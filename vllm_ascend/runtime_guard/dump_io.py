@@ -57,12 +57,7 @@ def write_kv_dump_skipped(
     """
     if not req_id:
         return None
-    out_dir = (
-        Path(dump_root)
-        / str(incident_type or "unknown")
-        / str(req_id)
-        / kv_dump_wave_dirname(wave)
-    )
+    out_dir = Path(dump_root) / str(incident_type or "unknown") / str(req_id) / kv_dump_wave_dirname(wave)
     if rank_tag:
         out_dir = out_dir / str(rank_tag)
     path = out_dir / "dump_skipped.json"
@@ -123,12 +118,7 @@ def write_kv_dump_request_info(
         return None
     from vllm_ascend.runtime_guard.report import dumps_report_json, sanitize_report_detail
 
-    out_dir = (
-        Path(dump_root)
-        / str(incident_type or "unknown")
-        / str(req_id)
-        / kv_dump_wave_dirname(wave)
-    )
+    out_dir = Path(dump_root) / str(incident_type or "unknown") / str(req_id) / kv_dump_wave_dirname(wave)
     path = out_dir / "request_info.json"
     safe_detail = sanitize_report_detail(
         detail,

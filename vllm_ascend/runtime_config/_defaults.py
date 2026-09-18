@@ -21,7 +21,6 @@ from typing import Any
 
 from vllm_ascend.runtime_config._dist import SYNC_BROADCAST
 
-
 _DEFAULTS: dict[str, Any] = {
     # broadcast: EngineCore leader reads JSON, in-DP broadcast (or file poll);
     # file: each rank polls the path (shared FS / per-node copy).
@@ -159,10 +158,7 @@ _DETECTOR_ACTION_KEYS: frozenset[str] = frozenset(
 )
 # Allowed keys per detector section (params ∪ action overrides).
 DETECTOR_KEYS: dict[str, frozenset[str]] = {
-    name: frozenset(sec) | _DETECTOR_ACTION_KEYS
-    for name, sec in _DEFAULTS["detector"].items()
-    if isinstance(sec, dict)
+    name: frozenset(sec) | _DETECTOR_ACTION_KEYS for name, sec in _DEFAULTS["detector"].items() if isinstance(sec, dict)
 }
 # Control-plane section for incident_type=manual_trigger (not a detector).
 MANUAL_TRIGGER_SECTION_KEYS: frozenset[str] = frozenset(_DETECTOR_ACTION_KEYS)
-

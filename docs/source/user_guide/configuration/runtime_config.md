@@ -133,6 +133,7 @@ Each armed wave with scheduled tokens decrements `manual_dump` **in memory** aft
   "on_trigger": ["report", "dump_kv"]
 }
 ```
+
 ## Example (detection + dump on repeat)
 
 ```json

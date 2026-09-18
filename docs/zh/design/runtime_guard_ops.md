@@ -113,7 +113,7 @@ manual 触发 incident_type 为 `manual_trigger`。**始终**注入 `dump_kv`，
 | last PP 全部 TP | **同波** `end_of_wave_sync`：收到 `{req_id, ...}` 后各自读本地 block 表再 D2H |
 | 其它 PP | 不 dump |
 
-```
+```text
 {dump_root}/<incident_type>/<req_id>/wave_<N>/
   request_info.json          # last-PP TP0，arm 时写
   dp{D}_tp0_pp{last}_cp{C}/  # 与其它 TP 同一拍 D2H
@@ -141,9 +141,9 @@ manual 触发 incident_type 为 `manual_trigger`。**始终**注入 `dump_kv`，
 - **Quota：** 一次 `prepare` 只 `try_consume` 一次；同 `arm_id` 的多个 req job 在 drain 时若 **全部** 未产出 D2H，才 **refund 一次**（还次数并清 cooldown）。异步 `torch.save` 失败 **不** refund（额度按 D2H 机会计，不按落盘成功）。ActionQueue **满**时 heavy（`.pt`）**丢弃**并 WARNING，light（report）改为 inline。
 - TP=1：无名单广播，同波 flush 只 dump 一份 `tp0` 目录。
 - dump / config 通知（PP==1 broadcast）：**波头一次** `all_reduce([config_due, dump_due])`；各 lane due 才各自 `broadcast_object`（平时只付 1 次 AR）。配置本波即用。
-  - **自动单请求 dump**：本波 detect 入队，**下一波头**再 bcast，该波末尾 D2H（+1 wave）。
-  - **manual_dump**：波末各 last-PP TP **本地** dump（不走 dump-job bcast）。
-  - **PP>1（强制 file）/ file**：config 本地 poll；auto dump 在波头 TP drain → 末尾 D2H。
+    - **自动单请求 dump**：本波 detect 入队，**下一波头**再 bcast，该波末尾 D2H（+1 wave）。
+    - **manual_dump**：波末各 last-PP TP **本地** dump（不走 dump-job bcast）。
+    - **PP>1（强制 file）/ file**：config 本地 poll；auto dump 在波头 TP drain → 末尾 D2H。
 - D2H 时机：arm 只排队；**同波** `run_sample_phase` 末尾（`check_after_sample` 之后）由 `end_of_wave_sync` 做 D2H；本步无 sample 时在 sync 路径走同一末尾入口。
 
 ### 2.5 日志开关

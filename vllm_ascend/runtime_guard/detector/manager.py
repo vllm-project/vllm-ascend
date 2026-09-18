@@ -22,7 +22,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from vllm_ascend.runtime_guard.incident import Incident
+from vllm_ascend.logger import init_logger_ascend
 from vllm_ascend.runtime_guard.detector.base import (
     AnomalyDetector,
     DetectorRegistry,
@@ -32,11 +32,11 @@ from vllm_ascend.runtime_guard.detector.logits_finite import LogitsFiniteDetecto
 from vllm_ascend.runtime_guard.detector.output_substring import OutputSubstringDetector
 from vllm_ascend.runtime_guard.detector.spec_acceptance import SpecAcceptanceDetector
 from vllm_ascend.runtime_guard.detector.token_repeat import TokenRepeatDetector
+from vllm_ascend.runtime_guard.incident import Incident
 from vllm_ascend.runtime_guard.io_snapshot import RequestIoSnapshotManager
 from vllm_ascend.runtime_guard.rank_gate import runner_tp_rank
 from vllm_ascend.runtime_guard.request_state import RequestGuardStore
 from vllm_ascend.runtime_guard.token_utils import freeze_sampled_rows
-from vllm_ascend.logger import init_logger_ascend
 
 if TYPE_CHECKING:
     from vllm_ascend.runtime_config.config import RuntimeConfig
@@ -162,10 +162,7 @@ class DetectorManager:
         if self._runtime_config is not None and self._runtime_config.hot_reload_enabled:
             self._output_substring_det.refresh_from_config()
             self._token_repeat_det.refresh_from_config()
-        return bool(
-            self._output_substring_det.enabled
-            or self._token_repeat_det.enabled
-        )
+        return bool(self._output_substring_det.enabled or self._token_repeat_det.enabled)
 
     def check_after_spec(
         self,
@@ -183,9 +180,7 @@ class DetectorManager:
         if self._gated("after_spec"):
             return []
         skip = RequestGuardStore.get().stopped_req_ids()
-        return self._spec_det.check_all(
-            sampled_tokens, accepted_token_nums, skip_req_ids=skip, req_ids=req_ids
-        )
+        return self._spec_det.check_all(sampled_tokens, accepted_token_nums, skip_req_ids=skip, req_ids=req_ids)
 
     def after_sample_hot_path(
         self,
@@ -266,16 +261,12 @@ class DetectorManager:
         Production :meth:`RuntimeGuardProcessor.check_after_sample` enqueues
         :meth:`run_after_sample_cpu` instead of waiting.
         """
-        alerts, snap = self.after_sample_hot_path(
-            sampled_token_ids, req_ids=req_ids
-        )
+        alerts, snap = self.after_sample_hot_path(sampled_token_ids, req_ids=req_ids)
         if snap is not None:
             alerts.extend(self.run_after_sample_cpu(snap))
         return alerts
 
-    def _after_sample_setup(
-        self, req_ids: list[str] | None
-    ) -> tuple[list[str], bool, bool, set[str]]:
+    def _after_sample_setup(self, req_ids: list[str] | None) -> tuple[list[str], bool, bool, set[str]]:
         resolved_ids = resolve_batch_req_ids(self._runner, req_ids)
         need_io = True
         if self._runtime_config is not None:

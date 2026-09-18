@@ -108,7 +108,5 @@ def test_isolation_refresh_vs_pure_noop(tmp_path: Path):
 
     us_noop = _bench(noop, n=5000)
     us_rg = _bench(lambda: proc.refresh_config(allow_arm=True), n=2000)
-    assert us_rg < us_noop + 400.0, (
-        f"reload=0 path not near-noop: rg={us_rg:.1f}µs noop={us_noop:.1f}µs"
-    )
+    assert us_rg < us_noop + 400.0, f"reload=0 path not near-noop: rg={us_rg:.1f}µs noop={us_noop:.1f}µs"
     RuntimeGuardProcessor.reset_for_tests()

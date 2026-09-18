@@ -24,11 +24,11 @@ from typing import TYPE_CHECKING, Any
 import torch
 from vllm.distributed.parallel_state import get_pp_group
 
-from vllm_ascend.runtime_guard.incident import Incident
+from vllm_ascend.logger import init_logger_ascend
 from vllm_ascend.runtime_guard.detector.base import ConfigBackedDetector, resolve_batch_req_ids
+from vllm_ascend.runtime_guard.incident import Incident
 from vllm_ascend.runtime_guard.io_snapshot import output_token_count_for_request
 from vllm_ascend.runtime_guard.rank_gate import runner_tp_rank
-from vllm_ascend.logger import init_logger_ascend
 
 if TYPE_CHECKING:
     from vllm_ascend.runtime_config.config import RuntimeConfig
@@ -94,7 +94,9 @@ class SpecAcceptanceDetector(ConfigBackedDetector):
         if not self._precheck():
             runner = self._runner
             if runner_tp_rank(runner) == 0:
-                logger.info_once("[runtime_guard: spec short] skip: detector.spec_acceptance.enabled=false in live runtime config")
+                logger.info_once(
+                    "[runtime_guard: spec short] skip: detector.spec_acceptance.enabled=false in live runtime config"
+                )
             return []
         runner = self._runner
         if runner is None:

@@ -27,6 +27,11 @@ from pathlib import Path
 from typing import Any
 
 from vllm_ascend.logger import init_logger_ascend
+from vllm_ascend.runtime_config.config import RuntimeConfig
+from vllm_ascend.runtime_guard.dump_io import (
+    write_kv_dump_request_info,
+    write_kv_dump_skipped,
+)
 from vllm_ascend.runtime_guard.incident import Incident
 from vllm_ascend.runtime_guard.kv_cache_reader import (
     DEFAULT_DUMP_FREE_HEADROOM_BYTES,
@@ -41,11 +46,6 @@ from vllm_ascend.runtime_guard.rank_gate import (
     runner_tp_world_size,
 )
 from vllm_ascend.runtime_guard.report import ReportWriter
-from vllm_ascend.runtime_guard.dump_io import (
-    write_kv_dump_request_info,
-    write_kv_dump_skipped,
-)
-from vllm_ascend.runtime_config.config import RuntimeConfig
 
 logger = init_logger_ascend(__name__)
 
@@ -161,9 +161,7 @@ class DumpKvAction(Action):
 
         # Synthetic ``__manual_trigger__`` is never a Store/KV owner — skip the
         # per-incident finished gate; ``all_requests`` filters real reqs below.
-        if not is_manual and not RequestGuardStore.get().kv_dump_allowed(
-            str(incident.req_id or "")
-        ):
+        if not is_manual and not RequestGuardStore.get().kv_dump_allowed(str(incident.req_id or "")):
             return DumpKvPrepared(skip=_dump_skip_kwargs(ctx, reason="finished_or_reaped"))
         base = Path(ctx.runtime_config.dump_root()) / ctx.incident.incident_type
 
@@ -175,9 +173,7 @@ class DumpKvAction(Action):
                 ctx.incident.incident_type,
                 scope,
             )
-            return DumpKvPrepared(
-                skip=_dump_skip_kwargs(ctx, reason="no_dump_targets", detail={"scope": scope})
-            )
+            return DumpKvPrepared(skip=_dump_skip_kwargs(ctx, reason="no_dump_targets", detail={"scope": scope}))
         if all(not bids for _req, bids in targets):
             # Manual arm runs in sync_for_step *before* prepare_inputs, so the
             # first prefill wave often has req ids but empty block tables.
@@ -217,9 +213,7 @@ class DumpKvAction(Action):
         tp_size = runner_tp_world_size(ctx.runner)
         estimated *= tp_size
         try:
-            headroom = int(
-                ctx.runtime_config.dump_get("free_headroom_bytes", DEFAULT_DUMP_FREE_HEADROOM_BYTES)
-            )
+            headroom = int(ctx.runtime_config.dump_get("free_headroom_bytes", DEFAULT_DUMP_FREE_HEADROOM_BYTES))
         except (TypeError, ValueError):
             headroom = DEFAULT_DUMP_FREE_HEADROOM_BYTES
         # Skip free-space gate when estimate is unknown (deferred block_ids).

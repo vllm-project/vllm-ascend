@@ -20,6 +20,7 @@ from __future__ import annotations
 from typing import Any
 
 from vllm_ascend.logger import init_logger_ascend
+from vllm_ascend.runtime_config.config import RuntimeConfig
 from vllm_ascend.runtime_guard.action.actions import Action, ActionContext, get_action
 from vllm_ascend.runtime_guard.action.queue import ActionQueue
 from vllm_ascend.runtime_guard.incident import Incident
@@ -28,7 +29,6 @@ from vllm_ascend.runtime_guard.manual_trigger import MANUAL_TRIGGER_TYPE
 from vllm_ascend.runtime_guard.quota import DumpQuota
 from vllm_ascend.runtime_guard.rank_gate import dump_rank_tag, should_run_anomaly_check_on_rank
 from vllm_ascend.runtime_guard.report import ReportWriter
-from vllm_ascend.runtime_config.config import RuntimeConfig
 
 logger = init_logger_ascend(__name__)
 
@@ -80,8 +80,7 @@ class ActionExecutor:
         """Queue a torch.save-scale job; drop (never inline) when the queue is full."""
         if not self._queue.submit(job, heavy=True):
             logger.warning(
-                "[runtime_guard action] skip heavy enqueue (queue full or stopping); "
-                "KV .pt save may be missing"
+                "[runtime_guard action] skip heavy enqueue (queue full or stopping); KV .pt save may be missing"
             )
 
     def resolve_actions(
@@ -125,11 +124,7 @@ class ActionExecutor:
             names = [n for n in names if n != "report"]
         # Manual dump: default inject dump_kv (queue+bcast path). End-of-wave
         # local fire passes inject_manual_dump_kv=False — each rank D2H itself.
-        if (
-            inject_manual_dump_kv
-            and incident.incident_type == MANUAL_TRIGGER_TYPE
-            and "dump_kv" not in names
-        ):
+        if inject_manual_dump_kv and incident.incident_type == MANUAL_TRIGGER_TYPE and "dump_kv" not in names:
             names.append("dump_kv")
         overrides = dict(det_cfg)
         if incident.incident_type == MANUAL_TRIGGER_TYPE and inject_manual_dump_kv:
@@ -200,8 +195,7 @@ class ActionExecutor:
                     # Light report: queue-full runs inline (submit still True).
                     # False means same-key dedupe or queue stopping.
                     logger.info(
-                        "[runtime_guard action] skip report enqueue "
-                        "(dedupe or stopping) type=%s req_id=%s wave=%s",
+                        "[runtime_guard action] skip report enqueue (dedupe or stopping) type=%s req_id=%s wave=%s",
                         incident.incident_type,
                         incident.req_id,
                         incident.wave,

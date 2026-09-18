@@ -3,11 +3,11 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+from vllm_ascend.runtime_guard.processor import RuntimeGuardProcessor, SamplePhaseResult
 from vllm_ascend.runtime_guard.runner_bridge import (
     check_before_sample_from_batch,
     wrap_compute_logits_for_pre_sample,
 )
-from vllm_ascend.runtime_guard.processor import RuntimeGuardProcessor, SamplePhaseResult
 from vllm_ascend.runtime_guard.test._helpers import bare_processor
 
 
@@ -54,7 +54,11 @@ def test_wrap_restores_compute_logits():
     with wrap_compute_logits_for_pre_sample(runner, "batch"):
         pass
     assert model.compute_logits == original
-    assert not hasattr(model, "__dict__") or "compute_logits" not in model.__dict__ or model.__dict__["compute_logits"] is original
+    assert (
+        not hasattr(model, "__dict__")
+        or "compute_logits" not in model.__dict__
+        or (model.__dict__["compute_logits"] is original)
+    )
 
 
 def test_from_batch_falls_back_to_runner_logits_indices():

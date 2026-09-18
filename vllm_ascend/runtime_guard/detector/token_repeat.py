@@ -23,15 +23,14 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
-from vllm_ascend.runtime_guard.incident import Incident
+from vllm_ascend.logger import init_logger_ascend
+from vllm_ascend.runtime_config._validate import normalize_ignore_token_ids
+from vllm_ascend.runtime_config.config import RuntimeConfig
 from vllm_ascend.runtime_guard.detector.base import ConfigBackedDetector, resolve_batch_req_ids
-from vllm_ascend.runtime_guard.incident import ILL_TYPE_REPEAT
+from vllm_ascend.runtime_guard.incident import ILL_TYPE_REPEAT, Incident
 from vllm_ascend.runtime_guard.io_snapshot import RequestIoSnapshotManager
 from vllm_ascend.runtime_guard.rank_gate import runner_tp_rank
 from vllm_ascend.runtime_guard.token_utils import normalize_token_ids
-from vllm_ascend.runtime_config._validate import normalize_ignore_token_ids
-from vllm_ascend.runtime_config.config import RuntimeConfig
-from vllm_ascend.logger import init_logger_ascend
 
 logger = init_logger_ascend(__name__)
 
@@ -255,7 +254,8 @@ class TokenRepeatDetector(ConfigBackedDetector):
         }
         if log_leader:
             logger.error(
-                "[runtime_guard: token_repeat] req=%s repeat_sum=%s threshold=%s window=%s content_seen=%s consecutive=%s",
+                "[runtime_guard: token_repeat] req=%s repeat_sum=%s threshold=%s "
+                "window=%s content_seen=%s consecutive=%s",
                 req_id,
                 state.repeat_sum,
                 thresh,

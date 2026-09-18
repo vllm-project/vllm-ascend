@@ -1591,10 +1591,7 @@ def init_ascend_config(vllm_config):
     # pre-step; the resolved path is passed as the dump_config_path field.
     dump_config_path = AscendConfig._resolve_dump_config_path(additional_config)
 
-    raw_runtime_path = (
-        additional_config.get("runtime_config_path")
-        or additional_config.get("runtime-config")
-    )
+    raw_runtime_path = additional_config.get("runtime_config_path") or additional_config.get("runtime-config")
     if raw_runtime_path is not None and not isinstance(raw_runtime_path, str):
         raise ValueError(
             f"additional_config.runtime_config_path must be a string, got {type(raw_runtime_path).__name__}."
@@ -1615,9 +1612,7 @@ def init_ascend_config(vllm_config):
         )
     raw_runtime_overlay = additional_config.get("runtime_config")
     if raw_runtime_overlay is not None and not isinstance(raw_runtime_overlay, dict):
-        raise ValueError(
-            f"additional_config.runtime_config must be a dict, got {type(raw_runtime_overlay).__name__}."
-        )
+        raise ValueError(f"additional_config.runtime_config must be a dict, got {type(raw_runtime_overlay).__name__}.")
     raw_runtime_report_dir = additional_config.get("runtime_report_dir")
     if raw_runtime_report_dir is not None and not isinstance(raw_runtime_report_dir, str):
         raise ValueError(

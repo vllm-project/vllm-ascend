@@ -30,7 +30,7 @@ class WaveTracker:
     Stamps are a **FIFO per req** (W1-3): under async scheduling, step N+1 may
     ``record`` before step N's ``get_output`` ``take``. A single overwrite slot
     made the later take miss (``missing sample-wave stamp``) and polluted
-    ``arm_wave``. Ordered deques keep stamp/take paired.
+    ``arm_wave``. Ordered ``deque`` FIFOs keep stamp/take paired.
     """
 
     def __init__(self) -> None:

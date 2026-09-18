@@ -25,8 +25,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from vllm_ascend.runtime_guard.token_utils import decode_token_ids, is_int_list, is_list_of_int_lists
 from vllm_ascend.logger import init_logger_ascend
+from vllm_ascend.runtime_guard.token_utils import decode_token_ids, is_int_list, is_list_of_int_lists
 
 logger = init_logger_ascend(__name__)
 
@@ -355,9 +355,7 @@ def dumps_report_json(obj: Any, *, indent: int = 2) -> str:
             # Each inner token-id row compact; rows stacked for readability.
             if not value:
                 return "[]"
-            inner = ",\n".join(
-                f"{sp_in}{json.dumps(row, ensure_ascii=False, separators=(',', ':'))}" for row in value
-            )
+            inner = ",\n".join(f"{sp_in}{json.dumps(row, ensure_ascii=False, separators=(',', ':'))}" for row in value)
             return "[\n" + inner + f"\n{sp}]"
         if isinstance(value, list):
             if not value:
@@ -458,8 +456,7 @@ class ReportWriter:
                 gap = _same_pair_gap_waves(count)
                 if wave_i is None:
                     logger.debug(
-                        "[runtime_guard report] same-pair backoff needs wave "
-                        "type=%s req_id=%s count=%d; skip",
+                        "[runtime_guard report] same-pair backoff needs wave type=%s req_id=%s count=%d; skip",
                         pair[0],
                         pair[1],
                         count,
@@ -483,7 +480,7 @@ class ReportWriter:
             else:
                 if len(self._pair_state) >= 8192:
                     # Bound the tracking dict on long-running servers.
-                    for stale in sorted(self._pair_state.items(), key=lambda kv: kv[1][0])[: -4096]:
+                    for stale in sorted(self._pair_state.items(), key=lambda kv: kv[1][0])[:-4096]:
                         self._pair_state.pop(stale[0], None)
                 # First write: record wave (0 if unknown) so later gaps are measurable.
                 self._pair_state[pair] = [wave_i if wave_i is not None else 0, 1]

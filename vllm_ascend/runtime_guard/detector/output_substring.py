@@ -21,17 +21,16 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
-from vllm_ascend.runtime_guard.incident import Incident
+from vllm_ascend.logger import init_logger_ascend
+from vllm_ascend.runtime_config._validate import normalize_raw_patterns
 from vllm_ascend.runtime_guard.detector.base import ConfigBackedDetector, resolve_batch_req_ids
-from vllm_ascend.runtime_guard.incident import ILL_TYPE_NONE
+from vllm_ascend.runtime_guard.incident import ILL_TYPE_NONE, Incident
 from vllm_ascend.runtime_guard.io_snapshot import RequestIoSnapshotManager, output_token_count_for_request
 from vllm_ascend.runtime_guard.token_utils import (
     decode_token_ids,
     load_model_tokenizer,
     normalize_token_ids,
 )
-from vllm_ascend.runtime_config._validate import normalize_raw_patterns
-from vllm_ascend.logger import init_logger_ascend
 
 if TYPE_CHECKING:
     from vllm_ascend.runtime_config.config import RuntimeConfig

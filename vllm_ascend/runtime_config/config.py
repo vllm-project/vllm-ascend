@@ -63,9 +63,14 @@ from pathlib import Path
 from typing import Any
 
 from vllm_ascend.logger import init_logger_ascend
+
+# ``_rg_multi_dp_file_fallback_logged`` is mutated by sync_runtime_config.
+from vllm_ascend.runtime_config import _dist as _dist_mod
+from vllm_ascend.runtime_config._defaults import (
+    _DEFAULTS,
+)
 from vllm_ascend.runtime_config._defaults import (
     DETECTOR_SECTIONS as _DETECTOR_SECTIONS,
-    _DEFAULTS,
 )
 from vllm_ascend.runtime_config._dist import (
     SYNC_BROADCAST,
@@ -92,10 +97,8 @@ from vllm_ascend.runtime_config._paths import (
 from vllm_ascend.runtime_config._validate import validate_runtime_config
 from vllm_ascend.runtime_config.jsonc_io import loads_jsonc
 
-# ``_rg_multi_dp_file_fallback_logged`` is mutated by sync_runtime_config.
-from vllm_ascend.runtime_config import _dist as _dist_mod
-
 logger = init_logger_ascend(__name__)
+
 
 class RuntimeConfig:
     """Runtime guard switches loaded from JSON (per-DP broadcast or file poll).
@@ -140,9 +143,7 @@ class RuntimeConfig:
         # C1: sync_mode frozen at first apply — ranks of a DP group must see
         # the same value for the whole process lifetime; hot-reload may not
         # flip it (collective split → hang).
-        self._sync_mode_frozen: str | None = (
-            str(sync_mode).lower() if sync_mode is not None else None
-        )
+        self._sync_mode_frozen: str | None = str(sync_mode).lower() if sync_mode is not None else None
         self._initial_broadcast_done = False
         self._data = deepcopy(_DEFAULTS)
         # Lazily filled hot-path bools; cleared on every ``_data`` mutation.
@@ -431,9 +432,7 @@ class RuntimeConfig:
                 any_det = True
                 break
 
-        dump_on = self._auto_on_from_dump(dump) or self._manual_dump_active(
-            dump.get("manual_dump", False)
-        )
+        dump_on = self._auto_on_from_dump(dump) or self._manual_dump_active(dump.get("manual_dump", False))
         print_out = bool(log.get("print_output_on_finish", False))
         save_sensitive = bool(report.get("save_sensitive_info", False))
         out_sub = bool((det.get("output_substring") or {}).get("enabled", False))
@@ -448,12 +447,7 @@ class RuntimeConfig:
             except (TypeError, ValueError):
                 manual_count = 0
 
-        needs_io = (
-            print_out
-            or out_sub
-            or tok_rep
-            or (any_det and save_sensitive)
-        )
+        needs_io = print_out or out_sub or tok_rep or (any_det and save_sensitive)
         needs_sample = any_det or print_out
 
         cached = {
@@ -628,8 +622,7 @@ class RuntimeConfig:
                 )
             else:
                 logger.warning(
-                    "[runtime_config] manual_dump drained → false in-memory but failed "
-                    "to persist path=%s was=%d %s",
+                    "[runtime_config] manual_dump drained → false in-memory but failed to persist path=%s was=%d %s",
                     self.config_path,
                     remaining,
                     _process_role_tag(),
@@ -770,7 +763,6 @@ class RuntimeConfig:
         if isinstance(raw, str) and raw.strip():
             return _reject_unsafe_path(Path(raw.strip()), label="runtime_dump_dir")
         return self.report_dir / "kv_cache"
-
 
     def actions_default_on_trigger(self) -> list[str]:
         actions = self._data.get("actions") or {}
@@ -917,8 +909,7 @@ class RuntimeConfig:
                     )
                 else:
                     logger.info(
-                        "[runtime_config] config hot-reload uses local "
-                        "file poll (broadcast group size<=1). path=%s %s",
+                        "[runtime_config] config hot-reload uses local file poll (broadcast group size<=1). path=%s %s",
                         self.config_path,
                         _process_role_tag(),
                     )
@@ -939,10 +930,7 @@ class RuntimeConfig:
         if not self.hot_reload_enabled:
             return False
         now = time.time()
-        return bool(
-            (not self._initial_broadcast_done)
-            or (now - self._last_reload_ts >= self.reload_interval_seconds)
-        )
+        return bool((not self._initial_broadcast_done) or (now - self._last_reload_ts >= self.reload_interval_seconds))
 
     def build_config_sync_payload(self) -> tuple[dict[str, Any], bool]:
         """Leader: reload JSON and pack broadcast payload. Returns (payload, changed)."""
@@ -1016,8 +1004,7 @@ class RuntimeConfig:
         role = _process_role_tag()
         config_due_local = self.config_due_local()
         logger.debug(
-            "[runtime_config sync] enter stage=config_task_bus "
-            "due_local=%s initial_done=%s group_size=%s %s",
+            "[runtime_config sync] enter stage=config_task_bus due_local=%s initial_done=%s group_size=%s %s",
             config_due_local,
             self._initial_broadcast_done,
             getattr(sync_group, "world_size", "?"),
@@ -1251,4 +1238,3 @@ class RuntimeConfig:
                     self_inner._fd.close()
 
         return _LockCtx()
-

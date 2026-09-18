@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -38,10 +39,8 @@ def _pp_start_layer(runner: Any) -> int:
     roots: list[Any] = [getattr(runner, "model", None)]
     getter = getattr(runner, "get_model", None)
     if callable(getter):
-        try:
+        with contextlib.suppress(Exception):
             roots.append(getter())
-        except Exception:
-            pass
     for root in roots:
         for obj in (root, getattr(root, "model", None) if root is not None else None):
             try:
@@ -203,9 +202,7 @@ class KvCacheReader:
         names, start = self._list_layer_meta()
         total = 0
         for _src, kv_caches in self._kv_sources():
-            for _name, tensor in _iter_kv_tensors(
-                kv_caches, list_names=names, start_layer=start
-            ):
+            for _name, tensor in _iter_kv_tensors(kv_caches, list_names=names, start_layer=start):
                 total += _block_payload_bytes(tensor, ids)
         return total
 
@@ -215,7 +212,7 @@ class KvCacheReader:
         req_id: str,
         block_ids: list[int],
         out_dir: Path,
-    ) -> "Iterator[KvDumpSnapshot]":
+    ) -> Iterator[KvDumpSnapshot]:
         """Yield per-layer CPU snapshots for one request (D2H per layer).
 
         Only the request's ``block_ids`` are dumped (never the full KV pool).
@@ -243,14 +240,11 @@ class KvCacheReader:
         cp_rank = runner_cp_rank(self._runner)
         names, start = self._list_layer_meta()
         for src_name, kv_caches in self._kv_sources():
-            for layer_name, tensor in _iter_kv_tensors(
-                kv_caches, list_names=names, start_layer=start
-            ):
+            for layer_name, tensor in _iter_kv_tensors(kv_caches, list_names=names, start_layer=start):
                 num_kv_heads = int(tensor.shape[-2]) if tensor.dim() >= 3 else None
                 if not ids:
                     logger.warning(
-                        "[runtime_guard dump_kv] skip layer=%s req_id=%s: empty block_ids "
-                        "(refusing full-cache D2H)",
+                        "[runtime_guard dump_kv] skip layer=%s req_id=%s: empty block_ids (refusing full-cache D2H)",
                         layer_name,
                         req_id,
                     )

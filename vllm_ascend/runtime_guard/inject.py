@@ -24,9 +24,11 @@ requires a source edit) and (2) ``RG_INJECT`` is set. Either missing →
 
 from __future__ import annotations
 
+import contextlib
 import os
-import re
 from typing import Any
+
+import regex as re
 
 from vllm_ascend.logger import init_logger_ascend
 
@@ -131,10 +133,8 @@ def _row0_ids(sampled: Any) -> list[int]:
     out: list[int] = []
     for x in row:
         if hasattr(x, "item"):
-            try:
+            with contextlib.suppress(Exception):
                 x = x.item()
-            except Exception:
-                pass
         out.append(int(x))
     return out
 
@@ -165,6 +165,7 @@ def _resolve_pattern(param: str | None, runner: Any) -> list[int] | None:
         return _pattern
     text = param or DEFAULT_TEXT
     from vllm_ascend.runtime_guard.token_utils import load_model_tokenizer
+
     try:
         tok = load_model_tokenizer(runner)
         if tok is None:
@@ -222,8 +223,11 @@ def inject_after_spec(accepted_token_nums: Any) -> None:
         logger.warning("[INJECT] spec_all_reject write failed wave=%d error=%s", _wave, exc)
         return
     _fired.add(plan.scenario)
-    logger.info("[INJECT] scenario=spec_all_reject wave=%d hook=after_spec bs=%d", _wave,
-                len(accepted_token_nums) if hasattr(accepted_token_nums, "__len__") else -1)
+    logger.info(
+        "[INJECT] scenario=spec_all_reject wave=%d hook=after_spec bs=%d",
+        _wave,
+        len(accepted_token_nums) if hasattr(accepted_token_nums, "__len__") else -1,
+    )
 
 
 def inject_after_sample(sampled_token_ids: Any, runner: Any = None) -> None:
@@ -249,7 +253,10 @@ def inject_after_sample(sampled_token_ids: Any, runner: Any = None) -> None:
                 return
             logger.info(
                 "[INJECT] scenario=forbidden_substring wave=%d hook=after_sample token=%d (%d/%d)",
-                _wave, token_id, (_pattern_pos - 1) % len(ids) + 1, len(ids),
+                _wave,
+                token_id,
+                (_pattern_pos - 1) % len(ids) + 1,
+                len(ids),
             )
             return
         # token_loop: anchor = the trigger wave's own row-0 last sampled token.
@@ -272,8 +279,12 @@ def inject_after_sample(sampled_token_ids: Any, runner: Any = None) -> None:
         _loop_waves_left -= 1
         if _loop_waves_left <= 0:
             _fired.add("token_loop")
-        logger.info("[INJECT] scenario=token_loop wave=%d hook=after_sample token=%d waves_left=%d",
-                    _wave, _last_tok, max(_loop_waves_left, 0))
+        logger.info(
+            "[INJECT] scenario=token_loop wave=%d hook=after_sample token=%d waves_left=%d",
+            _wave,
+            _last_tok,
+            max(_loop_waves_left, 0),
+        )
     finally:
         # Last inject hook in the sync sample path; async get_output also ends here.
         _close_wave()

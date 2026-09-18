@@ -205,9 +205,7 @@ def test_sync_for_step_marks_finished_on_empty_batch(tmp_path: Path):
 
 def test_refresh_config_skips_clear_wave_cache_when_idle(tmp_path: Path):
     cfg = _cfg(tmp_path, reload=0.0)
-    with patch(
-        "vllm_ascend.runtime_guard.processor.RequestIoSnapshotManager"
-    ) as io_mgr:
+    with patch("vllm_ascend.runtime_guard.processor.RequestIoSnapshotManager") as io_mgr:
         io = MagicMock()
         io_mgr.get.return_value = io
         proc = _bind(cfg)

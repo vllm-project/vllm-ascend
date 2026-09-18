@@ -141,10 +141,7 @@ def runner_cp_rank(runner: Any) -> int:
 def dump_rank_tag(runner: Any) -> str:
     """Directory / report tag for this worker's KV shard (dp/tp/pp/cp)."""
     return (
-        f"dp{runner_dp_rank(runner)}_"
-        f"tp{runner_tp_rank(runner)}_"
-        f"pp{runner_pp_rank(runner)}_"
-        f"cp{runner_cp_rank(runner)}"
+        f"dp{runner_dp_rank(runner)}_tp{runner_tp_rank(runner)}_pp{runner_pp_rank(runner)}_cp{runner_cp_rank(runner)}"
     )
 
 

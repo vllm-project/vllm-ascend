@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from vllm_ascend.runtime_guard.incident import Incident
 from vllm_ascend.runtime_guard.detector.base import (
     AnomalyDetector,
     ConfigBackedDetector,
@@ -24,6 +23,7 @@ from vllm_ascend.runtime_guard.detector.manager import DetectorManager
 from vllm_ascend.runtime_guard.detector.output_substring import OutputSubstringDetector
 from vllm_ascend.runtime_guard.detector.spec_acceptance import SpecAcceptanceDetector
 from vllm_ascend.runtime_guard.detector.token_repeat import TokenRepeatDetector
+from vllm_ascend.runtime_guard.incident import Incident
 
 __all__ = [
     "Incident",

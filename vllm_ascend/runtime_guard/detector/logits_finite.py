@@ -24,10 +24,9 @@ from typing import Any
 import numpy as np
 import torch
 
-from vllm_ascend.runtime_guard.incident import Incident
-from vllm_ascend.runtime_guard.detector.base import ConfigBackedDetector
-from vllm_ascend.runtime_guard.incident import ILL_TYPE_NAN
 from vllm_ascend.logger import init_logger_ascend
+from vllm_ascend.runtime_guard.detector.base import ConfigBackedDetector
+from vllm_ascend.runtime_guard.incident import ILL_TYPE_NAN, Incident
 
 logger = init_logger_ascend(__name__)
 
@@ -172,9 +171,7 @@ class LogitsFiniteDetector(ConfigBackedDetector):
         self._deferred.append(alerts)
         if len(self._deferred) > self._MAX_DEFERRED:
             self._deferred.popleft()
-            logger.warning_once(
-                "[runtime_guard: logits_finite] deferred alert queue overflow; dropped oldest batch"
-            )
+            logger.warning_once("[runtime_guard: logits_finite] deferred alert queue overflow; dropped oldest batch")
 
     def check_deferred(self, *, skip_req_ids: set[str] | None = None) -> list[Incident]:
         """Drain host-side incidents built at pre-sample (apply late skips)."""

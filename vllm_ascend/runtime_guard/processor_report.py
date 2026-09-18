@@ -61,16 +61,14 @@ class RuntimeGuardReportMixin:
             return
         if not cfg.dump_enabled():
             logger.warning(
-                "[runtime_guard manual_trigger] dump.manual_dump=%s but dump inactive; "
-                "not consuming",
+                "[runtime_guard manual_trigger] dump.manual_dump=%s but dump inactive; not consuming",
                 remaining,
             )
             return
         rows = self._batch_request_io_rows()
         if not rows:
             logger.debug(
-                "[runtime_guard manual_trigger] dump.manual_dump deferred (no local rows); "
-                "remaining=%d",
+                "[runtime_guard manual_trigger] dump.manual_dump deferred (no local rows); remaining=%d",
                 remaining,
             )
             return
@@ -159,7 +157,8 @@ class RuntimeGuardReportMixin:
             elif tokenizer is None:
                 text = "<tokenizer unavailable>"
             logger.info(
-                "[runtime_guard print_output] req_id=%s output_token_count=%d truncated=%s output_token_ids=%s output_text=%r",
+                "[runtime_guard print_output] req_id=%s output_token_count=%d truncated=%s "
+                "output_token_ids=%s output_text=%r",
                 req_id,
                 snap.output_token_count,
                 truncated,
@@ -363,4 +362,3 @@ class RuntimeGuardReportMixin:
         if not self.runtime_config.report_save_sensitive_info() or not self.runtime_config.report_decode_token_ids():
             return None
         return self._get_detector_tokenizer()
-

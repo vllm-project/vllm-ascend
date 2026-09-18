@@ -25,6 +25,7 @@ from vllm.distributed.parallel_state import get_tp_group
 
 from vllm_ascend.logger import init_logger_ascend
 from vllm_ascend.runtime_config._task_bus import sync_task_bus
+from vllm_ascend.runtime_guard.dump_io import kv_dump_wave_dirname, write_kv_dump_skipped
 from vllm_ascend.runtime_guard.kv_block_meta import block_ids_for_request
 from vllm_ascend.runtime_guard.kv_cache_reader import KvCacheReader
 from vllm_ascend.runtime_guard.rank_gate import (
@@ -33,7 +34,6 @@ from vllm_ascend.runtime_guard.rank_gate import (
     should_dump_kv_on_rank,
 )
 from vllm_ascend.runtime_guard.request_state import RequestGuardStore
-from vllm_ascend.runtime_guard.dump_io import kv_dump_wave_dirname, write_kv_dump_skipped
 
 logger = init_logger_ascend(__name__)
 
@@ -61,8 +61,7 @@ class RuntimeGuardDumpMixin:
                 continue
             if j.get("wave") == wave:
                 logger.info(
-                    "[runtime_guard dump_kv] skip enqueue: already pending "
-                    "req_id=%s wave=%s (same-wave dedupe)",
+                    "[runtime_guard dump_kv] skip enqueue: already pending req_id=%s wave=%s (same-wave dedupe)",
                     rid,
                     wave,
                 )

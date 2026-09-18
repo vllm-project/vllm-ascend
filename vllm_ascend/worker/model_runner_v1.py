@@ -110,8 +110,8 @@ from vllm.v1.worker.gpu_model_runner import (
     GPUModelRunner,
 )
 
-from vllm_ascend.runtime_guard.runner_bridge import AscendAsyncGPUModelRunnerOutput
 from vllm_ascend.runtime_guard.processor import SamplePhaseResult
+from vllm_ascend.runtime_guard.runner_bridge import AscendAsyncGPUModelRunnerOutput
 from vllm_ascend.runtime_guard.token_utils import accepted_token_counts
 
 # vLLM main (#15146) exports nans_to_dict / gpu_sync_allowed / raise_if_nan_logits;

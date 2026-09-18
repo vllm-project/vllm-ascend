@@ -21,8 +21,8 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from vllm_ascend.runtime_guard.rank_gate import should_run_anomaly_check_on_rank
 from vllm_ascend.logger import init_logger_ascend
+from vllm_ascend.runtime_guard.rank_gate import should_run_anomaly_check_on_rank
 
 if TYPE_CHECKING:
     from vllm_ascend.runtime_config.config import RuntimeConfig

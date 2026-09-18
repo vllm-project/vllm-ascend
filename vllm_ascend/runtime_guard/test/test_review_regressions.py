@@ -46,14 +46,13 @@ import torch
 import vllm_ascend.runtime_config.config as cfg_mod
 from vllm_ascend.runtime_config.config import RuntimeConfig
 from vllm_ascend.runtime_guard.action.queue import ActionQueue
-from vllm_ascend.runtime_guard.runner_bridge import AscendAsyncOutput
 from vllm_ascend.runtime_guard.detector.logits_finite import LogitsFiniteDetector
 from vllm_ascend.runtime_guard.detector.manager import DetectorManager
 from vllm_ascend.runtime_guard.processor import RuntimeGuardProcessor
 from vllm_ascend.runtime_guard.report import dumps_report_json
-from vllm_ascend.runtime_guard.wave_tracker import WaveTracker
+from vllm_ascend.runtime_guard.runner_bridge import AscendAsyncOutput
 from vllm_ascend.runtime_guard.test._helpers import bare_processor as _bare_processor
-
+from vllm_ascend.runtime_guard.wave_tracker import WaveTracker
 
 # ---------------------------------------------------------------- V2 (P0-5)
 
@@ -462,7 +461,17 @@ def test_v10b_unknown_top_level_key_rejected_on_reload(tmp_path: Path, caplog):
     from vllm_ascend.runtime_config._validate import validate_runtime_config
 
     with pytest.raises(ValueError, match="unknown top-level key"):
-        validate_runtime_config({"windw": 10, "dump": {}, "log": {}, "report": {}, "ascend_log": {}, "detector": {}, "actions": {}})
+        validate_runtime_config(
+            {
+                "windw": 10,
+                "dump": {},
+                "log": {},
+                "report": {},
+                "ascend_log": {},
+                "detector": {},
+                "actions": {},
+            }
+        )
 
     cfg_path = tmp_path / "runtime_config.json"
     cfg_path.write_text(json.dumps({"detector": {"token_repeat": {"enabled": False}}}), encoding="utf-8")
@@ -580,6 +589,7 @@ def test_v12c2_logits_finite_hit_resolved_before_enqueue():
     assert alerts[0].req_id == "a"
     assert alerts[0].detail.get("flat_token_index") == 1
     assert alerts[0].detail.get("finite_kind") == "nan"
+
 
 def test_v12d_logits_finite_check_every_tokens_rejected():
     import copy
@@ -866,11 +876,7 @@ def test_v18c_list_kv_caches_use_global_layer_names(tmp_path: Path):
 
     cache0 = torch.randn(2, 4, 1, 8)
     cache1 = torch.randn(2, 4, 1, 8)
-    groups = [
-        SimpleNamespace(
-            layer_names=["model.layers.14.self_attn", "model.layers.15.self_attn"]
-        )
-    ]
+    groups = [SimpleNamespace(layer_names=["model.layers.14.self_attn", "model.layers.15.self_attn"])]
     runner = SimpleNamespace(
         kv_caches=[cache0, cache1],
         kv_cache_config=SimpleNamespace(kv_cache_groups=groups),
@@ -909,7 +915,6 @@ def test_v18d_list_kv_caches_fallback_start_layer(tmp_path: Path):
         out_dir=tmp_path / "kv",
     )
     assert snaps[0].payload["layer"] == "layer_14"
-
 
 
 @pytest.mark.parametrize("tp_rank", [0, 1])
@@ -1221,7 +1226,6 @@ def test_v19a2_manual_trigger_handle_consumes_one_count():
         MANUAL_TRIGGER_TYPE,
         TriggerEvent,
     )
-    from vllm_ascend.runtime_guard.processor import RuntimeGuardProcessor
 
     p = _bare_processor()
     rc = _ConsumeRecorder(remaining=2)
@@ -1245,23 +1249,23 @@ def test_v19a2_manual_trigger_handle_consumes_one_count():
     p._batch_request_io_rows = MagicMock(return_value=[("r1", 0)])
     p.wave_tracker = MagicMock()
     p.wave_tracker.current_wave.return_value = 3
-    with patch(
-        "vllm_ascend.runtime_guard.processor_report.is_action_leader_rank",
-        return_value=True,
-    ), patch(
-        "vllm_ascend.runtime_guard.processor_report.RequestIoSnapshotManager"
-    ) as io_cls, patch(
-        "vllm_ascend.runtime_guard.processor_report.block_ids_for_request",
-        return_value=[0],
+    with (
+        patch(
+            "vllm_ascend.runtime_guard.processor_report.is_action_leader_rank",
+            return_value=True,
+        ),
+        patch("vllm_ascend.runtime_guard.processor_report.RequestIoSnapshotManager") as io_cls,
+        patch(
+            "vllm_ascend.runtime_guard.processor_report.block_ids_for_request",
+            return_value=[0],
+        ),
     ):
         io = MagicMock()
         snap = MagicMock()
         snap.as_detail_fields.return_value = {}
         io.snapshot.return_value = snap
         io_cls.get.return_value = io
-        p._handle_manual_trigger(
-            TriggerEvent(trigger_type=MANUAL_TRIGGER_TYPE, req_id=MANUAL_TRIGGER_REQ_ID)
-        )
+        p._handle_manual_trigger(TriggerEvent(trigger_type=MANUAL_TRIGGER_TYPE, req_id=MANUAL_TRIGGER_REQ_ID))
     assert p.action_executor.handle.called
     assert rc.consume_calls == 1
     assert rc.remaining == 1
@@ -1284,23 +1288,23 @@ def test_v19a3_manual_trigger_consumes_even_when_dump_not_armed():
     p._batch_request_io_rows = MagicMock(return_value=[("r1", 0)])
     p.wave_tracker = MagicMock()
     p.wave_tracker.current_wave.return_value = 1
-    with patch(
-        "vllm_ascend.runtime_guard.processor_report.is_action_leader_rank",
-        return_value=True,
-    ), patch(
-        "vllm_ascend.runtime_guard.processor_report.RequestIoSnapshotManager"
-    ) as io_cls, patch(
-        "vllm_ascend.runtime_guard.processor_report.block_ids_for_request",
-        return_value=[],
+    with (
+        patch(
+            "vllm_ascend.runtime_guard.processor_report.is_action_leader_rank",
+            return_value=True,
+        ),
+        patch("vllm_ascend.runtime_guard.processor_report.RequestIoSnapshotManager") as io_cls,
+        patch(
+            "vllm_ascend.runtime_guard.processor_report.block_ids_for_request",
+            return_value=[],
+        ),
     ):
         io = MagicMock()
         snap = MagicMock()
         snap.as_detail_fields.return_value = {}
         io.snapshot.return_value = snap
         io_cls.get.return_value = io
-        p._handle_manual_trigger(
-            TriggerEvent(trigger_type=MANUAL_TRIGGER_TYPE, req_id=MANUAL_TRIGGER_REQ_ID)
-        )
+        p._handle_manual_trigger(TriggerEvent(trigger_type=MANUAL_TRIGGER_TYPE, req_id=MANUAL_TRIGGER_REQ_ID))
     assert p.action_executor.handle.called
     assert rc.consume_calls == 1
     assert rc.remaining == 1
@@ -1351,6 +1355,7 @@ def test_v19c_empty_block_ids_manual_still_queues(monkeypatch):
     assert rc.consume_calls == 0  # manual count consumed in processor, not here
     quota.try_consume.assert_called_once_with(consume_quota=False)
     assert ctx.runner.runtime_guard.queue_kv_dump.call_count == 1
+
 
 def test_v19d_dump_kv_queues_jobs_on_leader():
     from vllm_ascend.runtime_guard.action.actions import DumpKvAction
@@ -1465,9 +1470,7 @@ def test_v21_bootstrap_overwrites_existing_file_with_defaults(tmp_path: Path, mo
     assert rc.ensure_persisted() is True
     on_disk = json.loads(cfg_file.read_text(encoding="utf-8"))
     assert on_disk["detector"]["token_repeat"]["enabled"] is False
-    assert rc.detector_get("token_repeat", "window", 0) == int(
-        cfg._DEFAULTS["detector"]["token_repeat"]["window"]
-    )
+    assert rc.detector_get("token_repeat", "window", 0) == int(cfg._DEFAULTS["detector"]["token_repeat"]["window"])
     assert rc.detector_get("output_substring", "enabled", True) is False
 
 
@@ -1649,14 +1652,16 @@ def test_v23d_manual_handle_writes_one_report_per_req(tmp_path: Path):
     p._batch_request_io_rows = MagicMock(return_value=[("cmpl-a", 0), ("cmpl-b", 1)])
     p.wave_tracker = MagicMock()
     p.wave_tracker.current_wave.return_value = 5
-    with patch(
-        "vllm_ascend.runtime_guard.processor_report.is_action_leader_rank",
-        return_value=True,
-    ), patch(
-        "vllm_ascend.runtime_guard.processor_report.RequestIoSnapshotManager"
-    ) as io_cls, patch(
-        "vllm_ascend.runtime_guard.processor_report.block_ids_for_request",
-        side_effect=lambda _r, rid, *_a, **_k: [10] if rid == "cmpl-a" else [20],
+    with (
+        patch(
+            "vllm_ascend.runtime_guard.processor_report.is_action_leader_rank",
+            return_value=True,
+        ),
+        patch("vllm_ascend.runtime_guard.processor_report.RequestIoSnapshotManager") as io_cls,
+        patch(
+            "vllm_ascend.runtime_guard.processor_report.block_ids_for_request",
+            side_effect=lambda _r, rid, *_a, **_k: [10] if rid == "cmpl-a" else [20],
+        ),
     ):
         p.runtime_config.report_include_block_ids = lambda: True  # type: ignore[method-assign]
         io = MagicMock()
@@ -1705,15 +1710,11 @@ def test_v25b_dump_rank_tag_uses_global_dp_rank(monkeypatch):
     assert rank_gate.runner_dp_rank(runner) == 1
     assert rank_gate.dump_rank_tag(runner).startswith("dp1_tp")
 
-    monkeypatch.setattr(
-        rank_gate, "get_tp_group", lambda: SimpleNamespace(rank_in_group=0, world_size=2)
-    )
+    monkeypatch.setattr(rank_gate, "get_tp_group", lambda: SimpleNamespace(rank_in_group=0, world_size=2))
     runner0 = SimpleNamespace(use_async_scheduling=True, tp_rank=0, tp_size=2)
     assert rank_gate.anomaly_check_rank_skip_reason(runner0) is None
 
-    monkeypatch.setattr(
-        rank_gate, "get_pp_group", lambda: SimpleNamespace(is_last_rank=False)
-    )
+    monkeypatch.setattr(rank_gate, "get_pp_group", lambda: SimpleNamespace(is_last_rank=False))
     assert rank_gate.anomaly_check_rank_skip_reason(runner0) == "not last PP rank"
 
 
@@ -1795,6 +1796,7 @@ def test_v26b_cpu_detect_dropped_not_inline():
     gate = threading.Event()
     started = threading.Event()
     try:
+
         def _block() -> None:
             started.set()
             gate.wait(timeout=2.0)

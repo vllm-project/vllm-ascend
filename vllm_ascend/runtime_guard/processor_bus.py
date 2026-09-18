@@ -110,9 +110,7 @@ class RuntimeGuardBusMixin:
         elif hasattr(self, "_kv_dump_jobs"):
             self._kv_dump_jobs.clear()
 
-        config_due, dump_due = sync_due_bits(
-            sync_group, [config_due_local, dump_due_local]
-        )
+        config_due, dump_due = sync_due_bits(sync_group, [config_due_local, dump_due_local])
 
         changed = False
         leader_changed = [False]
@@ -160,8 +158,7 @@ class RuntimeGuardBusMixin:
             self._deferred_kv_dump_jobs.extend(list(jobs))
 
         logger.debug(
-            "[runtime_guard sync] leave stage=wave_head_merged_bus "
-            "config_due=%s dump_due=%s changed=%s",
+            "[runtime_guard sync] leave stage=wave_head_merged_bus config_due=%s dump_due=%s changed=%s",
             config_due,
             dump_due,
             changed,

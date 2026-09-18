@@ -127,6 +127,7 @@ def test_forbidden_substring_encodes_text_via_tokenizer(monkeypatch):
             return [11, 22, 33]
 
     import vllm_ascend.runtime_guard.token_utils as token_utils_mod
+
     monkeypatch.setattr(token_utils_mod, "load_model_tokenizer", lambda runner: _Tok())
     seq = []
     for wave in range(1, 5):

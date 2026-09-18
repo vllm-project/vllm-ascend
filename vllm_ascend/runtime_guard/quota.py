@@ -89,6 +89,5 @@ class DumpQuota:
                 self._total_count -= 1
             self._last_ts = None
 
-
     def snapshot(self) -> tuple[int, int]:
         return self._total_count, self._max_times

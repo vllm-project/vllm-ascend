@@ -20,6 +20,7 @@ from __future__ import annotations
 from typing import Any
 
 from vllm_ascend.runtime_config._defaults import (
+    _DEFAULTS,
     ACTIONS_KEYS,
     ASCEND_LOG_KEYS,
     DETECTOR_KEYS,
@@ -29,7 +30,6 @@ from vllm_ascend.runtime_config._defaults import (
     MANUAL_TRIGGER_SECTION_KEYS,
     REPORT_KEYS,
     TOP_LEVEL_KEYS,
-    _DEFAULTS,
 )
 from vllm_ascend.runtime_config._dist import SYNC_BROADCAST, SYNC_FILE
 from vllm_ascend.runtime_config._merge import _normalize_config_sections_into
@@ -38,9 +38,7 @@ from vllm_ascend.runtime_config._merge import _normalize_config_sections_into
 def _is_int_list(value: Any) -> bool:
     """True when ``value`` is a non-empty ``list[int]`` (bool excluded)."""
     return (
-        isinstance(value, list)
-        and bool(value)
-        and all(isinstance(x, int) and not isinstance(x, bool) for x in value)
+        isinstance(value, list) and bool(value) and all(isinstance(x, int) and not isinstance(x, bool) for x in value)
     )
 
 
@@ -118,9 +116,7 @@ def validate_dump_mutual_exclusive(dump: dict[str, Any]) -> None:
     manual_raw = dump.get("manual_dump", False)
     manual_on = manual_raw not in (False, 0)
     if auto_on and manual_on:
-        raise ValueError(
-            "dump.auto_max_times>0 and dump.manual_dump active are mutually exclusive"
-        )
+        raise ValueError("dump.auto_max_times>0 and dump.manual_dump active are mutually exclusive")
 
 
 def validate_runtime_config(data: dict[str, Any]) -> None:
@@ -135,10 +131,7 @@ def validate_runtime_config(data: dict[str, Any]) -> None:
     _normalize_config_sections_into(data)
     unknown_top = sorted(set(data) - TOP_LEVEL_KEYS)
     if unknown_top:
-        raise ValueError(
-            f"runtime config has unknown top-level key(s) {unknown_top}; "
-            f"allowed={sorted(TOP_LEVEL_KEYS)}"
-        )
+        raise ValueError(f"runtime config has unknown top-level key(s) {unknown_top}; allowed={sorted(TOP_LEVEL_KEYS)}")
     for section in (
         "dump",
         "ascend_log",
@@ -151,9 +144,7 @@ def validate_runtime_config(data: dict[str, Any]) -> None:
             raise ValueError(f"runtime config missing object section '{section}'")
     unknown_actions = sorted(set(data["actions"]) - ACTIONS_KEYS)
     if unknown_actions:
-        raise ValueError(
-            f"actions has unknown key(s) {unknown_actions}; allowed={sorted(ACTIONS_KEYS)}"
-        )
+        raise ValueError(f"actions has unknown key(s) {unknown_actions}; allowed={sorted(ACTIONS_KEYS)}")
     interval = data.get("reload_interval_seconds", 0)
     if not isinstance(interval, (int, float)) or interval < 0:
         raise ValueError(f"reload_interval_seconds must be >= 0, got {interval}")
@@ -164,13 +155,9 @@ def validate_runtime_config(data: dict[str, Any]) -> None:
     if unknown_dump:
         raise ValueError(f"dump has unknown key(s) {unknown_dump}; allowed={sorted(DUMP_KEYS)}")
     auto_max_times = data["dump"].get("auto_max_times", 0)
-    data["dump"]["auto_max_times"] = int_field(
-        auto_max_times, "dump.auto_max_times", min_value=0
-    )
+    data["dump"]["auto_max_times"] = int_field(auto_max_times, "dump.auto_max_times", min_value=0)
     auto_cd = data["dump"].get("auto_cooldown_seconds", 300)
-    data["dump"]["auto_cooldown_seconds"] = int_field(
-        auto_cd, "dump.auto_cooldown_seconds", min_value=0
-    )
+    data["dump"]["auto_cooldown_seconds"] = int_field(auto_cd, "dump.auto_cooldown_seconds", min_value=0)
     manual_dump = data["dump"].get("manual_dump")
     if manual_dump is not None and not isinstance(manual_dump, bool):
         if isinstance(manual_dump, int) and not isinstance(manual_dump, bool):
@@ -201,9 +188,7 @@ def validate_runtime_config(data: dict[str, Any]) -> None:
                 raise ValueError(f"log.{log_key} must be bool")
     unknown_report = sorted(set(data["report"]) - REPORT_KEYS)
     if unknown_report:
-        raise ValueError(
-            f"report has unknown key(s) {unknown_report}; allowed={sorted(REPORT_KEYS)}"
-        )
+        raise ValueError(f"report has unknown key(s) {unknown_report}; allowed={sorted(REPORT_KEYS)}")
     save_sensitive = data["report"].get("save_sensitive_info")
     if save_sensitive is not None and not isinstance(save_sensitive, bool):
         if save_sensitive in (0, 1):
@@ -226,9 +211,7 @@ def validate_runtime_config(data: dict[str, Any]) -> None:
             raise ValueError(f"report.{max_key} must be >= 0")
         data["report"][max_key] = int(max_val)
     if "max_per_req" in data["report"] and data["report"]["max_per_req"] is not None:
-        data["report"]["max_per_req"] = int_field(
-            data["report"]["max_per_req"], "report.max_per_req", min_value=1
-        )
+        data["report"]["max_per_req"] = int_field(data["report"]["max_per_req"], "report.max_per_req", min_value=1)
     block_val = data["report"].get("include_block_ids")
     if block_val is not None and not isinstance(block_val, bool):
         if block_val in (0, 1):
@@ -240,9 +223,7 @@ def validate_runtime_config(data: dict[str, Any]) -> None:
         raise ValueError("ascend_log.level must be str")
     unknown_ascend = sorted(set(data["ascend_log"]) - ASCEND_LOG_KEYS)
     if unknown_ascend:
-        raise ValueError(
-            f"ascend_log has unknown key(s) {unknown_ascend}; allowed={sorted(ASCEND_LOG_KEYS)}"
-        )
+        raise ValueError(f"ascend_log has unknown key(s) {unknown_ascend}; allowed={sorted(ASCEND_LOG_KEYS)}")
     debug = data["ascend_log"].get("debug", [])
     if not isinstance(debug, list):
         raise ValueError("ascend_log.debug must be a list of module name strings")
@@ -281,10 +262,7 @@ def validate_runtime_config(data: dict[str, Any]) -> None:
             raise ValueError(f"detector.{key} must be an object")
         unknown_sub = sorted(set(value) - DETECTOR_KEYS[key])
         if unknown_sub:
-            raise ValueError(
-                f"detector.{key} has unknown key(s) {unknown_sub}; "
-                f"allowed={sorted(DETECTOR_KEYS[key])}"
-            )
+            raise ValueError(f"detector.{key} has unknown key(s) {unknown_sub}; allowed={sorted(DETECTOR_KEYS[key])}")
     for name in DETECTOR_SECTIONS:
         sec = detector.setdefault(name, {})
         if not isinstance(sec, dict):
@@ -312,9 +290,7 @@ def validate_runtime_config(data: dict[str, Any]) -> None:
             raise ValueError("detector.output_substring.match_prefix must be bool")
 
     token_repeat = detector["token_repeat"]
-    token_repeat["window"] = int_field(
-        token_repeat.get("window", 32), "detector.token_repeat.window", min_value=1
-    )
+    token_repeat["window"] = int_field(token_repeat.get("window", 32), "detector.token_repeat.window", min_value=1)
     token_repeat["repeat_sum_threshold"] = int_field(
         token_repeat.get("repeat_sum_threshold", 64),
         "detector.token_repeat.repeat_sum_threshold",
@@ -333,9 +309,7 @@ def validate_runtime_config(data: dict[str, Any]) -> None:
     token_repeat["ignore_token_ids"] = normalize_ignore_token_ids(token_repeat.get("ignore_token_ids", []))
 
     spec = detector["spec_acceptance"]
-    spec["window"] = int_field(
-        spec.get("window", 10), "detector.spec_acceptance.window", min_value=1
-    )
+    spec["window"] = int_field(spec.get("window", 10), "detector.spec_acceptance.window", min_value=1)
     for rate_key in ("low_threshold", "high_threshold"):
         spec[rate_key] = float_field(
             spec.get(rate_key, _DEFAULTS["detector"]["spec_acceptance"][rate_key]),
@@ -349,4 +323,3 @@ def validate_runtime_config(data: dict[str, Any]) -> None:
             f"detector.spec_acceptance.{len_key}",
             min_value=0.0,
         )
-

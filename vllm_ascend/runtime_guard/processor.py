@@ -22,28 +22,30 @@ runners ``bind`` the process singleton once; other call sites use
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.v1.outputs import AsyncModelRunnerOutput
 
+from vllm_ascend.logger import init_logger_ascend
 from vllm_ascend.runtime_guard import inject
+from vllm_ascend.runtime_guard.action.executor import ActionExecutor
 from vllm_ascend.runtime_guard.detector.manager import DetectorManager
 from vllm_ascend.runtime_guard.io_snapshot import RequestIoSnapshotManager
 from vllm_ascend.runtime_guard.manual_trigger import ManualTriggerManager
 from vllm_ascend.runtime_guard.processor_bus import RuntimeGuardBusMixin
 from vllm_ascend.runtime_guard.processor_dump import RuntimeGuardDumpMixin
 from vllm_ascend.runtime_guard.processor_report import RuntimeGuardReportMixin
+from vllm_ascend.runtime_guard.quota import DumpQuota
 from vllm_ascend.runtime_guard.rank_gate import runner_tp_rank
 from vllm_ascend.runtime_guard.report import ReportWriter
 from vllm_ascend.runtime_guard.request_state import RequestGuardStore
-from vllm_ascend.runtime_guard.action.executor import ActionExecutor
-from vllm_ascend.runtime_guard.quota import DumpQuota
 from vllm_ascend.runtime_guard.wave_tracker import WaveTracker
-from vllm_ascend.logger import init_logger_ascend
 
 if TYPE_CHECKING:
     from vllm_ascend.runtime_config.config import RuntimeConfig
@@ -98,9 +100,7 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         """Return the process singleton. Raises if :meth:`bind` has not run."""
         inst = cls._instance
         if inst is None:
-            raise RuntimeError(
-                "RuntimeGuardProcessor is not bound; call RuntimeGuardProcessor.bind(runner) first"
-            )
+            raise RuntimeError("RuntimeGuardProcessor is not bound; call RuntimeGuardProcessor.bind(runner) first")
         return inst
 
     @classmethod
@@ -129,10 +129,8 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
             inst = cls._instance
             cls._instance = None
         if inst is not None:
-            try:
+            with contextlib.suppress(Exception):
                 inst.shutdown()
-            except Exception:
-                pass
 
     def _init_from_runner(self, runner: Any) -> None:
         ascend = runner.ascend_config
@@ -274,10 +272,7 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         try:
             self.wave_tracker.advance(allow_arm=allow_arm)
             cfg = self.runtime_config
-            idle = (
-                not cfg.manual_trigger()
-                and not cfg.needs_sample_phase_hooks()
-            )
+            idle = not cfg.manual_trigger() and not cfg.needs_sample_phase_hooks()
             if idle and not cfg.hot_reload_enabled:
                 # Static idle: deliver any leftover auto jobs without config bus.
                 self._claim_dump_jobs_to_deferred_via_tp()
@@ -421,9 +416,7 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         def _run() -> None:
             if not self.should_check_after_spec():
                 return
-            for alert in self.detectors.check_after_spec(
-                sampled_tokens, accepted_token_nums, req_ids=req_ids
-            ):
+            for alert in self.detectors.check_after_spec(sampled_tokens, accepted_token_nums, req_ids=req_ids):
                 self._handle_alert(alert, detector=self.detectors.get(alert.incident_type))
 
         self._soft_fail("check_after_spec", _run)
@@ -450,14 +443,14 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
     def run_sample_phase(
         self,
         *,
-        sample_fn: Callable[[], "SamplePhaseResult"],
+        sample_fn: Callable[[], SamplePhaseResult],
         speculative_config: Any,
         need_accepted_tokens: bool,
         use_async: bool,
-        async_state_update_fn: Callable[["SamplePhaseResult"], None] | None = None,
-        routed_experts_fn: Callable[["SamplePhaseResult"], Any] | None = None,
-        accepted_token_nums_fn: Callable[["SamplePhaseResult"], Any] | None = None,
-    ) -> tuple["SamplePhaseResult", Any]:
+        async_state_update_fn: Callable[[SamplePhaseResult], None] | None = None,
+        routed_experts_fn: Callable[[SamplePhaseResult], Any] | None = None,
+        accepted_token_nums_fn: Callable[[SamplePhaseResult], Any] | None = None,
+    ) -> tuple[SamplePhaseResult, Any]:
         """Single sink for post-pre-sample runtime_guard hooks.
 
         Replaces 7 inline ``self.runtime_guard.*`` calls scattered across
@@ -687,7 +680,6 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
                 req_ids_job,
             )
             store.finish_cpu_jobs(req_ids_job)
-
 
     def _log_sampling_meta_debug(self, req_ids: list[str] | None) -> None:
         """DEBUG ``[SamplingMeta]`` for local-batch reqs (TP0 + last PP).

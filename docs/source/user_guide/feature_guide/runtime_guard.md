@@ -79,6 +79,7 @@ runtime/
 ```
 
 Report JSON top-level includes `dump_attempted` (whether `dump_kv` was in `on_trigger`, not whether D2H finished), `dump_arm_wave`, and `dump_dir`. Same `(type, req_id)` is capped by `report.max_per_req` (default 1); reaching the cap stops detection for that request. Wave backoff (64, then doubles) spaces further writes when the cap is higher. Default `on_trigger` includes `report`.
+
 ## Detectors
 
 | Type | Stage | Typical use |
