@@ -22,8 +22,8 @@ if [ "${USE_HOST_PROXY:-1}" = "1" ]; then
         export HTTPS_PROXY="http://host.docker.internal:3128"
     fi
 fi
-export http_proxy="${http_proxy:-${HTTP_PROXY}}"
-export https_proxy="${https_proxy:-${HTTPS_PROXY}}"
+export http_proxy="${http_proxy:-${HTTP_PROXY:-}}"
+export https_proxy="${https_proxy:-${HTTPS_PROXY:-}}"
 
 echo "[1/5] 标记 git safe.directory"
 git config --global --add safe.directory "${PROJECT_DIR}"
