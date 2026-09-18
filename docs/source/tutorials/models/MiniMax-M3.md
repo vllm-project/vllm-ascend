@@ -151,6 +151,8 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve ${WEIGHT_PATH} \
+      --host 0.0.0.0 \
+      --port 11223 \
       --served-model-name minimax-m3 \
       --trust-remote-code \
       --max-model-len 43008 \
@@ -161,17 +163,18 @@ Single-node deployment completes both Prefill and Decode within the same node. T
       --gpu-memory-utilization 0.92 \
       --reasoning-parser minimax_m3 \
       --limit-mm-per-prompt '{"image":1,"video":0}' \
+      --enable-prefix-caching \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
       --additional-config '{
           "enable_cpu_binding": true,
+          "enable_flashcomm1": true,
           "ascend_compilation_config": {
-          "enable_static_kernel": true,
+          "enable_static_kernel": false,
           "fuse_norm_quant": false
           },
           "multistream_overlap_shared_expert": true,
           "weight_nz_mode": 2
-      }' \
-      --port 11223 > ${LOG_PATH} 2>&1 &
+      }' > ${LOG_PATH} 2>&1 &
     ```
 
 === "A3 series(W8A8)"
@@ -182,6 +185,8 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve ${WEIGHT_PATH} \
+    --host 0.0.0.0 \
+    --port 11223 \
     --served-model-name minimax-m3 \
     --trust-remote-code \
     --max-model-len 131072 \
@@ -196,19 +201,20 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     --gpu-memory-utilization 0.92 \
     --reasoning-parser minimax_m3 \
     --limit-mm-per-prompt '{"image":1,"video":0}' \
+    --enable-prefix-caching \
     --speculative-config '{"model":"${EAGLE3_WEIGHT_PATH}", "method":"eagle3", "num_speculative_tokens":3}' \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
     --additional-config '{
         "enable_cpu_binding": true,
+        "enable_flashcomm1": true,
         "ascend_compilation_config": {
-          "enable_static_kernel": true,
+          "enable_static_kernel": false,
           "fuse_norm_quant": false
             },
         "multistream_overlap_shared_expert": true,
         "enable_shared_expert_dp": true,
         "weight_nz_mode": 2
-    }' \
-    --port 11223 > ${LOG_PATH} 2>&1 &
+    }' > ${LOG_PATH} 2>&1 &
     ```
 
 === "950DT products"
@@ -217,12 +223,9 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     nic_name="xxxx"  # NIC corresponding to local_ip
     export GLOO_SOCKET_IFNAME=$nic_name
     export HCCL_SOCKET_IFNAME=$nic_name
-    export HCCL_BUFFSIZE=512
-    export HCCL_BUFFSIZE_EP=512
-    export HCCL_OP_EXPANSION_MODE=AIV
+    export HCCL_OP_EXPANSION_MODE="AIV"
     export LD_LIBRARY_PATH=/usr/local/Ascend/cann-9.1.0/opp/vendors/experimental_950_transformer/op_api/lib/:${LD_LIBRARY_PATH}
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export VLLM_SERVER_DEV_MODE=1
 
     vllm serve ${WEIGHT_PATH} \
       --host 0.0.0.0 \
@@ -245,7 +248,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
       --limit-mm-per-prompt '{"image":1,"video":0}' \
       --gpu-memory-utilization 0.92 \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-      --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_qknorm_rope":false,"fuse_norm_quant":false,"enable_static_kernel":true},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true}' \
+      --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_qknorm_rope":false,"fuse_norm_quant":false,"enable_static_kernel":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
       --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3,"kv_cache_dtype": "bfloat16"}' \
       --safetensors-load-strategy prefetch > ${LOG_PATH} 2>&1 &
     ```
@@ -270,31 +273,30 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
     export IFNAME="${NETWORK_INTERFACE}"
     export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME="$IFNAME"
-    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
     export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     export GLOO_SOCKET_IFNAME="$IFNAME"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve ${WEIGHT_PATH} \
       --host 0.0.0.0 \
+      --port 11223 \
       --served-model-name minimax-m3 \
       --trust-remote-code \
       --max-model-len 65920 \
       --tensor-parallel-size 8 \
       --enable-expert-parallel \
-      --max-num-seqs 8 \
-      --data-parallel-size 2 \
-      --data-parallel-size-local 1 \
+      --max-num-seqs 32 \
+      --data-parallel-size 4 \
+      --data-parallel-size-local 2 \
       --data-parallel-start-rank 0 \
       --data-parallel-address $node0_ip \
       --distributed_executor_backend "mp" \
-      --gpu-memory-utilization 0.94 \
+      --gpu-memory-utilization 0.92 \
       --reasoning-parser minimax_m3 \
       --limit-mm-per-prompt '{"image":1,"video":0}' \
       --speculative-config '{"model":"${EAGLE3_WEIGHT_PATH}","method":"eagle3","num_speculative_tokens":3}' \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-      --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "multistream_overlap_shared_expert": true, "weight_nz_mode": 2}' \
-      --port 11223 > ${LOG_PATH} 2>&1 &
+      --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "enable_shared_expert_dp":true,"multistream_overlap_shared_expert": true, "weight_nz_mode": 2,"enable_flashcomm1":true}' > ${LOG_PATH} 2>&1 &
     ```
 
     Run the following command on node 1:
@@ -307,32 +309,31 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
     export IFNAME="${NETWORK_INTERFACE}"
     export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME="$IFNAME"
-    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
     export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     export GLOO_SOCKET_IFNAME="$IFNAME"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve ${WEIGHT_PATH} \
       --host 0.0.0.0 \
+      --port 11223 \
       --served-model-name minimax-m3 \
       --trust-remote-code \
       --headless \
       --max-model-len 65920 \
       --tensor-parallel-size 8 \
       --enable-expert-parallel \
-      --max-num-seqs 8 \
-      --data-parallel-size 2 \
-      --data-parallel-size-local 1 \
-      --data-parallel-start-rank 1 \
+      --max-num-seqs 32 \
+      --data-parallel-size 4 \
+      --data-parallel-size-local 2 \
+      --data-parallel-start-rank 2 \
       --data-parallel-address $node0_ip \
       --distributed_executor_backend "mp" \
-      --gpu-memory-utilization 0.94 \
+      --gpu-memory-utilization 0.92 \
       --reasoning-parser minimax_m3 \
       --limit-mm-per-prompt '{"image":1,"video":0}' \
       --speculative-config '{"model":"${EAGLE3_WEIGHT_PATH}","method":"eagle3","num_speculative_tokens":3}' \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-      --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "multistream_overlap_shared_expert": true, "weight_nz_mode": 2}' \
-      --port 11223 > ${LOG_PATH} 2>&1 &
+      --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "multistream_overlap_shared_expert": true, "weight_nz_mode": 2}' > ${LOG_PATH} 2>&1 &
     ```
 
 === "A3 series(W8A8)"
@@ -347,21 +348,21 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
     export IFNAME="${NETWORK_INTERFACE}"
     export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME="$IFNAME"
-    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
     export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     export GLOO_SOCKET_IFNAME="$IFNAME"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve ${WEIGHT_PATH} \
       --host 0.0.0.0 \
+      --port 11223 \
       --served-model-name minimax-m3 \
       --trust-remote-code \
       --max-model-len 131072 \
-      --tensor-parallel-size 8 \
+      --tensor-parallel-size 4 \
       --enable-expert-parallel \
-      --max-num-seqs 8 \
-      --data-parallel-size 2 \
-      --data-parallel-size-local 1 \
+      --max-num-seqs 32 \
+      --data-parallel-size 8 \
+      --data-parallel-size-local 4 \
       --data-parallel-start-rank 0 \
       --data-parallel-address $node0_ip \
       --distributed_executor_backend "mp" \
@@ -370,8 +371,7 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
       --limit-mm-per-prompt '{"image":1,"video":0}' \
       --speculative-config '{"model":"${EAGLE3_WEIGHT_PATH}", "method":"eagle3", "num_speculative_tokens":3}' \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-      --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "multistream_overlap_shared_expert": false, "weight_nz_mode": 2}' \
-      --port 11223 > ${LOG_PATH} 2>&1 &
+      --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "multistream_overlap_shared_expert": true, "weight_nz_mode": 2,"enable_flashcomm1":true}' > ${LOG_PATH} 2>&1 &
     ```
 
     Run the following command on node 1:
@@ -384,24 +384,23 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
     export IFNAME="${NETWORK_INTERFACE}"
     export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME="$IFNAME"
-    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
     export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     export GLOO_SOCKET_IFNAME="$IFNAME"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-
     vllm serve ${WEIGHT_PATH} \
       --host 0.0.0.0 \
+      --port 11223 \
       --served-model-name minimax-m3 \
       --trust-remote-code \
       --headless \
       --max-model-len 131072 \
-      --tensor-parallel-size 8 \
+      --tensor-parallel-size 4 \
       --enable-expert-parallel \
-      --max-num-seqs 8 \
-      --data-parallel-size 2 \
-      --data-parallel-size-local 1 \
-      --data-parallel-start-rank 1 \
+      --max-num-seqs 32 \
+      --data-parallel-size 8 \
+      --data-parallel-size-local 4 \
+      --data-parallel-start-rank 4 \
       --data-parallel-address $node0_ip \
       --distributed_executor_backend "mp" \
       --gpu-memory-utilization 0.92 \
@@ -409,8 +408,7 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
       --limit-mm-per-prompt '{"image":1,"video":0}' \
       --speculative-config '{"model":"${EAGLE3_WEIGHT_PATH}", "method":"eagle3", "num_speculative_tokens":3}' \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-      --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "multistream_overlap_shared_expert": false, "weight_nz_mode": 2}' \
-      --port 11223 > ${LOG_PATH} 2>&1 &
+      --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "multistream_overlap_shared_expert": true, "weight_nz_mode": 2}' > ${LOG_PATH} 2>&1 &
     ```
 
 ### 5.3 Prefill-Decode Disaggregation
@@ -558,7 +556,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
     nic_name="xxxx"                 # NIC corresponding to local_ip
     local_ip="xxxx"                 # Prefill node IP
     model_path="xxxx"               # MiniMax-M3 model path
-    draft_model_path="xxxx"         # MiniMax-M3-EAGLE3-GQA path
+    EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
 
     export VLLM_PP_LAYER_PARTITION="30,30"
     export HCCL_BUFFSIZE=1024
@@ -593,12 +591,13 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         --max-num-batched-tokens 32768 \
         --long-prefill-token-threshold 2048 \
         --enable-chunked-prefill \
+        --enable-prefix-caching \
         --trust-remote-code \
-        --gpu-memory-utilization 0.85 \
+        --gpu-memory-utilization 0.92 \
         --limit-mm-per-prompt '{"image":1,"video":0}' \
         --reasoning-parser minimax_m3 \
-        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":true,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true}' \
-        --speculative-config '{"method":"eagle3","model":"'"$draft_model_path"'","num_speculative_tokens":3}' \
+        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
+        --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3}' \
         --kv-transfer-config \
         '{
             "kv_connector":"MooncakeConnectorV1",
@@ -621,7 +620,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
     nic_name="xxxx"                 # NIC corresponding to local_ip
     local_ip="xxxx"                 # Decode node IP
     model_path="xxxx"               # MiniMax-M3 model path
-    draft_model_path="xxxx"         # MiniMax-M3-EAGLE3-GQA path
+    EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
 
     export HCCL_BUFFSIZE=2048
     export HCCL_IF_IP=$local_ip
@@ -658,8 +657,8 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         --gpu-memory-utilization 0.92 \
         --limit-mm-per-prompt '{"image":1,"video":0}' \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":true,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true}' \
-        --speculative-config '{"method":"eagle3","model":"'"$draft_model_path"'","num_speculative_tokens":3}' \
+        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true}' \
+        --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3}' \
         --kv-transfer-config \
         '{
             "kv_connector":"MooncakeConnectorV1",
@@ -735,11 +734,11 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
     nic_name="xxxx"                 # NIC corresponding to local_ip
     local_ip="xxxx"                 # Prefill node IP
     model_path="xxxx"               # MiniMax-M3-MXFP8 model path
-    draft_model_path="xxxx"         # MiniMax-M3-EAGLE3-GQA path
+    EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
 
     export HCCL_BUFFSIZE=256
     export HCCL_IF_IP=$local_ip
-    export HCCL_OP_EXPANSION_MODE=AIV
+    export HCCL_OP_EXPANSION_MODE="AIV"
     export ASCEND_RT_VISIBLE_DEVICES=$1
     export HCCL_SOCKET_IFNAME=$nic_name
     export GLOO_SOCKET_IFNAME=$nic_name
@@ -770,9 +769,9 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         --kv-cache-dtype fp8 \
         --reasoning-parser minimax_m3 \
         --safetensors-load-strategy prefetch \
-        --speculative-config '{"method":"eagle3","model":"'"$draft_model_path"'","num_speculative_tokens":3,"kv_cache_dtype":"bfloat16"}' \
+        --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3,"kv_cache_dtype":"bfloat16"}' \
         --enforce-eager \
-        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_qknorm_rope":false,"fuse_norm_quant":false,"enable_static_kernel":true},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true}' \
+        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_qknorm_rope":false,"fuse_norm_quant":false,"enable_static_kernel":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
         --kv-transfer-config '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_producer","kv_port":"30000","engine_id":"0","kv_connector_extra_config":{"use_ascend_direct":true,"ascend_local_comm_res_path":"/etc/hixlep","prefill":{"dp_size":2,"tp_size":4,"pp_size":1},"decode":{"dp_size":2,"tp_size":4,"pp_size":1}}}'
     ```
 
@@ -785,11 +784,11 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
     nic_name="xxxx"                 # NIC corresponding to local_ip
     local_ip="xxxx"                 # Decode node IP
     model_path="xxxx"               # MiniMax-M3-MXFP8 model path
-    draft_model_path="xxxx"         # MiniMax-M3-EAGLE3-GQA path
+    EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
 
     export HCCL_BUFFSIZE=2048
     export HCCL_IF_IP=$local_ip
-    export HCCL_OP_EXPANSION_MODE=AIV
+    export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME=$nic_name
     export GLOO_SOCKET_IFNAME=$nic_name
     export ASCEND_RT_VISIBLE_DEVICES=$1
@@ -820,8 +819,8 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         --quantization mxfp8 \
         --kv-cache-dtype fp8 \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-        --speculative-config '{"method":"eagle3","model":"'"$draft_model_path"'","num_speculative_tokens":3,"kv_cache_dtype":"bfloat16"}' \
-        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":true,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true}' \
+        --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3,"kv_cache_dtype":"bfloat16"}' \
+        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true}' \
         --kv-transfer-config '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_consumer","kv_port":"26900","engine_id":"1","kv_connector_extra_config":{"use_ascend_direct":true,"ascend_local_comm_res_path":"/etc/hixlep","prefill":{"dp_size":2,"tp_size":4,"pp_size":1},"decode":{"dp_size":2,"tp_size":4,"pp_size":1}}}'
     ```
 
@@ -1038,7 +1037,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     nic_name="xxxx"                 # NIC corresponding to local_ip
     local_ip="xxxx"                 # Prefill node IP
     model_path="xxxx"               # MiniMax-M3 model path
-    draft_model_path="xxxx"         # MiniMax-M3-EAGLE3-GQA path
+    EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
 
     export VLLM_PP_LAYER_PARTITION="30,30"
     export HCCL_BUFFSIZE=1024
@@ -1077,11 +1076,12 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
         --max-num-batched-tokens 32768 \
         --long-prefill-token-threshold 2048 \
         --enable-chunked-prefill \
+        --enable-prefix-caching \
         --trust-remote-code \
-        --gpu-memory-utilization 0.85 \
+        --gpu-memory-utilization 0.92 \
         --reasoning-parser minimax_m3 \
-        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":true,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true}' \
-        --speculative-config '{"method":"eagle3","model":"'"$draft_model_path"'","num_speculative_tokens":3}' \
+        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
+        --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3}' \
         --kv-transfer-config \
         '{"kv_connector":"MultiConnector","kv_role":"kv_producer","engine_id":"minimax-m3-prefill-dp'"$4"'","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV1","kv_buffer_device":"npu","kv_role":"kv_producer","kv_port":"36000","kv_connector_extra_config":{"use_ascend_direct":true,"prefill":{"dp_size":2,"tp_size":4,"pp_size":2,"pp_layer_partition":"30,30"},"decode":{"dp_size":4,"tp_size":4,"pp_size":1}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backend":"mooncake","lookup_rpc_port":'$((37000 + $4))'}}]}}'
     ```
@@ -1094,7 +1094,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     nic_name="xxxx"                 # NIC corresponding to local_ip
     local_ip="xxxx"                 # Decode node IP
     model_path="xxxx"               # MiniMax-M3 model path
-    draft_model_path="xxxx"         # MiniMax-M3-EAGLE3-GQA path
+    EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
 
     export HCCL_BUFFSIZE=2048
     export HCCL_IF_IP=$local_ip
@@ -1134,8 +1134,8 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
         --max-num-seqs 64 \
         --gpu-memory-utilization 0.92 \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":true,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true}' \
-        --speculative-config '{"method":"eagle3","model":"'"$draft_model_path"'","num_speculative_tokens":3}' \
+        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true}' \
+        --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3}' \
         --kv-transfer-config \
         '{"kv_connector":"MultiConnector","kv_role":"kv_consumer","engine_id":"minimax-m3-decode-dp'"$4"'","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV1","kv_buffer_device":"npu","kv_role":"kv_consumer","kv_port":"36100","kv_connector_extra_config":{"use_ascend_direct":true,"prefill":{"dp_size":2,"tp_size":4,"pp_size":2,"pp_layer_partition":"30,30"},"decode":{"dp_size":4,"tp_size":4,"pp_size":1}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backend":"mooncake","lookup_rpc_port":'$((37100 + $4))'}}]}}'
     ```
@@ -1155,11 +1155,11 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     nic_name="xxxx"                 # NIC corresponding to local_ip
     local_ip="xxxx"                 # Prefill node IP
     model_path="xxxx"               # MiniMax-M3-MXFP8 model path
-    draft_model_path="xxxx"         # MiniMax-M3-EAGLE3-GQA path
+    EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
 
     export HCCL_BUFFSIZE=256
     export HCCL_IF_IP=$local_ip
-    export HCCL_OP_EXPANSION_MODE=AIV
+    export HCCL_OP_EXPANSION_MODE="AIV"
     export ASCEND_RT_VISIBLE_DEVICES=$1
     export HCCL_SOCKET_IFNAME=$nic_name
     export GLOO_SOCKET_IFNAME=$nic_name
@@ -1196,9 +1196,9 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
         --kv-cache-dtype fp8 \
         --reasoning-parser minimax_m3 \
         --safetensors-load-strategy prefetch \
-        --speculative-config '{"method":"eagle3","model":"'"$draft_model_path"'","num_speculative_tokens":3,"kv_cache_dtype":"bfloat16"}' \
+        --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3,"kv_cache_dtype":"bfloat16"}' \
         --enforce-eager \
-        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_qknorm_rope":false,"fuse_norm_quant":false,"enable_static_kernel":true},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true}' \
+        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_qknorm_rope":false,"fuse_norm_quant":false,"enable_static_kernel":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
         --kv-transfer-config \
         '{"kv_connector":"MultiConnector","kv_role":"kv_producer","engine_id":"minimax-m3-prefill-dp'"$4"'","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV1","kv_buffer_device":"npu","kv_role":"kv_producer","kv_port":"30000","kv_connector_extra_config":{"use_ascend_direct":true,"ascend_local_comm_res_path":"/etc/hixlep","prefill":{"dp_size":2,"tp_size":4,"pp_size":1},"decode":{"dp_size":2,"tp_size":4,"pp_size":1}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backend":"mooncake","lookup_rpc_port":'$((37000 + $4))'}}]}}'
     ```
@@ -1212,11 +1212,11 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     nic_name="xxxx"                 # NIC corresponding to local_ip
     local_ip="xxxx"                 # Decode node IP
     model_path="xxxx"               # MiniMax-M3-MXFP8 model path
-    draft_model_path="xxxx"         # MiniMax-M3-EAGLE3-GQA path
+    EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
 
     export HCCL_BUFFSIZE=2048
     export HCCL_IF_IP=$local_ip
-    export HCCL_OP_EXPANSION_MODE=AIV
+    export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME=$nic_name
     export GLOO_SOCKET_IFNAME=$nic_name
     export ASCEND_RT_VISIBLE_DEVICES=$1
@@ -1254,8 +1254,8 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
         --quantization mxfp8 \
         --kv-cache-dtype fp8 \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-        --speculative-config '{"method":"eagle3","model":"'"$draft_model_path"'","num_speculative_tokens":3,"kv_cache_dtype":"bfloat16"}' \
-        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":true,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true}' \
+        --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3,"kv_cache_dtype":"bfloat16"}' \
+        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true}' \
         --kv-transfer-config \
         '{"kv_connector":"MultiConnector","kv_role":"kv_consumer","engine_id":"minimax-m3-decode-dp'"$4"'","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV1","kv_buffer_device":"npu","kv_role":"kv_consumer","kv_port":"26900","kv_connector_extra_config":{"use_ascend_direct":true,"ascend_local_comm_res_path":"/etc/hixlep","prefill":{"dp_size":2,"tp_size":4,"pp_size":1},"decode":{"dp_size":2,"tp_size":4,"pp_size":1}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backend":"mooncake","lookup_rpc_port":'$((37100 + $4))'}}]}}'
     ```
