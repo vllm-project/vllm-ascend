@@ -70,6 +70,8 @@ def test_query_start_loc_arange_keeps_sufficient_buffer():
     proposer._ensure_query_start_loc_arange_capacity()
 
     assert proposer.arange is arange
+
+
 @pytest.mark.parametrize("method", ["mtp", "dspark"])
 def test_glm_moe_dsa_supported_methods_use_spec_decode_graph(method: str):
     model_config = SimpleNamespace(hf_text_config=SimpleNamespace(model_type="glm_moe_dsa"))
