@@ -70,6 +70,12 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
         for provider in self._layerwise_slot_release_providers:
             provider.wait_for_layer_reuse(layer_idx)
 
+    def wait_for_pd_hbm_visibility(self) -> None:
+        for connector in self._connectors:
+            wait = getattr(connector, "wait_for_pd_hbm_visibility", None)
+            if callable(wait):
+                wait()
+
     def wait_for_layer_load(self, layer_name: str) -> None:
         if getattr(self, "_external_slot_release_sink_configured", False):
             # AscendStore owns the layer-entry reuse wait after accepting the

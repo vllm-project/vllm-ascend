@@ -2547,6 +2547,7 @@ class NPUModelRunner(GPUModelRunner):
                         mamba_copy_connector = connector
                 if mamba_copy_connector is None:
                     mamba_utils.do_mamba_copy_block(preprocess_bufs)
+            self._wait_for_pd_hbm_visibility()
             hidden_states = self._model_forward(
                 num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
             )
@@ -3183,6 +3184,20 @@ class NPUModelRunner(GPUModelRunner):
             self.input_batch.block_table[group_id].get_cpu_tensor()[:num_reqs],
             get_storage_block_size(group.kv_cache_spec),
         )
+
+    def _wait_for_pd_hbm_visibility(self) -> None:
+        """Join the compute stream to finished PD D2D before the first decode.
+
+        Must stay outside captured attention: a stream sync inside
+        ``_nano_attention`` breaks ACLGraph, and a per-layer host wait breaks
+        async scheduling. Call this only from the real ``execute_model``
+        path; dummy / capture forwards must not consume the pending join.
+        """
+        if not self.is_kv_consumer or not has_kv_transfer_group():
+            return
+        wait = getattr(get_kv_transfer_group(), "wait_for_pd_hbm_visibility", None)
+        if callable(wait):
+            wait()
 
     def _model_forward(
         self,

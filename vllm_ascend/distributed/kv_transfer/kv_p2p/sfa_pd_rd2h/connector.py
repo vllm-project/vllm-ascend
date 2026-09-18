@@ -216,6 +216,13 @@ class SfaRemoteD2HConnector(KVConnectorBase_V1, SupportsHMA):
         if self.is_consumer and self.connector_worker is not None:
             self.connector_worker.wait_for_save()
 
+    def wait_for_pd_hbm_visibility(self) -> None:
+        if not self.is_consumer or self.connector_worker is None:
+            return
+        wait = getattr(self.connector_worker, "wait_for_pd_hbm_visibility", None)
+        if callable(wait):
+            wait()
+
     def get_nano_slot_bindings(self) -> dict[str, int]:
         """Return the early-bound nano top-k rows for in-flight PD requests."""
         worker = self.connector_worker
