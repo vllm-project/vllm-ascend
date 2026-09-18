@@ -655,6 +655,11 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 2.1: Process the multi-query part
         if spec_sequence_masks is not None:
+            assert query_spec is not None
+            assert key_spec is not None
+            assert value_spec is not None
+            assert g_spec is not None
+            assert beta_spec is not None
             actual_seq_lengths = attn_metadata.spec_decode_metadata.actual_seq_lengths
             query_spec = l2norm_fwd(query_spec)
             key_spec = l2norm_fwd(key_spec)
