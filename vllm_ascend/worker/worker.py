@@ -708,8 +708,8 @@ class NPUWorker(WorkerBase):
             and has_mamba
             and layout.is_layer_compact
             and layout.is_block_compact
-            and self.vllm_config.kv_transfer_config is None
             and getattr(model_runner, "supports_standardized_shared_kv_backing", False)
+            and getattr(model_runner, "supports_shared_backing_with_kv_transfer", False)
             and not getattr(model_runner, "use_sparse", False)
             and not getattr(model_runner, "use_compress", False)
         ):

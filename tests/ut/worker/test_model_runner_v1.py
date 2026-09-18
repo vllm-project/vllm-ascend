@@ -1141,6 +1141,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         for kv_transfer_config in (
             None,
             SimpleNamespace(kv_connector="ExampleHiddenStatesConnector"),
+            SimpleNamespace(kv_connector="MooncakeConnectorV1"),
             SimpleNamespace(kv_connector="MooncakeConnectorV2"),
             SimpleNamespace(kv_connector="MooncakePullConnector"),
         ):
