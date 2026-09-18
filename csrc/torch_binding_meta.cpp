@@ -530,41 +530,6 @@ at::Tensor npu_fused_sparse_attention_overlap_meta(
     return at::empty_symint(out_sizes, query.options().dtype(query.dtype()));
 }
 
-std::tuple<at::Tensor,at::Tensor, at::Tensor> moe_gating_top_k_meta(
-    const at::Tensor& x,
-    int64_t k,
-    int64_t k_group,
-    int64_t group_count,
-    int64_t group_select_mode,
-    int64_t renorm,
-    int64_t norm_type,
-    bool out_flag,
-    double routed_scaling_factor,
-    double eps,
-    const c10::optional<at::Tensor>& bias_opt
-
-    )
-{
-    TORCH_CHECK(x.dim() == 2, "The x should be 2D");
-    TORCH_CHECK(
-        x.scalar_type() == at::kHalf || x.scalar_type() == at::kFloat || x.scalar_type() == at::kBFloat16,
-        "float16、float32 or bfloat16 tensor expected but got a tensor with dtype: ",
-        x.scalar_type());
-
-    auto rows = x.sym_size(0);
-    auto expert_num = x.sym_size(1);
-    const at::Tensor &bias = c10::value_or_else(bias_opt, [] { return at::Tensor(); });
-    if (bias.defined()) {
-        TORCH_CHECK(x.scalar_type() == bias.scalar_type(), "The dtype of x and bias should be same");
-        TORCH_CHECK(bias.dim() == 1, "The bias should be 1D");
-    }
-    at::Tensor y = at::empty_symint(c10::SymDimVector{rows, c10::SymInt(k)}, x.options());
-    at::Tensor expert_idx = at::empty_symint(c10::SymDimVector{rows, c10::SymInt(k)}, x.options().dtype(at::kInt));
-    at::Tensor out = at::empty_symint(c10::SymDimVector{rows, expert_num}, x.options().dtype(at::kFloat));
-
-    return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y,expert_idx,out);
-}
-
 std::tuple<at::Tensor,at::Tensor, at::Tensor> npu_add_rms_norm_bias_meta(
     const at::Tensor& x1,
     const at::Tensor& x2,
@@ -955,32 +920,6 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> compressor_metadata_meta(
     return std::make_tuple(compress_cos, compress_sin, slot_mapping);
 }
 
-std::tuple<at::Tensor, at::Tensor> construct_quant_lightning_indexer_output_tensor(const at::Tensor& query, const at::Tensor& key,
-                                                           int64_t sparse_count, std::string query_layout_str,
-                                                           std::string key_layout_str, bool return_value)
-{
-    constexpr int64_t DIM_0 = 0;
-    constexpr int64_t DIM_1 = 1;
-    constexpr int64_t DIM_2 = 2;
-    c10::SymDimVector output_size;
-    TORCH_CHECK(sparse_count > 0, "sparse count should be greater than 0, but now is ", sparse_count);
-    c10::SymInt keyHeadNum = (key_layout_str == "TND") ? key.sym_size(DIM_1) : key.sym_size(DIM_2);
-    if (query_layout_str == "BSND") {
-        output_size = {query.sym_size(DIM_0), query.sym_size(DIM_1), keyHeadNum, c10::SymInt(sparse_count)};
-    } else {
-        output_size = {query.sym_size(DIM_0), keyHeadNum, c10::SymInt(sparse_count)};
-    }
-    at::Tensor sparse_indices_out = at::empty_symint(output_size, query.options().dtype(at::kInt));
-    at::Tensor sparse_values_out;
-    if (return_value) {
-        sparse_values_out = at::empty_symint(output_size, query.options().dtype(at::kFloat));
-    } else {
-        sparse_values_out = at::empty_symint(c10::SymDimVector{c10::SymInt(0)}, query.options().dtype(at::kFloat));
-    }
-
-    return std::tuple<at::Tensor, at::Tensor>(sparse_indices_out, sparse_values_out);
-}
-
 std::tuple<at::Tensor, at::Tensor> construct_quant_lightning_indexer_v2_output_tensor(const at::Tensor& query, const at::Tensor& key,
                                                            int64_t sparse_count, std::string query_layout_str,
                                                            std::string key_layout_str, int64_t return_value)
@@ -1003,27 +942,6 @@ std::tuple<at::Tensor, at::Tensor> construct_quant_lightning_indexer_v2_output_t
     } else {
         sparse_values_out = at::empty_symint(c10::SymDimVector{c10::SymInt(0)}, query.options().dtype(at::kBFloat16));
     }
-
-    return std::tuple<at::Tensor, at::Tensor>(sparse_indices_out, sparse_values_out);
-}
-
-std::tuple<at::Tensor, at::Tensor> npu_vllm_quant_lightning_indexer_meta(
-    const at::Tensor &query, const at::Tensor &key, const at::Tensor &weights,
-    const at::Tensor &query_dequant_scale, const at::Tensor &key_dequant_scale,
-    int64_t query_quant_mode, int64_t key_quant_mode,
-    const c10::optional<at::Tensor> &actual_seq_lengths_query,
-    const c10::optional<at::Tensor> &actual_seq_lengths_key,
-    const c10::optional<at::Tensor> &block_table,
-    const c10::optional<at::Tensor> &metadata,
-    c10::string_view layout_query, c10::string_view layout_key, int64_t sparse_count,
-    int64_t sparse_mode, int64_t pre_tokens, int64_t next_tokens, int64_t cmp_ratio, bool return_value)
-{
-    std::string query_layout_str = std::string(layout_query);
-    std::string key_layout_str = std::string(layout_key);
-    std::tuple<at::Tensor, at::Tensor> quant_lightning_indexer_output = construct_quant_lightning_indexer_output_tensor(
-            query, key, sparse_count, query_layout_str, key_layout_str, return_value);
-    at::Tensor sparse_indices_out = std::get<0>(quant_lightning_indexer_output);
-    at::Tensor sparse_values_out = std::get<1>(quant_lightning_indexer_output);
 
     return std::tuple<at::Tensor, at::Tensor>(sparse_indices_out, sparse_values_out);
 }
@@ -1142,37 +1060,6 @@ at::Tensor npu_sparse_attn_sharedkv_metadata_meta(
             c10::SymDimVector{c10::SymInt(OUTPUT_SIZE)},
             torch::dtype(torch::kInt32).device(at::Device(device_str)));
     }
-    return output;
-}
-
-at::Tensor npu_vllm_quant_lightning_indexer_metadata_meta(
-    int64_t num_heads_q, int64_t num_heads_k, int64_t head_dim, int64_t query_quant_mode, int64_t key_quant_mode,
-    const c10::optional<at::Tensor> &actual_seq_lengths_query, const c10::optional<at::Tensor> &actual_seq_lengths_key, int64_t batch_size,
-    int64_t max_seqlen_q, int64_t max_seqlen_k, const c10::string_view layout_query, c10::string_view layout_key, int64_t sparse_count,
-    int64_t sparse_mode, int64_t pre_tokens, int64_t next_tokens, int64_t cmp_ratio, const c10::string_view device)
-{
-    constexpr int64_t OUTPUT_SIZE = 1024;
-    at::Tensor output;
-    if (actual_seq_lengths_query.has_value()) {
-        output = at::empty_symint(
-            c10::SymDimVector{c10::SymInt(OUTPUT_SIZE)},
-            torch::dtype(torch::kInt32).device(actual_seq_lengths_query.value().device()));
-    } else if (actual_seq_lengths_key.has_value()) {
-        output = at::empty_symint(
-            c10::SymDimVector{c10::SymInt(OUTPUT_SIZE)},
-            torch::dtype(torch::kInt32).device(actual_seq_lengths_key.value().device()));
-    } else {
-        auto deviceOri = at::Device(std::string(device));
-        std::string device_str = "meta";
-        if (deviceOri.has_index()) {
-            device_str += ":";
-            device_str += std::to_string(deviceOri.index());
-        }
-        output = at::empty_symint(
-            c10::SymDimVector{c10::SymInt(OUTPUT_SIZE)},
-            torch::dtype(torch::kInt32).device(at::Device(device_str)));
-    }
-
     return output;
 }
 
@@ -1551,34 +1438,6 @@ std::tuple<at::Tensor, at::Tensor> npu_dequant_swiglu_quant_meta(
     at::Tensor y = at::empty_symint(y_size, x.options().dtype(c10::ScalarType::Char));
     at::Tensor scale = at::empty_symint(scale_size, x.options().dtype(c10::ScalarType::Float));
     return {y, scale};
-}
-
-at::Tensor npu_lightning_indexer_quant_meta(
-    const at::Tensor &query, const at::Tensor &key, const at::Tensor &weights,
-    const at::Tensor &query_dequant_scale, const at::Tensor &key_dequant_scale,
-    const c10::optional<at::Tensor> &actual_seq_lengths_query,
-    const c10::optional<at::Tensor> &actual_seq_lengths_key,
-    const c10::optional<at::Tensor> &block_table, int64_t query_quant_mode, int64_t key_quant_mode,
-    c10::string_view layout_query, c10::string_view layout_key, int64_t sparse_count, int64_t sparse_mode)
-{
-    std::string query_layout_str = std::string(layout_query);
-    std::string key_layout_str = std::string(layout_key);
-
-    const int DIM_0 = 0;
-    const int DIM_1 = 1;
-    const int DIM_2 = 2;
-
-    c10::SymDimVector output_size;
-    TORCH_CHECK(sparse_count > 0, "sparse count should be greater than 0, but now is ", sparse_count);
-    c10::SymInt keyHeadNum = (key_layout_str == "TND") ? key.sym_size(DIM_1) : key.sym_size(DIM_2);
-    if (query_layout_str == "BSND") {
-        output_size = {query.sym_size(DIM_0), query.sym_size(DIM_1), keyHeadNum, c10::SymInt(sparse_count)};
-    } else {
-        output_size = {query.sym_size(DIM_0), keyHeadNum, c10::SymInt(sparse_count)};
-    }
-    at::Tensor lightning_indexer_quant_output = at::empty_symint(output_size, query.options().dtype(at::kInt));
-
-    return lightning_indexer_quant_output;
 }
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_k2q_csr_meta(
@@ -2208,8 +2067,6 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_fused_sparse_attention_overlap", &vllm_ascend::meta::npu_fused_sparse_attention_overlap_meta);
     // MoE dispatch-ffn-combine
     ops.impl("dispatch_ffn_combine", &vllm_ascend::meta::dispatch_ffn_combine_meta);
-    // Moe_gating_top_k
-    ops.impl("moe_gating_top_k", &vllm_ascend::meta::moe_gating_top_k_meta);
     // Add_Rms_Norm_Bias
     ops.impl("npu_add_rms_norm_bias", &vllm_ascend::meta::npu_add_rms_norm_bias_meta);
     ops.impl("npu_rms_norm_cast", &vllm_ascend::meta::npu_rms_norm_cast_meta);
@@ -2224,8 +2081,6 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("moe_gating_top_k_hash", &vllm_ascend::meta::moe_gating_top_k_hash_meta);
     ops.impl("compressor", &vllm_ascend::meta::compressor_meta);
     ops.impl("compressor_metadata", &vllm_ascend::meta::compressor_metadata_meta);
-    ops.impl("npu_vllm_quant_lightning_indexer", &vllm_ascend::meta::npu_vllm_quant_lightning_indexer_meta);
-    ops.impl("npu_vllm_quant_lightning_indexer_metadata", &vllm_ascend::meta::npu_vllm_quant_lightning_indexer_metadata_meta);
     ops.impl("npu_quant_lightning_indexer_v2", &vllm_ascend::meta::npu_quant_lightning_indexer_v2_meta);
     ops.impl("npu_quant_lightning_indexer_v2_metadata", &vllm_ascend::meta::npu_quant_lightning_indexer_v2_metadata_meta);
     ops.impl("npu_sparse_attn_sharedkv", &vllm_ascend::meta::npu_sparse_attn_sharedkv_meta);
@@ -2243,8 +2098,6 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("indexer_compress_epilog_v2", &vllm_ascend::meta::indexer_compress_epilog_v2_meta);
     ops.impl("npu_dequant_swiglu_quant", &vllm_ascend::meta::npu_dequant_swiglu_quant_meta);
     ops.impl("npu_scatter_nd_update_sk", &vllm_ascend::meta::npu_scatter_nd_update_sk_meta);
-    // Lightning indexer quant
-    ops.impl("npu_lightning_indexer_quant", &vllm_ascend::meta::npu_lightning_indexer_quant_meta);
     // MLA prolog (MlaPrologV3), Ascend950-only; name aligned with torch_npu
     ops.impl("npu_mla_prolog_v3", &vllm_ascend::meta::npu_mla_prolog_v3_meta);
     // chunk_gated_delta_rule_fwd_h

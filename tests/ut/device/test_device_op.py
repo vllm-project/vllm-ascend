@@ -102,6 +102,50 @@ def test_a5_reshape_and_cache_uses_bsnd_view_for_bnsd():
     assert call_kwargs["value_cache"].data_ptr() == value_cache.data_ptr()
 
 
+def test_moe_gating_top_k_uses_cann_api():
+    x = torch.randn(2, 4)
+    bias = torch.randn(4)
+    native_weights = torch.tensor([[2.0, 6.0], [3.0, 1.0]])
+    native_ids = torch.tensor([[1, 3], [2, 0]], dtype=torch.int64)
+    native_out = torch.randn(2, 4)
+
+    with mock.patch(
+        "vllm_ascend.device.device_op.torch_npu.npu_moe_gating_top_k",
+        return_value=(native_weights, native_ids, native_out),
+        create=True,
+    ) as mock_gating:
+        weights, ids, out = BaseDeviceAdaptor.moe_gating_top_k(
+            x,
+            k=2,
+            k_group=1,
+            group_count=2,
+            group_select_mode=1,
+            renorm=1,
+            norm_type=0,
+            out_flag=True,
+            routed_scaling_factor=2.5,
+            eps=1e-6,
+            bias_opt=bias,
+        )
+
+    mock_gating.assert_called_once_with(
+        x,
+        k=2,
+        k_group=1,
+        group_count=2,
+        group_select_mode=1,
+        renorm=1,
+        norm_type=0,
+        out_flag=True,
+        routed_scaling_factor=2.5,
+        eps=1e-6,
+        bias=bias,
+    )
+    assert weights is native_weights
+    torch.testing.assert_close(ids, native_ids.to(torch.int32))
+    assert out is native_out
+
+
 def test_kv_cache_load_makes_seq_lens_contiguous():
     cache_kv_c = object()
     cache_k_pe = object()
