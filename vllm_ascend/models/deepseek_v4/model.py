@@ -1210,12 +1210,20 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
                 if is_pp_missing_parameter(name, self):
                     continue
                 param = params_dict[name]
+                # Route the write through the parameter's loader. A live weight
+                # update runs inside vLLM's layerwise reload, which parks the
+                # layer on the meta device and buffers every load made through
+                # ``weight_loader`` so it can replay it onto the materialized
+                # layer. A direct ``param.data.copy_`` bypasses that buffer: it
+                # lands on the meta tensor (a no-op), so attention sinks would
+                # silently keep their dummy values after an update.
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 if enable_dsa_cp():
-                    param.data.copy_(loaded_weight)
+                    weight_loader(param, loaded_weight)
                 else:
                     # Handle attention sinks (distributed across ranks)
                     narrow_weight = loaded_weight.narrow(0, head_start, heads_per_rank)
-                    param.data.copy_(narrow_weight)
+                    weight_loader(param, narrow_weight)
                 loaded_params.add(name)
                 continue
 
