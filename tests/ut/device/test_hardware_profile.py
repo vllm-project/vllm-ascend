@@ -70,7 +70,6 @@ _EXPECTED_CAPABILITIES = {
     AscendDeviceType.A5: frozenset(
         {
             HardwareCapability.AUTO_ENABLE_CUSTOM_OPS,
-            HardwareCapability.BGMV_SGMV_META_REGISTRATION,
             HardwareCapability.CANN_MEGAMOE,
             HardwareCapability.CANN_MEGAMOE_MXFP,
             HardwareCapability.CHUNKED_PREFILL_PHASE_SPLIT,
@@ -91,6 +90,7 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS,
             HardwareCapability.NPUGRAPH_EX,
             HardwareCapability.REDUCED_CUDAGRAPH_CAPTURE_SIZES,
+            HardwareCapability.RUNTIME_CUSTOM_OPS,
             HardwareCapability.STANDARD_MAMBA_PATCH,
             HardwareCapability.STANDARD_WORKER_PATCHES,
             HardwareCapability.SWIGLU_OAI_MX_QUANT,
