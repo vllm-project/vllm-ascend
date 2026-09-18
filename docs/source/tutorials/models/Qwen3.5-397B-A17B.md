@@ -51,7 +51,7 @@ The `Qwen3.5-397B-A17B` model is first supported in `vllm-ascend:v0.17.0rc1`. Us
     Start the docker image on your each node.
 
     ```bash
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-950DT
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
     export NAME=vllm-ascend
 
     docker run --rm \

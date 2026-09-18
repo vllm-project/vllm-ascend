@@ -195,11 +195,16 @@ def test_p_eagle_acceptance(
     method: str,
     num_speculative_tokens: int,
     draft_tensor_parallel_size: None | int,
+    monkeypatch,
 ):
     """
     Test acceptance rate for parallel drafting speculative decoding
     using a smaller draft model with parallel_drafting enabled.
     """
+    # MRv2 FULL decode ACL graph capture D2Hs seq_lens via .tolist() for
+    # parallel_drafting. Keep this acceptance case on V1 until that path is
+    # capture-safe.
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     main_model_name = P_EAGLE_MODELS[method]["main"]
     spec_model_name = P_EAGLE_MODELS[method]["spec"]
 
@@ -367,7 +372,9 @@ def test_qwen3_vwn_eagle3_tp2():
     assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
 
 
-def test_eagle3_sliding_window():
+def test_eagle3_sliding_window(monkeypatch):
+    # draft_window_size is MRV1-only; Qwen3 + eagle3 now defaults to MRv2.
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     method = "eagle3"
     num_speculative_tokens = 3
     draft_window_size = 512
@@ -447,7 +454,7 @@ def test_eagle3_sliding_window():
     assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
 
 
-def test_hang():
+def test_hang(monkeypatch):
     """Reproduce the spec-decode hang fixed by vllm-ascend#10117.
 
     The server deadlocks when all of the following hold:
@@ -459,6 +466,9 @@ def test_hang():
     length saturates the boundary in (3). The model is a small random-weight
     DeepseekV3 MoE+MTP so the case runs on two cards with EP on.
     """
+    # The deadlock was fixed on the V1 proposer. Qwen3_5MoeForCausalLM now
+    # defaults to MRv2; keep this regression on V1.
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     # Fail-fast: cap NPU operator execution timeout at 5 min. Without this the
     # hang deadlocks for ~9 min until CANN's default vector-core timeout
     # (~556s) fires — too long for CI.
@@ -564,7 +574,12 @@ def test_hang():
 def test_dflash2_acceptance(
     method: str,
     num_speculative_tokens: int,
+    monkeypatch,
 ):
+    # After #16726 reverted UpdatableGraph, MRv2 PIECEWISE dummy profile calls
+    # dflash2 candidate_selector without set_forward_context. Keep this
+    # acceptance case on V1; test_dflash2_v2_acceptance covers V2 eager.
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     main_model_name = DFLASH2_MODELS[method]["main"]
     spec_model_name = DFLASH2_MODELS[method]["spec"]
 

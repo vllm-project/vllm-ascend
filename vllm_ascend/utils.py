@@ -1348,6 +1348,23 @@ def dispose_layer(layer: Any):
             dispose_tensor(attr_value)
 
 
+def is_rl_weight_update_enabled(vllm_config: VllmConfig) -> bool:
+    """Whether this deployment takes part in an RL weight update loop.
+
+    RL rollout workers receive weights through vLLM's layerwise reload, which
+    writes every checkpoint parameter back into the storage that exists when
+    the transaction starts. A parameter whose storage was released therefore
+    has no valid reload destination, so whoever would release it must keep it
+    while this returns ``True``.
+
+    Two switches mark such a deployment: the Ascend RL defaults
+    (``additional_config.rl_config.enabled``) and the upstream weight transfer
+    service (``--weight-transfer-config``), which is how a rollout worker
+    declares that a trainer may update its weights in place.
+    """
+    return get_ascend_config().rl_config.enabled or vllm_config.weight_transfer_config is not None
+
+
 def check_kv_extra_config(vllm_config):
     def _check(name: str, config: dict):
         tp_key = "tp_size"
