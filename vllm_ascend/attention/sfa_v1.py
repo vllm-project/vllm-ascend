@@ -1702,6 +1702,21 @@ class AscendSFAImpl(MLAAttentionImpl):
         if self.preprocess_type == PreprocessType.MLAPO and num_input_tokens > MLAPO_MAX_SUPPORTED_TOKENS:
             fused_type = PreprocessType.NATIVE
 
+        # IMPORTANT!
+        # NOTE: With PIECEWISE ACL graphs, this method is executed in
+        # eager-mode PyTorch. Even view and slice operations can add CPU
+        # overhead without launching NPU kernels. Minimize PyTorch operations
+        # in this method and benchmark changes to avoid regressions.
+        if fused_type == PreprocessType.NATIVE:
+            hidden_states = self._prepare_native_hidden_states(hidden_states, attn_metadata)
+
+        # Inputs and outputs may contain DP or graph padding. Keep the
+        # preallocated output for the caller while running attention only on
+        # the token rows described by metadata, matching upstream backends.
+        hidden_states = hidden_states[:num_input_tokens]
+        if gate_hidden_states is not None:
+            gate_hidden_states = gate_hidden_states[:num_input_tokens]
+
         if fused_type != PreprocessType.NATIVE:
             if fused_type == PreprocessType.PROLOG_V3:
                 assert slot_mapping_sfa.numel() == hidden_states.shape[0], (
@@ -1741,7 +1756,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         # native
         else:
             assert self.fused_qkv_a_proj is not None, "q lora is required for DSA."
-            hidden_states = self._prepare_native_hidden_states(hidden_states, attn_metadata)
             qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
             q_c, kv_no_split = qkv_lora.split(
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
@@ -1856,14 +1870,9 @@ class AscendSFAImpl(MLAAttentionImpl):
         if gate_hidden_states is not None:
             assert self.g_proj is not None
             attn_output.mul_(torch.sigmoid(self.g_proj(gate_hidden_states.contiguous())[0]))
-        if self.qk_rope_head_dim == 0 and attn_output.shape[0] < output.shape[0]:
-            padded = attn_output.new_zeros((output.shape[0], attn_output.shape[1]))
-            padded[: attn_output.shape[0]] = attn_output
-            attn_output = padded
-
-        output = self._finalize_o_proj(
+        self._finalize_o_proj(
             attn_output,
-            output,
+            output[:num_input_tokens],
             parallel_context.gather_full_o_proj,
         )
 
