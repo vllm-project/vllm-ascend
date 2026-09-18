@@ -1,6 +1,6 @@
 # MlaPrologV3 API 与调用示例
 
-本验证分支仅编译 Kimi-K3 A5 TP8 decode 使用的 MXFP8、BF16 KV、PA_BSND、NoPE、split-N 模板。该模板也覆盖 TP8/DCP8 replicated-Q 的 96 个 Q heads；V-up 和 O 投影仍使用本 TP rank 的 12 个 heads。
+本验证分支仅编译 Kimi-K3 A5 TP8 decode 使用的 MXFP8 权重、BF16 或 per-tensor FP8 KV、PA_BSND、NoPE、split-N 模板。该模板也覆盖 TP8/DCP8 replicated-Q 的 96 个 Q heads；V-up 和 O 投影仍使用本 TP rank 的 12 个 heads。
 下面的完整 API 描述保留用于参考；本分支产物不包含其他量化与布局模板。
 
 ## 1. API 总览
@@ -86,6 +86,18 @@
 RoPE 开关由 `ropeSin` / `ropeCos` 的 nullity 推导：同时非空 → 开启，同时为空 → 关闭；混合 null 返回参数错误。
 
 `kv_cache` / `kr_cache` 在 Ascend 950PR/Ascend 950DT 上支持首轴非连续；PA_BSND 还支持 token 轴的非连续布局，可直接写入 FlashMLA 合并缓存中 token stride 为 576 的 CKV/KR 视图。
+
+本分支 C8 使用 `weight_quant_mode=3`、`kv_cache_quant_mode=1`、`query_quant_mode=1`。
+`quant_scale_ckv` 是 shape `[1]` 的 FP32 静态**量化乘数**，即 KV 反量化 scale 的倒数。
+512 维 latent KV 直接量化写入 FP8 E4M3，64 维 KR 保持 BF16；关闭 RoPE 仅跳过旋转，不删除 KR。
+Q latent 逐 token/head 动态量化，返回 FP32 `dequant_scale_q_nope`；Q 的 BF16 64 维分量已乘
+`quant_scale_ckv / dequant_scale_q_nope`。下游 attention 必须将整个 QK 累加结果乘 Q 和 KV 的反量化
+scale，不能再次预缩放 Q 的 64 维分量。两个 cache 的 stride 均以各自 dtype 的元素为单位。C8 FlashMLA
+每个 128-token kernel page 先存 `[128,512]` FP8 latent，再存 `[128,64]` BF16 KR，总计 81920 B，
+等价于平均 640 B/token。两分量的 token 轴连续，首轴可非连续；无需为写回再做缓存转换。
+
+FP8 Q 某一行全零时返回 `dequant_scale_q_nope=1`，Q 保持零。这避免零 latent Q 但非零 BF16
+64 维分量时发生除零，并保留该分量对 attention logits 的贡献。
 
 #### 量化模式合法组合（`weight_quant_mode` × `kv_cache_quant_mode`）
 

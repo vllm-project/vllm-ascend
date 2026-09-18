@@ -142,6 +142,14 @@ void FlashMlaWithKvcacheInfoParser::GetOptionalInputParaInfo()
     GetOptionalInputParaPageAttentionInfo();
     GetOptionalInputParaMetadataInfo();
     GetOptionalInputParaMaskInfo();
+    opParamInfo_.queryRope.tensor = context_->GetOptionalInputTensor(QUERY_ROPE_INDEX);
+    opParamInfo_.queryRope.desc = context_->GetOptionalInputDesc(QUERY_ROPE_INDEX);
+    opParamInfo_.keyRope.tensor = context_->GetOptionalInputTensor(KEY_ROPE_INDEX);
+    opParamInfo_.keyRope.desc = context_->GetOptionalInputDesc(KEY_ROPE_INDEX);
+    opParamInfo_.dequantScaleQuery.tensor = context_->GetOptionalInputTensor(DEQUANT_SCALE_QUERY_INDEX);
+    opParamInfo_.dequantScaleQuery.desc = context_->GetOptionalInputDesc(DEQUANT_SCALE_QUERY_INDEX);
+    opParamInfo_.dequantScaleKey.tensor = context_->GetOptionalInputTensor(DEQUANT_SCALE_KEY_INDEX);
+    opParamInfo_.dequantScaleKey.desc = context_->GetOptionalInputDesc(DEQUANT_SCALE_KEY_INDEX);
 }
 void FlashMlaWithKvcacheInfoParser::GetOptionalInputParaMaskInfo()
 {
@@ -191,6 +199,28 @@ ge::graphStatus FlashMlaWithKvcacheInfoParser::GetStrides()
     valueStrides_ = keyStrides_;
     OP_CHECK_IF(keyStrides_ == nullptr || keyStrides_->GetDimNum() == 0,
                 OP_LOGE(opName_, "Missing cache stride descriptor."), return ge::GRAPH_FAILED);
+    if (inputQType_ == ge::DT_FLOAT8_E4M3FN) {
+        OP_CHECK_IF(layoutQ_ != FlashMlaWithKvcacheLayout::TND ||
+                    layoutKV_ != FlashMlaWithKvcacheLayout::PA_BBND,
+                    OP_LOGE(opName_, "FlashMLA C8 requires TND query and PA_BBND cache."),
+                    return ge::GRAPH_FAILED);
+        const auto &shape = opParamInfo_.kCache.shape->GetStorageShape();
+        OP_CHECK_IF(shape.GetDimNum() != 4 || keyStrides_->GetDimNum() != 4 ||
+                    shape.GetDim(1) != 128 || shape.GetDim(2) != 1 || shape.GetDim(3) != 512 ||
+                    keyStrides_->GetStride(3) != 1 || keyStrides_->GetStride(1) != 512 ||
+                    keyStrides_->GetStride(0) < 128 * 512,
+                    OP_LOGE(opName_, "C8 cache requires [pages,128,1,512] with contiguous inner pages."),
+                    return ge::GRAPH_FAILED);
+        OP_CHECK_IF(opParamInfo_.keyRope.tensor == nullptr || !context_->InputIsView(KEY_ROPE_INDEX),
+                    OP_LOGE(opName_, "C8 key_rope requires its own view/stride descriptor."),
+                    return ge::GRAPH_FAILED);
+        const auto *ropeStride = context_->GetInputStride(KEY_ROPE_INDEX);
+        OP_CHECK_IF(ropeStride == nullptr || ropeStride->GetDimNum() != 4 ||
+                    ropeStride->GetStride(3) != 1 || ropeStride->GetStride(1) != 64 ||
+                    ropeStride->GetStride(0) < 128 * 64,
+                    OP_LOGE(opName_, "C8 key_rope inner page must be contiguous."),
+                    return ge::GRAPH_FAILED);
+    }
     if (layoutKV_ == FlashMlaWithKvcacheLayout::PA_BNBD) {
         const gert::Shape &shape = opParamInfo_.kCache.shape->GetStorageShape();
         OP_CHECK_IF(shape.GetDimNum() != 4 || keyStrides_->GetDimNum() != 4,
@@ -313,12 +343,14 @@ ge::graphStatus FlashMlaWithKvcacheInfoParser::GetQkHeadDim()
     }
     int64_t headDimV = (opParamInfo_.headDimV == nullptr) ? arch35MLA::MLA_D_DIM_512 : *opParamInfo_.headDimV;
     int64_t lastDim = queryShape_->GetShapeD();
-    if (lastDim <= headDimV || (lastDim - headDimV) != arch35MLA::MLA_ROPE_D_DIM_64) {
+    const bool isC8 = opParamInfo_.query.desc->GetDataType() == ge::DT_FLOAT8_E4M3FN;
+    const int64_t expectedLastDim = headDimV + (isC8 ? 0 : arch35MLA::MLA_ROPE_D_DIM_64);
+    if (lastDim != expectedLastDim) {
         OP_LOGE(opName_, "q last dim(%ld) must be head_dim_v(%ld) + rope(64).", lastDim, headDimV);
         return ge::GRAPH_FAILED;
     }
     qkHeadDim_ = headDimV;
-    ropeHeadDim_ = lastDim - headDimV;
+    ropeHeadDim_ = arch35MLA::MLA_ROPE_D_DIM_64;
     return ge::GRAPH_SUCCESS;
 }
 
@@ -465,7 +497,9 @@ ge::graphStatus FlashMlaWithKvcacheInfoParser::GetValueHeadDim()
     }
     int64_t headDimV = (opParamInfo_.headDimV == nullptr) ? arch35MLA::MLA_D_DIM_512 : *opParamInfo_.headDimV;
     int64_t lastDim = valueShape_->GetShapeD();
-    if (lastDim <= headDimV || (lastDim - headDimV) != arch35MLA::MLA_ROPE_D_DIM_64) {
+    const bool isC8 = opParamInfo_.query.desc->GetDataType() == ge::DT_FLOAT8_E4M3FN;
+    const int64_t expectedLastDim = headDimV + (isC8 ? 0 : arch35MLA::MLA_ROPE_D_DIM_64);
+    if (lastDim != expectedLastDim) {
         OP_LOGE(opName_, "k_cache last dim(%ld) must be head_dim_v(%ld) + rope(64).", lastDim, headDimV);
         return ge::GRAPH_FAILED;
     }
@@ -499,6 +533,13 @@ ge::graphStatus FlashMlaWithKvcacheInfoParser::GetInAndOutLayout()
         return ge::GRAPH_FAILED;
     }
     layoutOut_ = itOut->second;
+    if (std::string(opParamInfo_.layoutOut) == "NTD_DCP" &&
+        (opParamInfo_.query.desc->GetDataType() != ge::DT_FLOAT8_E4M3FN ||
+         layoutQ_ != FlashMlaWithKvcacheLayout::TND ||
+         opParamInfo_.returnSoftMaxLse == nullptr || *opParamInfo_.returnSoftMaxLse == 0)) {
+        OP_LOGE(opName_, "NTD_DCP requires C8 TND query and LSE output.");
+        return ge::GRAPH_FAILED;
+    }
 
     // 路由约束（与 op_host/checkers/common_checker.cpp 的新布局矩阵对齐）：
     //   q ∈ {TND, BNSD, BSND}；kv 仅分页布局 {PA_NZ, PA_BBND, PA_BNBD}（连续 KV 不放行）；
@@ -631,6 +672,11 @@ void FlashMlaWithKvcacheInfoParser::GenerateLayoutInfo(FlashMlaWithKvcacheTiling
     faInfo.qLayout = layoutQ_;
     faInfo.kvLayout = layoutKV_;
     faInfo.outLayout = layoutOut_;
+    if (std::string(opParamInfo_.layoutOut) == "NTD_DCP") {
+        // Keep the generic host layout NTD; only the C8 kernel uses tag 7.
+        faInfo.kernelOutputLayout = FLASH_MLA_C8_DCP_KERNEL_LAYOUT;
+        return;
+    }
     // kernel 侧 FLASH_MLA_WITH_KVCACHE_LAYOUT 数值（flash_mla_with_kvcache_public_define_arch35.h），限定路由下恒为
     // NTD(5)
     switch (layoutOut_) {
@@ -702,6 +748,14 @@ void FlashMlaWithKvcacheInfoParser::GenerateAxisInfo(FlashMlaWithKvcacheTilingIn
 
 void FlashMlaWithKvcacheInfoParser::GenerateDtypeInfo(FlashMlaWithKvcacheTilingInfo &faInfo)
 {
+    faInfo.isC8 = inputQType_ == ge::DT_FLOAT8_E4M3FN;
+    if (faInfo.isC8) {
+        const auto *strides = context_->GetInputStride(KEY_ROPE_INDEX);
+        if (strides != nullptr && strides->GetDimNum() == 4) {
+            faInfo.kRopeBnStride = strides->GetStride(0);
+            faInfo.kRopeN2Stride = strides->GetStride(2);
+        }
+    }
     faInfo.inputQType = inputQType_;
     faInfo.inputKvType = inputKvType_;
     faInfo.outputType = outputType_;

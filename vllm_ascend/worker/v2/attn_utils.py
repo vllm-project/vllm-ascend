@@ -73,7 +73,11 @@ from vllm_ascend.utils import (
     vllm_version_is,
 )
 from vllm_ascend.worker.device_metadata import DeviceMetadataExecutor, DeviceMetadataTaskProvider
-from vllm_ascend.worker.flash_kv_cache import create_flash_kernel_block_view
+from vllm_ascend.worker.flash_kv_cache import (
+    create_flash_kernel_block_view,
+    customize_flash_mla_c8_spec,
+    split_flash_mla_c8_cache,
+)
 from vllm_ascend.worker.kvpp_cache import allocate_kvpp_cache
 
 if TYPE_CHECKING:
@@ -141,6 +145,8 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             # GQA only changes physical K/V head slots through its backend.
             if not isinstance(attn_module, MLAAttention):
                 spec = attn_module.get_attn_backend().customize_spec(spec)
+            elif getattr(getattr(attn_module, "impl", None), "fa_quant_layer", False):
+                spec = customize_flash_mla_c8_spec(spec, attn_module)
             kv_cache_spec[layer_name] = spec
             attention_layer_names.append(layer_name)
             continue
@@ -1154,7 +1160,11 @@ def _reshape_kv_cache_v2(
                             kv_cache_spec.get_num_kernel_states(kernel_block_size),
                             kv_cache_spec.state_content_size_bytes // get_dtype_size(kv_cache_spec.dtype),
                         )
-                    kv_caches[layer_name] = cache.squeeze(1) if isinstance(kv_cache_spec, MLAAttentionSpec) else cache
+                    if isinstance(kv_cache_spec, MLAAttentionSpec):
+                        cache = cache.squeeze(1)
+                        if kv_cache_spec.dtype == torch.float8_e4m3fn:
+                            cache = split_flash_mla_c8_cache(cache)
+                    kv_caches[layer_name] = cache
                 continue
 
             if isinstance(group_spec, AscendSFAIndexerCacheSpec):

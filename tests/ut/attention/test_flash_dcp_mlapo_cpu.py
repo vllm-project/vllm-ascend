@@ -20,14 +20,20 @@ def load_forward(scope):
 
 
 @pytest.mark.parametrize("dcp", [1, 8])
-def test_prolog_writes_replicated_current_slots_for_dcp(dcp):
+@pytest.mark.parametrize("quantized", [False, True])
+def test_prolog_writes_replicated_current_slots_for_dcp(dcp, quantized):
     path = Path(__file__).resolve().parents[3] / "vllm_ascend/attention/mla_v1.py"
     tree = ast.parse(path.read_text(encoding="utf-8"))
     cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "AscendMLAImpl")
     method = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "mla_preprocess_only_decode")
     tokens, heads = 4, 12 * dcp
-    history = torch.empty(4, 2, 128, 576)[:, 1]
-    current = torch.empty(3, 1, 128, 576)
+    history = torch.empty(4, 2, 128, 576, dtype=torch.bfloat16)[:, 1]
+    if quantized:
+        history = (
+            torch.empty(4, 2, 128, 1, 512, dtype=torch.float8_e4m3fn)[:, 1],
+            torch.empty(4, 2, 128, 1, 64, dtype=torch.bfloat16)[:, 1],
+        )
+    current = torch.empty(3, 1, 128, 576, dtype=torch.bfloat16)
     owned_slots = torch.tensor([-1, 128, -1, -1])
     current_slots = torch.tensor([127, 128, 129, -1])
     metadata = SimpleNamespace(
@@ -41,15 +47,31 @@ def test_prolog_writes_replicated_current_slots_for_dcp(dcp):
     )
 
     def prolog(**kwargs):
-        cache = current.squeeze(1) if dcp > 1 else history
-        assert kwargs["kv_cache"].data_ptr() == cache.data_ptr()
-        assert kwargs["kr_cache"].data_ptr() == cache[..., 512:].data_ptr()
-        assert kwargs["kv_cache"].stride() == cache[..., :512].unsqueeze(2).stride()
-        torch.testing.assert_close(kwargs["cache_index"], current_slots if dcp > 1 else owned_slots)
-        return torch.empty(tokens, heads, 512), torch.empty(tokens, heads, 64), None, None, None
+        c8_prolog = quantized and dcp == 1
+        assert kwargs["kv_cache_quant_mode"] == kwargs["query_quant_mode"] == int(c8_prolog)
+        assert (kwargs["quant_scale_ckv"] is not None) == c8_prolog
+        if c8_prolog:
+            assert kwargs["kv_cache"] is history[0]
+            assert kwargs["kr_cache"] is history[1]
+        else:
+            cache = current.squeeze(1) if dcp > 1 else history
+            assert kwargs["kv_cache"].dtype == torch.bfloat16
+            assert kwargs["kv_cache"].data_ptr() == cache.data_ptr()
+            assert kwargs["kr_cache"].data_ptr() == cache[..., 512:].data_ptr()
+            assert kwargs["kv_cache"].stride() == cache[..., :512].unsqueeze(2).stride()
+        torch.testing.assert_close(kwargs["cache_index"].reshape(-1), current_slots if dcp > 1 else owned_slots)
+        scale = torch.ones(tokens, heads, 1) if c8_prolog else None
+        return torch.empty(tokens, heads, 512), torch.empty(tokens, heads, 64), scale, None, None
 
     scope = dict(
         torch=torch,
+        torch_npu=SimpleNamespace(
+            npu_dynamic_mx_quant=lambda x, **kwargs: (
+                x.to(torch.float8_e4m3fn),
+                torch.empty(tokens, 1, 112, 2, dtype=torch.uint8),
+            )
+        ),
+        get_dynamic_mx_quant_scale_alg=lambda _: 0,
         envs=SimpleNamespace(VLLM_ASCEND_ENABLE_FLASH_MLA=True),
         _npu_mla_prolog_v3_no_rope=prolog,
         DecodeMLAPreprocessResult=lambda q, r, k, v, **kwargs: SimpleNamespace(ql_nope=q, q_pe=r),
@@ -59,10 +81,15 @@ def test_prolog_writes_replicated_current_slots_for_dcp(dcp):
     impl = SimpleNamespace(
         kv_lora_rank=512,
         support_fp8_attention=True,
-        mlapo_weight_quant_mode=0,
+        mlapo_weight_quant_mode=3,
+        vllm_config=None,
+        dequant_scale_w_dq=torch.empty(1, dtype=torch.uint8),
+        dequant_scale_w_uq_qr=torch.empty(1, dtype=torch.uint8),
+        dequant_scale_w_dkv_kr=torch.empty(1, dtype=torch.uint8),
+        fak_descale_reciprocal=torch.tensor([32.0]),
         use_mla_rope=False,
         _mlapo_empty_rope=torch.empty(0, 64),
-        fa_quant_layer=False,
+        fa_quant_layer=quantized,
         weight_dq=None,
         weight_uq_qr=None,
         mlapo_W_UK_T=None,
@@ -182,6 +209,7 @@ def test_replicated_prolog_current_and_owner_cache(monkeypatch, tokens, rank, ml
     monkeypatch.setattr(torch.ops._C_ascend, "flash_mla_with_kvcache", flash, raising=False)
     impl = SimpleNamespace(
         enable_mlapo=mlapo,
+        fa_quant_layer=False,
         q_proj=Projection(),
         layerwise_kv_cache_hook=None,
         mla_preprocess_only_decode=preprocess,

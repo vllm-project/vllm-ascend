@@ -70,6 +70,7 @@ bool FlashMlaWithKvcacheMetadataCpuKernel::Prepare(CpuKernelContext &ctx)
     GetAttrValueOpt(ctx, "max_seqlen_kv", maxSeqlenKv_);
     GetAttrValueOpt(ctx, "mask_mode", maskMode_);
     GetAttrValueOpt(ctx, "layout_q", layoutQ_);
+    GetAttrValueOpt(ctx, "is_c8", isC8_);
 
     KERNEL_CHECK_FALSE(ParamsCheck(), false, "Params check failed");
     return ParamsInit();
@@ -226,13 +227,27 @@ void FlashMlaWithKvcacheMetadataCpuKernel::InitDeviceInfo()
 
 void FlashMlaWithKvcacheMetadataCpuKernel::InitLoadBalanceParams()
 {
-    param.mBaseSize = 96;
-    param.s2BaseSize = 112;
+    param.mBaseSize = isC8_ ? HEAD_M_BASE_SIZE_MLA_C8 : HEAD_M_BASE_SIZE_MLA;
+    param.s2BaseSize = isC8_ ? HEAD_S2_BASE_SIZE_MLA_C8 : HEAD_S2_BASE_SIZE_MLA;
+    // Long-context replicated-Q decode: keep the 96 M tiles in one stream-K
+    // schedule instead of restarting the CV pipeline for four L2 sections.
+    // This is tuned for 128K + 1K generation with DCP8 and a shared prefix.
+    // It remains correct for unshared pages; other shapes retain L2 sectioning.
+    constexpr uint32_t LONG_DECODE_BATCH = 16;
+    constexpr uint32_t LONG_DECODE_HEADS = 96;
+    constexpr uint32_t LONG_DECODE_QUERY = 4;
+    constexpr int64_t LONG_DECODE_KV_MIN = 16 * 1024;
+    constexpr int64_t LONG_DECODE_KV_MAX = LONG_DECODE_KV_MIN + 2 * HEAD_S2_BASE_SIZE_MLA_C8;
+    const bool longC8Decode = isC8_ && maskMode_ == 0 && numHeadsQ_ == LONG_DECODE_HEADS &&
+        maxSeqlenQ_ == LONG_DECODE_QUERY && actualSeqlenKv_.size() == LONG_DECODE_BATCH &&
+        std::all_of(actualSeqlenKv_.begin(), actualSeqlenKv_.end(), [](int64_t length) {
+            return length >= LONG_DECODE_KV_MIN && length <= LONG_DECODE_KV_MAX;
+        });
     // M 方向总行数 = g * S1 = (N1/N2) * maxSeqlenQ。若总行数 <= 2*mBaseSize（M 最多 2 块），
     // 多 section 切分无收益，仅增加 metadata/re-init/SyncAll 开销，故关闭。
     {
         uint32_t g = numHeadsQ_ / numHeadsKv_;
-        if (g * maxSeqlenQ_ <= param.mBaseSize * 2) {
+        if (g * maxSeqlenQ_ <= param.mBaseSize * 2 || longC8Decode) {
             param.l2Byte = 0U; // 0: disable section splitting
         } else {
             param.l2Byte = 96U * 1024U * 1024U; // 96MB
@@ -270,8 +285,8 @@ void FlashMlaWithKvcacheMetadataCpuKernel::InitBaseInfo()
     baseInfo.preToken = std::numeric_limits<uint32_t>::max();
     baseInfo.nextToken = std::numeric_limits<uint32_t>::max();
     baseInfo.layoutQuery = load_balance::ConvertToLayout(layoutQ_);
-    baseInfo.queryType = load_balance::DataType::FP16;
-    baseInfo.kvType = load_balance::DataType::FP16;
+    baseInfo.queryType = isC8_ ? load_balance::DataType::INT8 : load_balance::DataType::FP16;
+    baseInfo.kvType = isC8_ ? load_balance::DataType::INT8 : load_balance::DataType::FP16;
     baseInfo.isCumulativeKvSeq = isActualSeqlenKvAccum_;
     baseInfo.actualKvSeqSize = actualSeqlenKv_;
     baseInfo.isCumulativeQuerySeq = isActualSeqlenQAccum_;
@@ -290,9 +305,9 @@ bool FlashMlaWithKvcacheMetadataCpuKernel::GenMetadata(load_balance::SectionStre
     faMetadata.Clear(); // set to all 0
 
     faMetadata.SetHeadMetadata(HEAD_SECTION_NUM_INDEX, splitRes.sectionNum);
-    // Keep metadata tile sizes consistent with the fixed M96/S2=112 kernel.
-    faMetadata.SetHeadMetadata(HEAD_M_BASE_SIZE_INDEX, HEAD_M_BASE_SIZE_MLA);
-    faMetadata.SetHeadMetadata(HEAD_S2_BASE_SIZE_INDEX, HEAD_S2_BASE_SIZE_MLA);
+    // Publish the selected tile sizes for the matching BF16 or C8 kernel.
+    faMetadata.SetHeadMetadata(HEAD_M_BASE_SIZE_INDEX, param.mBaseSize);
+    faMetadata.SetHeadMetadata(HEAD_S2_BASE_SIZE_INDEX, param.s2BaseSize);
     faMetadata.SetHeadMetadata(HEAD_AIC_NUM_INDEX, static_cast<FA_METADATA_T>(aicCoreNum_));
     faMetadata.SetHeadMetadata(HEAD_AIV_NUM_INDEX, static_cast<FA_METADATA_T>(aivCoreNum_));
     faMetadata.SetHeadMetadata(HEAD_OUTPUT_LAYOUT_INDEX,

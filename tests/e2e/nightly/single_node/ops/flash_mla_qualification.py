@@ -92,7 +92,10 @@ class Qualification:
         self.scale = 1 / math.sqrt(576)
         self.mask = torch.triu(torch.ones((2048, 2048), dtype=torch.int8), 1).to(self.device)
         self.metadata = torch.full(
-            (((((self.aic + self.aiv) * 3 + 1) * 16 + 4095) // 4096 * 4096),), -211, dtype=torch.int32, device=self.device
+            (((((self.aic + self.aiv) * 3 + 1) * 16 + 4095) // 4096 * 4096),),
+            -211,
+            dtype=torch.int32,
+            device=self.device,
         )
         self.graph_metadata = torch.empty_like(self.metadata)
         self.graph_cu = torch.empty_like(self.cu)
@@ -135,8 +138,12 @@ class Qualification:
             c_npu, r_npu = c.to(self.device), r.to(self.device)
             slots_npu = torch.tensor(slots, dtype=integer, device=self.device)
             self.torch_npu.npu_scatter_pa_kv_cache(
-                c_npu, r_npu, self.cache[..., :512].unsqueeze(2),
-                self.cache[..., 512:].unsqueeze(2), slots_npu, cache_mode="Norm"
+                c_npu,
+                r_npu,
+                self.cache[..., :512].unsqueeze(2),
+                self.cache[..., 512:].unsqueeze(2),
+                slots_npu,
+                cache_mode="Norm",
             )
             torch.npu.synchronize()
             for i, slot in enumerate(slots):
@@ -181,20 +188,37 @@ class Qualification:
                 self.graph_metadata,
             )
         produced = torch.ops._C_ascend.flash_mla_with_kvcache_metadata(
-            lengths, self.heads, 1, cu_seqlens_q=cu, seqused_q=used,
-            max_seqlen_q=9, max_seqlen_kv=2 * self.page,
-            head_dim_qk=576, head_dim_v=512,
-            mask_mode=3 if causal else 0, layout_q="TND",
+            lengths,
+            self.heads,
+            1,
+            cu_seqlens_q=cu,
+            seqused_q=used,
+            max_seqlen_q=9,
+            max_seqlen_kv=2 * self.page,
+            head_dim_qk=576,
+            head_dim_v=512,
+            mask_mode=3 if causal else 0,
+            layout_q="TND",
         )
         metadata.copy_(produced)
         result = torch.ops._C_ascend.flash_mla_with_kvcache(
-            query, self.cache.unsqueeze(1), block_table=self.blocks,
-            cache_seqlens=lengths, cu_seqlens_q=cu, seqused_q=used,
-            attn_mask=self.mask if causal else None, metadata=metadata,
-            head_dim_v=512, softmax_scale=self.scale,
-            mask_mode=3 if causal else 0, max_seqlen_q=9,
-            max_seqlen_kv=2 * self.page, layout_q="TND", layout_kv="PA_BNBD",
-            layout_out=layout, return_softmax_lse=return_lse,
+            query,
+            self.cache.unsqueeze(1),
+            block_table=self.blocks,
+            cache_seqlens=lengths,
+            cu_seqlens_q=cu,
+            seqused_q=used,
+            attn_mask=self.mask if causal else None,
+            metadata=metadata,
+            head_dim_v=512,
+            softmax_scale=self.scale,
+            mask_mode=3 if causal else 0,
+            max_seqlen_q=9,
+            max_seqlen_kv=2 * self.page,
+            layout_q="TND",
+            layout_kv="PA_BNBD",
+            layout_out=layout,
+            return_softmax_lse=return_lse,
         )
         if out is not None:
             out.copy_(result[0])
@@ -312,11 +336,15 @@ class Qualification:
         # Warmup/capture starts with no valid slot, preserving the eager cache.
         slots = torch.full((3,), -1, dtype=torch.int64, device=self.device)
         for _ in range(3):
-            self.mla.write_mla_cache(c, r, slots, self.cache)
+            self.torch_npu.npu_scatter_pa_kv_cache(
+                c, r, self.cache[..., :512].unsqueeze(2), self.cache[..., 512:].unsqueeze(2), slots, cache_mode="Norm"
+            )
         torch.npu.synchronize()
         graph = torch.npu.NPUGraph()
         with torch.npu.graph(graph):
-            self.mla.write_mla_cache(c, r, slots, self.cache)
+            self.torch_npu.npu_scatter_pa_kv_cache(
+                c, r, self.cache[..., :512].unsqueeze(2), self.cache[..., 512:].unsqueeze(2), slots, cache_mode="Norm"
+            )
         self.record("capture_writer")
         for epoch, mapping in enumerate(
             ([3 * self.page + 1, 5 * self.page + 2, -1], [-1, -1, -1], [3 * self.page + 2, -1, 5 * self.page + 1])

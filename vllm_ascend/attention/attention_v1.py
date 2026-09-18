@@ -240,6 +240,7 @@ class AscendFlashAttentionMetadata:
     current_block_table: torch.Tensor | None = None
     current_slots: torch.Tensor | None = None
     causal: bool = True
+    is_c8: bool = False
 
 
 def _flash_attention_schedule(builder, flash, *, is_mla, current=False, meta=False):
@@ -253,6 +254,7 @@ def _flash_attention_schedule(builder, flash, *, is_mla, current=False, meta=Fal
     heads = builder.flash_num_heads if current else builder.flash_num_heads * flash.dcp_size
     max_kv = flash.max_query_len if current else flash.max_seq_len
     if is_mla and not (current and flash.unabsorbed):
+        quant_args = {"is_c8": True} if flash.is_c8 and not current else {}
         return torch.ops._C_ascend.flash_mla_with_kvcache_metadata(
             tensor(lengths),
             heads,
@@ -265,6 +267,7 @@ def _flash_attention_schedule(builder, flash, *, is_mla, current=False, meta=Fal
             head_dim_v=512,
             mask_mode=mask_mode,
             layout_q="TND",
+            **quant_args,
         )
 
     from cann_ops_transformer.ops import flash_attn_metadata
@@ -295,6 +298,7 @@ def _init_flash_attention_metadata(builder, impl) -> None:
 
     builder.flash_num_heads, builder.flash_num_kv_heads = impl.num_heads, impl.num_kv_heads
     builder.flash_unabsorbed_prefill = getattr(impl, "flash_unabsorbed_prefill", False)
+    builder.flash_is_c8 = getattr(impl, "fa_quant_layer", False)
     builder._flash_buffers = {}
     builder._flash_attn_mask = torch.triu(torch.ones((2048, 2048), dtype=torch.int8, device=builder.device), diagonal=1)
 
@@ -304,13 +308,16 @@ def _build_flash_attention_metadata(builder, common, *, is_mla: bool) -> AscendF
     tokens = max(common.num_actual_tokens, common.num_input_tokens)
     table = common.block_table_tensor[:batch]
     dcp_size = getattr(builder, "dcp_size", 1)
+    is_c8 = is_mla and getattr(builder, "flash_is_c8", False)
     unabsorbed = (
         is_mla
+        and not is_c8
         and common.causal
         and common.max_query_len > builder.decode_threshold
         and getattr(builder, "flash_unabsorbed_prefill", False)
     )
-    split_kv = common.causal and (dcp_size > 1 or unabsorbed)
+    c8_prefill = is_c8 and common.max_query_len > builder.decode_threshold
+    split_kv = common.causal and (dcp_size > 1 or unabsorbed or c8_prefill)
     key = batch, tokens, table.shape[1], common.causal, unabsorbed
     # Retaining every eager prefill shape also retains its DCP-gathered query.
     # Decode metadata needs stable addresses for graph replay.
@@ -323,7 +330,10 @@ def _build_flash_attention_metadata(builder, common, *, is_mla: bool) -> AscendF
         # The final zero-used request owns physical graph/SP padding tokens.
         rows = batch + 1
         int_args = {"dtype": torch.int32, "device": builder.device}
-        float_args = {"dtype": builder.kv_cache_spec.dtype, "device": builder.device}
+        # The history cache may be FP8, but projection and the current chunk
+        # remain BF16. Quantize only history Q and persistent KV writes.
+        query_dtype = builder.vllm_config.model_config.dtype if is_c8 else builder.kv_cache_spec.dtype
+        float_args = {"dtype": query_dtype, "device": builder.device}
         head_dim = 576 if is_mla else 64
         shape = (tokens, builder.flash_num_heads * dcp_size, head_dim)
         block_size = builder.kernel_block_size or builder.kv_cache_spec.block_size
@@ -346,6 +356,7 @@ def _build_flash_attention_metadata(builder, common, *, is_mla: bool) -> AscendF
             split_kv=split_kv,
             unabsorbed=unabsorbed,
             causal=common.causal,
+            is_c8=is_c8,
         )
         flash = buffers[key]
         flash.schedule = torch.empty_like(

@@ -25,13 +25,14 @@ def _merge(
     T: tl.constexpr,
     CORES: tl.constexpr,
     HAS_LOCAL: tl.constexpr,
+    ROW_WORDS: tl.constexpr,
 ):
     rank_ids = tl.arange(0, 8)
     dims = tl.arange(0, 512)
     for row in range(tl.program_id(0), T * 12, CORES):
         token = row // 12
         head = row % 12
-        base = (rank_ids * 12 * T + head * T + token) * 257
+        base = (rank_ids * 12 * T + head * T + token) * ROW_WORDS
         raw = tl.load(recv + base + 256).to(tl.float32, bitcast=True)
         finite = (raw == raw) & (raw > -float("inf")) & (raw < float("inf"))
         maximum = tl.max(tl.where(finite, raw, -float("inf")), 0)
@@ -47,7 +48,7 @@ def _merge(
         result = tl.zeros((512,), tl.float32)
         # Read O through a BF16 alias of the same raw buffer; no receive copy.
         for rank in tl.static_range(8):
-            offset = ((rank * 12 + head) * T + token) * 514
+            offset = ((rank * 12 + head) * T + token) * (ROW_WORDS * 2)
             value = tl.load(out_bits + offset + dims).to(tl.float32)
             value = tl.where(get_element(finite, (rank,)), value, 0.0)
             weight = get_element(weights, (rank,))
@@ -76,6 +77,7 @@ def _merge_vectorized(
     T: tl.constexpr,
     BLOCK_ROWS: tl.constexpr,
     HAS_LOCAL: tl.constexpr,
+    ROW_WORDS: tl.constexpr,
 ):
     percore = tl.cdiv(triton.cdiv(T * 12, BLOCK_ROWS), tl.num_programs(0))
     for tile in range(
@@ -86,7 +88,7 @@ def _merge_vectorized(
         heads = rows - tokens * 12
         ranks = tl.arange(0, 8)
         dims = tl.arange(0, 512)
-        base = (ranks[None, :] * 12 * T + heads[:, None] * T + tokens[:, None]) * 257
+        base = (ranks[None, :] * 12 * T + heads[:, None] * T + tokens[:, None]) * ROW_WORDS
         stats = tl.load(recv + base + 256, rows[:, None] < T * 12, other=0).to(tl.float32, bitcast=True)
         finite = (stats == stats) & (stats != float("inf")) & (stats != -float("inf"))
         maximum = tl.max(tl.where(finite, stats, -float("inf")), 1)
@@ -120,14 +122,14 @@ def merge_raw_dcp_output_lse(
     local_output: torch.Tensor | None = None,
     local_lse: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Consume [rank, local head, token, 257] INT32 without a receive copy."""
+    """Consume a 257/272-word raw row without a receive copy."""
     if (
         recv.device.type != "npu"
         or recv.dtype != torch.int32
         or recv.ndim != 4
         or recv.shape[0:2] != (8, 12)
         or recv.shape[2] not in (4, 8, 16, 32, 64)
-        or recv.shape[3] != 257
+        or recv.shape[3] not in (257, 272)
         or not recv.is_contiguous()
         or head_dim != 512
         or scatter_dim != 1
@@ -160,6 +162,7 @@ def merge_raw_dcp_output_lse(
             tokens,
             1,
             local_output is not None,
+            recv.shape[3],
             multibuffer=False,
         )
         return out
@@ -174,5 +177,6 @@ def merge_raw_dcp_output_lse(
         tokens,
         programs,
         local_output is not None,
+        recv.shape[3],
     )
     return out

@@ -31,7 +31,8 @@ extern "C" {
 extern aclnnStatus aclnnInnerFlashMlaWithKvcacheGetWorkspaceSize(
     const aclTensor *q, const aclTensor *kCache, const aclTensor *blockTableOptional,
     const aclTensor *cacheSeqlensOptional, const aclTensor *cuSeqlensQOptional, const aclTensor *sequsedQOptional,
-    const aclTensor *attnMaskOptional, const aclTensor *metadataOptional, int64_t headDimV, double softmaxScale,
+    const aclTensor *attnMaskOptional, const aclTensor *metadataOptional, const aclTensor *queryRopeOptional, const aclTensor *keyRopeOptional,
+    const aclTensor *dequantScaleQueryOptional, const aclTensor *dequantScaleKeyOptional, int64_t headDimV, double softmaxScale,
     int64_t maskMode, int64_t maxSeqlenQ, int64_t maxSeqlenKV, const char *layoutQ, const char *layoutKv,
     const char *layoutOut, int64_t returnSoftmaxLse, const aclTensor *attnOut, const aclTensor *softmaxLse,
     uint64_t *workspaceSize, aclOpExecutor **executor);
@@ -75,7 +76,7 @@ aclnnStatus aclnnFlashMlaWithKvcacheGetWorkspaceSize(
 
     aclnnStatus ret = aclnnInnerFlashMlaWithKvcacheGetWorkspaceSize(
         q, kCache, blockTableOptional, cacheSeqlensOptional, cuSeqlensQOptional, sequsedQOptional, attnMaskOptional,
-        metadataOptional, headDimV, softmaxScale, maskMode, maxSeqlenQ, maxSeqlenKV, layoutQ, layoutKv, layoutOut,
+        metadataOptional, nullptr, nullptr, nullptr, nullptr, headDimV, softmaxScale, maskMode, maxSeqlenQ, maxSeqlenKV, layoutQ, layoutKv, layoutOut,
         returnSoftmaxLse, attnOut, placeHolder, workspaceSize, executor);
 
     // 销毁占位符
@@ -84,6 +85,41 @@ aclnnStatus aclnnFlashMlaWithKvcacheGetWorkspaceSize(
     }
 
     return ret;
+}
+
+aclnnStatus aclnnFlashMlaWithKvcacheC8GetWorkspaceSize(
+    const aclTensor *q, const aclTensor *kCache, const aclTensor *blockTableOptional,
+    const aclTensor *cacheSeqlensOptional, const aclTensor *cuSeqlensQOptional, const aclTensor *sequsedQOptional,
+    const aclTensor *attnMaskOptional, const aclTensor *metadataOptional, const aclTensor *queryRopeOptional, const aclTensor *keyRopeOptional,
+    const aclTensor *dequantScaleQueryOptional, const aclTensor *dequantScaleKeyOptional, int64_t headDimV, double softmaxScale,
+    int64_t maskMode, int64_t maxSeqlenQ, int64_t maxSeqlenKV, const char *layoutQ, const char *layoutKv,
+    const char *layoutOut, int64_t returnSoftmaxLse, const aclTensor *attnOut, const aclTensor *softmaxLseOptional,
+    uint64_t *workspaceSize, aclOpExecutor **executor)
+{
+    OP_LOGD("start aclnnFlashMlaWithKvcacheC8GetWorkspaceSize");
+
+    const aclTensor *placeHolder = nullptr;
+    const aclTensor *tempTensor = nullptr;
+
+    FlashMlaWithKvcacheProcessSoftmaxLse(returnSoftmaxLse, softmaxLseOptional, tempTensor, placeHolder);
+
+    aclnnStatus ret = aclnnInnerFlashMlaWithKvcacheGetWorkspaceSize(
+        q, kCache, blockTableOptional, cacheSeqlensOptional, cuSeqlensQOptional, sequsedQOptional, attnMaskOptional,
+        metadataOptional, queryRopeOptional, keyRopeOptional, dequantScaleQueryOptional, dequantScaleKeyOptional, headDimV, softmaxScale, maskMode, maxSeqlenQ, maxSeqlenKV, layoutQ, layoutKv, layoutOut,
+        returnSoftmaxLse, attnOut, placeHolder, workspaceSize, executor);
+
+    // 销毁占位符
+    if (returnSoftmaxLse == 0) {
+        aclDestroyTensor(tempTensor);
+    }
+
+    return ret;
+}
+
+aclnnStatus aclnnFlashMlaWithKvcacheC8(void *workspace, uint64_t workspaceSize, aclOpExecutor *executor,
+                                      const aclrtStream stream)
+{
+    return aclnnInnerFlashMlaWithKvcache(workspace, workspaceSize, executor, stream);
 }
 
 // 第二段接口：执行计算

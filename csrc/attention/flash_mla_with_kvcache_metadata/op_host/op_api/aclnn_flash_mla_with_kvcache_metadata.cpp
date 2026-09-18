@@ -34,16 +34,12 @@
 extern "C" {
 #endif
 
-aclnnStatus aclnnFlashMlaWithKvcacheMetadataGetWorkspaceSize(
+static aclnnStatus FlashMlaMetadataGetWorkspaceSize(
     const aclTensor *cuSeqlensQOptional, const aclTensor *cacheSeqlensOptional, const aclTensor *sequsedQOptional,
     int64_t maxSeqlenQ, int64_t maxSeqlenKv, int64_t numHeadsQ, int64_t numHeadsKv, int64_t headDimQk, int64_t headDimV,
-    int64_t maskMode, const char *layoutQ, const aclTensor *metaData, uint64_t *workspaceSize, aclOpExecutor **executor)
+    int64_t maskMode, const char *layoutQ, const aclTensor *metaData, uint64_t *workspaceSize, aclOpExecutor **executor,
+    int64_t isC8)
 {
-    L2_DFX_PHASE_1(aclnnFlashMlaWithKvcacheMetadata,
-                   DFX_IN(cuSeqlensQOptional, cacheSeqlensOptional, sequsedQOptional, maxSeqlenQ, maxSeqlenKv,
-                          numHeadsQ, numHeadsKv, headDimQk, headDimV, maskMode, layoutQ),
-                   DFX_OUT(metaData));
-
     auto uniqueExecutor = CREATE_EXECUTOR();
     CHECK_RET(uniqueExecutor.get() != nullptr, ACLNN_ERR_INNER_CREATE_EXECUTOR);
 
@@ -90,7 +86,7 @@ aclnnStatus aclnnFlashMlaWithKvcacheMetadataGetWorkspaceSize(
     auto output =
         l0op::FlashMlaWithKvcacheMetadata(cuSeqlensQContiguous, cacheSeqlensContiguous, sequsedQContiguous, maxSeqlenQ,
                                           maxSeqlenKv, numHeadsQ, numHeadsKv, headDimQk, headDimV, maskMode, layoutQ,
-                                          socVersion, aicCoreNum, aivCoreNum, metaData, uniqueExecutor.get());
+                                          socVersion, aicCoreNum, aivCoreNum, isC8, metaData, uniqueExecutor.get());
     CHECK_RET(output != nullptr, ACLNN_ERR_INNER_NULLPTR);
 
     *workspaceSize = uniqueExecutor->GetWorkspaceSize();
@@ -98,10 +94,43 @@ aclnnStatus aclnnFlashMlaWithKvcacheMetadataGetWorkspaceSize(
     return ACLNN_SUCCESS;
 }
 
+aclnnStatus aclnnFlashMlaWithKvcacheMetadataGetWorkspaceSize(
+    const aclTensor *cuSeqlensQOptional, const aclTensor *cacheSeqlensOptional, const aclTensor *sequsedQOptional,
+    int64_t maxSeqlenQ, int64_t maxSeqlenKv, int64_t numHeadsQ, int64_t numHeadsKv, int64_t headDimQk, int64_t headDimV,
+    int64_t maskMode, const char *layoutQ, const aclTensor *metaData, uint64_t *workspaceSize, aclOpExecutor **executor)
+{
+    L2_DFX_PHASE_1(aclnnFlashMlaWithKvcacheMetadata,
+                  DFX_IN(cuSeqlensQOptional, cacheSeqlensOptional, sequsedQOptional, maxSeqlenQ, maxSeqlenKv,
+                         numHeadsQ, numHeadsKv, headDimQk, headDimV, maskMode, layoutQ), DFX_OUT(metaData));
+    return FlashMlaMetadataGetWorkspaceSize(cuSeqlensQOptional, cacheSeqlensOptional, sequsedQOptional,
+        maxSeqlenQ, maxSeqlenKv, numHeadsQ, numHeadsKv, headDimQk, headDimV, maskMode, layoutQ,
+        metaData, workspaceSize, executor, 0);
+}
+
+aclnnStatus aclnnFlashMlaWithKvcacheMetadataC8GetWorkspaceSize(
+    const aclTensor *cuSeqlensQOptional, const aclTensor *cacheSeqlensOptional, const aclTensor *sequsedQOptional,
+    int64_t maxSeqlenQ, int64_t maxSeqlenKv, int64_t numHeadsQ, int64_t numHeadsKv, int64_t headDimQk, int64_t headDimV,
+    int64_t maskMode, const char *layoutQ, const aclTensor *metaData, uint64_t *workspaceSize, aclOpExecutor **executor)
+{
+    L2_DFX_PHASE_1(aclnnFlashMlaWithKvcacheMetadataC8,
+                  DFX_IN(cuSeqlensQOptional, cacheSeqlensOptional, sequsedQOptional, maxSeqlenQ, maxSeqlenKv,
+                         numHeadsQ, numHeadsKv, headDimQk, headDimV, maskMode, layoutQ), DFX_OUT(metaData));
+    return FlashMlaMetadataGetWorkspaceSize(cuSeqlensQOptional, cacheSeqlensOptional, sequsedQOptional,
+        maxSeqlenQ, maxSeqlenKv, numHeadsQ, numHeadsKv, headDimQk, headDimV, maskMode, layoutQ,
+        metaData, workspaceSize, executor, 1);
+}
+
 aclnnStatus aclnnFlashMlaWithKvcacheMetadata(void *workspace, uint64_t workspaceSize, aclOpExecutor *executor,
                                              aclrtStream stream)
 {
     L2_DFX_PHASE_2(aclnnFlashMlaWithKvcacheMetadata);
+    return CommonOpExecutorRun(workspace, workspaceSize, executor, stream);
+}
+
+
+aclnnStatus aclnnFlashMlaWithKvcacheMetadataC8(void *workspace, uint64_t workspaceSize,
+                                           aclOpExecutor *executor, aclrtStream stream)
+{
     return CommonOpExecutorRun(workspace, workspaceSize, executor, stream);
 }
 

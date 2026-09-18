@@ -64,6 +64,10 @@ constexpr uint32_t CU_SEQLENS_Q_INDEX = 4;
 constexpr uint32_t SEQUSED_Q_INDEX = 5;
 constexpr uint32_t ATTN_MASK_INDEX = 6;
 constexpr uint32_t METADATA_INDEX = 7;
+constexpr uint32_t QUERY_ROPE_INDEX = 8;
+constexpr uint32_t KEY_ROPE_INDEX = 9;
+constexpr uint32_t DEQUANT_SCALE_QUERY_INDEX = 10;
+constexpr uint32_t DEQUANT_SCALE_KEY_INDEX = 11;
 
 // Attributes Index (order: head_dim_v, softmax_scale, mask_mode, max_seqlen_q,
 // max_seqlen_kv, layout_q, layout_kv, layout_out, return_softmax_lse)
@@ -100,6 +104,10 @@ enum class MaskMode : int32_t {
     BAND = 4
 };
 
+// Physical BF16 row: O512, FP32 LSE, then 60 zero bytes; 64-byte aligned.
+constexpr uint32_t FLASH_MLA_DCP_OUTPUT_WIDTH = 544;
+constexpr uint32_t FLASH_MLA_C8_DCP_KERNEL_LAYOUT = 7;
+
 using FlashMlaWithKvcacheLayout = FiaLayout;
 using FlashMlaWithKvcacheAxis = FiaAxis;
 using FlashMlaWithKvcacheCompareType = FiaCompareType;
@@ -110,6 +118,7 @@ using FlashMlaWithKvcacheTilingShapeCompare = FiaTilingShapeCompare;
 const std::map<std::string, FlashMlaWithKvcacheLayout> layoutMap = {
     {"BSND", FlashMlaWithKvcacheLayout::BSND},       {"BNSD", FlashMlaWithKvcacheLayout::BNSD},
     {"TND", FlashMlaWithKvcacheLayout::TND},         {"NTD", FlashMlaWithKvcacheLayout::NTD},
+    {"NTD_DCP", FlashMlaWithKvcacheLayout::NTD},
     {"PA_BBND", FlashMlaWithKvcacheLayout::PA_BBND}, {"PA_BNBD", FlashMlaWithKvcacheLayout::PA_BNBD},
     {"PA_NZ", FlashMlaWithKvcacheLayout::PA_NZ}};
 
@@ -159,6 +168,10 @@ struct FlashMlaWithKvcacheParaInfo {
     FlashMlaWithKvcacheOptionalParaInfo sequsedQ = {nullptr, nullptr};
     FlashMlaWithKvcacheOptionalParaInfo attnMask = {nullptr, nullptr};
     FlashMlaWithKvcacheOptionalParaInfo metadata = {nullptr, nullptr};
+    FlashMlaWithKvcacheOptionalParaInfo queryRope = {nullptr, nullptr};
+    FlashMlaWithKvcacheOptionalParaInfo keyRope = {nullptr, nullptr};
+    FlashMlaWithKvcacheOptionalParaInfo dequantScaleQuery = {nullptr, nullptr};
+    FlashMlaWithKvcacheOptionalParaInfo dequantScaleKey = {nullptr, nullptr};
 
     // 已从接口移除：key/value/cu_seqlens_kv/seqused_kv 输入与 win_left/win_right 属性。
     // 说明：cuSeqlensKv/sequsedKv 仍保留字段占位（parser 不再填充，恒为 nullptr），
@@ -189,6 +202,10 @@ public:
     const char *opName = nullptr;
     fe::PlatFormInfos *platformInfo = nullptr;
     FlashMlaWithKvcacheParaInfo opParamInfo;
+
+    bool isC8 = false;
+    int64_t kRopeBnStride = 0;
+    int64_t kRopeN2Stride = 0;
 
     // Base Param
     int64_t bSize = 0;
@@ -414,8 +431,8 @@ const std::map<ge::DataType, std::string> DATATYPE_TO_STRING_MAP = {{ge::DT_UNDE
                                                                     {ge::DT_FLOAT4_E2M1, "DT_FLOAT4_E2M1"}};
 
 const std::map<std::string, std::vector<ge::DataType>> DTYPE_SUPPORT_MAP = {
-    {QUERY_NAME, {ge::DT_FLOAT16, ge::DT_BF16}},
-    {K_CACHE_NAME, {ge::DT_FLOAT16, ge::DT_BF16}},
+    {QUERY_NAME, {ge::DT_FLOAT16, ge::DT_BF16, ge::DT_FLOAT8_E4M3FN}},
+    {K_CACHE_NAME, {ge::DT_FLOAT16, ge::DT_BF16, ge::DT_FLOAT8_E4M3FN}},
     {ATTN_MASK_NAME, {ge::DT_INT8}},
     {BLOCK_TABLE_NAME, {ge::DT_INT32}},
     {CACHE_SEQLENS_NAME, {ge::DT_INT32}},

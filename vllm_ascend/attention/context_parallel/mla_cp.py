@@ -223,7 +223,7 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         if envs.VLLM_ASCEND_ENABLE_FLASH_MLA and not self.dcp_q_replicate:
             self.enable_mlapo = False
         if self.dcp_q_replicate:
-            if self.fa_quant_layer:
+            if self.fa_quant_layer and not (envs.VLLM_ASCEND_ENABLE_FLASH_MLA and self.support_fp8_attention):
                 raise ValueError("DCP replicated Q requires unquantized MLA KV cache")
             # The A5 NoPE prolog accepts the same group-head Q projection as
             # the unfused path. Other backends retain their existing path.

@@ -186,6 +186,41 @@ def test_unabsorbed_prefill_keeps_compressed_history_lengths(helpers):
     assert calls[1][-1]["layout_kv"] == "TND"
 
 
+@pytest.mark.parametrize("dcp_size", [1, 8])
+def test_c8_prefill_separates_quantized_history_and_bf16_current(helpers, dcp_size):
+    module, calls = helpers
+    builder, common = make_builder(), make_common()
+    builder.flash_is_c8 = True
+    builder.flash_unabsorbed_prefill = True
+    builder.kv_cache_spec.dtype = torch.float8_e4m3fn
+    builder.kernel_block_size = 128
+    builder.dcp_size, builder.dcp_rank = dcp_size, 0
+    builder.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(dtype=torch.bfloat16),
+        parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=4),
+    )
+    common.max_query_len = 8
+    common.seq_lens.copy_(torch.tensor([132, 0, 138]))
+    flash = module._build_flash_attention_metadata(builder, common, is_mla=True)
+    with (
+        patch.object(torch.Tensor, "cpu", side_effect=AssertionError("host readback")),
+        patch.object(torch.Tensor, "item", side_effect=AssertionError("host scalar")),
+        patch.object(torch.Tensor, "tolist", side_effect=AssertionError("host list")),
+    ):
+        builder._device_metadata_tasks[0].run()
+    assert flash.is_c8 and flash.split_kv and not flash.unabsorbed
+    assert flash.query.dtype == flash.current_cache.dtype == torch.bfloat16
+    assert flash.current_cache.shape[2:] == (128, 576)
+    assert calls[0][-1]["is_c8"] is True
+    assert calls[0][-1]["head_dim_qk"] == 576
+    assert calls[0][-1]["mask_mode"] == 0
+    assert "is_c8" not in calls[1][-1]
+    assert calls[1][-1]["mask_mode"] == 3
+    assert calls[1][1].tolist() == [2, 0, 2, 0]
+    expected = [130, 0, 136, 0] if dcp_size == 1 else [18, 0, 20, 0]
+    assert calls[0][1].tolist() == expected
+
+
 @pytest.mark.parametrize(
     "filename,classname", [("attention_cp.py", "AscendAttentionDCPImpl"), ("mla_cp.py", "AscendMlaDCPImpl")]
 )

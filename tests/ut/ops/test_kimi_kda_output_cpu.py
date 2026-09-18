@@ -111,15 +111,44 @@ def test_forward_output_skips_redundant_initialization(mode, padding):
         )
     expected = values[:n, 2 * h * d :].reshape(1, n, h, d) * 0.5
     if mode == "mixed_holes":
-        expected[:, 4:] = 0
+        # Unscheduled rows have no output contract. Poisoning them verifies
+        # they do not leak into any live token through norm/scatter.
+        expected[:, 4:] = torch.nan
     elif mode == "idle":
         expected.zero_()
-    torch.testing.assert_close(output[:, :n], expected)
-    torch.testing.assert_close(output[:, n:], torch.zeros_like(output[:, n:]))
+    torch.testing.assert_close(output[:, :n], expected, equal_nan=True)
+    if mode == "idle":
+        torch.testing.assert_close(output[:, n:], torch.zeros_like(output[:, n:]))
+    else:
+        assert torch.isnan(output[:, n:]).all()
+        assert "aten.zero_.default" not in trace.ops
     if mode in ("spec", "decode", "prefill"):
         assert norm_inputs[0] is recurrent_outputs[0]
         assert "aten.zero_.default" not in before_norm
     elif mixed:
-        assert "aten.zero_.default" in before_norm
+        assert "aten.zero_.default" not in before_norm
     else:
         assert not norm_inputs
+
+    if mode in ("spec", "decode", "prefill"):
+        # Reuse the graph output with fewer live tokens. Previously live rows
+        # become padding and need neither a clear nor a copy on this replay.
+        previous = output.clone()
+        metadata.num_actual_tokens = 2
+        metadata.num_decode_tokens = 2
+        starts[-1] = 2
+        values.add_(7)
+        trace.ops.clear()
+        with trace:
+            forward(
+                attention,
+                values,
+                torch.zeros(1, n + padding, h, d),
+                torch.zeros(n + padding, h, d),
+                torch.zeros(1, n + padding, h),
+                output,
+            )
+        expected = values[:2, 2 * h * d :].reshape(1, 2, h, d) * 0.5
+        torch.testing.assert_close(output[:, :2], expected)
+        torch.testing.assert_close(output[:, 2:], previous[:, 2:], equal_nan=True)
+        assert "aten.zero_.default" not in trace.ops

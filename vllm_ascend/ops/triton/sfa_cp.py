@@ -470,6 +470,7 @@ def sfa_dcp_a2a_fused_combine(
     scatter_group: dist.ProcessGroup | None,
     pcp_group: GroupCoordinator | None = None,
     defer_combine: bool = False,
+    raw_row_words: int = 257,
 ) -> torch.Tensor:
     """Pack, scatter over DCP or TP, optionally gather over PCP, then merge.
 
@@ -485,12 +486,14 @@ def sfa_dcp_a2a_fused_combine(
     ):
         if scatter_group is None:
             raise ValueError("SFA output scatter requires an explicit All2All group.")
-        send = pack_raw_dcp_output_lse(sfa_output, softmax_lse)
+        send = pack_raw_dcp_output_lse(sfa_output, softmax_lse, raw_row_words)
         recv = torch.empty_like(send)
         dist.all_to_all_single(recv, send, group=scatter_group)
         if defer_combine:
             return recv
         return fused_sfa_dcp_lse_combine(recv, sfa_output.shape[-1], scatter_dim)
+    if raw_row_words != 257:
+        raise ValueError("The aligned raw wire requires the DCP8 BF16 H96 D512 contract.")
     send = pack_sfa_dcp_output_lse(
         sfa_output,
         softmax_lse,
@@ -525,6 +528,7 @@ def sfa_dcp_a2a_fused(
     group_name: str,
     pcp_group_name: str | None = None,
     defer_combine: bool = False,
+    raw_row_words: int = 257,
 ) -> torch.Tensor:
     """Fused SFA output merge, optionally gathering contributions across PCP.
 
@@ -561,6 +565,7 @@ def sfa_dcp_a2a_fused(
         scatter_group=scatter_group,
         pcp_group=pcp_group,
         defer_combine=defer_combine,
+        raw_row_words=raw_row_words,
     )
 
 
@@ -572,6 +577,7 @@ def sfa_dcp_a2a_fused_fake(
     group_name: str,
     pcp_group_name: str | None = None,
     defer_combine: bool = False,
+    raw_row_words: int = 257,
 ) -> torch.Tensor:
     """Propagate output metadata for torch.compile without running HCCL.
 
@@ -580,6 +586,8 @@ def sfa_dcp_a2a_fused_fake(
     the real implementation performs the collective at execution time.
     """
     del group_name
+    if raw_row_words not in (257, 272):
+        raise ValueError("Raw DCP row pitch must be 257 or 272 INT32 words.")
     if defer_combine:
         if can_use_raw_dcp_exchange(
             sfa_output,
@@ -588,7 +596,9 @@ def sfa_dcp_a2a_fused_fake(
             scatter_dim,
             has_pcp=pcp_group_name is not None,
         ):
-            return torch.empty((8, 12, sfa_output.shape[0], 257), dtype=torch.int32, device=sfa_output.device)
+            return torch.empty((8, 12, sfa_output.shape[0], raw_row_words), dtype=torch.int32, device=sfa_output.device)
+        if raw_row_words != 257:
+            raise ValueError("The aligned raw wire requires the DCP8 BF16 H96 D512 contract.")
         rank_count = dcp_size
         if pcp_group_name is not None:
             group_ref = _groups.get(pcp_group_name)

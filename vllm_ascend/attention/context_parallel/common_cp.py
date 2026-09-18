@@ -24,6 +24,7 @@ def exchange_flash_attention_output(
     dcp_group=None,
     *,
     fp32_output: bool = False,
+    raw_row_words: int = 257,
 ) -> torch.Tensor:
     """Exchange history shards without waiting for the local current chunk."""
     size = dcp_group.world_size if dcp_group is not None else 1
@@ -37,6 +38,7 @@ def exchange_flash_attention_output(
         1,
         dcp_group.unique_name if size > 1 else "",
         defer_combine=True,
+        raw_row_words=raw_row_words,
     )
 
 
@@ -73,9 +75,12 @@ def merge_flash_attention_output(
     current_output: torch.Tensor | None = None,
     current_lse: torch.Tensor | None = None,
     value_projection: torch.Tensor | None = None,
+    raw_row_words: int = 257,
 ) -> torch.Tensor:
     """Reuse DCP exchange/combine, including Flash's empty-rank LSE sentinel."""
-    recv = exchange_flash_attention_output(output, lse, dcp_group, fp32_output=value_projection is not None)
+    recv = exchange_flash_attention_output(
+        output, lse, dcp_group, fp32_output=value_projection is not None, raw_row_words=raw_row_words
+    )
     return combine_flash_attention_output(
         recv,
         output.shape[-1],

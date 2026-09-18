@@ -88,6 +88,7 @@ uint32_t FlashMlaWithKvcacheBaseChecker::GetTypeSize(ge::DataType dtype)
             return NUM_BYTES_FLOAT;
         case ge::DT_FLOAT16:
             return NUM_BYTES_FLOAT16;
+        case ge::DT_FLOAT8_E4M3FN:
         case ge::DT_INT8:
         case ge::DT_UINT8:
             return NUM_BYTES_INT8;

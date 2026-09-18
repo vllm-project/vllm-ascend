@@ -1,10 +1,32 @@
 # ChunkKdaFwd
 
+FLA NPU 新增代码保留 [BSD 3-Clause](../LICENSE.fla-npu) 及文件头指定的 [CANN 许可证](../LICENSE.CANN)。
+
 ## 功能
 
 `ChunkKdaFwd` 对齐不涉及 CP 切分的 FLA `chunk_kda_fwd` 顶层语义。公共接口接收 raw gate 或已激活的
-自然对数 gate；Gate、Prepare、PostWu、FwdH 和 Finalize 均在一个物理 `ChunkKdaFwd` L0 内完成，
-L2 不再拼接或依次发射多个阶段 L0。
+自然对数 gate。原有 A5 变长路径按 Gate/Prepare、PostWu、FwdH、Finalize 发射四个阶段。
+K3 的 BF16 K128/V128 prefill 默认使用新的三阶段组合接口 `aclnnChunkKdaFwdV2`。
+
+## A5 K3 prefill 融合路径
+
+迁移自 [FLA NPU](https://github.com/flashserve/flash-linear-attention-npu/tree/81a7346ddb13340e03cdd2e14cbbbe777bafbcdf)。
+沿用 `torch.ops._C_ascend.chunk_kda_fwd` 名称，新增可选参数
+`use_qk_l2norm_in_kernel=False`；Meta 实现同步扩展。`run_chunk_kda` 在支持的 A5 场景自动选择新路径。
+
+1. `ChunkKdaFwdPrepare` 融合 Q/K L2 norm、safe gate/cumsum、三角求解和 W/U 准备。
+2. `ChunkFwdH` 原生读写 VK 状态，省去两次状态转置。
+3. `ChunkKdaFwdFinalize` 在 L0C 累积两个矩阵乘结果，直接写最终输出布局。
+
+本仓编译模板只覆盖 BF16 Q/K/V/raw gate、FP32 已激活 beta、K=V=128、chunk64、
+safe gate、exp2 的推理路径，不保存反向中间量。外层仍负责 Q/K/V/gate 连续化。
+输入长度必须是严格递增的 host 序列；其他 dtype、gate、空序列或 Tensor 长度沿用原路径。
+不增加运行时环境开关，不改变 decode recurrent 路径。
+
+新路径回归：`tests/e2e/nightly/single_node/ops/singlecard_ops/test_kimi_kda_prefill_v2_npu.py`，
+覆盖非连续 Q/K/V、单/多请求尾块、最终状态及改输入后的 ACLGraph 回放。
+
+下文宽泛的输入/输出契约描述原有接口；三个新算子的 README 顶部列出了本仓的模板裁剪范围。
 
 Shape 符号与布局约定见 [KDA 模型符号表](../README.md#model-shape-symbols)。
 

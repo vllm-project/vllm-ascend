@@ -112,8 +112,8 @@ void FlashMlaWithKvcacheTilingImpl::SplitPolicy()
 {
     // MLA uses M96/S2=112; each AIV handles 48 rows. The metadata producer
     // owns task partitioning, and the kernel executes its FA/FD sections.
-    sOuterFactor_ = 48;
-    sInnerFactor_ = 112;
+    sOuterFactor_ = faInfo_->isC8 ? 32 : 48;
+    sInnerFactor_ = faInfo_->isC8 ? 128 : 112;
     CalcNumBlocks(platformInfo_.aicNum);
     flashDecodeFlag_ = true;
 }
@@ -287,8 +287,8 @@ void FlashMlaWithKvcacheTilingImpl::SetFATilingData()
         tilingData_.baseTiling.flashMlaWithKvcacheBaseParams.keyStrides.n2Stride = faInfo_->keyN2Stride;
         tilingData_.baseTiling.flashMlaWithKvcacheBaseParams.valueStrides.bnStride = faInfo_->valueBnStride;
         tilingData_.baseTiling.flashMlaWithKvcacheBaseParams.valueStrides.n2Stride = faInfo_->valueN2Stride;
-        tilingData_.baseTiling.flashMlaWithKvcacheBaseParams.kRopeStrides.bnStride = faInfo_->keyBnStride;
-        tilingData_.baseTiling.flashMlaWithKvcacheBaseParams.kRopeStrides.n2Stride = faInfo_->keyN2Stride;
+        tilingData_.baseTiling.flashMlaWithKvcacheBaseParams.kRopeStrides.bnStride = faInfo_->isC8 ? faInfo_->kRopeBnStride : faInfo_->keyBnStride;
+        tilingData_.baseTiling.flashMlaWithKvcacheBaseParams.kRopeStrides.n2Stride = faInfo_->isC8 ? faInfo_->kRopeN2Stride : faInfo_->keyN2Stride;
     }
 }
 

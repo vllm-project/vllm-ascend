@@ -853,9 +853,32 @@ class MooncakePullRecvingThread(threading.Thread):
                 remote_block_len = remote_metadata.block_lens[remote_layer_index][cache_index]
                 local_shape = local_shapes[cache_index]
                 remote_shape = remote_shapes[cache_index]
+                conv_history_rows = None
+                if cache_index == 0 and len(local_shape) == len(remote_shape) == 2:
+                    model_config = getattr(self, "model_config", None)
+                    hf_config = getattr(model_config, "hf_text_config", None)
+                    linear_config = getattr(hf_config, "linear_attn_config", None)
+                    conv_kernel_size = linear_config.get("short_conv_kernel_size") if linear_config else None
+                    if isinstance(conv_kernel_size, int) and conv_kernel_size > 1:
+                        # KDA prefill writes W-1 committed rows at offset zero;
+                        # additional speculative rows belong to each worker.
+                        conv_history_rows = conv_kernel_size - 1
+                        if min(local_shape[0], remote_shape[0]) < conv_history_rows:
+                            raise ValueError("Mooncake KDA conv state is shorter than the committed history.")
+                        dtype_size = torch.tensor([], dtype=spec.dtypes[cache_index]).element_size()
+                        if (
+                            local_block_len != local_shape[0] * local_shape[1] * dtype_size
+                            or remote_block_len != remote_shape[0] * remote_shape[1] * dtype_size
+                        ):
+                            raise ValueError("Mooncake KDA conv byte lengths do not match the state shapes and dtype.")
 
                 address_slices: list[tuple[int, int, int]]
                 if self.tp_size == remote_tp_size:
+                    if conv_history_rows is not None:
+                        if local_shape[1] != remote_shape[1]:
+                            raise ValueError("Mooncake KDA conv projection widths do not match.")
+                        dtype_size = torch.tensor([], dtype=spec.dtypes[cache_index]).element_size()
+                        local_block_len = remote_block_len = conv_history_rows * local_shape[1] * dtype_size
                     if remote_tp_rank != self.tp_rank or local_block_len != remote_block_len:
                         raise ValueError(
                             f"Mooncake Mamba equal-TP metadata mismatch for layer "
@@ -863,7 +886,7 @@ class MooncakePullRecvingThread(threading.Thread):
                         )
                     address_slices = [(0, 0, local_block_len)]
                 elif cache_index == 0 and len(local_shape) == len(remote_shape) == 2:
-                    if local_shape[0] != remote_shape[0]:
+                    if conv_history_rows is None and local_shape[0] != remote_shape[0]:
                         raise ValueError(
                             f"Mooncake Mamba conv row mismatch for layer {self.layer_names[local_layer_index]!r}: "
                             f"local={local_shape}, remote={remote_shape}"
@@ -945,7 +968,7 @@ class MooncakePullRecvingThread(threading.Thread):
                             local_slice_offset = local_projection_offset
                             remote_slice_offset = remote_projection_offset + rank_offset * local_projection_width
                             transfer_width = local_projection_width
-                        for row_index in range(local_shape[0]):
+                        for row_index in range(conv_history_rows or local_shape[0]):
                             address_slices.append(
                                 (
                                     (row_index * local_shape[1] + local_slice_offset) * dtype_size,

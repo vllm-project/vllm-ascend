@@ -79,6 +79,7 @@ private:
     std::vector<int64_t> actualSeqlenKv_{};
 
     // SplitParams
+    int64_t isC8_ = 0;
     uint32_t mBaseSize_ = 64;   // 64: default value
     uint32_t s2BaseSize_ = 128; // 128: default value
     load_balance::DeviceInfo deviceInfo;

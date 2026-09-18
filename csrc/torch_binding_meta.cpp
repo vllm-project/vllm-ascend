@@ -18,7 +18,8 @@ at::Tensor flash_mla_with_kvcache_metadata_meta(
     int64_t head_dim_qk,
     int64_t head_dim_v,
     int64_t mask_mode,
-    c10::string_view layout_q);
+    c10::string_view layout_q,
+    bool is_c8);
 
 std::tuple<at::Tensor, at::Tensor> flash_mla_with_kvcache_meta(
     const at::Tensor &query,
@@ -37,7 +38,11 @@ std::tuple<at::Tensor, at::Tensor> flash_mla_with_kvcache_meta(
     c10::string_view layout_q,
     c10::string_view layout_kv,
     const c10::optional<c10::string_view> &layout_out,
-    bool return_softmax_lse);
+    bool return_softmax_lse,
+    const c10::optional<at::Tensor> &query_rope,
+    const c10::optional<at::Tensor> &key_rope,
+    const c10::optional<at::Tensor> &dequant_scale_query,
+    const c10::optional<at::Tensor> &dequant_scale_key);
 }
 /*
  * How to write a meta implementation for a custom operator (meta kernel):
@@ -1944,7 +1949,8 @@ chunk_kda_fwd_meta(
     const c10::optional<at::Tensor> &dt_bias,
     c10::optional<bool> disable_recompute,
     c10::optional<bool> return_intermediate_states,
-    c10::optional<bool> state_v_first)
+    c10::optional<bool> state_v_first,
+    bool use_qk_l2norm_in_kernel)
 {
     std::string layout_str = std::string(layout);
     bool is_tnd = layout_str == "TND";

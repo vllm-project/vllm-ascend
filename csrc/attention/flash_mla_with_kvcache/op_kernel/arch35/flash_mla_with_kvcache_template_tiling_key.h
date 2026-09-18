@@ -76,6 +76,15 @@ ASCENDC_TPL_ARGS_DECL(FlashMlaWithKvcache,
                       //    0: 保留原 Config 枚举标识；实际 kernel 模板使用 M96/S2=112/D576/DV512
                       ASCENDC_TPL_UINT_DECL(Config, ASCENDC_TPL_3_BW, ASCENDC_TPL_UI_RANGE, 1, 0, 0), );
 
+#if defined(ORIG_DTYPE_Q) && (ORIG_DTYPE_Q == DT_FLOAT8_E4M3FN)
+// Only compile the two output layouts and optional causal mask needed by C8 MLA.
+ASCENDC_TPL_SEL(ASCENDC_TPL_ARGS_SEL(
+    ASCENDC_TPL_UINT_SEL(InOutLayoutType, ASCENDC_TPL_UI_LIST, InOutLayoutType_TND, InOutLayoutType_TND_NTD),
+    ASCENDC_TPL_UINT_SEL(KvLayoutType, ASCENDC_TPL_UI_LIST, KvLayoutType_PA_BBND),
+    ASCENDC_TPL_BOOL_SEL(HasAttenMask, FLASH_MLA_WITH_KVCACHE_TPL_BOOL_FALSE, FLASH_MLA_WITH_KVCACHE_TPL_BOOL_TRUE),
+    ASCENDC_TPL_UINT_SEL(Config, ASCENDC_TPL_UI_LIST, Config_MLA_DEFAULT),
+    ASCENDC_TPL_TILING_STRUCT_SEL(FlashMlaWithKvcacheTilingData)), );
+#else
 ASCENDC_TPL_SEL(ASCENDC_TPL_ARGS_SEL(ASCENDC_TPL_UINT_SEL(InOutLayoutType, ASCENDC_TPL_UI_LIST, InOutLayoutType_BSND,
                                                           InOutLayoutType_BNSD, InOutLayoutType_TND,
                                                           InOutLayoutType_TND_NTD),
@@ -86,5 +95,7 @@ ASCENDC_TPL_SEL(ASCENDC_TPL_ARGS_SEL(ASCENDC_TPL_UINT_SEL(InOutLayoutType, ASCEN
                                      ASCENDC_TPL_UINT_SEL(Config, ASCENDC_TPL_UI_LIST,
                                                           Config_S1Aligned64_S2Aligned128_DAligned576_DVAligned512),
                                      ASCENDC_TPL_TILING_STRUCT_SEL(FlashMlaWithKvcacheTilingData)), );
+
+#endif
 
 #endif // FLASH_MLA_WITH_KVCACHE_TEMPLATE_TILING_KEY_H_

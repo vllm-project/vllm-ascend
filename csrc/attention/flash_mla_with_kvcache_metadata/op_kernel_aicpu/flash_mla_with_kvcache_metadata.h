@@ -47,6 +47,8 @@ constexpr uint32_t HEAD_OUTPUT_LAYOUT_INDEX = 6U;
 // GenMetadata writes these values directly; do not derive them through FA tile adjustment.
 constexpr uint32_t HEAD_M_BASE_SIZE_MLA = 96U;
 constexpr uint32_t HEAD_S2_BASE_SIZE_MLA = 112U;
+constexpr uint32_t HEAD_M_BASE_SIZE_MLA_C8 = 64U;
+constexpr uint32_t HEAD_S2_BASE_SIZE_MLA_C8 = 128U;
 
 // FA Metadata Index Definitions
 constexpr uint32_t FA_BN2_START_INDEX = 0U;

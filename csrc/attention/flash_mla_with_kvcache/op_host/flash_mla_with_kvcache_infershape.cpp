@@ -81,7 +81,8 @@ ge::graphStatus InferShapeFlashMlaWithKvcache(gert::InferShapeContext *context)
                                               "The value of head_dim_v must be greater than 0");
         return ge::GRAPH_FAILED;
     }
-    int64_t expectedLastDim = headDimV + FLASH_MLA_WITH_KVCACHE_ROPE_HEAD_DIM;
+    const bool isC8 = context->GetOptionalInputShape(8) != nullptr;
+    int64_t expectedLastDim = headDimV + (isC8 ? 0 : FLASH_MLA_WITH_KVCACHE_ROPE_HEAD_DIM);
 
     std::string layoutQStr = std::string(layoutQ);
     std::string layoutKvStr = std::string(layoutKv);
@@ -143,9 +144,14 @@ ge::graphStatus InferShapeFlashMlaWithKvcache(gert::InferShapeContext *context)
         return ge::GRAPH_FAILED;
     }
 
+    const bool dcpWire = layoutOutStr == "NTD_DCP";
+    if (dcpWire && (!isC8 || layoutQStr != "TND" || headDimV != 512 || returnSoftmaxLse == 0)) {
+        OP_LOGE(context->GetNodeName(), "NTD_DCP requires C8 TND query, D512, and LSE.");
+        return ge::GRAPH_FAILED;
+    }
     // 输出布局必须与查询布局一致（仅允许 TND→NTD 转置）
     if (layoutOutStr != layoutQStr) {
-        if (!(layoutQStr == "TND" && layoutOutStr == "NTD")) {
+        if (!(layoutQStr == "TND" && (layoutOutStr == "NTD" || dcpWire))) {
             OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context->GetNodeName(), "layout_out", layoutOutStr.c_str(),
                                                   "The value of layout_out must be equal to layout_q");
             return ge::GRAPH_FAILED;
@@ -191,12 +197,13 @@ ge::graphStatus InferShapeFlashMlaWithKvcache(gert::InferShapeContext *context)
         attnOutShape->SetDim(0, seqLenQ); // T总token数
         attnOutShape->SetDim(1, numHeadsQ);
         attnOutShape->SetDim(2, headDimV);
-    } else if (layoutOutStr == "NTD") {
+    } else if (layoutOutStr == "NTD" || dcpWire) {
         // TND→NTD 转置输出 (N, T, D)
         attnOutShape->SetDimNum(3);
         attnOutShape->SetDim(0, numHeadsQ);
         attnOutShape->SetDim(1, seqLenQ);
-        attnOutShape->SetDim(2, headDimV);
+        // 512 BF16 values + 64 bytes containing FP32 LSE and padding.
+        attnOutShape->SetDim(2, dcpWire ? 544 : headDimV);
     } else {
         OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context->GetNodeName(), "layout_out", layoutOutStr.c_str(),
                                               "The value of layout_out must be in BSND/BNSD/TND");
@@ -208,8 +215,8 @@ ge::graphStatus InferShapeFlashMlaWithKvcache(gert::InferShapeContext *context)
         if (returnSoftmaxLse != 0) {
             if (isTND) {
                 lseShape->SetDimNum(2);
-                lseShape->SetDim(0, seqLenQ);
-                lseShape->SetDim(1, numHeadsQ);
+                lseShape->SetDim(0, dcpWire ? numHeadsQ : seqLenQ);
+                lseShape->SetDim(1, dcpWire ? seqLenQ : numHeadsQ);
             } else {
                 lseShape->SetDimNum(3);
                 lseShape->SetDim(0, batchSize);
@@ -234,7 +241,7 @@ ge::graphStatus InferDataTypeFlashMlaWithKvcache(gert::InferDataTypeContext *con
     }
     // attn_out数据类型与q一致
     auto qDtype = context->GetInputDataType(INPUT_IDX_Q);
-    context->SetOutputDataType(OUTPUT_IDX_ATTN_OUT, qDtype);
+    context->SetOutputDataType(OUTPUT_IDX_ATTN_OUT, qDtype == ge::DT_FLOAT8_E4M3FN ? ge::DT_BF16 : qDtype);
     // softmax_lse固定为FLOAT32
     context->SetOutputDataType(OUTPUT_IDX_SOFTMAX_LSE, ge::DT_FLOAT);
     return ge::GRAPH_SUCCESS;

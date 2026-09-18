@@ -43,6 +43,51 @@ using namespace AscendC;
 using namespace arch35MLA;
 using namespace Ops::Base;
 
+namespace {
+ge::graphStatus CheckC8Parameters(const FlashMlaWithKvcacheTilingInfo &info)
+{
+    const auto &params = info.opParamInfo;
+    const bool hasC8Input = params.queryRope.tensor != nullptr || params.keyRope.tensor != nullptr ||
+                           params.dequantScaleQuery.tensor != nullptr || params.dequantScaleKey.tensor != nullptr;
+    if (!info.isC8) {
+        OP_CHECK_IF(hasC8Input, OP_LOGE(info.opName, "Nonquantized FlashMLA does not accept C8 inputs."),
+                    return ge::GRAPH_FAILED);
+        return ge::GRAPH_SUCCESS;
+    }
+    OP_CHECK_IF(params.queryRope.tensor == nullptr || params.keyRope.tensor == nullptr ||
+                params.dequantScaleQuery.tensor == nullptr || params.dequantScaleKey.tensor == nullptr ||
+                params.queryRope.desc == nullptr || params.keyRope.desc == nullptr ||
+                params.dequantScaleQuery.desc == nullptr || params.dequantScaleKey.desc == nullptr,
+                OP_LOGE(info.opName, "C8 requires query_rope, key_rope and Q/K dequantization scales."),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(params.queryRope.desc->GetDataType() != ge::DT_BF16 ||
+                params.keyRope.desc->GetDataType() != ge::DT_BF16 ||
+                params.dequantScaleQuery.desc->GetDataType() != ge::DT_FLOAT ||
+                params.dequantScaleKey.desc->GetDataType() != ge::DT_FLOAT,
+                OP_LOGE(info.opName, "C8 rope tensors must be BF16 and scales must be FP32."),
+                return ge::GRAPH_FAILED);
+    const auto &queryShape = params.query.shape->GetStorageShape();
+    const auto &ropeShape = params.queryRope.tensor->GetStorageShape();
+    const auto &keyShape = params.kCache.shape->GetStorageShape();
+    const auto &keyRopeShape = params.keyRope.tensor->GetStorageShape();
+    OP_CHECK_IF(queryShape.GetDimNum() != 3 || ropeShape.GetDimNum() != 3 ||
+                ropeShape.GetDim(0) != queryShape.GetDim(0) || ropeShape.GetDim(1) != queryShape.GetDim(1) ||
+                ropeShape.GetDim(2) != 64 || keyRopeShape.GetDimNum() != 4 ||
+                keyRopeShape.GetDim(0) != keyShape.GetDim(0) || keyRopeShape.GetDim(1) != 128 ||
+                keyRopeShape.GetDim(2) != 1 || keyRopeShape.GetDim(3) != 64,
+                OP_LOGE(info.opName, "C8 rope dimensions must match query/cache leading dimensions and width 64."),
+                return ge::GRAPH_FAILED);
+    const auto &qScaleShape = params.dequantScaleQuery.tensor->GetStorageShape();
+    OP_CHECK_IF((qScaleShape.GetDimNum() != 2 && qScaleShape.GetDimNum() != 3) ||
+                qScaleShape.GetDim(0) != queryShape.GetDim(0) || qScaleShape.GetDim(1) != queryShape.GetDim(1) ||
+                (qScaleShape.GetDimNum() == 3 && qScaleShape.GetDim(2) != 1) ||
+                params.dequantScaleKey.tensor->GetShapeSize() != 1,
+                OP_LOGE(info.opName, "C8 requires per-token/head Q scales and one static KV scale."),
+                return ge::GRAPH_FAILED);
+    return ge::GRAPH_SUCCESS;
+}
+} // namespace
+
 // ============================================================================
 // Layout — SinglePara (routing set of the new layout matrix)
 // ============================================================================
@@ -147,7 +192,7 @@ ge::graphStatus CommonChecker::CheckDtypeConsistency(const FlashMlaWithKvcacheTi
     }
 
     if (attnOutDesc != nullptr) {
-        if (attnOutDesc->GetDataType() != queryDtype) {
+        if (attnOutDesc->GetDataType() != (faInfo.isC8 ? ge::DT_BF16 : queryDtype)) {
             std::string reason =
                 "The dtype of attn_out must be the same as dtype(" + ToString(queryDtype) + ") of query";
             OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(faInfo.opName, "attn_out",
@@ -280,7 +325,7 @@ ge::graphStatus CommonChecker::CheckMlaGeometry(const FlashMlaWithKvcacheTilingI
     // q last dim == 576, k_cache last dim == 576 (shape-level, merged nope+rope)
     const gert::Shape &qShape = faInfo.opParamInfo.query.shape->GetStorageShape();
     int64_t qLastDim = qShape.GetDim(qShape.GetDimNum() - 1);
-    OP_CHECK_IF(qLastDim != static_cast<int64_t>(DSIZE_576),
+    OP_CHECK_IF(qLastDim != static_cast<int64_t>(faInfo.isC8 ? DSIZE_512 : DSIZE_576),
                 OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(faInfo.opName, "query", ToString(qShape).c_str(),
                                                       "The last dim of q must be 576 (nope 512 + rope 64)"),
                 return ge::GRAPH_FAILED);
@@ -370,7 +415,7 @@ ge::graphStatus CommonChecker::CheckQueryShape(const FlashMlaWithKvcacheTilingIn
     shapeParams.N = static_cast<int64_t>(faInfo.n1Size);
     shapeParams.S = static_cast<int64_t>(faInfo.s1Size);
     // q carries the merged width: nope 512 + rope 64 = 576 (identical for TND/BNSD/BSND)
-    shapeParams.D = static_cast<int64_t>(faInfo.qkHeadDim + MLA_ROPE_D_DIM_64);
+    shapeParams.D = static_cast<int64_t>(faInfo.qkHeadDim + (faInfo.isC8 ? 0 : MLA_ROPE_D_DIM_64));
     if (faInfo.qLayout == FlashMlaWithKvcacheLayout::TND) {
         // T axis exists only in TND; qTSize == 0 is normal for BNSD/BSND (no total-token axis)
         shapeParams.T = static_cast<int64_t>(faInfo.qTSize);
@@ -398,7 +443,7 @@ ge::graphStatus CommonChecker::CheckKVShapeForPageAttention(const FlashMlaWithKv
     // paged k_cache carries the merged width (nope 512 + rope 64); D0 = 32B / elem
     // 仅 PA_NZ 使用 D0（5-D [Bn,N,D/D0,Bs,D0]）；PA_BBND [Bn,Bs,N,D] 与
     // PA_BNBD [Bn,N,Bs,D] 为 4-D，D0 参数被 CompareShape 忽略（按布局轴表自动适配）
-    shapeParams.D = static_cast<int64_t>(faInfo.qkHeadDim + MLA_ROPE_D_DIM_64);
+    shapeParams.D = static_cast<int64_t>(faInfo.qkHeadDim + (faInfo.isC8 ? 0 : MLA_ROPE_D_DIM_64));
     shapeParams.D0 = static_cast<int64_t>(kvBlockElemNum);
 
     return keyShapeCmp_->CompareShape(shapeParams, __func__);
@@ -432,7 +477,8 @@ ge::graphStatus CommonChecker::CheckAttnOutShape(const FlashMlaWithKvcacheTiling
     shapeParams.N = static_cast<int64_t>(faInfo.n1Size);
     shapeParams.S = static_cast<int64_t>(faInfo.s1Size);
     // attn_out carries only the value (nope) width; rope is not part of the output
-    shapeParams.D = static_cast<int64_t>(faInfo.vHeadDim);
+    shapeParams.D = std::string(faInfo.opParamInfo.layoutOut) == "NTD_DCP"
+        ? FLASH_MLA_DCP_OUTPUT_WIDTH : static_cast<int64_t>(faInfo.vHeadDim);
     // T 轴存在于 TND 输出（(T,N,D)）和 NTD 输出（(N,T,D)）；BNSD/BSND 下 qTSize==0 属正常
     if (faInfo.outLayout == FlashMlaWithKvcacheLayout::TND || faInfo.outLayout == FlashMlaWithKvcacheLayout::NTD) {
         shapeParams.T = static_cast<int64_t>(faInfo.qTSize);
@@ -458,6 +504,9 @@ ge::graphStatus CommonChecker::CheckShapeConsistency(const FlashMlaWithKvcacheTi
 
 ge::graphStatus CommonChecker::CheckMultiPara(const FlashMlaWithKvcacheTilingInfo &faInfo)
 {
+    if (CheckC8Parameters(faInfo) != ge::GRAPH_SUCCESS) {
+        return ge::GRAPH_FAILED;
+    }
     if (CheckMultiParaLayout(faInfo) != ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
     }

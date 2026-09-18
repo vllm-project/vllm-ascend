@@ -84,12 +84,14 @@ ASCENDC_TPL_ARGS_DECL(
     ASCENDC_TPL_BOOL_DECL(ENABLE_ROPE, 0, 1));
 
 // This integration targets Kimi-K3 TP8 decode on A5: MXFP8 weights,
-// BF16 PA_BSND cache, no RoPE, and split-N. Other templates are not built.
+// BF16 or per-tensor FP8 PA_BSND cache, no RoPE, and split-N. Other
+// templates are not built. Mode 8 also quantizes Q per token/head and rescales
+// its BF16 64-dimensional component for the full-quant MLA attention contract.
 ASCENDC_TPL_SEL(
     ASCENDC_TPL_ARGS_SEL(
         ASCENDC_TPL_UINT_SEL(CACHE_MODE, ASCENDC_TPL_UI_LIST, 1),
         ASCENDC_TPL_UINT_SEL(SCENARIO, ASCENDC_TPL_UI_LIST, 2),
-        ASCENDC_TPL_UINT_SEL(QUANT_MODE, ASCENDC_TPL_UI_LIST, 7),
+        ASCENDC_TPL_UINT_SEL(QUANT_MODE, ASCENDC_TPL_UI_LIST, 7, 8),
         ASCENDC_TPL_BOOL_SEL(ENABLE_DEQUANT_OPTIONAL, 1),
         ASCENDC_TPL_BOOL_SEL(ENABLE_GROUP_COMPUTE_OPTIONAL, 0),
         ASCENDC_TPL_UINT_SEL(EMPTY_TENSOR_MODE, ASCENDC_TPL_UI_LIST, 0),

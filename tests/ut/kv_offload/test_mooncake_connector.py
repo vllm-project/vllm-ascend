@@ -2262,8 +2262,9 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
 
         self.assertEqual(block_ids, ([22],))
 
-    def test_get_transfer_block_ids_keeps_non_aligned_state_group(self):
+    def test_get_transfer_block_ids_selects_non_aligned_committed_state(self):
         self.scheduler.vllm_config.cache_config.mamba_cache_mode = "none"
+        self.scheduler.vllm_config.speculative_config = types.SimpleNamespace(num_speculative_tokens=3)
         self.scheduler.group_transfer_info = [
             types.SimpleNamespace(  # type: ignore[list-item]
                 tokens_per_block=16,
@@ -2274,7 +2275,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
 
         block_ids = self.scheduler._get_transfer_block_ids(([20, 21, 22, 23],), prompt_len=16)
 
-        self.assertEqual(block_ids, ([20, 21, 22, 23],))
+        self.assertEqual(block_ids, ([20],))
 
     def test_get_transfer_block_ids_rejects_short_aligned_state_metadata(self):
         self.scheduler.vllm_config.cache_config.mamba_cache_mode = "align"

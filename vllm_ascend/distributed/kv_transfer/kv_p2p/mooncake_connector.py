@@ -825,6 +825,9 @@ class KVCacheRecvingThread(threading.Thread):
                 self.kv_group2layeridx,
             )
         remote_layer_name_to_idx = build_layer_name_to_metadata_idx(remote_kv_group2layeridx)
+        remote_layer_specs = {
+            layer_idx: spec for spec, layer_indices in remote_kv_group2layeridx.values() for layer_idx in layer_indices
+        }
         session_id = f"{remote_host}:{remote_transfer_port}"
 
         req_start_time = time.perf_counter()
@@ -921,7 +924,7 @@ class KVCacheRecvingThread(threading.Thread):
             else:
                 # Ascend Hybrid Mamba supports "align" (prefix caching) and
                 # "none" (no prefix caching), but not "all".
-                if self.mamba_cache_mode == "align":
+                if self.mamba_cache_mode == "align" or len(remote_group_block_ids) == 1:
                     if len(remote_group_block_ids) != 1:
                         raise RuntimeError(
                             "Mooncake Mamba transfer requires exactly one normalized remote state block; "
@@ -965,6 +968,7 @@ class KVCacheRecvingThread(threading.Thread):
                         local_block_id=grouped_local_block_ids[0][0],
                         tp_num_need_pulls=tp_num_need_pulls,
                         remote_tp_offset=inner_offset,
+                        remote_group_spec=remote_layer_specs.get(remote_layer_idx),
                     )
                     if logger.isEnabledFor(logging.DEBUG):
                         for src, dst, length in zip(
@@ -1210,6 +1214,7 @@ class KVCacheRecvingThread(threading.Thread):
         local_block_id: int,
         tp_num_need_pulls: int,
         remote_tp_offset: int,
+        remote_group_spec: dict[str, Any] | None = None,
     ) -> None:
         remote_tp_size = self.tp_size * tp_num_need_pulls
         assert remote_tp_size >= self.tp_size, "Mamba prefill TP size must be >= decode TP size."
@@ -1224,6 +1229,59 @@ class KVCacheRecvingThread(threading.Thread):
         tp_ratio = tp_num_need_pulls
         remote_conv_len = local_conv_len // tp_ratio
         remote_ssm_len = local_ssm_len // tp_ratio
+
+        hf_text_config = self.vllm_config.model_config.hf_text_config
+        linear_attn_config = getattr(hf_text_config, "linear_attn_config", None)
+        conv_kernel_size = linear_attn_config.get("short_conv_kernel_size") if linear_attn_config else None
+        if isinstance(conv_kernel_size, int) and conv_kernel_size > 1:
+            # Prefill writes the committed W-1 inputs at the start of the conv
+            # state. The remaining num_spec rows are decode-local scratch.
+            # P and D may reserve different speculative windows; never copy
+            # the D allocation size from P or transfer P's pending draft rows.
+            local_shape = group_spec["shapes"][0]
+            if remote_group_spec is None:
+                raise ValueError("Mooncake KDA transfer requires the producer's state shapes.")
+            remote_shape = remote_group_spec["shapes"][0]
+            state_axis = 1 if is_conv_state_dim_first() else 0
+            local_rows, remote_rows = local_shape[state_axis], remote_shape[state_axis]
+            local_width, remote_width = local_shape[1 - state_axis], remote_shape[1 - state_axis]
+            history_rows = conv_kernel_size - 1
+            if min(local_rows, remote_rows) < history_rows or local_width != remote_width * tp_ratio:
+                raise ValueError(f"Incompatible Mamba conv states: local={local_shape}, remote={remote_shape}.")
+            local_state_shape, remote_state_shape = group_spec["shapes"][1], remote_group_spec["shapes"][1]
+            if (
+                local_state_shape[0] != remote_state_shape[0] * tp_ratio
+                or local_state_shape[1:] != remote_state_shape[1:]
+                or group_spec["dtype_sizes"] != remote_group_spec["dtype_sizes"]
+            ):
+                raise ValueError("Mooncake KDA state shapes or dtypes do not match the TP ratio.")
+            dtype_size = group_spec["dtype_sizes"][0]
+            local_base = local_conv_addr + local_block_id * local_conv_stride
+            remote_base = remote_conv_addr + remote_block_id * remote_conv_stride
+            if tp_ratio == 1 and state_axis == 0:
+                src_list.append(local_base)
+                dst_list.append(remote_base)
+                length_list.append(history_rows * local_width * dtype_size)
+            else:
+                projection_width = linear_attn_config["num_heads"] * linear_attn_config["head_dim"]
+                remote_projection_width = projection_width // remote_tp_size
+                for projection in range(3):
+                    local_offset = (projection * tp_ratio + remote_tp_offset) * remote_projection_width
+                    remote_offset = projection * remote_projection_width
+                    if state_axis == 0:
+                        for row in range(history_rows):
+                            src_list.append(local_base + (row * local_width + local_offset) * dtype_size)
+                            dst_list.append(remote_base + (row * remote_width + remote_offset) * dtype_size)
+                            length_list.append(remote_projection_width * dtype_size)
+                    else:
+                        for channel in range(remote_projection_width):
+                            src_list.append(local_base + (local_offset + channel) * local_rows * dtype_size)
+                            dst_list.append(remote_base + (remote_offset + channel) * remote_rows * dtype_size)
+                            length_list.append(history_rows * dtype_size)
+            src_list.append(local_ssm_addr + local_block_id * local_ssm_stride + remote_tp_offset * remote_ssm_len)
+            dst_list.append(remote_ssm_addr + remote_block_id * remote_ssm_stride)
+            length_list.append(remote_ssm_len)
+            return
 
         if tp_ratio == 1:
             src_list.extend(
@@ -1244,8 +1302,6 @@ class KVCacheRecvingThread(threading.Thread):
         conv_shape = group_spec["shapes"][0]
         conv_dtype_size = group_spec["dtype_sizes"][0]
 
-        hf_text_config = self.vllm_config.model_config.hf_text_config
-        linear_attn_config = getattr(hf_text_config, "linear_attn_config", None)
         if linear_attn_config is not None:
             projection_width = linear_attn_config["num_heads"] * linear_attn_config["head_dim"]
             remote_conv_sizes = [projection_width // remote_tp_size] * 3
@@ -1816,8 +1872,9 @@ class MooncakeConnectorScheduler:
         In aligned Mamba mode, normalize each state group to the single block
         containing the final prompt state. This prevents the receiver from
         inferring a block index from a speculative *token* count. Non-aligned
-        state groups keep their existing behavior. SWA tail clipping is handled
-        as a separate step after this.
+        state groups select their committed slot using the producer's draft
+        count, which can differ from the consumer's. SWA tail clipping is
+        handled as a separate step after this.
         """
         if len(block_ids) == 0:
             return block_ids
@@ -1830,7 +1887,15 @@ class MooncakeConnectorScheduler:
                 getattr(self.vllm_config.cache_config, "mamba_cache_mode", None) == "align"
             )
             if group_info.is_state_group and not is_aligned_state_group:
-                transfer_block_ids.append(blocks)
+                if not blocks:
+                    transfer_block_ids.append(blocks)
+                    continue
+                speculative_config = self.vllm_config.speculative_config
+                num_spec = speculative_config.num_speculative_tokens if speculative_config is not None else 0
+                state_idx = len(blocks) - num_spec - 1
+                if state_idx < 0:
+                    raise ValueError("Mamba transfer metadata is missing the committed state block.")
+                transfer_block_ids.append(blocks[state_idx : state_idx + 1])
             elif is_aligned_state_group:
                 # Mamba state is not DCP-sharded like attention KV. Its aligned
                 # block index is derived from the actual (already truncated)

@@ -62,6 +62,7 @@ from vllm_ascend.core.profiling_chunk_predictor import (
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
+    _is_kimi_k3_target,
     enable_kimi_k3_sp,
     is_pd_decode_node,
     lmhead_tp_enable,
@@ -144,6 +145,15 @@ class NPUModelRunner(GPUModelRunner):
 
         self.update_stream = None
         self.device_metadata_executor = DeviceMetadataExecutor() if ascend_envs.VLLM_ASCEND_ENABLE_FLASH_MLA else None
+        # Flash attention and K3's recurrent-state metadata read corrected
+        # lengths on device. The scheduler's CPU lengths remain upper bounds
+        # after speculative rejection, as in GPUModelRunner. PCP still needs
+        # exact host lengths to partition the batch.
+        self._use_device_seq_lens = (
+            self.device_metadata_executor is not None
+            and _is_kimi_k3_target(vllm_config)
+            and parallel_config.prefill_context_parallel_size == 1
+        )
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.update_stream = torch.npu.Stream()
 
@@ -425,10 +435,7 @@ class NPUModelRunner(GPUModelRunner):
         batch_req_state: BatchReqState,
         batch_desc: BatchExecutionDescriptor,
     ) -> AscendInputBatch:
-        """Override GPUModelRunner.prepare_inputs for Ascend NPUs.
-        npu attention backends need seq_lens_cpu to work.
-        so we need to prepare seq_lens_cpu here.
-        """
+        """Prepare Ascend inputs and host length bounds for attention metadata."""
         num_tokens = batch_req_state.num_tokens
         num_tokens_after_padding = max(num_tokens, batch_desc.num_tokens)
         assert num_tokens > 0
@@ -827,10 +834,7 @@ class NPUModelRunner(GPUModelRunner):
         num_rejected,
         query_start_loc=None,
     ):
-        """Override GPUModelRunner.postprocess_sampled for Ascend NPUs.
-        npu attention backends need seq_lens_cpu to work.
-        so we need to copy num_computed_tokens back to cpu here.
-        """
+        """Correct device state and refresh CPU lengths for host-tiling backends."""
         super().postprocess_sampled(
             idx_mapping,
             sampled_tokens,
@@ -847,13 +851,14 @@ class NPUModelRunner(GPUModelRunner):
     def postprocess_num_computed_tokens(self, input_batch: AscendInputBatch) -> None:
         super().postprocess_num_computed_tokens(input_batch)
         # Non-last PP stages advance prefill chunks without sampled-token output.
-        # Keep the CPU snapshot fresh before the next chunk prepares seq_lens.
+        # Host-tiling backends need a fresh snapshot for the next chunk.
         if self.use_spec_pp:
             self._copy_num_computed_tokens_to_cpu()
 
     def _copy_num_computed_tokens_to_cpu(self):
-        # npu attention backend still need to use seq_lens_cpu,
-        # we need to copy num_computed_tokens back to cpu.
+        if self._use_device_seq_lens:
+            return
+        # Host-tiling backends still need exact rejection-corrected lengths.
         default_stream = torch.cuda.current_stream()
         assert self.num_computed_tokens_stream is not None
         assert self.num_computed_tokens_cpu is not None
@@ -872,20 +877,23 @@ class NPUModelRunner(GPUModelRunner):
     ):
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
 
-        # MTP needs D2H copy to get reverted num_computed_tokens after rejection.
+        # Host-tiling backends need rejection-corrected lengths from the D2H copy.
         # req_states.num_computed_tokens_cpu shares storage with its NumPy view,
         # so this update also corrects the num_computed_tokens_np used by PCP.
-        if self.speculator is not None or self.use_spec_pp:
+        if not self._use_device_seq_lens and (self.speculator is not None or self.use_spec_pp):
             self.num_computed_tokens_event.synchronize()
             for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
                 req_index = self.req_states.req_id_to_index[req_id]
                 self.req_states.num_computed_tokens_cpu[req_index] = self.num_computed_tokens_cpu[req_index]
 
-        # update seq_lens_cpu
-        for i, req_id in enumerate(req_ids):  # type: ignore
-            req_index = self.req_states.req_id_to_index[req_id]
-            num_computed_tokens = self.req_states.num_computed_tokens_cpu[req_index]
-            self.input_buffers.seq_lens_cpu[i] = num_computed_tokens + num_scheduled_tokens[req_id]
+        # These NumPy arrays alias the CPU tensors. Avoid dispatching scalar
+        # select/add/copy operations for every request during input preparation.
+        req_indices = [self.req_states.req_id_to_index[req_id] for req_id in req_ids]
+        np.add(
+            self.req_states.num_computed_tokens_np[req_indices],
+            np.fromiter((num_scheduled_tokens[req_id] for req_id in req_ids), dtype=np.int32, count=len(req_ids)),
+            out=self.input_buffers.seq_lens_np[: len(req_ids)],
+        )
 
     def _pad_query_start_loc_for_fia(
         self,

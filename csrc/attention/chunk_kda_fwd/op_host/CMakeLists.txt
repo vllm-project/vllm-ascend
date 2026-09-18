@@ -12,7 +12,7 @@ get_filename_component(COMMON_KERNEL_UTILS_DIR_ABS ${COMMON_KERNEL_UTILS_DIR} AB
 
 add_op_to_compiled_list()
 set(chunk_kda_fwd_depends
-    "attention/kda_gate_cumsum;moe/chunk_gated_delta_rule_fwd_h"
+    "attention/kda_gate_cumsum;moe/chunk_gated_delta_rule_fwd_h;attention/kda_layout_swap12;attention/chunk_kda_fwd_prepare;attention/chunk_kda_fwd_finalize;attention/chunk_fwd_h"
     CACHE STRING "Kernel source dependencies for chunk_kda_fwd" FORCE)
 if (BUILD_OPEN_PROJECT)
     target_sources(op_host_aclnnExc PRIVATE

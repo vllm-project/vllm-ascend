@@ -63,6 +63,11 @@ from vllm_ascend.ops.linear_op import KimiOProjMMReduceScatterOp
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.triton.copy_mla_kv import copy_mla_kv
 from vllm_ascend.ops.triton.flash_attention_output import flash_attention_gate, flash_attention_output
+from vllm_ascend.ops.triton.mla_query_rope import (
+    quantize_mla_query_and_kv,
+    scale_mla_query_rope,
+)
+from vllm_ascend.ops.triton.quantize_mla_kv import quantize_mla_kv
 from vllm_ascend.ops.triton.query_gather_prep import prep_query_head_major
 from vllm_ascend.quantization.methods import AscendW8A8LinearMethod, AscendW8A8MXFP8DynamicLinearMethod
 from vllm_ascend.quantization.utils import enable_fa_quant, get_dynamic_mx_quant_scale_alg
@@ -929,8 +934,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         if envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
             if (self.kv_lora_rank, self.qk_rope_head_dim, self.num_kv_heads) != (512, 64, 1):
                 raise ValueError("A5 Flash MLA requires latent=512, rope=64 and one KV head")
-            if self.dtype != torch.bfloat16 or self.fa_quant_layer:
-                raise ValueError("A5 Flash MLA requires BF16 attention and unquantized KV")
+            if self.vllm_config.model_config.dtype != torch.bfloat16 or (
+                self.fa_quant_layer and not self.support_fp8_attention
+            ):
+                raise ValueError("A5 Flash MLA requires BF16 activations and BF16 or FP8 E4M3 KV")
             self.enable_mlapo = not self.is_draft_model and not self.use_mla_rope
             self.enable_kv_nz = False
             self.flash_dcp_overlap = True
@@ -1941,17 +1948,25 @@ class AscendMLAImpl(MLAAttentionImpl):
         return decode_q_nope, decode_q_pe
 
     def mla_preprocess_only_decode(self, hidden_states, kv_cache, attn_metadata):
+        quantize_prolog = self.fa_quant_layer
         if envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
             bsz = attn_metadata.flash.query.shape[0]
             flash = attn_metadata.flash
             cache_index = flash.slots
-            if flash.dcp_size > 1:
+            # DCP retains the complete current chunk in BF16 on every rank.
+            # Mode 7 supplies it and the replicated query in one prolog; only
+            # rank-owned current rows are subsequently quantized into history.
+            quantize_prolog = self.fa_quant_layer and flash.dcp_size == 1
+            if quantize_prolog:
+                decode_k_nope, decode_k_pe = kv_cache
+            elif flash.dcp_size > 1:
                 # All ranks need this step's complete causal KV. Write it
                 # once here; only rank-owned slots are copied into history.
                 kv_cache = flash.current_cache.squeeze(1)
                 cache_index = flash.current_slots
-            decode_k_nope = kv_cache[..., : self.kv_lora_rank].unsqueeze(2)
-            decode_k_pe = kv_cache[..., self.kv_lora_rank :].unsqueeze(2)
+            if not quantize_prolog:
+                decode_k_nope = kv_cache[..., : self.kv_lora_rank].unsqueeze(2)
+                decode_k_pe = kv_cache[..., self.kv_lora_rank :].unsqueeze(2)
         else:
             bsz = attn_metadata.num_decode_tokens
             cache_index = attn_metadata.slot_mapping[:bsz].to(torch.int64)
@@ -1993,7 +2008,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             cache_index = cache_index.view(bsz, -1) if quantized_x.dim() == 3 else cache_index.view(-1)
             cache_mode = "PA_BSND"
             weight_quant_mode = self.mlapo_weight_quant_mode
-            quant_scale_ckv = self.fak_descale_reciprocal if self.fa_quant_layer else None
+            quant_scale_ckv = self.fak_descale_reciprocal if quantize_prolog else None
         else:
             cos_shape = attn_metadata.decode.cos.shape
             quantized_x, dynamic_scale = torch_npu.npu_dynamic_quant(hidden_states)
@@ -2030,14 +2045,16 @@ class AscendMLAImpl(MLAAttentionImpl):
             cache_mode=cache_mode,
             rmsnorm_epsilon_cq=self.q_a_layernorm.variance_epsilon,
             rmsnorm_epsilon_ckv=self.kv_a_layernorm.variance_epsilon,
-            query_quant_mode=1 if self.fa_quant_layer else 0,
+            query_quant_mode=1 if quantize_prolog else 0,
             weight_quant_mode=weight_quant_mode,
-            kv_cache_quant_mode=1 if self.fa_quant_layer else 0,
+            kv_cache_quant_mode=1 if quantize_prolog else 0,
             quant_scale_ckv=quant_scale_ckv,
         )
 
         decode_q_nope = decode_q_nope.view(bsz, self.mlapo_num_heads, self.kv_lora_rank)
         decode_q_pe = decode_q_pe.view(bsz, self.mlapo_num_heads, -1)
+        if envs.VLLM_ASCEND_ENABLE_FLASH_MLA and quantize_prolog:
+            dequant_scale_q_nope = dequant_scale_q_nope.view(bsz, self.mlapo_num_heads)
 
         decode_q_nope, decode_q_pe = self.reorg_decode_q(decode_q_nope, decode_q_pe)
         decode_preprocess_res = DecodeMLAPreprocessResult(
@@ -2201,11 +2218,251 @@ class AscendMLAImpl(MLAAttentionImpl):
     ) -> torch.Tensor:
         raise NotImplementedError("forward_mqa is not supported for MLA attention. Use forward() instead.")
 
+    def _forward_flash_c8(self, layer_name, hidden_states, kv_cache, attn_metadata, output):
+        """Execute static C8 MLA, retaining BF16 current chunks when splitting KV.
+
+        The metadata separates history from all current rows, including decode
+        requests in a mixed batch. Both attention results have true log-sum-exp
+        values, so the existing DCP merge counts the current chunk exactly once.
+        Temporary memory is proportional to scheduled tokens, never history.
+        """
+        b = attn_metadata.flash
+        if b.unabsorbed or (b.is_prefill and b.causal and not b.split_kv):
+            raise ValueError("C8 FlashMLA prefill requires absorbed history/current metadata.")
+        t = b.query.shape[0]
+        wait_for_device_metadata(DeviceMetadataStage.ATTENTION, id(b.schedule))
+        if t == 0:
+            return output.zero_()
+        x = hidden_states[:t]
+        q_replicated = getattr(self.q_proj, "qrep_active", False)
+        use_mlapo = (
+            self.enable_mlapo
+            and not b.is_prefill
+            and ((b.dcp_size == 1 and not b.split_kv) or (q_replicated and b.dcp_size > 1 and b.split_kv))
+            and self.mlapo_weight_quant_mode == 3
+            and t <= MLAPO_MAX_SUPPORTED_TOKENS
+        )
+        if use_mlapo:
+            if self.layerwise_kv_cache_hook is not None:
+                self.layerwise_kv_cache_hook.wait_for_layer(layer_name)
+            prolog, _ = self.mla_preprocess_only_decode(x, kv_cache, attn_metadata)
+            if b.dcp_size == 1:
+                query, query_rope, query_scale = prolog.ql_nope, prolog.q_pe, prolog.dequant_scale_q_nope
+            else:
+                current = b.current_cache.squeeze(1)
+                local_query = None
+                local_head_start = 0
+                if prolog.ql_nope.shape == (64, 96, 512) and b.dcp_size == 8:
+                    local_heads = prolog.ql_nope.shape[-2] // b.dcp_size
+                    local_head_start = self.q_proj.rank_in_group * local_heads
+                    local_query = torch.empty((64, local_heads, 576), dtype=x.dtype, device=x.device)
+                # One program owns one token's Q heads and persistent KV row.
+                # Other shapes retain the existing separate quantization calls.
+                query, query_rope, query_scale = quantize_mla_query_and_kv(
+                    prolog.ql_nope,
+                    prolog.q_pe,
+                    self.fak_descale_float,
+                    current[..., :512].unsqueeze(2),
+                    current[..., 512:].unsqueeze(2),
+                    kv_cache[0],
+                    kv_cache[1],
+                    b.slots,
+                    self.fak_descale_reciprocal,
+                    source_slots=b.current_slots,
+                    local_query=local_query,
+                    local_head_start=local_head_start,
+                )
+                if local_query is None:
+                    local_query = torch.cat(
+                        (self.q_proj._local_view(prolog.ql_nope), self.q_proj._local_view(prolog.q_pe)), dim=-1
+                    )
+        elif self.fused_qkv_a_proj is not None:
+            qkv_lora = self.fused_qkv_a_proj(x)[0]
+            q_c, kv = qkv_lora.split([self.q_lora_rank, 576], dim=-1)
+            q_c = self.q_a_layernorm(q_c)
+        else:
+            q_c = x
+            kv = self.kv_a_proj_with_mqa(x)[0]
+        if not use_mlapo:
+            q_abs, q_pe = self._q_proj_and_k_up_proj(q_c)
+            c_kv, k_pe = kv.view(t, 1, 576).split([512, 64], dim=-1)
+            c_kv = self.kv_a_layernorm(c_kv.contiguous()).view(t, 1, 512)
+            if self.use_mla_rope:
+                cos, sin = get_cos_and_sin_mla(b.positions, use_cache=False)
+                q_pe = self.rope_single(q_pe, cos, sin)
+                k_pe = self.rope_single(k_pe, cos, sin)
+            local_query = torch.cat((q_abs, q_pe), dim=-1)
+            if getattr(self.q_proj, "qrep_active", False):
+                b.query.copy_(local_query)
+                local_query = self.q_proj._local_view(local_query)
+            else:
+                b.query.copy_(self._dcp_all_gather(local_query, 1) if b.dcp_size > 1 else local_query)
+            if b.is_prefill:
+                wait_for_kv_layer_from_connector(layer_name)
+            if self.layerwise_kv_cache_hook is not None:
+                self.layerwise_kv_cache_hook.wait_for_layer(layer_name)
+            quantize_mla_kv(c_kv, k_pe, kv_cache[0], kv_cache[1], b.slots, self.fak_descale_reciprocal)
+            query, query_scale = torch_npu.npu_dynamic_quant(
+                b.query[..., :512].contiguous(), dst_type=torch.float8_e4m3fn
+            )
+            # FIA applies q_scale * kv_scale to both dot products. Cancel that
+            # factor on the unquantized 64-D component; MLAPO already does so.
+            query_rope = scale_mla_query_rope(b.query[..., 512:], query_scale, self.fak_descale_float)
+        notify_kv_cache_written(layer_name)
+        # Static KV scales are part of the layer's calibration contract. Keep
+        # the current chunk in BF16 even after writing its persistent FP8 copy.
+        if b.split_kv and not use_mlapo:
+            torch_npu.npu_scatter_pa_kv_cache(
+                key=c_kv.contiguous(),
+                value=k_pe.contiguous(),
+                key_cache=b.current_cache[..., :512].permute(0, 2, 1, 3),
+                value_cache=b.current_cache[..., 512:].permute(0, 2, 1, 3),
+                slot_mapping=b.current_slots,
+                cache_mode="Norm",
+            )
+        needs_merge = b.dcp_size > 1 or b.split_kv
+        # Uniform producer/wire contract, not rank-local allocation inspection.
+        # Qualify the target decode T64 first; all other paths retain row257.
+        direct_dcp_wire = (
+            not b.is_prefill
+            and b.dcp_size == 8
+            and self.dcp_group is not None
+            and self.dcp_group.world_size == 8
+            and query.dtype == torch.float8_e4m3fn
+            and query.shape == (64, 96, 512)
+        )
+        raw_row_words = 272 if direct_dcp_wire else 257
+        overlap = b.dcp_size > 1 and not b.is_prefill and self.flash_dcp_overlap
+        if overlap:
+            main_stream = torch.npu.current_stream()
+            comm_stream = _dcp_mtp_comm_stream()
+        mask_mode = 3 if b.causal and not b.split_kv and b.dcp_size == 1 else 0
+        history_output, history_lse = torch.ops._C_ascend.flash_mla_with_kvcache(
+            query,
+            kv_cache[0],
+            query_rope=query_rope,
+            key_rope=kv_cache[1],
+            dequant_scale_query=query_scale,
+            dequant_scale_key=self.fak_descale_float,
+            block_table=b.block_table,
+            cache_seqlens=b.cache_lens,
+            cu_seqlens_q=b.cu,
+            seqused_q=b.used_q,
+            attn_mask=b.attn_mask if mask_mode else None,
+            metadata=b.schedule,
+            head_dim_v=512,
+            softmax_scale=self.scale,
+            mask_mode=mask_mode,
+            max_seqlen_q=b.max_query_len,
+            max_seqlen_kv=b.max_seq_len,
+            layout_q="TND",
+            layout_kv="PA_BBND",
+            layout_out="NTD_DCP" if direct_dcp_wire else ("TND" if needs_merge else "NTD"),
+            return_softmax_lse=needs_merge,
+        )
+        gate_logits = None
+        if needs_merge:
+            if overlap:
+                history_ready = main_stream.record_event()
+                history_output.record_stream(comm_stream)
+                history_lse.record_stream(comm_stream)
+                with torch.npu.stream(comm_stream):
+                    comm_stream.wait_event(history_ready)
+                    history_recv = exchange_flash_attention_output(
+                        history_output, history_lse, self.dcp_group, raw_row_words=raw_row_words
+                    )
+                    history_comm_done = comm_stream.record_event()
+                history_recv.record_stream(main_stream)
+            current_output = current_lse = None
+            if b.split_kv:
+                current_output, current_lse = torch.ops._C_ascend.flash_mla_with_kvcache(
+                    local_query,
+                    b.current_cache,
+                    block_table=b.current_block_table,
+                    cache_seqlens=b.used_q,
+                    cu_seqlens_q=b.cu,
+                    seqused_q=b.used_q,
+                    attn_mask=b.attn_mask,
+                    metadata=b.current_schedule,
+                    head_dim_v=512,
+                    softmax_scale=self.scale,
+                    mask_mode=3,
+                    max_seqlen_q=b.max_query_len,
+                    max_seqlen_kv=b.max_query_len,
+                    layout_q="TND",
+                    layout_kv="PA_BNBD",
+                    layout_out="TND",
+                    return_softmax_lse=True,
+                )
+            if overlap:
+                if self.use_output_gate:
+                    # Gate projection only reads x; enqueue its Cube work while
+                    # the side stream exchanges history, before waiting on it.
+                    gate_logits = self.g_proj(x.contiguous())[0]
+                main_stream.wait_event(history_comm_done)
+                merged = combine_flash_attention_output(
+                    history_recv,
+                    history_output.shape[-1],
+                    current_output=current_output,
+                    current_lse=current_lse,
+                )
+            else:
+                merged = merge_flash_attention_output(
+                    history_output,
+                    history_lse,
+                    self.dcp_group if b.dcp_size > 1 else None,
+                    raw_row_words=raw_row_words,
+                    current_output=current_output,
+                    current_lse=current_lse,
+                )
+            projected = self._v_up_proj_batch_major(merged.to(x.dtype))
+        else:
+            projected = self._v_up_proj(history_output)
+        if self.use_output_gate and gate_logits is None:
+            gate_logits = self.g_proj(x.contiguous())[0]
+        if (
+            not needs_merge
+            and not b.is_prefill
+            and self.use_output_gate
+            and self.o_proj.input_is_parallel
+            and not self.o_proj.reduce_results
+            and self.o_proj.bias is None
+            and getattr(self.o_proj, "custom_op", None) is None
+            and isinstance(self.o_proj.quant_method, UnquantizedLinearMethod)
+            and projected.dtype == self.o_proj.weight.dtype == output.dtype == torch.bfloat16
+            and output.shape[0] == t
+        ):
+            flash_attention_gate(projected, gate_logits, b.token_live)
+            torch.mm(projected, self.o_proj.weight.t(), out=output)
+            return output
+        projection_op = getattr(self.o_proj, "custom_op", None)
+        if (
+            not b.is_prefill
+            and self.use_output_gate
+            and isinstance(projection_op, KimiOProjMMReduceScatterOp)
+            and projected.shape[0] == output.shape[0] * projection_op.tp_size
+            and projected.dtype == output.dtype == torch.bfloat16
+            and output.is_contiguous()
+        ):
+            flash_attention_gate(projected, gate_logits, b.token_live)
+            return projection_op.apply_into(projected, output)
+        if self.use_output_gate:
+            projected.mul_(torch.sigmoid(gate_logits))
+        result = self.o_proj(projected, is_prefill=b.is_prefill)[0]
+        token_live = b.token_live
+        projection_op = getattr(self.o_proj, "custom_op", None)
+        if isinstance(projection_op, KimiOProjMMReduceScatterOp):
+            start = projection_op.tp_rank * result.shape[0]
+            token_live = token_live[start : start + result.shape[0]]
+        return flash_attention_output(result, token_live, output)
+
     def _forward_flash(self, layer_name, hidden_states, kv_cache, attn_metadata, output=None):
         if output is None:
             raise ValueError("A5 Flash MLA requires an explicit output buffer.")
         if attn_metadata is None:
             return output.zero_()
+        if self.fa_quant_layer:
+            return self._forward_flash_c8(layer_name, hidden_states, kv_cache, attn_metadata, output)
         meta = attn_metadata
         b = meta.flash
         t = b.query.shape[0]

@@ -29,12 +29,17 @@
 #include "arch35/flash_mla_with_kvcache_template_tiling_key.h"
 #include "../../a5_mla_common/op_kernel/arch35/flash_attention_score_common_regbase_arch35.h"
 #include "adv_api/activation/softmax.h"
+#if (ORIG_DTYPE_Q == DT_FLOAT8_E4M3FN)
+#include "arch35/flash_mla_c8_kernel.h"
+#else
 #include "utils/flash_mla_with_kvcache_type.h"
 using namespace optiling;
 #include "arch35/flash_mla_with_kvcache_kernel.h"
+#endif
 
 using namespace AscendC;
 
+#if (ORIG_DTYPE_Q != DT_FLOAT8_E4M3FN)
 // ============ 入口 layout 推导（if-constexpr 直接映射，无表查找）============
 // InOutLayoutType → q 布局（TND_NTD 输入仍为 TND q 布局）
 template <uint8_t inOutLayoutType>
@@ -88,6 +93,8 @@ __global__ __aicore__ void flash_mla_with_kvcache(__gm__ uint8_t *query, __gm__ 
                                                   __gm__ uint8_t *blockTable, __gm__ uint8_t *cacheSeqlens,
                                                   __gm__ uint8_t *cuSeqlensQ, __gm__ uint8_t *sequsedQ,
                                                   __gm__ uint8_t *attnMask, __gm__ uint8_t *metadata,
+                                                  __gm__ uint8_t *queryRope, __gm__ uint8_t *keyRope,
+                                                  __gm__ uint8_t *dequantScaleQuery, __gm__ uint8_t *dequantScaleKey,
                                                   __gm__ uint8_t *attnOut, __gm__ uint8_t *softmaxLse,
                                                   __gm__ uint8_t *workspace, __gm__ uint8_t *tiling)
 {
@@ -158,3 +165,105 @@ __global__ __aicore__ void flash_mla_with_kvcache(__gm__ uint8_t *query, __gm__ 
 
     AscendC::PipeBarrier<PIPE_ALL>();
 }
+
+#else
+template <uint8_t inOutLayoutType, uint8_t KvLayoutType, bool hasAttenMask, uint8_t config, FlashMlaC8Layout outputLayout>
+__aicore__ inline void RunFlashMlaC8(
+    __gm__ uint8_t *query, __gm__ uint8_t *kCache, __gm__ uint8_t *blockTable,
+    __gm__ uint8_t *cacheSeqlens, __gm__ uint8_t *cuSeqlensQ, __gm__ uint8_t *sequsedQ,
+    __gm__ uint8_t *attnMask, __gm__ uint8_t *metadata, __gm__ uint8_t *queryRope,
+    __gm__ uint8_t *keyRope, __gm__ uint8_t *dequantScaleQuery, __gm__ uint8_t *dequantScaleKey,
+    __gm__ uint8_t *attnOut, __gm__ uint8_t *softmaxLse, __gm__ uint8_t *workspace, const optiling::FlashMlaWithKvcacheNoQuantTilingArch35 *tilingData)
+{
+    using namespace BaseApi;
+    constexpr auto inputLayout = FlashMlaC8Layout::LAYOUT_TND;
+    constexpr auto m = S1TemplateType::Aligned64;
+    constexpr auto s = S2TemplateType::Aligned128;
+    constexpr auto d = DTemplateType::Aligned576;
+    constexpr auto dv = DTemplateType::Aligned512;
+    constexpr auto pse = PseTypeEnum::PSE_NONE_TYPE;
+    using CubeNormal = FAFullQuantMlaBlockCube<fp8_e4m3fn_t, float, inputLayout, m, s, d, dv,
+                                              true, KvLayoutType, false, false, true, false>;
+    using CubeDummy = FAFullQuantMlaBlockCubeDummy<fp8_e4m3fn_t, float, inputLayout, m, s, d, dv,
+                                                  true, KvLayoutType, false, false, true, false>;
+    using VecNormal = FAFullQuantMlaBlockVec<fp8_e4m3fn_t, float, bfloat16_t, inputLayout, outputLayout,
+                                            m, s, d, dv, pse, hasAttenMask, false, true, KvLayoutType,
+                                            true, false, false, true, false>;
+    using VecDummy = FAFullQuantMlaBlockVecDummy<fp8_e4m3fn_t, float, bfloat16_t, inputLayout, outputLayout,
+                                                m, s, d, dv, pse, hasAttenMask, false, true, KvLayoutType,
+                                                true, false, false, true, false>;
+    using FdNormal = FiaBlockVecFlashDecodeFullQuant<fp8_e4m3fn_t, float, bfloat16_t, inputLayout, outputLayout,
+                                                    m, s, d, dv, pse, hasAttenMask, false, true, KvLayoutType,
+                                                    false, false, true, false>;
+    using FdDummy = FiaBlockVecFlashDecodeFullQuantDummy<fp8_e4m3fn_t, float, bfloat16_t, inputLayout, outputLayout,
+                                                       m, s, d, dv, pse, hasAttenMask, false, true, KvLayoutType,
+                                                       false, false, true, false>;
+#ifdef __DAV_C310_CUBE__
+    using Kernel = FlashAttentionFullQuantMlaKernel<CubeNormal, VecDummy, FdDummy>;
+#else
+    using Kernel = FlashAttentionFullQuantMlaKernel<CubeDummy, VecNormal, FdNormal>;
+#endif
+    const uint32_t sectionCount = ((__gm__ uint32_t *)metadata)[0];
+    if constexpr (outputLayout == FlashMlaC8Layout::LAYOUT_NTD_DCP) {
+        if (sectionCount == 0) {
+            if ASCEND_IS_AIV {
+                const auto &base = tilingData->flashMlaWithKvcacheBaseParams;
+                AttentionCommon::ConstInfo_t<AttentionCommon::FiaKernelType::FULL_QUANT> info{};
+                info.t1Size = base.t1Size;
+                info.realN2Size = base.n2Size;
+                info.realGSize = base.gSize;
+                info.coreNum = base.coreNum;
+                info.aivIdx = GetBlockIdx();
+                GlobalTensor<bfloat16_t> output;
+                GlobalTensor<float> wire, lse;
+                output.SetGlobalBuffer((__gm__ bfloat16_t *)attnOut);
+                wire.SetGlobalBuffer((__gm__ float *)attnOut);
+                lse.SetGlobalBuffer((__gm__ float *)softmaxLse);
+                InitDcpOutput<bfloat16_t, 0>(output, wire, lse, info);
+            }
+            AscendC::PipeBarrier<PIPE_ALL>();
+            return;
+        }
+    }
+    // A section owns its buffer-ring state. Drain it before FD reuses the UB,
+    // then recreate the buffer managers for the following metadata section.
+    for (uint32_t section = 0; section < sectionCount; ++section) {
+        fa_base_matmul::ResetIdCounter();
+        TPipe pipe;
+        Kernel op;
+        op.Init(query, kCache, kCache, attnMask, cuSeqlensQ, cacheSeqlens, blockTable,
+                dequantScaleQuery, dequantScaleKey, dequantScaleKey, queryRope, keyRope,
+                softmaxLse, attnOut, GetUserWorkspace(workspace), metadata, tilingData,
+                &pipe, sequsedQ, section);
+        op.Process();
+        AscendC::PipeBarrier<PIPE_ALL>();
+    }
+}
+
+template <uint8_t inOutLayoutType, uint8_t KvLayoutType, bool hasAttenMask, uint8_t config>
+__global__ __aicore__ void flash_mla_with_kvcache(
+    __gm__ uint8_t *query, __gm__ uint8_t *kCache, __gm__ uint8_t *blockTable,
+    __gm__ uint8_t *cacheSeqlens, __gm__ uint8_t *cuSeqlensQ, __gm__ uint8_t *sequsedQ,
+    __gm__ uint8_t *attnMask, __gm__ uint8_t *metadata, __gm__ uint8_t *queryRope,
+    __gm__ uint8_t *keyRope, __gm__ uint8_t *dequantScaleQuery, __gm__ uint8_t *dequantScaleKey,
+    __gm__ uint8_t *attnOut, __gm__ uint8_t *softmaxLse, __gm__ uint8_t *workspace, __gm__ uint8_t *tiling)
+{
+    REGISTER_TILING_DEFAULT(optiling::FlashMlaWithKvcacheTilingData);
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
+    GET_TILING_DATA_MEMBER(optiling::FlashMlaWithKvcacheTilingData, baseTiling, baseTilingIn, tiling);
+    // Retain the public TND_NTD tiling key; only C8's final GM writer differs.
+    if constexpr (inOutLayoutType == InOutLayoutType_TND_NTD) {
+        if (baseTilingIn.flashMlaWithKvcacheBaseParams.outputLayout ==
+            static_cast<uint32_t>(FlashMlaC8Layout::LAYOUT_NTD_DCP)) {
+            RunFlashMlaC8<inOutLayoutType, KvLayoutType, hasAttenMask, config,
+                          FlashMlaC8Layout::LAYOUT_NTD_DCP>(query, kCache, blockTable, cacheSeqlens, cuSeqlensQ, sequsedQ, attnMask, metadata,
+            queryRope, keyRope, dequantScaleQuery, dequantScaleKey, attnOut, softmaxLse, workspace, &baseTilingIn);
+            return;
+        }
+    }
+    constexpr auto outputLayout = inOutLayoutType == InOutLayoutType_TND_NTD
+        ? FlashMlaC8Layout::LAYOUT_NTD : FlashMlaC8Layout::LAYOUT_TND;
+    RunFlashMlaC8<inOutLayoutType, KvLayoutType, hasAttenMask, config, outputLayout>(query, kCache, blockTable, cacheSeqlens, cuSeqlensQ, sequsedQ, attnMask, metadata,
+            queryRope, keyRope, dequantScaleQuery, dequantScaleKey, attnOut, softmaxLse, workspace, &baseTilingIn);
+}
+#endif

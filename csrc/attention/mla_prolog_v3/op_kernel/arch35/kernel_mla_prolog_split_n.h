@@ -114,7 +114,7 @@ private:
                  const MMParams &mmPara, const UsedBlockParams &mmBlockParams,
                  const GlobalTensor<S> &tensorAScaleGm = {}, const GlobalTensor<S> &tensorBScaleGm = {});
     __aicore__ inline void MatmulAndSyncQcQr(AicOffset &aicOffset);
-    __aicore__ inline void MatmulQcQr(AicOffset &aicOffset);
+    __aicore__ inline void MatmulQcQr(AicOffset &aicOffset, int64_t batchOffset = 0);
     __aicore__ inline void PreloadQnAndSync(AicOffset &aicOffset, int64_t mmQnLoops);
     __aicore__ inline void MatmulQnWeightPreload(int64_t weightUkOffset);
     template <bool needQnDynamicQuant>
@@ -482,6 +482,14 @@ __aicore__ inline void MlaPrologVecS1CubS2<MLAPT>::MmQcQrParamInit()
         if constexpr (std::is_same<mmInputType, FP8E4M3>::value &&
                       isFp8E8m0) { // FP8全量化场景下L1B用满，修改baseN会造成内存踩踏
             mmQcQrParam_.baseN = 128;
+            if constexpr (!MLAPT::enableRope) {
+                const bool targetShape =
+                    (baseParams_->tokenSize == 32 && baseParams_->numHeadSize == 12) ||
+                    (baseParams_->tokenSize == 64 && baseParams_->numHeadSize == 96);
+                if (targetShape) {
+                    mmQcQrParam_.baseN = 192;
+                }
+            }
         } else {
             if (mmQcQrParam_.m <= 64) { // FP8全量化场景，scale需要额外占用L1，该优化不适用
                 mmQcQrParam_.baseN = 256;
@@ -864,7 +872,7 @@ __aicore__ inline void MlaPrologVecS1CubS2<MLAPT>::AicProcess(AicOffset &aicOffs
     CrossCoreWaitFlag(FINISH_VEC_RMSNORM_CQ);
 
     if constexpr (std::is_same<mmInputType, FP8E4M3>::value && isFp8E8m0) {
-        MatmulQcQr(aicOffset);
+        MatmulQcQr(aicOffset, batchOffset);
     } else {
         MatmulAndSyncQcQr(aicOffset);
     }
@@ -1086,7 +1094,7 @@ __aicore__ inline void MlaPrologVecS1CubS2<MLAPT>::MatmulAndSyncQcQr(AicOffset &
 }
 
 template <typename MLAPT>
-__aicore__ inline void MlaPrologVecS1CubS2<MLAPT>::MatmulQcQr(AicOffset &aicOffset)
+__aicore__ inline void MlaPrologVecS1CubS2<MLAPT>::MatmulQcQr(AicOffset &aicOffset, int64_t batchOffset)
 {
     if (blockIdx_ >= baseParams_->mm3BlockNum) {
         return;
@@ -1105,7 +1113,7 @@ __aicore__ inline void MlaPrologVecS1CubS2<MLAPT>::MatmulQcQr(AicOffset &aicOffs
     if (isAFullLoad) {
         if constexpr (std::is_same<mmQcQrInputType, FP8E4M3>::value && isFp8E8m0) {
             uint32_t offsetL1B =
-                L1_B_SIZE / 2 / sizeof(rmsNormCqOutputType); // // 2表示scale起始地址固定从L1B上ping的64k开始
+                MxScaleL1ByteOffset(mmQcQrParam_) / sizeof(rmsNormCqOutputType); // Scales follow the current tile weights in L1B ping.
             WaitFlag<HardEvent::MTE1_MTE2>(SCALE_EVENT);
             LoadL1AAndScale<rmsNormCqOutputType, dequantScaleType, false, true>(
                 rmsNormCqResGm_[aicOffset.rmsNormCqResOffset],
@@ -1124,6 +1132,21 @@ __aicore__ inline void MlaPrologVecS1CubS2<MLAPT>::MatmulQcQr(AicOffset &aicOffs
             subNL1SplitSize = nInput - (nL1loops - 1) * nL1SplitSize;
         }
         if constexpr (std::is_same<mmQcQrInputType, FP8E4M3>::value && isFp8E8m0) {
+            if constexpr (!MLAPT::enableRope && MLAPT::enableDequantOpt) {
+                if (mmQcQrParam_.baseN == 192) {
+                    const int64_t firstHead = aicOffset.qcQrResOffset / 192;
+                    MatmulSplitK<rmsNormCqOutputType, mmQcQrOutputType, dequantScaleType,
+                                 true, true, false, DataFormat::NZ, true>(
+                        mmQcQrResGm_[aicOffset.qcQrResOffset], rmsNormCqResGm_[aicOffset.rmsNormCqResOffset],
+                        weightUqQrGm_[aicOffset.weightUqQrOffset], mmQcQrParam_, bufParam_, nL1 * nL1SplitSize,
+                        subNL1SplitSize, dequantTool_.deQuantScaleCqGm_[aicOffset.dequantScaleCqOffset],
+                        deqScaleQcQrW_[aicOffset.dequantScaleWuqqrOffset], mmQcQrResDequantGm_[firstHead * 128],
+                        qrOutGm_[batchOffset * baseParams_->headSizeQr + firstHead * 64]);
+                    // The FIX flag covers both split writes before the AIV relay.
+                    CrossCoreSetFlag<0x2, PIPE_FIX>(FINISH_MM_QCQR_SPLIT_N);
+                    continue;
+                }
+            }
             if (isAFullLoad) {
                 MatmulSplitK<rmsNormCqOutputType, mmQcQrOutputType, dequantScaleType, true, true>(
                     mmQcQrResGm_[aicOffset.qcQrResOffset], rmsNormCqResGm_[aicOffset.rmsNormCqResOffset],
@@ -2103,6 +2126,18 @@ __aicore__ inline void MlaPrologVecS1CubS2<MLAPT>::DequantAndRopeSplitNSyncMMQcQ
 {
     if (cubeBlockIdx_ >= baseParams_->mm3BlockNum) {
         return;
+    }
+    if constexpr (!MLAPT::enableRope && std::is_same<mmQcQrInputType, FP8E4M3>::value && isFp8E8m0) {
+        if (mmQcQrParam_.baseN == 192) {
+            // Keep the original per-head AIC -> AIV -> AIC protocol. Data
+            // conversion is already complete when the producer FIX flag arrives.
+            const uint32_t heads = CeilDiv(mmQcQrParam_.n, 192U);
+            for (uint32_t head = 0; head < heads; ++head) {
+                CrossCoreWaitFlag(FINISH_MM_QCQR_SPLIT_N);
+                CrossCoreSetFlag<SYNC_MODE_CUBE_VEC, PIPE_MTE3>(FINISH_VEC_DEQUANT_QC_SPLIT_N);
+            }
+            return;
+        }
     }
     // mmQcQr一个C核算stepBatchSize * singleN，每两个V核做对应C核输出的Qc部分的dequant
     // singleN一定整除(dimHeadSizeQc + dimHeadSizeQc)，保证dequant能找到dimHeadSizeQc部分的起始位置

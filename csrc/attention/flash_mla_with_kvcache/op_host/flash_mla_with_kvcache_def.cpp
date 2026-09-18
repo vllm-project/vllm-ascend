@@ -10,10 +10,10 @@
 
 /*!
  * \file flash_mla_with_kvcache_def.cpp
- * \brief FlashMlaWithKvcache算子定义（训练推理归一，仅非量化）
- *        输入数据类型仅支持FLOAT16和BFLOAT16。
- *        无独立 v / q_rope / k_rope 输入：rope 已合并进 q 与 k_cache（最后维 576 = nope 512 + rope 64，
- *        head_dim_v 为 k_cache 内 nope（value）段宽度，head_dim_v + 64 == 576 由 checker/infershape 保证）。
+ * \brief FlashMlaWithKvcache supports merged FP16/BF16 and split A5 FP8 C8 inputs.
+ *        FP16/BF16 query/cache width is 576 (latent 512 + rope 64).
+ *        C8 uses FP8 latent 512, separate BF16 rope 64, dynamic Q scales and
+ *        one static KV scale; its attention output remains BF16. V aliases K latent.
  *        cache_seqlens 携带逐 batch 的 KV cache 长度（替代 cu_seqlens_kv/seqused_kv，KV 走分页）。
  */
 
@@ -28,53 +28,73 @@ public:
     {
         this->Input("q")
             .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT16, ge::DT_BF16})
-            .Format({ge::FORMAT_ND, ge::FORMAT_ND})
+            .DataType({ge::DT_FLOAT16, ge::DT_BF16, ge::DT_FLOAT8_E4M3FN})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
             .AutoContiguous();
         this->Input("k_cache")
             .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT16, ge::DT_BF16})
-            .Format({ge::FORMAT_ND, ge::FORMAT_ND})
+            .DataType({ge::DT_FLOAT16, ge::DT_BF16, ge::DT_FLOAT8_E4M3FN})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
             .IgnoreContiguous();
         this->Input("block_table")
             .ParamType(OPTIONAL)
-            .DataType({ge::DT_INT32, ge::DT_INT32})
-            .Format({ge::FORMAT_ND, ge::FORMAT_ND})
+            .DataType({ge::DT_INT32, ge::DT_INT32, ge::DT_INT32})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
             .AutoContiguous();
         this->Input("cache_seqlens")
             .ParamType(OPTIONAL)
-            .DataType({ge::DT_INT32, ge::DT_INT32})
-            .Format({ge::FORMAT_ND, ge::FORMAT_ND})
+            .DataType({ge::DT_INT32, ge::DT_INT32, ge::DT_INT32})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
             .AutoContiguous();
         this->Input("cu_seqlens_q")
             .ParamType(OPTIONAL)
-            .DataType({ge::DT_INT32, ge::DT_INT32})
-            .Format({ge::FORMAT_ND, ge::FORMAT_ND})
+            .DataType({ge::DT_INT32, ge::DT_INT32, ge::DT_INT32})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
             .AutoContiguous();
         this->Input("seqused_q")
             .ParamType(OPTIONAL)
-            .DataType({ge::DT_INT32, ge::DT_INT32})
-            .Format({ge::FORMAT_ND, ge::FORMAT_ND})
+            .DataType({ge::DT_INT32, ge::DT_INT32, ge::DT_INT32})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
             .AutoContiguous();
         this->Input("attn_mask")
             .ParamType(OPTIONAL)
-            .DataType({ge::DT_INT8, ge::DT_INT8})
-            .Format({ge::FORMAT_ND, ge::FORMAT_ND})
+            .DataType({ge::DT_INT8, ge::DT_INT8, ge::DT_INT8})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
             .AutoContiguous();
         this->Input("metadata")
             .ParamType(OPTIONAL)
-            .DataType({ge::DT_INT32, ge::DT_INT32})
-            .Format({ge::FORMAT_ND, ge::FORMAT_ND})
+            .DataType({ge::DT_INT32, ge::DT_INT32, ge::DT_INT32})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+            .AutoContiguous();
+        this->Input("query_rope")
+            .ParamType(OPTIONAL)
+            .DataType({ge::DT_BF16, ge::DT_BF16, ge::DT_BF16})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+            .AutoContiguous();
+        this->Input("key_rope")
+            .ParamType(OPTIONAL)
+            .DataType({ge::DT_BF16, ge::DT_BF16, ge::DT_BF16})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+            .IgnoreContiguous();
+        this->Input("dequant_scale_query")
+            .ParamType(OPTIONAL)
+            .DataType({ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+            .AutoContiguous();
+        this->Input("dequant_scale_key")
+            .ParamType(OPTIONAL)
+            .DataType({ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
             .AutoContiguous();
         this->Output("attn_out")
             .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT16, ge::DT_BF16})
-            .Format({ge::FORMAT_ND, ge::FORMAT_ND})
+            .DataType({ge::DT_FLOAT16, ge::DT_BF16, ge::DT_BF16})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
             .AutoContiguous();
         this->Output("softmax_lse")
             .ParamType(OPTIONAL)
-            .DataType({ge::DT_FLOAT, ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND, ge::FORMAT_ND})
+            .DataType({ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
             .AutoContiguous();
         this->Attr("head_dim_v").AttrType(OPTIONAL).Int(512);
         this->Attr("softmax_scale").AttrType(OPTIONAL).Float(1.0f);

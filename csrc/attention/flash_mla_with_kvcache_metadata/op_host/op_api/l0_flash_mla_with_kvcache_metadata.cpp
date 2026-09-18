@@ -30,7 +30,7 @@ const aclTensor *FlashMlaWithKvcacheMetadata(const aclTensor *cuSeqlensQOptional
                                              const aclTensor *sequsedQOptional, int64_t maxSeqlenQ, int64_t maxSeqlenKv,
                                              int64_t numHeadsQ, int64_t numHeadsKv, int64_t headDimQk, int64_t headDimV,
                                              int64_t maskMode, const char *layoutQ, const char *socVersion,
-                                             int64_t aicCoreNum, int64_t aivCoreNum, const aclTensor *metaData,
+                                             int64_t aicCoreNum, int64_t aivCoreNum, int64_t isC8, const aclTensor *metaData,
                                              aclOpExecutor *executor)
 {
     L0_DFX(FlashMlaWithKvcacheMetadata, cuSeqlensQOptional, cacheSeqlensOptional, sequsedQOptional, maxSeqlenQ,
@@ -42,10 +42,10 @@ const aclTensor *FlashMlaWithKvcacheMetadata(const aclTensor *cuSeqlensQOptional
     auto ret = ADD_TO_LAUNCHER_LIST_AICPU(
         FlashMlaWithKvcacheMetadata,
         OP_ATTR_NAMES({"max_seqlen_q", "max_seqlen_kv", "num_heads_q", "num_heads_kv", "head_dim_qk", "head_dim_v",
-                       "mask_mode", "layout_q", "soc_version", "aic_core_num", "aiv_core_num"}),
+                       "mask_mode", "layout_q", "soc_version", "aic_core_num", "aiv_core_num", "is_c8"}),
         OP_INPUT(cuSeqlensQOptional, cacheSeqlensOptional, sequsedQOptional), OP_OUTPUT(metaData),
         OP_ATTR(maxSeqlenQ, maxSeqlenKv, numHeadsQ, numHeadsKv, headDimQk, headDimV, maskMode, layoutQ, socVersion,
-                aicCoreNum, aivCoreNum));
+                aicCoreNum, aivCoreNum, isC8));
     OP_CHECK(ret == ACL_SUCCESS,
              OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "FlashMlaWithKvcacheMetadata ADD_TO_LAUNCHER_LIST_AICPU failed."),
              return nullptr);

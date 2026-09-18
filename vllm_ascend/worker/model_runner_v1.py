@@ -225,7 +225,11 @@ from vllm_ascend.worker.device_metadata import (
     DeviceMetadataTask,
     DeviceMetadataTaskProvider,
 )
-from vllm_ascend.worker.flash_kv_cache import create_flash_kernel_block_view
+from vllm_ascend.worker.flash_kv_cache import (
+    create_flash_kernel_block_view,
+    customize_flash_mla_c8_spec,
+    split_flash_mla_c8_cache,
+)
 from vllm_ascend.worker.kvpp_cache import allocate_kvpp_cache
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.utils import AscendKVBlockZeroer, disable_compilation
@@ -5079,7 +5083,11 @@ class NPUModelRunner(GPUModelRunner):
                                 spec.state_content_size_bytes // get_dtype_size(spec.dtype),
                             )
                         layer = self.compilation_config.static_forward_context[layer_name]
-                        kv_caches[layer_name] = cache.squeeze(1) if isinstance(layer, MLAAttention) else cache
+                        if isinstance(layer, MLAAttention):
+                            cache = cache.squeeze(1)
+                            if spec.dtype == torch.float8_e4m3fn:
+                                cache = split_flash_mla_c8_cache(cache)
+                        kv_caches[layer_name] = cache
                     continue
 
                 # TODO: remove this after the OOM issue is located and fixed, otherwise, some model may
@@ -5783,6 +5791,8 @@ class NPUModelRunner(GPUModelRunner):
                     if spec := attn_module.get_kv_cache_spec(self.vllm_config):
                         # Keep the upstream spec verbatim, including causal
                         # draft grouping and any manager-selected padding.
+                        if getattr(getattr(attn_module, "impl", None), "fa_quant_layer", False):
+                            spec = customize_flash_mla_c8_spec(spec, attn_module)
                         kv_cache_spec[layer_name] = spec
                         attn_layer_names.add(layer_name)
                 elif self.use_sparse:

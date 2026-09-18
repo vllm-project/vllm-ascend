@@ -21,7 +21,8 @@ OP_TYPE_REGISTER(FlashMlaWithKvcache);
 const std::array<const aclTensor *, 2> FlashMlaWithKvcache(
     const aclTensor *q, const aclTensor *kCache, const aclTensor *blockTableOptional,
     const aclTensor *cacheSeqlensOptional, const aclTensor *cuSeqlensQOptional, const aclTensor *sequsedQOptional,
-    const aclTensor *attnMaskOptional, const aclTensor *metadataOptional, int32_t headDimV, double softmaxScale,
+    const aclTensor *attnMaskOptional, const aclTensor *metadataOptional, const aclTensor *queryRopeOptional, const aclTensor *keyRopeOptional,
+    const aclTensor *dequantScaleQueryOptional, const aclTensor *dequantScaleKeyOptional, int32_t headDimV, double softmaxScale,
     int32_t maskMode, int32_t maxSeqlenQ, int32_t maxSeqlenKV, const char *layoutQ, const char *layoutKv,
     const char *layoutOut, int32_t returnSoftmaxLse, aclOpExecutor *executor)
 {
@@ -48,12 +49,13 @@ const std::array<const aclTensor *, 2> FlashMlaWithKvcache(
         metadataOptional = executor->AllocTensor(DataType::DT_INT32, Format::FORMAT_ND, Format::FORMAT_ND);
     }
 
-    auto attentionOutAlloc = executor->AllocTensor(q->GetDataType(), Format::FORMAT_ND, Format::FORMAT_ND);
+    auto attentionOutAlloc = executor->AllocTensor(q->GetDataType() == DataType::DT_FLOAT8_E4M3FN ? DataType::DT_BF16 : q->GetDataType(), Format::FORMAT_ND, Format::FORMAT_ND);
     auto softmaxLseAlloc = executor->AllocTensor(DataType::DT_FLOAT, Format::FORMAT_ND, Format::FORMAT_ND);
 
     auto ret = INFER_SHAPE(FlashMlaWithKvcache,
                            OP_INPUT(q, kCache, blockTableOptional, cacheSeqlensOptional, cuSeqlensQOptional,
-                                    sequsedQOptional, attnMaskOptional, metadataOptional),
+                                    sequsedQOptional, attnMaskOptional, metadataOptional, queryRopeOptional, keyRopeOptional,
+                                    dequantScaleQueryOptional, dequantScaleKeyOptional),
                            OP_OUTPUT(attentionOutAlloc, softmaxLseAlloc),
                            OP_ATTR(headDimV, softmaxScale, maskMode, maxSeqlenQ, maxSeqlenKV, layoutQ, layoutKv,
                                    layoutOut, returnSoftmaxLse));
@@ -64,7 +66,8 @@ const std::array<const aclTensor *, 2> FlashMlaWithKvcache(
 
     ret = ADD_TO_LAUNCHER_LIST_AICORE(FlashMlaWithKvcache,
                                       OP_INPUT(q, kCache, blockTableOptional, cacheSeqlensOptional, cuSeqlensQOptional,
-                                               sequsedQOptional, attnMaskOptional, metadataOptional),
+                                               sequsedQOptional, attnMaskOptional, metadataOptional, queryRopeOptional, keyRopeOptional,
+                                    dequantScaleQueryOptional, dequantScaleKeyOptional),
                                       OP_OUTPUT(attentionOutAlloc, softmaxLseAlloc),
                                       OP_ATTR(headDimV, softmaxScale, maskMode, maxSeqlenQ, maxSeqlenKV, layoutQ,
                                               layoutKv, layoutOut, returnSoftmaxLse));

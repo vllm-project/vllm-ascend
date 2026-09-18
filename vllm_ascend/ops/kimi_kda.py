@@ -754,9 +754,8 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             assert spec_token_indices is not None
             assert non_spec_token_indices is not None
             assert spec_token_indices.numel() + non_spec_token_indices.numel() <= num_actual_tokens
-            # FULL graphs may leave rows outside both live index sets. Only
-            # those mixed batches need initialization before the scatter.
-            output.zero_()
+            # The two index sets cover the live tokens. Graph padding outside
+            # those sets has no output contract and needs no initialization.
             output.index_copy_(1, spec_token_indices, core_spec)
             output.index_copy_(1, non_spec_token_indices, core_non_spec)
             norm_input = output
@@ -769,5 +768,3 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         # kernel. Pure decode/prefill batches can consume the kernel result
         # directly, without clearing and copying an intermediate output.
         self.o_norm(norm_input, g2, out=output)
-        if num_actual_tokens < core_attn_out.shape[1]:
-            core_attn_out[:, num_actual_tokens:].zero_()

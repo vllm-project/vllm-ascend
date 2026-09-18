@@ -74,6 +74,18 @@ aclnnStatus aclnnFlashMlaWithKvcacheGetWorkspaceSize(
     const char *layoutOut, int64_t returnSoftmaxLse, const aclTensor *attnOut, const aclTensor *softmaxLseOptional,
     uint64_t *workspaceSize, aclOpExecutor **executor);
 
+aclnnStatus aclnnFlashMlaWithKvcacheC8GetWorkspaceSize(
+    const aclTensor *q, const aclTensor *kCache, const aclTensor *blockTableOptional,
+    const aclTensor *cacheSeqlensOptional, const aclTensor *cuSeqlensQOptional, const aclTensor *sequsedQOptional,
+    const aclTensor *attnMaskOptional, const aclTensor *metadataOptional, const aclTensor *queryRopeOptional, const aclTensor *keyRopeOptional,
+    const aclTensor *dequantScaleQueryOptional, const aclTensor *dequantScaleKeyOptional, int64_t headDimV, double softmaxScale,
+    int64_t maskMode, int64_t maxSeqlenQ, int64_t maxSeqlenKV, const char *layoutQ, const char *layoutKv,
+    const char *layoutOut, int64_t returnSoftmaxLse, const aclTensor *attnOut, const aclTensor *softmaxLseOptional,
+    uint64_t *workspaceSize, aclOpExecutor **executor);
+aclnnStatus aclnnFlashMlaWithKvcacheC8(void *workspace, uint64_t workspaceSize, aclOpExecutor *executor,
+                                     const aclrtStream stream);
+
+
 /**
  * @brief aclnnFlashMlaWithKvcache的第二段接口，用于执行计算。
  * @param workspace       [IN] 由第一段接口计算得到的workspace设备内存指针。

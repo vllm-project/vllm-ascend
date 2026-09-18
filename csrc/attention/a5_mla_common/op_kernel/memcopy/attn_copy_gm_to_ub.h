@@ -199,10 +199,11 @@ private:
                     dataCopyPadParams);
     }
 
-    __aicore__ inline void ProcessS1G(FaUbTensor<T> &dstTensor, FaGmTensor<T, GM_FORMAT> &srcTensor,
+    template <typename FaGmTensorType>
+    __aicore__ inline void ProcessS1G(FaUbTensor<T> &dstTensor, FaGmTensorType &srcTensor,
                                       GmCoordGs1Merge &gmCoord)
     {
-        OffsetCalculator<GM_FORMAT> &offsetCalculator = srcTensor.offsetCalculator;
+        auto &offsetCalculator = srcTensor.offsetCalculator;
         uint64_t gSize = offsetCalculator.GetDimG();
         uint32_t s1IdxStart = gmCoord.gS1Idx / gSize;
         uint32_t gIdxStart = gmCoord.gS1Idx % gSize;
