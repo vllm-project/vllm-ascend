@@ -58,6 +58,33 @@ def test_sfa_dcp_validation_only_bypasses_separate_draft(model_role):
             enable_sfa.assert_called_once_with(config)
 
 
+@pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5])
+@pytest.mark.parametrize("enable_sfa_c8", [False, True])
+@pytest.mark.parametrize("enable_li_c8", [False, True])
+def test_sfa_dcp_c8_hardware_validation(device_type, enable_sfa_c8, enable_li_c8):
+    config = SimpleNamespace(
+        use_v2_model_runner=True,
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=1, tensor_parallel_size=4, decode_context_parallel_size=4
+        ),
+        speculative_config=None,
+        additional_config={
+            "enable_sparse_sfa_c8": enable_sfa_c8,
+            "enable_sparse_li_c8": enable_li_c8,
+        },
+    )
+    with (
+        patch("vllm_ascend.platform.KVPPConfig.from_vllm_config", return_value=SimpleNamespace(size=1)),
+        patch("vllm_ascend.platform.enable_sfa_dcp_replicated_indexer", return_value=True),
+        patch("vllm_ascend.platform.get_current_hardware_profile", return_value=get_hardware_profile(device_type)),
+    ):
+        if device_type == AscendDeviceType.A5 and enable_sfa_c8:
+            with pytest.raises(NotImplementedError, match="SFA C8 DCP"):
+                _validate_parallel_config(config)
+        else:
+            _validate_parallel_config(config)
+
+
 def test_visible_device_id_to_physical_device_id():
     with (
         patch("vllm_ascend.platform.bootstrap_custom_op_env"),

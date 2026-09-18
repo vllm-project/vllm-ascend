@@ -1554,9 +1554,14 @@ def _validate_parallel_config(vllm_config: VllmConfig) -> None:
                 f"is pcp_size({pcp_size}) or tp_size({parallel_config.tensor_parallel_size}) "
                 f"* pcp_size({pcp_size}) ({full_dcp_size})."
             )
-        if not get_current_hardware_profile().supports(HardwareCapability.SFA_DCP_REPLICATED_INDEXER):
+        # A5 supports non-C8 SFA DCP, but its SFA C8 operator does not yet
+        # support DCP with a replicated indexer. Reject that combination early.
+        if vllm_config.additional_config.get("enable_sparse_sfa_c8", False) and not (
+            get_current_hardware_profile().supports(HardwareCapability.SFA_C8_DCP_REPLICATED_INDEXER)
+        ):
             raise NotImplementedError(
-                "SFA DCP with replicated indexer is not supported by the current hardware profile."
+                "SFA C8 DCP with replicated indexer is not supported by the current hardware profile. "
+                "Disable enable_sparse_sfa_c8 to use non-C8 SFA DCP."
             )
 
 
