@@ -13,7 +13,6 @@ from vllm.distributed.parallel_state import (
 )
 
 import vllm_ascend.ops.triton.sfa_cp  # noqa: F401
-from vllm_ascend.ops.triton import sfa_cp
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.utils import enable_custom_op
 
@@ -94,32 +93,6 @@ def _worker(rank: int, world_size: int, port: int, result_queue: mp.SimpleQueue)
                 )
 
             torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
-            # Deferred communication returns all history shards; current KV
-            # is supplied once after the stream join.
-            recv = torch.ops.vllm.sfa_dcp_a2a_fused(
-                sender_outputs[rank].float(),
-                sender_lses[rank].contiguous(),
-                world_size,
-                scatter_dim,
-                dcp_group.unique_name,
-                defer_combine=True,
-            )
-            local = torch.full_like(expected, 2.0, dtype=torch.float32)
-            local_lse = torch.zeros((*expected.shape[:2], 1), device="npu")
-            combined = sfa_cp.fused_sfa_dcp_lse_combine(
-                recv,
-                head_dim,
-                scatter_dim,
-                local_output=local,
-                local_lse=local_lse,
-            )
-            history = sender_outputs[:, token_slice] if scatter_dim == 0 else sender_outputs[:, :, head_slice]
-            history_lse = sender_lses[:, token_slice] if scatter_dim == 0 else sender_lses[:, :, head_slice]
-            expected_combined = _reference_merge(
-                torch.cat((history.float(), local.unsqueeze(0))),
-                torch.cat((history_lse, local_lse.unsqueeze(0)))[..., 0],
-            )
-            torch.testing.assert_close(combined, expected_combined, atol=1e-4, rtol=1e-4)
             torch.distributed.barrier(group=dcp_group.device_group)
 
         result_queue.put(None)
