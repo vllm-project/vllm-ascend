@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 from vllm.config import CacheConfig, SchedulerConfig, VllmConfig
 from vllm.distributed.parallel_state import GroupCoordinator
@@ -24,6 +25,162 @@ from vllm_ascend.attention.mla_v1 import (
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ
+
+
+@pytest.mark.parametrize(
+    "enable_mlapo,fa_quant_layer,is_draft,disable_after_init,uses_fused_weights",
+    [
+        (True, False, False, False, True),
+        (False, True, False, False, True),
+        (True, True, False, False, True),
+        (False, False, False, False, False),
+        (True, False, True, False, False),
+        (True, True, True, False, True),
+        (True, False, False, True, False),
+    ],
+)
+def test_mxfp8_mla_restores_nd_before_weight_split(
+    enable_mlapo, fa_quant_layer, is_draft, disable_after_init, uses_fused_weights
+):
+    scheme = AscendW8A8MXFP8DynamicLinearMethod.__new__(AscendW8A8MXFP8DynamicLinearMethod)
+    scheme.group_size = 32
+    projections = []
+    for output_size, input_size in ((128, 256), (192, 64)):
+        layer = torch.nn.Module()
+        layer.quant_method = SimpleNamespace(quant_method=scheme)
+        layer.weight = torch.nn.Parameter(torch.randn(output_size, input_size).to(torch.float8_e4m3fn), False)
+        layer.weight_scale = torch.nn.Parameter(
+            torch.randint(1, 128, (output_size, input_size // scheme.group_size), dtype=torch.uint8), False
+        )
+        projections.append(layer)
+    fused_qkv_a_proj, q_b_proj = projections
+    original_weights = [layer.weight.float().clone() for layer in projections]
+    original_scales = [layer.weight_scale.clone() for layer in projections]
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(runner_type="draft" if is_draft else "generate", dtype=torch.bfloat16),
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
+        speculative_config=None,
+    )
+    with (
+        patch("vllm_ascend.attention.mla_v1.get_current_vllm_config", return_value=config),
+        patch("vllm_ascend.attention.mla_v1.get_ascend_config", return_value=SimpleNamespace(enable_kv_nz=False)),
+        patch(
+            "vllm_ascend.attention.mla_v1.get_current_hardware_profile",
+            return_value=get_hardware_profile(AscendDeviceType.A5),
+        ),
+        patch("vllm_ascend.attention.mla_v1.enabling_mlapo", return_value=enable_mlapo),
+        patch("vllm_ascend.attention.mla_v1.enable_fa_quant", return_value=fa_quant_layer),
+        patch("vllm_ascend.utils._should_trans_nz", return_value=True),
+        patch("torch_npu.npu_format_cast", side_effect=lambda weight, fmt, **kwargs: weight.clone()) as cast,
+    ):
+        impl = AscendMLAImpl(
+            num_heads=2,
+            head_size=64,
+            scale=1.0,
+            num_kv_heads=1,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="auto",
+            logits_soft_cap=None,
+            attn_type=None,
+            kv_sharing_target_layer_name=None,
+            q_lora_rank=64,
+            kv_lora_rank=32,
+            qk_nope_head_dim=64,
+            qk_rope_head_dim=32,
+            qk_head_dim=96,
+            v_head_dim=128,
+            rotary_emb=None,
+            fused_qkv_a_proj=fused_qkv_a_proj,
+            q_b_proj=q_b_proj,
+            kv_b_proj=SimpleNamespace(weight=torch.randn(384, 32), quant_method=UnquantizedLinearMethod()),
+            o_proj=None,
+        )
+        if disable_after_init:
+            # Embedded draft modules such as K3 DSpark disable MLAPO here.
+            impl.enable_mlapo = False
+        for layer in projections:
+            scheme.process_weights_after_loading(layer)
+
+        assert cast.call_count == 2
+        source_ptrs = [layer.weight.data_ptr() for layer in projections]
+        cast.reset_mock()
+        with patch.object(impl, "_load_fa_quant_scales"):
+            impl.process_weights_after_loading(torch.bfloat16)
+        assert [layer.weight.data_ptr() for layer in projections] == source_ptrs
+        if not uses_fused_weights:
+            assert not hasattr(impl, "weight_dq")
+            return
+
+        # CPU mocks do not model NZ storage. Check that kv_b and both prolog
+        # sources are converted to ND before the three prolog NZ conversions.
+        assert [call.args[1] for call in cast.call_args_list] == [ACL_FORMAT_FRACTAL_ND] * 3 + [
+            ACL_FORMAT_FRACTAL_NZ
+        ] * 3
+        torch.testing.assert_close(impl.weight_dq.float(), original_weights[0][:64].T)
+        torch.testing.assert_close(impl.weight_dkv_kr.float(), original_weights[0][64:].T)
+        torch.testing.assert_close(impl.weight_uq_qr.float(), original_weights[1].T)
+        torch.testing.assert_close(impl.dequant_scale_w_dq, original_scales[0][:64])
+        torch.testing.assert_close(impl.dequant_scale_w_dkv_kr, original_scales[0][64:])
+        torch.testing.assert_close(impl.dequant_scale_w_uq_qr, original_scales[1])
+
+
+@pytest.mark.parametrize("is_native,fa_quant_layer", [(False, False), (False, True), (True, False)])
+def test_mla_prolog_normalizes_sources_before_tensor_operations(is_native, fa_quant_layer):
+    impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl.enable_mlapo = True
+    impl.fa_quant_layer = fa_quant_layer
+    impl._mlapo_uses_native_weights = is_native
+    impl.q_lora_rank = 64
+    impl.num_heads = 3
+    impl.num_heads_padded = 4
+    impl.head_padding = 1
+    impl.qk_head_dim = 96
+    impl.W_UK_T = torch.randn(3, 64, 32)
+    dtype = torch.bfloat16 if is_native else torch.float8_e4m3fn
+    fused_nd = torch.randn(256, 128).to(dtype)
+    q_nd = torch.randn(64, 288).to(dtype)
+    # Opaque source markers deliberately reject tensor operations: only the
+    # mocked ND conversion may expose tensors for slicing/transpose/padding.
+    fused_source, q_source = object(), object()
+    impl.fused_qkv_a_proj = SimpleNamespace(
+        weight=SimpleNamespace(data=fused_source), weight_scale=torch.ones(4, 128, 2, dtype=torch.uint8)
+    )
+    impl.q_proj = SimpleNamespace(
+        weight=SimpleNamespace(data=q_source), weight_scale=torch.ones(1, 288, 2, dtype=torch.uint8)
+    )
+
+    def format_cast(weight, fmt):
+        if fmt == ACL_FORMAT_FRACTAL_ND:
+            source = fused_nd if weight is fused_source else q_nd
+            assert weight is fused_source or weight is q_source
+            return source.T.contiguous() if is_native else source
+        assert fmt == ACL_FORMAT_FRACTAL_NZ
+        assert isinstance(weight, torch.Tensor) and weight.is_contiguous()
+        return weight.clone()
+
+    with (
+        patch("torch_npu.npu_format_cast", side_effect=format_cast) as cast,
+        patch(
+            "vllm_ascend.attention.mla_v1.get_current_hardware_profile",
+            return_value=get_hardware_profile(AscendDeviceType.A5),
+        ),
+        patch("vllm_ascend.attention.mla_v1.get_ascend_config"),
+        patch.object(impl, "_load_fa_quant_scales"),
+    ):
+        impl._process_weights_for_fused(torch.bfloat16)
+
+    assert [call.args[1] for call in cast.call_args_list] == [ACL_FORMAT_FRACTAL_ND] * 2 + [ACL_FORMAT_FRACTAL_NZ] * 3
+    torch.testing.assert_close(impl.weight_dq.float(), fused_nd[:, :64].float())
+    torch.testing.assert_close(impl.weight_dkv_kr.float(), fused_nd[:, 64:].float())
+    torch.testing.assert_close(impl.weight_uq_qr[:, :288].float(), q_nd.float())
+    if is_native:
+        assert impl.weight_uq_qr.shape == (64, 384)
+        assert torch.count_nonzero(impl.weight_uq_qr[:, 288:]) == 0
+    assert impl.fused_qkv_a_proj.weight.data is fused_source
+    assert impl.q_proj.weight.data is q_source
 
 
 class TestAscendMLABackend(TestBase):

@@ -1097,8 +1097,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         assert self.fused_qkv_a_proj is not None
 
         is_native = self._mlapo_uses_native_weights
-        fused_weight = self.fused_qkv_a_proj.weight.data
-        weight_uq_qr = self.q_proj.weight.data
+        # Linear weight processing may already have converted these to NZ.
+        # Split, transpose and pad in ND before converting the prolog weights.
+        fused_weight = torch_npu.npu_format_cast(self.fused_qkv_a_proj.weight.data, ACL_FORMAT_FRACTAL_ND)
+        weight_uq_qr = torch_npu.npu_format_cast(self.q_proj.weight.data, ACL_FORMAT_FRACTAL_ND)
         if is_native:
             # Native Linear stores [out_features, in_features], while the
             # prolog consumes [in_features, out_features].
