@@ -1629,6 +1629,12 @@ def _sync_forced_compile_keys_to_singleton(vllm_config: VllmConfig, ascend_confi
     makes inproc match the spawn rebuild semantics. No-op whenever the dict
     and singleton already agree (e.g. the inductor track pins both keys
     False before step 5 ever runs).
+
+    Config-refactor ruling (09 §5.2 #9, 2026-09-18): kept as the ONE
+    sanctioned exception — it plugs a COMMUNITY dual-source gap (step 7
+    writes only the dict + the identity cache) whose removal would regress
+    the default inproc track to the #65 crash. To be removed when the
+    dual-source problem is rooted out (see the M5 TODO ledger).
     """
     forced = (vllm_config.additional_config or {}).get("ascend_compilation_config", {})
     if isinstance(forced, dict):
