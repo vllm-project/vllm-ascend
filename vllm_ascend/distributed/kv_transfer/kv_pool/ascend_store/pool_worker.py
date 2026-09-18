@@ -2375,16 +2375,22 @@ class KVPoolWorker:
         """Start current-layer put only once KV is ready at attention entry."""
         if not is_kv_save_role(self.kv_role, self.consumer_is_to_put):
             return
+        assert self.sync_save_events is not None
+        assert self.layer_save_finished_events is not None
+        assert self.kv_send_thread is not None
+        sync_save_events = self.sync_save_events
+        save_finished_events = self.layer_save_finished_events
+        send_thread = self.kv_send_thread
         self._attention_saved_layers.add(layer_id)
-        self.sync_save_events[layer_id].record()
+        sync_save_events[layer_id].record()
         tasks = self.layer_save_tasks[layer_id]
         if not tasks:
-            self.layer_save_finished_events[layer_id].set()
+            save_finished_events[layer_id].set()
             return
         for task in tasks:
             for block_range in task.block_ranges:
-                self.kv_send_thread.add_stored_request(block_range.request.req_id)
-        self.kv_send_thread.add_request(tasks)
+                send_thread.add_stored_request(block_range.request.req_id)
+        send_thread.add_request(tasks)
 
     def _finish_attention_window(self) -> None:
         try:
@@ -2570,7 +2576,9 @@ class KVPoolWorker:
 
     def _wait_for_final_layer_save(self, num_local: int, send_thread: KVTransferThread) -> None:
         """Keep layerwise source buffers alive until the step's last PUT commits."""
-        while not self.layer_save_finished_events[num_local - 1].wait(timeout=10):
+        assert self.layer_save_finished_events is not None
+        save_finished_events = self.layer_save_finished_events
+        while not save_finished_events[num_local - 1].wait(timeout=10):
             send_thread.raise_if_failed()
             logger.info("Layerwise %d save not done, keep waiting", num_local - 1)
         send_thread.raise_if_failed()
@@ -2578,8 +2586,8 @@ class KVPoolWorker:
         for layer_id in range(num_local):
             if layer_id in reuse_source_layers:
                 continue
-            if self.layer_save_finished_events[layer_id].is_set():
-                self.layer_save_finished_events[layer_id].clear()
+            if save_finished_events[layer_id].is_set():
+                save_finished_events[layer_id].clear()
 
     def wait_for_save(self, connector_metadata: AscendConnectorMetadata):
         current_event = None

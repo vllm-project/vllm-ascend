@@ -1610,6 +1610,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         self._put_started_keys_lock = put_started_keys_lock or threading.Lock()
         self._session_tracker = session_tracker
         self._active_put_keys: set[str] | None = None
+        self._group_put_keys: dict[int, set[str] | None] = {}
         self.group_builders: list[LayerBatchBuilder] | None = group_builders
         if group_builders is not None:
             self.layer_batch_builder = group_builders[0]
@@ -1715,8 +1716,6 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
 
     def _handle_range_layer_tasks(self, transfer_tasks: list[LayerTransferTask]) -> None:
         layer_id = transfer_tasks[0].layer_id
-        if not hasattr(self, "_group_put_keys"):
-            self._group_put_keys = {}
         try:
             for task in transfer_tasks:
                 shared = task.shared_block_data
@@ -1890,6 +1889,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         self._invalid_block_ids_lock = invalid_block_ids_lock or threading.Lock()
         self._load_abort_event = load_abort_event or threading.Event()
         self._active_load_indices: set[int] | None = None
+        self._group_load_indices: dict[int, set[int] | None] = {}
         self.group_builders: list[LayerBatchBuilder] | None = group_builders
         if group_builders is not None:
             self.layer_batch_builder = group_builders[0]
@@ -1995,8 +1995,6 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
                     logger.info("Layerwise %d load waits for attention compute start", layer_id)
             if self.external_slot_release_waiter is not None:
                 self.external_slot_release_waiter(layer_id)
-            if not hasattr(self, "_group_load_indices"):
-                self._group_load_indices = {}
             for task in data.transfer_tasks:
                 shared = task.shared_block_data
                 if shared is None:

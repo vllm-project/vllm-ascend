@@ -436,13 +436,13 @@ class KVPoolScheduler:
                     if len(codes) != len(batch) or any(type(code) is not int or code not in (0, 1) for code in codes):
                         raise RuntimeError("Block-key layerwise exists returned invalid results")
                     states.extend(codes)
-                hits = []
+                existing_hashes = []
                 offset = 0
                 for block_hash, block_keys in zip(allowed_hashes, keys_by_block):
                     if all(states[offset : offset + len(block_keys)]):
-                        hits.append(block_hash)
+                        existing_hashes.append(block_hash)
                     offset += len(block_keys)
-                return hits
+                return existing_hashes
             key_infos = self.store_scheduler.batch_get_key_info(all_keys)
             if len(key_infos) != len(all_keys):
                 logger.error(

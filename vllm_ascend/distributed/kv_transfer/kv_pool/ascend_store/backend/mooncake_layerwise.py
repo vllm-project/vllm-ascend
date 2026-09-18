@@ -175,8 +175,8 @@ def _prepare_group_sessions(worker: KVPoolWorker, requests: list[ReqMeta]) -> di
     is not a portable snapshot: the shared coordinator supplies aligned extents
     and masks for the reachable state at each boundary.
     """
-    result = {group: [] for group in range(worker.num_kv_cache_groups)}
-    get_slots = []
+    result: dict[int, list[ReqMeta]] = {group: [] for group in range(worker.num_kv_cache_groups)}
+    get_slots: list[tuple[ReqMeta, str, int, int | None]] = []
     tracker = worker._layerwise_session_tracker
     worker._current_layerwise_request_ids = {request.req_id for request in requests}
     worker._current_layerwise_last_chunk_req_ids = {request.req_id for request in requests if request.is_last_chunk}
