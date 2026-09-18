@@ -3,9 +3,6 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 import torch
 
-from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake import (
-    transfer as transfer_module,
-)
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.transfer import (
     AscendMooncakeTransfer,
     _plan_registration_ranges,
@@ -31,42 +28,6 @@ def _make_source(
     tensor.data_ptr.return_value = source_start
     tensor.nbytes = source_nbytes
     return tensor
-
-
-def test_initialize_engine_binds_npu_and_uses_ascend_protocol():
-    transfer = AscendMooncakeTransfer("producer-host", 3)
-    engine = MagicMock()
-    calls = []
-
-    def initialize(*args):
-        calls.append(("initialize", args))
-        return 0
-
-    engine.initialize.side_effect = initialize
-
-    with patch.object(
-        transfer_module.torch.npu,
-        "set_device",
-        side_effect=lambda device: calls.append(("set_device", device)),
-    ) as set_device:
-        result = transfer._initialize_engine(engine)
-
-    assert result == 0
-
-    set_device.assert_called_once_with(3)
-    engine.initialize.assert_called_once_with(
-        "producer-host",
-        "P2PHANDSHAKE",
-        "ascend",
-        "",
-    )
-    assert calls == [
-        ("set_device", 3),
-        (
-            "initialize",
-            ("producer-host", "P2PHANDSHAKE", "ascend", ""),
-        ),
-    ]
 
 
 def test_plan_source_whole_direct():
@@ -336,6 +297,27 @@ def test_plan_transfer_waves_all_bounce_has_no_registration_ranges():
     assert waves[0].sources[0].bounce_offset == 0
 
 
+def test_transfer_lazily_reuses_process_ascend_engine():
+    transfer = AscendMooncakeTransfer("producer-host", 3)
+    engine = MagicMock()
+
+    with (
+        patch(
+            "vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.transfer.global_te.get_transfer_engine",
+            return_value=engine,
+        ) as get_transfer_engine,
+        patch("vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.transfer.torch.npu.set_device") as set_device,
+    ):
+        assert transfer._ensure_engine() is engine
+        assert transfer._ensure_engine() is engine
+
+    set_device.assert_called_once_with(3)
+    get_transfer_engine.assert_called_once_with(
+        "producer-host",
+        device_name=None,
+    )
+
+
 def test_acquire_registration_ranges_registers_individually_and_reuses():
     transfer = AscendMooncakeTransfer("producer-host", 0)
     engine = MagicMock()
@@ -368,10 +350,7 @@ def test_acquire_registration_ranges_rolls_back_new_ranges_in_reverse():
     engine = MagicMock()
     engine.batch_register_memory.side_effect = [0, 0, 7]
     engine.unregister_memory.return_value = 0
-    ranges = tuple(
-        _RegistrationRangePlan(address, _MIB, (MagicMock(),))
-        for address in (4 * _MIB, 8 * _MIB, 12 * _MIB)
-    )
+    ranges = tuple(_RegistrationRangePlan(address, _MIB, (MagicMock(),)) for address in (4 * _MIB, 8 * _MIB, 12 * _MIB))
 
     with (
         patch.object(transfer, "_ensure_engine", return_value=engine),
@@ -396,9 +375,7 @@ def test_release_registration_ranges_waits_for_last_user():
     engine = MagicMock()
     engine.batch_register_memory.return_value = 0
     engine.unregister_memory.return_value = 0
-    ranges = (
-        _RegistrationRangePlan(4 * _MIB, 2 * _MIB, (MagicMock(),)),
-    )
+    ranges = (_RegistrationRangePlan(4 * _MIB, 2 * _MIB, (MagicMock(),)),)
 
     with patch.object(transfer, "_ensure_engine", return_value=engine):
         first = transfer.acquire_registration_ranges(ranges)
@@ -420,9 +397,7 @@ def test_release_registration_ranges_retains_owner_on_failure():
     engine.batch_register_memory.return_value = 0
     engine.unregister_memory.return_value = 7
     owner = MagicMock()
-    ranges = (
-        _RegistrationRangePlan(4 * _MIB, 2 * _MIB, (owner,)),
-    )
+    ranges = (_RegistrationRangePlan(4 * _MIB, 2 * _MIB, (owner,)),)
 
     with patch.object(transfer, "_ensure_engine", return_value=engine):
         addresses = transfer.acquire_registration_ranges(ranges)

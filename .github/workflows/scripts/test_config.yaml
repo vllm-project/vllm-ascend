@@ -170,6 +170,7 @@ estimated_times:
   tests/e2e/pull_request/two_card/test_data_parallel.py: 520
   tests/e2e/pull_request/two_card/test_deepseek_multistream_moe.py: 120
   tests/e2e/pull_request/two_card/test_disaggregated_encoder.py: 230
+  tests/e2e/pull_request/two_card/test_ec_mooncake_encoder_output.py: 900
   tests/e2e/pull_request/two_card/test_gpt_oss_distributed.py: 180
   tests/e2e/pull_request/two_card/rlhf/consistency/test_moe_routing_replay.py: 560
   tests/e2e/pull_request/two_card/test_prefix_caching.py: 420

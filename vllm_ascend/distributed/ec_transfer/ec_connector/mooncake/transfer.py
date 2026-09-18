@@ -2,6 +2,7 @@
 # This file is a part of the vllm-ascend project.
 # SPDX-License-Identifier: Apache-2.0
 """Ascend Direct initialization for an ECMooncake TransferEngine."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -16,6 +17,9 @@ from vllm.utils.math_utils import round_down, round_up
 
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.memory import (
     ASCEND_DIRECT_MEMORY_ALIGNMENT,
+)
+from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import (
+    global_te,
 )
 
 if TYPE_CHECKING:
@@ -199,16 +203,28 @@ def _plan_transfer_waves(
 
 
 class AscendMooncakeTransfer(MooncakeTransfer):
-    """Bind the NPU before initializing an Ascend Direct transport."""
+    """Use the process-wide Ascend engine with EC registration ownership."""
 
     def __init__(self, hostname: str, device_index: int) -> None:
         super().__init__(hostname, "ascend")
         self._device_index = device_index
         self._direct_registrations: dict[int, _DirectRegistration] = {}
 
-    def _initialize_engine(self, engine: TransferEngine) -> int:
-        torch.npu.set_device(self._device_index)
-        return super()._initialize_engine(engine)
+    def _ensure_engine(self) -> TransferEngine:
+        engine = self._engine
+        if engine is not None:
+            return engine
+
+        with self._engine_lock:
+            engine = self._engine
+            if engine is None:
+                torch.npu.set_device(self._device_index)
+                engine = global_te.get_transfer_engine(
+                    self._hostname,
+                    device_name=None,
+                )
+                self._engine = engine
+        return engine
 
     def acquire_registration_ranges(
         self,
@@ -224,9 +240,7 @@ class AscendMooncakeTransfer(MooncakeTransfer):
 
                     if entry is not None:
                         if entry.nbytes != item.nbytes:
-                            raise RuntimeError(
-                                "Mooncake direct registration range changed size"
-                            )
+                            raise RuntimeError("Mooncake direct registration range changed size")
                         entry.users += 1
                         acquired.append(item.address)
                         continue
@@ -237,15 +251,12 @@ class AscendMooncakeTransfer(MooncakeTransfer):
                     )
                     if status != 0:
                         raise RuntimeError(
-                            "Mooncake direct registration failed for "
-                            f"address {item.address} with status {status}"
+                            f"Mooncake direct registration failed for address {item.address} with status {status}"
                         )
 
-                    self._direct_registrations[item.address] = (
-                        _DirectRegistration(
-                            nbytes=item.nbytes,
-                            owners=item.owners,
-                        )
+                    self._direct_registrations[item.address] = _DirectRegistration(
+                        nbytes=item.nbytes,
+                        owners=item.owners,
                     )
                     acquired.append(item.address)
 
@@ -303,8 +314,7 @@ class AscendMooncakeTransfer(MooncakeTransfer):
                 status = engine.unregister_memory(address)
                 if status != 0:
                     logger.error(
-                        "Mooncake direct registration cleanup failed for "
-                        "address %d with status %d",
+                        "Mooncake direct registration cleanup failed for address %d with status %d",
                         address,
                         status,
                     )
