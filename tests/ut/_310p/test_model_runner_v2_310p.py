@@ -19,6 +19,7 @@ from vllm_ascend._310p.worker.v2.model_state import (
     Ascend310PModelState,
 )
 from vllm_ascend._310p.worker.v2.sampler import Ascend310PSampler
+from vllm_ascend._310p.worker.v2.states import Ascend310PStagedWriteTensor
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
@@ -61,6 +62,71 @@ def test_config_accepts_tensor_parallelism() -> None:
     NPUModelRunner310V2._validate_config(_make_vllm_config())
 
 
+@pytest.mark.parametrize(
+    ("has_mamba", "uses_eagle_block_drop", "num_spec_tokens", "expected"),
+    [
+        (True, True, 2, True),
+        (True, True, 1, False),
+        (True, False, 2, False),
+        (False, True, 2, False),
+        (True, True, 0, False),
+    ],
+)
+def test_kv_zeroing_uses_narrow_310p_gate(
+    has_mamba: bool,
+    uses_eagle_block_drop: bool,
+    num_spec_tokens: int,
+    expected: bool,
+) -> None:
+    runner = object.__new__(NPUModelRunner310V2)
+    runner.speculative_config = (
+        SimpleNamespace(
+            num_speculative_tokens=num_spec_tokens,
+            use_eagle_block_drop=lambda: uses_eagle_block_drop,
+        )
+        if num_spec_tokens
+        else None
+    )
+    kv_cache_config = SimpleNamespace(
+        has_mamba_layers=has_mamba,
+        kv_cache_groups=[SimpleNamespace(is_eagle_group=uses_eagle_block_drop)],
+    )
+
+    with patch.object(model_runner_module, "vllm_version_is", return_value=False):
+        assert runner._needs_kv_cache_zeroing_310p(kv_cache_config) is expected
+
+
+def test_kv_zeroing_matches_v028_gate() -> None:
+    runner = object.__new__(NPUModelRunner310V2)
+    runner.speculative_config = SimpleNamespace(num_speculative_tokens=2)
+    kv_cache_config = SimpleNamespace(
+        has_mamba_layers=True,
+        kv_cache_groups=[SimpleNamespace(is_eagle_group=True)],
+    )
+
+    with patch.object(model_runner_module, "vllm_version_is", return_value=True):
+        assert runner._needs_kv_cache_zeroing_310p(kv_cache_config)
+
+
+def test_update_requests_filters_unneeded_upstream_zeroing() -> None:
+    runner = object.__new__(NPUModelRunner310V2)
+    runner.speculative_config = None
+    runner.kv_cache_config = SimpleNamespace(
+        has_mamba_layers=True,
+        kv_cache_groups=[SimpleNamespace(is_eagle_group=False)],
+    )
+    scheduler_output = SimpleNamespace(
+        kv_cache_block_copies=None,
+        new_block_ids_to_zero=[1, 2, 3],
+    )
+
+    with patch.object(NPUModelRunner, "update_requests") as update_requests:
+        runner.update_requests(scheduler_output)
+
+    assert scheduler_output.new_block_ids_to_zero is None
+    update_requests.assert_called_once_with(scheduler_output)
+
+
 def test_config_accepts_qwen3_vl_multimodal_mrope() -> None:
     """Qwen3-VL is multimodal + MRoPE; 310P MRv2 must allow it."""
     config = _make_vllm_config()
@@ -89,18 +155,23 @@ def test_310p_v2_does_not_advertise_shared_kv_backing() -> None:
 def test_310p_hybrid_postprocess_filters_padding_indices() -> None:
     state = object.__new__(Ascend310PMambaHybridModelState)
     state.num_accepted_tokens_gpu = torch.zeros(4, dtype=torch.int32)
+    state._num_accepted_tokens_cpu = np.zeros(4, dtype=np.int32)
+    state._align_mode = False
+    state.recoverssm = None
     idx_mapping = torch.tensor([0, -1, 2], dtype=torch.int32)
 
     state.postprocess_state(idx_mapping, num_sampled=3)
-    torch.testing.assert_close(state.num_accepted_tokens_gpu, torch.tensor([3, 0, 3, 0], dtype=torch.int32))
+    np.testing.assert_array_equal(state._num_accepted_tokens_cpu, np.array([3, 0, 3, 0], dtype=np.int32))
 
     num_sampled = torch.tensor([2, 9, 4], dtype=torch.int32)
     state.postprocess_state(idx_mapping, num_sampled=num_sampled)
-    torch.testing.assert_close(state.num_accepted_tokens_gpu, torch.tensor([2, 0, 4, 0], dtype=torch.int32))
+    np.testing.assert_array_equal(state._num_accepted_tokens_cpu, np.array([2, 0, 4, 0], dtype=np.int32))
 
 
 def test_310p_hybrid_model_state_initializes_full_upstream_contract() -> None:
     state = object.__new__(Ascend310PMambaHybridModelState)
+    state.max_num_reqs = 4
+    state._align_mode = False
     config = object()
     model = object()
     encoder_cache = object()
@@ -108,10 +179,12 @@ def test_310p_hybrid_model_state_initializes_full_upstream_contract() -> None:
     with (
         patch.object(AscendMambaHybridModelState, "__init__") as parent_init,
         patch.object(Ascend310PMambaHybridModelState, "_replace_310p_rope_state") as replace_rope,
+        patch("vllm_ascend._310p.worker.v2.model_state.vllm_version_is", return_value=True),
     ):
         Ascend310PMambaHybridModelState.__init__(state, config, model, encoder_cache, device)
     parent_init.assert_called_once_with(state, config, model, encoder_cache, device)
     replace_rope.assert_called_once_with(encoder_cache)
+    assert state.recoverssm is None
     assert isinstance(state._capture_seq_lens_by_ptr, dict)
 
 
@@ -141,6 +214,7 @@ def test_init_model_state_routes_qwen35_hybrid_to_310p() -> None:
 def test_get_kv_cache_spec_restores_qwen35_linear_attn() -> None:
     """Qwen3.5 GDN layers may be omitted by upstream V2; 310P restores them."""
     runner = object.__new__(NPUModelRunner310V2)
+    runner.device = torch.device("cpu")
     runner.vllm_config = object()
     restored = object()
     linear_layer = SimpleNamespace(get_kv_cache_spec=lambda _cfg: restored)
@@ -181,8 +255,6 @@ def test_kv_cache_allocation_qwen35_mamba_stays_nd() -> None:
         kv_cache_tensors=[
             SimpleNamespace(
                 size=160,
-                # vLLM #51718 renamed shared_by to layers; expose both fields
-                # so this focused 310P fixture stays valid on main and 0.28.0.
                 shared_by=[layer_name],
                 layers=[layer_name],
             )
@@ -230,8 +302,6 @@ def test_main_mamba_descriptor_allocates_private_per_layer_pages() -> None:
                 layer_names=layer_names,
             )
         ],
-        # Deliberately model a full standardized backing much larger than one
-        # layer. The 310P private allocator must not use this as layer bytes.
         kv_cache_tensors=[
             SimpleNamespace(
                 size=4096,
@@ -269,6 +339,7 @@ def test_runner_installs_310p_request_state() -> None:
         runner.num_speculative_steps = 0
         runner.vocab_size = 1024
         runner.device = device
+        runner.input_buffers = SimpleNamespace()
 
     with (
         patch.object(
@@ -282,6 +353,7 @@ def test_runner_installs_310p_request_state() -> None:
             "Ascend310PRequestState",
             return_value=request_state,
         ) as request_state_cls,
+        patch.object(model_runner_module, "is_pin_memory_available", return_value=False),
     ):
         runner = NPUModelRunner310V2(_make_vllm_config(), torch.device("cpu"))
 
@@ -307,6 +379,99 @@ def test_prepare_inputs_dispatches_to_310p_implementation() -> None:
 
     assert result is expected
     prepare_inputs_310p.assert_called_once_with(scheduler_output, batch_desc)
+
+
+def test_post_update_cpu_matches_upstream_bookkeeping() -> None:
+    idx_mapping_np = np.array([1, 0], dtype=np.int32)
+    query_start_loc_np = np.array([0, 2, 4], dtype=np.int32)
+    total_len = Ascend310PStagedWriteTensor(2, dtype=torch.int32, device=torch.device("cpu"))
+    num_computed_tokens = Ascend310PStagedWriteTensor(2, dtype=torch.int32, device=torch.device("cpu"))
+    req_states = SimpleNamespace(
+        all_token_ids=SimpleNamespace(cpu=torch.zeros((2, 8), dtype=torch.int32)),
+        last_sampled_tokens_cpu=torch.zeros((2, 1), dtype=torch.int64),
+        total_len=total_len,
+        num_computed_tokens_np=np.zeros(2, dtype=np.int32),
+        num_computed_tokens_cpu=torch.zeros(2, dtype=torch.int32),
+        num_computed_tokens=num_computed_tokens,
+    )
+    sampled_tokens = torch.tensor([[10, 11], [20, -1]], dtype=torch.int32)
+    num_sampled = torch.tensor([2, 1], dtype=torch.int32)
+    num_rejected = torch.tensor([0, 1], dtype=torch.int32)
+
+    sampled_cpu = model_runner_module._post_update_cpu(
+        idx_mapping_np,
+        query_start_loc_np,
+        req_states,
+        sampled_tokens,
+        num_sampled,
+        num_rejected,
+    )
+
+    torch.testing.assert_close(sampled_cpu, num_sampled)
+    np.testing.assert_array_equal(req_states.total_len.np, [1, 2])
+    np.testing.assert_array_equal(req_states.num_computed_tokens_np, [1, 2])
+    torch.testing.assert_close(req_states.last_sampled_tokens_cpu[:, 0], torch.tensor([20, 11]))
+    torch.testing.assert_close(
+        req_states.all_token_ids.cpu[1, :2],
+        torch.tensor([10, 11], dtype=torch.int32),
+    )
+    req_states.total_len.apply_write()
+    req_states.num_computed_tokens.apply_write()
+    torch.testing.assert_close(req_states.total_len.gpu, torch.tensor([1, 2], dtype=torch.int32))
+    torch.testing.assert_close(
+        req_states.num_computed_tokens.gpu,
+        torch.tensor([1, 2], dtype=torch.int32),
+    )
+
+
+def test_postprocess_sampled_keeps_last_token_on_device() -> None:
+    runner = object.__new__(NPUModelRunner310V2)
+    runner.device = torch.device("cpu")
+    runner.is_last_pp_rank = False
+    runner._postprocess_idx_mapping_np = np.array([1, 0], dtype=np.int32)
+    runner._postprocess_query_start_loc_np = np.array([0, 2, 4], dtype=np.int32)
+    runner.req_states = SimpleNamespace(
+        num_computed_tokens_cpu=torch.zeros(2, dtype=torch.int32),
+        last_sampled_tokens=torch.zeros((2, 1), dtype=torch.int64),
+        last_sampled_tokens_cpu=torch.tensor([[20], [11]], dtype=torch.int64),
+    )
+    runner.model_state = MagicMock()
+    runner.speculator = object()
+    runner.rejection_sampler = MagicMock()
+    runner._decode_req_indices = model_runner_module.CpuGpuBuffer(
+        2, dtype=torch.int64, device=runner.device, pin_memory=False
+    )
+    runner._decode_input_indices = model_runner_module.CpuGpuBuffer(
+        2, dtype=torch.int64, device=runner.device, pin_memory=False
+    )
+    idx_mapping = torch.tensor([1, 0], dtype=torch.int32)
+    sampled_tokens = torch.tensor([[10, 11], [20, -1]], dtype=torch.int32)
+    num_sampled = torch.tensor([2, 1], dtype=torch.int32)
+    num_rejected = torch.tensor([0, 1], dtype=torch.int32)
+    query_start_loc = torch.tensor([0, 2, 4], dtype=torch.int32)
+    runner._sampled_tokens_cpu = sampled_tokens
+    runner._num_sampled_cpu = num_sampled
+    runner._num_rejected_cpu = num_rejected
+
+    with patch.object(model_runner_module, "_post_update_cpu", return_value=num_sampled.cpu()) as post_update:
+        runner.postprocess_sampled(
+            idx_mapping,
+            sampled_tokens,
+            num_sampled,
+            num_rejected,
+            query_start_loc,
+        )
+
+    post_update.assert_called_once()
+    runner.model_state.postprocess_state.assert_called_once()
+    postprocess_args = runner.model_state.postprocess_state.call_args.args
+    torch.testing.assert_close(
+        postprocess_args[0],
+        torch.from_numpy(runner._postprocess_idx_mapping_np),
+    )
+    torch.testing.assert_close(postprocess_args[1], num_sampled.cpu())
+    assert postprocess_args[2] is runner.req_states.num_computed_tokens_cpu
+    torch.testing.assert_close(runner.req_states.last_sampled_tokens, runner.req_states.last_sampled_tokens_cpu)
 
 
 @pytest.mark.parametrize(("finished_req_ids", "sync_count"), [({"finished"}, 1), (set(), 0)])
@@ -386,6 +551,7 @@ def test_sampler_accepts_temperature_and_rejects_penalties() -> None:
     sampler = Ascend310PSampler(max_num_reqs=4, device="cpu", vocab_size=16)
     sampler.add_request(0, 4, SamplingParams(temperature=0))
     sampler.add_request(1, 4, SamplingParams(temperature=0.8, top_p=0.9, top_k=8, seed=7))
+    sampler.apply_staged_writes()
     assert sampler.sampling_states.temperature.gpu[1].item() == pytest.approx(0.8)
     assert sampler.sampling_states.top_p.gpu[1].item() == pytest.approx(0.9)
     assert int(sampler.sampling_states.top_k.gpu[1].item()) == 8
@@ -471,6 +637,7 @@ def test_sampler_top_k_restricts_softmax_mass() -> None:
 
     sampler = Ascend310PSampler(max_num_reqs=1, device="cpu", vocab_size=5)
     sampler.add_request(0, 2, SamplingParams(temperature=0.8, top_k=2, top_p=1.0, seed=7))
+    sampler.apply_staged_writes()
     # max at idx1, second at idx2; top_k=2 must keep only {1,2}
     logits = torch.tensor([[1.0, 5.0, 4.0, 0.0, -2.0]], dtype=torch.float32)
     captured: dict[str, torch.Tensor] = {}
@@ -496,6 +663,7 @@ def test_sampler_top_k_one_matches_argmax_with_temperature() -> None:
 
     sampler = Ascend310PSampler(max_num_reqs=1, device="cpu", vocab_size=5)
     sampler.add_request(0, 2, SamplingParams(temperature=0.9, top_k=1, top_p=1.0, seed=3))
+    sampler.apply_staged_writes()
     logits = torch.tensor([[0.2, 0.1, 3.0, 1.5, -1.0]], dtype=torch.float32)
 
     def _argmax_sample(probs: torch.Tensor, generators):
@@ -513,6 +681,7 @@ def test_sampler_top_p_restricts_softmax_mass() -> None:
 
     sampler = Ascend310PSampler(max_num_reqs=1, device="cpu", vocab_size=5)
     sampler.add_request(0, 2, SamplingParams(temperature=0.8, top_k=-1, top_p=0.5, seed=11))
+    sampler.apply_staged_writes()
     logits = torch.tensor([[5.0, 4.0, 1.0, 0.0, -1.0]], dtype=torch.float32)
     captured: dict[str, torch.Tensor] = {}
 
@@ -530,7 +699,8 @@ def test_sampler_top_p_restricts_softmax_mass() -> None:
     assert int(out.sampled_token_ids.view(-1)[0].item()) == 0
 
 
-def test_block_tables_use_cpu_metadata_for_gather_and_slot_mapping() -> None:
+@patch("vllm_ascend._310p.worker.v2.block_table.is_pin_memory_available", return_value=False)
+def test_block_tables_use_cpu_metadata_for_gather_and_slot_mapping(_pin_memory) -> None:
     block_tables = Ascend310PBlockTables(
         block_sizes=[4],
         max_num_reqs=3,
@@ -559,7 +729,8 @@ def test_block_tables_use_cpu_metadata_for_gather_and_slot_mapping() -> None:
     )
 
 
-def test_block_table_expands_logical_blocks_to_310p_kernel_blocks() -> None:
+@patch("vllm_ascend._310p.worker.v2.block_table.is_pin_memory_available", return_value=False)
+def test_block_table_expands_logical_blocks_to_310p_kernel_blocks(_pin_memory) -> None:
     block_tables = Ascend310PBlockTables(
         block_sizes=[128],
         max_num_reqs=1,
@@ -595,8 +766,6 @@ def test_kv_cache_allocation_uses_separate_nz_k_and_v() -> None:
         kv_cache_tensors=[
             SimpleNamespace(
                 size=8192,
-                # vLLM #51718 renamed shared_by to layers; expose both fields
-                # so this focused 310P fixture stays valid on main and 0.28.0.
                 shared_by=["model.layers.0.self_attn"],
                 layers=["model.layers.0.self_attn"],
             )
@@ -764,15 +933,6 @@ def test_model_state_only_refreshes_seq_lens_for_full_runtime() -> None:
 
         model_state.prepare_attn(input_batch, CUDAGraphMode.FULL, (), object(), [], object())
         torch.testing.assert_close(capture_seq_lens, input_batch.seq_lens)
-
-
-def test_aclgraph_query_lens_ignore_padded_request_entries() -> None:
-    query_lens = NPUModelRunner310V2._get_valid_query_lens(
-        torch.tensor([3, 7, -1, -1], dtype=torch.int32),
-        torch.tensor([0, 2, 5], dtype=torch.int32),
-    )
-
-    torch.testing.assert_close(query_lens, torch.tensor([2, 3], dtype=torch.int32))
 
 
 def test_worker_selects_v2_runner_on_310p() -> None:
