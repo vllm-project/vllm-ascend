@@ -975,8 +975,8 @@ def _force_top_k_top_p_sampling(sampling_states):
     """
     orig_top_k = sampling_states.top_k.np[0]
     orig_top_p = sampling_states.top_p.np[0]
-    sampling_states.top_k.np[0] = 1
-    sampling_states.top_p.np[0] = 0.9
+    sampling_states.top_k.np[0] = 20
+    sampling_states.top_p.np[0] = 0.95
     try:
         yield
     finally:
