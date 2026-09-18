@@ -165,6 +165,17 @@ jobs:
           git submodule sync --recursive
           git submodule update --init --recursive
 
+      # Keep workflow helpers independent of the source tree above. The source
+      # checkout is rebased onto a fixed base snapshot and may not contain the
+      # cache action that belongs to the currently executing workflow.
+      - name: Checkout cache workflow helpers
+        if: ${{ matrix.group.npu_type != 'cpu' }}
+        uses: actions/checkout@v7
+        with:
+          path: .csrc-cache-workflow
+          sparse-checkout: .github/actions/csrc-l1-restore
+          sparse-checkout-cone-mode: false
+
       - name: Get csrc hash
         id: get_csrc_hash
         if: ${{ matrix.group.npu_type != 'cpu' }}
@@ -233,11 +244,12 @@ jobs:
       - name: Restore incremental cache for NPU fallback
         id: fallback-l1
         if: ${{ matrix.group.npu_type != 'cpu' && steps.cache-csrc.outputs.cache-hit != 'true' }}
-        uses: ./.github/actions/csrc-l1-restore
+        uses: ./.csrc-cache-workflow/.github/actions/csrc-l1-restore
         with:
           cache-dir: ${{ runner.temp }}/vllm-ascend-incremental-build-cache
           architecture: ${{ steps.get_arch.outputs.arch }}
           soc-version: ${{ matrix.group.npu_type }}
+          source-root: ${{ github.workspace }}
       - name: Install vllm-project/vllm-ascend with device
         if: ${{ matrix.group.npu_type != 'cpu' }}
         env:
