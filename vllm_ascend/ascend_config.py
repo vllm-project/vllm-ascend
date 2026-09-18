@@ -1618,6 +1618,11 @@ def init_ascend_config(vllm_config):
         raise ValueError(
             f"additional_config.runtime_config must be a dict, got {type(raw_runtime_overlay).__name__}."
         )
+    raw_runtime_report_dir = additional_config.get("runtime_report_dir")
+    if raw_runtime_report_dir is not None and not isinstance(raw_runtime_report_dir, str):
+        raise ValueError(
+            f"additional_config.runtime_report_dir must be a string, got {type(raw_runtime_report_dir).__name__}."
+        )
     raw_runtime_dump_dir = additional_config.get("runtime_dump_dir")
     if raw_runtime_dump_dir is not None and not isinstance(raw_runtime_dump_dir, str):
         raise ValueError(
@@ -1627,7 +1632,7 @@ def init_ascend_config(vllm_config):
 
     runtime_cfg = RuntimeConfig(
         raw_runtime_path,
-        report_dir=additional_config.get("runtime_report_dir"),
+        report_dir=raw_runtime_report_dir,
         reload_interval_seconds=runtime_config_reload_interval,
         ensure_file=False,
         dump_dir=raw_runtime_dump_dir,
