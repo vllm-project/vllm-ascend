@@ -64,8 +64,8 @@ RuntimeGuardProcessor.bind(runner)
   → ActionExecutor         # report | dump_kv | set_log_level (async queue)
 ```
 
-Design details (Chinese): [runtime_guard_design.md](https://github.com/vllm-project/vllm-ascend/blob/main/docs/zh/design/runtime_guard_design.md)  
-Operations runbook (Chinese): [runtime_guard_ops.md](https://github.com/vllm-project/vllm-ascend/blob/main/docs/zh/design/runtime_guard_ops.md)
+Design details (Chinese): [runtime_guard_design.md](../../developer_guide/Design_Documents/runtime_guard_design.md)  
+Operations runbook (Chinese): [runtime_guard_ops.md](../../developer_guide/Design_Documents/runtime_guard_ops.md)
 
 ## On-disk layout
 
@@ -127,5 +127,5 @@ Live NPU A/B checklist: `vllm_ascend/runtime_guard/test/perf/README.md`.
 ## Related docs
 
 - [runtime_config.md](../configuration/runtime_config.md) — JSON field reference  
-- [runtime_guard_design.md](https://github.com/vllm-project/vllm-ascend/blob/main/docs/zh/design/runtime_guard_design.md) — full design  
-- [runtime_guard_ops.md](https://github.com/vllm-project/vllm-ascend/blob/main/docs/zh/design/runtime_guard_ops.md) — ops / troubleshooting
+- [runtime_guard_design.md](../../developer_guide/Design_Documents/runtime_guard_design.md) — full design  
+- [runtime_guard_ops.md](../../developer_guide/Design_Documents/runtime_guard_ops.md) — ops / troubleshooting

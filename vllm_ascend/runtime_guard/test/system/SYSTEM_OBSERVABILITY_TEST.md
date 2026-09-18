@@ -244,7 +244,7 @@ container sizes. Wire into `manual_trigger.py` as new trigger type
 ### 3.0 UCM 绕过前置检查（2026-09-12 新增）
 
 Ascend 容器里 UCM 会**无条件**劫持 `vllm.logger.init_logger`（见
-`docs/zh/design/runtime_guard_design.md` 2.5）。`init_logger_ascend` 已改为直接
+`docs/source/developer_guide/Design_Documents/runtime_guard_design.md` 2.5）。`init_logger_ascend` 已改为直接
 `logging.getLogger` + `_METHODS_TO_PATCH` 绕过；否则本节的 **M5–M8（Layer B）会静默失效**
 （级别锁死 INFO、不进 stdlib 树，`ascend_log` 调级对 runtime_guard 模块不生效）。
 跑矩阵前先确认 logger 类型：

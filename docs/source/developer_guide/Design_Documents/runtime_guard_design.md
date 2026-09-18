@@ -123,7 +123,7 @@ sync 路径上 after-sample 已 arm 的 job 可同波 D2H；async `get_output` �
 | `log` | 运维日志开关（不落 report JSON） |
 | `ascend_log` | Ascend 模块日志级别 |
 
-字段详解见 [runtime_config 配置参考](../../source/user_guide/configuration/runtime_config.md)。
+字段详解见 [runtime_config 配置参考](../../user_guide/configuration/runtime_config.md)。
 
 ## 2.5 日志与 UCM 劫持
 
@@ -209,6 +209,6 @@ v1/v2 在 `compute_logits` 外包一层以插入 `check_before_sample`（`runner
 ## 8. 相关文档
 
 - 运维与排障：[runtime_guard_ops.md](./runtime_guard_ops.md)
-- 用户功能指南：[runtime_guard.md](../../source/user_guide/feature_guide/runtime_guard.md)
-- 配置字段表：[runtime_config.md](../../source/user_guide/configuration/runtime_config.md)
-- 启动项：[additional_config.md](../../source/user_guide/configuration/additional_config.md)
+- 用户功能指南：[runtime_guard.md](../../user_guide/feature_guide/runtime_guard.md)
+- 配置字段表：[runtime_config.md](../../user_guide/configuration/runtime_config.md)
+- 启动项：[additional_config.md](../../user_guide/configuration/additional_config.md)

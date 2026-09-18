@@ -2,7 +2,7 @@
 
 > 面向部署 / on-call。  
 > 设计细节见 [runtime_guard_design.md](./runtime_guard_design.md)；  
-> 配置字段见 [runtime_config.md](../../source/user_guide/configuration/runtime_config.md)。
+> 配置字段见 [runtime_config.md](../../user_guide/configuration/runtime_config.md)。
 
 ## 1. 最小可用配置
 
@@ -192,5 +192,5 @@ manual 触发 incident_type 为 `manual_trigger`。**始终**注入 `dump_kv`，
 ## 6. 相关文档
 
 - [runtime_guard_design.md](./runtime_guard_design.md)
-- [runtime_guard.md](../../source/user_guide/feature_guide/runtime_guard.md)
-- [runtime_config.md](../../source/user_guide/configuration/runtime_config.md)
+- [runtime_guard.md](../../user_guide/feature_guide/runtime_guard.md)
+- [runtime_config.md](../../user_guide/configuration/runtime_config.md)

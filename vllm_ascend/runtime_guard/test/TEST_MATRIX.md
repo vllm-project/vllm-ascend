@@ -106,7 +106,7 @@ Store-side `sample_waves` FIFO removed — drain gating via `WaveTracker.pending
 ## P0 — 日志功能验证（UCM 绕过，2026-09-12）
 
 Ascend 容器里 UCM 会无条件劫持 `vllm.logger.init_logger`（见
-`docs/zh/design/runtime_guard_design.md` 2.5）。`init_logger_ascend` 已改为直接
+`docs/source/developer_guide/Design_Documents/runtime_guard_design.md` 2.5）。`init_logger_ascend` 已改为直接
 `logging.getLogger` + `_METHODS_TO_PATCH` 绕过，使 Ascend / runtime_guard 日志回到 stdlib 树。
 
 | ID | What | How（UT） | Expect |
