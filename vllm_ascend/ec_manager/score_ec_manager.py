@@ -415,8 +415,7 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
         # evictable while the request still needs it, and the encoder then
         # recomputes an item it already has.
         if any(
-            request.mm_features[other_id].identifier == mm_hash
-            for other_id in self.request_cached_ids.get(req_id, ())
+            request.mm_features[other_id].identifier == mm_hash for other_id in self.request_cached_ids.get(req_id, ())
         ):
             return
         self.cached[mm_hash].discard(req_id)
