@@ -1656,6 +1656,16 @@ class AscendSFAImpl(MLAAttentionImpl):
         kv_cache: tuple[torch.Tensor, ...],
         attn_metadata: M,
         output: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return self._forward(layer_name, hidden_states, kv_cache, attn_metadata, output)
+
+    def _forward(
+        self,
+        layer_name,
+        hidden_states: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, ...],
+        attn_metadata: M,
+        output: torch.Tensor | None = None,
         *,
         sequence_parallel: bool = False,
     ) -> torch.Tensor:

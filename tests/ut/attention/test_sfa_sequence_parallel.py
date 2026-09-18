@@ -76,7 +76,7 @@ def test_sequence_parallel_preserves_padding_without_mutating_input(monkeypatch,
         assert torch.count_nonzero(hidden[valid:]) == 0
         output.copy_(hidden + 11)
 
-    monkeypatch.setattr(AscendSFAImpl, "forward", forward)
+    monkeypatch.setattr(AscendSFAImpl, "_forward", forward)
     for rank in range(world_size):
         metadata = _metadata(tokens, rank, world_size)
         local = (tokens + world_size - 1) // world_size

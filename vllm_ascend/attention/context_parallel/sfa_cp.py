@@ -438,7 +438,7 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         # before CP. Preserve that behavior even after padded MoE rows change.
         if valid_tokens < local_tokens:
             hidden_states = nn.functional.pad(hidden_states[:valid_tokens], (0, 0, 0, local_tokens - valid_tokens))
-        super().forward(layer_name, hidden_states, kv_cache, attn_metadata, output, sequence_parallel=True)
+        super()._forward(layer_name, hidden_states, kv_cache, attn_metadata, output, sequence_parallel=True)
         # Replicated output is truncated before the decoder pads/reduce-scatters.
         # Invalid token rows therefore arrive at its post-attention norm as zero.
         if valid_tokens < local_tokens:
