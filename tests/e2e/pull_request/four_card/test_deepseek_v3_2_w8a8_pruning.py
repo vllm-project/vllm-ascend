@@ -19,14 +19,16 @@
 import json
 import os
 
+import pytest
 import requests
 from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import DisaggPDProxy, RemotePDServer, VllmRunner, wait_until_npu_memory_free
 
 
+@pytest.mark.parametrize("enable_fused_mc2", [0, 2], ids=["default", "megamoe"])
 @wait_until_npu_memory_free()
-def test_moe_w8a8_tp_pp_ep_full_decode_only():
+def test_moe_w8a8_tp_pp_ep_full_decode_only(enable_fused_mc2: int):
     """Verify W8A8 MoE generation with TP, PP, EP, and full decode only."""
     model = "vllm-ascend/DeepSeek-V3.2-W8A8-Pruning"
     prompts = ["Hello, my name is"]
@@ -39,6 +41,7 @@ def test_moe_w8a8_tp_pp_ep_full_decode_only():
         tensor_parallel_size=2,
         pipeline_parallel_size=2,
         gpu_memory_utilization=0.8,
+        additional_config={"enable_fused_mc2": enable_fused_mc2},
         compilation_config={"cudagraph_capture_sizes": [2, 4, 6, 8, 10, 12], "cudagraph_mode": "FULL_DECODE_ONLY"},
     ) as vllm_model:
         outputs = vllm_model.generate_greedy(prompts, max_tokens=500)
