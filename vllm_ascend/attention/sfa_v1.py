@@ -1766,12 +1766,15 @@ class AscendSFAImpl(MLAAttentionImpl):
             k_pe, k_nope = kv_outputs[:2]
             knope_scale = kv_outputs[2] if len(kv_outputs) == 3 else None
             indexer_cache_inputs = self._prepare_indexer_cache_inputs(hidden_states, indexer_attn_metadata)
+            parallel_kv_kwargs = (
+                {"indexer_cache_inputs": indexer_cache_inputs} if indexer_cache_inputs is not None else {}
+            )
             fused_kv_no_split, kv_ag_handles = self._prepare_kv_for_parallel(
                 k_pe,
                 k_nope,
                 knope_scale,
                 parallel_context.gather_full_o_proj,
-                indexer_cache_inputs=indexer_cache_inputs,
+                **parallel_kv_kwargs,
             )
 
             ql_nope, q_pe = self._q_proj_and_k_up_proj(q_c)
@@ -1796,7 +1799,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 self._get_sfa_kv_slot_mapping(attn_metadata),
                 attn_metadata,
                 parallel_context.gather_full_o_proj,
-                indexer_cache_inputs=indexer_cache_inputs,
+                **parallel_kv_kwargs,
             )
 
         if self.runtime_has_indexer:
@@ -1809,13 +1812,16 @@ class AscendSFAImpl(MLAAttentionImpl):
             # independently built metadata.
             assert k_hidden_states is not None
             assert indexer_attn_metadata is not None
+            # Preserve the existing call signature outside the fused CP path,
+            # including custom indexers that do not accept prepared inputs.
+            indexer_kwargs = {"cache_inputs": indexer_cache_inputs} if indexer_cache_inputs is not None else {}
             topk_indices = self.indexer(
                 hidden_states,
                 q_c,
                 k_hidden_states,
                 indexer_attn_metadata,
                 compute_topk=not self.skip_topk,
-                cache_inputs=indexer_cache_inputs,
+                **indexer_kwargs,
             )
             if self.skip_topk:
                 topk_indices = self._get_indexcache_topk_indices(parallel_context.topk_num_tokens)
