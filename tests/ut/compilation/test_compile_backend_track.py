@@ -112,14 +112,19 @@ class TestDeprecatedSidecarGuard(TrackTestBase):
             NPUPlatform._apply_inductor_track_defaults(vllm_config)
         self.assertIn("mutually exclusive", str(ctx.exception))
 
-    def test_sidecar_explicit_auto_plus_front_door_also_raises(self):
-        """Q-2 edge: an explicit "auto" is still a set value."""
+    def test_sidecar_explicit_auto_plus_front_door_does_not_raise(self):
+        """Q-2 edge deviation (M1b probe evidence): step 6 writes the resolved
+        enum value back into additional_config and the spawned EngineCore
+        re-runs VllmConfig.__post_init__ with that bag, so a bag-carried
+        "auto" cannot be attributed to user intent — it must not trip the
+        conflict rule (the front-door smoke leg died on this false positive
+        before the exemption). "auto" selects nothing, so no genuine conflict
+        is masked; the write-back source disappears with the enum (M2)."""
         from vllm_ascend.platform import NPUPlatform
 
         vllm_config = self._with_sidecar("auto")
         vllm_config.compilation_config.backend = "inductor"
-        with self.assertRaises(ValueError):
-            NPUPlatform._apply_inductor_track_defaults(vllm_config)
+        NPUPlatform._apply_inductor_track_defaults(vllm_config)  # no raise
 
     def test_sidecar_legacy_values_do_not_raise(self):
         """M1 interim: fusion_pass / npugraph_ex / auto without the front
@@ -397,46 +402,75 @@ class TestAscendPostGradPassManager(TrackTestBase):
         self.assertTrue(manager.fix_functionalization.uuid())
 
 
-class TestCompileBackendEnum(TrackTestBase):
-    """Stage2: compile_backend four-value enum + enable_npugraph_ex sentinel."""
+class TestDeprecatedCompileBackendTranslation(TrackTestBase):
+    """M2 (09 §3.3 / Q-3 / Q-4): the compile_backend enum is removed and
+    enable_npugraph_ex restored to the community ``bool = True``. The
+    side-door key is translated at init_ascend_config (the single legitimate
+    entry point) for a 2-release deprecation window."""
 
-    def _config(self, **kwargs):
-        from vllm_ascend.ascend_config import AscendCompilationConfig
+    def _init_with_sidecar(self, ascend_dict: dict):
+        from vllm_ascend.ascend_config import init_ascend_config
 
-        return AscendCompilationConfig(**kwargs)
+        vllm_config = self._make_vllm_config()
+        vllm_config.additional_config = {"ascend_compilation_config": dict(ascend_dict)}
+        return init_ascend_config(vllm_config), vllm_config
 
-    def test_auto_default_resolves_npugraph_ex_true(self):
-        config = self._config()
-        self.assertEqual(config.compile_backend, "auto")
-        self.assertTrue(config.enable_npugraph_ex)
+    def test_community_bool_default_restored(self):
+        config, _ = self._init_with_sidecar({})
+        self.assertIs(config.ascend_compilation_config.enable_npugraph_ex, True)
+        self.assertNotIn("compile_backend", vars(config.ascend_compilation_config))
 
-    def test_inductor_resolves_false_and_keeps_minimal_usage(self):
-        config = self._config(compile_backend="inductor")
-        self.assertFalse(config.enable_npugraph_ex)
+    def test_inductor_value_raises_with_pointer(self):
+        with self.assertRaises(ValueError) as ctx:
+            self._init_with_sidecar({"compile_backend": "inductor"})
+        self.assertIn("-cc.backend", str(ctx.exception))
 
-    def test_inductor_with_explicit_npugraph_ex_raises(self):
+    def test_fusion_pass_translates_to_false_with_warning(self):
+        import logging
+
+        with self.assertLogs("vllm_ascend", level=logging.WARNING):
+            config, _ = self._init_with_sidecar({"compile_backend": "fusion_pass"})
+        self.assertIs(config.ascend_compilation_config.enable_npugraph_ex, False)
+
+    def test_npugraph_ex_translates_to_true_with_warning(self):
+        import logging
+
+        with self.assertLogs("vllm_ascend", level=logging.WARNING):
+            config, _ = self._init_with_sidecar({"compile_backend": "npugraph_ex"})
+        self.assertIs(config.ascend_compilation_config.enable_npugraph_ex, True)
+
+    def test_auto_is_ignored_with_warning(self):
+        import logging
+
+        with self.assertLogs("vllm_ascend", level=logging.WARNING):
+            config, _ = self._init_with_sidecar({"compile_backend": "auto"})
+        # community default resolution
+        self.assertIs(config.ascend_compilation_config.enable_npugraph_ex, True)
+
+    def test_unknown_value_raises(self):
         with self.assertRaises(ValueError):
-            self._config(compile_backend="inductor", enable_npugraph_ex=True)
+            self._init_with_sidecar({"compile_backend": "bogus"})
 
-    def test_fusion_pass_resolves_false(self):
-        self.assertFalse(self._config(compile_backend="fusion_pass").enable_npugraph_ex)
+    def test_user_bag_is_not_mutated(self):
+        """R10: the interception copies the nested dict — the user's
+        additional_config bag keeps the deprecated key untouched (one-off
+        data, never rewritten in place)."""
+        import logging
 
-    def test_npugraph_ex_resolves_true(self):
-        self.assertTrue(self._config(compile_backend="npugraph_ex").enable_npugraph_ex)
+        bag = {"compile_backend": "fusion_pass"}
+        vllm_config = self._make_vllm_config()
+        vllm_config.additional_config = {"ascend_compilation_config": bag}
+        with self.assertLogs("vllm_ascend", level=logging.WARNING):
+            from vllm_ascend.ascend_config import init_ascend_config
 
-    def test_auto_keeps_explicit_bool(self):
-        self.assertFalse(self._config(enable_npugraph_ex=False).enable_npugraph_ex)
-        self.assertTrue(self._config(enable_npugraph_ex=True).enable_npugraph_ex)
+            init_ascend_config(vllm_config)
+        self.assertEqual(bag, {"compile_backend": "fusion_pass"})
 
-    def test_invalid_value_rejected(self):
-        with self.assertRaises(ValueError):
-            self._config(compile_backend="bogus")
+    def test_no_key_no_warning(self):
+        import logging
 
-    def test_reparse_idempotent(self):
-        # additional_config writeback carries the resolved bool; re-parsing
-        # (as workers do) must not trip the conflict check again.
-        config = self._config(compile_backend="inductor", enable_npugraph_ex=False)
-        self.assertFalse(config.enable_npugraph_ex)
+        with self.assertNoLogs("vllm_ascend", level=logging.WARNING):
+            self._init_with_sidecar({})
 
 
 class TestTrackCudagraphMode(TrackTestBase):
@@ -580,56 +614,6 @@ class TestTrackFullFamilyBranches(TrackTestBase):
                 self.assertEqual(cc.cudagraph_mode, mode)
                 # inductor 轨上该分支不写 npugraph_ex（step-6 已同步 False，保持不变）
                 self.assertFalse(vllm_config.additional_config["ascend_compilation_config"]["enable_npugraph_ex"])
-
-
-class TestNpugraphExTrackGuard(TrackTestBase):
-    """Stage2: explicit compile_backend='npugraph_ex' needs full-graph modes."""
-
-    @staticmethod
-    def _make_stub(compile_backend: str, cg) -> SimpleNamespace:
-        compilation_config = CompilationConfig()
-        compilation_config.mode = CompilationMode.VLLM_COMPILE
-        compilation_config.cudagraph_mode = cg
-        return SimpleNamespace(
-            compilation_config=compilation_config,
-            additional_config={
-                "ascend_compilation_config": {
-                    "compile_backend": compile_backend,
-                    "enable_npugraph_ex": True,
-                    "enable_static_kernel": False,
-                }
-            },
-            model_config=SimpleNamespace(enforce_eager=False),
-            parallel_config=SimpleNamespace(
-                all2all_backend="flashinfer_all2allv",
-                tensor_parallel_size=1,
-                data_parallel_size=1,
-            ),
-            _set_cudagraph_sizes=lambda: None,
-        )
-
-    def _run(self, compile_backend: str, cg):
-        from vllm_ascend.platform import _setup_compile_backend
-
-        vllm_config = self._make_stub(compile_backend, cg)
-        with patch("vllm_ascend.platform.enable_sp", return_value=False):
-            _setup_compile_backend(
-                vllm_config,
-                compile_backend="vllm_ascend.compilation.compiler_interface.AscendCompiler",
-            )
-        return vllm_config
-
-    def test_npugraph_ex_with_cg_none_raises(self):
-        with self.assertRaises(ValueError):
-            self._run("npugraph_ex", CUDAGraphMode.NONE)
-
-    def test_npugraph_ex_with_cg_full_ok(self):
-        vllm_config = self._run("npugraph_ex", CUDAGraphMode.FULL)
-        self.assertEqual(vllm_config.compilation_config.cudagraph_mode, CUDAGraphMode.FULL)
-
-    def test_auto_with_cg_none_unchanged(self):
-        vllm_config = self._run("auto", CUDAGraphMode.NONE)
-        self.assertEqual(vllm_config.compilation_config.mode, CompilationMode.NONE)
 
 
 class TestRngWarn(TrackTestBase):
