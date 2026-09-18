@@ -317,8 +317,9 @@ class RuntimeConfig:
             self._invalidate_hot_path_gates()
             if self.config_path.exists():
                 try:
-                    self._mtime = self.config_path.stat().st_mtime
-                    self._version = float(self._mtime)
+                    mtime = self.config_path.stat().st_mtime
+                    self._mtime = mtime
+                    self._version = float(mtime)
                 except OSError:
                     self._version = 0.0
                 # Mark the pre-bootstrap file as already-reflected so reload()
@@ -1214,7 +1215,7 @@ class RuntimeConfig:
                 stat = self.config_path.stat()
                 self._mtime = stat.st_mtime
                 self._content_digest = self._digest_path(self.config_path)
-                self._version = float(self._mtime)
+                self._version = float(stat.st_mtime)
             logger.info("[runtime_config] saved path=%s", self.config_path)
             return True
         except Exception as exc:
