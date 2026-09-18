@@ -44,8 +44,15 @@ def kernel_warmup(worker: NPUWorker) -> None:
     logger.info("Starting Triton kernel warmup.")
     start = time.perf_counter()
 
-    _run_warmup("rejection_sampler", rejection_sampler_triton_warmup, worker)
-    _run_warmup("penalties", penalties_triton_warmup, worker)
+    if not worker.use_v2_model_runner:
+        # V1-only triton kernels: MRv2 samples through worker/v2 kernels that
+        # are already exercised by warmup_kernels' spec-decode steps and
+        # for_sampler_warmup() sampling params.
+        _run_warmup("rejection_sampler", rejection_sampler_triton_warmup, worker)
+        _run_warmup("penalties", penalties_triton_warmup, worker)
+    # rms / indexer enumerate constexpr specializations (BLOCK_M 1..16 and the
+    # BLOCK_ROWS ladder) that warmup_kernels' limited batch shapes cannot
+    # cover before ACL graph capture, so they stay unconditional.
     _run_warmup("rms", triton_rms_warmup, worker)
     _run_warmup("indexer", indexer_triton_warmup, worker)
 
