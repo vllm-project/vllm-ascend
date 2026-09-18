@@ -220,7 +220,14 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         # layers, so quant methods must skip their own NZ conversion.
         # Mark before VLLM calls process_weights_after_loading on submodules.
         impl = self.mla_attn.impl
-        if getattr(impl, "_fused_preprocess_type", None) and impl._fused_preprocess_type() is not None:
+        fused_preprocess_type = getattr(impl, "_fused_preprocess_type", None)
+        # SFA exposes an explicit resolver; dense MLA enters fused preprocess
+        # directly when MLAPO or FA quant is enabled.
+        if fused_preprocess_type is not None:
+            fused_preprocess_managed = fused_preprocess_type() is not None
+        else:
+            fused_preprocess_managed = impl.enable_mlapo or impl.fa_quant_layer
+        if fused_preprocess_managed:
             for _layer in (impl.fused_qkv_a_proj, impl.q_proj):
                 if _layer is not None:
                     _layer._fused_preprocess_managed = True
