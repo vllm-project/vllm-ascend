@@ -1944,6 +1944,14 @@ at::Tensor npu_sparse_attention_score_prefill(
     return output;
 }
 
+bool is_minimax_sparse_attention_split_kv_available()
+{
+    static const bool is_available =
+        GetOpApiFuncAddr("aclnnMinimaxSparseAttentionSplitKv") != nullptr &&
+        GetOpApiFuncAddr("aclnnMinimaxSparseAttentionSplitKvGetWorkspaceSize") != nullptr;
+    return is_available;
+}
+
 std::vector<int64_t> get_npu_storage_shape(const at::Tensor& tensor)
 {
     TORCH_CHECK(
@@ -2245,6 +2253,10 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                           ) -> Tensor "
     );
     ops.impl("npu_sparse_attention_score_prefill", torch::kPrivateUse1, &vllm_ascend::npu_sparse_attention_score_prefill);
+
+    ops.def("is_minimax_sparse_attention_split_kv_available() -> bool");
+    ops.impl("is_minimax_sparse_attention_split_kv_available", c10::DispatchKey::CompositeExplicitAutograd,
+             &vllm_ascend::is_minimax_sparse_attention_split_kv_available);
 
     ops.def(
         "npu_sparse_flash_attention(Tensor query, Tensor key, Tensor value,"
