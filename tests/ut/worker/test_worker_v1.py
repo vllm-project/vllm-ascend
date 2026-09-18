@@ -930,7 +930,11 @@ class TestNPUWorker(TestBase):
             worker.execute_dummy_batch()
 
             # Verify call
-            mock_model_runner._dummy_run.assert_called_once_with(mock_uniform_decode_query_len, uniform_decode=True)
+            mock_model_runner._dummy_run.assert_called_once_with(
+                mock_uniform_decode_query_len,
+                uniform_decode=True,
+                skip_gdn_state_update=True,
+            )
 
     @patch("vllm_ascend.worker.worker.plan_sparse_kv_offload_memory")
     @patch("vllm_ascend.worker.worker.get_ascend_config")
@@ -2156,7 +2160,7 @@ class TestNPUWorkerWeightUpdate(TestBase):
 
         self.assertFalse(worker._weight_update_active)
 
-    def test_finish_weight_update_resets_state(self):
+    def test_finish_weight_update_resets_lora_state_after_base_weights(self):
         engine = MagicMock()
         worker = self._make_worker(engine=engine)
         worker._weight_update_active = True
@@ -2164,6 +2168,7 @@ class TestNPUWorkerWeightUpdate(TestBase):
         worker.finish_weight_update()
 
         engine.finish_weight_update.assert_called_once_with()
+        worker.model_runner.reset_lora_state.assert_called_once_with()
         self.assertFalse(worker._weight_update_active)
 
     def test_finish_without_start_raises(self):

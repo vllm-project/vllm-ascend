@@ -123,8 +123,8 @@ DeepSeek-V3.2 是一种稀疏注意力模型。其主要架构与 DeepSeek-V3.1 
 - 在启动命令下方提供常见问题指引，如公共FAQ中已有描述可直接链接呈现。
 - 模型路径规范：部署命令中，模型路径须使用变量占位符 `<YOUR_MODEL_PATH>`，并注释提示用户根据3.1章节记录的路径替换该占位符。
 - **商发模型**的配置脚本需要和版本出口某个场景下最优性能保持一致（禁止使用未经验证调优的通用启动脚本）。
-- 提供服务验证方法（如 curl 命令）及预期结果，说明成功特征（如 200 OK），**并提供完整的回显信息示例**。
 - 若模型仅支持单一硬件系列（如仅支持Atlas 300I DUO），须在安装章节开头明确说明；若支持多硬件系列（如 A3/A2 系列），须使用标签页语法将它们分开展示，并按新机型优先的顺序排列。关于 MkDocs 与 Sphinx 框架在标签页语法上的具体差异，请参阅 [语法补充](template-supplement.md#3-tabs)。
+- 提供成功启动时的输出样例
 
 ### 5.1 单机在线部署
 
@@ -146,15 +146,15 @@ vllm serve <YOUR_MODEL_PATH> \
   --served-model-name DeepSeek-V3.2-W8A8
 ```
 
-常见问题提示：如遇xxx问题，请参考[公共FAQ](../faqs.md)进行检查。
+成功启动时输出为：
 
-服务验证：
-
-```bash
-# 略
+```text
+INFO:     Started server process
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
 ```
 
-预期结果：略（按实际输出书写即可）。
+常见问题提示：如遇xxx问题，请参考[公共FAQ](../faqs.md)进行检查。
 
 ### 5.2 多机在线部署
 

@@ -66,7 +66,7 @@ _benchmarks_3500_50: &benchmarks_3500_50
     max_out_len: 1500
     batch_size: 15
     request_rate: 0
-    baseline: 701.55
+    baseline: 764.6096
     threshold: 0.97
 
 _benchmarks_3500_20: &benchmarks_3500_20
@@ -79,7 +79,7 @@ _benchmarks_3500_20: &benchmarks_3500_20
     max_out_len: 1500
     batch_size: 12
     request_rate: 0
-    baseline: 115.03
+    baseline: 702.0055
     threshold: 0.97
 
 _benchmarks_prefix_64k_50: &benchmarks_prefix_64k_50
@@ -103,7 +103,7 @@ _benchmarks_prefix_64k_50: &benchmarks_prefix_64k_50
     max_out_len: 1024
     batch_size: 18
     request_rate: 0
-    baseline: 284.9
+    baseline: 286.9966
     threshold: 0.97
 
 _benchmarks_prefix_128k_50: &benchmarks_prefix_128k_50
@@ -127,7 +127,7 @@ _benchmarks_prefix_128k_50: &benchmarks_prefix_128k_50
     max_out_len: 1024
     batch_size: 6
     request_rate: 0
-    baseline: 95.24
+    baseline: 111.3027
     threshold: 0.97
 # ==========================================
 # ACTUAL TEST CASES

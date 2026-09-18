@@ -71,6 +71,7 @@ from vllm_ascend.worker.v2.pp_utils import (
     bypass_upstream_spec_pp_guard,
     resolve_spec_pp_support,
     restore_pp_after_upstream_init,
+    use_legacy_spec_pp,
 )
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
@@ -103,15 +104,16 @@ class NPUModelRunner(GPUModelRunner):
         set_potential_max_tokens(vllm_config)
         parallel_config = vllm_config.parallel_config
 
-        # Eagle3/DSpark drafters are rank-local. Hide PP from the upstream
-        # initializer, then rebuild the skipped PP state.
+        # Only release versions need PP hidden during upstream initialization.
         spec_pp_support = resolve_spec_pp_support(vllm_config)
         with torch_cuda_wrapper():
             with bypass_upstream_spec_pp_guard(vllm_config, spec_pp_support) as pp_disabled:
                 super().__init__(vllm_config, device)
             if pp_disabled:
                 restore_pp_after_upstream_init(self, vllm_config)
-        self.use_spec_pp = spec_pp_support is not None
+        # Native PP owns token broadcast/writeback; only releases use our packing.
+        # Legacy Spec+PP transport (0.28/0.29 only); deleted when 0.30+ is the floor.
+        self.use_spec_pp = spec_pp_support is not None and use_legacy_spec_pp()
         # These draft heads consume target aux states collected across PP ranks.
         if spec_pp_support is not None and spec_pp_support.needs_aux_hidden_states:
             self.use_aux_hidden_state_outputs = True
@@ -145,7 +147,7 @@ class NPUModelRunner(GPUModelRunner):
         # init_speculator will return AscendEagleSpeculator when eagle is used.
         # so here we just call init_speculator to reinitialize speculator.
         self.speculator: AscendEagleSpeculator | None = None
-        if self.speculative_config is not None and (not self.use_spec_pp or self.is_last_pp_rank):
+        if self.speculative_config is not None and self.is_last_pp_rank:
             self.speculator = init_speculator(self.vllm_config, self.device)
             # Shared update_stream: main model (ModelAclGraphManager) and draft
             # (Eagle/DFlash/DSpark AclGraphManager) all use this same stream.
@@ -161,13 +163,13 @@ class NPUModelRunner(GPUModelRunner):
             vocab_size=self.vocab_size,
             device=self.device,
         )
-        if self.use_spec_pp and vllm_version_is("0.28.0"):
+        if self.use_spec_pp:
             from vllm_ascend.patch.worker.patch_v2.patch_spec_pp import (
-                install_spec_pp_token_broadcast,
+                install_upstream_spec_pp_protocol,
             )
 
             assert self.pp_handler is not None
-            install_spec_pp_token_broadcast(self.pp_handler, self.req_states)
+            install_upstream_spec_pp_protocol(self.pp_handler, self.req_states, self.num_speculative_steps)
         # AscendInputBuffers has extra `seq_lens_cpu` attribute.
         # so reinitialize input_buffers here.
         self.input_buffers: AscendInputBuffers = AscendInputBuffers(
@@ -242,9 +244,9 @@ class NPUModelRunner(GPUModelRunner):
 
         self._restore_replicated_draft_target_states()
         output = super().sample_tokens(grammar_output)
-        if vllm_version_is("0.28.0") and self.use_spec_pp and self.is_last_pp_rank:
+        if self.use_spec_pp and self.is_last_pp_rank:
             assert self.pp_handler is not None
-            self.pp_handler.broadcast_draft_tokens()
+            self.pp_handler.broadcast_drafts()
         return output
 
     def initialize_kv_cache(
@@ -257,9 +259,12 @@ class NPUModelRunner(GPUModelRunner):
         if vllm_version_is("0.28.0"):
             kv_cache_config = unwrap_mamba_kv_cache_groups(kv_cache_config)
         with graph_manager_wrapper(self):
+            # vLLM 0.28 GPUModelRunner.initialize_kv_cache does not accept
+            # kv_cache_allocation_context. Gate it the same way as other
+            # 0.28 super() kwargs in this runner.
             super().initialize_kv_cache(
                 kv_cache_config,
-                kv_cache_allocation_context=kv_cache_allocation_context,
+                **({} if vllm_version_is("0.28.0") else {"kv_cache_allocation_context": kv_cache_allocation_context}),
             )
             if self.pcp_manager is not None:
                 assert isinstance(self.pcp_manager, AscendPCPManager)

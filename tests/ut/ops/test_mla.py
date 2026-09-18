@@ -137,7 +137,7 @@ class TestAscendSFAIndexerBackend(TestBase):
 
         def _forward_k(*args):
             calls.append("forward_k")
-            return k_li, None
+            return k_li, None, None
 
         indexer.forward_k = MagicMock(side_effect=_forward_k)
         indexer.write_cache = MagicMock(side_effect=lambda *args, **kwargs: calls.append("write_cache"))
@@ -183,7 +183,7 @@ class TestAscendSFAIndexerBackend(TestBase):
         # the cache write still run; the selection stage is skipped.
         indexer = self._make_forward_indexer()
         indexer_metadata = self._make_indexer_metadata()
-        indexer.forward_k = MagicMock(return_value=(torch.zeros(2, 128), None))
+        indexer.forward_k = MagicMock(return_value=(torch.zeros(2, 128), None, None))
         indexer.write_cache = MagicMock()
 
         with patch("vllm_ascend.device.device_op.DeviceOperator.indexer_select_post_process") as select:
@@ -441,8 +441,8 @@ class TestAscendMultiHeadLatentAttention(TestBase):
                         prefix=self.prefix,
                     )
 
-                self.assertEqual(hasattr(fused_qkv_a_proj, "_fused_preprocess_managed"), should_mark)
-                self.assertEqual(hasattr(q_proj, "_fused_preprocess_managed"), should_mark)
+                self.assertEqual(fused_qkv_a_proj._fused_preprocess_managed, should_mark)
+                self.assertEqual(q_proj._fused_preprocess_managed, should_mark)
 
     @patch("vllm_ascend.ops.mla.IndexerWrapper")
     @patch("vllm_ascend.ops.mla.torch.ops.vllm.mla_forward")

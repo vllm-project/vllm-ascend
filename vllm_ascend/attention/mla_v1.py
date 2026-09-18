@@ -28,6 +28,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import (
     MLAPO_MAX_SUPPORTED_TOKENS,
     AscendCommonAttentionMetadata,
+    PreprocessType,
     ascend_chunked_prefill_workspace_size,
     enable_dcp,
     enabling_mlapo,
@@ -1013,6 +1014,17 @@ class AscendMLAImpl(MLAAttentionImpl):
         ql_nope = torch.bmm(q_nope, self.W_UK_T)
         # Convert from (N, B, L) to (B, N, L)
         return ql_nope.transpose(0, 1), q_pe
+
+    def _fused_preprocess_type(self) -> PreprocessType | None:
+        """Defer MXFP8 projection NZ conversion to the enabled FP8 prolog."""
+        if not self.support_fp8_attention or not (self.enable_mlapo or self.fa_quant_layer):
+            return None
+        if self.fused_qkv_a_proj is None or self.q_proj is None:
+            return None
+        quant_method = getattr(self.fused_qkv_a_proj.quant_method, "quant_method", None)
+        if isinstance(quant_method, AscendW8A8MXFP8DynamicLinearMethod):
+            return PreprocessType.PROLOG_V3
+        return None
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         # NOTE: We currently do not support quant kv_b_proj.

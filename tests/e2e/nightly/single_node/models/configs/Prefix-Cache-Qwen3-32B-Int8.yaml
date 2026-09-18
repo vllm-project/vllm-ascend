@@ -56,7 +56,7 @@ test_cases:
         num_prompts: 210
         max_out_len: 1
         batch_size: 48
-        baseline: 3.5855
+        baseline: 2.9593
         threshold: 0.97
       prefix75:
         case_type: performance
@@ -66,5 +66,5 @@ test_cases:
         num_prompts: 210
         max_out_len: 1
         batch_size: 48
-        baseline: 12.8682
+        baseline: 10.6383
         threshold: 0.97

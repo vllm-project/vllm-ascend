@@ -27,6 +27,7 @@ from vllm_ascend.attention.sfa_v1 import (
     AscendSFAMetadata,
     AscendSFAMetadataBuilder,
     PreprocessType,
+    _int64_kv_slots,
     custom_kv_rmsnorm_rope,
 )
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
@@ -540,6 +541,139 @@ class TestAscendSFAKVQuantSparseAttention(TestBase):
         self.assertEqual(call_kwargs["quant_scale_repo_mode"], 1)
 
 
+class TestAscendSFAKPathFusion(TestBase):
+    """K-path fusions: per-step int64 slot conversion and indexer weight reuse."""
+
+    def test_int64_kv_slots_passthrough_for_int64_input(self):
+        slots = torch.arange(4, dtype=torch.int64)
+        metadata = SimpleNamespace()
+
+        self.assertIs(_int64_kv_slots(slots, metadata), slots)
+
+    def test_int64_kv_slots_converts_and_caches_per_metadata(self):
+        slots = torch.arange(4, dtype=torch.int32).view(-1, 1)
+        metadata = SimpleNamespace()
+
+        converted = _int64_kv_slots(slots, metadata)
+        self.assertEqual(converted.dtype, torch.int64)
+        self.assertTrue(torch.equal(converted, slots.to(torch.int64)))
+
+        # The same slot tensor must return the cached conversion instead of
+        # re-casting (one Cast kernel per step instead of one per layer).
+        again = _int64_kv_slots(slots, metadata)
+        self.assertIs(again, converted)
+
+        # A different slot tensor on the same metadata re-converts.
+        new_slots = torch.arange(4, 8, dtype=torch.int32).view(-1, 1)
+        new_converted = _int64_kv_slots(new_slots, metadata)
+        self.assertIsNot(new_converted, converted)
+        self.assertTrue(torch.equal(new_converted, new_slots.to(torch.int64)))
+
+        # A fresh metadata object (new scheduling step) re-converts.
+        fresh_converted = _int64_kv_slots(slots, SimpleNamespace())
+        self.assertIsNot(fresh_converted, converted)
+        self.assertTrue(torch.equal(fresh_converted, converted))
+
+    @patch("vllm_ascend.attention.sfa_v1.torch_npu.npu_kv_rmsnorm_rope_cache", create=True)
+    def test_exec_kv_reuses_int64_slots_across_layers(self, mock_kv_cache_op):
+        impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.enable_sparse_sfa_c8 = False
+        impl.num_kv_heads = 1
+        impl.kv_lora_rank = 128
+        impl.qk_rope_head_dim = 64
+        impl.kv_a_layernorm = MagicMock()
+        impl.kv_a_layernorm.weight = torch.ones(128)
+        impl.kv_a_layernorm.variance_epsilon = 1e-6
+
+        kv_no_split = torch.randn(2, 128 + 64)
+        cos = torch.randn(2, 64)
+        sin = torch.randn(2, 64)
+        kv_cache = (torch.zeros(128, 128), torch.zeros(128, 64))
+        slots = torch.arange(2, dtype=torch.int32)
+        metadata = SimpleNamespace()
+
+        impl.exec_kv(kv_no_split, cos, sin, kv_cache, slots, metadata)
+        impl.exec_kv(kv_no_split, cos, sin, kv_cache, slots, metadata)
+
+        self.assertEqual(mock_kv_cache_op.call_count, 2)
+        first_slots = mock_kv_cache_op.call_args_list[0].args[4]
+        second_slots = mock_kv_cache_op.call_args_list[1].args[4]
+        self.assertEqual(first_slots.dtype, torch.int64)
+        self.assertIs(first_slots, second_slots)
+
+    @patch("vllm_ascend.attention.indexer.DeviceOperator.indexer_select_post_process")
+    @patch("vllm_ascend.attention.indexer.HAS_TRITON", True)
+    @patch("vllm_ascend.attention.indexer.rope_forward_triton_siso", side_effect=lambda x, *a, **k: x)
+    def test_indexer_forward_reuses_wk_weights_proj(self, mock_rope, mock_devop):
+        """forward_k + forward must run wk_weights_proj only once."""
+        num_tokens, head_dim, weights_dim = 4, 128, 32
+        n_head = 2
+
+        kw = torch.randn(num_tokens, head_dim + weights_dim)
+        wk_weights_proj = MagicMock(return_value=(kw, None))
+
+        indexer = AscendSFAIndexerBackend.__new__(AscendSFAIndexerBackend)
+        indexer.wk_weights_proj = wk_weights_proj
+        indexer.k_norm = MagicMock(side_effect=lambda x: x)
+        indexer.head_dim = head_dim
+        indexer.qk_rope_head_dim = 64
+        indexer.is_rope_neox_style = False
+        indexer.enable_sparse_li_c8 = False
+        indexer.n_head = n_head
+        indexer.wq_b = MagicMock(return_value=(torch.randn(num_tokens, n_head * head_dim), None))
+        indexer.use_torch_npu_lightning_indexer = False
+        indexer.k_cache = SimpleNamespace(kv_cache=torch.zeros(2, 16, 1, 128))
+        indexer._pcp_active = False
+        indexer._dsa_cp_active = False
+        indexer.write_cache = MagicMock()
+
+        hidden_states = torch.randn(num_tokens, head_dim + weights_dim)
+        cos = torch.randn(num_tokens, 1, 1, 64)
+        sin = torch.randn(num_tokens, 1, 1, 64)
+        indexer_metadata = SimpleNamespace(
+            cos=cos,
+            sin=sin,
+            slot_mapping=torch.arange(num_tokens, dtype=torch.int64).view(-1, 1),
+            actual_seq_lengths_query=torch.tensor([num_tokens], dtype=torch.int32),
+            actual_seq_lengths_key=torch.tensor([num_tokens], dtype=torch.int32),
+        )
+
+        k_li, k_li_scale, indexer_weights = indexer.forward_k(hidden_states, cos, sin)
+
+        self.assertIsNone(k_li_scale)
+        self.assertTrue(torch.equal(indexer_weights, kw[:, head_dim:]))
+        self.assertEqual(wk_weights_proj.call_count, 1)
+
+        # forward runs forward_k internally; when the top-k stage is handed
+        # the same hidden states, it reuses the weights tail instead of
+        # re-running the wk_weights_proj GEMM.
+        wk_weights_proj.reset_mock()
+        expected_topk = torch.zeros(num_tokens, 1, 4, dtype=torch.int32)
+        mock_devop.return_value = expected_topk
+        topk = indexer.forward(
+            hidden_states,
+            torch.randn(num_tokens, 64),
+            hidden_states,
+            indexer_metadata,
+            compute_topk=True,
+        )
+
+        self.assertIs(topk, expected_topk)
+        self.assertEqual(wk_weights_proj.call_count, 1)
+        self.assertTrue(torch.equal(mock_devop.call_args.args[3], kw[:, head_dim:]))
+
+        # A distinct top-k input must fall back to recomputing the weights:
+        # one GEMM inside forward_k plus one for the top-k stage.
+        indexer.forward(
+            torch.randn(num_tokens, head_dim + weights_dim),
+            torch.randn(num_tokens, 64),
+            hidden_states,
+            indexer_metadata,
+            compute_topk=True,
+        )
+        self.assertEqual(wk_weights_proj.call_count, 3)
+
+
 class TestAscendSFAMetadata(TestBase):
     def test_ascend_sfa_metadata_default(self):
         num_actual_tokens = 100
@@ -901,6 +1035,7 @@ class TestAscendSFAImpl(TestBase):
         mock_ascend_config.enable_sparse_li_c8 = False
         mock_ascend_config.enable_shared_expert_dp = False
         mock_ascend_config.is_sparse_li_c8_layer.return_value = False
+        mock_ascend_config.rl_config.enabled = False
         mock_get_ascend_config.return_value = mock_ascend_config
         self.mock_ascend_config = mock_ascend_config
 
@@ -909,6 +1044,9 @@ class TestAscendSFAImpl(TestBase):
         vllm_config.model_config.hf_config = MagicMock()
         vllm_config.model_config.hf_text_config = None
         vllm_config.kv_transfer_config = None
+        # Pin both live-weight-update switches off: a bare MagicMock attribute
+        # is truthy and would silently enable the RL keep-alive paths.
+        vllm_config.weight_transfer_config = None
         vllm_config.speculative_config = MagicMock()
         vllm_config.speculative_config.num_speculative_tokens = 0
         vllm_config.parallel_config = MagicMock()
@@ -1096,6 +1234,32 @@ class TestAscendSFAImpl(TestBase):
         mock_dispose.assert_called_once()
         mock_maybe_trans_nz.assert_called_once()
 
+    @patch("vllm_ascend.attention.sfa_v1.maybe_trans_nz")
+    @patch("vllm_ascend.attention.sfa_v1.dispose_layer")
+    @patch("torch_npu.npu_format_cast")
+    def test_process_weights_after_loading_keeps_kv_b_proj_for_rl(
+        self, mock_format_cast, mock_dispose, mock_maybe_trans_nz
+    ):
+        """RL keeps kv_b_proj so live weight updates stay loadable (#15463).
+
+        The layerwise reload writes every checkpoint weight back into the
+        storage that exists when the transaction starts. A disposed parameter
+        has no valid destination, so the incoming weight is dropped and
+        W_UK_T/W_UV are re-derived from an empty tensor on every update.
+        """
+        layer = self._setup_kv_b_proj()
+        mock_format_cast.return_value = layer.weight
+        mock_maybe_trans_nz.side_effect = lambda x: x
+        self.impl.rl_weight_update_enabled = True
+
+        self.impl.process_weights_after_loading(torch.bfloat16)
+
+        mock_dispose.assert_not_called()
+        self.assertEqual(self.impl.W_UK_T.shape[0], self.impl.num_heads)
+        self.assertEqual(self.impl.W_UK_T.shape[2], self.impl.kv_lora_rank)
+        self.assertEqual(self.impl.W_UV.shape[0], self.impl.num_heads)
+        self.assertEqual(self.impl.W_UV.shape[2], self.impl.v_head_dim)
+
     # ============ _process_weights_for_fused_prolog_v3 ============
 
     def _run_prolog_v3_weight_test(self, qt, has_scales):
@@ -1128,6 +1292,49 @@ class TestAscendSFAImpl(TestBase):
 
     def test_process_weights_for_fused_prolog_v3_unquantized(self):
         self._run_prolog_v3_weight_test(None, False)
+
+    def _run_prolog_v3_kv_consumer_dispose_test(self, rl_weight_update_enabled: bool):
+        """Exercise the kv-consumer dispose branch of the PROLOG_V3 path."""
+        mock_format_cast = patch("torch_npu.npu_format_cast", return_value=torch.randn(128, 128))
+        mock_format_cast.start()
+        self.addCleanup(mock_format_cast.stop)
+        mock_empty_cache = patch("torch.npu.empty_cache")
+        mock_empty_cache.start()
+        self.addCleanup(mock_empty_cache.stop)
+
+        self.impl._quant_type = None
+        self.impl.fused_qkv_a_proj = MagicMock()
+        self.impl.fused_qkv_a_proj.weight.data = torch.randn(128, 96, 64)
+        self.impl.q_proj = SimpleNamespace(weight=SimpleNamespace(data=torch.randn(128, 96)))
+        self.impl.q_lora_rank = 32
+        self.impl.is_kv_consumer = True
+        self.impl.rl_weight_update_enabled = rl_weight_update_enabled
+
+        with patch("vllm_ascend.attention.sfa_v1.dispose_layer") as mock_dispose:
+            self.impl._process_weights_for_fused_prolog_v3()
+        return mock_dispose
+
+    def test_prolog_v3_disposes_sources_without_rl(self):
+        mock_dispose = self._run_prolog_v3_kv_consumer_dispose_test(rl_weight_update_enabled=False)
+
+        self.assertEqual(mock_dispose.call_count, 2)
+
+    def test_prolog_v3_keeps_sources_for_rl(self):
+        mock_dispose = self._run_prolog_v3_kv_consumer_dispose_test(rl_weight_update_enabled=True)
+
+        mock_dispose.assert_not_called()
+        self.assertTrue(hasattr(self.impl, "weight_dq"))
+        self.assertTrue(hasattr(self.impl, "weight_dkv_kr"))
+        self.assertTrue(hasattr(self.impl, "weight_uq_qr"))
+
+    @patch("vllm_ascend.attention.sfa_v1.dispose_layer")
+    def test_process_weights_prolog_v3_keeps_weights_non_pd(self, mock_dispose):
+        """Non-PD workers keep the original qkv_a/q_b weights: the NATIVE
+        fallback path still consumes them."""
+        self.impl.is_kv_consumer = False
+        self._run_prolog_v3_weight_test(AscendW8A8MXFP8DynamicLinearMethod, True)
+
+        mock_dispose.assert_not_called()
 
     # ============ exec_kv: sparse C8 uses custom_kv_rmsnorm_rope ============
 
@@ -1246,6 +1453,64 @@ class TestAscendSFAImpl(TestBase):
         path = self.impl._resolve_preprocess_type(torch.bfloat16)
         self.assertEqual(path, PreprocessType.PROLOG_V3)
 
+    def test_resolve_path_non_pd_w8a8dynamic_c8_goes_prolog_v3(self):
+        """Non-PD + W8A8Dynamic + C8 -> PROLOG_V3 (default, no opt-in)."""
+        self._set_quant(AscendW8A8DynamicLinearMethod)
+        self.impl.is_kv_consumer = False
+        self.impl.enable_sparse_sfa_c8 = True
+
+        path = self.impl._resolve_preprocess_type(torch.bfloat16)
+        self.assertEqual(path, PreprocessType.PROLOG_V3)
+
+    def test_resolve_path_non_pd_w8a8dynamic_without_c8_goes_prolog_v3(self):
+        """Non-PD + W8A8Dynamic + C8 off -> PROLOG_V3: the C8 switches only
+        select the KV cache layout and are orthogonal to the fused path."""
+        self._set_quant(AscendW8A8DynamicLinearMethod)
+        self.impl.is_kv_consumer = False
+        self.impl.enable_sparse_sfa_c8 = False
+
+        path = self.impl._resolve_preprocess_type(torch.bfloat16)
+        self.assertEqual(path, PreprocessType.PROLOG_V3)
+
+    def test_resolve_path_non_pd_mxfp_goes_prolog_v3(self):
+        """Non-PD + MXFP -> PROLOG_V3 (default)."""
+        self._set_quant(AscendW8A8MXFP8DynamicLinearMethod)
+        self.impl.is_kv_consumer = False
+
+        path = self.impl._resolve_preprocess_type(torch.bfloat16)
+        self.assertEqual(path, PreprocessType.PROLOG_V3)
+
+    def test_resolve_path_non_pd_unquantized_stays_native(self):
+        """Non-PD unquantized keeps the NATIVE chain: the unquantized weight
+        preparation transposes fused_qkv_a_proj.weight in place, which the
+        NATIVE fallback still consumes."""
+        self._set_quant(None)
+        self.impl.is_kv_consumer = False
+
+        path = self.impl._resolve_preprocess_type(torch.bfloat16)
+        self.assertEqual(path, PreprocessType.NATIVE)
+
+    def test_resolve_path_kv_producer_quantized_goes_prolog_v3(self):
+        """KV producer (P-node) + quantized -> PROLOG_V3: prefill steps take
+        the fused path too; enable_dsa_cp remains the P-node CP route."""
+        self._set_quant(AscendW8A8DynamicLinearMethod)
+        self.impl.is_kv_producer = True
+        self.impl.is_kv_consumer = False
+        self.impl.enable_sparse_sfa_c8 = True
+
+        path = self.impl._resolve_preprocess_type(torch.bfloat16)
+        self.assertEqual(path, PreprocessType.PROLOG_V3)
+
+    def test_resolve_path_kv_producer_unquantized_stays_native(self):
+        """KV producer + unquantized keeps the NATIVE chain (same weight
+        preparation constraint as non-PD workers)."""
+        self._set_quant(None)
+        self.impl.is_kv_producer = True
+        self.impl.is_kv_consumer = False
+
+        path = self.impl._resolve_preprocess_type(torch.bfloat16)
+        self.assertEqual(path, PreprocessType.NATIVE)
+
     # ============ _get_fused_type_unsupported_reasons ============
 
     def _setup_prolog_v3_state(self):
@@ -1269,12 +1534,14 @@ class TestAscendSFAImpl(TestBase):
         reasons = impl._get_fused_type_unsupported_reasons(PreprocessType.PROLOG_V3)
         self.assertTrue(any("DSA-CP" in r for r in reasons))
 
-    def test_reasons_kv_producer_blocked(self):
+    def test_reasons_kv_producer_not_blocked(self):
+        """KV producers take PROLOG_V3 too: the prefill/P-node CP route is
+        selected by enable_dsa_cp (impl selection), not by the reasons."""
         self._setup_prolog_v3_state()
         self.impl.is_kv_producer = True
 
         reasons = self.impl._get_fused_type_unsupported_reasons(PreprocessType.PROLOG_V3)
-        self.assertTrue(any("KV producer" in r for r in reasons))
+        self.assertFalse(any("KV producer" in r for r in reasons))
 
     def test_reasons_unquantized_c8_blocked(self):
         self._setup_prolog_v3_state()

@@ -1159,12 +1159,12 @@ After several minutes, you can get the performance evaluation result.
 
 |Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|
 |--------|---------------|-----------|--------------|------------------|
-|High Throughput<br>(3.5k/16k input)|Single-Node Mixed|16 (A3)|DeepSeek-V3.1-w4a8-perchannle|Use dp4 tp4 to balance memory capacity and compute efficiency|
-|Low Latency<br>(3.5k/16k input)|Single-Node Mixed|16 (A3)|DeepSeek-V3.1-w4a8-perchannle|Use dp2 tp8 to balance memory capacity and compute efficiency|
-|High Throughput / Low Latency<br>(64k input)|Single-Node Mixed|16 (A3)|DeepSeek-V3.1-w4a8-perchannle|Use dp2 tp8 to balance memory capacity and compute efficiency|
-|High Throughput / Low Latency<br>(3.5k input)|2P1D deployment|64 (A3)|DeepSeek-V3.1-w4a8-perchannle|Use dp2 tp8 to balance memory capacity and compute efficiency|
-|High Throughput / Low Latency<br>(16k input)|2P1D deployment|64 (A3)|DeepSeek-V3.1-w4a8-perchannle|Use dp2 tp8 to balance memory capacity and compute efficiency|
-|Long Context<br>(64k input, no prefix cache)|2P1D deployment|64 (A3)|DeepSeek-V3.1-w4a8-perchannle|Use dp1 tp8 to balance memory capacity and compute efficiency|
+|High Throughput<br>(3.5k/16k input)|Single-Node Mixed|16 (A3)|DeepSeek-V3.1-w4a8-perchannel|Use dp4 tp4 to balance memory capacity and compute efficiency|
+|Low Latency<br>(3.5k/16k input)|Single-Node Mixed|16 (A3)|DeepSeek-V3.1-w4a8-perchannel|Use dp2 tp8 to balance memory capacity and compute efficiency|
+|High Throughput / Low Latency<br>(64k input)|Single-Node Mixed|16 (A3)|DeepSeek-V3.1-w4a8-perchannel|Use dp2 tp8 to balance memory capacity and compute efficiency|
+|High Throughput / Low Latency<br>(3.5k input)|2P1D deployment|64 (A3)|DeepSeek-V3.1-w4a8-perchannel|Use dp2 tp8 to balance memory capacity and compute efficiency|
+|High Throughput / Low Latency<br>(16k input)|2P1D deployment|64 (A3)|DeepSeek-V3.1-w4a8-perchannel|Use dp2 tp8 to balance memory capacity and compute efficiency|
+|Long Context<br>(64k input, no prefix cache)|2P1D deployment|64 (A3)|DeepSeek-V3.1-w4a8-perchannel|Use dp1 tp8 to balance memory capacity and compute efficiency|
 
 #### Table 2: Detailed Node Configuration(A3)
 

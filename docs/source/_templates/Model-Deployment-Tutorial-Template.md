@@ -123,8 +123,8 @@ If multi-node deployment is required, please follow the [Verify Multi-node Commu
 - Provide troubleshooting guidance below the startup commands. If the issue is already covered in the public FAQ, a direct link to it may be used.
 - **Model path specification**: In deployment commands, the model path must use the variable placeholder `<YOUR_MODEL_PATH>`, with a comment reminding users to replace this placeholder with the path recorded in Section 3.1.
 - The configuration script for the **Commercial Model** shall be strictly aligned with the optimal performance configuration validated for the specific version release scenario. The use of generic default startup scripts that have not undergone performance tuning and verification is prohibited.
-- Provide service verification methods (e.g., curl commands) and expected results, specifying success indicators (e.g., 200 OK), and **provide a complete example of the echo output**.
 - If the model supports only a single hardware series (e.g., Atlas 300I DUO only), explicitly state this at the beginning of the installation section. If multiple hardware series are supported(e.g., A3/A2 series), use tabbed syntax to present them separately, with newer models listed first. For syntax differences between MkDocs and Sphinx frameworks, refer to [Syntax Supplement](template-supplement.md#3-tabs).
+- Provide the output example when the startup is successful.
 
 ### 5.1 Single-Node Online Deployment
 
@@ -146,15 +146,15 @@ vllm serve <YOUR_MODEL_PATH> \
   --served-model-name DeepSeek-V3.2-W8A8
 ```
 
-Common Issues Tip: If you encounter XXX issues, please refer to the [Public FAQs](../faqs.md) for troubleshooting.
+The output upon successful startup is:
 
-Service Verification:
-
-```bash
-# Omitted
+```text
+INFO:     Started server process
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
 ```
 
-Expected Result: Omitted (fill in according to actual output).
+Common Issues Tip: If you encounter XXX issues, please refer to the [Public FAQs](../faqs.md) for troubleshooting.
 
 ### 5.2  Multi-Node Online Deployment
 

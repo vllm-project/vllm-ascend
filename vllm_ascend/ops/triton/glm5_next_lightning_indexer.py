@@ -32,6 +32,13 @@ TRITON_POOL_SUB_TILE_SIZE = 128
 # Chunk tokens to limit the FP32 score buffer to this budget where possible.
 TRITON_SCORES_CHUNK_BYTES = 256 * 1024 * 1024
 
+# CANN's fused TopKV2 high_performance kernel faults (aicore VEC 507035) on -inf
+# cells produced by a ragged mask at a non-aligned width. The fp32-lowest finite
+# value orders identically -- no real score can reach it -- so the wrapper
+# rewrites the mask sentinel to it on the way into top-k. Producers keep using
+# -inf; the guard sits at the consumer that faults.
+NEG_INF_SENTINEL = torch.finfo(torch.float32).min
+
 
 # Keep batch-varying inputs unspecialized to avoid recompiling per step.
 # REQ_POW2 stays constexpr for tl.arange; warm up its power-of-two variants.
@@ -171,7 +178,8 @@ def glm5_next_lightning_indexer_triton(
             .contiguous()
         )
         # -inf init: the kernel skips sub-tiles beyond a request's visible pools,
-        # and those cells must stay excluded from the top-k.
+        # and those cells must stay excluded from the top-k. The wrapper rewrites
+        # every -inf to NEG_INF_SENTINEL on the way into top-k.
         scores = torch.full(
             (rows, max_pool_seq_len),
             float("-inf"),
@@ -203,9 +211,15 @@ def glm5_next_lightning_indexer_triton(
             TRITON_POOL_SUB_TILE_SIZE,
         )
 
+        # TopKV2 faults on -inf at a non-aligned width, so hand it the finite
+        # sentinel instead. In place: the scratch is not read again after the
+        # top-k, and a second full-size buffer on this path is real memory.
+        # NaN is mapped to the same sentinel so it can never outrank a valid
+        # score (the default rewrite to 0.0 could).
+        scores.nan_to_num_(nan=NEG_INF_SENTINEL, neginf=NEG_INF_SENTINEL)
         topk_vals, pool_ids = torch.topk(scores, topk, dim=1)
         pool_ids = torch.where(
-            topk_vals == float("-inf"),
+            topk_vals <= NEG_INF_SENTINEL,
             torch.full_like(pool_ids, -1),
             pool_ids,
         )

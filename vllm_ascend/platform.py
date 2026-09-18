@@ -111,6 +111,18 @@ class NPUPlatform(Platform):
     def manual_seed_all(cls, seed: int) -> None:
         pass
 
+    @classmethod
+    def visible_device_id_to_physical_device_id(cls, device_id: int) -> int:
+        """Resolve a bound runtime device ordinal to its host physical NPU ID.
+
+        Call after torch.npu.set_device. CANN resolves visibility reordering
+        and container remapping; device_id is not a vLLM local rank.
+        """
+        # Keep runtime initialization lazy and independent of compute-op flags.
+        bootstrap_custom_op_env()
+        import_module("vllm_ascend.vllm_ascend_C")
+        return torch.ops._C_ascend.get_physical_device_id(device_id)
+
     def is_sleep_mode_available(self) -> bool:
         return True
 
@@ -1519,9 +1531,14 @@ def _validate_parallel_config(vllm_config: VllmConfig) -> None:
                 f"is pcp_size({pcp_size}) or tp_size({parallel_config.tensor_parallel_size}) "
                 f"* pcp_size({pcp_size}) ({full_dcp_size})."
             )
-        if not get_current_hardware_profile().supports(HardwareCapability.SFA_DCP_REPLICATED_INDEXER):
+        # A5 supports non-C8 SFA DCP, but its SFA C8 operator does not yet
+        # support DCP with a replicated indexer. Reject that combination early.
+        if vllm_config.additional_config.get("enable_sparse_sfa_c8", False) and not (
+            get_current_hardware_profile().supports(HardwareCapability.SFA_C8_DCP_REPLICATED_INDEXER)
+        ):
             raise NotImplementedError(
-                "SFA DCP with replicated indexer is not supported by the current hardware profile."
+                "SFA C8 DCP with replicated indexer is not supported by the current hardware profile. "
+                "Disable enable_sparse_sfa_c8 to use non-C8 SFA DCP."
             )
 
 

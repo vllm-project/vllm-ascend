@@ -122,7 +122,7 @@ Select an image based on your machine type and start the docker image on your no
     Start the docker image on each node.
 
     ```bash
-    export IMAGE=quay.io/ascend/vllm-ascend:v0.23.0
+    export IMAGE=quay.io/ascend/vllm-ascend:qwen3.8-a2
     export NAME=vllm-ascend
 
     docker run --rm \
@@ -185,6 +185,12 @@ After entering the container, verify that vLLM and vLLM-Ascend can be imported:
 
 ```shell
 python -c "import vllm, vllm_ascend; print('vllm and vllm_ascend are ready')"
+```
+
+Expected output:
+
+```shell
+vllm and vllm_ascend are ready
 ```
 
 ### 4.2 Source Code Installation
@@ -415,6 +421,14 @@ Before starting the service:
         - `"cudagraph_capture_sizes"`: represents different levels of graph modes. When tensor parallelism (TP) is enabled, hardware event-id constraints allow at most two capture sizes (for example, `[1, 8]`).
         With MTP enabled, calculate each capture size as `n * (num_speculative_tokens + 1)`, where `n` is a capture size for the deployment without MTP. For example, when `num_speculative_tokens` is `1`, the non-MTP sizes `[1,2,4,8]` become `[2,4,8,16]`.
     - `--additional-config` with `"ascend_compilation_config": {"enable_npugraph_ex": false}` is required on Atlas 300I DUO because `enable_npugraph_ex` is not supported on this platform.
+
+Wait until the engine finishes loading weights and graph capture. A successful startup includes output similar to the following:
+
+```text
+INFO:     Started server process
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+```
 
 ## 6 Functional Verification
 
