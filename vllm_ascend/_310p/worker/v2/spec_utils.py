@@ -12,22 +12,21 @@ from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 
 
 def expand_idx_mapping_cpu(
-    idx_mapping: torch.Tensor,
+    idx_mapping_np: np.ndarray,
     total_num_logits: int,
     cu_num_logits_np: np.ndarray,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    device = idx_mapping.device
-    expanded_idx_mapping = idx_mapping.new_empty(total_num_logits)
-    expanded_local_pos = torch.empty(total_num_logits, dtype=torch.int32, device=device)
+    expanded_mapping_np: np.ndarray,
+    expanded_local_pos_np: np.ndarray,
+) -> None:
+    """Expand request metadata into caller-owned persistent host buffers."""
     for req_idx in range(cu_num_logits_np.shape[0] - 1):
         start = int(cu_num_logits_np[req_idx])
         end = int(cu_num_logits_np[req_idx + 1])
         num_tokens = end - start
         if num_tokens <= 0:
             continue
-        expanded_idx_mapping[start:end] = idx_mapping[req_idx]
-        expanded_local_pos[start:end] = torch.arange(num_tokens, dtype=torch.int32, device=device)
-    return expanded_idx_mapping, expanded_local_pos
+        expanded_mapping_np[start:end] = idx_mapping_np[req_idx]
+        expanded_local_pos_np[start:end] = np.arange(num_tokens, dtype=np.int32)
 
 
 def combine_sampled_and_draft_tokens_cpu(
@@ -95,31 +94,35 @@ def combine_sampled_and_draft_tokens_cpu(
 
 
 def get_num_sampled_and_rejected_cpu(
-    num_sampled: torch.Tensor,
-    seq_lens: torch.Tensor,
-    cu_num_logits: torch.Tensor,
+    num_sampled_cpu: torch.Tensor,
+    seq_lens_np: np.ndarray,
+    cu_num_logits_np: np.ndarray,
     idx_mapping_np: np.ndarray,
     prefill_len_np: np.ndarray,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     num_reqs = idx_mapping_np.shape[0]
-    num_rejected = torch.empty_like(num_sampled)
-    cu_np = cu_num_logits.detach().cpu().numpy()
-    seq_np = seq_lens.detach().cpu().numpy()
-    sampled_np = num_sampled.detach().cpu().numpy().copy()
+    num_rejected_cpu = torch.empty_like(num_sampled_cpu)
+    sampled_np = num_sampled_cpu.numpy().copy()
 
     for batch_idx in range(num_reqs):
-        seq_len = int(seq_np[batch_idx])
+        seq_len = int(seq_lens_np[batch_idx])
         prefill_len_i = int(prefill_len_np[batch_idx])
         is_chunked_prefilling = seq_len < prefill_len_i
         if is_chunked_prefilling:
             sampled_np[batch_idx] = 0
-            num_rejected[batch_idx] = 0
+            num_rejected_cpu[batch_idx] = 0
             continue
-        num_logits = int(cu_np[batch_idx + 1] - cu_np[batch_idx])
-        num_rejected[batch_idx] = num_logits - int(sampled_np[batch_idx])
+        num_logits = int(cu_num_logits_np[batch_idx + 1] - cu_num_logits_np[batch_idx])
+        num_rejected_cpu[batch_idx] = num_logits - int(sampled_np[batch_idx])
 
-    num_sampled_out = torch.from_numpy(sampled_np).to(device=num_sampled.device, dtype=num_sampled.dtype)
-    return num_sampled_out, num_rejected.to(device=num_sampled.device)
+    num_sampled_cpu = torch.from_numpy(sampled_np)
+    return (
+        num_sampled_cpu.to(device=device, non_blocking=True),
+        num_rejected_cpu.to(device=device, non_blocking=True),
+        num_sampled_cpu,
+        num_rejected_cpu,
+    )
 
 
 _SAMPLING_EPS = 1e-5
@@ -128,27 +131,26 @@ _UNIFORM_TINY = float(torch.finfo(torch.float32).tiny)
 
 def greedy_rejection_sample_cpu(
     target_logits: torch.Tensor,
-    draft_sampled: torch.Tensor,
-    cu_num_logits: torch.Tensor,
+    draft_sampled_cpu: torch.Tensor,
+    cu_num_logits_np: np.ndarray,
     num_speculative_steps: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Greedy (temperature=0) rejection sampling for MTP verify.
 
     Argmax runs on-device so we only D2H token ids (not the full vocab logits).
     Acceptance bookkeeping stays on CPU to avoid per-element NPU syncs.
     """
-    cu_np = cu_num_logits.detach().cpu().numpy()
-    num_reqs = cu_np.shape[0] - 1
+    num_reqs = cu_num_logits_np.shape[0] - 1
     max_tokens = num_speculative_steps + 1
     sampled_cpu = torch.full((num_reqs, max_tokens), -1, dtype=torch.int32)
     num_sampled_cpu = torch.zeros(num_reqs, dtype=torch.int32)
     # Avoid full-vocab logits D2H (dominant cost on 310P MTP verify).
     target_argmax_cpu = target_logits.argmax(dim=-1).to(dtype=torch.int32).detach().cpu().numpy()
-    draft_cpu = draft_sampled.detach().cpu().to(dtype=torch.int32).numpy()
+    draft_np = draft_sampled_cpu.to(dtype=torch.int32).numpy()
 
     for req_idx in range(num_reqs):
-        start = int(cu_np[req_idx])
-        end = int(cu_np[req_idx + 1])
+        start = int(cu_num_logits_np[req_idx])
+        end = int(cu_num_logits_np[req_idx + 1])
         num_logits = end - start
         if num_logits <= 0:
             continue
@@ -160,7 +162,7 @@ def greedy_rejection_sample_cpu(
             target_token = int(target_argmax_cpu[logit_idx])
             is_bonus = logit_idx >= end - 1
             if accepted < num_speculative_steps and not is_bonus:
-                draft_token = int(draft_cpu[logit_idx + 1])
+                draft_token = int(draft_np[logit_idx + 1])
                 if draft_token == target_token:
                     sampled_cpu[req_idx, accepted] = target_token
                     accepted += 1
@@ -176,6 +178,8 @@ def greedy_rejection_sample_cpu(
     return (
         sampled_cpu.to(device=target_logits.device, non_blocking=True),
         num_sampled_cpu.to(device=target_logits.device, non_blocking=True),
+        sampled_cpu,
+        num_sampled_cpu,
     )
 
 
@@ -200,13 +204,13 @@ def _sample_from_probs_row_cpu(probs_row: torch.Tensor, generator: torch.Generat
 
 def probabilistic_rejection_sample_cpu(
     target_logits: torch.Tensor,
-    draft_sampled: torch.Tensor,
-    cu_num_logits: torch.Tensor,
+    draft_sampled_cpu: torch.Tensor,
+    cu_num_logits_np: np.ndarray,
     num_speculative_steps: int,
     temperature_np: np.ndarray,
     idx_mapping_np: np.ndarray,
     source_generators: dict[int, torch.Generator],
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """MTP rejection with temperature (Leviathan, draft one-hot / IS_NGRAM).
 
     Aligns with MRV1 ``rejection_random_sample_pytorch`` when ``draft_probs`` is
@@ -218,7 +222,7 @@ def probabilistic_rejection_sample_cpu(
     """
     from vllm_ascend._310p.sample.sampler import _prepare_cpu_generators_310p
 
-    cu_np = cu_num_logits.detach().cpu().numpy()
+    cu_np = cu_num_logits_np
     num_reqs = cu_np.shape[0] - 1
     max_tokens = num_speculative_steps + 1
     sampled_cpu = torch.full((num_reqs, max_tokens), -1, dtype=torch.int32)
@@ -227,7 +231,7 @@ def probabilistic_rejection_sample_cpu(
     # Softmax once on-device; per-step gathers stay cheap for small K.
     probs = torch.softmax(target_logits, dim=-1, dtype=torch.float32)
     target_argmax_cpu = target_logits.argmax(dim=-1).to(dtype=torch.int32).detach().cpu().numpy()
-    draft_cpu = draft_sampled.detach().cpu().to(dtype=torch.int32).numpy()
+    draft_cpu = draft_sampled_cpu.to(dtype=torch.int32).numpy()
 
     # Prepare CPU RNG keyed by request-state index (MRV1 generator cache).
     sources = {int(req): gen for req, gen in source_generators.items()}
@@ -293,6 +297,8 @@ def probabilistic_rejection_sample_cpu(
     return (
         sampled_cpu.to(device=target_logits.device, non_blocking=True),
         num_sampled_cpu.to(device=target_logits.device, non_blocking=True),
+        sampled_cpu,
+        num_sampled_cpu,
     )
 
 

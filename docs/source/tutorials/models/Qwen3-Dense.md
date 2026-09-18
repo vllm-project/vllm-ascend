@@ -50,10 +50,6 @@ These are the recommended numbers of cards, which can be adjusted according to t
 
 >**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
-### 3.2 Verify Multi-node Communication
-
-If you need to deploy a multi-node environment, verify the multi-node communication according to [Verify Multi-node Communication Environment](../../getting_started/installation.md#installation-multi-node-interconnect).
-
 ## 4 Installation
 
 ### 4.1 Docker Image Installation
@@ -278,7 +274,7 @@ Single-node deployment completes both Prefill and Decode within the same node, s
     ```bash
     export VLLM_USE_MODELSCOPE=True
     export ASCEND_RT_VISIBLE_DEVICES=0
-    
+
     # Ensure the model path matches the directory recorded during download
     vllm serve Eco-Tech/Qwen3-8B-w8a8sc-310-vllm/TP1/Qwen3-8B-w8a8sc-310-vllm-tp1 \
         --host 127.0.0.1 \
@@ -324,7 +320,7 @@ Single-node deployment completes both Prefill and Decode within the same node, s
     ```bash
     export VLLM_USE_MODELSCOPE=True
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
-    
+
     # Ensure the model path matches the directory recorded during download
     vllm serve Eco-Tech/Qwen3-32B-w8a8sc-310-vllm/TP4/Qwen3-32B-w8a8sc-310-vllm-tp4 \
         --host 127.0.0.1 \
@@ -382,7 +378,7 @@ Expected result: HTTP 200 with a JSON response containing the `choices` field wi
 
 ## 7 Accuracy Evaluation
 
-### Using AISBench
+### 7.1 Using AISBench
 
 For setup details, including installation, dataset download, and configuration, please refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md).
 
@@ -429,7 +425,7 @@ ais_bench --models vllm_api_general_chat --datasets aime2025_gen_0_shot_chat_pro
 
 ## 8 Performance Evaluation
 
-### Using AISBench
+### 8.1 Using AISBench
 
 For setup details, including installation, dataset download, and configuration, please refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
@@ -470,7 +466,7 @@ models = [
 ais_bench --models vllm_api_stream_chat --datasets gsm8k_gen_0_shot_cot_str_perf --debug --summarizer default_perf --mode perf --num-prompts 360
 ```
 
-### Using vLLM Benchmark
+### 8.2 Using vLLM Benchmark
 
 Refer to [vLLM benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 

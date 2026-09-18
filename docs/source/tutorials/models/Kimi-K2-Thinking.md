@@ -251,11 +251,11 @@ Expected Result:
 
 ## 7 Accuracy Evaluation
 
-### Using AISBench
+### 7.1 Using AISBench
 
 For details, please refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md).
 
-### Using lm-eval
+### 7.2 Using lm-eval
 
 You can use [lm-eval](https://github.com/EleutherAI/lm-evaluation-harness) to evaluate the model accuracy through the OpenAI-compatible API.
 
@@ -281,6 +281,8 @@ Below are reference `gsm8k` results for `Kimi-K2-Thinking` powered by `vllm-asce
 | `gsm8k` | 3 | `strict-match` | 5 | `exact_match` | 0.8453 | 0.0100 |
 
 ## 8 Performance Evaluation
+
+### 8.1 Using vLLM Benchmark
 
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 

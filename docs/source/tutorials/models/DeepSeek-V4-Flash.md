@@ -174,7 +174,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         --no-enable-prefix-caching \
         --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
         --quantization ascend \
-        --port 8900 \
+        --port 8000 \
         --block-size 128 \
         --speculative-config '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}' \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
@@ -255,7 +255,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         --reasoning-parser deepseek_v4 \
         --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
         --quantization ascend \
-        --port 8900 \
+        --port 8000 \
         --block-size 32 \
         --speculative-config '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}' \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
@@ -298,7 +298,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         --reasoning-parser deepseek_v4 \
         --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
         --quantization ascend \
-        --port 8900 \
+        --port 8000 \
         --block-size 32 \
         --speculative-config '{"method":"dspark","num_speculative_tokens":7,"enforce_eager":true}' \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
@@ -333,7 +333,7 @@ Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](..
 Service Verification:
 
 ```shell
-curl http://<node0_ip>:8900/v1/chat/completions \
+curl http://<node0_ip>:8000/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
         "model": "dsv4",
@@ -1123,7 +1123,7 @@ The service returns HTTP 200 OK with a JSON response containing the `choices` fi
 
 Here is the accuracy evaluation method using AISBench.
 
-### Using AISBench
+### 7.1 Using AISBench
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
@@ -1138,11 +1138,11 @@ Here is the accuracy evaluation method using AISBench.
 
 ## 8 Performance Evaluation
 
-### Using AISBench
+### 8.1 Using AISBench
 
 Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
-### Using vLLM Benchmark
+### 8.2 Using vLLM Benchmark
 
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 

@@ -226,7 +226,11 @@ from vllm_ascend.worker.device_metadata import (
 )
 from vllm_ascend.worker.kvpp_cache import allocate_kvpp_cache
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
-from vllm_ascend.worker.utils import AscendKVBlockZeroer, disable_compilation
+from vllm_ascend.worker.utils import (
+    AscendKVBlockZeroer,
+    copy_kv_cache_blocks_inplace,
+    disable_compilation,
+)
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 
 from vllm_ascend.ascend_forward_context import (  # isort: skip
@@ -903,6 +907,24 @@ class NPUModelRunner(GPUModelRunner):
                     req_state.prev_num_draft_len = 0
 
         self._apply_pp_sampled_tokens_from_scheduler_output(scheduler_output)
+        if scheduler_output.kv_cache_block_copies:
+            # The upstream helper assumes one block-major backing storage.
+            # Ascend can pack multiple block-indexed segments (notably Mamba
+            # conv and SSM states) into one storage, so zero and copy them via
+            # their logical tensor views before delegating the remaining state
+            # updates to the parent runner.
+            if scheduler_output.new_block_ids_to_zero:
+                self._zero_block_ids(scheduler_output.new_block_ids_to_zero)
+            copy_kv_cache_blocks_inplace(
+                self.kv_caches,
+                self.kv_cache_config.num_blocks,
+                scheduler_output.kv_cache_block_copies,
+            )
+            scheduler_output = replace(
+                scheduler_output,
+                new_block_ids_to_zero=[],
+                kv_cache_block_copies=[],
+            )
         sampling_metadata = super()._update_states(scheduler_output)
         self._track_tmp_encoder_cache_refs(scheduler_output)
         return sampling_metadata

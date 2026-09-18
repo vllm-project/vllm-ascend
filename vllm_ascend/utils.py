@@ -264,6 +264,12 @@ def device_print(
         )
 
 
+# Minimum number of dimensions a matmul weight needs for both k and n dims to exist.
+MIN_MATMUL_WEIGHT_NDIMS = 2
+# Size of a singleton dimension (k=1 or n=1), unsupported by aclnnMatmulWeightNZ.
+SINGLETON_DIM_SIZE = 1
+
+
 def _should_trans_nz(weight: torch.Tensor) -> bool:
     # FP32 cannot use NZ.
     if weight.dtype == torch.float32:
@@ -271,6 +277,14 @@ def _should_trans_nz(weight: torch.Tensor) -> bool:
 
     # meta tensor only keeps shape/dtype meta info without physical memory, it is not necessary to trans it to NZ
     if weight.is_meta:
+        return False
+
+    # aclnnMatmulWeightNZ does not support matrices whose reduction/output
+    # dimension is one (k=1 or n=1). Keep these weights in ND format so the
+    # subsequent linear/matmul dispatch does not select the NZ-only path.
+    if weight.ndim >= MIN_MATMUL_WEIGHT_NDIMS and (
+        weight.shape[-1] == SINGLETON_DIM_SIZE or weight.shape[-2] == SINGLETON_DIM_SIZE
+    ):
         return False
 
     # Some hardware profiles require NZ weight layout.
@@ -1332,6 +1346,23 @@ def dispose_layer(layer: Any):
         attr_value = getattr(layer, attr_name)
         if isinstance(attr_value, torch.Tensor):
             dispose_tensor(attr_value)
+
+
+def is_rl_weight_update_enabled(vllm_config: VllmConfig) -> bool:
+    """Whether this deployment takes part in an RL weight update loop.
+
+    RL rollout workers receive weights through vLLM's layerwise reload, which
+    writes every checkpoint parameter back into the storage that exists when
+    the transaction starts. A parameter whose storage was released therefore
+    has no valid reload destination, so whoever would release it must keep it
+    while this returns ``True``.
+
+    Two switches mark such a deployment: the Ascend RL defaults
+    (``additional_config.rl_config.enabled``) and the upstream weight transfer
+    service (``--weight-transfer-config``), which is how a rollout worker
+    declares that a trainer may update its weights in place.
+    """
+    return get_ascend_config().rl_config.enabled or vllm_config.weight_transfer_config is not None
 
 
 def check_kv_extra_config(vllm_config):

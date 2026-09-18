@@ -901,6 +901,7 @@ class TestAscendSFAImpl(TestBase):
         mock_ascend_config.enable_sparse_li_c8 = False
         mock_ascend_config.enable_shared_expert_dp = False
         mock_ascend_config.is_sparse_li_c8_layer.return_value = False
+        mock_ascend_config.rl_config.enabled = False
         mock_get_ascend_config.return_value = mock_ascend_config
         self.mock_ascend_config = mock_ascend_config
 
@@ -909,6 +910,9 @@ class TestAscendSFAImpl(TestBase):
         vllm_config.model_config.hf_config = MagicMock()
         vllm_config.model_config.hf_text_config = None
         vllm_config.kv_transfer_config = None
+        # Pin both live-weight-update switches off: a bare MagicMock attribute
+        # is truthy and would silently enable the RL keep-alive paths.
+        vllm_config.weight_transfer_config = None
         vllm_config.speculative_config = MagicMock()
         vllm_config.speculative_config.num_speculative_tokens = 0
         vllm_config.parallel_config = MagicMock()
@@ -1096,6 +1100,32 @@ class TestAscendSFAImpl(TestBase):
         mock_dispose.assert_called_once()
         mock_maybe_trans_nz.assert_called_once()
 
+    @patch("vllm_ascend.attention.sfa_v1.maybe_trans_nz")
+    @patch("vllm_ascend.attention.sfa_v1.dispose_layer")
+    @patch("torch_npu.npu_format_cast")
+    def test_process_weights_after_loading_keeps_kv_b_proj_for_rl(
+        self, mock_format_cast, mock_dispose, mock_maybe_trans_nz
+    ):
+        """RL keeps kv_b_proj so live weight updates stay loadable (#15463).
+
+        The layerwise reload writes every checkpoint weight back into the
+        storage that exists when the transaction starts. A disposed parameter
+        has no valid destination, so the incoming weight is dropped and
+        W_UK_T/W_UV are re-derived from an empty tensor on every update.
+        """
+        layer = self._setup_kv_b_proj()
+        mock_format_cast.return_value = layer.weight
+        mock_maybe_trans_nz.side_effect = lambda x: x
+        self.impl.rl_weight_update_enabled = True
+
+        self.impl.process_weights_after_loading(torch.bfloat16)
+
+        mock_dispose.assert_not_called()
+        self.assertEqual(self.impl.W_UK_T.shape[0], self.impl.num_heads)
+        self.assertEqual(self.impl.W_UK_T.shape[2], self.impl.kv_lora_rank)
+        self.assertEqual(self.impl.W_UV.shape[0], self.impl.num_heads)
+        self.assertEqual(self.impl.W_UV.shape[2], self.impl.v_head_dim)
+
     # ============ _process_weights_for_fused_prolog_v3 ============
 
     def _run_prolog_v3_weight_test(self, qt, has_scales):
@@ -1128,6 +1158,40 @@ class TestAscendSFAImpl(TestBase):
 
     def test_process_weights_for_fused_prolog_v3_unquantized(self):
         self._run_prolog_v3_weight_test(None, False)
+
+    def _run_prolog_v3_kv_consumer_dispose_test(self, rl_weight_update_enabled: bool):
+        """Exercise the kv-consumer dispose branch of the PROLOG_V3 path."""
+        mock_format_cast = patch("torch_npu.npu_format_cast", return_value=torch.randn(128, 128))
+        mock_format_cast.start()
+        self.addCleanup(mock_format_cast.stop)
+        mock_empty_cache = patch("torch.npu.empty_cache")
+        mock_empty_cache.start()
+        self.addCleanup(mock_empty_cache.stop)
+
+        self.impl._quant_type = None
+        self.impl.fused_qkv_a_proj = MagicMock()
+        self.impl.fused_qkv_a_proj.weight.data = torch.randn(128, 96, 64)
+        self.impl.q_proj = SimpleNamespace(weight=SimpleNamespace(data=torch.randn(128, 96)))
+        self.impl.q_lora_rank = 32
+        self.impl.is_kv_consumer = True
+        self.impl.rl_weight_update_enabled = rl_weight_update_enabled
+
+        with patch("vllm_ascend.attention.sfa_v1.dispose_layer") as mock_dispose:
+            self.impl._process_weights_for_fused_prolog_v3()
+        return mock_dispose
+
+    def test_prolog_v3_disposes_sources_without_rl(self):
+        mock_dispose = self._run_prolog_v3_kv_consumer_dispose_test(rl_weight_update_enabled=False)
+
+        self.assertEqual(mock_dispose.call_count, 2)
+
+    def test_prolog_v3_keeps_sources_for_rl(self):
+        mock_dispose = self._run_prolog_v3_kv_consumer_dispose_test(rl_weight_update_enabled=True)
+
+        mock_dispose.assert_not_called()
+        self.assertTrue(hasattr(self.impl, "weight_dq"))
+        self.assertTrue(hasattr(self.impl, "weight_dkv_kr"))
+        self.assertTrue(hasattr(self.impl, "weight_uq_qr"))
 
     # ============ exec_kv: sparse C8 uses custom_kv_rmsnorm_rope ============
 
