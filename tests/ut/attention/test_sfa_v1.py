@@ -27,6 +27,7 @@ from vllm_ascend.attention.sfa_v1 import (
     AscendSFAMetadata,
     AscendSFAMetadataBuilder,
     PreprocessType,
+    _build_sfa_fia_shared_prefill_plan,
     _int64_kv_slots,
     custom_kv_rmsnorm_rope,
 )
@@ -892,7 +893,7 @@ class TestAscendSFAMetadataBuilder(TestBase):
         assert metadata.num_actual_tokens == common_attn_metadata.num_actual_tokens
         assert metadata.slot_mapping.shape == (100, 4, 1024)
         torch.testing.assert_close(metadata.cum_query_lens_cpu, common_attn_metadata.query_start_loc_cpu[1:])
-        assert metadata._sfa_fia_shared_prefill_plan is None
+        assert metadata.sfa_fia_shared_prefill_plan is None
 
     @patch("vllm_ascend.attention.sfa_v1.get_current_vllm_config")
     @patch("vllm_ascend.attention.sfa_v1.get_cos_and_sin_mla")
@@ -1268,7 +1269,15 @@ class TestAscendSFAImpl(TestBase):
         if len(query_lengths) > 1:
             metadata.block_table[1] = metadata.block_table[1].flip(0)
         metadata.attn_mask = torch.ones(2048, 2048, dtype=torch.int8).triu(1)
-        metadata._sfa_fia_shared_prefill_plan = None
+        metadata.sfa_fia_shared_prefill_plan = _build_sfa_fia_shared_prefill_plan(
+            attn_state=metadata.attn_state,
+            query_ends=tuple(metadata.cum_query_lens_cpu.tolist()),
+            kv_lengths=tuple(metadata.seq_lens_cpu.tolist()),
+            num_actual_tokens=metadata.num_actual_tokens,
+            num_input_tokens=metadata.num_input_tokens,
+            num_decodes=metadata.num_decodes,
+            num_decode_tokens=metadata.num_decode_tokens,
+        )
         indices = torch.arange(total, dtype=torch.int32).view(-1, 1, 1).expand(-1, 1, 2048).contiguous()
         return q, rope, cache, metadata, indices
 
@@ -1285,6 +1294,35 @@ class TestAscendSFAImpl(TestBase):
         self.addCleanup(fia_patch.stop)
         self.addCleanup(sparse_patch.stop)
         return fia, sparse
+
+    def test_shared_fia_plan_construction_is_metadata_only(self):
+        plan = _build_sfa_fia_shared_prefill_plan(
+            attn_state=AscendAttentionState.ChunkedPrefill,
+            query_ends=(2048, 4096),
+            kv_lengths=(3072, 3072),
+            num_actual_tokens=4096,
+            num_input_tokens=4096,
+            num_decodes=0,
+            num_decode_tokens=0,
+        )
+
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertEqual(plan.eligible_lengths, (1024, 1024))
+        self.assertEqual(plan.dense_spans, ((0, 1024), (2048, 3072)))
+        self.assertEqual(plan.tail_spans, ((1024, 2048), (3072, 4096)))
+        self.assertEqual(plan.dense_query_ends, (1024, 2048))
+        self.assertEqual(plan.dense_kv_lengths, (2048, 2048))
+        self.assertEqual(plan.tail_query_ends, (1024, 2048))
+        self.assertEqual(plan.tail_kv_lengths, (3072, 3072))
+
+    def test_shared_fia_execution_requires_metadata_plan(self):
+        args = self._setup_shared_fia()
+        args[3].sfa_fia_shared_prefill_plan = None
+        fia, sparse = self._mock_shared_fia_kernels()
+        self.assertIsNone(self.impl._try_sfa_fia_shared_prefill(*args))
+        fia.assert_not_called()
+        sparse.assert_not_called()
 
     def test_shared_fia_default_off_and_producer_decline(self):
         self.assertFalse(AscendConfig.enable_sfa_fia_shared_prefill)
@@ -1323,7 +1361,7 @@ class TestAscendSFAImpl(TestBase):
         self.assertIsNone(self.impl._try_sfa_fia_shared_prefill(*args))
         fia.assert_not_called()
         sparse.assert_not_called()
-        self.assertIsNone(args[3]._sfa_fia_shared_prefill_plan)
+        self.assertIsNone(args[3].sfa_fia_shared_prefill_plan)
 
     def test_shared_fia_whole_dense_and_over_cap_decline(self):
         fia, sparse = self._mock_shared_fia_kernels()
@@ -1359,7 +1397,7 @@ class TestAscendSFAImpl(TestBase):
         args = self._setup_shared_fia()
         fia, sparse = self._mock_shared_fia_kernels()
         self.impl._try_sfa_fia_shared_prefill(*args)
-        plan = args[3]._sfa_fia_shared_prefill_plan
+        plan = args[3].sfa_fia_shared_prefill_plan
 
         def assert_cpu_geometry(value):
             if isinstance(value, tuple):
@@ -1368,10 +1406,12 @@ class TestAscendSFAImpl(TestBase):
             else:
                 self.assertIs(type(value), int)
 
-        assert_cpu_geometry(plan)
+        assert plan is not None
+        for value in vars(plan).values():
+            assert_cpu_geometry(value)
         current_indices = args[4] + 1
         self.impl._try_sfa_fia_shared_prefill(*args[:4], current_indices)
-        self.assertIs(args[3]._sfa_fia_shared_prefill_plan, plan)
+        self.assertIs(args[3].sfa_fia_shared_prefill_plan, plan)
         torch.testing.assert_close(sparse.call_args.args[3], current_indices[2048:])
         self.assertEqual(fia.call_count, 2)
         self.assertEqual(sparse.call_count, 2)
