@@ -12,6 +12,73 @@ import vllm_ascend.attention.sfa_v1 as sparse_mla
 from vllm_ascend.attention.sfa_v1 import AscendSFAImpl, AscendSFAMetadata
 
 
+@pytest.fixture(autouse=True)
+def mock_scatter_nd_update(monkeypatch):
+    def scatter(cache, indices, updates):
+        slots = indices[:, 0]
+        valid = (slots >= 0) & (slots < cache.shape[0])
+        cache[slots[valid]] = updates[valid]
+        return cache
+
+    monkeypatch.setattr(sparse_mla.torch_npu, "npu_scatter_nd_update_", scatter, raising=False)
+
+
+@pytest.mark.parametrize("block_size", [128, 640])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("slot_dtype", [torch.int32, torch.int64])
+def test_nope_exec_kv_preserves_padding_and_special_values(block_size, dtype, slot_dtype):
+    dim = 512
+    backing = torch.randn(5, block_size, 1, dim, dtype=dtype)
+    cache = backing[1:-1]
+    before = backing.clone()
+    slots = torch.tensor([0, block_size - 1, block_size, block_size + 1, 3 * block_size - 1, -1], dtype=slot_dtype)
+    values = torch.randn(slots.numel(), dim, dtype=dtype)
+    values[0, :4] = torch.tensor([-0.0, float("nan"), float("inf"), -float("inf")], dtype=dtype)
+    expected = before.clone()
+    for slot, value in zip(slots.tolist(), values):
+        if slot >= 0:
+            expected[1 + slot // block_size, slot % block_size, 0] = value
+    impl = SimpleNamespace(qk_rope_head_dim=0, kv_lora_rank=dim, kv_a_layernorm=lambda x: x)
+    native = sparse_mla.torch_npu.npu_scatter_nd_update_
+    with patch.object(sparse_mla.torch_npu, "npu_scatter_nd_update_", wraps=native) as scatter:
+        result = AscendSFAImpl.exec_kv(impl, values, None, None, (cache,), slots, None)
+    assert result == (None, None)
+    scatter.assert_called_once()
+    indices = scatter.call_args.args[1]
+    assert indices.dtype == slot_dtype
+    assert torch.equal(indices, slots.view(-1, 1))
+    assert scatter.call_args.args[0].data_ptr() == cache.data_ptr()
+    assert torch.equal(backing.view(torch.uint8), expected.view(torch.uint8))
+
+
+def test_nope_exec_kv_trims_unused_slots_and_converts_values():
+    cache = torch.zeros(2, 4, 1, 8, dtype=torch.bfloat16)
+    values = torch.randn(2, 8, dtype=torch.float32)
+    slots = torch.tensor([1, 4, 7], dtype=torch.int32)
+    impl = SimpleNamespace(qk_rope_head_dim=0, kv_lora_rank=8, kv_a_layernorm=lambda x: x)
+    AscendSFAImpl.exec_kv(impl, values, None, None, (cache,), slots, None)
+    expected = torch.zeros_like(cache)
+    expected[0, 1, 0] = values[0].to(cache.dtype)
+    expected[1, 0, 0] = values[1].to(cache.dtype)
+    assert torch.equal(cache, expected)
+
+
+def test_nope_exec_kv_rejects_unmergeable_pages():
+    backing = torch.randn(3, 5, 1, 8)
+    cache = backing[:, :4]
+    before = backing.clone()
+    values = torch.randn(1, 8)
+    slots = torch.tensor([4], dtype=torch.int32)
+    impl = SimpleNamespace(qk_rope_head_dim=0, kv_lora_rank=8, kv_a_layernorm=lambda x: x)
+    with (
+        patch.object(sparse_mla.torch_npu, "npu_scatter_nd_update_") as scatter,
+        pytest.raises(RuntimeError, match="view size is not compatible"),
+    ):
+        AscendSFAImpl.exec_kv(impl, values, None, None, (cache,), slots, None)
+    scatter.assert_not_called()
+    assert torch.equal(backing, before)
+
+
 class _Linear:
     def __init__(self, weight: torch.Tensor) -> None:
         self.weight = weight
@@ -144,11 +211,24 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, em
 
     indexer.head_dim = latent_dim
     indexer.enable_sparse_li_c8 = False
-    config = SimpleNamespace(kv_transfer_config=None, model_config=SimpleNamespace(hf_config=SimpleNamespace()))
-    ascend_config = SimpleNamespace(enable_sparse_sfa_c8=False, enable_mlapo=False)
+    config = SimpleNamespace(
+        kv_transfer_config=None,
+        weight_transfer_config=None,
+        model_config=SimpleNamespace(hf_config=SimpleNamespace()),
+    )
+    ascend_config = SimpleNamespace(
+        enable_sparse_sfa_c8=False,
+        enable_mlapo=False,
+        rl_config=SimpleNamespace(enabled=False),
+    )
     with (
         patch.object(sparse_mla, "get_current_vllm_config", return_value=config),
         patch.object(sparse_mla, "get_ascend_config", return_value=ascend_config),
+        # `AscendSFAImpl.__init__` asks `vllm_ascend.utils` whether RL pushes
+        # weights into the live model, and that module holds its own reference
+        # to the config singleton, so patching the `sfa_v1` name alone leaves
+        # the predicate reading the real (uninitialised) config.
+        patch("vllm_ascend.utils.get_ascend_config", return_value=ascend_config),
         patch.object(sparse_mla, "get_tensor_model_parallel_world_size", return_value=1),
         patch.object(sparse_mla, "enable_sp", return_value=False),
     ):
@@ -202,7 +282,11 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, em
         patch.object(sparse_mla, "wait_for_kv_layer_from_connector"),
         patch.object(sparse_mla, "notify_kv_cache_written"),
         patch.object(sparse_mla, "maybe_save_kv_layer_to_connector"),
-        patch.object(sparse_mla, "torch_npu", SimpleNamespace()),
+        patch.object(
+            sparse_mla,
+            "torch_npu",
+            SimpleNamespace(npu_scatter_nd_update_=sparse_mla.torch_npu.npu_scatter_nd_update_),
+        ),
     ):
         actual = AscendSFAImpl.forward(
             impl,

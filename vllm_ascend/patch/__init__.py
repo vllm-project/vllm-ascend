@@ -716,16 +716,20 @@
 #       architecture whitelists, Triton availability, and feature
 #       compatibility checks. On Ascend the NPU v2 runner is not yet
 #       compatible with all upstream-defaulted models and features, so
-#       enabling by model architecture can crash. We override the
-#       property to read only VLLM_USE_V2_MODEL_RUNNER, deferring
-#       model/framework checks to the NPU runner itself.
+#       following upstream defaults can crash. We override the property
+#       with Ascend-owned whitelist heuristics in mrv2_utils (currently
+#       Qwen3ForCausalLM plus eagle3/mtp/dflash spec decode, Triton, and
+#       non-310P). Explicit VLLM_USE_V2_MODEL_RUNNER still wins.
 #    How:
-#       Monkey-patch VllmConfig.use_v2_model_runner to return
-#       envs.VLLM_USE_V2_MODEL_RUNNER (defaulting to False when unset).
+#       Call apply_v2_model_runner_config_patch() to install the Ascend
+#       use_v2_model_runner property and neutralize upstream V2
+#       validation. Keep additional patches for V2 spec-PP unsupported
+#       features and Ascend-supported V1 features (dspark / dflash2).
 #       worker/patch_v2/patch_use_v2_model_runner.py reuses this platform
 #       patch so EngineCore and worker processes share the same behavior.
 #    Related PR (if no, explain why):
 #       1. https://github.com/vllm-project/vllm-ascend/pull/11389
+#       2. https://github.com/vllm-project/vllm-ascend/pull/11692
 #    Future Plan:
 #       Remove this patch once vllm-ascend fully supports the v2 model
 #       runner and can rely on upstream's default enablement heuristics
@@ -1072,6 +1076,16 @@
 #    Future Plan:
 #       Remove this patch once torch.compile fully supports matching pattern from
 #       op's params.
+#   2. `vllm.model_executor.models.step3p5.FusedMoEBlock.__init__`
+#      `vllm.model_executor.models.step3p5.Step3p5DecoderLayer.__init__`
+#      `vllm.model_executor.models.step3p5.Step3p5DecoderLayer.forward`
+#      `vllm.model_executor.models.step3p5.Step3p5Model.forward`
+#    Why:
+#       Add SP support for step3.5/3.7. Upstream step3.5/3.7 doesn't support SP.
+#    How:
+#       Monkey-patch Step3p5 to enable SP.
+#    Future Plan:
+#       Remove this patch once upstream SP completes refactor.
 #
 # ** 21. File: worker/patch_triton.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1294,7 +1308,8 @@
 #    Why:
 #       EngineCore subprocesses only load global/platform patches, while workers
 #       also import this compatibility module. The actual monkey-patch is defined
-#       in `platform/patch_use_v2_model_runner.py`.
+#       in `platform/patch_use_v2_model_runner.py` (whitelist default plus
+#       remaining V2/V1 feature patches).
 #    How：
 #       Reuse the platform patch so EngineCore and worker processes share the
 #       same `use_v2_model_runner` behavior.
