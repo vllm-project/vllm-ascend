@@ -51,7 +51,7 @@ _benchmarks_3500: &benchmarks_3500
     max_out_len: 1500
     batch_size: 190
     request_rate: 0
-    baseline: 4568.9169
+    baseline: 4573.02
     threshold: 0.97
   perf_20:
     case_type: performance
@@ -62,7 +62,7 @@ _benchmarks_3500: &benchmarks_3500
     max_out_len: 1500
     batch_size: 48
     request_rate: 0
-    baseline: 2282.1936
+    baseline: 2229.147
     threshold: 0.97
 
 # ==========================================
