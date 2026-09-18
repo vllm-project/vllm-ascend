@@ -61,8 +61,18 @@ EPLB_EXPERT_WEIGHT_NAMES = {
     ),
     (QuantType.W4A4MXFP, False): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
     (QuantType.W4A4MXFP, True): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
-    (QuantType.W8A8MXFP, False): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
-    (QuantType.W8A8MXFP, True): ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"),
+    (QuantType.W8A8MXFP, False): (
+        "w13_weight_list",
+        "w2_weight_list",
+        "w13_weight_scale_list",
+        "w2_weight_scale_list",
+    ),
+    (QuantType.W8A8MXFP, True): (
+        "w13_weight_list",
+        "w2_weight_list",
+        "w13_weight_scale_list",
+        "w2_weight_scale_list",
+    ),
 }
 
 
