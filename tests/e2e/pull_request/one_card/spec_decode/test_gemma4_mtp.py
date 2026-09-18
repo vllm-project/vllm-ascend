@@ -81,8 +81,8 @@ _TASKS = [
 # acceptance by more than a couple of points.
 _EXAMPLE_PROMPTS = [_HEADER + f"{sig}\n{doc}" for sig, doc in _TASKS]
 
-MODELS = ["google/gemma-4-31B-it"]
-DRAFT_MODEL = "google/gemma-4-31B-it-assistant"
+MODELS = ["Google/gemma-4-31B-it"]
+DRAFT_MODEL = "Google/gemma-4-31B-it-assistant"
 
 # Measured baseline is ~0.98/0.96/0.90 (multiple runs on 950DT); golden is
 # set a few points below to absorb machine variance, and the assertion below
