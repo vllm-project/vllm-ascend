@@ -25,10 +25,18 @@ class PlacementImbalance:
 
 @dataclass(frozen=True)
 class PlacementPlan:
-    """Target experts and sources as aligned ``[ranks, slots]`` arrays.
+    """Target experts and their pre-migration source coordinates.
 
-    At each destination slot, ``source_rank_ids`` and ``source_slot_ids``
-    identify that target expert's location in the current placement.
+    Attributes:
+        rank_expert_ids: Target expert IDs ``[ranks, slots]``, indexed by
+            destination rank and slot.
+        source_rank_ids: Source rank for each target slot, with shape
+            ``[ranks, slots]``.
+        source_slot_ids: Source slot for each target slot, with shape
+            ``[ranks, slots]``.
+
+    Source coordinates index the current placement, so
+    ``current[source_rank_ids, source_slot_ids] == rank_expert_ids``.
     """
 
     rank_expert_ids: np.ndarray
@@ -64,15 +72,21 @@ _VARIANCE_ROUNDOFF_SAFETY_FACTOR = 8
 class StairEplbPolicy(AbstractEplbPolicy):
     """STAIR load statistics and placement planning."""
 
+    # Load modeling and placement scoring.
+
     @staticmethod
     def compress_load_window(load_samples: np.ndarray, max_bins: int) -> tuple[np.ndarray, np.ndarray]:
-        """Compress [steps, layers, experts] into bin means and sample counts."""
+        """Compress ``[steps, layers, experts]`` into weighted bins.
+
+        Return bin means ``[bins, layers, experts]`` and counts ``[bins]``.
+        """
         if max_bins < 1:
             raise ValueError("max_bins must be positive")
         values = np.asarray(load_samples, dtype=np.float64)
         if values.ndim != 3 or values.shape[0] == 0 or not np.all(np.isfinite(values)) or np.any(values < 0):
             raise ValueError("load_samples must be finite non-negative [steps, layers, experts]")
         num_bins = min(values.shape[0], max_bins)
+        # Integer boundaries spread the remainder across bins without dropping steps.
         boundaries = np.arange(num_bins + 1) * values.shape[0] // num_bins
         sample_counts = np.diff(boundaries).astype(np.int64)
         compressed = np.stack(
@@ -84,7 +98,11 @@ class StairEplbPolicy(AbstractEplbPolicy):
     def weighted_moments(
         load_samples: np.ndarray, sample_counts: np.ndarray
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Return frequency-weighted mean, sample variance, and covariance."""
+        """Return frequency-weighted moments for ``[bins, experts]`` samples.
+
+        ``sample_counts`` is ``[bins]``. Return mean and variance ``[experts]``
+        plus covariance ``[experts, experts]``.
+        """
         values = np.asarray(load_samples, dtype=np.float64)
         if values.ndim != 2 or values.shape[0] == 0 or not np.all(np.isfinite(values)) or np.any(values < 0):
             raise ValueError("load_samples must be finite non-negative [bins, experts]")
@@ -92,6 +110,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
         if counts.shape != (values.shape[0],) or not np.issubdtype(counts.dtype, np.integer) or np.any(counts <= 0):
             raise ValueError("sample_counts must contain one positive integer per bin")
         counts = counts.astype(np.int64, copy=False)
+        # Counts restore how many original steps each compressed bin represents.
         total_sample_count = int(counts.sum())
         mean = np.sum(values * counts[:, None], axis=0, dtype=np.float64) / total_sample_count
         centered = values - mean
@@ -104,7 +123,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
 
     @staticmethod
     def placement_replica_counts(rank_expert_ids: np.ndarray, num_experts: int) -> np.ndarray:
-        """Validate [ranks, slots] expert IDs and count each expert's replicas."""
+        """Validate ``[ranks, slots]`` IDs and return counts ``[experts]``."""
         placement = np.asarray(rank_expert_ids)
         if placement.ndim != 2 or not np.issubdtype(placement.dtype, np.integer):
             raise ValueError("rank_expert_ids must be an integer [ranks, slots] array")
@@ -122,7 +141,11 @@ class StairEplbPolicy(AbstractEplbPolicy):
     def placement_imbalance(
         cls, load_samples: np.ndarray, sample_counts: np.ndarray, rank_expert_ids: np.ndarray
     ) -> PlacementImbalance:
-        """Return weighted mean and nearest-rank p95 max-to-average ratios."""
+        """Score a ``[ranks, slots]`` placement on ``[bins, experts]`` loads.
+
+        ``sample_counts`` is ``[bins]``. Return weighted mean and nearest-rank
+        p95 max-to-average ratios.
+        """
         values = np.asarray(load_samples, dtype=np.float64)
         if values.ndim != 2 or values.shape[0] == 0 or not np.all(np.isfinite(values)) or np.any(values < 0):
             raise ValueError("load_samples must be finite non-negative [bins, experts]")
@@ -132,16 +155,19 @@ class StairEplbPolicy(AbstractEplbPolicy):
         counts = counts.astype(np.int64, copy=False)
         placement = np.asarray(rank_expert_ids)
         replica_counts = cls.placement_replica_counts(placement, values.shape[1])
+        # Planning assumes an expert's logical load is shared evenly by its replicas.
         rank_loads = np.stack(
             [np.sum(values[:, rank_experts] / replica_counts[rank_experts], axis=1) for rank_experts in placement],
             axis=1,
         )
         sample_total_loads = rank_loads.sum(axis=1)
+        # A sample with no routed load is balanced by definition.
         imbalance_ratios = np.ones(values.shape[0], dtype=np.float64)
         nonzero_load_samples = sample_total_loads > 0
         imbalance_ratios[nonzero_load_samples] = rank_loads[nonzero_load_samples].max(axis=1) / (
             sample_total_loads[nonzero_load_samples] / placement.shape[0]
         )
+        # Compute a weighted nearest-rank quantile without expanding the bins.
         imbalance_order = np.argsort(imbalance_ratios, kind="stable")
         cumulative_sample_counts = np.cumsum(counts[imbalance_order])
         p95_rank = max(1, int(np.ceil(0.95 * int(cumulative_sample_counts[-1]))))
@@ -152,7 +178,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
 
     @staticmethod
     def expert_risk(expert_means: np.ndarray, expert_variances: np.ndarray, z_score: float) -> np.ndarray:
-        """Return ``mean + z_score * sqrt(variance)`` for each expert."""
+        """Return ``mean + z_score * sqrt(variance)`` for ``[experts]`` inputs."""
         averages = np.asarray(expert_means, dtype=np.float64)
         variances = np.asarray(expert_variances, dtype=np.float64)
         if (
@@ -168,6 +194,8 @@ class StairEplbPolicy(AbstractEplbPolicy):
             raise ValueError("STAIR expert moments and z-score must be finite and non-negative")
         return averages + z_score * np.sqrt(variances)
 
+    # FlashTree-style search over per-expert replica counts.
+
     @staticmethod
     def _allocate_extra_replicas(
         expert_risks: np.ndarray,
@@ -176,7 +204,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
         num_ranks: int,
         eligible_experts: tuple[int, ...],
     ) -> np.ndarray | None:
-        """Greedily allocate slots by descending risk per existing replica."""
+        """Allocate ``[experts]`` counts from ``[experts]`` per-copy risks."""
         allocated_counts = replica_counts.copy()
         for _ in range(extra_slots):
             allocatable_experts = [expert for expert in eligible_experts if allocated_counts[expert] < num_ranks]
@@ -214,6 +242,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
         stage_expansions = []
         eligible_experts = current_experts + later_experts
         for replica_counts, unallocated_slots in search_beam:
+            # Greedy completion defines the center budget explored for this group.
             baseline_completion = cls._allocate_extra_replicas(
                 expert_risks, replica_counts, unallocated_slots, num_ranks, eligible_experts
             )
@@ -224,6 +253,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
             )
             current_capacity = sum(num_ranks - replica_counts[expert] for expert in current_experts)
             later_capacity = sum(num_ranks - replica_counts[expert] for expert in later_experts)
+            # Reserve enough capacity for later groups while respecting this group's cap.
             min_budget = max(0, unallocated_slots - later_capacity)
             max_budget = min(unallocated_slots, current_capacity)
             for budget in cls._candidate_group_budgets(center_budget, min_budget, max_budget, budget_radius):
@@ -272,6 +302,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
     ) -> list[np.ndarray]:
         """Return at most ``beam_size`` unique candidates, best score first.
 
+        ``expert_risks`` and every returned replica vector are ``[experts]``.
         ``candidate_score`` is lower-is-better and runs only on final candidates.
         """
         risks = np.asarray(expert_risks, dtype=np.float64)
@@ -298,6 +329,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
         experts_by_descending_risk = sorted(range(num_experts), key=lambda expert: (-risks[expert], expert))
         stage_count = min(num_stages, num_experts)
         expert_groups = [tuple(group) for group in np.array_split(experts_by_descending_risk, stage_count)]
+        # Every expert starts covered; the search distributes only redundant slots.
         search_beam: list[_ReplicaSearchState] = [(np.ones(num_experts, dtype=np.int64), total_slots - num_experts)]
 
         for group_index, current_experts in enumerate(expert_groups[:-1]):
@@ -324,6 +356,8 @@ class StairEplbPolicy(AbstractEplbPolicy):
             key=lambda candidate: (candidate_score(candidate), tuple(candidate)),
         )[:beam_size]
 
+    # Covariance-aware placement and migration-source selection.
+
     @staticmethod
     def _updated_rank_variance(
         expert: int,
@@ -337,13 +371,15 @@ class StairEplbPolicy(AbstractEplbPolicy):
         """Add one replica's scaled variance and covariance to a rank.
 
         ``rank_experts`` contains expert IDs already placed on that rank. The
-        result uses total replica counts for load splitting and clips only
-        floating-point roundoff below zero.
+        variance and replica-count vectors are ``[experts]``; covariance is
+        ``[experts, experts]``. The result uses total replica counts for load
+        splitting and clips only floating-point roundoff below zero.
         """
         expert_replica_count = replica_counts[expert]
         variance_increment = expert_variances[expert] / expert_replica_count**2
         updated_scale = current_scale + abs(variance_increment)
         for existing_expert in rank_experts:
+            # Each off-diagonal covariance contributes in both matrix directions.
             covariance_increment = (
                 2
                 * expert_covariance[expert, existing_expert]
@@ -352,6 +388,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
             variance_increment += covariance_increment
             updated_scale += abs(covariance_increment)
         updated_variance = current_variance + variance_increment
+        # Bound cancellation error by the accumulated term magnitudes.
         num_experts = len(rank_experts) + 1
         num_terms = num_experts * (num_experts + 1) // 2
         scale = max(updated_scale, np.finfo(np.float64).tiny)
@@ -369,6 +406,8 @@ class StairEplbPolicy(AbstractEplbPolicy):
     ) -> np.ndarray | None:
         """Return source ranks aligned with target slots, or ``None``.
 
+        Current, target, and returned placements are ``[ranks, slots]``;
+        ``expert_sources[e]`` lists the current ranks containing expert ``e``.
         Per destination, ``(source rank, capacity index)`` owns at most one
         ``(target slot, expert)`` demand. Occupied capacity recursively rematches
         its owner; retained experts stay local, and unplaced slots remain ``-1``.
@@ -402,6 +441,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
                     return True
             return False
 
+        # Directed pair capacities are independent across destination ranks.
         for dst_rank, target_experts in enumerate(target_placement):
             capacity_slot_owners: dict[tuple[int, int], tuple[int, int]] = {}
             for slot, expert in enumerate(target_experts):
@@ -422,9 +462,10 @@ class StairEplbPolicy(AbstractEplbPolicy):
     ) -> np.ndarray | None:
         """Choose a source rank for each target slot.
 
-        The returned array is aligned with ``target_placement``; unplaced slots
-        remain ``-1`` and retained local experts use the destination rank. Local
-        experts do not consume directed rank-pair migration capacity. Among
+        Current, target, and returned placements are ``[ranks, slots]``;
+        ``rank_node_ids`` is ``[ranks]``. Unplaced slots remain ``-1`` and
+        retained local experts use the destination rank. Local experts do not
+        consume directed rank-pair migration capacity. Among
         valid assignments, minimize transfers between unequal node IDs, then
         choose the lexicographically smallest source-rank vector in target-slot
         order. Return ``None`` when no valid assignment exists.
@@ -468,6 +509,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
             candidate_sources = sorted(
                 {src_rank for _, expert in demands for src_rank in expert_sources[expert] if src_rank != dst_rank}
             )
+            # Expand each directed rank pair into unit-capacity matching slots.
             capacity_slots = [
                 (src_rank, capacity_index)
                 for src_rank in candidate_sources
@@ -499,7 +541,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
 
     @staticmethod
     def _align_target_slots(current_placement: np.ndarray, target_placement: np.ndarray) -> np.ndarray:
-        """Keep retained experts in their slots and fill gaps by expert ID."""
+        """Align ``[ranks, slots]`` layouts while keeping retained slots."""
         aligned = np.full_like(target_placement, -1)
         for rank_id, target_experts in enumerate(target_placement):
             target_set = set(map(int, target_experts))
@@ -519,7 +561,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
         target_placement: np.ndarray,
         source_rank_ids: np.ndarray,
     ) -> np.ndarray:
-        """Return the unique current source slot for every target expert."""
+        """Map three ``[ranks, slots]`` inputs to source slots of the same shape."""
         source_slot_ids = np.empty_like(target_placement)
         for dst_rank, target_experts in enumerate(target_placement):
             for dst_slot, expert in enumerate(target_experts):
@@ -547,8 +589,10 @@ class StairEplbPolicy(AbstractEplbPolicy):
         """Place replicas with deterministic covariance-aware greedy LPT.
 
         Mean, variance, and replica counts are ``[experts]``; covariance is
-        ``[experts, experts]``. Experts are processed by descending per-replica
-        risk. Each replica chooses the legal rank with the lowest updated risk,
+        ``[experts, experts]``. Current placement is ``[ranks, slots]`` and node
+        IDs are ``[ranks]``; all returned plan arrays are ``[ranks, slots]``.
+        Experts are processed by descending per-replica risk. Each replica
+        chooses the legal rank with the lowest updated risk,
         breaking ties by rank ID. Each partial placement must have a source
         assignment within the directed rank-pair limit. ``None`` means bounded
         backtracking found no legal placement. The first source-feasible choice
@@ -633,6 +677,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
             rank_variances[rank_id] = previous_state[1]
             rank_variance_scales[rank_id] = previous_state[2]
 
+        # Decision i retains the remaining rank choices and undo state for copy i.
         while replica_index < len(replica_order):
             expert = replica_order[replica_index]
             if len(decisions) == replica_index:
@@ -668,6 +713,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
                 rank_means[rank_id] = updated_mean
                 rank_variances[rank_id] = updated_variance
                 rank_variance_scales[rank_id] = updated_scale
+                # Search needs only source feasibility; topology cost is deferred.
                 sources = migration_sources(current_placement, placement, rank_pair_migration_limit, expert_sources)
                 budget_exhausted = (
                     sources is not None and decision.tried_feasible_choice and backtracks_used == backtrack_limit
@@ -677,6 +723,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
                     if budget_exhausted:
                         return None
                     continue
+                # The greedy feasible choice is free; feasible alternatives consume budget.
                 if decision.tried_feasible_choice:
                     backtracks_used += 1
                 else:
@@ -696,6 +743,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
             rank_id, slot, previous_state = undo_state
             undo_placement(rank_id, slot, previous_state)
 
+        # Slot order does not affect risk, so stabilize it before exact source selection.
         placement = cls._align_target_slots(current_placement, placement)
         sources = cls._minimum_cost_migration_sources(
             current_placement, placement, rank_pair_migration_limit, expert_sources, node_ids
@@ -703,6 +751,8 @@ class StairEplbPolicy(AbstractEplbPolicy):
         assert sources is not None
         source_slots = cls._source_slots(current_placement, placement, sources)
         return PlacementPlan(placement, sources, source_slots)
+
+    # Single-layer orchestration and acceptance.
 
     @classmethod
     def plan_layer(
@@ -715,6 +765,8 @@ class StairEplbPolicy(AbstractEplbPolicy):
     ) -> LayerPlan | None:
         """Return the best mean-non-regressing placement for one layer.
 
+        Loads are ``[bins, experts]``, counts are ``[bins]``, current placement
+        is ``[ranks, slots]``, and node IDs are ``[ranks]``.
         P95 is diagnostic and does not gate acceptance. The lowest predicted
         mean ratio wins; ratios within the internal absolute tolerance are tied.
         Ties minimize cross-node migrations, same-node remote migrations,
@@ -729,6 +781,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
         num_ranks = current_placement.shape[0]
         scored_candidates = []
 
+        # Replica risk screens the bounded beam; actual imbalance decides acceptance.
         replica_candidates = cls.replica_candidates(
             risks,
             current_placement.size,
