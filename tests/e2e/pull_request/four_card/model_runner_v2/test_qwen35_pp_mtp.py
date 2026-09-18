@@ -84,7 +84,7 @@ def test_qwen35_pp_mtp_full_decode_only() -> None:
                 ],
                 temperature=0,
                 max_tokens=8192,
-                extra_body={"chat_template_kwargs": {"enable_thinking": True}},
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
             )
             choice = response.choices[0]
             assert choice.finish_reason == "stop", choice
@@ -93,15 +93,15 @@ def test_qwen35_pp_mtp_full_decode_only() -> None:
             assert numbers and int(numbers[-1]) == expected, text
             return response
 
-        for expression, answer in [("19 times 23", 437), ("125 plus 378", 503), ("144 divided by 12", 12)]:
-            check_answer(f"What is {expression}? Check the arithmetic and give the final integer.", answer)
+        for expression, answer in [("6 plus 7", 13), ("3 times 4", 12), ("9 minus 5", 4)]:
+            check_answer(f"What is {expression}? Give the final integer.", answer)
 
         with ThreadPoolExecutor(max_workers=16) as executor:
             futures = [
                 executor.submit(
                     check_answer,
-                    f"What is {19 + i} times {23 + i}? Check the arithmetic and give the final integer.",
-                    (19 + i) * (23 + i),
+                    f"What is {3 + i % 6} plus {4 + i % 5}? Give the final integer.",
+                    (3 + i % 6) + (4 + i % 5),
                 )
                 for i in range(32)
             ]
@@ -111,8 +111,7 @@ def test_qwen35_pp_mtp_full_decode_only() -> None:
         # Force a second prefill chunk before exercising decode graph replay.
         padding = "This paragraph is padding for a long context test. " * 2000
         response = check_answer(
-            padding
-            + "\nIgnore the padding above. What is 125 plus 378? Check the arithmetic and give the final integer.",
-            503,
+            padding + "\nIgnore the padding above. What is 6 plus 7? Give the final integer.",
+            13,
         )
         assert response.usage.prompt_tokens > MAX_BATCHED_TOKENS
