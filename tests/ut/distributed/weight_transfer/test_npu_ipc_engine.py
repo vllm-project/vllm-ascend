@@ -33,6 +33,8 @@ These cover the bugs that broke ``examples/rl/rlhf_http_npu_ipc.py``:
    visible storage was not preserved after loading.
 4. The packed receive path decoded tensors but never passed them to
    ``model.load_weights``.
+5. The receive path did not close vLLM's MTP completeness check, which rejects a
+   transfer that loads the model in batches.
 """
 
 import inspect
@@ -40,14 +42,20 @@ import sys
 import types
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
+from vllm.distributed.weight_transfer.base import TrainerWeightTransferEngine
+from vllm.distributed.weight_transfer.ipc_engine import IPCTrainerWeightTransferEngine
 
 from vllm_ascend.distributed.weight_transfer import npu_ipc_engine
 from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import (
+    NPUIPCTrainerInitInfo,
+    NPUIPCTrainerWeightTransferEngine,
     NPUIPCWeightTransferEngine,
 )
 
 _MODULE = "vllm_ascend.distributed.weight_transfer.npu_ipc_engine"
+_MTP = "vllm.model_executor.model_loader.mtp_validation.disable_mtp_completeness_check"
 
 
 def _patch_rebuild_npu_tensor(rebuild_func):
@@ -241,3 +249,58 @@ def test_receive_packed_weights_loads_model():
         importer=engine._packed_importer,
     )
     engine.model.load_weights.assert_called_once_with(packed_weights)
+
+
+def test_receive_weights_closes_mtp_completeness_check():
+    """A transfer loads the model in batches, so the completeness check is off.
+
+    The loader validates that every expected parameter arrived; a packed
+    transfer loads one chunk at a time, so the check has to be closed for the
+    duration of the transaction (upstream's NCCL/IPC engines do the same).
+    """
+    npu_uuid = "node-0"
+    rebuild_args = (None, None, None, None, None, None, 999, None)
+    update_info = NPUIPCWeightTransferEngine.update_info_cls(
+        names=["model.weight"],
+        dtype_names=["float32"],
+        shapes=[[3]],
+        ipc_handles=[{npu_uuid: rebuild_args}],
+    )
+
+    engine = object.__new__(NPUIPCWeightTransferEngine)
+    engine.model = MagicMock()
+    engine.device = MagicMock(index=0)
+    engine.packed = False
+    mtp = MagicMock()
+
+    with (
+        _patch_rebuild_npu_tensor(lambda *args: torch.tensor([1.0, 2.0, 3.0])),
+        patch(f"{_MODULE}.npu_generate_uuid", return_value=npu_uuid),
+        patch(_MTP, mtp),
+    ):
+        engine.receive_weights(update_info)
+
+    mtp.assert_called_once_with()
+    mtp.return_value.__enter__.assert_called_once()
+    engine.model.load_weights.assert_called_once()
+
+
+def test_worker_engine_has_no_legacy_trainer_api():
+    """The static trainer entry point is gone; trainers use the trainer engine."""
+    assert not hasattr(NPUIPCWeightTransferEngine, "trainer_send_weights")
+
+
+def test_trainer_engine_extends_the_transport_neutral_trainer_base():
+    """Every data-plane step is NPU-specific, so the CUDA IPC trainer engine —
+    which owns ``torch.cuda`` device/UUID handling — must not be the base."""
+    assert issubclass(NPUIPCTrainerWeightTransferEngine, TrainerWeightTransferEngine)
+    assert not issubclass(NPUIPCTrainerWeightTransferEngine, IPCTrainerWeightTransferEngine)
+
+
+def test_trainer_init_requires_a_weight_source():
+    with pytest.raises(ValueError, match="requires a WeightSource"):
+        NPUIPCTrainerWeightTransferEngine.trainer_init(
+            NPUIPCTrainerInitInfo(rank=0),
+            client=MagicMock(),
+            source=None,
+        )
