@@ -488,7 +488,17 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             pertoken_scale=None,
         )
 
-    def all_gather_input_id_with_dp_group(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def all_gather_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """Align token ids with the rows produced by :meth:`prepare`.
+
+        Hash-based routing consumes ``input_ids`` alongside the gathered router
+        logits. Sequence-parallel inputs use the same EP gather-and-unpad path
+        as hidden states and router logits. Other inputs follow the DP-then-PCP
+        communication layout.
+        """
+        if self._use_ep_sequence_parallel():
+            return torch.ops.vllm.maybe_all_gather_and_maybe_unpad(input_ids)
+
         if self.moe_config.dp_size > 1:
             max_tokens_across_dp = _EXTRA_CTX.max_tokens_across_dp
             pad_size = max_tokens_across_dp - self.num_tokens
@@ -496,6 +506,15 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
                 input_ids = nn.functional.pad(input_ids, (0, pad_size))
 
             input_ids = self.moe_config.dp_group.all_gather(input_ids, 0)
+
+        if self.moe_config.pcp_size > 1:
+            max_tokens_across_pcp = _EXTRA_CTX.max_tokens_across_pcp
+            pad_size = max_tokens_across_pcp - self.num_tokens_pcp
+            if pad_size > 0:
+                input_ids = nn.functional.pad(input_ids, (0, pad_size))
+
+            input_ids = get_pcp_group().all_gather(input_ids, 0)
+
         return input_ids
 
     def finalize(
