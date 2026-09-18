@@ -20,7 +20,6 @@ from vllm_ascend._310p.worker.v2.model_state import (
 )
 from vllm_ascend._310p.worker.v2.sampler import Ascend310PSampler
 from vllm_ascend._310p.worker.v2.states import Ascend310PStagedWriteTensor
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
@@ -96,7 +95,7 @@ def test_kv_zeroing_uses_narrow_310p_gate(
         assert runner._needs_kv_cache_zeroing_310p(kv_cache_config) is expected
 
 
-def test_kv_zeroing_matches_v028_gate() -> None:
+def test_kv_zeroing_matches_v029_gate() -> None:
     runner = object.__new__(NPUModelRunner310V2)
     runner.speculative_config = SimpleNamespace(num_speculative_tokens=2)
     kv_cache_config = SimpleNamespace(
@@ -172,19 +171,23 @@ def test_310p_hybrid_model_state_initializes_full_upstream_contract() -> None:
     state = object.__new__(Ascend310PMambaHybridModelState)
     state.max_num_reqs = 4
     state._align_mode = False
+    recover_state = object()
     config = object()
     model = object()
     encoder_cache = object()
     device = torch.device("cpu")
+
+    def init_parent(self, *_args):
+        self.recoverssm = recover_state
+
     with (
-        patch.object(AscendMambaHybridModelState, "__init__") as parent_init,
+        patch.object(AscendMambaHybridModelState, "__init__", side_effect=init_parent, autospec=True) as parent_init,
         patch.object(Ascend310PMambaHybridModelState, "_replace_310p_rope_state") as replace_rope,
-        patch("vllm_ascend._310p.worker.v2.model_state.vllm_version_is", return_value=True),
     ):
         Ascend310PMambaHybridModelState.__init__(state, config, model, encoder_cache, device)
     parent_init.assert_called_once_with(state, config, model, encoder_cache, device)
     replace_rope.assert_called_once_with(encoder_cache)
-    assert state.recoverssm is None
+    assert state.recoverssm is recover_state
     assert isinstance(state._capture_seq_lens_by_ptr, dict)
 
 

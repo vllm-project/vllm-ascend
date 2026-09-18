@@ -802,7 +802,7 @@ class NPUModelRunner310V2(NPUModelRunner):
         spec_config = self.speculative_config
         if spec_config is None:
             return False
-        if vllm_version_is("0.28.0"):
+        if vllm_version_is("0.29.0"):
             uses_eagle_block_drop = any(group.is_eagle_group for group in kv_cache_config.kv_cache_groups)
         else:
             uses_eagle_block_drop = spec_config.use_eagle_block_drop()

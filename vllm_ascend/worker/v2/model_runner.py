@@ -257,12 +257,9 @@ class NPUModelRunner(GPUModelRunner):
         kv_cache_allocation_context: AbstractContextManager | None = None,
     ) -> None:
         with graph_manager_wrapper(self):
-            # vLLM 0.28 GPUModelRunner.initialize_kv_cache does not accept
-            # kv_cache_allocation_context. Gate it the same way as other
-            # 0.28 super() kwargs in this runner.
             super().initialize_kv_cache(
                 kv_cache_config,
-                **({} if vllm_version_is("0.28.0") else {"kv_cache_allocation_context": kv_cache_allocation_context}),
+                kv_cache_allocation_context=kv_cache_allocation_context,
             )
             if self.pcp_manager is not None:
                 assert isinstance(self.pcp_manager, AscendPCPManager)
