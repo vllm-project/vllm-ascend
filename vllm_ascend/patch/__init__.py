@@ -27,6 +27,18 @@
 # ----------------------------------------------------------------------------------
 
 # What's Patched and how it works:
+#
+# File: worker/patch_qwen3_moe.py
+#   Targets: Qwen3MoeDecoderLayer.__init__/forward, Qwen3MoeSparseMoeBlock.forward,
+#            Qwen3MoeModel.forward/use_sequence_parallel.
+#   Why: MoE-only token sharding leaves both decoder RMSNorm operations replicated.
+#   How: Backport model-entry sharding, attention AG/RS, already-sharded MoE inputs,
+#        and model-exit gathering (including auxiliary hidden states). Retain the
+#        original forwards for PP, multimodal, mixed dense/MoE and custom o_proj
+#        layouts. Keep the existing Qwen attention forward patch unchanged.
+#   Related PR: https://github.com/vllm-project/vllm/pull/57337
+#   Future plan: Skip installation when native model-level SP is available;
+#                remove the backport once supported vLLM versions include it.
 # --------------------------------
 # * Platform Patch:
 # =================
