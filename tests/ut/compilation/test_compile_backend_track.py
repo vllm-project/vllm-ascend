@@ -428,21 +428,21 @@ class TestDeprecatedCompileBackendTranslation(TrackTestBase):
     def test_fusion_pass_translates_to_false_with_warning(self):
         import logging
 
-        with self.assertLogs("vllm_ascend", level=logging.WARNING):
+        with self.assertLogs("vllm", level=logging.WARNING):
             config, _ = self._init_with_sidecar({"compile_backend": "fusion_pass"})
         self.assertIs(config.ascend_compilation_config.enable_npugraph_ex, False)
 
     def test_npugraph_ex_translates_to_true_with_warning(self):
         import logging
 
-        with self.assertLogs("vllm_ascend", level=logging.WARNING):
+        with self.assertLogs("vllm", level=logging.WARNING):
             config, _ = self._init_with_sidecar({"compile_backend": "npugraph_ex"})
         self.assertIs(config.ascend_compilation_config.enable_npugraph_ex, True)
 
     def test_auto_is_ignored_with_warning(self):
         import logging
 
-        with self.assertLogs("vllm_ascend", level=logging.WARNING):
+        with self.assertLogs("vllm", level=logging.WARNING):
             config, _ = self._init_with_sidecar({"compile_backend": "auto"})
         # community default resolution
         self.assertIs(config.ascend_compilation_config.enable_npugraph_ex, True)
@@ -460,7 +460,7 @@ class TestDeprecatedCompileBackendTranslation(TrackTestBase):
         bag = {"compile_backend": "fusion_pass"}
         vllm_config = self._make_vllm_config()
         vllm_config.additional_config = {"ascend_compilation_config": bag}
-        with self.assertLogs("vllm_ascend", level=logging.WARNING):
+        with self.assertLogs("vllm", level=logging.WARNING):
             from vllm_ascend.ascend_config import init_ascend_config
 
             init_ascend_config(vllm_config)
@@ -469,7 +469,7 @@ class TestDeprecatedCompileBackendTranslation(TrackTestBase):
     def test_no_key_no_warning(self):
         import logging
 
-        with self.assertNoLogs("vllm_ascend", level=logging.WARNING):
+        with self.assertNoLogs("vllm", level=logging.WARNING):
             self._init_with_sidecar({})
 
 

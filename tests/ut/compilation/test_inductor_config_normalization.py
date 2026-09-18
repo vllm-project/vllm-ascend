@@ -129,6 +129,22 @@ class TestUnknownKeys(NormalizationTestBase):
         config = {"npu_backend": "triton_experimental"}
         self.assertEqual(_normalize_inductor_config(config), config)
 
+    def test_npu_backend_warns_q5(self):
+        """Q-5 (09 §六, 2026-09-18 ruling): the key stays legal (someone may
+        rely on passing validation) but never takes effect on vLLM's piecewise
+        path — compile_fx is called directly, without the wrapper that
+        resolves npu_backend. Point at TORCHINDUCTOR_NPU_BACKEND."""
+        import logging
+
+        from vllm_ascend.platform import _normalize_inductor_config
+
+        with self.assertLogs("vllm", level=logging.WARNING) as logs:
+            result = _normalize_inductor_config({"npu_backend": "triton_experimental"})
+        joined = "\n".join(logs.output)
+        self.assertIn("does not take effect", joined)
+        self.assertIn("TORCHINDUCTOR_NPU_BACKEND", joined)
+        self.assertEqual(result, {"npu_backend": "triton_experimental"})
+
     def test_none_is_a_noop(self):
         from vllm_ascend.platform import _normalize_inductor_config
 

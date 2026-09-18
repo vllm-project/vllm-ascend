@@ -489,12 +489,6 @@ class NPUPlatform(Platform):
             )
 
         compilation_config = vllm_config.compilation_config
-        if compilation_config.backend != "inductor":
-            logger.warning(
-                "Inductor compile-backend track: backend=%s inconsistent with the track, correcting to 'inductor'.",
-                compilation_config.backend,
-            )
-            compilation_config.backend = "inductor"
 
         if os.environ.get("TORCHINDUCTOR_NPU_BACKEND", "triton_experimental") != "triton_experimental":
             logger.warning(
@@ -1516,6 +1510,19 @@ def _normalize_inductor_config(config: dict | None) -> dict | None:
             "use the track."
         )
 
+    # Q-5 (09 §六, 2026-09-18 ruling): npu_backend stays in the whitelist
+    # (someone may rely on it passing validation), but it never takes effect
+    # on vLLM's piecewise compilation path — compile_fx is called directly,
+    # without the torch.compile wrapper that resolves npu_backend.
+    if "npu_backend" in config:
+        logger.warning(
+            "Inductor compile-backend track: inductor_compile_config npu_backend "
+            "does not take effect on vLLM's piecewise compilation path (compile_fx "
+            "is called directly, without the torch.compile wrapper that resolves "
+            "it). Use the TORCHINDUCTOR_NPU_BACKEND environment variable to "
+            "select the torch_npu inductor backend variant."
+        )
+
     for key in _TRACK_PINNED_OFF_INDUCTOR_KEYS + _TRACK_COMBO_INDUCTOR_KEYS:
         if config.get(key):
             logger.warning(
@@ -1738,18 +1745,6 @@ def _setup_compile_backend(
             "need ASCEND_LAUNCH_BLOCKING for debugging, consider other methods — "
             "for example, check the plog files (default: $HOME/ascend/log/debug) "
             "for more information about runtime errors."
-        )
-
-    # The explicit npugraph_ex track only makes sense with full-graph capture
-    # modes (see graph_mode.md); cg=NONE would silently compile nothing.
-    if (
-        _inductor_track_backend(vllm_config) == "npugraph_ex"
-        and compilation_config.cudagraph_mode == CUDAGraphMode.NONE
-    ):
-        raise ValueError(
-            "ascend_compilation_config.compile_backend='npugraph_ex' requires a "
-            "full-graph cudagraph_mode (FULL / FULL_DECODE_ONLY / FULL_AND_PIECEWISE), "
-            f"got cudagraph_mode={compilation_config.cudagraph_mode}."
         )
 
 

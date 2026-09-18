@@ -63,13 +63,17 @@ class AscendCompilationConfig:
     downgrades (disable npugraph_ex / static_kernel) and the
     static_kernel→npugraph_ex dependency check are applied in an ``after``
     model_validator.
+
+    The config refactor (09_重构说明书 §三) removed the compile_backend enum:
+    the inductor track is selected through the upstream front door
+    (compilation_config.backend), and the legacy fusion_pass / npugraph_ex
+    resolution is the plain community ``enable_npugraph_ex`` boolean plus the
+    cudagraph-mode filtering in the platform's step 7 — exactly the boundary
+    tree (9e3caae09) behavior. The deprecated side-door key is translated at
+    init_ascend_config for a 2-release window.
     """
 
-    # None = "not set by the user": the compile_backend enum resolves it below,
-    # so enum defaults can be told apart from an explicit True/False (e.g. the
-    # minimal {"compile_backend": "inductor"} usage must not trip the
-    # inductor/npugraph_ex conflict check).
-    enable_npugraph_ex: bool | None = None
+    enable_npugraph_ex: bool = True
     enable_static_kernel: bool = False
     fuse_norm_quant: bool = True
     fuse_qknorm_rope: bool = True
@@ -84,34 +88,9 @@ class AscendCompilationConfig:
     # accepted behind this explicit flag (default-off also honors the original
     # hold-design 3.2 "first version off, enable experiment-driven" promise).
     fuse_norm_quant_dynamic: bool = False
-    # "auto" keeps the existing npugraph_ex / fusion_pass inference unchanged
-    # (resolved enable_npugraph_ex True/False selects between them).
-    # "fusion_pass" / "npugraph_ex" pin one of the two legacy tracks.
-    # "inductor" enables the inductor compile-backend track: per-piece
-    # compilation goes through upstream vLLM's InductorAdaptor (compile_fx)
-    # with torch_npu's triton_experimental inductor backend. Incompatible with
-    # enforce_eager=True and -O0 (both disable compilation entirely) and with
-    # an explicit enable_npugraph_ex=True.
-    compile_backend: Literal["auto", "fusion_pass", "npugraph_ex", "inductor"] = "auto"
 
     @model_validator(mode="after")
     def _apply_unsupported_hardware_downgrade_and_static_kernel_check(self):
-        # Resolve the compile_backend enum into the effective npugraph_ex bool
-        # BEFORE the hardware downgrade below, so downstream consumers always
-        # read a concrete bool (they never see the None sentinel).
-        if self.compile_backend == "inductor":
-            if self.enable_npugraph_ex is True:
-                raise ValueError(
-                    "ascend_compilation_config.compile_backend='inductor' is incompatible with "
-                    "enable_npugraph_ex=True: the inductor track does not use npugraph_ex."
-                )
-            self.enable_npugraph_ex = False
-        elif self.compile_backend == "fusion_pass":
-            self.enable_npugraph_ex = False
-        elif self.compile_backend == "npugraph_ex":
-            self.enable_npugraph_ex = True
-        elif self.enable_npugraph_ex is None:  # "auto" with no explicit bool
-            self.enable_npugraph_ex = True
 
         from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
@@ -1449,6 +1428,55 @@ def init_ascend_config(vllm_config):
         "batch_job_sched_config",
     }
     kwargs = {k: v for k, v in additional_config.items() if k not in _NON_USER_INPUT_KEYS}
+    # Config-refactor deprecation window (09 §3.3 / Q-3 / Q-4): the
+    # compile_backend enum is removed (field + sentinel). Translate the
+    # side-door key here — the single legitimate entry point, before pydantic
+    # (extra="forbid" would otherwise reject it with a bare validation error).
+    # The nested dict may share identity with the user's additional_config
+    # bag: copy one level before popping, the bag is one-off data and is never
+    # rewritten in place (02 design §6.2 / R10).
+    acc = kwargs.get("ascend_compilation_config")
+    if isinstance(acc, dict) and "compile_backend" in acc:
+        acc = dict(acc)
+        value = acc.pop("compile_backend")
+        if value == "inductor":
+            raise ValueError(
+                "ascend_compilation_config.compile_backend='inductor' no longer selects "
+                "the inductor track: request it through the upstream front door "
+                "(-cc.backend inductor, i.e. compilation_config.backend='inductor') "
+                "and remove the side-door key."
+            )
+        if value == "fusion_pass":
+            acc["enable_npugraph_ex"] = False
+            logger.warning(
+                "ascend_compilation_config.compile_backend='fusion_pass' is deprecated "
+                "and will be removed in 2 releases: it now maps to "
+                "ascend_compilation_config.enable_npugraph_ex=False. Use the boolean "
+                "instead and remove the key."
+            )
+        elif value == "npugraph_ex":
+            acc["enable_npugraph_ex"] = True
+            logger.warning(
+                "ascend_compilation_config.compile_backend='npugraph_ex' is deprecated "
+                "and will be removed in 2 releases: it now maps to "
+                "ascend_compilation_config.enable_npugraph_ex=True. Use the boolean "
+                "instead and remove the key."
+            )
+        elif value == "auto":
+            logger.warning(
+                "ascend_compilation_config.compile_backend='auto' is deprecated and "
+                "will be removed in 2 releases: the dynamic fusion_pass/npugraph_ex "
+                "resolution is the default behavior with the plain "
+                "enable_npugraph_ex boolean. Remove the key."
+            )
+        else:
+            raise ValueError(
+                f"ascend_compilation_config.compile_backend={value!r} is not a valid "
+                "value: the compile_backend enum has been removed. The legacy tracks "
+                "are selected with the enable_npugraph_ex boolean and the inductor "
+                "track with compilation_config.backend='inductor'."
+            )
+        kwargs["ascend_compilation_config"] = acc
     unknown_keys = sorted(set(kwargs) - AscendConfig.__dataclass_fields__.keys())
     # vLLM-Omni shares this mapping with the platform plugin. Preserve its
     # extension keys on VllmConfig while excluding them from Ascend validation.
