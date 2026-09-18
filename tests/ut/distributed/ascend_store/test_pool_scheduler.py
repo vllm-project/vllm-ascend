@@ -791,7 +791,7 @@ class TestKVPoolSchedulerGetSwClippedBlocks(unittest.TestCase):
 
 
 class TestKVPoolSchedulerUpdateFinished(unittest.TestCase):
-    """Test update_finished_sending and update_finished_recving."""
+    """Test update_finished_sending."""
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def _make_scheduler(self, mock_client_cls):
@@ -799,25 +799,18 @@ class TestKVPoolSchedulerUpdateFinished(unittest.TestCase):
 
     def test_update_finished(self):
         cases = [
-            ("sending", {"r1", "r2", "r3"}, {"r1", "r2"}, {"r3"}),
-            ("sending", {"r1"}, None, {"r1"}),
-            ("recving", {"r1", "r2"}, {"r1"}, {"r2"}),
-            ("recving", {"r1"}, None, {"r1"}),
+            ({"r1", "r2", "r3"}, {"r1", "r2"}, {"r3"}),
+            ({"r1"}, None, {"r1"}),
         ]
-        for direction, initial, finished, expected in cases:
-            with self.subTest(direction=direction, finished=finished):
+        for initial, finished, expected in cases:
+            with self.subTest(finished=finished):
                 scheduler = self._make_scheduler()
-                attribute = "_delayed_free_req_ids" if direction == "sending" else "_loading_req_ids"
-                if direction == "sending":
-                    for req_id in initial:
-                        scheduler._set_delayed_free(req_id, 1)
-                else:
-                    setattr(scheduler, attribute, initial)
-                getattr(scheduler, f"update_finished_{direction}")(finished)
-                self.assertEqual(getattr(scheduler, attribute), expected)
-                if direction == "sending":
-                    self.assertEqual(scheduler._delayed_free_blocks_by_req, dict.fromkeys(expected, 1))
-                    self.assertEqual(scheduler._num_delayed_free_blocks, len(expected))
+                for req_id in initial:
+                    scheduler._set_delayed_free(req_id, 1)
+                scheduler.update_finished_sending(finished)
+                self.assertEqual(scheduler._delayed_free_req_ids, expected)
+                self.assertEqual(scheduler._delayed_free_blocks_by_req, dict.fromkeys(expected, 1))
+                self.assertEqual(scheduler._num_delayed_free_blocks, len(expected))
 
 
 class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):
@@ -1017,17 +1010,6 @@ class TestKVPoolSchedulerUpdateStateAfterAllocBranches(unittest.TestCase):
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def _make_scheduler(self, mock_client_cls, extra_config=None):
         return KVPoolScheduler(make_config(extra_config=extra_config), use_layerwise=False)
-
-    def test_async_adds_loading_req(self):
-        scheduler = self._make_scheduler(extra_config={"load_async": True})
-        scheduler.load_specs["r1"] = LoadSpec(0, 32, can_load=True)
-
-        request = MagicMock()
-        request.request_id = "r1"
-        blocks = MagicMock()
-        blocks.get_block_ids.return_value = [[0, 1]]
-        scheduler.update_state_after_alloc(request, blocks, 32)
-        self.assertIn("r1", scheduler._loading_req_ids)
 
     def test_zero_external_tokens(self):
         scheduler = self._make_scheduler()

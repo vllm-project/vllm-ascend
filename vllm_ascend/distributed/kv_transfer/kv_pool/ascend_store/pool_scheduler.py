@@ -147,7 +147,6 @@ class KVPoolScheduler:
             "discard_partial_chunks", True
         )
         self._unfinished_requests: dict[str, tuple[Request, list[list[int]]]] = {}
-        self._loading_req_ids: set[str] = set()
         self._delayed_free_req_ids: set[str] = set()
         self._delayed_free_blocks_by_req: dict[str, int] = {}
         self._num_delayed_free_blocks = 0
@@ -804,8 +803,6 @@ class KVPoolScheduler:
         )
 
         self.load_specs[request.request_id].can_load = True
-        if self.load_async and not self.use_layerwise:
-            self._loading_req_ids.add(request.request_id)
         logger.debug(
             "KV pool load spec enabled req=%s num_external_tokens=%d vllm_cached=%d kvpool_cached=%d groups=%s",
             request.request_id,
@@ -1021,18 +1018,15 @@ class KVPoolScheduler:
             self._request_trackers.pop(finished_req_id, None)
             self._unfinished_requests.pop(finished_req_id, None)
             self._preempted_req_ids.discard(finished_req_id)
-            self._loading_req_ids.discard(finished_req_id)
 
         for req_id in scheduler_output.preempted_req_ids:
             self._preempted_req_ids.update(scheduler_output.preempted_req_ids)
             self._request_trackers.pop(req_id, None)
             self._unfinished_requests.pop(req_id, None)
-            self._loading_req_ids.discard(req_id)
             self._set_delayed_free(req_id, 0)
 
         meta = AscendConnectorMetadata(
             scheduler_output.preempted_req_ids,
-            self._loading_req_ids.copy(),
             self._delayed_free_req_ids.copy(),
         )
 
@@ -1192,10 +1186,6 @@ class KVPoolScheduler:
         if finished_sending:
             for req_id in finished_sending:
                 self._set_delayed_free(req_id, 0)
-
-    def update_finished_recving(self, finished_recving: set[str] | None) -> None:
-        if finished_recving:
-            self._loading_req_ids.difference_update(finished_recving)
 
     def _set_delayed_free(self, req_id: str, num_blocks: int) -> None:
         if num_blocks:
