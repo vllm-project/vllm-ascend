@@ -246,8 +246,10 @@ def _run_speculative_decoding(
     max_tokens: int = 1024,
     acceptance_length_rtol: float = ACCEPTANCE_LENGTH_RTOL,
     is_moe: bool = True,
+    enable_thinking: bool | None = None,
 ) -> float:
     prompts = list(example_prompts)
+    chat_template_kwargs = {} if enable_thinking is None else {"enable_thinking": enable_thinking}
     with VllmRunner(
         model_name,
         enable_expert_parallel=is_moe,
@@ -263,6 +265,7 @@ def _run_speculative_decoding(
                     [{"role": "user", "content": prompt}],
                     tokenize=False,
                     add_generation_prompt=True,
+                    **chat_template_kwargs,
                 ),
                 add_special_tokens=False,
             )

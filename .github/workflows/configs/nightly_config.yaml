@@ -180,6 +180,9 @@ a3:
       - name: Kimi-K2.6-w4a8-A3
         os: linux-aarch64-nightly-a3-16
         config_file_path: Kimi-K2.6-w4a8-A3.yaml
+      - name: Kimi-K2.6-w4a8-DFlash-A3
+        os: linux-aarch64-nightly-a3-16
+        config_file_path: Kimi-K2.6-w4a8-DFlash-A3.yaml
   multi_card:
     test_config:
       - name: Qwen3-32B-QuaRot
