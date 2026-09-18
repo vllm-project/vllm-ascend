@@ -95,16 +95,16 @@ from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_world_size,
 )
 
-# Read lease TTL (ms) for the layerwise load path. batch_add_lease acquires a
-# read lease before batch_copy(G2L); the lease must cover the asynchronous
-# multi-layer load time.
-LAYERWISE_READ_LEASE_TTL_MS = 5 * 60 * 1000
+# The scheduler leases pool blobs for the whole load window (see
+# KVPoolScheduler._build_pool_gva_snapshot). At load-entry time the worker
+# treats a lease that cannot cover the whole load (plus this margin) as a
+# miss so the scheduler recomputes the request instead of risking a
+# mid-load expiry.
+POOL_LEASE_ENTRY_MARGIN_S = 5.0
 
-# A partial snapshot can be visible to readers before the rank responsible for
-# saving it has published its final layer.
-MEMCACHE_UNMATCHED_STATE = -3101
-PARTIAL_LEASE_RETRY_COUNT = 10
-PARTIAL_LEASE_RETRY_INTERVAL_S = 0.001
+# Read lease TTL (ms) forwarded to the C++ side by the save path's
+# batch_alloc so allocated blobs start under a write lease.
+LAYERWISE_READ_LEASE_TTL_MS = 5 * 60 * 1000
 
 
 class KVPoolWorker:
@@ -208,6 +208,9 @@ class KVPoolWorker:
         # registry; generic code never imports the protocol module by name.
         self.layerwise_protocol = get_layerwise_protocol(self.backend_name)
         self.use_layerwise_transfer = use_layerwise and self.layerwise_protocol is not None
+        # Load GVAs are leased by the scheduler and passed down in the request
+        # metadata, so the worker load path makes zero store RPCs.
+        self._direct_g2l_loaded_reqs: set[str] = set()
         kv_cache_groups = kv_cache_config.kv_cache_groups if kv_cache_config is not None else None
         self.use_hybrid = uses_hybrid_kv_cache(vllm_config.scheduler_config, kv_cache_groups)
         if self.backend_name == "mooncake" and self.use_layerwise and self.use_hybrid:
@@ -697,6 +700,8 @@ class KVPoolWorker:
                     invalid_block_ids=self._invalid_block_ids,
                     invalid_block_ids_lock=self._invalid_block_ids_lock,
                     load_abort_event=self._layer_load_aborted,
+                    load_failure_cb=self._record_direct_g2l_load_failure,
+                    loaded_req_cb=self._on_direct_g2l_req_loaded,
                 )
             else:
                 self.kv_recv_thread = KVCacheStoreKeyLayerRecvingThread(
@@ -1399,6 +1404,15 @@ class KVPoolWorker:
                 )
             )
 
+    @staticmethod
+    def _get_partial_block_index(
+        token_count: int,
+        block_size: int,
+        hash_count: int,
+        enabled: bool,
+    ) -> int | None:
+        return get_partial_block_index(token_count, block_size, hash_count, enabled)
+
     def _make_layerwise_full_key(self, group_id: int, block_hash_hex: str) -> str:
         """Full-block key for the layerwise transfer, built by the
         backend's protocol module.
@@ -1631,17 +1645,18 @@ class KVPoolWorker:
                 request.gva_block_offset = 0
 
     def _prepare_load_gvas(self, requests: list[ReqMeta]) -> None:
-        """Fetch per-rank GVA and acquire read lease for the load path.
+        """Build the per-rank load GVA tables from the scheduler snapshot.
 
-        memcache requires batch_copy (read) to find the blob in the per-process
-        gvaBlobTracker with a valid lease. The scheduler only checks existence
-        (batch_is_exist) to decide the load range; before batch_copy(G2L) the
-        worker must, for its own per-rank keys:
-          1. batch_get_key_info to fetch the GVA (fills block_gvas_np)
-          2. batch_add_lease to register the blob locally + acquire a read lease
+        The scheduler leased the pool blobs and passed the per-rank GVAs down
+        in the request metadata (see KVPoolScheduler._build_pool_gva_snapshot).
+        This only reads that table; zero/missing entries flow into the
+        existing invalid-block recompute path. Leases live on the scheduler,
+        so there is nothing to acquire or release here.
         """
         if not self.use_layerwise_transfer:
             return
+        num_ranks = self.tp_size // self.put_step
+        rank = self.head_or_tp_rank
         for request in requests:
             if request.load_spec is None or not request.load_spec.can_load:
                 continue
@@ -1661,8 +1676,22 @@ class KVPoolWorker:
             block_hashes = request.block_hashes
             request.load_masks = self._compute_reachable_load_masks(request, cached_tokens)
 
+            # Entry pre-check: if the lease cannot cover the whole load, treat
+            # the request as a miss so the scheduler recomputes it instead of
+            # risking a mid-load expiry.
+            table = request.pool_load_gvas_by_group
+            deadline = request.pool_lease_deadline
+            if table is None or deadline is None or time.time() + POOL_LEASE_ENTRY_MARGIN_S >= deadline:
+                logger.warning(
+                    "direct_g2l: req=%s has no usable lease snapshot (table=%s deadline=%s); recompute",
+                    request.req_id,
+                    table is not None,
+                    deadline,
+                )
+                table = None
+            partial_table = request.pool_partial_gvas_by_group if table is not None else None
+
             all_group_load_gvas: list[np.ndarray] = []
-            all_group_load_keys: list[str] = []
             request.partial_load_gva_per_group = [0] * self.num_kv_cache_groups
             for group_id in range(self.num_kv_cache_groups):
                 group_block_size = self.grouped_block_size[group_id]
@@ -1700,6 +1729,11 @@ class KVPoolWorker:
                     all_group_load_gvas.append(np.zeros(full_len, dtype=np.int64))
                     continue
 
+                # The scheduler table only covers full blocks; the partial
+                # block's GVA lives in the separate partial table. Blocks the
+                # reachability mask excludes were never stored, so they are
+                # skipped without being reported as invalid.
+                group_table = table[group_id] if (table is not None and group_id < len(table)) else None
                 group_load_mask = (
                     request.load_masks[group_id]
                     if request.load_masks is not None and group_id < len(request.load_masks)
@@ -1710,149 +1744,59 @@ class KVPoolWorker:
                     for block_idx in range(load_start_block, full_blocks)
                     if group_load_mask is None or block_idx >= len(group_load_mask) or group_load_mask[block_idx]
                 ]
-                keys = [
-                    self._make_layerwise_full_key(group_id, block_hash_to_str(group_block_hashes[block_idx]))
-                    for block_idx in block_indices
-                ]
-                has_partial_key = False
-                if partial_block_index is not None:
-                    keys.append(
-                        self._make_layerwise_partial_key(
-                            request,
-                            group_id,
-                            partial_block_index,
-                            cached_tokens,
-                        )
-                    )
-                    block_indices.append(partial_block_index)
-                    has_partial_key = True
-                if not keys:
-                    all_group_load_gvas.append(np.zeros(full_len, dtype=np.int64))
-                    continue
-
-                key_infos = self.m_store.batch_get_key_info(keys)
-                gvas = []
-                valid_gva_indices = []
                 invalid_block_ids: list[int] = []
-                for ki, key, block_idx in zip(key_infos, keys, block_indices):
-                    sizes = ki.size()
-                    gva = ki.gva_list()[0] if sizes and sizes > 0 else 0
+                gvas: list[int] = []
+                for block_idx in block_indices:
+                    gva = 0
+                    if group_table is not None:
+                        flat_idx = block_idx * num_ranks + rank
+                        if 0 <= flat_idx < len(group_table):
+                            gva = group_table[flat_idx]
                     gvas.append(gva)
-                    if gva > 0:
-                        valid_gva_indices.append(len(gvas) - 1)
-                    else:
-                        if block_idx < len(block_ids_by_group):
-                            invalid_block_ids.append(int(block_ids_by_group[block_idx]))
-                        logger.warning(
-                            "load_gvas: req=%s group=%d got invalid gva=%d (size=%d), block_id=%s load failed",
-                            request.req_id,
-                            group_id,
-                            gva,
-                            sizes if sizes else 0,
-                            int(block_ids_by_group[block_idx]) if block_idx < len(block_ids_by_group) else "N/A",
-                        )
-
-                # Only call batch_add_lease for keys with valid size
-                valid_keys = [keys[index] for index in valid_gva_indices]
-                if valid_keys:
-                    lease_results = self.m_store.batch_add_lease(valid_keys, LAYERWISE_READ_LEASE_TTL_MS)
-                    if len(lease_results) != len(valid_keys):
-                        raise RuntimeError(
-                            "MemCache lease returned unexpected number of results: "
-                            f"expected={len(valid_keys)}, actual={len(lease_results)}"
-                        )
-                    leased_keys = []
-                    for gva_index, lease_res in zip(valid_gva_indices, lease_results):
-                        block_idx = block_indices[gva_index]
-                        if lease_res == MEMCACHE_UNMATCHED_STATE and block_idx == partial_block_index:
-                            partial_key = keys[gva_index]
-                            for retry in range(1, PARTIAL_LEASE_RETRY_COUNT + 1):
-                                time.sleep(PARTIAL_LEASE_RETRY_INTERVAL_S)
-                                retry_results = self.m_store.batch_add_lease(
-                                    [partial_key],
-                                    LAYERWISE_READ_LEASE_TTL_MS,
-                                )
-                                if len(retry_results) != 1:
-                                    raise RuntimeError(
-                                        "MemCache partial lease retry returned "
-                                        f"unexpected number of results: {len(retry_results)}"
-                                    )
-                                lease_res = retry_results[0]
-                                if lease_res != MEMCACHE_UNMATCHED_STATE:
-                                    break
-                        block_id = int(block_ids_by_group[block_idx]) if block_idx < len(block_ids_by_group) else None
-                        if lease_res == 0:
-                            leased_keys.append(keys[gva_index])
-                        else:
-                            gvas[gva_index] = 0
-                            if block_id is not None:
-                                invalid_block_ids.append(block_id)
-                            logger.warning(
-                                "load_gvas: req=%s group=%d lease failed result=%d, block_id=%s load failed",
-                                request.req_id,
-                                group_id,
-                                lease_res,
-                                block_id,
-                            )
-                else:
-                    lease_results = []
-                    leased_keys = []
-
-                # Report invalid blocks to scheduler for recompute.
-                # Single-group models can safely report individual block IDs.
-                # Multi-group (hybrid) models must not report partial group
-                # failures, as the scheduler cannot handle inconsistent KV
-                # cache state across groups (see PR #9701 for rationale).
+                    if gva <= 0 and block_idx < len(block_ids_by_group):
+                        invalid_block_ids.append(int(block_ids_by_group[block_idx]))
+                partial_gva = 0
+                if partial_block_index is not None:
+                    if (
+                        partial_table is not None
+                        and group_id < len(partial_table)
+                        and rank < len(partial_table[group_id])
+                    ):
+                        partial_gva = partial_table[group_id][rank]
+                    if partial_gva <= 0 and partial_block_index < len(block_ids_by_group):
+                        invalid_block_ids.append(int(block_ids_by_group[partial_block_index]))
                 if invalid_block_ids:
-                    if self.num_kv_cache_groups == 1:
-                        with self._invalid_block_ids_lock:
-                            self._invalid_block_ids.update(invalid_block_ids)
-                    else:
-                        leased_keys_to_release = list(
-                            dict.fromkeys(
-                                [
-                                    *all_group_load_keys,
-                                    *leased_keys,
-                                ]
-                            )
-                        )
-                        if leased_keys_to_release:
-                            self.m_store.batch_remove_lease(leased_keys_to_release)
-                        raise RuntimeError(
-                            "Layerwise multi-group KV load failed and cannot "
-                            "safely fall back to per-block recomputation: "
-                            f"request={request.req_id}, "
-                            f"failed_blocks={invalid_block_ids}"
-                        )
-                all_group_load_keys.extend(leased_keys)
+                    logger.warning(
+                        "direct_g2l: req=%s group=%d %d blocks missing pool GVA; recompute",
+                        request.req_id,
+                        group_id,
+                        len(invalid_block_ids),
+                    )
 
-                logger.debug(
-                    "load_gvas: req=%s group=%d eff_bs=%d load_blocks=[%d,%d) keys=%d valid_gvas=%d lease_fail=%d",
-                    request.req_id,
-                    group_id,
-                    effective_block_size,
-                    load_start_block,
-                    full_blocks,
-                    len(keys),
-                    sum(1 for g in gvas if g > 0),
-                    sum(1 for r in lease_results if r != 0),
-                )
+                # Same invalid semantics as the old RPC path: single-group
+                # models recompute per block; hybrid models cannot fall back
+                # per block and fail loudly instead.
+                if invalid_block_ids and self.num_kv_cache_groups == 1:
+                    with self._invalid_block_ids_lock:
+                        self._invalid_block_ids.update(invalid_block_ids)
+                elif invalid_block_ids:
+                    raise RuntimeError(
+                        "Layerwise multi-group direct-G2L load failed and cannot "
+                        f"safely fall back to per-block recomputation: request={request.req_id}, "
+                        f"failed_blocks={invalid_block_ids}"
+                    )
 
-                # Pad to match block_ids_by_group length, filling only the
-                # positions whose keys were actually queried (the trailing
-                # partial key is excluded from the per-position fill).
+                if partial_block_index is not None:
+                    request.partial_load_gva_per_group[group_id] = partial_gva
+
                 full_gvas = [0] * full_len
-                full_key_count = len(block_indices) - (1 if has_partial_key else 0)
-                for gva_index in range(full_key_count):
-                    block_idx = block_indices[gva_index]
+                for block_idx, gva in zip(block_indices, gvas):
                     if block_idx < len(full_gvas):
-                        full_gvas[block_idx] = gvas[gva_index]
+                        full_gvas[block_idx] = gva
                 all_group_load_gvas.append(np.asarray(full_gvas, dtype=np.int64))
-                if has_partial_key and gvas:
-                    request.partial_load_gva_per_group[group_id] = gvas[-1]
 
             if all_group_load_gvas:
-                request.load_keys = all_group_load_keys
+                request.load_keys = []
                 request.load_block_gvas_by_group_np = all_group_load_gvas
                 request.load_block_gvas_np = all_group_load_gvas[0]
                 request.load_gva_block_offset = 0
@@ -2129,6 +2073,13 @@ class KVPoolWorker:
         for request in requests:
             self._prepare_mooncake_put_session(request)
 
+    def _record_direct_g2l_load_failure(self, block_ids) -> None:
+        with self._invalid_block_ids_lock:
+            self._invalid_block_ids.update(int(block_id) for block_id in block_ids)
+
+    def _on_direct_g2l_req_loaded(self, req_id: str) -> None:
+        self._direct_g2l_loaded_reqs.add(req_id)
+
     def _build_shared_save_data(self) -> None:
         """Build shared block data once and attach to all layer save tasks.
 
@@ -2292,6 +2243,15 @@ class KVPoolWorker:
             for group_id, layer_idx_in_group in group_layers:
                 self._process_load_for_layer_batch(requests, local_layer, group_id, layer_idx_in_group)
         self._build_shared_load_data()
+        if self.use_layerwise_transfer and self.kv_recv_thread is not None:
+            deadlines = [
+                request.pool_lease_deadline
+                for request in requests
+                if request.pool_lease_deadline is not None
+                and request.load_spec is not None
+                and request.load_spec.can_load
+            ]
+            self.kv_recv_thread.step_lease_deadline = min(deadlines) if deadlines else None
 
     def _submit_ready_layer_loads(self) -> None:
         assert self.kv_recv_thread is not None
@@ -3167,7 +3127,14 @@ class KVPoolWorker:
         return []
 
     def build_connector_worker_meta(self) -> AscendStoreKVConnectorWorkerMetadata | None:
+        meta: AscendStoreKVConnectorWorkerMetadata | None = None
         if self.use_mamba and isinstance(self.kv_send_thread, KVCacheStoreSendingThread):
             if ce := self.kv_send_thread.get_completed_events():
-                return AscendStoreKVConnectorWorkerMetadata(ce)
-        return None
+                meta = AscendStoreKVConnectorWorkerMetadata(ce)
+        if self._direct_g2l_loaded_reqs:
+            loaded = list(self._direct_g2l_loaded_reqs)
+            self._direct_g2l_loaded_reqs.clear()
+            if meta is None:
+                meta = AscendStoreKVConnectorWorkerMetadata()
+            meta.loaded_req_ids = loaded
+        return meta

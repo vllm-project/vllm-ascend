@@ -398,7 +398,7 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
         save_finished[0].set()
         sync_events[0].synchronize.side_effect = lambda: call_order.append(("save", 0))
 
-        def record_h2d(*_args) -> int:
+        def record_h2d(*_args, **_kwargs) -> int:
             call_order.append(("h2d", 1))
             return 0
 
