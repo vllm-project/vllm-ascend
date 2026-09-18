@@ -115,8 +115,13 @@ def collect_configured_register_regions(
 
         caches_by_storage: dict[int, list[torch.Tensor]] = {}
         for cache in cache_tensors:
+            if cache.numel() == 0:
+                continue
             storage_key = tensor_storage_key(cache)
             caches_by_storage.setdefault(storage_key, []).append(cache)
+
+        if not caches_by_storage:
+            continue
 
         if len(caches_by_storage) == 1:
             # The model runner over-allocates by one alignment unit and returns

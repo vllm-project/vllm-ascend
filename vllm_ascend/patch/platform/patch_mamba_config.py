@@ -113,7 +113,11 @@ def verify_and_update_config(cls, vllm_config) -> None:
         # whose block size must be a multiple of 16. Keep the scheduler block
         # C128-aligned while making block_size / index_kpool C16-aligned too.
         alignment_tokens = math.lcm(kernel_block_size, index_kpool * 16)
-        min_block_size = cdiv(mamba_raw_page_size, attn_token_page_size)
+        if model_config.use_mla and vllm_config.kv_transfer_config is not None:
+            derivation_mamba_page_size = mamba_raw_page_size * parallel_config.tensor_parallel_size
+        else:
+            derivation_mamba_page_size = mamba_raw_page_size
+        min_block_size = cdiv(derivation_mamba_page_size, attn_token_page_size)
         requested_block_size = cache_config.block_size or kernel_block_size
         attn_block_size = alignment_tokens * cdiv(max(requested_block_size, min_block_size), alignment_tokens)
         if cache_config.block_size != attn_block_size:
