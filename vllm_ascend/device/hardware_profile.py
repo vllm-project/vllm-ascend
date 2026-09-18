@@ -320,7 +320,6 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                 {
                     HardwareCapability.AUTO_ENABLE_CUSTOM_OPS,
                     HardwareCapability.SCATTER_PA_CACHE_STORE,
-                    HardwareCapability.BGMV_SGMV_META_REGISTRATION,
                     HardwareCapability.CANN_MEGAMOE,
                     HardwareCapability.CANN_MEGAMOE_MXFP,
                     HardwareCapability.CHUNKED_PREFILL_PHASE_SPLIT,
@@ -339,6 +338,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
                     HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS,
                     HardwareCapability.NPUGRAPH_EX,
+                    HardwareCapability.RUNTIME_CUSTOM_OPS,
                     HardwareCapability.STANDARD_MAMBA_PATCH,
                     HardwareCapability.STANDARD_WORKER_PATCHES,
                     HardwareCapability.SWIGLU_OAI_MX_QUANT,
