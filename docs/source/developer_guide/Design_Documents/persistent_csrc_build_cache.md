@@ -249,9 +249,11 @@ Only roles that create canonical reusable domains publish L1:
 - release wheel builds for their container toolchains; and
 - image builds for their container toolchains.
 
-Selected tests, doctest, nightly, and historical-source jobs are restore-only
-consumers. Their local compilation remains correct but does not create shared
-snapshots.
+Doctest, nightly, and historical-source jobs are restore-only L1 consumers.
+Selected tests consume the central producer's exact L0 output. On an L0 miss,
+they continue directly to the ordinary source build without making persistent
+L1 transport a prerequisite. Local compilation remains correct but does not
+create a shared snapshot.
 
 A writer publishes only after a successful build creates or replaces a local
 entry. OBS restore and save failures remain performance degradations.
@@ -278,10 +280,10 @@ contention. Observability is best effort and never serializes compilation.
 
 ### Direct source consumers
 
-Selected tests, doctest, and nightly source replacement restore L1 before their
-existing source installation. They do not publish. Scheduled upstream E2E uses
-the canonical producer's exact L0 output and does not add a second direct L1
-fallback.
+Doctest and nightly source replacement restore L1 before their existing source
+installation. They do not publish. Selected tests and scheduled upstream E2E
+use the canonical producer's exact L0 output; an L0 miss proceeds through their
+existing source build without a second direct L1 fallback.
 
 ### Local source builds
 
