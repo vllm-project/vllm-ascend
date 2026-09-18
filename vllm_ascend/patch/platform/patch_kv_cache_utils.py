@@ -218,6 +218,76 @@ def _get_kimi_k3_dspark_mixed_kv_cache_groups(
     return groups
 
 
+def _log_kimi_k3_dspark_page_size_failure(kv_cache_spec: dict[str, KVCacheSpec]) -> None:
+    """Report Kimi K3 target, draft, and Mamba layouts on unification failure."""
+    target_attention_specs = {
+        name: spec
+        for name, spec in kv_cache_spec.items()
+        if name.startswith(_KIMI_K3_TARGET_LAYER_PREFIX) and isinstance(spec, FullAttentionSpec)
+    }
+    draft_attention_specs = {
+        name: spec
+        for name, spec in kv_cache_spec.items()
+        if name.startswith(_KIMI_K3_DRAFT_LAYER_PREFIX) and isinstance(spec, FullAttentionSpec)
+    }
+    mamba_specs = {
+        name: spec
+        for name, spec in kv_cache_spec.items()
+        if name.startswith(_KIMI_K3_TARGET_LAYER_PREFIX) and isinstance(spec, MambaSpec)
+    }
+    if (
+        not target_attention_specs
+        or not draft_attention_specs
+        or not mamba_specs
+        or len(target_attention_specs) + len(draft_attention_specs) + len(mamba_specs) != len(kv_cache_spec)
+    ):
+        return
+
+    max_page_size = max(
+        spec.page_size_bytes
+        for specs in (target_attention_specs, draft_attention_specs, mamba_specs)
+        for spec in specs.values()
+    )
+    logger.error(
+        "Kimi K3 DSpark KV page-size unification failed: max_page_size_bytes=%s",
+        max_page_size,
+    )
+    for role, specs in (
+        ("target_attention", target_attention_specs),
+        ("draft_attention", draft_attention_specs),
+        ("mamba", mamba_specs),
+    ):
+        specs_by_layout: dict[tuple[object, ...], list[str]] = defaultdict(list)
+        for layer_name, spec in specs.items():
+            layout = (
+                type(spec).__name__,
+                spec.block_size,
+                spec.page_size_bytes,
+                getattr(spec, "page_size_padded", None),
+                getattr(spec, "real_page_size_bytes", None),
+                getattr(spec, "indexes_kv_by_block_stride", None),
+                getattr(spec, "num_kv_heads", None),
+                getattr(spec, "head_size", None),
+                str(getattr(spec, "dtype", None)),
+                getattr(spec, "shapes", None),
+                str(getattr(spec, "dtypes", None)),
+                getattr(spec, "mamba_cache_mode", None),
+            )
+            specs_by_layout[layout].append(layer_name)
+        for layout, layer_names in specs_by_layout.items():
+            logger.error(
+                "Kimi K3 DSpark KV layout: role=%s, layers=%s, "
+                "spec_type=%s, block_size=%s, page_size_bytes=%s, "
+                "page_size_padded=%s, real_page_size_bytes=%s, "
+                "indexes_kv_by_block_stride=%s, num_kv_heads=%s, "
+                "head_size=%s, dtype=%s, mamba_shapes=%s, "
+                "mamba_dtypes=%s, mamba_cache_mode=%s",
+                role,
+                sorted(layer_names),
+                *layout,
+            )
+
+
 def _get_kv_cache_groups_uniform_page_size(
     kv_cache_spec: dict[str, KVCacheSpec],
 ) -> list[KVCacheGroupSpec]:
@@ -593,9 +663,14 @@ def _get_glm5_next_kv_cache_groups(
     vllm_config: VllmConfig,
     kv_cache_spec: dict[str, KVCacheSpec],
 ) -> list[KVCacheGroupSpec]:
-    if any(is_glm5_next_cache_spec(spec) for spec in kv_cache_spec.values()):
-        return get_glm5_next_kv_cache_groups(vllm_config, kv_cache_spec)
-    return _orig_get_kv_cache_groups(vllm_config, kv_cache_spec)
+    try:
+        if any(is_glm5_next_cache_spec(spec) for spec in kv_cache_spec.values()):
+            return get_glm5_next_kv_cache_groups(vllm_config, kv_cache_spec)
+        return _orig_get_kv_cache_groups(vllm_config, kv_cache_spec)
+    except NotImplementedError as exc:
+        if "page size is not divisible by the maximum page size" in str(exc):
+            _log_kimi_k3_dspark_page_size_failure(kv_cache_spec)
+        raise
 
 
 def _ascend_get_kv_cache_config_from_groups(
