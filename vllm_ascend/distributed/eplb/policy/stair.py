@@ -21,10 +21,15 @@ class PlacementImbalance:
 
 @dataclass(frozen=True)
 class PlacementPlan:
-    """Target experts and their source rank for every target slot."""
+    """Target experts and sources as aligned ``[ranks, slots]`` arrays.
+
+    At each destination slot, ``source_rank_ids`` and ``source_slot_ids``
+    identify that target expert's location in the current placement.
+    """
 
     rank_expert_ids: np.ndarray
     source_rank_ids: np.ndarray
+    source_slot_ids: np.ndarray
 
 
 _RankChoice = tuple[float, int, float, float, float]  # risk, rank, mean, variance, variance scale
@@ -480,6 +485,38 @@ class StairEplbPolicy(AbstractEplbPolicy):
                     return None
         return source_rank_ids
 
+    @staticmethod
+    def _align_target_slots(current_placement: np.ndarray, target_placement: np.ndarray) -> np.ndarray:
+        """Keep retained experts in their slots and fill gaps by expert ID."""
+        aligned = np.full_like(target_placement, -1)
+        for rank_id, target_experts in enumerate(target_placement):
+            target_set = set(map(int, target_experts))
+            retained_experts = set()
+            for slot, expert in enumerate(current_placement[rank_id]):
+                if int(expert) in target_set:
+                    aligned[rank_id, slot] = expert
+                    retained_experts.add(int(expert))
+            empty_slots = np.flatnonzero(aligned[rank_id] < 0)
+            for slot, expert in zip(empty_slots, sorted(target_set - retained_experts)):
+                aligned[rank_id, slot] = expert
+        return aligned
+
+    @staticmethod
+    def _source_slots(
+        current_placement: np.ndarray,
+        target_placement: np.ndarray,
+        source_rank_ids: np.ndarray,
+    ) -> np.ndarray:
+        """Return the unique current source slot for every target expert."""
+        source_slot_ids = np.empty_like(target_placement)
+        for dst_rank, target_experts in enumerate(target_placement):
+            for dst_slot, expert in enumerate(target_experts):
+                src_rank = source_rank_ids[dst_rank, dst_slot]
+                source_slots = np.flatnonzero(current_placement[src_rank] == expert)
+                assert source_slots.size == 1
+                source_slot_ids[dst_rank, dst_slot] = source_slots[0]
+        return source_slot_ids
+
     @classmethod
     def lpt_placement(
         cls,
@@ -507,6 +544,9 @@ class StairEplbPolicy(AbstractEplbPolicy):
         ``rank_node_ids`` contains one non-negative node ID per rank; equal IDs
         mean that two ranks share a node. Final source assignment first minimizes
         cross-node transfers, then source rank IDs in target-slot order.
+        Retained experts keep their current slots; incoming experts fill the
+        remaining slots by expert ID. Returned source coordinates align with
+        these final target slots.
         """
         means = np.asarray(expert_means, dtype=np.float64)
         variances = np.asarray(expert_variances, dtype=np.float64)
@@ -644,8 +684,10 @@ class StairEplbPolicy(AbstractEplbPolicy):
             rank_id, slot, previous_state = undo_state
             undo_placement(rank_id, slot, previous_state)
 
+        placement = cls._align_target_slots(current_placement, placement)
         sources = cls._minimum_cost_migration_sources(
             current_placement, placement, rank_pair_migration_limit, expert_sources, node_ids
         )
         assert sources is not None
-        return PlacementPlan(placement, sources)
+        source_slots = cls._source_slots(current_placement, placement, sources)
+        return PlacementPlan(placement, sources, source_slots)
