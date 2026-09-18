@@ -337,7 +337,7 @@ class AscendSFAMetadata:
 
     # CPU geometry belongs to this fresh metadata, never to a layer or TopK cache.
     cum_query_lens_cpu: torch.Tensor | None = None
-    _sfa_fia_shared_prefill_plan: tuple | None = None
+    sfa_fia_shared_prefill_plan: "SFAFIASharedPrefillPlan | None" = None
 
     # For logging.
     num_input_tokens: int = 0  # Number of tokens including padding.
@@ -399,11 +399,125 @@ class SFAForwardContext:
     gather_full_o_proj: bool = False
 
 
+@dataclass(frozen=True)
+class SFAFIASharedPrefillPlan:
+    """CPU-built row plan for the experimental shared FIA prefill path."""
+
+    eligible_lengths: tuple[int, ...]
+    dense_requests: tuple[int, ...]
+    tail_requests: tuple[int, ...]
+    dense_spans: tuple[tuple[int, int], ...]
+    tail_spans: tuple[tuple[int, int], ...]
+    dense_query_ends: tuple[int, ...]
+    dense_kv_lengths: tuple[int, ...]
+    tail_query_ends: tuple[int, ...]
+    tail_kv_lengths: tuple[int, ...]
+
+
+def _as_cpu_length_tuple(lengths: torch.Tensor | None) -> tuple[int, ...] | None:
+    if (
+        not isinstance(lengths, torch.Tensor)
+        or lengths.device.type != "cpu"
+        or lengths.ndim != 1
+        or lengths.dtype not in (torch.int32, torch.int64)
+    ):
+        return None
+    values = tuple(lengths.tolist())
+    if any(not isinstance(length, int) for length in values):
+        return None
+    return values
+
+
+def _build_sfa_fia_shared_prefill_plan(
+    *,
+    attn_state: AscendAttentionState,
+    query_ends: tuple[int, ...],
+    kv_lengths: tuple[int, ...],
+    num_actual_tokens: int,
+    num_input_tokens: int,
+    num_decodes: int = 0,
+    num_decode_tokens: int = 0,
+) -> SFAFIASharedPrefillPlan | None:
+    """Build the metadata-time hybrid FIA/SFA plan from CPU request geometry."""
+    if attn_state not in (
+        AscendAttentionState.PrefillNoCache,
+        AscendAttentionState.PrefillCacheHit,
+        AscendAttentionState.ChunkedPrefill,
+    ):
+        return None
+    if not query_ends or len(query_ends) != len(kv_lengths):
+        return None
+    previous = 0
+    query_lengths: list[int] = []
+    for query_end, kv_length in zip(query_ends, kv_lengths, strict=True):
+        query_length = query_end - previous
+        if query_length <= 0 or kv_length < query_length:
+            return None
+        query_lengths.append(query_length)
+        previous = query_end
+    num_tokens = query_ends[-1]
+    if num_actual_tokens != num_tokens or num_input_tokens != num_tokens:
+        return None
+    if attn_state == AscendAttentionState.ChunkedPrefill and (
+        any(length <= 1 for length in query_lengths) or num_decodes != 0 or num_decode_tokens != 0
+    ):
+        return None
+
+    query_starts = (0, *query_ends[:-1])
+    eligible_lengths = tuple(
+        min(query_length, max(0, SFA_FIA_SHARED_PREFILL_TOPK_WIDTH - (kv_length - query_length)))
+        for query_length, kv_length in zip(query_lengths, kv_lengths, strict=True)
+    )
+    dense_total = sum(eligible_lengths)
+    # Only a full packed group is admitted; low-fill and whole-dense fall back.
+    if dense_total != SFA_FIA_SHARED_PREFILL_TOPK_WIDTH or dense_total >= num_tokens:
+        return None
+
+    dense_requests = tuple(i for i, eligible in enumerate(eligible_lengths) if eligible)
+    tail_requests = tuple(
+        i
+        for i, (query_length, eligible) in enumerate(zip(query_lengths, eligible_lengths, strict=True))
+        if eligible < query_length
+    )
+    dense_spans = tuple((query_starts[i], query_starts[i] + eligible_lengths[i]) for i in dense_requests)
+    tail_spans = tuple((query_starts[i] + eligible_lengths[i], query_ends[i]) for i in tail_requests)
+
+    dense_query_ends_list: list[int] = []
+    dense_kv_lengths_list: list[int] = []
+    running = 0
+    for request in dense_requests:
+        running += eligible_lengths[request]
+        dense_query_ends_list.append(running)
+        dense_kv_lengths_list.append(kv_lengths[request] - query_lengths[request] + eligible_lengths[request])
+
+    tail_query_ends_list: list[int] = []
+    tail_kv_lengths_list: list[int] = []
+    running = 0
+    for request in tail_requests:
+        running += query_lengths[request] - eligible_lengths[request]
+        tail_query_ends_list.append(running)
+        tail_kv_lengths_list.append(kv_lengths[request])
+
+    return SFAFIASharedPrefillPlan(
+        eligible_lengths=eligible_lengths,
+        dense_requests=dense_requests,
+        tail_requests=tail_requests,
+        dense_spans=dense_spans,
+        tail_spans=tail_spans,
+        dense_query_ends=tuple(dense_query_ends_list),
+        dense_kv_lengths=tuple(dense_kv_lengths_list),
+        tail_query_ends=tuple(tail_query_ends_list),
+        tail_kv_lengths=tuple(tail_kv_lengths_list),
+    )
+
+
 class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
     """
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
+
+    supports_sfa_fia_shared_prefill_plan = True
 
     def __init__(
         self,
@@ -608,6 +722,24 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             block_size=block_size,
             **parallel_metadata,
         )
+        query_ends = _as_cpu_length_tuple(metadata.cum_query_lens_cpu)
+        kv_lengths = _as_cpu_length_tuple(metadata.seq_lens_cpu)
+        if (
+            self.supports_sfa_fia_shared_prefill_plan
+            and not self.nope
+            and getattr(get_ascend_config(), "enable_sfa_fia_shared_prefill", False) is True
+            and query_ends is not None
+            and kv_lengths is not None
+        ):
+            metadata.sfa_fia_shared_prefill_plan = _build_sfa_fia_shared_prefill_plan(
+                attn_state=metadata.attn_state,
+                query_ends=query_ends,
+                kv_lengths=kv_lengths,
+                num_actual_tokens=metadata.num_actual_tokens,
+                num_input_tokens=metadata.num_input_tokens,
+                num_decodes=metadata.num_decodes,
+                num_decode_tokens=metadata.num_decode_tokens,
+            )
         if self.nope:
             query_lens = (
                 common_attn_metadata.query_start_loc_cpu[1 : num_reqs + 1]
@@ -1465,15 +1597,11 @@ class AscendSFAImpl(MLAAttentionImpl):
         )
 
     def _sfa_fia_dense_prefill_lengths(self, attn_metadata: M) -> tuple[list[int], list[int]] | None:
-        query_lengths_cpu = getattr(attn_metadata, "cum_query_lens_cpu", None)
-        kv_lengths_cpu = getattr(attn_metadata, "seq_lens_cpu", None)
-        if query_lengths_cpu is None or kv_lengths_cpu is None:
+        query_lengths = _as_cpu_length_tuple(getattr(attn_metadata, "cum_query_lens_cpu", None))
+        kv_lengths = _as_cpu_length_tuple(getattr(attn_metadata, "seq_lens_cpu", None))
+        if query_lengths is None or kv_lengths is None:
             return None
-        query_lengths = query_lengths_cpu.tolist()
-        kv_lengths = kv_lengths_cpu.tolist()
         if not query_lengths or len(query_lengths) != len(kv_lengths):
-            return None
-        if any(not isinstance(length, int) for length in (*query_lengths, *kv_lengths)):
             return None
         previous = 0
         for query_end, kv_length in zip(query_lengths, kv_lengths, strict=True):
@@ -1481,7 +1609,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             if query_length <= 0 or kv_length < query_length:
                 return None
             previous = query_end
-        return query_lengths, kv_lengths
+        return list(query_lengths), list(kv_lengths)
 
     def _validate_sfa_fia_shared_group(
         self,
@@ -1492,10 +1620,6 @@ class AscendSFAImpl(MLAAttentionImpl):
     ) -> tuple[list[int], list[int]] | None:
         """Validate a packed group before either attention kernel is submitted."""
         if not self.enable_sfa_fia_shared_prefill or not self.skip_topk:
-            return None
-        # Subclasses own DCP/DSA/PCP/offload behavior and remain entirely on
-        # their established sparse routes.
-        if type(self) is not AscendSFAImpl:
             return None
         if attn_metadata.attn_state not in (
             AscendAttentionState.PrefillNoCache,
@@ -1508,7 +1632,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         # Ordinary tensor parallelism only shards heads; the bound FIA call is
         # rank-local and reuses the existing TP projection/finalization tail.
         # Token-sharding and cross-rank attention variants remain excluded by
-        # the exact implementation type plus the DCP/PCP/DSA guards below.
+        # explicit implementation capability plus the DCP/PCP/DSA guards below.
         if any(
             getattr(parallel_config, name, 1) != 1
             for name in (
@@ -1653,12 +1777,10 @@ class AscendSFAImpl(MLAAttentionImpl):
         topk_indices: torch.Tensor,
     ) -> torch.Tensor | None:
         """Consume current layer TopK using one full FIA group and one sparse tail."""
-        if (
-            type(self) is not AscendSFAImpl
-            or not self.enable_sfa_fia_shared_prefill
-            or not self.skip_topk
-            or not self.use_index_cache
-        ):
+        if not self.use_index_cache:
+            return None
+        plan = getattr(attn_metadata, "sfa_fia_shared_prefill_plan", None)
+        if plan is None:
             return None
         if attn_metadata.attn_state not in (
             AscendAttentionState.PrefillNoCache,
@@ -1706,8 +1828,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             or kv_cache[0].shape[0] * SFA_FIA_DENSE_PREFILL_BLOCK_SIZE < max(kv_lengths)
         ):
             return None
-        query_starts = [0, *query_ends[:-1]]
-        query_lengths = [end - start for start, end in zip(query_starts, query_ends, strict=True)]
+        query_lengths = [end - start for start, end in zip((0, *query_ends[:-1]), query_ends, strict=True)]
         if attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill and (
             any(length <= 1 for length in query_lengths)
             or getattr(attn_metadata, "num_decodes", None) != 0
@@ -1715,77 +1836,19 @@ class AscendSFAImpl(MLAAttentionImpl):
         ):
             return None
 
-        signature = (tuple(query_ends), tuple(kv_lengths))
-        plan = getattr(attn_metadata, "_sfa_fia_shared_prefill_plan", None)
-        if plan is None or plan[0] != signature:
-            eligible_lengths = tuple(
-                min(query_length, max(0, SFA_FIA_SHARED_PREFILL_TOPK_WIDTH - (kv_length - query_length)))
-                for query_length, kv_length in zip(query_lengths, kv_lengths, strict=True)
-            )
-            dense_total = sum(eligible_lengths)
-            # Only a full packed group is admitted; low-fill and whole-dense fall back.
-            if dense_total != SFA_FIA_SHARED_PREFILL_TOPK_WIDTH or dense_total >= num_tokens:
-                return None
-            dense_requests = tuple(i for i, eligible in enumerate(eligible_lengths) if eligible)
-            tail_requests = tuple(
-                i
-                for i, (query_length, eligible) in enumerate(zip(query_lengths, eligible_lengths, strict=True))
-                if eligible < query_length
-            )
-            dense_spans = tuple((query_starts[i], query_starts[i] + eligible_lengths[i]) for i in dense_requests)
-            tail_spans = tuple((query_starts[i] + eligible_lengths[i], query_ends[i]) for i in tail_requests)
-            dense_query_ends_list: list[int] = []
-            dense_kv_lengths_list: list[int] = []
-            running = 0
-            for request in dense_requests:
-                running += eligible_lengths[request]
-                dense_query_ends_list.append(running)
-                dense_kv_lengths_list.append(kv_lengths[request] - query_lengths[request] + eligible_lengths[request])
-            tail_query_ends_list: list[int] = []
-            tail_kv_lengths_list: list[int] = []
-            running = 0
-            for request in tail_requests:
-                running += query_lengths[request] - eligible_lengths[request]
-                tail_query_ends_list.append(running)
-                tail_kv_lengths_list.append(kv_lengths[request])
-            plan = (
-                signature,
-                tuple(eligible_lengths),
-                dense_requests,
-                tail_requests,
-                dense_spans,
-                tail_spans,
-                tuple(dense_query_ends_list),
-                tuple(dense_kv_lengths_list),
-                tuple(tail_query_ends_list),
-                tuple(tail_kv_lengths_list),
-            )
-        (
-            _,
-            eligible_lengths,
-            dense_requests,
-            tail_requests,
-            dense_spans,
-            tail_spans,
-            dense_query_ends,
-            dense_kv_lengths,
-            tail_query_ends,
-            tail_kv_lengths,
-        ) = plan
-
         def pack_rows(tensor: torch.Tensor, spans: tuple[tuple[int, int], ...]) -> torch.Tensor:
             if len(spans) == 1:
                 start, end = spans[0]
                 return tensor[start:end]
             return torch.cat([tensor[start:end] for start, end in spans], dim=0)
 
-        dense_q = pack_rows(ql_nope, dense_spans)
-        dense_rope = pack_rows(q_pe, dense_spans)
+        dense_q = pack_rows(ql_nope, plan.dense_spans)
+        dense_rope = pack_rows(q_pe, plan.dense_spans)
         dense_metadata = copy(attn_metadata)
         dense_metadata.attn_state = AscendAttentionState.PrefillCacheHit
-        dense_metadata.block_table = attn_metadata.block_table[list(dense_requests)]
-        dense_metadata.cum_query_lens_cpu = cum_query_lens_cpu.new_tensor(list(dense_query_ends))
-        dense_metadata.seq_lens_cpu = seq_lens_cpu.new_tensor(list(dense_kv_lengths))
+        dense_metadata.block_table = attn_metadata.block_table[list(plan.dense_requests)]
+        dense_metadata.cum_query_lens_cpu = cum_query_lens_cpu.new_tensor(list(plan.dense_query_ends))
+        dense_metadata.seq_lens_cpu = seq_lens_cpu.new_tensor(list(plan.dense_kv_lengths))
         dense_metadata.num_actual_tokens = dense_q.shape[0]
         dense_metadata.num_input_tokens = dense_q.shape[0]
         if self._validate_sfa_fia_shared_group(dense_q, dense_rope, kv_cache, dense_metadata) is None:
@@ -1803,13 +1866,13 @@ class AscendSFAImpl(MLAAttentionImpl):
         dense_output = self._execute_sfa_fia_shared_group(dense_q, dense_rope, kv_cache, dense_metadata)
         assert dense_output is not None, "Validated shared FIA group unexpectedly declined"
 
-        tail_q = pack_rows(ql_nope, tail_spans)
-        tail_rope = pack_rows(q_pe, tail_spans)
-        tail_indices = pack_rows(topk_indices, tail_spans)
+        tail_q = pack_rows(ql_nope, plan.tail_spans)
+        tail_rope = pack_rows(q_pe, plan.tail_spans)
+        tail_indices = pack_rows(topk_indices, plan.tail_spans)
         tail_metadata = copy(attn_metadata)
-        tail_metadata.block_table = attn_metadata.block_table[list(tail_requests)]
-        tail_metadata.cum_query_lens = cum_query_lens.new_tensor(list(tail_query_ends))
-        tail_metadata.seq_lens = seq_lens.new_tensor(list(tail_kv_lengths))
+        tail_metadata.block_table = attn_metadata.block_table[list(plan.tail_requests)]
+        tail_metadata.cum_query_lens = cum_query_lens.new_tensor(list(plan.tail_query_ends))
+        tail_metadata.seq_lens = seq_lens.new_tensor(list(plan.tail_kv_lengths))
         tail_output = self._execute_sparse_flash_attention_process(
             tail_q,
             tail_rope,
@@ -1833,7 +1896,7 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         outputs = []
         dense_cursor = tail_cursor = 0
-        for query_length, eligible in zip(query_lengths, eligible_lengths, strict=True):
+        for query_length, eligible in zip(query_lengths, plan.eligible_lengths, strict=True):
             if eligible:
                 outputs.append(dense_output[dense_cursor : dense_cursor + eligible])
                 dense_cursor += eligible
@@ -1852,7 +1915,6 @@ class AscendSFAImpl(MLAAttentionImpl):
                 f"expected shape={tuple(ql_nope.shape)}, dtype={ql_nope.dtype}, device={ql_nope.device}; "
                 f"got shape={tuple(attn_output.shape)}, dtype={attn_output.dtype}, device={attn_output.device}."
             )
-        attn_metadata._sfa_fia_shared_prefill_plan = plan
         return attn_output
 
     def _record_query_gather_context(
