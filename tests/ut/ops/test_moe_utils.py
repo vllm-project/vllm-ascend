@@ -185,6 +185,60 @@ class TestMegaMoeActivationKwargs(unittest.TestCase):
                 swiglu_beta=1.0,
             )
 
+    def test_select_mega_moe_activation_kwargs_reads_generic_wrapper_metadata(self):
+        for metadata in ("_schema", "__doc__"):
+            for names, expected in (
+                (
+                    "activation, activation_params",
+                    {"activation": "swigluoai", "activation_params": {"alpha": 1.702, "beta": 1.0}},
+                ),
+                ("glu_alpha, glu_bias", {"glu_alpha": 1.702, "glu_bias": 1.0}),
+                ("swiglu_alpha, swiglu_beta", {"swiglu_alpha": 1.702, "swiglu_beta": 1.0}),
+            ):
+                with self.subTest(metadata=metadata, names=names):
+
+                    def mega_moe(*args, **kwargs):
+                        return kwargs
+
+                    setattr(mega_moe, metadata, f"mega_moe(..., activation_clamp, {names})")
+                    kwargs = select_mega_moe_activation_kwargs(
+                        mega_moe,
+                        activation="swigluoai",
+                        activation_clamp=7.0,
+                        swiglu_alpha=1.702,
+                        swiglu_beta=1.0,
+                    )
+                    self.assertEqual(mega_moe(**kwargs), {"activation_clamp": 7.0, **expected})
+
+    def test_select_mega_moe_activation_kwargs_preserves_explicit_signature(self):
+        def mega_moe(*, activation_clamp=None, glu_alpha=1.0, glu_bias=0.0, **kwargs):
+            """Unlike another API with activation and activation_params, use direct scalars."""
+            self.assertFalse(kwargs)
+            return activation_clamp, glu_alpha, glu_bias
+
+        kwargs = select_mega_moe_activation_kwargs(
+            mega_moe,
+            activation="swigluoai",
+            activation_clamp=7.0,
+            swiglu_alpha=1.702,
+            swiglu_beta=1.0,
+        )
+        self.assertEqual(mega_moe(**kwargs), (7.0, 1.702, 1.0))
+
+    def test_select_mega_moe_activation_kwargs_rejects_metadata_for_closed_signature(self):
+        def mega_moe(*, activation_clamp=None):
+            """This legacy wrapper does not support activation or activation_params."""
+            return activation_clamp
+
+        with self.assertRaisesRegex(RuntimeError, "does not expose SwiGLU-OAI"):
+            select_mega_moe_activation_kwargs(
+                mega_moe,
+                activation="swigluoai",
+                activation_clamp=7.0,
+                swiglu_alpha=1.702,
+                swiglu_beta=1.0,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

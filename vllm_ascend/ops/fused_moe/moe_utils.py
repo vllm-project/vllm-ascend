@@ -168,12 +168,26 @@ def select_mega_moe_activation_kwargs(
     if activation_name not in ("swigluoai", "swigluoai_uninterleave"):
         return kwargs
 
+    activation_parameter_pairs = (
+        {"activation", "activation_params"},
+        {"glu_alpha", "glu_bias"},
+        {"swiglu_alpha", "swiglu_beta"},
+    )
     try:
-        parameter_names = set(inspect.signature(mega_moe_op).parameters)
+        parameters = inspect.signature(mega_moe_op).parameters
+        parameter_names = {
+            name
+            for name, parameter in parameters.items()
+            if parameter.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+        }
+        accepts_kwargs = any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
     except (TypeError, ValueError):
-        # Some compiled/custom operators do not expose an inspectable Python
-        # signature. Their docstring or torch schema still carries argument
-        # names.
+        parameter_names = set()
+        accepts_kwargs = True
+    if accepts_kwargs and not any(pair.issubset(parameter_names) for pair in activation_parameter_pairs):
+        # Compiled operators and generic **kwargs wrappers may describe their
+        # arguments only in metadata. Prefer an explicit Python activation API;
+        # documentation must not introduce keywords a closed wrapper rejects.
         signature_metadata = " ".join(
             str(value)
             for value in (getattr(mega_moe_op, "__doc__", None), getattr(mega_moe_op, "_schema", None))
@@ -187,7 +201,7 @@ def select_mega_moe_activation_kwargs(
             "swiglu_alpha",
             "swiglu_beta",
         }
-        parameter_names = {name for name in known_names if re.search(rf"\b{re.escape(name)}\b", signature_metadata)}
+        parameter_names.update(name for name in known_names if re.search(rf"\b{re.escape(name)}\b", signature_metadata))
 
     if {"activation", "activation_params"}.issubset(parameter_names):
         kwargs.update(

@@ -1253,6 +1253,33 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_minimax_m3_derivation_initializes_unknown_megamoe_support(self, mock_fix):
+        vc = VllmConfig()
+        vc.model_config.architectures = ["MiniMaxM3SparseForCausalLM"]
+        config = init_ascend_config(vc)
+        # Exercise a custom entry point with normalized MC2 mode and an
+        # uninitialized capability cache, outside the usual factory ordering.
+        config.enable_fused_mc2 = 1
+        with (
+            patch("vllm_ascend.ascend_config._MEGA_MOE_SUPPORTED", None),
+            patch("vllm_ascend.ascend_config.importlib.util.find_spec", return_value=object()),
+            patch.object(AscendConfig, "_is_megamoe_supported_by_config", return_value=True),
+        ):
+            config.derive_and_validate(vc)
+            self.assertEqual(config.enable_fused_mc2, 1)
+            self.assertTrue(is_mega_moe_supported())
+
+        # An explicitly disabled cache must stay disabled even with CANN
+        # installed: MiniMax cannot use dispatch_ffn_combine.
+        with (
+            patch("vllm_ascend.ascend_config._MEGA_MOE_SUPPORTED", False),
+            patch("vllm_ascend.ascend_config.importlib.util.find_spec", return_value=object()),
+            self.assertRaisesRegex(AssertionError, "MiniMax M3 does not support enable_fused_mc2=1"),
+        ):
+            config.derive_and_validate(vc)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_converged_bypass_fields_are_validated(self, mock_fix):
         vc = VllmConfig()
         vc.additional_config = {
