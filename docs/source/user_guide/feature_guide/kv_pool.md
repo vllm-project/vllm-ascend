@@ -3,10 +3,10 @@
 ## 1. Environmental Dependencies
 
 * Software:
-* * CANN >= 8.5.0
-  * vLLM：main branch
-  * vLLM-Ascend：main branch
-  * mooncake：>= 0.3.11.post1
+    * CANN >= 8.5.0
+    * vLLM：main branch
+    * vLLM-Ascend：main branch
+    * mooncake：>= 0.3.11.post1
 
 ### KV Pool Parameter Description
 
@@ -48,7 +48,7 @@ export PYTHONHASHSEED=0
 ### Step 2.1: Software Installation
 
 * Software:
-  * Check Configuration:
+    * Check Configuration:
 
     Ensure that the hccn.conf file exists in the environment. If using Docker, mount it into the container.
 
@@ -58,10 +58,10 @@ export PYTHONHASHSEED=0
 
     For 950PR&950DT Products, additionally mount:
 
-    * devices: `/dev/ummu`, `/dev/uburma`
-    * commands: `/usr/bin/urma_admin`
-    * configurations: `/lib/route.conf`, `/etc/hccl_rootinfo.json`
-  * Install Mooncake
+      * devices: `/dev/ummu`, `/dev/uburma`
+      * commands: `/usr/bin/urma_admin`
+      * configurations: `/lib/route.conf`, `/etc/hccl_rootinfo.json`
+    * Install Mooncake
 
     Mooncake is the serving platform for Kimi, a leading LLM service provided by Moonshot AI.
     The Mooncake wheel requires glibc 2.35 or later. Check the installed glibc version before installation:
@@ -889,7 +889,7 @@ For disk config, eviction watermarks, and other UBS IO parameters, see the [DRAM
 ## 4. Example of using Yuanrong as a KV Pool backend
 
 * Software:
-  * Install `openyuanrong-datasystem` on all nodes (`yr.datasystem` must be importable).
+    * Install `openyuanrong-datasystem` on all nodes (`yr.datasystem` must be importable).
 
 ### Step 4.1: Install Yuanrong Datasystem
 
@@ -1472,8 +1472,8 @@ echo "${LOOP_DEV}"
 When vLLM reports failed `put` or `get` operations, first check whether the error is reported by Mooncake itself.
 
 * If the error is reported by Mooncake:
-  * For `put` failures, check whether the Mooncake log contains `NO_AVAILABLE_HANDLE` or `BatchPut failed ... due to insufficient space`. This usually means the remaining space after eviction is not enough for one `BatchPut` request. Ensure the space left by the eviction policy (for example, the capacity implied by `1 - eviction_ratio`) can hold one batch put, or consider increasing the available capacity, increasing eviction headroom, or reducing the batch size.
-  * For `get` failures, check whether the Mooncake log contains `lease_expired_before_data_transfer_completed key=...` or returns `LEASE_EXPIRED`. This means the KV object lease expired before the data transfer completed. Increase `--default_kv_lease_ttl` for `mooncake_master` as needed, and keep it larger than `ASCEND_CONNECT_TIMEOUT` and `ASCEND_TRANSFER_TIMEOUT`.
+    * For `put` failures, check whether the Mooncake log contains `NO_AVAILABLE_HANDLE` or `BatchPut failed ... due to insufficient space`. This usually means the remaining space after eviction is not enough for one `BatchPut` request. Ensure the space left by the eviction policy (for example, the capacity implied by `1 - eviction_ratio`) can hold one batch put, or consider increasing the available capacity, increasing eviction headroom, or reducing the batch size.
+    * For `get` failures, check whether the Mooncake log contains `lease_expired_before_data_transfer_completed key=...` or returns `LEASE_EXPIRED`. This means the KV object lease expired before the data transfer completed. Increase `--default_kv_lease_ttl` for `mooncake_master` as needed, and keep it larger than `ASCEND_CONNECT_TIMEOUT` and `ASCEND_TRANSFER_TIMEOUT`.
 * If the error is not reported by Mooncake, it is likely an HIXL (ascend_direct) transfer-layer issue. Collect plog files under `/root/ascend/log/debug/plog` and check whether the issue matches a known HIXL problem.
 
 For common troubleshooting and issue localization guidance for HIXL (ascend_direct), see:
