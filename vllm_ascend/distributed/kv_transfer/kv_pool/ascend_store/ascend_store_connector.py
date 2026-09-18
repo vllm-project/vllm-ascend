@@ -124,6 +124,9 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
         self._current_step_has_real_forward = False
         self._mamba_copy_bufs = None
+        # Handle to the (V2) mamba hybrid model state while its per-layer
+        # align pre-copy is deferred behind this connector's layerwise loads.
+        self._mamba_state: Any = None
         self.requires_mamba_state_copy_after_layer_load = self.use_layerwise
 
         self.connector_scheduler: KVPoolScheduler | None = None
@@ -271,21 +274,39 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
                 self._mamba_copy_bufs,
                 layer_name,
             )
+        # Mamba state copy must run AFTER this layer's load finishes,
+        # otherwise the copy would race with the in-flight layerwise load and
+        # read half-loaded state. The model state no-ops for non-mamba layers
+        # and for layers whose copy already ran.
+        if self._mamba_state is not None:
+            self._mamba_state.do_mamba_copy_for_layer(layer_name)
 
-    def prepare_mamba_state_copy(self, copy_bufs) -> bool:
+    def prepare_mamba_state_copy(self, mamba_state_or_copy_bufs) -> bool:
+        """Take over the mamba align pre-copy for this step.
+
+        The V1 model runner passes its mamba copy buffers; each layer's copy
+        is then executed from :meth:`wait_for_layer_load` via
+        ``mamba_utils.do_mamba_copy_block_for_layer``. The V2 model runner
+        passes its mamba hybrid model state from ``preprocess_state``; each
+        layer's copy is executed from :meth:`wait_for_layer_load` right after
+        that layer's KV load (conv/ssm state included) completes.
+        """
         if not self.requires_mamba_state_copy_after_layer_load:
             return False
-        mamba_utils.prepare_mamba_copy_by_layer(copy_bufs)
-        self._mamba_copy_bufs = copy_bufs
+        if hasattr(mamba_state_or_copy_bufs, "do_mamba_copy_for_layer"):
+            self._mamba_state = mamba_state_or_copy_bufs
+        else:
+            mamba_utils.prepare_mamba_copy_by_layer(mamba_state_or_copy_bufs)
+            self._mamba_copy_bufs = mamba_state_or_copy_bufs
         return True
 
     def finish_mamba_state_copy(self) -> None:
-        if self._mamba_copy_bufs is None:
-            return
-        try:
-            mamba_utils.finish_mamba_copy_by_layer(self._mamba_copy_bufs)
-        finally:
-            self._mamba_copy_bufs = None
+        if self._mamba_copy_bufs is not None:
+            try:
+                mamba_utils.finish_mamba_copy_by_layer(self._mamba_copy_bufs)
+            finally:
+                self._mamba_copy_bufs = None
+        self._mamba_state = None
 
     def save_kv_layer(
         self, layer_name: str, kv_layer: torch.Tensor, attn_metadata: "AttentionMetadata", **kwargs
