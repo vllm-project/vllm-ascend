@@ -137,7 +137,7 @@ Expected result: The version information is displayed, matching the pulled image
 
 Start the online serving service with the following command:
 
-For descriptions of the standard `vllm serve` arguments used in the deployment examples, refer to the [vLLM Serving Arguments documentation](https://docs.vllm.ai/en/latest/cli/serve/#arguments). For Ascend-specific options passed through `--additional-config`, refer to [Additional Configuration](../../user_guide/configuration/additional_config.md). For Ascend-specific environment variables, refer to [Environment Variables](../../user_guide/configuration/env_vars.md).
+The deployment examples use standard `vllm serve` arguments. Refer to `vllm serve --help` in the target vLLM environment for the complete and version-specific argument reference. For Ascend-specific options passed through `--additional-config`, refer to [Additional Configuration](../../user_guide/configuration/additional_config.md). For Ascend-specific environment variables, refer to [Environment Variables](../../user_guide/configuration/env_vars.md).
 
 ### 5.1 Single-Node Deployment
 
@@ -711,7 +711,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         31060 31061 31062 31063
     ```
 
-    The service is then accessible at `http://<proxy_ip>:8009`. For PD disaggregation, use this proxy endpoint in Section 7.
+    The service is then accessible at the proxy host on port `8009`. For PD disaggregation, use this proxy endpoint in Section 7. Replace the proxy host with the IP address or hostname of the machine running the proxy.
 
 === "950DT products"
 
@@ -861,7 +861,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         31060 31061
     ```
 
-    The service is then accessible at `http://<proxy_ip>:8009`. For PD disaggregation, use this proxy endpoint in Section 7.
+    The service is then accessible at the proxy host on port `8009`. For PD disaggregation, use this proxy endpoint in Section 7. Replace the proxy host with the IP address or hostname of the machine running the proxy.
 
 Key Parameter Descriptions:
 
@@ -1280,7 +1280,7 @@ mooncake_master \
 
 3. Start Prefill the same way. Wait until every Prefill rank prints `Application startup complete`.
 
-4. Start the Section 5.3 proxy. The service is then accessible at `http://<proxy_ip>:8009`. Use this proxy endpoint in Section 7.
+4. Start the Section 5.3 proxy. The service is then accessible at the proxy host on port `8009`. Use this proxy endpoint in Section 7. Replace the proxy host with the IP address or hostname of the machine running the proxy.
 
 #### 5.4.5 Verification
 
