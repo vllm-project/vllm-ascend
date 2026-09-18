@@ -899,3 +899,27 @@ def test_sfa_dcp_split_uses_builder_config_without_current_context(is_consumer, 
     assert gather.call_count == int(result.num_prefills > 0)
     assert common.slot_mapping is slots
     assert common.block_table_tensor is blocks
+
+
+def test_sfa_dcp_prefill_passes_contiguous_gathered_cache() -> None:
+    impl = AscendSFADCPImpl.__new__(AscendSFADCPImpl)
+    impl.dcp_group = Mock()
+    packed = torch.randn(2, 128, 1, 576)
+    gathered = packed.split((512, 64), dim=-1)
+    assert all(not tensor.is_contiguous() for tensor in gathered)
+    context = SimpleNamespace(gather_context=object(), kv_gather_block_table=object())
+    metadata = SimpleNamespace(dcp_context=context)
+    output = object()
+    with (
+        patch.object(impl, "_has_prefill", return_value=True),
+        patch.object(impl, "_finish_dcp_gather", return_value=gathered),
+        patch(
+            "vllm_ascend.attention.context_parallel.sfa_cp.DeviceOperator.execute_sparse_flash_attention_process",
+            return_value=output,
+        ) as execute,
+    ):
+        result = impl._execute_sparse_flash_attention_process(None, None, (), None, metadata, None, None)
+    assert result is output
+    for actual, expected in zip(execute.call_args.args[3], gathered):
+        assert actual.is_contiguous()
+        torch.testing.assert_close(actual, expected)
