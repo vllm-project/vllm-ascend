@@ -193,15 +193,15 @@ class TestMooncakeHybrid(unittest.TestCase):
             worker.wait_for_layer_load()
             with attention_transfer_window():
                 pass
+            worker.save_kv_layer(meta)
             if layer < 2:
                 self.assertFalse(store.complete)
             elif layer == 2:
                 # The runtime intentionally allows a bounded send backlog.
                 # Synchronize only this intermediate visibility assertion.
-                assert worker.kv_send_thread is not None
-                worker.kv_send_thread.request_queue.join()
+                assert worker.layer_save_finished_events is not None
+                self.assertTrue(worker.layer_save_finished_events[layer].wait(timeout=2))
                 self.assertEqual(len(store.complete), 4, "Group 0 completes before the last physical layer")
-            worker.save_kv_layer(meta)
         self.assertEqual(len(store.complete), 7)
         self.assertFalse(worker._put_started_keys)
         for array in arrays.values():
