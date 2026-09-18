@@ -161,5 +161,5 @@ Each armed wave with scheduled tokens decrements `manual_dump` **in memory** aft
 ## Related docs
 
 - [Runtime Guard feature guide](../feature_guide/runtime_guard.md)
-- [runtime_guard_design.md](../../../zh/design/runtime_guard_design.md)
-- [runtime_guard_ops.md](../../../zh/design/runtime_guard_ops.md)
+- [runtime_guard_design.md](https://github.com/vllm-project/vllm-ascend/blob/main/docs/zh/design/runtime_guard_design.md)
+- [runtime_guard_ops.md](https://github.com/vllm-project/vllm-ascend/blob/main/docs/zh/design/runtime_guard_ops.md)
