@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import torch
 from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -24,6 +25,7 @@ from vllm_ascend.worker.v2.attn_utils import (
     get_kv_cache_spec,
     unwrap_mamba_kv_cache_groups,
 )
+from vllm_ascend.worker.utils import _copy_kv_cache_blocks_inplace_ascend
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states import init_asecnd_model_state
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import (
@@ -148,6 +150,45 @@ def test_mamba_model_state_inherits_upstream_state_management():
 
 def test_mrv2_advertises_standardized_shared_kv_backing():
     assert NPUModelRunner.supports_standardized_shared_kv_backing is True
+
+
+def test_mrv2_cow_copy_ignores_aligned_storage_padding():
+    # The logical view has 3 blocks, while its underlying aligned allocation
+    # has 26 elements and is deliberately not divisible by 3.
+    backing = torch.arange(26, dtype=torch.int32)
+    conv_state = backing[1:13].view(3, 4)
+    ssm_state = backing[13:25].view(3, 4)
+    padding_before = backing[[0, 25]].clone()
+    src_conv = conv_state[0].clone()
+    src_ssm = ssm_state[0].clone()
+
+    _copy_kv_cache_blocks_inplace_ascend(
+        [[conv_state, ssm_state]],
+        3,
+        [KVCacheBlockCopy(src_block_id=0, dst_block_id=2)],
+    )
+
+    assert torch.equal(conv_state[2], src_conv)
+    assert torch.equal(ssm_state[2], src_ssm)
+    assert torch.equal(backing[[0, 25]], padding_before)
+
+
+def test_mrv2_cow_copy_snapshots_overlapping_views_before_writes():
+    # Hybrid Attention/Mamba views can overlap one shared allocation.  The
+    # destination of the first view aliases the source of the second view, so
+    # sequential read/write copies would propagate the wrong bytes.
+    backing = torch.arange(12, dtype=torch.int32)
+    first_view = backing[:8].view(4, 2)
+    second_view = backing[4:].view(4, 2)
+    expected_second_source = second_view[0].clone()
+
+    _copy_kv_cache_blocks_inplace_ascend(
+        [[first_view], [second_view]],
+        4,
+        [KVCacheBlockCopy(src_block_id=0, dst_block_id=2)],
+    )
+
+    assert torch.equal(second_view[2], expected_second_source)
 
 
 def test_prepare_inputs_propagates_padded_request_count():

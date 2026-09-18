@@ -24,6 +24,13 @@ Decode consumers preserve the complete verifier window. Sparse index-kpool
 producers align against the resolved common cache-group boundary because their
 physical indexer-state block is smaller than the Mamba checkpoint interval.
 Other models retain the upstream behavior.
+
+On a pure PD prefill producer or a standalone instance the EAGLE one-block
+backoff of the last cacheable position is suppressed: matched content-hash
+blocks are always verified prompt blocks there, while the backoff would leave
+the final full mamba-align state page unmaterialized across the chunk boundary
+(copy-on-write in MambaManager.allocate_new_blocks), pinning hybrid prefix
+hits one full page (or entirely) short.
 """
 
 import functools
@@ -32,6 +39,9 @@ import inspect
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.request import Request
 
+from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
+    _skips_eagle_block_drop,
+)
 from vllm_ascend.patch.platform.patch_mamba_config import (
     _get_sparse_index_kpool,
 )
@@ -47,6 +57,55 @@ _EXPECTED_PARAMETERS = (
 _original_mamba_block_aligned_split = Scheduler._mamba_block_aligned_split
 
 
+def _split_without_shared_prefix_junction(
+    self: Scheduler,
+    request: Request,
+    num_new_tokens: int,
+    num_new_local_computed_tokens: int,
+    num_external_computed_tokens: int,
+) -> int:
+    """Apply upstream Mamba alignment without a shared-prefix chunk stop."""
+    start = (
+        request.num_computed_tokens
+        + num_new_local_computed_tokens
+        + num_external_computed_tokens
+    )
+    prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
+    if start >= prefill_end:
+        return num_new_tokens
+
+    block_size = self.cache_config.block_size
+    last_cache_position = request.num_tokens - request.num_tokens % block_size
+    if self.use_eagle and not _skips_eagle_block_drop(getattr(self.vllm_config, "kv_transfer_config", None)):
+        last_cache_position = max(last_cache_position - block_size, 0)
+
+    end = start + num_new_tokens
+    if end < prefill_end:
+        max_prefill_tokens = self.max_num_scheduled_tokens
+        long_prefill_threshold = self.scheduler_config.long_prefill_token_threshold
+        if long_prefill_threshold > 0:
+            max_prefill_tokens = min(max_prefill_tokens, long_prefill_threshold)
+        aligned_end = end // block_size * block_size
+        if aligned_end > start or block_size <= max_prefill_tokens:
+            end = aligned_end
+
+    next_block_boundary = (start // block_size + 1) * block_size
+    tail_boundary = (
+        request.num_prompt_tokens // self.hash_block_size * self.hash_block_size
+        if self.mamba_partial_cache_hit
+        else 0
+    )
+    stops = (
+        next_block_boundary if start % block_size != 0 else 0,
+        last_cache_position,
+        tail_boundary
+        if last_cache_position < tail_boundary < request.num_prompt_tokens
+        else 0,
+    )
+    end = min((stop for stop in stops if start < stop < end), default=end)
+    return max(end - start, 0)
+
+
 @functools.wraps(_original_mamba_block_aligned_split)
 def _mamba_block_aligned_split(
     self: Scheduler,
@@ -57,7 +116,13 @@ def _mamba_block_aligned_split(
 ) -> int:
     """Preserve PD windows and align sparse index-kpool cache groups."""
     kv_transfer_config = self.vllm_config.kv_transfer_config
-    if kv_transfer_config is not None and kv_transfer_config.is_kv_consumer:
+    # A consumer only needs the unsplit verifier window after some prefix has
+    # already been computed locally or loaded from the connector.  ``kv_both``
+    # also handles cold prefills; bypassing alignment for those requests means
+    # no reusable Mamba state is ever materialized, so neither HBM nor the KV
+    # pool can cache the prefix.
+    has_computed_prefix = request.num_computed_tokens + num_new_local_computed_tokens + num_external_computed_tokens > 0
+    if kv_transfer_config is not None and kv_transfer_config.is_kv_consumer and has_computed_prefix:
         return num_new_tokens
 
     if _get_sparse_index_kpool(self.vllm_config.model_config) is not None:
@@ -68,7 +133,7 @@ def _mamba_block_aligned_split(
         ):
             block_size = self.block_size
             last_cache_position = request.num_tokens - request.num_tokens % block_size
-            if self.use_eagle:
+            if self.use_eagle and not _skips_eagle_block_drop(getattr(self.vllm_config, "kv_transfer_config", None)):
                 last_cache_position = max(last_cache_position - block_size, 0)
             scheduled_end = num_computed_tokens + num_new_tokens
             if scheduled_end < last_cache_position:
@@ -79,7 +144,7 @@ def _mamba_block_aligned_split(
                 num_new_tokens = last_cache_position - num_computed_tokens
         return num_new_tokens
 
-    return _original_mamba_block_aligned_split(
+    return _split_without_shared_prefix_junction(
         self,
         request,
         num_new_tokens,

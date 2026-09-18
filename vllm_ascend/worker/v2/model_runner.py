@@ -60,7 +60,10 @@ from vllm_ascend.core.profiling_chunk_predictor import (
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import lmhead_tp_enable, set_potential_max_tokens, vllm_version_is
-from vllm_ascend.worker.utils import disable_compilation
+from vllm_ascend.worker.utils import (
+    _copy_kv_cache_blocks_inplace_ascend,
+    disable_compilation,
+)
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state, unwrap_mamba_kv_cache_groups
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
@@ -90,6 +93,21 @@ class NPUModelRunner(GPUModelRunner):
     supports_standardized_shared_kv_backing = True
 
     execute_model_state: ExecuteModelState | None
+
+    def update_requests(self, scheduler_output: SchedulerOutput) -> None:
+        copies = scheduler_output.kv_cache_block_copies
+        # The upstream copier operates on the complete untyped storage.  An
+        # aligned Ascend allocation keeps padding outside the logical tensor,
+        # so consume the copies here and apply them to the logical views after
+        # the parent has zeroed and updated this step's blocks.
+        scheduler_output.kv_cache_block_copies = None
+        super().update_requests(scheduler_output)
+        if copies:
+            _copy_kv_cache_blocks_inplace_ascend(
+                self.kv_caches,
+                self.kv_cache_config.num_blocks,
+                copies,
+            )
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Ascend-specific configurations
