@@ -20,6 +20,7 @@ def make_mock_worker(
     speculative_config=None,
     attn_groups=None,
     device: str = "cpu",
+    use_v2_model_runner: bool = False,
 ) -> MagicMock:
     worker = MagicMock()
     worker.device = torch.device(device)
@@ -33,4 +34,5 @@ def make_mock_worker(
     worker.vllm_config.speculative_config = speculative_config
     worker.vllm_config.parallel_config.pipeline_parallel_size = pipeline_parallel_size
     worker.model_runner.attn_groups = attn_groups
+    worker.use_v2_model_runner = use_v2_model_runner
     return worker

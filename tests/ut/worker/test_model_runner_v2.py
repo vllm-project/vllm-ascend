@@ -789,3 +789,55 @@ def test_copy_num_computed_tokens_to_cpu_records_event():
     stream.wait_stream.assert_called_once_with(default_stream)
     runner.num_computed_tokens_cpu.copy_.assert_called_once()
     runner.num_computed_tokens_event.record.assert_called_once_with()
+
+
+def _sampler_run_runner(vocab_size=16):
+    runner = _make_runner()
+    runner.sampler = SimpleNamespace(
+        sampling_states=SimpleNamespace(
+            vocab_size=vocab_size,
+            top_k=SimpleNamespace(np=np.full(4, vocab_size, dtype=np.int32)),
+            top_p=SimpleNamespace(np=np.ones(4, dtype=np.float32)),
+        )
+    )
+    return runner
+
+
+def test_dummy_sampler_run_forces_top_k_top_p_kernels():
+    runner = _sampler_run_runner()
+    observed = {}
+
+    def fake_parent(hidden_states):
+        observed["top_k"] = runner.sampler.sampling_states.top_k.np[0]
+        observed["top_p"] = runner.sampler.sampling_states.top_p.np[0]
+
+    with patch.object(GPUModelRunner, "_dummy_sampler_run", side_effect=fake_parent):
+        runner._dummy_sampler_run(torch.zeros((4, 16)))
+
+    # Non-default values are visible while the upstream dummy sampler runs, so
+    # get_top_k_top_p returns non-None k/p and the top-k/top-p kernels cannot
+    # be skipped during the memory profiling measurement.
+    assert observed["top_k"] != runner.sampler.sampling_states.vocab_size
+    assert observed["top_p"] != 1.0
+    # Defaults are restored afterwards.
+    np.testing.assert_array_equal(
+        runner.sampler.sampling_states.top_k.np,
+        np.full(4, 16, dtype=np.int32),
+    )
+    np.testing.assert_array_equal(runner.sampler.sampling_states.top_p.np, np.ones(4, dtype=np.float32))
+
+
+def test_dummy_sampler_run_restores_states_on_failure():
+    runner = _sampler_run_runner()
+
+    with (
+        patch.object(GPUModelRunner, "_dummy_sampler_run", side_effect=RuntimeError("boom")),
+        pytest.raises(RuntimeError, match="boom"),
+    ):
+        runner._dummy_sampler_run(torch.zeros((4, 16)))
+
+    np.testing.assert_array_equal(
+        runner.sampler.sampling_states.top_k.np,
+        np.full(4, 16, dtype=np.int32),
+    )
+    np.testing.assert_array_equal(runner.sampler.sampling_states.top_p.np, np.ones(4, dtype=np.float32))

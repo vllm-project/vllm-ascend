@@ -357,6 +357,21 @@ class NPUModelRunner(GPUModelRunner):
                     self._dummy_run(mc2_tokens_capacity, skip_attn=True, skip_eplb=True, is_profile=True)
             super().profile_run()
 
+    @torch.inference_mode()
+    def _dummy_sampler_run(self, hidden_states: torch.Tensor) -> None:
+        """Override GPUModelRunner._dummy_sampler_run for Ascend NPUs.
+
+        The dummy batch carries default sampling params (top_k == vocab_size,
+        top_p == 1.0), so the upstream dummy sampler run skips the top-k/top-p
+        kernels. Their transient workspace (full-vocab softmax/sort/cumsum in
+        _apply_top_k_top_p_pytorch) would then escape the
+        torch.npu.max_memory_allocated() profiling measurement and could OOM
+        at runtime once a request uses non-default top_k/top_p.
+        """
+        assert self.sampler is not None
+        with _force_top_k_top_p_sampling(self.sampler.sampling_states):
+            super()._dummy_sampler_run(hidden_states)
+
     def prepare_inputs(  # type: ignore[misc]
         self,
         scheduler_output: SchedulerOutput,
@@ -904,3 +919,24 @@ def graph_manager_wrapper(model_runner):
         yield
     finally:
         vllm_model_runner.ModelCudaGraphManager = original_graph_manager
+
+
+@contextmanager
+def _force_top_k_top_p_sampling(sampling_states):
+    """Stage non-default top_k/top_p on sampling slot 0.
+
+    The dummy batch used by NPUModelRunner._dummy_sampler_run maps request 0
+    to slot 0, so np.any(... != default) makes get_top_k_top_p return
+    non-None k/p and the top-k/top-p kernels run inside the profiled region.
+    The kernel's memory footprint depends on the [B, V] shapes, not on the
+    k/p values themselves.
+    """
+    orig_top_k = sampling_states.top_k.np[0]
+    orig_top_p = sampling_states.top_p.np[0]
+    sampling_states.top_k.np[0] = 1
+    sampling_states.top_p.np[0] = 0.9
+    try:
+        yield
+    finally:
+        sampling_states.top_k.np[0] = orig_top_k
+        sampling_states.top_p.np[0] = orig_top_p
