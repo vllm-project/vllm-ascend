@@ -3,9 +3,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-import pytestacce
+import pytest
 import torch
 
 from vllm_ascend.ops import rope_dsv4
