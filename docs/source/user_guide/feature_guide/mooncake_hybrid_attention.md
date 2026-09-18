@@ -176,24 +176,11 @@ session ownership, continuation with remapped local blocks, negative transfer
 results, allocation rollback, device-event gating, and fatal-thread propagation.
 They do not execute attention kernels or a real Mooncake service.
 
-For opt-in NPU validation, start Mooncake separately and run from the repository:
-
-```bash
-python tests/e2e/nightly/single_node/models/scripts/mooncake_layerwise_hybrid.py \
-  --model /path/to/hybrid-model --tp 8 \
-  --prompt-tokens 32768 --chunk-tokens 4096 \
-  --warm-runs 3 --profile-dir /tmp/mooncake-hybrid-traces
-```
-
-The script compares greedy output tokens from a fresh-prefix cold run against
-warm runs. It resets the local prefix cache without clearing the remote connector
-between runs and requires a positive cached-token count. It reports complete
-generation wall time and request TTFT when available; these are different metrics.
-Use `--engine-args` for additional model-specific LLM arguments.
-
-Repeat with `--non-layerwise` for the existing Mooncake non-layerwise baseline,
-using otherwise identical settings and an isolated test pool. Run performance
-measurements again without profiling or range-debug logging enabled.
+Real NPU and distributed Mooncake validation is still required and is not
+automated by this change. Use the project-approved deployment and benchmark
+workflow for the target model and hardware. Compare layerwise and non-layerwise
+Mooncake with otherwise identical settings and isolated test pools, and run
+performance measurements without profiling or range-debug logging enabled.
 
 Before claiming hardware support or a performance improvement, verify:
 
