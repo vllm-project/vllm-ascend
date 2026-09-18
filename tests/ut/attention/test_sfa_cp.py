@@ -25,6 +25,7 @@ from vllm_ascend.attention.context_parallel.sfa_cp import (
     resolve_sfa_impl,
     resolve_sfa_metadata_builder,
 )
+from vllm_ascend.attention.indexer import IndexerCacheInputs
 from vllm_ascend.attention.sfa_v1 import (
     AscendSFAImpl,
     AscendSFAMetadata,
@@ -38,6 +39,107 @@ from vllm_ascend.weight_switch import (
     WeightSwitchLoadState,
     WeightSwitchMixin,
 )
+
+
+@pytest.mark.parametrize("world_size", [1, 2, 8])
+@pytest.mark.parametrize("num_tokens", [0, 1, 5, 16])
+@pytest.mark.parametrize("sfa_c8,li_c8", [(False, False), (False, True), (True, False), (True, True)])
+@pytest.mark.parametrize("async_op", [False, True])
+def test_dsa_cp_fuses_cache_gather_bitwise(world_size, num_tokens, sfa_c8, li_c8, async_op):
+    impl = AscendSFADSACPImpl.__new__(AscendSFADSACPImpl)
+    impl.enable_sparse_sfa_c8 = sfa_c8
+    impl.qk_rope_head_dim = 4
+    impl.kv_lora_rank = 8
+    impl._all_gather_o_proj_full_weight = MagicMock()
+    local_tokens = (num_tokens + world_size - 1) // world_size
+
+    def make_parts(rank):
+        offset = rank * local_tokens * 16
+        raw = torch.arange(offset, offset + local_tokens * 16).reshape(local_tokens, 16)
+        dtype = torch.int8 if sfa_c8 else torch.bfloat16
+        # Non-contiguous inputs exercise byte packing without dtype promotion.
+        nope = raw[:, :8].to(dtype)
+        pe = raw[:, 8:12].to(dtype)
+        scale = raw[:, 12:16].to(torch.int8) if sfa_c8 else None
+        key = raw[:, ::2].to(torch.int8 if li_c8 else torch.bfloat16)
+        li_scale = (raw[:, :1].float() / 7).to(torch.float16) if li_c8 else None
+        return pe, nope, scale, key, li_scale
+
+    ranks = [make_parts(rank) for rank in range(world_size)]
+    pe, nope, scale, key, li_scale = ranks[0]
+    weights = torch.randn(local_tokens, 2)
+    inputs = IndexerCacheInputs(key, li_scale, weights)
+    events = []
+
+    def pack(parts):
+        pe, nope, scale, key, li_scale = parts
+        tensors = [nope, pe, scale] if sfa_c8 else [pe, nope]
+        tensors += [key] + ([] if li_scale is None else [li_scale])
+        return torch.cat(
+            [
+                t.reshape(-1).contiguous().view(torch.uint8).view(t.shape[0], t.shape[1] * t.element_size())
+                for t in tensors
+            ],
+            dim=-1,
+        )
+
+    expected = torch.cat([pack(parts) for parts in ranks], dim=0)
+
+    def gather(tensor, group, async_op):
+        torch.testing.assert_close(tensor, pack(ranks[0]), rtol=0, atol=0)
+        if not async_op:
+            events.append("complete")
+            return expected.clone(), None
+        result = torch.empty_like(expected)
+
+        def wait():
+            result.copy_(expected)
+            events.append("complete")
+
+        return result, SimpleNamespace(wait=wait)
+
+    def scatter(cache, slots, values):
+        assert events == ["complete"]
+        torch.testing.assert_close(slots.flatten(), torch.arange(num_tokens))
+        expected_main = torch.cat([torch.cat([p[1], p[0], p[2]], dim=-1) for p in ranks])
+        torch.testing.assert_close(values, expected_main[:num_tokens], rtol=0, atol=0)
+
+    def reshape_and_cache(**kwargs):
+        assert events == ["complete"]
+        for argument, index in [("key", 1), ("value", 0)]:
+            reference = torch.cat([p[index] for p in ranks])[:num_tokens].unsqueeze(1)
+            torch.testing.assert_close(kwargs[argument], reference, rtol=0, atol=0)
+
+    main_cache = (torch.empty(world_size * local_tokens, 16, dtype=torch.int8),) if sfa_c8 else (None, None)
+    with (
+        patch("vllm_ascend.attention.context_parallel.sfa_cp.get_tp_group"),
+        patch("vllm_ascend.attention.context_parallel.sfa_cp.all_gather_async", side_effect=gather) as collective,
+        patch("torch_npu.npu_scatter_nd_update_", side_effect=scatter, create=True),
+        patch(
+            "vllm_ascend.attention.context_parallel.sfa_cp.DeviceOperator.reshape_and_cache",
+            side_effect=reshape_and_cache,
+        ),
+    ):
+        gathered, handles = impl._prepare_kv_for_parallel(pe, nope, scale, async_op, inputs)
+        impl._store_parallel_kv(
+            pe,
+            nope,
+            scale,
+            gathered,
+            handles,
+            main_cache,
+            torch.arange(world_size * local_tokens),
+            SimpleNamespace(num_actual_tokens=num_tokens),
+            async_op,
+            inputs,
+        )
+    collective.assert_called_once()
+    torch.testing.assert_close(inputs.key, torch.cat([p[3] for p in ranks]), rtol=0, atol=0)
+    assert inputs.weights is weights
+    if li_c8:
+        torch.testing.assert_close(inputs.scale, torch.cat([p[4] for p in ranks]), rtol=0, atol=0)
+    else:
+        assert inputs.scale is None
 
 
 @pytest.mark.parametrize("first_block_id", [0, 3])
