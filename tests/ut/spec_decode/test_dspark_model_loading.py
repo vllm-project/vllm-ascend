@@ -17,7 +17,7 @@ from vllm_ascend.worker.v2.spec_decode.dspark import speculator as shared
 
 @pytest.mark.parametrize("fail", [False, True])
 def test_post_process_receives_target_config_after_loading(monkeypatch, fail):
-    events = []
+    events: list[tuple[str, object]] = []
     config = SimpleNamespace(quant_config=object())
     spec = shared.AscendDSparkSpeculator.__new__(shared.AscendDSparkSpeculator)
     spec.vllm_config = config
@@ -38,7 +38,10 @@ def test_post_process_receives_target_config_after_loading(monkeypatch, fail):
     monkeypatch.setattr(shared, "set_current_vllm_config", lambda _: nullcontext())
     with pytest.raises(ValueError, match="load failed") if fail else nullcontext():
         assert spec.load_draft_model(target, set()) is draft
-    assert events == ([("load", config)] if fail else [("load", config), ("post_process", config), ("capture", target)])
+    expected: list[tuple[str, object]] = [("load", config)]
+    if not fail:
+        expected.extend([("post_process", config), ("capture", target)])
+    assert events == expected
 
 
 @pytest.mark.parametrize(

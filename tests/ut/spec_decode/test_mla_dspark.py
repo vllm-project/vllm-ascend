@@ -3,6 +3,7 @@
 
 from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -189,7 +190,7 @@ def test_padded_mla_query_lengths_are_nested():
 def test_empty_metadata_is_a_noop(architecture):
     spec = make_speculator()
     spec.attn_architecture = architecture
-    metadata = {}
+    metadata: dict[str, SimpleNamespace] = {}
     assert spec._update_draft_attn_metadata(metadata, 1) is metadata
 
 
@@ -216,7 +217,16 @@ def test_capture_delegates_and_restores_contexts(monkeypatch, architecture, fail
         return context("model")
 
     monkeypatch.setattr(graph, "model_capture_wrapper", model_context)
-    args = (MagicMock(), SimpleNamespace(positions=torch.arange(20)), object(), [], object(), 128, False, "capture")
+    args: tuple[Any, ...] = (
+        MagicMock(),
+        SimpleNamespace(positions=torch.arange(20)),
+        object(),
+        [],
+        object(),
+        128,
+        False,
+        "capture",
+    )
 
     def capture(self, *received):
         assert self is manager
@@ -244,7 +254,7 @@ def test_replay_metadata_preserves_architecture_behavior(monkeypatch, architectu
     monkeypatch.setattr(DSparkSpeculator, "_build_draft_attn_metadata", builder)
     update = MagicMock(wraps=spec._update_draft_attn_metadata)
     monkeypatch.setattr(spec, "_update_draft_attn_metadata", update)
-    captured = {}
+    captured: dict[str, Any] = {}
 
     @contextmanager
     def factory(positions, pad, is_prefilling):
