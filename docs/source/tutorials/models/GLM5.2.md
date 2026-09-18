@@ -1563,7 +1563,7 @@ The service returns HTTP 200 OK. The JSON response contains the `choices` field 
             "index": 0,
             "text": "here,and it's not just about chatbots. It's about AI agents",
             "logprobs":null,
-            "finish_reason”:"length",
+            "finish_reason":"length",
             "stop_reason":null,
             "token_ids":null,
             "prompt_logprobs":null,

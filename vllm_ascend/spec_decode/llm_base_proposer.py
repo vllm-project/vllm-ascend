@@ -54,6 +54,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 )
 from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
 from vllm_ascend.models.deepseek_v4.dspark import DSparkDeepseekV4ForCausalLM
+from vllm_ascend.models.deepseek_v41.dspark import DSparkDeepseekV41ForCausalLM
 from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
@@ -78,6 +79,7 @@ _HIDDEN_STATE_DRAFTER_TYPES = (
     Eagle3VwnLlamaForCausalLM,
     Eagle3DeepseekV2ForCausalLM,
     DSparkDeepseekV4ForCausalLM,
+    DSparkDeepseekV41ForCausalLM,
 )
 
 
@@ -113,6 +115,17 @@ def _is_glm_model(model_config) -> bool:
 
 class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     _runnable: ACLGraphWrapper | Callable
+    arange: torch.Tensor
+
+    def _ensure_query_start_loc_arange_capacity(self) -> None:
+        """Ensure ``arange`` includes the terminal query boundary."""
+        required_size = max(self.max_batch_size, self.max_num_tokens) + 1
+        if self.arange.numel() < required_size:
+            self.arange = torch.arange(
+                required_size,
+                device=self.arange.device,
+                dtype=self.arange.dtype,
+            )
 
     def _create_draft_vllm_config(self) -> VllmConfig:
         """Expose the draft runner type during model construction.
@@ -161,6 +174,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device, pass_hidden_states_to_model: bool, runner=None):
         super().__init__(vllm_config, device, pass_hidden_states_to_model, runner=runner)
+        self._ensure_query_start_loc_arange_capacity()
 
         # Assign runner before it's used in the methods below
         self.runner = runner

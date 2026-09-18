@@ -53,7 +53,7 @@ class HardwareCapability(Enum):
     RC_DEVICE_DISCOVERY = auto()
     REDUCED_CUDAGRAPH_CAPTURE_SIZES = auto()
     RUNTIME_CUSTOM_OPS = auto()
-    SFA_DCP_REPLICATED_INDEXER = auto()
+    SFA_C8_DCP_REPLICATED_INDEXER = auto()
     STANDARD_WORKER_PATCHES = auto()
     STANDARD_MAMBA_PATCH = auto()
     SWIGLU_OAI_MX_QUANT = auto()
@@ -150,7 +150,7 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.NPUGRAPH_EX,
         HardwareCapability.PAGED_ATTENTION,
         HardwareCapability.RUNTIME_CUSTOM_OPS,
-        HardwareCapability.SFA_DCP_REPLICATED_INDEXER,
+        HardwareCapability.SFA_C8_DCP_REPLICATED_INDEXER,
         HardwareCapability.STANDARD_MAMBA_PATCH,
         HardwareCapability.STANDARD_WORKER_PATCHES,
         HardwareCapability.TRITON_BATCH_MEMCPY,

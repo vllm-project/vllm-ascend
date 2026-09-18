@@ -1389,7 +1389,8 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
                 gather_context = dcp_context.gather_context
                 dcp_context.gather_context = None
             assert gather_context is not None
-            gathered_kv_cache = self._finish_dcp_gather(gather_context)
+            # Splitting the packed KV buffer leaves non-contiguous inner strides.
+            gathered_kv_cache = tuple(t.contiguous() for t in self._finish_dcp_gather(gather_context))
             block_table = dcp_context.kv_gather_block_table
             assert block_table is not None
             # The gathered KV cache is complete, so each rank can attend with
