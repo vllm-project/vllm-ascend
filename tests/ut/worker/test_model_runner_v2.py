@@ -21,6 +21,7 @@ from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 
 def _make_runner(need_timing: bool = True):
     runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.pcp_manager = None
     runner.ascend_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(need_timing=need_timing))
     )
