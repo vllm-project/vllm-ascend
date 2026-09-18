@@ -34,13 +34,8 @@ The symbols used have the following meanings:
 | [Quantization W8A8](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/quantization.html) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❔ | ✅ | ✅ |  |  |  |
 | <abbr title="Tensor Parallel">TP</abbr> | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |  |  |
 | Weight nz | ✅ | ✅ | ✅ | ✅ | ✅ | ❔ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | 🟠 | ✅ | ✅ | ✅ |  |
-| [KVPP (Experimental)](../feature_guide/kvpp.md) | ❌ | ❌ | ✅ | ✅ | ✅ | ❌ | ❔ | ❔ | 🟠<sup>4</sup> | ❌ | ❔ | ✅ | 🟠<sup>5</sup> | ❔ | ❔ | ❔ | ❔ | ❔ | ❔ | ❔ | ❔ | ✅ | ❔ | ✅ |
+| [KVPP (Experimental)](../feature_guide/kvpp.md) | ❌ | ❌ | ✅ | ✅ | ✅ | ❌ | ❔ | ❔ | 🟠 | ❌ | ❔ | ✅ | 🟠 | ❔ | ❔ | ❔ | ❔ | ❔ | ❔ | ❔ | ❔ | ✅ | ❔ | ✅ |
 
 - <sup>1</sup> Only dcp supports dp while pcp does not support dp.
 - <sup>2</sup> Lmhead TP is only enabled in the pure dp scenarios.
 - <sup>3</sup> MLAPO is only supported on the decode stage.
-
-- <sup>4</sup> KVPP supports P/D disaggregation through `MooncakeConnectorV2` (Experimental), with KVPP enabled only on the prefill node. The connector does not yet support PCP.
-- <sup>5</sup> KVPP supports Memcache pooling through `AscendStoreConnector` with `kv_producer` or `kv_both`, `use_layerwise=false`, and `load_async=true`. Combining KVPP, PCP, and pooling is not supported.
-
-KVPP is experimental and supports non-hybrid MLA/SFA models in eager mode. PCP is supported with Model Runner V2. See the [KVPP guide](../feature_guide/kvpp.md#supported-scenarios) for the complete support scope.
