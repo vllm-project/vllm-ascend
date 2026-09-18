@@ -122,6 +122,7 @@ def _is_glm_model(model_config) -> bool:
     model_type = getattr(hf_text_config, "model_type", "") or ""
     return "glm" in str(model_type).lower()
 
+
 def _supports_spec_decode_graph(model_config, method: str) -> bool:
     """Return whether graph-mode drafting is supported for this model/method.
 
@@ -133,6 +134,7 @@ def _supports_spec_decode_graph(model_config, method: str) -> bool:
         return True
     model_type = getattr(getattr(model_config, "hf_text_config", None), "model_type", "")
     return str(model_type).lower() == "glm_moe_dsa" and method in ("mtp", "dspark")
+
 
 class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     _runnable: ACLGraphWrapper | Callable
