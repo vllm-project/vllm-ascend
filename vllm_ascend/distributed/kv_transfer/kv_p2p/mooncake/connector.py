@@ -64,6 +64,10 @@ if TYPE_CHECKING:
 class MooncakeBaseConnector(KVConnectorBase_V1, SupportsHMA):
     """Common facade for the Mooncake scheduler and worker implementations."""
 
+    @property
+    def supports_divergent_local_hybrid_hits(self) -> bool:
+        return True
+
     def __init__(
         self,
         vllm_config: VllmConfig,

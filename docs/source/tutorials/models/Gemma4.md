@@ -29,10 +29,6 @@ Download the Gemma4 model weight to a local or shared directory, such as `/root/
 
 The examples below assume a single node with visible NPUs. The commands use 4 visible NPUs as an example. Adjust `ASCEND_RT_VISIBLE_DEVICES` and `--tensor-parallel-size` according to the model size and available devices.
 
-### 3.2 Verify Multi-node Communication (Optional)
-
-If multi-node deployment is required, verify the multi-node communication environment according to [Verify Multi-node Communication Environment](../../getting_started/installation.md#installation-multi-node-interconnect).
-
 ## 4 Installation
 
 ### 4.1 Image Availability

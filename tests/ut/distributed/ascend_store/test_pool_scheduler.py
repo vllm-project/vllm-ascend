@@ -88,6 +88,27 @@ class TestKVPoolScheduler(unittest.TestCase):
     def _make_config(self, kv_role="kv_producer", extra_config=None, block_size=16):
         return make_config(kv_role, extra_config, block_size)
 
+    def test_pcp_query_keys_and_worker_count(self):
+        for pcp_size, dcp_size in ((1, 1), (2, 1), (4, 1), (1, 2)):
+            with self.subTest(pcp_size=pcp_size, dcp_size=dcp_size):
+                config = self._make_config()
+                config.parallel_config.prefill_context_parallel_size = pcp_size
+                config.parallel_config.decode_context_parallel_size = dcp_size
+                config.parallel_config.tensor_parallel_size = 2
+                config.parallel_config.world_size = 2 * pcp_size
+                config.model_config.get_total_num_kv_heads.return_value = 2
+                scheduler = KVPoolScheduler(config, use_layerwise=False)
+                self.assertEqual(scheduler.grouped_block_size, [16 * dcp_size])
+                self.assertEqual(scheduler.hash_block_size, 16 * dcp_size)
+                self.assertEqual(scheduler._expected_worker_count, 2 * pcp_size)
+                keys = scheduler._generate_store_query_keys([b"h0"], False, 0)[0]
+                expected = [
+                    f"llama-7b@dcp:{dcp}@head_or_tp_rank:{tp}@pp_rank:0@group:0@cache_role:kv@cache_family:default@6830"
+                    for dcp in range(dcp_size)
+                    for tp in range(2)
+                ]
+                self.assertEqual(keys, expected)
+
     def test_mooncake_layerwise_rejects_tp_mismatch(self):
         config = self._make_config(
             kv_role="kv_consumer",
@@ -803,33 +824,32 @@ class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):
     """Test update_connector_output."""
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
-    def _make_scheduler(self, mock_client_cls):
+    def _make_scheduler(self, mock_client_cls, pcp_size=1):
         config = make_config()
-        config.parallel_config.world_size = 2
+        config.parallel_config.prefill_context_parallel_size = pcp_size
+        config.parallel_config.world_size = 2 * pcp_size
         scheduler = KVPoolScheduler(config, use_layerwise=False)
         scheduler._block_pool = MagicMock()
         return scheduler
 
     def test_completed_event_frees_blocks(self):
-        scheduler = self._make_scheduler()
-        scheduler.sending_events = {1: 1}  # already 1 worker completed
-        scheduler.sending_blocks = {1: [10, 20, 30]}
-        scheduler._expected_worker_count = 2
-
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
             AscendStoreKVConnectorWorkerMetadata,
         )
 
-        for initial, should_free in [(1, True), (0, False)]:
-            with self.subTest(initial=initial):
-                scheduler = self._make_scheduler()
-                scheduler.sending_events = {1: initial}
+        for pcp_size in (1, 2, 4):
+            with self.subTest(pcp_size=pcp_size):
+                scheduler = self._make_scheduler(pcp_size=pcp_size)
+                scheduler.sending_events = {1: 0}
                 scheduler.sending_blocks = {1: [10, 20]}
-                scheduler._expected_worker_count = 2
-                output = MagicMock(kv_connector_worker_meta=AscendStoreKVConnectorWorkerMetadata({1: 1}))
+                for _ in range(2 * pcp_size - 1):
+                    output = MagicMock(kv_connector_worker_meta=AscendStoreKVConnectorWorkerMetadata({1: 1}))
+                    scheduler.update_connector_output(output)
+                    scheduler._block_pool.free_blocks.assert_not_called()
+                    self.assertIn(1, scheduler.sending_blocks)
                 scheduler.update_connector_output(output)
-                self.assertEqual(scheduler._block_pool.free_blocks.called, should_free)
-                self.assertEqual(1 in scheduler.sending_blocks, not should_free)
+                scheduler._block_pool.free_blocks.assert_called_once()
+                self.assertNotIn(1, scheduler.sending_blocks)
 
     def test_invalid_event_id(self):
         scheduler = self._make_scheduler()

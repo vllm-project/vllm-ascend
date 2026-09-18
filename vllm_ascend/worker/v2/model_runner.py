@@ -17,13 +17,14 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 
 import numpy as np
 import torch
 from vllm.compilation import breakable_cudagraph
 from vllm.config import VllmConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
+from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.sequence import IntermediateTensors
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -61,10 +62,7 @@ from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import lmhead_tp_enable, set_potential_max_tokens, vllm_version_is
 from vllm_ascend.worker.utils import disable_compilation
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
-from vllm_ascend.worker.v2.attn_utils import (
-    build_attn_state,
-    normalize_mamba_kv_cache_config,
-)
+from vllm_ascend.worker.v2.attn_utils import build_attn_state, unwrap_mamba_kv_cache_groups
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
@@ -249,12 +247,23 @@ class NPUModelRunner(GPUModelRunner):
             self.pp_handler.broadcast_draft_tokens()
         return output
 
-    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
-        # vLLM 0.28 model-state code recognizes bare MambaSpec groups, while
-        # Ascend's hybrid cache planner retains per-layer uniform wrappers.
-        kv_cache_config = normalize_mamba_kv_cache_config(kv_cache_config)
+    def initialize_kv_cache(
+        self,
+        kv_cache_config: KVCacheConfig,
+        kv_cache_allocation_context: AbstractContextManager | None = None,
+    ) -> None:
+        # TODO: Remove this vLLM 0.28 workaround once support for 0.28 is dropped.
+        # vLLM 0.29 already fixes wrapped Mamba block-table sizing upstream.
+        if vllm_version_is("0.28.0"):
+            kv_cache_config = unwrap_mamba_kv_cache_groups(kv_cache_config)
         with graph_manager_wrapper(self):
-            super().initialize_kv_cache(kv_cache_config)
+            # vLLM 0.28 GPUModelRunner.initialize_kv_cache does not accept
+            # kv_cache_allocation_context. Gate it the same way as other
+            # 0.28 super() kwargs in this runner.
+            super().initialize_kv_cache(
+                kv_cache_config,
+                **({} if vllm_version_is("0.28.0") else {"kv_cache_allocation_context": kv_cache_allocation_context}),
+            )
             if self.pcp_manager is not None:
                 assert isinstance(self.pcp_manager, AscendPCPManager)
                 self.pcp_manager.vllm_config = self.vllm_config
@@ -299,6 +308,13 @@ class NPUModelRunner(GPUModelRunner):
             profiling_config,
             scheduler_output,
         )
+
+        # Preemption stores must complete before the parent updates states and
+        # reuses or zeroes the preempted requests' physical KV cache blocks.
+        if has_kv_transfer_group():
+            kv_connector_metadata = scheduler_output.kv_connector_metadata
+            assert kv_connector_metadata is not None
+            get_kv_transfer_group().handle_preemptions(kv_connector_metadata)
 
         self.model_state.kvpp_is_dummy_run = dummy_run or is_profile
         output = super().execute_model(

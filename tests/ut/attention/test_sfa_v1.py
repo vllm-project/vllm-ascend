@@ -228,6 +228,25 @@ class TestAscendSFADeviceOperator(TestBase):
 
 
 class TestAscendSFACacheComposition(TestBase):
+    def test_nope_cache_normalization_with_runtime_shared_indexer(self):
+        for is_mtp in (False, True):
+            with self.subTest(is_mtp=is_mtp):
+                impl = AscendSFAImpl.__new__(AscendSFAImpl)
+                impl.qk_rope_head_dim = 0
+                impl.has_indexer = True
+                impl._is_mtp_layer = is_mtp
+                impl.skip_topk = True
+                latent_cache = torch.empty(1, 128, 1, 512)
+                empty_rope_cache = torch.empty(1, 128, 1, 0)
+
+                self.assertEqual(impl.runtime_has_indexer, is_mtp)
+                composed = impl._compose_sfa_kv_cache((latent_cache, empty_rope_cache))
+                self.assertEqual(len(composed), 1)
+                self.assertIs(composed[0], latent_cache)
+                self.assertIsNone(impl._compose_sfa_kv_cache(None))
+                with self.assertRaisesRegex(RuntimeError, "NoPE SFA requires one latent KV cache tensor"):
+                    impl._compose_sfa_kv_cache((latent_cache, torch.empty(1)))
+
     def test_compose_independent_sfa_and_li_c8_layouts(self):
         for enable_sfa_c8, enable_li_c8 in (
             (False, False),
@@ -303,10 +322,7 @@ class TestAscendSFACacheComposition(TestBase):
             impl._get_indexer_attn_metadata()
 
     @patch("vllm_ascend.attention.sfa_v1.get_forward_context")
-    def test_get_indexer_attn_metadata_falls_back_to_main_metadata(self, mock_get_forward_context):
-        # A KV-sharing layer (e.g. an MTP draft layer) owns no indexer cache,
-        # so no metadata is built under its own prefix; the indexer shares
-        # this layer's SFA attention metadata instead.
+    def test_get_indexer_attn_metadata_does_not_fall_back_to_main_metadata(self, mock_get_forward_context):
         impl = AscendSFAImpl.__new__(AscendSFAImpl)
         impl.has_indexer = True
         impl.layer_name = "model.layers.78.self_attn.attn"
@@ -316,7 +332,8 @@ class TestAscendSFACacheComposition(TestBase):
         main_metadata = SimpleNamespace(slot_mapping=torch.tensor([3, 4]))
         mock_get_forward_context.return_value.attn_metadata = {"model.layers.78.self_attn.attn": main_metadata}
 
-        self.assertIs(impl._get_indexer_attn_metadata(), main_metadata)
+        with self.assertRaises(RuntimeError):
+            impl._get_indexer_attn_metadata()
 
     @patch("vllm_ascend.attention.sfa_v1.get_forward_context")
     def test_get_indexer_attn_metadata_resolves_kv_sharing_target(self, mock_get_forward_context):
@@ -336,6 +353,25 @@ class TestAscendSFACacheComposition(TestBase):
         }
 
         self.assertIs(impl._get_indexer_attn_metadata(), target_metadata)
+
+    @patch("vllm_ascend.attention.sfa_v1.get_forward_context")
+    def test_get_indexer_attn_metadata_uses_own_indexer_when_target_is_absent(
+        self,
+        mock_get_forward_context,
+    ):
+        impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.has_indexer = True
+        impl.layer_name = "model.layers.78.self_attn.attn"
+        impl.kv_sharing_target_layer_name = "model.layers.77.self_attn.attn"
+        impl.indexer = SimpleNamespace(
+            k_cache=SimpleNamespace(prefix="model.layers.78.self_attn.indexer.k_cache"),
+        )
+        own_metadata = object()
+        mock_get_forward_context.return_value.attn_metadata = {
+            "model.layers.78.self_attn.indexer.k_cache": own_metadata,
+        }
+
+        self.assertIs(impl._get_indexer_attn_metadata(), own_metadata)
 
     @patch(
         "vllm_ascend.device.device_op.torch.ops._C_ascend.npu_lightning_indexer_quant",
@@ -762,7 +798,7 @@ class TestAscendSFAMetadataBuilder(TestBase):
     @patch("vllm_ascend.attention.sfa_v1.get_current_vllm_config")
     @patch("vllm_ascend.attention.sfa_v1.get_cos_and_sin_mla")
     @patch("torch.ops._C_ascend.store_kv_block_metadata", create=True)
-    def test_ascend_sfa_metadata_builder_automatically_builds_li_c8_metadata_on_prefill_node(
+    def test_ascend_sfa_metadata_builder_does_not_build_indexer_c8_metadata(
         self,
         store_kv_block_metadata,
         mock_get_cos_and_sin_mla,
@@ -834,15 +870,11 @@ class TestAscendSFAMetadataBuilder(TestBase):
         assert metadata.num_actual_tokens == common_attn_metadata.num_actual_tokens
         assert metadata.slot_mapping.shape == (100, 4, 1024)
 
-        store_kv_block_metadata.assert_called_once()
-        actual_args, _ = store_kv_block_metadata.call_args
-        assert torch.equal(actual_args[0], common_attn_metadata.slot_mapping)
-        assert actual_args[4] == 128
-
+        store_kv_block_metadata.assert_not_called()
         assert metadata.block_size == 128
-        assert metadata.group_len is actual_args[1]
-        assert metadata.group_key_idx is actual_args[2]
-        assert metadata.group_key_cache_idx is actual_args[3]
+        assert metadata.group_len is None
+        assert metadata.group_key_idx is None
+        assert metadata.group_key_cache_idx is None
 
 
 class TestAscendSFAImpl(TestBase):
@@ -957,10 +989,13 @@ class TestAscendSFAImpl(TestBase):
             topk_num_tokens=2,
         )
         cases = (
-            (PreprocessType.NATIVE, True),
-            (PreprocessType.NATIVE, False),
-            (PreprocessType.PROLOG_V3, True),
-            (PreprocessType.MLAPO, True),
+            (PreprocessType.NATIVE, True, False),
+            (PreprocessType.NATIVE, False, False),
+            (PreprocessType.PROLOG_V3, True, False),
+            (PreprocessType.MLAPO, True, False),
+            # MTP skip_topk layers keep a runtime indexer cache, so their k
+            # path and cache write must still follow the KVPP wait.
+            (PreprocessType.NATIVE, True, True),
         )
         events: list[object] = []
 
@@ -969,11 +1004,12 @@ class TestAscendSFAImpl(TestBase):
             return result
 
         width = self.impl.q_lora_rank + self.impl.kv_lora_rank + self.impl.qk_rope_head_dim
-        for preprocess_type, has_indexer in cases:
-            with self.subTest(preprocess_type=preprocess_type, has_indexer=has_indexer):
+        for preprocess_type, has_indexer, is_mtp in cases:
+            with self.subTest(preprocess_type=preprocess_type, has_indexer=has_indexer, is_mtp=is_mtp):
                 events.clear()
                 self.impl.preprocess_type = preprocess_type
                 self.impl.has_indexer = has_indexer
+                self.impl._is_mtp_layer = is_mtp
                 self.impl._get_indexer_attn_metadata = lambda: metadata if self.impl.has_indexer else None
                 self.impl.skip_topk = True
                 self.impl.vllm_config.parallel_config.prefill_context_parallel_size = 1
@@ -1014,7 +1050,9 @@ class TestAscendSFAImpl(TestBase):
                     self.assertTrue(torch.all(output == 1))
                     expected: list[object] = ["projection"] if preprocess_type == PreprocessType.NATIVE else []
                     expected.extend([("wait", "layer"), "cache"])
-                    if has_indexer:
+                    # Static shared-index layers own no runtime indexer cache;
+                    # only MTP skip_topk layers still write one.
+                    if self.impl.runtime_has_indexer:
                         expected.append("indexer_cache")
                     self.assertEqual(events, expected)
                     events.clear()

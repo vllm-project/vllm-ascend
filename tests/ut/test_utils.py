@@ -471,7 +471,37 @@ class TestUtils(TestBase):
             self.assertIs(result, weight)
             assert_nz_cast(weight)
 
-        # Test case 7: non-310P quantized weights still convert by default
+        # Test case 7: non-310P NZ mode skips weights with k=1 or n=1.
+        for shape in ((32, 1), (1, 64), (2, 32, 1)):
+            mock_npu_format_cast.reset_mock()
+            with (
+                mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
+                mock.patch(
+                    "vllm_ascend.utils.get_current_hardware_profile",
+                    return_value=get_hardware_profile(AscendDeviceType.A2),
+                ),
+            ):
+                weight = torch.randn(*shape, dtype=torch.float16)
+                result = utils.maybe_trans_nz(weight)
+                self.assertIs(result, weight)
+                mock_npu_format_cast.assert_not_called()
+
+        # Test case 7b: 310P also skips weights with k=1 or n=1.
+        for shape in ((32, 1), (1, 64), (2, 32, 1)):
+            mock_npu_format_cast.reset_mock()
+            with (
+                mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
+                mock.patch(
+                    "vllm_ascend.utils.get_current_hardware_profile",
+                    return_value=get_hardware_profile(AscendDeviceType._310P),
+                ),
+            ):
+                weight = torch.randn(*shape, dtype=torch.float16)
+                result = utils.maybe_trans_nz(weight)
+                self.assertIs(result, weight)
+                mock_npu_format_cast.assert_not_called()
+
+        # Test case 8: non-310P quantized weights still convert by default
         mock_npu_format_cast.reset_mock()
         mock_config.weight_nz_mode = 1
         with (
@@ -711,3 +741,35 @@ def test_check_gdn_layer_returns_false_without_linear_attention():
     vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=Qwen3Config()))
 
     assert utils.check_gdn_layer(vllm_config) is False
+
+
+class TestIsMtpLayer(TestBase):
+    """``utils.is_mtp_layer`` backs the SFA indexer-ownership decision."""
+
+    def test_backbone_layer_is_not_mtp(self):
+        config = SimpleNamespace(num_hidden_layers=80)
+        self.assertFalse(utils.is_mtp_layer(config, "model.layers.2.self_attn.attn"))
+
+    def test_last_backbone_layer_is_not_mtp(self):
+        config = SimpleNamespace(num_hidden_layers=80)
+        self.assertFalse(utils.is_mtp_layer(config, "model.layers.79.self_attn.attn"))
+
+    def test_layer_at_or_past_backbone_is_mtp(self):
+        config = SimpleNamespace(num_hidden_layers=80)
+        self.assertTrue(utils.is_mtp_layer(config, "model.layers.80.self_attn.attn"))
+        self.assertTrue(utils.is_mtp_layer(config, "model.layers.81.self_attn.attn"))
+
+    def test_explicit_mtp_segment_is_mtp(self):
+        config = SimpleNamespace(num_hidden_layers=80)
+        self.assertTrue(utils.is_mtp_layer(config, "mtp.0.self_attn.attn"))
+
+    def test_missing_layer_info_is_not_mtp(self):
+        config = SimpleNamespace(num_hidden_layers=80)
+        self.assertFalse(utils.is_mtp_layer(config, "unknown"))
+        self.assertFalse(utils.is_mtp_layer(config, None))
+        self.assertFalse(utils.is_mtp_layer(SimpleNamespace(), "model.layers.0.self_attn.attn"))
+
+    def test_non_integer_num_hidden_layers_is_not_mtp(self):
+        # Mocked/partial hf_configs must not be classified as MTP layers.
+        config = SimpleNamespace(num_hidden_layers="80")
+        self.assertFalse(utils.is_mtp_layer(config, "model.layers.80.self_attn.attn"))

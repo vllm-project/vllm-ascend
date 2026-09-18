@@ -8,6 +8,7 @@ import torch_npu
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import get_forward_context
 from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
@@ -27,7 +28,6 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.context_parallel.common_cp import (
     DCPImplMixin,
     DCPMetadataBuilderMixin,
-    get_dcp_local_seq_lens,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import (
@@ -196,9 +196,10 @@ class AscendMlaDCPMetadataBuilder(
         history_lens = (local_lengths.sum(dim=-1) - query_lens).clamp(min=0)
         cp_history_seq_len: list[int] = get_dcp_local_seq_lens(
             history_lens,
-            self.dcp_size,
-            self.cp_local_block_size,
-        )[:, self.dcp_rank].tolist()
+            dcp_size=self.dcp_size,
+            dcp_rank=self.dcp_rank,
+            cp_kv_cache_interleave_size=self.cp_local_block_size,
+        ).tolist()
         # Preserve the base builder's cumulative TND query boundaries,
         # including graph padding; the old BSND path used per-request lengths.
         assert decode_metadata.actual_seq_lengths_q is not None

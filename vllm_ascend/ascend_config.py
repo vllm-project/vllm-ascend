@@ -27,6 +27,7 @@ from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.config_utils import config
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -326,6 +327,7 @@ class AscendConfig:
             "enable_mc2_hierarchy_comm": false,
             "enable_reduce_sample": false,
             "enable_dsa_cp": false,
+            "sfa_dcp_force_tmajor_restore": false,
             "enable_force_eplb": false,
             "enable_pcp_o_proj_weight_sharding": false,
             "draft_window_size": null,
@@ -460,6 +462,7 @@ class AscendConfig:
     enable_mc2_hierarchy_comm: bool = False  # deprecated, will be replaced by mc2_comm_alg = "hierarchy"
     enable_reduce_sample: bool = False
     enable_dsa_cp: bool = False
+    sfa_dcp_force_tmajor_restore: bool = False
     enable_force_eplb: bool = False
     enable_pcp_o_proj_weight_sharding: bool = False
     draft_window_size: int | None = None
@@ -889,6 +892,10 @@ class AscendConfig:
 
     @staticmethod
     def _is_megamoe_supported_by_config(vllm_config: VllmConfig) -> bool:
+        if get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP):
+            mega_moe_supported_by_config = AscendConfig._is_a5_megamoe_supported_by_config(vllm_config)
+            logger.debug("mega moe operator is supported by current a5 config: %r", mega_moe_supported_by_config)
+            return mega_moe_supported_by_config
         hf_text_config = vllm_config.model_config.hf_text_config
         hidden_size = getattr(hf_text_config, "hidden_size", None)
         if hidden_size is None and hasattr(vllm_config.model_config, "get_hidden_size"):
@@ -920,6 +927,60 @@ class AscendConfig:
             "quanttype.w4a8",
         }
         return quant_name in supported_quant_names
+
+    @staticmethod
+    def _is_a5_megamoe_supported_by_config(vllm_config) -> bool:
+        # Ascend 950 MegaMoe supports only MXFP quantization (dispatch_quant_mode
+        # == 4) and constrains hidden / intermediate to fixed discrete sets, per
+        # cann_ops_transformer docs/zh/mega_moe.md (Ascend 950 constraints).
+        hf_text_config = vllm_config.model_config.hf_text_config
+        hidden_size = getattr(hf_text_config, "hidden_size", None)
+        if hidden_size is None and hasattr(vllm_config.model_config, "get_hidden_size"):
+            hidden_size = vllm_config.model_config.get_hidden_size()
+        if hidden_size is None:
+            return False
+        if int(hidden_size) not in {1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192}:
+            logger.warning(
+                "mega moe operator is not supported by current a5 config, for hidden_size %s"
+                " is not in {1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192}",
+                int(hidden_size),
+            )
+            return False
+
+        moe_intermediate_size = getattr(hf_text_config, "moe_intermediate_size", None)
+        if moe_intermediate_size is None:
+            return False
+        # intermediate_hidden == l1_weights.dim1 == 2 * moe_intermediate_size.
+        intermediate_hidden = 2 * int(moe_intermediate_size)
+        if intermediate_hidden not in {1024, 2048, 3072, 4096, 7168}:
+            logger.warning(
+                "mega moe operator is not supported by current a5 config, for intermediate_hidden size %s"
+                " is not in {1024, 2048, 3072, 4096, 7168}",
+                intermediate_hidden,
+            )
+            return False
+
+        # num_experts must divide evenly across the EP group.
+        ep_world_size = (
+            vllm_config.parallel_config.world_size_across_dp // vllm_config.parallel_config.pipeline_parallel_size
+        )
+        if ep_world_size < 2:
+            return False
+        if int(vllm_config.model_config.get_num_experts()) % ep_world_size != 0:
+            return False
+
+        num_top_k = getattr(
+            hf_text_config,
+            "num_experts_per_tok",
+            getattr(hf_text_config, "top_k_experts", 1),
+        )
+        if not (1 <= int(num_top_k) <= 32):
+            logger.warning(
+                "mega moe operator is not supported by current a5 config, for num_top_k %s is not between 1 and 32",
+                num_top_k,
+            )
+            return False
+        return True
 
     @staticmethod
     def _materialize_dump_config_to_file(dump_config: dict[str, Any]) -> str:
@@ -954,7 +1015,7 @@ class AscendConfig:
         quant_description = getattr(quant_config, "quant_description", None)
         if not isinstance(quant_description, dict):
             return False
-        quant_suffixes = (".indexer.quant_type", ".indexer.wq_b_weight")
+        quant_suffixes = (".indexer.quant_type", ".indexer.wq_b.weight")
         return any(isinstance(key, str) and key.endswith(quant_suffixes) for key in quant_description)
 
     @classmethod
@@ -963,7 +1024,7 @@ class AscendConfig:
         if not isinstance(quant_description, dict):
             return set(), set()
 
-        QUANT_SUFFIXES = (".indexer.quant_type", ".indexer.wq_b_weight")
+        QUANT_SUFFIXES = (".indexer.quant_type", ".indexer.wq_b.weight")
         VALID_QUANT_TYPES = ("INT8_DYNAMIC", "W8A8_MXFP8")
 
         layer_ids: set[int] = set()
@@ -1477,6 +1538,26 @@ def init_ascend_config(vllm_config):
             "FlashComm is deprecated; remove enable_flashcomm1 and "
             "VLLM_ASCEND_ENABLE_FLASHCOMM1 from the configuration. Use upstream configuration instead"
         )
+    # Upstream EngineArgs injects --gdn-prefill-backend / --kda-prefill-backend
+    # into additional_config. The generic GDN/KDA model layers consume them
+    # (qwen_gdn_linear_attn / kimi_gdn_linear_attn), but on non-CUDA platforms
+    # only the triton path is available: the FLA Triton kernels run on Ascend
+    # via triton-ascend (the CUDA triton package is replaced in Ascend images).
+    # CUDA-only values (flashinfer/cutedsl for GDN, flashkda for KDA) have no
+    # kernel on Ascend. Strip the keys here so extra="forbid" does not reject
+    # them as typos, and warn only when the user requested an unsupported value.
+    _TRITON_COMPATIBLE_VALUES = ("auto", "triton")
+    for _prefill_key in ("gdn_prefill_backend", "kda_prefill_backend"):
+        _prefill_value = additional_config.get(_prefill_key)
+        if _prefill_value is not None and str(_prefill_value).strip().lower() not in _TRITON_COMPATIBLE_VALUES:
+            logger.warning_once(
+                "Ascend does not support %s=%r; only the 'triton' value is "
+                "available on Ascend for GDN/KDA prefill (FLA kernels run via "
+                "triton-ascend). The option is ignored.",
+                _prefill_key,
+                _prefill_value,
+            )
+
     refresh = validate_additional_config_bool(additional_config.get("refresh", False), "additional_config.refresh")
     raw_rl_config = additional_config.get("rl_config", {})
     if isinstance(raw_rl_config, dict):
@@ -1512,6 +1593,13 @@ def init_ascend_config(vllm_config):
     _NON_USER_INPUT_KEYS = {
         # control-flow flag (singleton/cache refresh), not a configuration field
         "refresh",
+        # Upstream-injected by EngineArgs for the generic GDN/KDA prefill
+        # backend selector; Ascend supports only the triton value (FLA kernels
+        # run via triton-ascend), and the triton default applies either way
+        # (warned above when the user requested a CUDA-only value). Strip
+        # instead of letting extra="forbid" report them as typos.
+        "gdn_prefill_backend",
+        "kda_prefill_backend",
         # Removed upstream option: warn above, but do not pass it into the
         # strict AscendConfig schema where it would be reported as a typo.
         "enable_flashcomm1",

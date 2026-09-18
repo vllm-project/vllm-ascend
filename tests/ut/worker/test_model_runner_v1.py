@@ -108,6 +108,8 @@ class TestDummyRunSlotInvalidation(unittest.TestCase):
         runner.speculative_config = None
         runner.use_compress = True
         runner._has_gdn = False
+        # _dummy_run reads multimodal_config for the mm_encoder_only early-exit.
+        runner.vllm_config = SimpleNamespace(model_config=SimpleNamespace(multimodal_config=None))
 
         runner._determine_batch_execution_and_padding = MagicMock(
             return_value=(CUDAGraphMode.NONE, SimpleNamespace(num_tokens=1, num_reqs=1), None, None, None)
@@ -141,6 +143,34 @@ class TestDummyRunSlotInvalidation(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "metadata checked"):
             runner._dummy_run(1)
+
+
+class TestMmEncoderOnlyDummyRunEarlyExit(unittest.TestCase):
+    def _build_runner(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(multimodal_config=SimpleNamespace(mm_encoder_only=True))
+        )
+        return runner
+
+    def test_dummy_run_returns_empty_tensors_without_forward(self):
+        runner = self._build_runner()
+        runner._model_forward = MagicMock()
+
+        result = runner._dummy_run(4)
+
+        self.assertIsInstance(result, tuple)
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0].numel(), 0)
+        self.assertEqual(result[1].numel(), 0)
+        runner._model_forward.assert_not_called()
+
+    def test_dummy_sampler_run_returns_empty_tensor(self):
+        runner = self._build_runner()
+
+        result = runner._dummy_sampler_run(torch.zeros((4, 16)))
+
+        self.assertEqual(result.numel(), 0)
 
 
 class TestDeviceMetadataFullGraphEvents(unittest.TestCase):
@@ -211,7 +241,9 @@ class TestDeviceMetadataFullGraphEvents(unittest.TestCase):
         runner.uses_xdrope_dim = 0
         runner.positions = torch.zeros(4, dtype=torch.int64)
         runner.drafter = None
-        runner.vllm_config = MagicMock()
+        # _dummy_run reads multimodal_config for the mm_encoder_only
+        # early-exit; keep it real so the forward path is not skipped.
+        runner.vllm_config = SimpleNamespace(model_config=SimpleNamespace(multimodal_config=None))
         runner.model = MagicMock()
         runner._has_sinks = False
         runner.use_aux_hidden_state_outputs = False
@@ -1359,6 +1391,51 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertEqual(k_cache.shape, (2, 16, 1, 512))
         self.assertEqual(v_cache.shape, (2, 16, 1, 64))
         self.assertEqual(indexer_cache.shape, (4, 16, 1, 128))
+
+    @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
+    @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
+    def test_sparse_indexer_skips_allocation_for_runtime_shared_s_layer(
+        self,
+        mock_get_layers,
+        _mock_has_ec_transfer,
+    ):
+        runner = self._build_runner()
+        runner.use_sparse = True
+        runner.block_size = 16
+        runner.sfa_dcp_replicated_indexer_size = 1
+        runner.kv_cache_dtype = torch.bfloat16
+        runner.shared_kv_cache_layers = {}
+        runner.ascend_config = MagicMock()
+        runner.ascend_config.is_sparse_li_c8_layer.return_value = False
+        runner.model_config.hf_text_config = SimpleNamespace(
+            kv_lora_rank=512,
+            qk_rope_head_dim=64,
+            index_head_dim=128,
+        )
+        runner.vllm_config.cache_config.cache_dtype = "auto"
+
+        attn_module = MLAAttention.__new__(MLAAttention)
+        torch.nn.Module.__init__(attn_module)
+        attn_module.impl = SimpleNamespace(
+            has_indexer=True,
+            runtime_has_indexer=False,
+            enable_sparse_sfa_c8=False,
+            enable_sparse_li_c8=False,
+        )
+        attn_module.kv_lora_rank = 512
+        attn_module.qk_rope_head_dim = 64
+        indexer_module = DeepseekV32IndexerCache.__new__(DeepseekV32IndexerCache)
+        torch.nn.Module.__init__(indexer_module)
+        attn_layer_name = "model.layers.1.self_attn.attn"
+        indexer_layer_name = "model.layers.1.self_attn.indexer.k_cache"
+        mock_get_layers.return_value = {
+            attn_layer_name: attn_module,
+            indexer_layer_name: indexer_module,
+        }
+
+        specs = runner.get_kv_cache_spec()
+        self.assertIn(attn_layer_name, specs)
+        self.assertNotIn(indexer_layer_name, specs)
 
     def test_sparse_c8_indexer_owns_quantized_cache_accounting(self):
         main_spec = AscendMLAAttentionSpec(

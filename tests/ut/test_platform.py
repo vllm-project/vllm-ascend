@@ -17,6 +17,7 @@ from vllm_ascend.platform import (
     NPUPlatform,
     _setup_compile_backend,
     _validate_eplb_config,
+    _validate_parallel_config,
     _validate_sfa_dcp_kv_sp,
 )
 from vllm_ascend.utils import (
@@ -25,6 +26,48 @@ from vllm_ascend.utils import (
     AscendDeviceType,
     vllm_version_is,
 )
+
+
+@pytest.mark.parametrize("model_role", ["target", "draft", "alias", "non_speculative"])
+def test_sfa_dcp_validation_only_bypasses_separate_draft(model_role):
+    target = object()
+    draft = target if model_role == "alias" else object()
+    spec = (
+        None
+        if model_role == "non_speculative"
+        else SimpleNamespace(target_model_config=target, draft_model_config=draft)
+    )
+    config = SimpleNamespace(
+        use_v2_model_runner=True,
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=1, tensor_parallel_size=4, decode_context_parallel_size=2
+        ),
+        model_config=draft if model_role == "draft" else target,
+        speculative_config=spec,
+    )
+    with (
+        patch("vllm_ascend.platform.KVPPConfig.from_vllm_config", return_value=SimpleNamespace(size=1)),
+        patch("vllm_ascend.platform.enable_sfa_dcp_replicated_indexer", return_value=True) as enable_sfa,
+    ):
+        if model_role == "draft":
+            _validate_parallel_config(config)
+            enable_sfa.assert_not_called()
+        else:
+            with pytest.raises(AssertionError, match="DCP for SFA"):
+                _validate_parallel_config(config)
+            enable_sfa.assert_called_once_with(config)
+
+
+def test_visible_device_id_to_physical_device_id():
+    with (
+        patch("vllm_ascend.platform.bootstrap_custom_op_env"),
+        patch("vllm_ascend.platform.import_module") as load_extension,
+        patch.object(torch.ops, "_C_ascend") as ops,
+    ):
+        ops.get_physical_device_id.return_value = 6
+        assert NPUPlatform.visible_device_id_to_physical_device_id(0) == 6
+        ops.get_physical_device_id.assert_called_once_with(0)
+        load_extension.assert_called_once_with("vllm_ascend.vllm_ascend_C")
 
 
 class TestNPUPlatform(TestBase):
@@ -710,6 +753,29 @@ class TestNPUPlatform(TestBase):
         self.assertEqual(kwargs["max_tokens_across_pcp"], 5)
         self.assertIs(kwargs["moe_comm_method"], dummy_comm_method)
         self.assertEqual(kwargs["dynamic_mx_quant_scale_alg"], 0)
+
+    def test_set_additional_forward_context_v2_without_tp_falls_back(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.use_v2_model_runner = True
+
+        with (
+            patch(
+                "vllm_ascend.quantization.utils.get_dynamic_mx_quant_scale_alg",
+                return_value=1,
+            ),
+            patch(
+                "vllm.distributed.get_tensor_model_parallel_world_size",
+                side_effect=AssertionError("tensor model parallel group is not initialized"),
+            ),
+        ):
+            kwargs = self.platform.set_additional_forward_context(
+                attn_metadata=None,
+                vllm_config=vllm_config,
+                dp_metadata=None,
+                num_tokens=5,
+            )
+
+        self.assertEqual(kwargs, {"dynamic_mx_quant_scale_alg": 1})
 
     def test_set_additional_forward_context_v1_includes_dynamic_mx_scale_alg(self):
         vllm_config = TestNPUPlatform.mock_vllm_config()

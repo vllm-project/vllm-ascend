@@ -29,6 +29,7 @@ def _make_runner(need_timing: bool = True):
     runner.model_state = SimpleNamespace(kvpp_is_dummy_run=False)
     runner.execute_model_state = None
     runner.is_last_pp_rank = False
+    runner.attn_groups = []
     runner.adaptive_verification = None
     runner.use_fia = False
     return runner
@@ -548,7 +549,7 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
         kv_cache_groups=[],
     )
 
-    def _super(self, kv_cache_config):
+    def _super(self, kv_cache_config, kv_cache_allocation_context=None):
         self.kv_cache_config = kv_cache_config
         self.attn_groups = []
         seen["factory"] = vllm_model_runner.ModelCudaGraphManager
@@ -575,6 +576,49 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
     assert runner.model_state.pcp_manager is runner.pcp_manager
     assert runner.speculator.pcp_manager is runner.pcp_manager
     runner.init_routed_experts_capturer.assert_called_once_with()
+
+
+@pytest.mark.parametrize("is_vllm_0_28_0", [True, False], ids=["v0.28.0", "newer"])
+def test_initialize_kv_cache_forwards_allocation_context_by_vllm_version(is_vllm_0_28_0):
+    runner = _make_runner()
+    runner.vllm_config = SimpleNamespace()
+    runner.compilation_config = SimpleNamespace(static_forward_context={})
+    runner.pcp_manager = None
+    runner.model_state = SimpleNamespace(pcp_manager=None, kvpp_runtime=None)
+    runner.speculator = None
+    runner.model_config = SimpleNamespace(enable_return_routed_experts=False)
+    called = False
+    captured_kwargs: dict[str, object] = {}
+    allocation_context = object()
+    kv_cache_config = KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[],
+        kv_cache_groups=[],
+    )
+
+    def _super(self, kv_cache_config, **kwargs):
+        nonlocal called
+        called = True
+        captured_kwargs.update(kwargs)
+        self.kv_cache_config = kv_cache_config
+        self.attn_groups = []
+
+    with (
+        patch("vllm_ascend.worker.v2.model_runner.vllm_version_is", return_value=is_vllm_0_28_0),
+        patch.object(GPUModelRunner, "initialize_kv_cache", _super),
+        patch("vllm_ascend.worker.v2.model_runner.ModelAclGraphManager", return_value="acl"),
+        patch(
+            "vllm_ascend.worker.v2.model_runner.KVPPRuntime.create_from_kv_cache",
+            return_value="kvpp",
+        ),
+    ):
+        runner.initialize_kv_cache(kv_cache_config, kv_cache_allocation_context=allocation_context)
+
+    assert called is True
+    if is_vllm_0_28_0:
+        assert "kv_cache_allocation_context" not in captured_kwargs
+    else:
+        assert captured_kwargs["kv_cache_allocation_context"] is allocation_context
 
 
 @pytest.mark.parametrize("moe_type", [MoECommType.MC2, MoECommType.FUSED_MC2])

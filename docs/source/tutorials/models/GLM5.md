@@ -20,14 +20,18 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-- `GLM-5-w4a8`(Quantized version): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5-w4a8).
-- `GLM-5-w8a8`(Quantized version): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5-w8a8).
-- `GLM-5.1-w4a8`(Quantized version): [Download model weight](https://modelers.cn/models/Eco-Tech/GLM-5.1-w4a8).
-- `GLM-5.1-w8a8`(Quantized version): [Download model weight](https://modelers.cn/models/Eco-Tech/GLM-5.1-w8a8).
-- `GLM-5.1-w8a8c8`(Quantized version): [Download model weight](https://modelers.cn/models/Eco-Tech/GLM-5.1-w8a8c8-MTP). The weights have been verified on Atlas 800 A3 and are recommended for use.
-- `GLM-5.1-w4a4`(Ascend950DT mxfp4 Quantized): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.1-w4a4c8-mxfp4). The weights have been verified on Ascend 950DT and are recommended for use.
+|  Weight Version                   | Hardware Requirements      | Download Links |
+|-----------------------------------|----------------------------|----------------|
+| `GLM-5-w4a8`(Quantized version)   | 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5-w4a8) |
+| `GLM-5-w8a8`(Quantized version)   | 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5-w8a8) |
+| `GLM-5.1-w4a8`(Quantized version) | 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.1-w4a8) |
+| `GLM-5.1-w8a8`(Quantized version) | 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.1-w8a8) |
+|`GLM-5.1-w8a8c8`(Quantized version)| The weights have been verified on Atlas 800 A3 and are recommended for use. |[Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.1-w8a8c8-MTP)|
+|`GLM-5.1-w4a4`(Ascend950DT mxfp4 Quantized)| The weights have been verified on Ascend 950DT and are recommended for use. |[ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.1-w4a4c8-mxfp4)|
 
-It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
+It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
@@ -199,10 +203,11 @@ If you want to deploy multi-node environment, you need to set up environment on 
     export PROMETHEUS_MULTIPROC_DIR=/dev/shm/vllm_metrics && mkdir -p $PROMETHEUS_MULTIPROC_DIR
     export HCCL_DFS_CONFIG="task_exception:off,inconsistent_check:off"
     export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a4 \
     --host 0.0.0.0 \
-    --port 8077 \
+    --port 8000 \
     --data-parallel-size 1 \
     --tensor-parallel-size 8 \
     --seed 1024 \
@@ -240,9 +245,10 @@ If you want to deploy multi-node environment, you need to set up environment on 
     export HCCL_OP_EXPANSION_MODE="AIV"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
     --host 0.0.0.0 \
-    --port 8077 \
+    --port 8000 \
     --data-parallel-size 1 \
     --tensor-parallel-size 16 \
     --enable-expert-parallel \
@@ -274,10 +280,11 @@ If you want to deploy multi-node environment, you need to set up environment on 
     export HCCL_BUFFSIZE=200
     export HCCL_OP_EXPANSION_MODE="AIV"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
     --host 0.0.0.0 \
-    --port 8077 \
+    --port 8000 \
     --data-parallel-size 1 \
     --tensor-parallel-size 8 \
     --enable-expert-parallel \
@@ -321,7 +328,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
 
 - For low-latency scenarios, use `dp1tp16` (data-parallel-size 1, tensor-parallel-size 16) and consider reducing `--max-num-seqs` and `--max-num-batched-tokens`.
 - For high-throughput scenarios, increase `--max-num-seqs` and enable `--enable-prefix-caching`.
-- For long-context scenarios (e.g., 200K), use w4a8 weight (more memory for KV cache) and set `--max-model-len` to the desired context length. Consider enabling `--enable-chunked-prefill`.
+- For long-context scenarios (e.g., 200k), use w4a8 weight (more memory for KV cache) and set `--max-model-len` to the desired context length. Consider enabling `--enable-chunked-prefill`.
 - If you encounter OOM, reduce `--gpu-memory-utilization`, `--max-num-seqs`, or `--max-model-len`. Disabling `"enable_mlapo"` can also reduce memory usage (at the cost of performance).
 
 ### 5.2 Multi-node Deployment
@@ -351,9 +358,10 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     export HCCL_SOCKET_IFNAME=$nic_name
     export GLOO_SOCKET_IFNAME=$nic_name
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-W8A8C8-MTP \
     --host 0.0.0.0 \
-    --port 8077 \
+    --port 8000 \
     --data-parallel-size 8 \
     --data-parallel-size-local 4 \
     --data-parallel-address $local_ip \
@@ -393,9 +401,10 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     export HCCL_SOCKET_IFNAME=$nic_name
     export GLOO_SOCKET_IFNAME=$nic_name
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-W8A8C8-MTP \
     --host 0.0.0.0 \
-    --port 8077 \
+    --port 8000 \
     --headless \
     --data-parallel-size 8 \
     --data-parallel-size-local 4 \
@@ -447,10 +456,11 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     export HCCL_SOCKET_IFNAME=$nic_name
     export GLOO_SOCKET_IFNAME=$nic_name
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
     --host 0.0.0.0 \
-    --port 8077 \
+    --port 8000 \
     --data-parallel-size 2 \
     --data-parallel-size-local 1 \
     --data-parallel-address $node0_ip \
@@ -488,10 +498,11 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     export HCCL_SOCKET_IFNAME=$nic_name
     export GLOO_SOCKET_IFNAME=$nic_name
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
     --host 0.0.0.0 \
-    --port 8077 \
+    --port 8000 \
     --headless \
     --data-parallel-size 2 \
     --data-parallel-size-local 1 \
@@ -601,7 +612,7 @@ def parse_args():
     parser.add_argument(
         "--vllm-start-port",
         type=int,
-        default=9000,
+        default=8000,
         help="Starting port for the engine."
     )
     return parser.parse_args()
@@ -671,7 +682,8 @@ if __name__ == "__main__":
         export HCCL_DFS_CONFIG="task_exception:off,inconsistent_check:off"
         export HCCL_ALGO=level0:fullmesh
         export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
-
+        
+        # Ensure the model path matches the directory recorded during download
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a4 \
             --host 0.0.0.0 \
             --port $2 \
@@ -733,7 +745,8 @@ if __name__ == "__main__":
         export HCCL_DFS_CONFIG="task_exception:off,inconsistent_check:off"
         export HCCL_ALGO=level0:fullmesh
         export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
-
+        
+        # Ensure the model path matches the directory recorded during download
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a4 \
             --host 0.0.0.0 \
             --port $2 \
@@ -795,7 +808,8 @@ if __name__ == "__main__":
         export HCCL_DFS_CONFIG="task_exception:off,inconsistent_check:off"
         export HCCL_ALGO=level0:fullmesh
         export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
-
+        
+        # Ensure the model path matches the directory recorded during download
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a4 \
             --host 0.0.0.0 \
             --port $2 \
@@ -860,7 +874,8 @@ if __name__ == "__main__":
         export HCCL_DFS_CONFIG="task_exception:off,inconsistent_check:off"
         export HCCL_ALGO=level0:fullmesh
         export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
-
+        
+        # Ensure the model path matches the directory recorded during download
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a4 \
             --host 0.0.0.0 \
             --port $2 \
@@ -1017,7 +1032,7 @@ if __name__ == "__main__":
 
     1. Prefill node 0
 
-        The prefill script selects the node via `node_rank`: set `node_rank=0` on prefill node 0 (PP master node, engine port `9081`) and `node_rank=1` on prefill node 1 (non-master node, `--headless`, no API server).
+        The prefill script selects the node via `node_rank`: set `node_rank=0` on prefill node 0 (PP master node, engine port `8000`) and `node_rank=1` on prefill node 1 (non-master node, `--headless`, no API server).
 
         ```shell
         nic_name="xxxx" # change to your own nic name
@@ -1037,7 +1052,7 @@ if __name__ == "__main__":
 
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-W8A8C8-MTP \
             --host 0.0.0.0 \
-            --port 9081 \
+            --port 8000 \
             --pipeline-parallel-size 2 \
             --distributed-executor-backend mp \
             --master-addr $local_ip \
@@ -1338,12 +1353,12 @@ unset http_proxy
 unset https_proxy
 
 python load_balance_proxy_server_example.py \
-    --port 9000 \
+    --port 8000 \
     --host 0.0.0.0 \
     --prefiller-hosts \
     $node_p0_ip \
     --prefiller-ports \
-    9081 \
+    8000 \
     --decoder-hosts \
     $node_d0_ip \
     $node_d0_ip \
