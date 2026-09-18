@@ -1,5 +1,7 @@
 from vllm import ModelRegistry
 
+from vllm_ascend.utils import vllm_version_is
+
 
 def register_model():
     ModelRegistry.register_model(
@@ -35,10 +37,17 @@ def register_model():
         "DeepseekV4ForConditionalGeneration",
         "vllm_ascend.models.deepseek_v4.vl_model:AscendDeepseekV4ForConditionalGeneration",
     )
-    ModelRegistry.register_model(
-        "DeepseekV41ForCausalLM",
-        "vllm_ascend.models.deepseek_v41.vl_model:AscendDeepseekV41ForCausalLM",
-    )
+    # V4.1 requires upstream config, multimodal, Engram and circular-cache
+    # APIs that are not available in the supported v0.28.0 release.
+    if not vllm_version_is("0.28.0"):
+        ModelRegistry.register_model(
+            "DeepseekV41ForCausalLM",
+            "vllm_ascend.models.deepseek_v41.vl_model:AscendDeepseekV41ForCausalLM",
+        )
+        ModelRegistry.register_model(
+            "DeepseekV41DSparkModel",
+            "vllm_ascend.models.deepseek_v41.dspark:DSparkDeepseekV41ForCausalLM",
+        )
     ModelRegistry.register_model(
         "MiniMaxM3SparseForCausalLM",
         "vllm_ascend.models.minimax_m3:MiniMaxM3SparseForCausalLM",
@@ -51,10 +60,6 @@ def register_model():
     ModelRegistry.register_model(
         "DSparkDraftModel",
         "vllm_ascend.models.deepseek_v4.dspark:DSparkDeepseekV4ForCausalLM",
-    )
-    ModelRegistry.register_model(
-        "DeepseekV41DSparkModel",
-        "vllm_ascend.models.deepseek_v41.dspark:DSparkDeepseekV41ForCausalLM",
     )
     ModelRegistry.register_model(
         "LlamaForCausalLMVwnEagle3", "vllm_ascend.models.llama_eagle3_vwn:Eagle3VwnLlamaForCausalLM"

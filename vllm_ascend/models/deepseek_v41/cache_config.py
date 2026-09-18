@@ -7,7 +7,6 @@ from dataclasses import replace
 from vllm.config import VllmConfig
 from vllm.v1.core.kv_cache_utils import may_override_num_blocks
 from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
@@ -17,6 +16,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSlidingWindowMLASpec,
+    is_circular_kv_cache_spec,
 )
 
 STATE_RING_ROWS = 32
@@ -47,7 +47,7 @@ def _draft_layer_number(name):
 def get_layer_tuples(specs):
     """Return DSV4-style ordered layer tuples and their physical page sizes."""
     mla = {name for name, spec in specs.items() if isinstance(spec, AscendMLAAttentionSpec)}
-    state = sorted((name for name, spec in specs.items() if isinstance(spec, CircularBufferSpec)), key=_layer_number)
+    state = sorted((name for name, spec in specs.items() if is_circular_kv_cache_spec(spec)), key=_layer_number)
     swa = {name for name, spec in specs.items() if isinstance(spec, AscendSlidingWindowMLASpec)}
 
     full = sorted((name for name in mla if not specs[name].scale_dim), key=_layer_number)
@@ -87,7 +87,7 @@ def group_cache_specs(specs):
         padded.update((name, replace(specs[name], page_size_padded=page_size)) for name in aliases)
 
     mla_names = [name for name, spec in padded.items() if isinstance(spec, AscendMLAAttentionSpec)]
-    state_names = [name for name, spec in padded.items() if isinstance(spec, CircularBufferSpec)]
+    state_names = [name for name, spec in padded.items() if is_circular_kv_cache_spec(spec)]
     groups = [
         UniformTypeKVCacheSpecs.from_specs({name: padded[name] for name in mla_names}),
         UniformTypeKVCacheSpecs.from_specs({name: padded[name] for name in state_names}),

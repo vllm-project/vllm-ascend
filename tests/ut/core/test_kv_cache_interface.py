@@ -3,6 +3,7 @@
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 
@@ -11,6 +12,8 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendSlidingWindowMLASpec,
     get_kv_cache_compression_ratio,
     get_storage_block_size,
+    is_circular_kv_cache_spec,
+    is_prefix_cacheable,
 )
 
 
@@ -50,3 +53,34 @@ def test_sliding_window_mla_storage_and_page_size():
     )
     assert spec.storage_block_size == 16
     assert spec.real_page_size_bytes == 16 * 128 * 2
+
+
+@pytest.mark.parametrize("circular", [False, True])
+def test_legacy_circular_capability_is_preserved(circular):
+    spec = SimpleNamespace(is_circular=circular)
+    assert is_circular_kv_cache_spec(spec) is circular
+    uniform = UniformTypeKVCacheSpecs(block_size=32, kv_cache_specs={"state": spec})
+    assert is_circular_kv_cache_spec(uniform) is circular
+    assert not is_circular_kv_cache_spec(SimpleNamespace())
+
+
+def test_mixed_and_empty_groups_are_not_circular():
+    for specs in ({}, {"state": SimpleNamespace(is_circular=True), "kv": SimpleNamespace()}):
+        uniform = UniformTypeKVCacheSpecs(block_size=32, kv_cache_specs=specs)
+        assert not is_circular_kv_cache_spec(uniform)
+
+
+@pytest.mark.parametrize(
+    "flags, expected",
+    [
+        ({}, True),
+        ({"prefix_cacheable": False}, False),
+        ({"participates_in_prefix_caching": False}, False),
+        ({"prefix_cacheable": True, "participates_in_prefix_caching": False}, False),
+    ],
+)
+def test_prefix_cache_capabilities_across_versions(flags, expected):
+    spec = SimpleNamespace(**flags)
+    assert is_prefix_cacheable(spec) is expected
+    uniform = UniformTypeKVCacheSpecs(block_size=32, kv_cache_specs={"state": spec})
+    assert is_prefix_cacheable(uniform) is expected

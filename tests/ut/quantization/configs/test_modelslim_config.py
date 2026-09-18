@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -20,7 +21,7 @@ from vllm_ascend.quantization.configs.modelslim_config import (
     _make_modelslim_moe_weight_loader,
     get_quant_type_for_layer,
 )
-from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, get_rotation_path
+from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, get_rotation_path, vllm_version_is
 
 
 class TestAscendModelSlimConfig(TestBase):
@@ -71,6 +72,7 @@ class TestAscendModelSlimConfig(TestBase):
         config = AscendModelSlimConfig.from_config({"quant_method": "ascend", "model_quant_type": "W8A8_DYNAMIC"})
         self.assertEqual(config.quant_description, {})
 
+    @unittest.skipIf(vllm_version_is("0.28.0"), "V4.1 requires the pinned vLLM main APIs")
     def test_deepseek_v41_model_mapping_and_expert_discovery(self):
         from vllm.model_executor.model_loader.utils import configure_quant_config
 
