@@ -176,6 +176,7 @@ run_pytest_target() {
   log_name="${log_name%.py}"
   log_name="${log_name//[^a-zA-Z0-9_.-]/_}"
   local log_file="${pytest_log_dir}/${test_index}-${log_name}.log"
+  local junit_xml="${pytest_log_dir}/${test_index}-${log_name}.xml"
   echo "::group::${target}"
   echo -e "\033[1;34m=== Running target: ${target} ===\033[0m"
   local start_time=0
@@ -185,10 +186,10 @@ run_pytest_target() {
   if [ "${enable_coverage}" = "true" ]; then
     setup_coverage "${target}"
     set +e
-    run_logged_command "${log_file}" python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${target}"
+    run_logged_command "${log_file}" python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes --junitxml="${junit_xml}" "${target}"
   else
     set +e
-    run_logged_command "${log_file}" pytest -sv --color=yes "${target}"
+    run_logged_command "${log_file}" pytest -sv --color=yes --junitxml="${junit_xml}" "${target}"
   fi
   local status=$?
   set -e
@@ -225,6 +226,7 @@ run_pytest_batch() {
   local batch_targets=("$@")
   test_index=$((test_index + 1))
   local log_file="${pytest_log_dir}/${test_index}-cpu-ut.log"
+  local junit_xml="${pytest_log_dir}/${test_index}-cpu-ut.xml"
 
   echo "::group::${target}"
   echo -e "\033[1;34m=== Running target: ${target} ===\033[0m"
@@ -236,10 +238,10 @@ run_pytest_batch() {
     echo "DEBUG: Go to the [Coverage Branch] page."
     setup_coverage "cpu-ut"
     set +e
-    run_logged_command "${log_file}" python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${batch_targets[@]}"
+    run_logged_command "${log_file}" python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes --junitxml="${junit_xml}" "${batch_targets[@]}"
   else
     set +e
-    run_logged_command "${log_file}" pytest -sv --color=yes "${batch_targets[@]}"
+    run_logged_command "${log_file}" pytest -sv --color=yes --junitxml="${junit_xml}" "${batch_targets[@]}"
   fi
   local status=$?
   set -e
