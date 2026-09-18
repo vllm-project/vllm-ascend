@@ -18,15 +18,12 @@ Refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for featur
 
 ### 3.1 Model Weight
 
-|  Weight Version    | Hardware Requirements              | Download Links |
-|--------------------|------------------------------------|----------------|
-| `MiniMax-M3`(BF16) | requires 16 × 64 GB NPU chips. Prefill-Decode disaggregation uses 2 Atlas 800 A3 (64GB × 16) | [ModelScope](https://www.modelscope.cn/collections/MiniMax/MiniMax-M3) |
-| `MiniMax-M3-W8A8`  | requires at least 8 × 64 GB NPU chips. Recommended for Atlas 800 A3 (64GB × 16) and Atlas 800 A2 (64GB × 8)| [ModelScope](https://www.modelscope.cn/models/Eco-Tech/MiniMax-M3-w8a8-0626) |
-| `MiniMax-M3-MXFP8` (MXFP8)| used for 950DT products (96GB × 8) PD disaggregation (2 nodes, 1P1D) |[ModelScope](https://huggingface.co/MiniMaxAI/MiniMax-M3-MXFP8)|
+- `MiniMax-M3` (BF16): requires 16 × 64 GB NPU chips. Prefill-Decode disaggregation uses 2 Atlas 800 A3 (64GB × 16). [Download the model weights](https://www.modelscope.cn/collections/MiniMax/MiniMax-M3).
+- `MiniMax-M3-w8a8` (W8A8): requires at least 8 × 64 GB NPU chips. Recommended for Atlas 800 A3 (64GB × 16) and Atlas 800 A2 (64GB × 8). [Download the model weights](https://www.modelscope.cn/models/Eco-Tech/MiniMax-M3-w8a8-0626).
+- `MiniMax-M3-MXFP8` (MXFP8): used for 950DT products (96GB × 8) PD disaggregation (2 nodes, 1P1D). [Download the model weights](https://huggingface.co/MiniMaxAI/MiniMax-M3-MXFP8).
+- `MiniMax-M3-EAGLE3-GQA`: EAGLE3 draft model used as the draft model for speculative decoding (eagle3 method) to accelerate generation. Compared with the original `MiniMax-M3-EAGLE3`, this draft model adopts Grouped Query Attention (GQA) for inference efficiency and compatibility with the target model. [Download the model weights](https://www.modelscope.cn/models/Inferact/MiniMax-M3-EAGLE3-GQA).
 
 It is recommended to place the model weight in a shared cache directory.
-
->**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
@@ -38,72 +35,113 @@ For multi-node deployment, verify the communication environment by following [Ve
 
 You can use the official all-in-one Docker image. For the available image tags and published versions, refer to [Using Docker](../../getting_started/installation.md#installation-prebuilt-image).
 
-- Step 1: Download the latest Docker image
+**Step 1:** Download the latest Docker image
 
-  ```bash
-  docker pull quay.io/ascend/vllm-ascend:{tag}
-  ```
+```bash
+docker pull quay.io/ascend/vllm-ascend:{tag}
+```
 
-- Step 2: Start Docker container
+**Step 2:** Start Docker container
 
-  ```bash
-  # Set the vLLM Ascend image name.
-  export IMAGE=quay.io/ascend/vllm-ascend:{tag}
-  export NAME=minimax-m3-dev
+Select the `docker run` command for your hardware platform:
 
-  # Start the container with the variables defined above.
-  # Update --device for your hardware (Atlas A3: /dev/davinci[0-15]; Atlas A2: /dev/davinci[0-7]).
-  # If you use a Docker bridge network, open the ports required for multi-node communication in advance.
-  docker run --rm \
-  --name $NAME \
-  --net=host \
-  --shm-size=100g \
-  --device /dev/davinci0 \
-  --device /dev/davinci1 \
-  --device /dev/davinci2 \
-  --device /dev/davinci3 \
-  --device /dev/davinci4 \
-  --device /dev/davinci5 \
-  --device /dev/davinci6 \
-  --device /dev/davinci7 \
-  --device /dev/davinci8 \
-  --device /dev/davinci9 \
-  --device /dev/davinci10 \
-  --device /dev/davinci11 \
-  --device /dev/davinci12 \
-  --device /dev/davinci13 \
-  --device /dev/davinci14 \
-  --device /dev/davinci15 \
-  --device /dev/davinci_manager \
-  --device /dev/devmm_svm \
-  --device /dev/hisi_hdc \
-  -v /usr/local/dcmi:/usr/local/dcmi \
-  -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-  -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-  -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-  -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-  -v /etc/ascend_install.info:/etc/ascend_install.info \
-  -v /root/.cache:/root/.cache \
-  -it $IMAGE bash
-  ```
+=== "A3 series"
 
-  Expected result: The container is listed with status `Up`. You can also verify the vllm-ascend version inside the container:
+    ```bash
+    # Set the vLLM Ascend image name.
+    export IMAGE=quay.io/ascend/vllm-ascend:{tag}
+    export NAME=minimax-m3-dev
 
-  ```bash
-  pip show vllm-ascend
-  ```
+    # Start the container with the variables defined above.
+    docker run --rm \
+    --name $NAME \
+    --net=host \
+    --shm-size=100g \
+    --device /dev/davinci0 \
+    --device /dev/davinci1 \
+    --device /dev/davinci2 \
+    --device /dev/davinci3 \
+    --device /dev/davinci4 \
+    --device /dev/davinci5 \
+    --device /dev/davinci6 \
+    --device /dev/davinci7 \
+    --device /dev/davinci8 \
+    --device /dev/davinci9 \
+    --device /dev/davinci10 \
+    --device /dev/davinci11 \
+    --device /dev/davinci12 \
+    --device /dev/davinci13 \
+    --device /dev/davinci14 \
+    --device /dev/davinci15 \
+    --device /dev/davinci_manager \
+    --device /dev/devmm_svm \
+    --device /dev/hisi_hdc \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /root/.cache:/root/.cache \
+    -it $IMAGE bash
+    ```
 
-  Expected result: The version information is displayed, matching the pulled image version.
+=== "950DT products"
+
+    ```bash
+    # Set the vLLM Ascend image name.
+    export IMAGE=quay.io/ascend/vllm-ascend:{tag}
+    export NAME=minimax-m3-dev
+
+    # 950DT products have 8 NPUs and use Device UB.
+    docker run --rm \
+    --name $NAME \
+    --net=host \
+    --privileged=true \
+    --shm-size=60g \
+    --device /dev/davinci_manager \
+    --device /dev/hisi_hdc \
+    --device /dev/ummu \
+    --device /dev/uburma \
+    --device /dev/davinci0 \
+    --device /dev/davinci1 \
+    --device /dev/davinci2 \
+    --device /dev/davinci3 \
+    --device /dev/davinci4 \
+    --device /dev/davinci5 \
+    --device /dev/davinci6 \
+    --device /dev/davinci7 \
+    -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+    -v /usr/local/Ascend/firmware:/usr/local/Ascend/firmware \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /etc/hixlep:/etc/hixlep \
+    -v /etc/hccn.conf:/etc/hccn.conf \
+    -v /var/log/npu/:/usr/slog \
+    -v /root/.cache:/root/.cache \
+    -it $IMAGE bash
+    ```
+
+Adjust data volume mounts (for example, model weights and datasets) according to your environment. On 950DT products, do not add Atlas A3 mounts such as `/dev/devmm_svm` that do not exist on the host.
+
+Expected result: The container is listed with status `Up`. You can also verify the vllm-ascend version inside the container:
+
+```bash
+pip show vllm-ascend
+```
+
+Expected result: The version information is displayed, matching the pulled image version.
 
 ## 5 Online Service Deployment {: #5-online-service-deployment }
 
 Start the online serving service with the following command:
 
-For descriptions of the standard `vllm serve` arguments used in the deployment examples, refer to the [vLLM Serving Arguments documentation](https://docs.vllm.ai/en/latest/cli/serve/#arguments). For Ascend-specific options passed through `--additional-config`, refer to [Additional Configuration](../../user_guide/configuration/additional_config.md). For Ascend-specific environment variables, refer to [Environment Variables](../../user_guide/configuration/env_vars.md).
+The deployment examples use standard `vllm serve` arguments. Refer to `vllm serve --help` in the target vLLM environment for the complete and version-specific argument reference. For Ascend-specific options passed through `--additional-config`, refer to [Additional Configuration](../../user_guide/configuration/additional_config.md). For Ascend-specific environment variables, refer to [Environment Variables](../../user_guide/configuration/env_vars.md).
 
 ### 5.1 Single-Node Deployment
 
-Single-node deployment completes both Prefill and Decode within the same node. Both the bfloat(MiniMax-M3) and quantized(W8A8、MXFP8) model can be deployed on 1 Atlas 800 A3 (64GB × 16). W8A8 quantized model can be deployed on 1 Atlas 800 A2 (64GB × 8). MXFP8 quantized model can be deployed on 1 950DT products (96GB × 8).
+Single-node deployment completes both Prefill and Decode within the same node. The MiniMax-M3 (BF16) model can be deployed on 1 Atlas 800 A3 (64GB × 16), but dual-node deployment is recommended for BF16 on A3 series; single-node is not recommended. The MiniMax-M3-w8a8 (W8A8) quantized model is recommended for single-node deployment on 1 Atlas 800 A3 (64GB × 16) or 1 Atlas 800 A2 (64GB × 8). The MiniMax-M3-MXFP8 (MXFP8) quantized model can be deployed on 1 950DT products (96GB × 8).
 
 === "A3 series(BF16)"
 
@@ -111,9 +149,10 @@ Single-node deployment completes both Prefill and Decode within the same node. B
     export HCCL_OP_EXPANSION_MODE="AIV"
     export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    
-    # Ensure the model path matches the directory recorded during download
+
     vllm serve ${WEIGHT_PATH} \
+      --host 0.0.0.0 \
+      --port 11223 \
       --served-model-name minimax-m3 \
       --trust-remote-code \
       --max-model-len 43008 \
@@ -124,19 +163,17 @@ Single-node deployment completes both Prefill and Decode within the same node. B
       --gpu-memory-utilization 0.92 \
       --reasoning-parser minimax_m3 \
       --limit-mm-per-prompt '{"image":1,"video":0}' \
-      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+      --enable-prefix-caching \
       --additional-config '{
           "enable_cpu_binding": true,
+          "enable_flashcomm1": true,
           "ascend_compilation_config": {
-          "enable_static_kernel": true,
+          "enable_static_kernel": false,
           "fuse_norm_quant": false
           },
           "multistream_overlap_shared_expert": true,
-          "weight_nz_mode": 2,
-          "enable_flashcomm1": true,
-          "enable_reduce_sample": true
-      }' \
-      --port 11223 > ${LOG_PATH} 2>&1 &
+          "weight_nz_mode": 2
+      }' > ${LOG_PATH} 2>&1 &
     ```
 
 === "A3 series(W8A8)"
@@ -147,6 +184,8 @@ Single-node deployment completes both Prefill and Decode within the same node. B
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve ${WEIGHT_PATH} \
+    --host 0.0.0.0 \
+    --port 11223 \
     --served-model-name minimax-m3 \
     --trust-remote-code \
     --max-model-len 131072 \
@@ -161,21 +200,19 @@ Single-node deployment completes both Prefill and Decode within the same node. B
     --gpu-memory-utilization 0.92 \
     --reasoning-parser minimax_m3 \
     --limit-mm-per-prompt '{"image":1,"video":0}' \
+    --enable-prefix-caching \
     --speculative-config '{"model":"${EAGLE3_WEIGHT_PATH}", "method":"eagle3", "num_speculative_tokens":3}' \
-    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
     --additional-config '{
         "enable_cpu_binding": true,
+        "enable_flashcomm1": true,
         "ascend_compilation_config": {
-          "enable_static_kernel": true,
+          "enable_static_kernel": false,
           "fuse_norm_quant": false
             },
         "multistream_overlap_shared_expert": true,
         "enable_shared_expert_dp": true,
-        "weight_nz_mode": 2,
-        "enable_flashcomm1": true,
-        "enable_reduce_sample": true
-    }' \
-    --port 11223 > ${LOG_PATH} 2>&1 &
+        "weight_nz_mode": 2
+    }' > ${LOG_PATH} 2>&1 &
     ```
 
 === "950DT products"
@@ -184,14 +221,10 @@ Single-node deployment completes both Prefill and Decode within the same node. B
     nic_name="xxxx"  # NIC corresponding to local_ip
     export GLOO_SOCKET_IFNAME=$nic_name
     export HCCL_SOCKET_IFNAME=$nic_name
-    export HCCL_BUFFSIZE=512
-    export HCCL_BUFFSIZE_EP=512
-    export HCCL_OP_EXPANSION_MODE=AIV
+    export HCCL_OP_EXPANSION_MODE="AIV"
     export LD_LIBRARY_PATH=/usr/local/Ascend/cann-9.1.0/opp/vendors/experimental_950_transformer/op_api/lib/:${LD_LIBRARY_PATH}
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export VLLM_SERVER_DEV_MODE=1
-    
-    # Ensure the model path matches the directory recorded during download
+
     vllm serve ${WEIGHT_PATH} \
       --host 0.0.0.0 \
       --port 11223 \
@@ -212,8 +245,7 @@ Single-node deployment completes both Prefill and Decode within the same node. B
       --reasoning-parser minimax_m3 \
       --limit-mm-per-prompt '{"image":1,"video":0}' \
       --gpu-memory-utilization 0.92 \
-      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-      --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_qknorm_rope":false,"fuse_norm_quant":false,"enable_static_kernel":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_reduce_sample":false}' \
+      --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_qknorm_rope":false,"fuse_norm_quant":false,"enable_static_kernel":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
       --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3,"kv_cache_dtype": "bfloat16"}' \
       --safetensors-load-strategy prefetch > ${LOG_PATH} 2>&1 &
     ```
@@ -238,31 +270,29 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
     export IFNAME="${NETWORK_INTERFACE}"
     export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME="$IFNAME"
-    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
     export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     export GLOO_SOCKET_IFNAME="$IFNAME"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-    # Ensure the model path matches the directory recorded during download
     vllm serve ${WEIGHT_PATH} \
       --host 0.0.0.0 \
+      --port 11223 \
       --served-model-name minimax-m3 \
       --trust-remote-code \
-      --max-model-len 40960 \
+      --max-model-len 65920 \
       --tensor-parallel-size 8 \
       --enable-expert-parallel \
-      --max-num-seqs 8 \
-      --data-parallel-size 2 \
-      --data-parallel-size-local 1 \
+      --max-num-seqs 32 \
+      --data-parallel-size 4 \
+      --data-parallel-size-local 2 \
       --data-parallel-start-rank 0 \
       --data-parallel-address $node0_ip \
       --distributed_executor_backend "mp" \
-      --gpu-memory-utilization 0.94 \
+      --gpu-memory-utilization 0.92 \
       --reasoning-parser minimax_m3 \
       --limit-mm-per-prompt '{"image":1,"video":0}' \
-      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-      --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "multistream_overlap_shared_expert": true, "weight_nz_mode": 2}' \
-      --port 11223 > ${LOG_PATH} 2>&1 &
+      --speculative-config '{"model":"${EAGLE3_WEIGHT_PATH}","method":"eagle3","num_speculative_tokens":3}' \
+      --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "enable_shared_expert_dp":true,"multistream_overlap_shared_expert": true, "weight_nz_mode": 2,"enable_flashcomm1":true}' > ${LOG_PATH} 2>&1 &
     ```
 
     Run the following command on node 1:
@@ -275,32 +305,30 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
     export IFNAME="${NETWORK_INTERFACE}"
     export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME="$IFNAME"
-    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
     export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     export GLOO_SOCKET_IFNAME="$IFNAME"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-    # Ensure the model path matches the directory recorded during download
     vllm serve ${WEIGHT_PATH} \
       --host 0.0.0.0 \
+      --port 11223 \
       --served-model-name minimax-m3 \
       --trust-remote-code \
       --headless \
-      --max-model-len 40960 \
+      --max-model-len 65920 \
       --tensor-parallel-size 8 \
       --enable-expert-parallel \
-      --max-num-seqs 8 \
-      --data-parallel-size 2 \
-      --data-parallel-size-local 1 \
-      --data-parallel-start-rank 1 \
+      --max-num-seqs 32 \
+      --data-parallel-size 4 \
+      --data-parallel-size-local 2 \
+      --data-parallel-start-rank 2 \
       --data-parallel-address $node0_ip \
       --distributed_executor_backend "mp" \
-      --gpu-memory-utilization 0.94 \
+      --gpu-memory-utilization 0.92 \
       --reasoning-parser minimax_m3 \
       --limit-mm-per-prompt '{"image":1,"video":0}' \
-      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-      --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "multistream_overlap_shared_expert": true, "weight_nz_mode": 2}' \
-      --port 11223 > ${LOG_PATH} 2>&1 &
+      --speculative-config '{"model":"${EAGLE3_WEIGHT_PATH}","method":"eagle3","num_speculative_tokens":3}' \
+      --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "multistream_overlap_shared_expert": true, "weight_nz_mode": 2}' > ${LOG_PATH} 2>&1 &
     ```
 
 === "A3 series(W8A8)"
@@ -315,22 +343,21 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
     export IFNAME="${NETWORK_INTERFACE}"
     export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME="$IFNAME"
-    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
     export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     export GLOO_SOCKET_IFNAME="$IFNAME"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    
-    # Ensure the model path matches the directory recorded during download
+
     vllm serve ${WEIGHT_PATH} \
       --host 0.0.0.0 \
+      --port 11223 \
       --served-model-name minimax-m3 \
       --trust-remote-code \
       --max-model-len 131072 \
-      --tensor-parallel-size 8 \
+      --tensor-parallel-size 4 \
       --enable-expert-parallel \
-      --max-num-seqs 8 \
-      --data-parallel-size 2 \
-      --data-parallel-size-local 1 \
+      --max-num-seqs 32 \
+      --data-parallel-size 8 \
+      --data-parallel-size-local 4 \
       --data-parallel-start-rank 0 \
       --data-parallel-address $node0_ip \
       --distributed_executor_backend "mp" \
@@ -338,9 +365,7 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
       --reasoning-parser minimax_m3 \
       --limit-mm-per-prompt '{"image":1,"video":0}' \
       --speculative-config '{"model":"${EAGLE3_WEIGHT_PATH}", "method":"eagle3", "num_speculative_tokens":3}' \
-      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-      --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "multistream_overlap_shared_expert": false, "weight_nz_mode": 2, "enable_flashcomm1": true}' \
-      --port 11223 > ${LOG_PATH} 2>&1 &
+      --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "multistream_overlap_shared_expert": true, "weight_nz_mode": 2,"enable_flashcomm1":true}' > ${LOG_PATH} 2>&1 &
     ```
 
     Run the following command on node 1:
@@ -353,33 +378,30 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
     export IFNAME="${NETWORK_INTERFACE}"
     export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME="$IFNAME"
-    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
     export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     export GLOO_SOCKET_IFNAME="$IFNAME"
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-    # Ensure the model path matches the directory recorded during download
     vllm serve ${WEIGHT_PATH} \
       --host 0.0.0.0 \
+      --port 11223 \
       --served-model-name minimax-m3 \
       --trust-remote-code \
       --headless \
       --max-model-len 131072 \
-      --tensor-parallel-size 8 \
+      --tensor-parallel-size 4 \
       --enable-expert-parallel \
-      --max-num-seqs 8 \
-      --data-parallel-size 2 \
-      --data-parallel-size-local 1 \
-      --data-parallel-start-rank 1 \
+      --max-num-seqs 32 \
+      --data-parallel-size 8 \
+      --data-parallel-size-local 4 \
+      --data-parallel-start-rank 4 \
       --data-parallel-address $node0_ip \
       --distributed_executor_backend "mp" \
       --gpu-memory-utilization 0.92 \
       --reasoning-parser minimax_m3 \
       --limit-mm-per-prompt '{"image":1,"video":0}' \
-      --speculative-config '{"model":"${EAGLE3_WEIGHT_PATH}", "method":"eagle3", "num_speculative_tokens":3}' \
-      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-      --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "multistream_overlap_shared_expert": false, "weight_nz_mode": 2, "enable_flashcomm1": true}' \
-      --port 11223 > ${LOG_PATH} 2>&1 &
+      --speculative-config '{"model":"${EAGLE3_WEIGHT_PATH}","method":"eagle3","num_speculative_tokens":3}' \
+      --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "multistream_overlap_shared_expert": true, "weight_nz_mode": 2}' > ${LOG_PATH} 2>&1 &
     ```
 
 ### 5.3 Prefill-Decode Disaggregation
@@ -515,14 +537,9 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
 
 === "A3 series"
 
-    Prefill-Decode disaggregation can be deployed on 2 Atlas 800 A3 (64GB × 16) for `MiniMax-M3` (BF16) with EAGLE3.
+    Prefill-Decode disaggregation can be deployed on 2 Atlas 800 A3 (64GB × 16) for `MiniMax-M3` (BF16) with `MiniMax-M3-EAGLE3-GQA`.
 
-    **Deployment topology:**
-
-    | Node group | Nodes | Parallelism | Engine ports |
-    | ---------- | ----- | ----------- | ------------ |
-    | Prefill | 1 | `DP2 TP4 PP2` (2 ranks, 8 NPUs each) | 31050/31051 |
-    | Decode | 1 | `DP4 TP4 PP1` (4 ranks, 4 NPUs each) | 31060-31063 |
+    Explicitly declaring this limit (--limit-mm-per-prompt '{"image":1,"video":0}') improves scheduler-side memory planning and end-to-end throughput. Adjust it to your actual request shape (e.g., `{"image":2,"video":0}` for two-image requests, `{"image":0,"video":1}` for one-video requests); for text-only deployment, this parameter can be omitted.
 
     1. Prefill node
 
@@ -532,7 +549,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
     nic_name="xxxx"                 # NIC corresponding to local_ip
     local_ip="xxxx"                 # Prefill node IP
     model_path="xxxx"               # MiniMax-M3 model path
-    draft_model_path="xxxx"         # MiniMax-M3-EAGLE3 path
+    EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
 
     export VLLM_PP_LAYER_PARTITION="30,30"
     export HCCL_BUFFSIZE=1024
@@ -542,14 +559,12 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
     export HCCL_SOCKET_IFNAME=$nic_name
     export GLOO_SOCKET_IFNAME=$nic_name
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export PYTHONHASHSEED=0
 
     # If Mooncake is installed in a non-standard path, set this before startup.
     if [ -n "${MOONCAKE_LIB_DIRS:-}" ]; then
         export LD_LIBRARY_PATH="${MOONCAKE_LIB_DIRS}:${LD_LIBRARY_PATH:-}"
     fi
 
-    # Ensure the model path matches the directory recorded during download
     vllm serve "$model_path" \
         --host 0.0.0.0 \
         --port $2 \
@@ -568,12 +583,14 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         --max-num-seqs 32 \
         --max-num-batched-tokens 32768 \
         --long-prefill-token-threshold 2048 \
+        --enable-chunked-prefill \
+        --enable-prefix-caching \
         --trust-remote-code \
-        --gpu-memory-utilization 0.85 \
-        --reasoning-parser minimax_m3 \
+        --gpu-memory-utilization 0.92 \
         --limit-mm-per-prompt '{"image":1,"video":0}' \
-        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true}' \
-        --speculative-config '{"method":"eagle3","model":"'"$draft_model_path"'","num_speculative_tokens":3}' \
+        --reasoning-parser minimax_m3 \
+        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
+        --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3}' \
         --kv-transfer-config \
         '{
             "kv_connector":"MooncakeConnectorV1",
@@ -596,7 +613,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
     nic_name="xxxx"                 # NIC corresponding to local_ip
     local_ip="xxxx"                 # Decode node IP
     model_path="xxxx"               # MiniMax-M3 model path
-    draft_model_path="xxxx"         # MiniMax-M3-EAGLE3 path
+    EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
 
     export HCCL_BUFFSIZE=2048
     export HCCL_IF_IP=$local_ip
@@ -605,14 +622,12 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
     export HCCL_SOCKET_IFNAME=$nic_name
     export GLOO_SOCKET_IFNAME=$nic_name
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export PYTHONHASHSEED=0
 
     # If Mooncake is installed in a non-standard path, set this before startup.
     if [ -n "${MOONCAKE_LIB_DIRS:-}" ]; then
         export LD_LIBRARY_PATH="${MOONCAKE_LIB_DIRS}:${LD_LIBRARY_PATH:-}"
     fi
-    
-    # Ensure the model path matches the directory recorded during download
+
     vllm serve "$model_path" \
         --host 0.0.0.0 \
         --port $2 \
@@ -634,9 +649,8 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         --max-num-seqs 64 \
         --gpu-memory-utilization 0.92 \
         --limit-mm-per-prompt '{"image":1,"video":0}' \
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true}' \
-        --speculative-config '{"method":"eagle3","model":"'"$draft_model_path"'","num_speculative_tokens":3}' \
+        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true}' \
+        --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3}' \
         --kv-transfer-config \
         '{
             "kv_connector":"MooncakeConnectorV1",
@@ -694,31 +708,14 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
     --decoder-hosts \
         $node_d_ip $node_d_ip $node_d_ip $node_d_ip \
     --decoder-ports \
-        31060 31061 31062 31063 \
-    --max-retries 3
+        31060 31061 31062 31063
     ```
 
-    The service is then accessible over HTTP at `<proxy_ip>:8009`. For PD disaggregation, use this proxy endpoint in Section 7.
+    The service is then accessible at the proxy host on port `8009`. For PD disaggregation, use this proxy endpoint in Section 7. Replace the proxy host with the IP address or hostname of the machine running the proxy.
 
 === "950DT products"
 
-    Prefill-Decode disaggregation can be deployed on 2 950DT products (96GB × 8) for `MiniMax-M3-MXFP8` with EAGLE3. Mount `/etc/hixlep/` in the container for UBOE / Ascend direct KV transfer.
-
-    **Deployment topology:**
-
-    | Node group | Nodes | Parallelism | Engine ports |
-    | ---------- | ----- | ----------- | ------------ |
-    | Prefill | 1 | `DP2 TP4 PP1` (2 ranks, 4 NPUs each) | 31050/31051 |
-    | Decode | 1 | `DP2 TP4 PP1` (2 ranks, 4 NPUs each) | 31060/31061 |
-
-    Each node launches one API process per DP rank: 2 Prefill ranks on ports 31050/31051 and 2 Decode ranks on ports 31060/31061. Both roles use `PP=1` (no pipeline parallel), so no `VLLM_PP_LAYER_PARTITION` setting is required. Both sides must declare the same topology in `kv_connector_extra_config`:
-
-    ```json
-    {
-      "prefill": {"dp_size": 2, "tp_size": 4, "pp_size": 1},
-      "decode": {"dp_size": 2, "tp_size": 4, "pp_size": 1}
-    }
-    ```
+    Prefill-Decode disaggregation can be deployed on 2 950DT products (96GB × 8) for `MiniMax-M3-MXFP8` with `MiniMax-M3-EAGLE3-GQA`. Mount `/etc/hixlep/` in the container for UBOE / Ascend direct KV transfer.
 
     1. Prefill node
 
@@ -729,20 +726,19 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
     nic_name="xxxx"                 # NIC corresponding to local_ip
     local_ip="xxxx"                 # Prefill node IP
     model_path="xxxx"               # MiniMax-M3-MXFP8 model path
-    draft_model_path="xxxx"         # MiniMax-M3-EAGLE3 path
+    EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
 
     export HCCL_BUFFSIZE=256
     export HCCL_IF_IP=$local_ip
-    export HCCL_OP_EXPANSION_MODE=AIV
+    export HCCL_OP_EXPANSION_MODE="AIV"
     export ASCEND_RT_VISIBLE_DEVICES=$1
     export HCCL_SOCKET_IFNAME=$nic_name
     export GLOO_SOCKET_IFNAME=$nic_name
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export PYTHONHASHSEED=0
+
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:$LD_LIBRARY_PATH
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
-    # Ensure the model path matches the directory recorded during download
     vllm serve "$model_path" \
         --host 0.0.0.0 \
         --port $2 \
@@ -765,10 +761,9 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         --kv-cache-dtype fp8 \
         --reasoning-parser minimax_m3 \
         --safetensors-load-strategy prefetch \
-        --speculative-config '{"method":"eagle3","model":"'"$draft_model_path"'","num_speculative_tokens":3,"kv_cache_dtype":"bfloat16"}' \
+        --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3,"kv_cache_dtype":"bfloat16"}' \
         --enforce-eager \
-        --no-async-scheduling \
-        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_qknorm_rope":false,"fuse_norm_quant":false,"enable_static_kernel":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_reduce_sample":false}' \
+        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_qknorm_rope":false,"fuse_norm_quant":false,"enable_static_kernel":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
         --kv-transfer-config '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_producer","kv_port":"30000","engine_id":"0","kv_connector_extra_config":{"use_ascend_direct":true,"ascend_local_comm_res_path":"/etc/hixlep","prefill":{"dp_size":2,"tp_size":4,"pp_size":1},"decode":{"dp_size":2,"tp_size":4,"pp_size":1}}}'
     ```
 
@@ -781,20 +776,18 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
     nic_name="xxxx"                 # NIC corresponding to local_ip
     local_ip="xxxx"                 # Decode node IP
     model_path="xxxx"               # MiniMax-M3-MXFP8 model path
-    draft_model_path="xxxx"         # MiniMax-M3-EAGLE3 path
+    EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
 
     export HCCL_BUFFSIZE=2048
     export HCCL_IF_IP=$local_ip
-    export HCCL_OP_EXPANSION_MODE=AIV
+    export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME=$nic_name
     export GLOO_SOCKET_IFNAME=$nic_name
     export ASCEND_RT_VISIBLE_DEVICES=$1
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:$LD_LIBRARY_PATH
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export PYTHONHASHSEED=0
-    
-    # Ensure the model path matches the directory recorded during download
+
     vllm serve "$model_path" \
         --host 0.0.0.0 \
         --port $2 \
@@ -817,9 +810,8 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         --dtype bfloat16 \
         --quantization mxfp8 \
         --kv-cache-dtype fp8 \
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-        --speculative-config '{"method":"eagle3","model":"'"$draft_model_path"'","num_speculative_tokens":3,"kv_cache_dtype":"bfloat16"}' \
-        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_reduce_sample":false}' \
+        --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3,"kv_cache_dtype":"bfloat16"}' \
+        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true}' \
         --kv-transfer-config '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_consumer","kv_port":"26900","engine_id":"1","kv_connector_extra_config":{"use_ascend_direct":true,"ascend_local_comm_res_path":"/etc/hixlep","prefill":{"dp_size":2,"tp_size":4,"pp_size":1},"decode":{"dp_size":2,"tp_size":4,"pp_size":1}}}'
     ```
 
@@ -869,7 +861,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         31060 31061
     ```
 
-    The service is then accessible over HTTP at `<proxy_ip>:8009`. For PD disaggregation, use this proxy endpoint in Section 7.
+    The service is then accessible at the proxy host on port `8009`. For PD disaggregation, use this proxy endpoint in Section 7. Replace the proxy host with the IP address or hostname of the machine running the proxy.
 
 Key Parameter Descriptions:
 
@@ -890,12 +882,11 @@ Key Parameter Descriptions:
 
 - `--pipeline-parallel-size` (A3 Prefill: `2`): Splits the 60 MiniMax-M3 layers across two pipeline stages. A3 sets `VLLM_PP_LAYER_PARTITION=30,30` and also writes `pp_layer_partition` into the Mooncake extra config. The 950DT products launch uses `--pp-size 1` on both Prefill and Decode (no pipeline parallel), so no layer partition is needed.
 - `--enforce-eager`: Prefill nodes do not capture CUDA/ACL graphs.
-- `--speculative-config '{"method":"eagle3", ...}'`: Enables the MiniMax-M3 EAGLE3 draft model. Do not replace this with GLM MTP options.
-- `--no-async-scheduling` (950DT products): Used by the verified MXFP8 Prefill launch.
+- `--speculative-config '{"method":"eagle3", ...}'`: Enables the `MiniMax-M3-EAGLE3-GQA` draft model. Do not replace this with GLM MTP options.
 
 **Decode node-specific configurations:**
 
-- `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'`: Graph capture for the decode phase only.
+- `"max_cudagraph_capture_size"` (optional, omitted by default): Limits the maximum decode batch size covered by ACL graph capture and the graph memory reserved for it; the program default is `512`. With EAGLE3 speculative decoding, each request is expanded to `1 + num_speculative_tokens` tokens in one decode step (`4` tokens when `num_speculative_tokens=3`). Since DP distributes requests per rank, the per-rank batch size matters: for example, with `DP2` and `--max-num-seqs 256`, each DP rank handles 128 requests, producing `4 × 128 = 512` tokens per step — exactly at the default limit. If concurrency rises to 257, one DP rank handles 129 requests, giving `4 × 129 = 516 > 512`; batches above 512 skip graph capture and fall back to eager execution, lowering decode throughput. In that case set `"max_cudagraph_capture_size":1024` in `--compilation-config` (e.g., `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":1024}'`). Because a larger capture size reserves additional NPU memory, the configurations in this tutorial keep the default; add this option only when your target concurrency requires it.
 - `--no-enable-prefix-caching` (A3 Decode): Disables prefix caching on the Decode node to avoid the D-node prefix-cache known issue tracked in [#7944](https://github.com/vllm-project/vllm-ascend/issues/7944). The 950DT products launch does not set this flag and keeps prefix caching enabled.
 - `--max-num-seqs 256`: Decode concurrency used by the verified 950DT products 1P1D launch. A3 uses `64`.
 
@@ -916,7 +907,390 @@ Key Parameter Descriptions:
 
 Please refer to [envs.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/envs.py) for further explanation and restrictions of the environment variables above.
 
-### 5.4 Multimodal and ViT DP (Optional)
+### 5.4 Prefill-Decode Disaggregation with KV Cache Pool
+
+This section builds on [Section 5.3](#53-prefill-decode-disaggregation). Reuse the same topology, `launch_online_dp.py`, proxy mapping, and MiniMax `vllm serve` flags. Prefill and Decode switch to `MultiConnector` so live P→D KV transfer and Mooncake KV Cache Pool work together:
+
+- `MooncakeConnectorV1` transfers KV from Prefill to Decode in real time (same role as Section 5.3).
+- `AscendStoreConnector` stores KV in the Mooncake KV Cache Pool so later Prefills with the same prefix can hit the pool instead of recomputing.
+- By default the Prefill node performs pool lookup, load, and write.
+
+For backend selection, `mooncake.json`, Mooncake Master, eviction, and tenant options, refer to the [KV Cache Pool Deployment Guide](../../user_guide/feature_guide/kv_pool.md). For the hardware/communication environment variables required by pooling, refer to [Environment Variables Description](../../user_guide/feature_guide/kv_pool.md#51-environment-variables-description). For MiniMax-specific issues, refer to [Chapter 10 FAQ](#10-faq).
+
+**Compared with normal PD in Section 5.3, pay attention to these pooling-only requirements:**
+
+| Item | Normal PD (5.3) | Pooled PD (this section) |
+| ---- | --------------- | ------------------------ |
+| Connector | Single `MooncakeConnectorV1` | `MultiConnector` wrapping `MooncakeConnectorV1` + `AscendStoreConnector` |
+| Mooncake Master | Not required | Must start `mooncake_master` before Decode / Prefill |
+| `mooncake.json` | Not required | Required on every rank; Prefill donates memory, Decode sets `global_segment_size=0` |
+| `engine_id` / `lookup_rpc_port` | Fixed example IDs are OK | **Must be unique per DP rank** (`37000/37100 + DP_RANK`) to avoid port / engine collisions |
+| Extra env | Section 5.3 `HCCL_*` only | Keep 5.3 env, then add pool fabric/UB exports from [kv_pool.md §5.1](../../user_guide/feature_guide/kv_pool.md#51-environment-variables-description) |
+| Container mounts | 950DT needs `/etc/hixlep/` | Also mount `/etc/hccn.conf`; keep `/etc/hixlep/` on 950DT |
+| Startup order | Decode → Prefill → Proxy | **Mooncake Master → Decode → Prefill → Proxy** |
+| Verification | P→D KV transfer only | Also check Prefill pool lookup/get/put hits after a repeated-prefix warmup |
+
+#### 5.4.1 Prerequisites
+
+Mount the host HCCN config into every container that participates in pooling:
+
+```bash
+-v /etc/hccn.conf:/etc/hccn.conf:ro
+```
+
+On 950DT products, also keep the `/etc/hixlep/` mount from Section 5.3 for Ascend direct KV transfer.
+
+Place `mooncake.json` next to `run_dp_template.sh` on each node. Prefill contributes pool memory; Decode does not. Replace `xxxx` with the Prefill node IP that runs Mooncake Master. A non-zero `global_segment_size` must be aligned to `1GB`.
+
+A3 Prefill `mooncake.json`:
+
+```json
+{
+  "metadata_server": "P2PHANDSHAKE",
+  "protocol": "ascend",
+  "device_name": "",
+  "master_server_address": "xxxx:50088",
+  "global_segment_size": "64GB",
+  "preferred_segment": true,
+  "prefer_alloc_in_same_node": true,
+  "enable_ssd_offload": false,
+  "tenant_id": "default"
+}
+```
+
+950DT Prefill `mooncake.json`:
+
+```json
+{
+  "metadata_server": "P2PHANDSHAKE",
+  "protocol": "ascend",
+  "device_name": "",
+  "master_server_address": "xxxx:50088",
+  "global_segment_size": "128GB",
+  "preferred_segment": true,
+  "prefer_alloc_in_same_node": true,
+  "enable_ssd_offload": false,
+  "tenant_id": "default"
+}
+```
+
+Decode `mooncake.json` on both platforms (same Master and `tenant_id`, no donated segment):
+
+```json
+{
+  "metadata_server": "P2PHANDSHAKE",
+  "protocol": "ascend",
+  "device_name": "",
+  "master_server_address": "xxxx:50088",
+  "global_segment_size": 0,
+  "preferred_segment": true,
+  "prefer_alloc_in_same_node": true,
+  "enable_ssd_offload": false,
+  "tenant_id": "default"
+}
+```
+
+#### 5.4.2 Environment Variables
+
+Start from the Section 5.3 environment block (`HCCL_IF_IP`, `HCCL`/`GLOO`/`TP` socket IFNAME, `HCCL_BUFFSIZE`, `HCCL_OP_EXPANSION_MODE`, `PYTORCH_NPU_ALLOC_CONF`, `ASCEND_RT_VISIBLE_DEVICES`, and A3 Prefill `VLLM_PP_LAYER_PARTITION="30,30"`). Then add the pooling-required variables below. Choose the hardware/communication exports from [Environment Variables Description](../../user_guide/feature_guide/kv_pool.md#51-environment-variables-description) according to your machine and link type.
+
+Common pooling exports on every Prefill and Decode rank:
+
+```bash
+export PYTHONHASHSEED=0
+export MOONCAKE_CONFIG_PATH=./mooncake.json
+# Optional: only if Mooncake is installed in a non-standard path (same as Section 5.3).
+if [ -n "${MOONCAKE_LIB_DIRS:-}" ]; then
+    export LD_LIBRARY_PATH="${MOONCAKE_LIB_DIRS}:${LD_LIBRARY_PATH:-}"
+fi
+```
+
+| Hardware | Dependencies | Required pooling exports | Notes |
+| -------- | ------------- | ------------------------ | ----- |
+| 800I/T A3 (HCCS, recommended) | HDK >= 26.0, or HDK >= 25.5 with mooncake >= v0.3.11; CANN >= 9.0.0 | `export ACL_OP_INIT_MODE=1` and `export ASCEND_ENABLE_USE_FABRIC_MEM=1` | Keep the Section 5.3 `HCCL_IF_IP` / socket IFNAME exports. |
+| 800I/T A3 (RoCE) or 800I/T A2 | A2: HDK >= 25.5 recommended | `export HCCL_INTRA_ROCE_ENABLE=1`, plus `HCCL_IF_IP` / socket IFNAME, and `nr_hugepages=200000` | Use the RoCE path from the KV Cache Pool guide. |
+| 950PR/DT (Device UB) | HDK >= 25.6 with mooncake >= v0.3.11; CANN >= 9.1.0 | `export ASCEND_LOCAL_COMM_RES_PATH=/etc/hixlep/` and `export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'`; `unset ASCEND_GLOBAL_RESOURCE_CONFIG` | Mount `/etc/hixlep/`. For UBOE instead, use `ASCEND_GLOBAL_RESOURCE_CONFIG` as described in the KV Cache Pool guide. |
+
+#### 5.4.3 Prefill / Decode Scripts
+
+Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh` with the pooled version below. Keep the Section 5.3 `vllm serve` flag style; only `--kv-transfer-config` switches to `MultiConnector`. Expand `engine_id` and `lookup_rpc_port` from `$4` (DP rank) — do not hardcode the same values across ranks.
+
+=== "A3 series"
+
+    Prefill-Decode disaggregation with KV Cache Pool on 2 Atlas 800 A3 (64GB × 16) for `MiniMax-M3` (BF16) with `MiniMax-M3-EAGLE3-GQA`.
+
+    1. Prefill node
+
+    ```bash
+    unset http_proxy https_proxy ftp_proxy
+
+    nic_name="xxxx"                 # NIC corresponding to local_ip
+    local_ip="xxxx"                 # Prefill node IP
+    model_path="xxxx"               # MiniMax-M3 model path
+    EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
+
+    export VLLM_PP_LAYER_PARTITION="30,30"
+    export HCCL_BUFFSIZE=1024
+    export HCCL_IF_IP=$local_ip
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export ASCEND_RT_VISIBLE_DEVICES=$1
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export PYTHONHASHSEED=0
+
+    # Pooling extras on top of Section 5.3 (kv_pool.md §5.1, A3 HCCS)
+    export ACL_OP_INIT_MODE=1
+    export ASCEND_ENABLE_USE_FABRIC_MEM=1
+    export MOONCAKE_CONFIG_PATH=./mooncake.json
+    if [ -n "${MOONCAKE_LIB_DIRS:-}" ]; then
+        export LD_LIBRARY_PATH="${MOONCAKE_LIB_DIRS}:${LD_LIBRARY_PATH:-}"
+    fi
+
+    vllm serve "$model_path" \
+        --host 0.0.0.0 \
+        --port $2 \
+        --data-parallel-size $3 \
+        --data-parallel-rank $4 \
+        --data-parallel-address $5 \
+        --data-parallel-rpc-port $6 \
+        --tensor-parallel-size $7 \
+        --pipeline-parallel-size $8 \
+        --enforce-eager \
+        --distributed-executor-backend mp \
+        --served-model-name minimax-m3 \
+        --enable-expert-parallel \
+        --seed 1024 \
+        --max-model-len 133000 \
+        --max-num-seqs 32 \
+        --max-num-batched-tokens 32768 \
+        --long-prefill-token-threshold 2048 \
+        --enable-chunked-prefill \
+        --enable-prefix-caching \
+        --trust-remote-code \
+        --gpu-memory-utilization 0.92 \
+        --reasoning-parser minimax_m3 \
+        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
+        --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3}' \
+        --kv-transfer-config \
+        '{"kv_connector":"MultiConnector","kv_role":"kv_producer","engine_id":"minimax-m3-prefill-dp'"$4"'","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV1","kv_buffer_device":"npu","kv_role":"kv_producer","kv_port":"36000","kv_connector_extra_config":{"use_ascend_direct":true,"prefill":{"dp_size":2,"tp_size":4,"pp_size":2,"pp_layer_partition":"30,30"},"decode":{"dp_size":4,"tp_size":4,"pp_size":1}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backend":"mooncake","lookup_rpc_port":'$((37000 + $4))'}}]}}'
+    ```
+
+    2. Decode node
+
+    ```bash
+    unset http_proxy https_proxy ftp_proxy
+
+    nic_name="xxxx"                 # NIC corresponding to local_ip
+    local_ip="xxxx"                 # Decode node IP
+    model_path="xxxx"               # MiniMax-M3 model path
+    EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
+
+    export HCCL_BUFFSIZE=2048
+    export HCCL_IF_IP=$local_ip
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export ASCEND_RT_VISIBLE_DEVICES=$1
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export PYTHONHASHSEED=0
+
+    # Pooling extras on top of Section 5.3 (kv_pool.md §5.1, A3 HCCS)
+    export ACL_OP_INIT_MODE=1
+    export ASCEND_ENABLE_USE_FABRIC_MEM=1
+    export MOONCAKE_CONFIG_PATH=./mooncake.json
+    if [ -n "${MOONCAKE_LIB_DIRS:-}" ]; then
+        export LD_LIBRARY_PATH="${MOONCAKE_LIB_DIRS}:${LD_LIBRARY_PATH:-}"
+    fi
+
+    vllm serve "$model_path" \
+        --host 0.0.0.0 \
+        --port $2 \
+        --data-parallel-size $3 \
+        --data-parallel-rank $4 \
+        --data-parallel-address $5 \
+        --data-parallel-rpc-port $6 \
+        --tensor-parallel-size $7 \
+        --pipeline-parallel-size $8 \
+        --enable-expert-parallel \
+        --seed 1024 \
+        --served-model-name minimax-m3 \
+        --reasoning-parser minimax_m3 \
+        --distributed-executor-backend mp \
+        --max-model-len 133000 \
+        --max-num-batched-tokens 32768 \
+        --trust-remote-code \
+        --no-enable-prefix-caching \
+        --max-num-seqs 64 \
+        --gpu-memory-utilization 0.92 \
+        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true}' \
+        --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3}' \
+        --kv-transfer-config \
+        '{"kv_connector":"MultiConnector","kv_role":"kv_consumer","engine_id":"minimax-m3-decode-dp'"$4"'","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV1","kv_buffer_device":"npu","kv_role":"kv_consumer","kv_port":"36100","kv_connector_extra_config":{"use_ascend_direct":true,"prefill":{"dp_size":2,"tp_size":4,"pp_size":2,"pp_layer_partition":"30,30"},"decode":{"dp_size":4,"tp_size":4,"pp_size":1}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backend":"mooncake","lookup_rpc_port":'$((37100 + $4))'}}]}}'
+    ```
+
+    Start order on A3: Mooncake Master → Decode → Prefill → Proxy. Use the same `launch_online_dp.py` and proxy commands as Section 5.3 A3 (`--vllm-start-port 31050` / `31060`, proxy on `8009`).
+
+=== "950DT products"
+
+    Prefill-Decode disaggregation with KV Cache Pool on 2 950DT products (96GB × 8) for `MiniMax-M3-MXFP8` with `MiniMax-M3-EAGLE3-GQA`. Mount `/etc/hixlep/` and `/etc/hccn.conf`. Place the Prefill / Decode `mooncake.json` from Section 5.4.1 next to `run_dp_template.sh` (`global_segment_size` is `128GB` on Prefill and `0` on Decode). Set `master_server_address` to the Prefill Mooncake Master, for example `xxxx:50088`.
+
+    1. Prefill node
+
+    ```bash
+    unset ftp_proxy https_proxy http_proxy all_proxy
+    unset FTP_PROXY HTTPS_PROXY HTTP_PROXY ALL_PROXY
+
+    nic_name="xxxx"                 # NIC corresponding to local_ip
+    local_ip="xxxx"                 # Prefill node IP
+    model_path="xxxx"               # MiniMax-M3-MXFP8 model path
+    EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
+
+    export HCCL_BUFFSIZE=256
+    export HCCL_IF_IP=$local_ip
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export ASCEND_RT_VISIBLE_DEVICES=$1
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export PYTHONHASHSEED=0
+    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:$LD_LIBRARY_PATH
+    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+
+    # Pooling extras on top of Section 5.3 (kv_pool.md §5.1, Device UB)
+    export MOONCAKE_CONFIG_PATH=./mooncake.json
+    export ASCEND_LOCAL_COMM_RES_PATH=/etc/hixlep/
+    export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
+    unset ASCEND_GLOBAL_RESOURCE_CONFIG
+
+    vllm serve "$model_path" \
+        --host 0.0.0.0 \
+        --port $2 \
+        --data-parallel-size $3 \
+        --data-parallel-rank $4 \
+        --data-parallel-address $5 \
+        --data-parallel-rpc-port $6 \
+        --tensor-parallel-size $7 \
+        --pipeline-parallel-size $8 \
+        --served-model-name minimax-m3 \
+        --trust-remote-code \
+        --dtype bfloat16 \
+        --max-num-seqs 128 \
+        --max-num-batched-tokens 32768 \
+        --max-model-len 133000 \
+        --enable-expert-parallel \
+        --quantization mxfp8 \
+        --gpu-memory-utilization 0.92 \
+        --distributed-executor-backend mp \
+        --kv-cache-dtype fp8 \
+        --reasoning-parser minimax_m3 \
+        --safetensors-load-strategy prefetch \
+        --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3,"kv_cache_dtype":"bfloat16"}' \
+        --enforce-eager \
+        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_qknorm_rope":false,"fuse_norm_quant":false,"enable_static_kernel":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
+        --kv-transfer-config \
+        '{"kv_connector":"MultiConnector","kv_role":"kv_producer","engine_id":"minimax-m3-prefill-dp'"$4"'","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV1","kv_buffer_device":"npu","kv_role":"kv_producer","kv_port":"30000","kv_connector_extra_config":{"use_ascend_direct":true,"ascend_local_comm_res_path":"/etc/hixlep","prefill":{"dp_size":2,"tp_size":4,"pp_size":1},"decode":{"dp_size":2,"tp_size":4,"pp_size":1}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backend":"mooncake","lookup_rpc_port":'$((37000 + $4))'}}]}}'
+    ```
+
+    2. Decode node
+
+    ```bash
+    unset ftp_proxy https_proxy http_proxy all_proxy
+    unset FTP_PROXY HTTPS_PROXY HTTP_PROXY ALL_PROXY
+
+    nic_name="xxxx"                 # NIC corresponding to local_ip
+    local_ip="xxxx"                 # Decode node IP
+    model_path="xxxx"               # MiniMax-M3-MXFP8 model path
+    EAGLE3_WEIGHT_PATH="xxxx"       # MiniMax-M3-EAGLE3-GQA path
+
+    export HCCL_BUFFSIZE=2048
+    export HCCL_IF_IP=$local_ip
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export ASCEND_RT_VISIBLE_DEVICES=$1
+    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:$LD_LIBRARY_PATH
+    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export PYTHONHASHSEED=0
+
+    # Pooling extras on top of Section 5.3 (kv_pool.md §5.1, Device UB)
+    export MOONCAKE_CONFIG_PATH=./mooncake.json
+    export ASCEND_LOCAL_COMM_RES_PATH=/etc/hixlep/
+    export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
+    unset ASCEND_GLOBAL_RESOURCE_CONFIG
+
+    vllm serve "$model_path" \
+        --host 0.0.0.0 \
+        --port $2 \
+        --data-parallel-size $3 \
+        --data-parallel-rank $4 \
+        --data-parallel-address $5 \
+        --data-parallel-rpc-port $6 \
+        --tensor-parallel-size $7 \
+        --pipeline-parallel-size $8 \
+        --enable-expert-parallel \
+        --seed 1024 \
+        --served-model-name minimax-m3 \
+        --reasoning-parser minimax_m3 \
+        --distributed-executor-backend mp \
+        --max-model-len 133000 \
+        --max-num-batched-tokens 32768 \
+        --trust-remote-code \
+        --max-num-seqs 256 \
+        --gpu-memory-utilization 0.92 \
+        --dtype bfloat16 \
+        --quantization mxfp8 \
+        --kv-cache-dtype fp8 \
+        --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3,"kv_cache_dtype":"bfloat16"}' \
+        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true}' \
+        --kv-transfer-config \
+        '{"kv_connector":"MultiConnector","kv_role":"kv_consumer","engine_id":"minimax-m3-decode-dp'"$4"'","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV1","kv_buffer_device":"npu","kv_role":"kv_consumer","kv_port":"26900","kv_connector_extra_config":{"use_ascend_direct":true,"ascend_local_comm_res_path":"/etc/hixlep","prefill":{"dp_size":2,"tp_size":4,"pp_size":1},"decode":{"dp_size":2,"tp_size":4,"pp_size":1}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backend":"mooncake","lookup_rpc_port":'$((37100 + $4))'}}]}}'
+    ```
+
+    Start order on 950DT: Mooncake Master → Decode → Prefill → Proxy. Use the same `launch_online_dp.py` and proxy commands as Section 5.3 950DT (`DP2` on both roles, proxy on `8009`).
+
+#### 5.4.4 Start the Services
+
+Start in this order on every platform:
+
+```text
+Mooncake Master
+    ↓
+Decode
+    ↓
+Prefill
+    ↓
+Proxy (:8009)
+```
+
+1. Start `mooncake_master` on the Prefill node and confirm port `50088` is reachable:
+
+```bash
+mooncake_master \
+  --port 50088 \
+  --eviction_high_watermark_ratio 0.9 \
+  --eviction_ratio 0.1 \
+  --default_kv_lease_ttl 11000 \
+  --enable_offload=false \
+  --client_ttl=120
+```
+
+2. Start Decode with the Section 5.3 `launch_online_dp.py` command for your platform. Wait until every Decode rank prints `Application startup complete`.
+
+3. Start Prefill the same way. Wait until every Prefill rank prints `Application startup complete`.
+
+4. Start the Section 5.3 proxy. The service is then accessible at the proxy host on port `8009`. Use this proxy endpoint in Section 7. Replace the proxy host with the IP address or hostname of the machine running the proxy.
+
+#### 5.4.5 Verification
+
+1. Confirm Mooncake Master port `50088` is reachable.
+2. Confirm every Decode engine port is ready, then every Prefill engine port.
+3. Send requests only to the proxy on port `8009`.
+4. Warm up with a repeated-prefix request, then send again and check Prefill logs for KV Pool lookup/get/put and hit information.
+5. Confirm Decode logs still show a normal Mooncake P→D KV transfer.
+
+### 5.5 Multimodal and ViT DP (Optional)
 
 MiniMax-M3 supports image and video inputs on Ascend. The deployment examples above keep `--limit-mm-per-prompt '{"image":1,"video":0}'` as the default multimodal capacity assumption because the other serving parameters are tuned for the single-image path.
 
