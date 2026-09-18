@@ -18,6 +18,26 @@ class PlacementImbalance:
     p95_ratio: float
 
 
+@dataclass(frozen=True)
+class PlacementPlan:
+    """Target experts and their source rank for every target slot."""
+
+    rank_expert_ids: np.ndarray
+    source_rank_ids: np.ndarray
+
+
+_RankChoice = tuple[float, int, float, float, float]  # risk, rank, mean, variance, variance scale
+_PlacementUndoState = tuple[int, int, tuple[float, float, float]]  # rank, slot, previous rank statistics
+
+
+@dataclass
+class _PlacementDecision:
+    choices: list[_RankChoice]
+    next_choice: int = 0
+    tried_feasible_choice: bool = False
+    undo_state: _PlacementUndoState | None = None
+
+
 _ReplicaSearchState = tuple[np.ndarray, int]
 # (replica counts, unallocated extra slots)
 _VARIANCE_ROUNDOFF_SAFETY_FACTOR = 8
@@ -322,6 +342,58 @@ class StairEplbPolicy(AbstractEplbPolicy):
             raise ValueError("expert covariance produces a negative rank variance")
         return max(float(updated_variance), 0.0), updated_scale
 
+    @staticmethod
+    def _migration_sources(
+        current_placement: np.ndarray,
+        target_placement: np.ndarray,
+        rank_pair_limit: int,
+        expert_sources: list[list[int]],
+    ) -> np.ndarray | None:
+        """Return source ranks aligned with target slots, or ``None``.
+
+        Per destination, ``(source rank, capacity index)`` owns at most one
+        ``(target slot, expert)`` demand. Occupied capacity recursively rematches
+        its owner; retained experts stay local, and unplaced slots remain ``-1``.
+        """
+        source_rank_ids = np.full_like(target_placement, -1)
+
+        def try_assign_source(
+            slot: int,
+            expert: int,
+            dst_rank: int,
+            capacity_slot_owners: dict[tuple[int, int], tuple[int, int]],
+            visited_capacity_slots: set[tuple[int, int]],
+        ) -> bool:
+            for src_rank in expert_sources[expert]:
+                if src_rank == dst_rank:
+                    continue
+                for capacity_index in range(rank_pair_limit):
+                    capacity_slot = (src_rank, capacity_index)
+                    if capacity_slot in visited_capacity_slots:
+                        continue
+                    visited_capacity_slots.add(capacity_slot)
+                    displaced_demand = capacity_slot_owners.get(capacity_slot)
+                    if displaced_demand is not None:
+                        displaced_slot, displaced_expert = displaced_demand
+                        if not try_assign_source(
+                            displaced_slot, displaced_expert, dst_rank, capacity_slot_owners, visited_capacity_slots
+                        ):
+                            continue
+                    capacity_slot_owners[capacity_slot] = (slot, expert)
+                    source_rank_ids[dst_rank, slot] = src_rank
+                    return True
+            return False
+
+        for dst_rank, target_experts in enumerate(target_placement):
+            capacity_slot_owners: dict[tuple[int, int], tuple[int, int]] = {}
+            for slot, expert in enumerate(target_experts):
+                if expert >= 0:
+                    if expert in current_placement[dst_rank]:
+                        source_rank_ids[dst_rank, slot] = dst_rank
+                    elif not try_assign_source(slot, int(expert), dst_rank, capacity_slot_owners, set()):
+                        return None
+        return source_rank_ids
+
     @classmethod
     def lpt_placement(
         cls,
@@ -331,14 +403,20 @@ class StairEplbPolicy(AbstractEplbPolicy):
         replica_counts: np.ndarray,
         num_ranks: int,
         z_score: float,
-    ) -> np.ndarray | None:
+        *,
+        current_rank_expert_ids: np.ndarray,
+        rank_pair_migration_limit: int,
+        backtrack_limit: int,
+    ) -> PlacementPlan | None:
         """Place replicas with deterministic covariance-aware greedy LPT.
 
         Mean, variance, and replica counts are ``[experts]``; covariance is
         ``[experts, experts]``. Experts are processed by descending per-replica
         risk. Each replica chooses the legal rank with the lowest updated risk,
-        breaking ties by rank ID. The result is ``[ranks, slots]``; ``None``
-        means greedy choices left no legal rank for a later replica.
+        breaking ties by rank ID. Each partial placement must have a source
+        assignment within the directed rank-pair limit. ``None`` means bounded
+        backtracking found no legal placement. The first source-feasible choice
+        is free; each accepted alternative choice consumes one backtrack.
         """
         means = np.asarray(expert_means, dtype=np.float64)
         variances = np.asarray(expert_variances, dtype=np.float64)
@@ -371,10 +449,21 @@ class StairEplbPolicy(AbstractEplbPolicy):
         covariance = (covariance + covariance.T) * 0.5
         if not isinstance(num_ranks, int) or isinstance(num_ranks, bool) or num_ranks < 1:
             raise ValueError("num_ranks must be a positive integer")
+        controls = rank_pair_migration_limit, backtrack_limit
+        invalid_type = any(isinstance(value, bool) or not isinstance(value, int) for value in controls)
+        if invalid_type or rank_pair_migration_limit < 1 or backtrack_limit < 0:
+            raise ValueError("rank_pair_migration_limit and backtrack_limit must be positive/non-negative integers")
         replicas = replicas.astype(np.int64, copy=False)
         total_slots = int(replicas.sum())
         if np.any(replicas < 1) or np.any(replicas > num_ranks) or total_slots % num_ranks != 0:
             raise ValueError("replica_counts must fit an equal-capacity rank placement")
+        current_placement = np.asarray(current_rank_expert_ids)
+        if current_placement.shape != (num_ranks, total_slots // num_ranks):
+            raise ValueError("current_rank_expert_ids must match the target rank capacity")
+        cls.placement_replica_counts(current_placement, num_experts)
+        current_placement = current_placement.astype(np.int64, copy=False)
+        expert_sources = [np.where(current_placement == expert)[0].tolist() for expert in range(num_experts)]
+        migration_sources = cls._migration_sources
 
         slots_per_rank = total_slots // num_ranks
         placement = np.full((num_ranks, slots_per_rank), -1, dtype=np.int64)
@@ -387,8 +476,21 @@ class StairEplbPolicy(AbstractEplbPolicy):
             range(num_experts), key=lambda expert: (-per_replica_risks[expert], expert)
         )
 
-        for expert in experts_by_descending_replica_risk:
-            for _ in range(replicas[expert]):
+        replica_order = [expert for expert in experts_by_descending_replica_risk for _ in range(replicas[expert])]
+        decisions: list[_PlacementDecision] = []
+        replica_index = 0
+        backtracks_used = 0
+
+        def undo_placement(rank_id: int, slot: int, previous_state: tuple[float, float, float]) -> None:
+            placement[rank_id, slot] = -1
+            rank_sizes[rank_id] -= 1
+            rank_means[rank_id] = previous_state[0]
+            rank_variances[rank_id] = previous_state[1]
+            rank_variance_scales[rank_id] = previous_state[2]
+
+        while replica_index < len(replica_order):
+            expert = replica_order[replica_index]
+            if len(decisions) == replica_index:
                 rank_choices = []
                 for rank_id in range(num_ranks):
                     size = rank_sizes[rank_id]
@@ -407,14 +509,47 @@ class StairEplbPolicy(AbstractEplbPolicy):
                     )
                     updated_risk = updated_mean + z_score * np.sqrt(updated_variance)
                     rank_choices.append((float(updated_risk), rank_id, updated_mean, updated_variance, updated_scale))
-                if not rank_choices:
-                    return None
-                _, selected_rank, selected_mean, selected_variance, selected_scale = min(
-                    rank_choices, key=lambda choice: (choice[0], choice[1])
+                decisions.append(_PlacementDecision(sorted(rank_choices)))
+
+            decision = decisions[replica_index]
+            advanced = False
+            while decision.next_choice < len(decision.choices):
+                _, rank_id, updated_mean, updated_variance, updated_scale = decision.choices[decision.next_choice]
+                decision.next_choice += 1
+                slot = rank_sizes[rank_id]
+                previous_state = rank_means[rank_id], rank_variances[rank_id], rank_variance_scales[rank_id]
+                placement[rank_id, slot] = expert
+                rank_sizes[rank_id] += 1
+                rank_means[rank_id] = updated_mean
+                rank_variances[rank_id] = updated_variance
+                rank_variance_scales[rank_id] = updated_scale
+                sources = migration_sources(current_placement, placement, rank_pair_migration_limit, expert_sources)
+                budget_exhausted = (
+                    sources is not None and decision.tried_feasible_choice and backtracks_used == backtrack_limit
                 )
-                rank_means[selected_rank] = selected_mean
-                rank_variances[selected_rank] = selected_variance
-                rank_variance_scales[selected_rank] = selected_scale
-                placement[selected_rank, rank_sizes[selected_rank]] = expert
-                rank_sizes[selected_rank] += 1
-        return placement
+                if sources is None or budget_exhausted:
+                    undo_placement(rank_id, slot, previous_state)
+                    if budget_exhausted:
+                        return None
+                    continue
+                if decision.tried_feasible_choice:
+                    backtracks_used += 1
+                else:
+                    decision.tried_feasible_choice = True
+                decision.undo_state = rank_id, slot, previous_state
+                replica_index += 1
+                advanced = True
+                break
+            if advanced:
+                continue
+            decisions.pop()
+            if replica_index == 0:
+                return None
+            replica_index -= 1
+            undo_state = decisions[replica_index].undo_state
+            assert undo_state is not None
+            rank_id, slot, previous_state = undo_state
+            undo_placement(rank_id, slot, previous_state)
+
+        assert sources is not None
+        return PlacementPlan(placement, sources)

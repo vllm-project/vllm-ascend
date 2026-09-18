@@ -191,9 +191,12 @@ class TestStairLoadStatistics(unittest.TestCase):
             np.ones(4, dtype=np.int64),
             num_ranks=2,
             z_score=1.0,
+            current_rank_expert_ids=np.array([[0, 1], [2, 3]]),
+            rank_pair_migration_limit=1,
+            backtrack_limit=0,
         )
 
-        np.testing.assert_array_equal(placement, [[0, 1], [2, 3]])
+        np.testing.assert_array_equal(placement.rank_expert_ids, [[0, 1], [2, 3]])
 
     def test_lpt_placement_is_deterministic_and_preserves_replica_constraints(self):
         kwargs = dict(
@@ -203,22 +206,75 @@ class TestStairLoadStatistics(unittest.TestCase):
             replica_counts=np.array([2, 1, 1]),
             num_ranks=2,
             z_score=0.5,
+            current_rank_expert_ids=np.array([[0, 1], [0, 2]]),
+            rank_pair_migration_limit=1,
+            backtrack_limit=0,
         )
 
         first = StairEplbPolicy.lpt_placement(**kwargs)
         second = StairEplbPolicy.lpt_placement(**kwargs)
 
-        np.testing.assert_array_equal(first, second)
-        self.assertTrue(all(len(set(rank)) == len(rank) for rank in first.tolist()))
-        np.testing.assert_array_equal(StairEplbPolicy.placement_replica_counts(first, 3), [2, 1, 1])
+        np.testing.assert_array_equal(first.rank_expert_ids, second.rank_expert_ids)
+        np.testing.assert_array_equal(first.source_rank_ids, second.source_rank_ids)
+        self.assertTrue(all(len(set(rank)) == len(rank) for rank in first.rank_expert_ids.tolist()))
+        np.testing.assert_array_equal(StairEplbPolicy.placement_replica_counts(first.rank_expert_ids, 3), [2, 1, 1])
 
     def test_lpt_placement_rejects_invalid_covariance_shape(self):
         with self.assertRaises(ValueError):
-            StairEplbPolicy.lpt_placement(np.ones(2), np.ones(2), np.ones((2, 3)), np.ones(2, dtype=np.int64), 2, 0.5)
+            StairEplbPolicy.lpt_placement(
+                np.ones(2),
+                np.ones(2),
+                np.ones((2, 3)),
+                np.ones(2, dtype=np.int64),
+                2,
+                0.5,
+                current_rank_expert_ids=np.array([[0], [1]]),
+                rank_pair_migration_limit=1,
+                backtrack_limit=0,
+            )
 
     def test_lpt_placement_rejects_uneven_rank_capacity(self):
         with self.assertRaises(ValueError):
-            StairEplbPolicy.lpt_placement(np.ones(2), np.ones(2), np.eye(2), np.array([1, 2]), 2, 0.5)
+            StairEplbPolicy.lpt_placement(
+                np.ones(2),
+                np.ones(2),
+                np.eye(2),
+                np.array([1, 2]),
+                2,
+                0.5,
+                current_rank_expert_ids=np.array([[0], [1]]),
+                rank_pair_migration_limit=1,
+                backtrack_limit=0,
+            )
+
+    def test_migration_sources_enforce_directed_rank_pair_limit(self):
+        current = np.array([[0, 1], [2, 3], [4, 5]])
+        target = np.array([[2, 3], [0, 4], [1, 5]])
+        expert_sources = [np.flatnonzero(np.any(current == expert, axis=1)).tolist() for expert in range(6)]
+
+        self.assertIsNone(StairEplbPolicy._migration_sources(current, target, 1, expert_sources))
+        sources = StairEplbPolicy._migration_sources(current, target, 2, expert_sources)
+
+        np.testing.assert_array_equal(sources, [[1, 1], [0, 2], [0, 2]])
+
+    def test_migration_sources_reassign_earlier_demand(self):
+        current = np.array([[2, 3], [0, 1], [0, 4]])
+        partial_target = np.array([[0, 1], [-1, -1], [-1, -1]])
+        expert_sources = [np.flatnonzero(np.any(current == expert, axis=1)).tolist() for expert in range(5)]
+
+        sources = StairEplbPolicy._migration_sources(current, partial_target, 1, expert_sources)
+
+        np.testing.assert_array_equal(sources[0], [2, 1])
+
+    def test_migration_sources_follow_multi_hop_augmenting_path(self):
+        current = np.array([[3, 4, 5], [0, 2, 6], [0, 1, 7], [1, 8, 9]])
+        partial_target = np.full_like(current, -1)
+        partial_target[0] = [0, 1, 2]
+        expert_sources = [np.where(current == expert)[0].tolist() for expert in range(10)]
+
+        sources = StairEplbPolicy._migration_sources(current, partial_target, 1, expert_sources)
+
+        np.testing.assert_array_equal(sources[0], [2, 3, 1])
 
     def test_lpt_variance_scales_by_replica_count(self):
         variance, scale = StairEplbPolicy._updated_rank_variance(
@@ -234,21 +290,32 @@ class TestStairLoadStatistics(unittest.TestCase):
         self.assertEqual(variance, 4.0)
         self.assertEqual(scale, 4.0)
 
-    def test_lpt_placement_returns_none_at_greedy_dead_end(self):
+    def test_lpt_placement_backtracks_from_greedy_dead_end(self):
         means = np.array([100.0, 6.0, 5.0, 4.0, 3.0, 2.0, 3.0])
+        current = np.array([[0, 1, 6], [2, 3, 6], [4, 5, 6]])
+        kwargs = dict(
+            expert_means=means,
+            expert_variances=np.zeros(7),
+            expert_covariance=np.zeros((7, 7)),
+            replica_counts=np.array([1, 1, 1, 1, 1, 1, 3]),
+            num_ranks=3,
+            z_score=0.0,
+            current_rank_expert_ids=current,
+            rank_pair_migration_limit=1,
+        )
 
         # Greedy choices fill one rank too early, leaving no three distinct
         # ranks for the final expert even though a valid placement exists.
-        placement = StairEplbPolicy.lpt_placement(
-            means,
-            np.zeros(7),
-            np.zeros((7, 7)),
-            np.array([1, 1, 1, 1, 1, 1, 3]),
-            num_ranks=3,
-            z_score=0.0,
-        )
+        self.assertIsNone(StairEplbPolicy.lpt_placement(**kwargs, backtrack_limit=3))
+        placement = StairEplbPolicy.lpt_placement(**kwargs, backtrack_limit=4)
 
-        self.assertIsNone(placement)
+        self.assertIsNotNone(placement)
+        for dst_rank, target_experts in enumerate(placement.rank_expert_ids):
+            for slot, expert in enumerate(target_experts):
+                self.assertIn(expert, current[placement.source_rank_ids[dst_rank, slot]])
+            for src_rank in range(3):
+                if src_rank != dst_rank:
+                    self.assertLessEqual(np.sum(placement.source_rank_ids[dst_rank] == src_rank), 1)
 
     def test_lpt_placement_accepts_valid_covariance_with_strong_cancellation(self):
         deviations = np.array([-0.04, -0.01, 0.03, -0.15, 0.20, 43.74, 0.18, -43.95])
@@ -263,6 +330,9 @@ class TestStairLoadStatistics(unittest.TestCase):
             np.ones(8, dtype=np.int64),
             num_ranks=1,
             z_score=1.0,
+            current_rank_expert_ids=np.arange(8).reshape(1, 8),
+            rank_pair_migration_limit=1,
+            backtrack_limit=0,
         )
 
         self.assertIsNotNone(placement)
@@ -276,6 +346,9 @@ class TestStairLoadStatistics(unittest.TestCase):
                 np.ones(2, dtype=np.int64),
                 num_ranks=1,
                 z_score=1.0,
+                current_rank_expert_ids=np.array([[0, 1]]),
+                rank_pair_migration_limit=1,
+                backtrack_limit=0,
             )
 
     def test_statistics_reject_invalid_inputs(self):
