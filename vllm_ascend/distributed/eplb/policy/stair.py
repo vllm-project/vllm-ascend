@@ -194,6 +194,42 @@ class StairEplbPolicy(AbstractEplbPolicy):
             raise ValueError("STAIR expert moments and z-score must be finite and non-negative")
         return averages + z_score * np.sqrt(variances)
 
+    @classmethod
+    def gated_layer_imbalance(
+        cls,
+        load_samples: np.ndarray,
+        sample_counts: np.ndarray,
+        current_rank_expert_ids: np.ndarray,
+        last_committed_mean_ratio: float | None,
+        config: StairConfig,
+    ) -> PlacementImbalance | None:
+        """Return current imbalance when a layer passes load and hysteresis gates.
+
+        Loads are ``[bins, experts]``, counts are ``[bins]``, and placement is
+        ``[ranks, slots]``. ``last_committed_mean_ratio`` is the prediction saved
+        only after a real placement commit; ``None`` or NaN means no anchor yet.
+        Return the current imbalance for a nonzero window without an anchor or
+        when either threshold fires; return ``None`` for an all-zero window or
+        when neither threshold fires.
+        """
+        values = np.asarray(load_samples, dtype=np.float64)
+        current_imbalance = cls.placement_imbalance(values, sample_counts, current_rank_expert_ids)
+        if not np.any(values):
+            return None
+        if last_committed_mean_ratio is None or np.isnan(last_committed_mean_ratio):
+            return current_imbalance
+        if not np.isfinite(last_committed_mean_ratio) or last_committed_mean_ratio < 1:
+            raise ValueError("last_committed_mean_ratio must be NaN or a finite ratio no smaller than one")
+
+        current_balance = 1.0 / current_imbalance.mean_ratio
+        committed_balance = 1.0 / last_committed_mean_ratio
+        if (
+            current_balance / committed_balance <= config.relative_balance_threshold
+            or current_balance <= config.absolute_balance_threshold
+        ):
+            return current_imbalance
+        return None
+
     # FlashTree-style search over per-expert replica counts.
 
     @staticmethod

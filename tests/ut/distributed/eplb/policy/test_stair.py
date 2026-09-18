@@ -62,6 +62,62 @@ class TestStairLoadStatistics(unittest.TestCase):
 
         np.testing.assert_array_equal(risk, [2.0, 2.0])
 
+    def test_layer_gate_skips_zero_load(self):
+        result = StairEplbPolicy.gated_layer_imbalance(
+            np.zeros((1, 2)), np.ones(1, dtype=np.int64), np.array([[0], [1]]), None, StairConfig()
+        )
+
+        self.assertIsNone(result)
+
+    def test_layer_gate_accepts_first_nonzero_window(self):
+        for anchor in (None, np.nan):
+            with self.subTest(anchor=anchor):
+                imbalance = StairEplbPolicy.gated_layer_imbalance(
+                    np.array([[11.0, 9.0]]),
+                    np.ones(1, dtype=np.int64),
+                    np.array([[0], [1]]),
+                    anchor,
+                    StairConfig(),
+                )
+
+                self.assertIsNotNone(imbalance)
+                self.assertEqual(imbalance.mean_ratio, 1.1)
+
+    def test_layer_gate_accepts_relative_deterioration(self):
+        imbalance = StairEplbPolicy.gated_layer_imbalance(
+            np.array([[3.0, 2.0]]),
+            np.ones(1, dtype=np.int64),
+            np.array([[0], [1]]),
+            1.1,
+            StairConfig(absolute_balance_threshold=0.5),
+        )
+
+        self.assertIsNotNone(imbalance)
+        self.assertEqual(imbalance.mean_ratio, 1.2)
+
+    def test_layer_gate_accepts_absolute_imbalance(self):
+        imbalance = StairEplbPolicy.gated_layer_imbalance(
+            np.array([[3.0, 2.0]]),
+            np.ones(1, dtype=np.int64),
+            np.array([[0], [1]]),
+            1.3,
+            StairConfig(),
+        )
+
+        self.assertIsNotNone(imbalance)
+        self.assertEqual(imbalance.mean_ratio, 1.2)
+
+    def test_layer_gate_rejects_stable_balanced_layer(self):
+        result = StairEplbPolicy.gated_layer_imbalance(
+            np.array([[11.0, 9.0]]),
+            np.ones(1, dtype=np.int64),
+            np.array([[0], [1]]),
+            1.1,
+            StairConfig(),
+        )
+
+        self.assertIsNone(result)
+
     def test_replica_search_is_bounded_and_deterministic(self):
         kwargs = dict(
             num_stages=3,
