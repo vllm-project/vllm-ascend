@@ -19,6 +19,9 @@ from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
 from vllm_ascend.ops.gdn_attn_builder import (
     AscendGDNAttentionBackend,
     AscendGDNAttentionMetadataBuilder,
+    AscendGDNFusedAttentionBackend,
+    AscendGDNHostMetadataBackend,
+    AscendGDNHostMetadataBuilder,
 )
 from vllm_ascend.ops.triton.fla import utils as fla_utils
 from vllm_ascend.ops.triton.fla.utils import (
@@ -160,6 +163,7 @@ def _make_builder(
     device: torch.device,
     num_heads: int,
     num_speculative_tokens: int,
+    builder_cls=AscendGDNAttentionMetadataBuilder,
     mamba_cache_mode: str = "none",
     block_size: int = 16,
     num_speculative_blocks: int = 0,
@@ -178,7 +182,7 @@ def _make_builder(
         mamba_cache_mode=mamba_cache_mode,
         num_speculative_blocks=num_speculative_blocks,
     )
-    return AscendGDNAttentionMetadataBuilder(spec, ["layer0"], vllm_config, device)
+    return builder_cls(spec, ["layer0"], vllm_config, device)
 
 
 def _build_attn_metadata(
@@ -301,8 +305,97 @@ def test_kimi_chunk_metadata_uses_linear_attention_head_count() -> None:
 
 
 def test_ascend_gdn_attention_uses_ascend_backend():
-    assert AscendGatedDeltaNetAttention.get_attn_backend(object()) is AscendGDNAttentionBackend
+    assert AscendGatedDeltaNetAttention.get_attn_backend(object()) is AscendGDNFusedAttentionBackend
     assert AscendGDNAttentionBackend.get_builder_cls() is AscendGDNAttentionMetadataBuilder
+
+
+def test_fused_backend_selects_host_metadata_only_when_supported(monkeypatch):
+    monkeypatch.setattr(AscendGatedDeltaNetAttention, "_probe_fused_chunk", lambda: True)
+    monkeypatch.setattr(
+        ascend_gdn_attn_builder,
+        "get_pcp_group",
+        lambda: SimpleNamespace(world_size=1),
+    )
+    assert AscendGDNFusedAttentionBackend.get_builder_cls() is AscendGDNHostMetadataBuilder
+
+    monkeypatch.setattr(
+        ascend_gdn_attn_builder,
+        "get_pcp_group",
+        lambda: SimpleNamespace(world_size=2),
+    )
+    assert AscendGDNFusedAttentionBackend.get_builder_cls() is AscendGDNAttentionMetadataBuilder
+    assert AscendGDNHostMetadataBackend.get_builder_cls() is AscendGDNHostMetadataBuilder
+
+    monkeypatch.setattr(AscendGatedDeltaNetAttention, "_probe_fused_chunk", lambda: False)
+    monkeypatch.setattr(
+        ascend_gdn_attn_builder,
+        "get_pcp_group",
+        lambda: SimpleNamespace(world_size=1),
+    )
+    assert AscendGDNFusedAttentionBackend.get_builder_cls() is AscendGDNAttentionMetadataBuilder
+
+
+def test_host_metadata_skips_unused_chunk_helpers(monkeypatch):
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=0,
+        builder_cls=AscendGDNHostMetadataBuilder,
+    )
+    cu_seqlens = torch.tensor([0, 130], dtype=torch.int32)
+    for helper_name in (
+        "prepare_chunk_offsets",
+        "prepare_update_chunk_offsets",
+        "prepare_final_chunk_indices",
+    ):
+        monkeypatch.setattr(
+            ascend_gdn_attn_builder,
+            helper_name,
+            lambda *args, _name=helper_name, **kwargs: pytest.fail(f"unexpected {_name} call"),
+        )
+    original_prepare_indices = ascend_gdn_attn_builder.prepare_chunk_indices
+
+    def prepare_indices_once(cu, chunk_size):
+        assert chunk_size == ascend_gdn_attn_builder._GDN_CHUNK_SIZE
+        return original_prepare_indices(cu, chunk_size)
+
+    monkeypatch.setattr(ascend_gdn_attn_builder, "prepare_chunk_indices", prepare_indices_once)
+    chunk_meta = ascend_gdn_attn_builder._build_non_spec_chunked_prefill_metadata(
+        builder,
+        cu_seqlens,
+        torch.device("cpu"),
+        build_device_metadata=False,
+    )
+
+    assert chunk_meta.chunk_indices_chunk64 is None
+    assert chunk_meta.chunk_offsets_chunk64 is None
+    assert chunk_meta.update_chunk_offsets_chunk64 is None
+    assert chunk_meta.final_chunk_indices_chunk64 is None
+    assert chunk_meta.chunk_indices_large_block is None
+    assert chunk_meta.block_indices_cumsum is None
+    expected = original_prepare_indices(cu_seqlens, ascend_gdn_attn_builder._GDN_CHUNK_SIZE)
+    assert chunk_meta.chunk_indices_chunk64_host == tuple(expected.to(torch.int64).flatten().tolist())
+
+
+def test_host_builder_exposes_host_descriptors_without_device_chunks():
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=0,
+        builder_cls=AscendGDNHostMetadataBuilder,
+    )
+    common_attn_metadata = create_common_attn_metadata(
+        BatchSpec(seq_lens=[130], query_lens=[130]),
+        block_size=16,
+        device=torch.device("cpu"),
+    )
+    attn_metadata = builder.build(0, common_attn_metadata)
+    chunk_meta = attn_metadata.non_spec_prefill_metadata.chunk
+    assert chunk_meta.chunk_indices_chunk64 is None
+    assert chunk_meta.chunk_offsets_chunk64 is None
+    assert chunk_meta.chunk_indices_chunk64_host
+    assert attn_metadata.chunk_indices is None
+    assert attn_metadata.chunk_offsets is None
 
 
 def test_sequence_index_buffers_cover_spec_decode_when_cudagraph_disabled():
@@ -904,7 +997,6 @@ def test_spec_width_prompt_chunk_retains_prefill_metadata(
     graph_mode: CUDAGraphMode,
 ):
     _patch_missing_runtime_cdiv(monkeypatch)
-    monkeypatch.setitem(_make_builder.__globals__, "AscendGDNAttentionMetadataBuilder", builder_cls)
     width = num_spec + 1
     query_lens = [width, width] if mixed_spec else [width]
     seq_lens = [768 + width, context_len + width] if mixed_spec else [context_len + width]
@@ -919,6 +1011,7 @@ def test_spec_width_prompt_chunk_retains_prefill_metadata(
         device=torch.device("cpu"),
         num_heads=32,
         num_speculative_tokens=num_spec,
+        builder_cls=builder_cls,
         mamba_cache_mode="align",
         block_size=384,
         num_speculative_blocks=num_spec,
@@ -1111,12 +1204,12 @@ def test_full_graph_non_spec_metadata_nulls_padded_state_indices(
 
 @pytest.mark.parametrize("builder_cls", [AscendGDNAttentionMetadataBuilder, GDNAttentionMetadataBuilder310])
 @pytest.mark.parametrize("spec", [False, True])
-def test_graph_attaches_once_after_padding_and_reuses_final_buffers(monkeypatch, builder_cls, spec):
-    monkeypatch.setitem(_make_builder.__globals__, "AscendGDNAttentionMetadataBuilder", builder_cls)
+def test_graph_attaches_once_after_padding_and_reuses_final_buffers(builder_cls, spec):
     builder = _make_builder(
         device=torch.device("cpu"),
         num_heads=32,
         num_speculative_tokens=3,
+        builder_cls=builder_cls,
         cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
     )
     is_common = builder_cls is ascend_gdn_attn_builder.AscendGDNAttentionMetadataBuilder
@@ -1192,9 +1285,13 @@ def test_graph_attaches_once_after_padding_and_reuses_final_buffers(monkeypatch,
 
 @pytest.mark.parametrize("builder_cls", [AscendGDNAttentionMetadataBuilder, GDNAttentionMetadataBuilder310])
 @pytest.mark.parametrize("mixed_spec", [False, True])
-def test_prefill_builds_only_consumed_kernel_metadata(monkeypatch, builder_cls, mixed_spec):
-    monkeypatch.setitem(_make_builder.__globals__, "AscendGDNAttentionMetadataBuilder", builder_cls)
-    builder = _make_builder(device=torch.device("cpu"), num_heads=32, num_speculative_tokens=3)
+def test_prefill_builds_only_consumed_kernel_metadata(builder_cls, mixed_spec):
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=3,
+        builder_cls=builder_cls,
+    )
     common = create_common_attn_metadata(
         BatchSpec(seq_lens=[12, 3, 9] if mixed_spec else [3, 9], query_lens=[4, 3, 5] if mixed_spec else [3, 5]),
         block_size=16,
