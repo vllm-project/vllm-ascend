@@ -29,7 +29,6 @@ You can check the [support status of vLLM V1 Engine][v1_user_guide]. Below is th
 | Graph Mode                    | 🟢 Functional    | Functional, see detailed note: [Graph Mode][graph_mode]                 |
 | Sleep Mode                    | 🟢 Functional    | Functional, see detailed note: [Sleep Mode][sleep_mode]                 |
 | Context Parallel              | 🟢 Functional    | Functional, see detailed note: [Context Parallel][context_parallel]     |
-
 | KVPP | 🔵 Experimental | Non-hybrid MLA/SFA models in eager mode; see [KVPP][kvpp] for supported combinations. |
 
 - 🟢 Functional: Fully operational, with ongoing optimizations.
