@@ -70,7 +70,7 @@ from vllm_ascend.worker.device_metadata import DeviceMetadataTask, DeviceMetadat
 # Currently we will fix block size to a small one since `num_reqs` can't be too large
 _PREPARE_INPUTS_BLOCK_SIZE = 4
 
-_HIDDEN_STATE_DRAFTER_TYPES: tuple[type, ...] = (
+_HIDDEN_STATE_DRAFTER_TYPES: tuple[type[Any], ...] = (
     Eagle3LlamaForCausalLM,
     DFlashQwen3ForCausalLM,
     Qwen3DSparkForCausalLM,
