@@ -17,6 +17,7 @@ from vllm_ascend.quantization.utils import (
     enable_fa_quant,
     get_dynamic_mx_quant_scale_alg,
     maybe_auto_detect_quantization,
+    model_uses_fa_quantization,
 )
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD
 
@@ -104,6 +105,22 @@ class TestDetectQuantizationMethod(TestBase):
 
             result = detect_quantization_method(tmpdir)
             self.assertEqual(result, ASCEND_QUANTIZATION_METHOD)
+
+    def test_detects_fa_quantization_from_modelslim_metadata(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = os.path.join(tmpdir, MODELSLIM_CONFIG_FILENAME)
+            with open(config_path, "w") as f:
+                json.dump({"fa_quant_type": "FAKQuant"}, f)
+
+            self.assertTrue(model_uses_fa_quantization(tmpdir))
+
+    def test_fa_quantization_detection_is_model_agnostic(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = os.path.join(tmpdir, MODELSLIM_CONFIG_FILENAME)
+            with open(config_path, "w") as f:
+                json.dump({"model.layers.0.weight": "W8A8_DYNAMIC"}, f)
+
+            self.assertFalse(model_uses_fa_quantization(tmpdir))
 
     def test_detects_compressed_tensors(self):
         with tempfile.TemporaryDirectory() as tmpdir:

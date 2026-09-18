@@ -40,6 +40,12 @@ from vllm_ascend.utils import npu_stream_switch, shared_experts_calculation_stre
 SITU_MX_DST_TYPE_E4M3FN = 36
 
 
+def _uses_kimi_k3_shared_expert_w4a8(projection: torch.nn.Module) -> bool:
+    linear_method = getattr(projection, "quant_method", None)
+    scheme = getattr(linear_method, "quant_method", None)
+    return getattr(scheme, "is_kimi_k3_shared_expert_w4a8", False) is True
+
+
 class SharedExpertParallelMode(Enum):
     """Effective activation and weight layout for a shared-expert forward."""
 
@@ -355,6 +361,10 @@ class AscendSharedExperts:
         down_projection_milestone: str,
     ) -> torch.Tensor:
         original_dtype = hidden_states.dtype
+        kimi_k3_w4a8 = all(
+            _uses_kimi_k3_shared_expert_w4a8(projection)
+            for projection in (self.layer.gate_up_proj, self.layer.down_proj)
+        )
         # Vector dynamic quant overlaps the Cube-heavy router gate.
         quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
         self._wait_for_milestone(
@@ -364,14 +374,17 @@ class AscendSharedExperts:
         # Gate-up is Cube-heavy. From router_output_ready it overlaps the
         # routed AllGather prepare communication, or All2All preprocessing and
         # its forward exchange.
-        gate_up = torch_npu.npu_quant_matmul(
-            quantized_x,
-            self.layer.gate_up_proj.weight,
-            self.layer.gate_up_proj.weight_scale,
-            pertoken_scale=None,
-            bias=None,
-            output_dtype=torch.int32,
-        )
+        if kimi_k3_w4a8:
+            gate_up = self.layer.gate_up_proj((quantized_x, pertoken_scale))[0]
+        else:
+            gate_up = torch_npu.npu_quant_matmul(
+                quantized_x,
+                self.layer.gate_up_proj.weight,
+                self.layer.gate_up_proj.weight_scale,
+                pertoken_scale=None,
+                bias=None,
+                output_dtype=torch.int32,
+            )
 
         self._wait_for_routed_stage(
             milestones,
@@ -381,8 +394,8 @@ class AscendSharedExperts:
         if self.situ_activation is not None:
             quantized_x, swiglu_out_scale = torch.ops._C_ascend.dequant_situ_quant(
                 x=gate_up,
-                weight_scale=self.layer.gate_up_proj.weight_scale_fp32,
-                activation_scale=pertoken_scale,
+                weight_scale=None if kimi_k3_w4a8 else self.layer.gate_up_proj.weight_scale_fp32,
+                activation_scale=None if kimi_k3_w4a8 else pertoken_scale,
                 bias=None,
                 quant_scale=None,
                 quant_offset=None,
@@ -416,6 +429,8 @@ class AscendSharedExperts:
             down_projection_ready,
             down_projection_milestone,
         )
+        if kimi_k3_w4a8:
+            return self.layer.down_proj((quantized_x, swiglu_out_scale))[0]
         return torch_npu.npu_quant_matmul(
             quantized_x,
             self.layer.down_proj.weight,
@@ -542,7 +557,15 @@ class AscendSharedExperts:
             and hasattr(self.layer.gate_up_proj, "weight_scale")
             and hasattr(self.layer.down_proj, "weight_scale")
         )
-        if has_quantized_shared_without_lora and self.quant_type in (QuantType.W8A8, QuantType.W4A8):
+        kimi_k3_w4a8 = all(
+            _uses_kimi_k3_shared_expert_w4a8(projection)
+            for projection in (self.layer.gate_up_proj, self.layer.down_proj)
+        )
+        if (
+            has_quantized_shared_without_lora
+            and self.quant_type in (QuantType.W8A8, QuantType.W4A8)
+            and (not kimi_k3_w4a8 or self.situ_activation is not None)
+        ):
             return SharedExpertMLPPath.A8_INT_FUSED
         if has_quantized_shared_without_lora and self.quant_type == QuantType.W4A8MXFP:
             return SharedExpertMLPPath.A8_MXFP_FUSED
