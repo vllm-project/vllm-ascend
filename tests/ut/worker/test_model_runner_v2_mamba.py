@@ -17,6 +17,8 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import (
     _allocate_kv_cache,
@@ -617,7 +619,10 @@ def test_init_model_state_uses_override_then_default():
     assert init_asecnd_model_state(vllm_config, model, encoder_cache, device) is custom_cls.return_value
 
     with (
-        patch("vllm_ascend.worker.v2.model_states.is_310p", return_value=False),
+        patch(
+            "vllm_ascend.worker.v2.model_states.get_current_hardware_profile",
+            return_value=get_hardware_profile(AscendDeviceType.A2),
+        ),
         patch("vllm_ascend.worker.v2.model_states.default.AscendModelState") as default_cls,
     ):
         state = init_asecnd_model_state(
