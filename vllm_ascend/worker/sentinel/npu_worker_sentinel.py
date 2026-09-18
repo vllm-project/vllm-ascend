@@ -1,12 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 import torch
 import torch_npu
 import vllm.v1.worker.sentinel.gpu_worker_sentinel as _gpu_worker_sentinel
-from vllm.distributed.parallel_state import get_ep_group
+from vllm.distributed.parallel_state import (
+    get_dp_group,
+    get_ep_group,
+    get_tp_group,
+)
+from vllm.distributed.utils import set_gloo_backend_timeout
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
 from vllm.v1.fault_tolerance.utils import FaultToleranceRequest
@@ -123,7 +129,14 @@ class WorkerSentinel(GPUWorkerSentinel):
         super().scale_down(ft_request)
 
         # Verify the redistributed model is runnable before reporting healthy.
+        parallel_config = self.worker.parallel_config
+        timeout = timedelta(seconds=self.worker.parallel_config.fault_tolerance_config.engine_recovery_timeout_sec)
+        if parallel_config.data_parallel_size > 1:
+            set_gloo_backend_timeout(get_dp_group().cpu_group, timeout)
+        if parallel_config.tensor_parallel_size > 1:
+            set_gloo_backend_timeout(get_tp_group().cpu_group, timeout)
         self.worker.execute_dummy_batch()
+        self.activate_cpu_group_timeouts(ft_request)
         torch.npu.synchronize()
 
     def _validate_scale_down_preconditions(self) -> None:
