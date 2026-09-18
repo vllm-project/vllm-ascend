@@ -20,10 +20,8 @@ from vllm.model_executor.model_loader import get_model_loader
 # Re-exported upstream helpers, kept in one place so the sentinel has a
 # single import site for the redistribution building blocks.
 from vllm.v1.worker.sentinel.eplb_redistribute import (
-    check_redundancy_sufficient,
     compute_dead_ep_ranks,
     mark_dead_expert_slots_inplace,
-    rebuild_logical_expert_maps,
     redistribute_expert_placement,
 )
 
@@ -36,11 +34,9 @@ from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
 
 __all__ = [
     "build_orig_to_dense_rank_table",
-    "check_redundancy_sufficient",
     "compute_dead_ep_ranks",
     "densify_routing_table_physical_ids",
     "mark_dead_expert_slots_inplace",
-    "rebuild_logical_expert_maps",
     "redistribute_expert_placement",
     "reload_experts_from_disk",
 ]
