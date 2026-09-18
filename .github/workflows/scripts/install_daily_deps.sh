@@ -54,13 +54,9 @@ python3 -m pip install "$MEMCACHE_URL" --force-reinstall --no-deps
 # ---- triton-ascend ----
 # Controlled by INSTALL_TRITON_ASCEND env var (default: false).
 # Set INSTALL_TRITON_ASCEND=true to enable triton-ascend daily installation.
-if [ "${INSTALL_TRITON_ASCEND:-false}" = "true" ]; then
-    echo "Install triton-ascend..."
-    TRITON_ASCEND_URL="https://ascend-cann-open.obs.cn-north-4.myhuaweicloud.com/Triton_Innersource/B_Version/Triton%20Performance%20Optimization%20${TRITON_ASCEND_VERSION}/triton_ascend-${TRITON_ASCEND_PACKAGE_VERSION}-cp312-cp312-manylinux_2_27_${ARCH}.manylinux_2_28_${ARCH}.whl"
-    python3 -m pip install "$TRITON_ASCEND_URL" --force-reinstall
-else
-    echo "Skipping triton-ascend (set INSTALL_TRITON_ASCEND=true to enable)"
-fi
+echo "Install triton-ascend..."
+TRITON_ASCEND_URL="https://ascend-cann-open.obs.cn-north-4.myhuaweicloud.com/Triton_Innersource/B_Version/Triton%20Performance%20Optimization%20${TRITON_ASCEND_VERSION}/triton_ascend-${TRITON_ASCEND_PACKAGE_VERSION}-cp312-cp312-manylinux_2_27_${ARCH}.manylinux_2_28_${ARCH}.whl"
+python3 -m pip install "$TRITON_ASCEND_URL" --force-reinstall
 
 # ---- torch-npu ----
 echo "Download, extract and install torch-npu..."
