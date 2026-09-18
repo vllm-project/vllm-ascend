@@ -607,13 +607,12 @@ class KVPoolWorker:
                 per_layer = sum(gbl) // group_num_layers
                 if getattr(self, "pp_size", 1) > 1:
                     layer_byte_offset += int(getattr(self, "layerwise_key_layer_offset", 0)) * per_layer
-                cp_scale = getattr(self, "pcp_size", 1) * getattr(self, "dcp_size", 1)
-                if cp_scale > 1 and self.put_step > 1:
+                if self.dcp_size > 1 and self.put_step > 1:
                     # Use the GLOBAL region size (PP-aware) as the basis for
                     # the per-shard stride; under PP>1 the local sum(gbl) only
                     # covers this stage's layers and would under-allocate.
-                    shard_stride = self._global_group_alloc_size(group_id) // cp_scale
-                    shard_idx = getattr(self, "pcp_rank", 0) * self.dcp_size + getattr(self, "dcp_rank", 0)
+                    shard_stride = self._global_group_alloc_size(group_id) // self.dcp_size
+                    shard_idx = self.dcp_rank
                     layer_byte_offset += shard_idx * shard_stride
             builders.append(
                 LayerBatchBuilder(
@@ -889,11 +888,10 @@ class KVPoolWorker:
         # and an unaligned stride would yield misaligned GVA addresses that
         # SDMA rejects. With put_step == 1 every rank owns a distinct region
         # key and no shard separation is needed.
-        cp_scale = getattr(self, "pcp_size", 1) * getattr(self, "dcp_size", 1)
-        if self.put_step > 1 and cp_scale > 1:
+        if self.put_step > 1 and self.dcp_size > 1:
             gva_align = 2 * 1024 * 1024
             shard_stride = (per_layer * n_global + gva_align - 1) // gva_align * gva_align
-            return shard_stride * cp_scale
+            return shard_stride * self.dcp_size
         return per_layer * n_global
 
     def _infer_cache_group_metadata(self, group_id: int, layer_names: list[str]):
