@@ -7,7 +7,7 @@ _envs: &envs
 #  OMP_NUM_THREADS: "1"
   HCCL_BUFFSIZE: "1024"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-
+  VLLM_DISABLE_COMPILE_CACHE: "1"
 
 _server_cmd: &server_cmd
   - "--port"
