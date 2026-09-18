@@ -32,7 +32,7 @@ def test_uses_swift_balancer_policy(monkeypatch):
     policy = AscendV2EplbPolicy()
 
     assert policy._policy is generated_policy
-    assert policy.max_rebalanced_layers_per_cycle == 2
+    assert policy.max_rebalanced_layers_per_cycle == 10
     generate_policy.assert_called_once_with(2)
 
 
@@ -61,6 +61,60 @@ def test_build_physical_load_splits_replicated_expert_load():
     )
 
 
+def test_spread_packed_redundant_slots_preserves_replica_counts():
+    packed_mapping = torch.tensor(
+        [
+            list(range(12)) + [0, 1, 2, 3],
+            list(range(12)) + [0, 1, 2, 3],
+        ]
+    )
+    logical_load = torch.tensor(
+        [
+            [10] * 12,
+            [0] * 12,
+        ]
+    )
+
+    spread_mapping, spread_layers = (
+        AscendV2EplbPolicy._spread_packed_redundant_slots(
+            packed_mapping,
+            logical_load,
+            num_ranks=4,
+        )
+    )
+
+    assert spread_layers == [0]
+    torch.testing.assert_close(spread_mapping[1], packed_mapping[1])
+    torch.testing.assert_close(
+        torch.bincount(spread_mapping[0], minlength=12),
+        torch.bincount(packed_mapping[0], minlength=12),
+    )
+    rank_mapping = spread_mapping[0].reshape(4, 4)
+    assert all(len(set(rank_experts.tolist())) == 4 for rank_experts in rank_mapping)
+    assert not torch.equal(spread_mapping[0], packed_mapping[0])
+
+
+def test_rebalance_spreads_packed_layout_before_swift_balancer():
+    old_mapping = torch.tensor([list(range(12)) + [0, 1, 2, 3]])
+    policy = make_policy(changed=True, new_deployment=[], max_layers=1)
+    policy._policy.rebalance_experts.side_effect = (
+        lambda placement, workload: (True, [0], placement.tolist())
+    )
+
+    result = policy.rebalance_experts(
+        weight=torch.tensor([[10] * 12]),
+        num_replicas=16,
+        num_groups=1,
+        num_nodes=1,
+        num_ranks=4,
+        old_global_expert_indices=old_mapping,
+    )
+
+    current_table, _ = policy._policy.rebalance_experts.call_args.args
+    assert not torch.equal(current_table.flatten(), old_mapping[0])
+    torch.testing.assert_close(result, current_table.reshape(1, 16))
+
+
 def test_rebalance_converts_between_vllm_and_ascend_shapes():
     old_mapping = torch.tensor([[0, 1, 0, 1]])
     new_deployment = [[[0, 0], [1, 1]]]
@@ -87,7 +141,7 @@ def test_rebalance_converts_between_vllm_and_ascend_shapes():
     torch.testing.assert_close(result, torch.tensor([[0, 0, 1, 1]]))
 
 
-def test_rebalance_keeps_old_mapping_when_policy_declines_update():
+def test_rebalance_uses_candidate_mapping_when_policy_declines_update():
     old_mapping = torch.tensor([[0, 1, 0, 1]])
     policy = make_policy(
         changed=False,
@@ -103,8 +157,7 @@ def test_rebalance_keeps_old_mapping_when_policy_declines_update():
         old_global_expert_indices=old_mapping,
     )
 
-    torch.testing.assert_close(result, old_mapping)
-    assert result is not old_mapping
+    torch.testing.assert_close(result, torch.tensor([[0, 0, 1, 1]]))
 
 
 def test_rebalance_limits_changed_layers_by_policy_priority():
