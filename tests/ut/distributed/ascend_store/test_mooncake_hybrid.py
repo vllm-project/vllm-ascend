@@ -196,6 +196,10 @@ class TestMooncakeHybrid(unittest.TestCase):
             if layer < 2:
                 self.assertFalse(store.complete)
             elif layer == 2:
+                # The runtime intentionally allows a bounded send backlog.
+                # Synchronize only this intermediate visibility assertion.
+                assert worker.kv_send_thread is not None
+                worker.kv_send_thread.request_queue.join()
                 self.assertEqual(len(store.complete), 4, "Group 0 completes before the last physical layer")
             worker.save_kv_layer(meta)
         self.assertEqual(len(store.complete), 7)
@@ -245,7 +249,10 @@ class TestMooncakeHybrid(unittest.TestCase):
     def test_layout_fingerprint_covers_group_membership_and_page_size(self):
         config = SimpleNamespace(
             kv_cache_groups=[
-                KVCacheGroupSpec(["model.layers.0.kv"], FullAttentionSpec(block_size=16, dtype="uint8")),
+                KVCacheGroupSpec(
+                    ["model.layers.0.kv"],
+                    FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype="uint8"),
+                ),
             ]
         )
         original = hybrid_layout_id(config)
@@ -253,9 +260,13 @@ class TestMooncakeHybrid(unittest.TestCase):
         config.kv_cache_groups[0].layer_names.append("model.layers.1.kv")
         self.assertNotEqual(original, hybrid_layout_id(config))
         config.kv_cache_groups[0].layer_names.pop()
-        config.kv_cache_groups[0].kv_cache_spec = FullAttentionSpec(block_size=16, dtype="float16")
+        config.kv_cache_groups[0].kv_cache_spec = FullAttentionSpec(
+            block_size=16, num_kv_heads=1, head_size=1, dtype="float16"
+        )
         self.assertEqual(original, hybrid_layout_id(config))
-        config.kv_cache_groups[0].kv_cache_spec = FullAttentionSpec(block_size=32, dtype="float16")
+        config.kv_cache_groups[0].kv_cache_spec = FullAttentionSpec(
+            block_size=32, num_kv_heads=1, head_size=1, dtype="float16"
+        )
         self.assertNotEqual(original, hybrid_layout_id(config))
 
     def test_layout_fingerprint_normalizes_uniform_wrapper(self):
@@ -455,9 +466,19 @@ class TestMooncakeHybrid(unittest.TestCase):
     def test_shared_coordinator_requires_reachable_state_in_all_groups(self):
         group_config = SimpleNamespace(
             kv_cache_groups=[
-                KVCacheGroupSpec(["model.layers.0.kv"], FullAttentionSpec(block_size=16, dtype="uint8")),
                 KVCacheGroupSpec(
-                    ["model.layers.1.state"], SlidingWindowSpec(block_size=16, sliding_window=16, dtype="uint8")
+                    ["model.layers.0.kv"],
+                    FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype="uint8"),
+                ),
+                KVCacheGroupSpec(
+                    ["model.layers.1.state"],
+                    SlidingWindowSpec(
+                        block_size=16,
+                        sliding_window=16,
+                        num_kv_heads=1,
+                        head_size=1,
+                        dtype="uint8",
+                    ),
                 ),
             ]
         )
