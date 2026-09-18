@@ -253,6 +253,7 @@ class TestStairLoadStatistics(unittest.TestCase):
             num_ranks=2,
             z_score=1.0,
             current_rank_expert_ids=np.array([[0, 1], [2, 3]]),
+            rank_node_ids=np.zeros(2, dtype=np.int64),
             rank_pair_migration_limit=1,
             backtrack_limit=0,
         )
@@ -268,6 +269,7 @@ class TestStairLoadStatistics(unittest.TestCase):
             num_ranks=2,
             z_score=0.5,
             current_rank_expert_ids=np.array([[0, 1], [0, 2]]),
+            rank_node_ids=np.zeros(2, dtype=np.int64),
             rank_pair_migration_limit=1,
             backtrack_limit=0,
         )
@@ -290,6 +292,7 @@ class TestStairLoadStatistics(unittest.TestCase):
                 2,
                 0.5,
                 current_rank_expert_ids=np.array([[0], [1]]),
+                rank_node_ids=np.zeros(2, dtype=np.int64),
                 rank_pair_migration_limit=1,
                 backtrack_limit=0,
             )
@@ -304,6 +307,22 @@ class TestStairLoadStatistics(unittest.TestCase):
                 2,
                 0.5,
                 current_rank_expert_ids=np.array([[0], [1]]),
+                rank_node_ids=np.zeros(2, dtype=np.int64),
+                rank_pair_migration_limit=1,
+                backtrack_limit=0,
+            )
+
+    def test_lpt_placement_rejects_invalid_rank_nodes(self):
+        with self.assertRaisesRegex(ValueError, "rank_node_ids"):
+            StairEplbPolicy.lpt_placement(
+                np.ones(2),
+                np.ones(2),
+                np.eye(2),
+                np.ones(2, dtype=np.int64),
+                2,
+                0.5,
+                current_rank_expert_ids=np.array([[0], [1]]),
+                rank_node_ids=np.array([0]),
                 rank_pair_migration_limit=1,
                 backtrack_limit=0,
             )
@@ -337,6 +356,53 @@ class TestStairLoadStatistics(unittest.TestCase):
 
         np.testing.assert_array_equal(sources[0], [2, 3, 1])
 
+    def test_minimum_cost_sources_prefer_same_node_then_lowest_rank(self):
+        current = np.array([[1], [0], [0]])
+        target = np.array([[0], [-1], [-1]])
+        expert_sources = [[1, 2], [0]]
+
+        same_node = StairEplbPolicy._minimum_cost_migration_sources(
+            current, target, 1, expert_sources, np.array([0, 1, 0])
+        )
+        tied = StairEplbPolicy._minimum_cost_migration_sources(
+            current, target, 1, expert_sources, np.zeros(3, dtype=np.int64)
+        )
+
+        self.assertEqual(same_node[0, 0], 2)
+        self.assertEqual(tied[0, 0], 1)
+
+    def test_minimum_cost_sources_preserve_global_topology_optimum(self):
+        current = np.array([[2, 3], [0, 1], [0, 4], [1, 5]])
+        target = np.full_like(current, -1)
+        target[0] = [0, 1]
+        expert_sources = [np.where(current == expert)[0].tolist() for expert in range(6)]
+
+        sources = StairEplbPolicy._minimum_cost_migration_sources(
+            current, target, 1, expert_sources, np.array([0, 0, 0, 1])
+        )
+
+        # Taking rank 1 for expert 0 would force expert 1 to cross nodes.
+        np.testing.assert_array_equal(sources[0], [2, 1])
+
+    def test_lpt_placement_uses_topology_aware_final_sources(self):
+        current = np.array([[0, 2], [0, 1], [1, 3]])
+        placement = StairEplbPolicy.lpt_placement(
+            np.zeros(4),
+            np.zeros(4),
+            np.zeros((4, 4)),
+            np.array([2, 2, 1, 1]),
+            num_ranks=3,
+            z_score=0.0,
+            current_rank_expert_ids=current,
+            rank_node_ids=np.array([0, 1, 0]),
+            rank_pair_migration_limit=1,
+            backtrack_limit=0,
+        )
+
+        self.assertIsNotNone(placement)
+        np.testing.assert_array_equal(placement.rank_expert_ids, [[0, 1], [0, 1], [2, 3]])
+        self.assertEqual(placement.source_rank_ids[0, 1], 2)
+
     def test_lpt_variance_scales_by_replica_count(self):
         variance, scale = StairEplbPolicy._updated_rank_variance(
             expert=1,
@@ -362,6 +428,7 @@ class TestStairLoadStatistics(unittest.TestCase):
             num_ranks=3,
             z_score=0.0,
             current_rank_expert_ids=current,
+            rank_node_ids=np.zeros(3, dtype=np.int64),
             rank_pair_migration_limit=1,
         )
 
@@ -392,6 +459,7 @@ class TestStairLoadStatistics(unittest.TestCase):
             num_ranks=1,
             z_score=1.0,
             current_rank_expert_ids=np.arange(8).reshape(1, 8),
+            rank_node_ids=np.zeros(1, dtype=np.int64),
             rank_pair_migration_limit=1,
             backtrack_limit=0,
         )
@@ -408,6 +476,7 @@ class TestStairLoadStatistics(unittest.TestCase):
                 num_ranks=1,
                 z_score=1.0,
                 current_rank_expert_ids=np.array([[0, 1]]),
+                rank_node_ids=np.zeros(1, dtype=np.int64),
                 rank_pair_migration_limit=1,
                 backtrack_limit=0,
             )
