@@ -295,7 +295,7 @@ def test_pcp_dummy_refreshes_captured_buffers_after_real_batch(num_reqs, num_tok
 def test_prepare_dummy_attn_without_pcp_uses_upstream():
     runner = _make_runner()
     runner.pcp_manager = None
-    dummy = object()
+    dummy = SimpleNamespace(num_tokens_after_padding=4)
     with patch.object(GPUModelRunner, "prepare_dummy_attn", return_value=((), None)) as parent:
         assert runner.prepare_dummy_attn(dummy) == ((), None)
     if vllm_version_is("0.28.0"):

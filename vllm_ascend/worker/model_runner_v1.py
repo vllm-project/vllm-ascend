@@ -41,7 +41,6 @@ from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import CompilationMode, CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
 )
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
@@ -2404,7 +2403,7 @@ class NPUModelRunner(GPUModelRunner):
 
                 if (
                     cudagraph_mode == CUDAGraphMode.FULL
-                    or (enable_sp() and not self.model_config.use_mla)
+                    or (enable_sp(self.vllm_config) and not self.model_config.use_mla)
                     and self.dcp_size == 1
                 ):
                     # Currently, Graph Mode and SP will both pad num_tokens,
@@ -3108,6 +3107,13 @@ class NPUModelRunner(GPUModelRunner):
             return round_up(num_scheduled_tokens, tp_size)
         return num_scheduled_tokens
 
+    def _get_pp_input_num_tokens(self, num_tokens: int) -> int:
+        # PP receives happen outside the model's forward context. Use this
+        # runner's config for both real inputs and profile/capture buffers.
+        if enable_sp(self.vllm_config):
+            return cdiv(num_tokens, self.vllm_config.parallel_config.tensor_parallel_size)
+        return num_tokens
+
     # Keep PP intermediate tensors local to the sequence-parallel shard.
     def sync_and_slice_intermediate_tensors(
         self,
@@ -3116,28 +3122,18 @@ class NPUModelRunner(GPUModelRunner):
         sync_self: bool,
     ) -> IntermediateTensors:
         assert self.intermediate_tensors is not None
-        tp = self.vllm_config.parallel_config.tensor_parallel_size
+        copy_len = self._get_pp_input_num_tokens(num_tokens)
 
         if sync_self:
             assert intermediate_tensors is not None
             for k, v in intermediate_tensors.items():
-                copy_len = (num_tokens + tp - 1) // tp if enable_sp() else num_tokens
                 if k not in self.intermediate_tensors.tensors:
                     base_tensor = self.intermediate_tensors["hidden_states"]
-                    self.intermediate_tensors[k] = v.new_empty(
-                        (base_tensor.shape[0], *v.shape[1:])
-                    )
-                self.intermediate_tensors[k][:copy_len].copy_(
-                    v[:copy_len], non_blocking=True
-                )
+                    self.intermediate_tensors[k] = v.new_empty((base_tensor.shape[0], *v.shape[1:]))
+                self.intermediate_tensors[k][:copy_len].copy_(v[:copy_len], non_blocking=True)
 
         return IntermediateTensors(
-            {
-                k: v[: (num_tokens + tp - 1) // tp]
-                if enable_sp()
-                else v[:num_tokens]
-                for k, v in self.intermediate_tensors.items()
-            }
+            {k: v[:copy_len] for k, v in self.intermediate_tensors.items()}
         )
 
     def sync_and_gather_intermediate_tensors(
@@ -3147,9 +3143,7 @@ class NPUModelRunner(GPUModelRunner):
         sync_self: bool,
     ) -> IntermediateTensors:
         # vLLM renamed sync_and_slice to sync_and_gather.
-        return self.sync_and_slice_intermediate_tensors(
-            num_tokens, intermediate_tensors, sync_self
-        )
+        return self.sync_and_slice_intermediate_tensors(num_tokens, intermediate_tensors, sync_self)
 
     def _determine_batch_execution_and_padding(
         self,
@@ -3937,18 +3931,10 @@ class NPUModelRunner(GPUModelRunner):
             if get_pp_group().is_first_rank:
                 intermediate_tensors = None
             else:
-                # When PP and sequence parallelism are enabled, during dummy_run the estimated space should divide
-                # num_tokens by
-                # tp_size; otherwise, on non-first PP ranks it would effectively perform an extra all-gather, leading
-                # to incorrect memory estimation and potentially causing OOM.
-                intermediate_tokens = num_tokens_padded
-                if enable_sp():
-                    tp_size = get_tensor_model_parallel_world_size()
-                    intermediate_tokens = (num_tokens_padded + tp_size - 1) // tp_size
+                # Match the actual PP receive layout in profiling and capture.
+                intermediate_tokens = self._get_pp_input_num_tokens(num_tokens_padded)
                 if self.intermediate_tensors is None:
-                    max_actual_tokens = self.max_num_tokens
-                    if enable_sp():
-                        max_actual_tokens = (self.max_num_tokens + tp_size - 1) // tp_size
+                    max_actual_tokens = self._get_pp_input_num_tokens(self.max_num_tokens)
                     self.intermediate_tensors = self.model.make_empty_intermediate_tensors(
                         batch_size=max_actual_tokens, dtype=self.dtype, device=self.device
                     )
