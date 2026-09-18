@@ -87,7 +87,7 @@ def test_qwen35_lora_with_aclgraph_tp1_fp16(qwen35_text_lora_files):
         mamba_ssm_cache_dtype="float16",
         compilation_config={
             "cudagraph_mode": "FULL_DECODE_ONLY",
-            "cudagraph_capture_sizes": [1,2,4],
+            "cudagraph_capture_sizes": [1, 2, 4],
         },
     ) as vllm_runner:
         llm = vllm_runner.model

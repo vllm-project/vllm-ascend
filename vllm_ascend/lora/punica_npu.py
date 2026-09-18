@@ -216,9 +216,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
     def _use_sgmv(self) -> bool:
         if not self.is_prefill:
             return False
-        return not (
-            self._in_graph_mode() and self.ascend_device_type == AscendDeviceType._310P
-        )
+        return not (self._in_graph_mode() and self.ascend_device_type == AscendDeviceType._310P)
 
     def _apply_expand(
         self,
@@ -235,9 +233,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         GEMM of lora'b.
         """
 
-        expand_slice_fun: Callable = (
-            self._expand_slice_prefill if self._use_sgmv() else self._expand_slice_decode
-        )
+        expand_slice_fun: Callable = self._expand_slice_prefill if self._use_sgmv() else self._expand_slice_decode
         expand_slice_fun(y, x, w_t_all, y_offset, y_slice_size, add_inputs)
 
     def _apply_shrink(self, y: torch.Tensor, x: torch.Tensor, w_t_all: torch.Tensor, scale: float):
