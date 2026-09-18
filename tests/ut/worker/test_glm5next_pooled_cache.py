@@ -134,6 +134,12 @@ def _make_runner(config, main_cache_dims=(4, 0)):
     runner.sparse_kv_offload_config = SimpleNamespace(enabled=False)
     runner.tp_rank = 0
     runner.attn_backend = _AttentionBackend
+    # Mirror the real initialize flow: the full group (MAIN + INDEXER) resolves
+    # its kernel block size through select_common_block_size, the tail group
+    # keeps its own block, and mamba disables splitting. With the mini config
+    # (logical block 8) the full group kernel equals the logical block, so the
+    # compressed indexer kernel rows are 8 // compress_ratio(2) = 4 = storage.
+    runner.kernel_block_sizes = [[8], [2], [0]]
     # The runner must consume the descriptor/spec contract without inspecting
     # a model type.
     runner.model_config = SimpleNamespace()
@@ -144,21 +150,25 @@ def _make_runner(config, main_cache_dims=(4, 0)):
             backend=_AttentionBackend,
             kv_cache_spec=specs[MAIN],
             layer_names=[MAIN],
+            kv_cache_group_id=0,
         ),
         SimpleNamespace(
             backend=_AttentionBackend,
             kv_cache_spec=specs[INDEXER],
             layer_names=[INDEXER],
+            kv_cache_group_id=0,
         ),
         SimpleNamespace(
             backend=_StateBackend,
             kv_cache_spec=specs[STATE],
             layer_names=[STATE],
+            kv_cache_group_id=1,
         ),
         SimpleNamespace(
             backend=None,
             kv_cache_spec=specs[MAMBA],
             layer_names=[MAMBA],
+            kv_cache_group_id=2,
         ),
     ]
     runner._kv_cache_spec_attn_group_iterator = lambda: iter(attn_groups)
@@ -170,7 +180,8 @@ def _make_plan(num_blocks=3, main_head_size=4):
     # Match production: vLLM registers built-in specs before the Ascend hook.
     register_all_kvcache_specs(None)
     config = _make_config()
-    groups = get_glm5_next_kv_cache_groups(config, _make_specs(main_head_size))
+    specs = _make_specs(main_head_size)
+    groups = get_glm5_next_kv_cache_groups(config, specs)
     bytes_per_block = get_glm5_next_pool_bytes_per_block(groups)
     plan = get_glm5_next_kv_cache_config(
         config,
@@ -206,10 +217,15 @@ def test_glm5_next_runner_allocates_contiguous_slot_backings():
         (3, 1, 2, 2),
     ]
 
-    for name, cache in ((INDEXER, indexer_cache), (STATE, tail_cache)):
-        page_size = descriptors[name].size // plan.num_blocks
-        assert cache.stride(0) * cache.element_size() == page_size
-        assert cache.data_ptr() == raw_caches[name].data_ptr()
+    # Kernel-block contract (mirrors _reshape_kv_cache_v2): the compressed
+    # indexer packs natural kernel blocks as a contiguous prefix of the
+    # shared small slot; the per-request tail ring packs a contiguous suffix.
+    assert indexer_cache.is_contiguous()
+    assert indexer_cache.data_ptr() == raw_caches[INDEXER].data_ptr()
+    tail_packed_bytes = tail_cache.numel() * tail_cache.element_size()
+    slot = raw_caches[STATE]
+    slot_bytes = slot.numel() * slot.element_size()
+    assert tail_cache.data_ptr() + tail_packed_bytes == slot.data_ptr() + slot_bytes
     for cache in caches[MAMBA]:
         assert cache.stride(0) * cache.element_size() == descriptors[MAMBA].size // plan.num_blocks
 
@@ -219,9 +235,13 @@ def test_glm5_next_runner_allocates_contiguous_slot_backings():
     assert mamba_payload_size < descriptors[MAMBA].size
 
     tail_cache[2].fill_(7)
-    state_payload_size = tail_cache[0].numel() * tail_cache.element_size()
-    state_padding = 2 * (descriptors[STATE].size // plan.num_blocks) + state_payload_size
-    assert raw_caches[STATE][state_padding].item() == 0
+    # The tail owns the slot suffix: block 2 of the ring holds 7.0f, the
+    # rest of the suffix ring and the indexer prefix stay untouched.
+    tail_packed_els = tail_packed_bytes // slot.element_size()
+    block2_els = tail_cache[2].numel() * tail_cache[2].element_size() // slot.element_size()
+    assert torch.all(slot[slot.numel() - block2_els :].view(torch.float32) == 7)
+    assert torch.count_nonzero(slot[: slot.numel() - tail_packed_els]) == 0
+    assert torch.count_nonzero(slot[slot.numel() - tail_packed_els : slot.numel() - block2_els]) == 0
 
 
 def test_glm5_next_runner_splits_main_mla_components_within_each_page():

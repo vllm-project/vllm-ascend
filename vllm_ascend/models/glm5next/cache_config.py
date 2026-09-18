@@ -107,7 +107,14 @@ def _align_glm5_next_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]) -> None:
         max(_unpadded_page_size(spec) for spec in main_candidates),
     )
     small_candidates = (*indexer_specs, *tail_specs)
+    # The shared small slot must keep the unified page size: the compressed
+    # indexer packs a kernel-block prefix and the per-request tail rings a
+    # suffix, each bounded to half the slot. MRV2 workers pre-pad their
+    # specs to the common page, so the max is already the unified size
+    # there; MRV1 workers send unpadded specs, so the main page must
+    # dominate here for both runners to land on the same slot geometry.
     small_page_size = max(
+        main_page_size,
         max(spec.page_size_bytes for spec in small_candidates),
         max(_unpadded_page_size(spec) for spec in small_candidates),
     )

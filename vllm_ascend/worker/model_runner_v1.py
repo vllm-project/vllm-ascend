@@ -5025,6 +5025,12 @@ class NPUModelRunner(GPUModelRunner):
         kv_caches: dict[str, torch.Tensor] = {}
         layer_kv_cache_spec = self._get_layer_kv_cache_specs(kv_cache_config)
         uses_padded_page_layout = requires_padded_page_layout(layer_kv_cache_spec.values())
+        # The kpool tail spec is the model-level GLM-Next signature: the main
+        # MLA spec may carry its glm marker only on the module, not on the
+        # spec the use_compress branch forwards unwrapped.
+        is_glm5_next_model = any(
+            isinstance(spec, AscendIndexerKPoolTailSpec) for spec in layer_kv_cache_spec.values()
+        )
         for group in self._kv_cache_spec_attn_group_iterator():
             attn_backend = group.backend
             current_kv_cache_spec = group.kv_cache_spec
@@ -5033,6 +5039,127 @@ class NPUModelRunner(GPUModelRunner):
                     continue
 
                 current_kv_cache_spec = layer_kv_cache_spec[layer_name]
+
+                if isinstance(current_kv_cache_spec, AscendIndexerKPoolTailSpec):
+                    # GLM-5.3-Flash kpool tail: per-request ring packed as a
+                    # contiguous suffix of the shared small slot (mirrors
+                    # _reshape_kv_cache_v2 in worker/v2/attn_utils.py).
+                    raw_cache = kv_cache_raw_tensors[layer_name]
+                    if not isinstance(raw_cache, torch.Tensor):
+                        raise ValueError(
+                            f"KPool tail cache for {layer_name} must use one raw tensor."
+                        )
+                    typed_slot = raw_cache.view(current_kv_cache_spec.dtype)
+                    tail_block_el = (
+                        current_kv_cache_spec.unpadded_page_size_bytes
+                        // get_dtype_size(current_kv_cache_spec.dtype)
+                    )
+                    num_tail_blocks = kv_cache_config.num_blocks
+                    if num_tail_blocks * tail_block_el * 2 > typed_slot.numel():
+                        raise ValueError(
+                            f"KPool tail cache for {layer_name} exceeds half the small slot: "
+                            f"packed={num_tail_blocks * tail_block_el} elements, "
+                            f"slot={typed_slot.numel()}."
+                        )
+                    kv_caches[layer_name] = [
+                        typed_slot[
+                            typed_slot.numel() - num_tail_blocks * tail_block_el :
+                        ].view(
+                            num_tail_blocks,
+                            2,
+                            current_kv_cache_spec.block_size,
+                            current_kv_cache_spec.head_size,
+                        )
+                    ]
+                    continue
+                if (
+                    isinstance(current_kv_cache_spec, AscendMLAAttentionSpec)
+                    and getattr(current_kv_cache_spec, "indexes_kv_by_block_stride", False)
+                    and get_kv_cache_compression_ratio(current_kv_cache_spec) > 1
+                ):
+                    # GLM-5.3-Flash compressed indexer: natural kernel blocks
+                    # packed as a contiguous prefix of the shared small slot
+                    # (mirrors _reshape_kv_cache_v2). The stride marker guards
+                    # against intercepting compressed specs owned by the
+                    # existing V1 page-strided path (e.g. DSV4).
+                    raw_cache = kv_cache_raw_tensors[layer_name]
+                    raw_single = raw_cache[0] if isinstance(raw_cache, tuple) else raw_cache
+                    if isinstance(raw_cache, tuple) and len(raw_cache) != 1:
+                        raise ValueError(
+                            f"Compressed indexer cache for {layer_name} must be a single tensor."
+                        )
+                    compression_ratio = get_kv_cache_compression_ratio(current_kv_cache_spec)
+                    kernel_block_size = (
+                        self.kernel_block_sizes[group.kv_cache_group_id][0]
+                        // compression_ratio
+                    )
+                    num_blocks = raw_single.numel() // current_kv_cache_spec.page_size_bytes
+                    num_blocks_per_kv_block = (
+                        get_storage_block_size(current_kv_cache_spec) // kernel_block_size
+                    )
+                    kv_cache_shape = attn_backend.get_kv_cache_shape(
+                        num_blocks * num_blocks_per_kv_block,
+                        kernel_block_size,
+                        current_kv_cache_spec.num_kv_heads,
+                        current_kv_cache_spec.head_size,
+                    )
+                    shape = tuple(kv_cache_shape)
+                    strides = [1] * len(shape)
+                    for dim_idx in range(len(shape) - 2, -1, -1):
+                        strides[dim_idx] = strides[dim_idx + 1] * shape[dim_idx + 1]
+                    typed_slot = raw_single.view(current_kv_cache_spec.dtype)
+                    if strides[0] * shape[0] * 2 > typed_slot.numel():
+                        raise ValueError(
+                            f"Compressed indexer cache for {layer_name} exceeds half the small slot: "
+                            f"packed={strides[0] * shape[0]} elements, slot={typed_slot.numel()}."
+                        )
+                    cache = torch.as_strided(typed_slot, size=shape, stride=tuple(strides))
+                    kv_caches[layer_name] = (cache,)
+                    continue
+                if (
+                    isinstance(current_kv_cache_spec, AscendMLAAttentionSpec)
+                    and is_glm5_next_model
+                    and get_kv_cache_compression_ratio(current_kv_cache_spec) == 1
+                ):
+                    # GLM-5.3-Flash main MLA: expose natural kernel blocks
+                    # (mirrors _reshape_kv_cache_v2) instead of one page-sized
+                    # block per scheduler block, so dim0 blocks stay
+                    # byte-identical across engines with different TP and the
+                    # whole-block KV transfer can pair them. The NoPE main
+                    # cache has no rope component, so the latent view fills
+                    # its page and the kernel blocks pack contiguously; a
+                    # future rope-bearing variant falls back to the generic
+                    # page-strided path below.
+                    k_dim, v_dim = self._get_attention_kv_cache_dims(
+                        layer_name, current_kv_cache_spec
+                    )
+                    if v_dim == 0:
+                        raw_cache = kv_cache_raw_tensors[layer_name]
+                        kernel_block_size = self.kernel_block_sizes[group.kv_cache_group_id][0]
+                        num_blocks = raw_cache.numel() // current_kv_cache_spec.page_size_bytes
+                        num_blocks_per_kv_block = (
+                            get_storage_block_size(current_kv_cache_spec) // kernel_block_size
+                        )
+                        shape = tuple(
+                            attn_backend.get_kv_cache_shape(
+                                num_blocks * num_blocks_per_kv_block,
+                                kernel_block_size,
+                                current_kv_cache_spec.num_kv_heads,
+                                current_kv_cache_spec.head_size,
+                            )
+                        )
+                        strides = [1] * len(shape)
+                        for dim_idx in range(len(shape) - 2, -1, -1):
+                            strides[dim_idx] = strides[dim_idx + 1] * shape[dim_idx + 1]
+                        typed_slot = raw_cache.view(current_kv_cache_spec.dtype)
+                        k_cache = torch.as_strided(typed_slot, size=shape, stride=tuple(strides))
+                        rope_cache = torch.as_strided(
+                            typed_slot,
+                            size=(*shape[:-1], 0),
+                            stride=tuple(strides[:-1]) + (1,),
+                        )
+                        kv_caches[layer_name] = [k_cache, rope_cache]
+                        continue
 
                 # TODO: remove this after the OOM issue is located and fixed, otherwise, some model may
                 # encounter OOM issue
