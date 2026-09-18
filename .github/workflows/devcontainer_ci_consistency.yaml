@@ -1,0 +1,96 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# Copyright 2023 The vLLM team.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+# 验证目标：门禁 CI 执行环境 与 开发环境 devcontainer 的一致性。
+#
+# 原理：devcontainers/ci 会读取 .devcontainer/{cpu,npu}/devcontainer.json，
+# 在其 up 阶段自动执行 devcontainer.json 里声明的 postCreateCommand——这正是
+# 本仓库开发容器「首次创建时」运行的编译 + 测试脚本。因此只要这个 workflow
+# 能跑通，就说明同一套 devcontainer 配置在「本地 VS Code Dev Container」与
+# 「GitHub Actions CI」两种环境下产出一致。
+#
+# cpu  job：nightly-main 镜像（amd64），跑 cpu-ut（门禁 pr_test.yaml 的
+#           cpu-ut 阶段，即 tests/ut without-device）。GitHub 托管
+#           ubuntu-latest 即可，无需 NPU。
+# npu  job：nightly-main-a3 镜像（arm64），跑 two_card with-device
+#           （门禁 run-selected-tests 的 a3-2 分区）。需要带昇腾卡的
+#           self-hosted runner（GitHub 不提供 NPU），label 通过手动触发参数传入。
+name: Devcontainer CI Consistency
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: '要验证的目标（cpu / npu / all）'
+        type: choice
+        required: true
+        default: 'cpu'
+        options:
+          - cpu
+          - npu
+          - all
+      npu_runner:
+        description: 'NPU self-hosted runner 的 label（仅 npu/all 需要）'
+        type: string
+        required: false
+        default: 'linux-aarch64-a3-2'
+
+permissions:
+  contents: read
+
+jobs:
+  cpu:
+    if: ${{ inputs.target == 'cpu' || inputs.target == 'all' }}
+    name: cpu-ut (devcontainer/cpu, nightly-main)
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # devcontainers/ci 在 up 阶段自动执行 .devcontainer/cpu/devcontainer.json
+      # 的 postCreateCommand（= 门禁 cpu-ut 的编译 + 测试脚本）。
+      # runCmd 只是容器起来后的占位命令，真正的验证发生在 postCreateCommand。
+      - name: Build & run cpu devcontainer (postCreateCommand = cpu-ut)
+        uses: devcontainers/ci@v0.3
+        with:
+          configFile: .devcontainer/cpu/devcontainer.json
+          push: never
+          # GitHub runner 容器直连外网，无需 WSL2 宿主机 squid 代理兜底。
+          env: |
+            USE_HOST_PROXY=0
+          runCmd: echo "devcontainer cpu postCreateCommand (cpu-ut) completed"
+
+  npu:
+    if: ${{ inputs.target == 'npu' || inputs.target == 'all' }}
+    name: a3 two-card device tests (devcontainer/npu, nightly-main-a3)
+    runs-on: ${{ inputs.npu_runner }}
+    timeout-minutes: 240
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # 同上，up 阶段自动执行 .devcontainer/npu/devcontainer.json 的
+      # postCreateCommand（= 门禁 a3-2 with-device 的编译 + 测试脚本）。
+      - name: Build & run npu devcontainer (postCreateCommand = a3 device tests)
+        uses: devcontainers/ci@v0.3
+        with:
+          configFile: .devcontainer/npu/devcontainer.json
+          push: never
+          env: |
+            USE_HOST_PROXY=0
+          runCmd: echo "devcontainer npu postCreateCommand (a3 two-card) completed"
