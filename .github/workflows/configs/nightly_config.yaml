@@ -179,6 +179,10 @@ a3:
         config_file_path: DeepSeek-V4-flash-w8a8-PD-prefix.yaml
         config_base_path: tests/e2e/nightly/multi_node/external_dp/config
         size: 2
+      - name: DeepSeek-V4-flash-w8a8-PD-prefix-MRV2
+        config_file_path: DeepSeek-V4-flash-w8a8-PD-prefix-MRV2.yaml
+        config_base_path: tests/e2e/nightly/multi_node/external_dp/config
+        size: 2
   single_node:
     test_config:
       - name: mtpx-deepseek-r1-0528-w8a8
@@ -196,6 +200,9 @@ a3:
       - name: DeepSeek-V4-Flash-W8A8-A3
         os: linux-aarch64-nightly-a3-16
         config_file_path: DeepSeek-V4-Flash-W8A8-A3.yaml
+      - name: DeepSeek-V4-Flash-W8A8-A3-MRV2
+        os: linux-aarch64-nightly-a3-16
+        config_file_path: DeepSeek-V4-Flash-W8A8-A3-MRV2.yaml
       - name: kimi-k2-thinking
         os: linux-aarch64-nightly-a3-16
         config_file_path: Kimi-K2-Thinking.yaml
@@ -369,6 +376,9 @@ a3-560t:
       - name: DeepSeek-V4-Flash-W8A8-A3
         os: linux-aarch64-a3-16-cn12-001
         config_file_path: DeepSeek-V4-Flash-W8A8-A3.yaml
+      - name: DeepSeek-V4-Flash-W8A8-A3-MRV2
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: DeepSeek-V4-Flash-W8A8-A3-MRV2.yaml
       - name: kimi-k2-thinking
         os: linux-aarch64-a3-16-cn12-001
         config_file_path: Kimi-K2-Thinking.yaml
