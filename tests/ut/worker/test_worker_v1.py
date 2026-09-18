@@ -1578,6 +1578,33 @@ class TestNPUWorker(TestBase):
             # Verify calls
             worker.model_runner.load_model.assert_called_once()
 
+    def test_load_model_joins_prewarm_threads_before_returning(self):
+        """Prewarm threads must be done before memory profiling runs."""
+        from vllm_ascend.worker.worker import NPUWorker
+
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+            worker.model_runner = MagicMock()
+            worker.vllm_config = MagicMock()
+            worker.vllm_config.model_config.enable_sleep_mode = False
+            worker.vllm_config.weight_transfer_config = None
+
+            order = []
+            worker.model_runner.load_model.side_effect = lambda: order.append("load")
+            with (
+                patch(
+                    "vllm_ascend.model_executor.warmup.nz_warmup.join_nz_warm_thread",
+                    side_effect=lambda: order.append("nz"),
+                ),
+                patch(
+                    "vllm_ascend.model_executor.warmup.early_kernel_warmup.join_early_kernel_warmup",
+                    side_effect=lambda where: order.append("early"),
+                ),
+            ):
+                worker.load_model()
+
+            self.assertEqual(order, ["load", "nz", "early"])
+
     @patch("vllm_ascend.worker.worker.CaMemAllocator")
     def test_load_model_sleep_mode_assertion_error(self, mock_allocator_class):
         """Test load_model method - assertion error in sleep mode"""

@@ -31,6 +31,7 @@ from vllm_ascend.ascend_config import (
     AscendCompilationConfig,
     AscendConfig,
     AscendFusionConfig,
+    AscendWarmupConfig,
     DynamicSpecConfig,
     DyntraLBConfig,
     EplbConfig,
@@ -922,6 +923,13 @@ class TestSubconfigPydanticTypeValidation(TestBase):
     def test_ascend_fusion_config_forbids_unknown_key(self):
         with self.assertRaises(ValueError):
             AscendFusionConfig(unknown_key=1)
+
+    def test_ascend_warmup_config_bool_lax_and_forbid(self):
+        cfg = AscendWarmupConfig(enable_early_kernel_warmup="true", enable_early_nz_warmup="false")
+        self.assertTrue(cfg.enable_early_kernel_warmup)
+        self.assertFalse(cfg.enable_early_nz_warmup)
+        with self.assertRaises(ValueError):
+            AscendWarmupConfig(unknown_key=1)
 
     def test_ascend_compilation_config_bool_lax_and_forbid(self):
         cfg = AscendCompilationConfig(enable_npugraph_ex="false")
