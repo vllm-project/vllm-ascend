@@ -129,7 +129,7 @@ def test_aux_capture_gathers_single_token_shards(monkeypatch):
     gather = Mock(return_value=torch.tensor([[7.0], [0.0], [0.0], [0.0]]))
     monkeypatch.setattr(patch_deepseek_v2, "tensor_model_parallel_all_gather", gather)
     model = SimpleNamespace(aux_hidden_state_layers=(1,))
-    outputs = []
+    outputs: list[torch.Tensor] = []
     patch_deepseek_v2._capture_aux_hidden_state(
         model, outputs, 1, torch.zeros(1, 1), None, torch.zeros(1), sequence_parallel=True
     )

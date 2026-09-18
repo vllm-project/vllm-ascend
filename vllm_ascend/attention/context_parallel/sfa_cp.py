@@ -13,7 +13,13 @@ from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 import vllm_ascend.ops.triton.sfa_cp  # noqa: F401
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.cache_store import (
+    BLOCK_CACHE_STORE_MIN_TOKENS,
+    build_block_cache_groups,
+    try_store_kv_blocks,
+)
 from vllm_ascend.attention.context_parallel.common_cp import (
     DCPImplMixin,
     DCPMetadataBuilderMixin,
@@ -41,9 +47,11 @@ from vllm_ascend.attention.utils import (
     split_decodes_and_prefills,
 )
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.utils import (
     _round_up,
+    enable_custom_op,
     enable_dsa_cp,
     enable_dsa_cp_full_o_proj,
     enable_pcp_o_proj_weight_sharding,
@@ -269,6 +277,13 @@ class AscendSFADSACPMetadataBuilder(AscendSFAMetadataBuilder):
             metadata_cls or AscendSFADSACPMetadata,
             supports_dcp_with_varlen,
         )
+        self.use_block_cache_store = (
+            type(self) is AscendSFADSACPMetadataBuilder
+            and vllm_config.model_config.enforce_eager
+            and get_ascend_config().enable_sparse_sfa_c8
+            and get_current_hardware_profile().supports(HardwareCapability.BLOCK_KV_CACHE_STORE)
+            and enable_custom_op()
+        )
         max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         self.dsa_cp_actual_seq_lengths_query = torch.zeros(max_num_reqs + 1, dtype=torch.int32, device=device)
         self.dsa_cp_actual_seq_lengths_key = torch.empty_like(self.dsa_cp_actual_seq_lengths_query)
@@ -360,6 +375,16 @@ class AscendSFADSACPMetadataBuilder(AscendSFAMetadataBuilder):
             actual_seq_lengths_query=actual_seq_lengths_query[: common_attn_metadata.num_reqs],
             actual_seq_lengths_key=actual_seq_lengths_key[: common_attn_metadata.num_reqs],
         )
+        if (
+            getattr(self, "use_block_cache_store", False)
+            and draft_index is None
+            and common_attn_metadata.num_actual_tokens >= BLOCK_CACHE_STORE_MIN_TOKENS
+            and slot_mapping.dtype == torch.int32
+        ):
+            # Main KV owns a different physical slot mapping from its indexer.
+            extra.update(
+                build_block_cache_groups(slot_mapping[: common_attn_metadata.num_actual_tokens], self.kernel_block_size)
+            )
         return cos, sin, slot_mapping, extra
 
     def _update_parallel_slot_mapping(
@@ -598,11 +623,13 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         if kv_cache is not None:
             assert fused_kv_no_split is not None
             if self.enable_sparse_sfa_c8:
-                torch_npu.npu_scatter_nd_update_(
-                    kv_cache[0].view(-1, fused_kv_no_split.shape[-1]),
-                    slot_mapping_sfa[: attn_metadata.num_actual_tokens].view(-1, 1),
-                    fused_kv_no_split[: attn_metadata.num_actual_tokens],
-                )
+                cache_input = fused_kv_no_split[: attn_metadata.num_actual_tokens]
+                if not try_store_kv_blocks(cache_input, kv_cache[0], attn_metadata):
+                    torch_npu.npu_scatter_nd_update_(
+                        kv_cache[0].view(-1, fused_kv_no_split.shape[-1]),
+                        slot_mapping_sfa[: attn_metadata.num_actual_tokens].view(-1, 1),
+                        cache_input,
+                    )
                 k_pe = k_nope = None
             else:
                 k_pe, k_nope = fused_kv_no_split.split([self.qk_rope_head_dim, self.kv_lora_rank], dim=-1)

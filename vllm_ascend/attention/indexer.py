@@ -18,6 +18,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.utils import select_common_block_size
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.attention.cache_store import try_store_kv_blocks
 from vllm_ascend.attention.context_parallel.common_cp import (
     build_pcp_ordered_slot_mapping,
     get_cp_local_query_key_lens,
@@ -255,6 +256,14 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                 indexer_attn_metadata.group_key_cache_idx,
                 indexer_attn_metadata.block_size,
             )
+        elif (
+            getattr(self, "_dsa_cp_active", False)
+            and not self._pcp_active
+            and try_store_kv_blocks(k_li, indexer_k_cache, indexer_attn_metadata)
+        ):
+            # Large BF16 indexer caches can use their already-built grouping
+            # metadata too; cache quantization is independent of this copy.
+            pass
         else:
             torch_npu.npu_scatter_nd_update_(
                 indexer_k_cache.view(-1, k_li.shape[-1]),
