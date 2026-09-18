@@ -43,6 +43,24 @@ class LayerPlan:
     predicted_imbalance: PlacementImbalance
 
 
+@dataclass(frozen=True)
+class StairPlan:
+    """Fixed-shape placement plan for every model layer.
+
+    The placement and source arrays are ``[layers, ranks, slots]``.
+    ``predicted_mean_ratios`` is ``[layers]`` and contains NaN for layers
+    without an accepted candidate; those layers keep their current placement
+    and same-rank, same-slot sources. All source coordinates index the current
+    placement passed to the planner. Callers may persist a predicted ratio only
+    after that layer is committed successfully.
+    """
+
+    rank_expert_ids: np.ndarray
+    source_rank_ids: np.ndarray
+    source_slot_ids: np.ndarray
+    predicted_mean_ratios: np.ndarray
+
+
 _RankChoice = tuple[float, int, float, float, float]  # risk, rank, mean, variance, variance scale
 _PlacementUndoState = tuple[int, int, tuple[float, float, float]]  # rank, slot, previous rank statistics
 
@@ -821,3 +839,73 @@ class StairEplbPolicy(AbstractEplbPolicy):
         if np.array_equal(selected_plan.placement.rank_expert_ids, current_placement):
             return None
         return selected_plan
+
+    @classmethod
+    def plan_rebalance(
+        cls,
+        logical_load_samples: np.ndarray,
+        current_rank_expert_ids: np.ndarray,
+        last_committed_mean_ratios: np.ndarray,
+        rank_node_ids: np.ndarray,
+        config: StairConfig,
+    ) -> StairPlan:
+        """Plan every eligible layer from a ``[steps, layers, experts]`` window.
+
+        Current placement is ``[layers, ranks, slots]``, committed ratios are
+        ``[layers]``, and node IDs are ``[ranks]``. A NaN committed ratio means
+        that the layer has no commit anchor; its relative deterioration is 0
+        for sorting. Eligible layers are planned by descending current mean
+        ratio, relative deterioration, then layer ID.
+        """
+        load_bins, sample_counts = cls.compress_load_window(logical_load_samples, config.load_window_bins)
+        current = np.asarray(current_rank_expert_ids)
+        if current.ndim != 3 or 0 in current.shape or not np.issubdtype(current.dtype, np.integer):
+            raise ValueError("current_rank_expert_ids must be a non-empty integer [layers, ranks, slots] array")
+        if load_bins.shape[1] != current.shape[0]:
+            raise ValueError("logical load and current placement layer counts must match")
+        current = current.astype(np.int64, copy=False)
+
+        anchors = np.asarray(last_committed_mean_ratios, dtype=np.float64)
+        if anchors.shape != (current.shape[0],):
+            raise ValueError("last_committed_mean_ratios must contain one value per layer")
+        if np.any(~np.isnan(anchors) & (~np.isfinite(anchors) | (anchors < 1))):
+            raise ValueError("committed mean ratios must be NaN or finite values no smaller than one")
+        node_ids = np.asarray(rank_node_ids)
+        if (
+            node_ids.shape != (current.shape[1],)
+            or not np.issubdtype(node_ids.dtype, np.integer)
+            or np.any(node_ids < 0)
+        ):
+            raise ValueError("rank_node_ids must contain one non-negative integer per rank")
+
+        rank_expert_ids = current.copy()
+        source_rank_ids = np.broadcast_to(np.arange(current.shape[1])[None, :, None], current.shape).copy()
+        source_slot_ids = np.broadcast_to(np.arange(current.shape[2])[None, None, :], current.shape).copy()
+        predicted_mean_ratios = np.full(current.shape[0], np.nan, dtype=np.float64)
+        layer_priority_keys = []
+        for layer_id in range(current.shape[0]):
+            current_imbalance = cls.gated_layer_imbalance(
+                load_bins[:, layer_id], sample_counts, current[layer_id], anchors[layer_id], config
+            )
+            if current_imbalance is None:
+                continue
+            relative_deterioration = (
+                0.0 if np.isnan(anchors[layer_id]) else current_imbalance.mean_ratio / anchors[layer_id] - 1.0
+            )
+            layer_priority_keys.append((-current_imbalance.mean_ratio, -relative_deterioration, layer_id))
+
+        for _, _, layer_id in sorted(layer_priority_keys):
+            layer_plan = cls.plan_layer(load_bins[:, layer_id], sample_counts, current[layer_id], node_ids, config)
+            if layer_plan is None:
+                continue
+            rank_expert_ids[layer_id] = layer_plan.placement.rank_expert_ids
+            source_rank_ids[layer_id] = layer_plan.placement.source_rank_ids
+            source_slot_ids[layer_id] = layer_plan.placement.source_slot_ids
+            predicted_mean_ratios[layer_id] = layer_plan.predicted_imbalance.mean_ratio
+
+        return StairPlan(
+            rank_expert_ids=rank_expert_ids,
+            source_rank_ids=source_rank_ids,
+            source_slot_ids=source_slot_ids,
+            predicted_mean_ratios=predicted_mean_ratios,
+        )
