@@ -12,7 +12,7 @@ The pipeline parallelism in KVPP refers to KV cache storage and communication, w
 
 KVPP targets long-context inference and concurrent serving workloads where duplicated KV caches limit the available cache capacity. It can also be combined with prefix caching and KV pooling for workloads with reusable long prefixes.
 
-On 950DT devices, the measured KV cache capacity was **6.25×** with GLM-5.2-W4A8C8 on one eight-device node using TP8 + EP, and **5.35×** with GLM-5.2-W8A8C8-mxfp8 on two eight-device nodes using TP8 + PP2 + EP (38/40 layers). Each comparison uses the same model, hardware, and memory budget with KVPP off and on. These capacity ratios are specific to the configurations in the performance section; they are not throughput multipliers or guarantees for other models.
+On 950DT Products, the measured KV cache capacity was **6.25×** with GLM-5.2-W4A8C8 on one eight-device node using TP8 + EP, and **5.35×** with GLM-5.2-W8A8C8-mxfp8 on two eight-device nodes using TP8 + PP2 + EP (38/40 layers). Each comparison uses the same model, hardware, and memory budget with KVPP off and on. These capacity ratios are specific to the configurations in the performance section; they are not throughput multipliers or guarantees for other models.
 
 ## Supported Scenarios
 
@@ -137,13 +137,13 @@ Each TP rank saves one complete object per token block containing its persistent
 
 ## Performance
 
-The following measurements of GLM-5.2 on 950DT products show the impact on cache capacity, time to first token (TTFT), and prefill throughput. The single-node and dual-node deployments use different quantized weights; compare KVPP on and off within each deployment.
+The following measurements of GLM-5.2 on 950DT Products show the impact on cache capacity, time to first token (TTFT), and prefill throughput. The single-node and dual-node deployments use different quantized weights; compare KVPP on and off within each deployment.
 
 ### Test Configuration
 
 | Setting | Single node | Dual-node PP |
 | --- | --- | --- |
-| Hardware | One node with 8 950DT products | Two nodes with 8 950DT products per node |
+| Hardware | One node with 8 950DT Products | Two nodes with 8 950DT Products per node |
 | Model | GLM-5.2-W4A8C8 | GLM-5.2-W8A8C8-mxfp8 |
 | Parallelism | TP8 + EP | TP8 + PP2 + EP, 38/40 layer split |
 | Common settings | DSA-CP, chunked prefill, prefix caching, asynchronous scheduling, LI-C8, Model Runner V1, eager mode | Same as single node |
@@ -164,7 +164,7 @@ Equivalent KV memory savings are estimated from the capacity ratio and do not re
 
 ### Time to First Token
 
-This test measures long-input, zero-prefix-hit, low-concurrency requests. The single-node deployment uses GLM-5.2-W4A8C8 with eight 950DT devices and TP8 + EP. The dual-node deployment uses GLM-5.2-W8A8C8-mxfp8 with eight 950DT devices per node and TP8 + PP2 + EP (38/40 layers). Other service settings follow the test configuration above.
+This test measures long-input, zero-prefix-hit, low-concurrency requests. The single-node deployment uses GLM-5.2-W4A8C8 with eight 950DT Products and TP8 + EP. The dual-node deployment uses GLM-5.2-W8A8C8-mxfp8 with eight 950DT Products per node and TP8 + PP2 + EP (38/40 layers). Other service settings follow the test configuration above.
 
 Input lengths are 32K, 64K, and 128K tokens. Prefix cache hit rate was 0%, with 1 output token. Each result is the mean TTFT of 4 requests at client concurrency 1. A positive change indicates increased latency.
 
