@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, Any
 from vllm.logger import logger
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 
-from vllm_ascend import envs
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ReqMeta,
     block_hash_to_str,
@@ -122,15 +121,8 @@ def hybrid_block_key(
 
 
 def fence_drains_recv() -> bool:
-    """Whether the attention-window fence also quiesces the LOAD queue.
-
-    Off by default: the load queue carries the prefetch that layerwise exists
-    to overlap, and per-layer completion is already enforced by
-    ``wait_for_layer_load``. Set ``VLLM_ASCEND_KVPOOL_FENCE_DRAIN_RECV=1`` to
-    restore the old whole-queue fence when diagnosing interconnect contention
-    between loads and collectives.
-    """
-    return bool(envs.VLLM_ASCEND_KVPOOL_FENCE_DRAIN_RECV)
+    """Keep future-layer prefetch running across attention boundaries."""
+    return False
 
 
 def send_fence_backlog() -> int:
@@ -151,9 +143,10 @@ def send_fence_backlog() -> int:
     waits for the final layer's save event at the end of every step, which
     implies every earlier layer has committed.
 
-    0 restores the old drain-to-zero fence; a larger value allows more overlap.
+    Eight layers of slack preserved the measured overlap without introducing a
+    public tuning surface. Full drains are still enforced on teardown.
     """
-    return max(0, int(envs.VLLM_ASCEND_KVPOOL_FENCE_SEND_BACKLOG))
+    return 8
 
 
 def selected(mask, index: int) -> bool:

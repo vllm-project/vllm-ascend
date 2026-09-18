@@ -117,9 +117,8 @@ to the following output projection or MoE communication.
 By default, future-layer gets remain queued and up to eight send tasks may stay
 unfinished. This removes whole-queue drains from each layer's critical path,
 but it also means transfer can overlap subsequent output-projection or MoE
-communication. Set `VLLM_ASCEND_KVPOOL_FENCE_DRAIN_RECV=1` and
-`VLLM_ASCEND_KVPOOL_FENCE_SEND_BACKLOG=0` to restore the strict local policy
-that drains both queues at each attention boundary.
+communication. This is an internal scheduling policy rather than a public
+runtime setting. Error and teardown paths still drain both queues completely.
 
 In DSA this boundary is after the compressor/indexer/cache updates and before
 the sparse-attention operator. In SFA it surrounds the sparse-attention operator;
@@ -129,8 +128,8 @@ transformer layer.
 Consequences:
 
 - Under the default policy, a transfer tail can compete with subsequent HCCL or
-  expert-parallel communication. Use device traces to choose an appropriate
-  send backlog for the target deployment.
+  expert-parallel communication. Device traces should be used to validate this
+  fixed policy on the target deployment.
 - An initial, unprefetched demand load has no preceding attention window. It
   waits for earlier compute-stream work, then completes before attention starts.
 - Session allocation, existence queries, and other metadata RPCs are not payload
