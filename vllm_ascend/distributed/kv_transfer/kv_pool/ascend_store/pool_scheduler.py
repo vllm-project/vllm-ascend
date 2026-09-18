@@ -370,7 +370,7 @@ class KVPoolScheduler:
         A block is a hit only when every PP stage has saved it, so the
         protocol helper enumerates all stages and head/TP ranks.
         """
-        head_or_tp_ranks = self.tp_size // self.put_step
+        head_or_tp_ranks = self.tp_size if group_id in self.mamba_group_ids else self.tp_size // self.put_step
         return self.layerwise_protocol.make_hit_check_keys(
             self.model_name,
             group_id,

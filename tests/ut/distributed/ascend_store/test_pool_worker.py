@@ -59,6 +59,9 @@ def make_worker(
     dcp_size=1,
     kv_cache_config=None,
     prefix_match_unit=None,
+    pp_size=1,
+    pp_rank=0,
+    layer_offset=0,
 ):
     module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker"
     start_patch(test, f"{module}.get_tensor_model_parallel_rank", return_value=tp_rank)
@@ -81,8 +84,11 @@ def make_worker(
     config.model_config.get_num_layers.return_value = num_layers
     config.model_config.get_total_num_kv_heads.return_value = num_kv_heads
     config.parallel_config.data_parallel_rank = 0
-    config.parallel_config.rank = 0
-    config.parallel_config.pipeline_parallel_size = 1
+    config.parallel_config.rank = pp_rank * tp_size + tp_rank
+    config.parallel_config.pipeline_parallel_size = pp_size
+    if pp_size > 1:
+        config.model_config.get_layers_start_end_indices.return_value = (layer_offset, layer_offset + num_layers)
+        config.model_config.get_total_num_hidden_layers.return_value = num_layers * pp_size
     config.parallel_config.tensor_parallel_size = tp_size
     config.parallel_config.prefill_context_parallel_size = pcp_size
     config.parallel_config.decode_context_parallel_size = dcp_size
@@ -429,6 +435,7 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         worker = object.__new__(cls)
         worker.num_layers = 4
         worker.num_kv_cache_groups = 2
+        worker.cacheable_group_ids = [0, 1]
         worker.hf_config = SimpleNamespace(num_hidden_layers=4)
         worker.use_layerwise_transfer = True
         worker._extra_config = {"layerwise_num_shared_buffers": 2}
@@ -1151,6 +1158,9 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         worker = make_worker(self, extra_config={"backend": "memcache"}, use_layerwise=True)
         worker.layerwise_offload = True
         worker.num_kv_cache_groups = num_groups
+        worker.cacheable_group_ids = list(range(num_groups))
+        worker.group_uses_align_state = [False] * num_groups
+        worker.metadata = worker.metadata * num_groups
         worker.grouped_block_size = [16] * num_groups
         worker.kv_cache_group_families = ["default"] * num_groups
         worker.group_block_len = {group_id: [64] for group_id in range(num_groups)}

@@ -43,6 +43,11 @@ and asynchronous loading are supported. The pool transfers main MLA, compressed
 indexer, and per-TP-rank KDA state. Request-private indexer tails stay local,
 and pool hits resume at complete page/state boundaries.
 
+For Memcache layerwise transfer, set `backend` to `"memcache"` and `use_layerwise`
+to `true`. KDA state is saved and restored separately on every TP rank, while
+MLA KV keeps its shared-rank keys. Leave layerwise buffer reuse disabled for
+this hybrid layout. Mooncake layerwise still rejects hybrid cache layouts.
+
 ### Environment Variable Configuration
 
 To guarantee uniform hash generation, it is required to synchronize the PYTHONHASHSEED environment variable across all nodes upon enabling KV Pool.
