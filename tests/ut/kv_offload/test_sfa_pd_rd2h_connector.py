@@ -476,6 +476,38 @@ def _make_consumer_worker_for_completion_test():
     return worker
 
 
+def test_consumer_joins_compute_stream_once_after_recv():
+    worker = _make_consumer_worker_for_completion_test()
+    worker._pending_pd_hbm_visibility = False
+    worker._mf_read_thread.get_and_clear_done.return_value = {"req-0"}
+    worker._gather_tp_read_status = MagicMock(return_value=[({"req-0"}, set()), ({"req-0"}, set())])
+    assert worker.get_finished() == (set(), {"req-0-internal"})
+    assert worker._pending_pd_hbm_visibility is True
+
+    stream = MagicMock()
+    with (
+        patch("torch.npu.is_current_stream_capturing", return_value=False),
+        patch("torch.npu.current_stream", return_value=stream),
+    ):
+        worker.wait_for_pd_hbm_visibility()
+        worker.wait_for_pd_hbm_visibility()
+    stream.synchronize.assert_called_once()
+    assert worker._pending_pd_hbm_visibility is False
+
+
+def test_consumer_skips_pd_hbm_wait_while_capturing():
+    worker = _make_consumer_worker_for_completion_test()
+    worker._pending_pd_hbm_visibility = True
+    stream = MagicMock()
+    with (
+        patch("torch.npu.is_current_stream_capturing", return_value=True),
+        patch("torch.npu.current_stream", return_value=stream),
+    ):
+        worker.wait_for_pd_hbm_visibility()
+    stream.synchronize.assert_not_called()
+    assert worker._pending_pd_hbm_visibility is True
+
+
 def test_consumer_completion_waits_for_every_tp_rank():
     worker = _make_consumer_worker_for_completion_test()
     worker._mf_read_thread.get_and_clear_done.side_effect = [{"req-0"}, set()]
