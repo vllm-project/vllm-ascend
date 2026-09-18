@@ -5,10 +5,19 @@
 
 NPU 0 hosts the inference worker and NPU 1 deterministically generates every
 parameter of the layer-reduced model. Names and shapes come from a meta-device
-HF model; values are fixed-random BF16 and require no checkpoint weights. The
-test proves dummy inference in FULL_DECODE_ONLY mode before comparing a complete
-baseline with an exact full-payload reload across a pause/resume boundary.
-Both unpacked and packed HCCL broadcasts exercise the same transaction.
+HF model; values are fixed-random BF16 and require no checkpoint weights.
+
+The correctness oracle is *normal startup loading of that same payload*: the
+generator also writes a temporary checkpoint, a reference server loads it at
+startup, and the live-update lane has to reproduce its signature exactly —
+
+    normal startup load(W) == first live update(W) == second live update(W)
+
+The dummy-started lane's pre-update signature must differ from the reference, so
+a transfer that never ran cannot pass, and the second update covers the layerwise
+reload lifecycle, runtime/destructive representations, derived state and the
+graph-captured storage of the first update. Both packed modes exercise the same
+transaction.
 
 The trainer side is driven by ``HCCLTrainerWeightTransferEngine``: it opens the
 rank-0 HCCL endpoint itself, then ``send_weights()`` owns the whole remote
@@ -26,16 +35,21 @@ from tests.e2e.conftest import RemoteOpenAIServer
 from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import (
     FixedRandomWeightSource,
     WeightUpdateModelCase,
-    assert_dummy_then_fixed_reload,
+    assert_weight_update_matches_reference,
     generation_signature,
+    live_update_serve_args,
     packed_buffer_size_for,
     pytest_model_cases,
+    reference_signature,
     register_engines_once,
+    wait_for_free_device_memory,
 )
 
 INFERENCE_WORLD_SIZE = 1
 TRAINER_DEVICE_INDEX = INFERENCE_WORLD_SIZE
+INFERENCE_DEVICE_INDEX = 0
 CONTROL_TIMEOUT = 60
+GPU_MEMORY_UTILIZATION = 0.75
 
 
 def _log(message: str) -> None:
@@ -55,37 +69,40 @@ def _post(server: RemoteOpenAIServer, route: str, *, json=None, timeout=CONTROL_
 @pytest.mark.parametrize("case", pytest_model_cases())
 @pytest.mark.parametrize("packed", [False, True], ids=["unpacked", "packed"])
 def test_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bool):
-    port = get_open_port()
-    server_args = [
-        "--load-format",
-        "dummy",
-        "--dtype",
-        "bfloat16",
-        "--compilation-config",
-        '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1]}',
-        "--weight-transfer-config",
-        '{"backend": "hccl"}',
-        "--tensor-parallel-size",
-        str(INFERENCE_WORLD_SIZE),
-        "--max-model-len",
-        "1024",
-        "--gpu-memory-utilization",
-        "0.75",
-        "--port",
-        str(port),
-        "--trust-remote-code",
-        "--additional-config",
-        '{"weight_nz_mode": 0}',
-        *case.server_args(),
-    ]
+    torch.npu.set_device(TRAINER_DEVICE_INDEX)
+    source = FixedRandomWeightSource(case, torch.device("npu", TRAINER_DEVICE_INDEX))
     env_dict = {
         "VLLM_SERVER_DEV_MODE": "1",
         "ASCEND_RT_VISIBLE_DEVICES": "0",
     }
 
+    # Independent oracle first: a server that loads exactly this payload at
+    # startup, on its own lifecycle, before the live path touches anything.
+    reference = reference_signature(
+        source,
+        case,
+        port=get_open_port(),
+        gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
+        tensor_parallel_size=INFERENCE_WORLD_SIZE,
+        device_index=INFERENCE_DEVICE_INDEX,
+        env_dict=env_dict,
+    )
+
+    # Dummy sanity, first live update and the reload regression share one lane.
+    # Its pre-update signature is the dummy-sanity check; the *reference* is the
+    # part that must come from a separate server. The reference and the lane share
+    # one card, so wait for its process tree to hand the HBM back.
+    wait_for_free_device_memory(INFERENCE_DEVICE_INDEX, GPU_MEMORY_UTILIZATION)
+    port = get_open_port()
     with RemoteOpenAIServer(
         case.model,
-        vllm_serve_args=server_args,
+        vllm_serve_args=live_update_serve_args(
+            case,
+            backend="hccl",
+            port=port,
+            gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
+            tensor_parallel_size=INFERENCE_WORLD_SIZE,
+        ),
         server_host="127.0.0.1",
         server_port=port,
         env_dict=env_dict,
@@ -93,9 +110,6 @@ def test_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: b
     ) as server:
         client = server.get_client()
         dummy_signature = generation_signature(client, case.model)
-
-        torch.npu.set_device(TRAINER_DEVICE_INDEX)
-        source = FixedRandomWeightSource(case, torch.device("npu", TRAINER_DEVICE_INDEX))
 
         from vllm.distributed.weight_transfer.clients import HTTPVLLMWeightSyncClient
         from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactory
@@ -131,4 +145,11 @@ def test_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: b
             _post(server, "resume")
             signatures.append(generation_signature(client, case.model))
 
-    assert_dummy_then_fixed_reload(dummy_signature, signatures[0], signatures[1], case)
+    updated_signature, reloaded_signature = signatures
+    assert_weight_update_matches_reference(
+        dummy_signature,
+        reference,
+        updated_signature,
+        reloaded_signature,
+        case,
+    )
