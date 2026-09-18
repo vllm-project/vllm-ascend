@@ -28,6 +28,7 @@ from vllm_ascend.quantization.methods.w8a8.fp8_block import (
     AscendFp8BlockLinearMethod,
     resolve_block_scales,
 )
+from vllm_ascend.quantization.tp_weight_switch import TPWeightGatherSpec, TPWeightRepeatSpec
 
 MODULE = "vllm_ascend.quantization.methods.w8a8.fp8_block"
 
@@ -110,6 +111,40 @@ class TestAscendFp8BlockLinearMethod(TestBase):
         weight = scheme.get_weight(512, 256, torch.bfloat16)["weight"]
         self.assertEqual(weight.shape, (256, 512))
         self.assertEqual(weight.dtype, torch.float8_e4m3fn)
+
+    def test_tp_weight_switch_specs_follow_mxfp8_execution_method(self):
+        scheme = self.build_scheme(is_950=True)
+        input_gather = (TPWeightGatherSpec("input_weight"),)
+        output_gather = (TPWeightGatherSpec("output_weight", gather_dim=1),)
+        input_repeat = (TPWeightRepeatSpec("input_scale"),)
+        output_repeat = (TPWeightRepeatSpec("output_scale"),)
+        scheme.mxfp8_method.tp_weight_gather_specs = input_gather
+        scheme.mxfp8_method.tp_weight_output_gather_specs = output_gather
+        scheme.mxfp8_method.tp_weight_repeat_specs = input_repeat
+        scheme.mxfp8_method.tp_weight_output_repeat_specs = output_repeat
+
+        self.assertTrue(scheme.supports_tp_weight_switch)
+        self.assertEqual(
+            scheme.get_tp_weight_switch_specs(input_sharded=True),
+            (input_gather, input_repeat),
+        )
+        self.assertEqual(
+            scheme.get_tp_weight_switch_specs(input_sharded=False),
+            (output_gather, output_repeat),
+        )
+
+    def test_tp_weight_switch_specs_cover_dense_fallback(self):
+        scheme = self.build_scheme(is_950=False)
+
+        self.assertTrue(scheme.supports_tp_weight_switch)
+        self.assertEqual(
+            scheme.get_tp_weight_switch_specs(input_sharded=True),
+            ((TPWeightGatherSpec("weight", gather_dim=1),), ()),
+        )
+        self.assertEqual(
+            scheme.get_tp_weight_switch_specs(input_sharded=False),
+            ((TPWeightGatherSpec("weight"),), ()),
+        )
 
     def test_pergroup_param_declares_block_scale_and_loader_hints(self):
         scheme = self.build_scheme(block_size=(128, 64))
