@@ -83,7 +83,7 @@ def test_qwen35_pp_mtp_full_decode_only() -> None:
                     }
                 ],
                 temperature=0,
-                max_tokens=2048,
+                max_tokens=8192,
                 extra_body={"chat_template_kwargs": {"enable_thinking": True}},
             )
             choice = response.choices[0]
