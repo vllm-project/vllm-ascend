@@ -11,6 +11,7 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import (
+    get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
@@ -194,10 +195,17 @@ class DeepSeekMultiTokenPredictor(nn.Module):
                 )
             }
         )
-        self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size,
-            config.hidden_size,
-        )
+        # PP=1 MTP rebinds embed_tokens from the target after load. Skip a
+        # second vocab table during draft construct.
+        use_compress = hasattr(vllm_config.model_config.hf_config, "compress_ratios")
+        self._share_target_embed = get_pp_group().world_size == 1 and not use_compress
+        if self._share_target_embed:
+            self.embed_tokens = PPMissingLayer()
+        else:
+            self.embed_tokens = VocabParallelEmbedding(
+                config.vocab_size,
+                config.hidden_size,
+            )
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -244,6 +252,7 @@ class DeepSeekV4MTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
         self.config = vllm_config.model_config.hf_config
         self.quant_config = vllm_config.quant_config
         self.model = DeepSeekMultiTokenPredictor(vllm_config=vllm_config, prefix=maybe_prefix(prefix, "mtp"))
+        self.has_own_embed_tokens = not getattr(self.model, "_share_target_embed", False)
         # Set MoE hyperparameters
         self.set_moe_parameters()
 
@@ -366,6 +375,9 @@ class DeepSeekV4MTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
                 name = name.replace(".ffn_norm.", ".post_attention_layernorm.")
             if ".attn_norm." in name:
                 name = name.replace(".attn_norm.", ".input_layernorm.")
+
+            if not self.has_own_embed_tokens and "embed_tokens" in name:
+                continue
 
             if ".gate.bias" in name:
                 name = name.replace(".gate.bias", ".gate.e_score_correction_bias")
