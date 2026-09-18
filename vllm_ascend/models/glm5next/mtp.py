@@ -28,7 +28,6 @@ from .model import (
     Glm5NextDecoderLayer,
     Glm5NextMLAAttention,
     Glm5NextMoE,
-    _pad_kv_a_proj_no_rope,
     _try_load_fp8_indexer_wk,
     get_spec_layer_idx_from_weight_name,
 )
@@ -303,11 +302,6 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         _pending_wk_fp8: dict = {}
-        # GLM-5.3-Flash NoPE checkpoints omit the RoPE rows from
-        # ``kv_a_proj_with_mqa``; the FP8-to-BF16 path pads them for the model.
-        kv_a_pad_size = 0
-        if self.config.mla_nope and self.config.qk_rope_head_dim > 0:
-            kv_a_pad_size = self.config.qk_rope_head_dim
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -330,14 +324,6 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
                 loaded_params,
             ):
                 continue
-
-            loaded_weight = _pad_kv_a_proj_no_rope(
-                name,
-                loaded_weight,
-                kv_a_pad_size,
-                self.quant_config,
-                self.config.kv_lora_rank,
-            )
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:

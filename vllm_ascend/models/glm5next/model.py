@@ -701,12 +701,6 @@ class Glm5NextModel(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
 
-        # GLM-5.3-Flash NoPE checkpoints omit the RoPE rows from
-        # ``kv_a_proj_with_mqa``; pad them with zeros for the model shape.
-        kv_a_pad_size = 0
-        if self.config.mla_nope and self.config.qk_rope_head_dim > 0:
-            kv_a_pad_size = self.config.qk_rope_head_dim
-
         _pending_wk_fp8: dict = {}
 
         for args in weights:
@@ -733,14 +727,6 @@ class Glm5NextModel(nn.Module):
                 loaded_params,
             ):
                 continue
-
-            loaded_weight = _pad_kv_a_proj_no_rope(
-                name,
-                loaded_weight,
-                kv_a_pad_size,
-                self.quant_config,
-                self.config.kv_lora_rank,
-            )
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
@@ -1039,34 +1025,3 @@ def _try_load_fp8_indexer_wk(name, tensor, buf, params_dict, loaded_params):
     param.weight_loader(param, weight_bf16, 0)
     loaded_params.add(fused_name)
     return True
-
-
-def _pad_kv_a_proj_no_rope(
-    name: str,
-    loaded_weight: torch.Tensor,
-    kv_a_pad_size: int,
-    quant_config,
-    kv_lora_rank: int,
-) -> torch.Tensor:
-    """Pad NoPE rope rows for ``kv_a_proj_with_mqa`` weight and scale.
-
-    The NoPE checkpoint omits the RoPE rows, so the weight and the per-row
-    MXFP8 scale are padded by ``kv_a_pad_size`` rows. The block-FP8 scale is a
-    2D tile scale, so it is padded by the matching number of output tiles.
-    """
-    if not (kv_a_pad_size > 0 and ".kv_a_proj_with_mqa." in name):
-        return loaded_weight
-    if name.endswith(".weight_scale_inv"):
-        block_n = quant_config.weight_block_size[0]
-        pad_rows = (kv_lora_rank + kv_a_pad_size + block_n - 1) // block_n - (kv_lora_rank + block_n - 1) // block_n
-    elif name.endswith(".weight_scale") or name.endswith(".weight"):
-        pad_rows = kv_a_pad_size
-    else:
-        return loaded_weight
-    pad = torch.zeros(
-        pad_rows,
-        *loaded_weight.shape[1:],
-        dtype=loaded_weight.dtype,
-        device=loaded_weight.device,
-    )
-    return torch.cat([loaded_weight, pad], dim=0)
