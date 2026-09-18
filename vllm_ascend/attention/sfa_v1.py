@@ -1656,6 +1656,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         kv_cache: tuple[torch.Tensor, ...],
         attn_metadata: M,
         output: torch.Tensor | None = None,
+        *,
+        sequence_parallel: bool = False,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
         if attn_metadata is None:
@@ -1736,7 +1738,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         # native
         else:
             assert self.fused_qkv_a_proj is not None, "q lora is required for DSA."
-            hidden_states = self._prepare_native_hidden_states(hidden_states, attn_metadata)
+            if not sequence_parallel:
+                hidden_states = self._prepare_native_hidden_states(hidden_states, attn_metadata)
             qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
             q_c, kv_no_split = qkv_lora.split(
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
@@ -1864,10 +1867,12 @@ class AscendSFAImpl(MLAAttentionImpl):
             padded[: attn_output.shape[0]] = attn_output
             attn_output = padded
 
+        output_layout_kwargs = {"output_is_sequence_parallel": True} if sequence_parallel else {}
         output = self._finalize_o_proj(
             attn_output,
             output,
             parallel_context.gather_full_o_proj,
+            **output_layout_kwargs,
         )
 
         maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))

@@ -2,6 +2,7 @@
 
 import random
 import traceback
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -17,6 +18,33 @@ from vllm.distributed.parallel_state import (
 
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADSACPImpl
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend, IndexerCacheInputs
+
+
+def _check_sequence_parallel_projection(impl, group, rank, world_size):
+    impl.enable_dsa_cp_full_o_proj = True
+    impl.o_proj = SimpleNamespace(reduce_results=False)
+    impl._use_full_o_proj_weights = nullcontext
+    weight = (torch.arange(256, device="npu").reshape(16, 16) % 13).to(torch.bfloat16) / 16
+    impl._apply_o_proj_full_weight = lambda hidden: hidden @ weight
+    for tokens in (1, 7, 8, 9, 33, 8192):
+        local_tokens = (tokens + world_size - 1) // world_size
+        padded_tokens = local_tokens * world_size
+        hidden = torch.arange(padded_tokens * 16, device="npu").reshape(padded_tokens, 16)
+        hidden = (hidden % 31).to(torch.bfloat16) / 32
+        hidden[tokens:].zero_()
+        local = hidden[rank * local_tokens : (rank + 1) * local_tokens].contiguous()
+        # Existing decoder/attention contract: gather, slice, project into a
+        # sparse replicated buffer, then pad and reduce-scatter.
+        replicated = group.all_gather(local, dim=0)[:tokens]
+        prepared = torch.nn.functional.pad(replicated, (0, 0, 0, padded_tokens - tokens))
+        prepared = prepared[rank * local_tokens : (rank + 1) * local_tokens]
+        reference_buffer = torch.empty((tokens, 16), device="npu", dtype=torch.bfloat16)
+        impl._finalize_o_proj(prepared, reference_buffer, True)
+        reference_buffer = torch.nn.functional.pad(reference_buffer, (0, 0, 0, padded_tokens - tokens))
+        expected = group.reduce_scatter(reference_buffer, dim=0)
+        actual = torch.empty_like(local)
+        impl._finalize_o_proj(local, actual, True, output_is_sequence_parallel=True)
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
 
 @torch.inference_mode()
@@ -114,6 +142,8 @@ def _worker(rank, world_size, port, result_queue):
                     scales.add_(increment)
                     graph.replay()
                     check()
+        with patch("vllm_ascend.attention.context_parallel.sfa_cp.get_tp_group", return_value=group):
+            _check_sequence_parallel_projection(impl, group, rank, world_size)
         result_queue.put(None)
     except Exception:
         result_queue.put(traceback.format_exc())
