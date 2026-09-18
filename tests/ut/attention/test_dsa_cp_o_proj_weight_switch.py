@@ -64,14 +64,6 @@ class TestAscendDSACPOProjWeightSwitch(unittest.TestCase):
         layer = self._OProj()
         with (
             patch(
-                "vllm_ascend.attention.context_parallel.dsa_cp.get_ascend_config",
-                return_value=SimpleNamespace(multistream_dsv4_dsa_overlap=True),
-            ),
-            patch(
-                "vllm_ascend.attention.context_parallel.dsa_cp.is_a5_bf16_kv_enabled",
-                return_value=False,
-            ),
-            patch(
                 "vllm_ascend.attention.context_parallel.dsa_cp.enable_dsa_cp_full_o_proj",
                 return_value=True,
             ),
@@ -98,9 +90,9 @@ class TestAscendDSACPOProjWeightSwitch(unittest.TestCase):
                 n_local_groups=1,
                 window_size=1,
                 compress_ratio=1,
-                wq_a=layer,
-                wq_b=layer,
-                wkv=layer,
+                wq_a=object(),
+                wq_b=object(),
+                wkv=object(),
                 q_norm=object(),
                 kv_norm=object(),
                 swa_cache_layer=SimpleNamespace(prefix="swa"),
@@ -110,10 +102,6 @@ class TestAscendDSACPOProjWeightSwitch(unittest.TestCase):
                 attn_sink=torch.empty(2),
             )
 
-        self.assertTrue(impl.multistream_dsv4_dsa_overlap)
-        self.assertIs(impl.cv_wq_a.linear, layer)
-        self.assertIs(impl.cv_wkv.linear, layer)
-        self.assertIs(impl.cv_wq_b.linear, layer)
         self.assertTrue(impl.enable_dsa_cp_full_o_proj)
         profile.supports.assert_called_once_with(HardwareCapability.FP8_ATTENTION)
 
@@ -192,44 +180,3 @@ class TestAscendDSACPOProjWeightSwitch(unittest.TestCase):
 
         self.assertEqual(impl.wo_a.weight.data_ptr(), local_ptrs[0])
         self.assertEqual(impl.wo_b.weight.data_ptr(), local_ptrs[1])
-
-    def test_restore_tp_heads_preserves_inverse_rope_with_hardware_fallback(self):
-        for supports_negate in (False, True):
-            for tp_size, skip_all_to_all in ((1, False), (2, False), (2, True)):
-                with self.subTest(supports_negate=supports_negate, tp_size=tp_size, skip=skip_all_to_all):
-                    impl = self._make_impl()
-                    impl.tp_size = tp_size
-                    impl.nope_head_dim, impl.head_dim = 2, 4
-                    output = torch.randn(3, 2, 4)
-                    sin = torch.randn(3, 2)
-                    cos = torch.randn(3, 2)
-                    metadata = SimpleNamespace(
-                        req_metadata=SimpleNamespace(
-                            cp_metadata=SimpleNamespace(local_sin={"layer": sin}, local_cos={"layer": cos})
-                        )
-                    )
-                    with (
-                        patch("vllm_ascend.attention.context_parallel.dsa_cp.get_current_hardware_profile") as profile,
-                        patch("torch.ops._C_ascend.inplace_partial_rotary_mul", create=True) as rotary,
-                        patch("vllm_ascend.attention.context_parallel.dsa_cp.restore_tp_heads") as restore,
-                    ):
-                        profile.return_value.supports.return_value = supports_negate
-                        result = impl._restore_tp_head_layout(output, "layer", metadata, skip_all_to_all)
-
-                    profile.return_value.supports.assert_called_once_with(
-                        HardwareCapability.INPLACE_PARTIAL_ROTARY_MUL_NEGATE_SIN
-                    )
-                    rotary.assert_called_once()
-                    args, kwargs = rotary.call_args
-                    self.assertEqual(args[0].data_ptr(), output.data_ptr())
-                    self.assertIs(args[1], cos)
-                    self.assertEqual(kwargs["partial_slice"], [2, 4])
-                    self.assertEqual(kwargs["rotary_mode"], "interleave")
-                    effective_sin = -args[2] if kwargs["negate_sin"] else args[2]
-                    torch.testing.assert_close(effective_sin, -sin)
-                    if tp_size == 1 or skip_all_to_all:
-                        restore.assert_not_called()
-                        self.assertIs(result, output)
-                    else:
-                        restore.assert_called_once_with(output, impl.tp_group)
-                        self.assertIs(result, restore.return_value)

@@ -162,25 +162,7 @@
 #       engine-core-level customization, or when the feature modules no longer
 #       need an entry-point hook.
 #
-# ** 6. File: platform/patch_engram_config.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.config.engram.EngramConfig.verify_model_config`
-#    Why:
-#       Upstream rejects every platform that is not CUDA, because Engram
-#       embedding offload started there. Validating `current_platform.is_cuda()`
-#       rather than "does the checkpoint carry n-gram layers" makes
-#       `--engram-config` unusable on Ascend even though the same checkpoint
-#       hashes to the same rows and only the storage location differs.
-#    How：
-#       Accept a configuration whose checkpoint declares `engram_layer_ids`,
-#       and reject the DP-sharding switches that the Ascend implementation does
-#       not provide instead of silently ignoring them.
-#    Related PR (if no, explain why):
-#       No, upstream vLLM has no Ascend Engram to relax this for.
-#    Future Plan:
-#       Remove this patch once upstream validation is platform-agnostic.
-#
-# ** 7. File: platform/patch_eplb.py**
+# ** 6. File: platform/patch_eplb.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.parallel.current_platform`
 #   2. `vllm.distributed.eplb.eplb_state._move_to_workspace`
@@ -202,7 +184,7 @@
 #       available in the supported vLLM version. Retain only the NPU backend,
 #       operator, communicator, load normalization, and weight views.
 #
-# ** 8. File: platform/patch_fused_moe.py**
+# ** 7. File: platform/patch_fused_moe.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.layers.fused_moe.FusedMoEFactory`
 #    Why:
@@ -277,7 +259,7 @@
 #       model types or resolves MLA from the config contents instead of a
 #       model_type whitelist.
 #
-# ** 9. File: platform/patch_kv_cache_coordinator.py**
+# ** 8. File: platform/patch_kv_cache_coordinator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.kv_cache_coordinator.HybridKVCacheCoordinator.find_longest_cache_hit_per_group`
 #    Why:
@@ -301,7 +283,7 @@
 #       Remove this patch when vLLM PR #42524 and #44243 is included in the supported
 #       upstream vLLM version.
 #
-# ** 10. File: platform/patch_kv_cache_utils.py**
+# ** 9. File: platform/patch_kv_cache_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes`
 #      `vllm.v1.engine.core.resolve_kv_cache_block_sizes`
@@ -320,7 +302,7 @@
 #       Remove this patch once upstream vLLM supports hybrid KV cache + CP for
 #       non-CUDA backends, or exposes a platform hook for this behavior.
 #
-# ** 11. File: platform/patch_mamba_block_aligned_split.py**
+# ** 10. File: platform/patch_mamba_block_aligned_split.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.sched.scheduler.Scheduler._mamba_block_aligned_split`
 #    Why:
@@ -350,7 +332,7 @@
 #    Future Plan:
 #       Remove this patch when vLLM merges the PR.
 #
-# ** 12. File: platform/patch_mamba_config_310.py**
+# ** 11. File: platform/patch_mamba_config_310.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.config.HybridAttentionMambaModelConfig.verify_and_update_config`
 #    Why:
@@ -367,7 +349,7 @@
 #    Future Plan:
 #       Remove this patch once upstream supports 310P-aligned mamba block sizing.
 #
-# ** 13. File: platform/patch_mamba_manager.py**
+# ** 12. File: platform/patch_mamba_manager.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.single_type_kv_cache_manager.MambaManager`
 #    Why:
@@ -387,7 +369,7 @@
 #          hybrid prefix cache lookup for DCP.
 #       2. Remove this patch once upstream accept 46892 pr or fixed the bug by other pr.
 #
-# ** 14. File: platform/patch_minimax_m2_config.py**
+# ** 13. File: platform/patch_minimax_m2_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.model.ModelConfig._verify_quantization`
 #    Why:
@@ -448,7 +430,7 @@
 #       Drop the alias once upstream registry includes it or the checkpoint
 #       standardizes architecture strings.
 #
-# ** 15. File: platform/patch_mla_prefill_backend.py**
+# ** 14. File: platform/patch_mla_prefill_backend.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.attention.backends.mla.common.get_mla_prefill_backend`
 #    Why:
@@ -470,7 +452,7 @@
 #       platform/device hook so Ascend can be selected (or skipped) without
 #       monkey-patching.
 #
-# ** 16. File: platform/patch_multiproc_executor.py**
+# ** 15. File: platform/patch_multiproc_executor.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.executor.multiproc_executor.MultiprocExecutor`
 #    Why:
@@ -483,7 +465,7 @@
 #    Future Plan:
 #       Remove this patch when vLLM fix the issue.
 #
-# ** 17. File: platform/patch_pp_mtp.py**
+# ** 16. File: platform/patch_pp_mtp.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.outputs.ModelRunnerOutput`
 #    Why:
@@ -576,7 +558,7 @@
 #       supports local drafter models with PP > 1, or moves the PP validation to a
 #       separate hook that can be overridden per-model-type.
 #
-# ** 18. File: platform/patch_profiling_chunk.py**
+# ** 17. File: platform/patch_profiling_chunk.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.engine.core.EngineCore.__init__`
 #   2. `Scheduler.update_from_output` (scheduler class, wrapped when profiling chunk is enabled)
@@ -604,7 +586,7 @@
 #       profiling startup and per-step timing callbacks without monkey-patching
 #       `EngineCore` and the multiprocess entry point.
 #
-# ** 19. File: platform/patch_speculative_config.py**
+# ** 18. File: platform/patch_speculative_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.speculative.SpeculativeConfig.hf_config_override`
 #    Why:
@@ -645,7 +627,7 @@
 #       before DSpark draft selection, or otherwise guarantees that rebuilding
 #       `model_arch_config` preserves the selected draft architecture.
 #
-# ** 20. File: platform/patch_structured_output.py**
+# ** 19. File: platform/patch_structured_output.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.sampling_params.SamplingParams._validate_structured_outputs`
 #      `vllm.v1.structured_output.StructuredOutputManager.grammar_init`
@@ -689,7 +671,7 @@
 #       Remove this patch once upstream vLLM adds the terminal short-circuit
 #       to the outlines backend.
 #
-# ** 21. File: platform/patch_torch_accelerator.py**
+# ** 20. File: platform/patch_torch_accelerator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `torch.accelerator.memory_stats`, `torch.accelerator.memory_reserved`,
 #      `torch.accelerator.reset_peak_memory_stats`, `torch.accelerator.get_memory_info`,
@@ -709,7 +691,7 @@
 #       Remove this patch once `torch.accelerator` correctly routes to the NPU
 #       backend for these memory APIs.
 #
-# ** 22. File: platform/patch_tool_choice_none_content.py**
+# ** 21. File: platform/patch_tool_choice_none_content.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.entrypoints.openai.chat_completion.protocol.ChatCompletionResponse`
 #      `vllm.entrypoints.openai.chat_completion.protocol.ChatCompletionStreamResponse`
@@ -725,7 +707,7 @@
 #    Future Plan:
 #       Remove this patch once the supported vLLM version contains PR #44105.
 #
-# ** 23. File: platform/patch_use_v2_model_runner.py**
+# ** 22. File: platform/patch_use_v2_model_runner.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.vllm.VllmConfig.use_v2_model_runner`
 #    Why:

@@ -17,8 +17,8 @@ one eighth of DeepSeek-V4-Flash. The model accepts text and images and supports
 a continuously adjustable reasoning effort from 1 to 100.
 
 vLLM Ascend supports W8A8 colocated deployment on either two Atlas 800 A3
-servers or four Atlas 800 A2 servers. A single A3 server can use Engram host
-offload as described below. Prefill-Decode disaggregation is not covered by this guide.
+servers or four Atlas 800 A2 servers. Prefill-Decode disaggregation and Engram
+host offloading are not covered by this guide.
 
 ## 2 Supported Features
 
@@ -46,7 +46,7 @@ on ModelScope. It includes the DSpark draft parameters and INT8 Engram tables.
 After the checkpoint is available, download it to the same absolute path on
 every server; the examples use `<YOUR_MODEL_PATH>`.
 
-Alternatively, use [ModelSlim](https://github.com/Ascend/msmodelslim) to
+Alternatively, use [ModelSlim](https://gitcode.com/Ascend/msmodelslim) to
 prepare a ModelSlim-compatible W8A8 checkpoint from the official weights.
 
 Use one of the following hardware configurations:
@@ -193,8 +193,6 @@ every other node is a headless worker.
     NIC_NAME="<NETWORK_INTERFACE>"
     MODEL_PATH="<YOUR_MODEL_PATH>"
 
-    # Allow time for weight loading and graph capture on large models.
-    export VLLM_ENGINE_READY_TIMEOUT_S="${VLLM_ENGINE_READY_TIMEOUT_S:-3600}"
     export HCCL_IF_IP="$LOCAL_IP"
     export GLOO_SOCKET_IFNAME="$NIC_NAME"
     export TP_SOCKET_IFNAME="$NIC_NAME"
@@ -208,7 +206,7 @@ every other node is a headless worker.
     DP_START_RANK=$((NODE_RANK * 2))
     HEADLESS_ARGS=()
     if [[ "$NODE_RANK" != "0" ]]; then
-      HEADLESS_ARGS+=(--headless --data-parallel-start-rank "$DP_START_RANK")
+      HEADLESS_ARGS+=(--headless)
     fi
 
     vllm serve "$MODEL_PATH" \
@@ -219,6 +217,7 @@ every other node is a headless worker.
       --data-parallel-rpc-port 13399 \
       --data-parallel-size 4 \
       --data-parallel-size-local 2 \
+      --data-parallel-start-rank "$DP_START_RANK" \
       --tensor-parallel-size 8 \
       --enable-expert-parallel \
       --served-model-name deepseek-v41 \
@@ -235,7 +234,7 @@ every other node is a headless worker.
       --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
       --safetensors-load-strategy lazy \
       --quantization ascend \
-      --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_npugraph_ex":false,"enable_static_kernel":false}}' \
+      --additional-config '{"enable_engram":true,"engram_storage":"int8","enable_cpu_binding":true,"ascend_compilation_config":{"enable_npugraph_ex":false,"enable_static_kernel":false}}' \
       --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}' \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
     ```
@@ -255,8 +254,6 @@ every other node is a headless worker.
     NIC_NAME="<NETWORK_INTERFACE>"
     MODEL_PATH="<YOUR_MODEL_PATH>"
 
-    # Allow time for weight loading and graph capture on large models.
-    export VLLM_ENGINE_READY_TIMEOUT_S="${VLLM_ENGINE_READY_TIMEOUT_S:-3600}"
     export HCCL_IF_IP="$LOCAL_IP"
     export GLOO_SOCKET_IFNAME="$NIC_NAME"
     export TP_SOCKET_IFNAME="$NIC_NAME"
@@ -269,7 +266,7 @@ every other node is a headless worker.
 
     HEADLESS_ARGS=()
     if [[ "$NODE_RANK" != "0" ]]; then
-      HEADLESS_ARGS+=(--headless --data-parallel-start-rank "$NODE_RANK")
+      HEADLESS_ARGS+=(--headless)
     fi
 
     vllm serve "$MODEL_PATH" \
@@ -280,6 +277,7 @@ every other node is a headless worker.
       --data-parallel-rpc-port 13399 \
       --data-parallel-size 4 \
       --data-parallel-size-local 1 \
+      --data-parallel-start-rank "$NODE_RANK" \
       --tensor-parallel-size 8 \
       --enable-expert-parallel \
       --served-model-name deepseek-v41 \
@@ -296,14 +294,10 @@ every other node is a headless worker.
       --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
       --safetensors-load-strategy lazy \
       --quantization ascend \
-      --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_npugraph_ex":false,"enable_static_kernel":false}}' \
+      --additional-config '{"enable_engram":true,"engram_storage":"int8","enable_cpu_binding":true,"ascend_compilation_config":{"enable_npugraph_ex":false,"enable_static_kernel":false}}' \
       --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}' \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
     ```
-
-Omit `--data-parallel-start-rank` on Node 0: specifying even `0` selects
-hybrid load balancing in the pinned vLLM CLI, which is incompatible with
-headless remote engines. Set the start rank only on the headless nodes.
 
 Start Node 0 first and then the remaining nodes. The global topology is
 DP4/TP8/EP32 in both configurations:
@@ -348,38 +342,6 @@ curl -sS http://127.0.0.1:8000/v1/models | \
 ```
 
 The response must contain a model entry whose `id` is `deepseek-v41`.
-
-### 5.3 Single A3 with Engram Host Offload
-
-Keep the INT8 Engram weights and their scale tensors available in the
-checkpoint. `--safetensors-load-strategy lazy`
-is required to avoid eagerly materializing the entire table on each rank.
-
-For a single A3, use TP8/DP2/EP16 across all 16 logical devices with both
-DP replicas local (`--data-parallel-size 2 --data-parallel-size-local 2`).
-Keep model runner V1, `FULL_DECODE_ONLY`, and DSpark with eager draft execution.
-Use INT8 Engram tables and turn the offload on through vLLM's Engram config.
-This needs a vLLM that provides `--engram-config`; without it the tables stay
-on the device:
-
-```bash
---engram-config '{"cpu_offload": true}'
-```
-
-With `cpu_offload` the shard stays in host memory, is registered with
-`aclrtHostRegisterV2`, and the NPU gather kernel reads it through the device
-address `aclrtHostGetDevicePointer` returns, so the offloaded table needs
-neither an H2D copy nor a host-side gather.
-
-Start with 4 sequences per DP replica, 512 batched tokens, 131072 model
-length, and 1 GiB of KV cache per rank, with prefix caching disabled.
-Ensure enough host RAM for all compressed Engram shards and runtime memory;
-CPU/NUMA page migration can add several minutes to startup.
-
-This configuration passed model loading, decode graph capture, natural-text
-requests, and mixed-length concurrent request smoke tests. These checks do
-not establish dataset accuracy or performance. Other Engram storage formats
-and model runner V2 are not covered by this smoke validation.
 
 ## 6 Functional Verification
 
@@ -444,7 +406,7 @@ version, and whether DSpark is enabled.
 
 Refer to the
 [AISBench performance evaluation guide](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation)
-or the [vLLM benchmark guide](https://github.com/vllm-project/vllm/blob/84030bbe3d74d99bad477a3d2e37a973ccd8865c/docs/benchmarking/README.md).
+or the [vLLM benchmark guide](https://docs.vllm.ai/en/latest/benchmarking/).
 No production performance baseline is published for this configuration.
 
 ## 9 Performance Tuning

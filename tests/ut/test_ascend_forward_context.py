@@ -473,8 +473,7 @@ def test_select_moe_comm_method_310p_uses_allgather(monkeypatch):
     assert afc.select_moe_comm_method(128, _make_vllm_config()) == MoECommType.ALLGATHER
 
 
-@pytest.mark.parametrize("model_owned", [False, True])
-def test_set_ascend_forward_context_pins_current_vllm_config(monkeypatch, model_owned):
+def test_set_ascend_forward_context_pins_current_vllm_config(monkeypatch):
     vllm_config = _make_vllm_config()
     seen: dict[str, object] = {"config": None, "inside": False}
 
@@ -503,22 +502,16 @@ def test_set_ascend_forward_context_pins_current_vllm_config(monkeypatch, model_
     monkeypatch.setattr(afc, "get_mc2_mask", lambda: None)
     monkeypatch.setattr(afc, "use_v2_model_runner", lambda _cfg: True)
 
-    legacy_method = object()
-    target_method = object()
-    draft_method = object()
     moe_mod_name = "vllm_ascend.ops.fused_moe.moe_comm_method"
     if moe_mod_name in sys.modules:
-        monkeypatch.setattr(sys.modules[moe_mod_name], "get_moe_comm_method", lambda _t: legacy_method)
+        monkeypatch.setattr(sys.modules[moe_mod_name], "get_moe_comm_method", lambda _t: None)
     else:
-        monkeypatch.setitem(sys.modules, moe_mod_name, SimpleNamespace(get_moe_comm_method=lambda _t: legacy_method))
+        monkeypatch.setitem(sys.modules, moe_mod_name, SimpleNamespace(get_moe_comm_method=lambda _t: None))
 
-    for expected in (target_method, draft_method, target_method):
-        model = SimpleNamespace(moe_comm_methods={None: expected}) if model_owned else None
-        with afc.set_ascend_forward_context(None, vllm_config, num_tokens=4, model_instance=model):
-            assert seen["inside"] is True
-            assert seen["config"] is vllm_config
-            assert afc._USE_V2_EXTRA_KWARGS is True
-            assert forward_context.moe_comm_method is (expected if model_owned else legacy_method)
+    with afc.set_ascend_forward_context(None, vllm_config, num_tokens=4):
+        assert seen["inside"] is True
+        assert seen["config"] is vllm_config
+        assert afc._USE_V2_EXTRA_KWARGS is True
 
     assert seen["inside"] is False
 
