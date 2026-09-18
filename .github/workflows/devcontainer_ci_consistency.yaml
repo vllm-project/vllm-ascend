@@ -76,9 +76,6 @@ jobs:
         with:
           configFile: .devcontainer/cpu/devcontainer.json
           push: never
-          # GitHub runner 容器直连外网，无需 WSL2 宿主机 squid 代理兜底。
-          env: |
-            USE_HOST_PROXY=0
           runCmd: echo "devcontainer cpu postCreateCommand (cpu-ut) completed"
 
   npu:
@@ -100,6 +97,4 @@ jobs:
         with:
           configFile: .devcontainer/npu/devcontainer.json
           push: never
-          env: |
-            USE_HOST_PROXY=0
           runCmd: echo "devcontainer npu postCreateCommand (a3 two-card) completed"

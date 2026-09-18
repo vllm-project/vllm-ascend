@@ -20,19 +20,6 @@ set -euo pipefail
 PROJECT_DIR="/workspace/vllm-ascend"
 cd "${PROJECT_DIR}"
 
-# 网络兜底：本地 WSL2 容器直连外网被墙，需走宿主机 squid 代理 + 清华 pip 镜像。
-# GitHub runner 上的容器可直连外网，无需代理：传 USE_HOST_PROXY=0 关闭此兜底。
-if [ "${USE_HOST_PROXY:-1}" = "1" ]; then
-    if [ -z "${HTTP_PROXY:-}" ]; then
-        export HTTP_PROXY="http://host.docker.internal:3128"
-    fi
-    if [ -z "${HTTPS_PROXY:-}" ]; then
-        export HTTPS_PROXY="http://host.docker.internal:3128"
-    fi
-fi
-export http_proxy="${http_proxy:-${HTTP_PROXY:-}}"
-export https_proxy="${https_proxy:-${HTTPS_PROXY:-}}"
-
 echo "[1/6] 标记 git safe.directory"
 git config --global --add safe.directory "${PROJECT_DIR}"
 
