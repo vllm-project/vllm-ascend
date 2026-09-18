@@ -4546,20 +4546,6 @@ class NPUModelRunner(GPUModelRunner):
         # prefill disaggregation need the addr of cache tensor be aligned with 2M
         alignment = 2 * 1024 * 1024
         layer_kv_cache_spec = self._get_layer_kv_cache_specs(kv_cache_config)
-<<<<<<< HEAD
-        # v0.28.0 keeps the legacy ``shared_by`` contract: one allocation per
-        # descriptor, shared by every listed layer. Main uses #51718's
-        # standardized descriptors, whose ``size`` is the size of one common
-        # backing allocation rather than the size of an individual layer.
-        use_legacy_shared_by_layout = vllm_version_is("0.28.0")
-=======
-        if is_deepseek_v41_cache(layer_kv_cache_spec):
-            for allocation in kv_cache_config.kv_cache_tensors:
-                backing = self._allocate_int8_cache_tensor(allocation.size, alignment)
-                for name in allocation.layers:
-                    kv_cache_raw_tensors[name] = backing
-            return kv_cache_raw_tensors
->>>>>>> 5e35533c1 (fix: upgrade supported vLLM release to v0.29.0)
         uses_padded_page_layout = requires_padded_page_layout(layer_kv_cache_spec.values())
         is_dsv4_main = any(
             getattr(spec, "model_version", None) == "deepseek_v4"

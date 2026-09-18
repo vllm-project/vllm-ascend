@@ -70,7 +70,7 @@ from vllm_ascend.worker.device_metadata import DeviceMetadataTask, DeviceMetadat
 # Currently we will fix block size to a small one since `num_reqs` can't be too large
 _PREPARE_INPUTS_BLOCK_SIZE = 4
 
-_HIDDEN_STATE_DRAFTER_TYPES: tuple[type[Any], ...] = (
+_HIDDEN_STATE_DRAFTER_TYPES = (
     Eagle3LlamaForCausalLM,
     DFlashQwen3ForCausalLM,
     Qwen3DSparkForCausalLM,
@@ -79,13 +79,6 @@ _HIDDEN_STATE_DRAFTER_TYPES: tuple[type[Any], ...] = (
     Eagle3DeepseekV2ForCausalLM,
     DSparkDeepseekV4ForCausalLM,
 )
-
-if not vllm_version_is("0.29.0"):
-    # vLLM #56228 added the V4.1 dependencies after v0.29.0. Keep the
-    # common proposer importable on release for models that do not use V4.1.
-    from vllm_ascend.models.deepseek_v41.dspark import DSparkDeepseekV41ForCausalLM
-
-    _HIDDEN_STATE_DRAFTER_TYPES += (DSparkDeepseekV41ForCausalLM,)
 
 
 def greedy_sample(logits: torch.Tensor) -> torch.Tensor:
