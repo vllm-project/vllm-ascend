@@ -12,6 +12,7 @@ from vllm.distributed.eplb.policy import AbstractEplbPolicy
 
 from vllm_ascend.ascend_config import StairConfig
 
+_MEAN_RATIO_TIE_TOLERANCE = 1e-9
 
 @dataclass(frozen=True)
 class PlacementImbalance:
@@ -32,6 +33,14 @@ class PlacementPlan:
     rank_expert_ids: np.ndarray
     source_rank_ids: np.ndarray
     source_slot_ids: np.ndarray
+
+
+@dataclass(frozen=True)
+class LayerPlan:
+    """An accepted placement and its predicted imbalance."""
+
+    placement: PlacementPlan
+    predicted_imbalance: PlacementImbalance
 
 
 _RankChoice = tuple[float, int, float, float, float]  # risk, rank, mean, variance, variance scale
@@ -730,3 +739,85 @@ class StairEplbPolicy(AbstractEplbPolicy):
         assert sources is not None
         source_slots = cls._source_slots(current_placement, placement, sources)
         return PlacementPlan(placement, sources, source_slots)
+
+    @classmethod
+    def plan_layer(
+        cls,
+        load_samples: np.ndarray,
+        sample_counts: np.ndarray,
+        current_rank_expert_ids: np.ndarray,
+        rank_node_ids: np.ndarray,
+        config: StairConfig,
+    ) -> LayerPlan | None:
+        """Return the best mean-non-regressing placement for one layer.
+
+        P95 is diagnostic and does not gate acceptance. The lowest predicted
+        mean ratio wins; ratios within the internal absolute tolerance are tied.
+        Ties minimize cross-node migrations, same-node remote migrations,
+        target expert IDs, source rank IDs, then source slot IDs. Return ``None``
+        when no candidate is accepted or the winner keeps the current placement.
+        """
+        current_placement = np.asarray(current_rank_expert_ids)
+        current_imbalance = cls.placement_imbalance(load_samples, sample_counts, current_placement)
+        means, variances, covariance = cls.weighted_moments(load_samples, sample_counts)
+        risks = cls.expert_risk(means, variances, config.z_score)
+        node_ids = np.asarray(rank_node_ids)
+        num_ranks = current_placement.shape[0]
+        scored_candidates = []
+
+        replica_candidates = cls.replica_candidates(
+            risks,
+            current_placement.size,
+            num_ranks,
+            num_stages=config.replica_search_num_stages,
+            budget_radius=config.replica_search_radius,
+            beam_size=config.replica_search_beam_size,
+            candidate_score=lambda replicas: float(np.max(risks / replicas)),
+        )
+        for replicas in replica_candidates:
+            placement = cls.lpt_placement(
+                means,
+                variances,
+                covariance,
+                replicas,
+                num_ranks,
+                config.z_score,
+                current_rank_expert_ids=current_placement,
+                rank_node_ids=node_ids,
+                rank_pair_migration_limit=config.rank_pair_migration_limit,
+                backtrack_limit=config.placement_search_backtrack_limit,
+            )
+            if placement is None:
+                continue
+            predicted_imbalance = cls.placement_imbalance(load_samples, sample_counts, placement.rank_expert_ids)
+            if predicted_imbalance.mean_ratio > current_imbalance.mean_ratio:
+                continue
+
+            dst_rank_ids = np.arange(num_ranks)[:, None]
+            remote = placement.source_rank_ids != dst_rank_ids
+            cross_node = remote & (node_ids[placement.source_rank_ids] != node_ids[:, None])
+            cross_node_migrations = int(cross_node.sum())
+            same_node_remote_migrations = int(remote.sum() - cross_node_migrations)
+            # The remaining fields make equal-cost plans deterministic.
+            tie_key = (
+                cross_node_migrations,
+                same_node_remote_migrations,
+                tuple(placement.rank_expert_ids.ravel()),
+                tuple(placement.source_rank_ids.ravel()),
+                tuple(placement.source_slot_ids.ravel()),
+            )
+            candidate_plan = LayerPlan(placement, predicted_imbalance)
+            scored_candidates.append((predicted_imbalance.mean_ratio, tie_key, candidate_plan))
+
+        if not scored_candidates:
+            return None
+        minimum_mean_ratio = min(mean_ratio for mean_ratio, *_ in scored_candidates)
+        tied_candidates = [
+            candidate
+            for candidate in scored_candidates
+            if candidate[0] <= minimum_mean_ratio + _MEAN_RATIO_TIE_TOLERANCE
+        ]
+        _, _, selected_plan = min(tied_candidates, key=lambda candidate: candidate[1])
+        if np.array_equal(selected_plan.placement.rank_expert_ids, current_placement):
+            return None
+        return selected_plan

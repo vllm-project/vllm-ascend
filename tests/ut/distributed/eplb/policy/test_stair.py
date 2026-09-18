@@ -483,6 +483,88 @@ class TestStairLoadStatistics(unittest.TestCase):
                 backtrack_limit=0,
             )
 
+    def test_plan_layer_accepts_mean_improvement(self):
+        samples = np.array([[8.0, 7.0, 6.0, 5.0]])
+        current = np.array([[0, 1], [2, 3]])
+
+        plan = StairEplbPolicy.plan_layer(
+            samples,
+            np.ones(1, dtype=np.int64),
+            current,
+            np.array([0, 1]),
+            StairConfig(),
+        )
+
+        self.assertIsNotNone(plan)
+        np.testing.assert_array_equal(plan.placement.rank_expert_ids, [[0, 3], [2, 1]])
+        self.assertEqual(plan.predicted_imbalance.mean_ratio, 1.0)
+
+    def test_plan_layer_skips_noop(self):
+        self.assertIsNone(
+            StairEplbPolicy.plan_layer(
+                np.array([[8.0, 7.0, 6.0, 5.0]]),
+                np.ones(1, dtype=np.int64),
+                np.array([[0, 3], [2, 1]]),
+                np.array([0, 1]),
+                StairConfig(),
+            )
+        )
+
+    def test_plan_layer_breaks_mean_tie_by_migration_count(self):
+        plan = StairEplbPolicy.plan_layer(
+            np.ones((1, 3)),
+            np.ones(1, dtype=np.int64),
+            np.array([[0, 2], [0, 1]]),
+            np.array([0, 1]),
+            StairConfig(),
+        )
+
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan.predicted_imbalance.mean_ratio, 1.0)
+        np.testing.assert_array_equal(plan.placement.rank_expert_ids, [[0, 2], [2, 1]])
+        self.assertEqual(np.sum(plan.placement.source_rank_ids != np.arange(2)[:, None]), 1)
+
+    def test_plan_layer_rejects_mean_regression(self):
+        samples = np.array(
+            [
+                [21, 28, 26, 15],
+                [28, 29, 29, 2],
+                [13, 18, 8, 11],
+                [18, 24, 17, 5],
+                [20, 26, 6, 16],
+            ]
+        )
+
+        plan = StairEplbPolicy.plan_layer(
+            samples,
+            np.array([2, 5, 1, 3, 5]),
+            np.array([[0, 3], [1, 2]]),
+            np.array([0, 1]),
+            StairConfig(),
+        )
+
+        self.assertIsNone(plan)
+
+    def test_plan_layer_does_not_reject_p95_regression(self):
+        samples = np.array(
+            [
+                [16, 5, 2, 5],
+                [8, 16, 9, 1],
+                [6, 12, 16, 14],
+                [19, 3, 17, 1],
+                [11, 5, 4, 13],
+            ]
+        )
+        sample_counts = np.array([2, 3, 2, 1, 4])
+        current = np.array([[0, 3], [1, 2]])
+        current_imbalance = StairEplbPolicy.placement_imbalance(samples, sample_counts, current)
+
+        plan = StairEplbPolicy.plan_layer(samples, sample_counts, current, np.array([0, 1]), StairConfig())
+
+        self.assertIsNotNone(plan)
+        self.assertLess(plan.predicted_imbalance.mean_ratio, current_imbalance.mean_ratio)
+        self.assertGreater(plan.predicted_imbalance.p95_ratio, current_imbalance.p95_ratio)
+
     def test_statistics_reject_invalid_inputs(self):
         invalid_samples = np.array([[[1.0, -1.0]]])
         with self.assertRaises(ValueError):
