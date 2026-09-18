@@ -173,7 +173,13 @@ def test_dsv4_rope_writes_back_inplace():
     # tensors; force the CPU device type so forward runs on one device.
     with (
         patch("vllm_ascend.ops.rope_dsv4.current_platform") as fake_platform,
-        patch("torch_npu.npu_rotary_mul", lambda x, cos, sin, rotary_mode=None: x * 2 + 1),
+        # create=True: the torch_npu mock installed by tests/ut/conftest.py on
+        # CPU-only CI has no npu_rotary_mul attribute.
+        patch(
+            "torch_npu.npu_rotary_mul",
+            lambda x, cos, sin, rotary_mode=None: x * 2 + 1,
+            create=True,
+        ),
     ):
         fake_platform.device_type = "cpu"
         vllm_config = SimpleNamespace(
