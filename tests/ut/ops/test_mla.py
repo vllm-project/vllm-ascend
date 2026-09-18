@@ -403,19 +403,34 @@ class TestAscendMultiHeadLatentAttention(TestBase):
     @patch("vllm_ascend.ops.mla.IndexerWrapper")
     @patch("vllm_ascend.ops.mla.get_current_vllm_config")
     @patch("vllm_ascend.ops.mla.get_tensor_model_parallel_world_size")
-    def test_marks_layers_only_when_fused_preprocess_type_resolved(
-        self, mock_tp_size, mock_get_vllm_config, mock_indexer_cls
-    ):
-        for resolved_type, should_mark in ((PreprocessType.MLAPO, True), (None, False)):
-            with self.subTest(resolved_type=resolved_type):
+    def test_marks_layers_for_sfa_or_mla_fused_preprocess(self, mock_tp_size, mock_get_vllm_config, mock_indexer_cls):
+        cases = (
+            (True, PreprocessType.MLAPO, False, False, True),
+            (True, None, True, True, False),
+            (False, None, True, False, True),
+            (False, None, False, True, True),
+            (False, None, False, False, False),
+        )
+        for has_type_resolver, resolved_type, enable_mlapo, fa_quant_layer, should_mark in cases:
+            with self.subTest(
+                has_type_resolver=has_type_resolver,
+                resolved_type=resolved_type,
+                enable_mlapo=enable_mlapo,
+                fa_quant_layer=fa_quant_layer,
+            ):
                 fused_qkv_a_proj = SimpleNamespace()
                 q_proj = SimpleNamespace()
                 mock_mla_attn = MagicMock()
                 mock_mla_attn.process_weights_after_loading = MagicMock()
-                mock_mla_attn.impl = MagicMock()
-                mock_mla_attn.impl._fused_preprocess_type.return_value = resolved_type
-                mock_mla_attn.impl.fused_qkv_a_proj = fused_qkv_a_proj
-                mock_mla_attn.impl.q_proj = q_proj
+                mock_mla_attn.impl = SimpleNamespace(
+                    process_weights_after_loading=MagicMock(),
+                    fused_qkv_a_proj=fused_qkv_a_proj,
+                    q_proj=q_proj,
+                    enable_mlapo=enable_mlapo,
+                    fa_quant_layer=fa_quant_layer,
+                )
+                if has_type_resolver:
+                    mock_mla_attn.impl._fused_preprocess_type = MagicMock(return_value=resolved_type)
 
                 with patch("vllm_ascend.ops.mla.MLAAttention", return_value=mock_mla_attn):
                     mock_tp_size.return_value = 2
