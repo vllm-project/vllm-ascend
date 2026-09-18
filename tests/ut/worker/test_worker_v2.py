@@ -60,6 +60,7 @@ class TestNPUWorkerV2(TestBase):
     def test_execute_model_pooling_uses_pool_output(self, mock_get_pp_group, mock_get_ascend_config):
         """MRV2 pooling must finish in execute_model instead of sampling logits."""
         from vllm.v1.outputs import ModelRunnerOutput
+
         from vllm_ascend.worker.worker import NPUWorker
 
         mock_ascend_config = MagicMock()
