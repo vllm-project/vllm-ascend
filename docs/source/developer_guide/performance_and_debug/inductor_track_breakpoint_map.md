@@ -1,6 +1,6 @@
 # Inductor Track Breakpoint Map
 
-The **inductor compile-backend track** (`ascend_compilation_config.compile_backend='inductor'` in `additional_config`) routes `torch.compile` through vLLM's built-in Inductor adaptor into torch_npu's `triton_experimental` backend. The generated Triton kernels are then compiled by **triton-ascend** and **bishengir-compile** (AscendNPU-IR) down to NPU binaries.
+The **inductor compile-backend track** (`compilation_config.backend='inductor'`, i.e. `-cc.backend inductor`) routes `torch.compile` through vLLM's built-in Inductor adaptor into torch_npu's `triton_experimental` backend. The generated Triton kernels are then compiled by **triton-ascend** and **bishengir-compile** (AscendNPU-IR) down to NPU binaries.
 
 When this track breaks it usually does **not** raise: the engine silently falls back to another track, the backend never activates, or an operator deoptimizes to an extern kernel. The only symptoms are "performance is wrong" or "numbers are wrong". This page is the operating manual for pinpointing where the chain broke: the pipeline boundaries, the log chain, backend-activation verification, artifact reading, a four-question triage tree, and a living list of known breakpoints.
 
@@ -11,7 +11,7 @@ Every code reference below is a **grep anchor** (a log message, a symbol name, o
 ```text
 vllm engine (vllm serve / LLM)
  └─ torch.compile -> @support_torch_compile -> vllm compilation backend
-     ├─ inductor track: compile_backend='inductor'
+     ├─ inductor track: compilation_config.backend='inductor' (-cc.backend inductor)
      │    -> vllm InductorAdaptor -> torch._inductor.compile_fx
      │       -> torch_npu npu_backend loader -> triton_experimental (lazy activation)
      │          -> codegen: output_code.py (wrapper + embedded Triton kernel source)
@@ -50,7 +50,7 @@ Each artifact boundary is also a component boundary for evidence gathering: to a
 Notes:
 
 - `triton_experimental` itself is silent by default — there is **no log at activation** (see the next section for how to verify it). For torch-side Inductor logs use `TORCH_LOGS=+inductor`; for the DEBUG rows above use `VLLM_LOGGING_LEVEL=DEBUG`.
-- Warnings that say the track is inert: `VLLM_USE_BREAKABLE_CUDAGRAPH wins over compile_backend='inductor'`, `TORCH_COMPILE_DISABLE=1 detected`, `VLLM_USE_AOT_COMPILE=1 is explicitly set` — see the guard table in section 7.
+- Warnings that say the track is inert: `VLLM_USE_BREAKABLE_CUDAGRAPH wins over compilation_config.backend='inductor'`, `TORCH_COMPILE_DISABLE=1 detected`, `VLLM_USE_AOT_COMPILE=1 is explicitly set` — see the guard table in section 7.
 
 ## 2. Is the Backend Really Active? (Intent vs Fact)
 
@@ -175,7 +175,7 @@ Each entry: symptom (grep anchor) -> root cause -> fix. Append a new entry whene
 
 7. **`torch._dynamo.mark_dynamic` is a sticky tensor property.** Reusing input tensors across test cases carries the previous case's dynamic annotations into the next one; the failure (a `ConstraintViolationError` about a tensor specialized as a constant) points at the polluted case while the root cause is the previous one. Fix: fresh tensors per case.
 
-8. **Informational attributes are not switches.** `compilation_config.oot_compiler` is written dynamically by the platform code and is not a vLLM `CompilationConfig` field; seeing it in a log does not mean vLLM consumed it. The track switch is `ascend_compilation_config.compile_backend`, plus the guards below.
+8. **Informational attributes are not switches.** `compilation_config.oot_compiler` is written dynamically by the platform code and is not a vLLM `CompilationConfig` field; seeing it in a log does not mean vLLM consumed it. The track switch is `compilation_config.backend` (`-cc.backend inductor`), plus the guards below.
 
 ## 7. Track Observability Affordances
 
@@ -185,12 +185,12 @@ Explicitly-set controls that silently change what the track compiles produce `wa
 
 | Condition | Grep anchor | Meaning |
 |---|---|---|
-| `VLLM_USE_BREAKABLE_CUDAGRAPH` set | `wins over compile_backend='inductor'` | upstream forced mode to NONE; the track is inert. Set `VLLM_USE_BREAKABLE_CUDAGRAPH=0` to use the track |
+| `VLLM_USE_BREAKABLE_CUDAGRAPH` set | `wins over compilation_config.backend='inductor'` | upstream forced mode to NONE; the track is inert. Set `VLLM_USE_BREAKABLE_CUDAGRAPH=0` to use the track |
 | `TORCH_COMPILE_DISABLE=1` | `TORCH_COMPILE_DISABLE=1 detected` | upstream already disabled compilation; the track has no effect on this engine |
 | `VLLM_USE_AOT_COMPILE=1` | `VLLM_USE_AOT_COMPILE=1 is explicitly set` | it runs, but reloading the saved AOT artifact on a later start is unverified on this track |
 | user `TORCHINDUCTOR_NPU_BACKEND` != `triton_experimental` | `keeping user TORCHINDUCTOR_NPU_BACKEND` | your backend value is kept and used |
 | `VLLM_USE_STANDALONE_COMPILE=1` / `VLLM_USE_MEGA_AOT_ARTIFACT=1` | `does not support` | hard `ValueError` — unadapted compile paths |
-| `enforce_eager=True` / `-O0` | `compile_backend='inductor' is incompatible with` / `level -O1 or higher` | hard `ValueError` — compilation fully disabled |
+| `enforce_eager=True` / `-O0` | `compilation_config.backend='inductor' is incompatible with` / `level -O1 or higher` | hard `ValueError` — compilation fully disabled |
 
 ### 7.2 One-flag dump trigger
 
