@@ -110,7 +110,6 @@ def test_paged_call_keeps_causal_multi_token_queries(builder, impl, state):
     query = torch.randn(11, 4, 8)
     output = torch.empty_like(query)
     with (
-        patch.object(fa3, "_EXTRA_CTX", SimpleNamespace(capturing=False)),
         patch.object(fa3, "get_scheduler_metadata", return_value=torch.empty(1)) as tiling,
         patch.object(fa3, "flash_attn_with_kvcache", return_value=query) as kernel,
         patch.object(fa3, "record_attention_compute_start"),
@@ -124,24 +123,6 @@ def test_paged_call_keeps_causal_multi_token_queries(builder, impl, state):
     assert kernel.call_args.kwargs["cu_seqlens_q"] is metadata.query_start_loc
     assert kernel.call_args.kwargs["page_table"] is metadata.block_tables
     assert kernel.call_args.kwargs["scheduler_metadata"] is tiling_tensor
-
-
-def test_varlen_only_for_uncached_prefill(builder, impl):
-    metadata = builder.build(0, common_metadata([3, 7], [3, 7]))
-    metadata.attn_state = AscendAttentionState.PrefillNoCache
-    metadata.varlen_scheduler_metadata[(4, 2, 8, torch.float32, 0.123, 0.0)] = torch.empty(1)
-    query = torch.randn(12, 4, 8)
-    output = torch.full_like(query, -1)
-    with (
-        patch.object(fa3, "_EXTRA_CTX", SimpleNamespace(capturing=False)),
-        patch.object(fa3, "flash_attn_varlen_func", return_value=query[:10]) as kernel,
-        patch.object(fa3, "record_attention_compute_start"),
-    ):
-        impl.forward_impl(query, query, query, (), metadata, output)
-    assert kernel.call_args.args[0].shape[0] == 10
-    assert kernel.call_args.kwargs["softmax_scale"] == impl.scale
-    assert output[:10].equal(query[:10])
-    assert torch.all(output[10:] == -1)
 
 
 @pytest.mark.parametrize(
@@ -162,17 +143,16 @@ def test_full_forward_never_falls_back_to_fia(builder, impl, state, capturing):
     metadata = builder.build(0, common_metadata(query_lens, [10, 20]))
     metadata.attn_state = state
     metadata.scheduler_metadata[(4, 2, 8, torch.float32, 0.123, 0.0)] = torch.empty(1)
-    metadata.varlen_scheduler_metadata[(4, 2, 8, torch.float32, 0.123, 0.0)] = torch.empty(1)
     query = torch.randn(sum(query_lens), 4, 8)
     output = torch.empty_like(query)
     expected = torch.full_like(query, 7)
     impl.pcp_enabled = False
     impl.attn_type = "decoder"
+    impl._use_layer_aware_fia_graph_replay = False
+    impl.use_bnsd_kv_cache = False
     impl.kv_sharing_target_layer_name = None
     layer = SimpleNamespace(layer_name="model.layers.0.self_attn.attn", _k_scale_float=1.0, _v_scale_float=1.0)
     with (
-        patch.object(fa3, "_EXTRA_CTX", SimpleNamespace(capturing=capturing)),
-        patch.object(fa3, "flash_attn_varlen_func", return_value=expected) as varlen,
         patch.object(fa3, "flash_attn_with_kvcache", return_value=expected) as paged,
         patch.object(fa3, "record_attention_compute_start"),
         patch("vllm_ascend.attention.attention_v1.DeviceOperator.reshape_and_cache") as cache_write,
@@ -189,12 +169,8 @@ def test_full_forward_never_falls_back_to_fia(builder, impl, state, capturing):
     assert result is output
     assert output.equal(expected)
     cache_write.assert_called_once()
-    if state == AscendAttentionState.PrefillNoCache and not capturing:
-        varlen.assert_called_once()
-        paged.assert_not_called()
-    else:
-        paged.assert_called_once()
-        varlen.assert_not_called()
+    paged.assert_called_once()
+    assert paged.call_args.kwargs["num_splits"] == 0
 
 
 def test_tiling_prepared_before_capture_and_refreshed_in_place(builder, impl):
@@ -210,8 +186,7 @@ def test_tiling_prepared_before_capture_and_refreshed_in_place(builder, impl):
     ):
         metadata = builder.build(0, common)
         address = metadata.scheduler_metadata[spec].data_ptr()
-        with patch.object(fa3, "_EXTRA_CTX", SimpleNamespace(capturing=True)):
-            impl.forward_impl(query, None, None, (), metadata, output)
+        impl.forward_impl(query, None, None, (), metadata, output)
         assert tiling.call_count == 1
         common.seq_lens.add_(1)
         updated = builder.build(0, common)
@@ -278,7 +253,7 @@ def test_config_rejects_context_parallel_fa3(pcp, dcp):
         config.derive_and_validate(vllm_config)
 
 
-def test_varlen_tiling_shared_but_attention_computed_for_each_layer(builder, impl):
+def test_paged_tiling_shared_but_attention_computed_for_each_layer(builder, impl):
     spec = (4, 2, 8, torch.float32, 0.123, 0.0)
     builder.scheduler_specs = {spec}
     common = common_metadata([3, 7], [3, 7])
@@ -287,9 +262,8 @@ def test_varlen_tiling_shared_but_attention_computed_for_each_layer(builder, imp
     query = torch.randn(10, 4, 8)
     output = torch.empty_like(query)
     with (
-        patch.object(fa3, "_EXTRA_CTX", SimpleNamespace(capturing=False)),
         patch.object(fa3, "get_scheduler_metadata", return_value=shared_tiling) as tiling,
-        patch.object(fa3, "flash_attn_varlen_func", side_effect=[query, query + 1]) as kernel,
+        patch.object(fa3, "flash_attn_with_kvcache", side_effect=[query, query + 1]) as kernel,
         patch.object(fa3, "record_attention_compute_start"),
     ):
         metadata = builder.build(0, common)
@@ -298,9 +272,11 @@ def test_varlen_tiling_shared_but_attention_computed_for_each_layer(builder, imp
         impl.forward_impl(query + 1, query + 1, query + 1, (), metadata, output)
         assert output.equal(query + 1)
     tiling.assert_called_once()
-    assert tiling.call_args.kwargs["page_size"] is None
-    assert tiling.call_args.kwargs["max_seqlen_k"] == 7
+    assert tiling.call_args.kwargs["page_size"] == 128
+    assert tiling.call_args.kwargs["num_splits"] == 0
+    assert tiling.call_args.kwargs["max_seqlen_k"] == 384
     assert tiling.call_args.kwargs["cache_seqlens"].tolist() == [3, 7, 0, 0, 0]
     assert kernel.call_count == 2
     assert all(call.kwargs["scheduler_metadata"] is shared_tiling for call in kernel.call_args_list)
-    assert not metadata.scheduler_metadata
+    assert metadata.scheduler_metadata[spec] is shared_tiling
+    assert all(call.kwargs["num_splits"] == 0 for call in kernel.call_args_list)

@@ -15,7 +15,6 @@ pytest.importorskip("flash_attn_npu_3")
 
 from vllm_ascend.attention import flash_attention_v3 as fa3
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.compilation.updatable_graph import UpdatableGraph
 
 BLOCK_SIZE = 128
 HEAD_SIZE = 128
@@ -29,8 +28,6 @@ SCALE = 0.071  # Deliberately differs from 1 / sqrt(head_size).
 @pytest.fixture(autouse=True)
 def forward_context():
     with (
-        patch.object(fa3, "_EXTRA_CTX", SimpleNamespace(capturing=False)),
-        patch.object(fa3, "flash_attn_varlen_func", wraps=fa3.flash_attn_varlen_func) as varlen,
         patch.object(fa3, "flash_attn_with_kvcache", wraps=fa3.flash_attn_with_kvcache) as paged,
         patch.object(fa3.AscendAttentionBackendImpl, "forward_impl", side_effect=AssertionError("FIA fallback")),
         patch.object(
@@ -38,7 +35,7 @@ def forward_context():
         ),
         patch.object(fa3.AscendAttentionBackendImpl, "forward_paged_attention", side_effect=AssertionError("PA")),
     ):
-        yield SimpleNamespace(varlen=varlen, paged=paged)
+        yield SimpleNamespace(paged=paged)
 
 
 def make_attention(dtype, num_heads=NUM_HEADS, num_kv_heads=NUM_KV_HEADS):
@@ -63,6 +60,8 @@ def make_attention(dtype, num_heads=NUM_HEADS, num_kv_heads=NUM_KV_HEADS):
     impl.is_kv_producer = False
     impl.pcp_enabled = False
     impl.attn_type = "decoder"
+    impl._use_layer_aware_fia_graph_replay = False
+    impl.use_bnsd_kv_cache = False
     common = SimpleNamespace(
         num_reqs=0,
         num_input_tokens=0,
@@ -162,12 +161,8 @@ def test_fa3_precision(dtype, query_lens, context_lens, state, num_heads, num_kv
     torch.npu.synchronize()
     expected = reference(impl, query, pages, query_lens, seq_lens)
     torch.testing.assert_close(output.float().cpu(), expected, atol=0.02, rtol=0.02)
-    if state == AscendAttentionState.PrefillNoCache:
-        forward_context.varlen.assert_called_once()
-        forward_context.paged.assert_not_called()
-    else:
-        forward_context.paged.assert_called_once()
-        forward_context.varlen.assert_not_called()
+    forward_context.paged.assert_called_once()
+    assert forward_context.paged.call_args.kwargs["num_splits"] == 0
 
 
 @pytest.mark.parametrize("num_heads,num_kv_heads", [(4, 2), (16, 1)])
@@ -187,11 +182,11 @@ def test_fa3_graph_changes_requests_lengths_and_pages(dtype, num_heads, num_kv_h
     for _ in range(3):
         impl.forward(layer, query, key, value, caches, metadata, output)
     torch.npu.synchronize()
-    graph = UpdatableGraph()
-    with patch.object(fa3, "_EXTRA_CTX", SimpleNamespace(capturing=True)), torch.npu.graph(graph):
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
         impl.forward(layer, query, key, value, caches, metadata, output)
-    # FA3 replay must not register any host-side per-layer update tasks.
-    assert not graph.tasks
+    # No FIA graph-task update is needed before replay.
+    impl.update_graph_params(None, None, 6, None)
     for query_lens, context_lens in [
         ([1, 1, 4], [129, 257, 128]),
         ([3, 3], [254, 126]),
@@ -207,4 +202,4 @@ def test_fa3_graph_changes_requests_lengths_and_pages(dtype, num_heads, num_kv_h
     # Three warmups and one capture execute the real FA3 Python wrapper;
     # subsequent replays execute the captured NPU kernels directly.
     assert forward_context.paged.call_count == 4
-    forward_context.varlen.assert_not_called()
+    assert forward_context.paged.call_args.kwargs["num_splits"] == 0

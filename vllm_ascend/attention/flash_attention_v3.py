@@ -6,12 +6,11 @@
 from dataclasses import dataclass, field
 
 import torch
-from flash_attn_npu_3 import flash_attn_varlen_func, flash_attn_with_kvcache, get_scheduler_metadata
+from flash_attn_npu_3 import flash_attn_with_kvcache, get_scheduler_metadata
 from vllm.config import VllmConfig
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionMetadataBuilder, AttentionType
 from vllm.v1.kv_cache_interface import AttentionSpec
 
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackend,
     AscendAttentionBackendImpl,
@@ -36,7 +35,6 @@ class AscendFlashAttentionBackend(AscendAttentionBackend):
 class AscendFlashAttentionMetadata(AscendMetadata):
     # Shared only within this execution, keyed by the operator's static parameters.
     scheduler_metadata: dict[tuple, torch.Tensor] = field(default_factory=dict)
-    varlen_scheduler_metadata: dict[tuple, torch.Tensor] = field(default_factory=dict)
 
 
 class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAttentionMetadata]):
@@ -119,31 +117,7 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
         graph_shape = num_input_tokens in self.capture_sizes
         max_query_len = num_input_tokens if graph_shape else common.max_query_len
         scheduler_metadata = {}
-        varlen_scheduler_metadata = {}
-        if common.attn_state == AscendAttentionState.PrefillNoCache:
-            # Varlen consumes only the current packed K/V. Prepare its tiling
-            # once per layer layout, including warmups for capturable shapes.
-            varlen_kv_lens = query_start_loc[1:] - query_start_loc[:-1]
-            for spec in self.scheduler_specs:
-                num_heads, num_kv_heads, head_size, dtype, scale, softcap = spec
-                varlen_scheduler_metadata[spec] = get_scheduler_metadata(
-                    batch_size=self.max_num_reqs,
-                    max_seqlen_q=max_query_len,
-                    max_seqlen_k=max_query_len,
-                    num_heads_q=num_heads,
-                    num_heads_kv=num_kv_heads,
-                    headdim=head_size,
-                    cache_seqlens=varlen_kv_lens,
-                    qkv_dtype=dtype,
-                    cu_seqlens_q=query_start_loc,
-                    page_size=None,
-                    causal=common.causal,
-                    softmax_scale=scale,
-                    softcap=softcap,
-                    num_splits=1,
-                )
-        needs_paged_attention = graph_shape or common.attn_state != AscendAttentionState.PrefillNoCache
-        for spec in self.scheduler_specs if needs_paged_attention else ():
+        for spec in self.scheduler_specs:
             num_heads, num_kv_heads, head_size, dtype, scale, softcap = spec
             # AICPU tiling runs once per layout, before entering the model graph.
             # The operator's auxiliary-stream events cannot themselves be
@@ -163,7 +137,7 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
                 causal=common.causal,
                 softmax_scale=scale,
                 softcap=softcap,
-                num_splits=1,
+                num_splits=0,
             )
             if graph_shape:
                 buffer_key = (source_key, spec, max_query_len, common.causal)
@@ -184,7 +158,6 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
             causal=common.causal,
             model_runner_type=self.model_runner_type,
             scheduler_metadata=scheduler_metadata,
-            varlen_scheduler_metadata=varlen_scheduler_metadata,
         )
 
     def build_for_graph_capture(
@@ -243,6 +216,19 @@ class AscendFlashAttentionImpl(AscendAttentionBackendImpl):
             raise ValueError("FA3 context parallelism is not implemented.")
         self.logits_soft_cap = logits_soft_cap or 0.0
 
+    @staticmethod
+    def update_graph_params(
+        update_stream,
+        forward_context,
+        num_tokens,
+        vllm_config,
+        speculative_config=None,
+        draft_attn_metadatas=None,
+    ):
+        # The metadata builder updates FA3 inputs and device tiling in place
+        # before replay; no host-side attention tasks need to be updated.
+        pass
+
     def forward_impl(
         self,
         query: torch.Tensor,
@@ -262,25 +248,6 @@ class AscendFlashAttentionImpl(AscendAttentionBackendImpl):
             self.scale,
             self.logits_soft_cap,
         )
-        if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache and not _EXTRA_CTX.capturing:
-            num_tokens = attn_metadata.num_actual_tokens
-            result = flash_attn_varlen_func(
-                query[:num_tokens],
-                key[:num_tokens],
-                value[:num_tokens],
-                cu_seqlens_q=attn_metadata.query_start_loc,
-                cu_seqlens_k=attn_metadata.query_start_loc,
-                max_seqlen_q=attn_metadata.max_query_len,
-                max_seqlen_k=attn_metadata.max_query_len,
-                softmax_scale=self.scale,
-                causal=attn_metadata.causal,
-                softcap=self.logits_soft_cap,
-                scheduler_metadata=attn_metadata.varlen_scheduler_metadata[scheduler_key],
-                num_splits=1,
-            )
-            output[:num_tokens].copy_(result)
-            return output
-
         result = flash_attn_with_kvcache(
             query,
             self.key_cache,
@@ -293,7 +260,7 @@ class AscendFlashAttentionImpl(AscendAttentionBackendImpl):
             causal=attn_metadata.causal,
             softcap=self.logits_soft_cap,
             scheduler_metadata=attn_metadata.scheduler_metadata[scheduler_key],
-            num_splits=1,
+            num_splits=0,
         )
         output.copy_(result)
         return output

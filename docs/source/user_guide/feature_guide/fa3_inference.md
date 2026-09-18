@@ -1,32 +1,25 @@
 # FA3 inference with device-side tiling
 
-The opt-in FA3 inference backend uses `flash_attn_varlen_func` and
-`flash_attn_with_kvcache` from
+The opt-in FA3 inference backend uses `flash_attn_with_kvcache` for both
+prefill and decode, with automatic KV splitting (`num_splits=0`), from
 [flash-attention-npu](https://github.com/MinghuasLab/flash-attention-npu).
 It is separate from the [RL training-consistency backend](flash_attention.md).
 
 ## Installation and selection
 
-Build the v3 operator for Ascend 910B/C with the accompanying
-[varlen metadata interface patch](fa3_varlen_scheduler_metadata.patch).
-Replace `/path/to/vllm-ascend` below with this checkout's absolute path:
+Build the v3 operator for Ascend 910B/C:
 
 ```bash
 git clone --recursive https://github.com/MinghuasLab/flash-attention-npu.git
 cd flash-attention-npu
-git checkout d2edb6d7c3587fb7f58b4c91e1f3aedd6e602ca0
-git apply /path/to/vllm-ascend/docs/source/user_guide/feature_guide/fa3_varlen_scheduler_metadata.patch
+git checkout 7ce2a8926a2c10c92fd05c195cde33c49b32fc0f
 source /usr/local/Ascend/cann/set_env.sh
 FLASH_ATTN_BUILD_VERSION=v3 FLASH_ATTN_BUILD_NPU=910 python setup.py install
 ```
 
-The Python module must provide `flash_attn_npu_3.get_scheduler_metadata`,
-`flash_attn_varlen_func`, and `flash_attn_with_kvcache`. The integration was
-developed against operator revision `d2edb6d7c3587fb7f58b4c91e1f3aedd6e602ca0`.
-The patch adds the optional `scheduler_metadata` argument to the varlen Python
-interface; it leaves the C++ ABI and kernels unchanged. The unpatched revision
-does not accept this argument, so update the operator package together with this
-backend. Calls without the argument retain the operator's internal tiling path.
+The Python module must provide `flash_attn_npu_3.get_scheduler_metadata`
+and `flash_attn_with_kvcache`. The varlen metadata interface patch is no longer
+required by this backend.
 
 Enable the backend through the Ascend platform's attention selector:
 
@@ -43,17 +36,16 @@ is required. With the option disabled, existing attention selection is preserved
 
 ## Attention and graph execution
 
-- Uncached prefill uses the variable-length interface. Cached prefill, prefix
-  hits, mixed prefill/decode batches, and multi-token verification use paged KV
-  attention with right-aligned causal masking.
+- Uncached prefill, cached prefill, decode, prefix hits, mixed prefill/decode
+  batches, and multi-token verification all use paged KV attention with
+  right-aligned causal masking.
 - KV writes use the existing Ascend cache writer and vLLM slot mapping. The FA3
   call receives the total KV length **after** those writes; it does not append KV
   a second time. Shared prefix pages remain read-only when writing a new suffix.
 - The metadata builder consumes device-side query offsets and sequence lengths.
   It does not copy lengths to the CPU or infer decode causality from query length.
 - `get_scheduler_metadata` executes device-side tiling once per distinct layer
-  layout and interface per batch. Varlen and paged metadata are stored separately
-  because their KV layouts differ. Layers reuse tiling, while each layer still
+  layout per batch. Layers reuse tiling, while each layer still
   computes attention from its own Q/K/V. Omitting metadata from the paged
   interface would select host tiling and introduce device synchronization.
 - For captured token sizes, tiling and request metadata have stable addresses.
@@ -61,11 +53,10 @@ is required. With the option disabled, existing attention selection is preserved
   outside the model graph because the operator's AICPU auxiliary-stream events
   are not capturable on every CANN release. Attention itself is captured, with
   no per-layer host task updates.
-- Graph capture uses the paged interface, including uncached prefill. An uncached
-  batch at a capturable token size prepares both kinds of tiling because eager
-  warmup uses varlen while capture uses paged attention. Cached prefill, decode,
-  chunked prefill, and speculative verification all use the paged interface;
-  mixed prefill/decode batches do not require separate calls.
+- Eager execution and graph capture use the same paged interface and metadata.
+  Both tiling construction and attention execution pass `num_splits=0`, allowing
+  the operator to select splitting. Mixed prefill/decode batches do not require
+  separate calls.
 - Request dimensions include an extra padding row. Zero-length queries exclude
   padding, including a dummy request inserted by the FIA-oriented runner.
 
