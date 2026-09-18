@@ -190,8 +190,8 @@ class EplbConfig:
     num_redundant_experts: int = 0
     eplb_policy_type: int = 2
     eplb_heat_collection_stage: str = "all"
-    # Model Runner V2 only. Restricts which batch phase contributes to the
-    # upstream EPLB expert-load window; any prefill request marks the batch
+    # Native EPLB (V2, or global Policy4 on V1): restrict which batch phase
+    # contributes to the load window. Any prefill request marks the batch
     # as prefill.
     load_collection_phase: str = "all"
 
@@ -215,8 +215,10 @@ class EplbConfig:
                 raise TypeError(f"{key} must be an integer")
             if value < 0:
                 raise ValueError(f"{key} must greater than 0; got {value} instead")
-        if self.eplb_policy_type not in [0, 1, 2, 3]:
-            raise ValueError("eplb_policy_type must in [0, 1, 2, 3]")
+        if self.eplb_policy_type not in [0, 1, 2, 3, 4]:
+            raise ValueError("eplb_policy_type must in [0, 1, 2, 3, 4]")
+        if self.eplb_policy_type == 4 and self.num_redundant_experts <= 0:
+            raise ValueError("Global Policy4 requires positive num_redundant_experts per rank")
         if self.dynamic_eplb:
             assert (
                 os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1")

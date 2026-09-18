@@ -140,7 +140,8 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         ascend_config = get_ascend_config()
         self.dynamic_eplb = False if vllm_config.use_v2_model_runner else ascend_config.eplb_config.dynamic_eplb
         self.use_expert_weight_list = self.dynamic_eplb or (
-            vllm_config.use_v2_model_runner is True and vllm_config.parallel_config.enable_eplb is True
+            (vllm_config.use_v2_model_runner is True or ascend_config.eplb_config.eplb_policy_type == 4)
+            and vllm_config.parallel_config.enable_eplb is True
         )
         self.in_dtype = vllm_config.model_config.dtype
         try:
