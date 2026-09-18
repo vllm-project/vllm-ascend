@@ -176,9 +176,12 @@ class ActionExecutor:
                 if prepared is None:
                     continue
 
+                act_bound: Action = action
+                prep_bound: Any = prepared
+
                 def _commit(
-                    act: Action = action,
-                    prep: Any = prepared,
+                    act: Action = act_bound,
+                    prep: Any = prep_bound,
                 ) -> None:
                     try:
                         act.commit(prep)
