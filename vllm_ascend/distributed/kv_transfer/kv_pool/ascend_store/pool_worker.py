@@ -585,7 +585,7 @@ class KVPoolWorker:
         # Guard with pp_size == 1: under PP>1, num_layers holds the GLOBAL
         # layer count after the cache-group layout update, while
         # layerwise_key_layers must stay at the per-stage LOCAL count.
-        if self.num_kv_cache_groups == 1:
+        if self.num_kv_cache_groups == 1 and getattr(self, "pp_size", 1) == 1:
             self.layerwise_key_layers = self.num_layers
         for group_id in range(self.num_kv_cache_groups):
             group_num_layers = self.group_num_layers.get(group_id, self.num_layers)
@@ -609,8 +609,10 @@ class KVPoolWorker:
                     layer_byte_offset += int(getattr(self, "layerwise_key_layer_offset", 0)) * per_layer
                 cp_scale = getattr(self, "pcp_size", 1) * getattr(self, "dcp_size", 1)
                 if cp_scale > 1 and self.put_step > 1:
-                    gva_align = 2 * 1024 * 1024
-                    shard_stride = (sum(gbl) + gva_align - 1) // gva_align * gva_align
+                    # Use the GLOBAL region size (PP-aware) as the basis for
+                    # the per-shard stride; under PP>1 the local sum(gbl) only
+                    # covers this stage's layers and would under-allocate.
+                    shard_stride = self._global_group_alloc_size(group_id) // cp_scale
                     shard_idx = getattr(self, "pcp_rank", 0) * self.dcp_size + getattr(self, "dcp_rank", 0)
                     layer_byte_offset += shard_idx * shard_stride
             builders.append(
@@ -890,7 +892,7 @@ class KVPoolWorker:
         cp_scale = getattr(self, "pcp_size", 1) * getattr(self, "dcp_size", 1)
         if self.put_step > 1 and cp_scale > 1:
             gva_align = 2 * 1024 * 1024
-            shard_stride = (sum(gbl) + gva_align - 1) // gva_align * gva_align
+            shard_stride = (per_layer * n_global + gva_align - 1) // gva_align * gva_align
             return shard_stride * cp_scale
         return per_layer * n_global
 
