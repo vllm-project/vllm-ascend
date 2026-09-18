@@ -1,8 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from unittest.mock import MagicMock, patch
+# ruff: noqa: E402
 
 import pytest
+
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.28.0"):
+    pytest.skip("DeepSeek V4.1 requires the pinned vLLM main APIs", allow_module_level=True)
+
+from unittest.mock import MagicMock, patch
+
 import torch
 
 from tests.deepseek_v41_utils import hc_mixes_reference, hc_post_reference

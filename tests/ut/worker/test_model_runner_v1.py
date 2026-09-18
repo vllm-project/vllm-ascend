@@ -26,7 +26,6 @@ from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
-from tests.deepseek_v41_utils import make_cache_config
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
 from vllm_ascend.core.kv_cache_interface import (
@@ -254,7 +253,10 @@ class TestDummyRunSlotInvalidation(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "metadata checked"):
             runner._dummy_run(1)
 
+    @unittest.skipIf(vllm_version_is("0.28.0"), "V4.1 requires the pinned vLLM main APIs")
     def test_graph_capture_invalidates_only_v41_active_slots(self):
+        from tests.deepseek_v41_utils import make_cache_config
+
         runner = NPUModelRunner.__new__(NPUModelRunner)
         runner.uniform_decode_query_len = 1
         runner.scheduler_config = SimpleNamespace(max_num_batched_tokens=8, max_num_seqs=8)
@@ -714,7 +716,9 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                     caches = runner._reshape_kv_cache_tensors(cache_config, raw)
                 assert_attention_cache_views(caches, raw, packed)
 
+    @unittest.skipIf(vllm_version_is("0.28.0"), "V4.1 requires the pinned vLLM main APIs")
     def test_v41_layer_outer_buffers_allocate_and_reshape(self):
+        from tests.deepseek_v41_utils import make_cache_config
         from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheBackend
 
         runner = self._build_runner()
@@ -752,7 +756,9 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         assert caches[prefix + "0.self_attn.swa_cache"].is_contiguous()
         assert not caches[prefix + "3.self_attn.swa_cache"].is_contiguous()
 
+    @unittest.skipIf(vllm_version_is("0.28.0"), "V4.1 requires the pinned vLLM main APIs")
     def test_v41_dspark_shares_four_backings_after_rank_shrink(self):
+        from tests.deepseek_v41_utils import make_cache_config
         from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheBackend
 
         runner = self._build_runner()

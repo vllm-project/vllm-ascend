@@ -1,9 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# ruff: noqa: E402
+
+import pytest
+
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.28.0"):
+    pytest.skip("DeepSeek V4.1 requires the pinned vLLM main APIs", allow_module_level=True)
+
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-import pytest
 import torch
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheManager

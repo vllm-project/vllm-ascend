@@ -17,6 +17,8 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from safetensors.torch import save_file
 
+from vllm_ascend.utils import vllm_version_is
+
 ROOT = Path(__file__).resolve().parents[3]
 
 
@@ -34,15 +36,13 @@ def load_module(module_name, path):
 
 ENGRAM = ROOT / "vllm_ascend/models/deepseek_v41/engram"
 npu = load_module("engram_npu", ENGRAM / "npu.py")
-_missing_upstream = ""
-try:
-    common = load_module("engram_common", ENGRAM / "common.py")
-except ImportError as error:  # the hashing itself comes from upstream's V4.1 module
+if vllm_version_is("0.28.0"):
     common = None
-    _missing_upstream = str(error)
+else:
+    common = load_module("engram_common", ENGRAM / "common.py")
 
 requires_upstream_hash = pytest.mark.skipif(
-    common is None, reason=f"engram hashing needs vLLM with DeepSeek V4.1: {_missing_upstream}"
+    vllm_version_is("0.28.0"), reason="Engram hashing requires the pinned vLLM main APIs"
 )
 
 
@@ -256,10 +256,10 @@ def test_host_offloaded_shard_serves_the_lookup(monkeypatch):
 
 @pytest.fixture
 def engram_model(monkeypatch):
-    try:
-        from vllm_ascend.models.deepseek_v41 import model as implementation
-    except ImportError as error:  # the V4.1 model needs a newer vLLM
-        pytest.skip(f"DeepSeek V4.1 is not importable here: {error}")
+    if vllm_version_is("0.28.0"):
+        pytest.skip("DeepSeek V4.1 requires the pinned vLLM main APIs")
+    from vllm_ascend.models.deepseek_v41 import model as implementation
+
     monkeypatch.setattr(implementation, "engram_enabled", lambda config: True)
     cls = implementation.DeepseekV41Model
     shell = SimpleNamespace(

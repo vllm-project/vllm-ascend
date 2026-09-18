@@ -25,7 +25,6 @@ from vllm.v1.attention.backend import (
     AttentionMetadata,
     AttentionMetadataBuilder,
 )
-from vllm.v1.kv_cache_interface import CircularBufferSpec
 
 from vllm_ascend.attention.dsa_v1 import build_dspark_swa_indices, dsv4_dsa_overlap_stream
 from vllm_ascend.core.kv_cache_interface import (
@@ -33,6 +32,7 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendSlidingWindowMLASpec,
     get_kv_cache_compression_ratio,
     get_storage_block_size,
+    is_circular_kv_cache_spec,
 )
 from vllm_ascend.ops.rope_dsv4 import (
     get_cos_and_sin_dsa,
@@ -577,7 +577,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         # roles are fixed before allocation and graph capture.
         self._build_query_metadata = build_query_metadata
         self._build_compressor_metadata = build_compressor_metadata
-        if isinstance(kv_cache_spec, CircularBufferSpec):
+        if is_circular_kv_cache_spec(kv_cache_spec):
             self._cache_kind = "compressor_state"
         elif isinstance(kv_cache_spec, AscendSlidingWindowMLASpec):
             self._cache_kind = "swa"

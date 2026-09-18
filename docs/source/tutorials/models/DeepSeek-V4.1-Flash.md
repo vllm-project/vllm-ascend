@@ -20,6 +20,11 @@ vLLM Ascend supports W8A8 colocated deployment on either two Atlas 800 A3
 servers or four Atlas 800 A2 servers. A single A3 server can use Engram host
 offload as described below. Prefill-Decode disaggregation is not covered by this guide.
 
+DeepSeek V4.1 requires the vLLM main commit pinned in
+`.github/vllm-main-verified.commit`. The supported vLLM v0.28.0 release
+does not include the V4.1 configuration, multimodal, Engram, or circular
+KV-cache APIs, so V4.1 models are not registered on that release.
+
 ## 2 Supported Features
 
 Refer to the [Supported Models](../../user_guide/support_matrix/supported_models.md)

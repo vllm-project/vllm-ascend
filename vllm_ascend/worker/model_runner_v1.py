@@ -4391,7 +4391,7 @@ class NPUModelRunner(GPUModelRunner):
             kv_cache_config,
             kv_cache_allocation_context=kv_cache_allocation_context,
         )
-        if any(is_circular_kv_cache_spec(g.kv_cache_spec) for g in kv_cache_config.kv_cache_groups):
+        if is_deepseek_v41_cache(kv_cache_config.kv_cache_groups):
             # Lazy import avoids the model/cache registration cycle.
             from vllm_ascend.models.deepseek_v41.compressor import DeepseekV41Compressor
 
