@@ -670,7 +670,7 @@ class AscendDSparkProposer(AscendDflashProposer):
             is_draft_model=True,
             draft_attn_metadatas=multi_steps_attn_metadata,
             device_metadata_executor=active_device_metadata_executor,
-            model_instance=self.model,
+            
             eplb_heat_collection_status=(
                 self.runner.eplb_heat_collection_status if self.runner.dynamic_eplb else False
             ),

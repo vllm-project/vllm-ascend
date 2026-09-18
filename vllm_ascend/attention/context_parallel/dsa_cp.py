@@ -306,12 +306,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.decode_threshold = 1
         self.spec_slot_mapping = None
         self.dspark_swa_indices_buffer: torch.Tensor | None = None
-        if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION) and not is_a5_bf16_kv_enabled(
-            vllm_config
-        ):
-            self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens,)  # type: ignore
-        else:
-            self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens, 2)  # type: ignore
+
         kv_plan = get_dsa_attn_kv_plan(vllm_config)
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         self.slot_mapping_shape = (
@@ -669,10 +664,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             # capture-time metadata and cause illegal device memory accesses.
             local_cos = cos[local_start:local_end_with_pad]
             local_sin = sin[local_start:local_end_with_pad]
-            local_query_start_loc = local_query_start_loc.clone()
-            local_seq_lens = local_seq_lens.clone()
-            local_cos = cos.pad_to(num_tokens_pad)[local_start:local_end_with_pad]
-            local_sin = sin.pad_to(num_tokens_pad)[local_start:local_end_with_pad]
+
 
             _, _, _, _, local_query_start_loc_cpu, local_seq_lens_cpu = self._build_local_token_metadata(
                 num_reqs=num_reqs,
