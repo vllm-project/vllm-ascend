@@ -2185,7 +2185,8 @@ class NPUModelRunner(GPUModelRunner):
         )
 
         self._rg_scheduler_output = scheduler_output
-        if need_pre_sample_hook(self.runtime_guard):
+        runtime_guard = getattr(self, "runtime_guard", None)
+        if runtime_guard is not None and need_pre_sample_hook(runtime_guard):
             with wrap_compute_logits_for_pre_sample(self, self.input_batch):
                 return self.model.compute_logits(sample_hidden_states)
         return self.model.compute_logits(sample_hidden_states)
@@ -2197,17 +2198,19 @@ class NPUModelRunner(GPUModelRunner):
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
         allow_arm = int(getattr(scheduler_output, "total_num_scheduled_tokens", 0) or 0) > 0
-        self.runtime_guard.sync_for_step(
-            scheduler_output=scheduler_output,
-            allow_arm=allow_arm,
-        )
+        runtime_guard = getattr(self, "runtime_guard", None)
+        if runtime_guard is not None:
+            runtime_guard.sync_for_step(
+                scheduler_output=scheduler_output,
+                allow_arm=allow_arm,
+            )
         try:
             return self._execute_model_after_sync(scheduler_output, intermediate_tensors)
         finally:
             # Collectives must stay lockstep — do not soft-fail this gate.
             # No-sample / early return: do not burn manual_dump.
-            if self.execute_model_state is None:
-                self.runtime_guard.end_of_wave_sync(allow_arm=False)
+            if runtime_guard is not None and self.execute_model_state is None:
+                runtime_guard.end_of_wave_sync(allow_arm=False)
 
     def _execute_model_after_sync(
         self,

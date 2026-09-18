@@ -271,6 +271,11 @@ class NPUModelRunner(GPUModelRunner):
         # Capture bound super() before nested sample_fn (zero-arg super fails in nested fn).
         _super_sample_tokens = super().sample_tokens
 
+        # ``__new__`` UTs omit ``runtime_guard``; keep the pre-guard sample path.
+        runtime_guard = getattr(self, "runtime_guard", None)
+        if runtime_guard is None:
+            return _super_sample_tokens(grammar_output)
+
         def sample_fn() -> SamplePhaseResult:
             with (
                 wrap_compute_logits_for_pre_sample(self, input_batch)
@@ -395,11 +400,14 @@ class NPUModelRunner(GPUModelRunner):
 
         # v1 parity: dummy waves never arm — manual_dump is not burned and the
         # wave counter does not advance (advance(allow_arm=False) is a no-op).
-        allow_arm = scheduler_output.total_num_scheduled_tokens > 0
-        self.runtime_guard.sync_for_step(
-            scheduler_output=scheduler_output,
-            allow_arm=allow_arm,
-        )
+        # ``__new__`` UTs omit ``runtime_guard``; skip hooks when unbound.
+        runtime_guard = getattr(self, "runtime_guard", None)
+        allow_arm = int(getattr(scheduler_output, "total_num_scheduled_tokens", 0) or 0) > 0
+        if runtime_guard is not None:
+            runtime_guard.sync_for_step(
+                scheduler_output=scheduler_output,
+                allow_arm=allow_arm,
+            )
         self._rg_scheduler_output = scheduler_output
 
         try:
@@ -418,8 +426,8 @@ class NPUModelRunner(GPUModelRunner):
         finally:
             # Collectives must stay lockstep — do not soft-fail this gate.
             # No-sample / early return: do not burn manual_dump.
-            if dummy_run or self.execute_model_state is None:
-                self.runtime_guard.end_of_wave_sync(allow_arm=False)
+            if runtime_guard is not None and (dummy_run or self.execute_model_state is None):
+                runtime_guard.end_of_wave_sync(allow_arm=False)
 
         self._cpp_execution_time_ms = _finish_profiling_chunk_timing(
             profiling_config,

@@ -415,6 +415,10 @@ def test_init_without_spec_pp():
         patch("torch.npu.Event", return_value="event"),
         patch("torch.npu.Stream", return_value="stream"),
         patch("torch.empty", return_value=torch.zeros(2, dtype=torch.int32)),
+        patch(
+            "vllm_ascend.runtime_guard.processor.RuntimeGuardProcessor.bind",
+            return_value=MagicMock(name="runtime_guard"),
+        ),
     ):
         runner = NPUModelRunner(vllm_config, torch.device("cpu"))
     assert runner.eplb == "eplb"
@@ -456,6 +460,10 @@ def test_init_spec_pp_full_graph_and_speculator():
         patch("torch.npu.Stream", return_value="stream"),
         patch("torch.npu.Event", return_value="event"),
         patch("torch.empty", return_value=torch.zeros(2, dtype=torch.int32)),
+        patch(
+            "vllm_ascend.runtime_guard.processor.RuntimeGuardProcessor.bind",
+            return_value=MagicMock(name="runtime_guard"),
+        ),
         patch(
             "vllm_ascend.worker.v2.model_runner.breakable_cudagraph.is_breakable_cudagraph_enabled",
             return_value=True,
