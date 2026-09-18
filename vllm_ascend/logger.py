@@ -15,9 +15,10 @@ import os
 import sys
 from datetime import datetime
 from types import MethodType
+from typing import cast
 
 from vllm import envs
-from vllm.logger import _METHODS_TO_PATCH
+from vllm.logger import _METHODS_TO_PATCH, _VllmLogger
 from vllm.logging_utils import ColoredFormatter, NewLineFormatter
 
 _FORMAT = "%(levelname)s %(asctime)s [%(fileinfo)s:%(lineno)d] %(message)s"
@@ -27,7 +28,7 @@ _LOG_DIR = os.path.join(os.path.expanduser("~"), "ascend", "log", "vllm_ascend")
 _LOG_MAX_BYTES = 20 * 1024 * 1024
 
 
-def init_logger_ascend(name: str) -> logging.Logger:
+def init_logger_ascend(name: str) -> _VllmLogger:
     """Return a stdlib logger for Ascend / runtime_guard modules.
 
     Uses ``logging.getLogger`` directly (plus vLLM's once-method patching)
@@ -41,7 +42,7 @@ def init_logger_ascend(name: str) -> logging.Logger:
     logger = logging.getLogger(name)
     for method_name, method in _METHODS_TO_PATCH.items():
         setattr(logger, method_name, MethodType(method, logger))
-    return logger
+    return cast(_VllmLogger, logger)
 
 
 def _resolve_log_level(level: str) -> int:
