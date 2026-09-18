@@ -20,11 +20,11 @@ Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for
 
 The following model variants are available. It is recommended to download the model weight to a shared directory accessible to all nodes.
 
-| Model                               | Hardware Requirement                                                                             | Download                                                                                |
-| ----------------------------------- | ------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------- |
-| Qwen3-Coder-30B-A3B-Instruct (BF16) | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards) | [Download](https://www.modelscope.cn/models/Qwen/Qwen3-Coder-30B-A3B-Instruct)          |
-| Qwen3-Coder-30B-A3B-Instruct-W8A8   | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards)                               | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-Coder-30B-A3B-Instruct-w8a8) |
-| Eagle3 Draft Model                  | NA                                                                                               | [Download](https://huggingface.co/AngelSlim/Qwen3-a3B_eagle3)                           |
+| Model                               | Hardware Requirement                                               | Download                                                                                |
+| ----------------------------------- | ------------------------------------------------------------------ | --------------------------------------------------------------------------------------- |
+| Qwen3-Coder-30B-A3B-Instruct (BF16) | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards) | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-Coder-30B-A3B-Instruct)          |
+| Qwen3-Coder-30B-A3B-Instruct-W8A8   | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3-Coder-30B-A3B-Instruct-w8a8) |
+| Eagle3 Draft Model                  | NA                                                                 | [Hugging Face](https://huggingface.co/AngelSlim/Qwen3-a3B_eagle3)                           |
 
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.
 
@@ -39,6 +39,8 @@ If the W8A8 quantized weights are not available for direct download, you can obt
     - **Attention projections** (q/k/v/o_proj): Static W8A8 with pre-computed per-tensor scales; biases kept in BF16
     - **MoE routing gate** (mlp.gate): BF16
     - **MoE expert projections** (gate/up/down_proj): Dynamic W8A8 where input scales are computed on-the-fly during inference
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ## 4 Installation
 
@@ -192,6 +194,7 @@ export HCCL_OP_EXPANSION_MODE="AIV"  # not needed on A2
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
+# Ensure the model path matches the directory recorded during download
 vllm serve your_model_path \
     --served-model-name qwen3-coder \
     --trust-remote-code \
@@ -261,7 +264,7 @@ Expected result: HTTP 200 with a JSON response containing the `choices` field wi
 
 ## 7 Accuracy Evaluation
 
-### Using AISBench
+### 7.1 Using AISBench
 
 For setup details, including installation, dataset download, and configuration, please refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md).
 
@@ -332,7 +335,7 @@ For dataset preparation, please refer to the [AISBench Datasets Guide](https://g
 
 ## 8 Performance Evaluation
 
-### Using AISBench
+### 8.1 Using AISBench
 
 For setup details, please refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation).
 
@@ -395,7 +398,7 @@ ais_bench --models vllm_api_stream_chat --datasets synthetic_gen --mode perf --d
 
 > The `--models` value should match the `abbr` in your model config file. Use `--num-prompts` to limit the number of test requests.
 
-### Using vLLM Benchmark
+### 8.2 Using vLLM Benchmark
 
 Refer to [vLLM benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
@@ -553,15 +556,15 @@ Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_mat
 
 For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md). This chapter only covers model-specific issues.
 
-### Q: How do I enable long context (beyond 256K)?
+### Q: How do I enable long context (beyond 256k)?
 
-Qwen3-Coder-30B-A3B natively supports 256K token context length. For contexts beyond 256K, YaRN rope scaling is required to extend up to 1M. Enable YaRN via `--hf-overrides`:
+Qwen3-Coder-30B-A3B natively supports 256k token context length. For contexts beyond 256k, YaRN rope scaling is required to extend up to 1M. Enable YaRN via `--hf-overrides`:
 
 ```bash
 --hf-overrides '{"rope_parameters": {"rope_type":"yarn","factor":4,"original_max_position_embeddings":262144}}'
 ```
 
-For contexts within the native 256K range, no additional configuration is needed. Just set `--max-model-len` to your desired length.
+For contexts within the native 256k range, no additional configuration is needed. Just set `--max-model-len` to your desired length.
 
 ### Q: What makes Qwen3-Coder different from Qwen3-30B-A3B?
 

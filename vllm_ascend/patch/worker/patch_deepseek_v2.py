@@ -32,6 +32,8 @@ from vllm.model_executor.models.deepseek_v2 import (
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.sequence import IntermediateTensors
 
+from vllm_ascend.utils import is_mtp_layer
+
 
 def _should_skip_indexer_init(
     config: DeepseekV2Config | DeepseekV3Config,
@@ -42,8 +44,7 @@ def _should_skip_indexer_init(
         return False
 
     layer_id = extract_layer_index(prefix)
-    num_hidden_layers = getattr(config, "num_hidden_layers", None)
-    if num_hidden_layers is not None and layer_id >= num_hidden_layers:
+    if is_mtp_layer(config, prefix):
         return False
 
     # GLM-5.2 describes checkpoint-level shared indexers explicitly. Runtime
@@ -226,6 +227,13 @@ def _deepseek_v2_mla_attention_init(
     elif 0 <= layer_id < len(_index_topk_pattern):
         _skip_topk = _index_topk_pattern[layer_id] == "S"
 
+    # The skip pattern only governs backbone layers. MTP/nextn layers
+    # (layer_id >= num_hidden_layers) must never start with skip_topk=True:
+    # they compute their own indices at draft step 0 and toggle at runtime
+    # via set_skip_topk (index_share_for_mtp_iteration). Matches upstream
+    # deepseek_v2.py behavior.
+    mtp_layer = is_mtp_layer(config, prefix)
+
     skip_indexer_init = _should_skip_indexer_init(config, prefix, _skip_topk)
     if self.is_v32 and not skip_indexer_init:
         self.indexer_rope_emb = get_rope(
@@ -283,7 +291,7 @@ def _deepseek_v2_mla_attention_init(
         cache_config,
         quant_config,
         prefix,
-        skip_topk=_skip_topk,
+        skip_topk=_skip_topk and not mtp_layer,
     )
 
 

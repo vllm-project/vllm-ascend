@@ -73,7 +73,7 @@ class AscendDeepSeekMTP(DeepSeekMTP):
 
 class AscendGlmMoeDsaForCausalLM(GlmMoeDsaForCausalLM):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        if vllm_version_is("0.27.1"):
+        if vllm_version_is("0.28.0"):
             loader = AutoWeightsLoader(self, skip_prefixes=["rot."])
             return loader.load_weights(weights)
         mapper = WeightsMapper(orig_to_new_prefix={"rot.": None})

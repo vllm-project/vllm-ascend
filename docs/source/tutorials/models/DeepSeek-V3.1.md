@@ -24,14 +24,17 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-- `DeepSeek-V3.1`(BF16 version): [Download model weight](https://www.modelscope.cn/models/deepseek-ai/DeepSeek-V3.1).
-- `DeepSeek-V3.1-w8a8-mtp-QuaRot`(Quantized version with mix mtp): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-w8a8-mtp-QuaRot).
-- `DeepSeek-V3.1-Terminus-w4a8-mtp-QuaRot`(Quantized version with mix mtp): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-Terminus-w4a8-mtp-QuaRot).
-- `DeepSeek-V3.1-w4a4c8-mxfp4`(Quantized version with mix mtp): [Download model weight](https://modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4).
-- `DeepSeek-V3.1-w8a8c8-mxfp8`(Quantized version with mix mtp): [Download model weight](https://modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-w8a8c8-mxfp8).
+|  Weight Version                                                          | Download Links |
+|--------------------------------------------------------------------------|----------------|
+| `DeepSeek-V3.1`(BF16 version)                                            | [ModelScope](https://www.modelscope.cn/models/deepseek-ai/DeepSeek-V3.1) |
+| `DeepSeek-V3.1-w8a8-mtp-QuaRot`(Quantized version with mix mtp)          | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-w8a8-mtp-QuaRot) |
+| `DeepSeek-V3.1-Terminus-w4a8-mtp-QuaRot`(Quantized version with mix mtp) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-Terminus-w4a8-mtp-QuaRot) |
+| `DeepSeek-V3.1-w4a4c8-mxfp4`(Quantized version with mix mtp)             | [ModelScope](https://modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4) |
+| `DeepSeek-V3.1-w8a8c8-mxfp8`(Quantized version with mix mtp)             | [ModelScope](https://modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-w8a8c8-mxfp8) |
+
 - `Quantization method`: [msmodelslim](https://gitcode.com/Ascend/msmodelslim/blob/master/example/DeepSeek/README.md). You can use this method to quantize the model.
 
-It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
@@ -183,6 +186,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export TASK_QUEUE_ENABLE=1
 
+    # Ensure the model path matches the directory recorded during download
     vllm serve /weight/dsk-v3.1-w4a4_mlp-w8a8c8_attn-0618-full \
     --host 0.0.0.0 \
     --port 8015 \
@@ -226,7 +230,8 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     export TP_SOCKET_IFNAME=$nic_name
     export HCCL_SOCKET_IFNAME=$nic_name
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
     --host 0.0.0.0 \
     --port 8015 \
@@ -340,7 +345,8 @@ Run the following scripts on two nodes respectively.
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_INTRA_PCIE_ENABLE=1
     export HCCL_INTRA_ROCE_ENABLE=0
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot --additional-config '{"scheduler_config":{"enable_balance_scheduling":true}}' \
     --host 0.0.0.0 \
     --port 8004 \
@@ -393,6 +399,7 @@ Run the following scripts on two nodes respectively.
     export HCCL_INTRA_PCIE_ENABLE=1
     export HCCL_INTRA_ROCE_ENABLE=0
 
+    # Ensure the model path matches the directory recorded during download
     vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot --additional-config '{"scheduler_config":{"enable_balance_scheduling":true}}' \
     --host 0.0.0.0 \
     --port 8004 \
@@ -523,7 +530,7 @@ Parameter descriptions:
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
-
+        # Ensure the model path matches the directory recorded during download
         vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
             --host 0.0.0.0 \
             --port $2 \
@@ -597,7 +604,7 @@ Parameter descriptions:
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
-
+        # Ensure the model path matches the directory recorded during download
         vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
             --host 0.0.0.0 \
             --port $2 \
@@ -670,7 +677,8 @@ Parameter descriptions:
         export VLLM_USE_V1=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
-
+        
+        # Ensure the model path matches the directory recorded during download
         vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
             --host 0.0.0.0 \
             --port $2 \
@@ -744,6 +752,7 @@ Parameter descriptions:
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
+        # Ensure the model path matches the directory recorded during download
         vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
             --host 0.0.0.0 \
             --port $2 \
@@ -809,6 +818,7 @@ Parameter descriptions:
         export DYNAMIC_EPLB="true"
 
         export ASCEND_RT_VISIBLE_DEVICES=$1
+        # Ensure the model path matches the directory recorded during download
         vllm serve /weight/dsk_v3.1-T-w8a8c8_attn-0506-full/  \
         --host 0.0.0.0 \
         --port $2 \
@@ -871,7 +881,8 @@ Parameter descriptions:
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export TASK_QUEUE_ENABLE=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
-
+         
+        # Ensure the model path matches the directory recorded during download
         vllm serve /weight/dsk_v3.1-T-w8a8c8_attn-0506-full/ \
         --host 0.0.0.0 \
         --port $2 \
@@ -1085,7 +1096,7 @@ curl http://<node0_ip>:<port>/v1/completions \
 
 Here is one accuracy evaluation method.
 
-### Using AISBench
+### 7.1 Using AISBench
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
@@ -1096,13 +1107,13 @@ Here is one accuracy evaluation method.
 | ceval | - | accuracy | gen | 90.94 | 1 Atlas 800 A3 (64GB × 16) |
 | gsm8k | - | accuracy | gen | 96.28 | 1 Atlas 800 A3 (64GB × 16) |
 
-### Using Language Model Evaluation Harness
+### 7.2 Using Language Model Evaluation Harness
 
 Not test yet.
 
 ## 8 Performance Evaluation
 
-### Using AISBench
+### 8.1 Using AISBench
 
 Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
@@ -1116,7 +1127,7 @@ The performance result is:
 
 **Performance**: TTFT = 6.16s, TPOT = 48.82ms, Average performance of each card is 478 TPS (Token Per Second).
 
-### Using vLLM Benchmark
+### 8.2 Using vLLM Benchmark
 
 Run performance evaluation of `DeepSeek-V3.1-w8a8-mtp-QuaRot` as an example.
 
@@ -1148,28 +1159,28 @@ After several minutes, you can get the performance evaluation result.
 
 |Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|
 |--------|---------------|-----------|--------------|------------------|
-|High Throughput<br>(3.5K/16K input)|Single-Node Mixed|16 (A3)|DeepSeek-V3.1-w4a8-perchannle|Use dp4 tp4 to balance memory capacity and compute efficiency|
-|Low Latency<br>(3.5K/16K input)|Single-Node Mixed|16 (A3)|DeepSeek-V3.1-w4a8-perchannle|Use dp2 tp8 to balance memory capacity and compute efficiency|
-|High Throughput / Low Latency<br>(64K input)|Single-Node Mixed|16 (A3)|DeepSeek-V3.1-w4a8-perchannle|Use dp2 tp8 to balance memory capacity and compute efficiency|
-|High Throughput / Low Latency<br>(3.5K input)|2P1D deployment|64 (A3)|DeepSeek-V3.1-w4a8-perchannle|Use dp2 tp8 to balance memory capacity and compute efficiency|
-|High Throughput / Low Latency<br>(16K input)|2P1D deployment|64 (A3)|DeepSeek-V3.1-w4a8-perchannle|Use dp2 tp8 to balance memory capacity and compute efficiency|
-|Long Context<br>(64K input, no prefix cache)|2P1D deployment|64 (A3)|DeepSeek-V3.1-w4a8-perchannle|Use dp1 tp8 to balance memory capacity and compute efficiency|
+|High Throughput<br>(3.5k/16k input)|Single-Node Mixed|16 (A3)|DeepSeek-V3.1-w4a8-perchannel|Use dp4 tp4 to balance memory capacity and compute efficiency|
+|Low Latency<br>(3.5k/16k input)|Single-Node Mixed|16 (A3)|DeepSeek-V3.1-w4a8-perchannel|Use dp2 tp8 to balance memory capacity and compute efficiency|
+|High Throughput / Low Latency<br>(64k input)|Single-Node Mixed|16 (A3)|DeepSeek-V3.1-w4a8-perchannel|Use dp2 tp8 to balance memory capacity and compute efficiency|
+|High Throughput / Low Latency<br>(3.5k input)|2P1D deployment|64 (A3)|DeepSeek-V3.1-w4a8-perchannel|Use dp2 tp8 to balance memory capacity and compute efficiency|
+|High Throughput / Low Latency<br>(16k input)|2P1D deployment|64 (A3)|DeepSeek-V3.1-w4a8-perchannel|Use dp2 tp8 to balance memory capacity and compute efficiency|
+|Long Context<br>(64k input, no prefix cache)|2P1D deployment|64 (A3)|DeepSeek-V3.1-w4a8-perchannel|Use dp1 tp8 to balance memory capacity and compute efficiency|
 
 #### Table 2: Detailed Node Configuration(A3)
 
 |Scenario|Configuration|NPUs|TP|DP|Max Model Len|MTP Speculation Num|
 |--------|-------------|-----|--|--|-------------------|--------------------|
-|High Throughput (3.5K)|Server / Single Machine|16|4|4|39K|3|
-|High Throughput (16K)|Server / Single Machine|16|4|4|36K|3|
-|Low Latency (3.5K)|Server / Single Machine|16|8|2|36K|3|
-|Low Latency (16K)|Server / Single Machine|16|8|2|36K|3|
-|High Throughput / Low Latency (64K)|Server / Single Machine|16|8|2|132K|3|
-|High Throughput (16K)|Server-P Node|16|8|2|36K|1|
-|High Throughput (16K)|Server-D Node|16|4|8|36K|1|
-|Low Latency (16K)|Server-P Node|16|8|2|36K|3|
-|Low Latency (16K)|Server-D Node|16|4|8|36K|3|
-|Long Context (64K)|Server-P Node|16|16|1|132K|3|
-|Long Context (64K)|Server-D Node|16|4|8|132K|3|
+|High Throughput (3.5k)|Server / Single Machine|16|4|4|39k|3|
+|High Throughput (16k)|Server / Single Machine|16|4|4|36k|3|
+|Low Latency (3.5k)|Server / Single Machine|16|8|2|36k|3|
+|Low Latency (16k)|Server / Single Machine|16|8|2|36k|3|
+|High Throughput / Low Latency (64k)|Server / Single Machine|16|8|2|132k|3|
+|High Throughput (16k)|Server-P Node|16|8|2|36k|1|
+|High Throughput (16k)|Server-D Node|16|4|8|36k|1|
+|Low Latency (16k)|Server-P Node|16|8|2|36k|3|
+|Low Latency (16k)|Server-D Node|16|4|8|36k|3|
+|Long Context (64k)|Server-P Node|16|16|1|132k|3|
+|Long Context (64k)|Server-D Node|16|4|8|132k|3|
 
 #### Table 3: Scenario Overview(Ascend 950DT)
 
@@ -1177,28 +1188,28 @@ After several minutes, you can get the performance evaluation result.
 
 |Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|
 |--------|---------------|-----------|--------------|------------------|
-|High Throughput<br>(3.5K/16K input)|Single-Node Mixed|8 (Ascend 950DT)|DeepseekV3.1-w8a8c8_attn|Use dp1 tp8 to balance memory capacity and compute efficiency|
-|Low Latency<br>(3.5K/16K input)|Single-Node Mixed|8 (Ascend 950DT)|DeepseekV3.1-w8a8c8_attn|Use dp1 tp8 to balance memory capacity and compute efficiency|
-|High Throughput / Low Latency<br>(64K input)|Single-Node Mixed|8 (Ascend 950DT)|DeepseekV3.1-w8a8c8_attn|Use dp1 tp8 to balance memory capacity and compute efficiency|
-|High Throughput / Low Latency<br>(3.5K input)|2P1D deployment|64 (Ascend 950DT)|DeepseekV3.1-w8a8c8_attn|Use dp4 tp4 to balance memory capacity and compute efficiency|
-|High Throughput / Low Latency<br>(16K input)|2P1D deployment|64 (Ascend 950DT)|DeepseekV3.1-w8a8c8_attn|Use dp4 tp4 to balance memory capacity and compute efficiency|
-|Long Context<br>(64K input, no prefix cache)|2P1D deployment|64 (Ascend 950DT)|DeepseekV3.1-w8a8c8_attn|Use dp4 tp4 to balance memory capacity and compute efficiency|
+|High Throughput<br>(3.5k/16k input)|Single-Node Mixed|8 (Ascend 950DT)|DeepseekV3.1-w8a8c8_attn|Use dp1 tp8 to balance memory capacity and compute efficiency|
+|Low Latency<br>(3.5k/16k input)|Single-Node Mixed|8 (Ascend 950DT)|DeepseekV3.1-w8a8c8_attn|Use dp1 tp8 to balance memory capacity and compute efficiency|
+|High Throughput / Low Latency<br>(64k input)|Single-Node Mixed|8 (Ascend 950DT)|DeepseekV3.1-w8a8c8_attn|Use dp1 tp8 to balance memory capacity and compute efficiency|
+|High Throughput / Low Latency<br>(3.5k input)|2P1D deployment|64 (Ascend 950DT)|DeepseekV3.1-w8a8c8_attn|Use dp4 tp4 to balance memory capacity and compute efficiency|
+|High Throughput / Low Latency<br>(16k input)|2P1D deployment|64 (Ascend 950DT)|DeepseekV3.1-w8a8c8_attn|Use dp4 tp4 to balance memory capacity and compute efficiency|
+|Long Context<br>(64k input, no prefix cache)|2P1D deployment|64 (Ascend 950DT)|DeepseekV3.1-w8a8c8_attn|Use dp4 tp4 to balance memory capacity and compute efficiency|
 
 #### Table 4: Detailed Node Configuration(Ascend 950DT)
 
 |Scenario|Configuration|NPUs|TP|DP|Max Model Len|MTP Speculation Num|
 |--------|-------------|-----|--|--|-------------------|--------------------|
-|High Throughput (3.5K)|Server / Single Machine|8|8|1|39K|3|
-|High Throughput (16K)|Server / Single Machine|8|8|1|36K|3|
-|Low Latency (3.5K)|Server / Single Machine|8|8|1|36K|3|
-|Low Latency (16K)|Server / Single Machine|8|8|1|36K|3|
-|High Throughput / Low Latency (64K)|Server / Single Machine|8|8|1|132K|3|
-|High Throughput (16K)|Server-P Node|16|4|4|36K|1|
-|High Throughput (16K)|Server-D Node|32|1|32|36K|1|
-|Low Latency (16K)|Server-P Node|16|4|4|36K|3|
-|Low Latency (16K)|Server-D Node|32|1|32|36K|3|
-|Long Context (64K)|Server-P Node|16|4|4|132K|3|
-|Long Context (64K)|Server-D Node|32|1|32|132K|3|
+|High Throughput (3.5k)|Server / Single Machine|8|8|1|39k|3|
+|High Throughput (16k)|Server / Single Machine|8|8|1|36k|3|
+|Low Latency (3.5k)|Server / Single Machine|8|8|1|36k|3|
+|Low Latency (16k)|Server / Single Machine|8|8|1|36k|3|
+|High Throughput / Low Latency (64k)|Server / Single Machine|8|8|1|132k|3|
+|High Throughput (16k)|Server-P Node|16|4|4|36k|1|
+|High Throughput (16k)|Server-D Node|32|1|32|36k|1|
+|Low Latency (16k)|Server-P Node|16|4|4|36k|3|
+|Low Latency (16k)|Server-D Node|32|1|32|36k|3|
+|Long Context (64k)|Server-P Node|16|4|4|132k|3|
+|Long Context (64k)|Server-D Node|32|1|32|132k|3|
 
 > For complete startup commands and parameter descriptions, please refer to the deployment examples in [Chapter 5](#5-online-service-deployment).
 

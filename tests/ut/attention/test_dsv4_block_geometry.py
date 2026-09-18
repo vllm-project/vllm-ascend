@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from vllm.forward_context import ForwardContext, override_forward_context
 
 from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPImpl
 from vllm_ascend.models.deepseek_v4.compressor import Compressor
@@ -27,6 +28,7 @@ def test_compressor_metadata_uses_physical_storage_geometry(
     query_start_loc = torch.tensor([0, 4], dtype=torch.int32)
     start_pos = torch.tensor([508], dtype=torch.int32)
     metadata = SimpleNamespace(
+        cache_group_key="model.layers.0.self_attn.attn",
         full_compress_cos=torch.zeros((8, 1, 1, 64), dtype=torch.bfloat16),
         full_compress_sin=torch.zeros((8, 1, 1, 64), dtype=torch.bfloat16),
         query_start_loc=query_start_loc,
@@ -54,6 +56,10 @@ def test_compressor_metadata_uses_physical_storage_geometry(
         lambda vllm_config: plan,
     )
     monkeypatch.setattr(
+        "vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan",
+        lambda vllm_config: plan,
+    )
+    monkeypatch.setattr(
         "vllm_ascend.attention.context_parallel.dsa_cp.get_dsa_attn_kv_plan",
         lambda vllm_config: plan,
     )
@@ -67,7 +73,14 @@ def test_compressor_metadata_uses_physical_storage_geometry(
     owner.compress_ratio = compress_ratio
     owner.vllm_config = SimpleNamespace()
 
-    result = getattr(owner, method_name)(metadata)
+    forward_context = ForwardContext(
+        no_compile_layers={},
+        attn_metadata={},
+        slot_mapping={},
+        additional_kwargs={},
+    )
+    with override_forward_context(forward_context):
+        result = getattr(owner, method_name)(metadata)
 
     assert result is expected
     args = captured["args"]

@@ -61,7 +61,7 @@ def test_other_managers_do_not_enable_score_cache():
 
 
 @pytest.mark.skipif(
-    vllm_version_is("0.27.1"),
+    vllm_version_is("0.28.0"),
     reason=("ScoreEncoderCacheManager configuration requires vllm-project/vllm#51251."),
 )
 @pytest.mark.parametrize(

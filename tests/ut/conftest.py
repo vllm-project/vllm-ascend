@@ -51,7 +51,7 @@ if not _npu_available:
     torch_npu.__path__ = []
     torch_npu.npu = MagicMock()  # type: ignore[attr-defined]
     torch_npu.npu_fusion_attention = MagicMock()  # type: ignore[attr-defined]
-    torch_npu.npu_format_cast = MagicMock(side_effect=lambda weight, fmt: weight)  # type: ignore[attr-defined]
+    torch_npu.npu_format_cast = MagicMock(side_effect=lambda weight, fmt, **kwargs: weight)  # type: ignore[attr-defined]
     torch_npu._C = MagicMock()  # type: ignore[attr-defined]
     torch_npu._C._NPUTaskGroupHandle = MagicMock
     # Note: Assign missing attributes with values from real scenarios
@@ -164,6 +164,10 @@ if not _npu_available:
     torch.npu.graph_task_update_begin = MagicMock()
     torch.npu.graph_task_update_end = MagicMock()
     torch.npu.stream = MagicMock()
+    # cpu-ut is never capturing an ACL graph. Leave this unstubbed and
+    # is_current_stream_capturing() is a truthy MagicMock, which would send
+    # FIA into graph_task_group_begin.
+    torch.npu.is_current_stream_capturing = MagicMock(return_value=False)
     # Some code paths do `import torch.npu`; attribute assignment alone is not enough.
     sys.modules["torch.npu"] = torch.npu
     torch_npu.npu.Stream = _NpuStreamStub  # type: ignore[attr-defined]
@@ -228,6 +232,7 @@ if not _npu_available:
     sys.modules["torch_npu"].npu_fast_gelu = MagicMock()  # type: ignore[attr-defined]
     sys.modules["torch_npu"].npu_convert_weight_to_int4pack = MagicMock()  # type: ignore[attr-defined]
     sys.modules["torch_npu"].npu_transpose_batchmatmul = MagicMock()  # type: ignore[attr-defined]
+    sys.modules["torch_npu"].npu_weight_quant_batchmatmul = MagicMock()  # type: ignore[attr-defined]
     sys.modules["torch_npu"].npu_scatter_nd_update_ = MagicMock()  # type: ignore[attr-defined]
     sys.modules["torch_npu"].npu_grouped_matmul = MagicMock(return_value=[MagicMock()])  # type: ignore[attr-defined]
     sys.modules["torch_npu"].npu_clipped_swiglu = MagicMock()  # type: ignore[attr-defined]
@@ -252,6 +257,7 @@ if not _npu_available:
     # Re-sync after enable_custom_op / adapt_patch so @patch("torch.npu.*") hits
     # the same object production code uses via `torch.npu`.
     torch.npu.current_device = MagicMock(return_value="cpu")
+    torch.npu.is_current_stream_capturing = MagicMock(return_value=False)
     sys.modules["torch.npu"] = torch.npu
 
 # Clean up any stale mock modules that may have been installed by

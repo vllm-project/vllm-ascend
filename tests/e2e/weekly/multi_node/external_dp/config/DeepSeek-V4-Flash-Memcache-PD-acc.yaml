@@ -171,7 +171,7 @@ templates:
       - "--additional-config"
       - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false}, "enable_cpu_binding":true, "multistream_overlap_shared_expert":true, "recompute_scheduler_enable":true, "enable_mlapo":true}'
       - "--kv-transfer-config"
-      - '{"kv_connector": "MultiConnector", "kv_role": "kv_consumer", "kv_connector_extra_config": {"connectors": [{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_consumer", "kv_port": "30100", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 4}, "decode": {"dp_size": 16, "tp_size": 1}}}, {"kv_connector": "AscendStoreConnector", "kv_role": "kv_consumer", "kv_connector_extra_config": {"backend": "memcache", "use_layerwise": true}}]}}'
+      - '{"kv_connector": "MultiConnector", "kv_role": "kv_consumer", "kv_connector_extra_config": {"connectors": [{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_consumer", "kv_port": "30100", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 4}, "decode": {"dp_size": 16, "tp_size": 1}}}, {"kv_connector": "AscendStoreConnector", "kv_role": "kv_consumer", "kv_connector_extra_config": {"backend": "memcache", "use_layerwise": false}}]}}'
 
 benchmarks:
   acc_aime2025:

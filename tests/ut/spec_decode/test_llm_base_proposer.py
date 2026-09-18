@@ -46,6 +46,30 @@ NON_FULL_CUDAGRAPH_MODES = [
 ]
 
 
+def test_query_start_loc_arange_expands_to_required_capacity():
+    proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+    proposer.max_batch_size = 2
+    proposer.max_num_tokens = 4
+    proposer.arange = torch.arange(4, dtype=torch.int64)
+
+    proposer._ensure_query_start_loc_arange_capacity()
+
+    assert proposer.arange.dtype == torch.int64
+    assert torch.equal(proposer.arange, torch.arange(5, dtype=torch.int64))
+
+
+def test_query_start_loc_arange_keeps_sufficient_buffer():
+    proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+    proposer.max_batch_size = 4
+    proposer.max_num_tokens = 2
+    arange = torch.arange(5, dtype=torch.int32)
+    proposer.arange = arange
+
+    proposer._ensure_query_start_loc_arange_capacity()
+
+    assert proposer.arange is arange
+
+
 class TestMultimodalImageTokenIndex:
     @pytest.mark.parametrize(
         "model_name",
@@ -108,6 +132,15 @@ class TestMultimodalImageTokenIndex:
         )
 
         assert image_token_index == 456
+
+    def test_model_with_multiple_image_sentinels_needs_no_single_index(self):
+        config = SimpleNamespace()
+
+        image_token_index = AscendSpecDecodeBaseProposer._get_multimodal_image_token_index(
+            "AscendDeepseekV4ForConditionalGeneration", config
+        )
+
+        assert image_token_index is None
 
 
 class TestMtpSharesTheTargetLmHead:
@@ -184,7 +217,7 @@ def test_load_model_reads_validated_draft_window_size():
         patch("vllm_ascend.spec_decode.llm_base_proposer.get_pp_group") as mock_pp_group,
         patch(
             "vllm_ascend.spec_decode.llm_base_proposer.get_layers_from_vllm_config",
-            side_effect=[{}, {"draft": draft_layer}, {}, {"draft": draft_layer}],
+            side_effect=[{}, {"draft": draft_layer}, {"draft": draft_layer}],
         ),
         patch("vllm_ascend.ascend_config.get_ascend_config") as mock_get_ascend_config,
         patch("vllm_ascend.spec_decode.llm_base_proposer.SlidingWindowAdapter") as mock_adapter,
@@ -197,6 +230,40 @@ def test_load_model_reads_validated_draft_window_size():
 
     assert proposer.draft_window_size == 4096
     mock_adapter.assert_called_once_with(4096, 16, 8, 4, "cpu")
+
+
+def test_draft_vllm_config_only_propagates_draft_runner_type():
+    draft_model_config = SimpleNamespace(
+        runner_type="draft",
+        architecture="draft-architecture",
+        num_experts=0,
+    )
+    base_model_config = SimpleNamespace(
+        runner_type="generate",
+        architecture="target-architecture",
+        num_experts=256,
+    )
+    base_vllm_config = SimpleNamespace(model_config=base_model_config)
+    proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+    proposer.speculative_config = SimpleNamespace(
+        draft_model_config=draft_model_config,
+    )
+
+    with (
+        patch(
+            "vllm.v1.spec_decode.llm_base_proposer.SpecDecodeBaseProposer._create_draft_vllm_config",
+            return_value=base_vllm_config,
+        ),
+    ):
+        draft_vllm_config = proposer._create_draft_vllm_config()
+
+    assert draft_vllm_config is not base_vllm_config
+    assert draft_vllm_config.model_config is not base_model_config
+    assert draft_vllm_config.model_config is not draft_model_config
+    assert draft_vllm_config.model_config.runner_type == "draft"
+    assert draft_vllm_config.model_config.architecture == "target-architecture"
+    assert draft_vllm_config.model_config.num_experts == 256
+    assert base_model_config.runner_type == "generate"
 
 
 class TestDisablePaddedDrafterBatchWithFullGraph:

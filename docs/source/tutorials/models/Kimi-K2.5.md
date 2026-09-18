@@ -18,10 +18,14 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-- `Kimi-K2.5-w4a8` (Quantized version for w4a8): requires 1 Atlas 800 A3 (64GB × 16) node or 2 Atlas 800 A2 (64GB × 8) nodes. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Kimi-K2.5-W4A8).
-- `kimi-k2.5-eagle3` (Eagle3 MTP draft model for accelerating inference of Kimi-K2.5): [Download model weight](https://huggingface.co/lightseekorg/kimi-k2.5-eagle3)
+|  Weight Version                                                                     | Hardware Requirements                                             | Download Links |
+|-------------------------------------------------------------------------------------|-------------------------------------------------------------------|----------------|
+| `Kimi-K2.5-w4a8` (Quantized version for w4a8)                                       | 1 Atlas 800 A3 (64GB × 16) node or 2 Atlas 800 A2 (64GB × 8) nodes| [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Kimi-K2.5-W4A8)  |
+| `kimi-k2.5-eagle3` (Eagle3 MTP draft model for accelerating inference of Kimi-K2.5) |                                                                   | [Hugging Face](https://huggingface.co/lightseekorg/kimi-k2.5-eagle3) |
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
@@ -142,6 +146,7 @@ export OMP_NUM_THREADS=1
 export TASK_QUEUE_ENABLE=1
 
 export HCCL_BUFFSIZE=800
+# Ensure the model path matches the directory recorded during download
 vllm serve Eco-Tech/Kimi-K2.5-w4a8 --additional-config '{"scheduler_config":{"enable_balance_scheduling":true},"enable_mlapo":true}' \
   --host 0.0.0.0 \
   --port 8088 \
@@ -170,7 +175,7 @@ Key Parameter Descriptions:
 
 - Setting `additional_config.scheduler_config.enable_balance_scheduling=true` enables balance scheduling. This may help increase output throughput and reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios. Furthermore, enabling this feature is not recommended in scenarios where PD is separated.
 - For single-node deployment, we recommend using `dp4 tp4` instead of `dp2 tp8`.
-- `--max-model-len` specifies the maximum context length - that is, the sum of input and output tokens for a single request. For performance testing with an input length of 3.5K and output length of 1.5K, a value of `16384` is sufficient, however, for precision testing, please set it at least `35000`.
+- `--max-model-len` specifies the maximum context length - that is, the sum of input and output tokens for a single request. For performance testing with an input length of 3.5k and output length of 1.5k, a value of `16384` is sufficient, however, for precision testing, please set it at least `35000`.
 - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
 - `--mm-encoder-tp-mode` indicates how to optimize multi-modal encoder inference using tensor parallelism (TP). If you want to test the multimodal inputs, we recommend using `data`.
 - If you use the w4a8 weight, more memory will be allocated to kvcache, and you can try to increase system throughput to achieve greater throughput.
@@ -268,6 +273,7 @@ Run the following scripts on two nodes respectively.
     export TASK_QUEUE_ENABLE=1
 
     export HCCL_BUFFSIZE=1024
+    # Ensure the model path matches the directory recorded during download
     vllm serve Eco-Tech/Kimi-K2.5-w4a8 --additional-config '{"scheduler_config":{"enable_balance_scheduling":true},"enable_mlapo":true}' \
     --host 0.0.0.0 \
     --port 8088 \
@@ -332,6 +338,7 @@ Run the following scripts on two nodes respectively.
     export TASK_QUEUE_ENABLE=1
 
     export HCCL_BUFFSIZE=1024
+    # Ensure the model path matches the directory recorded during download
     vllm serve Eco-Tech/Kimi-K2.5-w4a8 --additional-config '{"scheduler_config":{"enable_balance_scheduling":true},"enable_mlapo":true}' \
     --host 0.0.0.0 \
     --port 8088 \
@@ -467,6 +474,7 @@ Parameter descriptions:
         export HCCL_BUFFSIZE=256
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
+        # Ensure the model path matches the directory recorded during download
         vllm serve Eco-Tech/Kimi-K2.5-w4a8 \
             --host 0.0.0.0 \
             --port $2 \
@@ -545,7 +553,8 @@ Parameter descriptions:
 
         export HCCL_BUFFSIZE=256
         export ASCEND_RT_VISIBLE_DEVICES=$1
-
+ 
+        # Ensure the model path matches the directory recorded during download
         vllm serve Eco-Tech/Kimi-K2.5-w4a8 \
             --host 0.0.0.0 \
             --port $2 \
@@ -624,7 +633,8 @@ Parameter descriptions:
 
         export HCCL_BUFFSIZE=1100
         export ASCEND_RT_VISIBLE_DEVICES=$1
-
+        
+        # Ensure the model path matches the directory recorded during download
         vllm serve Eco-Tech/Kimi-K2.5-w4a8 \
             --host 0.0.0.0 \
             --port $2 \
@@ -703,6 +713,7 @@ Parameter descriptions:
         export HCCL_BUFFSIZE=1100
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
+        # Ensure the model path matches the directory recorded during download
         vllm serve Eco-Tech/Kimi-K2.5-w4a8 \
             --host 0.0.0.0 \
             --port $2 \
@@ -938,7 +949,7 @@ The service returns HTTP 200 OK. The JSON response contains the `choices` field 
 
 Here is one accuracy evaluation method.
 
-### Using AISBench
+### 7.1 Using AISBench
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
@@ -953,11 +964,11 @@ Here is one accuracy evaluation method.
 
 ## 8 Performance Evaluation
 
-### Using AISBench
+### 8.1 Using AISBench
 
 Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
-### Using vLLM Benchmark
+### 8.2 Using vLLM Benchmark
 
 Run performance evaluation of `Kimi-K2.5-w4a8` as an example.
 
@@ -989,22 +1000,22 @@ After about several minutes, you can get the performance evaluation result.
 
 |Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|
 |--------|---------------|-----------|--------------|------------------|
-|High Throughput / Low Latency<br>(16K context)|Single-Node Mixed|16 (A3)|kimi-k2.5-w4a8|Use dp4 tp4 for optimal throughput and low latency|
-|High Throughput / Low Latency<br>(16K context)|2-Node Data Parallel|16 (A2)|kimi-k2.5-w4a8|dp4 tp4 across 2 nodes; balanced latency and throughput|
-|High Throughput / Low Latency<br>(16K context)|2P1D deployment|64 (A3)|kimi-k2.5-w4a8|Prefill: dp2 tp8; Decode: dp32 tp1 for high concurrency|
-|Long Context<br>(128K, low concurrency ≤4)|Single-Node Mixed|16 (A3)|kimi-k2.5-w4a8|dp1 tp16 to maximize TP, accommodate extreme context lengths|
-|Long Context<br>(128K, high concurrency >4)|Single-Node Mixed|16 (A3)|kimi-k2.5-w4a8|dp2 tp8 to optimize memory bandwidth and support higher concurrency|
+|High Throughput / Low Latency<br>(16k context)|Single-Node Mixed|16 (A3)|kimi-k2.5-w4a8|Use dp4 tp4 for optimal throughput and low latency|
+|High Throughput / Low Latency<br>(16k context)|2-Node Data Parallel|16 (A2)|kimi-k2.5-w4a8|dp4 tp4 across 2 nodes; balanced latency and throughput|
+|High Throughput / Low Latency<br>(16k context)|2P1D deployment|64 (A3)|kimi-k2.5-w4a8|Prefill: dp2 tp8; Decode: dp32 tp1 for high concurrency|
+|Long Context<br>(128k, low concurrency ≤4)|Single-Node Mixed|16 (A3)|kimi-k2.5-w4a8|dp1 tp16 to maximize TP, accommodate extreme context lengths|
+|Long Context<br>(128k, high concurrency >4)|Single-Node Mixed|16 (A3)|kimi-k2.5-w4a8|dp2 tp8 to optimize memory bandwidth and support higher concurrency|
 
 #### Table 2: Detailed Node Configuration
 
 |Scenario|Configuration|NPUs|TP|DP|Max Model Len|MTP Speculation Num|
 |--------|-------------|-----|--|--|-------------|--------------------|
-|High Throughput / Low Latency (16K)|Server / Single Machine|16|4|4|~16K|3|
-|High Throughput / Low Latency (16K)|Server / 2-Node DP|8|4|2|~16K|3|
-|High Throughput / Low Latency (16K)|Server-P Node|16|8|2|~16K|3|
-|High Throughput / Low Latency (16K)|Server-D Node|16|1|32|~16K|3|
-|Long Context (128K, low concurrency ≤4)|Server / Single Machine|16|16|1|128K|3|
-|Long Context (128K, high concurrency >4)|Server / Single Machine|16|8|2|128K|3|
+|High Throughput / Low Latency (16k)|Server / Single Machine|16|4|4|~16k|3|
+|High Throughput / Low Latency (16k)|Server / 2-Node DP|8|4|2|~16k|3|
+|High Throughput / Low Latency (16k)|Server-P Node|16|8|2|~16k|3|
+|High Throughput / Low Latency (16k)|Server-D Node|16|1|32|~16k|3|
+|Long Context (128k, low concurrency ≤4)|Server / Single Machine|16|16|1|128k|3|
+|Long Context (128k, high concurrency >4)|Server / Single Machine|16|8|2|128k|3|
 
 > For complete startup commands and parameter descriptions, please refer to the deployment examples in [Chapter 5](#5-online-service-deployment).
 

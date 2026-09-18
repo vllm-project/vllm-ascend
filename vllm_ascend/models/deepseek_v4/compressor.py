@@ -144,11 +144,12 @@ class Compressor(nn.Module):
             return_bias=False,
         )
 
-        # A5 compressor kernel needs float for norm_weight input
-        norm_dtype = (
-            torch.float32 if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE) else None
-        )
-        self.norm = RMSNorm(self.head_dim, config.rms_norm_eps, dtype=norm_dtype)
+        # The custom compressor op consumes ND weights directly.
+        self.wkv.skip_weight_nz_conversion = True
+        self.wgate.skip_weight_nz_conversion = True
+
+        # The DSV4 compressor kernel only accepts FP32 norm_weight.
+        self.norm = RMSNorm(self.head_dim, config.rms_norm_eps, dtype=torch.float32)
 
         state_dtype = torch.float32
         # TODO(zyj): change following codes if block_size is configurable & refactor the magic numbers
@@ -177,7 +178,8 @@ class Compressor(nn.Module):
         self,
         metadata: typing.Any,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan
+        # Imported lazily to avoid a circular import at module load time.
+        from vllm_ascend.attention.dsa_v1 import get_or_compute_compressor_metadata
 
         precomputed = getattr(metadata, "compressor_metadata", None)
         if precomputed is not None:
@@ -186,31 +188,7 @@ class Compressor(nn.Module):
             wait_for_device_metadata(DeviceMetadataStage.COMPRESSOR, group_id)
             return precomputed
 
-        assert metadata.full_compress_cos is not None
-        assert metadata.full_compress_sin is not None
-        assert metadata.num_compressed_tokens is not None
-        assert metadata.start_pos is not None
-        assert metadata.num_actual_reqs is not None
-        full_compress_cos = metadata.full_compress_cos.view(
-            metadata.full_compress_cos.shape[0],
-            metadata.full_compress_cos.shape[-1],
-        )
-        full_compress_sin = metadata.full_compress_sin.view(
-            metadata.full_compress_sin.shape[0],
-            metadata.full_compress_sin.shape[-1],
-        )
-        return torch.ops._C_ascend.compressor_metadata(
-            full_compress_cos,
-            full_compress_sin,
-            metadata.query_start_loc,
-            metadata.start_pos,
-            metadata.block_table,
-            metadata.storage_block_size,
-            get_dsa_attn_kv_plan(self.vllm_config).get_dsa_compressor_slot_mapping_format(),
-            self.compress_ratio,
-            metadata.num_compressed_tokens,
-            metadata.num_actual_reqs,
-        )
+        return get_or_compute_compressor_metadata(metadata, self.compress_ratio, self.vllm_config)
 
     def forward(
         self,

@@ -26,7 +26,7 @@ _DSA_C_ASCEND_OPS = (
     "npu_kv_quant_sparse_attn_sharedkv",
     "npu_kv_quant_sparse_attn_sharedkv_metadata",
     "kv_compress_epilog",
-    "npu_scatter_nd_update_v2",
+    "npu_scatter_nd_update_sk",
 )
 
 
@@ -63,6 +63,7 @@ def test_a5_fp8_plan_uses_flat_shared_kv():
     with _on(AscendDeviceType.A5):
         plan = get_dsa_attn_kv_plan(_config(False))
         assert plan.get_dsa_compressor_slot_mapping_format() == DSA_COMPRESSOR_SLOT_MAPPING_FLAT
+        assert not plan.requires_block_offset_slots
         assert plan.get_dsa_sparse_attn_metadata_kwargs("npu:0") == {"kv_quant_mode": 1}
 
 
@@ -70,10 +71,11 @@ def test_a5_bf16_plan_uses_sparse_flash_mla():
     with _on(AscendDeviceType.A5):
         plan = get_dsa_attn_kv_plan(_config(True))
         assert plan.get_dsa_sparse_attn_op() is sparse_flash_mla
-        assert plan.get_dsa_compressor_slot_mapping_format() == DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET
+        assert plan.get_dsa_compressor_slot_mapping_format() == DSA_COMPRESSOR_SLOT_MAPPING_FLAT
+        assert not plan.requires_block_offset_slots
         torch.testing.assert_close(
             plan.format_dsa_slot_mapping(torch.tensor([5, -1], dtype=torch.int32), 128),
-            torch.tensor([[0, 5], [-1, -1]], dtype=torch.int32),
+            torch.tensor([5, -1], dtype=torch.int32),
         )
 
 
@@ -81,6 +83,7 @@ def test_non_a5_plan_preserves_shared_kv_runtime_kwargs():
     with _on(AscendDeviceType.A3):
         plan = get_dsa_attn_kv_plan(_config(True))
         assert plan.get_dsa_compressor_slot_mapping_format() == DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET
+        assert plan.requires_block_offset_slots
         kwargs: dict[str, Any] = {}
         plan.add_dsa_sparse_attn_extra_kwargs(kwargs, cu_seqlens_ori_kv=torch.tensor([0, 1]))
         assert "cu_seqlens_ori_kv" in kwargs
@@ -93,6 +96,75 @@ def test_scatter_skips_none_updates():
         with mock.patch.object(torch.ops._C_ascend, "kv_compress_epilog") as epilog:
             plan.dsa_kv_compress_scatter(cache, None, torch.tensor([0], dtype=torch.int32))
             epilog.assert_not_called()
+
+
+def _cpu_scatter_nd_update_(cache, indices, updates):
+    """Apply npu_scatter_nd_update_ semantics on CPU for flat BF16 slots."""
+    for row, update in zip(indices, updates, strict=True):
+        if int(row[0]) < 0:
+            continue
+        cache[row[0]] = update
+
+
+def test_bf16_scatter_is_aclgraph_static_and_keeps_pad_slots():
+    """PAD_SLOT_ID rows stay in-graph and must keep index -1.
+
+    Evaluating ``torch.any(valid)`` as a Python bool calls LocalScalarDense
+    and aborts ACLGraph capture (EE1016 / error 107027). Boolean-indexing the
+    valid rows is also illegal: it emits a data-dependent Nonzero. Clamping
+    ``-1`` to ``0`` overwrites a live physical slot.
+    """
+    with _on(AscendDeviceType.A5):
+        plan = get_dsa_attn_kv_plan(_config(True))
+        num_blocks, block_size, num_kv_heads, head_dim = 3, 4, 1, 2
+        cache = torch.zeros(num_blocks, block_size, num_kv_heads, head_dim)
+        sentinel = torch.full((num_kv_heads, head_dim), 999.0)
+        cache[num_blocks - 1, block_size - 1] = sentinel
+        slot_zero = cache[0, 0].clone()
+
+        slot_mapping = torch.tensor([1, -1, -1], dtype=torch.int32)
+        updates = torch.tensor([[[1.0, 2.0]], [[-7.0, -7.0]], [[-8.0, -8.0]]])
+        captured: dict[str, torch.Tensor] = {}
+
+        def fake_scatter(cache_t, indices, values):
+            captured["indices"] = indices.detach().clone()
+            captured["updates"] = values.detach().clone()
+            _cpu_scatter_nd_update_(cache_t, indices, values)
+
+        with (
+            mock.patch(
+                "vllm_ascend.attention.dsa_attn_kv_plan.torch_npu.npu_scatter_nd_update_", side_effect=fake_scatter
+            ),
+            mock.patch("torch.any", wraps=torch.any) as any_spy,
+        ):
+            plan.dsa_kv_compress_scatter(cache, updates, slot_mapping)
+
+        any_spy.assert_not_called()
+        assert captured["indices"].shape == (slot_mapping.shape[0], 1)
+        assert captured["updates"].shape[0] == slot_mapping.shape[0]
+        torch.testing.assert_close(
+            captured["indices"],
+            torch.tensor([[1], [-1], [-1]], dtype=torch.int32),
+        )
+        torch.testing.assert_close(cache[0, 1], updates[0])
+        torch.testing.assert_close(cache[0, 0], slot_zero)
+        torch.testing.assert_close(cache[num_blocks - 1, block_size - 1], sentinel)
+
+
+def test_bf16_scatter_does_not_early_return_on_all_padded_slots():
+    """An all-pad decode capture batch must still emit a static scatter."""
+    with _on(AscendDeviceType.A5):
+        plan = get_dsa_attn_kv_plan(_config(True))
+        cache = torch.zeros(2, 2, 1, 2)
+        slot_mapping = torch.full((4,), -1, dtype=torch.int32)
+        updates = torch.ones(4, 1, 2)
+
+        with mock.patch("vllm_ascend.attention.dsa_attn_kv_plan.torch_npu.npu_scatter_nd_update_") as scatter:
+            plan.dsa_kv_compress_scatter(cache, updates, slot_mapping)
+            scatter.assert_called_once()
+            indices = scatter.call_args.args[1]
+            assert indices.shape == (4, 1)
+            assert bool((indices == -1).all())
 
 
 def test_is_a5_bf16_kv_enabled_requires_vllm_config():

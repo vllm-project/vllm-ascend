@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Keep speculative verifier windows intact on PD decode consumers.
+"""Apply Ascend-specific Mamba chunk-boundary handling.
 
 A newly admitted KV-consumer request can have one prompt token left after the
 external cache hit. The waiting scheduler pads that token to a ``1 + K``
@@ -20,8 +20,10 @@ speculative verifier window before Mamba alignment is applied. If the window
 starts mid-block, the alignment split can shorten its physical width while the
 request still advertises all ``K`` speculative placeholders.
 
-Decode consumers preserve the complete verifier window. Producers continue to
-use the upstream Mamba boundary logic unchanged.
+Decode consumers preserve the complete verifier window. Sparse index-kpool
+producers align against the resolved common cache-group boundary because their
+physical indexer-state block is smaller than the Mamba checkpoint interval.
+Other models retain the upstream behavior.
 """
 
 import functools
@@ -29,6 +31,10 @@ import inspect
 
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.request import Request
+
+from vllm_ascend.patch.platform.patch_mamba_config import (
+    _get_sparse_index_kpool,
+)
 
 _EXPECTED_PARAMETERS = (
     "self",
@@ -49,9 +55,28 @@ def _mamba_block_aligned_split(
     num_new_local_computed_tokens: int = 0,
     num_external_computed_tokens: int = 0,
 ) -> int:
-    """Bypass Mamba splitting on KV consumers and preserve it elsewhere."""
+    """Preserve PD windows and align sparse index-kpool cache groups."""
     kv_transfer_config = self.vllm_config.kv_transfer_config
     if kv_transfer_config is not None and kv_transfer_config.is_kv_consumer:
+        return num_new_tokens
+
+    if _get_sparse_index_kpool(self.vllm_config.model_config) is not None:
+        num_computed_tokens = request.num_computed_tokens + num_new_local_computed_tokens + num_external_computed_tokens
+        if num_computed_tokens < max(
+            request.num_prompt_tokens,
+            request.num_tokens - 1,
+        ):
+            block_size = self.block_size
+            last_cache_position = request.num_tokens - request.num_tokens % block_size
+            if self.use_eagle:
+                last_cache_position = max(last_cache_position - block_size, 0)
+            scheduled_end = num_computed_tokens + num_new_tokens
+            if scheduled_end < last_cache_position:
+                chunked_tokens = num_new_tokens // block_size * block_size
+                if chunked_tokens > 0:
+                    num_new_tokens = chunked_tokens
+            elif num_computed_tokens < last_cache_position < scheduled_end:
+                num_new_tokens = last_cache_position - num_computed_tokens
         return num_new_tokens
 
     return _original_mamba_block_aligned_split(

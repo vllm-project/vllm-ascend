@@ -16,6 +16,7 @@ if "torch_npu._inductor" not in sys.modules:
     sys.modules["torch_npu._inductor"] = MagicMock()
 
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADSACPImpl
+from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.sfa_kv_offload import (
     AscendSFAKVOffloadImpl,
     AscendSFAKVOffloadMetadataBuilder,
@@ -227,6 +228,25 @@ class TestAscendSFADeviceOperator(TestBase):
 
 
 class TestAscendSFACacheComposition(TestBase):
+    def test_nope_cache_normalization_with_runtime_shared_indexer(self):
+        for is_mtp in (False, True):
+            with self.subTest(is_mtp=is_mtp):
+                impl = AscendSFAImpl.__new__(AscendSFAImpl)
+                impl.qk_rope_head_dim = 0
+                impl.has_indexer = True
+                impl._is_mtp_layer = is_mtp
+                impl.skip_topk = True
+                latent_cache = torch.empty(1, 128, 1, 512)
+                empty_rope_cache = torch.empty(1, 128, 1, 0)
+
+                self.assertEqual(impl.runtime_has_indexer, is_mtp)
+                composed = impl._compose_sfa_kv_cache((latent_cache, empty_rope_cache))
+                self.assertEqual(len(composed), 1)
+                self.assertIs(composed[0], latent_cache)
+                self.assertIsNone(impl._compose_sfa_kv_cache(None))
+                with self.assertRaisesRegex(RuntimeError, "NoPE SFA requires one latent KV cache tensor"):
+                    impl._compose_sfa_kv_cache((latent_cache, torch.empty(1)))
+
     def test_compose_independent_sfa_and_li_c8_layouts(self):
         for enable_sfa_c8, enable_li_c8 in (
             (False, False),
@@ -239,6 +259,7 @@ class TestAscendSFACacheComposition(TestBase):
                 enable_li_c8=enable_li_c8,
             ):
                 impl = AscendSFAImpl.__new__(AscendSFAImpl)
+                impl.qk_rope_head_dim = 64
                 impl.layer_name = "model.layers.0.self_attn.attn"
                 impl.has_indexer = True
                 impl.enable_sparse_sfa_c8 = enable_sfa_c8
@@ -246,7 +267,10 @@ class TestAscendSFACacheComposition(TestBase):
 
                 main_cache = tuple(torch.empty(1) for _ in range(1 if enable_sfa_c8 else 2))
                 indexer_cache = tuple(torch.empty(1) for _ in range(2 if enable_li_c8 else 1))
-                impl.indexer = SimpleNamespace(k_cache=SimpleNamespace(kv_cache=indexer_cache))
+                impl.indexer = SimpleNamespace(
+                    k_cache=SimpleNamespace(kv_cache=indexer_cache),
+                    num_cache_tensors=2 if enable_li_c8 else 1,
+                )
 
                 composed = impl._compose_sfa_kv_cache(main_cache)
 
@@ -257,25 +281,103 @@ class TestAscendSFACacheComposition(TestBase):
                 for actual_tensor, expected_tensor in zip(composed, expected):
                     self.assertIs(actual_tensor, expected_tensor)
 
-    @patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
+    @patch("vllm_ascend.attention.indexer.get_ascend_config")
     def test_li_c8_reshape_optim_requires_layer_li_c8(self, mock_get_ascend_config):
+        indexer = AscendSFAIndexerBackend.__new__(AscendSFAIndexerBackend)
+        mock_get_ascend_config.return_value.c8_reshape_optim_enabled = True
+
+        indexer.enable_sparse_li_c8 = False
+        self.assertFalse(indexer._use_c8_reshape_optim())
+
+        indexer.enable_sparse_li_c8 = True
+        self.assertTrue(indexer._use_c8_reshape_optim())
+
+        mock_get_ascend_config.return_value.c8_reshape_optim_enabled = False
+        self.assertFalse(indexer._use_c8_reshape_optim())
+
+    @patch("vllm_ascend.attention.sfa_v1.get_forward_context")
+    def test_get_indexer_attn_metadata_fetches_by_k_cache_prefix(self, mock_get_forward_context):
         impl = AscendSFAImpl.__new__(AscendSFAImpl)
-        mock_get_ascend_config.return_value.c8_enable_reshape_optim = True
+        impl.has_indexer = True
+        impl.layer_name = "model.layers.0.self_attn.attn"
+        own_metadata = SimpleNamespace(slot_mapping=torch.tensor([1, 2]))
+        impl.indexer = SimpleNamespace(
+            k_cache=SimpleNamespace(prefix="model.layers.0.indexer"),
+        )
+        mock_get_forward_context.return_value.attn_metadata = {"model.layers.0.indexer": own_metadata}
 
-        impl.enable_sparse_li_c8 = False
-        self.assertFalse(impl._use_li_c8_reshape_optim())
+        self.assertIs(impl._get_indexer_attn_metadata(), own_metadata)
 
-        impl.enable_sparse_li_c8 = True
-        self.assertTrue(impl._use_li_c8_reshape_optim())
+    @patch("vllm_ascend.attention.sfa_v1.get_forward_context")
+    def test_get_indexer_attn_metadata_missing_raises(self, mock_get_forward_context):
+        impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.has_indexer = True
+        impl.layer_name = "model.layers.0.self_attn.attn"
+        impl.indexer = SimpleNamespace(
+            k_cache=SimpleNamespace(prefix="model.layers.0.indexer"),
+        )
+        mock_get_forward_context.return_value.attn_metadata = {}
 
-        mock_get_ascend_config.return_value.c8_enable_reshape_optim = False
-        self.assertFalse(impl._use_li_c8_reshape_optim())
+        with self.assertRaises(RuntimeError):
+            impl._get_indexer_attn_metadata()
+
+    @patch("vllm_ascend.attention.sfa_v1.get_forward_context")
+    def test_get_indexer_attn_metadata_does_not_fall_back_to_main_metadata(self, mock_get_forward_context):
+        impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.has_indexer = True
+        impl.layer_name = "model.layers.78.self_attn.attn"
+        impl.indexer = SimpleNamespace(
+            k_cache=SimpleNamespace(prefix="model.layers.78.self_attn.indexer.k_cache"),
+        )
+        main_metadata = SimpleNamespace(slot_mapping=torch.tensor([3, 4]))
+        mock_get_forward_context.return_value.attn_metadata = {"model.layers.78.self_attn.attn": main_metadata}
+
+        with self.assertRaises(RuntimeError):
+            impl._get_indexer_attn_metadata()
+
+    @patch("vllm_ascend.attention.sfa_v1.get_forward_context")
+    def test_get_indexer_attn_metadata_resolves_kv_sharing_target(self, mock_get_forward_context):
+        # During draft propose the forward context is the main runner's, which
+        # only keys main-layer prefixes; a KV-sharing draft layer resolves its
+        # indexer metadata via the sharing target's indexer cache prefix.
+        impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.has_indexer = True
+        impl.layer_name = "model.layers.78.self_attn.attn"
+        impl.kv_sharing_target_layer_name = "model.layers.77.self_attn.attn"
+        impl.indexer = SimpleNamespace(
+            k_cache=SimpleNamespace(prefix="model.layers.78.self_attn.indexer.k_cache"),
+        )
+        target_metadata = SimpleNamespace(slot_mapping=torch.tensor([5, 6]))
+        mock_get_forward_context.return_value.attn_metadata = {
+            "model.layers.77.self_attn.indexer.k_cache": target_metadata
+        }
+
+        self.assertIs(impl._get_indexer_attn_metadata(), target_metadata)
+
+    @patch("vllm_ascend.attention.sfa_v1.get_forward_context")
+    def test_get_indexer_attn_metadata_uses_own_indexer_when_target_is_absent(
+        self,
+        mock_get_forward_context,
+    ):
+        impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.has_indexer = True
+        impl.layer_name = "model.layers.78.self_attn.attn"
+        impl.kv_sharing_target_layer_name = "model.layers.77.self_attn.attn"
+        impl.indexer = SimpleNamespace(
+            k_cache=SimpleNamespace(prefix="model.layers.78.self_attn.indexer.k_cache"),
+        )
+        own_metadata = object()
+        mock_get_forward_context.return_value.attn_metadata = {
+            "model.layers.78.self_attn.indexer.k_cache": own_metadata,
+        }
+
+        self.assertIs(impl._get_indexer_attn_metadata(), own_metadata)
 
     @patch(
         "vllm_ascend.device.device_op.torch.ops._C_ascend.npu_lightning_indexer_quant",
         create=True,
     )
-    def test_li_c8_indexer_uses_cache_slots_after_main_cache(self, mock_indexer):
+    def test_li_c8_indexer_uses_own_cache_tuple_slots(self, mock_indexer):
         expected_topk = torch.zeros(2, 1, 4, dtype=torch.int32)
         mock_indexer.return_value = expected_topk
         q_li = torch.zeros(2, 1, 128, dtype=torch.int8)
@@ -283,45 +385,34 @@ class TestAscendSFACacheComposition(TestBase):
         weights = torch.ones(2, 1, dtype=torch.bfloat16)
         attn_metadata = SimpleNamespace(block_table=torch.zeros(1, 2, dtype=torch.int32))
 
-        for enable_sfa_c8 in (False, True):
-            with self.subTest(enable_sfa_c8=enable_sfa_c8):
-                main_cache = (
-                    (torch.empty(2, 16, 1, 656, dtype=torch.int8),)
-                    if enable_sfa_c8
-                    else (
-                        torch.empty(2, 16, 1, 512, dtype=torch.bfloat16),
-                        torch.empty(2, 16, 1, 64, dtype=torch.bfloat16),
-                    )
-                )
-                indexer_k_cache = torch.empty(2, 16, 1, 128, dtype=torch.int8)
-                indexer_scale_cache = torch.empty(2, 16, 1, 1, dtype=torch.float16)
-                kv_cache = (*main_cache, indexer_k_cache, indexer_scale_cache)
-                impl = AscendSFAImpl.__new__(AscendSFAImpl)
-                impl.enable_sparse_sfa_c8 = enable_sfa_c8
-                impl.use_torch_npu_lightning_indexer = False
-                mock_indexer.reset_mock()
+        # The wrapper receives the indexer's own cache tuple (k + scale) at
+        # the fixed slots; the main SFA cache is no longer part of it.
+        indexer_k_cache = torch.empty(2, 16, 1, 128, dtype=torch.int8)
+        indexer_scale_cache = torch.empty(2, 16, 1, 1, dtype=torch.float16)
+        kv_cache = (indexer_k_cache, indexer_scale_cache)
 
-                result = BaseDeviceAdaptor.indexer_select_post_process(
-                    impl,
-                    q_li,
-                    q_li_scale,
-                    q_li.shape,
-                    weights,
-                    kv_cache,
-                    attn_metadata,
-                    torch.tensor([2], dtype=torch.int32),
-                    torch.tensor([2], dtype=torch.int32),
-                    True,
-                    False,
-                )
+        result = BaseDeviceAdaptor.indexer_select_post_process(
+            q_li,
+            q_li_scale,
+            q_li.shape,
+            weights,
+            kv_cache,
+            0,
+            1,
+            attn_metadata,
+            torch.tensor([2], dtype=torch.int32),
+            torch.tensor([2], dtype=torch.int32),
+            True,
+            False,
+        )
 
-                self.assertIs(result, expected_topk)
-                call_kwargs = mock_indexer.call_args.kwargs
-                self.assertIs(call_kwargs["key"], indexer_k_cache)
-                self.assertEqual(
-                    call_kwargs["key_dequant_scale"].data_ptr(),
-                    indexer_scale_cache.data_ptr(),
-                )
+        self.assertIs(result, expected_topk)
+        call_kwargs = mock_indexer.call_args.kwargs
+        self.assertIs(call_kwargs["key"], indexer_k_cache)
+        self.assertEqual(
+            call_kwargs["key_dequant_scale"].data_ptr(),
+            indexer_scale_cache.data_ptr(),
+        )
 
 
 class TestAscendSFAKVQuantSparseAttention(TestBase):
@@ -522,7 +613,7 @@ class TestAscendSFAMetadataBuilder(TestBase):
         self.patcher.start()
 
         mock_ascend_config = MagicMock()
-        mock_ascend_config.c8_enable_reshape_optim = False
+        mock_ascend_config.c8_reshape_optim_enabled = False
         mock_ascend_config.enable_mlapo = True
         mock_ascend_config.enable_shared_expert_dp = False
         self.ascend_config_patcher = patch(
@@ -707,7 +798,7 @@ class TestAscendSFAMetadataBuilder(TestBase):
     @patch("vllm_ascend.attention.sfa_v1.get_current_vllm_config")
     @patch("vllm_ascend.attention.sfa_v1.get_cos_and_sin_mla")
     @patch("torch.ops._C_ascend.store_kv_block_metadata", create=True)
-    def test_ascend_sfa_metadata_builder_build_with_c8_reshape_optim(
+    def test_ascend_sfa_metadata_builder_does_not_build_indexer_c8_metadata(
         self,
         store_kv_block_metadata,
         mock_get_cos_and_sin_mla,
@@ -729,14 +820,15 @@ class TestAscendSFAMetadataBuilder(TestBase):
         vllm_config.model_config.get_head_size.return_value = 64
         vllm_config.model_config.dtype = torch.float16
         vllm_config.model_config.hf_text_config.qk_rope_head_dim = 64
+        vllm_config.kv_transfer_config = SimpleNamespace(
+            kv_role="kv_producer",
+            is_kv_producer=True,
+            is_kv_consumer=False,
+        )
         speculative_config = MagicMock()
         speculative_config.num_speculative_tokens = 4
         vllm_config.speculative_config = speculative_config
         device = torch.device("cpu")
-
-        builder = AscendSFAMetadataBuilder(
-            kv_cache_spec=kv_cache_spec, layer_names=layer_names, vllm_config=vllm_config, device=device
-        )
 
         common_attn_metadata = MagicMock()
         common_attn_metadata.num_reqs = 10
@@ -759,8 +851,15 @@ class TestAscendSFAMetadataBuilder(TestBase):
 
         with patch("vllm_ascend.attention.sfa_v1.get_ascend_config") as mock_get_ascend_config:
             mock_ascend_config = MagicMock()
-            mock_ascend_config.c8_enable_reshape_optim = True
+            mock_ascend_config.c8_reshape_optim_enabled = True
             mock_get_ascend_config.return_value = mock_ascend_config
+
+            builder = AscendSFAMetadataBuilder(
+                kv_cache_spec=kv_cache_spec,
+                layer_names=layer_names,
+                vllm_config=vllm_config,
+                device=device,
+            )
 
             metadata = builder.build(
                 common_prefix_len=10,
@@ -771,15 +870,11 @@ class TestAscendSFAMetadataBuilder(TestBase):
         assert metadata.num_actual_tokens == common_attn_metadata.num_actual_tokens
         assert metadata.slot_mapping.shape == (100, 4, 1024)
 
-        store_kv_block_metadata.assert_called_once()
-        actual_args, _ = store_kv_block_metadata.call_args
-        assert torch.equal(actual_args[0], common_attn_metadata.slot_mapping)
-        assert actual_args[4] == 128
-
+        store_kv_block_metadata.assert_not_called()
         assert metadata.block_size == 128
-        assert metadata.group_len is actual_args[1]
-        assert metadata.group_key_idx is actual_args[2]
-        assert metadata.group_key_cache_idx is actual_args[3]
+        assert metadata.group_len is None
+        assert metadata.group_key_idx is None
+        assert metadata.group_key_cache_idx is None
 
 
 class TestAscendSFAImpl(TestBase):
@@ -806,6 +901,7 @@ class TestAscendSFAImpl(TestBase):
         mock_ascend_config.enable_sparse_li_c8 = False
         mock_ascend_config.enable_shared_expert_dp = False
         mock_ascend_config.is_sparse_li_c8_layer.return_value = False
+        mock_ascend_config.rl_config.enabled = False
         mock_get_ascend_config.return_value = mock_ascend_config
         self.mock_ascend_config = mock_ascend_config
 
@@ -814,6 +910,9 @@ class TestAscendSFAImpl(TestBase):
         vllm_config.model_config.hf_config = MagicMock()
         vllm_config.model_config.hf_text_config = None
         vllm_config.kv_transfer_config = None
+        # Pin both live-weight-update switches off: a bare MagicMock attribute
+        # is truthy and would silently enable the RL keep-alive paths.
+        vllm_config.weight_transfer_config = None
         vllm_config.speculative_config = MagicMock()
         vllm_config.speculative_config.num_speculative_tokens = 0
         vllm_config.parallel_config = MagicMock()
@@ -874,6 +973,97 @@ class TestAscendSFAImpl(TestBase):
             **kwargs,
         )
 
+    def test_kvpp_waits_before_native_and_fused_cache_access(self):
+        from vllm_ascend.attention import sfa_v1
+
+        hidden = torch.zeros(2, 4)
+        metadata = SimpleNamespace(
+            cos=None,
+            sin=None,
+            slot_mapping=torch.arange(2),
+            num_input_tokens=2,
+            num_decode_tokens=2,
+            attn_state=AscendAttentionState.DecodeOnly,
+        )
+        context = SimpleNamespace(
+            actual_seq_lengths_query=[1, 2],
+            actual_seq_lengths_key=[1, 2],
+            kv_slot_mapping=metadata.slot_mapping,
+            gather_full_o_proj=False,
+            topk_num_tokens=2,
+        )
+        cases = (
+            (PreprocessType.NATIVE, True, False),
+            (PreprocessType.NATIVE, False, False),
+            (PreprocessType.PROLOG_V3, True, False),
+            (PreprocessType.MLAPO, True, False),
+            # MTP skip_topk layers keep a runtime indexer cache, so their k
+            # path and cache write must still follow the KVPP wait.
+            (PreprocessType.NATIVE, True, True),
+        )
+        events: list[object] = []
+
+        def record_event(name, result):
+            events.append(name)
+            return result
+
+        width = self.impl.q_lora_rank + self.impl.kv_lora_rank + self.impl.qk_rope_head_dim
+        for preprocess_type, has_indexer, is_mtp in cases:
+            with self.subTest(preprocess_type=preprocess_type, has_indexer=has_indexer, is_mtp=is_mtp):
+                events.clear()
+                self.impl.preprocess_type = preprocess_type
+                self.impl.has_indexer = has_indexer
+                self.impl._is_mtp_layer = is_mtp
+                self.impl._get_indexer_attn_metadata = lambda: metadata if self.impl.has_indexer else None
+                self.impl.skip_topk = True
+                self.impl.vllm_config.parallel_config.prefill_context_parallel_size = 1
+                self.impl._compose_sfa_kv_cache = lambda cache: cache
+                self.impl._get_sfa_kv_slot_mapping = lambda _: metadata.slot_mapping
+                self.impl._get_parallel_forward_context = lambda *_args: context
+                self.impl._prepare_native_hidden_states = lambda x, _: x
+                self.impl.fused_qkv_a_proj = lambda _: record_event("projection", (torch.zeros(2, width),))
+                self.impl.q_a_layernorm = torch.nn.Identity()
+                self.impl.indexer = lambda *_args, **_kwargs: record_event(
+                    "indexer_cache", torch.zeros(2, 1, dtype=torch.int64)
+                )
+                self.impl.layerwise_kv_cache_hook = SimpleNamespace(
+                    wait_for_layer=lambda name: events.append(("wait", name))
+                )
+                self.impl.exec_kv = lambda *_args: record_event("cache", (hidden, hidden))
+                self.impl._prepare_kv_for_parallel = lambda *_args: (hidden, [])
+                self.impl._q_proj_and_k_up_proj = lambda _: (hidden, hidden)
+                self.impl.rope_single = lambda x, *_args: x
+                self.impl._record_query_gather_context = lambda *_args: None
+                self.impl._store_parallel_kv = lambda *_args: (hidden, hidden)
+                self.impl._sfa_preprocess_prolog_v3 = lambda **_kwargs: record_event(
+                    "cache", (hidden, hidden, hidden, hidden)
+                )
+                self.impl._sfa_preprocess_mlapo = self.impl._sfa_preprocess_prolog_v3
+                self.impl._get_indexcache_topk_indices = lambda _: torch.zeros(2, 1, dtype=torch.int64)
+                self.impl._execute_sparse_flash_attention_process = lambda *_args: torch.ones(2, 4)
+                self.impl._v_up_proj = lambda x: x
+                self.impl._finalize_o_proj = lambda x, output, _: output.copy_(x)
+                output = torch.empty_like(hidden)
+                with (
+                    patch.object(sfa_v1, "wait_for_kv_layer_from_connector"),
+                    patch.object(sfa_v1, "notify_kv_cache_written"),
+                    patch.object(sfa_v1, "record_attention_compute_start"),
+                    patch.object(sfa_v1, "maybe_save_kv_layer_to_connector"),
+                ):
+                    self.assertIs(self.impl.forward("layer", hidden, (hidden,), metadata, output), output)
+                    self.assertTrue(torch.all(output == 1))
+                    expected: list[object] = ["projection"] if preprocess_type == PreprocessType.NATIVE else []
+                    expected.extend([("wait", "layer"), "cache"])
+                    # Static shared-index layers own no runtime indexer cache;
+                    # only MTP skip_topk layers still write one.
+                    if self.impl.runtime_has_indexer:
+                        expected.append("indexer_cache")
+                    self.assertEqual(events, expected)
+                    events.clear()
+                    self.impl.forward("layer", hidden, (), None, output)
+                self.assertEqual(events, [])
+                self.assertEqual(torch.count_nonzero(output).item(), 0)
+
     def _setup_kv_b_proj(self):
         """Set up kv_b_proj with real weight tensor for process_weights_after_loading."""
         shape_0 = self.impl.num_heads * (self.impl.qk_nope_head_dim + self.impl.v_head_dim)
@@ -910,6 +1100,32 @@ class TestAscendSFAImpl(TestBase):
         mock_dispose.assert_called_once()
         mock_maybe_trans_nz.assert_called_once()
 
+    @patch("vllm_ascend.attention.sfa_v1.maybe_trans_nz")
+    @patch("vllm_ascend.attention.sfa_v1.dispose_layer")
+    @patch("torch_npu.npu_format_cast")
+    def test_process_weights_after_loading_keeps_kv_b_proj_for_rl(
+        self, mock_format_cast, mock_dispose, mock_maybe_trans_nz
+    ):
+        """RL keeps kv_b_proj so live weight updates stay loadable (#15463).
+
+        The layerwise reload writes every checkpoint weight back into the
+        storage that exists when the transaction starts. A disposed parameter
+        has no valid destination, so the incoming weight is dropped and
+        W_UK_T/W_UV are re-derived from an empty tensor on every update.
+        """
+        layer = self._setup_kv_b_proj()
+        mock_format_cast.return_value = layer.weight
+        mock_maybe_trans_nz.side_effect = lambda x: x
+        self.impl.rl_weight_update_enabled = True
+
+        self.impl.process_weights_after_loading(torch.bfloat16)
+
+        mock_dispose.assert_not_called()
+        self.assertEqual(self.impl.W_UK_T.shape[0], self.impl.num_heads)
+        self.assertEqual(self.impl.W_UK_T.shape[2], self.impl.kv_lora_rank)
+        self.assertEqual(self.impl.W_UV.shape[0], self.impl.num_heads)
+        self.assertEqual(self.impl.W_UV.shape[2], self.impl.v_head_dim)
+
     # ============ _process_weights_for_fused_prolog_v3 ============
 
     def _run_prolog_v3_weight_test(self, qt, has_scales):
@@ -942,6 +1158,40 @@ class TestAscendSFAImpl(TestBase):
 
     def test_process_weights_for_fused_prolog_v3_unquantized(self):
         self._run_prolog_v3_weight_test(None, False)
+
+    def _run_prolog_v3_kv_consumer_dispose_test(self, rl_weight_update_enabled: bool):
+        """Exercise the kv-consumer dispose branch of the PROLOG_V3 path."""
+        mock_format_cast = patch("torch_npu.npu_format_cast", return_value=torch.randn(128, 128))
+        mock_format_cast.start()
+        self.addCleanup(mock_format_cast.stop)
+        mock_empty_cache = patch("torch.npu.empty_cache")
+        mock_empty_cache.start()
+        self.addCleanup(mock_empty_cache.stop)
+
+        self.impl._quant_type = None
+        self.impl.fused_qkv_a_proj = MagicMock()
+        self.impl.fused_qkv_a_proj.weight.data = torch.randn(128, 96, 64)
+        self.impl.q_proj = SimpleNamespace(weight=SimpleNamespace(data=torch.randn(128, 96)))
+        self.impl.q_lora_rank = 32
+        self.impl.is_kv_consumer = True
+        self.impl.rl_weight_update_enabled = rl_weight_update_enabled
+
+        with patch("vllm_ascend.attention.sfa_v1.dispose_layer") as mock_dispose:
+            self.impl._process_weights_for_fused_prolog_v3()
+        return mock_dispose
+
+    def test_prolog_v3_disposes_sources_without_rl(self):
+        mock_dispose = self._run_prolog_v3_kv_consumer_dispose_test(rl_weight_update_enabled=False)
+
+        self.assertEqual(mock_dispose.call_count, 2)
+
+    def test_prolog_v3_keeps_sources_for_rl(self):
+        mock_dispose = self._run_prolog_v3_kv_consumer_dispose_test(rl_weight_update_enabled=True)
+
+        mock_dispose.assert_not_called()
+        self.assertTrue(hasattr(self.impl, "weight_dq"))
+        self.assertTrue(hasattr(self.impl, "weight_dkv_kr"))
+        self.assertTrue(hasattr(self.impl, "weight_uq_qr"))
 
     # ============ exec_kv: sparse C8 uses custom_kv_rmsnorm_rope ============
 
@@ -1032,17 +1282,17 @@ class TestAscendSFAImpl(TestBase):
         path = self.impl._resolve_preprocess_type(torch.bfloat16)
         self.assertEqual(path, PreprocessType.PROLOG_V3)
 
-    def test_resolve_path_unquantized_c8_goes_prolog_v3(self):
-        """Unquantized + is_kv_consumer + C8 → PROLOG_V3 (blocked by reasons)."""
+    def test_resolve_path_unquantized_c8_goes_native(self):
+        """Unquantized + is_kv_consumer + C8 → NATIVE (blocked by reasons)."""
         self._set_quant(None)
         self.impl.is_kv_consumer = True
         self.impl.enable_sparse_sfa_c8 = True
 
         path = self.impl._resolve_preprocess_type(torch.bfloat16)
-        # Enters candidate but blocked by _get_fused_type_unsupported_reasons
-        # (unquantized + C8).  With _try_enable_type mocked to True, still
-        # returns PROLOG_V3 in the test.
-        self.assertEqual(path, PreprocessType.PROLOG_V3)
+        # The candidate is blocked by _get_fused_type_unsupported_reasons
+        # (unquantized + C8), so the path must fall back to NATIVE even when
+        # _try_enable_type is mocked to True.
+        self.assertEqual(path, PreprocessType.NATIVE)
 
     def test_resolve_path_no_mlapo_goes_native(self):
         """No quant + MLAPO disabled → NATIVE."""
@@ -1066,6 +1316,9 @@ class TestAscendSFAImpl(TestBase):
         """Minimal setup so unsupported-reasons checks can run."""
         self.impl.preprocess_type = PreprocessType.PROLOG_V3
         self.impl._quant_type = AscendW8A8DynamicLinearMethod
+        quant_method = AscendW8A8DynamicLinearMethod.__new__(AscendW8A8DynamicLinearMethod)
+        self.impl.fused_qkv_a_proj = MagicMock()
+        self.impl.fused_qkv_a_proj.quant_method = SimpleNamespace(quant_method=quant_method)
         self.impl.kv_a_layernorm = MagicMock()
         self.impl.kv_a_layernorm.variance_epsilon = 1e-5
         self.impl.q_a_layernorm = MagicMock()
@@ -1090,6 +1343,7 @@ class TestAscendSFAImpl(TestBase):
     def test_reasons_unquantized_c8_blocked(self):
         self._setup_prolog_v3_state()
         self.impl._quant_type = None
+        self.impl.fused_qkv_a_proj.quant_method = SimpleNamespace(quant_method=None)
         self.impl.enable_sparse_sfa_c8 = True
 
         reasons = self.impl._get_fused_type_unsupported_reasons(PreprocessType.PROLOG_V3)
@@ -1122,7 +1376,6 @@ class TestAscendSFAImpl(TestBase):
         impl.kv_a_layernorm.weight.data = torch.ones(32)
         impl.kv_a_layernorm.variance_epsilon = 1e-5
         impl.has_indexer = True
-        impl.wq_b = None
         impl.weight_dq = torch.empty(1)
         impl.weight_uq_qr = torch.empty(1)
         impl.W_UK_T = torch.randn(2, 64, 32)

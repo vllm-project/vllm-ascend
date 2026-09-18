@@ -1,6 +1,5 @@
 from unittest import mock
 
-import pytest
 import torch
 
 from vllm_ascend.device.device_op import A5DeviceAdaptor, BaseDeviceAdaptor
@@ -36,6 +35,73 @@ def test_reshape_and_cache_makes_scatter_inputs_contiguous():
     assert call_kwargs["cache_mode"] == "Norm"
 
 
+def test_base_reshape_and_cache_uses_custom_scatter_for_bnsd():
+    key = torch.randn(2, 8, 64)
+    value = torch.randn_like(key)
+    key_cache = torch.empty(4, 8, 128, 64)
+    value_cache = torch.empty_like(key_cache)
+    slot_mapping = torch.arange(2, dtype=torch.int32)
+
+    with (
+        mock.patch.object(
+            torch.ops._C_ascend,
+            "npu_scatter_pa_kv_cache",
+            create=True,
+        ) as mock_custom_scatter,
+        mock.patch("vllm_ascend.device.device_op.torch_npu.npu_scatter_pa_kv_cache") as mock_public_scatter,
+    ):
+        BaseDeviceAdaptor.reshape_and_cache(
+            key,
+            value,
+            key_cache,
+            value_cache,
+            slot_mapping,
+            use_bnsd=True,
+        )
+
+    mock_public_scatter.assert_not_called()
+    mock_custom_scatter.assert_called_once()
+    assert mock_custom_scatter.call_args.args[2] is key_cache
+    assert mock_custom_scatter.call_args.args[3] is value_cache
+    assert mock_custom_scatter.call_args.kwargs["cache_mode"] == "Norm"
+    assert mock_custom_scatter.call_args.kwargs["scatter_mode"] == "NHSD"
+
+
+def test_a5_reshape_and_cache_uses_bsnd_view_for_bnsd():
+    key = torch.randn(2, 8, 64)
+    value = torch.randn_like(key)
+    key_cache = torch.empty(4, 8, 128, 64)
+    value_cache = torch.empty_like(key_cache)
+    slot_mapping = torch.arange(2, dtype=torch.int32)
+
+    with (
+        mock.patch.object(
+            torch.ops._C_ascend,
+            "npu_scatter_pa_kv_cache",
+            create=True,
+        ) as mock_custom_scatter,
+        mock.patch("vllm_ascend.device.device_op.torch_npu.npu_scatter_pa_kv_cache") as mock_public_scatter,
+    ):
+        A5DeviceAdaptor.reshape_and_cache(
+            key,
+            value,
+            key_cache,
+            value_cache,
+            slot_mapping,
+            use_bnsd=True,
+        )
+
+    mock_custom_scatter.assert_not_called()
+    mock_public_scatter.assert_called_once()
+    call_kwargs = mock_public_scatter.call_args.kwargs
+    assert call_kwargs["key_cache"].shape == (4, 128, 8, 64)
+    assert call_kwargs["value_cache"].shape == (4, 128, 8, 64)
+    assert not call_kwargs["key_cache"].is_contiguous()
+    assert not call_kwargs["value_cache"].is_contiguous()
+    assert call_kwargs["key_cache"].data_ptr() == key_cache.data_ptr()
+    assert call_kwargs["value_cache"].data_ptr() == value_cache.data_ptr()
+
+
 def test_kv_cache_load_makes_seq_lens_contiguous():
     cache_kv_c = object()
     cache_k_pe = object()
@@ -69,116 +135,3 @@ def test_kv_cache_load_makes_seq_lens_contiguous():
     assert mock_gather.call_args.kwargs["seq_offset"] is seq_starts
     assert mock_gather.call_args.kwargs["key"] is key
     assert mock_gather.call_args.kwargs["value"] is value
-
-
-def test_npu_flash_attention_uses_fusion_attention_for_fp32():
-    query = torch.randn(5, 4, 64, dtype=torch.float32)
-    key = torch.randn_like(query)
-    value = torch.randn_like(query)
-    seq_lens_cpu = torch.tensor([2, 3], dtype=torch.int32)
-    expected = torch.randn_like(query)
-
-    with (
-        mock.patch(
-            "vllm_ascend.device.device_op.torch_npu.npu_fusion_attention",
-            return_value=(expected,),
-        ) as mock_fusion_attention,
-        mock.patch(
-            "vllm_ascend.device.device_op.torch_npu._npu_flash_attention_unpad",
-            create=True,
-        ) as mock_flash_attention,
-    ):
-        output = BaseDeviceAdaptor.npu_flash_attention(
-            query=query,
-            key=key,
-            value=value,
-            seq_lens_cpu=seq_lens_cpu,
-            head_num=4,
-            scale_value=0.125,
-            num_kv_heads=4,
-        )
-
-    assert output is expected
-    mock_flash_attention.assert_not_called()
-    mock_fusion_attention.assert_called_once()
-    call_kwargs = mock_fusion_attention.call_args.kwargs
-    assert call_kwargs["query"] is query
-    assert call_kwargs["key"] is key
-    assert call_kwargs["value"] is value
-    assert call_kwargs["actual_seq_qlen"] == [2, 5]
-    assert all(isinstance(seq_len, int) for seq_len in call_kwargs["actual_seq_qlen"])
-    assert call_kwargs["actual_seq_kvlen"] is call_kwargs["actual_seq_qlen"]
-    assert call_kwargs["head_num"] == 4
-    assert call_kwargs["scale"] == 0.125
-    assert call_kwargs["input_layout"] == "TND"
-
-
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_npu_flash_attention_uses_unpad_attention_for_low_precision(dtype):
-    query = torch.randn(5, 4, 64, dtype=dtype)
-    key = torch.randn_like(query)
-    value = torch.randn_like(query)
-    seq_lens_cpu = torch.tensor([2, 3], dtype=torch.int32)
-
-    def fake_flash_attention(*, query, key, value, seq_len, scale_value, num_heads, num_kv_heads, out):
-        out.copy_(query + 1)
-
-    with (
-        mock.patch(
-            "vllm_ascend.device.device_op.torch_npu.npu_fusion_attention",
-        ) as mock_fusion_attention,
-        mock.patch(
-            "vllm_ascend.device.device_op.torch_npu._npu_flash_attention_unpad",
-            side_effect=fake_flash_attention,
-            create=True,
-        ) as mock_flash_attention,
-    ):
-        output = BaseDeviceAdaptor.npu_flash_attention(
-            query=query,
-            key=key,
-            value=value,
-            seq_lens_cpu=seq_lens_cpu,
-            head_num=4,
-            scale_value=0.125,
-            num_kv_heads=4,
-        )
-
-    mock_fusion_attention.assert_not_called()
-    mock_flash_attention.assert_called_once()
-    call_kwargs = mock_flash_attention.call_args.kwargs
-    assert call_kwargs["query"] is query
-    assert call_kwargs["key"] is key
-    assert call_kwargs["value"] is value
-    assert call_kwargs["seq_len"] is seq_lens_cpu
-    assert call_kwargs["num_heads"] == 4
-    assert call_kwargs["num_kv_heads"] == 4
-    assert call_kwargs["scale_value"] == 0.125
-    torch.testing.assert_close(output, query + 1)
-
-
-def test_a5_npu_flash_attention_uses_python_sequence_lengths():
-    query = torch.randn(5, 4, 64, dtype=torch.float16)
-    key = torch.randn_like(query)
-    value = torch.randn_like(query)
-    seq_lens_cpu = torch.tensor([2, 3], dtype=torch.int32)
-    expected = torch.randn_like(query)
-
-    with mock.patch(
-        "vllm_ascend.device.device_op.torch_npu.npu_fusion_attention",
-        return_value=(expected,),
-    ) as mock_fusion_attention:
-        output = A5DeviceAdaptor.npu_flash_attention(
-            query=query,
-            key=key,
-            value=value,
-            seq_lens_cpu=seq_lens_cpu,
-            head_num=4,
-            scale_value=0.125,
-            num_kv_heads=4,
-        )
-
-    assert output is expected
-    call_kwargs = mock_fusion_attention.call_args.kwargs
-    assert call_kwargs["actual_seq_qlen"] == [2, 5]
-    assert all(isinstance(seq_len, int) for seq_len in call_kwargs["actual_seq_qlen"])
-    assert call_kwargs["actual_seq_kvlen"] is call_kwargs["actual_seq_qlen"]

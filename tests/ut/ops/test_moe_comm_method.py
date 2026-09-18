@@ -77,7 +77,7 @@ class TestMoECommMethod(TestBase):
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_mc2_group")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.logger.warning_once")
     def test_mega_moe_symm_buffer_uses_mega_moe_max_tokens(self, mock_warning_once, mock_get_mc2_group):
-        self.mock_ascend_config.mega_moe_max_tokens = 32768
+        self.mock_ascend_config.mega_moe_max_tokens = 512
         mock_mc2_group = MagicMock()
         mock_mc2_group.device_group = "mc2_group"
         mock_get_mc2_group.return_value = mock_mc2_group
@@ -88,7 +88,26 @@ class TestMoECommMethod(TestBase):
         comm_impl.get_symm_buffer_for_mega_moe.assert_called_once()
         call_args = comm_impl.get_symm_buffer_for_mega_moe.call_args
         self.assertEqual(call_args.args[:4], ("mc2_group", 8, 128, 2))
-        self.assertEqual(call_args.kwargs["max_recv_token_num"], 32768)
+        self.assertEqual(call_args.kwargs["max_recv_token_num"], 512)
+        mock_warning_once.assert_called_once()
+        self.assertIn("mega_moe_max_tokens", mock_warning_once.call_args.args[0])
+
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.logger.warning_once")
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_mc2_group")
+    def test_mega_moe_symm_buffer_clamps_to_safe_capacity_for_p_node(self, mock_get_mc2_group, mock_warning_once):
+        # mega_moe_max_tokens (32768) exceeds the absolute safe upper bound
+        # (1024), so the P-node buffer must be clamped to that bound.
+        self.mock_ascend_config.mega_moe_max_tokens = 32768
+        mock_mc2_group = MagicMock()
+        mock_mc2_group.device_group = "mc2_group"
+        mock_get_mc2_group.return_value = mock_mc2_group
+        comm_impl = self._make_fused_mc2_comm_for_buffer_init()
+
+        comm_impl._init_mega_moe_symm_buffer(is_decode_only_node=False)
+
+        comm_impl.get_symm_buffer_for_mega_moe.assert_called_once()
+        call_args = comm_impl.get_symm_buffer_for_mega_moe.call_args
+        self.assertEqual(call_args.kwargs["max_recv_token_num"], 1024)
         mock_warning_once.assert_called_once()
         self.assertIn("mega_moe_max_tokens", mock_warning_once.call_args.args[0])
 
@@ -242,10 +261,10 @@ class TestMoECommMethod(TestBase):
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.PrepareAndFinalizeWithAllGather")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.TokenDispatcherWithAllGather")
-    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.unified_apply_mlp")
-    @patch("torch.npu.current_stream", MagicMock())
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.apply_moe_mlp")
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.torch.npu.current_stream", MagicMock())
     def test_fused_experts_method(
-        self, mock_unified_apply_mlp, mock_token_dispatcher, mock_prepare_finalize, mock_get_forward_context
+        self, mock_apply_mlp, mock_token_dispatcher, mock_prepare_finalize, mock_get_forward_context
     ):
         # Mock forward context
         mock_context = MagicMock()
@@ -279,8 +298,9 @@ class TestMoECommMethod(TestBase):
         mock_td_instance.token_combine.return_value = torch.randn(4, 8)
         mock_token_dispatcher.return_value = mock_td_instance
 
-        # Mock unified_apply_mlp returns (tensor, event) tuple
-        mock_unified_apply_mlp.return_value = (torch.randn(6, 8), MagicMock())
+        # Mock the unified MoE MLP orchestration returning (tensor, event).
+        mock_apply_mlp.return_value = (torch.randn(6, 8), MagicMock())
+        quant_method = MagicMock()
 
         # Create instance
         comm_impl = AllGatherCommImpl(self.moe_config)
@@ -316,7 +336,8 @@ class TestMoECommMethod(TestBase):
                 need_trans=False,
                 dynamic_eplb=False,
                 quant=MoEQuantParams(),
-            )
+            ),
+            quant_method=quant_method,
         )
 
         # Verify result shape
@@ -325,14 +346,15 @@ class TestMoECommMethod(TestBase):
         # Verify token_dispatch was called
         mock_td_instance.token_dispatch.assert_called_once()
 
-        # Verify unified_apply_mlp was called
-        mock_unified_apply_mlp.assert_called_once()
-        mlp_compute_input = mock_unified_apply_mlp.call_args.kwargs["mlp_compute_input"]
+        # Verify the unified MoE MLP orchestration was called
+        mock_apply_mlp.assert_called_once()
+        mlp_compute_input = mock_apply_mlp.call_args.args[0]
         self.assertFalse(mlp_compute_input.fusion)
         self.assertFalse(mlp_compute_input.quant.is_mxfp)
+        self.assertIs(mock_apply_mlp.call_args.args[1], quant_method)
 
         # Verify token_combine was called
         mock_td_instance.token_combine.assert_called_once_with(
-            hidden_states=mock_unified_apply_mlp.return_value[0],
+            hidden_states=mock_apply_mlp.return_value[0],
             combine_metadata=mock_td_instance.token_dispatch.return_value.combine_metadata,
         )

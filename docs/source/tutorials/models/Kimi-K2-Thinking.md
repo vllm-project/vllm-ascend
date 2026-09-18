@@ -18,9 +18,13 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-- `Kimi-K2-Thinking` (bfloat16): requires 1 Atlas 800 A3 (64GB × 16) node. [Download model weight](https://huggingface.co/moonshotai/Kimi-K2-Thinking).
+|  Weight Version               | Hardware Requirements           | Download Links |
+|-------------------------------|---------------------------------|----------------|
+| `Kimi-K2-Thinking` (bfloat16) | 1 Atlas 800 A3 (64GB × 16) node | [ModelScope](https://www.modelscope.cn/models/moonshotai/Kimi-K2-Thinking) \| [Hugging Face](https://huggingface.co/moonshotai/Kimi-K2-Thinking) |
 
 It is recommended to download the model weight to the shared directory, such as `/mnt/sfs_turbo/.cache/`.
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 After downloading the model weights, please edit the value of `"quantization_config.config_groups.group_0.targets"` from `["Linear"]` to `["MoE"]` in `config.json` of the original model to use the quantized model.
 
@@ -247,11 +251,11 @@ Expected Result:
 
 ## 7 Accuracy Evaluation
 
-### Using AISBench
+### 7.1 Using AISBench
 
 For details, please refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md).
 
-### Using lm-eval
+### 7.2 Using lm-eval
 
 You can use [lm-eval](https://github.com/EleutherAI/lm-evaluation-harness) to evaluate the model accuracy through the OpenAI-compatible API.
 
@@ -277,6 +281,8 @@ Below are reference `gsm8k` results for `Kimi-K2-Thinking` powered by `vllm-asce
 | `gsm8k` | 3 | `strict-match` | 5 | `exact_match` | 0.8453 | 0.0100 |
 
 ## 8 Performance Evaluation
+
+### 8.1 Using vLLM Benchmark
 
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
@@ -348,9 +354,9 @@ Reference results for 1024 input tokens and 1024 output tokens are:
 
 | Scenario | Deployment Mode | Total NPUs | Weight Version | Key Considerations |
 |----------|----------------|------------|----------------|---------------------|
-| Long Context | Single-node | 16 (A3) | bfloat16 | Keep `--max-model-len` close to the real maximum input and output length, and reduce `--max-num-seqs` first when memory pressure is high. The validated scope of this single-node baseline covers up to 2K input / 2K output in Chapter 8. |
+| Long Context | Single-node | 16 (A3) | bfloat16 | Keep `--max-model-len` close to the real maximum input and output length, and reduce `--max-num-seqs` first when memory pressure is high. The validated scope of this single-node baseline covers up to 2k input / 2k output in Chapter 8. |
 | Low Latency | Single-node | 16 (A3) | bfloat16 | Reduce `--max-num-seqs` and `--max-num-batched-tokens` from the validated baseline (`12` and `8192`) to reduce queueing delay. In the Chapter 8 concurrency sweep, concurrency 1-4 kept mean TTFT below 1s; validate TTFT, TPOT, and tail latency against the target latency SLO. |
-| High Throughput | Single-node | 16 (A3) | bfloat16 | Increase `--max-num-seqs` gradually and benchmark with a request rate close to the real workload. In the 1K/1K concurrency sweep in Chapter 8, concurrency 8 gave the best output throughput; validate tail latency before using higher concurrency in production. |
+| High Throughput | Single-node | 16 (A3) | bfloat16 | Increase `--max-num-seqs` gradually and benchmark with a request rate close to the real workload. In the 1k/1k concurrency sweep in Chapter 8, concurrency 8 gave the best output throughput; validate tail latency before using higher concurrency in production. |
 
 ### 9.2 Tuning Guidelines
 

@@ -22,18 +22,6 @@ from vllm_ascend.utils import (
 SFA_QSFA_TILE_SIZE = 128
 MLAPO_MAX_SUPPORTED_TOKENS = 1024
 
-_GLM5_NEXT_KPOOL_CACHE_TYPES = frozenset({"Glm5NextIndexerCache", "Glm5NextTailCache"})
-
-
-def is_glm5_next_kpool_cache(attn_module: Any) -> bool:
-    """Return True for GLM-5.3-Flash kpool indexer / tail cache layers.
-
-    Those classes subclass DeepseekV32IndexerCache but keep their own
-    ``compress_ratio`` / ``KpoolTailSpec`` layouts. The DeepSeek V3.2 SFA
-    rewrite must not replace them with ``AscendSFAIndexerCacheSpec``.
-    """
-    return type(attn_module).__name__ in _GLM5_NEXT_KPOOL_CACHE_TYPES
-
 
 def get_or_register_attention_buffer(
     vllm_config: VllmConfig,
@@ -240,7 +228,6 @@ def enable_dcp():
     return parallel_config.decode_context_parallel_size > 1
 
 
-@lru_cache(maxsize=1)
 def enable_pcp():
     parallel_config = get_current_vllm_config().parallel_config
     return parallel_config.prefill_context_parallel_size > 1
@@ -270,6 +257,8 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # CPU tensor of sequence lengths for host-side operations.
     # E.g., tensor([128, 256, 64]) for 3 requests with different seq lengths.
     seq_lens_cpu: torch.Tensor = None
+
+    # Host mirror of this cache group's block table, including padded rows.
 
     # CPU tensor of already computed tokens count per request.
     # E.g., tensor([100, 200, 50]) means req0 has 100 tokens already computed.
