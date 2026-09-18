@@ -27,6 +27,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector import
     MooncakeConnectorMetadata,
     MooncakeConnectorScheduler,
     MooncakeConnectorWorker,
+    _reconstruct_shared_pages,
 )
 
 
@@ -520,6 +521,52 @@ class TestMooncakeHybridConnectorWorker(unittest.TestCase):
 
 
 class TestMooncakeHybridConnectorRegistration(unittest.TestCase):
+    def test_reconstruct_shared_pages_uses_indexed_descriptor_placement(self):
+        num_blocks = 2
+        block_stride = 80
+        layer_stride = num_blocks * block_stride
+        dummy_layers = ["dummy.0", "dummy.1"]
+        shared_layers = ["long_kv_cache", "indexer.k_cache"]
+
+        backing = torch.empty(2 * layer_stride, dtype=torch.uint8)
+        dummy_cache = backing.as_strided((num_blocks, block_stride), (block_stride, 1))
+        long_kv_cache = backing[layer_stride:].as_strided((num_blocks, 64), (block_stride, 1))
+        indexer_k_cache = backing[layer_stride + 64 :].as_strided((num_blocks, 8), (block_stride, 1))
+        indexer_scale = backing[layer_stride + 72 :].as_strided((num_blocks, 2), (block_stride, 1))
+        kv_caches = {
+            dummy_layers[0]: dummy_cache,
+            dummy_layers[1]: dummy_cache,
+            shared_layers[0]: long_kv_cache,
+            shared_layers[1]: (indexer_k_cache, indexer_scale),
+        }
+        descriptors = [
+            types.SimpleNamespace(
+                size=2 * layer_stride,
+                layers=[dummy_layer, shared_layer],
+                layer_stride=layer_stride,
+                block_stride=block_stride,
+                offset=0,
+            )
+            for dummy_layer, shared_layer in zip(dummy_layers, shared_layers)
+        ]
+
+        pages = _reconstruct_shared_pages(
+            types.SimpleNamespace(
+                num_blocks=num_blocks,
+                kv_cache_tensors=descriptors,
+            ),
+            kv_caches,
+        )
+
+        shared_page = next(
+            page for page in pages if {layer_name for layer_name, _ in page.placements} == set(shared_layers)
+        )
+        self.assertEqual(
+            shared_page.placements,
+            ((shared_layers[0], 0), (shared_layers[1], 64)),
+        )
+        self.assertEqual(shared_page.block_stride, block_stride)
+
     def test_dsv4_registration_reconstructs_one_entry_per_shared_page(self):
         alignment = 2 * 1024 * 1024
         num_blocks = 2
@@ -601,7 +648,127 @@ class TestMooncakeHybridConnectorRegistration(unittest.TestCase):
             worker.kv_caches_base_addr,
         )
 
-    def test_hybrid_registration_uses_actual_merged_tensor_ranges(self):
+    def test_registration_recovers_page_base_from_runtime_offsets(self):
+        alignment = 2 * 1024 * 1024
+        num_blocks = 2
+        block_stride = 80
+        backing_size = num_blocks * block_stride
+        raw_tensor = torch.empty(backing_size + alignment, dtype=torch.uint8)
+        aligned_offset = (-raw_tensor.data_ptr()) % alignment
+        backing = raw_tensor[aligned_offset : aligned_offset + backing_size]
+
+        long_layer = "model.layers.0.self_attn.long_kv_cache"
+        indexer_layer = "model.layers.0.self_attn.indexer.k_cache"
+        state_layer = "model.layers.0.self_attn.indexer.compressor.state_cache"
+        long_kv_cache = backing.as_strided((num_blocks, 64), (block_stride, 1))
+        indexer_k_cache = backing[64:].as_strided((num_blocks, 8), (block_stride, 1))
+        indexer_scale = backing[72:].as_strided((num_blocks, 2), (block_stride, 1))
+        state_cache = backing.as_strided((num_blocks, block_stride), (block_stride, 1))
+        kv_caches = {
+            long_layer: long_kv_cache,
+            indexer_layer: (indexer_k_cache, indexer_scale),
+            state_layer: state_cache,
+        }
+
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker.vllm_config = types.SimpleNamespace(
+            model_config=types.SimpleNamespace(
+                is_deepseek_mla=True,
+                hf_text_config=types.SimpleNamespace(),
+            )
+        )
+        worker.kv_cache_config = types.SimpleNamespace(
+            num_blocks=num_blocks,
+            kv_cache_groups=[
+                types.SimpleNamespace(layer_names=[long_layer, indexer_layer]),
+                types.SimpleNamespace(layer_names=[state_layer]),
+            ],
+            kv_cache_tensors=[
+                types.SimpleNamespace(
+                    size=backing_size,
+                    layers=[long_layer, indexer_layer, state_layer],
+                    layer_stride=0,
+                    block_stride=block_stride,
+                    offset=0,
+                )
+            ],
+        )
+        worker.use_hybrid = True
+        worker.use_mamba = False
+        worker.use_compress = True
+
+        class RegistrationCaptured(Exception):
+            pass
+
+        with (
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector.global_te.register_buffer",
+                side_effect=RegistrationCaptured,
+            ) as register_buffer,
+            self.assertRaises(RegistrationCaptured),
+        ):
+            worker.register_kv_caches(kv_caches)
+
+        self.assertEqual(worker.kv_caches_base_addr, [backing.data_ptr()])
+        self.assertEqual(worker.addr_group_idx, [[0, 1]])
+        self.assertEqual(worker.block_stride_per_addr, [block_stride])
+        self.assertEqual(worker.block_len_per_addr, [block_stride])
+        register_buffer.assert_called_once_with([backing.data_ptr()], [backing_size])
+
+    def test_registration_keeps_independent_pages_with_same_stride_separate(self):
+        num_blocks = 2
+        block_stride = 80
+        layer_names = ["long_kv_cache.0", "long_kv_cache.1"]
+        kv_caches = {
+            layer_name: torch.empty((num_blocks, block_stride), dtype=torch.uint8) for layer_name in layer_names
+        }
+
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker.vllm_config = types.SimpleNamespace(
+            model_config=types.SimpleNamespace(
+                is_deepseek_mla=True,
+                hf_text_config=types.SimpleNamespace(),
+            )
+        )
+        worker.kv_cache_config = types.SimpleNamespace(
+            num_blocks=num_blocks,
+            kv_cache_groups=[types.SimpleNamespace(layer_names=[name]) for name in layer_names],
+            kv_cache_tensors=[
+                types.SimpleNamespace(
+                    size=num_blocks * block_stride,
+                    layers=[name],
+                    layer_stride=0,
+                    block_stride=block_stride,
+                    offset=0,
+                )
+                for name in layer_names
+            ],
+        )
+        worker.use_hybrid = True
+        worker.use_mamba = False
+        worker.use_compress = True
+
+        class RegistrationCaptured(Exception):
+            pass
+
+        with (
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector.global_te.register_buffer",
+                side_effect=RegistrationCaptured,
+            ),
+            self.assertRaises(RegistrationCaptured),
+        ):
+            worker.register_kv_caches(kv_caches)
+
+        self.assertEqual(
+            worker.kv_caches_base_addr,
+            [kv_caches[name].data_ptr() for name in layer_names],
+        )
+        self.assertEqual(worker.addr_group_idx, [[0], [1]])
+        self.assertEqual(worker.block_stride_per_addr, [block_stride, block_stride])
+        self.assertEqual(worker.block_len_per_addr, [block_stride, block_stride])
+
+    def test_hybrid_registration_uses_configured_backing_range(self):
         alignment = 2 * 1024 * 1024
         backing_size = 4 * alignment
         layer_names = [
@@ -656,7 +823,7 @@ class TestMooncakeHybridConnectorRegistration(unittest.TestCase):
 
         register_buffer.assert_called_once_with(
             [backing.data_ptr()],
-            [3 * alignment],
+            [backing_size],
         )
 
 
@@ -685,6 +852,18 @@ class TestMooncakeHybridConnectorScheduler(unittest.TestCase):
         transfer_block_ids = scheduler._compute_transfer_block_ids(block_ids, prompt_len=129)
 
         self.assertEqual(transfer_block_ids, ([0], [100, 101]))
+
+    def test_compute_transfer_block_ids_preserves_circular_groups(self):
+        scheduler = self._make_scheduler()
+        scheduler.kv_cache_specs = [
+            [types.SimpleNamespace(is_circular=True)],
+            [types.SimpleNamespace(is_circular=False)],
+        ]
+        block_ids = (list(range(10)), [100, 101, 102, 103])
+
+        transfer_block_ids = scheduler._compute_transfer_block_ids(block_ids, prompt_len=129)
+
+        self.assertEqual(transfer_block_ids, (list(range(10)), [100, 101]))
 
     def test_request_finished_preserves_group_layout_with_pcp(self):
         scheduler = self._make_scheduler()

@@ -66,6 +66,7 @@ _SHARED_BACKING_KV_CONNECTORS = frozenset(
         "ExampleHiddenStatesConnector",
         "MooncakeConnectorV1",
         "MooncakeConnectorV2",
+        "MooncakeHybridConnector",
         "MooncakePullConnector",
     }
 )
