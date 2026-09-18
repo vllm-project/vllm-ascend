@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import torch
+from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 
 from vllm_ascend.attention.context_parallel.common_cp import (
     DCPImplMixin,
@@ -9,7 +10,6 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     _npu_attention_update,
     _npu_attn_out_lse_update,
     _update_out_and_lse,
-    get_dcp_local_seq_lens,
 )
 
 
@@ -20,7 +20,7 @@ class TestCommonCP(unittest.TestCase):
         actual = get_dcp_local_seq_lens(
             seq_lens,
             dcp_size=2,
-            interleave_size=4,
+            cp_kv_cache_interleave_size=4,
         )
 
         expected = torch.tensor(
@@ -44,7 +44,7 @@ class TestCommonCP(unittest.TestCase):
         actual = get_dcp_local_seq_lens(
             seq_lens,
             dcp_size=2,
-            interleave_size=4,
+            cp_kv_cache_interleave_size=4,
         )
 
         self.assertEqual(actual.shape, (2, 2, 2))

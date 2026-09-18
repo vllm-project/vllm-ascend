@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from vllm_ascend.ops import register_custom_ops as custom_ops
@@ -99,3 +100,57 @@ def test_rope_fake_uses_requested_output_dtype():
     assert key_out.shape == key.shape
     assert query_out.dtype == torch.float8_e4m3fn
     assert key_out.dtype == torch.float8_e4m3fn
+
+
+@pytest.mark.parametrize("dp_size,pcp_size,sp_size", [(1, 2, 2), (2, 1, 2), (2, 2, 2), (2, 2, 4)])
+def test_sp_ep_pcp_token_order_and_round_trip(monkeypatch, dp_size, pcp_size, sp_size):
+    # Uneven DP batches, including TP padding, must preserve DP/PCP/TP order.
+    dp_tokens = [1, 9][:dp_size]
+    sp_sizes = [(tokens + sp_size - 1) // sp_size for tokens in dp_tokens]
+    local_sizes = [size for size in sp_sizes for _ in range(sp_size)]
+    ep_sizes = [size for size in sp_sizes for _ in range(pcp_size * sp_size)]
+    world_size = dp_size * pcp_size * sp_size
+    max_size = max(ep_sizes)
+    chunks = [torch.full((size, 4), float(rank + 1)) for rank, size in enumerate(ep_sizes)]
+    padded = torch.stack([torch.nn.functional.pad(chunk, (0, 0, 0, max_size - len(chunk))) for chunk in chunks])
+    expected = torch.cat(chunks)
+    context = SimpleNamespace(
+        dp_metadata=SimpleNamespace(
+            get_chunk_sizes_across_dp_rank=lambda: local_sizes, num_tokens_across_dp_cpu=torch.tensor(dp_tokens)
+        )
+    )
+    monkeypatch.setattr(custom_ops, "get_forward_context", lambda: context)
+    monkeypatch.setattr(
+        custom_ops, "_EXTRA_CTX", SimpleNamespace(is_draft_model=False, padded_length=max_size * sp_size)
+    )
+    monkeypatch.setattr(custom_ops, "get_dp_group", lambda: SimpleNamespace(world_size=dp_size))
+    monkeypatch.setattr(custom_ops, "get_pcp_group", lambda: SimpleNamespace(world_size=pcp_size), raising=False)
+
+    for rank in range(world_size):
+
+        def gather(x, dim, rank=rank):
+            assert dim == 0
+            assert torch.equal(x, padded[rank])
+            return padded.flatten(0, 1)
+
+        def reduce(x, dim, rank=rank):
+            assert dim == 0
+            assert torch.equal(x, padded.flatten(0, 1))
+            # Every EP rank contributes the same tensor to this reference sum.
+            return padded[rank] * world_size
+
+        group = SimpleNamespace(world_size=world_size, rank_in_group=rank, all_gather=gather, reduce_scatter=reduce)
+        monkeypatch.setattr(custom_ops, "get_ep_group", lambda group=group: group)
+        gathered = custom_ops._maybe_all_gather_and_maybe_unpad_impl(chunks[rank])
+        assert torch.equal(gathered, expected)
+        assert custom_ops._maybe_all_gather_and_maybe_unpad_fake(chunks[rank]).shape == expected.shape
+        reduced = custom_ops._maybe_pad_and_reduce_impl(gathered)
+        assert torch.equal(reduced, chunks[rank] * world_size)
+        assert custom_ops._maybe_pad_and_reduce_fake(gathered).shape == chunks[rank].shape
+
+
+def test_sp_ep_returns_none_for_inconsistent_topology(monkeypatch):
+    metadata = SimpleNamespace(get_chunk_sizes_across_dp_rank=lambda: [2, 2, 2])
+    monkeypatch.setattr(custom_ops, "get_dp_group", lambda: SimpleNamespace(world_size=2))
+    monkeypatch.setattr(custom_ops, "get_pcp_group", lambda: SimpleNamespace(world_size=2), raising=False)
+    assert custom_ops._get_ep_local_sizes(metadata, SimpleNamespace(world_size=8)) is None

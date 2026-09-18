@@ -10,7 +10,6 @@ from vllm.logger import logger
 from vllm.v1.worker.utils import AttentionGroup, KVBlockZeroer
 
 from vllm_ascend.compilation.acl_graph import get_draft_graph_params, get_graph_params, weak_ref_workspaces
-from vllm_ascend.compilation.updatable_graph import UpdatableGraph
 from vllm_ascend.utils import vllm_version_is, weak_ref_tensor, weak_ref_tensors
 
 
@@ -112,12 +111,14 @@ def torch_cuda_wrapper():
         torch.cuda.default_stream = torch.npu.default_stream
         torch.cuda.current_stream = torch.npu.current_stream
         torch.cuda.graph_pool_handle = torch.npu.graph_pool_handle
-        torch.cuda.CUDAGraph = UpdatableGraph
+        torch.cuda.CUDAGraph = torch.npu.NPUGraph
         torch.cuda.graph = torch_npu_graph_wrapper
         torch.cuda.synchronize = torch.npu.synchronize
         torch.cuda.set_stream = torch.npu.set_stream
         torch.cuda.current_device = torch.npu.current_device
         torch.cuda.mem_get_info = torch.npu.mem_get_info
+        # GPU V2 prefetch/offload calls this CUDA API during load_model.
+        torch.cuda.is_current_stream_capturing = torch.npu.is_current_stream_capturing
         breakable_cudagraph.weak_ref_tensor = weak_ref_tensor
         breakable_cudagraph.weak_ref_tensors = weak_ref_tensors
         logger.info_once("Wrapping torch.cuda with torch.npu.")

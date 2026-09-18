@@ -17,19 +17,19 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 
 import numpy as np
 import torch
 from vllm.compilation import breakable_cudagraph
 from vllm.config import VllmConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
+from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.sequence import IntermediateTensors
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
-from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import (
     combine_sampled_and_draft_tokens,
@@ -52,6 +52,8 @@ from vllm_ascend.ascend_forward_context import (
     set_mc2_mask,
     set_mc2_tokens_capacity,
 )
+from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.core.profiling_chunk_predictor import (
     _finish_profiling_chunk_timing,
     _start_profiling_chunk_timing,
@@ -60,7 +62,7 @@ from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import lmhead_tp_enable, set_potential_max_tokens, vllm_version_is
 from vllm_ascend.worker.utils import disable_compilation
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
-from vllm_ascend.worker.v2.attn_utils import build_attn_state
+from vllm_ascend.worker.v2.attn_utils import build_attn_state, unwrap_mamba_kv_cache_groups
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
@@ -74,6 +76,9 @@ from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import AscendV2KVBlockZeroer, torch_cuda_wrapper
+
+if vllm_version_is("0.28.0"):
+    from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 
 
 class NPUModelRunner(GPUModelRunner):
@@ -90,6 +95,9 @@ class NPUModelRunner(GPUModelRunner):
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
         self.kvpp = KVPPRuntime()
+        # Adaptive verification uses this flag to apply FIA-specific query
+        # boundary and sequence length padding during FULL graph execution.
+        self.use_fia = False
         # FusedMoE can be constructed by the parent initializer and reads this
         # capacity while setting up MC2 communication.
         set_potential_max_tokens(vllm_config)
@@ -251,15 +259,40 @@ class NPUModelRunner(GPUModelRunner):
             cache_dtype=self.cache_config.cache_dtype,
         )
 
-    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+    def initialize_kv_cache(
+        self,
+        kv_cache_config: KVCacheConfig,
+        kv_cache_allocation_context: AbstractContextManager | None = None,
+    ) -> None:
+        # TODO: Remove this vLLM 0.28 workaround once support for 0.28 is dropped.
+        # vLLM 0.29 already fixes wrapped Mamba block-table sizing upstream.
+        if vllm_version_is("0.28.0"):
+            kv_cache_config = unwrap_mamba_kv_cache_groups(kv_cache_config)
         with graph_manager_wrapper(self):
-            super().initialize_kv_cache(kv_cache_config)
+            # vLLM 0.28 GPUModelRunner.initialize_kv_cache does not accept
+            # kv_cache_allocation_context. Gate it the same way as other
+            # 0.28 super() kwargs in this runner.
+            super().initialize_kv_cache(
+                kv_cache_config,
+                **({} if vllm_version_is("0.28.0") else {"kv_cache_allocation_context": kv_cache_allocation_context}),
+            )
             if self.pcp_manager is not None:
                 assert isinstance(self.pcp_manager, AscendPCPManager)
                 self.pcp_manager.vllm_config = self.vllm_config
                 self.model_state.pcp_manager = self.pcp_manager
                 if self.speculator is not None:
                     self.speculator.pcp_manager = self.pcp_manager
+
+        # Only target-model layers determine whether FIA is in use. This flag
+        # is used for adaptive verification handling.
+        draft_layer_names: set[str] = getattr(self.speculator, "draft_attn_layer_names", set())
+        self.use_fia = any(
+            (group.backend is AscendAttentionBackend or group.backend is AscendMLABackend)
+            and any(layer_name not in draft_layer_names for layer_name in group.layer_names)
+            for groups in self.attn_groups
+            for group in groups
+        )
+
         if self.model_config.enable_return_routed_experts:
             self.init_routed_experts_capturer()
 
@@ -287,6 +320,13 @@ class NPUModelRunner(GPUModelRunner):
             profiling_config,
             scheduler_output,
         )
+
+        # Preemption stores must complete before the parent updates states and
+        # reuses or zeroes the preempted requests' physical KV cache blocks.
+        if has_kv_transfer_group():
+            kv_connector_metadata = scheduler_output.kv_connector_metadata
+            assert kv_connector_metadata is not None
+            get_kv_transfer_group().handle_preemptions(kv_connector_metadata)
 
         self.model_state.kvpp_is_dummy_run = dummy_run or is_profile
         output = super().execute_model(
@@ -393,7 +433,15 @@ class NPUModelRunner(GPUModelRunner):
             np.cumsum(num_logits, out=cu_num_logits_np[1:])
             cu_num_logits = async_copy_to_gpu(cu_num_logits_np, device=self.device)
 
+        adaptive_verification_manager = self.adaptive_verification
+        adaptive_verification_active = (
+            adaptive_verification_manager is not None and num_draft_tokens_per_req is not None
+        )
         num_scheduled_tokens_upper_bound = num_scheduled_tokens_np
+        if adaptive_verification_active:
+            num_scheduled_tokens_np, cu_num_logits_np = adaptive_verification_manager.compact_batch(
+                num_draft_tokens_per_req, num_scheduled_tokens_np, cu_num_logits_np
+            )
         # Get query_start_loc.
         # NOTE: For FULL mode we change +1 to +2 to reserve extra space for padding.
         # See _pad_query_start_loc_for_fia.
@@ -405,7 +453,7 @@ class NPUModelRunner(GPUModelRunner):
         # Some attention backends like FA3 require query_start_loc to be non-decreasing.
         query_start_loc_np[num_reqs + 1 :] = num_tokens
 
-        if batch_desc.cg_mode == CUDAGraphMode.FULL:
+        if batch_desc.cg_mode == CUDAGraphMode.FULL and not adaptive_verification_manager:
             # This is only required for vllm-ascend.
             query_start_loc_np, num_reqs_padded = self._pad_query_start_loc_for_fia(
                 num_tokens_after_padding,
@@ -418,6 +466,29 @@ class NPUModelRunner(GPUModelRunner):
 
         query_start_loc = self.input_buffers.query_start_loc
         async_copy_to_gpu(query_start_loc_np, out=query_start_loc)
+
+        if adaptive_verification_active:
+            cu_num_logits, query_start_loc, total_num_draft_tokens = adaptive_verification_manager.reallocate_drafts(
+                req_ids, idx_mapping
+            )
+            total_num_logits = num_reqs * num_bonus_tokens + total_num_draft_tokens
+
+            # Non-fia backends skip padding query boundary when using adaptive verification
+            if self.use_fia:
+                query_start_loc_np[: num_reqs + 1] = query_start_loc[: num_reqs + 1].cpu().numpy()
+                query_start_loc_np[num_reqs + 1 :] = int(query_start_loc_np[num_reqs])
+
+        if self.use_fia and adaptive_verification_manager:
+            if batch_desc.cg_mode == CUDAGraphMode.FULL:
+                query_start_loc_np, num_reqs_padded = self._pad_adaptive_query_start_loc_for_fia(
+                    num_tokens_after_padding,
+                    num_reqs_padded,
+                    num_reqs,
+                    query_start_loc_np,
+                )
+
+            query_start_loc = self.input_buffers.query_start_loc
+            async_copy_to_gpu(query_start_loc_np, out=query_start_loc)
 
         if draft_tokens:
             expanded_idx_mapping, expanded_local_pos = expand_idx_mapping(
@@ -449,12 +520,16 @@ class NPUModelRunner(GPUModelRunner):
             self.input_buffers.seq_lens,
         )
         seq_lens = self.input_buffers.seq_lens[:num_reqs_padded]
+        if adaptive_verification_active and self.use_fia:
+            self.input_buffers.seq_lens_np[:num_reqs] = seq_lens[:num_reqs].cpu().numpy()
 
         # Pad for full CUDA graph mode.
         self.input_buffers.seq_lens_np[num_reqs_padded:] = 0
 
         dcp_local_seq_lens = None
-        if self.use_dcp:
+        # Main computes DCP lengths in the inherited execute_model after PCP
+        # partitioning (vLLM #55212). Release still prepares them here.
+        if vllm_version_is("0.28.0") and self.use_dcp:
             prepare_dcp_local_seq_lens(
                 self.input_buffers.dcp_local_seq_lens,
                 self.input_buffers.seq_lens,
@@ -785,6 +860,29 @@ class NPUModelRunner(GPUModelRunner):
             query_start_loc_np[num_reqs_padded + 1] = num_tokens_padded
             num_reqs_padded = num_reqs_padded + 1
 
+        return query_start_loc_np, num_reqs_padded
+
+    def _pad_adaptive_query_start_loc_for_fia(
+        self,
+        num_tokens_padded: int,
+        num_reqs_padded: int,
+        num_reqs: int,
+        query_start_loc_np: np.ndarray,
+    ) -> tuple[np.ndarray, int]:
+        """Pad adaptive query boundary to the captured FULL graph request shape."""
+        last_loc = int(query_start_loc_np[num_reqs])
+        num_padding_tokens = num_tokens_padded - last_loc
+        num_padding_reqs = num_reqs_padded - num_reqs
+        assert num_padding_tokens >= 0 and num_padding_reqs >= 0
+
+        if num_padding_reqs == 0:
+            if num_padding_tokens > 0:
+                query_start_loc_np[num_reqs + 1] = num_tokens_padded
+                num_reqs_padded += 1
+            return query_start_loc_np, num_reqs_padded
+
+        cumulative_padding = np.arange(1, num_padding_reqs + 1, dtype=np.int32) * num_padding_tokens // num_padding_reqs
+        query_start_loc_np[num_reqs + 1 : num_reqs_padded + 1] = last_loc + cumulative_padding
         return query_start_loc_np, num_reqs_padded
 
 

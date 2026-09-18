@@ -11,6 +11,7 @@ from tests.ut.base import TestBase
 from vllm_ascend.attention.indexer import (
     AscendSFAIndexerBackend,
 )
+from vllm_ascend.attention.sfa_v1 import PreprocessType
 from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention, IndexerWrapper
 
 
@@ -121,6 +122,8 @@ class TestAscendSFAIndexerBackend(TestBase):
             num_decode_tokens=0,
             actual_seq_lengths_query=MagicMock(),
             actual_seq_lengths_key=MagicMock(),
+            cos=MagicMock(name="cos"),
+            sin=MagicMock(name="sin"),
         )
 
     def test_forward_runs_full_pipeline(self):
@@ -147,8 +150,6 @@ class TestAscendSFAIndexerBackend(TestBase):
         hidden_states = torch.zeros(2, 32)
         q_c = torch.zeros(2, 16)
         k_hidden_states = torch.zeros(2, 32)
-        cos, sin = MagicMock(name="cos"), MagicMock(name="sin")
-
         with (
             patch("vllm_ascend.attention.indexer.HAS_TRITON", True),
             patch(
@@ -160,12 +161,16 @@ class TestAscendSFAIndexerBackend(TestBase):
                 side_effect=_select,
             ),
         ):
-            result = indexer.forward(hidden_states, q_c, cos, sin, k_hidden_states, indexer_metadata)
+            result = indexer.forward(hidden_states, q_c, k_hidden_states, indexer_metadata)
 
         self.assertIs(result, expected_topk)
         # The write completes before the selection kernel reads the cache.
         self.assertEqual(calls, ["forward_k", "write_cache", "select"])
-        indexer.forward_k.assert_called_once_with(k_hidden_states, cos, sin)
+        indexer.forward_k.assert_called_once_with(
+            k_hidden_states,
+            indexer_metadata.cos,
+            indexer_metadata.sin,
+        )
         indexer.write_cache.assert_called_once_with(
             k_li,
             None,
@@ -185,8 +190,6 @@ class TestAscendSFAIndexerBackend(TestBase):
             result = indexer.forward(
                 torch.zeros(2, 32),
                 None,
-                MagicMock(name="cos"),
-                MagicMock(name="sin"),
                 torch.zeros(2, 32),
                 indexer_metadata,
                 compute_topk=False,
@@ -327,8 +330,8 @@ class TestIndexerWrapper(TestBase):
         self.assertIs(wrapper.impl, mock_backend_cls.return_value)
         self.assertIs(wrapper.k_cache, wrapper.impl.k_cache)
 
-        wrapper("hidden", "q_c", "cos", "sin", "k_hidden", "meta", False)
-        wrapper.impl.assert_called_once_with("hidden", "q_c", "cos", "sin", "k_hidden", "meta", False)
+        wrapper("hidden", "q_c", "k_hidden", "meta", False)
+        wrapper.impl.assert_called_once_with("hidden", "q_c", "k_hidden", "meta", False)
 
         wrapper.process_weights_after_loading()
         wrapper.impl.process_weights_after_loading.assert_called_once_with()
@@ -396,6 +399,50 @@ class TestAscendMultiHeadLatentAttention(TestBase):
 
             self.assertEqual(attn.tp_size, 2)
             self.assertIsNotNone(attn.mla_attn)
+
+    @patch("vllm_ascend.ops.mla.IndexerWrapper")
+    @patch("vllm_ascend.ops.mla.get_current_vllm_config")
+    @patch("vllm_ascend.ops.mla.get_tensor_model_parallel_world_size")
+    def test_marks_layers_only_when_fused_preprocess_type_resolved(
+        self, mock_tp_size, mock_get_vllm_config, mock_indexer_cls
+    ):
+        for resolved_type, should_mark in ((PreprocessType.MLAPO, True), (None, False)):
+            with self.subTest(resolved_type=resolved_type):
+                fused_qkv_a_proj = SimpleNamespace()
+                q_proj = SimpleNamespace()
+                mock_mla_attn = MagicMock()
+                mock_mla_attn.process_weights_after_loading = MagicMock()
+                mock_mla_attn.impl = MagicMock()
+                mock_mla_attn.impl._fused_preprocess_type.return_value = resolved_type
+                mock_mla_attn.impl.fused_qkv_a_proj = fused_qkv_a_proj
+                mock_mla_attn.impl.q_proj = q_proj
+
+                with patch("vllm_ascend.ops.mla.MLAAttention", return_value=mock_mla_attn):
+                    mock_tp_size.return_value = 2
+                    mock_vllm_config = MagicMock(spec=VllmConfig)
+                    mock_vllm_config.model_config.hf_text_config = MagicMock(
+                        num_hidden_layers=32, first_k_dense_replace=True
+                    )
+                    mock_get_vllm_config.return_value = mock_vllm_config
+                    mock_vllm_config.compilation_config = CompilationConfig()
+
+                    AscendMultiHeadLatentAttention(
+                        hidden_size=self.hidden_size,
+                        num_heads=self.num_heads,
+                        scale=self.scale,
+                        qk_nope_head_dim=self.qk_nope_head_dim,
+                        qk_rope_head_dim=self.qk_rope_head_dim,
+                        v_head_dim=self.v_head_dim,
+                        q_lora_rank=self.q_lora_rank,
+                        kv_lora_rank=self.kv_lora_rank,
+                        mla_modules=self.mock_mla_modules,
+                        cache_config=self.mock_cache_config,
+                        quant_config=self.mock_quant_config,
+                        prefix=self.prefix,
+                    )
+
+                self.assertEqual(hasattr(fused_qkv_a_proj, "_fused_preprocess_managed"), should_mark)
+                self.assertEqual(hasattr(q_proj, "_fused_preprocess_managed"), should_mark)
 
     @patch("vllm_ascend.ops.mla.IndexerWrapper")
     @patch("vllm_ascend.ops.mla.torch.ops.vllm.mla_forward")

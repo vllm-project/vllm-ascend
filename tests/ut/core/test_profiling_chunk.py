@@ -22,9 +22,11 @@ from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.core.sched.interface import PauseState
+from vllm.v1.core.sched.request_queue import SchedulingPolicy
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.request import Request
+from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
 from tests.ut.base import TestBase
@@ -524,3 +526,184 @@ class TestProfilingChunkScheduler(TestBase):
         scheduler.update_from_output(output, model_output)
 
         self.assertEqual(len(scheduler.running), 3)
+
+    def _mark_ready(self, scheduler, predicted_chunk=64, need_timing=False):
+        scheduler.profiling_chunk_config.need_timing = need_timing
+        scheduler.profiling_chunk_manager._profiling_done = True
+        scheduler.profiling_chunk_manager.predictor.is_ready = True
+        scheduler.profiling_chunk_manager.predictor.target_latency = 10.0
+        scheduler.profiling_chunk_manager.predict_chunk_size = MagicMock(return_value=predicted_chunk)
+        scheduler.profiling_chunk_manager.predict_time = MagicMock(return_value=0.01)
+        return scheduler
+
+    def test_extract_latency_and_build_rpc_kwargs(self):
+        self.assertEqual(ProfilingChunkScheduler._extract_latency(2), 2.0)
+        self.assertIsNone(ProfilingChunkScheduler._extract_latency([]))
+        self.assertIsNone(ProfilingChunkScheduler._extract_latency("bad"))
+        self.assertEqual(ProfilingChunkScheduler._build_rpc_kwargs(object()), {})
+
+        class NoRank:
+            def collective_rpc(self, method, args=()):
+                pass
+
+        self.assertEqual(ProfilingChunkScheduler._build_rpc_kwargs(NoRank()), {})
+
+        class WithRank:
+            vllm_config = None
+
+            def collective_rpc(self, method, args=(), unique_reply_rank=None):
+                pass
+
+        self.assertEqual(ProfilingChunkScheduler._build_rpc_kwargs(WithRank()), {})
+        exe = WithRank()
+        exe.vllm_config = MagicMock()
+        exe.vllm_config.parallel_config.world_size = 8
+        exe.vllm_config.parallel_config.tensor_parallel_size = 2
+        exe.vllm_config.parallel_config.prefill_context_parallel_size = 1
+        self.assertEqual(ProfilingChunkScheduler._build_rpc_kwargs(exe)["unique_reply_rank"], 6)
+
+    def test_run_profiling_chunk_init_error_paths(self):
+        scheduler = self.create_scheduler()
+        scheduler.profiling_chunk_manager.base_chunk_size = 1
+        n = {"i": 0}
+
+        def rpc(*_a, **_k):
+            n["i"] += 1
+            if n["i"] % 2 == 0:
+                raise RuntimeError("fail")
+            return None
+
+        mock_executor = MagicMock()
+        mock_executor.collective_rpc.side_effect = rpc
+        scheduler.run_profiling_chunk_init(mock_executor)
+        self.assertFalse(scheduler.profiling_chunk_manager.is_ready)
+
+        scheduler2 = self.create_scheduler()
+        mock_executor2 = MagicMock()
+        mock_executor2.collective_rpc.return_value = [10.0]
+        with patch.object(scheduler2.profiling_chunk_manager.predictor, "fit", return_value=False):
+            scheduler2.run_profiling_chunk_init(mock_executor2)
+        self.assertFalse(scheduler2.profiling_chunk_manager.is_ready)
+
+    def test_schedule_pause_dynamic_chunk_spec_and_mamba(self):
+        scheduler = self.create_scheduler()
+        scheduler._pause_state = PauseState.PAUSED_ALL
+        paused = scheduler.schedule()
+        self.assertEqual(paused.total_num_scheduled_tokens, 0)
+        scheduler._pause_state = PauseState.UNPAUSED
+
+        self._mark_ready(scheduler)
+        scheduler.use_v2_model_runner = True
+        scheduler.scheduler_config.long_prefill_token_threshold = 32
+        scheduler.need_mamba_block_aligned_split = True
+        mamba_calls = {"n": 0}
+
+        def split(req, num, *_a, **_k):
+            mamba_calls["n"] += 1
+            return 0 if mamba_calls["n"] > 2 else num
+
+        scheduler._mamba_block_aligned_split = split
+        reqs = create_requests(num_requests=1, num_tokens=200, max_tokens=16)
+        scheduler.add_request(reqs[0])
+        out1 = scheduler.schedule()
+        self.assertGreater(out1.total_num_scheduled_tokens, 0)
+
+        reqs[0].spec_token_ids = [1, 2, 3, 4, 5, 6]
+        reqs[0].num_computed_tokens = reqs[0].num_tokens
+        out2 = scheduler.schedule()
+        self.assertGreaterEqual(out2.total_num_scheduled_tokens, 0)
+        reqs[0].num_computed_tokens = 10
+        scheduler.schedule()
+
+        reqs[0].num_output_placeholders = 1
+        reqs[0].num_computed_tokens = 1000
+        scheduler.schedule()
+
+        self._mark_ready(scheduler, predicted_chunk=None, need_timing=True)
+        reqs[0].num_output_placeholders = 0
+        reqs[0].num_computed_tokens = 10
+        scheduler.schedule()
+        self._mark_ready(scheduler, predicted_chunk=None, need_timing=False)
+        scheduler.schedule()
+
+    def test_schedule_preempt_lora_connector_and_waiting_edges(self):
+        scheduler = self.create_scheduler()
+        self._mark_ready(scheduler)
+        reqs = create_requests(num_requests=2, num_tokens=80, max_tokens=16)
+        for req in reqs:
+            scheduler.add_request(req)
+        scheduler.schedule()
+
+        orig_alloc = scheduler.kv_cache_manager.allocate_slots
+        n = {"c": 0}
+
+        def alloc(*a, **k):
+            n["c"] += 1
+            return orig_alloc(*a, **k) if n["c"] == 1 else None
+
+        scheduler.kv_cache_manager.allocate_slots = alloc
+        scheduler.policy = SchedulingPolicy.PRIORITY
+        reqs[0].priority = 10
+        scheduler.schedule()
+
+        scheduler2 = self.create_scheduler()
+        self._mark_ready(scheduler2)
+        reqs2 = create_requests(num_requests=2, num_tokens=80, max_tokens=16)
+        for req in reqs2:
+            scheduler2.add_request(req)
+        scheduler2.schedule()
+        scheduler2.kv_cache_manager.allocate_slots = MagicMock(return_value=None)
+        scheduler2.schedule()
+
+        scheduler3 = self.create_scheduler()
+        self._mark_ready(scheduler3)
+        scheduler3.lora_config = MagicMock(max_loras=1)
+        scheduler3.connector = MagicMock()
+        scheduler3.ec_connector = MagicMock()
+        scheduler3._build_kv_connector_meta = MagicMock(return_value="meta")
+        scheduler3.connector.get_num_new_matched_tokens.side_effect = [(2, True), (2, False)]
+        scheduler3.connector_prefix_cache_stats = MagicMock()
+        scheduler3._try_schedule_encoder_inputs = MagicMock(return_value=([0], 8, 100, [1]))
+        scheduler3.encoder_cache_manager.allocate = MagicMock()
+        scheduler3.is_encoder_decoder = True
+        scheduler3._is_blocked_waiting_status = lambda status: status == RequestStatus.WAITING_FOR_REMOTE_KVS
+        scheduler3._try_promote_blocked_waiting_request = MagicMock(return_value=False)
+        scheduler3.max_num_running_reqs = 2
+
+        edge_reqs = create_requests(num_requests=4, num_tokens=40, max_tokens=16)
+        edge_reqs[2].lora_request = MagicMock(lora_int_id=1)
+        edge_reqs[2].get_num_encoder_embeds = MagicMock(return_value=1)
+        edge_reqs[3].lora_request = MagicMock(lora_int_id=2)
+        for req in edge_reqs:
+            scheduler3.add_request(req)
+        edge_reqs[0].status = RequestStatus.WAITING_FOR_REMOTE_KVS
+        with patch.object(Request, "has_encoder_inputs", new_callable=PropertyMock, return_value=True):
+            scheduler3.schedule()
+            scheduler3.schedule()
+
+        scheduler4 = self.create_scheduler()
+        self._mark_ready(scheduler4)
+        preempted = create_requests(num_requests=1, num_tokens=20)[0]
+        scheduler4.add_request(preempted)
+        preempted.status = RequestStatus.PREEMPTED
+        preempted.num_computed_tokens = 4
+        scheduler4.schedule()
+
+        scheduler5 = self.create_scheduler()
+        self._mark_ready(scheduler5)
+        scheduler5.max_num_running_reqs = 0
+        scheduler5.add_request(create_requests(num_requests=1, num_tokens=20)[0])
+        scheduler5.schedule()
+
+        scheduler6 = self.create_scheduler()
+        self._mark_ready(scheduler6)
+        scheduler6.kv_cache_manager.allocate_slots = MagicMock(return_value=None)
+        scheduler6.add_request(create_requests(num_requests=1, num_tokens=20)[0])
+        scheduler6.schedule()
+
+        scheduler7 = self.create_scheduler()
+        self._mark_ready(scheduler7)
+        scheduler7.scheduler_config.enable_chunked_prefill = False
+        scheduler7.max_num_scheduled_tokens = 4
+        scheduler7.add_request(create_requests(num_requests=1, num_tokens=20)[0])
+        scheduler7.schedule()

@@ -115,6 +115,8 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "vllm_quant_lightning_indexer_metadata"
         "quant_lightning_indexer_v2"
         "quant_lightning_indexer_v2_metadata"
+        "sparse_flash_mla"
+        "sparse_flash_mla_metadata"
         "sparse_attn_sharedkv"
         "sparse_attn_sharedkv_metadata"
         "hc_pre"
@@ -171,6 +173,8 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "vllm_quant_lightning_indexer_metadata"
         "quant_lightning_indexer_v2"
         "quant_lightning_indexer_v2_metadata"
+        "sparse_flash_mla"
+        "sparse_flash_mla_metadata"
         "sparse_attn_sharedkv"
         "sparse_attn_sharedkv_metadata"
         "hc_pre"
@@ -204,6 +208,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
     setup_catlass_dependency
 
     CUSTOM_OPS_ARRAY=(
+        "add_rms_norm_bias"
         "moe_gating_top_k_hash"
         "inplace_partial_rotary_mul"
         "kv_compress_epilog"
@@ -233,6 +238,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "k2q_csr"
         "sparse_attention_score"
         "mla_prolog_v3"
+        "msa_index_score"
     )
 
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")

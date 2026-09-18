@@ -661,7 +661,7 @@ class DeepseekV32XliteModel(DeepseekV3XliteModel):
         mla_caches: list[tuple[torch.Tensor, ...]] = []
 
         idx = 0
-        index_mask = self.xlite_config.index_full_mask or [True] * self.xlite_config.n_layers
+        index_mask = getattr(self.xlite_config, "index_full_mask", None) or [True] * self.xlite_config.n_layers
         dummy_indexer_cache = (_DUMMY_TENSOR,)
         for mask in index_mask:
             indexer_caches.append(kv_caches[idx] if mask else dummy_indexer_cache)

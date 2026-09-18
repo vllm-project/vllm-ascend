@@ -5,12 +5,11 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import torch
-import vllm.v1.worker.utils as upstream_utils
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
-from vllm_ascend.patch.worker.patch_copy_kv_cache import copy_kv_cache_blocks_inplace
-from vllm_ascend.worker.utils import AscendKVBlockZeroer
+import vllm_ascend.worker.utils as worker_utils
+from vllm_ascend.worker.utils import AscendKVBlockZeroer, copy_kv_cache_blocks_inplace
 
 MANAGER_BLOCK_SIZE = 384
 KERNEL_BLOCK_SIZE = 128
@@ -70,7 +69,7 @@ def _make_k3_component_cache(*, num_blocks: int = 2):
 
 def _install_cpu_h2d(monkeypatch):
     monkeypatch.setattr(
-        upstream_utils,
+        worker_utils,
         "async_tensor_h2d",
         lambda array, device: torch.from_numpy(array).to(device),
     )

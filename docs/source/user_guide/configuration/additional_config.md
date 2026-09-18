@@ -60,7 +60,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `multistream_overlap_shared_expert` | bool | `False` | Whether to enable multi-stream shared expert. This option only takes effect on MoE models with shared experts. |
 | `enable_cpu_binding`                | bool | `True`  | Enables Ascend-native CPU binding on ARM servers. Set to `False` to disable. See [CPU Binding](../feature_guide/cpu_binding.md). |
 | `pa_shape_list`                     | list | `[]`    | The custom shape list of page attention ops.                                                              |
-| `enable_kv_nz`                      | bool | `False` | Whether to enable KV cache NZ layout. This option only takes effects on models using MLA (e.g., DeepSeek).                                      |
+| `enable_kv_nz`                      | bool | `False` | Whether to enable KV cache NZ layout. This option only takes effect on models using MLA (e.g., DeepSeek).                                      |
 | `enable_sparse_sfa_c8`              | bool | `False` | Whether to enable the packed C8 KV cache for Sparse Flash Attention in DSA models (e.g., DeepSeek V3.2 and GLM5). This option is independent of `enable_sparse_li_c8`. SFA prefill context parallelism and Ascend 950 DCP are not supported. |
 | `enable_sparse_li_c8`               | bool | `False` | Whether to enable the C8 key and scale caches for LightningIndexer in DSA models. This option is independent of `enable_sparse_sfa_c8` and only applies to eligible indexer layers from the model quantization config. The StoreKVBlock cache-write optimization is enabled automatically on PD prefill nodes. SFA prefill context parallelism and Ascend 950 DCP are not supported. |
 | `mc2_comm_alg`                      | str  | `""`    | set dispatch/combine op's `comm_alg` param, only supports `""/"fullmesh"/"hierarchy"/"fullmesh_v2"`. `"hierarchy"` is only supported by A2/A3, and `"fullmesh_v2"` is only supported by A3 now. |
@@ -327,3 +327,16 @@ An example of additional configuration is as follows:
     "refresh": False
 }
 ```
+
+### KV pipeline parallelism (KVPP)
+
+Set `enable_kvpp: true` in `--additional-config` to distribute persistent MLA
+KV-cache layers across TP and (with Model Runner V2) PCP ranks within the same
+DP replica and PP stage. Group size is TP x PCP: TP4 + PCP2 uses eight ranks;
+TP1 + PCP2 also enables KVPP. DP replicas and PP stages use separate groups.
+
+PCP requires `VLLM_USE_V2_MODEL_RUNNER=1`. KVPP still requires eager execution and
+non-hybrid MLA, and does not support DCP or KV transfer connectors. PCP gathers
+prefill KV before cache writes; layer broadcasts restore prior-forward cache
+contents before attention. The broadcast decision uses the global scheduled
+batch, not PCP-local segment offsets.

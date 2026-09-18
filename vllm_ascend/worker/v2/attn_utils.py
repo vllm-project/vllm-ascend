@@ -52,6 +52,7 @@ from vllm_ascend.attention.utils import (
     get_sfa_qsfa_packed_head_dim,
 )
 from vllm_ascend.core.kv_cache_interface import (
+    AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
     AscendSlidingWindowMLASpec,
@@ -72,6 +73,34 @@ from vllm_ascend.worker.kvpp_cache import allocate_kvpp_cache
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
+
+
+def unwrap_mamba_kv_cache_groups(kv_cache_config: KVCacheConfig) -> KVCacheConfig:
+    """Expose homogeneous Mamba specs to the upstream MRV2 initializer.
+
+    vLLM 0.28 sizes block tables by checking MambaSpec directly. Leaving an identical
+    set of Mamba specs wrapped in UniformTypeKVCacheSpecs drops the extra
+    speculative state slots, so scheduler writes and GDN reads can overflow
+    the block table. Preserve the groups and allocation descriptors while
+    restoring the Mamba-specific sizing path.
+    """
+    # TODO: Remove this workaround once vLLM 0.28 support is dropped.
+    # vLLM 0.29 already handles wrapped Mamba block-table sizing correctly:
+    # https://github.com/vllm-project/vllm/pull/50493
+    # https://github.com/vllm-project/vllm/pull/50823
+    groups = []
+    for group in kv_cache_config.kv_cache_groups:
+        spec = group.kv_cache_spec
+        if isinstance(spec, UniformTypeKVCacheSpecs):
+            layer_specs = list(spec.kv_cache_specs.values())
+            if (
+                layer_specs
+                and isinstance(layer_specs[0], MambaSpec)
+                and all(layer_spec == layer_specs[0] for layer_spec in layer_specs)
+            ):
+                group = replace(group, kv_cache_spec=layer_specs[0])
+        groups.append(group)
+    return replace(kv_cache_config, kv_cache_groups=groups)
 
 
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
@@ -136,6 +165,12 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 cache_sparse_sfa_c8=cache_sparse_sfa_c8,
             )
         if isinstance(attn_module, DeepseekV32IndexerCache):
+            if not getattr(
+                getattr(attn_layers.get(layer_name.replace(".indexer.k_cache", ".attn")), "impl", None),
+                "runtime_has_indexer",
+                True,
+            ):
+                continue
             cache_sparse_li_c8 = get_ascend_config().is_sparse_li_c8_layer(layer_name)
             kv_cache_spec[layer_name] = AscendSFAIndexerCacheSpec(
                 block_size=vllm_config.cache_config.block_size,
@@ -288,6 +323,7 @@ def build_attn_metadata(
             attn_metadata_builder = attn_group.get_metadata_builder(0)
             is_dsa_builder = isinstance(attn_metadata_builder, AscendDSAMetadataBuilder)
             is_sfa_builder = isinstance(attn_metadata_builder, AscendSFAMetadataBuilder)
+            consumes_pcp_context = bool(getattr(attn_metadata_builder, "consumes_pcp_context", False))
             attn_metadata_extra_kwargs = (
                 model_specific_attn_metadata.get_extra_attn_kwargs(
                     attn_metadata_builder,
@@ -302,8 +338,9 @@ def build_attn_metadata(
                     num_actual_reqs=num_actual_reqs,
                     common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
                 )
-            # Only SFA and DSA metadata builders consume PCP context.
-            if pcp_context is not None and (is_sfa_builder or is_dsa_builder):
+            # Parallel attention and cache-only backends opt in to the PCP
+            # context needed to construct their own metadata.
+            if pcp_context is not None and (is_sfa_builder or is_dsa_builder or consumes_pcp_context):
                 attn_metadata_extra_kwargs.update(
                     pcp_context=pcp_context,
                     pcp_cache_group_idx=i,
@@ -621,7 +658,13 @@ def _allocate_kv_cache(
     vllm_config = get_current_vllm_config()
     if KVPPConfig.from_vllm_config(vllm_config).size > 1:
         caches = allocate_kvpp_cache(vllm_config, kv_cache_config, device)
-        return {name: parts[0] if len(parts) == 1 else parts for name, parts in caches.items()}
+        specs = _get_layer_kv_cache_specs(kv_cache_config)
+        # Indexer reshape expects a tuple even without a quantization scale.
+        # Single-component main MLA caches still use a raw Tensor.
+        return {
+            name: parts if isinstance(specs[name], AscendSFAIndexerCacheSpec) or len(parts) > 1 else parts[0]
+            for name, parts in caches.items()
+        }
     is_dsv4_model = _is_dsv4_model(vllm_config)
     # init kv cache tensors
     kv_cache_raw_tensors: dict[str, torch.Tensor | tuple[torch.Tensor, torch.Tensor]] = {}
@@ -698,6 +741,14 @@ def _allocate_kv_cache(
             continue
 
         if dsv4_backing is not None:
+            continue
+
+        if any(isinstance(layer_kv_cache_spec[name], AscendIndexerKPoolTailSpec) for name in shared_names):
+            # The compressed indexer and request-private tail share a physical
+            # small-page slot. Both need the same single backing allocation.
+            raw_tensor = _allocate_int8_cache_tensor(kv_cache_tensor.size, alignment, device)
+            for layer_name in shared_names:
+                kv_cache_raw_tensors[layer_name] = raw_tensor
             continue
 
         if is_dsv4_model:
@@ -1112,9 +1163,8 @@ def _reshape_kv_cache_v2(
                     kv_caches[layer_name] = typed_cache.view(kv_cache_shape)
                 continue
 
-            if is_dsv4_model and isinstance(
-                kv_cache_spec,
-                (AscendMLAAttentionSpec, AscendSlidingWindowMLASpec),
+            if isinstance(kv_cache_spec, AscendIndexerKPoolTailSpec) or (
+                is_dsv4_model and isinstance(kv_cache_spec, (AscendMLAAttentionSpec, AscendSlidingWindowMLASpec))
             ):
                 if not isinstance(raw_cache, torch.Tensor):
                     raise ValueError(f"DSA cache for {layer_name} must use one raw tensor.")
@@ -1297,11 +1347,12 @@ def build_attn_metadata_wrapper():
 
 @contextmanager
 def build_draft_attn_metadata_factory(positions, pad, is_prefilling):
-    """Wrap build_attn_metadata to forward rotary positions for the draft block.
+    """Wrap build_attn_metadata with Ascend draft-model context.
 
     The generic (Ascend) ``build_attn_metadata`` reads ``positions`` inside the
     DSA/MLA ``build_decode_metadata`` for cos/sin, but the flat upstream
-    speculator path does not forward them. Must run inside
+    speculator path does not forward them. Attention state is left to the
+    caller/backend instead of forcing the legacy speculative state. Must run inside
     ``build_attn_metadata_wrapper()``.
     """
     raw = _BUILD_ATTN_METADATA_MODULE.build_attn_metadata  # cache

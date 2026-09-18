@@ -201,9 +201,13 @@ def _dsa_layout_kv(vllm_config: VllmConfig) -> str:
 
 
 def _dsa_swa_only_cmp_ratio(compress_ratio: int, vllm_config: VllmConfig) -> int:
-    """BF16 SWA-only attention takes no compressed stream; otherwise keep main's value."""
+    """Return SparseFlashMLA cmp_ratio.
+
+    ops-transformer SparseFlashMLA only accepts 1/4/128 (default 1 when only
+    ori_kv is used). 0 is not a legal compression ratio.
+    """
     if is_a5_bf16_kv_enabled(vllm_config) and compress_ratio <= 1:
-        return 0
+        return 1
     return max(compress_ratio, 1)
 
 
@@ -606,12 +610,11 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.decode_threshold = 1
         self.spec_slot_mapping = None
         self.dspark_swa_indices_buffer: torch.Tensor | None = None
-        if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION) and not is_a5_bf16_kv_enabled(
-            vllm_config
-        ):
-            self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens,)  # type: ignore
-        else:
-            self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens, 2)  # type: ignore
+        kv_plan = get_dsa_attn_kv_plan(vllm_config)
+        max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        self.slot_mapping_shape = (
+            (max_num_batched_tokens, 2) if kv_plan.requires_block_offset_slots else (max_num_batched_tokens,)
+        )
         if self.speculative_config:
             spec_token_num = self.speculative_config.num_speculative_tokens
             self.spec_slot_mapping = [
@@ -695,8 +698,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.cu_seqlens_cmp_kv = torch.tensor([], device=self.device)
         self.seqused_q = torch.tensor([], device=self.device)
         self._zero_i32 = torch.tensor([0], device=self.device, dtype=torch.int32)
-        # Note(qcs): we use two dimension slot_mapping for kvcache with shape
-        # [block_nums, block_size, head_num, head_dim]
+        # A5 uses flat physical slots for both FP8 and BF16 KV. Other devices
+        # retain [block_idx, block_offset] mappings for paged cache writes.
         self.slot_mapping = torch.zeros(self.slot_mapping_shape, dtype=torch.int32, device=self.device)
         self.compressor_metadata_buffers: CompressorMetadataOutput | None = None
 
@@ -729,6 +732,13 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
     ) -> AttentionCGSupport:
         # Explicit override in case the underlying builder specialized this getter.
         # @override omitted only because of mypy limitation due to type variable.
+        speculative_config = vllm_config.speculative_config
+        if (
+            speculative_config is not None
+            and speculative_config.method == "dspark"
+            and getattr(speculative_config, "enable_adaptive_verification", False)
+        ):
+            return AttentionCGSupport.ALWAYS
         return AttentionCGSupport.UNIFORM_BATCH
 
     def reorder_batch(self, input_batch: "NPUInputBatch", scheduler_output: "SchedulerOutput") -> bool:
@@ -1037,6 +1047,16 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         seq_lens = self.seq_lens[:num_reqs]
         seq_lens_q = query_start_loc[1:] - query_start_loc[:-1]
         max_seqlen_q = torch.max(query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).item()
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.method == "dspark"
+            and getattr(self.speculative_config, "enable_adaptive_verification", False)
+            and self.num_prefills == 0
+        ):
+            # `query_start_loc_cpu` retains a layout with tokens evenly distributed across requests.
+            # Longer query will typically appear after reallocation, recorded in `query_start_loc`.
+            # So use the upper bound `num_speculative_tokens + 1` as `max_seqlen_q`.
+            max_seqlen_q = max(max_seqlen_q, self.speculative_config.num_speculative_tokens + 1)
         max_seqlen_kv = torch.max(seq_lens_cpu[:num_reqs]).item()
         has_prefill = self.num_prefills > 0
 
@@ -1526,8 +1546,6 @@ class AscendDSAImpl(AttentionImplBase[Any]):
 
         ascend_config = get_ascend_config()
         self.multistream_dsv4_dsa_overlap = ascend_config.multistream_dsv4_dsa_overlap
-        if self.multistream_dsv4_dsa_overlap and is_a5_bf16_kv_enabled(self.vllm_config):
-            self.multistream_dsv4_dsa_overlap = False
 
     def _get_layer_metadata(
         self,
@@ -1765,13 +1783,15 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         cos = req_metadata.cos[layer_name]
         sin = req_metadata.sin[layer_name]
 
+        negate_sin = get_current_hardware_profile().supports(HardwareCapability.INPLACE_PARTIAL_ROTARY_MUL_NEGATE_SIN)
+        sin_arg = sin[:actual_tokens] if negate_sin else -sin[:actual_tokens]
         torch.ops._C_ascend.inplace_partial_rotary_mul(
             o_proj_input[:actual_tokens].unsqueeze(1),
             cos[:actual_tokens],
-            sin[:actual_tokens],
+            sin_arg,
             rotary_mode="interleave",
             partial_slice=[self.nope_head_dim, self.head_dim],
-            negate_sin=True,
+            negate_sin=negate_sin,
         )
 
         # o

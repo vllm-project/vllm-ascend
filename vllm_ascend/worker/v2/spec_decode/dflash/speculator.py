@@ -155,42 +155,6 @@ class AscendDFlashSpeculator(DFlashSpeculator):
                 is_profile=is_profile,
             )
 
-    def build_fia_params(
-        self,
-        num_reqs_padded: int,
-        is_draft_model_prefill: bool,
-    ) -> list[dict[str, Any]]:
-        metadata = next(
-            metadata
-            for layer_name, metadata in self.model_state.attn_metadata.items()
-            if layer_name in self.draft_attn_layer_names
-        )
-        if is_draft_model_prefill:
-            return [
-                {
-                    "actual_seq_lengths": metadata.actual_seq_lengths_q,
-                    "actual_seq_lengths_kv": metadata.seq_lens_list,
-                    "block_table": metadata.block_tables,
-                }
-            ]
-        assert self.input_batch is not None
-        num_reqs = self.input_batch.num_reqs
-        query_start_loc = list(range(1, num_reqs_padded + 1))
-        fia_params: list[dict[str, Any]] = []
-        for step in range(1, self.num_speculative_steps):
-            seq_lens = [
-                min(int(seq_len) + step, self.max_model_len) for seq_len in self.input_batch.seq_lens_np[:num_reqs]
-            ]
-            seq_lens.extend([0] * (num_reqs_padded - num_reqs))
-            fia_params.append(
-                {
-                    "actual_seq_lengths": query_start_loc,
-                    "actual_seq_lengths_kv": seq_lens,
-                    "block_table": metadata.block_tables,
-                }
-            )
-        return fia_params
-
 
 # main2main compat: upstream ``_prepare_dflash_inputs_kernel`` added four
 # ``temperature``/``seeds`` parameters and corresponding stores (see
@@ -255,6 +219,7 @@ if vllm_version_is("0.28.0"):
 
         nrejected = tl.load(num_rejected_ptr + req_idx)
         valid_ctx_end = ctx_end - nrejected
+        num_valid_ctx = valid_ctx_end - ctx_start
 
         nsampled = tl.load(num_sampled_ptr + req_idx)
         if nsampled > 0:
@@ -269,11 +234,20 @@ if vllm_version_is("0.28.0"):
         # --- Context positions / slots ---
         for j in range(0, num_ctx):
             ctx_pos_idx = ctx_start + j
-            ctx_pos = tl.load(target_positions_ptr + ctx_pos_idx)
+            is_valid_ctx = j < num_valid_ctx
+            ctx_pos = tl.load(target_positions_ptr + ctx_pos_idx, mask=is_valid_ctx, other=0)
             ctx_block_num = ctx_pos // block_size
             ctx_block_num = tl.minimum(ctx_block_num, block_table_stride - 1)
-            ctx_block_id = tl.load(block_table_ptr + req_idx * block_table_stride + ctx_block_num).to(tl.int64)
-            ctx_slot = ctx_block_id * block_size + (ctx_pos % block_size)
+            ctx_block_id = tl.load(
+                block_table_ptr + req_idx * block_table_stride + ctx_block_num,
+                mask=is_valid_ctx,
+                other=0,
+            ).to(tl.int64)
+            ctx_slot = tl.where(
+                is_valid_ctx & (ctx_block_id != 0),
+                ctx_block_id * block_size + (ctx_pos % block_size),
+                PAD_SLOT_ID,
+            )
             tl.store(out_context_positions_ptr + ctx_pos_idx, ctx_pos)
             tl.store(out_context_slot_mapping_ptr + ctx_pos_idx, ctx_slot)
 
@@ -289,7 +263,7 @@ if vllm_version_is("0.28.0"):
             q_block_num = query_pos // block_size
             q_block_num = tl.minimum(q_block_num, block_table_stride - 1)
             q_block_id = tl.load(block_table_ptr + req_idx * block_table_stride + q_block_num).to(tl.int64)
-            q_slot = q_block_id * block_size + (query_pos % block_size)
+            q_slot = tl.where(q_block_id != 0, q_block_id * block_size + (query_pos % block_size), PAD_SLOT_ID)
 
             tl.store(out_input_ids_ptr + query_idx, input_id)
             clamped_query_pos = tl.minimum(query_pos, max_model_len - 1)
@@ -311,7 +285,7 @@ if vllm_version_is("0.28.0"):
         # seq_lens is the absolute sequence length the draft attention
         # reads up to (context + query), not just the count of accepted
         # tokens this step.
-        tl.store(out_seq_lens_ptr + req_idx, last_valid_pos + 1 + num_query_per_req)
+        tl.store(out_seq_lens_ptr + req_idx, tl.minimum(last_valid_pos + 1 + num_query_per_req, max_model_len))
         # Copy sampling state (added upstream in vllm-project/vllm#50000).
         tl.store(
             out_temperature_ptr + req_state_idx,
@@ -409,6 +383,7 @@ else:
 
         nrejected = tl.load(num_rejected_ptr + req_idx)
         valid_ctx_end = ctx_end - nrejected
+        num_valid_ctx = valid_ctx_end - ctx_start
 
         nsampled = tl.load(num_sampled_ptr + req_idx)
         if nsampled > 0:
@@ -423,11 +398,20 @@ else:
         # --- Context positions / slots ---
         for j in range(0, num_ctx):
             ctx_pos_idx = ctx_start + j
-            ctx_pos = tl.load(target_positions_ptr + ctx_pos_idx)
+            is_valid_ctx = j < num_valid_ctx
+            ctx_pos = tl.load(target_positions_ptr + ctx_pos_idx, mask=is_valid_ctx, other=0)
             ctx_block_num = ctx_pos // block_size
             ctx_block_num = tl.minimum(ctx_block_num, block_table_stride - 1)
-            ctx_block_id = tl.load(block_table_ptr + req_idx * block_table_stride + ctx_block_num).to(tl.int64)
-            ctx_slot = ctx_block_id * block_size + (ctx_pos % block_size)
+            ctx_block_id = tl.load(
+                block_table_ptr + req_idx * block_table_stride + ctx_block_num,
+                mask=is_valid_ctx,
+                other=0,
+            ).to(tl.int64)
+            ctx_slot = tl.where(
+                is_valid_ctx & (ctx_block_id != 0),
+                ctx_block_id * block_size + (ctx_pos % block_size),
+                PAD_SLOT_ID,
+            )
             tl.store(out_context_positions_ptr + ctx_pos_idx, ctx_pos)
             tl.store(out_context_slot_mapping_ptr + ctx_pos_idx, ctx_slot)
 
@@ -443,7 +427,7 @@ else:
             q_block_num = query_pos // block_size
             q_block_num = tl.minimum(q_block_num, block_table_stride - 1)
             q_block_id = tl.load(block_table_ptr + req_idx * block_table_stride + q_block_num).to(tl.int64)
-            q_slot = q_block_id * block_size + (query_pos % block_size)
+            q_slot = tl.where(q_block_id != 0, q_block_id * block_size + (query_pos % block_size), PAD_SLOT_ID)
 
             tl.store(out_input_ids_ptr + query_idx, input_id)
             clamped_query_pos = tl.minimum(query_pos, max_model_len - 1)
@@ -465,7 +449,7 @@ else:
         # seq_lens is the absolute sequence length the draft attention
         # reads up to (context + query), not just the count of accepted
         # tokens this step.
-        tl.store(out_seq_lens_ptr + req_idx, last_valid_pos + 1 + num_query_per_req)
+        tl.store(out_seq_lens_ptr + req_idx, tl.minimum(last_valid_pos + 1 + num_query_per_req, max_model_len))
         # Copy sampling state (added upstream in vllm-project/vllm#50000).
         tl.store(
             out_temperature_ptr + req_state_idx,

@@ -133,8 +133,6 @@ class KeyMetadata:
     model_name: str
     """ worker id when running under a distributed setting """
     head_or_tp_rank: int
-    """ Initialize the current prefill context model parallel rank """
-    pcp_rank: int
     """ Initialize the current decode context model parallel rank """
     dcp_rank: int
     """ Initialize the current pipeline parallel rank """
@@ -157,7 +155,6 @@ class PoolKey:
             (
                 self.key_metadata.model_name,
                 self.key_metadata.head_or_tp_rank,
-                self.key_metadata.pcp_rank,
                 self.key_metadata.dcp_rank,
                 self.key_metadata.pp_rank,
                 self.key_metadata.kv_cache_group_id,
@@ -170,7 +167,7 @@ class PoolKey:
     def to_string(self):
         return (
             f"{self.key_metadata.model_name}"
-            f"@pcp:{self.key_metadata.pcp_rank}@dcp:{self.key_metadata.dcp_rank}"
+            f"@dcp:{self.key_metadata.dcp_rank}"
             f"@head_or_tp_rank:{self.key_metadata.head_or_tp_rank}"
             f"@pp_rank:{self.key_metadata.pp_rank}"
             f"@group:{self.key_metadata.kv_cache_group_id}"
@@ -179,10 +176,10 @@ class PoolKey:
             f"@{self.chunk_hash}"
         )
 
-    def split_layers(self, num_layers: int) -> list[LayerPoolKey]:
+    def split_layers(self, num_layers: int, layer_offset: int = 0) -> list[LayerPoolKey]:
         """Split the key into multiple keys for each layer"""
         keys = []
-        for layer_id in range(num_layers):
+        for layer_id in range(layer_offset, layer_offset + num_layers):
             keys.append(
                 LayerPoolKey(
                     self.key_metadata,
@@ -204,7 +201,6 @@ class LayerPoolKey(PoolKey):
             (
                 self.key_metadata.model_name,
                 self.key_metadata.head_or_tp_rank,
-                self.key_metadata.pcp_rank,
                 self.key_metadata.dcp_rank,
                 self.key_metadata.kv_cache_group_id,
                 self.key_metadata.cache_role,
@@ -217,7 +213,7 @@ class LayerPoolKey(PoolKey):
     def to_string(self):
         return (
             f"{self.key_metadata.model_name}"
-            f"@pcp:{self.key_metadata.pcp_rank}@dcp:{self.key_metadata.dcp_rank}"
+            f"@dcp:{self.key_metadata.dcp_rank}"
             f"@head_or_tp_rank:{self.key_metadata.head_or_tp_rank}"
             f"@group:{self.key_metadata.kv_cache_group_id}"
             f"@cache_role:{self.key_metadata.cache_role}"
@@ -382,7 +378,7 @@ class ChunkedTokenDatabase:
             group_metadata = self.metadata[kv_cache_group_id]
             prefix = (
                 f"{group_metadata.model_name}"
-                f"@pcp:{group_metadata.pcp_rank}@dcp:{group_metadata.dcp_rank}"
+                f"@dcp:{group_metadata.dcp_rank}"
                 f"@head_or_tp_rank:{group_metadata.head_or_tp_rank}"
                 f"@pp_rank:{group_metadata.pp_rank}"
                 f"@group:{kv_cache_group_id}"
@@ -438,7 +434,6 @@ class ChunkedTokenDatabase:
             KeyMetadata(
                 model_name=group_metadata.model_name,
                 head_or_tp_rank=group_metadata.head_or_tp_rank,
-                pcp_rank=group_metadata.pcp_rank,
                 dcp_rank=group_metadata.dcp_rank,
                 pp_rank=group_metadata.pp_rank,
                 kv_cache_group_id=kv_cache_group_id,
