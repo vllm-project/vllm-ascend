@@ -385,32 +385,6 @@ std::tuple<at::Tensor, at::Tensor> npu_sparse_flash_mla_meta(
     return {output, lse};
 }
 
-at::Tensor npu_sparse_attention_score_meta(
-    const at::Tensor &query, const at::Tensor &key, const at::Tensor &value,
-    const at::Tensor &select_idx, const at::Tensor &block_table,
-    const c10::optional<at::Tensor> &select_num_idx,
-    const c10::optional<at::Tensor> &q_dequant_scale,
-    const c10::optional<at::Tensor> &k_dequant_scale,
-    const c10::optional<at::Tensor> &v_dequant_scale,
-    const c10::optional<at::Tensor> &actual_seq_lengths,
-    const c10::optional<at::Tensor> &actual_seq_lengths_kv,
-    c10::string_view q_input_layout, c10::string_view kv_input_layout,
-    int64_t num_key_value_heads, double scale_value, int64_t block_size,
-    int64_t top_k, int64_t inner_precise,
-    const c10::optional<at::ScalarType> &attention_out_dtype)
-{
-    TORCH_CHECK(std::string(q_input_layout) == "TND",
-                "npu_sparse_attention_score only supports query TND layout");
-    at::ScalarType out_dtype = query.scalar_type();
-    if (query.scalar_type() == at::kFloat8_e4m3fn) {
-        out_dtype = attention_out_dtype.value_or(at::kBFloat16);
-        TORCH_CHECK(out_dtype == at::kHalf || out_dtype == at::kBFloat16,
-                    "attention_out_dtype must be float16 or bfloat16 for float8_e4m3fn input.");
-    }
-    return at::empty_symint(query.sym_sizes(),
-                            query.options().dtype(out_dtype).device(c10::kMeta));
-}
-
 at::Tensor npu_msa_index_score_meta(
     const at::Tensor &query, const at::Tensor &,
     const at::Tensor &block_table, const at::Tensor &,
@@ -2197,7 +2171,6 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_sparse_flash_attention", &vllm_ascend::meta::npu_sparse_flash_attention_meta);
     ops.impl("npu_sparse_flash_mla_metadata", &vllm_ascend::meta::npu_sparse_flash_mla_metadata_meta);
     ops.impl("npu_sparse_flash_mla", &vllm_ascend::meta::npu_sparse_flash_mla_meta);
-    ops.impl("npu_sparse_attention_score", &vllm_ascend::meta::npu_sparse_attention_score_meta);
     ops.impl("npu_k2q_csr", &vllm_ascend::meta::npu_k2q_csr_meta);
     ops.impl("npu_sparse_attention_score_prefill",
              &vllm_ascend::meta::npu_sparse_attention_score_prefill_meta);

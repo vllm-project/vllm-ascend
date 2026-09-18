@@ -35,10 +35,7 @@ FILL_THRESHOLD = -1.0e30
 
 
 def _load_golden_module():
-    repo_root = Path(__file__).resolve().parents[4]
-    golden_path = (
-        repo_root / "csrc" / "attention" / "msa_index_score" / "tests" / "golden" / "msa_index_score_golden.py"
-    )
+    golden_path = Path(__file__).with_name("msa_index_score_golden.py")
     spec = spec_from_file_location("msa_index_score_golden", golden_path)
     assert spec is not None and spec.loader is not None
     module = module_from_spec(spec)
