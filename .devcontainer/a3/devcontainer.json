@@ -21,7 +21,7 @@
     "source=/etc/ascend_install.info,target=/etc/ascend_install.info,type=bind,consistency=cached",
     "source=${localEnv:HOME}/.cache,target=/root/.cache,type=bind,consistency=cached"
   ],
-  "postCreateCommand": "bash .devcontainer/npu/postCreateCommand.sh",
+  "postCreateCommand": "bash .devcontainer/a3/postCreateCommand.sh",
   "customizations": {
     "vscode": {
       "extensions": [

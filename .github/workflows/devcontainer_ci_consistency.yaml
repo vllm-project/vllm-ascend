@@ -80,7 +80,7 @@ jobs:
 
   npu:
     if: ${{ inputs.target == 'npu' || inputs.target == 'all' }}
-    name: a3 two-card device tests (devcontainer/npu, nightly-main-a3)
+    name: a3 two-card device tests (devcontainer/a3, nightly-main-a3)
     runs-on: ${{ inputs.npu_runner }}
     timeout-minutes: 240
     steps:
@@ -90,11 +90,11 @@ jobs:
       - name: Ensure host cache dir exists
         run: mkdir -p "${HOME}/.cache"
 
-      # 同上，up 阶段自动执行 .devcontainer/npu/devcontainer.json 的
+      # 同上，up 阶段自动执行 .devcontainer/a3/devcontainer.json 的
       # postCreateCommand（= 门禁 a3-2 with-device 的编译 + 测试脚本）。
       - name: Build & run npu devcontainer (postCreateCommand = a3 device tests)
         uses: devcontainers/ci@v0.3
         with:
-          configFile: .devcontainer/npu/devcontainer.json
+          configFile: .devcontainer/a3/devcontainer.json
           push: never
           runCmd: echo "devcontainer npu postCreateCommand (a3 two-card) completed"
