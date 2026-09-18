@@ -174,16 +174,12 @@ RUN echo "export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib" >> ~/.bashrc
 # ===== Conditional installation based on BUILD_TYPE =====
 
 # Install daily packages via shared script
-COPY .github/workflows/scripts/install_daily_deps.sh /tmp/
+COPY .github/workflows/scripts/install_daily_deps.sh .github/workflows/scripts/restore_public_sources.sh /tmp/
 RUN if [ "$BUILD_TYPE" = "daily" ]; then \
         bash /tmp/install_daily_deps.sh; \
     else \
         echo "Building release version without daily packages"; \
-    fi && rm -f /tmp/install_daily_deps.sh
-
-# Restore public package sources so externally-published images can install
-# packages; the internal mirrors are only needed during the build.
-COPY .github/workflows/scripts/restore_public_sources.sh /tmp/
-RUN bash /tmp/restore_public_sources.sh && rm -f /tmp/restore_public_sources.sh
+    fi && rm -f /tmp/install_daily_deps.sh && \
+    bash /tmp/restore_public_sources.sh && rm -f /tmp/restore_public_sources.sh
 
 CMD ["/bin/bash"]

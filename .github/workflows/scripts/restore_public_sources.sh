@@ -8,7 +8,7 @@ pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/si
 pip config unset global.trusted-host 2>/dev/null || true
 
 # cargo: drop the internal crates.io mirror / git-proxy config written during build.
-rm -f /root/.cargo/config.toml
+rm -f "$HOME/.cargo/config.toml"
 
 # git: drop any internal GitHub proxy insteadOf rule.
 for key in $(git config --global --name-only --get-regexp '^url\..*\.insteadof$' 2>/dev/null); do
