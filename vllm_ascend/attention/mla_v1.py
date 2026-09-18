@@ -1031,10 +1031,15 @@ class AscendMLAImpl(MLAAttentionImpl):
         )
 
     def _fused_preprocess_type(self) -> PreprocessType | None:
+        """Return the FP8 prolog that owns projection NZ conversion, if enabled."""
+        # Defer FP8 projection NZ conversion only on profiles using prolog v3.
+        # Other profiles retain their existing MLAPO weight-loading path.
+        if not self.support_fp8_attention:
+            return None
         if self.fused_qkv_a_proj is None or self.q_proj is None:
             return None
         if self.fa_quant_layer or (self.enable_mlapo and self._supports_mlapo_weights()):
-            return PreprocessType.PROLOG_V3 if self.support_fp8_attention else PreprocessType.MLAPO
+            return PreprocessType.PROLOG_V3
         return None
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):

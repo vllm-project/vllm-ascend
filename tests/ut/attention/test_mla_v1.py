@@ -24,7 +24,8 @@ from vllm_ascend.attention.mla_v1 import (
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, PreprocessType, mark_fused_preprocess_weights
 from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware_profile
+from vllm_ascend.quantization.methods import AscendW8A8LinearMethod
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ
 
@@ -142,7 +143,7 @@ def test_mla_fused_preprocess_checks_weight_support(quant_method, device_type, e
     impl = AscendMLAImpl.__new__(AscendMLAImpl)
     impl.enable_mlapo = True
     impl.fa_quant_layer = False
-    impl.support_fp8_attention = device_type == AscendDeviceType.A5
+    impl.support_fp8_attention = get_hardware_profile(device_type).supports(HardwareCapability.FP8_ATTENTION)
     impl.fused_qkv_a_proj = SimpleNamespace(quant_method=quant_method)
     impl.q_proj = SimpleNamespace()
     with patch(
@@ -151,6 +152,42 @@ def test_mla_fused_preprocess_checks_weight_support(quant_method, device_type, e
         assert impl._fused_preprocess_type() == expected_type
         impl.fused_qkv_a_proj = None
         assert impl._fused_preprocess_type() is None
+
+
+@pytest.mark.parametrize("device_type", list(AscendDeviceType))
+@pytest.mark.parametrize("enable_mlapo,fa_quant_layer", [(True, False), (False, True), (False, False)])
+def test_mla_nz_management_respects_hardware_profile(device_type, enable_mlapo, fa_quant_layer):
+    impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    profile = get_hardware_profile(device_type)
+    impl.support_fp8_attention = profile.supports(HardwareCapability.FP8_ATTENTION)
+    impl.enable_mlapo = enable_mlapo
+    impl.fa_quant_layer = fa_quant_layer
+    impl.fused_qkv_a_proj = SimpleNamespace(
+        quant_method=SimpleNamespace(quant_method=MagicMock(spec=AscendW8A8LinearMethod))
+    )
+    impl.q_proj = SimpleNamespace()
+    mark_fused_preprocess_weights(impl)
+    expected_managed = device_type == AscendDeviceType.A5 and (enable_mlapo or fa_quant_layer)
+    assert impl.fused_qkv_a_proj._fused_preprocess_managed == expected_managed
+    assert impl.q_proj._fused_preprocess_managed == expected_managed
+
+    if device_type not in (AscendDeviceType.A2, AscendDeviceType.A3):
+        return
+    # Isolating the NZ marker must not disable the existing W8A8/FA prolog.
+    impl.kv_lora_rank = 4
+    impl.num_heads = 1
+    impl.qk_nope_head_dim = 2
+    impl.v_head_dim = 2
+    impl.kv_b_proj = SimpleNamespace(weight=torch.randn(4, 4), quant_method=UnquantizedLinearMethod())
+    with (
+        patch("vllm_ascend.attention.mla_v1.get_current_hardware_profile", return_value=profile),
+        patch("torch_npu.npu_format_cast", side_effect=lambda weight, fmt: weight),
+        patch("vllm_ascend.attention.mla_v1.maybe_trans_nz", side_effect=lambda weight: weight),
+        patch.object(impl, "_process_weights_for_fused") as fused,
+    ):
+        impl.process_weights_after_loading(torch.bfloat16)
+    assert impl.enable_mlapo == enable_mlapo
+    assert fused.call_count == int(enable_mlapo or fa_quant_layer)
 
 
 class TestAscendMLABackend(TestBase):
