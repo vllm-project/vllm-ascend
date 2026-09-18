@@ -115,9 +115,9 @@ def hybrid_layout_id(kv_cache_config, tp_size: int = 1) -> str:
 
 
 def hybrid_block_key(
-    model: str, layout: str, group: int, family: str, block_size: int, block_hash: str, head: int
+    model: str, layout: str, group: int, block_size: int, block_hash: str, head: int
 ) -> str:
-    return f"{model}@mooncake_hybrid_v1:{layout}@group:{group}@family:{family}@block:{block_size}@{block_hash}@{head}"
+    return f"{model}@mooncake_hybrid_v1:{layout}@group:{group}@block:{block_size}@{block_hash}@{head}"
 
 
 def fence_drains_recv() -> bool:
@@ -209,7 +209,6 @@ def _prepare_group_sessions(worker: KVPoolWorker, requests: list[ReqMeta]) -> di
                     worker.model_name,
                     worker.block_key_hybrid_layout,
                     group,
-                    worker.kv_cache_group_families[group],
                     block_size,
                     block_hash_to_str(hashes[index]),
                     worker.head_or_tp_rank,

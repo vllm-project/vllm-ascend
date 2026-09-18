@@ -27,7 +27,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence im
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import mooncake_layerwise
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_layerwise import (
-    hybrid_block_key,
     hybrid_layout_id,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.session_tracker import (
@@ -298,7 +297,6 @@ class TestMooncakeHybrid(unittest.TestCase):
         scheduler.tp_size = 2
         scheduler.put_step = 1
         scheduler.grouped_block_size = [16, 32]
-        scheduler.kv_cache_group_families = ["c1", "c4"]
         scheduler.layerwise_max_transfer_blocks = 1
         scheduler.store_scheduler = MagicMock()
         scheduler.cache_coordinator = MagicMock()
@@ -314,7 +312,7 @@ class TestMooncakeHybrid(unittest.TestCase):
         self.assertEqual(scheduler._lookup_layerwise_with_coordinator(req, 32), 0)
         scheduler.store_scheduler.batch_get_key_info.assert_not_called()
         keys = scheduler.store_scheduler.batch_is_exist.call_args_list[0].args[0]
-        self.assertEqual(keys[0], hybrid_block_key("model", "layout", 0, "c1", 16, "6831", 0))
+        self.assertEqual(keys[0], "model@mooncake_hybrid_v1:layout@group:0@block:16@6831@0")
 
     def save_prefix(self, worker, last_chunk=True):
         request = ReqMeta(

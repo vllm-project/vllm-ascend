@@ -370,7 +370,6 @@ class KVPoolScheduler:
                     self.model_name,
                     self.block_key_hybrid_layout,
                     group_id,
-                    self.kv_cache_group_families[group_id],
                     self.grouped_block_size[group_id],
                     block_hash_hex,
                     head,

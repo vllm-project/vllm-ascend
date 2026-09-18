@@ -37,14 +37,15 @@ The single-group wire format is unchanged. Hybrid layouts use a separate
 namespace:
 
 ```text
-model@mooncake_hybrid_v1:<layout-digest>@group:<id>@family:<family>@block:<size>@<hash>@<head>
+model@mooncake_hybrid_v1:<layout-digest>@group:<id>@block:<size>@<hash>@<head>
 ```
 
-The digest includes TP size, ordered group membership, cache-spec types, and
-cache-spec fields. It prevents incompatible group layouts from reading the same
-objects. It is not a model-weight checksum or a tenant isolation mechanism:
-use isolated deployments for different weights with identical model names and
-cache specifications.
+The digest includes TP size, ordered group membership, and each group's page-size
+signature. Together with the group ID, it identifies the cache group without
+duplicating the scheduler's cache-family classification in the object key. It
+prevents incompatible group layouts from reading the same objects. It is not a
+model-weight checksum or a tenant isolation mechanism: use isolated deployments
+for different weights with identical model names and cache specifications.
 
 Each key stores one block for one group and storing head/rank. Its bytes contain
 only that group's registered cache entries, ordered by physical layer and cache
