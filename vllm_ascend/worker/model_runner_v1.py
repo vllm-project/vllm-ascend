@@ -154,6 +154,7 @@ from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.model_executor.offloader import create_offloader
 from vllm_ascend.models.qwen4_exp.common.qsa_cache import QSAMetadataBuilder
 from vllm_ascend.models.qwen4_exp.short_conv_attn import (
+    PleShortConvAttentionMetadata,
     PleShortConvAttentionMetadataBuilder,
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
@@ -2215,6 +2216,9 @@ class NPUModelRunner(GPUModelRunner):
                 num_tokens=num_tokens_padded,
                 num_reqs=num_reqs,
                 num_reqs_padded=num_reqs_padded,
+                use_compact_workspace=self._qwen4_exp_ple_can_use_compact_workspace(
+                    attn_metadata
+                ),
             )
 
             # update global cos, sin
@@ -2866,6 +2870,7 @@ class NPUModelRunner(GPUModelRunner):
         num_reqs: int,
         num_reqs_padded: int,
         is_dummy: bool = False,
+        use_compact_workspace: bool = False,
     ) -> None:
         """Backport the Qwen4Exp PLE inputs missing from vLLM 0.26.0."""
         text_config = self.model_config.hf_text_config
@@ -2873,6 +2878,7 @@ class NPUModelRunner(GPUModelRunner):
             return
 
         model_kwargs.setdefault("ple_input_ids", self.input_ids.gpu[:num_tokens])
+        model_kwargs["ple_use_compact_workspace"] = use_compact_workspace
         context_len = int(text_config.ngram_size) - 1
         if not 0 < num_reqs_padded <= self.max_num_reqs:
             raise ValueError(
@@ -2969,6 +2975,22 @@ class NPUModelRunner(GPUModelRunner):
         )
         model_kwargs["ngram_context"] = static_context
         model_kwargs["query_start_loc"] = static_query_start_loc
+
+    @staticmethod
+    def _qwen4_exp_ple_can_use_compact_workspace(
+        attn_metadata: Any,
+    ) -> bool:
+        """Use compact PLE packing only when every PLE request is decoding."""
+        if not isinstance(attn_metadata, dict):
+            return False
+        ple_metadata = [
+            metadata
+            for metadata in attn_metadata.values()
+            if isinstance(metadata, PleShortConvAttentionMetadata)
+        ]
+        return bool(ple_metadata) and all(
+            metadata.num_prefills == 0 for metadata in ple_metadata
+        )
 
     def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
         # Pad tokens to multiple of tensor_parallel_size when
@@ -3860,6 +3882,9 @@ class NPUModelRunner(GPUModelRunner):
                     num_reqs=num_reqs,
                     num_reqs_padded=num_reqs_padded,
                     is_dummy=True,
+                    use_compact_workspace=self._qwen4_exp_ple_can_use_compact_workspace(
+                        attn_metadata
+                    ),
                 )
                 outputs = self._model_forward(
                     num_tokens_padded,

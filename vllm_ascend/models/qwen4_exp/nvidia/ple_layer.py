@@ -218,6 +218,7 @@ class Qwen4ExpNGramEmbedding(PleOffloadLayer):
         ple_dense_layer_id: int,
         max_total_tokens: int,
         max_num_reqs: int,
+        max_decode_tokens: int,
         prefix: str,
         quant_config: QuantizationConfig | None = None,
         params_dtype: torch.dtype | None = None,
@@ -231,6 +232,11 @@ class Qwen4ExpNGramEmbedding(PleOffloadLayer):
             raise ValueError(f"ngram_size must be >= 2, got {self.ngram_size}")
         if self.heads_per_ngram <= 0:
             raise ValueError(f"heads_per_ngram must be > 0, got {self.heads_per_ngram}")
+        if max_decode_tokens <= 0:
+            raise ValueError(
+                "max_decode_tokens must be positive, got "
+                f"{max_decode_tokens}"
+            )
         if embedding_dim % self.ngram_heads:
             raise ValueError(
                 "ple_embed_dim must be divisible by total ngram heads: "
@@ -303,6 +309,21 @@ class Qwen4ExpNGramEmbedding(PleOffloadLayer):
             ),
             persistent=False,
         )
+        # Decode and speculative-decode only need a bounded number of tokens.
+        # Keep a separately contiguous workspace so graph replay does not run
+        # the n-gram shifts and hashes over max_num_batched_tokens. The width
+        # is the whole decode-token capacity rather than the per-request query
+        # length because FULL graph padding may place every padding token in
+        # one dummy request row.
+        self.register_buffer(
+            "decode_padded_buffer",
+            torch.full(
+                (max_num_reqs, max_decode_tokens),
+                self.eos_token_id,
+                dtype=torch.int64,
+            ),
+            persistent=False,
+        )
 
     @staticmethod
     def _shift_precompute(
@@ -346,6 +367,7 @@ class Qwen4ExpNGramEmbedding(PleOffloadLayer):
         query_start_loc: torch.Tensor,
         ngram_context: torch.Tensor,
         output_buffer: torch.Tensor | None = None,
+        use_compact_workspace: bool = False,
     ) -> torch.Tensor:
         del hidden_states
         input_ids = input_ids.reshape(-1).long()
@@ -377,12 +399,25 @@ class Qwen4ExpNGramEmbedding(PleOffloadLayer):
             # with an unpadded query_start_loc. Stale padding must not enter the
             # scatter: its clamped indices would overwrite the last real token.
             num_valid_tokens = min(int(query_start_loc[-1].item()), num_tokens)
+        elif use_compact_workspace:
+            max_seq_len = self.decode_padded_buffer.shape[1]
+            if num_tokens > max_seq_len:
+                raise ValueError(
+                    "PLE compact workspace cannot hold the decode batch: "
+                    f"tokens={num_tokens}, max_decode_tokens={max_seq_len}"
+                )
+            num_valid_tokens = num_tokens
         else:
             max_seq_len = self.padded_buffer.shape[1]
             num_valid_tokens = num_tokens
 
         positions = self.positions_buffer[:num_tokens]
-        packed = self.padded_buffer[:num_reqs, :max_seq_len]
+        pack_workspace = (
+            self.decode_padded_buffer
+            if use_compact_workspace and not is_offload_process()
+            else self.padded_buffer
+        )
+        packed = pack_workspace[:num_reqs, :max_seq_len]
         packed.fill_(self.eos_token_id)
         request_indices = torch.searchsorted(query_start_loc, positions, right=True) - 1
         request_indices.clamp_(max=num_reqs - 1)
@@ -560,6 +595,11 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         self.short_conv_dilation = int(config.ngram_size)
         self.conv_state_len = (self.conv_kernel_size - 1) * self.short_conv_dilation
         self.num_spec_tokens = vllm_config.num_speculative_tokens
+        max_decode_tokens = min(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            vllm_config.scheduler_config.max_num_seqs
+            * (self.num_spec_tokens + 1),
+        )
         self.activation = "silu"
         # The offload process builds the surrounding model on meta while
         # this subtree must own real CPU storage. GPU workers skip the
@@ -571,6 +611,7 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
                 self.ple_dense_layer_id,
                 vllm_config.scheduler_config.max_num_batched_tokens,
                 vllm_config.scheduler_config.max_num_seqs,
+                max_decode_tokens,
                 f"{prefix}.ple_embedding",
                 quant_config=quant_config,
                 params_dtype=model_config.dtype,
@@ -1281,6 +1322,7 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         input_ids: torch.Tensor,
         query_start_loc: torch.Tensor,
         ngram_context: torch.Tensor,
+        use_compact_workspace: bool = False,
     ) -> torch.Tensor:
         input_ids = input_ids.reshape(-1)
         if input_ids.shape[0] != hidden_states.shape[0]:
@@ -1294,6 +1336,7 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             input_ids,
             query_start_loc,
             ngram_context,
+            use_compact_workspace=use_compact_workspace,
         )
         embeddings = self._dequantize_embeddings(embeddings, hidden_states.dtype)
         key, _ = self.key_proj(embeddings)

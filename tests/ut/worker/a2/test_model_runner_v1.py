@@ -16,10 +16,13 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     UniformTypeKVCacheSpecs,
 )
-
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
+from vllm_ascend.models.qwen4_exp.short_conv_attn import (
+    PleShortConvAttentionMetadata,
+)
 from vllm_ascend.utils import AscendDeviceType
+
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
@@ -834,6 +837,7 @@ class TestQwen4ExpPleInputs(unittest.TestCase):
         dummy_context = dummy_kwargs["ngram_context"]
         stable_ptr = dummy_context.data_ptr()
         self.assertEqual(dummy_context.tolist(), [[999, 999]])
+        self.assertFalse(dummy_kwargs["ple_use_compact_workspace"])
 
         real_kwargs = {}
         runner._maybe_add_qwen4_exp_ple_inputs(
@@ -857,6 +861,30 @@ class TestQwen4ExpPleInputs(unittest.TestCase):
         copied_context = external_kwargs["ngram_context"]
         self.assertEqual(copied_context.data_ptr(), stable_ptr)
         self.assertEqual(copied_context.tolist(), [[33, 44]])
+
+    def test_compact_workspace_requires_decode_only_metadata(self):
+        decode_metadata = PleShortConvAttentionMetadata.__new__(
+            PleShortConvAttentionMetadata
+        )
+        decode_metadata.num_prefills = 0
+        prefill_metadata = PleShortConvAttentionMetadata.__new__(
+            PleShortConvAttentionMetadata
+        )
+        prefill_metadata.num_prefills = 1
+
+        self.assertTrue(
+            NPUModelRunner._qwen4_exp_ple_can_use_compact_workspace(
+                {"decoder.layers.0.ple": decode_metadata}
+            )
+        )
+        self.assertFalse(
+            NPUModelRunner._qwen4_exp_ple_can_use_compact_workspace(
+                {"decoder.layers.0.ple": prefill_metadata}
+            )
+        )
+        self.assertFalse(
+            NPUModelRunner._qwen4_exp_ple_can_use_compact_workspace(None)
+        )
 
 
 class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
