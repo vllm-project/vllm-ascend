@@ -79,7 +79,7 @@ on:
 
 jobs:
   generate-matrix:
-    runs-on: linux-amd64-cpu-4
+    runs-on: linux-amd64-cpu-2-hk
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
