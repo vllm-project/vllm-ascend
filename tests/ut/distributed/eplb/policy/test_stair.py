@@ -279,6 +279,7 @@ class TestStairLoadStatistics(unittest.TestCase):
 
         np.testing.assert_array_equal(first.rank_expert_ids, second.rank_expert_ids)
         np.testing.assert_array_equal(first.source_rank_ids, second.source_rank_ids)
+        np.testing.assert_array_equal(first.source_slot_ids, second.source_slot_ids)
         self.assertTrue(all(len(set(rank)) == len(rank) for rank in first.rank_expert_ids.tolist()))
         np.testing.assert_array_equal(StairEplbPolicy.placement_replica_counts(first.rank_expert_ids, 3), [2, 1, 1])
 
@@ -384,8 +385,8 @@ class TestStairLoadStatistics(unittest.TestCase):
         # Taking rank 1 for expert 0 would force expert 1 to cross nodes.
         np.testing.assert_array_equal(sources[0], [2, 1])
 
-    def test_lpt_placement_uses_topology_aware_final_sources(self):
-        current = np.array([[0, 2], [0, 1], [1, 3]])
+    def test_lpt_placement_aligns_slots_with_topology_aware_sources(self):
+        current = np.array([[2, 0], [1, 0], [3, 1]])
         placement = StairEplbPolicy.lpt_placement(
             np.zeros(4),
             np.zeros(4),
@@ -400,8 +401,9 @@ class TestStairLoadStatistics(unittest.TestCase):
         )
 
         self.assertIsNotNone(placement)
-        np.testing.assert_array_equal(placement.rank_expert_ids, [[0, 1], [0, 1], [2, 3]])
-        self.assertEqual(placement.source_rank_ids[0, 1], 2)
+        np.testing.assert_array_equal(placement.rank_expert_ids, [[1, 0], [1, 0], [3, 2]])
+        np.testing.assert_array_equal(placement.source_rank_ids, [[2, 0], [1, 1], [2, 0]])
+        np.testing.assert_array_equal(placement.source_slot_ids, [[1, 1], [0, 1], [0, 0]])
 
     def test_lpt_variance_scales_by_replica_count(self):
         variance, scale = StairEplbPolicy._updated_rank_variance(
