@@ -48,6 +48,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     get_group_block_size,
     get_group_cache_family,
     infer_cache_transfer_granularity,
+    infer_cacheable_group_ids,
     infer_group_block_sizes,
     infer_group_cache_families,
     infer_tp_mismatch_info,
@@ -123,20 +124,25 @@ class KVPoolScheduler:
         speculative_config = getattr(vllm_config, "speculative_config", None)
         use_eagle_fn = getattr(speculative_config, "use_eagle", None)
         self.use_eagle = use_eagle_fn() is True if callable(use_eagle_fn) else False
+        self.cacheable_group_ids = infer_cacheable_group_ids(kv_cache_groups)
         self.original_block_size = infer_group_block_sizes(vllm_config.cache_config.block_size, kv_cache_groups)
         self.grouped_block_size = [block_size * self.dcp_size for block_size in self.original_block_size]
         requested_hash_block_size = vllm_config.cache_config.prefix_match_unit
         if not isinstance(requested_hash_block_size, int):
             requested_hash_block_size = None
         self.hash_block_size = (
-            requested_hash_block_size if requested_hash_block_size is not None else min(self.original_block_size)
+            requested_hash_block_size
+            if requested_hash_block_size is not None
+            else min(self.original_block_size[i] for i in self.cacheable_group_ids)
         ) * self.dcp_size
-        for group_block_size in self.grouped_block_size:
-            assert group_block_size % self.hash_block_size == 0, "block_size must be divisible by hash_block_size"
+        for group_id in self.cacheable_group_ids:
+            assert self.grouped_block_size[group_id] % self.hash_block_size == 0, (
+                "block_size must be divisible by hash_block_size"
+            )
         self._block_size = self.grouped_block_size[0]
-        self.lcm_block_size = math.lcm(*self.grouped_block_size)
+        self.lcm_block_size = math.lcm(*(self.grouped_block_size[i] for i in self.cacheable_group_ids))
         self.cache_transfer_granularity = infer_cache_transfer_granularity(
-            self.grouped_block_size, self.lcm_block_size, self.kv_cache_group_ids
+            self.grouped_block_size, self.lcm_block_size, self.cacheable_group_ids
         )
         self.cache_coordinator = self._build_cache_coordinator()
         # request_id -> full_token_ids
@@ -687,6 +693,12 @@ class KVPoolScheduler:
                     hbm_hit_tokens=num_computed_tokens,
                 )
 
+        if len(self.cacheable_group_ids) != len(self.grouped_block_size):
+            # Private indexer tails are empty on a pool hit. Resume at a
+            # complete page/state boundary and recompute the final token.
+            num_external_hit_tokens = min(
+                num_external_hit_tokens, self._floor_to_cache_transfer_granularity(request.num_tokens - 1)
+            )
         if num_external_hit_tokens == 0:
             return 0, False
 
