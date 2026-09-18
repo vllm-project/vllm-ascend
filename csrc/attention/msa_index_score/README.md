@@ -182,10 +182,8 @@ with the documented output shape and receives:
 ### Invocation Example
 
 The following excerpt shows the two-stage invocation for a non-quantized BBND
-PageAttention input. See
-[test_aclnn_msa_index_score.cpp](./examples/test_aclnn_msa_index_score.cpp)
-for complete BBND, BNBD, TND, INT8, FP8, empty-sequence, strided-page, and wide
-block-table accuracy cases.
+PageAttention input. It assumes the input and output tensors have already
+been allocated with the shapes described above.
 
 ```cpp
 static char layoutKey[] = "BBND";
@@ -225,8 +223,8 @@ For BNBD, set `layoutKey="BNBD"` and use a
 `[block_num, N2, block_size, D]` key. For TND, set `layoutKey="TND"`, omit
 `blockTableOptional`, and provide `[B+1]` key-length prefix sums.
 
-Keep attribute storage alive through execution and graph capture. The
-complete example also handles synchronization and resource cleanup.
+Keep attribute storage alive through execution and graph capture. Synchronize
+the stream before reading the output or releasing the workspace and tensors.
 
 ## Implementation Notes
 
@@ -246,76 +244,6 @@ complete example also handles synchronization and resource cleanup.
   only the final chunk writes the aligned tail fill.
 
 ## Testing
-
-### Standalone ACLNN Build and Run
-
-Run these commands from the operator build tree (`csrc/` in this checkout),
-with the matching CANN build environment prepared. Use the generated `.run`
-package for your host architecture; the filenames below illustrate x86_64.
-These are standalone numerical checks, not model-level GPQA evaluation.
-
-For Atlas A2/A3:
-
-```bash
-bash build.sh --pkg --soc=ascend910b --ops=msa_index_score -j32
-bash ./build_out/cann-ops-transformer-custom_linux-x86_64.run \
-  --quiet --install-path=/tmp/msa_opp
-export ASCEND_CUSTOM_OPP_PATH=/tmp/msa_opp/vendors/custom_transformer
-bash build.sh --run_example msa_index_score eager cust \
-  --vendor_name=custom --soc=ascend910b
-```
-
-For 950PR&950DT Products:
-
-```bash
-bash build.sh --pkg --soc=ascend950 --ops=msa_index_score -j32
-bash ./build_out/cann-ops-transformer-custom_linux-x86_64.run \
-  --quiet --install-path=/tmp/msa_opp
-source /tmp/msa_opp/vendors/custom_transformer/bin/set_env.bash
-export ASCEND_CUSTOM_OPP_PATH=/tmp/msa_opp/vendors/custom_transformer
-bash build.sh --run_example msa_index_score eager cust \
-  --vendor_name=custom --soc=ascend950
-```
-
-The expected result is 50/50 cases on 950PR&950DT Products. A2/A3 skip the ten FP8
-cases and run 40 cases. See [Acceptance Criteria](#acceptance-criteria) for tolerances.
-
-### Standalone Test Matrix
-
-`start_loc` is a logical-block index, and `sparse_mode=3` applies
-right-down-causal masking.
-
-| Test Case | Scenario | Coverage |
-| --------- | -------- | -------- |
-| `L0-debug-trace` | Minimal dimensions | Main path and trace |
-| `L0-int8-dequant-trace` | INT8 key with scale | Fused dequantization |
-| `L0-prefill-aligned` | Aligned chunked prefill | Causal and local masks |
-| `L1-prefill-unaligned` | Variable-length batch | Boundary-block mask |
-| `L1-prefill-multi-mtile` | Row count greater than M-tile | M-tile partitioning |
-| `L1-decode-lq1` | Decode with `q_len=1` | Multiple sequence lengths |
-| `L1-decode-speculative` | Decode with `q_len>1` | Speculative decoding |
-| `L1-long-seq-multi-stile` | `kv_len=4096` | Multiple S-tiles |
-| `L1-bf16` / `L1-int8-dequant` | Data type | Non-quantized and quantized paths |
-| `L2-tiny-kv` | Minimal KV length | Tail padding |
-| `L1-bnbd` / `L1-bnbd-int8` | PageAttention BNBD | `[NP, N2, P, D]` layout |
-| `L1-tnd-unaligned` / `L1-tnd-int8` / `L0-tnd-tiny` | Packed TND | No block table and key-length prefix sums |
-| `L0-fp8-e4m3fn` / `L0-fp8-e5m2` / `L1-fp8-e4m3fn-prefill` | 950PR&950DT Products FP8 | Native E4M3FN/E5M2 Cube paths; HIFLOAT8 is kernel-only |
-| `L1-pad-q0` / `L1-pad-kv0` | Empty request in a mixed batch | Skip empty query or fill empty KV scores |
-| `L1-pad-q0-kv0` / `L1-tnd-pad-q0-kv0` / `L1-pad-mid-q0` | Empty request at an edge or in the middle | PageAttention and TND padding |
-| `L0-all-q0` / `L1-all-q0` | Entire batch has `q_len=0` | Host acceptance and skipped computation |
-| `L0-all-kv0` / `L0-all-q0-kv0` | Entire batch has empty KV | Fill scores and fully empty input |
-| `L0-tnd-all-q0` / `L0-tnd-all-kv0` / `L0-tnd-all-q0-kv0` | Empty packed TND batch | Empty query and key tensors |
-| `L0-stride-bbnd` / `L1-stride-bbnd` / `L1-stride-bnbd` | Page axis has a gap of two | Non-contiguous physical-page addressing |
-| `L1-stride-int8` | INT8 page axis has a gap of two | Quantized page copy with a stride |
-| `L0-wide-table-257` / `L1-wide-table-257-bf16` | Block-table width 257 | 950PR&950DT Products C2UB windowed flush |
-| `L0-fp8-wide-table-257` | Width 257 with FP8 | Aligned score width and fill positions |
-| `L0-decode-q4-kv4` / `L0-decode-q4-kv4-b2` | Short decode with four query heads | MIX launch sized from estimated M tasks |
-| `L0-decode-q4-kv4-table275` | Short decode with a wide block table | Aligned score tail and windowed flush |
-| `L0-decode-q4-kv275` | Long-KV decode with 275 visible pages | 950PR&950DT Products KV S-range splitting |
-| `L0-fp8-decode-*` | FP8 short and long-KV decode | E4M3FN/E5M2 compact, wide-table, and KV-split paths |
-
-The full matrix runs by default. The key layout is selected by `layout_key`
-(`layoutKeyOptional` in aclnn) and is not inferred from tensor rank.
 
 ### CPU Reference
 
@@ -361,9 +289,6 @@ weights and do not measure GPQA answer accuracy.
 
 - Masked and padded score positions must match the reference fill positions.
 - Blocks forced by `local_mask` must be at least `1e28` on both sides.
-- FLOAT16, BFLOAT16, and INT8 standalone checks use `atol=rtol=1e-3`;
-  FP8 uses `atol=rtol=2e-2`. The C++ example requires every ordinary score to
-  meet its tolerance and rejects mismatched fill or forced-block positions.
 - The NumPy reference's optional `compare` helper allows an error ratio no
   greater than `1e-3`, with an error threshold of
   `atol + rtol * max(abs(golden), 1)` for ordinary score values.
@@ -374,6 +299,5 @@ weights and do not measure GPQA answer accuracy.
 
 ## References
 
-- [Standalone ACLNN example](./examples/test_aclnn_msa_index_score.cpp)
 - [Upstream ops-transformer implementation](https://gitcode.com/cann/ops-transformer/tree/master/attention/msa_index_score)
 - [Upstream Python interface](https://gitcode.com/cann/ops-transformer/blob/master/attention/msa_index_score/docs/torchapi_msa_index_score.md)
