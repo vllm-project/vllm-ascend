@@ -83,7 +83,8 @@ def initialize_attention(monkeypatch, draft_backend, target_backend=AscendMLABac
     spec = init_speculator(config, torch.device("cpu"))
     assert type(spec) is AscendDSparkSpeculator
     assert spec.attn_architecture is None
-    spec.vllm_config = spec.attn_vllm_config = config
+    spec.vllm_config = config
+    monkeypatch.setattr(AscendDSparkSpeculator, "attn_vllm_config", property(lambda self: config))
     spec.draft_attn_layer_names = {"draft"}
     spec._context_slot_mappings = torch.zeros(1, dtype=torch.int64)
     target_groups = [[SimpleNamespace(backend=target_backend)]]
