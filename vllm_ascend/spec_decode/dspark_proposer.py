@@ -187,11 +187,6 @@ class AscendDSparkProposer(AscendDflashProposer):
                 builder = attn_group.get_metadata_builder()
                 if isinstance(builder, AscendDSAMetadataBuilder):
                     builder.enable_dspark_device_metadata(self.max_query_tokens)
-                else:
-                    from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder
-
-                    if isinstance(builder, AscendDSAV41MetadataBuilder):
-                        builder.enable_device_metadata()
 
         self.kv_cache_gid = self.draft_attn_groups[0].kv_cache_group_id
         self.kernel_block_size = self._per_group_kernel_block_sizes[self.kv_cache_gid]
@@ -401,7 +396,6 @@ class AscendDSparkProposer(AscendDflashProposer):
             batch_descriptor=batch_descriptor,
             aclgraph_runtime_mode=aclgraph_runtime_mode,
             is_draft_model=True,
-            model_instance=self.model,
             draft_attn_metadatas=[],
             eplb_heat_collection_status=(
                 self.runner.eplb_heat_collection_status if self.runner.dynamic_eplb else False
