@@ -2,7 +2,7 @@
 DeepSeek-V2-Lite (bf16) with explicit PIECEWISE cudagraph capture.
 
 Mirrors the T0-T0b-5R probe (stage design/stage4/_notes/t0_probe/RESULTS.md):
-V2-Lite x track, additional_config compile_backend=inductor,
+V2-Lite x track, compilation_config.backend=inductor,
 cudagraph_mode=PIECEWISE, gpu_memory_utilization=0.85, max_model_len=4096 —
 the probe-calibrated combo that generated token-identical output to eager
 (the npu_mla_* AscendC fused kernels ride the mla_forward splitting op into
@@ -61,8 +61,8 @@ _BASE = dict(
 # track default follows the -O presets (O2 -> FULL_AND_PIECEWISE); this test
 # pins the shape it was built to guard.
 _TRACK = dict(
-    additional_config={"ascend_compilation_config": {"compile_backend": "inductor"}},
-    compilation_config=CompilationConfig(cudagraph_mode=CUDAGraphMode.PIECEWISE),
+    # front door (config refactor M1b): compilation_config.backend selects the track
+    compilation_config=CompilationConfig(backend="inductor", cudagraph_mode=CUDAGraphMode.PIECEWISE),
 )
 
 

@@ -26,8 +26,8 @@ _BASE = dict(
 # -O presets (O2 -> FULL_AND_PIECEWISE); F&P x TP=2 is an unverified gap, so
 # this stage2 baseline pins the shape it was built to guard (ledger 13, debt 2).
 _TRACK = dict(
-    additional_config={"ascend_compilation_config": {"compile_backend": "inductor"}},
-    compilation_config=CompilationConfig(cudagraph_mode=CUDAGraphMode.PIECEWISE),
+    # front door (config refactor M1b): compilation_config.backend selects the track
+    compilation_config=CompilationConfig(backend="inductor", cudagraph_mode=CUDAGraphMode.PIECEWISE),
 )
 
 

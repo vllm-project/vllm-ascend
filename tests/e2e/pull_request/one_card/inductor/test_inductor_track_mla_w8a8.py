@@ -4,7 +4,7 @@ PIECEWISE cudagraph capture.
 
 Provenance: the V2-W8A8 probe (stage design/stage4/_notes/t0_probe/RESULTS.md,
 driver t_v2w8a8.py) — V2-Lite W8A8 (17G, 64 experts x 26 layers fully
-W8A8_DYNAMIC) x track with the M-D combo: compile_backend=inductor,
+W8A8_DYNAMIC) x track with the M-D combo: backend=inductor,
 cudagraph_mode=PIECEWISE explicit, gpu_memory_utilization=0.85,
 max_model_len=4096, max_num_seqs=8. All four probe criteria were green:
 ascend quantization auto-detected from quant_model_description.json, greedy
@@ -84,8 +84,8 @@ _BASE = dict(
 # refactor the track default follows the -O presets (O2 ->
 # FULL_AND_PIECEWISE); this test pins the shape it was built to guard.
 _TRACK = dict(
-    additional_config={"ascend_compilation_config": {"compile_backend": "inductor"}},
-    compilation_config=CompilationConfig(cudagraph_mode=CUDAGraphMode.PIECEWISE),
+    # front door (config refactor M1b): compilation_config.backend selects the track
+    compilation_config=CompilationConfig(backend="inductor", cudagraph_mode=CUDAGraphMode.PIECEWISE),
 )
 
 # V2-W8A8 probe artifact markers (merged output_code): observation basis

@@ -10,7 +10,7 @@ that probe, formalized, and doubles as the w4a8 quant-family track gate.
 Smoke scope (R15/D8 precedent — no eager parity leg: a second 151G TP4
 engine in the same test doubles a >30min load for little signal; degenerate
 near-tie behavior on debug-tier weights is already on record):
-  * the track engine boots with compile_backend="inductor" and
+  * the track engine boots with compilation_config.backend="inductor" and
     VLLM_USE_BREAKABLE_CUDAGRAPH=0;
   * final cudagraph_mode is the -O2 default journey (FULL_AND_PIECEWISE);
   * greedy generation is non-empty and coherent-looking (recorded, printed);
@@ -56,7 +56,8 @@ _BASE = dict(
 )
 
 _TRACK = dict(
-    additional_config={"ascend_compilation_config": {"compile_backend": "inductor"}},
+    # front door (config refactor M1b): compilation_config.backend selects the track
+    compilation_config={"backend": "inductor"},
 )
 
 _ROOT = Path(__file__).resolve().parents[6]

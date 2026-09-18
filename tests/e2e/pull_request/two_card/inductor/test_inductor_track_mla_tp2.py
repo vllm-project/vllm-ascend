@@ -56,8 +56,8 @@ _BASE = dict(
 # Same explicit PIECEWISE as the one-card gate: this test extends that
 # probe-verified shape to TP2 (minimal delta from the proven config).
 _TRACK = dict(
-    additional_config={"ascend_compilation_config": {"compile_backend": "inductor"}},
-    compilation_config=CompilationConfig(cudagraph_mode=CUDAGraphMode.PIECEWISE),
+    # front door (config refactor M1b): compilation_config.backend selects the track
+    compilation_config=CompilationConfig(backend="inductor", cudagraph_mode=CUDAGraphMode.PIECEWISE),
 )
 
 

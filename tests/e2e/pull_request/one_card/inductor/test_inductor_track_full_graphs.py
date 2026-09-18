@@ -60,15 +60,16 @@ def _run_track(cg_mode_name: str):
     runner_kwargs = {}
     if cg_mode_name == "DEFAULT":
         # Debt 2 (ledger 13): default journey — no explicit cudagraph_mode; the
-        # -O2 preset must fill FULL_AND_PIECEWISE (upstream semantics).
-        pass
+        # -O2 preset must fill FULL_AND_PIECEWISE (upstream semantics). The
+        # front door still selects the track.
+        runner_kwargs["compilation_config"] = CompilationConfig(backend="inductor")
     else:
         cg_mode = {
             "FULL_AND_PIECEWISE": CUDAGraphMode.FULL_AND_PIECEWISE,
             "FULL": CUDAGraphMode.FULL,
             "FULL_DECODE_ONLY": CUDAGraphMode.FULL_DECODE_ONLY,
         }[cg_mode_name]
-        runner_kwargs["compilation_config"] = CompilationConfig(cudagraph_mode=cg_mode)
+        runner_kwargs["compilation_config"] = CompilationConfig(backend="inductor", cudagraph_mode=cg_mode)
 
     counts = {"init": 0, "replay": 0}
     by_mode = {"init": {}, "replay": {}}
@@ -106,7 +107,6 @@ def _run_track(cg_mode_name: str):
             # 60.96 GiB = 33.5 GiB fits the 0.6B model + KV + graphs comfortably
             gpu_memory_utilization=0.55,
             max_num_seqs=16,
-            additional_config={"ascend_compilation_config": {"compile_backend": "inductor"}},
             **runner_kwargs,
         ) as runner:
             try:

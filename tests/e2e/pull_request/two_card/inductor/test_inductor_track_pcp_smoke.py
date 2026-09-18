@@ -74,8 +74,8 @@ _FULL_DECODE_GRAPH = {
 }
 
 _TRACK = dict(
-    compilation_config=dict(_FULL_DECODE_GRAPH),
-    additional_config={"ascend_compilation_config": {"compile_backend": "inductor"}},
+    # front door (config refactor M1b): compilation_config.backend selects the track
+    compilation_config={"backend": "inductor", **_FULL_DECODE_GRAPH},
 )
 
 _ROOT = Path(__file__).resolve().parents[6]
