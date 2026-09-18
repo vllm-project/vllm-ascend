@@ -25,6 +25,8 @@ transaction (init handshake, START -> broadcast -> FINISH), mirroring the
 upstream NCCL trainer engine.
 """
 
+import os
+
 import pytest
 import requests
 import torch
@@ -46,8 +48,14 @@ from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import (
 )
 
 INFERENCE_WORLD_SIZE = 1
-TRAINER_DEVICE_INDEX = INFERENCE_WORLD_SIZE
-INFERENCE_DEVICE_INDEX = 0
+# Card the inference server runs on, as an absolute device index inside the
+# container: the harness hands the server `ASCEND_RT_VISIBLE_DEVICES` explicitly,
+# so this is a physical chip. The trainer sits next to it. The default is the
+# first card pair CI uses; a shared host can point a lane at idle cards by
+# exporting `VLLM_RL_TEST_DEVICE_INDEX` (leaving `ASCEND_RT_VISIBLE_DEVICES`
+# unset, so the pytest process's logical indices equal the physical ones).
+INFERENCE_DEVICE_INDEX = int(os.environ.get("VLLM_RL_TEST_DEVICE_INDEX", "0"))
+TRAINER_DEVICE_INDEX = INFERENCE_DEVICE_INDEX + 1
 CONTROL_TIMEOUT = 60
 GPU_MEMORY_UTILIZATION = 0.75
 
@@ -73,7 +81,7 @@ def test_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: b
     source = FixedRandomWeightSource(case, torch.device("npu", TRAINER_DEVICE_INDEX))
     env_dict = {
         "VLLM_SERVER_DEV_MODE": "1",
-        "ASCEND_RT_VISIBLE_DEVICES": "0",
+        "ASCEND_RT_VISIBLE_DEVICES": str(INFERENCE_DEVICE_INDEX),
     }
 
     # Independent oracle first: a server that loads exactly this payload at

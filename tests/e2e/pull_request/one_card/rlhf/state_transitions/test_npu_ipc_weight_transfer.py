@@ -45,11 +45,17 @@ from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import (
     wait_for_free_device_memory,
 )
 
-INFERENCE_DEVICE_INDEX = 0
 CONTROL_TIMEOUT = 60
 # The trainer is co-located with the server on the same chip, so both models
 # have to fit; keep the budget low enough to leave room for the payload.
 GPU_MEMORY_UTILIZATION = 0.45
+# Card the inference server (and the co-located trainer) runs on, as an absolute
+# device index inside the container: the harness hands the server
+# `ASCEND_RT_VISIBLE_DEVICES` explicitly, so this is a physical chip. The default
+# is the card CI uses; a shared host can point a lane at an idle card by
+# exporting `VLLM_RL_TEST_DEVICE_INDEX` (leaving `ASCEND_RT_VISIBLE_DEVICES`
+# unset, so the pytest process's logical indices equal the physical ones).
+INFERENCE_DEVICE_INDEX = int(os.environ.get("VLLM_RL_TEST_DEVICE_INDEX", "0"))
 
 
 def _post(server: RemoteOpenAIServer, route: str, *, json=None, timeout=CONTROL_TIMEOUT):
