@@ -19,6 +19,7 @@
 
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -45,6 +46,7 @@ from vllm.v1.worker.utils import AttentionGroup
 from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
+from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
@@ -58,6 +60,7 @@ from vllm_ascend.core.kv_cache_interface import (
     get_storage_block_size,
 )
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.models.deepseek_v41.cache_config import is_deepseek_v41_cache
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import (
     calc_split_factor,
@@ -71,6 +74,26 @@ from vllm_ascend.worker.kvpp_cache import allocate_kvpp_cache
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
+
+
+# MRV2's upstream _dummy_run drops runner-specific kwargs such as
+# ``skip_gdn_state_update``, so the flag travels through this ContextVar
+# (mirroring ``override_mrv2_in_profile_run``) instead of the call chain.
+_SKIP_RING_STATE_UPDATE: ContextVar[bool] = ContextVar("_SKIP_RING_STATE_UPDATE", default=False)
+
+
+@contextmanager
+def skip_ring_state_update(enabled: bool):
+    """Scope dummy runs that must not touch V4.1 compressor ring state."""
+    token = _SKIP_RING_STATE_UPDATE.set(enabled)
+    try:
+        yield
+    finally:
+        _SKIP_RING_STATE_UPDATE.reset(token)
+
+
+def ring_state_update_skipped() -> bool:
+    return _SKIP_RING_STATE_UPDATE.get()
 
 
 def unwrap_mamba_kv_cache_groups(kv_cache_config: KVCacheConfig) -> KVCacheConfig:
@@ -249,8 +272,16 @@ def build_attn_metadata(
     model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     for_cudagraph_capture: bool = False,
     causal: bool | Mapping[int, bool] = True,
+    # V4.1 (Aurora) builders need the runtime graph mode to decide between
+    # graph-friendly and eager metadata paths, and a flag to skip ring-state
+    # writes during dummy runs that must not touch the compressor state.
+    # ``None`` resolves from the dummy-run scope ContextVar.
+    full_graph_mode: bool = False,
+    skip_ring_state_update: bool | None = None,
 ) -> dict[str, Any]:
     """Build attention metadata for Ascend NPUs."""
+    if skip_ring_state_update is None:
+        skip_ring_state_update = ring_state_update_skipped()
     # TODO(Ronald1995): optimize AscendCommonAttentionMetadata.
     # seq_lens_np is used for ascend npus, it maybe None in spec_decode case,
     # we fill it with max_seq_len in case `attn_metadata_builder.build` raise
@@ -279,12 +310,19 @@ def build_attn_metadata(
     attn_metadata: dict[str, Any] = {}
     # Share request-level DSA metadata across cache groups in one execution.
     common_ratio_to_sas_metadata: dict[Any, Any] = {}
+    # Share request-count-independent V4.1 batch metadata across cache groups
+    # in one execution (query_start_loc/seq_lens/positions-derived entries).
+    common_v41_batch_metadata: dict[str, Any] = {}
     kv_cache_groups = kv_cache_config.kv_cache_groups
     for i, kv_cache_spec in enumerate(kv_cache_groups):
         block_table = block_tables[i]
         slot_mapping = slot_mappings[i]
         # Hybrid drafters can configure causality per KV cache group.
         group_causal = causal if isinstance(causal, bool) else causal.get(i, True)
+        # V4.1 slot coordinates stay group-local: each KV cache group owns a
+        # fresh sharing dict so LongKV/Indexer mappings never alias another
+        # SWA group's mapping (aligned with model_runner_v1 semantics).
+        common_v41_metadata: dict[str, Any] = {}
 
         common_attn_metadata_extra_kwargs = (
             model_specific_attn_metadata.get_extra_common_attn_kwargs(i, num_reqs)
@@ -320,6 +358,7 @@ def build_attn_metadata(
         for attn_group in attn_groups[i]:
             attn_metadata_builder = attn_group.get_metadata_builder(0)
             is_dsa_builder = isinstance(attn_metadata_builder, AscendDSAMetadataBuilder)
+            is_v41_builder = isinstance(attn_metadata_builder, AscendDSAV41MetadataBuilder)
             is_sfa_builder = isinstance(attn_metadata_builder, AscendSFAMetadataBuilder)
             consumes_pcp_context = bool(getattr(attn_metadata_builder, "consumes_pcp_context", False))
             attn_metadata_extra_kwargs = (
@@ -335,6 +374,20 @@ def build_attn_metadata(
                 attn_metadata_extra_kwargs.update(
                     num_actual_reqs=num_actual_reqs,
                     common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
+                )
+            elif is_v41_builder:
+                # V4.1 cache coordinates are shared only inside one framework
+                # KV cache group: a source's LongKV and Indexer builders reuse
+                # the same [T, 2] mapping without aliasing any SWA group's
+                # mapping. Batch-level values are shared across all groups.
+                # The kwargs also flow into build_for_cudagraph_capture (it
+                # forwards them to build), so FULL-graph capture sees them.
+                attn_metadata_extra_kwargs.update(
+                    num_actual_reqs=num_actual_reqs,
+                    skip_ring_state_update=skip_ring_state_update,
+                    common_v41_metadata=common_v41_metadata,
+                    common_v41_batch_metadata=common_v41_batch_metadata,
+                    full_graph_mode=full_graph_mode,
                 )
             # Parallel attention and cache-only backends opt in to the PCP
             # context needed to construct their own metadata.
@@ -644,6 +697,18 @@ def _allocate_kv_cache(
     # prefill disaggregation need the addr of cache tensor be aligned with 2M
     alignment = 2 * 1024 * 1024
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
+    if is_deepseek_v41_cache(layer_kv_cache_spec):
+        # V4.1 uses layer-outermost hybrid allocation: one backing tensor per
+        # planned slot (each framework KVCacheTensor descriptor), shared by all
+        # placements (source KV/index, state, SWA aliases, draft) mapped onto
+        # that slot at distinct live block IDs.
+        for allocation in kv_cache_config.kv_cache_tensors:
+            backing = _allocate_int8_cache_tensor(allocation.size, alignment, device)
+            for name in allocation.layers:
+                kv_cache_raw_tensors[name] = backing
+        if set(kv_cache_raw_tensors) != set(layer_kv_cache_spec):
+            raise ValueError("V4.1 cache descriptors do not cover every resource")
+        return kv_cache_raw_tensors
     has_mamba = any(isinstance(spec, MambaSpec) for spec in layer_kv_cache_spec.values())
     has_attention = any(isinstance(spec, AttentionSpec) for spec in layer_kv_cache_spec.values())
     use_hybrid_layout = has_mamba and has_attention
@@ -1021,6 +1086,15 @@ def _reshape_kv_cache_v2(
     is_dsv4_model = _is_dsv4_model(vllm_config)
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
     kv_caches: dict[str, Any] = {}
+    # V4.1 slot views use the containing slot's physical page stride; the
+    # indexer scale plane starts right after the KV plane inside the page.
+    layer_strides: dict[str, int] = {}
+    if is_deepseek_v41_cache(layer_kv_cache_spec):
+        layer_strides = {
+            name: descriptor.block_stride
+            for descriptor in kv_cache_config.kv_cache_tensors
+            for name in descriptor.layers
+        }
 
     for group in attn_groups:
         if group.kv_cache_group_id >= len(kernel_block_sizes):
@@ -1039,6 +1113,38 @@ def _reshape_kv_cache_v2(
                 continue
 
             kv_cache_spec = layer_kv_cache_spec[layer_name]
+
+            if layer_name in layer_strides:
+                # Same view construction as model_runner_v1: every slot layer
+                # is addressed with the slot's block_stride; an indexer adds
+                # its scale plane after the KV plane of the same page.
+                block_stride = layer_strides[layer_name]
+                kv_cache_shape = group.backend.get_kv_cache_shape(
+                    kv_cache_config.num_blocks,
+                    get_storage_block_size(kv_cache_spec),
+                    kv_cache_spec.num_kv_heads,
+                    kv_cache_spec.head_size,
+                )
+                cache_shapes = [kv_cache_shape]
+                cache_dtypes = [kv_cache_spec.dtype]
+                if isinstance(kv_cache_spec, AscendMLAAttentionSpec) and kv_cache_spec.scale_dim:
+                    cache_shapes.append(
+                        group.backend.get_kv_cache_shape(
+                            kv_cache_config.num_blocks,
+                            get_storage_block_size(kv_cache_spec),
+                            kv_cache_spec.num_kv_heads,
+                            kv_cache_spec.scale_dim,
+                        )
+                    )
+                    cache_dtypes.append(kv_cache_spec.scale_dtype)
+                views = _adjust_dsv4_kv_layout(
+                    kv_cache_raw_tensors[layer_name],
+                    cache_shapes,
+                    cache_dtypes,
+                    block_stride,
+                )
+                kv_caches[layer_name] = tuple(views) if len(views) > 1 else views[0]
+                continue
 
             if isinstance(group_spec, AscendSFAIndexerCacheSpec):
                 assert kv_cache_config is not None
