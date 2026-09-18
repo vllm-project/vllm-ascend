@@ -3,7 +3,7 @@
 
 """CPU building blocks for the STAIR EPLB policy."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -955,6 +955,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
         last_committed_mean_ratios: np.ndarray,
         rank_node_ids: np.ndarray,
         config: StairConfig,
+        layer_ids: Sequence[int] | None = None,
     ) -> StairPlan:
         """Plan every eligible layer from a ``[steps, layers, experts]`` window.
 
@@ -962,7 +963,11 @@ class StairEplbPolicy(AbstractEplbPolicy):
         ``[layers]``, and node IDs are ``[ranks]``. A NaN committed ratio means
         that the layer has no commit anchor; its relative deterioration is 0
         for sorting. Eligible layers are planned by descending current mean
-        ratio, relative deterioration, then layer ID.
+        ratio, relative deterioration, then layer ID. ``layer_ids`` contains
+        stage-local indices on the input layer axis. The returned plan keeps its
+        full shape, but only those indices are authoritative; omitted layers are
+        identity/NaN placeholders that must not be committed before the shards
+        are gathered.
         """
         load_bins, sample_counts = cls.compress_load_window(logical_load_samples, config.load_window_bins)
         current = np.asarray(current_rank_expert_ids)
@@ -984,13 +989,20 @@ class StairEplbPolicy(AbstractEplbPolicy):
             or np.any(node_ids < 0)
         ):
             raise ValueError("rank_node_ids must contain one non-negative integer per rank")
+        selected_layers = range(current.shape[0]) if layer_ids is None else tuple(layer_ids)
+        if (
+            any(type(layer_id) is not int for layer_id in selected_layers)
+            or len(set(selected_layers)) != len(selected_layers)
+            or any(not 0 <= layer_id < current.shape[0] for layer_id in selected_layers)
+        ):
+            raise ValueError("layer_ids must contain unique valid stage-local layer IDs")
 
         rank_expert_ids = current.copy()
         source_rank_ids = np.broadcast_to(np.arange(current.shape[1])[None, :, None], current.shape).copy()
         source_slot_ids = np.broadcast_to(np.arange(current.shape[2])[None, None, :], current.shape).copy()
         predicted_mean_ratios = np.full(current.shape[0], np.nan, dtype=np.float64)
         layer_priority_keys = []
-        for layer_id in range(current.shape[0]):
+        for layer_id in selected_layers:
             current_imbalance = cls.gated_layer_imbalance(
                 load_bins[:, layer_id], sample_counts, current[layer_id], anchors[layer_id], config
             )
