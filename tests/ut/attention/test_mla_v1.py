@@ -63,6 +63,7 @@ def test_mxfp8_mla_fused_preprocess_owns_nz_conversion(
     config = SimpleNamespace(
         model_config=SimpleNamespace(runner_type="draft" if is_draft else "generate", dtype=torch.bfloat16),
         parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
+        cache_config=SimpleNamespace(cache_dtype="float16"),
         speculative_config=None,
     )
     with (
