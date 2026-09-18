@@ -7,7 +7,7 @@ import torch
 import torch_npu
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import get_pcp_group, get_tensor_model_parallel_world_size, get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
@@ -56,11 +56,20 @@ from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_ND,
     ACL_FORMAT_FRACTAL_NZ,
     dispose_layer,
+    enable_pcp_o_proj_weight_sharding,
     enable_sp,
     is_mtp_layer,
     is_rl_weight_update_enabled,
     maybe_trans_nz,
+    vllm_version_is,
 )
+from vllm_ascend.weight_switch import WeightLoadPartition, WeightSwitchConfig, WeightSwitchMixin
+from vllm_ascend.weight_switch.o_proj import OProjWeightSwitchMixin
+
+if vllm_version_is("0.28.0"):
+    from vllm.model_executor.layers.attention.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
+else:
+    from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -625,7 +634,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         return attn_metadata
 
 
-class AscendSFAImpl(MLAAttentionImpl):
+class AscendSFAImpl(OProjWeightSwitchMixin, MLAAttentionImpl):
     """
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
@@ -634,6 +643,9 @@ class AscendSFAImpl(MLAAttentionImpl):
     # A replicated MTP draft may inherit a PCP target's non-trivial interleave
     # value. With DCP disabled it does not change the draft KV-cache layout.
     supports_mtp_with_cp_non_trivial_interleave_size: bool = True
+    _manages_pcp_execution: bool = True
+    o_proj_full_pools: dict[Any, torch.Tensor] = {}
+    o_proj_weight_switch_pool_key = "sfa_pcp_o_proj"
 
     def __init__(
         self,
@@ -683,6 +695,7 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         ascend_config = get_ascend_config()
         self.vllm_config = get_current_vllm_config()
+        self._initialize_pcp_weight_switch()
         # SFA absorbs kv_b_proj (and, for KV consumers on PROLOG_V3, the fused
         # qkv/q projections) and disposes the source parameters. A disposed
         # parameter is no longer a valid destination for the in-place weight
@@ -757,6 +770,28 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.enable_mlapo = bool(get_ascend_config().enable_mlapo)
 
         self.enable_sp = enable_sp()
+
+    def _initialize_pcp_weight_switch(self) -> None:
+        pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
+        self.enable_sfa_pcp = self._manages_pcp_execution and pcp_size > 1
+        self.enable_pcp_o_proj_weight_sharding = self.enable_sfa_pcp and enable_pcp_o_proj_weight_sharding()
+        if not self.enable_sfa_pcp:
+            return
+
+        self._initialize_o_proj_weight_switch(WeightSwitchConfig.from_group(get_pcp_group(), shard_axis="input"))
+        if not self.enable_pcp_o_proj_weight_sharding:
+            return
+
+        self.o_proj_weight_load_partition = WeightLoadPartition.from_nested_groups(
+            get_tp_group(),
+            get_pcp_group(),
+        )
+        linear_method = self._get_o_proj_weight_switch_method()
+        self.o_proj_weight_load_state = linear_method.prepare_layer_for_parallel_weight_load(
+            self.o_proj,
+            self.o_proj_weight_switch_config,
+            self.o_proj_weight_load_partition,
+        )
 
     @property
     def skip_topk(self) -> bool:
@@ -848,6 +883,9 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         if self.has_indexer:
             self.indexer.process_weights_after_loading()
+
+        if self.enable_pcp_o_proj_weight_sharding:
+            self._enable_o_proj_full_weight_switch()
 
     @staticmethod
     def _get_layer_quant_method(layer: torch.nn.Module | None):
@@ -1089,6 +1127,18 @@ class AscendSFAImpl(MLAAttentionImpl):
         slots: torch.Tensor,
         attn_metadata: M,
     ):
+        if getattr(self, "enable_sfa_pcp", False):
+            num_decode_tokens = attn_metadata.num_decode_tokens or 0
+            (kv_no_split, cos, sin), slots = _gather_prefill_cache_inputs(
+                (kv_no_split, cos, sin),
+                slots,
+                num_decode_tokens,
+            )
+            assert slots.numel() == kv_no_split.shape[0], (
+                "SFA PCP cache write requires one slot per gathered token: "
+                f"tokens={kv_no_split.shape[0]}, slots={slots.numel()}."
+            )
+
         if self.qk_rope_head_dim == 0:
             assert self.kv_a_layernorm is not None
             values = self.kv_a_layernorm(kv_no_split.reshape(-1, self.kv_lora_rank))
@@ -1491,12 +1541,22 @@ class AscendSFAImpl(MLAAttentionImpl):
         num_input_tokens: int,
         hidden_states: torch.Tensor,
     ) -> SFAForwardContext:
-        return SFAForwardContext(
+        context = SFAForwardContext(
             actual_seq_lengths_query=attn_metadata.cum_query_lens,
             actual_seq_lengths_key=attn_metadata.seq_lens,
             kv_slot_mapping=self._get_sfa_kv_slot_mapping(attn_metadata),
             topk_num_tokens=num_input_tokens or hidden_states.shape[0],
         )
+        context.gather_full_o_proj = getattr(self, "_o_proj_weight_switch_enabled", False) and (
+            attn_metadata.attn_state
+            not in {
+                AscendAttentionState.DecodeOnly,
+                AscendAttentionState.SpecDecoding,
+            }
+        )
+        if context.gather_full_o_proj:
+            self._all_gather_o_proj_full_weight()
+        return context
 
     def _prepare_native_hidden_states(
         self,
@@ -1511,13 +1571,51 @@ class AscendSFAImpl(MLAAttentionImpl):
         output: torch.Tensor,
         gather_full_o_proj: bool,
     ) -> torch.Tensor:
-        output[...] = self.o_proj(attn_output)[0]
+        if not getattr(self, "_o_proj_weight_switch_enabled", False):
+            output[...] = self.o_proj(attn_output)[0]
+            return output
+        if gather_full_o_proj:
+            with self._use_full_o_proj_weights():
+                output[...] = self.o_proj(attn_output)[0]
+                return output
+
+        linear_method = self._get_o_proj_weight_switch_method()
+        weight_part = self._get_o_proj_weight_switch_state().gather_parts.get("weight")
+        if weight_part is None:
+            raise RuntimeError("SFA PCP O-proj requires a gather spec for the weight attribute.")
+        full_input_size = self.o_proj_weight_load_state.input_size_per_partition_before
+        if attn_output.shape[-1] != full_input_size:
+            raise RuntimeError(
+                "SFA PCP O-proj input does not match the reconstructed TP-local weight: "
+                f"input_shape={tuple(attn_output.shape)}, expected_last_dim={full_input_size}."
+            )
+        local_input = WeightSwitchMixin.split_tensor_for_parallel(
+            attn_output,
+            self.o_proj_weight_switch_config.world_size,
+            self.o_proj_weight_switch_config.rank,
+            dim=-1,
+        )
+        partial_output = linear_method.apply(self.o_proj, local_input, bias=None)
+        partial_output = self.o_proj_weight_switch_config.group.all_reduce(partial_output)
+
+        tp_group = get_tp_group()
+        if self.o_proj.reduce_results and tp_group.world_size > 1:
+            if not self.o_proj.skip_bias_add and tp_group.rank_in_group == 0 and self.o_proj.bias is not None:
+                partial_output = partial_output + self.o_proj.bias
+            partial_output = tp_group.all_reduce(partial_output)
+        elif not self.o_proj.skip_bias_add and self.o_proj.bias is not None:
+            partial_output = partial_output + self.o_proj.bias
+
+        output.copy_(partial_output)
         return output
 
     def _get_sfa_kv_slot_mapping(
         self,
         attn_metadata: M,
     ) -> torch.Tensor:
+        if getattr(self, "enable_sfa_pcp", False):
+            assert attn_metadata.pcp_slot_mapping is not None
+            return attn_metadata.pcp_slot_mapping
         return attn_metadata.slot_mapping
 
     def _compose_sfa_kv_cache(self, kv_cache) -> tuple[torch.Tensor, ...] | None:

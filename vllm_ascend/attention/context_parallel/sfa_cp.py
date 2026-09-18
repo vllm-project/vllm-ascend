@@ -39,153 +39,13 @@ from vllm_ascend.utils import (
     _round_up,
     enable_dsa_cp,
     enable_dsa_cp_full_o_proj,
-    enable_pcp_o_proj_weight_sharding,
     enable_sfa_dcp_force_tmajor_restore,
     enable_sfa_dcp_replicated_indexer,
     is_pd_decode_recompute_scheduler_enabled,
-    vllm_version_is,
 )
-from vllm_ascend.weight_switch import (
-    WeightLoadPartition,
-    WeightSwitchConfig,
-    WeightSwitchMixin,
-)
-from vllm_ascend.weight_switch.o_proj import OProjWeightSwitchMixin
-
-if vllm_version_is("0.28.0"):
-    from vllm.model_executor.layers.attention.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
-else:
-    from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
+from vllm_ascend.weight_switch import WeightSwitchConfig
 
 M = TypeVar("M", bound=AscendSFAMetadata)
-
-
-class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
-    """SFA PCP implementation with PCP-sharded O-proj weights.
-
-    Weight switching is performed only in the PCP domain. When TP is enabled,
-    the checkpoint's ordinary TP-local O-proj layout remains unchanged; PCP
-    slices that TP-local weight, and the original TP output reduction remains
-    part of the row-parallel layer semantics.
-    """
-
-    o_proj_full_pools: dict[Any, torch.Tensor] = {}
-    o_proj_weight_switch_pool_key = "sfa_pcp_o_proj"
-
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self.enable_pcp_o_proj_weight_sharding = enable_pcp_o_proj_weight_sharding()
-        self._initialize_o_proj_weight_switch(WeightSwitchConfig.from_group(get_pcp_group(), shard_axis="input"))
-        if not self.enable_pcp_o_proj_weight_sharding:
-            return
-        self.o_proj_weight_load_partition = WeightLoadPartition.from_nested_groups(
-            get_tp_group(),
-            get_pcp_group(),
-        )
-        linear_method = self._get_o_proj_weight_switch_method()
-        self.o_proj_weight_load_state = linear_method.prepare_layer_for_parallel_weight_load(
-            self.o_proj,
-            self.o_proj_weight_switch_config,
-            self.o_proj_weight_load_partition,
-        )
-
-    def process_weights_after_loading(self, act_dtype: torch.dtype):
-        result = super().process_weights_after_loading(act_dtype)
-        if self.enable_pcp_o_proj_weight_sharding:
-            self._enable_o_proj_full_weight_switch()
-        return result
-
-    def _get_parallel_forward_context(
-        self,
-        attn_metadata: M,
-        num_input_tokens: int,
-        hidden_states: torch.Tensor,
-    ) -> SFAForwardContext:
-        context = super()._get_parallel_forward_context(
-            attn_metadata,
-            num_input_tokens,
-            hidden_states,
-        )
-        context.gather_full_o_proj = self._o_proj_weight_switch_enabled and attn_metadata.attn_state not in {
-            AscendAttentionState.DecodeOnly,
-            AscendAttentionState.SpecDecoding,
-        }
-        if context.gather_full_o_proj:
-            self._all_gather_o_proj_full_weight()
-        return context
-
-    def _finalize_o_proj(
-        self,
-        attn_output: torch.Tensor,
-        output: torch.Tensor,
-        gather_full_o_proj: bool,
-    ) -> torch.Tensor:
-        if not self._o_proj_weight_switch_enabled:
-            return super()._finalize_o_proj(attn_output, output, gather_full_o_proj)
-        if gather_full_o_proj:
-            with self._use_full_o_proj_weights():
-                return super()._finalize_o_proj(attn_output, output, gather_full_o_proj)
-
-        # Decode tokens are replicated on PCP ranks. Each rank projects only
-        # its PCP input slice; PCP all-reduce reconstructs the pre-existing
-        # TP-local result, then the normal row-parallel TP reduction completes
-        # the output when TP is enabled.
-        linear_method = self._get_o_proj_weight_switch_method()
-        weight_part = self._get_o_proj_weight_switch_state().gather_parts.get("weight")
-        if weight_part is None:
-            raise RuntimeError("SFA PCP O-proj requires a gather spec for the weight attribute.")
-        # This is the logical TP-local O-proj input width. It remains valid
-        # even when a quantization method stores the weight in a packed layout
-        # whose gathered storage dimension differs from the activation dimension.
-        full_input_size = self.o_proj_weight_load_state.input_size_per_partition_before
-        if attn_output.shape[-1] != full_input_size:
-            raise RuntimeError(
-                "SFA PCP O-proj input does not match the reconstructed TP-local weight: "
-                f"input_shape={tuple(attn_output.shape)}, expected_last_dim={full_input_size}."
-            )
-        local_input = WeightSwitchMixin.split_tensor_for_parallel(
-            attn_output,
-            self.o_proj_weight_switch_config.world_size,
-            self.o_proj_weight_switch_config.rank,
-            dim=-1,
-        )
-        partial_output = linear_method.apply(self.o_proj, local_input, bias=None)
-        partial_output = self.o_proj_weight_switch_config.group.all_reduce(partial_output)
-
-        if self.o_proj.reduce_results and get_tp_group().world_size > 1:
-            if not self.o_proj.skip_bias_add and get_tp_group().rank_in_group == 0 and self.o_proj.bias is not None:
-                partial_output = partial_output + self.o_proj.bias
-            partial_output = get_tp_group().all_reduce(partial_output)
-        elif not self.o_proj.skip_bias_add and self.o_proj.bias is not None:
-            partial_output = partial_output + self.o_proj.bias
-
-        output.copy_(partial_output)
-        return output
-
-    def _get_sfa_kv_slot_mapping(
-        self,
-        attn_metadata: M,
-    ) -> torch.Tensor:
-        assert attn_metadata.pcp_slot_mapping is not None
-        return attn_metadata.pcp_slot_mapping
-
-    def exec_kv(
-        self,
-        kv_no_split: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
-        kv_cache: tuple,
-        slots: torch.Tensor,
-        attn_metadata: M,
-    ):
-        num_decode_tokens = attn_metadata.num_decode_tokens or 0
-        (kv_no_split, cos, sin), slots = _gather_prefill_cache_inputs((kv_no_split, cos, sin), slots, num_decode_tokens)
-        assert slots.numel() == kv_no_split.shape[0], (
-            "SFA PCP cache write requires one slot per gathered token: "
-            f"tokens={kv_no_split.shape[0]}, slots={slots.numel()}."
-        )
-
-        return super().exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
 
 
 @dataclass
@@ -377,9 +237,10 @@ class AscendSFADSACPMetadataBuilder(AscendSFAMetadataBuilder):
         dsa_cp_context.slot_mapping_cp = local_mapping[dsa_cp_context.local_start : dsa_cp_context.local_end_with_pad]
 
 
-class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
+class AscendSFADSACPImpl(AscendSFAImpl):
     """SFA implementation for DSA-CP token sharding in the TP group."""
 
+    _manages_pcp_execution = False
     o_proj_full_pools: dict[Any, torch.Tensor] = {}
     o_proj_weight_switch_pool_key = "sfa_o_proj"
 
@@ -1464,7 +1325,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         return output.to(output_dtype)
 
 
-class AscendSFAPCPDCPImpl(AscendSFADCPImpl, AscendSFAPCPImpl):
+class AscendSFAPCPDCPImpl(AscendSFADCPImpl):
     """Composes DCP attention with PCP gathered-token cache writes."""
 
     def _start_dcp_query_gather(
@@ -1585,6 +1446,4 @@ def resolve_sfa_impl(vllm_config: VllmConfig | None = None) -> type[AscendSFAImp
         return AscendSFAPCPDCPImpl
     if dcp_enabled:
         return AscendSFADCPImpl
-    if pcp_enabled:
-        return AscendSFAPCPImpl
     return AscendSFAImpl
