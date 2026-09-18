@@ -48,7 +48,7 @@ _benchmarks: &benchmarks
     max_out_len: 1500
     batch_size: 16
     request_rate: 0
-    baseline: 411
+    baseline: 425.5970
     threshold: 0.95
 
 # ==========================================
