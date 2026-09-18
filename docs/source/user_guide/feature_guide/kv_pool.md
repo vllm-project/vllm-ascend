@@ -35,14 +35,6 @@ When `MultiConnector` is used, configure `kv_load_failure_policy` on the `MultiC
 | `prefill_pp_layer_partition` | Prefill PP layer partition, needs to be set when Prefill node enables PP. |
 | `qos_priority` | Transfer QoS priority for KV pool, an integer in `[0, 4]` (a larger value means a higher priority). |
 
-### GLM-5.3-Flash
-
-Use `--mamba-cache-mode align` with the hybrid KV cache manager enabled.
-For non-layerwise transfer, set `use_layerwise` to `false`; both synchronous
-and asynchronous loading are supported. The pool transfers main MLA, compressed
-indexer, and per-TP-rank KDA state. Request-private indexer tails stay local,
-and pool hits resume at complete page/state boundaries.
-
 ### Environment Variable Configuration
 
 To guarantee uniform hash generation, it is required to synchronize the PYTHONHASHSEED environment variable across all nodes upon enabling KV Pool.
