@@ -239,6 +239,106 @@ class TestStairLoadStatistics(unittest.TestCase):
         self.assertEqual(len(candidates), 1)
         np.testing.assert_array_equal(candidates[0], expected)
 
+    def test_lpt_placement_co_locates_negatively_correlated_experts(self):
+        means = np.zeros(4)
+        variances = np.ones(4)
+        covariance = np.eye(4)
+        covariance[0, 1] = covariance[1, 0] = -0.9
+
+        placement = StairEplbPolicy.lpt_placement(
+            means,
+            variances,
+            covariance,
+            np.ones(4, dtype=np.int64),
+            num_ranks=2,
+            z_score=1.0,
+        )
+
+        np.testing.assert_array_equal(placement, [[0, 1], [2, 3]])
+
+    def test_lpt_placement_is_deterministic_and_preserves_replica_constraints(self):
+        kwargs = dict(
+            expert_means=np.array([8.0, 3.0, 1.0]),
+            expert_variances=np.array([2.0, 1.0, 0.5]),
+            expert_covariance=np.diag([2.0, 1.0, 0.5]),
+            replica_counts=np.array([2, 1, 1]),
+            num_ranks=2,
+            z_score=0.5,
+        )
+
+        first = StairEplbPolicy.lpt_placement(**kwargs)
+        second = StairEplbPolicy.lpt_placement(**kwargs)
+
+        np.testing.assert_array_equal(first, second)
+        self.assertTrue(all(len(set(rank)) == len(rank) for rank in first.tolist()))
+        np.testing.assert_array_equal(StairEplbPolicy.placement_replica_counts(first, 3), [2, 1, 1])
+
+    def test_lpt_placement_rejects_invalid_covariance_shape(self):
+        with self.assertRaises(ValueError):
+            StairEplbPolicy.lpt_placement(np.ones(2), np.ones(2), np.ones((2, 3)), np.ones(2, dtype=np.int64), 2, 0.5)
+
+    def test_lpt_placement_rejects_uneven_rank_capacity(self):
+        with self.assertRaises(ValueError):
+            StairEplbPolicy.lpt_placement(np.ones(2), np.ones(2), np.eye(2), np.array([1, 2]), 2, 0.5)
+
+    def test_lpt_variance_scales_by_replica_count(self):
+        variance, scale = StairEplbPolicy._updated_rank_variance(
+            expert=1,
+            rank_experts=np.array([0]),
+            current_variance=1.0,
+            current_scale=1.0,
+            expert_variances=np.array([4.0, 9.0]),
+            expert_covariance=np.array([[4.0, 6.0], [6.0, 9.0]]),
+            replica_counts=np.array([2, 3]),
+        )
+
+        self.assertEqual(variance, 4.0)
+        self.assertEqual(scale, 4.0)
+
+    def test_lpt_placement_returns_none_at_greedy_dead_end(self):
+        means = np.array([100.0, 6.0, 5.0, 4.0, 3.0, 2.0, 3.0])
+
+        # Greedy choices fill one rank too early, leaving no three distinct
+        # ranks for the final expert even though a valid placement exists.
+        placement = StairEplbPolicy.lpt_placement(
+            means,
+            np.zeros(7),
+            np.zeros((7, 7)),
+            np.array([1, 1, 1, 1, 1, 1, 3]),
+            num_ranks=3,
+            z_score=0.0,
+        )
+
+        self.assertIsNone(placement)
+
+    def test_lpt_placement_accepts_valid_covariance_with_strong_cancellation(self):
+        deviations = np.array([-0.04, -0.01, 0.03, -0.15, 0.20, 43.74, 0.18, -43.95])
+        center = np.full(8, 44.95)
+        samples = np.stack([center + deviations, center - deviations])
+        means, variances, covariance = StairEplbPolicy.weighted_moments(samples, np.ones(2, dtype=np.int64))
+
+        placement = StairEplbPolicy.lpt_placement(
+            means,
+            variances,
+            covariance,
+            np.ones(8, dtype=np.int64),
+            num_ranks=1,
+            z_score=1.0,
+        )
+
+        self.assertIsNotNone(placement)
+
+    def test_lpt_placement_rejects_small_indefinite_covariance(self):
+        with self.assertRaises(ValueError):
+            StairEplbPolicy.lpt_placement(
+                np.zeros(2),
+                np.full(2, 1e-30),
+                np.array([[1e-30, -1e-15], [-1e-15, 1e-30]]),
+                np.ones(2, dtype=np.int64),
+                num_ranks=1,
+                z_score=1.0,
+            )
+
     def test_statistics_reject_invalid_inputs(self):
         invalid_samples = np.array([[[1.0, -1.0]]])
         with self.assertRaises(ValueError):
