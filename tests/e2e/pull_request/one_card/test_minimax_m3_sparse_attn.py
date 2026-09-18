@@ -27,7 +27,9 @@ from typing import Literal
 import pytest
 import torch
 
+from vllm_ascend import envs
 from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
+    _npu_k2q_csr,
     minimax_m3_sparse_attn,
 )
 from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
@@ -908,6 +910,176 @@ def _build_decode_inputs(
             token_id += 1
 
     return q, block_table, seq_lens, topk_idx, num_pages
+
+
+@pytest.mark.parametrize("with_metadata", [False, True])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float8_e4m3fn])
+def test_prefill_schedule_metadata_meta_dispatch(with_metadata, dtype):
+    if not NPU_AVAILABLE:
+        pytest.skip("Requires the compiled Ascend extension")
+    _ensure_npu_sparse_attention_score_op()
+    query = torch.empty(8, 4, HEAD_DIM, device="meta", dtype=dtype)
+    cache = torch.empty(1, BLOCK_SIZE, 1, HEAD_DIM, device="meta", dtype=dtype)
+    indices = torch.empty(1, 1, device="meta", dtype=torch.int32)
+    metadata = torch.empty(1024, device="meta", dtype=torch.int32) if with_metadata else None
+    output = torch.ops._C_ascend.npu_sparse_attention_score_prefill(
+        query,
+        cache,
+        cache,
+        indices,
+        indices,
+        indices,
+        indices,
+        1,
+        SM_SCALE,
+        BLOCK_SIZE,
+        TOPK,
+        0,
+        metadata=metadata,
+    )
+    assert output.shape == query.shape
+    assert output.dtype == torch.bfloat16
+    assert output.device.type == "meta"
+
+
+@pytest.mark.parametrize("invalid", ["dtype", "size", "rank", "strides", "device"])
+def test_prefill_schedule_metadata_rejects_invalid_buffer(invalid):
+    if not NPU_AVAILABLE:
+        pytest.skip("Requires NPU")
+    _ensure_npu_sparse_attention_score_op()
+    metadata = torch.empty(1024, device=DEVICE, dtype=torch.int32)
+    if invalid == "dtype":
+        metadata = metadata.float()
+    elif invalid == "size":
+        metadata = metadata[:1023]
+    elif invalid == "rank":
+        metadata = metadata.reshape(32, 32)
+    elif invalid == "strides":
+        metadata = torch.empty(2048, device=DEVICE, dtype=torch.int32)[::2]
+    else:
+        metadata = metadata.cpu()
+    query = torch.empty(1, 4, HEAD_DIM, device=DEVICE, dtype=DTYPE)
+    cache = torch.empty(1, BLOCK_SIZE, 1, HEAD_DIM, device=DEVICE, dtype=DTYPE)
+    indices = torch.zeros(1, 1, device=DEVICE, dtype=torch.int32)
+    with pytest.raises(RuntimeError, match="MiniMax-M3 prefill metadata must"):
+        torch.ops._C_ascend.npu_sparse_attention_score_prefill(
+            query,
+            cache,
+            cache,
+            indices,
+            indices,
+            indices,
+            indices,
+            1,
+            SM_SCALE,
+            BLOCK_SIZE,
+            TOPK,
+            0,
+            metadata=metadata,
+        )
+
+
+@pytest.mark.parametrize(
+    "q_lens,kv_lens", [((8,), (128,)), ((8,), (129,)), ((17,), (300,)), ((8, 4), (256, 129)), ((0, 8), (0, 256))]
+)
+@pytest.mark.parametrize("query_prefix", [0, 64], ids=["base_query", "mixed_batch_query_slice"])
+@pytest.mark.parametrize("num_q_heads", [4, 16], ids=["gqa4", "tp4_gqa16"])
+def test_prefill_schedule_metadata(q_lens, kv_lens, query_prefix, num_q_heads):
+    """Requires the metadata-aware A3 vendor package and explicit ABI opt-in."""
+    if not NPU_AVAILABLE or not envs.VLLM_ASCEND_MINIMAX_M3_PREFILL_METADATA:
+        pytest.skip("Set VLLM_ASCEND_MINIMAX_M3_PREFILL_METADATA=1 with the A3 metadata vendor package")
+    _ensure_npu_sparse_attention_score_op()
+    torch.manual_seed(17)
+    num_kv_heads = 1
+    block_counts = [(length + BLOCK_SIZE - 1) // BLOCK_SIZE for length in kv_lens]
+    width = max(block_counts)
+    table = torch.arange(len(q_lens) * width, device=DEVICE, dtype=torch.int32).reshape(len(q_lens), width)
+    q_lens_t = torch.tensor(q_lens, device=DEVICE, dtype=torch.int32)
+    seq_lens = torch.tensor(kv_lens, device=DEVICE, dtype=torch.int32)
+    prefix_lens = seq_lens - q_lens_t
+    cu_q = torch.cat((q_lens_t.new_zeros(1), q_lens_t.cumsum(0))).to(torch.int32)
+    cu_blocks = torch.tensor([0, *block_counts], device=DEVICE, dtype=torch.int32).cumsum(0).to(torch.int32)
+    # A mixed batch passes the prefill suffix after its decode tokens. Keep the
+    # nonzero storage offset even though this view is contiguous; the vendor's
+    # internal view rejected offsets larger than its prefill storage shape.
+    q = torch.randn(query_prefix + sum(q_lens), num_q_heads, HEAD_DIM, device=DEVICE, dtype=DTYPE)[query_prefix:]
+    cache = _allocate_main_kv_cache_fused(len(q_lens) * width, num_kv_heads=num_kv_heads)
+    key, value = cache.unbind(1)
+    selected = _build_prefill_topk_idx(q_lens_t, prefix_lens, sum(q_lens), num_kv_heads=num_kv_heads)
+    row, indices, slots = _npu_k2q_csr(
+        selected,
+        cu_q,
+        cu_blocks,
+        order_method=1,
+        total_rows=sum(block_counts),
+        max_kv=width,
+        use_simt=0,
+        q_global_offset=True,
+    )
+    metadata = torch.full((1024,), -777, device=DEVICE, dtype=torch.int32)
+
+    def run():
+        return torch.ops._C_ascend.npu_sparse_attention_score_prefill(
+            q,
+            key,
+            value,
+            table,
+            row,
+            indices,
+            slots,
+            num_kv_heads,
+            SM_SCALE,
+            BLOCK_SIZE,
+            TOPK,
+            0,
+            actual_seq_lengths=q_lens_t,
+            actual_seq_lengths_kv=seq_lens,
+            metadata=metadata,
+        )
+
+    actual = run()
+    expected = _reference_sparse_attn(
+        q, cache, selected, table, q_lens_t, seq_lens, prefix_lens, num_q_heads=num_q_heads, num_kv_heads=num_kv_heads
+    )
+    _assert_sparse_close(actual, expected, backend="torch_npu")
+    header = metadata.cpu()
+    assert header[:3].tolist() == [0x5341534D, 1, 368]
+    assert not (header == -777).any()
+
+    # Poison the schedule after capture: replay must run the producer again,
+    # as well as recomputing attention for the changed query.
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        captured = run()
+    q.mul_(0.5)
+    metadata.fill_(-777)
+    graph.replay()
+    expected = _reference_sparse_attn(
+        q, cache, selected, table, q_lens_t, seq_lens, prefix_lens, num_q_heads=num_q_heads, num_kv_heads=num_kv_heads
+    )
+    _assert_sparse_close(captured, expected, backend="torch_npu")
+    replay_header = metadata.cpu()
+    assert replay_header[:10].tolist() == header[:10].tolist()
+    assert not (replay_header == -777).any()
+
+    # Exercise the public dispatch and its per-invocation metadata allocation too.
+    output = torch.empty_like(q)
+    minimax_m3_sparse_attn(
+        q,
+        _main_kv_cache_for_kernel(cache),
+        selected,
+        table,
+        cu_q,
+        seq_lens,
+        prefix_lens,
+        max(q_lens),
+        num_kv_heads,
+        SM_SCALE,
+        output,
+        total_kv_blocks=sum(block_counts),
+        max_kv_blocks=width,
+    )
+    _assert_sparse_close(output, expected, backend="torch_npu")
 
 
 @pytest.mark.parametrize(

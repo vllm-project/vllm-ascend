@@ -15,6 +15,8 @@
 import inspect
 import os
 
+import pytest
+
 import vllm_ascend.envs as envs_ascend
 from tests.ut.base import TestBase
 
@@ -35,7 +37,7 @@ class TestEnvVariables(TestBase):
                     self.assertEqual(getattr(envs_ascend, var_name), var_handler())
 
                     handler_source = inspect.getsource(var_handler)
-                    if var_name == "VLLM_ASCEND_KVPOOL_RANGE_DEBUG":
+                    if "_strict_binary_env(" in handler_source:
                         test_vals = ["0", "1"]
                     elif "int(" in handler_source:
                         test_vals = ["123", "456"]
@@ -79,3 +81,21 @@ class TestEnvVariables(TestBase):
                 os.environ.pop(name, None)
             else:
                 os.environ[name] = original_val
+
+
+@pytest.mark.parametrize("value,expected", [(None, False), ("0", False), ("1", True)])
+def test_minimax_m3_prefill_metadata_env(monkeypatch, value, expected):
+    name = "VLLM_ASCEND_MINIMAX_M3_PREFILL_METADATA"
+    if value is None:
+        monkeypatch.delenv(name, raising=False)
+    else:
+        monkeypatch.setenv(name, value)
+    assert getattr(envs_ascend, name) is expected
+
+
+@pytest.mark.parametrize("value", ["", "2", "true", "-1"])
+def test_minimax_m3_prefill_metadata_env_rejects_invalid(monkeypatch, value):
+    name = "VLLM_ASCEND_MINIMAX_M3_PREFILL_METADATA"
+    monkeypatch.setenv(name, value)
+    with pytest.raises(ValueError, match=name):
+        getattr(envs_ascend, name)
