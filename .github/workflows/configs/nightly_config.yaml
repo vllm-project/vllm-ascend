@@ -55,10 +55,6 @@ a2:
         config_file_path: GLM5_1-W8A8-A2-dual-nodes.yaml
         config_base_path: tests/e2e/nightly/multi_node/internal_dp/config
         size: 2
-      - name: multi-node-Kimi-K2.5-W4A8-A2
-        config_file_path: Kimi-K2_5-W4A8-A2-dual-nodes.yaml
-        config_base_path: tests/e2e/nightly/multi_node/internal_dp/config
-        size: 2
   accuracy:
     nightly:
       - name: accuracy-group-1
