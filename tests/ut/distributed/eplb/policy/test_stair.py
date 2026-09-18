@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import patch
 
 import numpy as np
+import torch
 from vllm.distributed.eplb.policy import AbstractEplbPolicy
 
 from vllm_ascend.ascend_config import StairConfig
@@ -12,8 +13,27 @@ from vllm_ascend.distributed.eplb.policy.stair import StairEplbPolicy, StairPlan
 
 
 class TestStairLoadStatistics(unittest.TestCase):
-    def test_policy_shares_upstream_abstract_base(self):
+    def test_policy_implements_upstream_abstract_contract(self):
         self.assertTrue(issubclass(StairEplbPolicy, AbstractEplbPolicy))
+        self.assertFalse(StairEplbPolicy.__abstractmethods__)
+
+    def test_upstream_policy_contract_runs_stair_and_flattens_placement(self):
+        result = StairEplbPolicy.rebalance_experts(
+            torch.tensor([[8.0, 7.0, 6.0, 5.0]]),
+            num_replicas=4,
+            num_groups=1,
+            num_nodes=1,
+            num_ranks=2,
+            old_global_expert_indices=torch.tensor([[0, 1, 2, 3]]),
+        )
+
+        self.assertEqual(result.device, torch.device("cpu"))
+        self.assertEqual(result.dtype, torch.int64)
+        torch.testing.assert_close(result, torch.tensor([[0, 3, 2, 1]]))
+
+    def test_upstream_policy_contract_requires_current_placement(self):
+        with self.assertRaisesRegex(ValueError, "current expert placement"):
+            StairEplbPolicy.rebalance_experts(torch.ones((1, 2)), 2, 1, 1, 2)
 
     def test_compression_preserves_all_steps_as_weighted_bins(self):
         samples = np.arange(20).reshape(5, 2, 2)

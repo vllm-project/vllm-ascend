@@ -7,6 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
+import torch
 from scipy.optimize import linear_sum_assignment  # type: ignore
 from vllm.distributed.eplb.policy import AbstractEplbPolicy
 
@@ -89,6 +90,59 @@ _VARIANCE_ROUNDOFF_SAFETY_FACTOR = 8
 
 class StairEplbPolicy(AbstractEplbPolicy):
     """STAIR load statistics and placement planning."""
+
+    @classmethod
+    def rebalance_experts(
+        cls,
+        weight: torch.Tensor,
+        num_replicas: int,
+        num_groups: int,
+        num_nodes: int,
+        num_ranks: int,
+        old_global_expert_indices: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Plan through the placement-only upstream policy contract.
+
+        The upstream contract has no temporal window, commit anchors, explicit
+        source plan, or rank-to-node mapping. This adapter treats ``weight`` as
+        one sample, assumes each node contains contiguous ranks, and uses STAIR
+        defaults. ``num_groups`` is validated for signature compatibility but
+        does not constrain placement. The result is a CPU
+        ``[layers, num_replicas]`` tensor with the current mapping's dtype.
+        Because upstream chooses migration sources again, its transfers need not
+        preserve STAIR's planned rank-pair limit. Call :meth:`plan_rebalance`
+        when the complete placement and source plan are required.
+        """
+        controls = num_replicas, num_groups, num_nodes, num_ranks
+        invalid_type = any(isinstance(value, bool) or not isinstance(value, int) for value in controls)
+        if invalid_type or min(controls) < 1:
+            raise ValueError("STAIR topology values must be positive integers")
+        if num_replicas % num_ranks or num_ranks % num_nodes:
+            raise ValueError("STAIR requires equal rank capacity and equal ranks per node")
+        if old_global_expert_indices is None:
+            raise ValueError("STAIR requires the current expert placement")
+
+        current_map = old_global_expert_indices.cpu()
+        if current_map.ndim != 2 or current_map.shape[1] != num_replicas:
+            raise ValueError("current expert placement must be [layers, num_replicas]")
+        logical_load = weight.float().cpu().numpy()
+        if logical_load.ndim != 2 or logical_load.shape[0] != current_map.shape[0]:
+            raise ValueError("weight must be [layers, logical_experts] and match the placement")
+
+        current_placement = current_map.numpy().reshape(current_map.shape[0], num_ranks, num_replicas // num_ranks)
+        ranks_per_node = num_ranks // num_nodes
+        node_ids = np.arange(num_ranks, dtype=np.int64) // ranks_per_node
+        config = StairConfig()
+        plan = cls.plan_rebalance(
+            logical_load[None, ...],
+            current_placement,
+            np.full(current_placement.shape[0], np.nan, dtype=np.float64),
+            node_ids,
+            config,
+        )
+        cls.validate_plan(current_placement, plan, logical_load.shape[1], config.rank_pair_migration_limit)
+        planned_map = plan.rank_expert_ids.reshape(current_map.shape)
+        return torch.from_numpy(planned_map).to(dtype=current_map.dtype)
 
     # Load modeling and placement scoring.
 
