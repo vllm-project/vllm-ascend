@@ -1,0 +1,85 @@
+test_name: "test DeepSeek-V4.1-Flash-W8A8 dual-node PD colocation on A3"
+model: "Eco-Tech/DeepSeek-V4.1-Flash-w8a8"
+num_nodes: 2
+npu_per_node: 16
+
+env_common: &env_common
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  VLLM_USE_MODELSCOPE: true
+  OMP_PROC_BIND: false
+  OMP_NUM_THREADS: 1
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  SERVER_PORT: 8000
+  VLLM_ENGINE_READY_TIMEOUT_S: 3600
+
+deployment:
+  - envs:
+      <<: *env_common
+    server_cmd: >
+      vllm serve Eco-Tech/DeepSeek-V4.1-Flash-w8a8
+      --host 0.0.0.0
+      --port $SERVER_PORT
+      --data-parallel-address $LOCAL_IP
+      --data-parallel-rpc-port 13399
+      --data-parallel-size 4
+      --data-parallel-size-local 2
+      --tensor-parallel-size 8
+      --enable-expert-parallel
+      --max-model-len 1048576
+      --max-num-batched-tokens 4096
+      --max-num-seqs 32
+      --gpu-memory-utilization 0.90
+      --block-size 128
+      --tokenizer-mode deepseek_v41
+      --reasoning-parser deepseek_v41
+      --tool-call-parser deepseek_v41
+      --enable-auto-tool-choice
+      --trust-remote-code
+      --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}'
+      --safetensors-load-strategy lazy
+      --quantization ascend
+      --additional-config '{"enable_engram":true,"engram_storage":"int8","enable_cpu_binding":true,"ascend_compilation_config":{"enable_npugraph_ex":false,"enable_static_kernel":false}}'
+      --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}'
+      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+
+  - envs:
+      <<: *env_common
+    server_cmd: >
+      vllm serve Eco-Tech/DeepSeek-V4.1-Flash-w8a8
+      --headless
+      --data-parallel-address $MASTER_IP
+      --data-parallel-rpc-port 13399
+      --data-parallel-size 4
+      --data-parallel-size-local 2
+      --data-parallel-start-rank 2
+      --tensor-parallel-size 8
+      --enable-expert-parallel
+      --max-model-len 1048576
+      --max-num-batched-tokens 4096
+      --max-num-seqs 32
+      --gpu-memory-utilization 0.90
+      --block-size 128
+      --tokenizer-mode deepseek_v41
+      --reasoning-parser deepseek_v41
+      --tool-call-parser deepseek_v41
+      --enable-auto-tool-choice
+      --trust-remote-code
+      --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}'
+      --safetensors-load-strategy lazy
+      --quantization ascend
+      --additional-config '{"enable_engram":true,"engram_storage":"int8","enable_cpu_binding":true,"ascend_compilation_config":{"enable_npugraph_ex":false,"enable_static_kernel":false}}'
+      --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}'
+      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+
+benchmarks:
+  acc_aime2025:
+    case_type: accuracy
+    dataset_path: vllm-ascend/aime2025
+    request_conf: vllm_api_general_chat
+    dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
+    max_out_len: 65536
+    temperature: 1.0
+    top_p: 0.95
+    batch_size: 32
+    baseline: 93.33
+    threshold: 10
