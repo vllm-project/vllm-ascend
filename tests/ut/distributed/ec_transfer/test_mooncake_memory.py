@@ -31,7 +31,7 @@ def _wait_for_waiters(manager: _BounceLeaseManager, count: int) -> None:
     raise AssertionError(f"expected {count} bounce waiters")
 
 
-def test_allocate_tensor_returns_2_mib_aligned_tensor():
+def test_prepare_registers_2_mib_aligned_tensor():
     alignment = 2 * 1024 * 1024
     capacity = 4096
     device = torch.device("cpu")
@@ -45,11 +45,15 @@ def test_allocate_tensor_returns_2_mib_aligned_tensor():
     assert raw_tensor.data_ptr() % alignment != 0
 
     allocator = AscendContiguousAllocator(capacity)
+    transfer = MagicMock()
+    transfer.register_memory.return_value = 0
 
     with patch.object(memory_module.torch, "empty", return_value=raw_tensor) as empty:
-        tensor = allocator._allocate_tensor(device)
+        allocator.prepare(device, transfer)
 
     expected_offset = (-raw_tensor.data_ptr()) % alignment
+    tensor = allocator.tensor
+    assert tensor is not None
 
     empty.assert_called_once_with(
         capacity + alignment - 1,
@@ -60,6 +64,7 @@ def test_allocate_tensor_returns_2_mib_aligned_tensor():
     assert tensor.nbytes == capacity
     assert tensor.data_ptr() % alignment == 0
     assert tensor.dtype == torch.uint8
+    transfer.register_memory.assert_called_once_with(tensor)
 
 
 def test_consumer_records_npu_release_event():
@@ -94,8 +99,16 @@ def test_producer_copies_to_staging_on_npu_stream():
     source = MagicMock()
     destination = MagicMock()
 
+    allocator = MagicMock()
+    allocator.tensor = pool
+    allocator.allocate.return_value = (0, 256)
+    allocator.view.return_value = destination
     producer = object.__new__(AscendProducerMemoryPool)
+    producer._allocator = allocator
+    producer._transfer = MagicMock()
+    producer._lock = memory_module.threading.Lock()
     producer._local = SimpleNamespace(stream=None)
+    producer._free_regions = MagicMock()
 
     stream = MagicMock()
     stream_context = MagicMock()
@@ -104,7 +117,7 @@ def test_producer_copies_to_staging_on_npu_stream():
         patch.object(memory_module.torch.npu, "Stream", return_value=stream) as stream_class,
         patch.object(memory_module.torch.npu, "stream", return_value=stream_context) as use_stream,
     ):
-        result = producer._copy_to_staging(pool, [destination], [source])
+        result = producer.stage([source])
 
     stream_class.assert_called_once_with(device=pool.device)
     use_stream.assert_called_once_with(stream)
@@ -114,7 +127,9 @@ def test_producer_copies_to_staging_on_npu_stream():
     )
     stream.synchronize.assert_called_once_with()
     assert producer._local.stream is stream
-    assert result is None
+    assert result is not None
+    assert result.tensors == [destination]
+    assert result.regions == [(0, 256)]
 
 
 def test_producer_allocator_layout():
@@ -220,12 +235,8 @@ def test_copy_to_bounce_packs_bytes_within_lease():
     source_b = torch.tensor([4, 5, 6], dtype=torch.uint8)
 
     with (
-        patch(
-            "vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.memory.torch.npu.Stream"
-        ) as stream_cls,
-        patch(
-            "vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.memory.torch.npu.stream"
-        ) as stream_context,
+        patch("vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.memory.torch.npu.Stream") as stream_cls,
+        patch("vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.memory.torch.npu.stream") as stream_context,
     ):
         stream = stream_cls.return_value
         address = pool.copy_to_bounce(

@@ -8,16 +8,13 @@ from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake import (
     worker as worker_module,
 )
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.memory import (
-    AscendConsumerMemoryPool,
-    AscendContiguousAllocator,
-    AscendProducerAllocator,
-    AscendProducerMemoryPool,
     _BounceLease,
 )
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.worker import (
     AscendECMooncakeWorker,
     _AcquiredTransferWave,
     _flatten_transfer_wave,
+    _resolve_ascend_config,
     _resolve_bounce_arena_size,
     _TransferFragmentPlan,
 )
@@ -30,9 +27,7 @@ def _make_bounce_config(
 ) -> MagicMock:
     config = MagicMock()
     config.scheduler_config.max_num_seqs = max_num_seqs
-    config.ec_transfer_config.ec_connector_extra_config = (
-        {} if extra_config is None else extra_config
-    )
+    config.ec_transfer_config.ec_connector_extra_config = {} if extra_config is None else extra_config
     return config
 
 
@@ -266,9 +261,7 @@ def test_push_batch_preserves_staging_first_path():
     worker._validate_push_source = MagicMock()
     worker._notify_completions = MagicMock()
     worker._abandon_pushes = MagicMock()
-    worker._run_fanout = MagicMock(
-        side_effect=lambda tasks, _on_submit: [task() for task in tasks]
-    )
+    worker._run_fanout = MagicMock(side_effect=lambda tasks, _on_submit: [task() for task in tasks])
 
     with patch.object(worker_module, "_plan_transfer_waves") as plan_waves:
         worker._push_batch([push])
@@ -308,9 +301,7 @@ def test_push_batch_runs_and_releases_fallback_waves_in_order():
     second_wave = MagicMock(sources=(MagicMock(),))
     first_acquired = MagicMock()
     second_acquired = MagicMock()
-    worker._acquire_transfer_wave = MagicMock(
-        side_effect=[first_acquired, second_acquired]
-    )
+    worker._acquire_transfer_wave = MagicMock(side_effect=[first_acquired, second_acquired])
     worker._write_transfer_wave = MagicMock()
     worker._release_transfer_wave = MagicMock()
     ready = [(first, first_shard), (second, second_shard)]
@@ -338,9 +329,7 @@ def test_push_batch_runs_and_releases_fallback_waves_in_order():
         call(first_acquired),
         call(second_acquired),
     ]
-    worker._producer_pushes.begin_notifying.assert_called_once_with(
-        [first, second]
-    )
+    worker._producer_pushes.begin_notifying.assert_called_once_with([first, second])
     worker._notify_completions.assert_called_once_with(ready)
     worker._producer_pushes.complete.assert_called_once_with([first, second])
 
@@ -366,12 +355,8 @@ def test_push_batch_later_wave_failure_releases_without_notifying():
     second_wave = MagicMock(sources=(MagicMock(),))
     first_acquired = MagicMock()
     second_acquired = MagicMock()
-    worker._acquire_transfer_wave = MagicMock(
-        side_effect=[first_acquired, second_acquired]
-    )
-    worker._write_transfer_wave = MagicMock(
-        side_effect=[None, RuntimeError("write failed")]
-    )
+    worker._acquire_transfer_wave = MagicMock(side_effect=[first_acquired, second_acquired])
+    worker._write_transfer_wave = MagicMock(side_effect=[None, RuntimeError("write failed")])
     worker._release_transfer_wave = MagicMock()
 
     with patch.object(
@@ -464,8 +449,7 @@ def test_push_batch_waits_for_delayed_session_before_releasing_failed_wave():
     worker._producer_pushes.fail.assert_called_once()
 
 
-def test_make_config_maps_upstream_defaults_to_ascend():
-    worker = object.__new__(AscendECMooncakeWorker)
+def test_resolve_ascend_config_maps_upstream_defaults():
     vllm_config = MagicMock()
 
     parallel_config = vllm_config.parallel_config
@@ -486,14 +470,13 @@ def test_make_config_maps_upstream_defaults_to_ascend():
         key, default
     )
 
-    config = worker._make_config(vllm_config)
+    config = _resolve_ascend_config(vllm_config)
 
     assert config.protocol == "ascend"
     assert config.buffer_device == "npu"
 
 
-def test_make_config_rejects_non_ascend_protocols():
-    worker = object.__new__(AscendECMooncakeWorker)
+def test_resolve_ascend_config_rejects_non_ascend_protocols():
     vllm_config = MagicMock()
 
     vllm_config.ec_transfer_config.ec_connector_extra_config = {"mooncake_protocol": "rdma"}
@@ -504,18 +487,17 @@ def test_make_config_rejects_non_ascend_protocols():
 
     with (
         patch.object(
-            worker_module.ECMooncakeWorker,
-            "_make_config",
+            worker_module.MooncakeECConfig,
+            "from_vllm_config",
             return_value=upstream_config,
         ),
         pytest.raises(ValueError, match="mooncake_protocol='ascend'"),
     ):
-        worker._make_config(vllm_config)
+        _resolve_ascend_config(vllm_config)
 
 
 @pytest.mark.parametrize("buffer_device", ["cpu", "npu:abc"])
-def test_make_config_rejects_non_npu_buffer_devices(buffer_device):
-    worker = object.__new__(AscendECMooncakeWorker)
+def test_resolve_ascend_config_rejects_non_npu_buffer_devices(buffer_device):
     vllm_config = MagicMock()
 
     vllm_config.ec_transfer_config.ec_connector_extra_config = {"mooncake_protocol": "ascend"}
@@ -526,17 +508,18 @@ def test_make_config_rejects_non_npu_buffer_devices(buffer_device):
 
     with (
         patch.object(
-            worker_module.ECMooncakeWorker,
-            "_make_config",
+            worker_module.MooncakeECConfig,
+            "from_vllm_config",
             return_value=upstream_config,
         ),
         pytest.raises(ValueError, match="ec_buffer_device='npu'"),
     ):
-        worker._make_config(vllm_config)
+        _resolve_ascend_config(vllm_config)
 
 
-def test_record_source_ready_event_uses_npu_event():
+def test_bind_push_source_uses_npu_event():
     worker = object.__new__(AscendECMooncakeWorker)
+    worker._producer_pushes = MagicMock()
     tensor = MagicMock()
     tensor.device.type = "npu"
     stream = MagicMock()
@@ -546,30 +529,61 @@ def test_record_source_ready_event_uses_npu_event():
         patch.object(worker_module.torch.npu, "current_stream", return_value=stream) as current_stream,
         patch.object(worker_module.torch.npu, "Event", return_value=event) as event_class,
     ):
-        result = worker._record_source_ready_event(tensor)
+        worker._bind_push_source(tensor, "image-hash")
 
-    assert result is event
     event_class.assert_called_once_with()
     current_stream.assert_called_once_with(tensor.device)
     event.record.assert_called_once_with(stream)
+    worker._producer_pushes.bind_source.assert_called_once_with("image-hash", tensor, event)
 
 
-def test_make_memory_pools_use_ascend_allocator():
-    worker = object.__new__(AscendECMooncakeWorker)
-    worker._bounce_arena_size = 2 * 1024 * 1024
+def test_worker_initializes_ascend_data_plane_without_factory_hooks():
+    vllm_config = MagicMock()
+    vllm_config.ec_transfer_config.is_ec_producer = True
+    vllm_config.ec_transfer_config.ec_connector_extra_config = {}
+    config = MagicMock(
+        protocol="ascend",
+        buffer_device="npu",
+        pool_size=1024,
+    )
     transfer = MagicMock()
-    capacity = 1024
+    consumer = MagicMock()
+    producer = MagicMock()
+    reservations = MagicMock()
+    control_client = MagicMock()
+    push_manager = MagicMock()
 
-    consumer = worker._make_consumer_memory(capacity, transfer)
-    producer = worker._make_producer_memory(capacity, transfer)
+    with (
+        patch.object(worker_module, "_resolve_ascend_config", return_value=config),
+        patch.object(worker_module, "_resolve_bounce_arena_size", return_value=4096),
+        patch.object(worker_module, "ensure_mooncake_available") as ensure_available,
+        patch.object(worker_module, "get_ip", return_value="127.0.0.1"),
+        patch.object(worker_module.torch.npu, "current_device", return_value=3),
+        patch.object(worker_module, "AscendMooncakeTransfer", return_value=transfer) as transfer_class,
+        patch.object(worker_module, "AscendConsumerMemoryPool", return_value=consumer) as consumer_class,
+        patch.object(worker_module, "AscendProducerMemoryPool", return_value=producer) as producer_class,
+        patch.object(worker_module, "ConsumerReservationManager", return_value=reservations) as reservations_class,
+        patch.object(worker_module, "ControlClient", return_value=control_client),
+        patch.object(worker_module, "ProducerPushManager", return_value=push_manager),
+        patch.object(worker_module, "ThreadPoolExecutor"),
+        patch.object(worker_module.threading.Thread, "start"),
+    ):
+        worker = AscendECMooncakeWorker(vllm_config)
 
-    assert isinstance(consumer, AscendConsumerMemoryPool)
-    assert isinstance(producer, AscendProducerMemoryPool)
-    assert isinstance(consumer._allocator, AscendContiguousAllocator)
-    assert isinstance(producer._allocator, AscendProducerAllocator)
-    assert producer._allocator.staging_capacity == capacity
-    assert producer._allocator.bounce_capacity == worker._bounce_arena_size
-    assert consumer._allocator is not producer._allocator
+    ensure_available.assert_called_once_with()
+    transfer_class.assert_called_once_with("127.0.0.1", 3)
+    consumer_class.assert_called_once()
+    producer_class.assert_called_once()
+    reservations_class.assert_called_once_with(
+        consumer,
+        worker_module._RESERVATION_TTL_SECONDS,
+        worker_module._MAX_CANCELLED_TRANSFER_IDS,
+    )
+    assert worker._buffer_device == "npu"
+    assert worker._transfer is transfer
+    assert worker._consumer_memory is consumer
+    assert worker._producer_memory is producer
+    assert worker._reservations is reservations
 
 
 @pytest.mark.parametrize(
