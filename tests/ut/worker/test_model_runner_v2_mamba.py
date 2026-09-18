@@ -258,6 +258,8 @@ def test_deferred_copy_missing_layer_raises(mock_get_group):
 
     with pytest.raises(RuntimeError, match="linear_attn"):
         state._finish_previous_layerwise_mamba_copy()
+
+
 def test_mrv2_shared_backing_support_follows_connector_capability():
     runner = NPUModelRunner.__new__(NPUModelRunner)
 
