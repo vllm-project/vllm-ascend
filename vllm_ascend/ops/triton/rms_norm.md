@@ -57,26 +57,26 @@ RMSNorm 是 Transformer 模型中广泛使用的一种归一化操作，其计�
 #### 自适应 `BLOCK_M` 计算流程
 
 ```python
-Max_UB_Size = 1572864            # Ascend A2/A3 Unified Buffer 大小（字节）
-Element_Size = element_size() * 8  # 每个元素占用的位数（如 bf16 = 16 位）
+available_ub_size = get_ub_size_bytes() - resv_buffer    # UB大小 - 预留buffer（6KB），防止UB溢出
+element_size = element_size()                      # 单个元素占用的字节大小（如 bf16 = 2字节）
 
 # 冗余系数：覆盖 UB 中并存的中间张量
-if Element_Size == 32:
-    Data_Multiplier = 5   # input(32bit) + output(32bit) + offset(32bit) + mask(32bit) + others(32bit)
-elif Element_Size == 16:
-    Data_Multiplier = 7   # input(16bit) + output(16bit) + offset(32bit) + mask(32bit) + others(16bit)
+if element_size == 4:
+    data_multiplier = 5   # input(4bytes) + offset(4bytes) + mid_out(4bytes) + output(4bytes) + others(4bytes) = 5x
+elif element_size == 2:
+    data_multiplier = 7   # input(2bytes) + offset(4bytes) + mid_out(4bytes) + output(2bytes) + others(2bytes) = 7x
 else:
     raise NotImplementedError  # 不支持的位宽
 
 # 估算 UB 可容纳的行数（向下取整）
-ROW_BLOCK_SIZE = int(Max_UB_Size / (dim * Element_Size * Data_Multiplier))
+ROW_BLOCK_SIZE = int(available_ub_size / (dim * element_size * data_multiplier))
 
 # 不超出每个 Core 分到的行数
 raw = min(ROW_BLOCK_SIZE, batch_per_core)
 BLOCK_M = 1 << (raw.bit_length() - 1)   # 不大于 raw 的最大 2 的幂
 ```
 
-> **说明**：`ROW_BLOCK_SIZE` 依据元素位宽自动选择 `Data_Multiplier`——fp32 需要更少冗余（5x，因为中间张量多为 32 位原生），fp16/bf16 需要更多冗余（7x，offset/mask 等控制张量以 32 位存在）。最终 `BLOCK_M` 必须为 2 的幂以适配 Triton 向量化。
+> **说明**：`ROW_BLOCK_SIZE` 依据元素位宽自动选择 `data_multiplier`——fp32 需要更少冗余（5x，因为中间张量多为 32 位原生），fp16/bf16 需要更多冗余（7x，offset/mask 等控制张量以 32 位存在）。最终 `BLOCK_M` 必须为 2 的幂以适配 Triton 向量化。
 
 ### 2.3 启动网格
 
