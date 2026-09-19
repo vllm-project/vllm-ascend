@@ -684,7 +684,7 @@ class NPUWorker(WorkerBase):
             specs = (
                 group_spec.kv_cache_specs.values() if isinstance(group_spec, UniformTypeKVCacheSpecs) else (group_spec,)
             )
-            if any(getattr(spec, "model_version", None) == "deepseek_v4" for spec in specs):
+            if any(getattr(spec, "model_version", None) in {"deepseek_v4", "deepseek_v41"} for spec in specs):
                 return available_memory
 
         # vLLM #51718 overlays KV cache groups in one standardized backing
@@ -1215,7 +1215,7 @@ class NPUWorker(WorkerBase):
     def execute_dummy_batch(self) -> None:
         self.log_memory_stats()
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
-        self.model_runner._dummy_run(num_tokens, uniform_decode=True)
+        self.model_runner._dummy_run(num_tokens, uniform_decode=True, skip_gdn_state_update=True)
 
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""

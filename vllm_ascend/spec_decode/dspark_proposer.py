@@ -15,6 +15,7 @@ from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.utils import enable_pcp
+from vllm_ascend.core.kv_cache_interface import is_deepseek_v41_cache
 from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_and_dspark_inputs_kernel
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer, _compute_num_programs
 from vllm_ascend.spec_decode.utils import DynamicSpecScheduler
@@ -187,6 +188,11 @@ class AscendDSparkProposer(AscendDflashProposer):
                 builder = attn_group.get_metadata_builder()
                 if isinstance(builder, AscendDSAMetadataBuilder):
                     builder.enable_dspark_device_metadata(self.max_query_tokens)
+                elif is_deepseek_v41_cache((attn_group.kv_cache_spec,)):
+                    from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder
+
+                    if isinstance(builder, AscendDSAV41MetadataBuilder):
+                        builder.enable_device_metadata()
 
         self.kv_cache_gid = self.draft_attn_groups[0].kv_cache_group_id
         self.kernel_block_size = self._per_group_kernel_block_sizes[self.kv_cache_gid]
@@ -396,6 +402,7 @@ class AscendDSparkProposer(AscendDflashProposer):
             batch_descriptor=batch_descriptor,
             aclgraph_runtime_mode=aclgraph_runtime_mode,
             is_draft_model=True,
+            model_instance=self.model,
             draft_attn_metadatas=[],
             eplb_heat_collection_status=(
                 self.runner.eplb_heat_collection_status if self.runner.dynamic_eplb else False

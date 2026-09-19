@@ -9,6 +9,7 @@ from typing_extensions import Self
 from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import get_dtype_size
+from vllm.v1 import kv_cache_interface as upstream_kv_cache_interface
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, SlidingWindowManager
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -53,7 +54,25 @@ def is_circular_kv_cache_spec(kv_cache_spec: KVCacheSpec) -> bool:
     if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
         specs = tuple(kv_cache_spec.kv_cache_specs.values())
         return bool(specs) and all(is_circular_kv_cache_spec(spec) for spec in specs)
-    return getattr(kv_cache_spec, "is_circular", False)
+    circular_spec = getattr(upstream_kv_cache_interface, "CircularBufferSpec", None)
+    return (circular_spec is not None and isinstance(kv_cache_spec, circular_spec)) or bool(
+        getattr(kv_cache_spec, "is_circular", False)
+    )
+
+
+def is_deepseek_v41_cache(specs_or_groups) -> bool:
+    """Identify V4.1 cache metadata without importing its upstream-only modules."""
+    if isinstance(specs_or_groups, dict):
+        specs = list(specs_or_groups.values())
+    else:
+        specs = []
+        for item in specs_or_groups:
+            spec = getattr(item, "kv_cache_spec", item)
+            if isinstance(spec, UniformTypeKVCacheSpecs):
+                specs.extend(spec.kv_cache_specs.values())
+            else:
+                specs.append(spec)
+    return any(getattr(spec, "model_version", None) == "deepseek_v41" for spec in specs)
 
 
 def is_prefix_cacheable(kv_cache_spec: KVCacheSpec) -> bool:
@@ -64,7 +83,9 @@ def is_prefix_cacheable(kv_cache_spec: KVCacheSpec) -> bool:
     """
     if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
         return all(is_prefix_cacheable(spec) for spec in kv_cache_spec.kv_cache_specs.values())
-    return getattr(kv_cache_spec, "prefix_cacheable", True)
+    return bool(getattr(kv_cache_spec, "prefix_cacheable", True)) and bool(
+        getattr(kv_cache_spec, "participates_in_prefix_caching", True)
+    )
 
 
 def requires_padded_page_layout(kv_cache_specs: Iterable[KVCacheSpec]) -> bool:
@@ -111,7 +132,6 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     # stride. vLLM main removed this field from AttentionSpec, but it remains
     # part of the Ascend runner/backend contract.
     indexes_kv_by_block_stride: bool = False
-
     if vllm_version_is("0.28.0"):
 
         @property
@@ -361,7 +381,6 @@ class AscendIndexerKPoolTailSpec(SlidingWindowSpec):
 
 
 def register_ascend_kv_cache_specs() -> None:
-    # Delay this import: the cache layer imports the specs from this module.
     from vllm_ascend.models.glm5next.kv_cache import KpoolTailManager
 
     KVCacheSpecRegistry.register(
