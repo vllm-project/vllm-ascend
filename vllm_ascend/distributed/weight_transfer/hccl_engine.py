@@ -15,30 +15,27 @@ from vllm.config import VllmConfig
 from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
     WeightTransferEngine,
-    WeightTransferInitInfo,
     WeightTransferUpdateInfo,
 )
 
+from vllm_ascend.distributed.weight_transfer.hccl_common import (
+    HCCLWeightTransferInitInfo,
+    trainer_init,
+    worker_init_process_group,
+)
 from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     DEFAULT_PACKED_NUM_BUFFERS,
     packed_broadcast_consumer,
 )
 
-
-@dataclass
-class HCCLWeightTransferInitInfo(WeightTransferInitInfo):
-    """Initialization info for HCCL weight transfer backend."""
-
-    master_address: str
-    """IP address of the trainer (rank 0) for HCCL process group setup."""
-    master_port: int
-    """Port on the trainer for HCCL process group setup."""
-    rank_offset: int
-    """Offset added to each vLLM worker's rank within the HCCL group.
-    Typically 1 (trainer is rank 0, workers start at rank 1)."""
-    world_size: int
-    """Total number of participants in the HCCL group (trainer + all workers)."""
+# Re-exported for backward compatibility; canonical home is hccl_common.
+__all__ = [
+    "HCCLWeightTransferInitInfo",
+    "HCCLTrainerSendWeightsArgs",
+    "HCCLWeightTransferUpdateInfo",
+    "HCCLWeightTransferEngine",
+]
 
 
 @dataclass
@@ -147,23 +144,9 @@ class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo, 
                       rank offset, and world size
         """
 
-        # Calculate the global rank in the trainer-worker process group
-        # Must account for data parallel to get unique ranks across all workers
-        dp_rank = self.parallel_config.data_parallel_index
-        world_size_per_dp = self.parallel_config.world_size  # TP * PP
-        rank_within_dp = self.parallel_config.rank
-
-        # Unique rank across all DP groups
-        worker_rank = dp_rank * world_size_per_dp + rank_within_dp
-        rank = worker_rank + init_info.rank_offset
-        # Create stateless process group
-        device = torch.accelerator.current_device_index()
-        self.model_update_group = HCCLWeightTransferEngine._stateless_init_process_group(
-            init_info.master_address,
-            init_info.master_port,
-            rank,
-            init_info.world_size,
-            device=device,
+        self.model_update_group = worker_init_process_group(
+            init_info,
+            self.parallel_config,
         )
 
     def receive_weights(
@@ -271,70 +254,6 @@ class HCCLWeightTransferEngine(WeightTransferEngine[HCCLWeightTransferInitInfo, 
                     stream=args.stream or torch.npu.current_stream(),
                 )
 
-    @staticmethod
-    def trainer_init(
-        init_info: HCCLWeightTransferInitInfo | dict,
-    ) -> "PyHcclCommunicator":
-        """
-        Initialize HCCL process group for trainer-side weight transfer.
-
-        The trainer is always rank 0 in the process group. Uses the current
-        Ascend device (torch.accelerator.current_device_index()).
-
-        Args:
-            init_info: Either an HCCLWeightTransferInitInfo object or a dict with keys:
-                - master_address: str
-                - master_port: int
-                - world_size: int
-
-        Returns:
-            PyHcclCommunicator for weight transfer.
-
-        Example:
-            >>> from vllm.distributed.weight_transfer.hccl_engine import (
-            ...     HCCLWeightTransferEngine,
-            ... )
-            >>> group = HCCLWeightTransferEngine.trainer_init(
-            ...     dict(
-            ...         master_address=master_address,
-            ...         master_port=master_port,
-            ...         world_size=world_size,
-            ...     ),
-            ... )
-        """
-        if isinstance(init_info, dict):
-            master_address = init_info["master_address"]
-            master_port = init_info["master_port"]
-            world_size = init_info["world_size"]
-        else:
-            # HCCLWeightTransferInitInfo object
-            master_address = init_info.master_address
-            master_port = init_info.master_port
-            world_size = init_info.world_size
-
-        # Trainer is always rank 0
-        device = torch.accelerator.current_device_index()
-        return HCCLWeightTransferEngine._stateless_init_process_group(
-            master_address,
-            master_port,
-            0,
-            world_size,
-            device,
-        )
-
-    @staticmethod
-    def _stateless_init_process_group(master_address, master_port, rank, world_size, device):
-        """
-        vLLM provides `StatelessProcessGroup` to create a process group
-        without considering the global process group in torch.distributed.
-        It is recommended to create `StatelessProcessGroup`, and then initialize
-        the data-plane communication (HCCL) between external (train processes)
-        and vLLM workers.
-        """
-        from vllm.distributed.utils import StatelessProcessGroup
-
-        from vllm_ascend.distributed.device_communicators.pyhccl import PyHcclCommunicator
-
-        pg = StatelessProcessGroup.create(host=master_address, port=master_port, rank=rank, world_size=world_size)
-        pyhccl = PyHcclCommunicator(pg, device=device)
-        return pyhccl
+    # Trainer-side process-group setup. Delegates to the shared helper so the
+    # sparse engine can reuse the exact same rendezvous without subclassing.
+    trainer_init = staticmethod(trainer_init)
