@@ -619,17 +619,22 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         num_reqs_padded: int,
         is_draft_model_prefill: bool,
     ) -> list[dict[str, Any]]:
-        metadata = next(
-            metadata
+        layer_name, metadata = next(
+            (layer_name, metadata)
             for layer_name, metadata in self.model_state.attn_metadata.items()
             if layer_name in self.draft_attn_layer_names
         )
+        block_table = metadata.block_tables
+        if block_table is not None and block_table.shape[0] < num_reqs_padded:
+            block_table = block_table.as_strided((num_reqs_padded, block_table.shape[1]), block_table.stride())
+
         if is_draft_model_prefill:
             return [
                 {
+                    "layer_name": layer_name,
                     "actual_seq_lengths": metadata.actual_seq_lengths_q,
                     "actual_seq_lengths_kv": metadata.seq_lens_list,
-                    "block_table": metadata.block_tables,
+                    "block_table": block_table,
                 }
             ]
         assert self.input_batch is not None
@@ -641,13 +646,15 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
                 min(int(seq_len) + step, self.max_model_len) for seq_len in self.input_batch.seq_lens_np[:num_reqs]
             ]
             seq_lens.extend([0] * (num_reqs_padded - num_reqs))
-            fia_params.append(
-                {
-                    "actual_seq_lengths": query_start_loc,
-                    "actual_seq_lengths_kv": seq_lens,
-                    "block_table": metadata.block_tables,
-                }
-            )
+            for layer_name in self.draft_attn_layer_names:
+                fia_params.append(
+                    {
+                        "layer_name": layer_name,
+                        "actual_seq_lengths": query_start_loc,
+                        "actual_seq_lengths_kv": seq_lens,
+                        "block_table": block_table,
+                    }
+                )
         return fia_params
 
     def _calc_next_seq_lens_cpu(self, seq_lens_cpu, num_reqs, num_reqs_padded, step):
