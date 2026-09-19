@@ -33,6 +33,21 @@ LARGE_HEAD_PREFILL_PATH = "vllm_ascend.device.utils.npu_large_head_prefill_atten
 
 
 class TestAttentionGraphHelpers(TestBase):
+    def test_fia_sparse_config_noncausal_ignores_sliding_window(self):
+        self.assertEqual(
+            attn_module._get_fia_sparse_config(1024, causal=False),
+            (0, attn_module.SWA_INT_MAX, attn_module.SWA_INT_MAX),
+        )
+
+    def test_fia_sparse_config_causal_sliding_window(self):
+        self.assertEqual(attn_module._get_fia_sparse_config(1024, causal=True), (4, 1024, 0))
+
+    def test_fia_sparse_config_causal_full_attention(self):
+        self.assertEqual(
+            attn_module._get_fia_sparse_config(None, causal=True),
+            (3, attn_module.SWA_INT_MAX, attn_module.SWA_INT_MAX),
+        )
+
     def test_cache_graph_workspace_keeps_first_workspace_by_default(self):
         graph_params = SimpleNamespace(workspaces={1: torch.empty(4)})
         candidate_workspace = torch.empty(8)
