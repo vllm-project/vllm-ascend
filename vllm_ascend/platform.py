@@ -1416,8 +1416,15 @@ def _get_default_max_cudagraph_capture_size(vllm_config: VllmConfig) -> int | No
     speculative_config = getattr(vllm_config, "speculative_config", None)
     if speculative_config and speculative_config.num_speculative_tokens:
         decode_query_len += speculative_config.num_speculative_tokens
+    max_cudagraph_capture_size = min(max_num_seqs * decode_query_len, 512)
 
-    return min(max_num_seqs * decode_query_len, 512)
+    # Pad to multiple of 8/16 to avoid eager fallback.
+    if max_cudagraph_capture_size > 4:
+        max_cudagraph_capture_size = (max_cudagraph_capture_size + 7) // 8 * 8
+    if max_cudagraph_capture_size >= 256:
+        max_cudagraph_capture_size = (max_cudagraph_capture_size + 15) // 16 * 16
+
+    return max_cudagraph_capture_size
 
 
 def _config_deprecated_logging():
