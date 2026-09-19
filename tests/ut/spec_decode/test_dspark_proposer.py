@@ -46,6 +46,7 @@ _NUM_SPECULATIVE_TOKENS = 3
 _MAX_BATCH_SIZE = 2
 _MAX_NUM_TOKENS = 8
 _HIDDEN_SIZE = 16
+_MAX_MODEL_LEN = 2048
 
 
 @pytest.mark.parametrize(
@@ -249,7 +250,8 @@ class _DSparkProposerTestBase:
             speculative_config=SimpleNamespace(
                 draft_sample_method=draft_sample_method,
                 draft_model_config=draft_model_config,
-            )
+            ),
+            model_config=SimpleNamespace(max_model_len=_MAX_MODEL_LEN),
         )
 
     @classmethod
@@ -259,6 +261,7 @@ class _DSparkProposerTestBase:
         max_num_tokens: int,
         num_reqs: int,
         block_size: int,
+        max_model_len: int = _MAX_MODEL_LEN,
         hf_config: SimpleNamespace | None = None,
         draft_attn_causal: bool | None = None,
         draft_sample_method: str = "greedy",
@@ -277,6 +280,7 @@ class _DSparkProposerTestBase:
             proposer.num_speculative_tokens = block_size
             proposer.max_batch_size = num_reqs
             proposer.max_num_tokens = max_num_tokens
+            proposer.max_model_len = max_model_len
             proposer.dtype = torch.float32
             proposer.device = device
             proposer.hidden_size = _HIDDEN_SIZE
@@ -581,6 +585,9 @@ class TestDSparkInitialization(_DSparkProposerTestBase):
         assert proposer.num_query_per_req == expected_num_query_per_req
         assert proposer.max_query_tokens == expected_max_query_tokens
         assert proposer._dspark_draft_buffer.shape == (_MAX_BATCH_SIZE, 1 + _NUM_SPECULATIVE_TOKENS)
+        assert torch.all(proposer._request_window_ok)
+        assert torch.all(proposer._request_window_ok_cpu)
+        assert proposer._request_window_mask_enabled is False
 
 
 class TestSetInputsFirstPassOutputs(_DSparkProposerTestBase):
@@ -648,6 +655,81 @@ class TestSetInputsFirstPassOutputs(_DSparkProposerTestBase):
         kwargs = kernel[1,].call_args.kwargs
         assert proposer.draft_attn_groups[0].kv_cache_spec.block_size == 384
         assert kwargs["block_size"] == 128
+        assert kwargs["CHECK_REQUEST_WINDOW"] is False
+
+    def test_short_sequences_skip_request_window_tensor_ops(self, monkeypatch):
+        num_reqs, block_size, max_num_tokens = 4, 5, 256
+        proposer = self._make_proposer(
+            max_num_tokens=max_num_tokens,
+            num_reqs=num_reqs,
+            block_size=block_size,
+        )
+        monkeypatch.setattr(
+            torch,
+            "where",
+            MagicMock(side_effect=AssertionError("short path called torch.where")),
+        )
+
+        _nqt, _ti, cad, _extra = self._invoke_set_inputs_first_pass(
+            proposer,
+            num_reqs=num_reqs,
+            block_size=block_size,
+        )[:4]
+
+        assert proposer._request_window_mask_enabled is False
+        assert torch.equal(cad.seq_lens, torch.full((num_reqs,), 128 + block_size, dtype=torch.int32))
+
+        draft_token_ids = torch.arange(num_reqs * block_size, dtype=torch.int64).view(num_reqs, block_size)
+        original_data_ptr = draft_token_ids.data_ptr()
+        output = proposer.mask_invalid_draft_output(draft_token_ids)
+        assert output.data_ptr() == original_data_ptr
+        assert torch.equal(output, draft_token_ids)
+
+    def test_over_limit_request_disables_whole_dspark_window(self, monkeypatch):
+        kernel = MagicMock()
+        monkeypatch.setattr(
+            "vllm_ascend.spec_decode.dspark_proposer.copy_and_expand_dflash_and_dspark_inputs_kernel",
+            kernel,
+        )
+        num_reqs, block_size, max_num_tokens = 2, 5, 32
+        proposer = self._make_proposer(
+            max_num_tokens=max_num_tokens,
+            num_reqs=num_reqs,
+            block_size=block_size,
+            max_model_len=130,
+        )
+
+        _nqt, _ti, cad, _extra = self._invoke_set_inputs_first_pass(
+            proposer,
+            num_reqs=num_reqs,
+            block_size=block_size,
+            seq_len=128,
+        )[:4]
+
+        assert proposer._request_window_mask_enabled is True
+        assert not torch.any(proposer._request_window_ok[:num_reqs])
+        assert not torch.any(proposer._request_window_ok_cpu[:num_reqs])
+        assert torch.equal(cad.seq_lens, torch.ones(num_reqs, dtype=torch.int32))
+        assert torch.equal(cad._seq_lens_cpu, torch.ones(num_reqs, dtype=torch.int32))
+        assert cad.max_seq_len == 130
+        kwargs = kernel[1,].call_args.kwargs
+        assert kwargs["request_window_ok_ptr"].data_ptr() == proposer._request_window_ok.data_ptr()
+        assert kwargs["padding_slot_id"] == -1
+        assert kwargs["CHECK_REQUEST_WINDOW"] is True
+
+    def test_over_limit_draft_outputs_are_padding(self):
+        proposer = self._make_proposer(max_num_tokens=32, num_reqs=2, block_size=5)
+        proposer._request_window_mask_enabled = True
+        proposer._request_window_ok[:2] = torch.tensor([True, False])
+        draft_token_ids = torch.arange(10, dtype=torch.int64).view(2, 5)
+        proposer._last_draft_probs = torch.ones(2, 5, 7)
+
+        output = proposer.mask_invalid_draft_output(draft_token_ids)
+
+        assert torch.equal(output[0], torch.arange(5, dtype=torch.int64))
+        assert torch.equal(output[1], torch.full((5,), -1, dtype=torch.int64))
+        assert torch.all(proposer._last_draft_probs[0] == 1)
+        assert torch.all(proposer._last_draft_probs[1] == 0)
 
     def test_dcp_passes_parallel_kernel_args_and_delegates_metadata(self, monkeypatch):
         kernel = MagicMock()

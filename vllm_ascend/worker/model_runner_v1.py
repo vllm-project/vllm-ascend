@@ -2053,6 +2053,8 @@ class NPUModelRunner(GPUModelRunner):
                 num_scheduled_tokens=num_scheduled_tokens,
                 num_rejected_tokens_gpu=num_rejected_tokens_gpu,
             )
+            if isinstance(self.drafter, AscendDSparkProposer):
+                draft_token_ids = self.drafter.mask_invalid_draft_output(draft_token_ids)
             if hasattr(self.drafter, "take_last_draft_probs"):
                 draft_probs = self.drafter.take_last_draft_probs()
                 if draft_probs is not None:
