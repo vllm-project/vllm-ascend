@@ -1,3 +1,6 @@
+from functools import wraps
+from typing import Any, cast
+
 import vllm.model_executor.layers.mamba.ops.causal_conv1d as _cc1d
 import vllm.third_party.flash_linear_attention.ops as fla_ops
 import vllm.third_party.flash_linear_attention.ops.fused_recurrent as fla_fused_recurrent
@@ -5,6 +8,7 @@ import vllm.third_party.flash_linear_attention.ops.layernorm_guard as fla_layern
 from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.math_utils import next_power_of_2
+from vllm.v1.worker.gpu.sample import trace_replay
 
 from vllm_ascend.ops.causal_conv1d import (
     causal_conv1d_fn as _npu_causal_conv1d_fn_impl,
@@ -56,6 +60,35 @@ def _npu_causal_conv1d_fn(*args, metadata=None, **kwargs):
 
 _cc1d.causal_conv1d_update = _npu_causal_conv1d_update
 _cc1d.causal_conv1d_fn = _npu_causal_conv1d_fn
+# CUDA accepts a zero-size Triton grid, while Ascend rejects coreDim=0.
+# Both the v1 and v2 Triton patch modules are imported on Ascend, so mark the
+# wrapper to keep this patch idempotent when the second module is loaded.
+if not getattr(trace_replay.apply_trace_tokens, "_vllm_ascend_empty_batch_guard", False):
+    _upstream_apply_trace_tokens = trace_replay.apply_trace_tokens
+
+    @wraps(_upstream_apply_trace_tokens)
+    def apply_trace_tokens(
+        sampled,
+        idx_mapping,
+        trace_token_ids,
+        trace_len,
+        total_len,
+        prompt_len,
+    ) -> None:
+        if sampled.shape[0] == 0:
+            return
+
+        _upstream_apply_trace_tokens(
+            sampled,
+            idx_mapping,
+            trace_token_ids,
+            trace_len,
+            total_len,
+            prompt_len,
+        )
+
+    cast(Any, apply_trace_tokens)._vllm_ascend_empty_batch_guard = True
+    trace_replay.apply_trace_tokens = apply_trace_tokens
 
 fla_layernorm_guard.LayerNormFn = LayerNormFn
 fla_ops.chunk_gated_delta_rule = chunk_gated_delta_rule
