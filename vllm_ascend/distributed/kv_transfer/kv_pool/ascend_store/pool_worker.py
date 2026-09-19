@@ -855,7 +855,7 @@ class KVPoolWorker:
         n_local = int(self.group_num_layers.get(group_id, 0))
         if n_local <= 0:
             return sum(gbl)
-        per_layer = sum(gbl) // n_local
+        per_layer = (sum(gbl) + n_local - 1) // n_local
         n_global = max(total_layers, int(self.num_layers), n_local)
         return per_layer * n_global
 
