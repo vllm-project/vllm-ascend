@@ -19,7 +19,6 @@
 
 from contextlib import AbstractContextManager, contextmanager
 from contextvars import ContextVar
-from dataclasses import replace
 
 import numpy as np
 import torch
@@ -33,7 +32,6 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
-from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import (
     combine_sampled_and_draft_tokens,
     expand_idx_mapping,
@@ -62,17 +60,11 @@ from vllm_ascend.core.profiling_chunk_predictor import (
     _start_profiling_chunk_timing,
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
-from vllm_ascend.utils import (
-    embedding_tp_enable,
-    lmhead_tp_enable,
-    mlp_tp_enable,
-    oproj_tp_enable,
-    set_potential_max_tokens,
-    vllm_version_is,
-)
+from vllm_ascend.utils import lmhead_tp_enable, set_potential_max_tokens, vllm_version_is
 from vllm_ascend.worker.utils import disable_compilation
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state, unwrap_mamba_kv_cache_groups
+from vllm_ascend.worker.v2.dp_utils import dispatch_cg_and_sync_dp
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
@@ -945,18 +937,7 @@ def _dispatch_pcp_and_sync_dp(cudagraph_manager, num_reqs, num_tokens, *args, **
     pcp_num_tokens = _PCP_DISPATCH_NUM_TOKENS.get()
     if pcp_num_tokens is not None:
         num_tokens = pcp_num_tokens
-    batch_desc, num_tokens_across_dp = dispatch_cg_and_sync_dp(cudagraph_manager, num_reqs, num_tokens, *args, **kwargs)
-    if (
-        batch_desc.cg_mode == CUDAGraphMode.NONE
-        and num_tokens_across_dp is not None
-        and (oproj_tp_enable() or embedding_tp_enable() or mlp_tp_enable() or lmhead_tp_enable())
-    ):
-        # v0.28 synchronizes eager token counts without padding them. Reuse
-        # those CPU counts for fine-grained TP collectives spanning DP ranks.
-        num_tokens_padded = int(num_tokens_across_dp.max().item())
-        batch_desc = replace(batch_desc, num_tokens=num_tokens_padded)
-        num_tokens_across_dp.fill_(num_tokens_padded)
-    return batch_desc, num_tokens_across_dp
+    return dispatch_cg_and_sync_dp(cudagraph_manager, num_reqs, num_tokens, *args, **kwargs)
 
 
 if vllm_version_is("0.28.0"):

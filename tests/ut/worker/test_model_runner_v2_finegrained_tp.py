@@ -11,59 +11,12 @@ from unittest.mock import MagicMock, create_autospec, patch
 
 import pytest
 import torch
-from vllm.config import CUDAGraphMode
-from vllm.v1.worker.gpu import dp_utils
-from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import RejectionSampler
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
 
-from vllm_ascend.worker.v2 import model_runner as ascend_model_runner
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
-
-
-@pytest.mark.parametrize("tp_component", [None, "oproj", "embedding", "mlp", "lmhead"])
-@pytest.mark.parametrize("mode", [CUDAGraphMode.NONE, CUDAGraphMode.FULL])
-@pytest.mark.parametrize("counts", [(3, 7), (0, 7), (0, 0), (3,)])
-def test_finegrained_tp_eager_dp_padding(tp_component, mode, counts, monkeypatch):
-    for component in ("oproj", "embedding", "mlp", "lmhead"):
-        monkeypatch.setattr(ascend_model_runner, f"{component}_tp_enable", lambda name=component: name == tp_component)
-
-    def all_reduce(tensor, group):
-        tensor[0] = torch.tensor(counts, dtype=torch.int32)
-        tensor[1].fill_(mode.value)
-
-    collective = MagicMock(side_effect=all_reduce)
-    monkeypatch.setattr(dp_utils, "get_dp_group", lambda: SimpleNamespace(cpu_group=object()))
-    monkeypatch.setattr(dp_utils.dist, "all_reduce", collective)
-    manager = MagicMock()
-    manager.dispatch.side_effect = lambda num_reqs, num_tokens, *args, **kwargs: BatchExecutionDescriptor(
-        cg_mode=mode, num_tokens=num_tokens, num_reqs=num_reqs, num_active_loras=2
-    )
-    with ascend_model_runner.pcp_dispatch_context():
-        desc, across_dp = ascend_model_runner._dispatch_pcp_and_sync_dp(
-            manager,
-            1,
-            counts[0],
-            None,
-            len(counts),
-            0,
-            need_eager=mode == CUDAGraphMode.NONE,
-            num_active_loras=2,
-        )
-
-    assert collective.call_count == int(len(counts) > 1)
-    if len(counts) == 1 or not any(counts):
-        assert across_dp is None
-        assert desc.num_tokens == counts[0]
-        return
-    should_pad = mode != CUDAGraphMode.NONE or tp_component is not None
-    assert desc.num_tokens == (max(counts) if should_pad else counts[0])
-    assert desc.num_reqs == 1
-    assert desc.num_active_loras == 2
-    assert desc.cg_mode == mode
-    assert across_dp.tolist() == ([max(counts)] * len(counts) if should_pad else list(counts))
 
 
 def _make_runner(max_num_reqs=8, decode_query_len=2, vocab=6):

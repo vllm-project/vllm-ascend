@@ -1115,7 +1115,6 @@ def test_pcp_dispatch_preserves_global_batch_and_dummy_count(
         patch.object(vllm_model_runner.GPUModelRunner, "gather_batch_req_state", return_value=(batch, None)),
         patch.object(ascend_model_runner, "dispatch_cg_and_sync_dp") as dispatch,
     ):
-        dispatch.return_value = (SimpleNamespace(cg_mode=CUDAGraphMode.NONE), None)
         with ascend_model_runner.pcp_dispatch_context():
             gathered, uniform = runner.gather_batch_req_state(object(), dummy_run)
             assert gathered is batch
