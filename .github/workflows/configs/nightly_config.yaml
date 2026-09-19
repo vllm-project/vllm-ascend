@@ -225,15 +225,18 @@ a3:
       - name: glm-5.2-w4a8-dspark
         os: linux-aarch64-nightly-a3-16
         config_file_path: GLM-5.2-W4A8-DSpark-A3.yaml
-      - name: glm-5.2-w4a8-mtp
+      - name: glm-5.2-w4a8-mtp-v1-mlp-on
         os: linux-aarch64-nightly-a3-16
-        config_file_path: GLM-5.2-W4A8-MTP-A3.yaml
+        config_file_path: GLM-5.2-W4A8-MTP-A3-V1-mlp-on.yaml
       - name: glm-5.2-w4a8-dspark-v2
         os: linux-aarch64-nightly-a3-16
         config_file_path: GLM-5.2-W4A8-DSpark-A3-V2.yaml
-      - name: glm-5.2-w4a8-mtp-v2
+      - name: glm-5.2-w4a8-mtp-v2-mlp-on
         os: linux-aarch64-nightly-a3-16
-        config_file_path: GLM-5.2-W4A8-MTP-A3-V2.yaml
+        config_file_path: GLM-5.2-W4A8-MTP-A3-V2-mlp-on.yaml
+      - name: glm-5.2-w4a8-mtp-v2-mlp-off
+        os: linux-aarch64-nightly-a3-16
+        config_file_path: GLM-5.2-W4A8-MTP-A3-V2-mlp-off.yaml
       - name: qwen3-235b-a22b-w8a8
         os: linux-aarch64-nightly-a3-16
         config_file_path: Qwen3-235B-A22B-W8A8.yaml
@@ -416,15 +419,9 @@ a3-560t:
       - name: glm-5.2-w4a8-dspark
         os: linux-aarch64-a3-16-cn12-001
         config_file_path: GLM-5.2-W4A8-DSpark-A3.yaml
-      - name: glm-5.2-w4a8-mtp
-        os: linux-aarch64-a3-16-cn12-001
-        config_file_path: GLM-5.2-W4A8-MTP-A3.yaml
       - name: glm-5.2-w4a8-dspark-v2
         os: linux-aarch64-a3-16-cn12-001
         config_file_path: GLM-5.2-W4A8-DSpark-A3-V2.yaml
-      - name: glm-5.2-w4a8-mtp-v2
-        os: linux-aarch64-a3-16-cn12-001
-        config_file_path: GLM-5.2-W4A8-MTP-A3-V2.yaml
   multi_card:
     test_config:
       # pytest-driven tests
