@@ -763,6 +763,43 @@ at::Tensor npu_recurrent_gated_delta_rule_meta(
     return output;
 }
 
+at::Tensor npu_rearrange_qkv_meta(
+    const at::Tensor &x, int64_t q_dim, int64_t k_dim, int64_t v_dim)
+{
+    (void)q_dim;
+    (void)k_dim;
+    (void)v_dim;
+    return at::empty_symint(c10::SymDimVector{x.sym_numel()}, x.options());
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_rearrange_qkv_and_gdn_gating_meta(
+    const at::Tensor &x,
+    const at::Tensor &a,
+    const at::Tensor &b,
+    const at::Tensor &a_log,
+    const at::Tensor &dt_bias,
+    int64_t q_dim,
+    int64_t k_dim,
+    int64_t v_dim,
+    double beta,
+    double threshold)
+{
+    (void)b;
+    (void)a_log;
+    (void)dt_bias;
+    (void)q_dim;
+    (void)k_dim;
+    (void)v_dim;
+    (void)beta;
+    (void)threshold;
+    const c10::SymInt tokens = a.sym_size(0);
+    const c10::SymInt num_heads = a.sym_size(1);
+    return std::make_tuple(
+        at::empty_symint(c10::SymDimVector{x.sym_numel()}, x.options()),
+        at::empty_symint(c10::SymDimVector{tokens, num_heads}, x.options().dtype(at::kFloat)),
+        at::empty_symint(c10::SymDimVector{tokens, num_heads}, x.options()));
+}
+
 at::Tensor recurrent_kda_meta(
     const at::Tensor& query,
     const at::Tensor& key,
@@ -2165,6 +2202,11 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_gemma_rms_norm", &vllm_ascend::meta::npu_gemma_rms_norm_meta);
     // recurrent_gated_delta_rule meta implementation
     ops.impl("npu_recurrent_gated_delta_rule", &vllm_ascend::meta::npu_recurrent_gated_delta_rule_meta);
+    // rearrange_qkv meta implementation
+    ops.impl("npu_rearrange_qkv", &vllm_ascend::meta::npu_rearrange_qkv_meta);
+    ops.impl(
+        "npu_rearrange_qkv_and_gdn_gating",
+        &vllm_ascend::meta::npu_rearrange_qkv_and_gdn_gating_meta);
     ops.impl("recurrent_kda", &vllm_ascend::meta::recurrent_kda_meta);
     ops.impl("dequant_situ_quant", &vllm_ascend::meta::dequant_situ_quant_meta);
     ops.impl("situ_mx_quant", &vllm_ascend::meta::situ_mx_quant_meta);

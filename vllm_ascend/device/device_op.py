@@ -747,6 +747,30 @@ class BaseDeviceAdaptor:
         return fused_gdn_gating_patch(A_log, a, b, dt_bias)
 
     @staticmethod
+    def rearrange_qkv(
+        mixed_qkv: torch.Tensor,
+        q_dim: int,
+        k_dim: int,
+        v_dim: int,
+    ) -> torch.Tensor | None:
+        """Return ``None`` when this device family has no DMA implementation."""
+        return None
+
+    @staticmethod
+    def rearrange_qkv_and_fused_gdn_gating(
+        mixed_qkv: torch.Tensor,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        A_log: torch.Tensor,
+        dt_bias: torch.Tensor,
+        q_dim: int,
+        k_dim: int,
+        v_dim: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+        """Return ``None`` when this device family has no fused implementation."""
+        return None
+
+    @staticmethod
     def split_qkv_rmsnorm_rope(
         input,
         q_weight,
@@ -790,6 +814,39 @@ class BaseDeviceAdaptor:
     ) -> torch.Tensor:
         tensor.index_fill_(dim, indices, value)
         return tensor
+
+
+class A2A3DeviceAdaptor(BaseDeviceAdaptor):
+    @staticmethod
+    def rearrange_qkv(
+        mixed_qkv: torch.Tensor,
+        q_dim: int,
+        k_dim: int,
+        v_dim: int,
+    ) -> torch.Tensor:
+        return torch.ops._C_ascend.npu_rearrange_qkv(mixed_qkv, q_dim, k_dim, v_dim)
+
+    @staticmethod
+    def rearrange_qkv_and_fused_gdn_gating(
+        mixed_qkv: torch.Tensor,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        A_log: torch.Tensor,
+        dt_bias: torch.Tensor,
+        q_dim: int,
+        k_dim: int,
+        v_dim: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        return torch.ops._C_ascend.npu_rearrange_qkv_and_gdn_gating(
+            mixed_qkv,
+            a,
+            b,
+            A_log,
+            dt_bias,
+            q_dim,
+            k_dim,
+            v_dim,
+        )
 
 
 class A5DeviceAdaptor(BaseDeviceAdaptor):
@@ -1530,7 +1587,7 @@ class Ascend310PDeviceAdaptor(BaseDeviceAdaptor):
 
 def get_device_adaptor() -> type["BaseDeviceAdaptor"]:
     adaptor_by_family = {
-        DeviceAdaptorFamily.STANDARD: BaseDeviceAdaptor,
+        DeviceAdaptorFamily.STANDARD: A2A3DeviceAdaptor,
         DeviceAdaptorFamily.FP8_OPTIMIZED: A5DeviceAdaptor,
         DeviceAdaptorFamily.COMPATIBILITY: Ascend310PDeviceAdaptor,
     }
