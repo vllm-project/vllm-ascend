@@ -559,7 +559,9 @@ def transdata(nd_mat, block_size: tuple = (16, 16)):
     c = round_up(nd_mat.shape[1], block_size[1])
     r_pad = r - nd_mat.shape[0]
     c_pad = c - nd_mat.shape[1]
-    nd_mat = F.pad(nd_mat, (0, r_pad, 0, c_pad))
+    # F.pad 4-tuple is (last_dim_left, last_dim_right, dim-2_left, dim-2_right):
+    # pad columns by c_pad and rows by r_pad to reach (r, c).
+    nd_mat = F.pad(nd_mat, (0, c_pad, 0, r_pad))
     nz_mat = torch.permute(
         torch.reshape(
             nd_mat,
