@@ -63,13 +63,6 @@ msgid "### 3.1 Model Weight"
 msgstr "### 3.1 模型权重"
 
 msgid ""
-"- `DeepSeek-OCR-2`: [Download model weight](https://huggingface.co/deepseek-"
-"ai/DeepSeek-OCR-2)."
-msgstr ""
-"- `DeepSeek-OCR-2`：[下载模型权重](https://huggingface.co/deepseek-ai/DeepSeek-"
-"OCR-2)。"
-
-msgid ""
 "It is recommended to download the model weight to the shared directory of "
 "multiple nodes, such as `/root/.cache/`."
 msgstr "建议将模型权重下载到多节点的共享目录中，例如 `/root/.cache/`。"
@@ -132,9 +125,6 @@ msgstr "推荐使用单节点部署。"
 msgid "### 5.3 Prefill-Decode Disaggregation"
 msgstr "### 5.3 预填充-解码分离"
 
-msgid "We don't need to Prefill-Decode disaggregation"
-msgstr "我们不需要进行预填充-解码分离"
-
 msgid "## 6 Functional Verification"
 msgstr "## 6 功能验证"
 
@@ -162,9 +152,6 @@ msgstr "2. 执行后，您可以获得结果，以下是 `DeepSeek-OCR-2` 的结
 
 msgid "## 8 Performance Evaluation"
 msgstr "## 8 性能评估"
-
-msgid "### Using AISBench"
-msgstr "### 使用 AISBench"
 
 msgid ""
 "Refer to [Using AISBench for performance "
@@ -291,3 +278,28 @@ msgid ""
 msgstr ""
 "根据您的机器类型选择镜像，并在您的节点上启动docker镜像，请参考[使用docker](../../getting_started/installation.md#installation-"
 "prebuilt-image)。"
+
+msgid "|  Weight Version  | Download Links |"
+msgstr "|  权重版本  | 下载链接 |"
+
+msgid ""
+"| `DeepSeek-OCR-2` | [Hugging Face](https://huggingface.co/deepseek-"
+"ai/DeepSeek-OCR-2) |"
+msgstr ""
+"| `DeepSeek-OCR-2` | [Hugging Face](https://huggingface.co/deepseek-"
+"ai/DeepSeek-OCR-2) |"
+
+msgid ""
+">**Path description**: Download the model weights to a directory of your "
+"choice and record it. Ensure the model path in the subsequent deployment "
+"command matches this directory."
+msgstr ">**路径说明**：将模型权重下载到您选择的目录并记录该路径。请确保后续部署命令中的模型路径与此目录一致。"
+
+msgid "Prefill-Decode disaggregation is not required."
+msgstr "无需进行 Prefill-Decode 分离部署。"
+
+msgid "### 7.1 Using AISBench"
+msgstr "### 7.1 使用 AISBench"
+
+msgid "### 8.1 Using AISBench"
+msgstr "### 8.1 使用 AISBench"

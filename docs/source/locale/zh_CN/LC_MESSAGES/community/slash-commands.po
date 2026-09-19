@@ -350,5 +350,5 @@ msgstr ""
 "变更自动触发它。有关支持的场景和本地命令，请参阅[运行 "
 "doctest](../developer_guide/contribution/testing.md#run-doctest)。"
 
-msgid "| `schedule_doctest.yaml` | `/rerun` command runs |"
-msgstr "| `schedule_doctest.yaml` | `/rerun` 命令运行 |"
+msgid "| `schedule_doc_getting_started_test.yaml` | `/rerun` command runs |"
+msgstr "| `schedule_doc_getting_started_test.yaml` | `/rerun` 命令运行 |"

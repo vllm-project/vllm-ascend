@@ -70,15 +70,6 @@ msgid "### 3.1 Model Weight"
 msgstr "### 3.1 模型权重"
 
 msgid ""
-"- `GLM-5.3-Flash-w8a8-mxfp8 (Ascend950DT mxfp8 Quantized)`: requires 1 Ascend950DT (96GB × 8) node.[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8-mxfp8).\n"
-"- `GLM-5.3-Flash-w8a8`: requires 1 Atlas 800 A3 (128GB × 8) node.[Download model weight](https://modelers.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8).\n"
-"- `GLM-5.3-Flash-w8a8`: requires 2 Atlas 800 A2 (64GB × 16) nodes.[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8)."
-msgstr ""
-"- `GLM-5.3-Flash-w8a8-mxfp8 (Ascend950DT mxfp8 量化版)`：需要 1 个 Ascend950DT（96GB × 8）节点。[下载模型权重](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8-mxfp8)。\n"
-"- `GLM-5.3-Flash-w8a8`：需要 1 个 Atlas 800 A3（128GB × 8）节点。[下载模型权重](https://modelers.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8)。\n"
-"- `GLM-5.3-Flash-w8a8`：需要 2 个 Atlas 800 A2（64GB × 16）节点。[下载模型权重](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8)。"
-
-msgid ""
 "- You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to "
 "quantize the model directly."
 msgstr ""
@@ -95,20 +86,8 @@ msgstr "## 4 安装"
 msgid "### 4.1 Docker Image Installation"
 msgstr "### 4.1 Docker 镜像安装"
 
-msgid "=== \"Ascend950DT series\""
-msgstr "=== \"Ascend950DT 系列\""
-
-msgid "Start the docker image on each node."
-msgstr "在每个节点上启动 docker 镜像。"
-
 msgid "=== \"A3 series\""
 msgstr "=== \"A3 系列\""
-
-msgid "Start the docker image on each node."
-msgstr "在每个节点上启动 docker 镜像。"
-
-msgid "=== \"A2 series\""
-msgstr "=== \"A2 系列\""
 
 msgid "Start the docker image on each node."
 msgstr "在每个节点上启动 docker 镜像。"
@@ -118,17 +97,6 @@ msgstr "## 5 在线服务部署"
 
 msgid "### 5.1 Single-Node Online Deployment"
 msgstr "### 5.1 单节点在线部署"
-
-msgid "=== \"Ascend950DT series\""
-msgstr "=== \"Ascend950DT 系列\""
-
-msgid ""
-"- Quantized model `GLM-5.3-Flash-w8a8-mxfp8` can be deployed on 1 "
-"Ascend950DT (96GB × 8) ."
-msgstr "- 量化模型 `GLM-5.3-Flash-w8a8-mxfp8` 可以部署在 1 个 Ascend950DT（96GB × 8）上。"
-
-msgid "Run the following script to execute online inference."
-msgstr "运行以下脚本执行在线推理。"
 
 msgid "=== \"Atlas 800 A3 series\""
 msgstr "=== \"Atlas 800 A3 系列\""
@@ -140,9 +108,6 @@ msgstr "- 量化模型 `GLM-5.3-Flash-w8a8` 可以部署在 1 个 A3（64GB × 1
 msgid "Run the following script to execute online inference."
 msgstr "运行以下脚本执行在线推理。"
 
-msgid "#### Key Parameter Descriptions"
-msgstr "#### 关键参数说明"
-
 msgid ""
 "Only the key parameters specific to this model/scenario are described below."
 " `max-model-len` and `max-num-seqs` need to be set according to the actual "
@@ -151,21 +116,6 @@ msgstr "下面仅描述该模型/场景特有的关键参数。`max-model-len` �
 
 msgid "**Model-specific parameters:**"
 msgstr "**模型特有参数：**"
-
-msgid ""
-"- `--data-parallel-size 1`: Runs a single DP rank. `--tensor-parallel-size` is 8 on Ascend950DT and 16 on Atlas 800 A3. This layout is recommended to balance memory capacity and compute efficiency for the w8a8 weights.\n"
-"- `--enable-expert-parallel`: Must be enabled for the MoE architecture of GLM-5.3-Flash.\n"
-"- `--quantization ascend`: Enables Ascend quantization for the w8a8 quantized weights.\n"
-"- `--compilation-config '{\"cudagraph_mode\": \"FULL_DECODE_ONLY\"}'`: Enables graph capture for the decode phase only, improving decode performance by reducing kernel launch overhead.\n"
-"- `--limit-mm-per-prompt '{\"image\": 1, \"video\": 0}'`: For text-only deployment, --limit-mm-per-prompt can be omitted. For multimodal deployment, configure this parameter according to the actual request shape. For example, use --limit-mm-per-prompt '{\"image\":2,\"video\":0}' for two-image requests, and use --limit-mm-per-prompt '{\"image\":0,\"video\":1}' for one-video requests.\n"
-"- `--speculative-config '{\"num_speculative_tokens\": 3, \"method\": \"deepseek_mtp\", \"enforce_eager\": true}'`: Enables Multi-Token Prediction (MTP) speculative decoding with the DeepSeek-style MTP draft head of GLM-5.3-Flash. `num_speculative_tokens` (3-5) controls how many tokens are speculated per step; `enforce_eager: true` is required because GLM-5.3-Flash does not support graph-mode speculative decoding."
-msgstr ""
-"- `--data-parallel-size 1`：运行单个 DP rank。`--tensor-parallel-size` 在 Ascend950DT 上为 8，在 Atlas 800 A3 上为 16。建议采用此布局以平衡 w8a8 权重的内存容量和计算效率。\n"
-"- `--enable-expert-parallel`：对于 GLM-5.3-Flash 的 MoE 架构，必须启用此参数。\n"
-"- `--quantization ascend`：为 w8a8 量化权重启用 Ascend 量化。\n"
-"- `--compilation-config '{\"cudagraph_mode\": \"FULL_DECODE_ONLY\"}'`：仅对解码阶段启用图捕获，通过减少内核启动开销来提升解码性能。\n"
-"- `--limit-mm-per-prompt '{\"image\": 1, \"video\": 0}'`：对于纯文本部署，可以省略 --limit-mm-per-prompt。对于多模态部署，请根据实际请求形态配置此参数。例如，对于双图像请求，使用 --limit-mm-per-prompt '{\"image\":2,\"video\":0}'；对于单视频请求，使用 --limit-mm-per-prompt '{\"image\":0,\"video\":1}'。\n"
-"- `--speculative-config '{\"num_speculative_tokens\": 3, \"method\": \"deepseek_mtp\", \"enforce_eager\": true}'`：启用基于 GLM-5.3-Flash 的 DeepSeek 风格 MTP 草稿头的多令牌预测（MTP）投机解码。`num_speculative_tokens`（3-5）控制每步推测的令牌数量；必须设置 `enforce_eager: true`，因为 GLM-5.3-Flash 不支持图模式投机解码。"
 
 msgid "### 5.2 Multi-Node Deployment"
 msgstr "### 5.2 多节点部署"
@@ -282,3 +232,61 @@ msgstr "- **问：如何为 GLM-5.3-Flash 启用函数调用？**"
 
 msgid "A: Please add following configurations in vLLM startup command"
 msgstr "答：请在 vLLM 启动命令中添加以下配置"
+
+msgid ""
+"- `GLM-5.3-Flash-w8a8-mxfp8 (950DT Products mxfp8 Quantized)`: requires 1 950DT Products (96GB × 8) node.[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8-mxfp8).\n"
+"- `GLM-5.3-Flash-w8a8`: requires 1 Atlas 800 A3 (128GB × 8) node.[Download model weight](https://modelers.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8).\n"
+"- `GLM-5.3-Flash-w8a8`: requires 2 Atlas 800 A2 (64GB × 16) nodes.[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8)."
+msgstr ""
+"- `GLM-5.3-Flash-w8a8-mxfp8 (950DT Products mxfp8 量化)`: 需要 1 个 950DT Products (96GB × 8) 节点。[下载模型权重](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8-mxfp8)。\n"
+"- `GLM-5.3-Flash-w8a8`: 需要 1 个 Atlas 800 A3 (128GB × 8) 节点。[下载模型权重](https://modelers.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8)。\n"
+"- `GLM-5.3-Flash-w8a8`: 需要 2 个 Atlas 800 A2 (64GB × 16) 节点。[下载模型权重](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8)。"
+
+msgid "### 3.2 Verify Multi-node Communication (Optional)"
+msgstr "### 3.2 验证多节点通信（可选）"
+
+msgid ""
+"If you want to deploy multi-node environment, you need to verify multi-node "
+"communication according to [verify multi-node communication "
+"environment](../../getting_started/installation.md#installation-multi-node-"
+"interconnect)."
+msgstr ""
+"如果您想部署多节点环境，需要根据[验证多节点通信环境](../../getting_started/installation.md#installation-"
+"multi-node-interconnect)验证多节点通信。"
+
+msgid "=== \"950DT Products\""
+msgstr "=== \"950DT Products\""
+
+msgid ""
+"Do not set `enable_thinking: false` / `thinking: false` for GLM-5.3-Flash, "
+"otherwise the output quality may degrade."
+msgstr ""
+"请勿为 GLM-5.3-Flash 设置 `enable_thinking: false` / `thinking: "
+"false`，否则输出质量可能会下降。"
+
+msgid ""
+"- Quantized model `GLM-5.3-Flash-w8a8-mxfp8` can be deployed on 1 950DT "
+"Products (96GB × 8) ."
+msgstr ""
+"- 量化模型 `GLM-5.3-Flash-w8a8-mxfp8` 可部署在 1 个 950DT Products (96GB × 8) 上。"
+
+msgid ""
+"- `--data-parallel-size 1`: Runs a single DP rank. `--tensor-parallel-size` is 8 on 950DT Products and 16 on Atlas 800 A3. This layout is recommended to balance memory capacity and compute efficiency for the w8a8 weights.\n"
+"- `--enable-expert-parallel`: Must be enabled for the MoE architecture of GLM-5.3-Flash.\n"
+"- `--quantization ascend`: Enables Ascend quantization for the w8a8 quantized weights.\n"
+"- `--compilation-config '{\"cudagraph_mode\": \"FULL_DECODE_ONLY\"}'`: Enables graph capture for the decode phase only, improving decode performance by reducing kernel launch overhead.\n"
+"- `--limit-mm-per-prompt '{\"image\": 1, \"video\": 0}'`: For text-only deployment, --limit-mm-per-prompt can be omitted. For multimodal deployment, configure this parameter according to the actual request shape. For example, use --limit-mm-per-prompt '{\"image\":2,\"video\":0}' for two-image requests, and use --limit-mm-per-prompt '{\"image\":0,\"video\":1}' for one-video requests.\n"
+"- `--speculative-config '{\"num_speculative_tokens\": 3, \"method\": \"deepseek_mtp\", \"enforce_eager\": true}'`: Enables Multi-Token Prediction (MTP) speculative decoding with the DeepSeek-style MTP draft head of GLM-5.3-Flash. `num_speculative_tokens` (3-5) controls how many tokens are speculated per step; `enforce_eager: true` is required because GLM-5.3-Flash does not support graph-mode speculative decoding."
+msgstr ""
+"- `--data-parallel-size 1`：运行单个 DP rank。`--tensor-parallel-size` 在 950DT Products 上为 8，在 Atlas 800 A3 上为 16。推荐使用此布局，以平衡 w8a8 权重的内存容量和计算效率。\n"
+"- `--enable-expert-parallel`：对于 GLM-5.3-Flash 的 MoE 架构，必须启用此项。\n"
+"- `--quantization ascend`：为 w8a8 量化权重启用 Ascend 量化。\n"
+"- `--compilation-config '{\"cudagraph_mode\": \"FULL_DECODE_ONLY\"}'`：仅对 decode 阶段启用图捕获，通过减少 kernel 启动开销来提升 decode 性能。\n"
+"- `--limit-mm-per-prompt '{\"image\": 1, \"video\": 0}'`：对于纯文本部署，可省略 --limit-mm-per-prompt。对于多模态部署，请根据实际请求形态配置此参数。例如，对于双图请求使用 --limit-mm-per-prompt '{\"image\":2,\"video\":0}'，对于单视频请求使用 --limit-mm-per-prompt '{\"image\":0,\"video\":1}'。\n"
+"- `--speculative-config '{\"num_speculative_tokens\": 3, \"method\": \"deepseek_mtp\", \"enforce_eager\": true}'`：使用 GLM-5.3-Flash 的 DeepSeek 风格 MTP draft head 启用多 token 预测（MTP）投机解码。`num_speculative_tokens`（3-5）控制每步投机多少个 token；`enforce_eager: true` 是必需的，因为 GLM-5.3-Flash 不支持图模式投机解码。"
+
+msgid "- **Q: Does GLM-5.3-Flash support `enable_thinking: false`?**"
+msgstr "- **问：GLM-5.3-Flash 是否支持 `enable_thinking: false`？**"
+
+msgid "A: No, GLM-5.3-Flash does not support `enable_thinking`."
+msgstr "答：不支持，GLM-5.3-Flash 不支持 `enable_thinking`。"
