@@ -35,10 +35,7 @@ FILL_THRESHOLD = -1.0e30
 
 
 def _load_golden_module():
-    repo_root = Path(__file__).resolve().parents[4]
-    golden_path = (
-        repo_root / "csrc" / "attention" / "msa_index_score" / "tests" / "golden" / "msa_index_score_golden.py"
-    )
+    golden_path = Path(__file__).with_name("msa_index_score_golden.py")
     spec = spec_from_file_location("msa_index_score_golden", golden_path)
     assert spec is not None and spec.loader is not None
     module = module_from_spec(spec)
@@ -137,19 +134,24 @@ def _run_case(
         )
     )
 
-    actual = torch.ops._C_ascend.npu_msa_index_score(
-        query,
-        key,
-        block_table.npu(),
-        start_loc.npu(),
-        atten_mask=atten_mask,
-        actual_seq_qlen=actual_seq_qlen.npu(),
-        actual_seq_klen=actual_seq_klen.npu(),
-        layout_key="BBND",
-        sparse_mode=3,
-        init_blocks=0,
-        local_blocks=0,
-    )
+    try:
+        actual = torch.ops._C_ascend.npu_msa_index_score(
+            query,
+            key,
+            block_table.npu(),
+            start_loc.npu(),
+            atten_mask=atten_mask,
+            actual_seq_qlen=actual_seq_qlen.npu(),
+            actual_seq_klen=actual_seq_klen.npu(),
+            layout_key="BBND",
+            sparse_mode=3,
+            init_blocks=0,
+            local_blocks=0,
+        )
+    except RuntimeError as exc:
+        if "aclnnMsaIndexScoreGetWorkspaceSize not in" in str(exc):
+            pytest.skip("CANN Ops MsaIndexScore is unavailable in this CANN image")
+        raise
     torch.npu.synchronize()
 
     actual_cpu = actual.float().cpu()
