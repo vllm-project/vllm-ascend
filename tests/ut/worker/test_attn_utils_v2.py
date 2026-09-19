@@ -940,19 +940,10 @@ def test_main_entry_allocates_and_reshapes_kvpp_views(monkeypatch, packed):
 
     monkeypatch.setattr(attn_utils, "allocate_kvpp_cache", allocate)
     assert upstream_model_runner.get_kv_cache_spec is patch_attn_utils.get_kv_cache_spec
-    if vllm_version_is("0.28.0"):
-        # vLLM #51718 kept the private split entry points on the 0.28.0 lane;
-        # Ascend replaces those instead of installing a public allocate_kv_cache.
-        assert upstream_attn_utils._allocate_kv_cache is patch_attn_utils._allocate_kv_cache
-        assert upstream_attn_utils._reshape_kv_cache is patch_attn_utils._reshape_kv_cache_v2
-        caches = patch_attn_utils.allocate_kv_cache_main(
-            make_cache_config(specs), device=torch.device("cpu"), layout=None, kernel_block_sizes=[2]
-        )
-    else:
-        assert upstream_attn_utils.allocate_kv_cache is patch_attn_utils.allocate_kv_cache_main
-        caches = upstream_attn_utils.allocate_kv_cache(
-            make_cache_config(specs), device=torch.device("cpu"), layout=None, kernel_block_sizes=[2]
-        )
+    assert upstream_attn_utils.allocate_kv_cache is patch_attn_utils.allocate_kv_cache_main
+    caches = upstream_attn_utils.allocate_kv_cache(
+        make_cache_config(specs), device=torch.device("cpu"), layout=None, kernel_block_sizes=[2]
+    )
     assert_attention_cache_views(caches, raw, packed)
 
 
