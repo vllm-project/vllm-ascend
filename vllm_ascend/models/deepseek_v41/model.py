@@ -48,9 +48,9 @@ from vllm.model_executor.models.interfaces import (
 from vllm.model_executor.models.utils import PPMissingLayer, is_pp_missing_parameter, make_layers, maybe_prefix
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.attention.dsa_attn_kv_plan import get_dsv4_attn_kv_dtype
 from vllm_ascend.attention.dsa_v41 import (
     DeepseekV41CacheLayer,
 )
@@ -605,11 +605,11 @@ class DeepseekV41SWAAttention(nn.Module):
             apply_yarn_scaling=use_yarn,
             rope_groups=["default"],
         )
-        k_dtype = get_dsv4_attn_kv_dtype(vllm_config)
+        kv_cache_dtype = kv_cache_dtype_str_to_dtype(vllm_config.cache_config.cache_dtype, vllm_config.model_config)
         swa_cache_layer = self.swa_cache_cls(
             head_dim=self.head_dim,
             window_size=self.window_size,
-            dtype=k_dtype,
+            dtype=kv_cache_dtype,
             prefix=f"{prefix}.swa_cache",
             cache_config=cache_config,
         )
