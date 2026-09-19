@@ -1004,6 +1004,9 @@ def _make_mla_layer(*, fa_quant: bool = False, sparse_c8: bool = False):
         head_size=128,
         dtype=torch.bfloat16,
         cache_dtype_str="auto",
+        model_version=None,
+        non_causal_multi_token_decode=False,
+        **({"compress_ratio": 1} if vllm_version_is("0.28.0") else {"tokens_per_state": 1}),
     )
     return layer
 
