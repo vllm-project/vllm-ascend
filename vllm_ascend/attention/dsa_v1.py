@@ -852,7 +852,9 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             # Short prefills may use the decode path, but PCP global/local
             # positions differ and must not overwrite each other's RoPE.
             is_prefilling = common_attn_metadata.is_prefilling
-            not_prefilling = is_prefilling is None or not bool(is_prefilling[:num_reqs].any())
+            not_prefilling = self.num_prefills == 0 and (
+                is_prefilling is None or not bool(is_prefilling[:num_reqs].any())
+            )
             cos, sin = get_cos_and_sin_dsa(
                 input_positions,
                 use_cache=not_prefilling,
