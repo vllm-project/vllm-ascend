@@ -9,6 +9,10 @@
 
 二分以 **commit 为最小单位**,每一轮复用现有 nightly 入口(单机 `test_single_node.py` / 多机 `test_multi_node.py`)**完整运行整个 YAML 文件的所有用例**,保证复现环境与 nightly 一致。
 
+启动二分时会先把所选 YAML 复制到 `BISECT_WORK_DIR/frozen_configs/`。后续 checkout
+只切换候选实现，不切换实验定义；因此候选 commit 即使早于该 nightly YAML 的合入，
+仍会运行 PR 头选择的同一份配置。
+
 > 注意:nightly 无法精确到单个 case 粒度,所以本工具**按整个 YAML 文件判定好坏**(文件内任一 case 失败即判 FAIL),不能只跑某一个 case。
 
 ---
