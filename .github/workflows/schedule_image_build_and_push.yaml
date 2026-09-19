@@ -82,17 +82,17 @@ on:
       torch_npu:
         description: 'Torch NPU version and date (JSON array: ["date", "version"])'
         required: false
-        default: '["20260725.3", "26.1.0"]'
+        default: '["20260918.5", "26.2.0"]'
         type: string
       cann:
         description: 'CANN URL, version and image tag (JSON array: ["url", "version", "image_tag"])'
         required: false
-        default: '["swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann", "9.1.0_20260731131545"]'
+        default: '["swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann", "9.2.0_20260918144839"]'
         type: string
       triton_ascend:
         description: 'Triton Ascend version and package version (JSON array: ["version", "package_version"])'
         required: false
-        default: '["", "3.2.2"]'
+        default: '["20260918000216", "3.6.0+dev20260918000216"]'
         type: string
       chips:
         description: 'Chips to build (JSON array: ["a2","a3","310p","a5"]). Default builds all.'
@@ -144,8 +144,8 @@ jobs:
       suffix: ${{ matrix.build_meta.suffix }}
       soc: ${{ matrix.build_meta.soc }}
       base_os: ${{ matrix.build_meta.base_os }}
-      cann_image_version: ${{ inputs.build_type == 'daily' && fromJSON(inputs.cann || '["swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann", "9.1.0_20260731131545"]')[1] || (fromJSON(inputs.cann || '["swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann", "2026.08.03", "9.1.0"]')[2] || '9.1.0') }}
-      cann_swr_url: ${{ inputs.build_type == 'daily' && fromJSON(inputs.cann || '["swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann", "9.1.0_20260731131545"]')[0] || 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann' }}
+      cann_image_version: ${{ inputs.build_type == 'daily' && fromJSON(inputs.cann || '["swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann", "9.2.0_20260918144839"]')[1] || (fromJSON(inputs.cann || '["swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann", "2026.08.03", "9.2.0"]')[2] || '9.2.0') }}
+      cann_swr_url: ${{ inputs.build_type == 'daily' && fromJSON(inputs.cann || '["swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann", "9.2.0_20260918144839"]')[0] || 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann' }}
       
       # ===== Dynamic SWR repositories based on build_type =====
       # Final multi-arch images are pushed to swr.cn-north-12 with the same repo
@@ -160,19 +160,19 @@ jobs:
       branch_ref: ${{ inputs.branch != 'none' && inputs.branch || '' }}
       schedule_tag_pattern: 'main'
       build_type: ${{ inputs.build_type || 'release' }}
-      cann_version: ${{ fromJSON(inputs.cann || '["swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann", "9.1.0_20260731131545"]')[1] }}
+      cann_version: ${{ fromJSON(inputs.cann || '["swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann", "9.2.0_20260918144839"]')[1] }}
       memcache_version: ${{ fromJSON(inputs.mem_deps || '{"memcache":["20260811.14","1.2.0"],"memfabric":["20260811.7","1.2.0"]}').memcache[1] }}
       memcache_date: ${{ fromJSON(inputs.mem_deps || '{"memcache":["20260811.14","1.2.0"],"memfabric":["20260811.7","1.2.0"]}').memcache[0] }}
       memfabric_version: ${{ fromJSON(inputs.mem_deps || '{"memcache":["20260811.14","1.2.0"],"memfabric":["20260811.7","1.2.0"]}').memfabric[1] }}
       memfabric_date: ${{ fromJSON(inputs.mem_deps || '{"memcache":["20260811.14","1.2.0"],"memfabric":["20260811.7","1.2.0"]}').memfabric[0] }}
-      torch_npu_version: ${{ fromJSON(inputs.torch_npu || '["20260725.3", "26.1.0"]')[1] }}
-      torch_npu_date: ${{ fromJSON(inputs.torch_npu || '["20260725.3", "26.1.0"]')[0] }}
-      triton_ascend_version: ${{ fromJSON(inputs.triton_ascend || '["", "3.2.2"]')[0] }}
-      triton_ascend_package_version: ${{ fromJSON(inputs.triton_ascend || '["", "3.2.2"]')[1] }}
+      torch_npu_version: ${{ fromJSON(inputs.torch_npu || '["20260918.5", "26.2.0"]')[1] }}
+      torch_npu_date: ${{ fromJSON(inputs.torch_npu || '["20260918.5", "26.2.0"]')[0] }}
+      triton_ascend_version: ${{ fromJSON(inputs.triton_ascend || '["20260918000216", "3.6.0%2Bdev20260918000216"]')[0] }}
+      triton_ascend_package_version: ${{ fromJSON(inputs.triton_ascend || '["20260918000216", "3.6.0%2Bdev20260918000216"]')[1] }}
       
       build_args: |
         ${{ inputs.build_type == 'daily' && format('BASE_OS={0}', contains(matrix.build_meta.suffix, 'openeuler') && 'openeuler24.03-lts-sp4' || 'ubuntu24.04') || '' }}
-        ${{ inputs.build_type == 'daily' && format('CANN_VERSION={0}', fromJSON(inputs.cann || '["swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann", "9.1.0_20260731131545"]')[1]) || '' }}
+        ${{ inputs.build_type == 'daily' && format('CANN_VERSION={0}', fromJSON(inputs.cann || '["swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann", "9.2.0_20260918144839"]')[1]) || '' }}
     secrets:
       SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
       SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
@@ -197,8 +197,8 @@ jobs:
       suffix: ${{ matrix.build_meta.suffix }}
       soc: ${{ matrix.build_meta.soc }}
       base_os: ${{ matrix.build_meta.base_os }}
-      cann_image_version: ${{ inputs.build_type == 'daily' && fromJSON(inputs.cann || '["swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann", "9.1.0_20260731131545"]')[1] || (fromJSON(inputs.cann || '["swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann", "2026.08.03", "9.1.0"]')[2] || '9.1.0') }}
-      cann_swr_url: ${{ inputs.build_type == 'daily' && fromJSON(inputs.cann || '["swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann", "9.1.0_20260731131545"]')[0] || 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann' }}
+      cann_image_version: ${{ inputs.build_type == 'daily' && fromJSON(inputs.cann || '["swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann", "9.2.0_20260918144839"]')[1] || (fromJSON(inputs.cann || '["swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann", "2026.08.03", "9.2.0"]')[2] || '9.2.0') }}
+      cann_swr_url: ${{ inputs.build_type == 'daily' && fromJSON(inputs.cann || '["swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann", "9.2.0_20260918144839"]')[0] || 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann' }}
       swr_registry: 'swr.cn-north-12.myhuaweicloud.com'
       swr_temp_repo: ${{ inputs.build_type == 'daily' && 'swr.cn-north-12.myhuaweicloud.com/atlas_inference/vllm-atlas-temp' || 'swr.cn-north-12.myhuaweicloud.com/atlas_ci/vllm-atlas-temp' }}
       should_push: true
@@ -208,20 +208,21 @@ jobs:
       workflow_dispatch_tag: ''
       branch_ref: ''
       build_type: ${{ inputs.build_type || 'release' }}
-      cann_version: ${{ fromJSON(inputs.cann || '["swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann", "9.1.0_20260731131545"]')[1] }}
+      cann_version: ${{ fromJSON(inputs.cann || '["swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann", "9.2.0_20260918144839"]')[1] }}
       memcache_version: ${{ fromJSON(inputs.mem_deps || '{"memcache":["20260811.14","1.2.0"],"memfabric":["20260811.7","1.2.0"]}').memcache[1] }}
       memcache_date: ${{ fromJSON(inputs.mem_deps || '{"memcache":["20260811.14","1.2.0"],"memfabric":["20260811.7","1.2.0"]}').memcache[0] }}
       memfabric_version: ${{ fromJSON(inputs.mem_deps || '{"memcache":["20260811.14","1.2.0"],"memfabric":["20260811.7","1.2.0"]}').memfabric[1] }}
       memfabric_date: ${{ fromJSON(inputs.mem_deps || '{"memcache":["20260811.14","1.2.0"],"memfabric":["20260811.7","1.2.0"]}').memfabric[0] }}
-      torch_npu_version: ${{ fromJSON(inputs.torch_npu || '["20260725.3", "26.1.0"]')[1] }}
-      torch_npu_date: ${{ fromJSON(inputs.torch_npu || '["20260725.3", "26.1.0"]')[0] }}
-      triton_ascend_version: ${{ fromJSON(inputs.triton_ascend || '["", "3.2.2"]')[0] }}
-      triton_ascend_package_version: ${{ fromJSON(inputs.triton_ascend || '["", "3.2.2"]')[1] }}
+      torch_npu_version: ${{ fromJSON(inputs.torch_npu || '["20260918.5", "26.2.0"]')[1] }}
+      torch_npu_date: ${{ fromJSON(inputs.torch_npu || '["20260918.5", "26.2.0"]')[0] }}
+      triton_ascend_version: ${{ fromJSON(inputs.triton_ascend || '["20260918000216", "3.6.0%2Bdev20260918000216"]')[0] }}
+      triton_ascend_package_version: ${{ fromJSON(inputs.triton_ascend || '["20260918000216", "3.6.0%2Bdev20260918000216"]')[1] }}
 
       build_args: |
         ${{ inputs.build_type == 'daily' && format('BASE_OS={0}', contains(matrix.build_meta.suffix, 'openeuler') && 'openeuler24.03-lts-sp4' || 'ubuntu24.04') || '' }}
-        ${{ inputs.build_type == 'daily' && format('CANN_VERSION={0}', fromJSON(inputs.cann || '["swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann", "9.1.0_20260731131545"]')[1]) || '' }}
+        ${{ inputs.build_type == 'daily' && format('CANN_VERSION={0}', fromJSON(inputs.cann || '["swr.cn-north-12.myhuaweicloud.com/atlas_inference/cann", "9.2.0_20260918144839"]')[1]) || '' }}
     secrets:
       SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
       SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
       SYNC_TOOLS_TOKEN: ${{ secrets.SYNC_TOOLS_TOKEN }}
+

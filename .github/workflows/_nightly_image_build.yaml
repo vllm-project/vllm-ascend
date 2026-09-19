@@ -42,7 +42,7 @@ on:
       cann_version:
         required: false
         type: string
-        default: '9.1.0_20260731131545'
+        default: '9.2.0_20260918144839'
         description: "CANN version for base image tag"
       base_image_date:
         required: false

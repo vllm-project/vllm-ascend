@@ -93,7 +93,7 @@ on:
         description: 'Torch NPU version'
         required: false
         type: string
-        default: '26.1.0'
+        default: '26.2.0'
       torch_npu_date:
         description: 'Torch NPU date'
         required: false
@@ -108,12 +108,12 @@ on:
         description: 'CANN version for daily tag naming (e.g. 2026.08.03)'
         required: false
         type: string
-        default: '9.1.0_20260731131545'
+        default: '9.2.0_20260918144839'
       cann_image_version:
-        description: 'CANN version for the build container image tag (default matches Dockerfile FROM: 9.1.0)'
+        description: 'CANN version for the build container image tag (default matches Dockerfile FROM: 9.2.0)'
         required: false
         type: string
-        default: '9.1.0'
+        default: '9.2.0'
       soc:
         description: 'Ascend SoC type for the CANN base image (e.g. 910b, a3, 310p, 950)'
         required: false
@@ -377,10 +377,10 @@ jobs:
           MEMCACHE_DATE=${{ inputs.memcache_date || '20260811.14' }}
           MEMFABRIC_VERSION=${{ inputs.memfabric_version || '1.2.0' }}
           MEMFABRIC_DATE=${{ inputs.memfabric_date || '20260811.7' }}
-          TORCH_NPU_VERSION=${{ inputs.torch_npu_version || '26.1.0' }}
-          TORCH_NPU_DATE=${{ inputs.torch_npu_date || '20260725.3' }}
-          TRITON_ASCEND_VERSION=${{ inputs.triton_ascend_version || '' }}
-          TRITON_ASCEND_PACKAGE_VERSION=${{ inputs.triton_ascend_package_version || '3.2.2' }}
+          TORCH_NPU_VERSION=${{ inputs.torch_npu_version || '26.2.0' }}
+          TORCH_NPU_DATE=${{ inputs.torch_npu_date || '20260918.5' }}
+          TRITON_ASCEND_VERSION=${{ inputs.triton_ascend_version || '20260918000216' }}
+          TRITON_ASCEND_PACKAGE_VERSION=${{ inputs.triton_ascend_package_version || '3.6.0%2Bdev20260918000216' }}
           ${{ inputs.build_args }}
         provenance: false
         # To speed up the build, we use registry cache. The cache tag is determined by the suffix and architecture, and shared across different workflow runs.
