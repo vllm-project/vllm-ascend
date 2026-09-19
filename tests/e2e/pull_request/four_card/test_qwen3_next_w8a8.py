@@ -27,22 +27,22 @@ MAX_NUM_BATCHED_TOKENS = 256
 
 
 @patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
-def test_qwen3_next_distributed_mp_graph_mode_tp4():
+def test_qwen3_next_w8a8dynamic_distributed_mp_tp4():
     example_prompts = [
         "Hello, my name is",
     ] * 4
     max_tokens = 5
     with VllmRunner(
-        "Qwen/Qwen3-Next-80B-A3B-Instruct",
+        "vllm-ascend/Qwen3-Next-80B-A3B-Instruct-W8A8",
         tensor_parallel_size=4,
         max_model_len=MAX_MODEL_LEN,
         max_num_seqs=MAX_NUM_SEQS,
         max_num_batched_tokens=MAX_NUM_BATCHED_TOKENS,
-        gpu_memory_utilization=0.8,
+        gpu_memory_utilization=0.7,
         distributed_executor_backend="mp",
         enable_expert_parallel=True,
-        cudagraph_capture_sizes=[4],
-        enforce_eager=False,
+        enforce_eager=True,
+        quantization="ascend",
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
         del vllm_model
