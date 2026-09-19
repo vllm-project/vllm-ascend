@@ -9,6 +9,7 @@ replaced here with the Ascend metadata builder and AscendC operators.
 
 from functools import wraps
 
+import cann_ops_transformer  # noqa: F401
 import torch
 import torch_npu
 from einops import rearrange
@@ -35,7 +36,6 @@ from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import (
     AscendW8A8MXFP8DynamicLinearMethod,
 )
-from vllm_ascend.utils import npu_stream_switch
 
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
 _F_PROJ_SHARD_ID = 1
@@ -241,7 +241,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
     ) -> torch.Tensor:
         if self.uses_mixed_projection:
             num_tokens = hidden_states.size(0)
-            mixed_qkv, beta, g1, g2 = self._run_overlapped_qkv_bfg(hidden_states)
+            mixed_qkv, beta, g1, g2 = self._run_kda_input_proj(hidden_states)
             core_attn_out = torch.empty(
                 (1, num_tokens, self.local_num_heads, self.head_dim),
                 dtype=hidden_states.dtype,
@@ -259,44 +259,37 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             return self.o_proj(core_attn_out)[0]
         return super().forward(hidden_states, positions)
 
-    def _run_overlapped_qkv_bfg(
+    def _run_kda_input_proj(
         self,
         hidden_states: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Fork BFG work to an auxiliary stream and join it back to main."""
-        main_stream = torch.npu.current_stream()
-        bfg_stream = _kda_bfg_stream()
-
-        hidden_states_ready = main_stream.record_event()
-        hidden_states.record_stream(bfg_stream)
-        with npu_stream_switch(bfg_stream):
-            bfg_stream.wait_event(hidden_states_ready)
-            fused_bfg = self._project_bfg(hidden_states)
-            bfg_projection_ready = bfg_stream.record_event()
-
-        quantized_qkv = self._quantize_fused_qkv(hidden_states)
-        quant_ready = main_stream.record_event()
-
-        # Stage 1 join: DynamicQuant on main overlaps the BFG GEMM on the
-        # auxiliary stream, but the two Cube matmuls remain serialized.
-        main_stream.wait_event(bfg_projection_ready)
-        mixed_qkv = self._matmul_fused_qkv(quantized_qkv)
-
-        with npu_stream_switch(bfg_stream):
-            # Stage 2: after both first-stage branches complete, overlap the
-            # QKV Cube matmul with beta's FP32 conversion and sigmoid vector
-            # work. Split and reshape the F/output gates here as well so all
-            # BFG output handling occurs after the QKV matmul is enqueued.
-            bfg_stream.wait_event(quant_ready)
-            beta, g1, g2 = self._postprocess_bfg(fused_bfg)
-            bfg_ready = bfg_stream.record_event()
-
-        for tensor in (beta, g1, g2):
-            tensor.record_stream(main_stream)
-        # bfg_ready is the auxiliary stream tail. Joining that exact event is
-        # required for multi-stream ACL graph capture as well as eager reuse.
-        main_stream.wait_event(bfg_ready)
+        """Run the fused KDA input projection (QKV + beta + F gate + g) aclnn op."""
+        beta_weight, gate_weight, g_weight = self._bfg_matmul_weights()
+        mixed_qkv, beta, gate, g = torch.ops.cann_ops_transformer.kda_input_proj(
+            hidden_states,
+            self.in_proj_qkvgfab.weight,
+            beta_weight,
+            gate_weight,
+            g_weight,
+            self.in_proj_qkvgfab.weight_scale.view(torch.float8_e8m0fnu),
+        )
+        # The operator already applies sigmoid to beta and returns it in FP32.
+        beta = beta.unsqueeze(0)
+        g1 = rearrange(gate, "n (h d) -> 1 n h d", d=self.head_dim)
+        g2 = rearrange(g, "n (h d) -> n h d", d=self.head_dim)
         return mixed_qkv, beta, g1, g2
+
+    def _bfg_matmul_weights(
+        self,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Slice the packed BFG weight into matmul-RHS [K, N] transposed views."""
+        n_beta, n_f_proj, n_gate = self._fused_bfg_output_sizes
+        weight = self.fused_bfg_proj.weight
+        return (
+            weight[:n_beta].t(),
+            weight[n_beta : n_beta + n_f_proj].t(),
+            weight[n_beta + n_f_proj :].t(),
+        )
 
     def _project_bfg(
         self,
