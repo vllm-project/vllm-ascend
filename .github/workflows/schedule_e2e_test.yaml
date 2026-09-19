@@ -18,6 +18,10 @@
 name: Schedule All E2E Tests
 
 on:
+  schedule:
+    # Weekly: Monday 02:00 UTC (10:00 Beijing) so auto-PR lands during working
+    # hours. Runs the full suite with timing upload + estimated-times refresh.
+    - cron: '0 2 * * 1'
   workflow_dispatch:
     inputs:
       vllm_ascend_branch:
@@ -42,7 +46,9 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # Keep scheduled runs in their own group so they never cancel (or get
+  # cancelled by) the externally-dispatched full-suite runs on the same ref.
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -132,11 +138,11 @@ jobs:
       base_ref: ${{ needs.select-all-tests.outputs.base_ref }}
       base_sha: ${{ needs.select-all-tests.outputs.base_sha }}
       test_groups: ${{ needs.select-all-tests.outputs.test_groups }}
-      upload_timing: ${{ inputs.update_est_times }}
+      upload_timing: ${{ inputs.update_est_times || github.event_name == 'schedule' }}
 
   update-estimated-times:
     needs: [run-all-tests]
-    if: ${{ !cancelled() && inputs.update_est_times }}
+    if: ${{ !cancelled() && (inputs.update_est_times || github.event_name == 'schedule') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
