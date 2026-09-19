@@ -303,7 +303,14 @@ def _init_flash_attention_metadata(builder, impl) -> None:
     builder._flash_attn_mask = torch.triu(torch.ones((2048, 2048), dtype=torch.int8, device=builder.device), diagonal=1)
 
 
-def _build_flash_attention_metadata(builder, common, *, is_mla: bool) -> AscendFlashAttentionMetadata:
+def _build_flash_attention_metadata(
+    builder,
+    common,
+    *,
+    is_mla: bool,
+    allow_unabsorbed: bool = True,
+    metadata_only: bool = False,
+) -> AscendFlashAttentionMetadata:
     batch = common.num_reqs
     tokens = max(common.num_actual_tokens, common.num_input_tokens)
     table = common.block_table_tensor[:batch]
@@ -311,6 +318,7 @@ def _build_flash_attention_metadata(builder, common, *, is_mla: bool) -> AscendF
     is_c8 = is_mla and getattr(builder, "flash_is_c8", False)
     unabsorbed = (
         is_mla
+        and allow_unabsorbed
         and not is_c8
         and common.causal
         and common.max_query_len > builder.decode_threshold
@@ -335,7 +343,9 @@ def _build_flash_attention_metadata(builder, common, *, is_mla: bool) -> AscendF
         query_dtype = builder.vllm_config.model_config.dtype if is_c8 else builder.kv_cache_spec.dtype
         float_args = {"dtype": query_dtype, "device": builder.device}
         head_dim = 576 if is_mla else 64
-        shape = (tokens, builder.flash_num_heads * dcp_size, head_dim)
+        # Expanded prefill owns its native query and per-chunk schedules.
+        # Retain a dtype/device placeholder, not an unused T*H*576 buffer.
+        shape = (0 if metadata_only else tokens, builder.flash_num_heads * dcp_size, head_dim)
         block_size = builder.kernel_block_size or builder.kv_cache_spec.block_size
         buffers[key] = AscendFlashAttentionMetadata(
             query=torch.empty(shape, **float_args),
@@ -359,9 +369,10 @@ def _build_flash_attention_metadata(builder, common, *, is_mla: bool) -> AscendF
             is_c8=is_c8,
         )
         flash = buffers[key]
-        flash.schedule = torch.empty_like(
-            _flash_attention_schedule(builder, flash, is_mla=is_mla, meta=True), device=builder.device
-        )
+        if not metadata_only:
+            flash.schedule = torch.empty_like(
+                _flash_attention_schedule(builder, flash, is_mla=is_mla, meta=True), device=builder.device
+            )
         if split_kv:
             flash.current_schedule = torch.empty_like(
                 _flash_attention_schedule(builder, flash, is_mla=is_mla, current=True, meta=True), device=builder.device
@@ -410,7 +421,8 @@ def _build_flash_attention_metadata(builder, common, *, is_mla: bool) -> AscendF
             flash.positions.zero_()
             positions = common.positions[:tokens]
             flash.positions[: positions.shape[0]].copy_(positions)
-        flash.schedule.copy_(_flash_attention_schedule(builder, flash, is_mla=is_mla))
+        if not metadata_only:
+            flash.schedule.copy_(_flash_attention_schedule(builder, flash, is_mla=is_mla))
         if split_kv:
             if flash.current_cache is not None:
                 block_size = flash.current_cache.shape[2]

@@ -215,6 +215,8 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
     setup_catlass_dependency
 
     CUSTOM_OPS_ARRAY=(
+        "flash_attn"
+        "flash_attn_metadata"
         "flash_mla_with_kvcache"
         "flash_mla_with_kvcache_metadata"
         "moe_gating_top_k_hash"
@@ -334,6 +336,9 @@ log_selected_ops
     chmod u+w "${custom_ops_install_dir}/vendors/custom_transformer/scripts"
   fi
   log "installer finished"
+  if [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
+    python3 "${ROOT_DIR}/csrc/scripts/package_flash_attn.py" "${ROOT_DIR}"
+  fi
   log "installed files under ${custom_ops_install_dir} (maxdepth=4, first 120 entries):"
   { find "${custom_ops_install_dir}" -mindepth 1 -maxdepth 4 -print | sort | head -n 120 | sed 's#^#[build_aclnn] install: #'; } || true
 

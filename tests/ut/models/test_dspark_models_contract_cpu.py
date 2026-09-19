@@ -110,6 +110,37 @@ def mla_draft(**fields):
     return draft
 
 
+@pytest.mark.parametrize("pp_size", [1, 4])
+def test_mla_draft_layer_ids_follow_global_target_with_pp_partition(monkeypatch, pp_size):
+    monkeypatch.setenv("VLLM_PP_LAYER_PARTITION", "25,24,24,20")
+    draft_factory = MagicMock(return_value=nn.Module())
+    model, _ = load_model(
+        "kimi_k3_dspark.py",
+        "AscendK3DSparkForCausalLM",
+        {"__init__"},
+        AscendK3DSparkModel=draft_factory,
+        LogitsProcessor=MagicMock(),
+        _get_target_rotation_path=lambda _: None,
+        maybe_prefix=lambda prefix, suffix: f"{prefix}.{suffix}" if prefix else suffix,
+    )
+    target_config = SimpleNamespace(
+        hf_text_config=SimpleNamespace(num_hidden_layers=93),
+        model="target",
+        get_num_layers=MagicMock(side_effect=ValueError("target PP partition does not apply to draft PP=1")),
+    )
+    config = SimpleNamespace(
+        model_config=target_config,
+        parallel_config=SimpleNamespace(pipeline_parallel_size=pp_size),
+        speculative_config=SimpleNamespace(
+            draft_model_config=SimpleNamespace(hf_config=SimpleNamespace(draft_vocab_size=32))
+        ),
+    )
+    model(vllm_config=config)
+    assert draft_factory.call_args.kwargs["start_layer_id"] == 93
+    assert config.parallel_config.pipeline_parallel_size == pp_size
+    target_config.get_num_layers.assert_not_called()
+
+
 def raw_target():
     return SimpleNamespace(
         model=SimpleNamespace(

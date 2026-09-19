@@ -259,7 +259,9 @@ class AscendK3DSparkForCausalLM(UpstreamK3DSparkForCausalLM):
         self.draft_model_config = vllm_config.speculative_config.draft_model_config
         assert self.draft_model_config is not None
         self.config = self.draft_model_config.hf_config
-        target_layer_num = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
+        # Draft layer IDs follow the complete target, independent of its PP
+        # partition or the PP=1 context used while loading the draft.
+        target_layer_num = vllm_config.model_config.hf_text_config.num_hidden_layers
         self.model = AscendK3DSparkModel(
             vllm_config=vllm_config,
             start_layer_id=target_layer_num,

@@ -377,10 +377,10 @@ class NPUModelRunner(GPUModelRunner):
         )
         self.group_len = self._make_buffer(
             vllm_config.scheduler_config.max_num_batched_tokens , dtype=torch.int32
-        )        
+        )
         self.group_key_idx = self._make_buffer(
            vllm_config.scheduler_config.max_num_batched_tokens , dtype=torch.int32
-        )        
+        )
         self.group_key_cache_idx = self._make_buffer(
             vllm_config.scheduler_config.max_num_batched_tokens, dtype=torch.int32
         )
@@ -2208,7 +2208,7 @@ class NPUModelRunner(GPUModelRunner):
         # _copy_draft_token_ids_to_cpu()/take_draft_token_ids(), and the
         # scheduler output is updated by EngineCore in its own process
         # (Scheduler.update_draft_token_ids_in_output). Nothing below mutates
-        # scheduler_output in the worker, so no copy is needed. 
+        # scheduler_output in the worker, so no copy is needed.
         pp_group = get_pp_group()
         if pp_group.world_size > 1 and not pp_group.is_last_rank:
             new_token_ids = scheduler_output.scheduled_cached_reqs.new_token_ids
@@ -3398,6 +3398,9 @@ class NPUModelRunner(GPUModelRunner):
                 # when the regular scheduler performed the KV handoff.
                 is_prefilling[:num_reqs] &= ~torch.from_numpy(self.dcp_manager.decode_req_mask)
             is_prefilling[num_reqs:] = False
+        # These host values are exact for prefilling requests even in async mode.
+        # The attention builder must slice only the prefill suffix.
+        num_computed_prefill_tokens_cpu = num_computed_tokens_cpu
         seq_lens_cpu = self.optimistic_seq_lens_cpu[:num_reqs_padded]
         if self.use_async_spec_decode:
             # GPU tensors are authoritative in async mode.
@@ -3454,6 +3457,7 @@ class NPUModelRunner(GPUModelRunner):
             # TODO
             # num_computed_tokens_cpu=self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs_padded],
             num_computed_tokens_cpu=num_computed_tokens_cpu,
+            num_computed_prefill_tokens_cpu=num_computed_prefill_tokens_cpu,
             num_reqs=num_reqs_padded,
             num_actual_tokens=num_tokens,
             max_query_len=max_query_len,

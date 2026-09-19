@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
 
 import numpy as np
@@ -29,6 +29,7 @@ from vllm_ascend.attention.attention_v1 import (
     AscendAttentionState,
     AscendFlashAttentionMetadata,
     _build_flash_attention_metadata,
+    _flash_attention_schedule,
     _init_flash_attention_metadata,
 )
 from vllm_ascend.attention.context_parallel.common_cp import (
@@ -36,6 +37,13 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     combine_flash_attention_output,
     exchange_flash_attention_output,
     merge_flash_attention_output,
+)
+from vllm_ascend.attention.mla_prefill import (
+    PrefillMetadata,
+    build_prefill_plan,
+    full_prefill,
+    native_flash_adapters,
+    prepare_metadata,
 )
 from vllm_ascend.attention.utils import (
     MLAPO_MAX_SUPPORTED_TOKENS,
@@ -248,6 +256,8 @@ class AscendMLAMetadata:
     prefill: AscendMLAPrefillMetadata | None = None
     reshape_cache_event: torch.npu.Event = None
     flash: AscendFlashAttentionMetadata | None = None
+    flash_full_prefill: PrefillMetadata | None = None
+    flash_decode: AscendFlashAttentionMetadata | None = None
 
     def __post_init__(self):
         pass
@@ -490,6 +500,59 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
     ):
         self.num_actual_tokens = common_attn_metadata.num_actual_tokens
 
+    def _build_full_flash_prefill(self, common, flash, num_decodes, num_decode_tokens):
+        # Read the runner's exact prefill counts only; async decode CPU mirrors
+        # can be optimistic and must never size a history gather.
+        offsets = common.query_start_loc_cpu[: common.num_reqs + 1].clamp_max(common.num_actual_tokens)
+        real_reqs = int((offsets[1:] > offsets[:-1]).sum())
+        contexts = common.num_computed_prefill_tokens_cpu[num_decodes:real_reqs]
+        plan = build_prefill_plan(
+            offsets[: real_reqs + 1],
+            num_decodes,
+            contexts,
+            min(self.chunked_prefill_workspace_size, 16384),
+            kernel_block_size=128,
+        )
+        schedule, _ = native_flash_adapters(self.flash_num_heads, 1.0, self._flash_attn_mask)
+        prefill = prepare_metadata(plan, self.device, schedule)
+        decode_flash = None
+        if num_decodes:
+            # The decode slice has a separate schedule; whole-batch metadata
+            # cannot be used for a shorter physical query tensor.
+            decode_flash = replace(
+                flash,
+                query=torch.empty(
+                    (num_decode_tokens, self.flash_num_heads, 576),
+                    dtype=flash.query.dtype,
+                    device=self.device,
+                ),
+                cu=flash.cu[: num_decodes + 1],
+                used_q=flash.used_q[:num_decodes],
+                cache_lens=flash.cache_lens[:num_decodes],
+                block_table=flash.block_table[:num_decodes],
+                max_query_len=self.decode_threshold,
+                is_prefill=False,
+            )
+            decode_flash.schedule = torch.empty_like(
+                _flash_attention_schedule(self, decode_flash, is_mla=True, meta=True),
+                device=self.device,
+            )
+
+            def refresh_decode_schedule():
+                decode_flash.schedule.copy_(_flash_attention_schedule(self, decode_flash, is_mla=True))
+
+            if self._device_metadata_enabled:
+                # The executor keeps ATTENTION tasks in submission order, so
+                # live GPU lengths are refreshed by the parent flash task first.
+                self._device_metadata_tasks += (
+                    DeviceMetadataTask(
+                        DeviceMetadataStage.ATTENTION, refresh_decode_schedule, id(decode_flash.schedule)
+                    ),
+                )
+            else:
+                refresh_decode_schedule()
+        return prefill, decode_flash
+
     def build(
         self,
         common_prefix_len: int,
@@ -515,6 +578,30 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
                 if num_decodes
                 else None
             )
+            use_full_prefill = (
+                num_prefills > 0
+                and common.causal
+                and self.flash_unabsorbed_prefill
+                and not self.flash_is_c8
+                and not self.dcp_enabled
+                and not self.pcp_enabled
+                and common.num_computed_prefill_tokens_cpu is not None
+            )
+            flash = _build_flash_attention_metadata(
+                self,
+                common,
+                is_mla=True,
+                allow_unabsorbed=not use_full_prefill,
+                metadata_only=use_full_prefill,
+            )
+            prefill, decode_flash = (None, None)
+            if use_full_prefill:
+                prefill, decode_flash = self._build_full_flash_prefill(
+                    common,
+                    flash,
+                    num_decodes,
+                    num_decode_tokens,
+                )
             return self.metadata_cls(
                 num_actual_tokens=common.num_actual_tokens,
                 num_input_tokens=common.num_input_tokens,
@@ -529,7 +616,9 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
                 decode=decode,
                 causal=common.causal,
                 attn_state=common.attn_state,
-                flash=_build_flash_attention_metadata(self, common, is_mla=True),
+                flash=flash,
+                flash_full_prefill=prefill,
+                flash_decode=decode_flash,
             )
         expanded_slot_mapping = common_attn_metadata.slot_mapping if self.pcp_enabled else None
         num_reqs = common_attn_metadata.num_reqs
@@ -2456,6 +2545,100 @@ class AscendMLAImpl(MLAAttentionImpl):
             token_live = token_live[start : start + result.shape[0]]
         return flash_attention_output(result, token_live, output)
 
+    def _forward_flash_full_prefill(self, layer_name, hidden_states, kv_cache, meta, output):
+        b = meta.flash
+        wait_for_device_metadata(DeviceMetadataStage.ATTENTION, id(b.schedule))
+        t = b.slots.shape[0]
+        x = hidden_states[:t]
+        if self.layerwise_kv_cache_hook is not None:
+            self.layerwise_kv_cache_hook.wait_for_layer(layer_name)
+        if self.fused_qkv_a_proj is not None:
+            qkv_lora = self.fused_qkv_a_proj(x)[0]
+            q_c, kv = qkv_lora.split([self.q_lora_rank, 576], dim=-1)
+            q_c = self.q_a_layernorm(q_c)
+        else:
+            q_c, kv = x, self.kv_a_proj_with_mqa(x)[0]
+        query = self._project_query(q_c, local_heads=True)
+        q_nope, q_pe = query.split(
+            [self.qk_nope_head_dim, self.qk_rope_head_dim],
+            dim=-1,
+        )
+        c_kv, k_pe = kv.view(t, 1, 576).split([512, 64], dim=-1)
+        c_kv = self.kv_a_layernorm(c_kv.contiguous()).view(t, 1, 512)
+        if self.use_mla_rope:
+            cos, sin = get_cos_and_sin_mla(b.positions, use_cache=False)
+            q_pe = self.rope_single(q_pe, cos, sin)
+            k_pe = self.rope_single(k_pe, cos, sin)
+        torch_npu.npu_scatter_pa_kv_cache(
+            key=c_kv.contiguous(),
+            value=k_pe.contiguous(),
+            key_cache=kv_cache[..., :512].unsqueeze(2),
+            value_cache=kv_cache[..., 512:].unsqueeze(2),
+            slot_mapping=b.slots,
+            cache_mode="Norm",
+        )
+        notify_kv_cache_written(layer_name)
+        nd = meta.num_decode_tokens
+        end = nd + meta.flash_full_prefill.plan.num_tokens
+        _, attention = native_flash_adapters(self.num_heads, self.scale, b.attn_mask)
+        prefill_out, _ = full_prefill(
+            q_nope[nd:end],
+            q_pe[nd:end],
+            c_kv[nd:end],
+            k_pe[nd:end],
+            kv_cache,
+            b.block_table[meta.num_decodes : meta.num_decodes + len(meta.flash_full_prefill.plan.query_lengths)],
+            meta.flash_full_prefill,
+            self.kv_b_proj,
+            attention,
+            DeviceOperator.kv_cache_load,
+            torch_npu.npu_attention_update,
+            query=query[nd:end] if not self.use_mla_rope else None,
+        )
+        # Only the bounded decode prefix uses Q absorption and V up-projection.
+        if nd == 0 and end == t:
+            projected = prefill_out.reshape(t, -1)
+        else:
+            projected = torch.empty((t, self.num_heads * self.v_head_dim), dtype=x.dtype, device=x.device)
+            projected[nd:end].copy_(prefill_out.reshape(end - nd, -1))
+        if nd:
+            d = meta.flash_decode
+            wait_for_device_metadata(DeviceMetadataStage.ATTENTION, id(d.schedule))
+            q_abs = torch.bmm(q_nope[:nd].transpose(0, 1), self.W_UK_T).transpose(0, 1)
+            torch.cat((q_abs, q_pe[:nd]), dim=-1, out=d.query)
+            latent, _ = torch.ops._C_ascend.flash_mla_with_kvcache(
+                d.query,
+                kv_cache.unsqueeze(1),
+                block_table=d.block_table,
+                cache_seqlens=d.cache_lens,
+                cu_seqlens_q=d.cu,
+                seqused_q=d.used_q,
+                attn_mask=d.attn_mask,
+                metadata=d.schedule,
+                head_dim_v=512,
+                softmax_scale=self.scale,
+                mask_mode=3,
+                max_seqlen_q=d.max_query_len,
+                max_seqlen_kv=d.max_seq_len,
+                layout_q="TND",
+                layout_kv="PA_BNBD",
+                layout_out="NTD",
+                return_softmax_lse=False,
+            )
+            projected[:nd].copy_(self._v_up_proj(latent))
+        # SP can add trailing physical rows that belong to no request.
+        if end < t:
+            projected[end:].zero_()
+        if self.use_output_gate:
+            projected.mul_(torch.sigmoid(self.g_proj(x.contiguous())[0]))
+        result = self.o_proj(projected, is_prefill=True)[0]
+        token_live = b.token_live
+        projection_op = getattr(self.o_proj, "custom_op", None)
+        if isinstance(projection_op, KimiOProjMMReduceScatterOp):
+            start = projection_op.tp_rank * result.shape[0]
+            token_live = token_live[start : start + result.shape[0]]
+        return flash_attention_output(result, token_live, output)
+
     def _forward_flash(self, layer_name, hidden_states, kv_cache, attn_metadata, output=None):
         if output is None:
             raise ValueError("A5 Flash MLA requires an explicit output buffer.")
@@ -2464,6 +2647,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         if self.fa_quant_layer:
             return self._forward_flash_c8(layer_name, hidden_states, kv_cache, attn_metadata, output)
         meta = attn_metadata
+        if getattr(meta, "flash_full_prefill", None) is not None:
+            return self._forward_flash_full_prefill(layer_name, hidden_states, kv_cache, meta, output)
         b = meta.flash
         t = b.query.shape[0]
         wait_for_device_metadata(DeviceMetadataStage.ATTENTION, id(b.schedule))
