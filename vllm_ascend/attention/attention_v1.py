@@ -1646,6 +1646,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             value_cache=self.value_cache,
             slot_mapping=slot_mapping,
             use_bnsd=self.use_bnsd_kv_cache,
+            use_scatter=self.pcp_enabled,
         )
 
     def reshape_and_cache(
@@ -1680,6 +1681,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 value_cache=self.value_cache,
                 slot_mapping=slots_to_cache,
                 use_bnsd=self.use_bnsd_kv_cache,
+                use_scatter=self.pcp_enabled,
             )
             notify_kv_cache_written()
         return query, key, value, output

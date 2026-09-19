@@ -47,6 +47,7 @@ class BaseDeviceAdaptor:
         value_cache,
         slot_mapping,
         use_bnsd=False,
+        use_scatter=False,
     ):
         if use_bnsd:
             torch.ops._C_ascend.npu_scatter_pa_kv_cache(
@@ -60,13 +61,29 @@ class BaseDeviceAdaptor:
             )
             return
 
-        torch_npu.npu_scatter_pa_kv_cache(
-            key=key.contiguous(),
-            value=value.contiguous(),
+        key = key.contiguous()
+        value = value.contiguous()
+        slot_mapping = slot_mapping.contiguous()
+        # GQA PCP + ACLGraph capture cannot set up ATB ReshapeCacheOperation.
+        # Keep scatter on that path; non-PCP ND traffic stays on the lower
+        # host-overhead _npu_reshape_and_cache op (#11713 regression).
+        if use_scatter:
+            torch_npu.npu_scatter_pa_kv_cache(
+                key=key,
+                value=value,
+                key_cache=key_cache,
+                value_cache=value_cache,
+                slot_mapping=slot_mapping,
+                cache_mode="Norm",
+            )
+            return
+
+        torch_npu._npu_reshape_and_cache(
+            key=key,
+            value=value,
             key_cache=key_cache,
             value_cache=value_cache,
-            slot_mapping=slot_mapping.contiguous(),
-            cache_mode="Norm",
+            slot_indices=slot_mapping,
         )
 
     @classmethod
@@ -802,11 +819,14 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         value_cache,
         slot_mapping,
         use_bnsd=False,
+        use_scatter=False,
     ):
         if use_bnsd:
             key_cache = key_cache.permute(0, 2, 1, 3)
             value_cache = value_cache.permute(0, 2, 1, 3)
-        super().reshape_and_cache(key, value, key_cache, value_cache, slot_mapping)
+        super().reshape_and_cache(
+            key, value, key_cache, value_cache, slot_mapping, use_scatter=use_scatter
+        )
 
     @classmethod
     def npu_fused_infer_attention_score(
@@ -1491,6 +1511,7 @@ class Ascend310PDeviceAdaptor(BaseDeviceAdaptor):
         value_cache,
         slot_mapping,
         use_bnsd=False,
+        use_scatter=False,
     ):
         if use_bnsd:
             raise NotImplementedError("BNSD KV cache is not supported on Ascend 310P")
