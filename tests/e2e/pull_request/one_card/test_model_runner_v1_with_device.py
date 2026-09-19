@@ -26,6 +26,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 import vllm_ascend.compilation.acl_graph as acl_graph
+from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
@@ -453,6 +454,7 @@ def test_stateful_handoff_preserves_decode_graph(
     )
     runner.model_config = SimpleNamespace(
         is_encoder_decoder=False,
+        enable_return_routed_experts=False,
         hf_text_config=SimpleNamespace(to_dict=lambda: {}),
     )
     runner.vllm_config = SimpleNamespace(
@@ -483,6 +485,10 @@ def test_stateful_handoff_preserves_decode_graph(
 
     module = "vllm_ascend.worker.model_runner_v1"
     monkeypatch.setattr(f"{module}.should_skip_allreduce_across_dp_group", lambda *args: False)
+    # Keep the test focused on graph dispatch: MC2 requires uniform DP inputs
+    # even when an incomplete handoff forces the batch back to eager mode.
+    monkeypatch.setattr(f"{module}.select_moe_comm_method", lambda *args: MoECommType.MC2)
+    monkeypatch.setattr(f"{module}.use_cann_megamoe", lambda *args: False)
     monkeypatch.setattr(f"{module}.get_dp_group", lambda: SimpleNamespace(cpu_group=None))
     monkeypatch.setattr(f"{module}.dist.all_reduce", all_reduce)
     mode, descriptor, _, tokens_across_dp, _ = runner._determine_batch_execution_and_padding(
