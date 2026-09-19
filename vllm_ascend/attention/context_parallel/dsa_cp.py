@@ -32,6 +32,7 @@ from vllm_ascend.attention.utils import (
     wait_for_kv_layer_from_connector,
 )
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, get_storage_block_size
+from vllm_ascend.device.device_config import is_950
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
@@ -1422,9 +1423,9 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         self.wo_a = kwargs["wo_a"]
         self.wo_b = kwargs["wo_b"]
 
-        # Device-independent: the selected linear method validates whether
-        # its tensors support domain/full-weight switching.
-        self.enable_dsa_cp_full_o_proj = enable_dsa_cp_full_o_proj()
+        # A5 uses full o_proj weight gathering. A3 keeps the activation
+        # all-to-all path to avoid gathering the full o_proj weights.
+        self.enable_dsa_cp_full_o_proj = enable_dsa_cp_full_o_proj() and is_950()
         self.o_proj_weight_switch_config = WeightSwitchConfig.from_group(self.tp_group)
         self._o_proj_weight_switch_enabled = False
 
@@ -1682,8 +1683,6 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             AscendAttentionState.DecodeOnly,
             AscendAttentionState.SpecDecoding,
         }
-        if need_gather_q_kv and self.tp_size > 1 and not is_decode and not self.enable_dsa_cp_full_o_proj:
-            raise RuntimeError("DSA-CP sequence-parallel prefill requires full o_proj weight gathering.")
         full_gather_wo_a_enabled = self.tp_size > 1 and self.enable_dsa_cp_full_o_proj and not is_decode
         local_attn_output = self._forward(
             layer_name,
