@@ -471,17 +471,19 @@ def _build_sfa_fia_shared_prefill_plan(
         for query_length, kv_length in zip(query_lengths, kv_lengths, strict=True)
     )
     dense_total = sum(eligible_lengths)
+    dense_group_sizes: tuple[int, ...]
+    eligible_count = sum(1 for eligible in eligible_lengths if eligible)
     if dense_total == SFA_FIA_SHARED_PREFILL_TOPK_WIDTH and dense_total < num_tokens:
-        dense_group_sizes = (sum(1 for eligible in eligible_lengths if eligible),)
+        dense_group_sizes = (eligible_count,)
     else:
         if (
             attn_state != AscendAttentionState.PrefillNoCache
             or len(query_lengths) < 2
             or dense_total >= num_tokens
-            or sum(1 for eligible in eligible_lengths if eligible) < 2
+            or eligible_count < 2
         ):
             return None
-        dense_group_sizes = (1,) * sum(1 for eligible in eligible_lengths if eligible)
+        dense_group_sizes = (1,) * eligible_count
     if any(size <= 0 for size in dense_group_sizes):
         return None
 
