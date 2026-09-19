@@ -83,6 +83,16 @@ PCP_PROMPTS = [
     LONG_CONTEXT + "Hello, my name is",
     LONG_CONTEXT + "The president of the United States is",
 ]
+PCP_SEGMENT_BOUNDARY_PROMPTS = [
+    "Alice explains how to grow flowers in a garden. Alice explains how to grow flowers",
+    "Bob describes a journey across the mountains. Bob describes a journey across the mountains.",
+    "Carol teaches students how to solve a math problem. Carol teaches students how to solve",
+]
+# Fixed checkpoint outputs agree between eager and graph, including DP and MTP.
+MLA_PCP_GOLDENS = [
+    prompt + " Salmonella团团 elsewhereッγκ物理学卷第收入和 costume commut saus↓↓招募生子इ点钟"
+    for prompt in PCP_PROMPTS
+]
 
 
 @dataclass(frozen=True)
@@ -239,17 +249,45 @@ PCP_RUNNER_KWARGS = {
     "compilation_config": PCP_FULL_DECODE_GRAPH,
 }
 
-MLA_PCP_CASE = InferenceCase(
+GQA_PCP_BOUNDARY_CASE = AccuracyCase(
+    name="eagle3_gqa_pcp_segment_boundary",
+    model=EAGLE3_PCP_TARGET_MODEL,
+    prompts=PCP_SEGMENT_BOUNDARY_PROMPTS,
+    expected_outputs=[
+        PCP_SEGMENT_BOUNDARY_PROMPTS[0]
+        + " in a garden. Alice explains how to grow flowers in a garden. Alice explains",
+        PCP_SEGMENT_BOUNDARY_PROMPTS[1]
+        + " Bob describes a journey across the mountains. Bob describes a journey across the mountains.",
+        PCP_SEGMENT_BOUNDARY_PROMPTS[2] + " a math problem. She starts by writing the equation on the board: 2",
+    ],
+    max_tokens=16,
+    runner_kwargs={
+        **PCP_RUNNER_KWARGS,
+        "seed": 0,
+        "speculative_config": {
+            "method": "eagle3",
+            "model": EAGLE3_PCP_DRAFT_MODEL,
+            "num_speculative_tokens": 3,
+        },
+    },
+)
+
+MLA_PCP_CASE = AccuracyCase(
+    name="mla_pcp",
+    expected_outputs=MLA_PCP_GOLDENS,
     model=MTP_PCP_MODEL,
     prompts=PCP_PROMPTS,
     max_tokens=16,
     runner_kwargs={
         **PCP_RUNNER_KWARGS,
         "enable_expert_parallel": True,
+        "seed": 0,
     },
 )
 
-MLA_PCP_DP_CASE = InferenceCase(
+MLA_PCP_DP_CASE = AccuracyCase(
+    name="mla_pcp_dp",
+    expected_outputs=MLA_PCP_GOLDENS,
     model=MTP_PCP_MODEL,
     prompts=PCP_PROMPTS,
     max_tokens=16,
@@ -257,6 +295,22 @@ MLA_PCP_DP_CASE = InferenceCase(
         **MLA_PCP_CASE.runner_kwargs,
         "tensor_parallel_size": 1,
         "data_parallel_size": 2,
+    },
+)
+
+MLA_PCP_MTP_CASE = AccuracyCase(
+    name="mla_pcp_mtp",
+    model=MTP_PCP_MODEL,
+    prompts=PCP_PROMPTS,
+    expected_outputs=MLA_PCP_GOLDENS,
+    max_tokens=16,
+    runner_kwargs={
+        **PCP_RUNNER_KWARGS,
+        "seed": 0,
+        "speculative_config": {
+            "method": "mtp",
+            "num_speculative_tokens": 3,
+        },
     },
 )
 
@@ -484,7 +538,7 @@ def test_eagle3_gqa_spec_decode_with_pcp_pp() -> None:
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_mla_with_pcp() -> None:
     """Guard MRV2 MLA PCP full-decode-only graph execution."""
-    _run_inference_case(MLA_PCP_CASE)
+    _run_accuracy_case(MLA_PCP_CASE)
 
 
 @pytest.mark.e2e_model(MTP_PCP_MODEL)
@@ -508,7 +562,7 @@ def test_mla_with_pcp() -> None:
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_mla_with_pcp_dp() -> None:
     """Guard MRV2 MLA PCP+DP full-decode-only graph execution."""
-    _run_inference_case(MLA_PCP_DP_CASE)
+    _run_accuracy_case(MLA_PCP_DP_CASE)
 
 
 @pytest.mark.e2e_model(EAGLE3_PCP_TARGET_MODEL)
@@ -643,7 +697,6 @@ def test_gqa_pcp_pd_disaggregation() -> None:
 def _run_pcp_spec_decode(
     model: str,
     speculative_config: dict[str, object],
-    prompts: Sequence[str] = PCP_PROMPTS,
 ) -> None:
     sampling_params = SamplingParams(max_tokens=16, temperature=0.0)
     with VllmRunner(
@@ -659,12 +712,12 @@ def _run_pcp_spec_decode(
         compilation_config=PCP_FULL_DECODE_GRAPH,
         speculative_config=speculative_config,
     ) as runner:
-        outputs = runner.model.generate(prompts, sampling_params)
+        outputs = runner.model.generate(PCP_PROMPTS, sampling_params)
         metrics = runner.model.get_metrics()
         num_drafts = sum(metric.value for metric in metrics if metric.name == "vllm:spec_decode_num_drafts")
 
     token_ids = [output.outputs[0].token_ids for output in outputs]
-    assert len(token_ids) == len(prompts)
+    assert len(token_ids) == len(PCP_PROMPTS)
     assert all(token_ids)
     assert num_drafts > 0
 
@@ -690,13 +743,7 @@ def _run_pcp_spec_decode(
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_mtp_mla_spec_decode_with_pcp() -> None:
     """Guard MRV2 MTP MLA PCP full-decode-only graph execution."""
-    _run_pcp_spec_decode(
-        MTP_PCP_MODEL,
-        {
-            "method": "mtp",
-            "num_speculative_tokens": 3,
-        },
-    )
+    _run_accuracy_case(MLA_PCP_MTP_CASE)
 
 
 @pytest.mark.e2e_model(EAGLE3_PCP_TARGET_MODEL, EAGLE3_PCP_DRAFT_MODEL)
@@ -721,18 +768,12 @@ def test_mtp_mla_spec_decode_with_pcp() -> None:
 @pytest.mark.parametrize("pcp_segment_boundary", [False, True], ids=["chunked_prefill", "pcp_segment_boundary"])
 def test_eagle3_gqa_spec_decode_with_pcp(pcp_segment_boundary: bool) -> None:
     """Guard MRV2 Eagle3 GQA PCP full-decode-only graph execution."""
-    prompts = PCP_PROMPTS
-    env = {}
     if pcp_segment_boundary:
         # Queue all three prefills before scheduling: PCP creates six local
         # block-table rows, while draft decode uses a four-request graph.
-        env["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
-        prompts = [
-            "Alice explains how to grow flowers in a garden. Alice explains how to grow flowers",
-            "Bob describes a journey across the mountains. Bob describes a journey across the mountains.",
-            "Carol teaches students how to solve a math problem. Carol teaches students how to solve",
-        ]
-    with patch.dict(os.environ, env):
+        with patch.dict(os.environ, {"VLLM_ENABLE_V1_MULTIPROCESSING": "0"}):
+            _run_accuracy_case(GQA_PCP_BOUNDARY_CASE)
+    else:
         _run_pcp_spec_decode(
             EAGLE3_PCP_TARGET_MODEL,
             {
@@ -740,5 +781,4 @@ def test_eagle3_gqa_spec_decode_with_pcp(pcp_segment_boundary: bool) -> None:
                 "model": EAGLE3_PCP_DRAFT_MODEL,
                 "num_speculative_tokens": 3,
             },
-            prompts,
         )
