@@ -54,7 +54,8 @@ def _make_mixed_metadata() -> GDNAttentionMetadata:
             cache_indices=torch.tensor([0, 1], dtype=torch.int32),
             initial_state_mode=torch.tensor([1, 1], dtype=torch.int32),
         ),
-        chunk=Mock(name="chunk_metadata"),
+        actual_seq_lengths=torch.tensor([2], dtype=torch.int32),
+        non_empty_indices=None,
     )
     metadata.non_spec_decode_metadata = GDNDecodeMetadata(
         causal_conv1d=GDNCausalConv1dMetadata(
@@ -149,8 +150,9 @@ def test_mixed_non_spec_reuses_rearranged_qkv() -> None:
         # Returning V makes the merged output easy to validate.
         return kwargs["value"].clone()
 
-    def chunk_gated_delta_rule(**kwargs):
-        return kwargs["v"].clone(), kwargs["initial_state"].clone()
+    def chunk_gated_delta_rule(query, key, value, beta, initial_state, actual_seq_lengths, g, scale):
+        del query, key, beta, actual_seq_lengths, g, scale
+        return value.clone(), initial_state.clone()
 
     # Shape [1, num_tokens, num_heads].
     gating = (
@@ -170,9 +172,11 @@ def test_mixed_non_spec_reuses_rearranged_qkv() -> None:
         ),
         patch("vllm_ascend.ops.gdn.l2norm_fwd", side_effect=lambda x: x),
         patch("vllm_ascend.ops.gdn.clear_ssm_states"),
-        patch(
-            "vllm_ascend.ops.gdn.chunk_gated_delta_rule",
+        patch.object(
+            torch.ops._C_ascend,
+            "npu_chunk_gated_delta_rule",
             side_effect=chunk_gated_delta_rule,
+            create=True,
         ) as chunk_mock,
         patch("vllm_ascend.ops.gdn.maybe_save_kv_layer_to_connector"),
         patch.object(
@@ -224,18 +228,18 @@ def test_mixed_non_spec_reuses_rearranged_qkv() -> None:
         non_none_calls[0].args[0],
         mixed_qkv,
     )
-    prefill_call = chunk_mock.call_args.kwargs
+    prefill_call = chunk_mock.call_args
     torch.testing.assert_close(
-        prefill_call["q"],
-        torch.tensor([[[[3.0, 4.0]], [[5.0, 6.0]]]]),
+        prefill_call.args[0],
+        torch.tensor([[[3.0, 4.0]], [[5.0, 6.0]]]),
     )
     torch.testing.assert_close(
-        prefill_call["k"],
-        torch.tensor([[[[13.0, 14.0]], [[15.0, 16.0]]]]),
+        prefill_call.args[1],
+        torch.tensor([[[13.0, 14.0]], [[15.0, 16.0]]]),
     )
     torch.testing.assert_close(
-        prefill_call["v"],
-        torch.tensor([[[[23.0, 24.0]], [[25.0, 26.0]]]]),
+        prefill_call.args[2],
+        torch.tensor([[[23.0, 24.0]], [[25.0, 26.0]]]),
     )
 
     # Decode and prefill outputs are stitched back in original token order.
