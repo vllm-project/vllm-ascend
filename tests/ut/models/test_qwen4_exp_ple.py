@@ -42,7 +42,9 @@ def _build_ngram_layer(decode_workspace_width: int = 4) -> Qwen4ExpNGramEmbeddin
 
 
 def test_compact_workspace_matches_full_workspace_for_ragged_mtp() -> None:
-    layer = _build_ngram_layer()
+    # 本用例喂入 6 个 token（4+2），compact workspace 必须至少这么宽；
+    # 真实配置里 width = max_num_seqs * (num_spec + 1)。
+    layer = _build_ngram_layer(decode_workspace_width=8)
     # Two active MTP rows with query lengths four and two, followed by two
     # graph-padding rows. The EOS inside the first chunk exercises segment
     # truncation for later draft tokens.
@@ -67,10 +69,10 @@ def test_compact_workspace_matches_full_workspace_for_ragged_mtp() -> None:
 
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     assert layer.decode_padded_buffer.tolist() == [
-        [10, 11, 99, 12],
-        [20, 21, 99, 99],
-        [99, 99, 99, 99],
-        [99, 99, 99, 99],
+        [10, 11, 99, 12, 99, 99, 99, 99],
+        [20, 21, 99, 99, 99, 99, 99, 99],
+        [99, 99, 99, 99, 99, 99, 99, 99],
+        [99, 99, 99, 99, 99, 99, 99, 99],
     ]
 
 
