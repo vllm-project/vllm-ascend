@@ -18,6 +18,13 @@
 # This workflow related to the resources atlas 800 A5
 name: Nightly-A5
 
+run-name: >-
+  ${{ inputs.request_id != '' &&
+      (inputs.request_id == 'daily' &&
+        'Nightly-A5 (Daily)' ||
+        format('Nightly-A5 (PR) {0}', inputs.request_id)) ||
+      'Nightly-A5 (scheduled)' }}
+
 on:
   workflow_dispatch:
     inputs:

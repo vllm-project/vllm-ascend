@@ -19,6 +19,13 @@
 # We will not limit the concurrency of jobs on A2
 name: Nightly-A2
 
+run-name: >-
+  ${{ inputs.request_id != '' &&
+      (inputs.request_id == 'daily' &&
+        'Nightly-A2 (Daily)' ||
+        format('Nightly-A2 (PR) {0}', inputs.request_id)) ||
+      'Nightly-A2 (scheduled)' }}
+
 on:
   workflow_dispatch:
     inputs:

@@ -20,6 +20,13 @@
 # We will limit the concurrency of jobs on A3 to avoid the risk of insufficient resources
 name: Nightly-A3
 
+run-name: >-
+  ${{ inputs.request_id != '' &&
+      (inputs.request_id == 'daily' &&
+        'Nightly-A3 (Daily)' ||
+        format('Nightly-A3 (PR) {0}', inputs.request_id)) ||
+      'Nightly-A3 (scheduled)' }}
+
 on:
   workflow_dispatch:
     inputs:
