@@ -153,6 +153,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
+from vllm_ascend.eplb.diagnostics.runtime import annotate_batch, record_diagnostics
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.model_executor.offloader import create_offloader
 from vllm_ascend.ops.fused_moe.force_eplb import build_force_eplb_topk
@@ -2150,6 +2151,7 @@ class NPUModelRunner(GPUModelRunner):
         return cut_tokens
 
     @torch.inference_mode()
+    @record_diagnostics
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
@@ -2459,6 +2461,12 @@ class NPUModelRunner(GPUModelRunner):
         )
 
         # Run forward pass
+        if self.ascend_config.eplb_diagnostics.mode != "off":
+            prefill_mask = (
+                self.input_batch.num_computed_tokens_cpu[:num_reqs] < self.input_batch.num_prompt_tokens[:num_reqs]
+            )
+            phase = "prefill" if np.all(prefill_mask) else ("mixed" if np.any(prefill_mask) else "decode")
+            annotate_batch(self, phase=phase, padded_tokens=num_tokens_padded, graph_mode=str(cudagraph_mode))
         defer_kv_connector_finalize = self.speculative_config is not None and (
             get_pp_group().is_last_rank or self.broadcast_pp_output
         )
