@@ -19,6 +19,7 @@ from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
 from vllm_ascend.utils import (
     get_ascend_config,
     is_pd_decode_recompute_scheduler_enabled,
+    vllm_version_is,
 )
 
 SFA_QSFA_TILE_SIZE = 128
@@ -313,6 +314,13 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     req_ids_tensor: torch.Tensor | None = None
     token_to_req: torch.Tensor | None = None
 
+    # vLLM removed these deprecated fields on main in the v0.29 deprecation
+    # (commit 5fe77aecfc). They are still present on the v0.28.0 release lane.
+    # NPU attention backends and speculative decoding still rely on them, so
+    # re-declare them here on lanes where the upstream parent no longer has them.
+    _seq_lens_cpu: torch.Tensor | None = None
+    _num_computed_tokens_cpu: torch.Tensor | None = None
+
     # TODO: Remove it when vLLM no longer uses this function.
     def unpadded(self, num_actual_tokens: int, num_actual_reqs: int) -> "AscendCommonAttentionMetadata":
         # This only use to eagle now. It will be use to enforce_eager in future.
@@ -358,7 +366,13 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             _seq_lens_cpu=_slice_reqs(self._seq_lens_cpu),
             _num_computed_tokens_cpu=_slice_reqs(self._num_computed_tokens_cpu),
             dcp_local_seq_lens=_slice_reqs(self.dcp_local_seq_lens),
-            dcp_local_seq_lens_cpu=_slice_reqs(self.dcp_local_seq_lens_cpu),
+            # Upstream #56157 renamed dcp_local_seq_lens_cpu to
+            # dcp_local_seq_lens_cpu_upper_bound on main.
+            **{
+                "dcp_local_seq_lens_cpu_upper_bound": _slice_reqs(
+                    self.dcp_local_seq_lens_cpu_upper_bound
+                )
+            },
             is_prefilling=_slice_reqs(self.is_prefilling),
             encoder_seq_lens=_slice_reqs(self.encoder_seq_lens),
             encoder_seq_lens_cpu=_slice_reqs(self.encoder_seq_lens_cpu),

@@ -18,7 +18,7 @@
 #
 
 from contextlib import AbstractContextManager, contextmanager
-from contextvars import ContextVar
+from typing import Any
 
 import numpy as np
 import torch
@@ -32,7 +32,6 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
-from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import (
     combine_sampled_and_draft_tokens,
     expand_idx_mapping,
@@ -314,16 +313,15 @@ class NPUModelRunner(GPUModelRunner):
             get_kv_transfer_group().handle_preemptions(kv_connector_metadata)
 
         self.model_state.kvpp_is_dummy_run = dummy_run or is_profile
-        with pcp_dispatch_context():
-            output = super().execute_model(
-                scheduler_output,
-                intermediate_tensors=intermediate_tensors,
-                dummy_run=dummy_run,
-                skip_attn_for_dummy_run=skip_attn_for_dummy_run,
-                is_profile=is_profile,
-                context_len=context_len,
-                **({} if vllm_version_is("0.29.0") else {"valid_dummy_state_slots": valid_dummy_state_slots}),
-            )
+        output = super().execute_model(
+            scheduler_output,
+            intermediate_tensors=intermediate_tensors,
+            dummy_run=dummy_run,
+            skip_attn_for_dummy_run=skip_attn_for_dummy_run,
+            is_profile=is_profile,
+            context_len=context_len,
+            **({} if vllm_version_is("0.29.0") else {"valid_dummy_state_slots": valid_dummy_state_slots}),
+        )
         self.model_state.kvpp_is_dummy_run = False
         self.kvpp.complete_forward()
 
@@ -352,16 +350,6 @@ class NPUModelRunner(GPUModelRunner):
                 with disable_compilation(self.get_model()):
                     self._dummy_run(mc2_tokens_capacity, skip_attn=True, skip_eplb=True, is_profile=True)
             super().profile_run()
-
-    def gather_batch_req_state(self, scheduler_output: SchedulerOutput, dummy_run: bool):
-        batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
-        num_tokens = None
-        if vllm_version_is("0.28.0") and self.pcp_manager is not None and batch_state is not None:
-            num_tokens = self.pcp_manager.get_num_tokens_for_dispatch(
-                batch_state.num_scheduled_tokens, batch_state.is_prefilling_np
-            )
-        _PCP_DISPATCH_NUM_TOKENS.set(num_tokens)
-        return batch_state, uniform_token_count
 
     def prepare_inputs(  # type: ignore[misc]
         self,
@@ -885,6 +873,7 @@ def graph_manager_wrapper(model_runner):
         decode_query_len: int,
         lora_capture_cases: list[int] | None = None,
         varlen_decode: bool = False,
+        ubatch_runner: Any = None,
     ):
         return ModelAclGraphManager(
             vllm_config,
@@ -894,6 +883,7 @@ def graph_manager_wrapper(model_runner):
             model_runner,
             lora_capture_cases=lora_capture_cases,
             varlen_decode=varlen_decode,  # type: ignore[call-arg]
+            ubatch_runner=ubatch_runner,
         )
 
     try:
@@ -901,28 +891,3 @@ def graph_manager_wrapper(model_runner):
         yield
     finally:
         vllm_model_runner.ModelCudaGraphManager = original_graph_manager
-
-
-# v0.28 calls a module-level dispatch function, with no runner hook. Carry
-# only the PCP execution count across that boundary; keep request state intact.
-_PCP_DISPATCH_NUM_TOKENS: ContextVar[int | None] = ContextVar("ascend_pcp_dispatch_num_tokens", default=None)
-
-
-@contextmanager
-def pcp_dispatch_context():
-    token = _PCP_DISPATCH_NUM_TOKENS.set(None)
-    try:
-        yield
-    finally:
-        _PCP_DISPATCH_NUM_TOKENS.reset(token)
-
-
-def _dispatch_pcp_and_sync_dp(cudagraph_manager, num_reqs, num_tokens, *args, **kwargs):
-    pcp_num_tokens = _PCP_DISPATCH_NUM_TOKENS.get()
-    if pcp_num_tokens is not None:
-        num_tokens = pcp_num_tokens
-    return dispatch_cg_and_sync_dp(cudagraph_manager, num_reqs, num_tokens, *args, **kwargs)
-
-
-if vllm_version_is("0.28.0"):
-    vllm_model_runner.dispatch_cg_and_sync_dp = _dispatch_pcp_and_sync_dp

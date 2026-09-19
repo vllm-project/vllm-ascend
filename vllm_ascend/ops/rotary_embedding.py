@@ -35,7 +35,7 @@ from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import enable_sp, has_rope, is_vl_model
+from vllm_ascend.utils import enable_sp, has_rope, is_vl_model, vllm_version_is
 
 if HAS_TRITON:
     from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
@@ -308,23 +308,19 @@ class AscendYaRNRotaryEmbedding(YaRNScalingRotaryEmbedding):
         is_neox_style: bool,
         scaling_factor: float,
         dtype: torch.dtype,
-        *,
-        extrapolation_factor: float = 1,
-        attn_factor: float = 1,
-        beta_fast: int = 32,
-        beta_slow: int = 1,
-        apply_yarn_scaling: bool = True,
-        truncate: bool = False,
+        **kwargs,
     ) -> None:
         extra_kwargs = {
-            "extrapolation_factor": extrapolation_factor,
-            "attn_factor": attn_factor,
-            "beta_fast": beta_fast,
-            "beta_slow": beta_slow,
-            "apply_yarn_scaling": apply_yarn_scaling,
+            "beta_fast": kwargs.pop("beta_fast", 32),
+            "beta_slow": kwargs.pop("beta_slow", 1),
             # TODO: current not support actual truncate，adaptation for extra parameters to be compatible with vllm
-            "truncate": truncate,
+            "truncate": kwargs.pop("truncate", False),
         }
+        # Upstream #56446 replaced extrapolation_factor/attn_factor/
+        # apply_yarn_scaling with mscale/mscale_all_dim/attention_factor.
+        for k in ("mscale", "mscale_all_dim", "attention_factor"):
+            if k in kwargs:
+                extra_kwargs[k] = kwargs.pop(k)
         super().__init__(
             head_size, rotary_dim, max_position_embeddings, base, is_neox_style, scaling_factor, dtype, **extra_kwargs
         )
@@ -362,14 +358,17 @@ class AscendDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
         is_neox_style: bool,
         scaling_factor: float,
         dtype: torch.dtype,
-        *,
-        extrapolation_factor: float = 1,
-        attn_factor: float = 1,
-        beta_fast: int = 32,
-        beta_slow: int = 1,
-        mscale: float = 1,
-        mscale_all_dim: float = 0,
+        **kwargs,
     ) -> None:
+        beta_fast = kwargs.pop("beta_fast", 32)
+        beta_slow = kwargs.pop("beta_slow", 1)
+        mscale = kwargs.pop("mscale", 1)
+        mscale_all_dim = kwargs.pop("mscale_all_dim", 0)
+        # Upstream #56446 removed extrapolation_factor/attn_factor
+        # from DeepseekScalingRotaryEmbedding.
+        extrapolation_factor = 1
+        attn_factor = 1
+        kwargs.pop("init_cache", None)  # upstream main added, unused
         # Note: we adopt the native huggingface deepseek rope initialization code from
         # https://huggingface.co/deepseek-ai/DeepSeek-V3-0324/blob/main/modeling_deepseek.py for
         # its more ascend compute friendly

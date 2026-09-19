@@ -21,7 +21,7 @@ from vllm.forward_context import BatchDescriptor, ForwardContext, get_forward_co
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
-from vllm.model_executor.models import supports_multimodal
+from vllm.model_executor.models import supports_multimodal, supports_multimodal_embeddings
 from vllm.model_executor.models.deepseek_eagle3 import Eagle3DeepseekV2ForCausalLM
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
@@ -378,11 +378,16 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         if self.supports_mm_inputs:
             # Match upstream: a multimodal target can use a text-only drafter.
-            try:
-                dummy_input_ids = torch.tensor([[1]], device=self.input_ids.device)
-                self.model.embed_input_ids(dummy_input_ids, multimodal_embeddings=None)
-            except (NotImplementedError, AttributeError, TypeError):
-                logger.warning("Draft model does not support multimodal inputs, falling back to text-only mode")
+            if not supports_multimodal_embeddings(self.model):
+                # Upstream #50417 replaced the runtime probe with this static
+                # capability check. Probing by calling embed_input_ids would run
+                # before the target embedding is aliased into the draft (see
+                # _maybe_share_embeddings below), which asserts on K3 DSpark.
+                logger.warning(
+                    "Draft model %s does not support external multimodal embeddings; "
+                    "using text-only draft inputs instead.",
+                    type(self.model).__name__,
+                )
                 self.supports_mm_inputs: bool = False
 
         # Find draft layers (attention layers added by draft model)

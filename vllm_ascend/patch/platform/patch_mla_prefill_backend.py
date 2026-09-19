@@ -14,7 +14,10 @@
 
 import torch
 import vllm.model_executor.layers.attention.mla_attention
+from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
+
+from vllm_ascend.utils import vllm_version_is
 
 
 class AscendMLAPrefillBackend(MLAPrefillBackend):
@@ -46,3 +49,9 @@ class AscendMLAPrefillBackend(MLAPrefillBackend):
 
 
 vllm.model_executor.layers.attention.mla_attention.get_mla_prefill_backend = lambda vllm_config: AscendMLAPrefillBackend
+
+# Upstream #56157 introduced supports_pcp_dcp on MLAAttention (default False)
+# which raises NotImplementedError when PCP+DCP is used. Ascend MLA supports
+# PCP+DCP, so opt in on the main lane.
+if not vllm_version_is("0.29.0"):
+    MLAAttention.supports_pcp_dcp = True

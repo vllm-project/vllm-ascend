@@ -42,6 +42,7 @@ from vllm_ascend.compilation.acl_graph import set_graph_params, update_full_grap
 from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.utils import communicator_switch
+from vllm_ascend.utils import vllm_version_is
 
 
 def _prepare_pcp_inputs_to_capture(
@@ -127,7 +128,9 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         model_runner: Any,
         lora_capture_cases: list[int] | None = None,
         varlen_decode: bool = False,
+        ubatch_runner: Any = None,
     ):
+        # Upstream added ubatch_runner on the main lane (PR #54736).
         super().__init__(
             vllm_config,
             device,
@@ -135,6 +138,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
             decode_query_len,
             lora_capture_cases=lora_capture_cases,
             varlen_decode=varlen_decode,
+            ubatch_runner=ubatch_runner,
         )
         self.breakable_cg_runner: BreakableACLGraphWrapper | None = None
         self.model_runner = model_runner

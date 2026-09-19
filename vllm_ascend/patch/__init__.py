@@ -732,18 +732,6 @@
 #       (model architecture, Triton, feature checks) without crashes or
 #       degraded functionality.
 #
-#   2. `vllm.config.parallel.ParallelConfig._validate_parallel_config`
-#    Why:
-#       vLLM 0.28.0 rejects PCP+DP before Ascend MRV2 can validate it.
-#    How:
-#       Only on Ascend MRV2 with DP>1, PCP>1 and DCP=1, temporarily mask
-#       PCP inside the original validator and restore it on every exit.
-#       Retain real DP validation and world_size; rebuild dependent Pydantic
-#       schemas once at import so nested configs use the same validator.
-#    Related PR: https://github.com/vllm-project/vllm/pull/54523
-#    Future Plan:
-#       Remove this workaround when vLLM 0.28.0 support is dropped.
-#
 # * Worker Patch:
 # ========#
 # Entries are listed in alphabetical order by file name.
