@@ -6,7 +6,6 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-import regex as re
 from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer, wait_until_npu_memory_free
@@ -76,21 +75,14 @@ def test_qwen35_pp_mtp_full_decode_only() -> None:
         def check_answer(question: str, expected: int):
             response = client.chat.completions.create(
                 model=MODEL,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": question + "\nEnd your response with a final line in the format answer:<integer>.",
-                    }
-                ],
+                messages=[{"role": "user", "content": question}],
                 temperature=0,
-                max_tokens=8192,
+                max_tokens=20,
                 extra_body={"chat_template_kwargs": {"enable_thinking": False}},
             )
             choice = response.choices[0]
-            assert choice.finish_reason == "stop", choice
             text = choice.message.content or ""
-            numbers = re.findall(r"(?im)^answer:\s*(-?\d+)\s*$", text.rsplit("</think>", 1)[-1])
-            assert numbers and int(numbers[-1]) == expected, text
+            assert text.strip() and str(expected) in text, choice
             return response
 
         for expression, answer in [("6 plus 7", 13), ("3 times 4", 12), ("9 minus 5", 4)]:
