@@ -4,12 +4,15 @@ if (BUILD_OPEN_PROJECT)
     target_sources(op_host_aclnn PRIVATE
         causal_conv1d_def.cpp
     )
+    target_compile_definitions(op_host_aclnn PRIVATE
+        ASCEND_SOC_VERSION="${ASCEND_COMPUTE_UNIT}"
+    )
 endif()
 
 add_ops_compile_options(
     OP_NAME CausalConv1d
     OPTIONS
-        --cce-auto-sync=on
+        --cce-auto-sync=off
         -Wno-deprecated-declarations
 )
 
