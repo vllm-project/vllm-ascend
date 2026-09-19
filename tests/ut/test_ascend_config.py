@@ -982,12 +982,25 @@ class TestSubconfigPydanticTypeValidation(TestBase):
             DyntraLBConfig(unknown_key=True)  # type: ignore[call-arg]
 
     def test_dyntra_lb_config_range_checks_preserved(self):
-        with self.assertRaisesRegex(ValueError, "end_step must be greater than start_step"):
-            DyntraLBConfig(start_step=10, end_step=10)  # type: ignore[call-arg]
+        with self.assertRaisesRegex(
+            ValueError,
+            "end_step must be greater than start_step",
+        ):
+            DyntraLBConfig(
+                start_step=10,
+                end_step=10,
+            )  # type: ignore[call-arg]
 
     def test_rejection_sampler_config_range_check_preserved(self):
-        with self.assertRaises(ValueError):
-            RejectionSamplerConfig(posterior_threshold=1.5)
+        invalid_kwargs = (
+            {"posterior_threshold": 1.5},
+            {"fly_entropy_top_k": 0},
+            {"fly_entropy_threshold": -0.1},
+            {"fly_window_size": 0},
+        )
+        for kwargs in invalid_kwargs:
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                RejectionSamplerConfig(**kwargs)
 
     def test_finegrained_tp_config_rejects_negative_size(self):
         with self.assertRaisesRegex(ValueError, "lmhead_tensor_parallel_size must be non-negative"):
@@ -1407,12 +1420,20 @@ class TestTopLevelSwitchTypeValidation(TestBase):
                 self.assertEqual(config.c8_reshape_optim_enabled, expected)
 
     @_clean_up
+    @patch("vllm.envs.VLLM_USE_V2_MODEL_RUNNER", False)
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_rejection_sampler_config_survives_factory(self, mock_fix):
         vc = VllmConfig()
+        vc.speculative_config = SimpleNamespace(
+            method="draft_model",
+            num_speculative_tokens=4,
+            num_speculative_tokens_per_batch_size=None,
+            rejection_sample_method="standard",
+        )
         vc.additional_config = {
             "rejection_sampler_config": {
                 "enable_block_verify": "false",
+                "enable_fly_verify": "true",
                 "posterior_threshold": "0.8",
             }
         }
@@ -1420,7 +1441,38 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         config = init_ascend_config(vc)
 
         self.assertFalse(config.rejection_sampler_config.enable_block_verify)
+        self.assertTrue(config.rejection_sampler_config.enable_fly_verify)
         self.assertEqual(config.rejection_sampler_config.posterior_threshold, 0.8)
+        self.assertEqual(config.rejection_sampler_config.fly_window_size, 3)
+
+    @_clean_up
+    @patch("vllm.envs.VLLM_USE_V2_MODEL_RUNNER", False)
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_fly_verify_rejects_other_verify_modes(self, mock_fix):
+        for verify_mode in (
+            "enable_block_verify",
+            "enable_entropy_verify",
+        ):
+            with self.subTest(verify_mode=verify_mode):
+                vc = VllmConfig()
+                vc.speculative_config = SimpleNamespace(
+                    method="draft_model",
+                    num_speculative_tokens=4,
+                    num_speculative_tokens_per_batch_size=None,
+                    rejection_sample_method="standard",
+                )
+                vc.additional_config = {
+                    "rejection_sampler_config": {
+                        "enable_fly_verify": True,
+                        verify_mode: True,
+                    }
+                }
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "incompatible with Block Verify and Entropy Verify",
+                ):
+                    init_ascend_config(vc)
 
     @_clean_up
     @patch("vllm_ascend.utils.model_uses_sfa_sparse", return_value=False)
