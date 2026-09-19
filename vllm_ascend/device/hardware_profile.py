@@ -20,6 +20,7 @@ class HardwareCapability(Enum):
     ATB_EXTENSIONS = auto()
     ATB_WARMUP = auto()
     BGMV_SGMV_META_REGISTRATION = auto()
+    BLOCK_KV_CACHE_STORE = auto()
     CANN_MEGAMOE = auto()
     CANN_MEGAMOE_MXFP = auto()
     CHUNKED_PREFILL_PHASE_SPLIT = auto()
@@ -140,6 +141,7 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.ATB_EXTENSIONS,
         HardwareCapability.ATB_WARMUP,
         HardwareCapability.BGMV_SGMV_META_REGISTRATION,
+        HardwareCapability.BLOCK_KV_CACHE_STORE,
         HardwareCapability.FUSED_SWIGLU_TUNING_ARGS,
         HardwareCapability.GRAPH_MULS_ADD_FUSION,
         HardwareCapability.GRAPH_NORM_QUANT_FUSION,

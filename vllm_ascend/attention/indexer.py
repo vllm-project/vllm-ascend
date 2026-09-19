@@ -19,6 +19,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.utils import select_common_block_size
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.attention.cache_store import try_store_kv_blocks
 from vllm_ascend.attention.context_parallel.common_cp import (
     build_pcp_ordered_slot_mapping,
     get_cp_local_query_key_lens,
@@ -52,6 +53,15 @@ else:
 # tuple (the scale slot exists only when LI C8 is enabled).
 INDEXER_K_CACHE_SLOT = 0
 INDEXER_SCALE_CACHE_SLOT = 1
+
+
+@dataclass
+class IndexerCacheInputs:
+    """Per-forward K inputs, optionally gathered together with the main KV."""
+
+    key: torch.Tensor
+    scale: torch.Tensor | None
+    weights: torch.Tensor
 
 
 @dataclass
@@ -248,6 +258,14 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                 indexer_attn_metadata.group_key_cache_idx,
                 indexer_attn_metadata.block_size,
             )
+        elif (
+            getattr(self, "_dsa_cp_active", False)
+            and not self._pcp_active
+            and try_store_kv_blocks(k_li, indexer_k_cache, indexer_attn_metadata)
+        ):
+            # Large BF16 indexer caches can use their already-built grouping
+            # metadata too; cache quantization is independent of this copy.
+            pass
         else:
             torch_npu.npu_scatter_nd_update_(
                 indexer_k_cache.view(-1, k_li.shape[-1]),
@@ -384,6 +402,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         k_hidden_states: torch.Tensor,
         indexer_metadata: AscendSFAIndexerMetadata,
         compute_topk: bool = True,
+        cache_inputs: IndexerCacheInputs | None = None,
     ) -> torch.Tensor | None:
         """Full indexer pipeline: k path -> cache write -> top-k selection.
 
@@ -397,8 +416,15 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         inputs."""
         cos = indexer_metadata.cos
         sin = indexer_metadata.sin
-        k_li, k_li_scale, indexer_weights = self.forward_k(k_hidden_states, cos, sin)
-        k_li, k_li_scale, slot_mapping = self._gather_cache_inputs(k_li, k_li_scale, indexer_metadata)
+        if cache_inputs is None:
+            k_li, k_li_scale, indexer_weights = self.forward_k(k_hidden_states, cos, sin)
+            k_li, k_li_scale, slot_mapping = self._gather_cache_inputs(k_li, k_li_scale, indexer_metadata)
+        else:
+            # The SFA caller completed the shared collective before handing
+            # these tensors back. Cache ownership and metadata remain here.
+            k_li, k_li_scale = cache_inputs.key, cache_inputs.scale
+            indexer_weights = cache_inputs.weights
+            slot_mapping = indexer_metadata.slot_mapping
         self.write_cache(k_li, k_li_scale, slot_mapping, indexer_attn_metadata=indexer_metadata)
         if not compute_topk:
             return None

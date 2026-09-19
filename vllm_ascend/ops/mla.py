@@ -32,7 +32,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 
-from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
+from vllm_ascend.attention.indexer import AscendSFAIndexerBackend, IndexerCacheInputs
 from vllm_ascend.attention.utils import mark_fused_preprocess_weights
 
 
@@ -97,6 +97,16 @@ class IndexerWrapper(nn.Module):
     def process_weights_after_loading(self) -> None:
         self.impl.process_weights_after_loading()
 
+    def prepare_cache_inputs(
+        self,
+        hidden_states: torch.Tensor,
+        indexer_metadata: AttentionMetadata,
+    ) -> IndexerCacheInputs | None:
+        # Other indexer families may use a different K/cache pipeline.
+        if type(self.impl) is not AscendSFAIndexerBackend or self.impl._pcp_active:
+            return None
+        return IndexerCacheInputs(*self.impl.forward_k(hidden_states, indexer_metadata.cos, indexer_metadata.sin))
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -104,7 +114,12 @@ class IndexerWrapper(nn.Module):
         k_hidden_states: torch.Tensor,
         indexer_metadata: AttentionMetadata,
         compute_topk: bool = True,
+        cache_inputs: IndexerCacheInputs | None = None,
     ) -> torch.Tensor | None:
+        if cache_inputs is not None:
+            return self.impl(
+                hidden_states, q_c, k_hidden_states, indexer_metadata, compute_topk, cache_inputs=cache_inputs
+            )
         return self.impl(hidden_states, q_c, k_hidden_states, indexer_metadata, compute_topk)
 
 
@@ -234,10 +249,33 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         self.mla_attn.process_weights_after_loading = wrapped_process_weights
 
         vllm_config = get_current_vllm_config()
+        # The eager prefill route can select its layout from per-step metadata.
+        # Compiled/captured paths keep their existing fixed operator contract.
+        self._eager_sequence_parallel = vllm_config.model_config.enforce_eager
         compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
+
+    def supports_sequence_parallel(self) -> bool:
+        if not self._eager_sequence_parallel:
+            return False
+        metadata = get_forward_context().attn_metadata
+        if not isinstance(metadata, dict):
+            return False
+        # Import lazily: the backend also consumes MLA wrapper types during
+        # attention backend initialization.
+        from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADSACPImpl
+
+        impl = self.mla_attn.impl
+        return type(impl) is AscendSFADSACPImpl and impl.supports_sequence_parallel(
+            metadata.get(self.mla_attn.layer_name)
+        )
+
+    def forward_sequence_parallel(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        output = torch.empty_like(hidden_states)
+        torch.ops.vllm.mla_forward_sequence_parallel(hidden_states, output, self.prefix)
+        return output
 
     def forward(
         self,
@@ -284,6 +322,27 @@ def mla_forward_fake(
 direct_register_custom_op(
     op_name="mla_forward",
     op_func=mla_forward,
+    mutates_args=["output"],
+    fake_impl=mla_forward_fake,
+    dispatch_key="PrivateUse1",
+)
+
+
+@eager_break_during_capture
+def mla_forward_sequence_parallel(
+    hidden_states: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: str,
+) -> None:
+    forward_context = get_forward_context()
+    layer = forward_context.no_compile_layers[layer_name].mla_attn
+    metadata = forward_context.attn_metadata[layer.layer_name]
+    layer.impl.forward_sequence_parallel(layer.layer_name, hidden_states, layer.kv_cache, metadata, output)
+
+
+direct_register_custom_op(
+    op_name="mla_forward_sequence_parallel",
+    op_func=mla_forward_sequence_parallel,
     mutates_args=["output"],
     fake_impl=mla_forward_fake,
     dispatch_key="PrivateUse1",

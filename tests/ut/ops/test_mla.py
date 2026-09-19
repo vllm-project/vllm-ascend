@@ -327,6 +327,31 @@ class TestAscendSFAIndexerBackend(TestBase):
 
 
 class TestIndexerWrapper(TestBase):
+    def test_prepares_and_forwards_fused_cache_inputs(self):
+        backend = AscendSFAIndexerBackend.__new__(AscendSFAIndexerBackend)
+        nn.Module.__init__(backend)
+        backend._pcp_active = False
+        key, scale, weights = torch.ones(2, 128), torch.ones(2, 1), torch.ones(2, 8)
+        backend.forward_k = MagicMock(return_value=(key, scale, weights))
+        backend.forward = MagicMock()
+        wrapper = IndexerWrapper.__new__(IndexerWrapper)
+        nn.Module.__init__(wrapper)
+        wrapper.impl = backend
+        hidden = torch.zeros(2, 128)
+        metadata = SimpleNamespace(cos=torch.ones(2, 64), sin=torch.zeros(2, 64))
+
+        inputs = wrapper.prepare_cache_inputs(hidden, metadata)
+        self.assertIs(inputs.key, key)
+        self.assertIs(inputs.scale, scale)
+        self.assertIs(inputs.weights, weights)
+        backend.forward_k.assert_called_once_with(hidden, metadata.cos, metadata.sin)
+        wrapper(hidden, hidden, hidden, metadata, False, cache_inputs=inputs)
+        backend.forward.assert_called_once_with(hidden, hidden, hidden, metadata, False, cache_inputs=inputs)
+
+        backend._pcp_active = True
+        self.assertIsNone(wrapper.prepare_cache_inputs(hidden, metadata))
+        self.assertEqual(backend.forward_k.call_count, 1)
+
     @patch("vllm_ascend.ops.mla.AscendSFAIndexerBackend")
     def test_constructs_backend_and_delegates_sfa_interface(self, mock_backend_cls):
         vllm_indexer = MagicMock(name="vllm_indexer")
