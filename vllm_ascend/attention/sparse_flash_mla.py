@@ -60,6 +60,28 @@ def sparse_flash_mla_metadata(**kwargs):
     return metadata_op(**kwargs)
 
 
+@lru_cache
+def _get_default_sinks(num_heads: int, device: torch.device) -> torch.Tensor:
+    """Return a cached all-ones sink tensor for SparseFlashMla."""
+    return torch.ones(
+        (num_heads,),
+        dtype=torch.float32,
+        device=device,
+    )
+
+
+def _ensure_sinks(q: torch.Tensor, kwargs: dict[str, Any]) -> None:
+    """Fill the required sparse-MLA sink tensor when the caller omits one.
+
+    The GLM5Next SFA path does not carry a learnable attention sink, while the
+    CANN SparseFlashMla op still requires a per-head float32 sink tensor.
+    Keep this behavior here in the op adapter instead of leaking it into SFA
+    metadata construction.
+    """
+    if kwargs.get("sinks") is None and q.ndim >= 2:
+        kwargs["sinks"] = _get_default_sinks(q.shape[1], q.device)
+
+
 def sparse_flash_mla(q: torch.Tensor, **kwargs):
     """Adapt existing DSA attention kwargs to SparseFlashMla BF16 KV."""
     kwargs.pop("kv_quant_mode", None)
@@ -70,5 +92,6 @@ def sparse_flash_mla(q: torch.Tensor, **kwargs):
         kwargs["seqused_ori_kv"] = kwargs.pop("seqused_kv")
     _drop_paged_kv_cu_seqlens(kwargs)
     _add_compressed_kv_lengths(kwargs)
+    _ensure_sinks(q, kwargs)
     attention_op, _ = _get_sparse_flash_mla_ops()
     return attention_op(q, **kwargs)
