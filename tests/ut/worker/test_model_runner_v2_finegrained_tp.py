@@ -39,6 +39,11 @@ def _make_runner(max_num_reqs=8, decode_query_len=2, vocab=6):
     runner.is_last_pp_rank = True
     runner.execute_model_state = None
     runner.pcp_manager = None
+    # The Ascend execute_model wrapper toggles model_state.kvpp_is_dummy_run
+    # around the parent call and completes the kvpp forward afterwards; both
+    # belong to the production initializer.
+    runner.model_state = SimpleNamespace(kvpp_is_dummy_run=False)
+    runner.kvpp = MagicMock()
     runner.ascend_config = SimpleNamespace(scheduler_config=SimpleNamespace(profiling_chunk_config=None))
     runner.model = MagicMock()
     runner.model.compute_logits.side_effect = lambda x: torch.zeros(x.shape[0], vocab)
@@ -282,6 +287,9 @@ def _make_speculator(max_num_reqs=8, num_speculative_steps=1):
     spec = object.__new__(_ConcreteSpeculator)
     spec.max_num_reqs = max_num_reqs
     spec.num_speculative_steps = num_speculative_steps
+    # Set by prepare_replicated_pcp_config in the production initializer; the
+    # draft runtime config build reads it.
+    spec.replicated_pcp = False
     spec.model = MagicMock()
     spec.use_local_argmax_reduction = False
     return spec
@@ -531,6 +539,7 @@ def test_draft_vllm_config_does_not_revalidate_draft_model_config():
     spec = object.__new__(_ConcreteSpeculator)
     spec.vllm_config = MagicMock(name="target_vllm_config")
     spec.draft_model_config = MagicMock(name="draft_model_config")
+    spec.replicated_pcp = False
 
     calls = []
 
@@ -541,12 +550,18 @@ def test_draft_vllm_config_does_not_revalidate_draft_model_config():
     with patch.object(autoreg_module, "replace", side_effect=_fake_replace):
         draft_vllm_config = spec._create_draft_vllm_config()
 
-    assert calls[0][0] is spec.vllm_config.parallel_config
-    assert calls[0][1] == {"pipeline_parallel_size": 1}
-    assert len(calls) == 2
-    # Only the target-derived config is validated; the draft model config is
-    # swapped in afterwards.
-    assert "model_config" not in calls[1][1]
+    # The target-derived config is what gets validated: its parallel config is
+    # normalized (PP=1) and its cache config refreshed.
+    parallel_calls = [c for c in calls if c[0] is spec.vllm_config.parallel_config]
+    assert parallel_calls and parallel_calls[0][1]["pipeline_parallel_size"] == 1
+    config_calls = [c for c in calls if c[0] is spec.vllm_config]
+    assert len(config_calls) == 1
+    assert "cache_config" in config_calls[0][1]
+    # Nothing may carry the draft model config through replace(): that re-runs
+    # VllmConfig validation against the draft head.
+    for _, kwargs in calls:
+        assert "model_config" not in kwargs
+    # ...and the draft model config still reaches the draft runtime config.
     assert draft_vllm_config.model_config is spec.draft_model_config
 
 
@@ -560,6 +575,7 @@ def test_eagle_draft_vllm_config_disables_expert_parallel():
     spec = object.__new__(AscendEagleSpeculator)
     spec.vllm_config = MagicMock(name="target_vllm_config")
     spec.draft_model_config = MagicMock(name="draft_model_config")
+    spec.replicated_pcp = False
 
     calls = []
 
@@ -573,7 +589,13 @@ def test_eagle_draft_vllm_config_disables_expert_parallel():
     ):
         draft_vllm_config = spec._create_draft_vllm_config()
 
-    assert calls[0][1] == {"pipeline_parallel_size": 1}
-    assert calls[-1][1] == {"enable_expert_parallel": False, "enable_eplb": False}
-    assert "model_config" not in calls[1][1]
+    # The draft-only parallel settings are applied last, on top of the config
+    # the base built.
+    assert calls[-1][1] == {
+        "prefill_context_parallel_size": 1,
+        "enable_expert_parallel": False,
+        "enable_eplb": False,
+    }
+    for _, kwargs in calls:
+        assert "model_config" not in kwargs
     assert draft_vllm_config.model_config is spec.draft_model_config
