@@ -1101,12 +1101,30 @@ class KVPoolWorker:
                 if group_id >= len(request.block_ids_by_group):
                     continue
                 block_ids = request.block_ids_by_group[group_id]
+                group_starts: list[int] = []
+                group_ends: list[int] = []
+                group_keys: list[str] = []
+                group_block_ids: list[int] = []
                 group_block_size = self.grouped_block_size[group_id]
                 mask_num = load_spec.vllm_cached_tokens // group_block_size * group_block_size
                 skip_null = group_id < len(self.group_uses_align_state) and self.group_uses_align_state[group_id]
+                group_load_mask = (
+                    load_masks[group_id] if load_masks is not None and group_id < len(load_masks) else None
+                )
+                if group_load_mask == []:
+                    continue
+                chunk_filter: Callable[[int], bool] | None = None
+                if group_load_mask is not None and not all(group_load_mask):
 
-                def chunk_filter(start: int, group_id=group_id, load_masks=load_masks) -> bool:
-                    return self.token_database.mask_allows_chunk(load_masks, group_id, start)
+                    def mask_filter(
+                        start: int,
+                        group_load_mask=group_load_mask,
+                        group_block_size=group_block_size,
+                    ) -> bool:
+                        block_idx = start // group_block_size
+                        return block_idx < len(group_load_mask) and group_load_mask[block_idx]
+
+                    chunk_filter = mask_filter
 
                 for (
                     start,
@@ -1123,17 +1141,21 @@ class KVPoolWorker:
                     skip_null_blocks=skip_null,
                     chunk_filter=chunk_filter,
                 ):
-                    addr, size, block_id = self.token_database.prepare_value(
-                        start,
-                        end,
-                        block_ids,
-                        kv_cache_group_id=group_id,
-                        block_id=block_id,
-                    )
-                    key_list.append(key)
-                    addr_list.append(addr)
-                    size_list.append(size)
-                    block_id_list.append(block_id)
+                    group_starts.append(start)
+                    group_ends.append(end)
+                    group_keys.append(key)
+                    group_block_ids.append(block_id)
+
+                group_addrs, group_sizes = self.token_database.prepare_values(
+                    group_starts,
+                    group_ends,
+                    group_block_ids,
+                    kv_cache_group_id=group_id,
+                )
+                key_list.extend(group_keys)
+                addr_list.extend(group_addrs)
+                size_list.extend(group_sizes)
+                block_id_list.extend(group_block_ids)
             if not key_list:
                 continue
             key_list_c = _circular_shift(key_list, self.tp_rank % len(key_list))
@@ -2787,6 +2809,7 @@ class KVPoolWorker:
         block_hashes: list[BlockHash],
         group_id: int,
         use_layerwise: bool,
+        need_starts: bool = True,
     ) -> tuple[list[str], list[int], list[int]]:
         keys: list[str] = []
         starts: list[int] = []
@@ -2809,7 +2832,8 @@ class KVPoolWorker:
                 token_len, block_hashes, kv_cache_group_id=group_id
             ):
                 keys.append(key_string)
-                starts.append(start)
+                if need_starts:
+                    starts.append(start)
                 ends.append(end)
         return keys, starts, ends
 
@@ -2910,8 +2934,28 @@ class KVPoolWorker:
         return f"{key[:value_start]}{value}{key[value_end:]}"
 
     def _expand_lookup_keys_by_rank(self, keys: list[str], group_id: int) -> list[str]:
-        # PCP replicas share keys; expand only the physical KV partitions.
-        expanded: list[str] = []
+        if not keys:
+            return []
+
+        # Non-layerwise keys share the same metadata prefix and only differ in
+        # their trailing hash. Expand that prefix once per physical rank.
+        prefix, separator, _ = keys[0].rpartition("@")
+        rank_markers = ("@dcp:", "@head_or_tp_rank:", "@pp_rank:")
+        if separator and all(marker in prefix for marker in rank_markers):
+            suffixes = [key[len(prefix) :] for key in keys]
+            expanded: list[str] = []
+            for pp_rank in range(self.pp_size):
+                for dcp_rank in range(self.dcp_size):
+                    for head_or_tp_rank in range(self.get_group_tp_size(group_id)):
+                        rank_prefix = self._replace_key_field(prefix, "dcp", dcp_rank)
+                        rank_prefix = self._replace_key_field(rank_prefix, "head_or_tp_rank", head_or_tp_rank)
+                        rank_prefix = self._replace_key_field(rank_prefix, "pp_rank", pp_rank)
+                        expanded.extend(rank_prefix + suffix for suffix in suffixes)
+            return expanded
+
+        # Layerwise keys do not contain pp_rank. Preserve their existing
+        # replacement and expansion behavior.
+        fallback_expanded: list[str] = []
         num_head_or_tp_ranks = self.get_group_tp_size(group_id)
         # Keep each rank shard's block/layer keys contiguous to match
         # lookup_scheduler()'s [rank_shard][block] result slicing.
@@ -2921,13 +2965,8 @@ class KVPoolWorker:
                     for key in keys:
                         rank_key = self._replace_key_field(key, "dcp", dcp_rank)
                         rank_key = self._replace_key_field(rank_key, "head_or_tp_rank", head_or_tp_rank)
-                        expanded.append(self._replace_key_field(rank_key, "pp_rank", pp_rank))
-        return expanded
-
-    def _expand_lookup_key_variants(self, key: str, group_id: int, include_all_ranks: bool) -> list[str]:
-        if not include_all_ranks:
-            return [key]
-        return self._expand_lookup_keys_by_rank([key], group_id)
+                        fallback_expanded.append(self._replace_key_field(rank_key, "pp_rank", pp_rank))
+        return fallback_expanded
 
     def _lookup_with_coordinator(
         self,
@@ -2956,38 +2995,44 @@ class KVPoolWorker:
                 # the pool only has to confirm the blocks beyond them.
                 present.extend(group_block_hashes[: hbm_hit_tokens // group_block_size])
             lookup_start = hbm_hit_tokens // group_block_size * group_block_size
-
-            def chunk_filter(
-                start: int,
-                group_block_size=group_block_size,
-                lookup_mask=lookup_mask,
-            ) -> bool:
-                chunk_idx = start // group_block_size
-                return lookup_mask is None or (chunk_idx < len(lookup_mask) and lookup_mask[chunk_idx])
-
+            key_prefix = self.token_database.get_key_prefix(group_id)
+            key_prefixes = (
+                self._expand_lookup_keys_by_rank([key_prefix], group_id) if include_all_ranks else [key_prefix]
+            )
+            variant_count = len(key_prefixes)
             keys: list[str] = []
             chunk_hashes: list[BlockHash | str] = []
-            variant_counts: list[int] = []
-            for _, _, key_string, chunk_hash in self.token_database.process_token_key_strings(
+            chunk_filter: Callable[[int], bool] | None = None
+            if lookup_mask is not None:
+
+                def mask_filter(
+                    start: int,
+                    group_block_size=group_block_size,
+                    lookup_mask=lookup_mask,
+                ) -> bool:
+                    chunk_idx = start // group_block_size
+                    return chunk_idx < len(lookup_mask) and lookup_mask[chunk_idx]
+
+                chunk_filter = mask_filter
+
+            for _, _, chunk_hash in self.token_database.process_token_hashes(
                 token_len,
                 block_hashes,
                 mask_num=lookup_start,
                 kv_cache_group_id=group_id,
                 chunk_filter=chunk_filter,
             ):
-                variants = self._expand_lookup_key_variants(key_string, group_id, include_all_ranks)
-                keys.extend(variants)
+                chunk_hash_string = block_hash_to_str(chunk_hash)
+                keys.extend(prefix + chunk_hash_string for prefix in key_prefixes)
                 chunk_hashes.append(chunk_hash)
-                variant_counts.append(len(variants))
 
             if keys:
                 res = self.m_store.exists(keys)  # type: ignore[assignment]
-                offset = 0
-                for chunk_hash, count in zip(chunk_hashes, variant_counts, strict=True):
-                    values = res[offset : offset + count]  # type: ignore[index]
+                for chunk_index, chunk_hash in enumerate(chunk_hashes):
+                    offset = chunk_index * variant_count
+                    values = res[offset : offset + variant_count]  # type: ignore[index]
                     if values and all(value == 1 for value in values):
                         present.append(chunk_hash)
-                    offset += count
 
             logger.debug(
                 "KV pool coordinator lookup group=%d token_len=%d keys=%d exists_chunks=%d sample_keys=%s",
@@ -3034,7 +3079,13 @@ class KVPoolWorker:
             if coordinator_hit is not None:
                 return coordinator_hit
             for group_id in kv_cache_group_ids:
-                keys, starts, ends = self._build_lookup_keys(token_len, block_hashes, group_id, use_layerwise)
+                keys, _, ends = self._build_lookup_keys(
+                    token_len,
+                    block_hashes,
+                    group_id,
+                    use_layerwise,
+                    need_starts=False,
+                )
 
                 if not keys:
                     return 0

@@ -323,6 +323,42 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         hits = [[16, 32, 48], [32, 48], [16, 32], [32, 48, 64]]
         self.assertEqual(32, cls._max_intersection_hit_position(hits))
 
+    def test_build_lookup_keys_can_skip_starts(self):
+        cls = self._make_worker_class()
+        worker = object.__new__(cls)
+        worker.token_database = MagicMock()
+        worker.token_database.process_token_key_strings.return_value = [
+            (0, 16, "key0", "hash0"),
+            (16, 32, "key1", "hash1"),
+        ]
+
+        keys, starts, ends = worker._build_lookup_keys(32, ["hash0", "hash1"], 0, False, need_starts=False)
+
+        self.assertEqual(keys, ["key0", "key1"])
+        self.assertEqual(starts, [])
+        self.assertEqual(ends, [16, 32])
+
+    def test_expand_lookup_keys_by_rank_preserves_order(self):
+        cls = self._make_worker_class()
+        worker = object.__new__(cls)
+        worker.pp_size = 2
+        worker.dcp_size = 2
+        worker.get_group_tp_size = MagicMock(return_value=2)
+        keys = [
+            "model@dcp:0@head_or_tp_rank:0@pp_rank:0@group:0@cache_role:kv@cache_family:default@hash0",
+            "model@dcp:0@head_or_tp_rank:0@pp_rank:0@group:0@cache_role:kv@cache_family:default@hash1",
+        ]
+        expected = []
+        for pp_rank in range(2):
+            for dcp_rank in range(2):
+                for head_or_tp_rank in range(2):
+                    for key in keys:
+                        rank_key = cls._replace_key_field(key, "dcp", dcp_rank)
+                        rank_key = cls._replace_key_field(rank_key, "head_or_tp_rank", head_or_tp_rank)
+                        expected.append(cls._replace_key_field(rank_key, "pp_rank", pp_rank))
+
+        self.assertEqual(worker._expand_lookup_keys_by_rank(keys, 0), expected)
+
     def _make_sparse_swa_coordinator(self):
         import torch
         from vllm.v1.kv_cache_interface import KVCacheGroupSpec, SlidingWindowSpec
@@ -356,15 +392,16 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         worker.cache_coordinator = coordinator
         worker.m_store = MagicMock()
         worker.token_database = MagicMock()
+        worker.token_database.get_key_prefix.return_value = "key"
 
-        def process_token_key_strings(token_len, block_hashes, mask_num, kv_cache_group_id, chunk_filter):
+        def process_token_hashes(token_len, block_hashes, mask_num, kv_cache_group_id, chunk_filter):
             return [
-                (start, start + 128, f"key{start // 128}", f"h{start // 128}".encode())
+                (start, start + 128, str(start // 128))
                 for start in range(mask_num, token_len, 128)
                 if chunk_filter(start)
             ]
 
-        worker.token_database.process_token_key_strings.side_effect = process_token_key_strings
+        worker.token_database.process_token_hashes.side_effect = process_token_hashes
         return worker
 
     def test_external_coordinator_lookup_uses_only_lookup_mask(self):
@@ -416,6 +453,48 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         # tail block beyond the HBM hit goes to the pool.
         self.assertEqual(hit, 256)
         worker.m_store.exists.assert_called_once_with(["key1"])
+
+    def test_external_coordinator_lookup_expands_rank_prefix_once(self):
+        cls = self._make_worker_class()
+        worker = object.__new__(cls)
+        worker.hash_block_size = 128
+        worker.num_kv_cache_groups = 1
+        worker.cache_coordinator = MagicMock()
+        worker.cache_coordinator.group_effective_block_sizes = [128]
+
+        def find_reachable_hit_tokens(block_hashes, token_len, query_group_hits, **kwargs):
+            self.assertEqual(
+                list(query_group_hits(0, ["aa" * 32, "bb" * 32], None)),
+                ["aa" * 32, "bb" * 32],
+            )
+            return 256
+
+        worker.cache_coordinator.find_reachable_hit_tokens.side_effect = find_reachable_hit_tokens
+        worker.m_store = MagicMock()
+        worker.m_store.exists.return_value = [1, 1, 1, 1]
+        worker._expand_lookup_keys_by_rank = MagicMock(return_value=["rank0@", "rank1@"])  # type: ignore[method-assign]
+
+        worker.token_database = MagicMock()
+        worker.token_database.get_key_prefix.return_value = "local@"
+        worker.token_database.process_token_hashes.return_value = [
+            (0, 128, "aa" * 32),
+            (128, 256, "bb" * 32),
+        ]
+
+        hit = worker._lookup_with_coordinator(
+            256,
+            [b"h0", b"h1"],
+            [0],
+            use_layerwise=False,
+            include_all_ranks=True,
+        )
+
+        self.assertEqual(hit, 256)
+        worker._expand_lookup_keys_by_rank.assert_called_once_with(["local@"], 0)
+        self.assertIsNone(worker.token_database.process_token_hashes.call_args.kwargs["chunk_filter"])
+        worker.m_store.exists.assert_called_once_with(
+            ["rank0@" + "aa" * 32, "rank1@" + "aa" * 32, "rank0@" + "bb" * 32, "rank1@" + "bb" * 32]
+        )
 
     def test_layerwise_multi_group_layout_includes_mtp(self):
         import torch
@@ -799,6 +878,11 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker.m_store.get = MagicMock(return_value=[0])
         # Setup token database
         worker.token_database.set_group_buffers({0: [1000, 2000]}, {0: [160]})
+        worker.token_database.prepare_values = MagicMock(wraps=worker.token_database.prepare_values)
+        worker.token_database.load_mask = MagicMock(return_value=([True],))
+        worker.token_database.process_token_key_strings_with_block_ids = MagicMock(
+            wraps=worker.token_database.process_token_key_strings_with_block_ids
+        )
 
         load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=16, can_load=True, token_len=16)
         req = ReqMeta(
@@ -815,6 +899,10 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         stats = worker.get_stats()
         self.assertEqual(stats.data["load_get_keys"], 1)
         self.assertEqual(len(stats.data["load_get_duration_seconds"]), 1)
+        worker.token_database.prepare_values.assert_called_once_with([0], [16], [0], kv_cache_group_id=0)
+        self.assertIsNone(
+            worker.token_database.process_token_key_strings_with_block_ids.call_args.kwargs["chunk_filter"]
+        )
 
     @patch(
         "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreRecvingThread.start",
