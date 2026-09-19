@@ -24,7 +24,7 @@ import importlib.util
 import json
 import math
 import os
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -1020,6 +1020,19 @@ def has_rope(vllm_config: VllmConfig):
         hf_config = vllm_config.model_config.hf_text_config.to_dict()
         _HAS_ROPE = "rope_parameters" in hf_config
     return _HAS_ROPE
+
+
+@contextmanager
+def super_kernel_scope(scope: str, enabled: bool):
+    if not enabled:
+        yield
+        return
+
+    torch.npu.super_kernel_scope_begin(scope)
+    try:
+        yield
+    finally:
+        torch.npu.super_kernel_scope_end(scope)
 
 
 def weak_ref_tensor(tensor: Any) -> Any:
