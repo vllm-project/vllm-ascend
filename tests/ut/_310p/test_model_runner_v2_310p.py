@@ -519,12 +519,16 @@ def test_config_accepts_mtp_and_rejects_non_mtp() -> None:
     [
         ("speculative_config", object(), "only supported via MTP"),
         ("kv_transfer_config", object(), "KV cache transfer"),
-        ("lora_config", object(), "LoRA"),
     ],
 )
 def test_config_rejects_out_of_scope_features(field, value, message) -> None:
     with pytest.raises(NotImplementedError, match=message):
         NPUModelRunner310V2._validate_config(_make_vllm_config(**{field: value}))
+
+
+def test_config_accepts_lora() -> None:
+    """310P MRv2 supports LoRA; gate must not reject lora_config."""
+    NPUModelRunner310V2._validate_config(_make_vllm_config(lora_config=object()))
 
 
 def test_copy_kv_cache_blocks_flattens_mamba_lists() -> None:
