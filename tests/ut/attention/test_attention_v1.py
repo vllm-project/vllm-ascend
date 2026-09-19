@@ -592,6 +592,106 @@ class TestAscendAttentionBackendImpl(TestBase):
         self.impl.forward_fused_infer_attention.assert_called_once()
         self.assertIs(result, output)
 
+    def test_head_256_chunked_prefill_gathers_paged_kv(self):
+        impl = AscendAttentionBackendImpl(
+            num_heads=4,
+            head_size=256,
+            scale=1.0,
+            num_kv_heads=2,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="auto",
+            logits_soft_cap=None,
+            attn_type=self.attention_type.DECODER,
+            kv_sharing_target_layer_name=None,
+        )
+        impl._use_dense_kv_for_paged_prefill = True
+        impl.key_cache = torch.randn(4, 128, 2, 256)
+        impl.value_cache = torch.randn_like(impl.key_cache)
+        query = torch.randn(2, 4, 256)
+        current_key = torch.randn(2, 2, 256)
+        current_value = torch.randn_like(current_key)
+        output = torch.empty_like(query)
+        metadata = self.attn_metadata
+        metadata.attn_state = AscendAttentionState.ChunkedPrefill
+        metadata.actual_seq_lengths_q = [2]
+        metadata.seq_lens_list = [130]
+        metadata.block_tables = torch.tensor([[0, 1]])
+        metadata.attn_mask = None
+        metadata.causal = True
+        metadata.num_decodes = 0
+        metadata.num_prefills = 1
+        dense_key = torch.randn(130, 2, 256)
+        dense_value = torch.randn_like(dense_key)
+
+        with (
+            patch(
+                "vllm_ascend.ascend_forward_context.get_forward_context",
+                return_value=MagicMock(capturing=False),
+            ),
+            patch.object(
+                attn_module.device_utils,
+                "get_dense_prefill_kv",
+                return_value=(dense_key, dense_value, [130]),
+            ) as gather_kv,
+            patch.object(
+                attn_module.DeviceOperator,
+                "npu_fused_infer_attention_score",
+                return_value=(torch.ones_like(query), None),
+            ) as fused_attention,
+        ):
+            result = impl.forward_fused_infer_attention(
+                query,
+                current_key,
+                current_value,
+                metadata,
+                output,
+                (impl.key_cache, impl.value_cache),
+            )
+
+        gather_kv.assert_called_once()
+        self.assertFalse(gather_kv.call_args.kwargs["use_bnsd_kv_cache"])
+        call_kwargs = fused_attention.call_args.kwargs
+        self.assertIsNone(call_kwargs["block_table"])
+        self.assertEqual(call_kwargs["actual_seq_lengths_kv"], [130])
+        self.assertIs(call_kwargs["key"], dense_key)
+        self.assertIs(call_kwargs["value"], dense_value)
+        self.assertTrue(torch.equal(result, torch.ones_like(query)))
+
+    def test_dense_prefill_kv_supports_nhd_and_hnd_cache_layouts(self):
+        metadata = MagicMock()
+        metadata.actual_seq_lengths_q = [1]
+        metadata.seq_lens_list = [3]
+        metadata.block_tables = torch.tensor([[0, 1]])
+        dense_key = torch.arange(12, dtype=torch.float32).view(4, 3, 1)
+        dense_value = dense_key + 100
+        nhd_key_cache = dense_key.view(2, 2, 3, 1)
+        nhd_value_cache = dense_value.view(2, 2, 3, 1)
+        hnd_key_cache = nhd_key_cache.transpose(1, 2).contiguous()
+        hnd_value_cache = nhd_value_cache.transpose(1, 2).contiguous()
+
+        for use_bnsd, key_cache, value_cache in (
+            (False, nhd_key_cache, nhd_value_cache),
+            (True, hnd_key_cache, hnd_value_cache),
+        ):
+            with self.subTest(use_bnsd=use_bnsd):
+                key, value, seq_lens = attn_module.device_utils.get_dense_prefill_kv(
+                    torch.empty(1, 3, 1),
+                    torch.empty(1, 3, 1),
+                    metadata,
+                    1,
+                    key_cache,
+                    value_cache,
+                    3,
+                    1,
+                    False,
+                    use_bnsd_kv_cache=use_bnsd,
+                )
+
+                torch.testing.assert_close(key, dense_key[:3])
+                torch.testing.assert_close(value, dense_value[:3])
+                self.assertEqual(seq_lens, [3])
+
     @patch("vllm_ascend.attention.attention_v1.using_paged_attention", return_value=True)
     def test_decode_uses_paged_attention(self, mock_using_pa):
         query = torch.randn(2, 8, FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE)
