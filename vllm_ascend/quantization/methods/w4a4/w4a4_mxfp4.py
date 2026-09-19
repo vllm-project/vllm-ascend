@@ -364,8 +364,14 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
             layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(1, 2)
 
     def apply_gmm1_act_quant(self, mlp_compute_input: MoEMlpComputeInput):
-        hidden_states = mlp_compute_input.hidden_states
-        hidden_states, pertoken_scale = self._quant_hidden_states(hidden_states, mlp_compute_input.dynamic_scale)
+        input_hidden_states = mlp_compute_input.hidden_states
+        requantized_input = mlp_compute_input.dynamic_scale is None
+        hidden_states, pertoken_scale = self._quant_hidden_states(input_hidden_states, mlp_compute_input.dynamic_scale)
+        # Dynamic MXFP quantization produces a new FP4 activation tensor. The
+        # original BF16 input is no longer consumed by GMM1, so release it
+        # before launching GMM1 to avoid inflating the profile-run peak.
+        if requantized_input:
+            dispose_tensor(input_hidden_states)
         layer = mlp_compute_input.layer
         assert layer is not None
         out, out_scale = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
@@ -383,12 +389,20 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
             weight_scale_dtype=torch_npu.float8_e8m0fnu,
             x_scale_dtype=torch_npu.float8_e8m0fnu,
         )
-        dispose_tensor(mlp_compute_input.hidden_states)
+        # With a dispatcher-provided scale, GMM1 consumes the input directly.
+        if not requantized_input:
+            dispose_tensor(input_hidden_states)
         return out, maybe_normalize_mxfp_scale_layout(out_scale)
 
     def apply_gmm1(self, mlp_compute_input: MoEMlpComputeInput):
-        hidden_states = mlp_compute_input.hidden_states
-        hidden_states, pertoken_scale = self._quant_hidden_states(hidden_states, mlp_compute_input.dynamic_scale)
+        input_hidden_states = mlp_compute_input.hidden_states
+        requantized_input = mlp_compute_input.dynamic_scale is None
+        hidden_states, pertoken_scale = self._quant_hidden_states(input_hidden_states, mlp_compute_input.dynamic_scale)
+        # Keep the same input lifetime as the pre-refactor quant_apply_mlp:
+        # once local dynamic quantization has produced a separate FP4 tensor,
+        # the BF16 source must not overlap with the GMM1 allocation.
+        if requantized_input:
+            dispose_tensor(input_hidden_states)
         layer = mlp_compute_input.layer
         assert layer is not None
         # Packed FP4 tensors use uint8 storage. Pass their logical dtype so the
@@ -408,7 +422,8 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
             x_dtype=torch_npu.float4_e2m1fn_x2,
             weight_dtype=torch_npu.float4_e2m1fn_x2,
         )[0]
-        dispose_tensor(mlp_compute_input.hidden_states)
+        if not requantized_input:
+            dispose_tensor(input_hidden_states)
         return hidden_states
 
     def apply_act_quant(self, mlp_compute_input: MoEMlpComputeInput, hidden_states: torch.Tensor):
