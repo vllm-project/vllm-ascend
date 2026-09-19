@@ -241,8 +241,8 @@ def _triton_rope_siso(
             pos_idx = tl.load(pos_ptr + row_idx).to(tl.int64)
             cos_start_ptr = cos_sin_ptr + pos_idx * cos_sin_row_stride
             cos_sin_row = tl.load(cos_start_ptr + cos_sin_offsets, mask = cos_sin_mask, other=0).to(tl.float32)
-            cos_row = extension.extract_slice(cos_sin_row, [0], [rope_dim // 2], [1])
-            sin_row = extension.extract_slice(cos_sin_row, [rope_dim // 2], [rope_dim // 2], [1])
+            cos_row = extension.extract_slice(cos_sin_row, [0], [pad_rope_dim // 2], [1])
+            sin_row = extension.extract_slice(cos_sin_row, [pad_rope_dim // 2], [pad_rope_dim // 2], [1])
         else:
             cos_start_ptr = cos_ptr + row_idx * cos_row_stride
             sin_start_ptr = sin_ptr + row_idx * sin_row_stride
