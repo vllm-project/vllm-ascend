@@ -30,6 +30,49 @@ from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8Dyna
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ
 
 
+@pytest.mark.parametrize("use_rope", [False, True])
+@pytest.mark.parametrize("weight_quant_mode", [0, 3])
+def test_mla_prolog_k3_and_cann_dispatch_are_isolated(use_rope, weight_quant_mode):
+    impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl.support_fp8_attention = True
+    impl.use_mla_rope = use_rope
+    impl.mlapo_weight_quant_mode = weight_quant_mode
+    impl.fa_quant_layer = False
+    impl.mlapo_num_heads = impl.num_heads = 2
+    impl.kv_lora_rank = 4
+    for name in ("weight_dq", "weight_uq_qr", "mlapo_W_UK_T", "weight_dkv_kr"):
+        setattr(impl, name, torch.empty(1))
+    for name in ("dequant_scale_w_dq", "dequant_scale_w_uq_qr", "dequant_scale_w_dkv_kr"):
+        setattr(impl, name, torch.ones(1, dtype=torch.uint8))
+    impl.q_a_layernorm = impl.kv_a_layernorm = SimpleNamespace(weight=torch.ones(1))
+    metadata = SimpleNamespace(
+        num_decode_tokens=2,
+        slot_mapping=torch.arange(2),
+        decode=SimpleNamespace(cos=torch.ones(2, 2), sin=torch.zeros(2, 2)),
+    )
+    kv_cache = (torch.empty(1, 128, 1, 4), torch.empty(1, 128, 1, 2))
+    outputs = (torch.randn(2, 2, 4), torch.randn(2, 2, 2), torch.empty(0), None, None)
+    with (
+        patch.dict("sys.modules", {"vllm_ascend.vllm_ascend_C": MagicMock()}),
+        patch("torch.ops._C_ascend.npu_mla_prolog_v3_k3", create=True, return_value=outputs) as k3_op,
+        patch("torch_npu.npu_mla_prolog_v3", return_value=outputs) as cann_op,
+        patch(
+            "torch_npu.npu_dynamic_mx_quant",
+            create=True,
+            return_value=(torch.empty(2, 1, 8), torch.ones(2, 1, 1, dtype=torch.uint8)),
+        ),
+    ):
+        impl.mla_preprocess_only_decode(torch.randn(2, 8), kv_cache, metadata)
+
+    selected, unused = (cann_op, k3_op) if use_rope else (k3_op, cann_op)
+    selected.assert_called_once()
+    unused.assert_not_called()
+    kwargs = selected.call_args.kwargs
+    assert kwargs["weight_quant_mode"] == weight_quant_mode
+    assert kwargs["kv_cache"] is kv_cache[0]
+    assert (kwargs["rope_cos"] is None) == (not use_rope)
+
+
 @pytest.mark.parametrize(
     "enable_mlapo,fa_quant_layer,is_draft,disable_after_init,uses_fused_weights",
     [

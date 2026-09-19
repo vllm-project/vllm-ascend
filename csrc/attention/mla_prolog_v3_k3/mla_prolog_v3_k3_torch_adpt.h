@@ -13,8 +13,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#ifndef MLA_PROLOG_V3_TORCH_ADPT_H
-#define MLA_PROLOG_V3_TORCH_ADPT_H
+#ifndef MLA_PROLOG_V3_K3_TORCH_ADPT_H
+#define MLA_PROLOG_V3_K3_TORCH_ADPT_H
 
 namespace vllm_ascend {
 
@@ -76,7 +76,7 @@ at::ScalarType GetDequantScaleQNormDtype(int64_t weight_quant_mode)
 }
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>
-ConstructMlaPrologV3Outputs(const at::Tensor &token_x, const at::Tensor &weight_dq,
+ConstructMlaPrologV3K3Outputs(const at::Tensor &token_x, const at::Tensor &weight_dq,
                             const at::Tensor &weight_uq_qr, const at::Tensor &weight_uk,
                             const at::Tensor &rope_sin, bool query_norm_flag,
                             int64_t weight_quant_mode, int64_t kv_cache_quant_mode)
@@ -168,8 +168,8 @@ ConstructMlaPrologV3Outputs(const at::Tensor &token_x, const at::Tensor &weight_
 
 }  // namespace
 
-// Torch schema name is npu_mla_prolog_v3 (aligned with torch_npu); underlying aclnn op is MlaPrologV3.
-inline std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_mla_prolog_v3(
+// K3 has its own Torch schema, ACLNN symbols and operator type; CANN retains MlaPrologV3.
+inline std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_mla_prolog_v3_k3(
     const at::Tensor &token_x,
     const at::Tensor &weight_dq,
     const at::Tensor &weight_uq_qr,
@@ -210,7 +210,7 @@ inline std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> np
     TORCH_CHECK(rope_sin_empty == rope_cos_empty,
                 "rope_sin and rope_cos must both be empty or both non-empty");
 
-    auto outputs = ConstructMlaPrologV3Outputs(
+    auto outputs = ConstructMlaPrologV3K3Outputs(
         token_x, weight_dq, weight_uq_qr, weight_uk, rope_sin, query_norm_flag,
         weight_quant_mode, kv_cache_quant_mode);
     at::Tensor query = std::get<0>(outputs);
@@ -219,7 +219,7 @@ inline std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> np
     at::Tensor query_norm = std::get<3>(outputs);
     at::Tensor dequant_scale_q_norm = std::get<4>(outputs);
 
-    // aclnnMlaPrologV3WeightNz derives queryNormFlag from whether optional outs are non-null.
+    // aclnnMlaPrologV3K3WeightNz derives queryNormFlag from whether optional outs are non-null.
     c10::optional<at::Tensor> dequant_scale_q_nope_opt =
         NeedDequantScaleQNope(weight_quant_mode, kv_cache_quant_mode)
             ? c10::optional<at::Tensor>(dequant_scale_q_nope)
@@ -239,7 +239,7 @@ inline std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> np
     at::Tensor rope_cos_aclnn = rope_cos_empty ? at::Tensor() : rope_cos;
 
     EXEC_NPU_CMD(
-        aclnnMlaPrologV3WeightNz,
+        aclnnMlaPrologV3K3WeightNz,
         token_x,
         weight_dq,
         weight_uq_qr,
@@ -283,4 +283,4 @@ inline std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> np
 
 }  // namespace vllm_ascend
 
-#endif  // MLA_PROLOG_V3_TORCH_ADPT_H
+#endif  // MLA_PROLOG_V3_K3_TORCH_ADPT_H

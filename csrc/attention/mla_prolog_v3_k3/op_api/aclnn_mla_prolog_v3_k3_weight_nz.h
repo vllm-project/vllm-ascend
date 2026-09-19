@@ -8,8 +8,8 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-#ifndef ACLNN_MLA_PROLOG_V3_WEIGHT_NZ_H
-#define ACLNN_MLA_PROLOG_V3_WEIGHT_NZ_H
+#ifndef ACLNN_MLA_PROLOG_V3_K3_WEIGHT_NZ_H
+#define ACLNN_MLA_PROLOG_V3_K3_WEIGHT_NZ_H
 
 #include "aclnn/acl_meta.h"
 #include "aclnn/aclnn_base.h"
@@ -19,11 +19,11 @@ extern "C" {
 #endif
 
 /**
- * @brief The first interface of aclnnMlaPrologV3WeightNz calculates
+ * @brief The first interface of aclnnMlaPrologV3K3WeightNz calculates
  * the workspace size based on the specific calculation process.
  * @domain aclnn_ops_infer
  */
-__attribute__((visibility("default"))) aclnnStatus aclnnMlaPrologV3WeightNzGetWorkspaceSize(
+__attribute__((visibility("default"))) aclnnStatus aclnnMlaPrologV3K3WeightNzGetWorkspaceSize(
     const aclTensor *tokenX, const aclTensor *weightDq, const aclTensor *weightUqQr, const aclTensor *weightUk,
     const aclTensor *weightDkvKr, const aclTensor *rmsnormGammaCq, const aclTensor *rmsnormGammaCkv,
     const aclTensor *ropeSin, const aclTensor *ropeCos, aclTensor *kvCacheRef, aclTensor *krCacheRef,
@@ -39,9 +39,9 @@ __attribute__((visibility("default"))) aclnnStatus aclnnMlaPrologV3WeightNzGetWo
     const aclTensor *dequantScaleQNormOutOptional, uint64_t *workspaceSize, aclOpExecutor **executor);
 
 /**
- * @brief The second interface of aclnnMlaPrologV3WeightNz is used to perform calculations.
+ * @brief The second interface of aclnnMlaPrologV3K3WeightNz is used to perform calculations.
  */
-__attribute__((visibility("default"))) aclnnStatus aclnnMlaPrologV3WeightNz(void *workspace, uint64_t workspaceSize,
+__attribute__((visibility("default"))) aclnnStatus aclnnMlaPrologV3K3WeightNz(void *workspace, uint64_t workspaceSize,
                                                                             aclOpExecutor *executor,
                                                                             const aclrtStream stream);
 
@@ -50,4 +50,4 @@ __attribute__((visibility("default"))) aclnnStatus aclnnMlaPrologV3WeightNz(void
 }
 #endif
 
-#endif // ACLNN_MLA_PROLOG_V3_WEIGHT_NZ_H
+#endif // ACLNN_MLA_PROLOG_V3_K3_WEIGHT_NZ_H

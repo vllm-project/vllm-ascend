@@ -53,7 +53,7 @@
 
 // 可表示的tilingkey范围为64bit，注意不可超过限制
 ASCENDC_TPL_ARGS_DECL(
-    mla_prolog_v3, // 算子唯一标识，必须与 OPTYPE / opc --main_func=mla_prolog_v3 一致
+    mla_prolog_v3_k3, // 算子唯一标识，必须与 OPTYPE / opc --main_func=mla_prolog_v3_k3 一致
                 // bit:0-3 CACHE_MODE：0-ND 1-PA_BSND 2-PA_NZ 3-PA_BLK_BSND 4-PA_BLK_NZ
     ASCENDC_TPL_UINT_DECL(CACHE_MODE, ASCENDC_TPL_4_BW, ASCENDC_TPL_UI_LIST, 0, 1, 2, 3, 4),
     // bit:4-5 场景标识：0-FP16(预留) 1-BF16  2-量化场景

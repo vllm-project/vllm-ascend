@@ -8,19 +8,19 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-#ifndef MLA_PROLOG_V3_TILING_H
-#define MLA_PROLOG_V3_TILING_H
+#include "mla_prolog_v3_k3_tiling.h"
+#include "register/op_def_registry.h"
 
-#include "register/tilingdata_base.h"
-#include "mla_prolog_tiling.h"
-
-#ifdef ASCENDC_OP_TEST
-#define MLA_EXTERN_C extern "C"
-#else
-#define MLA_EXTERN_C
-#endif
-
+using namespace ge;
+using namespace AscendC;
 namespace optiling {
-} // optiling
+ge::graphStatus TilingPrepareForMlaProlog(gert::TilingParseContext *context)
+{
+    (void)context;
+    return ge::GRAPH_SUCCESS;
+}
 
-#endif
+IMPL_OP_OPTILING(MlaPrologV3K3)
+    .Tiling(TilingMlaProlog)
+    .TilingParse<MlaPrologCompileInfo>(TilingPrepareForMlaProlog);
+} // namespace optiling

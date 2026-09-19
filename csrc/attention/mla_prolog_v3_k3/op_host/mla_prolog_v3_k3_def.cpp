@@ -11,9 +11,9 @@
 #include "register/op_def_registry.h"
 
 namespace ops {
-class MlaPrologV3 : public OpDef {
+class MlaPrologV3K3 : public OpDef {
 public:
-    explicit MlaPrologV3(const char *name) : OpDef(name)
+    explicit MlaPrologV3K3(const char *name) : OpDef(name)
     {
         this->Input("token_x")
             .ParamType(REQUIRED)
@@ -305,5 +305,5 @@ public:
         this->AICore().AddConfig("ascend950", aicore_config_95);
     }
 };
-OP_ADD(MlaPrologV3, optiling::MlaPrologCompileInfo);
+OP_ADD(MlaPrologV3K3, optiling::MlaPrologCompileInfo);
 } // namespace ops

@@ -117,7 +117,7 @@ constexpr char CACHE_MODE_PA_BLK_NZ[]{"PA_BLK_NZ"};
 
 constexpr char V1_OP_NAME[]{"MlaProlog"};
 constexpr char V2_OP_NAME[]{"MlaPrologV2"};
-constexpr char V3_OP_NAME[]{"MlaPrologV3"};
+constexpr char V3_OP_NAME[]{"MlaPrologV3K3"};
 
 
 constexpr uint32_t CACHE_MODE_LEN =
@@ -454,7 +454,7 @@ private:
     ge::DataType mmDateType_ = ge::DT_BF16;
     bool enableDequantOpt_ = false;
     bool enableGroupComputeOpt_ = false; // 低延时场景算例分组标记
-    bool enableRope_ = true;             // rope开关，仅 MlaPrologV3 在 DAV_3510 生效
+    bool enableRope_ = true;             // rope开关，仅 MlaPrologV3K3 在 DAV_3510 生效
 
     size_t ubSize_ = 0;
     size_t l1Size_ = 0;

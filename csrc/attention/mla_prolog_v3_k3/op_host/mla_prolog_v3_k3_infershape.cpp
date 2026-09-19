@@ -8,13 +8,13 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-#include "mla_prolog_v3_infershape.h"
+#include "mla_prolog_v3_k3_infershape.h"
 
 using namespace ge;
 
 namespace ops {
 
-ge::graphStatus GetMlaPrologV3ShapeDim(const gert::InferShapeContext *context, MlaPrologProtoShapeParam &shapeParam)
+ge::graphStatus GetMlaPrologV3K3ShapeDim(const gert::InferShapeContext *context, MlaPrologProtoShapeParam &shapeParam)
 {
     auto tokenXShape = context->GetRequiredInputShape(TOKEN_X_INDEX); // (B, S, He) | (T, He)
     OP_CHECK_NULL_WITH_CONTEXT(context, tokenXShape);
@@ -169,7 +169,7 @@ static ge::graphStatus SetQueryNormShape(const MlaPrologProtoShapeParam &shapePa
     return GRAPH_SUCCESS;
 }
 
-ge::graphStatus SetMlaPrologV3ShapeDim(const MlaPrologProtoShapeParam &shapeParam, gert::InferShapeContext *context)
+ge::graphStatus SetMlaPrologV3K3ShapeDim(const MlaPrologProtoShapeParam &shapeParam, gert::InferShapeContext *context)
 {
     auto queryShape = context->GetOutputShape(QUERY_INDEX); // query: (B, S, N, Hckv) | (T, N, Hckv)
     OP_CHECK_NULL_WITH_CONTEXT(context, queryShape);
@@ -210,26 +210,26 @@ ge::graphStatus SetMlaPrologV3ShapeDim(const MlaPrologProtoShapeParam &shapePara
                              queryNormFlag);
 }
 
-ge::graphStatus InferShapeMlaPrologV3(gert::InferShapeContext *context)
+ge::graphStatus InferShapeMlaPrologV3K3(gert::InferShapeContext *context)
 {
-    OP_LOGI(context->GetNodeName(), "Enter MlaPrologV3 infershape impl.");
+    OP_LOGI(context->GetNodeName(), "Enter MlaPrologV3K3 infershape impl.");
 
     MlaPrologProtoShapeParam shapeParam{};
-    auto apiRet = GetMlaPrologV3ShapeDim(context, shapeParam);
+    auto apiRet = GetMlaPrologV3K3ShapeDim(context, shapeParam);
     if (apiRet != GRAPH_SUCCESS) {
         return GRAPH_FAILED;
     }
 
-    apiRet = SetMlaPrologV3ShapeDim(shapeParam, context);
+    apiRet = SetMlaPrologV3K3ShapeDim(shapeParam, context);
     if (apiRet != GRAPH_SUCCESS) {
         return GRAPH_FAILED;
     }
     return GRAPH_SUCCESS;
 }
 
-ge::graphStatus InferDataTypeMlaPrologV3(gert::InferDataTypeContext *context)
+ge::graphStatus InferDataTypeMlaPrologV3K3(gert::InferDataTypeContext *context)
 {
-    OP_LOGI(context->GetNodeName(), "Enter MlaPrologV3 inferDataType impl.");
+    OP_LOGI(context->GetNodeName(), "Enter MlaPrologV3K3 inferDataType impl.");
 
     auto attrs = context->GetAttrs();
     OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
@@ -281,5 +281,5 @@ ge::graphStatus InferDataTypeMlaPrologV3(gert::InferDataTypeContext *context)
     return GRAPH_SUCCESS;
 }
 
-IMPL_OP_INFERSHAPE(MlaPrologV3).InferShape(InferShapeMlaPrologV3).InferDataType(InferDataTypeMlaPrologV3);
+IMPL_OP_INFERSHAPE(MlaPrologV3K3).InferShape(InferShapeMlaPrologV3K3).InferDataType(InferDataTypeMlaPrologV3K3);
 } // namespace ops

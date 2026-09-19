@@ -9,7 +9,7 @@
  */
 
 /*!
- * \file mla_prolog_v3.cpp
+ * \file mla_prolog_v3_k3.cpp
  * \brief
  */
 
@@ -28,7 +28,7 @@ using namespace MlaProlog;
 template<uint8_t CacheMode, uint8_t Scenario, uint8_t QuantMode,
          bool EnableDequantOpt, bool EnableGroupComputeOpt, uint8_t EmptyTensorMode,
          uint8_t ActualSeqLenMode, uint8_t SplitMMode, uint8_t CvMode, bool EnableRope>
-__global__ __aicore__ void mla_prolog_v3(
+__global__ __aicore__ void mla_prolog_v3_k3(
     __gm__ uint8_t *tokenX,
     __gm__ uint8_t *weightDq,
     __gm__ uint8_t *weightUqQr,
@@ -98,7 +98,7 @@ __global__ __aicore__ void mla_prolog_v3(
     else if constexpr (static_cast<SCENARIO>(Scenario) == SCENARIO::QUANT &&
                          static_cast<QUANT_MODE>(QuantMode) == QUANT_MODE::MXFP8_FULL_QUANT_KV_NO_QUANT) {
         if constexpr (splitMMode == SPLIT_M_MODE::ENABLED) {
-            MlaPrologV3SplitM<MLAPType<FP8E4M3, FP8E4M3, bfloat16_t, FP8E8M0, cacheMode,
+            MlaPrologV3K3SplitM<MLAPType<FP8E4M3, FP8E4M3, bfloat16_t, FP8E8M0, cacheMode,
                 EnableDequantOpt, EnableGroupComputeOpt,
                 emptyMode, actualSeqLenMode, false, cvRatio, EnableRope>> op(&pipe, tilingData, tilingDataBaseParams);
             op.Init(tokenX, weightDq, weightUqQr, weightUk, weightDkvKr, rmsnormGammaCq, rmsnormGammaCkv, ropeSin,
@@ -119,7 +119,7 @@ __global__ __aicore__ void mla_prolog_v3(
     } else if constexpr (static_cast<SCENARIO>(Scenario) == SCENARIO::QUANT &&
                          static_cast<QUANT_MODE>(QuantMode) == QUANT_MODE::MXFP8_FULL_QUANT_KV_QUANT_PER_TENSOR) {
         if constexpr (splitMMode == SPLIT_M_MODE::ENABLED) {
-            MlaPrologV3SplitM<MLAPType<FP8E4M3, FP8E4M3, FP8E4M3, FP8E8M0, cacheMode,
+            MlaPrologV3K3SplitM<MLAPType<FP8E4M3, FP8E4M3, FP8E4M3, FP8E8M0, cacheMode,
                 EnableDequantOpt, EnableGroupComputeOpt,
                 emptyMode, actualSeqLenMode, false, cvRatio, EnableRope>> op(&pipe, tilingData, tilingDataBaseParams);
             op.Init(tokenX, weightDq, weightUqQr, weightUk, weightDkvKr, rmsnormGammaCq, rmsnormGammaCkv, ropeSin,

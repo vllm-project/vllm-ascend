@@ -30,7 +30,7 @@
 
 namespace MlaProlog {
 template <typename MLAPT>
-class MlaPrologV3SplitM {
+class MlaPrologV3K3SplitM {
 public:
     static constexpr bool isPertile = MLAPT::isPertile;
 
@@ -60,7 +60,7 @@ public:
     MMParams mmQcQrParam_;
     MMParams mmQnParam_;
 
-    __aicore__ inline MlaPrologV3SplitM(TPipe *pipe, const optiling::MlaPrologTilingData *__restrict tilingData,
+    __aicore__ inline MlaPrologV3K3SplitM(TPipe *pipe, const optiling::MlaPrologTilingData *__restrict tilingData,
                                         const optiling::MlaPrologBaseParams *__restrict baseParams)
         : pipe_(pipe), tilingData_(tilingData), baseParams_(baseParams)
     {
@@ -259,7 +259,7 @@ private:
 
 
 template <typename MLAPT>
-__aicore__ inline void MlaPrologV3SplitM<MLAPT>::Init(
+__aicore__ inline void MlaPrologV3K3SplitM<MLAPT>::Init(
     __gm__ uint8_t *tokenX, __gm__ uint8_t *weightDq, __gm__ uint8_t *weightUqQr, __gm__ uint8_t *weightUk,
     __gm__ uint8_t *weightDkvKr, __gm__ uint8_t *rmsnormGammaCq, __gm__ uint8_t *rmsnormGammaCkv,
     __gm__ uint8_t *ropeSin, __gm__ uint8_t *ropeCos, __gm__ uint8_t *cacheIndex, __gm__ uint8_t *kvCache,
@@ -314,7 +314,7 @@ __aicore__ inline void MlaPrologV3SplitM<MLAPT>::Init(
 
 template <typename MLAPT>
 __aicore__ inline void
-MlaPrologV3SplitM<MLAPT>::OutputInit(__gm__ uint8_t *actualSeqLen, __gm__ uint8_t *queryOut,
+MlaPrologV3K3SplitM<MLAPT>::OutputInit(__gm__ uint8_t *actualSeqLen, __gm__ uint8_t *queryOut,
                                      __gm__ uint8_t *queryRopeOut, __gm__ uint8_t *dequantScaleQNopeOut,
                                      __gm__ uint8_t *queryNormOut, __gm__ uint8_t *dequantScaleQNormOut)
 {
@@ -341,7 +341,7 @@ MlaPrologV3SplitM<MLAPT>::OutputInit(__gm__ uint8_t *actualSeqLen, __gm__ uint8_
 
 template <typename MLAPT>
 __aicore__ inline void
-MlaPrologV3SplitM<MLAPT>::ScaleInit(__gm__ uint8_t *dequantScaleX, __gm__ uint8_t *dequantScaleWDq,
+MlaPrologV3K3SplitM<MLAPT>::ScaleInit(__gm__ uint8_t *dequantScaleX, __gm__ uint8_t *dequantScaleWDq,
                                     __gm__ uint8_t *deqScaleQcQrW, __gm__ uint8_t *dequantScaleWDkvkr,
                                     __gm__ uint8_t *quantScaleCkv, __gm__ uint8_t *quantScaleCkr,
                                     __gm__ uint8_t *smoothScaleCq, __gm__ uint8_t *kNopeClipAlpha)
@@ -362,7 +362,7 @@ MlaPrologV3SplitM<MLAPT>::ScaleInit(__gm__ uint8_t *dequantScaleX, __gm__ uint8_
 }
 
 template <typename MLAPT>
-__aicore__ inline void MlaPrologV3SplitM<MLAPT>::MmParamInit()
+__aicore__ inline void MlaPrologV3K3SplitM<MLAPT>::MmParamInit()
 {
     MmCqParamInit();
     MmCkvKrParamInit();
@@ -371,7 +371,7 @@ __aicore__ inline void MlaPrologV3SplitM<MLAPT>::MmParamInit()
 }
 
 template <typename MLAPT>
-__aicore__ inline void MlaPrologV3SplitM<MLAPT>::MmCqParamInit()
+__aicore__ inline void MlaPrologV3K3SplitM<MLAPT>::MmCqParamInit()
 {
     mmCqParam_.m = baseParams_->stepBatchSize;
     mmCqParam_.n = baseParams_->mm1SingleCoreN; // 1536 / 24 = 64
@@ -394,7 +394,7 @@ __aicore__ inline void MlaPrologV3SplitM<MLAPT>::MmCqParamInit()
 }
 
 template <typename MLAPT>
-__aicore__ inline void MlaPrologV3SplitM<MLAPT>::MmCkvKrParamInit()
+__aicore__ inline void MlaPrologV3K3SplitM<MLAPT>::MmCkvKrParamInit()
 {
     mmCkvKrParam_.m = baseParams_->stepBatchSize;
     mmCkvKrParam_.n = baseParams_->mm2SingleCoreN;
@@ -417,7 +417,7 @@ __aicore__ inline void MlaPrologV3SplitM<MLAPT>::MmCkvKrParamInit()
 }
 
 template <typename MLAPT>
-__aicore__ inline void MlaPrologV3SplitM<MLAPT>::MmQcQrParamInit()
+__aicore__ inline void MlaPrologV3K3SplitM<MLAPT>::MmQcQrParamInit()
 {
     mmQcQrParam_.m = baseParams_->stepBatchSize;
     mmQcQrParam_.n = baseParams_->mm3SingleCoreN;
@@ -441,7 +441,7 @@ __aicore__ inline void MlaPrologV3SplitM<MLAPT>::MmQcQrParamInit()
 
 
 template <typename MLAPT>
-__aicore__ inline void MlaPrologV3SplitM<MLAPT>::MmQnParamInit()
+__aicore__ inline void MlaPrologV3K3SplitM<MLAPT>::MmQnParamInit()
 {
     mmQnParam_.m = baseParams_->stepBatchSize;
     mmQnParam_.n = baseParams_->headSizeCkv;   // 512
@@ -468,7 +468,7 @@ __aicore__ inline void MlaPrologV3SplitM<MLAPT>::MmQnParamInit()
 }
 
 template <typename MLAPT>
-__aicore__ inline void MlaPrologV3SplitM<MLAPT>::VectorBufferInit()
+__aicore__ inline void MlaPrologV3K3SplitM<MLAPT>::VectorBufferInit()
 {
     pipe_->InitBuffer(rmsnormGammaCqBuffer_, baseParams_->headSizeCq * sizeof(rmsNormGammaType)); // [1, 1536] bf16
     rmsnormGammaCqLocal_ = rmsnormGammaCqBuffer_.Get<rmsNormGammaType>();
@@ -529,7 +529,7 @@ __aicore__ inline void MlaPrologV3SplitM<MLAPT>::VectorBufferInit()
 }
 
 template <typename MLAPT>
-__aicore__ inline void MlaPrologV3SplitM<MLAPT>::CubeBufferInit()
+__aicore__ inline void MlaPrologV3K3SplitM<MLAPT>::CubeBufferInit()
 {
     // cube相关Buffer初始化
     pipe_->InitBuffer(aBufL1_, L1_A_SIZE * 2);
@@ -575,7 +575,7 @@ __aicore__ inline void MlaPrologV3SplitM<MLAPT>::CubeBufferInit()
  * HCkv] (bf16 | int32)   (bf16 | int8)     (bf16 | int32)         (bf16)                    (bf16)
  */
 template <typename MLAPT>
-__aicore__ inline void MlaPrologV3SplitM<MLAPT>::WorkspaceInit(__gm__ uint8_t *workspace)
+__aicore__ inline void MlaPrologV3K3SplitM<MLAPT>::WorkspaceInit(__gm__ uint8_t *workspace)
 {
     int64_t workspaceOffset = 0;
     if constexpr (std::is_same<rmsNormCqOutputType, FP8E4M3>::value && isFp8E8m0) {
@@ -637,7 +637,7 @@ __aicore__ inline void MlaPrologV3SplitM<MLAPT>::WorkspaceInit(__gm__ uint8_t *w
 }
 
 template <typename MLAPT>
-__aicore__ inline void MlaPrologV3SplitM<MLAPT>::UpdateStepBatchParams(int64_t curMSize)
+__aicore__ inline void MlaPrologV3K3SplitM<MLAPT>::UpdateStepBatchParams(int64_t curMSize)
 {
     mmCqParam_.m = curMSize;
     mmCkvKrParam_.m = curMSize;
@@ -647,7 +647,7 @@ __aicore__ inline void MlaPrologV3SplitM<MLAPT>::UpdateStepBatchParams(int64_t c
 }
 
 /*
- * MlaPrologV3算子计算&CV流水同步流程
+ * MlaPrologV3K3算子计算&CV流水同步流程
  *                    ┌───────────────── token_x ─────────────────┐
  *                    |                                           ▼
  *                    |                                      MatmulCkvKr
@@ -673,7 +673,7 @@ __aicore__ inline void MlaPrologV3SplitM<MLAPT>::UpdateStepBatchParams(int64_t c
  * 注：仅为表明基本计算与CV同步流程，仅包含了影响CV同步的量化分支，其余量化分支应参考设计文档。
  */
 template <typename MLAPT>
-__aicore__ inline void MlaPrologV3SplitM<MLAPT>::Process()
+__aicore__ inline void MlaPrologV3K3SplitM<MLAPT>::Process()
 {
     constexpr bool needQnDynamicQuant =
         ((std::is_same<mmInputType, int8_t>::value && std::is_same<kvCacheType, int8_t>::value) ||
@@ -765,7 +765,7 @@ __aicore__ inline void MlaPrologV3SplitM<MLAPT>::Process()
 
 template <typename MLAPT>
 template <bool needQnDynamicQuant>
-__aicore__ inline void MlaPrologV3SplitM<MLAPT>::AicProcess(AicOffset &aicOffset, int64_t mOffset, int64_t mmQnLoops)
+__aicore__ inline void MlaPrologV3K3SplitM<MLAPT>::AicProcess(AicOffset &aicOffset, int64_t mOffset, int64_t mmQnLoops)
 {
     int64_t tokenXOffset = mOffset * static_cast<int64_t>(baseParams_->headSizeX);
     int64_t dequantScaleXOffset = mOffset * static_cast<int64_t>(baseParams_->headSizeX) / 32; // mxfp8需要除32
@@ -844,7 +844,7 @@ __aicore__ inline void MlaPrologV3SplitM<MLAPT>::AicProcess(AicOffset &aicOffset
 
 template <typename MLAPT>
 template <bool needQnDynamicQuant>
-__aicore__ inline void MlaPrologV3SplitM<MLAPT>::AivProcess(AivOffset &aivOffset, int64_t mOffset, int64_t curMSize,
+__aicore__ inline void MlaPrologV3K3SplitM<MLAPT>::AivProcess(AivOffset &aivOffset, int64_t mOffset, int64_t curMSize,
                                                             int64_t numHeadOffset, int64_t mmQnLoops)
 {
     if (mOffset == mOffsetStart_) {
@@ -913,7 +913,7 @@ __aicore__ inline void MlaPrologV3SplitM<MLAPT>::AivProcess(AivOffset &aivOffset
 template <typename MLAPT>
 template <typename T, typename O, typename S, bool needCheckEmptyTensor, bool needCheckAFullLoad, bool isContinuousCopy>
 __aicore__ inline void
-MlaPrologV3SplitM<MLAPT>::MatmulSplitM(const GlobalTensor<O> &tensorResGm, const GlobalTensor<T> &tensorAGm,
+MlaPrologV3K3SplitM<MLAPT>::MatmulSplitM(const GlobalTensor<O> &tensorResGm, const GlobalTensor<T> &tensorAGm,
                                        const GlobalTensor<T> &tensorBGm, const MMParams &mmPara,
                                        const UsedBlockParams &mmBlockParams, const GlobalTensor<S> &tensorAScaleGm,
                                        const GlobalTensor<S> &tensorBScaleGm)
@@ -952,7 +952,7 @@ MlaPrologV3SplitM<MLAPT>::MatmulSplitM(const GlobalTensor<O> &tensorResGm, const
 }
 
 template <typename MLAPT>
-__aicore__ inline void MlaPrologV3SplitM<MLAPT>::MatmulQcQr(AicOffset &aicOffset)
+__aicore__ inline void MlaPrologV3K3SplitM<MLAPT>::MatmulQcQr(AicOffset &aicOffset)
 {
     if (blockIdx_ >= baseParams_->mm3BlockNum) {
         return;
@@ -1017,7 +1017,7 @@ __aicore__ inline void MlaPrologV3SplitM<MLAPT>::MatmulQcQr(AicOffset &aicOffset
 template <typename MLAPT>
 template <bool needQnDynamicQuant>
 __aicore__ inline void
-MlaPrologV3SplitM<MLAPT>::MatmulQnSyncDynamicQuantAndMulQr(int64_t qcOffset, int64_t weightUkOffset,
+MlaPrologV3K3SplitM<MLAPT>::MatmulQnSyncDynamicQuantAndMulQr(int64_t qcOffset, int64_t weightUkOffset,
                                                            int64_t qnResOffset, int64_t subLoopTimes)
 {
     if (blockIdx_ >= baseParams_->mm4BlockNum) {
@@ -1060,7 +1060,7 @@ MlaPrologV3SplitM<MLAPT>::MatmulQnSyncDynamicQuantAndMulQr(int64_t qcOffset, int
 }
 
 template <typename MLAPT>
-__aicore__ inline void MlaPrologV3SplitM<MLAPT>::CopyInSinCos(int64_t tokenIndex, int64_t curVecToken,
+__aicore__ inline void MlaPrologV3K3SplitM<MLAPT>::CopyInSinCos(int64_t tokenIndex, int64_t curVecToken,
                                                               int64_t batchOffset, int64_t curMSize)
 {
     if constexpr (!MLAPT::enableRope) {
@@ -1089,7 +1089,7 @@ __aicore__ inline void MlaPrologV3SplitM<MLAPT>::CopyInSinCos(int64_t tokenIndex
 }
 
 template <typename MLAPT>
-__aicore__ inline void MlaPrologV3SplitM<MLAPT>::CopyGlobalParams()
+__aicore__ inline void MlaPrologV3K3SplitM<MLAPT>::CopyGlobalParams()
 {
     // rmsnormGammaCq
     DataCopy(rmsnormGammaCqLocal_, rmsnormGammaCqGm_, baseParams_->headSizeCq);
@@ -1124,7 +1124,7 @@ __aicore__ inline void MlaPrologV3SplitM<MLAPT>::CopyGlobalParams()
           内部所需空间约为 curVecToken(128) * 8*4 + 8*4 + (4*vectorRow_*baseParams_->headSizeCq + 8)*4 = 28.0625K
  */
 template <typename MLAPT>
-__aicore__ inline void MlaPrologV3SplitM<MLAPT>::RmsNormCq(int64_t tokenIndex, int64_t rmsNormCqOffset,
+__aicore__ inline void MlaPrologV3K3SplitM<MLAPT>::RmsNormCq(int64_t tokenIndex, int64_t rmsNormCqOffset,
                                                            int64_t rmsNormCqResOffset, int64_t curVecToken,
                                                            int64_t curBlockTokenOffset)
 {
@@ -1206,7 +1206,7 @@ __aicore__ inline void MlaPrologV3SplitM<MLAPT>::RmsNormCq(int64_t tokenIndex, i
 }
 
 template <typename MLAPT>
-__aicore__ inline void MlaPrologV3SplitM<MLAPT>::ComputeBlkScatterOffsets(GlobalTensor<int64_t> indexGm,
+__aicore__ inline void MlaPrologV3K3SplitM<MLAPT>::ComputeBlkScatterOffsets(GlobalTensor<int64_t> indexGm,
                                                                           int64_t tokenIndex, int64_t rows,
                                                                           CkvkrParams &rmsNormAndScatterCkvParams,
                                                                           CkvkrParams &ropeAndScatterKrParams)
@@ -1266,7 +1266,7 @@ __aicore__ inline void MlaPrologV3SplitM<MLAPT>::ComputeBlkScatterOffsets(Global
 }
 
 template <typename MLAPT>
-__aicore__ inline void MlaPrologV3SplitM<MLAPT>::RmsNormAndScatterCkv(LocalTensor<float> &dequantScaleXLocal,
+__aicore__ inline void MlaPrologV3K3SplitM<MLAPT>::RmsNormAndScatterCkv(LocalTensor<float> &dequantScaleXLocal,
                                                                       LocalTensor<uint8_t> &shareTmpUb,
                                                                       LocalTensor<ropeComputType> &cosLocalCkvKr,
                                                                       LocalTensor<ropeComputType> &sinLocalCkvKr,
@@ -1313,7 +1313,7 @@ __aicore__ inline void MlaPrologV3SplitM<MLAPT>::RmsNormAndScatterCkv(LocalTenso
 }
 
 template <typename MLAPT>
-__aicore__ inline void MlaPrologV3SplitM<MLAPT>::RmsNormAndQuantizeCkv(LocalTensor<kvCacheType> &outputLocal,
+__aicore__ inline void MlaPrologV3K3SplitM<MLAPT>::RmsNormAndQuantizeCkv(LocalTensor<kvCacheType> &outputLocal,
                                                                        LocalTensor<uint8_t> &rmsNormShareTmpUb,
                                                                        LocalTensor<float> &dequantScaleXLocal,
                                                                        RmsNormParam rmsNormParams,
@@ -1360,7 +1360,7 @@ __aicore__ inline void MlaPrologV3SplitM<MLAPT>::RmsNormAndQuantizeCkv(LocalTens
 }
 
 template <typename MLAPT>
-__aicore__ inline void MlaPrologV3SplitM<MLAPT>::ScatterCkv(LocalTensor<kvCacheType> &outputLocal,
+__aicore__ inline void MlaPrologV3K3SplitM<MLAPT>::ScatterCkv(LocalTensor<kvCacheType> &outputLocal,
                                                             CkvkrParams rmsNormAndScatterCkvParams)
 {
     if constexpr ((MLAPT::cacheMode == CACHE_MODE::PA_NZ) || (MLAPT::cacheMode == CACHE_MODE::PA_BSND) ||
@@ -1410,7 +1410,7 @@ __aicore__ inline void MlaPrologV3SplitM<MLAPT>::ScatterCkv(LocalTensor<kvCacheT
 }
 
 template <typename MLAPT>
-__aicore__ inline void MlaPrologV3SplitM<MLAPT>::RopeAndScatterKr(LocalTensor<float> &dequantScaleXLocal,
+__aicore__ inline void MlaPrologV3K3SplitM<MLAPT>::RopeAndScatterKr(LocalTensor<float> &dequantScaleXLocal,
                                                                   LocalTensor<uint8_t> &shareTmpUb,
                                                                   LocalTensor<ropeComputType> &cosLocalCkvKr,
                                                                   LocalTensor<ropeComputType> &sinLocalCkvKr,
@@ -1475,7 +1475,7 @@ __aicore__ inline void MlaPrologV3SplitM<MLAPT>::RopeAndScatterKr(LocalTensor<fl
 }
 
 template <typename MLAPT>
-__aicore__ inline void MlaPrologV3SplitM<MLAPT>::ScatterKr(LocalTensor<krCacheType> &outputKrLocal,
+__aicore__ inline void MlaPrologV3K3SplitM<MLAPT>::ScatterKr(LocalTensor<krCacheType> &outputKrLocal,
                                                            CkvkrParams ropeAndScatterKrParams)
 {
     int64_t paTokenIndex;
@@ -1527,7 +1527,7 @@ __aicore__ inline void MlaPrologV3SplitM<MLAPT>::ScatterKr(LocalTensor<krCacheTy
 }
 
 template <typename MLAPT>
-__aicore__ inline void MlaPrologV3SplitM<MLAPT>::RmsNormRopeScatterCkvKr(int64_t tokenIndex, int64_t rmsNormCkvOffset,
+__aicore__ inline void MlaPrologV3K3SplitM<MLAPT>::RmsNormRopeScatterCkvKr(int64_t tokenIndex, int64_t rmsNormCkvOffset,
                                                                          int64_t ropeKrOffset, int64_t curVecToken)
 {
     if (blockIdx_ < 0 || blockIdx_ >= cvRatio_ * baseParams_->mm2BlockNum) {
@@ -1582,7 +1582,7 @@ __aicore__ inline void MlaPrologV3SplitM<MLAPT>::RmsNormRopeScatterCkvKr(int64_t
 }
 
 template <typename MLAPT>
-__aicore__ inline void MlaPrologV3SplitM<MLAPT>::QcQrSplit(int64_t curVecToken, int64_t curBlockTokenOffset,
+__aicore__ inline void MlaPrologV3K3SplitM<MLAPT>::QcQrSplit(int64_t curVecToken, int64_t curBlockTokenOffset,
                                                            int64_t curMSize, int64_t mmQcQrOffset,
                                                            int64_t mmQnPreDequantResOffset, int64_t ropeQrOffset,
                                                            int64_t ropeQrResOffset)
@@ -1719,7 +1719,7 @@ __aicore__ inline void MlaPrologV3SplitM<MLAPT>::QcQrSplit(int64_t curVecToken, 
 
 template <typename MLAPT>
 __aicore__ inline void
-MlaPrologV3SplitM<MLAPT>::DynamicQuantQnAndMulQrSyncMMQn(int64_t batchOffset, int64_t curStepBatchSize,
+MlaPrologV3K3SplitM<MLAPT>::DynamicQuantQnAndMulQrSyncMMQn(int64_t batchOffset, int64_t curStepBatchSize,
                                                          int64_t numHeadOffset, int64_t mmQnLoops)
 {
     // 如果curStepBatchSize是偶数，则两个核平分；如果curStepBatchSize是奇数，则奇数核比偶数核多分一个
@@ -1788,4 +1788,4 @@ MlaPrologV3SplitM<MLAPT>::DynamicQuantQnAndMulQrSyncMMQn(int64_t batchOffset, in
 
 } // namespace MlaProlog
 
-#endif // MLA_PROLOG_V3_SPLIT_M
+#endif // MLA_PROLOG_V3_K3_SPLIT_M

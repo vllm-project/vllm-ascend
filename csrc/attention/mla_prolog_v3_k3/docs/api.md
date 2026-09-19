@@ -1,15 +1,17 @@
-# MlaPrologV3 API 与调用示例
+# MlaPrologV3K3 API 与调用示例
 
 ## 1. API 总览
 
 | 通路 | API/入口 | 支持情况 |
 | --- | --- | --- |
-| vllm-ascend 单算子入口 | `torch.ops._C_ascend.npu_mla_prolog_v3` | 支持 |
-| aclnn | `aclnnMlaPrologV3WeightNzGetWorkspaceSize` / `aclnnMlaPrologV3WeightNz` | 支持 |
-| Ascend C `<<<>>>` | `mla_prolog_v3<<<blockDim, nullptr, stream>>>` | 支持（诊断/直调；需自备 tiling） |
+| vllm-ascend 单算子入口 | `torch.ops._C_ascend.npu_mla_prolog_v3_k3` | 支持 |
+| aclnn | `aclnnMlaPrologV3K3WeightNzGetWorkspaceSize` / `aclnnMlaPrologV3K3WeightNz` | 支持 |
+| Ascend C `<<<>>>` | `mla_prolog_v3_k3<<<blockDim, nullptr, stream>>>` | 支持（诊断/直调；需自备 tiling） |
 
 各入口表达同一套 MLA 前处理融合语义：下采样 → RMSNorm → 上采样 / RoPE → 写入 KV/KR Cache（及可选量化）。
-底层算子名为 **MlaPrologV3**，权重 `weight_dq` / `weight_uq_qr` / `weight_dkv_kr` 需以 **FRACTAL_NZ** 格式传入。
+底层算子名为 **MlaPrologV3K3**，权重 `weight_dq` / `weight_uq_qr` / `weight_dkv_kr` 需以 **FRACTAL_NZ** 格式传入。
+
+K3 自定义实现使用独立的 Torch schema、ACLNN 导出和 OPP 算子类型，不注册原生 `MlaPrologV3` 的同名别名。SFA 的 C8 per-tile 模式（`kv_cache_quant_mode=3`）继续通过 `torch_npu.npu_mla_prolog_v3` 调用 CANN 实现。升级时应重新构建并安装完整自定义算子包，避免保留旧包的同名注册。
 
 本文描述 Ascend 950PR&950DT 系列产品上 vllm-ascend 自定义算子包的支持范围。当前支持非量化 BF16 和 MXFP8，具体联合配置见 §2.3；不支持的量化配置会在 Host 校验阶段拒绝。`torch_npu.npu_mla_prolog_v3` 的支持范围取决于其实际使用的 CANN/OPP 实现，不由本文定义。
 
@@ -117,7 +119,7 @@ PARTIAL、FULL INT8、普通 FP8、HIF8、KV per-channel/per-tile 均不在当�
 ### 3.1 接口签名
 
 ```cpp
-aclnnStatus aclnnMlaPrologV3WeightNzGetWorkspaceSize(
+aclnnStatus aclnnMlaPrologV3K3WeightNzGetWorkspaceSize(
     const aclTensor *tokenX, const aclTensor *weightDq, const aclTensor *weightUqQr,
     const aclTensor *weightUk, const aclTensor *weightDkvKr,
     const aclTensor *rmsnormGammaCq, const aclTensor *rmsnormGammaCkv,
@@ -138,7 +140,7 @@ aclnnStatus aclnnMlaPrologV3WeightNzGetWorkspaceSize(
     const aclTensor *queryNormOutOptional, const aclTensor *dequantScaleQNormOutOptional,
     uint64_t *workspaceSize, aclOpExecutor **executor);
 
-aclnnStatus aclnnMlaPrologV3WeightNz(
+aclnnStatus aclnnMlaPrologV3K3WeightNz(
     void *workspace, uint64_t workspaceSize, aclOpExecutor *executor, aclrtStream stream);
 ```
 
@@ -152,7 +154,7 @@ aclnnStatus aclnnMlaPrologV3WeightNz(
 // 按 2.1/2.2 创建 aclTensor；weightDq/UqQr/DkvKr 为 FRACTAL_NZ。
 uint64_t workspaceSize = 0;
 aclOpExecutor *executor = nullptr;
-ACLNN_CHECK(aclnnMlaPrologV3WeightNzGetWorkspaceSize(
+ACLNN_CHECK(aclnnMlaPrologV3K3WeightNzGetWorkspaceSize(
     tokenX, weightDq, weightUqQr, weightUk, weightDkvKr,
     gammaCq, gammaCkv, ropeSin, ropeCos, kvCache, krCache,
     cacheIndex, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
@@ -164,7 +166,7 @@ void *workspace = nullptr;
 if (workspaceSize != 0) {
     ACL_CHECK(aclrtMalloc(&workspace, workspaceSize, ACL_MEM_MALLOC_HUGE_FIRST));
 }
-ACLNN_CHECK(aclnnMlaPrologV3WeightNz(workspace, workspaceSize, executor, stream));
+ACLNN_CHECK(aclnnMlaPrologV3K3WeightNz(workspace, workspaceSize, executor, stream));
 ACL_CHECK(aclrtSynchronizeStream(stream));
 ```
 
@@ -174,7 +176,7 @@ ACL_CHECK(aclrtSynchronizeStream(stream));
 
 ```python
 query, query_rope, dequant_scale_q_nope, query_norm, dequant_scale_q_norm = (
-    torch.ops._C_ascend.npu_mla_prolog_v3(
+    torch.ops._C_ascend.npu_mla_prolog_v3_k3(
         token_x, weight_dq, weight_uq_qr, weight_uk, weight_dkv_kr,
         rmsnorm_gamma_cq, rmsnorm_gamma_ckv, rope_sin, rope_cos,
         kv_cache, kr_cache,  # mutable
@@ -228,13 +230,13 @@ kv_cache = torch.zeros(2, 128, 1, hckv, device=device, dtype=dtype)
 kr_cache = torch.zeros(2, 128, 1, dr, device=device, dtype=dtype)
 cache_index = torch.arange(t, device=device, dtype=torch.int64)
 
-query, query_rope, *_ = torch.ops._C_ascend.npu_mla_prolog_v3(
+query, query_rope, *_ = torch.ops._C_ascend.npu_mla_prolog_v3_k3(
     token_x, weight_dq, weight_uq_qr, weight_uk, weight_dkv_kr,
     gamma_cq, gamma_ckv, rope_sin, rope_cos, kv_cache, kr_cache,
     cache_index=cache_index, cache_mode="PA_BSND")
 # RoPE disabled: pass empty tensors for both rope inputs
 empty_rope = torch.empty(0, device=device, dtype=dtype)
-q_no_rope, qr_no_rope, *_ = torch.ops._C_ascend.npu_mla_prolog_v3(
+q_no_rope, qr_no_rope, *_ = torch.ops._C_ascend.npu_mla_prolog_v3_k3(
     token_x, weight_dq, weight_uq_qr, weight_uk, weight_dkv_kr,
     gamma_cq, gamma_ckv, empty_rope, empty_rope, kv_cache.clone(), kr_cache.clone(),
     cache_index=cache_index, cache_mode="PA_BSND")
@@ -247,7 +249,7 @@ torch.npu.synchronize()
 `blockDim`、workspace 与序列化 tiling data 必须来自同一组 host tiling。参数顺序与 kernel 定义一致：
 
 ```cpp
-mla_prolog_v3<<<blockDim, nullptr, stream>>>(
+mla_prolog_v3_k3<<<blockDim, nullptr, stream>>>(
     tokenX, weightDq, weightUqQr, weightUk, weightDkvKr,
     rmsnormGammaCq, rmsnormGammaCkv, ropeSin, ropeCos,
     kvCache, krCache, cacheIndex,
