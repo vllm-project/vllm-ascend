@@ -217,8 +217,10 @@ class AscendFlashAttentionImpl(AscendAttentionBackendImpl):
         )
         if self.enable_c8_quant or self.kv_cache_dtype not in ("auto", "float16", "bfloat16"):
             raise ValueError("FA3 requires FP16/BF16 KV cache; C8 and other quantized KV caches are unsupported.")
+        # DECODER identifies self-attention in a decoder model, not a decode
+        # scheduler step. It includes prefill, chunked prefill and mixed P/D.
         if self.attn_type != AttentionType.DECODER:
-            raise ValueError("FA3 currently supports decoder self-attention only.")
+            raise ValueError("FA3 does not support encoder attention or encoder-decoder cross-attention.")
         if self.alibi_slopes is not None or self.sliding_window is not None or self.sinks is not None:
             raise ValueError("FA3 backend currently requires full attention without ALiBi or attention sinks.")
         parallel = self.vllm_config.parallel_config

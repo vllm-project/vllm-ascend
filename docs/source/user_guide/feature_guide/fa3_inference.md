@@ -30,11 +30,11 @@ vllm serve Qwen/Qwen3-8B \
     --enable-prefix-caching
 ```
 
-For `Qwen3ForCausalLM` and `Qwen3MoeForCausalLM`, the platform automatically
+On A2/A3, for `Qwen3ForCausalLM` and `Qwen3MoeForCausalLM`, the platform automatically
 selects this backend when `flash_attn_npu_3` is installed and the attention
 configuration is supported. No additional user switch is required. If the
 package is absent, selection falls back to FIA. Other architectures, C8 or
-quantized KV cache, context parallelism, and the 310P compatibility platform
+quantized KV cache, context parallelism, and 310P/A5 hardware
 retain their existing backends. Explicit RL training-consistency selection
 also retains its existing backend.
 
