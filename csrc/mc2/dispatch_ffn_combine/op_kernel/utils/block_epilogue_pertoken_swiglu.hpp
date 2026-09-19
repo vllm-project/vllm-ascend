@@ -150,6 +150,7 @@ public:
 
         uint32_t epilogueCoreNum = 40,
         float swigluLimit = 0.0f,
+        float swigluAlpha = 0.0f,
         uint32_t blockK = 1,
         Callback &&callback = Callback{}
     )
@@ -225,25 +226,54 @@ public:
             AscendC::PipeBarrier<PIPE_V>();
 
             // swiglu limit clamp
+            // gate: ClampMax(limit) [single-sided max, same for SwigluOAI/standard]
+            // up  : ClampMin(-limit) [standard, min side only]; SwigluOAI(alpha>0) additionally adds ClampMax(limit) [both sides]
             if (swigluLimit > 0.0f) {
                 AscendC::ClampMax(ubCFp32, ubCFp32, sharedTmpBuffer, swigluLimit, blockN);
                 AscendC::PipeBarrier<PIPE_V>();
                 AscendC::ClampMin(ubCFp32[ChunkTileLen], ubCFp32[ChunkTileLen], sharedTmpBuffer, -1.0f * swigluLimit, ChunkTileLen);
-                //AscendC::ClampMin(ubCFp32, ubCFp32, sharedTmpBuffer, -1.0f * swigluLimit, ChunkTileLen);
+                AscendC::PipeBarrier<PIPE_V>();
+                // SwigluOAI: up double-sided clamp (adds max side). alpha==0 takes standard path keeping original behavior (up min side only) for bit compatibility.
+                if (swigluAlpha > 0.0f) {
+                    AscendC::ClampMax(ubCFp32[ChunkTileLen], ubCFp32[ChunkTileLen], sharedTmpBuffer, swigluLimit, ChunkTileLen);
+                    AscendC::PipeBarrier<PIPE_V>();
+                }
+            }
+
+            // Activation section:
+            //   alpha > 0 -> SwigluOAI: out = (up+1) * gate * sigmoid(gate*alpha)
+            //   alpha == 0 -> standard SwiGLU: out = silu(gate) * up   (bit-compatible with legacy models, e.g. M2.7)
+            // Layout: ubCFp32[0:ChunkTileLen]=gate, ubCFp32[ChunkTileLen:2*ChunkTileLen]=up (halves)
+            // Result written back to ubCFp32ChunkN (length ChunkTileLen). up original value is not read afterwards, in-place +1 is safe.
+            if (swigluAlpha > 0.0f) {
+                // gate*sigmoid(gate*alpha) = gate / (1 + exp(-alpha*gate))
+                AscendC::Muls(ubCFp32ChunkN, ubCFp32, -1.0f * swigluAlpha, ChunkTileLen);   // t = -alpha*gate  (alpha feeds into sigmoid)
+                AscendC::PipeBarrier<PIPE_V>();
+                AscendC::Exp(ubCFp32ChunkN, ubCFp32ChunkN, ChunkTileLen);                   // exp(-alpha*gate)
+                AscendC::PipeBarrier<PIPE_V>();
+                AscendC::Adds(ubCFp32ChunkN, ubCFp32ChunkN, 1.0f, ChunkTileLen);            // 1 + exp(-alpha*gate)
+                AscendC::PipeBarrier<PIPE_V>();
+                AscendC::Div(ubCFp32ChunkN, ubCFp32, ubCFp32ChunkN, ChunkTileLen);          // gate*sigmoid(alpha*gate) = glu
+                AscendC::PipeBarrier<PIPE_V>();
+                // (up + 1.0)
+                AscendC::Adds(ubCFp32[ChunkTileLen], ubCFp32[ChunkTileLen], 1.0f, ChunkTileLen);
+                AscendC::PipeBarrier<PIPE_V>();
+                // out = glu * (up+1)
+                AscendC::Mul(ubCFp32ChunkN, ubCFp32ChunkN, ubCFp32[ChunkTileLen], ChunkTileLen);
+                AscendC::PipeBarrier<PIPE_V>();
+            } else {
+                // standard SwiGLU: silu(gate)*up  (original implementation, alpha==0 bit-compatible)
+                AscendC::Muls(ubCFp32ChunkN, ubCFp32, -1.0f, ChunkTileLen);
+                AscendC::PipeBarrier<PIPE_V>();
+                AscendC::Exp(ubCFp32ChunkN, ubCFp32ChunkN, ChunkTileLen);
+                AscendC::PipeBarrier<PIPE_V>();
+                AscendC::Adds(ubCFp32ChunkN, ubCFp32ChunkN, 1.0f, ChunkTileLen);
+                AscendC::PipeBarrier<PIPE_V>();
+                AscendC::Div(ubCFp32ChunkN, ubCFp32, ubCFp32ChunkN, ChunkTileLen);
+                AscendC::PipeBarrier<PIPE_V>();
+                AscendC::Mul(ubCFp32ChunkN, ubCFp32ChunkN, ubCFp32[ChunkTileLen], ChunkTileLen);
                 AscendC::PipeBarrier<PIPE_V>();
             }
-            
-            // Swiglu computation process
-            AscendC::Muls(ubCFp32ChunkN, ubCFp32, -1.0f, ChunkTileLen);
-            AscendC::PipeBarrier<PIPE_V>();
-            AscendC::Exp(ubCFp32ChunkN, ubCFp32ChunkN, ChunkTileLen);
-            AscendC::PipeBarrier<PIPE_V>();
-            AscendC::Adds(ubCFp32ChunkN, ubCFp32ChunkN, 1.0f, ChunkTileLen);
-            AscendC::PipeBarrier<PIPE_V>();
-            // TODO: confirm whether the division impacts subsequent data
-            AscendC::Div(ubCFp32ChunkN, ubCFp32, ubCFp32ChunkN, ChunkTileLen);
-            AscendC::PipeBarrier<PIPE_V>();
-            AscendC::Mul(ubCFp32ChunkN, ubCFp32ChunkN, ubCFp32[ChunkTileLen], ChunkTileLen);
             
             // Quantization process; difference between the two approaches
             AscendC::PipeBarrier<PIPE_V>();
