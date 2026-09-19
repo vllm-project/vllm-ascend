@@ -9,6 +9,7 @@ from typing import Any
 
 import torch
 
+from vllm_ascend import envs
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.utils import enable_custom_op
 
@@ -21,6 +22,7 @@ _PREFILL_KV_GATHER_Q_INNER_PRECISE = 1
 # A3 KV-gather-Q prefill with BF16 inputs: use FP32 scores and partial
 # outputs to preserve accuracy.
 _A3_PREFILL_KV_GATHER_Q_INNER_PRECISE = 0
+_PREFILL_SCHEDULE_METADATA_SIZE = 1024
 _MSA_INDEX_BLOCK_SIZE = 128
 _MSA_SCORE_BLOCK_ALIGNMENT = 16
 _FP8_E4M3_MAX = 448.0
@@ -586,6 +588,11 @@ def _minimax_m3_sparse_attn_kv_gather_q(
     k2q_slot_indices = k2q_slot_indices.to(dtype=torch.int32).contiguous()
     q_lens_t = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).to(torch.int32).contiguous()
     kv_lens_t = seq_lens.to(torch.int32).contiguous()
+    op_kwargs: dict[str, Any] = {}
+    if not supports_fp8 and envs.VLLM_ASCEND_MINIMAX_M3_PREFILL_METADATA:
+        # The C++ binding runs the device-side scheduling producer followed by
+        # its consumer on the same stream, including during graph replay.
+        op_kwargs["metadata"] = torch.empty(_PREFILL_SCHEDULE_METADATA_SIZE, dtype=torch.int32, device=q.device)
     out = torch.ops._C_ascend.npu_sparse_attention_score_prefill(
         q,
         key,
@@ -601,6 +608,7 @@ def _minimax_m3_sparse_attn_kv_gather_q(
         inner_precise,
         actual_seq_lengths=q_lens_t,
         actual_seq_lengths_kv=kv_lens_t,
+        **op_kwargs,
     )
     output.copy_(out)
 

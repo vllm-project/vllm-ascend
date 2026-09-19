@@ -1620,7 +1620,8 @@ at::Tensor npu_sparse_attention_score_prefill_meta(
     int64_t num_key_value_heads, double scale_value, int64_t block_size,
     int64_t top_k, int64_t inner_precise,
     const c10::optional<at::Tensor> &actual_seq_lengths,
-    const c10::optional<at::Tensor> &actual_seq_lengths_kv)
+    const c10::optional<at::Tensor> &actual_seq_lengths_kv,
+    const c10::optional<at::Tensor> &metadata)
 {
     (void)key;
     (void)value;
@@ -1635,6 +1636,7 @@ at::Tensor npu_sparse_attention_score_prefill_meta(
     (void)inner_precise;
     (void)actual_seq_lengths;
     (void)actual_seq_lengths_kv;
+    (void)metadata;
     at::ScalarType out_dtype = query.scalar_type();
     if (query.scalar_type() == at::kFloat8_e4m3fn) {
         out_dtype = at::kBFloat16;
