@@ -849,8 +849,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
             self.common_ratio_to_sas_metadata["seq_lens_cpu"] = seq_lens_cpu
             input_positions = common_attn_metadata.positions[:num_input_tokens].long()
-            # Short prefills may use the decode path, but PCP global/local
-            # positions differ and must not overwrite each other's RoPE.
+            # num_prefills excludes short prefills classified as decodes;
+            # also check is_prefilling before reusing RoPE buffers.
             is_prefilling = common_attn_metadata.is_prefilling
             not_prefilling = self.num_prefills == 0 and (
                 is_prefilling is None or not bool(is_prefilling[:num_reqs].any())
