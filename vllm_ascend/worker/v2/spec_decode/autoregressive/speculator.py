@@ -1,4 +1,4 @@
-# Adapt from https://github.com/vllm-project/vllm/blob/main/vllm/v1/worker/gpu/sample/spec_decode/autoregressive/speculator.py
+# Adapt from https://github.com/vllm-project/vllm/blob/main/vllm/v1/worker/gpu/spec_decode/autoregressive/speculator.py
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
@@ -47,6 +47,7 @@ from vllm_ascend.worker.v2.attn_utils import (
 )
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
+from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import LmheadTPDraftSamplingMixin
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import (
     disable_target_pcp_for_replicated_draft,
     prepare_replicated_pcp_config,
@@ -58,7 +59,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
+class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveSpeculator):
     """Shared Ascend spec-decode loop for AscendEagle/AscendMTPSpeculator.
 
     GQA, MLA, DSA, and SFA draft decode state share one path. The current MTP path
@@ -82,6 +83,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         """
         vllm_config, self.replicated_pcp = prepare_replicated_pcp_config(vllm_config)
         super().__init__(vllm_config, device)
+        self._lmhead_tp_validate_draft_sampling()
 
         self.attn_architecture: str | None = None
         self.attn_backend: type[AttentionBackend] | None = None
@@ -110,7 +112,20 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         self.pcp_manager: AscendPCPManager | None = None
 
     def _create_draft_vllm_config(self) -> VllmConfig:
-        """Build the runtime config used while executing the draft model."""
+        """Build the runtime config used while executing the draft model.
+
+        Mirrors the V1 proposer
+        (``AscendSpecDecodeBaseProposer._create_draft_vllm_config``): validate
+        the target-derived config, then swap in the draft model config without
+        re-validating it. EAGLE and DFlash draft heads are dense even when the
+        target is MoE, so re-validating the draft config would check that dense
+        head against the target-side fine-grained TP layout (MoE-only in
+        ``ascend_config``) and fail before the speculator can be built.
+
+        The additional config has to stay intact: ``init_ascend_config`` caches
+        the config it builds process-wide, so dropping the fine-grained TP entry
+        here would silently turn lmhead TP off for the draft sampling path.
+        """
         source_parallel_config = self.vllm_config.parallel_config
         dcp_size = source_parallel_config.decode_context_parallel_size
         parallel_config = replace(
@@ -120,10 +135,14 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         )
         draft_config = replace(
             self.vllm_config,
-            model_config=self.draft_model_config,
             parallel_config=parallel_config,
             cache_config=replace(self.vllm_config.cache_config),
         )
+        # V1 parity: swap in the draft model config *after* validation. A dense
+        # EAGLE/DFlash head must not be re-validated against the target-side
+        # fine-grained TP layout (MoE-only in ``ascend_config``), which passing
+        # model_config through replace() above would do.
+        draft_config.model_config = self.draft_model_config
         if self.replicated_pcp:
             # TODO: Separate draft execution settings from worker topology.
             # Restore DCP only after the complete draft config reconstruction;

@@ -96,7 +96,16 @@ def test_draft_runtime_config_preserves_target_worker_topology(
             assert changes["parallel_config"].decode_context_parallel_size == (1 if target_pcp_size > 1 else dcp_size)
         if config is target_config and "model_config" not in changes:
             reconstructed_parallel = changes["parallel_config"]
-            captured["reconstruction_dcp_size"] = reconstructed_parallel.decode_context_parallel_size
+            # The draft config does not carry model_config through replace()
+            # (it is swapped in after validation, V1 parity), so this call is
+            # reached on every build. Record a reconstruction only when the DCP
+            # was actually normalized away, which is what the target having PCP
+            # means here.
+            if (
+                reconstructed_parallel.decode_context_parallel_size
+                != target_parallel_config.decode_context_parallel_size
+            ):
+                captured["reconstruction_dcp_size"] = reconstructed_parallel.decode_context_parallel_size
         values = vars(config).copy()
         values.update(changes)
         return SimpleNamespace(**values)
