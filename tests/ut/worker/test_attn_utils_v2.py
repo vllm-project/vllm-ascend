@@ -958,7 +958,7 @@ def _make_mla_layer(*, fa_quant: bool = False, sparse_c8: bool = False):
         enable_sparse_sfa_c8=sparse_c8,
         dtype=torch.bfloat16,
     )
-    layer.get_kv_cache_spec = lambda _cfg: SimpleNamespace(
+    layer.get_kv_cache_spec = lambda _cfg: AscendMLAAttentionSpec(
         block_size=16,
         num_kv_heads=1,
         head_size=128,

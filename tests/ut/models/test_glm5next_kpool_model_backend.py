@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from torch import nn
+from vllm.config.compilation import CUDAGraphMode
 
 import vllm_ascend.attention.indexer_kpool as backend_module
 from vllm_ascend.attention.indexer_kpool import (
@@ -211,8 +212,15 @@ class _RecordingKPool(nn.Module):
         return None
 
 
+@pytest.mark.parametrize(
+    "runtime_mode,capturing,expected_pool_len",
+    [(CUDAGraphMode.NONE, False, 1), (CUDAGraphMode.NONE, True, 2), (CUDAGraphMode.FULL, False, 2)],
+)
 def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
     monkeypatch,
+    runtime_mode,
+    capturing,
+    expected_pool_len,
 ) -> None:
     backend = Glm5NextKPoolIndexerBackend.__new__(Glm5NextKPoolIndexerBackend)
     nn.Module.__init__(backend)
@@ -238,12 +246,13 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
     backend._wk_weight_f32 = None
     backend.indexer_op = _RecordingKPool()
     tail_metadata = _tail_metadata()
+    monkeypatch.setattr(backend_module, "_EXTRA_CTX", SimpleNamespace(capturing=capturing), raising=False)
     monkeypatch.setattr(
         backend_module,
         "get_forward_context",
         lambda: SimpleNamespace(
             attn_metadata={"indexer.tail": tail_metadata},
-            cudagraph_runtime_mode=None,
+            cudagraph_runtime_mode=runtime_mode,
             virtual_engine=0,
         ),
     )
@@ -283,3 +292,4 @@ def test_backend_uses_normalized_q_c_and_separate_tail_metadata(
     assert backend.indexer_op.args[7] is tail_metadata
     assert backend.indexer_op.kwargs is not None
     assert backend.indexer_op.kwargs["compute_topk"] is True
+    assert backend.indexer_op.kwargs["max_pool_seq_len"] == expected_pool_len
