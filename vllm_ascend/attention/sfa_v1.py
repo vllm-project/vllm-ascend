@@ -504,8 +504,6 @@ class SFAForwardContext:
 class SFAFIASharedPrefillPlan:
     """CPU-built row plan for the experimental shared FIA prefill path."""
 
-    query_ends: tuple[int, ...]
-    kv_lengths: tuple[int, ...]
     eligible_lengths: tuple[int, ...]
     dense_requests: tuple[int, ...]
     dense_group_sizes: tuple[int, ...]
@@ -627,8 +625,6 @@ def _build_sfa_fia_shared_prefill_plan(
         tail_kv_lengths_list.append(kv_lengths[request])
 
     return SFAFIASharedPrefillPlan(
-        query_ends=query_ends,
-        kv_lengths=kv_lengths,
         eligible_lengths=eligible_lengths,
         dense_requests=dense_requests,
         dense_group_sizes=dense_group_sizes,
@@ -1935,8 +1931,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         if lengths is None:
             return None
         query_ends, kv_lengths = lengths
-        if plan.query_ends != tuple(query_ends) or plan.kv_lengths != tuple(kv_lengths):
-            return None
         cum_query_lens = getattr(attn_metadata, "cum_query_lens", None)
         seq_lens = getattr(attn_metadata, "seq_lens", None)
         for lengths_tensor in (cum_query_lens, seq_lens):
