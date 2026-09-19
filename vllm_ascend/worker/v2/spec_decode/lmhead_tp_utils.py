@@ -33,7 +33,8 @@ class LmheadTPDraftSamplingMixin:
     # Speculators whose draft sampling does not funnel through sample_draft
     # cannot be row-aligned by this mixin; they opt out and are rejected at
     # construction (DSpark: _sample_sequential calls compute_draft_logits
-    # directly).
+    # directly. DFlash2: _generate_draft calls compute_candidates ->
+    # get_top_k_tokens on the sharded head).
     _lmhead_tp_sample_draft_supported = True
 
     def _lmhead_tp_max_num_logits(self) -> int:
