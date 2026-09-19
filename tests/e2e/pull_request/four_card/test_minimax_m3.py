@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import math
 import os
 from pathlib import Path
@@ -44,6 +45,17 @@ os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["VLLM_DISABLE_COMPILE_CACHE"] = "0"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
+
+def _has_msa_index_score() -> bool:
+    for library_name in ("libopapi_transformer.so", "libopapi.so"):
+        try:
+            library = ctypes.CDLL(library_name)
+        except OSError:
+            continue
+        if hasattr(library, "aclnnMsaIndexScore") and hasattr(library, "aclnnMsaIndexScoreGetWorkspaceSize"):
+            return True
+    return False
 
 
 def _configure_jemalloc() -> None:
@@ -111,6 +123,9 @@ def _assert_logprobs_match(baseline, replay) -> None:
 @patch.dict(os.environ, {"ASCEND_RT_VISIBLE_DEVICES": "0,1,2,3"})
 @wait_until_npu_memory_free()
 def test_minimax_m3_tp4_dummy_logprobs() -> None:
+    if not _has_msa_index_score():
+        pytest.skip("CANN Ops MsaIndexScore is unavailable in this CANN image")
+
     _configure_jemalloc()
 
     with VllmRunner(
