@@ -894,8 +894,10 @@ def test_dsa_cp_attention_waits_before_sas_consumer(compress_ratio: int, monkeyp
 
 
 @pytest.mark.parametrize("for_drafting", [False, True])
+@pytest.mark.parametrize("is_prefilling", [None, [False, False], [False, True], [True, True]])
 def test_build_classifies_short_speculative_extends_as_decodes(
     for_drafting: bool,
+    is_prefilling: list[bool] | None,
 ):
     builder = _make_builder(compressor_ratio=1)
     builder.decode_threshold = 8
@@ -913,7 +915,7 @@ def test_build_classifies_short_speculative_extends_as_decodes(
         seq_lens=seq_lens,
         _seq_lens_cpu=seq_lens,
         seq_lens_cpu=None,
-        is_prefilling=torch.tensor([False, True]),
+        is_prefilling=torch.tensor(is_prefilling) if is_prefilling is not None else None,
         slot_mapping=torch.arange(14, dtype=torch.int32),
         block_table_tensor=torch.tensor([[1, 2], [3, 4]], dtype=torch.int32),
         attn_state=MagicMock(),
@@ -922,6 +924,12 @@ def test_build_classifies_short_speculative_extends_as_decodes(
     builder.build_req_metadata = MagicMock(return_value=req_metadata)
     builder.build_req_metadata_for_drafting = MagicMock(return_value=req_metadata)
     builder.spec_slot_mapping = [torch.zeros((16, 2), dtype=torch.int32)]
+    rope_buffer = torch.ones(14)
+    shared_metadata: dict[str, Any] = {}
+
+    def get_rope(positions, use_cache=False, **kwargs):
+        cos = rope_buffer if use_cache else rope_buffer.clone()
+        return cos, torch.zeros_like(cos)
 
     with (
         patch(
@@ -936,7 +944,7 @@ def test_build_classifies_short_speculative_extends_as_decodes(
         ),
         patch(
             "vllm_ascend.attention.dsa_v1.get_cos_and_sin_dsa",
-            return_value=(torch.ones(14), torch.zeros(14)),
+            side_effect=get_rope,
         ),
     ):
         if for_drafting:
@@ -948,12 +956,18 @@ def test_build_classifies_short_speculative_extends_as_decodes(
             metadata = builder.build(
                 common_prefix_len=0,
                 common_attn_metadata=common_attn_metadata,
-                common_ratio_to_sas_metadata={},
+                common_ratio_to_sas_metadata=shared_metadata,
             )
 
     assert metadata.num_decodes == 2
     assert metadata.num_decode_tokens == 14
     assert metadata.num_prefills == 0
+    if not for_drafting:
+        # A subsequent local RoPE build must not overwrite an isolated global result.
+        rope_buffer.zero_()
+        has_prefill = is_prefilling is not None and any(is_prefilling)
+        expected = torch.ones(14) if has_prefill else torch.zeros(14)
+        assert torch.equal(shared_metadata["cos"], expected)
 
 
 def test_build_req_metadata_preserves_zero_max_sequence_lengths():
