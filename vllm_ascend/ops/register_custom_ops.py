@@ -9,7 +9,7 @@ from vllm.distributed import (
 from vllm.forward_context import get_forward_context
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.rotary_embedding import rope_forward_oot
 from vllm_ascend.ops.triton.muls_add import muls_add_triton
 from vllm_ascend.utils import is_vl_model
@@ -124,37 +124,6 @@ def _maybe_pad_and_reduce_impl(x: torch.Tensor) -> torch.Tensor:
     return ep_group.reduce_scatter(padded_x.view(-1, *x.shape[1:]), 0)
 
 
-def _routed_output_is_reduced(layer_name: str) -> bool:
-    runner = get_forward_context().no_compile_layers[layer_name]
-    is_sequence_parallel = runner.moe_config.is_sequence_parallel
-    comm = _EXTRA_CTX.moe_comm_type
-    return comm in {
-        MoECommType.MC2,
-        MoECommType.ALLTOALL,
-        MoECommType.FUSED_MC2,
-    } or (comm == MoECommType.ALLGATHER and is_sequence_parallel)
-
-
-def _maybe_all_reduce_tensor_model_parallel_impl(
-    states: torch.Tensor,
-    layer_name: str,
-) -> torch.Tensor:
-    """Reduce routed/final output only if dispatch has not already reduced it."""
-    if _routed_output_is_reduced(layer_name):
-        return states
-    return tensor_model_parallel_all_reduce(states)
-
-
-def _maybe_all_reduce_shared_expert_impl(
-    shared_output: torch.Tensor,
-    layer_name: str,
-) -> torch.Tensor:
-    """Reduce shared TP output separately when routed output is already reduced."""
-    if _routed_output_is_reduced(layer_name):
-        return tensor_model_parallel_all_reduce(shared_output)
-    return shared_output
-
-
 def _maybe_all_gather_and_maybe_unpad_fake(x: torch.Tensor) -> torch.Tensor:
     forward_context = get_forward_context()
     ep_group = get_ep_group()
@@ -235,22 +204,6 @@ direct_register_custom_op(
     op_name="maybe_pad_and_reduce",
     op_func=_maybe_pad_and_reduce_impl,
     fake_impl=_maybe_pad_and_reduce_fake,
-    mutates_args=[],
-    dispatch_key="PrivateUse1",
-)
-
-direct_register_custom_op(
-    op_name="maybe_all_reduce_tensor_model_parallel",
-    op_func=_maybe_all_reduce_tensor_model_parallel_impl,
-    fake_impl=lambda states, layer_name: states,
-    mutates_args=[],
-    dispatch_key="PrivateUse1",
-)
-
-direct_register_custom_op(
-    op_name="maybe_all_reduce_shared_expert",
-    op_func=_maybe_all_reduce_shared_expert_impl,
-    fake_impl=lambda shared_output, layer_name: shared_output,
     mutates_args=[],
     dispatch_key="PrivateUse1",
 )
