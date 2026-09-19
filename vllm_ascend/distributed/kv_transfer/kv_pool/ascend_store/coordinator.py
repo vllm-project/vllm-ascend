@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import replace
 from importlib import import_module
-from typing import Any, cast
+from typing import Any, cast, overload
 
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList, KVCacheBlock
+from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
 from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -31,6 +31,51 @@ _MANAGER_CLASS_CACHE_ATTR = "_manager_class_cache"
 GroupHitQuery = Callable[[int, Sequence[BlockHash | str], Sequence[bool] | None], Iterable[BlockHash | str]]
 
 
+class _HBMCachedBlockHash(bytes):
+    """Coordinate marker for a hash block already cached in HBM."""
+
+
+_HBM_CACHED_BLOCK_HASH = _HBMCachedBlockHash()
+
+
+class HBMCachedBlockHashList(Sequence[BlockHash | str]):
+    """Expose omitted HBM-prefix hashes as logical coordinates.
+
+    The concrete prefix hashes are intentionally absent. A dedicated marker
+    occupies each omitted position so the existing terminal-hash grouping and
+    cache-manager walks keep using absolute request coordinates.
+    """
+
+    def __init__(self, suffix_block_hashes: Sequence[BlockHash | str], num_hbm_cached_hashes: int) -> None:
+        assert num_hbm_cached_hashes >= 0
+        self._suffix_block_hashes = suffix_block_hashes
+        self._num_hbm_cached_hashes = num_hbm_cached_hashes
+
+    def __len__(self) -> int:
+        return self._num_hbm_cached_hashes + len(self._suffix_block_hashes)
+
+    @overload
+    def __getitem__(self, index: int) -> BlockHash | str: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> list[BlockHash | str]: ...
+
+    def __getitem__(self, index: int | slice) -> BlockHash | str | list[BlockHash | str]:
+        if isinstance(index, slice):
+            return [self[idx] for idx in range(*index.indices(len(self)))]
+        if index < 0:
+            index += len(self)
+        if index < 0 or index >= len(self):
+            raise IndexError(index)
+        if index < self._num_hbm_cached_hashes:
+            return BlockHash(_HBM_CACHED_BLOCK_HASH)
+        return self._suffix_block_hashes[index - self._num_hbm_cached_hashes]
+
+    def __iter__(self) -> Iterator[BlockHash | str]:
+        for index in range(len(self)):
+            yield self[index]
+
+
 class ExternalCachedBlockPool:
     """Duck-typed BlockPool backed by external AscendStore key existence."""
 
@@ -51,6 +96,8 @@ class ExternalCachedBlockPool:
         block_hash: BlockHash,
         group_ids: list[int],
     ) -> list[KVCacheBlock] | None:
+        if isinstance(block_hash, _HBMCachedBlockHash):
+            return [self._present_block] * len(group_ids)
         if self._exists is None:
             return [self._present_block] * len(group_ids)
         h = block_hash_to_bytes(block_hash)
@@ -138,7 +185,7 @@ class AscendStoreCoordinator:
 
     def find_longest_cache_hit(
         self,
-        block_hashes: list[BlockHash],
+        block_hashes: Sequence[BlockHash | str],
         max_length: int,
         cached_block_pool: ExternalCachedBlockPool,
         *,
@@ -215,7 +262,7 @@ class AscendStoreCoordinator:
 
     def find_reachable_hit_tokens(
         self,
-        block_hashes: list[BlockHash],
+        block_hashes: Sequence[BlockHash | str],
         token_len: int,
         query_group_hits: GroupHitQuery,
         *,
@@ -257,12 +304,14 @@ class AscendStoreCoordinator:
         logger.debug("%s: token_len=%d hit_tokens=%d", log_context, token_len, hit_length)
         return hit_length
 
-    def block_hashes_for_spec(self, block_hashes: list[BlockHash], spec: KVCacheSpec) -> BlockHashList:
+    def block_hashes_for_spec(
+        self, block_hashes: Sequence[BlockHash | str], spec: KVCacheSpec
+    ) -> Sequence[BlockHash | str]:
         return block_hashes
 
     def _find_hit_blocks(
         self,
-        block_hashes: list[BlockHash],
+        block_hashes: Sequence[BlockHash | str],
         max_length: int,
         cached_block_pool: ExternalCachedBlockPool,
         *,

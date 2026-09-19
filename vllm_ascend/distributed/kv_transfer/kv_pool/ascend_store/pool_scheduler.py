@@ -38,6 +38,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendStoreKVConnectorWorkerMetadata,
     KeyMetadata,
     LoadSpec,
+    LookupHashMode,
     PoolKey,
     ReqMeta,
     RequestTracker,
@@ -52,6 +53,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     is_block_key_layerwise,
     make_layerwise_block_key,
     normalize_block_ids_by_group,
+    resolve_request_hash_block_size,
     uses_hybrid_kv_cache,
     validate_mooncake_layerwise_topology,
 )
@@ -122,12 +124,7 @@ class KVPoolScheduler:
         self.use_eagle = use_eagle_fn() is True if callable(use_eagle_fn) else False
         self.original_block_size = infer_group_block_sizes(vllm_config.cache_config.block_size, kv_cache_groups)
         self.grouped_block_size = [block_size * self.dcp_size for block_size in self.original_block_size]
-        requested_hash_block_size = vllm_config.cache_config.prefix_match_unit
-        if not isinstance(requested_hash_block_size, int):
-            requested_hash_block_size = None
-        self.hash_block_size = (
-            requested_hash_block_size if requested_hash_block_size is not None else min(self.original_block_size)
-        ) * self.dcp_size
+        self.hash_block_size = resolve_request_hash_block_size(vllm_config, kv_cache_config, self.grouped_block_size[0])
         for group_block_size in self.grouped_block_size:
             assert group_block_size % self.hash_block_size == 0, "block_size must be divisible by hash_block_size"
         self._block_size = self.grouped_block_size[0]
@@ -153,6 +150,14 @@ class KVPoolScheduler:
         # {event_id, completed_woke_count}
         self.sending_events: dict[int, int] = {}
         self._expected_worker_count = vllm_config.parallel_config.world_size
+
+        lookup_hash_mode = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+            "lookup_hash_mode", LookupHashMode.FULL.value
+        )
+        try:
+            self.lookup_hash_mode = LookupHashMode(lookup_hash_mode)
+        except ValueError as e:
+            raise ValueError(f"lookup_hash_mode must be one of: full, suffix; got {lookup_hash_mode!r}") from e
 
         use_mla = getattr(vllm_config.model_config, "use_mla", False)
         tp_mismatch_info = infer_tp_mismatch_info(
@@ -637,11 +642,28 @@ class KVPoolScheduler:
                     return 0, False
                 if self.client is None:
                     self.client = LookupKeyClient(self.vllm_config)
+                lookup_block_hashes = request.block_hashes
+                omitted_hashes = 0
+                if self.lookup_hash_mode is LookupHashMode.SUFFIX:
+                    assert num_computed_tokens % self.hash_block_size == 0, (
+                        "num_computed_tokens must align to the request hash block size"
+                    )
+                    omitted_hashes = num_computed_tokens // self.hash_block_size
+                    lookup_block_hashes = request.block_hashes[omitted_hashes:]
+                logger.debug(
+                    "KV pool lookup request mode=%s token_len=%d hbm_hit_tokens=%d omitted_hashes=%d sent_hashes=%d",
+                    self.lookup_hash_mode.value,
+                    token_len,
+                    num_computed_tokens,
+                    omitted_hashes,
+                    len(lookup_block_hashes),
+                )
                 num_external_hit_tokens = self.client.lookup(
                     token_len,
-                    request.block_hashes,
+                    lookup_block_hashes,
                     self.kv_cache_group_ids,
                     hbm_hit_tokens=num_computed_tokens,
+                    lookup_hash_mode=self.lookup_hash_mode,
                 )
 
         if num_external_hit_tokens == 0:
@@ -1138,15 +1160,19 @@ class LookupKeyClient:
         block_hashes: list[BlockHash],
         kv_cache_group_ids: list[int] | None = None,
         hbm_hit_tokens: int = 0,
+        lookup_hash_mode: LookupHashMode = LookupHashMode.FULL,
     ) -> int:
+        """Query with either the complete hash list or its post-HBM suffix."""
         kv_cache_group_ids = kv_cache_group_ids or [0]
         hash_strs = [h.hex() for h in block_hashes]
         hash_frames = self.encoder.encode(hash_strs)
         kv_group_frames = self.encoder.encode(kv_cache_group_ids)
+        lookup_mode_frames = self.encoder.encode(lookup_hash_mode.value)
         all_frames = [
             token_len.to_bytes(4, byteorder="big"),
             *kv_group_frames,
             hbm_hit_tokens.to_bytes(4, byteorder="big"),
+            *lookup_mode_frames,
             *hash_frames,
         ]
         self.socket.send_multipart(all_frames, copy=False)
