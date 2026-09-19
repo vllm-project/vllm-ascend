@@ -68,6 +68,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_qwen3_5_0_8b.py: 400
   tests/e2e/pull_request/one_card/test_qwen3_8b_w8a8.py: 400
   tests/e2e/pull_request/one_card/test_qwen3_embedding_0_6b.py: 210
+  tests/e2e/pull_request/one_card/test_tokenizer_cache.py: 180
   tests/e2e/pull_request/one_card/rlhf/state_transitions/test_pause_resume.py: 250
   tests/e2e/pull_request/one_card/rlhf/state_transitions/test_sleep_wake.py: 740
   tests/e2e/pull_request/one_card/test_sampler.py: 190
