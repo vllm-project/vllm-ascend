@@ -2,6 +2,7 @@ import torch
 from torch.library import Library
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.utils import is_310p
 
 # This file provides a template and registration utilities for writing "meta" implementations
 # of custom operators in Python for the vllm_ascend project.
@@ -75,3 +76,24 @@ def sgmv_expand_meta(
 if get_current_hardware_profile().supports(HardwareCapability.BGMV_SGMV_META_REGISTRATION):
     register_meta_if_necessary("_C_ascend", "bgmv_expand", bgmv_expand_meta)
     register_meta_if_necessary("_C_ascend", "sgmv_expand", sgmv_expand_meta)
+
+
+def quant_batch_matmul_v3_x_meta(
+    x1: torch.Tensor,
+    x2: torch.Tensor,
+    scale: torch.Tensor,
+    offset: torch.Tensor | None = None,
+    pertoken_scale: torch.Tensor | None = None,
+    bias: torch.Tensor | None = None,
+    transpose_x1: bool = False,
+    transpose_x2: bool = False,
+    group_size: int = 0,
+) -> torch.Tensor:
+    m = x1.size(-1) if transpose_x1 else x1.size(-2)
+    n = x2.size(-2) if transpose_x2 else x2.size(-1)
+    return torch.empty(list(x1.shape[:-2]) + [m, n], dtype=torch.float16, device=x1.device)
+
+
+if is_310p():
+    # The schema is only registered in the 310P TORCH_LIBRARY block.
+    register_meta_if_necessary("_C_ascend", "quant_batch_matmul_v3_x", quant_batch_matmul_v3_x_meta)
