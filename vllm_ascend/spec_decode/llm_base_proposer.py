@@ -695,6 +695,35 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     def _build_multi_group_graph_capture_metadata(self, common_attn_metadata, draft_index):
         return None
 
+    def _common_attn_metadata_for_draft_group(
+        self,
+        common_attn_metadata,
+        attn_group,
+        num_input_tokens,
+    ):
+        """Return the common metadata view consumed by one draft group."""
+        return common_attn_metadata
+
+    def _build_cache_only_group_next_step_attn_metadata(
+        self,
+        common_attn_metadata,
+        draft_index,
+        num_input_tokens,
+        primary_group,
+        primary_metadata,
+        cache_only_groups,
+    ):
+        """Build metadata for cache-only groups without advancing MTP state."""
+        per_layer_attn_metadata = {layer_name: primary_metadata for layer_name in primary_group.layer_names}
+        for attn_group in cache_only_groups:
+            attn_metadata = attn_group.get_metadata_builder().build_for_drafting(
+                common_attn_metadata,
+                draft_index,
+            )
+            for layer_name in attn_group.layer_names:
+                per_layer_attn_metadata[layer_name] = attn_metadata
+        return per_layer_attn_metadata
+
     def _get_attn_metadata_layer_names(self, attn_group):
         return self.attn_layer_names
 
@@ -1200,18 +1229,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         **draft_cp_kwargs,
                         attn_group=primary_group,
                     )
-                    for layer_name in primary_group.layer_names:
-                        per_layer_attn_metadata[layer_name] = primary_metadata
-                    for attn_group in cache_only_groups:
-                        builder = attn_group.get_metadata_builder()
-                        # Build cache-only metadata from the updated common
-                        # view without advancing the draft-step state again.
-                        attn_metadata = builder.build_for_drafting(
-                            common_attn_metadata,
-                            draft_index,
-                        )
-                        for layer_name in attn_group.layer_names:
-                            per_layer_attn_metadata[layer_name] = attn_metadata
+                    per_layer_attn_metadata = self._build_cache_only_group_next_step_attn_metadata(
+                        common_attn_metadata,
+                        draft_index,
+                        num_input_tokens,
+                        primary_group,
+                        primary_metadata,
+                        cache_only_groups,
+                    )
                 else:
                     for attn_group in self.draft_attn_groups:
                         common_attn_metadata, attn_metadata = self.attn_update_stack_num_spec_norm(
@@ -2109,8 +2134,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 draft_index=draft_index,
                 seq_lens_cpu=ori_seq_len_cpu,
             )
-        attn_metadata = attn_metadata_builder.build_for_drafting(
+        group_common_attn_metadata = self._common_attn_metadata_for_draft_group(
             common_attn_metadata,
+            attn_group,
+            input_batch_size,
+        )
+        attn_metadata = attn_metadata_builder.build_for_drafting(
+            group_common_attn_metadata,
             draft_index,
             **extra_attn_metadata_args,
         )

@@ -170,6 +170,9 @@ from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
 )
 from vllm_ascend.spec_decode.gemma4_proposer import AscendGemma4Proposer
 from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
+from vllm_ascend.spec_decode.multi_kv_cache_group_proposer import (
+    AscendMultiKVCacheGroupMTPProposer,
+)
 from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
 from vllm_ascend.spec_decode.step3p5 import AscendStep3p5MTPProposer
@@ -679,6 +682,7 @@ class NPUModelRunner(GPUModelRunner):
             AscendNgramProposer
             | AscendNgramProposerNPU
             | AscendEagleProposer
+            | AscendMultiKVCacheGroupMTPProposer
             | AscendStep3p5MTPProposer
             | AscendDraftModelProposer
             | AscendDflashProposer
@@ -3705,8 +3709,12 @@ class NPUModelRunner(GPUModelRunner):
             if self.speculative_config and spec_decode_common_attn_metadata is None:
                 if isinstance(
                     self.drafter,
-                    AscendEagleProposer | AscendGemma4Proposer
-                    | AscendDraftModelProposer | AscendDflashProposer | AscendDSparkProposer,
+                    AscendEagleProposer
+                    | AscendMultiKVCacheGroupMTPProposer
+                    | AscendGemma4Proposer
+                    | AscendDraftModelProposer
+                    | AscendDflashProposer
+                    | AscendDSparkProposer,
                 ):
                     if self.drafter.attn_layer_names[0] in kv_cache_group.layer_names:
                         spec_decode_common_attn_metadata = cm
@@ -4388,6 +4396,7 @@ class NPUModelRunner(GPUModelRunner):
             assert isinstance(
                 self.drafter,
                 AscendEagleProposer
+                | AscendMultiKVCacheGroupMTPProposer
                 | AscendGemma4Proposer
                 | AscendDflashProposer
                 | AscendDSparkProposer
@@ -5880,7 +5889,11 @@ class NPUModelRunner(GPUModelRunner):
         ):
             assert isinstance(
                 self.drafter,
-                AscendEagleProposer | AscendDflashProposer | AscendExtractHiddenStatesProposer | AscendGemma4Proposer,
+                AscendEagleProposer
+                | AscendMultiKVCacheGroupMTPProposer
+                | AscendDflashProposer
+                | AscendExtractHiddenStatesProposer
+                | AscendGemma4Proposer,
             )
             self.drafter.initialize_cudagraph_keys(cudagraph_mode)
 
