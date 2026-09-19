@@ -218,7 +218,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         block_size = kv_cache_spec.block_size
         if isinstance(kv_cache_spec, MambaSpec) and self.enable_caching:
             return block_size
-        if self.dcp_world_size > 1:
+        if kv_cache_spec.dcp_sharded:
             block_size *= self.dcp_world_size
         return block_size
 
@@ -385,7 +385,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                     kv_cache_spec=spec,
                     drop_eagle_block=drop_eagle_block,
                     alignment_tokens=self._cache_hit_alignment_tokens,
-                    dcp_world_size=self.dcp_world_size,
+                    dcp_world_size=self.dcp_world_size if spec.dcp_sharded else 1,
                     pcp_world_size=1,
                 )
                 hit_blocks, _new_hit_length = hit_result

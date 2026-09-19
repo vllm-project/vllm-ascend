@@ -45,6 +45,7 @@ class AscendBlockTables(BlockTables):
         cp_rank: int = 0,
         cp_interleave: int = 1,
         slot_mapping_enabled: list[bool] | None = None,
+        dcp_sharded: list[bool] | None = None,
     ):
         if kernel_block_sizes is None:
             kernel_block_sizes = block_sizes
@@ -72,6 +73,7 @@ class AscendBlockTables(BlockTables):
                 cp_rank,
                 cp_interleave,
                 slot_mapping_enabled=slot_mapping_enabled,
+                dcp_sharded=dcp_sharded,
             )
         self._triton_block_size = 1024
         # kernel_block_sizes determine the number of block-table entries
@@ -137,5 +139,7 @@ class AscendBlockTables(BlockTables):
             BLOCK_TABLE_WINDOW_SIZE=self._block_table_window_size,
             slot_mapping_enabled=slot_mapping_enabled,
             HAS_SLOT_MAPPING_ENABLED=not vllm_version_is("0.28.0"),
+            dcp_sharded=getattr(self, "dcp_sharded", None),
+            HAS_DCP_SHARDED=not vllm_version_is("0.28.0"),
         )
         return slot_mappings[:, :num_tokens_padded]

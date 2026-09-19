@@ -28,6 +28,7 @@ def _parent_init(
     cp_rank,
     cp_interleave,
     slot_mapping_enabled=None,
+    dcp_sharded=None,
 ):
     self.block_sizes = block_sizes
     self.kernel_block_sizes = kernel_block_sizes
@@ -38,6 +39,7 @@ def _parent_init(
     self.cp_rank = cp_rank
     self.cp_interleave = cp_interleave
     self.slot_mapping_enabled = slot_mapping_enabled
+    self.dcp_sharded = dcp_sharded
     self.block_tables = [SimpleNamespace(gpu=torch.zeros(2, 8))]
     self.block_table_ptrs = MagicMock()
     self.block_table_strides = MagicMock()
@@ -100,6 +102,7 @@ def test_init_forwards_slot_mapping_enabled_on_newer_vllm():
         _parent_init(self, *args, **kwargs)
 
     enabled = [True, False]
+    sharded = [True, False]
     with (
         patch.object(BlockTables, "__init__", recording_init),
         patch(
@@ -109,8 +112,9 @@ def test_init_forwards_slot_mapping_enabled_on_newer_vllm():
         ),
         _patch_version_is(False),
     ):
-        AscendBlockTables([4], 2, 8, [4], torch.device("cpu"), slot_mapping_enabled=enabled)
+        AscendBlockTables([4, 4], 2, 8, [4, 8], torch.device("cpu"), slot_mapping_enabled=enabled, dcp_sharded=sharded)
     assert seen["kwargs"]["slot_mapping_enabled"] is enabled
+    assert seen["kwargs"]["dcp_sharded"] is sharded
 
 
 def test_init_omits_slot_mapping_enabled_on_v028():
@@ -145,6 +149,7 @@ def _make_uninitialized_tables():
     tables.block_sizes_tensor = MagicMock(name="sizes")
     tables.kernel_block_sizes_tensor = MagicMock(name="kernel_sizes")
     tables.slot_mapping_enabled = MagicMock(name="enabled")
+    tables.dcp_sharded = torch.tensor([True, False])
     tables.cp_rank = 1
     tables.cp_size = 2
     tables.cp_interleave = 4
@@ -204,6 +209,8 @@ def test_compute_slot_mappings_passes_enabled_mask_on_newer_vllm():
 
     kwargs = kernel.__getitem__.return_value.call_args.kwargs
     assert kwargs["HAS_SLOT_MAPPING_ENABLED"] is True
+    assert kwargs["HAS_DCP_SHARDED"] is True
+    assert kwargs["dcp_sharded"] is tables.dcp_sharded
     assert kwargs["slot_mapping_enabled"] is enabled
 
 

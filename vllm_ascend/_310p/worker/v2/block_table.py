@@ -30,6 +30,7 @@ class Ascend310PBlockTables(BlockTables):
         cp_rank: int = 0,
         cp_interleave: int = 1,
         slot_mapping_enabled: list[bool] | None = None,
+        dcp_sharded: list[bool] | None = None,
     ) -> None:
         if kernel_block_sizes is None:
             kernel_block_sizes = block_sizes

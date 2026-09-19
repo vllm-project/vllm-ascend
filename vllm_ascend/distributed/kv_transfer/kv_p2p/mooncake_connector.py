@@ -57,7 +57,10 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.request import RequestStatus
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
-from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec, AscendSlidingWindowMLASpec
+from vllm_ascend.core.kv_cache_interface import (
+    AscendSFAIndexerCacheSpec,
+    AscendSlidingWindowMLASpec,
+)
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     PD_QOS_DEFAULT,
@@ -2278,6 +2281,8 @@ class MooncakeConnectorWorker:
             "kv_cache_spec_type": type(kv_cache_spec).__name__,
             "kv_cache_spec": serialized_kv_cache_spec,
         }
+        serialized["dcp_sharded"] = kv_cache_spec.dcp_sharded
+        serialized["block_size"] = kv_cache_spec.block_size
         if kv_cache_group_id is not None:
             serialized["kv_cache_group_id"] = kv_cache_group_id
         if isinstance(kv_cache_spec, MambaSpec):
@@ -2907,7 +2912,7 @@ class MooncakeConnectorWorker:
         # (no remote handshake scale needed). Mamba groups are not block-sharded and skipped.
         group_kernel_params: dict[int, tuple[int, int, int]] = {}
         for group_idx, (group_spec, layer_indices) in self.kv_group2layeridx.items():
-            if group_spec["kv_cache_spec_type"] == "MambaSpec":
+            if group_spec["kv_cache_spec_type"] == "MambaSpec" or is_replicated_draft_group(group_spec):
                 continue
             local_scale = self._get_kernel_block_scale(layer_indices)
             kernel_size = self.block_size // local_scale
@@ -2980,6 +2985,11 @@ class MooncakeConnectorWorker:
                     layer_indices, meta, group_idx, group_spec
                 )
                 continue
+            if is_replicated_draft_group(group_spec):
+                local_block_ids[block_id_idx], remote_block_ids[block_id_idx] = self._get_replicated_draft_block_ids(
+                    meta, group_idx, group_spec, layer_indices
+                )
+                continue
             if spec_type == "AscendSFAIndexerCacheSpec":
                 # The full indexer cache is transferred separately.
                 continue
@@ -3038,7 +3048,6 @@ class MooncakeConnectorWorker:
         is_decode_only_dcp = self.dcp_size > 1 and meta.remote_dcp_size == 1
         if is_decode_only_dcp:
             return self._get_decode_only_dcp_metadata(req_id, meta, prefill_tp_size)
-
         if self.dcp_size == meta.remote_dcp_size == 1:
             if self._is_hma_required:
                 chosen_rank_list, _ = self._get_hybrid_remote_rank_group_pulls(req_id, prefill_tp_size)
@@ -3260,8 +3269,11 @@ class MooncakeConnectorWorker:
         if meta.remote_engine_id not in self.local_remote_block_port_mapping:
             self.local_remote_block_port_mapping[meta.remote_engine_id] = None
 
-        if self.local_remote_block_port_mapping[meta.remote_engine_id] is None:
+        has_replicated_draft = any(is_replicated_draft_group(spec) for spec, _ in self.kv_group2layeridx.values())
+        if self.local_remote_block_port_mapping[meta.remote_engine_id] is None or has_replicated_draft:
             local_remote_block_port_mappings = get_local_remote_block_port_mappings()
+            if has_replicated_draft:
+                self._add_replicated_draft_ports(req_id, meta, local_remote_block_port_mappings)
             self.local_remote_block_port_mapping[meta.remote_engine_id] = local_remote_block_port_mappings[
                 self.handshake_port
             ]
@@ -3283,7 +3295,7 @@ class MooncakeConnectorWorker:
             (
                 group_spec.get("kv_cache_group_id", group_idx)
                 for group_idx, (group_spec, _) in kv_group_items
-                if group_spec["kv_cache_spec_type"] != "MambaSpec"
+                if group_spec["kv_cache_spec_type"] != "MambaSpec" and not is_replicated_draft_group(group_spec)
             ),
             0,
         )
@@ -3390,6 +3402,9 @@ class MooncakeConnectorWorker:
                     group_local_block_ids[block_id_idx] = (
                         list(meta.local_block_ids[kv_cache_group_id]) if is_final_shard else []
                     )
+                    continue
+                if is_replicated_draft_group(group_spec):
+                    # Filled on its matching TP source after target shard routing.
                     continue
                 # Attention: expand to kernel blocks here. Remote is sliced from remote_first
                 # (skips this rank's prefix-cached blocks) then expanded; local kernels are
@@ -3727,6 +3742,133 @@ class MooncakeConnectorWorker:
             use_mla=self._group_use_mla_rank_routing(group_spec),
         )[self.tp_rank]
 
+    def _add_replicated_draft_ports(self, req_id: str, meta: ReqMeta, mappings: dict[int, list[list[int]]]) -> None:
+        """Include draft head sources before counting P-side completion signals."""
+        prefill_tp_size = meta.remote_ptp_size or self._prefill_tp_size
+        pcp_offset = self._get_selected_pcp_rank(req_id, meta.remote_pcp_size) * prefill_tp_size
+        for spec, layers in self.kv_group2layeridx.values():
+            if not is_replicated_draft_group(spec) or not layers:
+                continue
+            ranks_by_decode = self._get_remote_ranks_for_req(
+                req_id,
+                prefill_tp_size,
+                num_key_value_heads=self._get_attention_group_num_key_value_heads(spec),
+                tp_num_need_pulls=self._get_attention_group_num_need_pulls(spec, prefill_tp_size),
+                use_mla=False,
+            )
+            for decode_port, head_shards in mappings.items():
+                decode_rank = (decode_port - self.side_channel_port) % self.tp_size
+                ports = {port for shards in head_shards for port in shards}
+                for rank in ranks_by_decode[decode_rank]:
+                    port = meta.remote_port + pcp_offset + rank
+                    if port not in ports:
+                        # One entry per target CP shard preserves the mapping's
+                        # rectangular shape. Only one pull carries draft blocks;
+                        # every entry participates in the source's done count.
+                        head_shards.append([port] * len(head_shards[0]))
+                        ports.add(port)
+
+    def _get_replicated_draft_block_ids(
+        self, meta: ReqMeta, group_idx: int, group_spec: dict[str, Any], layer_indices: list[int]
+    ) -> tuple[list[int], list[int]]:
+        """Map global token offsets to the draft's replicated physical pages."""
+        group_id = self._get_kv_cache_group_id(group_idx, group_spec)
+        local_ids = meta.local_block_ids[group_id]
+        if not local_ids or meta.num_external_tokens <= 0:
+            return [], []
+        local_scale = self._get_kernel_block_scale(layer_indices)
+        local_page_tokens = group_spec["block_size"]
+        if local_page_tokens % local_scale:
+            raise ValueError("Replicated draft page size must be divisible by its physical block scale.")
+        kernel_size = local_page_tokens // local_scale
+        remote_page_tokens = meta.remote_block_size or self.block_size
+        if remote_page_tokens % kernel_size:
+            raise ValueError("Replicated draft P/D pages must use the same kernel block granularity.")
+        remote_scale = remote_page_tokens // kernel_size
+        if meta.local_full_block_ids:
+            first_block = len(meta.local_full_block_ids[group_id]) - len(local_ids)
+        elif meta.num_computed_tokens:
+            raise ValueError("Replicated draft prefix-cache transfer requires the full local block table.")
+        else:
+            first_block = 0
+        if first_block < 0:
+            raise ValueError("Replicated draft local block suffix exceeds the full block table.")
+        end_token = meta.num_computed_tokens + meta.num_external_tokens
+        remote_ids = meta.remote_block_ids[group_id]
+        local_kernel_ids, remote_kernel_ids = [], []
+        for offset, block_id in enumerate(local_ids):
+            page_start = (first_block + offset) * local_page_tokens
+            for kernel_offset in range(local_scale):
+                token_start = page_start + kernel_offset * kernel_size
+                if token_start + kernel_size <= meta.num_computed_tokens:
+                    continue
+                if token_start >= end_token:
+                    break
+                remote_page, remote_offset = divmod(token_start, remote_page_tokens)
+                if remote_page >= len(remote_ids):
+                    raise ValueError("Insufficient remote replicated draft blocks for PD transfer.")
+                local_kernel_ids.append(block_id * local_scale + kernel_offset)
+                remote_kernel_ids.append(remote_ids[remote_page] * remote_scale + remote_offset // kernel_size)
+        return local_kernel_ids, remote_kernel_ids
+
+    def _set_replicated_draft_transfer_metadata(
+        self,
+        req_id: str,
+        meta: ReqMeta,
+        remote_ports: list[list[int]],
+        local_blocks: list[BlockIds],
+        remote_blocks: list[BlockIds],
+        group_pulls: list[list[list[GroupPull]]],
+    ) -> None:
+        """Attach complete draft pages to the corresponding TP head source.
+
+        Source ports were included before computing completion counts. Reuse
+        one pull per head shard, retaining the target/state transfer descriptors.
+        """
+        prefill_tp_size = meta.remote_ptp_size or self._prefill_tp_size
+        for group_idx, (spec, layers) in self.kv_group2layeridx.items():
+            if not is_replicated_draft_group(spec) or not layers:
+                continue
+            local_ids, remote_ids = self._get_replicated_draft_block_ids(meta, group_idx, spec, layers)
+            for shard in group_pulls:
+                for pulls in shard:
+                    pulls[:] = [pull for pull in pulls if pull.group_id != group_idx]
+            if not local_ids:
+                continue
+            ranks = self._get_attention_group_remote_rank(req_id, spec, prefill_tp_size)
+            num_pulls = self._get_attention_group_num_need_pulls(spec, prefill_tp_size)
+            for rank_idx, rank in enumerate(ranks):
+                # PCP replicas have identical draft KV. Keep the replica already
+                # selected by the target path, retaining both PP and TP rank.
+                source = next(
+                    (
+                        (shard_idx, port_idx)
+                        for shard_idx, ports in enumerate(remote_ports)
+                        for port_idx, port in enumerate(ports)
+                        if (port - meta.remote_port) % (prefill_tp_size * self._prefill_pp_size) == rank
+                    ),
+                    None,
+                )
+                if source is None:
+                    raise ValueError(
+                        "Replicated draft TP source is absent from the Mooncake DCP transfer plan: "
+                        f"prefill_rank={rank}, decode_rank={self.tp_rank}."
+                    )
+                shard_idx, port_idx = source
+                local = list(local_blocks[shard_idx])
+                remote = list(remote_blocks[shard_idx])
+                local[group_idx], remote[group_idx] = local_ids, remote_ids
+                local_blocks[shard_idx], remote_blocks[shard_idx] = tuple(local), tuple(remote)
+                group_pulls[shard_idx][port_idx].append(
+                    GroupPull(
+                        group_id=group_idx,
+                        remote_tp_offset=rank_idx % num_pulls,
+                        num_group_pulls=num_pulls,
+                        prefill_pp_rank=rank_idx // num_pulls,
+                        is_group_transfer_end=rank_idx % num_pulls == num_pulls - 1,
+                    )
+                )
+
     def _get_sfa_replicate_k_block_ids(
         self,
         meta: ReqMeta,
@@ -3851,6 +3993,15 @@ class MooncakeConnectorWorker:
                 meta.remote_port,
                 meta.remote_pcp_size,
                 meta.remote_dcp_size,
+            )
+
+            self._set_replicated_draft_transfer_metadata(
+                remote_req_id,
+                meta,
+                remote_handshake_port_list,
+                local_block_ids_list,
+                remote_block_ids_list,
+                group_pulls_list,
             )
 
             for shard_idx, remote_ports in enumerate(remote_handshake_port_list):
@@ -4214,6 +4365,8 @@ def transfer_groups_need_independent_block_ids(
     """
     group_scales: dict[int, int] = {}
     for group_idx, (group_spec, layer_indices) in kv_group2layeridx.items():
+        if is_replicated_draft_group(group_spec):
+            return True
         if group_spec.get("kv_cache_spec_type") == "MambaSpec":
             continue
         kv_cache_group_id = group_spec.get("kv_cache_group_id", group_idx)
@@ -4276,3 +4429,8 @@ def get_prefill_pp_indices(
         start_layer = sum(partitions[:pp_rank])
         end_layer = start_layer + partitions[pp_rank]
         return (start_layer, end_layer)
+
+
+def is_replicated_draft_group(group_spec: dict[str, Any]) -> bool:
+    """Dense draft KV uses global token positions on every target DCP rank."""
+    return group_spec.get("kv_cache_spec_type") == "FullAttentionSpec" and not group_spec.get("dcp_sharded", True)
