@@ -134,19 +134,24 @@ def _run_case(
         )
     )
 
-    actual = torch.ops._C_ascend.npu_msa_index_score(
-        query,
-        key,
-        block_table.npu(),
-        start_loc.npu(),
-        atten_mask=atten_mask,
-        actual_seq_qlen=actual_seq_qlen.npu(),
-        actual_seq_klen=actual_seq_klen.npu(),
-        layout_key="BBND",
-        sparse_mode=3,
-        init_blocks=0,
-        local_blocks=0,
-    )
+    try:
+        actual = torch.ops._C_ascend.npu_msa_index_score(
+            query,
+            key,
+            block_table.npu(),
+            start_loc.npu(),
+            atten_mask=atten_mask,
+            actual_seq_qlen=actual_seq_qlen.npu(),
+            actual_seq_klen=actual_seq_klen.npu(),
+            layout_key="BBND",
+            sparse_mode=3,
+            init_blocks=0,
+            local_blocks=0,
+        )
+    except RuntimeError as exc:
+        if "aclnnMsaIndexScoreGetWorkspaceSize not in" in str(exc):
+            pytest.skip("CANN Ops MsaIndexScore is unavailable in this CANN image")
+        raise
     torch.npu.synchronize()
 
     actual_cpu = actual.float().cpu()
