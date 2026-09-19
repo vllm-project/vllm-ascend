@@ -58,6 +58,12 @@ from vllm.v1.request import RequestStatus
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec, AscendSlidingWindowMLASpec
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_topology import (
+    decode_worker_rank,
+    encode_worker_rank,
+    insert_pcp_rank,
+    remove_pcp_rank,
+)
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     PD_QOS_DEFAULT,
@@ -306,7 +312,13 @@ class KVCacheSendingThread(threading.Thread):
             # to have a unique port. This hack to keeps us moving. We will
             # switch when moving to etcd or where we have a single ZMQ socket in
             # the scheduler.
-            device_index = (self.pp_rank * self.pcp_size + self.pcp_rank) * self.tp_size + self.tp_rank
+            device_index = encode_worker_rank(
+                self.pp_rank,
+                self.pcp_rank,
+                self.tp_rank,
+                self.pcp_size,
+                self.tp_size,
+            )
             handshake_port = self.side_channel_port + device_index
             path = make_zmq_path("tcp", self.side_channel_host, handshake_port)
             logger.info(
@@ -378,7 +390,13 @@ class KVCacheSendingThread(threading.Thread):
                         if request_id not in self.port_send_num:
                             self.port_send_num[request_id] = 0
                         self.port_send_num[request_id] += 1
-                        device_index = (self.pp_rank * self.pcp_size + self.pcp_rank) * self.tp_size + self.tp_rank
+                        device_index = encode_worker_rank(
+                            self.pp_rank,
+                            self.pcp_rank,
+                            self.tp_rank,
+                            self.pcp_size,
+                            self.tp_size,
+                        )
                         handshake_port = self.side_channel_port + device_index
                         if self.port_send_num[request_id] >= remote_port_send_num[handshake_port]["num"]:
                             self.task_tracker.update_done_task_count(request_id)
@@ -2134,8 +2152,6 @@ class MooncakeConnectorWorker:
         self.side_channel_host = get_ip()
         self.pcp_size = get_pcp_group().world_size
         self.total_layers = vllm_config.model_config.get_total_num_hidden_layers()
-        # Assert that pp_size and pcp_size cannot both be greater than 1
-        assert not (self.pp_size > 1 and self.pcp_size > 1), "pp and pcp cannot open in same time"
         self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
         self.dcp_size = get_decode_context_model_parallel_world_size()
         self.dcp_rank = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
@@ -2181,7 +2197,13 @@ class MooncakeConnectorWorker:
             * vllm_config.parallel_config.pipeline_parallel_size
             * self.pcp_size
         )
-        device_index = (self.pp_rank * self.pcp_size + self.pcp_rank) * self.tp_size + self.tp_rank
+        device_index = encode_worker_rank(
+            self.pp_rank,
+            self.pcp_rank,
+            self.tp_rank,
+            self.pcp_size,
+            self.tp_size,
+        )
         self.handshake_port = self.side_channel_port + device_index
         self.sockets: dict = {}
         device_name = str(torch.npu.current_device()) if self.pp_size > 1 else None
@@ -2959,8 +2981,13 @@ class MooncakeConnectorWorker:
             chosen_rank_list, _ = self._get_hybrid_remote_rank_group_pulls(req_id, prefill_tp_size)
         else:
             chosen_rank_list = self._get_remote_rank(req_id, prefill_tp_size)
-        pcp_offset = self._get_selected_pcp_rank(req_id, meta.remote_pcp_size) * prefill_tp_size
-        remote_handshake_port_list = [[x + meta.remote_port + pcp_offset for x in chosen_rank_list]]
+        selected_pcp_rank = self._get_selected_pcp_rank(req_id, meta.remote_pcp_size)
+        remote_handshake_port_list = [
+            [
+                meta.remote_port + insert_pcp_rank(x, selected_pcp_rank, meta.remote_pcp_size, prefill_tp_size)
+                for x in chosen_rank_list
+            ]
+        ]
         use_transfer_group_block_ids = transfer_groups_need_independent_block_ids(
             self.kv_group2layeridx, self.block_size_scale
         )
@@ -3034,6 +3061,8 @@ class MooncakeConnectorWorker:
         remote blocks that still need to be pulled.
         """
         prefill_tp_size: int = meta.remote_ptp_size if meta.remote_ptp_size is not None else self._prefill_tp_size
+        if self._prefill_pp_size > 1 and meta.remote_pcp_size > 1 and (self.dcp_size > 1 or meta.remote_dcp_size > 1):
+            raise ValueError("MooncakeConnectorV1 does not support enabling prefill PP, PCP, and DCP together.")
 
         is_decode_only_dcp = self.dcp_size > 1 and meta.remote_dcp_size == 1
         if is_decode_only_dcp:
@@ -3045,10 +3074,14 @@ class MooncakeConnectorWorker:
             else:
                 chosen_rank_list = self._get_remote_rank(req_id, prefill_tp_size)
 
-            # Select the same TP rank in the chosen PCP replica.
-            # E.g. TP2/PP1, PCP rank 1, TP rank 1: offset = 2, port = base + 3.
-            pcp_offset = self._get_selected_pcp_rank(req_id, meta.remote_pcp_size) * prefill_tp_size
-            remote_handshake_port_list = [[x + meta.remote_port + pcp_offset for x in chosen_rank_list]]
+            # Select the same PCP replica independently within every PP stage.
+            selected_pcp_rank = self._get_selected_pcp_rank(req_id, meta.remote_pcp_size)
+            remote_handshake_port_list = [
+                [
+                    meta.remote_port + insert_pcp_rank(x, selected_pcp_rank, meta.remote_pcp_size, prefill_tp_size)
+                    for x in chosen_rank_list
+                ]
+            ]
             # Complete KV replicas use the same logical-to-kernel block mapping
             # as the non-CP path.
             use_transfer_group_block_ids = transfer_groups_need_independent_block_ids(
@@ -3181,7 +3214,10 @@ class MooncakeConnectorWorker:
         ) -> dict[int, RemotePortInfo]:
             remote_port_send_num: dict[int, RemotePortInfo] = {}
             remote_ports: set[int] = set(
-                range(meta.remote_port, meta.remote_port + prefill_tp_size * meta.remote_pcp_size)
+                range(
+                    meta.remote_port,
+                    meta.remote_port + self._prefill_pp_size * meta.remote_pcp_size * prefill_tp_size,
+                )
             )
             kv_port = self.vllm_config.kv_transfer_config.kv_port
             for key, remote_host_info in meta.remote_multi_nodes_meta_mapping.items():
@@ -3459,8 +3495,11 @@ class MooncakeConnectorWorker:
             shard_pulls = []
             for port_idx, port in enumerate(ports):
                 pulls = []
-                port_tp = (port - remote_base_port) % prefill_tp_size
-                pp_rank = (port - remote_base_port) // (prefill_tp_size * remote_pcp_size)
+                pp_rank, _, port_tp = decode_worker_rank(
+                    port - remote_base_port,
+                    remote_pcp_size,
+                    prefill_tp_size,
+                )
                 # Attention uses the leading ports selected for each DCP shard.
                 if port_idx < attn_num:
                     pulls += [
@@ -3525,13 +3564,13 @@ class MooncakeConnectorWorker:
         """
         if self._is_hma_required:
             if remote_dcp_size == 1:
-                # The table uses TP/PP ranks without PCP replica offsets.
-                # Undo the offset added by _get_kv_split_metadata, keeping the PP stage.
-                # E.g. TP2/PP1, PCP rank 1: port base + 3 maps back to rank 3 - 2 = 1.
+                # The table uses ranks flattened as (PP, TP), without PCP.
                 _, rank_group_pulls = self._get_hybrid_remote_rank_group_pulls(req_id, prefill_tp_size)
-                pcp_offset = self._get_selected_pcp_rank(req_id, remote_pcp_size) * prefill_tp_size
                 return [
-                    [rank_group_pulls[p - remote_base_port - pcp_offset] for p in ports]
+                    [
+                        rank_group_pulls[remove_pcp_rank(p - remote_base_port, remote_pcp_size, prefill_tp_size)]
+                        for p in ports
+                    ]
                     for ports in remote_handshake_port_list
                 ]
 
@@ -3560,8 +3599,11 @@ class MooncakeConnectorWorker:
             if len(remote_ports) == 1:
                 remote_tp_offsets = [shard_idx % tp_num_need_pulls]
                 prefill_pp_ranks = [
-                    ((remote_ports[0] - remote_base_port) % (prefill_tp_size * self._prefill_pp_size))
-                    // prefill_tp_size
+                    decode_worker_rank(
+                        remote_ports[0] - remote_base_port,
+                        remote_pcp_size,
+                        prefill_tp_size,
+                    )[0]
                 ]
             else:
                 assert len(remote_ports) % tp_num_need_pulls == 0, (
@@ -3569,7 +3611,11 @@ class MooncakeConnectorWorker:
                 )
                 remote_tp_offsets = [rank_idx % tp_num_need_pulls for rank_idx in range(len(remote_ports))]
                 prefill_pp_ranks = [
-                    ((remote_port - remote_base_port) % (prefill_tp_size * self._prefill_pp_size)) // prefill_tp_size
+                    decode_worker_rank(
+                        remote_port - remote_base_port,
+                        remote_pcp_size,
+                        prefill_tp_size,
+                    )[0]
                     for remote_port in remote_ports
                 ]
             group_pulls_list.append(
@@ -3912,7 +3958,8 @@ class MooncakeConnectorWorker:
                 # Unused PCP replicas report completion locally; only transfer
                 # sources wait for the D-side completion signal.
                 selected_pcp_rank = self._get_selected_pcp_rank(req_id, self.pcp_size)
-                if self.pcp_rank == selected_pcp_rank and self.tp_rank in self._prefill_get_remote_rank(req_id):
+                pp_tp_rank = self.pp_rank * self.tp_size + self.tp_rank
+                if self.pcp_rank == selected_pcp_rank and pp_tp_rank in self._prefill_get_remote_rank(req_id):
                     self.kv_send_thread.add_delayed_request(req_id, delay_start_time)
                 else:
                     self.kv_send_thread.add_not_transfer_request(req_id)

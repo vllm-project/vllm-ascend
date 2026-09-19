@@ -54,6 +54,10 @@ from vllm.v1.request import RequestStatus
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_topology import (
+    encode_worker_rank,
+    insert_pcp_rank,
+)
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import PD_QOS_DEFAULT, get_transfer_timeout_value, inject_qos
 from vllm_ascend.utils import enable_custom_op, get_kv_cache_tensor_layers, is_vl_model
@@ -259,7 +263,13 @@ class KVCacheSendingThread(threading.Thread):
             # to have a unique port. This hack to keeps us moving. We will
             # switch when moving to etcd or where we have a single ZMQ socket in
             # the scheduler.
-            device_index = (self.pp_rank * self.pcp_size + self.pcp_rank) * self.tp_size + self.tp_rank
+            device_index = encode_worker_rank(
+                self.pp_rank,
+                self.pcp_rank,
+                self.tp_rank,
+                self.pcp_size,
+                self.tp_size,
+            )
             handshake_port = self.side_channel_port + device_index
             path = make_zmq_path("tcp", self.side_channel_host, handshake_port)
             logger.info(
@@ -329,7 +339,13 @@ class KVCacheSendingThread(threading.Thread):
                         if request_id not in self.port_send_num:
                             self.port_send_num[request_id] = 0
                         self.port_send_num[request_id] += 1
-                        device_index = self.pp_rank * self.tp_size + self.tp_rank
+                        device_index = encode_worker_rank(
+                            self.pp_rank,
+                            self.pcp_rank,
+                            self.tp_rank,
+                            self.pcp_size,
+                            self.tp_size,
+                        )
                         handshake_port = self.side_channel_port + device_index
                         if self.port_send_num[request_id] >= remote_port_send_num[handshake_port]["num"]:
                             self.task_tracker.update_done_task_count(request_id)
@@ -1250,6 +1266,7 @@ class MooncakeConnectorScheduler:
             vllm_config.parallel_config.tensor_parallel_size
             * vllm_config.parallel_config.data_parallel_size
             * vllm_config.parallel_config.pipeline_parallel_size
+            * vllm_config.parallel_config.prefill_context_parallel_size
         )
 
         # Handshake base port
@@ -1524,9 +1541,9 @@ class MooncakeConnectorScheduler:
             return metadata_key
         if len(metadata_key) == 2:
             pp_rank, tp_rank = metadata_key
-            return pp_rank * self.tp_size + tp_rank
+            return encode_worker_rank(pp_rank, 0, tp_rank, 1, self.tp_size)
         pp_rank, pcp_rank, tp_rank = metadata_key
-        return (pp_rank * 1 + pcp_rank) * self.tp_size + tp_rank
+        return encode_worker_rank(pp_rank, pcp_rank, tp_rank, self.pcp_size, self.tp_size)
 
     def set_xfer_handshake_metadata_from_workers(
         self,
@@ -1583,11 +1600,10 @@ class MooncakeConnectorWorker:
         self.pcp_rank = get_pcp_group().rank_in_group
         self.dcp_size = vllm_config.parallel_config.decode_context_parallel_size
         assert self.dcp_size == 1, "Mooncake Hybrid Connector requires decode_context_parallel_size=1."
-        assert not (self.pp_size > 1 and self.pcp_size > 1), "pp and pcp cannot open in same time"
         self.kv_caches: dict[str, torch.Tensor] = {}
         self.side_channel_host = get_ip()
 
-        self.max_device_id = self.tp_size * self.dp_size * self.pp_size
+        self.max_device_id = self.tp_size * self.dp_size * self.pp_size * self.pcp_size
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         if self.kv_role == "kv_consumer" and self.pcp_size > 1:
             raise ValueError(
@@ -1641,7 +1657,13 @@ class MooncakeConnectorWorker:
             * vllm_config.parallel_config.pipeline_parallel_size
             * vllm_config.parallel_config.prefill_context_parallel_size
         )
-        device_index = (self.pp_rank * self.pcp_size + self.pcp_rank) * self.tp_size + self.tp_rank
+        device_index = encode_worker_rank(
+            self.pp_rank,
+            self.pcp_rank,
+            self.tp_rank,
+            self.pcp_size,
+            self.tp_size,
+        )
         self.handshake_port = self.side_channel_port + device_index
         self.sockets: dict = {}
         inject_qos(vllm_config.kv_transfer_config.get_from_extra_config("qos_priority", PD_QOS_DEFAULT))
@@ -1934,13 +1956,16 @@ class MooncakeConnectorWorker:
             prefill_tp_size = meta.remote_ptp_size if getattr(meta, "remote_ptp_size", None) else self._prefill_tp_size
             tp_num_need_pulls = self._get_tp_num_need_pulls(prefill_tp_size)
             remote_req_id = meta.remote_request_id
-            # PCP selects a complete replica; TP offsets and group block IDs stay unchanged.
-            pcp_offset = self._get_selected_pcp_rank(remote_req_id, meta.remote_pcp_size) * prefill_tp_size
+            # PCP selects one complete replica consistently across all PP stages.
+            selected_pcp_rank = self._get_selected_pcp_rank(remote_req_id, meta.remote_pcp_size)
 
             if self.use_mamba:
                 assert self.kv_recv_thread is not None
                 chosen_rank_list = self._get_remote_rank(remote_req_id, prefill_tp_size)
-                remote_handshake_port_list = [[x + meta.remote_port + pcp_offset] for x in chosen_rank_list]
+                remote_handshake_port_list = [
+                    [meta.remote_port + insert_pcp_rank(x, selected_pcp_rank, meta.remote_pcp_size, prefill_tp_size)]
+                    for x in chosen_rank_list
+                ]
                 # Iterate all remote peers like the non-mamba branch; the old
                 # code only pulled from the first peer, so with P-side PP>1
                 # the later stages never transferred their KV.
@@ -1973,9 +1998,12 @@ class MooncakeConnectorWorker:
                         tp_num_need_pulls=pulls_per_stage,
                         all_task_done=(i == num_pulls - 1),
                     )
-            else:  # TODO: support prefill context parallel and pipeline parallel open at the same time
+            else:
                 chosen_rank_list = self._get_remote_rank(remote_req_id, prefill_tp_size)
-                remote_handshake_port_list = [[x + meta.remote_port + pcp_offset] for x in chosen_rank_list]
+                remote_handshake_port_list = [
+                    [meta.remote_port + insert_pcp_rank(x, selected_pcp_rank, meta.remote_pcp_size, prefill_tp_size)]
+                    for x in chosen_rank_list
+                ]
                 for i in range(tp_num_need_pulls * self._prefill_pp_size):
                     assert self.kv_recv_thread is not None
                     remote_host, remote_engine_id = self._get_remote_host_info_by_port(
@@ -2008,7 +2036,8 @@ class MooncakeConnectorWorker:
             for req_id, delay_start_time in metadata.requests_to_send.items():
                 # Only selected sources wait for DONE; unused PCP replicas finish locally.
                 selected_pcp_rank = self._get_selected_pcp_rank(req_id, self.pcp_size)
-                if self.pcp_rank == selected_pcp_rank and self.tp_rank in self._prefill_get_remote_rank(req_id):
+                pp_tp_rank = self.pp_rank * self.tp_size + self.tp_rank
+                if self.pcp_rank == selected_pcp_rank and pp_tp_rank in self._prefill_get_remote_rank(req_id):
                     self.kv_send_thread.add_delayed_request(req_id, delay_start_time)
                 else:
                     self.kv_send_thread.add_not_transfer_request(req_id)
