@@ -527,14 +527,6 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         num_input_tokens = common_attn_metadata.num_input_tokens
-        if (
-            self.speculative_config is not None
-            and self.speculative_config.method == "dspark"
-            and getattr(self.speculative_config, "enable_adaptive_verification", False)
-        ):
-            # TODO(lzt): Pass the adaptive verification token count explicitly
-            # instead of deriving its padded shape from positions. Need fix.
-            num_input_tokens = common_attn_metadata.positions.shape[0]
         block_table = common_attn_metadata.block_table_tensor[:num_reqs]
         pcp_slot_mapping = common_attn_metadata.slot_mapping
         slot_mapping = pcp_slot_mapping[:num_input_tokens]
