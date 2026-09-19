@@ -2283,14 +2283,56 @@ def _stub_moe_runner_init(monkeypatch, *, gate=None, shared_experts=None):
     )
 
 
-def test_runner_sets_precast_fp32_weight(monkeypatch):
-    """Init sets precast so load materializes weight_fp32."""
-    gate = SimpleNamespace(weight=torch.randn(8, 4, dtype=torch.float16))
+@pytest.mark.parametrize("precast_fp32_weight", [None, False, True])
+def test_runner_preserves_gate_precision_policy(monkeypatch, precast_fp32_weight):
+    """Only the model opts into FP32 routing, not the shared runner."""
+    gate = nn.Linear(4, 8, bias=False, dtype=torch.bfloat16)
+    if precast_fp32_weight is not None:
+        gate.precast_fp32_weight = precast_fp32_weight
     runner = _stub_moe_runner_init(monkeypatch, gate=gate)
 
     assert runner._gate is gate
-    assert gate.precast_fp32_weight is True
+    assert getattr(gate, "precast_fp32_weight", None) is precast_fp32_weight
     assert not hasattr(gate, "weight_fp32")
+
+
+@pytest.mark.parametrize("shared_experts", [False, True])
+def test_forward_impl_direct_linear_without_fp32_cast(monkeypatch, shared_experts):
+    hidden_states = torch.randn(2, 4, dtype=torch.bfloat16)
+    gate = nn.Linear(4, 3, bias=True, dtype=torch.bfloat16)
+    expected_logits = gate(hidden_states)
+    gate.forward = MagicMock(side_effect=AssertionError("unexpected native gate wrapper"))
+    runner = _stub_moe_runner_init(monkeypatch, gate=gate)
+    runner._sequence_parallel_context = MagicMock(return_value=nullcontext())
+    routed_out = torch.randn_like(hidden_states)
+    shared_out = torch.randn_like(hidden_states)
+    milestones = RoutedMoEMilestones()
+    runner.routed_experts.forward_impl = MagicMock(
+        return_value=(routed_out, milestones) if shared_experts else routed_out,
+    )
+    if shared_experts:
+        runner.ascend_shared_experts = SimpleNamespace(
+            prepare_input_before_routed=MagicMock(return_value=PreparedSharedExpertInput(hidden_states)),
+            forward=MagicMock(return_value=shared_out),
+        )
+        monkeypatch.setattr(fused_moe_module.torch.npu, "current_stream", MagicMock())
+
+    # Returning BF16 logits alone would miss an unused activation Cast.
+    monkeypatch.setattr(torch.Tensor, "float", MagicMock(side_effect=AssertionError("unexpected FP32 activation Cast")))
+    result = runner._forward_impl(hidden_states, hidden_states, shared_experts_input=None)
+
+    gate.forward.assert_not_called()
+    runner.routed_experts.forward_impl.assert_called_once_with(
+        hidden_states=hidden_states,
+        router_logits=expected_logits,
+        input_ids=None,
+    )
+    assert expected_logits.dtype == torch.bfloat16
+    if shared_experts:
+        assert result[0] is shared_out
+        assert result[1] is routed_out
+    else:
+        assert result is routed_out
 
 
 def test_runner_skips_precast_when_weight_fp32_already_exists(monkeypatch):
@@ -2307,7 +2349,7 @@ def test_runner_skips_precast_without_internal_router(monkeypatch):
 
 
 def test_forward_impl_uses_gate_weight_fp32(monkeypatch):
-    """Hot path only reads gate.weight_fp32; judgment lives in __init__."""
+    """An explicitly prepared FP32 gate keeps its cached weight in the hot path."""
     runner = AscendMoERunner.__new__(AscendMoERunner)
     nn.Module.__init__(runner)
     hidden_states = torch.randn(2, 4, dtype=torch.float16)
