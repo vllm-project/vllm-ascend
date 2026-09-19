@@ -22,6 +22,8 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     get_kv_cache_compression_ratio,
     get_storage_block_size,
+    is_circular_kv_cache_spec,
+    is_deepseek_v41_cache,
     is_prefix_cacheable,
     register_ascend_kv_cache_specs,
 )
@@ -68,6 +70,10 @@ def test_tail_uses_one_full_precision_page(capacity):
     assert not spec.prefix_cacheable
     assert not is_prefix_cacheable(spec)
     assert spec.is_circular
+    assert is_circular_kv_cache_spec(spec)
+    assert not is_deepseek_v41_cache((spec,))
+    with patch("vllm_ascend.core.kv_cache_interface.upstream_kv_cache_interface.CircularBufferSpec", None, create=True):
+        assert is_circular_kv_cache_spec(spec)
     context_parallel_config = SimpleNamespace(
         model_config=SimpleNamespace(max_model_len=1024),
         parallel_config=SimpleNamespace(

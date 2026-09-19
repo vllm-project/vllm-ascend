@@ -79,6 +79,10 @@ _HIDDEN_STATE_DRAFTER_TYPES = (
     Eagle3DeepseekV2ForCausalLM,
     DSparkDeepseekV4ForCausalLM,
 )
+if not vllm_version_is("0.28.0"):
+    from vllm_ascend.models.deepseek_v41.dspark import DSparkDeepseekV41ForCausalLM
+
+    _HIDDEN_STATE_DRAFTER_TYPES += (DSparkDeepseekV41ForCausalLM,)
 
 
 def greedy_sample(logits: torch.Tensor) -> torch.Tensor:
