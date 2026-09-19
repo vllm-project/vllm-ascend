@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
 
@@ -21,7 +22,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, vllm_version_is
 
 
 def get_kv_cache_compression_ratio(kv_cache_spec: KVCacheSpec) -> int:
@@ -89,6 +90,103 @@ def requires_padded_page_layout(kv_cache_specs: Iterable[KVCacheSpec]) -> bool:
     if not any(getattr(spec, "page_size_padded", None) is not None for spec in state_specs):
         return False
     return any(getattr(spec, "indexes_kv_by_block_stride", False) for spec in specs)
+
+
+# ---------------------------------------------------------------------------
+# Token-concatenated (parent) layout for unquantized SFA main caches.
+#
+# The supported parent is ND (blocks, tokens, 1, NoPE + RoPE), FP16/BF16.
+# ---------------------------------------------------------------------------
+
+
+def split_sfa_kv_parent(
+    raw: torch.Tensor,
+    *,
+    dtype: torch.dtype,
+    shape: tuple[int, int, int, int],
+    nope_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Split an exact logical raw region; never copy or include padding.
+
+    ``shape`` must already incorporate the validated manager/kernel block
+    conversion. A larger underlying allocation and aligned nonzero offset are
+    allowed, but raw itself must contain exactly the dense parent's bytes.
+    """
+    if raw.layout != torch.strided or raw.dtype != torch.int8 or raw.ndim != 1 or raw.stride() != (1,):
+        raise ValueError("SFA raw must be a contiguous flat int8 tensor")
+    if dtype not in (torch.float16, torch.bfloat16):
+        raise ValueError("SFA token-concat requires unquantized FP16 or BF16")
+    if (
+        len(shape) != 4
+        or any(not isinstance(d, int) or isinstance(d, bool) or d <= 0 for d in shape)
+        or shape[2] != 1
+        or not isinstance(nope_dim, int)
+        or isinstance(nope_dim, bool)
+        or not 0 < nope_dim < shape[3]
+    ):
+        raise ValueError("Unsupported SFA head geometry")
+    dtype_bytes = torch.empty((), dtype=dtype).element_size()
+    if raw.storage_offset() % dtype_bytes:
+        raise ValueError("SFA raw storage offset must be aligned to the cache dtype")
+    if raw.numel() != math.prod(shape) * dtype_bytes:
+        raise ValueError("SFA raw bytes must match the dense parent shape exactly; padded layouts are unsupported")
+    parent = raw.view(dtype).view(shape)
+    return parent[..., :nope_dim], parent[..., nope_dim:]
+
+
+def get_sfa_kv_parent(nope: torch.Tensor, rope: torch.Tensor) -> torch.Tensor:
+    """Validate component views and reconstruct their dense parent without copy.
+
+    Independent legacy caches and padded/interleaved pages are rejected. The
+    returned tensor retains storage ownership. Bounds are checked against the
+    storage; original raw-slice boundaries cannot be inferred from arbitrary
+    views, so allocation callers must use ``split_sfa_kv_parent`` to validate
+    their exact logical raw region first.
+    """
+    if nope.layout != torch.strided or rope.layout != torch.strided:
+        raise ValueError("SFA components must use strided ND storage")
+    if nope.device != rope.device or nope.dtype != rope.dtype:
+        raise ValueError("SFA components must have the same device and dtype")
+    if nope.dtype not in (torch.float16, torch.bfloat16):
+        raise ValueError("SFA token-concat requires unquantized FP16 or BF16")
+    if (
+        nope.ndim != 4
+        or rope.ndim != 4
+        or nope.shape[:-1] != rope.shape[:-1]
+        or nope.shape[2] != 1
+        or any(d <= 0 for d in (*nope.shape, rope.shape[-1]))
+    ):
+        raise ValueError("Unsupported SFA component geometry")
+    if nope.device.type == "meta":
+        raise ValueError("SFA parent reconstruction requires physical storage")
+    if nope.untyped_storage().data_ptr() != rope.untyped_storage().data_ptr():
+        raise ValueError("SFA components must share one storage")
+    width = nope.shape[-1] + rope.shape[-1]
+    shape = (*nope.shape[:-1], width)
+    strides = (shape[1] * width, width, width, 1)
+    if nope.stride() != strides or rope.stride() != strides:
+        raise ValueError("SFA components must have dense token-concat parent strides; padding is unsupported")
+    if rope.storage_offset() != nope.storage_offset() + nope.shape[-1]:
+        raise ValueError("SFA RoPE offset must immediately follow NoPE within each token")
+    end_bytes = (nope.storage_offset() + math.prod(shape)) * nope.element_size()
+    if nope.storage_offset() < 0 or end_bytes > min(nope.untyped_storage().nbytes(), rope.untyped_storage().nbytes()):
+        raise ValueError("SFA parent exceeds the shared storage bounds")
+    return torch.as_strided(nope, shape, strides, storage_offset=nope.storage_offset())
+
+
+def should_use_sfa_kv_parent_layout(vllm_config: VllmConfig) -> bool:
+    """Decide whether unquantized SFA main KV may use the token-concatenated
+    parent layout in this process, from the two environment facts it depends
+    on: the configured KV transfer route must understand the layout (today:
+    no KV transfer configured -- the native SFA PD connector's parent-page
+    protocol is being developed on a separate branch), and the current device
+    must have token-strided cache operators (adapted on Ascend 950 / A5 only).
+
+    Callers combine this with their runner-specific conditions (spec, backend,
+    runner modes) before enabling the parent layout. When A3 adaptation or the
+    deferred connector work lands, relax the corresponding check here.
+    """
+    return vllm_config.kv_transfer_config is None and get_ascend_device_type() == AscendDeviceType.A5
 
 
 @dataclass(frozen=True, kw_only=True)

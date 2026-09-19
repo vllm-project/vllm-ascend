@@ -193,6 +193,7 @@ from vllm_ascend.spec_decode.utils import (
     update_num_computed_tokens_for_batch_change,
 )
 from vllm_ascend.utils import (
+    AscendDeviceType,
     calc_split_factor,
     check_gdn_layer,
     embedding_tp_enable,
@@ -200,6 +201,7 @@ from vllm_ascend.utils import (
     enable_sfa,
     enable_sfa_dcp_replicated_indexer,
     enable_sp,
+    get_ascend_device_type,
     get_c_env,
     get_kv_cache_tensor_layers,
     global_stream,
@@ -263,6 +265,8 @@ from vllm_ascend.core.kv_cache_interface import (
     get_kv_cache_compression_ratio,
     get_storage_block_size,
     requires_padded_page_layout,
+    should_use_sfa_kv_parent_layout,
+    split_sfa_kv_parent,
 )
 from vllm_ascend.core.profiling_chunk_predictor import (
     _finish_profiling_chunk_timing,
@@ -4437,6 +4441,32 @@ class NPUModelRunner(GPUModelRunner):
             or getattr(kv_cache_spec, "indexes_kv_by_block_stride", False)
         )
 
+    # Declared here because _uses_sfa_kv_parent below reads it before the
+    # assignment inside _allocate_kv_cache_tensors, which mypy cannot infer.
+    hybrid_with_attn_and_mamba: bool
+
+    def _uses_sfa_kv_parent(self, layer_name: str, spec: AttentionSpec) -> bool:
+        # Model-level use_sparse also covers heterogeneous GQA draft layers.
+        # KVPP (ascend_config.kvpp_config.size > 1) short-circuits allocation
+        # above and is mutually exclusive with this layout.
+        if (
+            not self.use_sparse
+            or not should_use_sfa_kv_parent_layout(self.vllm_config)
+            or self.use_compress
+            or self._uses_page_strided_kv_layout(spec)
+            or self.hybrid_with_attn_and_mamba
+            or self.sparse_kv_offload_enabled
+            or not isinstance(spec, AscendMLAAttentionSpec)
+            or kv_cache_spec_uses_sparse_sfa_c8(spec)
+            or "cache_only_layers" in layer_name
+            or is_hidden_state_cache_spec(spec)
+            or getattr(spec, "model_version", None) == "deepseek_v4"
+        ):
+            return False
+        layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase, [layer_name])
+        layer = layers.get(layer_name)
+        return layer is not None and layer.get_attn_backend().get_name() == "ASCEND_SFA"
+
     def _get_attention_kv_cache_dims(self, layer_name: str, kv_cache_spec: AttentionSpec) -> tuple[int, int]:
         if isinstance(kv_cache_spec, AscendMLAAttentionSpec):
             attn_layers = get_layers_from_vllm_config(
@@ -4559,6 +4589,11 @@ class NPUModelRunner(GPUModelRunner):
         if self.ascend_config.kvpp_config.size > 1:
             self.hybrid_with_attn_and_mamba = False
             return allocate_kvpp_cache(self.vllm_config, kv_cache_config, self.device)
+        if self.use_sparse and get_ascend_device_type() != AscendDeviceType.A5:
+            logger.info(
+                "SFA parent KV layout disabled: token-strided cache operators are only "
+                "adapted on A5; falling back to separate NoPE/RoPE buffers."
+            )
         # init kv cache tensors
         kv_cache_raw_tensors: dict[str, torch.Tensor | tuple[torch.Tensor, ...]] = {}
         # prefill disaggregation need the addr of cache tensor be aligned with 2M
@@ -4898,6 +4933,21 @@ class NPUModelRunner(GPUModelRunner):
                         if use_legacy_shared_by_layout
                         else kv_cache_config.num_blocks * current_kv_cache_spec.page_size_bytes
                     )
+                    if self._uses_sfa_kv_parent(layer_name, current_kv_cache_spec):
+                        # Main descriptors cover multiple independent layer regions.
+                        # Only legacy shared_by means physical aliasing.
+                        parent_raw = self._allocate_int8_cache_tensor(kv_cache_tensor_size, alignment)
+                        kv_cache_raw_tensors[layer_name] = parent_raw
+                        if use_legacy_shared_by_layout:
+                            for shared_name in shared_layers:
+                                shared_spec = layer_kv_cache_spec[shared_name]
+                                if (
+                                    not self._uses_sfa_kv_parent(shared_name, shared_spec)
+                                    or shared_spec != current_kv_cache_spec
+                                ):
+                                    raise ValueError("Legacy SFA aliases require matching per-layer specs and backends")
+                                kv_cache_raw_tensors[shared_name] = parent_raw
+                        continue
                     if current_sparse_sfa_c8:
                         k_tensor_size = kv_cache_tensor_size
                         v_tensor_size = None
@@ -4971,7 +5021,15 @@ class NPUModelRunner(GPUModelRunner):
                         # main: every layer owns its own region; give each layer a
                         # private (k, v) so block indices don't collide across layers.
                         for layer_name_inner in shared_layers:
+                            if layer_name_inner in kv_cache_raw_tensors:
+                                continue
                             if "attn" in layer_name_inner and "linear_attn" not in layer_name_inner:
+                                inner_spec = layer_kv_cache_spec[layer_name_inner]
+                                if self._uses_sfa_kv_parent(layer_name_inner, inner_spec):
+                                    kv_cache_raw_tensors[layer_name_inner] = self._allocate_int8_cache_tensor(
+                                        kv_cache_config.num_blocks * inner_spec.page_size_bytes, alignment,
+                                    )
+                                    continue
                                 k_tensor = self._allocate_int8_cache_tensor(
                                     k_tensor_size,
                                     alignment,
@@ -5192,6 +5250,45 @@ class NPUModelRunner(GPUModelRunner):
                             self.sparse_kv_offload_config,
                         )
                         kv_caches[layer_name] = reshaped_tensors
+                        continue
+                    if self._uses_sfa_kv_parent(layer_name, current_kv_cache_spec):
+                        raw = kv_cache_raw_tensors[layer_name]
+                        if not isinstance(raw, torch.Tensor):
+                            raise ValueError(f"SFA main cache for {layer_name} requires one parent raw tensor")
+                        storage_block_size = get_storage_block_size(current_kv_cache_spec)
+                        kernel_block_size = storage_block_size
+                        if self.use_hybrid_blocks and hasattr(attn_backend, "get_supported_kernel_block_sizes"):
+                            kernel_block_size = attn_backend.get_supported_kernel_block_sizes()[0]
+                        if (
+                            not isinstance(kernel_block_size, int)
+                            or kernel_block_size <= 0
+                            or storage_block_size % kernel_block_size
+                        ):
+                            raise ValueError(f"SFA storage block cannot be divided into kernel blocks for {layer_name}")
+                        page_bytes = current_kv_cache_spec.page_size_bytes
+                        if raw.numel() % page_bytes or raw.numel() // page_bytes < kv_cache_config.num_blocks:
+                            raise ValueError(f"SFA main cache has invalid page capacity for {layer_name}")
+                        num_blocks = raw.numel() // page_bytes
+                        k_dim, v_dim = self._get_attention_kv_cache_dims(layer_name, current_kv_cache_spec)
+                        dense_page_bytes = (
+                            storage_block_size * (k_dim + v_dim) * get_dtype_size(current_kv_cache_spec.dtype)
+                        )
+                        if current_kv_cache_spec.num_kv_heads != 1 or page_bytes != dense_page_bytes:
+                            raise ValueError(
+                                f"SFA parent requires heads=1 and dense pages; padding is unsupported for {layer_name}"
+                            )
+                        shape = attn_backend.get_kv_cache_shape(
+                            num_blocks * (storage_block_size // kernel_block_size), kernel_block_size,
+                            current_kv_cache_spec.num_kv_heads, current_kv_cache_spec.head_size,
+                        )
+                        expected_shape = (
+                            num_blocks * (storage_block_size // kernel_block_size), kernel_block_size, 1, k_dim + v_dim,
+                        )
+                        if tuple(shape) != expected_shape:
+                            raise ValueError(f"Unsupported SFA backend parent shape for {layer_name}: {shape}")
+                        kv_caches[layer_name] = split_sfa_kv_parent(
+                            raw, dtype=current_kv_cache_spec.dtype, shape=tuple(shape), nope_dim=k_dim,
+                        )
                         continue
                     raw_kv_is_combined = False
                     if self.use_sparse and "cache_only_layers" not in layer_name:
