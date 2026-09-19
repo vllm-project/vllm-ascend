@@ -39,8 +39,8 @@ class AscendFlashAttentionMetadata(AscendMetadata):
 
 
 class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAttentionMetadata]):
-    # A single TND invocation handles mixed query lengths, including verification
-    # of multiple speculative tokens. No decode-first batch reordering is needed.
+    # Per-request query offsets let one paged call handle mixed prefill/decode
+    # and multi-token verification in the existing request order.
     reorder_batch_threshold = None
 
     def __init__(

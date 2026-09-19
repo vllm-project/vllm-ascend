@@ -450,8 +450,6 @@ class AscendConfig:
     enable_prefill_mc2: bool = False
     multistream_overlap_shared_expert: bool = False
     enable_kv_nz: bool = False
-    # Opt in to flash-attention-npu v3 for dense decoder attention (FP16/BF16 KV).
-    enable_fa3: bool = False
     enable_mc2_hierarchy_comm: bool = False  # deprecated, will be replaced by mc2_comm_alg = "hierarchy"
     enable_reduce_sample: bool = False
     enable_dsa_cp: bool = False
@@ -550,11 +548,6 @@ class AscendConfig:
     # the max_num_batched_tokens that sequence-parallel writeback corrected).
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
-        if self.enable_fa3 and (
-            vc.parallel_config.prefill_context_parallel_size != 1
-            or vc.parallel_config.decode_context_parallel_size != 1
-        ):
-            raise ValueError("FA3 context parallelism is not implemented.")
         if (
             self.enable_force_eplb
             and self.eplb_config.dynamic_eplb

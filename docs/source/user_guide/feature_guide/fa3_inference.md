@@ -1,6 +1,6 @@
 # FA3 inference with device-side tiling
 
-The opt-in FA3 inference backend uses `flash_attn_with_kvcache` for both
+The Qwen3 FA3 inference backend uses `flash_attn_with_kvcache` for both
 prefill and decode, with automatic KV splitting (`num_splits=0`), from
 [flash-attention-npu](https://github.com/MinghuasLab/flash-attention-npu).
 It is separate from the [RL training-consistency backend](flash_attention.md).
@@ -25,14 +25,18 @@ Enable the backend through the Ascend platform's attention selector:
 
 ```bash
 vllm serve Qwen/Qwen3-8B \
-    --additional-config '{"enable_fa3": true}' \
     --compilation-config '{"cudagraph_mode": "FULL"}' \
     --enable-chunked-prefill \
     --enable-prefix-caching
 ```
 
-`enable_fa3` defaults to `false`. No new environment variable or model patch
-is required. With the option disabled, existing attention selection is preserved.
+For `Qwen3ForCausalLM` and `Qwen3MoeForCausalLM`, the platform automatically
+selects this backend when `flash_attn_npu_3` is installed and the attention
+configuration is supported. No additional user switch is required. If the
+package is absent, selection falls back to FIA. Other architectures, C8 or
+quantized KV cache, context parallelism, and the 310P compatibility platform
+retain their existing backends. Explicit RL training-consistency selection
+also retains its existing backend.
 
 ## Attention and graph execution
 
@@ -105,14 +109,3 @@ reject any call to its original FIA/PA branches, and count calls to the real FA3
 wrappers during eager execution and graph capture. Serving accuracy must
 additionally be evaluated with real model weights and the same dataset and
 generation settings used for the FIA baseline.
-
-Run the fixed-shape GQA microbenchmark on an otherwise idle NPU:
-
-```bash
-python benchmarks/benchmark_fa3.py --num-layers 4 --output fa3-benchmark.json
-```
-
-It checks FA3 against FIA before measuring eager FIA, eager FA3, and captured
-FA3. FA3 timings include one device-side tiling invocation per group of layers;
-graph timings also include copying the tiling result before replay. These are
-operator timings, not model throughput or a comparison against captured FIA.

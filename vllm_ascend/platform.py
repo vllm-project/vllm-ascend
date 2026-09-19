@@ -239,16 +239,6 @@ class NPUPlatform(Platform):
         key = (use_mla, use_sparse)
         backend_key = (*key, use_compress)
 
-        if not attn_selector_config.use_pcp and get_ascend_config().enable_fa3 is True:
-            if use_mla or use_sparse or use_compress or attn_selector_config.use_pcp:
-                raise ValueError("FA3 supports dense decoder attention without context parallelism.")
-            if get_current_hardware_profile().attention_backend_family is AttentionBackendFamily.COMPATIBILITY:
-                raise ValueError("FA3 is not supported on the compatibility attention platform.")
-            if util.find_spec("flash_attn_npu_3") is None:
-                raise ImportError("FA3 requires flash-attention-npu built with its v3 backend (flash_attn_npu_3).")
-            logger.info_once("Using Ascend FA3 attention with device-side tiling.")
-            return "vllm_ascend.attention.flash_attention_v3.AscendFlashAttentionBackend"
-
         if not attn_selector_config.use_pcp and _validate_fa3_backend(key, attn_selector_config):
             return "vllm_ascend.attention.fa3_v1.AscendFABackend"
 
@@ -282,6 +272,26 @@ class NPUPlatform(Platform):
             if pcp_backend is None:
                 raise NotImplementedError(f"Ascend MRV2 PCP does not support attention backend {backend_key}.")
             return pcp_backend
+
+        # vLLM config imports platforms during initialization; import lazily.
+        from vllm.config import get_current_vllm_config_or_none
+
+        vllm_config = get_current_vllm_config_or_none()
+        if (
+            backend_key == (False, False, False)
+            and vllm_config is not None
+            and vllm_config.model_config is not None
+            and any(
+                architecture in ("Qwen3ForCausalLM", "Qwen3MoeForCausalLM")
+                for architecture in (vllm_config.model_config.hf_config.architectures or [])
+            )
+            and vllm_config.parallel_config.prefill_context_parallel_size == 1
+            and vllm_config.parallel_config.decode_context_parallel_size == 1
+            and vllm_config.cache_config.cache_dtype in ("auto", "float16", "bfloat16")
+            and not getattr(vllm_config.quant_config, "enable_c8_quant", False)
+            and util.find_spec("flash_attn_npu_3") is not None
+        ):
+            return "vllm_ascend.attention.flash_attention_v3.AscendFlashAttentionBackend"
 
         return backend_map[backend_key]
 

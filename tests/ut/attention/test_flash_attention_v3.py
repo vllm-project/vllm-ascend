@@ -11,8 +11,8 @@ import torch
 with patch.dict(sys.modules, {"flash_attn_npu_3": MagicMock()}):
     from vllm_ascend.attention import flash_attention_v3 as fa3
 
-from vllm_ascend.ascend_config import AscendConfig
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.device.hardware_profile import AttentionBackendFamily
 from vllm_ascend.platform import NPUPlatform
 
 
@@ -209,49 +209,47 @@ def test_quantized_cache_rejected(c8, cache_dtype):
         fa3.AscendFlashAttentionImpl(4, 128, 0.1, 2, None, None, cache_dtype, None, "decoder", None)
 
 
-def test_platform_selects_opt_in_fa3():
-    selector = SimpleNamespace(use_mla=False, use_sparse=False, use_compress=False, use_pcp=False)
-    with (
-        patch("vllm_ascend.platform.get_ascend_config", return_value=SimpleNamespace(enable_fa3=True)),
-        patch("vllm_ascend.platform.get_current_hardware_profile"),
-        patch("vllm_ascend.platform.util.find_spec", return_value=object()),
-    ):
-        assert NPUPlatform.get_attn_backend_cls(None, selector) == (
-            "vllm_ascend.attention.flash_attention_v3.AscendFlashAttentionBackend"
-        )
-
-
-def test_platform_fa3_dependency_error():
-    selector = SimpleNamespace(use_mla=False, use_sparse=False, use_compress=False, use_pcp=False)
-    with (
-        patch("vllm_ascend.platform.get_ascend_config", return_value=SimpleNamespace(enable_fa3=True)),
-        patch("vllm_ascend.platform.get_current_hardware_profile"),
-        patch("vllm_ascend.platform.util.find_spec", return_value=None),
-        pytest.raises(ImportError, match="flash_attn_npu_3"),
-    ):
-        NPUPlatform.get_attn_backend_cls(None, selector)
-
-
-@pytest.mark.parametrize("unsupported", ["use_mla", "use_compress"])
-def test_platform_rejects_unsupported_fa3_layout(unsupported):
-    selector = SimpleNamespace(use_mla=False, use_sparse=False, use_compress=False, use_pcp=False)
-    setattr(selector, unsupported, True)
-    with (
-        patch("vllm_ascend.platform.get_ascend_config", return_value=SimpleNamespace(enable_fa3=True)),
-        pytest.raises(ValueError, match="dense decoder"),
-    ):
-        NPUPlatform.get_attn_backend_cls(None, selector)
-
-
-@pytest.mark.parametrize("pcp,dcp", [(2, 1), (1, 2)])
-def test_config_rejects_context_parallel_fa3(pcp, dcp):
-    config = object.__new__(AscendConfig)
-    config.enable_fa3 = True
-    vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp, decode_context_parallel_size=dcp)
+@pytest.mark.parametrize(
+    "architecture,installed,c8,cache_dtype,pcp,dcp,compatibility,rl,expected",
+    [
+        ("Qwen3ForCausalLM", True, False, "auto", 1, 1, False, False, "fa3"),
+        ("Qwen3MoeForCausalLM", True, False, "bfloat16", 1, 1, False, False, "fa3"),
+        ("Qwen3ForCausalLM", False, False, "auto", 1, 1, False, False, "fia"),
+        ("Qwen3MoeForCausalLM", False, False, "auto", 1, 1, False, False, "fia"),
+        ("LlamaForCausalLM", True, False, "auto", 1, 1, False, False, "fia"),
+        ("Qwen3ForCausalLM", True, True, "auto", 1, 1, False, False, "fia"),
+        ("Qwen3ForCausalLM", True, False, "int8", 1, 1, False, False, "fia"),
+        ("Qwen3ForCausalLM", True, False, "auto", 2, 1, False, False, "fia"),
+        ("Qwen3ForCausalLM", True, False, "auto", 1, 2, False, False, "fia"),
+        ("Qwen3ForCausalLM", True, False, "auto", 1, 1, True, False, "310p"),
+        ("Qwen3ForCausalLM", True, False, "auto", 1, 1, False, True, "rl"),
+    ],
+)
+def test_platform_selects_fa3_by_model(architecture, installed, c8, cache_dtype, pcp, dcp, compatibility, rl, expected):
+    selector = SimpleNamespace(use_mla=False, use_sparse=False, use_compress=False, use_pcp=pcp > 1)
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(architectures=[architecture])),
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp, decode_context_parallel_size=dcp),
+        cache_config=SimpleNamespace(cache_dtype=cache_dtype),
+        quant_config=SimpleNamespace(enable_c8_quant=c8),
     )
-    with pytest.raises(ValueError, match="FA3 context parallelism"):
-        config.derive_and_validate(vllm_config)
+    family = AttentionBackendFamily.COMPATIBILITY if compatibility else AttentionBackendFamily.STANDARD
+    backends = {
+        "fa3": "vllm_ascend.attention.flash_attention_v3.AscendFlashAttentionBackend",
+        "fia": "vllm_ascend.attention.attention_v1.AscendAttentionBackend",
+        "310p": "vllm_ascend._310p.attention.attention_v1.AscendAttentionBackend310",
+        "rl": "vllm_ascend.attention.fa3_v1.AscendFABackend",
+    }
+    with (
+        patch("vllm.config.get_current_vllm_config_or_none", return_value=config),
+        patch("vllm_ascend.platform._validate_fa3_backend", return_value=rl),
+        patch(
+            "vllm_ascend.platform.get_current_hardware_profile",
+            return_value=SimpleNamespace(attention_backend_family=family),
+        ),
+        patch("vllm_ascend.platform.util.find_spec", return_value=object() if installed else None),
+    ):
+        assert NPUPlatform.get_attn_backend_cls(None, selector) == backends[expected]
 
 
 def test_paged_tiling_shared_but_attention_computed_for_each_layer(builder, impl):
