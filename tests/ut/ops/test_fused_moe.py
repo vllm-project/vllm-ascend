@@ -2230,7 +2230,7 @@ def test_forward_impl_keeps_full_width_input_for_shared_experts(monkeypatch):
     assert result[1] is routed_out
 
 
-def _stub_moe_runner_init(monkeypatch, *, gate=None, shared_experts=None):
+def _stub_moe_runner_init(monkeypatch, *, gate=None, shared_experts=None, vllm_config=None):
     """Construct AscendMoERunner with a lightweight MoERunner.__init__ stub."""
     moe_config = SimpleNamespace(hidden_dim=4, ep_size=1)
     routed_experts = SimpleNamespace(
@@ -2267,6 +2267,9 @@ def _stub_moe_runner_init(monkeypatch, *, gate=None, shared_experts=None):
         runner._forward_entry = object()
 
     monkeypatch.setattr(fused_moe_module.MoERunner, "__init__", init_base_runner)
+    if vllm_config is None:
+        vllm_config = SimpleNamespace(model_config=None, speculative_config=None, quant_config=None)
+    monkeypatch.setattr(fused_moe_module, "get_current_vllm_config", lambda: vllm_config)
     monkeypatch.setattr(fused_moe_module, "AscendSharedExperts", MagicMock(return_value=SimpleNamespace()))
     monkeypatch.setattr(fused_moe_module, "get_tp_group", MagicMock(return_value=object()))
     monkeypatch.setattr(fused_moe_module, "get_dp_group", MagicMock(return_value=object()))
@@ -2304,6 +2307,66 @@ def test_runner_skips_precast_when_weight_fp32_already_exists(monkeypatch):
 def test_runner_skips_precast_without_internal_router(monkeypatch):
     runner = _stub_moe_runner_init(monkeypatch, gate=None)
     assert runner._gate is None
+
+
+@pytest.mark.parametrize(
+    "model_type,hidden_size,num_layers,num_experts,dtype,spec_method,quantized,explicit_fp32,expected_fp32",
+    [
+        ("qwen3_moe", 4096, 94, 128, torch.bfloat16, None, False, False, False),
+        ("qwen3_moe", 4096, 94, 128, torch.bfloat16, "dspark", False, False, True),
+        ("qwen3_moe", 4096, 94, 128, torch.bfloat16, "eagle3", False, False, True),
+        ("qwen3_moe", 4096, 94, 128, torch.bfloat16, "ngram", False, False, True),
+        ("qwen3_moe", 4096, 94, 128, torch.bfloat16, None, True, False, True),
+        ("qwen3_moe", 4096, 94, 128, torch.bfloat16, None, False, True, True),
+        ("qwen3_moe", 4096, 94, 128, torch.float16, None, False, False, True),
+        ("qwen3_moe", 2048, 48, 128, torch.bfloat16, None, False, False, True),
+        ("qwen3_5_moe", 4096, 94, 128, torch.bfloat16, None, False, False, True),
+        ("deepseek_v3", 4096, 94, 128, torch.bfloat16, None, False, False, True),
+    ],
+)
+def test_runner_qwen3_router_precision_policy(
+    monkeypatch,
+    model_type,
+    hidden_size,
+    num_layers,
+    num_experts,
+    dtype,
+    spec_method,
+    quantized,
+    explicit_fp32,
+    expected_fp32,
+):
+    gate = nn.Linear(4, 8, bias=False, dtype=dtype)
+    gate.precast_fp32_weight = explicit_fp32
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_text_config=SimpleNamespace(
+                model_type=model_type,
+                hidden_size=hidden_size,
+                num_hidden_layers=num_layers,
+                num_experts=num_experts,
+            )
+        ),
+        speculative_config=SimpleNamespace(method=spec_method) if spec_method else None,
+        quant_config=object() if quantized else None,
+    )
+    runner = _stub_moe_runner_init(monkeypatch, gate=gate, vllm_config=config)
+    assert runner.gate is gate
+    assert gate.precast_fp32_weight is expected_fp32
+
+
+def test_native_router_does_not_cast_hidden_states(monkeypatch):
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    nn.Module.__init__(runner)
+    hidden_states = torch.randn(2, 4, dtype=torch.bfloat16)
+    gate = nn.Linear(4, 3, bias=False, dtype=torch.bfloat16)
+    expected = gate(hidden_states)
+    gate.forward = MagicMock(return_value=(expected, None))
+    runner._gate = gate
+    runner.gate = gate
+    monkeypatch.setattr(torch.Tensor, "float", MagicMock(side_effect=AssertionError("unused FP32 cast")))
+    assert runner._compute_router_logits(hidden_states, hidden_states) is expected
+    gate.forward.assert_called_once_with(hidden_states)
 
 
 def test_forward_impl_uses_gate_weight_fp32(monkeypatch):
