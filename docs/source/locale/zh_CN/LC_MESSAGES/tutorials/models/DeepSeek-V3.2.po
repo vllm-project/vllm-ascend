@@ -36,11 +36,6 @@ msgid ""
 "node and multi-node deployment, accuracy and performance evaluation."
 msgstr "本文档将展示该模型的主要验证步骤，包括支持的特性、特性配置、环境准备、单节点与多节点部署、精度及性能评估。"
 
-msgid ""
-"It is recommended to download the model weight to the shared directory of "
-"multiple nodes, such as `/root/.cache/`."
-msgstr "建议将模型权重下载到多节点的共享目录中，例如 `/root/.cache/`。"
-
 msgid "You can use our official docker image to run `DeepSeek-V3.2` directly."
 msgstr "您可以直接使用官方 Docker 镜像运行 `DeepSeek-V3.2`。"
 
@@ -90,9 +85,6 @@ msgstr ""
 msgid "2. After execution, you can get the result."
 msgstr "2. 执行后即可获取结果。"
 
-msgid "### Using Language Model Evaluation Harness"
-msgstr "### 使用 Language Model Evaluation Harness"
-
 msgid ""
 "As an example, take the `gsm8k` dataset as a test dataset, and run accuracy "
 "evaluation of `DeepSeek-V3.2-W8A8` in online mode."
@@ -134,9 +126,6 @@ msgstr "**输入/输出**：64k/3k"
 
 msgid "**Performance**: 533tps, TPOT 32ms"
 msgstr "**性能**：533tps，TPOT 32ms"
-
-msgid "### Using vLLM Benchmark"
-msgstr "### 使用vLLM基准测试"
 
 msgid "Run performance evaluation of `DeepSeek-V3.2-W8A8` as an example."
 msgstr "以`DeepSeek-V3.2-W8A8`为例进行性能评估。"
@@ -185,9 +174,6 @@ msgstr "**节点0**"
 
 msgid "**Node1**"
 msgstr "**节点1**"
-
-msgid "### Using AISBench"
-msgstr "### 使用 AISBench"
 
 msgid "## 1 Introduction"
 msgstr "## 1 简介"
@@ -382,13 +368,6 @@ msgid ""
 msgstr "请参考[特性指南](../../user_guide/feature_guide/index.md)获取特性的配置。"
 
 msgid ""
-"- `DeepSeek-V3.2-Exp-W8A8` (Quantized version): requires **1 Atlas 800 A3 (64GB × 16) node** or **2 Atlas 800 A2 (64GB × 8) nodes**. [Download model weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-Exp-W8A8)\n"
-"- `DeepSeek-V3.2-w8a8` (Quantized version): requires **1 Atlas 800 A3 (64GB × 16) node** or **2 Atlas 800 A2 (64GB × 8) nodes**. [Download model weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-W8A8/)"
-msgstr ""
-"- `DeepSeek-V3.2-Exp-W8A8`（量化版本）：需要**1个Atlas 800 A3（64GB × 16）节点**或**2个Atlas 800 A2（64GB × 8）节点**。[下载模型权重](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-Exp-W8A8)\n"
-"- `DeepSeek-V3.2-w8a8`（量化版本）：需要**1个Atlas 800 A3（64GB × 16）节点**或**2个Atlas 800 A2（64GB × 8）节点**。[下载模型权重](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-W8A8/)"
-
-msgid ""
 "- Quantized model `DeepSeek-V3.2-w8a8` can be deployed on 1 Atlas 800 A3 "
 "(64GB × 16)."
 msgstr "- 量化模型`DeepSeek-V3.2-w8a8`可以部署在1个Atlas 800 A3（64GB × 16）上。"
@@ -419,3 +398,50 @@ msgid ""
 "- Install `vllm-ascend` from source, refer to "
 "[installation](../../getting_started/installation.md)."
 msgstr "- 从源码安装 `vllm-ascend`，请参考[安装](../../getting_started/installation.md)。"
+
+msgid ""
+"|  Weight Version                              | Hardware Requirements"
+"                                                      | Download Links |"
+msgstr ""
+"|  权重版本                              | 硬件要求"
+"                                                      | 下载链接 |"
+
+msgid ""
+"| `DeepSeek-V3.2-Exp-W8A8` (Quantized version) | **1 Atlas 800 A3 (64GB × "
+"16) node** or **2 Atlas 800 A2 (64GB × 8) nodes** | "
+"[ModelScope](https://www.modelscope.cn/models/vllm-"
+"ascend/DeepSeek-V3.2-Exp-W8A8) |"
+msgstr ""
+"| `DeepSeek-V3.2-Exp-W8A8`（量化版本） | **1 个 Atlas 800 A3（64GB × 16）节点** 或 **2 个"
+" Atlas 800 A2（64GB × 8）节点** | "
+"[ModelScope](https://www.modelscope.cn/models/vllm-"
+"ascend/DeepSeek-V3.2-Exp-W8A8) |"
+
+msgid ""
+"|  `DeepSeek-V3.2-w8a8` (Quantized version)    | **1 Atlas 800 A3 (64GB × "
+"16) node** or **2 Atlas 800 A2 (64GB × 8) nodes** | "
+"[ModelScope](https://www.modelscope.cn/models/vllm-"
+"ascend/DeepSeek-V3.2-W8A8/) |"
+msgstr ""
+"|  `DeepSeek-V3.2-w8a8`（量化版本）    | **1 个 Atlas 800 A3（64GB × 16）节点** 或 **2 个"
+" Atlas 800 A2（64GB × 8）节点** | "
+"[ModelScope](https://www.modelscope.cn/models/vllm-"
+"ascend/DeepSeek-V3.2-W8A8/) |"
+
+msgid ""
+">**Path description**: Download the model weights to a directory of your "
+"choice and record it. Ensure the model path in the subsequent deployment "
+"command matches this directory."
+msgstr ">**路径说明**：将模型权重下载到您选择的目录并记录该目录。确保后续部署命令中的模型路径与该目录一致。"
+
+msgid "### 7.1 Using AISBench"
+msgstr "### 7.1 使用 AISBench"
+
+msgid "### 7.2 Using Language Model Evaluation Harness"
+msgstr "### 7.2 使用 Language Model Evaluation Harness"
+
+msgid "### 8.1 Using AISBench"
+msgstr "### 8.1 使用 AISBench"
+
+msgid "### 8.2 Using vLLM Benchmark"
+msgstr "### 8.2 使用 vLLM Benchmark"

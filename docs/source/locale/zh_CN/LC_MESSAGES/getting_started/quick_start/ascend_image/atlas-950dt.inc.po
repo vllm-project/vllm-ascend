@@ -18,9 +18,6 @@ msgstr ""
 "Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: detect_po_changes.py\n"
 
-msgid "=== \"950DT\""
-msgstr "=== \"950DT\""
-
 msgid "#### Pull the image"
 msgstr "#### 拉取镜像"
 
@@ -33,14 +30,8 @@ msgstr ""
 "\"getting_started/quick_start/ascend_image/image_download_mirror.inc.md\" "
 "%}{% endfilter %}"
 
-msgid "=== \"Ubuntu\""
-msgstr "=== \"Ubuntu\""
-
 msgid "<span id=\"quick-start-atlas-950dt-ubuntu\"></span>"
 msgstr "<span id=\"quick-start-atlas-950dt-ubuntu\"></span>"
-
-msgid "=== \"openEuler\""
-msgstr "=== \"openEuler\""
 
 msgid "<span id=\"quick-start-atlas-950dt-openeuler\"></span>"
 msgstr "<span id=\"quick-start-atlas-950dt-openeuler\"></span>"
@@ -53,3 +44,6 @@ msgstr "=== \"Ubuntu\""
 
 msgid "=== \"openEuler\""
 msgstr "=== \"openEuler\""
+
+msgid "=== \"950DT Products\""
+msgstr "=== \"950DT 产品\""
