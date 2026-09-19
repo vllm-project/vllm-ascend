@@ -66,9 +66,7 @@ env_prefill: &env_prefill
 env_decode: &env_decode
   <<: *env_common
   VLLM_TORCH_PROFILER_WITH_STACK: 0
-  EXPERT_MAP_RECORD: "true"
-  DYNAMIC_EPLB: "true"
-  VLLM_USE_V2_MODEL_RUNNER: "0"
+  VLLM_USE_V2_MODEL_RUNNER: "1"
   HCCL_BUFFSIZE: "1024"
 
 templates:
@@ -148,9 +146,12 @@ templates:
       - --no-enable-prefix-caching
       - --compilation-config
       - '{"cudagraph_mode": "FULL_DECODE_ONLY","cudagraph_capture_sizes":[5,10,15]}'
+      - --enable-eplb
+      - --eplb-config
+      - '{"window_size":4000,"step_interval":200,"num_redundant_experts":0,"use_async":true,"log_balancedness":true,"log_balancedness_interval":1}'
       - --additional-config
-      # #5533 renamed and nested the legacy EPLB keys below.
-      - '{"finegrained_tp_config": {"lmhead_tensor_parallel_size":8},"eplb_config":{"dynamic_eplb":true,"expert_heat_collection_interval":4000,"algorithm_execution_interval":200,"num_redundant_experts":0},"enable_mlapo":true}'
+      # Model Runner V2 keeps only the Ascend load-collection phase here.
+      - '{"finegrained_tp_config": {"lmhead_tensor_parallel_size":8},"eplb_config":{"load_collection_phase":"all"},"enable_mlapo":true}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_consumer", "kv_port": "30200", "engine_id": "2", "kv_connector_extra_config": {"use_ascend_direct": true,"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
 
@@ -189,9 +190,12 @@ templates:
       - --no-enable-prefix-caching
       - --compilation-config
       - '{"cudagraph_mode": "FULL_DECODE_ONLY","cudagraph_capture_sizes":[5,10,15]}'
+      - --enable-eplb
+      - --eplb-config
+      - '{"window_size":4000,"step_interval":200,"num_redundant_experts":0,"use_async":true,"log_balancedness":true,"log_balancedness_interval":1}'
       - --additional-config
-      # #5533 renamed and nested the legacy EPLB keys below.
-      - '{"finegrained_tp_config": {"lmhead_tensor_parallel_size":8},"eplb_config":{"dynamic_eplb":true,"expert_heat_collection_interval":4000,"algorithm_execution_interval":200,"num_redundant_experts":0},"enable_mlapo":true}'
+      # Model Runner V2 keeps only the Ascend load-collection phase here.
+      - '{"finegrained_tp_config": {"lmhead_tensor_parallel_size":8},"eplb_config":{"load_collection_phase":"all"},"enable_mlapo":true}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_consumer", "kv_port": "30200", "engine_id": "2", "kv_connector_extra_config": {"use_ascend_direct": true,"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
 
