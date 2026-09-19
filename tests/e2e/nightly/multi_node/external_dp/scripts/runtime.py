@@ -35,6 +35,29 @@ from tests.e2e.nightly.multi_node.scripts.utils import get_net_interface
 
 logger = logging.getLogger(__name__)
 
+
+def _inject_force_profiler_to_args(rendered_args: list[str]) -> list[str]:
+    """Inject --profiler-config into server command args when profiling is forced."""
+    if os.environ.get("VLLM_ASCEND_FORCE_PROFILE", "").lower() not in ("true", "1"):
+        return rendered_args
+    profile_dir = os.environ.get("VLLM_ASCEND_PROFILE_DIR", "")
+    if not profile_dir:
+        return rendered_args
+    with_stack = os.environ.get("VLLM_TORCH_PROFILER_WITH_STACK", "1").lower() not in ("0", "false", "f")
+    profiler_config = {
+        "profiler": "torch",
+        "torch_profiler_dir": profile_dir,
+        "torch_profiler_with_stack": with_stack,
+    }
+    args = list(rendered_args)
+    if "--profiler-config" in args:
+        idx = args.index("--profiler-config")
+        del args[idx : idx + 2]
+    args += ["--profiler-config", json.dumps(profiler_config)]
+    logger.info("Injected --profiler-config into external DP server args")
+    return args
+
+
 SERVER_READY_TIMEOUT_SECONDS = 3600
 KV_POOL_READY_TIMEOUT_SECONDS = 300
 MOONCAKE_EVICTION_HIGH_WATERMARK_RATIO = 0.9
@@ -340,6 +363,7 @@ class ServerCommandBuilder:
             )
             for arg in template.server_cmd_template
         ]
+        rendered_args = _inject_force_profiler_to_args(rendered_args)
         cmd = ["vllm", "serve", self.config.model, *rendered_args]
 
         env = {key: str(value) for key, value in rendered_env.items()}
