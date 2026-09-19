@@ -4,7 +4,8 @@ import pytest
 import torch
 
 from vllm_ascend.ops.causal_conv1d import causal_conv1d_fn as causal_conv1d_fn_ref
-from vllm_ascend.ops.triton.mamba.causal_conv1d import PAD_SLOT_ID, causal_conv1d_fn
+from fla_npu.ops.ascendc import causal_conv1d_fn
+from vllm_ascend.ops.triton.mamba.causal_conv1d import PAD_SLOT_ID, causal_conv1d_fn as triton_causal_conv1d_fn
 from vllm_ascend.utils import enable_custom_op
 
 
@@ -80,32 +81,17 @@ def test_ascend_causal_conv1d(
         cache_indices=cache_indices,
         query_start_loc=query_start_loc,
     )
-    # out = causal_conv1d_fn(x,
-    #                        weight,
-    #                        bias=bias,
-    #                        activation=activation,
-    #                        conv_states=conv_states,
-    #                        has_initial_state=has_initial_state_tensor,
-    #                        cache_indices=cache_indices,
-    #                        query_start_loc=query_start_loc)
-    x_origin = x.transpose(-1, -2)
-    weight_origin = weight.transpose(-1, -2)
-    conv_states_origin = conv_states.transpose(-1, -2)
-    activation_num = 1 if activation else 0
-    out = torch.empty_like(x_origin)
-    torch.ops._C_ascend.npu_causal_conv1d_custom(
-        out,
+    out = causal_conv1d_fn(
         x_origin,
-        weight_origin,
-        conv_state=conv_states_origin,
-        bias_opt=bias,
-        query_start_loc_opt=query_start_loc,
-        cache_indices_opt=cache_indices,
-        initial_state_mode_opt=has_initial_state_tensor,
-        num_accepted_tokens_opt=None,
-        activation_mode=activation_num,
+        weight,
+        bias=bias,
+        activation=activation,
+        conv_states=conv_states_origin,
+        has_initial_state=has_initial_state_tensor,
+        cache_indices=cache_indices,
+        query_start_loc=query_start_loc,
         pad_slot_id=PAD_SLOT_ID,
-        run_mode=0,
+        null_block_id=0,
     )
     out = out.transpose(-1, -2)
     validate_cmp(out, out_ref, itype)
@@ -162,7 +148,7 @@ def test_causal_conv1d(dim, width, extra_state_len, seq_len, has_bias, silu_acti
         cache_indices=cache_indices,
         query_start_loc=query_start_loc,
     )
-    out = causal_conv1d_fn(
+    out = triton_causal_conv1d_fn(
         x,
         weight,
         bias=bias,
