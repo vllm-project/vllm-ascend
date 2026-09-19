@@ -14,6 +14,7 @@ from vllm.v1.worker.gpu import dp_utils
 from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
 from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
 
+from vllm_ascend.worker.v2 import pcp_manager as pcp_manager_module
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.spec_decode.autoregressive import (
     speculator as speculator_module,
@@ -46,21 +47,26 @@ def _make_padded_input_batch() -> MagicMock:
 
 
 @pytest.mark.parametrize(
-    ("target_pcp_size", "expected_execution_pcp_size"),
-    [(2, 1), (1, 1)],
+    ("target_pcp_size", "expected_execution_pcp_size", "dcp_size"),
+    [(2, 1, 4), (2, 1, 8), (1, 1, 4)],
 )
 def test_draft_runtime_config_preserves_target_worker_topology(
     target_pcp_size: int,
     expected_execution_pcp_size: int,
+    dcp_size: int,
 ) -> None:
     draft_parallel_config = SimpleNamespace(
         prefill_context_parallel_size=2,
+        cp_kv_cache_interleave_size=64,
+        decode_context_parallel_size=4,
         enable_expert_parallel=False,
         enable_eplb=False,
         rank=0,
     )
     target_parallel_config = SimpleNamespace(
         prefill_context_parallel_size=target_pcp_size,
+        cp_kv_cache_interleave_size=128,
+        decode_context_parallel_size=dcp_size,
         enable_expert_parallel=True,
         enable_eplb=True,
         rank=7,
@@ -84,6 +90,13 @@ def test_draft_runtime_config_preserves_target_worker_topology(
     captured: dict[str, SimpleNamespace] = {}
 
     def fake_replace(config, **changes):
+        if "pipeline_parallel_size" in changes:
+            assert changes["decode_context_parallel_size"] == (1 if target_pcp_size > 1 else dcp_size)
+        if "model_config" in changes:
+            assert changes["parallel_config"].decode_context_parallel_size == (1 if target_pcp_size > 1 else dcp_size)
+        if config is target_config and "model_config" not in changes:
+            reconstructed_parallel = changes["parallel_config"]
+            captured["reconstruction_dcp_size"] = reconstructed_parallel.decode_context_parallel_size
         values = vars(config).copy()
         values.update(changes)
         return SimpleNamespace(**values)
@@ -124,22 +137,79 @@ def test_draft_runtime_config_preserves_target_worker_topology(
     execution_config = captured["execution_config"]
     execution_parallel_config = execution_config.parallel_config
     assert execution_parallel_config.prefill_context_parallel_size == expected_execution_pcp_size
+    assert execution_parallel_config.cp_kv_cache_interleave_size == 128
+    assert execution_parallel_config.decode_context_parallel_size == dcp_size
+    assert target_parallel_config.decode_context_parallel_size == dcp_size
+    if target_pcp_size > 1:
+        assert captured["reconstruction_dcp_size"] == 1
+    else:
+        assert "reconstruction_dcp_size" not in captured
     assert execution_parallel_config.enable_expert_parallel
     assert execution_parallel_config.enable_eplb
     assert execution_parallel_config.rank == target_parallel_config.rank
     assert execution_parallel_config.data_parallel_size == 2
     assert execution_parallel_config.data_parallel_rank == 1
     assert target_parallel_config.prefill_context_parallel_size == target_pcp_size
+    assert target_parallel_config.cp_kv_cache_interleave_size == 128
     assert target_parallel_config.enable_expert_parallel
     assert target_parallel_config.enable_eplb
 
     draft_config = speculator.draft_vllm_config
     assert draft_parallel_config.prefill_context_parallel_size == 2
+    assert draft_parallel_config.cp_kv_cache_interleave_size == 64
     assert not draft_parallel_config.enable_expert_parallel
     assert not draft_parallel_config.enable_eplb
     assert draft_config.model_config is draft_model_config
     assert draft_config.parallel_config.prefill_context_parallel_size == expected_execution_pcp_size
+    assert draft_config.parallel_config.cp_kv_cache_interleave_size == 128
     assert draft_config.parallel_config.pipeline_parallel_size == 1
+    assert draft_config.parallel_config.decode_context_parallel_size == dcp_size
+
+
+@pytest.mark.parametrize("replicated_pcp", [False, True])
+@pytest.mark.parametrize("shared", [False, True])
+@pytest.mark.parametrize("contiguous", [False, True])
+def test_run_model_broadcasts_only_actual_replicated_hidden_states(replicated_pcp, shared, contiguous):
+    speculator = object.__new__(speculator_module.AscendAutoRegressiveSpeculator)
+    speculator.replicated_pcp = replicated_pcp
+    last_hidden = torch.arange(48, dtype=torch.float32).view(6, 8)[:, ::2]
+    other_hidden = (torch.arange(48, dtype=torch.float32) + 50).view(6, 8)[:, ::2]
+    if contiguous:
+        last_hidden = last_hidden.contiguous()
+        other_hidden = other_hidden.contiguous()
+    hidden = last_hidden if shared else other_hidden
+    originals = [last_hidden[:4].clone(), hidden[:4].clone()]
+    sent = []
+
+    def broadcast(tensor, src):
+        assert src == 0
+        assert tensor.is_contiguous()
+        assert tensor.shape == (4, 4)
+        sent.append(tensor.clone())
+        return tensor.add_(100)
+
+    group = SimpleNamespace(broadcast=MagicMock(side_effect=broadcast))
+    with (
+        patch.object(speculator_module.AutoRegressiveSpeculator, "_run_model", return_value=(last_hidden, hidden)),
+        patch.object(pcp_manager_module, "get_pcp_group", return_value=group) as get_group,
+    ):
+        result_last, result_hidden = speculator._run_model(4, None, None, None)
+
+    if not replicated_pcp:
+        get_group.assert_not_called()
+        group.broadcast.assert_not_called()
+        assert result_last is last_hidden
+        assert result_hidden is hidden
+        return
+    get_group.assert_called_once_with()
+    assert group.broadcast.call_count == (1 if shared else 2)
+    torch.testing.assert_close(sent[0], originals[0])
+    if shared:
+        assert result_hidden is result_last
+    else:
+        torch.testing.assert_close(sent[1], originals[1])
+    torch.testing.assert_close(result_last, originals[0] + 100)
+    torch.testing.assert_close(result_hidden, originals[1] + 100)
 
 
 @pytest.mark.parametrize(("replicated_pcp", "manager_is_disabled"), [(True, True), (False, False)])

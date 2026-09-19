@@ -36,7 +36,7 @@ traffic before production deployment.
 
 !!!IMPORTANT
 
-    Ascend 950 Products does not support using EPLB with quant type "W4A8MXFP4", "W4A16MXFP4".
+    950PR&950DT Products does not support using EPLB with quant type "W4A8MXFP4", "W4A16MXFP4".
     A2 does not support redundant experts.
 
 ### Model Runner V2 Weight Formats
@@ -50,8 +50,8 @@ validation on the target hardware before production use.
 | BF16 / FP16 | Enabled | Uses the unquantized expert weights and biases. |
 | W8A8 / W8A8 Dynamic | Enabled | Uses persistent per-expert weight and scale tensors. |
 | W4A8 | Enabled | Uses persistent per-expert weight, scale, and scale-bias tensors. |
-| W4A4 MXFP | Enabled | Ascend 950 products; keeps native ND expert tensors. |
-| W8A8 MXFP | Enabled | Ascend 950 products; keeps native ND expert tensors. |
+| W4A4 MXFP | Enabled | 950PR&950DT Products; keeps native ND expert tensors. |
+| W8A8 MXFP | Enabled | 950PR&950DT Products; keeps native ND expert tensors. |
 | W4A16 | Rejected | The expert-weight layout has not completed independent EPLB validation. |
 | W4A16 MXFP | Rejected | The expert-weight layout has not completed independent EPLB validation. |
 | W4A8 MXFP | Rejected | The expert-weight layout has not completed independent EPLB validation. |
@@ -62,15 +62,15 @@ validation on the target hardware before production use.
 | ------------------------------- | --------------------------- |
 | W8A8 / W8A8-Dynamic             | A2, A3 |
 | W4A8 (with fused MC2 enabled)   | A2, A3 |
-| MXFP4                           | Ascend 950 Products         |
-| MXFP8                           | Ascend 950 Products         |
+| MXFP4                           | 950PR&950DT Products         |
+| MXFP8                           | 950PR&950DT Products         |
 
 ### Usage Recommendations
 
 EPLB is not recommended in the following scenarios because the load-balancing benefit may not offset its runtime overhead:
 
 - P node workloads with input sequences shorter than `1024` tokens.
-- D node workloads where the number of experts per die is `> 8` (`> 16` on 950DT), or where the per-die load is below `128` tokens.
+- D node workloads where the number of experts per die is `> 8` (`> 16` on 950DT Products), or where the per-die load is below `128` tokens.
 
 !!!WARNING
 

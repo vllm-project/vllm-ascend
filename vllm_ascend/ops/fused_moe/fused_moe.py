@@ -24,10 +24,9 @@ from vllm.distributed import (
     get_tp_group,
     tensor_model_parallel_all_reduce,
 )
-from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig, FusedMoERouter
 from vllm.model_executor.layers.fused_moe.layer import MoERunner
-from vllm.model_executor.layers.fused_moe.runner.moe_runner import _moe_forward_shared
+from vllm.model_executor.layers.fused_moe.runner.moe_runner import _moe_forward_shared, _unpack
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
@@ -76,45 +75,6 @@ direct_register_custom_op(
     op_name="ascend_moe_forward_shared_sp",
     op_func=_moe_forward_shared,
     fake_impl=_ascend_moe_forward_shared_sp_fake,
-    tags=(torch.Tag.needs_fixed_stride_order,),
-)
-
-
-def _ascend_moe_forward_complete(
-    hidden_states: torch.Tensor,
-    router_logits: torch.Tensor,
-    shared_experts_input: torch.Tensor | None,
-    input_ids: torch.Tensor | None,
-    layer_name: str,
-) -> torch.Tensor:
-    layer = get_forward_context().no_compile_layers[layer_name]
-    # Keep the communication-dependent reduction decisions inside the same
-    # opaque boundary as dispatch/combine. vLLM reuses a single Dynamo trace
-    # across ALLGATHER and MC2/ALLTOALL batches.
-    return MoERunner.forward(
-        layer,
-        hidden_states,
-        router_logits,
-        input_ids=input_ids,
-        shared_experts_input=shared_experts_input,
-    )
-
-
-def _ascend_moe_forward_complete_fake(
-    hidden_states: torch.Tensor,
-    router_logits: torch.Tensor,
-    shared_experts_input: torch.Tensor | None,
-    input_ids: torch.Tensor | None,
-    layer_name: str,
-) -> torch.Tensor:
-    output_width = shared_experts_input.shape[-1] if shared_experts_input is not None else hidden_states.shape[-1]
-    return hidden_states.new_empty((*hidden_states.shape[:-1], output_width))
-
-
-direct_register_custom_op(
-    op_name="ascend_moe_forward_complete",
-    op_func=_ascend_moe_forward_complete,
-    fake_impl=_ascend_moe_forward_complete_fake,
     tags=(torch.Tag.needs_fixed_stride_order,),
 )
 
@@ -194,13 +154,89 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         input_ids: torch.Tensor | None = None,
         shared_experts_input: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return torch.ops.vllm.ascend_moe_forward_complete(
+        """Mirror of upstream ``MoERunner.forward`` (this class is instantiated
+        through the OOT PluggableLayer dispatch of ``MoERunner``).
+
+        Upstream inlines the shared+routed output combine, which is not
+        exposed as an overridable hook. On NPU the combine goes through the
+        fused multi-tensor add kernel (``torch._foreach_add``), whose kernel
+        launch count is independent of the tensor-list length and which is
+        the NPU-validated fast path for the MoE combine. Every other step,
+        including the runtime-aware reduction hooks (#16550), is inherited
+        unchanged.
+
+        Future plan: once the aclnnAdd_AddAiCore_Add kernel is available via
+        the superkernel integration, upstream's plain add becomes the fast
+        path and this override can be dropped.
+        """
+        # Apply transform for routed experts (e.g., latent projection for
+        # latent MoE). When the caller pre-applies the routed input transform
+        # outside the runner (e.g. to overlap it on a separate stream), it
+        # passes the already-transformed routed input as ``hidden_states`` and
+        # the original hidden states as ``shared_experts_input``; skip the
+        # transform in that case so shared experts still see the original input.
+        if shared_experts_input is None:
+            hidden_states, shared_experts_input = self.apply_routed_input_transform(hidden_states)
+
+        # Record before `_maybe_pad_hidden_states` pads activations to match
+        # `moe_config.hidden_dim`, e.g. after `align_trtllm_fp4_moe_hidden_dim_for_fi`
+        # so routed output can be trimmed before
+        # shared+routed add / latent up proj if needed.
+        hidden_states, og_hidden_dim_pre_xform, og_hidden_dim_post_xform = self._maybe_pad_hidden_states(
+            shared_experts_input,
+            hidden_states,
+        )
+
+        result = self._forward_entry(
             hidden_states,
             router_logits,
             shared_experts_input,
             input_ids,
-            self.layer_name,
+            self._encode_layer_name(),
+            self.moe_config.hidden_dim_unpadded if self._quant_method.has_unpadded_output else 0,
         )
+
+        #
+        # Note: there are two all-reduce points below. They are mutually
+        # exclusive, controlled by _fused_output_is_reduced
+        #  - When True: the combine kernel already reduced fused_output,
+        #    so we reduce shared_output here to match, then skip the
+        #    all-reduce in _maybe_reduce_final_output.
+        #  - When False: neither output is reduced yet, so we combine
+        #    them first and all-reduce the sum in _maybe_reduce_final_output.
+
+        # Extract outputs from result
+        shared_output, fused_output = _unpack(result)
+
+        if og_hidden_dim_pre_xform is not None:
+            fused_output = fused_output[..., :og_hidden_dim_pre_xform]
+
+        fused_output_is_reduced = self._fused_output_is_reduced
+
+        # Latent routed output has to be reduced before output transform,
+        # because the transform may include non-linear normalization.
+        fused_output, fused_output_is_reduced = self._maybe_reduce_routed_output_before_transform(
+            fused_output,
+            fused_output_is_reduced,
+        )
+
+        # If routed output is already reduced, reduce shared to match.
+        # See note above re: the two all-reduce points.
+        shared_output = self._maybe_reduce_shared_expert_output(shared_output, fused_output_is_reduced)
+
+        shared_output, fused_output = self._maybe_apply_routed_scale_to_output(shared_output, fused_output)
+
+        # Apply output transform (e.g. latent -> full dim)
+        fused_output = self.apply_routed_output_transform(fused_output)
+
+        if shared_output is not None:
+            result = torch._foreach_add([shared_output], [fused_output])[0]
+        else:
+            result = fused_output
+
+        result = self._maybe_reduce_final_output(result, og_hidden_dim_post_xform, fused_output_is_reduced)
+
+        return self._maybe_add_zero_expert_output(result)
 
     @property
     def is_internal_router(self) -> bool:
@@ -250,19 +286,6 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             return SharedExpertParallelMode.TENSOR_PARALLEL
         return shared_experts.parallel_mode()
 
-    def _reduce_shared_output_if_needed(
-        self,
-        shared_output: torch.Tensor | None,
-        fused_output_is_reduced: bool,
-    ) -> torch.Tensor | None:
-        if (
-            shared_output is not None
-            and fused_output_is_reduced
-            and self._get_shared_expert_parallel_mode() is SharedExpertParallelMode.TENSOR_PARALLEL
-        ):
-            shared_output = tensor_model_parallel_all_reduce(shared_output)
-        return shared_output
-
     @property
     def local_num_experts(self) -> int:
         """Number of physical experts managed by this EPLB layer."""
@@ -272,6 +295,16 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
     def ep_rank(self) -> int:
         return self.moe_config.ep_rank
 
+    def _should_reduce_routed_before_combine(self) -> bool:
+        """Static layer policy; communication-dependent decisions stay in the op."""
+        # Shared DP already produces a complete output, so reduce routed first.
+        if self._get_shared_expert_parallel_mode() is SharedExpertParallelMode.SHARED_EXPERT_DATA_PARALLEL_ONLY:
+            return True
+        # A routed transform must receive the complete TP result.
+        if self.routed_output_transform is None or self.moe_config.is_sequence_parallel:
+            return False
+        return self.moe_config.tp_size > 1 or self.moe_config.ep_size > 1
+
     # Shared-expert layout-specific communication is handled by
     # AscendSharedExperts, so only standard TP weights need a separate
     # all-reduce when routed output has already been reduced.
@@ -280,46 +313,38 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         shared_output: torch.Tensor | None,
         fused_output_is_reduced: bool | None = None,
     ) -> torch.Tensor | None:
-        if fused_output_is_reduced is None:
-            fused_output_is_reduced = self._fused_output_is_reduced
-        return self._reduce_shared_output_if_needed(
-            shared_output,
-            fused_output_is_reduced,
-        )
+        if (
+            shared_output is None
+            or self._get_shared_expert_parallel_mode() is not SharedExpertParallelMode.TENSOR_PARALLEL
+        ):
+            return shared_output
+        # The upstream boolean can be specialized during tracing. Only the
+        # model-static early-reduction policy may be tested outside the op.
+        if self._should_reduce_routed_before_combine():
+            return tensor_model_parallel_all_reduce(shared_output)
+        return torch.ops.vllm.maybe_all_reduce_shared_expert(shared_output, self.layer_name)
 
     def _maybe_reduce_routed_output_before_transform(
         self,
         fused_output: torch.Tensor,
         fused_output_is_reduced: bool,
     ) -> tuple[torch.Tensor, bool]:
-        fused_output, fused_output_is_reduced = super()._maybe_reduce_routed_output_before_transform(
-            fused_output,
-            fused_output_is_reduced,
-        )
-
-        if (
-            self._get_shared_expert_parallel_mode() is SharedExpertParallelMode.SHARED_EXPERT_DATA_PARALLEL_ONLY
-            and not fused_output_is_reduced
-        ):
-            fused_output = tensor_model_parallel_all_reduce(fused_output)
-            fused_output_is_reduced = True
+        if self._should_reduce_routed_before_combine():
+            fused_output = torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(fused_output, self.layer_name)
+            return fused_output, True
         return fused_output, fused_output_is_reduced
 
-    # Ascend already handles reduction in its own dispatch path, so
-    # the upstream kwarg is accepted for interface alignment only.
     def _maybe_reduce_final_output(  # type: ignore[misc]
         self,
         states: torch.Tensor,
         trunc_size: int | None,
         output_is_reduced: bool | None = None,
     ) -> torch.Tensor:
-        if output_is_reduced is None:
-            output_is_reduced = self._fused_output_is_reduced
-        if not output_is_reduced and not self.moe_config.is_sequence_parallel:
-            # Use the normal TP collective when the upstream reduction
-            # contract requires it. Sequence-parallel outputs are token
-            # shards, so reducing them position-wise would corrupt the result.
-            states = tensor_model_parallel_all_reduce(states)
+        # Do not branch on output_is_reduced: it can describe the tracing
+        # batch rather than the batch replaying this graph. Early reduction
+        # and sequence parallelism are static properties of the layer.
+        if not self.moe_config.is_sequence_parallel and not self._should_reduce_routed_before_combine():
+            states = torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(states, self.layer_name)
         if trunc_size is not None and trunc_size > 0:
             return states[..., :trunc_size]
         return states

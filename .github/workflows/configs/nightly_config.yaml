@@ -55,10 +55,6 @@ a2:
         config_file_path: GLM5_1-W8A8-A2-dual-nodes.yaml
         config_base_path: tests/e2e/nightly/multi_node/internal_dp/config
         size: 2
-      - name: multi-node-Kimi-K2.5-W4A8-A2
-        config_file_path: Kimi-K2_5-W4A8-A2-dual-nodes.yaml
-        config_base_path: tests/e2e/nightly/multi_node/internal_dp/config
-        size: 2
   accuracy:
     nightly:
       - name: accuracy-group-1
@@ -220,9 +216,18 @@ a3:
       - name: glm-5.2-w4a8-mtp
         os: linux-aarch64-nightly-a3-16
         config_file_path: GLM-5.2-W4A8-MTP-A3.yaml
+      - name: glm-5.2-w4a8-dspark-v2
+        os: linux-aarch64-nightly-a3-16
+        config_file_path: GLM-5.2-W4A8-DSpark-A3-V2.yaml
+      - name: glm-5.2-w4a8-mtp-v2
+        os: linux-aarch64-nightly-a3-16
+        config_file_path: GLM-5.2-W4A8-MTP-A3-V2.yaml
       - name: qwen3-235b-a22b-w8a8
         os: linux-aarch64-nightly-a3-16
         config_file_path: Qwen3-235B-A22B-W8A8.yaml
+      - name: qwen3-235b-a22b-w8a8-MRV2-EPLB
+        os: linux-aarch64-nightly-a3-16
+        config_file_path: Qwen3-235B-A22B-W8A8-MRV2-EPLB.yaml        
       - name: Qwen3.5-397B-A17B-w8a8-mtp
         os: linux-aarch64-nightly-a3-16
         config_file_path: Qwen3.5-397B-A17B-W8A8-mtp-A3.yaml
@@ -312,11 +317,14 @@ a3:
 a3-560t:
   single_node:
     test_config:
+      - name: qwen3-235b-a22b-w8a8-MRV2-EPLB
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: Qwen3-235B-A22B-W8A8-MRV2-EPLB.yaml
       - name: deepseek-v3-2-w8a8
-        os: linux-aarch64-nightly-a3-16
+        os: linux-aarch64-a3-16-cn12-001
         config_file_path: DeepSeek-V3.2-W8A8.yaml
       - name: glm-5.1-w8a8-prefill-mc2
-        os: linux-aarch64-nightly-a3-16
+        os: linux-aarch64-a3-16-cn12-001
         config_file_path: GLM-5.1-W8A8-PrefillMC2.yaml
       - name: MiniMax-M3-BF16-A3
         os: linux-aarch64-a3-16-cn12-001
@@ -393,18 +401,18 @@ a3-560t:
       - name: glm-5.2-w4a8c8-sfa-dcp
         os: linux-aarch64-a3-16-cn12-001
         config_file_path: GLM-5.2-W4A8C8-SFA-DCP.yaml
-      - name: glm-5.1-w8a8-prefill-mc2
-        os: linux-aarch64-a3-16-cn12-001
-        config_file_path: GLM-5.1-W8A8-PrefillMC2.yaml
       - name: glm-5.2-w4a8-dspark
         os: linux-aarch64-a3-16-cn12-001
         config_file_path: GLM-5.2-W4A8-DSpark-A3.yaml
       - name: glm-5.2-w4a8-mtp
         os: linux-aarch64-a3-16-cn12-001
         config_file_path: GLM-5.2-W4A8-MTP-A3.yaml
-      - name: MiniMax-M3-BF16-A3
+      - name: glm-5.2-w4a8-dspark-v2
         os: linux-aarch64-a3-16-cn12-001
-        config_file_path: MiniMax-M3-BF16-A3.yaml
+        config_file_path: GLM-5.2-W4A8-DSpark-A3-V2.yaml
+      - name: glm-5.2-w4a8-mtp-v2
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: GLM-5.2-W4A8-MTP-A3-V2.yaml
   multi_card:
     test_config:
       # pytest-driven tests

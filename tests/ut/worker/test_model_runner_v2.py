@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 import torch
 from vllm.config import CUDAGraphMode
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
@@ -20,6 +21,7 @@ from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 
 def _make_runner(need_timing: bool = True):
     runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.pcp_manager = None
     runner.ascend_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(need_timing=need_timing))
     )
@@ -28,6 +30,9 @@ def _make_runner(need_timing: bool = True):
     runner.model_state = SimpleNamespace(kvpp_is_dummy_run=False)
     runner.execute_model_state = None
     runner.is_last_pp_rank = False
+    runner.attn_groups = []
+    runner.adaptive_verification = None
+    runner.use_fia = False
     return runner
 
 
@@ -448,7 +453,7 @@ def test_init_spec_pp_full_graph_and_speculator():
         patch("vllm_ascend.worker.v2.model_runner.set_cos_and_sin"),
         patch("vllm_ascend.worker.v2.model_runner.set_mc2_tokens_capacity"),
         patch("vllm_ascend.worker.v2.model_runner.set_mc2_mask"),
-        patch("vllm_ascend.patch.worker.patch_v2.patch_spec_pp.install_spec_pp_token_broadcast") as install_pp,
+        patch("vllm_ascend.patch.worker.patch_v2.patch_spec_pp.install_upstream_spec_pp_protocol") as install_pp,
         patch("torch.npu.Stream", return_value="stream"),
         patch("torch.npu.Event", return_value="event"),
         patch("torch.empty", return_value=torch.zeros(2, dtype=torch.int32)),
@@ -461,13 +466,14 @@ def test_init_spec_pp_full_graph_and_speculator():
     restore_pp.assert_called_once()
     assert eplb_cls.call_args.kwargs["load_collection_phase"] == "decode"
     assert runner.use_aclgraph is True
-    assert runner.use_spec_pp is True
     assert runner.use_aux_hidden_state_outputs is True
     assert runner.speculator is speculator
     assert speculator.update_stream is runner.update_stream
     if vllm_version_is("0.28.0"):
+        assert runner.use_spec_pp is True
         install_pp.assert_called_once()
     else:
+        assert runner.use_spec_pp is False
         install_pp.assert_not_called()
     assert runner.update_stream is not None
     assert runner.decode_query_len == 2
@@ -518,9 +524,15 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
     runner.init_routed_experts_capturer = MagicMock()
     original = vllm_model_runner.ModelCudaGraphManager
     seen = {}
+    kv_cache_config = KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[],
+        kv_cache_groups=[],
+    )
 
-    def _super(self, kv_cache_config):
+    def _super(self, kv_cache_config, kv_cache_allocation_context=None):
         self.kv_cache_config = kv_cache_config
+        self.attn_groups = []
         seen["factory"] = vllm_model_runner.ModelCudaGraphManager
         seen["cfg"] = kv_cache_config
 
@@ -532,10 +544,10 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
             return_value="kvpp",
         ) as create_kvpp,
     ):
-        runner.initialize_kv_cache("kv")
+        runner.initialize_kv_cache(kv_cache_config)
         seen["factory"](runner.vllm_config, torch.device("cpu"), CUDAGraphMode.FULL, 1)
 
-    assert seen["cfg"] == "kv"
+    assert seen["cfg"] == kv_cache_config
     assert vllm_model_runner.ModelCudaGraphManager is original
     acl_cls.assert_called_once()
     create_kvpp.assert_called_once()
@@ -545,6 +557,49 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
     assert runner.model_state.pcp_manager is runner.pcp_manager
     assert runner.speculator.pcp_manager is runner.pcp_manager
     runner.init_routed_experts_capturer.assert_called_once_with()
+
+
+@pytest.mark.parametrize("is_vllm_0_28_0", [True, False], ids=["v0.28.0", "newer"])
+def test_initialize_kv_cache_forwards_allocation_context_by_vllm_version(is_vllm_0_28_0):
+    runner = _make_runner()
+    runner.vllm_config = SimpleNamespace()
+    runner.compilation_config = SimpleNamespace(static_forward_context={})
+    runner.pcp_manager = None
+    runner.model_state = SimpleNamespace(pcp_manager=None, kvpp_runtime=None)
+    runner.speculator = None
+    runner.model_config = SimpleNamespace(enable_return_routed_experts=False)
+    called = False
+    captured_kwargs: dict[str, object] = {}
+    allocation_context = object()
+    kv_cache_config = KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[],
+        kv_cache_groups=[],
+    )
+
+    def _super(self, kv_cache_config, **kwargs):
+        nonlocal called
+        called = True
+        captured_kwargs.update(kwargs)
+        self.kv_cache_config = kv_cache_config
+        self.attn_groups = []
+
+    with (
+        patch("vllm_ascend.worker.v2.model_runner.vllm_version_is", return_value=is_vllm_0_28_0),
+        patch.object(GPUModelRunner, "initialize_kv_cache", _super),
+        patch("vllm_ascend.worker.v2.model_runner.ModelAclGraphManager", return_value="acl"),
+        patch(
+            "vllm_ascend.worker.v2.model_runner.KVPPRuntime.create_from_kv_cache",
+            return_value="kvpp",
+        ),
+    ):
+        runner.initialize_kv_cache(kv_cache_config, kv_cache_allocation_context=allocation_context)
+
+    assert called is True
+    if is_vllm_0_28_0:
+        assert "kv_cache_allocation_context" not in captured_kwargs
+    else:
+        assert captured_kwargs["kv_cache_allocation_context"] is allocation_context
 
 
 @pytest.mark.parametrize("moe_type", [MoECommType.MC2, MoECommType.FUSED_MC2])

@@ -121,7 +121,4 @@ SpeculativeConfig.hf_config_override = staticmethod(_normalize_legacy_qwen3_dspa
 SpeculativeConfig.__post_init__ = _dspark_post_init
 
 if "glm5_next_mtp" not in get_args(speculative_config.MTPModelTypes):
-    speculative_config.MTPModelTypes = Literal[
-        *get_args(speculative_config.MTPModelTypes),
-        "glm5_next_mtp",
-    ]
+    speculative_config.MTPModelTypes = Literal[(*get_args(speculative_config.MTPModelTypes), "glm5_next_mtp")]

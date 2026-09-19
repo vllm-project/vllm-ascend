@@ -72,11 +72,11 @@ from vllm.model_executor.models.utils import (
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
+from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache as VllmDeepseekV4SWACache
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.attention.dsa_attn_kv_plan import get_dsv4_attn_kv_dtype
 from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
 from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_all_gather,
@@ -124,9 +124,6 @@ class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
         self.block_size = DSV4_BLOCK_SIZES[cache_config.block_size][0][1]
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        self.dtype = get_dsv4_attn_kv_dtype(vllm_config)
-        if self.dtype == torch.float8_e4m3fn:
-            vllm_config.cache_config.cache_dtype = "float8_e4m3fn"
         cached_head_size = self.head_dim + 128 if self.dtype == torch.float8_e4m3fn else self.head_dim
         return AscendSlidingWindowMLASpec(
             block_size=self.block_size,
@@ -339,14 +336,14 @@ class DeepseekV4MoE(nn.Module):
                 requires_grad=False,
             )
         if self.hash:
-            # Use zeros instead of empty to avoid garbage values causing
-            # invalid memory access in dummy mode (--load-format="dummy")
+            # MC2 dispatch/combine fails
+            # in the dummy profile run if a token repeats an expert id
+            token_ids = torch.arange(config.vocab_size, dtype=torch.int32).unsqueeze(1)
+            expert_offsets = torch.arange(config.num_experts_per_tok, dtype=torch.int32).unsqueeze(0)
+            token_to_expert = (token_ids + expert_offsets) % config.n_routed_experts
+
             self.gate.tid2eid = nn.Parameter(
-                torch.zeros(
-                    config.vocab_size,
-                    config.num_experts_per_tok,
-                    dtype=torch.int32,
-                ),
+                token_to_expert,
                 requires_grad=False,
             )
             self.gate.e_score_correction_bias = None
@@ -615,11 +612,11 @@ class DeepseekV4Attention(nn.Module):
                     topk_indices_buffer=topk_indices_buffer,
                 )
 
-        k_dtype = get_dsv4_attn_kv_dtype(vllm_config)
+        kv_cache_dtype = kv_cache_dtype_str_to_dtype(vllm_config.cache_config.cache_dtype, vllm_config.model_config)
         swa_cache_layer = AscendDeepseekV4SWACache(
             head_dim=self.head_dim,
             window_size=self.window_size,
-            dtype=k_dtype,
+            dtype=kv_cache_dtype,
             prefix=f"{prefix}.swa_cache",
             cache_config=cache_config,
         )

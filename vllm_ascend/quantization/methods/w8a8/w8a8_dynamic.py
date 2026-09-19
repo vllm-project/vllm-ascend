@@ -489,7 +489,10 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         layer = mlp_compute_input.layer
         w1, w1_scale, _, w2_scale = self._get_mlp_weights(layer)
         w2_scale_dtype = w2_scale[0].dtype
-        scale = [w1_scale[0].to(w2_scale_dtype)]
+        # w1 may be a per-expert weight list (MRv2 EPLB: use_expert_weight_list),
+        # then scales must be per-expert too — aclnn grouped_matmul requires
+        # len(scale) == len(weight). The stacked path keeps a single-element list.
+        scale = [s.to(w2_scale_dtype) for s in w1_scale]
         hidden_states = torch_npu.npu_grouped_matmul(
             x=[hidden_states],
             weight=w1 if isinstance(w1, list) else [w1],

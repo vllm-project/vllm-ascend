@@ -315,7 +315,7 @@ class Glm5NextDecoderLayer(nn.Module):
                 kv_lora_rank=config.kv_lora_rank,
                 max_position_embeddings=config.max_position_embeddings,
                 cache_config=cache_config,
-                quant_config=None,  # MLA projections are BF16 in checkpoint
+                quant_config=quant_config,  # keep MLA projections quantized when checkpoint weights are quantized
                 prefix=f"{prefix}.self_attn",
                 topk_indices_buffer=topk_indices_buffer,
                 skip_rope=config.mla_nope,
@@ -700,12 +700,6 @@ class Glm5NextModel(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
 
-        # GLM-5.3-Flash NoPE checkpoints omit the RoPE rows from
-        # ``kv_a_proj_with_mqa``; pad them with zeros for the model shape.
-        kv_a_pad_size = 0
-        if self.config.mla_nope and self.config.qk_rope_head_dim > 0:
-            kv_a_pad_size = self.config.qk_rope_head_dim
-
         _pending_wk_fp8: dict = {}
 
         for args in weights:
@@ -732,28 +726,6 @@ class Glm5NextModel(nn.Module):
                 loaded_params,
             ):
                 continue
-
-            # FP8 checkpoint: dequantize BF16-kept MLA projections
-            # (q_a_proj / kv_a_proj_with_mqa / o_proj) to BF16.
-            if _try_load_fp8_attn_proj(
-                name,
-                loaded_weight,
-                _pending_wk_fp8,
-                params_dict,
-                loaded_params,
-                kv_a_pad_size,
-            ):
-                continue
-
-            # Pad kv_a_proj_with_mqa for NoPE models
-            if kv_a_pad_size > 0 and ".kv_a_proj_with_mqa." in name:
-                pad = torch.zeros(
-                    kv_a_pad_size,
-                    *loaded_weight.shape[1:],
-                    dtype=loaded_weight.dtype,
-                    device=loaded_weight.device,
-                )
-                loaded_weight = torch.cat([loaded_weight, pad], dim=0)
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
@@ -1001,8 +973,9 @@ class Glm5NextForConditionalGeneration(Glm4vForConditionalGeneration, HasInnerSt
     def load_weights(self, weights: Iterable[tuple[Any, ...]]) -> set[str]:
         # The visual merger's down_proj already contains the exported rotation.
         # Ignore the standalone QuaRot tensor to avoid applying it a second time.
-        loader = AutoWeightsLoader(self, skip_prefixes=["rot."])
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        loader = AutoWeightsLoader(self)
+        mapper = self.hf_to_vllm_mapper | WeightsMapper(orig_to_new_prefix={"rot.": None})
+        return loader.load_weights(weights, mapper=mapper)
 
     def get_encoder_cudagraph_config(self):
         # This vision tower does not produce the absolute position embedding
@@ -1050,107 +1023,4 @@ def _try_load_fp8_indexer_wk(name, tensor, buf, params_dict, loaded_params):
     param = params_dict[fused_name]
     param.weight_loader(param, weight_bf16, 0)
     loaded_params.add(fused_name)
-    return True
-
-
-def _dequant_fp8_block(
-    weight_fp8: torch.Tensor,
-    scale_inv: torch.Tensor,
-    block_size: int = 128,
-) -> torch.Tensor:
-    """Dequantize a block-FP8 (e4m3) weight with per-block scale to BF16.
-
-    Unlike ``scaled_dequantize`` this tolerates a non-divisible (partial last
-    block) shape by zero-padding to a multiple of ``block_size`` before the
-    scale broadcast and trimming back afterwards (e.g. kv_a_proj_with_mqa is
-    576 rows = 4*128 + 64).
-    """
-    out_dim, in_dim = weight_fp8.shape
-    pad_out = (-out_dim) % block_size
-    pad_in = (-in_dim) % block_size
-    w = weight_fp8
-    if pad_out or pad_in:
-        w = torch.nn.functional.pad(w, (0, pad_in, 0, pad_out))
-    # scale_inv is (ceil(out/block), ceil(in/block)); broadcast to (out, in).
-    s = scale_inv.to(torch.float32)
-    s_full = s.repeat_interleave(block_size, dim=0).repeat_interleave(block_size, dim=1)
-    out = (w.to(torch.float32) * s_full).to(torch.bfloat16)
-    return out[:out_dim, :in_dim].contiguous()
-
-
-# FP8 checkpoint projections that the MODEL keeps in BF16, so the block-FP8
-# (weight + weight_scale_inv) must be dequantized to BF16 on load.
-# Maps checkpoint proj-suffix -> (buffer key, model target base, fused shard id
-# or None for a direct projection, whether NoPE rope-padding applies).
-_FP8_ATTN_PROJS = {
-    ".q_a_proj.": ("q_a", "fused_qkv_a_proj", 0, False),
-    ".kv_a_proj_with_mqa.": ("kv_a", "fused_qkv_a_proj", 1, True),
-    ".q_b_proj.": ("q_b", "q_b_proj", None, False),
-    ".o_proj.": ("o_proj", "o_proj", None, False),
-}
-
-
-def _try_load_fp8_attn_proj(
-    name,
-    tensor,
-    buf,
-    params_dict,
-    loaded_params,
-    kv_a_pad_size: int,
-) -> bool:
-    """Dequantize FP8 q_a_proj / kv_a_proj_with_mqa / o_proj to BF16 on load.
-
-    The FP8 checkpoint stores these as block-FP8 (weight + weight_scale_inv),
-    but the model holds them in BF16 (``fused_qkv_a_proj`` is always BF16 via
-    DeepSeekV2FusedQkvAProjLinear; ``o_proj`` is excluded by
-    modules_to_not_convert). When the model target is BF16 (no
-    ``weight_scale_inv`` param) we dequantize; otherwise we return False so the
-    normal stacked/direct path loads the FP8 tensor as-is.
-    """
-    matched = None
-    for suffix, info in _FP8_ATTN_PROJS.items():
-        if suffix in name:
-            matched = (suffix, info)
-            break
-    if matched is None:
-        return False
-    suffix, (key, target_base, shard_id, is_kva) = matched
-    is_weight = name.endswith(".weight") and tensor.dtype == torch.float8_e4m3fn
-    is_scale = "weight_scale_inv" in name
-    if not is_weight and not is_scale:
-        return False
-
-    layer_prefix = name.rsplit(suffix, 1)[0]
-    target_w = f"{layer_prefix}.{target_base}.weight"
-    target_s = f"{layer_prefix}.{target_base}.weight_scale_inv"
-    # If the model actually kept this projection in FP8, let the normal path
-    # handle it (it has a weight_scale_inv param).
-    if target_s in params_dict:
-        return False
-
-    entry = buf.setdefault(layer_prefix, {}).setdefault(key, {})
-    entry["weight" if is_weight else "scale"] = tensor
-    if "weight" not in entry or "scale" not in entry:
-        return True
-
-    weight_fp8, scale_inv = entry["weight"], entry["scale"]
-    buf[layer_prefix].pop(key, None)
-    block_size = weight_fp8.shape[1] // scale_inv.shape[1]
-    weight_bf16 = _dequant_fp8_block(weight_fp8, scale_inv, block_size)
-    # NoPE: pad kv_a rope portion (kv_lora_rank -> kv_lora_rank + qk_rope_head_dim).
-    if is_kva and kv_a_pad_size > 0:
-        pad = torch.zeros(
-            kv_a_pad_size,
-            weight_bf16.shape[1],
-            dtype=weight_bf16.dtype,
-            device=weight_bf16.device,
-        )
-        weight_bf16 = torch.cat([weight_bf16, pad], dim=0)
-
-    param = params_dict[target_w]
-    if shard_id is None:
-        param.weight_loader(param, weight_bf16)
-    else:
-        param.weight_loader(param, weight_bf16, shard_id)
-    loaded_params.add(target_w)
     return True

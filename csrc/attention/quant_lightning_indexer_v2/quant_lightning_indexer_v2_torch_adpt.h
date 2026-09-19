@@ -138,11 +138,6 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> QuantLightningIndexerCandidate(
     char *keyLayoutPtr = const_cast<char *>(keyLayoutStr.c_str());
     int64_t returnValue = 0;
 
-    TORCH_CHECK(quantMode == 2, "Aurora QLI V2 currently supports INT8 quant_mode=2");
-    TORCH_CHECK(query.scalar_type() == at::kChar && key.scalar_type() == at::kChar,
-                "QLI V2 query/key must be INT8");
-    TORCH_CHECK(weights.scalar_type() == at::kHalf && queryDequantScale.scalar_type() == at::kHalf &&
-                keyDequantScale.scalar_type() == at::kHalf, "QLI V2 weights/scales must be FP16");
     TORCH_CHECK(candidateMode >= 1 && candidateMode <= 3, "Invalid candidate_mode");
     TORCH_CHECK(candidateMode != 2 || candidateTopkIndexIn.has_value(), "Consumer requires candidate blocks");
     if (query.device().is_meta()) return {sparseIndicesOut, sparseValuesOut, candidateTopkIndexOut};
