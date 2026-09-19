@@ -37,6 +37,7 @@ def common_metadata(query_lens, seq_lens, num_actual_tokens=None):
         num_input_tokens=0,
         num_actual_tokens=sum(query_lens) if num_actual_tokens is None else num_actual_tokens,
         query_start_loc=offsets,
+        query_start_loc_cpu=offsets,
         seq_lens=torch.tensor(seq_lens, dtype=torch.int32),
         block_table_tensor=torch.arange(len(seq_lens) * 3, dtype=torch.int32).view(len(seq_lens), 3),
         slot_mapping=torch.arange(sum(query_lens)),
@@ -280,3 +281,29 @@ def test_paged_tiling_shared_but_attention_computed_for_each_layer(builder, impl
     assert all(call.kwargs["scheduler_metadata"] is shared_tiling for call in kernel.call_args_list)
     assert metadata.scheduler_metadata[spec] is shared_tiling
     assert all(call.kwargs["num_splits"] == 0 for call in kernel.call_args_list)
+
+
+@pytest.mark.parametrize(
+    "query_lens,seq_lens,actual_tokens,expected_batch",
+    [
+        ([1], [4097], 1, 1),
+        ([1, 0, 0], [4097, 0, 0], 1, 1),
+        ([1, 1, 2], [4097, 4097], 2, 2),
+        ([3, 1, 0], [130, 4097, 0], 4, 2),
+        ([0], [0], 0, 1),
+    ],
+)
+def test_metadata_excludes_padding_from_active_batch(builder, query_lens, seq_lens, actual_tokens, expected_batch):
+    builder.max_num_reqs = 17
+    builder.capture_sizes = {1, 2, 4}
+    builder.scheduler_specs = {(4, 2, 8, torch.float32, 0.123, 0.0)}
+    common = common_metadata(query_lens, seq_lens, num_actual_tokens=actual_tokens)
+    with (
+        patch.object(fa3, "get_scheduler_metadata", return_value=torch.empty(1)) as tiling,
+        patch.object(torch.Tensor, "cpu", side_effect=AssertionError("device synchronization")),
+    ):
+        metadata = builder.build(0, common)
+    assert tiling.call_args.kwargs["batch_size"] == expected_batch
+    assert tiling.call_args.kwargs["num_splits"] == 0
+    assert metadata.seq_lens.shape == (17,)
+    assert metadata.query_start_loc.shape == (18,)

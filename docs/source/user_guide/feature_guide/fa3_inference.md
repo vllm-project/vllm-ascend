@@ -44,6 +44,8 @@ is required. With the option disabled, existing attention selection is preserved
   a second time. Shared prefix pages remain read-only when writing a new suffix.
 - The metadata builder consumes device-side query offsets and sequence lengths.
   It does not copy lengths to the CPU or infer decode causality from query length.
+  The runner's existing CPU query offsets identify the active request prefix for
+  tiling, without synchronizing device lengths.
 - `get_scheduler_metadata` executes device-side tiling once per distinct layer
   layout per batch. Layers reuse tiling, while each layer still
   computes attention from its own Q/K/V. Omitting metadata from the paged
@@ -57,8 +59,10 @@ is required. With the option disabled, existing attention selection is preserved
   Both tiling construction and attention execution pass `num_splits=0`, allowing
   the operator to select splitting. Mixed prefill/decode batches do not require
   separate calls.
-- Request dimensions include an extra padding row. Zero-length queries exclude
-  padding, including a dummy request inserted by the FIA-oriented runner.
+- Request buffers include an extra padding row and retain fixed dimensions for
+  graph replay. Tiling receives the active batch rather than buffer capacity:
+  inactive requests must not disable FlashDecode through its minimum query
+  length and task-count checks. A dummy forward retains one empty request.
 
 The standard Ascend graph dispatcher remains responsible for choosing FULL,
 FULL_DECODE_ONLY, or piecewise execution. Model runner and `attention_v1.py`
@@ -81,11 +85,11 @@ integration tests before enabling them in production.
 
 ## Validation
 
-The varlen metadata sharing update has CPU regression coverage for sharing tiling
-across layers while computing each layer's output separately. Its paired operator
-patch has been checked with isolated CPU mocks for default and supplied metadata,
-parameter mismatch rejection, and backward return arity. NPU and serving accuracy
-validation of this update are pending; earlier results do not validate it.
+CPU regression tests cover shared paged tiling, active batch counts, padding,
+and empty forwards. NPU regression tests cover long-KV graph replay while
+changing the active batch and switching between FlashDecode-eligible and
+short-KV attention workloads. Historical serving accuracy results do not
+validate subsequent backend changes.
 
 ```bash
 pytest -q tests/ut/attention/test_flash_attention_v3.py

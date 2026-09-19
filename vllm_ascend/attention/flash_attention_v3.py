@@ -3,6 +3,7 @@
 
 """Dense Ascend attention using flash-attention-npu's device-side FA3 tiling."""
 
+from bisect import bisect_left
 from dataclasses import dataclass, field
 
 import torch
@@ -88,6 +89,13 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
         num_reqs = common.num_reqs
         if num_reqs > self.max_num_reqs:
             raise ValueError("FA3 request count exceeds the configured batch capacity.")
+        # The runner can append zero-length or dummy requests for graph padding.
+        # Its CPU offsets identify the active prefix without a device sync.
+        # Keep one empty request for dummy forwards: the operator requires B > 0.
+        active_reqs = max(
+            1,
+            bisect_left(common.query_start_loc_cpu.numpy(), common.num_actual_tokens, 0, num_reqs + 1),
+        )
         source_key = (
             common.query_start_loc.data_ptr(),
             common.seq_lens.data_ptr(),
@@ -124,7 +132,9 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
             # captured on all CANN releases. This still consumes device lengths
             # asynchronously and requires no host-side per-layer graph updates.
             tiling = get_scheduler_metadata(
-                batch_size=self.max_num_reqs,
+                # Buffer capacity stays fixed for graph replay, but inactive
+                # slots must not participate in FlashDecode's min-Q/task count.
+                batch_size=active_reqs,
                 max_seqlen_q=max_query_len,
                 max_seqlen_k=block_tables.shape[1] * self.block_size,
                 num_heads_q=num_heads,

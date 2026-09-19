@@ -67,6 +67,7 @@ def make_attention(dtype, num_heads=NUM_HEADS, num_kv_heads=NUM_KV_HEADS):
         num_input_tokens=0,
         num_actual_tokens=0,
         query_start_loc=torch.zeros(MAX_REQS + 2, dtype=torch.int32, device="npu"),
+        query_start_loc_cpu=torch.zeros(MAX_REQS + 2, dtype=torch.int32),
         seq_lens=torch.zeros(MAX_REQS, dtype=torch.int32, device="npu"),
         block_table_tensor=torch.zeros(MAX_REQS, MAX_BLOCKS, dtype=torch.int32, device="npu"),
         slot_mapping=None,
@@ -90,6 +91,7 @@ def prepare_case(common, query_lens, context_lens, query, key, value):
     common.max_query_len = max(query_lens)
     common.query_start_loc.zero_()
     common.query_start_loc[: num_reqs + 1].copy_(offsets)
+    common.query_start_loc_cpu[: num_reqs + 1].copy_(offsets)
     common.seq_lens.zero_()
     common.seq_lens[:num_reqs].copy_(seq_lens)
     common.block_table_tensor.copy_(pages)
@@ -163,6 +165,49 @@ def test_fa3_precision(dtype, query_lens, context_lens, state, num_heads, num_kv
     torch.testing.assert_close(output.float().cpu(), expected, atol=0.02, rtol=0.02)
     forward_context.paged.assert_called_once()
     assert forward_context.paged.call_args.kwargs["num_splits"] == 0
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@torch.inference_mode()
+def test_fa3_graph_switches_flashdecode_and_active_batch(dtype, forward_context, monkeypatch):
+    # Long KV activates FlashDecode for small GQA batches; short KV disables it.
+    # Replay both paths with one captured workspace and stable tiling addresses.
+    monkeypatch.setitem(globals(), "MAX_BLOCKS", 40)
+    torch.manual_seed(44)
+    builder, impl, common = make_attention(dtype, 8, 1)
+    builder.max_num_reqs = 17
+    builder.capture_sizes = {4}
+    query = torch.empty(4, 8, HEAD_SIZE, device="npu", dtype=dtype)
+    key = torch.empty(4, 1, HEAD_SIZE, device="npu", dtype=dtype)
+    value = torch.empty_like(key)
+    output = torch.empty_like(query)
+    prepare_case(common, [1, 1, 1, 1], [127] * 4, query, key, value)
+    metadata = builder.build(0, common)
+    layer = SimpleNamespace(layer_name="model.layers.0.self_attn.attn", _k_scale_float=1.0, _v_scale_float=1.0)
+    caches = (impl.key_cache, impl.value_cache)
+    for _ in range(3):
+        impl.forward(layer, query, key, value, caches, metadata, output)
+    torch.npu.synchronize()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        impl.forward(layer, query, key, value, caches, metadata, output)
+    for query_lens, context_lens in [
+        ([1], [4096]),
+        ([1, 1, 1, 1], [4095] * 4),
+        ([3, 1], [4096, 2048]),
+        ([4], [127]),
+        ([1], [4097]),
+    ]:
+        pages, seq_lens = prepare_case(common, query_lens, context_lens, query, key, value)
+        with patch.object(fa3, "get_scheduler_metadata", wraps=fa3.get_scheduler_metadata) as tiling:
+            updated = builder.build(0, common)
+        assert tiling.call_args.kwargs["batch_size"] == len(query_lens)
+        spec = next(iter(builder.scheduler_specs))
+        assert updated.scheduler_metadata[spec].data_ptr() == metadata.scheduler_metadata[spec].data_ptr()
+        graph.replay()
+        torch.npu.synchronize()
+        expected = reference(impl, query, pages, query_lens, seq_lens)
+        torch.testing.assert_close(output[: sum(query_lens)].float().cpu(), expected, atol=0.02, rtol=0.02)
 
 
 @pytest.mark.parametrize("num_heads,num_kv_heads", [(4, 2), (16, 1)])
