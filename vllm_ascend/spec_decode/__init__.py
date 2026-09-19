@@ -35,6 +35,8 @@ from vllm_ascend.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
 
 
 def get_spec_decode_method(method, vllm_config, device, runner):
+    if vllm_config.speculative_config.use_gemma4_mtp():
+        return AscendGemma4Proposer(vllm_config, device, runner)
     if method == "ngram":
         return AscendNgramProposer(vllm_config, runner)
     elif method == "ngram_gpu":
