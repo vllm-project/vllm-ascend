@@ -245,6 +245,8 @@ class AscendSFADSADCPMetadata(AscendSFADCPMetadata):
 class AscendSFADSACPMetadataBuilder(AscendSFAMetadataBuilder):
     """Adds TP-token-sharded DSA-CP metadata to the shared SFA builder."""
 
+    supports_sfa_fia_shared_prefill_plan = False
+
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
@@ -618,6 +620,8 @@ class AscendSFADCPMetadataBuilder(
     DCPMetadataBuilderMixin,
     AscendSFAMetadataBuilder,
 ):
+    supports_sfa_fia_shared_prefill_plan = False
+
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
