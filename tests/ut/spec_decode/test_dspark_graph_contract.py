@@ -106,7 +106,7 @@ def test_replay_installs_forward_context_before_accessing_extra_ctx(monkeypatch)
     speculator = SimpleNamespace(
         num_query_per_req=7,
         input_batch=SimpleNamespace(seq_lens_cpu_upper_bound=object()),
-        build_draft_attn_metadatas=lambda *args: {"draft.0": object()},
+        get_draft_attn_metadatas_for_replay=lambda *args: {"draft.0": object()},
         attn_backends={"draft.0": _BackendA},
         dp_size=1,
         model_state=SimpleNamespace(attn_metadata={}),

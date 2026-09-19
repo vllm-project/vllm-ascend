@@ -23,6 +23,37 @@ logger = logging.getLogger(__name__)
 
 
 class AscendDFlashSpeculator(DFlashSpeculator):
+    def _build_draft_attn_metadata(self, num_reqs, num_reqs_padded, num_tokens_padded, *args, **kwargs):
+        # Upstream builds this metadata immediately before dispatching the
+        # draft FULL graph. Keep only that call's result; a failed rebuild
+        # must not leave an earlier result available for replay.
+        self._current_propose_draft_metadata = None
+        metadata = super()._build_draft_attn_metadata(num_reqs, num_reqs_padded, num_tokens_padded, *args, **kwargs)
+        if getattr(self, "_reuse_draft_metadata_within_propose", False) and metadata is not None:
+            self._current_propose_draft_metadata = (num_reqs, num_reqs_padded, num_tokens_padded, metadata)
+        return metadata
+
+    def get_draft_attn_metadatas_for_replay(self, num_reqs_padded, num_tokens_padded, seq_lens_cpu_upper_bound):
+        """Consume metadata from this propose only, otherwise rebuild it."""
+        cached = getattr(self, "_current_propose_draft_metadata", None)
+        self._current_propose_draft_metadata = None
+        if (
+            getattr(self, "_reuse_draft_metadata_within_propose", False)
+            and cached is not None
+            and cached[:3] == (self.input_batch.num_reqs, num_reqs_padded, num_tokens_padded)
+        ):
+            metadata = cached[3]
+            # The upstream build stops the query offsets at the real request
+            # count. FIA still needs query rows for the graph's padded batch.
+            self._update_draft_attn_metadata(metadata, num_reqs_padded)
+            return [metadata]
+        try:
+            # Capture/profile/dummy paths and incompatible descriptors retain
+            # the existing build path, including its padded-query correction.
+            return self.build_draft_attn_metadatas(num_reqs_padded, seq_lens_cpu_upper_bound)
+        finally:
+            self._current_propose_draft_metadata = None
+
     def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
         num_tokens_padded = num_reqs_padded * self.num_query_per_req
         with build_attn_metadata_wrapper():
@@ -57,6 +88,8 @@ class AscendDFlashSpeculator(DFlashSpeculator):
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
+        self._reuse_draft_metadata_within_propose = False
+        self._current_propose_draft_metadata = None
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         if self.speculative_config.enforce_eager:
@@ -127,33 +160,41 @@ class AscendDFlashSpeculator(DFlashSpeculator):
         dp_sync: Any = None,
     ) -> torch.Tensor:
         self.input_batch = input_batch
-        sync_state = num_tokens_across_dp if vllm_version_is("0.28.0") else dp_sync
-        if dummy_run and skip_attn_for_dummy_run:
-            # Profiling runs the draft with its own query token count, which
-            # can differ from the target batch. Let forward_context coordinate
-            # the actual draft counts instead of reusing the target DP state.
-            # TODO: Remove this guard once main2main includes upstream vLLM
-            # #54856 (facd9a74a1), which resets the profiling DP counts.
-            sync_state = None
-        with build_attn_metadata_wrapper():
-            return super().propose(
-                input_batch,
-                attn_metadata,
-                slot_mappings,
-                last_hidden_states,
-                aux_hidden_states,
-                num_sampled,
-                num_rejected,
-                last_sampled,
-                next_prefill_tokens,
-                temperature,
-                seeds,
-                sync_state,
-                dummy_run,
-                skip_attn_for_dummy_run,
-                mm_inputs,
-                is_profile=is_profile,
-            )
+        self._current_propose_draft_metadata = None
+        self._reuse_draft_metadata_within_propose = not dummy_run and not is_profile
+        try:
+            sync_state = num_tokens_across_dp if vllm_version_is("0.28.0") else dp_sync
+            if dummy_run and skip_attn_for_dummy_run:
+                # Profiling runs the draft with its own query token count, which
+                # can differ from the target batch. Let forward_context coordinate
+                # the actual draft counts instead of reusing the target DP state.
+                # TODO: Remove this guard once main2main includes upstream vLLM
+                # #54856 (facd9a74a1), which resets the profiling DP counts.
+                sync_state = None
+            with build_attn_metadata_wrapper():
+                return super().propose(
+                    input_batch,
+                    attn_metadata,
+                    slot_mappings,
+                    last_hidden_states,
+                    aux_hidden_states,
+                    num_sampled,
+                    num_rejected,
+                    last_sampled,
+                    next_prefill_tokens,
+                    temperature,
+                    seeds,
+                    sync_state,
+                    dummy_run,
+                    skip_attn_for_dummy_run,
+                    mm_inputs,
+                    is_profile=is_profile,
+                )
+        finally:
+            # Metadata aliases live request buffers. Never reuse it across
+            # decode steps, even after an exception or an eager dispatch.
+            self._reuse_draft_metadata_within_propose = False
+            self._current_propose_draft_metadata = None
 
 
 # main2main compat: upstream ``_prepare_dflash_inputs_kernel`` added four
@@ -231,10 +272,18 @@ if vllm_version_is("0.28.0"):
         last_valid_pos = tl.load(target_positions_ptr + valid_ctx_end - 1)
         query_base = req_idx * num_query_per_req
 
+        # Context and graph padding can contain thousands of entries. Tile
+        # these operations instead of issuing one scalar load/store per entry.
+        # Only program 0 owns each request, as in the scalar implementation.
+        lane_offsets = tl.arange(0, BLOCK_SIZE)
         # --- Context positions / slots ---
-        for j in range(0, num_ctx):
-            ctx_pos_idx = ctx_start + j
-            is_valid_ctx = j < num_valid_ctx
+        for j in range(0, num_ctx, BLOCK_SIZE):
+            ctx_pos_idx = ctx_start + j + lane_offsets
+            lane = j + lane_offsets
+            ctx_mask = lane < num_ctx
+            # Keep the scalar version's null-block guard: rejected-tail lanes
+            # and null block IDs must never produce a real cache slot.
+            is_valid_ctx = lane < num_valid_ctx
             ctx_pos = tl.load(target_positions_ptr + ctx_pos_idx, mask=is_valid_ctx, other=0)
             ctx_block_num = ctx_pos // block_size
             ctx_block_num = tl.minimum(ctx_block_num, block_table_stride - 1)
@@ -248,8 +297,8 @@ if vllm_version_is("0.28.0"):
                 ctx_block_id * block_size + (ctx_pos % block_size),
                 PAD_SLOT_ID,
             )
-            tl.store(out_context_positions_ptr + ctx_pos_idx, ctx_pos)
-            tl.store(out_context_slot_mapping_ptr + ctx_pos_idx, ctx_slot)
+            tl.store(out_context_positions_ptr + ctx_pos_idx, ctx_pos, mask=ctx_mask)
+            tl.store(out_context_slot_mapping_ptr + ctx_pos_idx, ctx_slot, mask=ctx_mask)
 
         # --- Query positions / input_ids / slots ---
         for q_off in range(0, num_query_per_req):
@@ -299,25 +348,28 @@ if vllm_version_is("0.28.0"):
         if req_idx == num_reqs - 1:
             # Pad per-request buffers to max_num_reqs for CUDA graph safety.
             last_query_end = num_reqs * num_query_per_req
-            for i in range(num_reqs, max_num_reqs + 1):
-                tl.store(out_query_start_loc_ptr + i, last_query_end)
-            for i in range(num_reqs, max_num_reqs):
-                tl.store(out_seq_lens_ptr + i, 0)
+            for i in range(num_reqs, max_num_reqs + 1, BLOCK_SIZE):
+                pad_idx = i + lane_offsets
+                tl.store(out_query_start_loc_ptr + pad_idx, last_query_end, mask=pad_idx <= max_num_reqs)
+                tl.store(out_seq_lens_ptr + pad_idx, 0, mask=pad_idx < max_num_reqs)
             # Padded sample slots point at query index 0 (a valid row in
             # last_hidden_states) so CG replay never reads OOB. Padded sample
             # idx mappings point to -1, which is ignored during sampling.
             pad_start = num_reqs * num_speculative_steps
             pad_end = max_num_reqs * num_speculative_steps
-            for i in range(pad_start, pad_end):
-                tl.store(out_sample_indices_ptr + i, 0)
-                tl.store(out_sample_pos_ptr + i, 0)
-                tl.store(out_sample_idx_mapping_ptr + i, -1)
+            for i in range(pad_start, pad_end, BLOCK_SIZE):
+                pad_idx = i + lane_offsets
+                pad_mask = pad_idx < pad_end
+                tl.store(out_sample_indices_ptr + pad_idx, 0, mask=pad_mask)
+                tl.store(out_sample_pos_ptr + pad_idx, 0, mask=pad_mask)
+                tl.store(out_sample_idx_mapping_ptr + pad_idx, -1, mask=pad_mask)
             # Pad query slot mappings past num_query_tokens with PAD so the
             # captured CG sees PAD slots (no K/V write) for replay sizes
             # larger than the current request count.
             q_pad_start = num_reqs * num_query_per_req
-            for i in range(q_pad_start, max_num_tokens):
-                tl.store(out_query_slot_mapping_ptr + i, PAD_SLOT_ID)
+            for i in range(q_pad_start, max_num_tokens, BLOCK_SIZE):
+                pad_idx = i + lane_offsets
+                tl.store(out_query_slot_mapping_ptr + pad_idx, PAD_SLOT_ID, mask=pad_idx < max_num_tokens)
 else:
     # main2main compat: upstream ``_prepare_dflash_inputs_kernel`` added
     # ``cp_rank``/``CP_SIZE``/``CP_INTERLEAVE`` for DCP support (see
@@ -395,10 +447,18 @@ else:
         last_valid_pos = tl.load(target_positions_ptr + valid_ctx_end - 1)
         query_base = req_idx * num_query_per_req
 
+        # Context and graph padding can contain thousands of entries. Tile
+        # these operations instead of issuing one scalar load/store per entry.
+        # Only program 0 owns each request, as in the scalar implementation.
+        lane_offsets = tl.arange(0, BLOCK_SIZE)
         # --- Context positions / slots ---
-        for j in range(0, num_ctx):
-            ctx_pos_idx = ctx_start + j
-            is_valid_ctx = j < num_valid_ctx
+        for j in range(0, num_ctx, BLOCK_SIZE):
+            ctx_pos_idx = ctx_start + j + lane_offsets
+            lane = j + lane_offsets
+            ctx_mask = lane < num_ctx
+            # Keep the scalar version's null-block guard: rejected-tail lanes
+            # and null block IDs must never produce a real cache slot.
+            is_valid_ctx = lane < num_valid_ctx
             ctx_pos = tl.load(target_positions_ptr + ctx_pos_idx, mask=is_valid_ctx, other=0)
             ctx_block_num = ctx_pos // block_size
             ctx_block_num = tl.minimum(ctx_block_num, block_table_stride - 1)
@@ -412,8 +472,8 @@ else:
                 ctx_block_id * block_size + (ctx_pos % block_size),
                 PAD_SLOT_ID,
             )
-            tl.store(out_context_positions_ptr + ctx_pos_idx, ctx_pos)
-            tl.store(out_context_slot_mapping_ptr + ctx_pos_idx, ctx_slot)
+            tl.store(out_context_positions_ptr + ctx_pos_idx, ctx_pos, mask=ctx_mask)
+            tl.store(out_context_slot_mapping_ptr + ctx_pos_idx, ctx_slot, mask=ctx_mask)
 
         # --- Query positions / input_ids / slots ---
         for q_off in range(0, num_query_per_req):
@@ -463,22 +523,25 @@ else:
         if req_idx == num_reqs - 1:
             # Pad per-request buffers to max_num_reqs for CUDA graph safety.
             last_query_end = num_reqs * num_query_per_req
-            for i in range(num_reqs, max_num_reqs + 1):
-                tl.store(out_query_start_loc_ptr + i, last_query_end)
-            for i in range(num_reqs, max_num_reqs):
-                tl.store(out_seq_lens_ptr + i, 0)
+            for i in range(num_reqs, max_num_reqs + 1, BLOCK_SIZE):
+                pad_idx = i + lane_offsets
+                tl.store(out_query_start_loc_ptr + pad_idx, last_query_end, mask=pad_idx <= max_num_reqs)
+                tl.store(out_seq_lens_ptr + pad_idx, 0, mask=pad_idx < max_num_reqs)
             # Padded sample slots point at query index 0 (a valid row in
             # last_hidden_states) so CG replay never reads OOB. Padded sample
             # idx mappings point to -1, which is ignored during sampling.
             pad_start = num_reqs * num_speculative_steps
             pad_end = max_num_reqs * num_speculative_steps
-            for i in range(pad_start, pad_end):
-                tl.store(out_sample_indices_ptr + i, 0)
-                tl.store(out_sample_pos_ptr + i, 0)
-                tl.store(out_sample_idx_mapping_ptr + i, -1)
+            for i in range(pad_start, pad_end, BLOCK_SIZE):
+                pad_idx = i + lane_offsets
+                pad_mask = pad_idx < pad_end
+                tl.store(out_sample_indices_ptr + pad_idx, 0, mask=pad_mask)
+                tl.store(out_sample_pos_ptr + pad_idx, 0, mask=pad_mask)
+                tl.store(out_sample_idx_mapping_ptr + pad_idx, -1, mask=pad_mask)
             # Pad query slot mappings past num_query_tokens with PAD so the
             # captured CG sees PAD slots (no K/V write) for replay sizes
             # larger than the current request count.
             q_pad_start = num_reqs * num_query_per_req
-            for i in range(q_pad_start, max_num_tokens):
-                tl.store(out_query_slot_mapping_ptr + i, PAD_SLOT_ID)
+            for i in range(q_pad_start, max_num_tokens, BLOCK_SIZE):
+                pad_idx = i + lane_offsets
+                tl.store(out_query_slot_mapping_ptr + pad_idx, PAD_SLOT_ID, mask=pad_idx < max_num_tokens)

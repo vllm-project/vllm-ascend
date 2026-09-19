@@ -23,6 +23,12 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_kind,
 )
 
+# DFLASH-MIXED-WINDOW-CACHE-WORKAROUND: remove these imports with dflash_cache.py.
+from vllm_ascend.core.dflash_cache import (
+    wrap_dflash_cache_group_annotation,
+    wrap_dflash_cache_group_builder,
+    wrap_dflash_cache_planner,
+)
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
 from vllm_ascend.models.glm5next.cache_config import (
     _get_glm5_next_cache_layout,
@@ -635,7 +641,11 @@ vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_page_size = _get_kv_cac
 # main uses _ascend_get_kv_cache_config_from_groups and the stride-aware planner.
 if vllm_version_is("0.28.0"):
     vllm.v1.core.kv_cache_utils._get_kv_cache_config_packed = _get_kv_cache_config_deepseek_v4
-vllm.v1.core.kv_cache_utils.get_kv_cache_groups = _get_glm5_next_kv_cache_groups
+vllm.v1.core.kv_cache_utils.get_kv_cache_groups = wrap_dflash_cache_group_builder(_get_glm5_next_kv_cache_groups)
+if hasattr(vllm.v1.core.kv_cache_utils, "_annotate_eagle_groups"):
+    vllm.v1.core.kv_cache_utils._annotate_eagle_groups = wrap_dflash_cache_group_annotation(
+        vllm.v1.core.kv_cache_utils._annotate_eagle_groups
+    )
 KVCacheConfig.has_mamba_layers = property(  # type: ignore[assignment]
     _kv_cache_config_has_mamba_layers
 )
@@ -648,3 +658,10 @@ if not vllm_version_is("0.28.0"):
 import vllm.v1.engine.core  # noqa: E402
 
 vllm.v1.engine.core.resolve_kv_cache_block_sizes = _ascend_resolve_kv_cache_block_sizes
+
+# DFLASH-MIXED-WINDOW-CACHE-WORKAROUND: keep both call sites on the same
+# allocation-time safety plan. This wrapper leaves non-mixed DFlash and all
+# target-only configurations unchanged; remove with dflash_cache.py.
+_dflash_cache_planner = wrap_dflash_cache_planner(vllm.v1.core.kv_cache_utils.get_kv_cache_configs)
+vllm.v1.core.kv_cache_utils.get_kv_cache_configs = _dflash_cache_planner
+vllm.v1.engine.core.get_kv_cache_configs = _dflash_cache_planner

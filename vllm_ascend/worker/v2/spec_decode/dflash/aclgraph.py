@@ -82,8 +82,9 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         """Override run_fullgraph to update full graph params in run_fullgraph."""
         num_tokens = desc.num_tokens
 
-        draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(
+        draft_attn_metadatas = self.speculator.get_draft_attn_metadatas_for_replay(
             desc.num_reqs,
+            desc.num_tokens,
             self.speculator.input_batch.seq_lens_cpu_upper_bound,
         )
         self.update_stream.wait_stream(torch.npu.current_stream())
