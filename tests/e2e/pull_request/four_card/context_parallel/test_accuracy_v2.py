@@ -643,6 +643,7 @@ def test_gqa_pcp_pd_disaggregation() -> None:
 def _run_pcp_spec_decode(
     model: str,
     speculative_config: dict[str, object],
+    prompts: Sequence[str] = PCP_PROMPTS,
 ) -> None:
     sampling_params = SamplingParams(max_tokens=16, temperature=0.0)
     with VllmRunner(
@@ -658,12 +659,12 @@ def _run_pcp_spec_decode(
         compilation_config=PCP_FULL_DECODE_GRAPH,
         speculative_config=speculative_config,
     ) as runner:
-        outputs = runner.model.generate(PCP_PROMPTS, sampling_params)
+        outputs = runner.model.generate(prompts, sampling_params)
         metrics = runner.model.get_metrics()
         num_drafts = sum(metric.value for metric in metrics if metric.name == "vllm:spec_decode_num_drafts")
 
     token_ids = [output.outputs[0].token_ids for output in outputs]
-    assert len(token_ids) == len(PCP_PROMPTS)
+    assert len(token_ids) == len(prompts)
     assert all(token_ids)
     assert num_drafts > 0
 
@@ -717,13 +718,27 @@ def test_mtp_mla_spec_decode_with_pcp() -> None:
     },
 )
 @wait_until_npu_memory_free(target_free_percentage=0.8)
-def test_eagle3_gqa_spec_decode_with_pcp() -> None:
+@pytest.mark.parametrize("pcp_segment_boundary", [False, True], ids=["chunked_prefill", "pcp_segment_boundary"])
+def test_eagle3_gqa_spec_decode_with_pcp(pcp_segment_boundary: bool) -> None:
     """Guard MRV2 Eagle3 GQA PCP full-decode-only graph execution."""
-    _run_pcp_spec_decode(
-        EAGLE3_PCP_TARGET_MODEL,
-        {
-            "method": "eagle3",
-            "model": EAGLE3_PCP_DRAFT_MODEL,
-            "num_speculative_tokens": 3,
-        },
-    )
+    prompts = PCP_PROMPTS
+    env = {}
+    if pcp_segment_boundary:
+        # Queue all three prefills before scheduling: PCP creates six local
+        # block-table rows, while draft decode uses a four-request graph.
+        env["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+        prompts = [
+            "Alice explains how to grow flowers in a garden. Alice explains how to grow flowers",
+            "Bob describes a journey across the mountains. Bob describes a journey across the mountains.",
+            "Carol teaches students how to solve a math problem. Carol teaches students how to solve",
+        ]
+    with patch.dict(os.environ, env):
+        _run_pcp_spec_decode(
+            EAGLE3_PCP_TARGET_MODEL,
+            {
+                "method": "eagle3",
+                "model": EAGLE3_PCP_DRAFT_MODEL,
+                "num_speculative_tokens": 3,
+            },
+            prompts,
+        )
