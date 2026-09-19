@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import torch
@@ -401,6 +401,12 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         metadata_cls: type[AscendSFAMetadata] | None = None,
         supports_dcp_with_varlen: bool = False,
     ):
+        layer = vllm_config.compilation_config.static_forward_context[layer_names[0]]
+        self.nope = layer.qk_rope_head_dim == 0
+        if self.nope and getattr(kv_cache_spec, "indexes_kv_by_block_stride", False):
+            # MRV2 passes a kernel-sized spec. Pooled NoPE metadata still
+            # addresses the scheduler's logical pages, as in MRV1.
+            kv_cache_spec = replace(kv_cache_spec, block_size=vllm_config.cache_config.block_size)
         super().__init__(
             kv_cache_spec,
             layer_names,
@@ -413,8 +419,6 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         # Match the logical block size selected for BlockTable.
         self.kernel_block_size = select_common_block_size(kv_cache_spec.block_size, [AscendSFABackend])
 
-        layer = vllm_config.compilation_config.static_forward_context[layer_names[0]]
-        self.nope = layer.qk_rope_head_dim == 0
         self.nope_states: dict[int | None, SparseMLAMetadataState] = {}
         self.nope_indexer = None
         if self.nope:

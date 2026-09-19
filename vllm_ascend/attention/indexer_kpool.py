@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Cache metadata and execution backends for the GLM-Next pooled indexer."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import torch
@@ -21,6 +21,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
     get_kv_cache_compression_ratio,
@@ -81,6 +82,9 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
             raise ValueError(f"Ascend Indexer KPool cache requires compress_ratio > 1, got {compress_ratio}.")
         if not layer_names or any(not name.endswith(".indexer.k_cache") for name in layer_names):
             raise ValueError(f"Invalid Indexer KPool cache layer names: {layer_names}.")
+        # MRV2 replaces the builder spec's block size with the SFA kernel
+        # size. Compression and page IDs use the original logical block.
+        kv_cache_spec = replace(kv_cache_spec, block_size=vllm_config.cache_config.block_size)
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.logical_block_size = kv_cache_spec.block_size
         self.storage_block_size = get_storage_block_size(kv_cache_spec)
@@ -235,8 +239,9 @@ class AscendIndexerKPoolBackend(AttentionBackend):
         num_kv_heads: int,
         head_size: int,
         cache_type: str = "",
+        cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
-        del cache_type
+        del cache_type, cache_dtype_str
         if num_kv_heads != 1:
             raise ValueError(f"Indexer KPool cache requires one KV head, got {num_kv_heads}.")
         return (num_blocks, block_size, num_kv_heads, head_size)
@@ -324,8 +329,9 @@ class AscendIndexerKPoolTailBackend(AttentionBackend):
         num_kv_heads: int,
         head_size: int,
         cache_type: str = "",
+        cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
-        del cache_type
+        del cache_type, cache_dtype_str
         if num_kv_heads != 1:
             raise ValueError(f"Indexer KPool tail cache requires one KV head, got {num_kv_heads}.")
         return (num_blocks, 2, block_size, head_size)
@@ -427,8 +433,11 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         if not isinstance(tail_metadata, AscendIndexerKPoolTailMetadata):
             raise TypeError("GLM KPool backend requires tail-cache metadata.")
 
+        # MRV2 captures FULL graphs with runtime mode NONE. The capture
+        # must cover future sequence lengths, not the dummy's short prefix.
+        full_graph = context.cudagraph_runtime_mode == CUDAGraphMode.FULL or _EXTRA_CTX.capturing
         num_tokens = hidden_states.shape[0]
-        if context.cudagraph_runtime_mode != CUDAGraphMode.FULL:
+        if not full_graph:
             num_tokens = min(num_tokens, indexer_metadata.num_actual_tokens)
         hidden = hidden_states[:num_tokens]
         k_hidden = k_hidden_states[:num_tokens]
@@ -476,7 +485,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             index_kpool=self.index_kpool,
             max_pool_seq_len=(
                 indexer_metadata.block_table.shape[1] * indexer_cache.shape[1]
-                if context.cudagraph_runtime_mode == CUDAGraphMode.FULL or indexer_metadata.seq_lens_cpu is None
+                if full_graph or indexer_metadata.seq_lens_cpu is None
                 else int(indexer_metadata.seq_lens_cpu.max())
                 if indexer_metadata.seq_lens_cpu.numel()
                 else 0

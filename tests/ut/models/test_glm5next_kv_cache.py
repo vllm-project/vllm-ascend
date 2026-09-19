@@ -25,6 +25,7 @@ from vllm_ascend.core.kv_cache_interface import (
     is_prefix_cacheable,
     register_ascend_kv_cache_specs,
 )
+from vllm_ascend.models.glm5next.attention import Indexer
 from vllm_ascend.models.glm5next.kv_cache import (
     Glm5NextIndexerCache,
     Glm5NextTailCache,
@@ -165,11 +166,13 @@ def test_invalid_pool_geometry_is_rejected(ratio):
 
 
 @pytest.mark.parametrize("storage_block_size", [8, 24, 144, 1536, 2048])
-def test_indexer_metadata_addresses_complete_storage_pages(storage_block_size):
+@pytest.mark.parametrize("kernel_spec", [False, True])
+def test_indexer_metadata_addresses_complete_storage_pages(storage_block_size, kernel_spec):
     pool_size = 16
     logical_size = storage_block_size * pool_size
     split = logical_size // 128
     config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=logical_size),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=4, max_num_seqs=1),
         model_config=SimpleNamespace(max_model_len=logical_size * 3),
     )
@@ -181,6 +184,8 @@ def test_indexer_metadata_addresses_complete_storage_pages(storage_block_size):
         tokens_per_state=pool_size,
         model_version="glm5_next",
     )
+    if kernel_spec:
+        spec = spec.copy_with_new_block_size(128)
     builders = [
         AscendIndexerKPoolMetadataBuilder(spec, ["layer.indexer.k_cache"], config, torch.device("cpu"))
         for _ in range(2)
@@ -256,14 +261,65 @@ def test_model_cache_layers_publish_source_compatible_specs():
     assert state_spec.indexes_kv_by_block_stride
     assert indexer.get_attn_backend() is AscendIndexerKPoolBackend
     assert state.get_attn_backend() is AscendIndexerKPoolTailBackend
+    assert indexer.get_attn_backend().get_kv_cache_shape(3, 16, 1, 128, cache_dtype_str="auto") == (3, 16, 1, 128)
+    assert state.get_attn_backend().get_kv_cache_shape(3, 16, 1, 128, cache_dtype_str="auto") == (3, 2, 16, 128)
     assert set(current_config.compilation_config.static_forward_context) == {
         indexer.prefix,
         state.prefix,
     }
 
 
+@pytest.mark.parametrize(("num_speculative_tokens", "expected_capacity"), [(0, 4), (1, 8), (3, 8), (7, 16)])
+@pytest.mark.parametrize("start_residue", range(4))
+def test_indexer_tail_retains_history_after_speculative_rejection(
+    num_speculative_tokens, expected_capacity, start_residue
+):
+    pool_size = 4
+    config = SimpleNamespace(
+        num_speculative_tokens=num_speculative_tokens,
+        parallel_config=SimpleNamespace(pipeline_parallel_size=1),
+        compilation_config=SimpleNamespace(static_forward_context={}),
+    )
+    model_config = SimpleNamespace(
+        index_topk=8, index_n_heads=1, index_head_dim=2, index_kpool=pool_size, qk_rope_head_dim=0
+    )
+    with (
+        patch("vllm_ascend.models.glm5next.kv_cache.get_current_vllm_config", return_value=config),
+        patch("vllm_ascend.models.glm5next.attention.ReplicatedLinear", return_value=torch.nn.Identity()),
+        patch("vllm_ascend.models.glm5next.attention.MergedColumnParallelLinear", return_value=torch.nn.Identity()),
+    ):
+        indexer = Indexer(
+            config,
+            model_config,
+            hidden_size=4,
+            q_lora_rank=4,
+            quant_config=None,
+            cache_config=SimpleNamespace(block_size=128),
+            topk_indices_buffer=torch.empty(8, 11, dtype=torch.int32),
+            prefix="model.layers.0.indexer",
+        )
+    capacity = indexer.tail_cache.get_kv_cache_spec(config).block_size
+    assert capacity == expected_capacity
+    # The no-prefix-cache coordinator requires each group to divide the
+    # scheduler block size; raw ring capacities such as 7 violate this.
+    assert indexer.k_cache.get_kv_cache_spec(config).block_size % capacity == 0
+    # Store absolute positions as distinct raw-key values. The verifier writes
+    # every candidate before the sampler decides how many tokens to retain.
+    start = 4 * pool_size + start_residue
+    ring = [-1] * capacity
+    for position in range(start + num_speculative_tokens + 1):
+        ring[position % capacity] = position
+    for accepted in range(1, num_speculative_tokens + 2):
+        replay_start = start + accepted
+        pool_start = replay_start // pool_size * pool_size
+        assert [ring[position % capacity] for position in range(pool_start, replay_start)] == list(
+            range(pool_start, replay_start)
+        )
+
+
 def test_indexer_metadata_preserves_raw_request_boundaries():
     config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=256),
         scheduler_config=SimpleNamespace(
             max_num_batched_tokens=16,
             max_num_seqs=2,
