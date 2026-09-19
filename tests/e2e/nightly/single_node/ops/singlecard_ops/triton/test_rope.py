@@ -331,3 +331,44 @@ def test_rotary_embedding_triton_kernel_siso(
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
+
+
+@pytest.mark.parametrize("max_position_embeddings", MAX_POSITION_EMBEDDINGS)
+@pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+@pytest.mark.parametrize("num_q_heads", SISO_NUM_HEADS)
+@pytest.mark.parametrize("head_size", SISO_HEAD_SIZES)
+@pytest.mark.parametrize("rotary_dim", SISO_ROTARY_DIMS)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", DEVICES)
+@torch.inference_mode()
+def test_rotary_embedding_triton_kernel_siso_with_cos_sin_cache(
+    max_position_embeddings: int,
+    is_neox_style: bool,
+    num_tokens: int,
+    num_q_heads: int,
+    head_size: int,
+    rotary_dim: int,
+    dtype: torch.dtype,
+    seed: int,
+    device: str,
+) -> None:
+    torch.manual_seed(seed)
+    torch.set_default_device(device)
+
+    if rotary_dim == -1:
+        rotary_dim = head_size
+    cos_sin_cache = torch.randn(max_position_embeddings, rotary_dim, dtype=dtype, device=device)
+    positions = torch.randint(low=0, high=max_position_embeddings, size=(num_tokens,), dtype=torch.int64, device=device)
+    q_trt = torch.randn(num_tokens, num_q_heads, head_size, dtype=dtype, device=device)
+    q_gold = torch.randn(num_tokens, num_q_heads, head_size, dtype=dtype, device=device)
+    q_trt.copy_(q_gold)
+    q_trt = rope_forward_triton_siso(q_trt, cos_sin_cache=cos_sin_cache, positions=positions, rope_dim=rotary_dim, is_neox_style=is_neox_style)
+    cos, sin = cos_sin_cache.index_select(0, positions).chunk(2, dim=-1)
+    q_gold = _rope_siso_pytorch_native(q_gold, cos, sin, rope_dim=rotary_dim, is_neox_style=is_neox_style)
+    # Compare the results.
+    torch.testing.assert_close(q_trt.view(q_gold.size()), q_gold, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()

@@ -204,6 +204,7 @@ def _triton_rope_siso(
     cos_sin_ptr,
     cos_sin_row_stride,
     pos_ptr,
+    output_ptr,
     num_tokens,
     n_h: tl.constexpr,
     hd: tl.constexpr,
@@ -230,6 +231,7 @@ def _triton_rope_siso(
 
     for row_idx in tl.range(pid, num_tokens, row_block_size):
         qk_start_ptr = qk_ptr + row_idx * qk_row_stride
+        out_start_ptr = output_ptr + row_idx * qk_row_stride
 
         # ####################################################################
         # get the cos(mθ_{i...d/2}) and sin(mθ_{i...d/2}) for token position
@@ -269,7 +271,7 @@ def _triton_rope_siso(
         else:
             qk_tile = extension.insert_slice(qk_tile, new_qk_tile_1, [0, 0], [pad_n_h, rope_dim // 2], [1, 2])
             qk_tile = extension.insert_slice(qk_tile, new_qk_tile_2, [0, 1], [pad_n_h, rope_dim // 2], [1, 2])
-        tl.store(qk_start_ptr + qk_offsets, qk_tile, mask=qk_mask)
+        tl.store(out_start_ptr + qk_offsets, qk_tile, mask=qk_mask)
 
 
 @triton.jit
@@ -565,6 +567,7 @@ def rope_forward_triton_siso(
             cos_sin_cache,
             cos_sin_cache.stride(0),
             positions,
+            qk,
             num_tokens,
             n_head,
             head_dim,
@@ -593,6 +596,7 @@ def rope_forward_triton_siso(
             None,
             None,
             None,
+            qk,
             num_tokens,
             n_head,
             head_dim,
