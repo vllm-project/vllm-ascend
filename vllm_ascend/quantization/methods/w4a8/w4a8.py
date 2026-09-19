@@ -35,6 +35,7 @@ from vllm_ascend.utils import (
     COMPRESSED_TENSORS_METHOD,
     dispose_tensor,
     maybe_trans_nz,
+    vllm_version_is,
 )
 
 from ..base import AscendMoEScheme, QuantType
@@ -340,6 +341,11 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             layer.w13_weight.data = self._pack_to_int32(layer.w13_weight.data)
             layer.w2_weight.data = self._pack_to_int32(layer.w2_weight.data)
 
+    def _sum_with_dim(self, x: torch.Tensor, dim: int) -> torch.Tensor:
+        if vllm_version_is("0.28.0"):
+            return x.sum(axis=dim)
+        return x.sum(dim=dim)
+
     def process_weights_after_loading_compressed_tensors(self, layer):
         layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2).contiguous()
         layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2).contiguous()
@@ -348,7 +354,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             group_num, k, n = weight.shape
             scale = scale.transpose(1, 2).contiguous()
             scale = scale.reshape(group_num, -1, n)
-            bias = 8 * (weight.to(torch.float32) * scale).sum(axis=1)
+            bias = 8 * self._sum_with_dim(weight.to(torch.float32) * scale, 1)
             return bias
 
         w13_bias = update_bias_compressed_tensors(layer.w13_weight.data, layer.w13_weight_scale.data)
@@ -553,6 +559,6 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         layer.w13_weight_scale.data = self._process_scale(layer.w13_weight_scale.data)
         layer.w2_weight_scale.data = self._process_scale(layer.w2_weight_scale.data)
 
-        layer.w13_scale_bias.data = layer.w13_scale_bias.data.transpose(1, 2).contiguous().sum(axis=1)
-        layer.w2_scale_bias.data = layer.w2_scale_bias.data.transpose(1, 2).contiguous().sum(axis=1)
+        layer.w13_scale_bias.data = self._sum_with_dim(layer.w13_scale_bias.data.transpose(1, 2).contiguous(), 1)
+        layer.w2_scale_bias.data = self._sum_with_dim(layer.w2_scale_bias.data.transpose(1, 2).contiguous(), 1)
         layer.w13_weight_scale.data = self.maybe_squeeze_per_channel_weight_scale(layer.w13_weight_scale.data)

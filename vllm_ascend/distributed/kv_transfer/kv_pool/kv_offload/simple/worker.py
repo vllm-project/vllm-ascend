@@ -33,6 +33,7 @@ from vllm.v1.simple_kv_offload.worker import SimpleCPUOffloadWorker
 from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.simple.copy_backend import (
     NPUDmaCopyBackend,
 )
+from vllm_ascend.utils import vllm_version_is
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -167,12 +168,17 @@ class SimpleCPUOffloadNPUWorker(SimpleCPUOffloadWorker):
         self,
         finished_req_ids: set[str],
     ) -> tuple[set[str] | None, set[str] | None]:
-        """Submit NPU transfers and report completed events.
+        """Report completed transfer events.
 
-        This mirrors vLLM's worker state machine. The only platform-specific
-        difference is recording the store barrier with ``torch.npu`` instead
-        of the CUDA stream used by the upstream implementation.
+        On main, upstream submits loads (``start_load_kv``) and stores
+        (``wait_for_save``) itself, so this only polls events — matching the
+        inherited implementation. On 0.28.0 the store barrier is recorded
+        with ``torch.npu`` inside ``get_finished``, which was the single
+        submission entry point of that lane.
         """
+        if not vllm_version_is("0.28.0"):
+            return super().get_finished(finished_req_ids)
+
         metadata = self._connector_metadata
         if metadata is not None:
             if metadata.load_cpu_blocks:

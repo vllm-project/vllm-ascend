@@ -59,4 +59,27 @@ def bind_kv_cache(
         utils.share_replayssm_ring_trackers(ordered_layer_names, forward_context, kv_cache_groups)
 
 
+# Upstream #53781 introduced bind_kv_cache_to_layers, which calls
+# layer.bind_kv_cache() expecting a single tensor. Ascend Mamba layers bind a
+# list of per-state tensors, so assign the cache directly like bind_kv_cache
+# above.
+def bind_kv_cache_to_layers(
+    kv_caches: dict[str, torch.Tensor],
+    forward_context: dict[str, Attention],
+    num_attn_module: int = 1,
+    kv_cache_groups: Sequence[KVCacheGroupSpec] | None = None,
+) -> None:
+    """Bind layer caches and share ReplaySSM trackers in model-layer order."""
+    for layer_name, kv_cache in kv_caches.items():
+        forward_context[layer_name].kv_cache = kv_cache
+
+    ordered_layer_names = sorted(
+        kv_caches, key=lambda name: extract_layer_index(name, num_attn_module)
+    )
+    if not vllm_version_is("0.28.0"):
+        utils.share_replayssm_ring_trackers(ordered_layer_names, forward_context, kv_cache_groups)
+
+
 utils.bind_kv_cache = bind_kv_cache
+if not vllm_version_is("0.28.0"):
+    utils.bind_kv_cache_to_layers = bind_kv_cache_to_layers

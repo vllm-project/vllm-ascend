@@ -19,6 +19,7 @@
 
 from contextlib import AbstractContextManager, contextmanager
 from contextvars import ContextVar
+from typing import Any
 
 import numpy as np
 import torch
@@ -878,23 +879,47 @@ def graph_manager_wrapper(model_runner):
     """Context manager to override graph manager."""
     original_graph_manager = vllm_model_runner.ModelCudaGraphManager
 
-    def factory(  # type: ignore[misc]
-        vllm_config: VllmConfig,
-        device: torch.device,
-        cudagraph_mode: CUDAGraphMode,
-        decode_query_len: int,
-        lora_capture_cases: list[int] | None = None,
-        varlen_decode: bool = False,
-    ):
-        return ModelAclGraphManager(
-            vllm_config,
-            device,
-            cudagraph_mode,
-            decode_query_len,
-            model_runner,
-            lora_capture_cases=lora_capture_cases,
-            varlen_decode=varlen_decode,  # type: ignore[call-arg]
-        )
+    if vllm_version_is("0.28.0"):
+
+        def factory(  # type: ignore[misc]
+            vllm_config: VllmConfig,
+            device: torch.device,
+            cudagraph_mode: CUDAGraphMode,
+            decode_query_len: int,
+            lora_capture_cases: list[int] | None = None,
+            varlen_decode: bool = False,
+        ):
+            return ModelAclGraphManager(
+                vllm_config,
+                device,
+                cudagraph_mode,
+                decode_query_len,
+                model_runner,
+                lora_capture_cases=lora_capture_cases,
+                varlen_decode=varlen_decode,  # type: ignore[call-arg]
+            )
+
+    else:
+
+        def factory(  # type: ignore[misc]
+            vllm_config: VllmConfig,
+            device: torch.device,
+            cudagraph_mode: CUDAGraphMode,
+            decode_query_len: int,
+            lora_capture_cases: list[int] | None = None,
+            varlen_decode: bool = False,
+            ubatch_runner: Any = None,
+        ):
+            return ModelAclGraphManager(
+                vllm_config,
+                device,
+                cudagraph_mode,
+                decode_query_len,
+                model_runner,
+                lora_capture_cases=lora_capture_cases,
+                varlen_decode=varlen_decode,  # type: ignore[call-arg]
+                ubatch_runner=ubatch_runner,
+            )
 
     try:
         vllm_model_runner.ModelCudaGraphManager = factory
