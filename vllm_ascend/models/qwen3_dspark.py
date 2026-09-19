@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -19,6 +20,46 @@ TARGET_LM_HEAD_WEIGHT_NAMES = (
     "language_model.lm_head.weight",
     "lm_head.weight",
 )
+
+logger = logging.getLogger(__name__)
+
+
+def _configure_dspark_draft_window(vllm_config: VllmConfig) -> None:
+    """Make ``draft_window_size`` a physical Qwen3 DSpark KV window.
+
+    ``SlidingWindowAdapter`` limits the block table consumed by attention, but
+    the scheduler can recycle old KV blocks only when the attention layers
+    expose a ``SlidingWindowSpec``. Qwen3 DSpark is built on the DFlash model,
+    whose ``dflash_config["use_swa"]`` switch selects that cache spec. Configure
+    it before the parent constructor creates the attention layers so only the
+    draft KV groups use ``SlidingWindowManager``; target-model groups are not
+    modified.
+    """
+    additional_config = vllm_config.additional_config or {}
+    window_size = additional_config.get("draft_window_size")
+    if window_size is None:
+        return
+    if isinstance(window_size, bool) or not isinstance(window_size, int) or window_size <= 0:
+        raise ValueError("draft_window_size must be a positive integer")
+
+    speculative_config = getattr(vllm_config, "speculative_config", None)
+    draft_model_config = getattr(speculative_config, "draft_model_config", None)
+    draft_config = getattr(draft_model_config, "hf_config", None)
+    if draft_config is None:
+        return
+
+    dflash_config = getattr(draft_config, "dflash_config", None)
+    if dflash_config is None:
+        dflash_config = {}
+        draft_config.dflash_config = dflash_config
+    dflash_config.update(
+        use_swa=True,
+        swa_window_size=window_size,
+    )
+    logger.info(
+        "Configuring Qwen3 DSpark draft KV cache as a %d-token physical sliding window.",
+        window_size,
+    )
 
 
 # Process the first linear weight with rotation matrix, if the target model uses rotary quantization
@@ -42,6 +83,7 @@ def process_weight(linear_weight: torch.Tensor, rotation_weight: torch.Tensor):
 
 class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+        _configure_dspark_draft_window(vllm_config)
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
         config = self.config
