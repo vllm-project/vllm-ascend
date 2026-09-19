@@ -376,7 +376,6 @@ class NPUPlatform(Platform):
         NPU-unsupported ones.
         """
         from vllm.config.compilation import CUDAGraphMode
-        from vllm.config.vllm import OptimizationLevel
 
         device_config = getattr(vllm_config, "device_config", None)
         if device_config is not None and getattr(device_config, "device_type", cls.device_type) != cls.device_type:
@@ -384,22 +383,11 @@ class NPUPlatform(Platform):
         if vllm_config.compilation_config.backend != "inductor":
             return
 
-        # Only the enforce_eager fail-fast needs model_config; the derived
-        # defaults below do not. A bare config (model_config=None, e.g. in
-        # tests) still gets the track applied.
-        model_config = getattr(vllm_config, "model_config", None)
-        if model_config is not None and model_config.enforce_eager:
-            raise ValueError(
-                "compilation_config.backend='inductor' is incompatible with "
-                "enforce_eager=True: enforce_eager disables all compilation. "
-                "Drop enforce_eager to use the inductor compile-backend track."
-            )
-        if vllm_config.optimization_level == OptimizationLevel.O0:
-            raise ValueError(
-                "compilation_config.backend='inductor' requires optimization "
-                "level -O1 or higher (-O0 disables all compilation)."
-            )
-
+        # enforce_eager / -O0: upstream semantics, no fail-fast (user ruling
+        # 2026-09-19, same lens as refactor1 debt 1) — vLLM core forces the
+        # compilation mode to NONE and the track is inert, exactly like CUDA;
+        # the stage-1 raises guarded the side-door half-configured world,
+        # which the front door eliminated.
         compilation_config = vllm_config.compilation_config
         logger.info(
             "Inductor compile-backend track enabled (compilation_config.backend=inductor): "

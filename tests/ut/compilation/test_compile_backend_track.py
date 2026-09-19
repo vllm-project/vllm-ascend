@@ -226,21 +226,17 @@ class TestApplyInductorTrackDefaults(TrackTestBase):
         # Debt 2: default -O2 journey — the presets now own the track default.
         self.assertEqual(cc.cudagraph_mode, CUDAGraphMode.FULL_AND_PIECEWISE)
 
-    def test_track_on_rejects_enforce_eager(self):
+    def test_track_on_with_enforce_eager_is_inert_upstream_semantics(self):
+        """User ruling 2026-09-19 (born-upstream lens): enforce_eager with
+        the front door is inert exactly like CUDA — vLLM core forces mode
+        NONE; the stage-1 raise guarded the side-door half-configured world
+        and is gone with it. The hook still applies its pinning unchanged."""
         from vllm_ascend.platform import NPUPlatform
 
         vllm_config = self._make_vllm_config(track=True)
         vllm_config.model_config.enforce_eager = True
-        with self.assertRaises(ValueError):
-            NPUPlatform._apply_inductor_track_defaults(vllm_config)
-
-    def test_track_on_rejects_o0(self):
-        from vllm_ascend.platform import NPUPlatform
-
-        vllm_config = self._make_vllm_config(track=True)
-        vllm_config.optimization_level = OptimizationLevel.O0
-        with self.assertRaises(ValueError):
-            NPUPlatform._apply_inductor_track_defaults(vllm_config)
+        NPUPlatform._apply_inductor_track_defaults(vllm_config)  # no raise
+        self.assertFalse(vllm_config.compilation_config.inductor_compile_config["combo_kernels"])
 
     def test_non_npu_device_is_skipped(self):
         from vllm_ascend.platform import NPUPlatform

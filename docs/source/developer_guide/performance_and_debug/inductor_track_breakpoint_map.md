@@ -190,7 +190,7 @@ Explicitly-set controls that silently change what the track compiles produce `wa
 | `VLLM_USE_AOT_COMPILE=1` | `VLLM_USE_AOT_COMPILE=1 is explicitly set` | it runs, but reloading the saved AOT artifact on a later start is unverified on this track |
 | user `TORCHINDUCTOR_NPU_BACKEND` != `triton_experimental` | `keeping user TORCHINDUCTOR_NPU_BACKEND` | your backend value is kept and used |
 | `VLLM_USE_STANDALONE_COMPILE=1` / `VLLM_USE_MEGA_AOT_ARTIFACT=1` | `does not support` | hard `ValueError` — unadapted compile paths |
-| `enforce_eager=True` / `-O0` | `compilation_config.backend='inductor' is incompatible with` / `level -O1 or higher` | hard `ValueError` — compilation fully disabled |
+| `enforce_eager=True` / `-O0` | *(no error — upstream semantics: mode forced to NONE, track inert)* | hard `ValueError` — compilation fully disabled |
 
 ### 7.2 One-flag dump trigger
 
