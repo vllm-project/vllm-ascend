@@ -1330,7 +1330,11 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
     ) -> torch.Tensor:
         assert isinstance(attn_metadata, AscendSFADCPMetadata)
         assert attn_metadata.dcp_context is not None
-        return attn_metadata.dcp_context.slot_mapping[: attn_metadata.num_input_tokens]
+        slots = attn_metadata.dcp_context.slot_mapping
+        # PCP gathers prefill KV rows; retain their full DCP mapping.
+        if isinstance(self, AscendSFAPCPImpl) and self._has_prefill(attn_metadata):
+            return slots
+        return slots[: attn_metadata.num_input_tokens]
 
     def _store_parallel_kv(
         self,

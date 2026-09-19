@@ -52,6 +52,9 @@ class AscendPCPManager(PCPManager):
     """PCP manager that refreshes Ascend-only local-batch metadata."""
 
     vllm_config: VllmConfig
+    _global_batch_slot_mappings: torch.Tensor | None
+    _gathered_kv_slot_mappings: torch.Tensor | None
+    _pad_slot_id: torch.Tensor
 
     def __init__(
         self,
@@ -78,6 +81,16 @@ class AscendPCPManager(PCPManager):
             dcp_rank=dcp_rank,
             cp_interleave=cp_interleave,
         )
+
+        # PCP supplies its own output buffers to compute_slot_mappings, so their
+        # dtype must match Ascend block-table slots for cache-write operators.
+        if block_tables is not None:
+            slot_dtype = block_tables.slot_mappings.dtype
+            if self._global_batch_slot_mappings is not None:
+                self._global_batch_slot_mappings = torch.empty_like(self._global_batch_slot_mappings, dtype=slot_dtype)
+            if self._gathered_kv_slot_mappings is not None:
+                self._gathered_kv_slot_mappings = torch.empty_like(self._gathered_kv_slot_mappings, dtype=slot_dtype)
+            self._pad_slot_id = self._pad_slot_id.to(slot_dtype)
 
         # vLLM #53515 made the PCP-local buffers persistent and uses them for
         # graph capture. Preserve that ownership while providing the extra CPU
