@@ -432,15 +432,26 @@ def test_production_speculators_carry_lmhead_sampling_mixin():
     """Every production speculator family must keep the mixin (directly or
     via AscendAutoRegressiveSpeculator): losing it to a re-parent during an
     upstream spec refactor silently drops the draft-side row alignment and
-    hangs the lmhead-TP collectives. DSpark must keep its opt-out flag."""
+    hangs the lmhead-TP collectives. Speculators whose draft sampling bypasses
+    ``sample_draft`` must keep their opt-out flag — upstream keeps adding such
+    families (DSpark, DFlash2), and a new one that silently drops the flag
+    would reintroduce the hang."""
     from vllm_ascend.worker.v2.spec_decode.dflash.speculator import AscendDFlashSpeculator
+    from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import AscendDFlash2Speculator
     from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
     from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
     from vllm_ascend.worker.v2.spec_decode.mtp.speculator import AscendMTPSpeculator
 
-    for cls in (AscendEagleSpeculator, AscendMTPSpeculator, AscendDFlashSpeculator, AscendDSparkSpeculator):
+    for cls in (
+        AscendEagleSpeculator,
+        AscendMTPSpeculator,
+        AscendDFlashSpeculator,
+        AscendDSparkSpeculator,
+        AscendDFlash2Speculator,
+    ):
         assert issubclass(cls, LmheadTPDraftSamplingMixin)
     assert AscendDSparkSpeculator._lmhead_tp_sample_draft_supported is False
+    assert AscendDFlash2Speculator._lmhead_tp_sample_draft_supported is False
 
 
 @pytest.mark.parametrize("any_prompt_logprobs", [True, False])
