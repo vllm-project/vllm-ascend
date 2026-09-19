@@ -381,7 +381,6 @@ class NPUPlatform(Platform):
         device_config = getattr(vllm_config, "device_config", None)
         if device_config is not None and getattr(device_config, "device_type", cls.device_type) != cls.device_type:
             return
-        _reject_deprecated_compile_backend(vllm_config)
         if vllm_config.compilation_config.backend != "inductor":
             return
 
@@ -1320,63 +1319,6 @@ def _validate_kv_load_failure_policy(vllm_config: VllmConfig) -> None:
     if getattr(kv_transfer_config, "kv_load_failure_policy", "fail") == "recompute":
         if getattr(vllm_config.model_config, "is_hybrid", False):
             raise AssertionError("Hybrid models do not support recompute mode kv load failure policy now.")
-
-
-def _inductor_track_backend(vllm_config: VllmConfig) -> str | None:
-    """The raw compile_backend value from additional_config, or None.
-
-    Usable from both platform config hooks: the early hook runs before
-    init_ascend_config parses the typed AscendConfig. After the config
-    refactor this reader only serves the deprecation machinery (the track
-    itself reads the upstream compilation_config.backend).
-    """
-    additional_config = getattr(vllm_config, "additional_config", None) or {}
-    ascend_compilation_config = additional_config.get("ascend_compilation_config") or {}
-    return ascend_compilation_config.get("compile_backend")
-
-
-def _reject_deprecated_compile_backend(vllm_config: VllmConfig) -> None:
-    """Deprecation first guard + Q-2 conflict rule (refactor 09 §2.4/§3.3).
-
-    The side-door ``ascend_compilation_config.compile_backend`` key no longer
-    selects the track (the upstream front door ``compilation_config.backend``
-    does). Fail fast on the states that would otherwise silently degrade:
-
-    - value "inductor": the user asked for the track through the removed
-      side door — point at the front door instead of silently falling back
-      to the legacy fusion_pass track;
-    - a real legacy selection (fusion_pass / npugraph_ex) while the front
-      door is also set: the two entries are mutually exclusive.
-
-    "auto" is deliberately NOT treated as a conflict: step 6
-    (_update_compilation_modes) writes the resolved enum value back into
-    additional_config, and the spawned EngineCore re-runs
-    VllmConfig.__post_init__ (vllm/v1/engine/core.py _perform_handshakes)
-    with that bag — so compile_backend="auto" in the bag cannot be
-    attributed to user intent (M1b probe evidence: the front-door smoke leg
-    died on this false positive). Q-2's "explicit auto counts" edge is
-    traded away for that robustness; "auto" selects nothing, so no genuine
-    conflict is masked. The write-back source disappears once the enum is
-    removed (M2).
-    """
-    value = _inductor_track_backend(vllm_config)
-    if value is None or value == "auto":
-        return
-    if value == "inductor":
-        raise ValueError(
-            "ascend_compilation_config.compile_backend='inductor' no longer selects "
-            "the inductor track: request it through the upstream front door "
-            "instead (-cc.backend inductor, i.e. compilation_config.backend="
-            "'inductor') and remove the side-door key."
-        )
-    if vllm_config.compilation_config.backend == "inductor":
-        raise ValueError(
-            f"ascend_compilation_config.compile_backend={value!r} and "
-            "compilation_config.backend='inductor' are mutually exclusive. "
-            "Remove one of the two: the side door only selects the legacy "
-            "fusion_pass/npugraph_ex tracks, the front door selects the "
-            "inductor track."
-        )
 
 
 def _inductor_track_active() -> bool:

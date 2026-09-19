@@ -83,64 +83,30 @@ class TrackTestBase(TestBase):
         return vllm_config
 
 
-class TestDeprecatedSidecarGuard(TrackTestBase):
-    """Refactor 09 §2.4/§3.3 (Q-2 + deprecation first guard): the removed
-    side-door ``ascend_compilation_config.compile_backend`` key must raise
-    when it carries "inductor" (pointer to the front door) and when it
-    coexists with the upstream front door (mutual exclusion — explicit
-    "auto" counts as set)."""
+class TestSidecarKeyNeverExisted(TrackTestBase):
+    """User ruling (2026-09-19): no compatibility window for the removed
+    side door — ascend_compilation_config.compile_backend behaves as a key
+    that was never invented. Setting it (any value, front door set or not)
+    is rejected by AscendCompilationConfig's extra="forbid" like any other
+    unknown key, at init_ascend_config time."""
 
-    def _with_sidecar(self, value: str) -> VllmConfig:
-        vllm_config = self._make_vllm_config()
-        vllm_config.additional_config = {"ascend_compilation_config": {"compile_backend": value}}
-        return vllm_config
+    def _init_with_sidecar_key(self):
+        from vllm_ascend.ascend_config import init_ascend_config
 
-    def test_sidecar_inductor_raises_with_pointer(self):
-        from vllm_ascend.platform import NPUPlatform
+        vllm_config = self._make_vllm_config(track=True)
+        vllm_config.additional_config = {
+            "ascend_compilation_config": {"compile_backend": "inductor"}
+        }
+        return init_ascend_config(vllm_config)
 
-        with self.assertRaises(ValueError) as ctx:
-            NPUPlatform._apply_inductor_track_defaults(self._with_sidecar("inductor"))
-        self.assertIn("compile_backend", str(ctx.exception))
-        self.assertIn("-cc.backend", str(ctx.exception))
-
-    def test_sidecar_plus_front_door_raises(self):
-        from vllm_ascend.platform import NPUPlatform
-
-        vllm_config = self._with_sidecar("fusion_pass")
-        vllm_config.compilation_config.backend = "inductor"
-        with self.assertRaises(ValueError) as ctx:
-            NPUPlatform._apply_inductor_track_defaults(vllm_config)
-        self.assertIn("mutually exclusive", str(ctx.exception))
-
-    def test_sidecar_explicit_auto_plus_front_door_does_not_raise(self):
-        """Q-2 edge deviation (M1b probe evidence): step 6 writes the resolved
-        enum value back into additional_config and the spawned EngineCore
-        re-runs VllmConfig.__post_init__ with that bag, so a bag-carried
-        "auto" cannot be attributed to user intent — it must not trip the
-        conflict rule (the front-door smoke leg died on this false positive
-        before the exemption). "auto" selects nothing, so no genuine conflict
-        is masked; the write-back source disappears with the enum (M2)."""
-        from vllm_ascend.platform import NPUPlatform
-
-        vllm_config = self._with_sidecar("auto")
-        vllm_config.compilation_config.backend = "inductor"
-        NPUPlatform._apply_inductor_track_defaults(vllm_config)  # no raise
-
-    def test_sidecar_legacy_values_do_not_raise(self):
-        """M1 interim: fusion_pass / npugraph_ex / auto without the front
-        door keep their legacy enum resolution (M2 adds the deprecation
-        warning at init_ascend_config)."""
-        from vllm_ascend.platform import NPUPlatform
-
-        for value in ("fusion_pass", "npugraph_ex", "auto"):
-            with self.subTest(value=value):
-                # no raise: the early hook treats them as plain legacy configs
-                NPUPlatform._apply_inductor_track_defaults(self._with_sidecar(value))
-
-    def test_no_sidecar_no_raise(self):
-        from vllm_ascend.platform import NPUPlatform
-
-        NPUPlatform._apply_inductor_track_defaults(self._make_vllm_config(track=False))
+    def test_sidecar_key_rejected_as_unknown(self):
+        with self.assertRaises(Exception) as ctx:
+            self._init_with_sidecar_key()
+        message = str(ctx.exception)
+        self.assertIn("compile_backend", message)
+        # the plain unknown-key rejection — no translation, no pointer,
+        # no warning path
+        self.assertNotIn("-cc.backend", message)
 
 
 class TestPassKeySwitch(TrackTestBase):
@@ -400,77 +366,6 @@ class TestAscendPostGradPassManager(TrackTestBase):
         # clone_elimination) needs a real PassContext and is exercised
         # end-to-end by the T2 smoke run instead.
         self.assertTrue(manager.fix_functionalization.uuid())
-
-
-class TestDeprecatedCompileBackendTranslation(TrackTestBase):
-    """M2 (09 §3.3 / Q-3 / Q-4): the compile_backend enum is removed and
-    enable_npugraph_ex restored to the community ``bool = True``. The
-    side-door key is translated at init_ascend_config (the single legitimate
-    entry point) for a 2-release deprecation window."""
-
-    def _init_with_sidecar(self, ascend_dict: dict):
-        from vllm_ascend.ascend_config import init_ascend_config
-
-        vllm_config = self._make_vllm_config()
-        vllm_config.additional_config = {"ascend_compilation_config": dict(ascend_dict)}
-        return init_ascend_config(vllm_config), vllm_config
-
-    def test_community_bool_default_restored(self):
-        config, _ = self._init_with_sidecar({})
-        self.assertIs(config.ascend_compilation_config.enable_npugraph_ex, True)
-        self.assertNotIn("compile_backend", vars(config.ascend_compilation_config))
-
-    def test_inductor_value_raises_with_pointer(self):
-        with self.assertRaises(ValueError) as ctx:
-            self._init_with_sidecar({"compile_backend": "inductor"})
-        self.assertIn("-cc.backend", str(ctx.exception))
-
-    def test_fusion_pass_translates_to_false_with_warning(self):
-        import logging
-
-        with self.assertLogs("vllm", level=logging.WARNING):
-            config, _ = self._init_with_sidecar({"compile_backend": "fusion_pass"})
-        self.assertIs(config.ascend_compilation_config.enable_npugraph_ex, False)
-
-    def test_npugraph_ex_translates_to_true_with_warning(self):
-        import logging
-
-        with self.assertLogs("vllm", level=logging.WARNING):
-            config, _ = self._init_with_sidecar({"compile_backend": "npugraph_ex"})
-        self.assertIs(config.ascend_compilation_config.enable_npugraph_ex, True)
-
-    def test_auto_is_ignored_with_warning(self):
-        import logging
-
-        with self.assertLogs("vllm", level=logging.WARNING):
-            config, _ = self._init_with_sidecar({"compile_backend": "auto"})
-        # community default resolution
-        self.assertIs(config.ascend_compilation_config.enable_npugraph_ex, True)
-
-    def test_unknown_value_raises(self):
-        with self.assertRaises(ValueError):
-            self._init_with_sidecar({"compile_backend": "bogus"})
-
-    def test_user_bag_is_not_mutated(self):
-        """R10: the interception copies the nested dict — the user's
-        additional_config bag keeps the deprecated key untouched (one-off
-        data, never rewritten in place)."""
-        import logging
-
-        bag = {"compile_backend": "fusion_pass"}
-        vllm_config = self._make_vllm_config()
-        vllm_config.additional_config = {"ascend_compilation_config": bag}
-        with self.assertLogs("vllm", level=logging.WARNING):
-            from vllm_ascend.ascend_config import init_ascend_config
-
-            init_ascend_config(vllm_config)
-        self.assertEqual(bag, {"compile_backend": "fusion_pass"})
-
-    def test_no_key_no_warning(self):
-        import logging
-
-        with self.assertNoLogs("vllm", level=logging.WARNING):
-            self._init_with_sidecar({})
 
 
 class TestTrackCudagraphMode(TrackTestBase):

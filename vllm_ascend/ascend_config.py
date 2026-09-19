@@ -69,8 +69,9 @@ class AscendCompilationConfig:
     (compilation_config.backend), and the legacy fusion_pass / npugraph_ex
     resolution is the plain community ``enable_npugraph_ex`` boolean plus the
     cudagraph-mode filtering in the platform's step 7 — exactly the boundary
-    tree (9e3caae09) behavior. The deprecated side-door key is translated at
-    init_ascend_config for a 2-release window.
+    tree (9e3caae09) behavior. The side-door key was never given a
+    compatibility window (user ruling, 2026-09-19): it is an unknown key,
+    rejected by ``extra="forbid"`` like any other typo.
     """
 
     enable_npugraph_ex: bool = True
@@ -91,7 +92,6 @@ class AscendCompilationConfig:
 
     @model_validator(mode="after")
     def _apply_unsupported_hardware_downgrade_and_static_kernel_check(self):
-
         from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
         if not get_current_hardware_profile().supports(HardwareCapability.NPUGRAPH_EX):
@@ -1428,55 +1428,6 @@ def init_ascend_config(vllm_config):
         "batch_job_sched_config",
     }
     kwargs = {k: v for k, v in additional_config.items() if k not in _NON_USER_INPUT_KEYS}
-    # Config-refactor deprecation window (09 §3.3 / Q-3 / Q-4): the
-    # compile_backend enum is removed (field + sentinel). Translate the
-    # side-door key here — the single legitimate entry point, before pydantic
-    # (extra="forbid" would otherwise reject it with a bare validation error).
-    # The nested dict may share identity with the user's additional_config
-    # bag: copy one level before popping, the bag is one-off data and is never
-    # rewritten in place (02 design §6.2 / R10).
-    acc = kwargs.get("ascend_compilation_config")
-    if isinstance(acc, dict) and "compile_backend" in acc:
-        acc = dict(acc)
-        value = acc.pop("compile_backend")
-        if value == "inductor":
-            raise ValueError(
-                "ascend_compilation_config.compile_backend='inductor' no longer selects "
-                "the inductor track: request it through the upstream front door "
-                "(-cc.backend inductor, i.e. compilation_config.backend='inductor') "
-                "and remove the side-door key."
-            )
-        if value == "fusion_pass":
-            acc["enable_npugraph_ex"] = False
-            logger.warning(
-                "ascend_compilation_config.compile_backend='fusion_pass' is deprecated "
-                "and will be removed in 2 releases: it now maps to "
-                "ascend_compilation_config.enable_npugraph_ex=False. Use the boolean "
-                "instead and remove the key."
-            )
-        elif value == "npugraph_ex":
-            acc["enable_npugraph_ex"] = True
-            logger.warning(
-                "ascend_compilation_config.compile_backend='npugraph_ex' is deprecated "
-                "and will be removed in 2 releases: it now maps to "
-                "ascend_compilation_config.enable_npugraph_ex=True. Use the boolean "
-                "instead and remove the key."
-            )
-        elif value == "auto":
-            logger.warning(
-                "ascend_compilation_config.compile_backend='auto' is deprecated and "
-                "will be removed in 2 releases: the dynamic fusion_pass/npugraph_ex "
-                "resolution is the default behavior with the plain "
-                "enable_npugraph_ex boolean. Remove the key."
-            )
-        else:
-            raise ValueError(
-                f"ascend_compilation_config.compile_backend={value!r} is not a valid "
-                "value: the compile_backend enum has been removed. The legacy tracks "
-                "are selected with the enable_npugraph_ex boolean and the inductor "
-                "track with compilation_config.backend='inductor'."
-            )
-        kwargs["ascend_compilation_config"] = acc
     unknown_keys = sorted(set(kwargs) - AscendConfig.__dataclass_fields__.keys())
     # vLLM-Omni shares this mapping with the platform plugin. Preserve its
     # extension keys on VllmConfig while excluding them from Ascend validation.
