@@ -408,6 +408,7 @@ class NPUModelRunner(GPUModelRunner):
             num_reqs,
             num_scheduled_tokens_np,
             num_valid_tokens,
+            self.kv_cache_config,
         )
 
         # Get the number of draft tokens for each request.
