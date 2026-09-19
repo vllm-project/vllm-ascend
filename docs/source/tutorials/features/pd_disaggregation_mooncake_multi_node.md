@@ -44,6 +44,36 @@ Execute the following commands on each node in sequence. The results must all be
         cat /etc/hccn.conf
         ```
 
+        The `address_N` entries must also match the NPU device IPs. Each entry is
+        the NIC IP of the NPU whose physical ID is `N`, so a stale entry makes
+        the corresponding NPU unreachable from the other nodes: KV transfer then
+        hangs or times out, and the reported errors do not point to the IP
+        configuration. The file can go stale after an NPU is replaced, the driver
+        is reinstalled, or the environment is rebuilt, so verify the entries
+        rather than only the file's presence:
+
+        ```bash
+        for i in {0..15}; do
+          conf=$(grep "^address_$i=" /etc/hccn.conf | cut -d= -f2)
+          live=$(hccn_tool -i $i -ip -g | awk -F: '/ipaddr/{print $2}' | tr -d ' ')
+          [ "$conf" = "$live" ] && echo "npu$i OK conf=$conf" \
+                                || echo "npu$i MISMATCH conf=$conf live=$live"
+        done
+        ```
+
+        If any entry mismatches, the device value reported by
+        `hccn_tool -i <id> -ip -g` is authoritative. Re-apply it to the device,
+        which also refreshes the matching `address_<id>` entry in
+        `/etc/hccn.conf` on supported systems:
+
+        ```bash
+        hccn_tool -i <id> -ip -s address <device_ip> netmask <netmask>
+        ```
+
+        If the file is not refreshed, edit the `address_<id>` line in
+        `/etc/hccn.conf` to match the device value instead. Restart the service
+        in either case.
+
     3. Get NPU IP Addresses
 
         ```bash
@@ -97,6 +127,35 @@ Execute the following commands on each node in sequence. The results must all be
         ```bash
         cat /etc/hccn.conf
         ```
+
+        The `address_N` entries must also match the NPU device IPs. A mismatch
+        makes the affected NPU unreachable from the other nodes: KV transfer
+        then hangs or times out, and the reported errors do not point to the IP
+        configuration. The file can go stale after an NPU is replaced, the
+        driver is reinstalled, or the environment is rebuilt, so verify the
+        entries rather than only the file's presence:
+
+        ```bash
+        for i in {0..7}; do
+          conf=$(grep "^address_$i=" /etc/hccn.conf | cut -d= -f2)
+          live=$(hccn_tool -i $i -ip -g | awk -F: '/ipaddr/{print $2}' | tr -d ' ')
+          [ "$conf" = "$live" ] && echo "npu$i OK conf=$conf" \
+                                || echo "npu$i MISMATCH conf=$conf live=$live"
+        done
+        ```
+
+        If any entry mismatches, the device value reported by
+        `hccn_tool -i <id> -ip -g` is authoritative. Re-apply it to the device,
+        which also refreshes the matching `address_<id>` entry in
+        `/etc/hccn.conf` on supported systems:
+
+        ```bash
+        hccn_tool -i <id> -ip -s address <device_ip> netmask <netmask>
+        ```
+
+        If the file is not refreshed, edit the `address_<id>` line in
+        `/etc/hccn.conf` to match the device value instead. Restart the service
+        in either case.
 
     3. Get NPU IP Addresses
 
