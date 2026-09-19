@@ -516,6 +516,76 @@ def _canonical_chunk_indices(cu_seqlens, chunk_size):
     ]
 
 
+@pytest.mark.parametrize("disable_recompute", [False, True])
+@pytest.mark.parametrize("seq_count,fixed_length", [(127, None), (128, None), (1, 80), (1, 129)])
+def test_chunk_kda_fwd_padded_workspace_matches_reference(seq_count, fixed_length, disable_recompute):
+    """Full chunks must not overwrite U seeds when other chunks contain padding."""
+    torch.manual_seed(1000 + seq_count)
+    heads, head_dim, chunk_size = 6, 128, 64
+    lengths = (
+        [fixed_length] if fixed_length is not None else [16, 32, 64] * (seq_count // 3) + [16, 32, 64][: seq_count % 3]
+    )
+    cu_seqlens = [0]
+    for length in lengths:
+        cu_seqlens.append(cu_seqlens[-1] + length)
+    shape = (1, cu_seqlens[-1], heads, head_dim)
+    q = torch.nn.functional.normalize(torch.randn(shape), dim=-1).to(torch.bfloat16)
+    k = torch.nn.functional.normalize(torch.randn(shape), dim=-1).to(torch.bfloat16)
+    v = (torch.randn(shape) * 0.1).to(torch.bfloat16)
+    raw_gate = torch.randn(shape) * 0.1
+    beta = torch.sigmoid(torch.randn(shape[:-1]))
+    initial_state = torch.zeros((seq_count, heads, head_dim, head_dim), dtype=torch.float32)
+    metadata = cu_seqlens if fixed_length is None else None
+
+    outputs = torch.ops._C_ascend.chunk_kda_fwd(
+        q.npu(),
+        k.npu(),
+        v.npu(),
+        raw_gate.npu(),
+        beta.npu(),
+        head_dim**-0.5,
+        chunk_size,
+        initial_state=initial_state.npu(),
+        output_final_state=True,
+        cu_seqlens=metadata,
+        chunk_indices=_canonical_chunk_indices(metadata, chunk_size),
+        safe_gate=True,
+        lower_bound=-5.0,
+        use_gate_in_kernel=True,
+        A_log=torch.zeros(heads, device="npu", dtype=torch.float32),
+        dt_bias=torch.zeros(heads * head_dim, device="npu", dtype=torch.float32),
+        disable_recompute=disable_recompute,
+        state_v_first=True,
+    )
+    actual = _snapshot_outputs(outputs)
+    for name, output in zip(CHUNK_KDA_OUTPUT_NAMES, actual):
+        if output is not None:
+            assert torch.isfinite(output).all(), name
+
+    gate = _gate_cumsum_reference(-5.0 * torch.sigmoid(raw_gate), chunk_size, cu_seqlens)
+    for seq, (start, end) in enumerate(zip(cu_seqlens[:-1], cu_seqlens[1:])):
+        reference = chunk_kda_forward_reference(
+            q[:, start:end],
+            k[:, start:end],
+            v[:, start:end],
+            gate[:, start:end],
+            beta[:, start:end],
+            head_dim**-0.5,
+            chunk_size,
+            output_final_state=True,
+        )
+        _assert_close(f"sequence {seq} output", actual[0][:, start:end], reference.o, rtol=5e-2, atol=5e-4)
+        assert reference.final_state is not None
+        _assert_close(
+            f"sequence {seq} final state",
+            actual[1][seq : seq + 1],
+            reference.final_state.transpose(-1, -2),
+            rtol=5e-2,
+            atol=3e-3,
+        )
+    _cleanup_npu()
+
+
 def _run_chunk_kda_fwd_a5_case(
     layout,
     tokens,
