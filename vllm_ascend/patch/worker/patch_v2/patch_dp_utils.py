@@ -4,13 +4,14 @@
 from dataclasses import replace
 
 from vllm.config import CUDAGraphMode
-from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp as upstream_dispatch_cg_and_sync_dp
+from vllm.v1.worker.gpu import dp_utils
+from vllm.v1.worker.gpu.dp_utils import sync_cudagraph_and_dp_padding as upstream_sync_cudagraph_and_dp_padding
 
-from vllm_ascend.utils import embedding_tp_enable, lmhead_tp_enable, mlp_tp_enable, oproj_tp_enable
+from vllm_ascend.utils import embedding_tp_enable, lmhead_tp_enable, mlp_tp_enable, oproj_tp_enable, vllm_version_is
 
 
-def dispatch_cg_and_sync_dp(*args, **kwargs):
-    batch_desc, num_tokens_across_dp = upstream_dispatch_cg_and_sync_dp(*args, **kwargs)
+def sync_cudagraph_and_dp_padding(*args, **kwargs):
+    batch_desc, num_tokens_across_dp = upstream_sync_cudagraph_and_dp_padding(*args, **kwargs)
     if (
         batch_desc.cg_mode == CUDAGraphMode.NONE
         and num_tokens_across_dp is not None
@@ -25,3 +26,10 @@ def dispatch_cg_and_sync_dp(*args, **kwargs):
         token_counts.fill(num_tokens_padded)
         batch_desc = replace(batch_desc, num_tokens=num_tokens_padded)
     return batch_desc, num_tokens_across_dp
+
+
+# v0.28 has no eager DP-padding policy hook. Patch the DP synchronization
+# boundary independently of model-runner dispatch and PCP. Replace this
+# adapter with an upstream padding-policy hook when one is available.
+if vllm_version_is("0.28.0"):
+    dp_utils.sync_cudagraph_and_dp_padding = sync_cudagraph_and_dp_padding

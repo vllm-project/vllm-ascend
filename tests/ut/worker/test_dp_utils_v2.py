@@ -10,7 +10,13 @@ from vllm.config import CUDAGraphMode
 from vllm.v1.worker.gpu import dp_utils
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 
-from vllm_ascend.worker.v2 import dp_utils as ascend_dp_utils
+from vllm_ascend.patch.worker.patch_v2 import patch_dp_utils as ascend_dp_utils
+
+
+@pytest.mark.skipif(not ascend_dp_utils.vllm_version_is("0.28.0"), reason="v0.28 DP synchronization adapter")
+def test_padding_registered_at_upstream_dp_boundary():
+    assert dp_utils.sync_cudagraph_and_dp_padding is ascend_dp_utils.sync_cudagraph_and_dp_padding
+    assert dp_utils.dispatch_cg_and_sync_dp.__module__ == "vllm.v1.worker.gpu.dp_utils"
 
 
 def test_eager_padding_uses_only_existing_cpu_metadata(monkeypatch):
@@ -18,15 +24,15 @@ def test_eager_padding_uses_only_existing_cpu_metadata(monkeypatch):
     counts = torch.tensor([3, 7], dtype=torch.int32, device="cpu")
     monkeypatch.setattr(ascend_dp_utils, "oproj_tp_enable", lambda: True)
     upstream = MagicMock(return_value=(desc, counts))
-    monkeypatch.setattr(ascend_dp_utils, "upstream_dispatch_cg_and_sync_dp", upstream)
+    monkeypatch.setattr(ascend_dp_utils, "upstream_sync_cudagraph_and_dp_padding", upstream)
     with (
         patch.object(torch.Tensor, "item", side_effect=AssertionError("unexpected scalar extraction")),
         patch.object(torch.Tensor, "cpu", side_effect=AssertionError("unexpected transfer")),
         patch.object(torch.Tensor, "to", side_effect=AssertionError("unexpected transfer")),
         patch.object(dp_utils.dist, "all_reduce", side_effect=AssertionError("unexpected collective")),
     ):
-        padded, across_dp = ascend_dp_utils.dispatch_cg_and_sync_dp(None, 1, 3, None, 2, 0)
-    upstream.assert_called_once_with(None, 1, 3, None, 2, 0)
+        padded, across_dp = ascend_dp_utils.sync_cudagraph_and_dp_padding(None, desc, 3, 1, None, 2, 0)
+    upstream.assert_called_once_with(None, desc, 3, 1, None, 2, 0)
     assert padded.num_tokens == 7
     assert across_dp is counts
     assert counts.tolist() == [7, 7]
@@ -50,7 +56,9 @@ def test_finegrained_tp_eager_dp_padding(tp_component, mode, counts, monkeypatch
     manager.dispatch.side_effect = lambda num_reqs, num_tokens, *args, **kwargs: BatchExecutionDescriptor(
         cg_mode=mode, num_tokens=num_tokens, num_reqs=num_reqs, num_active_loras=2
     )
-    desc, across_dp = ascend_dp_utils.dispatch_cg_and_sync_dp(
+    # Exercise the upstream entry directly, without importing a PCP adapter.
+    monkeypatch.setattr(dp_utils, "sync_cudagraph_and_dp_padding", ascend_dp_utils.sync_cudagraph_and_dp_padding)
+    desc, across_dp = dp_utils.dispatch_cg_and_sync_dp(
         manager,
         1,
         counts[0],

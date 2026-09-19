@@ -58,6 +58,7 @@ import vllm_ascend.patch.worker.patch_v2.patch_use_v2_model_runner  # noqa
 import vllm_ascend.patch.worker.patch_fused_moe  # noqa
 
 import vllm_ascend.patch.worker.patch_v2.patch_uva  # noqa
+import vllm_ascend.patch.worker.patch_v2.patch_dp_utils  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_input_batch  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_model_state  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_block_table  # noqa
