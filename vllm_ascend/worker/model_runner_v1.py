@@ -168,6 +168,7 @@ from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
+from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.model_executor.offloader import create_offloader
 from vllm_ascend.ops.fused_moe.force_eplb import build_force_eplb_topk
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
@@ -543,6 +544,14 @@ class NPUModelRunner(GPUModelRunner):
         self.use_aclgraph = self._use_aclgraph()
 
         eplb_config = self.ascend_config.eplb_config
+        self.global_eplb = None
+        if self.parallel_config.enable_eplb and eplb_config.eplb_policy_type == 4:
+            self.global_eplb = AscendEPLBController(
+                self.parallel_config,
+                self.device,
+                load_collection_phase=eplb_config.load_collection_phase,
+                global_pool_slots=eplb_config.num_redundant_experts,
+            )
         self.dynamic_eplb = eplb_config.dynamic_eplb
         self.eplb_enable = self.dynamic_eplb or (eplb_config.expert_map_path is not None)
         if self.dynamic_eplb:
@@ -2461,6 +2470,14 @@ class NPUModelRunner(GPUModelRunner):
         if self.kvpp.scheduler is not None:
             self.kvpp.prepare_forward(bool(np.any(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)))
 
+        if self.global_eplb is not None:
+            self.global_eplb.set_batch_phase(
+                bool(np.any(
+                    self.input_batch.num_computed_tokens_cpu[:num_reqs]
+                    < self.input_batch.num_prompt_tokens[:num_reqs]
+                ))
+            )
+            self.global_eplb.prepare_forward(self.model_config, num_tokens_unpadded, ubatch_slices)
         if self.dynamic_eplb:
             self.eplb_updator.forward_before()
 
@@ -2536,6 +2553,9 @@ class NPUModelRunner(GPUModelRunner):
         if active_device_metadata_executor is not None:
             active_device_metadata_executor.release()
         self.kvpp.complete_forward()
+
+        if self.global_eplb is not None:
+            self.global_eplb.step()
 
         with record_function_or_nullcontext("post process"):
             aux_hidden_states = None
@@ -3982,6 +4002,10 @@ class NPUModelRunner(GPUModelRunner):
             active_device_metadata_executor = self._prepare_device_metadata_for_forward(cudagraph_runtime_mode)
             self.kvpp.prepare_forward(False)
 
+            if self.global_eplb is not None:
+                self.global_eplb.state.prepare_forward(self.model_config, 0)
+                self.global_eplb.state.should_record_tensor.fill_(False)
+
             with set_ascend_forward_context(
                 attn_metadata,
                 self.vllm_config,
@@ -4005,6 +4029,8 @@ class NPUModelRunner(GPUModelRunner):
             if active_device_metadata_executor is not None:
                 active_device_metadata_executor.release()
             self.kvpp.complete_forward()
+            if self.global_eplb is not None and not skip_eplb:
+                self.global_eplb.step(is_dummy=True, is_profile=is_profile)
             if self.use_aux_hidden_state_outputs:
                 hidden_states, _ = outputs
             else:
@@ -4112,7 +4138,12 @@ class NPUModelRunner(GPUModelRunner):
                     return
                 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
                 DefaultModelLoader._init_ep_weight_filter = mock_pass
+            if self.global_eplb is not None:
+                self.global_eplb.prepare_load()
             self.model: nn.Module = get_model(vllm_config=self.vllm_config)
+            if self.global_eplb is not None:
+                if not self.global_eplb.maybe_register_model(self.model, self.model_config, load_dummy_weights=False):
+                    raise ValueError("Global Policy4 requires a model exposing the native MoE interface")
             for name, _ in self.model.named_parameters():
                 # sinks is a kind of parameter in attention
                 # only set in weight name
