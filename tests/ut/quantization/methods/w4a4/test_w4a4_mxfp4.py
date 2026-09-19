@@ -274,3 +274,111 @@ class TestAscendW4A4MXFP4MoEMethod(TestBase):
         kwargs = mock_npu.npu_grouped_matmul.call_args.kwargs
         self.assertEqual(kwargs["x_dtype"], mock_npu.float4_e2m1fn_x2)
         self.assertEqual(kwargs["weight_dtype"], mock_npu.float4_e2m1fn_x2)
+
+    def _run_gmm1_releases_requantized_input_before_operator(self, fused):
+        raw_hidden_states = torch.randn(4, self.hidden_size, dtype=torch.bfloat16)
+        quantized_hidden_states = torch.randint(0, 255, (4, self.hidden_size), dtype=torch.uint8)
+        mlp_compute_input = MagicMock(
+            hidden_states=raw_hidden_states,
+            dynamic_scale=None,
+            layer=MagicMock(),
+            group_list=torch.tensor([4], dtype=torch.int64),
+            group_list_type=0,
+        )
+        events = []
+
+        def grouped_matmul(**_kwargs):
+            events.append("gmm")
+            if fused:
+                return torch.randn(4, self.intermediate_size), torch.ones(4)
+            return [torch.randn(4, self.intermediate_size, dtype=torch.bfloat16)]
+
+        def quantize_hidden_states(*_args):
+            events.append("quantize")
+            return quantized_hidden_states, torch.ones(4)
+
+        def dispose_raw_hidden_states(tensor):
+            self.assertIs(tensor, raw_hidden_states)
+            events.append("dispose")
+
+        operator = "vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4." + (
+            "torch_npu.npu_grouped_matmul_swiglu_quant_v2" if fused else "torch_npu.npu_grouped_matmul"
+        )
+        with (
+            patch.object(
+                self.scheme,
+                "_quant_hidden_states",
+                side_effect=quantize_hidden_states,
+            ),
+            patch(
+                "vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.dispose_tensor",
+                side_effect=dispose_raw_hidden_states,
+            ) as mock_dispose,
+            patch(operator, side_effect=grouped_matmul),
+            patch(
+                "vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.maybe_normalize_mxfp_scale_layout",
+                side_effect=lambda scale: scale,
+            ),
+        ):
+            if fused:
+                self.scheme.apply_gmm1_act_quant(mlp_compute_input)
+            else:
+                self.scheme.apply_gmm1(mlp_compute_input)
+
+        mock_dispose.assert_called_once_with(raw_hidden_states)
+        self.assertEqual(events, ["quantize", "dispose", "gmm"])
+
+    def test_gmm1_releases_requantized_input_before_operator(self):
+        for fused in (False, True):
+            with self.subTest(fused=fused):
+                self._run_gmm1_releases_requantized_input_before_operator(fused)
+
+    def _run_gmm1_keeps_dispatch_quantized_input_until_operator(self, fused):
+        hidden_states = torch.randint(0, 255, (4, self.hidden_size), dtype=torch.uint8)
+        dynamic_scale = torch.ones(4)
+        mlp_compute_input = MagicMock(
+            hidden_states=hidden_states,
+            dynamic_scale=dynamic_scale,
+            layer=MagicMock(),
+            group_list=torch.tensor([4], dtype=torch.int64),
+            group_list_type=0,
+        )
+        events = []
+
+        def grouped_matmul(**_kwargs):
+            events.append("gmm")
+            if fused:
+                return torch.randn(4, self.intermediate_size), torch.ones(4)
+            return [torch.randn(4, self.intermediate_size, dtype=torch.bfloat16)]
+
+        def dispose_hidden_states(tensor):
+            self.assertIs(tensor, hidden_states)
+            events.append("dispose")
+
+        operator = "vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4." + (
+            "torch_npu.npu_grouped_matmul_swiglu_quant_v2" if fused else "torch_npu.npu_grouped_matmul"
+        )
+        with (
+            patch.object(self.scheme, "_quant_hidden_states", return_value=(hidden_states, dynamic_scale)),
+            patch(
+                "vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.dispose_tensor",
+                side_effect=dispose_hidden_states,
+            ) as mock_dispose,
+            patch(operator, side_effect=grouped_matmul),
+            patch(
+                "vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.maybe_normalize_mxfp_scale_layout",
+                side_effect=lambda scale: scale,
+            ),
+        ):
+            if fused:
+                self.scheme.apply_gmm1_act_quant(mlp_compute_input)
+            else:
+                self.scheme.apply_gmm1(mlp_compute_input)
+
+        mock_dispose.assert_called_once_with(hidden_states)
+        self.assertEqual(events, ["gmm", "dispose"])
+
+    def test_gmm1_keeps_dispatch_quantized_input_until_operator(self):
+        for fused in (False, True):
+            with self.subTest(fused=fused):
+                self._run_gmm1_keeps_dispatch_quantized_input_until_operator(fused)
