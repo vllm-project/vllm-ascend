@@ -32,6 +32,7 @@ SCENES = (SCENE_SINGLE, SCENE_MULTI)
 #          Treated like ``git bisect skip`` and excluded from the search.
 Verdict = Literal["PASS", "FAIL", "SKIP"]
 
+
 # --------------------------------------------------------------------------- #
 # Paths
 # --------------------------------------------------------------------------- #
