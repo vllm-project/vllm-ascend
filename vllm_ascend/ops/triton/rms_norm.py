@@ -1,6 +1,6 @@
 import torch
 from vllm.triton_utils import tl, triton
-
+from vllm_ascend.ops.triton.triton_utils import get_ub_size_bytes
 
 @triton.jit(
     do_not_specialize=[
@@ -51,7 +51,18 @@ def triton_q_rms(
     device_properties = triton.runtime.driver.active.utils.get_device_properties(q.device)
     num_vectorcore = device_properties.get("num_vectorcore", -1)
 
-    ROW_BLOCK_SIZE = 16  # A safe default balancing parallelism and register pressure.
+    # Adaptive calculate the block size
+    resv_buffer = 6144 # reserve buffer 6KB to prevent UB overflow
+    available_ub_size = get_ub_size_bytes() - resv_buffer
+    element_size = torch.empty(1, dtype=q.dtype).element_size()
+    if element_size == 4:
+        data_multiplier = 5  # input(4bytes) + offset(4bytes) + mid_out(4bytes) + output(4bytes) + others(4bytes) = 5x
+    elif element_size == 2:
+        data_multiplier = 7  # input(2bytes) + offset(4bytes) + mid_out(4bytes) + output(2bytes) + others(2bytes) = 7x
+    else:
+        raise NotImplementedError(f"triton_q_rms: Element_Size ({element_size}bytes) not supported")
+    ROW_BLOCK_SIZE = (int)(available_ub_size / (dim * element_size * data_multiplier))
+
     batch_per_core = triton.cdiv(total_batch, num_vectorcore)
     raw = min(ROW_BLOCK_SIZE, batch_per_core)
     BLOCK_M = 1 << (raw.bit_length() - 1)
