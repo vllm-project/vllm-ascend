@@ -43,6 +43,10 @@ from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
+from vllm_ascend.attention.flash_mla import (
+    FlashMLAContract,
+    flash_mla_with_kvcache_metadata,
+)
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     PagedAttentionGraphParam,
@@ -65,6 +69,7 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.utils import vllm_version_is, weak_ref_tensors
+from vllm_ascend.worker.device_metadata import DeviceMetadataStage, DeviceMetadataTask
 
 if vllm_version_is("0.28.0"):
     from vllm.model_executor.layers.attention.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
@@ -74,6 +79,157 @@ else:
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
 _ATTN_KEYS_BUFFER = None
+
+
+# FLASHMLA[REF-16468]: MLA subset of the reference's shared FA/MLA buffers.
+# Only AscendMLAMetadataBuilder uses these helpers in this draft; the generic
+# AscendAttentionBackend below still follows its existing attention path.
+@dataclass
+class AscendFlashAttentionMetadata:
+    """Persistent device buffers consumed by the external FlashMLA package."""
+
+    query: torch.Tensor
+    schedule: torch.Tensor
+    cu: torch.Tensor
+    used_q: torch.Tensor
+    cache_lens: torch.Tensor
+    block_table: torch.Tensor
+    slots: torch.Tensor
+    live_boundaries: torch.Tensor
+    token_live: torch.Tensor
+    positions: torch.Tensor
+    attn_mask: torch.Tensor
+    max_query_len: int
+    max_seq_len: int
+    is_prefill: bool
+    contract: FlashMLAContract
+
+
+def _init_flash_attention_metadata(builder, impl) -> None:
+    """Allocate FlashMLA state only after the worker selected an NPU."""
+    builder.flash_num_heads = impl.num_heads
+    builder._flash_buffers = {}
+    builder._flash_attn_mask = torch.triu(
+        torch.ones((2048, 2048), dtype=torch.int8, device=builder.device), diagonal=1
+    )
+
+
+def _build_flash_attention_metadata(builder, common) -> AscendFlashAttentionMetadata:
+    """Refresh batch-dependent FlashMLA inputs on the metadata stream.
+
+    The final zero-used row owns graph and sequence-parallel padding. Its
+    stable storage lets ACL Graph replay observe unchanged tensor addresses.
+    """
+    batch = common.num_reqs
+    tokens = max(common.num_actual_tokens, common.num_input_tokens)
+    table = common.block_table_tensor[:batch]
+    # FLASHMLA[REF-16468]: cache allocations by batch/token/table capacity.
+    # Contents (including physical block IDs) are refreshed on every step;
+    # stable addresses let captured attention consume the updated inputs.
+    key = batch, tokens, table.shape[1]
+    if key not in builder._flash_buffers:
+        # The extra row owns padded tokens, with seqused_q=cache_seqlens=0.
+        rows = batch + 1
+        int_args = {"dtype": torch.int32, "device": builder.device}
+        float_args = {"dtype": builder.kv_cache_spec.dtype, "device": builder.device}
+        # FLASHMLA[EXTERNAL]: retained A5 capacity formula from #16468.
+        # This allocates storage, not a synthetic schedule: the real metadata
+        # op generates its contents. The package result is checked below.
+        words = ((36 + 72) * rows + 1) * 16
+        words = ((words + 4095) // 4096) * 4096
+        block_size = getattr(builder, "kernel_block_size", None) or builder.kv_cache_spec.block_size
+        builder._flash_buffers[key] = AscendFlashAttentionMetadata(
+            query=torch.empty((tokens, builder.flash_num_heads, 576), **float_args),
+            schedule=torch.empty(words, **int_args),
+            cu=torch.zeros(rows + 1, **int_args),
+            used_q=torch.zeros(rows, **int_args),
+            cache_lens=torch.zeros(rows, **int_args),
+            block_table=torch.zeros((rows, table.shape[1]), **int_args),
+            slots=torch.full((tokens,), -1, dtype=torch.int64, device=builder.device),
+            live_boundaries=torch.zeros(tokens + 1, **int_args),
+            token_live=torch.zeros(tokens, dtype=torch.bool, device=builder.device),
+            positions=torch.zeros(tokens, dtype=torch.int64, device=builder.device),
+            attn_mask=builder._flash_attn_mask,
+            # Capacity bounds remain fixed for graph replay. Actual request
+            # lengths are carried by cu/used_q/cache_lens in token units.
+            max_query_len=tokens,
+            max_seq_len=table.shape[1] * block_size,
+            is_prefill=common.max_query_len > builder.decode_threshold,
+            contract=FlashMLAContract(
+                num_heads_q=builder.flash_num_heads,
+                max_seqlen_q=tokens,
+                max_seqlen_kv=table.shape[1] * block_size,
+            ),
+        )
+    flash = builder._flash_buffers[key]
+    flash.is_prefill = common.max_query_len > builder.decode_threshold
+    # FLASHMLA[ABI]: both operators receive this exact scalar/layout contract.
+    # The tensors are refreshed below, but the contract is rebuilt per batch so
+    # causal and capacity changes cannot leave a stale tiling description.
+    flash.contract = FlashMLAContract(
+        num_heads_q=builder.flash_num_heads,
+        max_seqlen_q=flash.max_query_len,
+        max_seqlen_kv=flash.max_seq_len,
+        mask_mode=3 if common.causal else 0,
+    )
+
+    def build_metadata() -> None:
+        # FLASHMLA[REF-16468]: read current device tensors when the executor
+        # submits this closure, after asynchronous acceptance corrections.
+        # cu is cumulative; used_q/cache_lens are per-request token counts.
+        flash.cu[: batch + 1].copy_(common.query_start_loc[: batch + 1])
+        flash.cu[batch + 1].fill_(tokens)
+        flash.used_q[:batch].copy_(flash.cu[1 : batch + 1] - flash.cu[:batch])
+        flash.used_q[:batch].masked_fill_(common.seq_lens[:batch] <= 0, 0)
+        flash.used_q[batch:].zero_()
+        flash.cache_lens[:batch].copy_(common.seq_lens[:batch])
+        flash.cache_lens[batch:].zero_()
+        flash.block_table[:batch].copy_(table)
+        flash.block_table[batch:].zero_()
+        flash.slots.fill_(-1)
+        slots = common.slot_mapping[:tokens]
+        flash.slots[:slots.shape[0]].copy_(slots)
+        # Mark live query intervals with a prefix sum. Setting inactive slots
+        # to -1 prevents graph/request padding from writing into real KV pages.
+        flash.live_boundaries.zero_()
+        live_rows = (flash.used_q > 0).to(torch.int32)
+        flash.live_boundaries.scatter_add_(0, flash.cu[:-1].long(), live_rows)
+        flash.live_boundaries.scatter_add_(
+            0, (flash.cu[:-1] + flash.used_q).long(), -live_rows
+        )
+        flash.token_live.copy_(flash.live_boundaries.cumsum(0)[:tokens] > 0)
+        flash.slots.masked_fill_(~flash.token_live, -1)
+        flash.positions.zero_()
+        positions = common.positions[:tokens]
+        flash.positions[:positions.shape[0]].copy_(positions)
+        # FLASHMLA[EXTERNAL]: replace #16468's _C_ascend metadata dispatcher.
+        # Heads, lengths, dimensions, mask_mode and layout_q come from the
+        # same contract later consumed by _forward_flash.
+        metadata = flash_mla_with_kvcache_metadata(
+            flash.cache_lens,
+            flash.contract.num_heads_q,
+            flash.contract.num_heads_kv,
+            **flash.contract.metadata_kwargs(flash.cu, flash.used_q),
+        )
+        if metadata.dtype != torch.int32 or metadata.numel() != flash.schedule.numel():
+            raise RuntimeError(
+                "External FlashMLA metadata ABI does not match the persistent "
+                f"schedule buffer: expected {flash.schedule.numel()} int32 words, "
+                f"got {metadata.numel()} {metadata.dtype} words."
+            )
+        # Preserve the schedule address captured by the main attention op.
+        # copy_ transfers the real producer output on the metadata stream.
+        flash.schedule.copy_(metadata)
+
+    if builder._device_metadata_enabled:
+        # FLASHMLA[REF-16468]: the existing worker executor owns the stream,
+        # events and reuse fence. _forward_flash waits on this same group ID.
+        builder._device_metadata_tasks = (
+            DeviceMetadataTask(DeviceMetadataStage.ATTENTION, build_metadata, id(flash.schedule)),
+        )
+    else:
+        build_metadata()
+    return flash
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
