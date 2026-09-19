@@ -266,11 +266,11 @@ def _triton_rope_siso(
         new_qk_tile_2 = qk_tile_2 * cos_row + qk_tile_1 * sin_row
 
         if IS_NEOX_STYLE:
-            qk_tile = extension.insert_slice(qk_tile, new_qk_tile_1, [0, 0], [pad_n_h, rope_dim // 2], [1, 1])
-            qk_tile = extension.insert_slice(qk_tile, new_qk_tile_2, [0, rope_dim // 2], [pad_n_h, rope_dim // 2], [1, 1])
+            qk_tile = extension.insert_slice(qk_tile, new_qk_tile_1, [0, 0], [pad_n_h, pad_rope_dim // 2], [1, 1])
+            qk_tile = extension.insert_slice(qk_tile, new_qk_tile_2, [0, pad_rope_dim // 2], [pad_n_h, pad_rope_dim // 2], [1, 1])
         else:
-            qk_tile = extension.insert_slice(qk_tile, new_qk_tile_1, [0, 0], [pad_n_h, rope_dim // 2], [1, 2])
-            qk_tile = extension.insert_slice(qk_tile, new_qk_tile_2, [0, 1], [pad_n_h, rope_dim // 2], [1, 2])
+            qk_tile = extension.insert_slice(qk_tile, new_qk_tile_1, [0, 0], [pad_n_h, pad_rope_dim // 2], [1, 2])
+            qk_tile = extension.insert_slice(qk_tile, new_qk_tile_2, [0, 1], [pad_n_h, pad_rope_dim // 2], [1, 2])
         tl.store(out_start_ptr + qk_offsets, qk_tile, mask=qk_mask)
 
 
