@@ -206,6 +206,63 @@ def test_load_model_retains_split_indexer_metadata_dependency():
     assert proposer.attn_layer_names == [draft_name, indexer_name]
 
 
+def test_initialize_attn_backend_delegates_single_kv_cache_group_to_vllm():
+    proposer = AscendEagleProposer.__new__(AscendEagleProposer)
+    proposer._draft_attn_layer_names = {"draft.attn"}
+    kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[SimpleNamespace(layer_names=["draft.attn"], kv_cache_spec=MagicMock())]
+    )
+
+    with patch.object(llm_base_proposer.SpecDecodeBaseProposer, "initialize_attn_backend") as parent_init:
+        proposer.initialize_attn_backend(kv_cache_config, kernel_block_sizes=[128])
+
+    parent_init.assert_called_once_with(kv_cache_config, [128])
+    assert proposer._uses_multi_group_kv_cache is False
+
+
+def test_initialize_attn_backend_splits_physical_groups_by_backend_impl():
+    proposer = AscendEagleProposer.__new__(AscendEagleProposer)
+    proposer._draft_attn_layer_names = {"draft.attn", "draft.indexer.k_cache"}
+    proposer.vllm_config = MagicMock()
+    proposer.device = torch.device("cpu")
+
+    main_backend = MagicMock()
+    main_backend.full_cls_name.return_value = "main.backend"
+    main_backend.get_impl_cls.return_value = object
+    indexer_backend = MagicMock()
+    indexer_backend.full_cls_name.return_value = "indexer.backend"
+    indexer_backend.get_impl_cls.return_value = None
+
+    main_layer = MagicMock()
+    main_layer.get_attn_backend.return_value = main_backend
+    indexer_layer = MagicMock()
+    indexer_layer.get_attn_backend.return_value = indexer_backend
+    kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[
+            SimpleNamespace(layer_names=["draft.attn"], kv_cache_spec=MagicMock()),
+            SimpleNamespace(layer_names=["draft.indexer.k_cache"], kv_cache_spec=MagicMock()),
+        ]
+    )
+
+    with (
+        patch.object(llm_base_proposer.SpecDecodeBaseProposer, "initialize_attn_backend") as parent_init,
+        patch.object(llm_base_proposer.AttentionGroup, "create_metadata_builders") as create_builders,
+        patch.object(
+            llm_base_proposer,
+            "get_layers_from_vllm_config",
+            return_value={"draft.attn": main_layer, "draft.indexer.k_cache": indexer_layer},
+        ),
+    ):
+        proposer.initialize_attn_backend(kv_cache_config, kernel_block_sizes=[128, 32])
+
+    parent_init.assert_not_called()
+    assert proposer._uses_multi_group_kv_cache is True
+    assert proposer.kv_cache_gid == 0
+    assert proposer.block_size == 128
+    assert [group.kv_cache_group_id for group in proposer.draft_attn_groups] == [0, 1]
+    assert [call.kwargs["kernel_block_size"] for call in create_builders.call_args_list] == [128, None]
+
+
 @pytest.mark.parametrize("method", ["mtp", "eagle3"])
 @pytest.mark.parametrize("group_order", list(permutations(("main", "indexer", "tail"))))
 def test_cache_only_groups_use_main_backend_and_metadata(group_order, method):
@@ -261,6 +318,51 @@ def test_cache_only_groups_use_main_backend_and_metadata(group_order, method):
     proposer.draft_attn_groups = [indexer_group, tail_group]
     with pytest.raises(ValueError, match="no executable attention backend"):
         proposer._get_primary_draft_attn_group()
+
+
+def test_cache_only_next_step_uses_group_metadata_without_reapplying_dcp():
+    proposer = AscendEagleProposer.__new__(AscendEagleProposer)
+    proposer.use_compress = False
+    proposer.runner = MagicMock()
+    proposer.runner.dcp_manager = MagicMock()
+
+    common_attn_metadata = MagicMock()
+    group_common_attn_metadata = MagicMock()
+    primary_metadata = object()
+    cache_only_metadata = object()
+
+    primary_group = MagicMock()
+    primary_group.layer_names = ["draft.attn"]
+    cache_only_group = MagicMock()
+    cache_only_group.layer_names = ["draft.indexer.k_cache"]
+    builder = cache_only_group.get_metadata_builder.return_value
+    builder.build_for_drafting.return_value = cache_only_metadata
+    proposer._common_attn_metadata_for_draft_group = MagicMock(return_value=group_common_attn_metadata)
+
+    per_layer_metadata = proposer._build_cache_only_group_next_step_attn_metadata(
+        common_attn_metadata,
+        draft_index=1,
+        num_input_tokens=2,
+        primary_group=primary_group,
+        primary_metadata=primary_metadata,
+        cache_only_groups=[cache_only_group],
+    )
+
+    proposer._common_attn_metadata_for_draft_group.assert_called_once_with(
+        common_attn_metadata,
+        cache_only_group,
+        2,
+    )
+    builder.build_for_drafting.assert_called_once_with(
+        group_common_attn_metadata,
+        1,
+    )
+    proposer.runner.dcp_manager.prepare_spec_decode_drafting_cp_metadata.assert_not_called()
+    proposer.runner.dcp_manager.update_spec_decode_drafting_cp_metadata.assert_not_called()
+    assert per_layer_metadata == {
+        "draft.attn": primary_metadata,
+        "draft.indexer.k_cache": cache_only_metadata,
+    }
 
 
 def test_prepare_inputs_padded_preserves_internal_seq_lens_cpu():
