@@ -157,11 +157,7 @@ def sparse_mla(query, cache, indices, metadata, scale):
             attention_mode=2,
             return_softmax_lse=False,
         )
-    output = result[0]
-    # Kernels may leave graph-capacity rows unwritten. Mask on device before
-    # value/output projections so NaNs in padding cannot escape the layer.
-    valid = torch.arange(query.shape[0], device=query.device) < metadata.query_start_loc[-1]
-    return output.masked_fill(~valid[:, None, None], 0)
+    return result[0]
 
 
 class SparseMLAMetadataState:
