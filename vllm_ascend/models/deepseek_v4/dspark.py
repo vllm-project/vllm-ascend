@@ -301,7 +301,8 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, Support
         super().__init__()
         assert vllm_config.speculative_config is not None
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
-
+        # Full-vocabulary draft: draft IDs already equal target IDs.
+        self.draft_id_to_target_id = None
         # check if quant config exist
         from vllm_ascend.utils import get_rotation_path
 

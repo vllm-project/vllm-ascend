@@ -27,6 +27,7 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
 )
 
+from vllm_ascend.ascend_config import validate_additional_config_bool
 from vllm_ascend.utils import (
     get_rotation_path,
     vllm_version_is,
@@ -34,6 +35,10 @@ from vllm_ascend.utils import (
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_wrapper,
     build_draft_attn_metadata_factory,
+)
+from vllm_ascend.worker.v2.spec_decode.dspark.greedy import (
+    sample_greedy_markov,
+    scratch_shape,
 )
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import prepare_replicated_pcp_config
 
@@ -45,6 +50,125 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         vllm_config, self.replicated_pcp = prepare_replicated_pcp_config(vllm_config)
         super().__init__(vllm_config, device)
         self.input_batch: InputBatch | None = None
+
+        additional_config = vllm_config.additional_config or {}
+        self._enable_dspark_fused_greedy = validate_additional_config_bool(
+            additional_config.get("enable_dspark_fused_greedy", False),
+            "additional_config.enable_dspark_fused_greedy",
+        )
+
+        self._greedy_partial_values: torch.Tensor | None = None
+        self._greedy_partial_indices: torch.Tensor | None = None
+
+        if not self._enable_dspark_fused_greedy:
+            return
+
+        hf_config = self.draft_model_config.hf_config
+        if getattr(hf_config, "model_type", None) != "deepseek_v4":
+            raise ValueError("enable_dspark_fused_greedy currently supports DeepSeek-V4 only")
+
+        if self.draft_logits is not None:
+            # Probabilistic drafting keeps the original implementation.
+            return
+
+        vocab_size = max(
+            hf_config.vocab_size,
+            getattr(hf_config, "draft_vocab_size", None) or 0,
+        )
+        shape = scratch_shape(self.max_num_reqs, vocab_size)
+        self._greedy_partial_values = torch.empty(
+            shape,
+            dtype=torch.float32,
+            device=device,
+        )
+        self._greedy_partial_indices = torch.empty(
+            shape,
+            dtype=torch.int32,
+            device=device,
+        )
+
+    def _sample_sequential(
+        self,
+        num_reqs: int,
+        head_hidden: torch.Tensor,
+    ) -> None:
+        # Current upstream _sample_logits also updates acceptance estimates.
+        # Preserve that path whenever those logits consumers are enabled.
+        if (
+            not self._enable_dspark_fused_greedy
+            or self.draft_logits is not None
+            or self._draft_topk is not None
+            or self.model.draft_id_to_target_id is not None
+        ):
+            super()._sample_sequential(num_reqs, head_hidden)
+            return
+
+        assert self._greedy_partial_values is not None
+        assert self._greedy_partial_indices is not None
+
+        n_spec = self.num_speculative_steps
+        num_sample = num_reqs * n_spec
+
+        sample_hidden = head_hidden[self.sample_indices[:num_sample]]
+        base_logits = self.model.compute_draft_logits(sample_hidden)
+        base_logits = base_logits.reshape(num_reqs, n_spec, -1)
+
+        idx_map = self.sample_idx_mapping[:num_sample].view(num_reqs, n_spec)
+        sample_pos = self.sample_pos[:num_sample].view(num_reqs, n_spec)
+
+        prev = self.input_buffers.input_ids[self._anchor_idx[:num_reqs]]
+        confidence_markov_embeds = []
+
+        for i in range(n_spec):
+            markov_embed = self.model.markov_embed(prev)
+
+            if self.enable_adaptive_verification:
+                confidence_markov_embeds.append(markov_embed)
+
+            # Keep the original complete Markov projection.
+            bias = self.model.markov_bias(markov_embed)
+            base_i = base_logits[:, i]
+            output_i = self.draft_tokens[:num_reqs, i]
+
+            can_fuse = (
+                base_i.shape == bias.shape
+                and base_i.dtype == bias.dtype
+                and base_i.dtype in (torch.float16, torch.bfloat16, torch.float32)
+                and base_i.stride(1) == 1
+                and bias.stride(1) == 1
+            )
+
+            if can_fuse:
+                sample_greedy_markov(
+                    base_i,
+                    bias,
+                    output_i,
+                    self._greedy_partial_values,
+                    self._greedy_partial_indices,
+                )
+                draft_sampled_i = output_i
+            else:
+                # Retain the original promotion/broadcasting and sampling path.
+                logits_i = base_i + bias
+                draft_sampled_i = self._sample_logits(
+                    logits_i,
+                    idx_map[:, i],
+                    sample_pos[:, i],
+                    i,
+                )
+                output_i.copy_(draft_sampled_i)
+
+            prev = draft_sampled_i
+
+        if self.enable_adaptive_verification:
+            confidence = self.model.compute_confidence(
+                sample_hidden,
+                torch.stack(confidence_markov_embeds, dim=1).flatten(0, 1),
+            )
+            self.draft_token_confidence_probs[:num_reqs] = confidence.reshape(
+                num_reqs,
+                n_spec,
+            )
 
     def load_draft_model(
         self,
