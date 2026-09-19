@@ -23,6 +23,7 @@ from einops import rearrange
 from torch import nn
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
+from vllm.logger import logger
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.model_executor.utils import replace_parameter
@@ -119,6 +120,56 @@ def _get_packed_conv_weights(layer: nn.Module) -> torch.Tensor:
     return _get_base_conv1d(layer).get_parameter(_PACKED_CONV_WEIGHT_NAME)
 
 
+_qk_fused_logged = False
+
+
+def _l2norm_qk(query: torch.Tensor, key: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """L2-normalise q and k with one Triton launch instead of two.
+
+    Every l2norm_fwd launch costs ~220 us of host Python whatever the row
+    count, and prefill steps run eagerly, so the launch count sets how long the
+    device idles. rearrange_mixed_qkv packs q, k and v back to back in one
+    buffer, which makes q and k adjacent contiguous views of one storage: they
+    can be normalised as a single (2N, D) tensor. The kernel is row-local, so
+    the result is bit-identical to two calls. Falls back to two calls if that
+    layout ever changes.
+    """
+    global _qk_fused_logged
+    n = query.numel()
+    if (
+        query.shape == key.shape
+        and query.is_contiguous()
+        and key.is_contiguous()
+        and key.storage_offset() == query.storage_offset() + n
+        and query.untyped_storage().data_ptr() == key.untyped_storage().data_ptr()
+    ):
+        d = query.shape[-1]
+        rows = n // d
+        y = l2norm_fwd(torch.as_strided(query, (2 * rows, d), (d, 1), query.storage_offset()))
+        if not _qk_fused_logged:
+            _qk_fused_logged = True
+            # warning, not info: vllm_ascend.* loggers have no handler, so INFO is dropped
+            logger.warning("GDN host fast path: fused q/k l2norm engaged")
+        return y[:rows].view(query.shape), y[rows:].view(key.shape)
+    if not _qk_fused_logged:
+        _qk_fused_logged = True
+        logger.warning("GDN host fast path: q/k not packed in one buffer, using two l2norm calls")
+    return l2norm_fwd(query), l2norm_fwd(key)
+
+
+def _zero_rows_without_state(initial_state: torch.Tensor, has_initial_state: torch.Tensor) -> None:
+    """Zero the state rows of sequences that have no initial state.
+
+    Same effect as ``clear_ssm_states`` for the common case, but with two aten
+    launches instead of the Triton wrapper; falls back when the mask is not a
+    plain bool tensor on the same device.
+    """
+    if has_initial_state.dtype == torch.bool and has_initial_state.device == initial_state.device:
+        initial_state.masked_fill_(~has_initial_state.view(-1, *([1] * (initial_state.dim() - 1))), 0)
+    else:
+        clear_ssm_states(initial_state, has_initial_state)
+
+
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
     @torch.no_grad()
     def _pack_conv_weights(self) -> None:
@@ -187,14 +238,17 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         initial_state: torch.Tensor,
         cu_seqlens: torch.Tensor,
         scale: float,
+        qk_prenormed: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Fused prefill path using ``torch_npu.npu_chunk_gated_delta_rule``.
 
         Drop-in replacement for the Triton ``chunk_gated_delta_rule`` pipeline
         (chunk_scaled_dot_kkt_fwd + solve_tril + recompute_w_u_fwd + ...).
         The fused CANN operator expects TND layout and does NOT apply q/k L2 norm
-        or the chunk-local cumsum of ``g`` internally, so q/k are normalized here
-        and the raw ``g`` is passed through.
+        or the chunk-local cumsum of ``g`` internally, so q/k are normalized here,
+        unless the caller already normalised them (``qk_prenormed=True``: one
+        fused l2norm then covers the decode and prefill slices together), and
+        the raw ``g`` is passed through.
 
         Args:
             q, k: ``[1, T, Nk, Dk]``   v: ``[1, T, Nv, Dv]``
@@ -203,13 +257,18 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 no transpose required.
             cu_seqlens: cumulative prefill query start locations ``[N+1]``.
             scale: query scaling factor (``Dk ** -0.5``).
+            qk_prenormed: ``q``/``k`` are already L2-normalised by the caller.
 
         Returns:
             o: ``[1, T, Nv, Dv]`` and final_state: ``[N, Nv, Dv, Dk]``.
         """
         # TND layout: drop the leading batch dim (batch size is always 1 here).
-        q = l2norm_fwd(q).squeeze(0).contiguous()  # [T, Nk, Dk]
-        k = l2norm_fwd(k).squeeze(0).contiguous()  # [T, Nk, Dk]
+        if qk_prenormed:
+            q = q.squeeze(0).contiguous()  # [T, Nk, Dk]
+            k = k.squeeze(0).contiguous()  # [T, Nk, Dk]
+        else:
+            q = l2norm_fwd(q).squeeze(0).contiguous()  # [T, Nk, Dk]
+            k = l2norm_fwd(k).squeeze(0).contiguous()  # [T, Nk, Dk]
         v = v.squeeze(0).contiguous()  # [T, Nv, Dv]
         g = g.squeeze(0).to(torch.float32).contiguous()  # [T, Nv]
         beta = beta.squeeze(0).to(v.dtype).contiguous()  # [T, Nv]
@@ -536,6 +595,21 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         )
         num_decode_tokens = attn_metadata.num_decode_tokens
 
+        # Eager prefill/mixed steps normalise the packed non-spec q/k once and
+        # slice the decode and prefill parts out of it, instead of paying two
+        # l2norm launches on the decode slice and two more inside the prefill
+        # op. Pure-decode steps are graph-replayed and keep their own path;
+        # pcp>1 hands raw q/k to the Triton entry, which normalises in kernel.
+        qk_prenormed = (
+            spec_sequence_masks is None
+            and attn_metadata.num_prefills > 0
+            and query_non_spec is not None
+            and get_pcp_group().world_size == 1
+            and AscendGatedDeltaNetAttention._probe_fused_chunk()
+        )
+        if qk_prenormed:
+            query_non_spec, key_non_spec = _l2norm_qk(query_non_spec, key_non_spec)
+
         # 2.1: Process the multi-query part
         if spec_sequence_masks is not None:
             actual_seq_lengths = attn_metadata.spec_decode_metadata.actual_seq_lengths
@@ -568,8 +642,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             key_decode = key_non_spec[:, :num_decode_tokens]
             value_decode = value_non_spec[:, :num_decode_tokens]
             actual_seq_lengths = attn_metadata.non_spec_decode_metadata.actual_seq_lengths
-            query_decode = l2norm_fwd(query_decode)
-            key_decode = l2norm_fwd(key_decode)
+            if not qk_prenormed:
+                query_decode = l2norm_fwd(query_decode)
+                key_decode = l2norm_fwd(key_decode)
             core_attn_out_decode = torch.ops._C_ascend.npu_recurrent_gated_delta_rule(
                 query=query_decode.squeeze(0),
                 key=key_decode.squeeze(0),
@@ -610,7 +685,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 # directly, so no transpose is needed. Advanced indexing already
                 # returns a copy, safe to clear in place.
                 initial_state = ssm_state[prefill_state_indices]
-                clear_ssm_states(initial_state, prefill_has_initial_state)
+                _zero_rows_without_state(initial_state, prefill_has_initial_state)
                 core_attn_out_non_spec, last_recurrent_state = (
                     AscendGatedDeltaNetAttention._chunk_gated_delta_rule_fused(
                         q=query_non_spec,
@@ -621,12 +696,13 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                         initial_state=initial_state,
                         cu_seqlens=prefill_query_start_loc,
                         scale=key_non_spec.shape[-1] ** -0.5,
+                        qk_prenormed=qk_prenormed,
                     )
                 )
                 ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
             else:
                 initial_state = ssm_state[prefill_state_indices].transpose(-1, -2).contiguous()
-                clear_ssm_states(initial_state, prefill_has_initial_state)
+                _zero_rows_without_state(initial_state, prefill_has_initial_state)
                 (core_attn_out_non_spec, last_recurrent_state) = chunk_gated_delta_rule(
                     q=query_non_spec,
                     k=key_non_spec,
@@ -638,7 +714,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     cu_seqlens=prefill_query_start_loc,
                     prebuilt_meta=attn_metadata.non_spec_prefill_metadata.chunk,
                     head_first=False,
-                    use_qk_l2norm_in_kernel=True,
+                    use_qk_l2norm_in_kernel=not qk_prenormed,
                 )
                 ssm_state[prefill_state_indices] = (
                     last_recurrent_state.transpose(-1, -2).contiguous().to(ssm_state.dtype)
