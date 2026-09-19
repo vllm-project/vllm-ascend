@@ -849,9 +849,13 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
             self.common_ratio_to_sas_metadata["seq_lens_cpu"] = seq_lens_cpu
             input_positions = common_attn_metadata.positions[:num_input_tokens].long()
+            # Short prefills may use the decode path, but PCP global/local
+            # positions differ and must not overwrite each other's RoPE.
+            is_prefilling = common_attn_metadata.is_prefilling
+            not_prefilling = is_prefilling is None or not bool(is_prefilling[:num_reqs].any())
             cos, sin = get_cos_and_sin_dsa(
                 input_positions,
-                use_cache=self.num_prefills == 0,
+                use_cache=not_prefilling,
             )
             self.common_ratio_to_sas_metadata["cos"] = cos
             self.common_ratio_to_sas_metadata["sin"] = sin
