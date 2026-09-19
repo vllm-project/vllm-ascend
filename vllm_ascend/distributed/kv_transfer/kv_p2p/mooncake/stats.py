@@ -28,7 +28,7 @@ class MooncakeKVConnectorStats(KVConnectorStats):
     def reset(self) -> None:
         # Values must remain serializable because worker stats are aggregated
         # outside of the worker process.
-        self.data: dict[str, list[float | int]] = {
+        self.data: dict[str, Any] = {
             "transfer_duration": [],
             "bytes_transferred": [],
             "num_failed_transfers": [],
@@ -51,14 +51,19 @@ class MooncakeKVConnectorStats(KVConnectorStats):
         return previous
 
     def is_empty(self) -> bool:
-        return self.num_successful_transfers == 0 and not self.data["num_failed_transfers"]
+        return (
+            self.num_successful_transfers == 0
+            and not self.data["num_failed_transfers"]
+            and "delayed_release_requests" not in self.data
+        )
 
     def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
         if not other.is_empty():
-            for key, values in other.data.items():
-                accumulator = self.data[key]
-                assert isinstance(accumulator, list)
-                accumulator.extend(values)
+            for key, value in other.data.items():
+                if isinstance(value, list):
+                    self.data[key].extend(value)
+                else:
+                    self.data[key] = value
         return self
 
     def reduce(self) -> dict[str, int | float]:
@@ -85,6 +90,10 @@ class MooncakeKVConnectorStats(KVConnectorStats):
             "Avg MB per transfer": round(megabytes.mean(), 3),
             "Throughput (MB/s)": round(float(throughput), 3),
         }
+
+    def set_delayed_release(self, num_requests: int, num_blocks: int) -> None:
+        self.data["delayed_release_requests"] = num_requests
+        self.data["delayed_release_blocks"] = num_blocks
 
     @property
     def num_successful_transfers(self) -> int:
@@ -144,6 +153,32 @@ class MooncakePromMetrics(KVConnectorPromMetrics):
         )
         self.failed_transfers = create_metric_per_engine(failed_transfers, self.per_engine_labelvalues)
 
+        delayed_release_requests = self._gauge_cls(
+            name="vllm:mooncake_pd_delayed_release_requests",
+            documentation=(
+                "Number of finished prefill requests whose KV cache blocks "
+                "are retained until Mooncake P/D transfer completes."
+            ),
+            labelnames=labelnames,
+        )
+        self.delayed_release_requests = create_metric_per_engine(
+            delayed_release_requests,
+            self.per_engine_labelvalues,
+        )
+
+        delayed_release_blocks = self._gauge_cls(
+            name="vllm:mooncake_pd_delayed_release_blocks",
+            documentation=(
+                "Number of KV cache block references retained for finished "
+                "prefill requests until Mooncake P/D transfer completes."
+            ),
+            labelnames=labelnames,
+        )
+        self.delayed_release_blocks = create_metric_per_engine(
+            delayed_release_blocks,
+            self.per_engine_labelvalues,
+        )
+
     def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0) -> None:
         for duration in transfer_stats_data["transfer_duration"]:
             self.transfer_duration[engine_idx].observe(duration)
@@ -151,3 +186,6 @@ class MooncakePromMetrics(KVConnectorPromMetrics):
             self.bytes_transferred[engine_idx].observe(num_bytes)
         for failure in transfer_stats_data["num_failed_transfers"]:
             self.failed_transfers[engine_idx].inc(failure)
+        if "delayed_release_requests" in transfer_stats_data:
+            self.delayed_release_requests[engine_idx].set(transfer_stats_data["delayed_release_requests"])
+            self.delayed_release_blocks[engine_idx].set(transfer_stats_data["delayed_release_blocks"])
