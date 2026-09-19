@@ -15,6 +15,13 @@ HIDDEN_SIZE = DSV4_FLASH_HIDDEN_SIZE
 EXTENDED_HIDDEN_SIZE = 7168
 MIX_HC = 24
 HC_SINKHORN_ITERS = 20
+# Batch sizes that drive the comb fragment staging in stage 2. The first one gives
+# every core fewer rows than one staging chunk, so the chunk is flushed once with
+# several rows in it; the second gives every core more than one chunk even on the
+# widest supported core count, so it also covers repeated flushes and a partial
+# last chunk.
+SINGLE_COMB_CHUNK_BS = 512
+MULTI_COMB_CHUNK_BS = 2100
 NORM_EPS = 1e-6
 HC_EPS = 1e-6
 HF32_MANTISSA_BITS = 10
@@ -178,6 +185,22 @@ def test_npu_hc_pre_v2_bf16_dsv4_flash_hidden_size():
 @torch.inference_mode()
 def test_npu_hc_pre_v2_bf16_extended_hidden_size():
     _compare_hc_pre_with_cpu((2, HC_MULT, EXTENDED_HIDDEN_SIZE))
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
+
+
+@torch.inference_mode()
+def test_npu_hc_pre_v2_bf16_single_comb_chunk():
+    _compare_hc_pre_with_cpu((SINGLE_COMB_CHUNK_BS, HC_MULT, HIDDEN_SIZE))
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
+
+
+@torch.inference_mode()
+def test_npu_hc_pre_v2_bf16_multiple_comb_chunks():
+    _compare_hc_pre_with_cpu((MULTI_COMB_CHUNK_BS, HC_MULT, HIDDEN_SIZE))
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
