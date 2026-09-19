@@ -248,6 +248,7 @@ class NPUModelRunner310V2(NPUModelRunner):
             num_reqs,
             num_scheduled_tokens,
             num_valid_tokens,
+            kv_cache_config=self.kv_cache_config,
         )
         idx_mapping_np = self._idx_mapping.np[:num_reqs]
         idx_mapping_np[:] = np.fromiter(
@@ -455,6 +456,7 @@ class NPUModelRunner310V2(NPUModelRunner):
             num_reqs,
             num_scheduled,
             num_scheduled,
+            kv_cache_config=self.kv_cache_config,
         )
         # Avoid importing AscendAttentionState at module top (heavy attention_v1).
         return attn_state.name in ("PrefillCacheHit", "ChunkedPrefill")
@@ -533,6 +535,7 @@ class NPUModelRunner310V2(NPUModelRunner):
             num_reqs,
             num_scheduled,
             num_valid_tokens,
+            kv_cache_config=self.kv_cache_config,
         )
         from vllm_ascend.attention.attention_v1 import AscendAttentionState
 

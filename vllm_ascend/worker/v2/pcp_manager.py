@@ -23,6 +23,7 @@ import numpy as np
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_pcp_group, get_pp_group
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
@@ -52,6 +53,7 @@ class AscendPCPManager(PCPManager):
     """PCP manager that refreshes Ascend-only local-batch metadata."""
 
     vllm_config: VllmConfig
+    kv_cache_config: KVCacheConfig | None = None
 
     def __init__(
         self,
@@ -366,6 +368,7 @@ class AscendPCPManager(PCPManager):
             local_batch.num_reqs,
             local_batch.num_scheduled_tokens,
             num_valid_tokens,
+            kv_cache_config=self.kv_cache_config,
         )
         return local_batch
 
