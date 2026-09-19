@@ -1,0 +1,92 @@
+#
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+# Upload extra_recommended_tests.yaml to OBS when a PR is opened or updated.
+name: Upload extra recommended tests
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+    branches:
+      - 'main'
+      - '*-dev'
+      - 'releases/v*'
+    paths:
+      - '.github/workflows/scripts/extra_recommended_tests.yaml'
+      - '.github/workflows/pr_upload_extra_recommended_tests.yaml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash -el {0}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  upload-extra-recommended-tests:
+    name: Upload extra_recommended_tests.yaml to OBS
+    if: ${{ github.event_name == 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    env:
+      OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY_PRECISION }}
+      OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY_PRECISION }}
+      LOCAL_FILE: .github/workflows/scripts/extra_recommended_tests.yaml
+    steps:
+      - name: Checkout vllm-ascend
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Upload extra_recommended_tests.yaml to OBS
+        run: |
+          set -euo pipefail
+          if [ ! -f "${LOCAL_FILE}" ]; then
+            echo "::error::Missing ${LOCAL_FILE}"
+            exit 1
+          fi
+          if [ -z "${OBS_ACCESS_KEY}" ] || [ -z "${OBS_SECRET_KEY}" ]; then
+            echo "::error::OBS credentials are missing"
+            exit 1
+          fi
+          echo "Uploading ${LOCAL_FILE}:"
+          cat "${LOCAL_FILE}"
+          pip install esdk-obs-python --quiet
+          python3 - <<'EOF'
+          import os
+          from obs import ObsClient
+
+          local_file = os.environ['LOCAL_FILE']
+          obs_path = 'ci/precision-test/extra_recommended_tests.yaml'
+          client = ObsClient(
+              access_key_id=os.environ['OBS_ACCESS_KEY'],
+              secret_access_key=os.environ['OBS_SECRET_KEY'],
+              server='https://obs.cn-north-4.myhuaweicloud.com',
+          )
+          resp = client.putFile('vllm-ascend', obs_path, local_file)
+          if resp.status >= 300:
+              raise Exception(f'Failed to upload {obs_path}: {resp.errorMessage}')
+          print(f'Uploaded {local_file} -> {obs_path}')
+          print('https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/' + obs_path)
+          EOF

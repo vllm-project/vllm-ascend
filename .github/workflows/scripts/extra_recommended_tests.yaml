@@ -1,0 +1,7 @@
+# Extra pytest targets appended to coverage-recommended tests.
+# Each item needs a path.
+#
+# Example:
+# - path: tests/e2e/pull_request/one_card/test_foo.py
+# - path: tests/e2e/pull_request/one_card/test_foo.py::test_method
+# - path: cpu-ut
