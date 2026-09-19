@@ -587,8 +587,7 @@ def _build_sfa_fia_shared_prefill_plan(
     if dense_total != SFA_FIA_SHARED_PREFILL_TOPK_WIDTH or dense_total >= num_tokens:
         if not (
             exact_multi_segment
-            and dense_total
-            == SFA_FIA_SHARED_PREFILL_TOPK_WIDTH * SFA_FIA_SHARED_PREFILL_MULTI_SEGMENT_REQUESTS
+            and dense_total == SFA_FIA_SHARED_PREFILL_TOPK_WIDTH * SFA_FIA_SHARED_PREFILL_MULTI_SEGMENT_REQUESTS
         ):
             return None
         dense_group_sizes = (1,) * SFA_FIA_SHARED_PREFILL_MULTI_SEGMENT_REQUESTS
