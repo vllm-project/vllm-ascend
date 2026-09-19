@@ -319,6 +319,14 @@ class NPUPlatform(Platform):
                 if ASCEND_QUANTIZATION_METHOD not in quant_action.choices:
                     quant_action.choices.append(ASCEND_QUANTIZATION_METHOD)
 
+        # Motor fork-group parent imported vLLM with devices hidden. Skip
+        # NPU-touching registration here; each child restores
+        # ASCEND_RT_VISIBLE_DEVICES and calls this method again without
+        # MOTOR_VLLM_FORK_PARENT.
+        if os.getenv("MOTOR_VLLM_FORK_PARENT", "").strip().lower() in {"1", "true", "yes"}:
+            _config_deprecated_logging()
+            return
+
         if get_current_hardware_profile().quantization_backend_family is QuantizationBackendFamily.STANDARD:
             from vllm_ascend.quantization import (  # noqa: F401
                 AscendCompressedTensorsConfig,
@@ -483,6 +491,11 @@ class NPUPlatform(Platform):
 
         # 4.Make sure the config is compatible with Ascend
         _fix_incompatible_config(vllm_config)
+
+        # 4b. Default multithread load so disk I/O does not dominate engine init
+        from vllm_ascend.model_loader.netloader.utils import apply_default_multithread_weight_load
+
+        apply_default_multithread_weight_load(getattr(vllm_config, "load_config", None))
 
         # 5.Initialize Ascend config and validate Ascend-specific options
         # (fused MC2 exclusivity + scheduler extension policies)
