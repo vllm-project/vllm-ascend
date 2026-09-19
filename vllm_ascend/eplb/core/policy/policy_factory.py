@@ -1,33 +1,36 @@
 # Copyright Huawei Technologies Co., Ltd. 2023-2024. All rights reserved.
 # Todo: Once https://github.com/vllm-project/vllm/pull/24069 is merged in vllm. Remove this factory.
+from importlib import import_module
+
 from vllm.logger import logger
 
 from .policy_abstract import EplbPolicy
-from .policy_default_eplb import DefaultEplb
-from .policy_flashlb import FlashLB, warm_up
-from .policy_random import RandomLoadBalance
-from .policy_swift_balancer import SwiftBalanceEplb
 
 
 class PolicyFactory:
     @staticmethod
     def generate_policy(policy_type: int) -> EplbPolicy:
-        policy: dict[int, type[EplbPolicy]] = {
+        policy: dict[int, tuple[str, str]] = {
             # Constraint applying Dynamic EPLB policy V2:
             # If there exists redundant expert:
             # only one redundant expert can be placed in one NPU and its physical expert index must be 0
             # Applying greedy d2d expert weight update composing
-            0: RandomLoadBalance,  # RandomLoadBalance: shuffle last physical expert on NPU 1 and 3
-            1: DefaultEplb,  # Dynamic EPLB policy: overall expert replacement based on current moe load
+            # RandomLoadBalance: shuffle last physical expert on NPU 1 and 3
+            0: (".policy_random", "RandomLoadBalance"),
+            # Dynamic EPLB policy: overall expert replacement based on current moe load
+            1: (".policy_default_eplb", "DefaultEplb"),
             # Dynamic EPLB policy V2: expert replacement with constrained number of expert shuffle
-            2: SwiftBalanceEplb,
+            2: (".policy_swift_balancer", "SwiftBalanceEplb"),
             # FlashLB EPLB policy: expert replacement based on Joint Optimization,
             # Multi-Shot Enhancement and Incremental Adjustment
-            3: FlashLB,
+            3: (".policy_flashlb", "FlashLB"),
         }
-        policy_class = policy.get(policy_type)
-        if policy_class is None:
-            policy_class = RandomLoadBalance
+        policy_entry = policy.get(policy_type)
+        fallback = policy_entry is None
+        module_name, class_name = policy[0] if fallback else policy_entry
+        policy_module = import_module(module_name, package=__package__)
+        policy_class = getattr(policy_module, class_name)
+        if fallback:
             logger.warning(
                 "[eplb/policy] Unrecognized policy_type=%s, falling back to %s",
                 policy_type,
@@ -37,5 +40,5 @@ class PolicyFactory:
             logger.info("[eplb/policy] Policy: %s (type=%s)", policy_class.__name__, policy_type)
         policy_instance = policy_class()
         if policy_type == 3:
-            warm_up()
+            policy_module.warm_up()
         return policy_instance
