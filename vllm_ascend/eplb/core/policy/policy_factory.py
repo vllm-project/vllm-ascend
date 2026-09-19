@@ -27,7 +27,9 @@ class PolicyFactory:
         }
         policy_entry = policy.get(policy_type)
         fallback = policy_entry is None
-        module_name, class_name = policy[0] if fallback else policy_entry
+        if policy_entry is None:
+         policy_entry = policy[0]
+        module_name, class_name = policy_entry
         policy_module = import_module(module_name, package=__package__)
         policy_class = getattr(policy_module, class_name)
         if fallback:
