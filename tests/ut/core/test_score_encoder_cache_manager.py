@@ -89,7 +89,7 @@ def test_factory_reads_score_parameters_from_vllm_config(
     )
 
     assert manager.cpu_cache_size == 12
-    assert manager.attn_heads == expected_attn_heads
+    assert manager.cost_estimator.attn_heads == expected_attn_heads
     manager._check_invariant()
 
 
