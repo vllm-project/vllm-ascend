@@ -120,7 +120,7 @@ jobs:
             {name: "A3 Ubuntu",      dockerfile: "Dockerfile.a3",            suffix: "a3",             chip: "a3", soc: "a3",   base_os: "ubuntu22.04"},
             {name: "310P Ubuntu",    dockerfile: "Dockerfile.310p",          suffix: "310p",           chip: "310p", soc: "310p", base_os: "ubuntu22.04"},
             {name: "A5 Ubuntu",      dockerfile: "Dockerfile.a5",            suffix: "a5",             chip: "a5", soc: "950",  base_os: "ubuntu22.04"},
-            {name: "A2 openeuler",   dockerfile: "Dockerfile.openEuler",     suffix: "openeuler",      chip: "a2", soc: "910b", base_os: "openeuler24.03"},a
+            {name: "A2 openeuler",   dockerfile: "Dockerfile.openEuler",     suffix: "openeuler",      chip: "a2", soc: "910b", base_os: "openeuler24.03"},
             {name: "A3 openEuler",   dockerfile: "Dockerfile.a3.openEuler",  suffix: "a3-openeuler",   chip: "a3", soc: "a3",   base_os: "openeuler24.03"},
             {name: "310P openEuler", dockerfile: "Dockerfile.310p.openEuler",suffix: "310p-openeuler",  chip: "310p", soc: "310p", base_os: "openeuler24.03"},
             {name: "A5 openEuler",   dockerfile: "Dockerfile.a5.openEuler",  suffix: "a5-openeuler",   chip: "a5", soc: "950",  base_os: "openeuler24.03"}
