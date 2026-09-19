@@ -27,10 +27,12 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
 )
 
+from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
+from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.utils import (
-    get_rotation_path,
     vllm_version_is,
 )
+from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_wrapper,
     build_draft_attn_metadata_factory,
@@ -45,21 +47,17 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         vllm_config, self.replicated_pcp = prepare_replicated_pcp_config(vllm_config)
         super().__init__(vllm_config, device)
         self.input_batch: InputBatch | None = None
+        self.attn_architecture: str | None = None
 
     def load_draft_model(
         self,
         target_model: torch.nn.Module,
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
-        # Upstream replaces quant_config with None for a BF16 draft. Pass only
-        # the target QuaRot path so the draft's existing load_weights can fold
-        # input inverse rotation into FC (W @ R) and align fallback embedding /
-        # lm_head before upstream decides weight sharing. Do not rotate again
-        # after loading or replace the draft's own quantization configuration.
-        draft_hf_config = self.draft_model_config.hf_config
-        rotation_path = get_rotation_path(self.vllm_config)
-        draft_hf_config._ascend_target_rotation_path = str(rotation_path) if rotation_path is not None else None
         model = super().load_draft_model(target_model, target_attn_layer_names)
+        if hasattr(model, "post_process"):
+            with set_current_vllm_config(self.vllm_config):
+                model.post_process(self.vllm_config)
         if hasattr(model, "configure_target_aux_hidden_capture"):
             model.configure_target_aux_hidden_capture(target_model)
 
@@ -110,10 +108,23 @@ class AscendDSparkSpeculator(DSparkSpeculator):
                     attn_backends[layer_name] = attn_layers[layer_name].get_attn_backend()
 
             self.attn_backends = attn_backends
+            backend = _get_graph_update_backend(self.attn_groups)
+            if issubclass(backend, AscendMLABackend):
+                self.attn_architecture = "MLA"
+            elif issubclass(backend, AscendAttentionBackend):
+                self.attn_architecture = "GQA"
+            else:
+                self.attn_architecture = None
 
     def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
         num_tokens_padded = num_reqs_padded * self.num_query_per_req
         assert self.input_batch is not None
+        # Dense MLA queries, including padded rows, must not inherit target prefill flags.
+        is_prefilling = (
+            torch.zeros(num_reqs_padded, dtype=torch.bool)
+            if self.attn_architecture == "MLA"
+            else torch.from_numpy(self.input_batch.is_prefilling_np)
+        )
         # The draft attention metadata is built through the generic
         # (Ascend) build_attn_metadata path; the factory forwards the draft
         # query positions that the DSA metadata builder needs for RoPE.
@@ -122,7 +133,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             build_draft_attn_metadata_factory(
                 self.input_buffers.positions,
                 num_tokens_padded,
-                torch.from_numpy(self.input_batch.is_prefilling_np),
+                is_prefilling,
             ),
         ):
             attn_metadata = self._build_draft_attn_metadata(
@@ -132,8 +143,19 @@ class AscendDSparkSpeculator(DSparkSpeculator):
                 seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
                 step=self.num_query_per_req,
                 causal=self._group_causal,
+                update_query_lengths=True,
             )
-        return [self._update_draft_attn_metadata(attn_metadata, num_reqs_padded)]
+        return [attn_metadata]
+
+    def _build_draft_attn_metadata(self, *, num_reqs_padded, update_query_lengths=False, **kwargs):
+        # Derive the MLA metadata request count from padded query tokens.
+        if self.attn_architecture == "MLA":
+            num_reqs_padded, remainder = divmod(kwargs["num_tokens_padded"], self.num_query_per_req)
+            assert remainder == 0, "MLA draft tokens must contain whole query groups"
+        metadata = super()._build_draft_attn_metadata(num_reqs_padded=num_reqs_padded, **kwargs)
+        if self.attn_architecture == "MLA" or update_query_lengths:
+            return self._update_draft_attn_metadata(metadata, num_reqs_padded)
+        return metadata
 
     def _update_draft_attn_metadata(self, attn_metadata, num_reqs_padded):
         """Rebuild ``actual_seq_lengths_q`` from the padded request count,
@@ -152,7 +174,10 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         """
         query_lens_list = [(i + 1) * self.num_query_per_req for i in range(num_reqs_padded)]
         for metadata in attn_metadata.values():
-            metadata.actual_seq_lengths_q = query_lens_list
+            decode_metadata = metadata.decode if self.attn_architecture == "MLA" else metadata
+            if self.attn_architecture == "MLA":
+                metadata.attn_state = AscendAttentionState.ChunkedPrefill
+            decode_metadata.actual_seq_lengths_q = query_lens_list
         return attn_metadata
 
     def propose(
