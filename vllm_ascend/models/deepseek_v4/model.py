@@ -979,8 +979,10 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         if self.use_sequence_parallel_moe:
             hidden_states = sp_all_gather(hidden_states)[: positions.shape[0]]
 
-        # Stash pre-hc_head residual for the MTP draft (captured copy_).
-        if self._mtp_hidden_buffer is not None:
+        # Stash the pre-hc_head residual for traditional MTP. Draft heads that
+        # consume aux hidden states already have their target inputs, so avoid
+        # an otherwise unused device-to-device copy in every target step.
+        if self._mtp_hidden_buffer is not None and not aux_hidden_states:
             num_tokens = hidden_states.shape[0]
             self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
 
