@@ -26,6 +26,7 @@ from unittest.mock import MagicMock, patch
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     backend_map,
+    get_layerwise_data_plane,
     get_layerwise_protocol,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import base as backend_base
@@ -150,20 +151,22 @@ class TestLayerwiseProtocolRegistry(unittest.TestCase):
     protocol functions (registered under the normalized backend name), or
     None when the entry carries no protocol marker."""
 
-    def test_get_layerwise_protocol_resolves_module(self):
-        protocol = get_layerwise_protocol("memcache")
-        self.assertIsNotNone(protocol)
-        for func_name in ("make_full_key", "make_partial_key", "make_hit_check_keys", "extract_layout_config"):
-            with self.subTest(func=func_name):
-                self.assertTrue(callable(getattr(protocol, func_name, None)))
+    def test_get_layerwise_protocol_resolves_modules(self):
+        expected = {"memcache": "gva", "mooncake": "block_key"}
+        for backend_name, data_plane in expected.items():
+            with self.subTest(backend=backend_name):
+                protocol = get_layerwise_protocol(backend_name)
+                self.assertIsNotNone(protocol)
+                self.assertEqual(get_layerwise_data_plane(protocol), data_plane)
+                self.assertTrue(callable(getattr(protocol, "extract_layout_config", None)))
 
     def test_get_layerwise_protocol_normalizes_name(self):
-        for backend_name in ("MEMCACHE", " Memcache "):
+        for backend_name in ("MEMCACHE", " Memcache ", "MOONCAKE", " Mooncake "):
             with self.subTest(backend=backend_name):
                 self.assertIsNotNone(get_layerwise_protocol(backend_name))
 
     def test_get_layerwise_protocol_returns_none_without_protocol(self):
-        for backend_name in ("mooncake", "yuanrong", "nonexistent"):
+        for backend_name in ("yuanrong", "nonexistent"):
             with self.subTest(backend=backend_name):
                 self.assertIsNone(get_layerwise_protocol(backend_name))
 
@@ -1074,15 +1077,8 @@ _LAYERWISE_STORE_METHODS = (
 )
 
 
-class TestLayerwiseProtocolMemcacheExclusivity(unittest.TestCase):
-    """The memcache backend is the only layerwise protocol carrier.
-
-    Three views of the same fact must agree for every registered backend:
-    the module exposes the protocol functions, the class overrides the
-    five layerwise store calls (python's MRO: an override wins over the
-    inherited NotImplementedError stub), and the registry entry carries
-    the ``layerwise_protocol`` marker.
-    """
+class TestLayerwiseProtocolRegistration(unittest.TestCase):
+    """Protocol adapters and backend store implementations stay aligned."""
 
     def _backend_entries(self):
         import importlib
@@ -1091,7 +1087,7 @@ class TestLayerwiseProtocolMemcacheExclusivity(unittest.TestCase):
             module = importlib.import_module(entry["path"])
             yield name, entry, module, getattr(module, entry["name"])
 
-    def test_protocol_functions_store_overrides_and_registry_marker_agree(self):
+    def test_protocol_registration_and_store_overrides(self):
         for name, entry, module, backend_class in self._backend_entries():
             with self.subTest(backend=name):
                 exposes_protocol = all(callable(getattr(module, func, None)) for func in _PROTOCOL_FUNCTIONS)
@@ -1101,7 +1097,9 @@ class TestLayerwiseProtocolMemcacheExclusivity(unittest.TestCase):
                 )
                 self.assertEqual(exposes_protocol, name == "memcache")
                 self.assertEqual(owns_overrides, name == "memcache")
-                self.assertEqual(exposes_protocol, bool(entry.get("layerwise_protocol")))
+                self.assertEqual(bool(entry.get("layerwise_protocol")), name in ("memcache", "mooncake"))
+                protocol = get_layerwise_protocol(name)
+                self.assertEqual(protocol is not None, name in ("memcache", "mooncake"))
                 self.assertEqual(owns_overrides, exposes_protocol)
 
 

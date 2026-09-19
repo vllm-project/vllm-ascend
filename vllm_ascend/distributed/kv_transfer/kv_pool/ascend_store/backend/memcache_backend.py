@@ -76,6 +76,8 @@ class MmcDirect(Enum):
 # tests/ut/distributed/ascend_store/test_backend.py locks the key formats
 # with snapshot assertions.
 
+LAYERWISE_DATA_PLANE = "gva"
+
 
 def extract_layout_config(extra_config: dict[str, Any]) -> dict[str, Any] | None:
     """Return the connector's extra config when it opts into the layerwise

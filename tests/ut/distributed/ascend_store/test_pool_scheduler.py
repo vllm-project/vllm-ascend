@@ -136,7 +136,7 @@ class TestKVPoolScheduler(unittest.TestCase):
         scheduler.store_scheduler.batch_is_exist.return_value = [1, 1, 1, 0, 1, 1]
         request = MagicMock(request_id="r1", block_hashes=[b"h0", b"h1", b"h2"])
 
-        hit_tokens = scheduler._get_mooncake_layerwise_hit_tokens(request, 48, 0)
+        hit_tokens = scheduler._lookup_block_key_contiguous(request, 48, 0)
 
         self.assertEqual(hit_tokens, 16)
         queried_keys = scheduler.store_scheduler.batch_is_exist.call_args.args[0]
