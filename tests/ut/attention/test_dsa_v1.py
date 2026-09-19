@@ -925,7 +925,7 @@ def test_build_classifies_short_speculative_extends_as_decodes(
     builder.build_req_metadata_for_drafting = MagicMock(return_value=req_metadata)
     builder.spec_slot_mapping = [torch.zeros((16, 2), dtype=torch.int32)]
     rope_buffer = torch.ones(14)
-    shared_metadata = {}
+    shared_metadata: dict[str, Any] = {}
 
     def get_rope(positions, use_cache=False, **kwargs):
         cos = rope_buffer if use_cache else rope_buffer.clone()
