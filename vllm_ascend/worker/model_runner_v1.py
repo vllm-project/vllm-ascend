@@ -2035,6 +2035,12 @@ class NPUModelRunner(GPUModelRunner):
             # vLLM's ``propose(num_speculative_tokens=...)``. ``_propose`` sets
             # ``self.num_speculative_tokens`` from it, so the model runner no
             # longer mutates the drafter's state here.
+            device_communicator = get_tp_group().device_communicator
+            release_aiv_outputs = getattr(
+                device_communicator, "release_aiv_outputs", None
+            )
+            if release_aiv_outputs is not None:
+                release_aiv_outputs()
             draft_token_ids = self.drafter._propose(
                 num_speculative_tokens=scheduler_output.num_spec_tokens_to_schedule,
                 target_token_ids=target_token_ids,
@@ -2171,6 +2177,13 @@ class NPUModelRunner(GPUModelRunner):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
+        device_communicator = get_tp_group().device_communicator
+        release_aiv_outputs = getattr(
+            device_communicator, "release_aiv_outputs", None
+        )
+        if self.speculative_config is None and release_aiv_outputs is not None:
+            release_aiv_outputs()
+
         self._cpp_execution_time_ms = None
         profiling_chunk_config = self.ascend_config.scheduler_config.profiling_chunk_config
         execution_start_time = _start_profiling_chunk_timing(
@@ -2600,6 +2613,12 @@ class NPUModelRunner(GPUModelRunner):
                 batch_desc,
             )
             self.kv_connector_output = kv_connector_output
+
+        # Async scheduling splits model execution and sampling into separate
+        # host phases. Retire AIV collectives before their temporary output
+        # storage can be reclaimed across that boundary.
+        if release_aiv_outputs is not None:
+            release_aiv_outputs()
 
         # Now the batch has been launched we can wait for corrections from the
         # previous model forward without breaking async scheduling.
