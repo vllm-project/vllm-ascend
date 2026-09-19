@@ -1,0 +1,11 @@
+model_name: "OpenGVLab/InternVL3-78B"
+hardware: "Atlas A2 Series"
+model: "vllm-vlm"
+tasks:
+  - name: "basic_inference"
+    metrics:
+    - name: "success"
+      value: true
+max_model_len: 40960
+trust_remote_code: True
+tensor_parallel_size: 4
