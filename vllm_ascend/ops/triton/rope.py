@@ -255,11 +255,11 @@ def _triton_rope_siso(
         # ####################################################################
         qk_tile = tl.load(qk_start_ptr + qk_offsets, mask=qk_mask, other=0).to(tl.float32)
         if IS_NEOX_STYLE:
-            qk_tile_1 = extension.extract_slice(qk_tile, [0, 0], [pad_n_h, rope_dim // 2], [1, 1])
-            qk_tile_2 = extension.extract_slice(qk_tile, [0, rope_dim // 2], [pad_n_h, rope_dim // 2], [1, 1])
+            qk_tile_1 = extension.extract_slice(qk_tile, [0, 0], [pad_n_h, pad_rope_dim // 2], [1, 1])
+            qk_tile_2 = extension.extract_slice(qk_tile, [0, pad_rope_dim // 2], [pad_n_h, pad_rope_dim // 2], [1, 1])
         else:
-            qk_tile_1 = extension.extract_slice(qk_tile, [0, 0], [pad_n_h, rope_dim // 2], [1, 2])
-            qk_tile_2 = extension.extract_slice(qk_tile, [0, 1], [pad_n_h, rope_dim // 2], [1, 2])
+            qk_tile_1 = extension.extract_slice(qk_tile, [0, 0], [pad_n_h, pad_rope_dim // 2], [1, 2])
+            qk_tile_2 = extension.extract_slice(qk_tile, [0, 1], [pad_n_h, pad_rope_dim // 2], [1, 2])
 
         # y = [x1, x2] * [cos, cos] + [-x2, x1] * [sin, sin]
         new_qk_tile_1 = qk_tile_1 * cos_row - qk_tile_2 * sin_row
