@@ -97,6 +97,7 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
         SimpleNamespace(
             model_config=SimpleNamespace(multimodal_config=SimpleNamespace(mm_encoder_only=True)),
         ),
+        SimpleNamespace(compilation_config=SimpleNamespace(cudagraph_mm_encoder=True)),
         SimpleNamespace(additional_config={"draft_window_size": 512}),
         SimpleNamespace(speculative_config=SimpleNamespace(method="suffix")),
         SimpleNamespace(speculative_config=SimpleNamespace(method="ngram")),
@@ -131,6 +132,7 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
         "kvpp",
         "vl-encoder-disaggregation",
         "vl-encoder-only",
+        "vl-encoder-graph",
         "draft-window-size",
         "suffix-speculative-decoding",
         "ngram-speculative-decoding",
@@ -181,6 +183,7 @@ def test_blacklist_does_not_override_explicit_env(monkeypatch):
     assert use_v2_model_runner(SimpleNamespace(model_config=SimpleNamespace(is_encoder_decoder=True))) is True
     assert use_v2_model_runner(SimpleNamespace(additional_config={"enable_kvpp": True})) is True
     assert use_v2_model_runner(SimpleNamespace(ec_transfer_config=object())) is True
+    assert use_v2_model_runner(SimpleNamespace(compilation_config=SimpleNamespace(cudagraph_mm_encoder=True))) is True
     assert use_v2_model_runner(SimpleNamespace(additional_config={"draft_window_size": 512})) is True
     assert (
         use_v2_model_runner(SimpleNamespace(kv_transfer_config=SimpleNamespace(kv_connector="AscendStoreConnector")))

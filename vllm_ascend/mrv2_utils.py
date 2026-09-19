@@ -116,6 +116,9 @@ def _v2_blacklist(vllm_config: VllmConfig) -> list[str]:
         mm_config = getattr(model_config, "multimodal_config", None)
         if getattr(mm_config, "mm_encoder_only", False) is True:
             reasons.append("VL encoder-only")
+    compilation_config = getattr(vllm_config, "compilation_config", None)
+    if _is_configured(compilation_config) and getattr(compilation_config, "cudagraph_mm_encoder", False) is True:
+        reasons.append("VL encoder graph")
     if _additional(vllm_config, "draft_window_size") is not None:
         reasons.append("draft_window_size")
 
@@ -149,6 +152,7 @@ def use_v2_model_runner(vllm_config: VllmConfig) -> bool:
     * encoder-decoder (Whisper)
     * KVPP (``additional_config.enable_kvpp``)
     * VL encoder disaggregation (``ec_transfer_config`` / encoder-only)
+    * VL encoder graph (``compilation_config.cudagraph_mm_encoder``)
     * draft_window_size
     * suffix speculative decoding
     * ngram speculative decoding (``ngram`` / ``ngram_gpu``)
