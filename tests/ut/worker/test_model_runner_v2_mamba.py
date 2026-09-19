@@ -308,25 +308,27 @@ def test_prepare_inputs_propagates_padded_request_count():
 
 
 @patch("vllm_ascend.worker.v2.model_states.mamba_hybrid.build_attn_metadata")
-def test_prepare_attn_marks_uniform_full_graph_padding_as_spec(mock_build_attn_metadata):
+@pytest.mark.parametrize("num_spec", [0, 3])
+@pytest.mark.parametrize("graph_mode", [CUDAGraphMode.FULL, CUDAGraphMode.NONE])
+def test_prepare_attn_keeps_actual_counts_separate_from_padding(mock_build_attn_metadata, num_spec, graph_mode):
     expected_metadata = {"gdn": object()}
     mock_build_attn_metadata.return_value = expected_metadata
     state = SimpleNamespace(
-        vllm_config=SimpleNamespace(num_speculative_tokens=3),
+        vllm_config=SimpleNamespace(num_speculative_tokens=num_spec),
         num_accepted_tokens_gpu=torch.tensor([2, 3], dtype=torch.int32),
         max_model_len=1024,
     )
     input_batch = SimpleNamespace(
         num_reqs=2,
         num_reqs_after_padding=4,
-        num_tokens=8,
-        num_tokens_after_padding=16,
+        num_tokens=2 * (num_spec + 1),
+        num_tokens_after_padding=4 * (num_spec + 1),
         is_prefilling_np=np.array([False, False]),
         idx_mapping=torch.tensor([0, 1]),
-        num_draft_tokens_per_req=np.array([3, 3], dtype=np.int32),
-        num_scheduled_tokens=np.array([4, 4], dtype=np.int32),
-        query_start_loc=torch.tensor([0, 4, 8, 12, 16], dtype=torch.int32),
-        query_start_loc_np=np.array([0, 4, 8, 12, 16], dtype=np.int32),
+        num_draft_tokens_per_req=np.full(2, num_spec, dtype=np.int32),
+        num_scheduled_tokens=np.full(2, num_spec + 1, dtype=np.int32),
+        query_start_loc=torch.arange(5, dtype=torch.int32) * (num_spec + 1),
+        query_start_loc_np=np.arange(5, dtype=np.int32) * (num_spec + 1),
         seq_lens=None,
         dcp_local_seq_lens=None,
         seq_lens_np=np.ones(4, dtype=np.int32),
@@ -337,7 +339,7 @@ def test_prepare_attn_marks_uniform_full_graph_padding_as_spec(mock_build_attn_m
     metadata = AscendMambaHybridModelState.prepare_attn(
         state,
         input_batch=input_batch,
-        cudagraph_mode=CUDAGraphMode.FULL,
+        cudagraph_mode=graph_mode,
         block_tables=(),
         slot_mappings=torch.empty(0, dtype=torch.int64),
         attn_groups=[],
@@ -345,9 +347,38 @@ def test_prepare_attn_marks_uniform_full_graph_padding_as_spec(mock_build_attn_m
     )
 
     assert metadata is expected_metadata
-    model_metadata = mock_build_attn_metadata.call_args.kwargs["model_specific_attn_metadata"]
-    assert model_metadata.num_decode_draft_tokens_cpu.tolist() == [3, 3, 3, 3]
-    assert model_metadata.num_accepted_tokens.tolist() == [2, 3, 1, 1]
+    kwargs = mock_build_attn_metadata.call_args.kwargs
+    assert kwargs["num_actual_reqs"] == 2
+    assert kwargs["num_actual_tokens"] == 2 * (num_spec + 1)
+    graph_requests = 4 if graph_mode == CUDAGraphMode.FULL else 2
+    assert kwargs["num_reqs"] == graph_requests
+    assert kwargs["num_tokens"] == graph_requests * (num_spec + 1)
+    model_metadata = kwargs["model_specific_attn_metadata"]
+    if num_spec:
+        assert model_metadata.num_decode_draft_tokens_cpu.tolist() == [num_spec] * graph_requests
+        assert model_metadata.num_accepted_tokens.tolist() == [2, 3] + [1] * (graph_requests - 2)
+    else:
+        assert model_metadata.num_decode_draft_tokens_cpu is None
+        assert model_metadata.num_accepted_tokens is None
+
+
+def test_prepare_attn_propagates_actual_request_count_to_metadata_builder():
+    model_state_path = (
+        Path(__file__).resolve().parents[3] / "vllm_ascend" / "worker" / "v2" / "model_states" / "mamba_hybrid.py"
+    )
+    module = ast.parse(model_state_path.read_text(encoding="utf-8"))
+    prepare_attn = next(
+        node for node in ast.walk(module) if isinstance(node, ast.FunctionDef) and node.name == "prepare_attn"
+    )
+    build_call = next(
+        node
+        for node in ast.walk(prepare_attn)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "build_attn_metadata"
+    )
+    keywords = {keyword.arg: keyword.value for keyword in build_call.keywords}
+
+    assert ast.unparse(keywords["num_reqs"]) == "num_reqs"
+    assert ast.unparse(keywords["num_actual_reqs"]) == "input_batch.num_reqs"
 
 
 @patch(
