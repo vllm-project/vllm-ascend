@@ -105,8 +105,24 @@ def build_smla_metadata(metadata, buffer, num_heads, head_dim, topk):
     metadata.smla_metadata = buffer
 
 
+def _view_cache_as_operator_pages(cache: torch.Tensor, block_size: int) -> torch.Tensor:
+    """Expose oversized contiguous storage pages at operator block granularity."""
+    storage_block_size = cache.shape[1]
+    if storage_block_size == block_size:
+        return cache
+    if storage_block_size % block_size:
+        raise ValueError(
+            f"Sparse MLA storage block size {storage_block_size} is not divisible by operator block size {block_size}."
+        )
+    try:
+        return cache.view(-1, block_size, *cache.shape[2:])
+    except RuntimeError as err:
+        raise ValueError("Sparse MLA oversized storage pages must support a zero-copy operator-page view.") from err
+
+
 def sparse_mla(query, cache, indices, metadata, scale):
     """Attend to original latent KV, using the platform's NoPE operator."""
+    cache = _view_cache_as_operator_pages(cache, metadata.block_size)
     if metadata.smla_metadata is not None:
         # The A5 DMA merges adjacent columns. Preserve the selected set while
         # sorting token positions and moving invalid padding to the end.
@@ -135,10 +151,6 @@ def sparse_mla(query, cache, indices, metadata, scale):
             return_softmax_lse=False,
         )
     else:
-        # Large, contiguous hybrid storage pages need a C128 view to meet
-        # the A2/A3 limit. Keep supported page-strided layouts unchanged.
-        if cache.shape[1] != metadata.block_size:
-            cache = cache.view(-1, metadata.block_size, *cache.shape[2:])
         result = torch.ops._C_ascend.npu_sparse_flash_attention(
             query=query.contiguous(),
             key=cache,
@@ -178,7 +190,7 @@ class SparseMLAMetadataState:
         self.split = block_size // kernel_block_size
         self.use_smla = get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.FP8_OPTIMIZED
         self.block_size = block_size
-        if not self.use_smla and block_size > SPARSE_ATTENTION_MAX_BLOCK_SIZE:
+        if block_size > SPARSE_ATTENTION_MAX_BLOCK_SIZE:
             self.block_size = kernel_block_size
         self.table_stride = self.block_size // kernel_block_size
         table_width = cdiv(vllm_config.model_config.max_model_len, block_size) * (block_size // self.block_size)
