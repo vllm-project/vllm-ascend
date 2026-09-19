@@ -604,7 +604,20 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             # Use the fused CANN operator when available (probed once, cached on
             # the class) and applicable. It only supports the non-PCP case; fall
             # back to the Triton pipeline under PCP or if the op is unavailable.
-            use_fused_chunk = AscendGatedDeltaNetAttention._probe_fused_chunk() and get_pcp_group().world_size == 1
+            # A partial prefix-cache hit resumes from an explicit cached GDN
+            # state and recomputes its tail with the Triton implementation. A
+            # fused cold prefill accumulates differently in bf16; mixing those
+            # kernels can magnify the drift through the recurrent state and
+            # make greedy cold/warm decoding diverge. Keep both paths on Triton
+            # when prefix caching is enabled. Deployments that explicitly turn
+            # prefix caching off retain the faster fused path. Small floating-
+            # point differences may still remain across different chunk
+            # boundaries, so this does not claim bitwise equivalence.
+            use_fused_chunk = (
+                not self.cache_config.enable_prefix_caching
+                and AscendGatedDeltaNetAttention._probe_fused_chunk()
+                and get_pcp_group().world_size == 1
+            )
             if use_fused_chunk:
                 # The fused op's state layout [N, Nv, Dv, Dk] matches ssm_state
                 # directly, so no transpose is needed. Advanced indexing already

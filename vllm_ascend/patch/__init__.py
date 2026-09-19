@@ -282,6 +282,49 @@
 #    Future Plan:
 #       Remove this patch when vLLM PR #42524 and #44243 is included in the supported
 #       upstream vLLM version.
+#   2. `vllm.v1.core.kv_cache_utils.get_kv_cache_config_from_groups`,
+#      `HybridKVCacheCoordinator.find_longest_cache_hit` and
+#      `...find_longest_cache_hit_per_group`
+#    Why:
+#       On a pure PD prefill producer (`kv_transfer_config.is_kv_producer`
+#       and not `is_kv_consumer`), every content-hash match is a verified
+#       prompt block, so the EAGLE last-block drop is never needed. With
+#       hybrid Mamba align pages (1536 tokens) the drop erases the whole
+#       shared prefix of typical ~2K prompts, pinning producer prefix hits
+#       to 0 (the MTP prefix-cache "kill band").
+#    How:
+#       Tag `is_kv_producer` onto KVCacheConfig while it is built (the
+#       coordinator factory never receives VllmConfig; the tag survives the
+#       scheduler-side deepcopy and worker pickle IPC), read it back in the
+#       coordinator, and skip the EAGLE drop in both lookup entry points on
+#       a tagged producer. The EAGLE-group fallback marks FullAttention
+#       groups only.
+#    Related PR (if no, explain why):
+#       No upstream PR; producer-side drop exemption for hybrid PD.
+#    Future Plan:
+#       Remove once upstream exposes the PD role to the coordinator or
+#       removes the EAGLE last-block drop for verified prompt blocks.
+#   3. `vllm.v1.core.sched.scheduler.Scheduler._mamba_block_aligned_split`
+#    Why:
+#       Scheduler-side companion of fix 2: upstream backs the last cacheable
+#       mamba-align page off by one block while the EAGLE block drop is
+#       active, so the producer never ends a prefill chunk at the final full
+#       page boundary. Mamba "align" state materializes only across a chunk
+#       boundary (copy-on-write in MambaManager.allocate_new_blocks), so the
+#       final full state page stays unhashed and hybrid hits reconcile one
+#       page short (1600-token prompts -> 0 hit, 3200-token -> 1536).
+#    How:
+#       Wrap the method unconditionally; on a pure producer clear the drop
+#       bit (`use_eagle` on vLLM 0.28.x, `use_eagle_block_drop` on newer
+#       revisions) for the duration of the original call and restore it
+#       afterwards. The wrapper self-gates on
+#       `self.vllm_config.kv_transfer_config` at call time, so consumers,
+#       kv_both and standalone instances pass through unchanged.
+#    Related PR (if no, explain why):
+#       No upstream PR; producer-side scheduler companion of fix 2.
+#    Future Plan:
+#       Remove together with fix 2 once upstream splits mamba-align pages
+#       without the EAGLE backoff on PD producers.
 #
 # ** 9. File: platform/patch_kv_cache_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
