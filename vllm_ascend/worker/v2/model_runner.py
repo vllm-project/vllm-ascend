@@ -65,6 +65,10 @@ from vllm_ascend.utils import lmhead_tp_enable, set_potential_max_tokens, vllm_v
 from vllm_ascend.worker.utils import disable_compilation
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state, unwrap_mamba_kv_cache_groups
+from vllm_ascend.worker.v2.eager_dp_padding import (
+    make_dp_padded_dummy_output,
+    sync_dp_group_max_tokens,
+)
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
@@ -119,6 +123,12 @@ class NPUModelRunner(GPUModelRunner):
         # These draft heads consume target aux states collected across PP ranks.
         if spec_pp_support is not None and spec_pp_support.needs_aux_hidden_states:
             self.use_aux_hidden_state_outputs = True
+
+        # o_proj TP needs every DP rank at the same token count; eager steps are aligned by `eager_dp_padding`.
+        finegrained_tp_config = self.ascend_config.finegrained_tp_config
+        self._dp_padding_enabled = finegrained_tp_config.oproj_tensor_parallel_size > 0 and self.dp_size > 1
+        self._dp_padding_aligned_tokens = 0
+        self._dp_padding_original_tokens = 0
 
         self.use_aclgraph = (
             self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
@@ -307,6 +317,23 @@ class NPUModelRunner(GPUModelRunner):
         valid_dummy_state_slots: bool = False,
     ):
         self._cpp_execution_time_ms = None
+        self._dp_padding_aligned_tokens = 0
+        self._dp_padding_original_tokens = 0
+        if (
+            getattr(self, "_dp_padding_enabled", False)
+            and not is_profile
+            and (dummy_run or scheduler_output.total_num_scheduled_tokens > 0)
+        ):
+            self._dp_padding_aligned_tokens = sync_dp_group_max_tokens(
+                0 if dummy_run else scheduler_output.total_num_scheduled_tokens, self.dp_size, self.dp_rank
+            )
+            if dummy_run and self._dp_padding_aligned_tokens > 0:
+                scheduler_output = make_dp_padded_dummy_output(
+                    scheduler_output,
+                    self._dp_padding_aligned_tokens,
+                    self.decode_query_len,
+                    self.max_num_reqs,
+                )
         profiling_config = self.ascend_config.scheduler_config.profiling_chunk_config
         execution_start_time = _start_profiling_chunk_timing(
             profiling_config,
@@ -362,6 +389,13 @@ class NPUModelRunner(GPUModelRunner):
 
     def gather_batch_req_state(self, scheduler_output: SchedulerOutput, dummy_run: bool):
         batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
+        if batch_state is None:
+            return batch_state, uniform_token_count
+        # Keep the real token count before the DP-aligned one replaces it below.
+        self._dp_padding_original_tokens = batch_state.num_tokens
+        # Report the agreed group max so eager dispatch steps are DP-padded.
+        if self._dp_padding_aligned_tokens > batch_state.num_tokens:
+            batch_state = batch_state._replace(num_tokens=self._dp_padding_aligned_tokens)
         num_tokens = None
         if vllm_version_is("0.28.0") and self.pcp_manager is not None and batch_state is not None:
             num_tokens = self.pcp_manager.get_num_tokens_for_dispatch(
@@ -380,7 +414,11 @@ class NPUModelRunner(GPUModelRunner):
         npu attention backends need seq_lens_cpu to work.
         so we need to prepare seq_lens_cpu here.
         """
-        num_tokens = batch_req_state.num_tokens
+        # Restore the real token extent; gather reported the padded size.
+        if self._dp_padding_aligned_tokens > 0:
+            num_tokens = self._dp_padding_original_tokens
+        else:
+            num_tokens = batch_req_state.num_tokens
         num_tokens_after_padding = max(num_tokens, batch_desc.num_tokens)
         assert num_tokens > 0
 
