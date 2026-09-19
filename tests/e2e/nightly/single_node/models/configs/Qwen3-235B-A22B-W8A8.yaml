@@ -73,6 +73,7 @@ test_cases:
     envs:
       <<: *envs
       DYNAMIC_EPLB: "true"
+      VLLM_USE_V2_MODEL_RUNNER: "0"
     server_cmd: *server_cmd
     server_cmd_extra:
       - "--additional-config"
