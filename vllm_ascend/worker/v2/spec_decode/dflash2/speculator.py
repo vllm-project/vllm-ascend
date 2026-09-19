@@ -118,6 +118,15 @@ class AscendDFlash2Speculator(DFlash2Speculator, AscendDFlashSpeculator):
     aclgraph capture, which captures ``self._generate_draft``.
     """
 
+    # DFlash2 samples drafts outside ``sample_draft``: its ``_generate_draft``
+    # calls ``compute_candidates`` -> ``get_top_k_tokens(self.lm_head, ...)``,
+    # i.e. it reduces over the vocab-sharded draft head with per-rank row counts.
+    # The group-aligned padding that LmheadTPDraftSamplingMixin applies in
+    # ``sample_draft`` therefore cannot reach it, so lmhead TP + DFlash2 would
+    # desync the head collectives; reject the combination at construction
+    # instead (same handling as DSpark).
+    _lmhead_tp_sample_draft_supported = False
+
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         # V2 passes the runner's cudagraph mode to the draft speculator
         # without consulting the spec-level enforce_eager. Honor it here:
