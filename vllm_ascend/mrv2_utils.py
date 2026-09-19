@@ -22,6 +22,8 @@ from typing import TYPE_CHECKING
 import vllm.envs as envs_vllm
 from vllm.logger import logger
 
+from vllm_ascend.device.device_config import is_310p
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 else:
@@ -76,6 +78,14 @@ def _is_configured(value: object) -> bool:
 _KV_POOL_CONNECTORS = frozenset({"AscendStoreConnector"})
 _DFLASH2_ARCHITECTURES = frozenset({"DFlash2DraftModel"})
 _NGRAM_SPEC_METHODS = frozenset({"ngram", "ngram_gpu"})
+_HY3_ARCHITECTURES = frozenset({"HYV3ForCausalLM"})
+_GEMMA4_ARCHITECTURES = frozenset(
+    {
+        "Gemma4ForCausalLM",
+        "Gemma4ForConditionalGeneration",
+        "Gemma4UnifiedForConditionalGeneration",
+    }
+)
 
 
 def _draft_window_size(vllm_config: VllmConfig) -> object:
@@ -87,12 +97,32 @@ def _draft_window_size(vllm_config: VllmConfig) -> object:
     return getattr(additional_config, "draft_window_size", None)
 
 
+def _collect_architectures(model_config: object) -> list[str]:
+    architectures: list[str] = []
+    architecture = getattr(model_config, "architecture", None)
+    if isinstance(architecture, str):
+        architectures.append(architecture)
+    architectures.extend(getattr(model_config, "architectures", None) or ())
+    for config_name in ("hf_config", "hf_text_config"):
+        config = getattr(model_config, config_name, None)
+        architectures.extend(getattr(config, "architectures", None) or ())
+    return [name for name in architectures if isinstance(name, str)]
+
+
 def _is_dflash2_spec(speculative_config: object) -> bool:
     draft_model_config = getattr(speculative_config, "draft_model_config", None)
-    architectures = list(getattr(draft_model_config, "architectures", None) or ())
-    hf_config = getattr(draft_model_config, "hf_config", None)
-    architectures.extend(getattr(hf_config, "architectures", None) or ())
-    return any(architecture in _DFLASH2_ARCHITECTURES for architecture in architectures)
+    return any(architecture in _DFLASH2_ARCHITECTURES for architecture in _collect_architectures(draft_model_config))
+
+
+def _blacklisted_architecture(model_config: object) -> str | None:
+    architectures = _collect_architectures(model_config)
+    if any(architecture in _HY3_ARCHITECTURES or architecture.startswith("HYV3") for architecture in architectures):
+        return "Hy3-preview"
+    if any(
+        architecture in _GEMMA4_ARCHITECTURES or architecture.startswith("Gemma4") for architecture in architectures
+    ):
+        return "Gemma4"
+    return None
 
 
 def _is_kv_pool(kv_transfer_config: object) -> bool:
@@ -107,15 +137,22 @@ def _get_v2_model_runner_blacklist(vllm_config: VllmConfig) -> list[str]:
     """Collect Ascend features that are not V2-ready and default to V1."""
     unsupported: list[str] = []
 
+    if is_310p():
+        unsupported.append("310P")
+
     if _is_configured(getattr(vllm_config, "lora_config", None)):
         unsupported.append("LoRA")
 
     model_config = getattr(vllm_config, "model_config", None)
-    if _is_configured(model_config) and (
-        getattr(model_config, "runner_type", None) == "pooling"
-        or getattr(model_config, "is_pooling_model", False) is True
-    ):
-        unsupported.append("pooling KV")
+    if _is_configured(model_config):
+        architecture = _blacklisted_architecture(model_config)
+        if architecture is not None:
+            unsupported.append(architecture)
+        if (
+            getattr(model_config, "runner_type", None) == "pooling"
+            or getattr(model_config, "is_pooling_model", False) is True
+        ):
+            unsupported.append("pooling KV")
 
     if _is_configured(getattr(vllm_config, "ec_transfer_config", None)):
         unsupported.append("VL encoder disaggregation")
@@ -150,8 +187,12 @@ def use_v2_model_runner(vllm_config: VllmConfig) -> bool:
     """Return whether the V2 model runner should be used on Ascend.
 
     An explicit ``VLLM_USE_V2_MODEL_RUNNER`` override wins. Otherwise V2 is
-    the default, except for blacklisted features that still default to V1:
+    the default, except for blacklisted models and features that still default
+    to V1:
 
+    * 310P
+    * Hy3-preview (``HYV3*``)
+    * Gemma4 (``Gemma4*``)
     * LoRA
     * pooling KV (``runner_type="pooling"``)
     * VL encoder disaggregation (``ec_transfer_config`` / encoder-only)

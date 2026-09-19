@@ -40,6 +40,7 @@ def test_environment_override_wins(monkeypatch, env_value):
             model_config=SimpleNamespace(
                 runner_type="generate",
                 is_attention_free=True,
+                architecture="UnknownModel",
                 architectures=["UnknownModel"],
             )
         ),
@@ -71,6 +72,7 @@ def test_environment_override_wins(monkeypatch, env_value):
 )
 def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
     monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
+    monkeypatch.setattr(mrv2_utils, "is_310p", lambda: False)
 
     assert use_v2_model_runner(config) is True
 
@@ -79,6 +81,14 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
     "config",
     [
         SimpleNamespace(lora_config=object()),
+        SimpleNamespace(model_config=SimpleNamespace(architectures=["HYV3ForCausalLM"])),
+        SimpleNamespace(model_config=SimpleNamespace(architecture="HYV3ForCausalLM")),
+        SimpleNamespace(model_config=SimpleNamespace(architectures=["Gemma4ForCausalLM"])),
+        SimpleNamespace(model_config=SimpleNamespace(architectures=["Gemma4ForConditionalGeneration"])),
+        SimpleNamespace(model_config=SimpleNamespace(architectures=["Gemma4UnifiedForConditionalGeneration"])),
+        SimpleNamespace(
+            model_config=SimpleNamespace(hf_config=SimpleNamespace(architectures=["Gemma4ForCausalLM"])),
+        ),
         SimpleNamespace(model_config=SimpleNamespace(runner_type="pooling")),
         SimpleNamespace(model_config=SimpleNamespace(is_pooling_model=True)),
         SimpleNamespace(ec_transfer_config=object()),
@@ -107,6 +117,12 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
     ],
     ids=[
         "lora",
+        "hy3-preview",
+        "hy3-preview-architecture",
+        "gemma4-causal",
+        "gemma4-conditional",
+        "gemma4-unified",
+        "gemma4-hf-config",
         "pooling-runner",
         "pooling-model",
         "vl-encoder-disaggregation",
@@ -123,12 +139,28 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
 )
 def test_blacklisted_features_default_to_v1(monkeypatch, config):
     monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
+    monkeypatch.setattr(mrv2_utils, "is_310p", lambda: False)
 
     assert use_v2_model_runner(config) is False
 
 
+def test_310p_defaults_to_v1(monkeypatch):
+    monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
+    monkeypatch.setattr(mrv2_utils, "is_310p", lambda: True)
+
+    assert use_v2_model_runner(SimpleNamespace()) is False
+
+
+def test_310p_env_override_still_wins(monkeypatch):
+    monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", True)
+    monkeypatch.setattr(mrv2_utils, "is_310p", lambda: True)
+
+    assert use_v2_model_runner(SimpleNamespace()) is True
+
+
 def test_magicmock_config_does_not_trip_the_blacklist(monkeypatch):
     monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
+    monkeypatch.setattr(mrv2_utils, "is_310p", lambda: False)
 
     assert use_v2_model_runner(MagicMock()) is True
 
@@ -137,6 +169,10 @@ def test_blacklist_does_not_override_explicit_env(monkeypatch):
     monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", True)
 
     assert use_v2_model_runner(SimpleNamespace(lora_config=object())) is True
+    assert use_v2_model_runner(SimpleNamespace(model_config=SimpleNamespace(architectures=["HYV3ForCausalLM"]))) is True
+    assert (
+        use_v2_model_runner(SimpleNamespace(model_config=SimpleNamespace(architectures=["Gemma4ForCausalLM"]))) is True
+    )
     assert use_v2_model_runner(SimpleNamespace(model_config=SimpleNamespace(runner_type="pooling"))) is True
     assert use_v2_model_runner(SimpleNamespace(ec_transfer_config=object())) is True
     assert use_v2_model_runner(SimpleNamespace(additional_config={"draft_window_size": 512})) is True
@@ -149,6 +185,7 @@ def test_blacklist_does_not_override_explicit_env(monkeypatch):
 def test_default_v2_logs_selection(monkeypatch):
     info_calls = []
     monkeypatch.setattr(mrv2_utils.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", None)
+    monkeypatch.setattr(mrv2_utils, "is_310p", lambda: False)
     monkeypatch.setattr(mrv2_utils.logger, "info_once", lambda *args: info_calls.append(args))
 
     assert use_v2_model_runner(SimpleNamespace()) is True
