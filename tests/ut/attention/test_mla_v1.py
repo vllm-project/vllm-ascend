@@ -319,6 +319,7 @@ def test_mla_pcp_metadata_keeps_expanded_slot_mapping() -> None:
 
 def test_mla_pcp_prefill_gathers_padded_cache_inputs() -> None:
     impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl.has_mla_extras = False
     captured: dict[str, torch.Tensor] = {}
 
     def fake_gather(tensors, slot_mapping, num_decode_tokens):
@@ -398,6 +399,7 @@ def test_mla_pcp_prefill_gathers_padded_cache_inputs() -> None:
 
 def test_mla_pcp_nope_prefill_trims_gathered_outputs() -> None:
     impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl.has_mla_extras = False
 
     def fake_gather(tensors, slot_mapping, num_decode_tokens):
         assert num_decode_tokens == 0
@@ -495,6 +497,8 @@ class TestPrefillMLAPreprocessResult(TestBase):
         self.assertIsNone(result.k_nope)
         self.assertIsNone(result.k_pe)
         self.assertIsNone(result.value)
+        self.assertIsNone(result.kv_lora)
+        self.assertIsNone(result.k_pe_cache)
 
     def test_prefill_mla_preprocess_result_with_values(self):
         q_nope = torch.randn(2, 4, 8)
@@ -1529,7 +1533,7 @@ class TestAscendMLAImpl(TestBase):
             "use_mla_rope": True,
         }
 
-        self.impl = AscendMLAImpl(
+        self.impl_init_kwargs = dict(
             num_heads=num_heads,
             head_size=head_size,
             scale=scale,
@@ -1543,6 +1547,7 @@ class TestAscendMLAImpl(TestBase):
             kv_sharing_target_layer_name=None,
             **kwargs,
         )
+        self.impl = AscendMLAImpl(**self.impl_init_kwargs)
         self.impl.fa_quant_layer = False
 
     def test_init(self):
@@ -1606,6 +1611,23 @@ class TestAscendMLAImpl(TestBase):
         self.assertTrue(impl.is_draft_model)
         self.assertFalse(impl.enable_mlapo)
         mock_enabling_mlapo.assert_not_called()
+
+    def test_mla_extras_use_layer_rotary_emb(self):
+        global_layer_kwargs = dict(self.impl_init_kwargs)
+        global_layer_kwargs["k_rope_only_layernorm"] = MagicMock()
+        global_layer_kwargs["sliding_window"] = None
+        with patch(
+            "vllm_ascend.attention.mla_v1.get_current_vllm_config",
+            return_value=self.impl.vllm_config,
+        ):
+            global_layer = AscendMLAImpl(**global_layer_kwargs)
+
+            sliding_layer_kwargs = dict(global_layer_kwargs)
+            sliding_layer_kwargs["sliding_window"] = 511
+            sliding_layer = AscendMLAImpl(**sliding_layer_kwargs)
+
+        self.assertTrue(global_layer.use_layer_rotary_emb)
+        self.assertTrue(sliding_layer.use_layer_rotary_emb)
 
     @patch("vllm_ascend.attention.mla_v1.get_current_vllm_config")
     def test_init_head_padding_for_non_power_of_two(self, mock_get_current_vllm_config):
@@ -2762,6 +2784,20 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(k_pe.shape[-1], self.impl.qk_rope_head_dim)
         self.assertEqual(k_nope.shape[-1], self.impl.kv_lora_rank)
 
+    @patch("torch_npu.npu_kv_rmsnorm_rope_cache")
+    def test_exec_kv_decode_extras_do_not_overwrite_normalized_cache(self, fused_cache):
+        self.impl.has_mla_extras = True
+        self.impl._manual_kv_norm_rope_cache = MagicMock()
+        cache = (torch.zeros(1), torch.ones(1))
+        args = (torch.empty(1), torch.empty(1), torch.empty(1), cache, torch.tensor([0]))
+
+        rope, latent = self.impl.exec_kv_decode(*args)
+
+        self.impl._manual_kv_norm_rope_cache.assert_called_once_with(*args)
+        fused_cache.assert_not_called()
+        self.assertIs(rope, cache[1])
+        self.assertIs(latent, cache[0])
+
     @patch("vllm_ascend.attention.mla_v1.torch_npu.npu_kv_rmsnorm_rope_cache", create=True)
     def test_exec_kv_decode(self, mock_kv_rmsnorm_rope_cache):
         B = 2
@@ -3057,6 +3093,7 @@ class TestAscendMLAImpl(TestBase):
 def test_mla_nope_decode_preserves_current_kv_contract():
     """DCP needs current KV tensors in addition to the paged NoPE cache."""
     impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl.has_mla_extras = False
     impl.use_mla_rope = True
     impl.num_kv_heads = 1
     impl.kv_lora_rank = 4

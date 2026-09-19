@@ -540,7 +540,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     )
             else:
                 # MTP model
-                share_embeddings = not self.use_compress
+                share_embeddings = not self.use_compress and not getattr(self.model, "has_own_embed_tokens", False)
                 if share_embeddings:
                     logger.info(
                         "[spec_decode/base] Detected MTP model. Sharing target model"

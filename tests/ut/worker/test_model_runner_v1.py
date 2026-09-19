@@ -19,6 +19,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
+    SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.utils import CpuGpuBuffer
@@ -31,6 +32,7 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
+    AscendSlidingWindowMLASpec,
 )
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.models.glm5next.kv_cache import (
@@ -483,6 +485,157 @@ def _ratio_kwargs(ratio: int) -> dict[str, int]:
 
 
 class TestNPUModelRunnerKVCache(unittest.TestCase):
+    @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
+    @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
+    def test_mixed_mla_keeps_full_sliding_and_indexer_specs_separate(
+        self,
+        mock_get_layers,
+        _mock_has_ec_transfer,
+    ):
+        runner = self._build_runner()
+        runner.use_sparse = True
+        runner.block_size = 16
+        runner.kv_cache_dtype = torch.bfloat16
+        runner.c8_k_cache_dtype = torch.int8
+        runner.c8_k_scale_cache_dtype = torch.float16
+        runner.shared_kv_cache_layers = {}
+        runner.ascend_config = MagicMock()
+        runner.ascend_config.is_sparse_li_c8_layer.return_value = False
+        runner.model_config.hf_text_config = SimpleNamespace(
+            kv_lora_rank=512,
+            qk_rope_head_dim=64,
+            index_head_dim=128,
+        )
+        runner.vllm_config.cache_config.cache_dtype = "auto"
+
+        full_spec = MLAAttentionSpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+            cache_dtype_str="auto",
+        )
+        sliding_spec = SlidingWindowMLASpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=1088,
+            dtype=torch.bfloat16,
+            cache_dtype_str="auto",
+            sliding_window=511,
+        )
+
+        def make_mla_attention(spec, *, use_sparse, kv_lora_rank, qk_rope_head_dim):
+            attn = MLAAttention.__new__(MLAAttention)
+            torch.nn.Module.__init__(attn)
+            attn.use_sparse = use_sparse
+            attn.kv_lora_rank = kv_lora_rank
+            attn.qk_rope_head_dim = qk_rope_head_dim
+            attn.impl = SimpleNamespace(
+                enable_sparse_sfa_c8=False,
+                fa_quant_layer=False,
+            )
+            attn.get_kv_cache_spec = MagicMock(return_value=spec)
+            return attn
+
+        full_layer_name = "model.layers.1.self_attn.attn"
+        sliding_layer_name = "model.layers.2.self_attn.attn"
+        indexer_layer_name = "model.layers.1.self_attn.indexer.k_cache"
+        full_attention = make_mla_attention(
+            full_spec,
+            use_sparse=True,
+            kv_lora_rank=512,
+            qk_rope_head_dim=64,
+        )
+        sliding_attention = make_mla_attention(
+            sliding_spec,
+            use_sparse=False,
+            kv_lora_rank=1024,
+            qk_rope_head_dim=64,
+        )
+        indexer = DeepseekV32IndexerCache.__new__(DeepseekV32IndexerCache)
+        torch.nn.Module.__init__(indexer)
+        mock_get_layers.return_value = {
+            full_layer_name: full_attention,
+            sliding_layer_name: sliding_attention,
+            indexer_layer_name: indexer,
+        }
+
+        specs = runner.get_kv_cache_spec()
+
+        self.assertIsInstance(specs[full_layer_name], AscendMLAAttentionSpec)
+        self.assertEqual(specs[full_layer_name].head_size, 576)
+        self.assertIsInstance(
+            specs[sliding_layer_name],
+            AscendSlidingWindowMLASpec,
+        )
+        self.assertEqual(specs[sliding_layer_name].head_size, 1088)
+        self.assertEqual(specs[sliding_layer_name].sliding_window, 511)
+        self.assertIsInstance(
+            specs[indexer_layer_name],
+            AscendSFAIndexerCacheSpec,
+        )
+        self.assertEqual(specs[indexer_layer_name].head_size, 128)
+
+    @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
+    def test_sliding_mla_cache_skips_sparse_offload(self, mock_get_layers):
+        runner = self._build_runner()
+        runner.use_sparse = True
+        runner.sparse_kv_offload_enabled = True
+        layer_name = "model.layers.2.self_attn.attn"
+        spec = AscendSlidingWindowMLASpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=1088,
+            dtype=torch.bfloat16,
+            cache_dtype_str="auto",
+            sliding_window=511,
+        )
+        attn = MLAAttention.__new__(MLAAttention)
+        torch.nn.Module.__init__(attn)
+        attn.kv_lora_rank = 1024
+        attn.qk_rope_head_dim = 64
+        mock_get_layers.return_value = {layer_name: attn}
+        kv_cache_config = KVCacheConfig(
+            num_blocks=2,
+            kv_cache_tensors=[
+                _make_kv_cache_tensor(
+                    per_layer_size=spec.page_size_bytes * 2,
+                    layer_names=[layer_name],
+                    page_size=spec.page_size_bytes,
+                )
+            ],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    layer_names=[layer_name],
+                    kv_cache_spec=spec,
+                )
+            ],
+        )
+
+        raw_tensors = runner._allocate_kv_cache_tensors(kv_cache_config)
+        assert isinstance(raw_tensors[layer_name], tuple)
+
+        runner.attn_backend.get_kv_cache_shape.side_effect = lambda num_blocks, block_size, num_kv_heads, head_size: (
+            num_blocks,
+            block_size,
+            num_kv_heads,
+            head_size,
+        )
+        runner._kv_cache_spec_attn_group_iterator = lambda: [
+            SimpleNamespace(
+                kv_cache_spec=spec,
+                backend=runner.attn_backend,
+                layer_names=[layer_name],
+            )
+        ]
+        k_cache, v_cache = runner._reshape_kv_cache_tensors(
+            kv_cache_config,
+            raw_tensors,
+        )[layer_name]
+
+        self.assertEqual(k_cache.shape, (2, 16, 1, 1024))
+        self.assertEqual(v_cache.shape, (2, 16, 1, 64))
+
     def _build_runner(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)
         runner.device = torch.device("cpu")
@@ -590,6 +743,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             dtype=torch.bfloat16,
         )
         attn_module = MLAAttention.__new__(MLAAttention)
+        attn_module.use_sparse = runner.use_sparse
         torch.nn.Module.__init__(attn_module)
         attn_module.impl = SimpleNamespace(fa_quant_layer=False)
         attn_module.model_version = "glm5_next"
@@ -1065,6 +1219,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
         layer_name = "draft_attn"
         attn_module = MLAAttention.__new__(MLAAttention)
+        attn_module.use_sparse = runner.use_sparse
         torch.nn.Module.__init__(attn_module)
         attn_module.kv_lora_rank = 512
         attn_module.qk_rope_head_dim = 64
@@ -1244,6 +1399,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.sparse_kv_offload_enabled = False
 
         attn_module = MLAAttention.__new__(MLAAttention)
+        attn_module.use_sparse = runner.use_sparse
         torch.nn.Module.__init__(attn_module)
         attn_module.impl = SimpleNamespace(
             has_indexer=False,
@@ -1309,6 +1465,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.sparse_kv_offload_enabled = False
 
         attn_module = MLAAttention.__new__(MLAAttention)
+        attn_module.use_sparse = runner.use_sparse
         torch.nn.Module.__init__(attn_module)
         attn_module.impl = SimpleNamespace(
             has_indexer=True,
@@ -1607,6 +1764,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.sparse_kv_offload_enabled = False
 
         attn_module = MLAAttention.__new__(MLAAttention)
+        attn_module.use_sparse = runner.use_sparse
         torch.nn.Module.__init__(attn_module)
         attn_module.kv_lora_rank = 512
         attn_module.qk_rope_head_dim = 64
