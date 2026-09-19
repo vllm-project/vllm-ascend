@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import copy
+import dataclasses
 import inspect as _inspect
 from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
@@ -31,6 +32,7 @@ from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import KVCacheConfig, UniformTypeKVCacheSpecs
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -40,6 +42,7 @@ from vllm.v1.spec_decode.utils import (
     extend_all_queries_by_N,
 )
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
+from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend import utils as ascend_utils
 from vllm_ascend.ascend_config import get_ascend_config
@@ -176,6 +179,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         # Assign runner before it's used in the methods below
         self.runner = runner
+        self._uses_multi_group_kv_cache = False
 
         logger.debug(
             "[spec_decode/base] Initializing spec decode proposer: method=%s,"
@@ -674,6 +678,160 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     def _build_multi_group_graph_capture_metadata(self, common_attn_metadata, draft_index):
         return None
 
+    def _get_draft_layer_kv_cache_groups(self, kv_cache_config: KVCacheConfig) -> dict[str, int]:
+        """Return the physical KV-cache group used by each drafting layer."""
+        layer_to_group = {
+            layer_name: gid
+            for gid, group in enumerate(kv_cache_config.kv_cache_groups)
+            for layer_name in group.layer_names
+            if layer_name in self._draft_attn_layer_names
+        }
+        missing_layers = self._draft_attn_layer_names - layer_to_group.keys()
+        if missing_layers:
+            raise ValueError(f"Drafting layers are missing from the KV cache config: {sorted(missing_layers)}")
+        return layer_to_group
+
+    def initialize_attn_backend(
+        self,
+        kv_cache_config: KVCacheConfig,
+        kernel_block_sizes: list[int] | None = None,
+    ) -> None:
+        """Use the vLLM initializer unless draft layers span cache groups."""
+        layer_to_group = self._get_draft_layer_kv_cache_groups(kv_cache_config)
+        draft_group_ids = set(layer_to_group.values())
+        self._uses_multi_group_kv_cache = len(draft_group_ids) > 1
+        if not self._uses_multi_group_kv_cache:
+            super().initialize_attn_backend(kv_cache_config, kernel_block_sizes)
+            return
+
+        all_attn_layers = get_layers_from_vllm_config(
+            self.vllm_config,
+            AttentionLayerBase,  # type: ignore[type-abstract]
+        )
+
+        attention_groups: dict[tuple[str, int], AttentionGroup] = {}
+        for layer_name in sorted(self._draft_attn_layer_names):
+            gid = layer_to_group[layer_name]
+            group_kv_cache_spec = kv_cache_config.kv_cache_groups[gid].kv_cache_spec
+            layer_kv_cache_spec = group_kv_cache_spec
+            if isinstance(group_kv_cache_spec, UniformTypeKVCacheSpecs):
+                layer_kv_cache_spec = group_kv_cache_spec.kv_cache_specs[layer_name]
+
+            attn_backend = all_attn_layers[layer_name].get_attn_backend()
+            backend_key = (attn_backend.full_cls_name(), gid)
+            if backend_key in attention_groups:
+                attention_groups[backend_key].layer_names.append(layer_name)
+                continue
+
+            attn_group = AttentionGroup(
+                backend=attn_backend,
+                layer_names=[layer_name],
+                kv_cache_spec=layer_kv_cache_spec,
+                kv_cache_group_id=gid,
+            )
+            # Cache-only groups (for example the GLM-Next indexer) have no
+            # attention implementation. Keep their cache spec's logical block
+            # size instead of rewriting it to the executable kernel's size.
+            kernel_block_size = (
+                kernel_block_sizes[gid]
+                if not self._is_cache_only_draft_attn_group(attn_group)
+                and kernel_block_sizes is not None
+                and gid < len(kernel_block_sizes)
+                else None
+            )
+            attn_group.create_metadata_builders(
+                self.vllm_config,
+                self.device,
+                kernel_block_size=kernel_block_size,
+            )
+            attention_groups[backend_key] = attn_group
+
+        if not attention_groups:
+            raise ValueError("No KV cache group found for drafting layers")
+
+        # The executable attention backend is the primary group. Cache-only
+        # indexer groups consume metadata but must not drive shared MTP state.
+        self.draft_attn_groups = list(attention_groups.values())
+        primary_group = self._get_primary_draft_attn_group()
+        self.kv_cache_gid = primary_group.kv_cache_group_id
+
+        logger.info(
+            "Initialized %d drafting attention group(s) across KV cache group ids %s; primary group id is %d",
+            len(self.draft_attn_groups),
+            sorted(draft_group_ids),
+            self.kv_cache_gid,
+        )
+
+        # attn_update_stack_num_spec_norm computes the shared MTP slot mapping
+        # from the primary group's block table, so it must use that group's
+        # kernel block size. Cache-only groups compute their own slot mapping.
+        if kernel_block_sizes is not None and self.kv_cache_gid < len(kernel_block_sizes):
+            self.block_size = kernel_block_sizes[self.kv_cache_gid]
+        else:
+            self.block_size = primary_group.get_metadata_builder().kv_cache_spec.block_size
+        logger.debug("Using block size %d for drafting layers", self.block_size)
+
+    def _draft_block_table_width(self, attn_group: AttentionGroup) -> int:
+        """Return the block-table width consumed by one metadata builder."""
+        builder = attn_group.get_metadata_builder()
+        logical_block_size = getattr(builder, "logical_block_size", None)
+        blocks_per_logical_block = getattr(builder, "kernel_blocks_per_logical_block", None)
+        if (
+            isinstance(logical_block_size, int)
+            and logical_block_size > 0
+            and isinstance(blocks_per_logical_block, int)
+            and blocks_per_logical_block > 0
+        ):
+            max_logical_blocks = (self.max_model_len + logical_block_size - 1) // logical_block_size
+            return max_logical_blocks * blocks_per_logical_block
+        return builder.kv_cache_spec.max_num_blocks_per_req(self.vllm_config, self.max_model_len)
+
+    def _build_common_attn_metadata_for_kv_cache_group(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        attn_group: AttentionGroup,
+    ) -> CommonAttentionMetadata:
+        """Bind graph-capture metadata to one physical KV-cache group."""
+        gid = attn_group.kv_cache_group_id
+        block_table = self.runner.input_batch.block_table[gid]
+        num_reqs = common_attn_metadata.num_reqs
+        num_slots = common_attn_metadata.slot_mapping.shape[0]
+        if gid == self.kv_cache_gid:
+            block_table_tensor = common_attn_metadata.block_table_tensor
+            slot_mapping = common_attn_metadata.slot_mapping
+        else:
+            block_table_tensor = block_table.get_device_tensor()[:num_reqs]
+            slot_mapping = block_table.slot_mapping.gpu[:num_slots]
+
+        return dataclasses.replace(
+            common_attn_metadata,
+            block_table_tensor=block_table_tensor[:num_reqs, : self._draft_block_table_width(attn_group)],
+            slot_mapping=slot_mapping,
+        )
+
+    def build_per_group_and_layer_attn_metadata(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        draft_index: int = 0,
+    ) -> tuple[list[object], dict[str, object]]:
+        """Build graph-capture metadata independently for every cache group."""
+        per_group_attn_metadata: list[object] = []
+        per_layer_attn_metadata: dict[str, object] = {}
+        for attn_group in self.draft_attn_groups:
+            group_common_attn_metadata = (
+                self._build_common_attn_metadata_for_kv_cache_group(common_attn_metadata, attn_group)
+                if getattr(self, "_uses_multi_group_kv_cache", False)
+                else common_attn_metadata
+            )
+            attn_metadata = attn_group.get_metadata_builder().build_for_drafting(
+                common_attn_metadata=group_common_attn_metadata,
+                draft_index=draft_index,
+            )
+            per_group_attn_metadata.append(attn_metadata)
+            for layer_name in attn_group.layer_names:
+                per_layer_attn_metadata[layer_name] = attn_metadata
+        return per_group_attn_metadata, per_layer_attn_metadata
+
     def _get_attn_metadata_layer_names(self, attn_group):
         return self.attn_layer_names
 
@@ -798,10 +956,15 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         continue
                     per_layer_attn_metadata = dict()
                     for attn_group in self.draft_attn_groups:
+                        group_common_attn_metadata = (
+                            self._build_common_attn_metadata_for_kv_cache_group(common_attn_metadata, attn_group)
+                            if getattr(self, "_uses_multi_group_kv_cache", False)
+                            else common_attn_metadata
+                        )
                         builder = attn_group.get_metadata_builder()
                         if not self.use_compress or draft_index == 0:
                             attn_metadata_eagle = builder.build_for_graph_capture(
-                                common_attn_metadata,
+                                group_common_attn_metadata,
                                 AscendAttentionState.SpecDecoding
                                 if self.method == "mtp"
                                 else AscendAttentionState.ChunkedPrefill,
@@ -809,7 +972,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                             )
                         else:
                             attn_metadata_eagle = builder.build_for_drafting(
-                                common_attn_metadata,
+                                group_common_attn_metadata,
                                 draft_index,
                                 **extra_attn_metadata_args,
                             )
@@ -1160,9 +1323,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             for draft_index in range(1, self.num_speculative_tokens):
                 per_layer_attn_metadata = dict()
                 if cache_only_groups:
-                    # Attention and cache-only groups describe the same draft
-                    # step. Advance shared state once while building metadata
-                    # for the executable attention group.
+                    # Advance sequence lengths, positions, and the primary slot
+                    # mapping once. Cache-only groups derive their metadata from
+                    # the same logical step using their own physical cache.
                     common_attn_metadata, primary_metadata = self.attn_update_stack_num_spec_norm(
                         draft_index,
                         common_attn_metadata,
@@ -1173,18 +1336,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         **draft_cp_kwargs,
                         attn_group=primary_group,
                     )
-                    for layer_name in primary_group.layer_names:
-                        per_layer_attn_metadata[layer_name] = primary_metadata
-                    for attn_group in cache_only_groups:
-                        builder = attn_group.get_metadata_builder()
-                        # Build cache-only metadata from the updated common
-                        # view without advancing the draft-step state again.
-                        attn_metadata = builder.build_for_drafting(
-                            common_attn_metadata,
-                            draft_index,
-                        )
-                        for layer_name in attn_group.layer_names:
-                            per_layer_attn_metadata[layer_name] = attn_metadata
+                    per_layer_attn_metadata = self._build_cache_only_group_next_step_attn_metadata(
+                        common_attn_metadata,
+                        draft_index,
+                        num_input_tokens,
+                        primary_group,
+                        primary_metadata,
+                        cache_only_groups,
+                    )
                 else:
                     for attn_group in self.draft_attn_groups:
                         common_attn_metadata, attn_metadata = self.attn_update_stack_num_spec_norm(
@@ -2079,8 +2238,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 draft_index=draft_index,
                 seq_lens_cpu=ori_seq_len_cpu,
             )
-        attn_metadata = attn_metadata_builder.build_for_drafting(
+        group_common_attn_metadata = self._common_attn_metadata_for_draft_group(
             common_attn_metadata,
+            attn_group,
+            input_batch_size,
+        )
+        attn_metadata = attn_metadata_builder.build_for_drafting(
+            group_common_attn_metadata,
             draft_index,
             **extra_attn_metadata_args,
         )
@@ -2459,6 +2623,85 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         return tensor, token_indices_to_sample
 
+    def _common_attn_metadata_for_draft_group(
+        self,
+        common_attn_metadata,
+        attn_group,
+        num_input_tokens,
+    ):
+        """Return a metadata view bound to an attention group's physical cache."""
+        if not getattr(self, "_uses_multi_group_kv_cache", False):
+            return common_attn_metadata
+
+        gid = attn_group.kv_cache_group_id
+        group_metadata = copy.copy(common_attn_metadata)
+        if gid == self.kv_cache_gid:
+            block_table_tensor = common_attn_metadata.block_table_tensor
+        else:
+            block_table = self.runner.input_batch.block_table[gid]
+            seq_lens_cpu = (
+                common_attn_metadata._seq_lens_cpu
+                if common_attn_metadata._seq_lens_cpu is not None
+                else common_attn_metadata.seq_lens_cpu
+            )
+            if seq_lens_cpu is None:
+                raise RuntimeError(
+                    "CPU sequence lengths are required to update a secondary draft KV-cache group's slot mapping"
+                )
+            num_reqs = group_metadata.num_reqs
+            num_active_reqs = min(
+                num_reqs,
+                common_attn_metadata.num_actual_tokens,
+                num_input_tokens,
+            )
+            req_indices = np.arange(num_active_reqs, dtype=np.int32)
+            positions = seq_lens_cpu[:num_active_reqs].numpy() - 1
+            block_table.compute_slot_mapping_draft(req_indices, positions)
+            block_table_tensor = block_table.get_device_tensor()[:num_reqs]
+            group_slot_mapping = block_table.slot_mapping.gpu[:num_input_tokens]
+            group_slot_mapping[num_active_reqs:].fill_(PADDING_SLOT_ID)
+            group_metadata.slot_mapping = group_slot_mapping
+
+        group_metadata.block_table_tensor = block_table_tensor[
+            : group_metadata.num_reqs, : self._draft_block_table_width(attn_group)
+        ]
+        return group_metadata
+
+    def _build_cache_only_group_next_step_attn_metadata(
+        self,
+        common_attn_metadata,
+        draft_index,
+        num_input_tokens,
+        primary_group,
+        primary_metadata,
+        cache_only_groups,
+    ):
+        """Build cache-only metadata without advancing shared MTP state."""
+        per_layer_attn_metadata: dict[str, Any] = {
+            layer_name: primary_metadata for layer_name in primary_group.layer_names
+        }
+
+        for attn_group in cache_only_groups:
+            group_common_attn_metadata = self._common_attn_metadata_for_draft_group(
+                common_attn_metadata,
+                attn_group,
+                num_input_tokens,
+            )
+            builder = attn_group.get_metadata_builder()
+            extra_attn_metadata_args: dict[str, Any] = {}
+            if self.use_compress:
+                extra_attn_metadata_args["common_ratio_to_sas_metadata"] = {}
+
+            attn_metadata = builder.build_for_drafting(
+                group_common_attn_metadata,
+                draft_index,
+                **extra_attn_metadata_args,
+            )
+
+            for layer_name in attn_group.layer_names:
+                per_layer_attn_metadata[layer_name] = attn_metadata
+        return per_layer_attn_metadata
+
     def build_draft_attn_metadata(
         self,
         common_attn_metadata,
@@ -2524,7 +2767,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     device_metadata_tasks.extend(device_metadata_provider.take_device_metadata_tasks())
             else:
                 attn_metadata = builder.build(
-                    0, common_attn_metadata, self.runner.get_model(), **extra_attn_metadata_args
+                    0,
+                    self._common_attn_metadata_for_draft_group(
+                        common_attn_metadata,
+                        attn_group,
+                        num_input_tokens,
+                    ),
+                    self.runner.get_model(),
+                    **extra_attn_metadata_args,
                 )
             if hasattr(attn_metadata, "causal") and not attn_metadata.causal:
                 attn_metadata.attn_mask = None
