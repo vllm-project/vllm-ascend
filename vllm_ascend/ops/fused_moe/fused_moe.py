@@ -240,6 +240,10 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
 
     @property
     def is_internal_router(self) -> bool:
+        # The diagnostic Qwen forwards restore v0.27.1's external-gate branch.
+        # Match its Ascend policy; other models retain the current contract.
+        if self.gate is not None and getattr(self.gate, "ascend_v0271_gate_control", False) is True:
+            return hasattr(self.gate, "weight_fp32")
         # main (cdc4824a21): vllm#51838 removed the gate branch in
         # DeepseekV2MoE.forward, always passing router_logits=hidden_states.
         # The runner must recompute router_logits via the gate.
