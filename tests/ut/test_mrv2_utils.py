@@ -91,6 +91,8 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
         ),
         SimpleNamespace(model_config=SimpleNamespace(runner_type="pooling")),
         SimpleNamespace(model_config=SimpleNamespace(is_pooling_model=True)),
+        SimpleNamespace(model_config=SimpleNamespace(is_encoder_decoder=True)),
+        SimpleNamespace(additional_config={"enable_kvpp": True}),
         SimpleNamespace(ec_transfer_config=object()),
         SimpleNamespace(
             model_config=SimpleNamespace(multimodal_config=SimpleNamespace(mm_encoder_only=True)),
@@ -125,6 +127,8 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
         "gemma4-hf-config",
         "pooling-runner",
         "pooling-model",
+        "encoder-decoder",
+        "kvpp",
         "vl-encoder-disaggregation",
         "vl-encoder-only",
         "draft-window-size",
@@ -174,6 +178,8 @@ def test_blacklist_does_not_override_explicit_env(monkeypatch):
         use_v2_model_runner(SimpleNamespace(model_config=SimpleNamespace(architectures=["Gemma4ForCausalLM"]))) is True
     )
     assert use_v2_model_runner(SimpleNamespace(model_config=SimpleNamespace(runner_type="pooling"))) is True
+    assert use_v2_model_runner(SimpleNamespace(model_config=SimpleNamespace(is_encoder_decoder=True))) is True
+    assert use_v2_model_runner(SimpleNamespace(additional_config={"enable_kvpp": True})) is True
     assert use_v2_model_runner(SimpleNamespace(ec_transfer_config=object())) is True
     assert use_v2_model_runner(SimpleNamespace(additional_config={"draft_window_size": 512})) is True
     assert (

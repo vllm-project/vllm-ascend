@@ -88,13 +88,21 @@ _GEMMA4_ARCHITECTURES = frozenset(
 )
 
 
-def _draft_window_size(vllm_config: VllmConfig) -> object:
+def _additional_config_value(vllm_config: VllmConfig, key: str) -> object:
     additional_config = getattr(vllm_config, "additional_config", None)
     if not _is_configured(additional_config):
         return None
     if isinstance(additional_config, dict):
-        return additional_config.get("draft_window_size")
-    return getattr(additional_config, "draft_window_size", None)
+        return additional_config.get(key)
+    return getattr(additional_config, key, None)
+
+
+def _draft_window_size(vllm_config: VllmConfig) -> object:
+    return _additional_config_value(vllm_config, "draft_window_size")
+
+
+def _is_kvpp_enabled(vllm_config: VllmConfig) -> bool:
+    return _additional_config_value(vllm_config, "enable_kvpp") is True
 
 
 def _collect_architectures(model_config: object) -> list[str]:
@@ -153,6 +161,11 @@ def _get_v2_model_runner_blacklist(vllm_config: VllmConfig) -> list[str]:
             or getattr(model_config, "is_pooling_model", False) is True
         ):
             unsupported.append("pooling KV")
+        if getattr(model_config, "is_encoder_decoder", False) is True:
+            unsupported.append("encoder-decoder")
+
+    if _is_kvpp_enabled(vllm_config):
+        unsupported.append("KVPP")
 
     if _is_configured(getattr(vllm_config, "ec_transfer_config", None)):
         unsupported.append("VL encoder disaggregation")
@@ -195,6 +208,8 @@ def use_v2_model_runner(vllm_config: VllmConfig) -> bool:
     * Gemma4 (``Gemma4*``)
     * LoRA
     * pooling KV (``runner_type="pooling"``)
+    * encoder-decoder (Whisper)
+    * KVPP (``additional_config.enable_kvpp``)
     * VL encoder disaggregation (``ec_transfer_config`` / encoder-only)
     * draft_window_size
     * suffix speculative decoding
