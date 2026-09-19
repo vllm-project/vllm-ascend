@@ -1043,15 +1043,19 @@ def finegrained_tp_dp_padding(enabled: bool):
     original_dispatch = vllm_model_runner.dispatch_cg_and_sync_dp
 
     def dispatch_with_finegrained_tp_padding(*args, **kwargs):
-        batch_desc, num_tokens_across_dp = original_dispatch(*args, **kwargs)
-        if num_tokens_across_dp is None:
-            return batch_desc, num_tokens_across_dp
+        batch_desc, dp_sync = original_dispatch(*args, **kwargs)
+        if dp_sync is None:
+            return batch_desc, dp_sync
+
+        # vLLM 0.28 returns the token-count tensor directly, while newer
+        # versions wrap it in DPSyncState so the same agreement can be reused.
+        num_tokens_across_dp = getattr(dp_sync, "num_tokens_across_dp", dp_sync)
 
         padded_num_tokens = max(batch_desc.num_tokens, int(num_tokens_across_dp.max().item()))
         if padded_num_tokens != batch_desc.num_tokens:
             batch_desc = replace(batch_desc, num_tokens=padded_num_tokens)
         num_tokens_across_dp.fill_(padded_num_tokens)
-        return batch_desc, num_tokens_across_dp
+        return batch_desc, dp_sync
 
     vllm_model_runner.dispatch_cg_and_sync_dp = dispatch_with_finegrained_tp_padding
     try:
