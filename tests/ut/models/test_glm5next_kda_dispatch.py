@@ -9,9 +9,9 @@ import torch
 import vllm_ascend.models.glm5next.kda as model_kda
 
 
-@pytest.mark.parametrize("speculative", [False, True])
+@pytest.mark.parametrize(("speculative", "spec_only"), [(False, False), (True, False), (True, True)])
 @pytest.mark.parametrize("dim_first", [False, True])
-def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch, speculative, dim_first):
+def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch, speculative, spec_only, dim_first):
     layer = model_kda.Glm5NextLinearAttention.__new__(model_kda.Glm5NextLinearAttention)
     torch.nn.Module.__init__(layer)
     layer.prefix = "layer"
@@ -28,7 +28,7 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
         setattr(layer, name, SimpleNamespace(bias=None, weight=torch.full((128, 1, 4), float(index))))
     layer.A_log = torch.zeros(1)
     layer.dt_bias = torch.zeros(128)
-    tokens = 5 if speculative else 4
+    tokens = 2 if spec_only else (5 if speculative else 4)
     metadata = object.__new__(model_kda.GDNAttentionMetadata)
     values = dict(
         has_initial_state=torch.tensor([True, False]),
@@ -64,6 +64,8 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
             num_decodes=0,
             num_decode_tokens=0,
         )
+    if spec_only:
+        values.update(num_prefills=0, non_spec_token_indx=None)
     for name, value in values.items():
         setattr(metadata, name, value)
     prefill_conv = SimpleNamespace(
@@ -81,6 +83,10 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
             )
         )
     monkeypatch.setattr(model_kda, "get_forward_context", lambda: SimpleNamespace(attn_metadata={"layer": metadata}))
+    events = []
+    monkeypatch.setattr(model_kda, "wait_for_kv_layer_from_connector", lambda prefix: events.append(("load", prefix)))
+    monkeypatch.setattr(model_kda, "record_attention_compute_start", lambda: events.append("compute"))
+    monkeypatch.setattr(model_kda, "maybe_save_kv_layer_to_connector", lambda *args: events.append("save"))
     conv_calls = []
     conv_entry = model_kda.causal_conv1d
 
@@ -94,6 +100,8 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
     monkeypatch.setattr(model_kda, "causal_conv1d", cpu_conv_entry)
 
     def conv(output, x, weight, **kwargs):
+        assert events[:2] == [("load", "layer"), "compute"]
+        assert "save" not in events
         conv_calls.append(kwargs["run_mode"])
         state = kwargs["conv_state"]
         assert state.shape == (8, 6, 384)
@@ -119,12 +127,14 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
     calls = []
 
     def recurrent(q, k, v, gate, beta, state, starts, indices, *args):
+        events.append("state_write")
         calls.append("recurrent")
         assert q.shape[1] == (2 if speculative else 1)
         torch.testing.assert_close(starts, torch.tensor([0, q.shape[1]]))
         return q * 2
 
     def prefill(q, k, v, gate, beta, state, indices, initial, chunk, *args):
+        events.append("state_write")
         calls.append("prefill")
         assert q.shape[1] == 3
         assert chunk is metadata.non_spec_prefill_metadata.chunk
@@ -140,8 +150,9 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
     expected[: 2 if speculative else 1] = torch.arange(1, 3 if speculative else 2) * 2
     torch.testing.assert_close(out[0, :tokens, 0, 0], expected)
     assert torch.count_nonzero(out[:, tokens:]) == 0
-    assert calls == ["recurrent", "prefill"]
-    assert conv_calls == ([1, 0] if speculative else [0])
+    assert calls == (["recurrent"] if spec_only else ["recurrent", "prefill"])
+    assert conv_calls == ([1] if spec_only else ([1, 0] if speculative else [0]))
+    assert events == [("load", "layer"), "compute", *(["state_write"] * len(calls)), "save"]
 
 
 @pytest.mark.parametrize(("width", "num_spec"), [(1, 0), (5, 0), (3, 3)])
@@ -157,3 +168,20 @@ def test_unsupported_conv_width_is_rejected_before_execution(monkeypatch, width,
     )
     with pytest.raises(ValueError, match="causal-conv requires"):
         model_kda.Glm5NextLinearAttention(config, vllm_config)
+
+
+@pytest.mark.parametrize("metadata", [None, {}])
+def test_profile_does_not_touch_the_connector(monkeypatch, metadata):
+    layer = model_kda.Glm5NextLinearAttention.__new__(model_kda.Glm5NextLinearAttention)
+    torch.nn.Module.__init__(layer)
+    layer.prefix = "layer"
+    monkeypatch.setattr(model_kda, "get_forward_context", lambda: SimpleNamespace(attn_metadata=metadata))
+
+    def unexpected(*args):
+        pytest.fail("Profiling must not advance the layerwise connector")
+
+    monkeypatch.setattr(model_kda, "wait_for_kv_layer_from_connector", unexpected)
+    monkeypatch.setattr(model_kda, "maybe_save_kv_layer_to_connector", unexpected)
+    output = torch.ones(1)
+    layer._forward(None, None, None, output)
+    assert output.item() == 0

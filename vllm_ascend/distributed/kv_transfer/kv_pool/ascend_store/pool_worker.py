@@ -74,6 +74,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     get_group_cache_family,
     get_partial_block_index,
     infer_cache_transfer_granularity,
+    infer_cacheable_group_ids,
     infer_group_block_sizes,
     infer_group_cache_families,
     infer_tp_mismatch_info,
@@ -216,23 +217,28 @@ class KVPoolWorker:
         speculative_config = getattr(vllm_config, "speculative_config", None)
         use_eagle_fn = getattr(speculative_config, "use_eagle", None)
         self.use_eagle = use_eagle_fn() is True if callable(use_eagle_fn) else False
+        self.cacheable_group_ids = infer_cacheable_group_ids(kv_cache_groups)
         self.original_block_size = infer_group_block_sizes(vllm_config.cache_config.block_size, kv_cache_groups)
         self.grouped_block_size = [block_size * self.dcp_size for block_size in self.original_block_size]
         requested_hash_block_size = vllm_config.cache_config.prefix_match_unit
         if not isinstance(requested_hash_block_size, int):
             requested_hash_block_size = None
         self.hash_block_size = (
-            requested_hash_block_size if requested_hash_block_size is not None else min(self.original_block_size)
+            requested_hash_block_size
+            if requested_hash_block_size is not None
+            else min(self.original_block_size[i] for i in self.cacheable_group_ids)
         ) * self.dcp_size
-        for group_block_size in self.grouped_block_size:
-            assert group_block_size % self.hash_block_size == 0, "block_size must be divisible by hash_block_size"
+        for group_id in self.cacheable_group_ids:
+            assert self.grouped_block_size[group_id] % self.hash_block_size == 0, (
+                "block_size must be divisible by hash_block_size"
+            )
         self.block_size = self.grouped_block_size[0]
-        self.lcm_block_size = math.lcm(*self.grouped_block_size)
+        self.lcm_block_size = math.lcm(*(self.grouped_block_size[i] for i in self.cacheable_group_ids))
         self.num_kv_cache_groups = len(self.grouped_block_size)
         self.kv_cache_group_families = infer_group_cache_families(kv_cache_groups, self.compress_ratios, self.hf_config)
         self.group_uses_align_state = self._infer_group_uses_align_state()
         self.cache_transfer_granularity = infer_cache_transfer_granularity(
-            self.grouped_block_size, self.lcm_block_size, range(self.num_kv_cache_groups)
+            self.grouped_block_size, self.lcm_block_size, self.cacheable_group_ids
         )
         self.h2d_stagger_us = int(extra_config.get("h2d_stagger_us", 0))
         self.layerwise_max_transfer_blocks = int(extra_config.get("layerwise_max_transfer_blocks", 0))
@@ -479,10 +485,12 @@ class KVPoolWorker:
 
         if self.kv_cache_config is not None and self.num_kv_cache_groups > 1:
             for group_id, group_spec in enumerate(self.kv_cache_config.kv_cache_groups):
+                if group_id not in self.cacheable_group_ids:
+                    continue
                 physical_layers = set()
                 for layer_name in group_spec.layer_names:
                     physical_layer = self._extract_physical_layer_index(layer_name)
-                    physical_layers.add(self._global_to_local_layer[physical_layer])
+                    physical_layers.add(physical_layer)
                 phys_to_layer_idx = {
                     physical_layer: layer_index for layer_index, physical_layer in enumerate(sorted(physical_layers))
                 }
@@ -808,8 +816,9 @@ class KVPoolWorker:
     @staticmethod
     def _as_cache_tuple(cache_or_caches) -> tuple[torch.Tensor, ...]:
         if isinstance(cache_or_caches, torch.Tensor):
-            return (cache_or_caches,)
-        return tuple(cache_or_caches)
+            cache_or_caches = (cache_or_caches,)
+        # NoPE MLA exposes an empty RoPE view whose data_ptr() is zero.
+        return tuple(cache for cache in cache_or_caches if cache.numel())
 
     def _get_cache_block_metadata(self, cache: torch.Tensor) -> tuple[int, int, int, int]:
         tensor_num_blocks = cache.shape[0]
@@ -1212,11 +1221,8 @@ class KVPoolWorker:
         group_id: int = 0,
         layer_idx_in_group: int = 0,
     ) -> None:
-        # Only the first rank in each put_step group saves to the
-        # pool.  Other ranks in the same group share the same KV cache
-        # (e.g. MLA latent), so they skip save to avoid redundant writes.
-        # TODO(lf): Distribute KV block writes across ranks in the put_step group.
-        if self.tp_rank % self.put_step != 0:
+        # MLA replicas share a writer; recurrent state is saved by every TP rank.
+        if not self._is_layerwise_save_owner(group_id):
             return
         block_size = get_group_block_size(self.grouped_block_size, group_id)
         request_block_ranges = []
@@ -1412,7 +1418,7 @@ class KVPoolWorker:
             self.model_name,
             group_id,
             block_hash_hex,
-            self.head_or_tp_rank,
+            self.metadata[group_id].head_or_tp_rank,
             self.num_kv_cache_groups,
             self.pp_rank,
             self.pp_size,
@@ -1431,7 +1437,7 @@ class KVPoolWorker:
             group_id,
             block_index,
             end_token,
-            self.head_or_tp_rank,
+            self.metadata[group_id].head_or_tp_rank,
             self.pp_rank,
             self.pp_size,
         )
@@ -1465,8 +1471,6 @@ class KVPoolWorker:
             return
         if self.kv_role == "kv_consumer" and not self.consumer_is_to_put:
             return
-        if self.tp_rank % self.put_step != 0:
-            return
         for request in requests:
             if request.can_save is None or not request.can_save:
                 continue
@@ -1477,11 +1481,6 @@ class KVPoolWorker:
             all_group_save_keys: list[str] = []
             request.partial_save_gva_per_group = [0] * self.num_kv_cache_groups
             for group_id in range(self.num_kv_cache_groups):
-                group_block_size = self.grouped_block_size[group_id]
-                effective_block_size = group_block_size
-                alloc_size = self._global_group_alloc_size(group_id)
-
-                group_block_hashes = get_block_hashes(block_hashes, effective_block_size, self.hash_block_size)
                 block_ids_by_group = (
                     request.block_ids_by_group_np[group_id]
                     if (request.block_ids_by_group_np is not None and group_id < len(request.block_ids_by_group_np))
@@ -1489,6 +1488,13 @@ class KVPoolWorker:
                 )
                 if block_ids_by_group is None:
                     raise RuntimeError(f"Block IDs are not initialized for request {request.req_id}")
+                if group_id not in self.cacheable_group_ids or not self._is_layerwise_save_owner(group_id):
+                    all_group_gvas.append(np.zeros(len(block_ids_by_group), dtype=np.int64))
+                    all_group_block_ids.append(np.asarray(block_ids_by_group, dtype=np.int64))
+                    continue
+                effective_block_size = self.grouped_block_size[group_id]
+                alloc_size = self._global_group_alloc_size(group_id)
+                group_block_hashes = get_block_hashes(block_hashes, effective_block_size, self.hash_block_size)
 
                 save_start_block = request.save_start_token // effective_block_size
                 save_end_block = request.save_end_token // effective_block_size
@@ -1665,6 +1671,9 @@ class KVPoolWorker:
             all_group_load_keys: list[str] = []
             request.partial_load_gva_per_group = [0] * self.num_kv_cache_groups
             for group_id in range(self.num_kv_cache_groups):
+                if group_id not in self.cacheable_group_ids:
+                    all_group_load_gvas.append(np.zeros(0, dtype=np.int64))
+                    continue
                 group_block_size = self.grouped_block_size[group_id]
                 effective_block_size = group_block_size
 
@@ -1863,8 +1872,11 @@ class KVPoolWorker:
         with self._invalid_block_ids_lock:
             self._invalid_block_ids.update(block_ids)
 
-    def _is_layerwise_save_owner(self) -> bool:
-        return is_kv_save_role(self.kv_role, self.consumer_is_to_put) and self.tp_rank % self.put_step == 0
+    def _is_layerwise_save_owner(self, group_id: int = 0) -> bool:
+        # Recurrent state is TP-sharded even when the model's MLA KV is replicated.
+        return is_kv_save_role(self.kv_role, self.consumer_is_to_put) and (
+            self.tp_rank % self.put_step == 0 or self.group_uses_align_state[group_id]
+        )
 
     def _mooncake_key_batches(self, keys: list[str]) -> list[list[str]]:
         batch_size = self.layerwise_max_transfer_blocks if self.layerwise_max_transfer_blocks > 0 else max(1, len(keys))
