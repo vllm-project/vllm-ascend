@@ -630,8 +630,6 @@ def check_capture_mem(capture_mem, baseline_capture_mem=0.2, capture_mem_toleran
     "cur_case", [CASE_QWEN_ACLGRAPH, CASE_DS_ACLGRAPH, CASE_DS_ACLGRAPH_ENPU, CASE_DS_BREAKABLE_ACLGRAPH]
 )
 def test_aclgraph(cur_case: dict, monkeypatch: pytest.MonkeyPatch):
-    import time
-    time.sleep(9999999)
 
     # Counter doesn't work in default "spawn" mode
     metrics = None
