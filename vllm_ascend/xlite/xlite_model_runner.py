@@ -64,10 +64,10 @@ class XliteModelRunner(NPUModelRunner):
         self,
         kv_cache_config: KVCacheConfig,
         kv_cache_allocation_context: AbstractContextManager | None = None,
+        is_profiling: bool = False,
     ) -> None:
         super().initialize_kv_cache(
-            kv_cache_config,
-            kv_cache_allocation_context=kv_cache_allocation_context,
+            kv_cache_config, kv_cache_allocation_context=kv_cache_allocation_context, is_profiling=is_profiling
         )
         self.runner_model.register_kv_caches(self.kv_caches)  # type: ignore[arg-type]
 
