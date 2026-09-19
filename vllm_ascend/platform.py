@@ -691,8 +691,6 @@ class NPUPlatform(Platform):
 
         # 5.Initialize Ascend config and validate Ascend-specific options
         # (fused MC2 exclusivity + scheduler extension policies)
-        # ascend_config is only used for verification here; the ONE sanctioned
-        # later mutation is the step-7.5 forced-key sync below (stage-4 #7/A1)
         ascend_config = init_ascend_config(vllm_config)
         _check_ascend_config(vllm_config, ascend_config)
 
@@ -711,11 +709,6 @@ class NPUPlatform(Platform):
             enable_shared_expert_dp=ascend_config.enable_shared_expert_dp,
             enable_dsa_cp=ascend_config.enable_dsa_cp,
         )
-
-        # 7.5 Stage-4 #7/A1 (R8 experiment + #65): keep the AscendConfig
-        # singleton in sync with step 7's forced-key writes (see the helper
-        # docstring for the inproc/spawn split this closes).
-        _sync_forced_compile_keys_to_singleton(vllm_config, ascend_config)
 
         # 8.Setup worker class, custom ops and scheduler (ascend_config -> vllm_config).
         _setup_worker_and_scheduler(vllm_config, ascend_config)
@@ -1542,36 +1535,6 @@ def _update_compilation_modes(vllm_config: VllmConfig, ascend_config) -> None:
             cudagraph_mode,
         )
         compilation_config.cudagraph_mode = cudagraph_mode
-
-
-def _sync_forced_compile_keys_to_singleton(vllm_config: VllmConfig, ascend_config) -> None:
-    """Stage-4 #7/A1 (R8 experiment + #65): sync step-7 forced keys into the singleton.
-
-    ``_setup_compile_backend``'s forced ``enable_npugraph_ex`` /
-    ``enable_static_kernel`` writes only touch the raw ``additional_config``
-    dict, while the AscendConfig singleton (built at step 5 of
-    ``check_and_update_config``) keeps the stale value. An in-process worker
-    (``VLLM_ENABLE_V1_MULTIPROCESSING=0`` re-inits with the SAME VllmConfig
-    object -> identity cache hit) then compiled the default track with
-    npugraph_ex still alive and hit the pre-existing npugraph_ex AOT-cache
-    assertion (#65), while spawn children (fresh object) rebuilt correctly —
-    the R8 experiment's two-leg split. Mirroring the dict into the singleton
-    makes inproc match the spawn rebuild semantics. No-op whenever the dict
-    and singleton already agree (both keys are legacy-track knobs:
-    AscendCompiler.compile / compute_hash are the only product readers, and
-    the inductor track never routes through AscendCompiler).
-
-    Config-refactor ruling (09 §5.2 #9, 2026-09-18): kept as the ONE
-    sanctioned exception — it plugs a COMMUNITY dual-source gap (step 7
-    writes only the dict + the identity cache) whose removal would regress
-    the default inproc track to the #65 crash. To be removed when the
-    dual-source problem is rooted out (see the M5 TODO ledger).
-    """
-    forced = (vllm_config.additional_config or {}).get("ascend_compilation_config", {})
-    if isinstance(forced, dict):
-        for key in ("enable_npugraph_ex", "enable_static_kernel"):
-            if key in forced:
-                setattr(ascend_config.ascend_compilation_config, key, forced[key])
 
 
 def _setup_compile_backend(
