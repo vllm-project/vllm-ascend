@@ -21,6 +21,8 @@ Decision rule (the compile-optimisation core):
   native change anywhere in the skipped range.
 * If the delta touches native sources / build definitions  -> rebuild.
 * If it only touches ``requirements*``                     -> reinstall deps.
+  Dependencies are tracked separately against the *last installed deps*
+  commit, because a deps-only reinstall does not move the build baseline.
 * Otherwise (pure ``.py`` / yaml / md)                     -> plain checkout;
   the editable install picks the change up live.
 """
@@ -72,6 +74,9 @@ class BuildManager:
                 logger.info("[build] assuming container is built at HEAD %s", self.last_built_commit[:12])
             except Exception:  # noqa: BLE001 - best effort; fall back to rebuild
                 self.last_built_commit = None
+        # The commit whose requirements are currently installed. Tracked apart
+        # from ``last_built_commit`` since a deps-only reinstall does not rebuild.
+        self.last_deps_commit: str | None = self.last_built_commit
 
     # ------------------------------------------------------------ decision
     def decide(self, target_commit: str) -> BuildDecision:
@@ -85,7 +90,10 @@ class BuildManager:
                 native_hits=[],
                 reason="no established build baseline (clean rebuild)",
             )
+        reqs = self._stale_requirements(target_commit)
         if self.last_built_commit == target_commit:
+            if reqs:
+                return BuildDecision(False, True, [], f"requirements changed (since last deps install): {reqs}")
             return BuildDecision(
                 rebuild=False,
                 reinstall_reqs=False,
@@ -102,13 +110,12 @@ class BuildManager:
             scope = "since last build"
 
         native = git_ops.matches_any(files, NATIVE_GLOBS + BUILD_DEF_GLOBS)
-        reqs = git_ops.matches_any(files, REQUIREMENTS_GLOBS)
 
         if native:
             reason = f"native/build-def files changed ({scope}): {native[:5]}"
             return BuildDecision(True, bool(reqs), native, reason)
         if reqs:
-            return BuildDecision(False, True, [], f"requirements changed ({scope}): {reqs}")
+            return BuildDecision(False, True, [], f"requirements changed (since last deps install): {reqs}")
         return BuildDecision(
             rebuild=False,
             reinstall_reqs=False,
@@ -134,6 +141,7 @@ class BuildManager:
             )
         if decision.reinstall_reqs:
             self._run(self.opt.pip_requirements_cmd, log_file, "pip install requirements")
+            self.last_deps_commit = target_commit
         if decision.rebuild:
             self._clean_artifacts()
             self._run(self.opt.pip_install_cmd, log_file, "pip install -e .")
@@ -141,7 +149,17 @@ class BuildManager:
         # Only advance the baseline once the binary actually matches the source.
         if decision.rebuild or self.last_built_commit is None:
             self.last_built_commit = target_commit
+        if self.last_deps_commit is None:
+            # Same trust as the initial clean rebuild: container deps are assumed current.
+            self.last_deps_commit = target_commit
         return decision
+
+    def _stale_requirements(self, target_commit: str) -> list[str]:
+        """Requirement files that differ from the currently installed deps."""
+        if self.last_deps_commit is None or self.last_deps_commit == target_commit:
+            return []
+        files = git_ops.changed_files(self.repo, self.last_deps_commit, target_commit)
+        return git_ops.matches_any(files, REQUIREMENTS_GLOBS)
 
     # ------------------------------------------------------------- helpers
     def _clean_artifacts(self) -> None:
