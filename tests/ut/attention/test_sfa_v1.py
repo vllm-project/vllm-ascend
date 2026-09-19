@@ -1298,6 +1298,30 @@ class TestAscendSFAImpl(TestBase):
         self.assertEqual(plan.tail_query_ends, (1024, 2048))
         self.assertEqual(plan.tail_kv_lengths, (3072, 3072))
 
+    def test_shared_fia_plan_construction_admits_generic_prefill_nocache_segments(self):
+        plan = _build_sfa_fia_shared_prefill_plan(
+            attn_state=AscendAttentionState.PrefillNoCache,
+            query_ends=(3007, 7118, 8192),
+            kv_lengths=(3007, 4111, 1074),
+            num_actual_tokens=8192,
+            num_input_tokens=8192,
+            num_decodes=0,
+            num_decode_tokens=0,
+        )
+
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertEqual(plan.eligible_lengths, (2048, 2048, 1074))
+        self.assertEqual(plan.dense_requests, (0, 1, 2))
+        self.assertEqual(plan.dense_group_sizes, (1, 1, 1))
+        self.assertEqual(plan.tail_requests, (0, 1))
+        self.assertEqual(plan.dense_spans, ((0, 2048), (3007, 5055), (7118, 8192)))
+        self.assertEqual(plan.tail_spans, ((2048, 3007), (5055, 7118)))
+        self.assertEqual(plan.dense_query_ends, (2048, 2048, 1074))
+        self.assertEqual(plan.dense_kv_lengths, (2048, 2048, 1074))
+        self.assertEqual(plan.tail_query_ends, (959, 3022))
+        self.assertEqual(plan.tail_kv_lengths, (3007, 4111))
+
     def test_shared_fia_execution_requires_metadata_plan(self):
         args = self._setup_shared_fia()
         args[3].sfa_fia_shared_prefill_plan = None
@@ -1425,6 +1449,70 @@ class TestAscendSFAImpl(TestBase):
         torch.testing.assert_close(indices, indices_before)
         self.assertIsNotNone(metadata.sfa_fia_shared_prefill_plan)
 
+    def test_shared_fia_heterogeneous_b_dense_only_request_omitted_from_tail(self):
+        args = self._setup_shared_fia(
+            (3007, 4111, 1074),
+            (3007, 4111, 1074),
+            attn_state=AscendAttentionState.PrefillNoCache,
+        )
+        q, _, _, metadata, indices = args
+        fia, sparse = self._mock_shared_fia_kernels()
+
+        result = self.impl._try_sfa_fia_shared_prefill(*args)
+
+        self.assertEqual(fia.call_count, 3)
+        sparse.assert_called_once()
+        for request, (start, eligible) in enumerate(((0, 2048), (3007, 2048), (7118, 1074))):
+            dense = fia.call_args_list[request].kwargs
+            torch.testing.assert_close(dense["query"], q[start : start + eligible])
+            torch.testing.assert_close(dense["block_table"], metadata.block_table[request : request + 1])
+            self.assertEqual(dense["actual_seq_lengths"], [eligible])
+            self.assertEqual(dense["actual_seq_lengths_kv"], [eligible])
+
+        tail = sparse.call_args.args
+        expected_tail_q = torch.cat((q[2048:3007], q[5055:7118]))
+        expected_tail_indices = torch.cat((indices[2048:3007], indices[5055:7118]))
+        torch.testing.assert_close(tail[0], expected_tail_q)
+        torch.testing.assert_close(tail[3], expected_tail_indices)
+        self.assertEqual(tail[5].tolist(), [959, 3022])
+        self.assertEqual(tail[6].tolist(), [3007, 4111])
+        torch.testing.assert_close(sparse.call_args.kwargs["block_table"], metadata.block_table[:2])
+
+        expected = torch.cat(
+            (
+                q[:2048] + 10,
+                q[2048:3007] + 20,
+                q[3007:5055] + 10,
+                q[5055:7118] + 20,
+                q[7118:] + 10,
+            )
+        )
+        torch.testing.assert_close(result, expected)
+
+    def test_shared_fia_unseen_heterogeneous_multifia_geometry(self):
+        args = self._setup_shared_fia(
+            (2400, 3600),
+            (2400, 3600),
+            attn_state=AscendAttentionState.PrefillNoCache,
+        )
+        q, _, _, _, indices = args
+        fia, sparse = self._mock_shared_fia_kernels()
+
+        result = self.impl._try_sfa_fia_shared_prefill(*args)
+
+        self.assertEqual(fia.call_count, 2)
+        sparse.assert_called_once()
+        torch.testing.assert_close(fia.call_args_list[0].kwargs["query"], q[:2048])
+        torch.testing.assert_close(fia.call_args_list[1].kwargs["query"], q[2400:4448])
+        tail = sparse.call_args.args
+        torch.testing.assert_close(tail[0], torch.cat((q[2048:2400], q[4448:])))
+        torch.testing.assert_close(tail[3], torch.cat((indices[2048:2400], indices[4448:])))
+        self.assertEqual(tail[5].tolist(), [352, 1904])
+        self.assertEqual(tail[6].tolist(), [2400, 3600])
+        torch.testing.assert_close(
+            result, torch.cat((q[:2048] + 10, q[2048:2400] + 20, q[2400:4448] + 10, q[4448:] + 20))
+        )
+
     def test_shared_fia_multisegment_prevalidates_all_segments_before_submission(self):
         args = self._setup_shared_fia(
             (2267, 2267, 2267),
@@ -1448,10 +1536,10 @@ class TestAscendSFAImpl(TestBase):
         fia.assert_not_called()
         sparse.assert_not_called()
 
-    def test_shared_fia_multisegment_nearby_geometry_falls_back_without_submission(self):
+    def test_shared_fia_multisegment_fewer_than_two_eligible_segments_falls_back(self):
         args = self._setup_shared_fia(
-            (2267, 2267, 2268),
-            (2267, 2267, 2268),
+            (3000, 200),
+            (3001, 2250),
             attn_state=AscendAttentionState.PrefillNoCache,
         )
         fia, sparse = self._mock_shared_fia_kernels()

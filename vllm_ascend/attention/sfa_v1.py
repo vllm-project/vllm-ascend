@@ -243,10 +243,6 @@ SFA_FIA_DENSE_PREFILL_LATENT_DIM = 512
 SFA_FIA_DENSE_PREFILL_ROPE_DIM = 64
 SFA_FIA_DENSE_PREFILL_BLOCK_SIZE = 128
 SFA_FIA_SHARED_PREFILL_TOPK_WIDTH = 2048
-# Bounded scheduler-observed multi-request geometry. Keep each FIA call at
-# the existing 2048-row/visible-KV limit; broaden only with direct evidence.
-SFA_FIA_SHARED_PREFILL_MULTI_SEGMENT_REQUESTS = 3
-SFA_FIA_SHARED_PREFILL_MULTI_SEGMENT_QUERY_LENGTH = 2267
 
 
 def _get_indexer_types(configs: tuple[Any, ...]) -> Any | None:
@@ -475,25 +471,17 @@ def _build_sfa_fia_shared_prefill_plan(
         for query_length, kv_length in zip(query_lengths, kv_lengths, strict=True)
     )
     dense_total = sum(eligible_lengths)
-    exact_multi_segment = (
-        attn_state == AscendAttentionState.PrefillNoCache
-        and query_lengths
-        == (SFA_FIA_SHARED_PREFILL_MULTI_SEGMENT_QUERY_LENGTH,) * SFA_FIA_SHARED_PREFILL_MULTI_SEGMENT_REQUESTS
-        and kv_lengths
-        == (SFA_FIA_SHARED_PREFILL_MULTI_SEGMENT_QUERY_LENGTH,) * SFA_FIA_SHARED_PREFILL_MULTI_SEGMENT_REQUESTS
-    )
-    # General grouped FIA remains one full packed group. The only admitted
-    # multi-call plan is the bounded C4 PrefillNoCache geometry validated in
-    # the child PR, represented here as three independent dense groups.
-    if dense_total != SFA_FIA_SHARED_PREFILL_TOPK_WIDTH or dense_total >= num_tokens:
-        if not (
-            exact_multi_segment
-            and dense_total == SFA_FIA_SHARED_PREFILL_TOPK_WIDTH * SFA_FIA_SHARED_PREFILL_MULTI_SEGMENT_REQUESTS
+    if dense_total == SFA_FIA_SHARED_PREFILL_TOPK_WIDTH and dense_total < num_tokens:
+        dense_group_sizes = (sum(1 for eligible in eligible_lengths if eligible),)
+    else:
+        if (
+            attn_state != AscendAttentionState.PrefillNoCache
+            or len(query_lengths) < 2
+            or dense_total >= num_tokens
+            or sum(1 for eligible in eligible_lengths if eligible) < 2
         ):
             return None
-        dense_group_sizes = (1,) * SFA_FIA_SHARED_PREFILL_MULTI_SEGMENT_REQUESTS
-    else:
-        dense_group_sizes = (sum(1 for eligible in eligible_lengths if eligible),)
+        dense_group_sizes = (1,) * sum(1 for eligible in eligible_lengths if eligible)
     if any(size <= 0 for size in dense_group_sizes):
         return None
 
