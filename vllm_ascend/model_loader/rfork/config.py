@@ -58,6 +58,7 @@ class RForkConfig:
     seed_timeout_sec: float = DEFAULT_RFORK_SEED_TIMEOUT_SEC
     request_timeout_sec: float = DEFAULT_RFORK_REQUEST_TIMEOUT_SEC
     seed_bind_host: str = "0.0.0.0"
+    seed_port_base: int = 0
     seed_advertise_host: str | None = None
     heartbeat_interval_sec: float = DEFAULT_RFORK_HEARTBEAT_INTERVAL_SEC
     lease_release_max_attempts: int = DEFAULT_RFORK_LEASE_RELEASE_MAX_ATTEMPTS
@@ -72,6 +73,9 @@ class RForkConfig:
         attempts = self.lease_release_max_attempts
         if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts <= 0:
             raise ValueError("rfork_lease_release_max_attempts must be a positive JSON integer")
+        port_base = self.seed_port_base
+        if isinstance(port_base, bool) or not isinstance(port_base, int) or port_base < 0 or port_base > 65535:
+            raise ValueError("rfork_seed_port_base must be a JSON integer in range [0, 65535]")
 
     @classmethod
     def from_extra_config(cls, raw_config: object) -> "RForkConfig":
@@ -122,6 +126,7 @@ class RForkConfig:
                 )
                 or "0.0.0.0"
             ),
+            seed_port_base=config.get("rfork_seed_port_base", 0),
             seed_advertise_host=_string_value(
                 config,
                 "rfork_seed_advertise_host",

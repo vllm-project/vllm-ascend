@@ -418,10 +418,12 @@ def test_rfork_acquires_seed_after_model_preparation(monkeypatch, processed_layo
         "vllm_ascend.model_loader.rfork.rfork_loader.get_ascend_config",
         lambda: SimpleNamespace(eplb_config=SimpleNamespace(dynamic_eplb=False, expert_map_record_path=None)),
     )
-    monkeypatch.setattr(
-        "vllm_ascend.model_loader.rfork.rfork_loader.initialize_model",
-        lambda **kwargs: (events.append("initialize") or model),
-    )
+
+    def initialize_model(**kwargs):
+        events.append("initialize")
+        return model
+
+    monkeypatch.setattr("vllm_ascend.model_loader.rfork.rfork_loader.initialize_model", initialize_model)
     monkeypatch.setattr(
         "vllm_ascend.model_loader.rfork.rfork_loader.process_weights_after_loading",
         lambda *args, **kwargs: events.append("layout" if processed_layout else "post_load"),
@@ -475,7 +477,7 @@ def test_rfork_model_preparation_failure_does_not_acquire_seed(monkeypatch, fail
             raise AssertionError("seed acquisition must happen after model preparation")
 
         def prepare_for_fallback(self):
-            return True
+            return RForkFallbackCleanupResult(True, True, True)
 
         def start_seed_service(self, model, processed_layout, exclude_blocks=None):
             return True

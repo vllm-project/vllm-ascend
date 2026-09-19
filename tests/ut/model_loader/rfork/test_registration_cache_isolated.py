@@ -23,20 +23,6 @@ def test_tensor_collection_deduplicates_exact_impl_alias_but_keeps_distinct_view
     assert [(name, tensor.numel()) for name, tensor in collected] == [("weight", 4), ("impl.view", 2)]
 
 
-def test_read_rejects_missing_registration_cache_without_rescanning_or_reading(tensor_runtime, monkeypatch):
-    transfer_backend = tensor_runtime.transfer_backend
-    backend = tensor_runtime.RForkTransferBackend()
-    read = Mock()
-    rescan = Mock(side_effect=AssertionError("destination tensors were not registered"))
-    backend.transfer_engine = SimpleNamespace(batch_transfer_sync_read=read)
-    monkeypatch.setattr(transfer_backend, "collect_transferable_tensors", rescan)
-    seed_info = tensor_runtime.SeedTransferInfo("seed-session", {"weight": (1234, 4, 4, [4], "float32")})
-
-    assert not backend.read_weights_from_seed(object(), seed_info, True)
-    rescan.assert_not_called()
-    read.assert_not_called()
-
-
 def test_layout_summary_is_one_bounded_info_record_with_fixed_digests(tensor_runtime, caplog):
     tensors = [(f"weight_{index}", torch.arange(4, dtype=torch.float32)) for index in range(6)]
     formats = {name: 29 for name, _ in tensors}

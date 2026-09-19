@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import errno
 import math
 import queue
 import socket
@@ -102,10 +103,10 @@ class RForkSeedServerStartupError(RuntimeError):
         self.handle = handle
 
 
-def _create_bound_socket(bind_host: str) -> socket.socket:
+def _create_bound_socket(bind_host: str, port: int = 0) -> socket.socket:
     """Create an IPv4 or IPv6 listener from the bind host's resolver result."""
     host = bind_host or "0.0.0.0"
-    infos = socket.getaddrinfo(host, 0, socket.AF_UNSPEC, socket.SOCK_STREAM, 0, socket.AI_PASSIVE)
+    infos = socket.getaddrinfo(host, port, socket.AF_UNSPEC, socket.SOCK_STREAM, 0, socket.AI_PASSIVE)
     last_error: OSError | None = None
     for family, socktype, protocol, _, sockaddr in infos:
         sock: socket.socket | None = None
@@ -121,7 +122,7 @@ def _create_bound_socket(bind_host: str) -> socket.socket:
                 sock.close()
     if last_error is None:
         raise OSError(f"unable to resolve RFork seed bind host {host!r}")
-    raise OSError(f"unable to bind RFork seed host {host!r}: {last_error}") from last_error
+    raise OSError(f"unable to bind RFork seed host {host!r} port {port}: {last_error}") from last_error
 
 
 def _health_url(bind_host: str, sock: socket.socket, port: int) -> str:
@@ -143,16 +144,29 @@ def start_fastapi_server(
     info: SeedTransferInfo,
     *,
     bind_host: str = "0.0.0.0",
+    port: int = 0,
+    fallback_to_dynamic_port: bool = False,
     stop_event: threading.Event | None = None,
     startup_state: _ServerStartupState | None = None,
 ):
-    logger.debug("[RFork Seed] Preparing socket with dynamic port on %s...", bind_host)
+    logger.debug("[RFork Seed] Preparing socket with port %s on %s...", port if port > 0 else "dynamic", bind_host)
 
     sock: socket.socket | None = None
     try:
-        sock = _create_bound_socket(bind_host)
-        _, port = sock.getsockname()[:2]
-        logger.debug("[RFork Seed] Assigned dynamic port: %s", port)
+        try:
+            sock = _create_bound_socket(bind_host, port)
+        except OSError as exc:
+            bind_error = exc.__cause__ if isinstance(exc.__cause__, OSError) else exc
+            if port <= 0 or not fallback_to_dynamic_port or bind_error.errno != errno.EADDRINUSE:
+                raise
+            logger.warning(
+                "[RFork Seed] configured port %d on %s is already in use; falling back to an OS-assigned port",
+                port,
+                bind_host,
+            )
+            sock = _create_bound_socket(bind_host, 0)
+        _, actual_port = sock.getsockname()[:2]
+        logger.debug("[RFork Seed] Bound to port: %s", actual_port)
 
         app = FastAPI()
         rfork_transfer_engine_info = (info.session_id, info.weights)
@@ -180,7 +194,7 @@ def start_fastapi_server(
 
         config = uvicorn.Config(app, host=None, port=None, log_level="warning")
         server = uvicorn.Server(config)
-        startup = _ServerStartup(server=server, sock=sock, port=port)
+        startup = _ServerStartup(server=server, sock=sock, port=actual_port)
         if startup_state is not None:
             # Publish before queue handoff so timeout cleanup always owns the socket.
             with startup_state.lock:
@@ -214,7 +228,7 @@ def start_fastapi_server(
             sock.close()
             return
 
-        logger.debug("[RFork Seed] FastAPI server starting on port %s...", port)
+        logger.debug("[RFork Seed] FastAPI server starting on port %s...", actual_port)
         server.run(sockets=[sock])
     except Exception as exc:
         logger.error("[RFork Seed] server thread failed: %s", exc)
@@ -253,6 +267,8 @@ def start_rfork_server(
     health_timeout_sec: float = 30.0,
     *,
     bind_host: str = "0.0.0.0",
+    port: int = 0,
+    fallback_to_dynamic_port: bool = False,
 ) -> RForkSeedServerHandle:
     if isinstance(health_timeout_sec, bool) or not isinstance(health_timeout_sec, (int, float)):
         raise ValueError("health_timeout_sec must be a finite positive number")
@@ -269,6 +285,8 @@ def start_rfork_server(
             seed_key,
             rfork_transfer_engine_info,
             bind_host=bind_host,
+            port=port,
+            fallback_to_dynamic_port=fallback_to_dynamic_port,
             stop_event=startup_stop_event,
             startup_state=startup_state,
         )

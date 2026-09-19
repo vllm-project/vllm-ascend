@@ -27,6 +27,7 @@ def runtime(monkeypatch):
     def load(name):
         full_name = f"{prefix}.{name}"
         spec = importlib.util.spec_from_file_location(full_name, RFORK_ROOT / f"{name}.py")
+        assert spec is not None and spec.loader is not None
         module = importlib.util.module_from_spec(spec)
         monkeypatch.setitem(sys.modules, full_name, module)
         spec.loader.exec_module(module)
@@ -72,7 +73,6 @@ def tensor_runtime(monkeypatch):
         monkeypatch,
         "vllm.utils.network_utils",
         get_ip=lambda: "127.0.0.1",
-        get_open_port=lambda: 12345,
         join_host_port=lambda host, port: f"{host}:{port}",
     )
     for module_name in (

@@ -25,7 +25,14 @@ def test_session_passes_tp_rank_to_transfer_backend(runtime, monkeypatch, tp_ran
 
 @pytest.mark.parametrize(
     ("status", "expected"),
-    [(200, "RELEASED"), (404, "RELEASED"), (400, "REJECTED"), (408, "RETRYABLE"), (503, "RETRYABLE")],
+    [
+        (200, "RELEASED"),
+        (404, "RELEASED"),
+        (400, "REJECTED"),
+        (408, "RETRYABLE"),
+        (429, "RETRYABLE"),
+        (503, "RETRYABLE"),
+    ],
 )
 def test_release_classifies_response_without_changing_wire_protocol(runtime, monkeypatch, status, expected):
     post = Mock(return_value=SimpleNamespace(status_code=status, text="rejected"))

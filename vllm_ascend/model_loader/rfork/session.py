@@ -37,6 +37,14 @@ LEASE_RENEW_MIN_INTERVAL_SEC = 0.1
 LEASE_RENEW_MAX_INTERVAL_SEC = 30.0
 LEASE_RELEASE_DEGRADED_RETRY_INTERVAL_SEC = 60.0
 LEASE_RELEASE_DEGRADED_LOG_EVERY_N = 10
+RFORK_SEED_PORT_SLOTS_PER_RANK = 2
+
+
+def _resolve_seed_server_port(config: RForkConfig, identity: RForkIdentity) -> int:
+    if config.seed_port_base == 0:
+        return 0
+    model_slot = 1 if identity.is_draft_model else 0
+    return config.seed_port_base + identity.global_rank * RFORK_SEED_PORT_SLOTS_PER_RANK + model_slot
 
 
 class RForkSession:
@@ -483,11 +491,27 @@ class RForkSession:
             self.state = RForkLifecycleState.CLEANUP_REQUIRED
         try:
             info = self._seed_transfer_info()
+            # Reserve adjacent main/draft slots for every distributed worker.
+            port = _resolve_seed_server_port(self.config, self.identity)
+            if port > 0:
+                if port > 65535:
+                    logger.warning(
+                        "RFork seed port exceeds 65535: base=%d global_rank=%d model_kind=%s resolved_port=%d; "
+                        "falling back to an OS-assigned port",
+                        self.config.seed_port_base,
+                        self.identity.global_rank,
+                        "draft" if self.identity.is_draft_model else "main",
+                        port,
+                    )
+                    port = 0
+
             handle = start_rfork_server(
                 self.planner.seed_key,
                 info,
                 health_timeout_sec=self.config.seed_timeout_sec,
                 bind_host=self.config.seed_bind_host,
+                port=port,
+                fallback_to_dynamic_port=port > 0,
             )
             with self._lock:
                 self.seed_server = handle

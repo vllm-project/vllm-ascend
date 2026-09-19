@@ -9,7 +9,7 @@ import hashlib
 import inspect
 import json
 import logging
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from typing import Any
 
 import torch
@@ -331,6 +331,7 @@ def collect_transferable_tensors(model: nn.Module, processed_layout: bool) -> li
     for name, tensor in model.named_buffers():
         _try_collect(name, tensor, seen, seen_tensors, collected)
     for module_prefix, module in model.named_modules():
+        attributes: Iterable[tuple[str, Any, bool]]
         if processed_layout:
             attributes = (
                 (name, value, name == "impl")

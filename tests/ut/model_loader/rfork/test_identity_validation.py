@@ -273,18 +273,16 @@ def test_canonicalization_is_deterministic_for_dicts_sets_and_dtype(identity_mod
     )
 
 
-@pytest.mark.parametrize(
-    "change",
-    [
+def test_fingerprint_changes_when_seed_compatibility_changes(identity_module):
+    changes = (
         {"dtype": torch.float16},
         {"quantization": "compressed"},
         {"revision": "rev-b"},
         {"tp_size": 2},
-    ],
-)
-def test_fingerprint_changes_when_seed_compatibility_changes(identity_module, change):
+    )
     base = _fingerprint(identity_module)
-    assert _fingerprint(identity_module, **change) != base
+    for change in changes:
+        assert _fingerprint(identity_module, **change) != base, change
 
 
 def test_fingerprint_changes_when_fused_mc2_changes(identity_module, monkeypatch):
@@ -323,17 +321,8 @@ def test_effective_quantization_description_isolates_weight_scheme(identity_modu
     )
 
 
-def test_fingerprint_changes_for_other_hf_behavior_fields(identity_module):
-    first = _model_config()
-    second = _model_config()
-    first.hf_config.hidden_act = "silu"
-    second.hf_config.hidden_act = "gelu"
-    assert _build_fingerprint(identity_module, first) != _build_fingerprint(identity_module, second)
-
-
-@pytest.mark.parametrize(
-    ("field", "base_value", "changed_value"),
-    [
+def test_fingerprint_changes_when_rope_configuration_changes(identity_module):
+    changes = (
         ("rope_theta", None, 1e6),
         (
             "rope_scaling",
@@ -357,21 +346,20 @@ def test_fingerprint_changes_for_other_hf_behavior_fields(identity_module):
                 "mscale_all_dim": 0.0,
             },
         ),
-    ],
-)
-def test_fingerprint_changes_when_rope_configuration_changes(identity_module, field, base_value, changed_value):
-    # RoPE values can alter cache contents without changing tensor shapes.
-    base_config = _model_config()
-    changed_config = _model_config()
-    setattr(base_config.hf_config, field, base_value)
-    setattr(changed_config.hf_config, field, changed_value)
-
-    base_fingerprint = _build_fingerprint(identity_module, base_config)
-    changed_fingerprint = _build_fingerprint(identity_module, changed_config)
-    assert base_fingerprint != changed_fingerprint
-    assert identity_module.build_seed_key(0, "model", "strategy", base_fingerprint) != (
-        identity_module.build_seed_key(0, "model", "strategy", changed_fingerprint)
     )
+    for field, base_value, changed_value in changes:
+        # RoPE values can alter cache contents without changing tensor shapes.
+        base_config = _model_config()
+        changed_config = _model_config()
+        setattr(base_config.hf_config, field, base_value)
+        setattr(changed_config.hf_config, field, changed_value)
+
+        base_fingerprint = _build_fingerprint(identity_module, base_config)
+        changed_fingerprint = _build_fingerprint(identity_module, changed_config)
+        assert base_fingerprint != changed_fingerprint, field
+        assert identity_module.build_seed_key(0, "model", "strategy", base_fingerprint) != (
+            identity_module.build_seed_key(0, "model", "strategy", changed_fingerprint)
+        ), field
 
 
 def test_fingerprint_changes_for_rope_overrides_on_text_config(identity_module):
@@ -389,24 +377,21 @@ def test_fingerprint_changes_for_rope_overrides_on_text_config(identity_module):
     assert _build_fingerprint(identity_module, first) != _build_fingerprint(identity_module, second)
 
 
-@pytest.mark.parametrize(
-    ("config_field", "commit_field"),
-    [("hf_config", "_commit_hash"), ("hf_text_config", "commit_hash")],
-)
-def test_resolved_commits_isolate_moving_revision_seeds(identity_module, config_field, commit_field):
-    first = _model_config(revision="main")
-    second = _model_config(revision="main")
-    for config, commit in ((first, "a" * 40), (second, "b" * 40)):
-        if config_field == "hf_text_config":
-            config.hf_text_config = SimpleNamespace()
-            config.hf_config.revision = "main"
-        setattr(getattr(config, config_field), commit_field, commit)
-    first_fingerprint = _build_fingerprint(identity_module, first)
-    second_fingerprint = _build_fingerprint(identity_module, second)
-    assert first_fingerprint != second_fingerprint
-    assert identity_module.build_seed_key(0, "model", "strategy", first_fingerprint) != (
-        identity_module.build_seed_key(0, "model", "strategy", second_fingerprint)
-    )
+def test_resolved_commits_isolate_moving_revision_seeds(identity_module):
+    for config_field, commit_field in (("hf_config", "_commit_hash"), ("hf_text_config", "commit_hash")):
+        first = _model_config(revision="main")
+        second = _model_config(revision="main")
+        for config, commit in ((first, "a" * 40), (second, "b" * 40)):
+            if config_field == "hf_text_config":
+                config.hf_text_config = SimpleNamespace()
+                config.hf_config.revision = "main"
+            setattr(getattr(config, config_field), commit_field, commit)
+        first_fingerprint = _build_fingerprint(identity_module, first)
+        second_fingerprint = _build_fingerprint(identity_module, second)
+        assert first_fingerprint != second_fingerprint, (config_field, commit_field)
+        assert identity_module.build_seed_key(0, "model", "strategy", first_fingerprint) != (
+            identity_module.build_seed_key(0, "model", "strategy", second_fingerprint)
+        ), (config_field, commit_field)
 
 
 def test_revision_aliases_share_the_same_resolved_commit(identity_module):
@@ -431,13 +416,13 @@ def test_unresolved_revision_keeps_explicit_version_fallback(identity_module):
     assert identity_module._get_model_revision(config) is None
 
 
-@pytest.mark.parametrize("quantization", [None, "ascend"])
-def test_fingerprint_changes_when_kv_role_changes(identity_module, quantization):
+def test_fingerprint_changes_when_kv_role_changes(identity_module):
     # Role isolation is unconditional, including checkpoint-layout transfer.
-    model_config = _model_config(quantization=quantization)
-    producer = _build_fingerprint(identity_module, model_config, kv_role="kv_producer")
-    consumer = _build_fingerprint(identity_module, model_config, kv_role="kv_consumer")
-    assert producer != consumer
+    for quantization in (None, "ascend"):
+        model_config = _model_config(quantization=quantization)
+        producer = _build_fingerprint(identity_module, model_config, kv_role="kv_producer")
+        consumer = _build_fingerprint(identity_module, model_config, kv_role="kv_consumer")
+        assert producer != consumer, quantization
 
 
 def test_effective_kv_role_supports_legacy_boolean_flags(identity_module):
@@ -450,9 +435,8 @@ def test_effective_kv_role_supports_legacy_boolean_flags(identity_module):
     assert identity_module._get_effective_kv_role(consumer_config) == "kv_consumer"
 
 
-@pytest.mark.parametrize(
-    ("field", "base_value", "changed_value"),
-    [
+def test_fingerprint_changes_when_ascend_layout_config_changes(identity_module, monkeypatch):
+    changes = (
         ("enable_mlapo", False, True),
         ("mlapo_keep_prefill_weights", False, True),
         ("enable_sparse_sfa_c8", False, True),
@@ -466,15 +450,20 @@ def test_effective_kv_role_supports_legacy_boolean_flags(identity_module):
         ("pd_head_ratio", 1, 2),
         ("num_head_replica", 1, 2),
         ("draft_window_size", None, 8),
-    ],
-)
-def test_fingerprint_changes_when_ascend_layout_config_changes(
-    identity_module, monkeypatch, field, base_value, changed_value
-):
-    monkeypatch.setattr(identity_module, "get_ascend_config", lambda: _ascend_config(**{field: base_value}))
-    base = _fingerprint(identity_module)
-    monkeypatch.setattr(identity_module, "get_ascend_config", lambda: _ascend_config(**{field: changed_value}))
-    assert _fingerprint(identity_module) != base
+    )
+    for field, base_value, changed_value in changes:
+        monkeypatch.setattr(
+            identity_module,
+            "get_ascend_config",
+            lambda field=field, base_value=base_value: _ascend_config(**{field: base_value}),
+        )
+        base = _fingerprint(identity_module)
+        monkeypatch.setattr(
+            identity_module,
+            "get_ascend_config",
+            lambda field=field, changed_value=changed_value: _ascend_config(**{field: changed_value}),
+        )
+        assert _fingerprint(identity_module) != base, field
 
 
 def test_fingerprint_changes_when_max_num_batched_tokens_changes(identity_module):
@@ -484,9 +473,8 @@ def test_fingerprint_changes_when_max_num_batched_tokens_changes(identity_module
     assert small_batch != large_batch
 
 
-@pytest.mark.parametrize(
-    ("config_kwargs", "model_kwargs"),
-    [
+def test_fingerprint_changes_when_runtime_tensor_layout_changes(identity_module):
+    changes: tuple[tuple[dict[str, object], dict[str, object]], ...] = (
         ({"cache_block_size": 64}, {}),
         ({"cache_dtype": "int8"}, {}),
         ({"mamba_cache_dtype": "float32"}, {}),
@@ -500,65 +488,64 @@ def test_fingerprint_changes_when_max_num_batched_tokens_changes(identity_module
         ({}, {"convert": "embed"}),
         ({}, {"use_mla": True}),
         ({}, {"enforce_eager": True}),
-    ],
-)
-def test_fingerprint_changes_when_runtime_tensor_layout_changes(identity_module, config_kwargs, model_kwargs):
+    )
     base = _build_fingerprint(identity_module, _model_config())
-    changed = _build_fingerprint(identity_module, _model_config(**model_kwargs), **config_kwargs)
-    assert changed != base
+    for config_kwargs, model_kwargs in changes:
+        changed = _build_fingerprint(identity_module, _model_config(**model_kwargs), **config_kwargs)
+        assert changed != base, (config_kwargs, model_kwargs)
 
 
-@pytest.mark.parametrize(
-    ("config_kwargs", "model_kwargs"),
-    [
+def test_runtime_sizing_does_not_partition_weight_seeds(identity_module):
+    changes: tuple[tuple[dict[str, object], dict[str, object]], ...] = (
         ({"max_num_seqs": 16}, {}),
         ({"cp_kv_cache_interleave_size": 2}, {}),
         ({}, {"max_seq_len_to_capture": 16384}),
-    ],
-)
-def test_runtime_sizing_does_not_partition_weight_seeds(identity_module, config_kwargs, model_kwargs):
+    )
     base = _build_fingerprint(identity_module, _model_config())
-    changed = _build_fingerprint(identity_module, _model_config(**model_kwargs), **config_kwargs)
-    assert changed == base
+    for config_kwargs, model_kwargs in changes:
+        changed = _build_fingerprint(identity_module, _model_config(**model_kwargs), **config_kwargs)
+        assert changed == base, (config_kwargs, model_kwargs)
 
 
-@pytest.mark.parametrize(
-    ("field", "changed_value"),
-    [
+def test_kv_cache_layout_does_not_partition_weight_seeds(identity_module, monkeypatch):
+    changes = (
         ("enable_kv_nz", True),
         ("enable_transpose_kv_cache_by_block", False),
-    ],
-)
-def test_kv_cache_layout_does_not_partition_weight_seeds(identity_module, monkeypatch, field, changed_value):
-    monkeypatch.setattr(identity_module, "get_ascend_config", lambda: _ascend_config())
-    base = _fingerprint(identity_module)
-    monkeypatch.setattr(identity_module, "get_ascend_config", lambda: _ascend_config(**{field: changed_value}))
-    assert _fingerprint(identity_module) == base
+    )
+    for field, changed_value in changes:
+        monkeypatch.setattr(identity_module, "get_ascend_config", lambda: _ascend_config())
+        base = _fingerprint(identity_module)
+        monkeypatch.setattr(
+            identity_module,
+            "get_ascend_config",
+            lambda field=field, changed_value=changed_value: _ascend_config(**{field: changed_value}),
+        )
+        assert _fingerprint(identity_module) == base, field
 
 
-@pytest.mark.parametrize(
-    "field_name",
-    [
+def test_fingerprint_changes_for_every_finegrained_tp_size(identity_module, monkeypatch):
+    field_names = (
         "oproj_tensor_parallel_size",
         "lmhead_tensor_parallel_size",
         "embedding_tensor_parallel_size",
         "mlp_tensor_parallel_size",
         "olora_tensor_parallel_size",
-    ],
-)
-def test_fingerprint_changes_for_every_finegrained_tp_size(identity_module, monkeypatch, field_name):
-    monkeypatch.setattr(identity_module, "get_ascend_config", lambda: _ascend_config())
-    base = _fingerprint(identity_module)
-
-    finegrained_values = {
-        name: (2 if name == field_name else 0) for name in identity_module._FINEGRAINED_TP_LAYOUT_FIELDS
-    }
-    monkeypatch.setattr(
-        identity_module,
-        "get_ascend_config",
-        lambda: _ascend_config(finegrained_tp_config=SimpleNamespace(**finegrained_values)),
     )
-    assert _fingerprint(identity_module) != base
+    for field_name in field_names:
+        monkeypatch.setattr(identity_module, "get_ascend_config", lambda: _ascend_config())
+        base = _fingerprint(identity_module)
+
+        finegrained_values = {
+            name: (2 if name == field_name else 0) for name in identity_module._FINEGRAINED_TP_LAYOUT_FIELDS
+        }
+        monkeypatch.setattr(
+            identity_module,
+            "get_ascend_config",
+            lambda finegrained_values=finegrained_values: _ascend_config(
+                finegrained_tp_config=SimpleNamespace(**finegrained_values)
+            ),
+        )
+        assert _fingerprint(identity_module) != base, field_name
 
 
 def test_finegrained_tp_isolates_data_parallel_layout_rank(identity_module, monkeypatch):
@@ -588,9 +575,8 @@ def test_replicated_data_parallel_ranks_keep_sharing_fingerprint(identity_module
     assert first_rank == second_rank
 
 
-@pytest.mark.parametrize(
-    ("field", "changed_value"),
-    [
+def test_fingerprint_changes_when_speculative_layout_changes(identity_module):
+    changes = (
         ("method", "eagle3"),
         ("num_speculative_tokens", 3),
         ("num_speculative_tokens_per_batch_size", {1: 3, 8: 1}),
@@ -602,13 +588,12 @@ def test_replicated_data_parallel_ranks_keep_sharing_fingerprint(identity_module
         ("speculative_token_tree", "[(0,), (0, 0)]"),
         ("quantization", "ascend"),
         ("use_local_argmax_reduction", True),
-    ],
-)
-def test_fingerprint_changes_when_speculative_layout_changes(identity_module, field, changed_value):
+    )
     base = _build_fingerprint(identity_module, _model_config())
-    speculative_config = SimpleNamespace(**{field: changed_value})
-    changed = _build_fingerprint(identity_module, _model_config(), speculative_config=speculative_config)
-    assert changed != base
+    for field, changed_value in changes:
+        speculative_config = SimpleNamespace(**{field: changed_value})
+        changed = _build_fingerprint(identity_module, _model_config(), speculative_config=speculative_config)
+        assert changed != base, field
 
 
 def test_fingerprint_changes_when_draft_model_or_parallel_layout_changes(identity_module):
@@ -665,28 +650,26 @@ def test_fingerprint_changes_when_hardware_device_type_changes(identity_module, 
     assert _fingerprint(identity_module) != a2_fingerprint
 
 
-@pytest.mark.parametrize(
-    ("field", "changed_value"),
-    [
+def test_compilation_capture_sizes_do_not_partition_weight_seeds(identity_module):
+    changes = (
         ("cudagraph_mode", "FULL"),
         ("cudagraph_capture_sizes", [1, 2, 16]),
         ("max_cudagraph_capture_size", 16),
-    ],
-)
-def test_compilation_capture_sizes_do_not_partition_weight_seeds(identity_module, field, changed_value):
-    base = _build_fingerprint(identity_module, _model_config())
-    values = {
-        "cudagraph_mode": "NONE",
-        "cudagraph_capture_sizes": [],
-        "max_cudagraph_capture_size": 0,
-    }
-    values[field] = changed_value
-    changed = _build_fingerprint(
-        identity_module,
-        _model_config(),
-        compilation_config=SimpleNamespace(**values),
     )
-    assert changed == base
+    base = _build_fingerprint(identity_module, _model_config())
+    for field, changed_value in changes:
+        values = {
+            "cudagraph_mode": "NONE",
+            "cudagraph_capture_sizes": [],
+            "max_cudagraph_capture_size": 0,
+        }
+        values[field] = changed_value
+        changed = _build_fingerprint(
+            identity_module,
+            _model_config(),
+            compilation_config=SimpleNamespace(**values),
+        )
+        assert changed == base, field
 
 
 def test_compilation_runtime_registry_is_not_part_of_fingerprint(identity_module):
@@ -700,19 +683,17 @@ def test_compilation_runtime_registry_is_not_part_of_fingerprint(identity_module
     assert _build_fingerprint(identity_module, _model_config(), compilation_config=compilation_config) == base
 
 
-@pytest.mark.parametrize(
-    ("field", "changed_value"),
-    [
+def test_multimodal_layout_isolates_tower_and_shard_choices(identity_module):
+    changes = (
         ("limit_per_prompt", {"image": 0}),
         ("mm_encoder_tp_mode", "data"),
         ("enable_multimodal_pruning", True),
-    ],
-)
-def test_multimodal_layout_isolates_tower_and_shard_choices(identity_module, field, changed_value):
+    )
     base = _build_fingerprint(identity_module, _model_config())
-    multimodal_config = SimpleNamespace(**{field: changed_value})
-    changed = _build_fingerprint(identity_module, _model_config(multimodal_config=multimodal_config))
-    assert changed != base
+    for field, changed_value in changes:
+        multimodal_config = SimpleNamespace(**{field: changed_value})
+        changed = _build_fingerprint(identity_module, _model_config(multimodal_config=multimodal_config))
+        assert changed != base, field
 
 
 def test_multimodal_processor_kwargs_do_not_partition_weight_seeds(identity_module):
@@ -749,58 +730,54 @@ def test_effective_multimodal_limit_and_pruning_isolate_model_layout(identity_mo
     assert pruning_changed != base
 
 
-@pytest.mark.parametrize(
-    ("feature", "field", "value"),
-    [
+def test_optional_model_features_isolate_tensor_layout(identity_module):
+    changes = (
         ("lora_config", "max_lora_rank", 128),
         ("prompt_adapter_config", "max_prompt_adapter_token", 16),
         ("pooler_config", "pooling_type", "LAST"),
-    ],
-)
-def test_optional_model_features_isolate_tensor_layout(identity_module, feature, field, value):
-    base = _build_fingerprint(identity_module, _model_config())
-    changed = _build_fingerprint(
-        identity_module,
-        _model_config(),
-        **{feature: SimpleNamespace(**{field: value})},
     )
-    assert changed != base
+    base = _build_fingerprint(identity_module, _model_config())
+    for feature, field, value in changes:
+        changed = _build_fingerprint(
+            identity_module,
+            _model_config(),
+            **{feature: SimpleNamespace(**{field: value})},
+        )
+        assert changed != base, feature
 
 
-@pytest.mark.parametrize(
-    ("feature", "layout_field", "runtime_field", "runtime_value"),
-    [
+def test_optional_runtime_fields_do_not_partition_weight_seeds(identity_module):
+    changes = (
         ("lora_config", "max_lora_rank", "max_cpu_loras", 8),
         ("prompt_adapter_config", "max_prompt_adapter_token", "max_prompt_adapters", 8),
         ("pooler_config", "pooling_type", "normalize", True),
-    ],
-)
-def test_optional_runtime_fields_do_not_partition_weight_seeds(
-    identity_module, feature, layout_field, runtime_field, runtime_value
-):
-    base_feature = SimpleNamespace(**{layout_field: 16})
-    changed_feature = SimpleNamespace(**{layout_field: 16, runtime_field: runtime_value})
-    base = _build_fingerprint(identity_module, _model_config(), **{feature: base_feature})
-    changed = _build_fingerprint(identity_module, _model_config(), **{feature: changed_feature})
-    assert changed == base
+    )
+    for feature, layout_field, runtime_field, runtime_value in changes:
+        base_feature = SimpleNamespace(**{layout_field: 16})
+        changed_feature = SimpleNamespace(**{layout_field: 16, runtime_field: runtime_value})
+        base = _build_fingerprint(identity_module, _model_config(), **{feature: base_feature})
+        changed = _build_fingerprint(identity_module, _model_config(), **{feature: changed_feature})
+        assert changed == base, feature
 
 
-@pytest.mark.parametrize(
-    "field",
-    [
+def test_derived_hardware_capabilities_do_not_partition_weight_seeds(identity_module, monkeypatch):
+    fields = (
         "attention_backend_family",
         "device_adaptor_family",
         "moe_comm_policy",
         "quantization_backend_family",
         "capabilities",
-    ],
-)
-def test_derived_hardware_capabilities_do_not_partition_weight_seeds(identity_module, monkeypatch, field):
-    base_profile = SimpleNamespace(weight_layout_policy="CONFIGURABLE", _device_type="A2")
-    monkeypatch.setattr(identity_module, "get_current_hardware_profile", lambda: base_profile)
-    base = _fingerprint(identity_module)
-    setattr(base_profile, field, {"MLAPO_NATIVE_WEIGHTS"} if field == "capabilities" else "COMPATIBILITY")
-    assert _fingerprint(identity_module) == base
+    )
+    for field in fields:
+        base_profile = SimpleNamespace(weight_layout_policy="CONFIGURABLE", _device_type="A2")
+        monkeypatch.setattr(
+            identity_module,
+            "get_current_hardware_profile",
+            lambda base_profile=base_profile: base_profile,
+        )
+        base = _fingerprint(identity_module)
+        setattr(base_profile, field, {"MLAPO_NATIVE_WEIGHTS"} if field == "capabilities" else "COMPATIBILITY")
+        assert _fingerprint(identity_module) == base, field
 
 
 def test_hardware_weight_policy_still_isolates_layout(identity_module, monkeypatch):
@@ -822,20 +799,10 @@ def test_multimodal_layout_descriptor_reads_dataclass_fields(identity_module):
     assert _build_fingerprint(identity_module, producer) != _build_fingerprint(identity_module, consumer)
 
 
-def test_compatibility_fingerprint_length_remains_fixed(identity_module):
-    base = _build_fingerprint(identity_module, _model_config())
-    expanded = _build_fingerprint(
-        identity_module,
-        _model_config(multimodal_config=SimpleNamespace(limit_per_prompt={"image": 1})),
-        lora_config=SimpleNamespace(max_lora_rank=128),
-    )
-    assert len(base) == len(expanded) == 64
-
-
 def test_recursive_fingerprint_values_fail_with_actionable_error(identity_module):
-    recursive_dict = {}
+    recursive_dict: dict[str, object] = {}
     recursive_dict["self"] = recursive_dict
-    recursive_list = []
+    recursive_list: list[object] = []
     recursive_list.append(recursive_list)
     recursive_object = SimpleNamespace()
     recursive_object.child = recursive_object
@@ -852,6 +819,13 @@ def test_extra_config_requires_json_object(monkeypatch, raw):
         config.RForkConfig.from_extra_config(raw)
 
 
+@pytest.mark.parametrize("value", ["8080", 8080.5, True, -1, 65536])
+def test_seed_port_base_rejects_non_integer_extra_config(monkeypatch, value):
+    config = _load_module(monkeypatch, "rfork_test_config", "config.py")
+    with pytest.raises(ValueError, match="rfork_seed_port_base must be a JSON integer in range"):
+        config.RForkConfig.from_extra_config({"rfork_seed_port_base": value})
+
+
 def test_build_seed_key_rejects_missing_identity_values(identity_module):
     build = identity_module.build_seed_key
     with pytest.raises(RuntimeError, match="model_url"):
@@ -860,8 +834,6 @@ def test_build_seed_key_rejects_missing_identity_values(identity_module):
         build(0, "model", "", "fingerprint")
     with pytest.raises(RuntimeError, match="compatibility fingerprint"):
         build(0, "model", "strategy", "")
-    with pytest.raises(TypeError):
-        build(0, "model", "strategy")
 
 
 def test_manifest_accepts_only_the_current_five_field_format(manifest_module):

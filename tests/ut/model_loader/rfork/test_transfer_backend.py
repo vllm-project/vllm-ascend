@@ -105,6 +105,114 @@ def test_first_registration_rejects_transfer_engine_without_memory_registration(
     assert backend.finalize_transfer_engine()
 
 
+class _FakeYrEngine:
+    def __init__(self, rpc_port=45678, initialize_error=False):
+        self.rpc_port = rpc_port
+        self.initialize_error = initialize_error
+        self.initialize_calls: list[tuple[str, str, str]] = []
+        self.finalize_calls = 0
+
+    def initialize(self, endpoint, protocol, device_name):
+        self.initialize_calls.append((endpoint, protocol, device_name))
+        return SimpleNamespace(
+            is_error=lambda: self.initialize_error,
+            to_string=lambda: "mock initialize error",
+        )
+
+    def get_rpc_port(self):
+        return self.rpc_port
+
+    def finalize(self):
+        self.finalize_calls += 1
+        return SimpleNamespace(is_error=lambda: False)
+
+
+def _install_yr_module_with_engine(monkeypatch, engine):
+    yr_module = ModuleType("yr")
+    datasystem_module = ModuleType("yr.datasystem")
+    datasystem_module.TransferEngine = lambda: engine  # type: ignore[attr-defined]
+    datasystem_module.MemoryRegistration = object  # type: ignore[attr-defined]
+    datasystem_module.ErrorCode = SimpleNamespace(kNotReady=1, kNotFound=2)  # type: ignore[attr-defined]
+    yr_module.datasystem = datasystem_module  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "yr", yr_module)
+    monkeypatch.setitem(sys.modules, "yr.datasystem", datasystem_module)
+    monkeypatch.setattr(transfer_backend, "get_ip", lambda: "10.0.0.1")
+    monkeypatch.setattr(
+        transfer_backend,
+        "torch",
+        SimpleNamespace(npu=SimpleNamespace(current_device=lambda: 2)),
+    )
+    return engine
+
+
+def test_initialize_transfer_engine_binds_dynamic_port_and_reads_rpc_port(monkeypatch):
+    engine = _install_yr_module_with_engine(monkeypatch, _FakeYrEngine(rpc_port=45678))
+    backend = RForkTransferBackend()
+
+    backend._initialize_transfer_engine()
+
+    assert engine.initialize_calls == [("10.0.0.1:0", "ascend", "npu:2")]
+    assert backend.transfer_session_id == "10.0.0.1:45678"
+    assert backend.transfer_engine is engine
+    assert backend._is_initialized
+
+
+@pytest.mark.parametrize("rpc_port", [0, -1, 65536, None])
+def test_initialize_transfer_engine_rejects_invalid_rpc_port(monkeypatch, rpc_port):
+    engine = _install_yr_module_with_engine(monkeypatch, _FakeYrEngine(rpc_port=rpc_port))
+    backend = RForkTransferBackend()
+
+    with pytest.raises(RuntimeError, match="invalid RPC port"):
+        backend._initialize_transfer_engine()
+
+    assert engine.finalize_calls == 1
+    assert backend.transfer_engine is None
+    assert not backend._is_initialized
+
+
+def test_initialize_transfer_engine_requires_get_rpc_port(monkeypatch):
+    class _EngineWithoutRpcPort(_FakeYrEngine):
+        get_rpc_port = None  # type: ignore[assignment]
+
+    engine = _install_yr_module_with_engine(monkeypatch, _EngineWithoutRpcPort())
+    backend = RForkTransferBackend()
+
+    with pytest.raises(RuntimeError, match="get_rpc_port"):
+        backend._initialize_transfer_engine()
+
+    assert engine.finalize_calls == 1
+    assert backend.transfer_engine is None
+
+
+def test_initialize_transfer_engine_finalizes_engine_when_rpc_port_raises(monkeypatch):
+    class _EngineWithRaisingRpcPort(_FakeYrEngine):
+        def get_rpc_port(self):
+            raise RuntimeError("native rpc port query failed")
+
+    engine = _install_yr_module_with_engine(monkeypatch, _EngineWithRaisingRpcPort())
+    backend = RForkTransferBackend()
+
+    with pytest.raises(RuntimeError, match="native rpc port query failed"):
+        backend._initialize_transfer_engine()
+
+    assert engine.finalize_calls == 1
+    assert backend.transfer_engine is None
+    assert not backend._is_initialized
+
+
+def test_initialize_transfer_engine_propagates_initialize_failure(monkeypatch):
+    engine = _install_yr_module_with_engine(monkeypatch, _FakeYrEngine(initialize_error=True))
+    backend = RForkTransferBackend()
+
+    with pytest.raises(RuntimeError, match="mock initialize error"):
+        backend._initialize_transfer_engine()
+
+    assert engine.initialize_calls == [("10.0.0.1:0", "ascend", "npu:2")]
+    assert engine.finalize_calls == 0
+    assert backend.transfer_engine is None
+    assert not backend._is_initialized
+
+
 def test_iter_transfer_chunks_splits_single_large_tensor():
     chunk_limit = transfer_backend.MAX_TRANSFER_CHUNK_BYTES
     chunks = list(
@@ -131,6 +239,7 @@ def test_read_weights_from_seed_refreshes_registered_shape_after_reshape(monkeyp
         batch_transfer_sync_read=lambda *args: SimpleNamespace(is_error=lambda: False)
     )
     backend.weight_manifest = {"weight": (tensor.data_ptr(), tensor.numel(), tensor.element_size(), (2, 3), "int64")}
+    backend._registered_transferable_tensors = [("weight", tensor)]
 
     monkeypatch.setattr(
         transfer_backend,
@@ -721,7 +830,7 @@ def test_read_weights_from_seed_rejects_missing_registration_cache(monkeypatch):
     storage = torch.arange(100, dtype=torch.float32)
     own_weight = storage[20:32]
     backend = RForkTransferBackend()
-    reads = []
+    reads: list[Any] = []
     backend.transfer_engine = SimpleNamespace(
         batch_transfer_sync_read=lambda *args: _append_and_return(reads, args, SimpleNamespace(is_error=lambda: False))
     )

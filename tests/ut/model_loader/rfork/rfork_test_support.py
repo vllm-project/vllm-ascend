@@ -11,6 +11,7 @@ RFORK_ROOT = Path(__file__).resolve().parents[4] / "vllm_ascend/model_loader/rfo
 
 def _load_module(monkeypatch, module_name: str, file_name: str):
     spec = importlib.util.spec_from_file_location(module_name, RFORK_ROOT / file_name)
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, module_name, module)
     spec.loader.exec_module(module)

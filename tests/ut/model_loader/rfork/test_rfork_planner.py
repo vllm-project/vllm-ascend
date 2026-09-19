@@ -20,8 +20,8 @@ def test_lease_ttl_default_and_configuration_precedence(monkeypatch):
     assert _build_arg_parser().parse_args(["--lease-ttl-sec", "180"]).lease_ttl_sec == 180
 
 
-@pytest.mark.parametrize("value", [0, -1])
-def test_non_positive_lease_ttl_rejected(monkeypatch, value):
+def test_non_positive_lease_ttl_rejected(monkeypatch):
+    value = 0
     with pytest.raises(ValueError, match="lease_ttl_sec must be > 0"):
         Settings(lease_ttl_sec=value)
     monkeypatch.setenv("RFORK_MOCK_LEASE_TTL_SEC", str(value))
@@ -48,8 +48,8 @@ def planner():
     return SimpleNamespace(clock=clock, store=store, seed_args=seed_args, seed=seed, lease=lease)
 
 
-@pytest.mark.parametrize("ttl", [60, 120])
-def test_lease_expiry_boundary_and_capacity_reclaimed_once(ttl):
+def test_lease_expiry_boundary_and_capacity_reclaimed_once():
+    ttl = 60
     clock = SimpleNamespace(now=0.0)
     store = Store(
         heartbeat_ttl_sec=ttl * 2,

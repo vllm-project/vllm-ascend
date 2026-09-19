@@ -244,9 +244,9 @@ def _reset_process_global_model_state(
     if compilation_config is not None:
         static_forward_context = getattr(compilation_config, "static_forward_context", None)
         if snapshot is not None and snapshot.static_forward_context is not None:
-            baseline_context, baseline_values = snapshot.static_forward_context
+            baseline_context, baseline_context_values = snapshot.static_forward_context
             baseline_context.clear()
-            baseline_context.update(baseline_values)
+            baseline_context.update(baseline_context_values)
             if static_forward_context is not baseline_context:
                 compilation_config.static_forward_context = baseline_context
         elif isinstance(static_forward_context, dict):
@@ -259,8 +259,8 @@ def _reset_process_global_model_state(
 
         static_all_moe_layers = getattr(compilation_config, "static_all_moe_layers", None)
         if snapshot is not None and snapshot.static_all_moe_layers is not None:
-            baseline_moe_layers, baseline_values = snapshot.static_all_moe_layers
-            baseline_moe_layers[:] = baseline_values
+            baseline_moe_layers, baseline_moe_values = snapshot.static_all_moe_layers
+            baseline_moe_layers[:] = baseline_moe_values
             if static_all_moe_layers is not baseline_moe_layers:
                 compilation_config.static_all_moe_layers = baseline_moe_layers
         elif isinstance(static_all_moe_layers, list):

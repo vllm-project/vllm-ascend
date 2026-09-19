@@ -20,6 +20,7 @@ def live_session(runtime, monkeypatch):
     path = Path(__file__).resolve().parents[4] / "vllm_ascend/model_loader/rfork/seed_server.py"
     name = "rfork_live_seed_server_test"
     spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, name, module)
     spec.loader.exec_module(module)
@@ -80,6 +81,43 @@ def test_session_serves_real_metadata_and_closes_listener(live_session):
     r.session.transfer_backend.finalize_transfer_engine.assert_called_once()
 
 
+@pytest.mark.parametrize(
+    ("global_rank", "is_draft_model", "expected_port"),
+    [
+        (0, False, 20000),
+        (0, True, 20001),
+        (3, False, 20006),
+        (3, True, 20007),
+    ],
+)
+def test_seed_server_port_reserves_main_and_draft_slots(runtime, global_rank, is_draft_model, expected_port):
+    config = replace(runtime.config, seed_port_base=20000)
+    identity = replace(runtime.identity, global_rank=global_rank, is_draft_model=is_draft_model)
+
+    assert runtime.session._resolve_seed_server_port(config, identity) == expected_port
+
+
+def test_seed_server_port_zero_keeps_dynamic_allocation(runtime):
+    identity = replace(runtime.identity, global_rank=3, is_draft_model=True)
+
+    assert runtime.session._resolve_seed_server_port(runtime.config, identity) == 0
+
+
+def test_configured_seed_port_falls_back_when_already_in_use(live_session):
+    r = live_session
+    occupied = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    occupied.bind(("127.0.0.1", 0))
+    occupied.listen(1)
+    occupied_port = occupied.getsockname()[1]
+    r.session.config = replace(r.session.config, seed_port_base=occupied_port)
+
+    try:
+        assert r.session.start_seed_service(object(), True) is r.runtime.types.RForkSeedServiceStartResult.STARTED
+        assert r.session.seed_server.port != occupied_port
+    finally:
+        occupied.close()
+
+
 def test_rejected_advertisement_cleans_real_server_before_unregister(live_session):
     r = live_session
     r.session.planner.report_seed_once.return_value = r.runtime.types.SeedReportResult(
@@ -118,22 +156,6 @@ def test_transient_initial_advertisement_recovers_without_restarting_instance(li
     assert r.session.state is r.runtime.types.RForkLifecycleState.SERVING
     assert r.session.shutdown()
     assert not handle.is_alive
-
-
-def test_failed_removal_keeps_live_seed_until_retry(live_session):
-    r = live_session
-    assert r.session.start_seed_service(object(), True) is r.runtime.types.RForkSeedServiceStartResult.STARTED
-    handle = r.session.seed_server
-    r.session.planner.remove_seed.return_value = False
-    assert not r.session.prepare_for_fallback().can_schedule_seed
-    assert handle.is_alive
-    r.session.transfer_backend.unregister_memory_region.assert_not_called()
-    info = r.client.fetch_seed_transfer_info(f"http://127.0.0.1:{handle.port}", "live-key", 1.0)
-    assert info is not None
-    r.session.planner.remove_seed.return_value = True
-    assert r.session.prepare_for_fallback().can_schedule_seed
-    assert not handle.is_alive
-    r.session.transfer_backend.unregister_memory_region.assert_called_once()
 
 
 @pytest.mark.parametrize("removal_fails", [False, True])

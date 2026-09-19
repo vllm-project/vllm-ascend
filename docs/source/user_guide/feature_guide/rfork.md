@@ -52,7 +52,17 @@ To enable RFork, pass `--load-format rfork` and provide RFork settings through `
 | **rfork_lease_release_max_attempts** | Integer | Fast-attempt count before transient lease-release failures continue at a slower background interval. | Optional. Default: `3`. Permanent planner rejection still stops retries. |
 | **rfork_lease_release_retry_interval_sec** | Number | Interval between fast lease-release retries. | Optional. Default: `30.0`. JSON configuration only. |
 | **rfork_seed_bind_host** | String | Local address used by the seed HTTP service. | Optional. Default: `0.0.0.0`. |
+| **rfork_seed_port_base** | Integer | Base port for deterministic seed HTTP endpoints. | Optional. Default: `0`, which lets the OS assign a port. For a nonzero base, main and draft models reserve adjacent slots per worker: main uses `base + 2 * global_rank`, draft uses `base + 2 * global_rank + 1`. Ports above `65535` or ports already in use fall back to OS assignment. Keep this range separate from TransferEngine, its HIXL endpoint range, and other service ports. |
 | **rfork_seed_advertise_host** | String | Seed address advertised to the planner. | Optional. Automatically detected when unset. |
+
+The YuanRong TransferEngine RPC port is not a configuration field: RFork initializes the engine with port `0`, and the
+engine binds and holds an OS-assigned port that RFork reads back via `get_rpc_port()` and publishes as the transfer
+session endpoint. To constrain the engine to a fixed port range (for example, for firewall rules), set YuanRong's
+`YR_TE_RPC_PORT_MIN` and `YR_TE_RPC_PORT_MAX` environment variables (both required, valid within `1024-65535` and
+outside the ephemeral range `32768-60999`); invalid values fall back to OS assignment. Keep this range separate from
+the seed HTTP ports and the HIXL endpoint range. The HIXL data-plane endpoints default to base port `22000`
+(`YR_TE_HIXL_BASE_PORT`, 100 ports per physical device), which stays clear of Mooncake ADXL's default `20000`-based
+segments on nodes that co-locate both engines.
 
 ### How RFork Matches Seeds
 
