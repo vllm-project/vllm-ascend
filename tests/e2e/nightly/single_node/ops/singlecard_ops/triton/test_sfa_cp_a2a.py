@@ -311,3 +311,53 @@ def test_combine_with_raw_local_fia(scatter_dim, dcp_size, head_dim, local_dtype
     expected_lse = torch.logsumexp(lses.masked_fill(~torch.isfinite(lses), -torch.inf), dim=0)
     torch.testing.assert_close(actual[..., :head_dim], expected, atol=1e-4, rtol=1e-4)
     torch.testing.assert_close(actual[..., head_dim], expected_lse, atol=1e-4, rtol=1e-4)
+
+
+@pytest.mark.parametrize(
+    "num_tokens,num_heads,head_dim",
+    [(t, 96, 512) for t in (8, 16, 31, 32, 63, 64, 65, 128, 256, 257, 512)]
+    + [(64, h, d) for h in (8, 32, 64, 128) for d in (64, 128, 256, 512)]
+    + [(63, 24, 80), (63, 48, 192), (64, 96, 511), (64, 96, 513), (64, 96, 1024), (64, 96, 2048)]
+    + [(15, 32, 512), (16, 32, 512), (17, 32, 512), (255, 8, 512), (256, 8, 512), (257, 8, 512)],
+)
+@pytest.mark.parametrize("strided", [False, True])
+@torch.inference_mode()
+def test_dcp8_local_combine_generalized_shapes(num_tokens: int, num_heads: int, head_dim: int, strided: bool) -> None:
+    """Cover row-count dispatch, feature tails, strides and scalar fallbacks."""
+    _check_local_combine_generalized_shape(num_tokens, num_heads, head_dim, strided, dcp_size=8)
+
+
+@pytest.mark.parametrize("dcp_size", range(1, 9))
+@pytest.mark.parametrize("local_heads", [4, 8])
+@pytest.mark.parametrize("head_dim", [128, 512])
+@pytest.mark.parametrize("strided", [False, True])
+@torch.inference_mode()
+def test_local_combine_dcp_sizes(dcp_size: int, local_heads: int, head_dim: int, strided: bool) -> None:
+    """Cover rank counts, including non-powers of two, at dispatch boundaries."""
+    _check_local_combine_generalized_shape(64, dcp_size * local_heads, head_dim, strided, dcp_size)
+
+
+def _check_local_combine_generalized_shape(
+    num_tokens: int, num_heads: int, head_dim: int, strided: bool, dcp_size: int
+) -> None:
+    torch.manual_seed(20260917)
+    destination_rank = min(3, dcp_size - 1)
+    local_heads = num_heads // dcp_size
+    stride = 2 if strided else 1
+    values = torch.randn(dcp_size, num_tokens, num_heads, head_dim * stride, device="npu", dtype=torch.bfloat16)[
+        ..., ::stride
+    ]
+    lses = (torch.randn(dcp_size, num_tokens, num_heads, stride, device="npu") * 3)[..., :1]
+    local = torch.randn(num_tokens, local_heads, head_dim * stride, device="npu", dtype=torch.bfloat16)[..., ::stride]
+    local_lse = (torch.randn(num_tokens, local_heads, stride, device="npu") * 3)[..., :1]
+    values[:, 0] = torch.nan
+    lses[:, 0] = -torch.inf
+    local[0] = torch.nan
+    local_lse[0] = -torch.inf
+    recv = _simulate_receive(values, lses, destination_rank, scatter_dim=1)
+    actual = fused_sfa_dcp_lse_combine(recv, head_dim, scatter_dim=1, local_output=local, local_lse=local_lse)
+    head_slice = slice(destination_rank * local_heads, (destination_rank + 1) * local_heads)
+    reference_values = torch.cat((values[:, :, head_slice], local.unsqueeze(0)))
+    reference_lses = torch.cat((lses[:, :, head_slice], local_lse.unsqueeze(0)))[..., 0]
+    expected = _reference_merge(reference_values, reference_lses)
+    torch.testing.assert_close(actual, expected, atol=1e-2, rtol=1e-2)

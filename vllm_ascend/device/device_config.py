@@ -25,6 +25,11 @@ class DeviceConfig:
 
     _device_type: AscendDeviceType
 
+    @property
+    def sfa_dcp_row_batch_size(self) -> int:
+        """Row tile for the validated SFA DCP specializations."""
+        return 8 if self._device_type == AscendDeviceType.A5 else 1
+
 
 def _device_type_from_build_info() -> AscendDeviceType:
     from vllm_ascend import _build_info  # type: ignore
