@@ -68,8 +68,8 @@ env:
   UV_INDEX_STRATEGY: unsafe-best-match
   UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
   UV_HTTP_TIMEOUT: 120
-  UV_NO_CACHE: 1
   UV_SYSTEM_PYTHON: 1
+  UV_CACHE_DIR: /tmp/uv-cache
 
 jobs:
   build:
@@ -164,6 +164,18 @@ jobs:
           yum install -y python3-pip net-tools jemalloc numactl patch clang
           pip install uv
 
+      - name: Restore uv wheel cache
+        # requirements-dev.txt installs the full build toolchain (torch,
+        # torch-npu, ...). Downloading ~2GB of wheels per build dominates the
+        # job wall time, so keep the uv cache across builds for the same
+        # dependency set and image.
+        uses: runs-on/cache/restore@v5
+        with:
+          path: /tmp/uv-cache
+          key: uv-wheels-${{ fromJSON(inputs.target).cache_arch }}-${{ fromJSON(inputs.target).image_tag }}-${{ hashFiles('requirements-dev.txt', 'requirements.txt') }}
+          restore-keys: |
+            uv-wheels-${{ fromJSON(inputs.target).cache_arch }}-${{ fromJSON(inputs.target).image_tag }}-
+
       - name: Install vllm-ascend
         env:
           SOC_VERSION: ${{ fromJSON(inputs.target).soc_version }}
@@ -183,7 +195,46 @@ jobs:
           # UV_EXTRA_INDEX_URL. Passing --extra-index-url here would replace it.
           uv pip install -r requirements-dev.txt
           uv pip install --force-reinstall --no-deps triton-ascend==3.2.2
-          uv pip install -e .
+          # --no-deps: requirements-dev.txt already provides every runtime
+          # dependency. Resolving them again here re-walks the whole index tree
+          # and costs 10-30 minutes against the remote mirrors for zero
+          # effect on the compiled artifacts.
+          #
+          # uv hides PEP 517 build output on success, which makes build-time
+          # analysis impossible (per-op compile times, parallel efficiency).
+          # Stream it with -v into a timestamped log on disk instead of the
+          # job console, and sample /proc/stat alongside it so CPU
+          # utilization of the two serial compile chains can be measured
+          # offline. Both files are uploaded as an artifact below.
+          set -o pipefail
+          (
+            while :; do
+              date +%s
+              grep '^cpu ' /proc/stat
+              sleep 5
+            done
+          ) > "$RUNNER_TEMP/vllm-ascend-cpu-samples.log" 2>/dev/null &
+          sampler_pid=$!
+
+          if uv pip install -e . --no-deps -v 2>&1 \
+            | while IFS= read -r line; do printf '%s %s\n' "$(date +%T)" "$line"; done \
+            > "$RUNNER_TEMP/vllm-ascend-build.log"; then
+            echo "vllm-ascend build finished; full log uploaded as an artifact"
+          else
+            build_status=$?
+            echo "::error::uv build failed (exit ${build_status}); tail of the build log:"
+            tail -n 200 "$RUNNER_TEMP/vllm-ascend-build.log"
+            kill "$sampler_pid" 2>/dev/null || true
+            exit 1
+          fi
+          kill "$sampler_pid" 2>/dev/null || true
+
+      - name: Save uv wheel cache
+        if: always()
+        uses: runs-on/cache/save@v5
+        with:
+          path: /tmp/uv-cache
+          key: uv-wheels-${{ fromJSON(inputs.target).cache_arch }}-${{ fromJSON(inputs.target).image_tag }}-${{ hashFiles('requirements-dev.txt', 'requirements.txt') }}
 
       - name: Verify csrc artifacts
         run: |
@@ -201,3 +252,16 @@ jobs:
             vllm_ascend/lib
             vllm_ascend/include
           key: vllm-ascend-build-v2-${{ fromJSON(inputs.target).cache_arch }}-${{ fromJSON(inputs.target).image_tag }}-${{ inputs.csrc_hash }}
+
+      - name: Upload build log
+        # Full uv/setuptools/cmake/ccec output plus 5s CPU samples, for
+        # build-time analysis (per-op compile times, parallel efficiency,
+        # utilization of the serial AscendC and C++ chains).
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: vllm-ascend-build-log-${{ fromJSON(inputs.target).id }}
+          path: ${{ runner.temp }}/vllm-ascend-*.log
+          if-no-files-found: ignore
+          retention-days: 7

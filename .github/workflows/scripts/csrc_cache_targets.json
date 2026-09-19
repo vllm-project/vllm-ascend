@@ -23,6 +23,14 @@
     "image": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-310p-ubuntu22.04-py3.12",
     "soc_version": "ascend310p1"
   },
+  "a5-arm64-ubuntu": {
+    "device": "a5",
+    "cache_arch": "ARM64",
+    "runner": "linux-arm64-cpu-16",
+    "os": "ubuntu",
+    "image": "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-950-ubuntu22.04-py3.12",
+    "soc_version": "ascend950dt_9582"
+  },
   "a2-arm64-openeuler": {
     "device": "a2",
     "cache_arch": "ARM64",

@@ -332,3 +332,5 @@ log_selected_ops
     log "VLLM_BATCH_INVARIANT is not set to 1, skipping batch_invariant ops build"
   fi
 )
+
+# build probe: force one cache-miss build to validate build-log artifact capture (safe to revert)

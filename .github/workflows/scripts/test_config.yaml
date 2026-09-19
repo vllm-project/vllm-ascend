@@ -126,7 +126,11 @@ partition:
     count: 1
   a2-1:
     runner_label: linux-aarch64-a2b3-1
-    count: 5
+    # a2-1 is the critical-path partition of the PR gate (the one_card suite
+    # is the largest and slowest bucket). Its group count sets the wall time
+    # of every labeled run: LPT balancing spreads the same total work over
+    # `count` groups, so the tail shrinks roughly by 5/count.
+    count: 8
   a3-2:
     runner_label: linux-aarch64-a3-2
     count: 4
