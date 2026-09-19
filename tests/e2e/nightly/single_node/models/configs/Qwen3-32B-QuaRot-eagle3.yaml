@@ -6,6 +6,7 @@ test_cases:
   - name: "Qwen3-32B-QuaRot"
     model: "vllm-ascend/Qwen3-32B-W8A8-QuaRot"
     envs:
+      VLLM_USE_MODEL_RUNNER_V2: "1"
       VLLM_WORKER_MULTIPROC_METHOD: "spawn"
       SERVER_PORT: "DEFAULT_PORT"
     server_cmd:
