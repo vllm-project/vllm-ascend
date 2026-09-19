@@ -133,3 +133,22 @@ def register_connector():
         "vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.connector",
         "SfaRemoteD2HConnector",
     )
+
+    # Some connectors are registered under a `kv_connector` config name that
+    # differs from their class name. MultiConnector keys transfer stats by
+    # `__class__.__name__` and resolves those keys through KVConnectorFactory,
+    # so without a class-name alias the stats reconstruction path raises
+    # ValueError and tears down EngineCore. Only connectors that actually emit
+    # stats need an alias here.
+    for module_path, class_name in (
+        (
+            "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.offloading_connector",
+            "AscendOffloadingConnector",
+        ),
+        (
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ucm_connector.connector",
+            "UCMConnectorV1",
+        ),
+    ):
+        KVConnectorFactory._registry.pop(class_name, None)
+        KVConnectorFactory.register_connector(class_name, module_path, class_name)
