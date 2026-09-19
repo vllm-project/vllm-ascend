@@ -305,6 +305,7 @@ class BaseDeviceAdaptor:
             group_type=0,
             group_list=group_list,
             output_dtype=fallback_output_dtype,
+            tuning_config=[0, 0, -1],
         )[0]
 
     @staticmethod
