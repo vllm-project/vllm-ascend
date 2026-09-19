@@ -18,10 +18,10 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 |  Weight Version          | Hardware Requirements                                             | Download Links |
 |--------------------------|-------------------------------------------------------------------|----------------|
-|  `GLM-5.2`(BF16 version) | 2 Atlas 800 A3 (128GB × 8) node or 4 Atlas 800 A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/ZhipuAI/GLM-5.2) |
-|  `GLM-5.2-w8a8`          | 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w8a8) |
-|  `GLM-5.2-w8a8c8`(Quantized version)        | 2 Atlas 800 A3 (64GB × 16) node or 4 Atlas 800 A2 (64GB × 8) node | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.2-w8a8c8) |
-|  `GLM-5.2-w4a8c8`        | 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w4a8c8) |
+|  `GLM-5.2`(BF16 version) | 2 Atlas 800 A3 (128GB × 16) node or 4 Atlas 800 A2 (64GB × 32) node | [ModelScope](https://www.modelscope.cn/models/ZhipuAI/GLM-5.2) |
+|  `GLM-5.2-w8a8`          | 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 16) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w8a8) |
+|  `GLM-5.2-w8a8c8`(Quantized version)        | 2 Atlas 800 A3 (128GB × 16) node or 4 Atlas 800 A2 (64GB × 32) node | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.2-w8a8c8) |
+|  `GLM-5.2-w4a8c8`        | 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 16) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w4a8c8) |
 
 - `GLM-5.2-w8a8c8`(Quantized version): The weights have been verified and are recommended for use.
 - You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly.
@@ -123,7 +123,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 #### 5.1.1 Single-node Deployment
 
-- Quantized model `GLM-5.2-w4a8c8` can be deployed on 1 Atlas 800 A3 (64GB × 16) .
+- Quantized model `GLM-5.2-w4a8c8` can be deployed on 1 Atlas 800 A3 (128GB × 8) .
 
 Run the following script to execute online inference.
 
@@ -166,7 +166,7 @@ The parameters are explained as follows:
 
 === "A3 series"
 
-    - `GLM-5.2-w4a8c8`: can be deployed on 2 Atlas 800 A3 (64GB × 16).
+    - `GLM-5.2-w4a8c8`: can be deployed on 2 Atlas 800 A3 (128GB × 16).
 
     Run the following scripts on two nodes respectively.
 
@@ -268,7 +268,7 @@ The parameters are explained as follows:
 
 === "A2 series"
 
-    - `GLM-5.2-w4a8c8`: can be deployed on 2 Atlas 800 A2 (64GB × 32).
+    - `GLM-5.2-w4a8c8`: can be deployed on 2 Atlas 800 A2 (64GB × 16).
 
     **node 0**
 
@@ -363,7 +363,7 @@ In the PD disaggregation scenario, Mooncake is used as the KV cache transfer con
 
 ##### 5.1.3.1 Deployment on 4 Atlas 800 A3
 
-Prefill-Decode disaggregation with the `GLM-5.2-w8a8c8` weights can be deployed on 4 Atlas 800 A3 (64GB × 16).
+Prefill-Decode disaggregation with the `GLM-5.2-w8a8c8` weights can be deployed on 4 Atlas 800 A3 (128GB × 32).
 
 Before you start, please
 
@@ -1036,7 +1036,7 @@ Please refer to the following python file for further explanation and restrictio
 
 #### 5.2.1 Single-Node 1M Deployment
 
-- Quantized model `GLM-5.2-w4a8c8` can be deployed on 1 Atlas 800 A3 (64GB × 16) for the 1M context.
+- Quantized model `GLM-5.2-w4a8c8` can be deployed on 1 Atlas 800 A3 (128GB × 8) for the 1M context.
 
 Recommended command:
 
@@ -1074,7 +1074,7 @@ vllm serve <MODEL_PATH> \
 
 #### 5.2.2 Dual-Node Co-Located 1M Deployment
 
-- `GLM-5.2-w4a8c8` can be deployed on 2 Atlas 800 A3 (64GB × 16) for the 1M context.
+- `GLM-5.2-w4a8c8` can be deployed on 2 Atlas 800 A3 (128GB × 16) for the 1M context.
 
 Recommended command for both co-located nodes:
 
