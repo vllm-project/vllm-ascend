@@ -58,6 +58,7 @@ class HardwareCapability(Enum):
     STANDARD_MAMBA_PATCH = auto()
     SWIGLU_OAI_MX_QUANT = auto()
     TRITON_BATCH_MEMCPY = auto()
+    TRITON_PENALTIES = auto()
     UNRESTRICTED_MLAPO = auto()
 
 
@@ -154,6 +155,7 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.STANDARD_MAMBA_PATCH,
         HardwareCapability.STANDARD_WORKER_PATCHES,
         HardwareCapability.TRITON_BATCH_MEMCPY,
+        HardwareCapability.TRITON_PENALTIES,
     }
 )
 _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
@@ -253,6 +255,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.STANDARD_WORKER_PATCHES,
                     HardwareCapability.SWIGLU_OAI_MX_QUANT,
                     HardwareCapability.TRITON_BATCH_MEMCPY,
+                    HardwareCapability.TRITON_PENALTIES,
                     HardwareCapability.UNRESTRICTED_MLAPO,
                 }
             ),
