@@ -69,7 +69,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_mlapo`                      | bool | `True`  | Whether to enable MLAPO (Model Layer-wise Adaptive Parallel Optimization). The legacy `VLLM_ASCEND_ENABLE_MLAPO` environment variable is no longer supported. |
 | `mlapo_keep_prefill_weights`        | bool | `False` | When True, keep MLAPO prefill weights on NPU instead of freeing them on kv_consumer (decode-only D) nodes. D nodes have normal local-prefill paths (recompute / fallback / preempt) that crash when the weights are freed (issue #11882). Enable this to trade NPU memory for stability. |
 | `weight_nz_mode`                    | int  | `1`     | Weight NZ mode. `0` disables NZ, `1` enables NZ only for quantized weights, and `2` also enables NZ for BF16/FP16 weights when supported. The legacy `VLLM_ASCEND_ENABLE_NZ` environment variable is no longer supported. |
-| `enable_fused_mc2`                  | int  | `0`     | Fused MC2 configuration. `0` disables the fused path and `1` enables it when the model and parallel configuration support it. The legacy `VLLM_ASCEND_ENABLE_FUSED_MC2` environment variable is no longer supported. |
+| `enable_fused_mc2`                  | int  | `0`     | Fused MC2 configuration. `0` disables the fused path and `1` enables it when the model and parallel configuration support it. The legacy `VLLM_ASCEND_ENABLE_FUSED_MC2` environment variable is no longer supported. See <a href="#enable_fused_mc2">enable_fused_mc2</a> for supported scenarios and constraints. |
 | `enable_transpose_kv_cache_by_block`| bool | `True`  | Whether to enable transpose KV cache by block. The legacy `VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK` environment variable is no longer supported. |
 | `enable_dsa_cp`                     | bool | `False` | Whether to enable dsa_cp for DeepSeek V3.2, DeepSeek V4, and other models with the same architecture. This feature requires sequence parallelism to be enabled. Enabling it automatically enables FlashComm.|
 | `enable_flashcomm1`                 | bool | `False` | Whether to enable SP MoE. The legacy `VLLM_ASCEND_ENABLE_FLASHCOMM1` environment variable is kept for compatibility. See [Sequence Parallelism](../feature_guide/sequence_parallelism.md). |
@@ -207,6 +207,23 @@ settings; enabling both selects the combined DyntraLB recompute scheduler.
 | `budget_update_interval` | int | `16` | Recompute the shared verify budget every N decode steps. |
 | `budget_threshold` | float | `0.3` | Cumulative survival-probability threshold used when estimating the mean verify budget. |
 | `min_verify_tokens` | int | `1` | Minimum number of draft tokens verified per request. |
+
+<span id="enable_fused_mc2"></span>**enable_fused_mc2**
+
+Fused MC2 enables the fused MoE computation path, which consolidates shared-expert and routed-expert computation into fused kernels (e.g. `dispatch_ffn_combine`) to reduce kernel launch overhead and improve MoE inference throughput.
+
+| Value | Behavior |
+| ----- | -------- |
+| `0` (default) | Disables the fused path. |
+| `1` | Enables the fused path when the model and parallel configuration support it. |
+
+The following constraints are validated at startup (see `vllm_ascend/ascend_config.py`):
+
+- Not supported for MiniMax M3 model architectures. Enabling fused MC2 with a MiniMax M3 model fails fast with a configuration error.
+- Mutually exclusive with hierarchy communication (`mc2_comm_alg = "hierarchy"` or the legacy `enable_mc2_hierarchy_comm`). Starting the server with both enabled raises a configuration error.
+- Mutually exclusive with `multistream_overlap_shared_expert`. If both are set, `multistream_overlap_shared_expert` is automatically disabled with a warning.
+
+For hardware-specific reference configurations that use fused MC2, see the model deployment tutorials (for example, GLM5.2 and DeepSeek-V4-Pro prefill nodes on A3).
 
 **scheduler_config.short_request_first_config**
 
