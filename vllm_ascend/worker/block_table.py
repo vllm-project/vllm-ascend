@@ -10,7 +10,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.utils import CpuGpuBuffer
 
-from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec, is_deepseek_v41_cache
+from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
 from vllm_ascend.ops.triton.compute_slot_mapping import (
     _compute_slot_mapping_kernel,
@@ -57,7 +57,7 @@ class BlockTable:
             # logical pages, even if another backend advertises smaller sizes.
             kernel_sizes = [block_size]
             self.max_num_blocks_per_req = max_num_blocks_per_req = 1
-        self.is_circular_group = kv_cache_group is not None and is_deepseek_v41_cache((kv_cache_group,))
+        self.is_circular_group = self.is_circular
 
         # If kernel_sizes is None or [0], use physical block size (no splitting)
         if kernel_sizes is None or kernel_sizes == [0]:

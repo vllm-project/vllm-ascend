@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -18,7 +18,12 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
-from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec, is_prefix_cacheable
+from tests.deepseek_v41_utils import make_cache_config
+from vllm_ascend.core.kv_cache_interface import (
+    is_circular_kv_cache_spec,
+    is_deepseek_v41_cache,
+    is_prefix_cacheable,
+)
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import AscendHybridKVCacheCoordinator
 from vllm_ascend.worker.block_table import BlockTable
 
@@ -80,6 +85,35 @@ def test_uniform_properties_and_single_plane_size():
     assert is_circular_kv_cache_spec(uniform) and not is_prefix_cacheable(uniform)
     assert not uniform.prefix_cacheable
     assert not is_prefix_cacheable(SimpleNamespace(participates_in_prefix_caching=False))
+
+
+def test_v41_model_marker_does_not_replace_circular_cache_capability():
+    mla_group, ring_group = make_cache_config(17).kv_cache_groups[:2]
+    assert is_deepseek_v41_cache((mla_group,))
+    assert not is_circular_kv_cache_spec(mla_group.kv_cache_spec)
+    assert not is_deepseek_v41_cache((ring_group,))
+    assert is_circular_kv_cache_spec(ring_group.kv_cache_spec)
+
+    with patch(
+        "vllm_ascend.worker.block_table.get_dcp_group",
+        return_value=SimpleNamespace(world_size=1, rank_in_group=0),
+    ):
+        tables = [
+            BlockTable(
+                block_size=group.kv_cache_spec.block_size,
+                max_num_reqs=2,
+                max_num_blocks_per_req=4,
+                max_num_batched_tokens=8,
+                pin_memory=False,
+                device=torch.device("cpu"),
+                kv_cache_group=group,
+            )
+            for group in (mla_group, ring_group)
+        ]
+    assert not tables[0].is_circular_group
+    assert tables[0].max_num_blocks_per_req == 4
+    assert tables[1].is_circular_group
+    assert tables[1].max_num_blocks_per_req == 1
 
 
 def test_scratch_groups_do_not_reduce_prefix_hits_or_truncation():

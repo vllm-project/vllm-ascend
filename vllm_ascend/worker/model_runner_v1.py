@@ -153,7 +153,7 @@ from vllm_ascend.compilation.acl_graph import (
     update_full_graph_params,
 )
 from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
-from vllm_ascend.core.kv_cache_interface import is_deepseek_v41_cache
+from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec, is_deepseek_v41_cache
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
     apply_layerwise_kv_cache_plan,
@@ -3957,7 +3957,7 @@ class NPUModelRunner(GPUModelRunner):
                 # Dummy requests bypass scheduler allocation. Give each active
                 # request a distinct non-null state ID before metadata/capture.
                 for gid, group in enumerate(self.kv_cache_config.kv_cache_groups):
-                    if skip_gdn_state_update or not is_deepseek_v41_cache((group,)):
+                    if skip_gdn_state_update or not is_circular_kv_cache_spec(group.kv_cache_spec):
                         continue
                     table = self.input_batch.block_table[gid]
                     table.block_table.np[:num_reqs_padded].fill(0)
@@ -5666,7 +5666,7 @@ class NPUModelRunner(GPUModelRunner):
                 kv_cache_spec = next(iter(kv_cache_spec.kv_cache_specs.values()))
             if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
                 continue
-            elif is_deepseek_v41_cache((kv_cache_spec,)):
+            elif is_circular_kv_cache_spec(kv_cache_spec):
                 self.kernel_block_sizes.append([kv_cache_spec.block_size])
             elif isinstance(kv_cache_spec, AttentionSpec):
                 # This is an attention backend that supports virtual
