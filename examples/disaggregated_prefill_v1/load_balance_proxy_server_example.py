@@ -407,7 +407,7 @@ class SharedProxyScheduler:
             return
         entry = self._pool(role).servers[key]
         if active_tokens:
-            entry.active_tokens -= load
+            entry.active_tokens = max(0.0, entry.active_tokens - load)
         if kv_cache:
             entry.active_kv_cache = max(0.0, entry.active_kv_cache - load)
         self._push_heap(role, key)
