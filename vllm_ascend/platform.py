@@ -1557,8 +1557,9 @@ def _sync_forced_compile_keys_to_singleton(vllm_config: VllmConfig, ascend_confi
     assertion (#65), while spawn children (fresh object) rebuilt correctly —
     the R8 experiment's two-leg split. Mirroring the dict into the singleton
     makes inproc match the spawn rebuild semantics. No-op whenever the dict
-    and singleton already agree (e.g. the inductor track pins both keys
-    False before step 5 ever runs).
+    and singleton already agree (both keys are legacy-track knobs:
+    AscendCompiler.compile / compute_hash are the only product readers, and
+    the inductor track never routes through AscendCompiler).
 
     Config-refactor ruling (09 §5.2 #9, 2026-09-18): kept as the ONE
     sanctioned exception — it plugs a COMMUNITY dual-source gap (step 7
