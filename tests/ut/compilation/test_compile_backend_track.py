@@ -3,8 +3,9 @@
 Covers (stage design/vllm config refactor/02_设计方案.md §四):
   1. upstream front-door trigger: compilation_config.backend == "inductor"
      (requested state; the early hook runs before the -O presets)
-  2. deprecated side-door guard: ascend_compilation_config.compile_backend
-     must not carry "inductor" nor coexist with the front door (Q-2)
+  2. side-door key never existed (user ruling 2026-09-19):
+     ascend_compilation_config.compile_backend is rejected as an unknown
+     key by extra="forbid" - no translation, no warning, no pointer
   3. pass_key / get_pass_manager_cls switch (upstream per-engine global
      get_current_vllm_config_or_none — rebinding-immune, nearest-window-wins)
   4. early-hook derived defaults ``NPUPlatform._apply_inductor_track_defaults``

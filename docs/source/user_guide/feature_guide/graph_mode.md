@@ -62,8 +62,7 @@ one full graph per batch size (decode-only for `FULL_DECODE_ONLY`; mixed
 batches then run the compiled graph ungraphed). The backend variant is selected with the
 `TORCHINDUCTOR_NPU_BACKEND` environment variable (the track default-pins
 `triton_experimental`); see
-[additional_config](../configuration/additional_config.md) for the deprecated
-`compile_backend` compatibility window.
+[additional_config](../configuration/additional_config.md).
 
 **Breakable CUDAGraph** (`VLLM_USE_BREAKABLE_CUDAGRAPH`): upstream semantics —
 for model architectures without `@support_torch_compile` (DeepSeek-V4,
