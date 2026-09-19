@@ -8,8 +8,25 @@ import pytest
 import torch
 import torch_npu  # noqa: F401
 
-from vllm_ascend.ops.triton.compute_slot_mapping import compute_slot_mapping_fused_groups
+from vllm_ascend.ops.triton.compute_slot_mapping import (
+    _compute_slot_mapping_fused_groups_adaptive_kernel,
+    _compute_slot_mapping_fused_groups_kernel,
+    compute_slot_mapping_fused_groups,
+)
 from vllm_ascend.worker.block_table import BlockTable
+
+
+@pytest.mark.parametrize(
+    "kernel",
+    [
+        _compute_slot_mapping_fused_groups_kernel,
+        _compute_slot_mapping_fused_groups_adaptive_kernel,
+    ],
+)
+def test_fused_slot_mapping_does_not_specialize_request_count(kernel):
+    num_reqs = next(param for param in kernel.params if param.name == "NUM_REQS")
+    assert num_reqs.do_not_specialize
+    assert not num_reqs.is_constexpr
 
 
 @pytest.mark.parametrize("lengths", [[3, 0, 5], [1025, 0, 1027], [1] * 64])

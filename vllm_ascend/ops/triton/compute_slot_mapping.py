@@ -152,7 +152,9 @@ def _compute_slot_mapping_request(
         tl.store(slot_mapping_ptr + offsets, slot_ids, mask=mask)
 
 
-@triton.jit(do_not_specialize=["num_tokens", "max_num_tokens"])
+# The active request count changes as sequences finish. Keep it dynamic so a
+# decode batch does not trigger a new Triton compilation for every batch size.
+@triton.jit(do_not_specialize=["num_tokens", "max_num_tokens", "NUM_REQS"])
 def _compute_slot_mapping_fused_groups_kernel(
     num_tokens,
     max_num_tokens,
@@ -165,13 +167,13 @@ def _compute_slot_mapping_fused_groups_kernel(
     is_circular_ptr,
     HAS_CIRCULAR: tl.constexpr,
     PAD_ID: tl.constexpr,
-    NUM_REQS: tl.constexpr,
+    NUM_REQS,
     TILE_BLOCK_SIZE: tl.constexpr,
     PARALLEL_TILES: tl.constexpr,
     BLOCK_TABLE_WINDOW_SIZE: tl.constexpr,
 ):
     program_idx = tl.program_id(0)
-    programs_per_group: tl.constexpr = NUM_REQS * PARALLEL_TILES + 1
+    programs_per_group = NUM_REQS * PARALLEL_TILES + 1
     group_idx = program_idx // programs_per_group
     group_program_idx = program_idx - group_idx * programs_per_group
 
@@ -226,7 +228,9 @@ def _compute_slot_mapping_fused_groups_kernel(
         tl.store(slot_mapping_ptr + offsets, slot_ids, mask=mask)
 
 
-@triton.jit(do_not_specialize=["num_tokens", "max_num_tokens"])
+# See _compute_slot_mapping_fused_groups_kernel: NUM_REQS is launch metadata,
+# not a property that changes the generated program.
+@triton.jit(do_not_specialize=["num_tokens", "max_num_tokens", "NUM_REQS"])
 def _compute_slot_mapping_fused_groups_adaptive_kernel(
     num_tokens,
     max_num_tokens,
@@ -239,13 +243,13 @@ def _compute_slot_mapping_fused_groups_adaptive_kernel(
     is_circular_ptr,
     HAS_CIRCULAR: tl.constexpr,
     PAD_ID: tl.constexpr,
-    NUM_REQS: tl.constexpr,
+    NUM_REQS,
     SMALL_TILE_BLOCK_SIZE: tl.constexpr,
     SMALL_BLOCK_TABLE_WINDOW_SIZE: tl.constexpr,
     LARGE_BLOCK_TABLE_WINDOW_SIZE: tl.constexpr,
 ):
     program_idx = tl.program_id(0)
-    programs_per_group: tl.constexpr = NUM_REQS + 1
+    programs_per_group = NUM_REQS + 1
     group_idx = program_idx // programs_per_group
     group_program_idx = program_idx - group_idx * programs_per_group
 
