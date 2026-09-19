@@ -220,6 +220,7 @@ class TestAscendSFAOProjWeightSwitch(TestBase):
         impl.o_proj = MagicMock()
         impl._prepare_native_hidden_states = MagicMock(side_effect=lambda hidden_states, _: hidden_states)
 
+        hidden_states = torch.empty(1, 1)
         output = MagicMock()
         finalized_output = MagicMock()
         kv_cache = (MagicMock(), MagicMock())
@@ -248,7 +249,7 @@ class TestAscendSFAOProjWeightSwitch(TestBase):
         ):
             result = impl.forward(
                 layer_name=impl.layer_name,
-                hidden_states=MagicMock(),
+                hidden_states=hidden_states,
                 kv_cache=kv_cache,
                 attn_metadata=attn_metadata,
                 output=output,
