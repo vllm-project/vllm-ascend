@@ -103,3 +103,73 @@ def test_adaptive_verification_patch_uses_uncompiled_budget_assignment(monkeypat
     importlib.reload(module)
 
     assert adaptive._assign_draft_token_budget_compiled is adaptive._assign_draft_token_budget
+
+
+def test_ascend_acceptance_estimator_predicts_and_records_features():
+    pytest.importorskip("vllm.v1.worker.gpu.spec_decode.acceptance_estimator")
+    from vllm_ascend.worker.v2.spec_decode.acceptance_estimator import (
+        AscendOnlineAcceptanceEstimator,
+    )
+
+    estimator = AscendOnlineAcceptanceEstimator(
+        max_num_reqs=3,
+        num_speculative_steps=2,
+        device=torch.device("cpu"),
+    )
+    estimator.slope.fill_(1.0)
+    estimator.intercepts.zero_()
+
+    logits = torch.tensor([[2.0, 0.0], [0.0, 0.0]])
+    idx_mapping = torch.tensor([1, 2])
+    confidence = torch.zeros(2, 2)
+    estimator.predict(
+        logits,
+        idx_mapping,
+        torch.tensor(0),
+        confidence,
+        torch.ones(3),
+    )
+
+    expected = torch.softmax(logits, dim=-1).amax(dim=-1)
+    torch.testing.assert_close(confidence[:, 0], expected)
+    torch.testing.assert_close(estimator.predictions[idx_mapping, 0], expected)
+
+
+def test_adaptive_verification_patch_installs_ascend_estimator():
+    pytest.importorskip("vllm.v1.worker.gpu.spec_decode.acceptance_estimator")
+    import vllm.v1.worker.gpu.spec_decode.speculator as speculator_module
+
+    from vllm_ascend.patch.worker.patch_v2 import patch_adaptive_verification
+    from vllm_ascend.worker.v2.spec_decode.acceptance_estimator import (
+        AscendOnlineAcceptanceEstimator,
+    )
+
+    importlib.reload(patch_adaptive_verification)
+
+    assert speculator_module.OnlineAcceptanceEstimator is AscendOnlineAcceptanceEstimator
+
+
+def test_ascend_acceptance_estimator_accumulates_verdicts():
+    pytest.importorskip("vllm.v1.worker.gpu.spec_decode.acceptance_estimator")
+    from vllm_ascend.worker.v2.spec_decode.acceptance_estimator import (
+        AscendOnlineAcceptanceEstimator,
+    )
+
+    estimator = AscendOnlineAcceptanceEstimator(
+        max_num_reqs=2,
+        num_speculative_steps=2,
+        device=torch.device("cpu"),
+    )
+    estimator.features[1] = torch.tensor([0.5, -0.5])
+    estimator.predictions[1] = torch.tensor([0.75, 0.25])
+
+    # One accepted draft, followed by one rejected draft. num_sampled also
+    # includes the bonus token, matching the model-runner contract.
+    estimator.step(
+        idx_mapping=torch.tensor([1]),
+        num_sampled=torch.tensor([2]),
+        num_rejected=torch.tensor([1]),
+    )
+
+    torch.testing.assert_close(estimator.counts, torch.ones(2))
+    torch.testing.assert_close(estimator.grad[:, 1], torch.tensor([0.25, -0.25]))
