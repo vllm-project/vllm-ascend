@@ -19,6 +19,7 @@
 
 from contextlib import AbstractContextManager, contextmanager
 from contextvars import ContextVar
+from dataclasses import replace
 
 import numpy as np
 import torch
@@ -61,7 +62,12 @@ from vllm_ascend.core.profiling_chunk_predictor import (
     _start_profiling_chunk_timing,
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
-from vllm_ascend.utils import lmhead_tp_enable, set_potential_max_tokens, vllm_version_is
+from vllm_ascend.utils import (
+    is_pd_decode_recompute_scheduler_enabled,
+    lmhead_tp_enable,
+    set_potential_max_tokens,
+    vllm_version_is,
+)
 from vllm_ascend.worker.utils import disable_compilation
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state, unwrap_mamba_kv_cache_groups
@@ -321,7 +327,7 @@ class NPUModelRunner(GPUModelRunner):
             get_kv_transfer_group().handle_preemptions(kv_connector_metadata)
 
         self.model_state.kvpp_is_dummy_run = dummy_run or is_profile
-        with pcp_dispatch_context():
+        with pcp_dispatch_context(), finegrained_tp_dp_padding(self._requires_finegrained_tp_padding()):
             output = super().execute_model(
                 scheduler_output,
                 intermediate_tensors=intermediate_tensors,
@@ -339,6 +345,57 @@ class NPUModelRunner(GPUModelRunner):
             execution_start_time,
         )
         return output
+
+    def _requires_finegrained_tp_padding(self) -> bool:
+        finegrained_tp_config = getattr(self.ascend_config, "finegrained_tp_config", None)
+        return finegrained_tp_config is not None and (
+            finegrained_tp_config.embedding_tensor_parallel_size > 1
+            or finegrained_tp_config.mlp_tensor_parallel_size > 1
+        )
+
+    def gather_batch_req_state(
+        self,
+        scheduler_output: SchedulerOutput,
+        dummy_run: bool,
+    ) -> tuple[BatchReqState | None, int | None]:
+        """Keep PD recompute handoffs eligible for decode full graphs.
+
+        Upstream classifies the last token of a remote-KV handoff as prefill so
+        input preparation can rebuild its sampling logits. That classification
+        is semantically correct, but it also suppresses the uniform-token hint
+        used by FULL_DECODE_ONLY/FULL_AND_PIECEWISE graph dispatch. Restore only
+        the graph hint for single-token batches whose requests all have KV and
+        whose prefilling requests are on their final token. The BatchReqState is
+        returned unchanged.
+        """
+        batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
+        pcp_num_tokens = None
+        if vllm_version_is("0.28.0") and self.pcp_manager is not None and batch_state is not None:
+            pcp_num_tokens = self.pcp_manager.get_num_tokens_for_dispatch(
+                batch_state.num_scheduled_tokens, batch_state.is_prefilling_np
+            )
+        _PCP_DISPATCH_NUM_TOKENS.set(pcp_num_tokens)
+
+        if (
+            dummy_run
+            or batch_state is None
+            or uniform_token_count is not None
+            or not is_pd_decode_recompute_scheduler_enabled(getattr(self, "vllm_config", None))
+            or self.decode_query_len != 1
+            or not batch_state.has_prefill
+        ):
+            return batch_state, uniform_token_count
+
+        num_reqs = len(batch_state.req_ids)
+        if num_reqs == 0 or batch_state.num_tokens != num_reqs or not np.all(batch_state.num_scheduled_tokens == 1):
+            return batch_state, uniform_token_count
+
+        computed_tokens = self.req_states.num_computed_tokens_np[batch_state.idx_mapping_np]
+        remaining_prefill_tokens = batch_state.prefill_len_np - batch_state.num_computed_prefill_tokens_np
+        if np.all(computed_tokens > 0) and np.all(remaining_prefill_tokens[batch_state.is_prefilling_np] == 1):
+            return batch_state, 1
+
+        return batch_state, uniform_token_count
 
     @torch.inference_mode()
     def profile_run(self) -> None:
@@ -359,16 +416,6 @@ class NPUModelRunner(GPUModelRunner):
                 with disable_compilation(self.get_model()):
                     self._dummy_run(mc2_tokens_capacity, skip_attn=True, skip_eplb=True, is_profile=True)
             super().profile_run()
-
-    def gather_batch_req_state(self, scheduler_output: SchedulerOutput, dummy_run: bool):
-        batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
-        num_tokens = None
-        if vllm_version_is("0.28.0") and self.pcp_manager is not None and batch_state is not None:
-            num_tokens = self.pcp_manager.get_num_tokens_for_dispatch(
-                batch_state.num_scheduled_tokens, batch_state.is_prefilling_np
-            )
-        _PCP_DISPATCH_NUM_TOKENS.set(num_tokens)
-        return batch_state, uniform_token_count
 
     def prepare_inputs(  # type: ignore[misc]
         self,
@@ -456,7 +503,12 @@ class NPUModelRunner(GPUModelRunner):
         # Some attention backends like FA3 require query_start_loc to be non-decreasing.
         query_start_loc_np[num_reqs + 1 :] = num_tokens
 
-        if batch_desc.cg_mode == CUDAGraphMode.FULL and not adaptive_verification_manager:
+        # Upstream DP synchronization keeps eager batches rank-local. Fine-
+        # grained TP overrides that contract because its collectives span the
+        # DP axis, so represent the trailing cross-DP padding with an extra
+        # query endpoint. FULL graph padding already follows this path.
+        has_eager_dp_padding = batch_desc.cg_mode == CUDAGraphMode.NONE and num_tokens_after_padding > num_tokens
+        if (batch_desc.cg_mode == CUDAGraphMode.FULL and not adaptive_verification_manager) or has_eager_dp_padding:
             # This is only required for vllm-ascend.
             query_start_loc_np, num_reqs_padded = self._pad_query_start_loc_for_fia(
                 num_tokens_after_padding,
@@ -466,6 +518,14 @@ class NPUModelRunner(GPUModelRunner):
                 batch_desc.cg_mode,
                 batch_desc.num_reqs,
             )
+
+        query_num_reqs_padded = None
+        if has_eager_dp_padding:
+            # The extra query endpoint makes TND lengths cover padded tokens,
+            # but it is not a KV request. Request-shaped buffers (including
+            # block tables) have only max_num_reqs rows.
+            query_num_reqs_padded = num_reqs_padded
+            num_reqs_padded = num_reqs
 
         query_start_loc = self.input_buffers.query_start_loc
         async_copy_to_gpu(query_start_loc_np, out=query_start_loc)
@@ -489,17 +549,26 @@ class NPUModelRunner(GPUModelRunner):
                     num_reqs,
                     query_start_loc_np,
                 )
+            elif has_eager_dp_padding:
+                # Adaptive verification rebuilds the real request boundaries
+                # above. Restore the query-only endpoint that covers FineTP's
+                # cross-DP eager padding without adding a KV request row.
+                assert query_num_reqs_padded is not None
+                query_start_loc_np[query_num_reqs_padded] = num_tokens_after_padding
 
             query_start_loc = self.input_buffers.query_start_loc
             async_copy_to_gpu(query_start_loc_np, out=query_start_loc)
+
+        if query_num_reqs_padded is None:
+            query_num_reqs_padded = num_reqs_padded
 
         if draft_tokens:
             expanded_idx_mapping, expanded_local_pos = expand_idx_mapping(
                 idx_mapping, total_num_logits, cu_num_logits, self.decode_query_len
             )
 
-        query_start_loc_np = query_start_loc_np[: num_reqs_padded + 1]
-        query_start_loc = query_start_loc[: num_reqs_padded + 1]
+        query_start_loc_np = query_start_loc_np[: query_num_reqs_padded + 1]
+        query_start_loc = query_start_loc[: query_num_reqs_padded + 1]
         self.eplb.set_batch_phase(batch_req_state.has_prefill)
 
         # Get prefill tokens if any.
@@ -557,6 +626,16 @@ class NPUModelRunner(GPUModelRunner):
             total_num_logits,
             self.model_state.num_new_sampled_tokens_per_step,
         )
+        # This buffer is reused across steps: a padding -> no-padding transition
+        # must clear the previous step's True values for current real tokens.
+        self.input_buffers.is_padding[:num_tokens_after_padding].fill_(False)
+        if num_tokens_after_padding > num_tokens:
+            self.input_buffers.is_padding[num_tokens:num_tokens_after_padding].fill_(True)
+        if has_eager_dp_padding:
+            # Padding participates in the model forward only to keep collective
+            # shapes identical. Use deterministic harmless token metadata.
+            self.input_buffers.input_ids[num_tokens:num_tokens_after_padding].zero_()
+            self.input_buffers.positions[num_tokens:num_tokens_after_padding].zero_()
 
         # CPU upper bound on seq_lens (num_computed_tokens + num_scheduled_tokens).
         # Added by vLLM PR #40654 to avoid GPU->CPU sync for seq_lens.
@@ -859,7 +938,8 @@ class NPUModelRunner(GPUModelRunner):
             # Mixed-batch case: num_reqs must equal num_reqs_padded
             assert num_reqs == num_reqs_padded
 
-            # Insert a dummy request instead of setting query_start_loc[num_reqs] = num_tokens_padded directly
+            # Append a query endpoint instead of stretching the last real
+            # request. The caller decides whether it needs a request buffer row.
             query_start_loc_np[num_reqs_padded + 1] = num_tokens_padded
             num_reqs_padded = num_reqs_padded + 1
 
@@ -942,3 +1022,43 @@ def _dispatch_pcp_and_sync_dp(cudagraph_manager, num_reqs, num_tokens, *args, **
 
 if vllm_version_is("0.28.0"):
     vllm_model_runner.dispatch_cg_and_sync_dp = _dispatch_pcp_and_sync_dp
+
+
+@contextmanager
+def finegrained_tp_dp_padding(enabled: bool):
+    """Make MRV2 eager batch shapes uniform for cross-DP fine-grained TP.
+
+    Upstream already performs one CPU-group all-reduce in
+    ``dispatch_cg_and_sync_dp``. Graph batches use its global maximum, while
+    eager batches intentionally keep their local token counts. Embedding TP and
+    dense MLP TP reuse DP ranks as a TP group, so their HCCL all-gather and
+    reduce-scatter inputs must have an identical leading dimension. Reuse the
+    synchronized token vector and only adjust the returned descriptor; no
+    additional collective is needed.
+    """
+    if not enabled:
+        yield
+        return
+
+    original_dispatch = vllm_model_runner.dispatch_cg_and_sync_dp
+
+    def dispatch_with_finegrained_tp_padding(*args, **kwargs):
+        batch_desc, dp_sync = original_dispatch(*args, **kwargs)
+        if dp_sync is None:
+            return batch_desc, dp_sync
+
+        # vLLM 0.28 returns the token-count tensor directly, while newer
+        # versions wrap it in DPSyncState so the same agreement can be reused.
+        num_tokens_across_dp = getattr(dp_sync, "num_tokens_across_dp", dp_sync)
+
+        padded_num_tokens = max(batch_desc.num_tokens, int(num_tokens_across_dp.max().item()))
+        if padded_num_tokens != batch_desc.num_tokens:
+            batch_desc = replace(batch_desc, num_tokens=padded_num_tokens)
+        num_tokens_across_dp.fill_(padded_num_tokens)
+        return batch_desc, dp_sync
+
+    vllm_model_runner.dispatch_cg_and_sync_dp = dispatch_with_finegrained_tp_padding
+    try:
+        yield
+    finally:
+        vllm_model_runner.dispatch_cg_and_sync_dp = original_dispatch
