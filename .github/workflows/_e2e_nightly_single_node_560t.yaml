@@ -188,6 +188,23 @@ jobs:
           fetch-depth: 1
           submodules: recursive
 
+      - name: Checkout incremental-cache workflow helpers
+        if: ${{ inputs.request_id != '' }}
+        uses: actions/checkout@v7
+        with:
+          path: .incremental-cache-workflow
+          sparse-checkout: |
+            .github/actions/csrc-l1-restore
+          sparse-checkout-cone-mode: false
+      - name: Restore incremental cache for source checkout
+        id: source-l1
+        if: ${{ inputs.request_id != '' }}
+        uses: ./.incremental-cache-workflow/.github/actions/csrc-l1-restore
+        with:
+          cache-dir: ${{ runner.temp }}/vllm-ascend-incremental-build-cache
+          architecture: ${{ runner.arch }}
+          soc-version: ${{ inputs.soc_version }}
+          source-root: ./temp-vllm-ascend
       - name: Move code to /vllm-workspace
         if: ${{ inputs.request_id != '' }}
         run: |

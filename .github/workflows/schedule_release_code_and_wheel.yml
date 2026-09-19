@@ -111,12 +111,31 @@ jobs:
           submodules: recursive
           ref: ${{ inputs.tag }}
 
+      - name: Checkout incremental-cache workflow helpers
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          path: .incremental-cache-workflow
+          sparse-checkout: |
+            .github/actions/csrc-l1-restore
+            .github/actions/csrc-l1-save
+            .github/workflows/scripts/export_csrc_l1_from_image.sh
+          sparse-checkout-cone-mode: false
       - name: Free up disk space
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
         with:
           tool-cache: true
           docker-images: false
 
+      - name: Restore incremental cache for wheel build
+        id: wheel-l1
+        uses: ./.incremental-cache-workflow/.github/actions/csrc-l1-restore
+        with:
+          cache-dir: ${{ github.workspace }}/build_cache
+          architecture: ${{ matrix.os == 'ubuntu-24.04-arm' && 'arm64' || 'x64' }}
+          soc-version: ascend910b1
+          toolchain-image: quay.io/ascend/manylinux:9.1.0-910b-manylinux_2_34-py${{ matrix.python-version }}
+          source-root: .
       - name: Build wheel
         run: |
           ls
@@ -130,6 +149,20 @@ jobs:
           bash -c "cp -r /workspace/vllm-ascend/dist /outpwd"
           ls dist
 
+      - name: Export incremental cache from wheel image
+        run: |
+          .incremental-cache-workflow/.github/workflows/scripts/export_csrc_l1_from_image.sh \
+            "wheel:v1" \
+            "$GITHUB_WORKSPACE/build_cache" \
+            "/workspace/vllm-ascend/build_cache"
+
+      - name: Save incremental cache for wheel build
+        uses: ./.incremental-cache-workflow/.github/actions/csrc-l1-save
+        with:
+          cache-dir: ${{ github.workspace }}/build_cache
+          primary-key: ${{ steps.wheel-l1.outputs.primary-key }}
+          access-key-id: ${{ secrets.HW_OBS_AK }}
+          secret-access-key: ${{ secrets.HW_OBS_SK }}
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -198,12 +231,31 @@ jobs:
           submodules: recursive
           ref: ${{ inputs.tag }}
 
+      - name: Checkout incremental-cache workflow helpers
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          path: .incremental-cache-workflow
+          sparse-checkout: |
+            .github/actions/csrc-l1-restore
+            .github/actions/csrc-l1-save
+            .github/workflows/scripts/export_csrc_l1_from_image.sh
+          sparse-checkout-cone-mode: false
       - name: Free up disk space
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
         with:
           tool-cache: true
           docker-images: false
 
+      - name: Restore incremental cache for wheel build
+        id: wheel-l1
+        uses: ./.incremental-cache-workflow/.github/actions/csrc-l1-restore
+        with:
+          cache-dir: ${{ github.workspace }}/build_cache
+          architecture: ${{ matrix.os == 'ubuntu-24.04-arm' && 'arm64' || 'x64' }}
+          soc-version: ascend910_9391
+          toolchain-image: quay.io/ascend/manylinux:9.1.0-a3-manylinux_2_34-py${{ matrix.python-version }}
+          source-root: .
       - name: Build wheel
         run: |
           ls
@@ -217,6 +269,20 @@ jobs:
           bash -c "cp -r /workspace/vllm-ascend/dist /outpwd"
           ls dist
 
+      - name: Export incremental cache from wheel image
+        run: |
+          .incremental-cache-workflow/.github/workflows/scripts/export_csrc_l1_from_image.sh \
+            "wheel-a3:v1" \
+            "$GITHUB_WORKSPACE/build_cache" \
+            "/workspace/vllm-ascend/build_cache"
+
+      - name: Save incremental cache for wheel build
+        uses: ./.incremental-cache-workflow/.github/actions/csrc-l1-save
+        with:
+          cache-dir: ${{ github.workspace }}/build_cache
+          primary-key: ${{ steps.wheel-l1.outputs.primary-key }}
+          access-key-id: ${{ secrets.HW_OBS_AK }}
+          secret-access-key: ${{ secrets.HW_OBS_SK }}
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -279,12 +345,31 @@ jobs:
           submodules: recursive
           ref: ${{ inputs.tag }}
 
+      - name: Checkout incremental-cache workflow helpers
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          path: .incremental-cache-workflow
+          sparse-checkout: |
+            .github/actions/csrc-l1-restore
+            .github/actions/csrc-l1-save
+            .github/workflows/scripts/export_csrc_l1_from_image.sh
+          sparse-checkout-cone-mode: false
       - name: Free up disk space
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
         with:
           tool-cache: true
           docker-images: false
 
+      - name: Restore incremental cache for wheel build
+        id: wheel-l1
+        uses: ./.incremental-cache-workflow/.github/actions/csrc-l1-restore
+        with:
+          cache-dir: ${{ github.workspace }}/build_cache
+          architecture: ${{ matrix.os == 'ubuntu-24.04-arm' && 'arm64' || 'x64' }}
+          soc-version: ascend310p1
+          toolchain-image: quay.io/ascend/manylinux:9.1.0-310p-manylinux_2_34-py${{ matrix.python-version }}
+          source-root: .
       - name: Build wheel
         run: |
           ls
@@ -298,6 +383,20 @@ jobs:
           bash -c "cp -r /workspace/vllm-ascend/dist /outpwd"
           ls dist
 
+      - name: Export incremental cache from wheel image
+        run: |
+          .incremental-cache-workflow/.github/workflows/scripts/export_csrc_l1_from_image.sh \
+            "wheel-310p:v1" \
+            "$GITHUB_WORKSPACE/build_cache" \
+            "/workspace/vllm-ascend/build_cache"
+
+      - name: Save incremental cache for wheel build
+        uses: ./.incremental-cache-workflow/.github/actions/csrc-l1-save
+        with:
+          cache-dir: ${{ github.workspace }}/build_cache
+          primary-key: ${{ steps.wheel-l1.outputs.primary-key }}
+          access-key-id: ${{ secrets.HW_OBS_AK }}
+          secret-access-key: ${{ secrets.HW_OBS_SK }}
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -360,12 +459,31 @@ jobs:
           submodules: recursive
           ref: ${{ inputs.tag }}
 
+      - name: Checkout incremental-cache workflow helpers
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          path: .incremental-cache-workflow
+          sparse-checkout: |
+            .github/actions/csrc-l1-restore
+            .github/actions/csrc-l1-save
+            .github/workflows/scripts/export_csrc_l1_from_image.sh
+          sparse-checkout-cone-mode: false
       - name: Free up disk space
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
         with:
           tool-cache: true
           docker-images: false
 
+      - name: Restore incremental cache for wheel build
+        id: wheel-l1
+        uses: ./.incremental-cache-workflow/.github/actions/csrc-l1-restore
+        with:
+          cache-dir: ${{ github.workspace }}/build_cache
+          architecture: ${{ matrix.os == 'ubuntu-24.04-arm' && 'arm64' || 'x64' }}
+          soc-version: ascend950dt_9582
+          toolchain-image: quay.io/ascend/manylinux:9.1.0-950-manylinux_2_34-py${{ matrix.python-version }}
+          source-root: .
       - name: Build wheel
         run: |
           ls
@@ -380,6 +498,20 @@ jobs:
           bash -c "cp -r /workspace/vllm-ascend/dist /outpwd"
           ls dist
 
+      - name: Export incremental cache from wheel image
+        run: |
+          .incremental-cache-workflow/.github/workflows/scripts/export_csrc_l1_from_image.sh \
+            "wheel-a5:v1" \
+            "$GITHUB_WORKSPACE/build_cache" \
+            "/workspace/vllm-ascend/build_cache"
+
+      - name: Save incremental cache for wheel build
+        uses: ./.incremental-cache-workflow/.github/actions/csrc-l1-save
+        with:
+          cache-dir: ${{ github.workspace }}/build_cache
+          primary-key: ${{ steps.wheel-l1.outputs.primary-key }}
+          access-key-id: ${{ secrets.HW_OBS_AK }}
+          secret-access-key: ${{ secrets.HW_OBS_SK }}
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:

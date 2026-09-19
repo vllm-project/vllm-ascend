@@ -89,6 +89,13 @@ jobs:
       matrix:
         group: ${{ fromJSON(inputs.test_groups) }}
     runs-on: ${{ matrix.group.runner }}
+    env:
+      RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
+      RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
+      RUNS_ON_S3_FORCE_PATH_STYLE: "false"
+      AWS_S3_FORCE_PATH_STYLE: "false"
+      AWS_REGION: ap-southeast-1
+      RUNS_ON_RUNNER_NAME: ""
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.group.image_tag }}
       env:
