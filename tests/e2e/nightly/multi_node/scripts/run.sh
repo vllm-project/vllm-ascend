@@ -513,5 +513,5 @@ main() {
     cd "$WORKSPACE/vllm-ascend"
     run_tests_with_log
 }
-
+#
 main "$@"
