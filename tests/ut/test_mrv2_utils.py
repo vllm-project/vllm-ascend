@@ -87,6 +87,8 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
         ),
         SimpleNamespace(additional_config={"draft_window_size": 512}),
         SimpleNamespace(speculative_config=SimpleNamespace(method="suffix")),
+        SimpleNamespace(speculative_config=SimpleNamespace(method="ngram")),
+        SimpleNamespace(speculative_config=SimpleNamespace(method="ngram_gpu")),
         SimpleNamespace(speculative_config=SimpleNamespace(parallel_drafting=True)),
         SimpleNamespace(
             speculative_config=SimpleNamespace(
@@ -111,6 +113,8 @@ def test_v2_is_default_outside_the_blacklist(monkeypatch, config):
         "vl-encoder-only",
         "draft-window-size",
         "suffix-speculative-decoding",
+        "ngram-speculative-decoding",
+        "ngram-gpu-speculative-decoding",
         "parallel-drafting",
         "dflash2-graph",
         "kv-pool-connector",

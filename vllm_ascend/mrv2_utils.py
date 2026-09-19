@@ -75,6 +75,7 @@ def _is_configured(value: object) -> bool:
 
 _KV_POOL_CONNECTORS = frozenset({"AscendStoreConnector"})
 _DFLASH2_ARCHITECTURES = frozenset({"DFlash2DraftModel"})
+_NGRAM_SPEC_METHODS = frozenset({"ngram", "ngram_gpu"})
 
 
 def _draft_window_size(vllm_config: VllmConfig) -> object:
@@ -128,8 +129,11 @@ def _get_v2_model_runner_blacklist(vllm_config: VllmConfig) -> list[str]:
 
     speculative_config = getattr(vllm_config, "speculative_config", None)
     if _is_configured(speculative_config):
-        if getattr(speculative_config, "method", None) == "suffix":
+        spec_method = getattr(speculative_config, "method", None)
+        if spec_method == "suffix":
             unsupported.append("suffix speculative decoding")
+        if spec_method in _NGRAM_SPEC_METHODS:
+            unsupported.append("ngram speculative decoding")
         if getattr(speculative_config, "parallel_drafting", False) is True:
             unsupported.append("parallel_drafting")
         if _is_dflash2_spec(speculative_config) and getattr(speculative_config, "enforce_eager", False) is not True:
@@ -153,6 +157,7 @@ def use_v2_model_runner(vllm_config: VllmConfig) -> bool:
     * VL encoder disaggregation (``ec_transfer_config`` / encoder-only)
     * draft_window_size
     * suffix speculative decoding
+    * ngram speculative decoding (``ngram`` / ``ngram_gpu``)
     * parallel_drafting
     * dflash2 graph (DFlash2 drafts without ``enforce_eager``)
     * KV pool (``AscendStoreConnector`` / memcache)
