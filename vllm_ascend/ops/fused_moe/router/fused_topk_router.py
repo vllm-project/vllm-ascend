@@ -202,7 +202,8 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
                 routed_scaling_factor=self.routed_scaling_factor,
                 eps=1e-20,
                 group_select_mode=1,
-                # The hash custom op currently accepts only renorm=0.
+                # The hash custom op currently rejects renorm != 0. Apply
+                # norm_topk_prob in Python below before returning to MoE compute.
                 renorm=0,
                 norm_type=2,
                 out_flag=False,

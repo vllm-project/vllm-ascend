@@ -1,6 +1,6 @@
-# DeepSeek V4.1 QLI V2 and candidate integration
+# Aurora QLI V2 and candidate integration
 
-DeepSeek V4.1's indexer uses `QuantLightningIndexerV2` with paged INT8 index K.
+Aurora's indexer uses `QuantLightningIndexerV2` with paged INT8 index K.
 The imported operator source is from `ops-transformer-qli_candidate.zip`,
 SHA256 `771f0c16b9119c676c10cebef713b168f127ff194f3f2f98edcbcd0979c6f966`.
 Its companion `QuantLightningIndexerV2Metadata` is built and registered too.
@@ -12,7 +12,7 @@ Its companion `QuantLightningIndexerV2Metadata` is built and registered too.
 scale. Head weights and K scales are FP16. Existing source-owned K-cache
 updates remain unchanged.
 
-The operator consumes `TND` Q and `PA_BBND` index K directly. DeepSeek V4.1's
+The operator consumes `TND` Q and `PA_BBND` index K directly. Aurora's
 four-slot layer-outermost allocator packs index K and FP16 scales after KV
 inside each shared page. C2 uses 64-row views with a 131072-byte block stride;
 C1 uses 128-row views with a 147712-byte block stride. The Torch adapter passes
@@ -48,7 +48,7 @@ raises an error.
 
 - INT8 Q/K, FP16 head weights and per-head Q/per-token K scales; quant mode 2.
 - 32 or 64 replicated index heads, head dimension 128, one index-K head.
-- DeepSeek V4.1 compression ratios 1 and 2, causal mask mode 3.
+- Aurora compression ratios 1 and 2, causal mask mode 3.
 - Position TopK in `[1, 2048]`; candidate blocks a multiple of 64 in `[64, 2048]`.
 - Candidate block size is exactly 8 in this kernel implementation.
 - TND query and PA_BBND key layouts only in the compiled package.
@@ -65,9 +65,20 @@ establish full-model or dataset accuracy.
 Build with `pip install -v -e . --no-deps --no-build-isolation` on the paired
 CANN/NPU environment. Both new symbols are registered on PrivateUse1 and Meta.
 
-Standalone operator-level E2E coverage for candidate generation/consumption,
-mixed requests, paged views, Meta shapes, and slot-backed SparseFlashMla is
-deferred. The end-to-end results below describe the original layout.
+`tests/e2e/nightly/single_node/ops/singlecard_ops/test_deepseek_v41_qli.py`
+checks candidate generation/consumption, different consumer queries, ratio
+boundaries, paged views, mixed requests, 2048 candidate blocks, 64 heads, empty
+contexts and Meta shapes against an independent CPU reference. Ties at the
+TopK cutoff use score validity, uniqueness and count rather than arbitrary
+index ordering.
+
+The mixed-request model-indexer cases allocate the actual four-slot cache
+configuration, including the null ID, and test source/consumer selection on
+its strided index K/scale views. The SparseFlashMla suite also compares the
+slot-backed BF16 views against the earlier block-outermost layout for ratios
+0/1/2 and decode, prefill and mixed requests. These updated tests have not yet
+been executed; remote torch/NPU verification is deferred. The end-to-end
+results below describe the original layout.
 
 The imported host tiling needed one semantic fix: TND candidate size is
 `T * N_k * blocks`, because T already includes every request. Multiplying by
@@ -90,12 +101,12 @@ cases, not a baseline-versus-candidate dataset accuracy comparison. Graph,
 
 ## Compilation scope
 
-DeepSeek V4.1's A2/A3 path uses INT8 Q/K, FP16 weights/scales and quant mode 2. Its
+Aurora's A2/A3 path uses INT8 Q/K, FP16 weights/scales and quant mode 2. Its
 compiled QLI V2 template matrix has one key, down from 4. A5 retains the full
 16-key matrix, including paged BSND/TND queries and matching nonpaged BSND/TND
 layouts. A5 dtype registration, host validation and kernel dispatch retain
 FP8, MXFP8, HiFloat8, MXFP4 and INT8 (quant modes 1/3/4/5/2 respectively).
-The DeepSeek V4.1 INT8 call sites do not establish that other A5 paths are unused.
+The Aurora INT8 call sites do not establish that other A5 paths are unused.
 Both architectures retain their original template argument encodings.
 
 Candidate modes 1/2/3, compression ratio, TopK and sequence lengths remain

@@ -113,7 +113,11 @@ def _has_csrc_changes(diff_file: str) -> bool:
 
     # Pattern to match csrc directory in diff paths (csrc as root directory)
     # Match lines like: +++ b/csrc/xxx.cpp or --- a/csrc/xxx.cpp
-    csrc_pattern = re.compile(r"^\+{3} [ab]/csrc/|^\-{3} a/csrc/", re.MULTILINE)
+    # Only non-Markdown changes under csrc require the full test suite.
+    csrc_pattern = re.compile(
+        r"^(?:\+{3} [ab]/|-{3} a/)csrc/(?!.*\.md$)",
+        re.MULTILINE | re.IGNORECASE,
+    )
     if csrc_pattern.search(diff_content):
         print("  CSRC directory changes detected in PR diff")
         return True

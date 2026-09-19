@@ -78,6 +78,7 @@ def test_deepseek_v4_dspark_spec_decoding_dp4_full_graph() -> None:
             "num_speculative_tokens": 5,
             "enforce_eager": True,
         },
+        attention_config={"indexer_kv_dtype": "int8"},
         compilation_config={
             "cudagraph_mode": "FULL_DECODE_ONLY",
             "cudagraph_capture_sizes": [6, 12],
