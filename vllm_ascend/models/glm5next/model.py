@@ -790,6 +790,9 @@ class Glm5NextModel(nn.Module):
                     weight_loader = getattr(param, "weight_loader", default_weight_loader)
                     weight_loader(param, loaded_weight, **kwargs)
             loaded_params.add(name)
+        for module in self.modules():
+            if isinstance(module, Glm5NextLinearAttention):
+                module.pack_fg_projection_weights()
         return loaded_params
 
 
