@@ -6,6 +6,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     HiddenStateCacheSpec,
     KVCacheGroupSpec,
+    KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
 )
@@ -18,7 +19,10 @@ from vllm_ascend.core.six_region_kv_cache_layout import (
     make_contiguous_slab_view,
 )
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
+    _ascend_max_memory_usage_bytes_from_groups,
     _get_qwen4_exp_six_region_kv_cache_config,
+    _merge_qsa_composite_groups,
+    _prepare_qsa_composite_groups,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -92,6 +96,58 @@ def _groups() -> list[KVCacheGroupSpec]:
         KVCacheGroupSpec(["model.ple"], ple),
         KVCacheGroupSpec(["model.cache_only_layers.0"], hidden),
     ]
+
+
+def _ungrouped_qwen_specs() -> dict[str, KVCacheSpec]:
+    main = FullAttentionSpec(
+        block_size=256,
+        num_kv_heads=1,
+        head_size=64,
+        head_size_v=64,
+        dtype=torch.bfloat16,
+    )
+    raw = CircularBufferSpec(
+        block_size=8,
+        num_kv_heads=1,
+        head_size=32,
+        head_size_v=0,
+        dtype=torch.bfloat16,
+    )
+    compressed = MLAAttentionSpec(
+        block_size=256,
+        num_kv_heads=1,
+        head_size=32,
+        dtype=torch.bfloat16,
+        tokens_per_state=4,
+    )
+    gdn = MambaSpec(
+        block_size=256,
+        shapes=((64, 4), (128, 128)),
+        dtypes=(torch.bfloat16, torch.bfloat16),
+        mamba_cache_mode="align",
+        num_speculative_blocks=3,
+    )
+    ple = MambaSpec(
+        block_size=256,
+        shapes=((128, 5),),
+        dtypes=(torch.bfloat16,),
+        mamba_cache_mode="align",
+        num_speculative_blocks=3,
+        tp_replicated=True,
+    )
+    specs: dict[str, KVCacheSpec] = {}
+    for index in range(13):
+        source = f"model.layers.{index * 4 + 3}.self_attn"
+        # Deliberately register the compressed owner first: grouping must
+        # still choose the main attention spec as the scheduler representative.
+        specs[f"{source}.indexer.compressed_key_cache"] = compressed
+        specs[f"{source}.indexer.raw_key_cache"] = raw
+        specs[f"{source}.attn"] = main
+    for index in range(36):
+        specs[f"model.layers.{index}.linear_attn"] = gdn
+    specs["model.ple"] = ple
+    assert len(specs) == 76
+    return specs
 
 
 def test_six_region_offsets_are_contiguous_non_overlapping_slabs() -> None:
@@ -318,3 +374,81 @@ def test_qsa_source_sets_must_match() -> None:
         assert "one-to-one source-layer mapping" in str(error)
     else:
         raise AssertionError("mismatched QSA source owners were accepted")
+
+
+def test_qsa_76_input_specs_restore_composite_block_table_lifetimes() -> None:
+    specs = _ungrouped_qwen_specs()
+    groups = [
+        KVCacheGroupSpec(
+            [name],
+            spec,
+            is_eagle_group=name.startswith("model.layers.51.self_attn"),
+        )
+        for name, spec in specs.items()
+    ]
+    owners = _prepare_qsa_composite_groups(specs)
+    assert owners is not None
+    merged = _merge_qsa_composite_groups(
+        groups,
+        specs,
+        *owners,
+    )
+
+    assert len(merged) == 39
+    composite = [group for group in merged if any(name.endswith(".attn") for name in group.layer_names)]
+    raw = [group for group in merged if any(name.endswith(".indexer.raw_key_cache") for name in group.layer_names)]
+    assert len(composite) == 1
+    assert len(composite[0].layer_names) == 26
+    assert sum(name.endswith(".attn") for name in composite[0].layer_names) == 13
+    assert sum(name.endswith(".indexer.compressed_key_cache") for name in composite[0].layer_names) == 13
+    first_composite_spec = next(iter(composite[0].kv_cache_spec.kv_cache_specs.values()))
+    assert isinstance(first_composite_spec, FullAttentionSpec)
+    assert not isinstance(first_composite_spec, MLAAttentionSpec)
+    assert composite[0].is_eagle_group
+    assert len(raw) == 1
+    assert len(raw[0].layer_names) == 13
+    assert raw[0].is_eagle_group
+
+
+def test_six_region_admission_matches_shared_planner_allocation() -> None:
+    specs = _ungrouped_qwen_specs()
+    owners = _prepare_qsa_composite_groups(specs)
+    assert owners is not None
+    groups = _merge_qsa_composite_groups(
+        [KVCacheGroupSpec([name], spec) for name, spec in specs.items()],
+        specs,
+        *owners,
+    )
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(max_model_len=135168),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        cache_config=SimpleNamespace(
+            mamba_cache_mode="align",
+            num_gpu_blocks_override=None,
+            prefix_cache_retention_interval=None,
+        ),
+        max_in_flight_tokens=4096,
+    )
+    required_bytes = _ascend_max_memory_usage_bytes_from_groups(
+        vllm_config,
+        groups,
+    )
+    required_blocks = sum(
+        (group.kv_cache_spec.max_memory_usage_bytes(vllm_config) + group.kv_cache_spec.page_size_bytes - 1)
+        // group.kv_cache_spec.page_size_bytes
+        for group in groups
+    )
+    planned = _get_qwen4_exp_six_region_kv_cache_config(
+        vllm_config,
+        groups,
+        required_bytes,
+    )
+    assert planned is not None
+    assert planned.num_blocks == required_blocks
+    layout = build_six_region_kv_cache_layout(
+        groups,
+        num_blocks=required_blocks,
+    )
+    assert layout is not None
+    assert layout.slot_count == 36
+    assert layout.slot_count * layout.slot_backing_size == required_bytes
