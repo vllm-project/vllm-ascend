@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import pytest
 import torch
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.models.qwen4_exp.common.qsa_cache import QSAKeyStateCache
@@ -68,7 +69,7 @@ def test_bind_kv_cache_calls_qsa_layer_hook_and_builds_runtime_views(
     assert torch.count_nonzero(layer.rope_position_cache).item() == 0
 
 
-def test_bind_kv_cache_calls_mamba_layer_hook_and_preserves_state_dtypes(
+def test_bind_kv_cache_calls_packed_mamba_layer_hook_and_preserves_state_dtypes(
     monkeypatch,
 ) -> None:
     layer_name = "model.layers.1.linear_attn"
@@ -94,3 +95,90 @@ def test_bind_kv_cache_calls_mamba_layer_hook_and_preserves_state_dtypes(
     assert temporal_state.untyped_storage().data_ptr() == allocated.untyped_storage().data_ptr()
     assert conv_state.storage_offset() == 0
     assert temporal_state.storage_offset() == 3
+
+
+@pytest.mark.parametrize("container_type", [list, tuple])
+def test_bind_kv_cache_accepts_materialized_mamba_states(
+    monkeypatch,
+    container_type,
+) -> None:
+    layer_name = "model.layers.1.linear_attn"
+    layer = _TestMambaLayer()
+    conv_state = torch.zeros(5, 2, 3, dtype=torch.bfloat16)
+    temporal_state = torch.zeros(5, 4, dtype=torch.float32)
+    allocated = container_type((conv_state, temporal_state))
+    runner_caches: list[object] = []
+    monkeypatch.setattr(patch_bind_kv_cache, "vllm_version_is", lambda _: True)
+
+    patch_bind_kv_cache.bind_kv_cache(
+        {layer_name: allocated},
+        {layer_name: layer},
+        runner_caches,
+    )
+
+    assert runner_caches == [allocated]
+    assert layer.kv_cache == (conv_state, temporal_state)
+    assert layer.kv_cache[0].is_contiguous()
+    assert layer.kv_cache[1].is_contiguous()
+    assert layer.kv_cache[0].data_ptr() == conv_state.data_ptr()
+    assert layer.kv_cache[1].data_ptr() == temporal_state.data_ptr()
+
+
+@pytest.mark.parametrize(
+    ("states", "error", "match"),
+    [
+        (
+            [torch.zeros(5, 2, 3, dtype=torch.bfloat16)],
+            ValueError,
+            "state count mismatch",
+        ),
+        (
+            [
+                torch.zeros(5, 2, 4, dtype=torch.bfloat16),
+                torch.zeros(5, 4, dtype=torch.float32),
+            ],
+            ValueError,
+            "state 0 shape mismatch",
+        ),
+        (
+            [
+                torch.zeros(5, 2, 3, dtype=torch.float32),
+                torch.zeros(5, 4, dtype=torch.float32),
+            ],
+            TypeError,
+            "state 0 dtype mismatch",
+        ),
+        (
+            [
+                torch.zeros(5, 2, 3, dtype=torch.bfloat16),
+                torch.zeros(4, 4, dtype=torch.float32),
+            ],
+            ValueError,
+            "different block counts",
+        ),
+        (
+            [
+                torch.zeros(5, 2, 3, dtype=torch.bfloat16),
+                object(),
+            ],
+            TypeError,
+            "states must be tensors",
+        ),
+    ],
+)
+def test_bind_kv_cache_rejects_invalid_materialized_mamba_states(
+    monkeypatch,
+    states,
+    error,
+    match,
+) -> None:
+    layer_name = "model.layers.1.linear_attn"
+    layer = _TestMambaLayer()
+    monkeypatch.setattr(patch_bind_kv_cache, "vllm_version_is", lambda _: True)
+
+    with pytest.raises(error, match=match):
+        patch_bind_kv_cache.bind_kv_cache(
+            {layer_name: states},
+            {layer_name: layer},
+            [],
+        )
