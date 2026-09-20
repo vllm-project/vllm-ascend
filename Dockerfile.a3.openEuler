@@ -186,8 +186,10 @@ RUN if [ "$BUILD_TYPE" = "daily" ]; then \
 # Only builds that used internal mirrors (CI) need this: their build-args
 # (PIP_INDEX_URL, GIT_PROXY, CRATES_IO_INDEX) point to cluster-internal hosts
 # that are unreachable from the published image. This step resets pip/cargo/git
-# to public defaults; with the default build-args everything is skipped.
+# to public defaults; the guard below skips it entirely for default builds.
 # The script ships with the repo and is already copied in by `COPY .` above.
-RUN bash /vllm-workspace/vllm-ascend/.github/workflows/scripts/restore_public_sources.sh
+RUN if [ -n "$GIT_PROXY" ] || [ -n "$CRATES_IO_INDEX" ] || [ "$PIP_INDEX_URL" != "$PUBLIC_PIP_INDEX_URL" ]; then \
+        bash /vllm-workspace/vllm-ascend/.github/workflows/scripts/restore_public_sources.sh; \
+    fi
 
 CMD ["/bin/bash"]
