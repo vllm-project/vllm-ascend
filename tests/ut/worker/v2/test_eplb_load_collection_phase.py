@@ -81,6 +81,7 @@ class TestEplbLoadCollectionPhase(unittest.TestCase):
             device=controller.device,
             parallel_config=controller.parallel_config,
             expanded_physical_to_logical=mapping,
+            stair_config=controller.stair_config,
         )
         self.assertIs(controller.state, state)
         self.assertTrue(controller._has_registered_models)
@@ -105,6 +106,7 @@ class TestEplbLoadCollectionPhase(unittest.TestCase):
             parallel_config=controller.parallel_config,
             expanded_physical_to_logical=mapping,
             num_valid_physical_experts=1,
+            stair_config=controller.stair_config,
         )
         self.assertIs(controller.state, state)
         self.assertTrue(controller._has_registered_models)
@@ -125,6 +127,8 @@ class TestEplbLoadCollectionPhase(unittest.TestCase):
                 state.prepare_forward.assert_called_once()
                 state._should_record_current_step.assert_called_once_with(log_stats=False)
                 self.assertIs(bool(state.should_record_tensor), expected_record)
+                self.assertTrue(state._is_load_sampling_step)
+                self.assertIs(state._should_collect_local_load, expected_record)
                 self.assertIs(state._has_fresh_recorded_load, expected_record)
 
 
@@ -189,16 +193,22 @@ class TestAscendEplbFreshLoadGate(unittest.TestCase):
                         return_value=True,
                     ) as sync_fresh_load,
                     patch("vllm.distributed.eplb.eplb_state.EplbState.rearrange") as upstream_rearrange,
+                    patch.object(state, "_publish_temporal_load_stats") as publish_async,
                 ):
                     state.step()
 
                 self.assertEqual(state.expert_rearrangement_step, 0)
                 self.assertFalse(state._has_fresh_recorded_load)
                 sync_fresh_load.assert_called_once_with()
-                upstream_rearrange.assert_called_once_with(
-                    is_profile=False,
-                    rank_mapping=None,
-                )
+                if is_async:
+                    publish_async.assert_called_once_with()
+                    upstream_rearrange.assert_not_called()
+                else:
+                    publish_async.assert_not_called()
+                    upstream_rearrange.assert_called_once_with(
+                        is_profile=False,
+                        rank_mapping=None,
+                    )
 
     def test_remote_fresh_load_enables_all_ranks(self):
         state = self._make_state()

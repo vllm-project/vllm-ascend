@@ -391,7 +391,8 @@ def _parent_init(self, vllm_config, device, *, full_graph=False, speculative=Fal
 
 def test_init_without_spec_pp():
     vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(enable_eplb=False))
-    ascend_config = SimpleNamespace(eplb_config=SimpleNamespace(load_collection_phase="all"))
+    stair_config = object()
+    ascend_config = SimpleNamespace(eplb_config=SimpleNamespace(load_collection_phase="all", stair_config=stair_config))
     with (
         patch("vllm_ascend.worker.v2.model_runner.get_ascend_config", return_value=ascend_config),
         patch("vllm_ascend.worker.v2.model_runner.set_potential_max_tokens"),
@@ -427,7 +428,10 @@ def test_init_without_spec_pp():
 
 def test_init_spec_pp_full_graph_and_speculator():
     vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(enable_eplb=True))
-    ascend_config = SimpleNamespace(eplb_config=SimpleNamespace(load_collection_phase="decode"))
+    stair_config = object()
+    ascend_config = SimpleNamespace(
+        eplb_config=SimpleNamespace(load_collection_phase="decode", stair_config=stair_config)
+    )
     spec_pp = SimpleNamespace(needs_aux_hidden_states=True)
     speculator = SimpleNamespace()
     with (
@@ -464,6 +468,7 @@ def test_init_spec_pp_full_graph_and_speculator():
         runner = NPUModelRunner(vllm_config, torch.device("cpu"))
     restore_pp.assert_called_once()
     assert eplb_cls.call_args.kwargs["load_collection_phase"] == "decode"
+    assert eplb_cls.call_args.kwargs["stair_config"] is stair_config
     assert runner.use_aclgraph is True
     assert runner.use_spec_pp is True
     assert runner.use_aux_hidden_state_outputs is True

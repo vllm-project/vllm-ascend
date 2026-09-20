@@ -11,6 +11,7 @@ from vllm.model_executor.models.interfaces import (
 )
 from vllm.v1.worker.gpu.eplb_utils import EPLBController
 
+from vllm_ascend.ascend_config import StairConfig
 from vllm_ascend.distributed.eplb.state import AscendEplbState
 
 
@@ -39,16 +40,18 @@ class AscendEPLBController(EPLBController):
         parallel_config: Any,
         device: torch.device,
         load_collection_phase: str = "all",
+        stair_config: StairConfig | None = None,
     ) -> None:
         super().__init__(parallel_config, device)
         self.load_collection_phase = load_collection_phase
+        self.stair_config = StairConfig() if stair_config is None else stair_config
         self._load_collection_phase_matched = True
 
     def prepare_load(self) -> None:
         self.state = None
         self._has_registered_models = False
         if self.parallel_config.enable_eplb:
-            self.state = AscendEplbState(self.parallel_config, self.device)
+            self.state = AscendEplbState(self.parallel_config, self.device, self.stair_config)
 
     def set_batch_phase(self, batch_has_prefill: bool) -> None:
         self._load_collection_phase_matched = is_eplb_load_collection_phase_matched(
@@ -67,12 +70,14 @@ class AscendEPLBController(EPLBController):
             return
         state.prepare_forward(model_config, num_unpadded_tokens, ubatch_slices)
         if state.should_record_tensor is not None:
-            should_record = (
-                state._should_record_current_step(log_stats=self.parallel_config.eplb_config.log_balancedness)
-                and self._load_collection_phase_matched
+            is_load_sampling_step = state._should_record_current_step(
+                log_stats=self.parallel_config.eplb_config.log_balancedness
             )
-            state.should_record_tensor.fill_(should_record)
-            if should_record:
+            should_collect_local_load = is_load_sampling_step and self._load_collection_phase_matched
+            state.should_record_tensor.fill_(should_collect_local_load)
+            state._is_load_sampling_step = is_load_sampling_step
+            state._should_collect_local_load = should_collect_local_load
+            if should_collect_local_load:
                 state._has_fresh_recorded_load = True
 
     def setup_from_mapping(
@@ -90,6 +95,7 @@ class AscendEPLBController(EPLBController):
             device=self.device,
             parallel_config=self.parallel_config,
             expanded_physical_to_logical=expanded_physical_to_logical,
+            stair_config=self.stair_config,
         )
         if old_num_physical_experts is not None:
             from_mapping_kwargs["num_valid_physical_experts"] = old_num_physical_experts

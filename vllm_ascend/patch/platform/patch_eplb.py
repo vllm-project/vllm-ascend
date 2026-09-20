@@ -113,7 +113,18 @@ def _wrap_async_rebalance(original_rebalance):
         bound = rebalance_signature.bind(*args, **kwargs)
         communicator = bound.arguments["model_state"].communicator
         _clear_transfer_target(communicator)
-        target = original_rebalance(*bound.args, **bound.kwargs)
+        model_state = bound.arguments["model_state"]
+        stats = model_state.eplb_stats
+        original_load_window = stats.global_expert_load_window
+        # The legacy async runner accepts only [layers, experts]. Temporarily
+        # aggregate our [bins, layers, experts] sums, then restore the snapshot.
+        if original_load_window.ndim == 3:
+            with _async_worker.device_stream(bound.arguments.get("stream")):
+                stats.global_expert_load_window = original_load_window.sum(dim=0)
+        try:
+            target = original_rebalance(*bound.args, **bound.kwargs)
+        finally:
+            stats.global_expert_load_window = original_load_window
         if _has_explicit_sources(target):
             setattr(communicator, _EXPLICIT_TRANSFER_TARGET_ATTR, target)
         return target

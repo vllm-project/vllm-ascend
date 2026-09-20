@@ -144,7 +144,10 @@ def _explicit_target():
 def test_async_rebalance_wrapper_stashes_explicit_target_on_communicator():
     target = _explicit_target()
     communicator = SimpleNamespace()
-    model_state = SimpleNamespace(communicator=communicator)
+    model_state = SimpleNamespace(
+        communicator=communicator,
+        eplb_stats=SimpleNamespace(global_expert_load_window=torch.ones((1, 2))),
+    )
 
     def original_rebalance(self, model_state, context):
         return target
@@ -153,6 +156,45 @@ def test_async_rebalance_wrapper_stashes_explicit_target_on_communicator():
 
     assert wrapped(object(), model_state, object()) is target
     assert getattr(communicator, patch_eplb._EXPLICIT_TRANSFER_TARGET_ATTR) is target
+
+
+def test_async_rebalance_aggregates_temporal_bins_on_worker_stream(monkeypatch):
+    worker_stream = object()
+    stream_active = False
+    aggregate = torch.tensor([[4, 6]])
+
+    class OriginalLoadWindow:
+        ndim = 3
+
+        def sum(self, dim):
+            assert dim == 0
+            assert stream_active
+            return aggregate
+
+    @contextmanager
+    def device_stream(stream):
+        nonlocal stream_active
+        assert stream is worker_stream
+        stream_active = True
+        try:
+            yield
+        finally:
+            stream_active = False
+
+    original_load_window = OriginalLoadWindow()
+    monkeypatch.setattr(patch_eplb._async_worker, "device_stream", device_stream)
+    stats = SimpleNamespace(global_expert_load_window=original_load_window)
+    model_state = SimpleNamespace(communicator=SimpleNamespace(), eplb_stats=stats)
+
+    def original_rebalance(model_state, eplb_state, physical_map, stream):
+        assert model_state.eplb_stats.global_expert_load_window is aggregate
+        return physical_map
+
+    wrapped = patch_eplb._wrap_async_rebalance(original_rebalance)
+    physical_map = torch.tensor([[0, 1]])
+
+    assert wrapped(model_state, object(), physical_map, worker_stream) is physical_map
+    assert stats.global_expert_load_window is original_load_window
 
 
 def test_async_transfer_wrapper_executes_explicit_sources(monkeypatch):

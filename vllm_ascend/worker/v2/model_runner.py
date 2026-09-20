@@ -129,6 +129,7 @@ class NPUModelRunner(GPUModelRunner):
             parallel_config,
             device,
             load_collection_phase=(load_collection_phase if parallel_config.enable_eplb else "all"),
+            stair_config=self.ascend_config.eplb_config.stair_config,
         )
 
         self.update_stream = None

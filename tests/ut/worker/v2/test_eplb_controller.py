@@ -54,6 +54,7 @@ class TestAscendEPLBController(unittest.TestCase):
         ascend_state.assert_called_once_with(
             controller.parallel_config,
             controller.device,
+            controller.stair_config,
         )
 
     def test_set_batch_phase_updates_match(self):
@@ -131,6 +132,8 @@ class TestAscendEPLBController(unittest.TestCase):
             log_stats=True,
         )
         self.assertTrue(state.should_record_tensor.item())
+        self.assertTrue(state._is_load_sampling_step)
+        self.assertTrue(state._should_collect_local_load)
         self.assertTrue(state._has_fresh_recorded_load)
 
     def test_prepare_forward_disables_nonmatching_phase(self):
@@ -149,6 +152,8 @@ class TestAscendEPLBController(unittest.TestCase):
             log_stats=True,
         )
         self.assertFalse(state.should_record_tensor.item())
+        self.assertTrue(state._is_load_sampling_step)
+        self.assertFalse(state._should_collect_local_load)
         self.assertFalse(state._has_fresh_recorded_load)
 
     def test_prepare_forward_disables_closed_window(self):
@@ -165,6 +170,8 @@ class TestAscendEPLBController(unittest.TestCase):
             log_stats=False,
         )
         self.assertFalse(state.should_record_tensor.item())
+        self.assertFalse(state._is_load_sampling_step)
+        self.assertFalse(state._should_collect_local_load)
         self.assertFalse(state._has_fresh_recorded_load)
 
     def test_setup_from_mapping_constructs_state_and_registers_model(self):
@@ -203,6 +210,7 @@ class TestAscendEPLBController(unittest.TestCase):
             parallel_config=controller.parallel_config,
             expanded_physical_to_logical=mapping,
             num_valid_physical_experts=2,
+            stair_config=controller.stair_config,
         )
         self.assertIs(controller.state, state)
         self.assertTrue(controller._has_registered_models)
