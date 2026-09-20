@@ -17,7 +17,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from contextlib import AbstractContextManager, contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from contextvars import ContextVar
 
 import numpy as np
@@ -26,6 +26,7 @@ from vllm.compilation import breakable_cudagraph
 from vllm.config import VllmConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
+from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -722,6 +723,7 @@ class NPUModelRunner(GPUModelRunner):
         *args,
         skip_attn: bool = False,
         uniform_decode: bool = False,
+        context_len: int = 0,
         skip_eplb: bool = False,
         is_profile: bool = False,
         **kwargs,
@@ -734,15 +736,28 @@ class NPUModelRunner(GPUModelRunner):
         ``_lmhead_tp_max_num_logits()``; a mismatch hangs). Skipped for
         profiling and non-last PP ranks. Draft-side alignment is not covered.
         """
-        hidden_states, sample_hidden_states = super()._dummy_run(
-            num_tokens,
-            *args,
-            skip_attn=skip_attn,
-            uniform_decode=uniform_decode,
-            skip_eplb=skip_eplb,
-            is_profile=is_profile,
-            **kwargs,
-        )
+        # Adaptive verification profiles eager tail sizes after graph capture.
+        # Use balanced dummy routing, as the initial memory profile does, so a
+        # synthetic router hotspot cannot exhaust one EP rank during startup.
+        profile_adaptive_tail = self.adaptive_verification is not None and context_len > 0
+        if profile_adaptive_tail and self.ascend_config.xlite_graph_config.enabled:
+            logger.warning_once(
+                "Adaptive verification cost profiling with XLite enabled may "
+                "produce inaccurate costs because balanced MoE profiling sets "
+                "the profile-run marker, which makes XLite bypass its graph path."
+            )
+        load_balance_ctx = override_mrv2_in_profile_run(True) if profile_adaptive_tail else nullcontext()
+        with load_balance_ctx:
+            hidden_states, sample_hidden_states = super()._dummy_run(
+                num_tokens,
+                *args,
+                skip_attn=skip_attn,
+                uniform_decode=uniform_decode,
+                context_len=context_len,
+                skip_eplb=skip_eplb,
+                is_profile=is_profile,
+                **kwargs,
+            )
         if lmhead_tp_enable() and not is_profile and hidden_states is not None:
             dummy_indices = torch.zeros(
                 self._lmhead_tp_max_num_logits(),
