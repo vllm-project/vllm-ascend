@@ -70,7 +70,41 @@ else:
 SWA_INT_MAX = 2147483647
 _FIA_WORKSPACE_KEY = "npu_fused_infer_attention_score.workspace"
 _FIA_V2_WORKSPACE_KEY = "npu_fused_infer_attention_score_v2.workspace"
+_FIA_BNSD_WORKSPACE_KEY = "npu_fused_infer_attention_score_bnsd.workspace"
 _PA_WORKSPACE_KEY = "npu_paged_attention.workspace"
+
+
+def bnsd_large_head_decode_args(attn_metadata, batch_size: int, block_table_shape=None, stable=False):
+    """Build shape-stable KV arguments for a BNSD large-head decode call."""
+    seq_lens_list = list(attn_metadata.seq_lens_list)
+    if len(seq_lens_list) < batch_size:
+        seq_lens_list += [1] * (batch_size - len(seq_lens_list))
+    source_block_table = attn_metadata.block_tables
+    actual_seq_lengths_kv = torch.tensor(seq_lens_list[:batch_size], dtype=torch.int32, device="cpu")
+    target_rows = batch_size if block_table_shape is None else block_table_shape[0]
+    target_cols = source_block_table.shape[1] if block_table_shape is None else block_table_shape[1]
+    if source_block_table.shape[1] > target_cols:
+        raise RuntimeError(
+            "BNSD large-head graph replay needs a wider block table than the captured graph: "
+            f"captured={target_cols}, current={source_block_table.shape[1]}"
+        )
+    if stable:
+        if source_block_table.shape != (target_rows, target_cols):
+            raise RuntimeError(
+                "BNSD large-head graph capture requires a shape-stable block table: "
+                f"actual={tuple(source_block_table.shape)}, expected={(target_rows, target_cols)}"
+            )
+        if actual_seq_lengths_kv.shape[0] < batch_size:
+            raise RuntimeError(
+                "BNSD large-head graph capture requires a shape-stable sequence-length buffer: "
+                f"actual={actual_seq_lengths_kv.shape[0]}, expected={batch_size}"
+            )
+        return source_block_table.clone(), actual_seq_lengths_kv[:batch_size]
+    block_table = source_block_table.new_zeros((target_rows, target_cols))
+    rows = min(source_block_table.shape[0], target_rows, batch_size)
+    cols = min(source_block_table.shape[1], target_cols)
+    block_table[:rows, :cols].copy_(source_block_table[:rows, :cols])
+    return block_table, actual_seq_lengths_kv
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
@@ -279,12 +313,6 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
     ) -> AttentionCGSupport:
         # Explicit override in case the underlying builder specialized this getter.
         # @override omitted only because of mypy limitation due to type variable.
-        # TODO: Remove this fallback once Gemma4's 512-dim global attention heads
-        #  are supported by the large-head FIA path inside the full ACL graph.
-        #  Capturing those layers together with the rest of the decode graph
-        #  triggers MTE out-of-range faults (507011) at high concurrency.
-        if getattr(kv_cache_spec, "head_size", None) == FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE:
-            return AttentionCGSupport.NEVER
         return AttentionCGSupport.ALWAYS
 
     def reorder_batch(self, input_batch, scheduler_output: "SchedulerOutput") -> bool:
@@ -502,6 +530,35 @@ class FIAParamProvider:
 
 
 @dataclass(frozen=True, slots=True)
+class FIABnsdLargeHeadParamProvider:
+    """Replay-time parameters of the Gemma4 512-head BNSD decode task.
+
+    ACL graph replay must reuse the addresses captured for this task, so the
+    captured block table / KV-length buffers are refreshed in place instead of
+    being rebound to the per-iteration metadata tensors.
+    """
+
+    layer_name: str | None
+    block_table: torch.Tensor
+    actual_seq_lengths_kv: torch.Tensor
+    actual_seq_lengths: torch.Tensor
+
+    def resolve(self, attn_metadata) -> dict[str, Any]:
+        metadata = attn_metadata[self.layer_name]
+        batch_size = self.block_table.shape[0]
+        block_table, actual_seq_lengths_kv = bnsd_large_head_decode_args(
+            metadata, batch_size, block_table_shape=tuple(self.block_table.shape)
+        )
+        self.block_table.copy_(block_table, non_blocking=True)
+        self.actual_seq_lengths_kv.copy_(actual_seq_lengths_kv, non_blocking=True)
+        return {
+            "block_table": self.block_table,
+            "actual_seq_lengths": self.actual_seq_lengths,
+            "actual_seq_lengths_kv": self.actual_seq_lengths_kv,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class FIAV2ParamProvider:
     layer_name: str | None
 
@@ -610,6 +667,88 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         super().process_weights_after_loading(act_dtype)
+
+    def _use_fia_bnsd_large_head_graph(self) -> bool:
+        return (
+            self.head_size == FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE and self.sinks is None and not self.enable_c8_quant
+        )
+
+    def full_graph_fia_bnsd_large_head(
+        self,
+        query: torch.Tensor,
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+    ):
+        num_tokens = query.shape[0]
+        if self.key_cache is None or self.value_cache is None:
+            raise RuntimeError("key_cache/value_cache must be initialized for large-head decode attention")
+        num_block, block_size, num_kv_heads, head_size = self.key_cache.shape
+        batch_size = attn_metadata.block_tables.shape[0]
+        if num_tokens % batch_size != 0:
+            raise RuntimeError(
+                "BNSD large-head graph capture requires query tokens to be divisible by the batch size: "
+                f"tokens={num_tokens}, batch={batch_size}"
+            )
+        query_len = num_tokens // batch_size
+        if query_len != 1:
+            raise RuntimeError("FIA BNSD large-head decode requires one query token per request")
+        block_table, actual_seq_lengths_kv = bnsd_large_head_decode_args(attn_metadata, batch_size, stable=True)
+        key = self.key_cache.view(num_block, block_size, num_kv_heads * head_size)
+        value = self.value_cache.view(num_block, block_size, num_kv_heads * head_size)
+        query_bnsd = query.view(batch_size, self.num_heads, query_len, head_size)
+        attn_output = output.view(batch_size, self.num_heads, query_len, head_size)
+        actual_seq_lengths = torch.ones(batch_size, dtype=torch.int32, device="cpu")
+        softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
+        workspace = get_capture_resource(
+            _FIA_BNSD_WORKSPACE_KEY,
+            lambda: torch_npu._npu_fused_infer_attention_score_get_max_workspace(
+                query=query_bnsd,
+                key=key,
+                value=value,
+                atten_mask=None,
+                block_table=block_table,
+                input_layout="BNSD",
+                block_size=block_size,
+                actual_seq_lengths=actual_seq_lengths,
+                actual_seq_lengths_kv=actual_seq_lengths_kv,
+                num_key_value_heads=num_kv_heads,
+                num_heads=self.num_heads,
+                sparse_mode=0,
+                pre_tokens=SWA_INT_MAX,
+                next_tokens=0,
+                scale=self.scale,
+            ),
+            use_max_workspace=True,
+        )
+        register_task(
+            torch_npu.npu_fused_infer_attention_score.out,
+            {
+                "query": query_bnsd,
+                "key": key,
+                "value": value,
+                "atten_mask": None,
+                "block_table": block_table,
+                "input_layout": "BNSD",
+                "block_size": block_size,
+                "actual_seq_lengths": actual_seq_lengths,
+                "actual_seq_lengths_kv": actual_seq_lengths_kv,
+                "num_key_value_heads": num_kv_heads,
+                "num_heads": self.num_heads,
+                "sparse_mode": 0,
+                "pre_tokens": SWA_INT_MAX,
+                "next_tokens": 0,
+                "scale": self.scale,
+                "workspace": workspace,
+                "out": [attn_output, softmax_lse],
+            },
+            FIABnsdLargeHeadParamProvider(
+                self._graph_metadata_layer_name(),
+                block_table,
+                actual_seq_lengths_kv,
+                actual_seq_lengths,
+            ),
+        )
+        return output, num_tokens
 
     def full_graph_fia(
         self,
@@ -878,6 +1017,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     attn_metadata,
                     output,
                 )
+            if self._use_fia_bnsd_large_head_graph():
+                return self.full_graph_fia_bnsd_large_head(query, attn_metadata, output)[0]
             if self.sinks is not None:
                 attn_output, num_tokens = self.full_graph_fia_v2(query, key, value, attn_metadata, output)
                 output[:num_tokens] = attn_output[:num_tokens]
@@ -1396,7 +1537,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
 
         output_padded = None
-        if key is not None and value is not None and getattr(layer, "kv_sharing_target_layer_name", None) is None:
+        if key is not None and value is not None:
             output_padded = output
             if self.pcp_enabled:
                 query, key, value, output_padded = self._reshape_and_cache_pcp(
@@ -1415,7 +1556,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
             attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output_padded)
         else:
             attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output)
-        output[:num_tokens] = attn_output[:num_tokens]
+        if attn_output is not output:
+            output[:num_tokens] = attn_output[:num_tokens]
         return output
 
 

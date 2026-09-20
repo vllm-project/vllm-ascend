@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
+from vllm.config.compilation import CUDAGraphMode
 
 import vllm_ascend.attention.attention_v1 as attn_module
 from tests.ut.base import TestBase
@@ -53,11 +54,33 @@ class TestAttentionGraphHelpers(TestBase):
     def test_large_head_uses_paged_attention_on_a2(self):
         vllm_config = MagicMock()
         vllm_config.speculative_config = None
+        vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
         with patch(
             "vllm_ascend.attention.utils.get_current_hardware_profile",
             return_value=get_hardware_profile(AscendDeviceType.A2),
         ):
             self.assertTrue(using_paged_attention(1, vllm_config, head_size=FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE))
+
+    def test_large_head_uses_fia_inside_full_decode_graph(self):
+        vllm_config = MagicMock()
+        vllm_config.speculative_config = None
+        vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+        with patch(
+            "vllm_ascend.attention.utils.get_current_hardware_profile",
+            return_value=get_hardware_profile(AscendDeviceType.A2),
+        ):
+            self.assertFalse(using_paged_attention(1, vllm_config, head_size=FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE))
+
+    def test_large_head_uses_paged_attention_without_full_decode_graph(self):
+        for cudagraph_mode in (CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE):
+            vllm_config = MagicMock()
+            vllm_config.speculative_config = None
+            vllm_config.compilation_config.cudagraph_mode = cudagraph_mode
+            with patch(
+                "vllm_ascend.attention.utils.get_current_hardware_profile",
+                return_value=get_hardware_profile(AscendDeviceType.A2),
+            ):
+                self.assertTrue(using_paged_attention(1, vllm_config, head_size=FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE))
 
 
 class TestAscendAttentionBackend(TestBase):
