@@ -430,6 +430,10 @@ class NPUModelRunner(GPUModelRunner):
     # standardized backing allocation. The default runner preserves that
     # contract for its layer/block-compact Attention+Mamba path.
     supports_standardized_shared_kv_backing = True
+    # Block-outermost main descriptors are logical page-strided views into one
+    # physical allocation. The runner materializes those views without
+    # multiplying the backing once per descriptor/layer.
+    supports_page_strided_shared_kv_backing = True
 
     @property
     def supports_shared_backing_with_kv_transfer(self) -> bool:
@@ -4865,6 +4869,98 @@ class NPUModelRunner(GPUModelRunner):
             or getattr(kv_cache_spec, "indexes_kv_by_block_stride", False)
         )
 
+    def _uses_page_strided_shared_backing(
+        self,
+        kv_cache_config: KVCacheConfig,
+        layer_kv_cache_spec: dict[str, KVCacheSpec],
+    ) -> bool:
+        """Whether main's descriptors require one block-outermost backing.
+
+        This is deliberately descriptor/layout based rather than model-name
+        based. In a block-outermost layout every descriptor has the size of the
+        complete allocation and advances between physical blocks by the packed
+        block stride. Allocating each descriptor or layer separately both
+        multiplies HBM usage and breaks the offsets encoded by the planner.
+        """
+        if vllm_version_is("0.28.0") or not kv_cache_config.kv_cache_tensors:
+            return False
+        layout = self.vllm_config.cache_config.get_resolved_kv_cache_layout()
+        if not getattr(layout, "is_block_outermost", False):
+            return False
+
+        tensor_sizes = {
+            descriptor.size for descriptor in kv_cache_config.kv_cache_tensors
+        }
+        if len(tensor_sizes) != 1:
+            return False
+        backing_size = next(iter(tensor_sizes))
+        has_interleaved_page_stride = False
+        for descriptor in kv_cache_config.kv_cache_tensors:
+            shared_layers = get_kv_cache_tensor_layers(descriptor)
+            if not shared_layers or descriptor.block_stride <= 0:
+                return False
+            for layer_idx, layer_name in enumerate(shared_layers):
+                spec = layer_kv_cache_spec[layer_name]
+                start = descriptor.offset + layer_idx * descriptor.layer_stride
+                end = (
+                    start
+                    + (kv_cache_config.num_blocks - 1)
+                    * descriptor.block_stride
+                    + spec.page_size_bytes
+                )
+                if start < 0 or end > backing_size:
+                    raise ValueError(
+                        "Packed KV-cache descriptor exceeds its shared "
+                        f"backing: layer={layer_name}, start={start}, "
+                        f"end={end}, size={backing_size}."
+                    )
+                has_interleaved_page_stride |= (
+                    descriptor.block_stride > spec.page_size_bytes
+                )
+        return has_interleaved_page_stride
+
+    def _is_qsa_state_cache(self, layer_name: str) -> bool:
+        attn_layer = self.vllm_config.compilation_config.static_forward_context.get(
+            layer_name
+        )
+        if not isinstance(attn_layer, AttentionLayerBase):
+            return False
+        # The fixed vLLM backend currently reports
+        # ``QWEN4_EXP_EXP_QSA_STATE`` while earlier Qwen4Exp integrations used
+        # ``QWEN4_EXP_QSA_STATE``.  Match the backend capability suffix rather
+        # than baking either transitional spelling into the cache geometry.
+        backend_name = attn_layer.get_attn_backend().get_name()
+        return backend_name.endswith("QSA_STATE")
+
+    @staticmethod
+    def _page_strided_tensor_view(
+        raw_tensor: torch.Tensor,
+        *,
+        dtype: torch.dtype,
+        shape: tuple[int, ...],
+        block_stride_bytes: int,
+        storage_offset_bytes: int,
+    ) -> torch.Tensor:
+        """Create one logical cache view over a packed block-outer backing."""
+        dtype_size = get_dtype_size(dtype)
+        if (
+            block_stride_bytes % dtype_size
+            or storage_offset_bytes % dtype_size
+        ):
+            raise ValueError(
+                "Packed KV-cache stride/offset must align to the cache dtype."
+            )
+        strides = [1] * len(shape)
+        for dim in range(len(shape) - 2, -1, -1):
+            strides[dim] = strides[dim + 1] * shape[dim + 1]
+        strides[0] = block_stride_bytes // dtype_size
+        return torch.as_strided(
+            raw_tensor.view(dtype),
+            size=shape,
+            stride=tuple(strides),
+            storage_offset=storage_offset_bytes // dtype_size,
+        )
+
     def _get_attention_kv_cache_dims(self, layer_name: str, kv_cache_spec: AttentionSpec) -> tuple[int, int]:
         if isinstance(kv_cache_spec, AscendMLAAttentionSpec):
             attn_layers = get_layers_from_vllm_config(
@@ -5019,6 +5115,32 @@ class NPUModelRunner(GPUModelRunner):
         supports_shared_backing_with_kv_transfer = (
             self.supports_shared_backing_with_kv_transfer
         )
+
+        uses_page_strided_shared_backing = (
+            not is_dsv4_main
+            and not uses_padded_page_layout
+            and supports_shared_backing_with_kv_transfer
+            and not self.use_sparse
+            and self._uses_page_strided_shared_backing(
+                kv_cache_config,
+                layer_kv_cache_spec,
+            )
+        )
+        self._page_strided_shared_backing = uses_page_strided_shared_backing
+
+        if uses_page_strided_shared_backing:
+            backing_sizes = {
+                descriptor.size
+                for descriptor in kv_cache_config.kv_cache_tensors
+            }
+            assert len(backing_sizes) == 1
+            backing = self._allocate_int8_cache_tensor(
+                backing_sizes.pop(),
+                alignment,
+            )
+            for descriptor in kv_cache_config.kv_cache_tensors:
+                for layer_name in get_kv_cache_tensor_layers(descriptor):
+                    kv_cache_raw_tensors[layer_name] = backing
 
         # GLM-Next emits one descriptor for each physical cache slot. Layers
         # listed by a descriptor deliberately alias that slot even when they
@@ -5377,6 +5499,18 @@ class NPUModelRunner(GPUModelRunner):
                 for name in descriptor.layers
             }
 
+        uses_page_strided_shared_backing = getattr(
+            self,
+            "_page_strided_shared_backing",
+            False,
+        )
+        packed_descriptors = {}
+        if uses_page_strided_shared_backing:
+            for descriptor in kv_cache_config.kv_cache_tensors:
+                for layer_idx, layer_name in enumerate(
+                    get_kv_cache_tensor_layers(descriptor)
+                ):
+                    packed_descriptors[layer_name] = (descriptor, layer_idx)
         for group in self._kv_cache_spec_attn_group_iterator():
             attn_backend = group.backend
             current_kv_cache_spec = group.kv_cache_spec
@@ -5422,6 +5556,77 @@ class NPUModelRunner(GPUModelRunner):
                         initial_offset_bytes=initial_offset,
                     )
                     kv_caches[layer_name] = tuple(views) if is_index else views[0]
+                    continue
+
+                packed_descriptor = packed_descriptors.get(layer_name)
+                if (
+                    packed_descriptor is not None
+                    and isinstance(current_kv_cache_spec, AttentionSpec)
+                ):
+                    descriptor, layer_idx = packed_descriptor
+                    raw_tensor = kv_cache_raw_tensors[layer_name]
+                    assert isinstance(raw_tensor, torch.Tensor)
+                    base_offset = descriptor.offset + layer_idx * descriptor.layer_stride
+                    if self._is_qsa_state_cache(layer_name):
+                        compression_ratio = get_kv_cache_compression_ratio(current_kv_cache_spec)
+                        if current_kv_cache_spec.block_size % compression_ratio:
+                            raise ValueError(
+                                "QSA cache block size must be divisible by "
+                                "the compression ratio."
+                            )
+                        # QSA state cache uses one unified view, not an ordinary
+                        # attention backend K/V tuple.
+                        cache_shape = (
+                            kv_cache_config.num_blocks,
+                            1,
+                            current_kv_cache_spec.block_size // compression_ratio,
+                            current_kv_cache_spec.head_size,
+                        )
+                        kv_caches[layer_name] = self._page_strided_tensor_view(
+                            raw_tensor,
+                            dtype=current_kv_cache_spec.dtype,
+                            shape=cache_shape,
+                            block_stride_bytes=descriptor.block_stride,
+                            storage_offset_bytes=base_offset,
+                        )
+                        continue
+
+                    cache_shape = attn_backend.get_kv_cache_shape(
+                        kv_cache_config.num_blocks,
+                        get_storage_block_size(current_kv_cache_spec),
+                        current_kv_cache_spec.num_kv_heads,
+                        current_kv_cache_spec.head_size,
+                    )
+                    k_shape = (
+                        cache_shape[1:]
+                        if cache_shape[0] == 2
+                        else cache_shape
+                    )
+                    head_size_v = getattr(
+                        current_kv_cache_spec,
+                        "head_size_v",
+                        current_kv_cache_spec.head_size,
+                    )
+                    v_shape = (*k_shape[:-1], head_size_v)
+                    k_cache = self._page_strided_tensor_view(
+                        raw_tensor,
+                        dtype=current_kv_cache_spec.dtype,
+                        shape=k_shape,
+                        block_stride_bytes=descriptor.block_stride,
+                        storage_offset_bytes=base_offset,
+                    )
+                    v_cache = self._page_strided_tensor_view(
+                        raw_tensor,
+                        dtype=current_kv_cache_spec.dtype,
+                        shape=v_shape,
+                        block_stride_bytes=descriptor.block_stride,
+                        storage_offset_bytes=(
+                            base_offset
+                            + int(np.prod(k_shape[1:]))
+                            * get_dtype_size(current_kv_cache_spec.dtype)
+                        ),
+                    )
+                    kv_caches[layer_name] = (k_cache, v_cache)
                     continue
 
                 # TODO: remove this after the OOM issue is located and fixed, otherwise, some model may
@@ -5767,6 +5972,37 @@ class NPUModelRunner(GPUModelRunner):
                 elif isinstance(current_kv_cache_spec, MambaSpec):
                     raw_tensor = kv_cache_raw_tensors[layer_name]
                     assert raw_tensor is not None
+                    packed_descriptor = packed_descriptors.get(layer_name)
+                    if packed_descriptor is not None:
+                        descriptor, layer_idx = packed_descriptor
+                        state_offset = (
+                            descriptor.offset
+                            + layer_idx * descriptor.layer_stride
+                        )
+                        state_tensors = []
+                        for shape, dtype in zip(
+                            current_kv_cache_spec.shapes,
+                            current_kv_cache_spec.dtypes,
+                            strict=True,
+                        ):
+                            target_shape = (
+                                kv_cache_config.num_blocks,
+                                *shape,
+                            )
+                            state_tensors.append(
+                                self._page_strided_tensor_view(
+                                    raw_tensor,
+                                    dtype=dtype,
+                                    shape=target_shape,
+                                    block_stride_bytes=descriptor.block_stride,
+                                    storage_offset_bytes=state_offset,
+                                )
+                            )
+                            state_offset += (
+                                math.prod(shape) * get_dtype_size(dtype)
+                            )
+                        kv_caches[layer_name] = state_tensors
+                        continue
                     assert raw_tensor.numel() % current_kv_cache_spec.page_size_bytes == 0
                     num_blocks = raw_tensor.numel() // current_kv_cache_spec.page_size_bytes
                     assert num_blocks >= kv_cache_config.num_blocks
