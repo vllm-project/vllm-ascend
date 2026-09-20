@@ -55,6 +55,7 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
     AscendSlidingWindowMLASpec,
+    get_kv_cache_compression_ratio,
     get_storage_block_size,
 )
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
@@ -65,6 +66,7 @@ from vllm_ascend.utils import (
     enable_sfa_dcp_replicated_indexer,
     get_kv_cache_tensor_layers,
     is_hidden_state_cache_spec,
+    vllm_version_is,
 )
 from vllm_ascend.worker.kvpp_cache import allocate_kvpp_cache
 
@@ -154,6 +156,17 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 head_size = spec.head_size
                 dtype = spec.dtype
                 cache_dtype_str = spec.cache_dtype_str
+            model_version = spec.model_version or getattr(attn_module, "model_version", None)
+            indexes_kv_by_block_stride = bool(
+                getattr(spec, "indexes_kv_by_block_stride", False)
+                or getattr(attn_module, "indexes_kv_by_block_stride", False)
+            )
+            compression_ratio = get_kv_cache_compression_ratio(spec)
+            ratio_kwargs: dict[str, Any] = (
+                {"compress_ratio": compression_ratio}
+                if vllm_version_is("0.28.0")
+                else {"tokens_per_state": compression_ratio}
+            )
             spec = AscendMLAAttentionSpec(
                 block_size=spec.block_size,
                 num_kv_heads=spec.num_kv_heads,
@@ -161,6 +174,10 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 dtype=dtype,
                 cache_dtype_str=cache_dtype_str,
                 cache_sparse_sfa_c8=cache_sparse_sfa_c8,
+                non_causal_multi_token_decode=spec.non_causal_multi_token_decode,
+                model_version=model_version,
+                indexes_kv_by_block_stride=indexes_kv_by_block_stride,
+                **ratio_kwargs,
             )
         if isinstance(attn_module, DeepseekV32IndexerCache):
             if not getattr(
@@ -193,7 +210,20 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
         for layer_name in attention_layer_names:
             spec = kv_cache_spec[layer_name]
             page_size_padded = common_page_size if spec.page_size_bytes < common_page_size else spec.page_size_padded
-            kv_cache_spec[layer_name] = replace(spec, page_size_padded=page_size_padded)
+            # Ascend exposes K and V as separate block-first views even when
+            # the backend's logical cache shape starts with the K/V dimension.
+            # Consequently, padded pages are indexed by their runtime block
+            # stride and are safe for hybrid Attention/Mamba allocations.
+            # vLLM #51718 removed AttentionSpec.indexes_kv_by_block_stride on
+            # main; page_size_padded alone carries the padding there.
+            if vllm_version_is("0.28.0"):
+                kv_cache_spec[layer_name] = replace(
+                    spec,
+                    page_size_padded=page_size_padded,
+                    indexes_kv_by_block_stride=True,
+                )
+            else:
+                kv_cache_spec[layer_name] = replace(spec, page_size_padded=page_size_padded)
         for layer_name, spec in mamba_specs.items():
             if spec.page_size_bytes < common_page_size:
                 mamba_specs[layer_name] = replace(spec, page_size_padded=common_page_size)
@@ -635,7 +665,7 @@ def _allocate_kv_cache(
     # Validate all descriptors before allocating so an unsupported geometry
     # cannot partially materialize and then fall back to duplicate buffers.
     dsv4_backing: torch.Tensor | None = None
-    if is_dsv4_model:
+    if is_dsv4_model and not vllm_version_is("0.28.0"):
         tensor_sizes = {descriptor.size for descriptor in kv_cache_config.kv_cache_tensors}
         if len(tensor_sizes) != 1:
             raise ValueError("DeepSeek-V4 KV cache descriptors must share one backing allocation.")
@@ -675,7 +705,7 @@ def _allocate_kv_cache(
     # once here; allocating tensor.size for every descriptor duplicates the
     # full cache pool and can OOM before the second tensor is initialized.
     hybrid_backing: torch.Tensor | None = None
-    if use_hybrid_layout and not is_dsv4_model:
+    if use_hybrid_layout and not is_dsv4_model and not vllm_version_is("0.28.0"):
         tensor_sizes = {tensor.size for tensor in kv_cache_config.kv_cache_tensors}
         if len(tensor_sizes) != 1:
             raise ValueError("Hybrid KV cache tensors must share one backing allocation.")
@@ -790,9 +820,10 @@ def _allocate_kv_cache(
 
         if isinstance(example_spec, AscendSFAIndexerCacheSpec):
             num_blocks = kv_cache_tensor.size // example_spec.page_size_bytes
-            # vLLM #51718 packs all group layers into one tensor;
-            # kv_cache_config.num_blocks is the per-layer block count.
-            num_blocks = kv_cache_config.num_blocks
+            if not vllm_version_is("0.28.0"):
+                # vLLM #51718 packs all group layers into one tensor;
+                # kv_cache_config.num_blocks is the per-layer block count.
+                num_blocks = kv_cache_config.num_blocks
 
             k_tensor_size = (
                 num_blocks
@@ -813,10 +844,11 @@ def _allocate_kv_cache(
                 )
             else:
                 scale_tensor_size = None
-            # main: every layer owns its own region.
-            for layer_name_inner in shared_names:
+
+            if vllm_version_is("0.28.0"):
+                # v0.28.0 `shared_by` aliases the same physical blocks.
                 if scale_tensor_size is not None:
-                    kv_cache_raw_tensors[layer_name_inner] = _allocate_sparse_c8_indexer_tensors(
+                    kv_cache_raw_tensors[shared_names[0]] = _allocate_sparse_c8_indexer_tensors(
                         dsa_k_tensor_size=k_tensor_size,
                         dsa_k_scale_tensor_size=scale_tensor_size,
                         alignment=alignment,
@@ -824,21 +856,47 @@ def _allocate_kv_cache(
                         device=device,
                     )
                 else:
-                    kv_cache_raw_tensors[layer_name_inner] = (
+                    kv_cache_raw_tensors[shared_names[0]] = (
                         _allocate_int8_cache_tensor(k_tensor_size, alignment, device),
                     )
+                for layer_name_inner in shared_names[1:]:
+                    kv_cache_raw_tensors[layer_name_inner] = kv_cache_raw_tensors[shared_names[0]]
+            else:
+                # main: every layer owns its own region.
+                for layer_name_inner in shared_names:
+                    if scale_tensor_size is not None:
+                        kv_cache_raw_tensors[layer_name_inner] = _allocate_sparse_c8_indexer_tensors(
+                            dsa_k_tensor_size=k_tensor_size,
+                            dsa_k_scale_tensor_size=scale_tensor_size,
+                            alignment=alignment,
+                            scale_dtype=example_spec.scale_dtype,
+                            device=device,
+                        )
+                    else:
+                        kv_cache_raw_tensors[layer_name_inner] = (
+                            _allocate_int8_cache_tensor(k_tensor_size, alignment, device),
+                        )
 
             continue
 
         # vLLM #51718 packs all group layers into one tensor on main; the
         # per-layer size is the block count times this layer's own page size
         # (correct even when the tensor's group is not the largest group).
-        kv_cache_tensor_size = kv_cache_config.num_blocks * example_spec.page_size_bytes
+        kv_cache_tensor_size = (
+            kv_cache_tensor.size
+            if vllm_version_is("0.28.0")
+            else kv_cache_config.num_blocks * example_spec.page_size_bytes
+        )
         # TODO:Subsequently, extend the `AttentionSpec` class in the vLLM community and remove these branches.
         if enable_sfa(vllm_config) and bool(getattr(example_spec, "cache_sparse_sfa_c8", False)):
             k_size = kv_cache_tensor_size
-            for layer_name in shared_names:
-                kv_cache_raw_tensors[layer_name] = _allocate_int8_cache_tensor(k_size, alignment, device)
+            if vllm_version_is("0.28.0"):
+                k_tensor = _allocate_int8_cache_tensor(k_size, alignment, device)
+                for layer_name in shared_names:
+                    kv_cache_raw_tensors[layer_name] = k_tensor
+            else:
+                for layer_name in shared_names:
+                    kv_cache_raw_tensors[layer_name] = _allocate_int8_cache_tensor(k_size, alignment, device)
         else:
             k_dim, v_dim = _get_attention_kv_cache_dims(example_layer_name, example_spec)
             if enable_fa_quant(vllm_config):
@@ -849,10 +907,16 @@ def _allocate_kv_cache(
                 k_factor, v_factor = calc_split_factor([k_dim, v_dim])
             k_size = int(kv_cache_tensor_size // k_factor)
             v_size = int(kv_cache_tensor_size // v_factor)
-            for layer_name in shared_names:
+            if vllm_version_is("0.28.0"):
                 k_tensor = _allocate_int8_cache_tensor(k_size, alignment, device)
                 v_tensor = _allocate_int8_cache_tensor(v_size, alignment, device)
-                kv_cache_raw_tensors[layer_name] = (k_tensor, v_tensor)
+                for layer_name in shared_names:
+                    kv_cache_raw_tensors[layer_name] = (k_tensor, v_tensor)
+            else:
+                for layer_name in shared_names:
+                    k_tensor = _allocate_int8_cache_tensor(k_size, alignment, device)
+                    v_tensor = _allocate_int8_cache_tensor(v_size, alignment, device)
+                    kv_cache_raw_tensors[layer_name] = (k_tensor, v_tensor)
 
     layer_names = {layer_name for group in kv_cache_config.kv_cache_groups for layer_name in group.layer_names}
     assert layer_names == (kv_cache_raw_tensors.keys() | shared_layers.keys()), (
@@ -981,6 +1045,11 @@ def _reshape_kv_cache_v2(
             if group_storage_block_size != group_spec.block_size
             else kernel_block_sizes[group.kv_cache_group_id]
         )
+        if group_storage_block_size != group_spec.block_size and getattr(
+            group_spec, "indexes_kv_by_block_stride", False
+        ):
+            compression_ratio = get_kv_cache_compression_ratio(group_spec)
+            kernel_block_size = kernel_block_sizes[group.kv_cache_group_id] // compression_ratio
 
         for layer_name in group.layer_names:
             if layer_name in shared_kv_cache_layers:
@@ -1039,14 +1108,24 @@ def _reshape_kv_cache_v2(
                 num_blocks = raw_cache.numel() // kv_cache_spec.page_size_bytes
                 if num_blocks < kv_cache_config.num_blocks:
                     raise ValueError(f"Hidden-state cache for {layer_name} has fewer blocks than KVCacheManager.")
-                # #51718 removes the backend shape hook and changes
-                # basic_cache writes to [block, :, offset, :].
-                kv_cache_shape = (
-                    num_blocks,
-                    kv_cache_spec.num_heads,
-                    kv_cache_spec.num_states,
-                    kv_cache_spec.state_content_size_bytes // get_dtype_size(kv_cache_spec.dtype),
-                )
+                if vllm_version_is("0.28.0"):
+                    # Release basic_cache writes [block, offset, :, :].
+                    kv_cache_shape = group.backend.get_kv_cache_shape(
+                        num_blocks,
+                        kv_cache_spec.block_size,
+                        kv_cache_spec.num_kv_heads,
+                        kv_cache_spec.head_size,
+                        cache_dtype,
+                    )
+                else:
+                    # #51718 removes the backend shape hook and changes
+                    # basic_cache writes to [block, :, offset, :].
+                    kv_cache_shape = (
+                        num_blocks,
+                        kv_cache_spec.num_heads,
+                        kv_cache_spec.num_states,
+                        kv_cache_spec.state_content_size_bytes // get_dtype_size(kv_cache_spec.dtype),
+                    )
                 typed_cache = raw_cache.view(kv_cache_spec.dtype)
                 page_size_padded = kv_cache_spec.page_size_padded
                 if page_size_padded is not None:
@@ -1065,9 +1144,27 @@ def _reshape_kv_cache_v2(
                     kv_caches[layer_name] = typed_cache.view(kv_cache_shape)
                 continue
 
-            if isinstance(kv_cache_spec, AscendIndexerKPoolTailSpec) or (
-                is_dsv4_model and isinstance(kv_cache_spec, (AscendMLAAttentionSpec, AscendSlidingWindowMLASpec))
-            ):
+            if isinstance(kv_cache_spec, AscendIndexerKPoolTailSpec):
+                if not isinstance(raw_cache, torch.Tensor):
+                    raise ValueError(f"KPool tail cache for {layer_name} must use one raw tensor.")
+                typed_slot = raw_cache.view(kv_cache_spec.dtype)
+                tail_block_el = kv_cache_spec.unpadded_page_size_bytes // get_dtype_size(kv_cache_spec.dtype)
+                num_tail_blocks = kv_cache_config.num_blocks
+                if num_tail_blocks * tail_block_el * 2 > typed_slot.numel():
+                    raise ValueError(
+                        f"KPool tail cache for {layer_name} exceeds half the small slot: "
+                        f"packed={num_tail_blocks * tail_block_el} elements, slot={typed_slot.numel()}."
+                    )
+                kv_caches[layer_name] = [
+                    typed_slot[typed_slot.numel() - num_tail_blocks * tail_block_el :].view(
+                        num_tail_blocks,
+                        2,
+                        kv_cache_spec.block_size,
+                        kv_cache_spec.head_size,
+                    )
+                ]
+                continue
+            if is_dsv4_model and isinstance(kv_cache_spec, (AscendMLAAttentionSpec, AscendSlidingWindowMLASpec)):
                 if not isinstance(raw_cache, torch.Tensor):
                     raise ValueError(f"DSA cache for {layer_name} must use one raw tensor.")
                 kv_caches[layer_name] = _view_dsv4_cache(
@@ -1110,6 +1207,25 @@ def _reshape_kv_cache_v2(
                 cache_dtype,
             )
             sparse_sfa_c8 = enable_sfa(vllm_config) and bool(getattr(kv_cache_spec, "cache_sparse_sfa_c8", False))
+            if isinstance(kv_cache_spec, (AscendMLAAttentionSpec, MLAAttentionSpec)) and (
+                get_kv_cache_compression_ratio(kv_cache_spec) > 1
+            ):
+                raw_single = raw_cache[0] if isinstance(raw_cache, tuple) else raw_cache
+                if isinstance(raw_cache, tuple) and len(raw_cache) != 1:
+                    raise ValueError(f"Compressed indexer cache for {layer_name} must be a single tensor.")
+                shape = tuple(kv_cache_shape)
+                strides = [1] * len(shape)
+                for dim_idx in range(len(shape) - 2, -1, -1):
+                    strides[dim_idx] = strides[dim_idx + 1] * shape[dim_idx + 1]
+                typed_slot = raw_single.view(kv_cache_spec.dtype)
+                if strides[0] * shape[0] * 2 > typed_slot.numel():
+                    raise ValueError(
+                        f"Compressed indexer cache for {layer_name} exceeds half the small slot: "
+                        f"packed={strides[0] * shape[0]} elements, slot={typed_slot.numel()}."
+                    )
+                cache = torch.as_strided(typed_slot, size=shape, stride=tuple(strides))
+                kv_caches[layer_name] = (cache,)
+                continue
             if isinstance(kv_cache_spec, (AscendMLAAttentionSpec, MLAAttentionSpec)):
                 num_blocks_, block_size_, num_kv_heads, _ = kv_cache_shape
                 k_dim, v_dim = _get_attention_kv_cache_dims(layer_name, kv_cache_spec)

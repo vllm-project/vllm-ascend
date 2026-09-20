@@ -6,9 +6,11 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 
 from vllm_ascend._310p.model_runner_310p import NPUModelRunner310
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 from vllm_ascend.worker.worker import NPUWorker
 
@@ -94,6 +96,10 @@ def test_310p_kv_pool_only_wraps_backing_allocation() -> None:
     assert not scope.active
 
 
+@pytest.mark.skipif(
+    vllm_version_is("0.28.0"),
+    reason="v0.28.0 still reconstructs metadata via post_kv_cache_wake_up",
+)
 def test_kv_wake_does_not_run_model_runner_recovery() -> None:
     model = torch.nn.Module()
     model.register_buffer("_k_scale", torch.tensor(0.5))

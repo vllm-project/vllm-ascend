@@ -31,10 +31,11 @@ from vllm_ascend.models.glm5next.kv_cache import (
     KpoolTailManager,
     format_indexer_kpool_slot_mapping,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 def _ratio_kwargs(ratio: int) -> dict[str, int]:
-    return {"tokens_per_state": ratio}
+    return {"compress_ratio": ratio} if vllm_version_is("0.28.0") else {"tokens_per_state": ratio}
 
 
 @pytest.mark.parametrize("capacity", [4, 12])
@@ -170,6 +171,7 @@ def test_indexer_metadata_addresses_complete_storage_pages(storage_block_size):
     logical_size = storage_block_size * pool_size
     split = logical_size // 128
     config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=logical_size),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=4, max_num_seqs=1),
         model_config=SimpleNamespace(max_model_len=logical_size * 3),
     )
@@ -178,7 +180,7 @@ def test_indexer_metadata_addresses_complete_storage_pages(storage_block_size):
         num_kv_heads=1,
         head_size=128,
         dtype=torch.bfloat16,
-        tokens_per_state=pool_size,
+        **({"compress_ratio": pool_size} if vllm_version_is("0.28.0") else {"tokens_per_state": pool_size}),
         model_version="glm5_next",
     )
     builders = [
@@ -202,17 +204,20 @@ def test_indexer_metadata_addresses_complete_storage_pages(storage_block_size):
         block_table_tensor=expanded,
     )
     first, draft = [builder.build(0, common) for builder in builders]
-    assert first.block_size == storage_block_size
-    torch.testing.assert_close(first.block_table, pages)
+    # Kernel-granularity blocks: the metadata reports the natural kernel rows
+    # (128 tokens / pool ratio) and passes the common expanded table through
+    # as a view, so both builders observe the same persistent buffer.
+    assert first.block_size == 128 // pool_size
+    torch.testing.assert_close(first.block_table, expanded)
     assert first.slot_mapping.tolist() == [8 * storage_block_size - 1, -1, 2 * storage_block_size, -1]
     assert first.seq_lens.tolist() == [storage_block_size + 1]
     address = first.block_table.data_ptr()
-    assert draft.block_table.data_ptr() != address
+    assert draft.block_table.data_ptr() == address
     common.block_table_tensor[:, :split] = 3 * split + torch.arange(split)
     refreshed = builders[0].build(0, common)
     assert refreshed.block_table.data_ptr() == address
-    assert first.block_table.tolist() == [[3, 2, -1]]
-    assert draft.block_table.tolist() == [[7, 2, -1]]
+    torch.testing.assert_close(refreshed.block_table, common.block_table_tensor[:1])
+    torch.testing.assert_close(draft.block_table, common.block_table_tensor[:1])
 
 
 def test_model_cache_layers_publish_source_compatible_specs():
@@ -264,6 +269,7 @@ def test_model_cache_layers_publish_source_compatible_specs():
 
 def test_indexer_metadata_preserves_raw_request_boundaries():
     config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=256),
         scheduler_config=SimpleNamespace(
             max_num_batched_tokens=16,
             max_num_seqs=2,

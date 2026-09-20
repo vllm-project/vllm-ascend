@@ -13,6 +13,7 @@ from vllm.v1.worker.gpu.spec_decode.eagle import speculator as eagle_speculator
 
 from vllm_ascend.ops.triton.v2.sample.categorical_sample import categorical_sample
 from vllm_ascend.patch.worker.patch_v2 import patch_triton
+from vllm_ascend.utils import vllm_version_is
 
 
 @pytest.mark.parametrize(
@@ -76,7 +77,10 @@ def test_dspark_sample_logits_dispatch(monkeypatch, probabilistic):
         assert args[1] is idx_mapping
         torch.testing.assert_close(args[4], sample_pos - 1)
         assert kwargs["apply_temperature"] is True
-        assert kwargs["is_drafting"] is True
+        if vllm_version_is("0.28.0"):
+            assert "is_drafting" not in kwargs
+        else:
+            assert kwargs["is_drafting"] is True
         assert kwargs["logits_cache"] is speculator.draft_logits
         torch.testing.assert_close(
             kwargs["logits_cache_col"],
