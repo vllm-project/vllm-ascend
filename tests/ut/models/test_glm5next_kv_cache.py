@@ -31,10 +31,11 @@ from vllm_ascend.models.glm5next.kv_cache import (
     KpoolTailManager,
     format_indexer_kpool_slot_mapping,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 def _ratio_kwargs(ratio: int) -> dict[str, int]:
-    return {"tokens_per_state": ratio}
+    return {"compress_ratio": ratio} if vllm_version_is("0.28.0") else {"tokens_per_state": ratio}
 
 
 @pytest.mark.parametrize("capacity", [4, 12])
@@ -179,7 +180,7 @@ def test_indexer_metadata_addresses_complete_storage_pages(storage_block_size):
         num_kv_heads=1,
         head_size=128,
         dtype=torch.bfloat16,
-        tokens_per_state=pool_size,
+        **({"compress_ratio": pool_size} if vllm_version_is("0.28.0") else {"tokens_per_state": pool_size}),
         model_version="glm5_next",
     )
     builders = [
