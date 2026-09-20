@@ -46,7 +46,7 @@ The following example uses the AArch64 image and exposes 8 devices on an Atlas 8
 
 === "A3 series"
 
-Start the docker image on each node.
+    Start the docker image on each node.
 
     ```bash
     export IMAGE=quay.io/atlas-ci/vllm-atlas-temp:qwen3.8-next-a3-ubuntu-34178549844-2-arm64-temp
@@ -56,7 +56,7 @@ Start the docker image on each node.
 
     docker run --rm \
         --name "$NAME" \
-        --shm-size=1g \
+        --shm-size=16g \
         --net=host \
         --device /dev/davinci0 \
         --device /dev/davinci1 \
@@ -93,6 +93,14 @@ After entering the container, verify that vLLM and vLLM-Ascend can be imported:
 python -c "import vllm, vllm_ascend; print('vllm and vllm-ascend are ready')"
 ```
 
+### 4.2 Source Code Installation
+
+If you don't want to use the docker image as above, you can also build all from source:
+
+- Install `vllm-ascend` from source, refer to [installation](../../getting_started/installation.md).
+
+If you want to deploy a multi-node environment, you need to set up the environment on each node.
+
 ## 5 Online Service Deployment {: #5-online-service-deployment }
 
 ### 5.1 Single-Node Online Deployment
@@ -106,7 +114,7 @@ Before starting the service:
 
 === "A3 series"
 
-    The following example is for Atlas 800 A2.
+    The following example is for Atlas 800 A3.
 
     ```bash
     unset CPLUS_INCLUDE_PATH CPATH C_INCLUDE_PATH
@@ -328,27 +336,37 @@ The A3 W8A8 deployment described in Section 5.1 was validated on GPQA Diamond wi
 | --- | --- | --- | --- |
 | Atlas 800 A3 | GPQA Diamond | Accuracy | 90.4 |
 
-## 8 Performance Tuning
+## 8 Performance Evaluation
 
-### 8.1 Validated Configuration Notes
+### 8.1 Using AISBench
 
-The deployment command in Section 5.1 uses the following model-specific optimizations:
+Refer to [AISBench performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation)
+for configuration and execution instructions.
 
-| Optimization | Enablement Method | Notes |
+## 9 Performance Tuning
+
+### 9.1 Reference Configuration
+
+The following is the configuration used by the full-checkpoint commands above,
+not a claim of optimal throughput or latency for every workload.
+
+| Deployment | Nodes | Total logical NPUs | TP per DP rank | Global DP / EP | Max Num Seqs per Engine | Max Num Batched Tokens | Max Model Len | Graph Mode |
+| --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | --- |
+| W8A8, mixed prefill/decode | 1 A3 | 8 | 8 | 8 / 8 | 16 | 4096 | 135168 | `FULL_DECODE_ONLY` |
+
+### 9.2 Tuning Guidelines
+
+| Goal | Parameters to evaluate | Check before adopting a change |
 | --- | --- | --- |
-| QSA Lightning Indexer | `VLLM_ASCEND_ENABLE_QSA_LIGHTNING_INDEXER=1` | Enables the fused QSA Lightning Indexer path. |
-| QSA Expand E3 | `VLLM_ASCEND_ENABLE_QSA_E3V=1` | Enables the fused QSA Expand E3 path. |
-| MTP speculative decoding | `--speculative-config` with `qwen3_5_mtp` | Drafts three tokens and keeps the MTP proposer in eager mode. |
-| Full Decode ACLGraph | `--compilation-config` with `FULL_DECODE_ONLY` | Enables ACLGraph for decode. |
-| CPU binding | `--additional-config` with `enable_cpu_binding=true` | Enables CPU binding for the validated deployment. |
-| Automatic Prefix Caching | `--enable-prefix-caching --mamba-cache-mode align` | Experimental for this model and requires additional NPU memory. |
+| Higher throughput | Increase `--max-num-seqs` or `--max-num-batched-tokens` gradually | Memory headroom, completed requests, and tail latency |
+| Lower latency | Compare the baseline with a matching DSpark draft | End-to-end latency, draft acceptance, and accuracy on the same workload |
+| Longer context | Adjust `--max-model-len` together with concurrency and the token budget | Target/draft compatibility and available hybrid KV-cache capacity |
+| Repeated prompts | Enable Prefix Cache and compare cold and cached requests separately | Cache-hit metrics and output correctness |
 
-Automatic Prefix Caching must be revalidated for the target context length and concurrency. The current release is intended for early performance evaluation; TTFT performance remains under active optimization.
+Refer to the [public performance tuning guide](../../developer_guide/performance_and_debug/optimization_and_tuning.md)
+and [feature matrix](../../user_guide/support_matrix/feature_matrix.md) for
+general tuning methods.
 
-### 8.2 General Tuning Reference
-
-Refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for general tuning methods.
-
-## 9 FAQ
+## 10 FAQ
 
 For common environment, installation, and parameter issues, refer to the [Public FAQs](../../faqs.md).
