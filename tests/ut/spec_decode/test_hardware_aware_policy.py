@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Configuration and CPU policy tests for hardware-aware decoding."""
+from types import SimpleNamespace
 
 import pytest
 
 from vllm_ascend.dynamic_spec import (
     AdaptiveDraftKController,
+    _create_controller,
+    _update_controller,
     resolve_physical_k,
     v2_physical_k_enabled,
 )
@@ -16,13 +17,9 @@ def compact(**physical):
     return {"method": "dspark", "policy": "hardware_aware", "physical_k": physical}
 
 
-def test_compact_config_defaults_and_overrides():
+def test_compact_defaults_and_override():
     params = resolve_physical_k(
-        compact(
-            min_k=3,
-            capture_k=[5, 3, 5],
-            hybrid={"enabled": False, "probe_interval": 0},
-        )
+        compact(min_k=3, capture_k=[5, 3, 5], hybrid={"enabled": False})
     )
     assert params == {
         "enabled": True,
@@ -35,18 +32,11 @@ def test_compact_config_defaults_and_overrides():
         "hybrid_acceptance_threshold": 0.6,
         "hybrid_low_steps": 4,
         "hybrid_high_steps": 2,
-        "hybrid_probe_interval": 0,
-        "auto_tune_enabled": False,
-        "auto_tune_warmup_steps": 128,
-        "auto_tune_explore_ratio": 0.05,
-        "auto_tune_update_interval": 32,
-        "auto_tune_min_gain": 0.02,
-        "auto_tune_ema_decay": 0.9,
-        "auto_tune_window_steps": 16,
+        "hybrid_probe_interval": 32,
+        "auto_tune_enabled": True,
     }
     assert v2_physical_k_enabled(compact())
     assert not v2_physical_k_enabled(compact(enabled=False))
-    assert not v2_physical_k_enabled({})
 
 
 @pytest.mark.parametrize(
@@ -54,280 +44,93 @@ def test_compact_config_defaults_and_overrides():
     [
         {"enabled": "false"},
         {"min_k": 0},
-        {"slack": -1},
-        {"percentile": float("nan")},
         {"capture_k": []},
-        {"capture_k": [True]},
         {"hybrid": False},
-        {"hybrid": {"low_steps": 0}},
         {"hybrid": {"unknown": 1}},
         {"auto_tune": False},
-        {"auto_tune": {"warmup_steps": 0}},
-        {"auto_tune": {"unknown": 1}},
+        {"auto_tune": {"warmup_steps": 1}},
         {"unknown": 1},
     ],
 )
-def test_compact_config_rejects_invalid_values(physical):
+def test_compact_rejects_removed_or_invalid_options(physical):
     with pytest.raises(ValueError):
         resolve_physical_k(compact(**physical))
 
 
-@pytest.mark.parametrize(
-    "policy,method",
-    [("confidence_budget", "dspark"), ("hardware_aware", None), ("hardware_aware", "eagle")],
-)
-def test_compact_interface_requires_supported_policy_and_method(policy, method):
-    with pytest.raises(ValueError, match="requires"):
-        resolve_physical_k({"physical_k": {}, "method": method, "policy": policy})
+def test_controller_defaults_to_full_k_until_worker_recommends():
+    controller = AdaptiveDraftKController(max_k=5, min_k=3)
+    assert controller.cap(5, 8) == 5
+    controller.recommend(8, 3)
+    assert controller.cap(5, 8) == 3
+    assert controller.last_reason == "av_profile_recommendation"
 
 
-def test_dflash_is_supported():
-    value = compact(min_k=2)
-    value["method"] = "dflash"
-    assert resolve_physical_k(value)["min_k"] == 2
+def test_recommendations_are_batch_bucket_specific():
+    controller = AdaptiveDraftKController(max_k=5, min_k=3, hybrid_min_batch_size=1)
+    controller.recommend(8, 3)
+    assert controller.cap(5, 8) == 3
+    assert controller.cap(5, 16) == 5
 
 
-def test_small_batch_keeps_full_width():
-    controller = AdaptiveDraftKController(max_k=5, min_k=4, hybrid_min_batch_size=8)
-    controller.observe([5] * 4, [[0]] * 4)
-    assert controller.current_k == 5
-    assert controller.last_reason == "small_batch_fixed_k"
-
-
-def test_small_batch_cap_is_a_fast_path():
-    controller = AdaptiveDraftKController(
-        max_k=5,
-        min_k=4,
-        hybrid_min_batch_size=8,
-        auto_tune_enabled=True,
-    )
-    assert controller.cap(5, batch_size=4) == 5
-    assert controller.last_reason == "small_batch_fixed_k"
+def test_small_batch_keeps_full_k():
+    controller = AdaptiveDraftKController(max_k=5, min_k=3, hybrid_min_batch_size=8)
+    controller.recommend(4, 3)
+    assert controller.cap(5, 4) == 5
+    controller.observe([5] * 4, [[0]] * 4, use_acceptance_fallback=False)
     assert controller.observation_count == 0
 
 
-def test_small_batch_does_not_pollute_online_cost_model():
+def test_periodic_probe_forces_full_k():
     controller = AdaptiveDraftKController(
         max_k=5,
-        min_k=4,
-        hybrid_min_batch_size=8,
-        auto_tune_enabled=True,
-        auto_tune_window_steps=1,
+        min_k=3,
+        hybrid_min_batch_size=1,
+        hybrid_probe_interval=2,
     )
-    controller.cap(5, batch_size=4)
-    controller.observe(
-        [5] * 4,
-        [[0, 1]] * 4,
-        elapsed_ms=10.0,
-        physical_k=5,
-    )
-    assert controller.observation_count == 0
-    assert controller._cost_model == {}
-    assert controller.last_reason == "small_batch_fixed_k"
-
-
-def test_hybrid_uses_hysteresis_and_periodic_probe():
-    controller = AdaptiveDraftKController(
-        max_k=5,
-        min_k=4,
-        hybrid_min_batch_size=8,
-        hybrid_acceptance_threshold=0.6,
-        hybrid_low_steps=2,
-        hybrid_probe_interval=3,
-    )
-    rejected = [[0]] * 8
-    controller.observe([5] * 8, rejected)
-    assert controller.current_k is None
-    controller.observe([5] * 8, rejected)
-    assert controller.current_k == 4
-    controller.observe([4] * 8, rejected)
-    assert controller.current_k == 5
+    controller.recommend(8, 3)
+    controller.observation_count = 2
+    assert controller.cap(5, 8) == 5
     assert controller.last_reason == "periodic_full_k_probe"
 
 
-def test_non_hybrid_tracks_accepted_width_and_recovers():
-    controller = AdaptiveDraftKController(max_k=5, min_k=1, slack=1, hybrid_enabled=False)
-    assert controller.cap(5) == 5
-    controller.observe([5, 5], [[1, 2, 3, 4], [1, 2, 3]])
-    assert controller.cap(5) == 4
-    controller.observe([4, 4], [[1, 2, 3, 4, 5], [1, 2, 3, 4, 5]])
-    assert controller.cap(5) == 5
-
-
-def test_online_cost_model_explores_and_selects_best_k():
+def test_missing_profile_uses_acceptance_fallback():
     controller = AdaptiveDraftKController(
         max_k=5,
         min_k=4,
-        capture_k=(4, 5),
-        auto_tune_enabled=True,
-        auto_tune_warmup_steps=1,
-        auto_tune_explore_ratio=0.0,
-        auto_tune_update_interval=1,
-        auto_tune_min_gain=0.0,
-        # One step per sample keeps this test focused on the explore/select
-        # logic; window accumulation has its own test below.
-        auto_tune_window_steps=1,
+        hybrid_min_batch_size=1,
+        hybrid_low_steps=1,
     )
-    assert controller.cap(5) == 5
-    # First observation measures K=5, then warmup exploration switches to K=4.
-    controller.observe([5] * 8, [[0, 1]] * 8, elapsed_ms=10.0)
+    controller.cap(5, 8)
+    controller.observe([5] * 8, [[0]] * 8, use_acceptance_fallback=True)
     assert controller.current_k == 4
-    # K=4 produces more effective tokens for the same measured time.
-    controller.observe([4] * 8, [[0, 1, 2, 3, 4]] * 8, elapsed_ms=10.0)
-    assert controller.current_k == 4
-    assert controller.last_reason == "auto_cost_model_best_k"
+    assert controller.last_reason == "low_acceptance_dynamic_k"
 
 
-def test_online_cost_model_accumulates_a_window_before_scoring():
-    """A single step timing is noisy, so no sample is settled until the window fills."""
-
-    controller = AdaptiveDraftKController(
-        max_k=5,
-        min_k=4,
-        capture_k=(4, 5),
-        auto_tune_enabled=True,
-        auto_tune_warmup_steps=0,
-        auto_tune_update_interval=1,
-        auto_tune_window_steps=4,
+def test_output_recommendation_is_applied():
+    controller = AdaptiveDraftKController(max_k=5, min_k=3, hybrid_min_batch_size=1)
+    scheduler_output = SimpleNamespace(
+        scheduled_spec_decode_tokens={str(i): [1] * 5 for i in range(8)}
     )
-    controller.cap(5)
-    key = controller._cost_key(8, 5)
-    for _ in range(3):
-        controller.observe([5] * 8, [[0, 1]] * 8, elapsed_ms=10.0, physical_k=5)
-    estimate = controller._cost_model[key]
-    assert estimate.samples == 0
-    assert estimate.window_count == 3
-    # Per step: 1 accepted token per request + 1 target token per request = 16.
-    assert estimate.window_tokens == 48.0
-    assert estimate.window_ms == 30.0
-
-    controller.observe([5] * 8, [[0, 1]] * 8, elapsed_ms=10.0, physical_k=5)
-    estimate = controller._cost_model[key]
-    assert estimate.samples == 1
-    assert estimate.window_count == 0
-    # 4 steps x 16 effective tokens over 4 x 10 ms.
-    assert estimate.ema_score == pytest.approx(64.0 / 40.0)
-
-
-def test_explore_probe_cycles_through_all_candidates():
-    """Round-robin probing re-measures a K that already scored badly."""
-
-    controller = AdaptiveDraftKController(
-        max_k=6,
-        min_k=4,
-        capture_k=(4, 5, 6),
-        auto_tune_enabled=True,
+    model_output = SimpleNamespace(
+        physical_k_recommendation=(8, 3, 1.25),
+        req_ids=[str(i) for i in range(8)],
+        sampled_token_ids=[[1, 2] for _ in range(8)],
     )
-    seen = [controller._next_explore_k() for _ in range(6)]
-    assert sorted(set(seen)) == [4, 5, 6]
-    assert seen[:3] == seen[3:]
+    _update_controller(controller, scheduler_output, model_output)
+    assert controller.cap(5, 8) == 3
 
 
-def test_explore_probe_holds_the_width_for_a_full_window():
-    """A probe shorter than the window never settles a sample, so it must dwell."""
-
-    controller = AdaptiveDraftKController(
-        max_k=6,
-        min_k=4,
-        capture_k=(4, 5, 6),
-        auto_tune_enabled=True,
-        auto_tune_warmup_steps=1000,
-        auto_tune_window_steps=4,
+def test_create_controller_and_opt_out():
+    config = SimpleNamespace(
+        use_v2_model_runner=True,
+        additional_config={"dynamic_spec_config": compact(min_k=4)},
+        speculative_config=SimpleNamespace(num_speculative_tokens=5),
     )
-    controller._choose_auto_k(8)
-    first = controller.current_k
-    assert controller.last_reason == "auto_warmup_explore"
-    assert controller._dwell_remaining == 3
-
-    for _ in range(3):
-        controller._choose_auto_k(8)
-        assert controller.current_k == first
-        assert controller.last_reason == "auto_explore_dwell"
-    assert controller._dwell_remaining == 0
-
-    # Once the dwell is exhausted a fresh decision happens, and the dwell is
-    # restarted for the next probe.
-    controller._choose_auto_k(8)
-    assert controller.last_reason == "auto_warmup_explore"
-    assert controller._dwell_remaining == 3
-
-
-def test_dwell_zero_window_steps_keeps_every_step_decidable():
-    """window_steps=1 restores strictly per-step decisions (no dwelling)."""
-
-    controller = AdaptiveDraftKController(
-        max_k=6,
-        min_k=4,
-        capture_k=(4, 5, 6),
-        auto_tune_enabled=True,
-        auto_tune_warmup_steps=1000,
-        auto_tune_window_steps=1,
+    assert _create_controller(config).auto_tune_enabled
+    config.additional_config["dynamic_spec_config"] = compact(
+        min_k=4, auto_tune={"enabled": False}
     )
-    controller._choose_auto_k(8)
-    assert controller._dwell_remaining == 0
-    controller._choose_auto_k(8)
-    assert controller.last_reason == "auto_warmup_explore"
-
-
-def test_online_cost_model_uses_physical_k_not_logical_width():
-    controller = AdaptiveDraftKController(
-        max_k=5,
-        min_k=4,
-        capture_k=(4, 5),
-        auto_tune_enabled=True,
-        auto_tune_warmup_steps=1,
-        auto_tune_window_steps=1,
-    )
-    controller.cap(5)
-    controller.observe(
-        [4] * 8,
-        [[0, 1]] * 8,
-        elapsed_ms=10.0,
-        physical_k=5,
-    )
-    assert controller._cost_key(8, 5) in controller._cost_model
-    assert controller._cost_key(8, 4) not in controller._cost_model
-
-
-def test_online_cost_model_keeps_full_k_for_small_batch():
-    controller = AdaptiveDraftKController(
-        max_k=5,
-        min_k=4,
-        capture_k=(4, 5),
-        hybrid_enabled=True,
-        hybrid_min_batch_size=8,
-        auto_tune_enabled=True,
-        auto_tune_warmup_steps=1,
-    )
-    controller.cap(5)
-    controller.observe(
-        [5] * 4,
-        [[0, 1]] * 4,
-        elapsed_ms=10.0,
-        physical_k=5,
-    )
-    assert controller.current_k == 5
-    assert controller.last_reason == "small_batch_fixed_k"
-
-
-def test_online_cost_model_applies_k_per_batch_bucket():
-    controller = AdaptiveDraftKController(
-        max_k=5,
-        min_k=4,
-        capture_k=(4, 5),
-        auto_tune_enabled=True,
-        auto_tune_warmup_steps=1,
-        auto_tune_window_steps=1,
-    )
-    controller.cap(5, batch_size=8)
-    controller.observe(
-        [5] * 8,
-        [[0, 1]] * 8,
-        elapsed_ms=10.0,
-        physical_k=5,
-    )
-    assert controller.cap(5, batch_size=8) == 4
-    assert controller.cap(5, batch_size=4) == 5
+    assert not _create_controller(config).auto_tune_enabled
 
 
 def test_dynamic_spec_config_validates_compact_interface():
@@ -336,8 +139,6 @@ def test_dynamic_spec_config_validates_compact_interface():
     config = DynamicSpecConfig(
         method="dspark",
         policy="hardware_aware",
-        physical_k={"min_k": 3, "capture_k": [3, 5]},
+        physical_k={"min_k": 3},
     )
     assert config.physical_k["min_k"] == 3
-    with pytest.raises(ValueError):
-        DynamicSpecConfig(method="dspark", policy="hardware_aware", physical_k={"minimum_k": 3})

@@ -210,6 +210,39 @@ settings; enabling both selects the combined DyntraLB recompute scheduler.
 | `budget_threshold` | float | `0.3` | Cumulative survival-probability threshold used when estimating the mean verify budget. |
 | `min_verify_tokens` | int | `1` | Minimum number of draft tokens verified per request. |
 
+**V2 hardware-aware physical K**
+
+The V1 configuration above selects verification lengths. On model runner V2,
+the `hardware_aware` policy additionally controls how many draft tokens are
+actually generated. Upstream adaptive verification still selects verification
+budgets. Enable adaptive verification in `speculative_config` and opt into
+physical K with the following minimal configuration:
+
+```json
+{
+  "dynamic_spec_config": {
+    "method": "dspark",
+    "policy": "hardware_aware",
+    "physical_k": {"min_k": 4}
+  }
+}
+```
+
+| Name | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `physical_k.min_k` | int | `1` | Lowest candidate K. Maximum K comes from `speculative_config.num_speculative_tokens`. |
+| `physical_k.enabled` | bool | `True` | Optional switch to disable physical K control. Omitting `physical_k` also leaves it disabled. |
+| `physical_k.auto_tune.enabled` | bool | `True` | Select physical K from AV startup-profiled NPU costs and confidence estimates. Set to `False` to use the acceptance-based fallback. |
+
+Candidate and capture widths default to the range from `min_k` to maximum K.
+The worker profiles every candidate K during AV startup, then sends compact K
+recommendations to the scheduler. Small-batch protection and periodic full-K
+probes use built-in defaults. Existing `capture_k`, `slack`, `percentile` and
+`hybrid` overrides remain supported; obsolete wall-clock autotune knobs are
+rejected. A candidate without a compatible FULL
+graph may execute eagerly; configuring a capture width does not guarantee a graph
+hit for every batch shape.
+
 **scheduler_config.short_request_first_config**
 
 ShortRequestFirst is a waiting-queue policy for FCFS synchronous or asynchronous scheduling on prefill and PD-mixed paths. It does not support batch-job-aware, profiling-chunk, or PD-disaggregated D-node scheduling. See [ShortRequestFirst Prefill Scheduling](../feature_guide/short_request_first.md) for usage, behavior, and tuning guidance.

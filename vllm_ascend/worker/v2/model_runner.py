@@ -247,6 +247,16 @@ class NPUModelRunner(GPUModelRunner):
 
         self._restore_replicated_draft_target_states()
         output = super().sample_tokens(grammar_output)
+        manager = getattr(self, "adaptive_verification", None)
+        recommendation = getattr(manager, "_physical_k_recommendation", None)
+        if manager is not None:
+            manager._physical_k_recommendation = None
+        output_container = getattr(output, "model_runner_output", output)
+        if output_container is not None and hasattr(
+            output_container,
+            "physical_k_recommendation",
+        ):
+            output_container.physical_k_recommendation = recommendation
         if vllm_version_is("0.28.0") and self.use_spec_pp and self.is_last_pp_rank:
             assert self.pp_handler is not None
             self.pp_handler.broadcast_draft_tokens()
@@ -256,6 +266,7 @@ class NPUModelRunner(GPUModelRunner):
         with graph_manager_wrapper(self), adaptive_verification_gate_wrapper(
             vllm_model_runner,
             self.compilation_config.cudagraph_mode,
+            self.vllm_config,
         ):
             super().initialize_kv_cache(kv_cache_config)
             if self.pcp_manager is not None:
@@ -807,15 +818,21 @@ class NPUModelRunner(GPUModelRunner):
         ``_lmhead_tp_max_num_logits()``; a mismatch hangs). Skipped for
         profiling and non-last PP ranks. Draft-side alignment is not covered.
         """
-        hidden_states, sample_hidden_states = super()._dummy_run(
-            num_tokens,
-            *args,
-            skip_attn=skip_attn,
-            uniform_decode=uniform_decode,
-            skip_eplb=skip_eplb,
-            is_profile=is_profile,
-            **kwargs,
+        from vllm_ascend.worker.v2.spec_decode.physical_k_profile import (
+            physical_k_profile_scope,
         )
+
+        profile_physical_k = kwargs.pop("profile_physical_k", None)
+        with physical_k_profile_scope(profile_physical_k):
+            hidden_states, sample_hidden_states = super()._dummy_run(
+                num_tokens,
+                *args,
+                skip_attn=skip_attn,
+                uniform_decode=uniform_decode,
+                skip_eplb=skip_eplb,
+                is_profile=is_profile,
+                **kwargs,
+            )
         if lmhead_tp_enable() and not is_profile and hidden_states is not None:
             dummy_indices = torch.zeros(
                 self._lmhead_tp_max_num_logits(),
