@@ -2443,7 +2443,10 @@ class NPUModelRunner(GPUModelRunner):
             update_cos_sin(positions)
 
         if self.kvpp.scheduler is not None:
-            self.kvpp.prepare_forward(bool(np.any(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)))
+            self.kvpp.prepare_forward(
+                bool(np.any(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)),
+                full_graph=cudagraph_mode == CUDAGraphMode.FULL,
+            )
 
         if self.dynamic_eplb:
             self.eplb_updator.forward_before()
@@ -3962,7 +3965,7 @@ class NPUModelRunner(GPUModelRunner):
                     return self.drafter.model.compute_logits(hidden_states[dummy_indices])
 
             active_device_metadata_executor = self._prepare_device_metadata_for_forward(cudagraph_runtime_mode)
-            self.kvpp.prepare_forward(False)
+            self.kvpp.prepare_forward(False, full_graph=cudagraph_runtime_mode == CUDAGraphMode.FULL)
 
             with set_ascend_forward_context(
                 attn_metadata,

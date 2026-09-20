@@ -89,7 +89,12 @@ class KVPPConfig:
 
         model_config = vllm_config.model_config
         if not model_config.enforce_eager:
-            raise ValueError("KVPP currently supports eager execution only; set --enforce-eager.")
+            from vllm.config import CUDAGraphMode
+
+            compilation_config = getattr(vllm_config, "compilation_config", None)
+            mode = getattr(compilation_config, "cudagraph_mode", None)
+            if mode not in (CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL_DECODE_ONLY):
+                raise ValueError("KVPP supports eager execution, PIECEWISE, or FULL_DECODE_ONLY.")
         if not model_config.use_mla or model_config.is_hybrid:
             raise ValueError("KVPP currently supports only non-hybrid MLA models.")
         speculative_config = vllm_config.speculative_config

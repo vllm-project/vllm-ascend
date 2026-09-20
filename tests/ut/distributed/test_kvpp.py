@@ -58,3 +58,19 @@ def test_full_layer_broadcast_completes_before_future(monkeypatch, local_rank):
     assert torch.all(payload == 17)
     assert torch.count_nonzero(backing[:2]) == 0
     assert torch.count_nonzero(backing[38:]) == 0
+
+
+def test_graph_broadcast_orders_completion_without_host_sync(monkeypatch):
+    group = SimpleNamespace(ranks=[4, 9], device_group=object())
+    payload, available, ready, transfer, work = (Mock() for _ in range(5))
+    monkeypatch.setattr(kvpp.torch.npu, "stream", lambda stream: nullcontext())
+    broadcast = Mock(return_value=work)
+    monkeypatch.setattr(kvpp.dist, "broadcast", broadcast)
+    transport = kvpp.BroadcastKVPPTransport(group, {"layer": 1}, {"layer": payload})
+    transport.prefetch_on_stream("layer", available, transfer, ready)
+    transfer.wait_event.assert_called_once_with(available)
+    broadcast.assert_called_once_with(payload, src=9, group=group.device_group, async_op=True)
+    work.wait.assert_called_once_with()
+    ready.record.assert_called_once_with(transfer)
+    ready.synchronize.assert_not_called()
+    transfer.synchronize.assert_not_called()

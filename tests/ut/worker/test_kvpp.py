@@ -20,7 +20,8 @@ from vllm_ascend.worker.v2 import kvpp
 @pytest.fixture
 def scheduler_device(monkeypatch):
     events: list[object] = []
-    compute, transfer = object(), object()
+    compute, transfer = Mock(), Mock()
+    compute.wait_event.side_effect = lambda event: events.append(("wait", event))
 
     def make_event():
         event = Mock()
@@ -32,6 +33,7 @@ def scheduler_device(monkeypatch):
     monkeypatch.setattr(kvpp.torch.npu, "current_stream", lambda: compute)
     monkeypatch.setattr(kvpp.torch.npu, "Stream", lambda: transfer)
     monkeypatch.setattr(kvpp.torch.npu, "Event", make_event)
+    monkeypatch.setattr(kvpp.torch.npu, "is_current_stream_capturing", lambda: True)
     monkeypatch.setattr(kvpp, "ThreadPoolExecutor", ManualExecutor)
     return events, compute, transfer
 
@@ -122,3 +124,109 @@ def test_hook_propagates_failed_future_without_scheduling_next(scheduler_device)
         scheduler.wait_for_layer(layer_name(0))
     assert raised.value is error
     assert len(scheduler._prefetch_executor.submitted) == 1
+
+
+@pytest.mark.parametrize("has_history", [False, True])
+def test_graph_prefetch_runs_one_layer_ahead(scheduler_device, has_history):
+    events, compute, transfer = scheduler_device
+    transport = Mock()
+    names = tuple(layer_name(i) for i in (2, 5, 8))
+    transport.prefetch_on_stream.side_effect = lambda name, available, stream, ready: events.append(
+        ("broadcast", name, available, stream, ready)
+    )
+    scheduler = kvpp.KVPPScheduler(transport, names)
+    scheduler.schedule_forward(has_history, full_graph=True)
+    assert not scheduler._prefetch_executor.submitted
+    assert not transport.prefetch_on_stream.called
+    for index, name in enumerate(names):
+        scheduler.wait_for_layer(name)
+        graph_events = scheduler._graph_events
+        ready = graph_events[index][1]
+        wait_index = events.index(("wait", ready))
+        if index + 1 < len(names):
+            available, next_ready = graph_events[index + 1]
+            assert events[wait_index + 1 :] == [
+                ("ready", available, compute),
+                ("broadcast", names[index + 1], available, transfer, next_ready),
+            ]
+        events.append(("compute", name))
+    assert transport.prefetch_on_stream.call_count == len(names)
+    assert not transport.prefetch.called
+    assert not scheduler._prefetch_executor.submitted
+    captured = scheduler._captured_events[0]
+    scheduler.complete_forward()
+    # Replay runs no Python hooks and must launch no eager prefetch.
+    scheduler.schedule_forward(True, full_graph=True)
+    scheduler.complete_forward()
+    assert scheduler._captured_events == [captured]
+    assert transport.prefetch_on_stream.call_count == len(names)
+
+
+def test_graph_capture_has_independent_events_and_checks_layer_order(scheduler_device):
+    scheduler = kvpp.KVPPScheduler(Mock(), (layer_name(0), layer_name(1)))
+    for _ in range(2):
+        scheduler.schedule_forward(False, full_graph=True)
+        with pytest.raises(RuntimeError, match="Unexpected KVPP graph layer"):
+            scheduler.wait_for_layer(layer_name(1))
+        scheduler.wait_for_layer(layer_name(0))
+        scheduler.wait_for_layer(layer_name(1))
+        scheduler.complete_forward()
+    first, second = scheduler._captured_events
+    assert all(a is not b for pair_a, pair_b in zip(first, second) for a, b in zip(pair_a, pair_b))
+
+
+def test_graph_dependencies_preserve_overlap_and_scratch_lifetime(monkeypatch, scheduler_device):
+    """Check device dependencies, including transitive serialization."""
+    dependencies = {}
+
+    class Stream:
+        def __init__(self):
+            self.tail = None
+
+        def enqueue(self, name, extra=None):
+            dependencies[name] = {node for node in (self.tail, extra) if node is not None}
+            self.tail = name
+
+        def wait_event(self, event):
+            self.enqueue((id(self), len(dependencies)), event.node)
+
+    class Event:
+        def record(self, stream):
+            self.node = stream.tail
+
+    compute, transfer = Stream(), Stream()
+    monkeypatch.setattr(kvpp.torch.npu, "current_stream", lambda: compute)
+    monkeypatch.setattr(kvpp.torch.npu, "Stream", lambda: transfer)
+    monkeypatch.setattr(kvpp.torch.npu, "Event", Event)
+    names = tuple(layer_name(i) for i in (2, 5, 8, 9))
+
+    def prefetch(name, available, stream, ready):
+        stream.wait_event(available)
+        stream.enqueue(("broadcast", names.index(name)))
+        ready.record(stream)
+
+    transport = Mock()
+    transport.prefetch_on_stream.side_effect = prefetch
+    scheduler = kvpp.KVPPScheduler(transport, names)
+    scheduler.schedule_forward(False, full_graph=True)
+    for index, name in enumerate(names):
+        scheduler.wait_for_layer(name)
+        compute.enqueue(("compute", index))
+
+    def ancestors(node):
+        result = set(dependencies[node])
+        for parent in dependencies[node]:
+            result.update(ancestors(parent))
+        return result
+
+    for index in range(len(names)):
+        # All ranks, including the owner, finish reading/writing the received
+        # history before this layer can update its KV cache.
+        assert ("broadcast", index) in ancestors(("compute", index))
+        if index > 0:
+            # No device dependency orders next communication after current
+            # compute, or makes current compute wait for next communication.
+            assert ("compute", index - 1) not in ancestors(("broadcast", index))
+            assert ("broadcast", index) not in ancestors(("compute", index - 1))
+        if index > 1:
+            assert ("compute", index - 2) in ancestors(("broadcast", index))

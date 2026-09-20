@@ -20,6 +20,14 @@ class BroadcastKVPPTransport:
         self._layer_buffers = layer_buffers
 
     def prefetch(self, layer_name: str, cache_ready: Any, transfer_stream: Any) -> None:
+        done = torch.npu.Event()
+        self.prefetch_on_stream(layer_name, cache_ready, transfer_stream, done)
+        # A Future must cover device completion, including the owner's source
+        # reads, before attention can overwrite the persistent cache.
+        done.synchronize()
+
+    def prefetch_on_stream(self, layer_name: str, cache_ready: Any, transfer_stream: Any, done: Any) -> None:
+        """Order the broadcast on device without synchronizing the host."""
         with torch.npu.stream(transfer_stream):
             transfer_stream.wait_event(cache_ready)
             work = dist.broadcast(
@@ -29,8 +37,4 @@ class BroadcastKVPPTransport:
                 async_op=True,
             )
             work.wait()
-            done = torch.npu.Event()
             done.record(transfer_stream)
-        # A Future must cover device completion, including the owner's source
-        # reads, before attention can overwrite the persistent cache.
-        done.synchronize()
