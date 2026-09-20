@@ -19,6 +19,8 @@ import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
 from vllm.v1.core.kv_cache_utils import _project_kv_cache_groups_to_worker
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
 
+from tests.ut.distributed.ascend_store.test_pool_worker import make_worker
+
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import mooncake_layerwise
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_layerwise import (
     hybrid_layout_id,
@@ -147,6 +149,36 @@ class TestHybridPpCoverage(unittest.TestCase):
         stage = project(make_groups(), STAGE0)
         stage[1].layer_names.clear()
         validate_hybrid_pp_coverage(as_config(stage), pp_config(pp_size=1))
+
+
+class TestLayerwiseSaveRankUnderDcp(unittest.TestCase):
+    """The save rule widened from one rank per head group to one per shard.
+
+    Before DCP only the first rank of each replicated KV-head group saved
+    (``tp_rank % put_step == 0``). A DCP rank holds a different token shard even
+    when its KV heads are replicated, so every shard must be saved: the rule is
+    ``tp_rank % put_step < dcp_size``, which degenerates to the old one at
+    ``dcp_size == 1`` — the case a hybrid model without DCP still takes.
+    """
+
+    def save_ranks(self, dcp_size: int) -> list[bool]:
+        return [
+            make_worker(
+                self,
+                tp_rank=tp_rank,
+                tp_size=4,
+                dcp_size=dcp_size,
+                num_kv_heads=1,
+                use_mla=True,
+                use_layerwise=True,
+            )._is_layerwise_save_rank()
+            for tp_rank in range(4)
+        ]
+
+    def test_save_rank_matrix(self):
+        self.assertEqual(self.save_ranks(dcp_size=1), [True, False, False, False])
+        self.assertEqual(self.save_ranks(dcp_size=2), [True, True, False, False])
+        self.assertEqual(self.save_ranks(dcp_size=4), [True, True, True, True])
 
 
 class TestHybridKeyCoordinates(unittest.TestCase):
