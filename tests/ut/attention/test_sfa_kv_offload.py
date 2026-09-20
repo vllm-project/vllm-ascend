@@ -34,6 +34,62 @@ def _make_boundary_decode_metadata():
     )
 
 
+@pytest.mark.parametrize("enabled", [True, False])
+def test_fused_metadata_checks_do_not_change_mtp_flattening(enabled):
+    impl = AscendSFAKVOffloadImpl.__new__(AscendSFAKVOffloadImpl)
+    metadata = SimpleNamespace(token_to_req=torch.tensor([0, 0, 1, 1], dtype=torch.int32))
+    cumulative = torch.tensor([2, 4], dtype=torch.int32)
+    lengths = torch.tensor([12, 22], dtype=torch.int32)
+    blocks = torch.tensor([[10, 11], [20, 21]], dtype=torch.int32)
+    with (
+        patch(
+            "vllm_ascend.attention.sfa_kv_offload.get_forward_context", return_value=SimpleNamespace(capturing=False)
+        ),
+        patch("vllm_ascend.attention.sfa_kv_offload.envs_ascend.VLLM_ASCEND_FSA_VALIDATE_DEVICE_METADATA", enabled),
+    ):
+        impl._validate_fused_overlap_mtp_decode_metadata(
+            metadata, num_tokens=4, num_reqs=2, full_q_actual_seq=cumulative, full_kv_actual_seq=lengths
+        )
+        observed = impl._flatten_fused_overlap_mtp_to_token_batch(
+            metadata,
+            num_tokens=4,
+            num_reqs=2,
+            full_q_actual_seq=cumulative,
+            full_kv_actual_seq=lengths,
+            full_kv_block_table=blocks,
+        )
+    torch.testing.assert_close(observed[0], torch.tensor([1, 2, 3, 4], dtype=torch.int32))
+    torch.testing.assert_close(observed[1], torch.tensor([11, 12, 21, 22], dtype=torch.int32))
+    torch.testing.assert_close(observed[2], blocks[torch.tensor([0, 0, 1, 1])])
+
+
+def test_disabling_device_checks_preserves_shape_validation_without_item():
+    impl = AscendSFAKVOffloadImpl.__new__(AscendSFAKVOffloadImpl)
+    metadata = SimpleNamespace(token_to_req=torch.tensor([0, 0], dtype=torch.int32))
+    with (
+        patch(
+            "vllm_ascend.attention.sfa_kv_offload.get_forward_context", return_value=SimpleNamespace(capturing=False)
+        ),
+        patch("vllm_ascend.attention.sfa_kv_offload.envs_ascend.VLLM_ASCEND_FSA_VALIDATE_DEVICE_METADATA", False),
+        patch.object(torch.Tensor, "item", side_effect=AssertionError("unexpected device-value read")),
+    ):
+        impl._validate_fused_overlap_mtp_decode_metadata(
+            metadata,
+            num_tokens=2,
+            num_reqs=1,
+            full_q_actual_seq=torch.tensor([2]),
+            full_kv_actual_seq=torch.tensor([10]),
+        )
+        with pytest.raises(RuntimeError, match="token_to_req length mismatch"):
+            impl._validate_fused_overlap_mtp_decode_metadata(
+                metadata,
+                num_tokens=3,
+                num_reqs=1,
+                full_q_actual_seq=torch.tensor([3]),
+                full_kv_actual_seq=torch.tensor([10]),
+            )
+
+
 @pytest.mark.parametrize(
     ("kv_transfer_config", "expected"),
     [

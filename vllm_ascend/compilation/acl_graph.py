@@ -20,6 +20,7 @@ from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import logger
 from vllm.platforms import current_platform
 
+from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 
@@ -201,6 +202,10 @@ class ACLGraphWrapper:
             aclgraph = UpdatableGraph()
 
             with ExitStack() as stack:
+                if ascend_envs.VLLM_ASCEND_FSA_REUSE_WRITEBACK_LAYOUT:
+                    stack.enter_context(
+                        patch.object(forward_context, "ascend_graph_capture_token", object(), create=True)
+                    )
                 if self.aclgraph_options.gc_disable:
                     # during every model forward for piecewise aclgraph
                     # mode, we will capture many pieces of aclgraphs

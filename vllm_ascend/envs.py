@@ -87,6 +87,24 @@ env_variables: dict[str, Callable[[], Any]] = {
     # (safe for Ascend 910B/A3). Set to a positive value to override when
     # auto-detection is unavailable or for debugging UB overflow issues.
     "VLLM_ASCEND_ROPE_UB_SIZE_KB": lambda: int(os.getenv("VLLM_ASCEND_ROPE_UB_SIZE_KB") or 0),
+    # Non-sensitive FSA scheduling: 1 (default) enables the dynamic planner stream; 0 disables it.
+    "VLLM_ASCEND_FSA_ASYNC_PLAN": lambda: bool(int(os.getenv("VLLM_ASCEND_FSA_ASYNC_PLAN", "1"))),
+    # Non-sensitive FSA layout reuse within a graph capture: 1 (default); 0 disables it.
+    "VLLM_ASCEND_FSA_REUSE_WRITEBACK_LAYOUT": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_FSA_REUSE_WRITEBACK_LAYOUT", "1"))
+    ),
+    # Non-sensitive runtime descriptor fusion: 1 (default); 0 disables it. Preserves MemFabric copy.
+    "VLLM_ASCEND_FSA_FUSED_WRITEBACK_DESCRIPTORS": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_FSA_FUSED_WRITEBACK_DESCRIPTORS", "1"))
+    ),
+    # Non-sensitive paired K/Rope scatter: 1 (default); 0 disables it. Native fallback remains.
+    "VLLM_ASCEND_FSA_PAIRED_CURRENT_SCATTER": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_FSA_PAIRED_CURRENT_SCATTER", "1"))
+    ),
+    # Non-sensitive device-value checks: 0 (default) skips optional checks; 1 enables validation.
+    "VLLM_ASCEND_FSA_VALIDATE_DEVICE_METADATA": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_FSA_VALIDATE_DEVICE_METADATA", "0"))
+    ),
 }
 
 # end-env-vars-definition

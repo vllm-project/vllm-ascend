@@ -19,6 +19,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     get_tp_group,
 )
+from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import AttentionBackend
@@ -30,6 +31,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.utils import CpuGpuBuffer
 
+from vllm_ascend import envs
 from vllm_ascend.ascend_config import SparseKVOffloadConfig, get_ascend_config
 from vllm_ascend.utils import AscendDeviceType, enable_custom_op, get_ascend_device_type
 
@@ -47,6 +49,7 @@ OFFLOAD_TOPK_BUFFER_V_INDEX = 5
 
 FSA_EXTERNAL_PLAN_READY_MARKER = 0x5A45
 FSA_PAIRED_SELECTION_COPY_MARKER = 0x5A56
+FSA_WRITEBACK_MAX_TOKEN_CAPACITY = 1 << 31
 FSA_SELECTION_MEMBERSHIP_MAP_INT16_COUNT = 16376
 FSA_SELECTION_MEMBERSHIP_ALIGNMENT_INT16_COUNT = 16
 FSA_SELECTION_MEMBERSHIP_CONTROL_INT16_COUNT = 8
@@ -778,6 +781,10 @@ class SparseKVOffloadManager:
         if self.use_fused_overlap:
             self.current_kv_save_stream = torch_npu.npu.Stream()
             self.fused_plan_stream = torch_npu.npu.Stream()
+            self.fused_async_plan = envs.VLLM_ASCEND_FSA_ASYNC_PLAN
+            self.fused_reuse_writeback_layout = envs.VLLM_ASCEND_FSA_REUSE_WRITEBACK_LAYOUT
+            self.fused_writeback_capture_token = None
+            self.fused_writeback_layouts = {}
             self.fused_plan_metadata_npu = torch.zeros(
                 1 + self.max_num_topk_rows,
                 dtype=torch.int32,
@@ -789,6 +796,8 @@ class SparseKVOffloadManager:
         self.d2h_size_npu = torch.empty(1, dtype=torch.int32, device=device)
         self.d2h_token_indices_npu = torch.arange(self.max_num_tokens, dtype=torch.int64, device=device)
 
+        self._initialize_fused_writeback_descriptors()
+        self._initialize_paired_current_scatter()
         pages_per_row = self.topk_buffer_size // self.block_size
         self.current_slots_npu = torch.empty(
             (self.max_num_topk_rows, self.topk),
@@ -1074,6 +1083,36 @@ class SparseKVOffloadManager:
         self.lru_epochs_ptr = self.lru_epochs.data_ptr()
         self.lru_physical_row_workspace_ptr = self.lru_physical_row_workspace.data_ptr()
 
+    def _initialize_paired_current_scatter(self) -> None:
+        self.fused_current_scatter = None
+        if not self.use_fused_overlap or self.max_num_tokens == 0 or not envs.VLLM_ASCEND_FSA_PAIRED_CURRENT_SCATTER:
+            return
+        from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.current_kv_scatter import (
+            try_paired_current_scatter,
+            warmup_current_scatter,
+        )
+
+        warmup_current_scatter(self)
+        self.fused_current_scatter = try_paired_current_scatter
+
+    def _initialize_fused_writeback_descriptors(self) -> None:
+        self.fused_writeback_descriptor_builder = None
+        if (
+            not self.use_fused_overlap
+            or self.tp_rank != 0
+            or self.max_num_tokens == 0
+            or not envs.VLLM_ASCEND_FSA_FUSED_WRITEBACK_DESCRIPTORS
+        ):
+            return
+        from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.writeback_descriptors import (
+            build_writeback_descriptors,
+            warmup_writeback_descriptors,
+        )
+
+        warmup_writeback_descriptors(self)
+        self.fused_writeback_descriptor_builder = build_writeback_descriptors
+        self.fused_reuse_writeback_layout = False
+
     def offload_new_kv(
         self,
         layer_name: str,
@@ -1090,6 +1129,17 @@ class SparseKVOffloadManager:
         if not has_prefill and k is not None and v is not None and self.use_fused_overlap:
             layer_id = self._get_offload_layer_id(layer_name)
             self.current_kv_by_layer[layer_id] = (k, v)
+        if (
+            capturing
+            and not has_prefill
+            and self.tp_rank == 0
+            and self.use_fused_overlap
+            and getattr(self, "fused_reuse_writeback_layout", False)
+        ):
+            capture_token = getattr(get_forward_context(), "ascend_graph_capture_token", None)
+            if capture_token is not getattr(self, "fused_writeback_capture_token", None):
+                self.fused_writeback_capture_token = capture_token
+                self.fused_writeback_layouts = {}
         use_side_stream = self.tp_rank == 0 and self.use_fused_overlap and capturing and not has_prefill
         if not use_side_stream:
             self._offload_new_kv_on_current_stream(
@@ -1101,6 +1151,7 @@ class SparseKVOffloadManager:
                 k,
                 v,
                 has_prefill,
+                capturing=capturing,
             )
             return
 
@@ -1116,6 +1167,7 @@ class SparseKVOffloadManager:
                 k,
                 v,
                 has_prefill,
+                capturing=capturing,
             )
 
     def _offload_new_kv_on_current_stream(
@@ -1169,8 +1221,68 @@ class SparseKVOffloadManager:
             raise ValueError(
                 f"Sparse KV offload CPU K/V pools have incompatible token capacities: k={num_k_slots}, v={num_v_slots}"
             )
-        valid = (slots >= 0) & (slots < num_k_slots)
-        safe_slots = slots.clamp(min=0, max=num_k_slots - 1)
+        descriptor_builder = getattr(self, "fused_writeback_descriptor_builder", None)
+        if (
+            self.use_fused_overlap
+            and not has_prefill
+            and descriptor_builder is not None
+            and token_count > 0
+            and num_k_slots < FSA_WRITEBACK_MAX_TOKEN_CAPACITY
+            and k.dtype == torch.bfloat16
+            and v.dtype == torch.bfloat16
+        ):
+            k_rows = k.reshape(-1, self.token_size_bytes_k // k.element_size()).contiguous()
+            v_rows = v.reshape(-1, self.token_size_bytes_v // v.element_size()).contiguous()
+            if k_rows.shape[0] != token_count or v_rows.shape[0] != token_count:
+                raise ValueError("decode K/V row counts must match slot_mapping")
+            descriptor_builder(
+                slots,
+                k_rows,
+                v_rows,
+                self.d2h_src_ptrs_npu,
+                self.d2h_dst_ptrs_npu,
+                self.d2h_lengths_npu,
+                self.d2h_size_npu,
+                num_k_slots,
+                k_cache_cpu.data_ptr(),
+                v_cache_cpu.data_ptr(),
+                self.token_size_bytes_k,
+                self.token_size_bytes_v,
+            )
+            result = offload.sparse_copy(
+                self.d2h_src_ptrs_npu,
+                self.d2h_dst_ptrs_npu,
+                self.d2h_lengths_npu,
+                self.d2h_size_npu,
+                device,
+            )
+            if result not in (None, 0):
+                raise RuntimeError(f"memfabric D2H sparse_copy failed with result={result}")
+            return
+        layout_cache = None
+        cached_layout = None
+        if (
+            capturing
+            and not has_prefill
+            and getattr(self, "fused_reuse_writeback_layout", False)
+            and getattr(self, "fused_writeback_capture_token", None) is not None
+            and getattr(get_forward_context(), "ascend_graph_capture_token", None) is self.fused_writeback_capture_token
+        ):
+            layout_cache = self.fused_writeback_layouts
+            layout_key = (
+                id(slot_mapping),
+                num_k_slots,
+                self.token_size_bytes_k,
+                self.token_size_bytes_v,
+                device,
+                torch_npu.npu.current_stream().npu_stream,
+            )
+            cached_layout = layout_cache.get(layout_key)
+        if cached_layout is None:
+            valid = (slots >= 0) & (slots < num_k_slots)
+            safe_slots = slots.clamp(min=0, max=num_k_slots - 1)
+        else:
+            _, valid, safe_slots, key_offsets, rope_offsets = cached_layout
 
         if has_prefill:
             assert k_cache_npu is not None and v_cache_npu is not None
@@ -1190,8 +1302,16 @@ class SparseKVOffloadManager:
             src_k = int(k_rows.data_ptr()) + token_indices * self.token_size_bytes_k
             src_v = int(v_rows.data_ptr()) + token_indices * self.token_size_bytes_v
 
-        dst_k = int(k_cache_cpu.data_ptr()) + safe_slots * self.token_size_bytes_k
-        dst_v = int(v_cache_cpu.data_ptr()) + safe_slots * self.token_size_bytes_v
+        if layout_cache is None:
+            dst_k = int(k_cache_cpu.data_ptr()) + safe_slots * self.token_size_bytes_k
+            dst_v = int(v_cache_cpu.data_ptr()) + safe_slots * self.token_size_bytes_v
+        else:
+            if cached_layout is None:
+                key_offsets = safe_slots * self.token_size_bytes_k
+                rope_offsets = safe_slots * self.token_size_bytes_v
+                layout_cache[layout_key] = (slot_mapping, valid, safe_slots, key_offsets, rope_offsets)
+            dst_k = int(k_cache_cpu.data_ptr()) + key_offsets
+            dst_v = int(v_cache_cpu.data_ptr()) + rope_offsets
         self.d2h_src_ptrs_npu[:token_count].copy_(src_k)
         self.d2h_src_ptrs_npu[token_count : 2 * token_count].copy_(src_v)
         self.d2h_dst_ptrs_npu[:token_count].copy_(dst_k)
@@ -1362,6 +1482,7 @@ class SparseKVOffloadManager:
             plan_start:FSA_SELECTION_MEMBERSHIP_REQUIRER_COLUMNS,
         ]
         encoded_plan_stride = selection_membership_map.stride(0)
+        async_plan = capturing or self.fused_async_plan
 
         owner_layer_id = self.fused_overlap_plan_owner_layer_id
         owner_map = self.fused_overlap_plan_membership_map
@@ -1376,6 +1497,8 @@ class SparseKVOffloadManager:
         if can_reuse_owner_plan:
             assert owner_map is not None
             if selection_membership_map.data_ptr() != owner_map.data_ptr():
+                if self.fused_async_plan and not capturing:
+                    self.fused_plan_stream.synchronize()
                 if capturing:
                     torch_npu.npu.current_stream().wait_stream(self.fused_plan_stream)
                 plan_storage.copy_(
@@ -1420,15 +1543,23 @@ class SparseKVOffloadManager:
                 self.lru_visible_seq_lens_ptr,
             )
 
-        if capturing:
+        def copy_inputs(non_blocking: bool) -> None:
+            for target, tensor in (
+                (self.lru_topk_indices_cpu, topk_indices_npu),
+                (self.lru_req_ids_cpu, req_ids_npu),
+                (self.lru_stable_prefix_lens_cpu, stable_prefix_lens_npu),
+                (self.lru_visible_seq_lens_cpu, visible_seq_lens_npu),
+            ):
+                target[:num_tokens].copy_(tensor, non_blocking=non_blocking)
+                if non_blocking and not capturing:
+                    tensor.record_stream(self.fused_plan_stream)
+
+        if async_plan:
             plan_inputs_ready = torch_npu.npu.current_stream().record_event()
             with torch_npu.npu.stream(self.fused_plan_stream):
                 self.fused_plan_stream.wait_event(plan_inputs_ready)
                 if self.tp_rank == 0:
-                    self.lru_topk_indices_cpu[:num_tokens].copy_(topk_indices_npu, non_blocking=True)
-                    self.lru_req_ids_cpu[:num_tokens].copy_(req_ids_npu, non_blocking=True)
-                    self.lru_stable_prefix_lens_cpu[:num_tokens].copy_(stable_prefix_lens_npu, non_blocking=True)
-                    self.lru_visible_seq_lens_cpu[:num_tokens].copy_(visible_seq_lens_npu, non_blocking=True)
+                    copy_inputs(non_blocking=True)
                     run_planner(enqueue=True)
                     self.fused_plan_current_linear_slots_npu[:num_tokens].copy_(
                         self.lru_physical_row_workspace[
@@ -1436,6 +1567,8 @@ class SparseKVOffloadManager:
                         ],
                         non_blocking=True,
                     )
+                    if capturing and self.tp_size > 1:
+                        self.fused_plan_stream.wait_stream(self.current_kv_save_stream)
                 self.tp_group.broadcast(self.fused_plan_metadata_npu, src=0)
             self.fused_overlap_plan_owner_layer_id = layer_id
             self.fused_overlap_plan_topk = self.topk
@@ -1447,10 +1580,7 @@ class SparseKVOffloadManager:
         if self.tp_rank == 0:
             self.fused_plan_status_npu.zero_()
             try:
-                self.lru_topk_indices_cpu[:num_tokens].copy_(topk_indices_npu)
-                self.lru_req_ids_cpu[:num_tokens].copy_(req_ids_npu)
-                self.lru_stable_prefix_lens_cpu[:num_tokens].copy_(stable_prefix_lens_npu)
-                self.lru_visible_seq_lens_cpu[:num_tokens].copy_(visible_seq_lens_npu)
+                copy_inputs(non_blocking=False)
                 run_planner(enqueue=False)
                 self.fused_plan_current_linear_slots_npu[:num_tokens].copy_(
                     self.lru_physical_row_workspace[
@@ -1542,8 +1672,12 @@ class SparseKVOffloadManager:
         current_kv = self.current_kv_by_layer.get(layer_id)
         if current_kv is None:
             raise RuntimeError(f"current decode K/V is unavailable for fused layer {layer_name}")
-        if capturing:
+        if capturing or self.fused_async_plan:
             torch_npu.npu.current_stream().wait_stream(self.fused_plan_stream)
+        if self.tp_rank == 0 and capturing:
+            torch_npu.npu.current_stream().wait_stream(self.current_kv_save_stream)
+        if capturing and self.tp_size > 1 and layer_id != self.fused_overlap_plan_owner_layer_id:
+            self.tp_group.broadcast(self.fused_plan_status_npu, src=0)
         current_k, current_rope = current_kv
         current_k = current_k.reshape(-1, selection_kv_cache.shape[-1])[:num_tokens]
         current_rope = current_rope.reshape(-1, selection_k_rope.shape[-1])[:num_tokens]
@@ -1551,6 +1685,9 @@ class SparseKVOffloadManager:
         indices = linear_slots.view(-1, 1)
         flat_kv = selection_kv_cache.reshape(-1, selection_kv_cache.shape[-1])
         flat_rope = selection_k_rope.reshape(-1, selection_k_rope.shape[-1])
+        paired_scatter = getattr(self, "fused_current_scatter", None)
+        if paired_scatter is not None and paired_scatter(linear_slots, current_k, current_rope, flat_kv, flat_rope):
+            return
         torch_npu.npu_scatter_nd_update_(flat_kv, indices, current_k)
         torch_npu.npu_scatter_nd_update_(flat_rope, indices, current_rope)
 
