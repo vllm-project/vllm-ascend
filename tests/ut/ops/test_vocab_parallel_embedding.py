@@ -18,6 +18,7 @@ from unittest import mock
 from unittest.mock import MagicMock, patch
 
 import torch
+from vllm.config.vllm import set_current_vllm_config
 
 from vllm_ascend.distributed import parallel_state
 from vllm_ascend.ops.vocab_parallel_embedding import (
@@ -39,6 +40,7 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
         self.mock_group = mock.MagicMock()
         self.mock_group.world_size = 2
         self.mock_group.rank_in_group = 0
+        self.mock_group.unique_name = "test_tp_group"
 
         parallel_state._MLP_TP = self.mock_group
         parallel_state._OTP = self.mock_group
@@ -56,6 +58,10 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
                 "vllm.distributed.parallel_state.get_tp_group",
                 return_value=self.mock_group,
             ),
+            patch(
+                "vllm_ascend.ops.vocab_parallel_embedding.get_tp_group",
+                return_value=self.mock_group,
+            ),
         ]
 
         for p in self.patches:
@@ -69,11 +75,6 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
         mock_group.rank_in_group = 0
         with (
             patch("vllm_ascend.ops.vocab_parallel_embedding.get_tp_group", return_value=mock_group),
-            patch("vllm.model_executor.layers.vocab_parallel_embedding.get_tensor_model_parallel_rank", return_value=0),
-            patch(
-                "vllm.model_executor.layers.vocab_parallel_embedding.get_tensor_model_parallel_world_size",
-                return_value=2,
-            ),
             patch("vllm.model_executor.layers.vocab_parallel_embedding.pad_vocab_size", side_effect=lambda x, y: x + y),
             patch("vllm.model_executor.layers.vocab_parallel_embedding.divide", side_effect=lambda x, y: x // y),
         ):
@@ -129,19 +130,21 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
         # Create a fresh mock embedding with tp_size=1
         layer = self._create_layer()
         layer.tp_size = 1
+        self.mock_group.world_size = 1
         layer.quant_method.embedding = MagicMock(return_value=torch.randn(3, layer.embedding_dim))
 
         input_ = torch.tensor([1, 2, 3])
 
-        with patch("torch.ops.vllm.maybe_pad_and_reduce", side_effect=lambda x: x) as mock_reduce_tp1:
+        with patch("torch.ops.vllm.all_reduce", side_effect=lambda x, _: x) as mock_reduce_tp1:
             output = layer.forward(input_)
 
         # Should just pass through without masking
         layer.quant_method.embedding.assert_called_once_with(layer, input_.long())
         self.assertEqual(output.shape, (3, layer.embedding_dim))
 
-        # Verify all_reduce was called once
-        mock_reduce_tp1.assert_called_once()
+        # A tp_size==1 layer already holds the full output locally (e.g. the
+        # replicated DSpark Markov head), so the reduce must be skipped.
+        mock_reduce_tp1.assert_not_called()
 
     def test_forward_with_tp(self):
         layer = self._create_layer()
@@ -149,7 +152,7 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
 
         input_ = torch.tensor([15, 35])  # one org vocab, one added vocab
 
-        with patch("torch.ops.vllm.maybe_pad_and_reduce", side_effect=lambda x: x) as mock_reduce_tp:
+        with patch("torch.ops.vllm.all_reduce", side_effect=lambda x, _: x) as mock_reduce_tp:
             # Call the forward method
             output = layer.forward(input_)
 
@@ -163,6 +166,23 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
         mock_reduce_tp.assert_called_once()
         self.assertEqual(output.shape, (2, self.embedding_dim))
 
+    def test_sequence_parallel_moe_keeps_complete_embedding(self):
+        layer = self._create_layer()
+        input_ = torch.tensor([15, 35, 16, 36])
+        mock_vllm_config = MagicMock()
+        mock_vllm_config.parallel_config.use_sequence_parallel_moe = True
+
+        with (
+            set_current_vllm_config(mock_vllm_config),
+            patch("torch.ops.vllm.all_reduce", side_effect=lambda x, _: x) as mock_all_reduce,
+            patch("torch.ops.vllm.reduce_scatter") as mock_reduce_scatter,
+        ):
+            output = layer.forward(input_)
+
+        self.assertEqual(output.shape, (input_.shape[0], self.embedding_dim))
+        mock_all_reduce.assert_called_once()
+        mock_reduce_scatter.assert_not_called()
+
     def test_forward_with_invalid_vocab(self):
         """Test that invalid vocab indices are properly masked out."""
         # Create a fresh embedding layer
@@ -173,7 +193,7 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
         layer.quant_method.embedding = MagicMock(return_value=mock_output.clone())
 
         # Patch tensor_model_parallel_all_reduce to mock its behavior
-        with patch("torch.ops.vllm.maybe_pad_and_reduce", side_effect=lambda x: x):
+        with patch("torch.ops.vllm.all_reduce", side_effect=lambda x, _: x):
             # Call the forward method
             output = layer.forward(input_)
         # Check that invalid positions (0, 2, 4) were zeroed out
@@ -197,10 +217,78 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
 
         for input_, expected_shape in test_cases:
             with self.subTest(input=input_):
-                with patch("torch.ops.vllm.maybe_pad_and_reduce", side_effect=lambda x: x):
+                with patch("torch.ops.vllm.all_reduce", side_effect=lambda x, _: x):
                     # Call the forward method
                     output = layer.forward(input_)
                 self.assertEqual(output.shape, expected_shape)
+
+    def test_disable_tp(self):
+        layer = AscendVocabParallelEmbedding(
+            num_embeddings=self.num_embeddings,
+            embedding_dim=self.embedding_dim,
+            org_num_embeddings=self.org_num_embeddings,
+            padding_size=self.padding_size,
+            quant_config=None,
+            prefix="",
+            disable_tp=True,
+        )
+
+        self.assertTrue(layer.disable_tp)
+        self.assertIs(layer.comm_group, parallel_state.get_replicated_group())
+        self.assertEqual(layer.tp_size, 1)
+        self.assertEqual(layer.tp_rank, 0)
+
+    def test_dspark_markov_lm_head_replicated(self):
+        """The DSpark markov lm_head is replicated on every rank (vllm#49731).
+
+        vllm's DSparkMarkovHead constructs markov_w2 as a ParallelLMHead with
+        disable_tp=True; its prefix ("layers.N.markov_head.markov_w2")
+        contains "head", so disable_tp must win over the lmhead prefix match
+        even when lmhead_tp is enabled — setUp makes lmhead_tp_enable()
+        return True — and pin the layer to the world_size=1 ReplicatedGroup
+        so every rank holds the full table and forward skips all
+        communication.
+        """
+        markov_group = MagicMock()
+        markov_group.world_size = 1
+        markov_group.rank_in_group = 0
+        with (
+            patch("vllm_ascend.ops.vocab_parallel_embedding.get_replicated_group", return_value=markov_group),
+            patch("vllm_ascend.ops.vocab_parallel_embedding.get_tp_group", return_value=MagicMock()),
+            patch(
+                "vllm.model_executor.layers.vocab_parallel_embedding.get_tensor_model_parallel_rank",
+                return_value=0,
+            ),
+            patch(
+                "vllm.model_executor.layers.vocab_parallel_embedding.get_tensor_model_parallel_world_size",
+                return_value=2,
+            ),
+            patch(
+                "vllm.model_executor.layers.vocab_parallel_embedding.pad_vocab_size",
+                side_effect=lambda x, y: x + y,
+            ),
+            patch("vllm.model_executor.layers.vocab_parallel_embedding.divide", side_effect=lambda x, y: x // y),
+        ):
+            layer = AscendVocabParallelEmbedding(
+                num_embeddings=self.num_embeddings,
+                embedding_dim=self.embedding_dim,
+                org_num_embeddings=self.org_num_embeddings,
+                padding_size=self.padding_size,
+                quant_config=None,
+                prefix="layers.0.markov_head.markov_w2",
+                disable_tp=True,
+            )
+
+        self.assertIs(layer.comm_group, markov_group)
+        self.assertEqual(layer.tp_size, 1)
+        self.assertEqual(layer.tp_rank, 0)
+        self.assertIsNone(layer.forward_type)
+
+        # tp_size==1: shard indices cover the full padded vocab, so each rank
+        # holds the entire markov table (no padding rows reserved for peers).
+        self.assertEqual(layer.num_embeddings_per_partition, layer.num_embeddings_padded)
+        self.assertEqual(layer.num_org_embeddings_per_partition, layer.org_vocab_size_padded)
+        self.assertEqual(layer.num_added_embeddings_per_partition, layer.num_added_embeddings)
 
 
 class TestAscendLogitsProcessor(unittest.TestCase):
@@ -272,3 +360,38 @@ class TestAscendLogitsProcessor(unittest.TestCase):
         self.mock_all_to_all_single.assert_called_once()
         # [N/P, V] after redistribution, then truncated to org_vocab_size.
         self.assertEqual(logits.shape, (1, self.vocab_size))
+
+    def test_get_logits_replicated_head_takes_normal_path(self):
+        """A replicated head (tp_size==1, e.g. the DSpark Markov w2) must not
+        join the lmhead_tp logits exchange even when lmhead_tp is enabled:
+        it holds the full table locally, so gathering/scattering across the
+        finegrained group would be wrong."""
+        hidden_states = torch.randn(1, 4)
+        replicated_head = MagicMock()
+        replicated_head.tp_size = 1
+        processor = AscendLogitsProcessor(vocab_size=self.vocab_size)
+        with (
+            patch.object(processor, "_get_logits_normal", return_value="normal") as mock_normal,
+            patch.object(processor, "_get_logits_lmheadtp") as mock_lmheadtp,
+        ):
+            result = processor._get_logits(hidden_states, replicated_head, None)
+
+        self.assertEqual(result, "normal")
+        mock_normal.assert_called_once_with(hidden_states, replicated_head, None)
+        mock_lmheadtp.assert_not_called()
+
+    def test_get_logits_sharded_head_takes_lmheadtp_path(self):
+        """A tp_size>1 lm_head keeps the lmhead_tp path (guard precision)."""
+        hidden_states = torch.randn(1, 4)
+        sharded_head = MagicMock()
+        sharded_head.tp_size = 2
+        processor = AscendLogitsProcessor(vocab_size=self.vocab_size)
+        with (
+            patch.object(processor, "_get_logits_normal") as mock_normal,
+            patch.object(processor, "_get_logits_lmheadtp", return_value="lmheadtp") as mock_lmheadtp,
+        ):
+            result = processor._get_logits(hidden_states, sharded_head, None)
+
+        self.assertEqual(result, "lmheadtp")
+        mock_lmheadtp.assert_called_once_with(hidden_states, sharded_head, None)
+        mock_normal.assert_not_called()

@@ -46,7 +46,7 @@ from tools.bisect.config import (
 )
 from tools.bisect.coordinator import Coordinator
 from tools.bisect.verdict import RunOutcome
-from tools.bisect.vllm_compat import check_compatible, check_compatible_at
+from tools.bisect.version_compat import VersionAdaptationError, VersionAdapter, VersionPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +93,16 @@ class BaseRunner:
         self.opt = opt
         self.builder = builder
         self.repo = opt.repo_dir
+        self.version_adapter = VersionAdapter(opt)
+        self.version_policy = VersionPolicy()
+
+    def configure_version_policy(self, policy: VersionPolicy) -> None:
+        self.version_policy = policy
+
+    def _ensure_versions(self, commit: str, log_path: Path) -> None:
+        if not self.version_policy.enabled:
+            return
+        self.version_adapter.ensure_at_commit(self.repo, commit, self.version_policy, log_path)
 
     def _base_env(self) -> dict[str, str]:
         env = dict(os.environ)
@@ -109,22 +119,6 @@ class BaseRunner:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    def _vllm_skip_outcome(self, rebuilt: bool) -> RunOutcome | None:
-        """After checkout, SKIP the commit if its pinned vLLM != the installed one.
-
-        Returns a SKIP RunOutcome on a confident mismatch, else None (proceed).
-        Avoids wasting a full pytest run on a commit that can only fail to
-        collect/import against the container's vLLM.
-        """
-        compatible, reason = check_compatible(self.repo)
-        if compatible:
-            logger.info("[vllm-compat] %s", reason)
-            return None
-        logger.warning("[vllm-compat] %s -> SKIP", reason)
-        outcome = RunOutcome(exit_code=0, infra_error=True, skip_reason=reason)
-        outcome.rebuilt = rebuilt  # type: ignore[attr-defined]
-        return outcome
-
     def validate(self, candidate: Candidate, round_idx: int, log_dir: Path) -> RunOutcome:
         raise NotImplementedError
 
@@ -139,12 +133,7 @@ class SingleNodeRunner(BaseRunner):
     def validate(self, candidate: Candidate, round_idx: int, log_dir: Path) -> RunOutcome:
         log_path = log_dir / f"round{round_idx}_{candidate.short}.log"
         decision = self.builder.prepare(candidate.commit, log_path)  # may raise BuildError
-
-        # vLLM/vllm-ascend version skew check: a commit pinned to a different
-        # vLLM than the container's cannot be validly tested -> SKIP cleanly.
-        skip = self._vllm_skip_outcome(decision.rebuild)
-        if skip is not None:
-            return skip
+        self._ensure_versions(candidate.commit, log_path)
 
         # Run the WHOLE yaml (all test_cases): nightly cannot select a single
         # case, so we don't pass -k. Each case writes its own benchmark JSON
@@ -189,32 +178,34 @@ class MultiNodeRunner(BaseRunner):
     def validate(self, candidate: Candidate, round_idx: int, log_dir: Path) -> RunOutcome:
         log_path = log_dir / f"round{round_idx}_{candidate.short}.log"
         decision = self.builder.decide(candidate.commit)
-
-        # 1) vLLM/vllm-ascend version skew: read this commit's pinned vLLM tag
-        # *without* checking it out (same container vLLM on every node, so the
-        # decision is identical cluster-wide). On a mismatch publish a SKIP
-        # command so workers consume the round and stay in lockstep, but neither
-        # side deploys or runs.
-        compatible, reason = check_compatible_at(self.repo, candidate.commit)
-        if not compatible:
-            logger.warning("[vllm-compat] %s -> SKIP", reason)
-            self.coord.publish_command(round_idx, candidate.commit, decision.rebuild, action="SKIP")
-            outcome = RunOutcome(exit_code=0, infra_error=True, skip_reason=reason)
-            outcome.rebuilt = False  # type: ignore[attr-defined]
-            return outcome
-        logger.info("[vllm-compat] %s", reason)
-
-        # 2) tell every node to deploy this commit, then deploy locally too.
-        self.coord.publish_command(round_idx, candidate.commit, decision.rebuild, action="RUN")
+        version_targets = self.version_adapter.targets_at(self.repo, candidate.commit, self.version_policy)
+        self.coord.publish_command(
+            round_idx,
+            candidate.commit,
+            decision.rebuild,
+            action="RUN",
+            version_targets=version_targets,
+            version_checks=self.version_policy.checked_packages,
+        )
         try:
             self.builder.prepare(candidate.commit, log_path)
-        except BuildError:
+            self.version_adapter.ensure_targets(
+                version_targets,
+                self.version_policy.checked_packages,
+                log_path,
+            )
+        except (BuildError, VersionAdaptationError):
             self.coord.publish_verdict(round_idx, "SKIP")
             raise
 
         # 3) barrier: every node deployed the same commit before any test starts
         self.coord.signal_ready(round_idx, git_ops.current_commit(self.repo))
-        self.coord.wait_all_ready(round_idx, candidate.commit, self.opt.barrier_timeout_s)
+        try:
+            self.coord.wait_all_ready(round_idx, candidate.commit, self.opt.barrier_timeout_s)
+        except (RuntimeError, TimeoutError) as exc:
+            self.coord.publish_verdict(round_idx, "SKIP")
+            raise VersionAdaptationError(f"Barrier failed: {exc}") from exc
+        self.coord.publish_start(round_idx)
 
         # 4) launch the multi-node pytest on master and read the verdict
         job = _safe_name(self.inp.config_yaml)

@@ -8,12 +8,10 @@
 _envs: &envs
   TASK_QUEUE_ENABLE: "1"
   HCCL_OP_EXPANSION_MODE: "AIV"
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
   SERVER_PORT: "DEFAULT_PORT"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   HCCL_BUFFSIZE: "1024"
   OMP_NUM_THREADS: "1"
-  VLLM_ASCEND_ENABLE_FUSED_MC2: "0"
 
 _server_cmd: &server_cmd
   - "--quantization"
@@ -39,7 +37,7 @@ _server_cmd: &server_cmd
   - "--data-parallel-size"
   - "1"
   - "--additional-config"
-  - '{"enable_cpu_binding":true}'
+  - '{"enable_cpu_binding":true,"enable_fused_mc2":0}'
   - "--enable-expert-parallel"
   - "--profiler-config"
   - '{"profiler": "torch", "torch_profiler_dir": "./profiling", "torch_profiler_with_stack": false}'

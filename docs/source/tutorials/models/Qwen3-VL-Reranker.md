@@ -6,16 +6,20 @@ The Qwen3-VL-Embedding and Qwen3-VL-Reranker model series are the latest additio
 
 ## 2 Supported Features
 
-Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
 ## 3 Prerequisites
 
 ### 3.1 Model Weight
 
-- `Qwen3-VL-Reranker-8B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Reranker-8B)
-- `Qwen3-VL-Reranker-2B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Reranker-2B)
+|  Weight Version        | Download Links |
+|------------------------|----------------|
+| `Qwen3-VL-Reranker-8B` | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Reranker-8B) |
+| `Qwen3-VL-Reranker-2B` | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Reranker-2B) |
 
-It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
+It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ## 4 Installation
 
@@ -23,7 +27,7 @@ It is recommended to download the model weight to the shared directory of multip
 
 You can use our official docker image to run `Qwen3-VL-Reranker` model directly.
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
 === "A3 series"
 
@@ -106,7 +110,7 @@ After a successful docker run, you can verify the running container service by e
 
 If you don't want to use the docker image as above, you can also build all from source:
 
-- Install `vllm-ascend` from source, refer to [installation](../../installation.md).
+- Install `vllm-ascend` from source, refer to [installation](../../getting_started/installation.md).
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
@@ -149,6 +153,7 @@ Save this file to a location of your choice (e.g., `./qwen3_vl_reranker.jinja`).
 
     ```shell
     #!/bin/sh
+    # Ensure the model path matches the directory recorded during download
     vllm serve Qwen/Qwen3-VL-Reranker-2B \
         --served-model-name Qwen/Qwen3-VL-Reranker-2B \
         --runner pooling \
@@ -164,6 +169,7 @@ Save this file to a location of your choice (e.g., `./qwen3_vl_reranker.jinja`).
 
     ```shell
     #!/bin/sh
+    # Ensure the model path matches the directory recorded during download
     vllm serve Qwen/Qwen3-VL-Reranker-2B \
         --served-model-name Qwen/Qwen3-VL-Reranker-2B \
         --runner pooling \
@@ -183,7 +189,7 @@ Key Parameter Descriptions:
 
 - `--max-model-len` represents the context length, which is the maximum value of the input plus output for a single request. For Atlas 300I DUO if automatic parsing resolves to a large context length, allocating this mask (O(max_model_len^2)) may exceed NPU memory and trigger OOM. Be sure to set an explicit and conservative value, such as --max-model-len 1024.
 
-Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
 ## 6 Functional Verification
 
@@ -237,7 +243,7 @@ For more usage examples, please reference the [examples](https://github.com/vllm
 
 Here are two accuracy evaluation methods.
 
-### Using MTEB
+### 7.1 Using MTEB
 
 1. Refer to [MTEB](https://docs.mteb.org/) for details.
 
@@ -278,7 +284,7 @@ Here are two accuracy evaluation methods.
 
 ## 8 Performance Evaluation
 
-### Using vLLM Benchmark
+### 8.1 Using vLLM Benchmark
 
 Run performance of `Qwen3-VL-Reranker-2B` as an example.
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/cli/) for more details.
@@ -293,4 +299,4 @@ After about several minutes, you can get the performance evaluation result.
 
 ## 9 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
+For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md).

@@ -92,6 +92,11 @@ else()
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_host/tiling/tiling_data.cpp)
 endif()
 
+# Sparse KV cache offloading is currently supported on Atlas A3 only.
+if(SOC_VERSION MATCHES "ascend910_93.*")
+  find_package(OpenMP REQUIRED)
+endif()
+
 include_directories(
   ${pybind11_INCLUDE_DIRS}
   ${PYTHON_INCLUDE_PATH}
@@ -109,6 +114,10 @@ set(
 )
 
 pybind11_add_module(vllm_ascend_C ${VLLM_ASCEND_SRC})
+if(SOC_VERSION MATCHES "ascend910_93.*")
+  target_compile_definitions(vllm_ascend_C PRIVATE VLLM_ASCEND_ENABLE_SPARSE_KV_OFFLOAD)
+  target_link_libraries(vllm_ascend_C PRIVATE OpenMP::OpenMP_CXX)
+endif()
 
 # Detect aclrtMemcpyBatchAsync availability (CANN 8.5+)
 # Can be overridden via VLLM_ASCEND_ENABLE_BATCH_MEMCPY env var (registered
@@ -120,6 +129,19 @@ include(CheckCXXSourceCompiles)
 set(CMAKE_REQUIRED_INCLUDES ${ASCEND_HOME_PATH}/include)
 set(CMAKE_REQUIRED_LIBRARIES ascendcl)
 set(CMAKE_REQUIRED_LINK_OPTIONS "-L${ASCEND_HOME_PATH}/lib64")
+
+# Keep builds on older CANN versions working; endpoint selection must fail
+# explicitly if the installed CANN lacks the user-to-physical conversion.
+check_cxx_source_compiles("
+  #include <acl/acl_rt.h>
+  int main() {
+    int32_t physical_id = 0;
+    return aclrtGetPhyDevIdByUserDevId(0, &physical_id);
+  }
+" HAVE_ACLRT_GET_PHY_DEV_ID_BY_USER_DEV_ID)
+if(HAVE_ACLRT_GET_PHY_DEV_ID_BY_USER_DEV_ID)
+  target_compile_definitions(vllm_ascend_C PRIVATE CANN_DEVICE_ID_MAPPING)
+endif()
 
 if(DEFINED VLLM_ASCEND_ENABLE_BATCH_MEMCPY)
   if("${VLLM_ASCEND_ENABLE_BATCH_MEMCPY}" STREQUAL "1")

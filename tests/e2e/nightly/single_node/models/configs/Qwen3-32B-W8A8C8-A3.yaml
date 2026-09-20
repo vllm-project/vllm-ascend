@@ -6,7 +6,6 @@ _envs: &envs
   TASK_QUEUE_ENABLE: "1"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   HCCL_OP_EXPANSION_MODE: "AIV"
-  VLLM_ASCEND_ENABLE_FLASHCOMM: "1"
   SERVER_PORT: "DEFAULT_PORT"
 
 _server_cmd: &server_cmd
@@ -25,6 +24,8 @@ _server_cmd: &server_cmd
   - "40960"
   - "--block-size"
   - "128"
+  - "--kv-cache-dtype"
+  - "int8"
   - "--trust-remote-code"
   - "--gpu-memory-utilization"
   - "0.9"

@@ -4,18 +4,20 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 from torch import nn
 from transformers import PretrainedConfig
 
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.models.minimax_m3 import (
     MiniMaxM3Attention,
     MiniMaxM3MoE,
     _get_rope_parameters,
     _sparse_attention_layer_ids,
 )
+from vllm_ascend.models.minimax_m3.minimax_m3 import MiniMaxM3SwiGLUOAI
 
 
 class _FakeQKVProj(nn.Module):
@@ -77,6 +79,37 @@ def _make_attention() -> MiniMaxM3Attention:
 
 
 class TestMiniMaxM3Modeling(unittest.TestCase):
+    def test_mxfp8_swiglu_uses_small_ops_then_dynamic_quant(self) -> None:
+        activation = MiniMaxM3SwiGLUOAI(
+            alpha=1.702,
+            beta=1.0,
+            limit=7.0,
+            use_mx_quant=True,
+        )
+        gate_up = torch.tensor(
+            [[-2.0, 8.0, -9.0, 3.0]],
+            dtype=torch.bfloat16,
+        )
+        quantized = torch.randn(1, 2)
+        output_scale = torch.randn(1, 1)
+
+        with patch.object(
+            DeviceOperator,
+            "npu_dynamic_quant",
+            return_value=(quantized, output_scale),
+        ) as dynamic_quant:
+            output, actual_scale = activation(gate_up)
+
+        gate = gate_up[..., :2].clamp(max=7.0)
+        up = gate_up[..., 2:].clamp(min=-7.0, max=7.0)
+        expected_activation = gate * torch.sigmoid(1.702 * gate) * (up + 1.0)
+        actual_activation = dynamic_quant.call_args.args[0]
+        torch.testing.assert_close(actual_activation, expected_activation)
+        self.assertEqual(dynamic_quant.call_args.kwargs["act_quant_type"], torch.float8_e4m3fn)
+        self.assertTrue(dynamic_quant.call_args.kwargs["use_mxfp_quant"])
+        self.assertIs(output, quantized)
+        self.assertIs(actual_scale, output_scale)
+
     def test_moe_passes_swigluoai_config_during_construction(self) -> None:
         config = PretrainedConfig(
             hidden_size=64,
@@ -93,11 +126,23 @@ class TestMiniMaxM3Modeling(unittest.TestCase):
         )
         gate = nn.Identity()
         gate.out_dtype = torch.float32
+        experts = nn.Identity()
+        experts.moe_config = Mock()
+        parallel_config = Mock()
+        parallel_config.enable_eplb = False
+        parallel_config.eplb_config.num_redundant_experts = 0
+        ep_group = Mock()
+        ep_group.device_group.size.return_value = 1
+        ep_group.rank_in_group = 0
 
         with (
             patch(
                 "vllm_ascend.models.minimax_m3.minimax_m3.get_tensor_model_parallel_world_size",
                 return_value=1,
+            ),
+            patch(
+                "vllm_ascend.models.minimax_m3.minimax_m3.get_ep_group",
+                return_value=ep_group,
             ),
             patch(
                 "vllm_ascend.models.minimax_m3.minimax_m3.MiniMaxM3MLP",
@@ -109,10 +154,14 @@ class TestMiniMaxM3Modeling(unittest.TestCase):
             ),
             patch(
                 "vllm_ascend.models.minimax_m3.minimax_m3.FusedMoEFactory",
-                return_value=nn.Identity(),
+                return_value=experts,
             ) as fused_moe,
         ):
-            MiniMaxM3MoE(config=config, prefix="model.layers.0.block_sparse_moe")
+            MiniMaxM3MoE(
+                config=config,
+                parallel_config=parallel_config,
+                prefix="model.layers.0.block_sparse_moe",
+            )
 
         kwargs = fused_moe.call_args.kwargs
         self.assertEqual(kwargs["activation"], "swigluoai_uninterleave")

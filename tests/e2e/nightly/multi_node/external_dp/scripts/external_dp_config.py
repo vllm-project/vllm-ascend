@@ -5,6 +5,11 @@ from typing import Any
 
 import regex as re
 
+from tests.e2e.common.kv_pool.config import (
+    KVPoolConfig,
+    parse_kv_pool_config,
+    validate_kv_pool_config,
+)
 from tests.e2e.nightly.multi_node.scripts.utils import (
     load_yaml_mapping,
     resolve_cluster_ips,
@@ -105,6 +110,12 @@ class ExternalDPConfig:
     launch_templates: list[NodeTemplate]
     benchmark_cases: list[dict[str, Any]] = field(default_factory=list)
     special_dependencies: dict[str, str] = field(default_factory=dict)
+    kv_pool: KVPoolConfig | None = None
+    test_content: list[str] = field(default_factory=list)
+    chat_prompts: list[Any] = field(default_factory=list)
+    acceptance_rate: dict[str, Any] = field(default_factory=dict)
+    api_keyword_args: dict[str, Any] | list | None = None
+    expected_response: dict[str, Any] = field(default_factory=dict)
 
     @property
     def is_disaggregated_prefill(self) -> bool:
@@ -189,6 +200,7 @@ class ExternalDPConfigLoader:
         nodes = cls._parse_nodes(raw_config, resolved_cluster_ips)
         launch_templates = cls._parse_templates(raw_config)
         benchmark_cases = cls._parse_benchmarks(raw_config)
+        kv_pool = cls._parse_kv_pool(raw_config)
 
         config = ExternalDPConfig(
             test_name=str(raw_config.get("test_name", "external_dp_test")),
@@ -202,6 +214,12 @@ class ExternalDPConfigLoader:
             launch_templates=launch_templates,
             benchmark_cases=benchmark_cases,
             special_dependencies=dict(raw_config.get("special_dependencies", {})),
+            kv_pool=kv_pool,
+            test_content=list(raw_config.get("test_content", [])),
+            chat_prompts=list(raw_config.get("chat_prompts", [])),
+            acceptance_rate=dict(raw_config.get("acceptance_rate", {})),
+            api_keyword_args=raw_config.get("api_keyword_args"),
+            expected_response=dict(raw_config.get("expected_response", {})),
         )
         cls._validate_config(config)
         return config
@@ -324,11 +342,16 @@ class ExternalDPConfigLoader:
             benchmark_cases.append(case_with_name)
         return benchmark_cases
 
+    @staticmethod
+    def _parse_kv_pool(raw_config: dict[str, Any]) -> KVPoolConfig | None:
+        return parse_kv_pool_config(raw_config.get("kv_pool"))
+
     @classmethod
     def _validate_config(cls, config: ExternalDPConfig) -> None:
         cls._validate_config_sizes(config)
         cls._validate_routing(config)
         cls._validate_node_parallel_config(config)
+        cls._validate_kv_pool(config)
 
     @staticmethod
     def _validate_config_sizes(config: ExternalDPConfig) -> None:
@@ -384,6 +407,13 @@ class ExternalDPConfigLoader:
                 )
             if node.dp_rank_start + node.dp_size_local > node.dp_size:
                 raise ValueError(f"node {node_index} dp rank range exceeds dp_size")
+
+    @staticmethod
+    def _validate_kv_pool(config: ExternalDPConfig) -> None:
+        kv_pool = config.kv_pool
+        if kv_pool is None:
+            return
+        validate_kv_pool_config(kv_pool)
 
 
 class RankResolver:

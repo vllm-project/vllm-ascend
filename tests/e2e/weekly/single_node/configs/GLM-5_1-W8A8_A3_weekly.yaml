@@ -8,8 +8,6 @@ _envs: &envs
   OMP_NUM_THREADS: "1"
   HCCL_BUFFSIZE: "200"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-  VLLM_ASCEND_BALANCE_SCHEDULING: "1"
-  VLLM_ASCEND_ENABLE_MLAPO: "1"
   SERVER_PORT: "DEFAULT_PORT"
 
 _server_cmd: &server_cmd
@@ -29,7 +27,7 @@ _server_cmd: &server_cmd
   - "ascend"
   - "--enable-chunked-prefill"
   - "--additional-config"
-  - '{"multistream_overlap_shared_expert":true}'
+  - '{"multistream_overlap_shared_expert":true,"scheduler_config":{"enable_balance_scheduling":true},"enable_mlapo":true}'
   - "--compilation-config"
   - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
   - "--speculative-config"
@@ -46,7 +44,7 @@ _benchmarks: &benchmarks
     max_out_len: 1024
     batch_size: 5
     request_rate: 0
-    baseline: 1
+    baseline: 81.5852
     threshold: 0.97
 
 _benchmarks_bs8: &benchmarks_bs8
@@ -59,7 +57,7 @@ _benchmarks_bs8: &benchmarks_bs8
     max_out_len: 512
     batch_size: 2
     request_rate: 0
-    baseline: 1
+    baseline: 24.4413
     threshold: 0.97
 
 _benchmarks_bs32: &benchmarks_bs32
@@ -72,7 +70,7 @@ _benchmarks_bs32: &benchmarks_bs32
     max_out_len: 512
     batch_size: 8
     request_rate: 0
-    baseline: 1
+    baseline: 141.8525
     threshold: 0.97
 
 _benchmarks_bs10: &benchmarks_bs10
@@ -85,7 +83,7 @@ _benchmarks_bs10: &benchmarks_bs10
     max_out_len: 1024
     batch_size: 5
     request_rate: 0
-    baseline: 1
+    baseline: 84.5546
     threshold: 0.97
 # ==========================================
 # ACTUAL TEST CASES

@@ -19,7 +19,9 @@
 
 import copy
 import gc
+import inspect
 import logging
+from contextlib import AbstractContextManager, nullcontext
 from types import NoneType
 from typing import Any
 
@@ -47,39 +49,57 @@ from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.v1.core.kv_cache_utils import get_kv_cache_groups
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVCacheConfig,
+    KVCacheSpec,
+    MambaSpec,
+    UniformTypeKVCacheSpecs,
+)
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
+from vllm.v1.worker.startup_plan import (
+    maybe_apply_startup_plan,
+    maybe_save_startup_plan,
+)
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
+from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config, init_ascend_config
 from vllm_ascend.batch_invariant import init_batch_invariance
+from vllm_ascend.core.kv_cache_placement import (
+    KVPPPhysicalCachePlan,
+    create_kvpp_cache_allocation_plan,
+)
+from vllm_ascend.core.profiling_chunk_predictor import (
+    _attach_profiling_chunk_execution_time,
+)
 from vllm_ascend.cpu_binding import bind_cpus
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
     build_layerwise_cache_layout,
     build_layerwise_reuse_layout,
-    get_gva_layerwise_config,
     get_layerwise_physical_layer_index,
+    get_layerwise_reuse_config,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
-    get_host_device_memory_usage_ratio,
+    plan_sparse_kv_offload_memory,
 )
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
 from vllm_ascend.utils import (
-    AscendDeviceType,
     check_ascend_device_type,
     enable_sp,
-    get_ascend_device_type,
     register_ascend_customop,
     setup_ascend_local_comm_res,
+    vllm_version_is,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -122,7 +142,7 @@ class NPUWorker(WorkerBase):
         from vllm_ascend import ops
 
         ops.register_dummy_fusion_op()
-        if get_ascend_device_type() != AscendDeviceType.A5:
+        if get_current_hardware_profile().supports(HardwareCapability.ATB_EXTENSIONS):
             _register_atb_extensions()
         register_ascend_customop(vllm_config)
         # init ascend config and soc version
@@ -166,6 +186,7 @@ class NPUWorker(WorkerBase):
             WEIGHT_LOADER_V2_SUPPORTED.remove("UnquantizedLinearMethod")
 
         self.use_v2_model_runner = self.vllm_config.use_v2_model_runner
+        self._kvpp_cache_allocation_plan: KVPPPhysicalCachePlan | None = None
         self._pp_send_work: list[Handle] = []
 
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
@@ -220,12 +241,17 @@ class NPUWorker(WorkerBase):
 
     def sleep(self, level: int = 1) -> None:
         free_bytes_before_sleep = torch.npu.mem_get_info()[0]
-        # Save the buffers before level 2 sleep
-        if level == 2:
+        # Level-1 only offloads the weights pool. Persistent metadata such as
+        # the DSA Hadamard matrix is allocated outside the kv_cache pool, so it
+        # stays resident and does not need a CPU backup.
+        if level == 1:
+            self._sleep_saved_buffers = {}
+        else:
             model = self.model_runner.model
             self._sleep_saved_buffers = {name: buffer.cpu().clone() for name, buffer in model.named_buffers()}
 
-        cleanup_enabled = getattr(get_ascend_config(), "enable_sleep_mode_extra_cleanup", False)
+        rl_config = get_ascend_config().rl_config
+        cleanup_enabled = rl_config.enabled and rl_config.sleep_mode_extra_cleanup
         if cleanup_enabled:
             self.sleep_wakeup_manager.sleep()
 
@@ -248,7 +274,9 @@ class NPUWorker(WorkerBase):
         if nz_mode:
             raise ValueError(
                 "FRACTAL_NZ mode is enabled. This may cause model parameter precision issues "
-                "in the RL scenarios. Please set weight_nz_mode=0 via --additional-config."
+                "in the RL scenarios. Please set weight_nz_mode=0 via --additional-config, "
+                "or enable additional_config.rl_config (enabled: true) which disables NZ "
+                "automatically."
             )
         allocator = CaMemAllocator.get_instance()
         allocator.wake_up(tags=tags)
@@ -261,10 +289,12 @@ class NPUWorker(WorkerBase):
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
 
-        if tags is None or "kv_cache" in tags:
+        # vLLM main removed the post-KV-cache wake hook; keep it on v0.28.0.
+        if (tags is None or "kv_cache" in tags) and vllm_version_is("0.28.0"):
             self.model_runner.post_kv_cache_wake_up()
 
-        cleanup_enabled = getattr(get_ascend_config(), "enable_sleep_mode_extra_cleanup", False)
+        rl_config = get_ascend_config().rl_config
+        cleanup_enabled = rl_config.enabled and rl_config.sleep_mode_extra_cleanup
         if cleanup_enabled:
             self.sleep_wakeup_manager.wakeup(tags)
 
@@ -282,11 +312,12 @@ class NPUWorker(WorkerBase):
         self.weight_transfer_engine.init_transfer_engine(typed_init_info)
 
     def _check_nz_disabled(self) -> None:
-        if envs_ascend.VLLM_ASCEND_ENABLE_NZ:
+        if get_ascend_config().weight_nz_mode:
             raise ValueError(
                 "FRACTAL_NZ mode is enabled. This may cause model parameter "
-                "precision issues in the RL scenarios. Please set "
-                "VLLM_ASCEND_ENABLE_NZ=0."
+                "precision issues in the RL scenarios. Please set weight_nz_mode=0 "
+                "via --additional-config, or enable additional_config.rl_config "
+                "(enabled: true) which disables NZ automatically."
             )
 
     def start_weight_update(self) -> None:
@@ -328,6 +359,7 @@ class NPUWorker(WorkerBase):
 
         assert self.weight_transfer_engine is not None
         self.weight_transfer_engine.finish_weight_update()
+        self.model_runner.reset_lora_state()
         self._weight_update_active = False
 
     def shutdown(self) -> None:
@@ -412,7 +444,7 @@ class NPUWorker(WorkerBase):
         gc.collect()
         torch.npu.empty_cache()
 
-        if get_ascend_device_type() == AscendDeviceType.A5:
+        if get_current_hardware_profile().supports(HardwareCapability.LOCAL_KV_COMM_RESOURCE):
             setup_ascend_local_comm_res(self.local_rank, self.vllm_config.kv_transfer_config)
 
         # take current memory snapshot
@@ -474,6 +506,50 @@ class NPUWorker(WorkerBase):
             # If usage stat is enabled, collect relevant info.
             report_usage_stats(self.vllm_config)
 
+    def _apply_kv_offload_decode_memory_constraints(
+        self,
+        available_device_memory_bytes: int,
+    ) -> int:
+        GiB = lambda b: b / GiB_bytes
+        sparse_kv_offload_config = get_ascend_config().sparse_kv_offload_config
+        if not sparse_kv_offload_config.enabled:
+            return int(available_device_memory_bytes)
+
+        kv_cache_spec = getattr(self, "kv_cache_spec", None) or self.get_kv_cache_spec()
+        dram_limit_bytes = int(sparse_kv_offload_config.dram_size_per_dp_GB * GiB_bytes)
+        budget = plan_sparse_kv_offload_memory(
+            kv_cache_spec=kv_cache_spec,
+            vllm_config=self.vllm_config,
+            available_device_memory_bytes=available_device_memory_bytes,
+            dram_limit_bytes=dram_limit_bytes,
+            keep_device_kv_cache=sparse_kv_offload_config.keep_device_kv_cache,
+        )
+        logger.info_once(
+            "Sparse KV offload memory plan: npu_limit=%d blocks, "
+            "dram_limit=%d blocks, workload_limit=%d blocks, "
+            "final=%d blocks (%s limited), planner=%.2f GiB, "
+            "host=%.2f GiB, device=%.2f GiB, alignment_reserve=%.2f GiB.",
+            budget.npu_limit_blocks,
+            budget.dram_limit_blocks,
+            budget.workload_limit_blocks,
+            budget.final_num_blocks,
+            budget.limiting_factor,
+            GiB(budget.final_planner_bytes),
+            GiB(budget.planned_host_bytes),
+            GiB(budget.planned_device_bytes),
+            GiB(budget.host_alignment_reserve_bytes),
+            scope="local",
+        )
+        return int(budget.final_planner_bytes)
+
+    def _apply_kvpp_memory_budget(self, available_bytes: int) -> int:
+        self.available_kv_cache_memory_bytes = available_bytes
+        plan = self._kvpp_cache_allocation_plan
+        if plan is None:
+            return available_bytes
+        num_blocks = plan.get_num_blocks(available_bytes)
+        return num_blocks * sum(spec.page_size_bytes for spec in plan.logical_cache_spec.values())
+
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
         """Profiles the peak memory usage of the model to determine how much
@@ -484,6 +560,8 @@ class NPUWorker(WorkerBase):
         bytes.
         """
         GiB = lambda b: b / GiB_bytes
+
+        maybe_apply_startup_plan(self)
 
         # Fast path: user has explicitly specified KV cache size via
         # --kv-cache-memory. Still run profile_run() to compile the model,
@@ -501,8 +579,9 @@ class NPUWorker(WorkerBase):
                 GiB(self.init_snapshot.free_memory),
                 GiB(kv_cache_memory_bytes),
             )
-            kv_cache_memory_bytes = self.update_available_memory_for_sparse_kv_offload(kv_cache_memory_bytes)
-            return kv_cache_memory_bytes
+            return self._apply_kvpp_memory_budget(
+                self._apply_kv_offload_decode_memory_constraints(kv_cache_memory_bytes)
+            )
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
@@ -540,8 +619,11 @@ class NPUWorker(WorkerBase):
             "isolate vLLM in its own container."
         )
         self.available_kv_cache_memory_bytes = self.requested_memory - profile_result.non_kv_cache_memory
+        self.available_kv_cache_memory_bytes = self._scale_kv_cache_memory_for_multi_group(
+            self.available_kv_cache_memory_bytes,
+        )
 
-        extra_config = get_gva_layerwise_config(self.vllm_config.kv_transfer_config)
+        extra_config = get_layerwise_reuse_config(self.vllm_config.kv_transfer_config)
         if extra_config is not None:
             memory_info = getattr(self, "_gva_layerwise_memory_info", None)
             if memory_info is None:
@@ -565,45 +647,99 @@ class NPUWorker(WorkerBase):
         logger.info_once(
             "Available KV cache memory: %.2f GiB", GiB(self.available_kv_cache_memory_bytes), scope="local"
         )
-        self.available_kv_cache_memory_bytes = self.update_available_memory_for_sparse_kv_offload(
-            self.available_kv_cache_memory_bytes,
+        self.available_kv_cache_memory_bytes = self._apply_kv_offload_decode_memory_constraints(
+            self.available_kv_cache_memory_bytes
         )
+        return self._apply_kvpp_memory_budget(self.available_kv_cache_memory_bytes)
 
-        return int(self.available_kv_cache_memory_bytes)
+    def _scale_kv_cache_memory_for_multi_group(self, available_memory: int) -> int:
+        """Scale the KV cache budget for vllm main's multi-group layout.
 
-    def update_available_memory_for_sparse_kv_offload(self, available_memory):
+        vLLM #51718 derives num_blocks from the largest KV cache group's
+        bytes-per-block, but some Ascend runners keep per-layer contiguous
+        buffers for every group. Per-layer sizing then totals
+        num_blocks * (sum of ALL groups' pages), which exceeds available
+        memory whenever more than one group is non-trivial. Scale the
+        advertised budget by bytes_per_block / sum(pages) so the engine
+        derives a num_blocks (and block pool) small enough for the per-layer
+        buffers to fit.
         """
-        A simple patch for Sparse KV offload: add additional available_memory according to the
-        ratio of host memory (kv) and dev memory (indexer), so we can allocate blocks for indexer cache
-        using all original available device memory without modify original kv_spec or vllm code.
-        For further optimization, consider to merge this logic to vllm kv_cache_utils.py,
-        or reuse hisparse's host pool logic after it's merged to vllm.
-        """
-        GiB = lambda b: b / GiB_bytes
-        sparse_kv_offload_config = get_ascend_config().sparse_kv_offload_config
-        if not sparse_kv_offload_config.enabled:
+        # v0.28.0 keeps shared_by aliasing (one alloc per descriptor); the
+        # #51718 multi-group scale is main-only. Also avoids
+        # CacheConfig.get_resolved_kv_cache_layout which does not exist on release.
+        if vllm_version_is("0.28.0"):
             return available_memory
-        keep_device_kv_cache = sparse_kv_offload_config.keep_device_kv_cache
-        if keep_device_kv_cache:
-            needed_dram_size_bytes = available_memory
-        else:
-            kv_cache_spec = getattr(self, "kv_cache_spec", None) or self.get_kv_cache_spec()
-            host_device_memory_usage_ratio = get_host_device_memory_usage_ratio(kv_cache_spec)
-            needed_dram_size_bytes = host_device_memory_usage_ratio * available_memory
-        if needed_dram_size_bytes > sparse_kv_offload_config.dram_size_per_dp_GB * (1 << 30):
-            raise ValueError(
-                f"Needed dram size ({GiB(needed_dram_size_bytes)} GB) is larger than "
-                f"user specified dram size ({sparse_kv_offload_config.dram_size_per_dp_GB} GB). "
-                "Please increase sparse_kv_offload_config.dram_size_per_dp_GB if available on your device."
+        kv_cache_spec = self.get_kv_cache_spec()
+        if not isinstance(kv_cache_spec, dict):
+            return available_memory
+        kv_cache_groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
+        if not kv_cache_groups:
+            return available_memory
+        # vLLM #51718 removed the DSV4-specific packed planner. Ascend restores
+        # that shared-tuple layout in patch_kv_cache_utils, so DSV4 already fits
+        # all groups in one physical budget and must not take the generic
+        # per-layer multi-group scale below.
+        for group in kv_cache_groups:
+            group_spec = group.kv_cache_spec
+            specs = (
+                group_spec.kv_cache_specs.values() if isinstance(group_spec, UniformTypeKVCacheSpecs) else (group_spec,)
             )
-        if not keep_device_kv_cache:
-            available_memory += needed_dram_size_bytes
-            logger.info_once(
-                "Sparse KV offload is enabled, enlarge total available memory to %.2f GiB",
-                GiB(available_memory),
-                scope="local",
+            if any(getattr(spec, "model_version", None) == "deepseek_v4" for spec in specs):
+                return available_memory
+
+        # vLLM #51718 overlays KV cache groups in one standardized backing
+        # allocation. For the default layer/block-compact layout, Ascend can
+        # preserve that contract for hybrid attention/Mamba models while still
+        # exposing contiguous per-layer views to its existing backends. Do not
+        # shrink the planner budget when the runner can consume that layout.
+        per_layer_specs = []
+        for group in kv_cache_groups:
+            group_spec = group.kv_cache_spec
+            if isinstance(group_spec, UniformTypeKVCacheSpecs):
+                per_layer_specs.extend(group_spec.kv_cache_specs.values())
+            else:
+                per_layer_specs.append(group_spec)
+        has_attention = any(isinstance(spec, AttentionSpec) for spec in per_layer_specs)
+        has_mamba = any(isinstance(spec, MambaSpec) for spec in per_layer_specs)
+        model_runner = getattr(self, "model_runner", None)
+        layout = self.vllm_config.cache_config.get_resolved_kv_cache_layout()
+        if (
+            has_attention
+            and has_mamba
+            and layout.is_layer_compact
+            and layout.is_block_compact
+            and self.vllm_config.kv_transfer_config is None
+            and getattr(model_runner, "supports_standardized_shared_kv_backing", False)
+            and not getattr(model_runner, "use_sparse", False)
+            and not getattr(model_runner, "use_compress", False)
+        ):
+            return available_memory
+
+        bytes_per_block = 0
+        sum_pages = 0
+        for group in kv_cache_groups:
+            group_pages = 0
+            for layer_name in group.layer_names:
+                group_spec = group.kv_cache_spec
+                if isinstance(group_spec, UniformTypeKVCacheSpecs):
+                    layer_spec = group_spec.kv_cache_specs[layer_name]
+                else:
+                    layer_spec = group_spec
+                group_pages += layer_spec.page_size_bytes
+                sum_pages += layer_spec.page_size_bytes
+            bytes_per_block = max(bytes_per_block, group_pages)
+        if bytes_per_block > 0 and sum_pages > bytes_per_block:
+            scale = bytes_per_block / sum_pages
+            logger.info(
+                "Ascend per-layer KV layout scales the multi-group budget by %.4f "
+                "(%d bytes/block over %d total page bytes) so per-layer "
+                "buffers fit within device memory.",
+                scale,
+                bytes_per_block,
+                sum_pages,
             )
-        return int(available_memory)
+            return int(available_memory * scale)
+        return available_memory
 
     def log_memory_stats(self) -> None:
         """Profiles the torch reserved memory, torch allocated memory in execute_model()."""
@@ -634,8 +770,6 @@ class NPUWorker(WorkerBase):
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         if forward_pass and not get_pp_group().is_first_rank:
-            # If flashcomm1 is used, this all_gather_group parameter needs to be removed, otherwise
-            # it will conflict with the all-gather operation in flashcomm1.
             if enable_sp():
                 all_gather_group = None
             else:
@@ -660,8 +794,6 @@ class NPUWorker(WorkerBase):
         assert isinstance(output, IntermediateTensors)
         parallel_config = self.vllm_config.parallel_config
         assert parallel_config.distributed_executor_backend != ("external_launcher") and not get_pp_group().is_last_rank
-        # If flashcomm1 is used, this all_gather_group parameter needs to be removed, otherwise
-        # it will conflict with the all-gather operation in flashcomm1.
         if enable_sp():
             all_gather_group = None
         else:
@@ -691,7 +823,13 @@ class NPUWorker(WorkerBase):
 
     @torch.inference_mode()
     def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
-        return self.model_runner.sample_tokens(grammar_output)
+        output = self.model_runner.sample_tokens(grammar_output)
+        _attach_profiling_chunk_execution_time(
+            self.model_runner.ascend_config.scheduler_config.profiling_chunk_config,
+            self.model_runner,
+            output,
+        )
+        return output
 
     def load_model(self) -> None:
         if self.vllm_config.model_config.enable_sleep_mode:
@@ -791,15 +929,21 @@ class NPUWorker(WorkerBase):
             )
             logger.info(msg)
 
+            if suggested_to_requested > 0:
+                maybe_save_startup_plan(self, suggested_to_requested)
+
         # Call ATB matmul to warm up; otherwise, the first operation (ReshapeAndCache)
         # may cause performance degradation at runtime.
-        if get_ascend_device_type() != AscendDeviceType.A5:
+        if get_current_hardware_profile().supports(HardwareCapability.ATB_WARMUP):
             self._warm_up_atb()
         # Bind after warmup so hot allocations are already materialized on the
         # worker process before migratepages/taskset run.
         if get_ascend_config().enable_cpu_binding:
             try:
-                bind_cpus(self.local_rank)
+                bind_cpus(
+                    self.local_rank,
+                    npu_id=current_platform.device_id_to_physical_device_id(self.local_rank),
+                )
             except Exception as e:
                 logger.warning("Bind cpus failed in rank%s: %s Skip binding cpu.", self.local_rank, e)
 
@@ -861,16 +1005,25 @@ class NPUWorker(WorkerBase):
 
         start = time.perf_counter()
 
-        # Run real model forward with force_attention=True
-        # This ensures attention is actually executed, not skipped.
-        # Without force_attention, attn_metadata may be None and attention
-        # won't run, making profiling results inaccurate.
-        # _dummy_run handles PP internally (intermediate tensors, etc.)
-        self.model_runner._dummy_run(
-            num_tokens=num_tokens,
-            force_attention=True,  # Critical: ensure attention is executed
-            profile_cpp=True,
-        )
+        # Run a real model forward with attention enabled in eager mode.
+        # _dummy_run handles PP internally (intermediate tensors, etc.).
+        old_max_num_reqs = self.model_runner.max_num_reqs
+        try:
+            self.model_runner.max_num_reqs = 1
+
+            dummy_run_kwargs = {
+                "num_tokens": num_tokens,
+                "force_attention": True,
+                "is_profile": False,
+                "cudagraph_runtime_mode": CUDAGraphMode.NONE,
+            }
+
+            if "profile_cpp" in inspect.signature(self.model_runner._dummy_run).parameters:
+                dummy_run_kwargs["profile_cpp"] = True
+
+            self.model_runner._dummy_run(**dummy_run_kwargs)
+        finally:
+            self.model_runner.max_num_reqs = old_max_num_reqs
 
         # Synchronize after forward to ensure NPU operations complete
         torch.npu.synchronize()
@@ -944,11 +1097,19 @@ class NPUWorker(WorkerBase):
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         kv_cache_spec = self.model_runner.get_kv_cache_spec()
-        extra_config = get_gva_layerwise_config(self.vllm_config.kv_transfer_config)
+        extra_config = get_layerwise_reuse_config(self.vllm_config.kv_transfer_config)
         if extra_config is not None:
             self._gva_layerwise_memory_info = self._get_layerwise_kv_cache_memory_info(
                 kv_cache_spec,
                 extra_config,
+            )
+        kvpp_config = KVPPConfig.from_vllm_config(self.vllm_config)
+        if kvpp_config.size > 1:
+            kvpp_rank = get_tp_group().rank_in_group % kvpp_config.size
+            self._kvpp_cache_allocation_plan = create_kvpp_cache_allocation_plan(
+                self.vllm_config,
+                kv_cache_spec,
+                kvpp_rank,
             )
         if get_ascend_config().sparse_kv_offload_config.enabled:
             # reserve kv_cache_spec for sparse kv offload memory profile usage.
@@ -968,31 +1129,38 @@ class NPUWorker(WorkerBase):
             self.model_runner.update_max_model_len(max_model_len)
         logger.debug("Updated max_model_len to %s", max_model_len)
 
+    def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
+        """Return the sleep-mode pool for ``tag``, or a no-op context."""
+        if self.vllm_config.model_config.enable_sleep_mode:
+            allocator = CaMemAllocator.get_instance()
+            return allocator.use_memory_pool(tag=tag)
+        return nullcontext()
+
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate NPU KV cache with the specified kv_cache_config."""
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
-        if self.vllm_config.model_config.enable_sleep_mode:
-            allocator = CaMemAllocator.get_instance()
-            context = allocator.use_memory_pool(tag="kv_cache")
-        else:
-            from contextlib import nullcontext
-
-            context = nullcontext()  # type: ignore
-        with context:
-            self.model_runner.initialize_kv_cache(kv_cache_config)
+        # Restrict the discardable kv_cache pool to backing cache allocations.
+        # Persistent metadata created during initialize_kv_cache must stay
+        # outside this pool so sleep/wake does not drop its contents.
+        self.model_runner.initialize_kv_cache(
+            kv_cache_config,
+            kv_cache_allocation_context=self._maybe_get_memory_pool_context(tag="kv_cache"),
+        )
 
         # MRV2's scheduler emits new_block_ids_to_zero whenever this flag is
         # set, so its worker-side consumer must use the same condition. Keep the
-        # narrower Eagle3 condition for MRV1, where zeroing was introduced only
-        # for the multi-step speculative-decode reuse issue.
+        # narrower Mamba + Eagle3 condition for MRV1, where zeroing was
+        # introduced only to prevent a recycled Mamba block from exposing stale
+        # values when reused by full attention during multi-step speculation.
         speculative_config = self.vllm_config.speculative_config
-        needs_mrv1_eagle_zeroing = (
-            speculative_config is not None
+        needs_mrv1_mamba_eagle_zeroing = (
+            kv_cache_config.has_mamba_layers
+            and speculative_config is not None
             and speculative_config.method == "eagle3"
             and speculative_config.num_speculative_tokens > 1
         )
         should_init_kv_zeroer = kv_cache_config.needs_kv_cache_zeroing and (
-            self.use_v2_model_runner or needs_mrv1_eagle_zeroing
+            self.use_v2_model_runner or needs_mrv1_mamba_eagle_zeroing
         )
         # Keep bookkeeping buffers outside the sleep-mode KV-cache pool so they
         # survive sleep/wake cycles.

@@ -20,11 +20,13 @@
 from __future__ import annotations
 
 import functools
+import importlib.util
 import json
 import math
 import os
 from contextlib import nullcontext
 from functools import lru_cache
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -32,18 +34,19 @@ import regex as re
 import torch
 import torch_npu  # noqa: F401
 from packaging.version import InvalidVersion, Version
+from safetensors.torch import load_file
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
 from vllm_ascend.device.device_config import (  # noqa: F401
     AscendDeviceType,
     check_ascend_device_type,
     get_ascend_device_type,
-    is_310p,
     is_950,
 )
+from vllm_ascend.device.hardware_profile import HardwareCapability, WeightLayoutPolicy, get_current_hardware_profile
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -73,7 +76,6 @@ _DYNAMIC_EPLB_BUFFER_SIZE = 100
 _IS_MOE_MODEL = None
 _IS_DRAFTER_MOE_MODEL = None
 _IS_VL_MODEL = None
-_ENABLE_SP = None
 _HAS_LAYER_IDX = None
 _HAS_ROPE = None
 _ATNN_CALCULATION_STREAM = None
@@ -115,12 +117,25 @@ def get_dsv4_compress_ratio(config: Any, layer_idx: int) -> int:
     return compress_ratios[layer_idx]
 
 
+def model_uses_kpool_indexer(model_config: Any | None) -> bool:
+    """Return True for GLM-5.3-Flash style kpool indexer models.
+
+    Those models expose ``index_topk`` like DeepSeek SFA but use a kpool
+    indexer over a hybrid MLA + KDA cache. Its cache geometry is
+    independent of the LightningIndexer layout used by other SFA models.
+    """
+    return any(hasattr(getattr(model_config, attr, None), "index_kpool") for attr in ("hf_text_config", "hf_config"))
+
+
 def model_uses_sfa_sparse(model_config: Any | None) -> bool:
     hf_text_config = getattr(model_config, "hf_text_config", None)
     hf_config = getattr(model_config, "hf_config", None)
+    if hf_text_config is None:
+        return False
+    if model_uses_kpool_indexer(model_config):
+        return False
     return (
-        hf_text_config is not None
-        and hasattr(hf_text_config, "index_topk")
+        hasattr(hf_text_config, "index_topk")
         and not hasattr(hf_text_config, "compress_ratios")
         and not hasattr(hf_config, "compress_ratios")
     )
@@ -137,10 +152,9 @@ def enable_sfa_dcp_replicated_indexer(vllm_config: VllmConfig | None = None) -> 
 
 
 def clear_enable_sp():
-    global _ENABLE_SP
-    _ENABLE_SP = None
     enable_dsa_cp.cache_clear()
-    enable_dsa_cp_with_o_proj_tp.cache_clear()
+    enable_dsa_cp_full_o_proj.cache_clear()
+    enable_pcp_o_proj_weight_sharding.cache_clear()
     _libc_getenv.cache_clear()
 
 
@@ -155,7 +169,7 @@ def is_rc_device() -> bool:
     ``accelerators``.
     """
     global _IS_RC_DEVICE
-    if not is_310p():
+    if not get_current_hardware_profile().supports(HardwareCapability.RC_DEVICE_DISCOVERY):
         return False
     if _IS_RC_DEVICE is not None:
         return _IS_RC_DEVICE
@@ -249,6 +263,12 @@ def device_print(
         )
 
 
+# Minimum number of dimensions a matmul weight needs for both k and n dims to exist.
+MIN_MATMUL_WEIGHT_NDIMS = 2
+# Size of a singleton dimension (k=1 or n=1), unsupported by aclnnMatmulWeightNZ.
+SINGLETON_DIM_SIZE = 1
+
+
 def _should_trans_nz(weight: torch.Tensor) -> bool:
     # FP32 cannot use NZ.
     if weight.dtype == torch.float32:
@@ -258,8 +278,16 @@ def _should_trans_nz(weight: torch.Tensor) -> bool:
     if weight.is_meta:
         return False
 
-    # 310P always converts to NZ.
-    if is_310p():
+    # aclnnMatmulWeightNZ does not support matrices whose reduction/output
+    # dimension is one (k=1 or n=1). Keep these weights in ND format so the
+    # subsequent linear/matmul dispatch does not select the NZ-only path.
+    if weight.ndim >= MIN_MATMUL_WEIGHT_NDIMS and (
+        weight.shape[-1] == SINGLETON_DIM_SIZE or weight.shape[-2] == SINGLETON_DIM_SIZE
+    ):
+        return False
+
+    # Some hardware profiles require NZ weight layout.
+    if get_current_hardware_profile().weight_layout_policy is WeightLayoutPolicy.FORCE_NZ:
         return True
 
     # Get config value instead of env
@@ -280,13 +308,49 @@ def _should_trans_nz(weight: torch.Tensor) -> bool:
 
 # NZ conversion policy:
 # - 310P: always convert supported weights to FRACTAL_NZ
-# - non-310P: follow VLLM_ASCEND_ENABLE_NZ
+# - non-310P: follow additional_config.weight_nz_mode
 # - FP32: never convert
 # - meta tensor: never convert
-def maybe_trans_nz(weight: torch.Tensor) -> torch.Tensor:
+def maybe_trans_nz(
+    weight: torch.Tensor,
+    customize_dtype: torch.dtype | None = None,
+    input_dtype: torch.dtype | None = None,
+) -> torch.Tensor:
     if not _should_trans_nz(weight):
         return weight
-    return torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ)
+    kwargs = {}
+    if customize_dtype is not None:
+        kwargs["customize_dtype"] = customize_dtype
+    if input_dtype is not None:
+        kwargs["input_dtype"] = input_dtype
+    return torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ, **kwargs)
+
+
+def maybe_trans_nz_with_scale(
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    transpose_dims: tuple[int, ...],
+    *,
+    customize_dtype: torch.dtype | None = None,
+    input_dtype: torch.dtype | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Transpose weight/scale and convert to FRACTAL_NZ when NZ applies.
+
+    Preserves the pre-NZ non-contiguous layout when NZ is disabled.
+    """
+    weight = weight.transpose(*transpose_dims)
+    weight_scale = weight_scale.transpose(*transpose_dims)
+    if not _should_trans_nz(weight):
+        return weight, weight_scale
+    weight = weight.contiguous()
+    weight_scale = weight_scale.contiguous()
+    kwargs = {}
+    if customize_dtype is not None:
+        kwargs["customize_dtype"] = customize_dtype
+    if input_dtype is not None:
+        kwargs["input_dtype"] = input_dtype
+    weight = torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ, **kwargs)
+    return weight, weight_scale
 
 
 def _round_up(x: int, align: int):
@@ -414,7 +478,7 @@ def enable_custom_op():
     # FIXME(linfeng): Currently custom op compilation and execution are partially available
     # in ASCEND950 chip, we temporarily disable all custom ops. Please refer to
     # https://github.com/vllm-project/vllm-ascend/issues/7157 for latest update about custom op.
-    if envs.VLLM_BATCH_INVARIANT or get_ascend_device_type() == AscendDeviceType.A5:
+    if envs.VLLM_BATCH_INVARIANT or not get_current_hardware_profile().supports(HardwareCapability.RUNTIME_CUSTOM_OPS):
         _CUSTOM_OP_ENABLED = False
         return _CUSTOM_OP_ENABLED
 
@@ -575,7 +639,28 @@ def setup_ascend_local_comm_res(local_rank: int, kv_transfer_config: Any | None)
     os.environ["ASCEND_LOCAL_COMM_RES"] = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
 
 
+@torch._dynamo.disable
+def _vllm_empty_device_matches_release(target_vllm_version: str) -> bool:
+    """Map untagged empty-device installs onto the matching release lane.
+
+    cpu-ut checks out vLLM by SHA with ``--no-tags`` and builds
+    ``VLLM_TARGET_DEVICE=empty``, so setuptools-scm reports
+    ``0.1.dev1+gSHA.empty`` instead of the tagged ``0.28.0``. Distinguish
+    v0.28.0 from main by where PCP lives: model_executor on 0.28.0, v1 ops
+    after the move on main.
+
+    Disabled under Dynamo: ``importlib.util.find_spec`` is marked skipped and
+    must not be traced when version gates run during torch.compile.
+    """
+    if target_vllm_version != "0.28.0":
+        return False
+    has_legacy_pcp = importlib.util.find_spec("vllm.model_executor.layers.attention.pcp") is not None
+    has_main_pcp = importlib.util.find_spec("vllm.v1.attention.ops.pcp") is not None
+    return has_legacy_pcp and not has_main_pcp
+
+
 @functools.cache
+@torch._dynamo.disable
 def vllm_version_is(target_vllm_version: str):
     if envs_ascend.VLLM_VERSION is not None:
         vllm_version = envs_ascend.VLLM_VERSION
@@ -584,7 +669,16 @@ def vllm_version_is(target_vllm_version: str):
 
         vllm_version = vllm.__version__
     try:
-        return Version(vllm_version) == Version(target_vllm_version)
+        # Strip any PEP 440 local version segment (e.g. "0.28.0+empty" built
+        # with VLLM_TARGET_DEVICE=empty): it is a build artifact and must not
+        # change the version identity for `vllm_version_is` comparisons.
+        vllm_version = vllm_version.split("+")[0]
+        parsed = Version(vllm_version)
+        if parsed == Version(target_vllm_version):
+            return True
+        if parsed.release[:2] == (0, 1) and parsed.dev is not None:
+            return _vllm_empty_device_matches_release(target_vllm_version)
+        return False
     except InvalidVersion:
         raise ValueError(
             f"Invalid vllm version {vllm_version} found. A dev version of vllm "
@@ -592,6 +686,17 @@ def vllm_version_is(target_vllm_version: str):
             "to control it by hand. And please make sure the value follows the "
             "format of x.y.z."
         )
+
+
+def get_kv_cache_tensor_layers(kv_cache_tensor) -> list[str]:
+    """Layer names covered by a KVCacheTensor.
+
+    vLLM #51718 renamed the `shared_by` field to `layers` and introduced a
+    required `layer_stride` on vLLM main. Gate by release vs main lane.
+    """
+    if vllm_version_is("0.28.0"):
+        return kv_cache_tensor.shared_by
+    return kv_cache_tensor.layers
 
 
 def get_max_hidden_layers(hf_config) -> int:
@@ -675,9 +780,10 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     from vllm_ascend.ops.bailing_moe_linear_attn import AscendBailingMoELinearAttention
     from vllm_ascend.ops.conv import AscendConv3dLayer
     from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
+    from vllm_ascend.ops.fused_moe.gate_linear import AscendGateLinear
     from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
     from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
-    from vllm_ascend.ops.layernorm import AscendGemmaRMSNorm, AscendRMSNorm, AscendRMSNormGated
+    from vllm_ascend.ops.layernorm import AscendFusedRMSNormGated, AscendGemmaRMSNorm, AscendRMSNorm, AscendRMSNormGated
     from vllm_ascend.ops.linear import (
         AscendColumnParallelLinear,
         AscendMergedColumnParallelLinear,
@@ -725,6 +831,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "MMEncoderAttention": AscendMMEncoderAttention,
         "ApplyRotaryEmb": AscendApplyRotaryEmb,
         "RMSNormGated": AscendRMSNormGated,
+        "FusedRMSNormGated": AscendFusedRMSNormGated,
         "Conv3dLayer": AscendConv3dLayer,
         "RelPosAttention": AscendRelPosAttention,
         "CustomQwen2Decoder": AscendCustomQwen2Decoder,
@@ -732,7 +839,13 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "BailingMoELinearAttention": AscendBailingMoELinearAttention,
         "MoERunner": AscendMoERunner,
         "RoutedExperts": AscendRoutedExperts,
+        "GateLinear": AscendGateLinear,
     }
+    if not vllm_version_is("0.28.0"):
+        from vllm_ascend.ops.kimi_mla import AscendKimiK3MultiHeadLatentAttention
+
+        REGISTERED_ASCEND_OPS["KimiK3MultiHeadLatentAttentionWrapper"] = AscendKimiK3MultiHeadLatentAttention
+
     if vllm_config is None:
         try:
             from vllm.config import get_current_vllm_config
@@ -740,13 +853,9 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
             vllm_config = get_current_vllm_config()
         except AssertionError:
             vllm_config = None
-    if vllm_config is not None and vllm_config.model_config.is_deepseek_mla:
-        from vllm_ascend.ops.fused_moe.gate_linear import AscendGateLinear
 
-        REGISTERED_ASCEND_OPS["GateLinear"] = AscendGateLinear
-
-    # 310P: override selected ops with 310P implementations (keep minimal changes outside _310p)
-    if is_310p():
+    # Override selected ops when the compatibility implementations are required.
+    if get_current_hardware_profile().supports(HardwareCapability.COMPATIBILITY_OP_IMPLEMENTATIONS):
         from vllm_ascend._310p.fused_moe.fused_moe import AscendMoERunner310, AscendRoutedExperts310
         from vllm_ascend._310p.ops.activation import AscendSiluAndMul310
         from vllm_ascend._310p.ops.conv import AscendConv3dLayer310
@@ -799,20 +908,11 @@ def oproj_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.oproj_tensor_parallel_size > 0
 
 
-def olora_tp_enable() -> bool:
-    return get_ascend_config().finegrained_tp_config.olora_tensor_parallel_size > 1
-
-
 def mlp_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.mlp_tensor_parallel_size > 0
 
 
-def enable_sp_by_pass():
-    return get_ascend_config().enable_sp_by_pass
-
-
 def enable_sp(vllm_config=None) -> bool:
-    global _ENABLE_SP
     if vllm_config is None:
         try:
             from vllm.config import get_current_vllm_config
@@ -821,24 +921,21 @@ def enable_sp(vllm_config=None) -> bool:
         except AssertionError:
             vllm_config = None
 
-    additional_config = getattr(vllm_config, "additional_config", None) if vllm_config is not None else None
-    refresh = additional_config.get("refresh", False) if additional_config else False
+    if vllm_config is None:
+        return False
 
-    if _ENABLE_SP is None or refresh:
-        if additional_config is not None and "enable_flashcomm1" in additional_config:
-            _ENABLE_SP = bool(additional_config["enable_flashcomm1"])
-        else:
-            try:
-                _ENABLE_SP = get_ascend_config().enable_flashcomm1
-            except RuntimeError:
-                _ENABLE_SP = envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
-
-    return bool(_ENABLE_SP)
+    return bool(vllm_config.parallel_config.use_sequence_parallel_moe)
 
 
 # TODO remove it after vllm has this func
 def shared_expert_dp_enabled() -> bool:
     return get_ascend_config().enable_shared_expert_dp
+
+
+def is_score_encoder_cache_manager(vllm_config: VllmConfig) -> bool:
+    from vllm_ascend.ec_manager.score_ec_manager import ScoreEncoderCacheManager
+
+    return vllm_config.ec_manager_config.get_encoder_cache_manager_obj() is ScoreEncoderCacheManager
 
 
 def is_moe_model(vllm_config: VllmConfig):
@@ -930,18 +1027,16 @@ def weak_ref_tensor(tensor: Any) -> Any:
     The new tensor will share the same data as the original tensor,
     but will not keep the original tensor alive.
     """
-    if isinstance(tensor, torch.Tensor):
+    if isinstance(tensor, torch.Tensor) and tensor.device.type == "npu":
         return torch_npu._C._weak_ref_tensor(tensor)
     else:
         return tensor
 
 
-def weak_ref_tensors(
-    tensors: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor],
-) -> torch.Tensor | list[Any] | tuple[Any] | Any:
+def weak_ref_tensors(tensors: Any) -> Any:
     """
-    Convenience function to create weak references to tensors,
-    for single tensor, list of tensors or tuple of tensors.
+    Recursively replace tensors with weak references while preserving containers
+    and non-tensor values.
 
     This function should be used in the following scenario:
     When a tensor is created during graph capture, and it's held by a method
@@ -953,14 +1048,14 @@ def weak_ref_tensors(
     if isinstance(tensors, torch.Tensor):
         return weak_ref_tensor(tensors)
     if isinstance(tensors, list):
-        return [weak_ref_tensor(t) for t in tensors]
+        return [weak_ref_tensors(tensor) for tensor in tensors]
     if isinstance(tensors, tuple):
-        return tuple(weak_ref_tensor(t) for t in tensors)
-    # For IntermediateTensors used in pipeline parallelism
+        return tuple(weak_ref_tensors(tensor) for tensor in tensors)
+    if isinstance(tensors, dict):
+        return {key: weak_ref_tensors(tensor) for key, tensor in tensors.items()}
     if isinstance(tensors, IntermediateTensors):
-        ret = IntermediateTensors({key: weak_ref_tensor(val) for key, val in tensors.tensors.items()})
-        return ret
-    raise ValueError("Invalid type for tensors")
+        return IntermediateTensors(weak_ref_tensors(tensors.tensors))
+    return tensors
 
 
 def npu_stream_switch(target_stream: torch.npu.Stream, *, enabled: bool = True):
@@ -1022,15 +1117,6 @@ def calculate_dp_buffer_size() -> int:
     return max(dp_buffer_size, _MIN_DP_BUFFER_SIZE)
 
 
-# Currently, when in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1
-# and HCCL_INTRA_ROCE_ENABLE=0 can reduce cross-machine communication traffic and
-# significantly improve communication performance of MC2 ops dispatch/combine.
-def is_hierarchical_communication_enabled():
-    return (
-        os.getenv("HCCL_INTRA_ROCE_ENABLE", "") == "0" and os.getenv("HCCL_INTRA_PCIE_ENABLE", "") == "1"
-    ) or get_ascend_config().enable_mc2_hierarchy_comm
-
-
 def is_pd_decode_recompute_scheduler_enabled(vllm_config: VllmConfig | None = None) -> bool:
     """True on PD-disaggregated decode nodes with recompute_scheduler_enable.
 
@@ -1040,12 +1126,17 @@ def is_pd_decode_recompute_scheduler_enabled(vllm_config: VllmConfig | None = No
     """
     try:
         if vllm_config is None:
-            try:
-                from vllm.config import get_current_vllm_config
+            # No caller-provided config: fall back to the upstream runtime
+            # context (non-raising). Previously this used the reach-through
+            # `get_ascend_config().vllm_config` as a second fallback, but
+            # vllm_config is no longer a member of AscendConfig (Plan B).
+            # get_current_vllm_config_or_none returns None outside an engine
+            # context — which is the exact case where the old fallback also
+            # could not supply a usable runtime config, so `vllm_config is None`
+            # below handles it identically.
+            from vllm.config import get_current_vllm_config_or_none
 
-                vllm_config = get_current_vllm_config()
-            except AssertionError:
-                vllm_config = get_ascend_config().vllm_config
+            vllm_config = get_current_vllm_config_or_none()
         if vllm_config is None:
             return False
         kv_cfg = vllm_config.kv_transfer_config
@@ -1122,7 +1213,8 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
     - Decode requires MC2 and ascend_config.scheduler_config.recompute_scheduler_enable is True.
 
     Skipping means each rank may have a different number of tokens, so MC2 needs
-    a non-zero global_bs and must NOT receive mc2_mask.
+    a non-zero global_bs and must NOT receive mc2_mask. CANN MegaMoe requires
+    uniform token counts across ranks, so its FUSED_MC2 path cannot skip.
 
     Returns False when hierarchy comm is enabled because hierarchy requires
     global_bs=0 (uniform tokens), which is incompatible with skipping allreduce.
@@ -1131,7 +1223,12 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
     computed once in init, and select_moe_comm_method is just config lookups, so
     this is cheap and avoids id-reuse / stale-cache / init-ordering hazards.
     """
-    if is_hierarchical_communication_enabled():
+    ascend_config = get_ascend_config()
+    # 1. When mc2_comm_alg == "hierarchy", dispatch/combine op don't support dynamic bs;
+    # 2. When use mega_moe, op don't support dynamic global_bs;
+    # we need to do allreduce and pad token across dp every step.
+    # TODO(zzzzwwjj): remove it when op can support dynamic bs.
+    if ascend_config.get_mc2_comm_alg() == "hierarchy" or is_mega_moe_supported():
         return False
 
     # For dense models, since we don't actually need dp communication, we simply skip it.
@@ -1145,8 +1242,11 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
     if not is_kv_consumer:
         return False
 
-    from vllm_ascend.ascend_forward_context import select_moe_comm_method
+    from vllm_ascend.ascend_forward_context import select_moe_comm_method, use_cann_megamoe
     from vllm_ascend.ops.fused_moe.moe_comm_method import MoECommType
+
+    if use_cann_megamoe(vllm_config):
+        return False
 
     def needs_mc2(n: int) -> bool:
         return select_moe_comm_method(n, vllm_config) in {MoECommType.MC2, MoECommType.FUSED_MC2}
@@ -1161,9 +1261,7 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
     prefill_must_use_mc2 = needs_mc2(scheduler_config.max_num_batched_tokens)
     uniform_cudagraph_mode = not vllm_config.compilation_config.cudagraph_mode.separate_routine()
     chunked_prefill_can_skip = prefill_must_use_mc2 and uniform_cudagraph_mode
-    return decode_can_skip and (
-        chunked_prefill_can_skip or get_ascend_config().scheduler_config.recompute_scheduler_enable
-    )
+    return decode_can_skip and (chunked_prefill_can_skip or ascend_config.scheduler_config.recompute_scheduler_enable)
 
 
 def has_layer_idx(model_instance: torch.nn.Module) -> bool:
@@ -1183,6 +1281,17 @@ def refresh_block_size(vllm_config):
     cache_config = vllm_config.cache_config
     scheduler_config = vllm_config.scheduler_config
     model_config = vllm_config.model_config
+
+    # A separate draft model shares the target model's CacheConfig and must use
+    # its resolved cache layout. Model-free proposers may alias the target as
+    # draft_model_config, so exclude that case.
+    spec_cfg = vllm_config.speculative_config
+    if (
+        spec_cfg is not None
+        and model_config is spec_cfg.draft_model_config
+        and model_config is not spec_cfg.target_model_config
+    ):
+        return
 
     if not cache_config:
         return
@@ -1236,6 +1345,23 @@ def dispose_layer(layer: Any):
             dispose_tensor(attr_value)
 
 
+def is_rl_weight_update_enabled(vllm_config: VllmConfig) -> bool:
+    """Whether this deployment takes part in an RL weight update loop.
+
+    RL rollout workers receive weights through vLLM's layerwise reload, which
+    writes every checkpoint parameter back into the storage that exists when
+    the transaction starts. A parameter whose storage was released therefore
+    has no valid reload destination, so whoever would release it must keep it
+    while this returns ``True``.
+
+    Two switches mark such a deployment: the Ascend RL defaults
+    (``additional_config.rl_config.enabled``) and the upstream weight transfer
+    service (``--weight-transfer-config``), which is how a rollout worker
+    declares that a trainer may update its weights in place.
+    """
+    return get_ascend_config().rl_config.enabled or vllm_config.weight_transfer_config is not None
+
+
 def check_kv_extra_config(vllm_config):
     def _check(name: str, config: dict):
         tp_key = "tp_size"
@@ -1285,7 +1411,7 @@ def is_gqa_backend(vllm_config: VllmConfig) -> bool:
 
 
 def uses_mooncake_connector(kv_transfer_config: Any) -> bool:
-    mooncake_connector_names = {"MooncakeConnector", "MooncakeConnectorV1"}
+    mooncake_connector_names = {"MooncakeConnector", "MooncakeConnectorV1", "MooncakeConnectorV2"}
     return bool(_collect_kv_connector_names(kv_transfer_config) & mooncake_connector_names)
 
 
@@ -1323,30 +1449,40 @@ def singleton(cls):
 
 @lru_cache(maxsize=1)
 def enable_dsa_cp() -> bool:
-    from vllm.config import get_current_vllm_config
+    # Read from the validated AscendConfig singleton instead of bypassing it
+    # via additional_config["enable_dsa_cp"]. This converges the bypass read
+    # (architecture debt #7) onto the canonical get_ascend_config() path, so
+    # the value benefits from @config type validation (bool lax coercion).
+    from vllm_ascend.ascend_config import get_ascend_config
 
-    vllm_config = get_current_vllm_config()
-    # DSA CP is only applicable to models with indexer (e.g., DSv3.2, DSv4).
-    has_indexer = hasattr(vllm_config.model_config, "hf_text_config") and hasattr(
-        vllm_config.model_config.hf_text_config, "index_topk"
-    )
-    if not has_indexer:
-        return False
+    return get_ascend_config().enable_dsa_cp
 
-    dsa_cp_enable = False
-    additional_config = getattr(vllm_config, "additional_config", None)
-    if additional_config is not None and "enable_dsa_cp" in additional_config:
-        dsa_cp_enable = bool(additional_config["enable_dsa_cp"])
 
-    if dsa_cp_enable and not enable_sp():
-        raise ValueError(
-            "DSA CP requires SP to be enabled. Please enable SP(set VLLM_ASCEND_ENABLE_FLASHCOMM1=1) to use DSA CP."
-        )
-    return dsa_cp_enable and enable_sp()
+def enable_sfa_dcp_force_tmajor_restore() -> bool:
+    # Read from the validated AscendConfig singleton (additional-config key
+    # sfa_dcp_force_tmajor_restore), like enable_dsa_cp, so the value
+    # benefits from @config type validation (bool lax coercion).
+    from vllm_ascend.ascend_config import get_ascend_config
+
+    return get_ascend_config().sfa_dcp_force_tmajor_restore
 
 
 @lru_cache(maxsize=1)
-def enable_dsa_cp_with_o_proj_tp() -> bool:
+def enable_pcp_o_proj_weight_sharding() -> bool:
+    """Whether SFA-PCP stores O-proj weights as PCP-local resident shards.
+
+    This is a load-time option because it changes the physical parameter shape
+    from a TP-local shard to a TP×PCP-local shard. DSA-CP does not use this
+    user-controlled option.
+    """
+    from vllm_ascend.ascend_config import get_ascend_config
+
+    return get_ascend_config().enable_pcp_o_proj_weight_sharding
+
+
+@lru_cache(maxsize=1)
+def enable_dsa_cp_full_o_proj() -> bool:
+    """Whether this DSA-CP role uses the original full O-proj prefill path."""
     if not enable_dsa_cp():
         return False
     from vllm.config import get_current_vllm_config
@@ -1354,7 +1490,7 @@ def enable_dsa_cp_with_o_proj_tp() -> bool:
     vllm_config = get_current_vllm_config()
     kv_transfer_config = vllm_config.kv_transfer_config
 
-    # Keep the original TP o_proj weight when:
+    # Use the gathered full o_proj weight when:
     # 1) KV pooling is disabled, or
     # 2) KV pooling is enabled on a prefill producer (including kv_both).
     # DSA-CP prefill produces a full-head attention output, so the runtime
@@ -1364,8 +1500,7 @@ def enable_dsa_cp_with_o_proj_tp() -> bool:
 
 def check_gdn_layer(vllm_config) -> bool:
     """
-    gdn layer is marked with `linear_attention`.
-    So, if `linear_attention` is detected, we think the model has gdn-attention.
+    Detect a model with GDN attention from either supported HF config shape.
     """
     if not hasattr(vllm_config, "model_config"):
         return False
@@ -1375,16 +1510,13 @@ def check_gdn_layer(vllm_config) -> bool:
         return False
 
     hf_config = model_config.hf_config
-
-    # Use `or []` to prevent errors when layer_types is None
-    layer_types = getattr(hf_config, "layer_types", None) or []
-    if "linear_attention" in layer_types:
-        return True
-
-    text_config = getattr(hf_config, "text_config", None)
-    if text_config:
-        text_layer_types = getattr(text_config, "layer_types", None) or []
-        if "linear_attention" in text_layer_types:
+    for config in (hf_config, getattr(hf_config, "text_config", None)):
+        if config is None:
+            continue
+        # Most hybrid models expose layer_types. Kimi Linear/K3 instead
+        # exposes the equivalent is_linear_attn property.
+        layer_types = getattr(config, "layer_types", None) or []
+        if "linear_attention" in layer_types or bool(getattr(config, "is_linear_attn", False)):
             return True
 
     return False
@@ -1440,6 +1572,27 @@ def parse_layer_idx(prefix: str) -> int | None:
     """Extract the layer index from a module prefix string like 'model.layers.0.self_attn'."""
     match = re.search(r"layers\.(\d+)", prefix)
     return int(match.group(1)) if match else None
+
+
+def is_mtp_layer(hf_config: Any, layer_name: str | None) -> bool:
+    """Whether ``layer_name`` belongs to an MTP/nextn layer rather than the backbone.
+
+    MTP layers live past the backbone in two naming styles: an explicit
+    ``mtp`` segment, or a layer index at or beyond ``num_hidden_layers``.
+    Callers that need a bounded range can also consult
+    ``num_nextn_predict_layers``; this helper answers the coarser
+    "is this layer part of the model's speculative head" question.
+    """
+    layer_name = layer_name or ""
+    num_hidden_layers = getattr(hf_config, "num_hidden_layers", None)
+    if not isinstance(num_hidden_layers, int):
+        return False
+    if ".mtp." in f".{layer_name}.":
+        return True
+    layer_id = parse_layer_idx(layer_name)
+    if layer_id is None:
+        return False
+    return layer_id >= num_hidden_layers
 
 
 def get_compressed_pos_and_indices(
@@ -1563,4 +1716,41 @@ def enable_sfa(vllm_config) -> bool:
     hf_text_config = getattr(model_config, "hf_text_config", None)
     if hf_text_config is None:
         return False
+    if model_uses_kpool_indexer(model_config):
+        return False
     return hasattr(hf_text_config, "index_topk") and not hasattr(hf_text_config, "compress_ratios")
+
+
+def get_rotation_path(vllm_config: VllmConfig) -> Path | None:
+    quant_config = vllm_config.quant_config
+    if quant_config is None:
+        return None
+    target_model_path = vllm_config.model_config.model
+    quant_description = getattr(quant_config, "quant_description", None) or {}
+    try:
+        rotation_relative_path = quant_description["optional"]["quarot"]["rotation_map"]["global_rotation"]
+    except (KeyError, TypeError):
+        return None
+    return Path(target_model_path) / rotation_relative_path
+
+
+def get_rotation_matrix(rotation_path: Path | None) -> torch.Tensor:
+    """Load the global rotation matrix."""
+    try:
+        safetensor_data = load_file(rotation_path)
+        Q = safetensor_data["global_rotation"]
+        return Q
+    except Exception as e:
+        logger.error(
+            "Failed to load rotation weight from '%s'. If you want to use quarot model with eagle3, take a check.",
+            rotation_path,
+        )
+        raise e
+
+
+def use_updatable_graph(
+    attn_backend,
+) -> bool:
+    from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+
+    return attn_backend is not None and issubclass(attn_backend, AscendAttentionBackend)

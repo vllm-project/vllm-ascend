@@ -18,9 +18,13 @@ Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for
 
 ### 3.1 Model Weight
 
-The BF16 model can be deployed with one Ascend 910B 64 GB NPU or one Ascend Atlas 300I DUO 48 GB NPU. Download the model weights from [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-ASR-1.7B).
+|  Weight Version    | Hardware Requirements                                            | Download Links |
+|--------------------|------------------------------------------------------------------|----------------|
+| BF16               | one Ascend Atlas 800I A2 64 GB NPU or one Ascend Atlas 300I DUO 48 GB NPU | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-ASR-1.7B) |
 
 Download the weights to a directory that is accessible from the deployment environment. For multi-node deployments, use a shared directory; for example, `/root/.cache/`.
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ## 4 Installation
 
@@ -83,7 +87,7 @@ Expected result: `docker ps` lists the container with status `Up`, and `pip show
 
 ### 4.2 Source Code Installation
 
-f you prefer to build from source instead of using the Docker image, install vLLM-Ascend following the [Installation Guide](../../installation.md).
+If you prefer to build from source instead of using the Docker image, install vLLM-Ascend following the [Installation Guide](../../getting_started/installation.md).
 
 !!! note
 
@@ -108,6 +112,7 @@ Single-node deployment runs both audio prefill and decoding on one NPU, making i
 === "Atlas A2 inference products"
 
     ```shell
+    # Ensure the model path matches the directory recorded during download
     vllm serve your_model_path \
       --served-model-name qwen3-asr \
       --tensor-parallel-size 1 \
@@ -120,6 +125,7 @@ Single-node deployment runs both audio prefill and decoding on one NPU, making i
 === "Atlas 300I DUO"
 
     ```shell
+    # Ensure the model path matches the directory recorded during download
     vllm serve your_model_path \
       --served-model-name qwen3-asr \
       --tensor-parallel-size 1 \
@@ -138,7 +144,7 @@ Single-node deployment runs both audio prefill and decoding on one NPU, making i
         - `--gpu-memory-utilization 0.9` sets the fraction of device memory available to the vLLM executor. Lower this value if other workloads share the NPU.
         - `--enforce-eager` disables graph execution. It is used in the Atlas 300I A2 2UP example for compatibility.
 
-When the service starts successfully, the log contains `Application startup complete`. If startup fails, see the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
+When the service starts successfully, the log contains `Application startup complete`. If startup fails, see the [Public FAQs](../../faqs.md).
 
 ## 6 Functional Verification
 
@@ -189,11 +195,11 @@ The following settings are starting points rather than globally optimal configur
 | High throughput | Increase request concurrency after establishing the latency baseline | Monitor NPU memory and end-to-end latency; do not use synthetic text-only requests as a proxy for ASR traffic. |
 | Long audio | Increase `--max-model-len` only as required | On Atlas 300I DUO, keep the value conservative because attention-mask memory grows with the configured maximum length. |
 
-For general parameter tuning, refer to the [Performance Tuning Guide](../../developer_guide/performance_and_debug/optimization_and_tuning.md).
+For general parameter tuning, refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md).
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, see the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html). This section covers model- and hardware-specific guidance.
+For common environment, installation, and general parameter issues, see the [Public FAQs](../../faqs.md). This section covers model- and hardware-specific guidance.
 
 ### Atlas 300I DUO runs out of memory during startup
 

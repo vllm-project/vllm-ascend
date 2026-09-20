@@ -39,6 +39,7 @@ class DummyDeviceConfig:
 class DummyParallelConfig:
     tensor_parallel_size = 1
     pipeline_parallel_size = 1
+    local_world_size = 1
 
 
 class DummyVllmConfig:
@@ -125,11 +126,22 @@ def _capturing_elastic_server(instances: list):
     return CapturingElasticServer
 
 
-def _patch_dist_barrier(monkeypatch) -> list[str]:
+def _patch_dist_barrier(
+    monkeypatch,
+    *,
+    world_size: int = 1,
+    rank: int = 0,
+) -> list[str]:
     barrier_calls: list[str] = []
     monkeypatch.setattr("torch.distributed.is_available", lambda: True)
     monkeypatch.setattr("torch.distributed.is_initialized", lambda: True)
-    monkeypatch.setattr("torch.distributed.barrier", lambda: barrier_calls.append("barrier"))
+    monkeypatch.setattr("torch.distributed.get_world_size", lambda: world_size)
+    monkeypatch.setattr("torch.distributed.get_rank", lambda: rank)
+
+    def _barrier(*args, **kwargs):
+        barrier_calls.append("barrier")
+
+    monkeypatch.setattr("torch.distributed.barrier", _barrier)
     return barrier_calls
 
 
@@ -232,34 +244,109 @@ def test_init_with_invalid_config(monkeypatch):
     assert loader.output_prefix is None
 
 
-def test_remove_new_static_forward_context_keys_preserves_baseline(monkeypatch):
-    class DummyCompilationConfig:
-        def __init__(self):
-            self.static_forward_context = {}
+def test_fallback_cleanup_context_releases_references_and_restores_state(monkeypatch):
+    from vllm.model_executor.layers import rotary_embedding
 
-    class ConfigWithCompilation:
-        def __init__(self):
-            self.compilation_config = DummyCompilationConfig()
+    from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 
-    passed_config = ConfigWithCompilation()
-    current_config = ConfigWithCompilation()
-    target_layer = object()
-    draft_layer = object()
-    passed_config.compilation_config.static_forward_context["target.layer"] = target_layer
-    current_config.compilation_config.static_forward_context["current.target"] = target_layer
+    class FakeCompileWrapper(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.cleanup_calls = 0
+
+        def cleanup(self):
+            self.cleanup_calls += 1
+
+    target_layer = nn.Module()
+    draft_layer = nn.Module()
+    stale_layer = nn.Module()
+    compile_wrapper = FakeCompileWrapper()
+    failed_model = nn.Module()
+    failed_model.add_module("stale", stale_layer)
+    failed_model.add_module("draft", draft_layer)
+    failed_model.add_module("compiled", compile_wrapper)
+    shared_moe_layers = [target_layer]
+    eplb_layers = [target_layer]
+    passed_config = SimpleNamespace(
+        compilation_config=SimpleNamespace(
+            static_forward_context={"target.layer": target_layer, "stale.layer": stale_layer},
+            static_all_moe_layers=shared_moe_layers,
+        )
+    )
+    current_config = SimpleNamespace(
+        compilation_config=SimpleNamespace(
+            static_forward_context={"current.target": target_layer},
+            static_all_moe_layers=shared_moe_layers,
+        )
+    )
     monkeypatch.setattr(
         "vllm_ascend.model_loader.netloader.netloader.get_current_vllm_config_or_none",
         lambda: current_config,
     )
+    target_key = ("target", 1)
+    draft_key = ("draft", 2)
+    target_rope = object()
+    rope_cache = {target_key: target_rope}
+    monkeypatch.setattr(rotary_embedding, "_ROPE_DICT", rope_cache)
+    monkeypatch.setattr(VllmEplbAdaptor, "_registered_moe_layers", eplb_layers)
+    monkeypatch.setattr(
+        "vllm.compilation.wrapper.TorchCompileWithNoGuardsWrapper",
+        FakeCompileWrapper,
+    )
+    monkeypatch.setattr(
+        ModelNetLoaderElastic,
+        "_get_npu_memory_usage",
+        staticmethod(lambda device_type: (100, 200)),
+    )
 
-    snapshots = ModelNetLoaderElastic._snapshot_static_forward_context_keys(passed_config)
+    cleanup_context = ModelNetLoaderElastic._create_fallback_cleanup_context(passed_config, "npu")
     passed_config.compilation_config.static_forward_context["draft.layer"] = draft_layer
     current_config.compilation_config.static_forward_context["current.draft"] = draft_layer
+    shared_moe_layers.append(draft_layer)
+    eplb_layers.append(draft_layer)
+    rope_cache[draft_key] = object()
 
-    ModelNetLoaderElastic._remove_new_static_forward_context_keys(passed_config, snapshots)
+    failed_model_ref = ModelNetLoaderElastic._release_failed_model_references(
+        failed_model, passed_config, cleanup_context
+    )
 
     assert passed_config.compilation_config.static_forward_context == {"target.layer": target_layer}
     assert current_config.compilation_config.static_forward_context == {"current.target": target_layer}
+    assert shared_moe_layers == [target_layer]
+    assert eplb_layers == [target_layer]
+    assert rope_cache == {target_key: target_rope}
+    assert cleanup_context.memory_baseline == (100, 200)
+    assert failed_model_ref() is failed_model
+    assert compile_wrapper.cleanup_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("memory_usage", "expected_attempts"),
+    [
+        ([(300, 400), (100, 150)], 1),
+        ([(300, 400), (250, 300), (100, 150)], 2),
+    ],
+)
+@patch("vllm_ascend.model_loader.netloader.netloader.torch.npu.empty_cache")
+@patch("vllm_ascend.model_loader.netloader.netloader.gc.collect")
+def test_reclaim_failed_model_memory_attempts(
+    mock_gc,
+    mock_empty_cache,
+    memory_usage,
+    expected_attempts,
+):
+    with patch.object(
+        ModelNetLoaderElastic,
+        "_get_npu_memory_usage",
+        side_effect=memory_usage,
+    ) as mock_memory_usage:
+        result = ModelNetLoaderElastic._reclaim_failed_model_memory("npu", (100, 200))
+
+    assert result.attempts == expected_attempts
+    assert result.reached_baseline is True
+    assert mock_gc.call_count == expected_attempts
+    assert mock_empty_cache.call_count == expected_attempts
+    assert mock_memory_usage.call_count == expected_attempts + 1
 
 
 def test_pre_transfer_weight_processing_unwraps_and_restores_quant_methods():
@@ -333,6 +420,7 @@ def test_load_model_elastic_success(mock_logger, monkeypatch, tmp_path):
     result = make_loader_with_config(extra).load_model(DummyVllmConfig(), DummyModelConfig())
     assert isinstance(result, nn.Module)
     assert (tmp_path / "output_0.txt").exists()
+    assert any("Netloader manifest build time" in call.args[0] for call in mock_logger.info.call_args_list)
 
 
 @patch("vllm_ascend.model_loader.netloader.netloader.logger")
@@ -345,14 +433,11 @@ def test_target_elastic_failure_sets_fallback_flag(mock_logger, monkeypatch):
         "revert_to_default",
         lambda self, *args, **kwargs: (dummy_model, False),
     )
-    monkeypatch.setattr(
-        "vllm_ascend.model_loader.netloader.netloader.ModelNetLoaderElastic._snapshot_static_forward_context_keys",
-        lambda *args, **kwargs: {},
-    )
-    monkeypatch.setattr(
-        "vllm_ascend.model_loader.netloader.netloader.ModelNetLoaderElastic._remove_new_static_forward_context_keys",
-        lambda *args, **kwargs: None,
-    )
+    cleanup_context = SimpleNamespace(memory_baseline=None)
+    reclaim_result = SimpleNamespace(attempts=1, before=None, after=None, reached_baseline=False)
+    monkeypatch.setattr(ModelNetLoaderElastic, "_create_fallback_cleanup_context", lambda *args: cleanup_context)
+    monkeypatch.setattr(ModelNetLoaderElastic, "_release_failed_model_references", lambda *args: lambda: None)
+    monkeypatch.setattr(ModelNetLoaderElastic, "_reclaim_failed_model_memory", lambda *args: reclaim_result)
     _install_elastic_server(monkeypatch)
 
     extra = {
@@ -365,6 +450,9 @@ def test_target_elastic_failure_sets_fallback_flag(mock_logger, monkeypatch):
     loader.load_model(DummyVllmConfig(), DummyModelConfig())
 
     assert ModelNetLoaderElastic._target_elastic_fallback is True
+    log_formats = [call.args[0] for call in mock_logger.method_calls]
+    assert any("Netloader load failed" in message for message in log_formats)
+    assert any("stage=fallback_cleanup" in message for message in log_formats)
     ModelNetLoaderElastic._target_elastic_fallback = False
 
 
@@ -478,28 +566,6 @@ def test_seed_process_weights_order_depends_on_int8_cache(mock_logger, monkeypat
     assert calls == expected_calls
 
 
-@pytest.mark.parametrize("int8_cache", ["dram", "no"])
-@patch("vllm_ascend.model_loader.netloader.netloader.logger")
-def test_target_model_barrier_before_draft(mock_logger, monkeypatch, int8_cache):
-    dummy_model = _patch_loader_common(monkeypatch)
-    monkeypatch.setattr("vllm_ascend.model_loader.netloader.netloader.elastic_load", lambda **kwargs: dummy_model)
-    _install_elastic_server(monkeypatch)
-    barrier_calls = _patch_dist_barrier(monkeypatch)
-
-    extra = {
-        "SOURCE": [{"device_id": 0, "sources": ["127.0.0.1:5000"]}],
-        "MODEL": "dummy-model",
-        "LISTEN_PORT": 5555,
-        "INT8_CACHE": int8_cache,
-    }
-    loader = make_loader_with_config(extra)
-    vllm_config = DummyVllmConfig()
-    vllm_config.speculative_config = object()
-    loader.load_model(vllm_config, DummyModelConfig())
-
-    assert barrier_calls == ["barrier"]
-
-
 @patch("vllm_ascend.model_loader.netloader.netloader.logger")
 def test_failed_target_model_participates_in_barrier_before_error(mock_logger, monkeypatch):
     _patch_loader_common(monkeypatch)
@@ -509,7 +575,7 @@ def test_failed_target_model_participates_in_barrier_before_error(mock_logger, m
         "revert_to_default",
         lambda self, *args, **kwargs: (None, False),
     )
-    barrier_calls = _patch_dist_barrier(monkeypatch)
+    barrier_calls = _patch_dist_barrier(monkeypatch, world_size=4)
 
     extra = {
         "SOURCE": [{"device_id": 0, "sources": ["127.0.0.1:5000"]}],
@@ -519,6 +585,7 @@ def test_failed_target_model_participates_in_barrier_before_error(mock_logger, m
     }
     loader = make_loader_with_config(extra)
     vllm_config = DummyVllmConfig()
+    vllm_config.parallel_config.local_world_size = 4
     vllm_config.speculative_config = object()
 
     with pytest.raises(RuntimeError, match="NetLoader elastic loads model fails"):
@@ -546,6 +613,62 @@ def test_draft_model_does_not_wait_for_target_netloader_barrier(mock_logger, mon
     loader.load_model(vllm_config, DummyDraftModelConfig())
 
     assert barrier_calls == []
+
+
+@patch("vllm_ascend.model_loader.netloader.netloader.logger")
+@pytest.mark.parametrize(
+    "world_size,local_world_size,rank,expected_groups,expected_barrier_group",
+    [
+        (4, 4, 0, [], None),
+        (8, 4, 2, [[0, 1, 2, 3], [4, 5, 6, 7]], "pg-0"),
+    ],
+)
+def test_target_model_uses_node_local_barrier(
+    mock_logger,
+    monkeypatch,
+    world_size,
+    local_world_size,
+    rank,
+    expected_groups,
+    expected_barrier_group,
+):
+    dummy_model = _patch_loader_common(monkeypatch)
+    monkeypatch.setattr("vllm_ascend.model_loader.netloader.netloader.elastic_load", lambda **kwargs: dummy_model)
+    _install_elastic_server(monkeypatch)
+
+    created_groups: list[list[int]] = []
+    barrier_groups: list[Any] = []
+
+    def fake_new_group(ranks=None, **kwargs):
+        rank_list = list(ranks)
+        created_groups.append(rank_list)
+        return f"pg-{rank_list[0]}"
+
+    def fake_barrier(*args, **kwargs):
+        barrier_groups.append(kwargs.get("group", args[0] if args else None))
+
+    monkeypatch.setattr("torch.distributed.is_available", lambda: True)
+    monkeypatch.setattr("torch.distributed.is_initialized", lambda: True)
+    monkeypatch.setattr("torch.distributed.get_world_size", lambda: world_size)
+    monkeypatch.setattr("torch.distributed.get_rank", lambda: rank)
+    monkeypatch.setattr("torch.distributed.new_group", fake_new_group)
+    monkeypatch.setattr("torch.distributed.barrier", fake_barrier)
+
+    extra = {
+        "SOURCE": [{"device_id": rank, "sources": ["127.0.0.1:5000"]}],
+        "MODEL": "dummy-model",
+        "LISTEN_PORT": 5555,
+        "INT8_CACHE": "no",
+    }
+    loader = make_loader_with_config(extra)
+    vllm_config = DummyVllmConfig()
+    vllm_config.parallel_config = DummyParallelConfig()
+    vllm_config.parallel_config.local_world_size = local_world_size
+    vllm_config.speculative_config = object()
+    loader.load_model(vllm_config, DummyModelConfig())
+
+    assert created_groups == expected_groups
+    assert barrier_groups == [expected_barrier_group]
 
 
 @pytest.mark.parametrize(

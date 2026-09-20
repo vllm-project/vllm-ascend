@@ -50,6 +50,7 @@ from tools.bisect.config import (
 from tools.bisect.good_table import GoodTable, valid_soc
 from tools.bisect.state import BisectState
 from tools.bisect.verdict import evaluate
+from tools.bisect.version_compat import VersionAdaptationError, VersionPolicy, expected_versions
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("auto_bisect")
@@ -98,7 +99,7 @@ class Bisector:
                 log_path=str(log_path),
                 note=note,
             )
-        except BuildError as exc:
+        except (BuildError, VersionAdaptationError) as exc:
             result = TrialResult(
                 candidate=candidate,
                 verdict="SKIP",
@@ -152,7 +153,7 @@ class Bisector:
             if v == "SKIP":
                 logger.error(
                     "Bad commit could not even run the test (environment error, "
-                    "e.g. vllm/vllm-ascend version mismatch). Fix the environment "
+                    "e.g. dependency adaptation failed). Fix the environment "
                     "before bisecting; aborting."
                 )
                 return False
@@ -168,7 +169,7 @@ class Bisector:
             if v == "SKIP":
                 logger.error(
                     "Good baseline could not even run the test (environment error, "
-                    "e.g. vllm/vllm-ascend version mismatch). The whole range is "
+                    "e.g. dependency adaptation failed). The whole range is "
                     "likely unrunnable against the installed vllm; fix the "
                     "environment before bisecting; aborting."
                 )
@@ -223,6 +224,18 @@ class Bisector:
 
         candidates = git_ops.candidate_list(self.repo, good.commit, bad.commit)
         logger.info("Search space: %d commits", len(candidates))
+        version_policy = VersionPolicy.between(
+            expected_versions(self.repo, good.commit),
+            expected_versions(self.repo, bad.commit),
+        )
+        self.runner.configure_version_policy(version_policy)
+        if version_policy.enabled:
+            logger.info(
+                "Version adaptation enabled for %s; endpoint versions differ",
+                ", ".join(version_policy.checked_packages),
+            )
+        else:
+            logger.info("Version adaptation disabled; good and bad endpoint versions match")
 
         state = BisectState.load(self.state_path, good=good.commit, bad=bad.commit) or BisectState(
             good=good.commit, bad=bad.commit, hi=len(candidates) - 1

@@ -162,6 +162,7 @@ jobs:
       UV_SYSTEM_PYTHON: 1
       VLLM_ENGINE_READY_TIMEOUT_S: 1800
       OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
+      VLLM_ASCEND_BRANCH: ${{ inputs.vllm_ascend_branch }}
     steps:
       - name: Check npu and CANN info
         run: |
@@ -210,6 +211,11 @@ jobs:
           pip install uc-manager
           uv pip install -r requirements-dev.txt
           uv pip install -e .
+
+      - name: Uninstall Triton for 310P tests
+        if: ${{ inputs.soc_version == '310P' }}
+        run: |
+          pip uninstall -y triton-ascend triton
 
       - name: Install aisbench
         if: ${{ inputs.request_id != '' }}

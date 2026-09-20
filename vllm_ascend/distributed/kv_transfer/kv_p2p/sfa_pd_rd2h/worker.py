@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any
 import regex as re
 import torch
 from vllm.config import VllmConfig
-from vllm.distributed import get_tensor_model_parallel_rank, get_tp_group
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_rank, get_tp_group
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
@@ -95,6 +95,16 @@ def _resolve_kv_transfer_backend(vllm_config: VllmConfig) -> str:
     return backend
 
 
+def _resolve_memfabric_transfer_protocol(vllm_config: VllmConfig) -> str | None:
+    """Read the optional MemFabric data-path protocol.
+
+    Read from ``kv_connector_extra_config["memfabric_transfer_protocol"]``:
+    ``sdma``/``device_rdma`` for A3 nodes, ``device_urma`` for A5 nodes.
+    """
+    extra = vllm_config.kv_transfer_config.kv_connector_extra_config or {}
+    return extra.get("memfabric_transfer_protocol")
+
+
 def _validate_tcp_port(port: int, *, description: str) -> None:
     if not MIN_TCP_PORT <= port <= MAX_TCP_PORT:
         raise ValueError(f"{description} must be in [{MIN_TCP_PORT}, {MAX_TCP_PORT}], got {port}")
@@ -158,6 +168,7 @@ class SFAPDRD2HConsumerWorker:
             global_memfabric_te.configure(
                 role=MEMFABRIC_ROLE_DECODE,
                 device_id=torch.npu.current_device(),
+                transfer_protocol=_resolve_memfabric_transfer_protocol(self.vllm_config),
             )
             self.engine = global_memfabric_te.get_transfer_engine(self.side_channel_host)
         return self.engine
@@ -444,6 +455,7 @@ class SFAPDRD2HProducerWorker:
         global_memfabric_te.configure(
             role=MEMFABRIC_ROLE_PREFILL,
             device_id=torch.npu.current_device(),
+            transfer_protocol=_resolve_memfabric_transfer_protocol(vllm_config),
         )
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
@@ -451,6 +463,8 @@ class SFAPDRD2HProducerWorker:
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.tp_rank = get_tensor_model_parallel_rank()
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
+        self.pp_rank = get_pp_group().rank_in_group
+        self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
         self.side_channel_host = get_ip()
         self.side_channel_port = vllm_config.kv_transfer_config.kv_port + self.dp_rank * self.tp_size
         self.total_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
@@ -463,7 +477,7 @@ class SFAPDRD2HProducerWorker:
         self.main_group_idx, self.indexer_group_idx = infer_sfa_component_group_ids(self.kv_cache_config)
         self.use_mla = self.vllm_config.model_config.use_mla
         self.layer_metadata: dict[str, LayerMetadata] = {}
-        self.index_to_name: dict[int, str] = {}
+        self.stage_layer_names: list[str] = []
         # A layer can touch a main storage slot and, optionally, a separate
         # indexer storage slot. The send thread owns one completion gate per
         # physical storage slot so reuse is safe across layer and step
@@ -577,6 +591,8 @@ class SFAPDRD2HProducerWorker:
             indexer_group_idx=self.indexer_group_idx,
             block_sizes=tuple(self.block_size),
             layer_storage_slots=self.layer_storage_slots,
+            producer_pp_rank=self.pp_rank,
+            producer_pp_size=self.pp_size,
         )
 
     @staticmethod
@@ -646,10 +662,10 @@ class SFAPDRD2HProducerWorker:
                 )
                 layer_meta.has_indexer = True
             self.layer_metadata[main_name] = layer_meta
-            self.index_to_name[physical_idx] = main_name
 
         self.last_layer_idx = max(main_by_layer)
         self.total_layers = self.last_layer_idx + 1
+        self.stage_layer_names = [name for _, name in sorted(main_by_layer.items())]
 
         # Infer physical storage slots directly from component addresses.
         # Main and indexer storage are tracked independently: a main-only layer
@@ -709,7 +725,9 @@ class SFAPDRD2HProducerWorker:
         """
         if self._backend != BACKEND_MEMFABRIC or self.kv_send_layer_thread is None:
             return
-        resolved_layer_name = layer_name or self.index_to_name.get(self.current_layer)
+        resolved_layer_name = layer_name or (
+            self.stage_layer_names[self.current_layer] if self.current_layer < len(self.stage_layer_names) else None
+        )
         if resolved_layer_name is None:
             return
         layer_idx = _layer_idx(resolved_layer_name)
@@ -741,7 +759,9 @@ class SFAPDRD2HProducerWorker:
             raise RuntimeError(
                 "SFAPD P-side send thread is unavailable; register_kv_caches() must complete before save_kv_layer()"
             )
-        resolved_layer_name = layer_name or self.index_to_name.get(self.current_layer)
+        resolved_layer_name = layer_name or (
+            self.stage_layer_names[self.current_layer] if self.current_layer < len(self.stage_layer_names) else None
+        )
         if resolved_layer_name is None:
             return
         layer_idx = _layer_idx(resolved_layer_name)
@@ -839,7 +859,9 @@ class SFAPDRD2HProducerWorker:
         """
         if self.kv_send_layer_thread is None:
             return
-        storage_slots = self.layer_storage_slots.get(layer_idx, ())
+        if layer_idx not in self.layer_storage_slots:
+            raise RuntimeError(f"SFA layerwise reuse mapping is missing layer {layer_idx}")
+        storage_slots = self.layer_storage_slots[layer_idx]
         if storage_slots:
             for slot_id in storage_slots:
                 self._wait_for_pd_read_completion(
@@ -847,6 +869,17 @@ class SFAPDRD2HProducerWorker:
                     lambda slot_id=slot_id: self.kv_send_layer_thread.get_storage_error(slot_id),
                     f"physical KV storage slot {slot_id} for layer {layer_idx}",
                 )
+
+    def wait_for_layer_reuse(self, stage_local_layer_idx: int) -> None:
+        """Translate AscendStore's stage-local ordinal to a global layer."""
+        try:
+            global_layer_idx = _layer_idx(self.stage_layer_names[stage_local_layer_idx])
+        except IndexError as error:
+            raise RuntimeError(
+                "SFA layerwise reuse mapping is missing stage-local layer "
+                f"{stage_local_layer_idx} on pp_rank={self.pp_rank}/{self.pp_size}"
+            ) from error
+        self.wait_for_layer_send(global_layer_idx)
 
     def shutdown(self) -> None:
         if self.kv_send_layer_thread is not None:

@@ -7,6 +7,8 @@ import regex as re
 import yaml
 from vllm.utils.network_utils import get_open_port
 
+from tests.e2e.common.kv_pool.config import KVPoolConfig, parse_kv_pool_config
+
 CONFIG_BASE_PATH = os.getenv("CONFIG_BASE_PATH") or "tests/e2e/nightly/single_node/models/configs"
 
 logger = logging.getLogger(__name__)
@@ -37,6 +39,7 @@ class SingleNodeConfig:
     epd_proxy_args: list[str] = field(default_factory=list)
     mm_request: dict[str, Any] = field(default_factory=dict)
     expected_response: dict[str, Any] = field(default_factory=dict)
+    kv_pool: KVPoolConfig | None = None
     extra_config: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -120,6 +123,7 @@ class SingleNodeConfigLoader:
         "epd_proxy_args",
         "expected_response",
         "mm_request",
+        "kv_pool",
     }
 
     @classmethod
@@ -192,6 +196,7 @@ class SingleNodeConfigLoader:
                     extra_config=extra_case_fields,
                     expected_response=case.get("expected_response", {}),
                     mm_request=case.get("mm_request", {}),
+                    kv_pool=parse_kv_pool_config(case.get("kv_pool")),
                 )
             )
         return result

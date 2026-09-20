@@ -33,7 +33,7 @@ jobs:
       actions: write
       issues: write
     steps:
-      - uses: actions/stale@v10
+      - uses: actions/stale@v11
         with:
           # Process issues with the 'resolved' label
           any-of-labels: 'resolved'
@@ -67,7 +67,7 @@ jobs:
           # Avoid accidental PR processing (PRs can be handled if needed; this is issue-only)
           days-before-pr-stale: -1
           days-before-pr-close: -1
-      - uses: actions/stale@v10
+      - uses: actions/stale@v11
         with:
           # Process issues with the 'wait-feedback' label
           any-of-labels: 'wait-feedback'

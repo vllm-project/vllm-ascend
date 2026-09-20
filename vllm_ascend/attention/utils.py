@@ -1,25 +1,79 @@
+import enum
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any
 
 import torch
 import torch.nn.functional as F
-import torch_npu
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group, is_v1_kv_transfer_group
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils.torch_utils import get_dtype_size
+from vllm.v1.attention.backend import MLAAttentionImpl
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
 from vllm_ascend.utils import (
-    AscendDeviceType,
     get_ascend_config,
-    get_ascend_device_type,
     is_pd_decode_recompute_scheduler_enabled,
 )
 
 SFA_QSFA_TILE_SIZE = 128
+MLAPO_MAX_SUPPORTED_TOKENS = 1024
+
+
+class PreprocessType(enum.Enum):
+    NATIVE = "native"
+    PROLOG_V3 = "prolog_v3"
+    MLAPO = "mlapo"
+
+
+def mark_fused_preprocess_weights(impl: MLAAttentionImpl) -> None:
+    """Refresh NZ management after changing preprocessing policy, before loading weights."""
+    resolve_type = getattr(impl, "_fused_preprocess_type", None)
+    if resolve_type is None:
+        return
+    managed = resolve_type() is not None
+    for layer in (impl.fused_qkv_a_proj, impl.q_proj):
+        if layer is not None:
+            layer._fused_preprocess_managed = managed
+
+
+def get_or_register_attention_buffer(
+    vllm_config: VllmConfig,
+    layer_names: list[str],
+    name: str,
+    factory: Callable[[], torch.Tensor],
+) -> torch.Tensor:
+    """Return a shared non-persistent buffer owned by attention modules."""
+    # TODO: Revisit this after torch_npu supports traversing mem-pool
+    # allocations during sleep/wake. The buffer could then be allocated from
+    # the appropriate mem-pool for CaMem to manage its device-memory lifetime.
+    static_forward_context = vllm_config.compilation_config.static_forward_context
+    modules = []
+    for layer_name in layer_names:
+        module = static_forward_context.get(layer_name)
+        if not isinstance(module, torch.nn.Module):
+            raise ValueError(f"Attention layer {layer_name!r} is not a registered torch.nn.Module")
+        modules.append(module)
+
+    if not modules:
+        raise ValueError("At least one attention layer is required to own the buffer")
+
+    buffer = next((getattr(module, name) for module in modules if hasattr(module, name)), None)
+    if buffer is None:
+        buffer = factory()
+
+    for module in modules:
+        existing = getattr(module, name, None)
+        if existing is None:
+            module.register_buffer(name, buffer, persistent=False)
+        elif existing is not buffer:
+            raise ValueError(f"Attention buffer {name!r} is already registered with a different tensor")
+
+    return buffer
 
 
 def build_valid_topk_mask(
@@ -53,53 +107,6 @@ class PagedAttentionGraphParam:
 
     def __iter__(self):
         return iter(self.params)
-
-
-def update_paged_attention_graph_param(
-    update_stream,
-    handle,
-    event,
-    param: PagedAttentionGraphParam,
-    block_table: torch.Tensor,
-    seq_lens: torch.Tensor,
-) -> None:
-    (
-        query,
-        key_cache,
-        value_cache,
-        num_kv_heads,
-        num_heads,
-        scale,
-        _captured_block_table,
-        _captured_seq_lens,
-        output,
-    ) = param.params
-    workspace = torch_npu._npu_paged_attention_get_workspace(
-        query=query,
-        key_cache=key_cache,
-        value_cache=value_cache,
-        num_kv_heads=num_kv_heads,
-        num_heads=num_heads,
-        scale_value=scale,
-        block_table=block_table,
-        context_lens=seq_lens,
-        out=output,
-    )
-    torch.npu.graph_task_update_begin(update_stream, handle)
-    torch_npu._npu_paged_attention(
-        query=query,
-        key_cache=key_cache,
-        value_cache=value_cache,
-        num_kv_heads=num_kv_heads,
-        num_heads=num_heads,
-        scale_value=scale,
-        block_table=block_table,
-        context_lens=seq_lens,
-        out=output,
-        workspace=workspace,
-    )
-    torch.npu.graph_task_update_end(update_stream)
-    event.record(update_stream)
 
 
 def cache_graph_workspace(
@@ -170,7 +177,7 @@ def ascend_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
 def using_paged_attention(runtime_shape: int, vllm_config: VllmConfig, head_size: int | None = None) -> bool:
     if vllm_config.speculative_config is not None:
         return False
-    if get_ascend_device_type() == AscendDeviceType.A5:
+    if not get_current_hardware_profile().supports(HardwareCapability.PAGED_ATTENTION):
         return False
     # TODO: Remove this fallback when A2/A3 FIA TND supports Gemma4's
     # 512-dim global attention heads. Decode can use PA directly; prefill is
@@ -190,6 +197,11 @@ def using_paged_attention(runtime_shape: int, vllm_config: VllmConfig, head_size
 def enable_dcp():
     parallel_config = get_current_vllm_config().parallel_config
     return parallel_config.decode_context_parallel_size > 1
+
+
+def enable_pcp():
+    parallel_config = get_current_vllm_config().parallel_config
+    return parallel_config.prefill_context_parallel_size > 1
 
 
 @dataclass
@@ -436,7 +448,7 @@ def wait_for_kv_layer_from_connector(layer_name: str):
 
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
-    if attn_metadata is None:
+    if attn_metadata is None or not connector.has_connector_metadata():
         return
     # TODO: assert ascendMetadata
     connector.wait_for_layer_load(layer_name)
@@ -453,7 +465,7 @@ def maybe_save_kv_layer_to_connector(
 
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
-    if attn_metadata is None:
+    if attn_metadata is None or not connector.has_connector_metadata():
         return
     # TODO: assert ascendMetadata
     connector.save_kv_layer(layer_name, kv_cache_layer, attn_metadata)
@@ -513,7 +525,7 @@ def transdata(nd_mat, block_size: tuple = (16, 16)):
 
 def enabling_mlapo(vllm_config: VllmConfig) -> bool:
     config_val = get_ascend_config().enable_mlapo
-    if get_ascend_device_type() == AscendDeviceType.A5:
+    if get_current_hardware_profile().supports(HardwareCapability.UNRESTRICTED_MLAPO):
         return bool(config_val)
 
     is_decode_instance = (

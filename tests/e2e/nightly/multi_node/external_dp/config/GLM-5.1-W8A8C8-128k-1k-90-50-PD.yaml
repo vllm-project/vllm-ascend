@@ -51,7 +51,6 @@ env_common: &env_common
   VLLM_USE_MODELSCOPE: "true"
   SERVER_PORT: "${PORT}"
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
-  VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
   HCCL_OP_EXPANSION_MODE: "AIV"
   OMP_PROC_BIND: "false"
   OMP_NUM_THREADS: "1"
@@ -89,8 +88,12 @@ templates:
       - "1024"
       - --max-model-len
       - "202752"
+      - --kv-cache-dtype
+      - "int8"
+      - --attention_config.indexer_kv_dtype
+      - "int8"
       - --additional-config
-      - '{"fuse_muls_add":true,"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_dsa_cp":true,"enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true,"c8_enable_reshape_optim":true}'
+      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_dsa_cp":true,"enable_fused_mc2":1}'
       - --max-num-batched-tokens
       - "8192"
       - --trust-remote-code
@@ -152,8 +155,12 @@ templates:
       - "1024"
       - --max-model-len
       - "202752"
+      - --kv-cache-dtype
+      - "int8"
+      - --attention_config.indexer_kv_dtype
+      - "int8"
       - --additional-config
-      - '{"fuse_muls_add":true,"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_dsa_cp":true,"enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true,"c8_enable_reshape_optim":true}'
+      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_dsa_cp":true,"enable_fused_mc2":1}'
       - --max-num-batched-tokens
       - "8192"
       - --trust-remote-code
@@ -191,7 +198,6 @@ templates:
       <<: *env_common
       HCCL_BUFFSIZE: "256"
       TASK_QUEUE_ENABLE: "1"
-      VLLM_ASCEND_ENABLE_MLAPO: "1"
     server_cmd_template:
       - --host
       - "0.0.0.0"
@@ -220,8 +226,12 @@ templates:
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - --speculative-config
       - '{"num_speculative_tokens": 3,  "method":"deepseek_mtp","enforce_eager":true}'
+      - --kv-cache-dtype
+      - "int8"
+      - --attention_config.indexer_kv_dtype
+      - "int8"
       - --additional-config
-      - '{"fuse_muls_add":true,"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true,"enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true}'
+      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true,"enable_fused_mc2":1,"enable_mlapo":true}'
       - --trust-remote-code
       - --max-num-seqs
       - "32"
@@ -257,7 +267,6 @@ templates:
       <<: *env_common
       HCCL_BUFFSIZE: "256"
       TASK_QUEUE_ENABLE: "1"
-      VLLM_ASCEND_ENABLE_MLAPO: "1"
     server_cmd_template:
       - --host
       - "0.0.0.0"
@@ -286,8 +295,12 @@ templates:
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - --speculative-config
       - '{"num_speculative_tokens": 3,  "method":"deepseek_mtp","enforce_eager":true}'
+      - --kv-cache-dtype
+      - "int8"
+      - --attention_config.indexer_kv_dtype
+      - "int8"
       - --additional-config
-      - '{"fuse_muls_add":true,"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true,"enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true}'
+      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true,"enable_fused_mc2":1,"enable_mlapo":true}'
       - --trust-remote-code
       - --max-num-seqs
       - "32"
@@ -327,7 +340,7 @@ benchmarks:
     dataset_path: vllm-ascend/aime2025
     request_conf: vllm_api_general_chat
     dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
-    max_out_len: 32768
+    max_out_len: 81920
     batch_size: 32
     baseline: 93.33
     threshold: 10
@@ -353,5 +366,5 @@ benchmarks:
     max_out_len: 1024
     batch_size: 64
     request_rate: 1.52
-    baseline: 1265.6172
+    baseline: 923.60
     threshold: 0.97

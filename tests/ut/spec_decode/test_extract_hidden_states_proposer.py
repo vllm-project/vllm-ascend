@@ -36,10 +36,14 @@ from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
 
 @pytest.fixture(autouse=True)
 def _no_pin_memory():
-    with patch(
-        "vllm.v1.spec_decode.extract_hidden_states.PIN_MEMORY",
-        False,
-    ):
+    # Both versions allocate through CpuGpuBuffer. Keep this CPU-only test
+    # independent of accelerator pin-memory registration.
+    original_zeros = torch.zeros
+
+    def _zeros(*args, pin_memory=False, **kwargs):
+        return original_zeros(*args, **kwargs)
+
+    with patch("torch.zeros", _zeros):
         yield
 
 

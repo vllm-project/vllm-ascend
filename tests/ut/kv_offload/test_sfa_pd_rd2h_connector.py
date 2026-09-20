@@ -2,11 +2,13 @@
 
 import asyncio
 import threading
+import time
 from concurrent.futures import Future
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+import msgspec
 import pytest
 
 pytest.importorskip("torch")
@@ -28,7 +30,9 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.connector import (  
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (  # noqa: E402
     BATCH_KV_TRANSFER_PARAMS,
+    MF_META_ACK,
     READ_READY_BATCH,
+    SFAPD_PROTOCOL_VERSION,
     LayerMetadata,
     SendTask,
     SfaPDProducerReqMeta,
@@ -543,6 +547,34 @@ def test_read_descriptor_rejects_missing_destination_blocks():
         )
 
 
+def test_read_descriptor_waits_for_late_destination_blocks():
+    thread = _make_read_thread()
+    thread._state.dest_blocks_by_req.clear()
+    thread._stop_event = threading.Event()
+
+    def register_late_dest_blocks():
+        time.sleep(0.02)
+        thread._state.dest_blocks_by_req["req-0"] = ([3, 4], [])
+
+    register_thread = threading.Thread(target=register_late_dest_blocks)
+    register_thread.start()
+    try:
+        local, peer, lengths, info = thread._build_req_descriptors(
+            _make_layer(k_cpu_ptr=3000, v_cpu_ptr=4000, has_indexer=False),
+            "req-0",
+            p_main_block_ids=[1, 2],
+            p_indexer_block_ids=[],
+            want_info=True,
+        )
+    finally:
+        register_thread.join(timeout=1)
+
+    assert local == [3030, 4060]
+    assert peer == [1010, 2020]
+    assert lengths == [20, 40]
+    assert info is not None
+
+
 def test_read_descriptor_rejects_incomplete_indexer_transfer():
     thread = _make_read_thread()
 
@@ -855,6 +887,15 @@ def test_pd_read_wait_propagates_read_failed():
 
     with pytest.raises(RuntimeError, match="memfabric read failed"):
         worker.wait_for_layer_send(0)
+
+
+def test_pd_read_wait_rejects_missing_layer_mapping():
+    worker = SFAPDRD2HProducerWorker.__new__(SFAPDRD2HProducerWorker)
+    worker.kv_send_layer_thread = MagicMock()
+    worker.layer_storage_slots = {0: (0,)}
+
+    with pytest.raises(RuntimeError, match="mapping is missing layer 1"):
+        worker.wait_for_layer_send(1)
 
 
 def test_save_kv_layer_requires_send_thread_without_marking_dispatched():
@@ -1177,6 +1218,15 @@ def test_connector_shutdown_delegates_to_active_components():
     connector.connector_scheduler.shutdown.assert_called_once_with()
 
 
+def test_connector_layerwise_reuse_wait_delegates_to_existing_gate():
+    connector = SfaRemoteD2HConnector.__new__(SfaRemoteD2HConnector)
+    connector.connector_worker = MagicMock()
+
+    connector.wait_for_layer_reuse(3)
+
+    connector.connector_worker.wait_for_layer_reuse.assert_called_once_with(3)
+
+
 # ---------------------------------------------------------------------------
 # Contributor-group split (unequal P/D TP)
 # ---------------------------------------------------------------------------
@@ -1337,3 +1387,61 @@ def test_discard_requests_clears_partial_contributor_state():
     thread.discard_requests({"req-0"})
     assert "req-0" not in thread._done_contributors
     assert "req-0" not in thread._expected_ratio
+
+
+def test_pp_request_done_waits_for_every_stage_and_rejects_topology_change():
+    thread = _make_completion_thread()
+
+    for contributor in range(3):
+        thread._record_chunk_done(["req-0"], contributor, 4)
+    assert "req-0" not in thread._done_requests
+
+    thread._record_chunk_done(["req-mismatch"], 0, 4)
+    thread._record_chunk_done(["req-mismatch"], 1, 2)
+    assert "req-mismatch" in thread._failed_requests
+    assert "req-mismatch" not in thread._done_requests
+
+    thread._record_chunk_done(["req-0"], 3, 4)
+    assert "req-0" in thread._done_requests
+
+
+def test_stage_local_reuse_translates_to_global_layer():
+    worker = SFAPDRD2HProducerWorker.__new__(SFAPDRD2HProducerWorker)
+    worker.pp_rank = 1
+    worker.pp_size = 2
+    worker.stage_layer_names = ["model.layers.6.self_attn", "model.layers.7.self_attn"]
+    worker.wait_for_layer_send = MagicMock()  # type: ignore[method-assign]
+
+    worker.wait_for_layer_reuse(0)
+
+    worker.wait_for_layer_send.assert_called_once_with(6)
+
+
+def test_pp_producer_requires_structured_mf_meta_ack():
+    thread = MembPullSendingThread.__new__(MembPullSendingThread)
+    thread.timeout = 0.01
+    thread._state = ProducerSendState(
+        last_layer_idx=6,
+        layer_metadata={},
+        p_session="p-session",
+        main_group_idx=0,
+        indexer_group_idx=0,
+        block_sizes=(16,),
+        layer_storage_slots={},
+        producer_pp_rank=1,
+        producer_pp_size=2,
+    )
+    thread._mf_meta_sent_paths = set()
+    dealer = MagicMock()
+    dealer.poll.return_value = True
+    dealer.recv_multipart.return_value = [b"ACK"]
+
+    with pytest.raises(RuntimeError, match="PP-aware D"):
+        thread._send_mf_meta("tcp://d:1", dealer, msgspec.msgpack.Encoder())
+
+    dealer.reset_mock()
+    dealer.recv_multipart.return_value = [msgspec.msgpack.encode((MF_META_ACK, SFAPD_PROTOCOL_VERSION))]
+
+    thread._send_mf_meta("tcp://d:1", dealer, msgspec.msgpack.Encoder())
+
+    assert "tcp://d:1" in thread._mf_meta_sent_paths

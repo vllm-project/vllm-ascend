@@ -34,6 +34,21 @@ routing:
     prefiller: [0]
     decoder: [1]
 
+# Optional. Select one managed KV pool backend and configure its ports. The
+# framework starts the backend service on node 0 and writes the backend config
+# used by every vLLM rank.
+kv_pool:
+  type: mooncake
+  master_port: 50088
+  metrics_port: 50089
+  config:
+    metadata_server: "P2PHANDSHAKE"
+    protocol: "ascend"
+    device_name: ""
+    global_segment_size: "1GB"
+    preferred_segment: false
+    prefer_alloc_in_same_node: true
+
 config:
   - node_index: 0
     port_start: 7100
@@ -56,10 +71,17 @@ config:
 env_common: &env_common
   HCCL_OP_
   VLLM_USE_MODELSCOPE: "true"
+  LD_LIBRARY_PATH: "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH"
+  PYTHONHASHSEED: "0"
   OMP_PROC_BIND: "false"
   OMP_NUM_THREADS: "10"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
+  ASCEND_ENABLE_USE_FABRIC_MEM: "1"
+  ACL_OP_INIT_MODE: "1"
+  HCCL_RDMA_TIMEOUT: "17"
+  ASCEND_CONNECT_TIMEOUT: "10000"
+  ASCEND_TRANSFER_TIMEOUT: "10000"
   HCCL_BUFFSIZE: "256"
   SERVER_PORT: "${PORT}"
   VLLM_ASCEND_ENABLE_FLASHCOMM1: "0"
@@ -184,6 +206,72 @@ benchmarks:
   address for prefiller nodes and the decoder master address for decoder nodes.
 - `templates`: One template per config entry. The framework expands one command
   per local DP rank.
+- `kv_pool`: Optional managed KV pool. `type` is either `mooncake` or
+  `memcache`. Mooncake requires `master_port` and `metrics_port`; Memcache
+  requires `meta_service_port` and `config_store_port`. All configured ports
+  must be available on node 0. The framework starts the selected service on
+  node 0 before any vLLM rank starts.
+- `kv_pool.config`: Backend-specific config. For Mooncake, it is written to
+  each node's generated `mooncake.json`; the framework derives and overwrites
+  `master_server_address`. For Memcache, it contains `meta` and `local`
+  mappings written to `mmc-meta.conf` and `mmc-local.conf`; the framework
+  derives and overwrites the MetaService and Config Store URLs.
+
+For KV pooling, use `MultiConnector` in each server template. The prefiller
+uses `kv_producer` for both child connectors:
+
+```yaml
+- --kv-transfer-config
+- >-
+  {
+    "kv_connector": "MultiConnector",
+    "kv_role": "kv_producer",
+    "kv_load_failure_policy": "recompute",
+    "kv_connector_extra_config": {
+      "connectors": [
+        {
+          "kv_connector": "MooncakeConnectorV1",
+          "kv_role": "kv_producer",
+          "kv_port": "30000",
+          "kv_connector_extra_config": {
+            "prefill": {"dp_size": 2, "tp_size": 1},
+            "decode": {"dp_size": 2, "tp_size": 1}
+          }
+        },
+        {
+          "kv_connector": "AscendStoreConnector",
+          "kv_role": "kv_producer",
+          "kv_connector_extra_config": {
+            "lookup_rpc_port": "0",
+            "backend": "mooncake"
+          }
+        }
+      ]
+    }
+  }
+```
+
+The decoder uses the same structure with `kv_role: kv_consumer` on the outer
+connector and both child connectors. The framework passes this argument
+through unchanged. When selecting Memcache, write `"backend": "memcache"`
+in the YAML command yourself.
+
+To use Memcache instead, replace the `kv_pool` block with:
+
+```yaml
+kv_pool:
+  type: memcache
+  meta_service_port: 5000
+  config_store_port: 6000
+  config:
+    meta:
+      ock.mmc.log_level: error
+    local:
+      ock.mmc.log_level: error
+      ock.mmc.local_service.world_size: 256
+      ock.mmc.local_service.protocol: device_sdma
+      ock.mmc.local_service.dram.size: 1GB
+```
 
 The framework injects distributed network envs at startup:
 
@@ -195,6 +283,29 @@ TP_SOCKET_IFNAME
 LOCAL_IP
 NIC_NAME
 MASTER_IP
+```
+
+When `kv_pool.type` is `mooncake`, it additionally injects:
+
+```text
+MOONCAKE_CONFIG_PATH
+MOONCAKE_MASTER
+```
+
+When `kv_pool.type` is `memcache`, it injects:
+
+```text
+MMC_LOCAL_CONFIG_PATH
+```
+
+The generated configs and service logs are archived with the node logs:
+
+```text
+<external-dp-log-root>/node-<index>/runtime/mooncake.json
+<external-dp-log-root>/node-0/mooncake-master.log
+<external-dp-log-root>/node-<index>/runtime/mmc-meta.conf
+<external-dp-log-root>/node-<index>/runtime/mmc-local.conf
+<external-dp-log-root>/node-0/memcache-meta-service.log
 ```
 
 The framework also derives proxy metadata from `routing.type`:

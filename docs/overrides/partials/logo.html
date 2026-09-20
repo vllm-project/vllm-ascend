@@ -9,7 +9,7 @@
 -#}
 {% if config.theme.logo %}
   <img class="md-logo__img md-logo__img--light" src="{{ config.theme.logo | url }}#only-light" alt="logo">
-  <img class="md-logo__img md-logo__img--dark" src="logos/vllm-ascend-logo-text-dark.png#only-dark" alt="logo">
+  <img class="md-logo__img md-logo__img--dark" src="{{ 'logos/vllm-ascend-logo-text-dark.png' | url }}#only-dark" alt="logo">
 {% else %}
   {% set icon = config.theme.icon.logo or "material/library" %}
   {% include ".icons/" ~ icon ~ ".svg" %}

@@ -15,11 +15,10 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-
 from typing import Any, cast
 
 import torch
-from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config import VllmConfig, get_layers_from_vllm_config, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
@@ -28,17 +27,47 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
 )
 
-from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
+from vllm_ascend.utils import (
+    get_rotation_path,
+    vllm_version_is,
+)
+from vllm_ascend.worker.v2.attn_utils import (
+    build_attn_metadata_wrapper,
+    build_draft_attn_metadata_factory,
+)
+from vllm_ascend.worker.v2.spec_decode.pcp_utils import prepare_replicated_pcp_config
 
 
 class AscendDSparkSpeculator(DSparkSpeculator):
     _speculator_name = "DSpark"
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
+        vllm_config, self.replicated_pcp = prepare_replicated_pcp_config(vllm_config)
         super().__init__(vllm_config, device)
         self.input_batch: InputBatch | None = None
 
+    def load_draft_model(
+        self,
+        target_model: torch.nn.Module,
+        target_attn_layer_names: set[str],
+    ) -> torch.nn.Module:
+        # Upstream replaces quant_config with None for a BF16 draft. Pass only
+        # the target QuaRot path so the draft's existing load_weights can fold
+        # input inverse rotation into FC (W @ R) and align fallback embedding /
+        # lm_head before upstream decides weight sharing. Do not rotate again
+        # after loading or replace the draft's own quantization configuration.
+        draft_hf_config = self.draft_model_config.hf_config
+        rotation_path = get_rotation_path(self.vllm_config)
+        draft_hf_config._ascend_target_rotation_path = str(rotation_path) if rotation_path is not None else None
+        model = super().load_draft_model(target_model, target_attn_layer_names)
+        if hasattr(model, "configure_target_aux_hidden_capture"):
+            model.configure_target_aux_hidden_capture(target_model)
+
+        return model
+
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
+        if self.speculative_config.enforce_eager:
+            cudagraph_mode = CUDAGraphMode.NONE
         super().init_cudagraph_manager(cudagraph_mode)
         # The Ascend graph manager is patched onto the upstream module and
         # created by super().init_cudagraph_manager without a speculator ref.
@@ -54,34 +83,48 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         target_input_buffers: Any,
         target_attn_groups: Any,
     ) -> None:
-        super().set_attn(
-            model_state,
-            kv_cache_config,
-            block_tables,
-            target_input_buffers,
-            target_attn_groups,
-        )
-        self._context_slot_mappings = self._context_slot_mappings.to(torch.int32)  # type: ignore[has-type]
-        # npu needs attn_backends to update full graph params in run_fullgraph.
-        attn_backends: dict[str, type[AttentionBackend]] = {}
-        active_layer_names = self.draft_attn_layer_names
-        for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
-            layer_names = kv_cache_group_spec.layer_names
-            if active_layer_names is not None:
-                layer_names = list(active_layer_names.intersection(layer_names))
+        # Initialize the draft attention backend with its PCP=1 config.
+        with set_current_vllm_config(self.attn_vllm_config):
+            super().set_attn(
+                model_state,
+                kv_cache_config,
+                block_tables,
+                target_input_buffers,
+                target_attn_groups,
+            )
+            self._context_slot_mappings = self._context_slot_mappings.to(torch.int32)  # type: ignore[has-type]
+            # npu needs attn_backends to update full graph params in run_fullgraph.
+            attn_backends: dict[str, type[AttentionBackend]] = {}
+            active_layer_names = self.draft_attn_layer_names
+            for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
+                layer_names = kv_cache_group_spec.layer_names
+                if active_layer_names is not None:
+                    # Preserve cache-group order so captured graph tasks and
+                    # runtime metadata stay aligned.
+                    layer_names = [name for name in layer_names if name in active_layer_names]
 
-            layer_type = cast(type[Any], AttentionLayerBase)
-            attn_layers = get_layers_from_vllm_config(self.vllm_config, layer_type, layer_names)
+                layer_type = cast(type[Any], AttentionLayerBase)
+                attn_layers = get_layers_from_vllm_config(self.vllm_config, layer_type, layer_names)
 
-            for layer_name in layer_names:
-                attn_backends[layer_name] = attn_layers[layer_name].get_attn_backend()
+                for layer_name in layer_names:
+                    attn_backends[layer_name] = attn_layers[layer_name].get_attn_backend()
 
-        self.attn_backends = attn_backends
+            self.attn_backends = attn_backends
 
     def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
         num_tokens_padded = num_reqs_padded * self.num_query_per_req
         assert self.input_batch is not None
-        with build_attn_metadata_wrapper():
+        # The draft attention metadata is built through the generic
+        # (Ascend) build_attn_metadata path; the factory forwards the draft
+        # query positions that the DSA metadata builder needs for RoPE.
+        with (
+            build_attn_metadata_wrapper(),
+            build_draft_attn_metadata_factory(
+                self.input_buffers.positions,
+                num_tokens_padded,
+                torch.from_numpy(self.input_batch.is_prefilling_np),
+            ),
+        ):
             attn_metadata = self._build_draft_attn_metadata(
                 num_reqs=self.input_batch.num_reqs,
                 num_reqs_padded=num_reqs_padded,
@@ -130,9 +173,25 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
+        # vLLM #53694 replaced num_tokens_across_dp with the DP sync state.
+        dp_sync: Any = None,
     ) -> torch.Tensor:
         self.input_batch = input_batch
-        with build_attn_metadata_wrapper():
+        assert self.input_batch is not None
+        sync_state = num_tokens_across_dp if vllm_version_is("0.28.0") else dp_sync
+        if dummy_run and skip_attn_for_dummy_run:
+            # Profiling runs the draft with its own query token count, which
+            # can differ from the target batch. Let forward_context coordinate
+            # the actual draft counts instead of reusing the target DP state.
+            # TODO: Remove this guard once main2main includes upstream vLLM
+            # #54856 (facd9a74a1), which resets the profiling DP counts.
+            sync_state = None
+        with (
+            build_attn_metadata_wrapper(),
+            build_draft_attn_metadata_factory(
+                self.input_buffers.positions, self.max_num_tokens, torch.from_numpy(self.input_batch.is_prefilling_np)
+            ),
+        ):
             return super().propose(
                 input_batch,
                 attn_metadata,
@@ -145,7 +204,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
                 next_prefill_tokens,
                 temperature,
                 seeds,
-                num_tokens_across_dp,
+                sync_state,
                 dummy_run,
                 skip_attn_for_dummy_run,
                 mm_inputs,

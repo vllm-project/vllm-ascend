@@ -43,7 +43,7 @@
 /vllm_ascend/device_allocator @weijinqian0
 /vllm_ascend/distributed @LCAIZJ
 # /vllm_ascend/eplb
-/vllm_ascend/kv_offload @nalinaly
+/vllm_ascend/distributed/kv_transfer/kv_pool/kv_offload @nalinaly
 /vllm_ascend/lora @paulyu12
 # /vllm_ascend/model_loader
 /vllm_ascend/ops @zzzzwwjj @realliujiaxu

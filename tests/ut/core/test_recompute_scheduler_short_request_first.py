@@ -15,7 +15,6 @@
 # limitations under the License.
 """Verify that RecomputeScheduler does not enable ShortRequestFirst."""
 
-from types import SimpleNamespace
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import torch
@@ -46,6 +45,10 @@ class TestRecomputeSchedulerWithoutShortRequestFirst(TestBase):
         "vllm.config.ModelConfig.is_encoder_decoder",
         PropertyMock(return_value=False),
     )
+    @patch(
+        "vllm.config.ModelConfig.uses_mrope",
+        PropertyMock(return_value=False),
+    )
     def test_waiting_queue_uses_upstream_policy(self):
         from vllm_ascend.core.recompute_scheduler import RecomputeScheduler
 
@@ -71,7 +74,9 @@ class TestRecomputeSchedulerWithoutShortRequestFirst(TestBase):
         model_config.pooler_config = MagicMock()
         model_config.multimodal_config = None
         model_config.served_model_name = MODEL
-        model_config.hf_config = SimpleNamespace(canvas_length=None)
+        model_config.hf_config = MagicMock()
+        model_config.hf_config.canvas_length = None
+        model_config.hf_config.get_text_config.return_value = model_config.hf_config
         model_config.hf_text_config = MagicMock()
         model_config.hf_text_config.is_encoder_decoder = False
         model_config.hf_text_config.model_type = "qwen3"

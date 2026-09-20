@@ -20,6 +20,15 @@ import torch
 
 
 def softmax_batch_invariant(input_, dim, dtype=None):
+    # ``aten::softmax`` passes an optional output dtype, while
+    # ``aten::_softmax`` passes a ``half_to_float`` boolean as its third
+    # argument. This implementation is registered for both operators.
+    if isinstance(dtype, bool):
+        if dtype:
+            input_ = input_.float()
+    elif dtype is not None:
+        input_ = input_.to(dtype=dtype)
+
     # Compute softmax in a deterministic way
     # First subtract max for numerical stability (standard practice)
     input_max = torch.amax(input_, dim=dim, keepdim=True)

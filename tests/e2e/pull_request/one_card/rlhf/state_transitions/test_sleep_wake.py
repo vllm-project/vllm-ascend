@@ -28,7 +28,7 @@ All tests require:
   --enable-sleep-mode   KV cache allocated via CuMemAllocator; without this
                         flag sleep/wake are no-ops and the bug cannot trigger.
   VLLM_SERVER_DEV_MODE=1
-  VLLM_ASCEND_ENABLE_NZ=0
+  --additional-config '{"weight_nz_mode": 0}'
 """
 
 import requests

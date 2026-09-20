@@ -19,9 +19,11 @@ from typing import Any
 
 import torch
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.sample.metadata import SamplingMetadata
 
 from vllm_ascend._310p.ops.rotary_embedding import AscendRotaryEmbedding310
 from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
+from vllm_ascend.utils import vllm_version_is
 
 _original_run_merged_draft = AscendSpecDecodeBaseProposer._run_merged_draft
 
@@ -39,6 +41,7 @@ class AscendSpecDecodeBaseProposer310(AscendSpecDecodeBaseProposer):
         multi_steps_attn_metadata,
         num_tokens,
         is_prefill=None,
+        sampling_metadata: SamplingMetadata | None = None,
     ) -> torch.Tensor:
         AscendRotaryEmbedding310.set_rope_position_flag_310p(True)
         try:
@@ -52,6 +55,7 @@ class AscendSpecDecodeBaseProposer310(AscendSpecDecodeBaseProposer):
                 multi_steps_attn_metadata,
                 num_tokens,
                 is_prefill,
+                sampling_metadata,
             )
         finally:
             AscendRotaryEmbedding310.set_rope_position_flag_310p(False)
@@ -97,7 +101,7 @@ class AscendSpecDecodeBaseProposer310(AscendSpecDecodeBaseProposer):
             ori_token_indices_to_sample = None
             query_lens_d = None
 
-            if self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim == 0:
+            if vllm_version_is("0.28.0") and self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim == 0:
                 target_positions = target_positions[0]
 
             self._set_positions(num_tokens, target_positions)

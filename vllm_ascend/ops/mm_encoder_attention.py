@@ -166,8 +166,8 @@ class AscendMMEncoderAttention(MMEncoderAttention):
     ) -> torch.Tensor:
         fia_kwargs = dict(
             query=query,
-            key=key,
-            value=value,
+            key=key.contiguous(),
+            value=value.contiguous(),
             atten_mask=None,
             block_table=None,
             input_layout="TND",

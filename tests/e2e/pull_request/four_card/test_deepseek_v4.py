@@ -17,7 +17,6 @@
 # Adapted from vllm/tests/basic_correctness/test_basic_correctness.py
 #
 import os
-from unittest.mock import patch
 
 import pytest
 
@@ -30,18 +29,12 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 @pytest.mark.e2e_model("gdydems/DeepSeek-V4-Flash-w4a8-mtp")
 @pytest.mark.e2e_coverage(
     arch="moe",
-    feature="mtp,flashcomm1",
+    feature="mtp",
     parallel="TP,EP",
     deploy="pd_mix",
     hardware="A3",
     quantization="W4A8",
     graph_mode="full_decode_only",
-)
-@patch.dict(
-    os.environ,
-    {
-        "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
-    },
 )
 @wait_until_npu_memory_free()
 def test_deepseek_v4_w4a8_tp4_basic_greedy():
@@ -64,6 +57,7 @@ def test_deepseek_v4_w4a8_tp4_basic_greedy():
         quantization="ascend",
         tokenizer_mode="deepseek_v4",
         block_size=128,
+        attention_config={"indexer_kv_dtype": "int8"},
         compilation_config={
             "cudagraph_mode": "FULL_DECODE_ONLY",
         },
@@ -91,12 +85,6 @@ def test_deepseek_v4_w4a8_tp4_basic_greedy():
     quantization="W4A8",
     graph_mode="full_decode_only",
 )
-@patch.dict(
-    os.environ,
-    {
-        "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
-    },
-)
 @wait_until_npu_memory_free()
 def test_deepseek_v4_w4a8_tp4_index_cache_freq4():
     """IndexCache freq=4 must produce non-empty greedy outputs identical in
@@ -123,6 +111,7 @@ def test_deepseek_v4_w4a8_tp4_index_cache_freq4():
         quantization="ascend",
         tokenizer_mode="deepseek_v4",
         block_size=128,
+        attention_config={"indexer_kv_dtype": "int8"},
         compilation_config={
             "cudagraph_mode": "FULL_DECODE_ONLY",
         },

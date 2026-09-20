@@ -1,32 +1,36 @@
 # Hy3-preview
 
-## Introduction
+## 1 Introduction
 
 Hy3-preview is a Mixture-of-Experts model, with 295B total parameters, 21B active parameters and 3.8B MTP layer parameters, developed by the Tencent Hy Team. It is the first model trained on Tencent rebuilt infrastructure. It improves significantly on complex reasoning, instruction following, context learning, coding, and agent tasks.
 
 This guide records the verified vLLM Ascend serving path for Hy3-preview on one Atlas A3 16-NPU node. The verified default path is TP16 + EP + MTP + ACLGraph.
 
-## Supported Features
+## 2 Supported Features
 
-Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
-Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
+Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
-## Environment Preparation
+## 3 Environment Preparation
 
-### Model Weight
+### 3.1 Model Weight
 
-- Hugging Face: [tencent/Hy3-preview](https://huggingface.co/tencent/Hy3-preview)
-- ModelScope: [Tencent-Hunyuan/Hy3-preview](https://www.modelscope.cn/models/Tencent-Hunyuan/Hy3-preview)
-- GitCode: [tencent_hunyuan/Hy3-preview](https://ai.gitcode.com/tencent_hunyuan/Hy3-preview)
+|  Weight Version | Download Links |
+|-----------------|----------------|
+| Hy3-preview     | [ModelScope](https://www.modelscope.cn/models/Tencent-Hunyuan/Hy3-preview) \| [Hugging Face](https://huggingface.co/tencent/Hy3-preview) \| [GitCode](https://ai.gitcode.com/tencent_hunyuan/Hy3-preview) |
 
 Download or mount the checkpoint to a path shared by the runtime container, for example `/models/Hy3-preview`.
 
-### Hardware
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
+
+### 3.2 Hardware
 
 The verified configuration uses one Atlas A3 node with 16 NPUs and 64 GB HBM per NPU. The real-weight run used about 58 GB process memory per NPU after startup.
 
-### Installation
+## 4 Installation
+
+### 4.1 Docker Image Installation
 
 You can use our official docker image to run Hy3-preview directly. For Atlas A3 machines, select the image variant with the `-a3` suffix. The official image already includes the vLLM and vLLM Ascend runtime needed for the verified serving path.
 
@@ -66,13 +70,15 @@ You can use our official docker image to run Hy3-preview directly. For Atlas A3 
     -it $IMAGE bash
 ```
 
+### 4.2 Source Code Installation
+
 In addition, if you don't want to use the docker image as above, you can also build all from source:
 
-- Install `vllm-ascend` from source, refer to [installation](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/installation.md).
+- Install `vllm-ascend` from source, refer to [installation](../../getting_started/installation.md).
 
-## Deployment
+## 5 Deployment
 
-### Single-node Deployment
+### 5.1 Single-node Deployment
 
 Run `vllm serve` from `/workspace`.
 
@@ -81,6 +87,7 @@ cd /workspace
 export MODEL_PATH=/models/Hy3-preview
 
 HCCL_OP_EXPANSION_MODE=AIV \
+# Ensure the model path matches the directory recorded during download
 vllm serve ${MODEL_PATH} \
   --served-model-name hy3-preview \
   --tensor-parallel-size 16 \
@@ -100,7 +107,7 @@ vllm serve ${MODEL_PATH} \
 - `--enable-ep-weight-filter` recommended. It skips expert weights that do not belong to the local EP rank during loading, reducing disk and host-memory pressure for very large MoE checkpoints. We recommend keeping it enabled.
 - Tool calling and reasoning are service interfaces declared in the Hy3 README, so it is recommended to pass the corresponding `hy_v3` parsers by default.
 
-## Functional Verification
+## 6 Functional Verification
 
 Check model readiness first:
 
@@ -140,11 +147,11 @@ Expected result:
 }
 ```
 
-## Accuracy Evaluation
+## 7 Accuracy Evaluation
 
 Here are two accuracy evaluation methods.
 
-### Using AISBench
+### 7.1 Using AISBench
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
@@ -155,21 +162,21 @@ Here are two accuracy evaluation methods.
 | GSM8K | - | accuracy | gen | 93.07 | 1 Atlas A3 (64GB × 16) |
 | C-Eval | - | accuracy | gen | 87.64 | 1 Atlas A3 (64GB × 16) |
 
-### Using Language Model Evaluation Harness
+### 7.2 Using Language Model Evaluation Harness
 
 Not tested yet.
 
-## Performance
+## 8 Performance Evaluation
 
-### Using AISBench
+### 8.1 Using AISBench
 
 Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
-### Using vLLM Benchmark
+### 8.2 Using vLLM Benchmark
 
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
-### Lightweight Online Benchmark
+### 8.3 Lightweight Online Benchmark
 
 The following numbers are from a real-weight smoke benchmark on one Atlas A3 16-NPU node, using TP16 + EP + MTP + ACLGraph. The benchmark used `vllm bench serve`, random prompts, output length 128, `--max-concurrency 1`, `--temperature 0`, and 4 requests per input length. These numbers are functional performance evidence, not tuned throughput limits.
 
@@ -196,7 +203,7 @@ vllm bench serve \
 | 4,096 | 4 / 4 | 1379.41 | 30.24 | 24.52 | 811.99 |
 | 16,384 | 4 / 4 | 2604.58 | 30.43 | 19.79 | 2554.65 |
 
-## Known Limitations
+## 9 Known Limitations
 
 - The model config supports 262,144 tokens, but this guide only verifies 32,768-token serving. Larger contexts require a separate capacity validation.
 - Formal AISBench accuracy results are pending and should be added only after a real benchmark run.

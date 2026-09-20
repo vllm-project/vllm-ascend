@@ -46,6 +46,7 @@ class RForkWorker:
         self.transfer_backend = RForkTransferBackend()
         self.ready_to_start_seed_service = False
         self.seed_service_started = False
+        self._excluded_weight_blocks: list[tuple[int, int]] = []
         self.seed_timeout_sec = seed_timeout_sec
         self.seed_protocol = RForkSeedProtocol(
             disaggregation_mode=disaggregation_mode,
@@ -64,22 +65,32 @@ class RForkWorker:
         self.rfork_seed = self.seed_protocol.get_seed()
         return self.rfork_seed is not None
 
+    def set_excluded_weight_blocks(self, excluded_blocks: list[tuple[int, int]] | None) -> None:
+        self._excluded_weight_blocks = list(excluded_blocks) if excluded_blocks else []
+
     def pre_transfer(self, model, processed_layout: bool) -> bool:
         try:
             assert self.transfer_backend.is_initialized(), "transfer_backend is not initialized, cannot pre_transfer."
-            result = self.transfer_backend.register_memory_region(model, processed_layout)
+            result = self.transfer_backend.register_memory_region(
+                model,
+                processed_layout,
+                self._excluded_weight_blocks,
+            )
             self.ready_to_start_seed_service = result
             return result
         except AssertionError as e:
             logger.exception("Pre-transfer failed for device_id=%s: %s", self.device_id, e)
             return False
 
-    def reset_transfer_state(self) -> None:
+    def reset_transfer_state(self) -> bool:
+        unregistered = False
         try:
-            self.transfer_backend.unregister_memory_region()
+            unregistered = self.transfer_backend.unregister_memory_region()
         except Exception as e:
             logger.warning("Failed to unregister rfork memory region: %s", e)
+        # Never serve a stale registration after reset.
         self.ready_to_start_seed_service = False
+        return unregistered
 
     def transfer(self, model, processed_layout: bool) -> bool:
         try:

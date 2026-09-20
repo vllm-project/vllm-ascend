@@ -98,6 +98,7 @@ def _build_trainer_model(device_index: int):
         config = AutoConfig.from_pretrained(MODEL_NAME, trust_remote_code=True)
         model = AutoModelForCausalLM.from_config(config)
     model = model.to(device=device, dtype=torch.bfloat16)
+    model.eval()
     return model
 
 
@@ -149,6 +150,23 @@ def _generate(client, model, prompts):
     return completions
 
 
+def _collect_logprobs(client, model, prompts):
+    """Collect sampled-token logprobs for the RL update regression check."""
+    values = []
+    for prompt in prompts:
+        response = client.completions.create(
+            model=model,
+            prompt=prompt,
+            max_tokens=4,
+            temperature=0,
+            logprobs=5,
+        )
+        logprobs = response.choices[0].logprobs
+        token_logprobs = getattr(logprobs, "token_logprobs", None)
+        values.append(tuple(token_logprobs or ()))
+    return values
+
+
 def _collect_weight_metadata(train_model):
     """Collect parameter metadata and size the packed buffer for broadcasting."""
     names: list[str] = []
@@ -188,6 +206,8 @@ def test_hccl_weight_transfer_updates_server_weights():
         "--port",
         str(port),
         "--trust-remote-code",
+        "--additional-config",
+        '{"weight_nz_mode": 0}',
     ]
     # The dev-mode endpoints (/init_weight_transfer_engine, /update_weights,
     # /pause, /resume, ...) are only registered when VLLM_SERVER_DEV_MODE=1.
@@ -195,7 +215,6 @@ def test_hccl_weight_transfer_updates_server_weights():
     env_dict = {
         "VLLM_SERVER_DEV_MODE": "1",
         "ASCEND_RT_VISIBLE_DEVICES": "0",
-        "VLLM_ASCEND_ENABLE_NZ": "0",
     }
 
     _log(f"starting server on port {port} (device 0, dummy weights) ...")
@@ -214,12 +233,15 @@ def test_hccl_weight_transfer_updates_server_weights():
         # 1) Baseline generation with dummy weights (expected to be nonsense).
         _log("generating baseline outputs (dummy weights) ...")
         outputs_before = _generate(client, MODEL_NAME, PROMPTS)
+        logits_before = _collect_logprobs(client, MODEL_NAME, PROMPTS)
         _log(f"outputs BEFORE weight update: {outputs_before}")
+        _log(f"logprobs BEFORE weight update: {logits_before}")
 
         # 2) Build the trainer model on the trainer NPU (download-free by default).
         _log(f"preparing trainer model on npu:{TRAINER_DEVICE_INDEX} ...")
         torch.npu.set_device(TRAINER_DEVICE_INDEX)
         train_model = _build_trainer_model(TRAINER_DEVICE_INDEX)
+        assert not train_model.training
         _log("trainer model ready")
 
         # Import after the server is up so the HCCL engine plugin is registered.
@@ -305,10 +327,13 @@ def test_hccl_weight_transfer_updates_server_weights():
 
         # 6) Generation after the broadcast weights are loaded.
         outputs_after = _generate(client, MODEL_NAME, PROMPTS)
+        logits_after = _collect_logprobs(client, MODEL_NAME, PROMPTS)
         _log(f"outputs AFTER weight update: {outputs_after}")
+        _log(f"logprobs AFTER weight update: {logits_after}")
 
     # Reaching here means the full HCCL transfer pipeline succeeded: every
     # control-plane RPC raised on a non-2xx response and each background POST
     # re-raised on join(). The broadcast weights differ from the server's dummy
     # init, so the served model must now produce different generations.
     assert outputs_after != outputs_before, "server weights did not change after HCCL transfer"
+    assert logits_after != logits_before, "server logits did not change after HCCL transfer"

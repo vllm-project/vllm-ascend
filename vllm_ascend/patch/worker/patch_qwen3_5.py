@@ -17,12 +17,13 @@
 # mypy: ignore-errors
 
 
+from functools import wraps
+
 import torch
-import vllm.model_executor.models.qwen3_next as qwen3_next_module
+from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention as _GDNBaseCls
 from vllm.model_executor.models.qwen3_5 import Qwen3_5DecoderLayer
-from vllm.model_executor.models.qwen3_next import _all_gather_hidden_and_residual
 
 try:
     from vllm.model_executor.models.qwen3_5_mtp import Qwen3_5MultiTokenPredictor
@@ -32,40 +33,25 @@ except ImportError:
     IntermediateTensors = None
 from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
 
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
-from vllm_ascend.utils import is_310p
-
-
-def _ascend_all_gather_hidden_and_residual(
-    hidden_states: torch.Tensor,
-    residual: torch.Tensor | None,
-    full_num_tokens: int,
-    hidden_size: int,
-) -> tuple[torch.Tensor, torch.Tensor | None]:
-    # FlashComm maintains its own sequence-parallel communication. Let the
-    # patched linear layers gather the sharded input instead of gathering
-    # it once here and again in the column-parallel projection.
-    if _EXTRA_CTX.flash_comm_v1_enabled:
-        return hidden_states, residual
-
-    return _all_gather_hidden_and_residual(
-        hidden_states,
-        residual,
-        full_num_tokens,
-        hidden_size,
-    )
-
-
-qwen3_next_module._all_gather_hidden_and_residual = _ascend_all_gather_hidden_and_residual
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention, initialize_packed_conv_weight
 
 _GDN_PATCH_TARGET = _GDNBaseCls
+_GDN_ORIGINAL_INIT = _GDN_PATCH_TARGET.__init__
+
+
+def _uses_multimodal_rope(attention: Qwen3NextAttention) -> bool:
+    """Return whether a Qwen3.5 attention layer exposes multimodal RoPE."""
+    return "qwen3_5" in attention.config.model_type and hasattr(attention.rotary_emb, "mrope_section")
 
 
 class AscendQwen3NextAttention(Qwen3NextAttention):
     def forward(self, positions: torch.Tensor, hidden_states: torch.Tensor, output: torch.Tensor = None):
         qkv, _ = self.qkv_proj(hidden_states)
-        if "qwen3_5" in self.config.model_type:
+        if _uses_multimodal_rope(self):
+            # MRV2 MTP uses 1D text positions; the fused kernel reads three planes.
+            if positions.ndim == 1:
+                positions = positions.unsqueeze(0).expand(3, -1)
             cos_sin = self.rotary_emb.cos_sin_cache[positions]
             if cos_sin.device != qkv.device:
                 cos_sin = cos_sin.to(qkv.device)
@@ -185,6 +171,14 @@ if Qwen3_5MultiTokenPredictor is not None:
 
         current_step_idx = spec_step_idx % self.num_mtp_layers
         mtp_layer = self.layers[current_step_idx]
+        if mtp_layer.use_attn_reduce_scatter_for_moe:
+            # SP chunk before decoder to keep residual shape consistent with
+            # reduced hidden_states after Qwen3NextDecoderLayer's reduce_scatter.
+            from vllm.model_executor.models.utils import sequence_parallel_chunk
+
+            assert hidden_states.shape[0] == positions.shape[-1]
+            hidden_states = sequence_parallel_chunk(hidden_states)
+            assert residual is None
         hidden_states, residual = mtp_layer(
             positions=positions,
             hidden_states=hidden_states,
@@ -199,14 +193,10 @@ if Qwen3_5MultiTokenPredictor is not None:
                 }
             )
 
-        if mtp_layer.use_attn_reduce_scatter_for_moe:
-            hidden_states, residual = _all_gather_hidden_and_residual(
-                hidden_states,
-                residual,
-                positions.shape[-1],
-                self.config.hidden_size,
-            )
         hidden_states, _ = self.norm(hidden_states, residual)
+        if mtp_layer.use_attn_reduce_scatter_for_moe:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+            hidden_states = hidden_states[: positions.shape[-1]]
         return hidden_states
 
     Qwen3_5MultiTokenPredictor.forward = qwen3_5_mtp_forward
@@ -217,12 +207,20 @@ _GDN_PATCH_TARGET._split_ba_for_tp = AscendGatedDeltaNetAttention._split_ba_for_
 _GDN_PATCH_TARGET.get_state_shape = AscendGatedDeltaNetAttention.get_state_shape
 _GDN_PATCH_TARGET.get_attn_backend = AscendGatedDeltaNetAttention.get_attn_backend
 
-if is_310p():
+if get_current_hardware_profile().supports(HardwareCapability.GDN_COMPATIBILITY):
     from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
 
     _GDN_PATCH_TARGET._forward_core = AscendGatedDeltaNetAttention310._forward_core
     _GDN_PATCH_TARGET.get_state_dtype = AscendGatedDeltaNetAttention310.get_state_dtype
 else:
+    _GDN_PATCH_TARGET._pack_conv_weights = AscendGatedDeltaNetAttention._pack_conv_weights
+
+    @wraps(_GDN_ORIGINAL_INIT)
+    def _gdn_init_with_packed_weight(self, *args, **kwargs):
+        _GDN_ORIGINAL_INIT(self, *args, **kwargs)
+        initialize_packed_conv_weight(self)
+
+    _GDN_PATCH_TARGET.__init__ = _gdn_init_with_packed_weight
     _GDN_PATCH_TARGET.forward = AscendGatedDeltaNetAttention.forward
     _GDN_PATCH_TARGET._forward_core = AscendGatedDeltaNetAttention._forward_core
     _GDN_PATCH_TARGET._warmup_prefill_kernels = AscendGatedDeltaNetAttention._warmup_prefill_kernels
