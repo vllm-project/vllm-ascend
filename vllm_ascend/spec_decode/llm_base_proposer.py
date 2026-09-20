@@ -4,7 +4,7 @@ import inspect as _inspect
 from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
 from functools import partial
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 import numpy as np
 import torch
@@ -54,6 +54,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 )
 from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
 from vllm_ascend.models.deepseek_v4.dspark import DSparkDeepseekV4ForCausalLM
+from vllm_ascend.models.deepseek_v41.dspark import DSparkDeepseekV41ForCausalLM
 from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
@@ -67,10 +68,15 @@ from vllm_ascend.spec_decode.utils import (
 from vllm_ascend.utils import check_gdn_layer, enable_sp, lmhead_tp_enable, use_updatable_graph, vllm_version_is
 from vllm_ascend.worker.device_metadata import DeviceMetadataTask, DeviceMetadataTaskProvider
 
+
+class _HiddenStateDrafter(Protocol):
+    def combine_hidden_states(self, aux_hidden_states: torch.Tensor) -> torch.Tensor: ...
+
+
 # Currently we will fix block size to a small one since `num_reqs` can't be too large
 _PREPARE_INPUTS_BLOCK_SIZE = 4
 
-_HIDDEN_STATE_DRAFTER_TYPES = (
+_HIDDEN_STATE_DRAFTER_TYPES: tuple[type, ...] = (
     Eagle3LlamaForCausalLM,
     DFlashQwen3ForCausalLM,
     Qwen3DSparkForCausalLM,
@@ -78,6 +84,7 @@ _HIDDEN_STATE_DRAFTER_TYPES = (
     Eagle3VwnLlamaForCausalLM,
     Eagle3DeepseekV2ForCausalLM,
     DSparkDeepseekV4ForCausalLM,
+    DSparkDeepseekV41ForCausalLM,
 )
 
 
@@ -964,7 +971,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             if isinstance(model, BreakableACLGraphWrapper):
                 model = model.unwrap()
             assert isinstance(model, _HIDDEN_STATE_DRAFTER_TYPES)
-            target_hidden_states = model.combine_hidden_states(target_hidden_states)
+            target_hidden_states = cast(_HiddenStateDrafter, model).combine_hidden_states(target_hidden_states)
             assert target_hidden_states.shape[-1] == self.hidden_size
 
         num_tokens, token_indices_to_sample, common_attn_metadata, long_seq_args = self.set_inputs_first_pass(

@@ -50,7 +50,7 @@ def _select_kv_token_budget(
 
 
 def _is_deepseek_v4_kv_cache_spec(kv_cache_spec: KVCacheSpec) -> bool:
-    if getattr(kv_cache_spec, "model_version", None) == "deepseek_v4":
+    if getattr(kv_cache_spec, "model_version", None) in {"deepseek_v4", "deepseek_v41"}:
         return True
 
     nested_specs = getattr(kv_cache_spec, "kv_cache_specs", None)
@@ -62,7 +62,7 @@ def _is_deepseek_v4_kv_cache_spec(kv_cache_spec: KVCacheSpec) -> bool:
     elif not isinstance(nested_specs, (list, tuple, set)):
         return False
 
-    return any(getattr(spec, "model_version", None) == "deepseek_v4" for spec in nested_specs)
+    return any(getattr(spec, "model_version", None) in {"deepseek_v4", "deepseek_v41"} for spec in nested_specs)
 
 
 def _is_deepseek_v4_kv_cache_config(kv_cache_config: KVCacheConfig) -> bool:

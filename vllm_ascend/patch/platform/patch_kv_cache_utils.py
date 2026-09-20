@@ -24,6 +24,13 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
+from vllm_ascend.models.deepseek_v41.cache_config import (
+    get_deepseek_v41_kv_cache_config,
+    get_deepseek_v41_pool_bytes_per_block,
+    group_cache_specs,
+    is_deepseek_v41_cache,
+    make_cache_groups,
+)
 from vllm_ascend.models.glm5next.cache_config import (
     _get_glm5_next_cache_layout,
     get_glm5_next_kv_cache_config,
@@ -42,8 +49,6 @@ _orig_get_packed_kv_cache_groups = vllm.v1.core.kv_cache_utils._get_packed_kv_ca
 _orig_get_kv_cache_config_from_groups = vllm.v1.core.kv_cache_utils.get_kv_cache_config_from_groups
 _orig_max_memory_usage_bytes_from_groups = vllm.v1.core.kv_cache_utils._max_memory_usage_bytes_from_groups
 _orig_pool_bytes_per_block = vllm.v1.core.kv_cache_utils._pool_bytes_per_block
-
-
 if UniformTypeKVCacheSpecs.max_num_blocks_per_req is KVCacheSpec.max_num_blocks_per_req:
 
     def _uniform_type_max_num_blocks_per_req(
@@ -93,11 +98,23 @@ def _ascend_resolve_kv_cache_block_sizes(
     groups = kv_cache_config.kv_cache_groups
     cacheable_groups = [group for group in groups if is_prefix_cacheable(group.kv_cache_spec)]
     filtered_private_groups = bool(cacheable_groups) and len(cacheable_groups) != len(groups)
-    if filtered_private_groups:
+    if filtered_private_groups and not is_deepseek_v41_cache(groups):
         # A fixed tail block is not a token-page scheduling or hashing unit.
         # Pool alignment is enforced by the GLM planner and prefix coordinator.
         kv_cache_config = replace(kv_cache_config, kv_cache_groups=cacheable_groups)
         groups = cacheable_groups
+
+    cacheable_groups = [g for g in groups if is_prefix_cacheable(g.kv_cache_spec)]
+    if len(cacheable_groups) != len(groups):
+        scheduler_block_size = math.lcm(*(g.kv_cache_spec.block_size for g in groups)) * dcp
+        if not cache_config.enable_prefix_caching or not cacheable_groups:
+            return scheduler_block_size, scheduler_block_size
+        filtered = replace(kv_cache_config, kv_cache_groups=cacheable_groups)
+        if dcp == 1:
+            _, hash_block_size = _orig_resolve_kv_cache_block_sizes(filtered, vllm_config)
+        else:
+            hash_block_size = math.gcd(*(g.kv_cache_spec.block_size for g in cacheable_groups))
+        return scheduler_block_size, hash_block_size
 
     if len(groups) <= 1:
         # EngineCore's global size is the minimum across all original groups.
@@ -364,12 +381,15 @@ def _ascend_get_packed_kv_cache_groups(
     kv_cache_spec: dict[str, KVCacheSpec],
 ) -> list[KVCacheGroupSpec] | None:
     """Preserve Ascend's DSV4 grouping on the live packed-group hook."""
-    grouped_specs = group_and_unify_kv_cache_specs(kv_cache_spec)
-    if grouped_specs is None:
-        assert _orig_get_packed_kv_cache_groups is not None
-        return _orig_get_packed_kv_cache_groups(vllm_config, kv_cache_spec)
-
-    groups = _get_kv_cache_groups_uniform_groups(grouped_specs)
+    if is_deepseek_v41_cache(kv_cache_spec):
+        grouped_specs = group_cache_specs(kv_cache_spec)
+        groups = make_cache_groups(grouped_specs)
+    else:
+        grouped_specs = group_and_unify_kv_cache_specs(kv_cache_spec)
+        if grouped_specs is None:
+            assert _orig_get_packed_kv_cache_groups is not None
+            return _orig_get_packed_kv_cache_groups(vllm_config, kv_cache_spec)
+        groups = _get_kv_cache_groups_uniform_groups(grouped_specs)
     vllm.v1.core.kv_cache_utils._annotate_eagle_groups(
         vllm_config,
         kv_cache_spec,
@@ -492,8 +512,10 @@ def _get_kv_cache_config_deepseek_v4_main(
 
 
 def _is_deepseek_v4_groups(kv_cache_groups: list[KVCacheGroupSpec]) -> bool:
-    if not kv_cache_groups or not all(
-        isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs) for group in kv_cache_groups
+    if (
+        is_deepseek_v41_cache(kv_cache_groups)
+        or not kv_cache_groups
+        or not all(isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs) for group in kv_cache_groups)
     ):
         return False
     for group in kv_cache_groups:
@@ -514,6 +536,8 @@ def _ascend_pool_bytes_per_block(kv_cache_groups: list[KVCacheGroupSpec]) -> int
     layout, so using the upstream value changes ``num_blocks`` during the
     re-plan and leaves ranks inconsistent.
     """
+    if is_deepseek_v41_cache(kv_cache_groups):
+        return get_deepseek_v41_pool_bytes_per_block(kv_cache_groups)
     if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
         return get_glm5_next_pool_bytes_per_block(kv_cache_groups)
     if not _is_deepseek_v4_groups(kv_cache_groups):
@@ -564,6 +588,8 @@ def _ascend_get_kv_cache_config_from_groups(
     available_memory: int,
 ) -> KVCacheConfig:
     """Restore Ascend's DSV4 shared-tuple planner removed by vLLM #51718."""
+    if is_deepseek_v41_cache(kv_cache_groups):
+        return get_deepseek_v41_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
     if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
         return get_glm5_next_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
     if not _is_deepseek_v4_groups(kv_cache_groups):
