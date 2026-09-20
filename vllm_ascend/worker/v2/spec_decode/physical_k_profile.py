@@ -15,7 +15,10 @@ from typing import Any
 import numpy as np
 from vllm.logger import logger
 
-from vllm_ascend.dynamic_spec import resolve_physical_k
+from vllm_ascend.dynamic_spec import (
+    PHYSICAL_K_MIN_TUNED_BATCH_SIZE,
+    resolve_physical_k,
+)
 
 _PROFILE_K: ContextVar[int | None] = ContextVar("ascend_profile_physical_k", default=None)
 
@@ -113,7 +116,7 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
     original_batches = manager.batches_to_profile
     original_set_curves = manager.set_initial_cost_curves
     original_get_num_tokens = manager.get_num_tokens
-    min_batch_size = 8
+    min_batch_size = PHYSICAL_K_MIN_TUNED_BATCH_SIZE
     manager._physical_k_profile_cases = []
     manager._physical_k_profile_is_upstream = []
     manager._physical_k_draft_costs = None
@@ -128,7 +131,9 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
             int(getattr(self.req_states, "max_num_reqs", 0)),
             min_batch_size,
         )
-        sparse = _sparse_profile_batches(covered)
+        sparse = _sparse_profile_batches(
+            [case for case in covered if case["num_tokens"] >= min_batch_size]
+        )
         self._physical_k_profile_cases.clear()
         self._physical_k_profile_is_upstream.clear()
         for physical_k in candidates:

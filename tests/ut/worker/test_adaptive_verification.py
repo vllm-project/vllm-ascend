@@ -23,6 +23,8 @@ from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffe
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
 
+_NATIVE_TORCH_SUM = torch.sum
+
 
 @pytest.mark.parametrize(
     "builder_cls",

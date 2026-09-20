@@ -1,8 +1,15 @@
 import numpy as np
 import torch
 import vllm.v1.worker.gpu.spec_decode.adaptive_verification as adaptive_verification
+from torch.overrides import TorchFunctionMode
 
 from vllm_ascend.utils import vllm_version_is
+
+
+def _index_fill(tensor, dim, index, value):
+    from vllm_ascend.device.device_op import DeviceOperator
+
+    return DeviceOperator.index_fill(tensor, dim, index, value)
 
 
 def _copy_to_npu_sync(

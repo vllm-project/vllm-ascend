@@ -400,15 +400,15 @@ class NPUModelRunner(GPUModelRunner):
         self._restore_replicated_draft_target_states()
         output = super().sample_tokens(grammar_output)
         manager = getattr(self, "adaptive_verification", None)
-        recommendation = getattr(manager, "_physical_k_recommendation", None)
         if manager is not None:
+            recommendation = getattr(manager, "_physical_k_recommendation", None)
             manager._physical_k_recommendation = None
-        output_container = getattr(output, "model_runner_output", output)
-        if output_container is not None and hasattr(
-            output_container,
-            "physical_k_recommendation",
-        ):
-            output_container.physical_k_recommendation = recommendation
+            output_container = getattr(output, "model_runner_output", output)
+            if output_container is not None and hasattr(
+                output_container,
+                "physical_k_recommendation",
+            ):
+                output_container.physical_k_recommendation = recommendation
         # Close the per-step msprobe dump cycle on the normal last-PP-rank
         # path (v1 parity: v1 finalizes at the end of sample_tokens).
         self._finalize_dump_data()
