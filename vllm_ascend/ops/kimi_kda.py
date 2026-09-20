@@ -334,14 +334,20 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
             )
         if run_mode == 1:
             if num_accepted_tokens is None:
-                # The 2-D varlen update requires counts even for ordinary
-                # decode. One selects history offset zero. Graph-padding
-                # rows retain their null cache indices and are skipped.
-                num_accepted_tokens = torch.ones(
-                    cache_indices.shape[0],
-                    dtype=torch.int32,
-                    device=mixed_qkv.device,
+                # CANN's non-speculative update contract requires fixed-batch
+                # 3-D input [batch, 1, dim].  The 2-D form is reserved for
+                # variable-length speculative decode and requires real
+                # num_accepted_tokens values.
+                output = torch.ops.cann_ops_transformer.causal_conv1d_update(
+                    x=mixed_qkv.unsqueeze(1),
+                    conv_state=conv_state,
+                    conv_state_indices=cache_indices,
+                    weight=conv_weights_t,
+                    bias=None,
+                    query_start_loc=metadata.query_start_loc,
+                    num_accepted_tokens=None,
                 )
+                return output.squeeze(1)
             return torch.ops.cann_ops_transformer.causal_conv1d_update(
                 x=mixed_qkv,
                 conv_state=conv_state,
