@@ -16,13 +16,13 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     UniformTypeKVCacheSpecs,
 )
+
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.models.qwen4_exp.short_conv_attn import (
     PleShortConvAttentionMetadata,
 )
 from vllm_ascend.utils import AscendDeviceType
-
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
@@ -814,6 +814,7 @@ class TestQwen4ExpPleInputs(unittest.TestCase):
         runner.max_num_reqs = 2
         runner.device = torch.device("cpu")
         runner._qwen4_exp_ngram_context_buffer = None
+        runner._qwen4_exp_query_start_loc_buffer = None
         runner.input_ids = SimpleNamespace(gpu=torch.tensor([5], dtype=torch.int32))
         runner.query_start_loc = SimpleNamespace(
             gpu=torch.tensor([0, 1], dtype=torch.int32)
@@ -836,7 +837,7 @@ class TestQwen4ExpPleInputs(unittest.TestCase):
         )
         dummy_context = dummy_kwargs["ngram_context"]
         stable_ptr = dummy_context.data_ptr()
-        self.assertEqual(dummy_context.tolist(), [[999, 999]])
+        self.assertEqual(dummy_context.tolist(), [[999, 999], [999, 999]])
         self.assertFalse(dummy_kwargs["ple_use_compact_workspace"])
 
         real_kwargs = {}
@@ -848,7 +849,7 @@ class TestQwen4ExpPleInputs(unittest.TestCase):
         )
         real_context = real_kwargs["ngram_context"]
         self.assertEqual(real_context.data_ptr(), stable_ptr)
-        self.assertEqual(real_context.tolist(), [[8, 9]])
+        self.assertEqual(real_context.tolist(), [[8, 9], [999, 999]])
 
         external = torch.tensor([[33, 44]], dtype=torch.int32)
         external_kwargs = {"ngram_context": external}
@@ -860,7 +861,7 @@ class TestQwen4ExpPleInputs(unittest.TestCase):
         )
         copied_context = external_kwargs["ngram_context"]
         self.assertEqual(copied_context.data_ptr(), stable_ptr)
-        self.assertEqual(copied_context.tolist(), [[33, 44]])
+        self.assertEqual(copied_context.tolist(), [[33, 44], [999, 999]])
 
     def test_compact_workspace_requires_decode_only_metadata(self):
         decode_metadata = PleShortConvAttentionMetadata.__new__(
