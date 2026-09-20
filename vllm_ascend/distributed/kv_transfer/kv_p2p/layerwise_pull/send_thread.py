@@ -7,7 +7,7 @@ import queue
 import socket
 import threading
 import time
-from collections import Counter
+from collections import Counter, deque
 from collections.abc import Iterable
 from contextlib import suppress
 from dataclasses import dataclass
@@ -109,6 +109,10 @@ class ProducerSendState:
     # into D-advertised destinations. None in pull mode (P never transfers).
     transfer_mode: str = "pull"
     backend: Any | None = None
+    # Push write path: "async" submits onto a dedicated NPU stream and releases
+    # source slots from a completion-reaping pass; "sync" is the bare-link
+    # validated fallback (p-push.md 2.4/2.7).
+    push_write_mode: str = "async"
 
 
 class LayerwisePullSendingThread(threading.Thread):
@@ -158,9 +162,13 @@ class LayerwisePullSendingThread(threading.Thread):
         # Push mode state
         self._transfer_mode = state.transfer_mode
         self._backend = state.backend
+        self._push_write_mode = getattr(state, "push_write_mode", "async")
         self._push_ready_paths: set[str] = set()
         self._d_layouts_by_path: dict[str, dict[int, tuple[ComponentLayout, ...]]] = {}
         self._d_sessions: dict[str, str] = {}
+        # path → (d_tp_rank, d_tp_size, tp_shared_components) from the extended
+        # DEST_LAYOUT_META reply; legacy 3-field replies default to (0, 1, ∅).
+        self._d_topology: dict[str, tuple[int, int, frozenset[str]]] = {}
         self._push_pairs_cache: dict[tuple[str, int], tuple[tuple[ComponentLayout, ComponentLayout], ...]] = {}
         self._dest_blocks_by_req: dict[str, list[list[int]]] = {}
         self._dest_block_queries_sent: set[str] = set()
@@ -168,6 +176,11 @@ class LayerwisePullSendingThread(threading.Thread):
         self._push_failed_reqs: set[str] = set()
         # Deferred (layer task, deadline) pairs waiting for DEST_BLOCKS.
         self._deferred_tasks: list[tuple[SendTask, float]] = []
+        # Async push: dedicated NPU stream (lazy, NPU-only) and the FIFO of
+        # submitted writes awaiting their completion events. Entries are
+        # (event, reader, layer_idx, path, done_ext_ids, transfer_id).
+        self._push_stream: Any | None = None
+        self._inflight_writes: deque[tuple[Any, ReaderId, int, str, list[str], int]] = deque()
         # Per-layer fresh compute-stream events recorded by the producer in
         # save_kv_layer right after KV scatter.
         self._p_save_events: dict[int, Any] = {}
@@ -242,6 +255,8 @@ class LayerwisePullSendingThread(threading.Thread):
                 try:
                     if self._dealers:
                         self._drain_read_replies(decoder)
+                    if getattr(self, "_transfer_mode", "pull") == "push":
+                        self._reap_write_completions(encoder)
                 except Exception as e:
                     logger.error("Layerwise pull reply drain error: %s: %s", type(e).__name__, e)
                 try:
@@ -267,6 +282,7 @@ class LayerwisePullSendingThread(threading.Thread):
                     with suppress(BlockingIOError):
                         self._task_reader.recv(4096)
                     if getattr(self, "_transfer_mode", "pull") == "push":
+                        self._reap_write_completions(encoder)
                         self._retry_deferred(encoder)
         except BaseException as error:
             thread_error = error
@@ -282,6 +298,9 @@ class LayerwisePullSendingThread(threading.Thread):
                     self._drain_read_replies(decoder)
                 except Exception as error:
                     logger.warning("Layerwise pull final reply drain failed: %s", error)
+            # fail_all errors every registered reader, including the inflight
+            # writes' readers; just drop the event bookkeeping.
+            self._inflight_writes.clear()
             self._ensure_reuse_tracker().fail_all(pending_error)
             if self._dealers:
                 for dealer in self._dealers.values():
@@ -506,6 +525,13 @@ class LayerwisePullSendingThread(threading.Thread):
         }
         self._d_layouts_by_path[path] = layouts
         self._d_sessions[path] = msg[2]
+        if len(msg) >= 6:
+            # Extended reply carries D's topology for tp_shared write slicing.
+            self._d_topology[path] = (int(msg[3]), int(msg[4]), frozenset(msg[5]))
+        else:
+            # Legacy 3-field reply predates sparse+push; it never has tp_shared
+            # components, so the D geometry defaults are never exercised.
+            self._d_topology[path] = (0, 1, frozenset())
         self._push_ready_paths.add(path)
         logger.info("Layerwise push P handshaked with %s: d_session=%s, layers=%d", path, msg[2], len(layouts))
 
@@ -588,7 +614,8 @@ class LayerwisePullSendingThread(threading.Thread):
             self._signal_layer_done(layer_idx)
             return
 
-        deferred = False
+        req_id_for_ext = {get_external_request_id(req_id): req_id for req_id in send_task.send_request}
+        deferred: list[str] = []
         for (remote_host, remote_port), (read_reqs, done_ext_ids, done_req_ids) in endpoint_payloads.items():
             path = make_zmq_path("tcp", remote_host, remote_port)
             dealer = self._ensure_dealer(path)
@@ -606,7 +633,7 @@ class LayerwisePullSendingThread(threading.Thread):
                     ready.append((ext_id, source_blocks, start_blocks))
                 else:
                     self._query_dest_blocks(dealer, encoder, path, ext_id)
-                    deferred = True
+                    deferred.append(req_id_for_ext[ext_id])
             for ext_id, req_id in zip(done_ext_ids, done_req_ids):
                 if ext_id in self._push_failed_reqs:
                     continue
@@ -617,7 +644,8 @@ class LayerwisePullSendingThread(threading.Thread):
                     # Terminal-layer request with no block payload at this layer
                     # still must deliver WRITE_DONE after its blocks arrive.
                     self._query_dest_blocks(dealer, encoder, path, ext_id)
-                    deferred = True
+                    if req_id not in deferred:
+                        deferred.append(req_id)
 
             if not ready:
                 continue
@@ -634,9 +662,16 @@ class LayerwisePullSendingThread(threading.Thread):
                 remote_addrs: list[int] = []
                 lengths: list[int] = []
                 pairs = self._match_push_components(path, layer_idx)
+                d_tp_rank, d_tp_size, tp_shared = self._d_topology.get(path, (0, 1, frozenset()))
                 for ext_id, source_blocks, start_blocks in ready:
                     dest_blocks_by_group = self._dest_blocks_by_req[ext_id]
                     for source, destination in pairs:
+                        if source.name in tp_shared:
+                            # Sparse offload's main cache is one TP-shared
+                            # destination: only contributor 0 writes, sliced by
+                            # the D rank's geometry (mirrors pull's read side).
+                            if group_member_idx != 0:
+                                continue
                         group_idx = source.group_index
                         source_ids = source_blocks[group_idx]
                         start_block = int(start_blocks[group_idx])
@@ -648,9 +683,15 @@ class LayerwisePullSendingThread(threading.Thread):
                                 f"range=[{start_block}, {end_block}), allocated={len(all_dest)}"
                             )
                         dest_ids = all_dest[start_block:end_block]
+                        if source.name in tp_shared:
+                            owned_start, owned_end = _tp_block_range(
+                                len(source_ids), d_tp_rank, d_tp_size, start_block
+                            )
+                            source_ids = source_ids[owned_start:owned_end]
+                            dest_ids = dest_ids[owned_start:owned_end]
                         # Unequal TP: this P rank writes only its own slice of the
                         # block range, mirroring pull's contributor slicing.
-                        if tp_ratio > 1:
+                        elif tp_ratio > 1:
                             owned_start, owned_end = _tp_block_range(
                                 len(source_ids), group_member_idx, tp_ratio, start_block
                             )
@@ -676,16 +717,30 @@ class LayerwisePullSendingThread(threading.Thread):
                             remote_addrs.extend(remote.tolist())
                             local_addrs.extend(local.tolist())
                             lengths.extend(planned_lengths.tolist())
-                # The write IS the transfer: a successful sync return means the
-                # payload has left the source buffers (bare-link validated), so
-                # the source slots are immediately reusable.
-                self._backend.write(self._d_sessions[path], local_addrs, remote_addrs, lengths)
                 if done_ready_req_ids:
                     with self._request_completion_lock:
                         self._completion_requests_by_reader[reader] = set(done_ready_req_ids)
-                self._complete_reader(reader)
-                if done_ready_ids:
-                    dealer.send(encoder.encode((WRITE_DONE, layer_idx, done_ready_ids, transfer_id)))
+                # An empty descriptor set (e.g. a pure tp_shared layer on a
+                # non-zero contributor) issues no write at all.
+                if not lengths:
+                    self._complete_reader(reader)
+                    if done_ready_ids:
+                        dealer.send(encoder.encode((WRITE_DONE, layer_idx, done_ready_ids, transfer_id)))
+                elif self._push_write_mode == "async":
+                    # The write IS the transfer: submit onto the push stream and
+                    # let _reap_write_completions release the source slots once
+                    # the stream event fires (payload has left the buffers).
+                    self._submit_push_write(path, layer_idx, reader, local_addrs, remote_addrs, lengths)
+                    event = self._record_push_event()
+                    self._inflight_writes.append((event, reader, layer_idx, path, done_ready_ids, transfer_id))
+                else:
+                    # Sync fallback (bare-link validated): a successful return
+                    # means the payload has left the source buffers, so the
+                    # source slots are immediately reusable.
+                    self._backend.write(self._d_sessions[path], local_addrs, remote_addrs, lengths)
+                    self._complete_reader(reader)
+                    if done_ready_ids:
+                        dealer.send(encoder.encode((WRITE_DONE, layer_idx, done_ready_ids, transfer_id)))
                 logger.debug(
                     "Layerwise push P wrote layer=%d to %s: reqs=%d, descriptors=%d, done=%d",
                     layer_idx,
@@ -702,30 +757,105 @@ class LayerwisePullSendingThread(threading.Thread):
                     dealer.send(encoder.encode((WRITE_FAILED, layer_idx, str(error), failed_ext_ids)))
                 raise
         if deferred:
+            # Only the block-missing subset is deferred; requests written in
+            # this pass must not be re-sent when the retry runs.
+            subset = SendTask(
+                send_request={req_id: send_task.send_request[req_id] for req_id in deferred},
+                layer_idx=send_task.layer_idx,
+                layer_name=send_task.layer_name,
+            )
             self._defer_task(
-                send_task, deadline if deadline is not None else time.monotonic() + PUSH_DEST_BLOCKS_TIMEOUT_SECONDS
+                subset, deadline if deadline is not None else time.monotonic() + PUSH_DEST_BLOCKS_TIMEOUT_SECONDS
             )
         self._signal_layer_done(layer_idx)
 
+    def _ensure_push_stream(self) -> Any:
+        """Lazily create the dedicated push stream (NPU-only, never in tests)."""
+        if self._push_stream is None:
+            self._push_stream = torch.npu.Stream()
+        return self._push_stream
+
+    def _submit_push_write(
+        self,
+        path: str,
+        layer_idx: int,
+        reader: ReaderId,
+        local_addrs: list[int],
+        remote_addrs: list[int],
+        lengths: list[int],
+    ) -> None:
+        stream = self._ensure_push_stream()
+        self._backend.write_async(self._d_sessions[path], local_addrs, remote_addrs, lengths, stream.npu_stream)
+
+    def _record_push_event(self) -> Any:
+        event = torch.npu.Event()
+        event.record(self._ensure_push_stream())
+        return event
+
+    def _reap_write_completions(self, encoder: msgspec.msgpack.Encoder) -> None:
+        """Release source slots and report WRITE_DONE for finished async writes.
+
+        Entries are FIFO on a single stream, so the first incomplete event
+        stops the scan; later entries cannot complete before it. Slot release
+        keeps the exact pull-mode semantics — wait_for_slot_release only waits
+        on the tracker's Events and does not care who sets them.
+        """
+        while self._inflight_writes:
+            event, reader, layer_idx, path, done_ext_ids, transfer_id = self._inflight_writes[0]
+            if not event.query():
+                break
+            self._inflight_writes.popleft()
+            self._complete_reader(reader)
+            if done_ext_ids:
+                dealer = self._ensure_dealer(path)
+                dealer.send(encoder.encode((WRITE_DONE, layer_idx, done_ext_ids, transfer_id)))
+            logger.debug(
+                "Layerwise push P write completed: transfer=%d, layer=%d, path=%s, done_reqs=%d",
+                transfer_id,
+                layer_idx,
+                path,
+                len(done_ext_ids),
+            )
+
     def _retry_deferred(self, encoder: msgspec.msgpack.Encoder) -> None:
+        """Three-way retry of deferred tasks (p-push.md §10.5 defer fix):
+        requests whose blocks arrived are written now; still-missing ones are
+        re-deferred with the SAME deadline; past the deadline they fail on D.
+        """
         if not self._deferred_tasks:
             return
         now = time.monotonic()
         tasks, self._deferred_tasks = self._deferred_tasks, []
         for task, deadline in tasks:
-            pending = [
+            writable = [
                 req_id
                 for req_id in task.send_request
-                if get_external_request_id(req_id) not in self._dest_blocks_by_req
+                if get_external_request_id(req_id) in self._dest_blocks_by_req
                 and get_external_request_id(req_id) not in self._push_failed_reqs
             ]
-            if not pending:
-                continue  # everything in this task was already written
+            missing = [
+                req_id
+                for req_id in task.send_request
+                if req_id not in writable and get_external_request_id(req_id) not in self._push_failed_reqs
+            ]
+            if writable:
+                subset = SendTask(
+                    send_request={req_id: task.send_request[req_id] for req_id in writable},
+                    layer_idx=task.layer_idx,
+                    layer_name=task.layer_name,
+                )
+                try:
+                    self._process_push_task(subset, encoder, deadline=deadline)
+                except Exception as error:
+                    logger.error("Layerwise push deferred write failed (layer=%d): %s", task.layer_idx, error)
+                    self._defer_task(subset, deadline)
+            if not missing:
+                continue
             if now >= deadline:
                 # D never allocated (cancelled/lost): fail the request on D and
                 # let P free it locally.
-                logger.error("Layerwise push timed out waiting for D blocks, failing requests: %s", pending)
-                for req_id in pending:
+                logger.error("Layerwise push timed out waiting for D blocks, failing requests: %s", missing)
+                for req_id in missing:
                     rm = task.send_request[req_id]
                     endpoint = rm.layer_endpoints.get(task.layer_idx)
                     if endpoint is None:
@@ -739,17 +869,14 @@ class LayerwisePullSendingThread(threading.Thread):
                             )
                         )
                 continue
-            subset = SendTask(
-                send_request={req_id: task.send_request[req_id] for req_id in pending},
-                layer_idx=task.layer_idx,
-                layer_name=task.layer_name,
+            self._defer_task(
+                SendTask(
+                    send_request={req_id: task.send_request[req_id] for req_id in missing},
+                    layer_idx=task.layer_idx,
+                    layer_name=task.layer_name,
+                ),
+                deadline,
             )
-            try:
-                # May re-defer the subset with the SAME original deadline.
-                self._process_push_task(subset, encoder, deadline=deadline)
-            except Exception as error:
-                logger.error("Layerwise push deferred write failed (layer=%d): %s", task.layer_idx, error)
-                self._defer_task(subset, deadline)
 
     def _send_layout_meta(self, path: str, dealer, encoder: msgspec.msgpack.Encoder) -> None:
         layouts = {

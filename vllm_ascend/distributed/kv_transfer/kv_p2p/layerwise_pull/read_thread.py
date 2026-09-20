@@ -107,6 +107,46 @@ class PullBackend:
         if self._is_error(ret):
             raise RuntimeError(f"{self._name} WRITE failed for session {session_id}, ret={ret}")
 
+    def write_async(
+        self,
+        session_id: str,
+        local_addrs: Sequence[int],
+        remote_addrs: Sequence[int],
+        lengths: Sequence[int],
+        stream: int,
+    ) -> None:
+        """Push mode (default): submit writes onto ``stream`` and return immediately.
+
+        The caller detects completion by recording a ``torch.npu.Event`` on the
+        same stream after this call (stream-ordered, so the event fires once the
+        payload has left the source buffers). Only MemFabric 1.2.0+ provides the
+        async submit; Mooncake users must fall back to push_write_mode="sync".
+        In-flight data errors cannot surface through stream events — they are a
+        known limitation pending bare-link verification (p-push.md 3.3-1).
+        """
+        submit = getattr(self._engine, "batch_transfer_async_write_submit", None)
+        if submit is None:
+            raise RuntimeError(
+                f"{self._name} does not provide batch_transfer_async_write_submit; "
+                'use transfer_backend="memfabric" or push_write_mode="sync"'
+            )
+        if not (len(local_addrs) == len(remote_addrs) == len(lengths)):
+            raise ValueError(
+                "Layerwise push descriptor counts differ: "
+                f"local={len(local_addrs)}, remote={len(remote_addrs)}, lengths={len(lengths)}"
+            )
+        if not local_addrs:
+            return
+        ret = submit(
+            session_id,
+            local_addrs if isinstance(local_addrs, list) else list(local_addrs),
+            remote_addrs if isinstance(remote_addrs, list) else list(remote_addrs),
+            lengths if isinstance(lengths, list) else list(lengths),
+            stream,
+        )
+        if self._is_error(ret):
+            raise RuntimeError(f"{self._name} async WRITE submit failed for session {session_id}, ret={ret}")
+
 
 def _coalesce_read_descriptors(
     remote_addrs: np.ndarray,
@@ -333,11 +373,6 @@ class LayerwisePullReadThread(threading.Thread):
         caller replies with DEST_LAYOUT_META carrying D's destination layouts.
         """
         _, pp_layers, tp_size, pp_rank, tp_rank = msg
-        if self._state.tp_shared_components:
-            raise ValueError(
-                "Layerwise push (transfer_mode=push) is not supported with sparse decode offload: "
-                "P would write directly into the shared CPU pool GVA, which is unvalidated"
-            )
         if tp_size < self._state.tp_size or tp_size % self._state.tp_size:
             raise ValueError("Layerwise push requires P TP size divisible by D TP size")
         ratio = tp_size // self._state.tp_size
@@ -466,7 +501,17 @@ class LayerwisePullReadThread(threading.Thread):
                     if msg[0] == PUSH_META:
                         try:
                             self._register_push_source(identity, msg)
-                            reply = (DEST_LAYOUT_META, self._encode_local_layouts(), self._state.d_session)
+                            # Extended reply: layouts + d_session + D topology
+                            # (tp_rank/tp_size/tp_shared_components) so P can
+                            # mirror pull's tp_shared slicing on the write side.
+                            reply = (
+                                DEST_LAYOUT_META,
+                                self._encode_local_layouts(),
+                                self._state.d_session,
+                                self.tp_rank,
+                                self._state.tp_size,
+                                sorted(self._state.tp_shared_components),
+                            )
                         except Exception as error:
                             logger.error("Layerwise push handshake failed: %s", error)
                             reply = (WRITE_FAILED, -1, str(error), [])
