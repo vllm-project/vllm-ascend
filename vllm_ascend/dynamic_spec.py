@@ -20,7 +20,7 @@ from typing import Any
 _ACCEPTANCE_EMA_ALPHA = 0.2
 _BUCKET_SWITCH_STEPS = 2
 _MIN_K_DWELL_STEPS = 8
-_MIN_BATCH_SIZE = 8
+PHYSICAL_K_MIN_TUNED_BATCH_SIZE = 9
 _ACCEPTANCE_THRESHOLD = 0.6
 _DOWNSHIFT_STEPS = 3
 _UPSHIFT_STEPS = 2
@@ -182,7 +182,7 @@ class AdaptiveDraftKController:
         configured_k = max(min(int(configured_k), self.max_k), 0)
         if configured_k == 0:
             return 0
-        if batch_size is not None and batch_size <= _MIN_BATCH_SIZE:
+        if batch_size is not None and batch_size < PHYSICAL_K_MIN_TUNED_BATCH_SIZE:
             self._current_k = configured_k
             return configured_k
         if batch_size:
@@ -214,7 +214,7 @@ class AdaptiveDraftKController:
             return
         widths = [width for width, _ in pairs]
         accepted = [min(width, max(len(tokens) - 1, 0)) for width, tokens in pairs]
-        if len(widths) <= _MIN_BATCH_SIZE:
+        if len(widths) < PHYSICAL_K_MIN_TUNED_BATCH_SIZE:
             self._current_k = self.max_k
             return
         bucket = self._batch_bucket(len(widths))

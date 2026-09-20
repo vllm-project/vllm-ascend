@@ -246,15 +246,12 @@ class NPUModelRunner(GPUModelRunner):
         self._restore_replicated_draft_target_states()
         output = super().sample_tokens(grammar_output)
         manager = getattr(self, "adaptive_verification", None)
-        recommendation = getattr(manager, "_physical_k_recommendation", None)
         if manager is not None:
+            recommendation = getattr(manager, "_physical_k_recommendation", None)
             manager._physical_k_recommendation = None
-        output_container = getattr(output, "model_runner_output", output)
-        if output_container is not None and hasattr(
-            output_container,
-            "physical_k_recommendation",
-        ):
-            output_container.physical_k_recommendation = recommendation
+            output_container = getattr(output, "model_runner_output", output)
+            if output_container is not None:
+                output_container.physical_k_recommendation = recommendation
         if vllm_version_is("0.28.0") and self.use_spec_pp and self.is_last_pp_rank:
             assert self.pp_handler is not None
             self.pp_handler.broadcast_draft_tokens()

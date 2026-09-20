@@ -213,16 +213,16 @@ settings; enabling both selects the combined DyntraLB recompute scheduler.
 **V2 hardware-aware physical K**
 
 The V1 configuration above selects verification lengths. On model runner V2,
-the `hardware_aware` policy additionally controls how many draft tokens are
-actually generated. Upstream adaptive verification still selects verification
-budgets. Enable adaptive verification in `speculative_config` and opt into
-physical K with the following minimal configuration:
+`physical_k` additionally controls how many draft tokens are actually
+generated. Upstream adaptive verification still selects verification budgets.
+Enable adaptive verification in `speculative_config` and opt in with the
+following minimal configuration:
 
 ```json
 {
   "dynamic_spec_config": {
     "method": "dspark",
-    "physical_k": {"min_k": 3}
+    "physical_k": {}
   }
 }
 ```
