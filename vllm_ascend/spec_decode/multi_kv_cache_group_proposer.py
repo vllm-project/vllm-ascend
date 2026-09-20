@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import copy
+from dataclasses import fields, is_dataclass, replace
 from typing import Any
 
-import numpy as np
+import torch
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -165,8 +166,8 @@ class AscendMultiKVCacheGroupMTPProposer(AscendEagleProposer):
 
         The base hook returns the common metadata unchanged. This override
         crops every group's block table to the width consumed by its builder.
-        For a secondary group it also computes slot mapping from current
-        request sequence lengths and that group's own block table. The input
+        For a secondary group it computes every input token's slot from the
+        device positions, query boundaries, and that group's block table. The input
         metadata is shallow-copied so the primary group's view is not
         overwritten.
         """
@@ -179,33 +180,79 @@ class AscendMultiKVCacheGroupMTPProposer(AscendEagleProposer):
             block_table_tensor = common_attn_metadata.block_table_tensor
         else:
             block_table = self.runner.input_batch.block_table[gid]
-            seq_lens_cpu = (
-                common_attn_metadata._seq_lens_cpu
-                if common_attn_metadata._seq_lens_cpu is not None
-                else common_attn_metadata.seq_lens_cpu
-            )
-            if seq_lens_cpu is None:
-                raise RuntimeError(
-                    "CPU sequence lengths are required to update a secondary draft KV-cache group's slot mapping"
-                )
             num_reqs = group_metadata.num_reqs
-            num_active_reqs = min(
+            num_actual_tokens = common_attn_metadata.num_actual_tokens
+            block_table.compute_slot_mapping(
                 num_reqs,
-                common_attn_metadata.num_actual_tokens,
-                num_input_tokens,
+                common_attn_metadata.query_start_loc,
+                common_attn_metadata.positions[:num_actual_tokens],
             )
-            req_indices = np.arange(num_active_reqs, dtype=np.int32)
-            positions = seq_lens_cpu[:num_active_reqs].numpy() - 1
-            block_table.compute_slot_mapping_draft(req_indices, positions)
             block_table_tensor = block_table.get_device_tensor()[:num_reqs]
-            group_slot_mapping = block_table.slot_mapping.gpu[:num_input_tokens]
-            group_slot_mapping[num_active_reqs:].fill_(PADDING_SLOT_ID)
+            # All draft steps are built before any forward. The block table's
+            # scratch mapping is overwritten when the next step is prepared.
+            group_slot_mapping = block_table.slot_mapping.gpu[:num_input_tokens].clone()
+            group_slot_mapping[num_actual_tokens:].fill_(PADDING_SLOT_ID)
             group_metadata.slot_mapping = group_slot_mapping
 
         group_metadata.block_table_tensor = block_table_tensor[
             : group_metadata.num_reqs, : self._draft_block_table_width(attn_group)
         ]
         return group_metadata
+
+    @staticmethod
+    def _copy_cache_only_draft_metadata(attn_metadata):
+        """Helper: preserve a step's tensors before a builder reuses its buffers.
+
+        KPool builders use persistent buffers for target graph replay. Draft
+        metadata for every step must coexist until the merged draft finishes,
+        including step 0's multi-token query layout and compressed cache slots.
+        """
+        if not is_dataclass(attn_metadata):
+            return attn_metadata
+        return replace(
+            attn_metadata,
+            **{
+                field.name: value.clone()
+                for field in fields(attn_metadata)
+                if isinstance(value := getattr(attn_metadata, field.name), torch.Tensor)
+            },
+        )
+
+    def attn_update_stack_num_spec_norm(
+        self,
+        draft_index,
+        old_common_metadata,
+        batch_size,
+        input_batch_size,
+        used_update_positions,
+        aclgraph_runtime_mode,
+        **kwargs,
+    ):
+        """Override the transition from verification rows to one row per request.
+
+        The first pass may retain rejected tokens as padding. Later draft steps
+        start at each request's selected token, so reset lengths to its actual
+        device position before the inherited updater advances the step once.
+        CPU lengths still describe the optimistic verification batch and must
+        be invalidated without introducing a device-to-host synchronization.
+        """
+        if self._uses_multi_group_kv_cache and draft_index == 1:
+            old_common_metadata = copy.copy(old_common_metadata)
+            old_common_metadata.seq_lens = old_common_metadata.seq_lens.clone()
+            old_common_metadata.seq_lens[:batch_size] = used_update_positions + 1
+            old_common_metadata.seq_lens_cpu = None
+            old_common_metadata._seq_lens_cpu = None
+            old_common_metadata.num_computed_tokens_cpu = None
+            old_common_metadata._num_computed_tokens_cpu = None
+        return super().attn_update_stack_num_spec_norm(
+            draft_index,
+            old_common_metadata,
+            batch_size,
+            input_batch_size,
+            used_update_positions,
+            aclgraph_runtime_mode,
+            **kwargs,
+        )
 
     def build_draft_attn_metadata(
         self,
@@ -246,6 +293,8 @@ class AscendMultiKVCacheGroupMTPProposer(AscendEagleProposer):
             )
             if hasattr(attn_metadata, "causal") and not attn_metadata.causal:
                 attn_metadata.attn_mask = None
+            if self._is_cache_only_draft_attn_group(attn_group):
+                attn_metadata = self._copy_cache_only_draft_metadata(attn_metadata)
             for layer_name in attn_group.layer_names:
                 per_layer_attn_metadata[layer_name] = attn_metadata
 
@@ -297,6 +346,7 @@ class AscendMultiKVCacheGroupMTPProposer(AscendEagleProposer):
                 draft_index,
                 **extra_attn_metadata_args,
             )
+            attn_metadata = self._copy_cache_only_draft_metadata(attn_metadata)
             for layer_name in attn_group.layer_names:
                 per_layer_attn_metadata[layer_name] = attn_metadata
         return per_layer_attn_metadata
