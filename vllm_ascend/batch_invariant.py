@@ -62,14 +62,23 @@ def add_rms_norm(
     return x_, None, residual_
 
 
+_SUPPORTED_DTYPES = (torch.float16, torch.float32, torch.bfloat16)
+
+
 def reduce_sum(x: torch.Tensor, dim: int | None = None, keepdim: bool = False) -> torch.Tensor:
     """npu_reduce_sum_batch_invariant requires dim to be specified, but torch.sum
     doesn't require it, so we set dim to -1 by default if dim is None and x.dim()==1.
     """
     dim = -1 if dim is None and x.dim() == 1 else dim
-    if x.device.type == "npu" and dim is not None:
+    # aclnnReduceSumBatchInvariant only supports reducing the last dimension and
+    # raises AclNN_Parameter_Error(EZ1001, "Provided dim only support last dim")
+    # for any other dim. The last dim can only be spelled as -1 or x.dim() - 1, so
+    # only those take the batch-invariant path, and the caller's dim is forwarded
+    # unchanged. Everything else (non-last-dim, tuple dim, full reduction when dim
+    # is None, CPU tensors, unsupported dtypes) falls back to the saved native
+    # torch.sum.
+    if x.device.type == "npu" and (dim == -1 or dim == x.dim() - 1) and x.dtype in _SUPPORTED_DTYPES:
         return torch.ops.batch_invariant_ops.npu_reduce_sum_batch_invariant(x, dim, keepdim)
-    # cpu tensor can't use npu_reduce_sum_batch_invariant, so we use torch.sum instead.
     return torch_sum(x, dim, keepdim)
 
 

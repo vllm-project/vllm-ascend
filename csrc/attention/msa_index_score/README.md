@@ -4,95 +4,300 @@
 
 | Product                                                               | Supported |
 | --------------------------------------------------------------------- | :-------: |
-| <term>Atlas A2 Training Series/Atlas 800I A2 Inference Product</term> |     √     |
-| <term>Atlas A3 Training Series/Atlas A3 Inference Series</term>       |     √     |
-| <term>Ascend 950PR/Ascend 950DT</term>                                |     ×     |
+| <term>Atlas A2 Products</term>                                       |     √     |
+| <term>Atlas A3 Products</term>                                       |     √     |
+| <term>950PR&950DT Products</term>                                    |     √     |
 
 ## Function Description
 
-- **Operator function**: Computes block scores for the Index Branch of the MSA (MiniMax Sparse Attention) module. For each query token and each sparse KV block, the operator applies a "matmul + max-pool" operation to $Q_{idx}$ and $K_{idx}$ (with optional int8 dequantization) over all causally visible tokens in that block. The resulting per-block importance score, `score`, is used as the input to the subsequent TopK operation in the Index Branch. Prefill and decode share the same interface.
+`MsaIndexScore` computes block scores for the Index Branch of MiniMax Sparse
+Attention (MSA). For each query token and sparse KV block, it performs matrix
+multiplication followed by max pooling over all causally visible tokens in the
+block. The scores are consumed by the subsequent TopK stage. Prefill and decode
+use the same interface.
 
-- **Formulas**:
+The non-quantized and INT8-quantized paths are:
 
-    - Non-quantized case:
+$$
+score = Maxpool[Q_{idx}@K_{idx}^{T}]
+$$
 
-    $$
-    score = Maxpool[ Q_{idx}@K_{idx}^{T} ]
-    $$
+$$
+score = Maxpool[scale \cdot Q_{idx}@K_{idx}^{T}]
+$$
 
-    - Int8-quantized case:
+The complete formula is:
 
-    $$
-    score = Maxpool[ scale \cdot Q_{idx}@K_{idx}^{T} ]
-    $$
+$$
+score = Maxpool[(scale \cdot)Q_{idx}@K_{idx}^{T} + atten\_mask] + local\_mask
+$$
 
-    Complete formula:
-
-    $$
-    score = Maxpool[(scale \cdot) Q_{idx}@K_{idx}^{T} + atten\_mask] + local\_mask
-    $$
-
-    Maxpool takes the maximum along the KV-token dimension within each sparse block of length $block\_size$. `start_loc`, `init_blocks`, and `local_blocks` jointly generate $local\_mask$. High scores are written to the leading blocks and to blocks near the current query so that they are always selected by the subsequent TopK operation. Set `init_blocks` and `local_blocks` to 0 to disable $local\_mask$ and match the Triton raw-score kernel.
+Max pooling reduces the KV-token dimension within each sparse block of length
+$block\_size$. `start_loc`, `init_blocks`, and `local_blocks` generate
+$local\_mask`, which assigns high scores to leading blocks and blocks around the
+current query so that TopK always retains them. Set both block-count attributes
+to 0 to disable this behavior and match the Triton raw-score kernel.
+When the two windows overlap, the local-window score (`1e29`) overrides
+the leading-block score (`1e30`).
 
 ## Parameters
 
-> **Notes:**
->
-> - B (Batch Size) is the number of input samples.
-> - S (Sequence Length) is the sequence length; $S1$ is for the query side and $S2$ is for the key side.
-> - T is the sum of sequence lengths across the batch; $T1$ is for the query side and $T2$ is for the key side.
-> - N (Head Num) is the number of heads; $N1$ is for the query side and $N2$ is for the key side.
-> - D (Head Dim) is the dimension of one attention head.
-> - In PageAttention, $block\_num$ is the total number of physical blocks, $block\_size$ is the number of tokens per block, $maxBlockNumPerSeq$ is the maximum number of logical blocks per batch entry (typically $\ge\lceil S2/block\_size\rceil$), and $M_b=\lceil S2/block\_size\rceil$ is the total number of logical blocks.
+Notation:
 
-| Parameter | Input/Output/Attribute | Description | Data Type | Format |
-| --------- | ---------------------- | ----------- | --------- | ------ |
-| query | Input | $Q_{idx}$ in the formula. Only TND is currently supported, with shape $[T1, N1, D]$. | BFLOAT16, FLOAT16 | ND |
-| key | Input | $K_{idx}$ in the formula. Supports TND (`[T2, N2, D]`), BNBD (`[block_num, N2, block_size, D]`), and BBND (`[block_num, block_size, N2, D]`). | BFLOAT16, FLOAT16, INT8 | ND, NZ |
-| block_table | Optional input | PageAttention logical-block-to-physical-page mapping. Required for PageAttention. It must be two-dimensional, and its second dimension must be at least $maxBlockNumPerSeq$; shape: $[B, S2/block\_size]$. | INT32 | ND |
-| scale | Optional input | Dequantization coefficient $scale$ in the formula. It must be empty for non-quantized inputs and is required for quantized inputs. Shape for PageAttention: $[block\_num, N2, block\_size]$ or $[block\_num, block\_size, N2]$; shape for TND: $[T2, N2]$. | FLOAT | ND, NZ |
-| atten_mask | Optional input | Mask controlling causal visibility. Used only when `sparse_mode=3`. A value of 1 excludes a position from computation, while 0 includes it; shape: $[2048, 2048]$. | INT8 | ND |
-| actual_seq_qlen | Optional input | Number of valid query tokens in each batch entry. Required when query uses TND. It is a non-decreasing prefix sum with shape $[B+1]$. | INT32 | ND |
-| actual_seq_klen | Optional input | Number of valid key tokens in each batch entry. For a TND key, it is a required prefix sum. For PageAttention, it contains the visible $S2$ of each request; shape: $[B]$. | INT32 | ND |
-| start_loc | Input | Logical-block index containing the current query, rather than a token prefix. Used to generate $local\_mask$; shape: $[B]$. | INT32 | ND |
-| layout_key | Attribute | Key layout: `"TND"`, `"BBND"`, or `"BNBD"`. The aclnn parameter is named `layoutKeyOptional` and defaults to `"BBND"` when omitted. | STRING | - |
-| sparse_mode | Attribute | Sparse mode. 0: defaultMask (`atten_mask` is empty); 3: rightDownCausal (requires an `atten_mask` of shape $[2048, 2048]$). | INT64 | - |
-| init_blocks | Attribute | Number of leading blocks forced by $local\_mask$. Logical blocks in $[0, init\_blocks)$ receive the high score $1\mathrm{e}30$. Optional; default: $0$. | INT64 | - |
-| local_blocks | Attribute | Length of the local window forced by $local\_mask$. The window is $[max(0, start\_loc+1-local\_blocks), start\_loc]$ and receives the high score $1\mathrm{e}29$, overriding `init_blocks` at overlapping positions. Optional; default: $1$ to match MiniMax HF. Set it to $0$ to match the Triton raw score. | INT64 | - |
-| score | Output | Per-block importance score $score$ in the formula; shape: $[N1, T1, RoundUp(maxBlockNumPerSeq, 16)]$. | FLOAT | ND |
+- B is the batch size.
+- S1 and S2 are the query and key sequence lengths.
+- T1 and T2 are the sums of query and key sequence lengths across the batch.
+- N1 and N2 are the query-head and key-head counts.
+- D is the head dimension.
+- In PageAttention, `block_num` is the number of physical pages, `block_size`
+  is the token count per page, and `maxBlockNumPerSeq` is the width of
+  `block_table`.
+
+| Parameter | ACLNN Name | Kind | Description | Data Type | Format |
+| --------- | ---------- | ---- | ----------- | --------- | ------ |
+| `query` | `query` | Input | Query tensor in TND layout, shape `[T1, N1, D]`. | BFLOAT16, FLOAT16, HIFLOAT8, FLOAT8_E5M2, FLOAT8_E4M3FN | ND |
+| `key` | `key` | Input | Key tensor in TND `[T2, N2, D]`, BNBD `[block_num, N2, block_size, D]`, or BBND `[block_num, block_size, N2, D]` layout. | BFLOAT16, FLOAT16, INT8, HIFLOAT8, FLOAT8_E5M2, FLOAT8_E4M3FN | ND |
+| `block_table` | `blockTableOptional` | Optional input | PageAttention logical-block-to-physical-page mapping, shape `[B, maxBlockNumPerSeq]`. Required for BBND and BNBD. | INT32 | ND |
+| `scale` | `scaleOptional` | Optional input | INT8 dequantization scale. PageAttention shape: `[block_num, N2, block_size]` or `[block_num, block_size, N2]`; TND shape: `[T2, N2]`, or `[T2]` when N2 is 1. | FLOAT | ND |
+| `atten_mask` | `attenMaskOptional` | Optional input | Base causal mask used by `sparse_mode=3`, shape `[2048, 2048]`. A value of 1 excludes a position and 0 includes it. | INT8 | ND |
+| `actual_seq_qlen` | `actualSeqQlenOptional` | Input | Non-decreasing query prefix sums, shape `[B+1]`. | INT32 | ND |
+| `actual_seq_klen` | `actualSeqKlenOptional` | Input | TND key prefix sums `[B+1]`, or visible key lengths `[B]` for PageAttention. | INT32 | ND |
+| `start_loc` | `startLoc` | Input | Logical-block index containing the current query, shape `[B]`. | INT32 | ND |
+| `layout_key` | `layoutKeyOptional` | Attribute | Key layout: `"TND"`, `"BBND"`, or `"BNBD"`. The aclnn parameter is `layoutKeyOptional` and defaults to `"BBND"`. | STRING | - |
+| `sparse_mode` | `sparseMode` | Attribute | 0: `defaultMask`; 3: `rightDownCausal`. | INT64 | - |
+| `init_blocks` | `initBlocks` | Attribute | Number of leading blocks assigned `1e30`. Default: 0. | INT64 | - |
+| `local_blocks` | `localBlocks` | Attribute | Size of the local window `[max(0, start_loc+1-local_blocks), start_loc]`, assigned `1e29`. Default: 1. | INT64 | - |
+| `score` | `score` | Output | Block scores, shape `[N1, T1, RoundUp(maxBlockNumPerSeq, 16)]`. | FLOAT | ND |
+
+The defaults above describe the operator schema. The ACLNN C++ calls take
+explicit attribute arguments. The vLLM binding in
+[msa_index_score_torch_adpt.h](./msa_index_score_torch_adpt.h) supports the
+BBND non-INT8 path and uses `init_blocks=0, local_blocks=0` by default, as
+registered in [torch_binding.cpp](../../torch_binding.cpp). Keep both at
+zero for TP-sharded scoring, where the subsequent TopK stage applies global
+block forcing.
 
 ## Constraints
 
-- Only a $block\_size$ of 128 is currently supported.
-- `layout_key` must be explicitly set to `"BBND"`, `"BNBD"`, or `"TND"` and must match the actual shape of `key`.
-- In PageAttention (`layout_key` is `"BBND"` or `"BNBD"`), `block_table` is required. For a TND key, `block_table` must be omitted and `actual_seq_klen` must be a `[B+1]` prefix sum.
-- In the non-quantized case, `key` must have the same dtype as `query` (currently BFLOAT16 or FLOAT16), and `scale` must be empty. Only INT8 quantization is supported. For quantized inputs, `scale` is required: its PageAttention shape is $[block\_num, N2, block\_size]$ or $[block\_num, block\_size, N2]$, and its TND shape is $[T2, N2]$ with dtype FLOAT. FP8 and <term>Ascend 950PR/Ascend 950DT</term> are not currently supported.
-- `sparse_mode` currently supports only 0 and 3:
-    - 0 selects defaultMask mode, and `atten_mask` must be empty.
-    - 3 selects rightDownCausal mode. `atten_mask` is required with shape $[2048, 2048]$; 1 excludes a position from computation, while 0 includes it.
-- `init_blocks` and `local_blocks` must be $\ge 0$ and must not exceed the number of logical blocks (the second dimension of `block_table` for PageAttention, or the aligned final score dimension for TND). When both are 0, $local\_mask$ is skipped.
-- The operator outputs block scores only; it does **not** perform TopK.
+- Only `block_size=128` is supported.
+- `layout_key` must match the actual shape of `key`.
+- PageAttention requires `block_table`. TND must omit `block_table` and use
+  `[B+1]` prefix sums for `actual_seq_klen`.
+- On the non-quantized path, `query` and `key` must have the same dtype and
+  `scale` must be absent. A2/A3 support FLOAT16 and BFLOAT16. 950PR&950DT Products also
+  supports HIFLOAT8, FLOAT8_E5M2, and FLOAT8_E4M3FN.
+- The quantized path supports a FLOAT16 query, an INT8 key, and a required
+  FLOAT scale. Native FP8 is not an INT8 quantized path: on 950PR&950DT Products, query
+  and key must use the same FP8 dtype and `scale` must be absent.
+- `sparse_mode=0` requires no `atten_mask`. `sparse_mode=3` requires an INT8
+  mask with shape `[2048, 2048]`.
+- `init_blocks` and `local_blocks` must be non-negative and cannot exceed the
+  logical block width. Setting both to 0 disables `local_mask`.
+- `block_table` may be wider than the actual logical KV block count. The score
+  width is `RoundUp(block_table.shape[1], 16)`. The 950PR&950DT Products C2UB path flushes
+  widths greater than 256 in 256-column windows.
+- `q_len` and `kv_len` may be zero, including for the entire batch. Empty query
+  requests skip QK computation; empty KV requests produce fill scores; an
+  all-empty query batch launches with one block.
+- PageAttention BBND/BNBD keys may be non-contiguous on the physical-page axis
+  on A2/A3 and 950PR&950DT Products. All inner axes must remain contiguous. TND keys must
+  be contiguous, and `scale` remains tightly packed by logical page.
+- A2/A3 and 950PR&950DT Products size the MIX launch from the estimated M-task count.
+  When short-M decode cannot fill the 950PR&950DT Products AICs and spans multiple visible
+  KV S-tiles, `kvChunks` partitions the visible KV range across additional MIX
+  tasks. Short-KV and wide-table inputs keep a single KV chunk.
+- The operator returns block scores only and does not perform TopK.
 
-## Examples
+## ACLNN Interface
 
-| Invocation | Example | Description |
-| ---------- | ------- | ----------- |
-| Standalone aclnn operator | [test_aclnn_msa_index_score.cpp](./examples/test_aclnn_msa_index_score.cpp) | End-to-end accuracy self-check with a built-in CPU golden implementation |
-| Interface documentation | [aclnnMsaIndexScore.md](./docs/aclnnMsaIndexScore.md) | Two-stage interface documentation |
-| Test documentation | [tests/README.md](./tests/README.md) | Test matrix and execution instructions |
+### Function Prototypes
 
-Build and run:
+This operator uses a two-stage interface. Call
+`aclnnMsaIndexScoreGetWorkspaceSize` to validate the inputs and obtain an
+executor and the required workspace size. Then call `aclnnMsaIndexScore` on the
+same stream context to execute the computation.
 
-```bash
-bash build.sh --pkg --soc=ascend910b --ops=msa_index_score -j32
-./build_out/cann-ops-transformer-custom_linux-aarch64.run --quiet --install-path=/tmp/msa_opp
-export ASCEND_CUSTOM_OPP_PATH=/tmp/msa_opp/vendors/custom_transformer
-bash build.sh --run_example msa_index_score eager cust --vendor_name=custom
+```cpp
+aclnnStatus aclnnMsaIndexScoreGetWorkspaceSize(
+    const aclTensor *query,
+    const aclTensor *key,
+    const aclTensor *blockTableOptional,
+    const aclTensor *scaleOptional,
+    const aclTensor *attenMaskOptional,
+    const aclTensor *actualSeqQlenOptional,
+    const aclTensor *actualSeqKlenOptional,
+    const aclTensor *startLoc,
+    char            *layoutKeyOptional,
+    int64_t          sparseMode,
+    int64_t          initBlocks,
+    int64_t          localBlocks,
+    const aclTensor *score,
+    uint64_t        *workspaceSize,
+    aclOpExecutor  **executor);
+
+aclnnStatus aclnnMsaIndexScore(
+    void           *workspace,
+    uint64_t        workspaceSize,
+    aclOpExecutor  *executor,
+    aclrtStream     stream);
 ```
 
-> **Implementation Notes (A2/A3)**
->
-> - The key layout is selected by the `layout_key` attribute (`layoutKeyOptional` in aclnn). PageAttention **BBND** and **BNBD**, as well as packed **TND**, are supported. TND does not use `block_table`, and `actual_seq_klen` is a `[B+1]` prefix sum. The default layout is `"BBND"`.
-> - For `sparse_mode=3`, the host requires `atten_mask[2048,2048]`. The device interprets the visible window according to rightDownCausal semantics, consistent with LightningIndexer, without loading the mask template element by element.
-> - `start_loc` is a logical-block index. Together with the `init_blocks` attribute (default: 0) and `local_blocks` attribute (default: 1), it applies `local_mask` after Maxpool.
-> - Complete formula: `score = Maxpool[(scale·)Q@Kᵀ + atten_mask] + local_mask`.
+### Workspace Query Outputs
+
+The input tensors and attributes of `aclnnMsaIndexScoreGetWorkspaceSize`
+are described in [Parameters](#parameters). The caller supplies `score`
+with the documented output shape and receives:
+
+| Parameter | Type | Description |
+| --------- | ---- | ----------- |
+| `workspaceSize` | `uint64_t*` | Required device workspace size in bytes. |
+| `executor` | `aclOpExecutor**` | Executor passed to the second-stage call. |
+
+### Workspace Query Return Values
+
+| Return Code | Error Code | Description |
+| ----------- | ---------- | ----------- |
+| `ACLNN_SUCCESS` | 0 | Validation succeeded. |
+| `ACLNN_ERR_PARAM_NULLPTR` | 161001 | A required input or output is null. |
+| `ACLNN_ERR_PARAM_INVALID` | 161002 | A dtype, format, dimension, stride, or value violates a constraint. |
+
+### Execution: aclnnMsaIndexScore
+
+#### Parameters
+
+| Parameter | Kind | Description |
+| --------- | ---- | ----------- |
+| `workspace` | Input | Device workspace address. |
+| `workspaceSize` | Input | Workspace size returned by the first-stage interface. |
+| `executor` | Input | Executor returned by the first-stage interface. |
+| `stream` | Input | ACL stream used to execute the operator. |
+
+#### Return Values
+
+| Return Code | Error Code | Description |
+| ----------- | ---------- | ----------- |
+| `ACLNN_SUCCESS` | 0 | Execution succeeded. |
+| `ACLNN_ERR_PARAM_INVALID` | 161002 | A parameter is invalid. |
+
+### Invocation Example
+
+The following excerpt shows the two-stage invocation for a non-quantized BBND
+PageAttention input. It assumes the input and output tensors have already
+been allocated with the shapes described above.
+
+```cpp
+static char layoutKey[] = "BBND";
+int64_t sparseMode = 3;
+int64_t initBlocks = 0;
+int64_t localBlocks = 1;
+void *workspace = nullptr;
+uint64_t workspaceSize = 0;
+aclOpExecutor *executor = nullptr;
+
+aclnnStatus ret = aclnnMsaIndexScoreGetWorkspaceSize(
+    queryTensor,
+    keyTensor,
+    blockTableTensor,
+    nullptr,  // scaleOptional: null for non-quantized input
+    attenMaskTensor,
+    actualSeqQlenTensor,
+    actualSeqKlenTensor,
+    startLocTensor,
+    layoutKey,
+    sparseMode,
+    initBlocks,
+    localBlocks,
+    scoreTensor,
+    &workspaceSize,
+    &executor);
+
+if (ret == ACLNN_SUCCESS && workspaceSize > 0) {
+    ret = aclrtMalloc(&workspace, workspaceSize, ACL_MEM_MALLOC_HUGE_FIRST);
+}
+if (ret == ACLNN_SUCCESS) {
+    ret = aclnnMsaIndexScore(workspace, workspaceSize, executor, stream);
+}
+```
+
+For BNBD, set `layoutKey="BNBD"` and use a
+`[block_num, N2, block_size, D]` key. For TND, set `layoutKey="TND"`, omit
+`blockTableOptional`, and provide `[B+1]` key-length prefix sums.
+
+Keep attribute storage alive through execution and graph capture. Synchronize
+the stream before reading the output or releasing the workspace and tensors.
+
+## Implementation Notes
+
+- `layout_key` selects PageAttention BBND/BNBD or packed TND. TND does not use
+  `block_table`.
+- For `sparse_mode=3`, the host validates `atten_mask[2048,2048]`; the device
+  derives right-down-causal visibility without loading the mask element by
+  element.
+- The 950PR&950DT Products implementation is under `op_kernel/arch35`. It uses native
+  Cube FP8 tiling keys 4/5/6 without a scale or an intermediate FP16 cast.
+- 950PR&950DT Products uses the operator-private Catlass snapshot under
+  `op_kernel/catlass`, derived from v1.3.1-notla. A2/A3 continue to use the
+  repository Catlass submodule. The `msa_` prefix isolates only the A5-specific
+  snapshot because its interfaces and implementation differ.
+- For 950PR&950DT Products short-M/long-KV decode, host tiling derives `kvChunks` from
+  visible KV S-tiles. Both arch22 and arch35 schedulers split the S range and
+  only the final chunk writes the aligned tail fill.
+
+## Testing
+
+### CPU Reference
+
+The NumPy CPU reference is in
+[msa_index_score_golden.py](./tests/golden/msa_index_score_golden.py):
+
+```python
+inputs = MsaIndexScoreGoldenInputs(
+    query=query,
+    key=key,
+    block_table=block_table,
+    actual_seq_qlen=actual_seq_qlen,
+    actual_seq_klen=actual_seq_klen,
+    start_loc=start_loc,
+    sparse_mode=3,
+    scale=None,
+)
+score = msa_index_score_golden(inputs)
+```
+
+### vLLM Single-Operator Precision Tests
+
+From the vllm-ascend repository root, with the custom operator installed, run:
+
+```bash
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_msa_index_score.py
+```
+
+The [nightly test](../../../tests/e2e/nightly/single_node/ops/singlecard_ops/test_msa_index_score.py)
+uses a self-contained CPU FP32 reference. Its eight scenarios cover prefill,
+decode, non-contiguous page axes, long KV with a wide block table, wide-table
+padding, empty query/KV requests, forced blocks, and dense TP chunks. Each is
+parameterized over FLOAT16, BFLOAT16, and FLOAT8_E4M3FN, giving 24 cases. FP8
+cases skip when `HardwareCapability.FP8_ATTENTION` is unavailable.
+
+The existing [PR operator test](../../../tests/e2e/pull_request/one_card/test_msa_index_score.py)
+also compares operator outputs against the NumPy reference. The
+[MiniMax unit tests](../../../tests/ut/models/minimax_m3/test_msa_m3.py)
+cover integration and dispatch behavior. These checks do not need model
+weights and do not measure GPQA answer accuracy.
+
+### Acceptance Criteria
+
+- Masked and padded score positions must match the reference fill positions.
+- Blocks forced by `local_mask` must be at least `1e28` on both sides.
+- The NumPy reference's optional `compare` helper allows an error ratio no
+  greater than `1e-3`, with an error threshold of
+  `atol + rtol * max(abs(golden), 1)` for ordinary score values.
+- The nightly test checks fill/forced-block masks exactly and uses
+  `torch.testing.assert_close` for every remaining score, with `atol=rtol=1e-3`
+  for FLOAT16/BFLOAT16 and `2e-2` for FP8. It uses inputs exactly representable
+  in the tested dtypes to isolate computation and scheduling differences.
+
+## References
+
+- [Upstream ops-transformer implementation](https://gitcode.com/cann/ops-transformer/tree/master/attention/msa_index_score)
+- [Upstream Python interface](https://gitcode.com/cann/ops-transformer/blob/master/attention/msa_index_score/docs/torchapi_msa_index_score.md)

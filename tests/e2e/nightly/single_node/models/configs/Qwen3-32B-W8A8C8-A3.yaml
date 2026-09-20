@@ -24,6 +24,8 @@ _server_cmd: &server_cmd
   - "40960"
   - "--block-size"
   - "128"
+  - "--kv-cache-dtype"
+  - "int8"
   - "--trust-remote-code"
   - "--gpu-memory-utilization"
   - "0.9"

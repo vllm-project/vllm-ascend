@@ -10,6 +10,7 @@ from vllm_ascend import ascend_forward_context as afc
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.quantization.quant_type import QuantType
 
 
 @pytest.fixture(autouse=True)
@@ -115,6 +116,7 @@ def test_deepseek_v4_forward_passes_input_ids_to_layers(monkeypatch):
     layer.side_effect = lambda _positions, hidden_states, *_args, **_kwargs: (hidden_states, None)
     model = SimpleNamespace(
         hc_mult=1,
+        use_sequence_parallel_moe=False,
         layers=[layer],
         start_layer=0,
         end_layer=1,
@@ -147,17 +149,8 @@ def test_deepseek_v4_forward_passes_input_ids_to_layers(monkeypatch):
     assert "input_ids" not in forward_context.additional_kwargs
 
 
-def test_set_mc2_tokens_capacity_without_cudagraph_aligns_per_tp_rank(monkeypatch):
-    monkeypatch.setattr(
-        afc,
-        "get_ascend_config",
-        lambda: SimpleNamespace(
-            enable_prefill_mc2=False,
-            enable_fused_mc2=0,
-            scheduler_config=SimpleNamespace(recompute_scheduler_enable=True),
-        ),
-    )
-    vllm_config = _make_vllm_config(tensor_parallel_size=6, kv_role="kv_consumer")
+def test_set_mc2_tokens_capacity_without_cudagraph_aligns_per_tp_rank():
+    vllm_config = _make_vllm_config(tensor_parallel_size=6)
 
     afc.set_mc2_tokens_capacity(vllm_config, max_num_reqs=200, uniform_decode_query_len=3)
 
@@ -469,6 +462,40 @@ def test_select_moe_comm_method_a5(monkeypatch, num_tokens, world_size, top_k_ex
     vllm_config = _make_vllm_config(world_size=world_size, top_k_experts=top_k_experts)
 
     assert afc.select_moe_comm_method(num_tokens, vllm_config) == expected
+
+
+@pytest.mark.parametrize("num_tokens", [128, 4096])
+def test_select_moe_comm_method_a5_uses_megamoe_when_enabled(monkeypatch, num_tokens):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=AscendDeviceType.A5,
+        capacity=128,
+        enable_fused_mc2=1,
+    )
+    monkeypatch.setattr(afc, "is_mega_moe_supported", lambda: True)
+    vllm_config = _make_vllm_config(world_size=8, top_k_experts=8)
+
+    assert afc.select_moe_comm_method(num_tokens, vllm_config) == MoECommType.FUSED_MC2
+
+
+@pytest.mark.parametrize("num_tokens", [128, 4096])
+@pytest.mark.parametrize("draft_quant", [QuantType.NONE, QuantType.W8A8MXFP, QuantType.W4A8MXFP, QuantType.W4A4MXFP])
+def test_select_moe_comm_method_a5_preserves_draft_quant_guard(monkeypatch, num_tokens, draft_quant):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=AscendDeviceType.A5,
+        capacity=128,
+        enable_fused_mc2=1,
+    )
+    monkeypatch.setattr(afc, "is_mega_moe_supported", lambda: True)
+    vllm_config = _make_vllm_config(world_size=8, top_k_experts=4)
+    expected = MoECommType.FUSED_MC2
+    if draft_quant == QuantType.NONE:
+        expected = MoECommType.MC2 if num_tokens <= 128 else MoECommType.ALLTOALL
+    assert (
+        afc.select_moe_comm_method(num_tokens, vllm_config, is_draft_model=True, draft_moe_quant_type=draft_quant)
+        == expected
+    )
 
 
 def test_select_moe_comm_method_310p_uses_allgather(monkeypatch):

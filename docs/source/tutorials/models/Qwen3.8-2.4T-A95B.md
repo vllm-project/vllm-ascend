@@ -30,12 +30,11 @@ configuration details.
 
 The following model weights are available:
 
-- `Qwen3.8-2.4T-A95B` (FP16/BF16): approximately 4.89 TB of storage and weight
-  memory. [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3.8-2.4T-A95B).
-- `Qwen3.8-2.4T-A95B-w8a8`: approximately 2.33 TiB of storage and weight
-  memory. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-2.4T-A95B-w8a8).
-- `Qwen3.8-2.4T-A95B-w4a8`: approximately 1.21 TiB of storage and weight
-  memory. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-2.4T-A95B-w4a8).
+|  Weight Version                 | Hardware Requirements                               | Download Links |
+|---------------------------------|-----------------------------------------------------|----------------|
+| `Qwen3.8-2.4T-A95B` (FP16/BF16) | approximately 4.89 TB of storage and weight memory  | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.8-2.4T-A95B) |
+| `Qwen3.8-2.4T-A95B-w8a8`        | approximately 2.33 TiB of storage and weight memory | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-2.4T-A95B-w8a8) |
+| `Qwen3.8-2.4T-A95B-w4a8`        | approximately 1.21 TiB of storage and weight memory | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-2.4T-A95B-w4a8) |
 
 This guide includes the following validated deployment configurations:
 
@@ -48,8 +47,9 @@ The checkpoint and tokenizer directories must be available at the same paths
 on all serving nodes. The W8A8 deployment uses the lazy Safetensors strategy to
 avoid prefetching the complete checkpoint from shared storage.
 
-It is recommended to download the model weight to the shared directory of
-multiple nodes, such as `/root/.cache/`.
+It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
@@ -105,18 +105,12 @@ node. Refer to [using a prebuilt image](../../getting_started/installation.md#in
       -it $IMAGE bash
     ```
 
-    After entering the container, verify that vLLM and vLLM-Ascend can be imported:
-
-    ```shell
-    python -c "import vllm, vllm_ascend; print('vllm and vllm_ascend are ready')"
-    ```
-
 === "A2 series"
 
     Start the docker image on each node.
 
     ```bash
-    export IMAGE=quay.io/ascend/vllm-ascend:v0.23.0
+    export IMAGE=quay.io/ascend/vllm-ascend:qwen3.8-a2
     export NAME=vllm-ascend
 
     docker run --rm \
@@ -144,11 +138,17 @@ node. Refer to [using a prebuilt image](../../getting_started/installation.md#in
       -it $IMAGE bash
     ```
 
-    After entering the container, verify that vLLM and vLLM-Ascend can be imported:
+After entering the container, verify that vLLM and vLLM-Ascend can be imported:
 
-    ```shell
-    python -c "import vllm, vllm_ascend; print('vllm and vllm_ascend are ready')"
-    ```
+```shell
+python -c "import vllm, vllm_ascend; print('vllm and vllm_ascend are ready')"
+```
+
+Expected output:
+
+```shell
+vllm and vllm_ascend are ready
+```
 
 ### 4.2 Source Code Installation
 
@@ -207,7 +207,8 @@ Before starting the service:
         export GLOO_SOCKET_IFNAME=$NIC_NAME
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export OPENBLAS_NUM_THREADS=1
-
+        
+        # Ensure the model path matches the directory recorded during download
         vllm serve $MODEL_PATH \
             --host 0.0.0.0 \
             --port $PORT \
@@ -261,7 +262,8 @@ Before starting the service:
         export GLOO_SOCKET_IFNAME=$NIC_NAME
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export OPENBLAS_NUM_THREADS=1
-
+        
+        # Ensure the model path matches the directory recorded during download
         vllm serve $MODEL_PATH \
             --headless \
             --host 0.0.0.0 \
@@ -369,7 +371,8 @@ Before starting the service:
         export OMP_PROC_BIND=false
         export OMP_NUM_THREADS=1
         export OPENBLAS_NUM_THREADS=1
-
+        
+        # Ensure the model path matches the directory recorded during download
         vllm serve $MODEL_PATH \
             --host 0.0.0.0 \
             --port $PORT \
@@ -432,7 +435,8 @@ Before starting the service:
         export OMP_PROC_BIND=false
         export OMP_NUM_THREADS=1
         export OPENBLAS_NUM_THREADS=1
-
+        
+        # Ensure the model path matches the directory recorded during download
         vllm serve $MODEL_PATH \
             --headless \
             --host 0.0.0.0 \
@@ -492,6 +496,15 @@ Before starting the service:
     Common Issues Tip: If a worker exits immediately, confirm that Node 0 is
     already running, `--data-parallel-address` resolves to Node 0, all nodes
     use the same RPC port, and every worker uses a unique DP start rank.
+
+Wait until the engine finishes loading weights and graph capture. A successful
+startup includes output similar to the following:
+
+```text
+INFO:     Started server process
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+```
 
 ### 5.2 Prefill-Decode Disaggregation
 

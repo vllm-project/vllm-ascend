@@ -219,12 +219,10 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
         is_profile=False,
     ):
         (
-            _,
+            num_tokens,
             num_tokens_across_dp,
             _,
         ) = self.runner._sync_metadata_across_dp(num_tokens, is_draft_model=True)
-        if num_tokens_across_dp is not None:
-            num_tokens = int(num_tokens_across_dp[self.dp_rank].item())
 
         multi_steps_attn_metadata: list[dict[str, Any]] = []
         if not self.use_cuda_graph:
@@ -291,6 +289,12 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
             inputs_embeds = None
 
         self.token_indices_to_sample.fill_(0)
+
+        if aclgraph_runtime_mode == CUDAGraphMode.FULL:
+            self._maybe_update_metadata(
+                self.draft_attn_groups[0].backend,
+                multi_steps_attn_metadata,
+            )
 
         with set_ascend_forward_context(
             multi_steps_attn_metadata[0] if multi_steps_attn_metadata else None,
@@ -389,12 +393,10 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
             num_input_tokens = num_tokens
 
         (
-            _,
+            num_input_tokens,
             num_tokens_across_dp,
             _,
         ) = self.runner._sync_metadata_across_dp(num_input_tokens, is_draft_model=True)
-        if num_tokens_across_dp is not None:
-            num_input_tokens = int(num_tokens_across_dp[self.dp_rank].item())
 
         if self.use_cuda_graph:
             aclgraph_runtime_mode, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
@@ -474,6 +476,12 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
         self.token_indices_to_sample[:token_indices_to_sample_len].copy_(token_indices_to_sample)
         self.token_indices_to_sample[token_indices_to_sample_len:].fill_(0)
 
+        if aclgraph_runtime_mode == CUDAGraphMode.FULL:
+            self._maybe_update_metadata(
+                self.draft_attn_groups[0].backend,
+                multi_steps_attn_metadata,
+            )
+
         with set_ascend_forward_context(
             multi_steps_attn_metadata[0],
             self.vllm_config,
@@ -534,7 +542,6 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
         }
         if self.pass_hidden_states_to_model:
             model_hidden_states = self.hidden_states[:num_input_tokens]
-            model_hidden_states, model_positions = self.maybe_pad_and_reduce(model_hidden_states, model_positions)
             model_kwargs["hidden_states"] = model_hidden_states
             model_kwargs["positions"] = model_positions
 
@@ -544,10 +551,6 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
             hidden_states = last_hidden_states
         else:
             last_hidden_states, hidden_states = ret_hidden_states
-
-        last_hidden_states, model_positions, hidden_states = self.maybe_all_gather_and_unpad(
-            last_hidden_states, model_positions, hidden_states
-        )
 
         num_indices = token_indices_to_sample.shape[0]
         if lmhead_tp_enable():
@@ -659,10 +662,6 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
             model_input_ids = self.input_ids[:input_batch_size]
             model_positions = self._get_positions(input_batch_size)
             model_hidden_states = self.hidden_states[:input_batch_size]
-            model_hidden_states, model_positions = self.maybe_pad_and_reduce(
-                model_hidden_states,
-                model_positions,
-            )
             if forward_context is not None and multi_steps_attn_metadata:
                 if spec_step_idx >= len(multi_steps_attn_metadata):
                     raise AssertionError("Step3.5 MTP metadata must contain one entry per draft step")
@@ -683,12 +682,6 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
                 hidden_states = ret_hidden_states
             else:
                 last_hidden_states, hidden_states = ret_hidden_states
-
-            last_hidden_states, model_positions, hidden_states = self.maybe_all_gather_and_unpad(
-                last_hidden_states,
-                model_positions,
-                hidden_states,
-            )
 
             num_indices = token_indices_to_sample.shape[0]
             sample_hidden_states = last_hidden_states[token_indices_to_sample]

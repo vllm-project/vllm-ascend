@@ -4,9 +4,9 @@
 
 | 产品                                                         | 是否支持 |
 | ------------------------------------------------------------ | :------: |
-|<term>Ascend 950PR/Ascend 950DT</term>   | √  |
-|<term>Atlas A3 推理系列产品</term>   | √  |
-|<term>Atlas A2 推理系列产品</term>   | √  |
+|<term>Ascend 950PR&950DT 系列产品</term>   | √  |
+|<term>Atlas A3 系列产品</term>   | √  |
+|<term>Atlas A2 系列产品</term>   | √  |
 
 ## 功能说明
 
@@ -113,7 +113,7 @@
          <tr>
            <td>cmp_ratio</td>
            <td>可选属性</td>
-           <td>用于稀疏计算，表示key的压缩倍数。Atlas A3 推理系列产品支持1/2/4/8/16/32/64/128，Ascend 950PR/Ascend 950DT支持1/4/128。数据类型支持int32，默认值1。</td>
+           <td>用于稀疏计算，表示key的压缩倍数。Atlas A3 系列产品支持1/2/4/8/16/32/64/128，Ascend 950PR&950DT 系列产品支持1/4/128。数据类型支持int32，默认值1。</td>
            <td>INT32</td>
            <td>-</td>
          </tr>
@@ -133,7 +133,7 @@
          <tr>
            <td>sparse_count</td>
            <td>可选属性</td>
-           <td>代表topK阶段需要保留的block数量，Atlas A3推理系列产品支持[1, 2048]，Ascend 950PR/Ascend 950DT支持512。</td>
+           <td>代表topK阶段需要保留的block数量，Atlas A3系列产品支持[1, 2048]，Ascend 950PR&950DT 系列产品支持512。</td>
            <td>INT32</td>
            <td>-</td>
          </tr>

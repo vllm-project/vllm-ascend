@@ -39,7 +39,27 @@ else:
 
 class BaseDeviceAdaptor:
     @classmethod
-    def reshape_and_cache(cls, key, value, key_cache, value_cache, slot_mapping):
+    def reshape_and_cache(
+        cls,
+        key,
+        value,
+        key_cache,
+        value_cache,
+        slot_mapping,
+        use_bnsd=False,
+    ):
+        if use_bnsd:
+            torch.ops._C_ascend.npu_scatter_pa_kv_cache(
+                key.contiguous(),
+                value.contiguous(),
+                key_cache,
+                value_cache,
+                slot_mapping.contiguous(),
+                cache_mode="Norm",
+                scatter_mode="NHSD",
+            )
+            return
+
         torch_npu.npu_scatter_pa_kv_cache(
             key=key.contiguous(),
             value=value.contiguous(),
@@ -470,7 +490,9 @@ class BaseDeviceAdaptor:
         sparse_mode: int = 3,
         return_lse: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        query = torch.cat([ql_nope, q_pe], dim=-1).contiguous()
+        # torch.cat allocates a fresh contiguous output, so no extra
+        # .contiguous() pass is needed here.
+        query = torch.cat([ql_nope, q_pe], dim=-1)
         return torch.ops._C_ascend.npu_kv_quant_sparse_flash_attention(
             query=query,
             key=kv,
@@ -565,6 +587,13 @@ class BaseDeviceAdaptor:
         torch.ops._C_ascend.npu_scatter_nd_update_sk(indexer_scale_cache, slot_mapping, kv_scale_dummy)
 
     # ===== Lightning Indexer Dtype Prep =====
+
+    @staticmethod
+    def get_dsa_indexer_quant_mode() -> int:
+        """Non-A5: q/k are int8 with fp16 scales, so lightning indexer runs
+        in INT8 quant mode (QUANT_MODE_INT8 = 2 in
+        csrc/attention/quant_lightning_indexer_v2)."""
+        return 2
 
     @staticmethod
     def prepare_dsa_indexer_weights(weights):
@@ -765,6 +794,21 @@ class BaseDeviceAdaptor:
 
 class A5DeviceAdaptor(BaseDeviceAdaptor):
     @classmethod
+    def reshape_and_cache(
+        cls,
+        key,
+        value,
+        key_cache,
+        value_cache,
+        slot_mapping,
+        use_bnsd=False,
+    ):
+        if use_bnsd:
+            key_cache = key_cache.permute(0, 2, 1, 3)
+            value_cache = value_cache.permute(0, 2, 1, 3)
+        super().reshape_and_cache(key, value, key_cache, value_cache, slot_mapping)
+
+    @classmethod
     def npu_fused_infer_attention_score(
         cls,
         query: torch.Tensor,
@@ -807,7 +851,9 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         sparse_mode: int = 3,
         return_lse: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        query = torch.cat([ql_nope, q_pe], dim=-1).contiguous()
+        # torch.cat allocates a fresh contiguous output, so no extra
+        # .contiguous() pass is needed here.
+        query = torch.cat([ql_nope, q_pe], dim=-1)
         result = torch_npu.npu_kv_quant_sparse_flash_attention(
             query=query,
             key=kv,
@@ -1160,6 +1206,13 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     # ===== Lightning Indexer Dtype Prep =====
 
     @staticmethod
+    def get_dsa_indexer_quant_mode() -> int:
+        """A5: q/k are fp8_e4m3fn with fp32 scales, so lightning indexer runs
+        in FP8 quant mode (QUANT_MODE_FP8 = 1 in
+        csrc/attention/quant_lightning_indexer_v2)."""
+        return 1
+
+    @staticmethod
     def prepare_dsa_indexer_weights(weights):
         """A5: cast indexer weights to float32 (fp8 scale format needs float)."""
         return weights.float()
@@ -1430,7 +1483,17 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
 class Ascend310PDeviceAdaptor(BaseDeviceAdaptor):
     @classmethod
-    def reshape_and_cache(cls, key, value, key_cache, value_cache, slot_mapping):
+    def reshape_and_cache(
+        cls,
+        key,
+        value,
+        key_cache,
+        value_cache,
+        slot_mapping,
+        use_bnsd=False,
+    ):
+        if use_bnsd:
+            raise NotImplementedError("BNSD KV cache is not supported on Ascend 310P")
         torch_npu._npu_reshape_and_cache(
             key=key,
             value=value,

@@ -8,13 +8,14 @@ This guide uses Qwen3-0.6B as an example to help you run your first offline infe
 - Python: {{ release_python_version }}
 - Docker
 - Supported hardware:
-{% include "getting_started/installation/supported_hardware.inc.md" %}
+
+{% filter indent(4, true) %}{% include "getting_started/installation/supported_hardware.inc.md" %}{% endfilter %}
 
 ??? note "Software stack included in the vLLM Ascend image"
 
     The prebuilt image includes a validated Python and Ascend user-space software stack, including CANN, NNAL, PyTorch, TorchNPU, vLLM, and vLLM Ascend.
 
-    A2, A3, and 950DT images also include the matching Triton Ascend runtime. Atlas 300I DUO and Atlas 200I Pro do not use Triton Ascend.
+    A2, A3, and 950DT Products images also include the matching Triton Ascend runtime. Atlas 300I DUO and Atlas 200I Pro do not use Triton Ascend.
 
     For the exact validated versions, see [Installation Guide > Hardware and software stack](installation.md#installation-hardware-software-stack).
 
@@ -50,6 +51,7 @@ The following sections provide offline inference and online serving examples. Ch
 
     If your environment cannot reliably access Hugging Face, model downloads may fail due to connection timeouts, DNS errors, or other network issues. You can switch to ModelScope:
 
+    <!-- doctest: quickstart-modelscope -->
     ```bash
     export VLLM_USE_MODELSCOPE=True
     pip install "modelscope>=1.18.1,<1.38"
@@ -59,7 +61,7 @@ The following sections provide offline inference and online serving examples. Ch
 
 ### Offline inference {: #quick-start-offline-inference }
 
-=== "A2 / A3 / 950DT"
+=== "A2 / A3 / 950DT Products"
 
     <span id="quick-start-atlas-a2-offline"></span>
     <span id="quick-start-atlas-a3-offline"></span>
@@ -76,7 +78,7 @@ The following sections provide offline inference and online serving examples. Ch
 
 ### Online serving {: #quick-start-online-serving }
 
-=== "A2 / A3 / 950DT"
+=== "A2 / A3 / 950DT Products"
 
     <span id="quick-start-atlas-a2-online"></span>
     <span id="quick-start-atlas-a3-online"></span>

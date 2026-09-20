@@ -4,23 +4,35 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
 
 import torch
 
-from vllm_ascend.utils import (
-    AscendDeviceType,
-    enable_custom_op,
-    get_ascend_device_type,
-)
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.utils import enable_custom_op
 
+# Existing mode for legacy prefill, decode, and A5 FP8 prefill.
 _SPARSE_ATTN_INNER_PRECISE = 4
+
+# Existing mode for A5 KV-gather-Q prefill with BF16 inputs.
+_PREFILL_KV_GATHER_Q_INNER_PRECISE = 1
+
+# A3 KV-gather-Q prefill with BF16 inputs: use FP32 scores and partial
+# outputs to preserve accuracy.
+_A3_PREFILL_KV_GATHER_Q_INNER_PRECISE = 0
 _MSA_INDEX_BLOCK_SIZE = 128
 _MSA_SCORE_BLOCK_ALIGNMENT = 16
-_ASCEND_DEVICE_TYPE = get_ascend_device_type()
 _FP8_E4M3_MAX = 448.0
 
-if _ASCEND_DEVICE_TYPE != AscendDeviceType.A5:
+if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
+    from vllm_ascend.models.minimax_m3.ops.msa_m3_triton_a5 import (
+        _index_topk_postprocess_kernel,
+    )
+    from vllm_ascend.models.minimax_m3.ops.msa_m3_triton_a5 import (
+        minimax_m3_index_topk as _minimax_m3_index_prefill_topk,
+    )
+elif get_current_hardware_profile().supports(HardwareCapability.RUNTIME_CUSTOM_OPS):
     from vllm_ascend.models.minimax_m3.ops.msa_m3_triton import (
         minimax_m3_index_topk as _minimax_m3_index_prefill_topk,
     )
@@ -162,6 +174,7 @@ def _minimax_m3_index_score(
     *,
     init_blocks: int = 0,
     local_blocks: int = 0,
+    force_blocks_in_kernel: bool = False,
 ) -> torch.Tensor:
     """Compute MSA index scores with the bundled AscendC operator.
 
@@ -171,10 +184,15 @@ def _minimax_m3_index_score(
 
     A causal mask selects sparse mode 3. Passing no mask selects dense mode 0
     for a TP chunk that is entirely before the current query positions.
-    ``init_blocks`` and ``local_blocks`` are kept for parity with the index
-    scoring interface; candidate forcing is applied by the TopK stage.
+    ``init_blocks`` and ``local_blocks`` can be applied in the AscendC
+    epilogue for a complete block table.  TP-sharded scoring keeps them at
+    zero because the operator attributes do not carry a global block offset;
+    that path applies global forcing in its candidate TopK stage instead.
     """
     index_kv_cache = _as_ascendc_index_kv_cache(index_kv_cache)
+    if index_kv_cache.dtype == torch.float8_e4m3fn and idx_q.dtype != index_kv_cache.dtype:
+        idx_q = _to_fp8_e4m3(idx_q)
+    block_force_kwargs = {"init_blocks": init_blocks, "local_blocks": local_blocks} if force_blocks_in_kernel else {}
     return torch.ops._C_ascend.npu_msa_index_score(
         idx_q,
         index_kv_cache,
@@ -185,7 +203,72 @@ def _minimax_m3_index_score(
         actual_seq_klen=seq_lens,
         layout_key="BBND",
         sparse_mode=3 if causal_mask is not None else 0,
+        **block_force_kwargs,
     )
+
+
+@torch.no_grad()
+def minimax_m3_index_decode_replicated(
+    idx_q: torch.Tensor,
+    index_kv_cache: torch.Tensor | tuple[torch.Tensor],
+    block_table: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    seq_lens: torch.Tensor,
+    start_loc: torch.Tensor,
+    causal_mask: torch.Tensor,
+    *,
+    topk: int,
+    init_blocks: int,
+    local_blocks: int,
+    decode_query_len: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Score the full replicated table with fused block forcing and TopK cleanup."""
+    assert get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
+    score = _minimax_m3_index_score(
+        idx_q,
+        index_kv_cache,
+        block_table,
+        cu_seqlens_q,
+        seq_lens,
+        start_loc,
+        causal_mask,
+        init_blocks=init_blocks,
+        local_blocks=local_blocks,
+        force_blocks_in_kernel=True,
+    )
+    if score.shape[-1] < topk:
+        raise ValueError(f"MsaIndexScore width {score.shape[-1]} is smaller than topk {topk}")
+
+    _, raw_topk = torch.topk(score, k=topk, dim=-1)
+    num_index_heads, total_q, _ = raw_topk.shape
+    topk_indices = torch.empty(
+        raw_topk.shape,
+        dtype=torch.int32,
+        device=raw_topk.device,
+    )
+    select_num_idx = torch.empty(
+        (num_index_heads, total_q),
+        dtype=torch.int32,
+        device=raw_topk.device,
+    )
+    _index_topk_postprocess_kernel[(total_q, num_index_heads)](
+        raw_topk,
+        topk_indices,
+        select_num_idx,
+        seq_lens,
+        _MSA_INDEX_BLOCK_SIZE,
+        topk,
+        decode_query_len,
+        raw_topk.stride(0),
+        raw_topk.stride(1),
+        raw_topk.stride(2),
+        topk_indices.stride(0),
+        topk_indices.stride(1),
+        topk_indices.stride(2),
+        select_num_idx.stride(0),
+        select_num_idx.stride(1),
+    )
+    return topk_indices, select_num_idx
 
 
 @torch.no_grad()
@@ -527,7 +610,7 @@ def _minimax_m3_sparse_attn_a3(
     output.copy_(out)
 
 
-def _minimax_m3_sparse_attn_a5(
+def _minimax_m3_sparse_attn_kv_gather_q(
     q: torch.Tensor,
     kv_cache: torch.Tensor | tuple[torch.Tensor, ...] | list[torch.Tensor],
     topk_idx: torch.Tensor,
@@ -538,20 +621,34 @@ def _minimax_m3_sparse_attn_a5(
     sm_scale: float,
     output: torch.Tensor,
     block_size: int,
+    total_kv_blocks: int,
+    max_kv_blocks: int,
+    *,
+    supports_fp8: bool,
 ) -> None:
     key, value = _split_main_kv_cache(kv_cache)
-    inner_precise = 1
+
+    # A3 uses FP32 scores and partial outputs. Keep A5's existing BF16
+    # precision mode; its FP8 cache path overrides this below as before.
+    inner_precise = _PREFILL_KV_GATHER_Q_INNER_PRECISE if supports_fp8 else _A3_PREFILL_KV_GATHER_Q_INNER_PRECISE
     if key.dtype == torch.float8_e4m3fn:
+        if not supports_fp8:
+            raise TypeError("MiniMax-M3 FP8 sparse attention is not supported on this device")
         if value.dtype != torch.float8_e4m3fn:
             raise TypeError("MiniMax-M3 FP8 sparse attention requires both K and V caches in E4M3")
         q = _to_fp8_e4m3(q)
         inner_precise = _SPARSE_ATTN_INNER_PRECISE
+
     cu_block_lens = _build_cu_block_lens(seq_lens, block_size)
+    # Keep the -1 sentinel: K2Q drops invalid entries, while replacing them
+    # with zero would add duplicate attention edges for logical KV block 0.
     k2q_row_ptr, k2q_q_indices, k2q_slot_indices = _npu_k2q_csr(
         topk_idx,
         cu_seqlens_q,
         cu_block_lens,
         order_method=1,
+        total_rows=total_kv_blocks,
+        max_kv=max_kv_blocks,
         use_simt=0,
         q_global_offset=True,
     )
@@ -580,6 +677,15 @@ def _minimax_m3_sparse_attn_a5(
     output.copy_(out)
 
 
+@lru_cache
+def _is_minimax_sparse_attention_split_kv_available() -> bool:
+    """Return whether the vendor Split-KV ACLNN entry points are installed."""
+    import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401, PLC0415
+
+    enable_custom_op()
+    return torch.ops._C_ascend.is_minimax_sparse_attention_split_kv_available()
+
+
 @torch.no_grad()
 def minimax_m3_sparse_attn(
     q: torch.Tensor,
@@ -594,12 +700,11 @@ def minimax_m3_sparse_attn(
     sm_scale: float,
     output: torch.Tensor,
     block_size: int = 128,
+    total_kv_blocks: int = -1,
+    max_kv_blocks: int = -1,
 ) -> None:
     del prefix_lens, max_query_len
-    sparse_attn_impl = (
-        _minimax_m3_sparse_attn_a5 if _ASCEND_DEVICE_TYPE == AscendDeviceType.A5 else _minimax_m3_sparse_attn_a3
-    )
-    sparse_attn_impl(
+    common_args = (
         q,
         kv_cache,
         topk_idx,
@@ -610,6 +715,25 @@ def minimax_m3_sparse_attn(
         sm_scale,
         output,
         block_size,
+    )
+    hardware_profile = get_current_hardware_profile()
+    supports_kv_gather_q = hardware_profile.supports(HardwareCapability.MINIMAX_M3_PREFILL_KV_GATHER_Q)
+    supports_fp8 = hardware_profile.supports(HardwareCapability.FP8_ATTENTION)
+    if not supports_kv_gather_q:
+        _minimax_m3_sparse_attn_a3(*common_args)
+        return
+
+    # The A3 CI image can predate the vendor Split-KV ACLNN package. A5
+    # already requires that package and cannot use the BF16-only A3 fallback.
+    if not supports_fp8 and not _is_minimax_sparse_attention_split_kv_available():
+        _minimax_m3_sparse_attn_a3(*common_args)
+        return
+
+    _minimax_m3_sparse_attn_kv_gather_q(
+        *common_args,
+        total_kv_blocks,
+        max_kv_blocks,
+        supports_fp8=supports_fp8,
     )
 
 

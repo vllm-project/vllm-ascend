@@ -1,7 +1,7 @@
 import importlib
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import torch
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig, ProfilerConfig, VllmConfig
@@ -1032,6 +1032,7 @@ class TestNPUWorker(TestBase):
         from vllm_ascend.worker.worker import NPUWorker
 
         worker = NPUWorker.__new__(NPUWorker)
+        worker._kvpp_cache_allocation_plan = None
         worker.cache_config = SimpleNamespace(kv_cache_memory_bytes=8192)
         worker.model_runner = MagicMock()
         worker.init_snapshot = SimpleNamespace(free_memory=16384)
@@ -1087,6 +1088,7 @@ class TestNPUWorker(TestBase):
         # Create worker mock
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
+            worker._kvpp_cache_allocation_plan = None
             worker.vllm_config = MagicMock(kv_transfer_config=None)
             worker.init_snapshot = mock_init_snapshot
             worker.requested_memory = 10000 * 0.8
@@ -1131,6 +1133,7 @@ class TestNPUWorker(TestBase):
 
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
+            worker._kvpp_cache_allocation_plan = None
             worker.vllm_config = MagicMock(kv_transfer_config=None)
             worker.cache_config = MagicMock()
             worker.cache_config.kv_cache_memory_bytes = None
@@ -1191,6 +1194,7 @@ class TestNPUWorker(TestBase):
         # Create worker mock
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
+            worker._kvpp_cache_allocation_plan = None
             worker.vllm_config = MagicMock(kv_transfer_config=None)
             worker.init_snapshot = mock_init_snapshot
             worker.requested_memory = 10000 * 0.9
@@ -1241,6 +1245,7 @@ class TestNPUWorker(TestBase):
         # Create worker mock
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
+            worker._kvpp_cache_allocation_plan = None
             worker.init_snapshot = mock_init_snapshot
             worker.requested_memory = 10000 * 0.8
             worker.model_runner = MagicMock()
@@ -1297,6 +1302,7 @@ class TestNPUWorker(TestBase):
         # Create worker mock
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
+            worker._kvpp_cache_allocation_plan = None
             worker.vllm_config = MagicMock(kv_transfer_config=None)
             worker.init_snapshot = mock_init_snapshot
             worker.requested_memory = 10000 * 0.8
@@ -1796,10 +1802,16 @@ class TestNPUWorker(TestBase):
             # Test initialize_from_config
             worker.initialize_from_config(mock_kv_cache_config)
 
-            # Verify calls
+            # Verify the kv_cache pool is created but not entered by the worker.
+            # Model runners enter it only around backing cache allocation.
             mock_allocator_class.get_instance.assert_called_once()
             mock_allocator.use_memory_pool.assert_called_once_with(tag="kv_cache")
-            worker.model_runner.initialize_kv_cache.assert_called_once_with(mock_kv_cache_config)
+            mock_context.__enter__.assert_not_called()
+            mock_context.__exit__.assert_not_called()
+            worker.model_runner.initialize_kv_cache.assert_called_once_with(
+                mock_kv_cache_config,
+                kv_cache_allocation_context=mock_context,
+            )
 
     def test_acl_graph_sleep_wakeup_manager_sleep_resets_acl_graph_state(self):
         from vllm_ascend.device_allocator.sleep_mem_optimized import AclGraphSleepWakeupManager
@@ -1880,7 +1892,10 @@ class TestNPUWorker(TestBase):
             worker.initialize_from_config(mock_kv_cache_config)
 
             # Verify calls
-            worker.model_runner.initialize_kv_cache.assert_called_once_with(mock_kv_cache_config)
+            worker.model_runner.initialize_kv_cache.assert_called_once_with(
+                mock_kv_cache_config,
+                kv_cache_allocation_context=ANY,
+            )
 
     @patch("vllm_ascend.worker.worker.ensure_kv_transfer_initialized")
     def test_initialize_from_config_initializes_kv_block_zeroer_for_mrv2_mamba(self, mock_ensure_kv_transfer):
@@ -1900,7 +1915,10 @@ class TestNPUWorker(TestBase):
 
             worker.initialize_from_config(mock_kv_cache_config)
 
-            worker.model_runner.initialize_kv_cache.assert_called_once_with(mock_kv_cache_config)
+            worker.model_runner.initialize_kv_cache.assert_called_once_with(
+                mock_kv_cache_config,
+                kv_cache_allocation_context=ANY,
+            )
             worker.model_runner._init_kv_zero_meta.assert_called_once_with()
 
     @patch("vllm_ascend.worker.worker.ensure_kv_transfer_initialized")
@@ -1923,7 +1941,10 @@ class TestNPUWorker(TestBase):
 
             worker.initialize_from_config(mock_kv_cache_config)
 
-            worker.model_runner.initialize_kv_cache.assert_called_once_with(mock_kv_cache_config)
+            worker.model_runner.initialize_kv_cache.assert_called_once_with(
+                mock_kv_cache_config,
+                kv_cache_allocation_context=ANY,
+            )
             worker.model_runner._init_kv_zero_meta.assert_called_once_with()
 
     @patch("vllm_ascend.worker.worker.ensure_kv_transfer_initialized")
@@ -1946,7 +1967,10 @@ class TestNPUWorker(TestBase):
 
             worker.initialize_from_config(mock_kv_cache_config)
 
-            worker.model_runner.initialize_kv_cache.assert_called_once_with(mock_kv_cache_config)
+            worker.model_runner.initialize_kv_cache.assert_called_once_with(
+                mock_kv_cache_config,
+                kv_cache_allocation_context=ANY,
+            )
             worker.model_runner._init_kv_zero_meta.assert_not_called()
 
     @patch("vllm_ascend.worker.worker.get_ascend_config")
@@ -2132,7 +2156,7 @@ class TestNPUWorkerWeightUpdate(TestBase):
 
         self.assertFalse(worker._weight_update_active)
 
-    def test_finish_weight_update_resets_state(self):
+    def test_finish_weight_update_resets_lora_state_after_base_weights(self):
         engine = MagicMock()
         worker = self._make_worker(engine=engine)
         worker._weight_update_active = True
@@ -2140,6 +2164,7 @@ class TestNPUWorkerWeightUpdate(TestBase):
         worker.finish_weight_update()
 
         engine.finish_weight_update.assert_called_once_with()
+        worker.model_runner.reset_lora_state.assert_called_once_with()
         self.assertFalse(worker._weight_update_active)
 
     def test_finish_without_start_raises(self):
@@ -2177,3 +2202,31 @@ class TestNPUWorkerWeightUpdate(TestBase):
         worker.shutdown()
 
         engine.shutdown.assert_called_once()
+
+
+class TestKVPPWorkerBudget(TestBase):
+    def test_complete_spec_and_logical_planner_budget(self):
+        from tests.ut.kvpp_utils import make_kvpp_config, make_kvpp_specs
+        from vllm_ascend.worker import worker as worker_module
+
+        specs = make_kvpp_specs()
+        worker = worker_module.NPUWorker.__new__(worker_module.NPUWorker)
+        worker.vllm_config = make_kvpp_config()
+        worker.model_runner = SimpleNamespace(get_kv_cache_spec=lambda: specs)
+        worker._kvpp_cache_allocation_plan = None
+        ascend_config = SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=False))
+        with (
+            patch.object(worker_module, "get_tp_group", return_value=SimpleNamespace(rank_in_group=1)),
+            patch.object(worker_module, "get_ascend_config", return_value=ascend_config),
+        ):
+            self.assertEqual(worker.get_kv_cache_spec(), specs)
+        plan = worker._kvpp_cache_allocation_plan
+        assert plan is not None
+        self.assertEqual(plan.logical_cache_spec, specs)
+        for available, expected in ((1175, 952), (1176, 1428)):
+            with self.subTest(available=available):
+                self.assertEqual(worker._apply_kvpp_memory_budget(available), expected)
+                self.assertEqual(worker.available_kv_cache_memory_bytes, available)
+        worker._kvpp_cache_allocation_plan = None
+        self.assertEqual(worker._apply_kvpp_memory_budget(1176), 1176)
+        self.assertEqual(worker.available_kv_cache_memory_bytes, 1176)
