@@ -1,7 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Group-aware Mooncake sessions using the shared hybrid reachability masks."""
+"""Group-aware Mooncake sessions using the shared hybrid reachability masks.
+
+DCP and cache groups
+--------------------
+
+Under decode context parallelism, groups do not all mean the same thing. A
+full-attention group is *sharded* across DCP ranks — each rank holds a
+different token shard — while a replicated group (the SFA indexer cache, the
+compressor state) holds the same bytes on every rank.
+
+Both are handled the same way here: every DCP rank saves its own key and the
+hit check requires all of them. For a sharded group that is required; for a
+replicated group it is redundant but consistent, and it keeps the key space
+uniform instead of introducing a per-group exception. The redundant write is a
+performance question for a later stage, not a correctness one.
+"""
 
 from __future__ import annotations
 
@@ -137,29 +152,67 @@ def group_block_size_signature(group) -> tuple[int, ...]:
     return tuple(sorted({int(sub.block_size) for sub in specs}))
 
 
-def hybrid_layout_id(kv_cache_config, tp_size: int = 1) -> str:
+def hybrid_layout_id(kv_cache_config, parallel_config: Any, model_config: Any = None) -> str:
     """Namespace every pool key, and must agree across processes.
 
-    Only representation-independent fields participate. Hashing the spec
-    objects does *not* work: the scheduler holds one merged spec per group
-    while a worker holds the per-layer ``UniformTypeKVCacheSpecs`` for the same
-    group, so ``asdict`` yields different JSON on each side. That produced two
-    disjoint key spaces — writes landed under one prefix and the hit check
-    queried another, so the pool never reported a hit, silently and with no
-    error anywhere.
+    Two properties have to hold at once: the digest must be identical on the
+    scheduler and on every worker, and it must change when the cache layout
+    changes.
 
-    Layer membership, group order and per-group page sizes are identical in
-    both representations, and the model name is already part of every key, so
-    this still isolates incompatible layouts from each other.
+    Without pipeline parallelism both sides describe the same layers, so layer
+    membership participates. Hashing the spec objects does *not* work: the
+    scheduler holds one merged spec per group while a worker holds the
+    per-layer ``UniformTypeKVCacheSpecs`` for the same group, so ``asdict``
+    yields different JSON on each side. That produced two disjoint key spaces —
+    writes landed under one prefix and the hit check queried another, so the
+    pool never reported a hit, silently and with no error anywhere.
+
+    **With pipeline parallelism the membership axis is gone.** Upstream builds
+    each worker's config by projecting the global groups onto that stage's
+    layers (``_project_kv_cache_groups_to_worker``), and the scheduler is
+    initialized from stage 0's config, so ``layer_names`` legitimately differ
+    per rank. Hashing them would give every stage its own key space — the same
+    silent, never-hitting failure this function exists to prevent. The digest
+    therefore switches to fields that are global by construction:
+
+    - the topology namespace (PP partitions, TP/DCP sizes, interleave),
+    - the ordered per-group page-size signatures.
+
+    Groups themselves are built from the whole-model spec *before* projection,
+    so their order and page sizes agree everywhere. ``cache_family`` is
+    deliberately *not* included: ``infer_group_cache_families`` falls back to
+    reading ``layer_names``, which is exactly the stage-local input being
+    avoided.
+
+    What this gives up is narrow: under PP, two layouts differing *only* in
+    which layer belongs to which group share a namespace. Membership follows
+    from the model config, the model name is already part of every key, and the
+    PP partition list is inside the namespace — a far smaller hole than
+    silently never hitting.
     """
-    groups = []
-    for group in kv_cache_config.kv_cache_groups:
-        groups.append((sorted(group.layer_names), group_block_size_signature(group)))
-    # No default= fallback on purpose: anything non-serializable here would have
-    # to come from a repr that can differ per process, which is exactly the bug
-    # this hash must never reacquire. Fail loudly instead.
-    encoded = json.dumps((tp_size, groups), sort_keys=True).encode()
-    return hashlib.sha256(encoded).hexdigest()
+    pp_size = _as_positive_int(getattr(parallel_config, "pipeline_parallel_size", 1), 1)
+    if pp_size <= 1:
+        tp_size = _as_positive_int(getattr(parallel_config, "tensor_parallel_size", 1), 1)
+        groups = []
+        for group in kv_cache_config.kv_cache_groups:
+            groups.append((sorted(group.layer_names), group_block_size_signature(group)))
+        # No default= fallback on purpose: anything non-serializable here would
+        # have to come from a repr that can differ per process, which is exactly
+        # the bug this hash must never reacquire. Fail loudly instead.
+        topology = f"tp:{tp_size}"
+        encoded = json.dumps((tp_size, groups), sort_keys=True).encode()
+    else:
+        if model_config is None:
+            raise ValueError("Hybrid layout under pipeline parallelism requires the model config")
+        topology = layerwise_topology_namespace(model_config, parallel_config)
+        groups = [
+            (index, group_block_size_signature(group))
+            for index, group in enumerate(kv_cache_config.kv_cache_groups)
+        ]
+        encoded = json.dumps(("hybrid_pp_v1", topology, groups), sort_keys=True).encode()
+    digest = hashlib.sha256(encoded).hexdigest()
+    logger.debug("Mooncake hybrid layout id=%s topology=%s groups=%s", digest, topology, groups)
+    return digest
 
 
 def hybrid_block_key(
@@ -181,6 +234,62 @@ def hybrid_block_key(
     return (
         f"{model}@mooncake_hybrid_v1:{layout}@pp_rank:{pp_rank}@dcp_rank:{dcp_rank}"
         f"@group:{group}@block:{block_size}@{block_hash}@{head}"
+    )
+
+
+def validate_hybrid_pp_coverage(
+    kv_cache_config,
+    parallel_config: Any,
+    *,
+    use_spec_decode: bool = False,
+) -> None:
+    """Every pipeline stage must own layers of every *pooled* cache group.
+
+    The hybrid hit check requires each group's keys from every PP stage, so a
+    stage that holds none of a group's layers never writes them and the block
+    can never be a hit — silently, for every request. Upstream projects the
+    global groups onto each stage, keeping the group list intact but leaving
+    ``layer_names`` empty for a group the partition did not reach, which is what
+    this checks for.
+
+    Each stage validates itself, so together the stages enforce the invariant.
+    That framing matters: no rank can see the *global* membership of a group
+    (that is exactly the input the projected configs drop), but every rank can
+    see whether its own share is empty.
+
+    A drafter group (MTP/EAGLE) is legitimately empty off the last stage, and
+    the PP projection clears its ``is_eagle_group`` flag along with its layers,
+    so it cannot be told apart from a target group the partition left empty.
+    With speculative decoding enabled the finding is therefore reported rather
+    than raised.
+    """
+    pp_size = _as_positive_int(getattr(parallel_config, "pipeline_parallel_size", 1), 1)
+    if pp_size <= 1 or kv_cache_config is None:
+        return
+    empty_group_ids = [
+        group_id
+        for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
+        if not list(getattr(group, "layer_names", []))
+    ]
+    if not empty_group_ids:
+        return
+    pp_rank = getattr(parallel_config, "rank", 0) // max(1, _as_positive_int(parallel_config.tensor_parallel_size, 1))
+    detail = (
+        f"PP rank {pp_rank}/{pp_size} holds no layers of KV cache group(s) {empty_group_ids}; "
+        "every stage must own layers of every pooled group, because a block is a hit only when "
+        "all stages have saved their keys"
+    )
+    if use_spec_decode:
+        logger.warning(
+            "%s. A drafter (MTP/EAGLE) group is expected to be empty away from the last stage, "
+            "and its flag is cleared by the PP projection, so this cannot be classified here; "
+            "verify the pool reports hits for these groups.",
+            detail,
+        )
+        return
+    raise ValueError(
+        f"{detail}. Re-partition the pipeline so each group spans every stage, "
+        "or disable hybrid layerwise pooling."
     )
 
 

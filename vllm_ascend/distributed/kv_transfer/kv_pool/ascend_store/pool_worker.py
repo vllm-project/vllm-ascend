@@ -223,8 +223,18 @@ class KVPoolWorker:
         )
         self.block_key_hybrid = self.use_block_key_layerwise and self.use_hybrid
         self.block_key_hybrid_layout = (
-            self.layerwise_protocol.hybrid_layout_id(kv_cache_config, self.tp_size) if self.block_key_hybrid else ""
+            self.layerwise_protocol.hybrid_layout_id(
+                kv_cache_config, vllm_config.parallel_config, vllm_config.model_config
+            )
+            if self.block_key_hybrid
+            else ""
         )
+        if self.block_key_hybrid:
+            self.layerwise_protocol.validate_hybrid_pp_coverage(
+                kv_cache_config,
+                vllm_config.parallel_config,
+                use_spec_decode=getattr(vllm_config, "speculative_config", None) is not None,
+            )
         self._attention_saved_layers: set[int] = set()
         self.use_mamba = self._uses_mamba_kv_cache(self.use_hybrid, kv_cache_config)
         speculative_config = getattr(vllm_config, "speculative_config", None)

@@ -177,10 +177,18 @@ class KVPoolScheduler:
 
         self.block_key_hybrid = self.use_block_key_layerwise and self.use_hybrid
         self.block_key_hybrid_layout = (
-            self.layerwise_protocol.hybrid_layout_id(kv_cache_config, vllm_config.parallel_config.tensor_parallel_size)
+            self.layerwise_protocol.hybrid_layout_id(
+                kv_cache_config, vllm_config.parallel_config, vllm_config.model_config
+            )
             if self.block_key_hybrid
             else ""
         )
+        if self.block_key_hybrid:
+            self.layerwise_protocol.validate_hybrid_pp_coverage(
+                kv_cache_config,
+                vllm_config.parallel_config,
+                use_spec_decode=getattr(vllm_config, "speculative_config", None) is not None,
+            )
         validate_layerwise_runtime(
             self.layerwise_protocol,
             use_hybrid=self.block_key_hybrid,
