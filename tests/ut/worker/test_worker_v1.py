@@ -277,6 +277,68 @@ class TestNPUWorker(TestBase):
         vllm_version_is("0.28.0"),
         "vLLM #51718 only changed the main planner",
     )
+    def test_page_strided_compressed_hybrid_budget_is_not_scaled(self):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        compressed_spec = MLAAttentionSpec(
+            block_size=8,
+            num_kv_heads=1,
+            head_size=4,
+            dtype=torch.float16,
+            tokens_per_state=4,
+        )
+        mamba_spec = MambaSpec(
+            block_size=8,
+            shapes=((2, 4),),
+            dtypes=(torch.float32,),
+        )
+        groups = [
+            KVCacheGroupSpec(
+                layer_names=["compressed_attn"],
+                kv_cache_spec=compressed_spec,
+            ),
+            KVCacheGroupSpec(
+                layer_names=["linear_attn"],
+                kv_cache_spec=mamba_spec,
+            ),
+        ]
+        worker = NPUWorker.__new__(NPUWorker)
+        worker.vllm_config = SimpleNamespace(
+            cache_config=SimpleNamespace(
+                get_resolved_kv_cache_layout=lambda: SimpleNamespace(
+                    is_block_outermost=True,
+                    is_layer_compact=False,
+                    is_block_compact=False,
+                )
+            ),
+            kv_transfer_config=None,
+        )
+        worker.get_kv_cache_spec = MagicMock(
+            return_value={
+                "compressed_attn": compressed_spec,
+                "linear_attn": mamba_spec,
+            }
+        )
+        worker.model_runner = SimpleNamespace(
+            supports_page_strided_shared_kv_backing=True,
+            supports_standardized_shared_kv_backing=True,
+            use_sparse=False,
+            use_compress=True,
+        )
+
+        with patch(
+            "vllm_ascend.worker.worker.get_kv_cache_groups",
+            return_value=groups,
+        ):
+            self.assertEqual(
+                worker._scale_kv_cache_memory_for_multi_group(12345),
+                12345,
+            )
+
+    @unittest.skipIf(
+        vllm_version_is("0.28.0"),
+        "vLLM #51718 only changed the main planner",
+    )
     def test_pure_attention_multi_group_budget_scales_for_private_layout(self):
         from vllm_ascend.worker.worker import NPUWorker
 

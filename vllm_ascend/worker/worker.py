@@ -706,6 +706,25 @@ class NPUWorker(WorkerBase):
         if (
             has_attention
             and has_mamba
+            and getattr(layout, "is_block_outermost", False)
+            and self.vllm_config.kv_transfer_config is None
+            and getattr(
+                model_runner,
+                "supports_page_strided_shared_kv_backing",
+                False,
+            )
+            and not getattr(model_runner, "use_sparse", False)
+        ):
+            # Main's block-outermost descriptors all address one physical
+            # page-strided backing. In particular, Qwen4Exp's compressed QSA
+            # descriptors describe logical views into that allocation; they
+            # are not independent per-layer buffers. Preserve the profiler's
+            # full budget so the planner derives num_blocks from the packed
+            # physical page size rather than scaling it once per group.
+            return available_memory
+        if (
+            has_attention
+            and has_mamba
             and layout.is_layer_compact
             and layout.is_block_compact
             and self.vllm_config.kv_transfer_config is None
