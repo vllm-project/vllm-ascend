@@ -42,6 +42,7 @@ class MoEWeights:
     w2_scale_bias: torch.Tensor | list[torch.Tensor] | None = None
     w1_offset: torch.Tensor | None = None
     w2_offset: torch.Tensor | None = None
+    quant_type: QuantType | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +63,9 @@ class MoEFusedExpertsInput:
     activation: MoEActivation | str = MoEActivation.SILU
     need_trans: bool = False
     dynamic_eplb: bool = False
+    # Optional shared-expert weights consumed by MegaMoE implementations that
+    # fuse routed and shared expert computation into one operator.
+    shared_weights: MoEWeights | None = None
     # Optional per-layer MoE LoRA state (vllm_ascend.lora MoELoRAContext).
     # ``Any`` avoids coupling the core contracts to the LoRA module; only the
     # unquant MLP path reads it, and only when a LoRA adapter is active.
@@ -100,6 +104,7 @@ def build_fused_experts_input(
     w2_scale_bias: list[torch.Tensor] | torch.Tensor | None = None,
     w1_offset: torch.Tensor | None = None,
     w2_offset: torch.Tensor | None = None,
+    shared_weights: MoEWeights | None = None,
     lora_context=None,
 ) -> MoEFusedExpertsInput:
     return MoEFusedExpertsInput(
