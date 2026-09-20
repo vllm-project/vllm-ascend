@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
 import torch
+from vllm.logger import logger
 
 from vllm_ascend.utils import weak_ref_tensors
 
@@ -141,6 +142,7 @@ class UpdatableGraph(torch.npu.NPUGraph):
         update_stream,
         resolved_tasks: tuple[GraphUpdateTask, ...],
     ) -> None:
+        logger.debug_once("Updating host-side attention metadata with UpdatableGraph.")
         with torch.npu.stream(update_stream):
             for task in resolved_tasks:
                 task.apply(update_stream)
