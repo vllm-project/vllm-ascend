@@ -207,7 +207,7 @@ class AscendMultiKVCacheGroupMTPProposer(AscendEagleProposer):
         metadata for every step must coexist until the merged draft finishes,
         including step 0's multi-token query layout and compressed cache slots.
         """
-        if not is_dataclass(attn_metadata):
+        if not is_dataclass(attn_metadata) or isinstance(attn_metadata, type):
             return attn_metadata
         return replace(
             attn_metadata,
@@ -226,7 +226,11 @@ class AscendMultiKVCacheGroupMTPProposer(AscendEagleProposer):
         input_batch_size,
         used_update_positions,
         aclgraph_runtime_mode,
-        **kwargs,
+        ori_seq_len=None,
+        ori_seq_len_cpu=None,
+        slot_indices=None,
+        mtp_slot_mapping=None,
+        attn_group=None,
     ):
         """Override the transition from verification rows to one row per request.
 
@@ -251,7 +255,11 @@ class AscendMultiKVCacheGroupMTPProposer(AscendEagleProposer):
             input_batch_size,
             used_update_positions,
             aclgraph_runtime_mode,
-            **kwargs,
+            ori_seq_len=ori_seq_len,
+            ori_seq_len_cpu=ori_seq_len_cpu,
+            slot_indices=slot_indices,
+            mtp_slot_mapping=mtp_slot_mapping,
+            attn_group=attn_group,
         )
 
     def build_draft_attn_metadata(

@@ -1,8 +1,10 @@
 import inspect
+from dataclasses import dataclass
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
 
@@ -21,6 +23,60 @@ def test_multi_group_proposer_directly_inherits_ascend_eagle():
     assert inspect.signature(AscendMultiKVCacheGroupMTPProposer.__init__) == inspect.signature(
         AscendEagleProposer.__init__
     )
+
+
+def test_draft_step_update_matches_parent_signature():
+    assert inspect.signature(AscendMultiKVCacheGroupMTPProposer.attn_update_stack_num_spec_norm) == inspect.signature(
+        AscendEagleProposer.attn_update_stack_num_spec_norm
+    )
+
+
+@pytest.mark.parametrize("use_keyword_arguments", [False, True])
+def test_draft_step_update_forwards_optional_parent_arguments(use_keyword_arguments):
+    proposer = AscendMultiKVCacheGroupMTPProposer.__new__(AscendMultiKVCacheGroupMTPProposer)
+    proposer._uses_multi_group_kv_cache = False
+    args = (1, object(), 2, 4, object(), CUDAGraphMode.NONE)
+    optional_args = dict(
+        ori_seq_len=object(),
+        ori_seq_len_cpu=object(),
+        slot_indices=object(),
+        mtp_slot_mapping=object(),
+        attn_group=object(),
+    )
+    expected = object()
+    with patch.object(AscendEagleProposer, "attn_update_stack_num_spec_norm", return_value=expected) as parent_update:
+        if use_keyword_arguments:
+            result = proposer.attn_update_stack_num_spec_norm(*args, **optional_args)
+        else:
+            result = proposer.attn_update_stack_num_spec_norm(*args, *optional_args.values())
+
+    assert result is expected
+    parent_update.assert_called_once_with(*args, **optional_args)
+
+
+def test_copy_cache_only_metadata_clones_dataclass_instance_tensors():
+    @dataclass
+    class Metadata:
+        slot_mapping: torch.Tensor
+        num_reqs: int
+
+    metadata = Metadata(torch.tensor([3, 7]), num_reqs=2)
+    copied = AscendMultiKVCacheGroupMTPProposer._copy_cache_only_draft_metadata(metadata)
+    assert isinstance(copied, Metadata)
+    assert copied is not metadata
+    assert copied.num_reqs == 2
+    assert copied.slot_mapping.data_ptr() != metadata.slot_mapping.data_ptr()
+    metadata.slot_mapping.fill_(-1)
+    assert copied.slot_mapping.tolist() == [3, 7]
+
+
+def test_copy_cache_only_metadata_passes_through_classes_and_non_dataclasses():
+    @dataclass
+    class Metadata:
+        num_reqs: int
+
+    for metadata in (Metadata, None, object(), SimpleNamespace(num_reqs=2)):
+        assert AscendMultiKVCacheGroupMTPProposer._copy_cache_only_draft_metadata(metadata) is metadata
 
 
 def test_glm5next_mtp_is_selected_by_draft_model_type():
