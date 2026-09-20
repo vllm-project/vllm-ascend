@@ -25,8 +25,6 @@ _server_cmd: &server_cmd
   - '{"method": "deepseek_mtp", "num_speculative_tokens": 3}'
   - "--quantization"
   - "ascend"
-  - "--kv-cache-dtype" 
-  - "fp8"
   - "--trust-remote-code"
 
 # ==========================================

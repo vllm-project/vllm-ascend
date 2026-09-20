@@ -223,12 +223,10 @@ If you want to deploy multi-node environment, you need to set up environment on 
     --enable-auto-tool-choice \
     --tool-call-parser glm47 \
     --reasoning-parser glm45 \
-    --kv-cache-dtype int8 \
-    --attention_config.indexer_kv_dtype int8 \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
-    --additional-config '{"enable_cpu_binding": "True", "multistream_overlap_shared_expert": "True", "enable_dsa_cp": true, "eplb_config": {"dynamic_eplb": true, "expert_heat_collection_interval": 50, "algorithm_execution_interval": 5, "eplb_policy_type": 2, "num_redundant_experts": 0}, "enable_flashcomm1": true}'
+    --additional-config '{"enable_cpu_binding": "True", "multistream_overlap_shared_expert": "True", "enable_sparse_c8": "True", "enable_dsa_cp": true, "eplb_config": {"dynamic_eplb": true, "expert_heat_collection_interval": 50, "algorithm_execution_interval": 5, "eplb_policy_type": 2, "num_redundant_experts": 0}, "enable_flashcomm1": true}'
     ```
 
 === "A3 series"
@@ -382,9 +380,7 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     --enable-chunked-prefill \
     --enable-prefix-caching \
     --async-scheduling \
-    --kv-cache-dtype int8 \
-    --attention_config.indexer_kv_dtype int8 \
-    --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true, "fuse_muls_add": true, "enable_flashcomm1": true, "enable_fused_mc2": true, "enable_mlapo": true}' \
+    --additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_balance_scheduling": true, "fuse_muls_add": true, "enable_flashcomm1": true, "enable_fused_mc2": true, "enable_mlapo": true}' \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
     ```
@@ -429,9 +425,7 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
     --enable-chunked-prefill \
     --enable-prefix-caching \
     --async-scheduling \
-    --kv-cache-dtype int8 \
-    --attention_config.indexer_kv_dtype int8 \
-    --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true, "fuse_muls_add": true, "enable_flashcomm1": true, "enable_fused_mc2": true, "enable_mlapo": true}' \
+    --additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_balance_scheduling": true, "fuse_muls_add": true, "enable_flashcomm1": true, "enable_fused_mc2": true, "enable_mlapo": true}' \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
     ```
@@ -554,6 +548,7 @@ In addition to all single-node parameters described in [Single-Node Online Deplo
 **w8a8c8-specific `--additional-config` fields:**
 
 - `"enable_dsa_cp": true`: Enables DSA context parallelism to accelerate long-context prefill.
+- `"enable_sparse_sfa_c8": true` / `"enable_sparse_li_c8": true`: Sparse attention optimizations of the C8 quantized model.
 - `"enable_balance_scheduling": true`: Improves output throughput and reduces TPOT in the v1 scheduler. Not recommended when Prefill-Decode is separated.
 - `"fuse_muls_add": true`: Fuses multiply-add operations.
 - `"multistream_overlap_shared_expert": true`: Overlaps shared-expert computation on an additional stream. Automatically disabled when `"enable_fused_mc2": true`.
@@ -707,8 +702,6 @@ if __name__ == "__main__":
             --enable-auto-tool-choice \
             --tool-call-parser glm47 \
             --reasoning-parser glm45 \
-            --kv-cache-dtype int8 \
-            --attention_config.indexer_kv_dtype int8 \
             --speculative-config '{"num_speculative_tokens": 1, "method": "deepseek_mtp", "enforce_eager": true}' \
             --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
             --kv-transfer-config \
@@ -728,7 +721,7 @@ if __name__ == "__main__":
                         "ascend_local_comm_res_path": "/etc/hixlep"
                 }
             }' \
-            --additional-config '{"enable_cpu_binding": "True", "multistream_overlap_shared_expert": "True", "recompute_scheduler_enable": "True", "enable_dsa_cp": true, "enable_flashcomm1": true}'
+            --additional-config '{"enable_cpu_binding": "True", "multistream_overlap_shared_expert": "True", "recompute_scheduler_enable": "True", "enable_sparse_c8": "True", "enable_dsa_cp": true, "enable_flashcomm1": true}'
         ```
 
     2. Prefill node 1
@@ -772,8 +765,6 @@ if __name__ == "__main__":
             --enable-auto-tool-choice \
             --tool-call-parser glm47 \
             --reasoning-parser glm45 \
-            --kv-cache-dtype int8 \
-            --attention_config.indexer_kv_dtype int8 \
             --speculative-config '{"num_speculative_tokens": 1, "method": "deepseek_mtp", "enforce_eager": true}' \
             --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
             --kv-transfer-config \
@@ -793,7 +784,7 @@ if __name__ == "__main__":
                         "ascend_local_comm_res_path": "/etc/hixlep"
                 }
             }' \
-            --additional-config '{"enable_cpu_binding": "True", "multistream_overlap_shared_expert": "True", "recompute_scheduler_enable": "True", "enable_dsa_cp": true, "enable_flashcomm1": true}'
+            --additional-config '{"enable_cpu_binding": "True", "multistream_overlap_shared_expert": "True", "recompute_scheduler_enable": "True", "enable_sparse_c8": "True", "enable_dsa_cp": true, "enable_flashcomm1": true}'
         ```
 
     3. Decode node 0
@@ -839,8 +830,6 @@ if __name__ == "__main__":
             --enable-auto-tool-choice \
             --tool-call-parser glm47 \
             --reasoning-parser glm45 \
-            --kv-cache-dtype int8 \
-            --attention_config.indexer_kv_dtype int8 \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
             --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
             --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
@@ -861,7 +850,7 @@ if __name__ == "__main__":
                         "ascend_local_comm_res_path": "/etc/hixlep"
                 }
             }' \
-            --additional-config '{"enable_cpu_binding": "True", "multistream_overlap_shared_expert": "True", "recompute_scheduler_enable": "True", "finegrained_tp_config": {"lmhead_tensor_parallel_size":8}}'
+            --additional-config '{"enable_cpu_binding": "True", "multistream_overlap_shared_expert": "True", "recompute_scheduler_enable": "True", "enable_sparse_c8": "True", "finegrained_tp_config": {"lmhead_tensor_parallel_size":8}}'
         ```
 
     4. Decode node 1
@@ -907,8 +896,6 @@ if __name__ == "__main__":
             --enable-auto-tool-choice \
             --tool-call-parser glm47 \
             --reasoning-parser glm45 \
-            --kv-cache-dtype int8 \
-            --attention_config.indexer_kv_dtype int8 \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
             --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
             --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
@@ -929,7 +916,7 @@ if __name__ == "__main__":
                         "ascend_local_comm_res_path": "/etc/hixlep"
                 }
             }' \
-            --additional-config '{"enable_cpu_binding": "True", "multistream_overlap_shared_expert": "True", "recompute_scheduler_enable": "True", "finegrained_tp_config": {"lmhead_tensor_parallel_size":8}}'
+            --additional-config '{"enable_cpu_binding": "True", "multistream_overlap_shared_expert": "True", "recompute_scheduler_enable": "True", "enable_sparse_c8": "True", "finegrained_tp_config": {"lmhead_tensor_parallel_size":8}}'
         ```
 
 Once the preparation is done, you can start the server with the following command on each node:
@@ -1078,9 +1065,7 @@ if __name__ == "__main__":
             --seed 1024 \
             --served-model-name glm-5 \
             --max-model-len 202752 \
-            --kv-cache-dtype int8 \
-            --attention_config.indexer_kv_dtype int8 \
-            --additional-config '{"fuse_muls_add": true, "recompute_scheduler_enable": false, "multistream_overlap_shared_expert": true, "enable_dsa_cp": true, "c8_enable_reshape_optim": true, "enable_flashcomm1": true, "enable_fused_mc2": true}' \
+            --additional-config '{"fuse_muls_add": true, "recompute_scheduler_enable": false, "multistream_overlap_shared_expert": true, "enable_dsa_cp": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "c8_enable_reshape_optim": true, "enable_flashcomm1": true, "enable_fused_mc2": true}' \
             --max-num-batched-tokens 16384 \
             --trust-remote-code \
             --enable-prefix-caching \
@@ -1140,9 +1125,7 @@ if __name__ == "__main__":
             --seed 1024 \
             --served-model-name glm-5 \
             --max-model-len 202752 \
-            --kv-cache-dtype int8 \
-            --attention_config.indexer_kv_dtype int8 \
-            --additional-config '{"fuse_muls_add": true, "recompute_scheduler_enable": false, "multistream_overlap_shared_expert": true, "enable_dsa_cp": true, "c8_enable_reshape_optim": true, "enable_flashcomm1": true, "enable_fused_mc2": true}' \
+            --additional-config '{"fuse_muls_add": true, "recompute_scheduler_enable": false, "multistream_overlap_shared_expert": true, "enable_dsa_cp": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "c8_enable_reshape_optim": true, "enable_flashcomm1": true, "enable_fused_mc2": true}' \
             --max-num-batched-tokens 16384 \
             --trust-remote-code \
             --enable-prefix-caching \
@@ -1204,10 +1187,8 @@ if __name__ == "__main__":
             --served-model-name glm-5 \
             --max-model-len 202752 \
             --max-num-batched-tokens 164 \
-            --kv-cache-dtype int8 \
-            --attention_config.indexer_kv_dtype int8 \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-            --additional-config '{"fuse_muls_add": true, "recompute_scheduler_enable": true, "multistream_overlap_shared_expert": true, "enable_fused_mc2": true, "enable_mlapo": true}' \
+            --additional-config '{"fuse_muls_add": true, "recompute_scheduler_enable": true, "multistream_overlap_shared_expert": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_fused_mc2": true, "enable_mlapo": true}' \
             --trust-remote-code \
             --max-num-seqs 32 \
             --gpu-memory-utilization 0.92 \
@@ -1267,10 +1248,8 @@ if __name__ == "__main__":
             --served-model-name glm-5 \
             --max-model-len 202752 \
             --max-num-batched-tokens 164 \
-            --kv-cache-dtype int8 \
-            --attention_config.indexer_kv_dtype int8 \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-            --additional-config '{"fuse_muls_add": true, "recompute_scheduler_enable": true, "multistream_overlap_shared_expert": true, "enable_fused_mc2": true, "enable_mlapo": true}' \
+            --additional-config '{"fuse_muls_add": true, "recompute_scheduler_enable": true, "multistream_overlap_shared_expert": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_fused_mc2": true, "enable_mlapo": true}' \
             --trust-remote-code \
             --max-num-seqs 32 \
             --gpu-memory-utilization 0.92 \
@@ -1512,7 +1491,7 @@ The following optimizations must be explicitly enabled to take effect. They appl
 |DSA CP|A3 prefill nodes; long context (≥128K)|`--additional-config '{"enable_dsa_cp": true}'`|DSA context parallelism accelerates long-context prefill, reducing TTFT for long prompts|In the reference configs, enabled on co-located nodes and PD prefill nodes|
 |Balance Scheduling|A3 single-node / co-located / non-PD scenarios|`--additional-config '{"enable_balance_scheduling": true}'`|Improves output throughput and reduces TPOT in the v1 scheduler|TTFT may degrade; not recommended when Prefill-Decode is separated|
 |Sparse SFA C8|A3 (w8a8c8); long-context prefill|`--additional-config '{"enable_sparse_sfa_c8": true}'`|Sparse Flash Attention skips unnecessary attention computation of the C8 quantized model, accelerating long-context prefill|Experimental in v0.23.0. In the reference configs, enabled in the high-throughput and PD scenarios; disabled in the low-latency scenario|
-|Sparse LI C8|A3 (w8a8c8)|`--attention_config.indexer_kv_dtype int8`|Sparse attention optimization reduces computation of the C8 quantized model, improving throughput|Independent of `enable_sparse_sfa_c8`; the reference low-latency config disables both|
+|Sparse LI C8|A3 (w8a8c8)|`--additional-config '{"enable_sparse_li_c8": true}'`|Sparse attention optimization reduces computation of the C8 quantized model, improving throughput|Independent of `enable_sparse_sfa_c8`; the reference low-latency config disables both|
 |Recompute Scheduler|A3 decode nodes|`--additional-config '{"recompute_scheduler_enable": true}'`|Recomputes KV cache on prefill nodes when decode KV cache is insufficient, avoiding decode-side OOM and improving throughput|Set to `false` on prefill nodes|
 |Multistream Overlap Shared Expert|A3|`--additional-config '{"multistream_overlap_shared_expert": true}'`|Overlaps shared-expert computation on an additional stream, hiding its latency and improving decode performance|Auto-disabled when `"enable_fused_mc2": true`|
 
