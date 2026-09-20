@@ -133,13 +133,13 @@ class TestKVPoolScheduler(unittest.TestCase):
         config.parallel_config.tensor_parallel_size = 2
         config.model_config.get_total_num_kv_heads.return_value = 2
         scheduler = KVPoolScheduler(config, use_layerwise=True)
-        scheduler.store_scheduler.batch_is_exist.return_value = [1, 1, 1, 0, 1, 1]
+        scheduler.store_scheduler.batch_is_readable.return_value = [True, True, True, False, True, True]
         request = MagicMock(request_id="r1", block_hashes=[b"h0", b"h1", b"h2"])
 
-        hit_tokens = scheduler._get_mooncake_layerwise_hit_tokens(request, 48, 0)
+        hit_tokens = scheduler._lookup_block_key_contiguous(request, 48, 0)
 
         self.assertEqual(hit_tokens, 16)
-        queried_keys = scheduler.store_scheduler.batch_is_exist.call_args.args[0]
+        queried_keys = scheduler.store_scheduler.batch_is_readable.call_args.args[0]
         self.assertEqual(len(queried_keys), 3 * 2)
         self.assertEqual(queried_keys[:2], ["llama-7b@6830@0", "llama-7b@6830@1"])
 
@@ -953,14 +953,7 @@ class TestKVPoolSchedulerGetLayerwiseHitTokens(unittest.TestCase):
         for hash_count, hits, token_count, computed_tokens, expected in cases:
             with self.subTest(hits=hits, computed_tokens=computed_tokens):
                 scheduler = self._make_scheduler()
-                key_infos = []
-                for hit in hits:
-                    info = MagicMock()
-                    info.size.return_value = int(hit)
-                    if hit:
-                        info.gva_list.return_value = [0x1000]
-                    key_infos.append(info)
-                scheduler.store_scheduler.batch_get_key_info.return_value = key_infos
+                scheduler.store_scheduler.batch_is_readable.return_value = hits
                 request = MagicMock()
                 request.block_hashes = [b"\xaa"] * hash_count
                 result = scheduler._get_layerwise_hit_tokens(request, token_count, computed_tokens)
@@ -1118,31 +1111,24 @@ class TestKVPoolSchedulerLayerwiseReachableLookup(unittest.TestCase):
         scheduler.kv_cache_group_ids = [0, 1]
         return scheduler
 
-    @staticmethod
-    def _key_info(hit: bool):
-        info = MagicMock()
-        info.size.return_value = 64 if hit else 0
-        info.gva_list.return_value = [0x1000] if hit else []
-        return info
-
     def _stub_pool(self, scheduler, num_blocks: int, pool_layout: dict[int, list[int]]):
-        """Mock batch_get_key_info so a block exists iff it is in pool_layout.
+        """Mock readability so a block exists iff it is in pool_layout.
 
         Layerwise hit-check keys use the multi-group format model@group@hash@rank,
         so the stub decodes the group and block index from each key.
         """
         hash_hex_by_idx = {f"{idx:02x}" * 32: idx for idx in range(num_blocks)}
 
-        def get_key_info(keys):
-            infos = []
+        def is_readable(keys):
+            states = []
             for key in keys:
                 parts = key.split("@")
                 group_id = int(parts[1])
                 block_idx = hash_hex_by_idx[parts[2]]
-                infos.append(self._key_info(block_idx in pool_layout.get(group_id, [])))
-            return infos
+                states.append(block_idx in pool_layout.get(group_id, []))
+            return states
 
-        scheduler.store_scheduler.batch_get_key_info.side_effect = get_key_info
+        scheduler.store_scheduler.batch_is_readable.side_effect = is_readable
 
     @staticmethod
     def _request(num_blocks: int):
@@ -1161,7 +1147,7 @@ class TestKVPoolSchedulerLayerwiseReachableLookup(unittest.TestCase):
         hit = scheduler._get_layerwise_hit_tokens(self._request(4), 64, 0)
 
         self.assertEqual(hit, 64)
-        queried_keys = scheduler.store_scheduler.batch_get_key_info.call_args_list
+        queried_keys = scheduler.store_scheduler.batch_is_readable.call_args_list
         # Only the 4 FA keys + 2 sparsely-stored SWA keys are queried.
         self.assertEqual(sum(len(call.args[0]) for call in queried_keys), 6)
 
@@ -1187,12 +1173,7 @@ class TestKVPoolSchedulerLayerwiseReachableLookup(unittest.TestCase):
     def test_without_coordinator_falls_back_to_contiguous(self):
         scheduler = self._make_scheduler()
         scheduler.cache_coordinator = None
-        infos = [self._key_info(True), self._key_info(False)]
-
-        def get_key_info(keys):
-            return infos[: len(keys)]
-
-        scheduler.store_scheduler.batch_get_key_info.side_effect = get_key_info
+        scheduler.store_scheduler.batch_is_readable.side_effect = lambda keys: [True, False][: len(keys)]
 
         hit = scheduler._get_layerwise_hit_tokens(self._request(2), 32, 0)
 
