@@ -1734,7 +1734,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         if full_gather_wo_a_enabled:
             self._switch_o_proj_to_full_weight()
         try:
-            projected_output = self._forward_o_proj(o_proj_input, full_gather_wo_a_enabled)
+            projected_output = self._forward_o_proj(o_proj_input, full_gather_wo_a_enabled=full_gather_wo_a_enabled)
             if need_gather_q_kv and not full_gather_wo_a_enabled:
                 projected_output = sp_reduce_scatter(projected_output)
             output[...] = projected_output
@@ -1746,7 +1746,9 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
 
         return output
 
-    def _forward_o_proj(self, o_proj_input, full_gather_wo_a_enabled=False):
+    def _forward_o_proj(
+        self, o_proj_input: torch.Tensor, output: torch.Tensor | None = None, *, full_gather_wo_a_enabled: bool = False
+    ) -> torch.Tensor:
         """Project with the active weights; the caller owns their lifetime."""
         num_tokens = o_proj_input.shape[0]
         o_proj_groups = self.n_group if full_gather_wo_a_enabled else self.n_local_groups
@@ -1785,7 +1787,11 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
                 batch_split_factor=1,
             )
             o_proj_input = o_proj_input.reshape(num_tokens, -1)
-        return self._apply_wo_b(o_proj_input, full_gather_wo_a_enabled)
+        projected_output = self._apply_wo_b(o_proj_input, full_gather_wo_a_enabled)
+        if output is None:
+            return projected_output
+        output[...] = projected_output
+        return output
 
     def _forward(
         self,
