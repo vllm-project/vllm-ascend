@@ -98,6 +98,15 @@ class TestAscendStoreConnector(unittest.TestCase):
         connector.build_connector_meta(output)
         self.assertFalse(hasattr(output, "has_sync_kv_loads"))
 
+    def test_layerwise_completion_poll_does_not_prime_loads(self):
+        connector = AscendStoreConnector.__new__(AscendStoreConnector)
+        connector.use_layerwise = True
+        connector.connector_worker = MagicMock()
+        connector._get_connector_metadata = MagicMock()
+        connector.start_load_kv(types.SimpleNamespace(attn_metadata=None))
+        connector.connector_worker.start_load_kv.assert_not_called()
+        self.assertFalse(connector._current_step_has_real_forward)
+
     def test_pp_handshake_metadata_is_ignored(self):
         connector = AscendStoreConnector.__new__(AscendStoreConnector)
         metadata = {

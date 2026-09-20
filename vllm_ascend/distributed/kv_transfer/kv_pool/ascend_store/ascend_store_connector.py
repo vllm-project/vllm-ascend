@@ -263,6 +263,11 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self._mamba_copy_bufs = None
         metadata = self._get_connector_metadata()
         self._current_step_has_real_forward = forward_context is not None
+        if self.use_layerwise and (forward_context is None or forward_context.attn_metadata is None):
+            # A no-forward completion poll has no layer hooks to consume loads
+            # or release reused buffers. Do not prime another prefetch cycle.
+            self._current_step_has_real_forward = False
+            return
         logger.debug(
             "KV pool connector start_load_kv metadata_requests=%d specs=%s",
             len(metadata.requests),
