@@ -167,8 +167,8 @@ RUN if [ -n "$GIT_PROXY" ] || [ -n "$CRATES_IO_INDEX" ]; then \
     fi
 RUN cd /vllm-workspace/vllm && \
     export PROTOC_INCLUDE=/usr/include && \
-    export RUSTUP_DIST_SERVER="${RUSTUP_DIST_SERVER}" && \
-    export RUSTUP_UPDATE_ROOT="${RUSTUP_UPDATE_ROOT}" && \
+    if [ -n "${RUSTUP_DIST_SERVER}" ]; then export RUSTUP_DIST_SERVER="${RUSTUP_DIST_SERVER}"; fi && \
+    if [ -n "${RUSTUP_UPDATE_ROOT}" ]; then export RUSTUP_UPDATE_ROOT="${RUSTUP_UPDATE_ROOT}"; fi && \
     python3 -m pip install setuptools-rust && \
     ./build_rust.sh
 
@@ -185,23 +185,12 @@ RUN if [ "$BUILD_TYPE" = "daily" ]; then \
         echo "Building release version without daily packages"; \
     fi && rm -f /tmp/install_daily_deps.sh
 
-# This layer only matters for INTERNAL CI builds. Our CI passes --build-arg with
-# cluster-internal mirrors (PIP_INDEX_URL, YUM_MIRROR, GIT_PROXY, CRATES_IO_INDEX)
-# to accelerate package downloads; those mirrors are unreachable from the published
-# image, so we restore the public defaults here.
-# If you build with the default build-args (all public / empty), every branch below
-# is skipped and no extra operations run - you can ignore this layer entirely:
-#   - pip: reset to PUBLIC_PIP_INDEX_URL only when PIP_INDEX_URL was overridden.
-#   - cargo/git: clean up only what internal builds configured.
-RUN if [ "$PIP_INDEX_URL" != "$PUBLIC_PIP_INDEX_URL" ]; then \
-        pip config set global.index-url ${PUBLIC_PIP_INDEX_URL} && \
-        { pip config unset global.trusted-host 2>/dev/null || true; }; \
-    fi && \
-    if [ -n "$GIT_PROXY" ] || [ -n "$CRATES_IO_INDEX" ]; then \
-        rm -f "$HOME/.cargo/config.toml" && \
-        for key in $(git config --global --name-only --get-regexp '^url\..*\.insteadof$' 2>/dev/null); do \
-            git config --global --unset-all "$key"; \
-        done; \
-    fi
+# Restore public package sources in the final image.
+# Only builds that used internal mirrors (CI) need this: their build-args
+# (PIP_INDEX_URL, GIT_PROXY, CRATES_IO_INDEX) point to cluster-internal hosts
+# that are unreachable from the published image. This step resets pip/cargo/git
+# to public defaults; with the default build-args everything is skipped.
+# The script ships with the repo and is already copied in by `COPY .` above.
+RUN bash /vllm-workspace/vllm-ascend/.github/workflows/scripts/restore_public_sources.sh
 
 CMD ["/bin/bash"]
