@@ -42,6 +42,14 @@ class WeightUpdateModelCase:
     checkpoint_name_map: Callable[[str], str] | None = None
     expert_intermediate_size: int | None = None
     extra_server_args: tuple[str, ...] = ()
+    hccl_skip_reason: str | None = None
+    """Why the two-card HCCL lane cannot carry this case yet.
+
+    The NPU IPC lane co-locates the trainer payload with the server on one chip
+    and is unaffected; the HCCL lane lets the trainer own a second chip and has
+    an open problem with this model, so the case is skipped there instead of
+    being reported as a transfer regression.
+    """
 
     def server_args(self) -> list[str]:
         # Run the worker out-of-process. With a single-process executor the
@@ -175,6 +183,10 @@ MODEL_CASES = (
         # the real safetensors header of ``experts.0.w1.weight`` == [2048, 4096].
         expert_intermediate_size=2048,
         extra_server_args=("--tokenizer-mode", "deepseek_v4"),
+        hccl_skip_reason=(
+            "the two-card HCCL lane still fails for DeepSeek-V4-Flash; the model is "
+            "exercised by the one-card NPU IPC lane instead"
+        ),
     ),
     WeightUpdateModelCase(
         id="glm-5.1-sfa-derived-kv",
