@@ -319,21 +319,23 @@ class TestNPUWorker(TestBase):
                 "linear_attn": mamba_spec,
             }
         )
-        worker.model_runner = SimpleNamespace(
-            supports_page_strided_shared_kv_backing=True,
-            supports_standardized_shared_kv_backing=True,
-            use_sparse=False,
-            use_compress=True,
-        )
+        for use_sparse in (False, True):
+            with self.subTest(use_sparse=use_sparse):
+                worker.model_runner = SimpleNamespace(
+                    supports_page_strided_shared_kv_backing=True,
+                    supports_standardized_shared_kv_backing=True,
+                    use_sparse=use_sparse,
+                    use_compress=True,
+                )
 
-        with patch(
-            "vllm_ascend.worker.worker.get_kv_cache_groups",
-            return_value=groups,
-        ):
-            self.assertEqual(
-                worker._scale_kv_cache_memory_for_multi_group(12345),
-                12345,
-            )
+                with patch(
+                    "vllm_ascend.worker.worker.get_kv_cache_groups",
+                    return_value=groups,
+                ):
+                    self.assertEqual(
+                        worker._scale_kv_cache_memory_for_multi_group(12345),
+                        12345,
+                    )
 
     @unittest.skipIf(
         vllm_version_is("0.28.0"),

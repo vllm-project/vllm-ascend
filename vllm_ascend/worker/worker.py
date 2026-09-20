@@ -713,7 +713,6 @@ class NPUWorker(WorkerBase):
                 "supports_page_strided_shared_kv_backing",
                 False,
             )
-            and not getattr(model_runner, "use_sparse", False)
         ):
             # Main's block-outermost descriptors all address one physical
             # page-strided backing. In particular, Qwen4Exp's compressed QSA
