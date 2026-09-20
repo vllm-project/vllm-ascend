@@ -80,8 +80,10 @@ estimated_times:
   tests/e2e/pull_request/two_card/lora/test_llama32_lora_tp2.py: 430
   tests/e2e/pull_request/two_card/lora/test_qwen3moe_lora.py: 450
   tests/e2e/pull_request/two_card/lora/test_qwen35_densemodel_lora_tp.py: 450
+  tests/e2e/pull_request/two_card/lora/test_qwen35_4b_multi_lora_mtp_aclgraph.py: 600
   tests/e2e/pull_request/two_card/model_runner_v2/test_data_parallel.py: 530
   # Initial estimate for two models with fixed goldens on MRV2.
+  tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_5_eagle3.py: 600
   tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_mtp.py: 600
   tests/e2e/pull_request/two_card/model_runner_v2/test_spec_decode_data_parallel.py: 370
   tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py: 690
@@ -110,6 +112,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/context_parallel/test_deepseek_v4.py: 520
   tests/e2e/pull_request/four_card/context_parallel/test_prefix_caching_cp.py: 210
   tests/e2e/pull_request/four_card/model_runner_v2/test_deepseek_v4.py: 520
+  tests/e2e/pull_request/four_card/model_runner_v2/test_qwen35_pp_mtp.py: 300
   tests/e2e/pull_request/four_card/model_runner_v2/test_spec_decode_data_parallel.py: 600
   tests/e2e/pull_request/four_card/rlhf/consistency/test_batch_invariant_tp4.py: 210
   tests/e2e/pull_request/four_card/spec_decode/test_mtp_qwen3_next.py: 730
@@ -123,7 +126,6 @@ estimated_times:
   tests/e2e/pull_request/four_card/test_pipeline_parallel.py: 690
   tests/e2e/pull_request/four_card/test_profiling_chunk_performance.py: 190
   tests/e2e/pull_request/four_card/test_qwen3_5.py: 670
-  tests/e2e/pull_request/four_card/lora/test_qwen35_27b_multi_lora_mtp_eager.py: 1200
   tests/e2e/pull_request/four_card/test_qwen3_next.py: 1160
   tests/e2e/pull_request/four_card/test_graph_mode.py: 480
   tests/e2e/pull_request/four_card/test_qwen3_mrv2_eplb.py: 410

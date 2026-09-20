@@ -10,7 +10,7 @@ This tutorial uses the vLLM-Ascend `v0.11.0rc3-a3` version for demonstration, sh
 
 !!! note
 
-    For **Atlas inference products**, Qwen3-VL Dense requires vLLM-Ascend `v0.18.0` or later(for Ascend950DT, the model is supported from `vllm-ascend:v0.23.0rc1`). Do not use the demonstration version above on this hardware.
+    For **Atlas inference products**, Qwen3-VL Dense requires vLLM-Ascend `v0.18.0` or later(for 950DT Products, the model is supported from `vllm-ascend:v0.23.0rc1`). Do not use the demonstration version above on this hardware.
 
 ## 2 Supported Features
 
@@ -25,9 +25,9 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 |  Weight Version                                 | Hardware Requirements                                                                     | Download Links |
 |-------------------------------------------------|-------------------------------------------------------------------------------------------|----------------|
 | `Qwen3-VL-8B-Instruct`                          | 1 card on Atlas 800I A2 (64GB × 8), Atlas 800 A3 (64GB × 16), or Atlas 300I DUO           | [ModelScope](https://modelscope.cn/models/Qwen/Qwen3-VL-8B-Instruct) |
-| `Qwen3-VL-8B-Instruct-w8a8`(Quantized version)  | 1 card on Ascend950DT series (96GB × 8) node                                              | [ModelScope](https://modelscope.cn/models/Eco-Tech/Qwen3-VL-8B-Instruct-w8a8-mxfp8) |
+| `Qwen3-VL-8B-Instruct-w8a8`(Quantized version)  | 1 card on 950DT Products (96GB × 8) node                                              | [ModelScope](https://modelscope.cn/models/Eco-Tech/Qwen3-VL-8B-Instruct-w8a8-mxfp8) |
 | `Qwen3-VL-32B-Instruct`                         | 2 cards on Atlas 800I A2 (64GB × 8), Atlas 800 A3 (64GB × 16), or Atlas inference products| [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-VL-32B-Instruct) |
-| `Qwen3-VL-32B-Instruct-w8a8`(Quantized version) | 1 card on Ascend950DT series (96GB × 8) node                                              | [ModelScope](https://modelscope.cn/models/Eco-Tech/Qwen3-VL-32B-Instruct-w8a8-mxfp8) |
+| `Qwen3-VL-32B-Instruct-w8a8`(Quantized version) | 1 card on 950DT Products (96GB × 8) node                                              | [ModelScope](https://modelscope.cn/models/Eco-Tech/Qwen3-VL-32B-Instruct-w8a8-mxfp8) |
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
@@ -39,12 +39,12 @@ It is recommended to download the model weight to the shared directory of multip
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
-=== "Ascend950DT series"
+=== "950DT Products"
 
     Start the docker image on your each node.
 
     ```shell
-    export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-#TODO
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
     export NAME=vllm-ascend
 
     docker run --rm \
@@ -198,7 +198,7 @@ For more details, please refer to the [Installation Guide](../../getting_started
 
 Run docker container to start the vLLM server on single-NPU:
 
-=== "Ascend950DT series"
+=== "950DT Products"
 
     ```bash
     export HCCL_OP_EXPANSION_MODE="AIV"
@@ -387,7 +387,7 @@ The accuracy of some models is already within our CI monitoring scope, including
 
 ## 8 Performance Evaluation
 
-### Using vLLM Benchmark
+### 8.1 Using vLLM Benchmark
 
 Refer to [vLLM Benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 

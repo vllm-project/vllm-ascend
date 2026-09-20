@@ -692,17 +692,20 @@ class AscendConfig:
         # enable_fused_mc2 enum + MiniMax mutex + multistream auto-disable
         assert self.enable_fused_mc2 in (0, 1), f"enable_fused_mc2 must be 0 or 1, got {self.enable_fused_mc2}"
         model_architectures = getattr(vc.model_config, "architectures", None) or []
-        assert not (
-            self.enable_fused_mc2 == 1
-            and any(architecture.startswith("MiniMaxM3") for architecture in model_architectures)
-        ), "MiniMax M3 does not support enable_fused_mc2=1. Please set additional_config.enable_fused_mc2 to 0."
+        is_minimax_m3 = any(architecture.startswith("MiniMaxM3") for architecture in model_architectures)
+        # dispatch_ffn_combine (enable_fused_mc2=1 after MegaMoe rollback) does not
+        # support MiniMax M3 SwiGLU-OAI. MegaMoe (enable_fused_mc2=2) is allowed.
+        assert not (self.enable_fused_mc2 == 1 and is_minimax_m3 and not is_mega_moe_supported()), (
+            "MiniMax M3 does not support enable_fused_mc2=1 (dispatch_ffn_combine). "
+            "Set additional_config.enable_fused_mc2 to 2 to enable MegaMoe, or 0 to disable fused MC2."
+        )
         if self.enable_fused_mc2 == 1 and self.multistream_overlap_shared_expert:
             self.multistream_overlap_shared_expert = False
             logger.warning_once(
                 "enable_fused_mc2 and multistream_overlap_shared_expert "
                 "cannot be enabled at the same time. Setting multistream_overlap_shared_expert to False."
             )
-        if self.enable_fused_mc2 == 1 and _MEGA_MOE_SUPPORTED and not self._is_megamoe_supported_by_config(vc):
+        if self.enable_fused_mc2 == 1 and is_mega_moe_supported() and not self._is_megamoe_supported_by_config(vc):
             self.enable_fused_mc2 = 0
             logger.warning_once(
                 "MegaMoe is not supported for this model config; additional_config.enable_fused_mc2 will be set to 0."
@@ -765,8 +768,9 @@ class AscendConfig:
         from vllm_ascend.utils import model_uses_sfa_sparse
 
         use_sparse = model_uses_sfa_sparse(vc.model_config)
-        self.enable_sparse_sfa_c8 = self.enable_sparse_sfa_c8 and use_sparse
-        self.enable_sparse_li_c8 = self.enable_sparse_li_c8 and use_sparse
+
+        self.enable_sparse_sfa_c8 = vllm_config.cache_config.cache_dtype in ["fp8", "int8"] and use_sparse
+        self.enable_sparse_li_c8 = vllm_config.attention_config.indexer_kv_dtype in ["fp8", "int8"] and use_sparse
         kv_transfer_config = vc.kv_transfer_config
         is_prefill_node = kv_transfer_config is not None and (
             getattr(kv_transfer_config, "kv_role", None) == "kv_producer"
@@ -947,16 +951,25 @@ class AscendConfig:
             )
             return False
 
+        model_architectures = getattr(vllm_config.model_config, "architectures", None) or []
+        is_minimax_m3 = any(architecture.startswith("MiniMaxM3") for architecture in model_architectures)
         moe_intermediate_size = getattr(hf_text_config, "moe_intermediate_size", None)
+        if moe_intermediate_size is None and is_minimax_m3:
+            moe_intermediate_size = getattr(hf_text_config, "intermediate_size", None)
         if moe_intermediate_size is None:
             return False
+        # MiniMax-M3 uses intermediate_size=3072 and a SwiGLU-OAI wrapper
+        # supporting the corresponding 6144-wide first projection.
+        supported_intermediate_sizes = {1024, 2048, 3072, 4096, 7168}
+        if is_minimax_m3:
+            supported_intermediate_sizes.add(6144)
         # intermediate_hidden == l1_weights.dim1 == 2 * moe_intermediate_size.
         intermediate_hidden = 2 * int(moe_intermediate_size)
-        if intermediate_hidden not in {1024, 2048, 3072, 4096, 7168}:
+        if intermediate_hidden not in supported_intermediate_sizes:
             logger.warning(
-                "mega moe operator is not supported by current a5 config, for intermediate_hidden size %s"
-                " is not in {1024, 2048, 3072, 4096, 7168}",
+                "mega moe operator is not supported by current a5 config, for intermediate_hidden size %s is not in %s",
                 intermediate_hidden,
+                sorted(supported_intermediate_sizes),
             )
             return False
 
@@ -1538,6 +1551,26 @@ def init_ascend_config(vllm_config):
             "FlashComm is deprecated; remove enable_flashcomm1 and "
             "VLLM_ASCEND_ENABLE_FLASHCOMM1 from the configuration. Use upstream configuration instead"
         )
+    # Upstream EngineArgs injects --gdn-prefill-backend / --kda-prefill-backend
+    # into additional_config. The generic GDN/KDA model layers consume them
+    # (qwen_gdn_linear_attn / kimi_gdn_linear_attn), but on non-CUDA platforms
+    # only the triton path is available: the FLA Triton kernels run on Ascend
+    # via triton-ascend (the CUDA triton package is replaced in Ascend images).
+    # CUDA-only values (flashinfer/cutedsl for GDN, flashkda for KDA) have no
+    # kernel on Ascend. Strip the keys here so extra="forbid" does not reject
+    # them as typos, and warn only when the user requested an unsupported value.
+    _TRITON_COMPATIBLE_VALUES = ("auto", "triton")
+    for _prefill_key in ("gdn_prefill_backend", "kda_prefill_backend"):
+        _prefill_value = additional_config.get(_prefill_key)
+        if _prefill_value is not None and str(_prefill_value).strip().lower() not in _TRITON_COMPATIBLE_VALUES:
+            logger.warning_once(
+                "Ascend does not support %s=%r; only the 'triton' value is "
+                "available on Ascend for GDN/KDA prefill (FLA kernels run via "
+                "triton-ascend). The option is ignored.",
+                _prefill_key,
+                _prefill_value,
+            )
+
     refresh = validate_additional_config_bool(additional_config.get("refresh", False), "additional_config.refresh")
     raw_rl_config = additional_config.get("rl_config", {})
     if isinstance(raw_rl_config, dict):
@@ -1573,6 +1606,13 @@ def init_ascend_config(vllm_config):
     _NON_USER_INPUT_KEYS = {
         # control-flow flag (singleton/cache refresh), not a configuration field
         "refresh",
+        # Upstream-injected by EngineArgs for the generic GDN/KDA prefill
+        # backend selector; Ascend supports only the triton value (FLA kernels
+        # run via triton-ascend), and the triton default applies either way
+        # (warned above when the user requested a CUDA-only value). Strip
+        # instead of letting extra="forbid" report them as typos.
+        "gdn_prefill_backend",
+        "kda_prefill_backend",
         # Removed upstream option: warn above, but do not pass it into the
         # strict AscendConfig schema where it would be reported as a typo.
         "enable_flashcomm1",

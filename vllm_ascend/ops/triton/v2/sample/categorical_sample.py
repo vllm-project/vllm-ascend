@@ -8,7 +8,6 @@ import torch
 from vllm.triton_utils import tl, triton
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
-from vllm_ascend.utils import vllm_version_is
 
 # Hierarchical sampling: prepare 8K coarse-block masses once, then sample
 # from one 1K fine block. The two granularities are tuned independently.
@@ -410,34 +409,32 @@ def _categorical_sample(
 
 
 categorical_sample: Callable[..., torch.Tensor]
-if vllm_version_is("0.28.0"):
-    # Preserve the legacy positional order; vLLM #54282 inserted is_drafting on main.
-    categorical_sample = _categorical_sample
-else:
 
-    def _categorical_sample_main(
-        logits: torch.Tensor,
-        expanded_idx_mapping: torch.Tensor,
-        temperature: torch.Tensor,
-        seed: torch.Tensor,
-        pos: torch.Tensor,
-        apply_temperature: bool,
-        is_drafting: bool,
-        logits_cache: torch.Tensor | None = None,
-        logits_cache_col: torch.Tensor | None = None,
-        use_fp64: bool = False,
-    ) -> torch.Tensor:
-        return _categorical_sample(
-            logits,
-            expanded_idx_mapping,
-            temperature,
-            seed,
-            pos,
-            apply_temperature,
-            logits_cache,
-            logits_cache_col,
-            use_fp64,
-            is_drafting=is_drafting,
-        )
 
-    categorical_sample = _categorical_sample_main
+def _categorical_sample_main(
+    logits: torch.Tensor,
+    expanded_idx_mapping: torch.Tensor,
+    temperature: torch.Tensor,
+    seed: torch.Tensor,
+    pos: torch.Tensor,
+    apply_temperature: bool,
+    is_drafting: bool,
+    logits_cache: torch.Tensor | None = None,
+    logits_cache_col: torch.Tensor | None = None,
+    use_fp64: bool = False,
+) -> torch.Tensor:
+    return _categorical_sample(
+        logits,
+        expanded_idx_mapping,
+        temperature,
+        seed,
+        pos,
+        apply_temperature,
+        logits_cache,
+        logits_cache_col,
+        use_fp64,
+        is_drafting=is_drafting,
+    )
+
+
+categorical_sample = _categorical_sample_main

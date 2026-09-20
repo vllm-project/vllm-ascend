@@ -1,3 +1,4 @@
+import enum
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -10,6 +11,7 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group, is_v1_kv_transfer_group
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils.torch_utils import get_dtype_size
+from vllm.v1.attention.backend import MLAAttentionImpl
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
@@ -21,6 +23,23 @@ from vllm_ascend.utils import (
 
 SFA_QSFA_TILE_SIZE = 128
 MLAPO_MAX_SUPPORTED_TOKENS = 1024
+
+
+class PreprocessType(enum.Enum):
+    NATIVE = "native"
+    PROLOG_V3 = "prolog_v3"
+    MLAPO = "mlapo"
+
+
+def mark_fused_preprocess_weights(impl: MLAAttentionImpl) -> None:
+    """Refresh NZ management after changing preprocessing policy, before loading weights."""
+    resolve_type = getattr(impl, "_fused_preprocess_type", None)
+    if resolve_type is None:
+        return
+    managed = resolve_type() is not None
+    for layer in (impl.fused_qkv_a_proj, impl.q_proj):
+        if layer is not None:
+            layer._fused_preprocess_managed = managed
 
 
 def get_or_register_attention_buffer(
@@ -78,37 +97,6 @@ def get_sfa_qsfa_packed_head_dim(
         )
     scale_metadata_bytes = (kv_lora_rank // tile_size) * get_dtype_size(torch.float32)
     return kv_lora_rank + qk_rope_head_dim * get_dtype_size(torch.bfloat16) + scale_metadata_bytes
-
-
-def scatter_paged_cache(
-    cache: torch.Tensor,
-    slots: torch.Tensor,
-    values: torch.Tensor,
-    block_size: int,
-) -> None:
-    """Write unique valid slots, preserving padded rows during graph replay."""
-    if cache.shape[1] != block_size:
-        raise ValueError(f"Cache block size mismatch: metadata={block_size}, tensor={cache.shape[1]}.")
-    values = values.reshape(values.shape[0], *cache.shape[2:])
-    valid = (slots >= 0) & (slots < cache.shape[0] * block_size)
-    safe_slots = torch.where(valid, slots, torch.zeros_like(slots))
-    block_ids = torch.div(safe_slots, block_size, rounding_mode="floor")
-    block_offsets = torch.remainder(safe_slots, block_size)
-    row_mask = valid.view(-1, *([1] * (values.ndim - 1)))
-
-    # Invalid rows use a fixed sentinel; restore its original value unless
-    # slot zero is itself a valid write. All operations retain static shapes.
-    old_zero = cache[0, 0].clone()
-    safe_values = torch.where(row_mask, values, old_zero.unsqueeze(0))
-    writes_zero = valid & (slots == 0)
-    zero_value = torch.where(
-        writes_zero.view(-1, *([1] * (values.ndim - 1))),
-        values,
-        torch.zeros_like(values),
-    ).sum(dim=0)
-    expected_zero = torch.where(writes_zero.any(), zero_value, old_zero)
-    cache[block_ids, block_offsets] = safe_values
-    cache[0, 0].copy_(expected_zero)
 
 
 @dataclass

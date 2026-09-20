@@ -25,6 +25,7 @@ import vllm.envs as envs_vllm
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
 from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (  # type: ignore
     AttentionBackend,
     AttentionCGSupport,
@@ -37,6 +38,7 @@ from vllm.v1.attention.backends.registry import (  # type: ignore
     AttentionBackendEnum,
     register_backend,
 )
+from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
@@ -63,12 +65,7 @@ from vllm_ascend.compilation.acl_graph import (
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
-from vllm_ascend.utils import vllm_version_is, weak_ref_tensors
-
-if vllm_version_is("0.28.0"):
-    from vllm.model_executor.layers.attention.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
-else:
-    from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
+from vllm_ascend.utils import weak_ref_tensors
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
@@ -487,7 +484,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.scale = float(scale)
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
         self.hidden_size = self.num_heads * self.head_size
-        self.kv_cache_dtype = kv_cache_dtype
         self.sliding_window = sliding_window
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32, device="npu")
@@ -504,9 +500,21 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.is_kv_producer = (
             self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
         )
+        self.kv_cache_dtype = kv_cache_dtype_str_to_dtype(
+            self.vllm_config.cache_config.cache_dtype, self.vllm_config.model_config
+        )
         self.enable_c8_quant = self.vllm_config.quant_config is not None and getattr(
             self.vllm_config.quant_config, "enable_c8_quant", False
         )
+        if self.kv_cache_dtype in [torch.float16, torch.bfloat16]:
+            self.enable_c8_quant = False
+        else:
+            if not self.enable_c8_quant:
+                raise ValueError(
+                    "The current GQA‑related models adopt static quantization. "
+                    "KV quantization is configured via `--kv‑cache‑dtype` upon service startup, "
+                    "and the corresponding quantized weights are required."
+                )
         self._use_layer_aware_fia_graph_replay = needs_layer_aware_fia_graph_replay()
         self._use_max_workspace_for_fia_graph = self._use_layer_aware_fia_graph_replay
         self.sinks = sinks

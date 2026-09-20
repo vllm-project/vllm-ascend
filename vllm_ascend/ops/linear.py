@@ -37,14 +37,12 @@ from vllm.model_executor.layers.linear import (  # noqa
     UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, WeightLayoutPolicy, get_current_hardware_profile
 from vllm_ascend.ops.linear_op import get_parallel_op, get_replicated_op
-from vllm_ascend.utils import (
-    maybe_trans_nz,
-)
+from vllm_ascend.utils import maybe_trans_nz
 from vllm_ascend.weight_switch import WeightSwitchGatherSpec, WeightSwitchMixin
 
 
@@ -112,9 +110,10 @@ class AscendUnquantizedLinearMethod(WeightSwitchMixin, UnquantizedLinearMethod):
         # must use fp32 to avoid accuracy degradation in dsv4.
         if getattr(layer, "precast_fp32_weight", False):
             weight_fp32 = layer.weight.data.to(torch.float32)
-            layer.weight_fp32 = (
-                weight_fp32 if keep_nd_weight or skip_weight_nz_conversion else maybe_trans_nz(weight_fp32)
-            )
+            new_fp32 = weight_fp32 if keep_nd_weight or skip_weight_nz_conversion else maybe_trans_nz(weight_fp32)
+            # keep the captured graph's weight reference to the updated weight
+            # during RL weight updates.
+            replace_parameter(layer, "weight_fp32", new_fp32, prefer_copy=True)
         if "conv1d" not in layer.prefix and not skip_weight_nz_conversion:
             # 310P torch_npu rejects FRACTAL_NZ matmul when the weight-side
             # matrix has n=1 or k=1. Keep scalar gates such as Qwen MoE's

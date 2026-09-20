@@ -16,7 +16,7 @@
   2. Load the per-request decision scalars, recompute the copy decision, and early-return when no copy is needed.
   3. Load the state metadata (base address, block stride, element size, inner size, conv width, group index), index the owning group's block table, and widen the src/dst block ids to int64 (block stride can exceed 2^31 bytes).
   4. Byte-level copy loop in `COPY_BLOCK_SIZE` chunks: contiguous region for SD conv / temporal states; per-dim-row copy for DS conv `dim-first` layout.
-- **Supported modes**: Atlas A2, Atlas A3, and Ascend 950. Used by the Mamba speculative-decode decode step of hybrid GDN models (e.g. Qwen3-Next); works in both eager and graph-capture modes. Two version-gated variants live in the source file: vllm 0.27.1 (2D grid, output-buffer semantics after upstream #50432) and v0.26.0 (3D grid with `TEMPORAL_TILES`, which partitions the temporal copy across extra CTAs to keep cores filled at small batch).
+- **Supported modes**: Atlas A2, Atlas A3, and 950PR&950DT Products. Used by the Mamba speculative-decode decode step of hybrid GDN models (e.g. Qwen3-Next); works in both eager and graph-capture modes. Two version-gated variants live in the source file: vllm 0.27.1 (2D grid, output-buffer semantics after upstream #50432) and v0.26.0 (3D grid with `TEMPORAL_TILES`, which partitions the temporal copy across extra CTAs to keep cores filled at small batch).
 
 ## Parameters
 

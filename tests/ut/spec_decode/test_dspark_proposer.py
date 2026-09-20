@@ -95,6 +95,7 @@ def test_build_draft_metadata_submits_only_non_cp_device_tasks(
         sliding_window=None,
         _per_group_block_table_buffers={group_id: torch.ones((1, 1), dtype=torch.int32) for group_id in range(2)},
         _per_group_query_slot_mapping_buffers={group_id: torch.zeros(1, dtype=torch.int32) for group_id in range(2)},
+        _get_primary_draft_attn_group=lambda: groups[0],
     )
     common_attn_metadata = SimpleNamespace(
         num_reqs=1,

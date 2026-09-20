@@ -770,13 +770,13 @@ curl http://<node0_ip>:<port>/v1/completions \
 
 Here are two accuracy evaluation methods.
 
-### Using AISBench
+### 7.1 Using AISBench
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
 2. After execution, you can get the result.
 
-### Using Language Model Evaluation Harness
+### 7.2 Using Language Model Evaluation Harness
 
 As an example, take the `gsm8k` dataset as a test dataset, and run accuracy evaluation of `DeepSeek-V3.2-W8A8` in online mode.
 
@@ -796,7 +796,7 @@ As an example, take the `gsm8k` dataset as a test dataset, and run accuracy eval
 
 ## 8 Performance Evaluation
 
-### Using AISBench
+### 8.1 Using AISBench
 
 Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
@@ -810,7 +810,7 @@ The performance result is:
 
 **Performance**: 533tps, TPOT 32ms
 
-### Using vLLM Benchmark
+### 8.2 Using vLLM Benchmark
 
 Run performance evaluation of `DeepSeek-V3.2-W8A8` as an example.
 

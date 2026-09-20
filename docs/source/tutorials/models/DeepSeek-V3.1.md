@@ -12,7 +12,7 @@ DeepSeek-V3.1 is a hybrid model that supports both thinking mode and non-thinkin
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
-This document is validated and written based on **vLLM-Ascend v0.9.1rc3**. The current model (DeepSeek-V3.1) is first supported in this version(for Ascend 950DT, the model is supported from **vllm-ascend:v0.23.0rc1**).
+This document is validated and written based on **vLLM-Ascend v0.9.1rc3**. The current model (DeepSeek-V3.1) is first supported in this version(for 950DT Products, the model is supported from **vllm-ascend:v0.23.0rc1**).
 
 ## 2 Supported Features
 
@@ -48,7 +48,7 @@ You can use our official docker image to run `DeepSeek-V3.1` directly.
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
-=== "Ascend 950DT series"
+=== "950DT Products"
 
     Start the docker image on your each node.
 
@@ -172,7 +172,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 Single-node deployment completes both Prefill and Decode within the same node. The quantized model `DeepSeek-V3.1-w8a8-mtp-QuaRot` can be deployed on 1 Atlas 800 A3 (64GB × 16).
 
-=== "Ascend 950DT series"
+=== "950DT Products"
 
     Startup Command:
 
@@ -475,7 +475,7 @@ This architecture is recommended for production deployments with concurrent mult
 Take Atlas 800 A3 (64GB × 16) for example, we recommend to deploy 2P1D (4 nodes) rather than 1P1D (2 nodes), because there is no enough NPU memory to serve high concurrency in 1P1D case.
 
 - `DeepSeek-V3.1-w8a8-mtp-QuaRot 2P1D Layerwise` require 4 Atlas 800 A3 (64GB × 16).
-- `DeepSeek-V3.1-w8a8c8-mtp 2P1D` require 8 Ascend 950DT (96GB × 8).
+- `DeepSeek-V3.1-w8a8c8-mtp 2P1D` require 8 950DT Products (96GB × 8).
 
 To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to deploy a `launch_online_dp.py` script and a `run_dp_template.sh` script on each node and deploy a `proxy.sh` script on prefill master node to forward requests.
 
@@ -791,7 +791,7 @@ Parameter descriptions:
             }'
         ```
 
-2. `run_dp_template.sh` script(Ascend 950DT)
+2. `run_dp_template.sh` script(950DT Products)
 
     === "Prefill Node"
 
@@ -946,7 +946,7 @@ Parameter descriptions:
         python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 16 --dp-rank-start 16 --dp-address 192.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
         ```
 
-    === "Ascend 950DT series"
+    === "950DT Products"
 
         ```shell
         # p0_0
@@ -967,7 +967,7 @@ Parameter descriptions:
         python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 8 --dp-rank-start 24 --dp-address 192.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
         ```
 
-4. Run the `proxy.sh` script on the prefill master node(The proxy.sh of the Ascend 950DT is consistent with the A3)
+4. Run the `proxy.sh` script on the prefill master node(The proxy.sh of the 950DT Products is consistent with the A3)
 
     Run a proxy server on the same node with the prefiller service instance. You can get the proxy program in the repository's examples: [load\_balance\_proxy\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
 
@@ -1096,7 +1096,7 @@ curl http://<node0_ip>:<port>/v1/completions \
 
 Here is one accuracy evaluation method.
 
-### Using AISBench
+### 7.1 Using AISBench
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
@@ -1107,13 +1107,13 @@ Here is one accuracy evaluation method.
 | ceval | - | accuracy | gen | 90.94 | 1 Atlas 800 A3 (64GB × 16) |
 | gsm8k | - | accuracy | gen | 96.28 | 1 Atlas 800 A3 (64GB × 16) |
 
-### Using Language Model Evaluation Harness
+### 7.2 Using Language Model Evaluation Harness
 
 Not test yet.
 
 ## 8 Performance Evaluation
 
-### Using AISBench
+### 8.1 Using AISBench
 
 Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
@@ -1127,7 +1127,7 @@ The performance result is:
 
 **Performance**: TTFT = 6.16s, TPOT = 48.82ms, Average performance of each card is 478 TPS (Token Per Second).
 
-### Using vLLM Benchmark
+### 8.2 Using vLLM Benchmark
 
 Run performance evaluation of `DeepSeek-V3.1-w8a8-mtp-QuaRot` as an example.
 
@@ -1159,12 +1159,12 @@ After several minutes, you can get the performance evaluation result.
 
 |Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|
 |--------|---------------|-----------|--------------|------------------|
-|High Throughput<br>(3.5k/16k input)|Single-Node Mixed|16 (A3)|DeepSeek-V3.1-w4a8-perchannle|Use dp4 tp4 to balance memory capacity and compute efficiency|
-|Low Latency<br>(3.5k/16k input)|Single-Node Mixed|16 (A3)|DeepSeek-V3.1-w4a8-perchannle|Use dp2 tp8 to balance memory capacity and compute efficiency|
-|High Throughput / Low Latency<br>(64k input)|Single-Node Mixed|16 (A3)|DeepSeek-V3.1-w4a8-perchannle|Use dp2 tp8 to balance memory capacity and compute efficiency|
-|High Throughput / Low Latency<br>(3.5k input)|2P1D deployment|64 (A3)|DeepSeek-V3.1-w4a8-perchannle|Use dp2 tp8 to balance memory capacity and compute efficiency|
-|High Throughput / Low Latency<br>(16k input)|2P1D deployment|64 (A3)|DeepSeek-V3.1-w4a8-perchannle|Use dp2 tp8 to balance memory capacity and compute efficiency|
-|Long Context<br>(64k input, no prefix cache)|2P1D deployment|64 (A3)|DeepSeek-V3.1-w4a8-perchannle|Use dp1 tp8 to balance memory capacity and compute efficiency|
+|High Throughput<br>(3.5k/16k input)|Single-Node Mixed|16 (A3)|DeepSeek-V3.1-w4a8-perchannel|Use dp4 tp4 to balance memory capacity and compute efficiency|
+|Low Latency<br>(3.5k/16k input)|Single-Node Mixed|16 (A3)|DeepSeek-V3.1-w4a8-perchannel|Use dp2 tp8 to balance memory capacity and compute efficiency|
+|High Throughput / Low Latency<br>(64k input)|Single-Node Mixed|16 (A3)|DeepSeek-V3.1-w4a8-perchannel|Use dp2 tp8 to balance memory capacity and compute efficiency|
+|High Throughput / Low Latency<br>(3.5k input)|2P1D deployment|64 (A3)|DeepSeek-V3.1-w4a8-perchannel|Use dp2 tp8 to balance memory capacity and compute efficiency|
+|High Throughput / Low Latency<br>(16k input)|2P1D deployment|64 (A3)|DeepSeek-V3.1-w4a8-perchannel|Use dp2 tp8 to balance memory capacity and compute efficiency|
+|Long Context<br>(64k input, no prefix cache)|2P1D deployment|64 (A3)|DeepSeek-V3.1-w4a8-perchannel|Use dp1 tp8 to balance memory capacity and compute efficiency|
 
 #### Table 2: Detailed Node Configuration(A3)
 
@@ -1182,18 +1182,18 @@ After several minutes, you can get the performance evaluation result.
 |Long Context (64k)|Server-P Node|16|16|1|132k|3|
 |Long Context (64k)|Server-D Node|16|4|8|132k|3|
 
-#### Table 3: Scenario Overview(Ascend 950DT)
+#### Table 3: Scenario Overview(950DT Products)
 
-> `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 node = 1 Atlas Ascend 950DT server (96GB × 8 NPUs).
+> `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 node = 1 950DT Products server (96GB × 8 NPUs).
 
 |Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|
 |--------|---------------|-----------|--------------|------------------|
-|High Throughput<br>(3.5k/16k input)|Single-Node Mixed|8 (Ascend 950DT)|DeepseekV3.1-w8a8c8_attn|Use dp1 tp8 to balance memory capacity and compute efficiency|
-|Low Latency<br>(3.5k/16k input)|Single-Node Mixed|8 (Ascend 950DT)|DeepseekV3.1-w8a8c8_attn|Use dp1 tp8 to balance memory capacity and compute efficiency|
-|High Throughput / Low Latency<br>(64k input)|Single-Node Mixed|8 (Ascend 950DT)|DeepseekV3.1-w8a8c8_attn|Use dp1 tp8 to balance memory capacity and compute efficiency|
-|High Throughput / Low Latency<br>(3.5k input)|2P1D deployment|64 (Ascend 950DT)|DeepseekV3.1-w8a8c8_attn|Use dp4 tp4 to balance memory capacity and compute efficiency|
-|High Throughput / Low Latency<br>(16k input)|2P1D deployment|64 (Ascend 950DT)|DeepseekV3.1-w8a8c8_attn|Use dp4 tp4 to balance memory capacity and compute efficiency|
-|Long Context<br>(64k input, no prefix cache)|2P1D deployment|64 (Ascend 950DT)|DeepseekV3.1-w8a8c8_attn|Use dp4 tp4 to balance memory capacity and compute efficiency|
+|High Throughput<br>(3.5k/16k input)|Single-Node Mixed|8 (950DT Products)|DeepseekV3.1-w8a8c8_attn|Use dp1 tp8 to balance memory capacity and compute efficiency|
+|Low Latency<br>(3.5k/16k input)|Single-Node Mixed|8 (950DT Products)|DeepseekV3.1-w8a8c8_attn|Use dp1 tp8 to balance memory capacity and compute efficiency|
+|High Throughput / Low Latency<br>(64k input)|Single-Node Mixed|8 (950DT Products)|DeepseekV3.1-w8a8c8_attn|Use dp1 tp8 to balance memory capacity and compute efficiency|
+|High Throughput / Low Latency<br>(3.5k input)|2P1D deployment|64 (950DT Products)|DeepseekV3.1-w8a8c8_attn|Use dp4 tp4 to balance memory capacity and compute efficiency|
+|High Throughput / Low Latency<br>(16k input)|2P1D deployment|64 (950DT Products)|DeepseekV3.1-w8a8c8_attn|Use dp4 tp4 to balance memory capacity and compute efficiency|
+|Long Context<br>(64k input, no prefix cache)|2P1D deployment|64 (950DT Products)|DeepseekV3.1-w8a8c8_attn|Use dp4 tp4 to balance memory capacity and compute efficiency|
 
 #### Table 4: Detailed Node Configuration(Ascend 950DT)
 

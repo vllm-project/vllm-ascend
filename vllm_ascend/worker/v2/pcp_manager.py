@@ -237,6 +237,23 @@ class AscendPCPManager(PCPManager):
             and global_batch.num_draft_tokens == 0
         )
 
+    def get_num_tokens_for_dispatch(self, num_scheduled_tokens: np.ndarray, is_prefilling: np.ndarray) -> int:
+        if not vllm_version_is("0.28.0"):
+            return super().get_num_tokens_for_dispatch(num_scheduled_tokens, is_prefilling)
+        # Reuse the actual partition rules: decode is replicated, while each
+        # prefill contributes two chunks. Computed positions only reorder rows.
+        query_start_loc = np.concatenate(([0], np.cumsum(num_scheduled_tokens)))
+        num_computed_tokens = np.zeros_like(num_scheduled_tokens)
+        return max(
+            sum(
+                segment.num_tokens
+                for segment in self._get_rank_segments(
+                    rank, num_scheduled_tokens, num_computed_tokens, is_prefilling, query_start_loc
+                )
+            )
+            for rank in range(self.pcp_world_size)
+        )
+
     def partition_batch(
         self,
         input_batch: AscendInputBatch,
@@ -246,9 +263,6 @@ class AscendPCPManager(PCPManager):
         global_batch = input_batch
         if global_batch.num_draft_tokens > 0:
             local_batch = self._partition_speculative_batch_compat(global_batch)
-        elif vllm_version_is("0.28.0"):
-            # vLLM #53515 added padded_num_tokens on main only.
-            local_batch = super().partition_batch(global_batch)
         else:
             local_batch = super().partition_batch(
                 global_batch,

@@ -20,7 +20,6 @@
 from __future__ import annotations
 
 import functools
-import importlib.util
 import json
 import math
 import os
@@ -264,6 +263,12 @@ def device_print(
         )
 
 
+# Minimum number of dimensions a matmul weight needs for both k and n dims to exist.
+MIN_MATMUL_WEIGHT_NDIMS = 2
+# Size of a singleton dimension (k=1 or n=1), unsupported by aclnnMatmulWeightNZ.
+SINGLETON_DIM_SIZE = 1
+
+
 def _should_trans_nz(weight: torch.Tensor) -> bool:
     # FP32 cannot use NZ.
     if weight.dtype == torch.float32:
@@ -271,6 +276,14 @@ def _should_trans_nz(weight: torch.Tensor) -> bool:
 
     # meta tensor only keeps shape/dtype meta info without physical memory, it is not necessary to trans it to NZ
     if weight.is_meta:
+        return False
+
+    # aclnnMatmulWeightNZ does not support matrices whose reduction/output
+    # dimension is one (k=1 or n=1). Keep these weights in ND format so the
+    # subsequent linear/matmul dispatch does not select the NZ-only path.
+    if weight.ndim >= MIN_MATMUL_WEIGHT_NDIMS and (
+        weight.shape[-1] == SINGLETON_DIM_SIZE or weight.shape[-2] == SINGLETON_DIM_SIZE
+    ):
         return False
 
     # Some hardware profiles require NZ weight layout.
@@ -626,26 +639,6 @@ def setup_ascend_local_comm_res(local_rank: int, kv_transfer_config: Any | None)
     os.environ["ASCEND_LOCAL_COMM_RES"] = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
 
 
-@torch._dynamo.disable
-def _vllm_empty_device_matches_release(target_vllm_version: str) -> bool:
-    """Map untagged empty-device installs onto the matching release lane.
-
-    cpu-ut checks out vLLM by SHA with ``--no-tags`` and builds
-    ``VLLM_TARGET_DEVICE=empty``, so setuptools-scm reports
-    ``0.1.dev1+gSHA.empty`` instead of the tagged ``0.28.0``. Distinguish
-    v0.28.0 from main by where PCP lives: model_executor on 0.28.0, v1 ops
-    after the move on main.
-
-    Disabled under Dynamo: ``importlib.util.find_spec`` is marked skipped and
-    must not be traced when version gates run during torch.compile.
-    """
-    if target_vllm_version != "0.28.0":
-        return False
-    has_legacy_pcp = importlib.util.find_spec("vllm.model_executor.layers.attention.pcp") is not None
-    has_main_pcp = importlib.util.find_spec("vllm.v1.attention.ops.pcp") is not None
-    return has_legacy_pcp and not has_main_pcp
-
-
 @functools.cache
 @torch._dynamo.disable
 def vllm_version_is(target_vllm_version: str):
@@ -656,16 +649,11 @@ def vllm_version_is(target_vllm_version: str):
 
         vllm_version = vllm.__version__
     try:
-        # Strip any PEP 440 local version segment (e.g. "0.28.0+empty" built
+        # Strip any PEP 440 local version segment (e.g. "0.29.0+empty" built
         # with VLLM_TARGET_DEVICE=empty): it is a build artifact and must not
         # change the version identity for `vllm_version_is` comparisons.
-        vllm_version = vllm_version.split("+")[0]
         parsed = Version(vllm_version)
-        if parsed == Version(target_vllm_version):
-            return True
-        if parsed.release[:2] == (0, 1) and parsed.dev is not None:
-            return _vllm_empty_device_matches_release(target_vllm_version)
-        return False
+        return Version(parsed.public) == Version(target_vllm_version)
     except InvalidVersion:
         raise ValueError(
             f"Invalid vllm version {vllm_version} found. A dev version of vllm "
@@ -681,8 +669,6 @@ def get_kv_cache_tensor_layers(kv_cache_tensor) -> list[str]:
     vLLM #51718 renamed the `shared_by` field to `layers` and introduced a
     required `layer_stride` on vLLM main. Gate by release vs main lane.
     """
-    if vllm_version_is("0.28.0"):
-        return kv_cache_tensor.shared_by
     return kv_cache_tensor.layers
 
 
@@ -828,7 +814,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "RoutedExperts": AscendRoutedExperts,
         "GateLinear": AscendGateLinear,
     }
-    if not vllm_version_is("0.28.0"):
+    if not vllm_version_is("0.29.0"):
         from vllm_ascend.ops.kimi_mla import AscendKimiK3MultiHeadLatentAttention
 
         REGISTERED_ASCEND_OPS["KimiK3MultiHeadLatentAttentionWrapper"] = AscendKimiK3MultiHeadLatentAttention
@@ -1334,6 +1320,23 @@ def dispose_layer(layer: Any):
             dispose_tensor(attr_value)
 
 
+def is_rl_weight_update_enabled(vllm_config: VllmConfig) -> bool:
+    """Whether this deployment takes part in an RL weight update loop.
+
+    RL rollout workers receive weights through vLLM's layerwise reload, which
+    writes every checkpoint parameter back into the storage that exists when
+    the transaction starts. A parameter whose storage was released therefore
+    has no valid reload destination, so whoever would release it must keep it
+    while this returns ``True``.
+
+    Two switches mark such a deployment: the Ascend RL defaults
+    (``additional_config.rl_config.enabled``) and the upstream weight transfer
+    service (``--weight-transfer-config``), which is how a rollout worker
+    declares that a trainer may update its weights in place.
+    """
+    return get_ascend_config().rl_config.enabled or vllm_config.weight_transfer_config is not None
+
+
 def check_kv_extra_config(vllm_config):
     def _check(name: str, config: dict):
         tp_key = "tp_size"
@@ -1698,10 +1701,10 @@ def get_rotation_path(vllm_config: VllmConfig) -> Path | None:
     if quant_config is None:
         return None
     target_model_path = vllm_config.model_config.model
+    quant_description = getattr(quant_config, "quant_description", None) or {}
     try:
-        quant_description = quant_config.quant_description
         rotation_relative_path = quant_description["optional"]["quarot"]["rotation_map"]["global_rotation"]
-    except KeyError:
+    except (KeyError, TypeError):
         return None
     return Path(target_model_path) / rotation_relative_path
 

@@ -16,6 +16,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+from contextvars import copy_context
 from dataclasses import replace
 from inspect import signature
 from types import SimpleNamespace
@@ -25,11 +26,13 @@ import numpy as np
 import pytest
 import torch
 from vllm.config import CUDAGraphMode
+from vllm.forward_context import DPMetadata
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.worker.v2 import model_runner as ascend_model_runner
 from vllm_ascend.worker.v2 import states as states_module
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager, _prepare_pcp_inputs_to_capture
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
@@ -139,8 +142,7 @@ def test_pcp_manager_uses_persistent_ascend_input_buffers():
     assert manager._input_buffers.max_num_reqs == 6
     assert manager._input_buffers.seq_lens_np.shape == (6,)
     assert manager._input_buffers.query_start_loc.shape == (7,)
-    if not vllm_version_is("0.28.0"):
-        assert manager.input_buffers is manager._input_buffers
+    assert manager.input_buffers is manager._input_buffers
 
 
 def _make_local_pcp_batch():
@@ -258,10 +260,7 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
             return_value=local_attn_state,
         ) as build_attn_state,
     ):
-        if vllm_version_is("0.28.0"):
-            result = manager.partition_batch(global_batch)
-        else:
-            result = manager.partition_batch(global_batch, padded_num_tokens=12)
+        result = manager.partition_batch(global_batch, padded_num_tokens=12)
 
     assert isinstance(result, AscendInputBatch)
     assert result is not global_batch
@@ -276,8 +275,19 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
     np.testing.assert_array_equal(result.num_scheduled_tokens, np.array([3, 5], dtype=np.int32))
     np.testing.assert_array_equal(result.query_start_loc_np, np.array([0, 3, 8], dtype=np.int32))
     assert result.num_tokens == 8
-    expected_num_tokens_after_padding = 10 if vllm_version_is("0.28.0") else 12
+    expected_num_tokens_after_padding = 12
     assert result.num_tokens_after_padding == expected_num_tokens_after_padding
+    if vllm_version_is("0.28.0"):
+        dispatched = manager.get_num_tokens_for_dispatch(
+            global_batch.num_scheduled_tokens, global_batch.is_prefilling_np
+        )
+        # Exercise the real invariant against the real upstream partition, not
+        # just a mocked dispatch call. Global 18 becomes PCP-local padded 10.
+        DPMetadata.make(
+            SimpleNamespace(data_parallel_size=2, data_parallel_rank=0, is_moe_model=True),
+            result.num_tokens_after_padding,
+            torch.tensor([dispatched, 0]),
+        )
     assert torch.equal(result.input_ids[:8], torch.tensor([15, 16, 17, 0, 1, 2, 3, 4], dtype=torch.int32))
 
     # dataclasses.replace() retains the global Ascend-only fields by default;
@@ -311,7 +321,6 @@ def test_full_decode_request_layout_is_token_sized_only_without_drafts():
     assert manager._full_decode_requests_are_token_sized(decode_batch) is False
 
 
-@pytest.mark.skipif(vllm_version_is("0.28.0"), reason="padded_num_tokens is a vLLM main PCP contract")
 def test_partition_batch_pads_decode_requests_when_tokens_are_already_padded():
     """Keep request metadata aligned when upstream already pads tokens."""
     input_buffers = AscendInputBuffers(
@@ -412,7 +421,6 @@ def test_partition_batch_pads_decode_requests_when_tokens_are_already_padded():
     np.testing.assert_array_equal(args[1], np.array([11, 21, 31], dtype=np.int32))
 
 
-@pytest.mark.skipif(vllm_version_is("0.28.0"), reason="padded_num_tokens is a vLLM main PCP contract")
 def test_partition_batch_keeps_piecewise_request_extent():
     """Token padding in PIECEWISE mode must not create dummy requests."""
     batch = _make_local_pcp_batch()
@@ -851,10 +859,6 @@ def test_main_pcp_capture_does_not_repartition_local_dummy_batch() -> None:
 
     with (
         patch(
-            "vllm_ascend.worker.v2.aclgraph_utils.vllm_version_is",
-            return_value=False,
-        ),
-        patch(
             "vllm_ascend.worker.v2.aclgraph_utils.cudagraph_utils.InputBatch.make_dummy",
             return_value=input_batch,
         ) as make_dummy,
@@ -932,8 +936,8 @@ def test_sample_tokens_uses_global_batch_only_on_non_last_pp_rank(
     runner.use_spec_pp = False
     # vLLM main added these ExecuteModelState fields; v0.28.0 lacks them.
     state_kwargs: dict = {}
-    if not vllm_version_is("0.28.0"):
-        state_kwargs["dp_sync"] = None
+    state_kwargs["dp_sync"] = None
+    if not vllm_version_is("0.29.0"):
         state_kwargs["cudagraph_stats"] = None
     runner.execute_model_state = vllm_model_runner.ExecuteModelState(
         input_batch=local_batch,
@@ -1058,3 +1062,87 @@ def test_dummy_attention_context_uses_current_batch(pcp_rank, has_stale_batch):
     assert manager._global_batch is saved_batch
     assert manager._hidden_restore_idx is saved_indices
     manager._block_tables.gather_block_tables.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "counts,prefilling,expected",
+    [
+        ([44], [True], 22),
+        ([18], [True], 10),
+        ([1], [True], 1),
+        ([4, 18], [False, True], 14),
+        ([4, 4], [False, False], 8),
+        ([18, 7], [True, True], 14),
+        ([0], [False], 0),
+    ],
+)
+def test_pcp_dispatch_counts_match_partition(counts, prefilling, expected):
+    manager = AscendPCPManager(pcp_world_size=2, pcp_rank=0, device=torch.device("cpu"))
+    assert manager.get_num_tokens_for_dispatch(np.array(counts), np.array(prefilling)) == expected
+
+
+@pytest.mark.skipif(not vllm_version_is("0.28.0"), reason="release dispatch adapter")
+@pytest.mark.parametrize("dummy_run", [False, True])
+@pytest.mark.parametrize("pcp_enabled", [False, True])
+@pytest.mark.parametrize("num_tokens", [0, 44])
+@pytest.mark.parametrize("release_adapter", [False, True])
+def test_pcp_dispatch_preserves_global_batch_and_dummy_count(
+    dummy_run, pcp_enabled, num_tokens, release_adapter, monkeypatch
+):
+    monkeypatch.setattr(ascend_model_runner, "vllm_version_is", lambda version: release_adapter)
+    runner = object.__new__(NPUModelRunner)
+    runner.pcp_manager = (
+        AscendPCPManager(pcp_world_size=2, pcp_rank=0, device=torch.device("cpu")) if pcp_enabled else None
+    )
+    batch = (
+        None
+        if dummy_run
+        else SimpleNamespace(
+            num_tokens=num_tokens, num_scheduled_tokens=np.array([num_tokens]), is_prefilling_np=np.array([True])
+        )
+    )
+    with (
+        patch.object(vllm_model_runner.GPUModelRunner, "gather_batch_req_state", return_value=(batch, None)),
+        patch.object(ascend_model_runner, "dispatch_cg_and_sync_dp") as dispatch,
+    ):
+        with ascend_model_runner.pcp_dispatch_context():
+            gathered, uniform = runner.gather_batch_req_state(object(), dummy_run)
+            assert gathered is batch
+            vllm_model_runner.dispatch_cg_and_sync_dp(None, 1, 44, uniform, 2, 0)
+            expected = num_tokens // 2 if release_adapter and pcp_enabled and not dummy_run else 44
+            assert dispatch.call_args.args[2] == expected
+        vllm_model_runner.dispatch_cg_and_sync_dp(None, 1, 44, None, 2, 0)
+        assert dispatch.call_args.args[2] == 44
+    if batch is not None:
+        assert batch.num_tokens == num_tokens
+
+
+@pytest.mark.skipif(not vllm_version_is("0.28.0"), reason="release dispatch adapter")
+def test_pcp_dispatch_context_restores_after_nested_failure():
+    runner = object.__new__(NPUModelRunner)
+    runner.pcp_manager = AscendPCPManager(pcp_world_size=2, pcp_rank=0, device=torch.device("cpu"))
+    batch = SimpleNamespace(num_tokens=44, num_scheduled_tokens=np.array([44]), is_prefilling_np=np.array([True]))
+    independent_context = copy_context()
+    with (
+        patch.object(vllm_model_runner.GPUModelRunner, "gather_batch_req_state", return_value=(batch, None)),
+        patch.object(ascend_model_runner, "dispatch_cg_and_sync_dp") as dispatch,
+        ascend_model_runner.pcp_dispatch_context(),
+    ):
+        runner.gather_batch_req_state(object(), False)
+        with (
+            pytest.raises(RuntimeError, match="test failure"),
+            ascend_model_runner.pcp_dispatch_context(),
+        ):
+            vllm_model_runner.dispatch_cg_and_sync_dp(None, 1, 44, None, 2, 0)
+            assert dispatch.call_args.args[2] == 44
+            raise RuntimeError("test failure")
+        independent_context.run(vllm_model_runner.dispatch_cg_and_sync_dp, None, 1, 44, None, 2, 0)
+        assert dispatch.call_args.args[2] == 44
+        vllm_model_runner.dispatch_cg_and_sync_dp(None, 1, 44, None, 2, 0)
+        assert dispatch.call_args.args[2] == 22
+        # A dummy gather must clear the previous real batch count, even when
+        # both are collected inside the same execution context.
+        with patch.object(vllm_model_runner.GPUModelRunner, "gather_batch_req_state", return_value=(None, None)):
+            runner.gather_batch_req_state(object(), True)
+        vllm_model_runner.dispatch_cg_and_sync_dp(None, 1, 44, None, 2, 0)
+        assert dispatch.call_args.args[2] == 44

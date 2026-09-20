@@ -10,7 +10,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
+from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config, set_current_vllm_config
 from vllm.distributed.parallel_state import (
     get_pp_group,
     get_tp_group,
@@ -23,7 +23,6 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.deepseek_eagle3 import Eagle3DeepseekV2ForCausalLM
-from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
 from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
@@ -114,6 +113,17 @@ def _is_glm_model(model_config) -> bool:
 
 class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     _runnable: ACLGraphWrapper | Callable
+    arange: torch.Tensor
+
+    def _ensure_query_start_loc_arange_capacity(self) -> None:
+        """Ensure ``arange`` includes the terminal query boundary."""
+        required_size = max(self.max_batch_size, self.max_num_tokens) + 1
+        if self.arange.numel() < required_size:
+            self.arange = torch.arange(
+                required_size,
+                device=self.arange.device,
+                dtype=self.arange.dtype,
+            )
 
     def _create_draft_vllm_config(self) -> VllmConfig:
         """Expose the draft runner type during model construction.
@@ -162,6 +172,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device, pass_hidden_states_to_model: bool, runner=None):
         super().__init__(vllm_config, device, pass_hidden_states_to_model, runner=runner)
+        self._ensure_query_start_loc_arange_capacity()
 
         # Assign runner before it's used in the methods below
         self.runner = runner
@@ -280,9 +291,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         self._runnable = self._run_merged_draft
         if self.uses_mrope:
-            num_dims = 3 if vllm_version_is("0.28.0") else self.draft_model_config.mrope_num_dims
+            num_dims = 3 if vllm_version_is("0.29.0") else self.draft_model_config.mrope_num_dims
             self.mrope_positions = torch.zeros((num_dims, self.max_num_tokens + 1), dtype=torch.int32, device=device)
-        elif vllm_version_is("0.28.0") and self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0:
+        elif vllm_version_is("0.29.0") and self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0:
             self.xdrope_positions = torch.zeros(
                 (self.uses_xdrope_dim, self.max_num_tokens + 1),
                 dtype=torch.int32,
@@ -309,6 +320,19 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 "supports padded drafter batch. Please unset "
                 "disable_padded_drafter_batch in the speculative_config."
             )
+
+    def _is_cache_only_draft_attn_group(self, attn_group: Any) -> bool:
+        # Cache-only backends provide metadata without an attention impl,
+        # regardless of the KV cache spec's inheritance hierarchy.
+        # Executable backends may resolve their impl from the current config.
+        with set_current_vllm_config(self.vllm_config):
+            return attn_group.backend.get_impl_cls() is None
+
+    def _get_primary_draft_attn_group(self) -> Any:
+        for attn_group in self.draft_attn_groups:
+            if not self._is_cache_only_draft_attn_group(attn_group):
+                return attn_group
+        raise ValueError("Draft attention groups contain no executable attention backend.")
 
     def _maybe_remove_d2t(self, draft_model: nn.Module) -> None:
         """Drop the identity d2t mapping of a full-vocab EAGLE3 draft."""
@@ -366,13 +390,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             self.vllm_config,
             AttentionLayerBase,  # type: ignore[type-abstract]
         )
-        all_indexer_layer_names = set(get_layers_from_vllm_config(self.vllm_config, DeepseekV32IndexerCache).keys())
-        # Filter to only layers that have KV cache specs.
+        # Filter to only layers that have KV cache specs. Split indexer cache
+        # layers must stay in this set: they now own a metadata builder even
+        # though the draft model shares their physical cache with the target.
         self._draft_attn_layer_names = {
             name
             for name in (set(all_attn_layers.keys()) - target_attn_layer_names)
             if all_attn_layers[name].get_kv_cache_spec(self.vllm_config) is not None
-        } - all_indexer_layer_names
+        }
 
         self.attn_layer_names = list(sorted(self._draft_attn_layer_names))
         draft_attn_layers_dict = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
@@ -743,7 +768,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     common_attn_metadata.context_parallel_metadata = dcp_manager.long_seq_metadata
 
                 assert len(self.draft_attn_groups) > 0
-                builder = self.draft_attn_groups[0].get_metadata_builder()
                 # update the tensor's address for each step.
                 for draft_index in range(self.num_speculative_tokens):
                     common_attn_metadata = self.shallow_copy_metadata(common_attn_metadata)
@@ -772,23 +796,25 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     if per_layer_attn_metadata is not None:
                         multi_steps_attn_metadata.append(per_layer_attn_metadata)
                         continue
-                    if not self.use_compress or draft_index == 0:
-                        attn_metadata_eagle = builder.build_for_graph_capture(
-                            common_attn_metadata,
-                            AscendAttentionState.SpecDecoding
-                            if self.method == "mtp"
-                            else AscendAttentionState.ChunkedPrefill,
-                            **extra_attn_metadata_args,
-                        )
-                    else:
-                        attn_metadata_eagle = builder.build_for_drafting(
-                            common_attn_metadata,
-                            draft_index,
-                            **extra_attn_metadata_args,
-                        )
                     per_layer_attn_metadata = dict()
-                    for layer_name in self.attn_layer_names:
-                        per_layer_attn_metadata[layer_name] = attn_metadata_eagle
+                    for attn_group in self.draft_attn_groups:
+                        builder = attn_group.get_metadata_builder()
+                        if not self.use_compress or draft_index == 0:
+                            attn_metadata_eagle = builder.build_for_graph_capture(
+                                common_attn_metadata,
+                                AscendAttentionState.SpecDecoding
+                                if self.method == "mtp"
+                                else AscendAttentionState.ChunkedPrefill,
+                                **extra_attn_metadata_args,
+                            )
+                        else:
+                            attn_metadata_eagle = builder.build_for_drafting(
+                                common_attn_metadata,
+                                draft_index,
+                                **extra_attn_metadata_args,
+                            )
+                        for layer_name in attn_group.layer_names:
+                            per_layer_attn_metadata[layer_name] = attn_metadata_eagle
                     multi_steps_attn_metadata.append(per_layer_attn_metadata)
 
         model_positions = self._get_positions(num_tokens)
@@ -1121,11 +1147,23 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         should_update_next_steps = not self.parallel_drafting and (self.dcp_size == 1 or dcp_mtp_inputs is not None)
         if should_update_next_steps:
+            cache_only_groups = (
+                [group for group in self.draft_attn_groups if self._is_cache_only_draft_attn_group(group)]
+                if self.method == "mtp"
+                else []
+            )
+            if cache_only_groups:
+                primary_group = self._get_primary_draft_attn_group()
+                if len(cache_only_groups) + 1 != len(self.draft_attn_groups):
+                    raise ValueError("MTP with cache-only groups requires exactly one main attention group.")
             # Copy the old attn_metadata and update
             for draft_index in range(1, self.num_speculative_tokens):
                 per_layer_attn_metadata = dict()
-                for attn_group in self.draft_attn_groups:
-                    common_attn_metadata, attn_metadata = self.attn_update_stack_num_spec_norm(
+                if cache_only_groups:
+                    # Attention and cache-only groups describe the same draft
+                    # step. Advance shared state once while building metadata
+                    # for the executable attention group.
+                    common_attn_metadata, primary_metadata = self.attn_update_stack_num_spec_norm(
                         draft_index,
                         common_attn_metadata,
                         batch_size,
@@ -1133,10 +1171,34 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         used_update_positions,
                         aclgraph_runtime_mode,
                         **draft_cp_kwargs,
-                        attn_group=attn_group,
+                        attn_group=primary_group,
                     )
-                    for layer_name in self._get_attn_metadata_layer_names(attn_group):
-                        per_layer_attn_metadata[layer_name] = attn_metadata
+                    for layer_name in primary_group.layer_names:
+                        per_layer_attn_metadata[layer_name] = primary_metadata
+                    for attn_group in cache_only_groups:
+                        builder = attn_group.get_metadata_builder()
+                        # Build cache-only metadata from the updated common
+                        # view without advancing the draft-step state again.
+                        attn_metadata = builder.build_for_drafting(
+                            common_attn_metadata,
+                            draft_index,
+                        )
+                        for layer_name in attn_group.layer_names:
+                            per_layer_attn_metadata[layer_name] = attn_metadata
+                else:
+                    for attn_group in self.draft_attn_groups:
+                        common_attn_metadata, attn_metadata = self.attn_update_stack_num_spec_norm(
+                            draft_index,
+                            common_attn_metadata,
+                            batch_size,
+                            num_input_tokens,
+                            used_update_positions,
+                            aclgraph_runtime_mode,
+                            **draft_cp_kwargs,
+                            attn_group=attn_group,
+                        )
+                        for layer_name in self._get_attn_metadata_layer_names(attn_group):
+                            per_layer_attn_metadata[layer_name] = attn_metadata
                 multi_steps_attn_metadata.append(per_layer_attn_metadata)
 
         token_indices_to_sample_len = token_indices_to_sample.shape[0]
@@ -1682,7 +1744,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 long_seq_args = first_pass_inputs.long_seq_args
 
             # copy inputs to buffer for cudagraph
-            if vllm_version_is("0.28.0") and self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim == 0:
+            if vllm_version_is("0.29.0") and self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim == 0:
                 target_positions = target_positions[0]
 
             self._set_positions(num_tokens, target_positions)
@@ -1745,10 +1807,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             # 2.
             # Recompute the slot mapping based on the new positions and
             # rejection mask.
-            # Use the first draft attention group's kv_cache_spec for block_size
-            # (all draft layers share the same kv-cache group)
+            # The split indexer cache may be the first draft group, but its
+            # storage layout is not the main attention cache layout.
             assert len(self.draft_attn_groups) > 0
-            block_size = self.draft_attn_groups[0].kv_cache_spec.block_size
+            block_size = self._get_primary_draft_attn_group().kv_cache_spec.block_size
 
             new_slot_mapping = compute_new_slot_mapping(
                 cad=cad,
@@ -1801,16 +1863,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             draft_model_config = getattr(self, "draft_model_config", None)
             hf_config = getattr(draft_model_config, "hf_config", None)
             architectures = getattr(hf_config, "architectures", []) or []
-            if vllm_version_is("0.28.0"):
-                return bool({"DeepSeekMTPModel", "KimiK3MTPModel"}.intersection(architectures))
-            else:
-                return bool(
-                    {
-                        "DeepSeekMTPModel",
-                        "DeepseekV32MTPModel",
-                        "KimiK3MTPModel",
-                    }.intersection(architectures)
-                )
+            return bool(
+                {
+                    "DeepSeekMTPModel",
+                    "DeepseekV32MTPModel",
+                    "KimiK3MTPModel",
+                }.intersection(architectures)
+            )
         return self.method not in ("mtp", "draft_model", "dflash", "dspark")
 
     def attn_update_stack_num_spec_norm(
@@ -2330,7 +2389,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     # update full-graph params for one spec token
     def _update_full_graph_params(self, forward_context, num_tokens, draft_attn_metadatas=None):
         assert len(self.draft_attn_groups) > 0
-        attn_backend = self.draft_attn_groups[0].backend
+        attn_backend = self._get_primary_draft_attn_group().backend
         update_full_graph_params(
             attn_backend,
             self.update_stream,
@@ -2473,7 +2532,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             device_metadata_executor.submit(device_metadata_tasks)
         multi_steps_attn_metadata = [per_layer_attn_metadata]
         # Copy the old attn_metadata and update
-        attn_metadata_i = per_layer_attn_metadata[self.draft_attn_groups[0].layer_names[0]]
+        primary_group = self._get_primary_draft_attn_group()
+        attn_metadata_i = per_layer_attn_metadata[primary_group.layer_names[0]]
         return multi_steps_attn_metadata, attn_metadata_i
 
     def _pad_draft_buffers(

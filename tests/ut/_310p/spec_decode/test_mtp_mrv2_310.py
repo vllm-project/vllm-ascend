@@ -35,7 +35,7 @@ class TestMRv2Mtp310(TestBase):
         draft_sampled = torch.tensor([7, 1], dtype=torch.int32)
         cu_num_logits = torch.tensor([0, 2], dtype=torch.int32)
 
-        sampled, num_sampled = greedy_rejection_sample_cpu(
+        sampled, num_sampled, _, _ = greedy_rejection_sample_cpu(
             target_logits, draft_sampled, cu_num_logits, num_speculative_steps=1
         )
 
@@ -61,7 +61,7 @@ class TestMRv2Mtp310(TestBase):
             "vllm_ascend._310p.worker.v2.spec_utils._draw_uniform_cpu",
             side_effect=[0.0, 0.99],  # accept draft; bonus near end of CDF → token 2
         ):
-            sampled, num_sampled = probabilistic_rejection_sample_cpu(
+            sampled, num_sampled, _, _ = probabilistic_rejection_sample_cpu(
                 target_logits,
                 draft_sampled,
                 cu_num_logits,
@@ -93,7 +93,7 @@ class TestMRv2Mtp310(TestBase):
             "vllm_ascend._310p.worker.v2.spec_utils._draw_uniform_cpu",
             return_value=0.999,  # always reject / pick high CDF
         ):
-            sampled, num_sampled = probabilistic_rejection_sample_cpu(
+            sampled, num_sampled, _, _ = probabilistic_rejection_sample_cpu(
                 target_logits,
                 draft_sampled,
                 cu_num_logits,
