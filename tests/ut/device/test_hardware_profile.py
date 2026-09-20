@@ -50,6 +50,7 @@ _EXPECTED_CAPABILITIES = {
     AscendDeviceType.A3: _STANDARD_CAPABILITIES
     | {
         HardwareCapability.CANN_MEGAMOE,
+        HardwareCapability.LOCAL_KV_COMM_RESOURCE,
         HardwareCapability.MC2_FULLMESH_V2_COMM,
         HardwareCapability.MINIMAX_M3_PREFILL_KV_GATHER_Q,
         HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
