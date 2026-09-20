@@ -816,6 +816,10 @@ def test_dsa_cp_attention_waits_before_sas_consumer(compress_ratio: int, monkeyp
         "vllm_ascend.attention.context_parallel.dsa_cp.get_current_vllm_config",
         _make_vllm_config,
     )
+    monkeypatch.setattr(
+        "vllm_ascend.attention.context_parallel.dsa_cp.get_ascend_config",
+        lambda: SimpleNamespace(multistream_dsv4_dsa_overlap=False),
+    )
     impl = cast(AscendDSACPImpl, _make_impl(AscendDSACPImpl))
     impl.compress_ratio = compress_ratio
     impl.compressor_overlap = False
@@ -1115,6 +1119,7 @@ def _make_req_metadata() -> AscendDSAReqMetadata:
 
 def _make_impl(
     impl_cls: type[AscendDSAImpl] = AscendDSAImpl,
+    **extra_kwargs,
 ) -> AscendDSAImpl:
     linear = MagicMock()
     with (
@@ -1154,6 +1159,7 @@ def _make_impl(
             eps=1e-6,
             attn_sink=None,
             swa_cache_layer=SimpleNamespace(prefix="swa_cache"),
+            **extra_kwargs,
         )
 
 

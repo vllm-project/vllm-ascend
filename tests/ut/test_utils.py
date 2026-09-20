@@ -775,6 +775,16 @@ class TestIsMtpLayer(TestBase):
         self.assertFalse(utils.is_mtp_layer(config, "model.layers.80.self_attn.attn"))
 
 
+def test_has_layer_idx_is_checked_per_model_instance():
+    target = SimpleNamespace(model=SimpleNamespace(start_layer=0))
+    draft = SimpleNamespace(model=SimpleNamespace())
+
+    assert utils.has_layer_idx(target)
+    assert not utils.has_layer_idx(draft)
+    assert utils.has_layer_idx(target)
+    assert not utils.has_layer_idx(None)
+
+
 class TestIsRlWeightUpdateEnabled(TestBase):
     """RL weight updates arrive through either deployment switch.
 
