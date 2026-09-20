@@ -11,7 +11,7 @@ from vllm.sequence import IntermediateTensors
 import vllm_ascend.patch.worker.patch_deepseek_v2 as patch_deepseek_v2
 import vllm_ascend.worker.v2.pp_utils as pp_utils
 from vllm_ascend.patch.worker.patch_deepseek_v2 import (
-    _deepseek_v2_model_init_with_pp_topk_transport,
+    _patched_deepseek_v2_model_init,
     _patched_forward,
     _should_skip_indexer_init,
 )
@@ -171,7 +171,7 @@ def test_model_init_adds_pp_topk_receive_buffer(monkeypatch):
     monkeypatch.setattr(patch_deepseek_v2.pp_utils, "use_legacy_spec_pp", lambda: False)
     model = SimpleNamespace()
 
-    _deepseek_v2_model_init_with_pp_topk_transport(
+    _patched_deepseek_v2_model_init(
         model,
         vllm_config=SimpleNamespace(use_v2_model_runner=True),
     )
