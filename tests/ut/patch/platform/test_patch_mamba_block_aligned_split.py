@@ -231,7 +231,7 @@ def _fake_original_recording(observed: dict):
 
 
 def test_producer_clears_drop_knobs_around_upstream_call(monkeypatch):
-    observed = {}
+    observed: dict[str, bool | None] = {}
     monkeypatch.setattr(mod, "_original_mamba_block_aligned_split", _fake_original_recording(observed))
     scheduler = _scheduler(is_kv_consumer=False, is_kv_producer=True)
     result = _mamba_block_aligned_split(scheduler, _request(), num_new_tokens=8)
@@ -244,7 +244,7 @@ def test_producer_clears_drop_knobs_around_upstream_call(monkeypatch):
 
 
 def test_standalone_clears_drop_knobs_around_upstream_call(monkeypatch):
-    observed = {}
+    observed: dict[str, bool | None] = {}
     monkeypatch.setattr(mod, "_original_mamba_block_aligned_split", _fake_original_recording(observed))
     scheduler = _scheduler(is_kv_consumer=None)
     result = _mamba_block_aligned_split(scheduler, _request(), num_new_tokens=8)
@@ -255,7 +255,7 @@ def test_standalone_clears_drop_knobs_around_upstream_call(monkeypatch):
 
 
 def test_consumer_keeps_drop_knobs_around_upstream_call(monkeypatch):
-    observed = {}
+    observed: dict[str, bool | None] = {}
     monkeypatch.setattr(mod, "_original_mamba_block_aligned_split", _fake_original_recording(observed))
     # Decode consumer with a computed prefix: the verifier window is preserved
     # by the early return, the original is never reached.
