@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
@@ -70,6 +71,36 @@ def test_profile_grid_repeats_upstream_cases_for_every_k():
     assert [case["profile_physical_k"] for case in cases] == [3, 3, 4, 4]
 
 
+def test_lower_k_profile_replays_are_sparse_but_max_k_is_unchanged():
+    manager = FakeManager()
+
+    def batches_to_profile(self, capture_sizes):
+        del self, capture_sizes
+        for _ in range(3):
+            yield {"num_tokens": 8, "context_len": 1024}
+
+    manager.batches_to_profile = MethodType(batches_to_profile, manager)
+    manager = configure_physical_k_profiling(manager, config())
+    cases = list(manager.batches_to_profile([8]))
+    assert [case["profile_physical_k"] for case in cases] == [3, 3, 4, 4, 4]
+
+
+def test_profile_grid_extends_through_large_rl_batch_buckets():
+    manager = FakeManager()
+    manager.req_states.max_num_reqs = 64
+    manager = configure_physical_k_profiling(manager, config())
+    cases = list(manager.batches_to_profile([8]))
+    by_k = {
+        physical_k: {
+            case["num_tokens"]
+            for case in cases
+            if case["profile_physical_k"] == physical_k
+        }
+        for physical_k in (3, 4)
+    }
+    assert by_k == {3: {8, 16, 32, 64}, 4: {8, 16, 32, 64}}
+
+
 def test_worker_recommends_k_from_profile_cost_and_confidence():
     manager = configure_physical_k_profiling(FakeManager(), config())
     list(manager.batches_to_profile([8]))
@@ -116,3 +147,43 @@ def test_eager_target_samples_do_not_price_draft_k():
     ]
     manager.set_initial_cost_curves(samples)
     assert manager._physical_k_draft_costs == {3: {8: 1.0}, 4: {8: 2.0}}
+
+
+def test_profile_cost_is_not_extrapolated_to_larger_batch():
+    manager = configure_physical_k_profiling(FakeManager(), config())
+    list(manager.batches_to_profile([8]))
+    samples = [
+        SimpleNamespace(num_reqs=8, drafter_ms=1.0, physical_k=3),
+        SimpleNamespace(num_reqs=8, drafter_ms=1.0, physical_k=3),
+        SimpleNamespace(num_reqs=8, drafter_ms=2.0, physical_k=4),
+        SimpleNamespace(num_reqs=8, drafter_ms=2.0, physical_k=4),
+    ]
+    manager.set_initial_cost_curves(samples)
+    manager.req_states.req_id_to_index.update({str(i): i for i in range(8, 16)})
+    manager.req_states.num_computed_tokens_np = np.full(16, 100)
+    manager.req_states.prefill_len.np = np.zeros(16)
+    manager._stale_confidences[0].np = np.full((16, 4), 0.9)
+    per_req = {str(i): 5 for i in range(16)}
+    drafts = {str(i): [1, 2, 3, 4] for i in range(16)}
+    manager.get_num_tokens(per_req, drafts)
+    assert manager._physical_k_recommendation is None
+
+
+def test_nonzero_tp_rank_skips_runtime_scoring():
+    manager = configure_physical_k_profiling(FakeManager(), config())
+    list(manager.batches_to_profile([8]))
+    samples = [
+        SimpleNamespace(num_reqs=8, drafter_ms=1.0, physical_k=3),
+        SimpleNamespace(num_reqs=8, drafter_ms=1.0, physical_k=3),
+        SimpleNamespace(num_reqs=8, drafter_ms=2.0, physical_k=4),
+        SimpleNamespace(num_reqs=8, drafter_ms=2.0, physical_k=4),
+    ]
+    manager.set_initial_cost_curves(samples)
+    per_req = {str(i): 5 for i in range(8)}
+    drafts = {str(i): [1, 2, 3, 4] for i in range(8)}
+    with patch(
+        "vllm_ascend.worker.v2.spec_decode.physical_k_profile._is_tp_rank_zero",
+        return_value=False,
+    ):
+        manager.get_num_tokens(per_req, drafts)
+    assert manager._physical_k_recommendation is None

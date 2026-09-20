@@ -30,7 +30,7 @@ def test_compact_defaults_and_override():
         "hybrid_enabled": False,
         "hybrid_min_batch_size": 8,
         "hybrid_acceptance_threshold": 0.6,
-        "hybrid_low_steps": 4,
+        "hybrid_low_steps": 3,
         "hybrid_high_steps": 2,
         "hybrid_probe_interval": 32,
         "auto_tune_enabled": True,
@@ -57,17 +57,24 @@ def test_compact_rejects_removed_or_invalid_options(physical):
         resolve_physical_k(compact(**physical))
 
 
-def test_controller_defaults_to_full_k_until_worker_recommends():
-    controller = AdaptiveDraftKController(max_k=5, min_k=3)
+def test_controller_debounces_worker_downshift():
+    controller = AdaptiveDraftKController(max_k=5, min_k=3, hybrid_min_batch_size=1)
     assert controller.cap(5, 8) == 5
     controller.recommend(8, 3)
+    for _ in range(2):
+        controller.observe([5] * 8, [[0]] * 8)
+        assert controller.cap(5, 8) == 5
+    controller.observe([5] * 8, [[0]] * 8)
     assert controller.cap(5, 8) == 3
-    assert controller.last_reason == "av_profile_recommendation"
+    assert controller.current_k == 3
 
 
 def test_recommendations_are_batch_bucket_specific():
-    controller = AdaptiveDraftKController(max_k=5, min_k=3, hybrid_min_batch_size=1)
+    controller = AdaptiveDraftKController(
+        max_k=5, min_k=3, hybrid_min_batch_size=1, hybrid_low_steps=1
+    )
     controller.recommend(8, 3)
+    controller.observe([5] * 8, [[0]] * 8)
     assert controller.cap(5, 8) == 3
     assert controller.cap(5, 16) == 5
 
@@ -76,7 +83,7 @@ def test_small_batch_keeps_full_k():
     controller = AdaptiveDraftKController(max_k=5, min_k=3, hybrid_min_batch_size=8)
     controller.recommend(4, 3)
     assert controller.cap(5, 4) == 5
-    controller.observe([5] * 4, [[0]] * 4, use_acceptance_fallback=False)
+    controller.observe([5] * 4, [[0]] * 4)
     assert controller.observation_count == 0
 
 
@@ -88,9 +95,11 @@ def test_periodic_probe_forces_full_k():
         hybrid_probe_interval=2,
     )
     controller.recommend(8, 3)
-    controller.observation_count = 2
+    state = controller._state(8)
+    state.observations = 2
     assert controller.cap(5, 8) == 5
     assert controller.last_reason == "periodic_full_k_probe"
+    assert state.stable_k == 5
 
 
 def test_missing_profile_uses_acceptance_fallback():
@@ -101,13 +110,15 @@ def test_missing_profile_uses_acceptance_fallback():
         hybrid_low_steps=1,
     )
     controller.cap(5, 8)
-    controller.observe([5] * 8, [[0]] * 8, use_acceptance_fallback=True)
+    controller.observe([5] * 8, [[0]] * 8)
     assert controller.current_k == 4
-    assert controller.last_reason == "low_acceptance_dynamic_k"
+    assert controller.last_reason == "combined_downshift"
 
 
-def test_output_recommendation_is_applied():
-    controller = AdaptiveDraftKController(max_k=5, min_k=3, hybrid_min_batch_size=1)
+def test_output_recommendation_and_acceptance_are_combined():
+    controller = AdaptiveDraftKController(
+        max_k=5, min_k=3, hybrid_min_batch_size=1, hybrid_low_steps=1
+    )
     scheduler_output = SimpleNamespace(
         scheduled_spec_decode_tokens={str(i): [1] * 5 for i in range(8)}
     )
@@ -118,6 +129,41 @@ def test_output_recommendation_is_applied():
     )
     _update_controller(controller, scheduler_output, model_output)
     assert controller.cap(5, 8) == 3
+
+
+def test_acceptance_survival_is_tracked_by_position():
+    controller = AdaptiveDraftKController(
+        max_k=5,
+        min_k=3,
+        hybrid_min_batch_size=1,
+        hybrid_low_steps=1,
+        hybrid_acceptance_threshold=0.6,
+    )
+    controller.recommend(8, 5)
+    sampled = [[0] * 5 for _ in range(5)] + [[0] * 4 for _ in range(3)]
+    controller.observe([5] * 8, sampled)
+    state = controller._state(8)
+    assert state.survival[:5] == [1.0, 1.0, 1.0, 0.625, 0.0]
+    assert state.empirical_k == 4
+    assert controller.cap(5, 8) == 4
+
+
+def test_rollout_batch_decay_uses_independent_state_after_two_steps():
+    controller = AdaptiveDraftKController(
+        max_k=5, min_k=3, hybrid_min_batch_size=1, hybrid_low_steps=1
+    )
+    controller.recommend(128, 3)
+    controller.observe([5] * 128, [[0]] * 128)
+    assert controller.cap(5, 128) == 3
+
+    controller.recommend(64, 4)
+    controller.observe([5] * 64, [[0] * 5] * 64)
+    assert controller.cap(5, 64) == 3
+    assert controller.cap(5, 64) == 4
+
+
+def test_default_candidates_start_at_k3():
+    assert resolve_physical_k(compact())["min_k"] == 3
 
 
 def test_create_controller_and_opt_out():
