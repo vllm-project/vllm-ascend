@@ -5120,7 +5120,6 @@ class NPUModelRunner(GPUModelRunner):
             not is_dsv4_main
             and not uses_padded_page_layout
             and supports_shared_backing_with_kv_transfer
-            and not self.use_sparse
             and self._uses_page_strided_shared_backing(
                 kv_cache_config,
                 layer_kv_cache_spec,

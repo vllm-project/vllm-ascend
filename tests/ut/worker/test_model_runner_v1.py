@@ -1524,6 +1524,10 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             ],
         )
         runner = self._build_runner()
+        # Sparse QSA is a runtime backend selection.  It must not disable a
+        # page-strided shared backing whose geometry is fully described by the
+        # planner descriptors.
+        runner.use_sparse = True
         runner.use_compress = True
         runner.vllm_config.cache_config.get_resolved_kv_cache_layout.return_value = SimpleNamespace(
             is_block_outermost=True,
