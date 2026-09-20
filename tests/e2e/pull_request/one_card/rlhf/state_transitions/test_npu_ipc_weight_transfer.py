@@ -7,9 +7,20 @@ Qwen3-0.6B cannot expose missing START/FINISH hooks because its checkpoint and
 runtime weight representations are compatible. This matrix instead targets
 architectures whose correctness depends on the transaction: fused-MoE layout
 restoration, derived FP32 routing weights, and SFA source/derived-state
-restoration. Each reduced model first proves dummy inference in FULL_DECODE_ONLY
-mode, then loads a complete fixed-random BF16 parameter set and compares that
-baseline with an exact full-payload reload across a pause/resume boundary.
+restoration.
+
+The correctness oracle is *normal startup loading of the same payload*, not the
+first live update: the generator also writes a temporary checkpoint, a reference
+server loads it at startup, and the live-update lane has to reproduce its
+signature exactly —
+
+    normal startup load(W) == first live update(W) == second live update(W)
+
+The dummy-started lane's pre-update signature must differ from the reference, so
+a transfer that never ran cannot pass, and the second update covers the layerwise
+reload lifecycle, runtime/destructive representations, derived state and the
+graph-captured storage of the first update. Both packed modes exercise the same
+transaction.
 """
 
 import os
@@ -18,45 +29,39 @@ import pytest
 import requests
 import torch
 import torch_npu  # noqa: F401  # registers the NPU backend
+from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer
 from tests.e2e.pull_request.rlhf.weight_transfer_test_utils import (
     FixedRandomWeightSource,
     WeightUpdateModelCase,
-    assert_dummy_then_fixed_reload,
+    assert_weight_update_matches_reference,
     generation_signature,
+    live_update_serve_args,
     packed_buffer_size_for,
     pytest_model_cases,
+    reference_signature,
+    register_engines_once,
+    wait_for_free_device_memory,
 )
 
-INFERENCE_DEVICE_INDEX = 0
 CONTROL_TIMEOUT = 60
+# The trainer is co-located with the server on the same chip, so both models
+# have to fit; keep the budget low enough to leave room for the payload.
+GPU_MEMORY_UTILIZATION = 0.45
+# Card the inference server (and the co-located trainer) runs on, as an absolute
+# device index inside the container: the harness hands the server
+# `ASCEND_RT_VISIBLE_DEVICES` explicitly, so this is a physical chip. The default
+# is the card CI uses; a shared host can point a lane at an idle card by
+# exporting `VLLM_RL_TEST_DEVICE_INDEX` (leaving `ASCEND_RT_VISIBLE_DEVICES`
+# unset, so the pytest process's logical indices equal the physical ones).
+INFERENCE_DEVICE_INDEX = int(os.environ.get("VLLM_RL_TEST_DEVICE_INDEX", "0"))
 
 
 def _post(server: RemoteOpenAIServer, route: str, *, json=None, timeout=CONTROL_TIMEOUT):
     response = requests.post(server.url_for(route), json=json, timeout=timeout)
     response.raise_for_status()
     return response
-
-
-_ENGINES_REGISTERED = False
-
-
-def _register_engines_once() -> None:
-    """Register the Ascend weight transfer engines exactly once per process.
-
-    ``register_engine()`` is not idempotent: it registers ``hccl`` and
-    ``npu_ipc`` and the underlying factory raises ``ValueError: Weight transfer
-    engine 'hccl' is already registered`` on a second call. Registering inside
-    the test body therefore fails every parametrisation after the first.
-    """
-    global _ENGINES_REGISTERED
-    if _ENGINES_REGISTERED:
-        return
-    from vllm_ascend.distributed.weight_transfer import register_engine
-
-    register_engine()
-    _ENGINES_REGISTERED = True
 
 
 @pytest.mark.skipif(
@@ -66,38 +71,41 @@ def _register_engines_once() -> None:
 @pytest.mark.parametrize("case", pytest_model_cases())
 @pytest.mark.parametrize("packed", [False, True], ids=["unpacked", "packed"])
 def test_npu_ipc_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bool):
-    from vllm.utils.network_utils import get_open_port
-
-    port = get_open_port()
-    server_args = [
-        "--load-format",
-        "dummy",
-        "--dtype",
-        "bfloat16",
-        "--compilation-config",
-        '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1]}',
-        "--weight-transfer-config",
-        '{"backend": "npu_ipc"}',
-        "--max-model-len",
-        "1024",
-        "--gpu-memory-utilization",
-        "0.45",
-        "--port",
-        str(port),
-        "--trust-remote-code",
-        "--additional-config",
-        '{"weight_nz_mode": 0}',
-        *case.server_args(),
-    ]
+    torch.npu.set_device(INFERENCE_DEVICE_INDEX)
+    source = FixedRandomWeightSource(case, torch.device("npu", INFERENCE_DEVICE_INDEX))
+    os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
     env_dict = {
         "VLLM_SERVER_DEV_MODE": "1",
         "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",
         "ASCEND_RT_VISIBLE_DEVICES": str(INFERENCE_DEVICE_INDEX),
     }
 
+    # Independent oracle first: a server that loads exactly this payload at
+    # startup, on its own lifecycle, before the live path touches anything.
+    reference = reference_signature(
+        source,
+        case,
+        port=get_open_port(),
+        gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
+        tensor_parallel_size=1,
+        device_index=INFERENCE_DEVICE_INDEX,
+        env_dict=env_dict,
+    )
+
+    # Dummy sanity, first live update and the reload regression share one lane.
+    # Its pre-update signature is the dummy-sanity check; the *reference* is the
+    # part that must come from a separate server. The reference and the lane share
+    # one card, so wait for its process tree to hand the HBM back.
+    wait_for_free_device_memory(INFERENCE_DEVICE_INDEX, GPU_MEMORY_UTILIZATION)
+    port = get_open_port()
     with RemoteOpenAIServer(
         case.model,
-        vllm_serve_args=server_args,
+        vllm_serve_args=live_update_serve_args(
+            case,
+            backend="npu_ipc",
+            port=port,
+            gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
+        ),
         server_host="127.0.0.1",
         server_port=port,
         env_dict=env_dict,
@@ -106,16 +114,12 @@ def test_npu_ipc_weight_transfer_transaction(case: WeightUpdateModelCase, packed
         client = server.get_client()
         dummy_signature = generation_signature(client, case.model)
 
-        torch.npu.set_device(INFERENCE_DEVICE_INDEX)
-        source = FixedRandomWeightSource(case, torch.device("npu", INFERENCE_DEVICE_INDEX))
-        os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
-
         from vllm.distributed.weight_transfer.clients import HTTPVLLMWeightSyncClient
         from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactory
 
         from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import NPUIPCTrainerInitInfo
 
-        _register_engines_once()
+        register_engines_once()
         engine = WeightTransferTrainerFactory.trainer_init(
             NPUIPCTrainerInitInfo(
                 rank=0,
@@ -134,4 +138,11 @@ def test_npu_ipc_weight_transfer_transaction(case: WeightUpdateModelCase, packed
             _post(server, "resume")
             signatures.append(generation_signature(client, case.model))
 
-    assert_dummy_then_fixed_reload(dummy_signature, signatures[0], signatures[1], case)
+    updated_signature, reloaded_signature = signatures
+    assert_weight_update_matches_reference(
+        dummy_signature,
+        reference,
+        updated_signature,
+        reloaded_signature,
+        case,
+    )
