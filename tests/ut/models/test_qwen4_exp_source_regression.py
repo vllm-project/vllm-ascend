@@ -2,6 +2,12 @@
 """Source-level ownership and integration guards for Qwen4Exp on Ascend."""
 
 from pathlib import Path
+from types import SimpleNamespace
+
+import torch
+from vllm.models.qwen4_exp.amd import indexer_qsa as upstream_indexer
+
+from vllm_ascend.models.qwen4_exp import qsa as ascend_qsa
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -70,6 +76,41 @@ def test_qsa_hot_paths_do_not_add_host_tensor_syncs() -> None:
     )
     assert ".item(" not in qsa_sources
     assert "torch.equal(" not in qsa_sources
+
+
+def test_qsa_normalization_uses_upstream_public_helper() -> None:
+    qsa = _source("vllm_ascend/models/qwen4_exp/qsa.py")
+    assert "upstream_indexer.apply_qsa_rmsnorm(" in qsa
+    assert "upstream_indexer._gemma_rmsnorm(" not in qsa
+
+
+def test_qsa_public_normalization_helper_matches_upstream(monkeypatch) -> None:
+    indexer = object.__new__(ascend_qsa.AscendQSAIndexer)
+    torch.nn.Module.__init__(indexer)
+    indexer.index_head_dim = 4
+    indexer.k_layernorm = torch.nn.Identity()
+    indexer.rotary_emb = SimpleNamespace(mrope_section=None)
+
+    monkeypatch.setattr(
+        ascend_qsa.envs,
+        "VLLM_ASCEND_ENABLE_QSA_INDEXER_SPLIT_NORM_ROPE",
+        False,
+    )
+    monkeypatch.setattr(
+        ascend_qsa,
+        "apply_qsa_rope",
+        lambda _rotary_emb, _positions, tensor: tensor,
+    )
+
+    pooled = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4)
+    first_positions = torch.zeros(2, 3, dtype=torch.int64)
+    actual = indexer.normalize_compressed_keys(pooled, first_positions)
+    expected = upstream_indexer.apply_qsa_rmsnorm(
+        indexer.k_layernorm,
+        pooled.reshape(-1, indexer.index_head_dim),
+    ).reshape(-1, 1, indexer.index_head_dim)
+
+    torch.testing.assert_close(actual, expected)
 
 
 def test_qsa_e3_custom_op_is_a3_scoped_and_has_meta_binding() -> None:
