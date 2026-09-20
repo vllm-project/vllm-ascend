@@ -151,7 +151,7 @@ _PPTransportBufferFactory = Callable[
 ]
 
 
-def initialize_pp_transport(
+def configure_pp_topk_transport(
     model: _PPTransportModel,
     data_types: tuple[PPTransportDataType, ...],
 ) -> None:
@@ -308,21 +308,3 @@ def pp_stage_requires_topk_indices(config: object, start_layer: int) -> bool:
         return indexer_types[start_layer].lower() == "shared"
 
     return bool(getattr(config, "use_index_cache", False)) and should_reuse_topk(config, start_layer)
-
-
-def add_pp_topk_indices(
-    intermediate_tensors: IntermediateTensors,
-    topk_indices_buffer: torch.Tensor,
-    num_tokens: int,
-) -> None:
-    """Append locally available Top-K indices to an outgoing PP payload."""
-    if num_tokens > topk_indices_buffer.shape[0]:
-        raise ValueError(
-            "PP Top-K indices exceed the local buffer capacity: "
-            f"requested {num_tokens} tokens, capacity {topk_indices_buffer.shape[0]}."
-        )
-    add_pp_transport_tensors(
-        intermediate_tensors,
-        PPTransportDataType.TOPK_INDICES,
-        [topk_indices_buffer[:num_tokens]],
-    )
