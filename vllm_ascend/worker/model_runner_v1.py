@@ -2848,7 +2848,6 @@ class NPUModelRunner(GPUModelRunner):
         assert self.model is not None
         forward_context = get_forward_context()
         assert forward_context is not None
-
         model_inputs: dict[str, Any] = {
             "input_ids": input_ids,
             "positions": positions,
@@ -3393,6 +3392,8 @@ class NPUModelRunner(GPUModelRunner):
         num_active_loras: int = 0,
         profile_seq_lens: int | None = None,
         profile_cpp: bool = False,
+        force_prefill_attention_state: bool = False,
+        in_profile_run: bool | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # only support eager mode and piecewise graph now
         assert cudagraph_runtime_mode is None or cudagraph_runtime_mode.valid_runtime_modes()
@@ -3502,6 +3503,8 @@ class NPUModelRunner(GPUModelRunner):
                     self.attn_state = AscendAttentionState.SpecDecoding
                 else:
                     self.attn_state = AscendAttentionState.ChunkedPrefill
+            if force_prefill_attention_state:
+                self.attn_state = AscendAttentionState.ChunkedPrefill
             # The reason why we use a fixed seq_len rather than max_query_len is that
             # _npu_paged_attention_get_workspace only returns max workspace with specific
             # seq_lens. We use this seq_len only when capturing graph, and still use max_query_len
@@ -3633,7 +3636,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.vllm_config,
                 num_tokens=num_tokens_padded,
                 num_tokens_across_dp=num_tokens_across_dp,
-                in_profile_run=is_profile,
+                in_profile_run=is_profile if in_profile_run is None else in_profile_run,
                 num_actual_tokens=num_tokens_padded,
                 aclgraph_runtime_mode=cudagraph_runtime_mode,
                 batch_descriptor=batch_desc,
@@ -3818,6 +3821,11 @@ class NPUModelRunner(GPUModelRunner):
 
         self._stock_compiled_call = None
         if self.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE:
+            # This path invokes torch.compile directly instead of vLLM's
+            # compilation wrapper, so raise Dynamo's per-frame cache limits
+            # in every worker before the compiled prefill graph is run.
+            torch._dynamo.config.recompile_limit = 64
+            torch._dynamo.config.accumulated_recompile_limit = 1024
             from vllm.env_override import _apply_constrain_to_fx_strides_patch
 
             _apply_constrain_to_fx_strides_patch()

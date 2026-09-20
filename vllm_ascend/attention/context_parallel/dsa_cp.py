@@ -1359,7 +1359,13 @@ class AscendDSACPImpl(DSAAttentionImpl):
             if self._fxrt_prefill_decompose
             else _has_prefill(common_attn_metadata.attn_state)
         )
-        hidden_states_cache = hidden_states[: common_attn_metadata.num_actual_tokens]
+        if self._fxrt_prefill_decompose:
+            slot_mapping = swa_metadata.req_metadata.slot_mapping
+            assert slot_mapping is not None
+            cache_tokens = slot_mapping.shape[0]
+        else:
+            cache_tokens = common_attn_metadata.num_actual_tokens
+        hidden_states_cache = hidden_states[:cache_tokens]
 
         if (not isinstance(self.wq_b.quant_method, AscendUnquantizedLinearMethod)) and isinstance(
             self.wq_b.quant_method.quant_method, AscendW8A8DynamicLinearMethod
@@ -1468,8 +1474,8 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 state_cache.squeeze(-2),
                 self.compressor_ape,
                 self.compressor_norm.weight,
-                compress_sin.view(-1, compress_sin.shape[-1]),
-                compress_cos.view(-1, compress_cos.shape[-1]),
+                compress_sin,
+                compress_cos,
                 state_block_table=compressor_kv_state_metadata.req_metadata.block_table,
                 cu_seqlens=actual_seq_lengths_query,
                 seqused=None,
@@ -1622,8 +1628,8 @@ class AscendDSACPImpl(DSAAttentionImpl):
             indexer_state_cache.squeeze(-2),
             self.indexcom_ape,
             self.indexcom_norm.weight,
-            compressed_sin.view(-1, compressed_sin.shape[-1]),
-            compressed_cos.view(-1, compressed_cos.shape[-1]),
+            compressed_sin,
+            compressed_cos,
             state_block_table=indexer_kv_state_metadata.req_metadata.block_table,
             cu_seqlens=actual_seq_lengths_query,
             seqused=None,
