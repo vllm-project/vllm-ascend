@@ -266,6 +266,31 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
         total_cost = draft_cost + verify_cost[non_draft : non_draft + max_budget + 1]
         return float(np.max(expected / total_cost))
 
+    def cost_floor(self, batch_size: int) -> int | None:
+        """Return the shortest K not dominated by a wider draft graph.
+
+        A wider K that costs no more can emit every proposal available to the
+        shorter K, while AV remains free not to verify its tail. Treat a 2%
+        cost difference as equivalent to avoid selecting a noisy micro-win.
+        """
+
+        measured = {
+            k: cost
+            for k in candidates
+            if (cost := lookup_cost(self, k, batch_size)) is not None
+        }
+        if len(measured) != len(candidates):
+            return None
+        for physical_k in candidates:
+            cost = measured[physical_k]
+            if not any(
+                measured[wider_k] <= cost * 1.02
+                for wider_k in candidates
+                if wider_k > physical_k
+            ):
+                return physical_k
+        return max_k
+
     def recommend(self, num_tokens_per_req, draft_tokens):
         if self._physical_k_draft_costs is None or self.cost_tables is None:
             return None
@@ -281,6 +306,15 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
             return None
         if not _is_tp_rank_zero():
             return None
+        fresh_width = min(len(draft_tokens[req_id]) for req_id in active)
+        # A narrowed physical step has no fresh confidence for wider
+        # candidates. Keep the last full-width recommendation until the next
+        # periodic K=max probe instead of creating a self-reinforcing low K.
+        if fresh_width < max_k:
+            return None
+        minimum_useful_k = cost_floor(self, batch_size)
+        if minimum_useful_k is None:
+            return None
         all_slots = np.fromiter(
             (self.req_states.req_id_to_index[req_id] for req_id in req_ids),
             dtype=np.intp,
@@ -291,7 +325,6 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
             dtype=np.intp,
             count=batch_size,
         )
-        fresh_width = min(len(draft_tokens[req_id]) for req_id in active)
         confidence = self._stale_confidences[self._stale_idx].np[slots].astype(np.float64)
         survival = np.cumprod(confidence, axis=1)
         num_non_draft = np.fromiter(
@@ -354,7 +387,7 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
                 fresh_width,
             )
             self._physical_k_last_logged[bucket] = selected
-        return batch_size, selected, score
+        return batch_size, selected, score, minimum_useful_k
 
     def get_num_tokens(self, num_tokens_per_req, draft_tokens) -> int:
         result = original_get_num_tokens(num_tokens_per_req, draft_tokens)

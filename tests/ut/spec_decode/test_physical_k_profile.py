@@ -114,13 +114,14 @@ def test_worker_recommends_k_from_profile_cost_and_confidence():
     per_req = {str(i): 5 for i in range(8)}
     drafts = {str(i): [1, 2, 3, 4] for i in range(8)}
     manager.get_num_tokens(per_req, drafts)
-    batch_size, physical_k, score = manager._physical_k_recommendation
+    batch_size, physical_k, score, cost_floor = manager._physical_k_recommendation
     assert batch_size == 8
     assert physical_k == 3
     assert score > 0
+    assert cost_floor == 3
 
 
-def test_no_tail_confidence_extrapolation():
+def test_narrowed_runtime_width_does_not_replace_full_width_recommendation():
     manager = configure_physical_k_profiling(FakeManager(), config())
     list(manager.batches_to_profile([8]))
     samples = [
@@ -133,7 +134,23 @@ def test_no_tail_confidence_extrapolation():
     per_req = {str(i): 4 for i in range(8)}
     drafts = {str(i): [1, 2, 3] for i in range(8)}
     manager.get_num_tokens(per_req, drafts)
-    assert manager._physical_k_recommendation[1] == 3
+    assert manager._physical_k_recommendation is None
+
+
+def test_cost_floor_rejects_shorter_k_dominated_by_wider_graph():
+    manager = configure_physical_k_profiling(FakeManager(), config())
+    list(manager.batches_to_profile([8]))
+    samples = [
+        SimpleNamespace(num_reqs=8, drafter_ms=10.0, physical_k=3),
+        SimpleNamespace(num_reqs=8, drafter_ms=10.0, physical_k=3),
+        SimpleNamespace(num_reqs=8, drafter_ms=2.0, physical_k=4),
+        SimpleNamespace(num_reqs=8, drafter_ms=2.0, physical_k=4),
+    ]
+    manager.set_initial_cost_curves(samples)
+    per_req = {str(i): 5 for i in range(8)}
+    drafts = {str(i): [1, 2, 3, 4] for i in range(8)}
+    manager.get_num_tokens(per_req, drafts)
+    assert manager._physical_k_recommendation[3] == 4
 
 
 def test_eager_target_samples_do_not_price_draft_k():

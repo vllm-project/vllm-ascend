@@ -151,6 +151,21 @@ def test_acceptance_survival_is_tracked_by_position():
     assert controller.cap(5, 8) == 4
 
 
+def test_empirical_acceptance_cannot_cross_profile_cost_floor():
+    controller = AdaptiveDraftKController(
+        max_k=5,
+        min_k=3,
+        hybrid_min_batch_size=1,
+        hybrid_low_steps=1,
+    )
+    controller.recommend(64, 4, cost_floor_k=4)
+    controller.observe([5] * 64, [[0]] * 64)
+    state = controller._state(64)
+    assert state.empirical_k == 3
+    assert state.stable_k == 4
+    assert controller.cap(5, 64) == 4
+
+
 def test_rollout_batch_decay_uses_independent_state_after_two_steps():
     controller = AdaptiveDraftKController(
         max_k=5, min_k=3, hybrid_min_batch_size=1, hybrid_low_steps=1
