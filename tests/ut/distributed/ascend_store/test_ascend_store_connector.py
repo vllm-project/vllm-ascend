@@ -73,6 +73,31 @@ class TestAscendStoreConnector(unittest.TestCase):
         config.parallel_config.rank = 0
         return config
 
+    def test_layerwise_miss_initializes_hooks_before_forward(self):
+        connector = AscendStoreConnector.__new__(AscendStoreConnector)
+        connector.use_layerwise = True
+        connector.connector_scheduler = MagicMock()
+        output = types.SimpleNamespace(has_sync_kv_loads=False)
+        connector.build_connector_meta(output)
+        self.assertTrue(output.has_sync_kv_loads)
+        connector.connector_scheduler.build_connector_meta.assert_called_once_with(output)
+
+    def test_non_layerwise_preserves_async_load_scheduling(self):
+        connector = AscendStoreConnector.__new__(AscendStoreConnector)
+        connector.use_layerwise = False
+        connector.connector_scheduler = MagicMock()
+        output = types.SimpleNamespace(has_sync_kv_loads=False)
+        connector.build_connector_meta(output)
+        self.assertFalse(output.has_sync_kv_loads)
+
+    def test_layerwise_supports_older_scheduler_output(self):
+        connector = AscendStoreConnector.__new__(AscendStoreConnector)
+        connector.use_layerwise = True
+        connector.connector_scheduler = MagicMock()
+        output = types.SimpleNamespace()
+        connector.build_connector_meta(output)
+        self.assertFalse(hasattr(output, "has_sync_kv_loads"))
+
     def test_pp_handshake_metadata_is_ignored(self):
         connector = AscendStoreConnector.__new__(AscendStoreConnector)
         metadata = {

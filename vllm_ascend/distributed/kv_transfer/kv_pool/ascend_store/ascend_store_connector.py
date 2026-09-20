@@ -169,6 +169,11 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         scheduler_output: SchedulerOutput,
     ) -> KVConnectorMetadata:
         assert self.connector_scheduler is not None
+        if self.use_layerwise and hasattr(scheduler_output, "has_sync_kv_loads"):
+            # Layer hooks need this step's state before forward even on a
+            # cache miss: start_load_kv also resets counters and prepares D2H.
+            # Recent vLLM otherwise defers it until after the model forward.
+            scheduler_output.has_sync_kv_loads = True
         return self.connector_scheduler.build_connector_meta(scheduler_output)
 
     def request_finished(
