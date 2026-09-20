@@ -2464,9 +2464,6 @@ class NPUModelRunner(GPUModelRunner):
             # update global cos, sin
             update_cos_sin(positions)
 
-        if self.kvpp.scheduler is not None:
-            self.kvpp.prepare_forward(bool(np.any(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)))
-
         if self.dynamic_eplb:
             self.eplb_updator.forward_before()
 
@@ -2508,6 +2505,10 @@ class NPUModelRunner(GPUModelRunner):
                 ),
             ) as kv_connector_output,
         ):
+            # start_load_kv resets per-forward completion events and primes H2D.
+            # Start broadcast only afterwards, never on a previous step's event.
+            if self.kvpp.scheduler is not None:
+                self.kvpp.prepare_forward(bool(np.any(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)))
             # Mamba state copy must run AFTER the KV transfer load finishes,
             # otherwise the copy would race with in-flight layerwise loads and
             # read half-loaded state. With a layerwise-capable connector we

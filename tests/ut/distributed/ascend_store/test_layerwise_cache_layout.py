@@ -46,6 +46,7 @@ def _make_vllm_config(num_layers: int, num_shared_buffers: int):
     model_config = MagicMock()
     model_config.get_num_layers.return_value = num_layers
     return SimpleNamespace(
+        additional_config={},
         kv_transfer_config=SimpleNamespace(
             kv_connector="AscendStoreConnector",
             kv_connector_extra_config={
@@ -587,3 +588,13 @@ def test_packed_cache_tensor_descriptors_are_rejected():
             kv_cache_config,
             _make_vllm_config(3, 1),
         )
+
+
+def test_kvpp_keeps_logical_descriptors_for_its_own_allocator():
+    config = _make_vllm_config(6, 3)
+    config.additional_config = {"enable_kvpp": True}
+    config.parallel_config = SimpleNamespace(tensor_parallel_size=2, prefill_context_parallel_size=1)
+    tensors = [object() for _ in range(6)]
+    cache = SimpleNamespace(kv_cache_tensors=tensors)
+    apply_layerwise_kv_cache_plan(cache, config)
+    assert cache.kv_cache_tensors is tensors

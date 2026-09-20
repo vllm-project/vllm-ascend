@@ -47,6 +47,7 @@ The following table lists individual feature combinations with KVPP. It does not
 | PCP | ✅ Supported | Requires Model Runner V2; caches are shared across PCP × TP ranks. |
 | DCP | ❌ Not supported | Cannot currently be combined with KVPP. |
 | P/D disaggregation | ✅ Supported | Uses `MooncakeConnectorV2` (Experimental); enable KVPP only on the prefill node. |
+| P-side layerwise offload | Experimental | Memcache, `kv_producer`, V1 eager, PP=PCP=1, no speculative decoding; see below. |
 | KV pooling | ✅ Supported | Memcache with `AscendStoreConnector`, `kv_producer` or `kv_both`, and asynchronous whole-block loading. |
 | PCP + P/D disaggregation + KVPP | ❌ Not supported | `MooncakeConnectorV2` does not yet support PCP. |
 | PCP + KV pooling + KVPP | ❌ Not supported | PCP and KV pooling are individually supported with KVPP, but the three-way combination is not supported. |
@@ -131,9 +132,29 @@ Configure the memcache SDK and MetaService as described in [KV Pool](kv_pool.md)
 --kv-transfer-config '{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"lookup_rpc_port":"0","backend":"memcache","use_layerwise":false,"load_async":true}}'
 ```
 
-The example uses `kv_producer`; you can also set `kv_role` to `kv_both`. Both roles save and load prefixes in this pooling configuration. Keep `use_layerwise=false`, `load_async=true`, and `discard_partial_chunks=true` (the default). Layerwise pooling, KV events, and consumer write-back are not supported with KVPP.
+The example uses `kv_producer`; you can also set `kv_role` to `kv_both`. Both roles save and load prefixes in this pooling configuration. Keep `use_layerwise=false`, `load_async=true`, and `discard_partial_chunks=true` (the default). KV events and consumer write-back are not supported with KVPP. The P-side offload configuration below uses a separate layerwise path.
 
 Each TP rank saves one complete object per token block containing its persistent target layers and its own MTP caches. Scratch buffers are excluded. Loading restores those same persistent buffers; the existing KVPP broadcast supplies other ranks when a layer executes. Pool lookup requires every nonempty owner shard across all PP stages.
+
+### P-Side Layerwise Offload (Experimental)
+
+KVPP can compose with Memcache layerwise offload on the prefill node. Configure the SDK and MetaService as described in [KV Pool](kv_pool.md), select Model Runner V1, and add:
+
+```bash
+VLLM_USE_V2_MODEL_RUNNER=0 vllm serve <model-path> \
+    --tensor-parallel-size 2 \
+    --enforce-eager \
+    --additional-config '{"enable_kvpp":true}' \
+    --kv-transfer-config '{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backend":"memcache","use_layerwise":true,"layerwise_num_shared_buffers":3,"layerwise_prefetch_layers":3}}'
+```
+
+This combination requires PP=1, PCP=1, DCP=1 and no speculative decoding. The shared-buffer and prefetch counts must both be 3; do not set `layerwise_independent_layers`. Other layerwise backends and Model Runner V2 are outside this combination's scope.
+
+At compute layer L, Memcache loads L+2 while KVPP broadcasts L+1. The owner waits for its H2D completion before broadcasting. Only layer owners perform H2D; each rank has three reusable owner buffers and two separate peer receive buffers. A buffer can be overwritten only after the previous layer's compute and D2H have finished. The first two layers are primed before the first broadcast.
+
+The Memcache full-object publication protocol remains single-writer: the existing writer still saves all computed layers. Owner-only H2D does not mean owner-only D2H. This differs from the whole-block pooling configuration above, where each owner publishes a separate shard. Use separate pool namespaces/model names when comparing these configurations.
+
+This is a prefill-side feature; it does not enable KVPP on a decode-only node. Reply correctness checks should include cold chunked prefill and repeated prefix reuse. Performance overlap and throughput depend on the workload and require separate profiling.
 
 ## Performance
 

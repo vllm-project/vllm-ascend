@@ -74,3 +74,15 @@ vllm serve <model-path> \
 ```
 
 `enable_kvpp` defaults to `false`. With PP enabled, each stage assigns owners and broadcasts within its own TP group.
+
+## P-side layerwise offload
+
+The Memcache shared-buffer opt-in uses the same full-layer HCCL broadcast transport. It adds a load-completion dependency in the prefetch executor and gives the owner three reusable buffers, while keeping the two peer receive buffers. `KVPPPhysicalCachePlan.buffer_slots()` drives both physical allocation and the connector's reuse predecessors so their lifetimes cannot diverge.
+
+For layer L, attention queues H2D through L+2, and the KVPP hook queues the broadcast of L+1. H2D for the first two layers starts without an attention gate. The model runner starts KVPP only after `start_load_kv` has reset the previous forward's completion events. The compute and broadcast paths share those events until the next forward; neither clears a completion the other still needs.
+
+All ranks enqueue layers in global order, including empty non-owner transfer tasks. Empty tasks still fence previous compute and D2H users of a peer buffer. Only owner tasks copy host KV into HBM. Full-object Memcache publication retains its existing single writer, and read leases are released at the end of the forward rather than at the last owned H2D layer.
+
+The physical budget accounts for three owner and two peer buffers directly; the generic layerwise logical-memory multiplier is skipped. The generic layerwise tensor-merging pass is also skipped because the KVPP allocator consumes the complete logical cache specification.
+
+For replicated Memcache offload caches, a TP CPU barrier at the next forward boundary prevents a non-writer rank from acquiring a read lease before the preceding writer has finished publishing the full object. Layerwise overlap within a forward is unchanged.
