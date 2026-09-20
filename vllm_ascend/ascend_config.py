@@ -1033,37 +1033,20 @@ class DynamicSpecConfig:
     # Dynamic speculative-length methods. "dspark" relies on the DSpark
     # confidence head; models without such a head need another method.
     SUPPORTED_METHODS: ClassVar[tuple[str, ...]] = ("dspark", "dflash")
-    SUPPORTED_POLICIES: ClassVar[tuple[str, ...]] = (
-        "confidence_budget",
-        "hardware_aware",
-    )
 
     # None disables the dynamic speculative-length path.
     method: str | None = None
     # Parameters consumed by the selected upstream dynamic method.
     method_params: dict[str, Any] = dataclasses.field(default_factory=dict)
-    # An object opts into V2 physical K with online auto-tuning enabled by
-    # default. Recommended: {"min_k": 3}; maximum K comes from speculative_config
-    # and candidate/capture widths are inferred from that range. Optional
-    # enabled=False disables physical K; auto_tune={"enabled": False} selects
-    # the acceptance-based fallback. Legacy capture_k, slack, percentile and
-    # hybrid overrides remain supported. AV profiling and per-batch empirical
-    # acceptance own all other tuning.
-    # None retains the legacy configuration path.
+    # An object opts into V2 physical K. Maximum K comes from
+    # speculative_config; online auto-tuning defaults to enabled.
     physical_k: dict[str, Any] | None = None
-    # ``hardware_aware`` adds Ascend physical K control over upstream
-    # confidence-based adaptive verification.
-    policy: str = "confidence_budget"
 
     @model_validator(mode="after")
     def _validate(self):
         if self.method is not None and self.method not in self.SUPPORTED_METHODS:
             raise ValueError(
                 f"dynamic_spec_config.method must be one of {self.SUPPORTED_METHODS} or None, got {self.method!r}"
-            )
-        if self.policy not in self.SUPPORTED_POLICIES:
-            raise ValueError(
-                f"dynamic_spec_config.policy must be one of {self.SUPPORTED_POLICIES}, got {self.policy!r}"
             )
         if not isinstance(self.method_params, dict):
             raise TypeError(
@@ -1074,7 +1057,6 @@ class DynamicSpecConfig:
         resolve_physical_k(
             {
                 "method": self.method,
-                "policy": self.policy,
                 "physical_k": self.physical_k,
             }
         )

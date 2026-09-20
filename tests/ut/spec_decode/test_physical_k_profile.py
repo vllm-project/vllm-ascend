@@ -48,7 +48,6 @@ def config():
         additional_config={
             "dynamic_spec_config": {
                 "method": "dspark",
-                "policy": "hardware_aware",
                 "physical_k": {"min_k": 3},
             }
         }
@@ -114,10 +113,9 @@ def test_worker_recommends_k_from_profile_cost_and_confidence():
     per_req = {str(i): 5 for i in range(8)}
     drafts = {str(i): [1, 2, 3, 4] for i in range(8)}
     manager.get_num_tokens(per_req, drafts)
-    batch_size, physical_k, score, cost_floor = manager._physical_k_recommendation
+    batch_size, physical_k, cost_floor = manager._physical_k_recommendation
     assert batch_size == 8
     assert physical_k == 3
-    assert score > 0
     assert cost_floor == 3
 
 
@@ -150,7 +148,7 @@ def test_cost_floor_rejects_shorter_k_dominated_by_wider_graph():
     per_req = {str(i): 5 for i in range(8)}
     drafts = {str(i): [1, 2, 3, 4] for i in range(8)}
     manager.get_num_tokens(per_req, drafts)
-    assert manager._physical_k_recommendation[3] == 4
+    assert manager._physical_k_recommendation[2] == 4
 
 
 def test_eager_target_samples_do_not_price_draft_k():

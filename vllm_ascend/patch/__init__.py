@@ -1281,15 +1281,18 @@
 #
 # ** 32. File: worker/patch_v2/patch_adaptive_verification.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.worker.gpu.spec_decode.adaptive_verification._assign_draft_token_budget_compiled`
+#   1. Adaptive-verification budget assignment and H2D copies.
 #    Why:
 #       The upstream adaptive-verification draft-budget allocator is wrapped by
-#       `torch.compile`, whose compiled path is not supported on Ascend.
+#       `torch.compile`, whose compiled path is not supported on Ascend. Its
+#       non-blocking temporary H2D copies are not safely ordered before the
+#       dependent allocator/cumsum on the current NPU stack.
 #    How:
-#       Replace the compiled wrapper with the original eager allocator while
-#       preserving the upstream budget-allocation algorithm.
+#       Use the original eager allocator and synchronous copies while reusing
+#       the upstream `reallocate_drafts` implementation.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/47808
 #    Future Plan:
-#       Remove this patch when the compiled allocator is supported on Ascend.
+#       Remove this patch when both compiled allocation and ordered async H2D
+#       copies are supported on Ascend.
 #

@@ -222,7 +222,6 @@ physical K with the following minimal configuration:
 {
   "dynamic_spec_config": {
     "method": "dspark",
-    "policy": "hardware_aware",
     "physical_k": {"min_k": 3}
   }
 }
@@ -231,8 +230,7 @@ physical K with the following minimal configuration:
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
 | `physical_k.min_k` | int | `3` | Lowest candidate K. Maximum K comes from `speculative_config.num_speculative_tokens`. |
-| `physical_k.enabled` | bool | `True` | Optional switch to disable physical K control. Omitting `physical_k` also leaves it disabled. |
-| `physical_k.auto_tune.enabled` | bool | `True` | Select physical K from AV startup-profiled NPU costs and confidence estimates. Set to `False` to use the acceptance-based fallback. |
+| `physical_k.auto_tune` | bool | `True` | Select physical K from AV startup-profiled NPU costs and confidence estimates. Set to `False` to use the acceptance-based fallback. |
 
 Candidate and capture widths default to the range from `min_k` to maximum K.
 The worker preserves the full upstream profile for maximum K and profiles two
@@ -242,15 +240,12 @@ beyond the measured batch range. The scheduler combines that recommendation
 with empirical per-position acceptance tracked independently for power-of-two
 batch buckets. This keeps large RL rollout batches adaptive while preventing
 K oscillation as the active batch shrinks after EOS. Small-batch protection,
-two-step batch-bucket switching, asymmetric K hysteresis, an eight-step minimum
-dwell, and periodic full-K probes use built-in defaults. A shorter K is never
+batch-bucket switching, K hysteresis, minimum dwell, and periodic full-K probes
+use built-in defaults. A shorter K is never
 selected when a wider profiled graph has equal or lower draft cost, and a
 narrowed runtime step cannot overwrite the last full-width recommendation.
-Existing `capture_k`,
-`slack`, `percentile` and `hybrid` overrides remain supported; obsolete
-wall-clock autotune knobs are rejected. A candidate without a compatible FULL
-graph may execute eagerly; configuring a capture width does not guarantee a graph
-hit for every batch shape.
+Candidate and capture widths are derived from `min_k`; a candidate without a
+compatible FULL graph may execute eagerly.
 
 **scheduler_config.short_request_first_config**
 

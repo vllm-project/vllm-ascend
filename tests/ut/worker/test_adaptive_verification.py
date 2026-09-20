@@ -2,6 +2,7 @@ import importlib
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import numpy as np
 import pytest
 import torch
 from vllm.v1.attention.backend import AttentionCGSupport
@@ -95,11 +96,16 @@ def test_sfa_metadata_uses_reallocated_adaptive_token_shape(
     assert kwargs["slot_mapping"].shape[0] == expected_tokens
 
 
-def test_adaptive_verification_patch_uses_uncompiled_budget_assignment(monkeypatch):
+def test_adaptive_verification_patch_uses_ascend_safe_operations(monkeypatch):
     import vllm.v1.worker.gpu.spec_decode.adaptive_verification as adaptive
 
     monkeypatch.setattr(adaptive, "_assign_draft_token_budget_compiled", object())
+    monkeypatch.setattr(adaptive, "async_copy_to_gpu", object())
     module = importlib.import_module("vllm_ascend.patch.worker.patch_v2.patch_adaptive_verification")
     importlib.reload(module)
 
     assert adaptive._assign_draft_token_budget_compiled is adaptive._assign_draft_token_budget
+    assert adaptive.async_copy_to_gpu is module._copy_to_npu_sync
+    output = torch.empty(2, dtype=torch.int32)
+    assert adaptive.async_copy_to_gpu(np.array([1, 2], dtype=np.int32), out=output) is output
+    assert output.tolist() == [1, 2]
