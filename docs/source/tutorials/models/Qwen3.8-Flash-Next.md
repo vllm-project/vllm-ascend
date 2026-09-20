@@ -30,7 +30,6 @@ The following model weights are available:
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as /root/.cache/.
 
-
 ## 4 Installation
 
 ### 4.1 Docker Image Installation
