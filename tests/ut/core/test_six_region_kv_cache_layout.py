@@ -360,8 +360,12 @@ def test_runner_materializes_contiguous_six_region_views() -> None:
             assert state.untyped_storage().data_ptr() == (backing.untyped_storage().data_ptr())
             assert state.numel() * state.element_size() == region.size
 
+    raw_qsa = caches["model.layers.11.self_attn.indexer.raw_key_cache"]
+    assert raw_qsa.shape == (3, 1, 8, 32)
+    assert raw_qsa.is_contiguous()
+
     compressed = caches["model.layers.11.self_attn.indexer.compressed_key_cache"]
-    assert compressed.shape == (3, 64, 1, 32)
+    assert compressed.shape == (3, 1, 64, 32)
     assert compressed.is_contiguous()
 
 
