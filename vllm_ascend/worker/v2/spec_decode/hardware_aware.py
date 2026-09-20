@@ -51,20 +51,11 @@ def v2_varlen_physical_k_enabled(vllm_config: Any) -> bool:
 
 
 def configured_capture_k(vllm_config: Any, max_k: int) -> tuple[int, ...]:
-    """Return the physical K values for which V2 FULL graphs are captured."""
+    """Capture every physical K from the configured minimum through max K."""
 
     params = resolve_physical_k(_dynamic_config(vllm_config)) or {}
-    configured = params.get("capture_k")
-    if configured is None:
-        min_k = max(1, min(int(params.get("min_k", 1)), max_k))
-        values = range(min_k, max_k + 1)
-    elif isinstance(configured, (list, tuple)):
-        values = configured
-    else:
-        values = (configured,)
-
-    result = sorted({max(1, min(int(value), max_k)) for value in values})
-    return tuple(result)
+    min_k = max(1, min(int(params.get("min_k", 3)), max_k))
+    return tuple(range(min_k, max_k + 1))
 
 
 def query_width(sample_from_anchor: bool, draft_k: int) -> int:

@@ -25,8 +25,7 @@ def make_speculator():
             additional_config={
                 "dynamic_spec_config": {
                     "method": "dspark",
-                    "policy": "hardware_aware",
-                    "physical_k": {"capture_k": [2, 5]},
+                    "physical_k": {"min_k": 2},
                 }
             }
         ),
@@ -41,7 +40,7 @@ def make_speculator():
 
 
 def test_capture_widths_use_compact_config():
-    assert configured_capture_k(make_speculator().vllm_config, 5) == (2, 5)
+    assert configured_capture_k(make_speculator().vllm_config, 5) == (2, 3, 4, 5)
 
 
 def test_min_k_only_infers_capture_widths():

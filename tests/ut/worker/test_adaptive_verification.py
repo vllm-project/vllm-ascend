@@ -23,8 +23,6 @@ from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffe
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
 
-_NATIVE_TORCH_SUM = torch.sum
-
 
 @pytest.mark.parametrize(
     "builder_cls",
@@ -77,7 +75,7 @@ def test_adaptive_tail_dummy_run_balances_moe_routing(adaptive_verification, con
     assert get_mrv2_in_profile_run() is False
 
 
-def test_adaptive_verification_patch_uses_uncompiled_budget_assignment(monkeypatch):
+def test_adaptive_verification_patch_uses_ascend_safe_operations(monkeypatch):
     import vllm.v1.worker.gpu.spec_decode.adaptive_verification as adaptive
 
     if not vllm_version_is("0.32.0"):

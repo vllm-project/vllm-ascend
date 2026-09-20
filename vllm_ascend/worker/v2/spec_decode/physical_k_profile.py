@@ -40,9 +40,9 @@ def _batch_bucket(batch_size: int) -> int:
 def _candidate_k(vllm_config: Any, max_k: int) -> tuple[int, ...]:
     dynamic = (getattr(vllm_config, "additional_config", None) or {}).get("dynamic_spec_config", {})
     params = resolve_physical_k(dynamic) or {}
-    if not params.get("enabled") or not params.get("auto_tune_enabled"):
+    if not params.get("auto_tune"):
         return ()
-    values = params.get("capture_k") or range(int(params.get("min_k", 3)), max_k + 1)
+    values = range(int(params.get("min_k", 3)), max_k + 1)
     return tuple(sorted({max(1, min(int(k), max_k)) for k in values} | {max_k}))
 
 
@@ -113,9 +113,7 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
     original_batches = manager.batches_to_profile
     original_set_curves = manager.set_initial_cost_curves
     original_get_num_tokens = manager.get_num_tokens
-    dynamic = (getattr(vllm_config, "additional_config", None) or {}).get("dynamic_spec_config", {})
-    params = resolve_physical_k(dynamic) or {}
-    min_batch_size = int(params.get("hybrid_min_batch_size", 8))
+    min_batch_size = 8
     manager._physical_k_profile_cases = []
     manager._physical_k_profile_is_upstream = []
     manager._physical_k_draft_costs = None
@@ -387,7 +385,7 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
                 fresh_width,
             )
             self._physical_k_last_logged[bucket] = selected
-        return batch_size, selected, score, minimum_useful_k
+        return batch_size, selected, minimum_useful_k
 
     def get_num_tokens(self, num_tokens_per_req, draft_tokens) -> int:
         result = original_get_num_tokens(num_tokens_per_req, draft_tokens)
