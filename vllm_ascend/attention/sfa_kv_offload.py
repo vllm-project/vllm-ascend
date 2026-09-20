@@ -33,6 +33,7 @@ from vllm.forward_context import (
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 
+from vllm_ascend import envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.sfa_v1 import (
@@ -599,7 +600,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             raise RuntimeError("fused_overlap offload requires req_ids_tensor metadata for selection invalidation")
         device = last_req_ids.device
         token_to_req = attn_metadata.token_to_req[:num_tokens].to(device=device, dtype=torch.long)
-        if not get_forward_context().capturing:
+        if not get_forward_context().capturing and envs_ascend.VLLM_ASCEND_FSA_VALIDATE_DEVICE_METADATA:
             invalid_req_mapping = (token_to_req < 0) | (token_to_req >= num_reqs)
             if bool(invalid_req_mapping.any().item()):
                 raise RuntimeError(
@@ -675,6 +676,8 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             raise RuntimeError(
                 f"fused_overlap token_to_req length mismatch: got {token_to_req.numel()} for num_tokens={num_tokens}"
             )
+        if not envs_ascend.VLLM_ASCEND_FSA_VALIDATE_DEVICE_METADATA:
+            return
         invalid_req_mapping = (token_to_req < 0) | (token_to_req >= num_reqs)
         if bool(invalid_req_mapping.any().item()):
             raise RuntimeError(
@@ -714,7 +717,11 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             .to(dtype=torch.int32)
             .contiguous()
         )
-        if not get_forward_context().capturing and bool((token_kv_lens <= 0).any().item()):
+        if (
+            not get_forward_context().capturing
+            and envs_ascend.VLLM_ASCEND_FSA_VALIDATE_DEVICE_METADATA
+            and bool((token_kv_lens <= 0).any().item())
+        ):
             raise RuntimeError(
                 "fused_overlap MTP flatten produced non-positive per-token kv lenses: "
                 f"token_kv_lens={token_kv_lens.detach().cpu().tolist()}"
