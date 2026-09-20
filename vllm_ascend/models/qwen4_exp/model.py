@@ -26,6 +26,7 @@ from .ops import (
     hc_gate_mix,
     hc_silu,
 )
+from .ple import patch_upstream_ple_short_conv
 
 # Keep the upstream model and weight loader authoritative. HyperConnection's
 # CUDA glue functions are module globals, so replace them before importing the
@@ -35,6 +36,11 @@ upstream_hc.hc_combine = hc_combine
 upstream_hc.hc_combine_norm = hc_combine_norm
 upstream_hc.hc_gate_mix = hc_gate_mix
 upstream_hc.hc_silu = hc_silu
+
+# PLE's depthwise F.conv1d otherwise lowers to ACLop Conv2D when torch-npu
+# internal formats are enabled. Scope the graph-safe option override to the
+# upstream PLE custom op instead of changing it globally for the worker.
+patch_upstream_ple_short_conv()
 
 from vllm.models.qwen4_exp.amd import model as upstream_model  # noqa: E402
 
