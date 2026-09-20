@@ -4,6 +4,7 @@
 
 from dataclasses import replace
 
+import torch
 from vllm.config import VllmConfig
 from vllm.v1.core.kv_cache_utils import may_override_num_blocks
 from vllm.v1.kv_cache_interface import (
@@ -18,8 +19,88 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSlidingWindowMLASpec,
 )
+from vllm_ascend.device.hardware_profile import (
+    HardwareCapability,
+    get_current_hardware_profile,
+)
 
 STATE_RING_ROWS = 32
+
+A5_CMP_LOGICAL_DIM = 512
+A5_CMP_GROUP_SIZE = 16
+A5_CMP_ROW_BYTES = A5_CMP_LOGICAL_DIM // 2 + (A5_CMP_LOGICAL_DIM // A5_CMP_GROUP_SIZE) * torch.bfloat16.itemsize
+A5_WIN_LOGICAL_DIM = 512
+A5_WIN_GROUP_SIZE = 32
+A5_WIN_ROW_BYTES = A5_WIN_LOGICAL_DIM + (A5_WIN_LOGICAL_DIM // A5_WIN_GROUP_SIZE) * torch.bfloat16.itemsize
+A5_INDEX_LOGICAL_DIM = 128
+A5_INDEX_GROUP_SIZE = 32
+A5_INDEX_DATA_BYTES = A5_INDEX_LOGICAL_DIM // 2
+A5_INDEX_SCALE_COUNT = A5_INDEX_LOGICAL_DIM // A5_INDEX_GROUP_SIZE
+
+
+def uses_a5_packed_cache() -> bool:
+    """Select the V4.1 cache ABI from the detected hardware profile."""
+    return get_current_hardware_profile().supports(HardwareCapability.DSV41_PACKED_CACHE)
+
+
+def make_swa_cache_spec(*, block_size, window_size, head_size, dtype, cache_dtype):
+    if uses_a5_packed_cache():
+        head_size = A5_WIN_ROW_BYTES
+        dtype = torch.uint8
+        cache_dtype = "a5_mxfp8_bf16_scale"
+    return AscendSlidingWindowMLASpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=head_size,
+        dtype=dtype,
+        sliding_window=window_size,
+        cache_dtype_str=cache_dtype,
+        model_version="deepseek_v41",
+        alignment=None,
+    )
+
+
+def make_long_cache_spec(*, block_size, head_size, compress_ratio):
+    if uses_a5_packed_cache():
+        head_size = A5_CMP_ROW_BYTES
+        dtype = torch.uint8
+        scale_dtype = torch.bfloat16
+    else:
+        dtype = torch.bfloat16
+        scale_dtype = torch.int8
+    return AscendMLAAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=head_size,
+        dtype=dtype,
+        tokens_per_state=compress_ratio,
+        model_version="deepseek_v41",
+        storage_block_size=block_size // compress_ratio,
+        scale_dtype=scale_dtype,
+    )
+
+
+def make_index_cache_spec(*, block_size, head_size, compress_ratio):
+    if uses_a5_packed_cache():
+        head_size = A5_INDEX_DATA_BYTES
+        dtype = torch.uint8
+        scale_dim = A5_INDEX_SCALE_COUNT
+        scale_dtype = torch.uint8
+    else:
+        dtype = torch.int8
+        scale_dim = 1
+        scale_dtype = torch.float16
+    return AscendMLAAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=head_size,
+        dtype=dtype,
+        tokens_per_state=compress_ratio,
+        model_version="deepseek_v41",
+        storage_block_size=block_size // compress_ratio,
+        scale_dim=scale_dim,
+        scale_dtype=scale_dtype,
+    )
 
 
 def is_deepseek_v41_cache(specs_or_groups):

@@ -12,7 +12,15 @@ from vllm_ascend.attention.dsa_v41 import (
     DeepseekV41CacheLayer,
     scatter_cache_sk,
 )
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.models.deepseek_v41.cache_config import (
+    make_index_cache_spec,
+    uses_a5_packed_cache,
+)
+from vllm_ascend.ops.dsv41_a5 import (
+    apply_partial_rotary_inplace,
+    run_a5_indexer,
+    write_index_cache,
+)
 from vllm_ascend.ops.triton.prepare_indexer_indices import prepare_indexer_indices
 from vllm_ascend.ops.triton.quantize_indexer_query import quantize_indexer_query
 from vllm_ascend.worker.device_metadata import (
@@ -39,6 +47,7 @@ class DeepseekV41Indexer(nn.Module):
     ):
         super().__init__()
         self.owns_k = owns_k
+        self.uses_a5_packed_cache = uses_a5_packed_cache()
         self.compress_ratio = compress_ratio
         self.n_heads = int(config.index_n_heads)
         self.width = int(config.index_head_dim)
@@ -73,16 +82,10 @@ class DeepseekV41Indexer(nn.Module):
             self.k_cache = DeepseekV41CacheLayer(
                 vllm_config,
                 f"{prefix}.k_cache",
-                AscendMLAAttentionSpec(
+                make_index_cache_spec(
                     block_size=vllm_config.cache_config.block_size,
-                    num_kv_heads=1,
                     head_size=self.width,
-                    dtype=torch.int8,
-                    tokens_per_state=compress_ratio,
-                    model_version="deepseek_v41",
-                    storage_block_size=(vllm_config.cache_config.block_size // compress_ratio),
-                    scale_dim=1,
-                    scale_dtype=torch.float16,
+                    compress_ratio=compress_ratio,
                 ),
             )
 
@@ -96,16 +99,28 @@ class DeepseekV41Indexer(nn.Module):
         if not self.owns_k or latent.shape[0] == 0:
             return
         key = self.k_norm(self.wk(latent)).view(-1, 1, self.width)
-        torch.ops._C_ascend.inplace_partial_rotary_mul(
-            key.unsqueeze(1),
-            cos,
-            sin,
-            rotary_mode="interleave",
-            partial_slice=[self.width - self.rope_width, self.width],
-        )
+        if self.uses_a5_packed_cache:
+            apply_partial_rotary_inplace(
+                key,
+                cos,
+                sin,
+                start=self.width - self.rope_width,
+                end=self.width,
+            )
+        else:
+            torch.ops._C_ascend.inplace_partial_rotary_mul(
+                key.unsqueeze(1),
+                cos,
+                sin,
+                rotary_mode="interleave",
+                partial_slice=[self.width - self.rope_width, self.width],
+            )
         key = key.squeeze(1)
-        quantized, scale = torch_npu.npu_dynamic_quant(key, dst_type=torch.int8)
         k_cache, scale_cache = self.k_cache.kv_cache[0]
+        if self.uses_a5_packed_cache:
+            write_index_cache((k_cache, scale_cache), slots, key)
+            return
+        quantized, scale = torch_npu.npu_dynamic_quant(key, dst_type=torch.int8)
         scatter_cache_sk(k_cache, slots, quantized)
         scatter_cache_sk(
             scale_cache,
@@ -128,16 +143,28 @@ class DeepseekV41Indexer(nn.Module):
         candidate_topk_blocks,
         candidate_block_size,
         candidates,
+        candidate_lengths=None,
+        topk_lengths=None,
+        indices_output=None,
     ):
         """Score index K, optionally filter blocks, then return position TopK."""
         query = self._output(self.wq_b, qr).unflatten(-1, (self.n_heads, self.width))
-        torch.ops._C_ascend.inplace_partial_rotary_mul(
-            query.unsqueeze(1),
-            cos,
-            sin,
-            rotary_mode="interleave",
-            partial_slice=[self.width - self.rope_width, self.width],
-        )
+        if self.uses_a5_packed_cache:
+            apply_partial_rotary_inplace(
+                query,
+                cos,
+                sin,
+                start=self.width - self.rope_width,
+                end=self.width,
+            )
+        else:
+            torch.ops._C_ascend.inplace_partial_rotary_mul(
+                query.unsqueeze(1),
+                cos,
+                sin,
+                rotary_mode="interleave",
+                partial_slice=[self.width - self.rope_width, self.width],
+            )
         weights = self._output(self.weights_proj, hidden_states)
         weights = weights.float() * self.weights_scale
 
@@ -152,6 +179,9 @@ class DeepseekV41Indexer(nn.Module):
             candidate_topk_blocks=candidate_topk_blocks,
             candidate_block_size=candidate_block_size,
             candidates=candidates,
+            candidate_lengths=candidate_lengths,
+            topk_lengths=topk_lengths,
+            indices_output=indices_output,
         )
 
     def select_projected(
@@ -167,6 +197,9 @@ class DeepseekV41Indexer(nn.Module):
         candidate_topk_blocks,
         candidate_block_size,
         candidates,
+        candidate_lengths=None,
+        topk_lengths=None,
+        indices_output=None,
     ):
         """Run QLI V2 on paged INT8 K; candidates are block IDs, not positions.
 
@@ -177,15 +210,42 @@ class DeepseekV41Indexer(nn.Module):
         candidate_shape = (query.shape[0], 1, candidate_topk_blocks)
         topk = self.index_topk
         if query.shape[0] == 0:
-            selected = torch.full((0, topk), -1, dtype=torch.int32, device=query.device)
+            selected = (
+                torch.full((0, topk), -1, dtype=torch.int32, device=query.device)
+                if indices_output is None
+                else indices_output
+            )
             if is_candidate_source:
                 candidates = torch.full(candidate_shape, -1, dtype=torch.int32, device=query.device)
             return selected, candidates
         if source_metadata.max_cache_seq_len == 0:
-            selected = torch.full((query.shape[0], 0), -1, dtype=torch.int32, device=query.device)
+            selected = (
+                torch.full((query.shape[0], 0), -1, dtype=torch.int32, device=query.device)
+                if indices_output is None
+                else indices_output
+            )
             if is_candidate_source:
                 candidates = torch.full(candidate_shape, -1, dtype=torch.int32, device=query.device)
             return selected, candidates
+
+        if self.uses_a5_packed_cache:
+            return run_a5_indexer(
+                query,
+                weights,
+                positions,
+                source_cache,
+                source_metadata,
+                topk=topk,
+                compress_ratio=self.compress_ratio,
+                is_candidate_source=is_candidate_source,
+                uses_candidate_filter=uses_candidate_filter,
+                candidate_topk_blocks=candidate_topk_blocks,
+                candidate_block_size=candidate_block_size,
+                candidates=candidates,
+                candidate_lengths=candidate_lengths,
+                topk_lengths=topk_lengths,
+                indices_output=indices_output,
+            )
 
         quantized_query, query_scale = quantize_indexer_query(query)
         weights = weights.to(torch.float16)
@@ -223,5 +283,11 @@ class DeepseekV41Indexer(nn.Module):
             candidate_block_size=candidate_block_size,
             **common,
         )
-        selected = prepare_indexer_indices(selected.squeeze(1), positions, self.compress_ratio)
+        selected = prepare_indexer_indices(
+            selected.squeeze(1),
+            positions,
+            self.compress_ratio,
+            indices_output=indices_output,
+            lengths_output=topk_lengths,
+        )
         return selected, candidate_out if is_candidate_source else candidates

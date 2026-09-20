@@ -54,7 +54,6 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.dsa_v41 import (
     DeepseekV41CacheLayer,
 )
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSlidingWindowMLASpec
 from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
@@ -62,6 +61,8 @@ from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_shard,
 )
 from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention, DSAModules
+from vllm_ascend.ops.dsv41_a5 import hc_post as a5_hc_post
+from vllm_ascend.ops.dsv41_a5 import hc_pre as a5_hc_pre
 from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding
 from vllm_ascend.ops.triton.mul_add import muls_add_triton
 from vllm_ascend.utils import (
@@ -70,6 +71,11 @@ from vllm_ascend.utils import (
     normalize_deepseek_v41_config,
 )
 
+from .cache_config import (
+    make_long_cache_spec,
+    make_swa_cache_spec,
+    uses_a5_packed_cache,
+)
 from .compressor import DeepseekV41Compressor
 from .engram import (
     EngramQueryGroup,
@@ -471,9 +477,11 @@ class DeepseekV41Topology:
 class DeepseekV41SharedAttentionState:
     """Per-forward handoff between index sources and their consumer layers."""
 
-    def __init__(self, topk_indices, candidates):
+    def __init__(self, topk_indices, candidates, candidate_lengths=None, topk_lengths=None):
         self.topk_indices = topk_indices
         self.candidates = candidates
+        self.candidate_lengths = candidate_lengths
+        self.topk_lengths = topk_lengths
 
     def reset(self):
         # Source layers overwrite the active rows before any consumer reads
@@ -547,15 +555,12 @@ class AscendDeepseekV41SWACache(DeepseekV41CacheLayer):
         from vllm_ascend.models.layer.attention.layer import DSV4_BLOCK_SIZES
 
         block_size = DSV4_BLOCK_SIZES[cache_config.block_size][0][1]
-        spec = AscendSlidingWindowMLASpec(
+        spec = make_swa_cache_spec(
             block_size=block_size,
-            num_kv_heads=1,
+            window_size=window_size,
             head_size=head_dim,
             dtype=dtype,
-            sliding_window=window_size,
-            cache_dtype_str=cache_config.cache_dtype,
-            model_version="deepseek_v41",
-            alignment=None,
+            cache_dtype=cache_config.cache_dtype,
         )
         super().__init__(get_current_vllm_config(), prefix, spec)
         self.head_dim = head_dim
@@ -690,20 +695,17 @@ class DeepseekV41Attention(DeepseekV41SWAAttention):
         self.topology = topology
         self.shared_state = None
         self.prefix = prefix
+        self.uses_a5_packed_cache = uses_a5_packed_cache()
         width = config.head_dim
         self.softmax_scale = width**-0.5
         if role.is_kv_source:
             self.long_kv_cache = DeepseekV41CacheLayer(
                 vllm_config,
                 f"{prefix}.long_kv_cache",
-                AscendMLAAttentionSpec(
+                make_long_cache_spec(
                     block_size=block_size,
-                    num_kv_heads=1,
                     head_size=width,
-                    dtype=torch.bfloat16,
-                    tokens_per_state=role.compress_ratio,
-                    model_version="deepseek_v41",
-                    storage_block_size=block_size // role.compress_ratio,
+                    compress_ratio=role.compress_ratio,
                 ),
             )
         self.compressor = (
@@ -814,6 +816,7 @@ class DeepseekV41DecoderLayer(nn.Module):
         self.hc_attn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
         self.hc_ffn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
         self.use_sequence_parallel = vllm_config.parallel_config.use_sequence_parallel_moe
+        self.uses_a5_packed_cache = uses_a5_packed_cache()
         # Leave the TP partial sums for the reduce-scatter below. The mHC
         # and MoE paths then stay sharded between attention calls.
         if self.use_sequence_parallel:
@@ -852,6 +855,18 @@ class DeepseekV41DecoderLayer(nn.Module):
         return (pre_mix.unsqueeze(-1) * x.float()).sum(-2).to(x.dtype)
 
     def hc_pre(self, x, hc_fn, hc_scale, hc_base, pre_mix=None):
+        if self.uses_a5_packed_cache:
+            return a5_hc_pre(
+                x,
+                hc_fn,
+                hc_scale,
+                hc_base,
+                pre_mix,
+                hc_mult=self.hc_mult,
+                hc_sinkhorn_iters=self.hc_sinkhorn_iters,
+                norm_eps=self.norm_eps,
+                hc_eps=self.hc_eps,
+            )
         return torch.ops._C_ascend.npu_hc_pre_v3(
             x,
             hc_fn,
@@ -865,6 +880,8 @@ class DeepseekV41DecoderLayer(nn.Module):
         )
 
     def hc_post(self, x, residual, post, comb):
+        if self.uses_a5_packed_cache:
+            return a5_hc_post(x, residual, post, comb)
         return torch.ops._C_ascend.npu_hc_post(
             x.unsqueeze(0),
             residual.unsqueeze(0),
@@ -983,9 +1000,19 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             device=self.topk_indices_buffer.device,
         )
         self.candidate_indices_buffer = candidate_buffer
+        candidate_lengths = torch.zeros(
+            (max_tokens, 1),
+            dtype=torch.int32,
+            device=self.topk_indices_buffer.device,
+        )
+        topk_lengths = torch.zeros_like(candidate_lengths)
+        self.candidate_lengths_buffer = candidate_lengths
+        self.topk_lengths_buffer = topk_lengths
         self.shared_attention_state = DeepseekV41SharedAttentionState(
             self.topk_indices_buffer,
             candidate_buffer,
+            candidate_lengths,
+            topk_lengths,
         )
         for layer in self.layers:
             if isinstance(layer, DeepseekV41DecoderLayer):
