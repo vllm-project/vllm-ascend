@@ -8,6 +8,7 @@ import torch.nn.functional as F
 import torch_npu
 from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
 from vllm.distributed import get_pcp_group, get_tp_group, tensor_model_parallel_all_gather
+from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionImplBase, AttentionMetadataBuilder
@@ -2545,17 +2546,18 @@ class AscendDSAPCPImpl(dsa_v1.AscendDSAImpl):
             1,
             self.nope_head_dim + self.rope_head_dim,
         )
+        num_cache_update_tokens = global_hidden_states.shape[0]
         torch.ops._C_ascend.inplace_partial_rotary_mul(
             kv.unsqueeze(1),
-            req_metadata.cos[layer_name],
-            req_metadata.sin[layer_name],
+            req_metadata.cos[layer_name][:num_cache_update_tokens],
+            req_metadata.sin[layer_name][:num_cache_update_tokens],
             rotary_mode="interleave",
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
         get_dsa_attn_kv_plan(self.vllm_config).dsa_kv_compress_scatter(
             swa_kv_cache,
             kv,
-            req_metadata.slot_mapping,
+            req_metadata.slot_mapping[:num_cache_update_tokens],
         )
 
     def _update_global_compressor_cache(
@@ -2619,6 +2621,12 @@ class AscendDSAPCPImpl(dsa_v1.AscendDSAImpl):
             layer_name,
             global_dsa_metadata_by_prefix,
         )
+
+        # FULL graph cache updates require the fixed padded shape. Other modes
+        # run DSA cache updates with the actual token extent, matching the
+        # non-PCP path and keeping graph padding out of the compressor.
+        if get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.FULL:
+            global_hidden_states = global_hidden_states[: global_layer_metadata.swa.num_actual_tokens]
 
         cmp_kv, swa_kv, state_cache, _, _, _ = DeviceOperator.unpack_dsa_forward_kv_cache(kv_cache, self.compress_ratio)
 
