@@ -15,6 +15,7 @@ be discoverable through ``named_buffers()``, must stay non-persistent, and must
 survive a deterministic level-2 discard/restore round trip.
 """
 
+import importlib
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -67,29 +68,34 @@ def _make_vllm_indexer() -> MagicMock:
 
 
 @patch("vllm_ascend.attention.indexer.enable_dsa_cp", return_value=False)
-@patch("vllm_ascend.attention.indexer.get_current_hardware_profile")
 @patch("vllm_ascend.attention.indexer.get_current_vllm_config")
 @patch("vllm_ascend.attention.indexer.get_ascend_config")
 def _make_indexer(
     mock_get_ascend_config: MagicMock,
     mock_get_vllm_config: MagicMock,
-    mock_hw_profile: MagicMock,
     _mock_enable_dsa_cp: MagicMock,
 ) -> AscendSFAIndexerBackend:
     mock_get_ascend_config.return_value.is_sparse_li_c8_layer.return_value = True
-    mock_get_vllm_config.return_value = SimpleNamespace(
-        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="deepseek_v32")),
-        parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
-    )
-    mock_hw_profile.return_value.supports.return_value = True
+    # Keep the config a ``MagicMock`` so nested lookups such as
+    # ``model_config.hf_config.model_type`` and ``attention_config.indexer_kv_dtype``
+    # resolve without every level having to be spelled out.
+    mock_get_vllm_config.return_value.model_config.hf_config.model_type = "deepseek_v32"
+    mock_get_vllm_config.return_value.parallel_config.prefill_context_parallel_size = 1
+    mock_get_vllm_config.return_value.attention_config.indexer_kv_dtype = "int8"
     indexer = AscendSFAIndexerBackend(_make_vllm_indexer(), qk_rope_head_dim=64)
     assert indexer.enable_sparse_li_c8
     return indexer
 
 
 def _process_indexer_weights(indexer: AscendSFAIndexerBackend) -> None:
-    """Run ``process_weights_after_loading`` without requiring an NPU device."""
-    real_tensor = torch.tensor
+    """Run ``process_weights_after_loading`` without requiring an NPU device.
+
+    The hook allocates its Hadamard matrices with ``device="npu"``. Resolve the
+    real ``torch.tensor`` through the module at call time and drop the device
+    argument so the allocator runs on CPU; the buffer-ownership contract under
+    test is device agnostic.
+    """
+    real_tensor = importlib.import_module("torch").tensor
 
     def cpu_tensor(*args, **kwargs):
         kwargs.pop("device", None)
