@@ -1,19 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
-"""Narrow vLLM EPLB construction and commit adapters for Ascend."""
+"""Narrow vLLM EPLB construction, execution, and commit adapters for Ascend."""
 
 from collections.abc import Sequence
 from functools import wraps
 from inspect import signature
 
+import torch
 from vllm.config import parallel as _parallel_config
+from vllm.distributed.eplb import async_worker as _async_worker
 from vllm.distributed.eplb import eplb_communicator as _eplb_communicator
 from vllm.distributed.eplb import eplb_state as _eplb_state
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import routed_experts as _routed_experts
 
 from vllm_ascend.distributed.eplb.communicator import AscendGlooEplbCommunicator
+from vllm_ascend.distributed.eplb.explicit_transfer import stage_explicit_layer_transfer
 from vllm_ascend.distributed.eplb.state import (
     ASYNC_EPLB_CYCLE_COMMITTED_LOG,
     EXPERT_MAPPING_EP_SIZE,
@@ -21,6 +24,9 @@ from vllm_ascend.distributed.eplb.state import (
 )
 
 _PATCH_MARKER = "_vllm_ascend_eplb_patch"
+# Old async APIs pass one target layer at a time. Preserve the augmented full
+# target on its per-model communicator until the last workspace commit.
+_EXPLICIT_TRANSFER_TARGET_ATTR = "_vllm_ascend_explicit_transfer_target"
 
 
 class _DeferredConsumedEvent:
@@ -169,6 +175,84 @@ def _patch_initial_expert_layout() -> None:
         routed_experts.make_expert_params_mapping = staticmethod(
             _with_expert_mapping_ep_size(original_make, model_ep_size)
         )
+def _has_explicit_sources(target) -> bool:
+    return hasattr(target, "source_rank_ids") and hasattr(target, "source_slot_ids")
+
+
+def _clear_transfer_target(communicator, target=None) -> None:
+    if target is None or getattr(communicator, _EXPLICIT_TRANSFER_TARGET_ATTR, None) is target:
+        communicator.__dict__.pop(_EXPLICIT_TRANSFER_TARGET_ATTR, None)
+
+
+def _wrap_async_rebalance(original_rebalance):
+    rebalance_signature = signature(original_rebalance)
+    if "model_state" not in rebalance_signature.parameters:
+        raise RuntimeError("Unsupported vLLM EPLB contract: async rebalance has no model_state parameter.")
+
+    @wraps(original_rebalance)
+    def _async_rebalance(*args, **kwargs):
+        bound = rebalance_signature.bind(*args, **kwargs)
+        communicator = bound.arguments["model_state"].communicator
+        _clear_transfer_target(communicator)
+        target = original_rebalance(*bound.args, **bound.kwargs)
+        if _has_explicit_sources(target):
+            setattr(communicator, _EXPLICIT_TRANSFER_TARGET_ATTR, target)
+        return target
+
+    setattr(_async_rebalance, _PATCH_MARKER, True)
+    return _async_rebalance
+
+
+def _wrap_async_transfer(original_transfer):
+    transfer_signature = signature(original_transfer)
+    required = {"old_layer_indices", "new_layer_indices", "expert_weights", "expert_weights_buffer"}
+    required.update({"ep_group", "communicator", "is_profile", "stream", "rank_mapping", "layer_idx"})
+    if not required.issubset(transfer_signature.parameters):
+        raise RuntimeError("Unsupported vLLM EPLB contract: asynchronous transfer signature changed.")
+
+    @wraps(original_transfer)
+    def _async_transfer(*args, **kwargs):
+        bound = transfer_signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        values = bound.arguments
+        communicator = values["communicator"]
+        full_target = getattr(communicator, _EXPLICIT_TRANSFER_TARGET_ATTR, None)
+        if not _has_explicit_sources(full_target):
+            return original_transfer(*bound.args, **bound.kwargs)
+        layer_idx = values["layer_idx"]
+        try:
+            if values["is_profile"] or values["rank_mapping"] is not None:
+                return original_transfer(*bound.args, **bound.kwargs)
+            layer_target = full_target[layer_idx]
+            if not torch.equal(layer_target, values["new_layer_indices"]):
+                raise RuntimeError("EPLB explicit transfer target does not match the current layer")
+            return stage_explicit_layer_transfer(
+                old_layer_indices=values["old_layer_indices"],
+                new_layer_indices=layer_target,
+                source_rank_ids=full_target.source_rank_ids[layer_idx],
+                source_slot_ids=full_target.source_slot_ids[layer_idx],
+                expert_weights=values["expert_weights"],
+                expert_weight_buffers=values["expert_weights_buffer"],
+                ep_group=values["ep_group"],
+                communicator=communicator,
+                stream=values["stream"],
+                layer_idx=layer_idx,
+            )
+        except Exception:
+            _clear_transfer_target(communicator, full_target)
+            raise
+
+    setattr(_async_transfer, _PATCH_MARKER, True)
+    return _async_transfer
+
+
+def _patch_explicit_transfer_execution() -> None:
+    original_rebalance = _async_worker.run_rebalance_experts
+    if not getattr(original_rebalance, _PATCH_MARKER, False):
+        _async_worker.run_rebalance_experts = _wrap_async_rebalance(original_rebalance)
+    original_async_transfer = _async_worker.transfer_layer
+    if not getattr(original_async_transfer, _PATCH_MARKER, False):
+        _async_worker.transfer_layer = _wrap_async_transfer(original_async_transfer)
 
 
 def _wrap_move_to_workspace(original_move):
@@ -193,7 +277,10 @@ def _wrap_move_to_workspace(original_move):
             result = original_move(*bound.args, **bound.kwargs)
             if layer_idx is not None:
                 refresh_model_routing_tables(model_state, layer_idx)
-                if bound.arguments["ep_rank"] == 0 and layer_idx == model_state.model.num_moe_layers - 1:
+                is_last_layer = layer_idx == model_state.model.num_moe_layers - 1
+                if is_last_layer:
+                    _clear_transfer_target(model_state.communicator)
+                if bound.arguments["ep_rank"] == 0 and is_last_layer:
                     logger.info(
                         "%s: model=%s",
                         ASYNC_EPLB_CYCLE_COMMITTED_LOG,
@@ -219,4 +306,5 @@ def _patch_async_move_to_workspace() -> None:
 _patch_parallel_config()
 _patch_initial_expert_layout()
 _patch_communicator_factory()
+_patch_explicit_transfer_execution()
 _patch_async_move_to_workspace()
