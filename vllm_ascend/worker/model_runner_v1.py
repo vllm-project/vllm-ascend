@@ -5555,8 +5555,8 @@ class NPUModelRunner(GPUModelRunner):
                             dtype=current_kv_cache_spec.dtype,
                             num_blocks=kv_cache_config.num_blocks,
                             item_shape=(
-                                storage_block_size,
                                 current_kv_cache_spec.num_kv_heads,
+                                storage_block_size,
                                 current_kv_cache_spec.head_size,
                             ),
                             storage_offset=slot_offset + region.offset,
