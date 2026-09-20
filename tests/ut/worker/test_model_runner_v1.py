@@ -1107,6 +1107,141 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         vllm_version_is("0.28.0"),
         "vLLM #51718 only changed the main planner",
     )
+    def test_standardized_overlay_descriptors_allocate_once(self):
+        """Equal page strides still describe one common main backing.
+
+        The real Qwen4Exp main planner emits one single-layer descriptor for
+        each cache region. Every descriptor has the same full allocation size,
+        starts at byte zero, and uses its logical page size as the block and
+        layer stride. This is an overlay layout, not a request for one full
+        allocation per descriptor.
+        """
+        attn_name = "model.layers.0.self_attn.attn"
+        compressed_name = "model.layers.0.self_attn.compressed_key"
+        mamba_name = "model.layers.1.linear_attn"
+        attn_spec = FullAttentionSpec(
+            block_size=8,
+            num_kv_heads=1,
+            head_size=4,
+            head_size_v=4,
+            dtype=torch.bfloat16,
+        )
+        compressed_spec = MLAAttentionSpec(
+            block_size=8,
+            num_kv_heads=1,
+            head_size=32,
+            dtype=torch.bfloat16,
+            tokens_per_state=4,
+        )
+        mamba_spec = MambaSpec(
+            block_size=8,
+            shapes=((4, 8),),
+            dtypes=(torch.float32,),
+        )
+        specs = {
+            attn_name: attn_spec,
+            compressed_name: compressed_spec,
+            mamba_name: mamba_spec,
+        }
+        page_sizes = {spec.page_size_bytes for spec in specs.values()}
+        self.assertEqual(len(page_sizes), 1)
+        page_size = page_sizes.pop()
+        num_blocks = 3
+        backing_size = num_blocks * page_size
+        config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=[
+                KVCacheTensor(
+                    size=backing_size,
+                    layers=[name],
+                    layer_stride=page_size,
+                    block_stride=page_size,
+                    offset=0,
+                )
+                for name in specs
+            ],
+            kv_cache_groups=[KVCacheGroupSpec([name], spec) for name, spec in specs.items()],
+        )
+        runner = self._build_runner()
+        runner.use_sparse = True
+        runner.use_compress = False
+        runner.vllm_config.cache_config.get_resolved_kv_cache_layout.return_value = SimpleNamespace(
+            is_block_outermost=True,
+            is_layer_compact=False,
+            is_block_compact=False,
+        )
+
+        self.assertTrue(runner._uses_page_strided_shared_backing(config, specs))
+        with patch.object(
+            runner,
+            "_allocate_int8_cache_tensor",
+            wraps=runner._allocate_int8_cache_tensor,
+        ) as allocate:
+            raw_caches = runner._allocate_kv_cache_tensors(config)
+
+        allocate.assert_called_once_with(backing_size, 2 * 1024 * 1024)
+        self.assertEqual(set(raw_caches), set(specs))
+        self.assertEqual(
+            len({raw.untyped_storage().data_ptr() for raw in raw_caches.values()}),
+            1,
+        )
+        self.assertTrue(all(raw is raw_caches[attn_name] for raw in raw_caches.values()))
+
+    @unittest.skipIf(
+        vllm_version_is("0.28.0"),
+        "vLLM #51718 only changed the main planner",
+    )
+    def test_independent_descriptor_sizes_do_not_alias(self):
+        first_name = "model.layers.0.self_attn.attn"
+        second_name = "model.layers.1.self_attn.attn"
+        spec = FullAttentionSpec(
+            block_size=8,
+            num_kv_heads=1,
+            head_size=4,
+            head_size_v=4,
+            dtype=torch.bfloat16,
+        )
+        num_blocks = 3
+        page_size = spec.page_size_bytes
+        config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=[
+                KVCacheTensor(
+                    size=num_blocks * page_size,
+                    layers=[first_name],
+                    layer_stride=page_size,
+                    block_stride=page_size,
+                    offset=0,
+                ),
+                KVCacheTensor(
+                    size=(num_blocks + 1) * page_size,
+                    layers=[second_name],
+                    layer_stride=page_size,
+                    block_stride=page_size,
+                    offset=0,
+                ),
+            ],
+            kv_cache_groups=[
+                KVCacheGroupSpec([first_name], spec),
+                KVCacheGroupSpec([second_name], spec),
+            ],
+        )
+        runner = self._build_runner()
+        runner.vllm_config.cache_config.get_resolved_kv_cache_layout.return_value = SimpleNamespace(
+            is_block_outermost=True
+        )
+
+        self.assertFalse(
+            runner._uses_page_strided_shared_backing(
+                config,
+                {first_name: spec, second_name: spec},
+            )
+        )
+
+    @unittest.skipIf(
+        vllm_version_is("0.28.0"),
+        "vLLM #51718 only changed the main planner",
+    )
     def test_page_strided_views_preserve_all_cache_region_geometry(self):
         from vllm.model_executor.layers.attention_layer_base import (
             AttentionLayerBase,
@@ -1282,6 +1417,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
     )
     def test_page_strided_descriptor_rejects_backing_overflow(self):
         name = "model.layers.0.self_attn.attn"
+        peer_name = "model.layers.1.self_attn.attn"
         spec = MLAAttentionSpec(
             block_size=8,
             num_kv_heads=1,
@@ -1298,8 +1434,20 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         )
         config = KVCacheConfig(
             num_blocks=2,
-            kv_cache_tensors=[descriptor],
-            kv_cache_groups=[KVCacheGroupSpec([name], spec)],
+            kv_cache_tensors=[
+                descriptor,
+                KVCacheTensor(
+                    size=descriptor.size,
+                    layers=[peer_name],
+                    layer_stride=0,
+                    block_stride=spec.page_size_bytes,
+                    offset=0,
+                ),
+            ],
+            kv_cache_groups=[
+                KVCacheGroupSpec([name], spec),
+                KVCacheGroupSpec([peer_name], spec),
+            ],
         )
         runner = self._build_runner()
         runner.vllm_config.cache_config.get_resolved_kv_cache_layout.return_value = SimpleNamespace(
@@ -1310,7 +1458,10 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             ValueError,
             "descriptor exceeds its shared backing",
         ):
-            runner._uses_page_strided_shared_backing(config, {name: spec})
+            runner._uses_page_strided_shared_backing(
+                config,
+                {name: spec, peer_name: spec},
+            )
 
     @unittest.skipIf(
         vllm_version_is("0.28.0"),

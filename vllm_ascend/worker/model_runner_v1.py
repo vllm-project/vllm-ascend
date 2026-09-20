@@ -4671,11 +4671,16 @@ class NPUModelRunner(GPUModelRunner):
 
         This is deliberately descriptor/layout based rather than model-name
         based. In a block-outermost layout every descriptor has the size of the
-        complete allocation and advances between physical blocks by the packed
-        block stride. Allocating each descriptor or layer separately both
-        multiplies HBM usage and breaks the offsets encoded by the planner.
+        complete allocation and addresses a logical view of that common
+        backing. The descriptor block stride may either be larger than the
+        logical page (an interleaved packed page) or exactly equal to it (main's
+        standardized overlay descriptors). Allocating each descriptor or layer
+        separately both multiplies HBM usage and breaks the planner contract.
         """
-        if vllm_version_is("0.28.0") or not kv_cache_config.kv_cache_tensors:
+        if (
+            vllm_version_is("0.28.0")
+            or len(kv_cache_config.kv_cache_tensors) < 2
+        ):
             return False
         layout = self.vllm_config.cache_config.get_resolved_kv_cache_layout()
         if not getattr(layout, "is_block_outermost", False):
@@ -4687,10 +4692,15 @@ class NPUModelRunner(GPUModelRunner):
         if len(tensor_sizes) != 1:
             return False
         backing_size = next(iter(tensor_sizes))
-        has_interleaved_page_stride = False
         for descriptor in kv_cache_config.kv_cache_tensors:
             shared_layers = get_kv_cache_tensor_layers(descriptor)
-            if not shared_layers or descriptor.block_stride <= 0:
+            if (
+                not shared_layers
+                or descriptor.size <= 0
+                or descriptor.block_stride <= 0
+                or descriptor.layer_stride < 0
+                or descriptor.offset < 0
+            ):
                 return False
             for layer_idx, layer_name in enumerate(shared_layers):
                 spec = layer_kv_cache_spec[layer_name]
@@ -4707,10 +4717,7 @@ class NPUModelRunner(GPUModelRunner):
                         f"backing: layer={layer_name}, start={start}, "
                         f"end={end}, size={backing_size}."
                     )
-                has_interleaved_page_stride |= (
-                    descriptor.block_stride > spec.page_size_bytes
-                )
-        return has_interleaved_page_stride
+        return True
 
     def _is_qsa_state_cache(self, layer_name: str) -> bool:
         attn_layer = self.vllm_config.compilation_config.static_forward_context.get(
