@@ -38,9 +38,17 @@ from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.compilation.acl_graph import set_graph_params, update_full_graph_params
+from vllm_ascend.compilation.acl_graph import (
+    set_graph_params,
+    update_full_graph_params,
+)
 from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.compilation.updatable_graph import (
+    ContextSource,
+    UpdatableGraph,
+)
+from vllm_ascend.utils import use_updatable_graph, vllm_version_is
+from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.utils import communicator_switch
 
 
@@ -58,14 +66,19 @@ def _prepare_pcp_inputs_to_capture(
     pcp_manager: Any,
 ) -> cudagraph_utils.AttentionState:
     """Build graph inputs with the same PCP-local layout used on replay."""
-    if vllm_version_is("0.27.1"):
-        input_batch = cudagraph_utils.InputBatch.make_dummy(num_reqs, num_tokens, input_buffers)
-    else:
-        input_batch = cudagraph_utils.InputBatch.make_dummy(
-            num_reqs, num_tokens, input_buffers, max_query_len=max_query_len
-        )
-    input_batch = pcp_manager.partition_batch(input_batch)
-    input_block_tables, slot_mappings = pcp_manager.prepare_attn(input_batch)
+    # vLLM #53515 passes PCP-local input buffers into graph capture, so the
+    # dummy batch must not be partitioned a second time. vLLM #53869
+    # supplies capture-only PCP metadata instead. The block tables must
+    # retain the same PCP-local backing that runtime prepare_attn updates,
+    # because the SFA full graph cannot rebind their captured pointer.
+    # The Ascend dummy carries the seq_lens_np/attn_state views consumed
+    # by Ascend metadata builders and doubles as the capture-time PCP
+    # global batch (is_dummy=True).
+    input_batch = AscendInputBatch.make_dummy(  # type: ignore[call-arg]
+        num_reqs, num_tokens, input_buffers, max_query_len=max_query_len
+    )
+    input_block_tables = pcp_manager.get_dummy_block_tables(num_reqs)
+    slot_mappings = pcp_manager.get_dummy_slot_mappings(num_tokens)
     slot_mappings_by_layer = cudagraph_utils.build_slot_mappings_by_layer(slot_mappings, kv_cache_config)
 
     attn_metadata = model_state.prepare_attn(
@@ -100,7 +113,12 @@ def _get_graph_update_backend(
     for groups in attn_groups:
         for group in groups:
             backend = group.backend
-            if backend.get_impl_cls() is not None:
+            try:
+                impl_cls = backend.get_impl_cls()
+            except NotImplementedError:
+                # Metadata-only backends such as GDN have no attention impl.
+                continue
+            if impl_cls is not None:
                 return backend
     raise RuntimeError("No executable attention backend is available for full-graph parameter updates.")
 
@@ -108,56 +126,30 @@ def _get_graph_update_backend(
 class ModelAclGraphManager(ModelCudaGraphManager):
     """ACL Model Cuda Graph Manager for Ascend NPUs."""
 
-    if vllm_version_is("0.27.1"):
-
-        def __init__(
-            self,
-            vllm_config: VllmConfig,
-            device: torch.device,
-            cudagraph_mode: CUDAGraphMode,
-            decode_query_len: int,
-            model_runner: Any,
-            lora_capture_cases: list[int] | None = None,
-        ):
-            super().__init__(
-                vllm_config,
-                device,
-                cudagraph_mode,
-                decode_query_len,
-                lora_capture_cases=lora_capture_cases,
-            )
-            self.model_runner = model_runner
-            self.update_stream = self.model_runner.update_stream
-            self.capture_sizes = collect_sorted_captured_token_sizes(self._capture_descs)
-            if super().needs_capture():
-                set_graph_params(self.capture_sizes)
-
-    else:
-
-        def __init__(  # type: ignore[misc]
-            self,
-            vllm_config: VllmConfig,
-            device: torch.device,
-            cudagraph_mode: CUDAGraphMode,
-            decode_query_len: int,
-            model_runner: Any,
-            lora_capture_cases: list[int] | None = None,
-            varlen_decode: bool = False,
-        ):
-            super().__init__(
-                vllm_config,
-                device,
-                cudagraph_mode,
-                decode_query_len,
-                lora_capture_cases=lora_capture_cases,
-                varlen_decode=varlen_decode,
-            )
-            self.breakable_cg_runner: BreakableACLGraphWrapper | None = None
-            self.model_runner = model_runner
-            self.update_stream = self.model_runner.update_stream
-            self.capture_sizes = collect_sorted_captured_token_sizes(self._capture_descs)
-            if super().needs_capture():
-                set_graph_params(self.capture_sizes)
+    def __init__(  # type: ignore[misc]
+        self,
+        vllm_config: VllmConfig,
+        device: torch.device,
+        cudagraph_mode: CUDAGraphMode,
+        decode_query_len: int,
+        model_runner: Any,
+        lora_capture_cases: list[int] | None = None,
+        varlen_decode: bool = False,
+    ):
+        super().__init__(
+            vllm_config,
+            device,
+            cudagraph_mode,
+            decode_query_len,
+            lora_capture_cases=lora_capture_cases,
+            varlen_decode=varlen_decode,
+        )
+        self.breakable_cg_runner: BreakableACLGraphWrapper | None = None
+        self.model_runner = model_runner
+        self.update_stream = self.model_runner.update_stream
+        self.capture_sizes = collect_sorted_captured_token_sizes(self._capture_descs)
+        if super().needs_capture():
+            set_graph_params(self.capture_sizes)
 
     def init_breakable_cg_runner(self, model: nn.Module) -> None:
         if self.breakable_cg_runner is None:
@@ -168,6 +160,17 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         num_tokens = desc.num_tokens
         logger.info_once("run_fullgraph with num_tokens=%s", num_tokens)
         assert self.update_stream is not None
+        with set_current_vllm_config(self.vllm_config):
+            attn_backend = _get_graph_update_backend(self.model_runner.attn_groups)
+        attn_metadata = self.model_runner.model_state.attn_metadata
+
+        if use_updatable_graph(attn_backend):
+            return self._updatable_graph_replay(desc, attn_metadata)
+        else:
+            # This will be removed once the refactoring is fully complete.
+            return self._graph_relay(attn_backend, desc, num_tokens, attn_metadata)
+
+    def _graph_relay(self, attn_backend, desc, num_tokens, attn_metadata):
         self.update_stream.wait_stream(torch.npu.current_stream())
         ret = super().run_fullgraph(desc)
 
@@ -183,7 +186,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         with (
             set_current_vllm_config(self.vllm_config),
             set_forward_context(
-                self.model_runner.model_state.attn_metadata,
+                attn_metadata,
                 self.vllm_config,
                 num_tokens=num_tokens,
                 cudagraph_runtime_mode=desc.cg_mode,
@@ -193,7 +196,6 @@ class ModelAclGraphManager(ModelCudaGraphManager):
             ),
         ):
             forward_context = get_forward_context()
-            attn_backend = _get_graph_update_backend(self.model_runner.attn_groups)
             update_full_graph_params(
                 # FIXME(Ronald1995): support hybrid attn backend
                 attn_backend,
@@ -203,6 +205,15 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                 self.vllm_config,
                 self.model_runner.speculative_config,
             )
+        return ret
+
+    def _updatable_graph_replay(self, desc, attn_metadata):
+        graph = self.graphs[desc]
+        assert isinstance(graph, UpdatableGraph)
+        resolved_tasks = graph.resolve_tasks(ContextSource(attn_metadata))
+        self.update_stream.wait_stream(torch.npu.current_stream())
+        ret = super().run_fullgraph(desc)
+        graph.update(self.update_stream, resolved_tasks)
         return ret
 
     def capture(
@@ -218,6 +229,8 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         use_aux_hidden_state_outputs: bool = False,
         lora_capture_hook: Callable[[int, int, int], None] | None = None,
         progress_bar_desc: str = "Capturing CUDA graphs",
+        # vLLM #53869 supplies PCP slot mappings during graph capture.
+        pcp_manager: Any = None,
     ) -> None:
         """Capture CUDA graphs for model forward pass."""
         model = ModelWithContext(model)
@@ -228,6 +241,23 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                 pcp_manager=pcp_manager,
             )
         with communicator_switch():
+            # vLLM #53869 added pcp_manager to ModelCudaGraphManager.capture on
+            # main; v0.28.0 still uses the older signature without that kwarg.
+            if not vllm_version_is("0.28.0"):
+                return super().capture(
+                    model,
+                    model_state,
+                    input_buffers,
+                    intermediate_tensors,
+                    block_tables,
+                    attn_groups,
+                    kv_cache_config,
+                    pcp_manager=pcp_manager,
+                    has_lora=has_lora,
+                    use_aux_hidden_state_outputs=use_aux_hidden_state_outputs,
+                    lora_capture_hook=lora_capture_hook,
+                    progress_bar_desc=progress_bar_desc,
+                )
             return super().capture(
                 model,
                 model_state,
@@ -287,6 +317,12 @@ class ModelWithContext(nn.Module):
 
     def map_draft_to_target(self, draft_ids: torch.Tensor):
         return self.original_model.map_draft_to_target(draft_ids)
+
+    def embed_input_ids(self, *args, **kwargs):
+        return self.original_model.embed_input_ids(*args, **kwargs)
+
+    def compute_confidence(self, head_hidden: torch.Tensor, markov_embed: torch.Tensor):
+        return self.original_model.compute_confidence(head_hidden, markov_embed)
 
 
 @contextmanager

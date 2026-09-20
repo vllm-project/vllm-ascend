@@ -201,6 +201,24 @@ class TestAscendEmbeddingForwardOOT:
         )
         assert result is expected_output
 
+    @patch("vllm_ascend.ops.rotary_embedding.is_forward_context_available", return_value=False)
+    @patch("vllm_ascend.ops.rotary_embedding.rope_forward_oot")
+    def test_q_only_uses_throwaway_key(self, mock_rope, _mock_is_ctx, make_embedding):
+        """key=None (Gemma4 MTP Q-only RoPE) routes to rope_forward_oot with a
+        throwaway key buffer and returns (rotated_query, None)."""
+        emb = make_embedding()
+        positions, query, _ = _make_tensors()
+        expected_query = torch.randn_like(query)
+        mock_rope.return_value = expected_query, torch.empty_like(query)
+        with patch("vllm_ascend.ops.rotary_embedding.HAS_TRITON", False):
+            result = emb.forward_oot(positions, query, None)
+        assert result[0] is expected_query
+        assert result[1] is None
+        dummy_key = mock_rope.call_args.args[2]
+        assert dummy_key.shape == (query.shape[0], HEAD_SIZE)
+        assert dummy_key.dtype == query.dtype
+        assert dummy_key.device == query.device
+
     @patch("torch.ops.vllm.npu_rotary_embedding")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     def test_fp8_output_delegates_to_npu_op(self, mock_get_forward_context, mock_npu_op, make_embedding):

@@ -39,7 +39,27 @@ else:
 
 class BaseDeviceAdaptor:
     @classmethod
-    def reshape_and_cache(cls, key, value, key_cache, value_cache, slot_mapping):
+    def reshape_and_cache(
+        cls,
+        key,
+        value,
+        key_cache,
+        value_cache,
+        slot_mapping,
+        use_bnsd=False,
+    ):
+        if use_bnsd:
+            torch.ops._C_ascend.npu_scatter_pa_kv_cache(
+                key.contiguous(),
+                value.contiguous(),
+                key_cache,
+                value_cache,
+                slot_mapping.contiguous(),
+                cache_mode="Norm",
+                scatter_mode="NHSD",
+            )
+            return
+
         torch_npu.npu_scatter_pa_kv_cache(
             key=key.contiguous(),
             value=value.contiguous(),
@@ -316,12 +336,13 @@ class BaseDeviceAdaptor:
 
     @staticmethod
     def indexer_select_post_process(
-        sfa_impl,
         q_li: torch.Tensor,
         q_li_scale: torch.Tensor | None,
         q_li_shape_ori: tuple[Any, ...] | None,
         weights: torch.Tensor,
         kv_cache: tuple,
+        indexer_k_cache_idx: int,
+        indexer_scale_cache_idx: int,
         attn_metadata,
         actual_seq_lengths_query: torch.Tensor,
         actual_seq_lengths_key: torch.Tensor,
@@ -331,11 +352,12 @@ class BaseDeviceAdaptor:
         # DSV3.2 currently has graph compilation issues when using torch_npu.npu.lightning_indexer.
         # So two branches are maintained temporarily.
         # TODO: torch.ops._C_ascend.npu_lightning_indexer needs to be removed.
-        indexer_cache_idx = sfa_impl.kv_cache_indexer_k_idx
-        indexer_scale_cache_idx = sfa_impl.kv_cache_indexer_scale_idx
+        indexer_cache_idx = indexer_k_cache_idx
+        indexer_scale_cache_idx = indexer_scale_cache_idx
 
         if enable_sparse_li_c8:
-            assert len(kv_cache) == (3 if sfa_impl.enable_sparse_sfa_c8 else 4)
+            # ``kv_cache`` is the indexer's own cache tuple (k + scale).
+            assert len(kv_cache) == 2
             assert q_li_scale is not None
             assert q_li_shape_ori is not None
             weights = weights.to(torch.float16)
@@ -355,7 +377,7 @@ class BaseDeviceAdaptor:
                 sparse_count=2048,
                 sparse_mode=3,
             )
-        elif sfa_impl.use_torch_npu_lightning_indexer:
+        elif use_torch_npu_lightning_indexer:
             topk_indices, _ = torch_npu.npu_lightning_indexer(
                 query=q_li,
                 key=kv_cache[indexer_cache_idx],
@@ -468,7 +490,9 @@ class BaseDeviceAdaptor:
         sparse_mode: int = 3,
         return_lse: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        query = torch.cat([ql_nope, q_pe], dim=-1).contiguous()
+        # torch.cat allocates a fresh contiguous output, so no extra
+        # .contiguous() pass is needed here.
+        query = torch.cat([ql_nope, q_pe], dim=-1)
         return torch.ops._C_ascend.npu_kv_quant_sparse_flash_attention(
             query=query,
             key=kv,
@@ -490,37 +514,6 @@ class BaseDeviceAdaptor:
             rope_head_dim=getattr(sfa_impl, "qk_rope_head_dim", q_pe.shape[-1]),
             return_softmax_lse=return_lse,
         )
-
-    @staticmethod
-    def npu_flash_attention(query, key, value, seq_lens_cpu, head_num, scale_value, num_kv_heads):
-        if query.dtype == torch.float32:
-            # _npu_flash_attention_unpad does not support FP32.
-            cumulative_seq_lens = seq_lens_cpu.cumsum(0).tolist()
-            return torch_npu.npu_fusion_attention(
-                query=query,
-                key=key,
-                value=value,
-                actual_seq_qlen=cumulative_seq_lens,
-                actual_seq_kvlen=cumulative_seq_lens,
-                head_num=head_num,
-                scale=scale_value,
-                input_layout="TND",
-            )[0]
-
-        context_layer = torch.empty_like(query)
-
-        torch_npu._npu_flash_attention_unpad(
-            query=query,
-            key=key,
-            value=value,
-            seq_len=seq_lens_cpu,
-            scale_value=scale_value,
-            num_heads=head_num,
-            num_kv_heads=num_kv_heads,
-            out=context_layer,
-        )
-
-        return context_layer
 
     # ===== SWA / Compressor KV Scatter =====
 
@@ -594,6 +587,13 @@ class BaseDeviceAdaptor:
         torch.ops._C_ascend.npu_scatter_nd_update_sk(indexer_scale_cache, slot_mapping, kv_scale_dummy)
 
     # ===== Lightning Indexer Dtype Prep =====
+
+    @staticmethod
+    def get_dsa_indexer_quant_mode() -> int:
+        """Non-A5: q/k are int8 with fp16 scales, so lightning indexer runs
+        in INT8 quant mode (QUANT_MODE_INT8 = 2 in
+        csrc/attention/quant_lightning_indexer_v2)."""
+        return 2
 
     @staticmethod
     def prepare_dsa_indexer_weights(weights):
@@ -794,6 +794,21 @@ class BaseDeviceAdaptor:
 
 class A5DeviceAdaptor(BaseDeviceAdaptor):
     @classmethod
+    def reshape_and_cache(
+        cls,
+        key,
+        value,
+        key_cache,
+        value_cache,
+        slot_mapping,
+        use_bnsd=False,
+    ):
+        if use_bnsd:
+            key_cache = key_cache.permute(0, 2, 1, 3)
+            value_cache = value_cache.permute(0, 2, 1, 3)
+        super().reshape_and_cache(key, value, key_cache, value_cache, slot_mapping)
+
+    @classmethod
     def npu_fused_infer_attention_score(
         cls,
         query: torch.Tensor,
@@ -836,7 +851,9 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         sparse_mode: int = 3,
         return_lse: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        query = torch.cat([ql_nope, q_pe], dim=-1).contiguous()
+        # torch.cat allocates a fresh contiguous output, so no extra
+        # .contiguous() pass is needed here.
+        query = torch.cat([ql_nope, q_pe], dim=-1)
         result = torch_npu.npu_kv_quant_sparse_flash_attention(
             query=query,
             key=kv,
@@ -1189,6 +1206,13 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     # ===== Lightning Indexer Dtype Prep =====
 
     @staticmethod
+    def get_dsa_indexer_quant_mode() -> int:
+        """A5: q/k are fp8_e4m3fn with fp32 scales, so lightning indexer runs
+        in FP8 quant mode (QUANT_MODE_FP8 = 1 in
+        csrc/attention/quant_lightning_indexer_v2)."""
+        return 1
+
+    @staticmethod
     def prepare_dsa_indexer_weights(weights):
         """A5: cast indexer weights to float32 (fp8 scale format needs float)."""
         return weights.float()
@@ -1286,23 +1310,25 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
     @staticmethod
     def indexer_select_post_process(
-        sfa_impl,
         q_li: torch.Tensor,
         q_li_scale: torch.Tensor | None,
         q_li_shape_ori: tuple[Any, ...] | None,
         weights: torch.Tensor,
         kv_cache: tuple,
+        indexer_k_cache_idx: int,
+        indexer_scale_cache_idx: int,
         attn_metadata,
         actual_seq_lengths_query: torch.Tensor,
         actual_seq_lengths_key: torch.Tensor,
         enable_sparse_li_c8: bool,
         use_torch_npu_lightning_indexer: bool,
     ) -> torch.Tensor:
-        indexer_cache_idx = sfa_impl.kv_cache_indexer_k_idx
-        indexer_scale_cache_idx = sfa_impl.kv_cache_indexer_scale_idx
+        indexer_cache_idx = indexer_k_cache_idx
+        indexer_scale_cache_idx = indexer_scale_cache_idx
 
         if enable_sparse_li_c8:
-            assert len(kv_cache) == (3 if sfa_impl.enable_sparse_sfa_c8 else 4)
+            # ``kv_cache`` is the indexer's own cache tuple (k + scale).
+            assert len(kv_cache) == 2
             assert q_li_shape_ori is not None
 
             if q_li_scale is not None:
@@ -1352,23 +1378,6 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 sparse_mode=3,
             )
         return topk_indices
-
-    @staticmethod
-    def npu_flash_attention(query, key, value, seq_lens_cpu, head_num, scale_value, num_kv_heads):
-        cumulative_seq_lens = seq_lens_cpu.cumsum(0).tolist()
-
-        context_layer = torch_npu.npu_fusion_attention(
-            query=query,
-            key=key,
-            value=value,
-            actual_seq_qlen=cumulative_seq_lens,
-            actual_seq_kvlen=cumulative_seq_lens,
-            head_num=head_num,
-            scale=scale_value,
-            input_layout="TND",
-        )[0]
-
-        return context_layer
 
     @staticmethod
     def chunk_scaled_dot_kkt_fwd(
@@ -1474,7 +1483,17 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
 class Ascend310PDeviceAdaptor(BaseDeviceAdaptor):
     @classmethod
-    def reshape_and_cache(cls, key, value, key_cache, value_cache, slot_mapping):
+    def reshape_and_cache(
+        cls,
+        key,
+        value,
+        key_cache,
+        value_cache,
+        slot_mapping,
+        use_bnsd=False,
+    ):
+        if use_bnsd:
+            raise NotImplementedError("BNSD KV cache is not supported on Ascend 310P")
         torch_npu._npu_reshape_and_cache(
             key=key,
             value=value,

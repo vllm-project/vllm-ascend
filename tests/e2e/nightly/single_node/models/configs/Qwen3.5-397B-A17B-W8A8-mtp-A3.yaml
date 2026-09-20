@@ -35,7 +35,7 @@ test_cases:
       - "--gpu-memory-utilization"
       - "0.9"
       - "--additional-config"
-      - '{"enable_cpu_binding":true,"enable_fused_mc2":0}'
+      - '{"enable_cpu_binding":true,"enable_fused_mc2":1}'
       - "--speculative_config"
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 5, "enforce_eager": true}'
       - "--compilation-config"

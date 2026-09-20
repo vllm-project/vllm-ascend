@@ -51,7 +51,7 @@ if not _npu_available:
     torch_npu.__path__ = []
     torch_npu.npu = MagicMock()  # type: ignore[attr-defined]
     torch_npu.npu_fusion_attention = MagicMock()  # type: ignore[attr-defined]
-    torch_npu.npu_format_cast = MagicMock(side_effect=lambda weight, fmt: weight)  # type: ignore[attr-defined]
+    torch_npu.npu_format_cast = MagicMock(side_effect=lambda weight, fmt, **kwargs: weight)  # type: ignore[attr-defined]
     torch_npu._C = MagicMock()  # type: ignore[attr-defined]
     torch_npu._C._NPUTaskGroupHandle = MagicMock
     # Note: Assign missing attributes with values from real scenarios
@@ -228,6 +228,7 @@ if not _npu_available:
     sys.modules["torch_npu"].npu_fast_gelu = MagicMock()  # type: ignore[attr-defined]
     sys.modules["torch_npu"].npu_convert_weight_to_int4pack = MagicMock()  # type: ignore[attr-defined]
     sys.modules["torch_npu"].npu_transpose_batchmatmul = MagicMock()  # type: ignore[attr-defined]
+    sys.modules["torch_npu"].npu_weight_quant_batchmatmul = MagicMock()  # type: ignore[attr-defined]
     sys.modules["torch_npu"].npu_scatter_nd_update_ = MagicMock()  # type: ignore[attr-defined]
     sys.modules["torch_npu"].npu_grouped_matmul = MagicMock(return_value=[MagicMock()])  # type: ignore[attr-defined]
     sys.modules["torch_npu"].npu_clipped_swiglu = MagicMock()  # type: ignore[attr-defined]

@@ -78,3 +78,6 @@ def register_model():
         "Glm5NextMTPModel",
         "vllm_ascend.models.glm5next.mtp:Glm5NextMTP",
     )
+    ModelRegistry.register_model(
+        "LlamaForCausalLMEagle3", "vllm_ascend.models.llama_eagle3:AscendEagle3LlamaForCausalLM"
+    )

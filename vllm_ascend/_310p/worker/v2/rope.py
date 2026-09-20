@@ -7,10 +7,13 @@ import numpy as np
 import torch
 import torch.nn as nn
 from vllm.config import ModelConfig
+from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.models.interfaces import SupportsMRoPE
+from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
 
 from vllm_ascend._310p.worker.v2.states import Ascend310PStagedWriteTensor
+from vllm_ascend.utils import vllm_version_is
 
 
 class Ascend310PRopeState:
@@ -34,7 +37,15 @@ class Ascend310PRopeState:
             uva_instead_of_gpu=True,
         )
         self.prefill_delta = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
-        self.positions_cpu = torch.zeros((num_dims, max_num_tokens + 1), dtype=torch.int64, device="cpu")
+        # Persistent pinned host storage makes the
+        # H2D copy genuinely asynchronous instead of pageable-memory staging.
+        self.positions_cpu = torch.zeros(
+            (num_dims, max_num_tokens + 1),
+            dtype=torch.int64,
+            device="cpu",
+            pin_memory=is_pin_memory_available(),
+        )
+        self.positions_np = self.positions_cpu.numpy()
         self.positions = torch.zeros((num_dims, max_num_tokens + 1), dtype=torch.int64, device=device)
 
     def init_prefill_positions(
@@ -83,16 +94,22 @@ class Ascend310PRopeState:
                 self.positions_cpu[:, query_start:query_end].copy_(positions)
             else:
                 delta = int(self.prefill_delta.np[req_idx])
-                decode_positions = torch.arange(
-                    num_computed + delta,
-                    num_computed + delta + query_len,
-                    dtype=torch.int64,
+                # Write directly into persistent host storage.
+                # Writes directly into persistent output; no per-request
+                # torch.arange allocation or intermediate CPU copy.
+                MRotaryEmbedding.get_next_input_positions_tensor(
+                    out=self.positions_np,
+                    out_offset=query_start,
+                    mrope_position_delta=delta,
+                    context_len=num_computed,
+                    num_new_tokens=query_len,
                 )
-                self.positions_cpu[:, query_start:query_end] = decode_positions
 
-        self.positions[:, :num_tokens_after_padding].copy_(
-            self.positions_cpu[:, :num_tokens_after_padding], non_blocking=True
-        )
+        # Keep the extra dummy column in the transfer. Slicing all rows but
+        # only active columns makes a non-contiguous 2D view because storage
+        # width is max_num_tokens + 1. On 310P that copy falls back to costly
+        # strided handling. Copy the complete contiguous buffer.
+        self.positions.copy_(self.positions_cpu, non_blocking=True)
 
     def get_positions(self, num_tokens: int) -> torch.Tensor:
         return self.positions[:, :num_tokens]
@@ -106,8 +123,8 @@ def get_310p_rope_state(
     max_model_len: int,
     device: torch.device,
 ) -> Ascend310PRopeState | None:
-    # 310P Qwen3-VL / Qwen3.5 use MRoPE only; XD-RoPE is out of scope.
     if model_config.uses_mrope:
         assert isinstance(model, SupportsMRoPE)
-        return Ascend310PRopeState(3, max_num_reqs, max_num_tokens, max_model_len, device)
+        num_dims = 3 if vllm_version_is("0.28.0") else model_config.mrope_num_dims
+        return Ascend310PRopeState(num_dims, max_num_reqs, max_num_tokens, max_model_len, device)
     return None

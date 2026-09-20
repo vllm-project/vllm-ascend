@@ -5,8 +5,10 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
+from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 
 from vllm_ascend.distributed.eplb.state import AscendEplbLayerState
+from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
 from vllm_ascend.patch.platform import patch_fused_moe
 
 
@@ -19,6 +21,11 @@ class _Router:
 
     def _validate_eplb_state(self) -> None:
         return None
+
+
+class _CustomRoutedExperts(RoutedExperts):
+    def weight_loader(self):
+        return "custom-loader"
 
 
 def test_factory_adapts_only_the_returned_router():
@@ -184,3 +191,43 @@ def test_factory_keeps_vision_bias_in_ascend_router_only():
     factory_kwargs = original_factory.call_args.kwargs
     assert "bias_vl" not in factory_kwargs
     assert "image_sentinel_lo" not in factory_kwargs
+
+
+def test_factory_composes_custom_routed_experts_with_ascend_contract():
+    router = _Router()
+    runner = SimpleNamespace(router=router)
+    original_factory = MagicMock(return_value=runner)
+    ascend_config = SimpleNamespace(
+        eplb_config=SimpleNamespace(
+            dynamic_eplb=False,
+            expert_map_path=None,
+            num_redundant_experts=0,
+        )
+    )
+
+    with (
+        patch.object(patch_fused_moe, "_original_FusedMoE", original_factory),
+        patch.object(patch_fused_moe, "get_ascend_config", return_value=ascend_config),
+    ):
+        result = patch_fused_moe._ascend_FusedMoE(
+            num_experts=8,
+            top_k=2,
+            router=router,
+            n_shared_experts=2,
+            routed_experts_cls=_CustomRoutedExperts,
+        )
+
+    assert result is runner
+    kwargs = original_factory.call_args.kwargs
+    adapted_cls = kwargs["routed_experts_cls"]
+    assert adapted_cls.__mro__[:4] == (
+        adapted_cls,
+        _CustomRoutedExperts,
+        AscendRoutedExperts,
+        RoutedExperts,
+    )
+    assert adapted_cls.__init__ is AscendRoutedExperts.__init__
+    assert adapted_cls.weight_loader is _CustomRoutedExperts.weight_loader
+    assert kwargs["routed_experts_args"]["n_shared_experts"] == 2
+    assert patch_fused_moe._adapt_routed_experts_cls(_CustomRoutedExperts) is adapted_cls
+    assert patch_fused_moe._adapt_routed_experts_cls(AscendRoutedExperts) is AscendRoutedExperts

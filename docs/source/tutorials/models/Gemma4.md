@@ -4,9 +4,9 @@
 
 Gemma4 is a Gemma-family language model that includes dense and Mixture-of-Experts (MoE) variants, and is suitable for general text generation, reasoning, and instruction-following scenarios.
 
-This document describes the main validation steps for Gemma4 on Atlas A2, Atlas A3, and Ascend 950 Products, including supported features, prerequisites, installation, single-node online deployment, functional verification, offline inference, accuracy and performance evaluation, performance tuning, and FAQs.
+This document describes the main validation steps for Gemma4 on Atlas A2, Atlas A3, and 950PR&950DT Products, including supported features, prerequisites, installation, single-node online deployment, functional verification, offline inference, accuracy and performance evaluation, performance tuning, and FAQs.
 
-This document is written based on the latest vLLM Ascend main branch. Gemma4 is supported on Atlas A2, Atlas A3, and Ascend 950 Products in this version.
+This document is written based on the latest vLLM Ascend main branch. Gemma4 is supported on Atlas A2, Atlas A3, and 950PR&950DT Products in this version.
 
 ## 2 Supported Features
 
@@ -14,7 +14,7 @@ Refer to [Supported Features List](../../user_guide/support_matrix/supported_mod
 
 Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get feature configuration details.
 
-Gemma4 supports both eager execution and ACLGraph execution on Atlas A2, Atlas A3, and Ascend 950 Products. For graph execution, `FULL_DECODE_ONLY` can reduce decode-phase dispatch overhead, while `PIECEWISE` is also supported.
+Gemma4 supports both eager execution and ACLGraph execution on Atlas A2, Atlas A3, and 950PR&950DT Products. For graph execution, `FULL_DECODE_ONLY` can reduce decode-phase dispatch overhead, while `PIECEWISE` is also supported.
 
 ## 3 Prerequisites
 
@@ -24,14 +24,10 @@ Download the Gemma4 model weight to a local or shared directory, such as `/root/
 
 | Model type | Description | Recommended hardware |
 | ---------- | ----------- | -------------------- |
-| Gemma4 dense model | Dense Gemma4 weight. | A single Atlas A2, Atlas A3, or Ascend 950 node. Adjust the number of visible NPUs according to model size. |
-| Gemma4 MoE model | Mixture-of-Experts Gemma4 weight. | A single Atlas A2, Atlas A3, or Ascend 950 node. Use tensor parallelism or expert parallelism according to the model size and deployment plan. |
+| Gemma4 dense model | Dense Gemma4 weight. | A single Atlas A2, Atlas A3, or 950PR&950DT node. Adjust the number of visible NPUs according to model size. |
+| Gemma4 MoE model | Mixture-of-Experts Gemma4 weight. | A single Atlas A2, Atlas A3, or 950PR&950DT node. Use tensor parallelism or expert parallelism according to the model size and deployment plan. |
 
 The examples below assume a single node with visible NPUs. The commands use 4 visible NPUs as an example. Adjust `ASCEND_RT_VISIBLE_DEVICES` and `--tensor-parallel-size` according to the model size and available devices.
-
-### 3.2 Verify Multi-node Communication (Optional)
-
-If multi-node deployment is required, verify the multi-node communication environment according to [Verify Multi-node Communication Environment](../../getting_started/installation.md#installation-multi-node-interconnect).
 
 ## 4 Installation
 
@@ -135,7 +131,7 @@ Expected result: the HTTP status is 200 and the JSON response contains a `choice
 
 ### 5.2 Multi-Card Deployment
 
-This tutorial provides single-node multi-card deployment examples for Gemma4 on Atlas A2, Atlas A3, and Ascend 950 Products. For different model sizes or device counts, adjust `ASCEND_RT_VISIBLE_DEVICES` and `--tensor-parallel-size` according to the available NPUs.
+This tutorial provides single-node multi-card deployment examples for Gemma4 on Atlas A2, Atlas A3, and 950PR&950DT Products. For different model sizes or device counts, adjust `ASCEND_RT_VISIBLE_DEVICES` and `--tensor-parallel-size` according to the available NPUs.
 
 ## 6 Functional Verification
 

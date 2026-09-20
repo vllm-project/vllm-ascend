@@ -26,8 +26,6 @@ def register_deepseek_v4_vision_config_convertor() -> None:
         ModelArchConfigConvertorBase,
     )
 
-    from vllm_ascend.utils import vllm_version_is
-
     class AscendDeepseekV4ModelArchConfigConvertor(ModelArchConfigConvertorBase):
         """Route vision checkpoints to the Ascend multimodal wrapper."""
 
@@ -41,10 +39,7 @@ def register_deepseek_v4_vision_config_convertor() -> None:
                 hf_config.architectures = ["DeepseekV4ForConditionalGeneration"]
                 hf_config.mm_prefix_clamp_sliding_window = True
                 hf_config.mm_prefix_span_leading_pad_modulus = 4
-            if vllm_version_is("0.27.1"):
-                super().__init__(hf_config, hf_text_config)
-            else:
-                super().__init__(hf_config, hf_text_config, revision)
+            super().__init__(hf_config, hf_text_config, revision)
 
         def is_mm_prefix_lm(self, supports_multimodal: bool = True) -> bool:
             return supports_multimodal and (getattr(self.hf_config, "vision_n_layers", 0) > 0)

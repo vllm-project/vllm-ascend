@@ -1,7 +1,9 @@
 # ruff: noqa: E501
 import inspect
 import unittest
+from contextlib import nullcontext
 from dataclasses import dataclass
+from itertools import permutations
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -9,9 +11,18 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 import torch
-from vllm.config import CacheConfig, CompilationMode, CUDAGraphMode, VllmConfig, set_current_vllm_config
+from vllm.config import (
+    CacheConfig,
+    CompilationMode,
+    CUDAGraphMode,
+    VllmConfig,
+    get_current_vllm_config,
+    set_current_vllm_config,
+)
 from vllm.forward_context import BatchDescriptor
+from vllm.model_executor.models.deepseek_mtp import DeepSeekMultiTokenPredictor
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
+from vllm.v1.kv_cache_interface import SlidingWindowSpec
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
 
 import vllm_ascend.spec_decode.llm_base_proposer as llm_base_proposer
@@ -19,10 +30,12 @@ from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import clear_ascend_config, init_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
+from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.spec_decode.utils import SlidingWindowAdapter
-from vllm_ascend.utils import enable_custom_op
+from vllm_ascend.utils import enable_custom_op, vllm_version_is
 from vllm_ascend.worker.dcp_utils import DCPSpecDecodeFirstPassInputs
 
 enable_custom_op()
@@ -138,6 +151,116 @@ def assert_attr_equal(attr: str | tuple[str, Any, Any], expect: Any, actual: Any
         assert torch.equal(expect_value, actual_value), f"{attr_name} tensor mismatch"
     else:
         assert expect_value == actual_value, f"{attr_name} value mismatch"
+
+
+def test_load_model_retains_split_indexer_metadata_dependency():
+    proposer = AscendEagleProposer.__new__(AscendEagleProposer)
+    proposer.method = "mtp"
+    proposer.vllm_config = MagicMock()
+    proposer.maybe_eager_context = nullcontext()
+    proposer._get_model = MagicMock(return_value=MagicMock())
+    proposer.supports_mm_inputs = False
+    proposer.parallel_drafting = False
+    proposer.draft_window_size = None
+    proposer.sliding_window = None
+    proposer._maybe_share_embeddings = MagicMock()
+    proposer._maybe_share_topk_indices = MagicMock()
+    proposer._maybe_share_lm_head = MagicMock()
+
+    target_name = "model.layers.0.self_attn.attn"
+    draft_name = "model.layers.1.self_attn.attn"
+    indexer_name = "model.layers.1.self_attn.indexer.k_cache"
+    target_layer = MagicMock()
+    draft_layer = MagicMock()
+    indexer_layer = MagicMock()
+    draft_layer.get_kv_cache_spec.return_value = MagicMock()
+    indexer_layer.get_kv_cache_spec.return_value = MagicMock()
+    draft_layer.get_attn_backend.return_value.get_supported_kernel_block_sizes.return_value = [128]
+
+    target_model = MagicMock()
+    with (
+        patch.object(llm_base_proposer, "get_pp_group", return_value=SimpleNamespace(is_last_rank=True)),
+        patch.object(llm_base_proposer, "supports_multimodal", return_value=False),
+        patch.object(
+            llm_base_proposer,
+            "get_layers_from_vllm_config",
+            side_effect=[
+                {target_name: target_layer},
+                {
+                    target_name: target_layer,
+                    draft_name: draft_layer,
+                    indexer_name: indexer_layer,
+                },
+                {
+                    target_name: target_layer,
+                    draft_name: draft_layer,
+                    indexer_name: indexer_layer,
+                },
+            ],
+        ),
+        patch("vllm_ascend.ascend_config.get_ascend_config", return_value=SimpleNamespace(draft_window_size=None)),
+    ):
+        proposer.load_model(target_model)
+
+    assert proposer._draft_attn_layer_names == {draft_name, indexer_name}
+    assert proposer.attn_layer_names == [draft_name, indexer_name]
+
+
+@pytest.mark.parametrize("method", ["mtp", "eagle3"])
+@pytest.mark.parametrize("group_order", list(permutations(("main", "indexer", "tail"))))
+def test_cache_only_groups_use_main_backend_and_metadata(group_order, method):
+    proposer = AscendEagleProposer.__new__(AscendEagleProposer)
+    proposer.method = method
+    proposer.use_compress = False
+    proposer.dcp_size = 1
+    proposer.runner = MagicMock()
+    proposer.vllm_config = MagicMock()
+    proposer.update_stream = MagicMock()
+
+    main_name = "model.layers.1.self_attn.attn"
+    indexer_name = "model.layers.1.self_attn.indexer.k_cache"
+    tail_name = "model.layers.1.self_attn.indexer.tail_cache"
+    main_metadata = object()
+    indexer_metadata = object()
+    tail_metadata = object()
+
+    def get_main_impl():
+        assert get_current_vllm_config() is proposer.vllm_config
+        return object
+
+    main_group = MagicMock()
+    main_group.layer_names = [main_name]
+    main_group.kv_cache_spec = MagicMock()
+    main_group.backend.get_impl_cls.side_effect = get_main_impl
+    main_group.get_metadata_builder.return_value.build.return_value = main_metadata
+    indexer_group = MagicMock()
+    indexer_group.layer_names = [indexer_name]
+    indexer_group.kv_cache_spec = MagicMock(spec=AscendSFAIndexerCacheSpec)
+    indexer_group.backend.get_impl_cls.return_value = None
+    indexer_group.get_metadata_builder.return_value.build.return_value = indexer_metadata
+    tail_group = MagicMock()
+    tail_group.layer_names = [tail_name]
+    # KpoolTailSpec derives from SlidingWindowSpec, not the SFA indexer spec.
+    tail_group.kv_cache_spec = MagicMock(spec=SlidingWindowSpec)
+    tail_group.backend.get_impl_cls.return_value = None
+    tail_group.get_metadata_builder.return_value.build.return_value = tail_metadata
+    groups = {"main": main_group, "indexer": indexer_group, "tail": tail_group}
+    proposer.draft_attn_groups = [groups[name] for name in group_order]
+
+    assert proposer._is_cache_only_draft_attn_group(indexer_group)
+    assert proposer._is_cache_only_draft_attn_group(tail_group)
+
+    with patch.object(llm_base_proposer, "update_full_graph_params") as mock_update_graph:
+        proposer._update_full_graph_params(None, 1)
+    assert mock_update_graph.call_args.args[0] is main_group.backend
+
+    metadata_steps, primary_metadata = proposer.build_draft_attn_metadata(MagicMock(), 1, 1)
+    assert metadata_steps == [{indexer_name: indexer_metadata, tail_name: tail_metadata, main_name: main_metadata}]
+    assert primary_metadata is main_metadata
+
+    proposer.draft_attn_groups = [indexer_group, tail_group]
+    with pytest.raises(ValueError, match="no executable attention backend"):
+        proposer._get_primary_draft_attn_group()
 
 
 def test_prepare_inputs_padded_preserves_internal_seq_lens_cpu():
@@ -291,10 +414,11 @@ class TestEagleProposerInitialization(TestBase):
             self.assertTrue(proposer.use_cuda_graph)
 
             expected_max_num_tokens = proposer.max_num_tokens
+            expected_arange_size = max(proposer.max_batch_size, expected_max_num_tokens) + 1
             self.assertEqual(proposer.input_ids.shape, (expected_max_num_tokens,))
             self.assertEqual(proposer.positions.shape, (expected_max_num_tokens,))
             self.assertEqual(proposer.hidden_states.shape, (expected_max_num_tokens, 4096))
-            self.assertEqual(proposer.arange.shape, (expected_max_num_tokens,))
+            self.assertEqual(proposer.arange.shape, (expected_arange_size,))
 
     def test_initialization_eagle3_enforce_eager(self):
         self.vllm_config.speculative_config.method = "eagle3"
@@ -590,12 +714,18 @@ class TestEagleProposerDummyRun(TestBase):
         self.mock_dp_group = patch("vllm_ascend.ascend_forward_context.get_dp_group", return_value=mock_dp_group)
         self.mock_dp_group.start()
 
+        self.mock_use_updatable_graph = patch(
+            "vllm_ascend.spec_decode.llm_base_proposer.use_updatable_graph", return_value=False
+        )
+        self.mock_use_updatable_graph.start()
+
         # Set the current vllm config
         set_current_vllm_config(self.vllm_config)
         self.proposer = AscendEagleProposer(vllm_config=self.vllm_config, device=self.device, runner=self.runner)
         self.proposer.model = MagicMock()
         self.proposer._runnable = MagicMock()
         self.proposer.update_stream = MagicMock()
+        self.proposer.draft_attn_groups = [MagicMock()]
 
     def tearDown(self):
         self.mock_get_ascend_config.stop()
@@ -603,6 +733,7 @@ class TestEagleProposerDummyRun(TestBase):
         self.mock_supports_multimodal_inputs.stop()
         self.mock_tp_world_size.stop()
         self.mock_dp_group.stop()
+        self.mock_use_updatable_graph.stop()
         # Clear the current vllm config
         set_current_vllm_config(None)
 
@@ -647,6 +778,7 @@ class TestEagleProposerDummyRun(TestBase):
         mock_get_context.return_value = mock_return_context
         mock_get_context_2.return_value = mock_return_context
         self.proposer.use_cuda_graph = True
+        self.proposer.draft_attn_groups = [MagicMock()]
         # cpu does not support `torch.ops.vllm.maybe_pad_and_reduce`
         with set_current_vllm_config(self.vllm_config):
             self.proposer.dummy_run(num_tokens=64, in_graph_capturing=True, aclgraph_runtime_mode=CUDAGraphMode.FULL)
@@ -750,128 +882,6 @@ class TestEagleProposerHelperMethods(TestBase):
 
 
 # fmt: off
-class TestEagleProposerMaybePadAndGather:
-    @pytest.fixture(autouse=True)
-    def setUp_and_tearDown(self):
-        self.check_mock()
-        self.device = torch.device("cpu")
-        yield
-
-    def _new_proposer(
-        self,
-        method,
-        *,
-        is_multimodal_model=False,
-        use_sequence_parallel_moe=False,
-    ):
-        proposer = object.__new__(AscendEagleProposer)
-        proposer.method = method
-        proposer.is_multimodal_model = is_multimodal_model
-        proposer.use_sequence_parallel_moe = use_sequence_parallel_moe
-        return proposer
-
-    def test_maybe_pad_and_reduce_is_removed(self):
-        proposer = self._new_proposer("eagle3")
-        hidden_states = torch.arange(12, device=self.device, dtype=torch.float32).view(6, 2)
-        positions = torch.arange(6, device=self.device, dtype=torch.int64)
-
-        reduced_hidden_states, reduced_positions = proposer.maybe_pad_and_reduce(hidden_states, positions)
-
-        assert reduced_hidden_states is hidden_states
-        assert reduced_positions is positions
-
-    @pytest.mark.parametrize(
-        "use_sequence_parallel_moe,hidden_states_is_none,expect_gather",
-        [
-            (True, False, True),
-            (True, True, True),
-            (False, False, False),
-        ],
-    )
-    def test_mtp_maybe_all_gather_and_unpad(
-        self,
-        use_sequence_parallel_moe,
-        hidden_states_is_none,
-        expect_gather,
-    ):
-        proposer = self._new_proposer(
-            "mtp",
-            use_sequence_parallel_moe=use_sequence_parallel_moe,
-        )
-        last_hidden_states = torch.arange(6, device=self.device, dtype=torch.float32).view(3, 2)
-        positions = torch.tensor([10, 11, 12], device=self.device, dtype=torch.int64)
-        hidden_states = None if hidden_states_is_none else last_hidden_states + 1000
-
-        def fake_all_gather(input_tensor, dim, world_size, group_name):
-            assert dim == 0
-            return torch.cat((input_tensor, input_tensor + 100), dim=0)
-
-        with (
-            patch(
-                "vllm_ascend.spec_decode.llm_base_proposer.get_tp_group",
-                return_value=MagicMock(world_size=2, unique_name="tp_group"),
-            ),
-            patch(
-                "torch.ops.vllm.all_gather",
-                side_effect=fake_all_gather,
-                create=True,
-            ) as mock_all_gather,
-        ):
-            gathered_last_hidden_states, gathered_positions, gathered_hidden_states = (
-                proposer.maybe_all_gather_and_unpad(last_hidden_states, positions, hidden_states)
-            )
-
-        if expect_gather:
-            expected_last_hidden_states = torch.cat((last_hidden_states, last_hidden_states + 100), dim=0)
-            expected_positions = torch.cat((positions, positions + 100), dim=0)
-            assert mock_all_gather.call_count == 2
-            assert torch.equal(gathered_last_hidden_states, expected_last_hidden_states)
-            assert torch.equal(gathered_positions, expected_positions)
-            if hidden_states_is_none:
-                assert gathered_hidden_states is None
-            else:
-                assert gathered_hidden_states is gathered_last_hidden_states
-        else:
-            mock_all_gather.assert_not_called()
-            assert gathered_last_hidden_states is last_hidden_states
-            assert gathered_positions is positions
-            assert gathered_hidden_states is hidden_states
-
-    def test_eagle_maybe_all_gather_and_unpad_does_not_gather(self):
-        proposer = self._new_proposer("eagle3")
-        last_hidden_states = torch.arange(6, device=self.device, dtype=torch.float32).view(3, 2)
-        positions = torch.tensor([10, 11, 12], device=self.device, dtype=torch.int64)
-        hidden_states = last_hidden_states + 1000
-
-        gathered_last_hidden_states, gathered_positions, gathered_hidden_states = proposer.maybe_all_gather_and_unpad(
-            last_hidden_states, positions, hidden_states
-        )
-
-        assert gathered_last_hidden_states is last_hidden_states
-        assert gathered_positions is positions
-        assert gathered_hidden_states is hidden_states
-
-    def check_mock(self):
-        import vllm_ascend.spec_decode.llm_base_proposer
-
-        assert hasattr(vllm_ascend.spec_decode.llm_base_proposer, "AscendSpecDecodeBaseProposer")
-        assert hasattr(vllm_ascend.spec_decode.llm_base_proposer, "get_tp_group")
-        RunnerCls = vllm_ascend.spec_decode.llm_base_proposer.AscendSpecDecodeBaseProposer
-
-        assert hasattr(RunnerCls, "maybe_pad_and_reduce")
-        sig = inspect.signature(RunnerCls.maybe_pad_and_reduce)
-        assert self.get_param_names(sig) == ["self", "hidden_states", "positions"]
-
-        assert hasattr(RunnerCls, "maybe_all_gather_and_unpad")
-        sig = inspect.signature(RunnerCls.maybe_all_gather_and_unpad)
-        assert self.get_param_names(sig) == ["self", "last_hidden_states", "positions", "hidden_states"]
-
-    def get_param_names(self, sig):
-        return [p.name for p in sig.parameters.values()]
-# fmt: on
-
-
-# fmt: off
 class TestEagleProposerPropose:
     @pytest.fixture(autouse=True)
     def setUp_and_tearDown(self):
@@ -963,6 +973,11 @@ class TestEagleProposerPropose:
         set_current_vllm_config(self.vllm_config)
         self.proposer = AscendEagleProposer(vllm_config=self.vllm_config, device=self.device, runner=self.runner)
 
+        self.mock_use_updatable_graph = patch(
+            "vllm_ascend.spec_decode.llm_base_proposer.use_updatable_graph", return_value=False
+        )
+        self.mock_use_updatable_graph.start()
+
         yield
 
         self.mock_cpugpubuffer.stop()
@@ -970,6 +985,7 @@ class TestEagleProposerPropose:
         self.mock_tp_world_size.stop()
         self.mock_dp_group.stop()
         self.mock_get_ascend_config.stop()
+        self.mock_use_updatable_graph.stop()
         # Clear the current vllm config
         set_current_vllm_config(None)
         clear_ascend_config()
@@ -1072,14 +1088,33 @@ class TestEagleProposerPropose:
             self.proposer.hidden_states = torch.zeros(8192, 7168, device=self.device, dtype=torch.bfloat16)
         else:
             self.proposer.hidden_states = torch.zeros(8192, 4096, device=self.device, dtype=torch.bfloat16)
+        main_layer_name = 'model.layers.36.self_attn.attn'
+        indexer_layer_name = 'model.layers.36.self_attn.indexer.k_cache'
         mock_attn_group = MagicMock()
         mock_builder = MagicMock()
         mock_attn_metadata = MagicMock()
         mock_builder.build.return_value = mock_attn_metadata
         mock_attn_group.get_metadata_builder.return_value = mock_builder
-        mock_attn_group.layer_names = ['model.layers.36.self_attn.attn']
+        mock_attn_group.layer_names = [main_layer_name]
         self.proposer.draft_attn_groups = [mock_attn_group]
-        self.proposer.attn_layer_names = ['model.layers.36.self_attn.attn']
+        self.proposer.attn_layer_names = [main_layer_name]
+        mock_indexer_builder = None
+        mock_indexer_metadata = None
+        mock_indexer_draft_metadata = None
+        if model_type == 'deepseek':
+            mock_indexer_group = MagicMock()
+            mock_indexer_builder = MagicMock()
+            mock_indexer_metadata = object()
+            mock_indexer_draft_metadata = object()
+            mock_indexer_builder.build.return_value = mock_indexer_metadata
+            mock_indexer_builder.build_for_drafting.return_value = mock_indexer_draft_metadata
+            mock_indexer_group.get_metadata_builder.return_value = mock_indexer_builder
+            mock_indexer_group.layer_names = [indexer_layer_name]
+            mock_indexer_group.kv_cache_spec = MagicMock(spec=AscendSFAIndexerCacheSpec)
+            mock_indexer_group.backend.get_impl_cls.return_value = None
+            mock_indexer_group.kv_cache_spec.block_size = 128
+            self.proposer.draft_attn_groups.append(mock_indexer_group)
+            self.proposer.attn_layer_names.append(indexer_layer_name)
         self.proposer.kernel_block_size = 128
         self.proposer.block_size = 128
         self.proposer._runnable = MagicMock()
@@ -1228,7 +1263,11 @@ class TestEagleProposerPropose:
 
         #run
         with (
-            patch.object(self.proposer, 'attn_update_stack_num_spec_norm', side_effect=side_effect),
+            patch.object(
+                self.proposer,
+                'attn_update_stack_num_spec_norm',
+                side_effect=side_effect,
+            ) as mock_update_metadata,
             set_current_vllm_config(self.vllm_config),
         ):
             self.proposer._propose(self.proposer.num_speculative_tokens,
@@ -1238,6 +1277,23 @@ class TestEagleProposerPropose:
                                 scheduler_output, num_scheduled_tokens, num_rejected_tokens_gpu,
                                 )
             self.assert_value_common_attn_metadata(captured_common_attn_metadata, flag_prefill_decode, model_type, graphmode)
+            if model_type == 'deepseek':
+                expected_followup_steps = self.proposer.num_speculative_tokens - 1
+                assert mock_update_metadata.call_count == expected_followup_steps
+                assert all(call.kwargs['attn_group'] is mock_attn_group for call in mock_update_metadata.call_args_list)
+                assert mock_indexer_builder is not None
+                assert mock_indexer_builder.build_for_drafting.call_count == expected_followup_steps
+
+                multi_steps_attn_metadata = self.proposer._runnable.call_args.kwargs['multi_steps_attn_metadata']
+                assert len(multi_steps_attn_metadata) == self.proposer.num_speculative_tokens
+                assert multi_steps_attn_metadata[0] == {
+                    main_layer_name: mock_attn_metadata,
+                    indexer_layer_name: mock_indexer_metadata,
+                }
+                for per_layer_metadata in multi_steps_attn_metadata[1:]:
+                    assert set(per_layer_metadata) == {main_layer_name, indexer_layer_name}
+                    assert per_layer_metadata[indexer_layer_name] is mock_indexer_draft_metadata
+                    assert per_layer_metadata[main_layer_name] is not mock_indexer_draft_metadata
 
     # give common_attn_metadata value
     def value_mock_common_attn_metadata(self, mock_common_attn_metadata, query_start_loc, query_start_loc_cpu, seq_lens, num_reqs,
@@ -1469,7 +1525,10 @@ class TestEagleProposerPropose:
             property
         )
         assert isinstance(
-            inspect.getattr_static(vllm.config.ModelConfig, "uses_xdrope_dim"),
+            inspect.getattr_static(
+                vllm.config.ModelConfig,
+                "uses_xdrope_dim" if vllm_version_is("0.28.0") else "mrope_num_dims",
+            ),
             property
         )
         assert isinstance(
@@ -2240,16 +2299,6 @@ class TestRunMergedDraft(TestBase):
         self.mock_extra_ctx.start()
         set_current_vllm_config(self.vllm_config)
         self.proposer = AscendEagleProposer(vllm_config=self.vllm_config, device=self.device, runner=self.runner)
-        self.proposer.maybe_pad_and_reduce = MagicMock(
-            side_effect=lambda hidden_states, positions: (hidden_states, positions)
-        )
-        self.proposer.maybe_all_gather_and_unpad = MagicMock(
-            side_effect=lambda last_hidden_states, positions, hidden_states: (
-                last_hidden_states,
-                positions,
-                hidden_states,
-            )
-        )
 
     def tearDown(self):
         self.mock_cpugpubuffer.stop()
@@ -2289,7 +2338,8 @@ class TestRunMergedDraft(TestBase):
         actual = set(vllm.config.ModelConfig.__dataclass_fields__)
         missing = fields - actual
         assert not missing, f"Missing dataclass fields: {missing}"
-        for field in ("uses_mrope", "uses_xdrope_dim", "use_mla", "is_multimodal_model"):
+        rope_dims_field = "uses_xdrope_dim" if vllm_version_is("0.28.0") else "mrope_num_dims"
+        for field in ("uses_mrope", rope_dims_field, "use_mla", "is_multimodal_model"):
             assert isinstance(inspect.getattr_static(vllm.config.ModelConfig, field), property)
         for method in ("get_hidden_size", "get_inputs_embeds_size"):
             assert hasattr(vllm.config.ModelConfig, method)
@@ -2398,8 +2448,6 @@ class TestRunMergedDraft(TestBase):
         RunnerCls = vllm_ascend.spec_decode.llm_base_proposer.AscendSpecDecodeBaseProposer
         for attr in (
             "_run_merged_draft",
-            "maybe_pad_and_reduce",
-            "maybe_all_gather_and_unpad",
             "model_returns_tuple",
         ):
             assert hasattr(RunnerCls, attr), f"AscendSpecDecodeBaseProposer.{attr} not found"
@@ -2418,12 +2466,6 @@ class TestRunMergedDraft(TestBase):
             "is_prefill",
             "sampling_metadata",
         ]
-        sig = inspect.signature(RunnerCls.maybe_pad_and_reduce)
-        sig_name = self.get_param_names(sig)
-        assert sig_name == ["self", "hidden_states", "positions"]
-        sig = inspect.signature(RunnerCls.maybe_all_gather_and_unpad)
-        sig_name = self.get_param_names(sig)
-        assert sig_name == ["self", "last_hidden_states", "positions", "hidden_states"]
         sig = inspect.signature(RunnerCls.model_returns_tuple)
         sig_name = self.get_param_names(sig)
         assert sig_name == ["self"]
@@ -2583,7 +2625,6 @@ class TestRunMergedDraft(TestBase):
         self.proposer.build_model_inputs_first_pass.assert_called_once_with(
             12, self.proposer._context_slot_mapping_buffers
         )
-        self.proposer.maybe_all_gather_and_unpad.assert_not_called()
         self.assertNotIn("hidden_states", self.proposer.model.calls[0])
         self.assertTrue(
             torch.equal(
@@ -4223,43 +4264,110 @@ class TestDeepSeekMTPIndicesSharing(unittest.TestCase):
         self.assertEqual(mod3.topk_indices_buffer, target_buffer_mock, "Module 3 buffer should be updated.")
         self.assertFalse(hasattr(mod2, "topk_indices_buffer"), "Module 2 should not have a buffer added.")
 
-    def test_run_merge_draft_mtp_skip_topk(self):
-        """Test the set_skip_topk calling logic in step 0 and step 1 of run_merge_draft."""
+    def _run_index_sharing_draft(self, share=True, supports_compact=True, dsa_cp=False):
+        """Run the real proposer and MLA hooks with known rows in place of model compute."""
         proposer = AscendEagleProposer.__new__(AscendEagleProposer)
-        proposer._share_mtp_indices = True
+        proposer.runner = None
+        proposer.method = "mtp"
+        proposer._share_mtp_indices = share
+        proposer.num_speculative_tokens = 2
+        proposer.parallel_drafting = False
+        proposer.pass_hidden_states_to_model = True
+        proposer.supports_mm_inputs = False
+        proposer.uses_mrope = False
+        proposer.use_cuda_graph = False
+        proposer.use_compress = False
+        proposer.device = torch.device("cpu")
+        proposer.input_ids = torch.arange(8, dtype=torch.int32)
+        proposer.positions = torch.arange(8, dtype=torch.int64)
+        proposer.hidden_states = torch.arange(32, dtype=torch.float32).reshape(8, 4)
+        proposer.arange = torch.arange(8, dtype=torch.int32)
+        proposer.vllm_config = SimpleNamespace(model_config=SimpleNamespace(max_model_len=128))
+        proposer._get_positions = lambda n: proposer.positions[:n]
+        proposer._set_positions = lambda n, positions: proposer.positions[:n].copy_(positions)
+        proposer.maybe_pad_and_reduce = lambda hidden, positions: (hidden, positions)
+        proposer.maybe_all_gather_and_unpad = lambda last, positions, hidden: (last, positions, hidden)
+        proposer.compute_draft_token_ids = lambda hidden, sampling_metadata: (torch.arange(hidden.shape[0]), None)
 
-        # Mock Draft Model and its set_skip_topk method
-        draft_model_mock = MagicMock()
-        proposer.model = MagicMock()
-        proposer.model.model = draft_model_mock
+        buffer = torch.full((8, 4), -1, dtype=torch.int32)
+        impl = SimpleNamespace(skip_topk=False, topk_indices_buffer=buffer)
+        attention = AscendMultiHeadLatentAttention.__new__(AscendMultiHeadLatentAttention)
+        torch.nn.Module.__init__(attention)
+        attention.mla_attn = SimpleNamespace(impl=impl)
+        attention.skip_topk = False
+        predictor = DeepSeekMultiTokenPredictor.__new__(DeepSeekMultiTokenPredictor)
+        torch.nn.Module.__init__(predictor)
+        layer = torch.nn.Module()
+        layer.mtp_block = torch.nn.Module()
+        layer.mtp_block.self_attn = torch.nn.Module()
+        layer.mtp_block.self_attn.mla_attn = attention
+        predictor.layers = torch.nn.ModuleDict({"80": layer})
+        if not supports_compact:
+            predictor = SimpleNamespace(set_skip_topk=predictor.set_skip_topk)
 
-        # Mock model inference return
-        proposer.model_returns_tuple = MagicMock(return_value=False)
-        proposer.model.return_value = MagicMock()
+        observed: list[tuple[bool, torch.Tensor]] = []
+        step0_rows = torch.arange(32, dtype=torch.int32).reshape(8, 4)
+        indices = torch.tensor([1, 6], dtype=torch.int32)
+        group = MagicMock(world_size=2, rank_in_group=0)
 
-        # Mock the run_merge_draft logic from your PR
-        # (Since this is a class method, we use an inner function to simulate and verify the core logic)
-        def mock_run_merge_draft(**model_kwargs):
-            # Step 0
-            draft_model = getattr(proposer.model, "model", None)
-            if proposer._share_mtp_indices and draft_model is not None and hasattr(draft_model, "set_skip_topk"):
-                draft_model.set_skip_topk(False)
+        def all_reduce(rows):
+            expected_contribution = torch.stack([step0_rows[1], torch.zeros(4, dtype=torch.int32)])
+            torch.testing.assert_close(rows, expected_contribution)
+            return step0_rows[indices]
 
-            # (Model inference...)
-            proposer.model(**model_kwargs)
+        group.all_reduce.side_effect = all_reduce
 
-            # Step 1
-            if proposer._share_mtp_indices and draft_model is not None and hasattr(draft_model, "set_skip_topk"):
-                draft_model.set_skip_topk(True)
+        def forward(**kwargs):
+            if not observed:
+                if dsa_cp:
+                    buffer[:4].copy_(step0_rows[:4])
+                else:
+                    buffer.copy_(step0_rows)
+            observed.append((impl.skip_topk, buffer.clone()))
+            return kwargs["hidden_states"].clone()
 
-        # Run the test
-        mock_run_merge_draft(input_ids=torch.tensor([1, 2, 3]))
+        proposer.model = MagicMock(side_effect=forward)
+        proposer.model.model = predictor
+        with (
+            patch.object(llm_base_proposer, "lmhead_tp_enable", return_value=False),
+            patch.object(llm_base_proposer.ascend_utils, "enable_dsa_cp", return_value=dsa_cp),
+            patch.object(llm_base_proposer, "get_tp_group", return_value=group),
+            patch.object(
+                llm_base_proposer, "get_ascend_config", return_value=SimpleNamespace(enable_reduce_sample=True)
+            ),
+            patch("vllm.forward_context._forward_context", SimpleNamespace(moe_layer_index=0)),
+        ):
+            result = proposer._run_merged_draft(
+                num_input_tokens=8,
+                batch_size=2,
+                token_indices_to_sample=indices,
+                target_positions=proposer.positions,
+                inputs_embeds=None,
+                multi_steps_attn_metadata=[None, None],
+                num_tokens=8,
+            )
+        self.assertEqual(result.shape, (2, 2))
+        self.assertEqual(len(observed), 2)
+        if dsa_cp:
+            group.all_reduce.assert_called_once()
+        return observed, step0_rows, indices
 
-        # Assert calling conditions
-        self.assertTrue(draft_model_mock.set_skip_topk.called, "set_skip_topk should be called.")
+    def test_run_merge_draft_mtp_skip_topk(self):
+        observed, original, indices = self._run_index_sharing_draft()
+        self.assertEqual([skip for skip, _ in observed], [False, True])
+        torch.testing.assert_close(observed[1][1][:2], original[indices])
 
-        # Verify calling order: False first, then True
-        calls = draft_model_mock.set_skip_topk.call_args_list
-        self.assertEqual(len(calls), 2, "set_skip_topk should be called exactly twice.")
-        self.assertEqual(calls[0][0][0], False, "Step 0 should call set_skip_topk(False).")
-        self.assertEqual(calls[1][0][0], True, "Step 1 should call set_skip_topk(True).")
+    def test_run_merge_draft_mtp_skip_topk_without_compact(self):
+        observed, original, _ = self._run_index_sharing_draft(supports_compact=False)
+        self.assertEqual([skip for skip, _ in observed], [False, True])
+        torch.testing.assert_close(observed[1][1], original)
+
+    def test_run_merge_draft_mtp_dsa_cp_compacts_remote_rows(self):
+        observed, original, indices = self._run_index_sharing_draft(dsa_cp=True)
+        self.assertEqual([skip for skip, _ in observed], [False, True])
+        torch.testing.assert_close(observed[1][1][:2], original[indices])
+
+    def test_run_merge_draft_mtp_sharing_disabled(self):
+        observed, original, _ = self._run_index_sharing_draft(share=False)
+        self.assertEqual([skip for skip, _ in observed], [False, False])
+        torch.testing.assert_close(observed[1][1], original)
