@@ -234,10 +234,33 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         self.mla_attn.process_weights_after_loading = wrapped_process_weights
 
         vllm_config = get_current_vllm_config()
+        # The eager prefill route can select its layout from per-step metadata.
+        # Compiled/captured paths keep their existing fixed operator contract.
+        self._eager_sequence_parallel = vllm_config.model_config.enforce_eager
         compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
+
+    def supports_sequence_parallel(self) -> bool:
+        if not self._eager_sequence_parallel:
+            return False
+        metadata = get_forward_context().attn_metadata
+        if not isinstance(metadata, dict):
+            return False
+        # Import lazily: the backend also consumes MLA wrapper types during
+        # attention backend initialization.
+        from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADSACPImpl
+
+        impl = self.mla_attn.impl
+        return type(impl) is AscendSFADSACPImpl and impl.supports_sequence_parallel(
+            metadata.get(self.mla_attn.layer_name)
+        )
+
+    def forward_sequence_parallel(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        output = torch.empty_like(hidden_states)
+        torch.ops.vllm.mla_forward_sequence_parallel(hidden_states, output, self.prefix)
+        return output
 
     def forward(
         self,
@@ -284,6 +307,27 @@ def mla_forward_fake(
 direct_register_custom_op(
     op_name="mla_forward",
     op_func=mla_forward,
+    mutates_args=["output"],
+    fake_impl=mla_forward_fake,
+    dispatch_key="PrivateUse1",
+)
+
+
+@eager_break_during_capture
+def mla_forward_sequence_parallel(
+    hidden_states: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: str,
+) -> None:
+    forward_context = get_forward_context()
+    layer = forward_context.no_compile_layers[layer_name].mla_attn
+    metadata = forward_context.attn_metadata[layer.layer_name]
+    layer.impl.forward_sequence_parallel(layer.layer_name, hidden_states, layer.kv_cache, metadata, output)
+
+
+direct_register_custom_op(
+    op_name="mla_forward_sequence_parallel",
+    op_func=mla_forward_sequence_parallel,
     mutates_args=["output"],
     fake_impl=mla_forward_fake,
     dispatch_key="PrivateUse1",

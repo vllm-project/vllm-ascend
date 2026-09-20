@@ -33,7 +33,12 @@ from vllm_ascend.attention.sfa_v1 import (
     AscendSFAMetadataBuilder,
     SFAForwardContext,
 )
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, enable_dcp, split_decodes_and_prefills
+from vllm_ascend.attention.utils import (
+    AscendCommonAttentionMetadata,
+    PreprocessType,
+    enable_dcp,
+    split_decodes_and_prefills,
+)
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.utils import (
@@ -398,6 +403,41 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
     def _parallel_query_gather_dim(self) -> int:
         return 0
 
+    def supports_sequence_parallel(self, attn_metadata) -> bool:
+        """Accept and return complete token shards on the full O-proj path."""
+        return (
+            attn_metadata is not None
+            and getattr(attn_metadata, "dsa_cp_context", None) is not None
+            and self.tp_size > 1
+            and getattr(self, "dcp_size", 1) == 1
+            and self.enable_dsa_cp_full_o_proj
+            and not self.o_proj.reduce_results
+            and not self._is_mtp_layer
+            and self.g_proj is None
+            and self.qk_rope_head_dim > 0
+            and self.preprocess_type == PreprocessType.NATIVE
+            and attn_metadata.attn_state not in {AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding}
+        )
+
+    def forward_sequence_parallel(self, layer_name, hidden_states, kv_cache, attn_metadata, output):
+        if not self.supports_sequence_parallel(attn_metadata):
+            raise RuntimeError("DSA-CP sequence-parallel input requires the prefill full O-proj path.")
+        context = attn_metadata.dsa_cp_context
+        local_tokens = context.local_end_with_pad - context.local_start
+        if hidden_states.shape[0] != local_tokens or output.shape != hidden_states.shape:
+            raise RuntimeError("DSA-CP sequence-parallel tensors must match the padded local token shard.")
+        valid_tokens = max(0, min(local_tokens, attn_metadata.num_input_tokens - context.local_start))
+        # The replicated route truncates gathered states, then pads with zero
+        # before CP. Preserve that behavior even after padded MoE rows change.
+        if valid_tokens < local_tokens:
+            hidden_states = nn.functional.pad(hidden_states[:valid_tokens], (0, 0, 0, local_tokens - valid_tokens))
+        super()._forward(layer_name, hidden_states, kv_cache, attn_metadata, output, sequence_parallel=True)
+        # Replicated output is truncated before the decoder pads/reduce-scatters.
+        # Invalid token rows therefore arrive at its post-attention norm as zero.
+        if valid_tokens < local_tokens:
+            output[valid_tokens:].zero_()
+        return output
+
     def _prepare_native_hidden_states(
         self,
         hidden_states: torch.Tensor,
@@ -545,7 +585,17 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         attn_output,
         output,
         gather_full_o_proj,
+        output_is_sequence_parallel=False,
     ):
+        if output_is_sequence_parallel:
+            if not gather_full_o_proj or self.o_proj.reduce_results:
+                raise RuntimeError("A complete local O-proj is required for sequence-parallel output.")
+            with self._use_full_o_proj_weights():
+                local_output = self._apply_o_proj_full_weight(attn_output)
+                if local_output.shape != output.shape:
+                    raise RuntimeError("DSA-CP local O-proj output does not match its sequence-parallel buffer.")
+                output.copy_(local_output)
+            return output
         if not self.enable_dsa_cp_full_o_proj:
             return super()._finalize_o_proj(
                 attn_output,
