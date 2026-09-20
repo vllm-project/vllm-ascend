@@ -5,10 +5,9 @@
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import pytest
 import torch
 
-from vllm_ascend.ops.rope_dsv4 import RopeDataProxy
+from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding, RopeDataProxy
 
 # ──────────────────────────────────────────────
 # Equivalence: pad_to + slice  vs  pad-positions + gather + slice
