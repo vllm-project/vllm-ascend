@@ -1,0 +1,146 @@
+#
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+# This file is a part of the vllm-ascend project.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# mypy: ignore-errors
+"""Ascend Qwen3.5: fused matmul+allreduce for row-parallel linears under TP.
+
+Uses torch_npu.npu_mm_all_reduce_base (aclnnMatmulAllReduce) to compute both
+in one kernel: activation crosses the HCCL link once, comm overlaps the
+matmul tail. Falls back to stock matmul+allreduce during ACL graph capture
+(EE1016) and for non-prefill / quantized / biased inputs.
+"""
+
+import os
+import types
+
+import torch
+import torch_npu
+from vllm.distributed import (
+    get_tp_group,
+    split_tensor_along_last_dim,
+    tensor_model_parallel_all_reduce,
+)
+from vllm.model_executor.layers.linear import (
+    RowParallelLinear,
+    UnquantizedLinearMethod,
+)
+from vllm.model_executor.models.qwen3_5 import (
+    Qwen3_5ForConditionalGeneration,
+    Qwen3_5MoeForConditionalGeneration,
+    Qwen3_5MoeProcessingInfo,
+    Qwen3_5ProcessingInfo,
+)
+from vllm.model_executor.models.qwen3_vl import (
+    Qwen3VLDummyInputsBuilder,
+    Qwen3VLMultiModalProcessor,
+)
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.utils.torch_utils import direct_register_custom_op
+
+
+def _mm_all_reduce_base_impl(x1: torch.Tensor, x2: torch.Tensor, hcom: str) -> torch.Tensor:
+    # Capture guard must live here (not in outer Python): dynamo specializes
+    # outer guards away at compile time, so only this impl runs during ACL
+    # capture. The MC2 comm-resource alloc does a sync memcpy, prohibited
+    # under capture modes GLOBAL/MAX (EE1016).
+    if torch.npu.is_current_stream_capturing():
+        return tensor_model_parallel_all_reduce(torch.matmul(x1, x2))
+    return torch_npu.npu_mm_all_reduce_base(x1, x2, hcom, bias=None)
+
+
+def _mm_all_reduce_base_fake(x1: torch.Tensor, x2: torch.Tensor, hcom: str) -> torch.Tensor:
+    return torch.empty((x1.shape[0], x2.shape[1]), dtype=x1.dtype, device=x1.device)
+
+
+direct_register_custom_op(
+    op_name="ascend_mm_all_reduce",
+    op_func=_mm_all_reduce_base_impl,
+    fake_impl=_mm_all_reduce_base_fake,
+    mutates_args=[],
+    dispatch_key="PrivateUse1",
+)
+
+
+def _fused_row_parallel_forward(self, input_):
+    # Replicates vllm's RowParallelLinear.forward; the matmul+allreduce
+    # steps are fused into one kernel when eligible, otherwise the fallback
+    # is bit-identical to stock. `self` is the bound RowParallelLinear.
+    if self.input_is_parallel:
+        input_parallel = input_
+    else:
+        input_parallel = split_tensor_along_last_dim(input_, num_partitions=self.tp_size)[self.tp_rank].contiguous()
+    bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
+
+    if (
+        self.reduce_results
+        and self.tp_size > 1
+        and input_parallel.shape[0] > 1000
+        and self.bias is None
+        and isinstance(self.quant_method, UnquantizedLinearMethod)
+    ):
+        output = torch.ops.vllm.ascend_mm_all_reduce(input_parallel, self.weight.t(), self._ascend_hcomm)
+    else:
+        output_parallel = self.quant_method.apply(self, input_parallel, bias_)
+        if self.reduce_results and self.tp_size > 1:
+            output = tensor_model_parallel_all_reduce(output_parallel)
+        else:
+            output = output_parallel
+
+    if not self.return_bias:
+        return output
+    return output, self.bias if self.skip_bias_add else None
+
+
+class _AscendMC2Mixin:
+    """Fused matmul+allreduce for row-parallel linears under TP."""
+
+    def __init__(self, *, vllm_config, prefix="model"):
+        # Explicit signature required: vllm's initialize_model inspects
+        # __init__ parameter names; *args/**kwargs is classified old-style.
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        if os.environ.get("VLLM_ASCEND_MM_ALL_REDUCE", "1") != "1":
+            return
+        if not hasattr(torch_npu, "npu_mm_all_reduce_base"):
+            return
+        tp = get_tp_group()
+        if tp.world_size <= 1:
+            return
+        group = tp.device_group
+        rank = torch.distributed.get_global_rank(group, torch.distributed.get_rank(group))
+        hcom = group._get_backend(torch.device("npu")).get_hccl_comm_name(rank)
+        # Instance-level forward replacement: only this model's own
+        # reduce_results RowParallelLinear modules are touched.
+        for module in self.modules():
+            if isinstance(module, RowParallelLinear) and module.reduce_results:
+                module._ascend_hcomm = hcom
+                module.forward = types.MethodType(_fused_row_parallel_forward, module)
+
+
+@MULTIMODAL_REGISTRY.register_processor(
+    Qwen3VLMultiModalProcessor,
+    info=Qwen3_5ProcessingInfo,
+    dummy_inputs=Qwen3VLDummyInputsBuilder,
+)
+class AscendQwen3_5ForConditionalGeneration(_AscendMC2Mixin, Qwen3_5ForConditionalGeneration):
+    pass
+
+
+@MULTIMODAL_REGISTRY.register_processor(
+    Qwen3VLMultiModalProcessor,
+    info=Qwen3_5MoeProcessingInfo,
+    dummy_inputs=Qwen3VLDummyInputsBuilder,
+)
+class AscendQwen3_5MoeForConditionalGeneration(_AscendMC2Mixin, Qwen3_5MoeForConditionalGeneration):
+    pass
