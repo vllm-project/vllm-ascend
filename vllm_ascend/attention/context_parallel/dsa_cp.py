@@ -832,7 +832,6 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 query_start_loc=local_query_start_loc,
                 seq_lens=local_seq_lens,
                 num_reqs=num_reqs,
-                max_seqlen_q=max_local_query_len,
                 max_seqlen_k=max_local_seq_lens,
             )
 
@@ -1139,7 +1138,6 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         query_start_loc,
         seq_lens,
         num_reqs,
-        max_seqlen_q,
         max_seqlen_k,
     ):
         if self.compressor_ratio != 4:
@@ -1162,6 +1160,10 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         metadata = self.common_ratio_to_sas_metadata.get(cache_key)
 
         if metadata is None:
+            # The cached CPU metadata can diverge from the device-local view
+            # under async scheduling, so derive this limit from the consumer.
+            seq_lens_q = query_start_loc[1 : num_reqs + 1] - query_start_loc[:num_reqs]
+            max_seqlen_q = max(1, int(seq_lens_q.max().item()))
             metadata = torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
                 num_heads_q=self.model_config.hf_config.index_n_heads,
                 num_heads_k=1,
@@ -1801,9 +1803,10 @@ class AscendDSACPImpl(DSAAttentionImpl):
         torch.ops._C_ascend.inplace_partial_rotary_mul(
             local_attn_output.unsqueeze(1),
             cp_metadata.local_cos[layer_name],
-            -cp_metadata.local_sin[layer_name],
+            cp_metadata.local_sin[layer_name],
             rotary_mode="interleave",
             partial_slice=[self.nope_head_dim, self.head_dim],
+            negate_sin=True,
         )
 
         if self.tp_size == 1 or skip_all_to_all:

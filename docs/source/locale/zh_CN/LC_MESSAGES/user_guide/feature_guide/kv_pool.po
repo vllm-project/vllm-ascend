@@ -125,12 +125,6 @@ msgid ""
 msgstr "注意：对于启用了基于 RoCE 的设备间通信的 MooncakeStore，建议在实际性能基准测试前进行预热阶段。"
 
 msgid ""
-"**For warm-up, it is recommended to issue requests with an input sequence "
-"length of 8K and an output sequence length of 1, with the total number of "
-"requests being 2–3× the number of devices (cards/dies).**"
-msgstr "**对于预热，建议发送输入序列长度为8K、输出序列长度为1的请求，请求总数应为设备数（卡/芯）的2–3倍。**"
-
-msgid ""
 "With Mode A (Embedded Real Client), Mooncake is embedded in vLLM. When the "
 "vLLM service starts, `AscendStoreConnector` / `MooncakeBackend` "
 "automatically calls `MooncakeDistributedStore.setup()` using the settings in"
@@ -1507,3 +1501,9 @@ msgstr ""
 
 msgid "### 5.5. DSv4 known issue (temporary)"
 msgstr "### 5.5. DSv4 已知问题（临时）"
+
+msgid ""
+"**For warm-up, it is recommended to issue requests with an input sequence "
+"length of 8k and an output sequence length of 1, with the total number of "
+"requests being 2–3× the number of devices (cards/dies).**"
+msgstr "**建议在预热阶段发送输入序列长度为8k、输出序列长度为1的请求，请求总数应为设备（卡/芯）数量的2–3倍。**"
