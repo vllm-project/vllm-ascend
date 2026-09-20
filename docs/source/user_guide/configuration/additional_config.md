@@ -85,7 +85,7 @@ The following table lists additional configuration options available in vLLM Asc
 The details of each configuration option are as follows:
 
 > [!WARNING]
-> With HDK 0.26.0 or earlier, `c8_enable_reshape_optim` may conflict with pooling models that use AICPU operators. Set `c8_enable_reshape_optim` to `false` to disable the optimization and avoid the conflict.
+> With HDK 0.26.0 or earlier, `c8_enable_reshape_optim` may conflict with pooling models that use AICPU operators. Set `c8_enable_reshape_optim` to `false` to disable the optimization and avoid the conflict. See [issue #15896](https://github.com/vllm-project/vllm-ascend/issues/15896) for details.
 
 **xlite_graph_config**
 

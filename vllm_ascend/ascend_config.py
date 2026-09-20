@@ -522,6 +522,7 @@ class AscendConfig:
     enable_sp_by_pass: bool = False
     enable_sparse_sfa_c8: bool = False
     enable_sparse_li_c8: bool = False
+    # See https://github.com/vllm-project/vllm-ascend/issues/15896
     c8_enable_reshape_optim: bool = True
     pd_tp_ratio: int = 1
     pd_head_ratio: int = 1
