@@ -46,20 +46,6 @@ msgstr "## 3 前提条件"
 msgid "### 3.1 Model Weight"
 msgstr "### 3.1 模型权重"
 
-msgid ""
-"- `Qwen3-Embedding-8B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-8B)\n"
-"- `Qwen3-Embedding-4B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-4B)\n"
-"- `Qwen3-Embedding-0.6B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-0.6B)"
-msgstr ""
-"- `Qwen3-Embedding-8B` [下载模型权重](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-8B)\n"
-"- `Qwen3-Embedding-4B` [下载模型权重](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-4B)\n"
-"- `Qwen3-Embedding-0.6B` [下载模型权重](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-0.6B)"
-
-msgid ""
-"It is recommended to download the model weight to the shared directory of "
-"multiple nodes, such as `/root/.cache/`"
-msgstr "建议将模型权重下载到多个节点的共享目录，例如 `/root/.cache/`"
-
 msgid "## 4 Installation"
 msgstr "## 4 安装"
 
@@ -159,9 +145,6 @@ msgstr "## 7 精度评估"
 msgid "Here are two accuracy evaluation methods."
 msgstr "这里提供两种精度评估方法。"
 
-msgid "### Using MTEB"
-msgstr "### 使用 MTEB"
-
 msgid "1. Refer to [MTEB](https://docs.mteb.org/) for details."
 msgstr "1. 有关详细信息，请参阅 [MTEB](https://docs.mteb.org/)。"
 
@@ -173,9 +156,6 @@ msgstr "3. 执行后，您可以获得结果。"
 
 msgid "## 8 Performance Evaluation"
 msgstr "## 8 性能评估"
-
-msgid "### Using vLLM Benchmark"
-msgstr "### 使用 vLLM Benchmark"
 
 msgid ""
 "Run performance of `Qwen3-Embedding-0.6B` as an example.\n"
@@ -227,3 +207,44 @@ msgid ""
 "[installation](../../getting_started/installation.md)."
 msgstr ""
 "- 从源码安装 `vllm-ascend`，请参阅 [安装](../../getting_started/installation.md)。"
+
+msgid "|  Weight Version        | Download Links |"
+msgstr "|  权重版本        | 下载链接 |"
+
+msgid ""
+"| `Qwen3-Embedding-8B`  | "
+"[ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-8B) |"
+msgstr ""
+"| `Qwen3-Embedding-8B`  | "
+"[ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-8B) |"
+
+msgid ""
+"| `Qwen3-Embedding-4B`   | "
+"[ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-4B) |"
+msgstr ""
+"| `Qwen3-Embedding-4B`   | "
+"[ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-4B) |"
+
+msgid ""
+"| `Qwen3-Embedding-0.6B` | "
+"[ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-0.6B) |"
+msgstr ""
+"| `Qwen3-Embedding-0.6B` | "
+"[ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-Embedding-0.6B) |"
+
+msgid ""
+"It is recommended to download the model weight to the shared directory of "
+"multiple nodes, such as `/root/.cache/`."
+msgstr "建议将模型权重下载到多节点的共享目录中，例如 `/root/.cache/`。"
+
+msgid ""
+">**Path description**: Download the model weights to a directory of your "
+"choice and record it. Ensure the model path in the subsequent deployment "
+"command matches this directory."
+msgstr ">**路径说明**：将模型权重下载到您选择的目录并记录该路径。确保后续部署命令中的模型路径与此目录一致。"
+
+msgid "### 7.1 Using MTEB"
+msgstr "### 7.1 使用 MTEB"
+
+msgid "### 8.1 Using vLLM Benchmark"
+msgstr "### 8.1 使用 vLLM Benchmark"
