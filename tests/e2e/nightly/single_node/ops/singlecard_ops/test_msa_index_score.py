@@ -6,6 +6,7 @@ import math
 import pytest
 import torch
 import torch_npu  # noqa: F401
+import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
