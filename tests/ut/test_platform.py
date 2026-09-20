@@ -1,4 +1,5 @@
 import importlib
+import os
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -15,6 +16,7 @@ from vllm_ascend.ascend_forward_context import MoECommType, override_mrv2_in_pro
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.platform import (
     NPUPlatform,
+    _fix_incompatible_config_and_env,
     _setup_compile_backend,
     _validate_eplb_config,
     _validate_parallel_config,
@@ -151,6 +153,22 @@ class TestNPUPlatform(TestBase):
         mock_ascend_config.update_compile_ranges_split_points = MagicMock()
         return mock_ascend_config
 
+    @staticmethod
+    def minimal_vllm_config():
+        return SimpleNamespace(
+            additional_config={},
+            attention_config=None,
+            cache_config=None,
+            compilation_config=None,
+            kv_transfer_config=None,
+            model_config=None,
+            observability_config=None,
+            parallel_config=SimpleNamespace(enable_eplb=False),
+            scheduler_config=None,
+            speculative_config=None,
+            use_v2_model_runner=False,
+        )
+
     def setUp(self):
         self._enable_sp_patch = patch("vllm_ascend.utils.enable_sp", return_value=False)
         self._enable_sp_patch.start()
@@ -165,6 +183,32 @@ class TestNPUPlatform(TestBase):
         self.assertEqual(NPUPlatform.simple_compile_backend, "eager")
         self.assertEqual(NPUPlatform.ray_device_key, "NPU")
         self.assertEqual(NPUPlatform.device_control_env_var, "ASCEND_RT_VISIBLE_DEVICES")
+
+    def test_breakable_cudagraph_is_opt_in(self):
+        from vllm_ascend import platform
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("VLLM_USE_BREAKABLE_CUDAGRAPH", None)
+            importlib.reload(platform)
+            self.assertEqual(os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"], "0")
+
+            os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
+            importlib.reload(platform)
+            self.assertEqual(os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"], "1")
+
+    def test_fix_incompatible_config_and_env_sets_memory_profiler_env_default(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS", None)
+
+            _fix_incompatible_config_and_env(self.minimal_vllm_config())
+
+            self.assertEqual(os.environ["VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS"], "0")
+
+    def test_fix_incompatible_config_and_env_preserves_explicit_memory_profiler_env_value(self):
+        with patch.dict(os.environ, {"VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS": "1"}, clear=False):
+            _fix_incompatible_config_and_env(self.minimal_vllm_config())
+
+            self.assertEqual(os.environ["VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS"], "1")
 
     @patch("vllm_ascend.platform.enable_sp", return_value=False)
     @patch("vllm_ascend.platform.enable_sfa_dcp_replicated_indexer", return_value=True)
@@ -878,7 +922,7 @@ class TestNPUPlatform(TestBase):
 
         with (
             self.assertLogs(logger="vllm", level="INFO") as cm,
-            patch.object(platform, "_fix_incompatible_config"),
+            patch.object(platform, "_fix_incompatible_config_and_env"),
         ):
             self.platform.check_and_update_config(vllm_config)
 
@@ -910,7 +954,7 @@ class TestNPUPlatform(TestBase):
 
         with (
             self.assertLogs(logger="vllm", level="INFO") as cm,
-            patch.object(platform, "_fix_incompatible_config"),
+            patch.object(platform, "_fix_incompatible_config_and_env"),
         ):
             self.platform.check_and_update_config(vllm_config)
 
@@ -957,7 +1001,7 @@ class TestNPUPlatform(TestBase):
 
         with (
             self.assertLogs(logger="vllm", level="WARNING") as cm,
-            patch.object(platform, "_fix_incompatible_config"),
+            patch.object(platform, "_fix_incompatible_config_and_env"),
         ):
             self.platform.check_and_update_config(vllm_config)
 
@@ -1060,7 +1104,7 @@ class TestNPUPlatform(TestBase):
 
         with (
             pytest.raises(ValueError, match=r"recompute_scheduler_enable.*PD-disaggregated.*PD-mixed"),
-            patch.object(platform, "_fix_incompatible_config"),
+            patch.object(platform, "_fix_incompatible_config_and_env"),
         ):
             self.platform.check_and_update_config(vllm_config)
 
@@ -1095,7 +1139,7 @@ class TestNPUPlatform(TestBase):
 
         with (
             pytest.raises(ValueError, match=r"recompute_scheduler_enable.*PD-disaggregated.*PD-mixed"),
-            patch.object(platform, "_fix_incompatible_config"),
+            patch.object(platform, "_fix_incompatible_config_and_env"),
             patch.object(platform, "check_kv_extra_config"),
         ):
             self.platform.check_and_update_config(vllm_config)
@@ -1132,7 +1176,7 @@ class TestNPUPlatform(TestBase):
         self.platform = platform.NPUPlatform()
 
         with (
-            patch.object(platform, "_fix_incompatible_config"),
+            patch.object(platform, "_fix_incompatible_config_and_env"),
             patch.object(platform, "check_kv_extra_config"),
             patch.object(platform.logger, "warning") as mock_warning,
         ):
@@ -1181,7 +1225,7 @@ class TestNPUPlatform(TestBase):
         self.platform = platform.NPUPlatform()
 
         with (
-            patch.object(platform, "_fix_incompatible_config"),
+            patch.object(platform, "_fix_incompatible_config_and_env"),
             patch.object(platform, "check_kv_extra_config"),
         ):
             self.platform.check_and_update_config(vllm_config)
@@ -1240,7 +1284,7 @@ class TestNPUPlatform(TestBase):
                 self.platform = platform.NPUPlatform()
 
                 with (
-                    patch.object(platform, "_fix_incompatible_config"),
+                    patch.object(platform, "_fix_incompatible_config_and_env"),
                     patch.object(platform, "check_kv_extra_config"),
                 ):
                     self.platform.check_and_update_config(vllm_config)
@@ -1295,7 +1339,7 @@ class TestNPUPlatform(TestBase):
 
                 with (
                     pytest.raises(ValueError, match=message),
-                    patch.object(platform, "_fix_incompatible_config"),
+                    patch.object(platform, "_fix_incompatible_config_and_env"),
                     patch.object(platform, "check_kv_extra_config"),
                 ):
                     self.platform.check_and_update_config(vllm_config)
@@ -1327,7 +1371,7 @@ class TestNPUPlatform(TestBase):
         vllm_config.scheduler_config.async_scheduling = False
 
         with (
-            patch.object(platform, "_fix_incompatible_config"),
+            patch.object(platform, "_fix_incompatible_config_and_env"),
             patch.object(platform, "check_kv_extra_config"),
         ):
             self.platform.check_and_update_config(vllm_config)
@@ -1368,7 +1412,7 @@ class TestNPUPlatform(TestBase):
                 ValueError,
                 match="requires synchronous scheduling",
             ),
-            patch.object(platform, "_fix_incompatible_config"),
+            patch.object(platform, "_fix_incompatible_config_and_env"),
             patch.object(platform, "check_kv_extra_config"),
         ):
             self.platform.check_and_update_config(vllm_config)
@@ -1398,7 +1442,7 @@ class TestNPUPlatform(TestBase):
                 )
 
                 with (
-                    patch.object(platform, "_fix_incompatible_config"),
+                    patch.object(platform, "_fix_incompatible_config_and_env"),
                     patch.object(platform, "check_kv_extra_config"),
                 ):
                     self.platform.check_and_update_config(vllm_config)
@@ -1431,7 +1475,7 @@ class TestNPUPlatform(TestBase):
                 )
 
                 with (
-                    patch.object(platform, "_fix_incompatible_config"),
+                    patch.object(platform, "_fix_incompatible_config_and_env"),
                     patch.object(platform, "check_kv_extra_config"),
                 ):
                     self.platform.check_and_update_config(vllm_config)
@@ -1463,7 +1507,7 @@ class TestNPUPlatform(TestBase):
         importlib.reload(platform)
         self.platform = platform.NPUPlatform()
         with (
-            patch.object(platform, "_fix_incompatible_config"),
+            patch.object(platform, "_fix_incompatible_config_and_env"),
             patch.object(platform, "check_kv_extra_config"),
             patch.object(platform.logger, "warning") as mock_warning,
         ):
@@ -1515,7 +1559,7 @@ class TestNPUPlatform(TestBase):
         self.platform = platform.NPUPlatform()
 
         with (
-            patch.object(platform, "_fix_incompatible_config"),
+            patch.object(platform, "_fix_incompatible_config_and_env"),
             patch.object(platform, "check_kv_extra_config"),
             patch("vllm_ascend.logger.configure_ascend_file_logging"),
         ):
@@ -1579,7 +1623,7 @@ class TestNPUPlatform(TestBase):
                         ValueError,
                         match=r"DyntraLB is only supported on PD-disaggregated D nodes",
                     ),
-                    patch.object(platform, "_fix_incompatible_config"),
+                    patch.object(platform, "_fix_incompatible_config_and_env"),
                     patch.object(platform, "check_kv_extra_config"),
                 ):
                     self.platform.check_and_update_config(vllm_config)
@@ -1612,7 +1656,7 @@ class TestNPUPlatform(TestBase):
                 ValueError,
                 match=r"DyntraLB only supports decoder instances.*single node",
             ),
-            patch.object(platform, "_fix_incompatible_config"),
+            patch.object(platform, "_fix_incompatible_config_and_env"),
             patch.object(platform, "check_kv_extra_config"),
         ):
             self.platform.check_and_update_config(vllm_config)
@@ -1644,7 +1688,7 @@ class TestNPUPlatform(TestBase):
 
         with (
             pytest.raises(ValueError, match=r"enable_balance_scheduling.*PD-mixed.*PD-disaggregated"),
-            patch.object(platform, "_fix_incompatible_config"),
+            patch.object(platform, "_fix_incompatible_config_and_env"),
             patch.object(platform, "check_kv_extra_config"),
         ):
             self.platform.check_and_update_config(vllm_config)
@@ -1679,7 +1723,7 @@ class TestNPUPlatform(TestBase):
 
         with (
             pytest.raises(ValueError, match=r"enable_balance_scheduling.*PD-mixed.*PD-disaggregated"),
-            patch.object(platform, "_fix_incompatible_config"),
+            patch.object(platform, "_fix_incompatible_config_and_env"),
             patch.object(platform, "check_kv_extra_config"),
         ):
             self.platform.check_and_update_config(vllm_config)

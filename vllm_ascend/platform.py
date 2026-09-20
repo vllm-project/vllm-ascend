@@ -482,7 +482,7 @@ class NPUPlatform(Platform):
             assert get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
 
         # 4.Make sure the config is compatible with Ascend
-        _fix_incompatible_config(vllm_config)
+        _fix_incompatible_config_and_env(vllm_config)
 
         # 5.Initialize Ascend config and validate Ascend-specific options
         # (fused MC2 exclusivity + scheduler extension policies)
@@ -637,11 +637,11 @@ class NPUPlatform(Platform):
         }
 
 
-def _fix_incompatible_config(vllm_config: VllmConfig) -> None:
+def _fix_incompatible_config_and_env(vllm_config: VllmConfig) -> None:
     """
-    Check and correct parameters in VllmConfig that are incompatible with Ascend NPU.
-    If GPU-specific or currently unsupported parameters are set by the user,
-    log a warning and reset them to safe values.
+    Check and correct parameters in VllmConfig and environment variables that
+    are incompatible with Ascend NPU. If GPU-specific or currently unsupported
+    parameters are set by the user, log a warning and reset them to safe values.
     """
     _validate_eplb_config(vllm_config)
     model_config = vllm_config.model_config
@@ -866,6 +866,12 @@ def _fix_incompatible_config(vllm_config: VllmConfig) -> None:
             "seconds for execute_model RPC calls in multiprocessing must be "
             "greater than 1836s, Set VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000"
         )
+
+    # ==================== 12. VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS ====================
+    # TODO(shihan-lin168): Remove this environment variable setting once CANN 9.2.0 is released.
+    if not envs_vllm.is_set("VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS"):
+        os.environ["VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS"] = "0"
+        logger.info("Set VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0 by default on Ascend")
 
 
 def _validate_eplb_config(vllm_config: VllmConfig) -> None:

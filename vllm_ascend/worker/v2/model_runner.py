@@ -17,6 +17,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import gc
 from contextlib import AbstractContextManager, contextmanager
 from contextvars import ContextVar
 
@@ -29,6 +30,7 @@ from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_
 from vllm.sequence import IntermediateTensors
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.worker.gpu import cudagraph_utils as vllm_cudagraph_utils
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
@@ -56,6 +58,7 @@ from vllm_ascend.ascend_forward_context import (
 )
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
+from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, reset_graph_params
 from vllm_ascend.core.profiling_chunk_predictor import (
     _finish_profiling_chunk_timing,
     _start_profiling_chunk_timing,
@@ -254,11 +257,13 @@ class NPUModelRunner(GPUModelRunner):
     def initialize_kv_cache(
         self,
         kv_cache_config: KVCacheConfig,
+        is_profiling: bool = False,
         kv_cache_allocation_context: AbstractContextManager | None = None,
     ) -> None:
         with graph_manager_wrapper(self):
             super().initialize_kv_cache(
                 kv_cache_config,
+                is_profiling=is_profiling,
                 kv_cache_allocation_context=kv_cache_allocation_context,
             )
             if self.pcp_manager is not None:
@@ -281,12 +286,31 @@ class NPUModelRunner(GPUModelRunner):
         if self.model_config.enable_return_routed_experts:
             self.init_routed_experts_capturer()
 
-        self.kvpp = KVPPRuntime.create_from_kv_cache(
-            vllm_config=self.vllm_config,
-            kv_cache_config=self.kv_cache_config,
-            static_forward_context=self.compilation_config.static_forward_context,
-        )
-        self.model_state.kvpp_runtime = self.kvpp
+        if not is_profiling:
+            self.kvpp = KVPPRuntime.create_from_kv_cache(
+                vllm_config=self.vllm_config,
+                kv_cache_config=self.kv_cache_config,
+                static_forward_context=self.compilation_config.static_forward_context,
+            )
+            self.model_state.kvpp_runtime = self.kvpp
+
+    @torch.inference_mode()
+    def profile_cudagraph_memory(self) -> int:
+        try:
+            with torch_cuda_wrapper(), aclgraph_profile_wrapper():
+                return super().profile_cudagraph_memory()
+        finally:
+            reset_graph_params()
+            # Upstream clears layer.kv_cache, while Ascend attention keeps
+            # two additional views that would retain the profiling cache.
+            for layer in self.compilation_config.static_forward_context.values():
+                if hasattr(layer, "impl"):
+                    if hasattr(layer.impl, "key_cache"):
+                        layer.impl.key_cache = None
+                    if hasattr(layer.impl, "value_cache"):
+                        layer.impl.value_cache = None
+            gc.collect()
+            torch.accelerator.empty_cache()
 
     @torch.inference_mode()
     def execute_model(
@@ -926,3 +950,14 @@ def _dispatch_pcp_and_sync_dp(cudagraph_manager, num_reqs, num_tokens, *args, **
 
 if vllm_version_is("0.28.0"):
     vllm_model_runner.dispatch_cg_and_sync_dp = _dispatch_pcp_and_sync_dp
+
+
+@contextmanager
+def aclgraph_profile_wrapper():
+    """Make upstream graph-memory profiling operate on ACL graph wrappers."""
+    original_graph_wrapper = vllm_cudagraph_utils.CUDAGraphWrapper
+    try:
+        vllm_cudagraph_utils.CUDAGraphWrapper = ACLGraphWrapper
+        yield
+    finally:
+        vllm_cudagraph_utils.CUDAGraphWrapper = original_graph_wrapper
