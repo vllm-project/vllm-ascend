@@ -268,6 +268,8 @@ class MooncakeBaseConnectorWorker:
                     block_size_scales.append(block_size_scale)
                 else:
                     for cache in caches:
+                        if cache.numel() == 0:
+                            continue
                         tensor_num_blocks = cache.shape[0]
                         element_size = cache.element_size()
                         block_shape = tuple(cache.shape[1:])
