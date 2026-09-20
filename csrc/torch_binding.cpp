@@ -2118,6 +2118,117 @@ at::Tensor chunk_fwd_o(
     return o;
 }
 
+bool is_chunk_gated_delta_rule_compute_wy_available()
+{
+    static const bool is_available =
+        GetOpApiFuncAddr("aclnnChunkGatedDeltaRuleComputeWy") != nullptr &&
+        GetOpApiFuncAddr("aclnnChunkGatedDeltaRuleComputeWyGetWorkspaceSize") != nullptr;
+    return is_available;
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> chunk_gated_delta_rule_compute_wy(
+    const at::Tensor & q,
+    const at::Tensor & k,
+    const at::Tensor & v,
+    const at::Tensor & g,
+    const at::Tensor & beta,
+    c10::optional<int64_t> chunk_size)
+{
+    TORCH_CHECK(is_chunk_gated_delta_rule_compute_wy_available(),
+                "aclnnChunkGatedDeltaRuleComputeWy is unavailable. Install the ops-transformer operator package.");
+    TORCH_CHECK(q.dim() == 4, "q must be [B, T, Hk, K], got ", q.sizes());
+    TORCH_CHECK(k.sizes() == q.sizes(), "k must have the same shape as q, got k=", k.sizes(), " q=", q.sizes());
+    TORCH_CHECK(v.dim() == 4, "v must be [B, T, Hv, V], got ", v.sizes());
+    TORCH_CHECK(g.dim() == 3, "g must be [B, T, Hv], got ", g.sizes());
+    TORCH_CHECK(beta.sizes() == g.sizes(), "beta must have the same shape as g, got beta=", beta.sizes(),
+                " g=", g.sizes());
+    TORCH_CHECK(q.scalar_type() == at::kHalf && k.scalar_type() == at::kHalf &&
+                v.scalar_type() == at::kHalf && beta.scalar_type() == at::kHalf,
+                "q/k/v/beta must be float16 for 310P WY compute.");
+    TORCH_CHECK(g.scalar_type() == at::kFloat, "g must be float32 for 310P WY compute.");
+
+    const int64_t chunk_size_value = chunk_size.value_or(64);
+    TORCH_CHECK(chunk_size_value == 64, "chunk_gated_delta_rule_compute_wy only supports chunk_size=64.");
+
+    const int64_t batch_size = q.size(0);
+    const int64_t sequence_length = q.size(1);
+    const int64_t num_key_heads = q.size(2);
+    const int64_t key_dim = q.size(3);
+    const int64_t num_value_heads = v.size(2);
+    const int64_t value_dim = v.size(3);
+    TORCH_CHECK(v.size(0) == batch_size && v.size(1) == sequence_length, "v must share B/T with q.");
+    TORCH_CHECK(g.size(0) == batch_size && g.size(1) == sequence_length && g.size(2) == num_value_heads,
+                "g must match [B, T, Hv].");
+    TORCH_CHECK(num_key_heads > 0 && num_value_heads % num_key_heads == 0,
+                "Hv must be divisible by Hk, got Hv=", num_value_heads, " Hk=", num_key_heads);
+    TORCH_CHECK(sequence_length % chunk_size_value == 0,
+                "T must be padded to a multiple of chunk_size, got T=", sequence_length);
+    TORCH_CHECK(key_dim % 16 == 0, "K must be a multiple of 16, got ", key_dim);
+    TORCH_CHECK(value_dim % 16 == 0, "V must be a multiple of 16, got ", value_dim);
+    TORCH_CHECK(key_dim <= 128, "K must be <= 128, got ", key_dim);
+    TORCH_CHECK(value_dim <= 128, "V must be <= 128, got ", value_dim);
+    TORCH_CHECK(batch_size <= 32, "Batch size B must be <= 32, got ", batch_size);
+    TORCH_CHECK(num_value_heads <= 64, "Hv must be <= 64, got ", num_value_heads);
+
+    at::Tensor q_kernel = at::empty({batch_size, num_key_heads, sequence_length, key_dim}, q.options());
+    at::Tensor k_kernel = at::empty({batch_size, num_key_heads, sequence_length, key_dim}, k.options());
+    at::Tensor w_kernel = at::empty({batch_size, num_value_heads, sequence_length, key_dim}, k.options());
+    at::Tensor u_kernel = at::empty({batch_size, num_value_heads, sequence_length, value_dim}, v.options());
+    at::Tensor g_kernel = at::empty({batch_size, num_value_heads, sequence_length},
+                                    g.options().dtype(at::kFloat));
+
+    EXEC_NPU_CMD(
+        aclnnChunkGatedDeltaRuleComputeWy,
+        q, k, v, g, beta, chunk_size_value,
+        q_kernel, k_kernel, w_kernel, u_kernel, g_kernel
+    );
+    return std::make_tuple(q_kernel, k_kernel, w_kernel, u_kernel, g_kernel);
+}
+
+bool is_fused_gdn_gating_available()
+{
+    static const bool is_available =
+        GetOpApiFuncAddr("aclnnFusedGdnGating") != nullptr &&
+        GetOpApiFuncAddr("aclnnFusedGdnGatingGetWorkspaceSize") != nullptr;
+    return is_available;
+}
+
+std::tuple<at::Tensor, at::Tensor> fused_gdn_gating(
+    const at::Tensor & A_log,
+    const at::Tensor & a,
+    const at::Tensor & b,
+    const at::Tensor & dt_bias,
+    double beta,
+    double threshold)
+{
+    TORCH_CHECK(is_fused_gdn_gating_available(),
+                "aclnnFusedGdnGating is unavailable. Install the ops-transformer operator package.");
+    TORCH_CHECK(A_log.dim() == 1, "A_log must be [num_heads], got ", A_log.sizes());
+    TORCH_CHECK(dt_bias.sizes() == A_log.sizes(), "dt_bias must have the same shape as A_log, got dt_bias=",
+                dt_bias.sizes(), " A_log=", A_log.sizes());
+    TORCH_CHECK(a.dim() == 2, "a must be [batch, num_heads], got ", a.sizes());
+    TORCH_CHECK(b.sizes() == a.sizes(), "b must have the same shape as a, got b=", b.sizes(), " a=", a.sizes());
+    TORCH_CHECK(a.size(1) == A_log.size(0), "a.size(1) must equal A_log.size(0), got a.size(1)=", a.size(1),
+                " A_log.size(0)=", A_log.size(0));
+    TORCH_CHECK(A_log.scalar_type() == at::kHalf && a.scalar_type() == at::kHalf &&
+                b.scalar_type() == at::kHalf && dt_bias.scalar_type() == at::kHalf,
+                "A_log/a/b/dt_bias must be float16 on 310P.");
+
+    const int64_t batch_size = a.size(0);
+    const int64_t num_heads = a.size(1);
+    at::Tensor g = at::empty({1, batch_size, num_heads}, a.options().dtype(at::kFloat));
+    at::Tensor beta_output = at::empty({1, batch_size, num_heads}, b.options());
+
+    const float beta_value = static_cast<float>(beta);
+    const float threshold_value = static_cast<float>(threshold);
+    EXEC_NPU_CMD(
+        aclnnFusedGdnGating,
+        A_log, a, b, dt_bias, beta_value, threshold_value,
+        g, beta_output
+    );
+    return std::make_tuple(g, beta_output);
+}
+
 at::Tensor npu_sparse_attention_score_prefill(
     const at::Tensor &query, const at::Tensor &key, const at::Tensor &value,
     const at::Tensor &block_table,
@@ -2872,6 +2983,29 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "chunk_fwd_o(Tensor q, Tensor k, Tensor v, Tensor h, float scale, *, Tensor? g=None, Tensor? g_gamma=None, int[]? cu_seqlens=None, int[]? chunk_indices=None, int? chunk_size=None, bool? transpose_state_layout=False) -> Tensor"
     );
     ops.impl("chunk_fwd_o", torch::kPrivateUse1, &vllm_ascend::chunk_fwd_o);
+
+    ops.def(
+        "is_chunk_gated_delta_rule_compute_wy_available() -> bool"
+    );
+    ops.impl("is_chunk_gated_delta_rule_compute_wy_available", c10::DispatchKey::CompositeExplicitAutograd,
+             &vllm_ascend::is_chunk_gated_delta_rule_compute_wy_available);
+
+    ops.def(
+        "chunk_gated_delta_rule_compute_wy(Tensor q, Tensor k, Tensor v, Tensor g, Tensor beta, int? chunk_size=None) -> (Tensor q_kernel, Tensor k_kernel, Tensor w_kernel, Tensor u_kernel, Tensor g_kernel)"
+    );
+    ops.impl("chunk_gated_delta_rule_compute_wy", torch::kPrivateUse1,
+             &vllm_ascend::chunk_gated_delta_rule_compute_wy);
+
+    ops.def(
+        "is_fused_gdn_gating_available() -> bool"
+    );
+    ops.impl("is_fused_gdn_gating_available", c10::DispatchKey::CompositeExplicitAutograd,
+             &vllm_ascend::is_fused_gdn_gating_available);
+
+    ops.def(
+        "fused_gdn_gating(Tensor A_log, Tensor a, Tensor b, Tensor dt_bias, float beta=1.0, float threshold=20.0) -> (Tensor g, Tensor beta_output)"
+    );
+    ops.impl("fused_gdn_gating", torch::kPrivateUse1, &vllm_ascend::fused_gdn_gating);
 
     ops.def(
         "chunk_kda_fwd(Tensor q, Tensor k, Tensor v, Tensor g, Tensor beta, float scale, int chunk_size, str layout=\"BSND\", *, Tensor? initial_state=None, bool? output_final_state=False, int[]? cu_seqlens=None, int[]? chunk_indices=None, bool? safe_gate=False, float? lower_bound=None, bool? use_gate_in_kernel=False, Tensor? A_log=None, Tensor? dt_bias=None, bool? disable_recompute=False, bool? return_intermediate_states=False, bool? state_v_first=False) -> (Tensor o, Tensor? final_state, Tensor? gk, Tensor aqk, Tensor akk, Tensor? w, Tensor? u, Tensor? qg, Tensor? kg, Tensor? v_new, Tensor? h, Tensor? initial_state_out)"
