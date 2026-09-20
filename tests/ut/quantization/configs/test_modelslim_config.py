@@ -1124,6 +1124,80 @@ class TestGetQuantTypeForLayer(TestBase):
 
         self.assertEqual(prefix, "mtp.layers.0.self_attn.q_proj")
 
+    def test_packed_experts_accept_fused_float_description(self):
+        quant_desc = {
+            "mtp.layers.0.mlp.experts.gate_up_proj": "FLOAT",
+            "mtp.layers.0.mlp.experts.down_proj": "FLOAT",
+        }
+        mapping = {
+            "experts": [
+                "experts.0.gate_proj",
+                "experts.0.up_proj",
+                "experts.0.down_proj",
+            ]
+        }
+
+        result = get_quant_type_for_layer(
+            quant_desc,
+            "mtp.layers.0.mlp.experts",
+            mapping,
+        )
+
+        self.assertIsNone(result)
+
+    def test_packed_experts_reject_partial_split_and_fused_description(self):
+        quant_desc = {
+            "mtp.layers.0.mlp.experts.0.gate_proj.weight": "FLOAT",
+            "mtp.layers.0.mlp.experts.gate_up_proj": "FLOAT",
+            "mtp.layers.0.mlp.experts.down_proj": "FLOAT",
+        }
+        mapping = {
+            "experts": [
+                "experts.0.gate_proj",
+                "experts.0.up_proj",
+                "experts.0.down_proj",
+            ]
+        }
+
+        with self.assertRaisesRegex(KeyError, "experts.0.up_proj.weight"):
+            get_quant_type_for_layer(
+                quant_desc,
+                "mtp.layers.0.mlp.experts",
+                mapping,
+            )
+
+    def test_packed_experts_reject_inconsistent_fused_description(self):
+        quant_desc = {
+            "mtp.layers.0.mlp.experts.gate_up_proj": "FLOAT",
+            "mtp.layers.0.mlp.experts.down_proj": "W8A8_DYNAMIC",
+        }
+        mapping = {
+            "experts": [
+                "experts.0.gate_proj",
+                "experts.0.up_proj",
+                "experts.0.down_proj",
+            ]
+        }
+
+        with self.assertRaisesRegex(ValueError, "Not all shards"):
+            get_quant_type_for_layer(
+                quant_desc,
+                "mtp.layers.0.mlp.experts",
+                mapping,
+            )
+
+    def test_packed_module_accepts_direct_fused_description(self):
+        quant_desc = {"model.layers.0.mlp.gate_up_proj": "W8A8_DYNAMIC"}
+        mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
+
+        result = get_quant_type_for_layer(
+            quant_desc,
+            "model.layers.0.mlp.gate_up_proj",
+            mapping,
+        )
+
+        self.assertEqual(result, "W8A8_DYNAMIC")
+
     def test_fused_module_inconsistent_shards_raises(self):
         """Fused module with inconsistent shard quant types raises ValueError."""
         quant_desc = {
