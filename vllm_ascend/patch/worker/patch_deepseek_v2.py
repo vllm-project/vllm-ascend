@@ -290,7 +290,7 @@ DeepseekV2MLAAttention.__init__ = _deepseek_v2_mla_attention_init
 _original_deepseek_v2_model_init = DeepseekV2Model.__init__
 
 
-def _deepseek_v2_model_init_with_pp_topk_transport(self, *args, **kwargs):
+def _patched_deepseek_v2_model_init(self, *args, **kwargs):
     _original_deepseek_v2_model_init(self, *args, **kwargs)
     # Legacy Spec+PP (0.28/0.29 only): 0.30+ uses the upstream aux relay.
     self._use_upstream_aux_relay = kwargs["vllm_config"].use_v2_model_runner and not pp_utils.use_legacy_spec_pp()
@@ -321,8 +321,7 @@ def _deepseek_v2_model_init_with_pp_topk_transport(self, *args, **kwargs):
     )
 
 
-_patched_deepseek_v2_model_init = _deepseek_v2_model_init_with_pp_topk_transport
-DeepseekV2Model.__init__ = _deepseek_v2_model_init_with_pp_topk_transport
+DeepseekV2Model.__init__ = _patched_deepseek_v2_model_init
 
 
 # Legacy Spec+PP (0.28/0.29 only); the upstream branch below is for 0.30+.
@@ -413,12 +412,12 @@ def _patched_forward(
         _capture_aux_hidden_state(self, aux_hidden_states, idx + 1, hidden_states, residual, positions)
 
     if not pp_group.is_last_rank:
-        outgoing_tensors = IntermediateTensors({"hidden_states": hidden_states, "residual": residual})
+        pp_output = IntermediateTensors({"hidden_states": hidden_states, "residual": residual})
         if self._use_upstream_aux_relay:
-            outgoing_tensors.tensors.update(self.pack_local_aux_hidden_states(aux_hidden_states))
+            pp_output.tensors.update(self.pack_local_aux_hidden_states(aux_hidden_states))
         else:
             pp_utils.add_pp_transport_tensors(
-                outgoing_tensors,
+                pp_output,
                 pp_utils.PPTransportDataType.AUX_HIDDEN_STATES,
                 aux_hidden_states,
             )
@@ -426,11 +425,11 @@ def _patched_forward(
             assert self.topk_indices_buffer is not None
             num_tokens = positions.shape[0]
             add_pp_topk_indices(
-                outgoing_tensors,
+                pp_output,
                 self.topk_indices_buffer,
                 num_tokens,
             )
-        return outgoing_tensors
+        return pp_output
 
     if hidden_states.shape[0] != positions.shape[0]:
         combined_states = torch.cat([hidden_states, residual], dim=-1)
