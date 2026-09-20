@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
-from dataclasses import is_dataclass, replace
+from dataclasses import replace
 from types import SimpleNamespace
+from typing import Any
 
 import torch
 from vllm.distributed.parallel_state import get_tp_group
@@ -79,12 +80,19 @@ class AscendRejectionSampler(RejectionSampler):
                 "frequency_penalties": sampling_metadata.frequency_penalties[repeat_indices],
                 "repetition_penalties": sampling_metadata.repetition_penalties[repeat_indices],
             }
-            if is_dataclass(sampling_metadata):
-                repeated_sampling_metadata = replace(sampling_metadata, **expanded)
-            else:
-                # Test doubles and non-dataclass metadata carriers are
-                # duplicated as plain namespaces instead.
-                repeated_sampling_metadata = SimpleNamespace(**{**vars(sampling_metadata), **expanded})
+            # Test doubles may carry a plain namespace instead of the
+            # SamplingMetadata dataclass; duplicate accordingly.
+            repeated_sampling_metadata: Any = (
+                SimpleNamespace(**{**vars(sampling_metadata), **expanded})
+                if isinstance(sampling_metadata, SimpleNamespace)
+                else replace(
+                    sampling_metadata,
+                    prompt_token_ids=prompt_token_ids[repeat_indices],
+                    presence_penalties=sampling_metadata.presence_penalties[repeat_indices],
+                    frequency_penalties=sampling_metadata.frequency_penalties[repeat_indices],
+                    repetition_penalties=sampling_metadata.repetition_penalties[repeat_indices],
+                )
+            )
             return Sampler.apply_penalties(logits, repeated_sampling_metadata, output_token_ids)
 
         assert sampling_metadata.prompt_token_ids is not None
