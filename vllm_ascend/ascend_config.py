@@ -344,6 +344,7 @@ class AscendConfig:
             "enable_shared_expert_dp": false,
             "enable_sparse_sfa_c8": false,
             "enable_sparse_li_c8": false,
+            "c8_enable_reshape_optim": true,
             "ascend_compilation_config": {
                 "enable_npugraph_ex": true,
                 "enable_static_kernel": false,
@@ -521,6 +522,7 @@ class AscendConfig:
     enable_sp_by_pass: bool = False
     enable_sparse_sfa_c8: bool = False
     enable_sparse_li_c8: bool = False
+    c8_enable_reshape_optim: bool = True
     pd_tp_ratio: int = 1
     pd_head_ratio: int = 1
     num_head_replica: int = 1
@@ -763,8 +765,9 @@ class AscendConfig:
                     "enable_kv_nz is only supported in pd scenario and can only be used in D node."
                 )
 
-        # Sparse C8 derivation. The StoreKVBlock optimization is internal and
-        # enabled only for SFA + Lightning Indexer C8 on PD prefill nodes.
+        # Sparse C8 derivation. StoreKVBlock can be disabled by users, and is
+        # otherwise enabled only for SFA + Lightning Indexer C8 on PD prefill
+        # nodes.
         from vllm_ascend.utils import model_uses_sfa_sparse
 
         use_sparse = model_uses_sfa_sparse(vc.model_config)
@@ -779,7 +782,7 @@ class AscendConfig:
                 and not bool(getattr(kv_transfer_config, "is_kv_consumer", False))
             )
         )
-        self._c8_reshape_optim_enabled = self.enable_sparse_li_c8 and is_prefill_node
+        self._c8_reshape_optim_enabled = self.c8_enable_reshape_optim and self.enable_sparse_li_c8 and is_prefill_node
         quant_config = getattr(vc, "quant_config", None)
         (
             self._sparse_li_c8_layer_ids,

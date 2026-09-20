@@ -1476,21 +1476,29 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         mock_uses_sfa,
     ):
         cases = (
-            (True, True, "kv_producer", True),
-            (False, True, "kv_producer", False),
-            (True, False, "kv_producer", False),
-            (True, True, "kv_consumer", False),
-            (True, True, "kv_both", False),
-            (True, True, None, False),
+            (None, True, True, "kv_producer", True),
+            (False, True, True, "kv_producer", False),
+            (True, False, True, "kv_producer", False),
+            (True, True, False, "kv_producer", False),
+            (True, True, True, "kv_consumer", False),
+            (True, True, True, "kv_both", False),
+            (True, True, True, None, False),
         )
-        for uses_sfa, enable_li_c8, kv_role, expected in cases:
-            with self.subTest(uses_sfa=uses_sfa, enable_li_c8=enable_li_c8, kv_role=kv_role):
+        for reshape_optim, uses_sfa, enable_li_c8, kv_role, expected in cases:
+            with self.subTest(
+                reshape_optim=reshape_optim,
+                uses_sfa=uses_sfa,
+                enable_li_c8=enable_li_c8,
+                kv_role=kv_role,
+            ):
                 mock_uses_sfa.return_value = uses_sfa
                 vc = VllmConfig()
                 vc.additional_config = {
                     "refresh": True,
                     "enable_sparse_li_c8": enable_li_c8,
                 }
+                if reshape_optim is not None:
+                    vc.additional_config["c8_enable_reshape_optim"] = reshape_optim
                 # enable_sparse_li_c8 is derived from indexer_kv_dtype (see
                 # init_ascend_config); the per-case flag is expressed there.
                 vc.attention_config.indexer_kv_dtype = "int8" if enable_li_c8 else "auto"
