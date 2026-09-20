@@ -174,12 +174,20 @@ RUN echo "export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib" >> ~/.bashrc
 # ===== Conditional installation based on BUILD_TYPE =====
 
 # Install daily packages via shared script
-COPY .github/workflows/scripts/install_daily_deps.sh .github/workflows/scripts/restore_public_sources.sh /tmp/
+COPY .github/workflows/scripts/install_daily_deps.sh /tmp/
 RUN if [ "$BUILD_TYPE" = "daily" ]; then \
         bash /tmp/install_daily_deps.sh; \
     else \
         echo "Building release version without daily packages"; \
-    fi && rm -f /tmp/install_daily_deps.sh && \
-    bash /tmp/restore_public_sources.sh && rm -f /tmp/restore_public_sources.sh
+    fi && rm -f /tmp/install_daily_deps.sh
+
+RUN if [ -n "$GIT_PROXY" ] || [ -n "$CRATES_IO_INDEX" ] || [ -n "$RUSTUP_DIST_SERVER" ]; then \
+        pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple && \
+        { pip config unset global.trusted-host 2>/dev/null || true; } && \
+        rm -f "$HOME/.cargo/config.toml" && \
+        for key in $(git config --global --name-only --get-regexp '^url\..*\.insteadof$' 2>/dev/null); do \
+            git config --global --unset-all "$key"; \
+        done; \
+    fi
 
 CMD ["/bin/bash"]
