@@ -65,6 +65,7 @@ from vllm_ascend.utils import lmhead_tp_enable, set_potential_max_tokens, vllm_v
 from vllm_ascend.worker.utils import disable_compilation
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state, unwrap_mamba_kv_cache_groups
+from vllm_ascend.worker.v2.dp_utils import pad_eager_batch_for_finegrained_tp
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
@@ -933,12 +934,15 @@ def pcp_dispatch_context():
         _PCP_DISPATCH_NUM_TOKENS.reset(token)
 
 
-def _dispatch_pcp_and_sync_dp(cudagraph_manager, num_reqs, num_tokens, *args, **kwargs):
+def _dispatch_ascend_and_sync_dp(cudagraph_manager, num_reqs, num_tokens, *args, **kwargs):
     pcp_num_tokens = _PCP_DISPATCH_NUM_TOKENS.get()
     if pcp_num_tokens is not None:
         num_tokens = pcp_num_tokens
-    return dispatch_cg_and_sync_dp(cudagraph_manager, num_reqs, num_tokens, *args, **kwargs)
+    batch_desc, num_tokens_across_dp = dispatch_cg_and_sync_dp(cudagraph_manager, num_reqs, num_tokens, *args, **kwargs)
+    # Use the synchronized runtime mode, including graph-size overflow or
+    # another DP rank forcing eager. Graph padding is handled upstream.
+    return pad_eager_batch_for_finegrained_tp(batch_desc, num_tokens_across_dp)
 
 
 if vllm_version_is("0.28.0"):
-    vllm_model_runner.dispatch_cg_and_sync_dp = _dispatch_pcp_and_sync_dp
+    vllm_model_runner.dispatch_cg_and_sync_dp = _dispatch_ascend_and_sync_dp

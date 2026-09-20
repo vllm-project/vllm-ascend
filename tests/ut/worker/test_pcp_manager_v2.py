@@ -1113,7 +1113,8 @@ def test_pcp_dispatch_preserves_global_batch_and_dummy_count(
     )
     with (
         patch.object(vllm_model_runner.GPUModelRunner, "gather_batch_req_state", return_value=(batch, None)),
-        patch.object(ascend_model_runner, "dispatch_cg_and_sync_dp") as dispatch,
+        patch.object(ascend_model_runner, "dispatch_cg_and_sync_dp", return_value=(None, None)) as dispatch,
+        patch.object(ascend_model_runner, "pad_eager_batch_for_finegrained_tp"),
     ):
         with ascend_model_runner.pcp_dispatch_context():
             gathered, uniform = runner.gather_batch_req_state(object(), dummy_run)
@@ -1135,7 +1136,8 @@ def test_pcp_dispatch_context_restores_after_nested_failure():
     independent_context = copy_context()
     with (
         patch.object(vllm_model_runner.GPUModelRunner, "gather_batch_req_state", return_value=(batch, None)),
-        patch.object(ascend_model_runner, "dispatch_cg_and_sync_dp") as dispatch,
+        patch.object(ascend_model_runner, "dispatch_cg_and_sync_dp", return_value=(None, None)) as dispatch,
+        patch.object(ascend_model_runner, "pad_eager_batch_for_finegrained_tp"),
         ascend_model_runner.pcp_dispatch_context(),
     ):
         runner.gather_batch_req_state(object(), False)
