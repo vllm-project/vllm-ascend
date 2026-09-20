@@ -39,6 +39,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 
 # isort: on
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
+    KVCacheStoreKeyLayerRecvingThread,
     KVCacheStoreKeyLayerSendingThread,
     KVCacheStoreLayerRecvingThread,
     KVCacheStoreLayerSendingThread,
@@ -297,7 +298,12 @@ class TestGVALayerTransferFailures(unittest.TestCase):
 
 
 class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
-    def _make_thread(self, external_slot_release_waiter=None, save_failure_checker=None):
+    def _make_thread(
+        self,
+        external_slot_release_waiter=None,
+        save_failure_checker=None,
+        load_failure_recorder=None,
+    ):
         # Plain mock store: the layerwise threads are backend-agnostic.
         # `.store` is attached explicitly to pin batch_copy's return value.
         store = MagicMock()
@@ -331,6 +337,7 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
             group_builders=[builder],
             external_slot_release_waiter=external_slot_release_waiter,
             save_failure_checker=save_failure_checker,
+            load_failure_recorder=load_failure_recorder,
         )
         return thread, load_finished, save_finished, sync_events
 
@@ -436,6 +443,81 @@ class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
 
         self.assertEqual(load_finished_observed, [False])
         self.assertTrue(load_finished[1].is_set())
+
+    def test_failed_layer_load_records_save_fence(self):
+        recorder = MagicMock()
+        thread, _, _, _ = self._make_thread(load_failure_recorder=recorder)
+        thread._batch_copy_with_limits = MagicMock(return_value=-1)
+        request = ReqMeta(
+            req_id="r1",
+            token_len_chunk=16,
+            block_ids=[7],
+            block_hashes=["h0"],
+            load_spec=LoadSpec(0, 16, can_load=True),
+        )
+        task = LayerTransferTask(
+            layer_id=1,
+            block_ranges=[LayerBlockRange(request, 0, 1)],
+            shared_block_data=SharedBlockData(
+                block_ids_arr=np.asarray([7]),
+                block_gvas_arr=np.asarray([100]),
+                req_ids=["r1"],
+                is_last_chunks=[False],
+            ),
+        )
+        load_task = LayerLoadTask(wait_for_save_layer=None, transfer_tasks=[task], layer_id=1)
+
+        with self.assertRaisesRegex(RuntimeError, "load batch_copy failed"):
+            thread._handle_request(load_task)
+
+        recorder.assert_called_once_with({"r1"}, {7}, True)
+
+
+class TestKeyLayerReceivingFailures(unittest.TestCase):
+    def test_failure_is_recorded_for_only_the_affected_request(self):
+        store = MagicMock()
+        store.get.return_value = [-1, 0]
+        recorder = MagicMock()
+        load_finished = [threading.Event()]
+        thread = KVCacheStoreKeyLayerRecvingThread(
+            m_store=store,
+            token_database=FakeTokenDatabase(),
+            block_size=16,
+            tp_rank=0,
+            tp_size=1,
+            dcp_size=1,
+            ready_event=threading.Event(),
+            get_event=threading.Event(),
+            layer_load_finished_events=load_finished,
+            layer_save_finished_events=[threading.Event()],
+            num_layers=1,
+            load_failure_recorder=recorder,
+        )
+        failed = ReqMeta(
+            req_id="failed",
+            block_ids=[7],
+            block_hashes=[b"h0"],
+            is_last_chunk=False,
+        )
+        healthy = ReqMeta(
+            req_id="healthy",
+            block_ids=[8],
+            block_hashes=[b"h1"],
+            is_last_chunk=False,
+        )
+        task = LayerTransferTask(
+            layer_id=0,
+            block_ranges=[
+                LayerBlockRange(failed, 0, 1),
+                LayerBlockRange(healthy, 0, 1),
+            ],
+        )
+        load_task = LayerLoadTask(wait_for_save_layer=None, transfer_tasks=[task], layer_id=0)
+        thread.request_queue.put(load_task)
+
+        thread._handle_request(load_task)
+
+        recorder.assert_called_once_with({"failed"}, {7}, True)
 
 
 class TestKVCacheStoreSendingThread(unittest.TestCase):
