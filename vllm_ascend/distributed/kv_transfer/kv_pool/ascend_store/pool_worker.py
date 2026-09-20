@@ -209,6 +209,13 @@ class KVPoolWorker:
         self.layerwise_data_plane = get_layerwise_data_plane(self.layerwise_protocol)
         self.use_block_key_layerwise = self.use_layerwise and self.layerwise_data_plane == "block_key"
         self.use_layerwise_transfer = self.use_layerwise and self.layerwise_data_plane == "gva"
+        self.mooncake_layerwise_namespace = (
+            self.layerwise_protocol.layerwise_topology_namespace(
+                vllm_config.model_config, vllm_config.parallel_config
+            )
+            if self.use_block_key_layerwise
+            else ""
+        )
         validate_layerwise_topology(self.layerwise_protocol, vllm_config.parallel_config, self.use_layerwise)
         kv_cache_groups = kv_cache_config.kv_cache_groups if kv_cache_config is not None else None
         self.use_hybrid = uses_hybrid_kv_cache(vllm_config.scheduler_config, kv_cache_groups) or (
@@ -216,8 +223,18 @@ class KVPoolWorker:
         )
         self.block_key_hybrid = self.use_block_key_layerwise and self.use_hybrid
         self.block_key_hybrid_layout = (
-            self.layerwise_protocol.hybrid_layout_id(kv_cache_config, self.tp_size) if self.block_key_hybrid else ""
+            self.layerwise_protocol.hybrid_layout_id(
+                kv_cache_config, vllm_config.parallel_config, vllm_config.model_config
+            )
+            if self.block_key_hybrid
+            else ""
         )
+        if self.block_key_hybrid:
+            self.layerwise_protocol.validate_hybrid_pp_coverage(
+                kv_cache_config,
+                vllm_config.parallel_config,
+                use_spec_decode=getattr(vllm_config, "speculative_config", None) is not None,
+            )
         self._attention_saved_layers: set[int] = set()
         self.use_mamba = self._uses_mamba_kv_cache(self.use_hybrid, kv_cache_config)
         speculative_config = getattr(vllm_config, "speculative_config", None)
@@ -1220,11 +1237,10 @@ class KVPoolWorker:
         group_id: int = 0,
         layer_idx_in_group: int = 0,
     ) -> None:
-        # Only the first rank in each put_step group saves to the
-        # pool.  Other ranks in the same group share the same KV cache
-        # (e.g. MLA latent), so they skip save to avoid redundant writes.
-        # TODO(lf): Distribute KV block writes across ranks in the put_step group.
-        if self.tp_rank % self.put_step != 0:
+        # Only the first rank of each replicated KV-head group saves to the
+        # pool; the other ranks in that group share the same KV cache (e.g. MLA
+        # latent), so saving them would write the same bytes again.
+        if not self._is_layerwise_save_rank():
             return
         block_size = get_group_block_size(self.grouped_block_size, group_id)
         request_block_ranges = []
@@ -1875,8 +1891,21 @@ class KVPoolWorker:
         with self._invalid_block_ids_lock:
             self._invalid_block_ids.update(block_ids)
 
+    def _is_layerwise_save_rank(self) -> bool:
+        """Whether this rank owns the save for its replicated KV-head group."""
+        return self.tp_rank % self.put_step == 0
+
     def _is_layerwise_save_owner(self) -> bool:
-        return is_kv_save_role(self.kv_role, self.consumer_is_to_put) and self.tp_rank % self.put_step == 0
+        return is_kv_save_role(self.kv_role, self.consumer_is_to_put) and self._is_layerwise_save_rank()
+
+    def _make_mooncake_layerwise_key(self, block_hash_or_tail: str) -> str:
+        return self.layerwise_protocol.make_block_key(
+            self.model_name,
+            block_hash_or_tail,
+            self.head_or_tp_rank,
+            namespace=self.mooncake_layerwise_namespace,
+            pp_rank=self.pp_rank,
+        )
 
     def _layerwise_key_batches(self, keys: list[str]) -> list[list[str]]:
         batch_size = self.layerwise_max_transfer_blocks if self.layerwise_max_transfer_blocks > 0 else max(1, len(keys))
@@ -2023,19 +2052,15 @@ class KVPoolWorker:
         request.save_block_keys = [None] * max(0, end_block - start_block)
         key_slots: list[tuple[str, int | None, int]] = []
         for block_index in range(start_block, min(end_block, len(group_block_hashes))):
-            key = self.layerwise_protocol.make_block_key(
-                self.model_name,
+            key = self._make_mooncake_layerwise_key(
                 block_hash_to_str(group_block_hashes[block_index]),
-                self.head_or_tp_rank,
             )
             request.save_block_keys[block_index - start_block] = key
             key_slots.append((key, block_index - start_block, block_index))
 
         if request.partial_block_index is not None:
-            request.save_last_block_key = self.layerwise_protocol.make_block_key(
-                self.model_name,
+            request.save_last_block_key = self._make_mooncake_layerwise_key(
                 f"{request.req_id}_lastblock",
-                self.head_or_tp_rank,
             )
             key_slots.append((request.save_last_block_key, None, request.partial_block_index))
 
@@ -2091,10 +2116,8 @@ class KVPoolWorker:
             for block_index in range(start_block, end_block):
                 current_entries.append(
                     (
-                        self.layerwise_protocol.make_block_key(
-                            self.model_name,
+                        self._make_mooncake_layerwise_key(
                             block_hash_to_str(group_block_hashes[block_index]),
-                            self.head_or_tp_rank,
                         ),
                         block_index,
                     )
@@ -2106,10 +2129,8 @@ class KVPoolWorker:
             if needs_last_block and 0 <= partial_block_index < len(request.block_ids):
                 current_entries.append(
                     (
-                        self.layerwise_protocol.make_block_key(
-                            self.model_name,
+                        self._make_mooncake_layerwise_key(
                             f"{request.req_id}_lastblock",
-                            self.head_or_tp_rank,
                         ),
                         partial_block_index,
                     )

@@ -177,15 +177,30 @@ class KVPoolScheduler:
 
         self.block_key_hybrid = self.use_block_key_layerwise and self.use_hybrid
         self.block_key_hybrid_layout = (
-            self.layerwise_protocol.hybrid_layout_id(kv_cache_config, vllm_config.parallel_config.tensor_parallel_size)
+            self.layerwise_protocol.hybrid_layout_id(
+                kv_cache_config, vllm_config.parallel_config, vllm_config.model_config
+            )
             if self.block_key_hybrid
             else ""
         )
+        if self.block_key_hybrid:
+            self.layerwise_protocol.validate_hybrid_pp_coverage(
+                kv_cache_config,
+                vllm_config.parallel_config,
+                use_spec_decode=getattr(vllm_config, "speculative_config", None) is not None,
+            )
         validate_layerwise_runtime(
             self.layerwise_protocol,
             use_hybrid=self.block_key_hybrid,
             has_recurrent_state=bool(self.mamba_group_ids),
             tp_mismatch=self.use_block_key_layerwise and self.tp_mismatch,
+        )
+        self.mooncake_layerwise_namespace = (
+            self.layerwise_protocol.layerwise_topology_namespace(
+                vllm_config.model_config, vllm_config.parallel_config
+            )
+            if self.use_block_key_layerwise
+            else ""
         )
         self.layerwise_max_transfer_blocks = int(
             vllm_config.kv_transfer_config.kv_connector_extra_config.get("layerwise_max_transfer_blocks", 0)
@@ -373,9 +388,23 @@ class KVPoolScheduler:
                     self.grouped_block_size[group_id],
                     block_hash_hex,
                     head,
+                    pp_rank,
                 )
+                for pp_rank in range(self.pp_size)
                 for head in range(head_or_tp_ranks)
             ]
+        if self.use_block_key_layerwise:
+            return self.layerwise_protocol.make_hit_check_keys(
+                self.model_name,
+                group_id,
+                block_hash_hex,
+                head_or_tp_ranks,
+                len(self.kv_cache_group_ids),
+                namespace=self.mooncake_layerwise_namespace,
+                pp_size=self.pp_size,
+            )
+        # The GVA plane carries its own PP tag, so it keeps the original
+        # argument shape.
         return self.layerwise_protocol.make_hit_check_keys(
             self.model_name,
             group_id,
@@ -531,7 +560,14 @@ class KVPoolScheduler:
         head_or_tp_ranks = self.tp_size // self.put_step
         keys_by_block = [
             [
-                self.layerwise_protocol.make_block_key(self.model_name, block_hash_to_str(block_hash), head_or_tp_rank)
+                self.layerwise_protocol.make_block_key(
+                    self.model_name,
+                    block_hash_to_str(block_hash),
+                    head_or_tp_rank,
+                    namespace=self.mooncake_layerwise_namespace,
+                    pp_rank=pp_rank,
+                )
+                for pp_rank in range(self.pp_size)
                 for head_or_tp_rank in range(head_or_tp_ranks)
             ]
             for block_hash in block_hashes
