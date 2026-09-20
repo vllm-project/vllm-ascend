@@ -197,6 +197,8 @@ class TestAscendSFAOProjWeightSwitch(TestBase):
         impl.preprocess_type = PreprocessType.NATIVE
         impl.tp_size = 2
         impl.q_lora_rank = 8
+        impl.q_lora_scale = 1.0
+        impl.sdpa_gate_type = None
         impl.kv_lora_rank = 4
         impl.qk_rope_head_dim = 2
         impl.g_proj = None
