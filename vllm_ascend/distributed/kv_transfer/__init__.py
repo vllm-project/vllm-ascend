@@ -89,7 +89,7 @@ def register_connector():
     )
 
     KVConnectorFactory.register_connector(
-        "LayerwisePullConnector",
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.layerwise_pull.connector",
-        "LayerwisePullConnector",
+        "LayerwisePushConnector",
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.layerwise_push.connector",
+        "LayerwisePushConnector",
     )

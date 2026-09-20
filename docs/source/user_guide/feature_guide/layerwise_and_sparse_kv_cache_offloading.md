@@ -1,5 +1,10 @@
 # Layerwise and Sparse KV Cache Offloading Guide
 
+> **Compatibility notice:** The current `LayerwisePushConnector` supports HBM
+> destinations only and rejects Sparse Decode Offload. The combined deployment
+> described below documents the former pull connector and is not a runnable
+> configuration in this branch.
+
 This guide explains how to configure:
 
 - Layerwise KV cache offloading during the Prefill phase

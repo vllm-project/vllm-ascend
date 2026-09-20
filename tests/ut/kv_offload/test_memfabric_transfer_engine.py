@@ -57,6 +57,29 @@ def test_memfabric_initialization_publishes_session_from_engine_port():
     ]
 
 
+def test_memfabric_push_initialization_uses_decode_store_server():
+    raw_engine = MagicMock()
+    raw_engine.get_rpc_port.return_value = 23456
+    raw_engine.initialize.return_value = 0
+    manager = GlobalMemfabricTE()
+    manager.configure(
+        role=MEMFABRIC_ROLE_PREFILL,
+        device_id=3,
+        store_server_role=MEMFABRIC_ROLE_DECODE,
+    )
+
+    with patch.dict(sys.modules, {"memfabric_hybrid": _fake_memfabric(raw_engine)}):
+        manager.get_transfer_engine("192.168.1.10")
+
+    raw_engine.initialize.assert_called_once_with(
+        "tcp://192.168.1.10",
+        "192.168.1.10",
+        MEMFABRIC_ROLE_PREFILL,
+        3,
+        store_server_role=MEMFABRIC_ROLE_DECODE,
+    )
+
+
 def test_memfabric_configuration_is_idempotent_but_role_bound():
     manager = GlobalMemfabricTE()
 

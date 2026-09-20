@@ -1,5 +1,10 @@
 # Layerwise and Sparse KV Cache Offloading Design
 
+> **Compatibility notice:** The current `LayerwisePushConnector` supports HBM
+> destinations only and rejects Sparse Decode Offload. The pull-based joint
+> design below is retained as background and is not implemented by the current
+> connector.
+
 This document explains why Prefill and Decode use different KV cache offload
 strategies, how the two strategies work, and how they preserve correctness when
 used together.

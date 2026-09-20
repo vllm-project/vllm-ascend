@@ -20,7 +20,7 @@ _VALID_MEMFABRIC_ROLES = (MEMFABRIC_ROLE_PREFILL, MEMFABRIC_ROLE_DECODE)
 
 
 class MemfabricBackend:
-    """Normalize the MemFabric API used by layerwise pull."""
+    """Normalize the MemFabric API used by layerwise KV transfer."""
 
     def __init__(self, engine: Any, advertised_rpc_port: int):
         self._engine = engine
@@ -96,8 +96,8 @@ class MemfabricBackend:
         same stream after this call fires once the payload has left the local
         buffers (source reuse) — mirroring the sync write's return semantics.
         Completion granularity on the wire (left-source vs remote-visible) is
-        pending bare-link verification; see p-push.md 3.3-1. Requires the peer
-        (Decode) to be the store server.
+        pending bare-link verification before production enablement. Requires
+        the peer (Decode) to be the store server.
         """
         ret = self._engine.batch_transfer_async_write_submit(
             session_id,
@@ -192,7 +192,7 @@ class GlobalMemfabricTE:
         except ImportError as exc:
             raise ImportError(
                 "Please install memfabric_hybrid (memfabric-hybrid) to use "
-                "LayerwisePullConnector with transfer_backend=memfabric."
+                "LayerwisePushConnector with transfer_backend=memfabric."
             ) from exc
 
         # Match the MemFabric initialization sequence used by its examples.
