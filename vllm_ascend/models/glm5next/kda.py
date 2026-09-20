@@ -106,6 +106,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
     head_dim: int
     num_heads: int
     conv_size: int
+    _fg_b_weight: torch.Tensor | None
 
     def get_state_dtype(
         self,
@@ -269,24 +270,26 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
     def get_attn_backend(self):
         return AscendGDNAttentionBackend
 
-    def pack_fg_projection_weights(self) -> None:
+    def pack_fg_projection_weights(self) -> torch.Tensor:
         """Pack the two unquantized projections, preserving captured addresses on reload."""
         packed = torch.stack((self.f_b_proj.weight.detach(), self.g_b_proj.weight.detach()))
         if self._fg_b_weight is None:
             self._fg_b_weight = packed
         else:
             self._fg_b_weight.copy_(packed)
+        return self._fg_b_weight
 
     def _project_fg(self, fg_a: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         # Separate GEMMs are faster for large prefills on Ascend.
         if fg_a.shape[0] > KDA_BATCHED_GATE_MAX_TOKENS:
             f_a, g_a = fg_a.split(self.head_dim, dim=-1)
             return self.f_b_proj(f_a)[0], self.g_b_proj(g_a)[0]
-        if self._fg_b_weight is None:
+        fg_b_weight = self._fg_b_weight
+        if fg_b_weight is None:
             # Dummy weight loaders do not call the model's load_weights hook.
-            self.pack_fg_projection_weights()
+            fg_b_weight = self.pack_fg_projection_weights()
         fg_a = fg_a.reshape(-1, 2, self.head_dim).transpose(0, 1)
-        fg_b = torch.bmm(fg_a, self._fg_b_weight.transpose(1, 2))
+        fg_b = torch.bmm(fg_a, fg_b_weight.transpose(1, 2))
         return fg_b.unbind(0)
 
     def forward(
