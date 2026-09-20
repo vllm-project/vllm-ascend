@@ -108,7 +108,7 @@ def test_mlapo_post_load_does_not_reprocess_released_weights(is_kv_consumer):
             return_value=SimpleNamespace(mlapo_keep_prefill_weights=False),
         ),
         patch("torch_npu.npu_format_cast", side_effect=lambda weight, fmt: weight),
-        patch("torch.npu.empty_cache") as empty_cache,
+        patch.object(torch.npu, "empty_cache") as empty_cache,
     ):
         inner.process_weights_after_loading(torch.bfloat16)
 
