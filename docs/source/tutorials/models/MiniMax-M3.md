@@ -163,6 +163,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
       --gpu-memory-utilization 0.92 \
       --reasoning-parser minimax_m3 \
       --limit-mm-per-prompt '{"image":1,"video":0}' \
+      --enable-chunked-prefill \
       --enable-prefix-caching \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
       --additional-config '{
@@ -201,6 +202,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     --gpu-memory-utilization 0.92 \
     --reasoning-parser minimax_m3 \
     --limit-mm-per-prompt '{"image":1,"video":0}' \
+    --enable-chunked-prefill \
     --enable-prefix-caching \
     --speculative-config '{"model":"${EAGLE3_WEIGHT_PATH}", "method":"eagle3", "num_speculative_tokens":3}' \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
@@ -242,6 +244,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
       --max-num-batched-tokens 16384 \
       --kv-cache-dtype fp8 \
       --max-num-seqs 500 \
+      --enable-chunked-prefill \
       --enable-prefix-caching \
       --async-scheduling \
       --reasoning-parser minimax_m3 \
@@ -295,6 +298,8 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
       --reasoning-parser minimax_m3 \
       --limit-mm-per-prompt '{"image":1,"video":0}' \
       --speculative-config '{"model":"${EAGLE3_WEIGHT_PATH}","method":"eagle3","num_speculative_tokens":3}' \
+      --enable-chunked-prefill \
+      --enable-prefix-caching \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
       --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "enable_shared_expert_dp":true,"multistream_overlap_shared_expert": true, "weight_nz_mode": 2,"enable_flashcomm1":true}' > ${LOG_PATH} 2>&1 &
     ```
@@ -332,8 +337,10 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
       --reasoning-parser minimax_m3 \
       --limit-mm-per-prompt '{"image":1,"video":0}' \
       --speculative-config '{"model":"${EAGLE3_WEIGHT_PATH}","method":"eagle3","num_speculative_tokens":3}' \
+      --enable-chunked-prefill \
+      --enable-prefix-caching \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-      --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "multistream_overlap_shared_expert": true, "weight_nz_mode": 2}' > ${LOG_PATH} 2>&1 &
+      --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "enable_shared_expert_dp":true,"multistream_overlap_shared_expert": true, "weight_nz_mode": 2,"enable_flashcomm1":true}' > ${LOG_PATH} 2>&1 &
     ```
 
 === "A3 series(W8A8)"
@@ -370,8 +377,10 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
       --reasoning-parser minimax_m3 \
       --limit-mm-per-prompt '{"image":1,"video":0}' \
       --speculative-config '{"model":"${EAGLE3_WEIGHT_PATH}", "method":"eagle3", "num_speculative_tokens":3}' \
+      --enable-chunked-prefill \
+      --enable-prefix-caching \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-      --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "multistream_overlap_shared_expert": true, "weight_nz_mode": 2,"enable_flashcomm1":true}' > ${LOG_PATH} 2>&1 &
+      --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "enable_shared_expert_dp":true,"multistream_overlap_shared_expert": true, "weight_nz_mode": 2,"enable_flashcomm1":true}' > ${LOG_PATH} 2>&1 &
     ```
 
     Run the following command on node 1:
@@ -407,8 +416,10 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
       --reasoning-parser minimax_m3 \
       --limit-mm-per-prompt '{"image":1,"video":0}' \
       --speculative-config '{"model":"${EAGLE3_WEIGHT_PATH}", "method":"eagle3", "num_speculative_tokens":3}' \
+      --enable-chunked-prefill \
+      --enable-prefix-caching \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-      --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "multistream_overlap_shared_expert": true, "weight_nz_mode": 2}' > ${LOG_PATH} 2>&1 &
+      --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "enable_shared_expert_dp":true,"multistream_overlap_shared_expert": true, "weight_nz_mode": 2,"enable_flashcomm1":true}' > ${LOG_PATH} 2>&1 &
     ```
 
 ### 5.3 Prefill-Decode Disaggregation
@@ -771,6 +782,8 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         --safetensors-load-strategy prefetch \
         --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3,"kv_cache_dtype":"bfloat16"}' \
         --enforce-eager \
+        --enable-chunked-prefill \
+        --enable-prefix-caching \
         --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_qknorm_rope":false,"fuse_norm_quant":false,"enable_static_kernel":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
         --kv-transfer-config '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_producer","kv_port":"30000","engine_id":"0","kv_connector_extra_config":{"use_ascend_direct":true,"ascend_local_comm_res_path":"/etc/hixlep","prefill":{"dp_size":2,"tp_size":4,"pp_size":1},"decode":{"dp_size":2,"tp_size":4,"pp_size":1}}}'
     ```
@@ -1198,6 +1211,8 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
         --safetensors-load-strategy prefetch \
         --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3,"kv_cache_dtype":"bfloat16"}' \
         --enforce-eager \
+        --enable-chunked-prefill \
+        --enable-prefix-caching \
         --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_qknorm_rope":false,"fuse_norm_quant":false,"enable_static_kernel":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
         --kv-transfer-config \
         '{"kv_connector":"MultiConnector","kv_role":"kv_producer","engine_id":"minimax-m3-prefill-dp'"$4"'","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV1","kv_buffer_device":"npu","kv_role":"kv_producer","kv_port":"30000","kv_connector_extra_config":{"use_ascend_direct":true,"ascend_local_comm_res_path":"/etc/hixlep","prefill":{"dp_size":2,"tp_size":4,"pp_size":1},"decode":{"dp_size":2,"tp_size":4,"pp_size":1}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backend":"mooncake","lookup_rpc_port":'$((37000 + $4))'}}]}}'
