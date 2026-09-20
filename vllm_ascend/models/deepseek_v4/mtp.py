@@ -372,12 +372,18 @@ class DeepSeekV4MTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
 
             if "sink" in name:
                 param = params_dict[name]
+                # Route the write through the parameter's loader: a live weight
+                # update runs inside vLLM's layerwise reload, which parks the
+                # layer on the meta device and only replays loads made through
+                # ``weight_loader``. A direct ``param.data.copy_`` lands on the
+                # meta tensor and is lost, leaving the sink at its dummy value.
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 if enable_dsa_cp():
-                    param.data.copy_(loaded_weight)
+                    weight_loader(param, loaded_weight)
                 else:
                     # Handle attention sinks (distributed across ranks)
                     narrow_weight = loaded_weight.narrow(0, head_start, heads_per_rank)
-                    param.data.copy_(narrow_weight)
+                    weight_loader(param, narrow_weight)
                 loaded_params.add(name)
                 continue
 
