@@ -10,6 +10,7 @@ from vllm.logger import logger
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.core.kv_cache_utils import _approximate_gcd, may_override_num_blocks
 from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -23,7 +24,10 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_kind,
 )
 
-from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
+from vllm_ascend.core.kv_cache_interface import (
+    get_kv_cache_compression_ratio,
+    is_prefix_cacheable,
+)
 from vllm_ascend.core.six_region_kv_cache_layout import (
     GDN,
     HIDDEN,
@@ -688,13 +692,159 @@ def _ascend_max_memory_usage_bytes_from_groups(
     )
 
 
-def _get_glm5_next_kv_cache_groups(
+def _prepare_qsa_composite_groups(
+    kv_cache_spec: dict[str, KVCacheSpec],
+) -> tuple[set[str], set[str], set[str]] | None:
+    """Identify the three cache owners of every QSA source layer.
+
+    The six-region backing aliases main K/V and compressed-key pages by the
+    same physical block ID, while the raw-key ring has one request-lifetime
+    block.  Grouping must therefore express those lifetimes before the main
+    block manager and admission planner see the specs.
+    """
+
+    raw = {
+        name[: -len(".indexer.raw_key_cache")]: (name, spec)
+        for name, spec in kv_cache_spec.items()
+        if name.endswith(".indexer.raw_key_cache") and isinstance(spec, CircularBufferSpec)
+    }
+    if not raw:
+        return None
+    all_main = {
+        name[: -len(".attn")]: (name, spec)
+        for name, spec in kv_cache_spec.items()
+        if name.endswith(".attn") and isinstance(spec, FullAttentionSpec) and not isinstance(spec, MLAAttentionSpec)
+    }
+    all_compressed = {
+        name[: -len(".indexer.compressed_key_cache")]: (name, spec)
+        for name, spec in kv_cache_spec.items()
+        if name.endswith(".indexer.compressed_key_cache")
+        and isinstance(spec, MLAAttentionSpec)
+        and get_kv_cache_compression_ratio(spec) > 1
+    }
+    missing_main = set(raw) - set(all_main)
+    missing_compressed = set(raw) - set(all_compressed)
+    if missing_main or missing_compressed:
+        raise ValueError(
+            "QSA raw cache owners must have matching main/compressed owners: "
+            f"missing_main={sorted(missing_main)}, "
+            f"missing_compressed={sorted(missing_compressed)}"
+        )
+    main = {source: all_main[source] for source in raw}
+    compressed = {source: all_compressed[source] for source in raw}
+    if not any(isinstance(spec, MambaSpec) and len(spec.shapes) == 2 for spec in kv_cache_spec.values()):
+        raise ValueError("QSA six-region cache layout requires GDN state specs")
+
+    main_names: set[str] = set()
+    compressed_names: set[str] = set()
+    raw_names: set[str] = set()
+    for source in sorted(main):
+        main_name, main_spec = main[source]
+        compressed_name, compressed_spec = compressed[source]
+        raw_name, raw_spec = raw[source]
+        assert isinstance(main_spec, FullAttentionSpec)
+        assert isinstance(compressed_spec, MLAAttentionSpec)
+        assert isinstance(raw_spec, CircularBufferSpec)
+        ratio = get_kv_cache_compression_ratio(compressed_spec)
+        if main_spec.block_size != compressed_spec.block_size:
+            raise ValueError(
+                f"{main_name} block_size={main_spec.block_size} does not match "
+                f"{compressed_name} block_size={compressed_spec.block_size}"
+            )
+        if main_spec.block_size % 128 or main_spec.block_size % ratio:
+            raise ValueError(
+                f"QSA block_size={main_spec.block_size} violates kernel/compression alignment (ratio={ratio})"
+            )
+        if raw_spec.block_size % ratio:
+            raise ValueError(
+                f"{raw_name} capacity={raw_spec.block_size} is not compression-ratio aligned (ratio={ratio})"
+            )
+        main_names.add(main_name)
+        compressed_names.add(compressed_name)
+        raw_names.add(raw_name)
+    return main_names, compressed_names, raw_names
+
+
+def _merge_qsa_composite_groups(
+    groups: list[KVCacheGroupSpec],
+    kv_cache_spec: dict[str, KVCacheSpec],
+    main_names: set[str],
+    compressed_names: set[str],
+    raw_names: set[str],
+) -> list[KVCacheGroupSpec]:
+    """Give QSA aliases the block-table lifetimes their backing requires."""
+
+    def merge_owners(
+        current: list[KVCacheGroupSpec],
+        owner_names: set[str],
+        description: str,
+        ordered_names: list[str] | None = None,
+    ) -> list[KVCacheGroupSpec]:
+        consumed: list[int] = []
+        eagle = False
+        for index, group in enumerate(current):
+            members = set(group.layer_names)
+            if not members & owner_names:
+                continue
+            if not members <= owner_names:
+                raise ValueError(f"QSA {description} owners were mixed with another cache role")
+            consumed.append(index)
+            eagle = eagle or group.is_eagle_group
+        if not consumed:
+            raise ValueError(f"QSA {description} owners were not grouped")
+        covered = set().union(*(set(current[index].layer_names) for index in consumed))
+        if covered != owner_names:
+            raise ValueError(f"QSA {description} grouping lost cache owners")
+        ordered = ordered_names or [name for name in kv_cache_spec if name in owner_names]
+        if set(ordered) != owner_names or len(ordered) != len(owner_names):
+            raise ValueError(f"QSA {description} owner order does not match its cache owners")
+        uniform = UniformTypeKVCacheSpecs.from_specs({name: kv_cache_spec[name] for name in ordered})
+        if uniform is None:
+            raise ValueError(f"QSA {description} owners do not have one lifetime")
+        merged = KVCacheGroupSpec(
+            ordered,
+            uniform,
+            is_eagle_group=eagle,
+        )
+        first = min(consumed)
+        return [
+            merged if index == first else group
+            for index, group in enumerate(current)
+            if index == first or index not in consumed
+        ]
+
+    result = merge_owners(
+        groups,
+        main_names | compressed_names,
+        "main/compressed",
+        [name for name in kv_cache_spec if name in main_names]
+        + [name for name in kv_cache_spec if name in compressed_names],
+    )
+    return merge_owners(result, raw_names, "raw circular")
+
+
+def _get_ascend_kv_cache_groups(
     vllm_config: VllmConfig,
     kv_cache_spec: dict[str, KVCacheSpec],
 ) -> list[KVCacheGroupSpec]:
     if any(is_glm5_next_cache_spec(spec) for spec in kv_cache_spec.values()):
         return get_glm5_next_kv_cache_groups(vllm_config, kv_cache_spec)
-    return _orig_get_kv_cache_groups(vllm_config, kv_cache_spec)
+    qsa_owners = _prepare_qsa_composite_groups(kv_cache_spec)
+    groups = _orig_get_kv_cache_groups(vllm_config, kv_cache_spec)
+    if qsa_owners is None:
+        return groups
+    merged = _merge_qsa_composite_groups(
+        groups,
+        kv_cache_spec,
+        *qsa_owners,
+    )
+    logger.info(
+        "Using QSA six-region grouping: %d main/compressed owners, %d raw circular owners, %d total cache groups",
+        len(qsa_owners[0]) + len(qsa_owners[1]),
+        len(qsa_owners[2]),
+        len(merged),
+    )
+    return merged
 
 
 def _get_qwen4_exp_six_region_kv_cache_config(
@@ -839,7 +989,12 @@ else:
     vllm.v1.core.kv_cache_utils._annotate_eagle_groups = _ascend_annotate_eagle_groups
     vllm.v1.core.kv_cache_utils._get_packed_kv_cache_groups = _ascend_get_packed_kv_cache_groups
 vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_page_size = _get_kv_cache_groups_uniform_page_size
-vllm.v1.core.kv_cache_utils.get_kv_cache_groups = _get_glm5_next_kv_cache_groups
+# vLLM v0.24.0 renamed _get_kv_cache_config_deepseek_v4 to
+# _get_kv_cache_config_packed. The v0.28.0 planner still consumes shared_by;
+# main uses _ascend_get_kv_cache_config_from_groups and the stride-aware planner.
+if vllm_version_is("0.28.0"):
+    vllm.v1.core.kv_cache_utils._get_kv_cache_config_packed = _get_kv_cache_config_deepseek_v4
+vllm.v1.core.kv_cache_utils.get_kv_cache_groups = _get_ascend_kv_cache_groups
 KVCacheConfig.has_mamba_layers = property(  # type: ignore[assignment]
     _kv_cache_config_has_mamba_layers
 )
