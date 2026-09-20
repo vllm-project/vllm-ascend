@@ -82,6 +82,39 @@ class MemfabricBackend:
             return -1
         return 0
 
+    def batch_transfer_async_write_submit(
+        self,
+        session_id: str,
+        local_buffers: list[int],
+        peer_buffers: list[int],
+        length_list: list[int],
+        stream: int,
+    ) -> int:
+        """Push mode: submit writes onto ``stream`` without blocking the caller.
+
+        The transfer is stream-ordered: a ``torch.npu.Event`` recorded on the
+        same stream after this call fires once the payload has left the local
+        buffers (source reuse) — mirroring the sync write's return semantics.
+        Completion granularity on the wire (left-source vs remote-visible) is
+        pending bare-link verification; see p-push.md 3.3-1. Requires the peer
+        (Decode) to be the store server.
+        """
+        ret = self._engine.batch_transfer_async_write_submit(
+            session_id,
+            local_buffers,
+            peer_buffers,
+            length_list,
+            stream,
+        )
+        if ret != 0:
+            logger.error(
+                "MemFabric batch_transfer_async_write_submit failed (ret=%s) for session %s",
+                ret,
+                session_id,
+            )
+            return -1
+        return 0
+
 
 class GlobalMemfabricTE:
     """Lazily create one role-bound MemFabric engine per process."""

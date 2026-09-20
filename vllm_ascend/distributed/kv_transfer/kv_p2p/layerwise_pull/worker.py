@@ -88,6 +88,21 @@ def _resolve_transfer_mode(vllm_config: VllmConfig) -> str:
     return mode
 
 
+PUSH_WRITE_MODES = ("async", "sync")
+
+
+def _resolve_push_write_mode(vllm_config: VllmConfig) -> str:
+    extra = vllm_config.kv_transfer_config.kv_connector_extra_config or {}
+    mode = extra.get("push_write_mode", "async")
+    if mode not in PUSH_WRITE_MODES:
+        raise ValueError(
+            "LayerwisePullConnector requires "
+            'kv_connector_extra_config["push_write_mode"] to be one of '
+            f"{PUSH_WRITE_MODES}, got {mode!r}"
+        )
+    return mode
+
+
 def _validate_tcp_port(port: int, *, description: str) -> None:
     if not MIN_TCP_PORT <= port <= MAX_TCP_PORT:
         raise ValueError(f"{description} must be in [{MIN_TCP_PORT}, {MAX_TCP_PORT}], got {port}")
@@ -224,11 +239,6 @@ class LayerwisePullConsumerWorker:
         main_names: set[str] = set()
         hbm_destinations = kv_caches
         if get_ascend_config().sparse_kv_offload_config.enabled:
-            if getattr(self, "_transfer_mode", TRANSFER_MODE_PULL) == TRANSFER_MODE_PUSH:
-                raise ValueError(
-                    "LayerwisePullConnector transfer_mode=push is not supported with sparse decode offload: "
-                    "P would write directly into the shared CPU pool GVA, which is unvalidated (坑5)"
-                )
             if self._backend_name != BACKEND_MEMFABRIC:
                 raise ValueError(
                     "LayerwisePullConnector with sparse decode offload requires "
@@ -571,7 +581,14 @@ class LayerwisePullProducerWorker:
         # Push mode: this thread writes into D-advertised destinations and needs
         # a backend; pull mode never transfers from P (backend stays None).
         push_backend = None
+        push_write_mode = _resolve_push_write_mode(self.vllm_config)
         if getattr(self, "_transfer_mode", TRANSFER_MODE_PULL) == TRANSFER_MODE_PUSH:
+            if push_write_mode == "async" and self._backend_name != BACKEND_MEMFABRIC:
+                raise ValueError(
+                    "LayerwisePullConnector push_write_mode=\"async\" requires "
+                    'kv_connector_extra_config["transfer_backend"]="memfabric"; '
+                    'Mooncake has no async write submit, use push_write_mode="sync"'
+                )
             push_backend = (
                 PullBackend.memfabric(self.engine)
                 if self._backend_name == BACKEND_MEMFABRIC
@@ -588,6 +605,7 @@ class LayerwisePullProducerWorker:
             tp_rank=self.tp_rank,
             transfer_mode=getattr(self, "_transfer_mode", TRANSFER_MODE_PULL),
             backend=push_backend,
+            push_write_mode=push_write_mode,
         )
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
