@@ -102,6 +102,9 @@ def test_reconstruction_rejects_non_parent_views(kind):
     "connector, module, expected",
     [
         (None, None, True),
+        ("MooncakeConnectorV2", None, True),
+        ("MooncakePullConnector", None, True),
+        ("MooncakeConnectorV2", "custom.connector", False),
         ("SfaRemoteD2HConnector", None, False),
         ("SfaRemoteD2HConnector", "vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.connector", False),
         ("SfaRemoteD2HConnector", "custom.connector", False),
