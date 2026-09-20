@@ -893,8 +893,10 @@ def test_one_token_prefill_selection_respects_recurrent_state(
         (16, 5, 384, True, CUDAGraphMode.FULL_DECODE_ONLY),
     ],
 )
-def test_spec_width_prompt_chunk_folds_only_without_dcp(
+@pytest.mark.parametrize("builder_cls", [AscendGDNAttentionMetadataBuilder, GDNAttentionMetadataBuilder310])
+def test_spec_width_prompt_chunk_retains_prefill_metadata(
     monkeypatch: pytest.MonkeyPatch,
+    builder_cls,
     dcp_size: int,
     num_spec: int,
     context_len: int,
@@ -902,6 +904,7 @@ def test_spec_width_prompt_chunk_folds_only_without_dcp(
     graph_mode: CUDAGraphMode,
 ):
     _patch_missing_runtime_cdiv(monkeypatch)
+    monkeypatch.setitem(_make_builder.__globals__, "AscendGDNAttentionMetadataBuilder", builder_cls)
     width = num_spec + 1
     query_lens = [width, width] if mixed_spec else [width]
     seq_lens = [768 + width, context_len + width] if mixed_spec else [context_len + width]
@@ -931,15 +934,7 @@ def test_spec_width_prompt_chunk_folds_only_without_dcp(
     )
 
     assert accepted.tolist() == ([2, 1] if mixed_spec else [1])
-    if dcp_size == 1 and context_len > 0:
-        assert metadata.num_prefills == 0
-        assert metadata.num_prefill_tokens == 0
-        assert metadata.num_spec_decodes == 1 + int(mixed_spec)
-        assert metadata.spec_sequence_masks.tolist() == ([True, True] if mixed_spec else [True])
-        assert metadata.num_accepted_tokens.tolist() == ([2, width] if mixed_spec else [width])
-        return
-
-    # DCP retains prefill state semantics regardless of the prompt chunk width.
+    # Prompt chunks stay prefills on every device/graph configuration.
     assert metadata.num_prefills == 1
     assert metadata.num_prefill_tokens == width
     assert metadata.num_spec_decodes == int(mixed_spec)

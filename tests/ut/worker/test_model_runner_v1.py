@@ -61,7 +61,7 @@ class TestGlm5MtpGraphMetadata(unittest.TestCase):
             num_prompt_tokens=np.array([10, 10], dtype=np.int32),
             lora_id_to_lora_request={},
         )
-        runner.model_config = SimpleNamespace(is_encoder_decoder=False)
+        runner.model_config = SimpleNamespace(is_encoder_decoder=False, is_hybrid=False)
         runner.cudagraph_dispatcher = MagicMock(
             dispatch=MagicMock(
                 return_value=(
@@ -96,6 +96,54 @@ class TestGlm5MtpGraphMetadata(unittest.TestCase):
 
         call_kwargs = runner.cudagraph_dispatcher.dispatch.call_args.kwargs
         self.assertTrue(call_kwargs["uniform_decode"])
+
+    def test_mamba_prefill_graph_dispatch(self):
+        cases = [
+            ([2048], [2052], False, None, False),  # cached/continued short prefill
+            ([2052], [2052], False, None, True),  # first decode
+            ([2060, 2048], [2052, 2052], False, None, False),  # mixed batch
+            ([2060, 2056], [2052, 2052], False, None, True),
+            ([0], [4], False, None, False),
+            ([2048], [2052], True, None, False),  # DCP
+            ([0], [4], False, True, True),  # explicit capture/dummy override
+        ]
+        for computed, prompts, dcp, forced, expected in cases:
+            with self.subTest(computed=computed, prompts=prompts, dcp=dcp, forced=forced):
+                runner = self._build_dispatch_runner(speculative=True)
+                runner.model_config.is_hybrid = True
+                runner.dcp_size = 2 if dcp else 1
+                runner.uniform_decode_query_len = 4
+                # Extra stale rows must not affect the real batch decision.
+                runner.input_batch.num_computed_tokens_cpu = np.array(computed + [0])
+                runner.input_batch.num_prompt_tokens = np.array(prompts + [999])
+                with patch("vllm_ascend.worker.model_runner_v1.enable_sp", return_value=False):
+                    runner._determine_batch_execution_and_padding(
+                        num_tokens=4 * len(computed),
+                        num_reqs=len(computed),
+                        num_scheduled_tokens_np=np.full(len(computed), 4),
+                        max_num_scheduled_tokens=4,
+                        use_cascade_attn=False,
+                        force_uniform_decode=forced,
+                    )
+                self.assertEqual(runner.cudagraph_dispatcher.dispatch.call_args.kwargs["uniform_decode"], expected)
+
+    def test_mamba_non_spec_decode_graph_dispatch(self):
+        for computed, expected in ((2048, False), (2049, True)):
+            with self.subTest(computed=computed):
+                runner = self._build_dispatch_runner(speculative=False)
+                runner.model_config.is_hybrid = True
+                runner.uniform_decode_query_len = 1
+                runner.input_batch.num_computed_tokens_cpu = np.array([computed])
+                runner.input_batch.num_prompt_tokens = np.array([2049])
+                with patch("vllm_ascend.worker.model_runner_v1.enable_sp", return_value=False):
+                    runner._determine_batch_execution_and_padding(
+                        num_tokens=1,
+                        num_reqs=1,
+                        num_scheduled_tokens_np=np.array([1]),
+                        max_num_scheduled_tokens=1,
+                        use_cascade_attn=False,
+                    )
+                self.assertEqual(runner.cudagraph_dispatcher.dispatch.call_args.kwargs["uniform_decode"], expected)
 
 
 class TestDummyRunSlotInvalidation(unittest.TestCase):
