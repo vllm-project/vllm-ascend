@@ -100,6 +100,13 @@ jobs:
       - name: Ensure host cache dir exists
         run: mkdir -p "${HOME}/.cache"
 
+      # self-hosted runner 不自带 node/npm，而 devcontainers/ci 内部用
+      # `npm install -g @devcontainers/cli` 安装 CLI，缺 npm 会直接失败。
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
       # 同上，up 阶段自动执行 .devcontainer/a3/devcontainer.json 的
       # postCreateCommand（= 门禁 a3-2 with-device 的编译 + 测试脚本）。
       - name: Build & run npu devcontainer (postCreateCommand = a3 device tests)
