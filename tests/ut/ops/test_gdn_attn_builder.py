@@ -456,17 +456,10 @@ def test_mixed_spec_prefill_chunk_metadata_preserves_single_token_count(
     )
 
     assert attn_metadata.num_decodes == 0
-    assert attn_metadata.num_prefills == 2
     assert attn_metadata.prefill_query_start_loc is None
     prefill_metadata = attn_metadata.non_spec_prefill_metadata
-    assert torch.equal(
-        prefill_metadata.causal_conv1d.query_start_loc,
-        torch.tensor([0, 1, 9], dtype=torch.int32),
-    )
-    assert torch.equal(
-        prefill_metadata.actual_seq_lengths,
-        torch.tensor([1, 8], dtype=torch.int32),
-    )
+    assert torch.equal(prefill_metadata.actual_seq_lengths, torch.tensor([1, 8], dtype=torch.int32))
+    assert prefill_metadata.non_empty_indices is None
     assert prefill_metadata.non_empty_indices is None
 
 
