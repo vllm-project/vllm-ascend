@@ -21,6 +21,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     block_hash_to_bytes,
     get_block_hashes,
+    infer_cacheable_group_ids,
 )
 
 _CACHE_MISSING = object()
@@ -99,7 +100,10 @@ class AscendStoreCoordinator:
         self.group_block_sizes = group_block_sizes
         self.group_cache_families = group_cache_families
         self.group_effective_block_sizes = list(group_block_sizes)
-        for effective_block_size in self.group_effective_block_sizes:
+        self.cacheable_group_ids = infer_cacheable_group_ids(kv_cache_groups)
+        assert self.cacheable_group_ids, "AscendStore requires at least one prefix-cacheable KV cache group"
+        for group_id in self.cacheable_group_ids:
+            effective_block_size = self.group_effective_block_sizes[group_id]
             assert effective_block_size % hash_block_size == 0, "block_size must be divisible by hash_block_size"
             assert scheduler_block_size % effective_block_size == 0, (
                 "scheduler_block_size must be a multiple of each group's effective block_size"
@@ -119,6 +123,8 @@ class AscendStoreCoordinator:
             spec = _unwrap_spec(group.kv_cache_spec)
             effective_spec = _copy_spec_with_block_size(spec, self.group_effective_block_sizes[group_id])
             self.group_effective_specs.append(effective_spec)
+            if group_id not in self.cacheable_group_ids:
+                continue
             manager_cls = _get_manager_class(spec)
 
             for existing_spec, group_ids, existing_cls in attention_groups:
@@ -185,6 +191,9 @@ class AscendStoreCoordinator:
         )
         masks: list[tuple[int, list[bool] | None]] = []
         for group_id, spec in enumerate(self.group_effective_specs):
+            if group_id not in self.cacheable_group_ids:
+                masks.append((0, []))
+                continue
             num_chunks = aligned_token_len // self.group_effective_block_sizes[group_id]
             if not _uses_reachable_mask(self.group_cache_families[group_id]):
                 masks.append((num_chunks, None))
@@ -253,7 +262,8 @@ class AscendStoreCoordinator:
         exists: set[tuple[int, bytes]] = set()
         block_hashes_to_check = block_hashes[: token_len // self.hash_block_size]
 
-        for group_id, group_block_size in enumerate(self.group_effective_block_sizes):
+        for group_id in self.cacheable_group_ids:
+            group_block_size = self.group_effective_block_sizes[group_id]
             group_block_hashes = get_block_hashes(block_hashes_to_check, group_block_size, self.hash_block_size)
             hits = query_group_hits(group_id, group_block_hashes, lookup_masks[group_id])
             exists.update((group_id, block_hash_to_bytes(hit)) for hit in hits)

@@ -43,7 +43,7 @@ def assert_scheduler_empty(scheduler: Scheduler):
     assert num_free_blocks == (scheduler.kv_cache_manager.block_pool.num_gpu_blocks - 1)
 
     for block in scheduler.kv_cache_manager.block_pool.blocks:
-        assert block.ref_cnt == 0
+        assert block.is_null or block.ref_cnt == 0
 
 
 def _fake_opt_model_info() -> SimpleNamespace:
@@ -77,6 +77,7 @@ def create_vllm_config(
     max_num_seqs: int = 16,
     max_num_batched_tokens: int = 1024,
     block_size: int = 128,
+    kv_transfer_config: KVTransferConfig | None = None,
 ) -> VllmConfig:
     """Initialize VllmConfig For Testing."""
     fake_weight_path = os.path.join(os.path.dirname(__file__), "..", "_fake_weight")
@@ -104,7 +105,7 @@ def create_vllm_config(
         cache_dtype="auto",
         enable_prefix_caching=True,
     )
-    kv_transfer_config = KVTransferConfig(kv_connector="MooncakeConnector", kv_role="kv_both")
+    kv_transfer_config = kv_transfer_config or KVTransferConfig(kv_connector="MooncakeConnector", kv_role="kv_both")
     return VllmConfig(
         scheduler_config=scheduler_config,
         model_config=model_config,
