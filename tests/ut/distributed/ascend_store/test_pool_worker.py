@@ -57,6 +57,8 @@ def make_worker(
     pcp_size=1,
     pcp_rank=0,
     dcp_size=1,
+    kv_cache_config=None,
+    prefix_match_unit=None,
 ):
     module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker"
     start_patch(test, f"{module}.get_tensor_model_parallel_rank", return_value=tp_rank)
@@ -91,13 +93,15 @@ def make_worker(
         **(extra_config or {}),
     }
     config.cache_config.block_size = 16
+    config.cache_config.prefix_match_unit = prefix_match_unit
+    config.scheduler_config.disable_hybrid_kv_cache_manager = False
     config.kv_events_config = None
     if enable_kv_events:
         config.kv_events_config = MagicMock(enable_kv_cache_events=True)
 
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
-    return KVPoolWorker(config, use_layerwise=use_layerwise)
+    return KVPoolWorker(config, use_layerwise=use_layerwise, kv_cache_config=kv_cache_config)
 
 
 class TestPCPPoolWorker(unittest.TestCase):
