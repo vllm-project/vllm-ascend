@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import gc
+import weakref
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -262,6 +264,7 @@ def test_nope_operator_masks_unwritten_graph_rows(monkeypatch, a5):
     metadata = SimpleNamespace(
         smla_metadata=torch.empty(1024, dtype=torch.int32) if a5 else None,
         smla_topk_length=torch.tensor([[1], [1], [0]], dtype=torch.int32),
+        smla_sinks=torch.ones(2, dtype=torch.float32),
         query_start_loc=torch.tensor([0, 1, 2], dtype=torch.int32),
         seq_lens=torch.tensor([1, 1], dtype=torch.int32),
         block_table=torch.tensor([[0], [1]], dtype=torch.int32),
@@ -293,6 +296,7 @@ def test_a5_smla_uses_original_cache_sorted_indices_and_stable_metadata(monkeypa
         smla_metadata=None,
         smla_topk_length=torch.full((2, 1), 3, dtype=torch.int32),
         block_size=8,
+        smla_sinks=torch.ones(2, dtype=torch.float32),
     )
 
     def build(**kwargs):
@@ -314,7 +318,7 @@ def test_a5_smla_uses_original_cache_sorted_indices_and_stable_metadata(monkeypa
 
     def smla(q, **kwargs):
         assert kwargs["ori_kv"] is cache
-        assert kwargs["sinks"] is None
+        assert kwargs["sinks"] is metadata.smla_sinks
         assert kwargs.get("cmp_kv") is None
         assert kwargs["metadata"] is buffer
         assert kwargs["layout_kv"] == "PA_BBND" and kwargs["topk_value_mode"] == 1
@@ -326,3 +330,101 @@ def test_a5_smla_uses_original_cache_sorted_indices_and_stable_metadata(monkeypa
 
     monkeypatch.setattr(sparse_mla, "sparse_flash_mla", smla)
     torch.testing.assert_close(sparse_mla.sparse_mla(query, cache, indices, metadata, 0.5), query + 1)
+
+
+def _sinks_owner(builder):
+    """The SparseMLAMetadataState that owns the persistent sinks."""
+    return builder.nope_states[None]
+
+
+def _stub_metadata_op(monkeypatch):
+    monkeypatch.setattr(
+        sparse_mla,
+        "sparse_flash_mla_metadata",
+        lambda **kwargs: torch.zeros(sparse_mla.SMLA_METADATA_SIZE, dtype=torch.int32),
+    )
+
+
+@pytest.mark.parametrize("block_size", [128, 2304])
+def test_a5_smla_sinks_are_builder_owned_and_stable(monkeypatch, block_size):
+    """The sinks tensor is allocated once by the builder state and reused
+    verbatim by every metadata build, so ACL Graph replay always finds it at
+    the address captured on the first run."""
+    _stub_metadata_op(monkeypatch)
+    builder = _builder(block_size, True, monkeypatch)
+
+    first = builder.build(0, _common(block_size))
+    second = builder.build(0, _common(block_size))
+    state = _sinks_owner(builder)
+
+    assert first.smla_sinks is state.sinks
+    assert second.smla_sinks is state.sinks
+    assert first.smla_sinks.data_ptr() == second.smla_sinks.data_ptr()
+    assert first.smla_sinks.shape == (state.num_heads,)
+    assert first.smla_sinks.dtype == torch.float32
+    torch.testing.assert_close(
+        first.smla_sinks,
+        torch.full((state.num_heads,), sparse_mla.SMLA_DEFAULT_SINK_VALUE, dtype=torch.float32),
+    )
+
+
+def test_a5_smla_passes_persistent_sinks_to_operator(monkeypatch):
+    """sparse_mla() forwards the builder-owned tensor itself, not a copy."""
+    _stub_metadata_op(monkeypatch)
+    builder = _builder(128, True, monkeypatch)
+    metadata = builder.build(0, _common(128))
+    state = _sinks_owner(builder)
+    seen = {}
+
+    def op(q, **kwargs):
+        seen["sinks"] = kwargs["sinks"]
+        return (q,)
+
+    monkeypatch.setattr(sparse_mla, "sparse_flash_mla", op)
+    query = torch.ones(3, state.num_heads, 8)
+    sparse_mla.sparse_mla(query, torch.zeros(8, 128, 1, 8), torch.zeros(3, 1, 4, dtype=torch.int32), metadata, 0.5)
+
+    assert seen["sinks"] is metadata.smla_sinks
+    assert seen["sinks"] is state.sinks
+
+
+def test_a5_smla_sinks_outlive_the_operator_call(monkeypatch):
+    """Regression for the 507011 kernel trap: a sinks tensor referenced only by
+    the operator call's kwargs is freed as soon as the call returns, while the
+    captured graph still holds its address."""
+    _stub_metadata_op(monkeypatch)
+    builder = _builder(128, True, monkeypatch)
+    metadata = builder.build(0, _common(128))
+    state = _sinks_owner(builder)
+    monkeypatch.setattr(sparse_mla, "sparse_flash_mla", lambda q, **kwargs: (q,))
+    query = torch.ones(3, state.num_heads, 8)
+    sparse_mla.sparse_mla(query, torch.zeros(8, 128, 1, 8), torch.zeros(3, 1, 4, dtype=torch.int32), metadata, 0.5)
+
+    ref = weakref.ref(metadata.smla_sinks)
+    del metadata
+    gc.collect()
+    assert ref() is not None, "sinks must outlive the metadata that exposes it"
+    assert ref() is state.sinks
+
+
+def _smla_metadata_stub(sinks):
+    return SimpleNamespace(
+        block_table=torch.zeros(1, 1, dtype=torch.int32),
+        smla_metadata=torch.zeros(sparse_mla.SMLA_METADATA_SIZE, dtype=torch.int32),
+        smla_topk_length=torch.ones(1, 1, dtype=torch.int32),
+        smla_sinks=sinks,
+        block_size=8,
+        query_start_loc=torch.tensor([0, 1], dtype=torch.int32),
+        seq_lens=torch.tensor([1], dtype=torch.int32),
+    )
+
+
+def test_sparse_mla_rejects_missing_sinks():
+    with pytest.raises(RuntimeError, match="persistent sinks"):
+        sparse_mla.sparse_mla(
+            torch.ones(1, 2, 8),
+            torch.zeros(1, 8, 1, 8),
+            torch.zeros(1, 1, 2, dtype=torch.int32),
+            _smla_metadata_stub(None),
+            0.5,
+        )

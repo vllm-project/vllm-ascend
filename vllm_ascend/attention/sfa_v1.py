@@ -71,6 +71,12 @@ if TYPE_CHECKING:
 
 # NoPE sparse MLA operator helpers.
 SMLA_METADATA_SIZE = 1024
+SPARSE_ATTENTION_MAX_BLOCK_SIZE = 1024
+# GLM5Next's SFA path carries no learnable attention sink, but SparseFlashMla
+# still requires a per-head float32 sinks tensor. This is the placeholder value
+# the path has always used; whether -inf is the correct "no sink" value is a
+# separate question, tracked outside this change.
+SMLA_DEFAULT_SINK_VALUE = 1.0
 
 
 def build_smla_metadata(metadata, buffer, num_heads, head_dim, topk):
@@ -91,9 +97,9 @@ def build_smla_metadata(metadata, buffer, num_heads, head_dim, topk):
         cmp_topk=0,
         cmp_ratio=1,
         ori_mask_mode=3,
-        cmp_mask_mode=3,
-        ori_win_left=0,
-        ori_win_right=0,
+        cmp_mask_mode=0,
+        ori_win_left=-1,
+        ori_win_right=-1,
         layout_q="TND",
         layout_kv="PA_BBND",
         has_ori_kv=True,
@@ -128,6 +134,8 @@ def sparse_mla(query, cache, indices, metadata, scale):
         sentinel = torch.iinfo(torch.int32).max
         sorted_indices = torch.where(indices >= 0, indices, sentinel).sort(dim=-1).values
         sorted_indices = torch.where(sorted_indices == sentinel, -1, sorted_indices)
+        if metadata.smla_sinks is None:
+            raise RuntimeError("Sparse MLA requires persistent sinks owned by SparseMLAMetadataState.")
         result = sparse_flash_mla(
             query.contiguous(),
             ori_kv=cache,
@@ -136,14 +144,14 @@ def sparse_mla(query, cache, indices, metadata, scale):
             cu_seqlens_q=metadata.query_start_loc,
             seqused_ori_kv=metadata.seq_lens,
             ori_topk_length=metadata.smla_topk_length[: query.shape[0]],
-            sinks=None,
+            sinks=metadata.smla_sinks,
             metadata=metadata.smla_metadata,
             softmax_scale=scale,
             cmp_ratio=1,
             ori_mask_mode=3,
-            cmp_mask_mode=3,
-            ori_win_left=0,
-            ori_win_right=0,
+            cmp_mask_mode=0,
+            ori_win_left=-1,
+            ori_win_right=-1,
             layout_q="TND",
             layout_kv="PA_BBND",
             topk_value_mode=1,
@@ -213,6 +221,16 @@ class SparseMLAMetadataState:
                 dtype=torch.int32,
                 device=device,
             )
+            # ACL Graph replay reads the addresses captured on the first run,
+            # so every tensor the operator consumes has to outlive the capture.
+            # Allocate the sinks once here, next to the other persistent
+            # operator buffers, and keep it for this state's lifetime.
+            self.sinks = torch.full(
+                (self.num_heads,),
+                SMLA_DEFAULT_SINK_VALUE,
+                dtype=torch.float32,
+                device=device,
+            )
 
     def prepare(self, metadata):
         expanded = metadata.block_table
@@ -234,6 +252,7 @@ class SparseMLAMetadataState:
             valid = torch.arange(positions.numel(), device=positions.device) < metadata.query_start_loc[-1]
             lengths[:, 0].copy_(counts.masked_fill(~valid, 0))
             metadata.smla_topk_length = lengths
+            metadata.smla_sinks = self.sinks
             build_smla_metadata(
                 metadata, self.metadata_buffer, self.num_heads, self.head_dim, self.indexer.topk_output_width
             )
@@ -363,6 +382,7 @@ class AscendSFAMetadata:
     max_seq_len: int = 0
     smla_metadata: torch.Tensor | None = None
     smla_topk_length: torch.Tensor | None = None
+    smla_sinks: torch.Tensor | None = None
 
 
 M = TypeVar("M", bound=AscendSFAMetadata)
