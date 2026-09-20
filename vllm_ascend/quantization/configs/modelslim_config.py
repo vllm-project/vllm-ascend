@@ -242,6 +242,8 @@ def get_quant_type_for_layer(
         ]
         for shard_prefix in shard_prefixes:
             shard_key = shard_prefix + ".weight"
+            if shard_key not in quant_description and shard_prefix in quant_description:
+                shard_key = shard_prefix
             # Only Gemma4 k_eq_v is allowed to omit v_proj; other missing
             # shards fall through to the original dictionary lookup below.
             if shard_key not in quant_description and _is_missing_v_shard(shard_key, quant_description):
@@ -499,6 +501,16 @@ class AscendModelSlimConfig(QuantizationConfig):
             )
             if not self._has_quant_weight(prefix) and self._has_quant_weight(candidate):
                 return candidate
+
+        if model_type in (
+            "qwen4_exp",
+            "qwen4_exp_mtp",
+            "qwen3_5_moe",
+            "qwen3_5_mtp",
+        ) and prefix.startswith("mtp.layers."):
+            # Qwen4Exp/Qwen3.5 MTP checkpoints store local draft layer zero,
+            # while the runtime module may expose its global layer index.
+            prefix = re.sub(r"(?<=^mtp\.layers\.)\d+", "0", prefix, count=1)
 
         if model_type == "step3p5_mtp" and prefix.startswith("model.layers."):
             # Step3P5 MTP and newly generated Step3P7 W8A8 MTP checkpoints use
