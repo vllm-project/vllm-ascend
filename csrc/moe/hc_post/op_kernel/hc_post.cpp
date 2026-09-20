@@ -29,30 +29,30 @@ using namespace HcPost;
 #define HC_POST_FLOAT 0
 #define HC_POST_BFLOAT16 1
 
-extern "C" __global__ __aicore__ void hc_post(GM_ADDR x, GM_ADDR residual, GM_ADDR post,
-    GM_ADDR comb, GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling)
+extern "C" __global__ __aicore__ void hc_post(GM_ADDR x, GM_ADDR residual, GM_ADDR post, GM_ADDR comb, GM_ADDR y,
+    GM_ADDR mean, GM_ADDR workspace, GM_ADDR tiling)
 {
     TPipe pipe;
-    #if defined(__DAV_C310__)
-        GET_TILING_DATA_WITH_STRUCT(HcPostTilingData, tilingData, tiling);
-        const HcPostTilingData *__restrict hcPostTilingData = &tilingData;
-        if (TILING_KEY_IS(HC_POST_FLOAT)) {
-            HcPostRegBaseFloat32<DTYPE_POST> op;
-            op.Init(x, residual, post, comb, y, workspace, hcPostTilingData, &pipe);
-            op.Process();
-            return;
-        } else if (TILING_KEY_IS(HC_POST_BFLOAT16)) {
-            HcPostRegBaseBfloat16<DTYPE_X, DTYPE_POST> op;
-            op.Init(x, residual, post, comb, y, workspace, hcPostTilingData, &pipe);
-            op.Process();
-            return;
-        }
-    #else
-        GET_TILING_DATA_WITH_STRUCT(HcPostTilingData, tilingData, tiling);
-        const HcPostTilingData *__restrict hcPostTilingData = &tilingData;
-        HcPostKernelDSplit<DTYPE_X, DTYPE_POST> op;
-        op.Init(x, residual, post, comb, y, workspace, hcPostTilingData, &pipe);
+#if defined(__DAV_C310__)
+    GET_TILING_DATA_WITH_STRUCT(HcPostTilingData, tilingData, tiling);
+    const HcPostTilingData* __restrict hcPostTilingData = &tilingData;
+    if (TILING_KEY_IS(HC_POST_FLOAT)) {
+        HcPostRegBaseFloat32<DTYPE_POST> op;
+        op.Init(x, residual, post, comb, y, mean, workspace, hcPostTilingData, &pipe);
         op.Process();
         return;
-    #endif
+    } else if (TILING_KEY_IS(HC_POST_BFLOAT16)) {
+        HcPostRegBaseBfloat16<DTYPE_X, DTYPE_POST> op;
+        op.Init(x, residual, post, comb, y, mean, workspace, hcPostTilingData, &pipe);
+        op.Process();
+        return;
+    }
+#else
+    GET_TILING_DATA_WITH_STRUCT(HcPostTilingData, tilingData, tiling);
+    const HcPostTilingData* __restrict hcPostTilingData = &tilingData;
+    HcPostKernelDSplit<DTYPE_X, DTYPE_POST> op;
+    op.Init(x, residual, post, comb, y, mean, workspace, hcPostTilingData, &pipe);
+    op.Process();
+    return;
+#endif
 }

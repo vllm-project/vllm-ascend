@@ -242,7 +242,7 @@ class DeepseekV41DSparkModel(torch.nn.Module):
             moe_input_ids = torch.where(input_ids == -1, 0, input_ids)
         for layer in self.layers.values():
             last_layer = layer
-            hidden_states, pre_mix = layer(
+            hidden_states, pre_mix, _ = layer(
                 positions,
                 hidden_states,
                 pre_mix,

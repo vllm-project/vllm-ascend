@@ -24,7 +24,7 @@ const int32_t INPUT_IDX_RESIDUAL = 1;
 const int32_t INPUT_IDX_POST = 2;
 const int32_t INPUT_IDX_COMB = 3;
 const int32_t INDEX_OUTPUT_Y = 0;
-
+const int32_t INDEX_OUTPUT_MEAN = 1;
 
 static ge::graphStatus InferShape4HcPost(gert::InferShapeContext* context)
 {
@@ -44,6 +44,8 @@ static ge::graphStatus InferShape4HcPost(gert::InferShapeContext* context)
 
     auto yShape = context->GetOutputShape(INDEX_OUTPUT_Y);
     *yShape = *residualShape;
+    auto meanShape = context->GetOutputShape(INDEX_OUTPUT_MEAN);
+    *meanShape = *xShape;
 
     OPS_LOG_I(context->GetNodeName(), "End to do InferShape4HcPost");
     return ge::GRAPH_SUCCESS;
@@ -54,6 +56,7 @@ static ge::graphStatus InferDtype4HcPost(gert::InferDataTypeContext* context)
     OPS_LOG_I(context->GetNodeName(), "InferDtype4HcPost enter");
     const auto xDtype = context->GetInputDataType(INPUT_IDX_X);
     context->SetOutputDataType(INDEX_OUTPUT_Y, xDtype);
+    context->SetOutputDataType(INDEX_OUTPUT_MEAN, xDtype);
     OPS_LOG_I(context->GetNodeName(), "InferDtype4HcPost end");
     return GRAPH_SUCCESS;
 }

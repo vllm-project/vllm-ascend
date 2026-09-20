@@ -24,8 +24,8 @@ template <typename T>
 class HcPostRegBaseFloat32 {
 public:
     __aicore__ inline HcPostRegBaseFloat32() {};
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR residual, GM_ADDR post, GM_ADDR comb, GM_ADDR y, GM_ADDR workspace,
-        const HcPostTilingData *tilingData, TPipe *pipe);
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR residual, GM_ADDR post, GM_ADDR comb, GM_ADDR y, GM_ADDR mean,
+                                GM_ADDR workspace, const HcPostTilingData* tilingData, TPipe* pipe);
     __aicore__ inline void Process();
     __aicore__ inline void DataCopyInX(int64_t batchIndex, int64_t dOnceDealing, int64_t dOffset);
     __aicore__ inline void DataCopyInPost(int64_t batchIndex);
@@ -54,6 +54,7 @@ private:
     int64_t dOnceDealing_ = 0;
     int64_t dLastDealing_ = 0;
     int64_t dSplitTime_ = 0;
+    bool computeMean_ = false;
     static constexpr int32_t ONE_BLOCK_SIZE = 32;
     int32_t perBlock32 = ONE_BLOCK_SIZE / sizeof(float);
 
@@ -62,61 +63,70 @@ private:
     GlobalTensor<T> postGm_;
     GlobalTensor<T> combGm_;
     GlobalTensor<float> yGm_;
+    GlobalTensor<float> meanGm_;
 
     TQue<QuePosition::VECIN, 1> xQue_;
     TQue<QuePosition::VECIN, 1> residualQue_;
     TQue<QuePosition::VECIN, 1> postQue_;
     TQue<QuePosition::VECIN, 1> combQue_;
     TQue<QuePosition::VECOUT, 1> sumQue_;
+    TQue<QuePosition::VECOUT, 1> meanQue_;
     TBuf<QuePosition::VECCALC> sumTempBuf_;
+    TBuf<QuePosition::VECCALC> meanBuf_;
 };
 
 template <typename T>
 __aicore__ inline void HcPostRegBaseFloat32<T>::Init(GM_ADDR x, GM_ADDR residual, GM_ADDR post, GM_ADDR comb, GM_ADDR y,
-    GM_ADDR workspace, const HcPostTilingData *tilingData, TPipe *pipe)
-{
-    blkIdx_ = GetBlockIdx();
-    if (blkIdx_ >= tilingData->usedCoreNum) {
-        return;
-    }
-    tiling_ = tilingData;
-    pipe_ = pipe;
-    hcParam_ = tilingData->hcParam;
-    dParam_ = tilingData->dParam;
-    batchOneCoreTail_ = tilingData->batchOneCoreTail;
-    batchOneCore_ = tilingData->batchOneCore;
-    isFrontCore_ = blkIdx_ < tilingData->frontCore;
-    int64_t frontCore = tilingData->frontCore;
-    dOnceDealing_ = tilingData->dOnceDealing;
-    dLastDealing_ = tilingData->dLastDealing;
-    dSplitTime_ = tilingData->dSplitTime;
-    dParamAlign_ = (dParam_ + perBlock32 - 1) / perBlock32 * perBlock32;
-    dParamOnceAlign_ = (dOnceDealing_ + perBlock32 - 1) / perBlock32 * perBlock32;
+                                                     GM_ADDR mean, GM_ADDR workspace,
+                                                     const HcPostTilingData* tilingData, TPipe* pipe) {
+  blkIdx_ = GetBlockIdx();
+  if (blkIdx_ >= tilingData->usedCoreNum) {
+    return;
+  }
+  tiling_ = tilingData;
+  pipe_ = pipe;
+  hcParam_ = tilingData->hcParam;
+  dParam_ = tilingData->dParam;
+  batchOneCoreTail_ = tilingData->batchOneCoreTail;
+  batchOneCore_ = tilingData->batchOneCore;
+  isFrontCore_ = blkIdx_ < tilingData->frontCore;
+  int64_t frontCore = tilingData->frontCore;
+  dOnceDealing_ = tilingData->dOnceDealing;
+  dLastDealing_ = tilingData->dLastDealing;
+  dSplitTime_ = tilingData->dSplitTime;
+  dParamAlign_ = (dParam_ + perBlock32 - 1) / perBlock32 * perBlock32;
+  dParamOnceAlign_ = (dOnceDealing_ + perBlock32 - 1) / perBlock32 * perBlock32;
+  computeMean_ = tilingData->computeMean != 0;
 
-    int64_t xOffset = blkIdx_ * batchOneCore_ * dParam_;
-    int64_t residualOffset = blkIdx_ * batchOneCore_ * hcParam_ * dParam_;
-    int64_t postOffset = blkIdx_ * batchOneCore_ * hcParam_;
-    int64_t combOffset = blkIdx_ * batchOneCore_ * hcParam_ * hcParam_;
-    int64_t yOffset = blkIdx_ * batchOneCore_ * hcParam_ * dParam_;
-    if (!isFrontCore_) {
-        xOffset = (blkIdx_ * batchOneCoreTail_ + frontCore) * dParam_;
-        residualOffset = (blkIdx_ * batchOneCoreTail_ + frontCore) * hcParam_ * dParam_;
-        postOffset = (blkIdx_ * batchOneCoreTail_ + frontCore) * hcParam_;
-        combOffset = (blkIdx_ * batchOneCoreTail_ + frontCore) * hcParam_ * hcParam_;
-        yOffset = (blkIdx_ * batchOneCoreTail_ + frontCore) * hcParam_ * dParam_;
-    }
-    xGm_.SetGlobalBuffer((__gm__ float *)x + xOffset);
-    residualGm_.SetGlobalBuffer((__gm__ float *)residual + residualOffset);
-    postGm_.SetGlobalBuffer((__gm__ T *)post + postOffset);
-    combGm_.SetGlobalBuffer((__gm__ T *)comb + combOffset);
-    yGm_.SetGlobalBuffer((__gm__ float *)y + yOffset);
+  int64_t xOffset = blkIdx_ * batchOneCore_ * dParam_;
+  int64_t residualOffset = blkIdx_ * batchOneCore_ * hcParam_ * dParam_;
+  int64_t postOffset = blkIdx_ * batchOneCore_ * hcParam_;
+  int64_t combOffset = blkIdx_ * batchOneCore_ * hcParam_ * hcParam_;
+  int64_t yOffset = blkIdx_ * batchOneCore_ * hcParam_ * dParam_;
+  if (!isFrontCore_) {
+    xOffset = (blkIdx_ * batchOneCoreTail_ + frontCore) * dParam_;
+    residualOffset = (blkIdx_ * batchOneCoreTail_ + frontCore) * hcParam_ * dParam_;
+    postOffset = (blkIdx_ * batchOneCoreTail_ + frontCore) * hcParam_;
+    combOffset = (blkIdx_ * batchOneCoreTail_ + frontCore) * hcParam_ * hcParam_;
+    yOffset = (blkIdx_ * batchOneCoreTail_ + frontCore) * hcParam_ * dParam_;
+  }
+  xGm_.SetGlobalBuffer((__gm__ float*)x + xOffset);
+  residualGm_.SetGlobalBuffer((__gm__ float*)residual + residualOffset);
+  postGm_.SetGlobalBuffer((__gm__ T*)post + postOffset);
+  combGm_.SetGlobalBuffer((__gm__ T*)comb + combOffset);
+  yGm_.SetGlobalBuffer((__gm__ float*)y + yOffset);
+  meanGm_.SetGlobalBuffer((__gm__ float*)mean + xOffset);
 
-    pipe_->InitBuffer(xQue_, 2, dParamOnceAlign_ * sizeof(float));
-    pipe_->InitBuffer(residualQue_, 2, hcParam_ * dParamOnceAlign_ * sizeof(float));
-    pipe_->InitBuffer(postQue_, 2, hcParam_ * sizeof(T));
-    pipe_->InitBuffer(combQue_, 2, hcParam_ * hcParam_ * sizeof(T));
-    pipe_->InitBuffer(sumQue_, 2, dParamOnceAlign_ * sizeof(float));
-    pipe_->InitBuffer(sumTempBuf_, dParamOnceAlign_ * sizeof(float));
+  pipe_->InitBuffer(xQue_, 2, dParamOnceAlign_ * sizeof(float));
+  pipe_->InitBuffer(residualQue_, 2, hcParam_ * dParamOnceAlign_ * sizeof(float));
+  pipe_->InitBuffer(postQue_, 2, hcParam_ * sizeof(T));
+  pipe_->InitBuffer(combQue_, 2, hcParam_ * hcParam_ * sizeof(T));
+  pipe_->InitBuffer(sumQue_, 2, dParamOnceAlign_ * sizeof(float));
+  pipe_->InitBuffer(sumTempBuf_, dParamOnceAlign_ * sizeof(float));
+  if (computeMean_) {
+    pipe_->InitBuffer(meanQue_, 1, dParamOnceAlign_ * sizeof(float));
+    pipe_->InitBuffer(meanBuf_, dParamOnceAlign_ * sizeof(float));
+  }
 }
 
 template <typename T>
@@ -284,12 +294,34 @@ __aicore__ inline void HcPostRegBaseFloat32<T>::DoCompute(LocalTensor<float> sum
     LocalTensor<float> xUb = xQue_.DeQue<float>();
     DataCopyInResidual(batchIndex, dDealing, dOffset);
     LocalTensor<float> residualUb = residualQue_.DeQue<float>();
+    LocalTensor<float> meanBuf;
+    if (computeMean_) {
+      meanBuf = meanBuf_.Get<float>();
+      Duplicate(meanBuf, 0.0f, dDealing);
+      PipeBarrier<PIPE_V>();
+    }
     for (int64_t hc1Index = 0; hc1Index < hcParam_; hc1Index++) {
         DoMulAndAdd(xUb, postUb, residualUb, combUb, sumTempBuf, hc1Index, dDealing);
+      if (computeMean_) {
+        Add(meanBuf, meanBuf, sumTempBuf, dDealing);
+        PipeBarrier<PIPE_V>();
+        }
         LocalTensor<float> sumUb = sumQue_.AllocTensor<float>();
         AscendC::Copy(sumUb, sumTempBuf, dDealing);
         sumQue_.EnQue<float>(sumUb);
         DataCopyOut(batchIndex, hc1Index, dDealing, dOffset);
+    }
+    if (computeMean_) {
+      Muls(meanBuf, meanBuf, 1.0f / static_cast<float>(hcParam_), dDealing);
+      PipeBarrier<PIPE_V>();
+      LocalTensor<float> meanOut = meanQue_.AllocTensor<float>();
+      Copy(meanOut, meanBuf, dDealing);
+      PipeBarrier<PIPE_V>();
+      meanQue_.EnQue<float>(meanOut);
+      meanOut = meanQue_.DeQue<float>();
+      DataCopyExtParams copyParams{1, static_cast<uint32_t>(dDealing * sizeof(float)), 0, 0, 0};
+      DataCopyPad(meanGm_[batchIndex * dParam_ + dOffset], meanOut, copyParams);
+      meanQue_.FreeTensor(meanOut);
     }
     residualQue_.FreeTensor(residualUb);
     xQue_.FreeTensor(xUb);

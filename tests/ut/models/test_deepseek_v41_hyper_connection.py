@@ -83,13 +83,14 @@ def test_v41_forward_threads_pre_mix_through_fused_hc_pre():
     layer.rms_norm_cast = MagicMock(return_value=(normalized, normalized_fp32))
     layer.self_attn = MagicMock(side_effect=lambda _positions, value, _scaling: value)
     layer.mlp = MagicMock(side_effect=lambda value, **_kwargs: value)
-    layer.hc_post = MagicMock(side_effect=lambda _x, residual, _post, _comb: residual)
+    layer.hc_post = MagicMock(side_effect=lambda _x, residual, _post, _comb, **_kwargs: (residual, None))
 
     input_ids = torch.tensor([11, 22])
-    output, next_pre = layer.forward(torch.arange(2), hidden_states, incoming_pre, input_ids=input_ids)
+    output, next_pre, aux = layer.forward(torch.arange(2), hidden_states, incoming_pre, input_ids=input_ids)
 
     assert output is hidden_states
     assert next_pre is ffn_pre
+    assert aux is None
     assert layer.hc_pre.call_args_list[0].args[-1] is incoming_pre
     assert layer.hc_pre.call_args_list[1].args[-1] is attn_pre
     layer.rms_norm_cast.assert_called_once_with(collapsed)
@@ -120,7 +121,7 @@ def test_v41_forward_gathers_attention_and_keeps_moe_sharded(monkeypatch):
     layer.rms_norm_cast = MagicMock(return_value=(collapsed, collapsed.float()))
     layer.self_attn = MagicMock(side_effect=lambda _positions, value, _scaling: value)
     layer.mlp = MagicMock(side_effect=lambda value, **_kwargs: value)
-    layer.hc_post = MagicMock(side_effect=lambda _x, residual, _post, _comb: residual)
+    layer.hc_post = MagicMock(side_effect=lambda _x, residual, _post, _comb, **_kwargs: (residual, None))
     all_gather = MagicMock(return_value=collapsed)
     reduce_scatter = MagicMock(return_value=collapsed)
     monkeypatch.setattr(deepseek_v41_module, "sp_all_gather", all_gather)
@@ -215,9 +216,10 @@ def test_v41_hc_post_dispatches_fused_operator_with_batch_dimension():
         create=True,
         return_value=expected,
     ) as op:
-        actual = layer.hc_post(x, residual, post, comb)
+        actual, mean = layer.hc_post(x, residual, post, comb)
 
     torch.testing.assert_close(actual, expected.squeeze(0))
+    assert mean is None
     op.assert_called_once()
     for actual_arg, expected_arg in zip(
         op.call_args.args,
@@ -229,6 +231,28 @@ def test_v41_hc_post_dispatches_fused_operator_with_batch_dimension():
         ),
     ):
         torch.testing.assert_close(actual_arg, expected_arg)
+
+
+def test_v41_hc_post_dispatches_mean_fused_operator_only_when_requested():
+    layer = _layer()
+    x = torch.randn(3, 5, dtype=torch.bfloat16)
+    residual = torch.randn(3, 4, 5, dtype=torch.bfloat16)
+    post = torch.randn(3, 4, dtype=torch.float32)
+    comb = torch.randn(3, 4, 4, dtype=torch.float32)
+    expected = torch.randn_like(residual).unsqueeze(0)
+    expected_mean = torch.randn_like(x).unsqueeze(0)
+
+    with patch.object(
+        torch.ops._C_ascend,
+        "npu_hc_post_with_mean",
+        create=True,
+        return_value=(expected, expected_mean),
+    ) as op:
+        actual, mean = layer.hc_post(x, residual, post, comb, return_mean=True)
+
+    torch.testing.assert_close(actual, expected.squeeze(0))
+    torch.testing.assert_close(mean, expected_mean.squeeze(0))
+    op.assert_called_once()
 
 
 def test_v41_dspark_propagates_delayed_mix_and_collapses_final_stream():
@@ -245,9 +269,9 @@ def test_v41_dspark_propagates_delayed_mix_and_collapses_final_stream():
     class Layer(torch.nn.Module):
         hc_collapse = staticmethod(DeepseekV41DecoderLayer.hc_collapse)
 
-        def forward(self, positions, hidden, pre_mix, llama_4_scaling=None, input_ids=None):
+        def forward(self, positions, hidden, pre_mix, llama_4_scaling=None, input_ids=None, capture_aux=False):
             seen.append(pre_mix.clone())
-            return hidden + 1, pre_mix.flip(-1)
+            return hidden + 1, pre_mix.flip(-1), None
 
     model.layers = torch.nn.ModuleDict({"40": Layer(), "41": Layer(), "42": Layer()})
     ids = torch.tensor([0, 1])
@@ -267,6 +291,7 @@ def test_v41_target_emits_input_residual_for_selected_aux_layers():
     model.norm = torch.nn.Identity()
     model.shared_attention_state = MagicMock()
     model._set_aux_hidden_state_layers((1, 3))
+    capture_flags = []
 
     class Layer(torch.nn.Module):
         hc_collapse = staticmethod(DeepseekV41DecoderLayer.hc_collapse)
@@ -276,8 +301,11 @@ def test_v41_target_emits_input_residual_for_selected_aux_layers():
             self.layer_idx = idx
             self.engram = None
 
-        def forward(self, positions, hidden, pre_mix, scaling, input_ids=None):
-            return hidden + 1, pre_mix
+        def forward(self, positions, hidden, pre_mix, scaling, input_ids=None, capture_aux=False):
+            capture_flags.append(capture_aux)
+            output = hidden + 1
+            aux = output.mean(dim=1) if capture_aux else None
+            return output, pre_mix, aux
 
     model.layers = torch.nn.ModuleList([Layer(i) for i in range(3)])
     ids = torch.tensor([0, 1])
@@ -295,6 +323,7 @@ def test_v41_target_emits_input_residual_for_selected_aux_layers():
     embedded = model.embed_tokens(ids)
     torch.testing.assert_close(output, embedded + 3)
     assert len(aux) == 2
+    assert capture_flags == [False, True, False]
     torch.testing.assert_close(aux[0], embedded)
     torch.testing.assert_close(aux[1], embedded + 2)
 

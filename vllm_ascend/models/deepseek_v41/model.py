@@ -864,13 +864,17 @@ class DeepseekV41DecoderLayer(nn.Module):
             hc_eps=self.hc_eps,
         )
 
-    def hc_post(self, x, residual, post, comb):
-        return torch.ops._C_ascend.npu_hc_post(
+    def hc_post(self, x, residual, post, comb, *, return_mean=False):
+        inputs = (
             x.unsqueeze(0),
             residual.unsqueeze(0),
             post.unsqueeze(0),
             comb.unsqueeze(0),
-        ).squeeze(0)
+        )
+        if return_mean:
+            output, mean = torch.ops._C_ascend.npu_hc_post_with_mean(*inputs)
+            return output.squeeze(0), mean.squeeze(0)
+        return torch.ops._C_ascend.npu_hc_post(*inputs).squeeze(0), None
 
     def forward(
         self,
@@ -879,6 +883,7 @@ class DeepseekV41DecoderLayer(nn.Module):
         pre_mix,
         llama_4_scaling=None,
         input_ids=None,
+        capture_aux=False,
     ):
         use_sequence_parallel = getattr(self, "use_sequence_parallel", False)
         residual = hidden_states
@@ -895,7 +900,7 @@ class DeepseekV41DecoderLayer(nn.Module):
         x = self.self_attn(positions, x, llama_4_scaling)
         if use_sequence_parallel:
             x = sp_reduce_scatter(x)
-        hidden_states = self.hc_post(x, residual, attn_post, attn_comb)
+        hidden_states, _ = self.hc_post(x, residual, attn_post, attn_comb)
 
         residual = hidden_states
         x, ffn_post, ffn_comb, ffn_pre = self.hc_pre(
@@ -912,8 +917,14 @@ class DeepseekV41DecoderLayer(nn.Module):
             hidden_states_fp32=x_fp32,
             already_sequence_parallel=use_sequence_parallel,
         )
-        hidden_states = self.hc_post(x, residual, ffn_post, ffn_comb)
-        return hidden_states, ffn_pre
+        hidden_states, aux_hidden_state = self.hc_post(
+            x,
+            residual,
+            ffn_post,
+            ffn_comb,
+            return_mean=capture_aux,
+        )
+        return hidden_states, ffn_pre, aux_hidden_state
 
 
 class DeepseekV41Model(nn.Module, EagleModelMixin):
@@ -1169,7 +1180,19 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                     active_mask,
                     self.config.rms_norm_eps,
                 )
-            hidden_states, pre_mix = layer(positions, hidden_states, pre_mix, None, input_ids=moe_input_ids)
+            capture_aux = layer.layer_idx + 2 in self.aux_hidden_state_layers
+            hidden_states, pre_mix, aux_hidden_state = layer(
+                positions,
+                hidden_states,
+                pre_mix,
+                None,
+                input_ids=moe_input_ids,
+                capture_aux=capture_aux,
+            )
+            if aux_hidden_state is not None:
+                if use_sequence_parallel:
+                    aux_hidden_state = sp_all_gather(aux_hidden_state)[:full_num_tokens]
+                aux_hidden_states.append(aux_hidden_state)
         assert last_layer is not None, "Hyper-connection collapse requires at least one decoder layer"
         hidden_states = last_layer.hc_collapse(hidden_states, pre_mix)
         if use_sequence_parallel:

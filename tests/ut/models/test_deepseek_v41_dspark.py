@@ -70,13 +70,18 @@ def test_target_exports_residual_entering_selected_layers(monkeypatch):
         lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
     )
 
+    capture_flags = []
+
     class Layer:
         def __init__(self, index):
             self.layer_idx = index
             self.engram = None
 
-        def __call__(self, positions, hidden, pre_mix, unused, input_ids):
-            return hidden + self.layer_idx + 1, pre_mix
+        def __call__(self, positions, hidden, pre_mix, unused, input_ids, capture_aux=False):
+            capture_flags.append(capture_aux)
+            output = hidden + self.layer_idx + 1
+            aux = output.mean(dim=1) if capture_aux else None
+            return output, pre_mix, aux
 
         @staticmethod
         def hc_collapse(hidden, pre_mix):
@@ -104,6 +109,7 @@ def test_target_exports_residual_entering_selected_layers(monkeypatch):
     torch.testing.assert_close(aux[0], hidden)
     torch.testing.assert_close(aux[1], hidden + 3)
     torch.testing.assert_close(output, hidden + 6)
+    assert capture_flags == [False, True, False]
 
 
 @pytest.mark.parametrize("cp", [False, True])
@@ -138,8 +144,8 @@ def test_v41_draft_sequence_parallel_shards_inputs_and_restores_output(monkeypat
         def hc_collapse(hidden, pre_mix):
             return hidden.mean(dim=1)
 
-        def __call__(self, positions, hidden, pre_mix, llama_4_scaling, input_ids):
-            return hidden, pre_mix
+        def __call__(self, positions, hidden, pre_mix, llama_4_scaling, input_ids, capture_aux=False):
+            return hidden, pre_mix, None
 
     hidden = torch.arange(16, dtype=torch.float32).reshape(4, 4)
     input_ids = torch.tensor([11, 12, 13, 14])
