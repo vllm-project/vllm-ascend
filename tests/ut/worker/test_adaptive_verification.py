@@ -123,9 +123,7 @@ def test_adaptive_verification_patch_preserves_budget_assignment(monkeypatch):
         "vllm_ascend.device.device_op.DeviceOperator.index_fill",
         side_effect=lambda tensor, dim, indices, value: tensor.scatter_(dim, indices, value),
     ) as mock_index_fill:
-        module._assign_draft_token_budget_ascend(
-            confidence_probs, idx_mapping, capacities, draft_budget=3, num_steps=3
-        )
+        module._assign_draft_token_budget_ascend(confidence_probs, idx_mapping, capacities, draft_budget=3, num_steps=3)
 
     mock_index_fill.assert_called_once()
     torch.testing.assert_close(capacities, expected)
@@ -140,9 +138,8 @@ def test_index_fill_mode_can_reenter_native_device_adaptor(monkeypatch):
     tensor = torch.zeros(5)
     indices = torch.tensor([1, 3])
 
-    with patch("vllm_ascend.device.device_op.DeviceOperator", BaseDeviceAdaptor):
-        with module._IndexFillMode():
-            result = tensor.index_fill_(0, indices, 2)
+    with patch("vllm_ascend.device.device_op.DeviceOperator", BaseDeviceAdaptor), module._IndexFillMode():
+        result = tensor.index_fill_(0, indices, 2)
 
     assert result is tensor
     torch.testing.assert_close(result, torch.tensor([0, 2, 0, 2, 0], dtype=result.dtype))

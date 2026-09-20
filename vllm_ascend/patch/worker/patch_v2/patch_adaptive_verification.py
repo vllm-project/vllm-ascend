@@ -1,6 +1,5 @@
 import torch
 from torch.overrides import TorchFunctionMode
-
 from vllm.v1.worker.gpu.spec_decode import adaptive_verification
 
 
