@@ -326,8 +326,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # Cache-only backends provide metadata without an attention impl,
         # regardless of the KV cache spec's inheritance hierarchy.
         # Executable backends may resolve their impl from the current config.
+        # Upstream cache-only backends use either ``None`` or
+        # ``NotImplementedError`` to express the absence of an attention impl.
         with set_current_vllm_config(self.vllm_config):
-            return attn_group.backend.get_impl_cls() is None
+            try:
+                impl_cls = attn_group.backend.get_impl_cls()
+            except NotImplementedError:
+                return True
+        return impl_cls is None
 
     def _get_primary_draft_attn_group(self) -> Any:
         for attn_group in self.draft_attn_groups:
