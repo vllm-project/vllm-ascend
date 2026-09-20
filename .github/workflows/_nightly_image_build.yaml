@@ -234,7 +234,7 @@ jobs:
             echo "swr_logged_in=false"
           fi
 
-      - name: Push image to SWR
+      - name: Log image push status
         if: ${{ inputs.should_push && github.repository_owner == 'vllm-project' && steps.login-swr.conclusion == 'success' }}
         run: |
           PUSH_REGISTRY="${{ steps.build.outputs.push_registry }}"

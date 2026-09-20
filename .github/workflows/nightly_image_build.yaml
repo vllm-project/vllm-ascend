@@ -15,9 +15,10 @@
 # This file is a part of the vllm-ascend project.
 #
 
-# This workflow builds nightly images as a layer-cache warm-up at 20:00 Beijing time.
+# This workflow builds nightly images as a layer-cache warm-up at 20:00 Beijing time,
+# and as a build-only verification when the 'nightly-image-build' label is added to a PR.
 # The nightly test workflows (Nightly-A2, Nightly-A3) each rebuild the image fresh
-# before running tests, so this schedule only serves to pre-populate the build cache.
+# before running tests, so the schedule only serves to pre-populate the build cache.
 # PR builds: add the 'nightly-image-build' label to a PR to run a build-only
 # verification (login/push/merge are skipped, no image is published).
 name: Nightly Image Build Schedule
