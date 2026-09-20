@@ -167,10 +167,13 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
                 -1, 1, self.index_head_dim
             )
         else:
-            compressed_keys = upstream_indexer._gemma_rmsnorm(
+            # Keep this path on upstream's public portable normalization
+            # helper. The former private Triton helper was removed when
+            # Qwen4Exp's AMD indexer switched to the shared GemmaRMSNorm
+            # module.
+            compressed_keys = upstream_indexer.apply_qsa_rmsnorm(
+                self.k_layernorm,
                 pooled.reshape(-1, self.index_head_dim),
-                self.k_layernorm.weight,
-                self.k_layernorm.variance_epsilon,
             ).reshape(-1, 1, self.index_head_dim)
         if getattr(self.rotary_emb, "mrope_section", None):
             first_positions = first_positions.transpose(0, 1)
