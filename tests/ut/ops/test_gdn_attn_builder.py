@@ -562,14 +562,15 @@ def test_full_graph_spec_actual_seq_lengths_use_padded_builder_buffer():
         query_lens=[4, 4],
         name="full_graph_padded_spec_actual_seq_lengths",
     )
+    # Mirror the runner: every common request-level array has the graph size,
+    # even though only the first two rows describe real requests.
     common_attn_metadata = create_common_attn_metadata(
-        batch_spec=batch_spec,
+        batch_spec=BatchSpec(seq_lens=batch_spec.seq_lens + [0, 0], query_lens=batch_spec.query_lens + [0, 0]),
         block_size=16,
         device=torch.device("cpu"),
     )
-    common_attn_metadata.num_reqs = 4
     common_attn_metadata.block_table_tensor = torch.tensor(
-        [[10, 11, 12, 13], [20, 21, 22, 23]],
+        [[10, 11, 12, 13], [20, 21, 22, 23], [NULL_BLOCK_ID] * 4, [NULL_BLOCK_ID] * 4],
         dtype=torch.int32,
     )
     builder = _make_builder(
