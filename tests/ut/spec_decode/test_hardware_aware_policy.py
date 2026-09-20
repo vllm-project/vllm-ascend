@@ -76,6 +76,9 @@ def test_recommendations_are_batch_bucket_specific():
     controller.recommend(8, 3)
     controller.observe([5] * 8, [[0]] * 8)
     assert controller.cap(5, 8) == 3
+    # A new bucket must persist for two steps before its independent state is
+    # used; one transient batch-size change keeps the previous stable K.
+    assert controller.cap(5, 16) == 3
     assert controller.cap(5, 16) == 5
 
 
