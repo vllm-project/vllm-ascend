@@ -1,4 +1,5 @@
 import contextlib
+import os
 import typing
 from dataclasses import dataclass
 from zlib import adler32
