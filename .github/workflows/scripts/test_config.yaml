@@ -80,7 +80,6 @@ skip_tests:
 accuracy_tests:
   - tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_mtp.py
   - tests/e2e/pull_request/two_card/test_shared_expert_dp.py
-  - tests/e2e/pull_request/two_card/test_shared_expert_dp_graph.py
   - tests/e2e/pull_request/two_card/lora/test_ilama_lora_tp2.py
   - tests/e2e/pull_request/two_card/lora/test_llama32_lora_tp2.py
   - tests/e2e/pull_request/two_card/lora/test_qwen35_densemodel_lora_tp.py
