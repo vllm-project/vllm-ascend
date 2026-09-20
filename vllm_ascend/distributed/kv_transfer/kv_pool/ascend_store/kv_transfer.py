@@ -859,6 +859,13 @@ class KVTransferThread(threading.Thread):
             return self.token_database.decode_adaptor_prefill_pp(keys, addrs, sizes)
 
 
+class KVCacheStoreBatch:
+    """FIFO fence for a batch of asynchronous KV store requests."""
+
+    def __init__(self) -> None:
+        self.done = threading.Event()
+
+
 class KVCacheStoreSendingThread(KVTransferThread):
     def __init__(
         self,
@@ -867,6 +874,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
         block_size: int | list[int],
         tp_rank: int,
         tp_size: int = 1,
+        pcp_rank: int = 0,
+        pcp_size: int = 1,
         dcp_size: int = 1,
         put_step: int = 1,
         kv_role: str = "kv_producer",
@@ -878,6 +887,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
         super().__init__(
             m_store, token_database, block_size, tp_rank, tp_size, dcp_size, ready_event, name="KVCacheSendingThread"
         )
+        self.pcp_rank = pcp_rank
+        self.pcp_size = pcp_size
         self.put_step = put_step
         self.kv_role = kv_role
         self.group_uses_align_state = group_uses_align_state or []
@@ -885,6 +896,26 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self.completed_events_lock = threading.Lock()
         self.completed_events: dict[int, int] = {}
         self.worker = worker
+
+    def add_stored_request(self, req_id: str):
+        with self.done_task_lock:
+            # A later chunk of the same request starts a new save lifecycle.
+            # Do not let a completion from an earlier chunk release it early.
+            self.finished_requests.discard(req_id)
+            self.stored_requests[req_id] += 1
+
+    def add_save_batch(self, requests: list[ReqMeta]) -> KVCacheStoreBatch:
+        """Queue requests followed by a fence that completes after the batch."""
+        save_batch = KVCacheStoreBatch()
+        # Register the entire batch before exposing any request to the send
+        # thread. Otherwise duplicate req_ids could transiently reach zero and
+        # be reported as finished between two chunks in the same batch.
+        for request in requests:
+            self.add_stored_request(request.req_id)
+        for request in requests:
+            self.request_queue.put(request)
+        self.request_queue.put(save_batch)
+        return save_batch
 
     def is_stored_request(self, req_id: str) -> bool:
         with self.done_task_lock:
@@ -915,7 +946,12 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 self.dec_stored_request(req_id)
         self.request_queue.task_done()
 
-    def _handle_request(self, req_meta: ReqMeta):
+    def _handle_request(self, req_meta: ReqMeta | KVCacheStoreBatch):
+        if isinstance(req_meta, KVCacheStoreBatch):
+            req_meta.done.set()
+            self.request_queue.task_done()
+            return
+
         if self.worker is not None and getattr(self.worker, "tp_mismatch", False):
             req_id = req_meta.req_id
             try:
@@ -1022,7 +1058,13 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 chunk_start = block_idx * group_block_size
                 return mask_allows and not should_skip(chunk_start, chunk_start + group_block_size)
 
-            pre_shard = self.dcp_size <= 1 and not align_state_group
+            tp_replicas = self.put_step if self.dcp_size <= 1 and not align_state_group else 1
+            # PCP=2, TP=4, KV heads=2, tp_replicas=2:
+            # PCP  TP (KV 0 / KV 1)  shard_rank  filtered candidates
+            #  0        0 / 2            0      0, 4, ...
+            #  0        1 / 3            1      1, 5, ...
+            #  1        0 / 2            2      2, 6, ...
+            #  1        1 / 3            3      3, 7, ...
             iterator = self.token_database.process_token_key_strings_with_block_ids(
                 token_len,
                 req_meta.block_hashes,
@@ -1030,8 +1072,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 kv_cache_group_id=group_id,
                 skip_null_blocks=skip_null_blocks,
                 chunk_filter=chunk_filter,
-                shard_rank=self.tp_rank % self.put_step if pre_shard else None,
-                shard_size=self.put_step if pre_shard else None,
+                shard_rank=self.pcp_rank * tp_replicas + self.tp_rank % tp_replicas,
+                shard_size=self.pcp_size * tp_replicas,
             )
             for start, end, key, block_hash, block_id in iterator:
                 starts.append(start)

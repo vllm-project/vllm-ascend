@@ -311,7 +311,7 @@ def _patch_model_config_validation() -> None:
             arch.startswith("Eagle") or arch.endswith("Eagle3") for arch in architectures
         )
         is_mtp_drafter = model_type in mtp_model_types
-        is_dspark_drafter = "DSparkDraftModel" in architectures
+        is_dspark_drafter = any(arch in ("DSparkDraftModel", "Qwen3DSparkModel") for arch in architectures)
         if (
             getattr(self, "runner", None) == "draft"
             and (is_eagle_drafter or is_mtp_drafter or is_dspark_drafter)
@@ -339,7 +339,7 @@ def _apply_patch() -> None:
         return
     _PATCHED = True
     _patch_model_runner_output()
-    _patch_engine_core()
+    # The patch for engine core has been moved to patch_engine_core.py
     _patch_scheduler_update_after_schedule()
     _patch_scheduler_make_cached_request_data()
     _patch_scheduler_update_from_output()

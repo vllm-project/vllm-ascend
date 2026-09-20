@@ -15,7 +15,7 @@ This guide uses Qwen3-0.6B as an example to help you run your first offline infe
 
     The prebuilt image includes a validated Python and Ascend user-space software stack, including CANN, NNAL, PyTorch, TorchNPU, vLLM, and vLLM Ascend.
 
-    A2, A3, and 950DT images also include the matching Triton Ascend runtime. Atlas 300I DUO and Atlas 200I Pro do not use Triton Ascend.
+    A2, A3, and 950DT Products images also include the matching Triton Ascend runtime. Atlas 300I DUO and Atlas 200I Pro do not use Triton Ascend.
 
     For the exact validated versions, see [Installation Guide > Hardware and software stack](installation.md#installation-hardware-software-stack).
 
@@ -61,7 +61,7 @@ The following sections provide offline inference and online serving examples. Ch
 
 ### Offline inference {: #quick-start-offline-inference }
 
-=== "A2 / A3 / 950DT"
+=== "A2 / A3 / 950DT Products"
 
     <span id="quick-start-atlas-a2-offline"></span>
     <span id="quick-start-atlas-a3-offline"></span>
@@ -78,7 +78,7 @@ The following sections provide offline inference and online serving examples. Ch
 
 ### Online serving {: #quick-start-online-serving }
 
-=== "A2 / A3 / 950DT"
+=== "A2 / A3 / 950DT Products"
 
     <span id="quick-start-atlas-a2-online"></span>
     <span id="quick-start-atlas-a3-online"></span>

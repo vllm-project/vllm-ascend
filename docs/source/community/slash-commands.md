@@ -95,6 +95,8 @@ binary bisect for genuine failures. By default, AOP hooks are disabled.
 
 This triggers `workflow_dispatch` on both `schedule_nightly_test_a2.yaml` and `schedule_nightly_test_a3.yaml`.
 
+> **Note**: These `schedule_*` workflows do not declare a GitHub Actions `schedule:` (cron) trigger; they are dispatched externally via `workflow_dispatch`. See [CI workflow triggers and the schedule_ prefix](../developer_guide/contribution/testing.md#ci-workflow-triggers-and-the-schedule_-prefix).
+
 ### `/cherry-pick`
 
 Cherry-pick a PR's commits onto a specified target branch and create a new PR. This is useful for backporting fixes to release branches.
@@ -161,7 +163,7 @@ Force-cancel all workflow runs on the current PR commit. This cancels runs direc
 | Cancelled | Not cancelled |
 |---|---|
 | `pr_test.yaml` (E2E) — automatic PR CI | `/e2e` command runs |
-| `schedule_doctest.yaml` | `/rerun` command runs |
+| `schedule_doc_getting_started_test.yaml` | `/rerun` command runs |
 | `schedule_doc_linkcheck.yaml` | `/nightly` / `/weekly` command runs |
 | `schedule_image_build_and_push.yaml` (if labeled) | Downstream nightly/weekly test workflows |
 | `labeled_download_model_dataset.yaml` | Scheduled / `workflow_dispatch` / `push` runs |

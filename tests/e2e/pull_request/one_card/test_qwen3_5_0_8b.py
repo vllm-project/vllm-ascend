@@ -22,6 +22,10 @@ from vllm.assets.image import ImageAsset
 
 from tests.e2e.conftest import VllmRunner, qwen_prompt, wait_until_npu_memory_free
 
+LONG_TEXT_PREFIX = " ".join(
+    f"Record {index} has value {index * index + 17} and checksum {index * 7919 % 100003}." for index in range(150)
+)
+
 
 @wait_until_npu_memory_free()
 def test_mamba_ssm_multimodal_reasoning_mtp_full_decode_only():
@@ -69,3 +73,30 @@ def test_mamba_ssm_multimodal_reasoning_mtp_full_decode_only():
         assert len(outputs) == len(prompts)
         for _, output_str in outputs:
             assert output_str, "Generated output should not be empty."
+
+
+@wait_until_npu_memory_free()
+def test_hybrid_prefix_match_unit_cached_output_consistency():
+    """Verify fine-grained hybrid prefix hits preserve generated tokens."""
+    model_path = hf_snapshot_download(
+        "Qwen/Qwen3.5-0.8B",
+        local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+    )
+    prompts = [
+        LONG_TEXT_PREFIX + "\nQuestion: What is the capital of France?",
+        LONG_TEXT_PREFIX + "\nQuestion: What is the capital of Japan?",
+    ]
+
+    with VllmRunner(
+        model_path,
+        dtype="bfloat16",
+        max_model_len=4096,
+        max_num_batched_tokens=4096,
+        enable_prefix_caching=True,
+        prefix_match_unit=16,
+        enforce_eager=True,
+    ) as runner:
+        cold_outputs = runner.generate_greedy(prompts=prompts, max_tokens=8)
+        warm_outputs = runner.generate_greedy(prompts=prompts, max_tokens=8)
+
+    assert warm_outputs == cold_outputs

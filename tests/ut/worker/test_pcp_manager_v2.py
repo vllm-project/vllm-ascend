@@ -16,6 +16,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+from contextvars import copy_context
 from dataclasses import replace
 from inspect import signature
 from types import SimpleNamespace
@@ -25,11 +26,13 @@ import numpy as np
 import pytest
 import torch
 from vllm.config import CUDAGraphMode
+from vllm.forward_context import DPMetadata
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.worker.v2 import model_runner as ascend_model_runner
 from vllm_ascend.worker.v2 import states as states_module
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager, _prepare_pcp_inputs_to_capture
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
@@ -278,6 +281,17 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
     assert result.num_tokens == 8
     expected_num_tokens_after_padding = 10 if vllm_version_is("0.28.0") else 12
     assert result.num_tokens_after_padding == expected_num_tokens_after_padding
+    if vllm_version_is("0.28.0"):
+        dispatched = manager.get_num_tokens_for_dispatch(
+            global_batch.num_scheduled_tokens, global_batch.is_prefilling_np
+        )
+        # Exercise the real invariant against the real upstream partition, not
+        # just a mocked dispatch call. Global 18 becomes PCP-local padded 10.
+        DPMetadata.make(
+            SimpleNamespace(data_parallel_size=2, data_parallel_rank=0, is_moe_model=True),
+            result.num_tokens_after_padding,
+            torch.tensor([dispatched, 0]),
+        )
     assert torch.equal(result.input_ids[:8], torch.tensor([15, 16, 17, 0, 1, 2, 3, 4], dtype=torch.int32))
 
     # dataclasses.replace() retains the global Ascend-only fields by default;
@@ -447,12 +461,20 @@ def test_partition_batch_keeps_piecewise_request_extent():
     np.testing.assert_array_equal(result.seq_lens_np, np.array([11, 21], dtype=np.int32))
 
 
-def test_attention_context_collects_global_pcp_data():
+@pytest.mark.parametrize("dcp_world_size", [1, 2])
+@pytest.mark.parametrize("is_prefilling", [False, True])
+def test_attention_context_collects_global_pcp_data(dcp_world_size, is_prefilling):
     manager = AscendPCPManager.__new__(AscendPCPManager)
+    manager.device = torch.device("cpu")
+    manager.dcp_world_size = dcp_world_size
     input_batch = _make_local_pcp_batch()
+    input_batch.idx_mapping_np = np.array([7, 3, -1, -1], dtype=np.int32)
+    input_batch.idx_mapping = torch.from_numpy(input_batch.idx_mapping_np)
+    input_batch.num_reqs_after_padding = 4
+    input_batch.is_prefilling_np[:] = is_prefilling
     block_tables = (
-        torch.tensor([[1]], dtype=torch.int32),
-        torch.tensor([[2]], dtype=torch.int32),
+        torch.tensor([[1], [2], [0], [0]], dtype=torch.int32),
+        torch.tensor([[3], [4], [0], [0]], dtype=torch.int32),
     )
     slot_mapping_capacity = input_batch.num_tokens_after_padding + 3
     global_slot_mappings = torch.arange(
@@ -460,9 +482,11 @@ def test_attention_context_collects_global_pcp_data():
         dtype=torch.int64,
     ).view(len(block_tables), slot_mapping_capacity)
     gather_block_tables = MagicMock(return_value=block_tables)
+    num_blocks = np.arange(16, dtype=np.int32).reshape(2, 8)
     manager._global_batch = input_batch
     manager._block_tables = SimpleNamespace(
         gather_block_tables=gather_block_tables,
+        num_blocks=SimpleNamespace(np=num_blocks),
     )
     manager._global_batch_slot_mappings = global_slot_mappings
     hidden_restore_idx = torch.arange(input_batch.num_tokens, dtype=torch.int64)
@@ -472,6 +496,15 @@ def test_attention_context_collects_global_pcp_data():
 
     actual = manager.build_attention_context()
 
+    if dcp_world_size > 1 and is_prefilling:
+        assert actual.global_block_table_num_blocks.device == manager.device
+        torch.testing.assert_close(
+            actual.global_block_table_num_blocks, torch.tensor([[7, 3], [15, 11]], dtype=torch.int32)
+        )
+        num_blocks.fill(0)
+        assert actual.global_block_table_num_blocks[0, 0] == 7
+    else:
+        assert actual.global_block_table_num_blocks is None
     assert actual.global_batch is input_batch
     assert actual.global_block_tables is block_tables
     assert torch.equal(
@@ -1039,3 +1072,117 @@ def test_dummy_attention_context_uses_current_batch(pcp_rank, has_stale_batch):
     assert manager._global_batch is saved_batch
     assert manager._hidden_restore_idx is saved_indices
     manager._block_tables.gather_block_tables.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "counts,prefilling,expected",
+    [
+        ([44], [True], 22),
+        ([18], [True], 10),
+        ([1], [True], 1),
+        ([4, 18], [False, True], 14),
+        ([4, 4], [False, False], 8),
+        ([18, 7], [True, True], 14),
+        ([0], [False], 0),
+    ],
+)
+def test_pcp_dispatch_counts_match_partition(counts, prefilling, expected):
+    manager = AscendPCPManager(pcp_world_size=2, pcp_rank=0, device=torch.device("cpu"))
+    assert manager.get_num_tokens_for_dispatch(np.array(counts), np.array(prefilling)) == expected
+
+
+@pytest.mark.skipif(not vllm_version_is("0.28.0"), reason="release dispatch adapter")
+@pytest.mark.parametrize("dummy_run", [False, True])
+@pytest.mark.parametrize("pcp_enabled", [False, True])
+@pytest.mark.parametrize("num_tokens", [0, 44])
+@pytest.mark.parametrize("release_adapter", [False, True])
+def test_pcp_dispatch_preserves_global_batch_and_dummy_count(
+    dummy_run, pcp_enabled, num_tokens, release_adapter, monkeypatch
+):
+    monkeypatch.setattr(ascend_model_runner, "vllm_version_is", lambda version: release_adapter)
+    runner = object.__new__(NPUModelRunner)
+    runner.pcp_manager = (
+        AscendPCPManager(pcp_world_size=2, pcp_rank=0, device=torch.device("cpu")) if pcp_enabled else None
+    )
+    batch = (
+        None
+        if dummy_run
+        else SimpleNamespace(
+            num_tokens=num_tokens, num_scheduled_tokens=np.array([num_tokens]), is_prefilling_np=np.array([True])
+        )
+    )
+    with (
+        patch.object(vllm_model_runner.GPUModelRunner, "gather_batch_req_state", return_value=(batch, None)),
+        patch.object(ascend_model_runner, "dispatch_cg_and_sync_dp") as dispatch,
+    ):
+        with ascend_model_runner.pcp_dispatch_context():
+            gathered, uniform = runner.gather_batch_req_state(object(), dummy_run)
+            assert gathered is batch
+            vllm_model_runner.dispatch_cg_and_sync_dp(None, 1, 44, uniform, 2, 0)
+            expected = num_tokens // 2 if release_adapter and pcp_enabled and not dummy_run else 44
+            assert dispatch.call_args.args[2] == expected
+        vllm_model_runner.dispatch_cg_and_sync_dp(None, 1, 44, None, 2, 0)
+        assert dispatch.call_args.args[2] == 44
+    if batch is not None:
+        assert batch.num_tokens == num_tokens
+
+
+@pytest.mark.skipif(not vllm_version_is("0.28.0"), reason="release dispatch adapter")
+def test_pcp_dispatch_context_restores_after_nested_failure():
+    runner = object.__new__(NPUModelRunner)
+    runner.pcp_manager = AscendPCPManager(pcp_world_size=2, pcp_rank=0, device=torch.device("cpu"))
+    batch = SimpleNamespace(num_tokens=44, num_scheduled_tokens=np.array([44]), is_prefilling_np=np.array([True]))
+    independent_context = copy_context()
+    with (
+        patch.object(vllm_model_runner.GPUModelRunner, "gather_batch_req_state", return_value=(batch, None)),
+        patch.object(ascend_model_runner, "dispatch_cg_and_sync_dp") as dispatch,
+        ascend_model_runner.pcp_dispatch_context(),
+    ):
+        runner.gather_batch_req_state(object(), False)
+        with (
+            pytest.raises(RuntimeError, match="test failure"),
+            ascend_model_runner.pcp_dispatch_context(),
+        ):
+            vllm_model_runner.dispatch_cg_and_sync_dp(None, 1, 44, None, 2, 0)
+            assert dispatch.call_args.args[2] == 44
+            raise RuntimeError("test failure")
+        independent_context.run(vllm_model_runner.dispatch_cg_and_sync_dp, None, 1, 44, None, 2, 0)
+        assert dispatch.call_args.args[2] == 44
+        vllm_model_runner.dispatch_cg_and_sync_dp(None, 1, 44, None, 2, 0)
+        assert dispatch.call_args.args[2] == 22
+        # A dummy gather must clear the previous real batch count, even when
+        # both are collected inside the same execution context.
+        with patch.object(vllm_model_runner.GPUModelRunner, "gather_batch_req_state", return_value=(None, None)):
+            runner.gather_batch_req_state(object(), True)
+        vllm_model_runner.dispatch_cg_and_sync_dp(None, 1, 44, None, 2, 0)
+        assert dispatch.call_args.args[2] == 44
+
+
+@pytest.mark.parametrize("slot_dtype", [torch.int32, torch.int64])
+def test_pcp_slot_buffers_match_block_tables(slot_dtype):
+    def init_buffers(manager, **kwargs):
+        manager._global_batch_slot_mappings = torch.empty((1, 4), dtype=torch.int64)
+        manager._gathered_kv_slot_mappings = torch.empty((1, 8), dtype=torch.int64)
+        manager._pad_slot_id = torch.tensor(-1, dtype=torch.int64)
+        manager.pcp_world_size = 2
+
+    block_tables = SimpleNamespace(slot_mappings=torch.empty((1, 4), dtype=slot_dtype))
+    with patch.object(PCPManager, "__init__", init_buffers):
+        manager = AscendPCPManager(2, 0, torch.device("cpu"), block_tables=block_tables)
+
+    assert manager._global_batch_slot_mappings.dtype == slot_dtype
+    assert manager._gathered_kv_slot_mappings.dtype == slot_dtype
+    manager._global_batch_slot_mappings.copy_(torch.tensor([[3200, 3201, -1, 3203]]))
+    manager._padded_gather_idx = torch.tensor([3, 0, 1, 2])
+    manager._gathered_kv_write_mask = torch.tensor([True, True, False, True])
+    buffer_ptr = manager._gathered_kv_slot_mappings.data_ptr()
+
+    gathered = manager._convert_to_gathered_slot_mappings(manager._global_batch_slot_mappings)
+    assert gathered.tolist() == [[3203, 3200, -1, -1]]
+    assert gathered.dtype == slot_dtype
+    assert gathered.data_ptr() == buffer_ptr
+
+    dummy = manager.get_dummy_slot_mappings(2)
+    assert dummy.tolist() == [[-1, -1, -1, -1]]
+    assert dummy.dtype == slot_dtype
+    assert dummy.data_ptr() == buffer_ptr

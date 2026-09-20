@@ -78,6 +78,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.math_utils import cdiv
 
+from vllm_ascend.attention.utils import mark_fused_preprocess_weights
 from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention  # type: ignore[import-untyped]
 from vllm_ascend.utils import get_rotation_path
 
@@ -318,6 +319,7 @@ class AscendKimiMLAAttention(UpstreamKimiMLAAttention):
         attention_layer = self._attention_layer
         if disable_mlapo:
             attention_layer.impl.enable_mlapo = False
+            mark_fused_preprocess_weights(attention_layer.impl)
         if not use_rope and not non_causal_multi_token_decode:
             return
 

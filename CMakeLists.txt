@@ -130,6 +130,19 @@ set(CMAKE_REQUIRED_INCLUDES ${ASCEND_HOME_PATH}/include)
 set(CMAKE_REQUIRED_LIBRARIES ascendcl)
 set(CMAKE_REQUIRED_LINK_OPTIONS "-L${ASCEND_HOME_PATH}/lib64")
 
+# Keep builds on older CANN versions working; endpoint selection must fail
+# explicitly if the installed CANN lacks the user-to-physical conversion.
+check_cxx_source_compiles("
+  #include <acl/acl_rt.h>
+  int main() {
+    int32_t physical_id = 0;
+    return aclrtGetPhyDevIdByUserDevId(0, &physical_id);
+  }
+" HAVE_ACLRT_GET_PHY_DEV_ID_BY_USER_DEV_ID)
+if(HAVE_ACLRT_GET_PHY_DEV_ID_BY_USER_DEV_ID)
+  target_compile_definitions(vllm_ascend_C PRIVATE CANN_DEVICE_ID_MAPPING)
+endif()
+
 if(DEFINED VLLM_ASCEND_ENABLE_BATCH_MEMCPY)
   if("${VLLM_ASCEND_ENABLE_BATCH_MEMCPY}" STREQUAL "1")
     message(STATUS "aclrtMemcpyBatchAsync: force enabled via VLLM_ASCEND_ENABLE_BATCH_MEMCPY=1")

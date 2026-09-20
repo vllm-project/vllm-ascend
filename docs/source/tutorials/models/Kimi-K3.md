@@ -37,6 +37,8 @@ The weight size is a storage requirement, not an estimate of runtime NPU memory;
 KV cache, activations, communication buffers, and the optional draft also need
 memory.
 
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
+
 ### 3.2 Verify Multi-Node Communication
 
 Before launching the four-node service, follow
@@ -135,6 +137,7 @@ Node 0 through the DP RPC address.
 Set these variables on every node:
 
 ```shell
+# Ensure the model path matches the directory recorded during download
 export MODEL_PATH="<KIMI_K3_FULL_W4A8_PATH>"
 export TOKENIZER_PATH="<KIMI_K3_TOKENIZER_PATH>"
 export LOCAL_IP="<CURRENT_NODE_IP>"
@@ -317,7 +320,7 @@ For automatic tool selection, keep `--enable-auto-tool-choice` and
 Use the full 93-layer, 896-expert checkpoint with the four-node service in
 Section 5.1.
 
-### Using AISBench
+### 7.1 Using AISBench
 
 Follow [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) to
 configure the `kimi-k3` chat-completions endpoint and run GPQA. Keep the model
@@ -325,7 +328,7 @@ and tokenizer revisions, chat rendering, reasoning mode, sampling parameters,
 dataset, and evaluator revisions fixed when comparing results. Record completed,
 failed, missing, and unparsed samples alongside the score.
 
-### Using Language Model Evaluation Harness
+### 7.2 Using Language Model Evaluation Harness
 
 See [Using lm_eval](../../developer_guide/evaluation/using_lm_eval.md) for
 evaluator setup. Use the same full checkpoint and serving configuration when
@@ -333,12 +336,12 @@ comparing results across backends.
 
 ## 8 Performance Evaluation
 
-### Using AISBench
+### 8.1 Using AISBench
 
 Refer to [AISBench performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation)
 for configuration and execution instructions.
 
-### Using vLLM Benchmark
+### 8.2 Using vLLM Benchmark
 
 After the service in Section 5.1 is ready, run the following from a load generator
 in the serving network with the same vLLM version and tokenizer files. Set

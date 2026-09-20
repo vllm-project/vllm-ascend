@@ -2,12 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import MethodType, SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import torch
 from safetensors.torch import save_file
 from torch import nn
 
+from vllm_ascend.attention.mla_v1 import AscendMLAImpl
+from vllm_ascend.attention.utils import mark_fused_preprocess_weights
 from vllm_ascend.models import kimi_k3
 from vllm_ascend.models.kimi_k3 import (
     AscendKimiK3MultiModalProjector,
@@ -16,6 +18,61 @@ from vllm_ascend.models.kimi_k3 import (
 from vllm_ascend.models.kimi_k3_dspark import (
     AscendK3DSparkForCausalLM,
 )
+from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
+
+
+def test_kimi_disabling_mlapo_refreshes_projection_nz_management():
+    for fa_quant_layer in (False, True):
+        impl = AscendMLAImpl.__new__(AscendMLAImpl)
+        impl.enable_mlapo = True
+        impl.fa_quant_layer = fa_quant_layer
+        impl.support_fp8_attention = True
+        scheme = AscendW8A8MXFP8DynamicLinearMethod.__new__(AscendW8A8MXFP8DynamicLinearMethod)
+        scheme.group_size = 32
+        projections = []
+        for output_size, input_size in ((128, 256), (192, 64)):
+            layer = nn.Module()
+            layer.quant_method = SimpleNamespace(quant_method=scheme)
+            layer.weight = nn.Parameter(torch.randn(output_size, input_size).to(torch.float8_e4m3fn), False)
+            layer.weight_scale = nn.Parameter(
+                torch.ones(output_size, input_size // scheme.group_size, dtype=torch.uint8), False
+            )
+            projections.append(layer)
+        impl.fused_qkv_a_proj, impl.q_proj = projections
+        mark_fused_preprocess_weights(impl)
+        assert impl.fused_qkv_a_proj._fused_preprocess_managed
+        with (
+            patch.object(kimi_k3.UpstreamKimiMLAAttention, "__init__", lambda self, **kwargs: nn.Module.__init__(self)),
+            patch.object(
+                kimi_k3.AscendKimiMLAAttention,
+                "_attention_layer",
+                new_callable=PropertyMock,
+                return_value=SimpleNamespace(impl=impl),
+            ),
+        ):
+            kimi_k3.AscendKimiMLAAttention(
+                config=SimpleNamespace(),
+                hidden_size=256,
+                num_heads=2,
+                qk_nope_head_dim=64,
+                qk_rope_head_dim=32,
+                v_head_dim=128,
+                q_lora_rank=64,
+                kv_lora_rank=32,
+                use_output_gate=False,
+                use_rope=False,
+                disable_mlapo=True,
+            )
+        assert not impl.enable_mlapo
+        assert impl.fused_qkv_a_proj._fused_preprocess_managed == fa_quant_layer
+        assert impl.q_proj._fused_preprocess_managed == fa_quant_layer
+        with (
+            patch("vllm_ascend.utils._should_trans_nz", return_value=True),
+            patch("torch_npu.npu_format_cast", side_effect=lambda weight, fmt, **kwargs: weight.clone()) as cast,
+        ):
+            for layer in projections:
+                scheme.process_weights_after_loading(layer)
+        assert cast.call_count == (0 if fa_quant_layer else 2)
 
 
 def test_kimi_moe_leaves_routed_input_transform_to_runner():

@@ -271,7 +271,7 @@ class TestUtils(TestBase):
                 self.assertTrue(utils.vllm_version_is.__wrapped__("0.28.0"))
                 self.assertFalse(utils.vllm_version_is.__wrapped__("0.27.1"))
             with mock.patch("vllm_ascend.utils.importlib.util.find_spec") as find_spec:
-                find_spec.side_effect = lambda name: (object() if name == "vllm.v1.attention.ops.pcp" else None)
+                find_spec.side_effect = lambda name: object() if name == "vllm.v1.attention.ops.pcp" else None
                 self.assertFalse(utils.vllm_version_is.__wrapped__("0.28.0"))
         # Test caching takes effect without leaving a polluted process cache.
         utils.vllm_version_is.cache_clear()
@@ -471,7 +471,37 @@ class TestUtils(TestBase):
             self.assertIs(result, weight)
             assert_nz_cast(weight)
 
-        # Test case 7: non-310P quantized weights still convert by default
+        # Test case 7: non-310P NZ mode skips weights with k=1 or n=1.
+        for shape in ((32, 1), (1, 64), (2, 32, 1)):
+            mock_npu_format_cast.reset_mock()
+            with (
+                mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
+                mock.patch(
+                    "vllm_ascend.utils.get_current_hardware_profile",
+                    return_value=get_hardware_profile(AscendDeviceType.A2),
+                ),
+            ):
+                weight = torch.randn(*shape, dtype=torch.float16)
+                result = utils.maybe_trans_nz(weight)
+                self.assertIs(result, weight)
+                mock_npu_format_cast.assert_not_called()
+
+        # Test case 7b: 310P also skips weights with k=1 or n=1.
+        for shape in ((32, 1), (1, 64), (2, 32, 1)):
+            mock_npu_format_cast.reset_mock()
+            with (
+                mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
+                mock.patch(
+                    "vllm_ascend.utils.get_current_hardware_profile",
+                    return_value=get_hardware_profile(AscendDeviceType._310P),
+                ),
+            ):
+                weight = torch.randn(*shape, dtype=torch.float16)
+                result = utils.maybe_trans_nz(weight)
+                self.assertIs(result, weight)
+                mock_npu_format_cast.assert_not_called()
+
+        # Test case 8: non-310P quantized weights still convert by default
         mock_npu_format_cast.reset_mock()
         mock_config.weight_nz_mode = 1
         with (
@@ -711,3 +741,69 @@ def test_check_gdn_layer_returns_false_without_linear_attention():
     vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=Qwen3Config()))
 
     assert utils.check_gdn_layer(vllm_config) is False
+
+
+class TestIsMtpLayer(TestBase):
+    """``utils.is_mtp_layer`` backs the SFA indexer-ownership decision."""
+
+    def test_backbone_layer_is_not_mtp(self):
+        config = SimpleNamespace(num_hidden_layers=80)
+        self.assertFalse(utils.is_mtp_layer(config, "model.layers.2.self_attn.attn"))
+
+    def test_last_backbone_layer_is_not_mtp(self):
+        config = SimpleNamespace(num_hidden_layers=80)
+        self.assertFalse(utils.is_mtp_layer(config, "model.layers.79.self_attn.attn"))
+
+    def test_layer_at_or_past_backbone_is_mtp(self):
+        config = SimpleNamespace(num_hidden_layers=80)
+        self.assertTrue(utils.is_mtp_layer(config, "model.layers.80.self_attn.attn"))
+        self.assertTrue(utils.is_mtp_layer(config, "model.layers.81.self_attn.attn"))
+
+    def test_explicit_mtp_segment_is_mtp(self):
+        config = SimpleNamespace(num_hidden_layers=80)
+        self.assertTrue(utils.is_mtp_layer(config, "mtp.0.self_attn.attn"))
+
+    def test_missing_layer_info_is_not_mtp(self):
+        config = SimpleNamespace(num_hidden_layers=80)
+        self.assertFalse(utils.is_mtp_layer(config, "unknown"))
+        self.assertFalse(utils.is_mtp_layer(config, None))
+        self.assertFalse(utils.is_mtp_layer(SimpleNamespace(), "model.layers.0.self_attn.attn"))
+
+    def test_non_integer_num_hidden_layers_is_not_mtp(self):
+        # Mocked/partial hf_configs must not be classified as MTP layers.
+        config = SimpleNamespace(num_hidden_layers="80")
+        self.assertFalse(utils.is_mtp_layer(config, "model.layers.80.self_attn.attn"))
+
+
+class TestIsRlWeightUpdateEnabled(TestBase):
+    """RL weight updates arrive through either deployment switch.
+
+    Both the Ascend RL defaults and the upstream weight transfer service must
+    be recognized on their own: missing either one makes weight owners keep or
+    release the wrong parameters (see ``utils.dispose_layer`` call sites).
+    """
+
+    @staticmethod
+    def _ascend_config(rl_enabled: bool) -> SimpleNamespace:
+        return SimpleNamespace(rl_config=SimpleNamespace(enabled=rl_enabled))
+
+    @staticmethod
+    def _vllm_config(weight_transfer_config: object) -> SimpleNamespace:
+        return SimpleNamespace(weight_transfer_config=weight_transfer_config)
+
+    def test_disabled_without_any_switch(self):
+        with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=self._ascend_config(False)):
+            self.assertFalse(utils.is_rl_weight_update_enabled(self._vllm_config(None)))
+
+    def test_enabled_by_rl_config(self):
+        with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=self._ascend_config(True)):
+            self.assertTrue(utils.is_rl_weight_update_enabled(self._vllm_config(None)))
+
+    def test_enabled_by_weight_transfer_config(self):
+        """`--weight-transfer-config` alone marks a weight update deployment."""
+        with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=self._ascend_config(False)):
+            self.assertTrue(utils.is_rl_weight_update_enabled(self._vllm_config(SimpleNamespace(backend="hccl"))))
+
+    def test_enabled_by_both_switches(self):
+        with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=self._ascend_config(True)):
+            self.assertTrue(utils.is_rl_weight_update_enabled(self._vllm_config(SimpleNamespace(backend="npu_ipc"))))

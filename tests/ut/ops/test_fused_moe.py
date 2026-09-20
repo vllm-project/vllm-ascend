@@ -12,6 +12,7 @@ from vllm.model_executor.layers.activation import SituAndMul
 
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.ops import register_custom_ops as custom_ops
 from vllm_ascend.ops.fused_moe import fused_moe as fused_moe_module
 from vllm_ascend.ops.fused_moe import routed_experts as routed_experts_module
 from vllm_ascend.ops.fused_moe import shared_experts as shared_experts_module
@@ -35,6 +36,26 @@ from vllm_ascend.ops.fused_moe.shared_experts import (
     SharedExpertParallelMode,
 )
 from vllm_ascend.quantization.quant_type import QuantType
+
+
+@pytest.fixture
+def runtime_moe_all_reduce(monkeypatch):
+    context = SimpleNamespace(moe_comm_type=MoECommType.ALLGATHER, no_compile_layers={})
+    monkeypatch.setattr(fused_moe_module, "_EXTRA_CTX", context)
+    monkeypatch.setattr(custom_ops, "_EXTRA_CTX", context)
+    monkeypatch.setattr(custom_ops, "get_forward_context", lambda: context)
+    monkeypatch.setattr(
+        custom_ops,
+        "tensor_model_parallel_all_reduce",
+        lambda states: fused_moe_module.tensor_model_parallel_all_reduce(states),
+    )
+    library = torch.library.Library("vllm", "IMPL", "CPU")
+    library.impl("maybe_all_reduce_tensor_model_parallel", custom_ops._maybe_all_reduce_tensor_model_parallel_impl)
+    library.impl("maybe_all_reduce_shared_expert", custom_ops._maybe_all_reduce_shared_expert_impl)
+    try:
+        yield context
+    finally:
+        library._destroy()
 
 
 def _build_weight_layer():
@@ -390,12 +411,18 @@ def test_runner_reduction_contract(monkeypatch, moe_comm_type, is_sequence_paral
 )
 def test_final_output_never_all_reduces_sequence_shards(
     monkeypatch,
+    runtime_moe_all_reduce,
     is_sequence_parallel,
     output_is_reduced,
     should_reduce,
 ):
+    runtime_moe_all_reduce.moe_comm_type = MoECommType.MC2 if output_is_reduced else MoECommType.ALLGATHER
     runner = AscendMoERunner.__new__(AscendMoERunner)
+    runner.layer_name = "test.reduction"
+    runtime_moe_all_reduce.no_compile_layers[runner.layer_name] = runner
     runner.moe_config = SimpleNamespace(is_sequence_parallel=is_sequence_parallel)
+    runner.routed_output_transform = None
+    runner.ascend_shared_experts = None
     states = torch.ones(2, 4)
     reduced_states = states + 1
     all_reduce = MagicMock(return_value=reduced_states)
@@ -431,11 +458,17 @@ def test_final_output_never_all_reduces_sequence_shards(
 )
 def test_shared_output_reduction_depends_on_weight_layout(
     monkeypatch,
+    runtime_moe_all_reduce,
     mode,
     fused_output_is_reduced,
     reduce_shared,
 ):
+    runtime_moe_all_reduce.moe_comm_type = MoECommType.MC2 if fused_output_is_reduced else MoECommType.ALLGATHER
     runner = AscendMoERunner.__new__(AscendMoERunner)
+    runner.layer_name = "test.reduction"
+    runtime_moe_all_reduce.no_compile_layers[runner.layer_name] = runner
+    runner.moe_config = SimpleNamespace(is_sequence_parallel=False)
+    runner.routed_output_transform = None
     runner.ascend_shared_experts = SimpleNamespace(parallel_mode=MagicMock(return_value=mode))
     shared_output = torch.ones(2, 4)
     reduced_output = shared_output + 1
@@ -446,9 +479,9 @@ def test_shared_output_reduction_depends_on_weight_layout(
         all_reduce,
     )
 
-    result = runner._reduce_shared_output_if_needed(
+    result = runner._maybe_reduce_shared_expert_output(
         shared_output,
-        fused_output_is_reduced,
+        not fused_output_is_reduced,  # A stale tracing-time flag must not control runtime reduction.
     )
 
     if reduce_shared:
@@ -469,10 +502,13 @@ def test_shared_output_reduction_depends_on_weight_layout(
 )
 def test_local_shared_expert_dp_reduces_partial_routed_output(
     monkeypatch,
+    runtime_moe_all_reduce,
     mode,
     reduce_routed,
 ):
     runner = AscendMoERunner.__new__(AscendMoERunner)
+    runner.layer_name = "test.reduction"
+    runtime_moe_all_reduce.no_compile_layers[runner.layer_name] = runner
     runner.ascend_shared_experts = SimpleNamespace(parallel_mode=MagicMock(return_value=mode))
     runner.routed_output_transform = None
     runner.moe_config = SimpleNamespace(
@@ -640,12 +676,13 @@ def test_routing_replay_disabled_keeps_ascend_routing_unchanged(monkeypatch):
 
 
 def test_hash_router_uses_explicit_input_ids(monkeypatch):
-    input_ids = torch.tensor([11, 22], dtype=torch.int32)
+    input_ids = torch.tensor([-1, 22], dtype=torch.int32)
+    gathered_input_ids = torch.tensor([22, -1], dtype=torch.int64)
     hidden_states = torch.randn(2, 4)
     router_logits = torch.randn(2, 4)
     topk_weights = torch.randn(2, 2)
     topk_ids = torch.zeros(2, 2, dtype=torch.int32)
-    prepare_finalize = SimpleNamespace(all_gather_input_id_with_dp_group=MagicMock(side_effect=lambda value: value))
+    prepare_finalize = SimpleNamespace(all_gather_input_ids=MagicMock(return_value=gathered_input_ids))
     monkeypatch.setattr(
         fused_topk_router_module,
         "_EXTRA_CTX",
@@ -679,8 +716,10 @@ def test_hash_router_uses_explicit_input_ids(monkeypatch):
 
     assert weights is topk_weights
     assert ids is topk_ids
-    torch.testing.assert_close(hash_op.call_args.kwargs["input_ids"], input_ids.to(torch.int64))
-    prepare_finalize.all_gather_input_id_with_dp_group.assert_called_once()
+    torch.testing.assert_close(hash_op.call_args.kwargs["input_ids"], torch.tensor([22, 0], dtype=torch.int64))
+    prepare_finalize.all_gather_input_ids.assert_called_once()
+    actual_input_ids = prepare_finalize.all_gather_input_ids.call_args.args[0]
+    torch.testing.assert_close(actual_input_ids, input_ids.to(torch.int64))
 
     with pytest.raises(ValueError, match="hash MoE routing requires input_ids"):
         router._compute_routing(hidden_states, router_logits, torch.int32)
@@ -2370,45 +2409,73 @@ def test_forward_impl_shared_experts_uses_gate_weight_fp32(monkeypatch):
 
 
 @pytest.mark.parametrize("initial_comm", [MoECommType.ALLGATHER, MoECommType.MC2])
-def test_compiled_moe_forward_keeps_runtime_reduction(monkeypatch, initial_comm):
+@pytest.mark.parametrize("layout", ["tp", "no_shared", "shared_dp", "sp", "latent"])
+def test_maybe_all_reduce_graph_replay_preserves_shared_and_routed_outputs(
+    monkeypatch,
+    runtime_moe_all_reduce,
+    initial_comm,
+    layout,
+):
     from torch.fx.experimental.proxy_tensor import make_fx
 
+    context = runtime_moe_all_reduce
+    tp_size = 8
+    is_sp = layout == "sp"
+    has_shared = layout != "no_shared"
     runner = AscendMoERunner.__new__(AscendMoERunner)
     nn.Module.__init__(runner)
-    runner.layer_name = "test.runtime_reduction"
-    runner.moe_config = SimpleNamespace(is_sequence_parallel=False)
-    context = SimpleNamespace(moe_comm_type=initial_comm)
-    monkeypatch.setattr(fused_moe_module, "_EXTRA_CTX", context)
-    monkeypatch.setattr(
-        fused_moe_module,
-        "get_forward_context",
-        lambda: SimpleNamespace(no_compile_layers={runner.layer_name: runner}),
+    runner.layer_name = "test.runtime_maybe_all_reduce"
+    context.no_compile_layers[runner.layer_name] = runner
+    runner.moe_config = SimpleNamespace(is_sequence_parallel=is_sp, tp_size=tp_size, ep_size=tp_size)
+    runner.routed_experts = SimpleNamespace(quant_method=SimpleNamespace(has_unpadded_output=False))
+    runner.routed_scaling_factor = 1.0
+    runner.routed_output_transform = (lambda x: x.square()) if layout == "latent" else None
+    mode = {
+        "sp": SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY,
+        "shared_dp": SharedExpertParallelMode.SHARED_EXPERT_DATA_PARALLEL_ONLY,
+    }.get(layout, SharedExpertParallelMode.TENSOR_PARALLEL)
+    runner.ascend_shared_experts = SimpleNamespace(parallel_mode=lambda: mode, multistream_overlap=False)
+    runner.apply_routed_input_transform = lambda x: (x, x if has_shared else None)
+    runner._maybe_pad_hidden_states = lambda shared, x: (x, None, 3)
+    runner._encode_layer_name = lambda: runner.layer_name
+    runner._maybe_add_zero_expert_output = lambda x: x
+    monkeypatch.setattr(fused_moe_module, "tensor_model_parallel_all_reduce", lambda x: x * tp_size)
+
+    library = torch.library.Library("moe_reduction_test", "FRAGMENT")
+    library.define("experts(Tensor x) -> (Tensor, Tensor)")
+
+    def experts(x):
+        routed_reduced = is_sp or context.moe_comm_type != MoECommType.ALLGATHER
+        shared = x * (tp_size if layout in ("sp", "shared_dp") else 1)
+        routed = x * (2 * tp_size if routed_reduced else 2)
+        return shared, routed
+
+    library.impl("experts", experts, "CPU")
+    torch.library.register_fake(
+        "moe_reduction_test::experts",
+        lambda x: (torch.empty_like(x), torch.empty_like(x)),
+        lib=library,
     )
-    monkeypatch.setattr(fused_moe_module, "tensor_model_parallel_all_reduce", lambda states: states * 4)
 
-    def upstream_forward(self, hidden_states, router_logits, **kwargs):
-        return self._maybe_reduce_final_output(hidden_states.clone(), None)
+    def forward_entry(x, *args):
+        shared, routed = torch.ops.moe_reduction_test.experts(x)
+        return (shared, routed) if has_shared else routed
 
-    monkeypatch.setattr(fused_moe_module.MoERunner, "forward", upstream_forward)
-    library = torch.library.Library("vllm", "IMPL", "CPU")
-    library.impl("ascend_moe_forward_complete", fused_moe_module._ascend_moe_forward_complete)
+    runner._forward_entry = forward_entry
     try:
+        context.moe_comm_type = initial_comm
         states = torch.ones(2, 4)
         graph = make_fx(lambda x: runner(x, x))(states)
-        # Reuse this exact graph as vLLM does, without retracing Python guards.
-        for comm in (MoECommType.ALLGATHER, MoECommType.MC2, MoECommType.ALLTOALL):
+        expected_routed = (2 * tp_size) ** 2 if layout == "latent" else 2 * tp_size
+        expected = expected_routed + (tp_size if has_shared else 0)
+        for comm in (MoECommType.ALLGATHER, MoECommType.MC2, MoECommType.ALLTOALL, MoECommType.FUSED_MC2):
             context.moe_comm_type = comm
-            expected = states * (4 if comm == MoECommType.ALLGATHER else 1)
-            torch.testing.assert_close(graph(states), expected)
-        assert any(node.target == torch.ops.vllm.ascend_moe_forward_complete.default for node in graph.graph.nodes)
+            torch.testing.assert_close(graph(states), torch.full((2, 3), float(expected)))
+        if not is_sp:
+            assert any(
+                node.target == torch.ops.vllm.maybe_all_reduce_tensor_model_parallel.default
+                for node in graph.graph.nodes
+            )
+        assert not any("ascend_moe_forward_complete" in str(node.target) for node in graph.graph.nodes)
     finally:
         library._destroy()
-
-
-@pytest.mark.parametrize("shared_width", [None, 8])
-def test_complete_moe_fake_preserves_local_token_count(shared_width):
-    hidden = torch.empty(3, 4)
-    shared = torch.empty(12, shared_width) if shared_width is not None else None
-    result = fused_moe_module._ascend_moe_forward_complete_fake(hidden, hidden, shared, None, "test")
-    assert result.shape == (3, shared_width or 4)
-    assert result.dtype == hidden.dtype
