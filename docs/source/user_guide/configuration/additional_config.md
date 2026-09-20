@@ -243,7 +243,10 @@ with empirical per-position acceptance tracked independently for power-of-two
 batch buckets. This keeps large RL rollout batches adaptive while preventing
 K oscillation as the active batch shrinks after EOS. Small-batch protection,
 two-step batch-bucket switching, asymmetric K hysteresis, an eight-step minimum
-dwell, and periodic full-K probes use built-in defaults. Existing `capture_k`,
+dwell, and periodic full-K probes use built-in defaults. A shorter K is never
+selected when a wider profiled graph has equal or lower draft cost, and a
+narrowed runtime step cannot overwrite the last full-width recommendation.
+Existing `capture_k`,
 `slack`, `percentile` and `hybrid` overrides remain supported; obsolete
 wall-clock autotune knobs are rejected. A candidate without a compatible FULL
 graph may execute eagerly; configuring a capture width does not guarantee a graph

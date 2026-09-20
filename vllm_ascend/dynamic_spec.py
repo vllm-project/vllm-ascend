@@ -105,6 +105,7 @@ def v2_physical_k_enabled(dynamic_config: dict[str, Any]) -> bool:
 class _BucketState:
     stable_k: int
     profile_k: int
+    cost_floor_k: int
     empirical_k: int
     survival: list[float]
     survival_seen: list[bool]
@@ -171,6 +172,7 @@ class AdaptiveDraftKController:
             state = _BucketState(
                 stable_k=self.max_k,
                 profile_k=self.max_k,
+                cost_floor_k=self.min_k,
                 empirical_k=self.max_k,
                 survival=[1.0] * self.max_k,
                 survival_seen=[False] * self.max_k,
@@ -203,9 +205,12 @@ class AdaptiveDraftKController:
     def _desired_k(self, state: _BucketState) -> int:
         desired = self.max_k
         if self.auto_tune_enabled:
-            desired = min(desired, state.profile_k)
+            desired = min(desired, max(state.profile_k, state.cost_floor_k))
         if self.hybrid_enabled or not self.auto_tune_enabled:
-            desired = min(desired, state.empirical_k)
+            empirical_k = state.empirical_k
+            if self.auto_tune_enabled:
+                empirical_k = max(empirical_k, state.cost_floor_k)
+            desired = min(desired, empirical_k)
         return max(self.min_k, min(desired, self.max_k))
 
     def _advance_state(self, state: _BucketState) -> None:
@@ -237,9 +242,20 @@ class AdaptiveDraftKController:
             state.up_steps = 0
             self.last_reason = "combined_stable"
 
-    def recommend(self, batch_size: int, physical_k: int) -> None:
+    def recommend(
+        self,
+        batch_size: int,
+        physical_k: int,
+        cost_floor_k: int | None = None,
+    ) -> None:
         physical_k = max(self.min_k, min(int(physical_k), self.max_k))
-        self._state(self._batch_bucket(batch_size)).profile_k = physical_k
+        state = self._state(self._batch_bucket(batch_size))
+        state.profile_k = physical_k
+        if cost_floor_k is not None:
+            state.cost_floor_k = max(
+                self.min_k,
+                min(int(cost_floor_k), self.max_k),
+            )
         self.last_reason = "av_profile_recommendation"
 
     def cap(self, configured_k: int, batch_size: int | None = None) -> int:
@@ -366,8 +382,12 @@ def _create_controller(vllm_config: Any) -> AdaptiveDraftKController | None:
 def _update_controller(controller, scheduler_output, model_runner_output) -> None:
     recommendation = getattr(model_runner_output, "physical_k_recommendation", None)
     if recommendation is not None:
-        batch_size, physical_k, _score = recommendation
-        controller.recommend(batch_size, physical_k)
+        batch_size, physical_k, _score, *extra = recommendation
+        controller.recommend(
+            batch_size,
+            physical_k,
+            extra[0] if extra else None,
+        )
     sampled = getattr(model_runner_output, "sampled_token_ids", None)
     req_ids = getattr(model_runner_output, "req_ids", ())
     scheduled = getattr(scheduler_output, "scheduled_spec_decode_tokens", None) or {}
