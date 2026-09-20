@@ -9,7 +9,19 @@ from vllm_ascend.utils import enable_custom_op
 enable_custom_op()
 
 
+def _is_ascend_950() -> bool:
+    try:
+        return "950" in torch.npu.get_device_name(0)
+    except Exception:
+        return False
+
+
 def _skip_if_mla_prolog_v3_k3_unavailable():
+    # The torch schema is registered unconditionally, but the underlying
+    # MlaPrologV3K3 kernel is only built for Ascend 950 (see csrc/build_aclnn.sh),
+    # so probing torch.ops alone is not enough to gate this file.
+    if not _is_ascend_950():
+        pytest.skip("requires an Ascend 950 device")
     if not hasattr(torch.ops, "_C_ascend") or not hasattr(torch.ops._C_ascend, "npu_mla_prolog_v3_k3"):
         pytest.skip("requires the npu_mla_prolog_v3_k3 custom operator")
 
