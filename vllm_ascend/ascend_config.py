@@ -57,6 +57,22 @@ def validate_additional_config_bool(value: Any, path: str) -> bool:
         raise ValueError(f"{path} must be a boolean, got {value!r}.") from exc
 
 
+# H2D is two layers ahead of compute; KVPP broadcasts one layer ahead.
+KVPP_OFFLOAD_PREFETCH_DISTANCE = 2
+KVPP_OFFLOAD_BUFFER_COUNT = 3
+
+
+def get_kvpp_offload_config(vllm_config: VllmConfig) -> dict[str, Any] | None:
+    """Explicit shared-buffer opt-in; ordinary layerwise pooling stays unchanged."""
+    transfer = vllm_config.kv_transfer_config
+    if transfer is None or transfer.kv_connector != "AscendStoreConnector":
+        return None
+    extra = transfer.kv_connector_extra_config or {}
+    if not extra.get("use_layerwise", False) or "layerwise_num_shared_buffers" not in extra:
+        return None
+    return extra
+
+
 @config(config=ConfigDict(frozen=True))
 class KVPPConfig:
     """Configuration for KV layer parallelism on Ascend."""
@@ -86,6 +102,25 @@ class KVPPConfig:
                 raise ValueError("KVPP PD disaggregation requires MooncakeConnectorV2.")
             if kv_transfer_config.kv_role == "kv_consumer":
                 raise ValueError("KVPP must be disabled on the decode-only node.")
+
+        offload = get_kvpp_offload_config(vllm_config)
+        if offload is not None:
+            if str(offload.get("backend", "mooncake")).lower() != "memcache":
+                raise ValueError("KVPP layerwise offload currently requires the Memcache backend.")
+            if kv_transfer_config.kv_role != "kv_producer":
+                raise ValueError("KVPP layerwise offload currently requires kv_producer.")
+            if vllm_config.use_v2_model_runner:
+                raise ValueError("KVPP layerwise offload currently requires Model Runner V1.")
+            if parallel_config.pipeline_parallel_size != 1 or parallel_config.prefill_context_parallel_size != 1:
+                raise ValueError("KVPP layerwise offload currently requires PP=1 and PCP=1.")
+            if vllm_config.speculative_config is not None:
+                raise ValueError("KVPP layerwise offload does not yet support speculative decoding.")
+            for name in ("layerwise_num_shared_buffers", "layerwise_prefetch_layers"):
+                value = offload.get(name, KVPP_OFFLOAD_BUFFER_COUNT)
+                if isinstance(value, bool) or not isinstance(value, int) or value != KVPP_OFFLOAD_BUFFER_COUNT:
+                    raise ValueError(f"KVPP layerwise offload requires {name}=3.")
+            if "layerwise_independent_layers" in offload:
+                raise ValueError("KVPP layerwise offload manages its own owner and peer buffers.")
 
         model_config = vllm_config.model_config
         if not model_config.enforce_eager:

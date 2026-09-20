@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
+from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
 import torch
+from vllm.distributed.kv_transfer import get_kv_transfer_group
 
 from vllm_ascend.ascend_config import KVPPConfig
 from vllm_ascend.core.kv_cache_placement import build_kvpp_layer_layout, create_kvpp_cache_allocation_plan
@@ -57,6 +59,7 @@ class KVPPRuntime:
         scheduler = KVPPScheduler(
             transport=BroadcastKVPPTransport(group, plan.layer_owner_ranks, layer_buffers),
             attention_layer_names=tuple(layer_buffers),
+            wait_for_cache=(get_kv_transfer_group().wait_for_kvpp_cache if plan.offload else None),
         )
         for name in layer_buffers:
             static_forward_context[name].impl.layerwise_kv_cache_hook = scheduler
@@ -74,7 +77,13 @@ class KVPPRuntime:
 class KVPPScheduler:
     """Prefetch one layer ahead; Target execution ordinal selects scratch."""
 
-    def __init__(self, transport: BroadcastKVPPTransport, attention_layer_names: tuple[str, ...]) -> None:
+    def __init__(
+        self,
+        transport: BroadcastKVPPTransport,
+        attention_layer_names: tuple[str, ...],
+        wait_for_cache: Callable[[str], None] | None = None,
+    ) -> None:
+        self.wait_for_cache = wait_for_cache
         self.transport = transport
         self.attention_layer_names = attention_layer_names
         self._has_history = False
@@ -97,6 +106,9 @@ class KVPPScheduler:
 
     def run_layer_prefetch(self, layer_name: str, cache_ready: Any) -> None:
         torch.npu.set_device(self._npu_device_id)
+        if self.wait_for_cache is not None:
+            # Owner H2D and peer-buffer D2H readers must finish before broadcast.
+            self.wait_for_cache(layer_name)
         self.transport.prefetch(layer_name, cache_ready, self._kv_transfer_stream)
 
     def wait_for_layer(self, layer_name: str) -> None:

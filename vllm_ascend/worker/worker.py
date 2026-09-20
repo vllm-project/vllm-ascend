@@ -69,7 +69,7 @@ from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config, init_ascend_config
+from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config, get_kvpp_offload_config, init_ascend_config
 from vllm_ascend.batch_invariant import init_batch_invariance
 from vllm_ascend.core.kv_cache_placement import (
     KVPPPhysicalCachePlan,
@@ -624,7 +624,10 @@ class NPUWorker(WorkerBase):
         )
 
         extra_config = get_layerwise_reuse_config(self.vllm_config.kv_transfer_config)
-        if extra_config is not None:
+        if extra_config is not None and not (
+            KVPPConfig.from_vllm_config(self.vllm_config).size > 1
+            and get_kvpp_offload_config(self.vllm_config) is not None
+        ):
             memory_info = getattr(self, "_gva_layerwise_memory_info", None)
             if memory_info is None:
                 num_layers = self.model_config.get_num_layers(self.parallel_config)
