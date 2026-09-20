@@ -11,7 +11,7 @@ from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec
 
-from vllm_ascend.ascend_config import KVPP_OFFLOAD_BUFFER_COUNT, KVPPConfig, get_kvpp_offload_config
+from vllm_ascend.ascend_config import KVPPConfig
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import calc_split_factor, enable_sfa
@@ -29,40 +29,18 @@ class KVPPPhysicalCachePlan:
     layer_bundles: dict[str, tuple[str, ...]]
     tensor_sizes: dict[str, tuple[int, ...]]
     kvpp_rank: int
-    offload: bool = False
-
-    def buffer_slots(self) -> dict[str, tuple[str, int]]:
-        """One source of truth for allocation and asynchronous reuse fences."""
-        slots = {}
-        owner_index = target_index = 0
-        for name in self.layer_bundles:
-            owner = self.layer_owner_ranks.get(name)
-            if owner is None:
-                continue
-            if owner == self.kvpp_rank:
-                slots[name] = ("owner", owner_index % KVPP_OFFLOAD_BUFFER_COUNT if self.offload else owner_index)
-                owner_index += 1
-            else:
-                slots[name] = ("peer", target_index % KVPP_SCRATCH_BUFFER_COUNT)
-            target_index += 1
-        return slots
 
     def get_num_blocks(self, available_bytes: int) -> int:
         persistent_bytes = 0
         scratch_bytes = 0
-        owner_bytes = 0
         for name, bundle in self.layer_bundles.items():
             _, size = build_kvpp_layer_layout(bundle, self.tensor_sizes, num_blocks=1)
             owner = self.layer_owner_ranks.get(name)
-            if owner is None or (owner == self.kvpp_rank and not self.offload):
+            if owner is None or owner == self.kvpp_rank:
                 persistent_bytes += size
-            if owner == self.kvpp_rank:
-                owner_bytes = max(owner_bytes, size)
             if owner is not None:
                 scratch_bytes = max(scratch_bytes, size)
         bytes_per_block = persistent_bytes + KVPP_SCRATCH_BUFFER_COUNT * scratch_bytes
-        if self.offload:
-            bytes_per_block += KVPP_OFFLOAD_BUFFER_COUNT * owner_bytes
         return available_bytes // bytes_per_block if bytes_per_block else 0
 
 
@@ -199,5 +177,4 @@ def create_kvpp_cache_allocation_plan(
         layer_bundles=build_layer_cache_bundles(logical_spec),
         tensor_sizes=build_kvpp_buffer_sizes(vllm_config, logical_spec),
         kvpp_rank=kvpp_rank,
-        offload=get_kvpp_offload_config(vllm_config) is not None,
     )

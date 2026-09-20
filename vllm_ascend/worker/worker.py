@@ -624,10 +624,7 @@ class NPUWorker(WorkerBase):
         )
 
         extra_config = get_layerwise_reuse_config(self.vllm_config.kv_transfer_config)
-        if extra_config is not None and not (
-            KVPPConfig.from_vllm_config(self.vllm_config).size > 1
-            and get_kvpp_offload_config(self.vllm_config) is not None
-        ):
+        if extra_config is not None:
             memory_info = getattr(self, "_gva_layerwise_memory_info", None)
             if memory_info is None:
                 num_layers = self.model_config.get_num_layers(self.parallel_config)
@@ -1107,7 +1104,7 @@ class NPUWorker(WorkerBase):
                 extra_config,
             )
         kvpp_config = KVPPConfig.from_vllm_config(self.vllm_config)
-        if kvpp_config.size > 1:
+        if kvpp_config.size > 1 and get_kvpp_offload_config(self.vllm_config) is None:
             kvpp_rank = get_tp_group().rank_in_group % kvpp_config.size
             self._kvpp_cache_allocation_plan = create_kvpp_cache_allocation_plan(
                 self.vllm_config,

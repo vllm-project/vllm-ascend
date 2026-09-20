@@ -43,14 +43,16 @@ def test_empty_metadata_still_primes_reuse_lifetimes():
     assert worker.next_layer_to_submit == 2
 
 
-def test_h2d_advances_by_global_layer_not_number_of_owner_tasks():
+@pytest.mark.parametrize("owner", [False, True])
+def test_h2d_advances_by_global_layer_not_number_of_owner_tasks(owner):
     worker = make_worker()
-    worker._submit_kvpp_layer_loads(1, gate=None)
+    worker.layer_load_tasks[2] = [object()] if owner else []
+    worker._submit_ready_layer_loads(startup=True)
     worker.layer_load_finished_events[0].set()
     worker.wait_for_layer_load()
     queued = [call.args[0] for call in worker.kv_recv_thread.add_request.call_args_list]
     assert [task.layer_id for task in queued] == [0, 1, 2]
-    assert queued[-1].attention_start_gate is not None
+    assert (queued[-1].attention_start_gate is not None) == owner
     assert worker.layer_load_finished_events[0].is_set()
     # Do not wait for future H2D on the compute thread.
     assert not worker.layer_load_finished_events[2].is_set()
@@ -63,7 +65,7 @@ def test_h2d_advances_by_global_layer_not_number_of_owner_tasks():
 def test_peer_without_h2d_still_waits_for_previous_buffer_save():
     worker = make_worker()
     worker.next_layer_to_submit = 4
-    worker._submit_kvpp_layer_loads(4, gate=None)
+    worker._submit_ready_layer_loads()
     task = worker.kv_recv_thread.add_request.call_args.args[0]
     assert task.transfer_tasks == []
     assert task.wait_for_save_layer == 2

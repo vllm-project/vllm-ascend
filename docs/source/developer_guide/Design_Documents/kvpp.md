@@ -77,12 +77,10 @@ vllm serve <model-path> \
 
 ## P-side layerwise offload
 
-The Memcache shared-buffer opt-in uses the same full-layer HCCL broadcast transport. It adds a load-completion dependency in the prefetch executor and gives the owner three reusable buffers, while keeping the two peer receive buffers. `KVPPPhysicalCachePlan.buffer_slots()` drives both physical allocation and the connector's reuse predecessors so their lifetimes cannot diverge.
+The Memcache shared-buffer opt-in keeps the full-layer HCCL broadcast transport. KVPP allocates contiguous layer spans according to the existing `build_layerwise_reuse_layout` slot plan, including independent layers. It uses the existing offload memory budget and reuse predecessors; there is no separate owner/peer slot planner or buffer pool.
 
-For layer L, attention queues H2D through L+2, and the KVPP hook queues the broadcast of L+1. H2D for the first two layers starts without an attention gate. The model runner starts KVPP only after `start_load_kv` has reset the previous forward's completion events. The compute and broadcast paths share those events until the next forward; neither clears a completion the other still needs.
+At compute layer L, the existing load submission function queues L+2 while KVPP prefetches L+1. The first two layers are primed before the first broadcast. A load-completion callback in the KVPP executor waits for the layer to become ready; attention and KVPP observe the same completion event until the next forward.
 
-All ranks enqueue layers in global order, including empty non-owner transfer tasks. Empty tasks still fence previous compute and D2H users of a peer buffer. Only owner tasks copy host KV into HBM. Full-object Memcache publication retains its existing single writer, and read leases are released at the end of the forward rather than at the last owned H2D layer.
+Only owners retain H2D tasks. Empty non-owner tasks still pass through the existing compute/D2H reuse fences before broadcast can overwrite their slot. Full-object Memcache publication retains its existing single writer, and read leases are released after the forward.
 
-The physical budget accounts for three owner and two peer buffers directly; the generic layerwise logical-memory multiplier is skipped. The generic layerwise tensor-merging pass is also skipped because the KVPP allocator consumes the complete logical cache specification.
-
-For replicated Memcache offload caches, a TP CPU barrier at the next forward boundary prevents a non-writer rank from acquiring a read lease before the preceding writer has finished publishing the full object. Layerwise overlap within a forward is unchanged.
+The KVPP allocator consumes complete logical cache specifications, so the generic descriptor-merging pass is skipped; slot grouping itself is reused from offload. Current vLLM must initialize layerwise state before every real forward, including cache misses. Completion-only polls do not start another prefetch cycle. A TP boundary fence prevents the next forward from reading before the single writer has published the previous D2H.

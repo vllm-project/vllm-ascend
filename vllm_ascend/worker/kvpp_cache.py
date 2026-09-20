@@ -3,12 +3,13 @@ import torch
 from vllm.config import VllmConfig
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec, UniformTypeKVCacheSpecs
 
-from vllm_ascend.ascend_config import KVPP_OFFLOAD_BUFFER_COUNT
+from vllm_ascend.ascend_config import get_kvpp_offload_config
 from vllm_ascend.core.kv_cache_placement import (
     KVPP_SCRATCH_BUFFER_COUNT,
     build_kvpp_layer_layout,
     create_kvpp_cache_allocation_plan,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import build_layerwise_reuse_layout
 from vllm_ascend.distributed.parallel_state import get_kvpp_group
 
 KVPP_BUFFER_ALIGNMENT = 2 * 1024 * 1024
@@ -40,27 +41,35 @@ def allocate_kvpp_cache(
         for name, bundle in plan.layer_bundles.items()
     }
     scratch_size = max((size for name, (_, size) in layouts.items() if name in plan.layer_owner_ranks), default=0)
+    extra = get_kvpp_offload_config(vllm_config)
+    shared_slots: dict[str, int] = {}
+    shared_buffers: dict[int, torch.Tensor] = {}
+    if extra is not None:
+        # Use offload's existing slot plan, including independent layers.
+        reuse = build_layerwise_reuse_layout(
+            plan.logical_cache_spec, vllm_config.model_config.get_num_layers(vllm_config.parallel_config), extra
+        )
+        for slot_index, layers in enumerate(reuse.buffer_slots):
+            names = [reuse.layer_cache_specs[layer].main.layer_name for layer in layers]
+            shared_buffers[slot_index] = _allocate_kvpp_buffer(max(layouts[name][1] for name in names), device)
+            shared_slots.update((name, slot_index) for name in names)
     scratch = (
-        [_allocate_kvpp_buffer(scratch_size, device) for _ in range(KVPP_SCRATCH_BUFFER_COUNT)] if scratch_size else []
-    )
-    caches: dict[str, tuple[torch.Tensor, ...]] = {}
-    slots = plan.buffer_slots()
-    owner_size = max(
-        (size for name, (_, size) in layouts.items() if plan.layer_owner_ranks.get(name) == plan.kvpp_rank), default=0
-    )
-    owner_buffers = (
-        [_allocate_kvpp_buffer(owner_size, device) for _ in range(KVPP_OFFLOAD_BUFFER_COUNT)]
-        if plan.offload and owner_size
+        [_allocate_kvpp_buffer(scratch_size, device) for _ in range(KVPP_SCRATCH_BUFFER_COUNT)]
+        if scratch_size and extra is None
         else []
     )
+    caches: dict[str, tuple[torch.Tensor, ...]] = {}
+    target_index = 0
     for name, (layout, size) in layouts.items():
         owner = plan.layer_owner_ranks.get(name)
-        if owner is None or (owner == plan.kvpp_rank and not plan.offload):
+        if extra is not None:
+            buffer = shared_buffers[shared_slots[name]]
+        elif owner is None or owner == plan.kvpp_rank:
             buffer = _allocate_kvpp_buffer(size, device)
-        elif owner == plan.kvpp_rank:
-            buffer = owner_buffers[slots[name][1]]
         else:
-            buffer = scratch[slots[name][1]]
+            buffer = scratch[target_index % KVPP_SCRATCH_BUFFER_COUNT]
         for cache_name, parts in layout.items():
             caches[cache_name] = tuple(buffer.narrow(0, offset, length) for offset, length in parts)
+        if owner is not None:
+            target_index += 1
     return caches

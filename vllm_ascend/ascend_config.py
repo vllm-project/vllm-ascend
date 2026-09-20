@@ -57,11 +57,6 @@ def validate_additional_config_bool(value: Any, path: str) -> bool:
         raise ValueError(f"{path} must be a boolean, got {value!r}.") from exc
 
 
-# H2D is two layers ahead of compute; KVPP broadcasts one layer ahead.
-KVPP_OFFLOAD_PREFETCH_DISTANCE = 2
-KVPP_OFFLOAD_BUFFER_COUNT = 3
-
-
 def get_kvpp_offload_config(vllm_config: VllmConfig) -> dict[str, Any] | None:
     """Explicit shared-buffer opt-in; ordinary layerwise pooling stays unchanged."""
     transfer = vllm_config.kv_transfer_config
@@ -116,11 +111,9 @@ class KVPPConfig:
             if vllm_config.speculative_config is not None:
                 raise ValueError("KVPP layerwise offload does not yet support speculative decoding.")
             for name in ("layerwise_num_shared_buffers", "layerwise_prefetch_layers"):
-                value = offload.get(name, KVPP_OFFLOAD_BUFFER_COUNT)
-                if isinstance(value, bool) or not isinstance(value, int) or value != KVPP_OFFLOAD_BUFFER_COUNT:
+                value = offload.get(name, 3)
+                if isinstance(value, bool) or not isinstance(value, int) or value != 3:
                     raise ValueError(f"KVPP layerwise offload requires {name}=3.")
-            if "layerwise_independent_layers" in offload:
-                raise ValueError("KVPP layerwise offload manages its own owner and peer buffers.")
 
         model_config = vllm_config.model_config
         if not model_config.enforce_eager:

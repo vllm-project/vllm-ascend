@@ -148,9 +148,9 @@ VLLM_USE_V2_MODEL_RUNNER=0 vllm serve <model-path> \
     --kv-transfer-config '{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backend":"memcache","use_layerwise":true,"layerwise_num_shared_buffers":3,"layerwise_prefetch_layers":3}}'
 ```
 
-This combination requires PP=1, PCP=1, DCP=1 and no speculative decoding. The shared-buffer and prefetch counts must both be 3; do not set `layerwise_independent_layers`. Other layerwise backends and Model Runner V2 are outside this combination's scope.
+This combination requires PP=1, PCP=1, DCP=1 and no speculative decoding. The shared-buffer and prefetch counts must both be 3. The existing `layerwise_independent_layers` setting is preserved (layer 0 by default). Other layerwise backends and Model Runner V2 are outside this combination's scope.
 
-At compute layer L, Memcache loads L+2 while KVPP broadcasts L+1. The owner waits for its H2D completion before broadcasting. Only layer owners perform H2D; each rank has three reusable owner buffers and two separate peer receive buffers. A buffer can be overwritten only after the previous layer's compute and D2H have finished. The first two layers are primed before the first broadcast.
+At compute layer L, Memcache loads L+2 while KVPP broadcasts L+1. The owner waits for its H2D completion before broadcasting. Only layer owners perform H2D; each rank uses the existing offload shared slots and independent layers, with no separate owner/peer buffer pools. A buffer can be overwritten only after the previous layer's compute and D2H have finished. The first two layers are primed before the first broadcast.
 
 The Memcache full-object publication protocol remains single-writer: the existing writer still saves all computed layers. Owner-only H2D does not mean owner-only D2H. This differs from the whole-block pooling configuration above, where each owner publishes a separate shard. Use separate pool namespaces/model names when comparing these configurations.
 

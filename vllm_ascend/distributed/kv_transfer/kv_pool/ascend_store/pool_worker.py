@@ -26,8 +26,8 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
-from vllm_ascend.ascend_config import KVPP_OFFLOAD_PREFETCH_DISTANCE, KVPPConfig, get_kvpp_offload_config
-from vllm_ascend.core.kv_cache_placement import create_kvpp_cache_allocation_plan, map_kvpp_layers_to_owners
+from vllm_ascend.ascend_config import KVPPConfig, get_kvpp_offload_config
+from vllm_ascend.core.kv_cache_placement import map_kvpp_layers_to_owners
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
     get_attention_compute_start_gate,
     reset_attention_compute_start_gate,
@@ -149,22 +149,9 @@ class KVPoolWorker:
         self.kvpp_layer_owners: dict[int, int] = {}
         if self.kvpp_offload:
             assert kv_cache_config is not None
-            plan = create_kvpp_cache_allocation_plan(
-                vllm_config, get_layerwise_kv_cache_specs(kv_cache_config), self.tp_rank
-            )
-            self.kvpp_layer_owners = {
-                self._extract_physical_layer_index(name): owner for name, owner in plan.layer_owner_ranks.items()
-            }
+            owners = map_kvpp_layers_to_owners(vllm_config, get_layerwise_kv_cache_specs(kv_cache_config))
+            self.kvpp_layer_owners = {self._extract_physical_layer_index(name): owner for name, owner in owners.items()}
             self.kvpp_rank = self.tp_rank
-            self.prefetch_layer_map.clear()
-            last_use: dict[tuple[str, int], int] = {}
-            for name, slot in plan.buffer_slots().items():
-                layer = self._extract_physical_layer_index(name)
-                if slot in last_use:
-                    self.prefetch_layer_map[layer] = last_use[slot]
-                last_use[slot] = layer
-            self.layerwise_offload = True
-            self.independent_layers.clear()
         self._kv_stats = AscendStoreKVConnectorStats()
         self._kv_stats_lock = threading.Lock()
 
@@ -1084,7 +1071,7 @@ class KVPoolWorker:
             if getattr(self, "kvpp_offload", False):
                 assert isinstance(self.kv_recv_thread, KVCacheStoreLayerRecvingThread)
                 self.kv_recv_thread.final_layer_id = -1
-                self._submit_kvpp_layer_loads(1, gate=None)
+                self._submit_ready_layer_loads(startup=True)
             return
         for request in metadata.requests:
             load_spec = request.load_spec
@@ -2341,20 +2328,6 @@ class KVPoolWorker:
                 if owner != self.kvpp_rank:
                     self.layer_load_tasks[layer_id] = []
 
-    def _submit_kvpp_layer_loads(self, last_layer: int, gate: Any) -> None:
-        assert self.kv_recv_thread is not None
-        while self.next_layer_to_submit <= min(last_layer, self.num_layers - 1):
-            layer_id = self.next_layer_to_submit
-            self.kv_recv_thread.add_request(
-                LayerLoadTask(
-                    wait_for_save_layer=self.prefetch_layer_map.get(layer_id),
-                    transfer_tasks=self.layer_load_tasks[layer_id],
-                    layer_id=layer_id,
-                    attention_start_gate=gate,
-                )
-            )
-            self.next_layer_to_submit += 1
-
     def wait_for_kvpp_cache(self, layer_name: str) -> None:
         layer_id = self._extract_physical_layer_index(layer_name)
         assert self.layer_load_finished_events is not None
@@ -2363,16 +2336,17 @@ class KVPoolWorker:
             self.kv_recv_thread.raise_if_failed()
         self.kv_recv_thread.raise_if_failed()
 
-    def _submit_ready_layer_loads(self) -> None:
+    def _submit_ready_layer_loads(self, *, startup: bool = False) -> None:
         assert self.kv_recv_thread is not None
         recv_thread = self.kv_recv_thread
+        kvpp = getattr(self, "kvpp_offload", False)
 
         def submit_layer_load(layer_id: int) -> bool:
             reuse_source = self.prefetch_layer_map.get(layer_id)
-            if not self.layer_load_tasks[layer_id] and reuse_source is None:
+            if not self.layer_load_tasks[layer_id] and reuse_source is None and not kvpp:
                 return False
             attention_start_gate = None
-            if self.layer_load_tasks[layer_id] and layer_id != self.current_layer:
+            if not startup and self.layer_load_tasks[layer_id] and layer_id != self.current_layer:
                 attention_start_gate = get_attention_compute_start_gate()
             recv_thread.add_request(
                 LayerLoadTask(  # type: ignore[arg-type]
@@ -2384,7 +2358,9 @@ class KVPoolWorker:
             )
             return True
 
-        submit_count = self.num_prefetch_layers if self.current_layer == 0 else 1
+        # Prime layers 0/1 before KVPP starts; subsequent hooks enqueue L+2.
+        # Include empty peer tasks so their existing reuse fences still run.
+        submit_count = 2 if startup else 1 if kvpp else self.num_prefetch_layers if self.current_layer == 0 else 1
         submitted_layers = 0
         while submitted_layers < submit_count and self.next_layer_to_submit < self.num_layers:
             layer_id = self.next_layer_to_submit
@@ -2399,17 +2375,12 @@ class KVPoolWorker:
         assert self.kv_recv_thread is not None
         try:
             self.kv_recv_thread.raise_if_failed()
-            gate = reset_attention_compute_start_gate()
-            if getattr(self, "kvpp_offload", False):
-                self._submit_kvpp_layer_loads(self.current_layer + KVPP_OFFLOAD_PREFETCH_DISTANCE, gate)
-                while not self.layer_load_finished_events[self.current_layer].wait(timeout=1):
-                    self.kv_recv_thread.raise_if_failed()
-                self.kv_recv_thread.raise_if_failed()
-                # Compute and KVPP both observe this event until the next step.
-                return
+            reset_attention_compute_start_gate()
             self._submit_ready_layer_loads()
             should_wait = (
-                bool(self.layer_load_tasks[self.current_layer]) or self.current_layer in self.prefetch_layer_map
+                getattr(self, "kvpp_offload", False)
+                or bool(self.layer_load_tasks[self.current_layer])
+                or self.current_layer in self.prefetch_layer_map
             )
             if should_wait:
                 while not self.layer_load_finished_events[self.current_layer].wait(timeout=10):
@@ -2424,7 +2395,8 @@ class KVPoolWorker:
             if getattr(self, "backend_name", None) == "mooncake" and getattr(self, "use_block_key_layerwise", False):
                 self._finish_current_mooncake_load_sessions()
             raise
-        self.layer_load_finished_events[self.current_layer].clear()
+        if not getattr(self, "kvpp_offload", False):
+            self.layer_load_finished_events[self.current_layer].clear()
         if (
             getattr(self, "backend_name", None) == "mooncake"
             and getattr(self, "use_block_key_layerwise", False)

@@ -240,10 +240,6 @@ class KVPoolScheduler:
                     self.num_layers,
                     vllm_config.kv_transfer_config.kv_connector_extra_config,
                 ).has_layer_reuse
-        from vllm_ascend.ascend_config import KVPPConfig, get_kvpp_offload_config
-
-        if KVPPConfig.from_vllm_config(vllm_config).size > 1 and get_kvpp_offload_config(vllm_config) is not None:
-            self.layerwise_offload = True
         self.model_name = model_config.model.split("/")[-1]
 
         self.client: LookupKeyClient | None = None

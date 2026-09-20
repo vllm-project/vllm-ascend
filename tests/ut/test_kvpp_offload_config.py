@@ -39,7 +39,6 @@ def test_explicit_offload_and_ordinary_layerwise_pooling():
         ("layerwise_num_shared_buffers", True),
         ("layerwise_prefetch_layers", 2),
         ("layerwise_prefetch_layers", 4),
-        ("layerwise_independent_layers", [0]),
         ("backend", "mooncake"),
     ],
 )
@@ -65,3 +64,9 @@ def test_reject_unsupported_execution(case):
         c.speculative_config = SimpleNamespace(method="mtp")
     with pytest.raises(ValueError, match="KVPP layerwise offload"):
         KVPPConfig.from_vllm_config(c).validate(c)
+
+
+def test_preserves_offload_independent_layers():
+    c = config()
+    c.kv_transfer_config.kv_connector_extra_config["layerwise_independent_layers"] = [0, 4]
+    KVPPConfig.from_vllm_config(c).validate(c)

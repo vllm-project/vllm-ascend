@@ -49,35 +49,35 @@ def test_physical_allocations_and_scratch_aliases(monkeypatch, num_blocks, total
 
 
 @pytest.mark.parametrize("rank", [0, 1])
-def test_offload_owner_and_peer_aliases_match_budget(monkeypatch, rank):
+@pytest.mark.parametrize("independent", [[], [0], [0, 4]])
+def test_offload_uses_existing_shared_slots(monkeypatch, rank, independent):
     from dataclasses import replace
-
-    from vllm_ascend.core.kv_cache_placement import create_kvpp_cache_allocation_plan
 
     config = make_kvpp_config(2)
     config.speculative_config = None
+    config.model_config.get_num_layers = lambda _: 12
     config.kv_transfer_config = SimpleNamespace(
         kv_connector="AscendStoreConnector",
         kv_connector_extra_config={
             "backend": "memcache",
             "use_layerwise": True,
             "layerwise_num_shared_buffers": 3,
+            "layerwise_independent_layers": independent,
         },
     )
     template = make_kvpp_specs()[layer_name(9)]
     specs = {layer_name(i): replace(template) for i in range(12)}
-    plan = create_kvpp_cache_allocation_plan(config, specs, rank)
     monkeypatch.setattr(kvpp_cache, "get_kvpp_group", lambda: SimpleNamespace(rank_in_group=rank))
     caches = kvpp_cache.allocate_kvpp_cache(config, make_cache_config(specs, 2), torch.device("cpu"))
     storages = {parts[0].untyped_storage().data_ptr(): parts[0].untyped_storage() for parts in caches.values()}
-    assert len(storages) == 5
-    actual_bytes = sum(s.nbytes() - kvpp_cache.KVPP_BUFFER_ALIGNMENT for s in storages.values())
-    assert plan.get_num_blocks(actual_bytes) == 2
-    slots = plan.buffer_slots()
-    for left in specs:
-        for right in specs:
-            aliases = caches[left][0].data_ptr() == caches[right][0].data_ptr()
-            assert aliases == (slots[left] == slots[right])
-    owned = [name for name in specs if plan.layer_owner_ranks[name] == rank]
-    assert caches[owned[0]][0].data_ptr() == caches[owned[3]][0].data_ptr()
-    assert len({caches[name][0].data_ptr() for name in owned[:3]}) == 3
+    assert len(storages) == 3 + len(independent)
+    assert sum(s.nbytes() - kvpp_cache.KVPP_BUFFER_ALIGNMENT for s in storages.values()) == (
+        (3 + len(independent)) * 2 * template.page_size_bytes
+    )
+    shared_layers = [i for i in range(12) if i not in independent]
+    for slot in range(3):
+        members = shared_layers[slot::3]
+        caches[layer_name(members[0])][0].fill_(slot + 1)
+        assert all(torch.all(caches[layer_name(i)][0] == slot + 1) for i in members)
+    for i in independent:
+        assert torch.count_nonzero(caches[layer_name(i)][0]) == 0

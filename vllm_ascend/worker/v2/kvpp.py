@@ -8,7 +8,7 @@ from typing import Any
 import torch
 from vllm.distributed.kv_transfer import get_kv_transfer_group
 
-from vllm_ascend.ascend_config import KVPPConfig
+from vllm_ascend.ascend_config import KVPPConfig, get_kvpp_offload_config
 from vllm_ascend.core.kv_cache_placement import build_kvpp_layer_layout, create_kvpp_cache_allocation_plan
 from vllm_ascend.distributed.kvpp import BroadcastKVPPTransport
 from vllm_ascend.distributed.parallel_state import get_kvpp_group
@@ -59,7 +59,11 @@ class KVPPRuntime:
         scheduler = KVPPScheduler(
             transport=BroadcastKVPPTransport(group, plan.layer_owner_ranks, layer_buffers),
             attention_layer_names=tuple(layer_buffers),
-            wait_for_cache=(get_kv_transfer_group().wait_for_kvpp_cache if plan.offload else None),
+            wait_for_cache=(
+                get_kv_transfer_group().wait_for_kvpp_cache
+                if get_kvpp_offload_config(vllm_config) is not None
+                else None
+            ),
         )
         for name in layer_buffers:
             static_forward_context[name].impl.layerwise_kv_cache_hook = scheduler
