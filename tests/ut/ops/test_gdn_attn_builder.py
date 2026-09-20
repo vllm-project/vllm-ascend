@@ -460,7 +460,6 @@ def test_mixed_spec_prefill_chunk_metadata_preserves_single_token_count(
     prefill_metadata = attn_metadata.non_spec_prefill_metadata
     assert torch.equal(prefill_metadata.actual_seq_lengths, torch.tensor([1, 8], dtype=torch.int32))
     assert prefill_metadata.non_empty_indices is None
-    assert prefill_metadata.non_empty_indices is None
 
 
 @pytest.mark.parametrize(
