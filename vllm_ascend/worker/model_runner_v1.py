@@ -4682,7 +4682,17 @@ class NPUModelRunner(GPUModelRunner):
             or len(kv_cache_config.kv_cache_tensors) < 2
         ):
             return False
-        layout = self.vllm_config.cache_config.get_resolved_kv_cache_layout()
+        resolve_layout = getattr(
+            self.vllm_config.cache_config,
+            "get_resolved_kv_cache_layout",
+            None,
+        )
+        if not callable(resolve_layout):
+            # Compatibility runners (notably the GLM5 pooled-cache path) may
+            # provide a lightweight cache-config stub.  They already own their
+            # shared-slot allocation contract, so leave them on that path.
+            return False
+        layout = resolve_layout()
         if not getattr(layout, "is_block_outermost", False):
             return False
 
@@ -4719,18 +4729,19 @@ class NPUModelRunner(GPUModelRunner):
                     )
         return True
 
-    def _is_qsa_state_cache(self, layer_name: str) -> bool:
-        attn_layer = self.vllm_config.compilation_config.static_forward_context.get(
-            layer_name
-        )
-        if not isinstance(attn_layer, AttentionLayerBase):
-            return False
-        # The fixed vLLM backend currently reports
-        # ``QWEN4_EXP_EXP_QSA_STATE`` while earlier Qwen4Exp integrations used
-        # ``QWEN4_EXP_QSA_STATE``.  Match the backend capability suffix rather
-        # than baking either transitional spelling into the cache geometry.
-        backend_name = attn_layer.get_attn_backend().get_name()
-        return backend_name.endswith("QSA_STATE")
+    @staticmethod
+    def _uses_unified_attention_cache_view(
+        attn_backend: type[AttentionBackend],
+    ) -> bool:
+        """Whether a backend consumes main's canonical ``[B, H, N, C]`` view.
+
+        Main-native cache owners such as QSA bind the unified view directly
+        and therefore intentionally do not implement the legacy
+        ``get_kv_cache_shape`` API.  Detect that capability boundary rather
+        than backend-name spellings, which differ between the QSA owner and
+        its raw/compressed side caches.
+        """
+        return not callable(getattr(attn_backend, "get_kv_cache_shape", None))
 
     @staticmethod
     def _page_strided_tensor_view(
@@ -5431,25 +5442,24 @@ class NPUModelRunner(GPUModelRunner):
                         descriptor.offset
                         + layer_idx * descriptor.layer_stride
                     )
-                    if self._is_qsa_state_cache(layer_name):
-                        compression_ratio = get_kv_cache_compression_ratio(
-                            current_kv_cache_spec
+                    if self._uses_unified_attention_cache_view(attn_backend):
+                        state_content_size = (
+                            current_kv_cache_spec.state_content_size_bytes
                         )
-                        if current_kv_cache_spec.block_size % compression_ratio:
+                        dtype_size = get_dtype_size(current_kv_cache_spec.dtype)
+                        if state_content_size % dtype_size:
                             raise ValueError(
-                                "QSA cache block size must be divisible by "
-                                "the compression ratio."
+                                "Unified KV-cache state width must align to "
+                                "the cache dtype."
                             )
-                        # QSAStateCache.bind_kv_cache consumes the unified
-                        # [blocks, 1, states, width] storage view.  Its dummy
-                        # backend deliberately has no ordinary attention
-                        # get_kv_cache_shape implementation.
+                        # Match vLLM main's canonical [B, H, N, C] view.  QSA
+                        # compressed caches have N < block_size, while the QSA
+                        # owner stores K and V together in C.
                         cache_shape = (
                             kv_cache_config.num_blocks,
-                            1,
-                            current_kv_cache_spec.block_size
-                            // compression_ratio,
-                            current_kv_cache_spec.head_size,
+                            current_kv_cache_spec.num_heads,
+                            current_kv_cache_spec.num_states,
+                            state_content_size // dtype_size,
                         )
                         kv_caches[layer_name] = self._page_strided_tensor_view(
                             raw_tensor,
