@@ -577,6 +577,66 @@ def test_dsa_cp_device_metadata_tasks(
         builder._build_qli_metadata.assert_not_called()
 
 
+@pytest.mark.parametrize("deferred", [False, True])
+def test_dsa_cp_host_maxima_are_shared_only_within_build(deferred):
+    shared = {}
+    builders = [_make_cp_builder(1), _make_cp_builder(1)]
+    qsl = torch.tensor([0, 2, 4], dtype=torch.int32)
+    common = SimpleNamespace(num_reqs=2, query_start_loc=qsl, query_start_loc_cpu=qsl)
+    for index, builder in enumerate(builders):
+        builder.common_ratio_to_sas_metadata = shared
+        builder._device_metadata_enabled = deferred
+        builder.num_prefills = 0
+        builder.num_actual_tokens = 4
+        builder.block_table = torch.full((2, 2), index + 1, dtype=torch.int32)
+        builder.slot_mapping = torch.full((4, 2), index + 10, dtype=torch.int32)
+        builder.seq_lens_cpu = torch.tensor([8, 6], dtype=torch.int32)
+        builder._build_sas_metadata = MagicMock(return_value=builder.req_sas_metadata)
+        builder._build_qli_metadata = MagicMock(return_value=builder.req_qli_metadata)
+        builder._ensure_device_local_metadata = MagicMock(
+            return_value=(0, 2, 2, 4, qsl, builder.seq_lens, MagicMock() if deferred else None)
+        )
+
+    def build(builder):
+        result = builder.build_req_metadata(
+            common,
+            input_positions=None,
+            num_input_tokens=4,
+            num_actual_reqs=None,
+            attn_state=MagicMock(),
+            cos=MagicMock(),
+            sin=MagicMock(),
+        )
+        for task in builder.take_device_metadata_tasks():
+            task.run()
+        return result
+
+    with patch(
+        "vllm_ascend.attention.context_parallel.dsa_cp.get_tp_group",
+        return_value=SimpleNamespace(world_size=2, rank_in_group=0),
+    ):
+        first = build(builders[0])
+        assert shared["_cpu_local_maxima"] == (2, 8)
+        # A sibling group must not redo host intersections or reductions.
+        with (
+            patch.object(builders[1], "_build_local_token_metadata", side_effect=AssertionError("cache miss")),
+            patch.object(torch.Tensor, "max", side_effect=AssertionError("repeated host reduction")),
+        ):
+            second = build(builders[1])
+        assert first.block_table.data_ptr() != second.block_table.data_ptr()
+        assert first.slot_mapping.data_ptr() != second.slot_mapping.data_ptr()
+        assert torch.all(second.block_table == 2)
+        assert torch.all(second.slot_mapping == 11)
+        assert builders[1]._build_sas_metadata.call_args.kwargs["max_seq_lens"] == 8
+
+        # The next runner build uses a fresh scope even with identical shapes.
+        builders[1].common_ratio_to_sas_metadata = {}
+        builders[1].seq_lens_cpu[0] = 13
+        build(builders[1])
+        assert builders[1]._build_sas_metadata.call_args.kwargs["max_seq_lens"] == 13
+        assert shared["_cpu_local_maxima"] == (2, 8)
+
+
 def test_dsa_cp_device_local_metadata_is_deferred_and_reused():
     cache: dict[str, dict[str, torch.Tensor]] = {}
 

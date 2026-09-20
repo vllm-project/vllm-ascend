@@ -913,16 +913,24 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 seq_lens=self.seq_lens_cpu[:num_reqs],
             )
             self.common_ratio_to_sas_metadata["_cpu_local"] = {
-                "qsl_cpu": local_query_start_loc_cpu.clone(),
-                "sl_cpu": local_seq_lens_cpu.clone(),
+                "qsl_cpu": local_query_start_loc_cpu,
+                "sl_cpu": local_seq_lens_cpu,
             }
         else:
             assert cpu_cache is not None
             local_query_start_loc_cpu = cpu_cache["qsl_cpu"]
             local_seq_lens_cpu = cpu_cache["sl_cpu"]
-        local_seq_lens_q_cpu = local_query_start_loc_cpu[1 : num_reqs + 1] - local_query_start_loc_cpu[:num_reqs]
-        max_local_query_len = max(1, int(local_seq_lens_q_cpu.max().item()))
-        max_local_seq_lens = max(1, int(local_seq_lens_cpu.max().item()))
+        maxima = self.common_ratio_to_sas_metadata.get("_cpu_local_maxima")
+        if maxima is None:
+            local_seq_lens_q_cpu = local_query_start_loc_cpu[1 : num_reqs + 1] - local_query_start_loc_cpu[:num_reqs]
+            maxima = (
+                max(1, int(local_seq_lens_q_cpu.max().item())),
+                max(1, int(local_seq_lens_cpu.max().item())),
+            )
+            # The runner creates this scope for each build. These host scalars
+            # depend on batch coordinates, not on a group's physical KV pages.
+            self.common_ratio_to_sas_metadata["_cpu_local_maxima"] = maxima
+        max_local_query_len, max_local_seq_lens = maxima
 
         if num_actual_reqs is None:
             num_actual_reqs = num_reqs
