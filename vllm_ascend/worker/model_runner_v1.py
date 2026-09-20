@@ -22,13 +22,13 @@ import math
 import sys
 import time
 from collections import defaultdict, deque
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import copy, deepcopy
 from dataclasses import dataclass, replace
 from functools import partial
 from multiprocessing import Manager
-from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias
+from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
 
 import numpy as np
 import torch
@@ -168,11 +168,20 @@ from vllm_ascend.spec_decode import get_spec_decode_method
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
-from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
+from vllm_ascend.spec_decode.eagle_proposer import (
+    AscendEagleProposer,
+    AscendQwen4ExpMTPProposer,
+)
 from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
     AscendExtractHiddenStatesProposer,
 )
 from vllm_ascend.spec_decode.gemma4_proposer import AscendGemma4Proposer
+from vllm_ascend.spec_decode.interfaces import (
+    SupportsAttentionBackendInitialization,
+    SupportsCUDAGraphInitialization,
+    SupportsPerGroupBlockTables,
+    SupportsPerGroupKernelBlockSizes,
+)
 from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
 from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
@@ -285,6 +294,42 @@ PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
 SEQ_LEN_WITH_MAX_PA_WORKSPACE = 6144
 
 
+def _pad_qwen4_exp_ple_graph_inputs(
+    context_buffer: torch.Tensor,
+    query_start_loc_buffer: torch.Tensor,
+    runtime_context: torch.Tensor,
+    runtime_query_start_loc: torch.Tensor,
+    num_reqs: int,
+    eos_token_id: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build fixed-row Qwen4Exp PLE inputs for ACL graph replay."""
+    max_num_reqs = context_buffer.shape[0]
+    if not 0 < num_reqs <= max_num_reqs:
+        raise ValueError(
+            f"PLE num_reqs must be in [1, {max_num_reqs}], got {num_reqs}"
+        )
+    if runtime_context.shape != context_buffer[:num_reqs].shape:
+        raise ValueError(
+            "PLE runtime context shape does not match the active graph rows: "
+            f"expected={tuple(context_buffer[:num_reqs].shape)}, "
+            f"actual={tuple(runtime_context.shape)}"
+        )
+    if runtime_query_start_loc.shape != (num_reqs + 1,):
+        raise ValueError(
+            "PLE runtime query_start_loc must have one boundary per active "
+            f"request: expected={(num_reqs + 1,)}, "
+            f"actual={tuple(runtime_query_start_loc.shape)}"
+        )
+
+    context_buffer.fill_(eos_token_id)
+    context_buffer[:num_reqs].copy_(runtime_context, non_blocking=False)
+    query_start_loc_buffer[: num_reqs + 1].copy_(
+        runtime_query_start_loc, non_blocking=False
+    )
+    query_start_loc_buffer[num_reqs + 1 :].fill_(runtime_query_start_loc[-1])
+    return context_buffer, query_start_loc_buffer
+
+
 
 @dataclass
 class GraphCaptureContext:
@@ -324,6 +369,37 @@ def graph_capture(device: torch.device):
 
 def get_tp_context(drafter):
     return getattr(drafter, "tp_group_context", nullcontext())
+
+
+def _resolve_draft_kernel_block_sizes(
+    kernel_block_sizes: int | Sequence[int | Sequence[int]],
+    *,
+    per_group: bool,
+) -> list[int]:
+    """Normalize runner kernel sizes for the draft proposer contract.
+
+    The target runner normally stores one list of supported sizes per cache
+    group. Multi-group proposers consume one resolved size from every group,
+    while existing proposers consume the supported-size list for group zero.
+    Scalar and already-flat inputs remain valid for single-group backends and
+    tests.
+    """
+    if isinstance(kernel_block_sizes, int):
+        return [kernel_block_sizes]
+    if not kernel_block_sizes:
+        return []
+    if per_group:
+        resolved_sizes: list[int] = []
+        for size in kernel_block_sizes:
+            if isinstance(size, int):
+                resolved_sizes.append(size)
+            else:
+                resolved_sizes.append(int(size[0]))
+        return resolved_sizes
+    first = kernel_block_sizes[0]
+    if not isinstance(first, int):
+        return [int(size) for size in first]
+    return [int(size) for size in cast(Sequence[int], kernel_block_sizes)]
 
 
 def _count_nans_per_row(logits: torch.Tensor) -> torch.Tensor:
@@ -617,6 +693,11 @@ class NPUModelRunner(GPUModelRunner):
             cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
             reasoning_config = getattr(self.vllm_config, "reasoning_config", None),
         )
+        # Qwen4Exp PLE consumes request-history input alongside the regular
+        # token stream. Keep stable backing allocations for FULL ACL graph
+        # capture; each step only refreshes their contents.
+        self._qwen4_exp_ngram_context_buffer: torch.Tensor | None = None
+        self._qwen4_exp_query_start_loc_buffer: torch.Tensor | None = None
         self.num_draft_tokens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
         # here we use int32
         self.sampled_token_ids_pinned_cpu = torch.empty(
@@ -711,6 +792,7 @@ class NPUModelRunner(GPUModelRunner):
             | AscendDflashProposer
             | AscendDSparkProposer
             | AscendGemma4Proposer
+            | AscendQwen4ExpMTPProposer
             | AscendSuffixDecodingProposer
             | AscendMedusaProposer
             | AscendExtractHiddenStatesProposer
@@ -2479,6 +2561,11 @@ class NPUModelRunner(GPUModelRunner):
                 num_tokens_padded,
                 intermediate_tensors,
             )
+            self._maybe_add_qwen4_exp_ple_inputs(
+                model_kwargs,
+                num_reqs=num_reqs,
+                num_reqs_padded=num_reqs_padded,
+            )
 
             # update global cos, sin
             update_cos_sin(positions)
@@ -3249,6 +3336,120 @@ class NPUModelRunner(GPUModelRunner):
             raise RuntimeError("Full-graph device metadata requires external events")
         return executor
 
+    def _maybe_add_qwen4_exp_ple_inputs(
+        self,
+        model_kwargs: dict[str, Any],
+        *,
+        num_reqs: int,
+        num_reqs_padded: int,
+        is_dummy: bool = False,
+    ) -> None:
+        """Add PLE inputs to the legacy Model Runner V1 forward contract."""
+        text_config = getattr(self.model_config, "hf_text_config", None)
+        if text_config is None:
+            return
+        if not getattr(text_config, "ple_layer_ids", None):
+            return
+
+        context_len = int(text_config.ngram_size) - 1
+        if context_len <= 0:
+            raise ValueError("Qwen4Exp PLE requires ngram_size >= 2")
+        if not 0 < num_reqs_padded <= self.max_num_reqs:
+            raise ValueError(
+                "Qwen4Exp PLE num_reqs_padded must be in "
+                f"[1, {self.max_num_reqs}], got {num_reqs_padded}"
+            )
+
+        runtime_query_start_loc = model_kwargs.get("query_start_loc")
+        if runtime_query_start_loc is None:
+            runtime_query_start_loc = self.query_start_loc.gpu[
+                : num_reqs_padded + 1
+            ]
+        runtime_query_start_loc = runtime_query_start_loc[: num_reqs_padded + 1]
+
+        runtime_context = model_kwargs.get("ngram_context")
+        if runtime_context is None:
+            eos_token_id = int(text_config.eos_token_id)
+            context_cpu = np.full(
+                (num_reqs_padded, context_len),
+                eos_token_id,
+                dtype=np.int32,
+            )
+            if not is_dummy:
+                for req_idx in range(num_reqs):
+                    context_end = int(
+                        self.input_batch.num_computed_tokens_cpu[req_idx]
+                    )
+                    context_start = max(0, context_end - context_len)
+                    tokens = self.input_batch.token_ids_cpu[
+                        req_idx, context_start:context_end
+                    ]
+                    if len(tokens) > 0:
+                        context_cpu[req_idx, -len(tokens) :] = tokens
+            runtime_context = torch.from_numpy(context_cpu)
+        elif (
+            runtime_context.shape != (num_reqs_padded, context_len)
+            or runtime_context.dtype != torch.int32
+        ):
+            raise ValueError(
+                "Qwen4Exp PLE ngram_context must have shape "
+                f"({num_reqs_padded}, {context_len}) and dtype torch.int32, "
+                f"got shape={tuple(runtime_context.shape)}, "
+                f"dtype={runtime_context.dtype}"
+            )
+
+        buffer = self._qwen4_exp_ngram_context_buffer
+        expected_buffer_shape = (self.max_num_reqs, context_len)
+        if buffer is None:
+            buffer = torch.empty(
+                expected_buffer_shape,
+                dtype=torch.int32,
+                device=self.device,
+            )
+            self._qwen4_exp_ngram_context_buffer = buffer
+        elif (
+            buffer.shape != expected_buffer_shape
+            or buffer.dtype != torch.int32
+            or buffer.device != self.device
+        ):
+            raise RuntimeError(
+                "Qwen4Exp PLE persistent ngram_context buffer changed "
+                f"unexpectedly: shape={tuple(buffer.shape)}, "
+                f"dtype={buffer.dtype}, device={buffer.device}"
+            )
+
+        query_start_loc_buffer = self._qwen4_exp_query_start_loc_buffer
+        expected_query_start_loc_shape = (self.max_num_reqs + 1,)
+        if query_start_loc_buffer is None:
+            query_start_loc_buffer = torch.empty(
+                expected_query_start_loc_shape,
+                dtype=torch.int32,
+                device=self.device,
+            )
+            self._qwen4_exp_query_start_loc_buffer = query_start_loc_buffer
+        elif (
+            query_start_loc_buffer.shape != expected_query_start_loc_shape
+            or query_start_loc_buffer.dtype != torch.int32
+            or query_start_loc_buffer.device != self.device
+        ):
+            raise RuntimeError(
+                "Qwen4Exp PLE persistent query_start_loc buffer changed "
+                f"unexpectedly: shape={tuple(query_start_loc_buffer.shape)}, "
+                f"dtype={query_start_loc_buffer.dtype}, "
+                f"device={query_start_loc_buffer.device}"
+            )
+
+        static_context, static_query_start_loc = _pad_qwen4_exp_ple_graph_inputs(
+            buffer,
+            query_start_loc_buffer,
+            runtime_context.to(device=self.device, dtype=torch.int32),
+            runtime_query_start_loc.to(device=self.device, dtype=torch.int32),
+            num_reqs_padded,
+            int(text_config.eos_token_id),
+        )
+        model_kwargs["ngram_context"] = static_context
+        model_kwargs["query_start_loc"] = static_query_start_loc
+
     def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
         # Pad tokens to multiple of tensor_parallel_size when
         # enabled collective fusion for SP
@@ -3785,13 +3986,22 @@ class NPUModelRunner(GPUModelRunner):
                 # build per-step attention metadata for the active MTP layer.
                 self.drafter.set_per_group_attn_metadata(
                     kv_cache_gid, cm.block_table_tensor, cm.slot_mapping)
-            elif self.speculative_config and isinstance(self.drafter, AscendGemma4Proposer):
-                self.drafter.set_per_group_block_table(kv_cache_gid, cm.block_table_tensor)
+            elif self.speculative_config and isinstance(
+                self.drafter,
+                SupportsPerGroupBlockTables,
+            ):
+                self.drafter.set_per_group_block_table(
+                    kv_cache_gid,
+                    cm.block_table_tensor,
+                )
             if self.speculative_config and spec_decode_common_attn_metadata is None:
                 if isinstance(
                     self.drafter,
-                    AscendEagleProposer | AscendGemma4Proposer
-                    | AscendDraftModelProposer | AscendDflashProposer | AscendDSparkProposer,
+                    AscendEagleProposer
+                    | AscendDraftModelProposer
+                    | AscendDflashProposer
+                    | AscendDSparkProposer
+                    | SupportsPerGroupBlockTables,
                 ):
                     if self.drafter.attn_layer_names[0] in kv_cache_group.layer_names:
                         spec_decode_common_attn_metadata = cm
@@ -4193,8 +4403,20 @@ class NPUModelRunner(GPUModelRunner):
                 if not is_graph_capturing and self.ascend_config.enable_force_eplb \
                     and self.vllm_config.model_config.is_moe:
                     build_force_eplb_topk(self.device, self.max_num_tokens)
+                model_kwargs: dict[str, Any] = {}
+                self._maybe_add_qwen4_exp_ple_inputs(
+                    model_kwargs,
+                    num_reqs=num_reqs,
+                    num_reqs_padded=num_reqs_padded,
+                    is_dummy=True,
+                )
                 outputs = self._model_forward(
-                    num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds
+                    num_tokens_padded,
+                    input_ids,
+                    positions,
+                    intermediate_tensors,
+                    inputs_embeds,
+                    **model_kwargs,
                 )
             if active_device_metadata_executor is not None and active_device_metadata_executor.submission_in_flight:
                 active_device_metadata_executor.release()
@@ -4511,22 +4733,15 @@ class NPUModelRunner(GPUModelRunner):
         ):
             assert isinstance(
                 self.drafter,
-                AscendEagleProposer
-                | AscendGemma4Proposer
-                | AscendDflashProposer
-                | AscendDSparkProposer
-                | AscendDraftModelProposer,
+                SupportsAttentionBackendInitialization,
             )
-            kernel_block_sizes = self.kernel_block_sizes
-            if isinstance(self.drafter, AscendDSparkProposer):
-                sizes = kernel_block_sizes if isinstance(kernel_block_sizes, list) else [kernel_block_sizes]
-                draft_kernel_block_sizes = [
-                    int(size[0] if isinstance(size, (list, tuple)) else size) for size in sizes
-                ]
-            else:
-                draft_kernel_block_sizes = (
-                    kernel_block_sizes[0] if isinstance(kernel_block_sizes, list) else kernel_block_sizes
-                )
+            draft_kernel_block_sizes = _resolve_draft_kernel_block_sizes(
+                self.kernel_block_sizes,
+                per_group=isinstance(
+                    self.drafter,
+                    SupportsPerGroupKernelBlockSizes,
+                ),
+            )
             self.drafter.initialize_attn_backend(kv_cache_config, draft_kernel_block_sizes)
 
         if (
@@ -6057,7 +6272,7 @@ class NPUModelRunner(GPUModelRunner):
         ):
             assert isinstance(
                 self.drafter,
-                AscendEagleProposer | AscendDflashProposer | AscendExtractHiddenStatesProposer | AscendGemma4Proposer,
+                SupportsCUDAGraphInitialization,
             )
             self.drafter.initialize_cudagraph_keys(cudagraph_mode)
 
