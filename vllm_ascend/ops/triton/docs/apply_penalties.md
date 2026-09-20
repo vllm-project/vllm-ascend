@@ -9,14 +9,14 @@
     - `logits[i, v] = logits[i, v] / p if logits[i, v] > 0 else logits[i, v] * p`
     - `logits[i, v] -= frequency_penalties[i] * output_bin_counts[i, v]`
     - `logits[i, v] -= presence_penalties[i] * output_mask[i, v]`
-- **Algorithm flow** (processed row by row, independently):
+- **Algorithm flow** (independent sequence/vocabulary tiles):
   1. `get_token_bin_counts_and_mask_triton(prompt_tokens_tensor, vocab_size, num_seqs)` builds the prompt occurrence mask; the same helper is called again on `output_tokens_tensor` to build both the output mask and the output bin counts.
      - Grid: `grid_size = min(num_vectorcore, total_blocks)` where `total_blocks = num_seqs * ceil(seq_len / SEQ_BLOCK)` and `SEQ_BLOCK = 256`; each program walks its blocks with a grid-stride loop, which keeps the launch within the Triton-Ascend `coreDim` limit of 65535.
      - Per block: load `SEQ_BLOCK` token ids, keep only ids inside `[vocab_start_idx, vocab_start_idx + vocab_size)`, and `tl.atomic_add` 1 into the row histogram. Addresses of masked-out lanes are clamped to index 0 so no out-of-range address is formed. `vocab_start_idx = tp_rank * vocab_size` is non-zero only in reduce-sample (compressed-vocabulary) mode.
      - `mask = bin_counts > 0` is derived on the host side.
   2. `apply_all_penalties_kernel` updates the logits.
-     - Grid: `grid = (min(num_seqs, num_vectorcore), 1, 1)`; each program handles `ceil(num_seqs / num_programs)` consecutive sequences.
-     - Per sequence: load the three scalar penalties once, then sweep the vocabulary in `BLOCK_SIZE = 2048` tiles. For each tile, apply the repetition scaling (`1/p` for positive logits, `p` otherwise), subtract `frequency_penalty * output_bin_counts`, subtract `presence_penalty * output_mask`, and store back in place.
+     - Grid: `grid = (min(num_seqs * ceil(vocab_size / BLOCK_SIZE), num_vectorcore), 1, 1)` with `BLOCK_SIZE = 2048`. A grid-stride loop distributes the independent sequence/vocabulary tiles across vector cores, including when there is only one sequence.
+     - Per tile: load the sequence's three scalar penalties, apply the repetition scaling (`1/p` for positive logits, `p` otherwise), subtract `frequency_penalty * output_bin_counts`, subtract `presence_penalty * output_mask`, and store back in place. Vocabulary tails are masked.
 - **Supported modes**: Atlas A2, Atlas A3, and 950PR&950DT Products. Used by `AscendSampler.apply_penalties` (`vllm_ascend/sample/sampler.py`) and by the rejection sampler (`vllm_ascend/sample/rejection_sampler.py`); it runs in the sampling stage after the model forward and is therefore outside the ACL graph capture region. When Triton is unavailable (`HAS_TRITON` is false), `AscendSampler` falls back to the default vLLM implementation.
 
 ## Parameters
@@ -35,7 +35,7 @@
 - `logits` must be 2-D `[num_seqs, vocab_size]`; `num_seqs` must match the first dimension of the two token tensors and the length of the three penalty tensors. The kernel reads the strides of every tensor, so non-contiguous `logits` is supported; `tokens` is made contiguous on the host side if needed.
 - Padding contract: any token id `>= vocab_size` is ignored. Callers must pad with `vocab_size` (not `-1`); `vllm_ascend/sample/penalties.py` converts `-1` to `vocab_size` before the call. Negative ids other than `-1` are not handled.
 - `max_prompt_len` or `max_output_len` equal to 0 is supported: `get_token_bin_counts_and_mask_triton` returns an all-zero histogram without launching a kernel.
-- `num_seqs == 0` is **not** supported. The histogram helpers do return early, but `_apply_all_penalties_triton` still launches with `grid = (min(num_seqs, num_vectorcore), 1, 1)`, i.e. a zero-sized launch. Callers must skip the call for an empty batch; in serving the sampler is never invoked with zero sequences.
+- The penalty-update helper returns without launching a kernel when `num_seqs == 0` or `vocab_size == 0`.
 - `repetition_penalties` must be `> 0`; the kernel divides by it for positive logits. vLLM validates this at the request level (`repetition_penalty > 0`).
 - The intermediate `bin_counts` is `int32` and is allocated as `[num_seqs, vocab_size]` per token tensor, so peak memory scales with `num_seqs * vocab_size * 4` bytes twice over.
 - `BLOCK_SIZE` (2048) and `SEQ_BLOCK` (256) are compile-time `constexpr`; `vocab_size` and `seq_len` are handled by masked tiles, so no shape needs to be a multiple of them.
@@ -56,4 +56,16 @@ The accuracy test compares this operator against `vllm.v1.sample.ops.penalties.a
 
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_apply_penalties_triton.py
+```
+
+The kernel-level regression test covers vocabulary tile boundaries, strided tensors, empty updates, and all three logits dtypes against a CPU reference:
+
+```bash
+pytest -sv tests/e2e/pull_request/one_card/test_penalty_update.py
+```
+
+To compare the penalty-update latency on two revisions with the same hardware:
+
+```bash
+python benchmarks/penalty_update.py --batches 1 4 16 64 --vocab-sizes 32000 151936 248320
 ```
