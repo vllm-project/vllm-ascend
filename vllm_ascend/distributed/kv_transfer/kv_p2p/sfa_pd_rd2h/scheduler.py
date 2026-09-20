@@ -35,7 +35,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.nano_topk_slots import (
     NanoTopkSlotAllocator,
     nano_pool_capacity,
-    nano_tail_geometry,
+    nano_prefill_dest_geometry,
 )
 
 if TYPE_CHECKING:
@@ -277,9 +277,10 @@ class SFAPDRD2HScheduler:
         # time, forwarded to the worker via build_connector_meta, and dropped
         # when the request finishes (vLLM owns the blocks themselves).
         self._request_trackers: dict[str, tuple[list[int], list[int]]] = {}
-        # req_id -> (pool_slot, tail_tokens, tail_block_index, kv_tokens)
-        self._nano_bindings: dict[str, tuple[int, int, int, int]] = {}
+        # req_id -> (pool_slot, tail_tokens, tail_block_index, kv_tokens, dense)
+        self._nano_bindings: dict[str, tuple[int, int, int, int, bool]] = {}
         self.main_block_size = self.block_size[self.main_group_idx]
+        self._nano_hot_tokens = self._resolve_nano_hot_tokens()
         self._nano_slot_allocator = self._try_create_nano_slot_allocator(vllm_config)
         # req_ids awaiting their first build_connector_meta seed (so the worker
         # can build request_map for get_finished even while async-waiting KV).
@@ -332,13 +333,16 @@ class SFAPDRD2HScheduler:
                 prompt_token_ids = getattr(request, "prompt_token_ids", None) or []
                 kv_tokens = len(prompt_token_ids)
             block_size = getattr(self, "main_block_size", None) or min(self.block_size)
-            tail_tokens, tail_block_index = nano_tail_geometry(kv_tokens, block_size)
+            dense, tail_tokens, tail_block_index = nano_prefill_dest_geometry(
+                kv_tokens, block_size, getattr(self, "_nano_hot_tokens", 0)
+            )
             pool_slot = allocator.bind(request.request_id)
             self._nano_bindings[request.request_id] = (
                 pool_slot,
                 tail_tokens,
                 tail_block_index,
                 kv_tokens,
+                dense,
             )
 
         # Notify P via the metaserver rendezvous that D is ready to pull this
@@ -395,7 +399,7 @@ class SFAPDRD2HScheduler:
             if binding is None:
                 meta.add_request(req_id, main_block_ids, indexer_block_ids)
             else:
-                pool_slot, tail_tokens, tail_block_index, kv_tokens = binding
+                pool_slot, tail_tokens, tail_block_index, kv_tokens, dense = binding
                 meta.add_request(
                     req_id,
                     main_block_ids,
@@ -404,6 +408,7 @@ class SFAPDRD2HScheduler:
                     tail_tokens=tail_tokens,
                     tail_block_index=tail_block_index,
                     kv_tokens=kv_tokens,
+                    dense=dense,
                 )
         self._reqs_need_recv.clear()
         return meta
@@ -438,6 +443,17 @@ class SFAPDRD2HScheduler:
     # ------------------------------------------------------------------
     # helpers
     # ------------------------------------------------------------------
+    @staticmethod
+    def _resolve_nano_hot_tokens() -> int:
+        try:
+            from vllm_ascend.ascend_config import get_ascend_config
+
+            if not get_ascend_config().sparse_kv_offload_config.use_nano:
+                return 0
+            return int(get_ascend_config().sparse_kv_offload_config.topk_buffer_size)
+        except Exception:
+            return 0
+
     @staticmethod
     def _try_create_nano_slot_allocator(vllm_config: VllmConfig) -> NanoTopkSlotAllocator | None:
         try:

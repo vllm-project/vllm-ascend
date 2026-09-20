@@ -3361,13 +3361,9 @@ class NPUModelRunner(GPUModelRunner):
         )
         has_lora = num_active_loras > 0 if force_has_lora is None else force_has_lora
 
-        nano_requires_eager = (
-            self.sparse_kv_offload_enabled and self.sparse_kv_offload_config.use_nano
-            and force_uniform_decode is None and not self._nano_batch_eligible(num_reqs)
-        )
         # ruff: noqa: E731
         def dispatch_cudagraph(num_tokens, disable_full=False, valid_modes=None):
-            if force_eager or nano_requires_eager:
+            if force_eager:
                 return (CUDAGraphMode.NONE, BatchDescriptor(num_tokens_padded))
 
             return self.cudagraph_dispatcher.dispatch(
@@ -3427,13 +3423,6 @@ class NPUModelRunner(GPUModelRunner):
             cudagraph_stats,
         )
 
-    def _nano_batch_eligible(self, num_reqs: int) -> bool:
-        # Prompt lengths are immutable lower bounds in decode. Keep short
-        # prompts on the existing eager offload path, even if generation later
-        # grows them past TopK. This avoids reading rejection-adjusted lengths
-        # back from the device merely to choose a graph specialization.
-        return bool(np.all(self.input_batch.num_prompt_tokens[:num_reqs] >= 2048 + 128 + 7))
-
     def _prebound_nano_slots(self) -> dict[str, int]:
         if not has_kv_transfer_group():
             return {}
@@ -3452,6 +3441,7 @@ class NPUModelRunner(GPUModelRunner):
         slots[:padded_reqs] = np.arange(padded_reqs, dtype=np.int32) + capacity
         generations[:padded_reqs] = -1
         self._nano_need_eager_tail_restore = False
+        dense_fills: dict[int, tuple[int, int]] = {}
         if not dummy:
             # PD binds rows at alloc time. Keep those reservations even when the
             # request is waiting for KV and is not in the current decode batch.
@@ -3464,27 +3454,78 @@ class NPUModelRunner(GPUModelRunner):
             }
             used = set(self._offload_request_slots.values()) | set(prebound.values())
             available = iter(slot for slot in range(capacity) if slot not in used)
+            computed_all = getattr(self.input_batch, "num_computed_tokens_cpu", None)
             for row, req in enumerate(self.input_batch.req_ids[:num_reqs]):
                 if req not in self._offload_request_slots:
                     slot = prebound[req] if req in prebound else next(available)
                     self._offload_request_slots[req] = slot
                     self._offload_slot_generation += 1
                     self._offload_slot_generations[slot] = self._offload_slot_generation
+                    # Fresh short rows get their full KV via the prefill-end
+                    # D2D in exec_kv; only rollbacks need the host-pool fill.
                 slot = self._offload_request_slots[req]
                 slots[row] = slot
                 generations[row] = self._offload_slot_generations[slot]
-            if prebound:
+            if computed_all is not None:
                 block_size = self.cache_config.block_size
-                computed = self.input_batch.num_computed_tokens_cpu[:num_reqs]
+                hot = self.sparse_kv_offload_config.topk_buffer_size if self.sparse_kv_offload_config else 0
                 for row in range(num_reqs):
                     slot = int(slots[row])
-                    prefix = (int(computed[row]) // block_size) * block_size
+                    prefix = (int(computed_all[row]) // block_size) * block_size
                     last_prefix = self._offload_slot_last_prefix.get(slot)
                     if last_prefix is not None and prefix < last_prefix:
-                        self._nano_need_eager_tail_restore = True
+                        if prebound:
+                            self._nano_need_eager_tail_restore = True
+                        # A rollback across the hot boundary leaves a sparse-layout
+                        # row under a dense (-3) reader: refill the whole row.
+                        if hot and last_prefix >= hot > prefix:
+                            dense_fills[slot] = (row, int(computed_all[row]))
                     self._offload_slot_last_prefix[slot] = prefix
+            if dense_fills:
+                self._dense_fill_nano_rows(dense_fills)
         self._offload_pool_slots.copy_to_gpu(padded_reqs)
         self._offload_pool_generations.copy_to_gpu(padded_reqs)
+
+    def _dense_fill_nano_rows(self, dense_fills: dict[int, tuple[int, int]]) -> None:
+        """Copy whole short rows from the CPU pool into their topk-buffer rows.
+
+        Rollback-only safety net: a rollback across the hot boundary leaves a
+        sparse-layout row under a dense (-3) reader, and the paged cache is
+        stale beyond the prompt, so the refill must come from the CPU pool.
+        Runs outside the captured graph at metadata-build time; the per-layer
+        host/device bases were pinned by ``bind_nano_kv_cache``.
+        """
+        manager = self.sparse_kv_offload_manager
+        assert manager is not None
+        block_size = self.cache_config.block_size
+        block_table = self.input_batch.block_table[0].get_numpy_array()
+        topk_k = manager.topk_buffers_k[0]
+        stride_tokens = topk_k.shape[1]
+        token_bytes = torch.tensor(
+            [[topk_k.element_size() * topk_k.shape[-1]],
+             [manager.topk_buffers_v[0].element_size() * manager.topk_buffers_v[0].shape[-1]]],
+            dtype=torch.int64,
+            device=topk_k.device,
+        )
+        for slot, (row, computed) in dense_fills.items():
+            nblocks = (computed + block_size - 1) // block_size
+            src_tokens = torch.tensor(
+                [int(block_table[row, b]) * block_size for b in range(nblocks)], dtype=torch.int64
+            ).to(topk_k.device)
+            lengths = torch.clamp(
+                torch.arange(nblocks, dtype=torch.int64, device=topk_k.device) * (-block_size) + computed,
+                min=0,
+                max=block_size,
+            )
+            src_offsets = src_tokens.view(1, -1).expand(2, -1) * token_bytes
+            dst_block_tokens = torch.arange(nblocks, dtype=torch.int64, device=topk_k.device) * block_size
+            dst_offsets = (slot * stride_tokens + dst_block_tokens.view(1, -1).expand(2, -1)) * token_bytes
+            lengths_bytes = lengths.view(1, -1).expand(2, -1) * token_bytes
+            count = torch.full((1,), 2 * nblocks, dtype=torch.int32, device=topk_k.device)
+            for host_bases, device_bases in zip(manager.nano_host_bases, manager.nano_device_bases):
+                sources = (src_offsets + host_bases).reshape(-1)
+                destinations = (dst_offsets + device_bases).reshape(-1)
+                manager.copy_nano_kv(sources, destinations, lengths_bytes.reshape(-1), count)
 
     def _maybe_eager_restore_nano_tails(self, attn_metadata: PerLayerAttnMetadata) -> None:
         if not self._nano_need_eager_tail_restore:
@@ -3732,8 +3773,6 @@ class NPUModelRunner(GPUModelRunner):
                                    if self._offload_pool_slots is not None else None),
             req_topk_buffer_generations=(self._offload_pool_generations.gpu[:num_reqs_padded]
                                          if self._offload_pool_generations is not None else None),
-            nano_eligible=(offload_dummy or self._nano_batch_eligible(num_reqs))
-                          if self._offload_pool_slots is not None else False,
             offload_dummy=offload_dummy,
             mm_req_doc_ranges=req_doc_ranges,
         )
