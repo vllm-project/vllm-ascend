@@ -18,9 +18,10 @@
 
 The oracle only means something while the reference server and the live-update
 lane differ in *nothing but* the load path: same dtype, graph mode, NZ layout,
-memory budget, max length, executor backend and config overrides. A future edit
-that touches one builder and not the other would silently turn the comparison
-into apples-to-oranges, so the parity and the caching contract are pinned here.
+memory budget, max length, executor backend, sleep-mode allocation pool and
+config overrides. A future edit that touches one builder and not the other would
+silently turn the comparison into apples-to-oranges, so the parity and the
+caching contract are pinned here.
 """
 
 from unittest.mock import MagicMock, patch
@@ -102,6 +103,12 @@ def test_reference_and_lane_share_the_measurement_conditions():
     ):
         assert lane[flag] == reference[flag], flag
     assert lane["--compilation-config"].startswith('{"cudagraph_mode": "FULL_DECODE_ONLY"')
+    # The one-card lane sleeps level 2 before every transfer, which only hands
+    # HBM back while the engine's weights and KV cache live in the CaMem pool.
+    # Both builders enable it so the reference is a startup load under the very
+    # same allocation pool instead of a differently-allocated one; the reference
+    # itself never sleeps.
+    assert lane["--enable-sleep-mode"] is reference["--enable-sleep-mode"] is True
 
 
 @pytest.fixture

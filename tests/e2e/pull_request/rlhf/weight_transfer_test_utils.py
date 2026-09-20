@@ -474,6 +474,13 @@ def _common_serve_args(
         "bfloat16",
         "--compilation-config",
         FULL_DECODE_ONLY_CONFIG,
+        # The one-card NPU IPC lane is a same-chip deployment: the co-located
+        # trainer only gets the HBM it needs once the rollout engine sleeps, so
+        # the lane releases the engine with a level-2 sleep before every
+        # transfer. That requires the CaMem pool, and both builders enable it so
+        # the reference stays a plain startup load of the same payload under the
+        # very same allocation pool; the reference itself never sleeps.
+        "--enable-sleep-mode",
         "--max-model-len",
         "1024",
         "--gpu-memory-utilization",

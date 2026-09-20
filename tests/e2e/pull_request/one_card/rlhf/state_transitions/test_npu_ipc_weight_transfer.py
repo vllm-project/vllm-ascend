@@ -21,6 +21,13 @@ a transfer that never ran cannot pass, and the second update covers the layerwis
 reload lifecycle, runtime/destructive representations, derived state and the
 graph-captured storage of the first update. Both packed modes exercise the same
 transaction.
+
+The lane is the same-chip deployment this backend exists for: the trainer
+payload shares the card with the rollout engine, so every round releases the
+engine's HBM with a level-2 sleep and wakes it again afterwards. Level 2
+discards the weights, so the weights allocation is mapped back *before* the
+transaction — the layerwise reload copies the payload into those very buffers —
+while the KV cache is re-allocated last, once the new weights are in place.
 """
 
 import os
@@ -58,8 +65,8 @@ GPU_MEMORY_UTILIZATION = 0.45
 INFERENCE_DEVICE_INDEX = int(os.environ.get("VLLM_RL_TEST_DEVICE_INDEX", "0"))
 
 
-def _post(server: RemoteOpenAIServer, route: str, *, json=None, timeout=CONTROL_TIMEOUT):
-    response = requests.post(server.url_for(route), json=json, timeout=timeout)
+def _post(server: RemoteOpenAIServer, route: str, *, json=None, params=None, timeout=CONTROL_TIMEOUT):
+    response = requests.post(server.url_for(route), json=json, params=params, timeout=timeout)
     response.raise_for_status()
     return response
 
@@ -133,8 +140,20 @@ def test_npu_ipc_weight_transfer_transaction(case: WeightUpdateModelCase, packed
         signatures = []
         for _ in range(2):
             _post(server, "pause")
+            # Same-chip RL: hand the engine's HBM to the co-located trainer
+            # before generating the payload. Level 2 discards the weights and the
+            # KV cache outright; `/sleep` reads its level from the query string,
+            # a JSON body is ignored.
+            _post(server, "sleep", params={"level": 2})
+            # Level 2 unmapped the weights pool and `send_weights`' layerwise
+            # reload copies the payload back into exactly those buffers, so the
+            # weights allocation has to be mapped again before the transaction.
+            # The KV cache stays asleep until the update is finished.
+            _post(server, "wake_up", params={"tags": ["weights"]})
             # send_weights owns the complete START -> LOAD -> FINISH transaction.
             engine.send_weights()
+            # The KV cache is re-allocated last, from the updated weights' state.
+            _post(server, "wake_up", params={"tags": ["kv_cache"]})
             _post(server, "resume")
             signatures.append(generation_signature(client, case.model))
 
