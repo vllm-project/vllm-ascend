@@ -25,7 +25,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.meta
     PreemptOffloadMetadata,
     PreemptOffloadWorkerMetadata,
 )
-from vllm_ascend.utils import get_kv_cache_tensor_layers
+from vllm_ascend.utils import get_kv_cache_tensor_layers, vllm_version_is
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -171,16 +171,27 @@ class PreemptOffloadScheduler:
             num_cpu_blocks = max(1, int(offload_host_memory_ratio * num_gpu_blocks))
         else:
             num_cpu_blocks = max(1, num_gpu_blocks * cpu_capacity_bytes // gpu_total_bytes)
-        cpu_tensors = [
-            KVCacheTensor(
-                size=t.size // num_gpu_blocks * num_cpu_blocks,
-                layers=list(t.layers),
-                layer_stride=t.layer_stride,
-                block_stride=t.block_stride,
-                offset=t.offset,
-            )
-            for t in gpu_kv_cache_tensors
-        ]
+        if vllm_version_is("0.28.0"):
+            cpu_tensors = [
+                KVCacheTensor(
+                    size=t.size // num_gpu_blocks * num_cpu_blocks,
+                    shared_by=list(t.shared_by),
+                    offset=t.offset,
+                    block_stride=t.block_stride,
+                )
+                for t in gpu_kv_cache_tensors
+            ]
+        else:
+            cpu_tensors = [
+                KVCacheTensor(
+                    size=t.size // num_gpu_blocks * num_cpu_blocks,
+                    layers=list(t.layers),
+                    layer_stride=t.layer_stride,
+                    block_stride=t.block_stride,
+                    offset=t.offset,
+                )
+                for t in gpu_kv_cache_tensors
+            ]
         return KVCacheConfigCls(
             num_blocks=num_cpu_blocks,
             kv_cache_tensors=cpu_tensors,

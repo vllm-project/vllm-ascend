@@ -20,7 +20,6 @@ from vllm_ascend.models.qwen3_dspark import (
     AscendQwen3DSparkForCausalLM,
     process_weight,
 )
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import (
     AscendDSparkSpeculator,
 )
@@ -260,15 +259,20 @@ def test_quarot_loaded_weights_survive_upstream_sharing(monkeypatch):
         parallel_config=SimpleNamespace(pipeline_parallel_size=1),
     )
     monkeypatch.setattr(dspark_utils, "replace", lambda obj, **kwargs: SimpleNamespace(**(vars(obj) | kwargs)))
-    # Both supported versions import model loading and sharing helpers locally.
-    monkeypatch.setattr("vllm.model_executor.model_loader.get_model", lambda **kwargs: draft)
-    monkeypatch.setattr(
-        "vllm.v1.worker.gpu.spec_decode.eagle.utils.get_pp_group", lambda: SimpleNamespace(world_size=1)
-    )
-    monkeypatch.setattr("vllm.v1.worker.gpu.spec_decode.eagle.utils.get_target_lm_head", lambda *args: target.lm_head)
-    if vllm_version_is("0.29.0"):
-        # Release retains the module-level PP guard removed on pinned main.
+    if hasattr(dspark_utils, "get_model"):
+        # v0.28 imports these helpers at module scope.
+        monkeypatch.setattr(dspark_utils, "get_model", lambda **kwargs: draft)
         monkeypatch.setattr(dspark_utils, "get_pp_group", lambda: SimpleNamespace(world_size=1))
+        monkeypatch.setattr(dspark_utils, "get_target_lm_head", lambda *args: target.lm_head)
+    else:
+        # Main imports the helpers inside load_dspark_model.
+        monkeypatch.setattr("vllm.model_executor.model_loader.get_model", lambda **kwargs: draft)
+        monkeypatch.setattr(
+            "vllm.v1.worker.gpu.spec_decode.eagle.utils.get_pp_group", lambda: SimpleNamespace(world_size=1)
+        )
+        monkeypatch.setattr(
+            "vllm.v1.worker.gpu.spec_decode.eagle.utils.get_target_lm_head", lambda *args: target.lm_head
+        )
     monkeypatch.setattr("vllm.compilation.backends.set_model_tag", lambda *args: nullcontext())
     monkeypatch.setattr("vllm.model_executor.models.qwen3_dflash.dflash_has_any_non_causal", lambda config: False)
     monkeypatch.setattr("vllm.model_executor.models.utils.get_draft_quant_config", lambda config: None)

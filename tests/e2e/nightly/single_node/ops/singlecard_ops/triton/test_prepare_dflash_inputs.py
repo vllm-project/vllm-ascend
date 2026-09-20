@@ -3,6 +3,7 @@ import gc
 import torch
 
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
     _prepare_dflash_inputs_kernel_ascend,
 )
@@ -56,7 +57,8 @@ def test_prepare_dflash_inputs_clamps_seq_len_to_max_model_len():
         "PAD_SLOT_ID": -1,
         "BLOCK_SIZE": 1,
     }
-    kwargs.update(cp_rank=0, CP_SIZE=1, CP_INTERLEAVE=1)
+    if not vllm_version_is("0.28.0"):
+        kwargs.update(cp_rank=0, CP_SIZE=1, CP_INTERLEAVE=1)
 
     _prepare_dflash_inputs_kernel_ascend[(1, 1)](**kwargs)
 

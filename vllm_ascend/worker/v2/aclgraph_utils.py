@@ -38,8 +38,16 @@ from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.compilation.acl_graph import set_graph_params, update_full_graph_params
+from vllm_ascend.compilation.acl_graph import (
+    set_graph_params,
+    update_full_graph_params,
+)
 from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
+from vllm_ascend.compilation.updatable_graph import (
+    ContextSource,
+    UpdatableGraph,
+)
+from vllm_ascend.utils import use_updatable_graph, vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.utils import communicator_switch
 
@@ -152,6 +160,17 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         num_tokens = desc.num_tokens
         logger.info_once("run_fullgraph with num_tokens=%s", num_tokens)
         assert self.update_stream is not None
+        with set_current_vllm_config(self.vllm_config):
+            attn_backend = _get_graph_update_backend(self.model_runner.attn_groups)
+        attn_metadata = self.model_runner.model_state.attn_metadata
+
+        if use_updatable_graph(attn_backend):
+            return self._updatable_graph_replay(desc, attn_metadata)
+        else:
+            # This will be removed once the refactoring is fully complete.
+            return self._graph_relay(attn_backend, desc, num_tokens, attn_metadata)
+
+    def _graph_relay(self, attn_backend, desc, num_tokens, attn_metadata):
         self.update_stream.wait_stream(torch.npu.current_stream())
         ret = super().run_fullgraph(desc)
 
@@ -167,7 +186,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         with (
             set_current_vllm_config(self.vllm_config),
             set_forward_context(
-                self.model_runner.model_state.attn_metadata,
+                attn_metadata,
                 self.vllm_config,
                 num_tokens=num_tokens,
                 cudagraph_runtime_mode=desc.cg_mode,
@@ -177,7 +196,6 @@ class ModelAclGraphManager(ModelCudaGraphManager):
             ),
         ):
             forward_context = get_forward_context()
-            attn_backend = _get_graph_update_backend(self.model_runner.attn_groups)
             update_full_graph_params(
                 # FIXME(Ronald1995): support hybrid attn backend
                 attn_backend,
@@ -187,6 +205,15 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                 self.vllm_config,
                 self.model_runner.speculative_config,
             )
+        return ret
+
+    def _updatable_graph_replay(self, desc, attn_metadata):
+        graph = self.graphs[desc]
+        assert isinstance(graph, UpdatableGraph)
+        resolved_tasks = graph.resolve_tasks(ContextSource(attn_metadata))
+        self.update_stream.wait_stream(torch.npu.current_stream())
+        ret = super().run_fullgraph(desc)
+        graph.update(self.update_stream, resolved_tasks)
         return ret
 
     def capture(
@@ -214,6 +241,23 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                 pcp_manager=pcp_manager,
             )
         with communicator_switch():
+            # vLLM #53869 added pcp_manager to ModelCudaGraphManager.capture on
+            # main; v0.28.0 still uses the older signature without that kwarg.
+            if not vllm_version_is("0.28.0"):
+                return super().capture(
+                    model,
+                    model_state,
+                    input_buffers,
+                    intermediate_tensors,
+                    block_tables,
+                    attn_groups,
+                    kv_cache_config,
+                    pcp_manager=pcp_manager,
+                    has_lora=has_lora,
+                    use_aux_hidden_state_outputs=use_aux_hidden_state_outputs,
+                    lora_capture_hook=lora_capture_hook,
+                    progress_bar_desc=progress_bar_desc,
+                )
             return super().capture(
                 model,
                 model_state,
@@ -222,7 +266,6 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                 block_tables,
                 attn_groups,
                 kv_cache_config,
-                pcp_manager=pcp_manager,
                 has_lora=has_lora,
                 use_aux_hidden_state_outputs=use_aux_hidden_state_outputs,
                 lora_capture_hook=lora_capture_hook,
