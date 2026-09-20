@@ -32,8 +32,7 @@ The example performs the following steps:
   is expected to be nonsense because the server is initialized with dummy weights.
 * Initialize weight transfer via HTTP endpoint (no-op for NPU IPC).
 * Pause generation and broadcast the real weights from the training model to
-  the vLLM server using NPU IPC handles (via HTTP). The pause/resume is
-  handled by ``trainer_send_weights`` — it calls ``update_weights`` internally.
+  the vLLM server using NPU IPC handles (via HTTP).
 * Generate text again to show normal output after the weight update.
 """
 
