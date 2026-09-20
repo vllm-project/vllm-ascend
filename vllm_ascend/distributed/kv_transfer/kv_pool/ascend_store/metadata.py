@@ -20,8 +20,19 @@ def make_layerwise_block_key(
     model_name: str,
     block_hash_or_tail: str,
     head_or_tp_rank: int,
+    group_id: int = 0,
+    num_groups: int = 1,
 ) -> str:
-    """Build the canonical one-object-per-block-and-saving-rank key."""
+    """Build the canonical one-object-per-block-and-saving-rank key.
+
+    For hybrid (multi-group) KV cache layouts the group id is embedded in the
+    key: different groups hold different cache specs (e.g. full attention vs
+    GDN state) whose per-block objects must not collide, even when their
+    block-hash chains coincide at shared block boundaries. Single-group models
+    keep the historical key format.
+    """
+    if num_groups > 1:
+        return f"{model_name}@g{group_id}@{block_hash_or_tail}@{head_or_tp_rank}"
     return f"{model_name}@{block_hash_or_tail}@{head_or_tp_rank}"
 
 
@@ -1047,6 +1058,15 @@ class ReqMeta:
         self.load_key_block_offset = load_key_block_offset
         self.load_last_block_key = load_last_block_key
         self.load_keys = [] if load_keys is None else list(load_keys)
+        # Per-group mirrors of the block-key session fields above. Populated by
+        # the worker's Mooncake session prep; the flat fields above keep the
+        # group-0 view for single-group / legacy consumers.
+        self.save_block_keys_by_group: list[list[str | None]] = []
+        self.save_key_block_offset_by_group: list[int] = []
+        self.save_last_block_key_by_group: list[str | None] = []
+        self.load_block_keys_by_group: list[list[str | None]] = []
+        self.load_key_block_offset_by_group: list[int] = []
+        self.load_last_block_key_by_group: list[str | None] = []
 
     @property
     def block_ids(self) -> list[int]:
@@ -1066,6 +1086,12 @@ class ReqMeta:
     load_block_keys: list[str | None] = field(default_factory=list)
     load_key_block_offset: int = 0
     load_last_block_key: str | None = None
+    save_block_keys_by_group: list[list[str | None]] = field(default_factory=list)
+    save_key_block_offset_by_group: list[int] = field(default_factory=list)
+    save_last_block_key_by_group: list[str | None] = field(default_factory=list)
+    load_block_keys_by_group: list[list[str | None]] = field(default_factory=list)
+    load_key_block_offset_by_group: list[int] = field(default_factory=list)
+    load_last_block_key_by_group: list[str | None] = field(default_factory=list)
 
     block_ids_np: np.ndarray | None = None
     block_ids_by_group_np: list[np.ndarray] | None = None
