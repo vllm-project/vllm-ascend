@@ -68,16 +68,30 @@ def _patch_model_runner_output() -> None:
 
     model_runner_output_cls = outputs_mod.ModelRunnerOutput
     fields = getattr(model_runner_output_cls, "__dataclass_fields__", {})
-    if "spec_token_ids" not in fields:
+    needs_spec_tokens = "spec_token_ids" not in fields
+    needs_physical_k = "physical_k_recommendation" not in fields
+    if needs_spec_tokens:
         model_runner_output_cls.spec_token_ids = None
+    if needs_physical_k:
+        model_runner_output_cls.physical_k_recommendation = None
+    if needs_spec_tokens or needs_physical_k:
         original_init = model_runner_output_cls.__init__
         if getattr(original_init, "_vllm_ascend_pp_mtp_patched", False):
             return
 
         @wraps(original_init)
-        def _patched_init(self, *args, spec_token_ids=None, **kwargs):
+        def _patched_init(
+            self,
+            *args,
+            spec_token_ids=None,
+            physical_k_recommendation=None,
+            **kwargs,
+        ):
             original_init(self, *args, **kwargs)
-            self.spec_token_ids = spec_token_ids
+            if needs_spec_tokens:
+                self.spec_token_ids = spec_token_ids
+            if needs_physical_k:
+                self.physical_k_recommendation = physical_k_recommendation
 
         _patched_init._vllm_ascend_pp_mtp_patched = True  # type: ignore[attr-defined]
         model_runner_output_cls.__init__ = _patched_init
@@ -85,6 +99,8 @@ def _patch_model_runner_output() -> None:
     empty_output = outputs_mod.EMPTY_MODEL_RUNNER_OUTPUT
     if not hasattr(empty_output, "spec_token_ids"):
         empty_output.spec_token_ids = None
+    if not hasattr(empty_output, "physical_k_recommendation"):
+        empty_output.physical_k_recommendation = None
 
 
 def _patch_engine_core() -> None:

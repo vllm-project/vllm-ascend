@@ -306,6 +306,16 @@ class NPUModelRunner(GPUModelRunner):
             pcp_manager._sampling_hidden_restored = False
         self._restore_replicated_draft_target_states()
         output = super().sample_tokens(grammar_output)
+        manager = getattr(self, "adaptive_verification", None)
+        recommendation = getattr(manager, "_physical_k_recommendation", None)
+        if manager is not None:
+            manager._physical_k_recommendation = None
+        output_container = getattr(output, "model_runner_output", output)
+        if output_container is not None and hasattr(
+            output_container,
+            "physical_k_recommendation",
+        ):
+            output_container.physical_k_recommendation = recommendation
         if self.use_spec_pp and self.is_last_pp_rank:
             assert self.pp_handler is not None
             self.pp_handler.broadcast_drafts()
@@ -319,6 +329,7 @@ class NPUModelRunner(GPUModelRunner):
         with graph_manager_wrapper(self), adaptive_verification_gate_wrapper(
             vllm_model_runner,
             self.compilation_config.cudagraph_mode,
+            self.vllm_config,
         ):
             super().initialize_kv_cache(
                 kv_cache_config,
@@ -920,6 +931,11 @@ class NPUModelRunner(GPUModelRunner):
         """Balanced dummy routing for adaptive-verification profiling; EPLB
         steps via ``step_eplb_after`` (#17233). The lmhead TP join lives in the
         ``execute_model`` tail — joining after ``super()._dummy_run`` deadlocks."""
+        from vllm_ascend.worker.v2.spec_decode.physical_k_profile import (
+            physical_k_profile_scope,
+        )
+
+        profile_physical_k = kwargs.pop("profile_physical_k", None)
         skip_ring = bool(kwargs.pop("skip_gdn_state_update", False))
         # Adaptive verification profiles eager tail sizes after graph capture.
         # Use balanced dummy routing, as the initial memory profile does, so a
@@ -932,7 +948,12 @@ class NPUModelRunner(GPUModelRunner):
                 "the profile-run marker, which makes XLite bypass its graph path."
             )
         load_balance_ctx = override_mrv2_in_profile_run(True) if profile_adaptive_tail else nullcontext()
-        with self._cap_parallel_draft_dummy_reqs(uniform_decode), skip_ring_state_update(skip_ring), load_balance_ctx:
+        with (
+            physical_k_profile_scope(profile_physical_k),
+            self._cap_parallel_draft_dummy_reqs(uniform_decode),
+            skip_ring_state_update(skip_ring),
+            load_balance_ctx,
+        ):
             return super()._dummy_run(
                 num_tokens,
                 *args,
