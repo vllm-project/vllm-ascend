@@ -18,6 +18,7 @@
 #
 
 from contextlib import AbstractContextManager, contextmanager
+from contextvars import ContextVar
 
 import numpy as np
 import torch
@@ -31,6 +32,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import (
     combine_sampled_and_draft_tokens,
     expand_idx_mapping,
@@ -62,7 +64,7 @@ from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import lmhead_tp_enable, set_potential_max_tokens, vllm_version_is
 from vllm_ascend.worker.utils import disable_compilation
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
-from vllm_ascend.worker.v2.attn_utils import build_attn_state, unwrap_mamba_kv_cache_groups
+from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
@@ -71,13 +73,14 @@ from vllm_ascend.worker.v2.pp_utils import (
     bypass_upstream_spec_pp_guard,
     resolve_spec_pp_support,
     restore_pp_after_upstream_init,
+    use_legacy_spec_pp,
 )
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 
-if vllm_version_is("0.28.0"):
+if vllm_version_is("0.29.0"):
     from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 
 
@@ -103,15 +106,16 @@ class NPUModelRunner(GPUModelRunner):
         set_potential_max_tokens(vllm_config)
         parallel_config = vllm_config.parallel_config
 
-        # Eagle3/DSpark drafters are rank-local. Hide PP from the upstream
-        # initializer, then rebuild the skipped PP state.
+        # Only release versions need PP hidden during upstream initialization.
         spec_pp_support = resolve_spec_pp_support(vllm_config)
         with torch_cuda_wrapper():
             with bypass_upstream_spec_pp_guard(vllm_config, spec_pp_support) as pp_disabled:
                 super().__init__(vllm_config, device)
             if pp_disabled:
                 restore_pp_after_upstream_init(self, vllm_config)
-        self.use_spec_pp = spec_pp_support is not None
+        # Native PP owns token broadcast/writeback; only releases use our packing.
+        # Legacy Spec+PP transport (0.28/0.29 only); deleted when 0.30+ is the floor.
+        self.use_spec_pp = spec_pp_support is not None and use_legacy_spec_pp()
         # These draft heads consume target aux states collected across PP ranks.
         if spec_pp_support is not None and spec_pp_support.needs_aux_hidden_states:
             self.use_aux_hidden_state_outputs = True
@@ -145,7 +149,7 @@ class NPUModelRunner(GPUModelRunner):
         # init_speculator will return AscendEagleSpeculator when eagle is used.
         # so here we just call init_speculator to reinitialize speculator.
         self.speculator: AscendEagleSpeculator | None = None
-        if self.speculative_config is not None and (not self.use_spec_pp or self.is_last_pp_rank):
+        if self.speculative_config is not None and self.is_last_pp_rank:
             self.speculator = init_speculator(self.vllm_config, self.device)
             # Shared update_stream: main model (ModelAclGraphManager) and draft
             # (Eagle/DFlash/DSpark AclGraphManager) all use this same stream.
@@ -161,13 +165,13 @@ class NPUModelRunner(GPUModelRunner):
             vocab_size=self.vocab_size,
             device=self.device,
         )
-        if self.use_spec_pp and vllm_version_is("0.28.0"):
+        if self.use_spec_pp:
             from vllm_ascend.patch.worker.patch_v2.patch_spec_pp import (
-                install_spec_pp_token_broadcast,
+                install_upstream_spec_pp_protocol,
             )
 
             assert self.pp_handler is not None
-            install_spec_pp_token_broadcast(self.pp_handler, self.req_states)
+            install_upstream_spec_pp_protocol(self.pp_handler, self.req_states, self.num_speculative_steps)
         # AscendInputBuffers has extra `seq_lens_cpu` attribute.
         # so reinitialize input_buffers here.
         self.input_buffers: AscendInputBuffers = AscendInputBuffers(
@@ -242,9 +246,9 @@ class NPUModelRunner(GPUModelRunner):
 
         self._restore_replicated_draft_target_states()
         output = super().sample_tokens(grammar_output)
-        if vllm_version_is("0.28.0") and self.use_spec_pp and self.is_last_pp_rank:
+        if self.use_spec_pp and self.is_last_pp_rank:
             assert self.pp_handler is not None
-            self.pp_handler.broadcast_draft_tokens()
+            self.pp_handler.broadcast_drafts()
         return output
 
     def initialize_kv_cache(
@@ -252,17 +256,10 @@ class NPUModelRunner(GPUModelRunner):
         kv_cache_config: KVCacheConfig,
         kv_cache_allocation_context: AbstractContextManager | None = None,
     ) -> None:
-        # TODO: Remove this vLLM 0.28 workaround once support for 0.28 is dropped.
-        # vLLM 0.29 already fixes wrapped Mamba block-table sizing upstream.
-        if vllm_version_is("0.28.0"):
-            kv_cache_config = unwrap_mamba_kv_cache_groups(kv_cache_config)
         with graph_manager_wrapper(self):
-            # vLLM 0.28 GPUModelRunner.initialize_kv_cache does not accept
-            # kv_cache_allocation_context. Gate it the same way as other
-            # 0.28 super() kwargs in this runner.
             super().initialize_kv_cache(
                 kv_cache_config,
-                **({} if vllm_version_is("0.28.0") else {"kv_cache_allocation_context": kv_cache_allocation_context}),
+                kv_cache_allocation_context=kv_cache_allocation_context,
             )
             if self.pcp_manager is not None:
                 assert isinstance(self.pcp_manager, AscendPCPManager)
@@ -317,15 +314,16 @@ class NPUModelRunner(GPUModelRunner):
             get_kv_transfer_group().handle_preemptions(kv_connector_metadata)
 
         self.model_state.kvpp_is_dummy_run = dummy_run or is_profile
-        output = super().execute_model(
-            scheduler_output,
-            intermediate_tensors=intermediate_tensors,
-            dummy_run=dummy_run,
-            skip_attn_for_dummy_run=skip_attn_for_dummy_run,
-            is_profile=is_profile,
-            context_len=context_len,
-            **({} if vllm_version_is("0.28.0") else {"valid_dummy_state_slots": valid_dummy_state_slots}),
-        )
+        with pcp_dispatch_context():
+            output = super().execute_model(
+                scheduler_output,
+                intermediate_tensors=intermediate_tensors,
+                dummy_run=dummy_run,
+                skip_attn_for_dummy_run=skip_attn_for_dummy_run,
+                is_profile=is_profile,
+                context_len=context_len,
+                **({} if vllm_version_is("0.29.0") else {"valid_dummy_state_slots": valid_dummy_state_slots}),
+            )
         self.model_state.kvpp_is_dummy_run = False
         self.kvpp.complete_forward()
 
@@ -354,6 +352,16 @@ class NPUModelRunner(GPUModelRunner):
                 with disable_compilation(self.get_model()):
                     self._dummy_run(mc2_tokens_capacity, skip_attn=True, skip_eplb=True, is_profile=True)
             super().profile_run()
+
+    def gather_batch_req_state(self, scheduler_output: SchedulerOutput, dummy_run: bool):
+        batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
+        num_tokens = None
+        if vllm_version_is("0.28.0") and self.pcp_manager is not None and batch_state is not None:
+            num_tokens = self.pcp_manager.get_num_tokens_for_dispatch(
+                batch_state.num_scheduled_tokens, batch_state.is_prefilling_np
+            )
+        _PCP_DISPATCH_NUM_TOKENS.set(num_tokens)
+        return batch_state, uniform_token_count
 
     def prepare_inputs(  # type: ignore[misc]
         self,
@@ -517,7 +525,7 @@ class NPUModelRunner(GPUModelRunner):
         dcp_local_seq_lens = None
         # Main computes DCP lengths in the inherited execute_model after PCP
         # partitioning (vLLM #55212). Release still prepares them here.
-        if vllm_version_is("0.28.0") and self.use_dcp:
+        if vllm_version_is("0.29.0") and self.use_dcp:
             prepare_dcp_local_seq_lens(
                 self.input_buffers.dcp_local_seq_lens,
                 self.input_buffers.seq_lens,
@@ -584,7 +592,7 @@ class NPUModelRunner(GPUModelRunner):
             has_prefill=batch_req_state.has_prefill,
             **(
                 {"max_seq_len_np": self.req_states.max_seq_len[idx_mapping_np] if self.use_pp else None}
-                if vllm_version_is("0.28.0")
+                if vllm_version_is("0.29.0")
                 else {}
             ),
             input_ids=self.input_buffers.input_ids[:num_tokens_after_padding],
@@ -600,20 +608,11 @@ class NPUModelRunner(GPUModelRunner):
             seq_lens_np=self.input_buffers.seq_lens_np,
             attn_state=attn_state,
         )
-
-        # vLLM #53515 / #15196 pass padded_num_tokens into PCP partition on main;
-        # v0.28.0 maybe_partition_pcp_batch does not accept that kwarg.
-        if vllm_version_is("0.28.0"):
-            input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
-                self.pcp_manager,
-                input_batch,
-            )
-        else:
-            input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
-                self.pcp_manager,
-                input_batch,
-                padded_num_tokens=batch_desc.num_tokens,
-            )
+        input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
+            self.pcp_manager,
+            input_batch,
+            padded_num_tokens=batch_desc.num_tokens,
+        )
 
         # For mla/sfa, update cos/sin. Here is for execute_model.
         update_cos_sin(input_batch.positions)
@@ -626,10 +625,10 @@ class NPUModelRunner(GPUModelRunner):
         if self.pcp_manager is None:
             return super().prepare_dummy_attn(
                 input_batch,
-                **({} if vllm_version_is("0.28.0") else {"valid_state_slots": valid_state_slots}),
+                **({} if vllm_version_is("0.29.0") else {"valid_state_slots": valid_state_slots}),
             )
         block_tables, slot_mappings = self.pcp_manager.prepare_dummy_attn(input_batch)
-        if not vllm_version_is("0.28.0") and valid_state_slots:
+        if not vllm_version_is("0.29.0") and valid_state_slots:
             # Match the upstream state-slot contract in the persistent PCP views.
             for block_table in block_tables:
                 state_slots = torch.arange(1, block_table.shape[0] + 1, dtype=torch.int32, device=block_table.device)
@@ -902,3 +901,28 @@ def graph_manager_wrapper(model_runner):
         yield
     finally:
         vllm_model_runner.ModelCudaGraphManager = original_graph_manager
+
+
+# v0.28 calls a module-level dispatch function, with no runner hook. Carry
+# only the PCP execution count across that boundary; keep request state intact.
+_PCP_DISPATCH_NUM_TOKENS: ContextVar[int | None] = ContextVar("ascend_pcp_dispatch_num_tokens", default=None)
+
+
+@contextmanager
+def pcp_dispatch_context():
+    token = _PCP_DISPATCH_NUM_TOKENS.set(None)
+    try:
+        yield
+    finally:
+        _PCP_DISPATCH_NUM_TOKENS.reset(token)
+
+
+def _dispatch_pcp_and_sync_dp(cudagraph_manager, num_reqs, num_tokens, *args, **kwargs):
+    pcp_num_tokens = _PCP_DISPATCH_NUM_TOKENS.get()
+    if pcp_num_tokens is not None:
+        num_tokens = pcp_num_tokens
+    return dispatch_cg_and_sync_dp(cudagraph_manager, num_reqs, num_tokens, *args, **kwargs)
+
+
+if vllm_version_is("0.28.0"):
+    vllm_model_runner.dispatch_cg_and_sync_dp = _dispatch_pcp_and_sync_dp

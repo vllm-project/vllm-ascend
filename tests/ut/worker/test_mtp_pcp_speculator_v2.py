@@ -86,7 +86,7 @@ def test_draft_runtime_config_preserves_target_worker_topology(
         ),
         cache_config=target_cache_config,
     )
-    draft_model_config = SimpleNamespace(hf_overrides=None)
+    draft_model_config = object()
     captured: dict[str, SimpleNamespace] = {}
 
     def fake_replace(config, **changes):
@@ -160,7 +160,6 @@ def test_draft_runtime_config_preserves_target_worker_topology(
     assert not draft_parallel_config.enable_expert_parallel
     assert not draft_parallel_config.enable_eplb
     assert draft_config.model_config is draft_model_config
-    assert draft_model_config.hf_overrides == {}
     assert draft_config.parallel_config.prefill_context_parallel_size == expected_execution_pcp_size
     assert draft_config.parallel_config.cp_kv_cache_interleave_size == 128
     assert draft_config.parallel_config.pipeline_parallel_size == 1
@@ -526,7 +525,6 @@ def test_graph_prefill_without_real_batch_preserves_metadata(attn_architecture: 
     speculator._build_draft_attn_metadata.assert_not_called()
 
 
-@pytest.mark.skipif(speculator_module.vllm_version_is("0.28.0"), reason="DPSyncState is a main2main interface")
 @pytest.mark.parametrize(
     ("speculator_cls", "parent_cls", "replicated_pcp", "batch_kind"),
     [
@@ -606,70 +604,16 @@ def test_propose_sync_follows_draft_token_layout(speculator_cls, parent_cls, rep
     assert speculator.model_state.pcp_manager is speculator.pcp_manager
 
 
-def test_propose_preserves_v028_dp_token_counts() -> None:
+def test_propose_preserves_dp_sync_state() -> None:
     speculator = object.__new__(AscendMTPSpeculator)
-    speculator.replicated_pcp = True
+    speculator.replicated_pcp = False
     input_batch = object()
-    token_counts = torch.tensor([4, 8])
+    dp_sync = object()
     with (
-        patch.object(speculator_module, "vllm_version_is", return_value=True),
         patch.object(speculator_module, "disable_target_pcp_for_replicated_draft", return_value=nullcontext()),
         patch.object(speculator_module, "build_attn_metadata_wrapper", return_value=nullcontext()),
         patch.object(speculator_module, "torch_gather_wrapper", return_value=nullcontext()),
         patch.object(MTPSpeculator, "propose") as parent,
     ):
-        speculator.propose(input_batch, *[MagicMock() for _ in range(10)], token_counts, dp_sync=object())
-    assert parent.call_args.args[11] is token_counts
-
-
-def _fake_replace(config, **changes):
-    values = vars(config).copy()
-    values.update(changes)
-    return SimpleNamespace(**values)
-
-
-@pytest.mark.parametrize(
-    ("hf_overrides", "expected"),
-    [
-        (None, {}),
-        ({"architectures": ["DeepSeekV4MTPModel"]}, {"architectures": ["DeepSeekV4MTPModel"]}),
-    ],
-)
-def test_ensure_draft_hf_overrides(hf_overrides, expected) -> None:
-    draft_model_config = SimpleNamespace(hf_overrides=hf_overrides)
-
-    speculator_module.ensure_draft_hf_overrides(draft_model_config)
-
-    assert draft_model_config.hf_overrides == expected
-
-
-def test_ensure_draft_hf_overrides_missing_attr() -> None:
-    draft_model_config = SimpleNamespace()
-
-    speculator_module.ensure_draft_hf_overrides(draft_model_config)
-
-    assert draft_model_config.hf_overrides == {}
-
-
-def test_eagle_create_draft_vllm_config_fills_hf_overrides() -> None:
-    speculator = object.__new__(AscendEagleSpeculator)
-    speculator.draft_model_config = SimpleNamespace(hf_overrides=None)
-    speculator.vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(
-            pipeline_parallel_size=8,
-            enable_expert_parallel=True,
-            enable_eplb=True,
-        ),
-    )
-
-    with patch(
-        "vllm_ascend.worker.v2.spec_decode.eagle.speculator.replace",
-        side_effect=_fake_replace,
-    ):
-        draft_config = speculator._create_draft_vllm_config()
-
-    assert speculator.draft_model_config.hf_overrides == {}
-    assert draft_config.model_config is speculator.draft_model_config
-    assert draft_config.parallel_config.pipeline_parallel_size == 1
-    assert not draft_config.parallel_config.enable_expert_parallel
-    assert not draft_config.parallel_config.enable_eplb
+        speculator.propose(input_batch, *[MagicMock() for _ in range(10)], dp_sync)
+    assert parent.call_args.args[11] is dp_sync

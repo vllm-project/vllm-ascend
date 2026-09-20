@@ -2755,13 +2755,10 @@ class KVPoolWorker:
                 if isinstance(send_thread, (KVCacheStoreSendingThread, KVCacheStoreLayerSendingThread)):
                     send_thread.delete_finished_stored_request(req_id)
             self.kv_send_thread.discard_finished_requests(meta.preempted_req_ids)
-            if self.use_layerwise:
-                self.kv_send_thread.get_and_clear_finished_requests()
-                done_sending = set()
-            else:
-                stale_finished_req_ids = finished_req_ids - meta.delayed_free_req_ids
-                self.kv_send_thread.discard_finished_requests(stale_finished_req_ids)
-                done_sending = self.kv_send_thread.get_and_clear_finished_requests(meta.delayed_free_req_ids)
+            # Saves complete synchronously in wait_for_save(), so the scheduler
+            # never waits for a request-level finished_sending notification.
+            self.kv_send_thread.get_and_clear_finished_requests()
+            done_sending: set[str] = set()
         else:
             done_sending = set()
 

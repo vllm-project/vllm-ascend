@@ -20,7 +20,6 @@
 from __future__ import annotations
 
 import functools
-import importlib.util
 import json
 import math
 import os
@@ -77,6 +76,7 @@ _DYNAMIC_EPLB_BUFFER_SIZE = 100
 _IS_MOE_MODEL = None
 _IS_DRAFTER_MOE_MODEL = None
 _IS_VL_MODEL = None
+_HAS_LAYER_IDX = None
 _HAS_ROPE = None
 _ATNN_CALCULATION_STREAM = None
 _CUSTOM_OP_VENDOR_DIR = "custom_transformer"
@@ -115,48 +115,6 @@ def get_dsv4_compress_ratio(config: Any, layer_idx: int) -> int:
     if compress_ratios is None or layer_idx >= len(compress_ratios):
         return 0
     return compress_ratios[layer_idx]
-
-
-def is_deepseek_v41(hf_config: Any) -> bool:
-    """Identify the released V4.1 config at the model boundary."""
-    model_types = ("deepseek_v41", "deepseek_v41_text")
-    if isinstance(hf_config, dict):
-        return hf_config.get("model_type") in model_types or is_deepseek_v41(hf_config.get("text_config"))
-    # SpeculativeConfig may overwrite the instance model_type for DSpark.
-    # The upstream flattened config class still identifies the V4.1 checkpoint.
-    return (
-        getattr(type(hf_config), "model_type", None) in model_types
-        or getattr(hf_config, "model_type", None) in model_types
-        or (getattr(hf_config, "text_config", None) is not None and is_deepseek_v41(hf_config.text_config))
-    )
-
-
-def normalize_deepseek_v41_config(hf_config: Any) -> Any:
-    """Prepare runtime defaults not supplied by upstream's released config."""
-    for name, default in (("num_hash_layers", 0), ("n_group", 1), ("topk_group", 1)):
-        if not hasattr(hf_config, name):
-            setattr(hf_config, name, default)
-    rope = dict(getattr(hf_config, "rope_parameters", None) or {})
-    for name, value in {
-        "factor": 1.0,
-        "beta_fast": 32,
-        "beta_slow": 1,
-        "original_max_position_embeddings": getattr(hf_config, "max_position_embeddings", 1048576),
-        "rope_theta": getattr(hf_config, "rope_theta", 10000.0),
-    }.items():
-        rope.setdefault(name, value)
-    hf_config.rope_parameters = rope
-    hf_config.image_sentinel_base_id = getattr(hf_config, "image_token_id", 129264)
-    hf_config.image_pad_token_id = hf_config.image_sentinel_base_id + 1
-    supported_rotation = {
-        "value_projection_rotated": True,
-        "value_basis": "quarot_global",
-        "key_and_gate_basis": "original",
-        "runtime_delta_rotation": False,
-    }
-    rotation = getattr(hf_config, "engram_rotation_config", None) or supported_rotation
-    hf_config.engram_rotation_config = dict(rotation)
-    return hf_config
 
 
 def model_uses_kpool_indexer(model_config: Any | None) -> bool:
@@ -681,26 +639,6 @@ def setup_ascend_local_comm_res(local_rank: int, kv_transfer_config: Any | None)
     os.environ["ASCEND_LOCAL_COMM_RES"] = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
 
 
-@torch._dynamo.disable
-def _vllm_empty_device_matches_release(target_vllm_version: str) -> bool:
-    """Map untagged empty-device installs onto the matching release lane.
-
-    cpu-ut checks out vLLM by SHA with ``--no-tags`` and builds
-    ``VLLM_TARGET_DEVICE=empty``, so setuptools-scm reports
-    ``0.1.dev1+gSHA.empty`` instead of the tagged ``0.28.0``. Distinguish
-    v0.28.0 from main by where PCP lives: model_executor on 0.28.0, v1 ops
-    after the move on main.
-
-    Disabled under Dynamo: ``importlib.util.find_spec`` is marked skipped and
-    must not be traced when version gates run during torch.compile.
-    """
-    if target_vllm_version != "0.28.0":
-        return False
-    has_legacy_pcp = importlib.util.find_spec("vllm.model_executor.layers.attention.pcp") is not None
-    has_main_pcp = importlib.util.find_spec("vllm.v1.attention.ops.pcp") is not None
-    return has_legacy_pcp and not has_main_pcp
-
-
 @functools.cache
 @torch._dynamo.disable
 def vllm_version_is(target_vllm_version: str):
@@ -711,16 +649,11 @@ def vllm_version_is(target_vllm_version: str):
 
         vllm_version = vllm.__version__
     try:
-        # Strip any PEP 440 local version segment (e.g. "0.28.0+empty" built
+        # Strip any PEP 440 local version segment (e.g. "0.29.0+empty" built
         # with VLLM_TARGET_DEVICE=empty): it is a build artifact and must not
         # change the version identity for `vllm_version_is` comparisons.
-        vllm_version = vllm_version.split("+")[0]
         parsed = Version(vllm_version)
-        if parsed == Version(target_vllm_version):
-            return True
-        if parsed.release[:2] == (0, 1) and parsed.dev is not None:
-            return _vllm_empty_device_matches_release(target_vllm_version)
-        return False
+        return Version(parsed.public) == Version(target_vllm_version)
     except InvalidVersion:
         raise ValueError(
             f"Invalid vllm version {vllm_version} found. A dev version of vllm "
@@ -736,8 +669,6 @@ def get_kv_cache_tensor_layers(kv_cache_tensor) -> list[str]:
     vLLM #51718 renamed the `shared_by` field to `layers` and introduced a
     required `layer_stride` on vLLM main. Gate by release vs main lane.
     """
-    if vllm_version_is("0.28.0"):
-        return kv_cache_tensor.shared_by
     return kv_cache_tensor.layers
 
 
@@ -883,7 +814,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "RoutedExperts": AscendRoutedExperts,
         "GateLinear": AscendGateLinear,
     }
-    if not vllm_version_is("0.28.0"):
+    if not vllm_version_is("0.29.0"):
         from vllm_ascend.ops.kimi_mla import AscendKimiK3MultiHeadLatentAttention
 
         REGISTERED_ASCEND_OPS["KimiK3MultiHeadLatentAttentionWrapper"] = AscendKimiK3MultiHeadLatentAttention
@@ -1311,7 +1242,11 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
 def has_layer_idx(model_instance: torch.nn.Module) -> bool:
     if model_instance is None:
         return False
-    return hasattr(model_instance, "model") and hasattr(model_instance.model, "start_layer")
+
+    global _HAS_LAYER_IDX
+    if _HAS_LAYER_IDX is None:
+        _HAS_LAYER_IDX = hasattr(model_instance, "model") and hasattr(model_instance.model, "start_layer")
+    return _HAS_LAYER_IDX
 
 
 def refresh_block_size(vllm_config):
@@ -1766,10 +1701,10 @@ def get_rotation_path(vllm_config: VllmConfig) -> Path | None:
     if quant_config is None:
         return None
     target_model_path = vllm_config.model_config.model
+    quant_description = getattr(quant_config, "quant_description", None) or {}
     try:
-        quant_description = quant_config.quant_description
         rotation_relative_path = quant_description["optional"]["quarot"]["rotation_map"]["global_rotation"]
-    except KeyError:
+    except (KeyError, TypeError):
         return None
     return Path(target_model_path) / rotation_relative_path
 

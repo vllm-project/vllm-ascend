@@ -38,7 +38,6 @@ from vllm_ascend.device.hardware_profile import (
     QuantizationBackendFamily,
     get_current_hardware_profile,
 )
-from vllm_ascend.mrv2_utils import apply_v2_model_runner_config_patch
 
 # isort: off
 from vllm_ascend.utils import (
@@ -454,24 +453,9 @@ class NPUPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
-        # NOTE: This still monkey-patches VllmConfig by replacing the
-        # use_v2_model_runner property (the "patch way"). It is kept here
-        # because upstream vLLM does not yet expose a platform hook to
-        # customize the default V2 model runner decision; the whitelist
-        # logic itself lives in vllm_ascend.mrv2_utils.
-        # The upstream V2 validation is also neutralized, since Ascend fully
-        # owns the V2 enablement decision (the platform / Triton gates in
-        # mrv2_utils differ from the upstream validation).
-        # TODO(wxsIcey): Remove this once upstream vLLM allows platforms to
-        # override the default, and contribute the whitelist upstream.
-        apply_v2_model_runner_config_patch()
-
         # Lazy import vllm/vllm-ascend to avoid circular import
-        from vllm_ascend.ascend_forward_context import sync_v2_extra_kwargs
         from vllm_ascend.quantization.utils import maybe_auto_detect_quantization
         from vllm_ascend.logger import configure_ascend_file_logging, configure_ascend_logging
-
-        sync_v2_extra_kwargs(vllm_config)
 
         # 1.Configure logging
         configure_ascend_file_logging()
@@ -492,8 +476,10 @@ class NPUPlatform(Platform):
         _validate_draft_decode_context_parallel_config(vllm_config)
         _validate_parallel_config(vllm_config)
 
-        # 3.Auto detect quantization method
+        # 3.Auto detect quantization method and verify cache dtype
         maybe_auto_detect_quantization(vllm_config)
+        if vllm_config.cache_config.cache_dtype == "fp8" or vllm_config.attention_config.indexer_kv_dtype == "fp8":
+            assert get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
 
         # 4.Make sure the config is compatible with Ascend
         _fix_incompatible_config(vllm_config)
@@ -561,7 +547,6 @@ class NPUPlatform(Platform):
             get_mc2_mask,
             get_mrv2_in_profile_run,
             select_moe_comm_method,
-            sync_v2_extra_kwargs,
         )
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
         from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
@@ -575,7 +560,6 @@ class NPUPlatform(Platform):
 
         if cudagraph_runtime_mode is None:
             cudagraph_runtime_mode = CUDAGraphMode.NONE
-        sync_v2_extra_kwargs(vllm_config)
         # TODO(Ronald1995): model runner v1 still use ascend_forward_context,
         # when v1's forward context is refactored, we can remove this branch.
         # Currently, model runner v2 use the new forward context.
@@ -593,12 +577,7 @@ class NPUPlatform(Platform):
         sinks = False
         in_profile_run = get_mrv2_in_profile_run()
 
-        try:
-            tp_world_size = get_tensor_model_parallel_world_size()
-        except AssertionError:
-            # Kernel / precision tests call set_forward_context without
-            # initializing TP. Keep V1 extras there.
-            return {"dynamic_mx_quant_scale_alg": dynamic_mx_quant_scale_alg}
+        tp_world_size = get_tensor_model_parallel_world_size()
 
         # NOTE: This cannot be set using set_forward_context
         # due to multiple warmups before actual capturing.
@@ -1095,14 +1074,6 @@ def _update_compilation_modes(vllm_config: VllmConfig, ascend_config) -> None:
             vars(ascend_compilation_config)
             if not isinstance(ascend_compilation_config, dict)
             else ascend_compilation_config
-        )
-
-    if model_config and hasattr(model_config.hf_text_config, "index_topk"):
-        from vllm_ascend.attention.dsa_attn_kv_plan import resolve_dsv4_cache_dtype
-
-        vllm_config.cache_config.cache_dtype = resolve_dsv4_cache_dtype(
-            vllm_config.cache_config.cache_dtype,
-            str(model_config.dtype).replace("torch.", ""),
         )
 
     # Update compilation mode in some cases

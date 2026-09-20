@@ -11,7 +11,7 @@
 - **Function**:
 - **Formula**:
 - **Algorithm flow** (processed row by row, independently):
-- **Supported modes**: Atlas A2, Atlas A3, and Ascend 950
+- **Supported modes**: Atlas A2, Atlas A3, and 950PR&950DT Products
 
 ## Parameters
 

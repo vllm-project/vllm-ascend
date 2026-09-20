@@ -215,7 +215,7 @@ class Glm5NextMLAAttention(nn.Module):
             self.kv_lora_rank,
             self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
             bias=False,
-            quant_config=quant_config,
+            quant_config=None,  # kv_b_proj stays BF16 in the FP8 checkpoint
             prefix=f"{prefix}.kv_b_proj",
         )
         self.o_proj = RowParallelLinear(

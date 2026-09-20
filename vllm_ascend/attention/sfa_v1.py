@@ -1,4 +1,3 @@
-import enum
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -12,6 +11,7 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
 from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (
     AttentionBackend,  # type: ignore
     AttentionCGSupport,
@@ -28,6 +28,7 @@ from vllm_ascend.attention.utils import (
     MLAPO_MAX_SUPPORTED_TOKENS,
     SFA_QSFA_TILE_SIZE,
     AscendCommonAttentionMetadata,
+    PreprocessType,
     ascend_chunked_prefill_workspace_size,
     get_sfa_qsfa_packed_head_dim,
     maybe_save_kv_layer_to_connector,
@@ -37,7 +38,7 @@ from vllm_ascend.attention.utils import (
     wait_for_kv_layer_from_connector,
 )
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
+from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
     record_attention_compute_start,
 )
@@ -235,12 +236,6 @@ BMM_TRANS_MAX_SUPPORTED_TOKENS = 1024
 TRANSPOSE_BMM_MAX_SUPPORTED_DIM = 65536
 
 
-class PreprocessType(enum.Enum):
-    NATIVE = "native"
-    PROLOG_V3 = "prolog_v3"
-    MLAPO = "mlapo"
-
-
 def _get_indexer_types(configs: tuple[Any, ...]) -> Any | None:
     for config in configs:
         if config is None:
@@ -360,6 +355,24 @@ class AscendSFAMetadata:
 
 
 M = TypeVar("M", bound=AscendSFAMetadata)
+
+
+def _int64_kv_slots(slots: torch.Tensor, attn_metadata: M) -> torch.Tensor:
+    """Convert the KV slot mapping to int64 once per scheduling step.
+
+    ``npu_kv_rmsnorm_rope_cache`` requires int64 cache indices while the SFA
+    metadata carries int32 slots. Every layer of a step shares the same slot
+    tensor, so cache the converted copy on the metadata object instead of
+    re-casting it inside each layer's ``exec_kv`` (one Cast kernel per step
+    instead of one per layer).
+    """
+    if slots.dtype == torch.int64:
+        return slots
+    cached = getattr(attn_metadata, "kv_slots_i64", None)
+    if cached is None or cached[0] is not slots:
+        cached = (slots, slots.to(torch.int64))
+        attn_metadata.kv_slots_i64 = cached  # type: ignore[attr-defined]
+    return cached[1]
 
 
 @dataclass
@@ -739,11 +752,12 @@ class AscendSFAImpl(MLAAttentionImpl):
             raise NotImplementedError("NoPE SFA currently requires an unquantized latent KV cache.")
         self.enable_sparse_li_c8 = self.has_indexer and self.indexer.enable_sparse_li_c8
         if self.enable_sparse_sfa_c8 or self.enable_sparse_li_c8:
-            if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
-                self.c8_k_cache_dtype = torch.float8_e4m3fn
+            self.c8_k_cache_dtype = kv_cache_dtype_str_to_dtype(
+                self.vllm_config.attention_config.indexer_kv_dtype, self.vllm_config.model_config
+            )
+            if self.c8_k_cache_dtype == torch.float8_e4m3fn:
                 self.c8_k_scale_cache_dtype = torch.float32
-            else:
-                self.c8_k_cache_dtype = torch.int8
+            elif self.c8_k_cache_dtype == torch.int8:
                 self.c8_k_scale_cache_dtype = torch.float16
 
         if self.enable_sparse_sfa_c8:
@@ -867,15 +881,23 @@ class AscendSFAImpl(MLAAttentionImpl):
         quant_method = self._get_layer_quant_method(self.fused_qkv_a_proj)
         qt = type(quant_method) if quant_method is not None else None
 
-        # PROLOG_V3 takes precedence over MLAPO.
+        # PROLOG_V3 takes precedence over MLAPO and is the default fused
+        # preprocessing for quantized SFA layers in every deployment (plain
+        # serving, PD KV producers and KV consumers). ``enable_dsa_cp`` is the
+        # prefill/P-node route selector: it routes to AscendSFADSACPImpl,
+        # which unconditionally disables fused preprocessing, so the two are
+        # mutually exclusive by construction. The C8 switches only select the
+        # KV cache layout and are orthogonal to this choice. Unquantized
+        # layers keep the NATIVE chain outside KV consumers because the
+        # unquantized weight preparation transposes fused_qkv_a_proj.weight
+        # in place, which the NATIVE fallback still consumes.
         if getattr(self, "dcp_group", None) is None:
-            eligible = self.is_kv_consumer and (
-                (qt is AscendW8A8DynamicLinearMethod and self.enable_sparse_sfa_c8)
-                or qt is AscendW8A8MXFP8DynamicLinearMethod
-                or qt is None
-            )
-            if eligible and not self._get_fused_type_unsupported_reasons(PreprocessType.PROLOG_V3):
-                return PreprocessType.PROLOG_V3
+            prolog_v3_eligible = qt is not None or self.is_kv_consumer
+            if prolog_v3_eligible and (
+                qt is AscendW8A8DynamicLinearMethod or qt is AscendW8A8MXFP8DynamicLinearMethod or qt is None
+            ):
+                if not self._get_fused_type_unsupported_reasons(PreprocessType.PROLOG_V3):
+                    return PreprocessType.PROLOG_V3
 
         eligible = qt is AscendW8A8LinearMethod and self.enable_mlapo
         if eligible and not self._get_fused_type_unsupported_reasons(PreprocessType.MLAPO):
@@ -907,8 +929,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         quant_method = self._get_layer_quant_method(self.fused_qkv_a_proj)
         qt = type(quant_method) if quant_method is not None else None
         if pp_type is PreprocessType.PROLOG_V3:
-            if self.is_kv_producer:
-                reasons.append("PROLOG_V3 is disabled on KV producer workers.")
             if qt is None and self.enable_sparse_sfa_c8:
                 reasons.append("PROLOG_V3: C8 sparse requires quantized MLAPO.")
             if getattr(self.q_proj, "_chunk_size", 0):
@@ -1128,7 +1148,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             self.kv_a_layernorm.weight,  # type: ignore[union-attr]
             cos,
             sin,
-            slots.to(torch.int64),
+            _int64_kv_slots(slots, attn_metadata),
             kv_cache[1],
             kv_cache[0],
             epsilon=self.kv_a_layernorm.variance_epsilon,  # type: ignore[union-attr]
@@ -1244,6 +1264,8 @@ class AscendSFAImpl(MLAAttentionImpl):
             kr_cache = kv_cache[1]
         rope_cos_ = cos.view(cos.shape[0], cos.shape[-1])
         rope_sin_ = sin.view(sin.shape[0], sin.shape[-1])
+        # The caller forwards the per-step cached int64 slots, so the .to()
+        # below is a no-op in production; kept for direct-call safety.
         cache_index = slot_mapping.view(-1).to(torch.int64)
 
         if qt is not None:
@@ -1661,11 +1683,9 @@ class AscendSFAImpl(MLAAttentionImpl):
         actual_seq_lengths_key = parallel_context.actual_seq_lengths_key
 
         fused_type: PreprocessType = self.preprocess_type
-        if (
-            attn_metadata.attn_state not in (AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding)
-            or self.preprocess_type == PreprocessType.MLAPO
-            and num_input_tokens > MLAPO_MAX_SUPPORTED_TOKENS
-        ):
+        # PROLOG_V3 serves every attention state (decode, spec decoding and
+        # prefill); only MLAPO carries a per-call token-count limit.
+        if self.preprocess_type == PreprocessType.MLAPO and num_input_tokens > MLAPO_MAX_SUPPORTED_TOKENS:
             fused_type = PreprocessType.NATIVE
 
         if fused_type != PreprocessType.NATIVE:
@@ -1690,7 +1710,10 @@ class AscendSFAImpl(MLAAttentionImpl):
                     kv_cache=kv_cache,
                     cos=cos,
                     sin=sin,
-                    slot_mapping=slot_mapping_sfa,
+                    # npu_mla_prolog_v3 requires int64 cache indices; reuse
+                    # the per-step conversion so all layers of a step share
+                    # one Cast kernel (the .to() inside is a no-op on int64).
+                    slot_mapping=_int64_kv_slots(slot_mapping_sfa, attn_metadata),
                 )
             else:
                 hidden_states, ql_nope, q_pe, q_c = self._sfa_preprocess_mlapo(
@@ -1853,8 +1876,10 @@ def custom_kv_rmsnorm_rope(
     k_rope = torch_npu.npu_interleave_rope(rope_in, cos, sin)
 
     prefix_shape = k_nope.shape[:-1]
+    # npu_rms_norm returns a contiguous tensor, so the explicit
+    # .contiguous() copy before the view is redundant.
     k_nope, knope_scale = torch_npu.npu_dynamic_block_quant(
-        k_nope.contiguous().view(-1, 1, kv_lora_rank),
+        k_nope.view(-1, 1, kv_lora_rank),
         dst_type=dst_type,
         row_block_size=1,
         col_block_size=tile_size,
