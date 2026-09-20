@@ -631,7 +631,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             if layer_name in self.draft_attn_layer_names
         )
         block_table = metadata.block_tables
-        if block_table is not None and block_table.shape[0] < num_reqs_padded:
+        if block_table is not None:
             block_table = block_table.as_strided((num_reqs_padded, block_table.shape[1]), block_table.stride())
 
         if is_draft_model_prefill:
