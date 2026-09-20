@@ -63,6 +63,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_la
     LayerwiseReuseLayout,
     build_layerwise_cache_layout,
     build_layerwise_reuse_layout,
+    get_layerwise_base_layers,
     get_layerwise_kv_cache_specs,
     get_layerwise_physical_layer_index,
 )
@@ -257,6 +258,10 @@ class KVPoolWorker:
     def _init_key_head_config(self, model_config, parallel_config) -> None:
         self.current_layer = 0
         self.num_layers = model_config.get_num_layers(parallel_config)
+        self.base_layer_start = 0
+        self.base_layer_end = self.num_layers
+        if self.use_layerwise_transfer:
+            self.base_layer_start, self.base_layer_end = model_config.get_layers_start_end_indices(parallel_config)
 
         if self.use_mla:
             self.num_kv_head = 1
@@ -420,7 +425,8 @@ class KVPoolWorker:
         self._current_layerwise_last_chunk_req_ids: set[str] = set()
 
     def _init_layerwise_config(self) -> None:
-        # Build mapping: physical_layer -> [(group_id, layer_idx_in_group), ...]
+        # Build mapping: local execution layer ->
+        # [(group_id, layer_idx_in_group), ...]
         # layer_idx_in_group is the index of the physical layer within the
         # group (not the index in layer_names). Multiple cache names at the
         # same physical layer are treated as entries of one layer.
@@ -455,7 +461,7 @@ class KVPoolWorker:
             self.layerwise_key_layer_offset = 0
 
         if self.kv_cache_config is not None:
-            base_layers = getattr(
+            total_base_layers = getattr(
                 self.hf_config,
                 "num_hidden_layers",
                 self.num_layers,
@@ -478,11 +484,17 @@ class KVPoolWorker:
                     )
                     self.num_layers = effective_num_layers
             if self.use_layerwise_transfer:
-                self._layerwise_reuse_layout = build_layerwise_reuse_layout(
-                    get_layerwise_kv_cache_specs(self.kv_cache_config),
-                    base_layers,
-                    self._extra_config,
-                )
+                layer_specs = get_layerwise_kv_cache_specs(self.kv_cache_config)
+                expected_base_layers = set(range(self.base_layer_start, self.base_layer_end))
+                actual_base_layers = get_layerwise_base_layers(physical_layers, total_base_layers)
+                if actual_base_layers == expected_base_layers:
+                    reuse_layout = build_layerwise_reuse_layout(
+                        layer_specs,
+                        total_base_layers,
+                        self._extra_config,
+                    )
+                    if reuse_layout.has_layer_reuse:
+                        self._layerwise_reuse_layout = reuse_layout
 
         if self.kv_cache_config is not None and self.num_kv_cache_groups > 1:
             for group_id, group_spec in enumerate(self.kv_cache_config.kv_cache_groups):
@@ -523,10 +535,11 @@ class KVPoolWorker:
                     self.num_layers,
                     self._extra_config,
                 )
-                self.layerwise_offload = cache_layout.has_layer_reuse
-                self.independent_layers = cache_layout.independent_layers
-                self.prefetch_layer_map = cache_layout.prefetch_layer_map
                 self.num_prefetch_layers = cache_layout.num_prefetch_layers
+                if self.kv_cache_config is None:
+                    self.layerwise_offload = cache_layout.has_layer_reuse
+                    self.independent_layers = cache_layout.independent_layers
+                    self.prefetch_layer_map = cache_layout.prefetch_layer_map
             else:
                 layout = self._layerwise_reuse_layout
                 stage_globals = sorted(layout.layer_cache_specs)
@@ -837,12 +850,12 @@ class KVPoolWorker:
             return cache.storage().data_ptr()
 
     def _extract_physical_layer_index(self, layer_name: str) -> int:
-        base_layers = getattr(
+        total_base_layers = getattr(
             self.hf_config,
             "num_hidden_layers",
             self.num_layers,
         )
-        return get_layerwise_physical_layer_index(layer_name, base_layers)
+        return get_layerwise_physical_layer_index(layer_name, total_base_layers)
 
     def _global_group_alloc_size(self, group_id: int) -> int:
         # GLOBAL region size: per-layer bytes x TOTAL model layers.
