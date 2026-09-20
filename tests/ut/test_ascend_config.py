@@ -341,7 +341,7 @@ class TestAscendConfig(TestBase):
     def test_init_ascend_config_rejects_layerwise_mooncake_c8_kv_cache_consumer(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
         test_vllm_config.kv_transfer_config = KVTransferConfig(
-            kv_connector="LayerwisePullConnector",
+            kv_connector="LayerwisePushConnector",
             kv_role="kv_consumer",
             kv_connector_extra_config={"transfer_backend": "mooncake"},
         )

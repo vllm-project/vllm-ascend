@@ -1293,7 +1293,7 @@ def uses_mooncake_connector(kv_transfer_config: Any) -> bool:
         if connector in mooncake_connector_names:
             return True
         if (
-            connector == "LayerwisePullConnector"
+            connector == "LayerwisePushConnector"
             and isinstance(extra_config, dict)
             and str(extra_config.get("transfer_backend", "")).lower() == "mooncake"
         ):

@@ -17,7 +17,7 @@ This feature addresses the need to optimize the **Time Per Output Token (TPOT)**
 vLLM Ascend currently supports two types of connectors for handling KV cache management:  
 
 - **MooncakeConnector**: D nodes pull KV cache from P nodes.
-- **LayerwisePullConnector**: D nodes pull KV cache after each P layer becomes ready.
+- **LayerwisePushConnector**: P nodes push KV cache after each layer becomes ready.
 
 For step-by-step deployment and configuration, refer to the following guide:  
 [PD disaggregation multi-node deployment guide](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/features/pd_disaggregation_mooncake_multi_node.html)

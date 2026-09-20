@@ -1,6 +1,6 @@
 # mypy: ignore-errors
 # SPDX-License-Identifier: Apache-2.0
-"""Backend-independent layerwise pull KV-transfer connector."""
+"""Backend-independent layerwise push KV-transfer connector."""
 
 import hashlib
 from collections.abc import Mapping
@@ -20,14 +20,14 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
-from vllm_ascend.distributed.kv_transfer.kv_p2p.layerwise_pull.protocol import LayerwisePullHandshakeMetadata
-from vllm_ascend.distributed.kv_transfer.kv_p2p.layerwise_pull.scheduler import (
-    LayerwisePullConsumerScheduler,
-    LayerwisePullProducerScheduler,
+from vllm_ascend.distributed.kv_transfer.kv_p2p.layerwise_push.protocol import LayerwisePushHandshakeMetadata
+from vllm_ascend.distributed.kv_transfer.kv_p2p.layerwise_push.scheduler import (
+    LayerwisePushConsumerScheduler,
+    LayerwisePushProducerScheduler,
 )
-from vllm_ascend.distributed.kv_transfer.kv_p2p.layerwise_pull.worker import (
-    LayerwisePullConsumerWorker,
-    LayerwisePullProducerWorker,
+from vllm_ascend.distributed.kv_transfer.kv_p2p.layerwise_push.worker import (
+    LayerwisePushConsumerWorker,
+    LayerwisePushProducerWorker,
     _validate_tcp_port,
 )
 
@@ -37,16 +37,15 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 
-class LayerwisePullConnector(KVConnectorBase_V1, SupportsHMA):
-    """Let Decode pull ready layer buffers exposed by Prefill.
+class LayerwisePushConnector(KVConnectorBase_V1, SupportsHMA):
+    """Let Prefill write ready layer buffers into registered Decode caches.
 
     * SCHEDULER + producer : P-side request/block metadata.
     * SCHEDULER + consumer : D-side destination block tracking.
-    * WORKER + producer    : P-side layer-wise READ_READY notifications.
-    * WORKER + consumer    : D-side reads through the configured backend.
+    * WORKER + producer    : P-side batched writes and completion notifications.
+    * WORKER + consumer    : D-side destination publication and completion tracking.
 
-    Sparse KV offload is one optional destination-layout adapter. It is not a
-    connector prerequisite and does not affect the wire protocol.
+    Sparse decode offload is not supported by this connector yet.
     """
 
     supports_layerwise_buffer_reuse = True
@@ -68,12 +67,12 @@ class LayerwisePullConnector(KVConnectorBase_V1, SupportsHMA):
 
         if role == KVConnectorRole.SCHEDULER:
             if self.is_producer:
-                self.connector_scheduler = LayerwisePullProducerScheduler(
+                self.connector_scheduler = LayerwisePushProducerScheduler(
                     vllm_config,
                     kv_cache_config,
                 )
             else:
-                self.connector_scheduler = LayerwisePullConsumerScheduler(
+                self.connector_scheduler = LayerwisePushConsumerScheduler(
                     vllm_config,
                     self.use_layerwise,
                     kv_cache_config,
@@ -82,9 +81,9 @@ class LayerwisePullConnector(KVConnectorBase_V1, SupportsHMA):
         else:
             self.connector_scheduler = None
             if self.is_producer:
-                self.connector_worker = LayerwisePullProducerWorker(vllm_config, kv_cache_config)
+                self.connector_worker = LayerwisePushProducerWorker(vllm_config, kv_cache_config)
             else:
-                self.connector_worker = LayerwisePullConsumerWorker(
+                self.connector_worker = LayerwisePushConsumerWorker(
                     vllm_config,
                     self.use_layerwise,
                     kv_cache_config,
@@ -93,15 +92,15 @@ class LayerwisePullConnector(KVConnectorBase_V1, SupportsHMA):
     # ------------------------------------------------------------------
     # Scheduler side
     # ------------------------------------------------------------------
-    def get_handshake_metadata(self) -> LayerwisePullHandshakeMetadata:
+    def get_handshake_metadata(self) -> LayerwisePushHandshakeMetadata:
         worker = self.connector_worker
         assert worker is not None
         if self.is_producer:
-            return LayerwisePullHandshakeMetadata(tuple(sorted(worker.layer_layouts)))
-        reader = worker._read_thread
+            return LayerwisePushHandshakeMetadata(tuple(sorted(worker.layer_layouts)))
+        reader = worker._receive_thread
         if reader is None or not reader.ready_event.is_set() or reader.startup_error is not None:
-            raise RuntimeError("Layerwise pull D listener must be ready before publishing its endpoint")
-        return LayerwisePullHandshakeMetadata(
+            raise RuntimeError("Layerwise push D listener must be ready before publishing its endpoint")
+        return LayerwisePushHandshakeMetadata(
             tuple(sorted(worker.layer_layouts)), reader._host, reader.side_channel_port + reader.tp_rank
         )
 
@@ -114,7 +113,7 @@ class LayerwisePullConnector(KVConnectorBase_V1, SupportsHMA):
         expected = {(pp, tp) for pp in range(pc.pipeline_parallel_size) for tp in range(pc.tensor_parallel_size)}
         if set(metadata) != expected:
             raise ValueError(
-                "Layerwise pull requires complete (PP, TP) worker handshake metadata; PCP is not supported"
+                "Layerwise push requires complete (PP, TP) worker handshake metadata; PCP is not supported"
             )
         endpoints = []
         pp_layers = []
@@ -124,21 +123,21 @@ class LayerwisePullConnector(KVConnectorBase_V1, SupportsHMA):
             layers = None
             for tp in range(pc.tensor_parallel_size):
                 info = metadata[pp, tp]
-                if not isinstance(info, LayerwisePullHandshakeMetadata):
-                    raise TypeError("Unexpected layerwise pull worker handshake metadata")
+                if not isinstance(info, LayerwisePushHandshakeMetadata):
+                    raise TypeError("Unexpected layerwise push worker handshake metadata")
                 if not info.layer_ids or len(set(info.layer_ids)) != len(info.layer_ids):
-                    raise ValueError("Layerwise pull workers must publish nonempty, unique layer IDs")
+                    raise ValueError("Layerwise push workers must publish nonempty, unique layer IDs")
                 if layers is None:
                     layers = tuple(sorted(info.layer_ids))
                 elif tuple(sorted(info.layer_ids)) != layers:
-                    raise ValueError("Layerwise pull requires identical layer ownership within each TP group")
+                    raise ValueError("Layerwise push requires identical layer ownership within each TP group")
                 if self.is_consumer:
                     if not info.host:
-                        raise ValueError("Layerwise pull D worker published an empty host")
-                    _validate_tcp_port(info.port, description="Layerwise pull D worker endpoint")
+                        raise ValueError("Layerwise push D worker published an empty host")
+                    _validate_tcp_port(info.port, description="Layerwise push D worker endpoint")
                 stage.append({"host": info.host, "port": info.port, "layer_ids": list(layers)})
             if owned_layers.intersection(layers):
-                raise ValueError("Layerwise pull PP stages must own disjoint layers")
+                raise ValueError("Layerwise push PP stages must own disjoint layers")
             owned_layers.update(layers)
             pp_layers.append(layers)
             endpoints.append(stage)
@@ -200,7 +199,7 @@ class LayerwisePullConnector(KVConnectorBase_V1, SupportsHMA):
         self.connector_worker.start_load_kv(self._get_connector_metadata())
 
     def wait_for_layer_load(self, layer_name: str) -> None:
-        """Layerwise Pull does not load KV at the attention-layer boundary."""
+        """Layerwise push does not load KV at the attention-layer boundary."""
         return
 
     def save_kv_layer(
@@ -219,7 +218,7 @@ class LayerwisePullConnector(KVConnectorBase_V1, SupportsHMA):
         self.connector_worker.save_kv_layer(layer_name, kv_layer, attn_metadata, self._get_connector_metadata())
 
     def on_kv_cache_written(self, layer_name: str = "") -> None:
-        # Producer-only early dispatch of the PD pull notification at scatter.
+        # Producer-only early enqueue of PD writes at scatter.
         if not self.is_producer or self.connector_worker is None:
             return
         if not self.has_connector_metadata():
@@ -229,7 +228,7 @@ class LayerwisePullConnector(KVConnectorBase_V1, SupportsHMA):
             hook(layer_name, self._get_connector_metadata())
 
     def wait_for_save(self):
-        # P-side completion is tracked by READ_DONE/storage_send_done_events.
+        # P-side source reuse is gated by completed WRITE operations.
         if self.is_consumer and self.connector_worker is not None:
             self.connector_worker.wait_for_save()
 
@@ -243,7 +242,7 @@ class LayerwisePullConnector(KVConnectorBase_V1, SupportsHMA):
         self.shutdown()
 
     def wait_for_slot_release(self, layer_idx: int) -> None:
-        """Wait until Decode releases a physical slot before AscendStore reuses it."""
+        """Wait until all WRITEs finish before AscendStore reuses a physical slot."""
         worker = self.connector_worker
         if worker is None or not hasattr(worker, "wait_for_slot_release"):
             return

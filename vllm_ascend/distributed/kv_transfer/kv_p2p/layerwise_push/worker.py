@@ -1,6 +1,6 @@
 # mypy: ignore-errors
 # SPDX-License-Identifier: Apache-2.0
-"""Worker side of the backend-independent layerwise pull connector."""
+"""Worker side of the backend-independent layerwise push connector."""
 
 from __future__ import annotations
 
@@ -18,21 +18,18 @@ from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
-from vllm_ascend.distributed.kv_transfer.kv_p2p.layerwise_pull.protocol import (
-    SUPPORTED_TRANSFER_MODES,
-    TRANSFER_MODE_PULL,
-    TRANSFER_MODE_PUSH,
+from vllm_ascend.distributed.kv_transfer.kv_p2p.layerwise_push.protocol import (
     ComponentLayout,
     SendTask,
     get_external_request_id,
 )
-from vllm_ascend.distributed.kv_transfer.kv_p2p.layerwise_pull.read_thread import (
-    ConsumerReadState,
-    LayerwisePullReadThread,
-    PullBackend,
+from vllm_ascend.distributed.kv_transfer.kv_p2p.layerwise_push.receive_thread import (
+    ConsumerDestinationState,
+    LayerwisePushReceiveThread,
+    WriteBackend,
 )
-from vllm_ascend.distributed.kv_transfer.kv_p2p.layerwise_pull.send_thread import (
-    LayerwisePullSendingThread,
+from vllm_ascend.distributed.kv_transfer.kv_p2p.layerwise_push.send_thread import (
+    LayerwisePushSendingThread,
     ProducerSendState,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
@@ -57,9 +54,10 @@ if TYPE_CHECKING:
     from vllm.v1.attention.backend import AttentionMetadata
 
 BACKEND_MOONCAKE = "mooncake"
-SUPPORTED_PULL_BACKENDS = (BACKEND_MEMFABRIC, BACKEND_MOONCAKE)
+SUPPORTED_PUSH_BACKENDS = (BACKEND_MEMFABRIC, BACKEND_MOONCAKE)
+PUSH_WRITE_MODES = ("async", "sync")
 CONNECTOR_THREAD_STARTUP_TIMEOUT_SECONDS = 10.0
-PD_READ_WAIT_LOG_INTERVAL_SECONDS = 10.0
+PD_WRITE_WAIT_LOG_INTERVAL_SECONDS = 10.0
 MIN_TCP_PORT = 1
 MAX_TCP_PORT = 65535
 
@@ -67,28 +65,13 @@ MAX_TCP_PORT = 65535
 def _resolve_kv_transfer_backend(vllm_config: VllmConfig) -> str:
     extra = vllm_config.kv_transfer_config.kv_connector_extra_config or {}
     backend = extra.get("transfer_backend")
-    if backend not in SUPPORTED_PULL_BACKENDS:
+    if backend not in SUPPORTED_PUSH_BACKENDS:
         raise ValueError(
-            "LayerwisePullConnector requires "
+            "LayerwisePushConnector requires "
             'kv_connector_extra_config["transfer_backend"] to be one of '
-            f"{SUPPORTED_PULL_BACKENDS}, got {backend!r}"
+            f"{SUPPORTED_PUSH_BACKENDS}, got {backend!r}"
         )
     return backend
-
-
-def _resolve_transfer_mode(vllm_config: VllmConfig) -> str:
-    extra = vllm_config.kv_transfer_config.kv_connector_extra_config or {}
-    mode = extra.get("transfer_mode", TRANSFER_MODE_PULL)
-    if mode not in SUPPORTED_TRANSFER_MODES:
-        raise ValueError(
-            "LayerwisePullConnector requires "
-            'kv_connector_extra_config["transfer_mode"] to be one of '
-            f"{SUPPORTED_TRANSFER_MODES}, got {mode!r}"
-        )
-    return mode
-
-
-PUSH_WRITE_MODES = ("async", "sync")
 
 
 def _resolve_push_write_mode(vllm_config: VllmConfig) -> str:
@@ -96,7 +79,7 @@ def _resolve_push_write_mode(vllm_config: VllmConfig) -> str:
     mode = extra.get("push_write_mode", "async")
     if mode not in PUSH_WRITE_MODES:
         raise ValueError(
-            "LayerwisePullConnector requires "
+            "LayerwisePushConnector requires "
             'kv_connector_extra_config["push_write_mode"] to be one of '
             f"{PUSH_WRITE_MODES}, got {mode!r}"
         )
@@ -108,8 +91,8 @@ def _validate_tcp_port(port: int, *, description: str) -> None:
         raise ValueError(f"{description} must be in [{MIN_TCP_PORT}, {MAX_TCP_PORT}], got {port}")
 
 
-class LayerwisePullConsumerWorker:
-    """Build local component layouts and pull Prefill buffers into them."""
+class LayerwisePushConsumerWorker:
+    """Publish local destinations and wait for Prefill writes."""
 
     def __init__(
         self,
@@ -118,13 +101,12 @@ class LayerwisePullConsumerWorker:
         kv_cache_config: KVCacheConfig | None,
     ) -> None:
         if kv_cache_config is None:
-            raise ValueError("LayerwisePullConsumerWorker requires KVCacheConfig")
+            raise ValueError("LayerwisePushConsumerWorker requires KVCacheConfig")
         os.environ["ASCEND_TRANSFER_TIMEOUT"] = str(get_transfer_timeout_value())
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
         self.use_layerwise = use_layerwise
         self._backend_name = _resolve_kv_transfer_backend(vllm_config)
-        self._transfer_mode = _resolve_transfer_mode(vllm_config)
         self.tp_rank = get_tensor_model_parallel_rank()
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.pp_rank = get_pp_group().rank_in_group
@@ -138,11 +120,11 @@ class LayerwisePullConsumerWorker:
         )
         _validate_tcp_port(
             self.side_channel_port + self.tp_size - 1,
-            description="Layerwise pull D-side highest TP control-plane port",
+            description="Layerwise push D-side highest TP control-plane port",
         )
 
         self.engine = None
-        self._read_thread: LayerwisePullReadThread | None = None
+        self._receive_thread: LayerwisePushReceiveThread | None = None
         self.offload_manager = None
         self._invalid_block_ids: set[int] = set()
         self.request_map: dict[str, str] = {}
@@ -153,25 +135,23 @@ class LayerwisePullConsumerWorker:
         self._deferred_cleanup_req_ids: set[str] = set()
         self.layer_layouts: dict[int, tuple[ComponentLayout, ...]] = {}
 
-    def _ensure_engine(self) -> tuple[Any, PullBackend]:
+    def _ensure_engine(self) -> tuple[Any, WriteBackend]:
         if self.engine is None:
             device_id = torch.npu.current_device()
             if self._backend_name == BACKEND_MEMFABRIC:
-                # Push writes into D's memory, so D must host the store server.
-                store_server_role = (
-                    MEMFABRIC_ROLE_DECODE if self._transfer_mode == TRANSFER_MODE_PUSH else MEMFABRIC_ROLE_PREFILL
-                )
                 global_memfabric_te.configure(
-                    role=MEMFABRIC_ROLE_DECODE, device_id=device_id, store_server_role=store_server_role
+                    role=MEMFABRIC_ROLE_DECODE,
+                    device_id=device_id,
+                    store_server_role=MEMFABRIC_ROLE_DECODE,
                 )
                 self.engine = global_memfabric_te.get_transfer_engine(self.side_channel_host)
             else:
                 device_name = str(device_id) if self.pp_size > 1 else None
                 self.engine = global_te.get_transfer_engine(self.side_channel_host, device_name=device_name)
         backend = (
-            PullBackend.memfabric(self.engine)
+            WriteBackend.memfabric(self.engine)
             if self._backend_name == BACKEND_MEMFABRIC
-            else PullBackend.mooncake(self.engine)
+            else WriteBackend.mooncake(self.engine)
         )
         return self.engine, backend
 
@@ -190,7 +170,7 @@ class LayerwisePullConsumerWorker:
         layouts: dict[int, list[ComponentLayout]] = {}
         for layer_name, cache_or_caches in kv_caches.items():
             if layer_name not in layer_to_group:
-                raise RuntimeError(f"Layerwise pull cannot find a KV cache group for {layer_name}")
+                raise RuntimeError(f"Layerwise push cannot find a KV cache group for {layer_name}")
             tensors = cache_or_caches if isinstance(cache_or_caches, (list, tuple)) else (cache_or_caches,)
             bases: list[int] = []
             dtypes: list[str] = []
@@ -201,7 +181,7 @@ class LayerwisePullConsumerWorker:
             for tensor in tensors:
                 if tensor.shape[0] % num_blocks != 0:
                     raise ValueError(
-                        f"Layerwise pull tensor {layer_name} has {tensor.shape[0]} rows, "
+                        f"Layerwise push tensor {layer_name} has {tensor.shape[0]} rows, "
                         f"which is not divisible by num_blocks={num_blocks}"
                     )
                 scale = tensor.shape[0] // num_blocks
@@ -230,111 +210,50 @@ class LayerwisePullConsumerWorker:
         return layouts
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
-        tp_shared_components: set[str] = set()
-
-        # Sparse main caches contain optional HBM/CPU tensors and top-k buffers,
-        # not an ordinary HBM component. Their destination is TP-shared CPU K/V.
         from vllm_ascend.ascend_config import get_ascend_config
 
-        main_names: set[str] = set()
-        hbm_destinations = kv_caches
         if get_ascend_config().sparse_kv_offload_config.enabled:
-            if self._backend_name != BACKEND_MEMFABRIC:
-                raise ValueError(
-                    "LayerwisePullConnector with sparse decode offload requires "
-                    'kv_connector_extra_config["transfer_backend"]="memfabric"; '
-                    "Mooncake cannot currently use the MemFabric offload memory pool."
-                )
-
-            from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
-                get_sparse_kv_offload_manager,
+            raise ValueError(
+                "LayerwisePushConnector does not yet support sparse decode offload: "
+                "the offload CPU GVA is not a registered remote WRITE destination. "
+                "Disable sparse decode offload when using this connector."
             )
-
-            self.offload_manager = get_sparse_kv_offload_manager()
-            main_names = set(getattr(self.offload_manager, "offload_layer_names", ()))
-            if not main_names:
-                raise RuntimeError("SparseKVOffloadManager.register_kv_caches must run before LayerwisePullConnector")
-            hbm_destinations = {name: value for name, value in kv_caches.items() if name not in main_names}
-
-        layouts = self._build_hbm_layouts(self.kv_cache_config, hbm_destinations, self.total_base_layers)
-        registration = collect_storage_merged_register_regions(hbm_destinations)
-        if main_names:
-            layer_to_group = {
-                layer_name: group_idx
-                for group_idx, group in enumerate(self.kv_cache_config.kv_cache_groups)
-                for layer_name in group.layer_names
-            }
-            for pool_idx, layer_name in enumerate(self.offload_manager.offload_layer_names):
-                group_idx = layer_to_group[layer_name]
-                k_base = self.offload_manager.gvas_k_bases[pool_idx]
-                v_base = self.offload_manager.gvas_v_bases[pool_idx]
-                k_len, v_len = self.offload_manager.cpu_block_lens[pool_idx]
-                layer_idx = get_layerwise_physical_layer_index(layer_name, self.total_base_layers)
-                # Top-k tensors exist on every TP rank. Their head dimensions
-                # and dtype match the CPU cache, but their row size does not.
-                topk_tensors = (
-                    self.offload_manager.topk_buffers_k[pool_idx],
-                    self.offload_manager.topk_buffers_v[pool_idx],
-                )
-                block_shapes = tuple((self.offload_manager.block_size, *tensor.shape[2:]) for tensor in topk_tensors)
-                block_size_scales = tuple(
-                    length // (tensor.element_size() * math.prod(shape))
-                    for length, tensor, shape in zip((k_len, v_len), topk_tensors, block_shapes, strict=True)
-                )
-                component = ComponentLayout(
-                    name=layer_name,
-                    group_index=group_idx,
-                    block_size=self.kv_cache_config.kv_cache_groups[group_idx].kv_cache_spec.block_size,
-                    dtypes=tuple(str(tensor.dtype) for tensor in topk_tensors),
-                    base_addrs=(k_base, v_base),
-                    block_strides=(k_len, v_len),
-                    block_lengths=(k_len, v_len),
-                    block_shapes=block_shapes,
-                    block_size_scales=block_size_scales,
-                )
-                layouts.setdefault(layer_idx, []).insert(0, component)
-                tp_shared_components.add(layer_name)
-
-            # MemFabric reads directly into the offload pool's GVA without
-            # registering it through the HBM-only TRANS registration path.
+        layouts = self._build_hbm_layouts(self.kv_cache_config, kv_caches, self.total_base_layers)
+        registration = collect_storage_merged_register_regions(kv_caches)
 
         self.layer_layouts = {layer_idx: tuple(components) for layer_idx, components in layouts.items()}
         validate_register_region_count(registration)
-        _, backend = self._ensure_engine()
+        engine, _ = self._ensure_engine()
         if self._backend_name == BACKEND_MEMFABRIC:
             global_memfabric_te.register_buffer(registration.ptrs, registration.lengths)
-            d_session = global_memfabric_te.unique_id
         else:
             global_te.register_buffer(registration.ptrs, registration.lengths)
-            # getattr: unit-test doubles bypass _ensure_engine/self.engine.
-            engine_obj = getattr(self, "engine", None)
-            rpc_port = engine_obj.get_rpc_port() if engine_obj is not None else 0
-            d_session = f"{getattr(self, 'side_channel_host', '')}:{rpc_port}"
 
-        self._read_thread = LayerwisePullReadThread(
+        self._receive_thread = LayerwisePushReceiveThread(
             tp_rank=self.tp_rank,
             side_channel_port=self.side_channel_port,
-            backend=backend,
-            state=ConsumerReadState(
+            state=ConsumerDestinationState(
                 tp_size=self.tp_size,
                 layer_layouts=self.layer_layouts,
                 dest_blocks_by_req=self._dest_blocks_by_req,
-                tp_shared_components=frozenset(tp_shared_components),
                 dest_blocks_condition=self._dest_blocks_condition,
-                d_session=d_session,
-                transfer_mode=getattr(self, "_transfer_mode", TRANSFER_MODE_PULL),
+                session=(
+                    global_memfabric_te.unique_id
+                    if self._backend_name == BACKEND_MEMFABRIC
+                    else f"{self.side_channel_host}:{engine.get_rpc_port()}"
+                ),
             ),
         )
-        self._read_thread.start()
-        if not self._read_thread.ready_event.wait(timeout=CONNECTOR_THREAD_STARTUP_TIMEOUT_SECONDS):
-            self._read_thread.stop()
-            raise RuntimeError("Timed out waiting for the layerwise pull D-side read thread")
-        if self._read_thread.startup_error is not None:
-            error = self._read_thread.startup_error
-            self._read_thread.stop()
-            raise RuntimeError("Layerwise pull D-side read thread failed during startup") from error
+        self._receive_thread.start()
+        if not self._receive_thread.ready_event.wait(timeout=CONNECTOR_THREAD_STARTUP_TIMEOUT_SECONDS):
+            self._receive_thread.stop()
+            raise RuntimeError("Timed out waiting for the layerwise push D-side receive thread")
+        if self._receive_thread.startup_error is not None:
+            error = self._receive_thread.startup_error
+            self._receive_thread.stop()
+            raise RuntimeError("Layerwise push D-side receive thread failed during startup") from error
         logger.info(
-            "Layerwise pull D registered %d layers through %s",
+            "Layerwise push D registered %d layers through %s",
             len(self.layer_layouts),
             self._backend_name,
         )
@@ -354,6 +273,8 @@ class LayerwisePullConsumerWorker:
                 self._dest_blocks_by_req[ext_id] = block_ids
                 self._pending_recv_req_ids.add(req_id)
             self._dest_blocks_condition.notify_all()
+        if self._receive_thread is not None:
+            self._receive_thread.notify_targets()
 
     def save_kv_layer(
         self,
@@ -369,27 +290,29 @@ class LayerwisePullConsumerWorker:
 
     def _cleanup_request_state(self, req_ids: set[str]) -> None:
         ext_ids = set()
-        for req_id in req_ids:
-            ext_id = get_external_request_id(req_id)
-            ext_ids.add(ext_id)
-            self.request_map.pop(ext_id, None)
-            self._dest_blocks_by_req.pop(ext_id, None)
-            self._terminal_ext_ids.discard(ext_id)
-        if self._read_thread is not None:
-            self._read_thread.discard_requests(ext_ids)
+        with self._dest_blocks_condition:
+            for req_id in req_ids:
+                ext_id = get_external_request_id(req_id)
+                ext_ids.add(ext_id)
+                self.request_map.pop(ext_id, None)
+                self._dest_blocks_by_req.pop(ext_id, None)
+                self._terminal_ext_ids.discard(ext_id)
+        if self._receive_thread is not None:
+            self._receive_thread.discard_requests(ext_ids)
 
-    def _gather_tp_read_status(
+    def _gather_tp_write_status(
         self,
         local_terminal: set[str],
         local_failed: set[str],
-    ) -> list[tuple[set[str], set[str]]]:
+        local_fatal: str | None,
+    ) -> list[tuple[set[str], set[str], str | None]]:
         if self.tp_size == 1:
-            return [(local_terminal, local_failed)]
+            return [(local_terminal, local_failed, local_fatal)]
         tp_group = get_tp_group()
-        gathered: list[tuple[set[str], set[str]] | None] = [None] * tp_group.world_size
+        gathered: list[tuple[set[str], set[str], str | None] | None] = [None] * tp_group.world_size
         torch.distributed.all_gather_object(
             gathered,
-            (local_terminal, local_failed),
+            (local_terminal, local_failed, local_fatal),
             group=tp_group.cpu_group,
         )
         return [status for status in gathered if status is not None]
@@ -397,14 +320,29 @@ class LayerwisePullConsumerWorker:
     def get_finished(self, finished_req_ids: set[str] | None = None) -> tuple[set[str], set[str]]:
         done_recving: set[str] = set()
         local_failed: set[str] = set()
-        if self._read_thread is not None:
-            local_done = self._read_thread.get_and_clear_done()
-            local_failed = self._read_thread.get_and_clear_failed()
-            self._terminal_ext_ids.update(local_done | local_failed)
+        receiver_error: BaseException | None = None
+        if self._receive_thread is not None:
+            receiver_error = self._receive_thread.fatal_error
+            if receiver_error is None:
+                local_done = self._receive_thread.get_and_clear_done()
+                local_failed = self._receive_thread.get_and_clear_failed()
+                self._terminal_ext_ids.update(local_done | local_failed)
 
-        tp_status = self._gather_tp_read_status(set(self._terminal_ext_ids), local_failed)
-        finished_on_all = set.intersection(*(terminal for terminal, _ in tp_status)) if tp_status else set()
-        failed_on_any = set().union(*(failed for _, failed in tp_status))
+        tp_status = self._gather_tp_write_status(
+            set(self._terminal_ext_ids),
+            local_failed,
+            str(receiver_error) if receiver_error is not None else None,
+        )
+        fatal_errors = [fatal for _, _, fatal in tp_status if fatal is not None]
+        if fatal_errors:
+            error = RuntimeError(
+                f"Push receiver failed on a TP rank; destination blocks remain pinned: {fatal_errors[0]}"
+            )
+            if receiver_error is not None:
+                raise error from receiver_error
+            raise error
+        finished_on_all = set.intersection(*(terminal for terminal, _, _ in tp_status)) if tp_status else set()
+        failed_on_any = set().union(*(failed for _, failed, _ in tp_status))
         self._terminal_ext_ids.difference_update(finished_on_all)
         for ext_id in failed_on_any:
             for group in self._dest_blocks_by_req.get(ext_id, []):
@@ -414,11 +352,11 @@ class LayerwisePullConsumerWorker:
             internal = self.request_map.get(ext_id)
             if internal is None:
                 raise RuntimeError(
-                    f"Layerwise pull completed request {ext_id!r} before its "
+                    f"Layerwise push completed request {ext_id!r} before its "
                     "D-side internal request mapping was registered"
                 )
             done_recving.add(internal)
-        # A scheduler finish notification can be a cancellation while READs
+        # A scheduler finish notification can be a cancellation while WRITEs
         # are still active. vLLM keeps those blocks until finished_recving;
         # preserve their lookup and PP completion counts for the same duration.
         self._pending_recv_req_ids.difference_update(done_recving)
@@ -437,20 +375,27 @@ class LayerwisePullConsumerWorker:
         return invalid
 
     def shutdown(self) -> None:
-        if self._read_thread is not None:
-            self._read_thread.stop()
+        if self._receive_thread is not None:
+            self._receive_thread.stop()
 
 
-class LayerwisePullProducerWorker:
-    """Expose local component layouts and publish per-layer readiness."""
+class LayerwisePushProducerWorker:
+    """Write ready local components into registered Decode destinations."""
 
     def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig | None) -> None:
         if kv_cache_config is None:
-            raise ValueError("LayerwisePullProducerWorker requires KVCacheConfig")
+            raise ValueError("LayerwisePushProducerWorker requires KVCacheConfig")
         os.environ["ASCEND_TRANSFER_TIMEOUT"] = str(get_transfer_timeout_value())
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
         self._backend_name = _resolve_kv_transfer_backend(vllm_config)
+        self._write_mode = _resolve_push_write_mode(vllm_config)
+        if self._write_mode == "async" and self._backend_name != BACKEND_MEMFABRIC:
+            raise ValueError(
+                'LayerwisePushConnector push_write_mode="async" requires '
+                'transfer_backend="memfabric"; use push_write_mode="sync" '
+                "with Mooncake"
+            )
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.tp_rank = get_tensor_model_parallel_rank()
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
@@ -460,15 +405,12 @@ class LayerwisePullProducerWorker:
         self.side_channel_host = get_ip()
         self.side_channel_port = vllm_config.kv_transfer_config.kv_port + self.dp_rank * self.pp_size * self.tp_size
         self.block_size = tuple(group.kv_cache_spec.block_size for group in self.kv_cache_config.kv_cache_groups)
-        self._transfer_mode = _resolve_transfer_mode(vllm_config)
         device_id = torch.npu.current_device()
         if self._backend_name == BACKEND_MEMFABRIC:
-            # Push writes into D's memory, so the store server is hosted by Decode.
-            store_server_role = (
-                MEMFABRIC_ROLE_DECODE if self._transfer_mode == TRANSFER_MODE_PUSH else MEMFABRIC_ROLE_PREFILL
-            )
             global_memfabric_te.configure(
-                role=MEMFABRIC_ROLE_PREFILL, device_id=device_id, store_server_role=store_server_role
+                role=MEMFABRIC_ROLE_PREFILL,
+                device_id=device_id,
+                store_server_role=MEMFABRIC_ROLE_DECODE,
             )
             self.engine = global_memfabric_te.get_transfer_engine(self.side_channel_host)
             self.session_id = global_memfabric_te.unique_id
@@ -483,7 +425,7 @@ class LayerwisePullProducerWorker:
         self.reused_storage_slots: frozenset[int] = frozenset()
         self.current_layer = 0
         self.last_layer_idx = -1
-        self.kv_send_layer_thread: LayerwisePullSendingThread | None = None
+        self.kv_send_layer_thread: LayerwisePushSendingThread | None = None
         self._pd_dispatched_layers: set[int] = set()
         self._routes_by_topology: dict[str, tuple[dict[int, tuple[str, int]], frozenset[int]]] = {}
 
@@ -502,9 +444,9 @@ class LayerwisePullProducerWorker:
         if not metadata.requests:
             return
         if len(metadata.producer_pp_layers) != self.pp_size:
-            raise RuntimeError("Layerwise pull producer PP topology has not been initialized")
+            raise RuntimeError("Layerwise push producer PP topology has not been initialized")
         if tuple(metadata.producer_pp_layers[self.pp_rank]) != self._layer_order:
-            raise RuntimeError("Layerwise pull producer layer ownership differs from startup metadata")
+            raise RuntimeError("Layerwise push producer layer ownership differs from startup metadata")
         assert self.kv_send_layer_thread is not None
         self.kv_send_layer_thread._state.pp_layers = metadata.producer_pp_layers
         self.kv_send_layer_thread._state.tp_size = self.tp_size
@@ -512,7 +454,7 @@ class LayerwisePullProducerWorker:
             remote_tp_size = req_meta.remote_tp_size or self.tp_size
             topology_id = req_meta.remote_topology_id
             if not isinstance(topology_id, str) or not topology_id:
-                raise ValueError("Layerwise pull requires the D startup topology ID")
+                raise ValueError("Layerwise push requires the D startup topology ID")
             remote_tp_rank = self._map_prefill_rank_to_decode_rank(
                 prefill_tp_size=self.tp_size,
                 decode_tp_size=remote_tp_size,
@@ -524,34 +466,34 @@ class LayerwisePullProducerWorker:
             if route is None:
                 endpoints = req_meta.remote_endpoints
                 if not endpoints or len(endpoints) != req_meta.remote_pp_size:
-                    raise ValueError("Layerwise pull requires the complete D worker endpoint table")
+                    raise ValueError("Layerwise push requires the complete D worker endpoint table")
                 if any(len(stage) != remote_tp_size for stage in endpoints):
-                    raise ValueError("Layerwise pull D endpoint table does not match its TP size")
+                    raise ValueError("Layerwise push D endpoint table does not match its TP size")
                 destination_by_layer = {}
                 for stage in endpoints:
                     endpoint = stage[remote_tp_rank]
                     host, port, layers = endpoint["host"], endpoint["port"], endpoint["layer_ids"]
                     if not host:
-                        raise ValueError("Layerwise pull D endpoint has no host")
-                    _validate_tcp_port(port, description="Layerwise pull remote D-side port")
+                        raise ValueError("Layerwise push D endpoint has no host")
+                    _validate_tcp_port(port, description="Layerwise push remote D-side port")
                     for layer in layers:
                         if layer in destination_by_layer:
-                            raise ValueError(f"Layerwise pull D has duplicate ownership of layer {layer}")
+                            raise ValueError(f"Layerwise push D has duplicate ownership of layer {layer}")
                         destination_by_layer[layer] = (host, port)
                 missing = set(self._layer_order) - destination_by_layer.keys()
                 if missing:
-                    raise ValueError(f"Layerwise pull D is missing destination layers {sorted(missing)}")
+                    raise ValueError(f"Layerwise push D is missing destination layers {sorted(missing)}")
                 layer_endpoints = {layer: destination_by_layer[layer] for layer in self._layer_order}
                 last_by_endpoint = {endpoint: layer for layer, endpoint in layer_endpoints.items()}
                 route = (layer_endpoints, frozenset(last_by_endpoint.values()))
                 self._routes_by_topology[topology_id] = route
             req_meta.layer_endpoints, req_meta.terminal_layers = route
-            # Register every destination before the first terminal-layer ACK
-            # can arrive. A P stage may feed more than one D stage.
+            # Register every destination before the first terminal WRITE can
+            # finish. A P stage may feed more than one D stage.
             if req_meta.chunk_finish:
                 self.kv_send_layer_thread.track_requests({req_id}, set(req_meta.layer_endpoints.values()))
             logger.debug(
-                "Layerwise pull P prepared req %s: layer_endpoints=%s, blocks=%s",
+                "Layerwise push P prepared req %s: layer_endpoints=%s, blocks=%s",
                 req_id,
                 req_meta.layer_endpoints,
                 req_meta.local_block_ids,
@@ -565,35 +507,19 @@ class LayerwisePullProducerWorker:
         prefill_tp_rank: int,
     ) -> int:
         if prefill_tp_size < 1 or decode_tp_size < 1:
-            raise ValueError("Layerwise pull P/D tensor parallel sizes must be positive")
+            raise ValueError("Layerwise push P/D tensor parallel sizes must be positive")
         if prefill_tp_size < decode_tp_size or prefill_tp_size % decode_tp_size != 0:
             raise ValueError(
-                "Layerwise pull requires P tensor parallel size to be greater than or equal to, "
+                "Layerwise push requires P tensor parallel size to be greater than or equal to, "
                 f"and divisible by, D tensor parallel size; got P={prefill_tp_size}, D={decode_tp_size}"
             )
         if not 0 <= prefill_tp_rank < prefill_tp_size:
             raise ValueError(
-                f"Layerwise pull P tensor parallel rank {prefill_tp_rank} is outside [0, {prefill_tp_size})"
+                f"Layerwise push P tensor parallel rank {prefill_tp_rank} is outside [0, {prefill_tp_size})"
             )
         return prefill_tp_rank // (prefill_tp_size // decode_tp_size)
 
     def _build_send_state(self) -> ProducerSendState:
-        # Push mode: this thread writes into D-advertised destinations and needs
-        # a backend; pull mode never transfers from P (backend stays None).
-        push_backend = None
-        push_write_mode = _resolve_push_write_mode(self.vllm_config)
-        if getattr(self, "_transfer_mode", TRANSFER_MODE_PULL) == TRANSFER_MODE_PUSH:
-            if push_write_mode == "async" and self._backend_name != BACKEND_MEMFABRIC:
-                raise ValueError(
-                    "LayerwisePullConnector push_write_mode=\"async\" requires "
-                    'kv_connector_extra_config["transfer_backend"]="memfabric"; '
-                    'Mooncake has no async write submit, use push_write_mode="sync"'
-                )
-            push_backend = (
-                PullBackend.memfabric(self.engine)
-                if self._backend_name == BACKEND_MEMFABRIC
-                else PullBackend.mooncake(self.engine)
-            )
         return ProducerSendState(
             last_layer_idx=self.last_layer_idx,
             layer_layouts=self.layer_layouts,
@@ -603,21 +529,19 @@ class LayerwisePullProducerWorker:
             num_blocks=self.kv_cache_config.num_blocks,
             pp_rank=self.pp_rank,
             tp_rank=self.tp_rank,
-            transfer_mode=getattr(self, "_transfer_mode", TRANSFER_MODE_PULL),
-            backend=push_backend,
-            push_write_mode=push_write_mode,
+            write_mode=self._write_mode,
         )
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         # The producer and an ordinary-HBM consumer use the same layout builder.
-        raw_layouts = LayerwisePullConsumerWorker._build_hbm_layouts(
+        raw_layouts = LayerwisePushConsumerWorker._build_hbm_layouts(
             self.kv_cache_config,
             kv_caches,
             self.total_base_layers,
         )
         self.layer_layouts = {layer_idx: tuple(components) for layer_idx, components in raw_layouts.items()}
         if not self.layer_layouts:
-            raise RuntimeError("Layerwise pull producer did not find any KV cache layers")
+            raise RuntimeError("Layerwise push producer did not find any KV cache layers")
         self._layer_order = tuple(sorted(self.layer_layouts))
         self.last_layer_idx = self._layer_order[-1]
         for layer_idx, components in self.layer_layouts.items():
@@ -644,36 +568,28 @@ class LayerwisePullProducerWorker:
             global_te.register_buffer(registration.ptrs, registration.lengths)
 
         ready_event = threading.Event()
-        self.kv_send_layer_thread = LayerwisePullSendingThread(
+        self.kv_send_layer_thread = LayerwisePushSendingThread(
             ready_event=ready_event,
             state=self._build_send_state(),
+            backend=(
+                WriteBackend.memfabric(self.engine)
+                if self._backend_name == BACKEND_MEMFABRIC
+                else WriteBackend.mooncake(self.engine)
+            ),
         )
         self.kv_send_layer_thread.start()
         if not ready_event.wait(timeout=CONNECTOR_THREAD_STARTUP_TIMEOUT_SECONDS):
             self.kv_send_layer_thread.stop()
-            raise RuntimeError("Timed out waiting for the layerwise pull P-side send thread")
+            raise RuntimeError("Timed out waiting for the layerwise push P-side send thread")
         if self.kv_send_layer_thread.startup_error is not None:
             error = self.kv_send_layer_thread.startup_error
             self.kv_send_layer_thread.stop()
-            raise RuntimeError("Layerwise pull P-side send thread failed during startup") from error
+            raise RuntimeError("Layerwise push P-side send thread failed during startup") from error
         logger.info(
-            "Layerwise pull P registered %d layers through %s",
+            "Layerwise push P registered %d layers through %s",
             len(self.layer_layouts),
             self._backend_name,
         )
-
-    def _has_pull_target(self, metadata: KVConnectorMetadata, layer_idx: int) -> bool:
-        group_indices = {component.group_index for component in self.layer_layouts[layer_idx]}
-        for req_meta in getattr(metadata, "requests", {}).values():
-            if layer_idx not in req_meta.layer_endpoints:
-                continue
-            has_blocks = any(
-                group_idx < len(req_meta.local_block_ids) and bool(req_meta.local_block_ids[group_idx])
-                for group_idx in group_indices
-            )
-            if has_blocks or (layer_idx in req_meta.terminal_layers and req_meta.chunk_finish):
-                return True
-        return False
 
     def on_kv_cache_written(self, layer_name: str, connector_metadata: KVConnectorMetadata) -> None:
         if self.kv_send_layer_thread is None:
@@ -688,13 +604,14 @@ class LayerwisePullProducerWorker:
         if not getattr(connector_metadata, "requests", None):
             return
         self._pd_dispatched_layers.add(layer_idx)
-        if self._has_pull_target(connector_metadata, layer_idx):
-            self.kv_send_layer_thread.mark_layer_pending(layer_idx)
         try:
-            self.kv_send_layer_thread.record_p_save_event(layer_idx)
-            self._enqueue_layer_send(resolved_name, layer_idx, connector_metadata)
+            # Bind the event to this task, not the layer: another batch may
+            # enqueue the same layer before the sending thread consumes it.
+            wait_event = torch.npu.Event()
+            wait_event.record()
+            self._enqueue_layer_send(resolved_name, layer_idx, connector_metadata, wait_event=wait_event)
         except Exception as error:
-            self.kv_send_layer_thread._fail_layer(layer_idx, str(error))
+            self.kv_send_layer_thread._record_layer_error(layer_idx, str(error))
             self._pd_dispatched_layers.discard(layer_idx)
             raise
 
@@ -723,8 +640,6 @@ class LayerwisePullProducerWorker:
         if not getattr(connector_metadata, "requests", None):
             return
         self._pd_dispatched_layers.add(layer_idx)
-        if self._has_pull_target(connector_metadata, layer_idx):
-            send_thread.mark_layer_pending(layer_idx)
         wait_event = torch.npu.Event()
         wait_event.record()
         self._enqueue_layer_send(
@@ -760,16 +675,14 @@ class LayerwisePullProducerWorker:
                 layer_name=layer_name,
             )
             self.kv_send_layer_thread.enqueue(task)
-        else:
-            self.kv_send_layer_thread._signal_layer_done(layer_idx)
 
     def wait_for_slot_release(self, layer_idx: int) -> None:
-        """Wait for all Decode readers before AscendStore overwrites a slot."""
+        """Wait for all writes using a slot before AscendStore overwrites it."""
         send_thread = self.kv_send_layer_thread
         if send_thread is None:
             return
         if layer_idx not in self.layer_storage_slots:
-            raise RuntimeError(f"Layerwise pull storage mapping is missing layer {layer_idx}")
+            raise RuntimeError(f"Layerwise push storage mapping is missing layer {layer_idx}")
         for slot_id in self.layer_storage_slots[layer_idx]:
             if slot_id not in self.reused_storage_slots:
                 continue
@@ -777,16 +690,16 @@ class LayerwisePullProducerWorker:
             if event is None:
                 continue
             description = f"physical KV storage slot {slot_id} for layer {layer_idx}"
-            while not event.wait(timeout=PD_READ_WAIT_LOG_INTERVAL_SECONDS):
+            while not event.wait(timeout=PD_WRITE_WAIT_LOG_INTERVAL_SECONDS):
                 error = send_thread.get_storage_error(slot_id)
                 if error is not None:
-                    raise RuntimeError(f"Decode failed to read {description}: {error}")
+                    raise RuntimeError(f"Push failed to write {description}: {error}")
                 if not send_thread.is_alive():
-                    raise RuntimeError(f"Layerwise pull send thread stopped while waiting for {description}")
-                logger.info("Waiting for Decode to read %s", description)
+                    raise RuntimeError(f"Layerwise push send thread stopped while waiting for {description}")
+                logger.info("Waiting for P to finish writing %s", description)
             error = send_thread.get_storage_error(slot_id)
             if error is not None:
-                raise RuntimeError(f"Decode failed to read {description}: {error}")
+                raise RuntimeError(f"Push failed to write {description}: {error}")
 
     def shutdown(self) -> None:
         if self.kv_send_layer_thread is not None:

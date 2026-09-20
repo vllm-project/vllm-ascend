@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Wire protocol for backend-independent layerwise pull."""
+"""Wire protocol for backend-independent layerwise push."""
 
 from __future__ import annotations
 
@@ -13,28 +13,16 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 
 BATCH_KV_TRANSFER_PARAMS = "batch_kv_transfer_params"
 LAYOUT_META = b"layout_meta"
-READ_READY_BATCH = b"read_ready_batch"
-READ_DONE = b"read_done"
-READ_FAILED = b"read_failed"
-
-# Push mode (transfer_mode="push"): D advertises destinations, P writes.
-PUSH_META = b"push_meta"  # P→D (on connect): producer topology for completion counting
-DEST_LAYOUT_META = b"dest_layout_meta"  # D→P (reply): destination component layouts + D session
-DEST_BLOCKS_REQUEST = b"dest_blocks_request"  # P→D: (ext_req_id,) block-id query
-DEST_BLOCKS = b"dest_blocks"  # D→P: (ext_req_id, block_ids_by_group)
-WRITE_DONE = b"write_done"  # P→D: terminal-layer write completion (chunk_done semantics)
-WRITE_FAILED = b"write_failed"  # P→D: write failure (fails the request on D)
-
-TRANSFER_MODE_PULL = "pull"
-TRANSFER_MODE_PUSH = "push"
-SUPPORTED_TRANSFER_MODES = (TRANSFER_MODE_PULL, TRANSFER_MODE_PUSH)
+TARGET_BLOCKS = b"target_blocks"
+REQUEST_DONE = b"request_done"
+WRITE_FAILED = b"write_failed"
 
 
 @dataclass(frozen=True)
-class LayerwisePullHandshakeMetadata(KVConnectorHandshakeMetadata):
+class LayerwisePushHandshakeMetadata(KVConnectorHandshakeMetadata):
     layer_ids: tuple[int, ...]
     host: str = ""
-    # Only D workers listen for READ_READY; P workers publish layer ownership.
+    # D workers serve destination metadata; P workers publish layer ownership.
     port: int = 0
 
 
@@ -69,7 +57,7 @@ class ComponentLayout:
 
 
 @dataclass
-class LayerwisePullProducerReqMeta:
+class LayerwisePushProducerReqMeta:
     local_block_ids: list[list[int]]
     remote_tp_size: int | None
     remote_pp_size: int | None = None
@@ -89,9 +77,9 @@ class LayerwisePullProducerReqMeta:
     terminal_layers: frozenset[int] = frozenset()
 
 
-class LayerwisePullProducerMetadata(KVConnectorMetadata):
+class LayerwisePushProducerMetadata(KVConnectorMetadata):
     def __init__(self) -> None:
-        self.requests: dict[str, LayerwisePullProducerReqMeta] = {}
+        self.requests: dict[str, LayerwisePushProducerReqMeta] = {}
         self.producer_pp_layers: tuple[tuple[int, ...], ...] = ()
 
     def add_new_req(
@@ -105,7 +93,7 @@ class LayerwisePullProducerMetadata(KVConnectorMetadata):
         local_transed_tokens: int = 0,
         chunk_start_blocks: list[int] | None = None,
     ) -> None:
-        self.requests[request_id] = LayerwisePullProducerReqMeta(
+        self.requests[request_id] = LayerwisePushProducerReqMeta(
             local_block_ids=local_block_ids,
             remote_tp_size=kv_transfer_params.get("remote_tp_size"),
             remote_pp_size=kv_transfer_params.get("remote_pp_size"),
@@ -120,16 +108,16 @@ class LayerwisePullProducerMetadata(KVConnectorMetadata):
 
 
 @dataclass
-class LayerwisePullConsumerReqMeta:
+class LayerwisePushConsumerReqMeta:
     """D-side block ids for every KV cache group."""
 
     req_id: str
     block_ids_by_group: list[list[int]]
 
 
-class LayerwisePullConsumerMetadata(KVConnectorMetadata):
+class LayerwisePushConsumerMetadata(KVConnectorMetadata):
     def __init__(self) -> None:
-        self.requests: list[LayerwisePullConsumerReqMeta] = []
+        self.requests: list[LayerwisePushConsumerReqMeta] = []
 
     def add_request(
         self,
@@ -137,7 +125,7 @@ class LayerwisePullConsumerMetadata(KVConnectorMetadata):
         block_ids: list[list[int]],
     ) -> None:
         self.requests.append(
-            LayerwisePullConsumerReqMeta(
+            LayerwisePushConsumerReqMeta(
                 req_id=request_id,
                 block_ids_by_group=[list(group) for group in block_ids],
             )
@@ -146,10 +134,11 @@ class LayerwisePullConsumerMetadata(KVConnectorMetadata):
 
 @dataclass
 class SendTask:
-    send_request: dict[str, LayerwisePullProducerReqMeta]
+    send_request: dict[str, LayerwisePushProducerReqMeta]
     wait_event: Any | None = None
     layer_idx: int = 0
     layer_name: str = ""
+    reservation_id: tuple[int, str] | None = None
 
 
 def get_external_request_id(request_id: str) -> str:

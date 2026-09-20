@@ -1,6 +1,6 @@
 # mypy: ignore-errors
 # SPDX-License-Identifier: Apache-2.0
-"""Scheduler side of the backend-independent layerwise pull connector."""
+"""Scheduler side of the backend-independent layerwise push connector."""
 
 from __future__ import annotations
 
@@ -17,10 +17,10 @@ from vllm.utils.math_utils import round_down
 from vllm.utils.network_utils import get_ip
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
-from vllm_ascend.distributed.kv_transfer.kv_p2p.layerwise_pull.protocol import (
+from vllm_ascend.distributed.kv_transfer.kv_p2p.layerwise_push.protocol import (
     BATCH_KV_TRANSFER_PARAMS,
-    LayerwisePullConsumerMetadata,
-    LayerwisePullProducerMetadata,
+    LayerwisePushConsumerMetadata,
+    LayerwisePushProducerMetadata,
     get_external_request_id,
 )
 
@@ -45,6 +45,7 @@ class _SendReqInfo:
         self.local_transferred_tokens = local_transferred_tokens
         self.local_computed_tokens = local_computed_tokens
         self.request = request
+        self.has_dispatched_blocks = False
 
     def extend_local_block_ids(self, new_block_ids: list[list[int]]) -> None:
         for i, new_block_id in enumerate(new_block_ids):
@@ -57,17 +58,17 @@ class _SendReqInfo:
         self.local_transferred_tokens = transferred_tokens
 
 
-class LayerwisePullProducerScheduler:
-    """P-side scheduler for layerwise pull.
+class LayerwisePushProducerScheduler:
+    """P-side scheduler for layerwise push.
 
     D's metaserver rendezvous carries ``do_remote_decode=True`` plus D's ZMQ
     endpoint. P tracks its own local block ids and emits per-step metadata for
-    the pull-mode sending thread; D looks up its destination blocks by req_id.
+    the push sending thread; D publishes its destination blocks by req_id.
     """
 
     def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig | None):
         if kv_cache_config is None:
-            raise ValueError("LayerwisePullProducerScheduler requires KVCacheConfig")
+            raise ValueError("LayerwisePushProducerScheduler requires KVCacheConfig")
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
         self.block_size = [group_spec.kv_cache_spec.block_size for group_spec in kv_cache_config.kv_cache_groups]
@@ -103,7 +104,7 @@ class LayerwisePullProducerScheduler:
             external_request_id = get_external_request_id(request.request_id)
             params = batch_params.get(external_request_id)
             if params is None:
-                raise RuntimeError(f"Layerwise pull batch metadata does not contain request {external_request_id!r}")
+                raise RuntimeError(f"Layerwise push batch metadata does not contain request {external_request_id!r}")
             # Each vLLM child request must retain only its own D-side endpoint
             # and cache state after a batched OpenAI completion is expanded.
             request.kv_transfer_params = params
@@ -119,7 +120,7 @@ class LayerwisePullProducerScheduler:
         self._reqs_need_send_layerwise[request.request_id] = send_req_info
 
         logger.debug(
-            "Layerwise pull P registered req %s: local_block_ids=%s, "
+            "Layerwise push P registered req %s: local_block_ids=%s, "
             "remote_endpoints=%s, remote_tp_size=%s, "
             "remote_cached_tokens=%s",
             request.request_id,
@@ -130,7 +131,7 @@ class LayerwisePullProducerScheduler:
         )
 
     def build_connector_meta(self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
-        meta = LayerwisePullProducerMetadata()
+        meta = LayerwisePushProducerMetadata()
         meta.producer_pp_layers = self.producer_pp_layers
         if not self._reqs_need_send_layerwise:
             return meta
@@ -143,7 +144,7 @@ class LayerwisePullProducerScheduler:
                 normalized = self._normalize_block_ids(new_blocks)
                 self._reqs_need_send_layerwise[req_id].extend_local_block_ids(normalized)
                 logger.debug(
-                    "Layerwise pull P extended req %s: new_blocks=%s",
+                    "Layerwise push P extended req %s: new_blocks=%s",
                     req_id,
                     normalized,
                 )
@@ -183,12 +184,13 @@ class LayerwisePullProducerScheduler:
                     end_block = chunk_computed_tokens // block_size
                 if end_block > len(all_block_ids):
                     raise RuntimeError(
-                        f"Layerwise pull chunk range exceeds allocation for group {group_idx}: "
+                        f"Layerwise push chunk range exceeds allocation for group {group_idx}: "
                         f"range=[{start_block}, {end_block}), allocated={len(all_block_ids)}"
                     )
                 end_block = max(end_block, start_block)
                 chunk_block_ids.append(all_block_ids[start_block:end_block])
                 chunk_start_blocks.append(start_block)
+            send_req_info.has_dispatched_blocks |= any(chunk_block_ids)
             meta.add_new_req(
                 request_id=req_id,
                 local_block_ids=chunk_block_ids,
@@ -200,7 +202,7 @@ class LayerwisePullProducerScheduler:
                 chunk_start_blocks=chunk_start_blocks,
             )
             logger.debug(
-                "Layerwise pull P added transfer task req %s: local_block_ids=%s, "
+                "Layerwise push P added transfer task req %s: local_block_ids=%s, "
                 "local_transed_tokens=%s, local_computed_tokens=%s, "
                 "remote_cache_tokens=%s, prompt_len=%s, chunk_finish=%s, "
                 "remote_endpoints=%s",
@@ -230,9 +232,14 @@ class LayerwisePullProducerScheduler:
         request: Request,
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
-        # The final chunk normally removes this tracker in
-        # build_connector_meta. Cancellation, preemption, and failures can
-        # finish earlier, so clean it up here as well.
+        # Early P cancellation has no terminal-layer marker to drain queued
+        # writes. Fail closed instead of releasing a potentially active source.
+        pending = self._reqs_need_send_layerwise.get(request.request_id)
+        if pending is not None and pending.has_dispatched_blocks:
+            raise RuntimeError(
+                "Layerwise push cannot cancel Prefill after a partial chunk was dispatched; "
+                "source blocks may still be used by queued writes."
+            )
         self._reqs_need_send_layerwise.pop(request.request_id, None)
         final_chunk_dispatched = request.request_id in self._reqs_finalized_layerwise
         self._reqs_finalized_layerwise.discard(request.request_id)
@@ -242,13 +249,13 @@ class LayerwisePullProducerScheduler:
         )
         if delay_free_blocks:
             logger.debug(
-                "Layerwise pull delaying source block free for request %s until Decode finishes pulling",
+                "Layerwise push delaying source block free for request %s until writes finish",
                 request.request_id,
             )
         return delay_free_blocks, None
 
 
-class LayerwisePullConsumerScheduler:
+class LayerwisePushConsumerScheduler:
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -259,7 +266,7 @@ class LayerwisePullConsumerScheduler:
         self.kv_cache_config = kv_cache_config
         self.use_layerwise = use_layerwise
         if kv_cache_config is None:
-            raise ValueError("LayerwisePullConsumerScheduler requires KVCacheConfig")
+            raise ValueError("LayerwisePushConsumerScheduler requires KVCacheConfig")
         self.block_size = [group_spec.kv_cache_spec.block_size for group_spec in kv_cache_config.kv_cache_groups]
 
         self.side_channel_host = get_ip()
@@ -281,7 +288,7 @@ class LayerwisePullConsumerScheduler:
         # deployments can be verified against the formula above.
         pc = vllm_config.parallel_config
         logger.info(
-            "Layerwise pull D topology: host=%s, kv_port=%d, data_parallel_rank=%d "
+            "Layerwise push D topology: host=%s, kv_port=%d, data_parallel_rank=%d "
             "(local=%s), data_parallel_size=%d (local=%s), pp_size=%d, tp_size=%d, "
             "PP/TP control-plane ports=[%d..%d]",
             self.side_channel_host,
@@ -316,7 +323,7 @@ class LayerwisePullConsumerScheduler:
     # D side (kv_consumer)
     # ------------------------------------------------------------------
     def get_num_new_matched_tokens(self, request: Request, num_computed_tokens: int) -> tuple[int, bool]:
-        # Pull the uncached prompt KV from the remote P node. The worker decides
+        # Receive the uncached prompt KV from the remote P node. The worker decides
         # where each component lands from the local layout adapter.
         params = request.kv_transfer_params
         if params is not None and params.get("do_remote_prefill"):
@@ -336,23 +343,21 @@ class LayerwisePullConsumerScheduler:
         if params is None or not params.get("do_remote_prefill"):
             return
         if self.remote_endpoints is None or self.remote_topology_id is None:
-            raise RuntimeError("Layerwise pull D worker topology has not been initialized")
+            raise RuntimeError("Layerwise push D worker topology has not been initialized")
 
-        block_ids_by_group = LayerwisePullProducerScheduler._normalize_block_ids(blocks.get_block_ids())
+        block_ids_by_group = LayerwisePushProducerScheduler._normalize_block_ids(blocks.get_block_ids())
         expected_groups = len(self.kv_cache_config.kv_cache_groups)
         if len(block_ids_by_group) != expected_groups:
             raise RuntimeError(
-                "Layerwise pull D allocation did not provide all KV cache groups: "
+                "Layerwise push D allocation did not provide all KV cache groups: "
                 f"expected={expected_groups}, got={len(block_ids_by_group)}"
             )
         self._request_trackers[request.request_id] = block_ids_by_group
         self._reqs_need_recv.add(request.request_id)
 
-        # Notify P via the metaserver rendezvous that D is ready to pull this
-        # request. D does NOT send its block ids to P — D keeps them (passed to
-        # the D worker via connector_meta) and looks
-        # them up by req_id when P's READ_READY arrives. Only contact info and
-        # the do_remote_decode flag go to P.
+        # Rendezvous supplies routing and cache-hit information to P. Destination
+        # block IDs go through the D worker's control channel, after memory
+        # registration and request state are ready, not through the scheduler.
         kv_transfer_params = dict(
             request_id=get_external_request_id(request.request_id),
             do_remote_prefill=False,
@@ -378,7 +383,7 @@ class LayerwisePullConsumerScheduler:
                 message=kv_transfer_params,
             )
         logger.debug(
-            "Layerwise pull D advertised req %s: block_ids=%s, remote_endpoints=%s, metaserver=%s",
+            "Layerwise push D advertised req %s: block_ids=%s, remote_endpoints=%s, metaserver=%s",
             request.request_id,
             block_ids_by_group,
             self.remote_endpoints,
@@ -386,7 +391,7 @@ class LayerwisePullConsumerScheduler:
         )
 
     def build_connector_meta(self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
-        meta = LayerwisePullConsumerMetadata()
+        meta = LayerwisePushConsumerMetadata()
         for req_id in list(self._reqs_need_recv):
             tracker = self._request_trackers.get(req_id)
             if tracker is None:

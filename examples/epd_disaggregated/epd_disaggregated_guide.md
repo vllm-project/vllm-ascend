@@ -203,10 +203,10 @@ vllm serve "/home/p00929506/Qwen3-VL-8B-Instruct" \
         }
     }' \
     --kv-transfer-config  \
-      '{"kv_connector": "LayerwisePullConnector",
+      '{"kv_connector": "LayerwisePushConnector",
       "kv_role": "kv_producer",
       "kv_port": "50001",
-      "kv_connector_extra_config": {"transfer_backend": "mooncake",
+      "kv_connector_extra_config": {"transfer_backend": "mooncake", "push_write_mode": "sync",
                 "use_ascend_direct": true,
                 "prefill": {
                         "dp_size": 1,
@@ -244,10 +244,10 @@ vllm serve "/your/local/model/path/Qwen3-VL-8B-Instruct" \
     --max-model-len 32768  \
     --max-num-seqs 128 \
     --kv-transfer-config  \
-      '{"kv_connector": "LayerwisePullConnector",
+      '{"kv_connector": "LayerwisePushConnector",
         "kv_role": "kv_consumer",
         "kv_port": "50001",
-        "kv_connector_extra_config": {"transfer_backend": "mooncake",
+        "kv_connector_extra_config": {"transfer_backend": "mooncake", "push_write_mode": "sync",
                   "use_ascend_direct": true,
                   "prefill": {
                           "dp_size": 1,
