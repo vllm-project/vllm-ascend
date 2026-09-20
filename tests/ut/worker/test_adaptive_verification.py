@@ -12,6 +12,8 @@ from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.device.device_op import BaseDeviceAdaptor
 from vllm_ascend.worker.v2.aclgraph_utils import ModelWithContext
 
+_NATIVE_TORCH_SUM = torch.sum
+
 
 @pytest.mark.parametrize(
     "builder_cls",
@@ -110,6 +112,8 @@ def test_adaptive_verification_patch_uses_uncompiled_budget_assignment(monkeypat
 def test_adaptive_verification_patch_preserves_budget_assignment(monkeypatch):
     import vllm.v1.worker.gpu.spec_decode.adaptive_verification as adaptive
 
+    # Isolate this test from batch-invariant tests that patch torch.sum globally.
+    monkeypatch.setattr(torch, "sum", _NATIVE_TORCH_SUM)
     monkeypatch.setattr(adaptive, "_assign_draft_token_budget_compiled", object())
     module = importlib.import_module("vllm_ascend.patch.worker.patch_v2.patch_adaptive_verification")
     importlib.reload(module)
