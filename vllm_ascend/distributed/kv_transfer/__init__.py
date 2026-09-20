@@ -55,6 +55,12 @@ def register_connector():
     )
 
     KVConnectorFactory.register_connector(
+        "MooncakeHeterogeneousConnector",
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_heterogeneous_connector",
+        "MooncakeHeterogeneousConnector",
+    )
+
+    KVConnectorFactory.register_connector(
         "UCMConnector", "vllm_ascend.distributed.kv_transfer.kv_pool.ucm_connector", "UCMConnectorV1"
     )
 

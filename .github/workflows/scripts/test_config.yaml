@@ -252,6 +252,15 @@
     - tests/ut/kv_offload
     - tests/e2e/pull_request/one_card/test_cpu_offloading.py
 
+# KV Transfer (heterogeneous PD)
+- name: kv_transfer
+  optional: false
+  source_file_dependencies:
+    - vllm_ascend/distributed/kv_transfer
+  tests:
+    - tests/ut/kv_transfer/test_mooncake_heterogeneous_connector.py
+    - tests/ut/kv_transfer/test_mooncake_heterogeneous_xfer_adapter.py
+
 # Lora
 - name: lora
   optional: false
