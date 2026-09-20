@@ -56,12 +56,7 @@ def get_spec_decode_method(method, vllm_config, device, runner):
         if speculative_config is not None and speculative_config.use_step3p5_mtp():
             return AscendStep3p5MTPProposer(vllm_config, device, runner)
         if method == "mtp" and is_multi_kv_cache_group_mtp(vllm_config):
-            return AscendMultiKVCacheGroupMTPProposer(
-                vllm_config,
-                device,
-                pass_hidden_states_to_model=True,
-                runner=runner,
-            )
+            return AscendMultiKVCacheGroupMTPProposer(vllm_config, device, runner)
         return AscendEagleProposer(vllm_config, device, runner)
     elif method == "dflash":
         if is_dflash2_draft(vllm_config.speculative_config):

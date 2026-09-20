@@ -7,17 +7,17 @@ import torch
 
 import vllm_ascend.spec_decode as spec_decode
 import vllm_ascend.spec_decode.multi_kv_cache_group_proposer as multi_group_proposer
-from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
+from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.spec_decode.multi_kv_cache_group_proposer import (
     AscendMultiKVCacheGroupMTPProposer,
     is_multi_kv_cache_group_mtp,
 )
 
 
-def test_multi_group_proposer_directly_inherits_ascend_base():
-    assert AscendMultiKVCacheGroupMTPProposer.__bases__ == (AscendSpecDecodeBaseProposer,)
+def test_multi_group_proposer_directly_inherits_ascend_eagle():
+    assert AscendMultiKVCacheGroupMTPProposer.__bases__ == (AscendEagleProposer,)
     assert inspect.signature(AscendMultiKVCacheGroupMTPProposer.__init__) == inspect.signature(
-        AscendSpecDecodeBaseProposer.__init__
+        AscendEagleProposer.__init__
     )
 
 
@@ -36,12 +36,7 @@ def test_glm5next_mtp_is_selected_by_draft_model_type():
     with patch.object(spec_decode, "AscendMultiKVCacheGroupMTPProposer", return_value=proposer) as proposer_cls:
         assert spec_decode.get_spec_decode_method("mtp", vllm_config, "npu", "runner") is proposer
 
-    proposer_cls.assert_called_once_with(
-        vllm_config,
-        "npu",
-        pass_hidden_states_to_model=True,
-        runner="runner",
-    )
+    proposer_cls.assert_called_once_with(vllm_config, "npu", "runner")
 
 
 def test_initialize_attn_backend_delegates_single_kv_cache_group():
@@ -51,7 +46,7 @@ def test_initialize_attn_backend_delegates_single_kv_cache_group():
         kv_cache_groups=[SimpleNamespace(layer_names=["draft.attn"], kv_cache_spec=MagicMock())]
     )
 
-    with patch.object(AscendSpecDecodeBaseProposer, "initialize_attn_backend") as parent_init:
+    with patch.object(AscendEagleProposer, "initialize_attn_backend") as parent_init:
         proposer.initialize_attn_backend(kv_cache_config, kernel_block_sizes=[128])
 
     parent_init.assert_called_once_with(kv_cache_config, [128])

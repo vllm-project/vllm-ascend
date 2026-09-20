@@ -170,9 +170,6 @@ from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
 )
 from vllm_ascend.spec_decode.gemma4_proposer import AscendGemma4Proposer
 from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
-from vllm_ascend.spec_decode.multi_kv_cache_group_proposer import (
-    AscendMultiKVCacheGroupMTPProposer,
-)
 from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
 from vllm_ascend.spec_decode.step3p5 import AscendStep3p5MTPProposer
@@ -682,7 +679,6 @@ class NPUModelRunner(GPUModelRunner):
             AscendNgramProposer
             | AscendNgramProposerNPU
             | AscendEagleProposer
-            | AscendMultiKVCacheGroupMTPProposer
             | AscendStep3p5MTPProposer
             | AscendDraftModelProposer
             | AscendDflashProposer
@@ -3710,7 +3706,6 @@ class NPUModelRunner(GPUModelRunner):
                 if isinstance(
                     self.drafter,
                     AscendEagleProposer
-                    | AscendMultiKVCacheGroupMTPProposer
                     | AscendGemma4Proposer
                     | AscendDraftModelProposer
                     | AscendDflashProposer
@@ -4396,7 +4391,6 @@ class NPUModelRunner(GPUModelRunner):
             assert isinstance(
                 self.drafter,
                 AscendEagleProposer
-                | AscendMultiKVCacheGroupMTPProposer
                 | AscendGemma4Proposer
                 | AscendDflashProposer
                 | AscendDSparkProposer
@@ -5890,7 +5884,6 @@ class NPUModelRunner(GPUModelRunner):
             assert isinstance(
                 self.drafter,
                 AscendEagleProposer
-                | AscendMultiKVCacheGroupMTPProposer
                 | AscendDflashProposer
                 | AscendExtractHiddenStatesProposer
                 | AscendGemma4Proposer,

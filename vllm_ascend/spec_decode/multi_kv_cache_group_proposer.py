@@ -11,7 +11,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, UniformTypeKVCacheSpecs
 from vllm.v1.spec_decode.utils import PADDING_SLOT_ID
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
+from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 
 _MULTI_KV_CACHE_GROUP_MTP_MODEL_TYPES = {"glm5_next_mtp"}
 _MULTI_KV_CACHE_GROUP_MTP_ARCHITECTURES = {"Glm5NextMTPModel"}
@@ -34,12 +34,12 @@ def is_multi_kv_cache_group_mtp(vllm_config: VllmConfig) -> bool:
     )
 
 
-class AscendMultiKVCacheGroupMTPProposer(AscendSpecDecodeBaseProposer):
+class AscendMultiKVCacheGroupMTPProposer(AscendEagleProposer):
     """MTP proposer for draft layers split across physical KV cache groups.
 
     The constructor is intentionally inherited unchanged from
-    ``AscendSpecDecodeBaseProposer``. Only eager runtime metadata paths that
-    need a physical KV-cache-group view are overridden below.
+    ``AscendEagleProposer``. Only eager runtime metadata paths that need a
+    physical KV-cache-group view are overridden below.
     """
 
     def _get_draft_layer_kv_cache_groups(self, kv_cache_config: KVCacheConfig) -> dict[str, int]:
@@ -229,7 +229,7 @@ class AscendMultiKVCacheGroupMTPProposer(AscendSpecDecodeBaseProposer):
             )
 
         per_layer_attn_metadata: dict[str, Any] = {}
-        shared_draft_cache = dict(common_ratio_to_sas_metadata=dict()) if self.use_compress else {}
+        shared_draft_cache: dict[str, Any] = dict(common_ratio_to_sas_metadata=dict()) if self.use_compress else {}
         for attn_group in self.draft_attn_groups:
             extra_attn_metadata_args = dict(shared_draft_cache)
             if self.use_compress:
