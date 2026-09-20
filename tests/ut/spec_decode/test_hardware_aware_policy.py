@@ -9,7 +9,6 @@ from vllm_ascend.dynamic_spec import (
     _create_controller,
     _update_controller,
     resolve_physical_k,
-    v2_physical_k_enabled,
 )
 
 
@@ -22,8 +21,8 @@ def test_compact_defaults_and_override():
         "min_k": 4,
         "auto_tune": True,
     }
-    assert v2_physical_k_enabled(compact())
-    assert not v2_physical_k_enabled({"method": "dspark"})
+    assert resolve_physical_k(compact()) is not None
+    assert resolve_physical_k({"method": "dspark"}) is None
 
 
 @pytest.mark.parametrize(
@@ -50,7 +49,6 @@ def test_controller_debounces_worker_downshift():
         assert controller.cap(5, 16) == 5
     controller.observe([5] * 16, [[0]] * 16)
     assert controller.cap(5, 16) == 3
-    assert controller.current_k == 3
 
 
 def test_recommendations_are_batch_bucket_specific():
@@ -87,7 +85,7 @@ def test_missing_profile_uses_acceptance_fallback():
     controller.cap(5, 16)
     for _ in range(3):
         controller.observe([5] * 16, [[0]] * 16)
-    assert controller.current_k == 4
+    assert controller.cap(5, 16) == 4
 
 
 def test_output_recommendation_and_acceptance_are_combined():
