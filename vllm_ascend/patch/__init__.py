@@ -1526,24 +1526,20 @@
 #
 # ** 32. File: worker/patch_v2/patch_adaptive_verification.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.worker.gpu.spec_decode.adaptive_verification._assign_draft_token_budget_compiled`
+#   1. Adaptive-verification budget assignment and H2D copies.
 #    Why:
 #       The upstream adaptive-verification draft-budget allocator is wrapped by
-#       `torch.compile`, whose compiled path is not supported on Ascend. In
-#       addition, the current A5 `index_fill_` implementation converts its
-#       device index tensor to a host vector, introducing synchronization
-#       proportional to the number of indices.
+#       `torch.compile`, whose compiled path is not supported on Ascend. Its
+#       non-blocking temporary H2D copies are not safely ordered before the
+#       dependent allocator/cumsum on the current NPU stack.
 #    How:
-#       Run the original upstream allocator eagerly, preserving its algorithm,
-#       and use a scoped `TorchFunctionMode` to route only `index_fill_` through
-#       `DeviceOperator`. The A5 adaptor temporarily implements it with the
-#       equivalent `scatter_` operation; other hardware keeps the native path.
+#       Use the original eager allocator and synchronous copies while reusing
+#       the upstream `reallocate_drafts` implementation.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/47808
 #    Future Plan:
-#       Remove the scoped `index_fill_` interception once the native A5 operator
-#       accepts device indices without synchronization. Remove this patch
-#       entirely once the compiled allocator is also supported on Ascend.
+#       Remove this patch when both compiled allocation and ordered async H2D
+#       copies are supported on Ascend.
 #
 # ** 33. File: worker/patch_v2/patch_model_runner.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

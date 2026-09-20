@@ -17,31 +17,14 @@ from functools import wraps
 from typing import Any
 
 
-_PHYSICAL_DEFAULTS = {"enabled": True, "min_k": 3, "slack": 0, "percentile": 0.5}
-_HYBRID_DEFAULTS = {
-    "enabled": True,
-    "min_batch_size": 8,
-    "acceptance_threshold": 0.6,
-    "low_steps": 3,
-    "high_steps": 2,
-    "probe_interval": 32,
-}
-
 _ACCEPTANCE_EMA_ALPHA = 0.2
 _BUCKET_SWITCH_STEPS = 2
 _MIN_K_DWELL_STEPS = 8
-
-
-def _validate_number(name: str, value: Any, default: Any) -> None:
-    if isinstance(default, bool):
-        valid = isinstance(value, bool)
-    elif isinstance(default, int):
-        minimum = 0 if name in ("slack", "probe_interval") else 1
-        valid = type(value) is int and value >= minimum
-    else:
-        valid = type(value) in (int, float) and math.isfinite(value) and 0 <= value <= 1
-    if not valid:
-        raise ValueError(f"physical_k.{name} has invalid value {value!r}")
+_MIN_BATCH_SIZE = 8
+_ACCEPTANCE_THRESHOLD = 0.6
+_DOWNSHIFT_STEPS = 3
+_UPSHIFT_STEPS = 2
+_PROBE_INTERVAL = 32
 
 
 def resolve_physical_k(dynamic_config: dict[str, Any]) -> dict[str, Any] | None:
@@ -50,55 +33,22 @@ def resolve_physical_k(dynamic_config: dict[str, Any]) -> dict[str, Any] | None:
         return None
     if not isinstance(physical, dict):
         raise ValueError("physical_k must be an object")
-    if dynamic_config.get("policy") != "hardware_aware" or dynamic_config.get("method") not in ("dspark", "dflash"):
-        raise ValueError("physical_k requires hardware_aware policy and dspark/dflash method")
-    unknown = set(physical) - set(_PHYSICAL_DEFAULTS) - {"capture_k", "hybrid", "auto_tune"}
+    if dynamic_config.get("method") not in ("dspark", "dflash"):
+        raise ValueError("physical_k requires dspark or dflash")
+    unknown = set(physical) - {"min_k", "auto_tune"}
     if unknown:
         raise ValueError(f"Unknown physical_k fields: {sorted(unknown)}")
-
-    result: dict[str, Any] = {}
-    for name, default in _PHYSICAL_DEFAULTS.items():
-        value = physical.get(name, default)
-        _validate_number(name, value, default)
-        result[name] = value
-    capture_k = physical.get("capture_k")
-    if capture_k is not None:
-        if (
-            not isinstance(capture_k, (list, tuple))
-            or not capture_k
-            or any(type(value) is not int or value < 1 for value in capture_k)
-        ):
-            raise ValueError("physical_k.capture_k must be a non-empty list of positive integers")
-        result["capture_k"] = tuple(sorted(set(capture_k)))
-
-    hybrid = physical.get("hybrid", {})
-    if not isinstance(hybrid, dict):
-        raise ValueError("physical_k.hybrid must be an object")
-    unknown = set(hybrid) - set(_HYBRID_DEFAULTS)
-    if unknown:
-        raise ValueError(f"Unknown physical_k.hybrid fields: {sorted(unknown)}")
-    for name, default in _HYBRID_DEFAULTS.items():
-        value = hybrid.get(name, default)
-        _validate_number(name, value, default)
-        result[f"hybrid_{name}"] = value
-
-    auto_tune = physical.get("auto_tune", {})
-    if not isinstance(auto_tune, dict):
-        raise ValueError("physical_k.auto_tune must be an object")
-    unknown = set(auto_tune) - {"enabled"}
-    if unknown:
-        raise ValueError(
-            "physical_k.auto_tune only supports 'enabled'; AV profiling owns "
-            f"K selection, unknown fields: {sorted(unknown)}"
-        )
-    result["auto_tune_enabled"] = auto_tune.get("enabled", True)
-    _validate_number("auto_tune.enabled", result["auto_tune_enabled"], True)
-    return result
+    min_k = physical.get("min_k", 3)
+    auto_tune = physical.get("auto_tune", True)
+    if type(min_k) is not int or min_k < 1:
+        raise ValueError(f"physical_k.min_k has invalid value {min_k!r}")
+    if not isinstance(auto_tune, bool):
+        raise ValueError(f"physical_k.auto_tune has invalid value {auto_tune!r}")
+    return {"min_k": min_k, "auto_tune": auto_tune}
 
 
 def v2_physical_k_enabled(dynamic_config: dict[str, Any]) -> bool:
-    physical = dynamic_config.get("physical_k")
-    return isinstance(physical, dict) and physical.get("enabled", True) is True
+    return isinstance(dynamic_config.get("physical_k"), dict)
 
 
 @dataclass
@@ -128,35 +78,16 @@ class AdaptiveDraftKController:
 
     max_k: int
     min_k: int = 1
-    slack: int = 0
-    percentile: float = 0.5
-    hybrid_enabled: bool = True
-    hybrid_min_batch_size: int = 8
-    hybrid_acceptance_threshold: float = 0.6
-    hybrid_low_steps: int = 3
-    hybrid_high_steps: int = 2
-    hybrid_probe_interval: int = 32
-    auto_tune_enabled: bool = True
+    auto_tune: bool = True
 
     def __post_init__(self) -> None:
         self.max_k = max(int(self.max_k), 0)
         self.min_k = min(max(int(self.min_k), 1), self.max_k) if self.max_k else 0
-        self.slack = max(int(self.slack), 0)
-        self.percentile = min(max(float(self.percentile), 0.0), 1.0)
-        self.hybrid_min_batch_size = max(int(self.hybrid_min_batch_size), 1)
-        self.hybrid_acceptance_threshold = min(max(float(self.hybrid_acceptance_threshold), 0.0), 1.0)
-        self.hybrid_low_steps = max(int(self.hybrid_low_steps), 1)
-        self.hybrid_high_steps = max(int(self.hybrid_high_steps), 1)
-        self.hybrid_probe_interval = max(int(self.hybrid_probe_interval), 0)
         self._current_k: int | None = None
         self._bucket_states: dict[int, _BucketState] = {}
         self._active_bucket: int | None = None
         self._pending_bucket: int | None = None
         self._pending_bucket_steps = 0
-        self.observation_count = 0
-        self.last_scheduled_widths: list[int] = []
-        self.last_accepted_lengths: list[int] = []
-        self.last_reason = "awaiting_profile_recommendation"
 
     @property
     def current_k(self) -> int | None:
@@ -195,22 +126,19 @@ class AdaptiveDraftKController:
                 self._active_bucket = bucket
                 self._pending_bucket = None
                 self._pending_bucket_steps = 0
-                self.last_reason = "batch_bucket_settled"
         else:
             self._pending_bucket = bucket
             self._pending_bucket_steps = 1
-            self.last_reason = "batch_bucket_hysteresis"
         return self._active_bucket
 
     def _desired_k(self, state: _BucketState) -> int:
         desired = self.max_k
-        if self.auto_tune_enabled:
+        if self.auto_tune:
             desired = min(desired, max(state.profile_k, state.cost_floor_k))
-        if self.hybrid_enabled or not self.auto_tune_enabled:
-            empirical_k = state.empirical_k
-            if self.auto_tune_enabled:
-                empirical_k = max(empirical_k, state.cost_floor_k)
-            desired = min(desired, empirical_k)
+        empirical_k = state.empirical_k
+        if self.auto_tune:
+            empirical_k = max(empirical_k, state.cost_floor_k)
+        desired = min(desired, empirical_k)
         return max(self.min_k, min(desired, self.max_k))
 
     def _advance_state(self, state: _BucketState) -> None:
@@ -220,27 +148,20 @@ class AdaptiveDraftKController:
         if desired < state.stable_k:
             state.down_steps += 1
             state.up_steps = 0
-            if state.down_steps >= self.hybrid_low_steps and state.dwell_steps == 0:
+            if state.down_steps >= _DOWNSHIFT_STEPS and state.dwell_steps == 0:
                 state.stable_k = desired
                 state.down_steps = 0
                 state.dwell_steps = _MIN_K_DWELL_STEPS
-                self.last_reason = "combined_downshift"
-            else:
-                self.last_reason = "downshift_hysteresis"
         elif desired > state.stable_k:
             state.up_steps += 1
             state.down_steps = 0
-            if state.up_steps >= self.hybrid_high_steps and state.dwell_steps == 0:
+            if state.up_steps >= _UPSHIFT_STEPS and state.dwell_steps == 0:
                 state.stable_k = desired
                 state.up_steps = 0
                 state.dwell_steps = _MIN_K_DWELL_STEPS
-                self.last_reason = "combined_upshift"
-            else:
-                self.last_reason = "upshift_hysteresis"
         else:
             state.down_steps = 0
             state.up_steps = 0
-            self.last_reason = "combined_stable"
 
     def recommend(
         self,
@@ -256,28 +177,25 @@ class AdaptiveDraftKController:
                 self.min_k,
                 min(int(cost_floor_k), self.max_k),
             )
-        self.last_reason = "av_profile_recommendation"
 
     def cap(self, configured_k: int, batch_size: int | None = None) -> int:
         configured_k = max(min(int(configured_k), self.max_k), 0)
         if configured_k == 0:
             return 0
-        if self.hybrid_enabled and batch_size is not None and batch_size < self.hybrid_min_batch_size:
+        if batch_size is not None and batch_size < _MIN_BATCH_SIZE:
             self._current_k = configured_k
-            self.last_reason = "small_batch_fixed_k"
             return configured_k
         if batch_size:
             bucket = self._settled_bucket(batch_size)
             state = self._state(bucket)
             if (
-                self.hybrid_probe_interval
+                _PROBE_INTERVAL
                 and state.observations
-                and state.observations % self.hybrid_probe_interval == 0
+                and state.observations % _PROBE_INTERVAL == 0
                 and state.last_probe_observation != state.observations
             ):
                 state.last_probe_observation = state.observations
                 self._current_k = configured_k
-                self.last_reason = "periodic_full_k_probe"
                 return configured_k
             self._current_k = min(state.stable_k, configured_k)
             return self._current_k
@@ -296,13 +214,9 @@ class AdaptiveDraftKController:
             return
         widths = [width for width, _ in pairs]
         accepted = [min(width, max(len(tokens) - 1, 0)) for width, tokens in pairs]
-        self.last_scheduled_widths = widths
-        self.last_accepted_lengths = accepted
-        if self.hybrid_enabled and len(widths) < self.hybrid_min_batch_size:
+        if len(widths) < _MIN_BATCH_SIZE:
             self._current_k = self.max_k
-            self.last_reason = "small_batch_fixed_k"
             return
-        self.observation_count += 1
         bucket = self._batch_bucket(len(widths))
         state = self._state(bucket)
         state.observations += 1
@@ -324,19 +238,19 @@ class AdaptiveDraftKController:
         for index in range(1, self.max_k):
             state.survival[index] = min(state.survival[index], state.survival[index - 1])
         useful_positions = sum(
-            probability >= self.hybrid_acceptance_threshold
+            probability >= _ACCEPTANCE_THRESHOLD
             for probability, seen in zip(state.survival, state.survival_seen)
             if seen
         )
         ordered = sorted(accepted)
-        quantile_position = math.ceil(self.percentile * (len(ordered) - 1))
+        quantile_position = math.ceil(0.5 * (len(ordered) - 1))
         quantile_k = ordered[quantile_position]
         state.empirical_k = max(
             self.min_k,
             min(
                 self.max_k,
-                useful_positions + self.slack,
-                quantile_k + self.slack,
+                useful_positions,
+                quantile_k,
             ),
         )
         self._advance_state(state)
@@ -361,33 +275,21 @@ def _create_controller(vllm_config: Any) -> AdaptiveDraftKController | None:
     if not isinstance(dynamic, dict):
         return None
     params = resolve_physical_k(dynamic)
-    if params is None or not params["enabled"]:
+    if params is None:
         return None
     max_k = int(getattr(getattr(vllm_config, "speculative_config", None), "num_speculative_tokens", 0))
     return AdaptiveDraftKController(
         max_k=max_k,
         min_k=params["min_k"],
-        slack=params["slack"],
-        percentile=params["percentile"],
-        hybrid_enabled=params["hybrid_enabled"],
-        hybrid_min_batch_size=params["hybrid_min_batch_size"],
-        hybrid_acceptance_threshold=params["hybrid_acceptance_threshold"],
-        hybrid_low_steps=params["hybrid_low_steps"],
-        hybrid_high_steps=params["hybrid_high_steps"],
-        hybrid_probe_interval=params["hybrid_probe_interval"],
-        auto_tune_enabled=params["auto_tune_enabled"],
+        auto_tune=params["auto_tune"],
     )
 
 
 def _update_controller(controller, scheduler_output, model_runner_output) -> None:
     recommendation = getattr(model_runner_output, "physical_k_recommendation", None)
     if recommendation is not None:
-        batch_size, physical_k, _score, *extra = recommendation
-        controller.recommend(
-            batch_size,
-            physical_k,
-            extra[0] if extra else None,
-        )
+        batch_size, physical_k, cost_floor_k = recommendation
+        controller.recommend(batch_size, physical_k, cost_floor_k)
     sampled = getattr(model_runner_output, "sampled_token_ids", None)
     req_ids = getattr(model_runner_output, "req_ids", ())
     scheduled = getattr(scheduler_output, "scheduled_spec_decode_tokens", None) or {}
