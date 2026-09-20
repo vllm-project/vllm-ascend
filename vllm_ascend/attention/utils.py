@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from vllm.config import VllmConfig, get_current_vllm_config
@@ -320,6 +321,12 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # cacheable groups -- and only the shared prefix is there. ``None`` means
     # the same as all zeros; dummy/profiling/capture batches do not fill it.
     replay_start: torch.Tensor | None = None
+
+    # CPU numpy copy of block_table for the xlite hybrid path: reading it
+    # avoids a per-step D2H sync that drains the compute stream.
+    # Set by model_runner when building this metadata; xlite.py reads it
+    # directly instead of calling block_tables.to("cpu").
+    block_table_cpu_np: np.ndarray | None = None
 
     # TODO: Remove it when vLLM no longer uses this function.
     def unpadded(self, num_actual_tokens: int, num_actual_reqs: int) -> "AscendCommonAttentionMetadata":

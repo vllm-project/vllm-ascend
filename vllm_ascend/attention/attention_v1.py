@@ -18,7 +18,7 @@
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
-
+import numpy as np
 import torch
 import torch_npu
 import vllm.envs as envs_vllm
@@ -209,6 +209,9 @@ class AscendMetadata:
     # Block addresses per sequence (Seq id -> list of physical block).
     # (batch_size, max_blocks_per_seq)
     block_tables: torch.Tensor = None
+    # CPU numpy copy of block_tables for xlite hybrid path (avoids per-step
+    # D2H sync which costs 38ms/step at B16 by draining the compute stream).
+    block_tables_cpu_np: np.ndarray | None = None
 
     # The indices of the token slots that input tokens will be stored into.
     # E.g., if `slot_mapping` is [35, 2, 17] and the block size is 16, the
@@ -442,6 +445,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             num_actual_tokens=num_actual_tokens,
             num_decode_tokens=num_decode_tokens,
             block_tables=block_table,
+            block_tables_cpu_np=getattr(common_attn_metadata, "block_table_cpu_np", None),
             query_start_loc=query_start_loc,
             query_start_loc_gpu=common_attn_metadata.query_start_loc,
             seq_lens_gpu=common_attn_metadata.seq_lens,
