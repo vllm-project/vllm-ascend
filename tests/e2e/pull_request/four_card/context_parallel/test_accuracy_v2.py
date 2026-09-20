@@ -19,6 +19,7 @@
 Run `pytest tests/e2e/pull_request/four_card/context_parallel/test_accuracy_v2.py`.
 """
 
+import json
 import os
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -26,9 +27,14 @@ from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
+import requests
 from vllm import SamplingParams
+from vllm.transformers_utils.utils import maybe_model_redirect
+from vllm.utils.network_utils import get_open_port
 
-from tests.e2e.conftest import DPVllmRunner, VllmRunner, wait_until_npu_memory_free
+from tests.e2e.common.kv_pool.config import MemcacheKVPoolConfig
+from tests.e2e.conftest import DPVllmRunner, RemoteOpenAIServer, VllmRunner, wait_until_npu_memory_free
+from tests.e2e.nightly.single_node.models.scripts.kv_pool_runtime import SingleNodeMemcacheManager
 from vllm_ascend.utils import vllm_version_is
 
 MAX_NUM_SEQS = 4
@@ -51,6 +57,8 @@ DSV3_2_PROMPTS = [
     "Hello, my name is Tom, I am",
     "The president of United States is",
 ]
+POOLING_MODEL_NAME = "pcp-pooling-test"
+POOLING_PROMPT = "This is background information. " * 80 + "The capital of France is"
 DSV3_2_SFA_DCP_GOLDENS = (
     [
         "The capital of France isoint054 Rund compasses",
@@ -148,6 +156,130 @@ def _run_inference_case(case: InferenceCase) -> None:
         assert isinstance(output_text, str) and output_text, "Each request should return non-empty text"
 
 
+def _complete_pooling_request(url: str, prompt: str | list[str]) -> list[str]:
+    response = requests.post(
+        url + "/v1/completions",
+        json={
+            "model": POOLING_MODEL_NAME,
+            "prompt": prompt,
+            "temperature": 0,
+            "max_tokens": 16,
+            "ignore_eos": True,
+        },
+        timeout=180,
+    )
+    response.raise_for_status()
+    result = response.json()
+    assert all(choice["finish_reason"] == "length" for choice in result["choices"])
+    return [choice["text"] for choice in result["choices"]]
+
+
+def _run_pcp_pooling_case(tmp_path) -> None:
+    """Validate PCP graph execution and remote KV-cache reload in one service."""
+    pytest.importorskip("memcache_hybrid")
+    config = MemcacheKVPoolConfig(
+        meta_service_port=get_open_port(),
+        config_store_port=get_open_port(),
+        config={
+            "meta": {
+                "ock.mmc.log_level": "info",
+                "ock.mmc.meta_service.metrics_url": f"http://127.0.0.1:{get_open_port()}",
+            },
+            "local": {
+                "ock.mmc.log_level": "info",
+                # TP1 * PCP2 * DP2 workers participate in the local pool.
+                "ock.mmc.local_service.world_size": 4,
+                "ock.mmc.local_service.protocol": "device_sdma",
+                "ock.mmc.local_service.dram.size": "1GB",
+            },
+        },
+    )
+    with SingleNodeMemcacheManager(config, tmp_path.name) as pool:
+        port = get_open_port()
+        args = [
+            "--port",
+            str(port),
+            "--served-model-name",
+            POOLING_MODEL_NAME,
+            "--trust-remote-code",
+            "--quantization",
+            "ascend",
+            "--tensor-parallel-size",
+            "1",
+            "--data-parallel-size",
+            "2",
+            "--distributed-executor-backend",
+            "mp",
+            "--prefill-context-parallel-size",
+            "2",
+            "--enable-expert-parallel",
+            "--enable-chunked-prefill",
+            "--enable-prefix-caching",
+            "--max-model-len",
+            "1024",
+            "--max-num-seqs",
+            str(MAX_NUM_SEQS),
+            "--max-num-batched-tokens",
+            "1024",
+            "--gpu-memory-utilization",
+            "0.8",
+            "--cp-kv-cache-interleave-size",
+            "128",
+            "--block-size",
+            "128",
+            "--seed",
+            "42",
+            "--generation-config",
+            "vllm",
+            "--compilation-config",
+            json.dumps(FULL_DECODE_GRAPH),
+            "--kv-transfer-config",
+            json.dumps(
+                {
+                    "kv_connector": "AscendStoreConnector",
+                    "kv_role": "kv_producer",
+                    "kv_connector_extra_config": {
+                        "lookup_rpc_port": "0",
+                        "backend": "memcache",
+                        "use_layerwise": False,
+                        "load_async": True,
+                    },
+                }
+            ),
+        ]
+        with RemoteOpenAIServer(
+            maybe_model_redirect(DSV3_2_MODEL),
+            args,
+            server_port=port,
+            auto_port=False,
+            env_dict={
+                **pool.server_envs,
+                "VLLM_USE_V2_MODEL_RUNNER": "1",
+                "VLLM_SERVER_DEV_MODE": "1",
+            },
+        ) as server:
+            # Preserve the original case's multi-request inference coverage.
+            smoke_outputs = _complete_pooling_request(server.url_root, DSV3_2_PROMPTS)
+            assert len(smoke_outputs) == len(DSV3_2_PROMPTS)
+            assert all(smoke_outputs)
+
+            # Write a long-prefix cache entry, clear local cache, then force two
+            # independent reloads from the remote pool.
+            expected = _complete_pooling_request(server.url_root, POOLING_PROMPT)
+            for _ in range(2):
+                requests.post(server.url_for("reset_prefix_cache"), timeout=30).raise_for_status()
+                assert _complete_pooling_request(server.url_root, POOLING_PROMPT) == expected
+
+            metrics = requests.get(server.url_for("metrics"), timeout=30)
+            metrics.raise_for_status()
+            loaded_keys = sum(
+                float(line.split()[-1])
+                for line in metrics.text.splitlines()
+                if line.startswith("vllm:ascend_store_load_get_keys_total{")
+            )
+            assert loaded_keys > 0
+
+
 DSV3_2_SFA_PCP_CASE = InferenceCase(
     model=DSV3_2_MODEL,
     prompts=DSV3_2_PROMPTS,
@@ -194,18 +326,6 @@ DSV3_2_SFA_PCP_DCP_CASE = AccuracyCase(
             "enable_dsa_cp": False,
             "enable_sparse_li_c8": False,
         },
-    },
-)
-
-DSV3_2_SFA_PCP_DP_CASE = InferenceCase(
-    model=DSV3_2_MODEL,
-    prompts=DSV3_2_PROMPTS,
-    max_tokens=5,
-    runner_kwargs={
-        **DSV3_2_SFA_PCP_CASE.runner_kwargs,
-        "tensor_parallel_size": 1,
-        "data_parallel_size": 2,
-        "distributed_executor_backend": "mp",
     },
 )
 
@@ -275,9 +395,9 @@ def test_dsv3_2_sfa_pcp_model_runner_v2_graph() -> None:
     },
 )
 @wait_until_npu_memory_free(target_free_percentage=0.8)
-def test_dsv3_2_sfa_pcp_dp_model_runner_v2_graph() -> None:
-    """Guard MRV2 SFA PCP graph execution with two DP replicas."""
-    _run_inference_case(DSV3_2_SFA_PCP_DP_CASE)
+def test_dsv3_2_sfa_pcp_dp_model_runner_v2_graph(tmp_path) -> None:
+    """Guard DP2+PCP2 graph execution and KV Cache Pooling reload."""
+    _run_pcp_pooling_case(tmp_path)
 
 
 @pytest.mark.e2e_model(DSV3_2_MODEL)
