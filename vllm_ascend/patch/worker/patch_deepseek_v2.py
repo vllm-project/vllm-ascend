@@ -1,5 +1,3 @@
-
-
 from itertools import islice
 
 import torch
@@ -41,7 +39,7 @@ from vllm_ascend.worker.v2 import pp_utils
 from vllm_ascend.worker.v2.pp_utils import (
     PPTransportDataType,
     add_pp_topk_indices,
-    make_empty_intermediate_tensors,
+    initialize_pp_transport,
 )
 
 
@@ -296,11 +294,6 @@ def _deepseek_v2_model_init_with_pp_topk_transport(self, *args, **kwargs):
     _original_deepseek_v2_model_init(self, *args, **kwargs)
     # Legacy Spec+PP (0.28/0.29 only): 0.30+ uses the upstream aux relay.
     self._use_upstream_aux_relay = kwargs["vllm_config"].use_v2_model_runner and not pp_utils.use_legacy_spec_pp()
-    if not self._use_upstream_aux_relay:
-        self.make_empty_intermediate_tensors = pp_utils.make_empty_intermediate_tensors(
-            self,
-            self.make_empty_intermediate_tensors,
-        )
     self.topk_indices_buffer = next(
         (
             topk_indices_buffer
@@ -316,10 +309,15 @@ def _deepseek_v2_model_init_with_pp_topk_transport(self, *args, **kwargs):
         ),
         None,
     )
-    self.make_empty_intermediate_tensors = make_empty_intermediate_tensors(
+    transport_data_type_list = [PPTransportDataType.TOPK_INDICES]
+    if not self._use_upstream_aux_relay:
+        transport_data_type_list.insert(0, PPTransportDataType.AUX_HIDDEN_STATES)
+    transport_data_types = tuple(transport_data_type_list)
+    initialize_pp_transport(self, transport_data_types)
+    self.make_empty_intermediate_tensors = pp_utils.make_empty_intermediate_tensors(
         self,
         self.make_empty_intermediate_tensors,
-        (PPTransportDataType.TOPK_INDICES,),
+        transport_data_types,
     )
 
 
