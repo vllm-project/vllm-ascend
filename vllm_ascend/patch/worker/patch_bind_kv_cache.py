@@ -9,8 +9,10 @@ from vllm.v1.worker.utils import defaultdict, extract_layer_index
 from vllm_ascend.utils import vllm_version_is
 
 
-# Without this patch, it will raise an exception when initialize kv_cache.
-# TODO To remove the patch, we need check why the original bind_kv_cache raises an NotImplementedError.
+# Ascend keeps a platform-specific runner-cache ordering, but every cache layer
+# must still receive its allocation through ``bind_kv_cache``.  The layer hook
+# is what turns the canonical allocation into the runtime views required by
+# specialized caches such as Mamba and QSA.
 def bind_kv_cache(
     kv_caches: dict[str, torch.Tensor],
     forward_context: dict[str, Attention],
@@ -50,9 +52,12 @@ def bind_kv_cache(
             runner_kv_caches.append(kv_caches[layer_name])
             ordered_layer_names.append(layer_name)
 
-    # Bind kv_caches to forward context
+    # Bind through the layer hook. Main's cache layers use this hook to unpack
+    # the canonical allocation into their runtime views (for example QSA
+    # creates key_cache/rope_position_cache and Mamba separates its states).
     for layer_name, kv_cache in kv_caches.items():
-        forward_context[layer_name].kv_cache = kv_cache
+        forward_context[layer_name].bind_kv_cache(kv_cache)
+
     # vLLM #52506 adds ReplaySSM ring trackers on main. v0.29.0 predates
     # that contract and has no tracker helper to invoke.
     if not vllm_version_is("0.29.0"):
