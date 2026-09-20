@@ -1,5 +1,5 @@
 test_name: "test Qwen3-235B-A22B-W8A8 disaggregated_prefill"
-model: "vllm-ascend/Qwen3-235B-A22B-W8A8"
+model: "Eco-Tech/Qwen3-235B-A22B-w8a8-QuaRot"
 num_nodes: 2
 npu_per_node: 16
 env_common: &env_common
@@ -21,7 +21,7 @@ deployment:
     envs:
       <<: *env_common
     server_cmd: >
-        vllm serve "vllm-ascend/Qwen3-235B-A22B-W8A8"
+        vllm serve "Eco-Tech/Qwen3-235B-A22B-w8a8-QuaRot"
         --host 0.0.0.0
         --port $SERVER_PORT
         --data-parallel-size 2
@@ -56,7 +56,7 @@ deployment:
     envs:
       <<: *env_common
     server_cmd: >
-        vllm serve "vllm-ascend/Qwen3-235B-A22B-W8A8"
+        vllm serve "Eco-Tech/Qwen3-235B-A22B-w8a8-QuaRot"
         --host 0.0.0.0
         --port $SERVER_PORT
         --data-parallel-size 2

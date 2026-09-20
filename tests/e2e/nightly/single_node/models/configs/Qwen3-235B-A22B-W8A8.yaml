@@ -47,7 +47,7 @@ _benchmarks: &benchmarks
 
 test_cases:
   - name: "Qwen3-235B-A22B-W8A8-full_graph"
-    model: "vllm-ascend/Qwen3-235B-A22B-W8A8"
+    model: "Eco-Tech/Qwen3-235B-A22B-w8a8-QuaRot"
     envs:
       <<: *envs
     server_cmd: *server_cmd
@@ -58,7 +58,7 @@ test_cases:
       <<: *benchmarks
 
   - name: "Qwen3-235B-A22B-W8A8-piecewise"
-    model: "vllm-ascend/Qwen3-235B-A22B-W8A8"
+    model: "Eco-Tech/Qwen3-235B-A22B-w8a8-QuaRot"
     envs:
       <<: *envs
     server_cmd: *server_cmd
@@ -69,7 +69,7 @@ test_cases:
       <<: *benchmarks
 
   - name: "Qwen3-235B-A22B-W8A8-EPLB"
-    model: "vllm-ascend/Qwen3-235B-A22B-W8A8"
+    model: "Eco-Tech/Qwen3-235B-A22B-w8a8-QuaRot"
     envs:
       <<: *envs
       DYNAMIC_EPLB: "true"
