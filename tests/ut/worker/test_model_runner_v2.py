@@ -64,7 +64,7 @@ def test_execute_model_records_profiling_time():
         "is_profile": False,
         "context_len": 0,
     }
-    if not vllm_version_is("0.29.0"):
+    if not vllm_version_is("0.28.0"):
         expected_kwargs["valid_dummy_state_slots"] = False
     mock_execute_model.assert_called_once_with(scheduler_output, **expected_kwargs)
 
@@ -241,14 +241,18 @@ def test_prepare_inputs_preserves_pcp_tokens_and_forwards_graph_padding():
 
     # prepare_inputs keeps the real global PCP batch when it is larger than the
     # graph descriptor, and forwards the descriptor as an explicit rank-local
-    # padded extent on both supported versions (upstream vLLM #53515).
+    # padded extent on main (upstream vLLM #53515). v0.28.0 omits the kwarg.
     assert len(padding_assignments) == 1
     assert ast.unparse(padding_assignments[0].value) == "max(num_tokens, batch_desc.num_tokens)"
 
-    assert len(partition_calls) == 1
+    assert len(partition_calls) == 2
     padded_call = next(
         call for call in partition_calls if any(keyword.arg == "padded_num_tokens" for keyword in call.keywords)
     )
+    unpadded_call = next(
+        call for call in partition_calls if not any(keyword.arg == "padded_num_tokens" for keyword in call.keywords)
+    )
+    assert unpadded_call is not None
     padded_num_tokens = next(keyword.value for keyword in padded_call.keywords if keyword.arg == "padded_num_tokens")
     assert isinstance(padded_num_tokens, ast.Attribute)
     assert padded_num_tokens.attr == "num_tokens"
@@ -295,7 +299,7 @@ def test_prepare_dummy_attn_without_pcp_uses_upstream():
     dummy = object()
     with patch.object(GPUModelRunner, "prepare_dummy_attn", return_value=((), None)) as parent:
         assert runner.prepare_dummy_attn(dummy) == ((), None)
-    if vllm_version_is("0.29.0"):
+    if vllm_version_is("0.28.0"):
         parent.assert_called_once_with(dummy)
     else:
         parent.assert_called_once_with(dummy, valid_state_slots=False)
@@ -465,7 +469,7 @@ def test_init_spec_pp_full_graph_and_speculator():
     assert runner.use_aux_hidden_state_outputs is True
     assert runner.speculator is speculator
     assert speculator.update_stream is runner.update_stream
-    if vllm_version_is("0.29.0"):
+    if vllm_version_is("0.28.0"):
         assert runner.use_spec_pp is True
         install_pp.assert_called_once()
     else:
@@ -503,7 +507,7 @@ def test_sample_tokens_spec_pp_broadcasts_draft_tokens():
     runner.pp_handler = MagicMock()
     with patch.object(GPUModelRunner, "sample_tokens", return_value="out"):
         assert runner.sample_tokens("g") == "out"
-    if vllm_version_is("0.29.0"):
+    if vllm_version_is("0.28.0"):
         runner.pp_handler.broadcast_draft_tokens.assert_called_once_with()
     else:
         runner.pp_handler.broadcast_draft_tokens.assert_not_called()
@@ -555,7 +559,8 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
     runner.init_routed_experts_capturer.assert_called_once_with()
 
 
-def test_initialize_kv_cache_forwards_allocation_context():
+@pytest.mark.parametrize("is_vllm_0_28_0", [True, False], ids=["v0.28.0", "newer"])
+def test_initialize_kv_cache_forwards_allocation_context_by_vllm_version(is_vllm_0_28_0):
     runner = _make_runner()
     runner.vllm_config = SimpleNamespace()
     runner.compilation_config = SimpleNamespace(static_forward_context={})
@@ -580,6 +585,7 @@ def test_initialize_kv_cache_forwards_allocation_context():
         self.attn_groups = []
 
     with (
+        patch("vllm_ascend.worker.v2.model_runner.vllm_version_is", return_value=is_vllm_0_28_0),
         patch.object(GPUModelRunner, "initialize_kv_cache", _super),
         patch("vllm_ascend.worker.v2.model_runner.ModelAclGraphManager", return_value="acl"),
         patch(
@@ -590,7 +596,10 @@ def test_initialize_kv_cache_forwards_allocation_context():
         runner.initialize_kv_cache(kv_cache_config, kv_cache_allocation_context=allocation_context)
 
     assert called is True
-    assert captured_kwargs["kv_cache_allocation_context"] is allocation_context
+    if is_vllm_0_28_0:
+        assert "kv_cache_allocation_context" not in captured_kwargs
+    else:
+        assert captured_kwargs["kv_cache_allocation_context"] is allocation_context
 
 
 @pytest.mark.parametrize("moe_type", [MoECommType.MC2, MoECommType.FUSED_MC2])
@@ -692,7 +701,7 @@ def _fake_async_copy(src, device=None, out=None):
     return tensor
 
 
-def _run_prepare_inputs(runner, scheduler_output, batch_req_state, batch_desc, *, version_029=False):
+def _run_prepare_inputs(runner, scheduler_output, batch_req_state, batch_desc, *, version_028=False):
     batch = SimpleNamespace(positions=torch.zeros(4, dtype=torch.int32))
 
     def _partition(_pcp_manager, input_batch, **_kwargs):
@@ -719,7 +728,7 @@ def _run_prepare_inputs(runner, scheduler_output, batch_req_state, batch_desc, *
             SimpleNamespace(maybe_partition_pcp_batch=_partition),
         ),
         patch("vllm_ascend.worker.v2.model_runner.update_cos_sin"),
-        patch("vllm_ascend.worker.v2.model_runner.vllm_version_is", return_value=version_029),
+        patch("vllm_ascend.worker.v2.model_runner.vllm_version_is", return_value=version_028),
     ):
         return runner.prepare_inputs(scheduler_output, batch_req_state, batch_desc), batch
 
@@ -736,7 +745,7 @@ def test_prepare_inputs_covers_draft_full_dcp_pp_and_rswa():
     runner, scheduler_output, batch_req_state, batch_desc = _prepare_inputs_runner(
         draft=True, full_cg=True, use_dcp=True, use_pp=True, rswa=True, speculator=True
     )
-    out, partitioned = _run_prepare_inputs(runner, scheduler_output, batch_req_state, batch_desc, version_029=True)
+    out, partitioned = _run_prepare_inputs(runner, scheduler_output, batch_req_state, batch_desc, version_028=True)
     assert out is partitioned
     runner.num_computed_tokens_event.synchronize.assert_called_once_with()
     assert runner.req_states.num_computed_tokens_cpu[0] == 3
