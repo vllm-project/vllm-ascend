@@ -42,8 +42,65 @@ def _candidate_k(vllm_config: Any, max_k: int) -> tuple[int, ...]:
     params = resolve_physical_k(dynamic) or {}
     if not params.get("enabled") or not params.get("auto_tune_enabled"):
         return ()
-    values = params.get("capture_k") or range(int(params.get("min_k", 1)), max_k + 1)
+    values = params.get("capture_k") or range(int(params.get("min_k", 3)), max_k + 1)
     return tuple(sorted({max(1, min(int(k), max_k)) for k in values} | {max_k}))
+
+
+def _is_tp_rank_zero() -> bool:
+    """Only the output-producing TP rank needs to score runtime K."""
+
+    try:
+        from vllm.distributed.parallel_state import get_tp_group
+
+        return int(get_tp_group().rank_in_group) == 0
+    except (AssertionError, AttributeError, RuntimeError):
+        # Unit tests and non-distributed startup do not initialize a TP group.
+        return True
+
+
+def _sparse_profile_batches(base: list[dict[str, int]]) -> list[dict[str, int]]:
+    """Keep two timing replays per shape for non-max-K candidates."""
+
+    counts: dict[tuple[tuple[str, int], ...], int] = defaultdict(int)
+    result: list[dict[str, int]] = []
+    for batch in base:
+        key = tuple(sorted(batch.items()))
+        if counts[key] >= 2:
+            continue
+        counts[key] += 1
+        result.append(batch)
+    return result
+
+
+def _extend_profile_batches(
+    base: list[dict[str, int]],
+    max_num_reqs: int,
+    min_batch_size: int,
+) -> tuple[list[dict[str, int]], list[bool]]:
+    """Add sparse power-of-two request counts through max_num_reqs.
+
+    Upstream AV already derives most of these cases from graph capture sizes.
+    Explicitly filling gaps makes coverage independent of a particular capture
+    list. Samples that cannot use a FULL graph are harmless: they remain useful
+    upstream warmups but are excluded from physical-K draft pricing.
+    """
+
+    result = list(base)
+    is_upstream = [True] * len(base)
+    if not base or max_num_reqs < min_batch_size:
+        return result, is_upstream
+    existing = {int(batch["num_tokens"]) for batch in base}
+    wanted: set[int] = {max_num_reqs}
+    size = _batch_bucket(min_batch_size)
+    while size < max_num_reqs:
+        wanted.add(size)
+        size *= 2
+    template = base[0]
+    for num_tokens in sorted(wanted - existing):
+        for _ in range(2):
+            result.append({**template, "num_tokens": num_tokens})
+            is_upstream.append(False)
+    return result, is_upstream
 
 
 def configure_physical_k_profiling(manager: Any, vllm_config: Any):
@@ -56,7 +113,11 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
     original_batches = manager.batches_to_profile
     original_set_curves = manager.set_initial_cost_curves
     original_get_num_tokens = manager.get_num_tokens
+    dynamic = (getattr(vllm_config, "additional_config", None) or {}).get("dynamic_spec_config", {})
+    params = resolve_physical_k(dynamic) or {}
+    min_batch_size = int(params.get("hybrid_min_batch_size", 8))
     manager._physical_k_profile_cases = []
+    manager._physical_k_profile_is_upstream = []
     manager._physical_k_draft_costs = None
     manager._physical_k_recommendation = None
     manager._physical_k_last_by_bucket = {}
@@ -64,21 +125,41 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
 
     def batches_to_profile(self, capture_sizes) -> Iterator[dict[str, int]]:
         base = list(original_batches(capture_sizes))
+        covered, covered_is_upstream = _extend_profile_batches(
+            base,
+            int(getattr(self.req_states, "max_num_reqs", 0)),
+            min_batch_size,
+        )
+        sparse = _sparse_profile_batches(covered)
         self._physical_k_profile_cases.clear()
+        self._physical_k_profile_is_upstream.clear()
         for physical_k in candidates:
-            for batch in base:
+            # Preserve the complete upstream max-K profile so its verify-cost
+            # curves are unchanged. Lower physical widths only need robust
+            # medians for each distinct graph shape.
+            batches = covered if physical_k == max_k else sparse
+            upstream_flags = (
+                covered_is_upstream
+                if physical_k == max_k
+                else [False] * len(batches)
+            )
+            for batch, is_upstream in zip(batches, upstream_flags):
                 case = dict(batch)
                 case["profile_physical_k"] = physical_k
                 self._physical_k_profile_cases.append(physical_k)
+                self._physical_k_profile_is_upstream.append(is_upstream)
                 yield case
 
     def set_initial_cost_curves(self, samples) -> None:
         cases = self._physical_k_profile_cases
-        if len(samples) != len(cases):
+        upstream_cases = self._physical_k_profile_is_upstream
+        if len(samples) != len(cases) or len(upstream_cases) != len(cases):
             raise RuntimeError(
-                f"physical-K profile mismatch: {len(samples)} timings for {len(cases)} cases"
+                "physical-K profile mismatch: "
+                f"{len(samples)} timings, {len(upstream_cases)} flags, "
+                f"and {len(cases)} cases"
             )
-        full_samples = [sample for sample, k in zip(samples, cases) if k == max_k]
+        full_samples = [sample for sample, upstream in zip(samples, upstream_cases) if upstream]
         original_set_curves(full_samples)
         grouped: dict[tuple[int, int], list[float]] = defaultdict(list)
         for sample, physical_k in zip(samples, cases):
@@ -119,6 +200,18 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
                             )
                 costs = merged
         self._physical_k_draft_costs = dict(costs)
+        profiled_max = min(
+            (max(buckets, default=0) for buckets in costs.values()),
+            default=0,
+        )
+        required_max = _batch_bucket(int(getattr(self.req_states, "max_num_reqs", 1)))
+        if profiled_max < required_max:
+            logger.warning(
+                "ASCEND_AV_PHYSICAL_K_COVERAGE profiled_max_batch=%d "
+                "configured_max_batch=%d action=full_k_outside_profile",
+                profiled_max,
+                required_max,
+            )
         logger.info("ASCEND_AV_PHYSICAL_K_COSTS candidates=%s costs=%s", candidates, dict(costs))
 
     def lookup_cost(self, physical_k: int, batch_size: int) -> float | None:
@@ -128,7 +221,12 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
         points = table[physical_k]
         xs = np.asarray(sorted(points), dtype=np.float64)
         ys = np.asarray([points[int(x)] for x in xs], dtype=np.float64)
-        return float(np.interp(_batch_bucket(batch_size), xs, ys))
+        bucket = _batch_bucket(batch_size)
+        # Never price a large RL batch with the edge of a smaller profile.
+        # The safe behavior outside measured coverage is full physical K.
+        if not len(xs) or bucket < xs[0] or bucket > xs[-1]:
+            return None
+        return float(np.interp(bucket, xs, ys))
 
     def score_k(
         self,
@@ -176,6 +274,12 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
         active = [req_id for req_id in req_ids if draft_tokens.get(req_id)]
         batch_size = len(active)
         if not batch_size:
+            return None
+        # Small batches deliberately stay at max K. Avoid confidence copies,
+        # cumprod, and sorting entirely on this latency-sensitive path.
+        if batch_size < min_batch_size:
+            return None
+        if not _is_tp_rank_zero():
             return None
         all_slots = np.fromiter(
             (self.req_states.req_id_to_index[req_id] for req_id in req_ids),

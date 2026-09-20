@@ -11,21 +11,25 @@ The acceptance policy remains a safe fallback if AV profiling is unavailable.
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import wraps
 from typing import Any
 
 
-_PHYSICAL_DEFAULTS = {"enabled": True, "min_k": 1, "slack": 0, "percentile": 0.5}
+_PHYSICAL_DEFAULTS = {"enabled": True, "min_k": 3, "slack": 0, "percentile": 0.5}
 _HYBRID_DEFAULTS = {
     "enabled": True,
     "min_batch_size": 8,
     "acceptance_threshold": 0.6,
-    "low_steps": 4,
+    "low_steps": 3,
     "high_steps": 2,
     "probe_interval": 32,
 }
+
+_ACCEPTANCE_EMA_ALPHA = 0.2
+_BUCKET_SWITCH_STEPS = 2
+_MIN_K_DWELL_STEPS = 8
 
 
 def _validate_number(name: str, value: Any, default: Any) -> None:
@@ -98,8 +102,28 @@ def v2_physical_k_enabled(dynamic_config: dict[str, Any]) -> bool:
 
 
 @dataclass
+class _BucketState:
+    stable_k: int
+    profile_k: int
+    empirical_k: int
+    survival: list[float]
+    survival_seen: list[bool]
+    observations: int = 0
+    down_steps: int = 0
+    up_steps: int = 0
+    dwell_steps: int = 0
+    last_probe_observation: int = -1
+
+
+@dataclass
 class AdaptiveDraftKController:
-    """Apply worker recommendations, with an acceptance-based fallback."""
+    """Combine AV cost recommendations with observed acceptance by batch.
+
+    RL rollouts commonly begin with a large decode batch and shrink as
+    requests encounter EOS.  Each power-of-two batch bucket therefore owns
+    independent acceptance and K state.  Bucket changes and K changes are
+    debounced so a short-lived rollout tail does not make graph width flap.
+    """
 
     max_k: int
     min_k: int = 1
@@ -108,7 +132,7 @@ class AdaptiveDraftKController:
     hybrid_enabled: bool = True
     hybrid_min_batch_size: int = 8
     hybrid_acceptance_threshold: float = 0.6
-    hybrid_low_steps: int = 4
+    hybrid_low_steps: int = 3
     hybrid_high_steps: int = 2
     hybrid_probe_interval: int = 32
     auto_tune_enabled: bool = True
@@ -124,9 +148,10 @@ class AdaptiveDraftKController:
         self.hybrid_high_steps = max(int(self.hybrid_high_steps), 1)
         self.hybrid_probe_interval = max(int(self.hybrid_probe_interval), 0)
         self._current_k: int | None = None
-        self._recommended_k_by_bucket: dict[int, int] = {}
-        self._low_acceptance_steps = 0
-        self._high_acceptance_steps = 0
+        self._bucket_states: dict[int, _BucketState] = {}
+        self._active_bucket: int | None = None
+        self._pending_bucket: int | None = None
+        self._pending_bucket_steps = 0
         self.observation_count = 0
         self.last_scheduled_widths: list[int] = []
         self.last_accepted_lengths: list[int] = []
@@ -140,9 +165,81 @@ class AdaptiveDraftKController:
     def _batch_bucket(batch_size: int) -> int:
         return 1 << (max(int(batch_size), 1) - 1).bit_length()
 
+    def _state(self, bucket: int) -> _BucketState:
+        state = self._bucket_states.get(bucket)
+        if state is None:
+            state = _BucketState(
+                stable_k=self.max_k,
+                profile_k=self.max_k,
+                empirical_k=self.max_k,
+                survival=[1.0] * self.max_k,
+                survival_seen=[False] * self.max_k,
+            )
+            self._bucket_states[bucket] = state
+        return state
+
+    def _settled_bucket(self, batch_size: int) -> int:
+        """Require two consecutive steps before following a shrinking batch."""
+
+        bucket = self._batch_bucket(batch_size)
+        if self._active_bucket is None:
+            self._active_bucket = bucket
+        elif bucket == self._active_bucket:
+            self._pending_bucket = None
+            self._pending_bucket_steps = 0
+        elif bucket == self._pending_bucket:
+            self._pending_bucket_steps += 1
+            if self._pending_bucket_steps >= _BUCKET_SWITCH_STEPS:
+                self._active_bucket = bucket
+                self._pending_bucket = None
+                self._pending_bucket_steps = 0
+                self.last_reason = "batch_bucket_settled"
+        else:
+            self._pending_bucket = bucket
+            self._pending_bucket_steps = 1
+            self.last_reason = "batch_bucket_hysteresis"
+        return self._active_bucket
+
+    def _desired_k(self, state: _BucketState) -> int:
+        desired = self.max_k
+        if self.auto_tune_enabled:
+            desired = min(desired, state.profile_k)
+        if self.hybrid_enabled or not self.auto_tune_enabled:
+            desired = min(desired, state.empirical_k)
+        return max(self.min_k, min(desired, self.max_k))
+
+    def _advance_state(self, state: _BucketState) -> None:
+        desired = self._desired_k(state)
+        if state.dwell_steps:
+            state.dwell_steps -= 1
+        if desired < state.stable_k:
+            state.down_steps += 1
+            state.up_steps = 0
+            if state.down_steps >= self.hybrid_low_steps and state.dwell_steps == 0:
+                state.stable_k = desired
+                state.down_steps = 0
+                state.dwell_steps = _MIN_K_DWELL_STEPS
+                self.last_reason = "combined_downshift"
+            else:
+                self.last_reason = "downshift_hysteresis"
+        elif desired > state.stable_k:
+            state.up_steps += 1
+            state.down_steps = 0
+            if state.up_steps >= self.hybrid_high_steps and state.dwell_steps == 0:
+                state.stable_k = desired
+                state.up_steps = 0
+                state.dwell_steps = _MIN_K_DWELL_STEPS
+                self.last_reason = "combined_upshift"
+            else:
+                self.last_reason = "upshift_hysteresis"
+        else:
+            state.down_steps = 0
+            state.up_steps = 0
+            self.last_reason = "combined_stable"
+
     def recommend(self, batch_size: int, physical_k: int) -> None:
         physical_k = max(self.min_k, min(int(physical_k), self.max_k))
-        self._recommended_k_by_bucket[self._batch_bucket(batch_size)] = physical_k
+        self._state(self._batch_bucket(batch_size)).profile_k = physical_k
         self.last_reason = "av_profile_recommendation"
 
     def cap(self, configured_k: int, batch_size: int | None = None) -> int:
@@ -153,46 +250,28 @@ class AdaptiveDraftKController:
             self._current_k = configured_k
             self.last_reason = "small_batch_fixed_k"
             return configured_k
-        if (
-            self.auto_tune_enabled
-            and self.hybrid_probe_interval
-            and self.observation_count
-            and self.observation_count % self.hybrid_probe_interval == 0
-        ):
-            self._current_k = configured_k
-            self.last_reason = "periodic_full_k_probe"
-            return configured_k
-        if self.auto_tune_enabled and batch_size:
-            selected = self._recommended_k_by_bucket.get(self._batch_bucket(batch_size), configured_k)
-            self._current_k = min(selected, configured_k)
-            if selected == configured_k:
-                self.last_reason = "profile_missing_full_k"
+        if batch_size:
+            bucket = self._settled_bucket(batch_size)
+            state = self._state(bucket)
+            if (
+                self.hybrid_probe_interval
+                and state.observations
+                and state.observations % self.hybrid_probe_interval == 0
+                and state.last_probe_observation != state.observations
+            ):
+                state.last_probe_observation = state.observations
+                self._current_k = configured_k
+                self.last_reason = "periodic_full_k_probe"
+                return configured_k
+            self._current_k = min(state.stable_k, configured_k)
             return self._current_k
-        if self._current_k is None:
-            self._current_k = configured_k
+        self._current_k = configured_k if self._current_k is None else self._current_k
         return min(self._current_k, configured_k)
-
-    def update(self, lengths: Iterable[int]) -> None:
-        observed_lengths = sorted(max(int(length), 0) for length in lengths)
-        if not observed_lengths or self.max_k <= 0:
-            return
-        observed = min(
-            observed_lengths[math.ceil(self.percentile * (len(observed_lengths) - 1))],
-            self.max_k,
-        )
-        if self._current_k is None:
-            self._current_k = max(self.min_k, min(self.max_k, observed + self.slack))
-        elif observed >= self._current_k:
-            self._current_k = min(self.max_k, self._current_k + 1)
-        else:
-            self._current_k = min(self._current_k, max(self.min_k, observed + self.slack))
 
     def observe(
         self,
         scheduled_widths: Sequence[int],
         sampled_token_ids: Sequence[Sequence[int]],
-        *,
-        use_acceptance_fallback: bool,
     ) -> None:
         if len(scheduled_widths) != len(sampled_token_ids):
             return
@@ -208,30 +287,55 @@ class AdaptiveDraftKController:
             self.last_reason = "small_batch_fixed_k"
             return
         self.observation_count += 1
-        if use_acceptance_fallback or not self.auto_tune_enabled:
-            if self.hybrid_enabled:
-                self._update_hybrid(widths, accepted)
+        bucket = self._batch_bucket(len(widths))
+        state = self._state(bucket)
+        state.observations += 1
+        alpha = _ACCEPTANCE_EMA_ALPHA
+        for position in range(1, self.max_k + 1):
+            eligible = [index for index, width in enumerate(widths) if width >= position]
+            if not eligible:
+                continue
+            observed = sum(accepted[index] >= position for index in eligible) / len(eligible)
+            index = position - 1
+            if state.survival_seen[index]:
+                state.survival[index] = (1.0 - alpha) * state.survival[index] + alpha * observed
             else:
-                self.update(accepted)
+                state.survival[index] = observed
+                state.survival_seen[index] = True
 
-    def _update_hybrid(self, widths: Sequence[int], accepted: Sequence[int]) -> None:
-        acceptance = sum(accepted) / sum(widths) if sum(widths) else 1.0
-        if acceptance >= self.hybrid_acceptance_threshold:
-            self._high_acceptance_steps += 1
-            self._low_acceptance_steps = 0
-            if self._high_acceptance_steps >= self.hybrid_high_steps:
-                self._current_k = self.max_k
-                self.last_reason = "high_acceptance_full_k"
-            else:
-                self.last_reason = "high_acceptance_hysteresis"
+        # Acceptance survival is monotone by definition. Enforce that after
+        # EMA updates where later positions may have fewer eligible samples.
+        for index in range(1, self.max_k):
+            state.survival[index] = min(state.survival[index], state.survival[index - 1])
+        useful_positions = sum(
+            probability >= self.hybrid_acceptance_threshold
+            for probability, seen in zip(state.survival, state.survival_seen)
+            if seen
+        )
+        ordered = sorted(accepted)
+        quantile_position = math.ceil(self.percentile * (len(ordered) - 1))
+        quantile_k = ordered[quantile_position]
+        state.empirical_k = max(
+            self.min_k,
+            min(
+                self.max_k,
+                useful_positions + self.slack,
+                quantile_k + self.slack,
+            ),
+        )
+        self._advance_state(state)
+        if self._active_bucket == bucket:
+            self._current_k = state.stable_k
+
+    def observe_proposals(self, lengths: Sequence[int]) -> None:
+        """Fallback for outputs that expose proposal lengths but no tokens."""
+
+        normalized = [max(0, min(int(length), self.max_k)) for length in lengths]
+        if not normalized:
             return
-        self._low_acceptance_steps += 1
-        self._high_acceptance_steps = 0
-        if self._low_acceptance_steps < self.hybrid_low_steps:
-            self.last_reason = "low_acceptance_hysteresis"
-            return
-        self.update(accepted)
-        self.last_reason = "low_acceptance_dynamic_k"
+        widths = [self.max_k] * len(normalized)
+        sampled = [[0] * (length + 1) for length in normalized]
+        self.observe(widths, sampled)
 
 
 def _create_controller(vllm_config: Any) -> AdaptiveDraftKController | None:
@@ -271,10 +375,9 @@ def _update_controller(controller, scheduler_output, model_runner_output) -> Non
         controller.observe(
             [len(scheduled.get(req_id, ())) for req_id in req_ids],
             sampled,
-            use_acceptance_fallback=recommendation is None,
         )
-    elif recommendation is None and (lengths := getattr(model_runner_output, "proposal_lengths", None)) is not None:
-        controller.update(lengths)
+    elif (lengths := getattr(model_runner_output, "proposal_lengths", None)) is not None:
+        controller.observe_proposals(lengths)
 
 
 def install_scheduler_policy() -> None:
