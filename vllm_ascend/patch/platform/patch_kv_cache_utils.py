@@ -24,6 +24,15 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
+from vllm_ascend.core.six_region_kv_cache_layout import (
+    GDN,
+    HIDDEN,
+    PLE,
+    QSA_COMPRESSED,
+    QSA_MAIN,
+    QSA_RAW,
+    build_six_region_kv_cache_layout,
+)
 from vllm_ascend.models.deepseek_v41.cache_config import (
     get_deepseek_v41_kv_cache_config,
     get_deepseek_v41_pool_bytes_per_block,
@@ -622,6 +631,14 @@ def _ascend_pool_bytes_per_block(kv_cache_groups: list[KVCacheGroupSpec]) -> int
         return get_deepseek_v41_pool_bytes_per_block(kv_cache_groups)
     if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
         return get_glm5_next_pool_bytes_per_block(kv_cache_groups)
+    if not vllm_version_is("0.28.0"):
+        six_region_layout = build_six_region_kv_cache_layout(
+            kv_cache_groups,
+            num_blocks=1,
+        )
+        if six_region_layout is not None:
+            hidden_bytes = sum(owner.spec.page_size_bytes for owner in six_region_layout.owners if owner.role == HIDDEN)
+            return six_region_layout.slot_count * six_region_layout.slot_backing_size + hidden_bytes
     if not _is_deepseek_v4_groups(kv_cache_groups):
         return _orig_pool_bytes_per_block(kv_cache_groups)
 
@@ -636,7 +653,23 @@ def _ascend_max_memory_usage_bytes_from_groups(
     """Keep the pre-#51718 DSV4 admission formula for its shared tuples."""
     if _get_glm5_next_cache_layout(kv_cache_groups) is not None:
         return get_glm5_next_max_memory_usage(vllm_config, kv_cache_groups)
-    if not _is_deepseek_v4_groups(kv_cache_groups):
+    if not vllm_version_is("0.28.0"):
+        six_region_layout = build_six_region_kv_cache_layout(
+            kv_cache_groups,
+            num_blocks=1,
+        )
+        if six_region_layout is not None:
+            hidden_bytes = sum(owner.spec.page_size_bytes for owner in six_region_layout.owners if owner.role == HIDDEN)
+            bytes_per_pool_block = six_region_layout.slot_count * six_region_layout.slot_backing_size + hidden_bytes
+            required_pool_blocks = sum(
+                cdiv(
+                    group.kv_cache_spec.max_memory_usage_bytes(vllm_config),
+                    group.kv_cache_spec.page_size_bytes,
+                )
+                for group in kv_cache_groups
+            )
+            return required_pool_blocks * bytes_per_pool_block
+    if vllm_version_is("0.28.0") or not _is_deepseek_v4_groups(kv_cache_groups):
         return _orig_max_memory_usage_bytes_from_groups(vllm_config, kv_cache_groups)
 
     assert all(isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs) for group in kv_cache_groups)
@@ -664,12 +697,102 @@ def _get_glm5_next_kv_cache_groups(
     return _orig_get_kv_cache_groups(vllm_config, kv_cache_spec)
 
 
+def _get_qwen4_exp_six_region_kv_cache_config(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+    available_memory: int,
+) -> KVCacheConfig | None:
+    """Plan QSA hybrid storage as six contiguous slabs per ordinal slot.
+
+    The main descriptor API cannot express that one logical QSA/GDN owner has
+    two disjoint physical regions.  Descriptors therefore publish the anchor
+    region and shared backing geometry; the Ascend runner reconstructs every
+    role from the same capability-derived layout.  Different cache groups
+    deliberately alias the same allocation because a physical block ID is
+    owned by only one group at a time.
+    """
+    if vllm_version_is("0.28.0"):
+        return None
+    probe = build_six_region_kv_cache_layout(
+        kv_cache_groups,
+        num_blocks=1,
+    )
+    if probe is None:
+        return None
+
+    hidden_owners = [owner for owner in probe.owners if owner.role == HIDDEN]
+    hidden_bytes_per_block = sum(owner.spec.page_size_bytes for owner in hidden_owners)
+    slab_bytes_per_block = sum(region.page_size_bytes for region in probe.regions)
+    bytes_per_block = probe.slot_count * slab_bytes_per_block + hidden_bytes_per_block
+    candidate = available_memory // bytes_per_block
+    while candidate > 0:
+        candidate_layout = build_six_region_kv_cache_layout(
+            kv_cache_groups,
+            num_blocks=candidate,
+        )
+        assert candidate_layout is not None
+        required = candidate_layout.slot_count * candidate_layout.slot_backing_size + hidden_bytes_per_block * candidate
+        if required <= available_memory:
+            break
+        candidate -= 1
+    num_blocks = may_override_num_blocks(vllm_config, candidate)
+    layout = build_six_region_kv_cache_layout(
+        kv_cache_groups,
+        num_blocks=num_blocks,
+    )
+    assert layout is not None
+    backing_size = layout.slot_count * layout.slot_backing_size
+
+    region_by_role = {
+        QSA_MAIN: "r2",
+        QSA_RAW: "r4",
+        QSA_COMPRESSED: "r5",
+        GDN: "r1",
+        PLE: "r6",
+    }
+    tensors: list[KVCacheTensor] = []
+    for role, region_name in region_by_role.items():
+        owners = sorted(
+            (owner for owner in layout.owners if owner.role == role),
+            key=lambda owner: owner.slot,
+        )
+        if not owners:
+            continue
+        region = layout.region(region_name)
+        tensors.append(
+            KVCacheTensor(
+                size=backing_size,
+                layers=[owner.layer_name for owner in owners],
+                layer_stride=layout.slot_backing_size,
+                block_stride=region.page_size_bytes,
+                offset=region.offset,
+            )
+        )
+    tensors.extend(
+        KVCacheTensor(
+            size=owner.spec.page_size_bytes * num_blocks,
+            layers=[owner.layer_name],
+            layer_stride=owner.spec.page_size_bytes * num_blocks,
+            block_stride=owner.spec.page_size_bytes,
+            offset=0,
+        )
+        for owner in hidden_owners
+    )
+
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=tensors,
+        kv_cache_groups=kv_cache_groups,
+        prefix_cache_retention_interval=(vllm_config.cache_config.prefix_cache_retention_interval),
+    )
+
+
 def _ascend_get_kv_cache_config_from_groups(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
     available_memory: int,
 ) -> KVCacheConfig:
-    """Restore Ascend's DSV4 shared-tuple planner removed by vLLM #51718.
+    """Restore Ascend-specific cache planners while retaining transfer metadata.
 
     Attach ``kv_transfer_config`` onto every built config: ``KVCacheConfig``
     has no native field, and the PD prefill-producer role read back by the
@@ -679,7 +802,12 @@ def _ascend_get_kv_cache_config_from_groups(
     ``copy.deepcopy`` in ``generate_scheduler_kv_cache_config`` and is
     dropped by worker pickle IPC, which never reads it.
     """
-    if is_deepseek_v41_cache(kv_cache_groups):
+    qwen_config = _get_qwen4_exp_six_region_kv_cache_config(
+        vllm_config, kv_cache_groups, available_memory
+    )
+    if qwen_config is not None:
+        kv_cache_config = qwen_config
+    elif is_deepseek_v41_cache(kv_cache_groups):
         kv_cache_config = get_deepseek_v41_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
     elif _get_glm5_next_cache_layout(kv_cache_groups) is not None:
         kv_cache_config = get_glm5_next_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
