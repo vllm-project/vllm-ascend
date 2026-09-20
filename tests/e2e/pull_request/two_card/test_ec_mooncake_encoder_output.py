@@ -6,13 +6,16 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
+import pybase64 as base64
 import pytest
 import requests
+import torch
 from vllm.assets.image import ImageAsset
 from vllm.multimodal.utils import encode_image_url
 from vllm.utils.network_utils import get_open_port
@@ -46,7 +49,7 @@ def _messages() -> dict[str, list[dict[str, Any]]]:
                     {"type": "image_url", "image_url": {"url": stop_sign_url}},
                     {
                         "type": "text",
-                        "text": "Describe the image in one short sentence.",
+                        "text": ("Identify the traffic sign. Reply with exactly one lowercase word: stop or yield."),
                     },
                 ],
             }
@@ -62,7 +65,11 @@ def _messages() -> dict[str, list[dict[str, Any]]]:
                     },
                     {
                         "type": "text",
-                        "text": "Describe both images briefly, in image order.",
+                        "text": (
+                            "For the first image choose stop or yield; for the "
+                            "second choose flowers or building. Reply with exactly "
+                            "two lowercase words separated by a comma."
+                        ),
                     },
                 ],
             }
@@ -74,7 +81,7 @@ def _request_body(messages: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "model": MODEL,
         "messages": messages,
-        "max_tokens": 64,
+        "max_tokens": 16,
         "temperature": 0.0,
         "seed": 42,
         "chat_template_kwargs": {"enable_thinking": False},
@@ -115,13 +122,16 @@ def _content_uuid(item: dict[str, Any]) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
-def _flatten_metadata(metadata: dict[str, Any]) -> dict[str, list[Any]]:
-    # This is the metadata-only image_embeds representation consumed by vLLM.
-    # Keep it aligned with the upstream disaggregated-encoder proxy protocol.
-    return {
-        key: [value for item in values for value in (item if isinstance(item, list) else [item])]
-        for key, values in metadata.items()
-    }
+def _encode_metadata(metadata: dict[str, Any]) -> dict[str, str]:
+    """Encode placeholder metadata using the image_embeds wire contract."""
+    encoded = {}
+    for key, values in metadata.items():
+        buffer = io.BytesIO()
+        tensor = torch.tensor(values, dtype=torch.long)
+        # Qwen's placeholder parser expects one flat (t, h, w) grid per item.
+        torch.save(tensor.reshape(-1)[:3], buffer)
+        encoded[key] = base64.b64encode(buffer.getvalue()).decode()
+    return encoded
 
 
 def _prepare_decode_body(
@@ -137,7 +147,7 @@ def _prepare_decode_body(
 
     def encode(
         item_with_index: tuple[int, dict[str, Any]],
-    ) -> tuple[int, dict[str, Any], str, Any, dict[str, str]]:
+    ) -> tuple[int, dict[str, Any], str, dict[str, str]]:
         index, item = item_with_index
         item_uuid = _content_uuid(item)
         transfer_id = uuid.uuid4().hex
@@ -163,31 +173,34 @@ def _prepare_decode_body(
         )
         response.raise_for_status()
         params = response.json().get("ec_transfer_params") or {}
-        ec_mm_hash = item_uuid
-        reported = params.get(ec_mm_hash)
-        if reported is None and len(params) == 1:
-            ((ec_mm_hash, reported),) = params.items()
-        assert reported, f"encoder returned no transfer handle for image {index}"
-        metadata = reported.get("metadata") or {}
+        reported_items = params.get("ec_items") or []
+        assert len(reported_items) == 1, f"encoder returned unexpected EC items for image {index}: {reported_items!r}"
+        reported = reported_items[0]
+        assert isinstance(reported, dict), f"encoder returned a non-dict EC item for image {index}: {reported!r}"
+        ec_mm_hash = reported.get("mm_hash")
+        assert ec_mm_hash, f"encoder returned no mm_hash for image {index}: {reported!r}"
+        reported_transfer_id = reported.get("transfer_id")
+        assert reported_transfer_id in (None, transfer_id), (
+            f"encoder changed transfer_id for image {index}: expected {transfer_id!r}, got {reported_transfer_id!r}"
+        )
+        metadata = {key: value for key, value in reported.items() if key not in {"mm_hash", "transfer_id"}}
         assert metadata, f"encoder returned no metadata for image {index}"
         item_meta = {
             "uuid": item_uuid,
-            "metadata": _flatten_metadata(metadata),
+            "metadata": _encode_metadata(metadata),
         }
         return (
             index,
             item_meta,
             ec_mm_hash,
-            reported,
             {"mm_hash": ec_mm_hash, "transfer_id": transfer_id},
         )
 
     with ThreadPoolExecutor(max_workers=len(images)) as executor:
         encoded = list(executor.map(encode, enumerate(images)))
 
-    item_meta = {index: meta for index, meta, _, _, _ in encoded}
-    ec_handles = {ec_mm_hash: reported for _, _, ec_mm_hash, reported, _ in encoded}
-    transfer_items = [transfer_item for _, _, _, _, transfer_item in encoded]
+    item_meta = {index: meta for index, meta, _, _ in encoded}
+    transfer_items = [transfer_item for _, _, _, transfer_item in encoded]
 
     image_index = 0
     rewritten_messages = []
@@ -213,7 +226,6 @@ def _prepare_decode_body(
         "messages": rewritten_messages,
         "ec_transfer_params": {
             "ec_items": transfer_items,
-            **ec_handles,
         },
     }
 
@@ -257,6 +269,8 @@ def _common_server_args() -> list[str]:
         json.dumps({"image": 2, "video": 0}),
         "--mm-tensor-ipc",
         "torch_shm",
+        "--mm-processor-device",
+        "cpu",
     ]
 
 
