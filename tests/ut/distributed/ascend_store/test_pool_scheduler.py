@@ -681,7 +681,7 @@ class TestLookupKeyClient(unittest.TestCase):
         mock_make_socket.return_value = mock_socket
         mock_socket.recv.return_value = (32).to_bytes(4, "big")
 
-        mock_encoder_cls.return_value.encode.side_effect = [[b"hashes"], [b"groups"]]
+        mock_encoder_cls.return_value.encode.side_effect = [[b"hashes"], [b"groups"], [b"mode"]]
         client = LookupKeyClient(config)
         result = client.lookup(64, [b"\xaa\xbb"], hbm_hit_tokens=16)
         self.assertEqual(result, 32)
@@ -693,6 +693,7 @@ class TestLookupKeyClient(unittest.TestCase):
                 (64).to_bytes(4, "big"),
                 b"groups",
                 (16).to_bytes(4, "big"),
+                b"mode",
                 b"hashes",
             ],
         )
