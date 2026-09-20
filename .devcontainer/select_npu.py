@@ -22,9 +22,10 @@ npu-smi info 能看到全系统（含其他容器）的 NPU 进程，判定准�
 
 import glob
 import os
-import re
 import subprocess
 import sys
+
+import regex as re
 
 
 def detect_free_cards(count):
@@ -43,26 +44,24 @@ def detect_free_cards(count):
     # 2. 查询 npu-smi info。
     try:
         out = subprocess.run(
-            ["npu-smi", "info"], capture_output=True, text=True, timeout=30,
+            ["npu-smi", "info"],
+            capture_output=True,
+            text=True,
+            timeout=30,
         ).stdout
     except Exception as e:  # noqa: BLE001 - 此处需上报任何探测失败原因
-        print("npu-smi info failed: %s" % e, file=sys.stderr)
+        print(f"npu-smi info failed: {e}", file=sys.stderr)
         sys.exit(1)
 
     # 3. 解析板卡表头行的 Health，非 OK 的卡不参与分配。
     #    板卡表头形如：| 0     910B3    | OK    | ...（名称列非空，能命中）；
     #    Chip 行形如：| 0              | 0000:C1:00.0 | ...（名称列为空，不会命中）。
     bad_health = {
-        int(m.group(1))
-        for m in re.finditer(r"^\|\s*(\d+)\s+\S+\s+\|\s*(\S+)", out, re.MULTILINE)
-        if m.group(2) != "OK"
+        int(m.group(1)) for m in re.finditer(r"^\|\s*(\d+)\s+\S+\s+\|\s*(\S+)", out, re.MULTILINE) if m.group(2) != "OK"
     }
 
     # 4. 空闲 = 进程区出现「No running processes found in NPU N」且健康 OK。
-    free_set = {
-        int(m.group(1))
-        for m in re.finditer(r"No running processes found in NPU\s+(\d+)", out)
-    }
+    free_set = {int(m.group(1)) for m in re.finditer(r"No running processes found in NPU\s+(\d+)", out)}
     free = [c for c in cards if c in free_set and c not in bad_health]
     return free[:count]
 
@@ -76,7 +75,7 @@ def main():
 
     if len(chosen) < count:
         print(
-            "only %d free card(s), requested %d" % (len(chosen), count),
+            f"only {len(chosen)} free card(s), requested {count}",
             file=sys.stderr,
         )
 
