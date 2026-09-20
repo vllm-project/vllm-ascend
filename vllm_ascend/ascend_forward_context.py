@@ -286,9 +286,7 @@ def get_a5_mega_moe_buffer_tokens_per_rank(
     kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
     kv_role = getattr(kv_transfer_config, "kv_role", None)
     is_kv_producer = bool(getattr(kv_transfer_config, "is_kv_producer", False))
-    if kv_transfer_config is None or kv_role in ("kv_producer", "kv_both") or (
-        kv_role is None and is_kv_producer
-    ):
+    if kv_transfer_config is None or kv_role in ("kv_producer", "kv_both") or (kv_role is None and is_kv_producer):
         execution_tokens_per_rank = vllm_config.scheduler_config.max_num_batched_tokens
     else:
         if mc2_tokens_capacity is None:
@@ -387,6 +385,7 @@ def _select_capacity_and_world_size_moe_comm_method(
     world_size = vllm_config.parallel_config.world_size_across_dp
     ascend_config = get_ascend_config()
     eplb_config = ascend_config.eplb_config
+    kv_role = getattr(getattr(vllm_config, "kv_transfer_config", None), "kv_role", None)
     buffer_tokens_per_rank = (
         get_a5_mega_moe_buffer_tokens_per_rank(vllm_config, mc2_tokens_capacity)
         if ascend_config.enable_fused_mc2 == 1
@@ -403,6 +402,7 @@ def _select_capacity_and_world_size_moe_comm_method(
         and not eplb_config.dynamic_eplb
         and eplb_config.num_redundant_experts == 0
         and not ascend_config.mix_placement
+        and kv_role != "kv_consumer"
     )
     if use_mega_moe:
         return MoECommType.FUSED_MC2
