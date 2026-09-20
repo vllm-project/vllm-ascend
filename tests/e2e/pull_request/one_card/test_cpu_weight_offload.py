@@ -94,9 +94,23 @@ def _compare_offload_logprobs(
         pytest.param(True, 0, id="ND-eager"),
         pytest.param(False, 0, id="ND-graph"),
         pytest.param(True, 2, id="NZ-eager"),
-        # Qwen3 defaults to MRv2; GPU V2 prefetch + NZ graph now matches the
-        # eager baseline. V1 still fail-fasts in AscendPrefetchOffloader.
-        pytest.param(False, 2, id="NZ-graph"),
+        # TODO(wangfiox): nz+graph not supported yet
+        pytest.param(
+            False,
+            2,
+            id="NZ-graph",
+            marks=pytest.mark.xfail(
+                strict=True,
+                reason=(
+                    "NZ static buffers make the prefetch H2D copy a "
+                    "cross-format (ND->NZ) conversion that is aclop-only on "
+                    "CANN 9.0.0 and rejected during ACL graph capture; "
+                    "AscendPrefetchOffloader fails fast with a clear error "
+                    "for this combo. Remove this marker and the offloader "
+                    "guard once the no-transdata prefetch path lands."
+                ),
+            ),
+        ),
     ],
 )
 @wait_until_npu_memory_free()

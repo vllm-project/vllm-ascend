@@ -22,8 +22,8 @@ Other sparse-attention models have not been validated.
 
 ## 1. Install Dependencies
 
-The installation steps are grouped by hardware. A3 and A5 series are supported.
-On A5 nodes, set the MemFabric transfer protocol to `device_urma` as described
+The installation steps are grouped by hardware. A3 and 950PR&950DT Products are supported.
+On 950PR&950DT Products nodes, set the MemFabric transfer protocol to `device_urma` as described
 in sections 2 and 3.
 
 ### Prefill Build Dependencies
@@ -200,7 +200,7 @@ The `SfaRemoteD2HConnector` entry accepts the following options:
 | Parameter | Description |
 | :--- | :--- |
 | `transfer_backend` | Transfer backend. `memfabric` is the only supported value. |
-| `memfabric_transfer_protocol` | MemFabric data-path protocol: `sdma` (default) and `device_rdma` for A3 series, `device_urma` for A5 series. Must be set to the same value on Prefill and Decode. Invalid values abort startup. |
+| `memfabric_transfer_protocol` | MemFabric data-path protocol: `sdma` (default) and `device_rdma` for A3 series, `device_urma` for 950PR&950DT Products. Must be set to the same value on Prefill and Decode. Invalid values abort startup. |
 
 The following log confirms that buffer reuse is enabled:
 
@@ -241,7 +241,7 @@ On Decode, reserve
 `decode_data_parallel_size * decode_tensor_parallel_size` consecutive ports
 starting from `kv_port`.
 
-On A5 nodes, add `"memfabric_transfer_protocol": "device_urma"` to
+On 950PR&950DT Products nodes, add `"memfabric_transfer_protocol": "device_urma"` to
 `kv_connector_extra_config` on both Prefill and Decode.
 
 | Parameter | Description |
@@ -276,7 +276,7 @@ For multi-node deployment, advertise reachable addresses instead of
 - MemFabric is the only supported `SfaRemoteD2HConnector` transfer backend.
 - The MemFabric data-path protocol is selected by launch configuration instead
   of hardware detection: use `sdma` (default) or `device_rdma` on A3 series and
-  `device_urma` on A5 series, identically on Prefill and Decode.
+  `device_urma` on 950PR&950DT Products, identically on Prefill and Decode.
 - Layerwise buffer reuse cannot currently be combined with
   `MooncakeLayerwiseConnector` because per-buffer transfer completion gating is
   not yet implemented. Support is planned in a follow-up update.

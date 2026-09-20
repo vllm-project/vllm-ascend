@@ -154,7 +154,9 @@ def test_dspark_device_metadata_executor_forward_lifecycle(has_task: bool):
     proposer.parallel_drafting = True
     proposer.token_indices_to_sample = torch.zeros(2, dtype=torch.int32)
     proposer.enable_enpu = False
+    proposer.draft_attn_groups = [MagicMock()]
     proposer._update_full_graph_params_if_needed = MagicMock()
+    proposer._maybe_update_metadata = MagicMock()
     proposer.set_inputs_first_pass = MagicMock()
     proposer.build_draft_attn_metadata = MagicMock()
 

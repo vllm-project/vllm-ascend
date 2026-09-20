@@ -24,6 +24,11 @@ if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_v2.patch_triton  # noqa
 
 
+# Flip STR_DTYPE_TO_TORCH_DTYPE["fp8"] -> torch.float8_e4m3fn on vllm builds
+# that lack register_kv_cache_dtype (e.g. releases/v0.27.1). Must run in every
+# worker before model loading resolves kv_cache_dtype. No-op on kvquant_27.
+import vllm_ascend.patch.worker.patch_kv_cache_dtype  # noqa
+
 import vllm_ascend.patch.worker.patch_distributed  # noqa
 import vllm_ascend.patch.worker.patch_minimax_m2  # noqa
 import vllm_ascend.patch.worker.patch_mamba_utils  # noqa
@@ -44,9 +49,10 @@ import vllm_ascend.patch.worker.patch_eagle3_init  # noqa
 import vllm_ascend.patch.worker.patch_cudagraph  # noqa
 import vllm_ascend.patch.worker.patch_deepseek_v2  # noqa
 
-# Re-apply the Ascend V2 model runner overrides in worker processes
-# (whitelist default + remaining V2/V1 feature patches). The env var
-# VLLM_USE_V2_MODEL_RUNNER still wins when set.
+# vLLM's use_v2_model_runner may enable the v2 runner without the
+# VLLM_USE_V2_MODEL_RUNNER env var (e.g. based on model architecture).
+# We always patch it so that on Ascend the v2 runner is enabled only
+# when the env var is explicitly set.
 import vllm_ascend.patch.worker.patch_v2.patch_use_v2_model_runner  # noqa
 
 import vllm_ascend.patch.worker.patch_fused_moe  # noqa

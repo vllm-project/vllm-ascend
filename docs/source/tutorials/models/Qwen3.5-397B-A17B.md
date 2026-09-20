@@ -24,11 +24,11 @@ The support matrix records the maximum verified capability for this model. The s
 
 |  Weight Version | Hardware Requirements | Download Links |
 |-----------------|-----------------------|----------------|
-| `Qwen3.5-397B-A17B` (BF16 version) | 2 Ascend 950DT(96GB x 8) nodes or 2 Atlas 800 A3 (64GB x 16) nodes or 4 Atlas 800 A2 (64GB x 8) nodes | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.5-397B-A17B) |
+| `Qwen3.5-397B-A17B` (BF16 version) | 2 950DT Products(96GB x 8) nodes or 2 Atlas 800 A3 (64GB x 16) nodes or 4 Atlas 800 A2 (64GB x 8) nodes | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.5-397B-A17B) |
 | `Qwen3.5-397B-A17B-w8a8` (quantized version) | 1 Atlas 800 A3 (64GB x 16) node or 2 Atlas 800 A2 (64GB x 8) nodes | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp) |
 | `Qwen3.5-397B-A17B-w4a8` (quantized version) | 1 Atlas 800 A3 (64GB x 16) node or 2 Atlas 800 A2 (64GB x 8) nodes | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w4a8-mtp) |
-| `Qwen3.5-397B-A17B-w8a8-mxfp8` (quantized version) | 1 Ascend 950DT(96GB x 8) node | [ModelScope](https://modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w8a8-mxfp8) |
-| `Qwen3.5-397B-A17B-w4a4-mxfp4` (quantized version) | 1 Ascend 950DT(96GB x 8) node | [ModelScope](https://modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w4a4-mxfp4) |
+| `Qwen3.5-397B-A17B-w8a8-mxfp8` (quantized version) | 1 950DT Products(96GB x 8) node | [ModelScope](https://modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w8a8-mxfp8) |
+| `Qwen3.5-397B-A17B-w4a4-mxfp4` (quantized version) | 1 950DT Products(96GB x 8) node | [ModelScope](https://modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w4a4-mxfp4) |
 
 It is recommended to download the model weight to a shared directory across multiple nodes, such as `/root/.cache/`, so that all serving nodes can load the same path.
 
@@ -46,7 +46,7 @@ Select an image based on your machine type and start the docker image on your no
 
 The `Qwen3.5-397B-A17B` model is first supported in `vllm-ascend:v0.17.0rc1`. Use `v0.17.0rc1` or later for this model.For Ascend95DT, the model is supported from `vllm-ascend:v0.23.0rc1`.
 
-=== "Ascend 950DT series"
+=== "950DT Products"
 
     Start the docker image on your each node.
 
@@ -177,9 +177,9 @@ If you want to deploy a multi-node service, install the same version of vLLM and
 
 Single-node deployment runs both Prefill and Decode on the same node. It is suitable for functional validation, long-context single-cluster serving.
 
-=== "Ascend 950DT series"
+=== "950DT Products"
 
-    Run the following script to execute online inference on 1 Ascend 950DT (96G x 8). The quantized versions (`Qwen3.5-397B-A17B-w8a8-mxfp8` and `Qwen3.5-397B-A17B-w4a4-mxfp4`) can be deployed on a single Ascend 950DT node, needs `--quantization ascend`.
+    Run the following script to execute online inference on 1 950DT Products (96G x 8). The quantized versions (`Qwen3.5-397B-A17B-w8a8-mxfp8` and `Qwen3.5-397B-A17B-w4a4-mxfp4`) can be deployed on a single 950DT Products node, needs `--quantization ascend`.
 
     ```shell
     #!/bin/sh
@@ -576,12 +576,12 @@ Common Issues Tip: If the decode node fails to initialize, check that `--tensor-
 - `--no-enable-prefix-caching` disables prefix caching. For PD disaggregation, the D-node prefix-cache known issue is tracked in [#7944](https://github.com/vllm-project/vllm-ascend/issues/7944).
 - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'` is recommended on the decode node to reduce decode dispatch overhead.
 
-### 5.5 Prefill-Decode Disaggregation (Ascend 950DT series)
+### 5.5 Prefill-Decode Disaggregation (950DT Products)
 
-For Ascend 950DT (96G x 8), we recommend deploying 1P1D with 2 nodes for `Qwen3.5-397B-A17B-w4a4-mxfp4`:
+For 950DT Products (96G x 8), we recommend deploying 1P1D with 2 nodes for `Qwen3.5-397B-A17B-w4a4-mxfp4`:
 
-- 1 Prefill node: 1 Ascend 950DT (96G x 8). Runs an independent service with DP=1, TP=8.
-- 1 Decode node: 1 Ascend 950DT (96G x 8). Forms a global DP=1 group, with 1 local DP rank (TP=8).
+- 1 Prefill node: 1 950DT Products (96G x 8). Runs an independent service with DP=1, TP=8.
+- 1 Decode node: 1 950DT Products (96G x 8). Forms a global DP=1 group, with 1 local DP rank (TP=8).
 
 The prefill service pushes KV cache to the decode node via the Mooncake p2p connector.
 
@@ -766,9 +766,9 @@ Run a proxy server on the same node as the prefiller service instance. You can g
     bash proxy.sh
     ```
 
-=== "Ascend 950DT series"
+=== "950DT Products"
 
-    For Ascend 950DT PD disaggregation (1P1D), the proxy forwards requests to 1 prefill node and 1 decode node. Use the layerwise proxy script.
+    For 950DT Products PD disaggregation (1P1D), the proxy forwards requests to 1 prefill node and 1 decode node. Use the layerwise proxy script.
 
     ```shell
     unset ftp_proxy
@@ -870,10 +870,10 @@ The following configurations are validated in specific test environments and are
 | Scenario        | Deployment Mode            | Total NPUs          | Weight Version | Key Considerations                                                                                    |
 | --------------- | -------------------------- | ------------------- | -------------- | ----------------------------------------------------------------------------------------------------- |
 | Long context    | Single-node online serving | 16 A3 NPUs          | W8A8 MTP       | Use larger `--max-model-len` and reserve enough KV cache. Lower `--max-num-seqs` if OOM occurs.       |
-| Long context    | Single-node online serving | 8 Ascend 950DT NPUs  | W4A4 MXFP4 MTP | Use TP=8 and reserve enough KV cache for 133k context. Lower `--max-num-seqs` if OOM occurs.          |
+| Long context    | Single-node online serving | 8 950DT Products NPUs  | W4A4 MXFP4 MTP | Use TP=8 and reserve enough KV cache for 133k context. Lower `--max-num-seqs` if OOM occurs.          |
 | High throughput | Multi-node MP              | 16 A2 NPUs          | W8A8 MTP       | Increase concurrency through DP and tune `--max-num-batched-tokens` for prefill throughput.           |
 | Low latency     | 1P1D PD disaggregation     | 48 A3 NPUs          | W8A8 MTP       | Use separate prefill and decode DP/TP layouts and enable full decode ACLGraph on decode nodes.        |
-| Low latency     | 1P1D PD disaggregation     | 16 Ascend 950DT NPUs | W4A4 MXFP4 MTP | Use one 8-NPU prefill node and one 8-NPU decode node. Enable full decode ACLGraph on the decode node. |
+| Low latency     | 1P1D PD disaggregation     | 16 950DT Products NPUs  | W4A4 MXFP4 MTP | Use one 8-NPU prefill node and one 8-NPU decode node. Enable full decode ACLGraph on the decode node. |
 
 | Scenario | Node Role | NPUs | TP | DP | Max Num Seqs | Max Model Len | Max Num Batched Tokens | MTP Tokens | Prefix Cache | Main Optimizations |
 | -------- | --------- | ---- | -- | -- | ------------ | ------------- | ---------------------- | ---------- | ------------ | ------------------ |

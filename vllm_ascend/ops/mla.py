@@ -33,6 +33,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
+from vllm_ascend.attention.utils import mark_fused_preprocess_weights
 
 
 class IndexerWrapper(nn.Module):
@@ -219,11 +220,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         # Fused preprocess (mlapo/prolog_v3) owns transpose+NZ for these
         # layers, so quant methods must skip their own NZ conversion.
         # Mark before VLLM calls process_weights_after_loading on submodules.
-        impl = self.mla_attn.impl
-        if getattr(impl, "_fused_preprocess_type", None) and impl._fused_preprocess_type() is not None:
-            for _layer in (impl.fused_qkv_a_proj, impl.q_proj):
-                if _layer is not None:
-                    _layer._fused_preprocess_managed = True
+        mark_fused_preprocess_weights(self.mla_attn.impl)
 
         original_process_weights = self.mla_attn.process_weights_after_loading
 

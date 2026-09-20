@@ -246,16 +246,20 @@ pip install xlite
 
 ### Decode-only vs. full mode
 
-XliteGraph has two modes, selected by `xlite_graph_config.full_mode`:
+XliteGraph has two modes, selected by `xlite_graph_config.full_mode`. In both modes, every batch is routed by its **token count** (the maximum number of tokens across all data-parallel ranks): batches that fit within the token budget xlite preallocates are executed by the xlite runtime — regardless of whether they contain prefill or decode — while larger batches fall back to the native runnable, captured/replayed by ACLGraph. The modes differ in the token budget xlite preallocates:
 
-| Mode | `full_mode` | Prefill | Decode |
+| Mode | `full_mode` | Preallocated token budget | Batches handled by the xlite runtime |
 |---|---|---|---|
-| **Decode-only** (default) | `False` | Falls back to the runnable / ACLGraph | Handled by the xlite runtime |
-| **Full** | `True` | Handled by the xlite runtime | Handled by the xlite runtime |
+| **Decode-only** (default) | `False` | `max_num_seqs × (1 + num_speculative_tokens)` | Batches within the decode-sized budget — typically decode steps (including MTP), and any small prefill/mixed batch that happens to fit |
+| **Full** | `True` | `max-num-batched-tokens` | Any batch up to `max-num-batched-tokens`, i.e., prefill, decode, and mixed batches alike |
 
-In **decode-only mode**, xlite only owns the decode batches; prefill (and any mixed batch that exceeds the graph capacity) falls back to the native runnable, captured/replayed by ACLGraph. This is the default and is the recommended option — `Xlite` is still evolving, and decode-only mode is more performant and robust for most workloads.
+In **decode-only mode** (the default), the budget is sized for a decode step: the maximum number of running requests times the per-request decode tokens (1, plus the speculative tokens when MTP-style speculative decoding is enabled). Batches that exceed this budget — such as prefill and large mixed batches — fall back to the native runnable. This keeps the xlite hidden-state workspace small, and is the recommended option — `Xlite` is still evolving, and decode-only mode is more performant and robust for most workloads.
 
-In **full mode**, the xlite runtime drives both prefill and decode. Because xlite itself manages the full forward, ACLGraph capture should be disabled, especially under memory constraints, for higher concurrency and better performance.
+In **full mode**, the budget is `max-num-batched-tokens`, so the xlite runtime drives prefill and decode alike; only batches that exceed `max-num-batched-tokens` (e.g., certain profile runs) fall back. Because xlite itself manages the full forward, ACLGraph capture should be disabled, especially under memory constraints, for higher concurrency and better performance.
+
+!!! note
+
+    Since v0.28.0, batches are routed by **token count** instead of the batch attention state: any batch within the preallocated budget runs on the xlite runtime, whether prefill, decode, or mixed. Before v0.28.0, decode-only mode only handled batches whose attention state was decode — any batch with a prefill was routed back to ACLGraph — so small prefill/mixed batches could never take the xlite path.
 
 ### Supported models
 

@@ -10,7 +10,7 @@ env_common: &env_common
   OMP_NUM_THREADS: 1
   HCCL_BUFFSIZE: 1024
   SERVER_PORT: 8080
-  VLLM_USE_V2_MODEL_RUNNER: "1"
+  DYNAMIC_EPLB: true
 disaggregated_prefill:
   enabled: true
   prefiller_host_index: [0]
@@ -51,10 +51,8 @@ deployment:
                   }
             }
         }'
-        --enable-eplb
-        --eplb-config '{"window_size":50,"step_interval":5,"num_redundant_experts":0,"use_async":true,"log_balancedness":true,"log_balancedness_interval":1}'
         --additional-config
-        '{"eplb_config":{"load_collection_phase":"all"}}'
+        '{"eplb_config": {"dynamic_eplb":true,"expert_heat_collection_interval":50,"algorithm_execution_interval":5}}'
 
   -
     envs:
@@ -90,8 +88,6 @@ deployment:
                   }
             }
         }'
-        --enable-eplb
-        --eplb-config '{"window_size":600,"step_interval":50,"num_redundant_experts":0,"use_async":true,"log_balancedness":true,"log_balancedness_interval":1}'
         --additional-config
-        '{"eplb_config":{"load_collection_phase":"all"}}'
+        '{"eplb_config": {"dynamic_eplb":true,"expert_heat_collection_interval":600,"algorithm_execution_interval":50}}'
 benchmarks:

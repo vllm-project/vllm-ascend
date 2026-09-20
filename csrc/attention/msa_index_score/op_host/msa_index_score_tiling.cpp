@@ -58,6 +58,118 @@ inline uint32_t RoundUpU32(uint32_t value, uint32_t align)
     return (value + align - 1) / align * align;
 }
 
+// MIX：按估计 M-task 数启动 AIC，避免短 decode 打满空核（scheduler.Init GetValue / MODE4 VC 空转）。
+// Host 读不到 per-request q_len。kernel TotalTasks = Σ CeilDiv(qLen_b * Hq, MSA_ROW_TILE_M)。
+// Σ ceil(x_i) <= ceil(Σ x_i) + B；B=1 时 packed == actual。B>1 用 packed+B 上界，避免少估把
+// 多 tile 请求串到已启动核上。多 M-tile / 大 batch 仍截到全量 AIC。
+inline uint32_t EstPackedMTasks(const MsaIndexScoreInfo &info, uint32_t aicNum)
+{
+    if (info.totalQ == 0U || aicNum == 0U) {
+        return 1U;
+    }
+    const uint64_t packedRows = static_cast<uint64_t>(info.totalQ) * static_cast<uint64_t>(info.numQHeads);
+    const uint32_t packedM =
+        static_cast<uint32_t>((packedRows + static_cast<uint64_t>(MSA_ROW_TILE_M) - 1U) / MSA_ROW_TILE_M);
+    uint32_t est = packedM;
+    if (info.batch > 1U) {
+        const uint32_t add = packedM + info.batch;
+        est = (add < packedM) ? aicNum : add;
+    }
+    if (est < 1U) {
+        est = 1U;
+    }
+    if (est > aicNum) {
+        est = aicNum;
+    }
+    return est;
+}
+
+// 可见 KV page 上界：优先 host 可读的 actual_seq_klen；否则 min(表宽, PA numPages)。
+// GetData() 对 device tensor 也返回非空指针，解引用会段错误；仅 kOnHost/kFollowing 可读。
+inline bool IsHostVisibleTensor(const gert::Tensor *tensor)
+{
+    if (tensor == nullptr) {
+        return false;
+    }
+    const auto placement = tensor->GetPlacement();
+    return (placement == gert::kOnHost) || (placement == gert::kFollowing);
+}
+
+inline uint32_t EstMaxVisibleBlocks(gert::TilingContext *context, const MsaIndexScoreInfo &info)
+{
+    uint32_t vis = info.maxBlocksPerBatch;
+    if (info.keyLayout != MSA_KEY_LAYOUT_TND && info.numPages > 0U && info.numPages < vis) {
+        vis = info.numPages;
+    }
+    auto klenTensor = context->GetOptionalInputTensor(MSA_IDX_ACTUAL_SEQ_KLEN);
+    if (!IsHostVisibleTensor(klenTensor)) {
+        return vis;
+    }
+    const int32_t *data = klenTensor->GetData<int32_t>();
+    if (data == nullptr) {
+        return vis;
+    }
+    uint32_t maxTok = 0U;
+    if (info.keyLayout == MSA_KEY_LAYOUT_TND) {
+        for (uint32_t b = 0; b < info.batch; ++b) {
+            const int32_t delta = data[b + 1U] - data[b];
+            if (delta > 0 && static_cast<uint32_t>(delta) > maxTok) {
+                maxTok = static_cast<uint32_t>(delta);
+            }
+        }
+    } else {
+        for (uint32_t b = 0; b < info.batch; ++b) {
+            if (data[b] > 0 && static_cast<uint32_t>(data[b]) > maxTok) {
+                maxTok = static_cast<uint32_t>(data[b]);
+            }
+        }
+    }
+    const uint32_t fromLen = (maxTok + MSA_BLOCK_SIZE - 1U) / MSA_BLOCK_SIZE;
+    if (fromLen < vis) {
+        vis = fromLen;
+    }
+    return vis;
+}
+
+// 950：M-task 填不满 AIC 且可见 KV stile 足够时，沿 S 切开打满核。A1 类 packedM≈aicNum 时 kvChunks=1。
+inline uint32_t EstKvChunks(const MsaIndexScoreInfo &info, uint32_t aicNum, uint32_t packedM, uint32_t visBlocks)
+{
+    if (!info.isAscend950 || packedM == 0U || aicNum == 0U || packedM >= aicNum) {
+        return 1U;
+    }
+    const uint32_t nStiles = (visBlocks + MSA_BLOCKS_PER_STILE - 1U) / MSA_BLOCKS_PER_STILE;
+    if (nStiles <= 1U) {
+        return 1U;
+    }
+    uint32_t chunks = aicNum / packedM;
+    if (chunks > nStiles) {
+        chunks = nStiles;
+    }
+    if (chunks < 1U) {
+        chunks = 1U;
+    }
+    return chunks;
+}
+
+inline uint32_t EstLaunchAic(uint32_t aicNum, uint32_t packedM, uint32_t kvChunks)
+{
+    if (aicNum == 0U) {
+        return 1U;
+    }
+    uint32_t est = packedM;
+    if (kvChunks > 1U) {
+        const uint32_t prod = packedM * kvChunks;
+        est = (prod / kvChunks != packedM) ? aicNum : prod;
+    }
+    if (est < 1U) {
+        est = 1U;
+    }
+    if (est > aicNum) {
+        est = aicNum;
+    }
+    return est;
+}
+
 inline uint64_t GetDefaultStride0(const gert::Shape &shape)
 {
     uint64_t stride = 1;
@@ -90,30 +202,31 @@ inline const gert::Stride *GetKeyStrideDesc(gert::TilingContext *context)
     return context->GetInputStride(MSA_IDX_KEY);
 }
 
-inline bool ValidateKeyInnerAxesContiguous(gert::TilingContext *context, const gert::Stride *stride,
-                                           const gert::Shape &shape)
+// 对齐 MlaProlog GetCacheStride0：dim1…末维须等于紧凑 stride，仅 dim0 可非连续。
+// size-1 轴不参与寻址：PyTorch / torch_npu 对其 stride 不做连续约束（BBND↔BNBD 且 N2=1
+// 时 permute().contiguous() 仍可能是 dim1 stride=P 而非 N2*P*D），跳过该轴比较。
+inline ge::graphStatus ValidateKeyInnerAxesContiguous(gert::TilingContext *context, const gert::Stride *stride,
+                                                      const gert::Shape &shape)
 {
     if (stride == nullptr || stride->GetDimNum() != shape.GetDimNum()) {
-        return true;
+        return ge::GRAPH_SUCCESS;
     }
-    uint64_t expectedStride = 1;
-    for (int64_t i = static_cast<int64_t>(shape.GetDimNum()) - 1; i >= 1; --i) {
-        const int64_t dimSize = shape.GetDim(static_cast<size_t>(i));
-        if (dimSize <= 1) {
-            // size-1 轴不参与寻址；PyTorch 对其 stride 不做连续约束（BNBD 且 N2=1 时常见）。
-            continue;
-        }
-        const uint64_t actualStride = static_cast<uint64_t>(stride->GetStride(static_cast<size_t>(i)));
-        if (actualStride != expectedStride) {
-            OP_LOGE(context,
-                    "key dim%ld must be contiguous, actual stride=%lu, expected=%lu. "
-                    "Only dim0 (PA page axis) may be non-contiguous.",
-                    i, actualStride, expectedStride);
-            return false;
+    uint64_t expectedStride = 1U;
+    for (int64_t dim = static_cast<int64_t>(shape.GetDimNum()) - 1; dim >= 1; --dim) {
+        const int64_t dimSize = shape.GetDim(static_cast<size_t>(dim));
+        OP_CHECK_IF(dimSize < 0, OP_LOGE(context, "key dim%ld size is negative.", dim), return ge::GRAPH_FAILED);
+        if (dimSize > 1) {
+            const uint64_t actualStride = static_cast<uint64_t>(stride->GetStride(static_cast<size_t>(dim)));
+            OP_CHECK_IF(actualStride != expectedStride,
+                        OP_LOGE(context,
+                                "key dim%ld must be contiguous, actual stride is %lu, expected stride is %lu. "
+                                "Only dim0 may be non-contiguous.",
+                                dim, actualStride, expectedStride),
+                        return ge::GRAPH_FAILED);
         }
         expectedStride *= static_cast<uint64_t>(dimSize);
     }
-    return true;
+    return ge::GRAPH_SUCCESS;
 }
 
 // PA：strideKvBlock 取 key dim0 元素 stride。连续输入写入值与 shape 推算相同。
@@ -136,8 +249,9 @@ inline ge::graphStatus ResolveStrideKvBlock(gert::TilingContext *context, const 
                 strideKvBlock);
         return ge::GRAPH_SUCCESS;
     }
-    OP_CHECK_IF(!ValidateKeyInnerAxesContiguous(context, stride, kc),
-                OP_LOGE(context, "key inner axes must stay contiguous."), return ge::GRAPH_FAILED);
+    if (ValidateKeyInnerAxesContiguous(context, stride, kc) != ge::GRAPH_SUCCESS) {
+        return ge::GRAPH_FAILED;
+    }
 
     const int64_t actualStride0 = stride->GetStride(MSA_DIM_0);
     if (info.keyLayout == MSA_KEY_LAYOUT_TND) {
@@ -432,6 +546,17 @@ ge::graphStatus DoTiling(gert::TilingContext *context, const MsaIndexScoreInfo &
     const uint32_t kScratchBytes = useKScratch ? (aicNum * kScratchElems * scratchElemBytes) : 0U;
     const uint32_t kScratchOffsetElems = sWsBytes / sizeof(float);
 
+    uint32_t launchAic = aicNum;
+    uint32_t kvChunks = 1U;
+    if (info.totalQ == 0U) {
+        launchAic = 1U;
+    } else {
+        const uint32_t packedM = EstPackedMTasks(info, aicNum);
+        const uint32_t visBlocks = EstMaxVisibleBlocks(context, info);
+        kvChunks = EstKvChunks(info, aicNum, packedM, visBlocks);
+        launchAic = EstLaunchAic(aicNum, packedM, kvChunks);
+    }
+
     MsaIndexScoreTilingData tilingData;
     tilingData.set_batch(info.batch);
     tilingData.set_totalQ(info.totalQ);
@@ -442,7 +567,7 @@ ge::graphStatus DoTiling(gert::TilingContext *context, const MsaIndexScoreInfo &
     tilingData.set_blockSize(info.blockSize);
     tilingData.set_maxBlocksPerBatch(info.maxBlocksPerBatch);
     tilingData.set_scoreBlockStride(scoreBlockStride);
-    tilingData.set_usedCoreNum(aicNum);
+    tilingData.set_usedCoreNum(launchAic);
     tilingData.set_isQuant(info.isQuant ? 1U : 0U);
     tilingData.set_sparseMode(info.sparseMode);
     tilingData.set_initBlocks(info.initBlocks);
@@ -450,6 +575,7 @@ ge::graphStatus DoTiling(gert::TilingContext *context, const MsaIndexScoreInfo &
     tilingData.set_numPages(info.numPages);
     tilingData.set_keyLayout(info.keyLayout);
     tilingData.set_totalK(info.totalK);
+    tilingData.set_kvChunks(kvChunks);
 
     tilingData.set_strideQt(info.numQHeads * info.headDim);
     tilingData.set_strideQn(info.headDim);
@@ -484,12 +610,17 @@ ge::graphStatus DoTiling(gert::TilingContext *context, const MsaIndexScoreInfo &
 
     // MIX 1AIC:2AIV：CalcTschBlockDim 的 sliceNum 按 AIV 计数，内部再 / (aiv/aic)。
     // 传入 aicNum 会再除一次得到 blockDim=aic/2，只能打一半 Cube。
-    // sliceNum = aivNum。
     // 整 batch q_len=0：totalQ==0 → BlockDim=1，避免 totalTaskNum=0。
+    // sliceNum = launchAic * 2：短 decode 只起实际 M-task（及 950 的 S-chunk）对应的 MIX；
+    // 多 M-tile / 大 batch 仍打满 AIC。
     if (info.totalQ == 0U) {
         context->SetBlockDim(1);
     } else {
-        context->SetBlockDim(ascendcPlatform.CalcTschBlockDim(aivNum, aicNum, aivNum));
+        uint32_t sliceAiv = launchAic * MSA_AIV_PER_AIC;
+        if (sliceAiv > aivNum) {
+            sliceAiv = aivNum;
+        }
+        context->SetBlockDim(ascendcPlatform.CalcTschBlockDim(sliceAiv, aicNum, aivNum));
     }
 
     size_t *workspaces = context->GetWorkspaceSizes(1);
@@ -514,8 +645,9 @@ ge::graphStatus DoTiling(gert::TilingContext *context, const MsaIndexScoreInfo &
         tilingKey = (info.queryDtype == ge::DT_BF16) ? MSA_TILING_KEY_BF16 : MSA_TILING_KEY_FP16;
     }
     context->SetTilingKey(tilingKey);
-    OP_LOGI(context->GetNodeName(), "MsaIndexScore tilingKey=%lu headDim=%u layout=%u strideKvBlock=%u", tilingKey,
-            info.headDim, info.keyLayout, strideKvBlock);
+    OP_LOGI(context->GetNodeName(),
+            "MsaIndexScore tilingKey=%lu headDim=%u layout=%u strideKvBlock=%u launchAic=%u kvChunks=%u aicNum=%u",
+            tilingKey, info.headDim, info.keyLayout, strideKvBlock, launchAic, kvChunks, aicNum);
     return ge::GRAPH_SUCCESS;
 }
 } // namespace
