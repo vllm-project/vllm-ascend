@@ -13,7 +13,6 @@ import math
 
 import torch
 from vllm.triton_utils import HAS_TRITON, tl, triton
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 _LOGITS_WORKSPACE_BYTES = 128 * 1024 * 1024
 
@@ -585,6 +584,619 @@ def _compress_qsa_groups_kernel(
     )
 
 
+@triton.jit
+def _gemma_rmsnorm_neox_rope(
+    x,
+    pos_t,
+    pos_h,
+    pos_w,
+    row_valid,
+    cos_sin_ptr,
+    cos_sin_stride,
+    num_rope_positions,
+    norm_weight_ptr,
+    eps,
+    IS_MROPE: tl.constexpr,
+):
+    """Apply Gemma RMSNorm and NeoX RoPE to register-resident rows."""
+
+    tile_t: tl.constexpr = x.shape[0]
+    tile_h: tl.constexpr = x.shape[1]
+    head_dim: tl.constexpr = x.shape[2]
+    rows: tl.constexpr = tile_t * tile_h
+    rotary_dim: tl.constexpr = head_dim // 2
+    rotary_half: tl.constexpr = rotary_dim // 2
+
+    pairs = tl.arange(0, rotary_half)
+    valid_t = (
+        row_valid[:,None] & (pos_t[:,None] >= 0) & (pos_t[:,None] < num_rope_positions)
+    )
+
+    if IS_MROPE:
+        valid_h = (
+            row_valid[:,None]
+            & (pos_h[:,None] >= 0)
+            & (pos_h[:,None] < num_rope_positions)
+        )
+
+        valid_w = (
+            row_valid[:,None]
+            & (pos_w[:,None] >= 0)
+            & (pos_w[:,None] < num_rope_positions)
+        )
+
+        h_mask = (pairs % 3) == 1
+        w_mask = (pairs % 3) == 2
+        t_mask = ~(h_mask | w_mask)
+
+        base = cos_sin_ptr + pairs[None,:]
+
+        cos = tl.load(
+            base + pos_t[:, None] * cos_sin_stride,
+            mask=valid_t & t_mask[None,:],
+            other=0.0
+        )
+
+        cos += tl.load(
+            base + pos_h[:,None] * cos_sin_stride,
+            mask=valid_h & h_mask[None,:],
+            other=0.0
+        )
+
+        cos += tl.load(
+            base + pos_w[:,None] * cos_sin_stride,
+            mask=valid_w & w_mask[None,:],
+            other=0.0
+        )
+
+        sin = tl.load(
+            base + pos_t[:, None] * cos_sin_stride + rotary_half,
+            mask=valid_t & t_mask[None,:],
+            other=0.0
+        )
+
+        sin += tl.load(
+            base + pos_h[:,None] * cos_sin_stride + rotary_half,
+            mask=valid_h & h_mask[None,:],
+            other=0.0
+        )
+
+        sin += tl.load(
+            base + pos_w[:,None] * cos_sin_stride + rotary_half,
+            mask=valid_w & w_mask[None,:],
+            other=0.0
+        )
+    else:
+        cos = tl.load(
+            cos_sin_ptr + pos_t[:,None] * cos_sin_stride + pairs[None,:],
+            mask=valid_t,
+            other=0.0
+        )
+
+        sin = tl.load(
+            cos_sin_ptr + pos_t[:,None] * cos_sin_stride + rotary_half + pairs[None,:],
+            mask=valid_t,
+            other=0.0
+        )
+
+    cos = tl.reshape(
+        tl.broadcast_to(
+            cos[:,None,:],
+            (tile_t,tile_h,rotary_half),
+        ),
+        (rows, rotary_half)
+    )
+
+    sin = tl.reshape(
+        tl.broadcast_to(
+            sin[:,None,:],
+            (tile_t,tile_h,rotary_half),
+        ),
+        (rows,rotary_half)
+    )
+
+    x = tl.reshape(x,(rows,head_dim)).to(tl.float32)
+    weight = tl.load(
+        norm_weight_ptr + tl.arange(0,head_dim)
+    ).to(tl.float32)
+    weight += 1.0
+
+    rrms = tl.rsqrt(
+        tl.sum(x*x, axis=1) / head_dim + eps
+    )
+    y = x * rrms[:,None] * weight[None,:]
+    y = y.to(cos.dtype)
+
+    rotated,passthrough = tl.split(
+        tl.permute(
+            tl.reshape(y,(rows,2,rotary_dim)),
+            (0,2,1),
+        )
+    )
+
+    rotary_first,rotary_second = tl.split(
+        tl.permute(
+            tl.reshape(
+                rotated,(rows,2,rotary_half),
+            ),
+            (0,2,1),
+        )
+    )
+
+    rotated_first = rotary_first * cos - rotary_second * sin
+    rotated_second = rotary_second * cos + rotary_first * sin
+
+    rotated = tl.reshape(
+        tl.permute(
+            tl.join(rotated_first,rotated_second),
+            (0,2,1),
+        ),
+        (rows, rotary_dim),
+    )
+    result = tl.reshape(
+        tl.permute(
+            tl.join(rotated, passthrough),
+            (0,2,1)
+        ),
+        (rows,head_dim),
+    )
+    return tl.reshape(
+        result,
+        (tile_t,tile_h,head_dim),
+    )
+
+@triton.jit(
+    do_not_specialize = [
+        "num_tokens",
+        "num_requests",
+        "num_state_blocks",
+        "num_compressed_blocks",
+        "num_rope_positions",
+    ]
+)
+def _qsa_update_compressed_cache_kernel(
+    raw_keys_ptr,
+    raw_keys_stride_token,
+    positions_ptr,
+    positions_stride_axis,
+    positions_stride_token,
+    cos_sin_ptr,
+    cos_sin_stride,
+    num_rope_positions,
+    k_norm_weight_pr,
+    eps,
+    state_cache_ptr,
+    state_cache_stride_block,
+    state_cache_stride_token,
+    state_cache_stride_dim,
+    state_positions_ptr,
+    state_positions_stride_block,
+    state_positions_stride_token,
+    state_positions_stride_axis,
+    state_block_table_ptr,
+    state_block_table_stride_request,
+    query_start_loc_ptr,
+    logical_positions_ptr,
+    compressed_slots_ptr,
+    k_work_metadata_ptr,
+    k_work_metadata_stride_work,
+    k_work_metadata_stride_field,
+    compressed_cache_ptr,
+    compressed_cache_stride_block,
+    compressed_cache_stride_token,
+    compressed_cache_stride_dim,
+    num_tokens,
+    num_requests,
+    num_state_blocks,
+    num_compressed_blocks,
+    HEAD_DIM: tl.constexpr,
+    COMPRESS_RATIO: tl.constexpr,
+    STATE_SIZE: tl.constexpr,
+    COMPRESSED_PAGE_SIZE: tl.constexpr,
+    IS_2D_POSITIONS: tl.constexpr,
+    IS_MROPE: tl.constexpr,
+    CACHE_HAS_ROPE_POSITIONS: tl.constexpr,
+):
+    """Produce completed compressed K groups and store them directly."""
+    work_id = tl.program_id(0)
+    request = tl.load(
+        k_work_metadata_ptr + work_id * k_work_metadata_stride_work
+    )
+    work_in_request = tl.load(
+        k_work_metadata_ptr +
+        work_id * k_work_metadata_stride_work +
+        k_work_metadata_stride_field
+    )
+    valid_request = (
+        (request >= 0)
+        & (request < num_requests)
+        & (work_in_request >= 0)
+    )
+    if not valid_request:
+        return
+
+    query_start = tl.load(
+        query_start_loc_ptr + request
+    )
+    query_end = tl.load(
+        query_start_loc_ptr + request + 1
+    )
+
+    valid_query = (
+        (query_start >= 0)
+        & (query_end > query_start)
+        & (query_end <= num_tokens)
+    )
+
+    if not valid_query:
+        return
+
+    query_length = query_end - query_start
+
+    chunk_end = tl.load(logical_positions_ptr + query_end - 1)
+    chunk_start = chunk_end - query_length + 1
+
+    num_groups = (
+        (chunk_end + 1) // COMPRESS_RATIO
+        - chunk_start // COMPRESS_RATIO
+    )
+
+    if work_in_request >= num_groups:
+        return
+
+    first_boundary = (
+        ((chunk_start + COMPRESS_RATIO) // COMPRESS_RATIO)
+        * COMPRESS_RATIO - 1
+    )
+    end_position = first_boundary + work_in_request * COMPRESS_RATIO
+
+    boundary_token = (
+        query_start + end_position - chunk_start
+    )
+
+    valid_boundary = (
+                        (boundary_token >= query_start) &
+                        (boundary_token < query_end) &
+                        (boundary_token < num_tokens))
+    if not valid_boundary:
+        return
+
+    compressed_slot = tl.load(
+        compressed_slots_ptr + boundary_token
+    )
+    valid_compressed_slot = (
+        (compressed_slot >= 0)
+        & (compressed_slot < num_compressed_blocks * COMPRESSED_PAGE_SIZE)
+    )
+    if not valid_compressed_slot:
+        return
+
+    state_block = tl.load(
+        state_block_table_ptr + request * state_block_table_stride_request
+    )
+    valid_state_block = (
+        (state_block >= 0)
+        & (state_block < num_state_blocks)
+    )
+
+    dims = tl.arange(0, HEAD_DIM)
+    compressed_block = (
+        compressed_slot // COMPRESSED_PAGE_SIZE
+    ).to(tl.int64)
+    compressed_offset = (
+        compressed_slot % COMPRESSED_PAGE_SIZE
+    )
+    compressed_row_ptr = (
+        compressed_cache_ptr
+        + compressed_block
+        * compressed_cache_stride_block
+        + compressed_offset
+        * compressed_cache_stride_token
+        + dims
+        * compressed_cache_stride_dim
+    )
+
+    # Match the unfused Torch path for inconsistent cache metadata. A valid
+    # compressed slot must not retain stale contents when its raw-state block
+    # is unavailable, regardless of whether this group crosses the chunk edge.
+    if not valid_state_block:
+        tl.store(
+            compressed_row_ptr,
+            tl.zeros((HEAD_DIM,), dtype=tl.float32),
+        )
+        return
+
+    safe_state_block = tl.maximum(
+        state_block,0,
+    ).to(tl.int64)
+
+    group_offsets = tl.arange(0, COMPRESS_RATIO,)
+
+    source_positions = (
+        end_position - (COMPRESS_RATIO - 1) + group_offsets
+    )
+    source_in_current_chunk = (source_positions >= chunk_start)
+    source_tokens = (query_start + source_positions - chunk_start)
+    valid_source_tokens = (
+        (source_tokens >= query_start)
+        & (source_tokens < query_end)
+        & (source_tokens < num_tokens)
+    )
+    safe_source_tokens = tl.maximum(
+        source_tokens,0,
+    )
+    current_values = tl.load(
+        raw_keys_ptr + safe_source_tokens[:,None] * raw_keys_stride_token + dims[None,:],
+        mask = (source_in_current_chunk[:,None] & valid_source_tokens[:,None]),
+        other=0.0,
+    ).to(tl.float32)
+
+    state_offsets = source_positions % STATE_SIZE
+    cached_values = tl.load(
+        state_cache_ptr
+        + safe_state_block
+        * state_cache_stride_block
+        + state_offsets[:,None]
+        * state_cache_stride_token
+        + dims[None,:]
+        * state_cache_stride_dim,
+        mask = (
+            (~source_in_current_chunk)[:,None] & valid_state_block
+        ),
+        other=0.0
+    ).to(tl.float32)
+
+    members = tl.where(
+        source_in_current_chunk[:,None],
+        current_values,
+        cached_values
+    )
+    pooled = (
+        tl.sum(
+            members, axis=0
+        ) / COMPRESS_RATIO
+    ).to(tl.bfloat16)
+
+    first_position = (
+        end_position - COMPRESS_RATIO + 1
+    )
+    if CACHE_HAS_ROPE_POSITIONS:
+        first_in_current_chunk = first_position >= chunk_start
+        first_token = query_start + first_position - chunk_start
+        valid_first_token = (
+            (first_token >= query_start)
+            & (first_token < query_end)
+            & (first_token < num_tokens)
+        )
+        safe_first_token = tl.maximum(
+            first_token,0,
+        )
+        load_current_position = first_in_current_chunk & valid_first_token
+        current_pos_t = tl.load(
+            positions_ptr + safe_first_token * positions_stride_token,
+            mask = load_current_position,
+            other=0,
+        )
+        if IS_2D_POSITIONS:
+            current_pos_h = tl.load(
+                positions_ptr + positions_stride_axis + safe_first_token * positions_stride_token,
+                mask = load_current_position,
+                other=0,
+            )
+            current_pos_w = tl.load(
+                positions_ptr + 2* positions_stride_axis + safe_first_token * positions_stride_token,
+                mask = load_current_position,
+                other=0,
+            )
+        else:
+            current_pos_h = current_pos_t
+            current_pos_w = current_pos_t
+
+        cached_position_address = (
+            state_positions_ptr
+            + safe_state_block
+            * state_positions_stride_block
+            + (
+                first_position % STATE_SIZE
+            )
+            * state_positions_stride_token
+        )
+
+        load_cached_position = (
+            (~first_in_current_chunk)
+            & valid_state_block
+        )
+        cached_pos_t = tl.load(
+            cached_position_address,
+            mask=load_cached_position,
+            other=0,
+        )
+        cached_pos_h = tl.load(
+            cached_position_address + state_positions_stride_axis,
+            mask=load_cached_position,
+            other=0
+        )
+        cached_pos_w = tl.load(
+            cached_position_address + 2 * state_positions_stride_axis,
+            mask=load_cached_position,
+            other=0
+        )
+
+        pos_t_scalar = tl.where(
+            first_in_current_chunk,
+            current_pos_t.to(tl.int64),
+            cached_pos_t,
+        )
+
+        pos_h_scalar = tl.where(
+            first_in_current_chunk,
+            current_pos_h.to(tl.int64),
+            cached_pos_h,
+        )
+
+        pos_w_scalar = tl.where(
+            first_in_current_chunk,
+            current_pos_w.to(tl.int64),
+            cached_pos_w,
+        )
+    else:
+        pos_t_scalar = first_position
+        pos_h_scalar = first_position
+        pos_w_scalar = first_position
+
+    valid_position = (
+        (pos_t_scalar >= 0)
+        & (pos_t_scalar < num_rope_positions)
+    )
+    if IS_MROPE:
+        valid_position &= (
+            (pos_h_scalar >= 0)
+            & (pos_h_scalar < num_rope_positions)
+            & (pos_w_scalar >= 0)
+            & (pos_w_scalar < num_rope_positions)
+        )
+    if not valid_position:
+        return
+
+    singleton = tl.arange(0,1)
+    pos_t = pos_t_scalar + singleton
+    pos_h = pos_h_scalar + singleton
+    pos_w = pos_w_scalar + singleton
+    row_valid = valid_position & (singleton == 0)
+
+    normalized_rotated = _gemma_rmsnorm_neox_rope(
+        tl.reshape(pooled,(1,1,HEAD_DIM)),
+        pos_t,
+        pos_h,
+        pos_w,
+        row_valid,
+        cos_sin_ptr,
+        cos_sin_stride,
+        num_rope_positions,
+        k_norm_weight_pr,
+        eps,
+        IS_MROPE,
+    )
+    normalized_rotated = tl.reshape(
+        normalized_rotated,
+        (HEAD_DIM,)
+    )
+    tl.store(
+        compressed_row_ptr,
+        normalized_rotated
+    )
+
+
+def qsa_fused_update_compressed_cache(
+    raw_keys: torch.Tensor,
+    positions: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    k_norm_weight: torch.Tensor,
+    eps: float,
+    state_cache: torch.Tensor,
+    state_position_cache: torch.Tensor | None,
+    state_block_table: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    logical_positions: torch.Tensor,
+    compressed_cache: torch.Tensor,
+    compressed_slots: torch.Tensor,
+    k_work_metadata: torch.Tensor,
+    *,
+    compress_ratio: int,
+    mrope_section: tuple[int, int, int] | None = None,
+) -> None:
+    """Fuse QSA K compression, norm, RoPE, and compressed-cache store.
+
+    Raw-state cache commit is intentionally handled by a later kernel. The
+    caller owns the common device, dtype, and metadata-consistency contract.
+    """
+    if raw_keys.device.type != "npu" or not HAS_TRITON:
+        raise RuntimeError("fused QSA cache update requires NPU and Triton")
+
+    if raw_keys.ndim == 3:
+        raw_keys = raw_keys[:, 0]
+    num_tokens, head_dim = raw_keys.shape
+    if num_tokens == 0 or k_work_metadata.shape[0] == 0:
+        return
+
+    # These constraints affect tl.arange shapes or packed-cache addressing;
+    # the remaining tensor contracts are guaranteed by the QSA cache owner.
+    assert head_dim == 128 and raw_keys.dtype == torch.bfloat16
+    assert compress_ratio > 1 and compress_ratio & (compress_ratio - 1) == 0
+
+    if positions.ndim == 2 and positions.shape[0] == 1:
+        positions = positions[0]
+    is_2d_positions = positions.ndim == 2
+    assert positions.shape == ((3, num_tokens) if is_2d_positions else (num_tokens,))
+    if is_2d_positions:
+        positions_stride_axis, positions_stride_token = positions.stride()
+    else:
+        positions_stride_axis = 0
+        positions_stride_token = positions.stride(0)
+
+    is_mrope = bool(mrope_section)
+    if is_mrope:
+        # The helper uses the fixed Qwen interleaved [11, 11, 10] layout.
+        assert tuple(mrope_section) == (11, 11, 10)
+        assert state_position_cache is not None
+    cache_has_rope_positions = state_position_cache is not None
+    if state_position_cache is None:
+        state_position_cache = logical_positions
+        state_positions_stride_block = 0
+        state_positions_stride_token = 0
+        state_positions_stride_axis = 0
+    else:
+        state_positions_stride_block = state_position_cache.stride(0)
+        state_positions_stride_token = state_position_cache.stride(1)
+        state_positions_stride_axis = state_position_cache.stride(3)
+
+    num_requests = min(state_block_table.shape[0], query_start_loc.shape[0] - 1)
+    _qsa_update_compressed_cache_kernel[(k_work_metadata.shape[0],)](
+        raw_keys,
+        raw_keys.stride(0),
+        positions,
+        positions_stride_axis,
+        positions_stride_token,
+        cos_sin_cache,
+        cos_sin_cache.stride(0),
+        cos_sin_cache.shape[0],
+        k_norm_weight,
+        eps,
+        state_cache,
+        state_cache.stride(0),
+        state_cache.stride(1),
+        state_cache.stride(3),
+        state_position_cache,
+        state_positions_stride_block,
+        state_positions_stride_token,
+        state_positions_stride_axis,
+        state_block_table,
+        state_block_table.stride(0),
+        query_start_loc,
+        logical_positions,
+        compressed_slots,
+        k_work_metadata,
+        k_work_metadata.stride(0),
+        k_work_metadata.stride(1),
+        compressed_cache,
+        compressed_cache.stride(0),
+        compressed_cache.stride(1),
+        compressed_cache.stride(3),
+        num_tokens,
+        num_requests,
+        state_cache.shape[0],
+        compressed_cache.shape[0],
+        HEAD_DIM=head_dim,
+        COMPRESS_RATIO=compress_ratio,
+        STATE_SIZE=state_cache.shape[1],
+        COMPRESSED_PAGE_SIZE=compressed_cache.shape[1],
+        IS_2D_POSITIONS=is_2d_positions,
+        IS_MROPE=is_mrope,
+        CACHE_HAS_ROPE_POSITIONS=cache_has_rope_positions,
+        num_warps=4,
+    )
+
+
 def _validate_mqa(q: torch.Tensor) -> None:
     if q.ndim != 3 or q.shape[1] <= 0 or q.shape[2] <= 0:
         raise ValueError("QSA query must be [rows, heads, head_dim]")
@@ -904,24 +1516,16 @@ def qsa_sparse_paged_attention(
 
     # Tuned on GB300 for the Qwen-Air TP1, TP2, and TP4 attention shapes.
     # Narrow tiles favor decode; wide tiles improve throughput for prefill.
-    if get_ascend_device_type() == AscendDeviceType.A2:
-        block_n = 64
-        partial_warps = 2
-
-        target_programs = 16
-        split_for_cores = max(1, target_programs // max(base_programs,1))
-        target_splits = 1 << (split_for_cores.bit_length() - 1)
+    if base_programs <= small_profile_limit:
+        block_n, target_splits, partial_warps = 16, 64, 4
+    elif base_programs < 32:
+        block_n, target_splits, partial_warps = 16, 32, 4
+    elif base_programs <= 256:
+        block_n, target_splits, partial_warps = 64, 8, 2
+    elif base_programs <= 512:
+        block_n, target_splits, partial_warps = 64, 4, 2
     else:
-        if base_programs <= small_profile_limit:
-            block_n, target_splits, partial_warps = 16, 64, 4
-        elif base_programs < 32:
-            block_n, target_splits, partial_warps = 16, 32, 4
-        elif base_programs <= 256:
-            block_n, target_splits, partial_warps = 64, 8, 2
-        elif base_programs <= 512:
-            block_n, target_splits, partial_warps = 64, 4, 2
-        else:
-            block_n, target_splits, partial_warps = 64, 1, 2
+        block_n, target_splits, partial_warps = 64, 1, 2
 
     num_tiles = triton.cdiv(logical_indices.shape[1], block_n)
     # Avoid empty splits when the selection width is smaller than the profile.
@@ -1156,6 +1760,7 @@ def qsa_compress_groups_with_ratio(
 __all__ = [
     "expand_qsa_block_indices_npu",
     "qsa_compress_groups_with_ratio",
+    "qsa_fused_update_compressed_cache",
     "qsa_mqa_paged",
     "qsa_select_paged_tokens",
     "qsa_sparse_paged_attention",

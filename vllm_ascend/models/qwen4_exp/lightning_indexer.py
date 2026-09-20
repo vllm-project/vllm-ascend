@@ -10,7 +10,6 @@ from __future__ import annotations
 import math
 
 import torch
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 from vllm_ascend.ops.triton.qwen4_exp.qsa import (
     expand_qsa_block_indices_e3,
@@ -112,38 +111,21 @@ def qsa_select_paged_tokens_lightning(
         dtype=torch.float32,
         device=query.device,
     )
-    if get_ascend_device_type() == AscendDeviceType.A2:
-        groups, _ = torch.ops._C_ascend.npu_lightning_indexer(
-            query,
-            compressed_key_cache,
-            weights,
-            actual_seq_lengths_query=query_cu_seqlens,
-            actual_seq_lengths_key=visible_groups,
-            block_table=row_block_table,
-            layout_query="TND",
-            layout_key="PA_BSND",
-            sparse_count=block_topk,
-            sparse_mode=0,
-            pre_tokens=9223372036854775807,
-            next_tokens=9223372036854775807,
-            return_value=False,
-        )
-    else:
-        groups, _ = torch.ops.npu.npu_lightning_indexer.default(
-            query,
-            compressed_key_cache,
-            weights,
-            actual_seq_lengths_query=query_cu_seqlens,
-            actual_seq_lengths_key=visible_groups,
-            block_table=row_block_table,
-            layout_query="TND",
-            layout_key="PA_BSND",
-            sparse_count=block_topk,
-            sparse_mode=0,
-            pre_tokens=9223372036854775807,
-            next_tokens=9223372036854775807,
-            return_value=False,
-        )
+    groups, _ = torch.ops.npu.npu_lightning_indexer.default(
+        query,
+        compressed_key_cache,
+        weights,
+        actual_seq_lengths_query=query_cu_seqlens,
+        actual_seq_lengths_key=visible_groups,
+        block_table=row_block_table,
+        layout_query="TND",
+        layout_key="PA_BSND",
+        sparse_count=block_topk,
+        sparse_mode=0,
+        pre_tokens=9223372036854775807,
+        next_tokens=9223372036854775807,
+        return_value=False,
+    )
     groups = groups.squeeze(1)
     expand = expand_qsa_block_indices_e3 if use_e3 else expand_qsa_block_indices_npu
     expand(

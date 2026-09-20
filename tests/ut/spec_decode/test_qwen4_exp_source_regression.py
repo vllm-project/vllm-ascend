@@ -334,11 +334,12 @@ def test_qsa_indexer_split_norm_rope_is_gated_and_falls_back() -> None:
     assert "VLLM_ASCEND_ENABLE_QSA_INDEXER_SPLIT_NORM_ROPE" in ENVS.read_text()
 
 
-def test_qsa_indexer_split_norm_rope_keeps_pooling_before_k_norm() -> None:
+def test_qsa_indexer_uses_fused_compressed_cache_update() -> None:
     update = ast.unparse(_method(QSA, "AscendQSAIndexer", "_update_and_compress"))
-    compress = update.index("qsa_compress_groups_with_ratio")
-    normalize = update.index("self.normalize_compressed_keys")
-    assert compress < normalize
+    assert "qsa_fused_update_compressed_cache" in update
+    assert update.count("qsa_store_cache_rows") == 2
+    assert "transpose(0, 1)" in update
+    assert "contiguous()" in update
 
     normalize_source = ast.unparse(
         _method(QSA, "AscendQSAIndexer", "normalize_compressed_keys")
