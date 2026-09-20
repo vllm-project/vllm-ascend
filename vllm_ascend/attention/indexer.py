@@ -50,6 +50,15 @@ INDEXER_SCALE_CACHE_SLOT = 1
 
 
 @dataclass
+class IndexerCacheInputs:
+    """Per-forward K inputs, optionally gathered together with the main KV."""
+
+    key: torch.Tensor
+    scale: torch.Tensor | None
+    weights: torch.Tensor
+
+
+@dataclass
 class AscendSFAIndexerMetadata:
     """Engine-side metadata owned by an SFA indexer cache layer.
 
@@ -379,6 +388,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         k_hidden_states: torch.Tensor,
         indexer_metadata: AscendSFAIndexerMetadata,
         compute_topk: bool = True,
+        cache_inputs: IndexerCacheInputs | None = None,
     ) -> torch.Tensor | None:
         """Full indexer pipeline: k path -> cache write -> top-k selection.
 
@@ -392,8 +402,15 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         inputs."""
         cos = indexer_metadata.cos
         sin = indexer_metadata.sin
-        k_li, k_li_scale, indexer_weights = self.forward_k(k_hidden_states, cos, sin)
-        k_li, k_li_scale, slot_mapping = self._gather_cache_inputs(k_li, k_li_scale, indexer_metadata)
+        if cache_inputs is None:
+            k_li, k_li_scale, indexer_weights = self.forward_k(k_hidden_states, cos, sin)
+            k_li, k_li_scale, slot_mapping = self._gather_cache_inputs(k_li, k_li_scale, indexer_metadata)
+        else:
+            # The SFA caller completed the shared collective before handing
+            # these tensors back. Cache ownership and metadata remain here.
+            k_li, k_li_scale = cache_inputs.key, cache_inputs.scale
+            indexer_weights = cache_inputs.weights
+            slot_mapping = indexer_metadata.slot_mapping
         self.write_cache(k_li, k_li_scale, slot_mapping, indexer_attn_metadata=indexer_metadata)
         if not compute_topk:
             return None
