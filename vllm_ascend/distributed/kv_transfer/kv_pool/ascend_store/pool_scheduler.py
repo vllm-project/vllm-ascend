@@ -172,7 +172,7 @@ class KVPoolScheduler:
         validate_layerwise_runtime(
             self.layerwise_protocol,
             use_hybrid=self.block_key_hybrid,
-            has_recurrent_state=bool(self.mamba_group_ids),
+            has_recurrent_state=bool(self.num_speculative_blocks_by_group),
             tp_mismatch=self.use_block_key_layerwise and self.tp_mismatch,
         )
         self.layerwise_max_transfer_blocks = int(
