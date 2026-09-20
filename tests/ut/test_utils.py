@@ -271,7 +271,7 @@ class TestUtils(TestBase):
                 self.assertTrue(utils.vllm_version_is.__wrapped__("0.28.0"))
                 self.assertFalse(utils.vllm_version_is.__wrapped__("0.27.1"))
             with mock.patch("vllm_ascend.utils.importlib.util.find_spec") as find_spec:
-                find_spec.side_effect = lambda name: (object() if name == "vllm.v1.attention.ops.pcp" else None)
+                find_spec.side_effect = lambda name: object() if name == "vllm.v1.attention.ops.pcp" else None
                 self.assertFalse(utils.vllm_version_is.__wrapped__("0.28.0"))
         # Test caching takes effect without leaving a polluted process cache.
         utils.vllm_version_is.cache_clear()
@@ -773,16 +773,6 @@ class TestIsMtpLayer(TestBase):
         # Mocked/partial hf_configs must not be classified as MTP layers.
         config = SimpleNamespace(num_hidden_layers="80")
         self.assertFalse(utils.is_mtp_layer(config, "model.layers.80.self_attn.attn"))
-
-
-def test_has_layer_idx_is_checked_per_model_instance():
-    target = SimpleNamespace(model=SimpleNamespace(start_layer=0))
-    draft = SimpleNamespace(model=SimpleNamespace())
-
-    assert utils.has_layer_idx(target)
-    assert not utils.has_layer_idx(draft)
-    assert utils.has_layer_idx(target)
-    assert not utils.has_layer_idx(None)
 
 
 class TestIsRlWeightUpdateEnabled(TestBase):

@@ -163,7 +163,7 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
                 tid2eid_ones = self.tid2eid.to(torch.int32) if self.tid2eid is not None else None
                 if _EXTRA_CTX.moe_comm_type == MoECommType.ALLGATHER:
                     prepare_finalize = _EXTRA_CTX.moe_comm_method.prepare_finalize
-                    input_ids = prepare_finalize.all_gather_input_id_with_dp_group(input_ids)
+                    input_ids = prepare_finalize.all_gather_input_ids(input_ids)
                 else:
                     input_ids = _EXTRA_CTX.moe_comm_method.pad_and_split_input_ids(input_ids)
                 if _EXTRA_CTX.moe_comm_type != MoECommType.ALLGATHER and input_ids.numel() != router_logits.shape[0]:
@@ -202,7 +202,8 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
                 routed_scaling_factor=self.routed_scaling_factor,
                 eps=1e-20,
                 group_select_mode=1,
-                # The hash custom op currently accepts only renorm=0.
+                # The hash custom op currently rejects renorm != 0. Apply
+                # norm_topk_prob in Python below before returning to MoE compute.
                 renorm=0,
                 norm_type=2,
                 out_flag=False,

@@ -1,0 +1,33 @@
+#
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+# Daily high-frequency nightly subset for daytime regression detection.
+# Every `name` below MUST match a test case in nightly_config.yaml.
+# Add/remove entries to tune the subset; the schedule_e2e_test.yaml workflow
+# dispatches them via the schedule_nightly_test_<soc>.yaml workflows.
+# resolve_daily_tests.py supports the a2/a3/a3-560t/a5 SOCs; 310p is not
+# dispatched by the daily workflow.
+
+a3:
+  single_node:
+    - name: kimi-k2.5
+    - name: Kimi-K2.6-w4a8-A3
+    - name: qwen3-vl-235b-a22b-instruct-w8a8
+    - name: Qwen3.5-397B-A17B-w8a8-mtp
+    - name: Qwen3.5-122B-A10B-W8A8-A3
+    - name: MiniMax-M3-BF16-A3
+  multi_card:
+    - name: Qwen3-32B-QuaRot

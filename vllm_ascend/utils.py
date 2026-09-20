@@ -77,6 +77,7 @@ _DYNAMIC_EPLB_BUFFER_SIZE = 100
 _IS_MOE_MODEL = None
 _IS_DRAFTER_MOE_MODEL = None
 _IS_VL_MODEL = None
+_HAS_LAYER_IDX = None
 _HAS_ROPE = None
 _ATNN_CALCULATION_STREAM = None
 _CUSTOM_OP_VENDOR_DIR = "custom_transformer"
@@ -115,48 +116,6 @@ def get_dsv4_compress_ratio(config: Any, layer_idx: int) -> int:
     if compress_ratios is None or layer_idx >= len(compress_ratios):
         return 0
     return compress_ratios[layer_idx]
-
-
-def is_deepseek_v41(hf_config: Any) -> bool:
-    """Identify the released V4.1 config at the model boundary."""
-    model_types = ("deepseek_v41", "deepseek_v41_text")
-    if isinstance(hf_config, dict):
-        return hf_config.get("model_type") in model_types or is_deepseek_v41(hf_config.get("text_config"))
-    # SpeculativeConfig may overwrite the instance model_type for DSpark.
-    # The upstream flattened config class still identifies the V4.1 checkpoint.
-    return (
-        getattr(type(hf_config), "model_type", None) in model_types
-        or getattr(hf_config, "model_type", None) in model_types
-        or (getattr(hf_config, "text_config", None) is not None and is_deepseek_v41(hf_config.text_config))
-    )
-
-
-def normalize_deepseek_v41_config(hf_config: Any) -> Any:
-    """Prepare runtime defaults not supplied by upstream's released config."""
-    for name, default in (("num_hash_layers", 0), ("n_group", 1), ("topk_group", 1)):
-        if not hasattr(hf_config, name):
-            setattr(hf_config, name, default)
-    rope = dict(getattr(hf_config, "rope_parameters", None) or {})
-    for name, value in {
-        "factor": 1.0,
-        "beta_fast": 32,
-        "beta_slow": 1,
-        "original_max_position_embeddings": getattr(hf_config, "max_position_embeddings", 1048576),
-        "rope_theta": getattr(hf_config, "rope_theta", 10000.0),
-    }.items():
-        rope.setdefault(name, value)
-    hf_config.rope_parameters = rope
-    hf_config.image_sentinel_base_id = getattr(hf_config, "image_token_id", 129264)
-    hf_config.image_pad_token_id = hf_config.image_sentinel_base_id + 1
-    supported_rotation = {
-        "value_projection_rotated": True,
-        "value_basis": "quarot_global",
-        "key_and_gate_basis": "original",
-        "runtime_delta_rotation": False,
-    }
-    rotation = getattr(hf_config, "engram_rotation_config", None) or supported_rotation
-    hf_config.engram_rotation_config = dict(rotation)
-    return hf_config
 
 
 def model_uses_kpool_indexer(model_config: Any | None) -> bool:
@@ -1069,18 +1028,16 @@ def weak_ref_tensor(tensor: Any) -> Any:
     The new tensor will share the same data as the original tensor,
     but will not keep the original tensor alive.
     """
-    if isinstance(tensor, torch.Tensor):
+    if isinstance(tensor, torch.Tensor) and tensor.device.type == "npu":
         return torch_npu._C._weak_ref_tensor(tensor)
     else:
         return tensor
 
 
-def weak_ref_tensors(
-    tensors: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor],
-) -> torch.Tensor | list[Any] | tuple[Any] | Any:
+def weak_ref_tensors(tensors: Any) -> Any:
     """
-    Convenience function to create weak references to tensors,
-    for single tensor, list of tensors or tuple of tensors.
+    Recursively replace tensors with weak references while preserving containers
+    and non-tensor values.
 
     This function should be used in the following scenario:
     When a tensor is created during graph capture, and it's held by a method
@@ -1092,14 +1049,14 @@ def weak_ref_tensors(
     if isinstance(tensors, torch.Tensor):
         return weak_ref_tensor(tensors)
     if isinstance(tensors, list):
-        return [weak_ref_tensor(t) for t in tensors]
+        return [weak_ref_tensors(tensor) for tensor in tensors]
     if isinstance(tensors, tuple):
-        return tuple(weak_ref_tensor(t) for t in tensors)
-    # For IntermediateTensors used in pipeline parallelism
+        return tuple(weak_ref_tensors(tensor) for tensor in tensors)
+    if isinstance(tensors, dict):
+        return {key: weak_ref_tensors(tensor) for key, tensor in tensors.items()}
     if isinstance(tensors, IntermediateTensors):
-        ret = IntermediateTensors({key: weak_ref_tensor(val) for key, val in tensors.tensors.items()})
-        return ret
-    raise ValueError("Invalid type for tensors")
+        return IntermediateTensors(weak_ref_tensors(tensors.tensors))
+    return tensors
 
 
 def npu_stream_switch(target_stream: torch.npu.Stream, *, enabled: bool = True):
@@ -1311,7 +1268,11 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
 def has_layer_idx(model_instance: torch.nn.Module) -> bool:
     if model_instance is None:
         return False
-    return hasattr(model_instance, "model") and hasattr(model_instance.model, "start_layer")
+
+    global _HAS_LAYER_IDX
+    if _HAS_LAYER_IDX is None:
+        _HAS_LAYER_IDX = hasattr(model_instance, "model") and hasattr(model_instance.model, "start_layer")
+    return _HAS_LAYER_IDX
 
 
 def refresh_block_size(vllm_config):
@@ -1766,10 +1727,10 @@ def get_rotation_path(vllm_config: VllmConfig) -> Path | None:
     if quant_config is None:
         return None
     target_model_path = vllm_config.model_config.model
+    quant_description = getattr(quant_config, "quant_description", None) or {}
     try:
-        quant_description = quant_config.quant_description
         rotation_relative_path = quant_description["optional"]["quarot"]["rotation_map"]["global_rotation"]
-    except KeyError:
+    except (KeyError, TypeError):
         return None
     return Path(target_model_path) / rotation_relative_path
 
@@ -1786,3 +1747,11 @@ def get_rotation_matrix(rotation_path: Path | None) -> torch.Tensor:
             rotation_path,
         )
         raise e
+
+
+def use_updatable_graph(
+    attn_backend,
+) -> bool:
+    from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+
+    return attn_backend is not None and issubclass(attn_backend, AscendAttentionBackend)

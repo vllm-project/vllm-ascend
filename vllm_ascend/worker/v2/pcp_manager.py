@@ -52,6 +52,9 @@ class AscendPCPManager(PCPManager):
     """PCP manager that refreshes Ascend-only local-batch metadata."""
 
     vllm_config: VllmConfig
+    _global_batch_slot_mappings: torch.Tensor | None
+    _gathered_kv_slot_mappings: torch.Tensor | None
+    _pad_slot_id: torch.Tensor
 
     def __init__(
         self,
@@ -78,6 +81,16 @@ class AscendPCPManager(PCPManager):
             dcp_rank=dcp_rank,
             cp_interleave=cp_interleave,
         )
+
+        # PCP supplies its own output buffers to compute_slot_mappings, so their
+        # dtype must match Ascend block-table slots for cache-write operators.
+        if block_tables is not None:
+            slot_dtype = block_tables.slot_mappings.dtype
+            if self._global_batch_slot_mappings is not None:
+                self._global_batch_slot_mappings = torch.empty_like(self._global_batch_slot_mappings, dtype=slot_dtype)
+            if self._gathered_kv_slot_mappings is not None:
+                self._gathered_kv_slot_mappings = torch.empty_like(self._gathered_kv_slot_mappings, dtype=slot_dtype)
+            self._pad_slot_id = self._pad_slot_id.to(slot_dtype)
 
         # vLLM #53515 made the PCP-local buffers persistent and uses them for
         # graph capture. Preserve that ownership while providing the extra CPU
@@ -235,6 +248,23 @@ class AscendPCPManager(PCPManager):
             not bool(global_batch.is_prefilling_np.any())
             and self.vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
             and global_batch.num_draft_tokens == 0
+        )
+
+    def get_num_tokens_for_dispatch(self, num_scheduled_tokens: np.ndarray, is_prefilling: np.ndarray) -> int:
+        if not vllm_version_is("0.28.0"):
+            return super().get_num_tokens_for_dispatch(num_scheduled_tokens, is_prefilling)
+        # Reuse the actual partition rules: decode is replicated, while each
+        # prefill contributes two chunks. Computed positions only reorder rows.
+        query_start_loc = np.concatenate(([0], np.cumsum(num_scheduled_tokens)))
+        num_computed_tokens = np.zeros_like(num_scheduled_tokens)
+        return max(
+            sum(
+                segment.num_tokens
+                for segment in self._get_rank_segments(
+                    rank, num_scheduled_tokens, num_computed_tokens, is_prefilling, query_start_loc
+                )
+            )
+            for rank in range(self.pcp_world_size)
         )
 
     def partition_batch(

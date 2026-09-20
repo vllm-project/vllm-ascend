@@ -999,6 +999,35 @@ class TestSubconfigPydanticTypeValidation(TestBase):
 
 
 class TestUpstreamConfigCompatibility(TestBase):
+    @patch(
+        "vllm_ascend.ascend_config.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A5),
+    )
+    def test_a5_megamoe_minimax_config_and_existing_guards(self, _mock_profile):
+        text_config = SimpleNamespace(hidden_size=6144, intermediate_size=3072, num_experts_per_tok=4)
+        model_config = SimpleNamespace(
+            architectures=["MiniMaxM3SparseForCausalLM"],
+            hf_text_config=text_config,
+            get_num_experts=lambda: 128,
+        )
+        parallel_config = SimpleNamespace(world_size_across_dp=8, pipeline_parallel_size=1)
+        vc = SimpleNamespace(model_config=model_config, parallel_config=parallel_config)
+        self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
+
+        for field, value in (("hidden_size", 896), ("intermediate_size", 4096), ("num_experts_per_tok", 33)):
+            with self.subTest(field=field), patch.object(text_config, field, value):
+                self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
+        for world_size in (1, 3):
+            with self.subTest(world_size=world_size), patch.object(parallel_config, "world_size_across_dp", world_size):
+                self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
+
+        model_config.architectures = ["Qwen3_5MoeForConditionalGeneration"]
+        self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
+        text_config.moe_intermediate_size = 3072
+        self.assertFalse(AscendConfig._is_megamoe_supported_by_config(vc))
+        text_config.moe_intermediate_size = 1024
+        self.assertTrue(AscendConfig._is_megamoe_supported_by_config(vc))
+
     def test_megamoe_model_config_constraints(self):
         supported = SimpleNamespace(
             model_config=SimpleNamespace(
@@ -1020,6 +1049,16 @@ class TestUpstreamConfigCompatibility(TestBase):
 
         self.assertTrue(AscendConfig._is_megamoe_supported_by_config(supported))
         self.assertFalse(AscendConfig._is_megamoe_supported_by_config(unsupported))
+
+        minimax_m3 = SimpleNamespace(
+            model_config=SimpleNamespace(
+                hf_text_config=SimpleNamespace(
+                    hidden_size=6144,
+                    intermediate_size=3072,
+                )
+            )
+        )
+        self.assertTrue(AscendConfig._is_megamoe_supported_by_config(minimax_m3))
 
     @patch(
         "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
@@ -1179,6 +1218,65 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         # The rollback forces _MEGA_MOE_SUPPORTED=False, so the fused path
         # routes to dispatch_ffn_combine instead of mega_moe.
         self.assertFalse(is_mega_moe_supported())
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_minimax_m3_rejects_fused_mc2_dispatch_ffn_combine(self, mock_fix):
+        vc = VllmConfig()
+        vc.model_config.architectures = ["MiniMaxM3SparseForCausalLM"]
+        vc.additional_config = {"enable_fused_mc2": 1}
+
+        with self.assertRaisesRegex(AssertionError, "MiniMax M3 does not support enable_fused_mc2=1"):
+            init_ascend_config(vc)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_minimax_m3_allows_fused_mc2_mode_2_megamoe(self, mock_fix):
+        def _fake_find_spec(name, *args, **kwargs):
+            if name == "cann_ops_transformer":
+                return object()
+            return real_find_spec(name, *args, **kwargs)
+
+        vc = VllmConfig()
+        vc.model_config.architectures = ["MiniMaxM3SparseForCausalLM"]
+        vc.model_config.hf_text_config = SimpleNamespace(
+            hidden_size=6144,
+            intermediate_size=3072,
+        )
+        vc.additional_config = {"enable_fused_mc2": 2}
+
+        with patch("vllm_ascend.ascend_config.importlib.util.find_spec", side_effect=_fake_find_spec):
+            config = init_ascend_config(vc)
+
+        self.assertEqual(config.enable_fused_mc2, 1)
+        self.assertTrue(is_mega_moe_supported())
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_minimax_m3_derivation_initializes_unknown_megamoe_support(self, mock_fix):
+        vc = VllmConfig()
+        vc.model_config.architectures = ["MiniMaxM3SparseForCausalLM"]
+        config = init_ascend_config(vc)
+        # Exercise a custom entry point with normalized MC2 mode and an
+        # uninitialized capability cache, outside the usual factory ordering.
+        config.enable_fused_mc2 = 1
+        with (
+            patch("vllm_ascend.ascend_config._MEGA_MOE_SUPPORTED", None),
+            patch("vllm_ascend.ascend_config.importlib.util.find_spec", return_value=object()),
+            patch.object(AscendConfig, "_is_megamoe_supported_by_config", return_value=True),
+        ):
+            config.derive_and_validate(vc)
+            self.assertEqual(config.enable_fused_mc2, 1)
+            self.assertTrue(is_mega_moe_supported())
+
+        # An explicitly disabled cache must stay disabled even with CANN
+        # installed: MiniMax cannot use dispatch_ffn_combine.
+        with (
+            patch("vllm_ascend.ascend_config._MEGA_MOE_SUPPORTED", False),
+            patch("vllm_ascend.ascend_config.importlib.util.find_spec", return_value=object()),
+            self.assertRaisesRegex(AssertionError, "MiniMax M3 does not support enable_fused_mc2=1"),
+        ):
+            config.derive_and_validate(vc)
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
@@ -1347,7 +1445,9 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         vc.quant_config = SimpleNamespace(
             quant_description={"model.layers.3.self_attn.indexer.quant_type": "INT8_DYNAMIC"}
         )
-        vc.additional_config = {"enable_sparse_li_c8": True}
+        # enable_sparse_li_c8 is derived from indexer_kv_dtype (see
+        # init_ascend_config): indexer_kv_dtype "int8" makes it active.
+        vc.attention_config.indexer_kv_dtype = "int8"
 
         config = init_ascend_config(vc)
 
@@ -1359,7 +1459,9 @@ class TestTopLevelSwitchTypeValidation(TestBase):
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_sparse_sfa_user_input_is_derived_on_factory_path(self, mock_fix, mock_sparse):
         vc = VllmConfig()
-        vc.additional_config = {"enable_sparse_sfa_c8": "true"}
+        # enable_sparse_sfa_c8 is derived from cache_dtype (see
+        # init_ascend_config): cache_dtype "fp8" makes it active.
+        vc.cache_config.cache_dtype = "fp8"
 
         config = init_ascend_config(vc)
 
@@ -1374,21 +1476,32 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         mock_uses_sfa,
     ):
         cases = (
-            (True, True, "kv_producer", True),
-            (False, True, "kv_producer", False),
-            (True, False, "kv_producer", False),
-            (True, True, "kv_consumer", False),
-            (True, True, "kv_both", False),
-            (True, True, None, False),
+            (None, True, True, "kv_producer", True),
+            (False, True, True, "kv_producer", False),
+            (True, False, True, "kv_producer", False),
+            (True, True, False, "kv_producer", False),
+            (True, True, True, "kv_consumer", False),
+            (True, True, True, "kv_both", False),
+            (True, True, True, None, False),
         )
-        for uses_sfa, enable_li_c8, kv_role, expected in cases:
-            with self.subTest(uses_sfa=uses_sfa, enable_li_c8=enable_li_c8, kv_role=kv_role):
+        for reshape_optim, uses_sfa, enable_li_c8, kv_role, expected in cases:
+            with self.subTest(
+                reshape_optim=reshape_optim,
+                uses_sfa=uses_sfa,
+                enable_li_c8=enable_li_c8,
+                kv_role=kv_role,
+            ):
                 mock_uses_sfa.return_value = uses_sfa
                 vc = VllmConfig()
                 vc.additional_config = {
                     "refresh": True,
                     "enable_sparse_li_c8": enable_li_c8,
                 }
+                if reshape_optim is not None:
+                    vc.additional_config["c8_enable_reshape_optim"] = reshape_optim
+                # enable_sparse_li_c8 is derived from indexer_kv_dtype (see
+                # init_ascend_config); the per-case flag is expressed there.
+                vc.attention_config.indexer_kv_dtype = "int8" if enable_li_c8 else "auto"
                 if kv_role is not None:
                     vc.kv_transfer_config = KVTransferConfig(
                         kv_connector="MooncakeConnectorV1",

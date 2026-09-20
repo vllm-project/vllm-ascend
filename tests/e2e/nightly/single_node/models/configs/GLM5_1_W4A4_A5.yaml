@@ -18,7 +18,7 @@ _envs: &envs
 #  HCCL_INTRA_PCIE_ENABLE: "1"
   HCCL_INTRA_ROCE_ENABLE: "1"
   ASCEND_LAUNCH_BLOCKING: "0"
-  VLLM_USE_V2_MODEL_RUNNER: "1"
+  DYNAMIC_EPLB: "true"
 
 _server_cmd: &server_cmd
   - "--port"
@@ -32,9 +32,6 @@ _server_cmd: &server_cmd
   - "--seed"
   - "1024"
   - "--enable-expert-parallel"
-  - "--enable-eplb"
-  - "--eplb-config"
-  - '{"window_size":50,"step_interval":5,"num_redundant_experts":0,"use_async":true,"log_balancedness":true,"log_balancedness_interval":1}'
   - "--async-scheduling"
   - "--max-num-seqs"
   - "128"
@@ -52,6 +49,10 @@ _server_cmd: &server_cmd
   - "glm45"
   - "--gpu-memory-utilization"
   - "0.95"
+  - "--kv-cache-dtype" 
+  - "fp8"
+  - "--attention_config.indexer_kv_dtype" 
+  - "fp8"
   - "--compilation-config"
   - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
   - "--trust-remote-code"
@@ -60,7 +61,7 @@ _server_cmd: &server_cmd
   - "--speculative-config"
   - '{"num_speculative_tokens":3,"method":"deepseek_mtp","enforce_eager":true}'
   - "--additional-config"
-  - '{"enable_cpu_binding":"True","multistream_overlap_shared_expert":"True","enable_sparse_sfa_c8":true,"enable_sparse_li_c8":true,"enable_dsa_cp":true,"eplb_config":{"load_collection_phase":"all"}}'
+  - '{"enable_cpu_binding":"True","multistream_overlap_shared_expert":"True", "enable_dsa_cp":true,"eplb_config":{"dynamic_eplb":true,"expert_heat_collection_interval":50,"algorithm_execution_interval":5,"eplb_policy_type":2,"num_redundant_experts":0}}'
 
 # ==========================================
 # ACTUAL TEST CASES
