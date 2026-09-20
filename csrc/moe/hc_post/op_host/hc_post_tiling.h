@@ -35,6 +35,7 @@ TILING_DATA_FIELD_DEF(int64_t, frontCore);
 TILING_DATA_FIELD_DEF(int64_t, dSplitTime);
 TILING_DATA_FIELD_DEF(int64_t, dOnceDealing);
 TILING_DATA_FIELD_DEF(int64_t, dLastDealing);
+TILING_DATA_FIELD_DEF(int64_t, computeMean);
 END_TILING_DATA_DEF;
 REGISTER_TILING_DATA_CLASS(HcPost, HcPostTilingData)
 

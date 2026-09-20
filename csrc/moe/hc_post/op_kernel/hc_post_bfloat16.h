@@ -24,14 +24,16 @@ template <typename T1, typename T2>
 class HcPostRegBaseBfloat16 {
 public:
     __aicore__ inline HcPostRegBaseBfloat16() {};
-    __aicore__ inline void Init(GM_ADDR x, GM_ADDR residual, GM_ADDR post, GM_ADDR comb, GM_ADDR y, GM_ADDR workspace,
-        const HcPostTilingData *tilingData, TPipe *pipe);
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR residual, GM_ADDR post, GM_ADDR comb, GM_ADDR y, GM_ADDR mean,
+                                GM_ADDR workspace, const HcPostTilingData* tilingData, TPipe* pipe);
     __aicore__ inline void Process();
     __aicore__ inline void DataCopyInX(int64_t batchIndex, int64_t dOnceDealing, int64_t dOffset);
     __aicore__ inline void DataCopyInPost(int64_t batchIndex);
     __aicore__ inline void DataCopyInResidual(int64_t batchIndex, int64_t dOnceDealing, int64_t dOffset);
     __aicore__ inline void DataCopyInComb(int64_t batchIndex);
     __aicore__ inline void DataCopyOut(int64_t batchIndex, int64_t dOnceDealing, int64_t dOffset);
+    __aicore__ inline void ComputeMean(LocalTensor<float> sumTempBuf, int64_t batchIndex, int64_t dOnceDealing,
+                                       int64_t dOffset);
     __aicore__ inline void DoProcess(int64_t batchSize);
     __aicore__ inline void DoCompute(LocalTensor<float> sumTempBuf, LocalTensor<T2> postUb, LocalTensor<T2> combUb, int64_t batchIndex, int64_t dOffset, int64_t dDealing);
     __aicore__ inline void DoMulAndAdd(LocalTensor<T1> xUb, LocalTensor<T2> postUb, LocalTensor<T1> residualUb, LocalTensor<T2> combUb, LocalTensor<float> sumTempBuf, int64_t dOnceDealing);
@@ -54,6 +56,7 @@ private:
     int64_t dLastDealing_ = 0;
     int64_t dSplitTime_ = 0;
     int64_t dParamOnceAlign_ = 0;
+    bool computeMean_ = false;
     static constexpr int32_t ONE_BLOCK_SIZE = 32;
     int32_t perBlock32 = ONE_BLOCK_SIZE / sizeof(float);
 
@@ -62,61 +65,70 @@ private:
     GlobalTensor<T2> postGm_;
     GlobalTensor<T2> combGm_;
     GlobalTensor<T1> yGm_;
+    GlobalTensor<T1> meanGm_;
 
     TQue<QuePosition::VECIN, 1> xQue_;
     TQue<QuePosition::VECIN, 1> residualQue_;
     TQue<QuePosition::VECIN, 1> postQue_;
     TQue<QuePosition::VECIN, 1> combQue_;
     TQue<QuePosition::VECOUT, 1> sumQue_;
+    TQue<QuePosition::VECOUT, 1> meanQue_;
     TBuf<QuePosition::VECCALC> sumTempBuf_;
+    TBuf<QuePosition::VECCALC> meanBuf_;
 };
 
 template <typename T1, typename T2>
-__aicore__ inline void HcPostRegBaseBfloat16<T1, T2>::Init(GM_ADDR x, GM_ADDR residual, GM_ADDR post, GM_ADDR comb, GM_ADDR y,
-    GM_ADDR workspace, const HcPostTilingData *tilingData, TPipe *pipe)
-{
-    blkIdx_ = GetBlockIdx();
-    if (blkIdx_ >= tilingData->usedCoreNum) {
-        return;
-    }
-    tiling_ = tilingData;
-    pipe_ = pipe;
-    hcParam_ = tilingData->hcParam;
-    dParam_ = tilingData->dParam;
-    batchOneCoreTail_ = tilingData->batchOneCoreTail;
-    batchOneCore_ = tilingData->batchOneCore;
-    isFrontCore_ = blkIdx_ < tilingData->frontCore;
-    int64_t frontCore = tilingData->frontCore;
-    dOnceDealing_ = tilingData->dOnceDealing;
-    dLastDealing_ = tilingData->dLastDealing;
-    dSplitTime_ = tilingData->dSplitTime;
-    dParamAlign_ = (dParam_ + perBlock32 - 1) / perBlock32 * perBlock32;
-    dParamOnceAlign_ = (dOnceDealing_ + perBlock32 - 1) / perBlock32 * perBlock32;
+__aicore__ inline void HcPostRegBaseBfloat16<T1, T2>::Init(GM_ADDR x, GM_ADDR residual, GM_ADDR post, GM_ADDR comb,
+                                                           GM_ADDR y, GM_ADDR mean, GM_ADDR workspace,
+                                                           const HcPostTilingData* tilingData, TPipe* pipe) {
+  blkIdx_ = GetBlockIdx();
+  if (blkIdx_ >= tilingData->usedCoreNum) {
+    return;
+  }
+  tiling_ = tilingData;
+  pipe_ = pipe;
+  hcParam_ = tilingData->hcParam;
+  dParam_ = tilingData->dParam;
+  batchOneCoreTail_ = tilingData->batchOneCoreTail;
+  batchOneCore_ = tilingData->batchOneCore;
+  isFrontCore_ = blkIdx_ < tilingData->frontCore;
+  int64_t frontCore = tilingData->frontCore;
+  dOnceDealing_ = tilingData->dOnceDealing;
+  dLastDealing_ = tilingData->dLastDealing;
+  dSplitTime_ = tilingData->dSplitTime;
+  dParamAlign_ = (dParam_ + perBlock32 - 1) / perBlock32 * perBlock32;
+  dParamOnceAlign_ = (dOnceDealing_ + perBlock32 - 1) / perBlock32 * perBlock32;
+  computeMean_ = tilingData->computeMean != 0;
 
-    int64_t xOffset = blkIdx_ * batchOneCore_ * dParam_;
-    int64_t residualOffset = blkIdx_ * batchOneCore_ * hcParam_ * dParam_;
-    int64_t postOffset = blkIdx_ * batchOneCore_ * hcParam_;
-    int64_t combOffset = blkIdx_ * batchOneCore_ * hcParam_ * hcParam_;
-    int64_t yOffset = blkIdx_ * batchOneCore_ * hcParam_ * dParam_;
-    if (!isFrontCore_) {
-        xOffset = (blkIdx_ * batchOneCoreTail_ + frontCore) * dParam_;
-        residualOffset = (blkIdx_ * batchOneCoreTail_ + frontCore) * hcParam_ * dParam_;
-        postOffset = (blkIdx_ * batchOneCoreTail_ + frontCore) * hcParam_;
-        combOffset = (blkIdx_ * batchOneCoreTail_ + frontCore) * hcParam_ * hcParam_;
-        yOffset = (blkIdx_ * batchOneCoreTail_ + frontCore) * hcParam_ * dParam_;
-    }
-    xGm_.SetGlobalBuffer((__gm__ T1 *)x + xOffset);
-    residualGm_.SetGlobalBuffer((__gm__ T1 *)residual + residualOffset);
-    postGm_.SetGlobalBuffer((__gm__ T2 *)post + postOffset);
-    combGm_.SetGlobalBuffer((__gm__ T2 *)comb + combOffset);
-    yGm_.SetGlobalBuffer((__gm__ T1 *)y + yOffset);
+  int64_t xOffset = blkIdx_ * batchOneCore_ * dParam_;
+  int64_t residualOffset = blkIdx_ * batchOneCore_ * hcParam_ * dParam_;
+  int64_t postOffset = blkIdx_ * batchOneCore_ * hcParam_;
+  int64_t combOffset = blkIdx_ * batchOneCore_ * hcParam_ * hcParam_;
+  int64_t yOffset = blkIdx_ * batchOneCore_ * hcParam_ * dParam_;
+  if (!isFrontCore_) {
+    xOffset = (blkIdx_ * batchOneCoreTail_ + frontCore) * dParam_;
+    residualOffset = (blkIdx_ * batchOneCoreTail_ + frontCore) * hcParam_ * dParam_;
+    postOffset = (blkIdx_ * batchOneCoreTail_ + frontCore) * hcParam_;
+    combOffset = (blkIdx_ * batchOneCoreTail_ + frontCore) * hcParam_ * hcParam_;
+    yOffset = (blkIdx_ * batchOneCoreTail_ + frontCore) * hcParam_ * dParam_;
+  }
+  xGm_.SetGlobalBuffer((__gm__ T1*)x + xOffset);
+  residualGm_.SetGlobalBuffer((__gm__ T1*)residual + residualOffset);
+  postGm_.SetGlobalBuffer((__gm__ T2*)post + postOffset);
+  combGm_.SetGlobalBuffer((__gm__ T2*)comb + combOffset);
+  yGm_.SetGlobalBuffer((__gm__ T1*)y + yOffset);
+  meanGm_.SetGlobalBuffer((__gm__ T1*)mean + xOffset);
 
-    pipe_->InitBuffer(xQue_, 2, dParamOnceAlign_ * sizeof(T1));
-    pipe_->InitBuffer(residualQue_, 2, hcParam_ * dParamOnceAlign_ * sizeof(T1));
-    pipe_->InitBuffer(postQue_, 2, hcParam_ * sizeof(T2));
-    pipe_->InitBuffer(combQue_, 2, hcParam_ * hcParam_ * sizeof(T2));
-    pipe_->InitBuffer(sumQue_, 2, hcParam_* dParamOnceAlign_ * sizeof(T1));
-    pipe_->InitBuffer(sumTempBuf_, hcParam_ * dParamOnceAlign_ * sizeof(float));
+  pipe_->InitBuffer(xQue_, 2, dParamOnceAlign_ * sizeof(T1));
+  pipe_->InitBuffer(residualQue_, 2, hcParam_ * dParamOnceAlign_ * sizeof(T1));
+  pipe_->InitBuffer(postQue_, 2, hcParam_ * sizeof(T2));
+  pipe_->InitBuffer(combQue_, 2, hcParam_ * hcParam_ * sizeof(T2));
+  pipe_->InitBuffer(sumQue_, 2, hcParam_ * dParamOnceAlign_ * sizeof(T1));
+  pipe_->InitBuffer(sumTempBuf_, hcParam_ * dParamOnceAlign_ * sizeof(float));
+  if (computeMean_) {
+    pipe_->InitBuffer(meanQue_, 1, dParamOnceAlign_ * sizeof(T1));
+    pipe_->InitBuffer(meanBuf_, dParamOnceAlign_ * sizeof(float));
+  }
 }
 
 template <typename T1, typename T2>
@@ -199,6 +211,31 @@ __aicore__ inline void HcPostRegBaseBfloat16<T1, T2>::DataCopyOut(int64_t batchI
     copyParams.dstStride = (dParamAlign_ - dOnceDealing) * sizeof(T1);
     AscendC::DataCopyPad(yGm_[batchIndex * hcParam_ * dParam_ + dOffset], outBuf, copyParams);
     sumQue_.FreeTensor(outBuf);
+}
+
+template <typename T1, typename T2>
+__aicore__ inline void HcPostRegBaseBfloat16<T1, T2>::ComputeMean(LocalTensor<float> sumTempBuf, int64_t batchIndex,
+                                                                  int64_t dOnceDealing, int64_t dOffset) {
+  if (!computeMean_) {
+    return;
+  }
+  LocalTensor<float> meanBuf = meanBuf_.Get<float>();
+  Duplicate(meanBuf, 0.0f, dOnceDealing);
+  PipeBarrier<PIPE_V>();
+  for (int64_t hcIndex = 0; hcIndex < hcParam_; hcIndex++) {
+    Add(meanBuf, meanBuf, sumTempBuf[hcIndex * dParamOnceAlign_], dOnceDealing);
+    PipeBarrier<PIPE_V>();
+  }
+  Muls(meanBuf, meanBuf, 1.0f / static_cast<float>(hcParam_), dOnceDealing);
+  PipeBarrier<PIPE_V>();
+  LocalTensor<T1> meanOut = meanQue_.AllocTensor<T1>();
+  Cast(meanOut, meanBuf, RoundMode::CAST_RINT, dOnceDealing);
+  PipeBarrier<PIPE_V>();
+  meanQue_.EnQue<T1>(meanOut);
+  meanOut = meanQue_.DeQue<T1>();
+  DataCopyExtParams copyParams{1, static_cast<uint32_t>(dOnceDealing * sizeof(T1)), 0, 0, 0};
+  DataCopyPad(meanGm_[batchIndex * dParam_ + dOffset], meanOut, copyParams);
+  meanQue_.FreeTensor(meanOut);
 }
 
 template <typename T1, typename T2>
@@ -318,6 +355,12 @@ __aicore__ inline void HcPostRegBaseBfloat16<T1, T2>::DoCompute(LocalTensor<floa
     DoMulAndAdd(xUb, postUb, residualUb, combUb, sumTempBuf, dDealing);
     LocalTensor<T1> sumUb = sumQue_.AllocTensor<T1>();
     AscendC::Cast(sumUb, sumTempBuf, AscendC::RoundMode::CAST_RINT, hcParam_ * dOnceDealing_);
+    if (computeMean_) {
+      PipeBarrier<PIPE_V>();
+      AscendC::Cast(sumTempBuf, sumUb, AscendC::RoundMode::CAST_NONE, hcParam_ * dOnceDealing_);
+      PipeBarrier<PIPE_V>();
+    }
+    ComputeMean(sumTempBuf, batchIndex, dDealing, dOffset);
     sumQue_.EnQue<T1>(sumUb);
     DataCopyOut(batchIndex, dDealing, dOffset);
     residualQue_.FreeTensor(residualUb);

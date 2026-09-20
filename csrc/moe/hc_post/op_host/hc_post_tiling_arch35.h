@@ -81,6 +81,11 @@ ge::graphStatus HcPostTilingRegbase::GetShapeInfoRegbase()
         return ge::GRAPH_FAILED;
     }
 
+    auto attrs = context_->GetAttrs();
+    OPS_ERR_IF(attrs == nullptr, OPS_LOG_E(context_->GetNodeName(), "get attrs nullptr."), return ge::GRAPH_FAILED);
+    auto computeMean = attrs->GetBool(0);
+    tilingRegbaseData_.set_computeMean(computeMean != nullptr && *computeMean ? 1 : 0);
+
     return ge::GRAPH_SUCCESS;
 }
 

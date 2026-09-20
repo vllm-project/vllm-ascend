@@ -1489,8 +1489,18 @@ at::Tensor npu_hc_post_npu(
     check_hc_post_shape_and_dtype(x, residual, post, comb);
     // construct the output tensor
     at::Tensor out = construct_hc_post_output_tensor(residual);
-    EXEC_NPU_CMD(aclnnHcPost, x, residual, post, comb, out);
+    at::Tensor mean = at::empty_like(x);
+    EXEC_NPU_CMD(aclnnHcPost, x, residual, post, comb, false, out, mean);
     return out;
+}
+
+std::tuple<at::Tensor, at::Tensor> npu_hc_post_with_mean_npu(const at::Tensor& x, const at::Tensor& residual,
+                                                             const at::Tensor& post, const at::Tensor& comb) {
+  check_hc_post_shape_and_dtype(x, residual, post, comb);
+  at::Tensor out = construct_hc_post_output_tensor(residual);
+  at::Tensor mean = at::empty_like(x);
+  EXEC_NPU_CMD(aclnnHcPost, x, residual, post, comb, true, out, mean);
+  return std::make_tuple(out, mean);
 }
 
 constexpr int64_t HC_PRE_HC_LIMIT = 4;
@@ -3514,6 +3524,15 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         ") -> (Tensor out)"
         );
     ops.impl("npu_hc_post", torch::kPrivateUse1, &vllm_ascend::npu_hc_post_npu);
+
+    ops.def(
+        "npu_hc_post_with_mean("
+        "Tensor x, "
+        "Tensor residual, "
+        "Tensor post, "
+        "Tensor comb"
+        ") -> (Tensor out, Tensor mean)");
+    ops.impl("npu_hc_post_with_mean", torch::kPrivateUse1, &vllm_ascend::npu_hc_post_with_mean_npu);
 
     ops.def(
         "npu_hc_pre_v2("
