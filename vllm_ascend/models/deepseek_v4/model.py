@@ -124,7 +124,9 @@ class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
         self.block_size = DSV4_BLOCK_SIZES[cache_config.block_size][0][1]
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        cached_head_size = self.head_dim + 128 if self.dtype == torch.float8_e4m3fn else self.head_dim
+        # FP8 SWA cache row: quantMode=1 layout = 608 B/token (rope 128 +
+        # nope 448 + bf16 scale 14 + pad 18), i.e. head_dim + 96.
+        cached_head_size = self.head_dim + 96 if self.dtype == torch.float8_e4m3fn else self.head_dim
         return AscendSlidingWindowMLASpec(
             block_size=self.block_size,
             num_kv_heads=1,

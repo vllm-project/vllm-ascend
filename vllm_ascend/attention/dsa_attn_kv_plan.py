@@ -9,6 +9,7 @@ from typing import Any
 import torch
 import torch_npu
 
+from vllm_ascend.attention.mq_flash_mla_adapter import mq_attn_call, mq_meta_call
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
@@ -117,14 +118,21 @@ class DsaAttnKvPlan:
         if not self.uses_kv_compress_epilog:
             torch.ops._C_ascend.npu_scatter_nd_update_sk(cache, slot_mapping, x)
             return
-        torch.ops._C_ascend.kv_compress_epilog(
-            kv_compress_cache=cache.view(-1, 1, cache.shape[-1]),
+        # cann_ops_transformer.kv_compress_epilog writes the PA_BBND
+        # quantMode=1 (608 B/token) layout directly:
+        #   [rope(64 bf16=128B) | nope(448 fp8) | scale(7 bf16=14B) | pad(18B)]
+        # The op only accepts UINT8 caches, so reinterpret the FP8 cache view
+        # (same 8-bit storage; the in-place update lands in the original
+        # tensor). quant_mode="fp8_bf16" (int 0): group(64) FP8(e4m3) with
+        # bf16 scale, rope kept bf16.
+        torch.ops.cann_ops_transformer.kv_compress_epilog(
+            cache=cache.view(torch.uint8),
             x=x.view(-1, x.shape[-1]),
             slot_mapping=slot_mapping,
             quant_group_size=64,
-            quant_mode=2,
-            round_scale_flag=True,
-            layout=1,
+            quant_mode="fp8_bf16",
+            round_scale=True,
+            x_scale=1.0,
         )
 
 
@@ -166,10 +174,10 @@ def get_dsa_attn_kv_plan(vllm_config) -> DsaAttnKvPlan:
         layout_kv="PA_ND",
         compressor_slot_mapping_format=DSA_COMPRESSOR_SLOT_MAPPING_FLAT,
         requires_block_offset_slots=False,
-        sparse_attn_op=torch.ops._C_ascend.npu_kv_quant_sparse_attn_sharedkv,
-        sparse_attn_metadata_op=torch.ops._C_ascend.npu_kv_quant_sparse_attn_sharedkv_metadata,
-        sparse_attn_base_kwargs={"kv_quant_mode": 1, "tile_size": 64, "rope_head_dim": 64},
-        sparse_attn_metadata_kwargs={"kv_quant_mode": 1},
+        sparse_attn_op=mq_attn_call,
+        sparse_attn_metadata_op=mq_meta_call,
+        sparse_attn_base_kwargs={},
+        sparse_attn_metadata_kwargs={},
         include_metadata_device=False,
         applies_sparse_attn_runtime_kwargs=False,
     )
