@@ -13,6 +13,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
 )
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.utils.math_utils import cdiv, round_down
+from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (
     AttentionBackend,  # type: ignore
     AttentionCGSupport,
@@ -28,6 +29,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import (
     MLAPO_MAX_SUPPORTED_TOKENS,
     AscendCommonAttentionMetadata,
+    PreprocessType,
     ascend_chunked_prefill_workspace_size,
     enable_dcp,
     enabling_mlapo,
@@ -72,11 +74,11 @@ BUILD_METADATA_STEP_PREFILL = 0
 BUILD_METADATA_STEP_DECODE = 1
 
 
-def _npu_mla_prolog_v3_no_rope(**kwargs):
-    """Call the AscendC MLA prolog with optional RoPE inputs omitted."""
+def _npu_mla_prolog_v3_k3(**kwargs):
+    """Call the isolated K3 MLA prolog with optional RoPE inputs omitted."""
     import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401, PLC0415
 
-    return torch.ops._C_ascend.npu_mla_prolog_v3(**kwargs)
+    return torch.ops._C_ascend.npu_mla_prolog_v3_k3(**kwargs)
 
 
 class AscendMLABackend(AttentionBackend):
@@ -844,9 +846,11 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         self.layer_name = kwargs.get("layer_name")
         self.fa_quant_layer = enable_fa_quant(self.vllm_config, self.layer_name)
-        if self.fa_quant_layer:
-            self.dtype = torch.float8_e4m3fn if self.support_fp8_attention else torch.int8
-        else:
+        self.dtype = kv_cache_dtype_str_to_dtype(
+            self.vllm_config.cache_config.cache_dtype, self.vllm_config.model_config
+        )
+        # may be a quantization rollback layer.
+        if not self.fa_quant_layer:
             self.dtype = self.vllm_config.model_config.dtype
         # For models whose num_heads is not a power of 2 (e.g., GLM-4.7-Flash
         # with 20 heads), ascend attention ops require padding heads to the
@@ -1013,6 +1017,17 @@ class AscendMLAImpl(MLAAttentionImpl):
         ql_nope = torch.bmm(q_nope, self.W_UK_T)
         # Convert from (N, B, L) to (B, N, L)
         return ql_nope.transpose(0, 1), q_pe
+
+    def _fused_preprocess_type(self) -> PreprocessType | None:
+        """Defer MXFP8 projection NZ conversion to the enabled FP8 prolog."""
+        if not self.support_fp8_attention or not (self.enable_mlapo or self.fa_quant_layer):
+            return None
+        if self.fused_qkv_a_proj is None or self.q_proj is None:
+            return None
+        quant_method = getattr(self.fused_qkv_a_proj.quant_method, "quant_method", None)
+        if isinstance(quant_method, AscendW8A8MXFP8DynamicLinearMethod):
+            return PreprocessType.PROLOG_V3
+        return None
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         # NOTE: We currently do not support quant kv_b_proj.
@@ -1865,7 +1880,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             else:
                 cos = None
                 sin = None
-                prolog_op = _npu_mla_prolog_v3_no_rope
+                prolog_op = _npu_mla_prolog_v3_k3
             cache_index = cache_index.view(bsz, -1) if quantized_x.dim() == 3 else cache_index.view(-1)
             cache_mode = "PA_BSND"
             weight_quant_mode = self.mlapo_weight_quant_mode

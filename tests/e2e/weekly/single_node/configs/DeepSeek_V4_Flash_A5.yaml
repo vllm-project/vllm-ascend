@@ -32,6 +32,10 @@ _server_cmd: &server_cmd
   - "deepseek_v4"
   - "--api_server_count"
   - "1"
+  - "--kv-cache-dtype" 
+  - "fp8"
+  - "--attention_config.indexer_kv_dtype" 
+  - "fp8"
   - "--compilation-config"
   - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
 _benchmarks_per1: &benchmarks_acc

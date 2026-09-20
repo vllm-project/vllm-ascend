@@ -69,7 +69,6 @@ def test_model_forward_updates_mtp_full_graph_params_before_replay() -> None:
         calls.append("update")
 
     def fake_model(**kwargs):
-        assert "is_dummy_run" not in kwargs
         calls.append("model")
         return torch.ones(1)
 

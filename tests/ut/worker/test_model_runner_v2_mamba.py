@@ -18,6 +18,8 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import (
     _allocate_kv_cache,
@@ -30,6 +32,13 @@ from vllm_ascend.worker.v2.model_states import init_asecnd_model_state
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import (
     AscendMambaHybridModelState,
 )
+
+
+def _mock_vllm_config():
+    # Config for get_kv_cache_spec: attn_utils reads attention_config.indexer_kv_dtype.
+    config = MagicMock()
+    config.attention_config.indexer_kv_dtype = "int8"
+    return config
 
 
 def _make_kv_cache_tensor(
@@ -616,7 +625,7 @@ def test_get_kv_cache_spec_keeps_mamba_layers(mock_get_layers):
     mamba_layer.get_kv_cache_spec.return_value = spec
     mock_get_layers.return_value = {"linear_attn": mamba_layer}
 
-    assert get_kv_cache_spec(MagicMock()) == {"linear_attn": spec}
+    assert get_kv_cache_spec(_mock_vllm_config()) == {"linear_attn": spec}
 
 
 @patch("vllm_ascend.worker.v2.attn_utils.get_layers_from_vllm_config")
@@ -650,7 +659,7 @@ def test_mamba_spec_follows_aligned_attention_spec(
         "full_attn": FakeAttention(),
     }
 
-    specs = get_kv_cache_spec(MagicMock())
+    specs = get_kv_cache_spec(_mock_vllm_config())
 
     assert list(specs) == ["full_attn", "linear_attn"]
     assert specs["full_attn"].page_size_bytes == 20
@@ -706,7 +715,7 @@ def test_get_kv_cache_spec_aligns_nondivisible_attention_and_mamba_pages(
         "large_attn": FakeAttention(large_attention_spec),
     }
 
-    specs = get_kv_cache_spec(MagicMock())
+    specs = get_kv_cache_spec(_mock_vllm_config())
 
     assert {spec.page_size_bytes for spec in specs.values()} == {80}
     # vLLM #51718 removed AttentionSpec.indexes_kv_by_block_stride on main.
@@ -758,7 +767,10 @@ def test_init_model_state_uses_override_then_default():
     assert init_asecnd_model_state(vllm_config, model, encoder_cache, device) is custom_cls.return_value
 
     with (
-        patch("vllm_ascend.worker.v2.model_states.is_310p", return_value=False),
+        patch(
+            "vllm_ascend.worker.v2.model_states.get_current_hardware_profile",
+            return_value=get_hardware_profile(AscendDeviceType.A2),
+        ),
         patch("vllm_ascend.worker.v2.model_states.default.AscendModelState") as default_cls,
     ):
         state = init_asecnd_model_state(

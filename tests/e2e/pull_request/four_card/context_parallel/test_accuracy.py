@@ -151,13 +151,13 @@ FULL_FEATURE_MODEL_CASES = [
             "gpu_memory_utilization": 0.4,
             "cp_kv_cache_interleave_size": 1,
             "block_size": 128,
+            "kv_cache_dtype": "int8",
+            "attention_config": {"indexer_kv_dtype": "int8"},
             "quantization": "ascend",
             "long_prefill_token_threshold": 128,
             "compilation_config": FULL_DECODE_GRAPH,
             "additional_config": {
                 "enable_dsa_cp": True,
-                "enable_sparse_sfa_c8": True,
-                "enable_sparse_li_c8": True,
             },
             "speculative_config": {
                 "method": "mtp",
@@ -182,6 +182,7 @@ FULL_FEATURE_MODEL_CASES = [
             "gpu_memory_utilization": 0.9,
             "quantization": "ascend",
             "tokenizer_mode": "deepseek_v4",
+            "attention_config": {"indexer_kv_dtype": "int8"},
             "block_size": 128,
             "compilation_config": {
                 "cudagraph_mode": "FULL_DECODE_ONLY",
@@ -237,6 +238,7 @@ def test_deepseek_v4_dsa_cp_prefill_decode_accuracy() -> None:
             tokenizer_mode="deepseek_v4",
             block_size=128,
             enforce_eager=True,
+            attention_config={"indexer_kv_dtype": "int8"},
             additional_config={"enable_dsa_cp": enable_dsa_cp},
         ) as runner:
             for prompt_length in prompt_lengths:
@@ -299,6 +301,7 @@ def test_models_dcp_full_graph_concurrent_requests() -> None:
         "quantization": "ascend",
         "tokenizer_mode": "deepseek_v4",
         "block_size": 128,
+        "attention_config": {"indexer_kv_dtype": "int8"},
         "compilation_config": {
             "cudagraph_mode": "FULL_DECODE_ONLY",
             "cudagraph_capture_sizes": CONCURRENT_CAPTURE_SIZES,

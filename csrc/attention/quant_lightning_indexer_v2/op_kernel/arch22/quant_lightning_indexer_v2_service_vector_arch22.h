@@ -165,8 +165,10 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::GetKeyScale(const QLIV2Common::RunIn
     if constexpr (PAGE_ATTENTION) {
         // A11: k_scale 0 轴非连续 — 块基址 = 表值 x keyDequantScaleStride0 (真实 stride);
         // 0 时兜底原紧凑公式 (kCacheBlockSize_), 现网行为不变 (R8)
-        int32_t kScaleBlkStride = constInfo_.keyDequantScaleStride0 != 0 ?
-                                      static_cast<int32_t>(constInfo_.keyDequantScaleStride0) : kCacheBlockSize_;
+        // Paged hybrid caches can span more than 2^31 scale elements. Promote
+        // before multiplication so high physical block IDs do not wrap.
+        int64_t kScaleBlkStride = constInfo_.keyDequantScaleStride0 != 0 ?
+                                      static_cast<int64_t>(constInfo_.keyDequantScaleStride0) : kCacheBlockSize_;
         int32_t startBlockTableIdx = startS2 / kCacheBlockSize_;
         int32_t startBlockTableOffset = startS2 % kCacheBlockSize_;
         int32_t blockTableBatchOffset = batchId * maxBlockNumPerBatch_;

@@ -27,6 +27,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import ge
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import (
     AscendStoreCoordinator,
     ExternalCachedBlockPool,
+    _reachable_block_mask,
 )
 # isort: on
 
@@ -228,7 +229,34 @@ class TestAscendStoreCoordinator(unittest.TestCase):
             masks = coord.lookup_mask(512)
 
         self.assertEqual(masks, ([False, False, False, True],))
-        self.assertIsNone(reachable.call_args.kwargs["retention_interval"])
+        self.assertEqual(reachable.call_args.kwargs["retention_interval"], 256)
+
+    def test_reachable_mask_preserves_optional_kwargs_for_flexible_signature(self):
+        class FlexibleManager:
+            @staticmethod
+            def reachable_block_mask(
+                start_block,
+                end_block,
+                alignment_tokens,
+                kv_cache_spec,
+                use_eagle,
+                retention_interval=None,
+                **kwargs,
+            ):
+                return [retention_interval, kwargs["num_prompt_tokens"]]
+
+        result = _reachable_block_mask(
+            FlexibleManager,
+            start_block=0,
+            end_block=8,
+            alignment_tokens=128,
+            kv_cache_spec=None,
+            use_eagle=False,
+            retention_interval=256,
+            num_prompt_tokens=1024,
+        )
+
+        self.assertEqual(result, [256, 1024])
 
     def test_store_mask_propagates_eagle_to_same_spec_siblings(self):
         calls = []

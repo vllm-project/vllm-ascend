@@ -21,6 +21,7 @@ from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 
 def _make_runner(need_timing: bool = True):
     runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.pcp_manager = None
     runner.ascend_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(need_timing=need_timing))
     )
@@ -521,7 +522,6 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
     runner.speculator = SimpleNamespace()
     runner.model_config = SimpleNamespace(enable_return_routed_experts=True)
     runner.init_routed_experts_capturer = MagicMock()
-    kv_cache_config = KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
     original = vllm_model_runner.ModelCudaGraphManager
     seen = {}
     kv_cache_config = KVCacheConfig(

@@ -57,6 +57,7 @@ def make_worker(
     pcp_size=1,
     pcp_rank=0,
     dcp_size=1,
+    kv_cache_config=None,
 ):
     module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker"
     start_patch(test, f"{module}.get_tensor_model_parallel_rank", return_value=tp_rank)
@@ -90,6 +91,8 @@ def make_worker(
         "backend": "mooncake",
         **(extra_config or {}),
     }
+    if kv_cache_config is not None:
+        config.scheduler_config.disable_hybrid_kv_cache_manager = False
     config.cache_config.block_size = 16
     config.kv_events_config = None
     if enable_kv_events:
@@ -97,7 +100,7 @@ def make_worker(
 
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
-    return KVPoolWorker(config, use_layerwise=use_layerwise)
+    return KVPoolWorker(config, use_layerwise=use_layerwise, kv_cache_config=kv_cache_config)
 
 
 class TestPCPPoolWorker(unittest.TestCase):
@@ -899,9 +902,14 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         kwargs["invalid_block_ids"].add(7)
         self.assertEqual(worker.get_block_ids_with_load_errors(), {7})
 
-    def test_wait_for_save_waits_for_save(self):
+    def test_wait_for_save_submits_batch_without_joining_queue(self):
         worker = self._make_worker()
-        worker.kv_send_thread = MagicMock()
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import KVCacheStoreSendingThread
+
+        worker.kv_send_thread = MagicMock(spec=KVCacheStoreSendingThread)
+        worker.kv_send_thread.request_queue = MagicMock()
+        save_batch = MagicMock()
+        worker.kv_send_thread.add_save_batch.return_value = save_batch
 
         req = ReqMeta(
             req_id="r1",
@@ -912,10 +920,12 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         )
         meta = AscendConnectorMetadata(set(), set())
         meta.add_request(req)
-        worker.wait_for_save(meta)
-        worker.kv_send_thread.add_stored_request.assert_called_with("r1")
-        worker.kv_send_thread.add_request.assert_called_once()
-        worker.kv_send_thread.request_queue.join.assert_called_once()
+        module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker"
+        with patch(f"{module}.torch.npu", create=True):
+            worker.wait_for_save(meta)
+        worker.kv_send_thread.add_save_batch.assert_called_once_with([req])
+        worker.kv_send_thread.request_queue.join.assert_not_called()
+        self.assertIs(worker._previous_save_batch, save_batch)
 
     def test_wait_for_save_skip_non_save(self):
         worker = self._make_worker()
