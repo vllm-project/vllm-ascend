@@ -10,7 +10,8 @@ import torch
 from torch.multiprocessing.reductions import reduce_tensor
 
 # Default values for packed tensor configuration.
-# These are imported by HCCLWeightTransferUpdateInfo and the HCCL trainer engine.
+# These are imported by HCCLWeightTransferInitInfo (which carries them as wire
+# params) and by the HCCL trainer engine.
 DEFAULT_PACKED_BUFFER_SIZE_BYTES = 1024 * 1024 * 1024  # 1GB
 DEFAULT_PACKED_NUM_BUFFERS = 2
 
@@ -96,6 +97,7 @@ def packed_broadcast_consumer(
     post_unpack_func: Callable[[list[tuple[str, torch.Tensor]]], None],
     buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS,
+    device: torch.device | str = "npu",
 ) -> None:
     """Consume packed tensors and unpack them into a list of tensors.
 
@@ -109,6 +111,10 @@ def packed_broadcast_consumer(
                           Both producer and consumer must use the same value.
         num_buffers: Number of buffers for double/triple buffering.
                     Both producer and consumer must use the same value.
+        device: Device for the receive buffers and their streams. The consumer
+                runs on the worker, whose device need not be the ambient current
+                one, so it is passed explicitly rather than defaulting to
+                whatever device happens to be current.
     """
 
     def unpack_tensor(
@@ -128,13 +134,13 @@ def packed_broadcast_consumer(
 
     target_packed_tensor_size = buffer_size_bytes
 
-    streams = [torch.npu.Stream() for _ in range(num_buffers)]
-    default_stream = torch.npu.current_stream()
+    streams = [torch.npu.Stream(device=device) for _ in range(num_buffers)]
+    default_stream = torch.npu.current_stream(device=device)
     buffer_idx = 0
 
     packing_tensor_meta_data: list[list[tuple[str, list[int], torch.dtype, int]]] = [[] for _ in range(num_buffers)]
     packing_tensor_sizes: list[int] = [0 for _ in range(num_buffers)]
-    packed_tensors: list[torch.Tensor] = [torch.empty(0, dtype=torch.uint8, device="npu") for _ in range(num_buffers)]
+    packed_tensors: list[torch.Tensor] = [torch.empty(0, dtype=torch.uint8, device=device) for _ in range(num_buffers)]
 
     done = False
     while not done:
@@ -160,7 +166,7 @@ def packed_broadcast_consumer(
                 packed_tensors[buffer_idx] = torch.empty(
                     packing_tensor_sizes[buffer_idx],
                     dtype=torch.uint8,
-                    device="npu",
+                    device=device,
                 )
 
         if len(packing_tensor_meta_data[buffer_idx]) == 0:
