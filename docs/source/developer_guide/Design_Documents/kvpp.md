@@ -84,3 +84,5 @@ For layer L, attention queues H2D through L+2, and the KVPP hook queues the broa
 All ranks enqueue layers in global order, including empty non-owner transfer tasks. Empty tasks still fence previous compute and D2H users of a peer buffer. Only owner tasks copy host KV into HBM. Full-object Memcache publication retains its existing single writer, and read leases are released at the end of the forward rather than at the last owned H2D layer.
 
 The physical budget accounts for three owner and two peer buffers directly; the generic layerwise logical-memory multiplier is skipped. The generic layerwise tensor-merging pass is also skipped because the KVPP allocator consumes the complete logical cache specification.
+
+For replicated Memcache offload caches, a TP CPU barrier at the next forward boundary prevents a non-writer rank from acquiring a read lease before the preceding writer has finished publishing the full object. Layerwise overlap within a forward is unchanged.

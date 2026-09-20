@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import KVCacheStoreLayerRecvingThread
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
 
@@ -22,7 +23,7 @@ def make_worker():
     worker.layer_load_tasks = [[object()], [object()], [], [], [], []]
     worker.layer_save_tasks = [[] for _ in range(6)]
     worker.layer_load_finished_events = [threading.Event() for _ in range(6)]
-    worker.kv_recv_thread = MagicMock()
+    worker.kv_recv_thread = MagicMock(spec=KVCacheStoreLayerRecvingThread)
     return worker
 
 
@@ -139,3 +140,34 @@ def test_start_load_resets_previous_forward_events_before_priming():
     worker.start_load_kv(SimpleNamespace(requests=[]))
     assert not any(event.is_set() for event in worker.layer_load_finished_events)
     assert worker.kv_recv_thread.final_layer_id == -1
+
+
+@pytest.mark.parametrize("kvpp", [False, True])
+def test_next_forward_waits_for_single_writer_publication(monkeypatch, kvpp):
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import pool_worker
+
+    worker = make_worker()
+    worker.kvpp_offload = kvpp
+    worker.layerwise_offload = True
+    worker.backend_name = "memcache"
+    worker.put_step = 2
+    reached_barrier = threading.Event()
+    published = threading.Event()
+    loaded = threading.Event()
+
+    def barrier():
+        reached_barrier.set()
+        assert published.wait(timeout=5)
+
+    monkeypatch.setattr(pool_worker, "get_tp_group", lambda: SimpleNamespace(barrier=barrier))
+    worker.process_layer_data = lambda requests: loaded.set()
+    thread = threading.Thread(target=worker.start_load_kv, args=(SimpleNamespace(requests=[object()]),))
+    thread.start()
+    try:
+        assert reached_barrier.wait(timeout=5)
+        assert not loaded.is_set()
+    finally:
+        published.set()
+        thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert loaded.is_set()

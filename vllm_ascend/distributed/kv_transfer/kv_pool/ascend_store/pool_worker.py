@@ -15,6 +15,7 @@ from vllm.distributed import (
     get_pcp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+    get_tp_group,
 )
 from vllm.distributed.kv_events import BlockStored
 from vllm.logger import logger
@@ -155,15 +156,15 @@ class KVPoolWorker:
                 self._extract_physical_layer_index(name): owner for name, owner in plan.layer_owner_ranks.items()
             }
             self.kvpp_rank = self.tp_rank
-            self.prefetch_layer_map = {}
-            last_use = {}
+            self.prefetch_layer_map.clear()
+            last_use: dict[tuple[str, int], int] = {}
             for name, slot in plan.buffer_slots().items():
                 layer = self._extract_physical_layer_index(name)
                 if slot in last_use:
                     self.prefetch_layer_map[layer] = last_use[slot]
                 last_use[slot] = layer
             self.layerwise_offload = True
-            self.independent_layers = []
+            self.independent_layers.clear()
         self._kv_stats = AscendStoreKVConnectorStats()
         self._kv_stats_lock = threading.Lock()
 
@@ -1051,6 +1052,16 @@ class KVPoolWorker:
         self._start_kv_transfer_threads()
 
     def start_load_kv(self, metadata: AscendConnectorMetadata):
+        if (
+            self.use_layerwise
+            and getattr(self, "layerwise_offload", False)
+            and self.backend_name == "memcache"
+            and self.put_step > 1
+        ):
+            # The output rank can enter the next forward while the single
+            # writer is still publishing the preceding forward's final D2H.
+            # Its save_kv_layer waits for publication before reaching here.
+            get_tp_group().barrier()
         self.current_layer = 0
         self.layerwise_retrievers: list[Any] = []
         if self.use_layerwise:
@@ -1071,6 +1082,7 @@ class KVPoolWorker:
         if self.use_layerwise:
             self.process_layer_data(metadata.requests)
             if getattr(self, "kvpp_offload", False):
+                assert isinstance(self.kv_recv_thread, KVCacheStoreLayerRecvingThread)
                 self.kv_recv_thread.final_layer_id = -1
                 self._submit_kvpp_layer_loads(1, gate=None)
             return
