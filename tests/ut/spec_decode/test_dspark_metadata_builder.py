@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+import torch
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -17,6 +18,7 @@ def make_speculator(architecture):
     spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
     spec.attn_architecture = architecture
     spec.num_query_per_req = 5
+    spec.input_buffers = SimpleNamespace(positions=torch.arange(32))
     return spec
 
 
@@ -40,7 +42,7 @@ def test_direct_mla_builder_updates_speculative_metadata(monkeypatch, num_reqs_p
         num_reqs=1, num_reqs_padded=num_reqs_padded, num_tokens_padded=num_reqs_padded * 5, step=5
     )
     assert result is metadata
-    assert result["draft"].attn_state == AscendAttentionState.ChunkedPrefill
+    assert result["draft"].attn_state == AscendAttentionState.PrefillCacheHit
     assert result["draft"].decode.actual_seq_lengths_q == [5 * (i + 1) for i in range(num_reqs_padded)]
     assert not hasattr(result["draft"], "actual_seq_lengths_q")
 
@@ -63,7 +65,7 @@ def test_direct_non_dense_mla_builder_preserves_upstream_metadata(monkeypatch, m
     assert getattr(metadata, "attn_state", None) is initial_attn_state
 
 
-@pytest.mark.parametrize("architecture", [None, "MLA"])
+@pytest.mark.parametrize("architecture", [None, "GQA", "MLA"])
 def test_direct_builder_preserves_empty_metadata(monkeypatch, architecture):
     spec = make_speculator(architecture)
     metadata: dict[str, SimpleNamespace] = {}
@@ -71,11 +73,13 @@ def test_direct_builder_preserves_empty_metadata(monkeypatch, architecture):
     assert spec._build_draft_attn_metadata(num_reqs=0, num_reqs_padded=1, num_tokens_padded=5) is metadata
 
 
+@pytest.mark.parametrize("architecture", ["GQA", "MLA"])
 @pytest.mark.parametrize("local_reqs,padded_reqs", [(1, 2), (2, 2), (1, 4)])
-def test_mla_eager_dp_metadata_covers_padded_tokens(monkeypatch, local_reqs, padded_reqs):
-    spec = make_speculator("MLA")
+def test_eager_dp_metadata_covers_padded_tokens(monkeypatch, architecture, local_reqs, padded_reqs):
+    spec = make_speculator(architecture)
     spec.num_query_per_req = 3
-    metadata = {"draft": SimpleNamespace(decode=SimpleNamespace(actual_seq_lengths_q=[3] * local_reqs))}
+    query_metadata = SimpleNamespace(actual_seq_lengths_q=[3] * local_reqs)
+    metadata = {"draft": SimpleNamespace(decode=query_metadata) if architecture == "MLA" else query_metadata}
     builder = MagicMock(return_value=metadata)
     monkeypatch.setattr(DSparkSpeculator, "_build_draft_attn_metadata", builder)
 
@@ -86,4 +90,5 @@ def test_mla_eager_dp_metadata_covers_padded_tokens(monkeypatch, local_reqs, pad
     builder.assert_called_once_with(
         num_reqs=local_reqs, num_reqs_padded=padded_reqs, num_tokens_padded=padded_reqs * 3, step=3
     )
-    assert result["draft"].decode.actual_seq_lengths_q == [3 * (i + 1) for i in range(padded_reqs)]
+    assert result is metadata
+    assert query_metadata.actual_seq_lengths_q == [3 * (i + 1) for i in range(padded_reqs)]

@@ -258,8 +258,8 @@ def test_replay_metadata_preserves_architecture_behavior(monkeypatch, architectu
     captured: dict[str, Any] = {}
 
     @contextmanager
-    def factory(positions, pad, is_prefilling):
-        captured.update(pad=pad, is_prefilling=is_prefilling)
+    def factory(positions, pad, is_prefilling, *, attn_state=None):
+        captured.update(pad=pad, is_prefilling=is_prefilling, attn_state=attn_state)
         yield
 
     monkeypatch.setattr(shared, "build_draft_attn_metadata_factory", factory)
@@ -267,9 +267,9 @@ def test_replay_metadata_preserves_architecture_behavior(monkeypatch, architectu
     assert captured["pad"] == 10
     assert result == [metadata]
     assert query_metadata.actual_seq_lengths_q == [5, 10]
-    if architecture == "MLA":
+    if architecture in ("GQA", "MLA"):
         assert captured["is_prefilling"].tolist() == [False, False]
-        assert result[0]["draft"].attn_state == AscendAttentionState.ChunkedPrefill
+        assert captured["attn_state"] == AscendAttentionState.ChunkedPrefill
     else:
         assert captured["is_prefilling"].tolist() == [True, True]
         assert np.shares_memory(captured["is_prefilling"].numpy(), spec.input_batch.is_prefilling_np)
@@ -314,3 +314,49 @@ def test_default_metadata_factory_preserves_caller_state(monkeypatch, fail):
     assert builder.call_args.kwargs["is_prefilling"] is flags
     assert builder.call_args.kwargs["attn_state"] == AscendAttentionState.DecodeOnly
     torch.testing.assert_close(builder.call_args.kwargs["positions"], torch.arange(6))
+
+
+@pytest.mark.parametrize("architecture", ["GQA", "MLA"])
+@pytest.mark.parametrize("fail", [False, True])
+def test_query_builder_overrides_and_restores_target_context(monkeypatch, architecture, fail):
+    spec = make_speculator()
+    spec.attn_architecture = architecture
+    module = attn_utils._BUILD_ATTN_METADATA_MODULE
+    original = module.build_attn_metadata
+    flags = torch.tensor([True, True])
+    captured = []
+
+    def build(**kwargs):
+        captured.append(kwargs)
+        if fail and kwargs["attn_state"] == AscendAttentionState.ChunkedPrefill:
+            raise RuntimeError("query failed")
+        query = SimpleNamespace(actual_seq_lengths_q=[5, 5])
+        metadata = SimpleNamespace(decode=query) if architecture == "MLA" else query
+        metadata.attn_state = kwargs["attn_state"]
+        return {"draft": metadata}
+
+    def parent(self, **kwargs):
+        assert kwargs["num_reqs_padded"] == 2
+        return module.build_attn_metadata(attn_state=None)
+
+    monkeypatch.setattr(attn_utils, "build_attn_metadata", build)
+    monkeypatch.setattr(DSparkSpeculator, "_build_draft_attn_metadata", parent)
+    with (
+        attn_utils.build_attn_metadata_wrapper(),
+        attn_utils.build_draft_attn_metadata_factory(torch.arange(20), 20, flags),
+    ):
+        outer = module.build_attn_metadata
+        with pytest.raises(RuntimeError, match="query failed") if fail else nullcontext():
+            result = spec._build_draft_attn_metadata(num_reqs=1, num_reqs_padded=1, num_tokens_padded=10, step=5)
+            metadata = result["draft"]
+            query = metadata.decode if architecture == "MLA" else metadata
+            assert query.actual_seq_lengths_q == [5, 10]
+            assert metadata.attn_state == AscendAttentionState.ChunkedPrefill
+        assert module.build_attn_metadata is outer
+        module.build_attn_metadata(attn_state=AscendAttentionState.DecodeOnly)
+    assert module.build_attn_metadata is original
+    assert captured[0]["is_prefilling"].tolist() == [False, False]
+    assert captured[0]["attn_state"] == AscendAttentionState.ChunkedPrefill
+    torch.testing.assert_close(captured[0]["positions"], torch.arange(10))
+    assert captured[1]["is_prefilling"] is flags
+    assert captured[1]["attn_state"] == AscendAttentionState.DecodeOnly

@@ -114,45 +114,49 @@ class AscendDSparkSpeculator(DSparkSpeculator):
                 self.attn_architecture = None
 
     def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
-        num_tokens_padded = num_reqs_padded * self.num_query_per_req
         assert self.input_batch is not None
-        # Dense MLA queries, including padded rows, must not inherit target prefill flags.
-        is_prefilling = (
-            torch.zeros(num_reqs_padded, dtype=torch.bool)
-            if self.attn_architecture == "MLA"
-            else torch.from_numpy(self.input_batch.is_prefilling_np)
+        num_tokens_padded = num_reqs_padded * self.num_query_per_req
+        kwargs = dict(
+            num_reqs=self.input_batch.num_reqs,
+            num_reqs_padded=num_reqs_padded,
+            num_tokens_padded=num_tokens_padded,
+            seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+            step=self.num_query_per_req,
+            causal=self._group_causal,
         )
-        # The draft attention metadata is built through the generic
-        # (Ascend) build_attn_metadata path; the factory forwards the draft
-        # query positions that the DSA metadata builder needs for RoPE.
+        if self.attn_architecture in ("GQA", "MLA"):
+            return [self._build_draft_attn_metadata(**kwargs)]
+
+        with (
+            build_attn_metadata_wrapper(),
+            build_draft_attn_metadata_factory(
+                self.input_buffers.positions,
+                num_tokens_padded,
+                torch.from_numpy(self.input_batch.is_prefilling_np),
+            ),
+        ):
+            attn_metadata = self._build_draft_attn_metadata(**kwargs)
+        return [self._update_draft_attn_metadata(attn_metadata, num_reqs_padded)]
+
+    def _build_draft_attn_metadata(self, *, num_reqs_padded, **kwargs):
+        if self.attn_architecture not in ("GQA", "MLA"):
+            return super()._build_draft_attn_metadata(num_reqs_padded=num_reqs_padded, **kwargs)
+
+        num_tokens_padded = kwargs["num_tokens_padded"]
+        num_reqs_padded, remainder = divmod(num_tokens_padded, self.num_query_per_req)
+        assert remainder == 0, "Draft tokens must contain whole query groups"
+        is_prefilling = torch.zeros(num_reqs_padded, dtype=torch.bool)
         with (
             build_attn_metadata_wrapper(),
             build_draft_attn_metadata_factory(
                 self.input_buffers.positions,
                 num_tokens_padded,
                 is_prefilling,
+                attn_state=AscendAttentionState.ChunkedPrefill,
             ),
         ):
-            attn_metadata = self._build_draft_attn_metadata(
-                num_reqs=self.input_batch.num_reqs,
-                num_reqs_padded=num_reqs_padded,
-                num_tokens_padded=num_tokens_padded,
-                seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
-                step=self.num_query_per_req,
-                causal=self._group_causal,
-                update_query_lengths=True,
-            )
-        return [attn_metadata]
-
-    def _build_draft_attn_metadata(self, *, num_reqs_padded, update_query_lengths=False, **kwargs):
-        # Derive the MLA metadata request count from padded query tokens.
-        if self.attn_architecture == "MLA":
-            num_reqs_padded, remainder = divmod(kwargs["num_tokens_padded"], self.num_query_per_req)
-            assert remainder == 0, "MLA draft tokens must contain whole query groups"
-        metadata = super()._build_draft_attn_metadata(num_reqs_padded=num_reqs_padded, **kwargs)
-        if self.attn_architecture == "MLA" or update_query_lengths:
-            return self._update_draft_attn_metadata(metadata, num_reqs_padded)
-        return metadata
+            attn_metadata = super()._build_draft_attn_metadata(num_reqs_padded=num_reqs_padded, **kwargs)
+        return self._update_draft_attn_metadata(attn_metadata, num_reqs_padded)
 
     def _update_draft_attn_metadata(self, attn_metadata, num_reqs_padded):
         """Rebuild ``actual_seq_lengths_q`` from the padded request count,
@@ -172,8 +176,6 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         query_lens_list = [(i + 1) * self.num_query_per_req for i in range(num_reqs_padded)]
         for metadata in attn_metadata.values():
             decode_metadata = metadata.decode if self.attn_architecture == "MLA" else metadata
-            if self.attn_architecture == "MLA":
-                metadata.attn_state = AscendAttentionState.ChunkedPrefill
             decode_metadata.actual_seq_lengths_q = query_lens_list
         return attn_metadata
 
