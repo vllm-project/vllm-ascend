@@ -147,7 +147,8 @@ Add the following options to the Decode launch command:
     "sparse_kv_offload_config": {
         "enabled": true,
         "topk_buffer_size": 4096,
-        "dram_size_per_dp_GB": 128
+        "dram_size_per_dp_GB": 128,
+        "lru_max_threads": 16
     }
 }' \
 --kv-transfer-config '{
@@ -166,6 +167,12 @@ Add the following options to the Decode launch command:
 | `topk_buffer_size` | Device hot-buffer size. It must be at least `index_topk` and divisible by `block_size`. Twice `index_topk` is a practical starting point. |
 | `dram_size_per_dp_GB` | Host memory reserved per DP rank. It must hold the full KV cache. TP ranks share this pool. |
 | `keep_device_kv_cache` | Debug-only option that retains the full device KV cache. Keep it `false` in production. |
+| `lru_max_threads` | Per-Decode-Worker CPU LRU planner thread budget. Positive integer; default `8`. |
+
+`lru_max_threads` caps the CPU LRU planner per Decode Worker. The effective
+team is also limited by the current work rows and the process CPU affinity.
+A larger value allocates more per-thread CPU workspaces; give the Worker an
+adequate NUMA-local CPU affinity range before increasing it.
 
 ## 4. Use Them Together
 
