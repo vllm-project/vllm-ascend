@@ -5,11 +5,12 @@
 
 import hashlib
 import json
-import re
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+import regex as re
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM
 from vllm.distributed.weight_transfer.base import ParamMeta, WeightSource
@@ -29,7 +30,21 @@ class WeightUpdateModelCase:
     extra_server_args: tuple[str, ...] = ()
 
     def server_args(self) -> list[str]:
-        return ["--hf-overrides", json.dumps(self.hf_overrides), *self.extra_server_args]
+        # Run the worker out-of-process. With a single-process executor the
+        # worker shares the engine core's ``VllmConfig``, and ``EngineCoreProc``
+        # rewrites ``cache_config.block_size`` to the minimum block size across
+        # the KV cache groups before the worker recomputes the KV cache specs.
+        # DeepSeek-V4's block-size tables are keyed by the user-facing 32/64/128,
+        # so the rewritten value (8/4/2) raises ``KeyError`` on every lookup. An
+        # out-of-process worker gets its own config copy, taken before that
+        # rewrite, and the single-worker topology of these cases is unchanged.
+        return [
+            "--hf-overrides",
+            json.dumps(self.hf_overrides),
+            "--distributed-executor-backend",
+            "mp",
+            *self.extra_server_args,
+        ]
 
 
 # Qwen and GLM reduce only layer count. DeepSeek keeps the first four
@@ -255,16 +270,34 @@ class FixedRandomWeightSource(WeightSource):
             (
                 self._apply_name_map(expanded_name, case),
                 resize_expert_shape(expanded_name, expanded_shape, case.expert_intermediate_size),
+                torch.bfloat16,
             )
             for name, parameter in meta_model.named_parameters()
             for expanded_name, expanded_shape in expand_fused_expert_params(
                 self._checkpoint_name(name, case), tuple(parameter.shape)
             )
         ]
+        # Learned integer tables must travel with the payload too. Some
+        # architectures expose them as HF *buffers* while the served model keeps
+        # them as parameters: DeepSeek-V4's hash router keeps ``tid2eid`` as a
+        # (vocab, topk) token -> expert table, and the real checkpoint ships it
+        # (``model.layers.{0,1,2}.mlp.gate.tid2eid`` in the safetensors index).
+        # Omitting it leaves the table to be re-materialised with ``torch.empty``
+        # during a live update, and the router then indexes experts out of range.
+        parameters += [
+            (
+                self._apply_name_map(self._checkpoint_name(name, case), case),
+                tuple(buffer.shape),
+                buffer.dtype,
+            )
+            for name, buffer in meta_model.named_buffers()
+            if not buffer.dtype.is_floating_point and not buffer.dtype.is_complex
+        ]
+        self._num_experts = int(getattr(meta_config, "n_routed_experts", 0) or 0)
         del meta_model
 
         assert parameters, f"{case.id}: reduced meta model contains no parameters"
-        names = [name for name, _ in parameters]
+        names = [name for name, _, _ in parameters]
         assert len(set(names)) == len(names), f"{case.id}: generated checkpoint parameter names are not unique"
         self._parameters = parameters
         self._device = device
@@ -288,22 +321,49 @@ class FixedRandomWeightSource(WeightSource):
         digest = hashlib.sha256(f"{FIXED_WEIGHT_SEED}:{name}".encode()).digest()
         return int.from_bytes(digest[:8], "little") % (2**63 - 1)
 
-    def _make_tensor(self, name: str, shape: tuple[int, ...]) -> torch.Tensor:
+    def _make_tensor(
+        self, name: str, shape: tuple[int, ...], dtype: torch.dtype = torch.bfloat16
+    ) -> torch.Tensor:
         seed = self._parameter_seed(name)
         torch.manual_seed(seed)
         torch.npu.manual_seed(seed)
-        tensor = torch.empty(shape, dtype=torch.bfloat16, device=self._device)
+        if not dtype.is_floating_point:
+            # Token -> expert tables (DeepSeek-V4's hash router). Values must
+            # stay inside [0, n_routed_experts) *and* be unique within a row:
+            # the MC2 dispatch/combine kernels assume a token never routes to
+            # the same expert twice, which is also why the served model
+            # initialises this table duplicate-free (#16485). Sampling top-k
+            # over per-expert scores guarantees both invariants while still
+            # differing from the model's own table.
+            assert self._num_experts > 0, f"{name}: integer table needs n_routed_experts"
+            assert len(shape) == 2, f"{name}: expected a (tokens, top_k) integer table, got {shape}"
+            scores = torch.rand(shape[0], self._num_experts, device=self._device)
+            return scores.topk(shape[1], dim=1).indices.to(dtype)
+        tensor = torch.empty(shape, dtype=dtype, device=self._device)
         if name.endswith("norm.weight"):
             return tensor.uniform_(0.9, 1.1)
         return tensor.uniform_(-0.02, 0.02)
 
     def metadata(self) -> list[ParamMeta]:
-        return [ParamMeta(name, torch.bfloat16, shape) for name, shape in self._parameters]
+        return [ParamMeta(name, dtype, shape) for name, shape, dtype in self._parameters]
 
     def __iter__(self):
         with torch.no_grad():
-            for name, shape in self._parameters:
-                yield name, self._make_tensor(name, shape)
+            for name, shape, dtype in self._parameters:
+                yield name, self._make_tensor(name, shape, dtype)
+
+
+def packed_buffer_size_for(source: FixedRandomWeightSource) -> int:
+    """Size a packed transfer buffer so every single tensor fits.
+
+    Both engines default to 1 GiB, which is smaller than the largest tensor of
+    some reduced cases (GLM-5.1's embedding is ~1.9 GB), and the producer then
+    raises ``ValueError: Tensor ... exceeds buffer_size_bytes``. Keep the 1 GiB
+    floor and add 128 MiB of headroom above the largest tensor.
+    """
+    metadata = source.metadata()
+    max_tensor_bytes = max(math.prod(meta.shape) * meta.dtype.itemsize for meta in metadata)
+    return max(max_tensor_bytes + 128 * 2**20, 2**30)
 
 
 PROMPTS = [
