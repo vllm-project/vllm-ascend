@@ -75,6 +75,20 @@ def test_kimi_disabling_mlapo_refreshes_projection_nz_management():
         assert cast.call_count == (0 if fa_quant_layer else 2)
 
 
+def test_kimi_mla_runner_shutdown_clears_owned_cache():
+    from vllm.v1.worker.utils import clear_layer_kv_caches
+
+    wrapper = kimi_k3.AscendKimiMLAAttention.__new__(kimi_k3.AscendKimiMLAAttention)
+    nn.Module.__init__(wrapper)
+    owner = SimpleNamespace(impl=SimpleNamespace(), kv_cache=torch.ones(2, 3))
+    wrapper.mla_attn = SimpleNamespace(mla_attn=owner)
+    clear_layer_kv_caches([wrapper])
+    assert owner.kv_cache.numel() == 0
+    owner.kv_cache = [torch.ones(2, 3), torch.ones(2, 3)]
+    clear_layer_kv_caches([wrapper])
+    assert owner.kv_cache == []
+
+
 def test_kimi_moe_leaves_routed_input_transform_to_runner():
     moe = kimi_k3.AscendKimiMoE.__new__(kimi_k3.AscendKimiMoE)
     nn.Module.__init__(moe)

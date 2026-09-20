@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 import torch
+from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.mla_cp import (
@@ -26,8 +27,43 @@ from vllm_ascend.attention.mla_v1 import (
 )
 
 
-def test_mla_dcp_extends_v1_backend() -> None:
+def _init_mla_without_mlapo(self, *args, **kwargs):
+    self.enable_mlapo = False
+
+
+@pytest.mark.parametrize("dcp_size", [1, 2, 8])
+@pytest.mark.parametrize("enable_mlapo", [False, True])
+def test_mla_dcp_disables_mlapo(dcp_size, enable_mlapo):
+    def init_mla(self, *args, **kwargs):
+        self.enable_mlapo = enable_mlapo
+
+    dcp_group = SimpleNamespace(world_size=dcp_size, rank_in_group=0, device_group=Mock())
+    with (
+        patch.object(AscendMLAImpl, "__init__", new=init_mla),
+        patch("vllm_ascend.attention.context_parallel.common_cp.get_dcp_group", return_value=dcp_group),
+        patch("vllm_ascend.attention.context_parallel.mla_cp.logger") as logger,
+    ):
+        impl = AscendMlaDCPImpl()
+
+    assert impl.enable_mlapo is (enable_mlapo and dcp_size == 1)
+    if enable_mlapo and dcp_size > 1:
+        logger.warning_once.assert_called_once_with("MLAPO is not supported with MLA DCP yet; disabling MLAPO.")
+    else:
+        logger.warning_once.assert_not_called()
+
+
+@pytest.mark.parametrize("dcp_size", [1, 2, 4])
+def test_mla_dcp_extends_v1_backend(dcp_size) -> None:
     assert issubclass(AscendMlaDCPImpl, AscendMLAImpl)
+    dcp_group = SimpleNamespace(world_size=dcp_size, rank_in_group=0, device_group=Mock())
+    with (
+        patch.object(AscendMLAImpl, "__init__", new=_init_mla_without_mlapo),
+        patch("vllm_ascend.attention.context_parallel.common_cp.get_dcp_group", return_value=dcp_group),
+    ):
+        impl = AscendMlaDCPImpl()
+    assert impl.can_return_lse_for_decode
+    assert impl.need_to_return_lse_for_decode is (dcp_size > 1)
+    assert impl.supports_mtp_with_cp_non_trivial_interleave_size
     assert issubclass(
         AscendMlaDCPMetadataBuilder,
         AscendMLAMetadataBuilder,
@@ -37,6 +73,29 @@ def test_mla_dcp_extends_v1_backend() -> None:
     dcp_fields = {field.name for field in fields(AscendMLADCPDecodeMetadata)}
     assert {"cp_seq_len", "dcp_mtp_attn_mask"}.isdisjoint(base_fields)
     assert {"cp_seq_len", "dcp_mtp_attn_mask"} <= dcp_fields
+
+
+@pytest.mark.parametrize("interleave_size", [1, 768])
+def test_mla_dcp_passes_upstream_speculative_cp_check(interleave_size):
+    dcp_group = SimpleNamespace(world_size=4, rank_in_group=0, device_group=Mock())
+    with (
+        patch.object(AscendMLAImpl, "__init__", new=_init_mla_without_mlapo),
+        patch("vllm_ascend.attention.context_parallel.common_cp.get_dcp_group", return_value=dcp_group),
+    ):
+        impl = AscendMlaDCPImpl()
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=4,
+            cp_kv_cache_interleave_size=interleave_size,
+        ),
+        speculative_config=SimpleNamespace(),
+    )
+    with patch(
+        "vllm.v1.worker.cp_utils.get_layers_from_vllm_config",
+        return_value={"target": SimpleNamespace(impl=impl)},
+    ):
+        check_attention_cp_compatibility(config)
 
 
 def test_mla_dcp_decode_metadata_separates_history_and_preserves_padded_queries() -> None:
@@ -154,7 +213,7 @@ def test_mla_dcp_mixed_cache_hit_batch_uses_decode_bsnd_metadata(mock_fia) -> No
     impl.qk_rope_head_dim = 2
     impl.scale = 1.0
     impl.speculative_config = SimpleNamespace(num_speculative_tokens=3)
-    impl._merge_dcp_attention_output = lambda output, _lse, _rank: output
+    impl._merge_dcp_attention_output = lambda output, _lse: output
     impl._v_up_proj_batch_major = lambda output: output
 
     decode = AscendMLADCPDecodeMetadata(
@@ -228,7 +287,7 @@ def test_mla_dcp_uses_native_global_query_heads_for_fia(mock_fia) -> None:
 
     merged = {}
 
-    def merge(output, softmax_lse, _rank):
+    def merge(output, softmax_lse):
         merged["output_shape"] = output.shape
         merged["softmax_lse_shape"] = softmax_lse.shape
         return output
@@ -470,3 +529,23 @@ def test_split_decode_overlaps_history_communication(dcp_size, dcp_rank, workspa
         ("main_wait", "done"),
         "merge",
     ]
+
+
+@pytest.mark.parametrize("supports_varlen", [False, True])
+def test_mla_dcp_builder_preserves_varlen_capability(supports_varlen):
+    def initialize_base(builder, *args):
+        builder.dcp_size = 2
+        builder.block_size = 128
+
+    config = SimpleNamespace(parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=128))
+    with (
+        patch.object(AscendMLAMetadataBuilder, "__init__", autospec=True, side_effect=initialize_base) as init,
+        patch(
+            "vllm_ascend.attention.context_parallel.common_cp.get_dcp_group",
+            return_value=SimpleNamespace(world_size=2, rank_in_group=0),
+        ),
+    ):
+        AscendMlaDCPMetadataBuilder(
+            SimpleNamespace(), ["layer"], config, torch.device("cpu"), supports_dcp_with_varlen=supports_varlen
+        )
+    assert init.call_args.args[-1] is supports_varlen

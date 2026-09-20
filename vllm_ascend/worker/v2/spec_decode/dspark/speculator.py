@@ -27,6 +27,7 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
 )
 
+from vllm_ascend.attention.mla_v1 import AscendMLAMetadata
 from vllm_ascend.utils import (
     get_rotation_path,
     vllm_version_is,
@@ -35,13 +36,15 @@ from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_wrapper,
     build_draft_attn_metadata_factory,
 )
+from vllm_ascend.worker.v2.spec_decode.dcp_utils import DCPDraftReplicatedMixin
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import prepare_replicated_pcp_config
 
 
-class AscendDSparkSpeculator(DSparkSpeculator):
+class AscendDSparkSpeculator(DCPDraftReplicatedMixin, DSparkSpeculator):
     _speculator_name = "DSpark"
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
+        vllm_config = self._prepare_dcp_draft_config(vllm_config)
         vllm_config, self.replicated_pcp = prepare_replicated_pcp_config(vllm_config)
         super().__init__(vllm_config, device)
         self.input_batch: InputBatch | None = None
@@ -123,6 +126,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
                 self.input_buffers.positions,
                 num_tokens_padded,
                 torch.from_numpy(self.input_batch.is_prefilling_np),
+                uniform_mla_query=True,
             ),
         ):
             attn_metadata = self._build_draft_attn_metadata(
@@ -152,7 +156,12 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         """
         query_lens_list = [(i + 1) * self.num_query_per_req for i in range(num_reqs_padded)]
         for metadata in attn_metadata.values():
-            metadata.actual_seq_lengths_q = query_lens_list
+            if isinstance(metadata, AscendMLAMetadata):
+                assert metadata.decode is not None
+                metadata.decode.actual_seq_lengths_q = query_lens_list
+                metadata.query_lens = [self.num_query_per_req] * num_reqs_padded
+            else:
+                metadata.actual_seq_lengths_q = query_lens_list
         return attn_metadata
 
     def propose(
@@ -187,9 +196,13 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             # #54856 (facd9a74a1), which resets the profiling DP counts.
             sync_state = None
         with (
+            self._draft_dcp_context(),
             build_attn_metadata_wrapper(),
             build_draft_attn_metadata_factory(
-                self.input_buffers.positions, self.max_num_tokens, torch.from_numpy(self.input_batch.is_prefilling_np)
+                self.input_buffers.positions,
+                self.max_num_tokens,
+                torch.from_numpy(self.input_batch.is_prefilling_np),
+                uniform_mla_query=True,
             ),
         ):
             return super().propose(

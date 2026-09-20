@@ -7,6 +7,7 @@ import torch
 import torch_npu
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import get_forward_context
+from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 
@@ -215,6 +216,20 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
     understand this class
     """
 
+    can_return_lse_for_decode: bool = True
+    # Causal decode merges interleave-aware history with the replicated current
+    # chunk; noncausal decode reads each rank's complete local sequence.
+    supports_mtp_with_cp_non_trivial_interleave_size: bool = True
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        # AscendMLAImpl bypasses the upstream MLA initializer. FIA returns LSE
+        # for the internal DCP merge, so expose that capability to MRv2 checks.
+        self.need_to_return_lse_for_decode = self.dcp_size > 1
+        if self.dcp_size > 1 and self.enable_mlapo:
+            self.enable_mlapo = False
+            logger.warning_once("MLAPO is not supported with MLA DCP yet; disabling MLAPO.")
+
     @staticmethod
     def update_graph_params(
         update_stream,
@@ -299,9 +314,15 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
                     seq_len = seq_len.tolist()
                 actual_seq_lengths_kv = seq_len
 
-                pad_length = num_tokens - len(actual_seq_lengths_kv)
-                if split_kind is None and pad_length > 0:
-                    actual_seq_lengths_kv = actual_seq_lengths_kv + [0] * (num_tokens - len(actual_seq_lengths_kv))
+                if split_kind is None:
+                    # Parallel DSpark queries use BSND: one KV length per
+                    # request, even when each request has several query tokens.
+                    num_requests = q_nope.shape[0]
+                    actual_seq_lengths_kv = actual_seq_lengths_kv + [0] * (num_requests - len(actual_seq_lengths_kv))
+                    if input_layout == "BSND":
+                        boundaries = decode_meta.actual_seq_lengths_q
+                        assert boundaries is not None
+                        actual_seq_lengths = [end - start for start, end in zip([0, *boundaries[:-1]], boundaries)]
 
                 torch.npu.graph_task_update_begin(update_stream, handle)
 
@@ -789,7 +810,6 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         attn_output = self._merge_dcp_attention_output(
             attn_output,
             softmax_lse,
-            self.kv_lora_rank,
         )
         return self._v_up_proj_batch_major(attn_output)
 
