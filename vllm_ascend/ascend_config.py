@@ -1043,11 +1043,12 @@ class DynamicSpecConfig:
     # Parameters consumed by the selected upstream dynamic method.
     method_params: dict[str, Any] = dataclasses.field(default_factory=dict)
     # An object opts into V2 physical K with online auto-tuning enabled by
-    # default. Recommended: {"min_k": 4}; maximum K comes from speculative_config
+    # default. Recommended: {"min_k": 3}; maximum K comes from speculative_config
     # and candidate/capture widths are inferred from that range. Optional
     # enabled=False disables physical K; auto_tune={"enabled": False} selects
     # the acceptance-based fallback. Legacy capture_k, slack, percentile and
-    # hybrid overrides remain supported. AV profiling owns all other tuning.
+    # hybrid overrides remain supported. AV profiling and per-batch empirical
+    # acceptance own all other tuning.
     # None retains the legacy configuration path.
     physical_k: dict[str, Any] | None = None
     # ``hardware_aware`` adds Ascend physical K control over upstream

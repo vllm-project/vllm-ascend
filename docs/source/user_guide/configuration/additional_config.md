@@ -223,23 +223,29 @@ physical K with the following minimal configuration:
   "dynamic_spec_config": {
     "method": "dspark",
     "policy": "hardware_aware",
-    "physical_k": {"min_k": 4}
+    "physical_k": {"min_k": 3}
   }
 }
 ```
 
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
-| `physical_k.min_k` | int | `1` | Lowest candidate K. Maximum K comes from `speculative_config.num_speculative_tokens`. |
+| `physical_k.min_k` | int | `3` | Lowest candidate K. Maximum K comes from `speculative_config.num_speculative_tokens`. |
 | `physical_k.enabled` | bool | `True` | Optional switch to disable physical K control. Omitting `physical_k` also leaves it disabled. |
 | `physical_k.auto_tune.enabled` | bool | `True` | Select physical K from AV startup-profiled NPU costs and confidence estimates. Set to `False` to use the acceptance-based fallback. |
 
 Candidate and capture widths default to the range from `min_k` to maximum K.
-The worker profiles every candidate K during AV startup, then sends compact K
-recommendations to the scheduler. Small-batch protection and periodic full-K
-probes use built-in defaults. Existing `capture_k`, `slack`, `percentile` and
-`hybrid` overrides remain supported; obsolete wall-clock autotune knobs are
-rejected. A candidate without a compatible FULL
+The worker preserves the full upstream profile for maximum K and profiles two
+timing samples per graph shape for lower candidate K values, then sends compact
+K recommendations from TP rank 0 to the scheduler. Costs are never extrapolated
+beyond the measured batch range. The scheduler combines that recommendation
+with empirical per-position acceptance tracked independently for power-of-two
+batch buckets. This keeps large RL rollout batches adaptive while preventing
+K oscillation as the active batch shrinks after EOS. Small-batch protection,
+two-step batch-bucket switching, asymmetric K hysteresis, an eight-step minimum
+dwell, and periodic full-K probes use built-in defaults. Existing `capture_k`,
+`slack`, `percentile` and `hybrid` overrides remain supported; obsolete
+wall-clock autotune knobs are rejected. A candidate without a compatible FULL
 graph may execute eagerly; configuring a capture width does not guarantee a graph
 hit for every batch shape.
 
