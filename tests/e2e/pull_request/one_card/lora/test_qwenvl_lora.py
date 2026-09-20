@@ -178,9 +178,13 @@ def _run_qwen2vl_adapter_types(
     qwen2vl_vision_tower_connector_lora_files: str,
     qwen2vl_vision_tower_lora_files: str,
 ) -> None:
-    """Switch language / vision-tower+connector / vision-tower adapters on one engine."""
+    """Switch language / vision-tower+connector / vision-tower adapters on one engine.
+
+    IDs start at 2 because this engine already loaded the pokemon adapter as
+    lora_id=1. Reusing an ID with a different path keeps the old weights.
+    """
     config.lora_path = qwen2vl_language_lora_files
-    for lora_id in [1, 2]:
+    for lora_id in [2, 3]:
         run_test(
             llm,
             config,
@@ -191,7 +195,7 @@ def _run_qwen2vl_adapter_types(
         )
 
     config.lora_path = qwen2vl_vision_tower_connector_lora_files
-    for lora_id in [3, 4]:
+    for lora_id in [4, 5]:
         run_test(
             llm,
             config,
@@ -202,7 +206,7 @@ def _run_qwen2vl_adapter_types(
         )
 
     config.lora_path = qwen2vl_vision_tower_lora_files
-    for lora_id in [5, 6]:
+    for lora_id in [6, 7]:
         run_test(
             llm,
             config,
@@ -250,7 +254,7 @@ def test_qwen25vl_lora(qwen25vl_lora_files, qwen25vl_vision_lora_files):
         llm = vllm_model.model
         run_test(llm, config, TEST_IMAGES, expected_outputs=EXPECTED_OUTPUTS, lora_id=1)
         config.lora_path = qwen25vl_vision_lora_files
-        run_test(llm, config, TEST_IMAGES, expected_outputs=EXPECTED_OUTPUTS, lora_id=1)
+        run_test(llm, config, TEST_IMAGES, expected_outputs=EXPECTED_OUTPUTS, lora_id=2)
 
 
 @wait_until_npu_memory_free()
