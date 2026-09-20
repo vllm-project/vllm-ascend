@@ -11,6 +11,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     SparseKVOffloadManager,
     get_sparse_kv_offload_cpu_pool_size_bytes,
     plan_sparse_kv_offload_memory,
+    resolve_lru_workspace_threads,
 )
 from vllm_ascend.utils import AscendDeviceType
 
@@ -54,6 +55,17 @@ def _make_memory_plan_inputs(max_num_seqs=2):
     vllm_config = SimpleNamespace(scheduler_config=SimpleNamespace(max_num_seqs=max_num_seqs))
     alignment_reserve = 2 * manager_module._CPU_CACHE_MAX_ALIGNMENT_OVERHEAD_PER_LAYER
     return specs, vllm_config, alignment_reserve
+
+
+class TestLRUWorkspaceThreads(unittest.TestCase):
+    def test_thread_budget_is_limited_by_available_cpus(self):
+        self.assertEqual(resolve_lru_workspace_threads(16, 8), 8)
+        self.assertEqual(resolve_lru_workspace_threads(8, 16), 8)
+
+    def test_thread_budget_requires_positive_values(self):
+        for configured_threads, available_cpus in ((0, 8), (-1, 8), (8, 0), (8, -1)):
+            with self.assertRaises(ValueError):
+                resolve_lru_workspace_threads(configured_threads, available_cpus)
 
 
 class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):

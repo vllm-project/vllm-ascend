@@ -1476,6 +1476,7 @@ class SparseKVOffloadConfig:
     keep_device_kv_cache: bool = False
     topk: int = dataclasses.field(default=0, init=False)
     use_fused_overlap: bool = False
+    lru_max_threads: int = 8
 
     @model_validator(mode="after")
     def _validate_values(self):
@@ -1483,6 +1484,8 @@ class SparseKVOffloadConfig:
             raise ValueError("sparse_kv_offload_config.topk_buffer_size must be positive")
         if self.dram_size_per_dp_GB <= 0:
             raise ValueError("sparse_kv_offload_config.dram_size_per_dp_GB must be positive")
+        if self.lru_max_threads <= 0:
+            raise ValueError("sparse_kv_offload_config.lru_max_threads must be positive")
         return self
 
     @classmethod
