@@ -56,6 +56,8 @@ def make_worker(
     use_kvpp=False,
     pcp_size=1,
     pcp_rank=0,
+    pp_size=1,
+    pp_rank=0,
     dcp_size=1,
     kv_cache_config=None,
 ):
@@ -78,13 +80,18 @@ def make_worker(
     if num_hidden_layers is not None:
         config.model_config.hf_text_config.num_hidden_layers = num_hidden_layers
     config.model_config.get_num_layers.return_value = num_layers
+    config.model_config.get_layers_start_end_indices.side_effect = lambda pc: (
+        (pc.rank // tp_size) * num_layers,
+        (pc.rank // tp_size + 1) * num_layers,
+    )
     config.model_config.get_total_num_kv_heads.return_value = num_kv_heads
     config.parallel_config.data_parallel_rank = 0
-    config.parallel_config.rank = 0
-    config.parallel_config.pipeline_parallel_size = 1
+    config.parallel_config.rank = pp_rank * tp_size + tp_rank
     config.parallel_config.tensor_parallel_size = tp_size
+    config.parallel_config.pipeline_parallel_size = pp_size
     config.parallel_config.prefill_context_parallel_size = pcp_size
     config.parallel_config.decode_context_parallel_size = dcp_size
+    config.parallel_config.cp_kv_cache_interleave_size = 1
     config.additional_config = {"enable_kvpp": use_kvpp}
     config.kv_transfer_config.kv_role = kv_role
     config.kv_transfer_config.kv_connector_extra_config = {
@@ -101,6 +108,7 @@ def make_worker(
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
     return KVPoolWorker(config, use_layerwise=use_layerwise, kv_cache_config=kv_cache_config)
+
 
 
 class TestPCPPoolWorker(unittest.TestCase):

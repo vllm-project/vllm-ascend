@@ -255,19 +255,22 @@ class TestMooncakeHybrid(unittest.TestCase):
                 ),
             ]
         )
-        original = hybrid_layout_id(config)
-        self.assertEqual(original, hybrid_layout_id(config))
+        # No pipeline parallelism here: membership participates, as upstream
+        # describes the same layers on both sides.
+        no_pp = SimpleNamespace(pipeline_parallel_size=1, tensor_parallel_size=1, rank=0)
+        original = hybrid_layout_id(config, no_pp)
+        self.assertEqual(original, hybrid_layout_id(config, no_pp))
         config.kv_cache_groups[0].layer_names.append("model.layers.1.kv")
-        self.assertNotEqual(original, hybrid_layout_id(config))
+        self.assertNotEqual(original, hybrid_layout_id(config, no_pp))
         config.kv_cache_groups[0].layer_names.pop()
         config.kv_cache_groups[0].kv_cache_spec = FullAttentionSpec(
             block_size=16, num_kv_heads=1, head_size=1, dtype="float16"
         )
-        self.assertEqual(original, hybrid_layout_id(config))
+        self.assertEqual(original, hybrid_layout_id(config, no_pp))
         config.kv_cache_groups[0].kv_cache_spec = FullAttentionSpec(
             block_size=32, num_kv_heads=1, head_size=1, dtype="float16"
         )
-        self.assertNotEqual(original, hybrid_layout_id(config))
+        self.assertNotEqual(original, hybrid_layout_id(config, no_pp))
 
     def test_layout_fingerprint_normalizes_uniform_wrapper(self):
         spec = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype="uint8")
@@ -281,7 +284,8 @@ class TestMooncakeHybrid(unittest.TestCase):
                 )
             ]
         )
-        self.assertEqual(hybrid_layout_id(scheduler_config), hybrid_layout_id(worker_config))
+        no_pp = SimpleNamespace(pipeline_parallel_size=1, tensor_parallel_size=1, rank=0)
+        self.assertEqual(hybrid_layout_id(scheduler_config, no_pp), hybrid_layout_id(worker_config, no_pp))
 
     def test_attention_window_drains_before_communication_and_on_exception(self):
         for fail in (False, True):
@@ -307,6 +311,7 @@ class TestMooncakeHybrid(unittest.TestCase):
         scheduler.model_name = "model"
         scheduler.tp_size = 2
         scheduler.put_step = 1
+        scheduler.pp_size = 1
         scheduler.grouped_block_size = [16, 32]
         scheduler.layerwise_max_transfer_blocks = 1
         scheduler.store_scheduler = MagicMock()
@@ -324,7 +329,7 @@ class TestMooncakeHybrid(unittest.TestCase):
         scheduler.store_scheduler.batch_is_exist.assert_not_called()
         scheduler.store_scheduler.batch_get_key_info.assert_not_called()
         keys = scheduler.store_scheduler.batch_is_readable.call_args_list[0].args[0]
-        self.assertEqual(keys[0], "model@mooncake_hybrid_v1:layout@group:0@block:16@6831@0")
+        self.assertEqual(keys[0], "model@mooncake_hybrid_v1:layout@pp_rank:0@group:0@block:16@6831@0")
 
     def save_prefix(self, worker, last_chunk=True):
         request = ReqMeta(
