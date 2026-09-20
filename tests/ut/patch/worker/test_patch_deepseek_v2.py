@@ -9,17 +9,17 @@ from vllm.model_executor.models.deepseek_v2 import DeepseekV2Model
 from vllm.sequence import IntermediateTensors
 
 import vllm_ascend.patch.worker.patch_deepseek_v2 as patch_deepseek_v2
-import vllm_ascend.worker.v2.pp_utils as pp_utils
+import vllm_ascend.worker.v2.pp_transport as pp_transport
 from vllm_ascend.patch.worker.patch_deepseek_v2 import (
     _patched_deepseek_v2_model_init,
     _patched_forward,
     _should_skip_indexer_init,
 )
-from vllm_ascend.worker.v2.pp_utils import (
+from vllm_ascend.worker.v2.pp_transport import (
     PPTransportDataType,
     add_pp_transport_tensors,
+    configure_pp_topk_transport,
     get_pp_transport_tensors,
-    initialize_pp_transport,
     make_empty_intermediate_tensors,
 )
 
@@ -121,10 +121,10 @@ def test_aux_buffer_factory_uses_one_protocol(monkeypatch, legacy, v2):
     factory = object()
     model = SimpleNamespace(layers=[], make_empty_intermediate_tensors=factory)
     monkeypatch.setattr(patch_deepseek_v2, "_original_deepseek_v2_model_init", lambda *args, **kwargs: None)
-    monkeypatch.setattr(patch_deepseek_v2.pp_utils, "use_legacy_spec_pp", lambda: legacy)
+    monkeypatch.setattr(patch_deepseek_v2.pp_transport, "use_legacy_spec_pp", lambda: legacy)
     wrapped = object()
     wrap_factory = Mock(return_value=wrapped)
-    monkeypatch.setattr(patch_deepseek_v2.pp_utils, "make_empty_intermediate_tensors", wrap_factory)
+    monkeypatch.setattr(patch_deepseek_v2.pp_transport, "make_empty_intermediate_tensors", wrap_factory)
     patch_deepseek_v2._patched_deepseek_v2_model_init(model, vllm_config=SimpleNamespace(use_v2_model_runner=v2))
     assert model._use_upstream_aux_relay is (v2 and not legacy)
     expected_data_types = (PPTransportDataType.TOPK_INDICES,)
@@ -168,7 +168,7 @@ def test_model_init_adds_pp_topk_receive_buffer(monkeypatch):
         "_original_deepseek_v2_model_init",
         original_init,
     )
-    monkeypatch.setattr(patch_deepseek_v2.pp_utils, "use_legacy_spec_pp", lambda: False)
+    monkeypatch.setattr(patch_deepseek_v2.pp_transport, "use_legacy_spec_pp", lambda: False)
     model = SimpleNamespace()
 
     _patched_deepseek_v2_model_init(
@@ -257,7 +257,7 @@ def test_make_empty_intermediate_tensors_aux_only():
 
 
 def test_make_empty_intermediate_tensors_indexcache_only(monkeypatch):
-    monkeypatch.setattr(pp_utils, "should_reuse_topk", lambda config, layer_idx: layer_idx in {2, 4})
+    monkeypatch.setattr(pp_transport, "should_reuse_topk", lambda config, layer_idx: layer_idx in {2, 4})
     topk_buffer = torch.zeros((8, 2), dtype=torch.int32)
     model = SimpleNamespace(
         config=SimpleNamespace(num_hidden_layers=8, use_index_cache=True),
@@ -266,7 +266,7 @@ def test_make_empty_intermediate_tensors_indexcache_only(monkeypatch):
         topk_indices_buffer=topk_buffer,
     )
     transport_data_types = (PPTransportDataType.TOPK_INDICES,)
-    initialize_pp_transport(model, transport_data_types)
+    configure_pp_topk_transport(model, transport_data_types)
     factory = make_empty_intermediate_tensors(model, _empty_tensor_factory, transport_data_types)
     result = factory(3, torch.bfloat16, torch.device("cpu"))
     assert model.receive_pp_topk_indices and model.send_pp_topk_indices
@@ -283,7 +283,7 @@ def test_make_empty_intermediate_tensors_aux_and_topk(monkeypatch, topk_mode):
         config.indexer_types = ["full", "full", "shared", "full", "shared", "full", "full", "full"]
     else:
         config.use_index_cache = True
-        monkeypatch.setattr(pp_utils, "should_reuse_topk", lambda config, layer_idx: layer_idx in {2, 4})
+        monkeypatch.setattr(pp_transport, "should_reuse_topk", lambda config, layer_idx: layer_idx in {2, 4})
     model = SimpleNamespace(
         config=config,
         start_layer=2,
@@ -295,7 +295,7 @@ def test_make_empty_intermediate_tensors_aux_and_topk(monkeypatch, topk_mode):
         PPTransportDataType.AUX_HIDDEN_STATES,
         PPTransportDataType.TOPK_INDICES,
     )
-    initialize_pp_transport(model, transport_data_types)
+    configure_pp_topk_transport(model, transport_data_types)
     factory = make_empty_intermediate_tensors(
         model,
         _empty_tensor_factory,

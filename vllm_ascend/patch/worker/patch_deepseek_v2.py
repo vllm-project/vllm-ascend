@@ -35,11 +35,10 @@ from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backends.mla.index_group import SparseMLAIndexGroupBuilder
 
 from vllm_ascend.utils import is_mtp_layer, should_reuse_topk
-from vllm_ascend.worker.v2 import pp_utils
-from vllm_ascend.worker.v2.pp_utils import (
+from vllm_ascend.worker.v2 import pp_transport
+from vllm_ascend.worker.v2.pp_transport import (
     PPTransportDataType,
-    add_pp_topk_indices,
-    initialize_pp_transport,
+    configure_pp_topk_transport,
 )
 
 
@@ -293,7 +292,7 @@ _original_deepseek_v2_model_init = DeepseekV2Model.__init__
 def _patched_deepseek_v2_model_init(self, *args, **kwargs):
     _original_deepseek_v2_model_init(self, *args, **kwargs)
     # Legacy Spec+PP (0.28/0.29 only): 0.30+ uses the upstream aux relay.
-    self._use_upstream_aux_relay = kwargs["vllm_config"].use_v2_model_runner and not pp_utils.use_legacy_spec_pp()
+    self._use_upstream_aux_relay = kwargs["vllm_config"].use_v2_model_runner and not pp_transport.use_legacy_spec_pp()
     self.topk_indices_buffer = next(
         (
             topk_indices_buffer
@@ -313,8 +312,8 @@ def _patched_deepseek_v2_model_init(self, *args, **kwargs):
     if not self._use_upstream_aux_relay:
         transport_data_type_list.insert(0, PPTransportDataType.AUX_HIDDEN_STATES)
     transport_data_types = tuple(transport_data_type_list)
-    initialize_pp_transport(self, transport_data_types)
-    self.make_empty_intermediate_tensors = pp_utils.make_empty_intermediate_tensors(
+    configure_pp_topk_transport(self, transport_data_types)
+    self.make_empty_intermediate_tensors = pp_transport.make_empty_intermediate_tensors(
         self,
         self.make_empty_intermediate_tensors,
         transport_data_types,
@@ -325,7 +324,7 @@ DeepseekV2Model.__init__ = _patched_deepseek_v2_model_init
 
 
 # Legacy Spec+PP (0.28/0.29 only); the upstream branch below is for 0.30+.
-if not pp_utils.use_legacy_spec_pp():
+if not pp_transport.use_legacy_spec_pp():
     # Release versions do not expose this interface. Reuse only upstream's
     # slot bookkeeping; the Ascend forward still owns capture and TP gathering.
     from vllm.model_executor.models.interfaces import EagleModelMixin
@@ -385,9 +384,9 @@ def _patched_forward(
         if self._use_upstream_aux_relay:
             aux_hidden_states = self.collect_remote_aux_hidden_states(intermediate_tensors)
         else:
-            aux_hidden_states = pp_utils.get_pp_transport_tensors(
+            aux_hidden_states = pp_transport.get_pp_transport_tensors(
                 intermediate_tensors,
-                pp_utils.PPTransportDataType.AUX_HIDDEN_STATES,
+                pp_transport.PPTransportDataType.AUX_HIDDEN_STATES,
             )
 
     llama_4_scaling_config = getattr(self.config, "llama_4_scaling", None)
@@ -416,18 +415,18 @@ def _patched_forward(
         if self._use_upstream_aux_relay:
             pp_output.tensors.update(self.pack_local_aux_hidden_states(aux_hidden_states))
         else:
-            pp_utils.add_pp_transport_tensors(
+            pp_transport.add_pp_transport_tensors(
                 pp_output,
-                pp_utils.PPTransportDataType.AUX_HIDDEN_STATES,
+                pp_transport.PPTransportDataType.AUX_HIDDEN_STATES,
                 aux_hidden_states,
             )
         if self.send_pp_topk_indices:
             assert self.topk_indices_buffer is not None
             num_tokens = positions.shape[0]
-            add_pp_topk_indices(
+            pp_transport.add_pp_transport_tensors(
                 pp_output,
-                self.topk_indices_buffer,
-                num_tokens,
+                PPTransportDataType.TOPK_INDICES,
+                [self.topk_indices_buffer[:num_tokens]],
             )
         return pp_output
 
