@@ -102,7 +102,9 @@ def test_reference_and_lane_share_the_measurement_conditions():
         "--distributed-executor-backend",
     ):
         assert lane[flag] == reference[flag], flag
-    assert lane["--compilation-config"].startswith('{"cudagraph_mode": "FULL_DECODE_ONLY"')
+    compilation_config = lane["--compilation-config"]
+    assert isinstance(compilation_config, str)
+    assert compilation_config.startswith('{"cudagraph_mode": "FULL_DECODE_ONLY"')
     # The one-card lane sleeps level 2 before every transfer, which only hands
     # HBM back while the engine's weights and KV cache live in the CaMem pool.
     # Both builders enable it so the reference is a startup load under the very
@@ -129,8 +131,9 @@ class _FakeServer:
     def __enter__(self) -> "_FakeServer":
         return self
 
-    def __exit__(self, *exc) -> bool:
-        return False
+    def __exit__(self, *exc) -> None:
+        # Never swallow an exception raised inside the ``with`` block.
+        return None
 
     def get_client(self):
         return MagicMock()
