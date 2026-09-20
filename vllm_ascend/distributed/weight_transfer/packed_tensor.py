@@ -53,17 +53,11 @@ def packed_broadcast_producer(
     packing_tensor_sizes: list[int] = [0 for _ in range(num_buffers)]
     packed_tensors: list[torch.Tensor] = [torch.empty(0, dtype=torch.uint8, device="npu") for _ in range(num_buffers)]
 
-    # Keep references until the stream for the corresponding slot is
-    # synchronized. This mirrors the upstream vLLM lifetime rule for
-    # asynchronous broadcasts.
-    in_flight: list[torch.Tensor | None] = [None] * num_buffers
-
     done = False
     while not done:
         # Synchronize the current stream (waits for previous
         # iteration's packing and broadcast work on this buffer to finish)
         streams[buffer_idx].synchronize()
-        in_flight[buffer_idx] = None
         # Start tasks for the new buffer in a new stream
         with torch.npu.stream(streams[buffer_idx]):
             # Initialize the packing tensor list and sizes
@@ -97,7 +91,6 @@ def packed_broadcast_producer(
             src=src,
             stream=streams[buffer_idx],
         )
-        in_flight[buffer_idx] = packed_tensors[buffer_idx]
 
         # Move to the next buffer
         buffer_idx = (buffer_idx + 1) % num_buffers
