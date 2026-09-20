@@ -246,6 +246,17 @@ def write_benchmark_results_json(
     output = build_benchmark_results(config=config, ranks=ranks, commands=commands, results=results)
     job_name = os.environ.get("BENCHMARK_JOB_NAME", "") or config.test_name.replace(" ", "-")
     path = write_results_json(output, job_name=job_name, output_dir=output_dir)
+    # Preserve the complete AISBench tables alongside the summarized results.
+    for case, result in zip(config.benchmark_cases, results):
+        if case["case_type"] != "performance" or not isinstance(result, list) or len(result) != 2:
+            continue
+        table, raw_json = result
+        case_name = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in case["case_name"])
+        raw_stem = f"{path.stem}_{case_name}"
+        table.to_csv(path.parent / f"{raw_stem}.csv")
+        (path.parent / f"{raw_stem}.json").write_text(
+            json.dumps(raw_json, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
     valid_items = [(case["case_name"], case) for case in config.benchmark_cases]
     postprocess_benchmark_results(
         [(key, case, result) for (key, case), result in zip(valid_items, results)],

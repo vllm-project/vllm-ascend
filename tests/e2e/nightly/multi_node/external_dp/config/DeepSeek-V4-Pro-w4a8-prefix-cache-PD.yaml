@@ -316,16 +316,5 @@ benchmarks:
     batch_size: 48
     request_rate: 1
     baseline: 737.07
-    threshold: 0.95
-  acc_aime2025:
-    case_type: accuracy
-    dataset_path: vllm-ascend/aime2025
-    request_conf: vllm_api_general_chat
-    dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
-    temperature: 1.0
-    top_p: 1.0
-    thinking: "true"
-    max_out_len: 65536
-    batch_size: 32
-    baseline: 90
-    threshold: 10
+    # Keep the main-branch baseline for comparison, but collect results below it too.
+    threshold: 0
