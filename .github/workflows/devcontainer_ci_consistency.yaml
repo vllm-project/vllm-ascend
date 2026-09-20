@@ -93,6 +93,7 @@ jobs:
           mkdir -p "${NODE_INSTALL_DIR}"
           tar -xzf "/tmp/${NODE_ARCHIVE_NAME}" --strip-components=1 -C "${NODE_INSTALL_DIR}"
           echo "${NODE_INSTALL_DIR}/bin" >> "$GITHUB_PATH"
+          PATH="${NODE_INSTALL_DIR}/bin:${PATH}"
           node --version
           npm --version
 
@@ -145,6 +146,7 @@ jobs:
           mkdir -p "${NODE_INSTALL_DIR}"
           tar -xzf "/tmp/${NODE_ARCHIVE_NAME}" --strip-components=1 -C "${NODE_INSTALL_DIR}"
           echo "${NODE_INSTALL_DIR}/bin" >> "$GITHUB_PATH"
+          PATH="${NODE_INSTALL_DIR}/bin:${PATH}"
           node --version
           npm --version
 
