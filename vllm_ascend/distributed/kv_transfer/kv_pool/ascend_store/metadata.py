@@ -1122,7 +1122,9 @@ class ReqMeta:
             and target_token_len % cache_transfer_granularity == 0
             and full_block_count > available_full_block_count
         )
-        if boundary_without_hash:
+        # Scheduled draft tokens can cross a page before that page has a
+        # committed request hash. Do not mark an unsent page as saved.
+        if boundary_without_hash or (not save_partial_block and full_block_count > available_full_block_count):
             num_tokens_to_save = available_full_block_count * cache_transfer_granularity
         if tracker.last_block_gva is not None and (
             target_token_len % cache_transfer_granularity != 0 or boundary_without_hash

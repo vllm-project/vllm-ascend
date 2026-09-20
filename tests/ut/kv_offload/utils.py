@@ -10,7 +10,16 @@ from unittest.mock import patch
 
 import torch
 from vllm import SamplingParams
-from vllm.config import CacheConfig, DeviceConfig, KVTransferConfig, ModelConfig, SchedulerConfig, VllmConfig
+from vllm.config import (
+    CacheConfig,
+    DeviceConfig,
+    KVTransferConfig,
+    ModelConfig,
+    ParallelConfig,
+    SchedulerConfig,
+    SpeculativeConfig,
+    VllmConfig,
+)
 from vllm.model_executor.models import ModelRegistry
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
@@ -78,10 +87,13 @@ def create_vllm_config(
     max_num_batched_tokens: int = 1024,
     block_size: int = 128,
     kv_transfer_config: KVTransferConfig | None = None,
+    speculative_method: str | None = None,
 ) -> VllmConfig:
     """Initialize VllmConfig For Testing."""
     fake_weight_path = os.path.join(os.path.dirname(__file__), "..", "_fake_weight")
     model_info = _fake_opt_model_info()
+    parallel_config = ParallelConfig()
+    speculative_config = None
     # ModelConfig inspects OPTForCausalLM in a subprocess that needs NPU tooling.
     with patch.object(
         ModelRegistry,
@@ -92,6 +104,21 @@ def create_vllm_config(
             model=fake_weight_path,
             skip_tokenizer_init=True,
         )
+        if speculative_method is not None:
+            if speculative_method == "mtp":
+                # Fake weight metadata must identify an MTP draft for the
+                # real SpeculativeConfig constructor to accept this method.
+                def mtp_override(hf_config):
+                    hf_config.model_type = "deepseek_mtp"
+                    return hf_config
+
+                model_config.hf_overrides = mtp_override
+            speculative_config = SpeculativeConfig(
+                method=speculative_method,
+                num_speculative_tokens=3,
+                target_model_config=model_config,
+                target_parallel_config=parallel_config,
+            )
     scheduler_config = SchedulerConfig(
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=max_num_batched_tokens,
@@ -109,6 +136,8 @@ def create_vllm_config(
     return VllmConfig(
         scheduler_config=scheduler_config,
         model_config=model_config,
+        parallel_config=parallel_config,
+        speculative_config=speculative_config,
         cache_config=cache_config,
         kv_transfer_config=kv_transfer_config,
         device_config=DeviceConfig("cpu"),

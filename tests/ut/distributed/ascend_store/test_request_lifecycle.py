@@ -25,7 +25,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     UniformTypeKVCacheSpecs,
 )
-from vllm.v1.outputs import KVConnectorOutput
+from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
@@ -51,7 +51,6 @@ class MemoryBackend(Backend):
     """The Store leaf API copies real bytes using production-generated addresses."""
 
     payloads = {}
-    requires_exists_before_put = False
 
     def __init__(self, parallel_config, **kwargs):
         self.regions = []
@@ -88,8 +87,13 @@ class MemoryBackend(Backend):
         return [0] * len(keys)
 
 
+@pytest.fixture(params=[None, "mtp", "dspark"])
+def speculative_method(request):
+    return request.param
+
+
 @pytest.fixture(params=["private-state", "full-attention", "full-and-swa"])
-def cache_layout(request):
+def cache_layout(request, speculative_method):
     """Dense attention or mixed C1/C2 + SWA, with optional private state."""
     specs = {
         "model.layers.0.long_kv_cache": AscendMLAAttentionSpec(
@@ -131,6 +135,12 @@ def cache_layout(request):
         plan.kv_cache_groups[0].kv_cache_spec = FullAttentionSpec(
             block_size=128, num_kv_heads=1, head_size=8, dtype=torch.bfloat16
         )
+    if speculative_method:
+        draft_names = [f"mtp.{i}.self_attn" for i in range(3 if speculative_method == "dspark" else 1)]
+        if request.param == "full-attention":
+            plan.kv_cache_groups[0].layer_names.extend(draft_names)
+        else:
+            plan.kv_cache_groups.append(KVCacheGroupSpec(draft_names, swa))
 
     def allocate():
         caches = {}
@@ -182,21 +192,28 @@ def payload_value(tokens, end, name, plane):
 
 @pytest.mark.parametrize("prefix_unit", [None, 32, 128])
 @pytest.mark.parametrize("load_async", [False, True])
-def test_raw_sequence_lifecycle(cache_layout, devices_and_store, prefix_unit, load_async):
+@pytest.mark.parametrize("save_decode_cache", [False, True])
+def test_raw_sequence_lifecycle(
+    cache_layout, devices_and_store, prefix_unit, load_async, speculative_method, save_decode_cache
+):
     plan, allocate = cache_layout
     if len(plan.kv_cache_groups) == 1 and prefix_unit == 32:
         pytest.skip("The upstream single-group scheduler always hashes whole 128-token blocks")
     has_private_state = any(not is_prefix_cacheable(group.kv_cache_spec) for group in plan.kv_cache_groups)
     config = create_vllm_config(
-        max_num_batched_tokens=1024,
+        max_num_batched_tokens=256,
+        speculative_method=speculative_method,
         kv_transfer_config=KVTransferConfig(
             kv_connector="AscendStoreConnector",
             kv_role="kv_both",
             kv_connector_module_path="vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector",
-            kv_connector_extra_config={"backend": "cpu", "load_async": load_async},
+            kv_connector_extra_config={
+                "backend": "cpu",
+                "load_async": load_async,
+                "save_decode_cache": save_decode_cache,
+            },
         ),
     )
-    config.scheduler_config.max_num_batched_tokens = 256
     config.scheduler_config.disable_hybrid_kv_cache_manager = False
     config.cache_config.prefix_match_unit = prefix_unit
     config.cache_config.num_gpu_blocks = plan.num_blocks
@@ -212,6 +229,7 @@ def test_raw_sequence_lifecycle(cache_layout, devices_and_store, prefix_unit, lo
     assert isinstance(pool.kv_recv_thread, KVCacheStoreRecvingThread) == load_async
     assert pool.hash_block_size == hash_size == (prefix_unit or 128)
     assert pool.cache_transfer_granularity == 128
+    assert pool.use_eagle == (speculative_method is not None)
     scheduler = Scheduler(
         config,
         plan,
@@ -225,7 +243,7 @@ def test_raw_sequence_lifecycle(cache_layout, devices_and_store, prefix_unit, lo
         request = Request(
             request_id=req_id,
             prompt_token_ids=tokens,
-            sampling_params=SamplingParams(max_tokens=2),
+            sampling_params=SamplingParams(max_tokens=10 if speculative_method else 2),
             pooling_params=None,
             block_hasher=get_request_block_hasher(hash_size, sha256),
         )
@@ -233,8 +251,10 @@ def test_raw_sequence_lifecycle(cache_layout, devices_and_store, prefix_unit, lo
         seen_load = False
         saw_decode = False
         compute_starts = []
+        accepted_counts = []
         for _ in range(12):
             output = scheduler.schedule()
+            assert output.total_num_scheduled_tokens <= 256
             meta = output.kv_connector_metadata
             worker.handle_preemptions(meta)
             worker.bind_connector_metadata(meta)
@@ -275,24 +295,38 @@ def test_raw_sequence_lifecycle(cache_layout, devices_and_store, prefix_unit, lo
                 compute_starts.append(start)
                 saw_decode |= start >= len(tokens)
                 # Model-compute leaf: write deterministic CPU bytes to allocated pages.
+                input_tokens = list(request.all_token_ids) + output.scheduled_spec_decode_tokens.get(req_id, [])
                 for gid, name, plane, tensor in cache_entries(plan, caches):
                     if not is_prefix_cacheable(plan.kv_cache_groups[gid].kv_cache_spec):
                         continue
                     for index, bid in enumerate(block_ids[gid]):
                         if bid and start < (index + 1) * 128 <= end:
-                            tensor[bid].fill_(payload_value(request.all_token_ids, (index + 1) * 128, name, plane))
+                            tensor[bid].fill_(payload_value(input_tokens, (index + 1) * 128, name, plane))
             worker.wait_for_save()
             pool.wait_for_previous_save()
             sending, recving = worker.get_finished(output.finished_req_ids)
             result = create_model_runner_output([request] if scheduled else [])
             if scheduled and request.num_computed_tokens < len(tokens):
                 result.sampled_token_ids = [[]]
+            drafts = output.scheduled_spec_decode_tokens.get(req_id, [])
+            if drafts:
+                accepted = (0, 1, 3)[min(len(accepted_counts), 2)]
+                accepted = min(accepted, len(drafts))
+                accepted_counts.append(accepted)
+                result.sampled_token_ids = [drafts[:accepted] + [0]]
             result.kv_connector_output = KVConnectorOutput(
                 finished_sending=sending,
                 finished_recving=recving,
                 kv_connector_worker_meta=worker.build_connector_worker_meta(),
             )
+            computed_before_update = request.num_computed_tokens
             scheduler.update_from_output(output, result)
+            if drafts:
+                assert request.num_computed_tokens == computed_before_update - len(drafts) + accepted
+            if speculative_method:
+                scheduler.update_draft_token_ids(
+                    DraftTokenIds([req_id], [[1000 + request.num_tokens + i for i in range(3)]])
+                )
             worker.clear_connector_metadata()
             if req_id not in scheduler.requests:
                 # Consume the finished-ID notification and release Store references.
@@ -303,11 +337,16 @@ def test_raw_sequence_lifecycle(cache_layout, devices_and_store, prefix_unit, lo
                 break
         assert seen_load == (expected_hit > 0)
         assert saw_decode
+        if req_id == "producer":
+            assert sum(start < len(tokens) for start in compute_starts) >= 2
+        if speculative_method:
+            assert accepted_counts[:3] == [0, 1, 3]
         assert compute_starts[0] == expected_hit
         assert_scheduler_empty(scheduler)
         assert not scheduler.connector.connector_scheduler.load_specs
         assert all(not manager.req_to_blocks for manager in scheduler.kv_cache_manager.coordinator.single_type_managers)
         assert not pool._invalid_block_ids
+        return list(request.all_token_ids)
 
     try:
         run_request("producer", producer_tokens, 0)
@@ -316,6 +355,8 @@ def test_raw_sequence_lifecycle(cache_layout, devices_and_store, prefix_unit, lo
         # Clear the real local prefix cache; the next request must use the Store.
         for case, (length, fork, hit) in enumerate(
             [
+                (125, None, 0),
+                (126, None, 0),
                 (127, None, 0),
                 (128, None, 0),
                 (129, None, 128),
@@ -338,16 +379,24 @@ def test_raw_sequence_lifecycle(cache_layout, devices_and_store, prefix_unit, lo
             tokens = list(range(length))
             if fork is not None:
                 tokens[fork] += 1000
-            if not has_private_state and fork is None:
+            if not has_private_state and not speculative_method and fork is None:
                 # Legacy full hits still reserve only the final token.
-                hit = {127: 0, 128: 127, 129: 128, 256: 255, 257: 256, 512: 511, 513: 512}[length]
-            run_request(f"consumer-{case}", tokens, hit)
+                hit = {125: 0, 126: 0, 127: 0, 128: 127, 129: 128, 256: 255, 257: 256, 512: 511, 513: 512}[length]
+            generated = run_request(f"consumer-{case}", tokens, hit)
             assert bool(pool.m_store.loads) == bool(hit)
+            if speculative_method and length in (125, 126):
+                assert scheduler.reset_prefix_cache()
+                for _, _, _, tensor in cache_entries(plan, caches):
+                    tensor.fill_(-3)
+                # Reuse a page completed only after rejected drafts rolled back.
+                run_request(f"decoded-prefix-{case}", generated, 128 if save_decode_cache else 0)
             if has_private_state:
                 assert not any("@group:1@" in key for key in MemoryBackend.payloads)
         assert scheduler.reset_prefix_cache()
         MemoryBackend.payloads = dict(saved)
-        run_request("local-prefix", producer_tokens[:128], 0 if has_private_state else 127)
+        seed_length = 256 if speculative_method else 128
+        seed_hit = 128 if speculative_method else (0 if has_private_state else 127)
+        run_request("local-prefix", producer_tokens[:seed_length], seed_hit)
         run_request("mixed-local-remote", list(range(513)), 512, expected_local=128)
         assert scheduler.reset_prefix_cache()
         missing_group = len(plan.kv_cache_groups) - 1

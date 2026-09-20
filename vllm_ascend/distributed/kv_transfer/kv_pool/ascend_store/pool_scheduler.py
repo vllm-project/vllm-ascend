@@ -872,11 +872,12 @@ class KVPoolScheduler:
         num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
         if req_tuple:
             request = req_tuple[0]
-            num_current_tokens = request_tracker.token_len
+            # The scheduler rolls this back when speculative tokens are rejected.
+            num_current_tokens = request.num_computed_tokens
             new_token_ids = request.all_token_ids[num_current_tokens : num_current_tokens + num_new_tokens]
             if request_tracker.token_ids is not None and new_token_ids:
                 request_tracker.token_ids.extend(new_token_ids)
-            request_tracker.token_len += num_new_tokens
+            request_tracker.token_len = num_current_tokens + num_new_tokens
         else:
             raise ValueError(f"Request {req_id} is not in _unfinished_requests, but it is scheduled to be cached")
         if new_block_ids is not None:
@@ -971,7 +972,12 @@ class KVPoolScheduler:
         if not force_skip_save:
             for i, req_id in enumerate(cached_reqs.req_ids):
                 new_block_ids = cached_reqs.new_block_ids[i]
-                if not new_block_ids and not self.tp_mismatch and not self.layerwise_offload:
+                if (
+                    not new_block_ids
+                    and not self.tp_mismatch
+                    and not self.layerwise_offload
+                    and not self.save_decode_cache
+                ):
                     continue
                 if req_id in self._preempted_req_ids:
                     if not new_block_ids:
