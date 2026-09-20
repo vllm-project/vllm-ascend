@@ -18,7 +18,13 @@ from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash, resolve_kv_cache_block_sizes
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
-from vllm.v1.kv_cache_interface import CircularBufferSpec, KVCacheConfig, KVCacheGroupSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    UniformTypeKVCacheSpecs,
+)
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
@@ -82,9 +88,9 @@ class MemoryBackend(Backend):
         return [0] * len(keys)
 
 
-@pytest.fixture
-def cache_layout():
-    """Mixed C1/C2 token pages, private ring, and sliding-window cache."""
+@pytest.fixture(params=["private-state", "full-attention", "full-and-swa"])
+def cache_layout(request):
+    """Dense attention or mixed C1/C2 + SWA, with optional private state."""
     specs = {
         "model.layers.0.long_kv_cache": AscendMLAAttentionSpec(
             block_size=128,
@@ -118,6 +124,14 @@ def cache_layout():
         ],
     )
 
+    if request.param != "private-state":
+        plan.kv_cache_groups.pop(1)
+    if request.param == "full-attention":
+        plan.kv_cache_groups.pop()
+        plan.kv_cache_groups[0].kv_cache_spec = FullAttentionSpec(
+            block_size=128, num_kv_heads=1, head_size=8, dtype=torch.bfloat16
+        )
+
     def allocate():
         caches = {}
         for group in plan.kv_cache_groups:
@@ -127,8 +141,10 @@ def cache_layout():
                     spec = spec.kv_cache_specs[name]
                 rows = spec.block_size // spec.tokens_per_state
                 shape = (plan.num_blocks, rows, 1, spec.head_size)
-                raw = aligned_buffer(int(np.prod(shape)) * torch.empty((), dtype=spec.dtype).element_size())
-                caches[name] = raw.view(spec.dtype).view(shape)
+                planes = 2 if type(spec) is FullAttentionSpec else 1
+                raw = aligned_buffer(planes * int(np.prod(shape)) * torch.empty((), dtype=spec.dtype).element_size())
+                tensors = raw.view(spec.dtype).view(planes, *shape)
+                caches[name] = tuple(tensors) if planes == 2 else tensors[0]
         return caches
 
     return plan, allocate
@@ -168,6 +184,9 @@ def payload_value(tokens, end, name, plane):
 @pytest.mark.parametrize("load_async", [False, True])
 def test_raw_sequence_lifecycle(cache_layout, devices_and_store, prefix_unit, load_async):
     plan, allocate = cache_layout
+    if len(plan.kv_cache_groups) == 1 and prefix_unit == 32:
+        pytest.skip("The upstream single-group scheduler always hashes whole 128-token blocks")
+    has_private_state = any(not is_prefix_cacheable(group.kv_cache_spec) for group in plan.kv_cache_groups)
     config = create_vllm_config(
         max_num_batched_tokens=1024,
         kv_transfer_config=KVTransferConfig(
@@ -293,7 +312,7 @@ def test_raw_sequence_lifecycle(cache_layout, devices_and_store, prefix_unit, lo
     try:
         run_request("producer", producer_tokens, 0)
         saved = dict(MemoryBackend.payloads)
-        assert saved and not any("@group:1@" in key for key in saved)
+        assert saved
         # Clear the real local prefix cache; the next request must use the Store.
         for case, (length, fork, hit) in enumerate(
             [
@@ -319,17 +338,23 @@ def test_raw_sequence_lifecycle(cache_layout, devices_and_store, prefix_unit, lo
             tokens = list(range(length))
             if fork is not None:
                 tokens[fork] += 1000
+            if not has_private_state and fork is None:
+                # Legacy full hits still reserve only the final token.
+                hit = {127: 0, 128: 127, 129: 128, 256: 255, 257: 256, 512: 511, 513: 512}[length]
             run_request(f"consumer-{case}", tokens, hit)
             assert bool(pool.m_store.loads) == bool(hit)
-            assert not any("@group:1@" in key for key in MemoryBackend.payloads)
+            if has_private_state:
+                assert not any("@group:1@" in key for key in MemoryBackend.payloads)
         assert scheduler.reset_prefix_cache()
         MemoryBackend.payloads = dict(saved)
-        run_request("local-prefix", producer_tokens[:128], 0)
+        run_request("local-prefix", producer_tokens[:128], 0 if has_private_state else 127)
         run_request("mixed-local-remote", list(range(513)), 512, expected_local=128)
         assert scheduler.reset_prefix_cache()
-        MemoryBackend.payloads = {key: value for key, value in saved.items() if "@group:2@" not in key}
-        run_request("missing-swa", producer_tokens, 0)
-        assert not any("@group:1@" in key for key in pool.m_store.lookups)
+        missing_group = len(plan.kv_cache_groups) - 1
+        MemoryBackend.payloads = {key: value for key, value in saved.items() if f"@group:{missing_group}@" not in key}
+        run_request("missing-group", producer_tokens, 0)
+        if has_private_state:
+            assert not any("@group:1@" in key for key in pool.m_store.lookups)
     finally:
         server = worker.lookup_server
         server.running = False
