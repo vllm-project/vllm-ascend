@@ -2224,6 +2224,7 @@ class TestKVPPExecute(unittest.TestCase):
             with self.subTest(computed=computed):
                 events.clear()
                 runner = NPUModelRunner.__new__(NPUModelRunner)
+                runner.dfx_recorder = MagicMock() if computed is not None else None
                 runner.ascend_config = SimpleNamespace(
                     scheduler_config=SimpleNamespace(
                         profiling_chunk_config=SimpleNamespace(enabled=False, need_timing=False)
@@ -2293,6 +2294,8 @@ class TestKVPPExecute(unittest.TestCase):
                     patch.object(module, "update_cos_sin"),
                 ):
                     self.assertIs(runner.execute_model(scheduler_output), result)
+                if runner.dfx_recorder is not None:
+                    runner.dfx_recorder.record_schedule.assert_called_once_with(scheduler_output)
                 self.assertEqual(
                     events, ([("prepare", expected)] if computed is not None else []) + ["forward", "complete"]
                 )

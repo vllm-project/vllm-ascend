@@ -358,6 +358,9 @@ class NPUWorker(WorkerBase):
         self._weight_update_active = False
 
     def shutdown(self) -> None:
+        recorder = getattr(getattr(self, "model_runner", None), "dfx_recorder", None)
+        if recorder is not None:
+            recorder.close()
         if ensure_kv_transfer_shutdown is not None:
             ensure_kv_transfer_shutdown()
 
@@ -371,6 +374,18 @@ class NPUWorker(WorkerBase):
             shutdown_fn = getattr(model_runner, "shutdown", None)
             if callable(shutdown_fn):
                 shutdown_fn()
+
+    def dump_dfx_trace(self, reason: str, source_execution_id: int | None = None) -> dict:
+        """Queue local host history export via worker RPC; no device collective."""
+        recorder = getattr(getattr(self, "model_runner", None), "dfx_recorder", None)
+        if recorder is None:
+            return {"status": "disabled_or_unavailable"}
+        return recorder.trigger(reason, source_execution_id)
+
+    def get_dfx_stats(self) -> dict:
+        """Inspect export completion/failure counters without device access."""
+        recorder = getattr(getattr(self, "model_runner", None), "dfx_recorder", None)
+        return recorder.stats() if recorder is not None else {"status": "disabled_or_unavailable"}
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         self.cache_config.num_gpu_blocks = num_gpu_blocks
@@ -1205,7 +1220,10 @@ class NPUWorker(WorkerBase):
     def execute_dummy_batch(self) -> None:
         self.log_memory_stats()
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
-        self.model_runner._dummy_run(num_tokens, uniform_decode=True)
+        if getattr(self.model_runner, "dfx_recorder", None) is not None:
+            self.model_runner._dummy_run(num_tokens, uniform_decode=True, dfx_sync_only=True)
+        else:
+            self.model_runner._dummy_run(num_tokens, uniform_decode=True)
 
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""

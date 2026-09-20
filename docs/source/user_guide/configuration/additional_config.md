@@ -52,6 +52,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `finegrained_tp_config`             | dict | `{}`    | Configuration options for module tensor parallelism                                                       |
 | `ascend_compilation_config`         | dict | `{}`    | Configuration options for ascend compilation                                                              |
 | `eplb_config`                       | dict | `{}`    | Runner-specific EPLB extensions. See [Expert Parallelism Load Balancer](../feature_guide/expert_parallelism_load_balancer.md). |
+| `dfx_config`                        | dict | `{}`    | Disabled-by-default MRV1/MRV2 DFX with host history and separately enabled device probes. See [KV-centered DFX](../../developer_guide/host_flight_recorder.md) for limits, coverage and export. |
 | `scheduler_config`                  | dict | `{}`    | Configuration options for Ascend scheduler extensions, including balance scheduling, recompute scheduling, DyntraLB, ShortRequestFirst, and dynamic chunked pipeline parallel. |
 | `refresh`                           | bool | `false` | Whether to refresh global Ascend configuration content. This is usually used by rlhf or ut/e2e test case. |
 | `dump_config`                       | dict | `None`  | Inline msprobe dump configuration. vLLM-Ascend will materialize it to a temporary JSON file and pass that file to the debugger. |

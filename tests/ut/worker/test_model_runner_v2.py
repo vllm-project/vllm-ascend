@@ -21,6 +21,9 @@ from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 
 def _make_runner(need_timing: bool = True):
     runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.dfx_recorder = None
+    runner._dfx_sync_only = False
+    runner._dfx_output_context = None
     runner.pcp_manager = None
     runner.ascend_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(need_timing=need_timing))
@@ -388,7 +391,9 @@ def _parent_init(self, vllm_config, device, *, full_graph=False, speculative=Fal
 
 def test_init_without_spec_pp():
     vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(enable_eplb=False))
-    ascend_config = SimpleNamespace(eplb_config=SimpleNamespace(load_collection_phase="all"))
+    ascend_config = SimpleNamespace(
+        eplb_config=SimpleNamespace(load_collection_phase="all"), dfx_config=SimpleNamespace(enabled=False)
+    )
     with (
         patch("vllm_ascend.worker.v2.model_runner.get_ascend_config", return_value=ascend_config),
         patch("vllm_ascend.worker.v2.model_runner.set_potential_max_tokens"),
@@ -422,9 +427,22 @@ def test_init_without_spec_pp():
     assert runner.decode_query_len == 1
 
 
+def test_dfx_v2_prepare_attn_preserves_parent_outputs():
+    runner = _make_runner()
+    runner.dfx_recorder = Mock()
+    batch = object()
+    tables, slots = object(), object()
+    with patch.object(GPUModelRunner, "prepare_attn", return_value=(tables, slots)) as parent:
+        assert runner.prepare_attn(batch) == (tables, slots)
+    parent.assert_called_once_with(batch)
+    runner.dfx_recorder.prepare_device.assert_called_once_with(runner, batch, tables, slots)
+
+
 def test_init_spec_pp_full_graph_and_speculator():
     vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(enable_eplb=True))
-    ascend_config = SimpleNamespace(eplb_config=SimpleNamespace(load_collection_phase="decode"))
+    ascend_config = SimpleNamespace(
+        eplb_config=SimpleNamespace(load_collection_phase="decode"), dfx_config=SimpleNamespace(enabled=False)
+    )
     spec_pp = SimpleNamespace(needs_aux_hidden_states=True)
     speculator = SimpleNamespace()
     with (

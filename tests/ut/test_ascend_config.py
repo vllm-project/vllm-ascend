@@ -1558,6 +1558,22 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_dfx_config_is_opt_in_and_validated_by_factory(self, mock_fix):
+        vc = VllmConfig()
+        self.assertFalse(init_ascend_config(vc).dfx_config.enabled)
+        vc.additional_config = {
+            "refresh": True,
+            "dfx_config": {"enabled": True, "output_dir": "/secure/dfx", "max_records": 32},
+        }
+        config = init_ascend_config(vc)
+        self.assertTrue(config.dfx_config.enabled)
+        self.assertEqual(config.dfx_config.max_records, 32)
+        vc.additional_config = {"refresh": True, "dfx_config": {"enabled": True}}
+        with self.assertRaises(ValueError):
+            init_ascend_config(vc)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_refresh_string_false_reuses_cached_config(self, mock_fix):
         vc = VllmConfig()
         vc.additional_config = {"refresh": "false"}

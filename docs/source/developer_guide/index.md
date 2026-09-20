@@ -28,3 +28,4 @@ Explore the design documents covering patch architecture, CPU binding, model run
 - **[Optimization and Tuning](performance_and_debug/optimization_and_tuning.md)** — Performance optimization
 - **[Service Profiling Guide](performance_and_debug/service_profiling_guide.md)** — Service profiling
 - **[msprobe Guide](performance_and_debug/msprobe_guide.md)** — Debugging with msprobe
+- **[Host Flight Recorder](host_flight_recorder.md)** — Opt-in MRV1 host scheduling and batch history

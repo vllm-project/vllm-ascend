@@ -22,6 +22,7 @@ from contextvars import ContextVar
 
 import numpy as np
 import torch
+from vllm import envs as vllm_envs
 from vllm.compilation import breakable_cudagraph
 from vllm.config import VllmConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
@@ -29,6 +30,7 @@ from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_
 from vllm.sequence import IntermediateTensors
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.outputs import AsyncModelRunnerOutput
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
@@ -84,6 +86,24 @@ if vllm_version_is("0.29.0"):
     from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 
 
+class _DfxV2AsyncOutput(AsyncModelRunnerOutput):
+    """Observe only the host result of the original async resolution."""
+
+    def __init__(self, inner, recorder, context):
+        self.inner = inner
+        self.model_runner_output = inner.model_runner_output
+        self.recorder = recorder
+        self.context = context
+        self.recorded = False
+
+    def get_output(self):
+        output = self.inner.get_output()
+        if not self.recorded:
+            self.recorded = True
+            self.recorder.record_output(output, self.context)
+        return output
+
+
 class NPUModelRunner(GPUModelRunner):
     """Model runner for Ascend NPUs."""
 
@@ -97,6 +117,9 @@ class NPUModelRunner(GPUModelRunner):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
+        self.dfx_recorder = None
+        self._dfx_sync_only = False
+        self._dfx_output_context = None
         self.kvpp = KVPPRuntime()
         # Adaptive verification uses this flag to apply FIA-specific query
         # boundary and sequence length padding during FULL graph execution.
@@ -200,6 +223,19 @@ class NPUModelRunner(GPUModelRunner):
         set_mc2_tokens_capacity(vllm_config, self.max_num_reqs, self.decode_query_len)
         set_mc2_mask(vllm_config, self.device)
         set_potential_max_tokens(vllm_config)
+        if self.ascend_config.dfx_config.enabled:
+            from vllm_ascend.dfx.recorder import V2FlightRecorder
+
+            self.dfx_recorder = V2FlightRecorder.create(
+                self.ascend_config.dfx_config,
+                {
+                    "dp_rank": self.dp_rank,
+                    "rank": self.parallel_config.rank,
+                    "tensor_parallel_size": self.parallel_config.tensor_parallel_size,
+                    "pipeline_parallel_size": self.parallel_config.pipeline_parallel_size,
+                    "runner": "mrv2",
+                },
+            )
 
     @property
     def pcp_manager_cls(self) -> type[AscendPCPManager]:
@@ -245,10 +281,17 @@ class NPUModelRunner(GPUModelRunner):
             )
 
         self._restore_replicated_draft_target_states()
+        context = self._dfx_output_context if self.dfx_recorder is not None else None
+        self._dfx_output_context = None
         output = super().sample_tokens(grammar_output)
         if self.use_spec_pp and self.is_last_pp_rank:
             assert self.pp_handler is not None
             self.pp_handler.broadcast_drafts()
+        if self.dfx_recorder is not None and context is not None and output is not None:
+            if isinstance(output, AsyncModelRunnerOutput):
+                output = _DfxV2AsyncOutput(output, self.dfx_recorder, context)
+            else:
+                self.dfx_recorder.record_output(output, context)
         return output
 
     def initialize_kv_cache(
@@ -287,6 +330,8 @@ class NPUModelRunner(GPUModelRunner):
             static_forward_context=self.compilation_config.static_forward_context,
         )
         self.model_state.kvpp_runtime = self.kvpp
+        if self.dfx_recorder is not None:
+            self.dfx_recorder.bind_v2(self, cache_layout=vllm_envs.VLLM_KV_CACHE_LAYOUT)
 
     @torch.inference_mode()
     def execute_model(
@@ -314,16 +359,25 @@ class NPUModelRunner(GPUModelRunner):
             get_kv_transfer_group().handle_preemptions(kv_connector_metadata)
 
         self.model_state.kvpp_is_dummy_run = dummy_run or is_profile
+        recorder = self.dfx_recorder
+        if recorder is not None:
+            self._dfx_output_context = None
+            if not is_profile and (not dummy_run or self._dfx_sync_only):
+                recorder.start(scheduler_output, sync_only=dummy_run)
         with pcp_dispatch_context():
-            output = super().execute_model(
-                scheduler_output,
-                intermediate_tensors=intermediate_tensors,
-                dummy_run=dummy_run,
-                skip_attn_for_dummy_run=skip_attn_for_dummy_run,
-                is_profile=is_profile,
-                context_len=context_len,
-                **({} if vllm_version_is("0.29.0") else {"valid_dummy_state_slots": valid_dummy_state_slots}),
-            )
+            try:
+                output = super().execute_model(
+                    scheduler_output,
+                    intermediate_tensors=intermediate_tensors,
+                    dummy_run=dummy_run,
+                    skip_attn_for_dummy_run=skip_attn_for_dummy_run,
+                    is_profile=is_profile,
+                    context_len=context_len,
+                    **({} if vllm_version_is("0.29.0") else {"valid_dummy_state_slots": valid_dummy_state_slots}),
+                )
+            finally:
+                if recorder is not None and recorder.active_execution:
+                    recorder.finish()
         self.model_state.kvpp_is_dummy_run = False
         self.kvpp.complete_forward()
 
@@ -617,16 +671,34 @@ class NPUModelRunner(GPUModelRunner):
         # For mla/sfa, update cos/sin. Here is for execute_model.
         update_cos_sin(input_batch.positions)
 
+        if self.dfx_recorder is not None and self.dfx_recorder.active_execution:
+            self.dfx_recorder.batch(self, input_batch, batch_desc)
+            if self.is_last_pp_rank:
+                # Scheduler order is not necessarily the final batch order.
+                output_batch = self.pcp_manager.global_batch if self.pcp_manager is not None else input_batch
+                self._dfx_output_context = self.dfx_recorder.output_context(
+                    output_batch.req_ids, self.vocab_size, scheduler_output.scheduled_spec_decode_tokens
+                )
+
         return input_batch
+
+    def prepare_attn(self, input_batch):
+        block_tables, slot_mappings = super().prepare_attn(input_batch)
+        if self.dfx_recorder is not None:
+            self.dfx_recorder.prepare_device(self, input_batch, block_tables, slot_mappings)
+        return block_tables, slot_mappings
 
     def prepare_dummy_attn(
         self, input_batch: AscendInputBatch, valid_state_slots: bool = False
     ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
         if self.pcp_manager is None:
-            return super().prepare_dummy_attn(
+            block_tables, slot_mappings = super().prepare_dummy_attn(
                 input_batch,
                 **({} if vllm_version_is("0.29.0") else {"valid_state_slots": valid_state_slots}),
             )
+            if self.dfx_recorder is not None:
+                self.dfx_recorder.prepare_device(self, input_batch, block_tables, slot_mappings)
+            return block_tables, slot_mappings
         block_tables, slot_mappings = self.pcp_manager.prepare_dummy_attn(input_batch)
         if not vllm_version_is("0.29.0") and valid_state_slots:
             # Match the upstream state-slot contract in the persistent PCP views.
@@ -708,6 +780,7 @@ class NPUModelRunner(GPUModelRunner):
         uniform_decode: bool = False,
         skip_eplb: bool = False,
         is_profile: bool = False,
+        dfx_sync_only: bool = False,
         **kwargs,
     ):
         """Join the LM-head collectives on dummy batches for lmhead TP.
@@ -718,15 +791,19 @@ class NPUModelRunner(GPUModelRunner):
         ``_lmhead_tp_max_num_logits()``; a mismatch hangs). Skipped for
         profiling and non-last PP ranks. Draft-side alignment is not covered.
         """
-        hidden_states, sample_hidden_states = super()._dummy_run(
-            num_tokens,
-            *args,
-            skip_attn=skip_attn,
-            uniform_decode=uniform_decode,
-            skip_eplb=skip_eplb,
-            is_profile=is_profile,
-            **kwargs,
-        )
+        self._dfx_sync_only = dfx_sync_only
+        try:
+            hidden_states, sample_hidden_states = super()._dummy_run(
+                num_tokens,
+                *args,
+                skip_attn=skip_attn,
+                uniform_decode=uniform_decode,
+                skip_eplb=skip_eplb,
+                is_profile=is_profile,
+                **kwargs,
+            )
+        finally:
+            self._dfx_sync_only = False
         if lmhead_tp_enable() and not is_profile and hidden_states is not None:
             dummy_indices = torch.zeros(
                 self._lmhead_tp_max_num_logits(),

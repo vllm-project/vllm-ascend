@@ -235,6 +235,8 @@ from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
+
+    from vllm_ascend.dfx.recorder import FlightRecorder
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
 
@@ -306,6 +308,21 @@ def get_tp_context(drafter):
     return getattr(drafter, "tp_group_context", nullcontext())
 
 
+class _DfxAsyncModelRunnerOutput(AsyncModelRunnerOutput):
+    """Observe the existing host resolution without issuing another device wait."""
+
+    def __init__(self, inner, recorder, context):
+        self.inner = inner
+        self.model_runner_output = inner.model_runner_output
+        self.recorder = recorder
+        self.context = context
+
+    def get_output(self):
+        output = self.inner.get_output()
+        self.recorder.record_output(output, self.context)
+        return output
+
+
 def _count_nans_per_row(logits: torch.Tensor) -> torch.Tensor:
     """Count NaNs without the unsupported NPU ``sum(dtype=...)`` overload."""
     return logits.isnan().sum(dim=-1).to(dtype=torch.int32)
@@ -334,6 +351,8 @@ class NPUModelRunner(GPUModelRunner):
     # standardized backing allocation. The default runner preserves that
     # contract for its layer/block-compact Attention+Mamba path.
     supports_standardized_shared_kv_backing = True
+
+    dfx_recorder: "FlightRecorder | None" = None
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Must be set before super().__init__() because parent init may call
@@ -391,6 +410,22 @@ class NPUModelRunner(GPUModelRunner):
 
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
+        self.dfx_recorder = None
+        if self.ascend_config.dfx_config.enabled:
+            from vllm_ascend.dfx.recorder import FlightRecorder
+
+            if type(self) is not NPUModelRunner:
+                raise ValueError("dfx_config currently supports the MRV1 NPUModelRunner only")
+            self.dfx_recorder = FlightRecorder.create(
+                self.ascend_config.dfx_config,
+                {
+                    "dp_rank": self.dp_rank,
+                    "rank": self.parallel_config.rank,
+                    "tensor_parallel_size": self.parallel_config.tensor_parallel_size,
+                    "pipeline_parallel_size": self.parallel_config.pipeline_parallel_size,
+                    "runner": "mrv1",
+                },
+            )
         self.use_score_encoder_cache = is_score_encoder_cache_manager(self.vllm_config)
 
         self.kvpp = KVPPRuntime()
@@ -1307,6 +1342,8 @@ class NPUModelRunner(GPUModelRunner):
             token_indices_tensor,
             out=self.input_ids.cpu[:total_num_scheduled_tokens],
         )
+        if self.dfx_recorder is not None:
+            self.dfx_recorder.record_batch(self, scheduler_output, positions_np, num_scheduled_tokens)
         if self.enable_prompt_embeds:
             is_token_ids = self.input_batch.is_token_ids_tensor.flatten()
             torch.index_select(
@@ -2156,6 +2193,8 @@ class NPUModelRunner(GPUModelRunner):
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
         self._cpp_execution_time_ms = None
+        if self.dfx_recorder is not None:
+            self.dfx_recorder.record_schedule(scheduler_output)
         profiling_chunk_config = self.ascend_config.scheduler_config.profiling_chunk_config
         execution_start_time = _start_profiling_chunk_timing(
             profiling_chunk_config,
@@ -2233,6 +2272,8 @@ class NPUModelRunner(GPUModelRunner):
                 deferred_state_corrections_fn = self._update_states(
                     scheduler_output
                 )
+                if self.dfx_recorder is not None and self.dfx_recorder.config.track_block_ownership:
+                    self.dfx_recorder.record_lifecycle(self, scheduler_output)
 
                 if has_ec_transfer() and not get_ec_transfer().is_consumer:
                     self._start_dump_data(scheduled_tokens = scheduler_output.num_scheduled_tokens)
@@ -2513,6 +2554,11 @@ class NPUModelRunner(GPUModelRunner):
                         mamba_copy_connector = connector
                 if mamba_copy_connector is None:
                     mamba_utils.do_mamba_copy_block(preprocess_bufs)
+            dfx_frame = None
+            if self.dfx_recorder is not None:
+                dfx_frame = self.dfx_recorder.begin_device(
+                    self, attn_metadata, input_ids, positions, graph_mode=cudagraph_mode,
+                )
             hidden_states = self._model_forward(
                 num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
             )
@@ -2541,6 +2587,8 @@ class NPUModelRunner(GPUModelRunner):
                     self._finalize_dump_data()
                     if self.dynamic_eplb:
                         self.eplb_updator.forward_end(self.eplb_heat_collection_status)
+                    if self.dfx_recorder is not None:
+                        self.dfx_recorder.end_device(dfx_frame)
                     return hidden_states
                 if self.is_pooling_model:
                     # Return the pooling output.
@@ -2549,6 +2597,8 @@ class NPUModelRunner(GPUModelRunner):
                     )
                     output.kv_connector_output = kv_connector_output
                     self._finalize_dump_data()
+                    if self.dfx_recorder is not None:
+                        self.dfx_recorder.end_device(dfx_frame)
                     return output
 
                 sample_hidden_states = hidden_states[logits_indices]
@@ -2574,6 +2624,8 @@ class NPUModelRunner(GPUModelRunner):
                 assert broadcasted is not None
                 logits = broadcasted["logits"]
 
+            if self.dfx_recorder is not None:
+                self.dfx_recorder.end_device(dfx_frame, logits)
             # Apply structured output bitmasks if present
             self.execute_model_state = ExecuteModelState(
                 scheduler_output,
@@ -2788,6 +2840,13 @@ class NPUModelRunner(GPUModelRunner):
                     routing_data=self.routed_experts_cpu[:total].numpy(),
                     slot_mapping=self.routed_experts_slot_mapping_cpu[:total].numpy(),
                 )
+            if self.dfx_recorder is not None:
+                context = self.dfx_recorder.output_context(
+                    model_runner_output.req_ids,
+                    self.input_batch.vocab_size,
+                    scheduler_output.scheduled_spec_decode_tokens,
+                )
+                self.dfx_recorder.record_output(model_runner_output, context)
             return model_runner_output
 
         # Async path: produce a device-side snapshot that the async
@@ -2826,6 +2885,12 @@ class NPUModelRunner(GPUModelRunner):
             async_output.sampled_token_ids_cpu,
             async_output.async_copy_ready_event,
         )
+        if self.dfx_recorder is not None:
+            context = self.dfx_recorder.output_context(
+                model_runner_output.req_ids, self.input_batch.vocab_size, scheduler_output.scheduled_spec_decode_tokens,
+            )
+            if context is not None:
+                return _DfxAsyncModelRunnerOutput(async_output, self.dfx_recorder, context)
         return async_output
 
     # overwrite _sample for lmhead_tp_enable and need_accepted_tokens
@@ -3691,7 +3756,10 @@ class NPUModelRunner(GPUModelRunner):
         profile_seq_lens: int | None = None,
         profile_cpp: bool = False,
         skip_gdn_state_update: bool = False,
+        dfx_sync_only: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if dfx_sync_only and self.dfx_recorder is not None:
+            self.dfx_recorder.record_sync_execution()
         mm_config = self.vllm_config.model_config.multimodal_config
         if mm_config and mm_config.mm_encoder_only:
             # The current dummy run only covers LM execution, so we can skip it.
@@ -3990,9 +4058,19 @@ class NPUModelRunner(GPUModelRunner):
                 if not is_graph_capturing and self.ascend_config.enable_force_eplb \
                     and self.vllm_config.model_config.is_moe:
                     build_force_eplb_topk(self.device, self.max_num_tokens)
+                dfx_frame = None
+                if self.dfx_recorder is not None:
+                    dfx_frame = self.dfx_recorder.begin_device(
+                        self, attn_metadata, input_ids, positions, kind="sync_only",
+                        graph_mode=cudagraph_runtime_mode,
+                        skip=(is_profile or is_graph_capturing or profile_cpp
+                              or not (skip_gdn_state_update or dfx_sync_only)),
+                    )
                 outputs = self._model_forward(
                     num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds
                 )
+                if self.dfx_recorder is not None:
+                    self.dfx_recorder.end_device(dfx_frame)
             if active_device_metadata_executor is not None:
                 active_device_metadata_executor.release()
             self.kvpp.complete_forward()
@@ -4289,6 +4367,8 @@ class NPUModelRunner(GPUModelRunner):
             kv_cache_config,
             kv_cache_allocation_context=kv_cache_allocation_context,
         )
+        if self.dfx_recorder is not None:
+            self.dfx_recorder.bind_device(self, kv_caches, cache_layout=envs.VLLM_KV_CACHE_LAYOUT)
         # TODO: refactor the logic of attention
         if (
             self.speculative_config
@@ -4330,6 +4410,8 @@ class NPUModelRunner(GPUModelRunner):
             self.sparse_kv_offload_manager.register_kv_caches(kv_caches)
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)
+            if self.dfx_recorder is not None:
+                self.dfx_recorder.audit_transfer(get_kv_transfer_group(), kv_caches, kv_cache_config)
 
         if self.model_config.enable_return_routed_experts:
             self.init_routed_experts_capturer()
