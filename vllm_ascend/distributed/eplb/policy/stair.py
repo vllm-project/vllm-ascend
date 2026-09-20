@@ -9,6 +9,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 from scipy.optimize import linear_sum_assignment  # type: ignore
+from vllm.distributed import get_eplb_group
 from vllm.distributed.eplb.policy import AbstractEplbPolicy
 
 from vllm_ascend.ascend_config import StairConfig
@@ -114,24 +115,27 @@ class StairEplbPolicy(AbstractEplbPolicy):
 
     def rebalance_experts(
         self,
-        weight: torch.Tensor,
+        weight: torch.Tensor | PreparedLoadStats,
         num_replicas: int,
         num_groups: int,
         num_nodes: int,
         num_ranks: int,
         old_global_expert_indices: torch.Tensor | None = None,
+        *,
+        last_committed_mean_ratios: np.ndarray | None = None,
+        rank_node_ids: np.ndarray | None = None,
     ) -> torch.Tensor:
-        """Plan through the placement-only upstream policy contract.
+        """Plan through the upstream policy contract with STAIR context.
 
-        The upstream contract has no temporal window, commit anchors, explicit
-        source plan, or rank-to-node mapping. This adapter treats ``weight`` as
-        one sample, assumes each node contains contiguous ranks, and uses this
-        policy's configured controls. ``num_groups`` is validated for signature
-        compatibility but does not constrain placement. The result is a CPU
-        ``[layers, num_replicas]`` tensor with the current mapping's dtype.
-        Because upstream chooses migration sources again, its transfers need not
-        preserve STAIR's planned rank-pair limit. Call :meth:`plan_rebalance`
-        when the complete placement and source plan are required.
+        A tensor is either ``[layers, experts]`` or an uncompressed
+        ``[samples, layers, experts]`` window. A :class:`PreparedLoadStats`
+        carries pre-binned sums and sample counts; its values must already
+        reside on CPU, where planning runs. Optional anchors and node IDs
+        enable the full STAIR path while preserving the upstream positional
+        contract. ``num_groups`` is validated for that contract but does not
+        constrain STAIR placement. The CPU result is ``[layers, num_replicas]``;
+        its source-coordinate attributes are ``[layers, ranks, slots]`` and
+        predicted ratios are ``[layers]``.
         """
         controls = num_replicas, num_groups, num_nodes, num_ranks
         invalid_type = any(isinstance(value, bool) or not isinstance(value, int) for value in controls)
@@ -145,28 +149,62 @@ class StairEplbPolicy(AbstractEplbPolicy):
         current_map = old_global_expert_indices.cpu()
         if current_map.ndim != 2 or current_map.shape[1] != num_replicas:
             raise ValueError("current expert placement must be [layers, num_replicas]")
-        logical_load = weight.float().cpu().numpy()
-        if logical_load.ndim != 2 or logical_load.shape[0] != current_map.shape[0]:
-            raise ValueError("weight must be [layers, logical_experts] and match the placement")
+        if isinstance(weight, PreparedLoadStats):
+            if weight.values.device.type != "cpu":
+                raise ValueError("prepared STAIR load statistics must be on CPU")
+            logical_load_values = weight.values.to(dtype=torch.float64).numpy()
+            sample_counts = weight.sample_counts
+            if sample_counts is None:
+                raise ValueError("prepared STAIR load statistics require sample counts")
+        else:
+            logical_load_values = weight.to(device="cpu", dtype=torch.float64).numpy()
+            logical_load_values = (
+                logical_load_values[None, ...] if logical_load_values.ndim == 2 else logical_load_values
+            )
+            sample_counts = None
+        if logical_load_values.ndim != 3 or logical_load_values.shape[1] != current_map.shape[0]:
+            raise ValueError("weight must be [samples, layers, logical_experts] and match the placement")
 
         current_placement = current_map.numpy().reshape(current_map.shape[0], num_ranks, num_replicas // num_ranks)
-        ranks_per_node = num_ranks // num_nodes
-        node_ids = np.arange(num_ranks, dtype=np.int64) // ranks_per_node
-        plan = self.plan_rebalance(
-            logical_load[None, ...],
-            current_placement,
-            np.full(current_placement.shape[0], np.nan, dtype=np.float64),
-            node_ids,
-            self.config,
-        )
+        if last_committed_mean_ratios is None:
+            last_committed_mean_ratios = np.full(current_placement.shape[0], np.nan)
+        if rank_node_ids is None:
+            rank_node_ids = np.arange(num_ranks, dtype=np.int64) // (num_ranks // num_nodes)
+        cpu_group = get_eplb_group().cpu_group
+        if cpu_group.size() != num_ranks:
+            raise RuntimeError("STAIR topology does not match the stage-local EPLB group")
+        if num_ranks == 1:
+            plan = self.plan_rebalance(
+                logical_load_values=logical_load_values,
+                current_rank_expert_ids=current_placement,
+                last_committed_mean_ratios=last_committed_mean_ratios,
+                rank_node_ids=rank_node_ids,
+                config=self.config,
+                sample_counts=sample_counts,
+            )
+        else:
+            plan = self.plan_sharded_rebalance(
+                logical_load_values=logical_load_values,
+                current_rank_expert_ids=current_placement,
+                last_committed_mean_ratios=last_committed_mean_ratios,
+                rank_node_ids=rank_node_ids,
+                config=self.config,
+                cpu_group=cpu_group,
+                sample_counts=sample_counts,
+            )
         self.validate_plan(
             current_placement,
             plan,
-            logical_load.shape[1],
+            logical_load_values.shape[2],
             self.config.rank_pair_migration_limit,
         )
         planned_map = plan.rank_expert_ids.reshape(current_map.shape)
-        return torch.from_numpy(planned_map).to(dtype=current_map.dtype)
+        target = torch.from_numpy(planned_map).to(dtype=current_map.dtype)
+        # The async migration patch consumes STAIR's exact source plan.
+        target.source_rank_ids = plan.source_rank_ids
+        target.source_slot_ids = plan.source_slot_ids
+        target.predicted_mean_ratios = plan.predicted_mean_ratios
+        return target
 
     # Load modeling and placement scoring.
 
@@ -973,26 +1011,48 @@ class StairEplbPolicy(AbstractEplbPolicy):
     @classmethod
     def plan_rebalance(
         cls,
-        logical_load_samples: np.ndarray,
+        logical_load_values: np.ndarray,
         current_rank_expert_ids: np.ndarray,
         last_committed_mean_ratios: np.ndarray,
         rank_node_ids: np.ndarray,
         config: StairConfig,
         layer_ids: Sequence[int] | None = None,
+        sample_counts: np.ndarray | None = None,
     ) -> StairPlan:
-        """Plan every eligible layer from a ``[steps, layers, experts]`` window.
+        """Plan every eligible layer from temporal loads.
 
-        Current placement is ``[layers, ranks, slots]``, committed ratios are
-        ``[layers]``, and node IDs are ``[ranks]``. A NaN committed ratio means
-        that the layer has no commit anchor; its relative deterioration is 0
-        for sorting. Eligible layers are planned by descending current mean
-        ratio, relative deterioration, then layer ID. ``layer_ids`` contains
-        stage-local indices on the input layer axis. The returned plan keeps its
-        full shape, but only those indices are authoritative; omitted layers are
-        identity/NaN placeholders that must not be committed before the shards
-        are gathered.
+        ``logical_load_values`` contains raw ``[steps, layers, experts]``
+        samples when ``sample_counts`` is absent, otherwise ``[bins, layers,
+        experts]`` pre-binned sums with one positive count per bin. Current
+        placement is ``[layers, ranks, slots]``,
+        committed ratios are ``[layers]``, and node IDs are ``[ranks]``. A NaN
+        committed ratio means that the layer has no commit anchor; its relative
+        deterioration is 0 for sorting. Eligible layers are planned by
+        descending current mean ratio, relative deterioration, then layer ID.
+        ``layer_ids`` contains stage-local indices on the input layer axis. The
+        returned plan keeps its full shape, but only those indices are
+        authoritative; omitted layers are identity/NaN placeholders that must
+        not be committed before the shards are gathered.
         """
-        load_bins, sample_counts = cls.compress_load_window(logical_load_samples, config.load_window_bins)
+        if sample_counts is None:
+            load_bins, bin_sample_counts = cls.compress_load_window(logical_load_values, config.load_window_bins)
+        else:
+            load_sums = np.asarray(logical_load_values, dtype=np.float64)
+            bin_sample_counts = np.asarray(sample_counts)
+            if (
+                load_sums.ndim != 3
+                or load_sums.shape[0] == 0
+                or not np.all(np.isfinite(load_sums))
+                or np.any(load_sums < 0)
+            ):
+                raise ValueError("prepared loads must be finite non-negative [bins, layers, experts]")
+            if (
+                bin_sample_counts.shape != (load_sums.shape[0],)
+                or not np.issubdtype(bin_sample_counts.dtype, np.integer)
+                or np.any(bin_sample_counts <= 0)
+            ):
+                raise ValueError("sample_counts must contain one positive integer per bin")
+            load_bins = load_sums / bin_sample_counts[:, None, None]
         current = np.asarray(current_rank_expert_ids)
         if current.ndim != 3 or 0 in current.shape or not np.issubdtype(current.dtype, np.integer):
             raise ValueError("current_rank_expert_ids must be a non-empty integer [layers, ranks, slots] array")
@@ -1027,7 +1087,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
         layer_priority_keys = []
         for layer_id in selected_layers:
             current_imbalance = cls.gated_layer_imbalance(
-                load_bins[:, layer_id], sample_counts, current[layer_id], anchors[layer_id], config
+                load_bins[:, layer_id], bin_sample_counts, current[layer_id], anchors[layer_id], config
             )
             if current_imbalance is None:
                 continue
@@ -1037,7 +1097,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
             layer_priority_keys.append((-current_imbalance.mean_ratio, -relative_deterioration, layer_id))
 
         for _, _, layer_id in sorted(layer_priority_keys):
-            layer_plan = cls.plan_layer(load_bins[:, layer_id], sample_counts, current[layer_id], node_ids, config)
+            layer_plan = cls.plan_layer(load_bins[:, layer_id], bin_sample_counts, current[layer_id], node_ids, config)
             if layer_plan is None:
                 continue
             rank_expert_ids[layer_id] = layer_plan.placement.rank_expert_ids
@@ -1055,12 +1115,13 @@ class StairEplbPolicy(AbstractEplbPolicy):
     @classmethod
     def plan_sharded_rebalance(
         cls,
-        logical_load_samples: np.ndarray,
+        logical_load_values: np.ndarray,
         current_rank_expert_ids: np.ndarray,
         last_committed_mean_ratios: np.ndarray,
         rank_node_ids: np.ndarray,
         config: StairConfig,
         cpu_group: torch.distributed.ProcessGroup,
+        sample_counts: np.ndarray | None = None,
     ) -> StairPlan:
         """Plan round-robin layer shards and gather one stage-local plan.
 
@@ -1081,12 +1142,13 @@ class StairEplbPolicy(AbstractEplbPolicy):
             num_layers = current.shape[0]
             owned_layer_ids = assigned_layer_ids(num_layers, cpu_group.rank(), group_size)
             local_plan = cls.plan_rebalance(
-                logical_load_samples,
+                logical_load_values,
                 current,
                 last_committed_mean_ratios,
                 rank_node_ids,
                 config,
                 layer_ids=owned_layer_ids,
+                sample_counts=sample_counts,
             )
             owned_indices = np.fromiter(owned_layer_ids, dtype=np.int64, count=len(owned_layer_ids))
             local_plan_fields = tuple(
@@ -1098,7 +1160,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
                     local_plan.predicted_mean_ratios,
                 )
             )
-            num_experts = np.asarray(logical_load_samples).shape[2]
+            num_experts = np.asarray(logical_load_values).shape[2]
         except Exception as error:
             local_error = error
 
