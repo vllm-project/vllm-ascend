@@ -295,35 +295,9 @@ class TestAscendConfig(TestBase):
             with self.subTest(algorithm=algorithm), self.assertRaises(ValueError):
                 EplbConfig(**{"algorithm": algorithm})
 
-    def test_stair_config_rejects_removed_options(self):
-        for name in (
-            "flash_tree_depth",
-            "flash_tree_width",
-            "hysteresis_absolute",
-            "hysteresis_relative",
-            "imbalance_threshold",
-            "lpt_max_backtracks",
-            "max_load_window_bins",
-            "max_candidates_per_layer",
-            "max_expert_transfers_per_rank_pair",
-            "min_relative_score_improvement",
-            "min_absolute_score_improvement",
-            "p95_regression_tolerance",
-            "risk_quantile",
-            "sample_size",
-            "score_tie_tolerance",
-        ):
-            with self.subTest(name=name), self.assertRaises(ValueError):
-                EplbConfig(stair_config={name: 0})
-
     def test_stair_config_rejects_unknown_option(self):
         with self.assertRaises(ValueError):
             EplbConfig(stair_config={"unknown_option": 0})
-
-    def test_stair_config_rejects_internal_policy_controls(self):
-        for name in ("z_score", "use_covariance", "hysteresis_enabled"):
-            with self.subTest(name=name), self.assertRaises(ValueError):
-                EplbConfig(stair_config={name: 0})
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")

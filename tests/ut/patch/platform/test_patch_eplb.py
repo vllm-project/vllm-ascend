@@ -5,7 +5,9 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
+import torch
 from vllm.config import EPLBConfig, ParallelConfig, VllmConfig
 from vllm.config import parallel as parallel_module
 from vllm.platforms import current_platform
@@ -132,18 +134,117 @@ def test_communicator_factory_requires_group_coordinator_parameter():
         patch_eplb._wrap_communicator_factory(original_factory)
 
 
-def test_async_workspace_wrapper_refreshes_committed_layer(monkeypatch):
+def _explicit_target():
+    target = torch.tensor([[1, 0]])
+    target.source_rank_ids = np.array([[[1], [0]]])
+    target.source_slot_ids = np.zeros((1, 2, 1), dtype=np.int64)
+    return target
+
+
+def test_async_rebalance_wrapper_stashes_explicit_target_on_communicator():
+    target = _explicit_target()
+    communicator = SimpleNamespace()
+    model_state = SimpleNamespace(communicator=communicator)
+
+    def original_rebalance(self, model_state, context):
+        return target
+
+    wrapped = patch_eplb._wrap_async_rebalance(original_rebalance)
+
+    assert wrapped(object(), model_state, object()) is target
+    assert getattr(communicator, patch_eplb._EXPLICIT_TRANSFER_TARGET_ATTR) is target
+
+
+def test_async_transfer_wrapper_executes_explicit_sources(monkeypatch):
+    target = _explicit_target()
+    communicator = SimpleNamespace(**{patch_eplb._EXPLICIT_TRANSFER_TARGET_ATTR: target})
+    metadata = object()
+    stage = MagicMock(return_value=metadata)
+    monkeypatch.setattr(patch_eplb, "stage_explicit_layer_transfer", stage)
+
+    def original_transfer(
+        old_layer_indices,
+        new_layer_indices,
+        expert_weights,
+        expert_weights_buffer,
+        ep_group,
+        communicator,
+        is_profile=False,
+        stream=None,
+        rank_mapping=None,
+        layer_idx=0,
+    ):
+        raise AssertionError("explicit source target must bypass the upstream transfer")
+
+    stream = object()
+    wrapped = patch_eplb._wrap_async_transfer(original_transfer)
+    result = wrapped(
+        torch.tensor([0, 1]),
+        target[0],
+        [object()],
+        [object()],
+        MagicMock(),
+        communicator,
+        stream=stream,
+    )
+
+    assert result is metadata
+    assert stage.call_args.kwargs["stream"] is stream
+    assert getattr(communicator, patch_eplb._EXPLICIT_TRANSFER_TARGET_ATTR) is target
+
+
+@pytest.mark.parametrize(
+    ("is_profile", "rank_mapping"),
+    [(True, None), (False, {0: 0})],
+)
+def test_async_explicit_transfer_delegates_profile_and_rank_mapping(is_profile, rank_mapping):
+    target = _explicit_target()
+    communicator = SimpleNamespace(**{patch_eplb._EXPLICIT_TRANSFER_TARGET_ATTR: target})
+
+    def original_transfer(
+        old_layer_indices,
+        new_layer_indices,
+        expert_weights,
+        expert_weights_buffer,
+        ep_group,
+        communicator,
+        is_profile=False,
+        stream=None,
+        rank_mapping=None,
+        layer_idx=0,
+    ):
+        return "upstream"
+
+    wrapped = patch_eplb._wrap_async_transfer(original_transfer)
+
+    result = wrapped(
+        torch.tensor([0, 1]),
+        target[0],
+        None,
+        None,
+        None,
+        communicator,
+        is_profile=is_profile,
+        rank_mapping=rank_mapping,
+    )
+
+    assert result == "upstream"
+
+
+@pytest.mark.parametrize(("layer_idx", "is_last_layer"), [(2, False), (3, True)])
+def test_async_workspace_refreshes_layer_and_clears_target_after_last(monkeypatch, layer_idx, is_last_layer):
     call_order: list[str] = []
     consumed_event = MagicMock()
     consumed_event.record.side_effect = lambda _stream=None: call_order.append("ack")
     pending_result = SimpleNamespace(
-        layer_idx=3,
+        layer_idx=layer_idx,
         transfer_metadata=object(),
         consumed_event=consumed_event,
     )
     model_state = SimpleNamespace(
         pending_result=pending_result,
         rebalanced=True,
+        communicator=SimpleNamespace(**{patch_eplb._EXPLICIT_TRANSFER_TARGET_ATTR: _explicit_target()}),
         model=SimpleNamespace(num_moe_layers=4),
         model_name="model",
     )
@@ -164,10 +265,47 @@ def test_async_workspace_wrapper_refreshes_committed_layer(monkeypatch):
     result = wrapped_move(model_state, 0, future_option="future")
 
     assert result == "moved"
-    refresh.assert_called_once_with(model_state, 3)
-    log_info.assert_called_once_with(
-        "%s: model=%s",
-        patch_eplb.ASYNC_EPLB_CYCLE_COMMITTED_LOG,
-        "model",
-    )
+    refresh.assert_called_once_with(model_state, layer_idx)
+    if is_last_layer:
+        log_info.assert_called_once_with(
+            "%s: model=%s",
+            patch_eplb.ASYNC_EPLB_CYCLE_COMMITTED_LOG,
+            "model",
+        )
+    else:
+        log_info.assert_not_called()
     assert call_order == ["move", "refresh", "ack"]
+    assert hasattr(model_state.communicator, patch_eplb._EXPLICIT_TRANSFER_TARGET_ATTR) == (not is_last_layer)
+
+
+def test_async_workspace_refresh_failure_keeps_target_and_defers_ack(monkeypatch):
+    target = _explicit_target()
+    consumed_event = MagicMock()
+    pending_result = SimpleNamespace(
+        layer_idx=0,
+        transfer_metadata=object(),
+        consumed_event=consumed_event,
+    )
+    communicator = SimpleNamespace(**{patch_eplb._EXPLICIT_TRANSFER_TARGET_ATTR: target})
+    model_state = SimpleNamespace(
+        pending_result=pending_result,
+        communicator=communicator,
+        model=SimpleNamespace(num_moe_layers=1),
+        model_name="model",
+    )
+    monkeypatch.setattr(
+        patch_eplb,
+        "refresh_model_routing_tables",
+        MagicMock(side_effect=RuntimeError("refresh failed")),
+    )
+
+    def original_move(model_state, ep_rank):
+        model_state.pending_result.consumed_event.record()
+        model_state.pending_result = None
+
+    wrapped_move = patch_eplb._wrap_move_to_workspace(original_move)
+    with pytest.raises(RuntimeError, match="refresh failed"):
+        wrapped_move(model_state, 0)
+
+    assert getattr(communicator, patch_eplb._EXPLICIT_TRANSFER_TARGET_ATTR) is target
+    consumed_event.record.assert_not_called()

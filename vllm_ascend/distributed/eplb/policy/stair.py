@@ -19,7 +19,7 @@ _MEAN_RATIO_TIE_TOLERANCE = 1e-9
 
 @dataclass(frozen=True)
 class PlacementImbalance:
-    """Max-to-average rank-load ratios; 1.0 means perfectly balanced."""
+    """Mean and p95 max-to-average ratios; 1.0 means perfectly balanced."""
 
     mean_ratio: float
     p95_ratio: float
@@ -872,11 +872,11 @@ class StairEplbPolicy(AbstractEplbPolicy):
         rank_node_ids: np.ndarray,
         config: StairConfig,
     ) -> LayerPlan | None:
-        """Return the best mean-non-regressing placement for one layer.
+        """Return the best mean- and p95-non-regressing placement for one layer.
 
         Loads are ``[bins, experts]``, counts are ``[bins]``, current placement
         is ``[ranks, slots]``, and node IDs are ``[ranks]``.
-        P95 is diagnostic and does not gate acceptance. The lowest predicted
+        Candidates may not regress mean or p95 imbalance. The lowest predicted
         mean ratio wins; ratios within the internal absolute tolerance are tied.
         Ties minimize cross-node migrations, same-node remote migrations,
         target expert IDs, source rank IDs, then source slot IDs. Return ``None``
@@ -916,7 +916,10 @@ class StairEplbPolicy(AbstractEplbPolicy):
             if placement is None:
                 continue
             predicted_imbalance = cls.placement_imbalance(load_samples, sample_counts, placement.rank_expert_ids)
-            if predicted_imbalance.mean_ratio > current_imbalance.mean_ratio:
+            if (
+                predicted_imbalance.mean_ratio > current_imbalance.mean_ratio
+                or predicted_imbalance.p95_ratio > current_imbalance.p95_ratio
+            ):
                 continue
 
             dst_rank_ids = np.arange(num_ranks)[:, None]
