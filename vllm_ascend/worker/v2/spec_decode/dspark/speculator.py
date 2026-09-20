@@ -143,8 +143,10 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             return super()._build_draft_attn_metadata(num_reqs_padded=num_reqs_padded, **kwargs)
 
         num_tokens_padded = kwargs["num_tokens_padded"]
-        num_reqs_padded, remainder = divmod(num_tokens_padded, self.num_query_per_req)
-        assert remainder == 0, "Draft tokens must contain whole query groups"
+        assert num_tokens_padded % self.num_query_per_req == 0, "Draft tokens must contain whole query groups"
+        # TODO: Replace this temporary padding workaround with upstream #56181's
+        # actual-token metadata and MLA input slicing for non-FULL execution.
+        num_reqs_padded = num_tokens_padded // self.num_query_per_req
         is_prefilling = torch.zeros(num_reqs_padded, dtype=torch.bool)
         with (
             build_attn_metadata_wrapper(),

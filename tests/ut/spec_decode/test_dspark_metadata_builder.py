@@ -92,3 +92,39 @@ def test_eager_dp_metadata_covers_padded_tokens(monkeypatch, architecture, local
     )
     assert result is metadata
     assert query_metadata.actual_seq_lengths_q == [3 * (i + 1) for i in range(padded_reqs)]
+
+
+@pytest.mark.parametrize("architecture", ["GQA", "MLA"])
+def test_dp_padded_queries_require_padded_request_boundaries(monkeypatch, architecture):
+    spec = make_speculator(architecture)
+    query = torch.zeros(10, 1, 8)
+    original_boundaries = []
+
+    def build(*, num_reqs, num_reqs_padded, num_tokens_padded, **kwargs):
+        assert num_reqs == 1
+        assert num_reqs_padded == 2
+        assert num_tokens_padded == query.shape[0]
+        # Upstream clamps padded request boundaries to the real query count.
+        starts = torch.arange(num_reqs_padded + 1).clamp(max=num_reqs) * spec.num_query_per_req
+        boundaries = starts[1:].tolist()
+        original_boundaries.extend(boundaries)
+        metadata = SimpleNamespace(actual_seq_lengths_q=boundaries)
+        return {"draft": SimpleNamespace(decode=metadata) if architecture == "MLA" else metadata}
+
+    monkeypatch.setattr(DSparkSpeculator, "_build_draft_attn_metadata", staticmethod(build))
+    result = spec._build_draft_attn_metadata(num_reqs=1, num_reqs_padded=1, num_tokens_padded=query.shape[0], step=5)
+    metadata = result["draft"].decode if architecture == "MLA" else result["draft"]
+    assert original_boundaries == [5, 5]
+    assert original_boundaries[-1] != query.shape[0]
+    assert metadata.actual_seq_lengths_q == [5, 10]
+    assert metadata.actual_seq_lengths_q[-1] == query.shape[0]
+
+
+@pytest.mark.parametrize("architecture", ["GQA", "MLA"])
+def test_draft_query_tokens_must_be_divisible_by_query_width(monkeypatch, architecture):
+    spec = make_speculator(architecture)
+    builder = MagicMock()
+    monkeypatch.setattr(DSparkSpeculator, "_build_draft_attn_metadata", builder)
+    with pytest.raises(AssertionError, match="whole query groups"):
+        spec._build_draft_attn_metadata(num_reqs=1, num_reqs_padded=2, num_tokens_padded=9, step=5)
+    builder.assert_not_called()
