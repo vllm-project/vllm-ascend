@@ -97,7 +97,7 @@ python -c "import vllm, vllm_ascend; print('vllm and vllm-ascend are ready')"
 
 If you don't want to use the docker image as above, you can also build all from source:
 
-- Install `vllm-ascend` from source, refer to [installation](../../getting_started/installation.md).
+- Install `vllm-ascend` from source, refer to [installation](../../getting_started.md).
 
 If you want to deploy a multi-node environment, you need to set up the environment on each node.
 
