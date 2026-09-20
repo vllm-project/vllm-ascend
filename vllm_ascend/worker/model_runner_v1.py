@@ -3705,11 +3705,8 @@ class NPUModelRunner(GPUModelRunner):
             if self.speculative_config and spec_decode_common_attn_metadata is None:
                 if isinstance(
                     self.drafter,
-                    AscendEagleProposer
-                    | AscendGemma4Proposer
-                    | AscendDraftModelProposer
-                    | AscendDflashProposer
-                    | AscendDSparkProposer,
+                    AscendEagleProposer | AscendGemma4Proposer
+                    | AscendDraftModelProposer | AscendDflashProposer | AscendDSparkProposer,
                 ):
                     if self.drafter.attn_layer_names[0] in kv_cache_group.layer_names:
                         spec_decode_common_attn_metadata = cm
@@ -5883,10 +5880,7 @@ class NPUModelRunner(GPUModelRunner):
         ):
             assert isinstance(
                 self.drafter,
-                AscendEagleProposer
-                | AscendDflashProposer
-                | AscendExtractHiddenStatesProposer
-                | AscendGemma4Proposer,
+                AscendEagleProposer | AscendDflashProposer | AscendExtractHiddenStatesProposer | AscendGemma4Proposer,
             )
             self.drafter.initialize_cudagraph_keys(cudagraph_mode)
 
