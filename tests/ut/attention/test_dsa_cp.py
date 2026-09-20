@@ -48,8 +48,8 @@ def test_o_projection_keeps_weight_lifetime_in_caller(monkeypatch, fail_at):
     metadata = SimpleNamespace(attn_state=dsa_cp.AscendAttentionState.PrefillNoCache)
     tensor = torch.ones(2, 4)
 
-    def project(value, full):
-        assert full
+    def project(value, *, full_gather_wo_a_enabled):
+        assert full_gather_wo_a_enabled
         events.append("project")
         if fail_at == "project":
             raise RuntimeError("projection failed")
@@ -86,7 +86,8 @@ def test_o_projection_keeps_weight_lifetime_in_caller(monkeypatch, fail_at):
 
 @pytest.mark.parametrize("full", [False, True])
 @pytest.mark.parametrize("fp8_attention", [False, True])
-def test_o_projection_common_computation_uses_active_weight_layout(monkeypatch, full, fp8_attention):
+@pytest.mark.parametrize("with_output", [False, True])
+def test_o_projection_common_computation_uses_active_weight_layout(monkeypatch, full, fp8_attention, with_output):
     def batch_matmul(value, weight, **kwargs):
         return torch.bmm(value.transpose(0, 1), weight).transpose(0, 1)
 
@@ -105,6 +106,9 @@ def test_o_projection_common_computation_uses_active_weight_layout(monkeypatch, 
         _get_batched_wo_a_weight=lambda count: weight,
         _apply_wo_b=lambda value, gathered: value @ wo_b,
     )
-    actual = AscendDSACPImpl._forward_o_proj(impl, value, full)
     expected = torch.einsum("tgh,ghr->tgr", value.reshape(4, groups, 3), weight).reshape(4, -1) @ wo_b
+    output = torch.empty_like(expected) if with_output else None
+    actual = AscendDSACPImpl._forward_o_proj(impl, value, output, full_gather_wo_a_enabled=full)
+    if with_output:
+        assert actual is output
     torch.testing.assert_close(actual, expected)
