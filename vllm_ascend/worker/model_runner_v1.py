@@ -3077,7 +3077,8 @@ class NPUModelRunner(GPUModelRunner):
         forward_context = get_forward_context()
         assert forward_context is not None
         if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
-            self.model.set_attn_backend(self.attn_backend)
+            if hasattr(self.model, "set_attn_backend"):
+                self.model.set_attn_backend(self.attn_backend)
 
         model_inputs: dict[str, Any] = {
             "input_ids": input_ids,
@@ -4208,7 +4209,7 @@ class NPUModelRunner(GPUModelRunner):
 
         if cudagraph_mode.has_full_cudagraphs():
             self.update_stream = torch.npu.Stream()
-            
+
             if self.drafter is not None:
                 if hasattr(self.drafter, "set_update_stream"):
                     self.drafter.set_update_stream(self.update_stream)

@@ -649,18 +649,19 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             self._runnable.set_update_stream(update_stream)
         self.update_stream = update_stream
 
-    def _maybe_update_metadata(self, att_backend, aclgraph_runtime_mode, multi_steps_attn_metadata):
+    def _maybe_update_metadata(self, att_backend, multi_steps_attn_metadata):
         if use_updatable_graph(att_backend):
             update_params = []
-            for per_layer_metadata in multi_steps_attn_metadata:
-                metadata = next(iter(per_layer_metadata.values()))
-                update_params.append(
-                    {
-                        "actual_seq_lengths": metadata.actual_seq_lengths_q,
-                        "actual_seq_lengths_kv": metadata.seq_lens_list,
-                        "block_table": metadata.block_tables,
-                    }
-                )
+            for per_step_metadata in multi_steps_attn_metadata:
+                for layer_name, metadata in per_step_metadata.items():
+                    update_params.append(
+                        {
+                            "layer_name": layer_name,
+                            "actual_seq_lengths": metadata.actual_seq_lengths_q,
+                            "actual_seq_lengths_kv": metadata.seq_lens_list,
+                            "block_table": metadata.block_tables,
+                        }
+                    )
             self._runnable.update_draft_model_metadata(update_params)  # type: ignore
             self._runnable.set_attn_backend(att_backend)  # type: ignore
 
@@ -862,7 +863,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         if aclgraph_runtime_mode == CUDAGraphMode.FULL:
             self._maybe_update_metadata(
                 self.draft_attn_groups[0].backend,
-                aclgraph_runtime_mode,
                 multi_steps_attn_metadata,
             )
 
@@ -1235,7 +1235,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         if aclgraph_runtime_mode == CUDAGraphMode.FULL:
             self._maybe_update_metadata(
                 self.draft_attn_groups[0].backend,
-                aclgraph_runtime_mode,
                 multi_steps_attn_metadata,
             )
 
