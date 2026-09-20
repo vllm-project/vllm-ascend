@@ -11,6 +11,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
+    HiddenStateCacheSpec,
 )
 
 from tests.ut.base import TestBase
@@ -66,7 +67,7 @@ class TestNPUWorker(TestBase):
         self.distributed_init_method = "tcp://localhost:12345"
         self.is_driver_worker = False
 
-    def test_layer_reuse_memory_factor_merges_main_components(self):
+    def test_layer_reuse_memory_plan_merges_main_components(self):
         from vllm_ascend.core.kv_cache_interface import (
             AscendMLAAttentionSpec,
             AscendSFAIndexerCacheSpec,
@@ -77,6 +78,8 @@ class TestNPUWorker(TestBase):
         worker.model_config = MagicMock()
         worker.parallel_config = MagicMock()
         worker.model_config.get_num_layers.return_value = 6
+        worker.model_config.get_total_num_hidden_layers.return_value = 6
+        worker.model_config.get_layers_start_end_indices.return_value = (0, 6)
         main_spec = AscendMLAAttentionSpec(
             block_size=2,
             num_kv_heads=1,
@@ -98,7 +101,7 @@ class TestNPUWorker(TestBase):
             **{f"model.layers.{layer}.self_attn.indexer.k_cache": indexer_spec for layer in (1, 2, 4)},
         }
 
-        num_layers, num_slots, factor = worker._get_layerwise_kv_cache_memory_info(
+        memory_info = worker._get_layerwise_kv_cache_memory_info(
             specs,
             {"layerwise_num_shared_buffers": 2},
         )
@@ -106,10 +109,13 @@ class TestNPUWorker(TestBase):
         expected_logical_bytes = 6 * main_spec.page_size_bytes + 3 * indexer_spec.page_size_bytes
         # Both reused slots contain indexer layers; the independent slot does not.
         expected_physical_bytes = 3 * main_spec.page_size_bytes + 2 * indexer_spec.page_size_bytes
-        self.assertEqual((num_layers, num_slots), (6, 3))
-        self.assertEqual(factor, expected_logical_bytes / expected_physical_bytes)
+        alignment = 2 * 1024 * 1024
+        self.assertEqual(
+            memory_info,
+            (6, 5, expected_logical_bytes, expected_physical_bytes, 5 * alignment),
+        )
 
-    def test_layer_reuse_memory_factor_counts_components_per_buffer(self):
+    def test_layer_reuse_memory_plan_counts_components_per_buffer(self):
         from vllm_ascend.core.kv_cache_interface import (
             AscendMLAAttentionSpec,
             AscendSFAIndexerCacheSpec,
@@ -120,6 +126,8 @@ class TestNPUWorker(TestBase):
         worker.model_config = MagicMock()
         worker.parallel_config = MagicMock()
         worker.model_config.get_num_layers.return_value = 6
+        worker.model_config.get_total_num_hidden_layers.return_value = 6
+        worker.model_config.get_layers_start_end_indices.return_value = (0, 6)
         main_spec = AscendMLAAttentionSpec(
             block_size=2,
             num_kv_heads=1,
@@ -144,7 +152,7 @@ class TestNPUWorker(TestBase):
             "model.mtp.0.self_attn.attn": main_spec,
         }
 
-        num_layers, num_slots, factor = worker._get_layerwise_kv_cache_memory_info(
+        memory_info = worker._get_layerwise_kv_cache_memory_info(
             specs,
             {"layerwise_num_shared_buffers": 2},
         )
@@ -154,8 +162,113 @@ class TestNPUWorker(TestBase):
         # counted once per buffer: independent + both reused == 3 indexer slots.
         expected_logical_bytes = 7 * main_spec.page_size_bytes + 3 * indexer_spec.page_size_bytes
         expected_physical_bytes = 3 * main_spec.page_size_bytes + 3 * indexer_spec.page_size_bytes
-        self.assertEqual((num_layers, num_slots), (7, 3))
-        self.assertEqual(factor, expected_logical_bytes / expected_physical_bytes)
+        alignment = 2 * 1024 * 1024
+        self.assertEqual(
+            memory_info,
+            (7, 6, expected_logical_bytes, expected_physical_bytes, 6 * alignment),
+        )
+
+    def test_layer_reuse_memory_plan_uses_largest_mixed_indexer(self):
+        from vllm_ascend.core.kv_cache_interface import (
+            AscendMLAAttentionSpec,
+            AscendSFAIndexerCacheSpec,
+        )
+        from vllm_ascend.worker.worker import NPUWorker
+
+        worker = NPUWorker.__new__(NPUWorker)
+        worker.model_config = MagicMock()
+        worker.parallel_config = MagicMock()
+        worker.model_config.get_num_layers.return_value = 2
+        worker.model_config.get_total_num_hidden_layers.return_value = 2
+        worker.model_config.get_layers_start_end_indices.return_value = (0, 2)
+        main_spec = AscendMLAAttentionSpec(
+            block_size=2,
+            num_kv_heads=1,
+            head_size=8,
+            dtype=torch.bfloat16,
+        )
+        bf16_indexer_spec = AscendSFAIndexerCacheSpec(
+            block_size=2,
+            num_kv_heads=1,
+            head_size=4,
+            dtype=torch.bfloat16,
+            cache_sparse_li_c8=False,
+        )
+        c8_indexer_spec = AscendSFAIndexerCacheSpec(
+            block_size=2,
+            num_kv_heads=1,
+            head_size=4,
+            dtype=torch.int8,
+            scale_dim=1,
+            scale_dtype=torch.float16,
+            cache_sparse_li_c8=True,
+        )
+        specs = {
+            "model.layers.0.self_attn.attn": main_spec,
+            "model.layers.1.self_attn.attn": main_spec,
+            "model.layers.0.self_attn.indexer.k_cache": bf16_indexer_spec,
+            "model.layers.1.self_attn.indexer.k_cache": c8_indexer_spec,
+        }
+
+        memory_info = worker._get_layerwise_kv_cache_memory_info(
+            specs,
+            {
+                "layerwise_num_shared_buffers": 1,
+                "layerwise_independent_layers": [],
+            },
+        )
+
+        expected_logical_bytes = (
+            2 * main_spec.page_size_bytes + bf16_indexer_spec.page_size_bytes + c8_indexer_spec.page_size_bytes
+        )
+        expected_physical_bytes = main_spec.page_size_bytes + bf16_indexer_spec.page_size_bytes
+        alignment = 2 * 1024 * 1024
+        self.assertEqual(
+            memory_info,
+            (2, 2, expected_logical_bytes, expected_physical_bytes, 3 * alignment),
+        )
+
+    def test_layer_reuse_memory_plan_counts_single_tensor_attention_lanes_once(self):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        worker = NPUWorker.__new__(NPUWorker)
+        worker.model_config = MagicMock()
+        worker.parallel_config = MagicMock()
+        worker.model_config.get_num_layers.return_value = 2
+        worker.model_config.get_total_num_hidden_layers.return_value = 2
+        worker.model_config.get_layers_start_end_indices.return_value = (0, 2)
+        cache_only_spec = FullAttentionSpec(
+            block_size=2,
+            num_kv_heads=1,
+            head_size=8,
+            dtype=torch.bfloat16,
+        )
+        hidden_state_spec = HiddenStateCacheSpec(
+            block_size=2,
+            num_kv_heads=1,
+            head_size=8,
+            dtype=torch.bfloat16,
+        )
+        specs = {
+            **{f"model.layers.{layer}.cache_only_layers.attn": cache_only_spec for layer in range(2)},
+            **{f"model.layers.{layer}.hidden_state.attn": hidden_state_spec for layer in range(2)},
+        }
+
+        memory_info = worker._get_layerwise_kv_cache_memory_info(
+            specs,
+            {
+                "layerwise_num_shared_buffers": 1,
+                "layerwise_independent_layers": [],
+            },
+        )
+
+        expected_logical_bytes = 2 * (cache_only_spec.page_size_bytes + hidden_state_spec.page_size_bytes)
+        expected_physical_bytes = cache_only_spec.page_size_bytes + hidden_state_spec.page_size_bytes
+        alignment = 2 * 1024 * 1024
+        self.assertEqual(
+            memory_info,
+            (2, 2, expected_logical_bytes, expected_physical_bytes, 2 * alignment),
+        )
 
     def test_incomplete_layer_layout_does_not_scale_memory_budget(self):
         from vllm_ascend.worker.worker import NPUWorker
@@ -164,6 +277,8 @@ class TestNPUWorker(TestBase):
         worker.model_config = MagicMock()
         worker.parallel_config = MagicMock()
         worker.model_config.get_num_layers.return_value = 4
+        worker.model_config.get_total_num_hidden_layers.return_value = 4
+        worker.model_config.get_layers_start_end_indices.return_value = (0, 4)
         specs = {
             "model.layers.0.self_attn.attn": MagicMock(),
             "model.layers.1.self_attn.attn": MagicMock(),
@@ -177,7 +292,40 @@ class TestNPUWorker(TestBase):
             },
         )
 
-        self.assertEqual(memory_info, (2, 2, 1.0))
+        self.assertEqual(memory_info, (2, 2, 0, 0, 0))
+
+    def test_wrong_pp_base_layers_do_not_scale_memory_budget(self):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        worker = NPUWorker.__new__(NPUWorker)
+        worker.model_config = MagicMock()
+        worker.parallel_config = MagicMock()
+        worker.model_config.get_num_layers.return_value = 2
+        worker.model_config.get_total_num_hidden_layers.return_value = 4
+        worker.model_config.get_layers_start_end_indices.return_value = (2, 4)
+        spec = FullAttentionSpec(
+            block_size=2,
+            num_kv_heads=1,
+            head_size=8,
+            head_size_v=8,
+            dtype=torch.int8,
+        )
+        specs = {
+            "model.layers.0.self_attn.attn": spec,
+            "model.layers.2.self_attn.attn": spec,
+            "model.layers.3.self_attn.attn": spec,
+            "model.mtp.0.self_attn.attn": spec,
+        }
+
+        memory_info = worker._get_layerwise_kv_cache_memory_info(
+            specs,
+            {
+                "layerwise_num_shared_buffers": 1,
+                "layerwise_independent_layers": [],
+            },
+        )
+
+        self.assertEqual(memory_info, (4, 4, 0, 0, 0))
 
     def test_no_reuse_does_not_scale_layerwise_memory_layout(self):
         from vllm_ascend.worker.worker import NPUWorker
@@ -186,6 +334,8 @@ class TestNPUWorker(TestBase):
         worker.model_config = MagicMock()
         worker.parallel_config = MagicMock()
         worker.model_config.get_num_layers.return_value = 2
+        worker.model_config.get_total_num_hidden_layers.return_value = 2
+        worker.model_config.get_layers_start_end_indices.return_value = (0, 2)
         spec = FullAttentionSpec(
             block_size=2,
             num_kv_heads=1,
@@ -204,7 +354,32 @@ class TestNPUWorker(TestBase):
             {"layerwise_num_shared_buffers": 3},
         )
 
-        self.assertEqual(memory_info, (3, 3, 1.0))
+        self.assertEqual(memory_info, (3, 3, 0, 0, 0))
+
+    def test_no_reuse_does_not_validate_multi_component_layers(self):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        worker = NPUWorker.__new__(NPUWorker)
+        worker.model_config = MagicMock()
+        worker.parallel_config = MagicMock()
+        worker.model_config.get_num_layers.return_value = 2
+        worker.model_config.get_total_num_hidden_layers.return_value = 2
+        worker.model_config.get_layers_start_end_indices.return_value = (0, 2)
+        suffixes = (
+            "compressor.state_cache",
+            "indexer.k_cache",
+            "indexer.compressor.state_cache",
+            "swa_cache",
+            "attn",
+        )
+        specs = {f"model.layers.{layer}.self_attn.{suffix}": MagicMock() for layer in range(2) for suffix in suffixes}
+
+        memory_info = worker._get_layerwise_kv_cache_memory_info(
+            specs,
+            {"layerwise_num_shared_buffers": 2},
+        )
+
+        self.assertEqual(memory_info, (2, 2, 0, 0, 0))
 
     @unittest.skipIf(vllm_version_is("0.28.0"), "vLLM #51718 only changed the main planner")
     def test_deepseek_v4_shared_tuple_layout_does_not_scale_budget(self):
