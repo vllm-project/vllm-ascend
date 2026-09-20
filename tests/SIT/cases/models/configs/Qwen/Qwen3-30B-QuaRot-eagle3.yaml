@@ -38,5 +38,9 @@ test_cases:
         max_out_len: 1500
         batch_size: 20
         request_rate: 0
+<<<<<<< HEAD
         baseline: 980.026
+=======
+        baseline: 269.9177
+>>>>>>> b67f63b62... update baseline
         threshold: 0.97
