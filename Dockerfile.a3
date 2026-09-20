@@ -25,6 +25,8 @@ FROM ${CANN_QUAY_URL}:${CANN_VERSION}-a3-ubuntu22.04-py3.12
 # Build-time arguments (declared once at the top of the stage for clarity).
 # PIP_INDEX_URL (optional): Primary pip index mirror URL for Python packages.
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
+# PUBLIC_PIP_INDEX_URL (optional): Public pip index used to restore config after internal-mirror builds.
+ARG PUBLIC_PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 # MOONCAKE_INDEX_URL (optional): Extra pip index URL for the mooncake-transfer-engine package.
 ARG MOONCAKE_INDEX_URL="https://mirrors.aliyun.com/pypi/web/simple"
 # PYTORCH_INDEX_URL (optional): Extra pip index URL for PyTorch wheels.
@@ -185,8 +187,8 @@ RUN if [ "$BUILD_TYPE" = "daily" ]; then \
         echo "Building release version without daily packages"; \
     fi && rm -f /tmp/install_daily_deps.sh
 
-RUN if [ -n "$GIT_PROXY" ] || [ -n "$CRATES_IO_INDEX" ] || [ -n "$RUSTUP_DIST_SERVER" ]; then \
-        pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple && \
+RUN if [ -n "$GIT_PROXY" ] || [ -n "$CRATES_IO_INDEX" ] || [ -n "$RUSTUP_DIST_SERVER" ] || [ "$PIP_INDEX_URL" != "$PUBLIC_PIP_INDEX_URL" ]; then \
+        pip config set global.index-url ${PUBLIC_PIP_INDEX_URL} && \
         { pip config unset global.trusted-host 2>/dev/null || true; } && \
         rm -f "$HOME/.cargo/config.toml" && \
         for key in $(git config --global --name-only --get-regexp '^url\..*\.insteadof$' 2>/dev/null); do \
