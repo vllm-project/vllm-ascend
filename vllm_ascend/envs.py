@@ -72,6 +72,27 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Qwen3.8 Flash-Next QSA compatibility path. Boolean 0/1, default 0;
+    # force the portable reference implementation for diagnosis. Not sensitive.
+    "VLLM_ASCEND_FORCE_QSA_REFERENCE": lambda: bool(int(os.getenv("VLLM_ASCEND_FORCE_QSA_REFERENCE", "0"))),
+    # Enable fused main-QSA normalization and rotary embedding. Boolean 0/1,
+    # default 0; use only on validated hardware/builds. Not sensitive.
+    "VLLM_ASCEND_ENABLE_QSA_MAIN_FUSED_NORM_ROPE": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_ENABLE_QSA_MAIN_FUSED_NORM_ROPE", "0"))
+    ),
+    # Enable split normalization/rotary embedding for the QSA indexer. Boolean
+    # 0/1, default 0; use only on validated hardware/builds. Not sensitive.
+    "VLLM_ASCEND_ENABLE_QSA_INDEXER_SPLIT_NORM_ROPE": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_ENABLE_QSA_INDEXER_SPLIT_NORM_ROPE", "0"))
+    ),
+    # Enable the native QSA Lightning Indexer. Boolean 0/1, default 0; an
+    # unsupported SoC falls back to the portable selector. Not sensitive.
+    "VLLM_ASCEND_ENABLE_QSA_LIGHTNING_INDEXER": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_ENABLE_QSA_LIGHTNING_INDEXER", "0"))
+    ),
+    # Enable the A3 qsa_expand_e3 output expansion kernel. Boolean 0/1,
+    # default 0; unsupported SoCs use the portable expansion. Not sensitive.
+    "VLLM_ASCEND_ENABLE_QSA_E3V": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_QSA_E3V", "0"))),
 }
 
 # end-env-vars-definition

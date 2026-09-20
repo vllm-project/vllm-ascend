@@ -23,7 +23,10 @@ from vllm_ascend.worker.v1.spec_decode.dflash2_proposer import AscendDflash2Prop
 from vllm_ascend.worker.v1.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.worker.v1.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.worker.v1.spec_decode.dspark_proposer import AscendDSparkProposer
-from vllm_ascend.worker.v1.spec_decode.eagle_proposer import AscendEagleProposer
+from vllm_ascend.worker.v1.spec_decode.eagle_proposer import (
+    AscendEagleProposer,
+    AscendQwen4ExpMTPProposer,
+)
 from vllm_ascend.worker.v1.spec_decode.extract_hidden_states_proposer import (
     AscendExtractHiddenStatesProposer,
 )
@@ -41,6 +44,18 @@ from vllm_ascend.worker.v1.spec_decode.suffix_proposer import AscendSuffixDecodi
 # lane still ships `AscendMedusaProposer`.
 if vllm_version_is("0.31.0"):
     from vllm_ascend.worker.v1.spec_decode.medusa_proposer import AscendMedusaProposer
+
+
+def _use_qwen4_exp_mtp(speculative_config) -> bool:
+    checker = getattr(speculative_config, "use_qwen4_exp_mtp", None)
+    if callable(checker) and checker():
+        return True
+    draft_model_config = getattr(speculative_config, "draft_model_config", None)
+    text_config = getattr(draft_model_config, "hf_text_config", None)
+    if text_config is None:
+        return False
+    architectures = getattr(text_config, "architectures", ()) or ()
+    return getattr(text_config, "model_type", None) == "qwen4_exp_mtp" or ("Qwen4ExpMTP" in architectures)
 
 
 def get_spec_decode_method(method, vllm_config, device, runner):
@@ -64,6 +79,8 @@ def get_spec_decode_method(method, vllm_config, device, runner):
         speculative_config = vllm_config.speculative_config
         if speculative_config is not None and speculative_config.use_step3p5_mtp():
             return AscendStep3p5MTPProposer(vllm_config, device, runner)
+        if speculative_config is not None and _use_qwen4_exp_mtp(speculative_config):
+            return AscendQwen4ExpMTPProposer(vllm_config, device, runner)
         if method == "mtp" and is_multi_kv_cache_group_mtp(vllm_config):
             return AscendMultiKVCacheGroupMTPProposer(vllm_config, device, runner)
         return AscendEagleProposer(vllm_config, device, runner)
