@@ -66,10 +66,15 @@ class AscendRejectionSampler(RejectionSampler):
                 "penalty implementation in rejection sampler. Rejection sampling performance "
                 "may be degraded on NPU. "
             )
-            assert sampling_metadata.prompt_token_ids is not None
+            prompt_token_ids = getattr(sampling_metadata, "prompt_token_ids", None)
+            if repeat_indices is None or prompt_token_ids is None:
+                # No per-request penalty tensors to expand (e.g. penalties
+                # disabled or metadata without them); hand the metadata to
+                # vLLM as-is, matching the upstream contract.
+                return Sampler.apply_penalties(logits, sampling_metadata, output_token_ids)
             repeated_sampling_metadata = replace(
                 sampling_metadata,
-                prompt_token_ids=sampling_metadata.prompt_token_ids[repeat_indices],
+                prompt_token_ids=prompt_token_ids[repeat_indices],
                 presence_penalties=sampling_metadata.presence_penalties[repeat_indices],
                 frequency_penalties=sampling_metadata.frequency_penalties[repeat_indices],
                 repetition_penalties=sampling_metadata.repetition_penalties[repeat_indices],
