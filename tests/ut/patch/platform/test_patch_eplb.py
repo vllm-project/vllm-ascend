@@ -3,11 +3,13 @@
 
 from contextlib import contextmanager
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
+import torch
 from vllm.config import EPLBConfig, ParallelConfig, VllmConfig
 from vllm.config import parallel as parallel_module
+from vllm.distributed.eplb import eplb_state as upstream_eplb_state
 from vllm.platforms import current_platform
 
 from vllm_ascend.patch.platform import patch_eplb
@@ -172,3 +174,90 @@ def test_async_workspace_wrapper_refreshes_committed_layer(monkeypatch):
         "model",
     )
     assert call_order == ["move", "refresh", "ack"]
+
+
+def test_distributed_initial_expert_map_spreads_redundant_slots():
+    mapping = patch_eplb._build_distributed_initial_expert_map(8, 4, 4)
+
+    assert mapping == [0, 1, 2, 2, 3, 4, 4, 5, 6, 6, 7, 0]
+    for rank in range(4):
+        local_mapping = mapping[rank * 3 : (rank + 1) * 3]
+        assert len(local_mapping) == 3
+
+
+def test_distributed_initial_expert_map_validates_divisibility():
+    with pytest.raises(ValueError, match="divisible by ep_size"):
+        patch_eplb._build_distributed_initial_expert_map(8, 3, 4)
+
+
+def test_get_changed_layer_indices():
+    old_mapping = torch.tensor([[0, 1], [2, 3], [4, 5]])
+    new_mapping = torch.tensor([[0, 1], [3, 2], [4, 5]])
+
+    assert patch_eplb._get_changed_layer_indices(old_mapping, new_mapping) == [1]
+
+
+def test_backported_noop_result_finishes_cycle():
+    consumed_event = MagicMock()
+    pending_result = patch_eplb._BackportedAsyncEplbLayerResult(
+        layer_idx=None,
+        new_physical_to_logical_map=None,
+        transfer_metadata=None,
+        consumed_event=consumed_event,
+        is_last_result=True,
+    )
+    model_state = SimpleNamespace(
+        pending_result=pending_result,
+        rebalanced=True,
+    )
+    owner = SimpleNamespace(
+        model_states={"model": model_state},
+        _async_cycle_in_progress=True,
+        expert_rearrangement_step=50,
+    )
+    model_state._ascend_eplb_owner = owner
+
+    patch_eplb._backported_move_to_workspace(model_state, ep_rank=0)
+
+    assert model_state.pending_result is None
+    assert not model_state.rebalanced
+    assert not owner._async_cycle_in_progress
+    assert owner.expert_rearrangement_step == 0
+    consumed_event.record.assert_called_once_with()
+
+
+def test_backported_workspace_move_commits_changed_layer(monkeypatch):
+    move_from_buffer = MagicMock()
+    commit = MagicMock()
+    monkeypatch.setattr(patch_eplb._rebalance_execute, "move_from_buffer", move_from_buffer)
+    monkeypatch.setattr(upstream_eplb_state, "_commit_eplb_maps_for_layer", commit)
+    consumed_event = MagicMock()
+    new_mapping = torch.tensor([1, 0])
+    model_state = SimpleNamespace(
+        pending_result=patch_eplb._BackportedAsyncEplbLayerResult(
+            layer_idx=1,
+            new_physical_to_logical_map=new_mapping,
+            transfer_metadata="metadata",
+            consumed_event=consumed_event,
+            is_last_result=False,
+        ),
+        model=SimpleNamespace(expert_weights=[["l0"], ["l1"]]),
+        expert_buffer=["buffer"],
+        rebalanced=True,
+    )
+
+    patch_eplb._backported_move_to_workspace(model_state, ep_rank=2)
+
+    assert move_from_buffer.call_args_list == [
+        call(
+            expert_weights=["l1"],
+            expert_weights_buffers=["buffer"],
+            transfer_metadata="metadata",
+            new_indices=new_mapping.numpy(),
+            ep_rank=2,
+        )
+    ]
+    commit.assert_called_once_with(
+        model_state, new_physical_to_logical_map=new_mapping, layer=1
+    )
+    consumed_event.record.assert_called_once_with()
