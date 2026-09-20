@@ -70,6 +70,7 @@ BASELINES_SP = {
     "vwn_eagle3": [0.75, 0.5, 0.3],
 }
 
+
 def test_qwen3_vwn_eagle3_tp2():
     """
     Test Qwen3-30B-A3B with VWN-Eagle3 speculative decoding acceptance rate.
@@ -157,7 +158,6 @@ def test_qwen3_vwn_eagle3_tp2():
     assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
 
 
-
 def test_eagle3_sliding_window():
     method = "eagle3"
     num_speculative_tokens = 3
@@ -236,7 +236,6 @@ def test_eagle3_sliding_window():
     golden = [0.7, 0.4, 0.3]
     match = all(abs(a - b) < 0.1 for a, b in zip(acceptance_per_pos, golden))
     assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
-
 
 
 def test_hang():
@@ -351,7 +350,19 @@ def test_hang():
         print(f"Output tokens: {output_tokens}")
 
 
-
+@pytest.mark.parametrize("model", [REDUCED_VOCAB_DSPARK_MODELS["qwen36_35b_dspark"]["main"]])
+@pytest.mark.parametrize("draft_model", [REDUCED_VOCAB_DSPARK_MODELS["qwen36_35b_dspark"]["spec"]])
+@pytest.mark.parametrize("max_tokens", [1024])
+@pytest.mark.parametrize("enforce_eager", [False])
+@pytest.mark.parametrize(
+    "compilation_config",
+    [
+        pytest.param(
+            {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [6, 12]},
+            id="full_decode_only",
+        )
+    ],
+)
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_qwen36_35b_dspark_spec_decoding(
     model: str,

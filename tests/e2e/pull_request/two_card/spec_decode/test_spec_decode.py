@@ -65,6 +65,7 @@ BASELINES_SP = {
     "dflash2": [0.855, 0.593, 0.359, 0.290, 0.193, 0.152, 0.076, 0.007],
 }
 
+
 @pytest.mark.skip(reason="skip test_eagle3_sp_acceptance")
 @pytest.mark.parametrize("method", ["eagle3"])
 @pytest.mark.parametrize("num_speculative_tokens", [3])
@@ -166,7 +167,6 @@ def test_eagle3_sp_acceptance(
     assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
 
 
-
 @pytest.mark.parametrize("method", P_EAGLE_MODELS.keys())
 @pytest.mark.parametrize("num_speculative_tokens", [8])
 @pytest.mark.parametrize("draft_tensor_parallel_size", [None, 2])
@@ -259,7 +259,6 @@ def test_p_eagle_acceptance(
     assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
 
 
-
 @pytest.mark.parametrize("method", DFLASH2_MODELS.keys())
 @pytest.mark.parametrize("num_speculative_tokens", [8])
 def test_dflash2_acceptance(
@@ -341,7 +340,6 @@ def test_dflash2_acceptance(
 
     match = all(abs(a - b) < 0.2 for a, b in zip(acceptance_per_pos, golden))
     assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
-
 
 
 @pytest.mark.parametrize("method", DFLASH2_MODELS.keys())
