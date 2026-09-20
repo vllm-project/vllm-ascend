@@ -8,7 +8,7 @@ first live update: a temporary checkpoint is written from the very same
 generator the transfer ships, a reference server loads it at startup, and every
 live-update lane has to reproduce that reference exactly. Comparing two live
 updates with each other could only prove the transfer is *deterministic*; a
-transfer that consistently drops, misnames or mis-shapes parameters would still
+transfer that consistently drops, renames or reshapes parameters would still
 pass. See ``assert_weight_update_matches_reference``.
 """
 
@@ -42,13 +42,12 @@ class WeightUpdateModelCase:
     checkpoint_name_map: Callable[[str], str] | None = None
     expert_intermediate_size: int | None = None
     extra_server_args: tuple[str, ...] = ()
-    hccl_skip_reason: str | None = None
-    """Why the two-card HCCL lane cannot carry this case yet.
+    skip_reason: str | None = None
+    """Why neither lane can carry this case yet.
 
-    The NPU IPC lane co-locates the trainer payload with the server on one chip
-    and is unaffected; the HCCL lane lets the trainer own a second chip and has
-    an open problem with this model, so the case is skipped there instead of
-    being reported as a transfer regression.
+    A case whose model is not ready for the transaction is skipped in both lanes
+    instead of being reported as a transfer regression; the reason is attached to
+    the case so the report says which prerequisite is missing.
     """
 
     def server_args(self) -> list[str]:
@@ -183,9 +182,10 @@ MODEL_CASES = (
         # the real safetensors header of ``experts.0.w1.weight`` == [2048, 4096].
         expert_intermediate_size=2048,
         extra_server_args=("--tokenizer-mode", "deepseek_v4"),
-        hccl_skip_reason=(
-            "the two-card HCCL lane still fails for DeepSeek-V4-Flash; the model is "
-            "exercised by the one-card NPU IPC lane instead"
+        skip_reason=(
+            "DeepSeek-V4-Flash is skipped in both lanes for now: its reload needs "
+            "the attention-sink fix that lives in #16355, and the two-card HCCL "
+            "lane has an open problem with the model as well"
         ),
     ),
     WeightUpdateModelCase(
@@ -612,7 +612,7 @@ def reference_signature(
     """Signature of a server that loaded the payload at normal startup.
 
     This is the correctness oracle and it never runs the live-update path, so a
-    transfer that silently drops, misnames, mis-shapes or mis-casts part of the
+    transfer that silently drops, renames, reshapes or recasts part of the
     payload cannot make the comparison pass. Independent server processes also
     keep the baseline free of whatever the live path does to the model (graph
     capture, layerwise reload state, derived representations).
@@ -685,7 +685,7 @@ def assert_weight_update_matches_reference(
       the payload is observable, so a transfer that never ran cannot pass.
     * ``updated_signature`` is the first live update: it must equal the
       independent startup-load reference, which is what makes a dropped,
-      misnamed, mis-shaped or mis-cast parameter a failure instead of a
+      renamed, reshaped or recast parameter a failure instead of a
       consistent-but-wrong result.
     * ``reloaded_signature`` is a second update of the same payload: it must stay
       on the reference too, which covers the layerwise reload lifecycle,

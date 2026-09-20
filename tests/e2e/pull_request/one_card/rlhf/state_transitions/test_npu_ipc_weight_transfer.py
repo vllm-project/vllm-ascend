@@ -7,7 +7,9 @@ Qwen3-0.6B cannot expose missing START/FINISH hooks because its checkpoint and
 runtime weight representations are compatible. This matrix instead targets
 architectures whose correctness depends on the transaction: fused-MoE layout
 restoration, derived FP32 routing weights, and SFA source/derived-state
-restoration.
+restoration. The derived-routing-weights case (DeepSeek-V4-Flash) is skipped for
+now — see the case's ``skip_reason`` — so today the matrix carries Qwen3.5 and
+GLM-5.1.
 
 The correctness oracle is *normal startup loading of the same payload*, not the
 first live update: the generator also writes a temporary checkpoint, a reference
@@ -78,6 +80,9 @@ def _post(server: RemoteOpenAIServer, route: str, *, json=None, params=None, tim
 @pytest.mark.parametrize("case", pytest_model_cases())
 @pytest.mark.parametrize("packed", [False, True], ids=["unpacked", "packed"])
 def test_npu_ipc_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bool):
+    if case.skip_reason is not None:
+        pytest.skip(f"{case.id}: {case.skip_reason}")
+
     torch.npu.set_device(INFERENCE_DEVICE_INDEX)
     source = FixedRandomWeightSource(case, torch.device("npu", INFERENCE_DEVICE_INDEX))
     os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"

@@ -155,8 +155,8 @@ def _send_update(server, source, model_update_group, *, packed: bool) -> None:
 @pytest.mark.parametrize("case", pytest_model_cases())
 @pytest.mark.parametrize("packed", [False, True], ids=["unpacked", "packed"])
 def test_hccl_weight_transfer_transaction(case: WeightUpdateModelCase, packed: bool):
-    if case.hccl_skip_reason is not None:
-        pytest.skip(f"{case.id}: {case.hccl_skip_reason}")
+    if case.skip_reason is not None:
+        pytest.skip(f"{case.id}: {case.skip_reason}")
 
     torch.npu.set_device(TRAINER_DEVICE_INDEX)
     source = FixedRandomWeightSource(case, torch.device("npu", TRAINER_DEVICE_INDEX))
