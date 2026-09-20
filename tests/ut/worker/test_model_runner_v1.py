@@ -968,11 +968,13 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         from vllm_ascend.core.kv_cache_interface import get_sfa_kv_parent
         from vllm_ascend.utils import AscendDeviceType
 
-        for legacy, connector in (
-            (False, None),
-            (True, None),
-            (False, "SfaRemoteD2HConnector"),
-            (False, "MultiConnector"),
+        for legacy, connector, expects_parent in (
+            (False, None, True),
+            (True, None, True),
+            (False, "MooncakeConnectorV2", True),
+            (False, "MooncakePullConnector", True),
+            (False, "SfaRemoteD2HConnector", False),
+            (False, "MultiConnector", False),
         ):
             with self.subTest(legacy=legacy, connector=connector):
                 runner = self._build_runner()
@@ -1006,12 +1008,12 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                     patch("vllm_ascend.worker.model_runner_v1.get_kv_cache_tensor_layers", return_value=names),
                 ):
                     raw = runner._allocate_kv_cache_tensors(config)
-                    if connector is None:
+                    if expects_parent:
                         self.assertIsInstance(raw[names[0]], torch.Tensor)
                         self.assertEqual(raw[names[0]].numel(), 3 * spec.page_size_bytes)
                         self.assertEqual(raw[names[0]] is raw[names[1]], legacy)
                     caches = runner._reshape_kv_cache_tensors(config, raw)
-                if connector is not None:
+                if not expects_parent:
                     self.assertTrue(all(t.is_contiguous() for n in names for t in caches[n]))
                     with self.assertRaises(ValueError):
                         get_sfa_kv_parent(*caches[names[0]])

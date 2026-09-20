@@ -1164,7 +1164,10 @@ def test_attn_state_mla_spec_and_metadata_wrappers(monkeypatch):
 
 @pytest.mark.parametrize("legacy", [False, True])
 @pytest.mark.parametrize("kernel_block_size", [2, 4])
-@pytest.mark.parametrize("connector", [None, "SfaRemoteD2HConnector", "MultiConnector"])
+@pytest.mark.parametrize(
+    "connector",
+    [None, "MooncakeConnectorV2", "MooncakePullConnector", "SfaRemoteD2HConnector", "MultiConnector"],
+)
 def test_sfa_parent_allocation_and_kernel_blocks(monkeypatch, legacy, kernel_block_size, connector):
     from vllm_ascend.attention.sfa_v1 import AscendSFABackend
     from vllm_ascend.core.kv_cache_interface import get_sfa_kv_parent
@@ -1195,7 +1198,7 @@ def test_sfa_parent_allocation_and_kernel_blocks(monkeypatch, legacy, kernel_blo
     monkeypatch.setattr(attn_utils, "get_kv_cache_tensor_layers", lambda d: names)
     monkeypatch.setattr(attn_utils, "_get_attention_kv_cache_dims", lambda *a: (8, 4))
     raw = attn_utils._allocate_kv_cache(config, {}, torch.device("cpu"))
-    concat = connector is None
+    concat = connector is None or connector in ("MooncakeConnectorV2", "MooncakePullConnector")
     if concat:
         assert isinstance(raw[names[0]], torch.Tensor)
         assert raw[names[0]].numel() == 3 * spec.page_size_bytes

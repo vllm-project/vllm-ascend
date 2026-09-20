@@ -176,18 +176,17 @@ def get_sfa_kv_parent(nope: torch.Tensor, rope: torch.Tensor) -> torch.Tensor:
 
 
 def should_use_sfa_kv_parent_layout(vllm_config: VllmConfig) -> bool:
-    """Decide whether unquantized SFA main KV may use the token-concatenated
-    parent layout in this process, from the two environment facts it depends
-    on: the configured KV transfer route must understand the layout (today:
-    no KV transfer configured -- the native SFA PD connector's parent-page
-    protocol is being developed on a separate branch), and the current device
-    must have token-strided cache operators (adapted on Ascend 950 / A5 only).
-
-    Callers combine this with their runner-specific conditions (spec, backend,
-    runner modes) before enabling the parent layout. When A3 adaptation or the
-    deferred connector work lands, relax the corresponding check here.
-    """
-    return vllm_config.kv_transfer_config is None and get_ascend_device_type() == AscendDeviceType.A5
+    """Whether the SFA main KV may use the token-concatenated parent layout.
+    A5 only. When PD transfer is configured, only connectors that understand
+    the packed parent page qualify (MooncakeV2 pull connectors)."""
+    return get_ascend_device_type() == AscendDeviceType.A5 and (
+        vllm_config.kv_transfer_config is None
+        or (
+            getattr(vllm_config.kv_transfer_config, "kv_connector_module_path", None) is None
+            and getattr(vllm_config.kv_transfer_config, "kv_connector", None)
+            in {"MooncakeConnectorV2", "MooncakePullConnector"}
+        )
+    )
 
 
 @dataclass(frozen=True, kw_only=True)
