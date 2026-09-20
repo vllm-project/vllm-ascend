@@ -34,6 +34,11 @@ def register_engine():
         "NPUIPCWeightTransferEngine",
     )
     WeightTransferTrainerFactory.register_engine(
+        "hccl",
+        "vllm_ascend.distributed.weight_transfer.hccl_engine",
+        "HCCLTrainerWeightTransferEngine",
+    )
+    WeightTransferTrainerFactory.register_engine(
         "npu_ipc",
         "vllm_ascend.distributed.weight_transfer.npu_ipc_engine",
         "NPUIPCTrainerWeightTransferEngine",

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
 from torch.multiprocessing.reductions import reduce_tensor
+from typing_extensions import Self
 from vllm.config import VllmConfig
 from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
@@ -20,12 +21,12 @@ from vllm.distributed.weight_transfer.base import (
 )
 from vllm.distributed.weight_transfer.ipc_engine import (
     IPCTrainerInitInfo,
-    IPCTrainerWeightTransferEngine,
     IPCWeightTransferUpdateInfo,
 )
 
 from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
+    NPUPackedBufferImporter,
     packed_npu_ipc_consumer,
     packed_npu_ipc_producer,
 )
@@ -128,16 +129,6 @@ class NPUIPCWeightTransferEngine(  # type: ignore[no-redef]
     init_info_cls = NPUIPCWeightTransferInitInfo
     update_info_cls = NPUIPCWeightTransferUpdateInfo
 
-    @staticmethod
-    def trainer_send_weights(*args: Any, **kwargs: Any) -> None:
-        raise NotImplementedError(
-            "The static NPU IPC trainer path has been replaced by "
-            "NPUIPCTrainerWeightTransferEngine. Build it via "
-            "WeightTransferTrainerFactory.trainer_init("
-            "NPUIPCTrainerInitInfo(...), client=..., "
-            "source=...) and drive it with send_weights()."
-        )
-
     def __init__(  # type: ignore[misc]
         self,
         config: WeightTransferConfig,
@@ -149,6 +140,10 @@ class NPUIPCWeightTransferEngine(  # type: ignore[no-redef]
         # Set from the trainer-supplied init info at the handshake; defaults
         # are only for the (unreachable) receive-before-init case.
         self.packed = False
+        # One importer per engine: every chunk of a packed transfer must reuse
+        # the same mapping so torch's cross-process refcount is decremented once
+        # per export instead of once per chunk (see NPUPackedBufferImporter).
+        self._packed_importer = NPUPackedBufferImporter()
 
     def init_transfer_engine(self, init_info: NPUIPCWeightTransferInitInfo) -> None:
         """Record the trainer-supplied wire params so the worker decodes
@@ -156,12 +151,20 @@ class NPUIPCWeightTransferEngine(  # type: ignore[no-redef]
         self.packed = init_info.packed
 
     def start_weight_update(self) -> None:
-        """No-op for NPU IPC engine (no layerwise reloading)."""
-        pass
+        from vllm.model_executor.model_loader.reload import (
+            initialize_layerwise_reload,
+        )
+
+        initialize_layerwise_reload(self.model)
 
     def finish_weight_update(self) -> None:
-        """No-op for NPU IPC engine (no layerwise reloading)."""
-        pass
+        from vllm.model_executor.model_loader.reload import (
+            finalize_layerwise_reload,
+        )
+
+        finalize_layerwise_reload(self.model, self.model_config)
+        # Release the packed import mapping held for this transfer.
+        self._packed_importer.close()
 
     def receive_weights(self, update_info: NPUIPCWeightTransferUpdateInfo) -> None:
         """Receive weights from the trainer via NPU IPC handles.
@@ -189,6 +192,7 @@ class NPUIPCWeightTransferEngine(  # type: ignore[no-redef]
                 dtype_names=update_info.dtype_names,
                 tensor_sizes=update_info.tensor_sizes,
                 device_index=device_index,
+                importer=self._packed_importer,
             )
         else:
             # Lazy import: ``rebuild_npu_tensor`` lives in ``torch_npu`` and
@@ -219,13 +223,21 @@ class NPUIPCWeightTransferEngine(  # type: ignore[no-redef]
                 weight = rebuild_npu_tensor(*list_args)
                 weights.append((name, weight))
 
+        from vllm.model_executor.model_loader.mtp_validation import (
+            disable_mtp_completeness_check,
+        )
+
+        # A packed transfer loads the model in chunks, so a loader that checks
+        # every expected parameter arrived would reject a chunk; only the whole
+        # transaction has to be complete.
+        with disable_mtp_completeness_check():
             self.model.load_weights(weights)
 
     def shutdown(self) -> None:
-        pass
+        self._packed_importer.close()
 
 
-class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
+class NPUIPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[NPUIPCTrainerInitInfo]):
     """Trainer-side NPU IPC weight transfer engine.
 
     Mirrors upstream ``IPCTrainerWeightTransferEngine`` but swaps the
@@ -234,6 +246,11 @@ class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
     NPU packed producer/consumer). HTTP/JSON transport is delegated to
     ``HTTPVLLMWeightSyncClient`` so the handles are serialized there
     rather than in this engine.
+
+    It extends the generic trainer base directly rather than the CUDA IPC
+    trainer engine: every data-plane step here is an NPU implementation, and
+    only the transport-neutral trainer contract (``client`` / ``source`` /
+    ``is_sender``) is shared.
     """
 
     init_info_cls = NPUIPCTrainerInitInfo
@@ -247,8 +264,7 @@ class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
         packed: bool = False,
         packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     ) -> None:
-        TrainerWeightTransferEngine.__init__(
-            self,
+        super().__init__(
             client=client,
             source=source,
             is_sender=is_sender,
@@ -264,8 +280,10 @@ class NPUIPCTrainerWeightTransferEngine(IPCTrainerWeightTransferEngine):
         init_info: NPUIPCTrainerInitInfo,
         *,
         client: "VLLMWeightSyncClient",
-        source: "WeightSource",
-    ) -> "NPUIPCTrainerWeightTransferEngine":
+        source: "WeightSource | None" = None,
+    ) -> Self:
+        if source is None:
+            raise ValueError("NPU IPC trainer weight transfer requires a WeightSource.")
         engine = cls(
             client=client,
             source=source,

@@ -25,6 +25,7 @@ data correctness is verified end-to-end.
 
 from __future__ import annotations
 
+import sys
 import types
 from unittest.mock import MagicMock, patch
 
@@ -33,6 +34,7 @@ import torch
 
 from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
+    NPUPackedBufferImporter,
     packed_broadcast_consumer,
     packed_broadcast_producer,
     packed_npu_ipc_consumer,
@@ -50,9 +52,14 @@ _MODULE = "vllm_ascend.distributed.weight_transfer.packed_tensor"
 class _FakeNpuStream:
     """A minimal stand-in for ``torch.npu.Stream``.
 
+    Mirrors the real signature (``device``/``priority`` are optional) so the
+    module under test can request a stream for a specific device.
     ``synchronize()`` is a no-op; ``__enter__``/``__exit__`` allow the
     ``with torch.npu.stream(s):`` context manager to work.
     """
+
+    def __init__(self, device=None, priority: int = 0, **kwargs) -> None:
+        self.device = device
 
     def synchronize(self) -> None:
         return None
@@ -64,6 +71,16 @@ class _FakeNpuStream:
         return None
 
 
+def _as_cpu_device(device):
+    """Map any NPU device spelling (``"npu"``, ``"npu:0"``, ``torch.device``)."""
+    if device is None:
+        return None
+    try:
+        return "cpu" if torch.device(device).type == "npu" else device
+    except (RuntimeError, TypeError):
+        return device
+
+
 @pytest.fixture(autouse=True)
 def _stub_torch_npu():
     """Patch every ``torch.npu.*`` reference and ``device="npu"`` the module uses.
@@ -73,7 +90,7 @@ def _stub_torch_npu():
     buffers with ``torch.empty(..., device="npu")``.  On a pure CPU build neither
     ``torch.npu`` nor the ``"npu"`` device exists, so both must be stubbed:
     ``torch.npu`` is replaced with a fake namespace and ``torch.empty`` is wrapped
-    to redirect ``device="npu"`` to ``device="cpu"`` (the packing logic under test
+    to redirect NPU devices to ``cpu`` (the packing logic under test
     is dtype/shape/byte-correctness, which is device-agnostic).
     """
     fake_npu = types.SimpleNamespace(
@@ -87,8 +104,8 @@ def _stub_torch_npu():
     original_empty = torch.empty
 
     def _fake_empty(*args, **kwargs):
-        if kwargs.get("device") == "npu":
-            kwargs["device"] = "cpu"
+        if "device" in kwargs:
+            kwargs["device"] = _as_cpu_device(kwargs["device"])
         return original_empty(*args, **kwargs)
 
     with patch.object(torch, "npu", fake_npu, create=True), patch.object(torch, "empty", _fake_empty):
@@ -574,6 +591,30 @@ def test_packed_npu_ipc_consumer_truncates_to_content_size():
             device_index=0,
         )
     assert torch.equal(weights[0][1].cpu(), torch.tensor([1.0], dtype=torch.float32))
+
+
+def test_npu_packed_buffer_importer_reuses_mapping_and_closes():
+    """One importer per transfer: rebuilt once, released once.
+
+    Rebuilding per chunk would decrement torch's cross-process refcount once
+    per chunk and leak the producer's buffer, so chunks must reuse the mapping
+    and ``close()`` must drop it.
+    """
+    packed = torch.zeros(4, dtype=torch.uint8)
+    patcher = _install_fake_rebuild_npu_tensor(packed)
+    importer = NPUPackedBufferImporter()
+    args = ["uuid", 4, 0, 0, 0, 0, 1, None]
+
+    with patcher:
+        first = importer.rebuild(args)
+        second = importer.rebuild(args)
+        fake_mod = sys.modules["torch_npu.multiprocessing.reductions"]
+        fake_rebuild = fake_mod.rebuild_npu_tensor  # type: ignore[attr-defined]
+
+    assert first is second
+    fake_rebuild.assert_called_once_with(*args)
+    importer.close()
+    assert importer._entry is None
 
 
 # ---------------------------------------------------------------------------
