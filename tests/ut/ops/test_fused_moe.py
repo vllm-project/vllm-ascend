@@ -12,6 +12,7 @@ from vllm.model_executor.layers.activation import SituAndMul
 
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.ops import register_custom_ops as custom_ops
 from vllm_ascend.ops.fused_moe import fused_moe as fused_moe_module
 from vllm_ascend.ops.fused_moe import routed_experts as routed_experts_module
@@ -28,7 +29,10 @@ from vllm_ascend.ops.fused_moe.routed_experts import (
     use_multistage_eplb_load,
 )
 from vllm_ascend.ops.fused_moe.router import fused_topk_router as fused_topk_router_module
-from vllm_ascend.ops.fused_moe.router.fused_topk_router import AscendFusedTopKRouter
+from vllm_ascend.ops.fused_moe.router.fused_topk_router import (
+    DEEPSEEK_V4_IMAGE_SENTINEL_COUNT,
+    AscendFusedTopKRouter,
+)
 from vllm_ascend.ops.fused_moe.router.grouped_topk_router import AscendGroupedTopKRouter
 from vllm_ascend.ops.fused_moe.shared_experts import (
     AscendSharedExperts,
@@ -737,7 +741,7 @@ def test_hash_router_preserves_fp32_weights_and_explicit_input_ids(monkeypatch, 
 
 @pytest.mark.parametrize("image_sentinel_lo", [129257, 129264])
 @pytest.mark.parametrize("renormalize", [True, False])
-def test_vision_router_preserves_reference_routing(monkeypatch, image_sentinel_lo, renormalize):
+def test_vision_router_preserves_reference_routing_on_a5(monkeypatch, image_sentinel_lo, renormalize):
     input_ids = torch.tensor([-1, image_sentinel_lo], dtype=torch.int32)
     hidden_states = torch.randn(2, 4)
     router_logits = torch.randn(2, 4, dtype=torch.float32)
@@ -751,6 +755,11 @@ def test_vision_router_preserves_reference_routing(monkeypatch, image_sentinel_l
             moe_comm_type=MoECommType.ALLGATHER,
             moe_comm_method=SimpleNamespace(prepare_finalize=prepare_finalize),
         ),
+    )
+    monkeypatch.setattr(
+        fused_topk_router_module,
+        "get_current_hardware_profile",
+        lambda: get_hardware_profile(AscendDeviceType.A5),
     )
     hash_op = MagicMock(side_effect=AssertionError("Vision routing must not call the hash kernel"))
     monkeypatch.setattr(
@@ -789,6 +798,67 @@ def test_vision_router_preserves_reference_routing(monkeypatch, image_sentinel_l
     torch.testing.assert_close(weights, expected_weights * 2.0)
     assert weights.dtype == torch.float32
     hash_op.assert_not_called()
+
+
+@pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3])
+def test_vision_router_uses_fused_hash_kernel_on_a2_a3(monkeypatch, device_type):
+    image_sentinel_lo = 129257
+    input_ids = torch.tensor([11, image_sentinel_lo + 2], dtype=torch.int32)
+    hidden_states = torch.randn(2, 4)
+    router_logits = torch.randn(2, 4, dtype=torch.float32)
+    text_bias = torch.randn(4, dtype=torch.float32)
+    bias_vl = torch.randn(4, dtype=torch.bfloat16)
+    topk_weights = torch.randn(2, 2)
+    topk_ids = torch.zeros(2, 2, dtype=torch.int32)
+    prepare_finalize = SimpleNamespace(all_gather_input_ids=MagicMock(side_effect=lambda value: value))
+    monkeypatch.setattr(
+        fused_topk_router_module,
+        "_EXTRA_CTX",
+        SimpleNamespace(
+            moe_comm_type=MoECommType.ALLGATHER,
+            moe_comm_method=SimpleNamespace(prepare_finalize=prepare_finalize),
+        ),
+    )
+    monkeypatch.setattr(
+        fused_topk_router_module,
+        "get_current_hardware_profile",
+        lambda: get_hardware_profile(device_type),
+    )
+    hash_op = MagicMock(return_value=(topk_weights, topk_ids, None))
+    monkeypatch.setattr(
+        fused_topk_router_module.torch.ops._C_ascend,
+        "moe_gating_top_k_hash",
+        hash_op,
+        raising=False,
+    )
+    router = AscendFusedTopKRouter(
+        top_k=2,
+        global_num_experts=4,
+        num_expert_group=1,
+        topk_group=1,
+        scoring_func="sqrtsoftplus",
+        e_score_correction_bias=text_bias,
+        bias_vl=bias_vl,
+        image_sentinel_lo=image_sentinel_lo,
+        routed_scaling_factor=2.0,
+    )
+
+    weights, ids = router._compute_routing(
+        hidden_states,
+        router_logits,
+        torch.int64,
+        input_ids=input_ids,
+    )
+
+    kwargs = hash_op.call_args.kwargs
+    assert weights is topk_weights
+    assert weights.dtype == torch.float32
+    assert ids.dtype == torch.int64
+    assert kwargs["bias"] is text_bias
+    assert kwargs["bias_vl"].dtype == router_logits.dtype
+    torch.testing.assert_close(kwargs["input_ids"], input_ids.to(torch.int64))
+    assert kwargs["image_sentinel_lo"] == image_sentinel_lo
+    assert kwargs["image_sentinel_count"] == DEEPSEEK_V4_IMAGE_SENTINEL_COUNT
 
 
 def test_hash_router_chunks_unaligned_input_ids_for_sequence_parallel(monkeypatch):
