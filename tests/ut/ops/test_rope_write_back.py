@@ -10,7 +10,7 @@ instead of silently disabling draft RoPE.
 """
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import torch
 
