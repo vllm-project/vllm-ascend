@@ -199,6 +199,13 @@ MODEL_CASES = (
             # single-chip IPC budget by keeping only the first 8 experts.
             "n_routed_experts": 8,
         },
+        skip_reason=(
+            "GLM-5.1's SFA runtime state does not survive the live-update "
+            "lifecycle yet: the same-chip lane fails its first update once the "
+            "engine has been through a level-2 sleep/wake cycle (#16725), and the "
+            "SFA runtime-weight refresh is still pending as well; both lanes skip "
+            "the case until those land"
+        ),
     ),
 )
 

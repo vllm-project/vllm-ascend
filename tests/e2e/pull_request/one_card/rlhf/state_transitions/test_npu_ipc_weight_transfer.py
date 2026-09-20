@@ -7,9 +7,11 @@ Qwen3-0.6B cannot expose missing START/FINISH hooks because its checkpoint and
 runtime weight representations are compatible. This matrix instead targets
 architectures whose correctness depends on the transaction: fused-MoE layout
 restoration, derived FP32 routing weights, and SFA source/derived-state
-restoration. The derived-routing-weights case (DeepSeek-V4-Flash) is skipped for
-now — see the case's ``skip_reason`` — so today the matrix carries Qwen3.5 and
-GLM-5.1.
+restoration. Cases whose model is not ready for the transaction are skipped in
+both lanes with a per-case ``skip_reason`` — DeepSeek-V4-Flash (needs the
+attention-sink fix in #16355) and GLM-5.1 (its SFA runtime state does not survive
+the level-2 sleep the same-chip lane needs, tracked by #16725) — so the matrix
+carries Qwen3.5-35B-A3B today.
 
 The correctness oracle is *normal startup loading of the same payload*, not the
 first live update: the generator also writes a temporary checkpoint, a reference
@@ -158,8 +160,9 @@ def test_npu_ipc_weight_transfer_transaction(case: WeightUpdateModelCase, packed
             # send_weights owns the complete START -> LOAD -> FINISH transaction.
             engine.send_weights()
             # The KV cache is re-allocated last, from the updated weights' state.
+            # That wake leaves nothing asleep, so the engine resumes scheduling on
+            # its own and no explicit `/resume` is needed.
             _post(server, "wake_up", params={"tags": ["kv_cache"]})
-            _post(server, "resume")
             signatures.append(generation_signature(client, case.model))
 
     updated_signature, reloaded_signature = signatures
