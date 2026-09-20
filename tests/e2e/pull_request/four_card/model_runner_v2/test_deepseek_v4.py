@@ -83,7 +83,6 @@ def test_deepseek_v4_mtp_full_decode_only():
             "num_speculative_tokens": num_speculative_tokens,
             "method": "mtp",
         },
-        attention_config={"indexer_kv_dtype": "int8"},
         additional_config={"enable_dsa_cp": False},
     ) as runner:
         runner.model.generate(prompts, sampling_params)
@@ -145,7 +144,6 @@ def test_dspark_spec_decoding(
         enforce_eager=enforce_eager,
         disable_log_stats=False,
         async_scheduling=True,
-        attention_config={"indexer_kv_dtype": "int8"},
         speculative_config={
             "method": "dspark",
             "num_speculative_tokens": num_speculative_tokens,

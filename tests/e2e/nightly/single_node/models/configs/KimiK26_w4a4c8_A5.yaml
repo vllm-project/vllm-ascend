@@ -51,8 +51,6 @@ _server_cmd: &server_cmd
   - "0"
   - "--mm-encoder-tp-mode"
   - "data"
-  - "--kv-cache-dtype" 
-  - "fp8"
   - "--compilation-config"
   - '{"cudagraph_capture_sizes":[48,64,80,96,112,128],"cudagraph_mode": "FULL_DECODE_ONLY"}'
   - "--additional-config"

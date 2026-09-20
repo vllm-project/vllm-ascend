@@ -106,9 +106,6 @@ def test_deepseek_v4_dspark_pp_accuracy() -> None:
         enforce_eager=True,
         enable_prefix_caching=False,
         disable_log_stats=False,
-        attention_config={
-            "indexer_kv_dtype": "int8",
-        },
         speculative_config={
             "method": "dspark",
             "num_speculative_tokens": 5,

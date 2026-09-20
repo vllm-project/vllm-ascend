@@ -478,10 +478,8 @@ class NPUPlatform(Platform):
         _validate_draft_decode_context_parallel_config(vllm_config)
         _validate_parallel_config(vllm_config)
 
-        # 3.Auto detect quantization method and verify cache dtype
+        # 3.Auto detect quantization method
         maybe_auto_detect_quantization(vllm_config)
-        if vllm_config.cache_config.cache_dtype == "fp8" or vllm_config.attention_config.indexer_kv_dtype == "fp8":
-            assert get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
 
         # 4.Make sure the config is compatible with Ascend
         _fix_incompatible_config(vllm_config)
@@ -1076,6 +1074,14 @@ def _update_compilation_modes(vllm_config: VllmConfig, ascend_config: AscendConf
             vars(ascend_compilation_config)
             if not isinstance(ascend_compilation_config, dict)
             else ascend_compilation_config
+        )
+
+    if model_config and hasattr(model_config.hf_text_config, "index_topk"):
+        from vllm_ascend.attention.dsa_attn_kv_plan import resolve_dsv4_cache_dtype
+
+        vllm_config.cache_config.cache_dtype = resolve_dsv4_cache_dtype(
+            vllm_config.cache_config.cache_dtype,
+            str(model_config.dtype).replace("torch.", ""),
         )
 
     # Update compilation mode in some cases

@@ -63,7 +63,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import DeviceMemoryProfiler
-from vllm.utils.torch_utils import PIN_MEMORY, get_dtype_size, kv_cache_dtype_str_to_dtype
+from vllm.utils.torch_utils import PIN_MEMORY, get_dtype_size
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -437,16 +437,14 @@ class NPUModelRunner(GPUModelRunner):
         # Set up Attention
         self.use_sparse = enable_sfa(vllm_config)
         # dsa c8
-        self.enable_sparse_sfa_c8 = vllm_config.cache_config.cache_dtype in ["fp8", "int8"]
-        self.enable_sparse_li_c8 = vllm_config.attention_config.indexer_kv_dtype in ["fp8", "int8"]
-        if self.enable_sparse_li_c8:
-            self.c8_k_cache_dtype = kv_cache_dtype_str_to_dtype(
-                vllm_config.attention_config.indexer_kv_dtype, 
-                vllm_config.model_config
-            )
-            if self.c8_k_cache_dtype == torch.float8_e4m3fn:
+        self.enable_sparse_sfa_c8 = self.ascend_config.enable_sparse_sfa_c8
+        self.enable_sparse_li_c8 = self.ascend_config.enable_sparse_li_c8
+        if self.enable_sparse_sfa_c8 or self.enable_sparse_li_c8:
+            if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
+                self.c8_k_cache_dtype = torch.float8_e4m3fn
                 self.c8_k_scale_cache_dtype = torch.float32
-            elif self.c8_k_cache_dtype == torch.int8:
+            else:
+                self.c8_k_cache_dtype = torch.int8
                 self.c8_k_scale_cache_dtype = torch.float16
 
         self.attn_backend = get_attn_backend(
@@ -5403,13 +5401,13 @@ class NPUModelRunner(GPUModelRunner):
                             v_dim,
                         )
                     k_cache_dtype = v_cache_dtype = current_kv_cache_spec.dtype
-
-                    if current_sparse_sfa_c8:
-                        k_cache_dtype = self.c8_k_cache_dtype
-                    elif enable_fa_quant(self.vllm_config):
+                    if enable_fa_quant(self.vllm_config):
                         k_cache_dtype, v_cache_dtype = self.vllm_config.quant_config.get_kv_quant_dtype(
                             layer_name, current_kv_cache_spec.dtype, self.model_config
                         )
+
+                    if current_sparse_sfa_c8:
+                        k_cache_dtype = self.c8_k_cache_dtype
 
                     k_cache = raw_k_tensor.view(k_cache_dtype).view(k_shape)
                     if current_sparse_sfa_c8:
@@ -5731,6 +5729,7 @@ class NPUModelRunner(GPUModelRunner):
                 if spec := attn_module.get_kv_cache_spec(self.vllm_config):
                     kv_cache_spec[layer_name] = spec
                     attn_layer_names.add(layer_name)
+
             elif isinstance(attn_module, MLAAttention):
                 if self.use_sparse:
                     impl = attn_module.impl
@@ -5810,12 +5809,8 @@ class NPUModelRunner(GPUModelRunner):
                     block_size=self.block_size,
                     num_kv_heads=1,
                     head_size=self.model_config.hf_text_config.index_head_dim,
-                    dtype=self.c8_k_cache_dtype if cache_sparse_li_c8 else self.dtype,
-                    cache_dtype_str=(
-                        self.vllm_config.cache_config.cache_dtype
-                        if cache_sparse_li_c8
-                        else "auto"
-                    ),
+                    dtype=self.c8_k_cache_dtype if cache_sparse_li_c8 else self.kv_cache_dtype,
+                    cache_dtype_str=self.vllm_config.cache_config.cache_dtype,
                     scale_dim=1 if cache_sparse_li_c8 else 0,
                     scale_dtype=self.c8_k_scale_cache_dtype if cache_sparse_li_c8 else torch.int8,
                     cache_sparse_li_c8=cache_sparse_li_c8,

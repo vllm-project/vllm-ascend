@@ -86,7 +86,6 @@ def _run_test(
         compilation_config=compilation_config,
         disable_log_stats=False,
         speculative_config=speculative_config,
-        attention_config={"indexer_kv_dtype": "int8"},
         additional_config={
             "enable_dsa_cp": False,
             "enable_prefill_mc2": True,

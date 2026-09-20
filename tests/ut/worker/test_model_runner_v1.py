@@ -503,7 +503,6 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.vllm_config.kv_transfer_config = None
         runner.model_config = MagicMock()
         runner.model_config.use_mla = True
-        runner.dtype = torch.bfloat16
         backend = MagicMock()
         backend.get_kv_cache_shape.side_effect = lambda num_blocks, block_size, num_kv_heads, head_size: (
             2,

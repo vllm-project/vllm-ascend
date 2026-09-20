@@ -28,7 +28,7 @@ import vllm
 from vllm.config import VllmConfig, get_current_vllm_config, get_layers_from_vllm_config
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.utils.torch_utils import get_dtype_size, kv_cache_dtype_str_to_dtype
+from vllm.utils.torch_utils import get_dtype_size, get_kv_cache_torch_dtype
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -117,12 +117,11 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
         else 1
     )
 
-    c8_k_cache_dtype = kv_cache_dtype_str_to_dtype(
-        vllm_config.attention_config.indexer_kv_dtype, vllm_config.model_config
-    )
-    if c8_k_cache_dtype == torch.float8_e4m3fn:
+    if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
+        c8_k_cache_dtype = torch.float8_e4m3fn
         c8_k_scale_cache_dtype = torch.float32
-    elif c8_k_cache_dtype == torch.int8:
+    else:
+        c8_k_cache_dtype = torch.int8
         c8_k_scale_cache_dtype = torch.float16
 
     for layer_name, attn_module in attn_layers.items():
@@ -191,8 +190,13 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 block_size=vllm_config.cache_config.block_size,
                 num_kv_heads=1,
                 head_size=vllm_config.model_config.hf_text_config.index_head_dim,
-                dtype=c8_k_cache_dtype if cache_sparse_li_c8 else vllm_config.model_config.dtype,
-                cache_dtype_str=(vllm_config.cache_config.cache_dtype if cache_sparse_li_c8 else "auto"),
+                dtype=c8_k_cache_dtype
+                if cache_sparse_li_c8
+                else get_kv_cache_torch_dtype(
+                    vllm_config.cache_config.cache_dtype,
+                    vllm_config.model_config.dtype,
+                ),
+                cache_dtype_str=vllm_config.cache_config.cache_dtype,
                 scale_dim=1 if cache_sparse_li_c8 else 0,
                 scale_dtype=c8_k_scale_cache_dtype if cache_sparse_li_c8 else torch.int8,
                 cache_sparse_li_c8=cache_sparse_li_c8,
@@ -1251,7 +1255,11 @@ def _reshape_kv_cache_v2(
 
             if sparse_sfa_c8:
                 raw_k_tensor = raw_cache
-                k_dtype = kv_cache_dtype_str_to_dtype(vllm_config.cache_config.cache_dtype, vllm_config.model_config)
+                k_dtype = (
+                    torch.float8_e4m3fn
+                    if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
+                    else torch.int8
+                )
                 k_cache = raw_k_tensor.view(k_dtype).view(k_shape)
                 kv_caches[layer_name] = (k_cache,)
             elif isinstance(raw_cache, tuple):
