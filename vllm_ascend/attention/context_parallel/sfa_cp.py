@@ -14,6 +14,7 @@ from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: igno
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 import vllm_ascend.ops.triton.sfa_cp  # noqa: F401
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import (
     DCPImplMixin,
@@ -35,7 +36,13 @@ from vllm_ascend.attention.sfa_v1 import (
     AscendSFAMetadataBuilder,
     SFAForwardContext,
 )
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, enable_dcp, split_decodes_and_prefills
+from vllm_ascend.attention.utils import (
+    AscendCommonAttentionMetadata,
+    enable_dcp,
+    prefill_cache_write_enabled,
+    split_decodes_and_prefills,
+    try_scatter_cache,
+)
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.utils import (
@@ -202,6 +209,7 @@ class AscendSFADSACPMetadata(AscendSFAMetadata):
     """SFA metadata fields used only by the DSA-CP execution path."""
 
     dsa_cp_context: DSACPContext | None = None
+    fast_cache_store: bool = False
 
 
 class DCPGatherContext(NamedTuple):
@@ -350,7 +358,21 @@ class AscendSFADSACPMetadataBuilder(AscendSFAMetadataBuilder):
             actual_seq_lengths_query=actual_seq_lengths_query[: common_attn_metadata.num_reqs],
             actual_seq_lengths_key=actual_seq_lengths_key[: common_attn_metadata.num_reqs],
         )
+        if type(self) is AscendSFADSACPMetadataBuilder:
+            extra["fast_cache_store"] = draft_index is None and prefill_cache_write_enabled(common_attn_metadata)
         return cos, sin, slot_mapping, extra
+
+    def build_for_cudagraph_capture(self, *args, **kwargs):
+        metadata = super().build_for_cudagraph_capture(*args, **kwargs)
+        if isinstance(metadata, AscendSFADSACPMetadata):
+            metadata.fast_cache_store = False
+        return metadata
+
+    def build_for_graph_capture(self, *args, **kwargs):
+        metadata = super().build_for_graph_capture(*args, **kwargs)
+        if isinstance(metadata, AscendSFADSACPMetadata):
+            metadata.fast_cache_store = False
+        return metadata
 
     def _update_parallel_slot_mapping(
         self,
@@ -399,6 +421,16 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
 
     def _parallel_query_gather_dim(self) -> int:
         return 0
+
+    def _use_c8_reshape_optim(self, attn_metadata: AscendSFAMetadata) -> bool:
+        """Use the existing P-node C8 write optimization setting for main KV."""
+        return (
+            self.enable_sparse_sfa_c8
+            and getattr(attn_metadata, "fast_cache_store", False)
+            and self.is_kv_producer
+            and not self.is_kv_consumer
+            and get_ascend_config().c8_enable_reshape_optim
+        )
 
     def _prepare_native_hidden_states(
         self,
@@ -553,11 +585,15 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         if kv_cache is not None:
             assert fused_kv_no_split is not None
             if self.enable_sparse_sfa_c8:
-                torch_npu.npu_scatter_nd_update_(
-                    kv_cache[0].view(-1, fused_kv_no_split.shape[-1]),
-                    slot_mapping_sfa[: attn_metadata.num_actual_tokens].view(-1, 1),
-                    fused_kv_no_split[: attn_metadata.num_actual_tokens],
-                )
+                if not (
+                    self._use_c8_reshape_optim(attn_metadata)
+                    and try_scatter_cache(fused_kv_no_split, kv_cache[0], slot_mapping_sfa, attn_metadata)
+                ):
+                    torch_npu.npu_scatter_nd_update_(
+                        kv_cache[0].view(-1, fused_kv_no_split.shape[-1]),
+                        slot_mapping_sfa[: attn_metadata.num_actual_tokens].view(-1, 1),
+                        fused_kv_no_split[: attn_metadata.num_actual_tokens],
+                    )
                 k_pe = k_nope = None
             else:
                 k_pe, k_nope = fused_kv_no_split.split([self.qk_rope_head_dim, self.kv_lora_rank], dim=-1)

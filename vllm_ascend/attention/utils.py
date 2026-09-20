@@ -6,6 +6,7 @@ from typing import Any
 
 import torch
 import torch.nn.functional as F
+import torch_npu
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group, is_v1_kv_transfer_group
 from vllm.forward_context import ForwardContext, get_forward_context
@@ -22,6 +23,92 @@ from vllm_ascend.utils import (
 
 SFA_QSFA_TILE_SIZE = 128
 MLAPO_MAX_SUPPORTED_TOKENS = 1024
+
+SCATTER_CACHE_MIN_TOKENS = 2048
+
+
+def prefill_cache_write_enabled(metadata: Any) -> bool:
+    """Select ordinary, unpadded prefill writes without reading device slots.
+
+    Callers must exclude PCP/DCP and drafting: those paths can mask slots
+    inside the actual-token prefix. Full-attention prefill writes instead
+    address allocated, distinct cache slots; TP padding is only at the end.
+    Capture builders explicitly disable this flag for their dummy mappings.
+    """
+    from vllm_ascend.attention.attention_v1 import AscendAttentionState
+
+    is_prefilling = getattr(metadata, "is_prefilling", None)
+    return (
+        metadata.num_actual_tokens >= SCATTER_CACHE_MIN_TOKENS
+        and getattr(metadata, "graph_pad_size", -1) == -1
+        and getattr(metadata, "attn_state", None)
+        in (
+            AscendAttentionState.PrefillNoCache,
+            AscendAttentionState.PrefillCacheHit,
+            AscendAttentionState.ChunkedPrefill,
+        )
+        and isinstance(is_prefilling, torch.Tensor)
+        and is_prefilling.device.type == "cpu"
+        and is_prefilling.numel() >= metadata.num_reqs > 0
+        and bool(is_prefilling[: metadata.num_reqs].all())
+    )
+
+
+def try_scatter_cache(key: torch.Tensor, cache: torch.Tensor, slots: torch.Tensor, metadata: Any) -> bool:
+    """Write eligible DSA-CP prefill rows in place, or request the old scatter.
+
+    Only builders satisfying prefill_cache_write_enabled may set the flag.
+    In particular, neither fast operator is assumed to skip negative slots.
+    Layout checks inspect strides only; no device-to-host synchronization is
+    introduced. Never make a contiguous copy of the destination cache.
+    """
+    if metadata is None or getattr(metadata, "fast_cache_store", False) is not True:
+        return False
+    tokens = metadata.num_actual_tokens
+    if (
+        tokens < SCATTER_CACHE_MIN_TOKENS
+        or key.ndim not in (2, 3)
+        or cache.ndim != 4
+        or cache.shape[2] != 1
+        or (key.ndim == 3 and key.shape[1] != 1)
+        or key.shape[0] < tokens
+        or slots.ndim != 1
+        or slots.numel() < tokens
+        or slots.dtype not in (torch.int32, torch.int64)
+        or key.dtype != cache.dtype
+        or key.shape[-1] != cache.shape[-1]
+    ):
+        return False
+
+    profile = get_current_hardware_profile()
+    width = key.shape[-1]
+    if profile.supports(HardwareCapability.SCATTER_ND_CACHE_STORE):
+        operation = getattr(torch.ops._C_ascend, "npu_scatter_nd_update_sk", None)
+        if operation is None or key.dtype not in (torch.int8, torch.float16, torch.bfloat16):
+            return False
+        try:
+            target = cache.view(-1, width)
+        except RuntimeError:
+            return False
+        # SK supports gaps between rows, but not striding within a row.
+        if target.stride(1) != 1 or target.stride(0) < width:
+            return False
+        operation(target, slots[:tokens].reshape(-1, 1), key[:tokens].reshape(tokens, width))
+        return True
+
+    if profile.supports(HardwareCapability.SCATTER_PA_CACHE_STORE):
+        operation = getattr(torch_npu, "npu_scatter_pa_cache", None)
+        if operation is None or not cache.is_contiguous():
+            return False
+        if key.dtype not in (torch.int8, torch.float16, torch.bfloat16, torch.float32, torch.float8_e4m3fn):
+            return False
+        operation(
+            key[:tokens].reshape(tokens, 1, width).contiguous(),
+            slots[:tokens].contiguous(),
+            key_cache=cache,
+        )
+        return True
+    return False
 
 
 class PreprocessType(enum.Enum):
