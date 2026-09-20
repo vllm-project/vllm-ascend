@@ -56,15 +56,10 @@ constexpr int64_t X_DTYPE_SIZE = 2;              // x and y are bfloat16
 constexpr int64_t PRE_POST_MIX_NUM = 2;          // the mixes01 buffers carry pre and post together
 constexpr int64_t SQUARE_SUM_SIZE = 16;          // must match SQUARE_SUM_SIZE in the kernel
 constexpr int64_t MASK_PATTERN_ELEM_NUM = 128;   // MASK_PATTERN_BASE_SIZE * MASK_PATTERN_REPEAT_SIZE
-// The batched sinkhorn column stage addresses one row of the hc_mult x hc_mult
-// matrix per UB block, and needs at least two rows to accumulate.
-constexpr int64_t MIN_HC_MULT = 2;
-constexpr int64_t MAX_HC_MULT = BLOCK_SIZE / static_cast<int64_t>(sizeof(float));
-// Upper bound on the comb fragment rows staged for one batched sinkhorn burst. The
-// column stage of an iteration costs the same few instructions for one row or for
-// many, so the gain flattens out well before this point and the remaining UB is
-// worth more to the x and y buffers. Keep COMB_ROW_FACTOR_MAX * MAX_HC_MULT within
-// the 255 repeat limit of the WholeReduceSum in the row stage.
+// MHC runs with four residual streams
+constexpr int64_t EXPECTED_HC_MULT = 4;
+// batching gain flattens before this point and the UB is worth more to the x/y
+// buffers; COMB_ROW_FACTOR_MAX * EXPECTED_HC_MULT stays within the 255 repeat limit
 constexpr int64_t COMB_ROW_FACTOR_MAX = 32;
 }
 
@@ -155,22 +150,19 @@ ge::graphStatus HcPreTiling::GetShapeAttrsInfoInner()
                   OPS_LOG_E(context_->GetNodeName(), "get attr failed."),
                   return ge::GRAPH_FAILED);
 
-    // GetAttr has the final word on hcMult_. The batched sinkhorn column stage in
-    // stage 2 addresses one row of the hc_mult x hc_mult matrix per UB block, and
-    // needs at least two rows to accumulate.
-    OPS_ERR_IF(hcMult_ < MIN_HC_MULT || hcMult_ > MAX_HC_MULT,
+    // GetAttr has the final word on hcMult_
+    OPS_ERR_IF(hcMult_ != EXPECTED_HC_MULT,
                     OPS_LOG_E(context_->GetNodeName(),
-                             "hc_mult should be in [%ld, %ld], but is %ld", MIN_HC_MULT, MAX_HC_MULT, hcMult_),
+                             "hc_mult should be %ld, but is %ld", EXPECTED_HC_MULT, hcMult_),
                     return ge::GRAPH_FAILED);
 
     return ge::GRAPH_SUCCESS;
 }
 
 
-// UB bytes HcPreMembaseKSplitCorePart2::Init allocates for a given split. Mirrors
-// its InitBuffer calls one for one, so it is the place to keep in step when a buffer
-// is added there. combRowFactor only feeds the three sinkhorn staging buffers.
-int64_t HcPreTiling::CalcStage2UbSize(int64_t rowFactor, int64_t dFactor, int64_t combRowFactor) const
+// UB bytes the stage-2 kernel Init allocates; mirrors its InitBuffer calls one for
+// one, keep in step when a buffer is added there
+int64_t HcPreTiling::CalcStage2UbSize(int64_t rowFactor, int64_t dFactor, int64_t combRowFactor)
 {
     const int64_t kBlockNum = tilingData_.get_cubeBlockDimK();
     const int64_t floatSize = static_cast<int64_t>(sizeof(float));
@@ -205,15 +197,10 @@ int64_t HcPreTiling::CalcStage2UbSize(int64_t rowFactor, int64_t dFactor, int64_
     return queSize + bufSize;
 }
 
-// Pick how many comb fragment rows stage 2 stages before it runs the sinkhorn
-// iterations over them. Growing this only costs the three staging buffers, so it is
-// decided here against the real UB budget rather than fixed in the kernel: at
-// d = 4096 the x buffers leave little slack, at d = 7168 dFactor is halved and the
-// slack pays for a bigger burst.
-// The chunk grows in whole stage2RowFactor groups because the stage-2 loop stages
-// one group per iteration and flushes once the chunk is full; a bound that is not a
-// multiple of the group size could be stepped over. Starting from stage2RowFactor
-// means a UB budget with no slack at all reproduces the unbatched footprint exactly.
+// comb rows staged per batched sinkhorn burst, grown against the real UB budget.
+// Whole stage2RowFactor groups only: the kernel flushes on >=, so a bound that is
+// not a multiple would be stepped over. Starting from stage2RowFactor keeps the
+// no-slack case identical to the unbatched footprint.
 void HcPreTiling::CalcCombRowFactor()
 {
     int64_t maxCombRows = std::min(COMB_ROW_FACTOR_MAX, rowOfFormerBlock_);

@@ -100,8 +100,7 @@ TILING_DATA_FIELD_DEF(int64_t, bufferPool1Size);
 TILING_DATA_FIELD_DEF(int64_t, mUbSize);
 TILING_DATA_FIELD_DEF(int64_t, hasPreMix);
 TILING_DATA_FIELD_DEF(int64_t, hasPreOut);
-// rows of comb fragment the stage-2 loop stages before running the batched
-// sinkhorn iterations; a whole multiple of stage2RowFactor
+// comb rows staged per batched sinkhorn burst; whole multiple of stage2RowFactor
 TILING_DATA_FIELD_DEF(int64_t, combRowFactor);
 
 END_TILING_DATA_DEF;
@@ -132,7 +131,8 @@ public:
     ge::graphStatus CalcMKSplitCoreMembasePart2Tiling();
 
 private:
-    int64_t CalcStage2UbSize(int64_t rowFactor, int64_t dFactor, int64_t combRowFactor) const;
+    // not const: the generated tiling-data getters are not const-qualified
+    int64_t CalcStage2UbSize(int64_t rowFactor, int64_t dFactor, int64_t combRowFactor);
     void CalcCombRowFactor();
 
     gert::TilingContext *context_ = nullptr;

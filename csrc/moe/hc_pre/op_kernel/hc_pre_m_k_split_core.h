@@ -455,12 +455,8 @@ int64_t curBsIdxForAll = (stage2BlockIdx * tilingData->rowLoopOfFormerBlock +
                         curRowFactor, tilingData->hcMult);
                 postQue.FreeTensor(postLocal);
 
-                // combFrag: the init part (softmax and the first column normalization)
-                // stays in this per-row loop so it keeps overlapping the x/y copies, and
-                // writes its result into the sinkhorn staging tensor. Once combRowFactor
-                // rows are staged, the remaining iterations run in place across all of
-                // them, which is where the batching pays off: their column stage costs
-                // the same handful of instructions for one row or for many.
+                // combFrag: init stays in this per-row loop to overlap the x/y copies
+                // and writes into the staging tensor; the rest runs batched below
                 if (stagedRows == 0) {
                     combFragLocal = combFragQue.AllocTensor<float>();
                 }
@@ -495,9 +491,8 @@ int64_t curBsIdxForAll = (stage2BlockIdx * tilingData->rowLoopOfFormerBlock +
                 mixesQue2.FreeTensor(mixes2Local);
                 squareSumQue.template FreeTensor(squareSumOutLocal);
 
-                // Host sizes combRowFactor as a whole multiple of stage2RowFactor, so a
-                // full chunk lands on the bound exactly; the tail row group is the last
-                // iteration and flushes with whatever it has staged.
+                // combRowFactor is a whole multiple of stage2RowFactor, so stagedRows
+                // lands on the bound exactly; the tail group flushes on the last loop
                 stagedRows += curRowFactor;
                 if (stagedRows >= tilingData->combRowFactor || rowOuterIdx == rowOuterLoop - 1) {
                     for (int64_t iter = 0; iter < tilingData->iterTimes - 1; iter++) {
