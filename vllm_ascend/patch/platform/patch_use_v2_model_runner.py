@@ -40,10 +40,6 @@ def _patched_use_v2_model_runner(self) -> bool:
 
 def _patched_get_unsupported_features(self) -> list[str]:
     unsupported = _original_get_unsupported_features(self)
-    if vllm_version_is("0.28.0") and "prefill context parallelism" in unsupported:
-        # The release GPU runner rejects non-MLA PCP. AscendPCPManager owns
-        # PCP execution and validates its model, graph and speculator limits.
-        unsupported.remove("prefill context parallelism")
     support = resolve_spec_pp_support(self)
     unsupported_feature = support.unsupported_feature if support is not None else None
     if unsupported_feature is not None and unsupported_feature in unsupported:
@@ -63,15 +59,16 @@ def _patched_validate_v2_model_runner(self) -> None:
 
 VllmConfig._validate_v2_model_runner = _patched_validate_v2_model_runner
 
-# vLLM main exposes this helper; the supported v0.28.0 lane does not.
-if not vllm_version_is("0.28.0"):
-    _original_get_v1_model_runner_unsupported_features = VllmConfig._get_v1_model_runner_unsupported_features
+# Both supported vLLM versions expose this helper.
+_original_get_v1_model_runner_unsupported_features = VllmConfig._get_v1_model_runner_unsupported_features
 
-    def _patched_get_v1_model_runner_unsupported_features(self) -> list[str]:
-        unsupported = _original_get_v1_model_runner_unsupported_features(self)
-        return [feature for feature in unsupported if feature not in _ASCEND_V1_SUPPORTED_FEATURES]
 
-    VllmConfig._get_v1_model_runner_unsupported_features = _patched_get_v1_model_runner_unsupported_features
+def _patched_get_v1_model_runner_unsupported_features(self) -> list[str]:
+    unsupported = _original_get_v1_model_runner_unsupported_features(self)
+    return [feature for feature in unsupported if feature not in _ASCEND_V1_SUPPORTED_FEATURES]
+
+
+VllmConfig._get_v1_model_runner_unsupported_features = _patched_get_v1_model_runner_unsupported_features
 
 
 if vllm_version_is("0.28.0"):
