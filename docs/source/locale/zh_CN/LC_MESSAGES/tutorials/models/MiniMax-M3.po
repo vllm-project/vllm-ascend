@@ -102,7 +102,7 @@ msgstr ""
 "有关部署示例中使用的标准 `vllm serve` 参数的说明，请参考 [vLLM Serving "
 "参数文档](https://docs.vllm.ai/en/latest/cli/serve/#arguments)。有关通过 "
 "`--additional-config` "
-"传递的昇腾特定选项，请参考[附加配置](../../user_guide/configuration/additional_config.md)。有关升腾特定的环境变量，请参考[环境变量](../../user_guide/configuration/env_vars.md)。"
+"传递的昇腾特定选项，请参考[附加配置](../../user_guide/configuration/additional_config.md)。有关昇腾特定的环境变量，请参考[环境变量](../../user_guide/configuration/env_vars.md)。"
 
 msgid "### 5.1 Single-Node Deployment"
 msgstr "### 5.1 单节点部署"
