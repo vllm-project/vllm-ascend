@@ -85,6 +85,17 @@ if vllm_version_is("0.29.0"):
     from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 
 
+def _get_kv_transfer_req_ids(metadata: object | None) -> set[str]:
+    """Return requests explicitly marked for PD tail recomputation."""
+    if metadata is None:
+        return set()
+
+    req_ids = set(getattr(metadata, "pd_decode_recompute_req_ids", ()))
+    for child_metadata in getattr(metadata, "metadata", ()):
+        req_ids.update(_get_kv_transfer_req_ids(child_metadata))
+    return req_ids
+
+
 class NPUModelRunner(GPUModelRunner):
     """Model runner for Ascend NPUs."""
 
@@ -300,6 +311,8 @@ class NPUModelRunner(GPUModelRunner):
         context_len: int = 0,
         valid_dummy_state_slots: bool = False,
     ):
+        if not dummy_run:
+            self._update_pd_decode_recompute_requests(scheduler_output)
         self._cpp_execution_time_ms = None
         profiling_config = self.ascend_config.scheduler_config.profiling_chunk_config
         execution_start_time = _start_profiling_chunk_timing(
@@ -334,6 +347,16 @@ class NPUModelRunner(GPUModelRunner):
         )
         return output
 
+    def _update_pd_decode_recompute_requests(self, scheduler_output: SchedulerOutput) -> None:
+        pending_req_ids: set[str] = getattr(self, "_pd_decode_recompute_req_ids", set())
+        pending_req_ids.difference_update(getattr(scheduler_output, "finished_req_ids", set()))
+        pending_req_ids.difference_update(getattr(scheduler_output, "preempted_req_ids", None) or set())
+        new_req_ids = _get_kv_transfer_req_ids(getattr(scheduler_output, "kv_connector_metadata", None))
+        if new_req_ids:
+            logger.debug("Tracking PD decode KV transfer requests: %s", sorted(new_req_ids))
+        pending_req_ids.update(new_req_ids)
+        self._pd_decode_recompute_req_ids = pending_req_ids
+
     @torch.inference_mode()
     def profile_run(self) -> None:
         """Override GPUModelRunner.profile_run for Ascend NPUs.
@@ -356,6 +379,47 @@ class NPUModelRunner(GPUModelRunner):
 
     def gather_batch_req_state(self, scheduler_output: SchedulerOutput, dummy_run: bool):
         batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
+        kv_transfer_config = getattr(self.vllm_config, "kv_transfer_config", None)
+        if batch_state is not None and kv_transfer_config is not None and kv_transfer_config.is_kv_consumer:
+            # A PD decode consumer recomputes the last prompt token after the
+            # transferred hybrid state is installed.  Upstream MRV2 derives
+            # ``is_prefilling`` solely from the prompt boundary, so that
+            # one-token recompute row incorrectly turns a mixed decode batch
+            # into a prefill batch and disables FULL_DECODE_ONLY replay.
+            self._update_pd_decode_recompute_requests(scheduler_output)
+            kv_transfer_req_ids = self._pd_decode_recompute_req_ids
+            is_kv_transfer_req = np.fromiter(
+                (req_id in kv_transfer_req_ids for req_id in batch_state.req_ids),
+                dtype=np.bool_,
+                count=len(batch_state.req_ids),
+            )
+            pd_decode_recompute = (
+                batch_state.is_prefilling_np
+                & is_kv_transfer_req
+                & (batch_state.num_computed_prefill_tokens_np > 0)
+                & (batch_state.num_scheduled_tokens == self.decode_query_len)
+                & (
+                    batch_state.num_computed_prefill_tokens_np + batch_state.num_scheduled_tokens
+                    >= batch_state.prefill_len_np
+                )
+            )
+            if np.any(pd_decode_recompute):
+                matched_req_ids = [
+                    req_id for req_id, matched in zip(batch_state.req_ids, pd_decode_recompute) if matched
+                ]
+                logger.debug(
+                    "Treating PD decode tail recompute as decode for requests: %s",
+                    matched_req_ids,
+                )
+                self._pd_decode_recompute_req_ids.difference_update(matched_req_ids)
+                batch_state.is_prefilling_np[pd_decode_recompute] = False
+                batch_state = batch_state._replace(has_prefill=bool(batch_state.is_prefilling_np.any()))
+                uniform_token_count = vllm_model_runner.get_uniform_decode_token_count(
+                    len(batch_state.req_ids),
+                    batch_state.num_tokens,
+                    int(batch_state.num_scheduled_tokens.max()),
+                    batch_state.has_prefill,
+                )
         num_tokens = None
         if vllm_version_is("0.28.0") and self.pcp_manager is not None and batch_state is not None:
             num_tokens = self.pcp_manager.get_num_tokens_for_dispatch(

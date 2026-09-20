@@ -10,7 +10,7 @@ import torch
 from vllm.config import CUDAGraphMode
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
-from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+from vllm.v1.worker.gpu.model_runner import BatchReqState, GPUModelRunner
 
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.utils import vllm_version_is
@@ -34,6 +34,182 @@ def _make_runner(need_timing: bool = True):
     runner.adaptive_verification = None
     runner.use_fia = False
     return runner
+
+
+def test_pd_decode_tail_recompute_keeps_uniform_decode_batch():
+    runner = _make_runner()
+    runner.decode_query_len = 1
+    runner.vllm_config = SimpleNamespace(kv_transfer_config=SimpleNamespace(is_kv_consumer=True))
+    batch_state = BatchReqState(
+        req_ids=["migrating", "decoding"],
+        num_scheduled_tokens=np.array([1, 1], dtype=np.int32),
+        num_tokens=2,
+        idx_mapping_np=np.array([0, 1], dtype=np.intp),
+        prefill_len_np=np.array([128, 64], dtype=np.int32),
+        num_computed_prefill_tokens_np=np.array([127, 64], dtype=np.int32),
+        is_prefilling_np=np.array([True, False]),
+        has_prefill=True,
+    )
+
+    transfer_step = SimpleNamespace(
+        kv_connector_metadata=SimpleNamespace(pd_decode_recompute_req_ids={"migrating"}),
+        finished_req_ids=set(),
+        preempted_req_ids=None,
+    )
+    runner._update_pd_decode_recompute_requests(transfer_step)
+
+    with patch.object(
+        GPUModelRunner,
+        "gather_batch_req_state",
+        return_value=(batch_state, None),
+    ):
+        scheduler_output = SimpleNamespace(kv_connector_metadata=SimpleNamespace(pd_decode_recompute_req_ids=set()))
+        gathered, uniform = runner.gather_batch_req_state(scheduler_output, False)
+
+    assert gathered is not batch_state
+    np.testing.assert_array_equal(gathered.is_prefilling_np, [False, False])
+    assert not gathered.has_prefill
+    assert uniform == 1
+    assert not runner._pd_decode_recompute_req_ids
+
+
+@pytest.mark.parametrize("computed,scheduled", [(64, 8), (127, 1)])
+def test_pd_decode_real_prefill_still_blocks_decode_graph(computed, scheduled):
+    runner = _make_runner()
+    runner.decode_query_len = 1
+    runner.vllm_config = SimpleNamespace(kv_transfer_config=SimpleNamespace(is_kv_consumer=True))
+    batch_state = BatchReqState(
+        req_ids=["fallback-prefill", "decoding"],
+        num_scheduled_tokens=np.array([scheduled, 1], dtype=np.int32),
+        num_tokens=scheduled + 1,
+        idx_mapping_np=np.array([0, 1], dtype=np.intp),
+        prefill_len_np=np.array([128, 64], dtype=np.int32),
+        num_computed_prefill_tokens_np=np.array([computed, 64], dtype=np.int32),
+        is_prefilling_np=np.array([True, False]),
+        has_prefill=True,
+    )
+
+    with patch.object(
+        GPUModelRunner,
+        "gather_batch_req_state",
+        return_value=(batch_state, None),
+    ):
+        scheduler_output = SimpleNamespace(kv_connector_metadata=SimpleNamespace(pd_decode_recompute_req_ids=set()))
+        gathered, uniform = runner.gather_batch_req_state(scheduler_output, False)
+
+    np.testing.assert_array_equal(gathered.is_prefilling_np, [True, False])
+    assert gathered.has_prefill
+    assert uniform is None
+
+
+def test_pd_decode_only_reclassifies_transferred_requests_in_mixed_prefill_batch():
+    runner = _make_runner()
+    runner.decode_query_len = 1
+    runner.vllm_config = SimpleNamespace(kv_transfer_config=SimpleNamespace(is_kv_consumer=True))
+    batch_state = BatchReqState(
+        req_ids=["migrating", "local-final-prefill", "decoding"],
+        num_scheduled_tokens=np.array([1, 1, 1], dtype=np.int32),
+        num_tokens=3,
+        idx_mapping_np=np.array([0, 1, 2], dtype=np.intp),
+        prefill_len_np=np.array([128, 128, 64], dtype=np.int32),
+        num_computed_prefill_tokens_np=np.array([127, 127, 64], dtype=np.int32),
+        is_prefilling_np=np.array([True, True, False]),
+        has_prefill=True,
+    )
+
+    with patch.object(
+        GPUModelRunner,
+        "gather_batch_req_state",
+        return_value=(batch_state, None),
+    ):
+        scheduler_output = SimpleNamespace(
+            kv_connector_metadata=SimpleNamespace(pd_decode_recompute_req_ids={"migrating"})
+        )
+        gathered, uniform = runner.gather_batch_req_state(scheduler_output, False)
+
+    np.testing.assert_array_equal(gathered.is_prefilling_np, [False, True, False])
+    assert gathered.has_prefill
+    assert uniform is None
+
+
+def test_pd_decode_transfer_tracking_clears_finished_and_preempted_requests():
+    runner = _make_runner()
+    runner._pd_decode_recompute_req_ids = {"finished", "preempted", "active"}
+    scheduler_output = SimpleNamespace(
+        kv_connector_metadata=SimpleNamespace(
+            metadata=(
+                SimpleNamespace(pd_decode_recompute_req_ids={"new"}),
+                SimpleNamespace(pd_decode_recompute_req_ids=set()),
+            )
+        ),
+        finished_req_ids={"finished"},
+        preempted_req_ids={"preempted"},
+    )
+
+    runner._update_pd_decode_recompute_requests(scheduler_output)
+
+    assert runner._pd_decode_recompute_req_ids == {"active", "new"}
+
+
+def test_pd_decode_tail_recompute_supports_multi_token_decode_query():
+    runner = _make_runner()
+    runner.decode_query_len = 2
+    runner.vllm_config = SimpleNamespace(kv_transfer_config=SimpleNamespace(is_kv_consumer=True))
+    batch_state = BatchReqState(
+        req_ids=["migrating", "decoding"],
+        num_scheduled_tokens=np.array([2, 2], dtype=np.int32),
+        num_tokens=4,
+        idx_mapping_np=np.array([0, 1], dtype=np.intp),
+        prefill_len_np=np.array([128, 64], dtype=np.int32),
+        num_computed_prefill_tokens_np=np.array([127, 64], dtype=np.int32),
+        is_prefilling_np=np.array([True, False]),
+        has_prefill=True,
+    )
+
+    with patch.object(
+        GPUModelRunner,
+        "gather_batch_req_state",
+        return_value=(batch_state, None),
+    ):
+        scheduler_output = SimpleNamespace(
+            kv_connector_metadata=SimpleNamespace(pd_decode_recompute_req_ids={"migrating"})
+        )
+        gathered, uniform = runner.gather_batch_req_state(scheduler_output, False)
+
+    np.testing.assert_array_equal(gathered.is_prefilling_np, [False, False])
+    assert not gathered.has_prefill
+    assert uniform == 2
+
+
+def test_pd_decode_non_consumer_does_not_reclassify_transferred_request():
+    runner = _make_runner()
+    runner.decode_query_len = 1
+    runner.vllm_config = SimpleNamespace(kv_transfer_config=SimpleNamespace(is_kv_consumer=False))
+    batch_state = BatchReqState(
+        req_ids=["transferred"],
+        num_scheduled_tokens=np.array([1], dtype=np.int32),
+        num_tokens=1,
+        idx_mapping_np=np.array([0], dtype=np.intp),
+        prefill_len_np=np.array([128], dtype=np.int32),
+        num_computed_prefill_tokens_np=np.array([127], dtype=np.int32),
+        is_prefilling_np=np.array([True]),
+        has_prefill=True,
+    )
+
+    with patch.object(
+        GPUModelRunner,
+        "gather_batch_req_state",
+        return_value=(batch_state, None),
+    ):
+        scheduler_output = SimpleNamespace(
+            kv_connector_metadata=SimpleNamespace(pd_decode_recompute_req_ids={"transferred"})
+        )
+        gathered, uniform = runner.gather_batch_req_state(scheduler_output, False)
+
+    assert gathered is batch_state
+    np.testing.assert_array_equal(gathered.is_prefilling_np, [True])
+    assert gathered.has_prefill
+    assert uniform is None
 
 
 def test_execute_model_records_profiling_time():

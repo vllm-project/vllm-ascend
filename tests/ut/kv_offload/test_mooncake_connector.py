@@ -2059,7 +2059,8 @@ class MockKVCacheBlocks:
 
 
 class MockSchedulerOutput:
-    pass
+    def __init__(self):
+        self.num_scheduled_tokens: dict[str, int] = {}
 
 
 class MockForwardContext:
@@ -2198,11 +2199,75 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
         self.assertEqual(self.scheduler._reqs_need_recv["req1"][1], ([4, 5, 6],))
         self.assertEqual(self.scheduler._reqs_need_recv["req1"][2], ([1, 2, 4, 5, 6],))
 
+    def test_pd_decode_recompute_marker_waits_for_first_forward_step(self):
+        request = MockRequest(
+            "req1",
+            kv_transfer_params={
+                "do_remote_prefill": True,
+                "remote_block_ids": [1, 2, 3],
+                "remote_engine_id": "remote",
+                "remote_request_id": "remote_req1",
+                "remote_host": "localhost",
+                "remote_port": 5000,
+            },
+        )
+        self.scheduler.update_state_after_alloc(request, MockKVCacheBlocks(), 3)
+
+        receive_step = MockSchedulerOutput()
+        receive_step.num_scheduled_tokens = {"req1": 1}
+        receive_meta = self.scheduler.build_connector_meta(receive_step)
+        self.assertEqual(receive_meta.pd_decode_recompute_req_ids, set())
+        self.assertEqual(self.scheduler._pd_decode_recompute_req_ids, {"req1"})
+
+        self.scheduler.update_state_after_alloc(request, MockKVCacheBlocks(), 0)
+        forward_step = MockSchedulerOutput()
+        forward_step.num_scheduled_tokens = {"req1": 1, "decode": 1}
+        forward_meta = self.scheduler.build_connector_meta(forward_step)
+        self.assertEqual(forward_meta.pd_decode_recompute_req_ids, {"req1"})
+        self.assertEqual(self.scheduler._pd_decode_recompute_req_ids, set())
+
+        later_step = MockSchedulerOutput()
+        later_step.num_scheduled_tokens = {"req1": 1}
+        later_meta = self.scheduler.build_connector_meta(later_step)
+        self.assertEqual(later_meta.pd_decode_recompute_req_ids, set())
+
     def test_request_finished_no_remote_decode(self):
         request = MockRequest("req1")
         delay_free, params = self.scheduler.request_finished(request, [1, 2, 3])
         self.assertFalse(delay_free)
         self.assertIsNone(params)
+
+    def test_request_finished_clears_pd_decode_recompute_marker(self):
+        for phase in ("pending", "ready"):
+            with self.subTest(phase=phase):
+                request = MockRequest("req1")
+                self.scheduler._pd_decode_recompute_req_ids = {"req1", "other"}
+                self.scheduler._pd_decode_recompute_ready_req_ids = {"req1", "other"} if phase == "ready" else {"other"}
+
+                delay_free, params = self.scheduler.request_finished(request, [1, 2, 3])
+
+                self.assertFalse(delay_free)
+                self.assertIsNone(params)
+                self.assertEqual(self.scheduler._pd_decode_recompute_req_ids, {"other"})
+                self.assertEqual(
+                    self.scheduler._pd_decode_recompute_ready_req_ids,
+                    {"other"},
+                )
+
+                metadata = self.scheduler.build_connector_meta(MockSchedulerOutput())
+                self.assertEqual(metadata.pd_decode_recompute_req_ids, {"other"})
+
+    def test_finished_marker_does_not_contaminate_reused_request_id(self):
+        finished = MockRequest("req1")
+        self.scheduler._pd_decode_recompute_req_ids.add("req1")
+        self.scheduler._pd_decode_recompute_ready_req_ids.add("req1")
+        self.scheduler.request_finished(finished, [1, 2, 3])
+
+        reused = MockRequest("req1")
+        self.scheduler.update_state_after_alloc(reused, MockKVCacheBlocks(), 0)
+        metadata = self.scheduler.build_connector_meta(MockSchedulerOutput())
+
+        self.assertEqual(metadata.pd_decode_recompute_req_ids, set())
 
     def test_request_finished_rejected_remote_prefill_enqueues_empty_recv(self):
         request = MockRequest(

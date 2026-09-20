@@ -1576,6 +1576,9 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
         self.requests: dict[str, ReqMeta] = {}
         self.requests_to_send: dict[str, float] = {}
         self.reqs_in_batch: set[str] = set()
+        # Requests whose first local forward after a remote prefill is the
+        # decode-side tail-token recomputation.
+        self.pd_decode_recompute_req_ids: set[str] = set()
 
     def add_new_req(
         self,
@@ -1768,6 +1771,8 @@ class MooncakeConnectorScheduler:
         self._reqs_need_recv: dict[str, tuple[Request, BlockIds, BlockIds, int]] = {}
         self._reqs_need_send: dict[str, float] = {}
         self._reqs_in_batch: set[str] = set()
+        self._pd_decode_recompute_req_ids: set[str] = set()
+        self._pd_decode_recompute_ready_req_ids: set[str] = set()
 
         # master-slave meta information for cross-nodes
         self.multi_nodes_meta_mapping: dict[str, dict[str, Any]] = {}
@@ -1948,6 +1953,12 @@ class MooncakeConnectorScheduler:
 
         if params is not None and (params.get("do_remote_prefill", False) or params.get("do_remote_decode", False)):
             self._reqs_in_batch.add(request.request_id)
+        if (
+            request.request_id in self._pd_decode_recompute_req_ids
+            and params is not None
+            and not params.get("do_remote_prefill", False)
+        ):
+            self._pd_decode_recompute_ready_req_ids.add(request.request_id)
         if params is not None and params.get("do_remote_prefill"):
             if params.get("remote_block_ids"):
                 if all(p in params for p in ("remote_engine_id", "remote_host", "remote_port", "remote_request_id")):
@@ -1960,6 +1971,7 @@ class MooncakeConnectorScheduler:
                         local_full_block_ids,
                         num_external_tokens,
                     )
+                    self._pd_decode_recompute_req_ids.add(request.request_id)
                 else:
                     logger.warning("Got invalid KVTransferParams. params=%s. ", params)
             else:
@@ -1994,6 +2006,18 @@ class MooncakeConnectorScheduler:
         meta.reqs_in_batch = self._reqs_in_batch
         self._reqs_in_batch = set()
 
+        # KV receive is scheduled in a no-forward step. update_state_after_alloc
+        # marks the same request ready when the scheduler later allocates its
+        # first local forward, which is the decode-side tail recomputation.
+        meta.pd_decode_recompute_req_ids = self._pd_decode_recompute_ready_req_ids
+        if meta.pd_decode_recompute_req_ids:
+            logger.debug(
+                "Emitting PD decode recompute requests: %s",
+                sorted(meta.pd_decode_recompute_req_ids),
+            )
+        self._pd_decode_recompute_req_ids.difference_update(meta.pd_decode_recompute_req_ids)
+        self._pd_decode_recompute_ready_req_ids = set()
+
         return meta
 
     def request_finished(
@@ -2005,6 +2029,13 @@ class MooncakeConnectorScheduler:
         Once a request is finished, determine whether request blocks
         should be freed now or will be sent asynchronously and freed later.
         """
+
+        # A request can finish or be aborted while its remote prefill is still
+        # pending, or after it becomes ready but before metadata is built.
+        # Clear both phases before any early return so stale request IDs cannot
+        # leak or be applied to a later request that reuses the same ID.
+        self._pd_decode_recompute_req_ids.discard(request.request_id)
+        self._pd_decode_recompute_ready_req_ids.discard(request.request_id)
 
         params = request.kv_transfer_params
         logger.debug(
