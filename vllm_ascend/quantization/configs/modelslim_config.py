@@ -213,6 +213,50 @@ def _is_missing_v_shard(shard_key: str, quant_description: dict[str, Any]) -> bo
     return f"{shard_prefix}q_proj.weight" in quant_description and f"{shard_prefix}k_proj.weight" in quant_description
 
 
+def _find_quant_description_key(quant_description: dict[str, Any], prefix: str) -> str | None:
+    """Return the weight or bare ModelSlim entry for ``prefix``."""
+    weight_key = prefix + ".weight"
+    if weight_key in quant_description:
+        return weight_key
+    if prefix in quant_description:
+        return prefix
+    return None
+
+
+def _resolve_fused_packed_shard_keys(
+    quant_description: dict[str, Any],
+    prefix: str,
+    shard_prefixes: list[str],
+) -> list[str] | None:
+    """Resolve descriptions that keep a runtime packed module fused.
+
+    ModelSlim may describe a packed runtime module directly. Routed experts
+    may also keep gate/up fused while vLLM exposes split logical shards. Only
+    use these entries when none of the normal expanded shard entries exists;
+    callers reject partially mixed descriptions.
+    """
+    direct_key = _find_quant_description_key(quant_description, prefix)
+    if direct_key is not None:
+        return [direct_key]
+
+    if prefix.rpartition(".")[-1] != "experts":
+        return None
+
+    expected_suffixes = {
+        shard_prefix.removeprefix(prefix + ".").partition(".")[-1]
+        for shard_prefix in shard_prefixes
+        if shard_prefix.startswith(prefix + ".")
+    }
+    if not {"gate_proj", "up_proj", "down_proj"}.issubset(expected_suffixes):
+        return None
+
+    gate_up_key = _find_quant_description_key(quant_description, f"{prefix}.gate_up_proj")
+    down_key = _find_quant_description_key(quant_description, f"{prefix}.down_proj")
+    if gate_up_key is None or down_key is None:
+        return None
+    return [gate_up_key, down_key]
+
+
 def get_quant_type_for_layer(
     quant_description: dict[str, Any],
     prefix: str,
@@ -240,14 +284,32 @@ def get_quant_type_for_layer(
         shard_prefixes = [
             prefix.removesuffix(proj_name) + shard_proj_name for shard_proj_name in packed_modules_mapping[proj_name]
         ]
-        for shard_prefix in shard_prefixes:
-            shard_key = shard_prefix + ".weight"
-            if shard_key not in quant_description and shard_prefix in quant_description:
-                shard_key = shard_prefix
-            # Only Gemma4 k_eq_v is allowed to omit v_proj; other missing
-            # shards fall through to the original dictionary lookup below.
-            if shard_key not in quant_description and _is_missing_v_shard(shard_key, quant_description):
-                continue
+        shard_keys = [_find_quant_description_key(quant_description, shard_prefix) for shard_prefix in shard_prefixes]
+        missing_v_shards = [
+            key is None and _is_missing_v_shard(shard_prefix + ".weight", quant_description)
+            for key, shard_prefix in zip(shard_keys, shard_prefixes)
+        ]
+        normal_keys = [key for key in shard_keys if key is not None]
+        missing_normal_shards = [
+            shard_prefix
+            for key, shard_prefix, missing_v in zip(shard_keys, shard_prefixes, missing_v_shards)
+            if key is None and not missing_v
+        ]
+
+        if missing_normal_shards:
+            # Never combine a partial normal description with fused aliases;
+            # that would hide malformed or mixed quantization metadata.
+            if normal_keys:
+                raise KeyError(missing_normal_shards[0] + ".weight")
+            fused_keys = _resolve_fused_packed_shard_keys(quant_description, prefix, shard_prefixes)
+            if fused_keys is None:
+                raise KeyError(missing_normal_shards[0] + ".weight")
+            shard_keys_to_check = fused_keys
+        else:
+            # Only Gemma4 k_eq_v is allowed to omit v_proj.
+            shard_keys_to_check = normal_keys
+
+        for shard_key in shard_keys_to_check:
             shard_quant_type = quant_description[shard_key]
 
             if quant_type is None:
