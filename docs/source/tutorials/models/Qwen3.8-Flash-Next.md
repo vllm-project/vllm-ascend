@@ -340,32 +340,25 @@ The A3 W8A8 deployment described in Section 5.1 was validated on GPQA Diamond wi
 
 ### 8.1 Using AISBench
 
-Refer to [AISBench performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation)
-for configuration and execution instructions.
+Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
+
+### 8.2 Using vLLM Benchmark
+
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 ## 9 Performance Tuning
 
-### 9.1 Reference Configuration
+### 9.1 Recommended Configurations
 
-The following is the configuration used by the full-checkpoint commands above,
-not a claim of optimal throughput or latency for every workload.
-
-| Deployment | Nodes | Total logical NPUs | TP per DP rank | Global DP / EP | Max Num Seqs per Engine | Max Num Batched Tokens | Max Model Len | Graph Mode |
-| --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | --- |
-| W8A8, mixed prefill/decode | 1 A3 | 8 | 8 | 8 / 8 | 16 | 4096 | 135168 | `FULL_DECODE_ONLY` |
+> For complete startup commands and parameter descriptions, please refer to the deployment examples in [Chapter 5](#5-online-service-deployment).
 
 ### 9.2 Tuning Guidelines
 
-| Goal | Parameters to evaluate | Check before adopting a change |
-| --- | --- | --- |
-| Higher throughput | Increase `--max-num-seqs` or `--max-num-batched-tokens` gradually | Memory headroom, completed requests, and tail latency |
-| Lower latency | Compare the baseline with a matching DSpark draft | End-to-end latency, draft acceptance, and accuracy on the same workload |
-| Longer context | Adjust `--max-model-len` together with concurrency and the token budget | Target/draft compatibility and available hybrid KV-cache capacity |
-| Repeated prompts | Enable Prefix Cache and compare cold and cached requests separately | Cache-hit metrics and output correctness |
+#### 9.2.1 General Tuning Reference
 
-Refer to the [public performance tuning guide](../../developer_guide/performance_and_debug/optimization_and_tuning.md)
-and [feature matrix](../../user_guide/support_matrix/feature_matrix.md) for
-general tuning methods.
+Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
+
+Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 ## 10 FAQ
 
