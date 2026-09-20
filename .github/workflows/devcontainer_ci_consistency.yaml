@@ -102,10 +102,23 @@ jobs:
 
       # self-hosted runner 不自带 node/npm，而 devcontainers/ci 内部用
       # `npm install -g @devcontainers/cli` 安装 CLI，缺 npm 会直接失败。
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
+      # 内网 runner 访问不了 nodejs.org / GitHub releases，不能走 setup-node
+      # （会卡在下载）；改为从华为云镜像拉取，与 schedule_main2main.yaml 一致。
+      - name: Install Node.js from HuaweiCloud mirror
+        env:
+          NODE_VERSION: 24.18.0
+        run: |
+          set -euxo pipefail
+          NODE_INSTALL_DIR="/opt/nodejs"
+          NODE_ARCHIVE_NAME="node-v${NODE_VERSION}-linux-arm64.tar.gz"
+          curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors \
+            -o "/tmp/${NODE_ARCHIVE_NAME}" \
+            "https://repo.huaweicloud.com/nodejs/v${NODE_VERSION}/${NODE_ARCHIVE_NAME}"
+          mkdir -p "${NODE_INSTALL_DIR}"
+          tar -xzf "/tmp/${NODE_ARCHIVE_NAME}" --strip-components=1 -C "${NODE_INSTALL_DIR}"
+          echo "${NODE_INSTALL_DIR}/bin" >> "$GITHUB_PATH"
+          node --version
+          npm --version
 
       # 同上，up 阶段自动执行 .devcontainer/a3/devcontainer.json 的
       # postCreateCommand（= 门禁 a3-2 with-device 的编译 + 测试脚本）。
