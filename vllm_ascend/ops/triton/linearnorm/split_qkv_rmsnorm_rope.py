@@ -19,7 +19,7 @@ import torch
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from vllm_ascend.ops.triton.triton_utils import extract_slice, get_element, get_vectorcore_num, insert_slice
+from vllm_ascend.ops.triton.triton_utils import extract_slice, get_vectorcore_num, insert_slice
 
 
 @triton.jit
@@ -67,19 +67,16 @@ def split_qkv_rmsnorm_rope_kernel(
 
     input_batch_offset_end = min(input_batch_offset + batch_size_per_vec, batch_size)
 
-    pos_indices = input_batch_offset + tl.arange(0, batch_size_per_iter_per_vec)
     output_q_nblk_idx = tl.arange(0, q_hidden_size)
     output_q_nmask = output_q_nblk_idx < q_hidden_size
     output_kv_nblk_idx = tl.arange(0, kv_hidden_size)
     output_kv_nmask = output_kv_nblk_idx < kv_hidden_size
     sin_cos_range = tl.arange(0, ROPE_DIM)
     cos_sin_cache_offset = cos_sin_cache_gm_ptr + sin_cos_range
+    last_row = input_batch_offset_end - 1
 
     for iter in tl.range(iter_num_per_vec):
         pos_offset = iter * batch_size_per_iter_per_vec
-        x = tl.load(
-            positions_gm_ptr + pos_indices + pos_offset, mask=(pos_indices + pos_offset) < input_batch_offset_end
-        )
         mmask = (mblk_idx + pos_offset) < input_batch_offset_end
         mask = (mmask[:, None]) & (nmask[None, :])
         idx = (mblk_idx + pos_offset)[:, None] * total_hidden_size + nblk_idx[None, :]
@@ -90,7 +87,7 @@ def split_qkv_rmsnorm_rope_kernel(
 
         values_tmp3 = tl.zeros((batch_size_per_iter_per_vec, ROPE_DIM), dtype=tl.bfloat16)
         for i in tl.range(batch_size_per_iter_per_vec):
-            pos = get_element(x, (i,))
+            pos = tl.load(positions_gm_ptr + min(input_batch_offset + pos_offset + i, last_row))
             values_tmp3 = insert_slice(
                 values_tmp3.reshape(batch_size_per_iter_per_vec, ROPE_DIM),
                 tl.load(pos * ROPE_DIM + cos_sin_cache_offset[:, None]).reshape(1, ROPE_DIM),
