@@ -43,66 +43,10 @@ def _blocks_for(n_tokens):
     return (n_tokens + BLOCK_SIZE - 1) // BLOCK_SIZE
 
 
-def _truncate_block_table(bt, n_tokens):
-    """Mask out blocks beyond ceil(n_tokens/32) per row with -1 (device-only).
-
-    The op never reads past ceil(n_tokens/32) blocks per sequence, so the
-    -1 padding is never dereferenced; -1 is the standard pad sentinel.
-    The mask is a pure device op (no host sync, no host loop), so it stays
-    valid inside CUDA-graph capture: on every replay the per-row counts are
-    re-derived from the seqused input buffer and the table from the block
-    table input buffer.
-    """
-    if bt is None:
-        return None
-    need = torch.clamp(_blocks_for(n_tokens), min=1, max=bt.shape[1])
-    cols = torch.arange(bt.shape[1], device=bt.device)
-    keep = cols[None, :] < need[:, None]
-    return torch.where(keep, bt, -1).contiguous()
-
-
 def _split_seqused(seqused, ratio, has_cmp):
     if not has_cmp:
         return None, None
     return seqused // ratio, seqused % ratio
-
-
-def _pair_reorder_cmp_phys(csi, bt, cuq):
-    """Reorder each adjacent csi slot pair (2j, 2j+1) so the physical cache
-    address is ascending within the pair.
-
-    The new op's CopyInKvSparse fuses each slot pair into ONE DataCopyPad
-    that starts from the SMALLER address; when phys(csi[2j]) > phys(csi[2j+1])
-    the two KV rows land in the wrong slots (pair swap). The reference op
-    (npu_kv_quant_sparse_attn_sharedkv) is slot-order invariant, so permuting
-    the values within such a pair changes nothing for it and cancels the swap
-    for the new op. Pure device ops, no host sync (CUDA-graph safe).
-    """
-    if csi is None or bt is None or cuq is None or csi.shape[-1] < 2:
-        return csi
-    T, H, K = csi.shape
-    dev = csi.device
-    blk = csi.clamp(min=0).to(torch.int64) // BLOCK_SIZE
-    off = csi.clamp(min=0).to(torch.int64) % BLOCK_SIZE
-    valid = csi >= 0
-    rows = torch.arange(T, device=dev)
-    bat = torch.searchsorted(cuq.to(dev), rows, right=True) - 1  # per-row batch idx
-    btb = bt[bat.clamp(min=0)].to(dev)  # (T, NB)
-    NB = btb.shape[1]
-    phys = torch.gather(btb.unsqueeze(1).expand(T, H, NB), 2, blk.clamp(max=NB - 1)) * BLOCK_SIZE + off
-    phys = torch.where(valid, phys, torch.full_like(phys, -1))
-    K2 = (K // 2) * 2
-    ev = csi[..., 0:K2:2]
-    od = csi[..., 1:K2:2]
-    p0 = phys[..., 0:K2:2]
-    p1 = phys[..., 1:K2:2]
-    swap = (p0 > p1) & (ev >= 0) & (od >= 0)
-    head = torch.stack([torch.where(swap, od, ev), torch.where(swap, ev, od)], dim=-1).reshape(T, H, K2)
-    if K2 < K:
-        out = torch.cat([head, csi[..., K2:]], dim=-1)
-    else:
-        out = head
-    return out.contiguous()
 
 
 def _fullcov_sparse_indices(si, seqused):
@@ -176,12 +120,9 @@ def mq_attn_adapter(q, kw):
     has_cmp = ratio > 1 and kw.get("cmp_kv") is not None
     cmp_len, residual = _split_seqused(seqused, ratio, has_cmp)
 
-    # ori_bt = _truncate_block_table(kw.get("ori_block_table"), seqused)
     ori_bt = kw.get("ori_block_table")
     ori_kv = kw.get("ori_kv")
     if has_cmp:
-        # cmp_len compressed tokens + residual tail can live in the cmp cache
-        # cmp_bt = _truncate_block_table(kw.get("cmp_block_table"), cmp_len + residual)
         cmp_bt = kw.get("cmp_block_table")
         cmp_kv = kw.get("cmp_kv")
     else:
@@ -190,10 +131,6 @@ def mq_attn_adapter(q, kw):
 
     win_r = int(kw.get("ori_win_right", 0))
     csi = kw.get("cmp_sparse_indices")
-    # if has_cmp and csi is not None:
-    #     # Cancel the new op's CopyInKvSparse pair-swap: sort each slot pair
-    #     # (2j,2j+1) by physical cache address (see _pair_reorder_cmp_phys).
-    #     csi = _pair_reorder_cmp_phys(csi, cmp_bt, kw.get("cu_seqlens_q"))
     osi = kw.get("ori_sparse_indices")
     if osi is not None:
         # Full coverage: the new op derives attention from the window instead.
