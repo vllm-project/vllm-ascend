@@ -29,6 +29,7 @@ class AscendV2EplbPolicy:
         self.max_rebalanced_layers_per_cycle = max_rebalanced_layers_per_cycle
         self.ep_rank = ep_rank
         self._policy: Any = PolicyFactory.generate_policy(SWIFT_BALANCER_POLICY_TYPE)
+        self._bootstrap_rebalance_active = True
 
     @staticmethod
     def _build_physical_load(
@@ -55,185 +56,6 @@ class AscendV2EplbPolicy:
         )
         slot_replica_count = replica_count.gather(1, mapping)
         return load.gather(1, mapping) / slot_replica_count
-
-    @classmethod
-    def _spread_packed_redundant_slots(
-        cls,
-        mapping: torch.Tensor,
-        logical_load: torch.Tensor,
-        num_ranks: int,
-    ) -> tuple[torch.Tensor, list[int]]:
-        """Spread a packed initial redundant layout with minimal swaps.
-
-        Checkpoint loading requires the initial physical layout to remain
-        ``[logical experts, redundant experts]``. SwiftBalancer, however,
-        treats the duplicate slots in that layout as fixed to their current
-        ranks while building a candidate. When every duplicate is on the last
-        rank, an otherwise useful candidate can overload that rank.
-
-        For rows that still exactly match the packed initial layout, build a
-        policy-only seed by spreading every copy of each replicated expert
-        across ranks. Global replica counts are unchanged. The returned
-        mapping is later compared with the real mapping by vLLM, so normal
-        EPLB weight transfer performs every required move before metadata is
-        committed.
-        """
-        if mapping.ndim != 2 or logical_load.ndim != 2:
-            raise ValueError("EPLB logical load and mapping must both be 2-D")
-        if mapping.shape[0] != logical_load.shape[0]:
-            raise ValueError("EPLB logical load and mapping layer counts must match")
-        if num_ranks <= 0 or mapping.shape[1] % num_ranks != 0:
-            raise ValueError("Physical experts must be divisible by EP ranks")
-
-        num_logical_experts = logical_load.shape[1]
-        num_redundant_experts = mapping.shape[1] - num_logical_experts
-        if num_redundant_experts <= 0:
-            return mapping, []
-
-        packed_mapping = torch.cat(
-            (
-                torch.arange(num_logical_experts, dtype=mapping.dtype),
-                torch.arange(num_redundant_experts, dtype=mapping.dtype)
-                % num_logical_experts,
-            )
-        )
-        active_packed_layers = torch.all(mapping == packed_mapping, dim=1) & (
-            logical_load.sum(dim=1) > 0
-        )
-        layer_indices = torch.nonzero(
-            active_packed_layers,
-            as_tuple=False,
-        ).flatten().tolist()
-        if not layer_indices:
-            return mapping, []
-
-        experts_per_rank = mapping.shape[1] // num_ranks
-        spread_mapping = mapping.clone()
-        for layer_idx in layer_indices:
-            rank_mapping = spread_mapping[layer_idx].reshape(
-                num_ranks,
-                experts_per_rank,
-            )
-            local_experts = [set(row.tolist()) for row in rank_mapping]
-            global_replica_count = torch.bincount(
-                rank_mapping.flatten(),
-                minlength=num_logical_experts,
-            )
-            replicated_experts = set(
-                torch.nonzero(
-                    global_replica_count > 1,
-                    as_tuple=False,
-                ).flatten().tolist()
-            )
-            replicated_slots_per_rank = [
-                sum(expert_id in replicated_experts for expert_id in row.tolist())
-                for row in rank_mapping
-            ]
-
-            while max(replicated_slots_per_rank) - min(
-                replicated_slots_per_rank
-            ) > 1:
-                source_ranks = sorted(
-                    range(num_ranks),
-                    key=lambda rank_idx: (
-                        -replicated_slots_per_rank[rank_idx],
-                        rank_idx,
-                    ),
-                )
-                target_ranks = sorted(
-                    range(num_ranks),
-                    key=lambda rank_idx: (
-                        replicated_slots_per_rank[rank_idx],
-                        rank_idx,
-                    ),
-                )
-                swap = None
-                for source_rank in source_ranks:
-                    for target_rank in target_ranks:
-                        if source_rank == target_rank:
-                            continue
-                        if (
-                            replicated_slots_per_rank[source_rank]
-                            <= replicated_slots_per_rank[target_rank] + 1
-                        ):
-                            continue
-                        for source_slot, replicated_expert in enumerate(
-                            rank_mapping[source_rank].tolist()
-                        ):
-                            if replicated_expert not in replicated_experts:
-                                continue
-                            if replicated_expert in local_experts[target_rank]:
-                                continue
-                            for target_slot, target_expert in enumerate(
-                                rank_mapping[target_rank].tolist()
-                            ):
-                                if target_expert in replicated_experts:
-                                    continue
-                                if target_expert not in local_experts[source_rank]:
-                                    swap = (
-                                        source_rank,
-                                        source_slot,
-                                        replicated_expert,
-                                        target_rank,
-                                        target_slot,
-                                        target_expert,
-                                    )
-                                    break
-                            if swap is not None:
-                                break
-                        if swap is not None:
-                            break
-                    if swap is not None:
-                        break
-
-                if swap is None:
-                    break
-                (
-                    source_rank,
-                    source_slot,
-                    replicated_expert,
-                    target_rank,
-                    target_slot,
-                    target_expert,
-                ) = swap
-                rank_mapping[source_rank, source_slot] = target_expert
-                rank_mapping[target_rank, target_slot] = replicated_expert
-                local_experts[source_rank].remove(replicated_expert)
-                local_experts[source_rank].add(target_expert)
-                local_experts[target_rank].remove(target_expert)
-                local_experts[target_rank].add(replicated_expert)
-                replicated_slots_per_rank[source_rank] -= 1
-                replicated_slots_per_rank[target_rank] += 1
-
-        old_physical_load = cls._build_physical_load(logical_load, mapping)
-        new_physical_load = cls._build_physical_load(logical_load, spread_mapping)
-        old_max_load = (
-            old_physical_load.reshape(
-                mapping.shape[0], num_ranks, experts_per_rank
-            )
-            .sum(dim=-1)
-            .max(dim=-1)
-            .values
-        )
-        new_max_load = (
-            new_physical_load.reshape(
-                mapping.shape[0], num_ranks, experts_per_rank
-            )
-            .sum(dim=-1)
-            .max(dim=-1)
-            .values
-        )
-        improvement = old_max_load - new_max_load
-        beneficial_layers = [
-            layer_idx for layer_idx in layer_indices if improvement[layer_idx] > 0
-        ]
-        rejected_layers = set(layer_indices) - set(beneficial_layers)
-        if rejected_layers:
-            spread_mapping[list(rejected_layers)] = mapping[list(rejected_layers)]
-        beneficial_layers.sort(
-            key=lambda layer_idx: (-float(improvement[layer_idx]), layer_idx)
-        )
-        return spread_mapping, beneficial_layers
 
     @classmethod
     def _compute_hotness_imbalance(
@@ -268,6 +90,130 @@ class AscendV2EplbPolicy:
             max(imbalance_list),
             imbalance_list,
         )
+
+    @staticmethod
+    def _validate_replica_rank_placement(
+        mapping: torch.Tensor,
+        num_ranks: int,
+    ) -> None:
+        """Ensure copies of one logical expert reside on distinct EP ranks."""
+        if (
+            mapping.ndim != 2
+            or num_ranks <= 0
+            or mapping.shape[1] % num_ranks != 0
+        ):
+            raise ValueError(
+                "Physical experts must be a 2-D tensor divisible by EP ranks"
+            )
+
+        rank_mapping = mapping.reshape(mapping.shape[0], num_ranks, -1)
+        for layer_idx, layer_mapping in enumerate(rank_mapping):
+            for rank_idx, local_mapping in enumerate(layer_mapping):
+                if torch.unique(local_mapping).numel() != local_mapping.numel():
+                    raise ValueError(
+                        "SwiftBalancer placed replicas of the same logical "
+                        f"expert on layer {layer_idx}, EP rank {rank_idx}"
+                    )
+
+    def _log_replica_changes(
+        self,
+        logical_load: torch.Tensor,
+        old_mapping: torch.Tensor,
+        new_mapping: torch.Tensor,
+        num_ranks: int,
+    ) -> None:
+        """Log which logical experts gained or lost replicas and their ranks."""
+        if self.ep_rank != 0:
+            return
+
+        num_logical_experts = logical_load.shape[1]
+        experts_per_rank = old_mapping.shape[1] // num_ranks
+        changed_layers = torch.nonzero(
+            torch.any(new_mapping != old_mapping, dim=1),
+            as_tuple=False,
+        ).flatten()
+        for layer_idx in changed_layers.tolist():
+            old_counts = torch.bincount(
+                old_mapping[layer_idx].long(),
+                minlength=num_logical_experts,
+            )
+            new_counts = torch.bincount(
+                new_mapping[layer_idx].long(),
+                minlength=num_logical_experts,
+            )
+            changed_experts = torch.nonzero(
+                old_counts != new_counts,
+                as_tuple=False,
+            ).flatten().tolist()
+            changed_experts.sort(
+                key=lambda expert_id: (
+                    -float(logical_load[layer_idx, expert_id]),
+                    expert_id,
+                )
+            )
+            changes = []
+            for expert_id in changed_experts:
+                physical_ids = torch.nonzero(
+                    new_mapping[layer_idx] == expert_id,
+                    as_tuple=False,
+                ).flatten()
+                replica_ranks = torch.div(
+                    physical_ids,
+                    experts_per_rank,
+                    rounding_mode="floor",
+                ).tolist()
+                changes.append(
+                    "%d(load=%.0f,copies=%d->%d,ranks=%s)"
+                    % (
+                        expert_id,
+                        float(logical_load[layer_idx, expert_id]),
+                        int(old_counts[expert_id]),
+                        int(new_counts[expert_id]),
+                        replica_ranks,
+                    )
+                )
+            logger.info(
+                "[eplb/policy2] layer %d replica changes: %s",
+                layer_idx,
+                changes,
+            )
+
+    def _run_swift_balancer(
+        self,
+        current_table: torch.Tensor,
+        workload_table: torch.Tensor,
+        logical_load: torch.Tensor,
+    ) -> tuple[int, Any, Any, bool]:
+        """Run initial heat-driven cycles without steady-state thresholds."""
+        bootstrap = bool(
+            getattr(self, "_bootstrap_rebalance_active", True)
+            and torch.any(logical_load > 0)
+        )
+        if not bootstrap:
+            change, priority, deployment = self._policy.rebalance_experts(
+                current_table,
+                workload_table,
+            )
+            return change, priority, deployment, False
+
+        old_imbalance_threshold = self._policy.imbalance_threshold
+        old_increment = self._policy.increment
+        self._policy.imbalance_threshold = 1.0
+        self._policy.increment = 0.0
+        if self.ep_rank == 0:
+            logger.info(
+                "[eplb/policy2] bootstrap rebalance uses collected heat "
+                "without steady-state improvement thresholds"
+            )
+        try:
+            change, priority, deployment = self._policy.rebalance_experts(
+                current_table,
+                workload_table,
+            )
+        finally:
+            self._policy.imbalance_threshold = old_imbalance_threshold
+            self._policy.increment = old_increment
+        return change, priority, deployment, True
 
     def _log_hotness_imbalance(
         self,
@@ -421,49 +367,27 @@ class AscendV2EplbPolicy:
             )
 
         logical_load = weight.detach().cpu()
-        policy_mapping, spread_layers = self._spread_packed_redundant_slots(
-            old_mapping,
-            logical_load,
-            num_ranks,
-        )
-        if spread_layers and self.ep_rank == 0:
-            logger.info(
-                "[eplb/policy2] spread packed redundant slots for policy "
-                "evaluation on layers: %s",
-                spread_layers,
-            )
         physical_load = self._build_physical_load(
             logical_load,
-            policy_mapping,
+            old_mapping,
         )
         num_layers = old_mapping.shape[0]
         experts_per_rank = num_replicas // num_ranks
-        current_table = policy_mapping.reshape(
+        current_table = old_mapping.reshape(
             num_layers,
             num_ranks,
             experts_per_rank,
         )
         workload_table = physical_load.reshape_as(current_table)
 
-        change, per_layer_priority, new_deployment = self._policy.rebalance_experts(
-            current_table,
-            workload_table,
+        change, per_layer_priority, new_deployment, bootstrap = (
+            self._run_swift_balancer(
+                current_table,
+                workload_table,
+                logical_load,
+            )
         )
         self._log_policy_diagnostics(change)
-        if spread_layers:
-            if per_layer_priority is None:
-                policy_priority = list(range(num_layers))
-            else:
-                policy_priority = torch.as_tensor(
-                    per_layer_priority,
-                    dtype=torch.long,
-                ).flatten().tolist()
-            spread_layer_set = set(spread_layers)
-            per_layer_priority = spread_layers + [
-                layer_idx
-                for layer_idx in policy_priority
-                if layer_idx not in spread_layer_set
-            ]
 
         new_mapping = torch.as_tensor(
             new_deployment,
@@ -472,10 +396,33 @@ class AscendV2EplbPolicy:
         ).reshape(num_layers, num_replicas)
         if bool((new_mapping < 0).any()) or bool((new_mapping >= weight.shape[1]).any()):
             raise ValueError("Ascend V2 EPLB policy returned an invalid expert mapping")
+        self._validate_replica_rank_placement(new_mapping, num_ranks)
+        raw_changed_layers = int(
+            torch.any(new_mapping != old_mapping, dim=1).sum()
+        )
         new_mapping = self._limit_rebalanced_layers(
             old_mapping,
             new_mapping,
             per_layer_priority,
+        )
+        if bootstrap:
+            self._bootstrap_rebalance_active = (
+                raw_changed_layers > self.max_rebalanced_layers_per_cycle
+            )
+            if self.ep_rank == 0:
+                logger.info(
+                    "[eplb/policy2] bootstrap rebalance %s; "
+                    "raw changed layers=%d",
+                    "continues next cycle"
+                    if self._bootstrap_rebalance_active
+                    else "completed",
+                    raw_changed_layers,
+                )
+        self._log_replica_changes(
+            logical_load,
+            old_mapping,
+            new_mapping,
+            num_ranks,
         )
         self._log_hotness_imbalance(
             logical_load,
