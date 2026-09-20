@@ -138,10 +138,7 @@ TITLES = {
     "tutorials/models/Qwen3-Coder-30B-A3B.md": {"en": "Qwen3-Coder-30B-A3B", "zh": "Qwen3-Coder-30B-A3B"},
     "tutorials/models/Qwen3-Dense.md": {"en": "Qwen3-Dense", "zh": "Qwen3-Dense"},
     "tutorials/models/Qwen3-Next.md": {"en": "Qwen3-Next", "zh": "Qwen3-Next"},
-    "tutorials/models/Qwen3.8-Flash-Next.md": {
-            "en": "Qwen3.8-Flash-Next (Experimental)",
-            "zh": "Qwen3.8-Flash-Next（实验性支持）",
-        },
+    "tutorials/models/Qwen3.8-Flash-Next.md": {"en": "Qwen3.8-Flash-Next (Experimental)", "zh": "Qwen3.8-Flash-Next（实验性支持）",},
     "tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md": {
         "en": "Qwen3-Omni-30B-A3B-Thinking",
         "zh": "Qwen3-Omni-30B-A3B-Thinking",
