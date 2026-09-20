@@ -567,6 +567,7 @@ class KVPoolScheduler:
         return token_len // self.cache_transfer_granularity * self.cache_transfer_granularity
 
     def _infer_mamba_groups(self) -> dict[int, int]:
+        """Validate Mamba cache modes and return hybrid group scratch counts."""
         if self.kv_cache_config is None:
             return {}
 
