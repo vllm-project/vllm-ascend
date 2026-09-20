@@ -3,6 +3,13 @@ from torch.overrides import TorchFunctionMode
 from vllm.v1.worker.gpu.spec_decode import adaptive_verification
 
 
+def _index_fill(tensor, dim, index, value):
+    # Import lazily to avoid circular imports during plugin startup.
+    from vllm_ascend.device.device_op import DeviceOperator
+
+    return DeviceOperator.index_fill(tensor, dim, index, value)
+
+
 class _IndexFillMode(TorchFunctionMode):
     """Temporarily route index_fill_ through the Ascend device adaptor.
 
@@ -15,11 +22,7 @@ class _IndexFillMode(TorchFunctionMode):
     def __torch_function__(self, func, types, args=(), kwargs=None):
         kwargs = {} if kwargs is None else kwargs
         if func is torch.Tensor.index_fill_:
-            # Import lazily to avoid circular imports during plugin startup.
-            from vllm_ascend.device.device_op import DeviceOperator
-
-            tensor, dim, indices, value = args
-            return DeviceOperator.index_fill(tensor, dim, indices, value)
+            return _index_fill(*args, **kwargs)
         return func(*args, **kwargs)
 
 
