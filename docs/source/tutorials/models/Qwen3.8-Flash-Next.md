@@ -42,9 +42,7 @@ A pre-built Qwen3.8 A3 image is available in the [vllm-atlas-temp repository](ht
 - AArch64: `quay.io/atlas-ci/vllm-atlas-temp:qwen3.8-next-a3-ubuntu-34178549844-2-arm64-temp`
 - x86_64: `quay.io/atlas-ci/vllm-atlas-temp:qwen3.8-next-a3-ubuntu-34178549844-2-amd64-temp`
 
-The following example uses the AArch64 image and exposes all 16 devices on an Atlas 800 A3 node. The service command in Section 5.1 uses the first eight devices. Replace `IMAGE` with the x86_64 image on an x86_64 host.
-
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
+The following example uses the AArch64 image and exposes 8 devices on an Atlas 800 A3 node. The service command in Section 5.1 uses the first eight devices.
 
 === "A3 series"
 
