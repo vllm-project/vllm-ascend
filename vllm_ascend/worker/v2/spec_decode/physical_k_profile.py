@@ -121,7 +121,6 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
     manager._physical_k_profile_is_upstream = []
     manager._physical_k_draft_costs = None
     manager._physical_k_recommendation = None
-    manager._physical_k_last_by_bucket = {}
     manager._physical_k_last_logged = {}
 
     def batches_to_profile(self, capture_sizes) -> Iterator[dict[str, int]]:
@@ -348,7 +347,7 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
         scored = [
             (score, k)
             for k in candidates
-            if k <= fresh_width
+            if minimum_useful_k <= k <= fresh_width
             and (
                 score := score_k(
                     self,
@@ -366,20 +365,6 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
             return None
         score, selected = max(scored)
         bucket = _batch_bucket(batch_size)
-        current = self._physical_k_last_by_bucket.get(bucket, max_k)
-        if current <= fresh_width and current != selected:
-            current_score = score_k(
-                self,
-                survival,
-                current,
-                batch_size,
-                num_reqs,
-                non_draft,
-                num_sampling_requests,
-            )
-            if current_score is not None and score < current_score * 1.02:
-                score, selected = current_score, current
-        self._physical_k_last_by_bucket[bucket] = selected
         if self._physical_k_last_logged.get(bucket) != selected:
             logger.info(
                 "ASCEND_AV_PHYSICAL_K_DECISION batch_bucket=%d physical_k=%d "
@@ -390,7 +375,7 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
                 fresh_width,
             )
             self._physical_k_last_logged[bucket] = selected
-        return batch_size, selected, minimum_useful_k
+        return batch_size, selected
 
     def get_num_tokens(self, num_tokens_per_req, draft_tokens) -> int:
         result = original_get_num_tokens(num_tokens_per_req, draft_tokens)

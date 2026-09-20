@@ -236,10 +236,11 @@ Candidate and capture widths default to the range from `min_k` to maximum K.
 The worker preserves the full upstream profile for maximum K and profiles two
 timing samples per graph shape for lower candidate K values, then sends compact
 K recommendations from TP rank 0 to the scheduler. Costs are never extrapolated
-beyond the measured batch range. The scheduler combines that recommendation
-with empirical per-position acceptance tracked independently for power-of-two
-batch buckets. This keeps large RL rollout batches adaptive while preventing
-K oscillation as the active batch shrinks after EOS. Small-batch protection,
+beyond the measured batch range. The scheduler applies profiled recommendations
+per power-of-two batch bucket; empirical acceptance is used only when profiling
+cannot recommend a K or auto-tuning is disabled. This keeps large RL rollout
+batches adaptive while preventing K oscillation as the active batch shrinks
+after EOS. Small-batch protection,
 batch-bucket switching, K hysteresis, minimum dwell, and periodic full-K probes
 use built-in defaults. A shorter K is never
 selected when a wider profiled graph has equal or lower draft cost, and a

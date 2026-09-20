@@ -50,8 +50,7 @@ def resolve_physical_k(dynamic_config: dict[str, Any]) -> dict[str, Any] | None:
 @dataclass
 class _BucketState:
     stable_k: int
-    profile_k: int
-    cost_floor_k: int
+    profile_k: int | None
     empirical_k: int
     survival: list[float]
     survival_seen: list[bool]
@@ -64,7 +63,7 @@ class _BucketState:
 
 @dataclass
 class AdaptiveDraftKController:
-    """Combine AV cost recommendations with observed acceptance by batch.
+    """Apply AV cost recommendations with an acceptance-only fallback.
 
     RL rollouts commonly begin with a large decode batch and shrink as
     requests encounter EOS.  Each power-of-two batch bucket therefore owns
@@ -93,8 +92,7 @@ class AdaptiveDraftKController:
         if state is None:
             state = _BucketState(
                 stable_k=self.max_k,
-                profile_k=self.max_k,
-                cost_floor_k=self.min_k,
+                profile_k=None,
                 empirical_k=self.max_k,
                 survival=[1.0] * self.max_k,
                 survival_seen=[False] * self.max_k,
@@ -123,13 +121,11 @@ class AdaptiveDraftKController:
         return self._active_bucket
 
     def _desired_k(self, state: _BucketState) -> int:
-        desired = self.max_k
-        if self.auto_tune:
-            desired = min(desired, max(state.profile_k, state.cost_floor_k))
-        empirical_k = state.empirical_k
-        if self.auto_tune:
-            empirical_k = max(empirical_k, state.cost_floor_k)
-        desired = min(desired, empirical_k)
+        desired = (
+            state.profile_k
+            if self.auto_tune and state.profile_k is not None
+            else state.empirical_k
+        )
         return max(self.min_k, min(desired, self.max_k))
 
     def _advance_state(self, state: _BucketState) -> None:
@@ -158,16 +154,10 @@ class AdaptiveDraftKController:
         self,
         batch_size: int,
         physical_k: int,
-        cost_floor_k: int | None = None,
     ) -> None:
         physical_k = max(self.min_k, min(int(physical_k), self.max_k))
         state = self._state(self._batch_bucket(batch_size))
         state.profile_k = physical_k
-        if cost_floor_k is not None:
-            state.cost_floor_k = max(
-                self.min_k,
-                min(int(cost_floor_k), self.max_k),
-            )
 
     def cap(self, configured_k: int, batch_size: int | None = None) -> int:
         configured_k = max(min(int(configured_k), self.max_k), 0)
@@ -200,12 +190,15 @@ class AdaptiveDraftKController:
         if not pairs:
             return
         widths = [width for width, _ in pairs]
-        accepted = [min(width, max(len(tokens) - 1, 0)) for width, tokens in pairs]
         if len(widths) < PHYSICAL_K_MIN_TUNED_BATCH_SIZE:
             return
         bucket = self._batch_bucket(len(widths))
         state = self._state(bucket)
         state.observations += 1
+        if self.auto_tune and state.profile_k is not None:
+            self._advance_state(state)
+            return
+        accepted = [min(width, max(len(tokens) - 1, 0)) for width, tokens in pairs]
         alpha = _ACCEPTANCE_EMA_ALPHA
         for position in range(1, self.max_k + 1):
             eligible = [index for index, width in enumerate(widths) if width >= position]
@@ -262,8 +255,7 @@ def _create_controller(vllm_config: Any) -> AdaptiveDraftKController | None:
 def _update_controller(controller, scheduler_output, model_runner_output) -> None:
     recommendation = getattr(model_runner_output, "physical_k_recommendation", None)
     if recommendation is not None:
-        batch_size, physical_k, cost_floor_k = recommendation
-        controller.recommend(batch_size, physical_k, cost_floor_k)
+        controller.recommend(*recommendation)
     sampled = getattr(model_runner_output, "sampled_token_ids", None)
     req_ids = getattr(model_runner_output, "req_ids", ())
     scheduled = getattr(scheduler_output, "scheduled_spec_decode_tokens", None) or {}

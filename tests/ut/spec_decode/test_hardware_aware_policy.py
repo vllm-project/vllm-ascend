@@ -88,13 +88,13 @@ def test_missing_profile_uses_acceptance_fallback():
     assert controller.cap(5, 16) == 4
 
 
-def test_output_recommendation_and_acceptance_are_combined():
+def test_output_recommendation_drives_controller():
     controller = AdaptiveDraftKController(max_k=5, min_k=3)
     scheduler_output = SimpleNamespace(
         scheduled_spec_decode_tokens={str(i): [1] * 5 for i in range(16)}
     )
     model_output = SimpleNamespace(
-        physical_k_recommendation=(16, 3, 3),
+        physical_k_recommendation=(16, 3),
         req_ids=[str(i) for i in range(16)],
         sampled_token_ids=[[1, 2] for _ in range(16)],
     )
@@ -103,27 +103,15 @@ def test_output_recommendation_and_acceptance_are_combined():
     assert controller.cap(5, 16) == 3
 
 
-def test_acceptance_survival_is_tracked_by_position():
+def test_profile_recommendation_is_authoritative_over_acceptance():
     controller = AdaptiveDraftKController(max_k=5, min_k=3)
     controller.recommend(16, 5)
     sampled = [[0] * 5 for _ in range(10)] + [[0] * 4 for _ in range(6)]
     for _ in range(3):
         controller.observe([5] * 16, sampled)
     state = controller._state(16)
-    assert state.survival[:5] == [1.0, 1.0, 1.0, 0.625, 0.0]
-    assert state.empirical_k == 4
-    assert controller.cap(5, 16) == 4
-
-
-def test_empirical_acceptance_cannot_cross_profile_cost_floor():
-    controller = AdaptiveDraftKController(max_k=5, min_k=3)
-    controller.recommend(64, 4, cost_floor_k=4)
-    for _ in range(3):
-        controller.observe([5] * 64, [[0]] * 64)
-    state = controller._state(64)
-    assert state.empirical_k == 3
-    assert state.stable_k == 4
-    assert controller.cap(5, 64) == 4
+    assert state.empirical_k == 5
+    assert controller.cap(5, 16) == 5
 
 
 def test_rollout_batch_decay_uses_independent_state_after_two_steps():
