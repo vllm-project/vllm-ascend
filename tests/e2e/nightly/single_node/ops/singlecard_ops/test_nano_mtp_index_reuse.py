@@ -26,6 +26,7 @@ def make_impl():
     impl.nano_miss_src = torch.zeros((4, 32768), dtype=torch.int32, device=device)
     impl.nano_miss_dst = torch.zeros_like(impl.nano_miss_src)
     impl.nano_misses = torch.full((4,), TOPK, dtype=torch.int32, device=device)
+    impl.nano_reuse_logical_lens = torch.full((4,), TOPK, dtype=torch.int32, device=device)
     impl.nano_reuse_cache_tokens = torch.full((4,), TOPK, dtype=torch.int32, device=device)
     impl.nano_reuse_topk_misses = torch.zeros(8, dtype=torch.int32, device=device)
     impl.nano_reuse_misses = torch.zeros(4, dtype=torch.int32, device=device)

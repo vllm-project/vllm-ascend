@@ -218,12 +218,18 @@ class SFAPDRD2HConsumerWorker:
                 pool_slot = getattr(req, "pool_slot", None)
                 if pool_slot is not None:
                     self.nano_slots_by_req[req_id] = int(pool_slot)
+                    dense = bool(getattr(req, "dense", False))
                     tail_tokens = int(getattr(req, "tail_tokens", 0) or 0)
-                    if tail_tokens > 0:
+                    # dense: the pull thread copies the whole prompt into the
+                    # row's hot region (short requests decode as -3); tail: the
+                    # circular slots only receive the incomplete last block.
+                    if dense or tail_tokens > 0:
                         self._nano_tail_by_req[ext_id] = NanoTailDest(
                             pool_slot=int(pool_slot),
                             tail_tokens=tail_tokens,
                             tail_block_index=int(getattr(req, "tail_block_index", 0) or 0),
+                            dense=dense,
+                            kv_tokens=int(getattr(req, "kv_tokens", 0) or 0),
                         )
 
     def save_kv_layer(

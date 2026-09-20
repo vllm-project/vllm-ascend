@@ -25,6 +25,27 @@ def nano_tail_geometry(kv_tokens: int, block_size: int) -> tuple[int, int]:
     return tail_tokens, kv_tokens // block_size
 
 
+def nano_prefill_dest_geometry(
+    kv_tokens: int,
+    block_size: int,
+    hot_tokens: int,
+) -> tuple[bool, int, int]:
+    """Return ``(dense, tail_tokens, tail_block_index)`` for a finished prefill.
+
+    ``dense=True`` when the whole prompt fits the decode row's hot region
+    (``kv_tokens <= hot_tokens``): blocks ``[0, ceil(kv_tokens / block_size))``
+    are D2D'd to row offsets ``b * block_size`` so the request can decode in
+    the -3 non-offload state. This also covers 128-aligned prompts that the
+    circular-tail path would skip entirely. Otherwise the circular tail only
+    prefetches the incomplete last block; a block-aligned ``kv_tokens`` keeps
+    ``(False, 0, 0)`` and the hot region arrives via the decode-side -2 init.
+    """
+    if kv_tokens <= hot_tokens:
+        return True, 0, 0
+    tail_tokens, tail_block_index = nano_tail_geometry(kv_tokens, block_size)
+    return False, tail_tokens, tail_block_index
+
+
 class NanoTopkSlotAllocator:
     """Bind a stable top-k row to a request from PD alloc until it finishes."""
 

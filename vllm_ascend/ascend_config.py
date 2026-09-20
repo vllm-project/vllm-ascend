@@ -1615,8 +1615,12 @@ class SparseKVOffloadConfig:
             width = 1 + (vllm_config.speculative_config.num_speculative_tokens if vllm_config.speculative_config else 0)
             if self.topk != 2048 or not 1 <= width <= 7:
                 raise ValueError("nano serving requires TopK=2048 and 1–7 query rows per request")
-            if not width * self.topk <= self.topk_buffer_size <= 16256 or self.topk_buffer_size % 128:
-                raise ValueError("nano hot budget must be block-aligned in [Q_max*2048, 16256]")
+            if not width * self.topk <= self.topk_buffer_size <= 16256 or self.topk_buffer_size % 256:
+                raise ValueError(
+                    "nano hot budget must be 256-aligned in [Q_max*2048, 16128]: "
+                    "the dense short-sequence layout only lines up with the circular "
+                    "tail slots when topk_buffer_size is a multiple of 256"
+                )
         if self.topk_buffer_size < self.topk:
             raise ValueError(
                 "sparse_kv_offload_config.topk_buffer_size must be >= topk, "

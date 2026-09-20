@@ -556,6 +556,75 @@ class MembPullReadThread(threading.Thread):
         local_chunks.append(local)
         length_chunks.append(length)
 
+    def _append_nano_dense_descriptors(
+        self,
+        layer: dict[str, Any],
+        ext_req_id: str,
+        p_main_block_ids: list[int],
+        main_start_block: int,
+        peer_chunks: list[np.ndarray],
+        local_chunks: list[np.ndarray],
+        length_chunks: list[np.ndarray],
+    ) -> None:
+        """D2D a whole short prompt densely into this rank's topk row (slot p = p)."""
+        state = self._state
+        dest = state.nano_tail_by_req.get(ext_req_id)
+        if dest is None or not dest.dense or dest.kv_tokens <= 0:
+            return
+        if not state.topk_k_bases or not state.topk_v_bases:
+            return
+        if state.block_size <= 0 or state.topk_row_tokens <= 0:
+            return
+        if dest.kv_tokens > state.topk_row_tokens - 2 * state.block_size:
+            raise RuntimeError(
+                f"MembPull nano dense prompt exceeds the row hot region: "
+                f"kv_tokens={dest.kv_tokens}, hot={state.topk_row_tokens - 2 * state.block_size}"
+            )
+        offload_id = layer["offload_id"]
+        if offload_id >= len(state.topk_k_bases) or offload_id >= len(state.topk_v_bases):
+            raise RuntimeError(
+                f"MembPull nano dense is missing topk buffer bases for {layer['layer_name']}"
+            )
+        p_k_len = int(layer["p_k_len"])
+        p_v_len = int(layer["p_v_len"])
+        if p_k_len % state.block_size or p_v_len % state.block_size:
+            raise RuntimeError(
+                f"MembPull nano dense requires block-aligned main KV bytes: "
+                f"k={p_k_len}, v={p_v_len}, block_size={state.block_size}"
+            )
+        token_bytes_k = p_k_len // state.block_size
+        token_bytes_v = p_v_len // state.block_size
+        # Copy every logical block of the prompt into the row's hot region,
+        # block b to row offset b*block_size. P may split large requests into
+        # chunk handshakes; copy only the blocks this chunk carries (the
+        # unsliced list, every-rank replicated, same as the tail path).
+        total_blocks = -(-dest.kv_tokens // state.block_size)
+        start = max(0, main_start_block)
+        end = min(total_blocks, main_start_block + len(p_main_block_ids))
+        if end <= start:
+            return
+        block_ids = np.array(
+            p_main_block_ids[start - main_start_block : end - main_start_block],
+            dtype=np.int64,
+        )
+        dst_blocks = np.arange(start, end, dtype=np.int64)
+        dst_tokens = dest.pool_slot * state.topk_row_tokens + dst_blocks * state.block_size
+        partial = np.minimum(dest.kv_tokens - dst_blocks * state.block_size, state.block_size)
+        for p_base, p_block_len, token_bytes, topk_base in (
+            (int(layer["p_k_base"]), p_k_len, token_bytes_k, state.topk_k_bases[offload_id]),
+            (int(layer["p_v_base"]), p_v_len, token_bytes_v, state.topk_v_bases[offload_id]),
+        ):
+            # P-side blocks are not contiguous; _coalesce_desc merges only the
+            # opportunistically contiguous runs in both address spaces.
+            cp, cl, coalesced_lengths = _coalesce_desc(
+                p_base + block_ids * p_block_len,
+                topk_base + dst_tokens * token_bytes,
+                partial * token_bytes,
+            )
+            peer_chunks.append(cp)
+            local_chunks.append(cl)
+            length_chunks.append(coalesced_lengths)
+
     def _build_req_descriptors(
         self,
         layer: dict[str, Any],
@@ -726,6 +795,15 @@ class MembPullReadThread(threading.Thread):
                 length_chunks.append(coalesced_lengths)
 
         self._append_nano_tail_descriptors(
+            layer,
+            ext_req_id,
+            p_main_block_ids_for_tail,
+            main_start_block,
+            peer_chunks,
+            local_chunks,
+            length_chunks,
+        )
+        self._append_nano_dense_descriptors(
             layer,
             ext_req_id,
             p_main_block_ids_for_tail,
