@@ -127,7 +127,7 @@ def test_aux_buffer_factory_uses_one_protocol(monkeypatch, legacy, v2):
     monkeypatch.setattr(patch_deepseek_v2.pp_transport, "make_empty_intermediate_tensors", wrap_factory)
     patch_deepseek_v2._patched_deepseek_v2_model_init(model, vllm_config=SimpleNamespace(use_v2_model_runner=v2))
     assert model._use_upstream_aux_relay is (v2 and not legacy)
-    expected_data_types = (PPTransportDataType.TOPK_INDICES,)
+    expected_data_types: tuple[PPTransportDataType, ...] = (PPTransportDataType.TOPK_INDICES,)
     if not model._use_upstream_aux_relay:
         expected_data_types = (PPTransportDataType.AUX_HIDDEN_STATES, *expected_data_types)
     wrap_factory.assert_called_once_with(model, factory, expected_data_types)
