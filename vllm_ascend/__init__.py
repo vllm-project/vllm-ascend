@@ -14,7 +14,6 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-# CI probe: keep this comment only while verifying src-path OBS merge.
 
 import importlib.util
 import sys
