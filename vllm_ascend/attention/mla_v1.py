@@ -986,18 +986,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         return x
 
     def _v_up_proj_batch_major(self, x: torch.Tensor) -> torch.Tensor:
-        """Project a batch-major partial-attention result.
-
-        The normal MLA kernel returns head-major output. Distributed attention
-        merges partial outputs into batch-major layout, so it only needs this
-        small layout adapter instead of replacing the projection itself.
-        """
-        x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
-        x = torch.bmm(x, self.W_UV)
-        return x.transpose(0, 1).reshape(
-            -1,
-            self.num_heads * self.v_head_dim,
-        )
+        """Keep the DCP result batch-major and fuse both BMM permutations."""
+        x = x.view(-1, self.num_heads, self.kv_lora_rank)
+        x = torch_npu.npu_transpose_batchmatmul(x, self.W_UV, perm_x1=(1, 0, 2), perm_y=(1, 0, 2))
+        return x.reshape(-1, self.num_heads * self.v_head_dim)
 
     # Return `ql_nope`, `q_pe`
     def _q_proj_and_k_up_proj(self, x):
