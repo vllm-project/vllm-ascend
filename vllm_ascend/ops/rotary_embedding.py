@@ -567,6 +567,7 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
             self.head_size,
             self.rotary_dim,
             self.mrope_interleaved,
+            self.is_neox_style,
         )
 
         return q.reshape(query_shape), k.reshape(key_shape)
