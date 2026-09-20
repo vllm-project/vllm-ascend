@@ -187,9 +187,19 @@ RUN if [ "$BUILD_TYPE" = "daily" ]; then \
         echo "Building release version without daily packages"; \
     fi && rm -f /tmp/install_daily_deps.sh
 
-RUN if [ -n "$GIT_PROXY" ] || [ -n "$CRATES_IO_INDEX" ] || [ -n "$RUSTUP_DIST_SERVER" ] || [ "$PIP_INDEX_URL" != "$PUBLIC_PIP_INDEX_URL" ]; then \
+# This layer only matters for INTERNAL CI builds. Our CI passes --build-arg with
+# cluster-internal mirrors (PIP_INDEX_URL, APTMIRROR, GIT_PROXY, CRATES_IO_INDEX)
+# to accelerate package downloads; those mirrors are unreachable from the published
+# image, so we restore the public defaults here.
+# If you build with the default build-args (all public / empty), every branch below
+# is skipped and no extra operations run - you can ignore this layer entirely:
+#   - pip: reset to PUBLIC_PIP_INDEX_URL only when PIP_INDEX_URL was overridden.
+#   - cargo/git: clean up only what internal builds configured.
+RUN if [ "$PIP_INDEX_URL" != "$PUBLIC_PIP_INDEX_URL" ]; then \
         pip config set global.index-url ${PUBLIC_PIP_INDEX_URL} && \
-        { pip config unset global.trusted-host 2>/dev/null || true; } && \
+        { pip config unset global.trusted-host 2>/dev/null || true; }; \
+    fi && \
+    if [ -n "$GIT_PROXY" ] || [ -n "$CRATES_IO_INDEX" ]; then \
         rm -f "$HOME/.cargo/config.toml" && \
         for key in $(git config --global --name-only --get-regexp '^url\..*\.insteadof$' 2>/dev/null); do \
             git config --global --unset-all "$key"; \
