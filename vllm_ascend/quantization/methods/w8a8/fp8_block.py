@@ -98,9 +98,19 @@ def resolve_block_scales(
         row_scales = scale_inv[row_start // block_n : cdiv(row_end, block_n)].to(
             device=weight.device, dtype=torch.float32
         )
-        row_scales = row_scales.repeat_interleave(block_n, dim=0)[: row_end - row_start]
-        row_scales = row_scales.repeat_interleave(block_k, dim=1)[:, :in_features]
-        resolved[row_start:row_end] = weight[row_start:row_end].to(torch.float32) * row_scales
+        row_count = row_end - row_start
+        if row_count % block_n == 0 and in_features % block_k == 0:
+            # Broadcast each scale across its tile without an expanded scale tensor.
+            tiles = (
+                weight[row_start:row_end]
+                .to(torch.float32)
+                .reshape(row_count // block_n, block_n, in_features // block_k, block_k)
+            )
+            resolved[row_start:row_end] = (tiles * row_scales[:, None, :, None]).reshape(row_count, in_features)
+        else:
+            row_scales = row_scales.repeat_interleave(block_n, dim=0)[:row_count]
+            row_scales = row_scales.repeat_interleave(block_k, dim=1)[:, :in_features]
+            resolved[row_start:row_end] = weight[row_start:row_end].to(torch.float32) * row_scales
     return resolved
 
 
