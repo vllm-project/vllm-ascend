@@ -43,78 +43,78 @@ def test_compact_rejects_removed_or_invalid_options(physical):
 
 def test_controller_debounces_worker_downshift():
     controller = AdaptiveDraftKController(max_k=5, min_k=3)
-    assert controller.cap(5, 8) == 5
-    controller.recommend(8, 3)
+    assert controller.cap(5, 16) == 5
+    controller.recommend(16, 3)
     for _ in range(2):
-        controller.observe([5] * 8, [[0]] * 8)
-        assert controller.cap(5, 8) == 5
-    controller.observe([5] * 8, [[0]] * 8)
-    assert controller.cap(5, 8) == 3
+        controller.observe([5] * 16, [[0]] * 16)
+        assert controller.cap(5, 16) == 5
+    controller.observe([5] * 16, [[0]] * 16)
+    assert controller.cap(5, 16) == 3
     assert controller.current_k == 3
 
 
 def test_recommendations_are_batch_bucket_specific():
     controller = AdaptiveDraftKController(max_k=5, min_k=3)
-    controller.recommend(8, 3)
+    controller.recommend(16, 3)
     for _ in range(3):
-        controller.observe([5] * 8, [[0]] * 8)
-    assert controller.cap(5, 8) == 3
+        controller.observe([5] * 16, [[0]] * 16)
+    assert controller.cap(5, 16) == 3
     # A new bucket must persist for two steps before its independent state is
     # used; one transient batch-size change keeps the previous stable K.
-    assert controller.cap(5, 16) == 3
-    assert controller.cap(5, 16) == 5
+    assert controller.cap(5, 32) == 3
+    assert controller.cap(5, 32) == 5
 
 
 def test_small_batch_keeps_full_k():
     controller = AdaptiveDraftKController(max_k=5, min_k=3)
-    controller.recommend(4, 3)
-    assert controller.cap(5, 4) == 5
-    controller.observe([5] * 4, [[0]] * 4)
-    assert controller._state(4).observations == 0
+    controller.recommend(8, 3)
+    assert controller.cap(5, 8) == 5
+    controller.observe([5] * 8, [[0]] * 8)
+    assert controller._state(8).observations == 0
 
 
 def test_periodic_probe_forces_full_k():
     controller = AdaptiveDraftKController(max_k=5, min_k=3)
-    controller.recommend(8, 3)
-    state = controller._state(8)
+    controller.recommend(16, 3)
+    state = controller._state(16)
     state.observations = 32
-    assert controller.cap(5, 8) == 5
+    assert controller.cap(5, 16) == 5
     assert state.stable_k == 5
 
 
 def test_missing_profile_uses_acceptance_fallback():
     controller = AdaptiveDraftKController(max_k=5, min_k=4)
-    controller.cap(5, 8)
+    controller.cap(5, 16)
     for _ in range(3):
-        controller.observe([5] * 8, [[0]] * 8)
+        controller.observe([5] * 16, [[0]] * 16)
     assert controller.current_k == 4
 
 
 def test_output_recommendation_and_acceptance_are_combined():
     controller = AdaptiveDraftKController(max_k=5, min_k=3)
     scheduler_output = SimpleNamespace(
-        scheduled_spec_decode_tokens={str(i): [1] * 5 for i in range(8)}
+        scheduled_spec_decode_tokens={str(i): [1] * 5 for i in range(16)}
     )
     model_output = SimpleNamespace(
-        physical_k_recommendation=(8, 3, 3),
-        req_ids=[str(i) for i in range(8)],
-        sampled_token_ids=[[1, 2] for _ in range(8)],
+        physical_k_recommendation=(16, 3, 3),
+        req_ids=[str(i) for i in range(16)],
+        sampled_token_ids=[[1, 2] for _ in range(16)],
     )
     for _ in range(3):
         _update_controller(controller, scheduler_output, model_output)
-    assert controller.cap(5, 8) == 3
+    assert controller.cap(5, 16) == 3
 
 
 def test_acceptance_survival_is_tracked_by_position():
     controller = AdaptiveDraftKController(max_k=5, min_k=3)
-    controller.recommend(8, 5)
-    sampled = [[0] * 5 for _ in range(5)] + [[0] * 4 for _ in range(3)]
+    controller.recommend(16, 5)
+    sampled = [[0] * 5 for _ in range(10)] + [[0] * 4 for _ in range(6)]
     for _ in range(3):
-        controller.observe([5] * 8, sampled)
-    state = controller._state(8)
+        controller.observe([5] * 16, sampled)
+    state = controller._state(16)
     assert state.survival[:5] == [1.0, 1.0, 1.0, 0.625, 0.0]
     assert state.empirical_k == 4
-    assert controller.cap(5, 8) == 4
+    assert controller.cap(5, 16) == 4
 
 
 def test_empirical_acceptance_cannot_cross_profile_cost_floor():
