@@ -24,7 +24,7 @@ class TestStairLoadStatistics(unittest.TestCase):
         self.assertFalse(StairEplbPolicy.__abstractmethods__)
 
     def test_upstream_policy_contract_runs_stair_and_flattens_placement(self):
-        result = StairEplbPolicy.rebalance_experts(
+        result = StairEplbPolicy(StairConfig()).rebalance_experts(
             torch.tensor([[8.0, 7.0, 6.0, 5.0]]),
             num_replicas=4,
             num_groups=1,
@@ -39,7 +39,7 @@ class TestStairLoadStatistics(unittest.TestCase):
 
     def test_upstream_policy_contract_requires_current_placement(self):
         with self.assertRaisesRegex(ValueError, "current expert placement"):
-            StairEplbPolicy.rebalance_experts(torch.ones((1, 2)), 2, 1, 1, 2)
+            StairEplbPolicy(StairConfig()).rebalance_experts(torch.ones((1, 2)), 2, 1, 1, 2)
 
     def test_compression_preserves_all_steps_as_weighted_bins(self):
         samples = np.arange(20).reshape(5, 2, 2)
@@ -50,6 +50,22 @@ class TestStairLoadStatistics(unittest.TestCase):
         np.testing.assert_allclose(compressed[0], samples[:2].mean(axis=0))
         np.testing.assert_allclose(compressed[1], samples[2:].mean(axis=0))
         np.testing.assert_allclose(np.average(compressed, axis=0, weights=weights), samples.mean(axis=0))
+
+    def test_temporal_bins_preserve_load_and_sample_counts(self):
+        samples = torch.arange(20).reshape(5, 2, 2)
+        policy = StairEplbPolicy(StairConfig(load_window_bins=2))
+
+        prepared = policy.prepare_local_load_stats(samples)
+        bin_means, numpy_sample_counts = StairEplbPolicy.compress_load_window(samples.numpy(), 2)
+
+        torch.testing.assert_close(prepared.values[0], samples[:2].sum(dim=0))
+        torch.testing.assert_close(prepared.values[1], samples[2:].sum(dim=0))
+        np.testing.assert_array_equal(prepared.sample_counts, [2, 3])
+        np.testing.assert_array_equal(prepared.sample_counts, numpy_sample_counts)
+        np.testing.assert_allclose(
+            prepared.values.numpy() / prepared.sample_counts[:, None, None],
+            bin_means,
+        )
 
     def test_weighted_moments_use_covariance(self):
         samples = np.array([[1.0, 4.0], [3.0, 2.0]])

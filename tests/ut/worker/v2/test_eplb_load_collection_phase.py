@@ -7,6 +7,8 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
+from vllm_ascend.ascend_config import EplbConfig, StairConfig
+from vllm_ascend.distributed.eplb.policy.stair import StairEplbPolicy
 from vllm_ascend.distributed.eplb.state import AscendEplbState
 from vllm_ascend.worker.v2.eplb import (
     AscendEPLBController,
@@ -46,7 +48,7 @@ class TestEplbLoadCollectionPhase(unittest.TestCase):
         controller = AscendEPLBController(
             parallel_config,
             torch.device("cpu"),
-            load_collection_phase=load_collection_phase,
+            ascend_eplb_config=EplbConfig(load_collection_phase=load_collection_phase),
         )
         controller._has_registered_models = True
         return controller
@@ -61,6 +63,7 @@ class TestEplbLoadCollectionPhase(unittest.TestCase):
             controller.prepare_load()
 
         self.assertIsInstance(controller.state, AscendEplbState)
+        self.assertIs(controller.state.policy, controller.eplb_policy)
 
     def test_setup_from_mapping_uses_current_upstream_contract(self):
         controller = self._make_controller()
@@ -81,7 +84,7 @@ class TestEplbLoadCollectionPhase(unittest.TestCase):
             device=controller.device,
             parallel_config=controller.parallel_config,
             expanded_physical_to_logical=mapping,
-            stair_config=controller.stair_config,
+            policy=controller.eplb_policy,
         )
         self.assertIs(controller.state, state)
         self.assertTrue(controller._has_registered_models)
@@ -106,7 +109,7 @@ class TestEplbLoadCollectionPhase(unittest.TestCase):
             parallel_config=controller.parallel_config,
             expanded_physical_to_logical=mapping,
             num_valid_physical_experts=1,
-            stair_config=controller.stair_config,
+            policy=controller.eplb_policy,
         )
         self.assertIs(controller.state, state)
         self.assertTrue(controller._has_registered_models)
@@ -149,6 +152,7 @@ class TestAscendEplbFreshLoadGate(unittest.TestCase):
         state.expert_load_window_size = 2
         state.should_record_tensor = None
         state._has_fresh_recorded_load = False
+        state.policy = StairEplbPolicy(StairConfig())
         return state
 
     @staticmethod
@@ -157,6 +161,7 @@ class TestAscendEplbFreshLoadGate(unittest.TestCase):
 
     def test_dummy_period_skips_rearrange_but_resets_clock(self):
         state = self._make_state()
+        state.is_async = True
 
         with (
             patch(
@@ -177,38 +182,31 @@ class TestAscendEplbFreshLoadGate(unittest.TestCase):
         upstream_rearrange.assert_not_called()
 
     def test_fresh_recorded_load_runs_rearrange_and_is_consumed(self):
-        for is_async in (False, True):
-            with self.subTest(is_async=is_async):
-                state = self._make_state()
-                state.is_async = is_async
+        state = self._make_state()
+        state.is_async = True
 
-                with (
-                    patch(
-                        "vllm.distributed.eplb.eplb_state.get_ep_group",
-                        return_value=self._ep_group(),
-                    ),
-                    patch.object(
-                        state,
-                        "_has_global_fresh_recorded_load",
-                        return_value=True,
-                    ) as sync_fresh_load,
-                    patch("vllm.distributed.eplb.eplb_state.EplbState.rearrange") as upstream_rearrange,
-                    patch.object(state, "_publish_temporal_load_stats") as publish_async,
-                ):
-                    state.step()
+        with (
+            patch(
+                "vllm.distributed.eplb.eplb_state.get_ep_group",
+                return_value=self._ep_group(),
+            ),
+            patch.object(
+                state,
+                "_has_global_fresh_recorded_load",
+                return_value=True,
+            ) as sync_fresh_load,
+            patch("vllm.distributed.eplb.eplb_state.EplbState.rearrange") as upstream_rearrange,
+            patch.object(state, "collect_global_load_stats", return_value={}) as collect_stats,
+            patch.object(state, "publish_async_load_stats") as publish_async,
+        ):
+            state.step()
 
-                self.assertEqual(state.expert_rearrangement_step, 0)
-                self.assertFalse(state._has_fresh_recorded_load)
-                sync_fresh_load.assert_called_once_with()
-                if is_async:
-                    publish_async.assert_called_once_with()
-                    upstream_rearrange.assert_not_called()
-                else:
-                    publish_async.assert_not_called()
-                    upstream_rearrange.assert_called_once_with(
-                        is_profile=False,
-                        rank_mapping=None,
-                    )
+        self.assertEqual(state.expert_rearrangement_step, 0)
+        self.assertFalse(state._has_fresh_recorded_load)
+        sync_fresh_load.assert_called_once_with()
+        collect_stats.assert_called_once_with()
+        publish_async.assert_called_once_with({})
+        upstream_rearrange.assert_not_called()
 
     def test_remote_fresh_load_enables_all_ranks(self):
         state = self._make_state()

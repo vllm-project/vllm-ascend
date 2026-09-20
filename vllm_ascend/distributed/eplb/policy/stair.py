@@ -13,6 +13,7 @@ from vllm.distributed.eplb.policy import AbstractEplbPolicy
 
 from vllm_ascend.ascend_config import StairConfig
 from vllm_ascend.distributed.eplb.layer_sharding import all_gather_layer_shards, assigned_layer_ids
+from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
 
 _MEAN_RATIO_TIE_TOLERANCE = 1e-9
 
@@ -92,9 +93,27 @@ _VARIANCE_ROUNDOFF_SAFETY_FACTOR = 8
 class StairEplbPolicy(AbstractEplbPolicy):
     """STAIR load statistics and placement planning."""
 
-    @classmethod
+    def __init__(self, config: StairConfig) -> None:
+        self.config = config
+
+    @staticmethod
+    def _load_bin_boundaries(num_samples: int, max_bins: int) -> tuple[np.ndarray, np.ndarray]:
+        if num_samples < 1 or max_bins < 1:
+            raise ValueError("load binning requires samples and a positive bin limit")
+        num_bins = min(num_samples, max_bins)
+        boundaries = np.arange(num_bins + 1) * num_samples // num_bins
+        return boundaries, np.diff(boundaries).astype(np.int64)
+
+    def prepare_local_load_stats(self, load_samples: torch.Tensor) -> PreparedLoadStats:
+        """Compress local temporal samples into STAIR's weighted bins."""
+        boundaries, samples_per_bin = self._load_bin_boundaries(load_samples.shape[0], self.config.load_window_bins)
+        load_sums_per_bin = torch.stack(
+            [load_samples[start:end].sum(dim=0) for start, end in zip(boundaries[:-1], boundaries[1:])]
+        )
+        return PreparedLoadStats(load_sums_per_bin, samples_per_bin)
+
     def rebalance_experts(
-        cls,
+        self,
         weight: torch.Tensor,
         num_replicas: int,
         num_groups: int,
@@ -106,9 +125,9 @@ class StairEplbPolicy(AbstractEplbPolicy):
 
         The upstream contract has no temporal window, commit anchors, explicit
         source plan, or rank-to-node mapping. This adapter treats ``weight`` as
-        one sample, assumes each node contains contiguous ranks, and uses STAIR
-        defaults. ``num_groups`` is validated for signature compatibility but
-        does not constrain placement. The result is a CPU
+        one sample, assumes each node contains contiguous ranks, and uses this
+        policy's configured controls. ``num_groups`` is validated for signature
+        compatibility but does not constrain placement. The result is a CPU
         ``[layers, num_replicas]`` tensor with the current mapping's dtype.
         Because upstream chooses migration sources again, its transfers need not
         preserve STAIR's planned rank-pair limit. Call :meth:`plan_rebalance`
@@ -133,15 +152,19 @@ class StairEplbPolicy(AbstractEplbPolicy):
         current_placement = current_map.numpy().reshape(current_map.shape[0], num_ranks, num_replicas // num_ranks)
         ranks_per_node = num_ranks // num_nodes
         node_ids = np.arange(num_ranks, dtype=np.int64) // ranks_per_node
-        config = StairConfig()
-        plan = cls.plan_rebalance(
+        plan = self.plan_rebalance(
             logical_load[None, ...],
             current_placement,
             np.full(current_placement.shape[0], np.nan, dtype=np.float64),
             node_ids,
-            config,
+            self.config,
         )
-        cls.validate_plan(current_placement, plan, logical_load.shape[1], config.rank_pair_migration_limit)
+        self.validate_plan(
+            current_placement,
+            plan,
+            logical_load.shape[1],
+            self.config.rank_pair_migration_limit,
+        )
         planned_map = plan.rank_expert_ids.reshape(current_map.shape)
         return torch.from_numpy(planned_map).to(dtype=current_map.dtype)
 
@@ -153,15 +176,11 @@ class StairEplbPolicy(AbstractEplbPolicy):
 
         Return bin means ``[bins, layers, experts]`` and counts ``[bins]``.
         """
-        if max_bins < 1:
-            raise ValueError("max_bins must be positive")
         values = np.asarray(load_samples, dtype=np.float64)
         if values.ndim != 3 or values.shape[0] == 0 or not np.all(np.isfinite(values)) or np.any(values < 0):
             raise ValueError("load_samples must be finite non-negative [steps, layers, experts]")
-        num_bins = min(values.shape[0], max_bins)
         # Integer boundaries spread the remainder across bins without dropping steps.
-        boundaries = np.arange(num_bins + 1) * values.shape[0] // num_bins
-        sample_counts = np.diff(boundaries).astype(np.int64)
+        boundaries, sample_counts = StairEplbPolicy._load_bin_boundaries(values.shape[0], max_bins)
         compressed = np.stack(
             [values[start:end].mean(axis=0, dtype=np.float64) for start, end in zip(boundaries[:-1], boundaries[1:])]
         )
