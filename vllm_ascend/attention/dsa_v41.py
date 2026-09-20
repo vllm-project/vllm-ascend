@@ -36,12 +36,19 @@ from vllm_ascend.core.kv_cache_interface import (
     get_kv_cache_compression_ratio,
     get_storage_block_size,
 )
-from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.models.deepseek_v41.cache_config import uses_a5_packed_cache
+from vllm_ascend.ops.dsv41_a5 import (
+    apply_partial_rotary_inplace,
+    build_window_indices,
+    qsmla,
+    write_attention_cache,
+)
+from vllm_ascend.ops.dsv41_a5.package_loader import import_packaged_a5_module
 from vllm_ascend.ops.rope_dsv4 import (
     get_cos_and_sin_dsa,
     get_full_cos_and_sin_dsa_for_layer,
 )
-from vllm_ascend.ops.triton.c2_ring_metadata import build_c2_ring_metadata
+from vllm_ascend.ops.triton.a5_slot_mapping import build_a5_slot_mapping
 from vllm_ascend.utils import npu_stream_switch
 from vllm_ascend.worker.device_metadata import (
     DeviceMetadataStage,
@@ -289,16 +296,29 @@ class AscendDSAV41Impl:
 
     @staticmethod
     def _apply_rotary(attn, value, cos, sin, *, inverse=False):
-        return DeviceOperator.apply_partial_rotary_inplace(
-            value, cos, sin, start=attn.nope_head_dim, end=attn.head_dim, inverse=inverse
+        if getattr(attn, "uses_a5_packed_cache", False):
+            return apply_partial_rotary_inplace(
+                value,
+                cos,
+                sin,
+                start=attn.nope_head_dim,
+                end=attn.head_dim,
+                inverse=inverse,
+            )
+        torch.ops._C_ascend.inplace_partial_rotary_mul(
+            value.unsqueeze(1),
+            cos,
+            -sin if inverse else sin,
+            rotary_mode="interleave",
+            partial_slice=[attn.nope_head_dim, attn.head_dim],
         )
+        return value
 
     @staticmethod
     def _write_swa_cache(attn, metadata, value):
         cache = attn.dsa_attn.swa_cache_layer.kv_cache[0]
-        backend = getattr(attn, "packed_cache_ops", None)
-        if backend is not None:
-            backend.write_attention_cache(
+        if getattr(attn, "uses_a5_packed_cache", False):
+            write_attention_cache(
                 cache,
                 metadata.flat_slot_mapping[: value.shape[0]],
                 value,
@@ -306,22 +326,6 @@ class AscendDSAV41Impl:
             )
             return
         scatter_cache_sk(cache, metadata.slot_mapping, value)
-
-    @staticmethod
-    def _write_swa_cache_on_main_stream(attn, metadata):
-        # Packaged A5 prefill/mixed cache writes must be captured on the
-        # current stream even when the independent Q/KV preparation overlaps.
-        # A missing prefill classification also cannot qualify as pure decode.
-        return getattr(attn, "packed_cache_ops", None) is not None and (
-            metadata.num_prefills > 0 or metadata.num_decodes != metadata.num_reqs
-        )
-
-    @classmethod
-    def _project_q(cls, attn, hidden_states, cos, sin):
-        qr = attn.q_norm(attn.wq_a(hidden_states))
-        q = attn.wq_b(qr).unflatten(-1, (-1, attn.head_dim))
-        cls._apply_rotary(attn, q, cos, sin)
-        return q.to(hidden_states.dtype), qr
 
     @classmethod
     def _project_kv(cls, attn, hidden_states, cos, sin):
@@ -485,14 +489,12 @@ class AscendDSAV41Impl:
         with npu_stream_switch(aux_stream):
             aux_stream.wait_event(part3_start)
             kv = attn.kv_norm(kv).view(-1, 1, attn.head_dim)
-            self._apply_rotary(attn, kv, kv_cos, kv_sin)
-            if not write_cache_on_main:
-                self._write_swa_cache(attn, swa_metadata, kv.squeeze(1))
-        q = wq_b.matmul(q_b_quant, q_b_scale, bias=attn.wq_b.bias).unflatten(-1, (-1, attn.head_dim))
+            AscendDSAV41Impl._apply_rotary(attn, kv, cos, sin)
+            AscendDSAV41Impl._write_swa_cache(attn, swa_metadata, kv.squeeze(1))
+        q = wq_b.matmul(q_b_quant, q_b_scale, bias=attn.wq_b.bias).unflatten(-1, (attn.n_local_heads, attn.head_dim))
         main_stream.wait_stream(aux_stream)
-        if write_cache_on_main:
-            self._write_swa_cache(attn, swa_metadata, kv.squeeze(1))
-        return q, qr
+        AscendDSAV41Impl._apply_rotary(attn, q, cos, sin)
+        return q.to(hidden_states.dtype), qr
 
     def _write_compressed_source(
         self,
@@ -549,9 +551,8 @@ class AscendDSAV41Impl:
         )
         latent = latent.view(-1, 1, attn.head_dim)
         AscendDSAV41Impl._apply_rotary(attn, latent, source_cos, source_sin)
-        backend = getattr(attn, "packed_cache_ops", None)
-        if backend is not None:
-            backend.write_attention_cache(
+        if getattr(attn, "uses_a5_packed_cache", False):
+            write_attention_cache(
                 attn.long_kv_cache.kv_cache[0],
                 compressor_metadata.cache.flat_slot_mapping[: positions.shape[0]],
                 latent.squeeze(1),
@@ -614,12 +615,11 @@ class AscendDSAV41Impl:
         """Run SparseFlashMla with the same PA metadata for both operator stages."""
         if source_cache is None and self.role.has_long_context:
             source_cache = get_forward_context().no_compile_layers[self.long_kv_source_prefix].kv_cache[0]
-        backend = getattr(attn, "packed_cache_ops", None)
-        if backend is not None:
+        if getattr(attn, "uses_a5_packed_cache", False):
             compressed_lengths = None
             if self.role.has_long_context and attn.shared_state.topk_lengths is not None:
                 compressed_lengths = attn.shared_state.topk_lengths[: q.shape[0]]
-            return backend.qsmla(
+            return qsmla(
                 q,
                 attn.dsa_attn.swa_cache_layer.kv_cache[0],
                 source_cache,
@@ -705,9 +705,8 @@ class AscendDSAV41Impl:
         if num_tokens:
             positions = metadata.positions[:num_tokens]
             cos, sin = metadata.rope(attn.rotary_emb.layername, num_tokens)
-            compressed_indices = self._select_sparse_indices(
-                attn, hidden_states, qr, positions, cos, sin, metadata, prepared_indexer
-            )
+            q, qr = self._prepare_queries(attn, hidden_states, positions, cos, sin, metadata)
+            compressed_indices = self._select_sparse_indices(attn, hidden_states, qr, positions, cos, sin, metadata)
             attention_output = self._forward_attention(attn, q, metadata, compressed_indices)
             AscendDSAV41Impl._apply_rotary(attn, attention_output, cos, sin, inverse=True)
         else:
@@ -760,8 +759,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 self._cache_kind = "index_k" if kv_cache_spec.scale_dim else "long_kv"
         else:
             raise TypeError(f"Unsupported V4.1 cache spec: {type(kv_cache_spec).__name__}")
-        self._device_backend = DeviceOperator.get_dsv41_packed_cache_ops()
-        self._uses_a5_packed_cache = self._device_backend is not None
+        self._uses_a5_packed_cache = uses_a5_packed_cache()
         text_config = vllm_config.model_config.hf_text_config
         window_size = int(_config_value(text_config, "sliding_window", 0))
         query_metadata_size = V41_METADATA_BUFFER_SIZE if build_query_metadata else 0
@@ -769,7 +767,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         compressor_reqs = max_reqs if build_compressor_metadata else 0
         self._slot_mapping = torch.full((max_tokens,), -1, dtype=torch.int64, device=device)
         self._slot_mapping_2d = torch.full((max_tokens, 2), -1, dtype=torch.int32, device=device)
-        self._flat_slot_mapping = torch.full((max_tokens,), -1, dtype=torch.int64, device=device)
+        self._flat_slot_mapping = torch.full((max_tokens,), -1, dtype=torch.int32, device=device)
         self._seq_lens = torch.zeros(max_reqs, dtype=torch.int32, device=device)
         self._max_tokens = max_tokens
         self._dspark_swa_indices = None
@@ -781,7 +779,8 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         if self._supports_device_ops and self._uses_a5_packed_cache and self._cache_kind == "swa":
             self._a5_causal_swa_indices = torch.empty((max_tokens, 1, window_size), dtype=torch.int32, device=device)
             self._a5_causal_swa_lengths = torch.empty((max_tokens, 1), dtype=torch.int32, device=device)
-            self._a5_smla_metadata = torch.empty(V41_METADATA_BUFFER_SIZE, dtype=torch.int32, device=device)
+            blocks = int(torch.npu.get_device_properties(device).cube_core_num)
+            self._a5_smla_metadata = torch.empty(2 * blocks, dtype=torch.int32, device=device)
             self._a5_smla_length_rows = torch.empty((max_tokens, 1), dtype=torch.int32, device=device)
         else:
             self._a5_causal_swa_indices = None
@@ -988,8 +987,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             if prepared_slots is None or prepared_flat_slots is None:
                 active_slots = common.slot_mapping[:num_input_tokens]
                 if self._uses_a5_packed_cache and active_slots.device.type == "npu":
-                    assert self._device_backend is not None
-                    prepared_slots, prepared_flat_slots = self._device_backend.build_packed_cache_slot_mapping(
+                    prepared_slots, prepared_flat_slots = build_a5_slot_mapping(
                         active_slots,
                         positions,
                         common.query_start_loc,
@@ -1080,20 +1078,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 num_actual_tokens,
                 use_logical_indices=True,
             )
-            # Full draft graphs retain these addresses from capture. Rebuild
-            # the values in persistent buffers rather than returning temporary
-            # tensors whose capture-time contents never advance with decoding.
-            if self._dspark_swa_indices is None:
-                self._dspark_swa_indices = ori_sparse_indices.new_empty(
-                    (self._max_tokens, *ori_sparse_indices.shape[1:])
-                )
-                self._dspark_swa_lengths = ori_topk_length.new_empty((self._max_tokens, *ori_topk_length.shape[1:]))
-            indices_view = self._dspark_swa_indices[:num_actual_tokens]
-            assert self._dspark_swa_lengths is not None
-            lengths_view = self._dspark_swa_lengths[:num_actual_tokens]
-            indices_view.copy_(ori_sparse_indices)
-            lengths_view.copy_(ori_topk_length)
-            ori_sparse_indices, ori_topk_length = indices_view, lengths_view
+        ori_topk_length = None
         if (
             not noncausal
             and ori_sparse_indices is None
@@ -1103,8 +1088,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             cache_key = f"a5-causal-swa:w{window_size}"
             cached_window = batch_shared.get(cache_key)
             if cached_window is None:
-                assert self._device_backend is not None
-                cached_window = self._device_backend.build_window_indices(
+                cached_window = build_window_indices(
                     positions[:num_input_tokens],
                     window_size,
                     indices_output=self._a5_causal_swa_indices[:num_input_tokens],
@@ -1122,30 +1106,28 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         qli_metadata = None
 
         if (
-            self._build_query_metadata
-            and self._uses_a5_packed_cache
+            self._uses_a5_packed_cache
             and cache_kind == "swa"
             and self._a5_smla_metadata is not None
             and self._a5_smla_length_rows is not None
         ):
 
             def build_a5_smla_metadata() -> None:
-                if metadata_tokens == 0:
+                if num_actual_tokens == 0:
                     self._a5_smla_metadata.zero_()
                     return
-                length_rows = self._a5_smla_length_rows[:metadata_tokens]
-                assert self._device_backend is not None
-                value = self._device_backend.mixed_quant_sparse_flash_mla_metadata(
+                import_packaged_a5_module("cann_ops_transformer.ops.attention.mixed_quant_sparse_flash_mla_dsl")
+                length_rows = self._a5_smla_length_rows[:num_actual_tokens]
+                value = torch.ops.cann_ops_transformer.ds41.mixed_quant_sparse_flash_mla_metadata(
                     length_rows,
                     length_rows,
-                    cu_seqlens_q=common.query_start_loc[: num_reqs + 1].int().contiguous(),
                     num_heads_q=64,
                     num_heads_kv=1,
                     head_dim=512,
                     quant_mode=1,
                     layout_q="TND",
                     layout_kv="PA_BBND",
-                    has_ori_kv=True,
+                    has_win_kv=True,
                     has_cmp_kv=True,
                 )
                 self._a5_smla_metadata.copy_(value)
@@ -1208,7 +1190,12 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 build_smla_metadata,
             )
 
-        if self._build_query_metadata and self._supports_device_ops and cache_kind == "index_k":
+        if (
+            self._build_query_metadata
+            and self._supports_device_ops
+            and not self._uses_a5_packed_cache
+            and cache_kind == "index_k"
+        ):
             residual = cmp_residual_buffer
 
             if self._uses_a5_packed_cache:

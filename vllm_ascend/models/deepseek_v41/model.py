@@ -58,8 +58,6 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.dsa_v41 import (
     DeepseekV41CacheLayer,
 )
-from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
@@ -67,6 +65,8 @@ from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_shard,
 )
 from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention, DSAModules
+from vllm_ascend.ops.dsv41_a5 import hc_post as a5_hc_post
+from vllm_ascend.ops.dsv41_a5 import hc_pre as a5_hc_pre
 from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding
 from vllm_ascend.ops.triton.mul_add import muls_add_triton
 from vllm_ascend.utils import (
@@ -76,8 +76,9 @@ from vllm_ascend.utils import (
 )
 
 from .cache_config import (
-    make_mla_cache_spec,
+    make_long_cache_spec,
     make_swa_cache_spec,
+    uses_a5_packed_cache,
 )
 from .compressor import DeepseekV41Compressor
 from .engram import (
@@ -709,14 +710,14 @@ class DeepseekV41Attention(DeepseekV41SWAAttention):
         self.topology = topology
         self.shared_state = None
         self.prefix = prefix
-        self.packed_cache_ops = DeviceOperator.get_dsv41_packed_cache_ops()
+        self.uses_a5_packed_cache = uses_a5_packed_cache()
         width = config.head_dim
         self.softmax_scale = width**-0.5
         if role.is_kv_source:
             self.long_kv_cache = DeepseekV41CacheLayer(
                 vllm_config,
                 f"{prefix}.long_kv_cache",
-                make_mla_cache_spec(
+                make_long_cache_spec(
                     block_size=block_size,
                     head_size=width,
                     compress_ratio=role.compress_ratio,
@@ -831,6 +832,7 @@ class DeepseekV41DecoderLayer(nn.Module):
         self.hc_attn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
         self.hc_ffn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
         self.use_sequence_parallel = vllm_config.parallel_config.use_sequence_parallel_moe
+        self.uses_a5_packed_cache = uses_a5_packed_cache()
         # Leave the TP partial sums for the reduce-scatter below. The mHC
         # and MoE paths then stay sharded between attention calls.
         if self.use_sequence_parallel:
@@ -857,6 +859,18 @@ class DeepseekV41DecoderLayer(nn.Module):
         return (pre_mix.unsqueeze(-1) * x.float()).sum(-2).to(x.dtype)
 
     def hc_pre(self, x, hc_fn, hc_scale, hc_base, pre_mix=None):
+        if self.uses_a5_packed_cache:
+            return a5_hc_pre(
+                x,
+                hc_fn,
+                hc_scale,
+                hc_base,
+                pre_mix,
+                hc_mult=self.hc_mult,
+                hc_sinkhorn_iters=self.hc_sinkhorn_iters,
+                norm_eps=self.norm_eps,
+                hc_eps=self.hc_eps,
+            )
         return torch.ops._C_ascend.npu_hc_pre_v3(
             x,
             hc_fn,
@@ -870,6 +884,8 @@ class DeepseekV41DecoderLayer(nn.Module):
         )
 
     def hc_post(self, x, residual, post, comb):
+        if self.uses_a5_packed_cache:
+            return a5_hc_post(x, residual, post, comb)
         return torch.ops._C_ascend.npu_hc_post(
             x.unsqueeze(0),
             residual.unsqueeze(0),
