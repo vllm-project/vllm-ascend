@@ -1398,14 +1398,21 @@
 #   1. `vllm.v1.worker.gpu.spec_decode.adaptive_verification._assign_draft_token_budget_compiled`
 #    Why:
 #       The upstream adaptive-verification draft-budget allocator is wrapped by
-#       `torch.compile`, whose compiled path is not supported on Ascend.
+#       `torch.compile`, whose compiled path is not supported on Ascend. In
+#       addition, the current A5 `index_fill_` implementation converts its
+#       device index tensor to a host vector, introducing synchronization
+#       proportional to the number of indices.
 #    How:
-#       Replace the compiled wrapper with the original eager allocator while
-#       preserving the upstream budget-allocation algorithm.
+#       Run the original upstream allocator eagerly, preserving its algorithm,
+#       and use a scoped `TorchFunctionMode` to route only `index_fill_` through
+#       `DeviceOperator`. The A5 adaptor temporarily implements it with the
+#       equivalent `scatter_` operation; other hardware keeps the native path.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/47808
 #    Future Plan:
-#       Remove this patch when the compiled allocator is supported on Ascend.
+#       Remove the scoped `index_fill_` interception once the native A5 operator
+#       accepts device indices without synchronization. Remove this patch
+#       entirely once the compiled allocator is also supported on Ascend.
 #
 # ** 34. File: platform/patch_vision.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
