@@ -46,11 +46,14 @@ def _use_qwen4_exp_mtp(speculative_config) -> bool:
     if callable(checker) and checker():
         return True
     draft_model_config = getattr(speculative_config, "draft_model_config", None)
+    model_architectures = tuple(getattr(draft_model_config, "architectures", ()) or ())
+    if "Qwen4ExpMTP" in model_architectures:
+        return True
     text_config = getattr(draft_model_config, "hf_text_config", None)
     if text_config is None:
         return False
-    architectures = getattr(text_config, "architectures", ()) or ()
-    return getattr(text_config, "model_type", None) == "qwen4_exp_mtp" or ("Qwen4ExpMTP" in architectures)
+    text_architectures = tuple(getattr(text_config, "architectures", ()) or ())
+    return getattr(text_config, "model_type", None) == "qwen4_exp_mtp" or ("Qwen4ExpMTP" in text_architectures)
 
 
 def get_spec_decode_method(method, vllm_config, device, runner):
