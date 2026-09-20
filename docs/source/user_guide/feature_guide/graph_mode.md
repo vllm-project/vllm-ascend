@@ -13,7 +13,7 @@ This document focuses on the Ascend-specific view: how graph mode works on Ascen
 
 ## Current Status on Ascend
 
-- Graph mode is currently available only on the **V1 Engine**.
+- Graph mode is currently available on both Model Runner V1/V2.
 - **ACLGraph** (capture/replay via `torch.npu.NPUGraph`) is the runtime graph execution mechanism used by the default graph path on Ascend.
 - **Npugraph_ex** is a compile-time FX graph optimization layer, enabled by default in FULL/FULL_DECODE_ONLY modes. It optimizes the graph before ACLGraph captures it.
 - **XliteGraph** is an optional graph path for selected model families and environments.
@@ -43,6 +43,8 @@ The default graph path on Ascend involves two stages: **compile-time optimizatio
 | FULL / FULL_DECODE_ONLY | Npugraph_ex FX optimization | ACLGraph capture/replay | Enabled |
 | PIECEWISE | Fusion pass only | ACLGraph capture/replay | Disabled |
 | NONE | None | Eager execution | Disabled |
+
+Ascend sets `use_inductor=False` and selects its own compilation backend. That backend applies npugraph_ex optimizations or FX fusion passes according to the configuration.
 
 Additionally, **XliteGraph** is available as an optional alternative graph path for selected model families (see [Using XliteGraph](#using-xlitegraph)).
 
@@ -129,15 +131,15 @@ As introduced in the [RFC](https://github.com/vllm-project/vllm-ascend/issues/47
 
 ### Default behavior
 
-Npugraph_ex is **enabled by default** when `cudagraph_mode` is `FULL` or `FULL_DECODE_ONLY`. It is automatically disabled in `PIECEWISE` or `NONE` modes.
+Npugraph_ex is **enabled by default** on supported hardware when `cudagraph_mode` is `FULL` or `FULL_DECODE_ONLY`. It is automatically disabled in `FULL_AND_PIECEWISE`, `PIECEWISE`, and `NONE` modes.
 
-This means for most users, Npugraph_ex is active without any explicit configuration:
+Select a full graph mode to use this default:
 
 ```python
 from vllm import LLM
 
 # Npugraph_ex is enabled by default in FULL/FULL_DECODE_ONLY mode
-llm = LLM(model="path/to/Qwen2-7B-Instruct")
+llm = LLM(model="path/to/Qwen2-7B-Instruct", compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"})
 outputs = llm.generate("Hello, how are you?")
 ```
 
