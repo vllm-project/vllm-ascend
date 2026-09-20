@@ -47,10 +47,6 @@ def resolve_physical_k(dynamic_config: dict[str, Any]) -> dict[str, Any] | None:
     return {"min_k": min_k, "auto_tune": auto_tune}
 
 
-def v2_physical_k_enabled(dynamic_config: dict[str, Any]) -> bool:
-    return isinstance(dynamic_config.get("physical_k"), dict)
-
-
 @dataclass
 class _BucketState:
     stable_k: int
@@ -83,15 +79,10 @@ class AdaptiveDraftKController:
     def __post_init__(self) -> None:
         self.max_k = max(int(self.max_k), 0)
         self.min_k = min(max(int(self.min_k), 1), self.max_k) if self.max_k else 0
-        self._current_k: int | None = None
         self._bucket_states: dict[int, _BucketState] = {}
         self._active_bucket: int | None = None
         self._pending_bucket: int | None = None
         self._pending_bucket_steps = 0
-
-    @property
-    def current_k(self) -> int | None:
-        return self._current_k
 
     @staticmethod
     def _batch_bucket(batch_size: int) -> int:
@@ -183,7 +174,6 @@ class AdaptiveDraftKController:
         if configured_k == 0:
             return 0
         if batch_size is not None and batch_size < PHYSICAL_K_MIN_TUNED_BATCH_SIZE:
-            self._current_k = configured_k
             return configured_k
         if batch_size:
             bucket = self._settled_bucket(batch_size)
@@ -195,12 +185,9 @@ class AdaptiveDraftKController:
                 and state.last_probe_observation != state.observations
             ):
                 state.last_probe_observation = state.observations
-                self._current_k = configured_k
                 return configured_k
-            self._current_k = min(state.stable_k, configured_k)
-            return self._current_k
-        self._current_k = configured_k if self._current_k is None else self._current_k
-        return min(self._current_k, configured_k)
+            return min(state.stable_k, configured_k)
+        return configured_k
 
     def observe(
         self,
@@ -215,7 +202,6 @@ class AdaptiveDraftKController:
         widths = [width for width, _ in pairs]
         accepted = [min(width, max(len(tokens) - 1, 0)) for width, tokens in pairs]
         if len(widths) < PHYSICAL_K_MIN_TUNED_BATCH_SIZE:
-            self._current_k = self.max_k
             return
         bucket = self._batch_bucket(len(widths))
         state = self._state(bucket)
@@ -254,18 +240,6 @@ class AdaptiveDraftKController:
             ),
         )
         self._advance_state(state)
-        if self._active_bucket == bucket:
-            self._current_k = state.stable_k
-
-    def observe_proposals(self, lengths: Sequence[int]) -> None:
-        """Fallback for outputs that expose proposal lengths but no tokens."""
-
-        normalized = [max(0, min(int(length), self.max_k)) for length in lengths]
-        if not normalized:
-            return
-        widths = [self.max_k] * len(normalized)
-        sampled = [[0] * (length + 1) for length in normalized]
-        self.observe(widths, sampled)
 
 
 def _create_controller(vllm_config: Any) -> AdaptiveDraftKController | None:
@@ -298,8 +272,6 @@ def _update_controller(controller, scheduler_output, model_runner_output) -> Non
             [len(scheduled.get(req_id, ())) for req_id in req_ids],
             sampled,
         )
-    elif (lengths := getattr(model_runner_output, "proposal_lengths", None)) is not None:
-        controller.observe_proposals(lengths)
 
 
 def install_scheduler_policy() -> None:
