@@ -44,15 +44,29 @@ def test_capture_widths_use_compact_config():
     assert configured_capture_k(make_speculator().vllm_config, 5) == (2, 5)
 
 
-def test_full_mode_preserves_upstream_adaptive_verification_factory():
+def test_min_k_only_infers_capture_widths():
+    config = make_speculator().vllm_config
+    config.additional_config["dynamic_spec_config"]["physical_k"] = {"min_k": 4}
+    assert configured_capture_k(config, 6) == (4, 5, 6)
+
+
+def test_capture_widths_clamp_minimum_to_maximum():
+    config = make_speculator().vllm_config
+    config.additional_config["dynamic_spec_config"]["physical_k"] = {"min_k": 8}
+    assert configured_capture_k(config, 5) == (5,)
+
+
+def test_full_mode_temporarily_installs_physical_k_profile_factory():
     def original_factory(**kwargs):
         return kwargs
 
     runner_module = SimpleNamespace(
         maybe_create_adaptive_verification_manager=original_factory
     )
-    with adaptive_verification_gate_wrapper(runner_module, CUDAGraphMode.FULL):
-        assert runner_module.maybe_create_adaptive_verification_manager is original_factory
+    with adaptive_verification_gate_wrapper(
+        runner_module, CUDAGraphMode.FULL, make_speculator().vllm_config
+    ):
+        assert runner_module.maybe_create_adaptive_verification_manager is not original_factory
     assert runner_module.maybe_create_adaptive_verification_manager is original_factory
 
 
@@ -63,7 +77,9 @@ def test_piecewise_mode_temporarily_installs_ascend_adapter():
     runner_module = SimpleNamespace(
         maybe_create_adaptive_verification_manager=original_factory
     )
-    with adaptive_verification_gate_wrapper(runner_module, CUDAGraphMode.PIECEWISE):
+    with adaptive_verification_gate_wrapper(
+        runner_module, CUDAGraphMode.PIECEWISE, make_speculator().vllm_config
+    ):
         assert runner_module.maybe_create_adaptive_verification_manager is not original_factory
     assert runner_module.maybe_create_adaptive_verification_manager is original_factory
 

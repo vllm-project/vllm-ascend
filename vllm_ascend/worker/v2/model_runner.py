@@ -400,6 +400,16 @@ class NPUModelRunner(GPUModelRunner):
             pcp_manager._sampling_hidden_restored = False
         self._restore_replicated_draft_target_states()
         output = super().sample_tokens(grammar_output)
+        manager = getattr(self, "adaptive_verification", None)
+        recommendation = getattr(manager, "_physical_k_recommendation", None)
+        if manager is not None:
+            manager._physical_k_recommendation = None
+        output_container = getattr(output, "model_runner_output", output)
+        if output_container is not None and hasattr(
+            output_container,
+            "physical_k_recommendation",
+        ):
+            output_container.physical_k_recommendation = recommendation
         # Close the per-step msprobe dump cycle on the normal last-PP-rank
         # path (v1 parity: v1 finalizes at the end of sample_tokens).
         self._finalize_dump_data()
@@ -502,7 +512,9 @@ class NPUModelRunner(GPUModelRunner):
             )
         with (
             graph_manager_wrapper(self),
-            adaptive_verification_gate_wrapper(vllm_model_runner, self.compilation_config.cudagraph_mode),
+            adaptive_verification_gate_wrapper(
+                vllm_model_runner, self.compilation_config.cudagraph_mode, self.vllm_config
+            ),
         ):
             self._initialize_kv_cache_upstream(kv_cache_config, kv_cache_allocation_context)
             self._uses_flashmla = any(
@@ -1360,6 +1372,11 @@ class NPUModelRunner(GPUModelRunner):
         """Balanced dummy routing for adaptive-verification profiling; EPLB
         steps via ``step_eplb_after`` (#17233). The lmhead TP join lives in the
         ``execute_model`` tail — joining after ``super()._dummy_run`` deadlocks."""
+        from vllm_ascend.worker.v2.spec_decode.physical_k_profile import (
+            physical_k_profile_scope,
+        )
+
+        profile_physical_k = kwargs.pop("profile_physical_k", None)
         skip_ring = bool(kwargs.pop("skip_gdn_state_update", False))
         # Adaptive verification profiles eager tail sizes after graph capture.
         # Use balanced dummy routing, as the initial memory profile does, so a
@@ -1377,6 +1394,7 @@ class NPUModelRunner(GPUModelRunner):
             self._cpp_profile_dummy(profile_cpp),
             # Preserve scheduled query tokens before PIECEWISE graph padding.
             self._preserve_dummy_query_tokens(num_tokens, uniform_decode),
+            physical_k_profile_scope(profile_physical_k),
             skip_ring_state_update(skip_ring),
             load_balance_ctx,
         ):

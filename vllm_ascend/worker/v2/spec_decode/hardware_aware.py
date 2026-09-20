@@ -28,6 +28,10 @@ from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.dynamic_spec import resolve_physical_k, v2_physical_k_enabled
+from vllm_ascend.worker.v2.spec_decode.physical_k_profile import (
+    configure_physical_k_profiling,
+    profiling_physical_k,
+)
 
 # Runtime physical widths and persistent buffers.
 
@@ -52,7 +56,8 @@ def configured_capture_k(vllm_config: Any, max_k: int) -> tuple[int, ...]:
     params = resolve_physical_k(_dynamic_config(vllm_config)) or {}
     configured = params.get("capture_k")
     if configured is None:
-        values = range(1, max_k + 1)
+        min_k = max(1, min(int(params.get("min_k", 1)), max_k))
+        values = range(min_k, max_k + 1)
     elif isinstance(configured, (list, tuple)):
         values = configured
     else:
@@ -161,6 +166,8 @@ def physical_k_scope(
         return
     sample_from_anchor = bool(getattr(speculator, "sample_from_anchor", False))
     active_k = draft_k
+    if active_k is None:
+        active_k = profiling_physical_k()
     if active_k is None and input_batch is not None:
         # ``num_draft_tokens_per_req`` describes drafts being verified in the
         # current target pass.  The scheduler output's physical K describes
@@ -622,8 +629,9 @@ def configure_piecewise_manager(
 def adaptive_verification_gate_wrapper(
     runner_module,
     cudagraph_mode: CUDAGraphMode,
+    vllm_config: Any,
 ):
-    """Adapt upstream verification only for the Ascend PIECEWISE fallback.
+    """Add physical-K profiling and adapt the PIECEWISE AV gate.
 
     PR #15098 owns the native FULL path, including graph validation, varlen
     capture and startup cost profiling.  Do not replace any of that behavior.
@@ -631,10 +639,6 @@ def adaptive_verification_gate_wrapper(
     the upstream ``AttentionCGSupport.ALWAYS`` gate and installs the Ascend
     PIECEWISE cost-curve sampler.
     """
-    if cudagraph_mode != CUDAGraphMode.PIECEWISE:
-        yield
-        return
-
     original_factory = getattr(runner_module, "maybe_create_adaptive_verification_manager", None)
     if original_factory is None:
         yield
@@ -655,9 +659,7 @@ def adaptive_verification_gate_wrapper(
         max_total_logits,
         **factory_kwargs,
     ):
-        # Keep upstream validation inputs (config, target layer names and
-        # additional attention support) intact; only relax the graph gate.
-        if not enable_adaptive_verification:
+        def create_manager():
             return original_factory(
                 enable_adaptive_verification=enable_adaptive_verification,
                 attn_groups=attn_groups,
@@ -668,17 +670,17 @@ def adaptive_verification_gate_wrapper(
                 max_total_logits=max_total_logits,
                 **factory_kwargs,
             )
-        try:
-            manager = original_factory(
-                enable_adaptive_verification=enable_adaptive_verification,
-                attn_groups=attn_groups,
-                attn_cg_support=attn_cg_support,
-                req_states=req_states,
-                query_start_loc=query_start_loc,
-                num_bonus_tokens=num_bonus_tokens,
-                max_total_logits=max_total_logits,
-                **factory_kwargs,
+        if not enable_adaptive_verification:
+            return create_manager()
+        if cudagraph_mode != CUDAGraphMode.PIECEWISE:
+            manager = create_manager()
+            return (
+                configure_physical_k_profiling(manager, vllm_config)
+                if manager is not None
+                else None
             )
+        try:
+            manager = create_manager()
         except ValueError as exc:
             # Only the ALWAYS requirement is relaxed on Ascend; any other
             # validation failure must keep failing loudly.
@@ -702,7 +704,10 @@ def adaptive_verification_gate_wrapper(
                 max_total_logits=max_total_logits,
             )
         logger.info("Using the upstream adaptive-verification manager with Ascend PIECEWISE cost profiling.")
-        return configure_piecewise_manager(manager)
+        return configure_physical_k_profiling(
+            configure_piecewise_manager(manager),
+            vllm_config,
+        )
 
     try:
         runner_module.maybe_create_adaptive_verification_manager = relaxed_factory
