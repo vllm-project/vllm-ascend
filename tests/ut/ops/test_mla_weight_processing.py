@@ -8,6 +8,7 @@ import pytest
 import torch
 from torch import nn
 from vllm.model_executor.layers.attention import MLAAttention
+from vllm.model_executor.layers.attention.attention import set_default_quant_scales
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 
 from vllm_ascend.attention.mla_v1 import AscendMLAImpl
@@ -19,6 +20,7 @@ def make_attention(impl):
     # Run the installed upstream post-load method, not a mock of its dispatch.
     inner = MLAAttention.__new__(MLAAttention)
     nn.Module.__init__(inner)
+    set_default_quant_scales(inner, register_buffer=True)
     inner.impl = impl
     inner.num_heads = 2
     inner.kv_lora_rank = 4
