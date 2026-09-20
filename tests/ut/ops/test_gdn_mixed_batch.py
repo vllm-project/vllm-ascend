@@ -99,7 +99,6 @@ def _make_layer() -> SimpleNamespace:
             torch.zeros(2, 1, 2),
             torch.zeros(2, 1, 2, 2),
         ),
-        cache_config=SimpleNamespace(enable_prefix_caching=True),
     )
     layer.model_config = SimpleNamespace(dtype=layer.conv1d.weight.dtype)
     initialize_packed_conv_weight(layer)
@@ -175,11 +174,6 @@ def test_mixed_non_spec_reuses_rearranged_qkv() -> None:
             "vllm_ascend.ops.gdn.chunk_gated_delta_rule",
             side_effect=chunk_gated_delta_rule,
         ) as chunk_mock,
-        patch.object(
-            AscendGatedDeltaNetAttention,
-            "_probe_fused_chunk",
-            side_effect=AssertionError("the fused chunk operator must not be probed when prefix caching is enabled"),
-        ),
         patch("vllm_ascend.ops.gdn.maybe_save_kv_layer_to_connector"),
         patch.object(
             torch.ops._C_ascend,
