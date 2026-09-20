@@ -27,7 +27,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.dynamic_spec import resolve_physical_k, v2_physical_k_enabled
+from vllm_ascend.dynamic_spec import resolve_physical_k
 from vllm_ascend.worker.v2.spec_decode.physical_k_profile import (
     configure_physical_k_profiling,
     profiling_physical_k,
@@ -47,7 +47,7 @@ def _dynamic_config(vllm_config: Any) -> dict[str, Any]:
 def v2_varlen_physical_k_enabled(vllm_config: Any) -> bool:
     """Whether the explicit V2 variable-width graph path is enabled."""
 
-    return v2_physical_k_enabled(_dynamic_config(vllm_config))
+    return resolve_physical_k(_dynamic_config(vllm_config)) is not None
 
 
 def configured_capture_k(vllm_config: Any, max_k: int) -> tuple[int, ...]:
