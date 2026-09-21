@@ -2,27 +2,63 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
+from vllm.model_executor.layers.linear import ColumnParallelLinear, MergedColumnParallelLinear
+from vllm.model_executor.model_loader.reload.layerwise import (
+    finalize_layerwise_reload,
+    initialize_layerwise_reload,
+    record_metadata_for_reloading,
+)
+from vllm.model_executor.parameter import ModelWeightParameter
+from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 from vllm_ascend.models.glm5next.kda import Glm5NextLinearAttention
-from vllm_ascend.models.glm5next.model import Glm5NextModel
+from vllm_ascend.models.glm5next.model import (
+    Glm5NextForCausalLM,
+    Glm5NextForConditionalGeneration,
+    Glm5NextModel,
+)
 
 
-class LinearWithBiasOutput(torch.nn.Linear):
-    def forward(self, inputs):
-        return super().forward(inputs), None
-
-
-def make_layer(width):
+def make_layer(width, tp_rank=0, tp_size=1, loader_version=2):
     layer = Glm5NextLinearAttention.__new__(Glm5NextLinearAttention)
     torch.nn.Module.__init__(layer)
     layer.head_dim = 128
-    layer.f_b_proj = LinearWithBiasOutput(128, width, bias=False)
-    layer.g_b_proj = LinearWithBiasOutput(128, width, bias=False)
-    layer.register_buffer("_fg_b_weight", None, persistent=False)
+    # Exercise the real merged loader without initializing distributed groups.
+    projection = MergedColumnParallelLinear.__new__(MergedColumnParallelLinear)
+    torch.nn.Module.__init__(projection)
+    projection.output_sizes = [width * tp_size, width * tp_size]
+    projection.tp_size = tp_size
+    projection.tp_rank = tp_rank
+    with (
+        patch("vllm.model_executor.parameter.get_tensor_model_parallel_rank", return_value=tp_rank),
+        patch("vllm.model_executor.parameter.get_tensor_model_parallel_world_size", return_value=tp_size),
+    ):
+        projection.weight = ModelWeightParameter(
+            data=torch.randn(2 * width, 128),
+            input_dim=1,
+            output_dim=0,
+            weight_loader=projection.weight_loader_v2 if loader_version == 2 else projection.weight_loader,
+        )
+    layer.fg_b_proj = projection
     return layer
+
+
+def make_model(layer):
+    model = Glm5NextModel.__new__(Glm5NextModel)
+    torch.nn.Module.__init__(model)
+    model.config = SimpleNamespace(is_moe=False, is_linear_attn=True, num_nextn_predict_layers=0)
+    model.add_module("linear_attention", layer)
+    return model
+
+
+def reference(layer, inputs):
+    f_weight, g_weight = layer.fg_b_proj.weight.chunk(2)
+    fa, ga = inputs.split(128, dim=-1)
+    return torch.nn.functional.linear(fa, f_weight), torch.nn.functional.linear(ga, g_weight)
 
 
 @pytest.mark.parametrize("num_tokens", [0, 1, 8, 64, 128, 129, 2048])
@@ -32,39 +68,123 @@ def test_batched_projection_reads_strided_fused_input(num_tokens, width):
     layer = make_layer(width)
     projected = torch.randn(num_tokens, 3 * width + width // 128 + 256)
     fg_a = projected[:, -256:]
-    fa, ga = fg_a.split(128, dim=-1)
 
     actual = layer._project_fg(fg_a)
 
-    torch.testing.assert_close(actual[0], layer.f_b_proj(fa)[0])
-    torch.testing.assert_close(actual[1], layer.g_b_proj(ga)[0])
-    if num_tokens <= 128:
-        assert not layer._fg_b_weight.requires_grad
-    else:
-        assert layer._fg_b_weight is None
+    torch.testing.assert_close(actual, reference(layer, fg_a))
     assert "_fg_b_weight" not in layer.state_dict()
+    assert not list(layer.buffers())
 
 
-def test_weight_reload_refreshes_captured_storage():
-    layer = make_layer(512)
-    model = Glm5NextModel.__new__(Glm5NextModel)
-    torch.nn.Module.__init__(model)
-    model.config = SimpleNamespace(is_moe=False, is_linear_attn=True, num_nextn_predict_layers=0)
-    model.add_module("linear_attention", layer)
-    weights = [
-        ("linear_attention.f_b_proj.weight", torch.ones_like(layer.f_b_proj.weight)),
-        ("linear_attention.g_b_proj.weight", torch.ones_like(layer.g_b_proj.weight)),
-    ]
-    assert model.load_weights(weights) == {name for name, _ in weights}
+@pytest.mark.parametrize("tp_size", [1, 2, 4, 8])
+@pytest.mark.parametrize("wrapper", [False, True])
+@pytest.mark.parametrize("loader_version", [1, 2])
+def test_checkpoint_reload_keeps_storage_and_shards_both_projections(tp_size, wrapper, loader_version):
+    width = 16
+    full_weight = torch.arange(width * tp_size * 128, dtype=torch.float32).reshape(-1, 128)
+    for rank in range(tp_size):
+        layer = make_layer(width, rank, tp_size, loader_version)
+        model = make_model(layer)
+        prefix = "linear_attention."
+        if wrapper:
+            causal = Glm5NextForCausalLM.__new__(Glm5NextForCausalLM)
+            torch.nn.Module.__init__(causal)
+            causal.model = model
+            outer = Glm5NextForConditionalGeneration.__new__(Glm5NextForConditionalGeneration)
+            torch.nn.Module.__init__(outer)
+            outer.language_model = causal
+            model = outer
+            prefix = "model.language_model.linear_attention."
+        address = layer.fg_b_proj.weight.data_ptr()
+        for scale in (1, 2):
+            # Separate chunks, including g before f, must not read stale peers.
+            for name, sign in (("g_b_proj", -1), ("f_b_proj", 1)):
+                model.load_weights([(prefix + name + ".weight", full_weight * sign * scale)])
+            expected = full_weight[rank * width : (rank + 1) * width] * scale
+            torch.testing.assert_close(layer.fg_b_proj.weight, torch.cat((expected, -expected)))
+            assert layer.fg_b_proj.weight.data_ptr() == address
+
+
+@torch.no_grad()
+@pytest.mark.parametrize("tokens", [4, 128, 129])
+def test_kernel_format_reload_changes_bmm_and_gemm_without_refresh(tokens):
+    layer = make_layer(16)
+    model = make_model(layer)
+    runner = SimpleNamespace(
+        get_model=lambda: model,
+        lora_config=None,
+        model_config=SimpleNamespace(quantization=None),
+        reset_lora_state=lambda: None,
+        reset_encoder_cache=lambda: None,
+        reset_mm_cache=lambda: None,
+    )
+    inputs = torch.ones(tokens, 256)
+    layer._project_fg(inputs)
+    address = layer.fg_b_proj.weight.data_ptr()
+    for f_scale, g_scale in ((2, 3), (5, -1)):
+        weights = torch.cat((torch.full((16, 128), f_scale), torch.full((16, 128), g_scale)))
+        GPUModelRunner.reload_weights(
+            runner,
+            weights_iterator=[("linear_attention.fg_b_proj.weight", weights)],
+            is_checkpoint_format=False,
+        )
+        actual = layer._project_fg(inputs)
+        torch.testing.assert_close(actual[0], torch.full((tokens, 16), float(128 * f_scale)))
+        torch.testing.assert_close(actual[1], torch.full((tokens, 16), float(128 * g_scale)))
+        assert layer.fg_b_proj.weight.data_ptr() == address
+
+
+def test_load_state_dict_updates_projection_without_refresh():
+    layer = make_layer(16)
     inputs = torch.ones(4, 256)
     layer._project_fg(inputs)
-    address = layer._fg_b_weight.data_ptr()
+    address = layer.fg_b_proj.weight.data_ptr()
+    layer.load_state_dict({"fg_b_proj.weight": torch.full((32, 128), 2.0)})
+    torch.testing.assert_close(layer._project_fg(inputs), (torch.full((4, 16), 256.0),) * 2)
+    assert layer.fg_b_proj.weight.data_ptr() == address
 
-    assert model.load_weights([(name, weight * factor) for (name, weight), factor in zip(weights, (2, 3))]) == {
-        name for name, _ in weights
-    }
-    actual = layer._project_fg(inputs)
 
-    assert layer._fg_b_weight.data_ptr() == address
-    torch.testing.assert_close(actual[0], torch.full((4, 512), 256.0))
-    torch.testing.assert_close(actual[1], torch.full((4, 512), 384.0))
+@torch.no_grad()
+def test_unmerged_checkpoint_loading_keeps_original_parameter_names():
+    layer = Glm5NextLinearAttention.__new__(Glm5NextLinearAttention)
+    torch.nn.Module.__init__(layer)
+    layer.head_dim = 128
+    layer.fg_b_proj = None
+    with (
+        patch("vllm.model_executor.parameter.get_tensor_model_parallel_rank", return_value=0),
+        patch("vllm.model_executor.parameter.get_tensor_model_parallel_world_size", return_value=1),
+    ):
+        layer.f_b_proj = ColumnParallelLinear(128, 16, bias=False, disable_tp=True)
+        layer.g_b_proj = ColumnParallelLinear(128, 16, bias=False, disable_tp=True)
+    model = make_model(layer)
+    addresses = [p.data_ptr() for p in layer.parameters()]
+    for scale in (2, 3):
+        loaded = model.load_weights(
+            [
+                (f"linear_attention.{name}.weight", torch.full((16, 128), float(scale)))
+                for name in ("f_b_proj", "g_b_proj")
+            ]
+        )
+        assert loaded == {"linear_attention.f_b_proj.weight", "linear_attention.g_b_proj.weight"}
+        with patch("torch.ops.vllm.unquantized_gemm", side_effect=torch.nn.functional.linear):
+            torch.testing.assert_close(
+                layer._project_fg(torch.ones(4, 256)), (torch.full((4, 16), float(128 * scale)),) * 2
+            )
+        assert [p.data_ptr() for p in layer.parameters()] == addresses
+
+
+@torch.no_grad()
+def test_layerwise_checkpoint_reload_keeps_captured_weight_storage():
+    layer = make_layer(16)
+    model = make_model(layer)
+    record_metadata_for_reloading(model)
+    inputs = torch.ones(4, 256)
+    layer._project_fg(inputs)
+    address = layer.fg_b_proj.weight.data_ptr()
+    for scale in (2, 3):
+        initialize_layerwise_reload(model)
+        for name in ("g_b_proj", "f_b_proj"):
+            model.load_weights([("linear_attention." + name + ".weight", torch.full((16, 128), float(scale)))])
+        finalize_layerwise_reload(model, SimpleNamespace(dtype=torch.float32))
+        torch.testing.assert_close(layer._project_fg(inputs), (torch.full((4, 16), float(128 * scale)),) * 2)
+        assert layer.fg_b_proj.weight.data_ptr() == address

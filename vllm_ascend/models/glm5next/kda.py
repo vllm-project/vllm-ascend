@@ -33,6 +33,7 @@ from vllm_ascend.models.glm5next.ops.kda import KDA_MAX_RECURRENT_TOKENS, chunk_
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
 
 KDA_BATCHED_GATE_MAX_TOKENS = 128
+KDA_BATCHED_GATE_MAX_WIDTH = 4096
 
 
 class _Glm5NextMergedColumnParallelLinear(MergedColumnParallelLinear):
@@ -106,7 +107,6 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
     head_dim: int
     num_heads: int
     conv_size: int
-    _fg_b_weight: torch.Tensor | None
 
     def get_state_dtype(
         self,
@@ -184,13 +184,25 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             prefix=f"{prefix}.in_proj_qkvbfg_a",
         )
 
-        self.f_b_proj = ColumnParallelLinear(
-            self.head_dim,
-            projection_size,
-            bias=False,
-            quant_config=self.quant_config,
-            prefix=f"{prefix}.f_b_proj",
-        )
+        self.fg_b_proj = None
+        if self.local_projection_size <= KDA_BATCHED_GATE_MAX_WIDTH:
+            self.fg_b_proj = MergedColumnParallelLinear(
+                self.head_dim,
+                [projection_size, projection_size],
+                bias=False,
+                quant_config=self.quant_config,
+                prefix=f"{prefix}.fg_b_proj",
+            )
+            # Both paths read the same Parameter, without a derived weight cache.
+            self.fg_b_proj.skip_weight_nz_conversion = True
+        else:
+            # Wide projections favor the original GEMMs, including NZ weights.
+            self.f_b_proj = ColumnParallelLinear(
+                self.head_dim, projection_size, bias=False, quant_config=self.quant_config, prefix=f"{prefix}.f_b_proj"
+            )
+            self.g_b_proj = ColumnParallelLinear(
+                self.head_dim, projection_size, bias=False, quant_config=self.quant_config, prefix=f"{prefix}.g_b_proj"
+            )
         self.dt_bias = nn.Parameter(torch.empty(divide(projection_size, self.tp_size), dtype=torch.float32))
 
         set_weight_attrs(self.dt_bias, {"weight_loader": sharded_weight_loader(0)})
@@ -230,14 +242,6 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         self.A_log = nn.Parameter(torch.empty(1, 1, self.local_num_heads, 1, dtype=torch.float32))
         set_weight_attrs(self.A_log, {"weight_loader": sharded_weight_loader(2)})
 
-        self.g_b_proj = ColumnParallelLinear(
-            self.head_dim,
-            projection_size,
-            bias=False,
-            quant_config=self.quant_config,
-            prefix=f"{prefix}.g_b_proj",
-        )
-        self.register_buffer("_fg_b_weight", None, persistent=False)
         self.o_norm = FusedRMSNormGated(self.head_dim, activation="sigmoid")
         self.o_proj = RowParallelLinear(
             projection_size,
@@ -270,24 +274,14 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
     def get_attn_backend(self):
         return AscendGDNAttentionBackend
 
-    def pack_fg_projection_weights(self) -> torch.Tensor:
-        """Pack the two unquantized projections, preserving captured addresses on reload."""
-        packed = torch.stack((self.f_b_proj.weight.detach(), self.g_b_proj.weight.detach()))
-        if self._fg_b_weight is None:
-            self._fg_b_weight = packed
-        else:
-            self._fg_b_weight.copy_(packed)
-        return self._fg_b_weight
-
     def _project_fg(self, fg_a: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        # Separate GEMMs are faster for large prefills on Ascend.
-        if fg_a.shape[0] > KDA_BATCHED_GATE_MAX_TOKENS:
+        if self.fg_b_proj is None:
             f_a, g_a = fg_a.split(self.head_dim, dim=-1)
             return self.f_b_proj(f_a)[0], self.g_b_proj(g_a)[0]
-        fg_b_weight = self._fg_b_weight
-        if fg_b_weight is None:
-            # Dummy weight loaders do not call the model's load_weights hook.
-            fg_b_weight = self.pack_fg_projection_weights()
+        fg_b_weight = self.fg_b_proj.weight.view(2, -1, self.head_dim)
+        if fg_a.shape[0] > KDA_BATCHED_GATE_MAX_TOKENS:
+            f_a, g_a = fg_a.split(self.head_dim, dim=-1)
+            return torch.nn.functional.linear(f_a, fg_b_weight[0]), torch.nn.functional.linear(g_a, fg_b_weight[1])
         fg_a = fg_a.reshape(-1, 2, self.head_dim).transpose(0, 1)
         fg_b = torch.bmm(fg_a, fg_b_weight.transpose(1, 2))
         return fg_b.unbind(0)

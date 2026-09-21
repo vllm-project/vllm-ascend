@@ -684,6 +684,8 @@ class Glm5NextModel(nn.Module):
             (".in_proj_qkvbfg_a", ".b_proj", 3),
             (".in_proj_qkvbfg_a", ".f_a_proj", 4),
             (".in_proj_qkvbfg_a", ".g_a_proj", 5),
+            (".fg_b_proj", ".f_b_proj", 0),
+            (".fg_b_proj", ".g_b_proj", 1),
         ]
         if self.config.is_moe:
             # Params for weights, fp8 weight scales, fp8 activation scales
@@ -739,8 +741,8 @@ class Glm5NextModel(nn.Module):
                 if ("mlp.experts." in name) and name not in params_dict:
                     continue
                 name_mapped = name.replace(weight_name, param_name)
-                # QKV fusion: skip if fused module doesn't exist in model
-                if param_name == ".fused_qkv_a_proj" and name_mapped not in params_dict:
+                # Optional fusion: retain separate projections when disabled.
+                if param_name in (".fused_qkv_a_proj", ".fg_b_proj") and name_mapped not in params_dict:
                     continue
                 name = name_mapped
                 # Skip loading extra bias for GPTQ models.
@@ -790,9 +792,6 @@ class Glm5NextModel(nn.Module):
                     weight_loader = getattr(param, "weight_loader", default_weight_loader)
                     weight_loader(param, loaded_weight, **kwargs)
             loaded_params.add(name)
-        for module in self.modules():
-            if isinstance(module, Glm5NextLinearAttention):
-                module.pack_fg_projection_weights()
         return loaded_params
 
 
