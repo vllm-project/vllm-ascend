@@ -81,6 +81,7 @@ def test_aux_relay_matches_unpartitioned_forward(monkeypatch, native, boundaries
             model.layers = [layer] * 78
             model.aux_hidden_state_layers = aux_layers
             model._use_upstream_aux_relay = native
+            model.send_pp_topk_indices = False
             model.embed_input_ids = lambda ids: torch.zeros(len(ids), 2)
             model.norm = lambda hidden, residual: (hidden + residual, None)
             if native:
@@ -174,6 +175,7 @@ def test_model_init_adds_pp_topk_receive_buffer(monkeypatch):
     _patched_deepseek_v2_model_init(
         model,
         vllm_config=SimpleNamespace(use_v2_model_runner=True),
+        prefix="",
     )
     intermediate_tensors = model.make_empty_intermediate_tensors(
         3,
