@@ -40,7 +40,7 @@ def token_prompt(tokenizer, text, length):
                 graph_mode="eager" if mode == "NONE" else mode.lower(),
             ),
         )
-        for mode in ("NONE", "PIECEWISE", "FULL_DECODE_ONLY")
+        for mode in ("NONE", "PIECEWISE")
     ],
 )
 def test_kvpp_combined_features(graph_mode):

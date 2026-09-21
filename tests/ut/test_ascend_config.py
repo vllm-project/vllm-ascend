@@ -1669,10 +1669,10 @@ class TestKVPPConfig(TestBase):
                 config = make_kvpp_config()
                 config.model_config.enforce_eager = False
                 config.compilation_config = SimpleNamespace(cudagraph_mode=mode)
-                if mode in (CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL_DECODE_ONLY):
+                if mode == CUDAGraphMode.PIECEWISE:
                     KVPPConfig.from_vllm_config(config).validate(config)
                 else:
-                    with self.assertRaisesRegex(ValueError, "FULL_DECODE_ONLY"):
+                    with self.assertRaisesRegex(ValueError, "PIECEWISE"):
                         KVPPConfig.from_vllm_config(config).validate(config)
 
     def test_enable_switch_uses_tp_size(self):

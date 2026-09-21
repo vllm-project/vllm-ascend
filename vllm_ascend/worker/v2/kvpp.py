@@ -62,9 +62,9 @@ class KVPPRuntime:
             static_forward_context[name].impl.layerwise_kv_cache_hook = scheduler
         return cls(scheduler)
 
-    def prepare_forward(self, has_history: bool, *, full_graph: bool = False) -> None:
+    def prepare_forward(self, has_history: bool) -> None:
         if self.scheduler is not None:
-            self.scheduler.schedule_forward(has_history, full_graph=full_graph)
+            self.scheduler.schedule_forward(has_history)
 
     def complete_forward(self) -> None:
         if self.scheduler is not None:
@@ -83,17 +83,11 @@ class KVPPScheduler:
         self._npu_device_id = torch.npu.current_device()
         self._kv_transfer_stream = torch.npu.Stream()
         self._prefetch_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="kvpp-prefetch")
-        self._full_graph = False
-        self._graph_events: list[tuple[Any, Any]] | None = None
-        # Each captured graph owns distinct events, retained for its lifetime.
-        self._captured_events: list[list[tuple[Any, Any]]] = []
 
-    def schedule_forward(self, has_history: bool, *, full_graph: bool = False) -> None:
+    def schedule_forward(self, has_history: bool) -> None:
         self._has_history = has_history
-        self._full_graph = full_graph
-        self._graph_events = None
         self._next_attention_layer_index = 0
-        if has_history and not full_graph:
+        if has_history:
             self.start_layer_prefetch(self.attention_layer_names[0])
 
     def start_layer_prefetch(self, layer_name: str) -> None:
@@ -106,9 +100,6 @@ class KVPPScheduler:
         self.transport.prefetch(layer_name, cache_ready, self._kv_transfer_stream)
 
     def wait_for_layer(self, layer_name: str) -> None:
-        if self._full_graph:
-            self._wait_for_graph_layer(layer_name)
-            return
         if not self._has_history:
             return
         assert self._prefetch_future is not None
@@ -118,33 +109,6 @@ class KVPPScheduler:
         if self._next_attention_layer_index < len(self.attention_layer_names):
             self.start_layer_prefetch(self.attention_layer_names[self._next_attention_layer_index])
 
-    def _wait_for_graph_layer(self, layer_name: str) -> None:
-        index = self._next_attention_layer_index
-        if index >= len(self.attention_layer_names) or self.attention_layer_names[index] != layer_name:
-            raise RuntimeError(f"Unexpected KVPP graph layer: {layer_name}")
-        if self._graph_events is None:
-            # Start inside the model's capture boundary. Replay executes these
-            # device operations directly and must never start an eager Future.
-            self._graph_events = [(torch.npu.Event(), torch.npu.Event()) for _ in self.attention_layer_names]
-            if torch.npu.is_current_stream_capturing():
-                self._captured_events.append(self._graph_events)
-            self._start_graph_prefetch(0)
-        torch.npu.current_stream().wait_event(self._graph_events[index][1])
-        self._next_attention_layer_index += 1
-        if self._next_attention_layer_index < len(self.attention_layer_names):
-            # Layer i-1 has finished using the scratch shared with i+1. Fork
-            # the next broadcast here, before computing layer i; only layer
-            # i+1 waits for it. The last layer joins the transfer stream.
-            self._start_graph_prefetch(self._next_attention_layer_index)
-
-    def _start_graph_prefetch(self, index: int) -> None:
-        assert self._graph_events is not None
-        available, ready = self._graph_events[index]
-        available.record(torch.npu.current_stream())
-        self.transport.prefetch_on_stream(self.attention_layer_names[index], available, self._kv_transfer_stream, ready)
-
     def complete_forward(self) -> None:
         self._has_history = False
-        self._full_graph = False
-        self._graph_events = None
         self._next_attention_layer_index = 0

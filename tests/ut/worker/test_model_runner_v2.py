@@ -303,15 +303,6 @@ def test_prepare_dummy_attn_without_pcp_uses_upstream():
 
 @pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize(
-    "graph_mode,for_capture,full_graph",
-    [
-        (CUDAGraphMode.NONE, False, False),
-        (CUDAGraphMode.PIECEWISE, False, False),
-        (CUDAGraphMode.FULL, False, True),
-        (CUDAGraphMode.NONE, True, True),
-    ],
-)
-@pytest.mark.parametrize(
     "computed,dummy_run,is_profile,expected",
     [
         ([0, 0, 99, 99], False, False, False),
@@ -320,16 +311,14 @@ def test_prepare_dummy_attn_without_pcp_uses_upstream():
         ([0, 4, 0, 0], False, True, False),
     ],
 )
-def test_kvpp_history_ignores_padding_and_dummy_work(
-    monkeypatch, computed, dummy_run, is_profile, expected, enabled, graph_mode, for_capture, full_graph
-):
+def test_kvpp_history_ignores_padding_and_dummy_work(monkeypatch, computed, dummy_run, is_profile, expected, enabled):
     from vllm_ascend.worker.v2.model_states import default
 
     runner = _make_runner(need_timing=False)
     events: list[object] = []
     runner.kvpp = SimpleNamespace(
         scheduler=object() if enabled else None,
-        prepare_forward=lambda history, **kwargs: events.append(("prepare", history, kwargs)),
+        prepare_forward=lambda history: events.append(("prepare", history)),
         complete_forward=lambda: events.append("complete"),
     )
     state = default.AscendModelState.__new__(default.AscendModelState)
@@ -360,13 +349,13 @@ def test_kvpp_history_ignores_padding_and_dummy_work(
 
     def forward(_self, _scheduler_output, **_kwargs):
         assert state.kvpp_is_dummy_run is (dummy_run or is_profile)
-        assert state.prepare_attn(batch, graph_mode, (), torch.empty(0), [], None, for_capture=for_capture) is metadata
+        assert state.prepare_attn(batch, CUDAGraphMode.NONE, (), torch.empty(0), [], None) is metadata
         events.append("forward")
         return metadata
 
     monkeypatch.setattr(GPUModelRunner, "execute_model", forward)
     assert runner.execute_model(SimpleNamespace(), dummy_run=dummy_run, is_profile=is_profile) is metadata
-    assert events == ([("prepare", expected, {"full_graph": full_graph})] if enabled else []) + ["forward", "complete"]
+    assert events == ([("prepare", expected)] if enabled else []) + ["forward", "complete"]
     assert state.kvpp_is_dummy_run is False
 
 

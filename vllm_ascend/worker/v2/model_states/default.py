@@ -82,9 +82,7 @@ class AscendModelState(DefaultModelState):
             )
             self.kvpp_runtime.prepare_forward(
                 not self.kvpp_is_dummy_run
-                and bool(np.any(history_batch.num_computed_tokens_np[: history_batch.num_reqs] > 0)),
-                # Upstream prepares FULL capture inputs with runtime mode NONE.
-                full_graph=for_capture or cudagraph_mode == CUDAGraphMode.FULL,
+                and bool(np.any(history_batch.num_computed_tokens_np[: history_batch.num_reqs] > 0))
             )
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
         is_prefilling = torch.from_numpy(input_batch.is_prefilling_np)
