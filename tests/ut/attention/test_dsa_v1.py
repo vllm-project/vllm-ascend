@@ -1173,6 +1173,10 @@ def _make_impl(
             "vllm_ascend.attention.dsa_v1.get_ascend_config",
             return_value=SimpleNamespace(multistream_dsv4_dsa_overlap=False),
         ),
+        patch(
+            "vllm_ascend.attention.context_parallel.dsa_cp.enable_pcp_o_proj_weight_sharding",
+            return_value=False,
+        ),
     ):
         return impl_cls(
             n_heads=1,
