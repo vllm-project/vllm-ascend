@@ -56,6 +56,7 @@
 #include "attention/k2q_csr/k2q_csr_torch_adpt.h"
 #include "attention/msa_index_score/msa_index_score_torch_adpt.h"
 #include "attention/sparse_attention_score/sparse_attention_score_torch_adpt.h"
+#include "attention/blasst_attention_score/blasst_attention_score_torch_adpt.h"
 #include "attention/store_kv_block/store_kv_block_torch_adpt.h"
 #include "attention/store_kv_block_metadata/store_kv_block_metadata_torch_adpt.cpp"
 #include "moe/dequant_situ_quant/dequant_situ_quant_torch_adpt.h"
@@ -3765,5 +3766,55 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("npu_fused_sparse_attention_overlap", torch::kPrivateUse1,
              &vllm_ascend::npu_fused_sparse_attention_overlap);
+
+    ops.def(
+        "npu_blasst_attention_score(Tensor query, Tensor key, Tensor value,"
+        "                                Tensor? pse_shift=None, Tensor? atten_mask=None,"
+        "                                int[] actual_seq_lengths=[], int[] actual_seq_lengths_kv=[],"
+        "                                Tensor? blocktable=None, int num_heads=1, float scale=1.0,"
+        "                                int pre_tokens=2147483647, int next_tokens=2147483647,"
+        "                                str input_layout='TND', int num_key_value_heads=0,"
+        "                                int sparse_mode=0, int inner_precise=0, int block_size=0,"
+        "                                int antiquant_mode=0, float sparse_lambda=-99.0,"
+        "                                bool softmax_lse_flag=False, bool sparse_stats_flag=False)"
+        " -> (Tensor attention_out, Tensor softmax_lse, Tensor sparse_stats)"
+    );
+    ops.impl("npu_blasst_attention_score", torch::kPrivateUse1, &vllm_ascend::npu_blasst_attention_score);
+
+    // 图模式 out 变体：输出/workspace 由调用方提供（capture/update 复用常驻 buffer，
+    // 保证 task update patch 的地址与 capture 一致）。仅 full-graph 路径使用。
+    ops.def(
+        "npu_blasst_attention_score_out(Tensor query, Tensor key, Tensor value,"
+        "                                Tensor(a!) attention_out, Tensor(b!) softmax_lse,"
+        "                                Tensor(c!) sparse_stats, Tensor? workspace=None,"
+        "                                Tensor? pse_shift=None, Tensor? atten_mask=None,"
+        "                                int[] actual_seq_lengths=[], int[] actual_seq_lengths_kv=[],"
+        "                                Tensor? blocktable=None, int num_heads=1, float scale=1.0,"
+        "                                int pre_tokens=2147483647, int next_tokens=2147483647,"
+        "                                str input_layout='TND', int num_key_value_heads=0,"
+        "                                int sparse_mode=0, int inner_precise=0, int block_size=0,"
+        "                                int antiquant_mode=0, float sparse_lambda=-99.0,"
+        "                                bool softmax_lse_flag=False, bool sparse_stats_flag=False)"
+        " -> ()"
+    );
+    ops.impl("npu_blasst_attention_score_out", torch::kPrivateUse1,
+             &vllm_ascend::npu_blasst_attention_score_out);
+
+    // 图模式辅助：只算 workspace 大小不 launch（按 bucket 预分配常驻 workspace 用；
+    // seqlen 影响 FD 追加区大小，调用方传上界值）。
+    ops.def(
+        "npu_blasst_attention_score_get_workspace(Tensor query, Tensor key, Tensor value,"
+        "                                Tensor? pse_shift=None, Tensor? atten_mask=None,"
+        "                                int[] actual_seq_lengths=[], int[] actual_seq_lengths_kv=[],"
+        "                                Tensor? blocktable=None, int num_heads=1, float scale=1.0,"
+        "                                int pre_tokens=2147483647, int next_tokens=2147483647,"
+        "                                str input_layout='TND', int num_key_value_heads=0,"
+        "                                int sparse_mode=0, int inner_precise=0, int block_size=0,"
+        "                                int antiquant_mode=0, float sparse_lambda=-99.0,"
+        "                                bool softmax_lse_flag=False, bool sparse_stats_flag=False)"
+        " -> int"
+    );
+    ops.impl("npu_blasst_attention_score_get_workspace", torch::kPrivateUse1,
+             &vllm_ascend::npu_blasst_attention_score_get_workspace);
 }
 #endif

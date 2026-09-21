@@ -173,6 +173,28 @@ class AscendFusionConfig:
 
 
 @config
+class BlasstConfig:
+    """Configuration Object for ``additional_config["blasst_config"]``.
+
+    Controls the BlasstAttentionScore (BlasST) branch:
+      - enabled: route eligible attention calls (TND layout, sparse_mode 3
+        for causal / sparse_mode 0 for non-causal, no sliding window /
+        learnable sink) to the custom op instead of torch_npu FIA. Enabling
+        it in a build without the registered op raises RuntimeError (same
+        policy as sparse_kv_offload).
+      - sparse_lambda: BlasST block-sparse threshold; -99.0 means dense
+        (detection only, no block skipping). ACL-Graph capture of the custom
+        op follows the forward flow directly: capturing batches route through
+        the host-list task-update path (DecodeOnly buckets only). The
+        FlashDecode split path is decided by the op's shape heuristic (small
+        decode batches over long KV) with no external switch.
+    """
+
+    enabled: bool = False
+    sparse_lambda: float = -99.0
+
+
+@config
 class EplbConfig:
     """Configuration Object for ``additional_config["eplb_config"]``.
 
@@ -503,6 +525,7 @@ class AscendConfig:
     # ---- sub-configs (no vllm_config dep): pydantic dict→dataclass coercion ----
     ascend_compilation_config: AscendCompilationConfig = dataclasses.field(default_factory=AscendCompilationConfig)
     ascend_fusion_config: AscendFusionConfig = dataclasses.field(default_factory=AscendFusionConfig)
+    blasst_config: BlasstConfig = dataclasses.field(default_factory=BlasstConfig)
     eplb_config: EplbConfig = dataclasses.field(default_factory=EplbConfig)
     rejection_sampler_config: RejectionSamplerConfig = dataclasses.field(default_factory=RejectionSamplerConfig)
     rl_config: RlConfig = dataclasses.field(default_factory=RlConfig)

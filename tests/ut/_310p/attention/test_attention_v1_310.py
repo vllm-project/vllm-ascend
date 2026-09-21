@@ -18,6 +18,7 @@ from unittest.mock import MagicMock, patch
 import torch
 
 from tests.ut.base import TestBase
+from vllm_ascend.ascend_config import clear_ascend_config, init_ascend_config
 from vllm_ascend._310p.attention.attention_v1 import (
     AscendAttentionBackend310,
     AscendAttentionBackendImpl310,
@@ -56,6 +57,13 @@ class TestAscendAttentionBackendImpl310(TestBase):
         self.attn_metadata.return_value = "1"
         self.mock_vllm_config = MagicMock()
         self.mock_vllm_config.cache_config.cache_dtype = "float16"
+        self.mock_vllm_config.parallel_config.prefill_context_parallel_size = 1
+        # AscendAttentionBackendImpl.__init__ reads
+        # get_ascend_config().blasst_config; same pattern as TestAscendMLAImpl:
+        # init a default config first.
+        self.mock_vllm_config.additional_config = {"refresh": True}
+        init_ascend_config(self.mock_vllm_config)
+        self.addCleanup(clear_ascend_config)
         self.utils_patcher = patch(
             "vllm_ascend.attention.utils.get_current_vllm_config", return_value=self.mock_vllm_config
         )
