@@ -54,20 +54,16 @@ def prefill_cache_write_enabled(metadata: Any) -> bool:
     )
 
 
-def try_scatter_cache(key: torch.Tensor, cache: torch.Tensor, slots: torch.Tensor, metadata: Any) -> bool:
+def try_scatter_cache(key: torch.Tensor, cache: torch.Tensor, slots: torch.Tensor, tokens: int) -> bool:
     """Write eligible DSA-CP prefill rows in place, or request the old scatter.
 
-    Only builders satisfying prefill_cache_write_enabled may set the flag.
-    In particular, neither fast operator is assumed to skip negative slots.
+    Callers must enforce prefill eligibility and valid slots in the token
+    prefix: neither fast operator is assumed to skip negative slots.
     Layout checks inspect strides only; no device-to-host synchronization is
     introduced. Never make a contiguous copy of the destination cache.
     """
-    if metadata is None or getattr(metadata, "fast_cache_store", False) is not True:
-        return False
-    tokens = metadata.num_actual_tokens
     if (
-        tokens < SCATTER_CACHE_MIN_TOKENS
-        or key.ndim not in (2, 3)
+        key.ndim not in (2, 3)
         or cache.ndim != 4
         or cache.shape[2] != 1
         or (key.ndim == 3 and key.shape[1] != 1)

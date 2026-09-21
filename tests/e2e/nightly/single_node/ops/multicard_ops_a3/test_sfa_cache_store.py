@@ -6,6 +6,7 @@ import pytest
 import torch
 import torch_npu
 
+from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADSACPImpl
 from vllm_ascend.attention.utils import try_scatter_cache
 from vllm_ascend.utils import enable_custom_op
 
@@ -35,12 +36,11 @@ def test_platform_cache_store_preserves_all_backing_bytes(dtype, width, tokens, 
     logical = torch.arange(tokens, device="npu", dtype=torch.int32) + 37
     slots[:tokens] = (blocks - 2 - logical // block_size) * block_size + logical % block_size
     slots[tokens:] = -1
-    meta = SimpleNamespace(num_actual_tokens=tokens, fast_cache_store=True)
     ptr = cache.data_ptr()
     for delta in (0, 1):
         key.add_(delta)
         reference.view(-1, width)[slots[:tokens].cpu().long()] = key[:tokens].cpu()
-        assert try_scatter_cache(key, cache, slots, meta)
+        assert try_scatter_cache(key, cache, slots, tokens)
         torch.npu.synchronize()
         assert cache.data_ptr() == ptr
         torch.testing.assert_close(backing.cpu(), initial, rtol=0, atol=0)
@@ -53,13 +53,14 @@ def test_unsupported_inner_stride_and_masked_metadata_preserve_fallback():
     key = torch.ones(2048, 128, dtype=torch.int8, device="npu")
     cache = torch.zeros(32, 128, 1, 256, dtype=torch.int8, device="npu")[..., ::2]
     slots = torch.arange(2048, dtype=torch.int32, device="npu")
-    meta = SimpleNamespace(num_actual_tokens=2048, fast_cache_store=True)
-    assert not try_scatter_cache(key, cache, slots, meta)
-    meta.fast_cache_store = False
+    assert not try_scatter_cache(key, cache, slots, 2048)
+    meta = SimpleNamespace(num_actual_tokens=2048, fast_cache_store=False)
     slots[-3:] = -1
     cache = torch.zeros(32, 128, 1, 128, dtype=torch.int8, device="npu")
-    assert not try_scatter_cache(key, cache, slots, meta)
-    torch_npu.npu_scatter_nd_update_(cache.view(-1, 128), slots.view(-1, 1), key)
+    impl = AscendSFADSACPImpl.__new__(AscendSFADSACPImpl)
+    impl.enable_sparse_sfa_c8 = True
+    impl.is_kv_producer, impl.is_kv_consumer = True, False
+    impl._store_parallel_kv(None, None, None, key, [], (cache,), slots, meta, False)
     torch.npu.synchronize()
     reference = torch.zeros_like(cache, device="cpu").view(-1, 128)
     reference[:2045] = 1

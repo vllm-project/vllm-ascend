@@ -550,7 +550,9 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
             if self.enable_sparse_sfa_c8:
                 if not (
                     self._use_c8_reshape_optim(attn_metadata)
-                    and try_scatter_cache(fused_kv_no_split, kv_cache[0], slot_mapping_sfa, attn_metadata)
+                    and try_scatter_cache(
+                        fused_kv_no_split, kv_cache[0], slot_mapping_sfa, attn_metadata.num_actual_tokens
+                    )
                 ):
                     torch_npu.npu_scatter_nd_update_(
                         kv_cache[0].view(-1, fused_kv_no_split.shape[-1]),

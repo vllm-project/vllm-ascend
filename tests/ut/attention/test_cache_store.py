@@ -65,7 +65,7 @@ def test_platform_dispatch_keeps_destination_storage(monkeypatch, family, dtype,
         and dtype != torch.float32
         and layout not in ("column_gap", "block_gap")
     ) or (family == AscendDeviceType.A5 and layout in ("contiguous", "offset"))
-    assert attention_utils.try_scatter_cache(key, cache, slots, metadata()) == expected
+    assert attention_utils.try_scatter_cache(key, cache, slots, 2049) == expected
     if expected:
         reference = torch.as_strided(before, cache.shape, cache.stride(), cache.storage_offset())
         reference.view(-1, 128)[slots[:2049].long()] = key[:2049]
@@ -96,31 +96,28 @@ def test_only_large_pure_prefill_can_enable_fast_store(state, prefilling, tokens
 
 
 @pytest.mark.parametrize("family", [AscendDeviceType.A3, AscendDeviceType.A5])
-def test_missing_operator_and_ineligible_metadata_fall_back(monkeypatch, family):
+def test_missing_operator_falls_back(monkeypatch, family):
     monkeypatch.setattr(attention_utils, "get_current_hardware_profile", lambda: get_hardware_profile(family))
     key, cache = torch.ones(2049, 128, dtype=torch.int8), torch.zeros(32, 128, 1, 128, dtype=torch.int8)
-    slots = torch.full((2049,), -1, dtype=torch.int32)
-    sk, pa = Mock(), Mock()
-    monkeypatch.setattr(torch.ops._C_ascend, "npu_scatter_nd_update_sk", sk, raising=False)
-    monkeypatch.setattr(torch_npu, "npu_scatter_pa_cache", pa, raising=False)
-    assert not attention_utils.try_scatter_cache(key, cache, slots, metadata(fast_cache_store=False))
-    sk.assert_not_called()
-    pa.assert_not_called()
-    monkeypatch.setattr(torch.ops._C_ascend, "npu_scatter_nd_update_sk", None)
-    monkeypatch.setattr(torch_npu, "npu_scatter_pa_cache", None)
-    assert not attention_utils.try_scatter_cache(key, cache, slots, metadata())
+    slots = torch.arange(2049, dtype=torch.int32)
+    monkeypatch.setattr(torch.ops._C_ascend, "npu_scatter_nd_update_sk", None, raising=False)
+    monkeypatch.setattr(torch_npu, "npu_scatter_pa_cache", None, raising=False)
+    assert not attention_utils.try_scatter_cache(key, cache, slots, 2049)
 
 
 @pytest.mark.parametrize("fast", [False, True])
 @pytest.mark.parametrize("enabled", [False, True])
-def test_main_cache_write_preserves_fallback_and_own_slots(fast, enabled):
+@pytest.mark.parametrize("eligible_batch", [False, True])
+def test_main_cache_write_preserves_fallback_and_own_slots(fast, enabled, eligible_batch):
     impl = AscendSFADSACPImpl.__new__(AscendSFADSACPImpl)
     impl.enable_sparse_sfa_c8 = True
     impl.is_kv_producer, impl.is_kv_consumer = True, False
     key = torch.empty(2056, 656, dtype=torch.int8)
     cache = torch.empty(32, 128, 1, 656, dtype=torch.int8)
     slots = torch.arange(2056, dtype=torch.int32) + 512
-    meta = metadata()
+    if not eligible_batch:
+        slots[2046:2049] = -1
+    meta = metadata(fast_cache_store=eligible_batch)
     with (
         patch(
             "vllm_ascend.attention.context_parallel.sfa_cp.get_ascend_config",
@@ -130,12 +127,13 @@ def test_main_cache_write_preserves_fallback_and_own_slots(fast, enabled):
         patch("torch_npu.npu_scatter_nd_update_", create=True) as scatter,
     ):
         impl._store_parallel_kv(None, None, None, key, [], (cache,), slots, meta, False)
-    assert store.call_count == int(enabled)
-    if enabled:
+    use_fast_store = enabled and eligible_batch
+    assert store.call_count == int(use_fast_store)
+    if use_fast_store:
         assert store.call_args.args[1] is cache and store.call_args.args[2] is slots
-        assert store.call_args.args[3] is meta
-    assert scatter.call_count == int(not (enabled and fast))
-    if not (enabled and fast):
+        assert store.call_args.args[3] == meta.num_actual_tokens
+    assert scatter.call_count == int(not (use_fast_store and fast))
+    if not (use_fast_store and fast):
         torch.testing.assert_close(scatter.call_args.args[1].flatten(), slots[:2049])
 
 
