@@ -1488,12 +1488,7 @@ def enable_sfa_dcp_force_tmajor_restore() -> bool:
 
 @lru_cache(maxsize=1)
 def enable_pcp_o_proj_weight_sharding() -> bool:
-    """Whether SFA-PCP stores O-proj weights as PCP-local resident shards.
-
-    This is a load-time option because it changes the physical parameter shape
-    from a TP-local shard to a TP×PCP-local shard. DSA-CP does not use this
-    user-controlled option.
-    """
+    """Whether PCP shards O-proj weights across its communication group."""
     from vllm_ascend.ascend_config import get_ascend_config
 
     return get_ascend_config().enable_pcp_o_proj_weight_sharding
