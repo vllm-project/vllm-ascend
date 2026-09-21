@@ -96,6 +96,7 @@ from vllm_ascend.utils import (
     get_kv_cache_tensor_layers,
     is_hidden_state_cache_spec,
     kv_cache_spec_uses_packed_sfa_main_cache,
+    vllm_version_is,
 )
 from vllm_ascend.worker.kvpp_cache import allocate_kvpp_cache
 
