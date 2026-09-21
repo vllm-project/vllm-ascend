@@ -123,10 +123,6 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAtt
 from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
-from vllm_ascend.attention.dsa_v41 import (
-    AscendDSAV41MetadataBuilder,
-    DeepseekV41CacheLayer,
-)
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
@@ -263,6 +259,21 @@ from vllm_ascend.core.profiling_chunk_predictor import (
     _finish_profiling_chunk_timing,
     _start_profiling_chunk_timing,
 )
+
+# vLLM 0.29 does not provide the upstream DeepSeek V4.1 config and model
+# modules imported by the Ascend V4.1 attention backend. Empty tuples remain
+# valid ``isinstance`` classinfo values while keeping all non-V4.1 paths
+# importable on the release tag.
+v41_metadata_builder_type: type | tuple[()] = ()
+v41_cache_layer_type: type | tuple[()] = ()
+if not vllm_version_is("0.29.0"):
+    from vllm_ascend.attention.dsa_v41 import (
+        AscendDSAV41MetadataBuilder,
+        DeepseekV41CacheLayer,
+    )
+
+    v41_metadata_builder_type = AscendDSAV41MetadataBuilder
+    v41_cache_layer_type = DeepseekV41CacheLayer
 
 # if true, allow tensor initialization and casting with internal format (e.g., NZ)
 torch.npu.config.allow_internal_format = True
@@ -3692,7 +3703,7 @@ class NPUModelRunner(GPUModelRunner):
                     common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
                     full_graph_mode=cudagraph_runtime_mode == CUDAGraphMode.FULL,
                 )
-            elif isinstance(builder, AscendDSAV41MetadataBuilder):
+            elif isinstance(builder, v41_metadata_builder_type):
                 extra_attn_metadata_args = dict(
                     num_actual_reqs=num_reqs,
                     skip_ring_state_update=skip_gdn_state_update,
@@ -3705,7 +3716,7 @@ class NPUModelRunner(GPUModelRunner):
                         AscendDSAMetadataBuilder,
                         AscendDSACPMetadataBuilder,
                         AscendSFADCPMetadataBuilder,
-                        AscendDSAV41MetadataBuilder,
+                        v41_metadata_builder_type,
                     ))):
                 attn_metadata_i = builder.build_for_cudagraph_capture(common_attn_metadata)
             else:
@@ -4571,7 +4582,7 @@ class NPUModelRunner(GPUModelRunner):
             kv_caches[layer_name] = kv_caches[target_layer_name]
 
         if any(
-            isinstance(self.compilation_config.static_forward_context.get(name), DeepseekV41CacheLayer)
+            isinstance(self.compilation_config.static_forward_context.get(name), v41_cache_layer_type)
             for name in kv_caches
         ):
             for name in sorted(kv_caches):
@@ -5836,7 +5847,7 @@ class NPUModelRunner(GPUModelRunner):
                 # or enable more requests to be processed simultaneously.
                 self.shared_kv_cache_layers[layer_name] = kv_tgt_layer
                 continue
-            elif isinstance(attn_module, DeepseekV41CacheLayer):
+            elif isinstance(attn_module, v41_cache_layer_type):
                 kv_cache_spec[layer_name] = attn_module.get_kv_cache_spec(self.vllm_config)
             elif self.use_compress:
                 # Skip modules that don't need KV cache (eg encoder-only attention)
