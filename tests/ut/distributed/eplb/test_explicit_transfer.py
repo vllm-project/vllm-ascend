@@ -30,6 +30,43 @@ class FakeCommunicator:
 
 
 class TestExplicitTransfer(unittest.TestCase):
+    def test_transfer_accepts_independent_expert_tensors(self):
+        communicator = FakeCommunicator()
+        weights = [[torch.tensor([10.0]), torch.tensor([11.0])]]
+        buffers = [[torch.zeros(1), torch.zeros(1)]]
+
+        stage_explicit_layer_transfer(
+            torch.tensor([0, 1, 2, 3]),
+            torch.tensor([0, 2, 1, 3]),
+            np.array([[0, 1], [0, 1]]),
+            np.array([[0, 0], [1, 1]]),
+            weights,
+            buffers,
+            SimpleNamespace(size=lambda: 2, rank=lambda: 0),
+            communicator,
+        )
+
+        self.assertIs(communicator.sends[0][0][0], weights[0][1])
+        self.assertIs(communicator.recvs[0][0][0], buffers[0][1])
+
+    def test_transfer_rejects_mismatched_independent_expert_tensors(self):
+        communicator = FakeCommunicator()
+        with self.assertRaisesRegex(ValueError, "slot-aligned schema"):
+            stage_explicit_layer_transfer(
+                torch.tensor([0, 1, 2, 3]),
+                torch.tensor([0, 2, 1, 3]),
+                np.array([[0, 1], [0, 1]]),
+                np.array([[0, 0], [1, 1]]),
+                [[torch.zeros(1), torch.zeros(2)]],
+                [[torch.zeros(1), torch.zeros(3)]],
+                SimpleNamespace(size=lambda: 2, rank=lambda: 0),
+                communicator,
+            )
+
+        self.assertFalse(hasattr(communicator, "context"))
+        self.assertFalse(communicator.sends)
+        self.assertFalse(communicator.recvs)
+
     def test_transfer_uses_exact_planned_sources(self):
         communicator = FakeCommunicator()
         old = torch.tensor([0, 1, 2, 3])
