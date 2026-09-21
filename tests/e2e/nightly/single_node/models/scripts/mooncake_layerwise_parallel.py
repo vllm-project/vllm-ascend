@@ -49,6 +49,15 @@ def main():
     parser.add_argument("--enforce-eager", action="store_true")
     parser.add_argument("--prefetch-layers", type=int, default=1)
     parser.add_argument(
+        "--prompt-tokens",
+        type=int,
+        default=32768,
+        help="Prompt length in tokens. It has to exceed the model's cache "
+        "transfer granularity (the LCM of the group page sizes) or nothing is "
+        "stored and nothing can be hit -- 16384 for a DeepSeek-V4 hybrid layout, "
+        "so the default covers two of those blocks.",
+    )
+    parser.add_argument(
         "--engine-args",
         default="{}",
         help="JSON object of extra engine kwargs, for example the model's "
@@ -74,7 +83,8 @@ def main():
         "pipeline_parallel_size": args.pp,
         "distributed_executor_backend": "mp",
         "dtype": "bfloat16",
-        "max_model_len": 8192,
+        # Has to fit the prompt (see --prompt-tokens) plus the sampled tokens.
+        "max_model_len": max(8192, args.prompt_tokens + 256),
         "max_num_seqs": 1,
         "max_num_batched_tokens": args.max_num_batched_tokens,
         "block_size": args.block_size,
@@ -96,17 +106,26 @@ def main():
     }
 
     llm = LLM(**engine_kwargs)
-    # Unique first tokens prevent earlier runs from satisfying the cold lookup.
-    prompt = f"Session {uuid.uuid4().hex}.\n" + "Explain how a distributed key-value cache works.\n" * 256
+    # A hybrid layout can have a page far larger than the scheduler block size,
+    # so build the prompt from tokens and size it past that granularity.
+    tokenizer = llm.get_tokenizer()
+    salt = tokenizer.encode(f"Mooncake layerwise validation {uuid.uuid4()}. ", add_special_tokens=False)
+    body = tokenizer.encode(
+        "Explain how a sliding window and compressed attention retain context. ", add_special_tokens=False
+    )
+    token_ids = (salt + body * (args.prompt_tokens // max(1, len(body)) + 1))[: args.prompt_tokens]
     sampling = SamplingParams(temperature=0, max_tokens=32, ignore_eos=True)
-    cold = llm.generate([prompt], sampling)[0]
+    cold = llm.generate([{"prompt_token_ids": token_ids}], sampling)[0]
     assert (cold.num_cached_tokens or 0) == 0, "The first request must have a cold prefix"
     assert cold.prompt_token_ids is not None
     assert len(cold.prompt_token_ids) > args.max_num_batched_tokens, "Prompt must exercise chunked prefill"
     for iteration in range(2):
         reset_local_prefix_cache(llm)
-        warm = llm.generate([prompt], sampling)[0]
-        assert (warm.num_cached_tokens or 0) >= args.block_size, "No complete remote block was loaded"
+        warm = llm.generate([{"prompt_token_ids": token_ids}], sampling)[0]
+        assert (warm.num_cached_tokens or 0) >= args.block_size, (
+            f"No remote block was loaded (cached_tokens={warm.num_cached_tokens}); is the prompt "
+            f"({args.prompt_tokens} tokens) longer than the model's transfer granularity?"
+        )
         assert warm.outputs[0].token_ids == cold.outputs[0].token_ids, "Cold/warm generation differs"
         print(f"Warm round {iteration + 1}: cached_tokens={warm.num_cached_tokens}, token IDs match")
     print(f"PASS: Mooncake layerwise TP={args.tp}, PP={args.pp}")
