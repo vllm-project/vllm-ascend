@@ -244,16 +244,15 @@ class MooncakePullConnector(MooncakeBaseConnector):
             raise ValueError(f"Unsupported KVConnectorRole: {role}")
 
 
-class MooncakePushConnector(MooncakeBaseConnector):
-    """Placeholder for the not-yet-implemented push-based connector."""
+# The push-based connector is backed by the heterogeneous implementation
+# (910B NPU P -> GPU D). Imported at module end to keep the base facade free of
+# heterogeneous dependencies while still filling the V2 push slot; the import
+# runs after MooncakeBaseConnector is defined, so push_connector can resolve it.
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.push_connector import (  # noqa: E402
+    MooncakeHeterogeneousPushConnector,
+)
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        role: KVConnectorRole,
-        kv_cache_config: "KVCacheConfig",
-    ) -> None:
-        raise NotImplementedError("MooncakePushConnector is not implemented yet.")
+MooncakePushConnector = MooncakeHeterogeneousPushConnector
 
 
 # Backward compatibility: MooncakeConnector is the pull-based connector.

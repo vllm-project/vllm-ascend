@@ -3,7 +3,6 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-import pytest
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.connector import (
@@ -100,6 +99,41 @@ def test_pull_connector_selects_implementation_by_role() -> None:
     assert worker_connector.connector_worker is worker_cls.return_value
 
 
-def test_push_connector_is_explicitly_unimplemented() -> None:
-    with pytest.raises(NotImplementedError, match="not implemented"):
-        MooncakePushConnector(MagicMock(), KVConnectorRole.SCHEDULER, MagicMock())
+def test_push_connector_dispatches_scheduler_and_worker() -> None:
+    # The V2 push slot is now backed by the heterogeneous implementation
+    # (910B NPU Prefill -> GPU Decode), no longer an explicit NotImplementedError.
+    from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.push_connector import (
+        MooncakeHeterogeneousPushConnector,
+    )
+
+    assert MooncakePushConnector is MooncakeHeterogeneousPushConnector
+    # P NPU keeps NHD (converted at transfer time), unlike the pull connector's HND.
+    assert MooncakePushConnector.get_required_kvcache_layout(SimpleNamespace(model_config=None)) is None
+
+    config = MagicMock()
+    kv_cache_config = MagicMock()
+    config.kv_transfer_config.kv_connector_extra_config = {}
+
+    def initialize_base(self, *_args, **_kwargs) -> None:
+        self.engine_id = "engine"
+        self.connector_scheduler = None
+        self.connector_worker = None
+
+    with (
+        patch.object(MooncakeBaseConnector, "__init__", initialize_base),
+        patch(
+            "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.push_connector."
+            "MooncakeHeterogeneousPushConnectorScheduler",
+            return_value=MagicMock(),
+        ) as scheduler_cls,
+        patch(
+            "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.push_connector."
+            "MooncakeHeterogeneousPushConnectorWorker",
+            return_value=MagicMock(),
+        ) as worker_cls,
+    ):
+        scheduler_connector = MooncakePushConnector(config, KVConnectorRole.SCHEDULER, kv_cache_config)
+        worker_connector = MooncakePushConnector(config, KVConnectorRole.WORKER, kv_cache_config)
+
+    assert scheduler_connector.connector_scheduler is scheduler_cls.return_value
+    assert worker_connector.connector_worker is worker_cls.return_value
