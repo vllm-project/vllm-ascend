@@ -149,27 +149,52 @@ def test_async_rebalance_wrapper_stashes_explicit_target_on_communicator():
         eplb_stats=SimpleNamespace(global_expert_load_window=torch.ones((1, 2))),
     )
 
-    def original_rebalance(self, model_state, context):
+    def original_rebalance(model_state, eplb_state, physical_to_logical_map_cpu, stream):
         return target
 
     wrapped = patch_eplb._wrap_async_rebalance(original_rebalance)
 
-    assert wrapped(object(), model_state, object()) is target
+    assert wrapped(model_state, object(), torch.tensor([[0, 1]]), object()) is target
     assert getattr(communicator, patch_eplb._EXPLICIT_TRANSFER_TARGET_ATTR) is target
 
 
-def test_async_rebalance_aggregates_temporal_bins_on_worker_stream(monkeypatch):
+def test_async_rebalance_wrapper_requires_current_upstream_contract():
+    def original_rebalance(model_state):
+        raise AssertionError("unsupported contract must be rejected before use")
+
+    with pytest.raises(RuntimeError, match="asynchronous rebalance signature"):
+        patch_eplb._wrap_async_rebalance(original_rebalance)
+
+
+def test_async_rebalance_ignores_stale_prepared_stats():
+    current_values = torch.tensor([[3, 4]])
+    model_state = SimpleNamespace(
+        communicator=SimpleNamespace(),
+        eplb_stats=SimpleNamespace(global_expert_load_window=current_values),
+        _policy_load_stats=patch_eplb.PreparedLoadStats(torch.tensor([[[1, 2]]]), np.array([1])),
+    )
+    physical_map = torch.tensor([[0, 1]])
+
+    def original_rebalance(model_state, eplb_state, physical_to_logical_map_cpu, stream):
+        assert model_state.eplb_stats.global_expert_load_window is current_values
+        return physical_to_logical_map_cpu
+
+    wrapped = patch_eplb._wrap_async_rebalance(original_rebalance)
+
+    assert wrapped(model_state, object(), physical_map, object()) is physical_map
+
+
+def test_async_rebalance_passes_prepared_stats_to_policy_on_worker_stream(monkeypatch):
     worker_stream = object()
     stream_active = False
-    aggregate = torch.tensor([[4, 6]])
+    cpu_values = torch.tensor([[[1, 2]], [[3, 4]]])
+    device_values = MagicMock()
 
-    class OriginalLoadWindow:
-        ndim = 3
+    def copy_to_cpu():
+        assert stream_active
+        return cpu_values
 
-        def sum(self, dim):
-            assert dim == 0
-            assert stream_active
-            return aggregate
+    device_values.cpu.side_effect = copy_to_cpu
 
     @contextmanager
     def device_stream(stream):
@@ -181,20 +206,37 @@ def test_async_rebalance_aggregates_temporal_bins_on_worker_stream(monkeypatch):
         finally:
             stream_active = False
 
-    original_load_window = OriginalLoadWindow()
     monkeypatch.setattr(patch_eplb._async_worker, "device_stream", device_stream)
-    stats = SimpleNamespace(global_expert_load_window=original_load_window)
-    model_state = SimpleNamespace(communicator=SimpleNamespace(), eplb_stats=stats)
+    stats = SimpleNamespace(
+        global_expert_load_window=device_values,
+        num_replicas=2,
+        num_groups=1,
+        num_nodes=1,
+        num_gpus=2,
+    )
+    prepared_stats = patch_eplb.PreparedLoadStats(device_values, np.array([1, 3]))
+    model_state = SimpleNamespace(
+        communicator=SimpleNamespace(),
+        eplb_stats=stats,
+        _policy_load_stats=prepared_stats,
+    )
+    target = _explicit_target()
+    policy = MagicMock()
+    policy.rebalance_experts.return_value = target
+    eplb_state = SimpleNamespace(policy=policy)
 
-    def original_rebalance(model_state, eplb_state, physical_map, stream):
-        assert model_state.eplb_stats.global_expert_load_window is aggregate
-        return physical_map
+    def original_rebalance(model_state, eplb_state, physical_to_logical_map_cpu, stream):
+        raise AssertionError("prepared statistics must bypass the legacy runner")
 
     wrapped = patch_eplb._wrap_async_rebalance(original_rebalance)
     physical_map = torch.tensor([[0, 1]])
 
-    assert wrapped(model_state, object(), physical_map, worker_stream) is physical_map
-    assert stats.global_expert_load_window is original_load_window
+    assert wrapped(model_state, eplb_state, physical_map, worker_stream) is target
+    planned_stats = policy.rebalance_experts.call_args.args[0]
+    assert isinstance(planned_stats, patch_eplb.PreparedLoadStats)
+    assert planned_stats.values is cpu_values
+    np.testing.assert_array_equal(planned_stats.sample_counts, [1, 3])
+    assert policy.rebalance_experts.call_args.args[1:] == (2, 1, 1, 2, physical_map)
 
 
 def test_async_transfer_wrapper_executes_explicit_sources(monkeypatch):

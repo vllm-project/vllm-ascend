@@ -15,6 +15,7 @@ from vllm.logger import logger
 
 from vllm_ascend.distributed.eplb.communicator import AscendGlooEplbCommunicator
 from vllm_ascend.distributed.eplb.explicit_transfer import stage_explicit_layer_transfer
+from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
 from vllm_ascend.distributed.eplb.state import (
     ASYNC_EPLB_CYCLE_COMMITTED_LOG,
     refresh_model_routing_tables,
@@ -105,26 +106,39 @@ def _clear_transfer_target(communicator, target=None) -> None:
 
 def _wrap_async_rebalance(original_rebalance):
     rebalance_signature = signature(original_rebalance)
-    if "model_state" not in rebalance_signature.parameters:
-        raise RuntimeError("Unsupported vLLM EPLB contract: async rebalance has no model_state parameter.")
+    required = {"model_state", "eplb_state", "physical_to_logical_map_cpu", "stream"}
+    if not required.issubset(rebalance_signature.parameters):
+        raise RuntimeError("Unsupported vLLM EPLB contract: asynchronous rebalance signature changed.")
 
     @wraps(original_rebalance)
     def _async_rebalance(*args, **kwargs):
         bound = rebalance_signature.bind(*args, **kwargs)
-        communicator = bound.arguments["model_state"].communicator
-        _clear_transfer_target(communicator)
         model_state = bound.arguments["model_state"]
-        stats = model_state.eplb_stats
-        original_load_window = stats.global_expert_load_window
-        # The legacy async runner accepts only [layers, experts]. Temporarily
-        # aggregate our [bins, layers, experts] sums, then restore the snapshot.
-        if original_load_window.ndim == 3:
-            with _async_worker.device_stream(bound.arguments.get("stream")):
-                stats.global_expert_load_window = original_load_window.sum(dim=0)
-        try:
+        communicator = model_state.communicator
+        _clear_transfer_target(communicator)
+        prepared_stats = getattr(model_state, "_policy_load_stats", None)
+        eplb_stats = model_state.eplb_stats
+        prepared_stats_is_current = (
+            prepared_stats is not None
+            and eplb_stats is not None
+            and prepared_stats.values is eplb_stats.global_expert_load_window
+        )
+        if not prepared_stats_is_current:
             target = original_rebalance(*bound.args, **bound.kwargs)
-        finally:
-            stats.global_expert_load_window = original_load_window
+        else:
+            # Bypass the legacy runner so weighted temporal bins reach the policy intact.
+            with _async_worker.device_stream(bound.arguments.get("stream")):
+                cpu_stats = PreparedLoadStats(prepared_stats.values.cpu(), prepared_stats.sample_counts)
+            target = bound.arguments["eplb_state"].policy.rebalance_experts(
+                cpu_stats,
+                eplb_stats.num_replicas,
+                eplb_stats.num_groups,
+                eplb_stats.num_nodes,
+                eplb_stats.num_gpus,
+                bound.arguments["physical_to_logical_map_cpu"],
+            )
+            if target.device.type != "cpu":
+                raise RuntimeError("EPLB policy returned a non-CPU expert mapping")
         if _has_explicit_sources(target):
             setattr(communicator, _EXPLICIT_TRANSFER_TARGET_ATTR, target)
         return target
