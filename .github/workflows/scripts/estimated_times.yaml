@@ -55,6 +55,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/spec_decode/test_suffix.py: 150
   tests/e2e/pull_request/one_card/rlhf/consistency/test_attention_fa3.py: 30
   tests/e2e/pull_request/one_card/test_camem.py: 140
+  tests/e2e/pull_request/one_card/test_chunk_kda_varlen_workspace.py: 60
   tests/e2e/pull_request/one_card/test_completion_with_prompt_embeds.py: 170
   tests/e2e/pull_request/one_card/test_cpu_offloading.py: 30
   tests/e2e/pull_request/one_card/test_cpu_weight_offload.py: 890
