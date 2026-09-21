@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 # Run `pytest tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py`.
+# CI verification: original unsplit spec decode tests.
 
 from __future__ import annotations
 
