@@ -10,7 +10,6 @@ test_cases:
       OMP_NUM_THREADS: "1"
       HCCL_OP_EXPANSION_MODE: "AIV"
       PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-      VLLM_USE_V1: "1"
       HCCL_BUFFSIZE: "256"
       ASCEND_AGGREGATE_ENABLE: "1"
       ASCEND_TRANSPORT_PRINT: "1"
