@@ -143,6 +143,10 @@ class DeepseekV4DSparkModel(nn.Module):
             bias=False,
             with_markov=True,
         )
+        last_layer = self.layers[str(last_layer_idx)]
+        last_layer.norm = self.norm
+        last_layer.markov_head = self.markov_head
+
         hc_dim = self.hc_mult * config.hidden_size
         self.hc_head_fn = nn.Parameter(
             torch.empty(self.hc_mult, hc_dim, dtype=torch.float32),
@@ -156,9 +160,6 @@ class DeepseekV4DSparkModel(nn.Module):
             torch.empty(1, dtype=torch.float32),
             requires_grad=False,
         )
-        last_layer = self.layers[str(last_layer_idx)]
-        last_layer.norm = self.norm
-        last_layer.markov_head = self.markov_head
         last_layer.hc_head_fn = self.hc_head_fn
         last_layer.hc_head_base = self.hc_head_base
         last_layer.hc_head_scale = self.hc_head_scale
