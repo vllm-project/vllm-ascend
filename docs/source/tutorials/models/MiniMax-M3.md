@@ -143,6 +143,16 @@ For descriptions of the standard `vllm serve` arguments used in the deployment e
 
 Single-node deployment completes both Prefill and Decode within the same node. The MiniMax-M3 (BF16) model can be deployed on 1 Atlas 800 A3 (64GB × 16), but dual-node deployment is recommended for BF16 on A3 series; single-node is not recommended. The MiniMax-M3-w8a8 (W8A8) quantized model is recommended for single-node deployment on 1 Atlas 800 A3 (64GB × 16) or 1 Atlas 800 A2 (64GB × 8). The MiniMax-M3-MXFP8 (MXFP8) quantized model can be deployed on 1 950DT products (96GB × 8).
 
+!!! note
+
+    The `--quantization` parameter is **only required for quantized weights** and must match the weight variant:
+
+    - **BF16 weights** (`MiniMax-M3`): do **not** add `--quantization`; the model loads as float.
+    - **W8A8 weights** (`MiniMax-M3-w8a8`, ModelSlim format): use `--quantization ascend`. vLLM Ascend can auto-detect this from the checkpoint files, but specifying it explicitly is recommended for clarity.
+    - **MXFP8 weights** (`MiniMax-M3-MXFP8`): use `--quantization mxfp8`.
+
+    Adding the wrong `--quantization` value (or adding it to BF16 weights) will cause the checkpoint to be misinterpreted and fail to load.
+
 === "A3 series(BF16)"
 
     ```bash
@@ -186,37 +196,38 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve ${WEIGHT_PATH} \
-    --host 0.0.0.0 \
-    --port 11223 \
-    --served-model-name minimax-m3 \
-    --trust-remote-code \
-    --max-model-len 131072 \
-    --tensor-parallel-size 4 \
-    --data-parallel-size 4 \
-    --api-server-count 1 \
-    --max-num-batched-tokens 32768 \
-    --long-prefill-token-threshold 4096 \
-    --enable-expert-parallel \
-    --max-num-seqs 32 \
-    --distributed_executor_backend "mp" \
-    --gpu-memory-utilization 0.92 \
-    --reasoning-parser minimax_m3 \
-    --limit-mm-per-prompt '{"image":1,"video":0}' \
-    --enable-chunked-prefill \
-    --enable-prefix-caching \
-    --speculative-config '{"model":"${EAGLE3_WEIGHT_PATH}", "method":"eagle3", "num_speculative_tokens":3}' \
-    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-    --additional-config '{
-        "enable_cpu_binding": true,
-        "enable_flashcomm1": true,
-        "ascend_compilation_config": {
-          "enable_static_kernel": false,
-          "fuse_norm_quant": false
-            },
-        "multistream_overlap_shared_expert": true,
-        "enable_shared_expert_dp": true,
-        "weight_nz_mode": 2
-    }' > ${LOG_PATH} 2>&1 &
+      --host 0.0.0.0 \
+      --port 11223 \
+      --served-model-name minimax-m3 \
+      --trust-remote-code \
+      --quantization ascend \
+      --max-model-len 131072 \
+      --tensor-parallel-size 4 \
+      --data-parallel-size 4 \
+      --api-server-count 1 \
+      --max-num-batched-tokens 32768 \
+      --long-prefill-token-threshold 4096 \
+      --enable-expert-parallel \
+      --max-num-seqs 32 \
+      --distributed_executor_backend "mp" \
+      --gpu-memory-utilization 0.92 \
+      --reasoning-parser minimax_m3 \
+      --limit-mm-per-prompt '{"image":1,"video":0}' \
+      --enable-chunked-prefill \
+      --enable-prefix-caching \
+      --speculative-config '{"model":"${EAGLE3_WEIGHT_PATH}", "method":"eagle3", "num_speculative_tokens":3}' \
+      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+      --additional-config '{
+          "enable_cpu_binding": true,
+          "enable_flashcomm1": true,
+          "ascend_compilation_config": {
+            "enable_static_kernel": false,
+            "fuse_norm_quant": false
+              },
+          "multistream_overlap_shared_expert": true,
+          "enable_shared_expert_dp": true,
+          "weight_nz_mode": 2
+      }' > ${LOG_PATH} 2>&1 &
     ```
 
 === "950DT products"
@@ -364,6 +375,7 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
       --port 11223 \
       --served-model-name minimax-m3 \
       --trust-remote-code \
+      --quantization ascend \
       --max-model-len 131072 \
       --tensor-parallel-size 4 \
       --enable-expert-parallel \
@@ -402,6 +414,7 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
       --port 11223 \
       --served-model-name minimax-m3 \
       --trust-remote-code \
+      --quantization ascend \
       --headless \
       --max-model-len 131072 \
       --tensor-parallel-size 4 \
@@ -553,9 +566,9 @@ if __name__ == "__main__":
 
 Then prepare `run_dp_template.sh` on each node and start the engines.
 
-=== "A3 series"
+=== "A3 series(W8A8)"
 
-    Prefill-Decode disaggregation can be deployed on 2 Atlas 800 A3 (64GB × 16) for `MiniMax-M3` (BF16) with `MiniMax-M3-EAGLE3-GQA`.
+    Prefill-Decode disaggregation can be deployed on 2 Atlas 800 A3 (64GB × 16) for `MiniMax-M3-w8a8` (W8A8) with `MiniMax-M3-EAGLE3-GQA`.
 
     Explicitly declaring this limit (--limit-mm-per-prompt '{"image":1,"video":0}') improves scheduler-side memory planning and end-to-end throughput. Adjust it to your actual request shape (e.g., `{"image":2,"video":0}` for two-image requests, `{"image":0,"video":1}` for one-video requests); for text-only deployment, this parameter can be omitted.
 
@@ -604,11 +617,12 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         --enable-chunked-prefill \
         --enable-prefix-caching \
         --trust-remote-code \
-        --gpu-memory-utilization 0.92 \
+        --quantization ascend \
+        --gpu-memory-utilization 0.85 \
         --limit-mm-per-prompt '{"image":1,"video":0}' \
         --reasoning-parser minimax_m3 \
         --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
-        --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3}' \
+        --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3,"enforce_eager":false}' \
         --kv-transfer-config \
         '{
             "kv_connector":"MooncakeConnectorV1",
@@ -663,13 +677,13 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         --max-model-len 133000 \
         --max-num-batched-tokens 32768 \
         --trust-remote-code \
-        --no-enable-prefix-caching \
+        --quantization ascend \
         --max-num-seqs 64 \
         --gpu-memory-utilization 0.92 \
         --limit-mm-per-prompt '{"image":1,"video":0}' \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true}' \
-        --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3}' \
+        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
+        --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3,"enforce_eager":false}' \
         --kv-transfer-config \
         '{
             "kv_connector":"MooncakeConnectorV1",
@@ -784,8 +798,21 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         --enforce-eager \
         --enable-chunked-prefill \
         --enable-prefix-caching \
-        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_qknorm_rope":false,"fuse_norm_quant":false,"enable_static_kernel":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
-        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_producer","kv_port":"30000","engine_id":"0","kv_connector_extra_config":{"use_ascend_direct":true,"ascend_local_comm_res_path":"/etc/hixlep","prefill":{"dp_size":2,"tp_size":4,"pp_size":1},"decode":{"dp_size":2,"tp_size":4,"pp_size":1}}}'
+        --no-async-scheduling \
+        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_qknorm_rope":true,"fuse_norm_quant":true,"enable_static_kernel":true},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true}' \
+        --kv-transfer-config \
+        '{
+            "kv_connector":"MooncakeConnectorV1",
+            "kv_role":"kv_producer",
+            "kv_port":"30000",
+            "engine_id":"0",
+            "kv_connector_extra_config":{
+                "use_ascend_direct":true,
+                "ascend_local_comm_res_path":"/etc/hixlep",
+                "prefill":{"dp_size":2,"tp_size":4,"pp_size":1},
+                "decode":{"dp_size":2,"tp_size":4,"pp_size":1}
+            }
+        }'
     ```
 
     2. Decode node
@@ -834,7 +861,19 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3,"kv_cache_dtype":"bfloat16"}' \
         --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true}' \
-        --kv-transfer-config '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_consumer","kv_port":"26900","engine_id":"1","kv_connector_extra_config":{"use_ascend_direct":true,"ascend_local_comm_res_path":"/etc/hixlep","prefill":{"dp_size":2,"tp_size":4,"pp_size":1},"decode":{"dp_size":2,"tp_size":4,"pp_size":1}}}'
+        --kv-transfer-config \
+        '{
+            "kv_connector":"MooncakeConnectorV1",
+            "kv_role":"kv_consumer",
+            "kv_port":"26900",
+            "engine_id":"1",
+            "kv_connector_extra_config":{
+                "use_ascend_direct":true,
+                "ascend_local_comm_res_path":"/etc/hixlep",
+                "prefill":{"dp_size":2,"tp_size":4,"pp_size":1},
+                "decode":{"dp_size":2,"tp_size":4,"pp_size":1}
+            }
+        }'
     ```
 
     Once the preparation is done, start the server with the following command on each node:
@@ -910,7 +949,6 @@ Key Parameter Descriptions:
 
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'`: Graph capture for the decode phase only.
 - `"max_cudagraph_capture_size"` (optional, omitted by default): Limits the maximum decode batch size covered by ACL graph capture and the graph memory reserved for it; the program default is `512`. With EAGLE3 speculative decoding, each request is expanded to `1 + num_speculative_tokens` tokens in one decode step (`4` tokens when `num_speculative_tokens=3`). Since DP distributes requests per rank, the per-rank batch size matters: for example, with `DP2` and `--max-num-seqs 256`, each DP rank handles 128 requests, producing `4 × 128 = 512` tokens per step — exactly at the default limit. If concurrency rises to 257, one DP rank handles 129 requests, giving `4 × 129 = 516 > 512`; batches above 512 skip graph capture and fall back to eager execution, lowering decode throughput. In that case set `"max_cudagraph_capture_size":1024` in `--compilation-config` (e.g., `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","max_cudagraph_capture_size":1024}'`). Because a larger capture size reserves additional NPU memory, the configurations in this tutorial keep the default; add this option only when your target concurrency requires it.
-- `--no-enable-prefix-caching` (A3 Decode): Disables prefix caching on the Decode node to avoid the D-node prefix-cache known issue tracked in [#7944](https://github.com/vllm-project/vllm-ascend/issues/7944). The 950DT products launch does not set this flag and keeps prefix caching enabled.
 - `--max-num-seqs 256`: Decode concurrency used by the verified 950DT products 1P1D launch. A3 uses `64`.
 
 **Mooncake KV transfer configuration (`--kv-transfer-config`):**
@@ -1038,9 +1076,9 @@ fi
 
 Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh` with the pooled version below. Keep the Section 5.3 `vllm serve` flag style; only `--kv-transfer-config` switches to `MultiConnector`. Expand `engine_id` and `lookup_rpc_port` from `$4` (DP rank) — do not hardcode the same values across ranks.
 
-=== "A3 series"
+=== "A3 series(W8A8)"
 
-    Prefill-Decode disaggregation with KV Cache Pool on 2 Atlas 800 A3 (64GB × 16) for `MiniMax-M3` (BF16) with `MiniMax-M3-EAGLE3-GQA`.
+    Prefill-Decode disaggregation with KV Cache Pool on 2 Atlas 800 A3 (64GB × 16) for `MiniMax-M3-w8a8` (W8A8) with `MiniMax-M3-EAGLE3-GQA`.
 
     1. Prefill node
 
@@ -1091,12 +1129,40 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
         --enable-chunked-prefill \
         --enable-prefix-caching \
         --trust-remote-code \
-        --gpu-memory-utilization 0.92 \
+        --quantization ascend \
+        --gpu-memory-utilization 0.85 \
         --reasoning-parser minimax_m3 \
         --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
-        --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3}' \
+        --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3,"enforce_eager":false}' \
         --kv-transfer-config \
-        '{"kv_connector":"MultiConnector","kv_role":"kv_producer","engine_id":"minimax-m3-prefill-dp'"$4"'","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV1","kv_buffer_device":"npu","kv_role":"kv_producer","kv_port":"36000","kv_connector_extra_config":{"use_ascend_direct":true,"prefill":{"dp_size":2,"tp_size":4,"pp_size":2,"pp_layer_partition":"30,30"},"decode":{"dp_size":4,"tp_size":4,"pp_size":1}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backend":"mooncake","lookup_rpc_port":'$((37000 + $4))'}}]}}'
+        '{
+            "kv_connector":"MultiConnector",
+            "kv_role":"kv_producer",
+            "engine_id":"minimax-m3-prefill-dp'"$4"'",
+            "kv_connector_extra_config":{
+                "connectors":[
+                    {
+                        "kv_connector":"MooncakeConnectorV1",
+                        "kv_buffer_device":"npu",
+                        "kv_role":"kv_producer",
+                        "kv_port":"36000",
+                        "kv_connector_extra_config":{
+                            "use_ascend_direct":true,
+                            "prefill":{"dp_size":2,"tp_size":4,"pp_size":2,"pp_layer_partition":"30,30"},
+                            "decode":{"dp_size":4,"tp_size":4,"pp_size":1}
+                        }
+                    },
+                    {
+                        "kv_connector":"AscendStoreConnector",
+                        "kv_role":"kv_producer",
+                        "kv_connector_extra_config":{
+                            "backend":"mooncake",
+                            "lookup_rpc_port":'$((37000 + $4))'
+                        }
+                    }
+                ]
+            }
+        }'
     ```
 
     2. Decode node
@@ -1143,14 +1209,41 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
         --max-model-len 133000 \
         --max-num-batched-tokens 32768 \
         --trust-remote-code \
-        --no-enable-prefix-caching \
+        --quantization ascend \
         --max-num-seqs 64 \
         --gpu-memory-utilization 0.92 \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true}' \
-        --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3}' \
+        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
+        --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3,"enforce_eager":false}' \
         --kv-transfer-config \
-        '{"kv_connector":"MultiConnector","kv_role":"kv_consumer","engine_id":"minimax-m3-decode-dp'"$4"'","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV1","kv_buffer_device":"npu","kv_role":"kv_consumer","kv_port":"36100","kv_connector_extra_config":{"use_ascend_direct":true,"prefill":{"dp_size":2,"tp_size":4,"pp_size":2,"pp_layer_partition":"30,30"},"decode":{"dp_size":4,"tp_size":4,"pp_size":1}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backend":"mooncake","lookup_rpc_port":'$((37100 + $4))'}}]}}'
+        '{
+            "kv_connector":"MultiConnector",
+            "kv_role":"kv_consumer",
+            "engine_id":"minimax-m3-decode-dp'"$4"'",
+            "kv_connector_extra_config":{
+                "connectors":[
+                    {
+                        "kv_connector":"MooncakeConnectorV1",
+                        "kv_buffer_device":"npu",
+                        "kv_role":"kv_consumer",
+                        "kv_port":"36100",
+                        "kv_connector_extra_config":{
+                            "use_ascend_direct":true,
+                            "prefill":{"dp_size":2,"tp_size":4,"pp_size":2,"pp_layer_partition":"30,30"},
+                            "decode":{"dp_size":4,"tp_size":4,"pp_size":1}
+                        }
+                    },
+                    {
+                        "kv_connector":"AscendStoreConnector",
+                        "kv_role":"kv_consumer",
+                        "kv_connector_extra_config":{
+                            "backend":"mooncake",
+                            "lookup_rpc_port":'$((37100 + $4))'
+                        }
+                    }
+                ]
+            }
+        }'
     ```
 
     Start order on A3: Mooncake Master → Decode → Prefill → Proxy. Use the same `launch_online_dp.py` and proxy commands as Section 5.3 A3 (`--vllm-start-port 31050` / `31060`, proxy on `8009`).
@@ -1188,34 +1281,63 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
     unset ASCEND_GLOBAL_RESOURCE_CONFIG
 
     vllm serve "$model_path" \
-        --host 0.0.0.0 \
-        --port $2 \
-        --data-parallel-size $3 \
-        --data-parallel-rank $4 \
-        --data-parallel-address $5 \
-        --data-parallel-rpc-port $6 \
-        --tensor-parallel-size $7 \
-        --pipeline-parallel-size $8 \
-        --served-model-name minimax-m3 \
-        --trust-remote-code \
-        --dtype bfloat16 \
-        --max-num-seqs 128 \
-        --max-num-batched-tokens 32768 \
-        --max-model-len 133000 \
-        --enable-expert-parallel \
-        --quantization mxfp8 \
-        --gpu-memory-utilization 0.92 \
-        --distributed-executor-backend mp \
-        --kv-cache-dtype fp8 \
-        --reasoning-parser minimax_m3 \
-        --safetensors-load-strategy prefetch \
-        --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3,"kv_cache_dtype":"bfloat16"}' \
-        --enforce-eager \
-        --enable-chunked-prefill \
-        --enable-prefix-caching \
-        --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_qknorm_rope":false,"fuse_norm_quant":false,"enable_static_kernel":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_flashcomm1":true}' \
-        --kv-transfer-config \
-        '{"kv_connector":"MultiConnector","kv_role":"kv_producer","engine_id":"minimax-m3-prefill-dp'"$4"'","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV1","kv_buffer_device":"npu","kv_role":"kv_producer","kv_port":"30000","kv_connector_extra_config":{"use_ascend_direct":true,"ascend_local_comm_res_path":"/etc/hixlep","prefill":{"dp_size":2,"tp_size":4,"pp_size":1},"decode":{"dp_size":2,"tp_size":4,"pp_size":1}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backend":"mooncake","lookup_rpc_port":'$((37000 + $4))'}}]}}'
+      --host 0.0.0.0 \
+      --port $2 \
+      --data-parallel-size $3 \
+      --data-parallel-rank $4 \
+      --data-parallel-address $5 \
+      --data-parallel-rpc-port $6 \
+      --tensor-parallel-size $7 \
+      --pipeline-parallel-size $8 \
+      --served-model-name minimax-m3 \
+      --trust-remote-code \
+      --dtype bfloat16 \
+      --max-num-seqs 128 \
+      --max-num-batched-tokens 32768 \
+      --max-model-len 133000 \
+      --enable-expert-parallel \
+      --quantization mxfp8 \
+      --gpu-memory-utilization 0.92 \
+      --distributed-executor-backend mp \
+      --kv-cache-dtype fp8 \
+      --reasoning-parser minimax_m3 \
+      --safetensors-load-strategy prefetch \
+      --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3,"kv_cache_dtype":"bfloat16"}' \
+      --enforce-eager \
+      --enable-chunked-prefill \
+      --enable-prefix-caching \
+      --no-async-scheduling \
+      --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_qknorm_rope":true,"fuse_norm_quant":true,"enable_static_kernel":true},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true}' \
+      --kv-transfer-config \
+      '{
+          "kv_connector":"MultiConnector",
+          "kv_role":"kv_producer",
+          "engine_id":"minimax-m3-prefill-dp'"$4"'",
+          "kv_connector_extra_config":{
+              "connectors":[
+                  {
+                      "kv_connector":"MooncakeConnectorV1",
+                      "kv_buffer_device":"npu",
+                      "kv_role":"kv_producer",
+                      "kv_port":"30000",
+                      "kv_connector_extra_config":{
+                          "use_ascend_direct":true,
+                          "ascend_local_comm_res_path":"/etc/hixlep",
+                          "prefill":{"dp_size":2,"tp_size":4,"pp_size":1},
+                          "decode":{"dp_size":2,"tp_size":4,"pp_size":1}
+                      }
+                  },
+                  {
+                      "kv_connector":"AscendStoreConnector",
+                      "kv_role":"kv_producer",
+                      "kv_connector_extra_config":{
+                          "backend":"mooncake",
+                          "lookup_rpc_port":'$((37000 + $4))'
+                      }
+                  }
+              ]
+          }
+      }'
     ```
 
     2. Decode node
@@ -1272,7 +1394,35 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
         --speculative-config '{"method":"eagle3","model":"${EAGLE3_WEIGHT_PATH}","num_speculative_tokens":3,"kv_cache_dtype":"bfloat16"}' \
         --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true}' \
         --kv-transfer-config \
-        '{"kv_connector":"MultiConnector","kv_role":"kv_consumer","engine_id":"minimax-m3-decode-dp'"$4"'","kv_connector_extra_config":{"connectors":[{"kv_connector":"MooncakeConnectorV1","kv_buffer_device":"npu","kv_role":"kv_consumer","kv_port":"26900","kv_connector_extra_config":{"use_ascend_direct":true,"ascend_local_comm_res_path":"/etc/hixlep","prefill":{"dp_size":2,"tp_size":4,"pp_size":1},"decode":{"dp_size":2,"tp_size":4,"pp_size":1}}},{"kv_connector":"AscendStoreConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"backend":"mooncake","lookup_rpc_port":'$((37100 + $4))'}}]}}'
+        '{
+            "kv_connector":"MultiConnector",
+            "kv_role":"kv_consumer",
+            "engine_id":"minimax-m3-decode-dp'"$4"'",
+            "kv_connector_extra_config":{
+                "connectors":[
+                    {
+                        "kv_connector":"MooncakeConnectorV1",
+                        "kv_buffer_device":"npu",
+                        "kv_role":"kv_consumer",
+                        "kv_port":"26900",
+                        "kv_connector_extra_config":{
+                            "use_ascend_direct":true,
+                            "ascend_local_comm_res_path":"/etc/hixlep",
+                            "prefill":{"dp_size":2,"tp_size":4,"pp_size":1},
+                            "decode":{"dp_size":2,"tp_size":4,"pp_size":1}
+                        }
+                    },
+                    {
+                        "kv_connector":"AscendStoreConnector",
+                        "kv_role":"kv_consumer",
+                        "kv_connector_extra_config":{
+                            "backend":"mooncake",
+                            "lookup_rpc_port":'$((37100 + $4))'
+                        }
+                    }
+                ]
+            }
+        }'
     ```
 
     Start order on 950DT: Mooncake Master → Decode → Prefill → Proxy. Use the same `launch_online_dp.py` and proxy commands as Section 5.3 950DT (`DP2` on both roles, proxy on `8009`).
