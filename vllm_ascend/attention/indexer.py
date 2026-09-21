@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
 import scipy  # type: ignore
 import torch
 import torch_npu
@@ -8,6 +9,7 @@ from torch import nn
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tp_group
 from vllm.triton_utils import HAS_TRITON
+from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -17,6 +19,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.utils import select_common_block_size
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -526,6 +529,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         self._dcp_block_table_buffers: dict[object, torch.Tensor] = {}
         self._dcp_slot_mapping_buffers: dict[object, torch.Tensor] = {}
         self._pcp_indexer_slot_mapping_buffers: dict[object, torch.Tensor] = {}
+        self._nano_token_masks: dict[object, CpuGpuBuffer] = {}
         max_num_input_tokens = scheduler_config.max_num_batched_tokens
         self._rope_capacity = max_num_input_tokens
         pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
@@ -990,6 +994,26 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         # graph capture and runtime rebuild update the exact same storage.
         return ("slot_mapping", common_attn_metadata.slot_mapping.data_ptr())
 
+    def _mask_nano_slot_mapping(self, common_attn_metadata, slot_mapping, buffer_key) -> None:
+        generations = getattr(common_attn_metadata, "req_topk_buffer_generations", None)
+        if generations is None or not get_ascend_config().sparse_kv_offload_config.use_nano:
+            return
+        # Only request ownership and query layout are needed; exact device
+        # positions in this group's slot mapping must remain unchanged.
+        count = common_attn_metadata.num_reqs
+        ends = common_attn_metadata.query_start_loc_cpu[1 : count + 1].numpy()
+        positions = np.arange(slot_mapping.numel())
+        rows = np.searchsorted(ends, positions, side="right").clip(max=count - 1)
+        mask = self._nano_token_masks.get(buffer_key)
+        if mask is None:
+            mask = CpuGpuBuffer(
+                self._slot_capacity, dtype=torch.bool, device=slot_mapping.device, pin_memory=is_pin_memory_available()
+            )
+            self._nano_token_masks[buffer_key] = mask
+        size = slot_mapping.numel()
+        mask.np[:size] = (generations.numpy()[rows] < 0) | (positions >= ends[-1])
+        slot_mapping.masked_fill_(mask.copy_to_gpu(size), -1)
+
     def _build(
         self,
         common_attn_metadata: CommonAttentionMetadata,
@@ -1030,6 +1054,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
                 num_input_tokens,
                 buffer_key,
             )
+        self._mask_nano_slot_mapping(common_attn_metadata, slot_mapping, buffer_key)
         input_positions = common_attn_metadata.positions[:num_input_tokens].long()
         block_size = self.kernel_block_size
 

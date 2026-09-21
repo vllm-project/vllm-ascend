@@ -825,12 +825,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     group_key_idx=self.runner.group_key_idx.gpu[:num_reqs],
                     group_key_cache_idx=self.runner.group_key_cache_idx.gpu[:num_reqs],
                     req_topk_buffer_slots=(
-                        self.runner._offload_pool_slots.gpu[:num_reqs]
+                        self.runner._offload_pool_slots.cpu[:num_reqs]
                         if self.runner._offload_pool_slots is not None
                         else None
                     ),
                     req_topk_buffer_generations=(
-                        self.runner._offload_pool_generations.gpu[:num_reqs]
+                        self.runner._offload_pool_generations.cpu[:num_reqs]
                         if self.runner._offload_pool_generations is not None
                         else None
                     ),
@@ -846,6 +846,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 # update the tensor's address for each step.
                 for draft_index in range(self.num_speculative_tokens):
                     common_attn_metadata = self.shallow_copy_metadata(common_attn_metadata)
+                    common_attn_metadata.nano_draft_index = draft_index
+                    common_attn_metadata.nano_restore_tails = False
                     extra_attn_metadata_args: dict = {}
                     if self.use_compress:
                         extra_attn_metadata_args.update(
@@ -2559,6 +2561,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     ):
         # FIXME(woosuk): The below two ops cause synchronization. Optimize.
         assert len(self.draft_attn_groups) > 0
+        if getattr(self.runner, "sparse_kv_offload_enabled", False) and self.runner.sparse_kv_offload_config.use_nano:
+            # Step 0 uses build(), unlike subsequent build_for_drafting() calls.
+            common_attn_metadata = self.shallow_copy_metadata(common_attn_metadata)
+            common_attn_metadata.nano_draft_index = 0
+            common_attn_metadata.nano_restore_tails = False
         per_layer_attn_metadata: dict[str, Any] = {}
         # One DSA cache dict shared by all attn groups within this decode step.
         # DSpark draft layers span multiple kv-cache groups; every group gets

@@ -3468,8 +3468,7 @@ class NPUModelRunner(GPUModelRunner):
                     self._offload_slot_last_prefix[slot] = prefix
             if dense_fills:
                 self._dense_fill_nano_rows(dense_fills)
-        self._offload_pool_slots.copy_to_gpu(padded_reqs)
-        self._offload_pool_generations.copy_to_gpu(padded_reqs)
+        # Nano builders stage host-owned slot/generation metadata once per step.
 
     def _dense_fill_nano_rows(self, dense_fills: dict[int, tuple[int, int]]) -> None:
         """Copy whole short rows from the CPU pool into their topk-buffer rows.
@@ -3754,11 +3753,12 @@ class NPUModelRunner(GPUModelRunner):
                 if self._offload_token_to_req is not None
                 else None
             ),
-            req_topk_buffer_slots=(self._offload_pool_slots.gpu[:num_reqs_padded]
+            req_topk_buffer_slots=(self._offload_pool_slots.cpu[:num_reqs_padded]
                                    if self._offload_pool_slots is not None else None),
-            req_topk_buffer_generations=(self._offload_pool_generations.gpu[:num_reqs_padded]
+            req_topk_buffer_generations=(self._offload_pool_generations.cpu[:num_reqs_padded]
                                          if self._offload_pool_generations is not None else None),
             offload_dummy=offload_dummy,
+            nano_restore_tails=self._nano_need_eager_tail_restore,
             mm_req_doc_ranges=req_doc_ranges,
         )
 

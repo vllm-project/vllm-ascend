@@ -368,12 +368,11 @@ class AscendSFAMetadata:
     nano_prefix_lens: torch.Tensor | None = None
     nano_cache_tokens: torch.Tensor | None = None
     nano_logical_lens: torch.Tensor | None = None
+    # Only draft step 0 populates this extent; later MTP steps use its saved
+    # implementation buffers. Target metadata leaves it unset.
+    nano_reuse_logical_lens: torch.Tensor | None = None
     nano_pool_entries: torch.Tensor | None = None
-    nano_generations: torch.Tensor | None = None
-    nano_active: torch.Tensor | None = None
-    # Per-request short-sequence flag (aligned prefix < hot budget): the whole
-    # sequence stays dense in the request's topk row and LIM runs state -3.
-    nano_is_short: torch.Tensor | None = None
+    nano_request_state: torch.Tensor | None = None
     # Per-batch-row topk row slots, populated for every batch (prefill
     # included) so exec_kv can D2D prefill KV into the rows at chunk end.
     nano_prefill_pool_slots: torch.Tensor | None = None
@@ -383,7 +382,6 @@ class AscendSFAMetadata:
     nano_tail_dst: torch.Tensor | None = None
     nano_tail_lengths: torch.Tensor | None = None
     nano_device_slots: torch.Tensor | None = None
-    nano_token_active: torch.Tensor | None = None
     nano_copy_src_offsets: torch.Tensor | None = None
     nano_copy_dst_offsets: torch.Tensor | None = None
     nano_copy_lengths: torch.Tensor | None = None

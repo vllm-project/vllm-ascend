@@ -27,6 +27,7 @@ def make_impl():
     impl.nano_miss_dst = torch.zeros_like(impl.nano_miss_src)
     impl.nano_misses = torch.full((4,), TOPK, dtype=torch.int32, device=device)
     impl.nano_reuse_logical_lens = torch.full((4,), TOPK, dtype=torch.int32, device=device)
+    impl.nano_reuse_logical_lens[1] = 0
     impl.nano_reuse_cache_tokens = torch.full((4,), TOPK, dtype=torch.int32, device=device)
     impl.nano_reuse_topk_misses = torch.zeros(8, dtype=torch.int32, device=device)
     impl.nano_reuse_misses = torch.zeros(4, dtype=torch.int32, device=device)
@@ -46,7 +47,6 @@ def metadata():
     return SimpleNamespace(
         num_decode_tokens=2,
         nano_pool_entries=pools,
-        nano_token_active=torch.tensor([True, False], device=device),
         nano_query_ends=torch.tensor([1, 2], dtype=torch.int32, device=device),
         nano_hbm_block_table=pools[:, None] * STRIDE_BLOCKS
         + torch.arange(STRIDE_BLOCKS, dtype=torch.int32, device=device)[None],
@@ -143,3 +143,74 @@ def test_later_draft_reuses_compacted_selection_without_copy(graph):
     assert impl.nano_reuse_misses.count_nonzero().item() == 0
     assert source_k.count_nonzero().item() == 0
     assert source_r.count_nonzero().item() == 0
+
+
+@pytest.mark.parametrize("query_count", [1, 4])
+@pytest.mark.parametrize("first_fill", [False, True])
+def test_copy_sfa_graph_zero_lengths_follow_replay_and_preserve_inactive_cache(query_count, first_fill):
+    """Exercise native output zeroing with MTP3 widths and both copy paths."""
+    enable_custom_op()
+    device = "npu:0"
+    impl, md = make_impl(), metadata()
+    impl.skip_topk = False
+    md.num_decode_tokens = 2 * query_count
+    md.nano_query_ends.copy_(torch.tensor([query_count, 2 * query_count], dtype=torch.int32, device=device))
+    md.nano_logical_lens = torch.zeros(2, dtype=torch.int32, device=device)
+    md.nano_cache_tokens = torch.full((2,), TOPK, dtype=torch.int32, device=device)
+    impl.nano_topk_src.copy_(torch.arange(TOPK, dtype=torch.int32, device=device).view(1, 1, -1))
+    impl.nano_topk_dst.copy_(impl.nano_topk_src)
+    impl.nano_topk_misses.zero_()
+    impl.nano_misses.zero_()
+    impl.nano_miss_src[:, :TOPK].copy_(impl.nano_topk_src[0])
+    impl.nano_miss_dst[:, :TOPK].copy_(impl.nano_topk_dst[0])
+
+    hbm_k = torch.full((8 * STRIDE_BLOCKS, BLOCK, 1, 512), 7.0, dtype=torch.bfloat16, device=device)
+    hbm_r = torch.full((8 * STRIDE_BLOCKS, BLOCK, 1, 64), 9.0, dtype=torch.bfloat16, device=device)
+    source_k = torch.full((256, BLOCK, 512), 11.0, dtype=torch.bfloat16, device=device)
+    source_r = torch.full((256, BLOCK, 64), 13.0, dtype=torch.bfloat16, device=device)
+    manager = SimpleNamespace(
+        topk_buffers_k=[hbm_k],
+        topk_buffers_v=[hbm_r],
+        k_caches_cpu=[source_k],
+        v_caches_cpu=[source_r],
+        _get_offload_layer_id=lambda _: 0,
+    )
+    # Zero queries make the active reference simply the mean of visible KV.
+    query = torch.zeros((2 * query_count, 16, 512), dtype=torch.bfloat16, device=device)
+    rope = torch.zeros((2 * query_count, 16, 64), dtype=torch.bfloat16, device=device)
+
+    def forward():
+        return impl._nano_attention(query, rope, impl.nano_topk_src, md, manager, "target.attn")
+
+    # Capture all rows inactive, then change only device input contents.
+    for _ in range(3):
+        assert forward().count_nonzero().item() == 0
+    captured = torch.npu.NPUGraph()
+    with torch.npu.graph(captured):
+        out = forward()
+    for active_row in (0, 1, None):
+        hbm_k.fill_(7)
+        hbm_r.fill_(9)
+        md.nano_logical_lens.zero_()
+        impl.nano_misses.zero_()
+        if active_row is not None:
+            md.nano_logical_lens[active_row] = TOPK + query_count - 1
+            if first_fill:
+                impl.nano_misses[active_row] = TOPK
+        eager = forward()
+        captured.replay()
+        torch.npu.synchronize()
+        torch.testing.assert_close(out, eager)
+        for row in range(2):
+            actual = out[row * query_count : (row + 1) * query_count]
+            if row != active_row:
+                assert actual.count_nonzero().item() == 0
+                pool = (1, 5)[row]
+                assert torch.all(hbm_k[pool * STRIDE_BLOCKS : (pool + 1) * STRIDE_BLOCKS] == 7).item()
+                assert torch.all(hbm_r[pool * STRIDE_BLOCKS : (pool + 1) * STRIDE_BLOCKS] == 9).item()
+            else:
+                values = [((11 if first_fill else 7) * TOPK + 7 * q) / (TOPK + q) for q in range(query_count)]
+                expected = torch.tensor(values, dtype=torch.float32, device=device)[:, None, None].expand_as(actual)
+                torch.testing.assert_close(actual.float(), expected, rtol=0.01, atol=0.08)
+        assert torch.all(source_k == 11).item()
+        assert torch.all(source_r == 13).item()
