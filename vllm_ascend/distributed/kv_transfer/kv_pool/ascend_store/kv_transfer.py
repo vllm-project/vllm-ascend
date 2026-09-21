@@ -1075,10 +1075,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 return mask_allows and not should_skip(chunk_start, chunk_start + group_block_size)
 
             tp_replicas = self.put_step if self.dcp_size <= 1 and not align_state_group else 1
-            # With DCP, PCP ranks hold different token shards. Every shard
-            # must save every block; only replicated caches may split work.
-            pcp_rank = self.pcp_rank if self.dcp_size == 1 else 0
-            pcp_replicas = self.pcp_size if self.dcp_size == 1 else 1
             # PCP=2, TP=4, KV heads=2, tp_replicas=2:
             # PCP  TP (KV 0 / KV 1)  shard_rank  filtered candidates
             #  0        0 / 2            0      0, 4, ...
@@ -1092,8 +1088,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 kv_cache_group_id=group_id,
                 skip_null_blocks=skip_null_blocks,
                 chunk_filter=chunk_filter,
-                shard_rank=pcp_rank * tp_replicas + self.tp_rank % tp_replicas,
-                shard_size=pcp_replicas * tp_replicas,
+                shard_rank=self.pcp_rank * tp_replicas + self.tp_rank % tp_replicas,
+                shard_size=self.pcp_size * tp_replicas,
             )
             for start, end, key, block_hash, block_id in iterator:
                 starts.append(start)

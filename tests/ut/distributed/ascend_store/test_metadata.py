@@ -33,7 +33,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     get_block_hashes,
     get_group_block_size,
     get_group_cache_family,
-    get_pool_rank_shards,
     infer_cache_transfer_granularity,
     infer_group_block_sizes,
     masked_block_runs,
@@ -42,22 +41,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 
 
 class TestCacheLayoutHelpers(unittest.TestCase):
-    def test_physical_rank_shards(self):
-        cases = [
-            ((2, 2, 1, 2), [(0, 0), (0, 1)]),
-            ((2, 2, 2, 2), [(0, 0), (0, 1), (1, 0), (1, 1)]),
-            ((2, 2, 4, 2), [(0, 0), (1, 0), (2, 1), (3, 1)]),
-            ((2, 1, 2, 2), [(0, 0), (1, 1)]),
-            # MLA / GQA replicas, and TP-mismatch subkeys.
-            ((2, 2, 4, 1), [(0, 0), (1, 0), (2, 0), (3, 0)]),
-            ((4, 2, 1, 2), [(0, 0), (0, 1)]),
-            ((2, 2, 1, 4), [(0, 0), (0, 1), (0, 2), (0, 3)]),
-            ((2, 2, 4, 4), [(0, 0), (0, 1), (1, 0), (1, 1), (2, 2), (2, 3), (3, 2), (3, 3)]),
-        ]
-        for topology, expected in cases:
-            with self.subTest(topology=topology):
-                self.assertEqual(get_pool_rank_shards(*topology), expected)
-
     def test_uses_hybrid_kv_cache(self):
         groups = [
             SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16)),
@@ -162,7 +145,6 @@ class TestPoolKey(unittest.TestCase):
             ("kv_cache_group_id", 1),
             ("cache_role", "state"),
             ("cache_family", "swa"),
-            ("kvpp_size", 4),
         ):
             with self.subTest(field=field):
                 other = PoolKey(replace(self.meta, **{field: value}), "hash1")
@@ -201,27 +183,6 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         self.meta = KeyMetadata("llama", 0, 0, 0)
         self.db = ChunkedTokenDatabase([self.meta], block_size=[16], partitions=None)
         self.db.set_group_buffers({0: [1000, 2000]}, {0: [160, 320]}, group_num_layers={0: 1})
-
-    def test_kvpp_key_namespace_survives_object_and_string_paths(self):
-        namespaces = []
-        for size in (1, 2, 4):
-            metadata = replace(self.meta, kvpp_size=size)
-            db = ChunkedTokenDatabase([metadata], block_size=[16], partitions=None)
-            db.set_group_buffers({0: [1000]}, {0: [160]}, group_num_layers={0: 1})
-            object_keys = [key for _, _, key in db.process_tokens(32, ["aaa", "bbb"])]
-            string_keys = [key for _, _, key, _ in db.process_token_key_strings(32, ["aaa", "bbb"])]
-            self.assertEqual([key.to_string() for key in object_keys], string_keys)
-            suffix = f"@kvpp_size:{size}" if size > 1 else ""
-            self.assertEqual(
-                string_keys[0],
-                f"llama@dcp:0@head_or_tp_rank:0@pp_rank:0@group:0@cache_role:kv@cache_family:default{suffix}@aaa",
-            )
-            layer_key = object_keys[0].split_layers(1)[0]
-            self.assertEqual(layer_key.key_metadata.kvpp_size, size)
-            self.assertEqual("@kvpp_size:" in layer_key.to_string(), size > 1)
-            namespaces.append(set(string_keys))
-        for left, right in ((0, 1), (0, 2), (1, 2)):
-            self.assertTrue(namespaces[left].isdisjoint(namespaces[right]))
 
     def test_make_key_by_hash(self):
         key = self.db._make_key_by_hash("abc")

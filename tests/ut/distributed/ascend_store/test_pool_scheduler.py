@@ -58,7 +58,6 @@ def _patch_pool_scheduler_importlib():
 
 def make_config(kv_role="kv_producer", extra_config=None, block_size=16):
     config = MagicMock()
-    config.additional_config = {}
     config.kv_transfer_config.kv_role = kv_role
     config.kv_transfer_config.kv_connector_extra_config = extra_config or {}
     config.kv_transfer_config.get_from_extra_config.return_value = True
@@ -115,7 +114,6 @@ class TestGetZmqRpcPathLookup(unittest.TestCase):
         for extra_config, rank, port in cases:
             with self.subTest(extra_config=extra_config, rank=rank):
                 config = MagicMock()
-                config.additional_config = {}
                 config.parallel_config.data_parallel_rank = rank
                 config.kv_transfer_config.kv_connector_extra_config = extra_config
                 result = get_zmq_rpc_path_lookup(config)
@@ -128,7 +126,7 @@ class TestKVPoolScheduler(unittest.TestCase):
         return make_config(kv_role, extra_config, block_size)
 
     def test_pcp_query_keys_and_worker_count(self):
-        for pcp_size, dcp_size in ((1, 1), (2, 1), (4, 1), (1, 2), (2, 2), (2, 4)):
+        for pcp_size, dcp_size in ((1, 1), (2, 1), (4, 1), (1, 2)):
             with self.subTest(pcp_size=pcp_size, dcp_size=dcp_size):
                 config = self._make_config()
                 config.parallel_config.prefill_context_parallel_size = pcp_size
@@ -141,51 +139,12 @@ class TestKVPoolScheduler(unittest.TestCase):
                 self.assertEqual(scheduler.hash_block_size, 16 * dcp_size)
                 self.assertEqual(scheduler._expected_worker_count, 2 * pcp_size)
                 keys = scheduler._generate_store_query_keys([b"h0"], False, 0)[0]
-                shards = {
-                    (1, 2): [(0, 0), (1, 1)],
-                    (2, 2): [(0, 0), (0, 1), (1, 0), (1, 1)],
-                    (2, 4): [(0, 0), (1, 0), (2, 1), (3, 1)],
-                }.get((pcp_size, dcp_size), [(0, 0), (0, 1)])
                 expected = [
                     f"llama-7b@dcp:{dcp}@head_or_tp_rank:{tp}@pp_rank:0@group:0@cache_role:kv@cache_family:default@6830"
-                    for dcp, tp in shards
+                    for dcp in range(dcp_size)
+                    for tp in range(2)
                 ]
                 self.assertEqual(keys, expected)
-
-    def test_kvpp_queries_every_pcp_tp_owner_and_pipeline_stage(self):
-        config = self._make_config()
-        config.additional_config = {"enable_kvpp": True}
-        config.parallel_config.prefill_context_parallel_size = 2
-        config.parallel_config.tensor_parallel_size = 2
-        config.parallel_config.pipeline_parallel_size = 2
-        config.parallel_config.rank = 3
-        config.model_config.use_mla = True
-        scheduler = KVPoolScheduler(config, use_layerwise=False)
-        self.assertEqual(scheduler.pp_rank, 0)
-        self.assertEqual(scheduler.grouped_block_size, [16])
-        self.assertEqual(scheduler.hash_block_size, 16)
-        expected = [
-            f"llama-7b@dcp:0@head_or_tp_rank:{owner}@pp_rank:{pp}@group:0@cache_role:kv@cache_family:default@kvpp_size:4@6830"
-            for owner in range(4)
-            for pp in range(2)
-        ]
-        self.assertEqual(scheduler._generate_store_query_keys([b"h0"])[0], expected)
-        request = MagicMock(request_id="r", block_hashes=[b"h0", b"h1"])
-        for missing in range(8):
-            with self.subTest(missing=missing):
-                states = [1] * 16
-                states[8 + missing] = 0
-                scheduler.store_scheduler.batch_is_exist.return_value = states
-                self.assertEqual(scheduler._get_store_lookup_hit_tokens(request, 32, 0), 16)
-
-    def test_pcp_does_not_change_pipeline_stage_identity(self):
-        config = self._make_config()
-        config.parallel_config.prefill_context_parallel_size = 2
-        config.parallel_config.tensor_parallel_size = 2
-        config.parallel_config.pipeline_parallel_size = 2
-        for rank, pp_rank in ((0, 0), (3, 0), (4, 1), (7, 1)):
-            config.parallel_config.rank = rank
-            self.assertEqual(KVPoolScheduler(config, use_layerwise=False).pp_rank, pp_rank)
 
     def test_mooncake_layerwise_rejects_tp_mismatch(self):
         config = self._make_config(
@@ -551,7 +510,6 @@ class TestKVPoolScheduler(unittest.TestCase):
 class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
     def _make_config(self, kv_role="kv_producer", block_size=16, extra_config=None, num_layers=2):
         config = MagicMock()
-        config.additional_config = {}
         config.kv_transfer_config.kv_role = kv_role
         config.kv_transfer_config.kv_connector_extra_config = extra_config or {}
         config.kv_transfer_config.get_from_extra_config.return_value = True
@@ -807,7 +765,6 @@ class TestLookupKeyClient(unittest.TestCase):
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.MsgpackEncoder")
     def test_lookup(self, mock_encoder_cls, mock_zmq, mock_make_socket):
         config = MagicMock()
-        config.additional_config = {}
         config.parallel_config.data_parallel_rank = 0
         config.kv_transfer_config.kv_connector_extra_config = {}
 
@@ -835,7 +792,6 @@ class TestLookupKeyClient(unittest.TestCase):
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.zmq")
     def test_close(self, mock_zmq, mock_make_socket):
         config = MagicMock()
-        config.additional_config = {}
         config.parallel_config.data_parallel_rank = 0
         config.kv_transfer_config.kv_connector_extra_config = {}
 
@@ -1045,7 +1001,6 @@ class TestKVPoolSchedulerMambaGroups(unittest.TestCase):
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_no_config(self, mock_client_cls):
         config = MagicMock()
-        config.additional_config = {}
         config.kv_transfer_config.kv_role = "kv_producer"
         config.kv_transfer_config.kv_connector_extra_config = {}
         config.kv_transfer_config.get_from_extra_config.return_value = True
