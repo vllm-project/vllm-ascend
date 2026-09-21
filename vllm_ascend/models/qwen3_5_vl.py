@@ -139,11 +139,12 @@ class _AscendVLPreprocessMixin:
             img = chunk.reshape(1, c, h, w).float()
             # bicubic + antialias reproduces HF/PIL resize (cosine sim 0.999996)
             img = F.interpolate(img, size=[gh * ps, gw * ps], mode="bicubic", align_corners=False, antialias=True)
-            img = img.clamp(0, 255).round().squeeze(0)
-            # patchify: (C, rh, rw) -> (gh*gw, C*tps*ps*ps), HF layout
-            x = img.reshape(c, gh // ms, ms, ps, gw // ms, ms, ps)
-            x = x.permute(1, 4, 2, 5, 0, 3, 6)
-            x = x.unsqueeze(5).expand(-1, -1, -1, -1, -1, tps, -1, -1)
+            img = img.clamp(0, 255).round()
+            # patchify: same reshape/permute/expand sequence as HF's patchify,
+            # with the batch dim kept so the permute indices match HF exactly
+            x = img.reshape(1, c, gh // ms, ms, ps, gw // ms, ms, ps)
+            x = x.permute(0, 2, 5, 3, 6, 1, 4, 7)
+            x = x.unsqueeze(6).expand(-1, -1, -1, -1, -1, -1, tps, -1, -1)
             patches.append(x.reshape(gh * gw, c * tps * ps * ps))
         return torch.cat(patches)
 
