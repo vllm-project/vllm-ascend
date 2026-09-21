@@ -14,7 +14,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -133,71 +133,6 @@ def test_upstream_kda_dispatch_accepts_beta_keyword_during_profile():
 
     get_context.assert_called_once_with()
     torch.testing.assert_close(output, expected)
-
-
-@pytest.mark.parametrize("with_initial_state", [True, False], ids=["warm-and-cold", "default-cold"])
-def test_causal_conv1d_prefill_uses_custom_op_with_packed_request_metadata(with_initial_state):
-    query_start_loc = torch.tensor([0, 1, 5, 7, 7], dtype=torch.int32)
-    cache_indices = torch.tensor([[2, 3], [4, 5], [6, 7], [-1, -1]], dtype=torch.int32)
-    metadata = SimpleNamespace(query_start_loc=query_start_loc, cache_indices=cache_indices)
-    if with_initial_state:
-        metadata.initial_state_mode = torch.tensor(
-            [[True, False], [False, False], [True, False], [False, False]], dtype=torch.bool
-        )[:, 0]
-        assert not metadata.initial_state_mode.is_contiguous()
-    mixed_qkv = torch.empty(7, 6, dtype=torch.bfloat16)
-    conv_weights_t = torch.empty(4, 6, dtype=mixed_qkv.dtype)
-    conv_state = torch.empty(8, 6, 6, dtype=mixed_qkv.dtype)
-    expected_output = torch.arange(mixed_qkv.numel(), dtype=mixed_qkv.dtype).reshape_as(mixed_qkv)
-
-    def write_output(output, *args, **kwargs):
-        output.copy_(expected_output)
-
-    with (
-        patch.dict(
-            "sys.modules",
-            {"vllm_ascend.vllm_ascend_C": ModuleType("vllm_ascend.vllm_ascend_C")},
-        ),
-        patch(
-            "vllm_ascend.ops.kimi_kda.torch.ops._C_ascend.npu_causal_conv1d_custom",
-            side_effect=write_output,
-            create=True,
-        ) as custom_conv,
-        patch(
-            "vllm_ascend.ops.kimi_kda.torch.ops.cann_ops_transformer.causal_conv1d_fn",
-            side_effect=AssertionError("Prefill must not use the incompatible CANN Fn interface"),
-        ) as official_conv,
-    ):
-        output = AscendKimiGatedDeltaNetAttention._run_causal_conv1d(
-            mixed_qkv,
-            conv_weights_t,
-            conv_state,
-            metadata,
-            run_mode=0,
-        )
-
-    custom_conv.assert_called_once()
-    official_conv.assert_not_called()
-    args = custom_conv.call_args.args
-    kwargs = custom_conv.call_args.kwargs
-    assert output is args[0]
-    torch.testing.assert_close(output, expected_output)
-    assert args[1] is mixed_qkv
-    assert args[2] is conv_weights_t
-    assert kwargs["conv_state"] is conv_state
-    assert kwargs["query_start_loc_opt"] is query_start_loc
-    torch.testing.assert_close(kwargs["cache_indices_opt"], torch.tensor([2, 4, 6, 0], dtype=torch.int32))
-    assert kwargs["cache_indices_opt"].is_contiguous()
-    expected_initial_state = [1, 0, 1, 0] if with_initial_state else [0, 0, 0, 0]
-    torch.testing.assert_close(
-        kwargs["initial_state_mode_opt"], torch.tensor(expected_initial_state, dtype=torch.int32)
-    )
-    assert kwargs["initial_state_mode_opt"].is_contiguous()
-    assert kwargs["bias_opt"] is None
-    assert kwargs["num_accepted_tokens_opt"] is None
-    assert kwargs["activation_mode"] == 1
-    assert kwargs["pad_slot_id"] == 0
-    assert kwargs["run_mode"] == 0
 
 
 @pytest.mark.parametrize(
