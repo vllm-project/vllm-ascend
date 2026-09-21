@@ -17,6 +17,7 @@ from torch import nn
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import (
@@ -46,6 +47,8 @@ from vllm_ascend.worker.device_metadata import (
 )
 
 V41_METADATA_BUFFER_SIZE = 1024
+
+_v41_logger = init_logger(__name__)
 
 
 @eager_break_during_capture
@@ -651,11 +654,50 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         # remain independent; the builder owns the operator metadata buffers.
         return self.build(0, common_attn_metadata)
 
-    def enable_device_metadata(self) -> None:
-        self._device_metadata_enabled = True
+    def prepare_source_rope(self) -> None:
+        """Validate and cache V4.1 source RoPE tables without async tasks.
+
+        MRV2 keeps metadata tasks synchronous (``_publish_task`` runs them
+        inline), so this must NOT flip ``_device_metadata_enabled`` — only
+        ``enable_device_metadata`` may turn the async task switch on.
+        """
+        flag_before = self._device_metadata_enabled
+        _v41_logger.info(
+            "V4.1 %s.prepare_source_rope enter: device_metadata_enabled=%s tasks=%d",
+            type(self).__name__,
+            flag_before,
+            len(self._device_metadata_tasks),
+        )
         if self._build_compressor_metadata and self._cache_kind == "compressor_state":
             source_rope = get_full_cos_and_sin_dsa_for_layer(self._c2_rope_layer_names[0])
             self._c2_full_source_rope = source_rope
+        if self._device_metadata_enabled != flag_before:
+            _v41_logger.error(
+                "V4.1 %s.prepare_source_rope flipped device_metadata_enabled %s -> %s",
+                type(self).__name__,
+                flag_before,
+                self._device_metadata_enabled,
+            )
+        _v41_logger.info(
+            "V4.1 %s.prepare_source_rope exit: device_metadata_enabled=%s (rope_cached=%s)",
+            type(self).__name__,
+            self._device_metadata_enabled,
+            self._c2_full_source_rope is not None,
+        )
+
+    def enable_device_metadata(self) -> None:
+        _v41_logger.info(
+            "V4.1 %s.enable_device_metadata enter: device_metadata_enabled=%s",
+            type(self).__name__,
+            self._device_metadata_enabled,
+        )
+        self._device_metadata_enabled = True
+        self.prepare_source_rope()
+        _v41_logger.info(
+            "V4.1 %s.enable_device_metadata exit: device_metadata_enabled=%s",
+            type(self).__name__,
+            self._device_metadata_enabled,
+        )
 
     def take_device_metadata_tasks(self) -> tuple[DeviceMetadataTask, ...]:
         tasks = self._device_metadata_tasks
