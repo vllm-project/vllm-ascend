@@ -7,7 +7,11 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-from vllm_ascend.ops.layernorm import AscendFusedRMSNormGated
+from vllm_ascend.ops.layernorm import (
+    AscendFusedRMSNormGated,
+    AscendRMSNormGated,
+    LayerNormFn,
+)
 from vllm_ascend.utils import enable_custom_op
 
 enable_custom_op()
@@ -108,6 +112,52 @@ def test_FusedRMSNormGated_dispatches_to_ascend_kernel(default_vllm_config):
         prenorm=True,
         residual_in_fp32=True,
     )
+
+
+@pytest.mark.parametrize("activation", ["sigmoid", "swish"])
+def test_RMSNormGated_forwards_activation(default_vllm_config, activation):
+    layer = AscendRMSNormGated(
+        hidden_size=8,
+        eps=1e-6,
+        norm_before_gate=True,
+        activation=activation,
+    )
+    x = torch.randn(2, 8)
+    z = torch.randn_like(x)
+    expected = torch.empty_like(x)
+
+    with patch.object(LayerNormFn, "apply", return_value=expected) as apply:
+        assert layer.forward_oot(x, z) is expected
+
+    assert apply.call_args.args[-1] == activation
+
+
+def test_LayerNormFn_forwards_sigmoid_to_npu_kernel(default_vllm_config):
+    x = torch.randn(2, 8)
+    z = torch.randn_like(x)
+    weight = torch.ones(8)
+    bias = torch.zeros(8)
+    expected = torch.empty_like(x)
+    rstd = torch.ones(2)
+
+    with patch(
+        "vllm_ascend.ops.layernorm.layer_norm_fwd_npu",
+        return_value=(expected, None, rstd),
+    ) as npu_kernel:
+        actual = LayerNormFn.apply(
+            x,
+            weight,
+            bias,
+            z,
+            1e-6,
+            None,
+            True,
+            True,
+            "sigmoid",
+        )
+
+    assert actual.data_ptr() == expected.data_ptr()
+    assert npu_kernel.call_args.kwargs["activation"] == "sigmoid"
 
 
 @pytest.mark.skipif(
