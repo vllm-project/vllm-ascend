@@ -32,11 +32,8 @@ _GRAPH_ENV = {
 _MTP_MODEL = "google/gemma-4-26B-A4B-it"
 _MTP_DRAFT_MODEL = "google/gemma-4-26B-A4B-it-assistant"
 _MTP_NUM_SPECULATIVE_TOKENS = 3
-# Loose floor per draft position. It does not pin an exact profile (that depends
-# on the checkpoint and the hardware) but it does catch the failure this test
-# exists for: a Gemma4 draft that does not share the target's KV cache reads its
-# own empty cache, so every draft token is rejected and every position sits at
-# ~0.
+# Loose floor: catches a draft that reads its own empty cache (~0 acceptance)
+# without pinning a profile that depends on the checkpoint and the hardware.
 _MTP_MIN_ACCEPTANCE_PER_POS = 0.3
 
 
@@ -92,12 +89,7 @@ def test_gemma4_26b_a4b_moe_full_decode_graph() -> None:
 @patch.dict(os.environ, {**_GRAPH_ENV, "VLLM_USE_V2_MODEL_RUNNER": "1"})
 @wait_until_npu_memory_free()
 def test_gemma4_mtp_spec_decode_model_runner_v2() -> None:
-    """Gemma4 MTP is routed to its own speculator on Model Runner V2.
-
-    Guards against a Gemma4 draft that ends up on a speculator without
-    cross-model KV sharing: the draft then reads its own empty cache and every
-    draft token is rejected (acceptance collapses to ~0).
-    """
+    """Gemma4 MTP keeps its acceptance on Model Runner V2."""
     from vllm import SamplingParams
 
     sampling_params = SamplingParams(temperature=0, max_tokens=64)
