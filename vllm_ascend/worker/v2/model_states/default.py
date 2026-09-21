@@ -42,7 +42,9 @@ class AscendModelState(DefaultModelState):
     kvpp_runtime: "KVPPRuntime | None" = None
     kvpp_is_dummy_run: bool = False
 
-    def _get_engram_history_inputs(self, input_batch: AscendInputBatch) -> tuple[torch.Tensor, torch.Tensor, int] | None:
+    def _get_engram_history_inputs(
+        self, input_batch: AscendInputBatch
+    ) -> tuple[torch.Tensor, torch.Tensor, int] | None:
         """MRV2 counterpart of model_runner_v1._get_engram_history_inputs.
 
         The engram hook runs before set_forward_context(), so the runner-side

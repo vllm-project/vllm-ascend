@@ -1112,10 +1112,7 @@ def _reshape_kv_cache_v2(
                 )
                 kv_cache_shape_list = [kv_cache_shape]
                 kv_cache_dtype_list = [kv_cache_spec.dtype]
-                is_index = (
-                    isinstance(kv_cache_spec, AscendMLAAttentionSpec)
-                    and kv_cache_spec.scale_dim
-                )
+                is_index = isinstance(kv_cache_spec, AscendMLAAttentionSpec) and kv_cache_spec.scale_dim
                 if is_index:
                     source_name = layer_name.removesuffix(".indexer.k_cache") + ".long_kv_cache"
                     source_spec = layer_kv_cache_spec[source_name]
