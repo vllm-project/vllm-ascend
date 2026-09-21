@@ -92,6 +92,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     plan_sparse_kv_offload_memory,
 )
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
+from vllm_ascend.eplb.diagnostics.runtime import initialize_diagnostics, run_dummy_batch, start_diagnostics
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
 from vllm_ascend.utils import (
@@ -833,6 +834,7 @@ class NPUWorker(WorkerBase):
 
         with context, set_current_vllm_config(self.vllm_config):
             self.model_runner.load_model()
+            initialize_diagnostics(self.model_runner)
 
         if self.vllm_config.weight_transfer_config is not None:
             from vllm.distributed.weight_transfer.factory import (
@@ -940,6 +942,7 @@ class NPUWorker(WorkerBase):
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
+        start_diagnostics(self.model_runner)
         return CompilationTimes(
             language_model=self.vllm_config.compilation_config.compilation_time,
             # `encoder_compilation_time` was added after v0.19.1 (vLLM #39240); fall
@@ -1202,10 +1205,16 @@ class NPUWorker(WorkerBase):
     def reset_encoder_cache(self) -> None:
         self.model_runner.reset_encoder_cache()
 
+    def finish_eplb_diagnostics(self) -> None:
+        """Collect the final partial window; invoke on all EP workers after generation."""
+        recorder = getattr(self.model_runner, "_eplb_diagnostics_recorder", None)
+        if recorder is not None:
+            recorder.finish()
+
     def execute_dummy_batch(self) -> None:
         self.log_memory_stats()
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
-        self.model_runner._dummy_run(num_tokens, uniform_decode=True)
+        run_dummy_batch(self.model_runner, num_tokens)
 
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""

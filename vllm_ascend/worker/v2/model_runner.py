@@ -60,6 +60,7 @@ from vllm_ascend.core.profiling_chunk_predictor import (
     _finish_profiling_chunk_timing,
     _start_profiling_chunk_timing,
 )
+from vllm_ascend.eplb.diagnostics.runtime import annotate_batch, record_diagnostics
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import lmhead_tp_enable, set_potential_max_tokens, vllm_version_is
 from vllm_ascend.worker.utils import disable_compilation
@@ -289,6 +290,7 @@ class NPUModelRunner(GPUModelRunner):
         self.model_state.kvpp_runtime = self.kvpp
 
     @torch.inference_mode()
+    @record_diagnostics
     def execute_model(
         self,
         scheduler_output: SchedulerOutput,
@@ -494,6 +496,14 @@ class NPUModelRunner(GPUModelRunner):
         query_start_loc_np = query_start_loc_np[: num_reqs_padded + 1]
         query_start_loc = query_start_loc[: num_reqs_padded + 1]
         self.eplb.set_batch_phase(batch_req_state.has_prefill)
+        if self.ascend_config.eplb_diagnostics.mode != "off":
+            prefill_mask = batch_req_state.is_prefilling_np
+            annotate_batch(
+                self,
+                phase="prefill" if prefill_mask.all() else ("mixed" if prefill_mask.any() else "decode"),
+                padded_tokens=num_tokens_after_padding,
+                graph_mode=str(batch_desc.cg_mode),
+            )
 
         # Get prefill tokens if any.
         if batch_req_state.has_prefill:

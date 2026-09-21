@@ -22,10 +22,12 @@ import torch.nn as nn
 import torch_npu
 from vllm.distributed.parallel_state import (
     get_dp_group,
+    get_ep_group,
     get_pcp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 
@@ -33,6 +35,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.lora.fused_moe import prepare_lora_indices
 from vllm_ascend.ops.fused_moe.dataclass.prepare_finalize import MoEPrepareOutput
 from vllm_ascend.ops.fused_moe.moe_utils import _pad_tokens_with_cat
+from vllm_ascend.ops.register_custom_ops import _get_ep_local_sizes
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
 
@@ -56,6 +59,10 @@ class PrepareAndFinalize(ABC):
 
     def set_lora_context(self, lora_context) -> None:
         self.lora_context = lora_context
+
+    def diagnostic_source_routes(self, ids, source_tokens, mask, padded_shape):
+        """Return (source-owned routes, validity mask, TP source offset), or None."""
+        return None
 
     @abstractmethod
     def prepare(
@@ -125,6 +132,15 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
         """Restore original TP configuration (same as MC2)."""
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
+
+    def diagnostic_source_routes(self, ids, source_tokens, mask, padded_shape):
+        if self.replace_allreduce:
+            offset = self.tp_rank * source_tokens
+        else:
+            # tensor_split gives earlier ranks one extra row for uneven sizes.
+            size, remainder = divmod(padded_shape[0], self.tp_size)
+            offset = self.tp_rank * size + min(self.tp_rank, remainder)
+        return ids, mask, offset
 
     def prepare(
         self,
@@ -239,6 +255,11 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
     def __init__(self, moe_config: FusedMoEConfig):
         super().__init__(moe_config)
         self._restore_tp_across_dp()
+
+    def diagnostic_source_routes(self, ids, source_tokens, mask, padded_shape):
+        if mask is None:
+            return None
+        return super().diagnostic_source_routes(ids, source_tokens, mask, padded_shape)
 
     def _restore_tp_across_dp(self):
         """
@@ -378,6 +399,40 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         routing.
         """
         return self.moe_config.is_sequence_parallel
+
+    def diagnostic_source_routes(self, ids, source_tokens, mask, padded_shape):
+        # Count only this rank's original sources, not replicated routes.
+        # The device-side scheduled-token scalar removes real padding.
+        tp_rank = get_tensor_model_parallel_rank()
+        offset = 0
+        if not self._use_ep_sequence_parallel():
+            if tp_rank != 0:
+                return ids[:0], None, 0
+            start = (
+                self.moe_config.dp_group.rank_in_group * _EXTRA_CTX.max_tokens_across_dp
+                if self.moe_config.dp_size > 1
+                else 0
+            )
+            length = source_tokens
+        else:
+            ep_group = get_ep_group()
+            metadata = get_forward_context().dp_metadata
+            local_sizes = _get_ep_local_sizes(metadata, ep_group)
+            offset = tp_rank * source_tokens
+            if local_sizes is not None:
+                start = sum(local_sizes[: ep_group.rank_in_group])
+                length = local_sizes[ep_group.rank_in_group]
+            elif metadata is None:
+                start, length = ep_group.rank_in_group * source_tokens, source_tokens
+            else:
+                # Same DP compaction as maybe_all_gather_and_maybe_unpad.
+                sizes = metadata.num_tokens_across_dp_cpu.tolist()
+                dp_rank = get_dp_group().rank_in_group
+                length = min(source_tokens, max(0, sizes[dp_rank] - offset))
+                start = sum(sizes[:dp_rank]) + min(offset, sizes[dp_rank])
+        if start < 0 or length < 0 or start + length > ids.shape[0]:
+            return None
+        return ids[start : start + length], None, offset
 
     def prepare(
         self,
