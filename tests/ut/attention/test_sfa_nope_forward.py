@@ -211,11 +211,24 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, em
 
     indexer.head_dim = latent_dim
     indexer.enable_sparse_li_c8 = False
-    config = SimpleNamespace(kv_transfer_config=None, model_config=SimpleNamespace(hf_config=SimpleNamespace()))
-    ascend_config = SimpleNamespace(enable_sparse_sfa_c8=False, enable_mlapo=False)
+    config = SimpleNamespace(
+        kv_transfer_config=None,
+        weight_transfer_config=None,
+        model_config=SimpleNamespace(hf_config=SimpleNamespace()),
+    )
+    ascend_config = SimpleNamespace(
+        enable_sparse_sfa_c8=False,
+        enable_mlapo=False,
+        rl_config=SimpleNamespace(enabled=False),
+    )
     with (
         patch.object(sparse_mla, "get_current_vllm_config", return_value=config),
         patch.object(sparse_mla, "get_ascend_config", return_value=ascend_config),
+        # `AscendSFAImpl.__init__` asks `vllm_ascend.utils` whether RL pushes
+        # weights into the live model, and that module holds its own reference
+        # to the config singleton, so patching the `sfa_v1` name alone leaves
+        # the predicate reading the real (uninitialised) config.
+        patch("vllm_ascend.utils.get_ascend_config", return_value=ascend_config),
         patch.object(sparse_mla, "get_tensor_model_parallel_world_size", return_value=1),
         patch.object(sparse_mla, "enable_sp", return_value=False),
     ):
@@ -265,7 +278,7 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, em
             side_effect=_reference_sparse_attention,
             create=True,
         ) as sparse_attention,
-        patch.object(sparse_mla, "record_attention_compute_start"),
+        patch.object(sparse_mla, "attention_transfer_window"),
         patch.object(sparse_mla, "wait_for_kv_layer_from_connector"),
         patch.object(sparse_mla, "notify_kv_cache_written"),
         patch.object(sparse_mla, "maybe_save_kv_layer_to_connector"),

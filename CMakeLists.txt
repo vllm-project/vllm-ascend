@@ -97,8 +97,10 @@ include_directories(
   ${pybind11_INCLUDE_DIRS}
   ${PYTHON_INCLUDE_PATH}
   ${TORCH_INCLUDE_DIRS}
-  ${TORCH_NPU_PATH}/include
+  # Prefer the selected CANN toolkit headers over the ACL snapshot bundled in
+  # some torch_npu wheels. Feature checks below use ASCEND_HOME_PATH as well.
   ${ASCEND_HOME_PATH}/include
+  ${TORCH_NPU_PATH}/include
 )
 
 set(
