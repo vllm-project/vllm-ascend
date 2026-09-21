@@ -1120,6 +1120,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             token_to_req,
             capturing=self._in_graph_runtime(),
             skip_topk=self.skip_topk,
+            query_ends_npu=decode_cum_query_lens,
         )
         decode_attn_output = DeviceOperator.execute_sparse_flash_attention_process(
             self,
@@ -1133,6 +1134,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             block_table=resident_block_table,
         )
         if num_prefills == 0:
+            manager.finish_local_kv_forward(layer_name)
             return self._pad_to_input_tokens(decode_attn_output, ql_nope.shape[0])
 
         # Mixed batch (colocate debug only): prefill rows still attend the NPU

@@ -2554,6 +2554,41 @@ HOT_FUNCTION void lru_resident_compact_with_plan_stable_rows(
                             physical_row_workspace_ptr, physical_row_capacity, visible_seq_lens_ptr);
 }
 
+// Zero only the lengths of fresh rows. The existing resident compaction and
+// layout (all K descriptors, then all V descriptors) are preserved for followers.
+void mask_fresh_kv_loads(const at::Tensor& counts, const at::Tensor& tokens,
+                         const at::Tensor& stable_prefix, at::Tensor& sizes) {
+  TORCH_CHECK(counts.device().is_cpu() && tokens.device().is_cpu() &&
+              stable_prefix.device().is_cpu() && sizes.device().is_cpu(), "CPU descriptors required");
+  TORCH_CHECK(counts.scalar_type() == at::kInt && tokens.scalar_type() == at::kInt &&
+              stable_prefix.scalar_type() == at::kInt && sizes.scalar_type() == at::kInt,
+              "Descriptor tensors must be int32");
+  TORCH_CHECK(counts.is_contiguous() && tokens.is_contiguous() &&
+              stable_prefix.is_contiguous() && sizes.is_contiguous(), "Contiguous descriptors required");
+  TORCH_CHECK(tokens.dim() == 2, "Miss tokens must have shape [rows, topk]");
+  const int64_t rows = tokens.size(0), topk = tokens.size(1);
+  TORCH_CHECK(counts.numel() >= rows && stable_prefix.numel() >= rows, "Metadata is shorter than rows");
+  auto* count = counts.data_ptr<int32_t>();
+  auto* token = tokens.data_ptr<int32_t>();
+  auto* prefix = stable_prefix.data_ptr<int32_t>();
+  auto* length = sizes.data_ptr<int32_t>();
+  int64_t total = 0;
+  for (int64_t r = 0; r < rows; ++r) {
+    TORCH_CHECK(count[r] >= 0 && count[r] <= topk, "Invalid LRU miss count");
+    total += count[r];
+  }
+  TORCH_CHECK(sizes.numel() >= 2 * total, "Descriptor lengths capacity exceeded");
+  int64_t offset = 0;
+  for (int64_t r = 0; r < rows; ++r) {
+    for (int64_t j = 0; j < count[r]; ++j, ++offset) {
+      if (token[r * topk + j] >= prefix[r]) {
+        length[offset] = 0;
+        length[total + offset] = 0;
+      }
+    }
+  }
+}
+
 int64_t compute_lru_resident_addrs(const at::Tensor& miss_count, const at::Tensor& miss_tokens,
                                    const at::Tensor& miss_slots, const at::Tensor& block_table,
                                    const int64_t block_size, const int64_t token_size_bytes_k,
@@ -3052,6 +3087,10 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("sparse_kv_enqueue_lru_resident_compact_with_plan_stable_rows",
              c10::DispatchKey::CompositeExplicitAutograd,
              &vllm_ascend::enqueue_lru_resident_compact_with_plan_stable_rows);
+
+    ops.def("sparse_kv_mask_fresh_kv_loads(Tensor counts, Tensor tokens, "
+            "Tensor stable_prefix, Tensor(a!) sizes) -> ()");
+    ops.impl("sparse_kv_mask_fresh_kv_loads", torch::kCPU, &vllm_ascend::mask_fresh_kv_loads);
 
     ops.def("sparse_kv_compute_lru_resident_addrs(Tensor miss_count, Tensor miss_tokens, Tensor miss_slots, "
             "Tensor block_table, int block_size, int token_size_bytes_k, int token_size_bytes_v, "

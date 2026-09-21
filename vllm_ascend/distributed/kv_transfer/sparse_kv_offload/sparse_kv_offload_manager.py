@@ -13,7 +13,7 @@ with contextlib.suppress(Exception):
     # ProvisioningError rather than ImportError when the CANN build toolchain is incomplete.
     # Sparse KV offload is opt-in, so nothing here may abort worker startup.
     from memfabric_hybrid import offload  # type: ignore
-from vllm.config import VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -479,6 +479,15 @@ class SparseKVOffloadManager:
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
         self.sparse_kv_offload_config = sparse_kv_offload_config
+        self.local_kv_writeback_overlap = sparse_kv_offload_config.local_kv_writeback_overlap
+        if self.local_kv_writeback_overlap and vllm_config.compilation_config.cudagraph_mode not in (
+            CUDAGraphMode.NONE,
+            CUDAGraphMode.FULL,
+            CUDAGraphMode.FULL_DECODE_ONLY,
+        ):
+            raise ValueError("Local KV writeback overlap requires eager or a full decode graph")
+        self.local_kv_active = False
+        self.local_writeback = None
 
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
@@ -491,6 +500,8 @@ class SparseKVOffloadManager:
         self.topk_buffer_size = sparse_kv_offload_config.topk_buffer_size
         self.topk = sparse_kv_offload_config.topk
         self.use_fused_overlap = sparse_kv_offload_config.use_fused_overlap
+        if self.local_kv_writeback_overlap and self.use_fused_overlap:
+            raise ValueError("Local KV writeback overlap cannot be combined with use_fused_overlap")
 
         self.max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
@@ -761,6 +772,21 @@ class SparseKVOffloadManager:
             )
         self.token_size_bytes_k = kv_head_num * head_dim_k * dtype.itemsize
         self.token_size_bytes_v = kv_head_num * head_dim_v * dtype.itemsize
+        if self.local_kv_writeback_overlap:
+            from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.local_kv_writeback import (
+                LocalKVWriteback,
+            )
+
+            self.local_writeback = LocalKVWriteback(
+                self.num_layers,
+                self.max_num_tokens,
+                head_dim_k,
+                head_dim_v,
+                self.topk_buffers_k[0].device,
+                dtype,
+                self.tp_rank == 0,
+            )
+            self.local_visibility_token = torch.zeros((), dtype=torch.int8, device=self.topk_buffers_k[0].device)
         if self.topk_buffer_size % self.block_size != 0:
             raise ValueError(
                 "Sparse KV offload topk_buffer_size must be divisible by "
@@ -1076,6 +1102,51 @@ class SparseKVOffloadManager:
 
     def offload_new_kv(
         self,
+        layer_name,
+        slot_mapping,
+        k_cache_cpu,
+        v_cache_cpu,
+        k_cache_npu,
+        v_cache_npu,
+        k,
+        v,
+        has_prefill=False,
+        capturing=False,
+    ):
+        kwargs = dict(
+            slot_mapping=slot_mapping,
+            k_cache_cpu=k_cache_cpu,
+            v_cache_cpu=v_cache_cpu,
+            k_cache_npu=k_cache_npu,
+            v_cache_npu=v_cache_npu,
+            k=k,
+            v=v,
+            has_prefill=has_prefill,
+            capturing=capturing,
+        )
+        self.local_kv_active = self.local_kv_writeback_overlap and not kwargs.get("has_prefill", False)
+        if not self.local_kv_active:
+            return self._offload_new_kv_existing(layer_name=layer_name, **kwargs)
+        if layer_name is None:
+            raise ValueError("Local KV writeback requires the layer name")
+        layer_id = self._get_offload_layer_id(layer_name)
+        if layer_id in (0, self.mtp_layer_id) and self.tp_size > 1:
+            # The preceding forward joined TP0's writeback stream. Publish
+            # that history BEFORE this forward can read it on another rank.
+            self.tp_group.broadcast(self.local_visibility_token, src=0)
+        k, v, slots = self.local_writeback.stage(layer_id, kwargs["k"], kwargs["v"], kwargs["slot_mapping"])
+        staged = dict(kwargs, k=k, v=v, slot_mapping=slots)
+        self.local_writeback.submit(layer_id, self._offload_new_kv_on_current_stream, **staged)
+
+    def finish_local_kv_forward(self, layer_name):
+        if not self.local_kv_active:
+            return
+        layer_id = self._get_offload_layer_id(layer_name)
+        if layer_id in (self.num_target_layers - 1, self.mtp_layer_id):
+            self.local_writeback.finish_forward()
+
+    def _offload_new_kv_existing(
+        self,
         layer_name: str,
         slot_mapping: torch.Tensor,
         k_cache_cpu: torch.Tensor | None,
@@ -1225,6 +1296,7 @@ class SparseKVOffloadManager:
         token_to_req_npu: torch.Tensor | None = None,
         capturing: bool = False,
         skip_topk: bool = False,
+        query_ends_npu: torch.Tensor | None = None,
     ):
         layer_id = self._get_offload_layer_id(layer_name)
         if num_tokens > self.max_num_topk_rows:
@@ -1302,6 +1374,7 @@ class SparseKVOffloadManager:
                 self.size_buffer_cpu,
                 self.num_tokens_buffer_cpu,
                 layer_id,
+                self.local_kv_active,
             )
 
             if capturing:
@@ -1320,7 +1393,7 @@ class SparseKVOffloadManager:
 
             self.sparse_copy_args_buffer_npu.copy_(self.sparse_copy_args_buffer_cpu, non_blocking=capturing)
 
-        if self.tp_size > 1:
+        if self.tp_size > 1 and not self.local_kv_active:
             # Make sure that tp0 d2h is finished before other tp's h2d.
             # NOTE we can't use barrier since it can't be captured in graph.
             self.tp_group.broadcast(torch.empty([], dtype=torch.int8, device="npu"), src=0)
@@ -1334,6 +1407,23 @@ class SparseKVOffloadManager:
 
         current_slots_cpu = self.lru_current_slots_cpu[:num_tokens]
         current_slots_npu[:num_tokens].copy_(current_slots_cpu, non_blocking=capturing)
+        if self.local_kv_active:
+            from vllm_ascend.ops.triton.local_kv_fill import fill_local_kv
+
+            fill_local_kv(
+                self.local_writeback.k[layer_id],
+                self.local_writeback.v[layer_id],
+                self.topk_buffers_k[layer_id],
+                self.topk_buffers_v[layer_id],
+                topk_indices_npu[:num_tokens],
+                current_slots_npu[:num_tokens],
+                stable_prefix_lens_npu[:num_tokens],
+                token_to_req_npu,
+                query_ends_npu,
+                req_ids_npu[:num_tokens],
+                self.local_writeback.slots[layer_id],
+                self.topk_buffer_size,
+            )
 
     def prepare_fused_overlap_external_plan(
         self,
@@ -1593,6 +1683,7 @@ class SparseKVOffloadManager:
             size_buffer,
             num_tokens_buffer,
             layer_id,
+            local_kv_active,
         ) = args
         sparse_kv_ops = _sparse_kv_ops()
         sparse_kv_ops.sparse_kv_lru_resident_compact(
@@ -1637,6 +1728,16 @@ class SparseKVOffloadManager:
             size_buffer,
             num_tokens_buffer,
         )
+
+        if local_kv_active:
+            # Length zero is the same no-op used for padded D2H descriptors.
+            # Keep resident/LRU slot assignment, but never read fresh CPU KV.
+            sparse_kv_ops.sparse_kv_mask_fresh_kv_loads(
+                miss_count,
+                miss_tokens,
+                self.lru_stable_prefix_lens_cpu[:num_reqs],
+                size_buffer,
+            )
 
 
 _SPARSE_KV_OFFLOAD_MANAGER: SparseKVOffloadManager | None = None
