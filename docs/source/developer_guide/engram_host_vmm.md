@@ -5,7 +5,8 @@ That prerequisite merged as `200309da4198f8c150d4dd365e55e98cb88b8400`.
 This follow-up now targets the current main Engram interfaces in `engram/npu.py`.
 It integrates VMM storage into the model, checkpoint loader, graph input
 preparation, worker shutdown and native build. It is not an example or a
-runtime monkey patch. The PR remains draft pending combined-revision NPU validation.
+runtime monkey patch. Bounded A3 E2E validation has passed; broader concurrency,
+performance acceptance and community CI remain draft gates.
 
 ## Enable
 
@@ -153,7 +154,25 @@ improve every TTFT metric. Serial token-ID checks matched; concurrent outputs
 also varied in baseline repeats. The earlier preparation-chain7x microbenchmark
 is not an E2E claim.
 
-The native library was freshly compiled and ABI2-loaded in the tested A3 image.
-The new follow-up's full model integration has **not** yet been validated on
-its exact combined dependency/framework revision. Prior E2E results must not be
-reported as fresh measurements of this PR.
+## Rebased integration validation (2026-09-21)
+
+The rebased runtime at `302d2a64c` was tested with pinned vLLM
+`84030bbe3d74d99bad477a3d2e37a973ccd8865c` on the same A3 image, with newly
+built native extensions and ACLNN operators. Real-CANN lifecycle/fault tests,
+two-consumer full208GiB sampled lookup, two VMM model boots and one HBM boot
+passed. All66HTTP requests completed; both VMM boots matched six serial HBM
+responses including complete token IDs. The final production typing fix also
+passed two-NPU lookup; subsequent `b946b2ba1` changes only test doubles.
+
+Short matched tests (eight requests per concurrency) measured HBM/VMM
+48.18/49.35tok/s at C1 and80.98/72.24tok/s at C4. An earlier VMM boot measured
+19.44tok/s at C4; the cause of that variability is unproven. These are bounded
+sanity measurements, not established throughput parity. Concurrent token IDs
+matched8/8 at C1 and5/8 at C4; this revision lacks a repeated HBM control to
+explain the latter. The draft remains open for those acceptance questions.
+
+The real-framework unit suite passed25tests and failed the pre-existing UVA
+scale-registration test with `aclrtHostRegisterV2 rc=507899 size=160`, also
+reproduced on unmodified main. VMM tests passed; that UVA failure is not a pass.
+See the PR description for current CI and evidence boundaries. The older
+performance table above remains historical, not a measurement of this revision.
