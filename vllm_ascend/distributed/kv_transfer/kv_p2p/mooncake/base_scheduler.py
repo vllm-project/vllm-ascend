@@ -64,7 +64,6 @@ class MooncakeBaseConnectorScheduler:
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
-        assert self.pcp_size == 1, f"Mooncake temporarily requires prefill context parallel size 1, got {self.pcp_size}"
         self.dcp_size = vllm_config.parallel_config.decode_context_parallel_size
         self.max_device_id = (
             self.tp_size
@@ -122,7 +121,9 @@ class MooncakeBaseConnectorScheduler:
         assert len(block_ids) == len(self.group_unique_specs), "Number of KV cache groups must match"
 
         transfer_block_ids: list[list[int]] = []
-        cp_size = max(1, self.pcp_size * self.dcp_size)
+        # PCP replicates the complete KV cache. Only DCP shards the sequence
+        # represented by scheduler-visible blocks.
+        cp_size = max(1, self.dcp_size)
         for blocks, block_size, group_specs in zip(
             block_ids,
             self.group_block_size,

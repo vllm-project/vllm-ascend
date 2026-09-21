@@ -21,17 +21,21 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.stats import MooncakeKV
 from .helpers import make_full_spec, make_kv_cache_tensor, make_sfa_indexer_spec, make_sliding_spec
 
 
-@pytest.mark.parametrize("rank", [0, 1])
-def test_kvpp_publishes_owned_layers_and_mtp(monkeypatch, rank):
+@pytest.mark.parametrize(
+    ("pcp_rank", "tp_rank", "target_index"),
+    [(0, 0, 0), (0, 1, 1), (1, 0, 2), (1, 1, 3)],
+)
+def test_kvpp_publishes_owned_layers_and_mtp(monkeypatch, pcp_rank, tp_rank, target_index):
     from tests.ut.kvpp_utils import layer_name, make_kvpp_config
 
-    names = [layer_name(i) for i in (9, 10, 17)]
+    names = [layer_name(i) for i in (9, 10, 11, 12, 17)]
     spec = make_full_spec()
     caches = {name: torch.zeros((2, 16, 1, 8), dtype=torch.float16) for name in names}
     worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
-    worker.vllm_config = make_kvpp_config(2)
-    worker.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=2))
-    worker.tp_rank = rank
+    worker.vllm_config = make_kvpp_config(tp=2, pcp=2)
+    worker.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=4))
+    worker.pcp_rank, worker.pcp_size = pcp_rank, 2
+    worker.tp_rank, worker.tp_size = tp_rank, 2
     worker.kv_cache_config = KVCacheConfig(
         num_blocks=2,
         kv_cache_tensors=[
@@ -51,10 +55,10 @@ def test_kvpp_publishes_owned_layers_and_mtp(monkeypatch, rank):
     regions = MagicMock(wraps=base_worker.collect_configured_register_regions)
     monkeypatch.setattr(base_worker, "collect_configured_register_regions", regions)
     worker.register_kv_caches(caches)
-    assert worker.xfer_handshake_metadata.layer_names == [names[rank], names[2]]
+    assert worker.xfer_handshake_metadata.layer_names == [names[target_index], names[4]]
     assert worker.xfer_handshake_metadata.kv_caches_base_addr == [
-        [caches[names[rank]].data_ptr()],
-        [caches[names[2]].data_ptr()],
+        [caches[names[target_index]].data_ptr()],
+        [caches[names[4]].data_ptr()],
     ]
     assert worker.kv_caches is caches
     assert any(arg is caches for arg in regions.call_args.args)
@@ -379,12 +383,25 @@ def test_base_worker_requires_local_dp_rank(monkeypatch: pytest.MonkeyPatch) -> 
         MooncakeBaseConnectorWorker(config, "engine", SimpleNamespace(num_blocks=1))  # type: ignore[arg-type]
 
 
-def test_base_worker_rejects_unsupported_pcp(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_base_worker_accepts_consumer_pcp(monkeypatch: pytest.MonkeyPatch) -> None:
     config = make_worker_config()
     patch_worker_runtime(monkeypatch, pcp_size=2)
 
-    with pytest.raises(AssertionError, match="prefill context parallel size 1"):
-        MooncakeBaseConnectorWorker(config, "engine", SimpleNamespace(num_blocks=1))  # type: ignore[arg-type]
+    worker = MooncakeBaseConnectorWorker(config, "engine", SimpleNamespace(num_blocks=1))  # type: ignore[arg-type]
+
+    assert worker.pcp_size == 2
+
+
+def test_base_worker_accepts_producer_pcp(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = make_worker_config(is_consumer=False, is_producer=True)
+    patch_worker_runtime(monkeypatch, pcp_size=2)
+
+    worker = MooncakeBaseConnectorWorker(config, "engine", SimpleNamespace(num_blocks=1))  # type: ignore[arg-type]
+
+    assert worker.pcp_size == 2
+    assert worker.max_device_id == 48
+    assert worker.side_channel_port == 6032
+    assert worker.handshake_port == 6042
 
 
 def test_base_worker_stats_are_returned_and_reset() -> None:

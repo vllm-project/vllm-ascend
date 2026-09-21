@@ -1112,7 +1112,10 @@ class NPUWorker(WorkerBase):
                 # the engine's cache groups. Attention compute stays windowed.
                 kv_cache_spec = dict(kv_cache_spec)
                 unify_hybrid_kv_cache_specs(kv_cache_spec)
-            kvpp_rank = get_tp_group().rank_in_group % kvpp_config.size
+            kvpp_rank = (
+                get_pcp_group().rank_in_group * self.vllm_config.parallel_config.tensor_parallel_size
+                + get_tp_group().rank_in_group
+            )
             self._kvpp_cache_allocation_plan = create_kvpp_cache_allocation_plan(
                 self.vllm_config,
                 kv_cache_spec,

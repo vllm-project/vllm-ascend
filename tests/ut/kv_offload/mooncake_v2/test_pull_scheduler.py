@@ -30,11 +30,13 @@ from .helpers import make_blocks, make_full_spec, make_mamba_spec, make_request,
 
 
 def make_sending_thread(
-    metadata: dict[int | tuple[int, int], object] | None = None,
+    metadata: dict[int | tuple[int, ...], object] | None = None,
     *,
     tp_size: int = 1,
     pp_size: int = 1,
+    pcp_size: int = 1,
     dcp_size: int = 1,
+    use_kv_pp: bool = False,
 ) -> MooncakeSchedulerSendingThread:
     return MooncakeSchedulerSendingThread(
         host="127.0.0.1",
@@ -43,8 +45,9 @@ def make_sending_thread(
         metadata=metadata or {0: make_transfer_metadata()},  # type: ignore[arg-type]
         tp_size=tp_size,
         pp_size=pp_size,
-        pcp_size=1,
+        pcp_size=pcp_size,
         dcp_size=dcp_size,
+        use_kv_pp=use_kv_pp,
         ready_event=threading.Event(),
     )
 
@@ -55,6 +58,7 @@ def make_pull_scheduler() -> MooncakePullConnectorScheduler:
     scheduler.num_speculative_tokens = 0
     scheduler.pcp_size = 1
     scheduler.dcp_size = 1
+    scheduler.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
     scheduler.group_block_size = [16]
     scheduler.group_unique_specs = [[make_full_spec()]]
     scheduler.engine_id = "engine-p"
@@ -80,9 +84,10 @@ def test_sending_thread_merges_tp_private_and_pp_common_metadata() -> None:
     pp_metadata = decoded.metadata_by_pp_rank[0]
     assert pp_metadata.layer_names == first.layer_names
     assert pp_metadata.block_shapes == first.block_shapes
-    assert pp_metadata.metadata_by_tp_rank[0].kv_caches_base_addr == [[1000]]
-    assert pp_metadata.metadata_by_tp_rank[1].kv_caches_base_addr == [[2000]]
-    assert pp_metadata.metadata_by_tp_rank[1].te_rpc_port == 9001
+    tp_metadata = pp_metadata.metadata_by_pcp_rank[0].metadata_by_tp_rank
+    assert tp_metadata[0].kv_caches_base_addr == [[1000]]
+    assert tp_metadata[1].kv_caches_base_addr == [[2000]]
+    assert tp_metadata[1].te_rpc_port == 9001
 
 
 def test_sending_thread_merges_layer_split_metadata_by_name() -> None:
@@ -107,17 +112,18 @@ def test_sending_thread_merges_layer_split_metadata_by_name() -> None:
         block_size_scales=[[1], [1]],
     )
 
-    thread = make_sending_thread({0: tp0, 1: tp1}, tp_size=2)
+    thread = make_sending_thread({0: tp0, 1: tp1}, tp_size=2, use_kv_pp=True)
     decoded = msgspec.msgpack.decode(thread.encoded_metadata, type=MooncakeTransferMetadataGroups)
 
     assert decoded.use_kv_pp is True
     pp_metadata = decoded.metadata_by_pp_rank[0]
     assert pp_metadata.layer_names == ["layer.0", "layer.1", "layer.2"]
     assert pp_metadata.layer_block_sizes == [16, 16, 16]
-    assert pp_metadata.metadata_by_tp_rank[0].layer_indices == [0, 2]
-    assert pp_metadata.metadata_by_tp_rank[0].kv_caches_base_addr == [[1000], [], [3000]]
-    assert pp_metadata.metadata_by_tp_rank[1].layer_indices == [1, 2]
-    assert pp_metadata.metadata_by_tp_rank[1].kv_caches_base_addr == [[], [2000], [4000]]
+    tp_metadata = pp_metadata.metadata_by_pcp_rank[0].metadata_by_tp_rank
+    assert tp_metadata[0].layer_indices == [0, 2]
+    assert tp_metadata[0].kv_caches_base_addr == [[1000], [], [3000]]
+    assert tp_metadata[1].layer_indices == [1, 2]
+    assert tp_metadata[1].kv_caches_base_addr == [[], [2000], [4000]]
 
 
 def test_sending_thread_rejects_layer_split_with_dcp() -> None:
@@ -129,8 +135,8 @@ def test_sending_thread_rejects_layer_split_with_dcp() -> None:
         base_addrs=[[2000]],
     )
 
-    with pytest.raises(ValueError, match="LayerSplit cannot be combined with DCP"):
-        make_sending_thread({0: tp0, 1: tp1}, tp_size=2, dcp_size=2)
+    with pytest.raises(ValueError, match="KVPP cannot be combined with DCP"):
+        make_sending_thread({0: tp0, 1: tp1}, tp_size=2, dcp_size=2, use_kv_pp=True)
 
 
 def test_sending_thread_aligns_different_tp_layer_orders() -> None:
@@ -160,9 +166,10 @@ def test_sending_thread_aligns_different_tp_layer_orders() -> None:
 
     pp_metadata = decoded.metadata_by_pp_rank[0]
     assert pp_metadata.layer_names == ["layer.0", "layer.1"]
-    assert pp_metadata.metadata_by_tp_rank[0].layer_indices == [0, 1]
-    assert pp_metadata.metadata_by_tp_rank[1].layer_indices == [0, 1]
-    assert pp_metadata.metadata_by_tp_rank[1].kv_caches_base_addr == [
+    tp_metadata = pp_metadata.metadata_by_pcp_rank[0].metadata_by_tp_rank
+    assert tp_metadata[0].layer_indices == [0, 1]
+    assert tp_metadata[1].layer_indices == [0, 1]
+    assert tp_metadata[1].kv_caches_base_addr == [
         [3000],
         [4000],
     ]
@@ -179,8 +186,60 @@ def test_sending_thread_accepts_pp_aware_keys() -> None:
     assert decoded.metadata_by_pp_rank[1].layer_names == ["pp1.layer"]
 
 
+def test_sending_thread_groups_kvpp_layers_across_all_pcp_tp_workers() -> None:
+    metadata = {}
+    for pcp_rank, tp_rank, kvpp_rank in ((0, 0, 0), (0, 1, 1), (1, 0, 2), (1, 1, 3)):
+        metadata[(0, pcp_rank, tp_rank)] = make_transfer_metadata(
+            te_rpc_port=9000 + kvpp_rank,
+            local_ip=f"10.0.{pcp_rank}.{tp_rank + 1}",
+            layer_names=[f"layer.{kvpp_rank}", "mtp.layer"],
+            base_addrs=[[1000 + kvpp_rank * 1000], [9000 + kvpp_rank * 100]],
+            handshake_port=5000 + kvpp_rank,
+        )
+
+    thread = make_sending_thread(metadata, tp_size=2, pcp_size=2, use_kv_pp=True)
+    decoded = msgspec.msgpack.decode(thread.encoded_metadata, type=MooncakeTransferMetadataGroups)
+
+    pp_metadata = decoded.metadata_by_pp_rank[0]
+    assert decoded.use_kv_pp
+    assert pp_metadata.layer_names == ["layer.0", "layer.1", "layer.2", "layer.3", "mtp.layer"]
+    assert set(pp_metadata.metadata_by_pcp_rank) == {0, 1}
+    for pcp_rank, tp_rank, kvpp_rank in ((0, 0, 0), (0, 1, 1), (1, 0, 2), (1, 1, 3)):
+        worker_metadata = pp_metadata.metadata_by_pcp_rank[pcp_rank].metadata_by_tp_rank[tp_rank]
+        assert worker_metadata.layer_indices == [kvpp_rank, 4]
+        assert worker_metadata.kv_caches_base_addr[kvpp_rank] == [1000 + kvpp_rank * 1000]
+        assert worker_metadata.kv_caches_base_addr[4] == [9000 + kvpp_rank * 100]
+
+
+def test_sending_thread_uses_configured_kvpp_when_worker_layers_match() -> None:
+    metadata = {
+        (0, pcp_rank, tp_rank): make_transfer_metadata(
+            te_rpc_port=9000 + pcp_rank * 2 + tp_rank,
+            base_addrs=[[1000 + pcp_rank * 2000 + tp_rank * 1000]],
+        )
+        for pcp_rank in range(2)
+        for tp_rank in range(2)
+    }
+
+    thread = make_sending_thread(metadata, tp_size=2, pcp_size=2, use_kv_pp=True)
+    decoded = msgspec.msgpack.decode(thread.encoded_metadata, type=MooncakeTransferMetadataGroups)
+
+    assert decoded.use_kv_pp
+
+
+def test_sending_thread_rejects_layer_split_when_kvpp_is_disabled() -> None:
+    tp0 = make_transfer_metadata(layer_names=["layer.0"])
+    tp1 = make_transfer_metadata(layer_names=["layer.1"], te_rpc_port=9001)
+
+    with pytest.raises(ValueError, match="different KV-cache layers while KVPP is disabled"):
+        make_sending_thread({0: tp0, 1: tp1}, tp_size=2)
+
+
 def test_sending_thread_rejects_incomplete_or_inconsistent_workers() -> None:
     metadata = make_transfer_metadata()
+    with pytest.raises(ValueError, match="incomplete PCP ranks"):
+        make_sending_thread({(0, 0, 0): metadata}, pcp_size=2)
+
     with pytest.raises(ValueError, match="incomplete TP ranks"):
         make_sending_thread({0: metadata}, tp_size=2)
 
@@ -501,10 +560,11 @@ def test_set_worker_metadata_starts_only_one_producer_sending_thread(
     scheduler.kv_transfer_config = SimpleNamespace(is_kv_producer=True)
     scheduler.side_channel_host = "127.0.0.1"
     scheduler.side_channel_port = 6000
-    scheduler.tp_size = 1
+    scheduler.tp_size = 2
     scheduler.pp_size = 1
     scheduler.pcp_size = 1
     scheduler.dcp_size = 1
+    scheduler.ascend_config.kvpp_config.size = 2
     created: list[MagicMock] = []
 
     def make_fake_thread(*args, **_kwargs):
@@ -527,6 +587,7 @@ def test_set_worker_metadata_starts_only_one_producer_sending_thread(
     scheduler.set_xfer_handshake_metadata_from_workers(metadata)
 
     thread_cls.assert_called_once()
+    assert thread_cls.call_args.args[-2] is True
     created[0].start.assert_called_once_with()
 
 

@@ -98,7 +98,6 @@ class MooncakeBaseConnectorWorker:
         pcp_group = get_pcp_group()
         self.pcp_rank = pcp_group.rank_in_group
         self.pcp_size = pcp_group.world_size
-        assert self.pcp_size == 1, f"Mooncake temporarily requires prefill context parallel size 1, got {self.pcp_size}"
         self.dcp_size = get_decode_context_model_parallel_world_size()
         self.dcp_rank = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
 
@@ -217,6 +216,7 @@ class MooncakeBaseConnectorWorker:
             if self.ascend_config.kvpp_config.size > 1
             else {}
         )
+        kvpp_rank = self.pcp_rank * self.tp_size + self.tp_rank
         layer_names: list[str] = []
         layer_block_sizes: list[int] = []
         group_indices: list[int] = []
@@ -242,7 +242,7 @@ class MooncakeBaseConnectorWorker:
                 # Foreign target layers alias scratch. Publish persistent owners
                 # only; MTP caches are absent from owners and remain replicated.
                 owner = owners.get(layer_name)
-                if owner is not None and owner != self.tp_rank:
+                if owner is not None and owner != kvpp_rank:
                     continue
 
                 base_addrs: list[int] = []
