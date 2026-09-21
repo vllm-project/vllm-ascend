@@ -287,19 +287,43 @@
 #       collapses the FullAttention hit length to 0, preventing partial
 #       FullAttention-only prefix cache reuse on the D side.
 #    How:
-#       For Mamba hybrid models,
-#       num_new_local_computed_tokens should be the FA hit
-#       length. This value is passed to the connector's
+#       Override the per-group lookup so the FullAttention hit length is
+#       reported directly; `num_new_local_computed_tokens` then carries the
+#       FA hit length. This value is passed to the connector's
 #       get_num_new_matched_tokens which computes:
 #       external = total - local_computed.
 #       Using the FA hit skips re-transferring FA blocks
-#       already cached on D-side.
+#       already cached on D-side. The override also injects the producer drop
+#       exemption of entry 2 into the per-group lookup.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/42524
 #       https://github.com/vllm-project/vllm/pull/44243
 #    Future Plan:
-#       Remove this patch when vLLM PR #42524 and #44243 is included in the supported
-#       upstream vLLM version.
+#       vLLM #44243 has landed in the supported upstream version, so this
+#       override is kept only for the drop exemption of entry 2; remove it
+#       together with entry 2 once upstream exposes the PD role.
+#   2. `vllm.v1.core.kv_cache_utils.get_kv_cache_config_from_groups`,
+#      `HybridKVCacheCoordinator.find_longest_cache_hit` and
+#      `...find_longest_cache_hit_per_group`
+#    Why:
+#       On a pure PD prefill producer (`kv_transfer_config.is_kv_producer`
+#       and not `is_kv_consumer`), every content-hash match is a verified
+#       prompt block, so the EAGLE last-block drop is never needed. With
+#       hybrid Mamba align pages (1536 tokens) the drop erases the whole
+#       shared prefix of typical ~2K prompts, pinning producer prefix hits
+#       to 0 (the MTP prefix-cache "kill band").
+#    How:
+#       Attach the live `kv_transfer_config` onto KVCacheConfig while it is
+#       built (the coordinator factory never receives VllmConfig; the
+#       attribute survives the scheduler-side deepcopy and is dropped by
+#       worker pickle IPC), read the PD role back in the coordinator, and
+#       skip the EAGLE drop in both lookup entry points on a pure producer.
+#       The EAGLE-group fallback marks FullAttention groups only.
+#    Related PR (if no, explain why):
+#       No upstream PR; producer-side drop exemption for hybrid PD.
+#    Future Plan:
+#       Remove once upstream exposes the PD role to the coordinator or
+#       removes the EAGLE last-block drop for verified prompt blocks.
 #
 # ** 10. File: platform/patch_kv_cache_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -337,6 +361,26 @@
 #    Future Plan:
 #       Remove this compatibility patch once upstream preserves speculative
 #       window atomicity for PD-admitted requests.
+#   2. `vllm.v1.core.sched.scheduler.Scheduler._mamba_block_aligned_split`
+#    Why:
+#       Scheduler-side companion of fix 8.2: upstream backs the last cacheable
+#       mamba-align page off by one block while the EAGLE block drop is
+#       active, so the producer never ends a prefill chunk at the final full
+#       page boundary. Mamba "align" state materializes only across a chunk
+#       boundary (copy-on-write in MambaManager.allocate_new_blocks), so the
+#       final full state page stays unhashed and hybrid hits reconcile one
+#       page short (1600-token prompts -> 0 hit, 3200-token -> 1536).
+#    How:
+#       Delegate to the original method, but on a pure PD producer suppress
+#       the drop bit for the duration of that call and restore it afterwards.
+#       The gate is `_skips_eagle_block_drop(self.vllm_config.kv_transfer_config)`
+#       and is evaluated at call time, so consumers, kv_both and standalone
+#       instances pass through unchanged.
+#    Related PR (if no, explain why):
+#       No upstream PR; producer-side scheduler companion of fix 8.2.
+#    Future Plan:
+#       Remove together with fix 8.2 once upstream splits mamba-align pages
+#       without the EAGLE backoff on PD producers.
 #
 # ** 10a. File: platform/patch_mamba_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
