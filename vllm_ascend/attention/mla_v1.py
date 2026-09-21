@@ -1050,9 +1050,6 @@ class AscendMLAImpl(MLAAttentionImpl):
             self.W_UK_T.copy_(W_UK.permute(1, 2, 0).contiguous())
         self.mlapo_W_UK_T = self.W_UK_T
 
-        # TODO(zzzzwwjj): Currently, torch.ops._C_ascend.batch_matmul_transpose cannot support weight nz
-        # self.W_UV = maybe_trans_nz(self.W_UV)
-
         if self.enable_mlapo:
             layer_quant_method = None if self.fused_qkv_a_proj is None else self.fused_qkv_a_proj.quant_method
             if layer_quant_method is None or isinstance(layer_quant_method, UnquantizedLinearMethod):
