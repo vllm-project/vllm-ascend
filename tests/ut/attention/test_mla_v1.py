@@ -26,6 +26,7 @@ from vllm_ascend.attention.mla_v1 import (
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
 
 
 class TestAscendMLABackend(TestBase):
@@ -1191,6 +1192,187 @@ class TestAscendMLAImpl(TestBase):
             **kwargs,
         )
         self.impl.fa_quant_layer = False
+
+    def _configure_kimi_k3_a3_prolog(self) -> None:
+        quant_method = AscendW8A8DynamicLinearMethod()
+        self.impl.vllm_config.model_config.hf_text_config.model_type = "kimi_linear"
+        self.impl.use_mla_rope = False
+        self.impl.num_kv_heads = 1
+        self.impl.q_lora_rank = 1536
+        self.impl.kv_lora_rank = 512
+        self.impl.qk_nope_head_dim = 128
+        self.impl.qk_rope_head_dim = 64
+        self.impl.fused_qkv_a_proj = SimpleNamespace(
+            quant_method=SimpleNamespace(quant_method=quant_method),
+        )
+        self.impl.q_proj = SimpleNamespace(
+            quant_method=SimpleNamespace(quant_method=quant_method),
+        )
+        self.impl.q_a_layernorm = SimpleNamespace(
+            weight=SimpleNamespace(data=torch.ones(1536)),
+            variance_epsilon=1e-6,
+        )
+        self.impl.kv_a_layernorm = SimpleNamespace(
+            weight=SimpleNamespace(data=torch.ones(512)),
+            variance_epsilon=1e-5,
+        )
+
+    def test_kimi_k3_prolog_v3_supports_a3_w8a8_dynamic(self):
+        self._configure_kimi_k3_a3_prolog()
+
+        with (
+            patch(
+                "vllm_ascend.attention.mla_v1.get_current_hardware_profile",
+                return_value=get_hardware_profile(AscendDeviceType.A3),
+            ),
+            patch.object(torch.ops._C_ascend, "npu_mla_prolog_v3", create=True),
+        ):
+            self.assertTrue(self.impl._supports_kimi_k3_prolog_v3(torch.bfloat16))
+
+        with (
+            patch(
+                "vllm_ascend.attention.mla_v1.get_current_hardware_profile",
+                return_value=get_hardware_profile(AscendDeviceType.A5),
+            ),
+            patch.object(torch.ops._C_ascend, "npu_mla_prolog_v3", create=True),
+        ):
+            self.assertFalse(self.impl._supports_kimi_k3_prolog_v3(torch.bfloat16))
+
+    def test_kimi_k3_prolog_v3_rejects_mismatched_linear_quantization(self):
+        self._configure_kimi_k3_a3_prolog()
+        self.impl.q_proj = SimpleNamespace(quant_method=UnquantizedLinearMethod())
+
+        self.assertIsNone(self.impl._get_kimi_k3_prolog_v3_weight_quant_mode())
+
+    def test_kimi_k3_prolog_v3_decode_uses_empty_rope_and_bsnd_cache(self):
+        self._configure_kimi_k3_a3_prolog()
+        self.impl.kimi_k3_prolog_v3_enabled = True
+        self.impl.kimi_k3_prolog_v3_weight_quant_mode = 2
+        self.impl.num_heads = 2
+        self.impl.kimi_k3_weight_dq = torch.empty(1, dtype=torch.int8)
+        self.impl.kimi_k3_weight_uq_qr = torch.empty(1, dtype=torch.int8)
+        self.impl.kimi_k3_weight_uk = torch.empty(1)
+        self.impl.kimi_k3_weight_dkv_kr = torch.empty(1, dtype=torch.int8)
+        self.impl.kimi_k3_dequant_scale_w_dq = torch.ones(1, 1)
+        self.impl.kimi_k3_dequant_scale_w_uq_qr = torch.ones(1, 1)
+        self.impl.kimi_k3_dequant_scale_w_dkv_kr = torch.ones(1, 1)
+        hidden_states = torch.randn(2, 8)
+        quantized_x = torch.randint(-128, 127, (2, 8), dtype=torch.int8)
+        dequant_scale_x = torch.ones(2)
+        kv_cache = (
+            torch.zeros(2, 4, 1, self.impl.kv_lora_rank),
+            torch.zeros(2, 4, 1, self.impl.qk_rope_head_dim),
+        )
+        metadata = SimpleNamespace(
+            num_prefills=0,
+            num_decode_tokens=2,
+            slot_mapping=torch.tensor([3, 7], dtype=torch.int32),
+        )
+        ql_nope = torch.randn(2, self.impl.num_heads, self.impl.kv_lora_rank)
+        q_pe = torch.randn(2, self.impl.num_heads, self.impl.qk_rope_head_dim)
+
+        with (
+            patch(
+                "vllm_ascend.attention.mla_v1.torch_npu.npu_dynamic_quant",
+                return_value=(quantized_x, dequant_scale_x),
+            ),
+            patch.object(
+                torch.ops._C_ascend,
+                "npu_mla_prolog_v3",
+                return_value=(ql_nope, q_pe, torch.empty(0), torch.empty(0), torch.empty(0)),
+                create=True,
+            ) as prolog,
+        ):
+            result = self.impl._try_kimi_k3_prolog_v3_decode(hidden_states, kv_cache, metadata)
+
+        assert result is not None
+        torch.testing.assert_close(result.ql_nope, ql_nope)
+        torch.testing.assert_close(result.q_pe, q_pe)
+        self.assertIs(result.k_nope, kv_cache[0])
+        self.assertIs(result.k_pe, kv_cache[1])
+        kwargs = prolog.call_args.kwargs
+        self.assertEqual(kwargs["rope_sin"].numel(), 0)
+        self.assertEqual(kwargs["rope_cos"].numel(), 0)
+        self.assertEqual(kwargs["cache_mode"], "PA_BSND")
+        self.assertEqual(kwargs["weight_quant_mode"], 2)
+        self.assertEqual(kwargs["kv_cache_quant_mode"], 0)
+        torch.testing.assert_close(kwargs["cache_index"], torch.tensor([3, 7], dtype=torch.int64))
+
+    def test_kimi_k3_prolog_v3_falls_back_for_prefill_or_graph_padding(self):
+        self.impl.kimi_k3_prolog_v3_enabled = True
+        metadata = SimpleNamespace(
+            num_prefills=1,
+            num_decode_tokens=1,
+            slot_mapping=torch.tensor([0], dtype=torch.int32),
+        )
+        kv_cache = (torch.empty(1), torch.empty(1))
+
+        self.assertIsNone(self.impl._try_kimi_k3_prolog_v3_decode(torch.randn(1, 8), kv_cache, metadata))
+
+        metadata.num_prefills = 0
+        self.assertIsNone(self.impl._try_kimi_k3_prolog_v3_decode(torch.randn(2, 8), kv_cache, metadata))
+
+        metadata.num_decode_tokens = 1025
+        metadata.slot_mapping = torch.arange(1025, dtype=torch.int32)
+        self.assertIsNone(self.impl._try_kimi_k3_prolog_v3_decode(torch.randn(1025, 8), kv_cache, metadata))
+
+    def test_kimi_k3_prolog_v3_prepares_w8a8_weights_without_changing_fallback(self):
+        self.impl.kimi_k3_prolog_v3_weight_quant_mode = 2
+        self.impl.q_lora_rank = 2
+        fused_weight = torch.arange(20, dtype=torch.int8).view(4, 5)
+        self.impl.fused_qkv_a_proj = SimpleNamespace(
+            weight=SimpleNamespace(data=fused_weight),
+            weight_scale=torch.tensor([0.5, 0.25, 0.125, 0.0625, 0.03125]),
+        )
+        q_proj_weight = torch.arange(12, dtype=torch.int8).view(4, 3)
+        self.impl.q_proj = SimpleNamespace(
+            weight=SimpleNamespace(data=q_proj_weight),
+            weight_scale=SimpleNamespace(data=torch.tensor([0.5, 0.25, 0.125])),
+        )
+        fallback_weight_uk = torch.ones(1, 1, 1)
+        self.impl.W_UK_T = fallback_weight_uk
+
+        with patch(
+            "vllm_ascend.attention.mla_v1.torch_npu.npu_format_cast",
+            side_effect=lambda tensor, _: tensor,
+        ):
+            self.impl._prepare_kimi_k3_prolog_v3_weights()
+
+        torch.testing.assert_close(self.impl.kimi_k3_weight_dq, fused_weight[:, :2])
+        torch.testing.assert_close(self.impl.kimi_k3_weight_dkv_kr, fused_weight[:, 2:])
+        torch.testing.assert_close(self.impl.kimi_k3_weight_uq_qr, q_proj_weight)
+        torch.testing.assert_close(self.impl.kimi_k3_weight_uk, fallback_weight_uk)
+        self.assertIs(self.impl.W_UK_T, fallback_weight_uk)
+        torch.testing.assert_close(self.impl.kimi_k3_dequant_scale_w_dq, torch.tensor([[0.5, 0.25]]))
+        torch.testing.assert_close(
+            self.impl.kimi_k3_dequant_scale_w_dkv_kr,
+            torch.tensor([[0.125, 0.0625, 0.03125]]),
+        )
+        torch.testing.assert_close(
+            self.impl.kimi_k3_dequant_scale_w_uq_qr,
+            torch.tensor([[0.5, 0.25, 0.125]]),
+        )
+
+    def test_mla_preprocess_returns_kimi_k3_prolog_v3_decode_result(self):
+        decode_result = DecodeMLAPreprocessResult(
+            ql_nope=torch.empty(1),
+            q_pe=torch.empty(1),
+            k_nope=torch.empty(1),
+            k_pe=torch.empty(1),
+        )
+        self.impl._try_kimi_k3_prolog_v3_decode = MagicMock(return_value=decode_result)
+        metadata = SimpleNamespace(num_decodes=1, num_prefills=0, num_decode_tokens=1)
+
+        with patch("vllm_ascend.attention.mla_v1.notify_kv_cache_written") as notify:
+            result = self.impl._mla_preprocess(
+                "model.layers.0.self_attn.attn",
+                torch.empty(1, 8),
+                (torch.empty(1), torch.empty(1)),
+                metadata,
+            )
+
+        self.assertEqual(result, (decode_result, None))
+        notify.assert_called_once_with("model.layers.0.self_attn.attn")
 
     def test_init(self):
         self.assertEqual(self.impl.num_heads, 256)

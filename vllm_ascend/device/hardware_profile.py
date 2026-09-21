@@ -32,6 +32,7 @@ class HardwareCapability(Enum):
     FP8_ATTENTION = auto()
     GDN_COMPATIBILITY = auto()
     IRQ_CPU_RESERVATION = auto()
+    KIMI_K3_MLA_PROLOG_V3 = auto()
     LOCAL_KV_COMM_RESOURCE = auto()
     LORA_CUSTOM_OPS = auto()
     MLA_DECODE_PROLOG_WITHOUT_ROPE = auto()
@@ -131,7 +132,10 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.TRITON_BATCH_MEMCPY,
     }
 )
-_A3_CAPABILITIES = _STANDARD_CAPABILITIES | {HardwareCapability.MC2_FULLMESH_V2_COMM}
+_A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
+    HardwareCapability.KIMI_K3_MLA_PROLOG_V3,
+    HardwareCapability.MC2_FULLMESH_V2_COMM,
+}
 _DEFAULT_WORKER_CLS = "vllm_ascend.worker.worker.NPUWorker"
 _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyType(
     {

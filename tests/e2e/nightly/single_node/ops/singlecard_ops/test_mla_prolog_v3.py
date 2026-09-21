@@ -14,6 +14,11 @@ def _skip_if_mla_prolog_v3_unavailable():
         pytest.skip("requires the npu_mla_prolog_v3 custom operator")
 
 
+def _rms_norm_reference(x: torch.Tensor, gamma: torch.Tensor, epsilon: float) -> torch.Tensor:
+    variance = x.float().square().mean(dim=-1, keepdim=True)
+    return (x.float() * torch.rsqrt(variance + epsilon) * gamma.float()).to(x.dtype)
+
+
 @torch.inference_mode()
 def test_mla_prolog_v3_native_bf16_head96():
     """Kimi K3 native bf16: head_num=96, q_lora=1536, kv_lora=512, D=128, Dr=64."""
@@ -77,6 +82,77 @@ def test_mla_prolog_v3_native_bf16_head96():
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
+
+
+@torch.inference_mode()
+def test_mla_prolog_v3_kimi_k3_no_rope_matches_reference():
+    """K3 decode path keeps the positional slice in checkpoint order."""
+    _skip_if_mla_prolog_v3_unavailable()
+
+    token_num = 1
+    head_num = 96
+    hidden_size = 7168
+    q_lora_rank = 1536
+    kv_lora_rank = 512
+    qk_nope_head_dim = 128
+    qk_rope_head_dim = 64
+    block_size = 128
+    dtype = torch.bfloat16
+    rms_epsilon = 1e-5
+
+    token_x = torch.randn((token_num, hidden_size), dtype=dtype).npu()
+    weight_dq_nd = torch.randn((hidden_size, q_lora_rank), dtype=dtype).npu()
+    weight_uq_qr_nd = torch.randn(
+        (q_lora_rank, head_num * (qk_nope_head_dim + qk_rope_head_dim)),
+        dtype=dtype,
+    ).npu()
+    weight_dkv_kr_nd = torch.randn((hidden_size, kv_lora_rank + qk_rope_head_dim), dtype=dtype).npu()
+    weight_dq = torch_npu.npu_format_cast(weight_dq_nd.contiguous(), 29)
+    weight_uq_qr = torch_npu.npu_format_cast(weight_uq_qr_nd.contiguous(), 29)
+    weight_dkv_kr = torch_npu.npu_format_cast(weight_dkv_kr_nd.contiguous(), 29)
+    weight_uk = torch.randn((head_num, qk_nope_head_dim, kv_lora_rank), dtype=dtype).npu()
+    rmsnorm_gamma_cq = torch.randn((q_lora_rank,), dtype=dtype).npu()
+    rmsnorm_gamma_ckv = torch.randn((kv_lora_rank,), dtype=dtype).npu()
+    empty_rope = torch.empty((0, qk_rope_head_dim), dtype=dtype).npu()
+    kv_cache = torch.zeros((1, block_size, 1, kv_lora_rank), dtype=dtype).npu()
+    kr_cache = torch.zeros((1, block_size, 1, qk_rope_head_dim), dtype=dtype).npu()
+    cache_index = torch.zeros(token_num, dtype=torch.int64).npu()
+
+    ql_nope, q_pe, *_ = torch.ops._C_ascend.npu_mla_prolog_v3(
+        token_x,
+        weight_dq,
+        weight_uq_qr,
+        weight_uk,
+        weight_dkv_kr,
+        rmsnorm_gamma_cq,
+        rmsnorm_gamma_ckv,
+        empty_rope,
+        empty_rope,
+        kv_cache,
+        kr_cache,
+        cache_index=cache_index,
+        cache_mode="PA_BSND",
+    )
+
+    q_norm = _rms_norm_reference(token_x @ weight_dq_nd, rmsnorm_gamma_cq, rms_epsilon)
+    q_projection = (q_norm @ weight_uq_qr_nd).view(
+        token_num,
+        head_num,
+        qk_nope_head_dim + qk_rope_head_dim,
+    )
+    q_nope, q_pe_reference = q_projection.split([qk_nope_head_dim, qk_rope_head_dim], dim=-1)
+    ql_nope_reference = torch.bmm(
+        q_nope.transpose(0, 1),
+        weight_uk,
+    ).transpose(0, 1)
+    kv_projection = token_x @ weight_dkv_kr_nd
+    kv_nope, kr_reference = kv_projection.split([kv_lora_rank, qk_rope_head_dim], dim=-1)
+    kv_nope_reference = _rms_norm_reference(kv_nope, rmsnorm_gamma_ckv, rms_epsilon)
+
+    torch.testing.assert_close(ql_nope, ql_nope_reference, rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(q_pe, q_pe_reference, rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(kv_cache[0, 0, 0], kv_nope_reference[0], rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(kr_cache[0, 0, 0], kr_reference[0], rtol=2e-2, atol=2e-2)
 
 
 @torch.inference_mode()
@@ -528,3 +604,259 @@ def test_mla_prolog_v3_full_int8_quant():
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
+
+
+def _cleanup_npu():
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
+
+
+def _nz_bf16(shape):
+    return torch_npu.npu_format_cast(torch.randn(shape, dtype=torch.bfloat16).npu().contiguous(), 29)
+
+
+def _nz_int8(shape):
+    return torch_npu.npu_format_cast(torch.randint(-7, 8, shape, dtype=torch.int8).npu().contiguous(), 29)
+
+
+@torch.inference_mode()
+@pytest.mark.parametrize("token_num,head_num,he", [(1, 8, 1024), (4, 16, 2048)])
+def test_mla_prolog_v3_arch22_bf16_pa_bsnd(token_num: int, head_num: int, he: int):
+    """A2/A3 (arch22) smoke: bf16 + PA_BSND with small shapes."""
+    _skip_if_mla_prolog_v3_unavailable()
+
+    hcq, hckv, d, dr = 1536, 512, 128, 64
+    block_num, block_size = 2, 128
+    dtype = torch.bfloat16
+
+    token_x = torch.randn((token_num, he), dtype=dtype).npu()
+    weight_dq = _nz_bf16((he, hcq))
+    weight_uq_qr = _nz_bf16((hcq, head_num * (d + dr)))
+    weight_uk = torch.randn((head_num, d, hckv), dtype=dtype).npu()
+    weight_dkv_kr = _nz_bf16((he, hckv + dr))
+    rmsnorm_gamma_cq = torch.ones((hcq,), dtype=dtype).npu()
+    rmsnorm_gamma_ckv = torch.ones((hckv,), dtype=dtype).npu()
+    rope_sin = torch.randn((token_num, dr), dtype=dtype).npu()
+    rope_cos = torch.randn((token_num, dr), dtype=dtype).npu()
+    kv_cache = torch.zeros((block_num, block_size, 1, hckv), dtype=dtype).npu()
+    kr_cache = torch.zeros((block_num, block_size, 1, dr), dtype=dtype).npu()
+    cache_index = torch.arange(token_num, dtype=torch.int64).npu()
+
+    kv_old = kv_cache.clone()
+    kr_old = kr_cache.clone()
+    query, query_rope, dequant_scale_q_nope, query_norm, dequant_scale_q_norm = torch.ops._C_ascend.npu_mla_prolog_v3(
+        token_x,
+        weight_dq,
+        weight_uq_qr,
+        weight_uk,
+        weight_dkv_kr,
+        rmsnorm_gamma_cq,
+        rmsnorm_gamma_ckv,
+        rope_sin,
+        rope_cos,
+        kv_cache,
+        kr_cache,
+        cache_index=cache_index,
+        cache_mode="PA_BSND",
+        weight_quant_mode=0,
+        kv_cache_quant_mode=0,
+    )
+
+    assert query.shape == (token_num, head_num, hckv)
+    assert query_rope.shape == (token_num, head_num, dr)
+    assert query.dtype == dtype
+    assert query_rope.dtype == dtype
+    assert dequant_scale_q_nope.numel() == 0
+    assert query_norm.numel() == 0
+    assert dequant_scale_q_norm.numel() == 0
+    assert not torch.equal(kv_cache, kv_old)
+    assert not torch.equal(kr_cache, kr_old)
+    _cleanup_npu()
+
+
+@torch.inference_mode()
+def test_mla_prolog_v3_arch22_rope_disabled():
+    """A2/A3: empty rope_sin/rope_cos disables RoPE (both empty required)."""
+    _skip_if_mla_prolog_v3_unavailable()
+
+    token_num, head_num, he = 2, 8, 1024
+    hcq, hckv, d, dr = 1536, 512, 128, 64
+    block_num, block_size = 2, 128
+    dtype = torch.bfloat16
+
+    token_x = torch.randn((token_num, he), dtype=dtype).npu()
+    weight_dq = _nz_bf16((he, hcq))
+    weight_uq_qr = _nz_bf16((hcq, head_num * (d + dr)))
+    weight_uk = torch.randn((head_num, d, hckv), dtype=dtype).npu()
+    weight_dkv_kr = _nz_bf16((he, hckv + dr))
+    rmsnorm_gamma_cq = torch.ones((hcq,), dtype=dtype).npu()
+    rmsnorm_gamma_ckv = torch.ones((hckv,), dtype=dtype).npu()
+    rope_sin = torch.empty((0,), dtype=dtype).npu()
+    rope_cos = torch.empty((0,), dtype=dtype).npu()
+    kv_cache = torch.zeros((block_num, block_size, 1, hckv), dtype=dtype).npu()
+    kr_cache = torch.zeros((block_num, block_size, 1, dr), dtype=dtype).npu()
+    cache_index = torch.arange(token_num, dtype=torch.int64).npu()
+
+    query, query_rope, *_ = torch.ops._C_ascend.npu_mla_prolog_v3(
+        token_x,
+        weight_dq,
+        weight_uq_qr,
+        weight_uk,
+        weight_dkv_kr,
+        rmsnorm_gamma_cq,
+        rmsnorm_gamma_ckv,
+        rope_sin,
+        rope_cos,
+        kv_cache,
+        kr_cache,
+        cache_index=cache_index,
+        cache_mode="PA_BSND",
+    )
+
+    assert query.shape == (token_num, head_num, hckv)
+    assert query_rope.shape == (token_num, head_num, dr)
+    _cleanup_npu()
+
+
+@torch.inference_mode()
+def test_mla_prolog_v3_arch22_partial_quant():
+    """A2/A3 supported path: weight_quant_mode=1 (PARTIAL)."""
+    _skip_if_mla_prolog_v3_unavailable()
+
+    token_num, head_num, he = 1, 8, 1024
+    hcq, hckv, d, dr = 1536, 512, 128, 64
+    block_num, block_size = 2, 128
+    dtype = torch.bfloat16
+
+    token_x = torch.randn((token_num, he), dtype=dtype).npu()
+    weight_dq = _nz_bf16((he, hcq))
+    weight_uq_qr = _nz_int8((hcq, head_num * (d + dr)))
+    weight_uk = torch.randn((head_num, d, hckv), dtype=dtype).npu()
+    weight_dkv_kr = _nz_bf16((he, hckv + dr))
+    rmsnorm_gamma_cq = torch.ones((hcq,), dtype=dtype).npu()
+    rmsnorm_gamma_ckv = torch.ones((hckv,), dtype=dtype).npu()
+    rope_sin = torch.randn((token_num, dr), dtype=dtype).npu()
+    rope_cos = torch.randn((token_num, dr), dtype=dtype).npu()
+    kv_cache = torch.zeros((block_num, block_size, 1, hckv), dtype=dtype).npu()
+    kr_cache = torch.zeros((block_num, block_size, 1, dr), dtype=dtype).npu()
+    cache_index = torch.arange(token_num, dtype=torch.int64).npu()
+    dequant_scale_w_uq_qr = torch.rand((1, head_num * (d + dr)), dtype=torch.float).npu()
+
+    query, query_rope, *_ = torch.ops._C_ascend.npu_mla_prolog_v3(
+        token_x,
+        weight_dq,
+        weight_uq_qr,
+        weight_uk,
+        weight_dkv_kr,
+        rmsnorm_gamma_cq,
+        rmsnorm_gamma_ckv,
+        rope_sin,
+        rope_cos,
+        kv_cache,
+        kr_cache,
+        cache_index=cache_index,
+        dequant_scale_w_uq_qr=dequant_scale_w_uq_qr,
+        cache_mode="PA_BSND",
+        weight_quant_mode=1,
+        kv_cache_quant_mode=0,
+    )
+
+    assert query.shape == (token_num, head_num, hckv)
+    assert query_rope.shape == (token_num, head_num, dr)
+    _cleanup_npu()
+
+
+@torch.inference_mode()
+def test_mla_prolog_v3_arch22_full_int8_quant():
+    """A2/A3 supported path: weight_quant_mode=2 (FULL INT8)."""
+    _skip_if_mla_prolog_v3_unavailable()
+
+    token_num, head_num, he = 1, 8, 1024
+    hcq, hckv, d, dr = 1536, 512, 128, 64
+    block_num, block_size = 2, 128
+    dtype = torch.bfloat16
+
+    token_x = torch.randint(-7, 8, (token_num, he), dtype=torch.int8).npu()
+    weight_dq = _nz_int8((he, hcq))
+    weight_uq_qr = _nz_int8((hcq, head_num * (d + dr)))
+    weight_uk = torch.randn((head_num, d, hckv), dtype=dtype).npu()
+    weight_dkv_kr = _nz_int8((he, hckv + dr))
+    rmsnorm_gamma_cq = torch.ones((hcq,), dtype=dtype).npu()
+    rmsnorm_gamma_ckv = torch.ones((hckv,), dtype=dtype).npu()
+    rope_sin = torch.randn((token_num, dr), dtype=dtype).npu()
+    rope_cos = torch.randn((token_num, dr), dtype=dtype).npu()
+    kv_cache = torch.zeros((block_num, block_size, 1, hckv), dtype=dtype).npu()
+    kr_cache = torch.zeros((block_num, block_size, 1, dr), dtype=dtype).npu()
+    cache_index = torch.arange(token_num, dtype=torch.int64).npu()
+    dequant_scale_x = torch.rand((token_num, 1), dtype=torch.float).npu()
+    dequant_scale_w_dq = torch.rand((1, hcq), dtype=torch.float).npu()
+    dequant_scale_w_uq_qr = torch.rand((1, head_num * (d + dr)), dtype=torch.float).npu()
+    dequant_scale_w_dkv_kr = torch.rand((1, hckv + dr), dtype=torch.float).npu()
+
+    query, query_rope, *_ = torch.ops._C_ascend.npu_mla_prolog_v3(
+        token_x,
+        weight_dq,
+        weight_uq_qr,
+        weight_uk,
+        weight_dkv_kr,
+        rmsnorm_gamma_cq,
+        rmsnorm_gamma_ckv,
+        rope_sin,
+        rope_cos,
+        kv_cache,
+        kr_cache,
+        cache_index=cache_index,
+        dequant_scale_x=dequant_scale_x,
+        dequant_scale_w_dq=dequant_scale_w_dq,
+        dequant_scale_w_uq_qr=dequant_scale_w_uq_qr,
+        dequant_scale_w_dkv_kr=dequant_scale_w_dkv_kr,
+        cache_mode="PA_BSND",
+        weight_quant_mode=2,
+        kv_cache_quant_mode=0,
+    )
+
+    assert query.shape == (token_num, head_num, hckv)
+    assert query_rope.shape == (token_num, head_num, dr)
+    _cleanup_npu()
+
+
+@torch.inference_mode()
+def test_mla_prolog_v3_arch22_bsnd():
+    """A2/A3: non-fused BSND layout with small shapes."""
+    _skip_if_mla_prolog_v3_unavailable()
+
+    batch, seq, head_num, he = 1, 2, 8, 1024
+    hcq, hckv, d, dr = 1536, 512, 128, 64
+    dtype = torch.bfloat16
+
+    token_x = torch.randn((batch, seq, he), dtype=dtype).npu()
+    weight_dq = _nz_bf16((he, hcq))
+    weight_uq_qr = _nz_bf16((hcq, head_num * (d + dr)))
+    weight_uk = torch.randn((head_num, d, hckv), dtype=dtype).npu()
+    weight_dkv_kr = _nz_bf16((he, hckv + dr))
+    rmsnorm_gamma_cq = torch.ones((hcq,), dtype=dtype).npu()
+    rmsnorm_gamma_ckv = torch.ones((hckv,), dtype=dtype).npu()
+    rope_sin = torch.randn((batch, seq, dr), dtype=dtype).npu()
+    rope_cos = torch.randn((batch, seq, dr), dtype=dtype).npu()
+    kv_cache = torch.zeros((batch, seq, 1, hckv), dtype=dtype).npu()
+    kr_cache = torch.zeros((batch, seq, 1, dr), dtype=dtype).npu()
+
+    query, query_rope, *_ = torch.ops._C_ascend.npu_mla_prolog_v3(
+        token_x,
+        weight_dq,
+        weight_uq_qr,
+        weight_uk,
+        weight_dkv_kr,
+        rmsnorm_gamma_cq,
+        rmsnorm_gamma_ckv,
+        rope_sin,
+        rope_cos,
+        kv_cache,
+        kr_cache,
+        cache_mode="BSND",
+    )
+
+    assert query.shape == (batch, seq, head_num, hckv)
+    assert query_rope.shape == (batch, seq, head_num, dr)
+    _cleanup_npu()

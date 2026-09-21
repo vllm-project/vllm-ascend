@@ -10,18 +10,17 @@
 
 /*!
  * \file mla_prolog_v3.cpp
- * \brief
+ * \brief Kernel dispatch for arch22 and arch35.
  */
 
 #define MLA_PROLOG_VERSION 3
 #define GLOBAL_OVERFLOW_MODE_CTRL 60
 
-#if __has_include("arch35/kernel_mla_prolog_split_n.h")
+#if __CCE_AICORE__ == 310
 #include "arch35/kernel_mla_prolog_split_n.h"
 #include "arch35/kernel_mla_prolog_split_m.h"
 #else
-#include "arch35/kernel_mla_prolog_split_n.h"
-#include "arch35/kernel_mla_prolog_split_m.h"
+#include "arch22/kernel_mla_prolog_split_n.h"
 #endif
 using namespace MlaProlog;
 
@@ -84,6 +83,7 @@ __global__ __aicore__ void mla_prolog_v3(
 #if (__NPU_ARCH__ == 3510)
     AscendC::SetCtrlSpr<GLOBAL_OVERFLOW_MODE_CTRL, GLOBAL_OVERFLOW_MODE_CTRL>(0);
 #endif
+    // Non-quantized path shared by arch22 and arch35.
     if constexpr (static_cast<SCENARIO>(Scenario) == SCENARIO::NO_QUANT) {
         MlaPrologVecS1CubS2<MLAPType<bfloat16_t, bfloat16_t, bfloat16_t, float, cacheMode,
             EnableDequantOpt, EnableGroupComputeOpt,
@@ -133,7 +133,9 @@ __global__ __aicore__ void mla_prolog_v3(
                 dequantScaleWDkvKr, quantScaleCkv, quantScaleCkr, smoothScalesCq, actualSeqLen, kNopeClipAlpha,
                 queryOut, queryRopeOut, dequantScaleQNopeOut, queryNormOut, dequantScaleQNormOut, workspace);
         op.Process();
-    } else if constexpr (static_cast<SCENARIO>(Scenario) == SCENARIO::QUANT &&
+    }
+#if __CCE_AICORE__ == 310
+    else if constexpr (static_cast<SCENARIO>(Scenario) == SCENARIO::QUANT &&
                          static_cast<QUANT_MODE>(QuantMode) == QUANT_MODE::PARTIAL_QUANT_KV_QUANT_PERTILE) {
         MlaPrologVecS1CubS2<MLAPType<bfloat16_t, int8_t, int8_t, float, cacheMode,
             EnableDequantOpt, EnableGroupComputeOpt,
@@ -154,7 +156,6 @@ __global__ __aicore__ void mla_prolog_v3(
                 queryOut, queryRopeOut, dequantScaleQNopeOut, queryNormOut, dequantScaleQNormOut, workspace);
         op.Process();
     }
-#if __CCE_AICORE__ == 310
     else if constexpr (static_cast<SCENARIO>(Scenario) == SCENARIO::QUANT &&
                          static_cast<QUANT_MODE>(QuantMode) == QUANT_MODE::MXFP8_FULL_QUANT_KV_NO_QUANT) {
         if constexpr (splitMMode == SPLIT_M_MODE::ENABLED) {

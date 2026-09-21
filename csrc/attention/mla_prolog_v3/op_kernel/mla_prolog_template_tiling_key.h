@@ -345,6 +345,7 @@ ASCENDC_TPL_SEL(
 #endif
 
 #if MLA_PROLOG_VERSION == -1 || MLA_PROLOG_VERSION == 3
+#if defined(__CCE_AICORE__) && (__CCE_AICORE__ == 310)
 // -------------------------- 半量化kv pertile量化 --------------------------
 #if ORIG_DTYPE_TOKEN_X == -1 || ORIG_DTYPE_WEIGHT_UQ_QR == -1 || ORIG_DTYPE_KV_CACHE == -1 || \
     (ORIG_DTYPE_TOKEN_X == DT_BF16 && ORIG_DTYPE_WEIGHT_UQ_QR == DT_INT8 && ORIG_DTYPE_KV_CACHE == DT_INT8)
@@ -648,6 +649,7 @@ ASCENDC_TPL_SEL(
                          ASCENDC_TPL_UINT_SEL(SPLIT_M_MODE, ASCENDC_TPL_UI_LIST, 0),
                          ASCENDC_TPL_SHARED_KERNEL_TYPE_SEL(CV_MODE, ASCENDC_TPL_MIX_AIC_1_1, ASCENDC_TPL_MIX_AIC_1_2),
                          ASCENDC_TPL_BOOL_SEL(ENABLE_ROPE, 0, 1)),
+#endif
 #endif
 #endif
 
