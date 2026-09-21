@@ -63,7 +63,15 @@ _SPEC_PP_SUPPORT_BY_METHOD: Mapping[str, SpecPPSupport] = MappingProxyType(
             unsupported_feature="EAGLE3 with pipeline parallelism",
         ),
         "dspark": SpecPPSupport(
-            architectures=frozenset({"DeepseekV4ForCausalLM", "GlmMoeDsaForCausalLM"}),
+            architectures=frozenset(
+                {
+                    "DeepseekV4ForCausalLM",
+                    "GlmMoeDsaForCausalLM",
+                    "KimiLinearForCausalLM",
+                    "KimiK3ForCausalLM",
+                    "KimiK3ForConditionalGeneration",
+                }
+            ),
             needs_aux_hidden_states=True,
             bypass_upstream_pp_guard=True,
         ),
@@ -141,6 +149,8 @@ class PPTransportDataType(str, Enum):
 def make_empty_intermediate_tensors(
     model: _PPAuxHiddenStateModel,
     tensor_factory: Callable[[int, torch.dtype, torch.device], IntermediateTensors],
+    *,
+    include_start_layer: bool = True,
 ) -> Callable[[int, torch.dtype, torch.device], IntermediateTensors]:
     """Wrap a model's PP tensor factory with auxiliary receive buffers."""
 
@@ -150,7 +160,11 @@ def make_empty_intermediate_tensors(
         device: torch.device,
     ) -> IntermediateTensors:
         intermediate_tensors = tensor_factory(batch_size, dtype, device)
-        num_incoming_aux_layers = sum(layer_idx <= model.start_layer for layer_idx in model.aux_hidden_state_layers)
+        # States captured before a layer are produced on that layer's stage.
+        num_incoming_aux_layers = sum(
+            layer_idx < model.start_layer or (include_start_layer and layer_idx == model.start_layer)
+            for layer_idx in model.aux_hidden_state_layers
+        )
         return add_pp_transport_buffers(
             intermediate_tensors,
             PPTransportDataType.AUX_HIDDEN_STATES,
