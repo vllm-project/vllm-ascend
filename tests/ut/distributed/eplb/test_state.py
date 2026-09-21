@@ -218,6 +218,7 @@ def test_add_model_initializes_custom_load_history(monkeypatch):
 
 def test_from_mapping_skips_custom_buffers_without_policy(monkeypatch):
     state = AscendEplbState.__new__(AscendEplbState)
+    state.policy = DefaultEplbPolicy
     state.model_states = {"model": SimpleNamespace()}
     state._initialize_load_stats_buffers = MagicMock()
     monkeypatch.setattr(
@@ -319,6 +320,7 @@ def test_from_mapping_refreshes_final_mapping(monkeypatch):
 
     def upstream_from_mapping(cls, **kwargs):
         state = cls.__new__(cls)
+        state.policy = DefaultEplbPolicy
         state.model_states = {"model": model_state}
         return state
 
@@ -359,6 +361,7 @@ def test_from_mapping_forwards_release_valid_expert_count(monkeypatch):
         nonlocal received_count
         received_count = num_valid_physical_experts
         state = cls.__new__(cls)
+        state.policy = DefaultEplbPolicy
         state.model_states = {}
         return state
 
