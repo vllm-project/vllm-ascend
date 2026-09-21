@@ -276,9 +276,6 @@ class AscendPCPManager(PCPManager):
         global_batch = input_batch
         if global_batch.num_draft_tokens > 0:
             local_batch = self._partition_speculative_batch_compat(global_batch)
-        elif vllm_version_is("0.28.0"):
-            # vLLM #53515 added padded_num_tokens on main only.
-            local_batch = super().partition_batch(global_batch)
         else:
             local_batch = super().partition_batch(
                 global_batch,

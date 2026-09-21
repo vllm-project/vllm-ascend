@@ -53,8 +53,9 @@ def bind_kv_cache(
     # Bind kv_caches to forward context
     for layer_name, kv_cache in kv_caches.items():
         forward_context[layer_name].kv_cache = kv_cache
-
-    if not vllm_version_is("0.28.0"):
+    # vLLM #52506 adds ReplaySSM ring trackers on main. v0.29.0 predates
+    # that contract and has no tracker helper to invoke.
+    if not vllm_version_is("0.29.0"):
         utils.share_replayssm_ring_trackers(ordered_layer_names, forward_context, kv_cache_groups)
 
 
