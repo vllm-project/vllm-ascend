@@ -199,9 +199,15 @@ def _request_counts(common: Any, num_reqs: int):
     ):
         return 0, 0, 0, 0
     flags = is_prefilling[:num_reqs].bool()
-    query_lens_cpu = query_start_loc_cpu[1 : num_reqs + 1] - query_start_loc_cpu[:num_reqs]
+    # Slice bounds must follow is_prefilling's own length: MRV2 keeps the real
+    # request count (no padding) while query_start_loc_cpu is padded, so indexing
+    # query_lens with num_reqs (padded) mismatches the mask. Padded requests sit
+    # at the tail, are flagged False, and contribute no counted tokens.
+    num_flags = min(flags.numel(), query_start_loc_cpu.numel() - 1)
+    flags = flags[:num_flags]
+    query_lens_cpu = query_start_loc_cpu[1 : num_flags + 1] - query_start_loc_cpu[:num_flags]
     num_prefills = int(flags.sum().item())
-    num_decodes = num_reqs - num_prefills
+    num_decodes = num_flags - num_prefills
     num_prefill_tokens = int(query_lens_cpu[flags].sum().item())
     num_decode_tokens = int(query_lens_cpu[~flags].sum().item())
     return num_decodes, num_decode_tokens, num_prefills, num_prefill_tokens
