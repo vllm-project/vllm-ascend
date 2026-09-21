@@ -1039,6 +1039,10 @@ class KVPoolWorker:
         self.layerwise_retrievers: list[Any] = []
         if self.use_layerwise:
             self.next_layer_to_submit = 0
+            if self.use_kvpp and self.use_layerwise_transfer:
+                assert self.layer_load_finished_events is not None
+                for event in self.layer_load_finished_events:
+                    event.clear()
             # Transfer threads receive these lists by reference. Give every
             # step fresh lists so a late clear of a previous step cannot drop
             # newly prepared loads/saves and leave a reused buffer stale.
@@ -2484,6 +2488,17 @@ class KVPoolWorker:
             if submit_layer_load(layer_id):
                 submitted_layers += 1
 
+    def wait_for_layer_load_ready(self, layer_name: str) -> None:
+        """Observe load completion without advancing the attention-side schedule."""
+        layer_id = self._global_to_local_layer[self._extract_physical_layer_index(layer_name)]
+        if not self.layer_load_tasks[layer_id] and layer_id not in self.prefetch_layer_map:
+            return
+        assert self.layer_load_finished_events is not None
+        assert self.kv_recv_thread is not None
+        while not self.layer_load_finished_events[layer_id].wait(timeout=1):
+            self.kv_recv_thread.raise_if_failed()
+        self.kv_recv_thread.raise_if_failed()
+
     def wait_for_layer_load(self) -> None:
         if self.current_layer >= self.num_layers:
             return
@@ -2525,7 +2540,9 @@ class KVPoolWorker:
             if getattr(self, "use_block_key_layerwise", False):
                 self._finish_current_layerwise_load_sessions()
             raise
-        self.layer_load_finished_events[self.current_layer].clear()
+        # KVPP also observes this signal; clear it when the next step starts.
+        if not (self.use_kvpp and self.use_layerwise_transfer):
+            self.layer_load_finished_events[self.current_layer].clear()
         if getattr(self, "block_key_hybrid", False) and self.current_layer == self.num_layers - 1:
             # The final model layer can have no reachable load rows. Completion
             # belongs to the whole request, not whichever group happens to end here.

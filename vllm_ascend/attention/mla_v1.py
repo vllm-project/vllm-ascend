@@ -1745,6 +1745,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             q_pe = _mla_nope_zero_rope(q_nope, rope_dim, zero_rope_cache)
             k_pe = _mla_nope_zero_rope(k_nope, rope_dim, zero_rope_cache)
 
+        if self.layerwise_kv_cache_hook is not None and self.layerwise_kv_cache_hook.layerwise:
+            record_attention_compute_start()
         common_kwargs = {
             "num_query_heads": self.num_heads_padded,
             "num_key_value_heads": self.num_kv_heads,
@@ -2044,7 +2046,7 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         decode_preprocess_res = None
         prefill_preprocess_res = None
-        if has_prefill:
+        if has_prefill or (self.layerwise_kv_cache_hook is not None and self.layerwise_kv_cache_hook.layerwise):
             wait_for_kv_layer_from_connector(layer_name)
         if self.layerwise_kv_cache_hook is not None and (has_decode or has_prefill):
             # Q/KV projections above overlap the full-layer KV cache broadcast.
@@ -2130,6 +2132,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             and attn_metadata.num_prefills == 0
         ):
             if self.layerwise_kv_cache_hook is not None:
+                if self.layerwise_kv_cache_hook.layerwise:
+                    wait_for_kv_layer_from_connector(layer_name)
                 self.layerwise_kv_cache_hook.wait_for_layer(layer_name)
             decode_preprocess_res, prefill_preprocess_res = self.mla_preprocess_only_decode(
                 hidden_states, kv_cache, attn_metadata
