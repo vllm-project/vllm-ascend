@@ -1102,6 +1102,9 @@ def _reshape_kv_cache_v2(
             kv_cache_spec = layer_kv_cache_spec[layer_name]
 
             if layer_name in layer_tuple_strides:
+                # Same view construction as model_runner_v1: every slot layer
+                # is addressed with the slot's block_stride; an indexer adds
+                # its scale plane after the KV plane of the same page.
                 block_stride = layer_tuple_strides[layer_name]
                 initial_offset = 0
                 kv_cache_shape = group.backend.get_kv_cache_shape(

@@ -8,7 +8,7 @@ before running the compressor, indexer and sparse-attention operators without
 moving cache or scheduler knowledge back into the model.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import torch
@@ -583,6 +583,18 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         build_query_metadata=True,
         build_compressor_metadata=True,
     ):
+        if (
+            isinstance(kv_cache_spec, AscendMLAAttentionSpec)
+            and getattr(kv_cache_spec, "model_version", None) == "deepseek_v41"
+        ):
+            logical_block_size = vllm_config.cache_config.block_size
+            if kv_cache_spec.block_size != logical_block_size:
+                updates = {"block_size": logical_block_size}
+                if "storage_block_size" in kv_cache_spec.__dataclass_fields__:
+                    updates["storage_block_size"] = (
+                        logical_block_size // get_kv_cache_compression_ratio(kv_cache_spec)
+                    )
+                kv_cache_spec = replace(kv_cache_spec, **updates)
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         max_tokens = getattr(vllm_config.scheduler_config, "max_num_batched_tokens", 4096)
         max_reqs = getattr(vllm_config.scheduler_config, "max_num_seqs", 256)
