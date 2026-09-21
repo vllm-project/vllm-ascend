@@ -23,7 +23,6 @@ def builder():
     result.device = torch.device("cpu")
     result.model_runner_type = "generate"
     result.max_num_reqs = 5
-    result.graph_buffers = {}
     result.scheduler_buffers = {}
     result.scheduler_specs = set()
     result.capture_sizes = {2, 6}
@@ -53,33 +52,46 @@ def test_metadata_uses_device_lengths_and_preserves_mixed_offsets(builder):
     common.seq_lens_cpu = torch.tensor([999, 999, 999])
     with patch.object(torch.Tensor, "cpu", side_effect=AssertionError("device synchronization")):
         metadata = builder.build(128, common)
-    assert metadata.query_start_loc.tolist() == [0, 3, 4, 11, 11, 11]
-    assert metadata.seq_lens.tolist() == [130, 259, 7, 0, 0]
-    assert metadata.block_tables[:3].equal(common.block_table_tensor)
+    assert metadata.query_start_loc is common.query_start_loc
+    assert metadata.query_start_loc.tolist() == [0, 3, 4, 11]
+    assert metadata.seq_lens is common.seq_lens
+    assert metadata.seq_lens.tolist() == [130, 259, 7]
+    assert metadata.block_tables is common.block_table_tensor
     assert metadata.causal
 
 
-def test_graph_buffers_are_stable_and_clear_removed_requests(builder):
-    common = common_metadata([3, 1, 7], [130, 259, 7])
-    first = builder.build(0, common)
-    addresses = [x.data_ptr() for x in (first.query_start_loc, first.seq_lens, first.block_tables)]
-    common.num_reqs = 1
-    common.num_actual_tokens = 2
-    common.query_start_loc[1] = 2
-    common.seq_lens[0] = 131
-    second = builder.build(0, common)
+def test_runner_buffer_views_are_reused_without_mutating_padding(builder):
+    spec = (4, 2, 8, torch.float32, 0.123, 0.0)
+    builder.scheduler_specs = {spec}
+    common = common_metadata([3, 1, 2], [130, 259, 7])
+    common.num_input_tokens = 6
+    with patch.object(fa3, "get_scheduler_metadata", side_effect=[torch.tensor([1]), torch.tensor([2])]) as tiling:
+        first = builder.build(0, common)
+        addresses = [x.data_ptr() for x in (first.query_start_loc, first.seq_lens, first.block_tables)]
+        common.num_reqs = 1
+        common.num_actual_tokens = 2
+        common.query_start_loc[1] = 2
+        common.seq_lens[0] = 131
+        # Runner views can shrink while their underlying allocations stay fixed.
+        common.seq_lens = common.seq_lens[:1]
+        common.block_table_tensor = common.block_table_tensor[:1]
+        saved = [x.clone() for x in (common.query_start_loc, common.seq_lens, common.block_table_tensor)]
+        second = builder.build(0, common)
     assert addresses == [x.data_ptr() for x in (second.query_start_loc, second.seq_lens, second.block_tables)]
-    assert second.query_start_loc.tolist() == [0, 2, 2, 2, 2, 2]
-    assert second.seq_lens.tolist() == [131, 0, 0, 0, 0]
-    assert torch.count_nonzero(second.block_tables[1:]) == 0
-    assert first.scheduler_metadata is not second.scheduler_metadata
+    for source, original in zip((common.query_start_loc, common.seq_lens, common.block_table_tensor), saved):
+        assert source.equal(original)
+    assert second.query_start_loc.tolist() == [0, 2, 4, 6]
+    assert second.seq_lens.shape == (1,)
+    assert tiling.call_args.kwargs["batch_size"] == 1
+    assert first.scheduler_metadata[spec].data_ptr() == second.scheduler_metadata[spec].data_ptr()
+    assert first.scheduler_metadata[spec].tolist() == [2]
 
 
 def test_padding_request_does_not_read_beyond_kv_metadata(builder):
     common = common_metadata([1, 1, 1, 1, 4], [10, 20, 30, 40], num_actual_tokens=4)
     metadata = builder.build(0, common)
-    assert metadata.query_start_loc.tolist() == [0, 1, 2, 3, 4, 4]
-    assert metadata.seq_lens.tolist() == [10, 20, 30, 40, 0]
+    assert metadata.query_start_loc.tolist() == [0, 1, 2, 3, 4, 8]
+    assert metadata.seq_lens.tolist() == [10, 20, 30, 40]
     assert metadata.slot_mapping.numel() == 4
 
 
@@ -87,7 +99,7 @@ def test_draft_step_buffers_are_independent(builder):
     first = builder.build(0, common_metadata([2, 3], [20, 30]))
     second = builder.build(0, common_metadata([1, 1], [21, 31]))
     assert first.seq_lens.data_ptr() != second.seq_lens.data_ptr()
-    assert first.query_start_loc.tolist() == [0, 2, 5, 5, 5, 5]
+    assert first.query_start_loc.tolist() == [0, 2, 5]
 
 
 @pytest.fixture
@@ -142,8 +154,10 @@ def test_paged_call_keeps_causal_multi_token_queries(builder, impl, state):
 )
 def test_full_forward_never_falls_back_to_fia(builder, impl, state, capturing):
     query_lens = [1, 1] if state == AscendAttentionState.DecodeOnly else [2, 3]
-    metadata = builder.build(0, common_metadata(query_lens, [10, 20]))
-    metadata.attn_state = state
+    common = common_metadata(query_lens, [10, 20])
+    common.attn_state = state
+    metadata = builder.build(0, common)
+    metadata.attn_state = None  # The inherited forward must not depend on a scheduler state.
     metadata.scheduler_metadata[(4, 2, 8, torch.float32, 0.123, 0.0)] = torch.empty(1)
     query = torch.randn(sum(query_lens), 4, 8)
     output = torch.empty_like(query)
@@ -281,7 +295,7 @@ def test_paged_tiling_shared_but_attention_computed_for_each_layer(builder, impl
     assert tiling.call_args.kwargs["page_size"] == 128
     assert tiling.call_args.kwargs["num_splits"] == 0
     assert tiling.call_args.kwargs["max_seqlen_k"] == 384
-    assert tiling.call_args.kwargs["cache_seqlens"].tolist() == [3, 7, 0, 0, 0]
+    assert tiling.call_args.kwargs["cache_seqlens"].tolist() == [3, 7]
     assert kernel.call_count == 2
     assert all(call.kwargs["scheduler_metadata"] is shared_tiling for call in kernel.call_args_list)
     assert metadata.scheduler_metadata[spec] is shared_tiling
@@ -310,5 +324,16 @@ def test_metadata_excludes_padding_from_active_batch(builder, query_lens, seq_le
         metadata = builder.build(0, common)
     assert tiling.call_args.kwargs["batch_size"] == expected_batch
     assert tiling.call_args.kwargs["num_splits"] == 0
-    assert metadata.seq_lens.shape == (17,)
-    assert metadata.query_start_loc.shape == (18,)
+    assert metadata.seq_lens is common.seq_lens
+    assert metadata.query_start_loc is common.query_start_loc
+
+
+@pytest.mark.parametrize("capture_state", list(AscendAttentionState))
+def test_capture_does_not_require_attention_state(builder, capture_state):
+    common = common_metadata([1, 1], [10, 20])
+    del common.attn_state
+    metadata = builder.build_for_graph_capture(common, capture_state)
+    assert metadata.query_start_loc is common.query_start_loc
+    assert metadata.seq_lens is common.seq_lens
+    metadata = builder.build_for_cudagraph_capture(common)
+    assert metadata.block_tables is common.block_table_tensor

@@ -70,10 +70,6 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
                 )
             )
         self.scheduler_buffers: dict[tuple, torch.Tensor] = {}
-        # FULL graphs can replay a different number of requests at the same
-        # token count. Keep the operator's request dimensions and addresses fixed.
-        # Draft steps have distinct runner-owned input buffers and must not alias.
-        self.graph_buffers: dict[tuple[int, int, int], tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
 
     @classmethod
     def get_cudagraph_support(cls, vllm_config: VllmConfig, kv_cache_spec: AttentionSpec) -> AttentionCGSupport:
@@ -101,26 +97,11 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
             common.seq_lens.data_ptr(),
             common.block_table_tensor.data_ptr(),
         )
-        if source_key not in self.graph_buffers:
-            self.graph_buffers[source_key] = (
-                torch.empty(self.max_num_reqs + 1, dtype=torch.int32, device=self.device),
-                torch.empty(self.max_num_reqs, dtype=torch.int32, device=self.device),
-                torch.empty(
-                    (self.max_num_reqs, common.block_table_tensor.shape[1]), dtype=torch.int32, device=self.device
-                ),
-            )
-        query_start_loc, seq_lens, block_tables = self.graph_buffers[source_key]
-        # The runner may add a dummy FIA request beyond the seq_lens/block-table
-        # capacity. FA3 needs no such request: zero query lengths skip padding.
-        query_start_loc.fill_(common.num_actual_tokens)
-        query_start_loc[: num_reqs + 1].copy_(common.query_start_loc[: num_reqs + 1])
-        query_start_loc.clamp_(min=0, max=common.num_actual_tokens)
-        seq_lens.zero_()
-        seq_count = min(num_reqs, common.seq_lens.shape[0])
-        seq_lens[:seq_count].copy_(common.seq_lens[:seq_count])
-        block_tables.zero_()
-        block_count = min(num_reqs, common.block_table_tensor.shape[0])
-        block_tables[:block_count].copy_(common.block_table_tensor[:block_count])
+        # The runner owns graph-stable buffers. Device tiling limits reads to
+        # active_reqs, so padding rows need neither copying nor sanitizing.
+        query_start_loc = common.query_start_loc
+        seq_lens = common.seq_lens
+        block_tables = common.block_table_tensor
         num_input_tokens = common.num_input_tokens or common.num_actual_tokens
         graph_shape = num_input_tokens in self.capture_sizes
         max_query_len = num_input_tokens if graph_shape else common.max_query_len
@@ -132,8 +113,8 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
             # captured on all CANN releases. This still consumes device lengths
             # asynchronously and requires no host-side per-layer graph updates.
             tiling = get_scheduler_metadata(
-                # Buffer capacity stays fixed for graph replay, but inactive
-                # slots must not participate in FlashDecode's min-Q/task count.
+                # Inactive slots must not participate in FlashDecode's
+                # min-Q/task count, even when runner buffers include padding.
                 batch_size=active_reqs,
                 max_seqlen_q=max_query_len,
                 max_seqlen_k=block_tables.shape[1] * self.block_size,
@@ -164,7 +145,6 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
             block_tables=block_tables,
             slot_mapping=common.slot_mapping[: common.num_actual_tokens],
             max_query_len=max_query_len,
-            attn_state=common.attn_state,
             causal=common.causal,
             model_runner_type=self.model_runner_type,
             scheduler_metadata=scheduler_metadata,
@@ -175,9 +155,9 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
         common_attn_metadata: AscendCommonAttentionMetadata,
         attn_state: AscendAttentionState = AscendAttentionState.DecodeOnly,
     ) -> AscendFlashAttentionMetadata:
-        metadata = self.build(0, common_attn_metadata)
-        metadata.attn_state = attn_state
-        return metadata
+        # Keep the runner's capture signature; FA3 handles all scheduling states
+        # through the same paged interface and does not consume attn_state.
+        return self.build(0, common_attn_metadata)
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: AscendCommonAttentionMetadata

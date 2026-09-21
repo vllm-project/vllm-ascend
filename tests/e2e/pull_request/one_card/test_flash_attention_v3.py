@@ -3,6 +3,7 @@
 
 """FA3 paged-cache and graph replay regression tests on a real Ascend device."""
 
+from copy import copy
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -43,7 +44,6 @@ def make_attention(dtype, num_heads=NUM_HEADS, num_kv_heads=NUM_KV_HEADS):
     builder.device = torch.device("npu")
     builder.model_runner_type = "generate"
     builder.max_num_reqs = MAX_REQS + 1
-    builder.graph_buffers = {}
     builder.scheduler_buffers = {}
     builder.scheduler_specs = {(num_heads, num_kv_heads, HEAD_SIZE, dtype, SCALE, 0.0)}
     builder.capture_sizes = {6}
@@ -200,8 +200,16 @@ def test_fa3_graph_switches_flashdecode_and_active_batch(dtype, forward_context,
     ]:
         pages, seq_lens = prepare_case(common, query_lens, context_lens, query, key, value)
         with patch.object(fa3, "get_scheduler_metadata", wraps=fa3.get_scheduler_metadata) as tiling:
-            updated = builder.build(0, common)
+            runner_view = copy(common)
+            runner_view.seq_lens = common.seq_lens[: len(query_lens)]
+            runner_view.block_table_tensor = common.block_table_tensor[: len(query_lens)]
+            # A nonempty dummy query must be ignored, not copied/clamped.
+            common.query_start_loc[len(query_lens) + 1 :] = query.shape[0]
+            updated = builder.build(0, runner_view)
         assert tiling.call_args.kwargs["batch_size"] == len(query_lens)
+        assert updated.query_start_loc.data_ptr() == common.query_start_loc.data_ptr()
+        assert updated.seq_lens.data_ptr() == common.seq_lens.data_ptr()
+        assert updated.block_tables.data_ptr() == common.block_table_tensor.data_ptr()
         spec = next(iter(builder.scheduler_specs))
         assert updated.scheduler_metadata[spec].data_ptr() == metadata.scheduler_metadata[spec].data_ptr()
         graph.replay()

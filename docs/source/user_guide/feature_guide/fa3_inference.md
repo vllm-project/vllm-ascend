@@ -55,7 +55,8 @@ also retains its existing backend.
   computes attention from its own Q/K/V. Omitting metadata from the paged
   interface would select host tiling and introduce device synchronization.
 - For captured token sizes, tiling and request metadata have stable addresses.
-  The builder refreshes these buffers before model graph replay. Tiling runs
+  The runner updates request buffers and the builder refreshes tiling before
+  model graph replay. Tiling runs
   outside the model graph because the operator's AICPU auxiliary-stream events
   are not capturable on every CANN release. Attention itself is captured, with
   no per-layer host task updates.
@@ -63,10 +64,13 @@ also retains its existing backend.
   Both tiling construction and attention execution pass `num_splits=0`, allowing
   the operator to select splitting. Mixed prefill/decode batches do not require
   separate calls.
-- Request buffers include an extra padding row and retain fixed dimensions for
-  graph replay. Tiling receives the active batch rather than buffer capacity:
+- Request tensors reuse the runner-owned buffers without extra allocation,
+  copying, or padding cleanup. Tiling receives the active batch rather than
+  buffer capacity:
   inactive requests must not disable FlashDecode through its minimum query
   length and task-count checks. A dummy forward retains one empty request.
+- FA3 does not consume `attn_state`: all scheduling states use the same paged
+  interface. The capture entry point retains the argument for runner compatibility.
 
 The standard Ascend graph dispatcher remains responsible for choosing FULL,
 FULL_DECODE_ONLY, or piecewise execution. Model runner and `attention_v1.py`
