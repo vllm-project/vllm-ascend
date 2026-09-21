@@ -13,6 +13,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    MambaSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu import attn_utils as upstream_attn_utils
@@ -124,6 +125,66 @@ def test_main_allocator_preserves_separate_ascend_kv_views(monkeypatch):
     expected_shape = (num_blocks, spec.block_size, spec.num_kv_heads, spec.head_size)
     assert key_cache.shape == expected_shape
     assert value_cache.shape == expected_shape
+
+
+def test_mrv2_mamba_views_skip_physical_page_padding():
+    spec = MambaSpec(
+        block_size=1,
+        shapes=((4,), (2,)),
+        dtypes=(torch.float16, torch.float32),
+        page_size_padded=32,
+    )
+    raw = torch.zeros(3 * 32, dtype=torch.int8)
+
+    conv_state, ssm_state = attn_utils._reshape_mamba_kv_cache(raw, spec)
+
+    assert conv_state.shape == (3, 4)
+    assert ssm_state.shape == (3, 2)
+    assert conv_state.stride() == (16, 1)
+    assert ssm_state.stride() == (8, 1)
+    assert not conv_state.is_contiguous()
+    assert not ssm_state.is_contiguous()
+
+    conv_state[1].fill_(1)
+    ssm_state[2].fill_(2)
+    assert torch.count_nonzero(raw[:32]) == 0
+    assert torch.count_nonzero(raw[32:40]) > 0
+    assert torch.count_nonzero(raw[40:64]) == 0
+    assert torch.count_nonzero(raw[64:72]) == 0
+    assert torch.count_nonzero(raw[72:80]) > 0
+    assert torch.count_nonzero(raw[80:]) == 0
+
+
+def test_mrv2_attention_views_interleave_kv_per_physical_page():
+    num_blocks = 3
+    block_size = 2
+    num_heads = 1
+    head_size = 4
+    logical_page_elements = 2 * block_size * num_heads * head_size
+    physical_page_elements = logical_page_elements + 8
+    raw = torch.zeros(
+        num_blocks * physical_page_elements * torch.float16.itemsize,
+        dtype=torch.int8,
+    )
+
+    key, value = attn_utils._reshape_combined_attention_kv_cache(
+        raw,
+        (2, num_blocks, block_size, num_heads, head_size),
+        torch.float16,
+        physical_page_elements * torch.float16.itemsize,
+    )
+
+    assert key.stride() == (physical_page_elements, 4, 4, 1)
+    assert value.stride() == (physical_page_elements, 4, 4, 1)
+    assert not key.is_contiguous()
+    assert not value.is_contiguous()
+
+    key[1].fill_(1)
+    value[2].fill_(2)
+    raw_typed = raw.view(torch.float16)
+    assert torch.count_nonzero(raw_typed[:physical_page_elements]) == 0
+    assert torch.count_nonzero(raw_typed[physical_page_elements : 2 * physical_page_elements]) == 8
+    assert torch.count_nonzero(raw_typed[2 * physical_page_elements :]) == 8
 
 
 def test_main_dsv4_materializes_real_planner_geometry_once(monkeypatch):

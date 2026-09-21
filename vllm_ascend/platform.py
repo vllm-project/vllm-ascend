@@ -368,6 +368,7 @@ class NPUPlatform(Platform):
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:
         super().update_block_size_for_backend(vllm_config)
+
         # TODO: NPU still sets block_size in check_and_update_config.
         # Move that logic here so block_size is chosen by the backend.
         using_kv_transfer_with_hybrid = (
@@ -387,6 +388,15 @@ class NPUPlatform(Platform):
                 assert cache_config.mamba_block_size % cache_config.block_size == 0, (
                     f"mamba_block_size must be a multiple of block_size: {cache_config.block_size}"
                 )
+
+    @classmethod
+    def _align_hybrid_block_size(cls, vllm_config: VllmConfig, backend_cls) -> None:
+        """Keep independent logical pages for MRV2 hybrid cache views."""
+        if not getattr(vllm_config, "use_v2_model_runner", False):
+            return super()._align_hybrid_block_size(vllm_config, backend_cls)
+        cache_config = vllm_config.cache_config
+        if cache_config.mamba_cache_mode == "align":
+            cache_config.mamba_block_size = cache_config.block_size
 
     @classmethod
     def _validate_indexer_pp_config(cls, vllm_config: VllmConfig) -> None:
