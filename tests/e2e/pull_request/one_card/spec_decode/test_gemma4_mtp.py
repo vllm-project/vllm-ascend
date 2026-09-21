@@ -96,7 +96,12 @@ def test_gemma4_mtp_acceptance_tp1(model_name):
     with VllmRunner(
         model_name,
         tensor_parallel_size=1,
-        max_model_len=4096,
+        # The prompts are short coding tasks, so a small context keeps the KV
+        # cache well within the CI runner's free memory (matches the budget
+        # used by the other Gemma4 e2e test).
+        max_model_len=1024,
+        max_num_batched_tokens=1024,
+        max_num_seqs=8,
         gpu_memory_utilization=0.8,
         disable_log_stats=False,
         speculative_config={
