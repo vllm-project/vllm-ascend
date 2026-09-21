@@ -90,11 +90,20 @@ def get_force_eplb_topk(
     topk_ids: torch.Tensor,
     num_logical_experts: int,
 ) -> torch.Tensor | None:
-    """Return deterministic round-robin ids when the policy is enabled."""
-    # MRV2 builds the upstream ForwardContext, which carries no
-    # moe_comm_method; force EPLB stays an MRV1-only feature there and
-    # the original topk_ids flow through unchanged.
-    moe_comm_method = getattr(get_forward_context(), "moe_comm_method", None)
+    """Return deterministic round-robin ids when the policy is enabled.
+
+    Read the comm method through the extras proxy: MRV2 stores
+    ``moe_comm_method`` in the forward context's ``additional_kwargs``, so a
+    plain ``getattr`` on the context object would silently miss it and leave
+    the original (possibly degenerate) topk_ids in place.
+    """
+    from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+
+    try:
+        moe_comm_method = _EXTRA_CTX.moe_comm_method
+    except AssertionError:
+        # Forward context may be unset outside the model runner (e.g. unit tests).
+        return topk_ids
     if moe_comm_method is None:
         return topk_ids
     top_k = int(topk_ids.shape[1])
