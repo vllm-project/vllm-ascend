@@ -94,15 +94,7 @@ class KVPoolScheduler:
             else [0]
         )
         self.kv_cache_group_families = infer_group_cache_families(kv_cache_groups, self.compress_ratios, self.hf_config)
-        if kv_cache_config is not None:
-            for kv_cache_group in kv_cache_config.kv_cache_groups:
-                kv_cache_spec = kv_cache_group.kv_cache_spec
-                if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
-                    kv_cache_spec = next(iter(kv_cache_spec.kv_cache_specs.values()))
-                if isinstance(kv_cache_spec, MambaSpec) and getattr(kv_cache_spec, "mamba_cache_mode", None) != "align":
-                    raise NotImplementedError(
-                        "AscendStore hybrid linear-attention support currently requires mamba_cache_mode='align'."
-                    )
+        self.num_speculative_blocks_by_group = self._infer_mamba_groups()
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.consumer_is_to_load = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "consumer_is_to_load", False
@@ -123,10 +115,6 @@ class KVPoolScheduler:
         self.pcp_size = getattr(vllm_config.parallel_config, "prefill_context_parallel_size", 1)
         self.dcp_size = getattr(vllm_config.parallel_config, "decode_context_parallel_size", 1)
 
-        self.mamba_group_ids = self._infer_mamba_groups()
-        self.num_speculative_blocks = (
-            vllm_config.speculative_config.num_speculative_tokens if vllm_config.speculative_config else 0
-        )
         speculative_config = getattr(vllm_config, "speculative_config", None)
         use_eagle_fn = getattr(speculative_config, "use_eagle", None)
         self.use_eagle = use_eagle_fn() is True if callable(use_eagle_fn) else False
@@ -184,7 +172,7 @@ class KVPoolScheduler:
         validate_layerwise_runtime(
             self.layerwise_protocol,
             use_hybrid=self.block_key_hybrid,
-            has_recurrent_state=bool(self.mamba_group_ids),
+            has_recurrent_state=bool(self.num_speculative_blocks_by_group),
             tp_mismatch=self.use_block_key_layerwise and self.tp_mismatch,
         )
         self.layerwise_max_transfer_blocks = int(
@@ -563,17 +551,25 @@ class KVPoolScheduler:
     def _floor_to_cache_transfer_granularity(self, token_len: int) -> int:
         return token_len // self.cache_transfer_granularity * self.cache_transfer_granularity
 
-    def _infer_mamba_groups(self):
-        if self.kv_cache_config is None or not self.use_hybrid:
-            return []
-        mamba_group_ids: list[int] = []
+    def _infer_mamba_groups(self) -> dict[int, int]:
+        """Validate Mamba cache modes and return hybrid group scratch counts."""
+        if self.kv_cache_config is None:
+            return {}
+
+        num_speculative_blocks_by_group: dict[int, int] = {}
         for group_id, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups):
             kv_cache_spec = kv_cache_group.kv_cache_spec
             if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
                 kv_cache_spec = next(iter(kv_cache_spec.kv_cache_specs.values()))
-            if isinstance(kv_cache_spec, MambaSpec):
-                mamba_group_ids.append(group_id)
-        return mamba_group_ids
+            if not isinstance(kv_cache_spec, MambaSpec):
+                continue
+            if getattr(kv_cache_spec, "mamba_cache_mode", None) != "align":
+                raise NotImplementedError(
+                    "AscendStore hybrid linear-attention support currently requires mamba_cache_mode='align'."
+                )
+            if self.use_hybrid:
+                num_speculative_blocks_by_group[group_id] = kv_cache_spec.num_speculative_blocks
+        return num_speculative_blocks_by_group
 
     def get_num_new_matched_tokens(
         self,
@@ -810,8 +806,7 @@ class KVPoolScheduler:
             num_prompt_tokens=len(request.prompt_token_ids),
             block_gvas=(previous_tracker.block_gvas.copy() if previous_tracker else []),
             gva_block_offset=(previous_tracker.gva_block_offset if previous_tracker else 0),
-            mamba_group_ids=self.mamba_group_ids,
-            num_speculative_blocks=self.num_speculative_blocks,
+            num_speculative_blocks_by_group=self.num_speculative_blocks_by_group,
             block_sizes=self.grouped_block_size,
         )
         self._request_trackers[request.req_id] = request_tracker
@@ -852,8 +847,7 @@ class KVPoolScheduler:
             num_prompt_tokens=len(request_real.prompt_token_ids),
             block_gvas=(previous_tracker.block_gvas.copy() if previous_tracker else []),
             gva_block_offset=(previous_tracker.gva_block_offset if previous_tracker else 0),
-            mamba_group_ids=self.mamba_group_ids,
-            num_speculative_blocks=self.num_speculative_blocks,
+            num_speculative_blocks_by_group=self.num_speculative_blocks_by_group,
             block_sizes=self.grouped_block_size,
         )
         self._request_trackers[req_id] = request_tracker
@@ -933,8 +927,7 @@ class KVPoolScheduler:
             num_prompt_tokens=len(request.prompt_token_ids),
             block_gvas=(previous_tracker.block_gvas.copy() if previous_tracker else []),
             gva_block_offset=(previous_tracker.gva_block_offset if previous_tracker else 0),
-            mamba_group_ids=self.mamba_group_ids,
-            num_speculative_blocks=self.num_speculative_blocks,
+            num_speculative_blocks_by_group=self.num_speculative_blocks_by_group,
             block_sizes=self.grouped_block_size,
         )
         self._request_trackers[request_id] = request_tracker
@@ -1035,7 +1028,7 @@ class KVPoolScheduler:
         """
         keep the reference of all non-null mamba blocks that will send to external kv store
         """
-        if not self.use_hybrid or len(self.mamba_group_ids) == 0 or not req_meta.can_save:
+        if not self.use_hybrid or not self.num_speculative_blocks_by_group or not req_meta.can_save:
             return
         # Layerwise transfer frees mamba blocks layer by layer on its own
         # completion path (see KVCacheStoreSendingThread); bulk-touching them
@@ -1045,9 +1038,16 @@ class KVPoolScheduler:
         using_event_id = self.get_sending_event_id()
         req_meta.event_id = using_event_id
         current_step_sending: list[int] = []
-        for group_id in self.mamba_group_ids:
+        for group_id, num_speculative_blocks in self.num_speculative_blocks_by_group.items():
             group_block_ids = req_meta.block_ids_by_group[group_id]
-            current_step_sending.extend([block_id for block_id in group_block_ids if block_id > 0])
+            # The last num_speculative_blocks slots are speculative scratch
+            # blocks that the allocator relocates in place; relocation requires
+            # them exclusively owned (ref_cnt == 1), so they must never be
+            # pinned here (crashes allocate_new_blocks after vllm PR #51358).
+            non_spec_block_ids = (
+                group_block_ids[:-num_speculative_blocks] if num_speculative_blocks > 0 else group_block_ids
+            )
+            current_step_sending.extend([block_id for block_id in non_spec_block_ids if block_id > 0])
         logger.debug("event: %s touch blocks: %s", using_event_id, current_step_sending)
         assert self._block_pool is not None
         self._block_pool.touch([self._block_pool.blocks[block_id] for block_id in current_step_sending])

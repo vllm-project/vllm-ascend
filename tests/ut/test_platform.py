@@ -24,7 +24,6 @@ from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
     COMPRESSED_TENSORS_METHOD,
     AscendDeviceType,
-    vllm_version_is,
 )
 
 
@@ -1723,6 +1722,35 @@ class TestNPUPlatform(TestBase):
 
         platform._validate_parallel_config(vllm_config)
 
+        # Exercise Pydantic construction, not just the patched Python method.
+        from vllm.config.parallel import ParallelConfig
+
+        import vllm_ascend.patch.platform.patch_parallel_config  # noqa: F401
+
+        parallel = ParallelConfig(
+            tensor_parallel_size=1,
+            prefill_context_parallel_size=2,
+            data_parallel_size=2,
+            data_parallel_size_local=1,
+        )
+        assert parallel.prefill_context_parallel_size == 2
+        assert parallel.data_parallel_size == 2
+        from vllm.config import VllmConfig
+
+        # Exercise nested Pydantic validation without initializing model/runtime
+        # configuration in this CPU test.
+        with patch.object(VllmConfig, "__post_init__", return_value=None):
+            config = VllmConfig(parallel_config=parallel)
+        assert config.parallel_config is parallel
+        with pytest.raises(ValueError, match="valid DCP sizes"):
+            ParallelConfig(
+                tensor_parallel_size=1,
+                prefill_context_parallel_size=2,
+                data_parallel_size=2,
+                data_parallel_size_local=1,
+                decode_context_parallel_size=3,
+            )
+
     def test_validate_parallel_config_accepts_dp_only(self):
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.parallel_config.data_parallel_size = 2
@@ -1868,30 +1896,16 @@ class TestNPUPlatform(TestBase):
         )
         for use_mla, use_pcp, use_dcp, expected_backend in cases:
             with self.subTest(use_mla=use_mla, use_pcp=use_pcp, use_dcp=use_dcp):
-                # use_dcp is a main-only AttentionSelectorConfig field; keep the
-                # attribute available on 0.28.0 via SimpleNamespace.
-                if vllm_version_is("0.28.0"):
-                    attn_selector_config = SimpleNamespace(
-                        dtype=torch.float16,
-                        head_size=0,
-                        kv_cache_dtype=None,
-                        block_size=128,
-                        use_mla=use_mla,
-                        use_sparse=False,
-                        use_pcp=use_pcp,
-                        use_dcp=use_dcp,
-                    )
-                else:
-                    attn_selector_config = AttentionSelectorConfig(
-                        dtype=torch.float16,
-                        head_size=0,
-                        kv_cache_dtype=None,
-                        block_size=128,
-                        use_mla=use_mla,
-                        use_sparse=False,
-                        use_pcp=use_pcp,
-                        use_dcp=use_dcp,
-                    )
+                attn_selector_config = AttentionSelectorConfig(
+                    dtype=torch.float16,
+                    head_size=0,
+                    kv_cache_dtype=None,
+                    block_size=128,
+                    use_mla=use_mla,
+                    use_sparse=False,
+                    use_pcp=use_pcp,
+                    use_dcp=use_dcp,
+                )
                 result = self.platform.get_attn_backend_cls("ascend", attn_selector_config)
                 self.assertEqual(result, expected_backend)
 

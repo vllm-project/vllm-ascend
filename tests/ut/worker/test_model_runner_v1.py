@@ -40,7 +40,8 @@ from vllm_ascend.models.glm5next.kv_cache import (
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _get_kv_cache_config_deepseek_v4_main,
 )
-from vllm_ascend.utils import AscendDeviceType, vllm_version_is
+from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
+from vllm_ascend.utils import AscendDeviceType
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 
@@ -325,6 +326,137 @@ class TestDSparkAuxCaptureMode(unittest.TestCase):
         self.assertFalse(runner._draft_uses_qwen3_gqa_dspark())
 
 
+class TestDrafterMaxModelLen(unittest.TestCase):
+    def _build_runner(
+        self,
+        *,
+        dp_size: int = 1,
+        query_width: int | None = None,
+        model_backed: bool = True,
+        use_dflash: bool = False,
+    ):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.effective_drafter_max_model_len = 1024
+        runner.num_spec_tokens = 5
+        runner.parallel_config = SimpleNamespace(data_parallel_size=dp_size)
+        runner.input_batch = SimpleNamespace(req_ids=["req-0", "req-1"])
+        runner.speculative_config = SimpleNamespace(
+            use_dflash=MagicMock(return_value=use_dflash),
+            use_eagle=MagicMock(return_value=model_backed),
+            uses_draft_model=MagicMock(return_value=False),
+            uses_extract_hidden_states=MagicMock(return_value=False),
+        )
+
+        if query_width is None:
+            drafter = SimpleNamespace()
+        else:
+            drafter = AscendDSparkProposer.__new__(AscendDSparkProposer)
+            drafter.num_query_per_req = query_width
+        drafter.dummy_run = MagicMock()
+        runner.drafter = drafter
+        return runner
+
+    def test_dspark_fit_check_uses_its_exact_query_group(self):
+        runner = self._build_runner(query_width=6)
+
+        self.assertTrue(runner._input_fits_in_drafter(SimpleNamespace(max_seq_len=1018)))
+        self.assertFalse(runner._input_fits_in_drafter(SimpleNamespace(max_seq_len=1019)))
+
+    def test_dflash_fit_check_includes_bonus_query(self):
+        runner = self._build_runner(use_dflash=True)
+
+        self.assertTrue(runner._input_fits_in_drafter(SimpleNamespace(max_seq_len=1018)))
+        self.assertFalse(runner._input_fits_in_drafter(SimpleNamespace(max_seq_len=1019)))
+
+    def test_standard_drafter_fit_check_uses_spec_token_count(self):
+        runner = self._build_runner()
+
+        self.assertTrue(runner._input_fits_in_drafter(SimpleNamespace(max_seq_len=1019)))
+        self.assertFalse(runner._input_fits_in_drafter(SimpleNamespace(max_seq_len=1020)))
+        self.assertFalse(runner._input_fits_in_drafter(None))
+
+    def test_pp_rank_without_drafter_does_not_apply_local_limit(self):
+        runner = self._build_runner(dp_size=2)
+        runner.drafter = None
+
+        self.assertTrue(runner._input_fits_in_drafter(SimpleNamespace(max_seq_len=1024)))
+        runner._skip_drafting()
+        self.assertEqual(runner._draft_token_ids, [[], []])
+
+    def test_dspark_overflow_rank_runs_complete_dp_dummy(self):
+        runner = self._build_runner(dp_size=2, query_width=6)
+
+        runner._skip_drafting()
+
+        runner.drafter.dummy_run.assert_called_once_with(num_tokens=6, num_reqs=1)
+        self.assertEqual(runner._draft_token_ids, [[], []])
+        self.assertEqual(runner._draft_token_req_ids, ["req-0", "req-1"])
+        self.assertIsNone(runner._draft_probs)
+        self.assertIsNone(runner._draft_prob_req_ids)
+        draft_token_ids = runner.take_draft_token_ids()
+        self.assertEqual(draft_token_ids.req_ids, ["req-0", "req-1"])
+        self.assertEqual(draft_token_ids.draft_token_ids, [[], []])
+
+    def test_padded_overflow_preserves_sampled_token_state(self):
+        runner = self._build_runner(dp_size=2)
+        sampled_token_ids = torch.tensor([[11, -1], [21, 22]])
+        next_token_ids = torch.tensor([11, 22])
+        valid_sampled_tokens_count = torch.tensor([1, 2])
+        discard_request_indices = torch.tensor([1])
+        runner.valid_sampled_token_count_event = MagicMock()
+        runner.requests = {"req-0": MagicMock(), "req-1": MagicMock()}
+        runner.discard_request_indices = SimpleNamespace(gpu=discard_request_indices)
+        runner.num_discarded_requests = 1
+        runner.drafter.prepare_next_token_ids_padded = MagicMock(
+            return_value=(next_token_ids, valid_sampled_tokens_count)
+        )
+        runner._copy_valid_sampled_token_count = MagicMock()
+
+        runner._skip_drafting(sampled_token_ids)
+
+        runner.drafter.prepare_next_token_ids_padded.assert_called_once_with(
+            sampled_token_ids,
+            runner.requests,
+            runner.input_batch,
+            discard_request_indices,
+            1,
+        )
+        runner._copy_valid_sampled_token_count.assert_called_once_with(next_token_ids, valid_sampled_tokens_count)
+        runner.drafter.dummy_run.assert_called_once_with(num_tokens=1)
+
+    def test_padded_overflow_avoids_state_work_without_count_event(self):
+        runner = self._build_runner(dp_size=1)
+        runner.valid_sampled_token_count_event = None
+        runner.drafter.prepare_next_token_ids_padded = MagicMock()
+
+        runner._skip_drafting(torch.tensor([[11]]))
+
+        runner.drafter.prepare_next_token_ids_padded.assert_not_called()
+
+    def test_model_backed_overflow_rank_runs_upstream_style_dp_dummy(self):
+        runner = self._build_runner(dp_size=2)
+
+        runner._skip_drafting()
+
+        runner.drafter.dummy_run.assert_called_once_with(num_tokens=1)
+
+    def test_non_model_proposer_does_not_run_dp_dummy(self):
+        runner = self._build_runner(dp_size=2, model_backed=False)
+
+        runner._skip_drafting()
+
+        runner.drafter.dummy_run.assert_not_called()
+        self.assertEqual(runner._draft_token_ids, [[], []])
+
+    def test_overflow_rank_skips_dummy_without_dp(self):
+        runner = self._build_runner(dp_size=1)
+
+        runner._skip_drafting()
+
+        runner.drafter.dummy_run.assert_not_called()
+        self.assertEqual(runner._draft_token_ids, [[], []])
+
+
 class TestAcceptedTokenSnapshot(unittest.TestCase):
     def _build_runner(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)
@@ -463,9 +595,7 @@ def _make_kv_cache_tensor(
     layer_names: list[str],
     page_size: int,
 ) -> KVCacheTensor:
-    """Build the lane-specific descriptor changed by vLLM #51718."""
-    if "shared_by" in KVCacheTensor.__dataclass_fields__:
-        return KVCacheTensor(size=per_layer_size, shared_by=layer_names)
+    """Build the standardized descriptor shared by both supported versions."""
     return KVCacheTensor(
         size=per_layer_size * len(layer_names),
         layers=layer_names,
@@ -477,8 +607,6 @@ def _make_kv_cache_tensor(
 
 def _ratio_kwargs(ratio: int) -> dict[str, int]:
     """Map the MLA compression field renamed by vLLM #51718."""
-    if vllm_version_is("0.28.0"):
-        return {"compress_ratio": ratio}
     return {"tokens_per_state": ratio}
 
 
@@ -822,15 +950,9 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         )
 
         raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
+        assert raw_caches[layer_names[0]][0] is not raw_caches[layer_names[1]][0]
+        assert raw_caches[layer_names[0]][1] is not raw_caches[layer_names[1]][1]
 
-        if vllm_version_is("0.28.0"):
-            assert raw_caches[layer_names[0]][0] is raw_caches[layer_names[1]][0]
-            assert raw_caches[layer_names[0]][1] is raw_caches[layer_names[1]][1]
-        else:
-            assert raw_caches[layer_names[0]][0] is not raw_caches[layer_names[1]][0]
-            assert raw_caches[layer_names[0]][1] is not raw_caches[layer_names[1]][1]
-
-    @unittest.skipIf(vllm_version_is("0.28.0"), "vLLM #51718 only changed the main planner")
     def test_hybrid_descriptors_share_standardized_backing_allocation(self):
         attn_names = ["model.layers.0.self_attn.attn", "model.layers.2.self_attn.attn"]
         mamba_names = ["model.layers.1.linear_attn", "model.layers.3.linear_attn"]
@@ -900,10 +1022,6 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                     base_offset + layer_size,
                 )
 
-    @unittest.skipIf(
-        vllm_version_is("0.28.0"),
-        "vLLM #51718 only changed the main planner",
-    )
     @patch(
         "vllm_ascend.patch.platform.patch_kv_cache_utils.may_override_num_blocks",
         side_effect=lambda _config, num_blocks: num_blocks,

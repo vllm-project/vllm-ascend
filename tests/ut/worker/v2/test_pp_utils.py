@@ -5,9 +5,11 @@ import os
 from types import SimpleNamespace
 
 import pytest
+import vllm
 import vllm.envs as vllm_envs
 from vllm.distributed.utils import get_pp_indices
 
+from vllm_ascend import utils
 from vllm_ascend.worker.v2 import pp_utils
 from vllm_ascend.worker.v2.pp_utils import SpecPPSupport, bypass_upstream_spec_pp_guard
 
@@ -23,25 +25,31 @@ def _clear_partition_cache():
 @pytest.mark.parametrize(
     "version, legacy",
     [
-        ("0.28.0", True),
-        ("0.28.1+empty", True),
+        ("0.28.0", False),
+        ("0.28.1+empty", False),
         ("0.29.0", True),
-        ("0.29.1rc1", True),
+        ("0.29.1rc1", False),
+        ("0.29.0+empty", True),
+        ("0.1.dev1+g84030bbe3.empty", False),
         ("0.30.0", False),
         ("0.31.0.dev12", False),
     ],
 )
 @pytest.mark.parametrize("override", [False, True])
 def test_spec_pp_version_routing(monkeypatch, version, legacy, override):
-    monkeypatch.setattr(pp_utils.vllm, "__version__", "0.30.0" if override else version)
-    monkeypatch.setattr(pp_utils.envs, "VLLM_VERSION", version if override else None)
-    monkeypatch.setattr(pp_utils, "vllm_version_is", lambda version: False)
+    monkeypatch.setattr(vllm, "__version__", "0.30.0" if override else version)
+    monkeypatch.setattr(utils.envs_ascend, "VLLM_VERSION", version if override else None)
+    monkeypatch.setattr(pp_utils, "vllm_version_is", utils.vllm_version_is.__wrapped__)
     assert pp_utils.use_legacy_spec_pp() is legacy
 
 
 def test_untagged_release_uses_existing_version_detection(monkeypatch):
-    monkeypatch.setattr(pp_utils.envs, "VLLM_VERSION", "0.1.dev1+g123.empty")
-    monkeypatch.setattr(pp_utils, "vllm_version_is", lambda version: version == "0.28.0")
+    monkeypatch.setattr(vllm, "__version__", "0.1.dev1+g123.empty")
+    monkeypatch.setattr(utils.envs_ascend, "VLLM_VERSION", None)
+    monkeypatch.setattr(pp_utils, "vllm_version_is", utils.vllm_version_is.__wrapped__)
+    assert not pp_utils.use_legacy_spec_pp()
+    # Untagged builds require an explicit override; do not infer a release SHA.
+    monkeypatch.setattr(utils.envs_ascend, "VLLM_VERSION", "0.29.0")
     assert pp_utils.use_legacy_spec_pp()
 
 
