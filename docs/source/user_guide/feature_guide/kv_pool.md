@@ -23,17 +23,17 @@ When `MultiConnector` is used, configure `kv_load_failure_policy` on the `MultiC
 
 #### `kv_connector_extra_config`: Additional Configurable Parameters for Pooling
 
-| Parameter | Description |
-| :--- | :--- |
-| `lookup_rpc_port` | Port for RPC Communication Between Pooling Scheduler Process and Worker Process: Each Instance Requires a Unique Port Configuration. |
-| `load_async` | Whether to Enable Asynchronous Loading. The default value is false. |
-| `backend` | Set the storage backend for kvpool (`mooncake`, `memcache`, `yuanrong`), with the default being `mooncake`. |
-| `consumer_is_to_put` | Whether Decode node put KV Cache into KV Pool. The default value is false. |
-| `consumer_is_to_load` | Whether Decode node load KV cache from KV Pool. The default value is false. |
-| `use_layerwise` | Enable layer-by-layer KV save/load. Only supported on the Prefill node and requires the `memcache` backend. The default value is false. |
-| `prefill_pp_size` | Prefill PP size, needs to be set when Prefill node enables PP. |
-| `prefill_pp_layer_partition` | Prefill PP layer partition, needs to be set when Prefill node enables PP. |
-| `qos_priority` | Transfer QoS priority for KV pool, an integer in `[0, 4]` (a larger value means a higher priority). |
+| Parameter                      | Description                                                                                                                              |
+| :----------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------- |
+| `lookup_rpc_port`            | Port for RPC Communication Between Pooling Scheduler Process and Worker Process: Each Instance Requires a Unique Port Configuration.     |
+| `load_async`                 | Whether to Enable Asynchronous Loading. The default value is false.                                                                      |
+| `backend`                    | Set the storage backend for kvpool (`mooncake`, `memcache`, `yuanrong`), with the default being `mooncake`.                      |
+| `consumer_is_to_put`         | Whether Decode node put KV Cache into KV Pool. The default value is false.                                                               |
+| `consumer_is_to_load`        | Whether Decode node load KV cache from KV Pool. The default value is false.                                                              |
+| `use_layerwise`              | Enable layer-by-layer KV save/load. Only supported on the Prefill node and requires the`memcache` backend. The default value is false. |
+| `prefill_pp_size`            | Prefill PP size, needs to be set when Prefill node enables PP.                                                                           |
+| `prefill_pp_layer_partition` | Prefill PP layer partition, needs to be set when Prefill node enables PP.                                                                |
+| `qos_priority`               | Transfer QoS priority for KV pool, an integer in`[0, 4]` (a larger value means a higher priority).                                     |
 
 ### Environment Variable Configuration
 
@@ -50,33 +50,33 @@ export PYTHONHASHSEED=0
 * Software:
     * Check Configuration:
 
-        Ensure that the hccn.conf file exists in the environment. If using Docker, mount it into the container.
+    Ensure that the hccn.conf file exists in the environment. If using Docker, mount it into the container.
 
-        ```bash
-        cat /etc/hccn.conf
-        ```
+    ```bash
+    cat /etc/hccn.conf
+    ```
 
-        For Ascend 950 Products, additionally mount:
-        * devices: `/dev/ummu`, `/dev/uburma`
-        * commands: `/usr/bin/urma_admin`
-        * configurations: `/lib/route.conf`, `/etc/hccl_rootinfo.json`
+    For 950PR&950DT Products, additionally mount:
 
+      * devices: `/dev/ummu`, `/dev/uburma`
+      * commands: `/usr/bin/urma_admin`
+      * configurations: `/lib/route.conf`, `/etc/hccl_rootinfo.json`
     * Install Mooncake
 
-        Mooncake is the serving platform for Kimi, a leading LLM service provided by Moonshot AI.
-        The Mooncake wheel requires glibc 2.35 or later. Check the installed glibc version before installation:
+    Mooncake is the serving platform for Kimi, a leading LLM service provided by Moonshot AI.
+    The Mooncake wheel requires glibc 2.35 or later. Check the installed glibc version before installation:
 
-        ```shell
-        ldd --version
-        ```
+    ```shell
+    ldd --version
+    ```
 
-        Install Mooncake with pip:
+    Install Mooncake with pip:
 
-        ```shell
-        python3 -m pip install mooncake-transfer-engine-npu==0.3.11.post1 --extra-index-url https://mirrors.aliyun.com/pypi/web/simple
-        ```
+    ```shell
+    python3 -m pip install mooncake-transfer-engine-npu==0.3.11.post1 --extra-index-url https://mirrors.aliyun.com/pypi/web/simple
+    ```
 
-        Mooncake `0.3.11.post1` remains supported when `tenant_id` is omitted or resolves to `default`. A non-default tenant requires a Mooncake version whose `MooncakeDistributedStore.setup()` accepts `tenant_id`; use Mooncake `0.3.12` or later for multi-tenant deployments.
+    Mooncake `0.3.11.post1` remains supported when `tenant_id` is omitted or resolves to `default`. A non-default tenant requires a Mooncake version whose `MooncakeDistributedStore.setup()` accepts `tenant_id`; use Mooncake `0.3.12` or later for multi-tenant deployments.
 
 ### Step 2.2: Run Mooncake Master
 
@@ -105,18 +105,18 @@ The environment variable **MOONCAKE_CONFIG_PATH** is configured to the full path
 }
 ```
 
-| Parameter | Description |
-| :--- | :--- |
-| `metadata_server` | Configured as **P2PHANDSHAKE**. |
-| `protocol` | Must be set to `ascend` on the NPU. |
-| `device_name` | Leave as empty string `""`.The ascend protocol does not use device names. |
-| `master_server_address` | IP and port of the master service. It can also be set via the **MOONCAKE_MASTER** environment variable, which takes precedence over this configuration item (useful for injecting the master address through Kubernetes). |
-| `global_segment_size` | Registered memory size per card to the KV Pool. **Needs to be aligned to 1GB.** It can also be set via the **MOONCAKE_GLOBAL_SEGMENT_SIZE** environment variable, which takes precedence over this configuration item. |
-| `preferred_segment` | Whether to prefer storing KV on the local segment when putting objects to the KV Pool. Defaults to **false**. |
-| `prefer_alloc_in_same_node` | Whether to prefer allocating KV on the same node. Defaults to **true**. |
-| `enable_ssd_offload` | Set to `true` to enable SSD offload. Environment variables are not supported. |
-| `ssd_offload_path` | **Required when `enable_ssd_offload` is `true`.** Absolute path to a local directory where Mooncake stores offloaded KV data (for example, `/nvme/mooncake_offload`). The directory must exist and be writable by the vLLM process; create it before startup (`mkdir -p <path>`). Relative paths, symbolic links, and paths containing `..` are rejected by Mooncake. |
-| `tenant_id` | Optional Mooncake tenant namespace. Missing, `null`, empty, or whitespace-only values use `default`; surrounding whitespace is removed. All Prefill, Decode, scheduler, and replica instances that share KV entries must use the same tenant ID. Non-default tenants require Mooncake `0.3.12` or later. |
+| Parameter                     | Description                                                                                                                                                                                                                                                                                                                                                                           |
+| :---------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `metadata_server`           | Configured as**P2PHANDSHAKE**.                                                                                                                                                                                                                                                                                                                                                  |
+| `protocol`                  | Must be set to`ascend` on the NPU.                                                                                                                                                                                                                                                                                                                                                  |
+| `device_name`               | Leave as empty string`""`.The ascend protocol does not use device names.                                                                                                                                                                                                                                                                                                            |
+| `master_server_address`     | IP and port of the master service. It can also be set via the**MOONCAKE_MASTER** environment variable, which takes precedence over this configuration item (useful for injecting the master address through Kubernetes).                                                                                                                                                        |
+| `global_segment_size`       | Registered memory size per card to the KV Pool.**Needs to be aligned to 1GB.** It can also be set via the **MOONCAKE_GLOBAL_SEGMENT_SIZE** environment variable, which takes precedence over this configuration item.                                                                                                                                                     |
+| `preferred_segment`         | Whether to prefer storing KV on the local segment when putting objects to the KV Pool. Defaults to**false**.                                                                                                                                                                                                                                                                    |
+| `prefer_alloc_in_same_node` | Whether to prefer allocating KV on the same node. Defaults to**true**.                                                                                                                                                                                                                                                                                                          |
+| `enable_ssd_offload`        | Set to`true` to enable SSD offload. Environment variables are not supported.                                                                                                                                                                                                                                                                                                        |
+| `ssd_offload_path`          | **Required when `enable_ssd_offload` is `true`.** Absolute path to a local directory where Mooncake stores offloaded KV data (for example, `/nvme/mooncake_offload`). The directory must exist and be writable by the vLLM process; create it before startup (`mkdir -p <path>`). Relative paths, symbolic links, and paths containing `..` are rejected by Mooncake. |
+| `tenant_id`                 | Optional Mooncake tenant namespace. Missing,`null`, empty, or whitespace-only values use `default`; surrounding whitespace is removed. All Prefill, Decode, scheduler, and replica instances that share KV entries must use the same tenant ID. Non-default tenants require Mooncake `0.3.12` or later.                                                                         |
 
 #### Step 2.2.2: Start mooncake_master
 
@@ -128,13 +128,13 @@ Under the mooncake folder:
 mooncake_master --port 50088 --eviction_high_watermark_ratio 0.9 --eviction_ratio 0.1 --default_kv_lease_ttl 11000 --enable_offload=false --client_ttl=120
 ```
 
-| Field | Description |
-| :--- | :--- |
-| `eviction_high_watermark_ratio` | Determines the watermark where Mooncake Store will perform eviction. |
-| `eviction_ratio` | Determines the portion of stored objects that would be evicted. |
-| `default_kv_lease_ttl` | Controls the default lease TTL for KV objects (milliseconds). Keep it larger than `ASCEND_CONNECT_TIMEOUT` and `ASCEND_TRANSFER_TIMEOUT`. |
-| `enable_offload` | Set to `true` to enable SSD offload in Mooncake master. Keep the master port aligned with `master_server_address` in `mooncake.json`. Only required when SSD offload is enabled. |
-| `client_ttl` | Seconds a client stays alive after the last Ping. CLI default is `10`; see [SEGMENT_NOT_FOUND with SSD offload](#5321-segment_not_found-with-ssd-offload). Only required when SSD offload is enabled. |
+| Field                             | Description                                                                                                                                                                                           |
+| :-------------------------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `eviction_high_watermark_ratio` | Determines the watermark where Mooncake Store will perform eviction.                                                                                                                                  |
+| `eviction_ratio`                | Determines the portion of stored objects that would be evicted.                                                                                                                                       |
+| `default_kv_lease_ttl`          | Controls the default lease TTL for KV objects (milliseconds). Keep it larger than`ASCEND_CONNECT_TIMEOUT` and `ASCEND_TRANSFER_TIMEOUT`.                                                          |
+| `enable_offload`                | Set to`true` to enable SSD offload in Mooncake master. Keep the master port aligned with `master_server_address` in `mooncake.json`. Only required when SSD offload is enabled.                 |
+| `client_ttl`                    | Seconds a client stays alive after the last Ping. CLI default is`10`; see [SEGMENT_NOT_FOUND with SSD offload](#5321-segment_not_found-with-ssd-offload). Only required when SSD offload is enabled. |
 
 #### Step 2.2.3: Enable Strict Multi-Tenant Mode
 
@@ -179,7 +179,7 @@ curl -s "http://<master_host>:9003/api/v1/tenant_quotas?tenant_id=tenant-a"
 
 Using `MultiConnector` to simultaneously utilize both `MooncakeConnectorV1` and `AscendStoreConnector`. `MooncakeConnectorV1` performs kv_transfer, while `AscendStoreConnector` serves as the prefix-cache node.
 
-For A3 and Ascend 950 Products Store/PD traffic separation, set `ASCEND_GLOBAL_RESOURCE_CONFIG` on both the prefill and decode nodes and use **CANN >= 9.1.0**. The top-level resource configuration controls `MooncakeConnectorV1` PD traffic, and the `store` section controls `AscendStoreConnector` Mooncake Store traffic.
+For A3 and  Store/PD traffic separation, set `ASCEND_GLOBAL_RESOURCE_CONFIG` on both the prefill and decode nodes and use **CANN >= 9.1.0**. The top-level resource configuration controls `MooncakeConnectorV1` PD traffic, and the `store` section controls `AscendStoreConnector` Mooncake Store traffic.
 
 **run_prefill.sh/run_decode.sh:**
 
@@ -188,7 +188,7 @@ For A3 and Ascend 950 Products Store/PD traffic separation, set `ASCEND_GLOBAL_R
 
 # prefill / decode
 ROLE="prefill"
-# A2 (800I/800T A2) or A3 (800I/800T A3) or A5 (950PR/950DT)
+# A2 (800I/800T A2) or A3 (800I/800T A3) or 950PR&950DT Products)
 HARDWARE_SERIES="A2"
 # Link type: ROCE or HCCS in A3 series.
 LINK_TYPE="ROCE"
@@ -235,9 +235,9 @@ elif [ "$HARDWARE_SERIES" == "A3" ] && [ "$LINK_TYPE" == "HCCS" ]; then
     export ACL_OP_INIT_MODE=1
     export ASCEND_ENABLE_USE_FABRIC_MEM=1
 elif [ "$HARDWARE_SERIES" == "A5" ]; then
-    # A5 UBOE
+    # 950PR&950DT Products UBOE
     export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["uboe:device"]}'
-    # A5 UB
+    # 950PR&950DT Products UB
     export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
 else
     echo "Error: Invalid HARDWARE_SERIES. Set to 'A2', 'A3', or 'A5'."
@@ -356,7 +356,7 @@ bash pd_mix.sh
 Content of pd_mix.sh:
 
 ```shell
-# A2 (800I/800T A2) or A3 (800I/800T A3) or A5 (950PR/950DT)
+# A2 (800I/800T A2) or A3 (800I/800T A3) or 950PR&950DT Products
 HARDWARE_SERIES="A2"
 # Link type: ROCE or HCCS in A3 series.
 LINK_TYPE="ROCE"
@@ -393,9 +393,9 @@ elif [ "$HARDWARE_SERIES" == "A3" ] && [ "$LINK_TYPE" == "HCCS" ]; then
     export ACL_OP_INIT_MODE=1
     export ASCEND_ENABLE_USE_FABRIC_MEM=1
 elif [ "$HARDWARE_SERIES" == "A5" ]; then
-    # A5 UBOE
+    # 950PR&950DT Products UBOE
     export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["uboe:device"]}'
-    # A5 UB
+    # 950PR&950DT Products UB
     export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
 else
     echo "Error: Invalid HARDWARE_SERIES. Set to 'A2', 'A3', or 'A5'."
@@ -468,12 +468,12 @@ With Mode A (Embedded Real Client), Mooncake is embedded in vLLM. When the vLLM 
 
 The following environment variables control disk space usage for SSD offload (bucket backend):
 
-| Environment Variable | Default | Description |
-| :--- | :--- | :--- |
-| `MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES` | `1342177280` (1280 MB) | Per-rank SSD read/write buffer size in bytes. **Not** configurable in `mooncake.json`. If you hit `BUFFER_OVERFLOW`, increase this value — see [Sizing MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES](#5323-sizing-mooncake_offload_local_buffer_size_bytes). **On A3 with `ASCEND_ENABLE_USE_FABRIC_MEM=1`, must be aligned to 1GB and counts toward per-rank fabric mem quota (see [Fabric memory size alignment](#5322-fabric-memory-size-alignment-a3--ascend_enable_use_fabric_mem1))**. |
-| `MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE` | `0` | Eviction threshold in bytes. When set to `0`, the backend uses **90% of the physical disk capacity** as the quota. Set an explicit value to control disk usage precisely. |
-| `MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY` | `none` | Eviction policy: `none` (writes fail when full), `fifo`, or `lru`. |
-| `MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES` | `2199023255552` (2 TB) | **Per-rank** maximum disk usage reported to Mooncake master. Master aggregates this across clients (roughly **2 TB × rank count** in the `SSD Storage` total). **Always override** to match real disk capacity — the default often exceeds available space. |
+| Environment Variable                         | Default                  | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| :------------------------------------------- | :----------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES` | `1342177280` (1280 MB) | Per-rank SSD read/write buffer size in bytes.**Not** configurable in `mooncake.json`. If you hit `BUFFER_OVERFLOW`, increase this value — see [Sizing MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES](#5323-sizing-mooncake_offload_local_buffer_size_bytes). **On A3 with `ASCEND_ENABLE_USE_FABRIC_MEM=1`, must be aligned to 1GB and counts toward per-rank fabric mem quota (see [Fabric memory size alignment](#5322-fabric-memory-size-alignment-a3--ascend_enable_use_fabric_mem1))**. |
+| `MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE`   | `0`                    | Eviction threshold in bytes. When set to`0`, the backend uses **90% of the physical disk capacity** as the quota. Set an explicit value to control disk usage precisely.                                                                                                                                                                                                                                                                                                                         |
+| `MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY`  | `none`                 | Eviction policy:`none` (writes fail when full), `fifo`, or `lru`.                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES`  | `2199023255552` (2 TB) | **Per-rank** maximum disk usage reported to Mooncake master. Master aggregates this across clients (roughly **2 TB × rank count** in the `SSD Storage` total). **Always override** to match real disk capacity — the default often exceeds available space.                                                                                                                                                                                                                        |
 
 **`MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES` risk:** If left at the 2 TB default, master shows a total SSD quota far larger than the physical disk (e.g. 16 ranks → ~32 TB displayed on a 1 TB NVMe). Offload still fails when the disk fills, while monitoring looks healthy. Set this to your actual per-rank budget before production use.
 
@@ -491,7 +491,7 @@ export MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES=1073741824   # 1 GB
 
 ### Step 3.1: Prerequisites
 
-Before installing and configuring Memcache, perform the necessary environment checks including memory inspection[5.2.1](#521-check-memory), A3 available memory scanning[5.2.2](#522-a3-only-scan-available-memory), Ascend 950 Products signature verification/container mounting by see [5.2.3](#523-ascend-950-products-only-disable-signature-verification--mount-key-paths-in-container--install-kernel-package). If also want to enable SSD feature, see [5.2.4](#524-checks-before-enabling-ssd).
+Before installing and configuring Memcache, perform the necessary environment checks including memory inspection[5.2.1](#521-check-memory), A3 available memory scanning[5.2.2](#522-a3-only-scan-available-memory), 950PR&950DT Products signature verification/container mounting by see [5.2.3](#523-950pr950dt-products-only-disable-signature-verification--mount-key-paths-in-container--install-kernel-package). If also want to enable SSD feature, see [5.2.4](#524-checks-before-enabling-ssd).
 
 ### Step 3.2: Software Installation
 
@@ -547,19 +547,19 @@ ubsio.standalone.force_new_disk = true
 
 **Key Focuses：**
 
-| Parameter | Description |
-| :--- | :--- |
-| `ock.mmc.meta_service_url` | The P node and D node should be configured with the same MetaService endpoint. |
-| `ock.mmc.local_service.config_store_url` | Its value must be the same as `ock.mmc.meta_service.config_store_url` in `mmc-meta.conf`. |
-| `ock.mmc.local_service.world_size` | Maximum number of supported LocalService, including services that will be added in the future. |
-| `ock.mmc.local_service.protocol` | The recommended protocols are `device_rdma` (RDMA over device, supported for A2 and A3 when device RoCE is available, recommended for A2) and `device_sdma` (SDMA over device, supported for A3 when HCCS is available, recommended for A3). For Ascend 950 Products UB scenarios, set to `device_urma`. For Ascend 950 Products UBOE scenarios, set to `device_uboe`. For details about other supported protocols, see the [MemCache LocalService configuration file](https://gitcode.com/Ascend/memcache/blob/master/config/mmc-local.conf). |
-| `ock.mmc.local_service.dram.size` | DRAM size allocated per die. For example, on A3, to allocate 640GB as KV pool, this parameter should be set to 640/16=40GB. set 0GB for A3 when HCCS is available. |
-| `ock.mmc.local_service.max.dram.size` | The MAX size of ock.mmc.local_service.dram.size in all local processes, necessary if ranks contribute different sizes of DRAM. |
-| `ock.mmc.local_service.storage.enabled` | Set to `true` to enable SSD caching. |
-| `ubsio.disk.path` | **Required when SSD caching is enabled. Specify the target SSD block devices, partitions, or loop devices directly. The configured devices must be exclusively used by UBS IO and must not have any mount points.** Separate multiple paths with colons (`:`). /dev/sdx do not recommend.|
-| `ubsio.mem.size_in_gb` | Per-process UBS IO memory pool size in GB. The recommended value is `10`. The supported range is an integer from `0` to `3072`; SSD caching requires at least `5` GB per process. The total allocation must not exceed the node memory available after reserving memory for the operating system, vLLM, and the Memcache DRAM pool. |
-| `ubsio.standalone.device_count` | Number of local services whose `ock.mmc.local_service.dram.size` is not `0`. |
-| `ubsio.standalone.force_new_disk` | Controls whether UBS IO initializes the configured SSD devices as new disks instead of recovering their existing metadata. Set to `true` because the current version does not support fault recovery. |
+| Parameter                                  | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| :----------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ock.mmc.meta_service_url`               | The P node and D node should be configured with the same MetaService endpoint.                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `ock.mmc.local_service.config_store_url` | Its value must be the same as`ock.mmc.meta_service.config_store_url` in `mmc-meta.conf`.                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `ock.mmc.local_service.world_size`       | Maximum number of supported LocalService, including services that will be added in the future.                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `ock.mmc.local_service.protocol`         | The recommended protocols are`device_rdma` (RDMA over device, supported for A2 and A3 when device RoCE is available, recommended for A2) and `device_sdma` (SDMA over device, supported for A3 when HCCS is available, recommended for A3). For 950PR&950DT Products UB scenarios, set to `device_urma`. For 950PR&950DT Products UBOE scenarios, set to `device_uboe`. For details about other supported protocols, see the [MemCache LocalService configuration file](https://gitcode.com/Ascend/memcache/blob/master/config/mmc-local.conf). |
+| `ock.mmc.local_service.dram.size`        | DRAM size allocated per die. For example, on A3, to allocate 640GB as KV pool, this parameter should be set to 640/16=40GB. set 0GB for A3 when HCCS is available.                                                                                                                                                                                                                                                                                                                                                                                       |
+| `ock.mmc.local_service.max.dram.size`    | The MAX size of ock.mmc.local_service.dram.size in all local processes, necessary if ranks contribute different sizes of DRAM.                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `ock.mmc.local_service.storage.enabled`  | Set to`true` to enable SSD caching.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `ubsio.disk.path`                        | **Required when SSD caching is enabled. Specify the target SSD block devices, partitions, or loop devices directly. The configured devices must be exclusively used by UBS IO and must not have any mount points.** Separate multiple paths with colons (`:`). /dev/sdx do not recommend.                                                                                                                                                                                                                                                        |
+| `ubsio.mem.size_in_gb`                   | Per-process UBS IO memory pool size in GB. The recommended value is`10`. The supported range is an integer from `0` to `3072`; SSD caching requires at least `5` GB per process. The total allocation must not exceed the node memory available after reserving memory for the operating system, vLLM, and the Memcache DRAM pool.                                                                                                                                                                                                               |
+| `ubsio.standalone.device_count`          | Number of local services whose`ock.mmc.local_service.dram.size` is not `0`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `ubsio.standalone.force_new_disk`        | Controls whether UBS IO initializes the configured SSD devices as new disks instead of recovering their existing metadata. Set to`true` because the current version does not support fault recovery.                                                                                                                                                                                                                                                                                                                                                   |
 
 ### Step 3.4: Run Memcache MetaService
 
@@ -579,7 +579,7 @@ python -c "from memcache_hybrid import MetaService; MetaService.main()"
 
 Using `MultiConnector` to simultaneously utilize both `MooncakeConnectorV1` and `AscendStoreConnector`. `MooncakeConnectorV1` performs kv_transfer, while `AscendStoreConnector` enables KV Cache Pool
 
-#### 800I A2/800T A2/800I A3/800T A3/950PR Ascend 950 Products/950DT Ascend 950 Products Series
+#### Atlas A2 Products/Atlas A3 Products/950PR&950DT Products
 
 **run_prefill.sh/run_decode.sh:**
 
@@ -588,7 +588,7 @@ Using `MultiConnector` to simultaneously utilize both `MooncakeConnectorV1` and 
 
 # prefill / decode
 ROLE="prefill"
-# A2 (800I/800T A2) or A3 (800I/800T A3) or A5 (950PR/950DT)
+# A2 (800I/800T A2) or A3 (800I/800T A3) or 950PR&950DT Products
 HARDWARE_SERIES="A2"
 # Link type: ROCE or HCCS in A3 series.
 LINK_TYPE="ROCE"
@@ -634,9 +634,9 @@ elif [ "$HARDWARE_SERIES" == "A3" ] && [ "$LINK_TYPE" == "HCCS" ]; then
     export ACL_OP_INIT_MODE=1
     export ASCEND_ENABLE_USE_FABRIC_MEM=1
 elif [ "$HARDWARE_SERIES" == "A5" ]; then
-    # A5 UBOE
+    # 950PR&950DT Products UBOE
     export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["uboe:device"]}'
-    # A5 UB
+    # 950PR&950DT Products UB
     export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
 else
     echo "Error: Invalid HARDWARE_SERIES. Set to 'A2', 'A3', or 'A5'."
@@ -711,14 +711,14 @@ Refer to [Run Inference](#step-233-run-inference) in the MooncakeStore deploymen
 
 #### Step 3.6.1: Run Mixed Deployment Script
 
-#### 800I A2/800T A2/800I A3/800T A3/950PR Ascend 950 Products/950DT Ascend 950 Products  Series
+#### Atlas A2 Products/Atlas A3 Products/950PR&950DT Products
 
 **Run_pd_mix.sh:**
 
 ```shell
 #!/bin/bash
 
-# A2 (800I/800T A2) or A3 (800I/800T A3) or A5 (950PR/950DT)
+# Atlas A2 Products or Atlas A3 Products or 950PR&950DT Products
 HARDWARE_SERIES="A2"
 # Link type: ROCE or HCCS in A3 series.
 LINK_TYPE="ROCE"
@@ -754,9 +754,9 @@ elif [ "$HARDWARE_SERIES" == "A3" ] && [ "$LINK_TYPE" == "HCCS" ]; then
     export ACL_OP_INIT_MODE=1
     export ASCEND_ENABLE_USE_FABRIC_MEM=1
 elif [ "$HARDWARE_SERIES" == "A5" ]; then
-    # A5 UBOE
+    # 950PR&950DT Products UBOE
     export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["uboe:device"]}'
-    # A5 UB
+    # 950PR&950DT Products UB
     export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
 else
     echo "Error: Invalid HARDWARE_SERIES. Set to 'A2', 'A3', or 'A5'."
@@ -882,9 +882,9 @@ maximum ubsio.mem.size_in_gb = min(3072, floor(available node memory for UBS IO 
 
 For example, if `200` GB is available to UBS IO and four local services have DRAM enabled, the upper limit is `50` GB per process, so the recommended value `ubsio.mem.size_in_gb = 10` is valid. If the calculated upper limit is less than `5`, free more node memory or reduce the number of DRAM-enabled local services.
 
-For the scenario of separate deployment of MemCache, it is recommended to configure a single process with `50` GB. In other scenarios, it is recommended to configure `10` GB. If you want to use the L2.5 memory caching capability, increase `ubsio.mem.size_in_gb` within the limits above and adjust [`ubsio.wcache.evict_water_level`](https://gitcode.com/Ascend/memcache/wiki/DRAM%20+%20SSD%20%E5%A4%9A%E7%BA%A7%E6%B1%A0%E5%8C%96%E9%85%8D%E7%BD%AE%E6%8C%87%E5%8D%97.md#ubsiowcacheevict_water_level) accordingly.
+For the scenario of separate deployment of MemCache, it is recommended to configure a single process with `50` GB. In other scenarios, it is recommended to configure `10` GB. If you want to use the L2.5 memory caching capability, increase `ubsio.mem.size_in_gb` within the limits above and adjust [`ubsio.wcache.evict_water_level`](<https://gitcode.com/Ascend/memcache/wiki/DRAM%20+%20SSD%20%E5%A4%9A%E7%BA%A7%E6%B1%A0%E5%8C%96%E9%85%8D%E7%BD%AE%E6%8C%87%E5%8D%97.md#ubsiowcacheevict_water_level>) accordingly.
 
-For disk config, eviction watermarks, and other UBS IO parameters, see the [DRAM + SSD Multi-level Pooling Configuration Guide](https://gitcode.com/Ascend/memcache/wiki/DRAM%20+%20SSD%20%E5%A4%9A%E7%BA%A7%E6%B1%A0%E5%8C%96%E9%85%8D%E7%BD%AE%E6%8C%87%E5%8D%97.md).
+For disk config, eviction watermarks, and other UBS IO parameters, see the [DRAM + SSD Multi-level Pooling Configuration Guide](<https://gitcode.com/Ascend/memcache/wiki/DRAM%20+%20SSD%20%E5%A4%9A%E7%BA%A7%E6%B1%A0%E5%8C%96%E9%85%8D%E7%BD%AE%E6%8C%87%E5%8D%97.md>).
 
 ## 4. Example of using Yuanrong as a KV Pool backend
 
@@ -902,7 +902,7 @@ dscli --version
 If the prebuilt package does not match the CANN or Ascend driver version in
 your environment, build Yuanrong Datasystem from source in the vLLM Ascend
 image. Follow the official Yuanrong Datasystem build instructions:
-<https://atomgit.com/openeuler/yuanrong-datasystem>
+[https://atomgit.com/openeuler/yuanrong-datasystem](https://atomgit.com/openeuler/yuanrong-datasystem)
 
 ### Step 4.2: Choose a service discovery backend
 
@@ -972,7 +972,7 @@ For a multi-node deployment, set `ETCD_IP` to an address that every Worker can
 reach instead of `127.0.0.1`.
 
 For production environments, refer to the official etcd clustering
-documentation: <https://etcd.io/docs/v3.7/op-guide/clustering/>
+documentation: [https://etcd.io/docs/v3.7/op-guide/clustering/](https://etcd.io/docs/v3.7/op-guide/clustering/)
 
 ### Multi-node deployment
 
@@ -1083,15 +1083,15 @@ do not also set `etcd_address` or `metastore_address`.
 
 The tuning parameters above have the following effects:
 
-| Parameter | Description |
-| :--- | :--- |
-| `log_dir` | Sets the Datasystem worker log directory. Create the directory and grant the worker process write permission before startup. |
-| `arena_per_tenant=1` | Uses one shared-memory arena per tenant as a conservative starting point for memory and file-descriptor usage. |
-| `enable_huge_tlb=true` | Backs worker shared memory with HugeTLB pages. Reserve enough 2 MiB huge pages before starting the worker. |
-| `enable_fallocate=false` | Disables `fallocate` for the shared-memory file; use this setting with the HugeTLB configuration above. |
-| `rpc_thread_num=64` | Sets the RPC/ZMQ service concurrency. |
-| `oc_thread_num=64` | Sets the Object Cache business-thread pool size. |
-| `enable_worker_worker_batch_get=true` | Enables batched Object Cache reads between Datasystem workers. |
+| Parameter                                               | Description                                                                                                                                      |
+| :------------------------------------------------------ | :----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `log_dir`                                             | Sets the Datasystem worker log directory. Create the directory and grant the worker process write permission before startup.                     |
+| `arena_per_tenant=1`                                  | Uses one shared-memory arena per tenant as a conservative starting point for memory and file-descriptor usage.                                   |
+| `enable_huge_tlb=true`                                | Backs worker shared memory with HugeTLB pages. Reserve enough 2 MiB huge pages before starting the worker.                                       |
+| `enable_fallocate=false`                              | Disables`fallocate` for the shared-memory file; use this setting with the HugeTLB configuration above.                                         |
+| `rpc_thread_num=64`                                   | Sets the RPC/ZMQ service concurrency.                                                                                                            |
+| `oc_thread_num=64`                                    | Sets the Object Cache business-thread pool size.                                                                                                 |
+| `enable_worker_worker_batch_get=true`                 | Enables batched Object Cache reads between Datasystem workers.                                                                                   |
 | `sc_regular_socket_num=0`, `sc_stream_socket_num=0` | Disables the Stream Cache service. Both values must be greater than zero to enable it; keep them at zero when KV Pool does not use Stream Cache. |
 
 For `shared_memory_size_mb=40960`, reserve at least 20480 2 MiB huge pages and
@@ -1113,7 +1113,7 @@ any `dscli start` options such as `--timeout` before `-w`.
 
 For more parameters, refer to the `dscli` usage documentation on the Yuanrong
 Datasystem official site:
-<https://atomgit.com/openeuler/yuanrong-datasystem>
+[https://atomgit.com/openeuler/yuanrong-datasystem](https://atomgit.com/openeuler/yuanrong-datasystem)
 
 Stop the Worker when it is no longer needed. Stop the selected service
 discovery backend only after all Workers have stopped. For an independent etcd
@@ -1129,13 +1129,13 @@ dscli stop --coordinator_address "${COORDINATOR_ADDRESS}"
 
 Set the following environment variables on each node before starting vLLM:
 
-| Variable | Required | Default | Description |
-| :--- | :--- | :--- | :--- |
-| `PYTHONHASHSEED` | Yes | `0` | Must be consistent across all nodes to guarantee uniform hash generation. |
-| `DS_WORKER_ADDR` | Yes | N/A | Datasystem worker address in `<host>:<port>` format. This must match the local `dscli start --worker_address` value. |
-| `DATASYSTEM_CLIENT_LOG_DIR` | No | `~/.datasystem/logs` | Directory for Yuanrong client SDK logs created by the vLLM process. Use a directory separate from the worker logs. |
-| `DS_ENABLE_EXCLUSIVE_CONNECTION` | No | `0` | Passed to Yuanrong `HeteroClient.enable_exclusive_connection`. Use `1` to enable the exclusive connection mode when required by your deployment. |
-| `DS_ENABLE_REMOTE_H2D` | No | `0` | Passed to Yuanrong `HeteroClient.enable_remote_h2d`. Use `1` only after the Remote H2D requirements below are met. |
+| Variable                           | Required | Default                | Description                                                                                                                                         |
+| :--------------------------------- | :------- | :--------------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PYTHONHASHSEED`                 | Yes      | `0`                  | Must be consistent across all nodes to guarantee uniform hash generation.                                                                           |
+| `DS_WORKER_ADDR`                 | Yes      | N/A                    | Datasystem worker address in`<host>:<port>` format. This must match the local `dscli start --worker_address` value.                             |
+| `DATASYSTEM_CLIENT_LOG_DIR`      | No       | `~/.datasystem/logs` | Directory for Yuanrong client SDK logs created by the vLLM process. Use a directory separate from the worker logs.                                  |
+| `DS_ENABLE_EXCLUSIVE_CONNECTION` | No       | `0`                  | Passed to Yuanrong`HeteroClient.enable_exclusive_connection`. Use `1` to enable the exclusive connection mode when required by your deployment. |
+| `DS_ENABLE_REMOTE_H2D`           | No       | `0`                  | Passed to Yuanrong`HeteroClient.enable_remote_h2d`. Use `1` only after the Remote H2D requirements below are met.                               |
 
 ```bash
 export PYTHONHASHSEED=0
@@ -1276,11 +1276,11 @@ dscli start --interleave 0-7 -w \
 
 #### Remote H2D link parameters
 
-| Parameter | Default | Description |
-| :--- | :--- | :--- |
-| `remote_h2d_device_ids` | empty | Non-empty enables worker-side RH2D. Comma-separated device IDs, e.g. `"0,1,2,3,4,5,6,7"`. |
-| `remote_h2d_link_type` | `ROCE` | Link type, case-sensitive. `ROCE` for P2P-Transfer over RoCE; `HCCS` for HIXL HCCS (covers buffer-pool, HIXL RoCE direct, and FabricMem sub-modes). Must correspond to the client-side `remote_h2d_transport_backend` in `yuanrong.json` (`ROCE` ↔ `P2P_TRANSFER`, `HCCS` ↔ `HIXL`). For `HCCS`, the client process must also export `DS_RH2D_LINK_TYPE=HCCS` before starting vLLM (the backend does not export it automatically); `ROCE` is the datasystem default and needs no env var. |
-| `remote_h2d_hccs_buffer_pool` | `4:8` | HIXL buffer-pool parameter `<count>:<size>`, only used when `remote_h2d_link_type=HCCS`. Ignored under HIXL RoCE direct mode (`HCCL_INTRA_ROCE_ENABLE=1`). |
+| Parameter                       | Default  | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| :------------------------------ | :------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `remote_h2d_device_ids`       | empty    | Non-empty enables worker-side RH2D. Comma-separated device IDs, e.g.`"0,1,2,3,4,5,6,7"`.                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `remote_h2d_link_type`        | `ROCE` | Link type, case-sensitive.`ROCE` for P2P-Transfer over RoCE; `HCCS` for HIXL HCCS (covers buffer-pool, HIXL RoCE direct, and FabricMem sub-modes). Must correspond to the client-side `remote_h2d_transport_backend` in `yuanrong.json` (`ROCE` ↔ `P2P_TRANSFER`, `HCCS` ↔ `HIXL`). For `HCCS`, the client process must also export `DS_RH2D_LINK_TYPE=HCCS` before starting vLLM (the backend does not export it automatically); `ROCE` is the datasystem default and needs no env var. |
+| `remote_h2d_hccs_buffer_pool` | `4:8`  | HIXL buffer-pool parameter`<count>:<size>`, only used when `remote_h2d_link_type=HCCS`. Ignored under HIXL RoCE direct mode (`HCCL_INTRA_ROCE_ENABLE=1`).                                                                                                                                                                                                                                                                                                                                                  |
 
 * Make sure the NPU driver, firmware, and CANN toolkit required by Yuanrong
   Remote H2D are installed and visible to the worker process. In containers,
@@ -1365,11 +1365,11 @@ and the worker process. Each instance must use a unique port value.
 
 This section describes hardware-specific environment variables required by both Mooncake and Memcache backends.
 
-| Hardware | Dependencies | Export Command | Description |
-| :--- | :--- | :--- | :--- |
-| 950PR/DT Ascend 950 Products series | HDK >=25.6 with mooncake >= v0.3.11 <br>CANN >= 9.1.0 | # UBOE<br> `export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["uboe:device"]}'` <br> # UB<br>`export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'` | Configure the required environment variables based on the communication protocol to use. |
-| 800 I/T A3 series | HDK >= 26.0<br>or HDK >= 25.5 with mooncake >= v0.3.11<br>CANN >= 9.0.0<br>LingQu Computing Network >= 1.5 | `export ASCEND_ENABLE_USE_FABRIC_MEM=1` | **Recommended**. Enables unified memory address direct transmission scheme. With SSD offload, see [Fabric memory size alignment](#5322-fabric-memory-size-alignment-a3--ascend_enable_use_fabric_mem1) — memory sizes must be aligned to 1GB. |
-| 800 I/T A2 series | HDK >= 25.5 is recommended | `export HCCL_INTRA_ROCE_ENABLE=1` | Required by direct transmission scheme on 800 I/T A2 series|
+| Hardware                            | Dependencies                                                                                   | Export Command                                                                                                                                                    | Description                                                                                                                                                                                                                                         |
+| :---------------------------------- | :--------------------------------------------------------------------------------------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 950PR&950DT Products | HDK >=25.6 with mooncake >= v0.3.11CANN >= 9.1.0                                               | # UBOE`export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["uboe:device"]}'`  # UB`export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'` | Configure the required environment variables based on the communication protocol to use.                                                                                                                                                            |
+| 800 I/T A3 series                   | HDK >= 26.0or HDK >= 25.5 with mooncake >= v0.3.11CANN >= 9.0.0LingQu Computing Network >= 1.5 | `export ASCEND_ENABLE_USE_FABRIC_MEM=1`                                                                                                                         | **Recommended**. Enables unified memory address direct transmission scheme. With SSD offload, see [Fabric memory size alignment](#5322-fabric-memory-size-alignment-a3--ascend_enable_use_fabric_mem1) — memory sizes must be aligned to 1GB. |
+| 800 I/T A2 series                   | HDK >= 25.5 is recommended                                                                     | `export HCCL_INTRA_ROCE_ENABLE=1`                                                                                                                               | Required by direct transmission scheme on 800 I/T A2 series                                                                                                                                                                                         |
 
 ### 5.2. Memcache Prerequisites
 
@@ -1398,7 +1398,7 @@ MemFabric uses 2MB and 1GB huge pages. The script scans by 1GB specification by 
 python3 mem_scan.py -m 2
 ```
 
-#### 5.2.3. (Ascend 950 Products only) Disable signature verification + mount key paths in container + install kernel package
+#### 5.2.3. (950PR&950DT Products only) Disable signature verification + mount key paths in container + install kernel package
 
 **Step 1:** Disable HDK signature verification on the bare metal (only needs to be executed once per machine):
 
@@ -1477,7 +1477,7 @@ When vLLM reports failed `put` or `get` operations, first check whether the erro
 * If the error is not reported by Mooncake, it is likely an HIXL (ascend_direct) transfer-layer issue. Collect plog files under `/root/ascend/log/debug/plog` and check whether the issue matches a known HIXL problem.
 
 For common troubleshooting and issue localization guidance for HIXL (ascend_direct), see:
-<https://gitcode.com/cann/hixl/wiki/HIXL%E5%B8%B8%E8%A7%81%E9%97%AE%E9%A2%98%E5%AE%9A%E4%BD%8D%E6%89%8B%E5%86%8C.md>
+[https://gitcode.com/cann/hixl/wiki/HIXL%E5%B8%B8%E8%A7%81%E9%97%AE%E9%A2%98%E5%AE%9A%E4%BD%8D%E6%89%8B%E5%86%8C.md](https://gitcode.com/cann/hixl/wiki/HIXL%E5%B8%B8%E8%A7%81%E9%97%AE%E9%A2%98%E5%AE%9A%E4%BD%8D%E6%89%8B%E5%86%8C.md)
 
 #### 5.3.2. SSD FAQ
 
@@ -1487,11 +1487,11 @@ If client logs show `OffloadObjectHeartbeat failed, error code is SEGMENT_NOT_FO
 
 **Typical trigger (with `enable_cpu_binding=true`):** Mooncake starts Ping during init, then vLLM-Ascend `bind_cpus()` runs `migratepages`/IRQ binding; the Ping thread is not pinned and can miss beats under the default `client_ttl=10`.
 
-| Mitigation | Notes |
-| :--- | :--- |
-| **Temporary:** raise Master TTL | e.g. `mooncake_master ... --client_ttl=120`. Tune to your init/warmup window (often `60`–`120` is enough). Does not fix the root cause. |
-| **Recovery:** upgrade Mooncake | Versions **> v0.3.11** (main branch) can remount `LOCAL_DISK` and rescan metadata after `SEGMENT_NOT_FOUND`. This **recovers after** cleanup; it does **not** prevent expiry or in-flight request failures while metadata is gone. |
-| **Root fix:** Mooncake Ping CPU affinity | Pin the storage Ping thread to a release/isolated CPU (Mooncake-side change). Optional vLLM-Ascend cooperation to pass the release CPU per rank. |
+| Mitigation                                     | Notes                                                                                                                                                                                                                                            |
+| :--------------------------------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Temporary:** raise Master TTL          | e.g.`mooncake_master ... --client_ttl=120`. Tune to your init/warmup window (often `60`–`120` is enough). Does not fix the root cause.                                                                                                    |
+| **Recovery:** upgrade Mooncake           | Versions**> v0.3.11** (main branch) can remount`LOCAL_DISK` and rescan metadata after `SEGMENT_NOT_FOUND`. This **recovers after** cleanup; it does **not** prevent expiry or in-flight request failures while metadata is gone. |
+| **Root fix:** Mooncake Ping CPU affinity | Pin the storage Ping thread to a release/isolated CPU (Mooncake-side change). Optional vLLM-Ascend cooperation to pass the release CPU per rank.                                                                                                 |
 
 Also restart Master together with vLLM to avoid stale `segment_already_exists` state when debugging restarts.
 
@@ -1499,10 +1499,10 @@ Also restart Master together with vLLM to avoid stale `segment_already_exists` s
 
 On A3 with fabric memory enabled, **each** fabric mem allocation must be an integer multiple of **1 GB** (1073741824 bytes). Mooncake does not round sizes up automatically.
 
-| Parameter | Config source | Alignment |
-| :--- | :--- | :--- |
-| `global_segment_size` | `mooncake.json` or export `MOONCAKE_GLOBAL_SEGMENT_SIZE` | Each rank's segment size must be aligned to 1GB (e.g. `"1GB"`, `"20GB"`). |
-| `MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES` | export `MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES` (only when `enable_ssd_offload=true`) | Must be aligned to 1GB. Default is 1280 MB (1.25 GB), which is **not** aligned and is too small for long-context SSD loads — size with [Sizing MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES](#5323-sizing-mooncake_offload_local_buffer_size_bytes). |
+| Parameter                                    | Config source                                                                              | Alignment                                                                                                                                                                                                                                             |
+| :------------------------------------------- | :----------------------------------------------------------------------------------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `global_segment_size`                      | `mooncake.json` or export `MOONCAKE_GLOBAL_SEGMENT_SIZE`                               | Each rank's segment size must be aligned to 1GB (e.g.`"1GB"`, `"20GB"`).                                                                                                                                                                          |
+| `MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES` | export`MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES` (only when `enable_ssd_offload=true`) | Must be aligned to 1GB. Default is 1280 MB (1.25 GB), which is**not** aligned and is too small for long-context SSD loads — size with [Sizing MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES](#5323-sizing-mooncake_offload_local_buffer_size_bytes). |
 
 `local_buffer_size` in `mooncake.json` is **not** used under fabric mem (vLLM-Ascend passes `0` to `setup()`).
 
@@ -1577,25 +1577,25 @@ Ensure `free -h` **available** on the host exceeds this sum plus vLLM overhead. 
 
 1. Pre-operation steps:
 2. For Memcache troubleshooting, see:
-<https://gitcode.com/Ascend/memcache/wiki/FAQ.md>
+   [https://gitcode.com/Ascend/memcache/wiki/FAQ.md](https://gitcode.com/Ascend/memcache/wiki/FAQ.md)
 
 ### 5.5. DSv4 known issue (temporary)
 
 For the temporary DSv4 known issue, see:
-<https://github.com/vllm-project/vllm-ascend/issues/9975>
+[https://github.com/vllm-project/vllm-ascend/issues/9975](https://github.com/vllm-project/vllm-ascend/issues/9975)
 
 ### 5.6. ASCEND_GLOBAL_RESOURCE_CONFIG
 
 `ASCEND_GLOBAL_RESOURCE_CONFIG` is a JSON string passed to HIXL. Common fields are:
 
-| Field | Description |
-| :--- | :--- |
-| `comm_resource_config.protocol_desc` | Protocol descriptor for the top-level Mooncake transfer engine. In PD disaggregation, this controls the `MooncakeConnectorV1` PD transfer path. Example values include `["hccs:device"]` and `["roce:device"]`. |
-| `store.comm_resource_config.protocol_desc` | Protocol descriptor for Mooncake Store traffic used by `AscendStoreConnector`. On A3, this can be set to `["roce:device"]` while PD transfer uses HCCS. |
-| `comm_resource_config.listen_port` | One-sided communication listen port. The HIXL default is `16666`; use a different port for standalone `mooncake_client` processes to avoid conflicts with embedded clients. |
-| `fabric_memory.max_capacity` | Fabric memory quota in GB per process. Use it only when the fabric memory budget is too small; see [Fabric memory size alignment](#5322-fabric-memory-size-alignment-a3--ascend_enable_use_fabric_mem1). |
+| Field                                        | Description                                                                                                                                                                                                          |
+| :------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `comm_resource_config.protocol_desc`       | Protocol descriptor for the top-level Mooncake transfer engine. In PD disaggregation, this controls the`MooncakeConnectorV1` PD transfer path. Example values include `["hccs:device"]` and `["roce:device"]`. |
+| `store.comm_resource_config.protocol_desc` | Protocol descriptor for Mooncake Store traffic used by`AscendStoreConnector`. On A3, this can be set to `["roce:device"]` while PD transfer uses HCCS.                                                           |
+| `comm_resource_config.listen_port`         | One-sided communication listen port. The HIXL default is`16666`; use a different port for standalone `mooncake_client` processes to avoid conflicts with embedded clients.                                       |
+| `fabric_memory.max_capacity`               | Fabric memory quota in GB per process. Use it only when the fabric memory budget is too small; see [Fabric memory size alignment](#5322-fabric-memory-size-alignment-a3--ascend_enable_use_fabric_mem1).               |
 
-Store/PD traffic separation requires **CANN >= 9.1.0**. It is intended for A3 and Ascend 950 Products deployments where PD transfer traffic can use HCCS and Mooncake Store traffic can use ROCE, so the two traffic classes do not compete on the same physical link. For more HIXL deployment patterns, see the [Mooncake + HIXL pooling overview](https://gitcode.com/cann/hixl/wiki/Mooncake%20+%20HIXL%20%E6%B1%A0%E5%8C%96%E6%96%B9%E6%A1%88%E6%80%BB%E8%A7%88%EF%BC%88A2%20-%20A3%EF%BC%89.md).
+Store/PD traffic separation requires **CANN >= 9.1.0**. It is intended for A3 and 950PR&950DT Products deployments where PD transfer traffic can use HCCS and Mooncake Store traffic can use ROCE, so the two traffic classes do not compete on the same physical link. For more HIXL deployment patterns, see the [Mooncake + HIXL pooling overview](<https://gitcode.com/cann/hixl/wiki/Mooncake%20+%20HIXL%20%E6%B1%A0%E5%8C%96%E6%96%B9%E6%A1%88%E6%80%BB%E8%A7%88%EF%BC%88A2%20-%20A3%EF%BC%89.md>).
 
 ### 5.7. QoS Configuration
 

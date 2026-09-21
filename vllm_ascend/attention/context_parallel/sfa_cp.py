@@ -1,6 +1,6 @@
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, NamedTuple, TypeVar, cast
+from typing import Any, NamedTuple, TypeVar
 
 import torch
 import torch_npu
@@ -8,7 +8,8 @@ from torch import nn
 from vllm.config import VllmConfig
 from vllm.distributed import get_dcp_group, get_pcp_group, get_tp_group
 from vllm.triton_utils import HAS_TRITON
-from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
+from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 import vllm_ascend.ops.triton.sfa_cp  # noqa: F401
@@ -16,7 +17,15 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import (
     DCPImplMixin,
     DCPMetadataBuilderMixin,
-    get_dcp_local_seq_lens,
+    build_pcp_ordered_slot_mapping,
+    get_cp_local_query_key_lens,
+)
+from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
+    build_sfa_dcp_replicated_block_table,
+    build_sfa_dcp_replicated_slot_mapping,
+    get_sfa_dcp_local_block_table,
+    get_sfa_dcp_max_local_block_table_cols,
+    get_sfa_pcp_global_metadata,
 )
 from vllm_ascend.attention.sfa_v1 import (
     AscendSFAImpl,
@@ -24,7 +33,7 @@ from vllm_ascend.attention.sfa_v1 import (
     AscendSFAMetadataBuilder,
     SFAForwardContext,
 )
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_decodes_and_prefills
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, enable_dcp, split_decodes_and_prefills
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.ops.triton.sfa_dcp_query import can_prepare_query, prepare_query_head_major, unpack_query
@@ -33,8 +42,9 @@ from vllm_ascend.utils import (
     enable_dsa_cp,
     enable_dsa_cp_full_o_proj,
     enable_pcp_o_proj_weight_sharding,
+    enable_sfa_dcp_force_tmajor_restore,
     enable_sfa_dcp_replicated_indexer,
-    vllm_version_is,
+    is_pd_decode_recompute_scheduler_enabled,
 )
 from vllm_ascend.weight_switch import (
     WeightLoadPartition,
@@ -42,11 +52,6 @@ from vllm_ascend.weight_switch import (
     WeightSwitchMixin,
 )
 from vllm_ascend.weight_switch.o_proj import OProjWeightSwitchMixin
-
-if vllm_version_is("0.28.0"):
-    from vllm.model_executor.layers.attention.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
-else:
-    from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 
 M = TypeVar("M", bound=AscendSFAMetadata)
 
@@ -325,17 +330,12 @@ class AscendSFADSACPMetadataBuilder(AscendSFAMetadataBuilder):
             actual_seq_lengths_key = self.dsa_cp_actual_seq_lengths_key
 
         num_segs = cum_query_lens.shape[0]
-        global_start = common_attn_metadata.query_start_loc[:num_segs]
-        global_end = cum_query_lens
-        req_local_start = global_start.clamp(min=local_start)
-        req_local_end = global_end.clamp(max=local_end_with_pad)
-        num_local_tokens = req_local_end - req_local_start
-        local_query_lens = torch.cumsum(num_local_tokens.clamp(min=0), dim=0)
-        offset = global_end - req_local_end
-        local_key_lens = torch.where(
-            num_local_tokens > 0,
-            torch.clamp_min(seq_lens - offset, 0),
-            0,
+        local_query_lens, local_key_lens = get_cp_local_query_key_lens(
+            common_attn_metadata.query_start_loc,
+            cum_query_lens,
+            seq_lens,
+            local_start,
+            local_end_with_pad,
         )
         actual_seq_lengths_query[:num_segs] = local_query_lens
         actual_seq_lengths_key[:num_segs] = local_key_lens
@@ -604,10 +604,11 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
 # - SFA KV cache remains DCP-local to preserve the KV memory saving. The sparse
 #   topk indices produced from the replicated indexer view are remapped to local
 #   KV indices before calling sparse flash attention.
-# - BlockTable only owns the DCP-local physical layout. This builder derives the
-#   replicated block table and slot mapping on demand, temporarily builds the
-#   indexer-facing metadata with that replicated view, and then stores the
-#   original DCP-local view in metadata.dcp_context for KV writes and SFA reads.
+# - BlockTable only owns the DCP-local physical layout. This builder derives its
+#   replicated block table and slot mapping on demand, then stores the original
+#   DCP-local view in metadata.dcp_context for KV writes and SFA reads. The
+#   independent indexer builder derives its own replicated view from common
+#   metadata using the same stateless address helpers.
 # - The replicated view uses the same logical/kernel block size as BlockTable,
 #   including hybrid block splitting.
 class AscendSFADCPMetadataBuilder(
@@ -632,6 +633,7 @@ class AscendSFADCPMetadataBuilder(
             metadata_cls,
             supports_dcp_with_varlen,
         )
+        self.dcp_enabled = enable_dcp()
         self.cp_kv_cache_interleave_size = vllm_config.parallel_config.cp_kv_cache_interleave_size
         assert self.dcp_size > 1, "AscendSFADCPMetadataBuilder requires DCP world size > 1."
         if self.cp_kv_cache_interleave_size <= 0:
@@ -663,8 +665,11 @@ class AscendSFADCPMetadataBuilder(
         total_cp_size = self.dcp_size
         # The generic vLLM BlockTable may expose global-width storage, while
         # the DCP physical KV layout only populates rank-local block columns.
-        self.max_local_block_table_cols = (
-            cdiv(max_model_len, kv_cache_spec.block_size * total_cp_size) * self.blocks_per_phys_block
+        self.max_local_block_table_cols = get_sfa_dcp_max_local_block_table_cols(
+            max_model_len,
+            kv_cache_spec.block_size,
+            total_cp_size,
+            self.blocks_per_phys_block,
         )
         max_replicated_block_table_cols = self.max_local_block_table_cols * total_cp_size
         self.block_table_replicated_view_buf: torch.Tensor = torch.empty(
@@ -702,13 +707,17 @@ class AscendSFADCPMetadataBuilder(
     def _get_dcp_local_seq_lens(self, seq_lens: torch.Tensor) -> torch.Tensor:
         return get_dcp_local_seq_lens(
             seq_lens,
-            self.dcp_size,
-            self.cp_kv_cache_interleave_size,
-        )[:, self.dcp_rank]
+            dcp_size=self.dcp_size,
+            dcp_rank=self.dcp_rank,
+            cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
+        )
 
     def _get_dcp_local_block_table(self, block_table: torch.Tensor, num_reqs: int) -> torch.Tensor:
-        local_cols = min(block_table.shape[1], self.max_local_block_table_cols)
-        return block_table[:num_reqs, :local_cols]
+        return get_sfa_dcp_local_block_table(
+            block_table,
+            num_reqs,
+            self.max_local_block_table_cols,
+        )
 
     def _ensure_replicated_view_buffers(
         self,
@@ -751,28 +760,14 @@ class AscendSFADCPMetadataBuilder(
             local_block_table_cols,
         )
 
-        total_cp_size = self.dcp_size
-        blocks_per_phys_block = self.blocks_per_phys_block
-        local_col_idx = (
-            replicated_col_idx // (total_cp_size * blocks_per_phys_block) * blocks_per_phys_block
-            + replicated_col_idx % blocks_per_phys_block
+        return build_sfa_dcp_replicated_block_table(
+            dcp_block_table,
+            seq_lens,
+            block_table_replicated_view,
+            replicated_col_idx,
+            self.dcp_size,
+            self.blocks_per_phys_block,
         )
-        rank_in_replicated_view = (replicated_col_idx // blocks_per_phys_block) % total_cp_size
-
-        local_logical_blocks = torch.index_select(dcp_block_table, 1, local_col_idx)
-        if blocks_per_phys_block == 1:
-            replicated_blocks = local_logical_blocks * total_cp_size + rank_in_replicated_view
-        else:
-            local_sub_blocks = local_logical_blocks % blocks_per_phys_block
-            local_phys_blocks = local_logical_blocks // blocks_per_phys_block
-            replicated_blocks = (
-                local_phys_blocks * total_cp_size + rank_in_replicated_view
-            ) * blocks_per_phys_block + local_sub_blocks
-
-        valid_req_mask = (seq_lens[:num_reqs].to(device=self.device) > 0).to(replicated_blocks.dtype).view(-1, 1)
-        replicated_blocks = replicated_blocks * valid_req_mask
-        block_table_replicated_view.copy_(replicated_blocks)
-        return block_table_replicated_view
 
     def _build_slot_mapping_replicated_view(
         self,
@@ -781,46 +776,26 @@ class AscendSFADCPMetadataBuilder(
     ) -> torch.Tensor:
         num_reqs = common_attn_metadata.num_reqs
         num_input_tokens = common_attn_metadata.num_input_tokens
-        num_actual_tokens = min(common_attn_metadata.num_actual_tokens, num_input_tokens)
         local_block_table_cols = block_table_replicated_view.shape[1] // self.dcp_size
         _, _, slot_mapping_replicated_view = self._ensure_replicated_view_buffers(
             num_reqs,
             num_input_tokens,
             local_block_table_cols,
         )
-        slot_mapping_replicated_view.fill_(-1)
-        if num_actual_tokens == 0:
-            return slot_mapping_replicated_view
-
-        query_lens = (
-            common_attn_metadata.query_start_loc[1 : num_reqs + 1] - common_attn_metadata.query_start_loc[:num_reqs]
+        return build_sfa_dcp_replicated_slot_mapping(
+            common_attn_metadata,
+            block_table_replicated_view,
+            slot_mapping_replicated_view,
+            self.replicated_view_block_size,
+            self.device,
         )
-        req_indices = torch.repeat_interleave(
-            torch.arange(num_reqs, dtype=torch.int32, device=self.device),
-            query_lens.to(device=self.device),
-            output_size=num_input_tokens,
-        )[:num_actual_tokens]
-        if req_indices.numel() == 0:
-            return slot_mapping_replicated_view
-
-        num_actual_tokens = min(num_actual_tokens, req_indices.shape[0])
-        req_indices = req_indices[:num_actual_tokens]
-        positions = common_attn_metadata.positions[:num_actual_tokens].to(
-            device=self.device,
-            dtype=torch.int32,
-        )
-        logical_block_idx = positions // self.replicated_view_block_size
-        block_offsets = positions % self.replicated_view_block_size
-        block_table_indices = req_indices * block_table_replicated_view.shape[1] + logical_block_idx
-        block_numbers = block_table_replicated_view.flatten()[block_table_indices]
-        slot_mapping_replicated_view[:num_actual_tokens] = (
-            block_numbers * self.replicated_view_block_size + block_offsets
-        )
-        return slot_mapping_replicated_view
 
     def _build_compact_kv_gather_metadata(
         self,
         dcp_block_table: torch.Tensor,
+        *,
+        global_dcp_block_table: torch.Tensor | None = None,
+        global_dcp_num_blocks: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Build the compact cross-DCP KV view used by prefill attention."""
         valid_block_ids, compact_block_table = dcp_block_table.flatten().unique(return_inverse=True)
@@ -837,6 +812,8 @@ class AscendSFADCPMetadataBuilder(
         self,
         common_attn_metadata: AscendCommonAttentionMetadata,
         build_metadata: Callable[[], AscendSFAMetadata],
+        global_dcp_block_table: torch.Tensor | None = None,
+        global_dcp_num_blocks: torch.Tensor | None = None,
     ) -> AscendSFAMetadata:
         dcp_slot_mapping = common_attn_metadata.slot_mapping
         full_dcp_block_table = common_attn_metadata.block_table_tensor
@@ -875,12 +852,18 @@ class AscendSFADCPMetadataBuilder(
         num_decodes, num_prefills, num_decode_tokens, _ = split_decodes_and_prefills(
             common_attn_metadata,
             decode_threshold=self.decode_threshold,
-            treat_short_extends_as_decodes=False,
+            treat_short_extends_as_decodes=(
+                self.dcp_enabled and is_pd_decode_recompute_scheduler_enabled(self.vllm_config)
+            ),
         )
         kv_gather_block_ids = None
         kv_gather_block_table = None
         if num_prefills > 0:
-            kv_gather_block_ids, kv_gather_block_table = self._build_compact_kv_gather_metadata(dcp_block_table)
+            kv_gather_block_ids, kv_gather_block_table = self._build_compact_kv_gather_metadata(
+                dcp_block_table,
+                global_dcp_block_table=global_dcp_block_table,
+                global_dcp_num_blocks=global_dcp_num_blocks,
+            )
         metadata.dcp_context = DCPContext(
             slot_mapping=dcp_slot_mapping,
             block_table=dcp_block_table,
@@ -943,6 +926,36 @@ class AscendSFAPCPDCPMetadataBuilder(AscendSFADCPMetadataBuilder):
             device=device,
         )
 
+    def _build_compact_kv_gather_metadata(
+        self,
+        dcp_block_table: torch.Tensor,
+        *,
+        global_dcp_block_table: torch.Tensor | None = None,
+        global_dcp_num_blocks: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if global_dcp_block_table is None:
+            return super()._build_compact_kv_gather_metadata(dcp_block_table)
+
+        # PCP ranks can have different local request rows, even with zeroed
+        # block-table tails. Use the global request view so every DCP sender
+        # packs the same block IDs in the same order.
+        if global_dcp_num_blocks is None:
+            raise ValueError("PCP+DCP compact KV metadata requires valid block counts for the global block table.")
+        valid_mask = self.arange_buffer[: global_dcp_block_table.shape[1]].unsqueeze(
+            0
+        ) < global_dcp_num_blocks.unsqueeze(1)
+        # Select allocated entries without modifying shared tables or
+        # introducing a block-0 placeholder for unused columns.
+        valid_block_ids = global_dcp_block_table[valid_mask].unique()
+        compact_block_table = torch.searchsorted(valid_block_ids, dcp_block_table.contiguous())
+        num_blocks = valid_block_ids.shape[0]
+        dcp_collective_rank_order = self.dcp_collective_rank_order[: self.dcp_size]
+        remapped_block_table = (
+            compact_block_table.unsqueeze(-1)
+            + (dcp_collective_rank_order * num_blocks).view(1, 1, -1).to(dcp_block_table)
+        ).reshape(dcp_block_table.shape[0], -1)
+        return valid_block_ids, remapped_block_table.to(torch.int32)
+
     def _build_pcp_ordered_indexer_slot_mapping(
         self,
         common_attn_metadata: AscendCommonAttentionMetadata,
@@ -950,24 +963,14 @@ class AscendSFAPCPDCPMetadataBuilder(AscendSFADCPMetadataBuilder):
         pcp_cache_group_idx: int,
     ) -> torch.Tensor:
         """Build this receiver's Indexer addresses in PCP token order."""
-        global_batch = pcp_context.global_batch
-        num_reqs = global_batch.num_reqs
-        global_block_table = pcp_context.global_block_tables[pcp_cache_group_idx]
-        global_common_attn_metadata = cast(
-            AscendCommonAttentionMetadata,
-            common_attn_metadata.replace(
-                query_start_loc=global_batch.query_start_loc,
-                seq_lens=global_batch.seq_lens[:num_reqs],
-                num_reqs=num_reqs,
-                num_actual_tokens=global_batch.num_tokens,
-                num_input_tokens=global_batch.num_tokens,
-                positions=global_batch.positions,
-                block_table_tensor=global_block_table,
-            ),
+        global_common_attn_metadata = get_sfa_pcp_global_metadata(
+            common_attn_metadata,
+            pcp_context,
+            pcp_cache_group_idx,
         )
         dcp_block_table = self._get_dcp_local_block_table(
-            global_block_table,
-            num_reqs,
+            global_common_attn_metadata.block_table_tensor,
+            global_common_attn_metadata.num_reqs,
         )
         replicated_block_table = self._build_block_table_replicated_view(
             dcp_block_table,
@@ -978,20 +981,11 @@ class AscendSFAPCPDCPMetadataBuilder(AscendSFADCPMetadataBuilder):
             replicated_block_table,
         )
 
-        gather_idx = pcp_context.padded_gather_idx
-        write_mask = pcp_context.gathered_kv_write_mask
-        if gather_idx is None or write_mask is None:
-            raise RuntimeError("PCP+DCP prefill requires the PCP gathered-token layout.")
-        num_pcp_ordered_tokens = gather_idx.numel()
-        pcp_ordered_slot_mapping = self.pcp_indexer_slot_mapping_buf[:num_pcp_ordered_tokens]
-        torch.index_select(
+        return build_pcp_ordered_slot_mapping(
             global_slot_mapping,
-            0,
-            gather_idx,
-            out=pcp_ordered_slot_mapping,
+            pcp_context,
+            self.pcp_indexer_slot_mapping_buf,
         )
-        pcp_ordered_slot_mapping.masked_fill_(~write_mask, -1)
-        return pcp_ordered_slot_mapping
 
     def build(
         self,
@@ -1018,11 +1012,20 @@ class AscendSFAPCPDCPMetadataBuilder(AscendSFADCPMetadataBuilder):
             pcp_ordered_indexer_slot_mapping = self._build_pcp_ordered_indexer_slot_mapping(
                 common_attn_metadata, pcp_context, pcp_cache_group_idx
             )
-        metadata = super().build(
-            common_prefix_len,
+        global_dcp_block_table = None
+        global_dcp_num_blocks = None
+        if pcp_cache_group_idx is not None:
+            global_dcp_block_table = self._get_dcp_local_block_table(
+                pcp_context.global_block_tables[pcp_cache_group_idx],
+                pcp_context.global_batch.num_reqs,
+            )
+            if pcp_context.global_block_table_num_blocks is not None:
+                global_dcp_num_blocks = pcp_context.global_block_table_num_blocks[pcp_cache_group_idx]
+        metadata = self._build_with_metadata_view(
             common_attn_metadata,
-            fast_build,
-            **kwargs,
+            lambda: self._build(common_attn_metadata, draft_index=None),
+            global_dcp_block_table=global_dcp_block_table,
+            global_dcp_num_blocks=global_dcp_num_blocks,
         )
         assert isinstance(metadata, AscendSFADCPMetadata)
         if pcp_ordered_indexer_slot_mapping is not None:
@@ -1144,6 +1147,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
     @staticmethod
     def _finish_dcp_gather(
         context: DCPGatherContext,
+        keep_view: bool = False,
     ) -> tuple[torch.Tensor, ...]:
         if context.handle is not None:
             context.handle.wait()
@@ -1151,7 +1155,9 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             return unpack_query(context.gathered)
         gathered = context.gathered
         if context.restore_perm is not None:
-            gathered = gathered.permute(context.restore_perm).contiguous()
+            gathered = gathered.permute(context.restore_perm)
+            if not keep_view:
+                gathered = gathered.contiguous()
         return torch.split(gathered, context.split_sizes, dim=-1)
 
     def _all_gather_dim_async(
@@ -1257,6 +1263,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             self.dcp_size,
             scatter_dim,
             self.dcp_group.unique_name,
+            decode_token_budget=self.vllm_config.scheduler_config.max_num_batched_tokens,
         )
 
     def _start_dcp_query_gather(
@@ -1290,6 +1297,24 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         # fragments. On Ascend the separate gathers can leave SFA with an
         # incomplete stream dependency on the first prefill. DSA-CP restores
         # token shards on dim 0; native DCP restores query shards on dim 1.
+        if query_gather_dim == 1 and getattr(ql_nope, "is_npu", False):
+            try:
+                from vllm_ascend.ops.triton.query_gather_prep import prep_query_head_major
+
+                head_major = prep_query_head_major(ql_nope, q_pe)
+            except Exception:
+                # Hard kernel failure: route to the torch assembly below.
+                head_major = None
+            if head_major is not None:
+                gathered, handle = all_gather_async(head_major, self.dcp_group)
+                return DCPGatherContext(
+                    gathered=gathered,
+                    handle=handle,
+                    restore_perm=(1, 0, 2),
+                    split_sizes=(ql_nope.shape[-1], q_pe.shape[-1]),
+                )
+            # prep_query_head_major returned None (shape not provably legal
+            # for the fast kernel): fall back to the torch assembly below.
         fused_q = torch.cat([ql_nope, q_pe], dim=-1).contiguous()
         return self._start_dcp_gather(
             fused_q,
@@ -1318,7 +1343,11 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
     ) -> torch.Tensor:
         assert isinstance(attn_metadata, AscendSFADCPMetadata)
         assert attn_metadata.dcp_context is not None
-        return attn_metadata.dcp_context.slot_mapping[: attn_metadata.num_input_tokens]
+        slots = attn_metadata.dcp_context.slot_mapping
+        # PCP gathers prefill KV rows; retain their full DCP mapping.
+        if isinstance(self, AscendSFAPCPImpl) and self._has_prefill(attn_metadata):
+            return slots
+        return slots[: attn_metadata.num_input_tokens]
 
     def _store_parallel_kv(
         self,
@@ -1377,7 +1406,8 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
                 gather_context = dcp_context.gather_context
                 dcp_context.gather_context = None
             assert gather_context is not None
-            gathered_kv_cache = self._finish_dcp_gather(gather_context)
+            # Splitting the packed KV buffer leaves non-contiguous inner strides.
+            gathered_kv_cache = tuple(t.contiguous() for t in self._finish_dcp_gather(gather_context))
             block_table = dcp_context.kv_gather_block_table
             assert block_table is not None
             # The gathered KV cache is complete, so each rank can attend with
@@ -1413,7 +1443,17 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             # DCP-local KV shard.
             topk_indices = self.dcp_group.all_gather(topk_indices.contiguous(), dim=0)
         topk_indices = self._remap_sparse_indices(topk_indices)
-        ql_nope, q_pe = self._finish_dcp_gather(gather_context)
+        # Keep the gathered query as a strided view of the head-major gather
+        # output. The split query fragments handed to npu_sparse_flash_
+        # attention have always been strided views (torch.split never copies),
+        # so the old permute+contiguous call only materialized the t-major
+        # [T, H, D] storage behind the views;
+        # additional-config sfa_dcp_force_tmajor_restore=true keeps the
+        # t-major materialization selectable for comparison runs.
+        ql_nope, q_pe = self._finish_dcp_gather(
+            gather_context,
+            keep_view=not enable_sfa_dcp_force_tmajor_restore(),
+        )
         sfa_output, softmax_max, softmax_sum = DeviceOperator.execute_sparse_flash_attention_process(
             self,
             ql_nope,

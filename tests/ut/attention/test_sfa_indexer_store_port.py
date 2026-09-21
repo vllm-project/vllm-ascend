@@ -71,7 +71,8 @@ def test_native_quantization_and_cache_pipeline_routing(variant):
     state.enable_sparse_li_c8 = True
     state._use_c8_reshape_optim = lambda: variant == "reshape"
     state.k_cache = SimpleNamespace(kv_cache=caches)
-    state.wk_weights_proj = lambda x: (torch.zeros(rows, 160, dtype=torch.bfloat16), None)
+    projected = torch.arange(rows * 160).reshape(rows, 160).to(torch.bfloat16)
+    state.wk_weights_proj = lambda x: (projected, None)
     state.k_norm = lambda x: x
     state.head_dim, state.qk_rope_head_dim, state.is_rope_neox_style = 128, 64, False
     state.c8_k_cache_dtype, state.c8_k_scale_cache_dtype = torch.int8, torch.float16
@@ -91,12 +92,17 @@ def test_native_quantization_and_cache_pipeline_routing(variant):
     state._gather_cache_inputs, state.write_cache = gather, legacy
     decode = 0 if variant == "prefill" else (1 if variant == "mixed" else rows)
     metadata = SimpleNamespace(
-        num_actual_tokens=rows, num_decode_tokens=decode, slot_mapping=torch.arange(rows, dtype=torch.int64) + 5
+        num_actual_tokens=rows,
+        num_decode_tokens=decode,
+        slot_mapping=torch.arange(rows, dtype=torch.int64) + 5,
+        cos=torch.ones(rows, 64),
+        sin=torch.zeros(rows, 64),
     )
     x = torch.zeros(rows, 4)
-    result = namespace["forward"](
-        state, x, None, torch.ones(rows, 64), torch.zeros(rows, 64), x, metadata, compute_topk=False
-    )
+    result = namespace["forward"](state, x, None, x, metadata, compute_topk=False)
     assert result is None and events == ["quant", "gather_done", "fused" if variant == "native" else "legacy"]
     assert torch.equal(caches[0][metadata.slot_mapping], quant)
     assert torch.equal(caches[1][metadata.slot_mapping], scales.to(torch.float16).view(rows, 1))
+    # Current main reuses this tail for top-k instead of repeating the GEMM.
+    _, _, indexer_weights = state.forward_k(x, metadata.cos, metadata.sin)
+    assert torch.equal(indexer_weights, projected[:, 128:])

@@ -148,7 +148,7 @@ jobs:
     name: ${{ inputs.name || inputs.config_file_path || inputs.tests }}
     runs-on: ${{ inputs.runner }}
     if: ${{ inputs.should_run }}
-    timeout-minutes: ${{ inputs.request_id != '' && 240 || fromJSON(inputs.testcase_timeout) }}
+    timeout-minutes: ${{ inputs.request_id != '' && (inputs.aop_single_enabled && 1440 || 240) || fromJSON(inputs.testcase_timeout) }}
     container:
       image: ${{ inputs.image }}
     env:
@@ -196,7 +196,7 @@ jobs:
 
       - name: Set MAX_JOBS based on runner
         run: |
-          CARDS=$(echo "${{ inputs.runner }}" | sed -E 's/.*a3-([0-9]+).*/\1/')
+          CARDS=$(echo "${{ inputs.runner }}" | sed -E 's/.*a3-(800i-)?([0-9]+).*/\2/')
           echo "MAX_JOBS=$((CARDS * 23))" >> $GITHUB_ENV
 
       - name: Install vllm-project/vllm-ascend

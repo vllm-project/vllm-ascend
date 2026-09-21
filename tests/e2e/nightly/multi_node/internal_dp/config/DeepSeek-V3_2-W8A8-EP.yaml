@@ -35,7 +35,6 @@ deployment:
           --host 0.0.0.0
           --port $SERVER_PORT
           --data-parallel-size 2
-          --data-parallel-start-rank 0
           --data-parallel-size-local 1
           --data-parallel-address $LOCAL_IP
           --data-parallel-rpc-port 13389
@@ -77,6 +76,7 @@ deployment:
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-V3.2-W8A8
           --host 0.0.0.0
+          --headless
           --port $SERVER_PORT
           --data-parallel-size 2
           --data-parallel-start-rank 1
@@ -124,7 +124,6 @@ deployment:
           --port $SERVER_PORT
           --data-parallel-size 8
           --data-parallel-size-local 4
-          --data-parallel-start-rank 0
           --data-parallel-address $LOCAL_IP
           --data-parallel-rpc-port 13389
           --tensor-parallel-size 4
@@ -166,6 +165,7 @@ deployment:
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-V3.2-W8A8
           --host 0.0.0.0
+          --headless
           --port $SERVER_PORT
           --data-parallel-size 8
           --data-parallel-size-local 4

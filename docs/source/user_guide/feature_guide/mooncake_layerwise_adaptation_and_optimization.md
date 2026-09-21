@@ -1,5 +1,8 @@
 # Mooncake Layerwise Adaptation and Optimization Analysis
 
+For the subsequent multi-group attention extension and its validation boundaries,
+see [Mooncake Layerwise Hybrid Attention](mooncake_hybrid_attention.md).
+
 ## 1. Adaptation Baseline and Conclusion
 
 - Baseline: `Eric-dot/vllm-ascend:mooncake` at local commit `0a023b094e9e88ffaca0b1fda02529cef6277f8e`.

@@ -21,11 +21,14 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-- `DeepSeek-V4-Flash-w8a8-mtp` (Quantized version): requires 1 Atlas 800 A3 (128GB × 8) node or 1 Atlas 800 A2 (64GB × 8) node. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp)
-
-- DeepSeek released new DeepSeek-V4-Flash-DSpark weights on July 31, 2026. Download the quantized `DeepSeek-V4-Flash-0731-w8a8` weight from [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-0731-w8a8).
+|  Weight Version                              | Hardware Requirements                                                      | Download Links |
+|----------------------------------------------|----------------------------------------------------------------------------|----------------|
+| `DeepSeek-V4-Flash-w8a8-mtp` (Quantized version) | 1 Atlas 800 A3 (128GB × 8) node or 1 Atlas 800 A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp) |
+| `DeepSeek-V4-Flash-0731-w8a8` | | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-0731-w8a8) |
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
@@ -153,7 +156,8 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     export HCCL_BUFFSIZE=1024
     export TASK_QUEUE_ENABLE=1
     export HCCL_OP_EXPANSION_MODE="AIV"
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp \
         --max-model-len 133120 \
         --max-num-batched-tokens 8192 \
@@ -170,8 +174,9 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         --no-enable-prefix-caching \
         --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
         --quantization ascend \
-        --port 8900 \
+        --port 8000 \
         --block-size 128 \
+        --attention_config.indexer_kv_dtype int8 \
         --speculative-config '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}' \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
         --additional-config '
@@ -195,7 +200,8 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     export HCCL_BUFFSIZE=1024
     export TASK_QUEUE_ENABLE=1
     export HCCL_OP_EXPANSION_MODE=AIV
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/UploadWeight/DeepSeek-V4-Flash-DSpark-w4a8-test \
         --max-model-len 800000 \
         --max-num-batched-tokens 8192 \
@@ -214,6 +220,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         --quantization ascend \
         --port 8000 \
         --block-size 128 \
+        --attention_config.indexer_kv_dtype int8 \
         --speculative-config '{"method": "dspark", "num_speculative_tokens": 7, "enforce_eager": true}'  \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
     ```
@@ -233,6 +240,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     export HCCL_OP_EXPANSION_MODE="AIV"
     export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
 
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp \
         --max-model-len 1048576 \
         --max-num-batched-tokens 10240 \
@@ -249,8 +257,9 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         --reasoning-parser deepseek_v4 \
         --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
         --quantization ascend \
-        --port 8900 \
+        --port 8000 \
         --block-size 32 \
+        --attention_config.indexer_kv_dtype int8 \
         --speculative-config '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}' \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
         --additional-config '
@@ -276,6 +285,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     export HCCL_OP_EXPANSION_MODE="AIV"
     export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
 
+    # Ensure the model path matches the directory recorded during download
     vllm serve /path/to/DeepSeek-V4-Flash-0731-w8a8 \
         --max-model-len 1048576 \
         --max-num-batched-tokens 10240 \
@@ -291,8 +301,9 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         --reasoning-parser deepseek_v4 \
         --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
         --quantization ascend \
-        --port 8900 \
+        --port 8000 \
         --block-size 32 \
+        --attention_config.indexer_kv_dtype int8 \
         --speculative-config '{"method":"dspark","num_speculative_tokens":7,"enforce_eager":true}' \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
         --additional-config '{
@@ -326,7 +337,7 @@ Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](..
 Service Verification:
 
 ```shell
-curl http://<node0_ip>:8900/v1/chat/completions \
+curl http://<node0_ip>:8000/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
         "model": "dsv4",
@@ -506,6 +517,7 @@ Before you start, please:
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
 
+        # Ensure the model path matches the directory recorded during download
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp \
             --host 0.0.0.0 \
             --port $2 \
@@ -525,6 +537,7 @@ Before you start, please:
             --speculative-config '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}' \
             --trust-remote-code \
             --block-size 32 \
+            --attention_config.indexer_kv_dtype int8 \
             --tokenizer-mode deepseek_v4 \
             --tool-call-parser deepseek_v4 \
             --enable-auto-tool-choice \
@@ -573,7 +586,8 @@ Before you start, please:
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export HCCL_BUFFSIZE=1024
         export ASCEND_RT_VISIBLE_DEVICES=$1
-
+        
+        # Ensure the model path matches the directory recorded during download
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp \
             --host 0.0.0.0 \
             --port $2 \
@@ -589,6 +603,7 @@ Before you start, please:
             --max-num-batched-tokens 120 \
             --max-num-seqs 60 \
             --block-size 32 \
+            --attention_config.indexer_kv_dtype int8 \
             --no-disable-hybrid-kv-cache-manager \
             --no-enable-prefix-caching \
             --trust-remote-code \
@@ -655,6 +670,7 @@ Before you start, please:
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
 
+        # Ensure the model path matches the directory recorded during download
         vllm serve /path/to/DeepSeek-V4-Flash-0731-w8a8 \
             --host 0.0.0.0 \
             --port $2 \
@@ -674,6 +690,7 @@ Before you start, please:
             --speculative-config '{"num_speculative_tokens": 5,"method": "dspark","enforce_eager": true}' \
             --trust-remote-code \
             --block-size 32 \
+            --attention_config.indexer_kv_dtype int8 \
             --tokenizer-mode deepseek_v4 \
             --tool-call-parser deepseek_v4 \
             --enable-auto-tool-choice \
@@ -722,7 +739,8 @@ Before you start, please:
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export HCCL_BUFFSIZE=2400
         export ASCEND_RT_VISIBLE_DEVICES=$1
-
+        
+        # Ensure the model path matches the directory recorded during download
         vllm serve /path/to/DeepSeek-V4-Flash-0731-w8a8 \
             --host 0.0.0.0 \
             --port $2 \
@@ -739,6 +757,7 @@ Before you start, please:
             --max-num-seqs 60 \
             --async-scheduling \
             --block-size 32 \
+            --attention_config.indexer_kv_dtype int8 \
             --no-disable-hybrid-kv-cache-manager \
             --no-enable-prefix-caching \
             --trust-remote-code \
@@ -904,6 +923,7 @@ Before you start, please:
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export TASK_QUEUE_ENABLE=1
 
+        # Ensure the model path matches the directory recorded during download
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp \
             --host 0.0.0.0 \
             --port $2 \
@@ -929,6 +949,7 @@ Before you start, please:
             --tool-call-parser deepseek_v4 \
             --enable-auto-tool-choice \
             --reasoning-parser deepseek_v4 \
+            --attention_config.indexer_kv_dtype int8 \
             --additional-config '{"enable_cpu_binding": true, "enable_shared_expert_dp": true}' \
             --speculative-config '{"num_speculative_tokens": 1, "method": "mtp","enforce_eager": true}' \
             --kv-transfer-config \
@@ -979,6 +1000,7 @@ Before you start, please:
 
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
+        # Ensure the model path matches the directory recorded during download
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp \
             --host 0.0.0.0 \
             --port $2 \
@@ -1004,6 +1026,7 @@ Before you start, please:
             --tool-call-parser deepseek_v4 \
             --enable-auto-tool-choice \
             --reasoning-parser deepseek_v4 \
+            --attention_config.indexer_kv_dtype int8 \
             --speculative-config '{"num_speculative_tokens": 1, "method": "mtp","enforce_eager": true}' \
             --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
             --kv-transfer-config \
@@ -1110,7 +1133,7 @@ The service returns HTTP 200 OK with a JSON response containing the `choices` fi
 
 Here is the accuracy evaluation method using AISBench.
 
-### Using AISBench
+### 7.1 Using AISBench
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
@@ -1125,11 +1148,11 @@ Here is the accuracy evaluation method using AISBench.
 
 ## 8 Performance Evaluation
 
-### Using AISBench
+### 8.1 Using AISBench
 
 Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
-### Using vLLM Benchmark
+### 8.2 Using vLLM Benchmark
 
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 

@@ -25,6 +25,9 @@ namespace ge {
    * @par Inputs:
    * @li x: A 2D tensor which moe gating topk is applied, The shape is: (B*S, E), format supports ND, and data type must be float16, float or bfloat16. E(Expert num) can not be greater than 2048. E(Expert num) should be divisible by group_count.
    * @li bias: A 1D tensor which is "bias" in moe gating topk. The shape is: (E), format supports ND, and data type must be the same as that of x.
+   * @li bias_vl: An optional 1D vision-token correction bias. When present, input_ids in
+   *     [image_sentinel_lo, image_sentinel_lo + image_sentinel_count) use this bias;
+   *     all other rows use bias.
    *
    * @par Outputs:
    * @li y: A 2D tensor which is the topk value result of moe gating topk, format supports ND, and data type must be the same as that of x.
@@ -49,6 +52,7 @@ REG_OP(MoeGatingTopKHash)
     .OPTIONAL_INPUT(bias, TensorType({DT_FLOAT, DT_FLOAT16, DT_BF16}))
     .OPTIONAL_INPUT(input_ids, TensorType({DT_INT64, DT_INT32}))
     .OPTIONAL_INPUT(tid2eid, TensorType({DT_INT64, DT_INT32}))
+    .OPTIONAL_INPUT(bias_vl, TensorType({DT_FLOAT, DT_FLOAT16, DT_BF16}))
     .OUTPUT(y, TensorType({DT_FLOAT, DT_FLOAT16, DT_BF16}))
     .OUTPUT(expert_idx, TensorType({DT_INT32}))
     .OUTPUT(out, TensorType({DT_FLOAT}))
@@ -61,6 +65,8 @@ REG_OP(MoeGatingTopKHash)
     .ATTR(out_flag, Bool, false)
     .ATTR(routed_scaling_factor, Float, 1.0)
     .ATTR(eps, Float, 1e-20f)
+    .ATTR(image_sentinel_lo, Int, 129257)
+    .ATTR(image_sentinel_count, Int, 5)
     .OP_END_FACTORY_REG(MoeGatingTopKHash)
 
 } // namespace ge

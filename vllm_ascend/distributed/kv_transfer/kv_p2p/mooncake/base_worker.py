@@ -30,6 +30,7 @@ from vllm.v1.kv_cache_interface import (
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
+from vllm_ascend.core.kv_cache_placement import map_kvpp_layers_to_owners
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeConnectorMetadata,
     MooncakeTransferMetadata,
@@ -53,6 +54,7 @@ from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
 )
+from vllm_ascend.utils import get_kv_cache_tensor_layers
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -210,6 +212,11 @@ class MooncakeBaseConnectorWorker:
         logger.info("num_blocks: %s", self.num_blocks)
         self.kv_caches = kv_caches
         self._build_kv_cache_spec_mappings()
+        owners = (
+            map_kvpp_layers_to_owners(self.vllm_config, kv_caches.keys())
+            if self.ascend_config.kvpp_config.size > 1
+            else {}
+        )
         layer_names: list[str] = []
         layer_block_sizes: list[int] = []
         group_indices: list[int] = []
@@ -221,7 +228,7 @@ class MooncakeBaseConnectorWorker:
         configured_layer_names: set[str] = set()
 
         for tensor_config in self.kv_cache_config.kv_cache_tensors:
-            for layer_name in tensor_config.layers:
+            for layer_name in get_kv_cache_tensor_layers(tensor_config):
                 if layer_name in configured_layer_names:
                     raise ValueError(f"Layer {layer_name!r} is referenced by more than one configured KV cache tensor.")
                 if layer_name not in self.layer_name_to_group_index:
@@ -230,6 +237,13 @@ class MooncakeBaseConnectorWorker:
                 cache_or_caches = kv_caches.get(layer_name)
                 if cache_or_caches is None:
                     raise ValueError(f"No KV cache was registered for configured layer {layer_name!r}.")
+
+                configured_layer_names.add(layer_name)
+                # Foreign target layers alias scratch. Publish persistent owners
+                # only; MTP caches are absent from owners and remain replicated.
+                owner = owners.get(layer_name)
+                if owner is not None and owner != self.tp_rank:
+                    continue
 
                 base_addrs: list[int] = []
                 block_strides: list[int] = []
@@ -263,7 +277,6 @@ class MooncakeBaseConnectorWorker:
                         block_shapes.append(block_shape)
                         block_size_scales.append(tensor_num_blocks // self.num_blocks)
 
-                configured_layer_names.add(layer_name)
                 layer_names.append(layer_name)
                 layer_block_size = spec.block_size
                 if isinstance(spec, AscendSFAIndexerCacheSpec):

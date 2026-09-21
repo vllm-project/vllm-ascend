@@ -74,5 +74,5 @@ test_cases:
         num_prompts: 210
         max_out_len: 1
         batch_size: 18
-        baseline: 8.6154
+        baseline: 7.7215
         threshold: 0.97

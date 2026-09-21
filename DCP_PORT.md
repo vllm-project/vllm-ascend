@@ -1,35 +1,48 @@
-# DCP decode layout port: fixed local main
+# Native DCP decode layout port
 
-## 2026-09-11 local refresh
+## Main refresh, 2026-09-21
 
-Base: local main ac6405d9eb12e1466d00a0fb4e67ab87c1a33061.
-Branch: perf/dcp-decode-layouts; historical port commit3788d00d5ee808a785cee3a4cac2237bf53c9eea.
-Original donor: local82bcf6902a5d08cb736d941ea1a874d026d30238.
-Current status: local source refresh and CPU checks complete; no new NPU run.
+This is the main continuation of [PR16349](https://github.com/vllm-project/vllm-ascend/pull/16349).
+Main base: `d052552072254a21560e8c5ebc04b80524c89622`.
+Published main predecessor: `f8186d340651c2b7491d4026559c7b339f27a6cb`.
+Release donor: `d5e74d19426fd6e18b9cf1e7e8dd33a703bb1b9b`.
+The update merges main without rewriting the published branch history.
 
-| Area | Current selection |
+| Area | Selection |
 |---|---|
-| Remap | Retain upstream two-kernel path; add tested DCP8/interleave128 integer and empty-input repairs |
-| O/LSE | Add v0.26 port's raw-bit pack, one AllToAll, FP32 merge and Cast |
-| Query | Existing head-major prepare and contiguous unpack; unchanged |
-| Indexer store | Existing native quantization plus fused stores in AscendSFAIndexerBackend; unchanged |
+| Sparse-index remap | Keep upstream two-kernel pipeline; DCP8/interleave128 integer-boundary and empty-input repairs |
+| O/LSE | Raw-bit pack, one AllToAll, FP32 merge and BF16 conversion; up to min(scheduler budget,192) tokens |
+| Query | Head-major preparation and contiguous unpack; existing T2-12 guard unchanged |
+| Indexer | Native INT8 quantization plus fused final key/scale writes; existing T1-12 guard unchanged |
 
-O/LSE reuses sfa_dcp_exchange.py and sfa_dcp_merge.py byte-for-byte from the
-measured v0.26 port. This preserves its invalid-rank masking adaptation.
-Routing stays inside the existing registered custom op and retains FakeTensor
-behavior/signatures. It selects the new path only without a PCP group, for
-scatter_size8/scatter_dim1 and eligible BF16 T1-12/H64/D512 + FP32 LSE.
-The current native attention caller reaches this path from decode handling.
-PCP composition, token-scatter DSA-CP, other group sizes, unsupported shapes
-and scatter-size1 keep the original upstream pipeline. A missing scatter
-group still raises before any communication.
+**192 is a manually selected cap, not a demonstrated kernel limit. Larger
+values have not been tested and retain the upstream fallback.** This change
+does not raise the scheduler's configured token budget. Both exchange variants
+already use one AllToAll; the gain is not a collective-count reduction.
 
-## Local verification
+No allocator, host-memory placement, SuperMem-specific serving configuration,
+or experimental VMM peer exchange is included.
 
-Final focused CPU suite: 43 tests passed.
-Tests cover old/new routing, PCP gather preservation (including no scatter),
-DSA token scatter, dtype/shape fallback, FakeTensor output, invalid-shard
-merge semantics, empty remap, query wait ordering and store routing.
+## Current main compatibility
+
+- Keep main's indexer-owned RoPE metadata and three-value `forward_k` return,
+  including the projection weights tail reused by top-k selection.
+- Preserve PCP composition, token scatter, scatter-size1 and unsupported dtype/shape paths.
+- Preserve main's `return_lse` and `defer_combine` modes. They must not use an
+  output-only optimized exchange, which would drop required intermediate state.
+- Main no longer stores `vllm_config` on `AscendConfig`. The attention caller
+  passes its current scheduler budget through the trailing optional
+  `decode_token_budget` argument on the registered operator and FakeTensor
+  implementation. Existing callers can omit it; standalone helpers retain
+  the manual cap. No new serving API or user configuration is added.
+- Missing-group errors and upstream invalid-shard semantics are retained.
+
+## Fresh validation and outstanding gates
+
+The focused CPU suite passes **101 tests**, covering budget boundaries and
+current-caller propagation, PCP/token-scatter fallback, deferred/returned-LSE
+semantics, FakeTensor output, native quantization/store routing, projection
+tail preservation, query wait ordering and empty remap inputs:
 
 ```bash
 python3 -m pytest --noconftest -q \
@@ -39,52 +52,36 @@ python3 -m pytest --noconftest -q \
   tests/ut/attention/test_sfa_indexer_store_port.py
 ```
 
-NPU entries: tests/ut/attention/a2/test_sfa_dcp_remap.py and
-tests/ut/attention/a2/test_sfa_dcp_exchange_port.py. The exchange test retains
-its strict oracle; it is not expected to waive the historical CPU-BF16 failures.
-No main-PCP device result or full main serving speedup is asserted.
+NPU entries are under `tests/ut/attention/a2/`. The large-batch registered-op
+regression covers T48/T192, changed graph inputs and an exactly representable
+uniform-weight oracle. It does not replace the unchanged strict random-BF16
+oracle. **Fresh full-main NPU and serving validation has not been performed.**
+CPU tests and reused kernel evidence do not establish full-main runtime acceptance.
 
-## Reused experiment evidence (not new validation of these worktrees)
+## Reused release evidence, not a new main benchmark
 
-- [Pinned upstream component comparison](../../experiments/upstream_dcp_20260910/REPORT.md)
-  tested release5f12bbf/f2648bb0f helpers on the pinned A3 environment. The
-  pack/combine leaf implementations match local main base ac6405d9; main's
-  additional PCP composition and full main serving were not measured.
-- Original optimized raw-bit O/LSE versus upstream, complete path including
-  communication, merge and BF16 Cast: T1 reduction30.5/30.7%, T6 23.6/28.4%,
-  T12 35.1/33.6% in AB/BA runs. Both paths already use one AllToAll.
-  This is not the later experimental VMM peer exchange and not a serving gain.
-- Query+SFA T6 reduction12.3-13.6%, T12 16.5-19.2%; T1 is unchanged fallback.
-  Native quant+store reduction73.9-75.9% for T1/6/12. Query/store NPU byte,
-  consumer and changed-graph checks passed in the pinned helper experiments.
-- [Remap follow-up](../../experiments/peer_olse_20260911/REMAP_RESULT.md):
-  two-kernel path reduces whole-remap latency35.08-42.63% relative to our
-  old five-operation path. The repaired module is copied byte-for-byte from
-  the tested local working source, not its older82bcf commit.
-- Integer regression: input16777343 belongs to owner0/local2097279; the
-  observed vector division gave owner1/local2097151. DCP8/interleave128 now
-  uses shifts/masks, including boundaries above2**24 and INT32_MAX.
-  Other configurations retain upstream arithmetic, without a new exactness
-  claim. Empty last dimension returns before division by TopK.
-- Historical v0.26 remap test result38PASS/3FAIL preceded this repair.
-  The former DCP_PORT claim of exact large-coordinate arithmetic was disproved
-  on hardware. Those failures are not erased or relabeled as passes.
-- Strict CPU-BF161e-3 tests fail for both original optimized and upstream
-  exchange. Independent FP64 diagnostics bound pre-cast FP32 error below8e-7
-  in the upstream comparison. These are not established donor-only regressions;
-  no tolerance is relaxed and no complete numerical acceptance is claimed.
-  The local9% TPOT result uses a different baseline and must not be claimed
-  for this port or added to the component percentages.
+PR16349's same-image synthetic decode comparison used DP4/TP8/DCP8/EP32,
+MTP5 with zero synthetic acceptance, zero-filled KV, C32 and fixed700 output
+tokens. All seven runs completed50/50 requests with35,000 output tokens and
+zero recorded errors:
 
-## Scope boundary
+| Release-image composition | Per-run mean TPOT (ms) | Median TPOT (ms) | Median throughput (tok/s) |
+|---|---|---:|---:|
+| PR15970 baseline |114.626,114.192|114.409|221.196|
+| Previous combined port, cap12 |114.339,114.006|114.172|221.521|
+| Updated combined port, cap192 |105.798,99.110,105.807|105.798|238.331|
 
-No fetch, rebase, remote update, push, PR, runtime installation, pod operation,
-NPU experiment, allocator/host-DRAM placement or experimental VMM peer code is
-part of this refresh. Q/store kernels are unchanged and identical across the
-two port worktrees and local donor. Local main always means ac6405d9, not
-today's remote main. Changes remain uncommitted on the historical port commit.
+Median TPOT improved7.53% versus PR15970 and7.33% versus cap12 in that
+experiment. These are image-compatible overlay results, not full-main builds,
+not accuracy results, and not confidence intervals. No gain is transferred
+numerically to the refreshed main integration.
 
-The new NPU regression tests exercise the actual two-kernel remap against a
-CPU int64 oracle, large coordinates and changed graph inputs. Their presence
-does not mean they ran locally. A new full-worktree NPU/serving validation is
-still required before making a full-port runtime acceptance claim.
+The release helper checks included1,152 rank-level changing-input graph
+checks at nine sizes T13-T192, plus128 registered-op checks at T48/T192.
+Additional positive colleague feedback concerns PR16349; it is not a new
+validation of this main refresh and does not add an independently audited metric.
+
+Strict CPU-BF16 `atol=rtol=1e-3` exchange checks historically failed for both
+compared implementations. Thresholds remain unchanged; no complete numerical
+acceptance is claimed. Historical operator improvements and the separate
+SuperMem serving measurements must not be added to these percentages.

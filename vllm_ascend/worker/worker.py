@@ -21,6 +21,7 @@ import copy
 import gc
 import inspect
 import logging
+from contextlib import AbstractContextManager, nullcontext
 from types import NoneType
 from typing import Any
 
@@ -68,8 +69,12 @@ from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
+from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config, init_ascend_config
 from vllm_ascend.batch_invariant import init_batch_invariance
+from vllm_ascend.core.kv_cache_placement import (
+    KVPPPhysicalCachePlan,
+    create_kvpp_cache_allocation_plan,
+)
 from vllm_ascend.core.profiling_chunk_predictor import (
     _attach_profiling_chunk_execution_time,
 )
@@ -94,7 +99,6 @@ from vllm_ascend.utils import (
     enable_sp,
     register_ascend_customop,
     setup_ascend_local_comm_res,
-    vllm_version_is,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -108,15 +112,6 @@ torch_non_c_binding_in_graph_functions_npu = dict.fromkeys(
 )  # noqa: E402
 torch_non_c_binding_in_graph_functions_npu["torch.npu.stream"] = TorchInGraphFunctionVariable  # noqa: E402
 torch._dynamo.trace_rules.torch_name_rule_map.append(torch_non_c_binding_in_graph_functions_npu)  # noqa: E402
-
-
-# These control buffers are created outside the weights mem-pool, so Level-1
-# sleep must save them explicitly. They are matched against the trailing
-# segment of each buffer name (e.g. "..._dsa_cp_hadamard").
-_allowed_names = (
-    "_dsa_cp_hadamard",
-    "_dsa_hadamard",
-)
 
 
 class NPUWorker(WorkerBase):
@@ -190,6 +185,7 @@ class NPUWorker(WorkerBase):
             WEIGHT_LOADER_V2_SUPPORTED.remove("UnquantizedLinearMethod")
 
         self.use_v2_model_runner = self.vllm_config.use_v2_model_runner
+        self._kvpp_cache_allocation_plan: KVPPPhysicalCachePlan | None = None
         self._pp_send_work: list[Handle] = []
 
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
@@ -244,14 +240,13 @@ class NPUWorker(WorkerBase):
 
     def sleep(self, level: int = 1) -> None:
         free_bytes_before_sleep = torch.npu.mem_get_info()[0]
-        model = self.model_runner.model
+        # Level-1 only offloads the weights pool. Persistent metadata such as
+        # the DSA Hadamard matrix is allocated outside the kv_cache pool, so it
+        # stays resident and does not need a CPU backup.
         if level == 1:
-            self._sleep_saved_buffers = {
-                name: buffer.cpu().clone()
-                for name, buffer in model.named_buffers()
-                if name.rsplit(".", maxsplit=1)[-1] in _allowed_names
-            }
+            self._sleep_saved_buffers = {}
         else:
+            model = self.model_runner.model
             self._sleep_saved_buffers = {name: buffer.cpu().clone() for name, buffer in model.named_buffers()}
 
         rl_config = get_ascend_config().rl_config
@@ -292,10 +287,6 @@ class NPUWorker(WorkerBase):
                 if name in self._sleep_saved_buffers:
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
-
-        # vLLM main removed the post-KV-cache wake hook; keep it on v0.28.0.
-        if (tags is None or "kv_cache" in tags) and vllm_version_is("0.28.0"):
-            self.model_runner.post_kv_cache_wake_up()
 
         rl_config = get_ascend_config().rl_config
         cleanup_enabled = rl_config.enabled and rl_config.sleep_mode_extra_cleanup
@@ -363,6 +354,7 @@ class NPUWorker(WorkerBase):
 
         assert self.weight_transfer_engine is not None
         self.weight_transfer_engine.finish_weight_update()
+        self.model_runner.reset_lora_state()
         self._weight_update_active = False
 
     def shutdown(self) -> None:
@@ -545,6 +537,14 @@ class NPUWorker(WorkerBase):
         )
         return int(budget.final_planner_bytes)
 
+    def _apply_kvpp_memory_budget(self, available_bytes: int) -> int:
+        self.available_kv_cache_memory_bytes = available_bytes
+        plan = self._kvpp_cache_allocation_plan
+        if plan is None:
+            return available_bytes
+        num_blocks = plan.get_num_blocks(available_bytes)
+        return num_blocks * sum(spec.page_size_bytes for spec in plan.logical_cache_spec.values())
+
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
         """Profiles the peak memory usage of the model to determine how much
@@ -574,7 +574,9 @@ class NPUWorker(WorkerBase):
                 GiB(self.init_snapshot.free_memory),
                 GiB(kv_cache_memory_bytes),
             )
-            return self._apply_kv_offload_decode_memory_constraints(kv_cache_memory_bytes)
+            return self._apply_kvpp_memory_budget(
+                self._apply_kv_offload_decode_memory_constraints(kv_cache_memory_bytes)
+            )
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
@@ -643,8 +645,7 @@ class NPUWorker(WorkerBase):
         self.available_kv_cache_memory_bytes = self._apply_kv_offload_decode_memory_constraints(
             self.available_kv_cache_memory_bytes
         )
-
-        return int(self.available_kv_cache_memory_bytes)
+        return self._apply_kvpp_memory_budget(self.available_kv_cache_memory_bytes)
 
     def _scale_kv_cache_memory_for_multi_group(self, available_memory: int) -> int:
         """Scale the KV cache budget for vllm main's multi-group layout.
@@ -658,11 +659,6 @@ class NPUWorker(WorkerBase):
         derives a num_blocks (and block pool) small enough for the per-layer
         buffers to fit.
         """
-        # v0.28.0 keeps shared_by aliasing (one alloc per descriptor); the
-        # #51718 multi-group scale is main-only. Also avoids
-        # CacheConfig.get_resolved_kv_cache_layout which does not exist on release.
-        if vllm_version_is("0.28.0"):
-            return available_memory
         kv_cache_spec = self.get_kv_cache_spec()
         if not isinstance(kv_cache_spec, dict):
             return available_memory
@@ -817,9 +813,6 @@ class NPUWorker(WorkerBase):
 
     @torch.inference_mode()
     def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
-        if not self.use_v2_model_runner:
-            return self.model_runner.sample_tokens(grammar_output)
-
         output = self.model_runner.sample_tokens(grammar_output)
         _attach_profiling_chunk_execution_time(
             self.model_runner.ascend_config.scheduler_config.profiling_chunk_config,
@@ -1100,6 +1093,14 @@ class NPUWorker(WorkerBase):
                 kv_cache_spec,
                 extra_config,
             )
+        kvpp_config = KVPPConfig.from_vllm_config(self.vllm_config)
+        if kvpp_config.size > 1:
+            kvpp_rank = get_tp_group().rank_in_group % kvpp_config.size
+            self._kvpp_cache_allocation_plan = create_kvpp_cache_allocation_plan(
+                self.vllm_config,
+                kv_cache_spec,
+                kvpp_rank,
+            )
         if get_ascend_config().sparse_kv_offload_config.enabled:
             # reserve kv_cache_spec for sparse kv offload memory profile usage.
             self.kv_cache_spec = kv_cache_spec
@@ -1118,18 +1119,23 @@ class NPUWorker(WorkerBase):
             self.model_runner.update_max_model_len(max_model_len)
         logger.debug("Updated max_model_len to %s", max_model_len)
 
+    def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
+        """Return the sleep-mode pool for ``tag``, or a no-op context."""
+        if self.vllm_config.model_config.enable_sleep_mode:
+            allocator = CaMemAllocator.get_instance()
+            return allocator.use_memory_pool(tag=tag)
+        return nullcontext()
+
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate NPU KV cache with the specified kv_cache_config."""
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
-        if self.vllm_config.model_config.enable_sleep_mode:
-            allocator = CaMemAllocator.get_instance()
-            context = allocator.use_memory_pool(tag="kv_cache")
-        else:
-            from contextlib import nullcontext
-
-            context = nullcontext()  # type: ignore
-        with context:
-            self.model_runner.initialize_kv_cache(kv_cache_config)
+        # Restrict the discardable kv_cache pool to backing cache allocations.
+        # Persistent metadata created during initialize_kv_cache must stay
+        # outside this pool so sleep/wake does not drop its contents.
+        self.model_runner.initialize_kv_cache(
+            kv_cache_config,
+            kv_cache_allocation_context=self._maybe_get_memory_pool_context(tag="kv_cache"),
+        )
 
         # MRV2's scheduler emits new_block_ids_to_zero whenever this flag is
         # set, so its worker-side consumer must use the same condition. Keep the

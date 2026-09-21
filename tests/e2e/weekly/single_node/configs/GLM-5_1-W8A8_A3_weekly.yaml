@@ -44,7 +44,7 @@ _benchmarks: &benchmarks
     max_out_len: 1024
     batch_size: 5
     request_rate: 0
-    baseline: 1
+    baseline: 81.5852
     threshold: 0.97
 
 _benchmarks_bs8: &benchmarks_bs8
@@ -57,7 +57,7 @@ _benchmarks_bs8: &benchmarks_bs8
     max_out_len: 512
     batch_size: 2
     request_rate: 0
-    baseline: 1
+    baseline: 24.4413
     threshold: 0.97
 
 _benchmarks_bs32: &benchmarks_bs32
@@ -70,7 +70,7 @@ _benchmarks_bs32: &benchmarks_bs32
     max_out_len: 512
     batch_size: 8
     request_rate: 0
-    baseline: 1
+    baseline: 141.8525
     threshold: 0.97
 
 _benchmarks_bs10: &benchmarks_bs10
@@ -83,7 +83,7 @@ _benchmarks_bs10: &benchmarks_bs10
     max_out_len: 1024
     batch_size: 5
     request_rate: 0
-    baseline: 1
+    baseline: 84.5546
     threshold: 0.97
 # ==========================================
 # ACTUAL TEST CASES

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """DCP8 exchange comparison; run via torchrun on an isolated eight-NPU group."""
 
+import gc
 import os
 
 import pytest
@@ -73,3 +74,76 @@ def test_exchange_matches_upstream_and_reference_with_changed_input_graphs():
         retained.append((graph, result, owner, lse))
     dist.barrier()
     dist.destroy_process_group()
+
+
+def test_large_batch_registered_graph_matches_exact_uniform_merge(monkeypatch):
+    """Exercise the actual registered op with an exactly representable oracle.
+
+    The existing random strict-BF16 test above is retained unchanged. This
+    regression targets new large-batch routing, group lookup and graph reuse.
+    """
+    from vllm.distributed.parallel_state import (
+        destroy_distributed_environment,
+        init_distributed_environment,
+        init_model_parallel_group,
+    )
+
+    from vllm_ascend.ops.triton import sfa_cp as dispatch
+    from vllm_ascend.ops.triton.sfa_dcp_exchange import can_exchange
+
+    calls = {}
+    original_exchange = dispatch.exchange
+
+    def observed_exchange(output, lse, group):
+        tokens = output.shape[0]
+        calls[tokens] = calls.get(tokens, 0) + 1
+        return original_exchange(output, lse, group)
+
+    monkeypatch.setattr(dispatch, "exchange", observed_exchange)
+
+    rank = int(os.environ["RANK"])
+    torch.npu.set_device(int(os.environ["LOCAL_RANK"]))
+    init_distributed_environment(
+        world_size=8, rank=rank, local_rank=rank, distributed_init_method="env://", backend="hccl"
+    )
+    group = init_model_parallel_group(
+        [list(range(8))],
+        local_rank=rank,
+        backend="hccl",
+        group_name="large_dcp8_regression",
+        use_device_communicator=False,
+    )
+    retained = []
+    for tokens in (48, 192):
+        base = (torch.arange(tokens * 64 * 512).reshape(tokens, 64, 512) % 31 - 15).float() / 32
+        output = (base + rank / 16).to(torch.bfloat16).npu()
+        lse = torch.zeros((tokens, 64, 1), device="npu", dtype=torch.float32)
+        assert can_exchange(output, lse)
+
+        def invoke(output=output, lse=lse):
+            return torch.ops.vllm.sfa_dcp_a2a_fused(output, lse, 8, 1, group.unique_name, decode_token_budget=192)
+
+        for _ in range(5):
+            invoke()
+        torch.npu.synchronize()
+        graph = torch.npu.NPUGraph()
+        calls_before_capture = calls.get(tokens, 0)
+        with torch.npu.graph(graph):
+            result = invoke()
+        assert calls.get(tokens, 0) > calls_before_capture, "registered capture bypassed the new exchange"
+        for step in range(8):
+            output.copy_((base + rank / 16 + step / 64).to(torch.bfloat16))
+            lse.fill_(step / 4)
+            graph.replay()
+            torch.npu.synchronize()
+            # Equal LSEs give equal weights. Every arithmetic term is binary-exact.
+            expected = (base[:, rank * 8 : (rank + 1) * 8] + 3.5 / 16 + step / 64).to(torch.bfloat16)
+            assert torch.equal(result.cpu().view(torch.int16), expected.contiguous().view(torch.int16))
+        retained.append((graph, result, output, lse))
+    dist.barrier()
+    retained.clear()
+    del graph, result, output, lse
+    gc.collect()
+    torch.npu.synchronize()
+    group.destroy()
+    destroy_distributed_environment()
