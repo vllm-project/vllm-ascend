@@ -167,7 +167,7 @@ Before starting the service:
 
 ## 6 Functional Verification
 
-After the service is started, the model can be invoked by sending a prompt. The `chat/completions` API is supported Use the `--served-model-name` you configured (`qwen3.8-flash-next` for `Qwen3.8-Flash-Next`).
+After the service is started, the model can be invoked by sending a prompt. The `chat/completions` API is supported. Use the `--served-model-name` you configured (`qwen3.8-flash-next` for `Qwen3.8-Flash-Next`).
 
 ### 6.1 Basic Chat Completion
 
