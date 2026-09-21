@@ -79,14 +79,23 @@ SPARSE_ATTENTION_MAX_BLOCK_SIZE = 1024
 SMLA_DEFAULT_SINK_VALUE = 1.0
 
 
-def build_smla_metadata(metadata, buffer, num_heads, head_dim, topk):
-    generated = sparse_flash_mla_metadata(
+def generate_smla_plan(metadata, num_heads, head_dim, topk, cu_seqlens_q, topk_length):
+    """Derive the operator's core-split plan for one specific set of inputs.
+
+    ``cu_seqlens_q`` and ``topk_length`` have to be the very tensors the
+    operator call will receive: the plan tells the kernel how many query rows to
+    walk and how far into each row's indices to go, so a plan built over
+    different ones makes it index past what it was handed. The metadata
+    interface enforces the second half of that itself - with ori_mask_mode 0 and
+    a non-zero ori_topk it rejects an absent ori_topk_length.
+    """
+    return sparse_flash_mla_metadata(
         num_heads_q=num_heads,
         num_heads_kv=1,
         head_dim=head_dim,
-        cu_seqlens_q=metadata.query_start_loc,
+        cu_seqlens_q=cu_seqlens_q,
         seqused_ori_kv=metadata.seq_lens,
-        ori_topk_length=metadata.smla_topk_length,
+        ori_topk_length=topk_length,
         batch_size=metadata.seq_lens.numel(),
         # These are scheduler CPU scalars. Passing device max() results here
         # would force a host synchronization for each metadata build.
@@ -96,8 +105,17 @@ def build_smla_metadata(metadata, buffer, num_heads, head_dim, topk):
         ori_topk=topk,
         cmp_topk=0,
         cmp_ratio=1,
-        ori_mask_mode=3,
+        # No Mask, which is what the sparse ori_kv scenario asks for: the
+        # selected indices are themselves the mask, since the indexer only ever
+        # offers causally valid tokens. Anything other than 0 also makes the
+        # kernel skip its softmax initialisation whenever no sequence has a
+        # query longer than its KV - which is every ordinary decode step - and
+        # a sparse gather does not write every accumulator slot, so the skipped
+        # rows keep whatever the previous step left in them.
+        ori_mask_mode=0,
+        # Required to be 0 while cmp_kv is absent.
         cmp_mask_mode=0,
+        # Only ori_mask_mode 4 may carry a bounded window on this product line.
         ori_win_left=-1,
         ori_win_right=-1,
         layout_q="TND",
@@ -106,6 +124,18 @@ def build_smla_metadata(metadata, buffer, num_heads, head_dim, topk):
         has_cmp_kv=False,
         device=str(metadata.seq_lens.device),
     )
+
+
+def build_smla_metadata(metadata, buffer, num_heads, head_dim, topk):
+    generated = generate_smla_plan(
+        metadata, num_heads, head_dim, topk, metadata.query_start_loc, metadata.smla_topk_length
+    )
+    if generated.numel() != buffer.numel():
+        # The persistent buffer is sized by the operator's fixed [1024] contract.
+        # A generated plan of any other size means this build does not match the
+        # operator this buffer was allocated for; say so here rather than letting
+        # copy_ decide.
+        raise ValueError(f"Sparse MLA plan must contain {buffer.numel()} int32 values, got {generated.numel()}.")
     buffer.copy_(generated)
     metadata.smla_metadata = buffer
 
@@ -136,19 +166,54 @@ def sparse_mla(query, cache, indices, metadata, scale):
         sorted_indices = torch.where(sorted_indices == sentinel, -1, sorted_indices)
         if metadata.smla_sinks is None:
             raise RuntimeError("Sparse MLA requires persistent sinks owned by SparseMLAMetadataState.")
+        if metadata.smla_sinks.shape[0] != query.shape[1]:
+            raise ValueError(
+                f"Sparse MLA sinks must cover {query.shape[1]} query heads, got {metadata.smla_sinks.shape[0]}."
+            )
+        # Default to the very tensors the plan in metadata.smla_metadata was
+        # generated from, so plan and call always describe the same work.
+        topk_length = metadata.smla_topk_length
+        cu_seqlens_q = metadata.query_start_loc
+        plan = metadata.smla_metadata
+        if query.shape[0] != topk_length.shape[0]:
+            # Eager and piecewise steps trim the query to the unpadded token
+            # count, while the plan built during metadata construction still
+            # describes the padded one (graph capacity, and under data
+            # parallelism the group-wide token count, which can be hundreds of
+            # rows larger). cu_seqlens_q is padded for the same reason. Rebuild
+            # for the rows actually being passed; a replayed full graph never
+            # reaches this branch, so the captured plan is left intact.
+            #
+            # Since this branch regenerates the plan anyway, take the top-k
+            # lengths from the indices being passed rather than from the
+            # prediction made before the indexer ran. The sort above left every
+            # -1 at the tail of its row, so counting the non-negative entries
+            # gives exactly the left-aligned prefix the operator contract asks
+            # for, and unlike a prediction it cannot overshoot into the -1 tail.
+            topk_length = (sorted_indices >= 0).sum(dim=-1, dtype=torch.int32).reshape(query.shape[0], -1)
+            cu_seqlens_q = cu_seqlens_q.clamp(max=query.shape[0])
+            plan = generate_smla_plan(
+                metadata,
+                query.shape[1],
+                query.shape[2],
+                sorted_indices.shape[-1],
+                cu_seqlens_q,
+                topk_length,
+            )
         result = sparse_flash_mla(
             query.contiguous(),
             ori_kv=cache,
             ori_sparse_indices=sorted_indices,
             ori_block_table=metadata.block_table,
-            cu_seqlens_q=metadata.query_start_loc,
+            cu_seqlens_q=cu_seqlens_q,
             seqused_ori_kv=metadata.seq_lens,
-            ori_topk_length=metadata.smla_topk_length[: query.shape[0]],
+            ori_topk_length=topk_length,
             sinks=metadata.smla_sinks,
-            metadata=metadata.smla_metadata,
+            metadata=plan,
             softmax_scale=scale,
             cmp_ratio=1,
-            ori_mask_mode=3,
+            # Must match the mode the plan above was generated with.
+            ori_mask_mode=0,
             cmp_mask_mode=0,
             ori_win_left=-1,
             ori_win_right=-1,
@@ -179,7 +244,9 @@ def sparse_mla(query, cache, indices, metadata, scale):
     output = result[0]
     # Kernels may leave graph-capacity rows unwritten. Mask on device before
     # value/output projections so NaNs in padding cannot escape the layer.
-    valid = torch.arange(query.shape[0], device=query.device) < metadata.query_start_loc[-1]
+    # query_start_loc's last entry is the PADDED token count, so bounding by it
+    # masks nothing; num_actual_tokens is what this batch really scheduled.
+    valid = torch.arange(query.shape[0], device=query.device) < metadata.num_actual_tokens
     return output.masked_fill(~valid[:, None, None], 0)
 
 
@@ -249,7 +316,13 @@ class SparseMLAMetadataState:
                 raise ValueError("Sparse MLA token count exceeds its persistent top-k buffer.")
             lengths = self.length_buffer[: positions.numel()]
             counts = self.indexer.get_topk_lengths(positions)
-            valid = torch.arange(positions.numel(), device=positions.device) < metadata.query_start_loc[-1]
+            # ``query_start_loc``'s last entry is the PADDED token count: the
+            # runner extends it so the TND layout constraint holds. It cannot
+            # separate real rows from padding, and padding rows still carry
+            # positions left behind by an earlier, larger batch while their
+            # sequence lengths are zero. Bound the mask by the unpadded token
+            # count, so padding never claims a top-k length with no KV behind it.
+            valid = torch.arange(positions.numel(), device=positions.device) < metadata.num_actual_tokens
             lengths[:, 0].copy_(counts.masked_fill(~valid, 0))
             metadata.smla_topk_length = lengths
             metadata.smla_sinks = self.sinks
