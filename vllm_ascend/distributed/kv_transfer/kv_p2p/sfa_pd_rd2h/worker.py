@@ -164,11 +164,6 @@ class SFAPDRD2HConsumerWorker:
         # rank has finished the same request. This is scheduler readiness state,
         # not a per-layer barrier.
         self._terminal_ext_ids: set[str] = set()
-        # D2D writes HBM off the compute stream. After recving finishes, the
-        # first decode forward must join that stream once so copy-sfa / LIM see
-        # the payload. Not a per-layer transfer wait: get_finished already means
-        # sync_read returned.
-        self._pending_pd_hbm_visibility = False
 
     # ------------------------------------------------------------------
     # Common
@@ -244,24 +239,6 @@ class SFAPDRD2HConsumerWorker:
     def wait_for_save(self):
         return
 
-    def wait_for_pd_hbm_visibility(self) -> None:
-        """Join the compute stream to completed PD D2D, once, outside the graph.
-
-        Host blocks this worker only for the first decode after recving. Later
-        steps and captured attention are untouched so ACLGraph and async
-        scheduling keep their existing overlap.
-        """
-        if not getattr(self, "_pending_pd_hbm_visibility", False):
-            return
-        try:
-            capturing = torch.npu.is_current_stream_capturing()
-        except Exception:
-            capturing = False
-        if capturing is True:
-            return
-        torch.npu.current_stream().synchronize()
-        self._pending_pd_hbm_visibility = False
-
     def _cleanup_request_state(self, req_ids: set[str]) -> None:
         ext_ids = set()
         for req_id in req_ids:
@@ -330,8 +307,6 @@ class SFAPDRD2HConsumerWorker:
                 else:
                     still_pending.add(ext_id)
             self._pending_done = still_pending
-            if done_recving:
-                self._pending_pd_hbm_visibility = True
             if done_recving or self._pending_done:
                 logger.debug(
                     "MembPull D get_finished: finished_all_tp_ext=%s, done_recving_internal=%s, pending_done_ext=%s",

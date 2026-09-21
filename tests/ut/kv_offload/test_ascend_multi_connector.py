@@ -164,17 +164,6 @@ def test_layerwise_reuse_without_sink_keeps_provider_layer_entry_wait():
     assert call_order == ["provider", "sibling"]
 
 
-def test_wait_for_pd_hbm_visibility_forwards_to_children():
-    pd = SimpleNamespace(wait_for_pd_hbm_visibility=MagicMock())
-    store = SimpleNamespace()
-    connector = AscendMultiConnector.__new__(AscendMultiConnector)
-    connector._connectors = [store, pd]
-
-    connector.wait_for_pd_hbm_visibility()
-
-    pd.wait_for_pd_hbm_visibility.assert_called_once_with()
-
-
 def test_mamba_state_copy_runs_after_all_connector_loads():
     call_order = []
     first = SimpleNamespace(wait_for_layer_load=MagicMock(side_effect=lambda *_: call_order.append("first-load")))
