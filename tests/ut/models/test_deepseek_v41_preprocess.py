@@ -249,13 +249,108 @@ def test_preprocess_equivalence_and_stream_dependencies(
         return
     kv_done = trace[trace.index(("aux", "kv", "matmul")) + 1]
     assert kv_done[:2] == ("aux", "record")
-    handoff = trace.index(("main", "wait", kv_done[2]))
-    assert handoff < trace.index(("main", "qb", "matmul"))
-    query_done = trace[handoff - 1]
-    assert query_done[:2] == ("main", "record")
-    assert trace.index(("aux", "wait", query_done[2])) < trace.index(("aux", "kv", "norm"))
-    join = trace.index(("main", "join", "aux"))
-    cache_on_main = a5_batch in {"prefill", "mixed", "dummy"}
-    store = trace.index(("main" if cache_on_main else "aux", "cache", "scatter"))
-    assert (join < store) == cache_on_main
-    assert join < trace.index(("main", "rope", "apply"))
+    assert trace.index(("main", "wait", kv_done[2])) < trace.index(("main", "qb", "matmul"))
+    part3 = trace[trace.index(("main", "wait", kv_done[2])) - 1]
+    assert part3[:2] == ("main", "record")
+    assert trace.index(("aux", "wait", part3[2])) < trace.index(("aux", "kv", "norm"))
+    assert trace.index(("aux", "cache", "scatter")) < trace.index(("main", "join", "aux"))
+    assert trace.index(("main", "join", "aux")) < trace.index(("main", "rope", "apply"))
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_forward_honors_multistream_preprocess_setting(monkeypatch, enabled):
+    impl = object.__new__(dsa_v41.AscendDSAV41Impl)
+    impl.role = SimpleNamespace(is_kv_source=False)
+    hidden = torch.zeros(1, 8)
+    q, qr = torch.zeros(1, 2, 4), torch.zeros(1, 6)
+    metadata = SimpleNamespace(
+        positions=torch.zeros(1), swa=SimpleNamespace(num_actual_tokens=1), rope=lambda *args: (None, None)
+    )
+    impl._get_layer_metadata = Mock(return_value=metadata)
+    impl.preprocess = Mock(return_value=(q, qr))
+    impl.multistream_preprocess = Mock(return_value=(q, qr))
+    impl._select_sparse_indices = Mock(return_value=None)
+    impl._forward_attention = Mock(return_value=q)
+    v1_impl = SimpleNamespace(
+        multistream_dsv4_dsa_overlap=enabled,
+        _forward_o_proj=lambda q, output: output.zero_(),
+    )
+    attn = SimpleNamespace(
+        dsv41_backend=None,
+        rotary_emb=SimpleNamespace(layername="layer"),
+        dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=v1_impl)),
+        nope_head_dim=2,
+        head_dim=4,
+    )
+    metadata.rope = lambda *args: (torch.zeros(1), torch.zeros(1))
+    monkeypatch.setattr(dsa_v41, "get_forward_context", lambda: SimpleNamespace(attn_metadata={}))
+    monkeypatch.setattr(torch.ops._C_ascend, "inplace_partial_rotary_mul", lambda *args, **kwargs: None, raising=False)
+    output = torch.full_like(hidden, 1)
+    result = impl.forward(attn, None, hidden, output)
+    selected = impl.multistream_preprocess if enabled else impl.preprocess
+    selected.assert_called_once()
+    assert result is output
+    assert torch.count_nonzero(output) == 0
+
+
+@pytest.mark.parametrize("local_tokens", [0, 2])
+@pytest.mark.parametrize("is_source", [False, True])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_cp_multistream_forward_preserves_full_cache_updates(monkeypatch, local_tokens, is_source, enabled):
+    impl = object.__new__(dsa_v41_cp.AscendDSAV41CPImpl)
+    impl.role = SimpleNamespace(is_kv_source=is_source)
+    hidden = torch.arange(40, dtype=torch.float32).reshape(5, 8)
+    global_cos, global_sin = torch.ones(4), torch.ones(4)
+    local_cos, local_sin = global_cos[2 : 2 + local_tokens], global_sin[2 : 2 + local_tokens]
+    metadata = SimpleNamespace(
+        swa=SimpleNamespace(num_actual_tokens=local_tokens, cp_token_range=(2, 4, 2, 4)),
+        positions=torch.arange(2, 2 + local_tokens),
+        rope=lambda *args: (local_cos, local_sin),
+    )
+    global_metadata = SimpleNamespace(
+        swa=SimpleNamespace(num_actual_tokens=4),
+        positions=torch.arange(4),
+        rope=lambda *args: (global_cos, global_sin),
+    )
+    impl._get_layer_metadata = Mock(return_value=metadata)
+    impl._global_layer_metadata = Mock(return_value=global_metadata)
+    q, qr = torch.zeros(local_tokens, 2, 4), torch.zeros(local_tokens, 6)
+    impl.multistream_preprocess = Mock(return_value=(q, qr))
+    impl._update_caches = Mock()
+    impl._write_compressed_source = Mock()
+    impl._select_sparse_indices = Mock(return_value=None)
+    impl._forward_attention = Mock(return_value=q)
+    impl._project_output = Mock(side_effect=lambda *args, projected: projected.zero_())
+    attn = SimpleNamespace(
+        rotary_emb=SimpleNamespace(layername="layer"),
+        n_heads=2,
+        enable_dsa_cp=True,
+        head_dim=4,
+        nope_head_dim=2,
+        dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=SimpleNamespace(multistream_dsv4_dsa_overlap=enabled))),
+    )
+    monkeypatch.setattr(dsa_v41, "get_forward_context", lambda: SimpleNamespace(attn_metadata={}))
+    monkeypatch.setattr(torch.ops._C_ascend, "inplace_partial_rotary_mul", lambda *args, **kwargs: None, raising=False)
+    output = torch.ones_like(hidden)
+    assert impl.forward(attn, None, hidden, output) is output
+    impl._project_output.assert_called_once()
+    assert torch.count_nonzero(output) == 0
+    if local_tokens:
+        impl._update_caches.assert_not_called()
+        impl.multistream_preprocess.assert_called_once()
+        args, kwargs = impl.multistream_preprocess.call_args
+        torch.testing.assert_close(args[1], hidden)
+        assert args[2] is local_cos and args[3] is local_sin
+        assert args[4] is metadata.swa
+        assert not kwargs
+        # The mocked preprocessor owns compressed-cache writes.
+        impl._write_compressed_source.assert_not_called()
+        assert impl._select_sparse_indices.call_args.args[-1] is metadata
+    else:
+        impl.multistream_preprocess.assert_not_called()
+        impl._update_caches.assert_called_once()
+        args = impl._update_caches.call_args.args
+        torch.testing.assert_close(args[1], hidden[:4])
+        assert args[2] is global_metadata
+        impl._write_compressed_source.assert_not_called()
+        impl._forward_attention.assert_not_called()

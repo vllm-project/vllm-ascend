@@ -49,9 +49,40 @@ else:
 
 class BaseDeviceAdaptor:
     @staticmethod
-    def get_dsv41_packed_cache_ops() -> type["MixedQuantPackedCacheOps"] | None:
-        """Return the packed-cache ABI implementation, or use standard caches."""
+    def get_deepseek_v41_backend() -> Any | None:
+        """Return an optional device-specific DeepSeek V4.1 operator backend."""
         return None
+
+    @classmethod
+    def scatter_cache(cls, key: torch.Tensor, cache: torch.Tensor, slots: torch.Tensor, tokens: int) -> None:
+        """Write cache rows in place, falling back to the generic scatter.
+
+        The actual-token prefix must contain valid slots: this helper does not
+        filter negative slots, and neither fast operator is assumed to skip them.
+        Layout checks inspect strides only; no device-to-host synchronization is
+        introduced. Never make a contiguous copy of the destination cache.
+        """
+        if (
+            key.ndim in (2, 3)
+            and cache.ndim == 4
+            and cache.shape[2] == 1
+            and (key.ndim == 2 or key.shape[1] == 1)
+            and key.shape[0] >= tokens
+            and slots.ndim == 1
+            and slots.numel() >= tokens
+            and slots.dtype in (torch.int32, torch.int64)
+            and key.dtype == cache.dtype
+            and key.shape[-1] == cache.shape[-1]
+        ):
+            stored = cls._scatter_cache(key[:tokens].reshape(tokens, key.shape[-1]), cache, slots[:tokens])
+            if stored:
+                return
+
+        torch_npu.npu_scatter_nd_update_(
+            cache.view(-1, key.shape[-1]),
+            slots[:tokens].view(-1, 1),
+            key[:tokens],
+        )
 
     @staticmethod
     def host_register_flags() -> int:
@@ -1018,22 +1049,12 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         return True
 
     @staticmethod
-    @lru_cache(maxsize=1)
-    def _load_cann_quant_lightning_indexer_ops():
-        ops = import_module("cann_ops_transformer.ops")
-        return ops.quant_lightning_indexer_metadata, ops.quant_lightning_indexer
+    def get_deepseek_v41_backend() -> Any:
+        # Import lazily so non-A5 processes never load the packaged A5 operator
+        # adapters or their runtime dependencies.
+        from vllm_ascend.ops import dsv41_a5
 
-    @staticmethod
-    def host_register_flags() -> int:
-        # A5 runtime rejects the redundant PINNED hint with error 107000.
-        # MAPPED works for both malloc-host allocations and shared mappings.
-        return ACL_HOST_REG_MAPPED
-
-    @staticmethod
-    def get_dsv41_packed_cache_ops() -> type["MixedQuantPackedCacheOps"]:
-        from vllm_ascend.models.deepseek_v41.mixed_quant_attention import MixedQuantPackedCacheOps
-
-        return MixedQuantPackedCacheOps
+        return dsv41_a5
 
     @classmethod
     def reshape_and_cache(

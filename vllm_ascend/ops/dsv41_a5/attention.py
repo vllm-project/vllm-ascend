@@ -32,6 +32,25 @@ def build_window_indices(
     )
 
 
+def build_smla_metadata(length_rows: torch.Tensor) -> torch.Tensor:
+    """Build the fixed A5 mixed-quant SMLA launch metadata."""
+    import_packaged_a5_module(
+        "cann_ops_transformer.ops.attention.mixed_quant_sparse_flash_mla_dsl"
+    )
+    return torch.ops.cann_ops_transformer.ds41.mixed_quant_sparse_flash_mla_metadata(
+        length_rows,
+        length_rows,
+        num_heads_q=64,
+        num_heads_kv=1,
+        head_dim=512,
+        quant_mode=1,
+        layout_q="TND",
+        layout_kv="PA_BBND",
+        has_win_kv=True,
+        has_cmp_kv=True,
+    )
+
+
 def _resolve_window_indices(q, metadata, window_size):
     indices = metadata.swa.ori_sparse_indices
     lengths = metadata.swa.ori_topk_length

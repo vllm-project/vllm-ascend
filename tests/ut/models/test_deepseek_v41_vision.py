@@ -131,22 +131,15 @@ def test_v41_image_and_alignment_pad_are_dead_to_engram():
     )
 
 
-def test_v41_engram_checkpoint_contract_is_unchanged():
+def test_v41_engram_requires_checkpoint_support_and_runtime_opt_in():
     checkpoint = SimpleNamespace(engram_layer_ids=[1, 14])
 
-    assert engram_enabled(checkpoint)
-    assert not engram_enabled(SimpleNamespace(engram_layer_ids=[]))
-
-
-def test_v41_a5_engram_requires_runtime_opt_in(monkeypatch):
-    checkpoint = SimpleNamespace(engram_layer_ids=[1, 14])
-    monkeypatch.setattr(
-        "vllm_ascend.models.deepseek_v41.model.DeviceOperator.get_dsv41_packed_cache_ops",
-        lambda: object(),
+    assert not engram_enabled(checkpoint, SimpleNamespace(engram_config=None))
+    assert engram_enabled(checkpoint, SimpleNamespace(engram_config=object()))
+    assert not engram_enabled(
+        SimpleNamespace(engram_layer_ids=[]),
+        SimpleNamespace(engram_config=object()),
     )
-
-    assert not _engram_enabled_for_runtime(checkpoint, SimpleNamespace(engram_config=None))
-    assert _engram_enabled_for_runtime(checkpoint, SimpleNamespace(engram_config=object()))
 
 
 def test_v41_span_has_three_delimiters_and_no_image_pad_parameter():
