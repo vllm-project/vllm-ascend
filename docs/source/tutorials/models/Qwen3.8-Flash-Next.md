@@ -36,10 +36,10 @@ It is recommended to download the model weight to the shared directory of multip
 
 Only the pre-built images listed below have been validated for this tutorial. Source installation is not covered.
 
-A pre-built Qwen3.8 A3 image is available in the [vllm-atlas-temp repository](https://quay.io/repository/atlas-ci/vllm-atlas-temp?tab=tags&tag=latest). Select the image that matches the host CPU architecture:
+A pre-built Qwen3.8 A3 image is available in the [vllm-ascend repository](https://quay.io/repository/ascend/vllm-ascend?tab=tags&tag=latest). Select the image that matches the host operating system:
 
-- AArch64: `quay.io/atlas-ci/vllm-atlas-temp:qwen3.8-next-a3-ubuntu-34178549844-2-arm64-temp`
-- x86_64: `quay.io/atlas-ci/vllm-atlas-temp:qwen3.8-next-a3-ubuntu-34178549844-2-amd64-temp`
+- openEuler: `quay.io/ascend/vllm-ascend:qwen3.8-next-a3-openeuler`
+- Ubuntu: `quay.io/ascend/vllm-ascend:qwen3.8-next-a3`
 
 The following example uses the AArch64 image and exposes 8 devices on an Atlas 800 A3 node. The service command in Section 5.1 uses the first eight devices.
 
