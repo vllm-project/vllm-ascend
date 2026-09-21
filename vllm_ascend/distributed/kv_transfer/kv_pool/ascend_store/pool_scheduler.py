@@ -164,8 +164,16 @@ class KVPoolScheduler:
         self.tp_mismatch = tp_mismatch_info.enabled
 
         self.block_key_hybrid = self.use_block_key_layerwise and self.use_hybrid
+        self.mooncake_layerwise_namespace = ""
+        if self.use_block_key_layerwise:
+            self.mooncake_layerwise_namespace = self.layerwise_protocol.layerwise_topology_namespace(vllm_config)
+            self.layerwise_protocol.validate_pp_groups(kv_cache_config, vllm_config.parallel_config)
         self.block_key_hybrid_layout = (
-            self.layerwise_protocol.hybrid_layout_id(kv_cache_config, vllm_config.parallel_config.tensor_parallel_size)
+            self.layerwise_protocol.hybrid_layout_id(
+                kv_cache_config,
+                vllm_config.parallel_config.tensor_parallel_size,
+                namespace=self.mooncake_layerwise_namespace,
+            )
             if self.block_key_hybrid
             else ""
         )
@@ -361,9 +369,21 @@ class KVPoolScheduler:
                     self.grouped_block_size[group_id],
                     block_hash_hex,
                     head,
+                    pp_rank=stage if self.pp_size > 1 else None,
                 )
+                for stage in range(self.pp_size)
                 for head in range(head_or_tp_ranks)
             ]
+        if self.use_block_key_layerwise:
+            return self.layerwise_protocol.make_hit_check_keys(
+                self.model_name,
+                group_id,
+                block_hash_hex,
+                head_or_tp_ranks,
+                len(self.kv_cache_group_ids),
+                self.pp_size,
+                namespace=self.mooncake_layerwise_namespace,
+            )
         return self.layerwise_protocol.make_hit_check_keys(
             self.model_name,
             group_id,
@@ -516,13 +536,8 @@ class KVPoolScheduler:
         )
         if not block_hashes:
             return 0
-        head_or_tp_ranks = self.tp_size // self.put_step
         keys_by_block = [
-            [
-                self.layerwise_protocol.make_block_key(self.model_name, block_hash_to_str(block_hash), head_or_tp_rank)
-                for head_or_tp_rank in range(head_or_tp_ranks)
-            ]
-            for block_hash in block_hashes
+            self._make_layerwise_hit_check_keys(0, block_hash_to_str(block_hash)) for block_hash in block_hashes
         ]
         block_hits = self._query_layerwise_block_hits(keys_by_block)
         num_hit_blocks = 0

@@ -22,9 +22,9 @@ It does not translate Mooncake operations into Memcache GVA operations.
 - This patch wires compute windows into the Ascend DSA, FA, and SFA attention
   paths. Start validation in eager mode. Graph-mode execution and additional
   attention backends require separate integration validation.
-- PP, DCP, PCP, and prefill/decode TP mismatch retain the restrictions of the
-  upstream-main Mooncake layerwise implementation. This branch does not include
-  the independent PP/DCP adaptation.
+- Topology-matched PP is supported by the [pipeline adaptation](mooncake_layerwise_pipeline_parallel.md),
+  including uneven partitions and stage-local hybrid groups. DCP, PCP and
+  prefill/decode TP mismatch remain unsupported.
 - Recurrent Mamba state is explicitly rejected. Hybrid attention and hybrid
   recurrent/linear-attention state are not interchangeable.
 - Only complete, coordinator-aligned block snapshots are published. Partial
@@ -67,9 +67,9 @@ entries at the same physical layer remain separate byte ranges.
 
 ## Reachability and session lifetime
 
-The scheduler queries `batch_is_exist` for the keys selected by the coordinator's
-per-group lookup masks. A block is usable only if all required storing-head keys
-exist. The coordinator then determines a common reachable token boundary across
+The scheduler queries `batch_is_readable` for the keys selected by the coordinator's
+per-group lookup masks. A block is usable only if all required stage and storing-head keys
+are committed and readable. The coordinator then determines a common reachable token boundary across
 groups. A full-attention hit alone is insufficient when the corresponding
 window or compressor state is missing.
 

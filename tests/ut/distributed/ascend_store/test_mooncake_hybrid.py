@@ -306,6 +306,7 @@ class TestMooncakeHybrid(unittest.TestCase):
         scheduler.layerwise_protocol = mooncake_layerwise
         scheduler.model_name = "model"
         scheduler.tp_size = 2
+        scheduler.pp_size = 1
         scheduler.put_step = 1
         scheduler.grouped_block_size = [16, 32]
         scheduler.layerwise_max_transfer_blocks = 1
