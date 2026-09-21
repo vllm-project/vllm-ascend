@@ -761,6 +761,7 @@ def minimax_m3_sparse_attn(
         block_size,
     )
     hardware_profile = get_current_hardware_profile()
+    supports_kv_gather_q = hardware_profile.supports(HardwareCapability.MINIMAX_M3_PREFILL_KV_GATHER_Q)
     supports_fp8 = hardware_profile.supports(HardwareCapability.FP8_ATTENTION)
     if not supports_kv_gather_q:
         _minimax_m3_sparse_attn_a3(*common_args, max_query_len=max_query_len)
