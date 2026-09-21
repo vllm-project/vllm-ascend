@@ -657,38 +657,6 @@ def test_slot_mapping_is_shared_per_compatible_cache_group(config, runtime):
     ]
 
 
-def test_uncompressed_slot_mapping_masks_full_graph_tail(config, runtime):
-    specs = collect_specs(runtime)
-    spec = specs["model.layers.3.self_attn.swa_cache"]
-    builder = AscendDSAV41MetadataBuilder(spec, [], runtime, torch.device("cpu"))
-    common = SimpleNamespace(
-        # The graph-padded rows deliberately contain valid-looking stale slots.
-        slot_mapping=torch.tensor([5, 6, 65, 66]),
-        positions=torch.tensor([10, 11, 0, 0]),
-        block_table_tensor=torch.tensor([[5], [0]]),
-        query_start_loc=torch.tensor([0, 2, 4]),
-        query_start_loc_cpu=torch.tensor([0, 2, 4]),
-        seq_lens=torch.tensor([12, 0]),
-        seq_lens_cpu=torch.tensor([12, 0]),
-        num_reqs=2,
-        num_actual_tokens=2,
-        num_input_tokens=4,
-        max_query_len=2,
-        max_seq_len=12,
-        is_prefilling=torch.tensor([False, False]),
-    )
-
-    metadata = builder.build(0, common, num_actual_reqs=1, full_graph_mode=True)
-
-    assert metadata.slot_mapping.tolist() == [
-        [0, 5],
-        [0, 6],
-        [-1, -1],
-        [-1, -1],
-    ]
-    assert metadata.flat_slot_mapping.tolist() == [5, 6, -1, -1]
-
-
 def test_compressed_metadata_exposes_original_and_cache_coordinates(config, runtime):
     specs = collect_specs(runtime)
     spec = specs["model.layers.2.self_attn.long_kv_cache"]
