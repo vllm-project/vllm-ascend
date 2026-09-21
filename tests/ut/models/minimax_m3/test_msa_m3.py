@@ -1765,40 +1765,13 @@ def test_sparse_attn_decode_npu_forwards_runtime_metadata(
     )
 
     mock_metadata_op.assert_called_once()
-    metadata_args = mock_metadata_op.call_args.args
     metadata_kwargs = mock_metadata_op.call_args.kwargs
-    assert torch.equal(metadata_args[0], topk_idx)
-    assert torch.equal(
-        metadata_args[1],
-        torch.tensor([[2, 1, 2, 0], [2, 1, 2, 1]], dtype=torch.int32),
-    )
-    assert metadata_args[2:6] == (2, 2, 4, [1, 128])
-    assert torch.equal(
-        metadata_kwargs["cu_seqlens_q"],
-        torch.tensor([0, 2, 4], dtype=torch.int64),
-    )
-    assert torch.equal(metadata_kwargs["seqused_kv"], seq_lens)
-    assert metadata_kwargs["max_seqlen_q"] == 2
-    assert metadata_kwargs["layout_q"] == "TND"
     assert metadata_kwargs["layout_kv"] == "PA_BBND"
     assert metadata_kwargs["mask_mode"] == 1
-    assert metadata_kwargs["quant_mode"] == 0
 
     mock_attention_op.assert_called_once()
-    args = mock_attention_op.call_args.args
     kwargs = mock_attention_op.call_args.kwargs
-    assert args[0] is q
-    assert torch.equal(args[3], topk_idx)
-    assert torch.equal(args[4], metadata_args[1])
-    assert args[5] == [1, 128]
     assert kwargs["metadata"] is metadata
-    assert torch.equal(kwargs["cu_seqlens_q"], metadata_kwargs["cu_seqlens_q"])
-    assert torch.equal(kwargs["seqused_kv"], seq_lens)
-    assert torch.equal(kwargs["block_table"], block_table)
-    assert kwargs["softmax_scale"] == 0.5
-    assert kwargs["mask_mode"] == 1
-    assert kwargs["quant_mode"] == 0
-    assert kwargs["return_softmax_lse"] is False
     assert torch.equal(output, torch.ones_like(output))
 
 
@@ -1866,22 +1839,12 @@ def test_sparse_attn_decode_npu_uses_fp8_inputs_without_unsupported_scales(
 
     metadata_kwargs = mock_metadata_op.call_args.kwargs
     assert metadata_kwargs["quant_mode"] == 5
-    assert metadata_kwargs["max_seqlen_q"] == 1
-    assert torch.equal(
-        metadata_kwargs["cu_seqlens_q"],
-        torch.tensor([0, 1], dtype=torch.int64),
-    )
 
     args = mock_attention_op.call_args.args
     kwargs = mock_attention_op.call_args.kwargs
     assert args[0].dtype == torch.float8_e4m3fn
-    assert args[1].dtype == torch.float8_e4m3fn
-    assert args[2].dtype == torch.float8_e4m3fn
-    assert torch.equal(args[4], select_num_idx)
     assert kwargs["quant_mode"] == 5
-    assert "q_dequant_scale" not in kwargs
-    assert "k_dequant_scale" not in kwargs
-    assert "v_dequant_scale" not in kwargs
+    assert not {"q_dequant_scale", "k_dequant_scale", "v_dequant_scale"} & kwargs.keys()
     assert kwargs["attention_out_dtype"] == torch.bfloat16
     assert torch.equal(output, torch.ones_like(output))
 

@@ -67,7 +67,6 @@ SM_SCALE = HEAD_DIM**-0.5
 _SPARSE_MEAN_ATOL = 2.5e-4
 _SPARSE_MAX_ATOL = 1.7e-2
 SparseAttnBackend = Literal["triton", "torch_npu"]
-_CANN_SPARSE_OP_AVAILABLE = False
 # MiniMax-M3 production sparse_attention_config (w8a8 checkpoint).
 PRODUCTION_SPARSE_TOPK = 16
 PRODUCTION_INDEX_HEAD_DIM = 128
@@ -120,7 +119,6 @@ def msa_m3_sparse_backend(request: pytest.FixtureRequest) -> SparseAttnBackend:
     if backend == "torch_npu":
         if not NPU_AVAILABLE:
             pytest.skip("torch_npu sparse backend requires NPU.")
-        _ensure_cann_sparse_attention_ops()
     return backend
 
 
@@ -137,26 +135,6 @@ def msa_m3_sparse_backend_triton_only(
 def should_do_global_cleanup_after_test() -> bool:
     # vLLM cleanup calls torch.accelerator.empty_cache(), invalid on NPU.
     return False
-
-
-def _ensure_cann_sparse_attention_ops() -> None:
-    """Ensure the CANN Ops GBSA Python bindings are available."""
-    global _CANN_SPARSE_OP_AVAILABLE
-    if _CANN_SPARSE_OP_AVAILABLE:
-        return
-
-    try:
-        from cann_ops_transformer.ops import (  # type: ignore[import-not-found]
-            generic_block_sparse_attention,
-            generic_block_sparse_attention_metadata,
-        )
-    except ImportError as exc:
-        pytest.skip(f"CANN Ops generic block sparse attention is unavailable: {exc}")
-
-    if not callable(generic_block_sparse_attention) or not callable(generic_block_sparse_attention_metadata):
-        pytest.skip("CANN Ops generic block sparse attention bindings are not callable.")
-
-    _CANN_SPARSE_OP_AVAILABLE = True
 
 
 def _sparse_tolerances(_backend: SparseAttnBackend) -> tuple[float, float]:
