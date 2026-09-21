@@ -34,7 +34,7 @@ It is recommended to download the model weight to the shared directory of multip
 
 ### 4.1 Docker Image Installation
 
-Only the pre-built images listed below have been validated for this tutorial. Source installation is not covered.
+Only the pre-built images listed below have been validated for this tutorial.
 
 A pre-built Qwen3.8 A3 image is available in the [vllm-ascend repository](https://quay.io/repository/ascend/vllm-ascend?tab=tags&tag=latest). Select the image that matches the host operating system:
 
@@ -167,7 +167,7 @@ Before starting the service:
 
 ## 6 Functional Verification
 
-After the service is started, the model can be invoked by sending a prompt. Two API interfaces are supported: `completions` and `chat/completions`. Use the `--served-model-name` you configured (`qwen3.8-flash-next` for `Qwen3.8-Flash-Next`).
+After the service is started, the model can be invoked by sending a prompt. The `chat/completions` API is supported. Use the `--served-model-name` you configured (`qwen3.8-flash-next` for `Qwen3.8-Flash-Next`).
 
 ### 6.1 Basic Chat Completion
 
