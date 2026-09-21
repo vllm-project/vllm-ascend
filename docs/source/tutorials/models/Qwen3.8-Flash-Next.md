@@ -6,7 +6,7 @@ Qwen3.8-Flash-Next is a multimodal Mixture-of-Experts (MoE) model and an experim
 
 The current version supports only Atlas A3 series hardware. Atlas A2 series hardware and Ascend 950DT and 950PR products are not yet supported and will be enabled progressively in future releases. This tutorial describes the W8A8 deployment on Atlas 800 A3. Text and multimodal input have been validated on Atlas 800 A3.
 
-This document is validated and written based on **vLLM-Ascend 0.23.0 release**. The current model (Qwen3.8-Flash-Next) is first supported in this version.
+This document is validated and written based on **vLLM-Ascend 0.26.0rc release**. The current model (Qwen3.8-Flash-Next) is first supported in this version.
 
 !!! warning
 
@@ -323,7 +323,7 @@ curl http://127.0.0.1:8088/v1/chat/completions \
 
 ## 7 Accuracy Evaluation
 
-### Using AISBench
+### 7.1 Using AISBench
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for evaluation setup and usage.
 
