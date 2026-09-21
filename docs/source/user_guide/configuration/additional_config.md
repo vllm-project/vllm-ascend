@@ -51,6 +51,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `finegrained_tp_config`             | dict | `{}`    | Configuration options for module tensor parallelism                                                       |
 | `ascend_compilation_config`         | dict | `{}`    | Configuration options for ascend compilation                                                              |
 | `ascend_warmup_config`              | dict | `{}`    | Configuration options for startup warmup that overlaps weight loading                                     |
+| `blasst_config`                     | dict | `{}`    | Configuration options for the BlasstAttentionScore (BlasST) attention op.                                 |
 | `eplb_config`                       | dict | `{}`    | Runner-specific EPLB extensions. See [Expert Parallelism Load Balancer](../feature_guide/expert_parallelism_load_balancer.md). |
 | `scheduler_config`                  | dict | `{}`    | Configuration options for Ascend scheduler extensions, including balance scheduling, recompute scheduling, DyntraLB, ShortRequestFirst, and dynamic chunked pipeline parallel. |
 | `refresh`                           | bool | `false` | Whether to refresh global Ascend configuration content. This is usually used by rlhf or ut/e2e test case. |
@@ -122,6 +123,15 @@ Both warmups run on a background thread during weight loading. The worker waits 
 | ---- | ---- | ------- | ----------- |
 | `enable_early_kernel_warmup` | bool | `False` | Compile the rejection sampler, penalty, and RMS norm Triton warmup kernels while weights load, so the regular kernel warmup hits the Triton cache. |
 | `enable_early_nz_warmup` | bool | `False` | Pay the one-time lazy initialization of the first NZ format cast while weights load. Independent of the quantization scheme. |
+
+**blasst_config**
+
+Controls the BlasstAttentionScore (BlasST) op, an AscendC attention kernel that replaces the torch_npu FIA call for eligible attention layers. Eligibility is gated automatically: TND layout, head size 128 or 256, fp16/bf16 KV cache, causal (sparse_mode 3) or non-causal (sparse_mode 0) batches, no sliding window / learnable sink, and batch size ≤ 256; non-eligible calls fall back to the torch_npu baseline path. ACL-Graph capture follows the forward flow directly (decode-only buckets). The op is only built for Ascend 910_93 (A3); on other SoCs (or when the custom op is not registered in this build), enabling `blasst_config` raises `RuntimeError` at startup instead of silently falling back.
+
+| Name | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `enabled` | bool | `False` | Whether to route eligible attention calls to the custom BlasST op instead of torch_npu FIA. |
+| `sparse_lambda` | float | `-99.0` | BlasST block-sparse threshold. `-99.0` means dense (no block skipping). |
 
 **eplb_config**
 
