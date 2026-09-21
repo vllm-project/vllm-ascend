@@ -47,6 +47,38 @@ Steps to follow to enable SP currently:
 - `enable_expert_parallel` is set (MoE models only).
 - `--additional-config '{"enable_flashcomm1": true}'` set `flashcomm1`
 
+### Matmul reduce-scatter fusion
+
+The reduce-scatter in the flow above consumes the output of the unreduced
+`o_proj` matmul. CANN can run both as a single pipelined kernel
+(`npu_mm_reduce_scatter_base`), which vLLM Ascend applies as an FX graph
+rewrite behind upstream's `fuse_gemm_comms` switch:
+
+```bash
+vllm serve <moe-model> \
+  --data-parallel-size 2 \
+  --tensor-parallel-size 2 \
+  --enable-expert-parallel \
+  --additional-config '{"enable_flashcomm1": true}' \
+  --compilation-config '{"pass_config": {"fuse_gemm_comms": true}}'
+```
+
+The rewrite is skipped, leaving the unfused matmul and reduce-scatter in place,
+when any of the following holds:
+
+- the model runs eagerly, so there is no compiled graph to rewrite,
+- `tensor_parallel_size` is not 2, 4, or 8, since the kernel needs an all-mesh
+  HCCS topology,
+- the projection is quantized, or its dtype is neither bfloat16 nor float16,
+- the contracted dimension falls outside `[256, 65535)`,
+- the projection has a bias, which is applied before the reduction.
+
+Upstream treats `fuse_gemm_comms` as async tensor parallelism built on the
+sequence-parallelism Inductor pass, so enabling it also turns on
+`pass_config.enable_sp` and switches the model to full-graph compilation.
+Ascend does not use upstream's `AsyncTPPass`, whose replacements are CUDA
+`symm_mem` collectives.
+
 ### Temporary FlashComm switch (Ascend only)
 
 Until SP support is fully validated, vLLM Ascend keeps SP MoE option by original flashcomm option.
