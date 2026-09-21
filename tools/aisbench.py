@@ -64,6 +64,9 @@ class AisbenchRunner:
             ]
         if self.num_prompts:
             aisbench_cmd.extend(["--num-prompts", str(self.num_prompts)])
+        if self.work_dir:
+            os.makedirs(self.work_dir, exist_ok=True)
+            aisbench_cmd.extend(["--work-dir", self.work_dir])
         self.stdout_file = f"output_{self.task_type}.txt"
         aisbench_cmd = " ".join(aisbench_cmd) + f" --debug > {self.stdout_file} 2>&1 &"
         print(f"running aisbench cmd: {aisbench_cmd}")
@@ -99,6 +102,8 @@ class AisbenchRunner:
         self.repetition_penalty = aisbench_config.get("repetition_penalty")
         self.no_pred = aisbench_config.get("no_pred")
         self.thinking = aisbench_config.get("thinking")
+        work_dir = aisbench_config.get("work_dir")
+        self.work_dir = os.path.expandvars(work_dir) if work_dir else None
         self.input_throughput_threshold = aisbench_config.get("input_throughput_threshold")
         self.tpot_threshold = aisbench_config.get("tpot_threshold")
         self.spec_decode_baseline = aisbench_config.get("baseline", [])
