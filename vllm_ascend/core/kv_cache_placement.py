@@ -9,7 +9,8 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.models.extract_hidden_states import CacheOnlyAttentionLayer
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.torch_utils import get_dtype_size
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec
+from vllm.v1.core.kv_cache_utils import unify_hybrid_kv_cache_specs
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec, SlidingWindowSpec
 
 from vllm_ascend.ascend_config import KVPPConfig
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
@@ -171,6 +172,14 @@ def create_kvpp_cache_allocation_plan(
 ) -> KVPPPhysicalCachePlan:
     """Keep upstream's logical group while budgeting actual allocations."""
     logical_spec = dict(worker_spec)
+    if (
+        vllm_config.speculative_config is not None
+        and vllm_config.speculative_config.method == "dspark"
+        and any(isinstance(spec, SlidingWindowSpec) for spec in logical_spec.values())
+    ):
+        # DSpark can use sliding-window draft layers. Match upstream's full
+        # cache allocation before budgeting; attention compute stays windowed.
+        unify_hybrid_kv_cache_specs(logical_spec)
     if (
         any(not isinstance(spec, FullAttentionSpec) for spec in logical_spec.values())
         or len({spec.block_size for spec in logical_spec.values()}) > 1

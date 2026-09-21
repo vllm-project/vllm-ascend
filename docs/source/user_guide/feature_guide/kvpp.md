@@ -99,6 +99,8 @@ Fixed-step MTP can be combined with KVPP, but MTP caches remain independently al
 
 GLM-5.2 with a Qwen3 DSpark draft uses the same draft-cache exclusion as MTP. DSpark layers are numbered after the target layers, with their count taken from the draft model configuration. The existing KVPP allocator keeps those caches independent on every rank and includes them in the memory budget.
 
+For sliding-window DSpark drafts, KVPP uses upstream's full-cache allocation conversion before computing that budget. This retains sliding-window attention computation, but allocates draft cache blocks for the full sequence rather than evicting blocks outside the window.
+
 For example, add the following to an existing GLM-5.2 launch configuration, retaining EP and asynchronous scheduling:
 
 ```bash
