@@ -38,6 +38,8 @@ from vllm_ascend.core.kv_cache_interface import (
 )
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     AscendHybridKVCacheCoordinator,
+    _CacheGroupBlockPoolView,
+    _GroupStableBlockPool,
     _is_deepseek_v4_kv_cache_spec,
     get_kv_cache_coordinator,
 )
@@ -48,6 +50,48 @@ from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     group_and_unify_kv_cache_specs,
 )
 from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
+
+
+def _make_group_stable_pool(num_blocks: int = 9) -> _GroupStableBlockPool:
+    return _GroupStableBlockPool(
+        num_gpu_blocks=num_blocks,
+        enable_caching=False,
+        hash_block_size=16,
+        enable_kv_cache_events=False,
+    )
+
+
+def test_packed_cache_pages_are_reused_by_their_original_group() -> None:
+    pool = _make_group_stable_pool()
+    group0 = _CacheGroupBlockPoolView(pool, 0)
+    group1 = _CacheGroupBlockPoolView(pool, 1)
+
+    blocks0 = group0.get_new_blocks(2)
+    blocks1 = group1.get_new_blocks(2)
+    ids0 = [block.block_id for block in blocks0]
+    ids1 = [block.block_id for block in blocks1]
+    # Deferred frees return a flat cross-group list through the coordinator's
+    # underlying pool, so ownership must be recoverable from the block itself.
+    pool.free_blocks([*reversed(blocks0), *reversed(blocks1)])
+
+    assert {block.block_id for block in group0.get_new_blocks(2)} == set(ids0)
+    assert {block.block_id for block in group1.get_new_blocks(2)} == set(ids1)
+
+
+def test_packed_cache_group_view_tracks_touch_and_refree_once() -> None:
+    pool = _make_group_stable_pool(5)
+    group = _CacheGroupBlockPoolView(pool, 3)
+    blocks = group.get_new_blocks(2)
+    group.free_blocks(blocks)
+
+    group.touch(blocks)
+    group.free_blocks(blocks)
+    reused = group.get_new_blocks(2)
+
+    assert len({block.block_id for block in reused}) == 2
+    assert {block.block_id for block in reused} == {
+        block.block_id for block in blocks
+    }
 
 
 @pytest.mark.parametrize("wrapped", [False, True])

@@ -1938,8 +1938,8 @@ class TestNPUWorker(TestBase):
             worker.model_runner._init_kv_zero_meta.assert_called_once_with()
 
     @patch("vllm_ascend.worker.worker.ensure_kv_transfer_initialized")
-    def test_initialize_from_config_skips_mrv1_zeroer_for_mixed_precision_only(self, mock_ensure_kv_transfer):
-        """MRV1 mixed-precision attention must not enter the Mamba zeroer."""
+    def test_initialize_from_config_initializes_mrv1_zeroer_for_mixed_precision(self, mock_ensure_kv_transfer):
+        """MRV1 must consume block IDs emitted for mixed-precision caches."""
         from vllm_ascend.worker.worker import NPUWorker
 
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
@@ -1961,7 +1961,7 @@ class TestNPUWorker(TestBase):
                 mock_kv_cache_config,
                 kv_cache_allocation_context=ANY,
             )
-            worker.model_runner._init_kv_zero_meta.assert_not_called()
+            worker.model_runner._init_kv_zero_meta.assert_called_once_with()
 
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.enable_sp", return_value=False)
