@@ -27,6 +27,7 @@ from vllm.logger import logger
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding,
     Gemma4RotaryEmbedding,
+    Llama3RotaryEmbedding,
     MRotaryEmbedding,
     RotaryEmbedding,
     YaRNScalingRotaryEmbedding,
@@ -319,6 +320,14 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         if out_dtype is None:
             return torch.ops.vllm.npu_rotary_embedding(*rope_args)
         return torch.ops.vllm.npu_rotary_embedding(*rope_args, out_dtype=out_dtype)
+
+
+class AscendLlama3RotaryEmbedding(Llama3RotaryEmbedding, AscendRotaryEmbedding):
+    """Keep Llama 3 frequency scaling and use Ascend's fused rotary forward.
+
+    Llama3RotaryEmbedding's cooperative constructor initializes its scaling
+    parameters before AscendRotaryEmbedding creates and records the cache.
+    """
 
 
 class AscendYaRNRotaryEmbedding(YaRNScalingRotaryEmbedding):
