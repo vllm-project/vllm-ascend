@@ -19,6 +19,7 @@
 
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -40,12 +41,15 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.worker.gpu.attn_utils import init_attn_backend as _upstream_init_attn_backend
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import AttentionGroup
 
+from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
+from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import (
     MLA_FLASH_SUPPORTED_Q_HEADS,
@@ -70,10 +74,31 @@ from vllm_ascend.utils import (
     is_hidden_state_cache_spec,
     vllm_version_is,
 )
+from vllm_ascend.worker.device_metadata import DeviceMetadataExecutor, DeviceMetadataTaskProvider
 from vllm_ascend.worker.kvpp_cache import allocate_kvpp_cache
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
+
+
+_device_metadata_executor: ContextVar[DeviceMetadataExecutor | None] = ContextVar(
+    "ascend_mrv2_device_metadata_executor", default=None
+)
+
+
+@contextmanager
+def device_metadata_context(executor: DeviceMetadataExecutor | None):
+    """Keep task buffers owned until the target/draft consumer has been queued."""
+    if executor is None or _device_metadata_executor.get() is executor:
+        yield
+        return
+    token = _device_metadata_executor.set(executor)
+    try:
+        yield
+    finally:
+        if executor.submission_in_flight:
+            executor.release()
+        _device_metadata_executor.reset(token)
 
 
 def unwrap_mamba_kv_cache_groups(kv_cache_config: KVCacheConfig) -> KVCacheConfig:
@@ -217,6 +242,45 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     return kv_cache_spec
 
 
+def init_attn_backend(kv_cache_config, vllm_config, device, **kwargs):
+    """Refine Flash metadata groups without changing scheduler KV groups."""
+    attn_groups, cg_support, kernel_block_sizes = _upstream_init_attn_backend(
+        kv_cache_config, vllm_config, device, **kwargs
+    )
+    if not ascend_envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
+        return attn_groups, cg_support, kernel_block_sizes
+    layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
+    layer_order = {name: index for index, name in enumerate(layers)}
+    for group_id, groups in enumerate(attn_groups):
+        refined = []
+        for group in groups:
+            if not issubclass(group.backend, AscendMLABackend):
+                # Hybrid KDA/GQA groups keep their original builders and order.
+                refined.append(group)
+                continue
+            partitions = {}
+            for name in sorted(group.layer_names, key=layer_order.__getitem__):
+                impl = getattr(layers[name], "impl", None)
+                # Upstream already splits Q heads and cache geometry. Flash
+                # tiling also bakes in RoPE mode and softmax scale.
+                key = (getattr(impl, "use_mla_rope", None), getattr(impl, "scale", None))
+                partitions.setdefault(key, []).append(name)
+            if len(partitions) <= 1:
+                refined.append(group)
+                continue
+            for names in partitions.values():
+                split_group = AttentionGroup(group.backend, names, group.kv_cache_spec, group.kv_cache_group_id)
+                split_group.create_metadata_builders(
+                    vllm_config=vllm_config,
+                    device=device,
+                    kernel_block_size=kernel_block_sizes[group_id] if group_id < len(kernel_block_sizes) else None,
+                    num_metadata_builders=len(group.metadata_builders),
+                )
+                refined.append(split_group)
+        attn_groups[group_id] = refined
+    return attn_groups, cg_support, kernel_block_sizes
+
+
 def build_attn_metadata(
     *,
     attn_groups: list[list[AttentionGroup]],
@@ -248,6 +312,13 @@ def build_attn_metadata(
     causal: bool | Mapping[int, bool] = True,
 ) -> dict[str, Any]:
     """Build attention metadata for Ascend NPUs."""
+    executor = _device_metadata_executor.get()
+    if executor is not None and executor.submission_in_flight:
+        # Capture factories and draft replay can build another metadata set
+        # after consuming the previous one on this stream.
+        executor.release()
+    device_metadata_tasks = []
+
     # TODO(Ronald1995): optimize AscendCommonAttentionMetadata.
     # seq_lens_np is used for ascend npus, it maybe None in spec_decode case,
     # we fill it with max_seq_len in case `attn_metadata_builder.build` raise
@@ -316,6 +387,8 @@ def build_attn_metadata(
 
         for attn_group in attn_groups[i]:
             attn_metadata_builder = attn_group.get_metadata_builder(0)
+            if executor is not None and isinstance(attn_metadata_builder, DeviceMetadataTaskProvider):
+                attn_metadata_builder.enable_device_metadata()
             is_dsa_builder = isinstance(attn_metadata_builder, AscendDSAMetadataBuilder)
             is_sfa_builder = isinstance(attn_metadata_builder, AscendSFAMetadataBuilder)
             consumes_pcp_context = bool(getattr(attn_metadata_builder, "consumes_pcp_context", False))
@@ -360,6 +433,17 @@ def build_attn_metadata(
                 common_ratio_to_sas_metadata = attn_metadata_builder.common_ratio_to_sas_metadata  # type: ignore[assignment]
             for layer_name in attn_group.layer_names:
                 attn_metadata[layer_name] = metadata
+            if executor is not None and isinstance(attn_metadata_builder, DeviceMetadataTaskProvider):
+                device_metadata_tasks.extend(attn_metadata_builder.take_device_metadata_tasks())
+    if device_metadata_tasks:
+        # Both upstream capture factories and runtime builders execute outside
+        # the captured model. Ordinary stream events therefore stay outside
+        # FULL graphs; replay reads the stable buffers after these waits.
+        assert not torch.npu.is_current_stream_capturing()
+        assert executor is not None
+        executor.submit(device_metadata_tasks)
+        for task in device_metadata_tasks:
+            executor.wait(task.stage, task.group_id)
     return attn_metadata
 
 

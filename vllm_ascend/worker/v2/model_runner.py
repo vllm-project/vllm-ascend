@@ -46,6 +46,7 @@ from vllm.v1.worker.gpu.model_runner import (
     GPUModelRunner,
 )
 
+from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import (
     MoECommType,
@@ -68,9 +69,10 @@ from vllm_ascend.utils import (
     set_potential_max_tokens,
     vllm_version_is,
 )
+from vllm_ascend.worker.device_metadata import DeviceMetadataExecutor
 from vllm_ascend.worker.utils import disable_compilation
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
-from vllm_ascend.worker.v2.attn_utils import build_attn_state
+from vllm_ascend.worker.v2.attn_utils import build_attn_state, device_metadata_context
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
@@ -146,6 +148,7 @@ class NPUModelRunner(GPUModelRunner):
             load_collection_phase=(load_collection_phase if parallel_config.enable_eplb else "all"),
         )
 
+        self.device_metadata_executor = DeviceMetadataExecutor() if ascend_envs.VLLM_ASCEND_ENABLE_FLASH_MLA else None
         self.update_stream = None
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.update_stream = torch.npu.Stream()
@@ -295,7 +298,10 @@ class NPUModelRunner(GPUModelRunner):
         # is used for adaptive verification handling.
         draft_layer_names: set[str] = getattr(self.speculator, "draft_attn_layer_names", set())
         self.use_fia = any(
-            (group.backend is AscendAttentionBackend or group.backend is AscendMLABackend)
+            (
+                group.backend is AscendAttentionBackend
+                or (group.backend is AscendMLABackend and not ascend_envs.VLLM_ASCEND_ENABLE_FLASH_MLA)
+            )
             and any(layer_name not in draft_layer_names for layer_name in group.layer_names)
             for groups in self.attn_groups
             for group in groups
@@ -337,7 +343,7 @@ class NPUModelRunner(GPUModelRunner):
             get_kv_transfer_group().handle_preemptions(kv_connector_metadata)
 
         self.model_state.kvpp_is_dummy_run = dummy_run or is_profile
-        with pcp_dispatch_context():
+        with pcp_dispatch_context(), device_metadata_context(self.device_metadata_executor):
             output = super().execute_model(
                 scheduler_output,
                 intermediate_tensors=intermediate_tensors,

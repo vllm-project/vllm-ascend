@@ -1,0 +1,9 @@
+{
+  "status": "Draft NPU integration candidate; runtime unvalidated",
+  "ascend_main": "fde460648b159410eac68f4d32fec97587cc8f3d",
+  "cache_pr_16456": "4839002d74a5cac8965a5dfee11c627442bdaa79",
+  "dspark_pr_16347_merge": "d4511510e15eb52744089e40d8cd7c9fc23ac0f4",
+  "integration_baseline": "c8ca7b135f4cd989dd4367ac81919c7759be5514",
+  "handoff": "16ceabb4068919592e34768c6f9cfe26683e9ac9",
+  "vllm": "84030bbe3d74d99bad477a3d2e37a973ccd8865c"
+}

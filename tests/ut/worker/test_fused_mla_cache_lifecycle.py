@@ -134,8 +134,11 @@ def test_component_mla_cow_copies_both_logical_components(monkeypatch):
 def test_fused_mla_cow_copies_complete_manager_block(monkeypatch):
     num_blocks = 2
     _, fused = _make_k3_fused_cache(num_blocks=num_blocks)
-    payload = ((torch.arange(SLOT_LOGICAL_BYTES, dtype=torch.int64) * 31 + 17) % 251).to(torch.uint8)
-    fused[3].copy_(payload.view(KERNEL_BLOCK_SIZE, NUM_KV_HEADS, FUSED_DIM))
+    # Count BF16 elements, not bytes, and give every virtual page a distinct
+    # payload: a manager-block COW copies corresponding pages, not page 0 to all.
+    payload = ((torch.arange(RATIO * KERNEL_BLOCK_SIZE * NUM_KV_HEADS * FUSED_DIM) * 31 + 17) % 251).to(torch.bfloat16)
+    payload = payload.view(RATIO, KERNEL_BLOCK_SIZE, NUM_KV_HEADS, FUSED_DIM)
+    fused[RATIO : 2 * RATIO].copy_(payload)
 
     _install_cpu_h2d(monkeypatch)
     copy_kv_cache_blocks_inplace(
@@ -144,8 +147,6 @@ def test_fused_mla_cow_copies_complete_manager_block(monkeypatch):
         [KVCacheBlockCopy(src_block_id=1, dst_block_id=0)],
     )
 
-    expected = payload.view(KERNEL_BLOCK_SIZE, NUM_KV_HEADS, FUSED_DIM)
-    torch.testing.assert_close(fused[0], expected)
-    torch.testing.assert_close(fused[1], expected)
-    torch.testing.assert_close(fused[2], expected)
-    assert not torch.equal(fused[4], expected)
+    torch.testing.assert_close(fused[:RATIO], payload, rtol=0, atol=0)
+    torch.testing.assert_close(fused[RATIO : 2 * RATIO], payload, rtol=0, atol=0)
+    assert not torch.equal(fused[0], fused[1])
