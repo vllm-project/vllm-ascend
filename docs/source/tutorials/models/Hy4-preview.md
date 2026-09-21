@@ -15,7 +15,7 @@ This document describes how to quickly get started with Hy4 model inference depl
     **Current status and constraints**
 
     - Hy4 Preview is provided **out-of-the-box** through the official Docker image `quay.io/ascend/vllm-ascend:hy4-a3`. The supporting code has **not yet been merged** into the vLLM-Ascend repository, so installing it from source (`pip install` or building from source) is **not supported** for this model yet.
-    - Only **Atlas 800I A3 (A3)** is supported now. Other Ascend hardware (e.g., Atlas 800I A2) is not supported for Hy4 Preview.
+    - Only **Atlas A3 (A3)** is supported now. Other Ascend hardware (e.g., Atlas A2 Products) is not supported for Hy4 Preview.
     - The features listed in [Supported Features](#2-supported-features) are only those enabled by the verified deployment commands in this document, and do **not** imply that all features are supported for Hy4 Preview. This is an early-access version; performance optimization and reliability validation are still in progress (see [Declaration](#9-declaration)).
 
 ## 2 Supported Features

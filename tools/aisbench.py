@@ -99,7 +99,6 @@ class AisbenchRunner:
         self.repetition_penalty = aisbench_config.get("repetition_penalty")
         self.no_pred = aisbench_config.get("no_pred")
         self.thinking = aisbench_config.get("thinking")
-        self.reasoning_effort = aisbench_config.get("reasoning_effort")
         self.input_throughput_threshold = aisbench_config.get("input_throughput_threshold")
         self.tpot_threshold = aisbench_config.get("tpot_threshold")
         self.spec_decode_baseline = aisbench_config.get("baseline", [])
@@ -176,12 +175,6 @@ class AisbenchRunner:
         if self.thinking:
             field_thinking = 'chat_template_kwargs={"thinking": True}'
             content = re.sub(r"ignore_eos.*", f"ignore_eos=False,\n            {field_thinking},", content)
-        if self.reasoning_effort is not None:
-            content = re.sub(
-                r"ignore_eos.*",
-                f'ignore_eos=False,\n            reasoning_effort="{self.reasoning_effort}",',
-                content,
-            )
         if self.task_type == "performance":
             content = re.sub(r"path=.*", f'path="{self.model_path}",', content)
             content = re.sub(r"request_rate.*", f"request_rate={self.request_rate},", content)

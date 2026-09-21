@@ -37,7 +37,7 @@ from vllm_ascend.attention.utils import (
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, get_storage_block_size
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
 from vllm_ascend.distributed.parallel_state import get_otp_group
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
 from vllm_ascend.models.deepseek_v4.indexer import AscendIndexerMetadata, IndexerOverlapPlan
@@ -428,16 +428,11 @@ def build_dspark_swa_indices(
     index_width: int | None = None,
     indices_output: torch.Tensor | None = None,
     buffer: torch.Tensor | None = None,
-    *,
-    use_logical_indices: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Build DSpark non-causal visible slot ids for a paged SWA cache.
 
     Each token in a draft block sees the trailing context window plus the
     whole current draft block. Invalid/padded rows get lens=0 and -1 slots.
-    ``use_logical_indices`` returns positions within each sequence for
-    SparseFlashMLA, which applies its own block-table lookup. The default
-    preserves physical slots for existing DSA callers.
 
     When ``buffer`` is given, the per-token slots are copied into its leading
     rows and the returned tensor is a slice view of ``buffer``. This keeps the
@@ -465,15 +460,13 @@ def build_dspark_swa_indices(
     cols = torch.arange(index_width, device=start_pos.device)
     col_mask = cols[None, :] < visible_lens[:, None]
     pos = start_pos[:, None] + cols[None, :]
-    if use_logical_indices:
-        slot_ids = pos.to(torch.int32)
-    else:
-        block_nums = pos // block_size
-        # Clamp out-of-range columns before gathering; col_mask discards them.
-        safe_nums = block_nums.clamp(min=0, max=int(block_table.shape[1]) - 1)
-        block_offsets = pos % block_size
-        block_ids = torch.gather(block_table, 1, safe_nums)
-        slot_ids = (block_ids * block_size + block_offsets).to(torch.int32)
+    block_nums = pos // block_size
+    # Clamp to valid block-table columns so gather never goes OOB on the
+    # out-of-range columns (their results are discarded by col_mask anyway).
+    safe_nums = block_nums.clamp(min=0, max=int(block_table.shape[1]) - 1)
+    block_offsets = pos % block_size
+    block_ids = torch.gather(block_table, 1, safe_nums)
+    slot_ids = (block_ids * block_size + block_offsets).to(torch.int32)
     slot_ids = slot_ids.where(col_mask, torch.full_like(slot_ids, -1))
 
     per_token_slots = torch.repeat_interleave(slot_ids, query_lens, dim=0, output_size=num_decode_tokens).unsqueeze(1)
@@ -1776,6 +1769,8 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         if actual_tokens == 0:
             output.zero_()
             notify_kv_cache_written(layer_name)
+            with attention_transfer_window():
+                pass
             maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
             return output
 
@@ -2205,7 +2200,6 @@ class AscendDSAImpl(AttentionImplBase[Any]):
 
         notify_kv_cache_written(layer_name)
         wait_for_device_metadata(DeviceMetadataStage.ATTENTION, id(common_metadata.sas_metadata))
-        record_attention_compute_start()
         kv_plan = get_dsa_attn_kv_plan(self.vllm_config)
         attn_op = kv_plan.get_dsa_sparse_attn_op()
         attn_kwargs = kv_plan.get_dsa_sparse_attn_base_kwargs()
@@ -2250,4 +2244,5 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 assert compress_topk_idxs is not None
                 attn_kwargs["cmp_sparse_indices"] = compress_topk_idxs
 
-        return attn_op(q, **attn_kwargs)[0]
+        with attention_transfer_window():
+            return attn_op(q, **attn_kwargs)[0]

@@ -29,7 +29,7 @@
 # What's Patched and how it works:
 # --------------------------------
 # * Platform Patch:
-# =================
+# ==========#
 # Entries are listed in alphabetical order by file name.
 #
 # ** 1. File: platform/patch_balance_schedule.py**
@@ -162,25 +162,7 @@
 #       engine-core-level customization, or when the feature modules no longer
 #       need an entry-point hook.
 #
-# ** 6. File: platform/patch_engram_config.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.config.engram.EngramConfig.verify_model_config`
-#    Why:
-#       Upstream rejects every platform that is not CUDA, because Engram
-#       embedding offload started there. Validating `current_platform.is_cuda()`
-#       rather than "does the checkpoint carry n-gram layers" makes
-#       `--engram-config` unusable on Ascend even though the same checkpoint
-#       hashes to the same rows and only the storage location differs.
-#    How：
-#       Accept a configuration whose checkpoint declares `engram_layer_ids`,
-#       and reject the DP-sharding switches that the Ascend implementation does
-#       not provide instead of silently ignoring them.
-#    Related PR (if no, explain why):
-#       No, upstream vLLM has no Ascend Engram to relax this for.
-#    Future Plan:
-#       Remove this patch once upstream validation is platform-agnostic.
-#
-# ** 7. File: platform/patch_eplb.py**
+# ** 6. File: platform/patch_eplb.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.parallel.current_platform`
 #   2. `vllm.distributed.eplb.eplb_state._move_to_workspace`
@@ -202,7 +184,7 @@
 #       available in the supported vLLM version. Retain only the NPU backend,
 #       operator, communicator, load normalization, and weight views.
 #
-# ** 8. File: platform/patch_fused_moe.py**
+# ** 7. File: platform/patch_fused_moe.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.layers.fused_moe.FusedMoEFactory`
 #    Why:
@@ -277,7 +259,7 @@
 #       model types or resolves MLA from the config contents instead of a
 #       model_type whitelist.
 #
-# ** 9. File: platform/patch_kv_cache_coordinator.py**
+# ** 8. File: platform/patch_kv_cache_coordinator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.kv_cache_coordinator.HybridKVCacheCoordinator.find_longest_cache_hit_per_group`
 #    Why:
@@ -301,7 +283,7 @@
 #       Remove this patch when vLLM PR #42524 and #44243 is included in the supported
 #       upstream vLLM version.
 #
-# ** 10. File: platform/patch_kv_cache_utils.py**
+# ** 9. File: platform/patch_kv_cache_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes`
 #      `vllm.v1.engine.core.resolve_kv_cache_block_sizes`
@@ -320,7 +302,7 @@
 #       Remove this patch once upstream vLLM supports hybrid KV cache + CP for
 #       non-CUDA backends, or exposes a platform hook for this behavior.
 #
-# ** 11. File: platform/patch_mamba_block_aligned_split.py**
+# ** 10. File: platform/patch_mamba_block_aligned_split.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.sched.scheduler.Scheduler._mamba_block_aligned_split`
 #    Why:
@@ -350,7 +332,7 @@
 #    Future Plan:
 #       Remove this patch when vLLM merges the PR.
 #
-# ** 12. File: platform/patch_mamba_config_310.py**
+# ** 11. File: platform/patch_mamba_config_310.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.config.HybridAttentionMambaModelConfig.verify_and_update_config`
 #    Why:
@@ -367,7 +349,7 @@
 #    Future Plan:
 #       Remove this patch once upstream supports 310P-aligned mamba block sizing.
 #
-# ** 13. File: platform/patch_mamba_manager.py**
+# ** 12. File: platform/patch_mamba_manager.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.single_type_kv_cache_manager.MambaManager`
 #    Why:
@@ -387,7 +369,7 @@
 #          hybrid prefix cache lookup for DCP.
 #       2. Remove this patch once upstream accept 46892 pr or fixed the bug by other pr.
 #
-# ** 14. File: platform/patch_minimax_m2_config.py**
+# ** 13. File: platform/patch_minimax_m2_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.model.ModelConfig._verify_quantization`
 #    Why:
@@ -448,7 +430,7 @@
 #       Drop the alias once upstream registry includes it or the checkpoint
 #       standardizes architecture strings.
 #
-# ** 15. File: platform/patch_mla_prefill_backend.py**
+# ** 14. File: platform/patch_mla_prefill_backend.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.attention.backends.mla.common.get_mla_prefill_backend`
 #    Why:
@@ -470,7 +452,7 @@
 #       platform/device hook so Ascend can be selected (or skipped) without
 #       monkey-patching.
 #
-# ** 16. File: platform/patch_multiproc_executor.py**
+# ** 15. File: platform/patch_multiproc_executor.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.executor.multiproc_executor.MultiprocExecutor`
 #    Why:
@@ -483,7 +465,7 @@
 #    Future Plan:
 #       Remove this patch when vLLM fix the issue.
 #
-# ** 17. File: platform/patch_pp_mtp.py**
+# ** 16. File: platform/patch_pp_mtp.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.outputs.ModelRunnerOutput`
 #    Why:
@@ -576,7 +558,7 @@
 #       supports local drafter models with PP > 1, or moves the PP validation to a
 #       separate hook that can be overridden per-model-type.
 #
-# ** 18. File: platform/patch_profiling_chunk.py**
+# ** 17. File: platform/patch_profiling_chunk.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.engine.core.EngineCore.__init__`
 #   2. `Scheduler.update_from_output` (scheduler class, wrapped when profiling chunk is enabled)
@@ -604,7 +586,7 @@
 #       profiling startup and per-step timing callbacks without monkey-patching
 #       `EngineCore` and the multiprocess entry point.
 #
-# ** 19. File: platform/patch_speculative_config.py**
+# ** 18. File: platform/patch_speculative_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.speculative.SpeculativeConfig.hf_config_override`
 #    Why:
@@ -645,7 +627,7 @@
 #       before DSpark draft selection, or otherwise guarantees that rebuilding
 #       `model_arch_config` preserves the selected draft architecture.
 #
-# ** 20. File: platform/patch_structured_output.py**
+# ** 19. File: platform/patch_structured_output.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.sampling_params.SamplingParams._validate_structured_outputs`
 #      `vllm.v1.structured_output.StructuredOutputManager.grammar_init`
@@ -689,7 +671,7 @@
 #       Remove this patch once upstream vLLM adds the terminal short-circuit
 #       to the outlines backend.
 #
-# ** 21. File: platform/patch_torch_accelerator.py**
+# ** 20. File: platform/patch_torch_accelerator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `torch.accelerator.memory_stats`, `torch.accelerator.memory_reserved`,
 #      `torch.accelerator.reset_peak_memory_stats`, `torch.accelerator.get_memory_info`,
@@ -709,7 +691,7 @@
 #       Remove this patch once `torch.accelerator` correctly routes to the NPU
 #       backend for these memory APIs.
 #
-# ** 22. File: platform/patch_tool_choice_none_content.py**
+# ** 21. File: platform/patch_tool_choice_none_content.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.entrypoints.openai.chat_completion.protocol.ChatCompletionResponse`
 #      `vllm.entrypoints.openai.chat_completion.protocol.ChatCompletionStreamResponse`
@@ -725,7 +707,7 @@
 #    Future Plan:
 #       Remove this patch once the supported vLLM version contains PR #44105.
 #
-# ** 23. File: platform/patch_use_v2_model_runner.py**
+# ** 22. File: platform/patch_use_v2_model_runner.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.vllm.VllmConfig.use_v2_model_runner`
 #    Why:
@@ -734,29 +716,71 @@
 #       architecture whitelists, Triton availability, and feature
 #       compatibility checks. On Ascend the NPU v2 runner is not yet
 #       compatible with all upstream-defaulted models and features, so
-#       following upstream defaults can crash. We override the property
-#       with Ascend-owned whitelist heuristics in mrv2_utils (currently
-#       Qwen3ForCausalLM plus eagle3/mtp/dflash spec decode, Triton, and
-#       non-310P). Explicit VLLM_USE_V2_MODEL_RUNNER still wins.
+#       enabling by model architecture can crash. We override the
+#       property to read only VLLM_USE_V2_MODEL_RUNNER, deferring
+#       model/framework checks to the NPU runner itself.
 #    How:
-#       Call apply_v2_model_runner_config_patch() to install the Ascend
-#       use_v2_model_runner property and neutralize upstream V2
-#       validation. Keep additional patches for V2 spec-PP unsupported
-#       features and Ascend-supported V1 features (dspark / dflash2).
+#       Monkey-patch VllmConfig.use_v2_model_runner to return
+#       envs.VLLM_USE_V2_MODEL_RUNNER (defaulting to False when unset).
 #       worker/patch_v2/patch_use_v2_model_runner.py reuses this platform
 #       patch so EngineCore and worker processes share the same behavior.
 #    Related PR (if no, explain why):
 #       1. https://github.com/vllm-project/vllm-ascend/pull/11389
-#       2. https://github.com/vllm-project/vllm-ascend/pull/11692
 #    Future Plan:
 #       Remove this patch once vllm-ascend fully supports the v2 model
 #       runner and can rely on upstream's default enablement heuristics
 #       (model architecture, Triton, feature checks) without crashes or
 #       degraded functionality.
 #
+#   2. `vllm.config.parallel.ParallelConfig._validate_parallel_config`
+#    Why:
+#       vLLM 0.28.0 rejects PCP+DP before Ascend MRV2 can validate it.
+#    How:
+#       Only on Ascend MRV2 with DP>1, PCP>1 and DCP=1, temporarily mask
+#       PCP inside the original validator and restore it on every exit.
+#       Retain real DP validation and world_size; rebuild dependent Pydantic
+#       schemas once at import so nested configs use the same validator.
+#    Related PR: https://github.com/vllm-project/vllm/pull/54523
+#    Future Plan:
+#       Remove this workaround when vLLM 0.28.0 support is dropped.
+#
 # * Worker Patch:
-# ===============
+# ========#
 # Entries are listed in alphabetical order by file name.
+#
+# ** 0. File: worker/patch_kv_cache_dtype.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.utils.torch_utils.STR_DTYPE_TO_TORCH_DTYPE["fp8"]`
+#    Why:
+#       vLLM ``releases/v0.27.1`` does not ship the pluggable kv-cache-dtype
+#       mechanism that the ``kvquant_27`` branch added
+#       (``register_kv_cache_dtype`` injects ``fp8 -> torch.float8_e4m3fn``
+#       in place). On such vLLM builds the upstream
+#       ``STR_DTYPE_TO_TORCH_DTYPE["fp8"]`` is ``torch.uint8`` (raw fp8 bytes
+#       for NVIDIA cutlass), but Ascend MLA/DSA kernels need native
+#       ``torch.float8_e4m3fn``. Without the flip, the call sites in
+#       ``vllm_ascend/models/deepseek_v4/{model,indexer}.py`` that do
+#       ``kv_cache_dtype_str_to_dtype("fp8", ...)`` resolve to ``uint8`` and
+#       the Ascend kernels fail (e.g. GLM-5.1 with ``--kv-cache-dtype fp8``
+#       and ``--attention_config.indexer_kv_dtype fp8``).
+#       ``vllm_ascend/core/kv_cache_dtype_handlers.py`` is import-guarded so
+#       it no longer raises ``ImportError`` on vLLM without
+#       ``register_kv_cache_dtype``; this worker patch then performs the
+#       dtype flip the handler would have done, in every spawned Worker
+#       process (the dtype is resolved per-worker, before model loading).
+#    How：
+#       At worker patch time, if ``register_kv_cache_dtype`` cannot be
+#       imported from ``vllm.config.cache``, mutate
+#       ``vllm.utils.torch_utils.STR_DTYPE_TO_TORCH_DTYPE["fp8"]`` to
+#       ``torch.float8_e4m3fn`` in place. No-op on vLLM builds that already
+#       provide the pluggable mechanism (kvquant_27 / future main), where the
+#       eager handler import already flipped the dtype.
+#    Related PR (if no, explain why):
+#       vLLM commit ``dd7e350c9 pluggable kv quant dtype`` (on kvquant_27).
+#    Future Plan:
+#       Remove this patch once the pluggable kv-cache-dtype mechanism lands on
+#       the vLLM release vllm-ascend targets, so the handler path alone
+#       handles the dtype flip.
 #
 # ** 1. File: worker/patch_cudagraph.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1326,8 +1350,7 @@
 #    Why:
 #       EngineCore subprocesses only load global/platform patches, while workers
 #       also import this compatibility module. The actual monkey-patch is defined
-#       in `platform/patch_use_v2_model_runner.py` (whitelist default plus
-#       remaining V2/V1 feature patches).
+#       in `platform/patch_use_v2_model_runner.py`.
 #    How：
 #       Reuse the platform patch so EngineCore and worker processes share the
 #       same `use_v2_model_runner` behavior.
@@ -1383,4 +1406,90 @@
 #       https://github.com/vllm-project/vllm/pull/47808
 #    Future Plan:
 #       Remove this patch when the compiled allocator is supported on Ascend.
+#
+# ** 34. File: platform/patch_vision.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.vision.FusedInputNorm.forward`
+#    Why:
+#       Upstream vLLM uses PyTorch 2.13.0, which requires eps > 0 for training
+#       but allows eps >= 0 for inference. vllm-ascend bundles PyTorch 2.10.0,
+#       which does not distinguish scenarios and requires eps > 0 in all cases.
+#       So when upstream FusedInputNorm passes eps=0.0 to F.batch_norm it works
+#       fine upstream, but fails on vllm-ascend with "batch_norm eps must be
+#       positive".
+#    How：
+#       Monkey-patch FusedInputNorm.forward to use eps=1e-5 instead of 0.0.
+#       The patch is guarded with contextlib.suppress(ImportError) so it does
+#       not crash on release wheels (v0.26.0) where FusedInputNorm does not exist.
+#       Upstream PR #51734 (dc5101fb1b, Aug 10) rewrote FusedInputNorm.forward to
+#       use a broadcast multiply-add (x * weight + bias) instead of F.batch_norm,
+#       removing running_mean/running_var. That commit is included in the target
+#       16cfe728; on those versions FusedInputNorm.forward is used as-is
+#       (multiply-add).
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/50411
+#       https://github.com/vllm-project/vllm/pull/51734
+#    Future Plan:
+#       Remove this patch once vllm-ascend's bundled PyTorch >= 2.13.0
+#       (which, like upstream, allows eps >= 0 for inference).
+#
+# ** 35. File: platform/patch_indexer_kv_dtype.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.config.attention.AttentionConfig.indexer_kv_dtype`
+#      `vllm.config.attention.IndexerKVDType`
+#    Why:
+#       DeepSeek V4 (and similar Ascend sparse-attention models) use an `int8`
+#       indexer K cache. Upstream vLLM types `indexer_kv_dtype` as the Literal
+#       `IndexerKVDType = Literal["bf16", "fp8", "mxfp4", "nvfp4"]`, which rejects
+#       `"int8"` at CLI/config validation with a pydantic `literal_error` -- before
+#       the value reaches `kv_cache_dtype_str_to_dtype`, which already supports
+#       `int8` (maps to `torch.int8` upstream, see `worker/patch_kv_cache_dtype.py`).
+#       So `vllm serve ... --attention_config.indexer_kv_dtype int8` fails to start
+#       even though the Ascend indexer kernels (`vllm_ascend/models/deepseek_v4/`)
+#       expect it.
+#    How：
+#       Widen the accepted `Literal` to include `"int8"` and rebuild the pydantic
+#       dataclass schema in place -- without editing the upstream vllm tree. The
+#       field's Literal is held in three places (the module-level `IndexerKVDType`
+#       symbol, the class `__annotations__`, and the stdlib `__dataclass_fields__`
+#       `.type`); all three are updated, then `pydantic.dataclasses.rebuild_dataclass`
+#       is called with `force=True` to regenerate the validator + core schema. Runs
+#       as a platform patch (in `pre_register_and_update`, after the `--attention-config`
+#       argparse args are registered and before `parse_args`), so the per-call
+#       `TypeAdapter(AttentionConfig)` used to validate the dotted-path argument
+#       picks up the widened Literal. Idempotent: no-ops if `int8` is already present.
+#    Related PR (if no, explain why):
+#       No, Ascend-specific int8 indexer cache support not yet upstream.
+#    Future Plan:
+#       Remove this patch once upstream `IndexerKVDType` includes `"int8"` (or once
+#       the indexer kv dtype is pluggable like the fp8 kv-cache-dtype mechanism).
+#
+# ** 36. File: platform/patch_parallel_config.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.config.parallel.ParallelConfig._validate_parallel_config`
+#    Why:
+#       vLLM v0.29.0 rejects PCP > 1 combined with DP > 1 in its shared
+#       validator, preventing Ascend's PCP+DP implementation from being reached.
+#       Upstream #54523 scopes this restriction to CUDA/ROCm instead; the pinned
+#       main already contains that fix.
+#    How:
+#       Apply only when vllm_version_is("0.29.0"). Preserve the release validator
+#       except for the PCP+DP rejection, without changing parameter values or
+#       bypassing other validation. Update the class method and Pydantic
+#       model-validator registration, then rebuild ParallelConfig,
+#       SpeculativeConfig, and VllmConfig in dependency order. SpeculativeConfig
+#       retains shared ParallelConfig schemas even through SkipValidation;
+#       rebuilding only the outer VllmConfig can restore the stale validator.
+#       Read parallel.current_platform dynamically to preserve the Ascend EPLB
+#       platform proxy installed by platform/patch_eplb.py.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/54523/files
+#       Upstream commit: 7c2f1ff4958eaf0818405e9192c71608fe4a16b1.
+#       Release source: 98dff2a81d747d1dba01a47f939f48c3526d4206.
+#    Future Plan:
+#       Remove this patch and its platform import when v0.29.0 support is dropped
+#       and all supported pins contain #54523 or an equivalent backend-scoped
+#       check. If the supported release pin first receives a backport, remove
+#       it after verifying PCP+DP construction and execution, retained invalid-
+#       config rejection, and Ascend EPLB validation.
 #

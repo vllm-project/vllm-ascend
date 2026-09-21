@@ -203,7 +203,9 @@ Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md
         --gpu-memory-utilization 0.90 \
         --quantization ascend \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-        --additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_balance_scheduling": true, "enable_fused_mc2": 1, "enable_flashcomm1": true}'  \
+        --kv-cache-dtype int8 \
+        --attention_config.indexer_kv_dtype int8 \
+        --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true, "enable_fused_mc2": 1, "enable_flashcomm1": true}'  \
         --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
     ```
 
@@ -259,7 +261,9 @@ Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md
         --enable-prefix-caching \
         --async-scheduling \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-        --additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_balance_scheduling": true, "enable_fused_mc2": 1, "enable_flashcomm1": true}' \
+        --kv-cache-dtype int8 \
+        --attention_config.indexer_kv_dtype int8 \
+        --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true, "enable_fused_mc2": 1, "enable_flashcomm1": true}' \
         --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
     ```
 
@@ -319,7 +323,9 @@ Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md
         --gpu-memory-utilization 0.92 \
         --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-        --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_flashcomm1": true}' \
+        --kv-cache-dtype int8 \
+        --attention_config.indexer_kv_dtype int8 \
+        --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_flashcomm1": true}' \
         --enable-prefix-caching \
         --async-scheduling \
         --api-server-count 1
@@ -379,7 +385,9 @@ Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md
         --gpu-memory-utilization 0.92 \
         --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-        --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true,"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_flashcomm1": true}' \
+        --kv-cache-dtype int8 \
+        --attention_config.indexer_kv_dtype int8 \
+        --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true,"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_flashcomm1": true}' \
         --enable-prefix-caching \
         --async-scheduling
     ```
@@ -427,7 +435,7 @@ curl http://<node0_ip>:<port>/v1/chat/completions \
         "messages":[
             {
                 "role": "user",
-                "content": "Who are you?",
+                "content": "Who are you?"
             }
         ],
         "temperature": 0
@@ -437,7 +445,7 @@ curl http://<node0_ip>:<port>/v1/chat/completions \
 Expected result should be have this:
 
 ```text
-"message":{"role":"assistant","content":"I'm GLM, a large language model developed by Z.ai. I'm designed to understand and generate human-like text based on the conversations we have together. My tvolves processing diverse text data to help answer questions and provide assistance across many topics.\n\nI don't store your personal data, and I'm contiarning to improve my capabilities. Is there something specific I can help you with today?","refusal":null,"annotations":null,"audio":null,"function_call":oning":"Let me analyze this question about my identity. First, I should acknowledge that this is a fundamental question about who and what I am. The key pover are my identity as GLM, a large language model by Z.ai, and my core capabilities. I should explain my primary function of text processing and generate being transparent about my nature as an AI system. It's also important to clarify my role in helping users and my ability to engage with various topics. ention my text processing abilities and learning from diverse datasets, but avoid making claims about consciousness or emotions. The response should be stogically, starting with my basic identity and moving on to my capabilities and purpose. I'll organize this information in a clear, straightforward manner sses the user's query directly."}
+"message":{"role":"assistant","content":"I'm GLM, a large language model developed by Z.ai. I'm designed to understand and generate human-like text based on the conversations we have together. My role involves processing diverse text data to help answer questions and provide assistance across many topics.\n\nI don't store your personal data, and I'm continually learning to improve my capabilities. Is there something specific I can help you with today?","refusal":null,"annotations":null,"audio":null,"function_call":oning":"Let me analyze this question about my identity. First, I should acknowledge that this is a fundamental question about who and what I am. The key aspects are my identity as GLM, a large language model by Z.ai, and my core capabilities. I should explain my primary function of text processing and be transparent about my nature as an AI system. It's also important to clarify my role in helping users and my ability to engage with various topics. Mention my text processing abilities and learning from diverse datasets, but avoid making claims about consciousness or emotions. The response should be structured logically, starting with my basic identity and moving on to my capabilities and purpose. I'll organize this information in a clear, straightforward manner that addresses the user's query directly."}
 ```
 
 ## 7 Accuracy Evaluation

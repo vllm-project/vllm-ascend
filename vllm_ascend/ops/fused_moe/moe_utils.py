@@ -15,9 +15,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import inspect
+from collections.abc import Callable
 from functools import lru_cache
 from importlib import import_module
+from typing import Any
 
+import regex as re
 import torch
 import torch.distributed
 import torch.distributed as dist
@@ -142,6 +146,81 @@ def load_cann_mega_moe_ops():
     get_symm_buffer_for_mega_moe = ops_module.get_symm_buffer_for_mega_moe
     mega_moe = ops_module.mega_moe
     return get_symm_buffer_for_mega_moe, mega_moe
+
+
+def select_mega_moe_activation_kwargs(
+    mega_moe_op: Callable[..., Any],
+    *,
+    activation: object,
+    activation_clamp: float | None,
+    swiglu_alpha: float,
+    swiglu_beta: float,
+) -> dict[str, object]:
+    """Build activation kwargs compatible with the installed MegaMoe wrapper.
+
+    MiniMax-M3 uses SwiGLU-OAI (``alpha=1.702``, ``beta=1.0``). Older MegaMoe
+    builds only expose ``activation_clamp`` for standard SwiGLU, while newer
+    wrappers expose either ``activation``/``activation_params`` or direct
+    alpha/beta keyword arguments. Standard SwiGLU keeps the legacy call.
+    """
+    kwargs: dict[str, object] = {"activation_clamp": activation_clamp}
+    activation_name = getattr(activation, "value", activation)
+    if activation_name not in ("swigluoai", "swigluoai_uninterleave"):
+        return kwargs
+
+    activation_parameter_pairs = (
+        {"activation", "activation_params"},
+        {"glu_alpha", "glu_bias"},
+        {"swiglu_alpha", "swiglu_beta"},
+    )
+    try:
+        parameters = inspect.signature(mega_moe_op).parameters
+        parameter_names = {
+            name
+            for name, parameter in parameters.items()
+            if parameter.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+        }
+        accepts_kwargs = any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
+    except (TypeError, ValueError):
+        parameter_names = set()
+        accepts_kwargs = True
+    if accepts_kwargs and not any(pair.issubset(parameter_names) for pair in activation_parameter_pairs):
+        # Compiled operators and generic **kwargs wrappers may describe their
+        # arguments only in metadata. Prefer an explicit Python activation API;
+        # documentation must not introduce keywords a closed wrapper rejects.
+        signature_metadata = " ".join(
+            str(value)
+            for value in (getattr(mega_moe_op, "__doc__", None), getattr(mega_moe_op, "_schema", None))
+            if value is not None
+        )
+        known_names = {
+            "activation",
+            "activation_params",
+            "glu_alpha",
+            "glu_bias",
+            "swiglu_alpha",
+            "swiglu_beta",
+        }
+        parameter_names.update(name for name in known_names if re.search(rf"\b{re.escape(name)}\b", signature_metadata))
+
+    if {"activation", "activation_params"}.issubset(parameter_names):
+        kwargs.update(
+            activation="swigluoai",
+            activation_params={"alpha": swiglu_alpha, "beta": swiglu_beta},
+        )
+        return kwargs
+    if {"glu_alpha", "glu_bias"}.issubset(parameter_names):
+        kwargs.update(glu_alpha=swiglu_alpha, glu_bias=swiglu_beta)
+        return kwargs
+    if {"swiglu_alpha", "swiglu_beta"}.issubset(parameter_names):
+        kwargs.update(swiglu_alpha=swiglu_alpha, swiglu_beta=swiglu_beta)
+        return kwargs
+
+    raise RuntimeError(
+        "The installed CANN MegaMoe wrapper does not expose SwiGLU-OAI "
+        "activation parameters required by MiniMax-M3. Install a compatible "
+        "cann_ops_transformer build or disable fused MC2."
+    )
 
 
 def _get_cann_mega_moe_quant_settings(quant_type: QuantType) -> tuple[int, int | None, int | None]:

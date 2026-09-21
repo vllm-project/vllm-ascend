@@ -38,7 +38,6 @@ from vllm_ascend.device.hardware_profile import (
     QuantizationBackendFamily,
     get_current_hardware_profile,
 )
-from vllm_ascend.mrv2_utils import apply_v2_model_runner_config_patch
 
 # isort: off
 from vllm_ascend.utils import (
@@ -59,10 +58,12 @@ from vllm_ascend.utils import (
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
     from vllm.utils import FlexibleArgumentParser
+    from vllm_ascend.ascend_config import AscendConfig
 else:
     ModelConfig = None
     VllmConfig = None
     FlexibleArgumentParser = None
+    AscendConfig = None
 
 # Keep Breakable CUDAGraph opt-in on Ascend. Upstream may auto-enable it
 # for selected architectures when the environment variable is absent.
@@ -457,24 +458,9 @@ class NPUPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
-        # NOTE: This still monkey-patches VllmConfig by replacing the
-        # use_v2_model_runner property (the "patch way"). It is kept here
-        # because upstream vLLM does not yet expose a platform hook to
-        # customize the default V2 model runner decision; the whitelist
-        # logic itself lives in vllm_ascend.mrv2_utils.
-        # The upstream V2 validation is also neutralized, since Ascend fully
-        # owns the V2 enablement decision (the platform / Triton gates in
-        # mrv2_utils differ from the upstream validation).
-        # TODO(wxsIcey): Remove this once upstream vLLM allows platforms to
-        # override the default, and contribute the whitelist upstream.
-        apply_v2_model_runner_config_patch()
-
         # Lazy import vllm/vllm-ascend to avoid circular import
-        from vllm_ascend.ascend_forward_context import sync_v2_extra_kwargs
         from vllm_ascend.quantization.utils import maybe_auto_detect_quantization
         from vllm_ascend.logger import configure_ascend_file_logging, configure_ascend_logging
-
-        sync_v2_extra_kwargs(vllm_config)
 
         # 1.Configure logging
         configure_ascend_file_logging()
@@ -495,8 +481,10 @@ class NPUPlatform(Platform):
         _validate_draft_decode_context_parallel_config(vllm_config)
         _validate_parallel_config(vllm_config)
 
-        # 3.Auto detect quantization method
+        # 3.Auto detect quantization method and verify cache dtype
         maybe_auto_detect_quantization(vllm_config)
+        if vllm_config.cache_config.cache_dtype == "fp8" or vllm_config.attention_config.indexer_kv_dtype == "fp8":
+            assert get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
 
         # 4.Make sure the config is compatible with Ascend
         _fix_incompatible_config(vllm_config)
@@ -564,7 +552,6 @@ class NPUPlatform(Platform):
             get_mc2_mask,
             get_mrv2_in_profile_run,
             select_moe_comm_method,
-            sync_v2_extra_kwargs,
         )
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
         from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
@@ -578,7 +565,6 @@ class NPUPlatform(Platform):
 
         if cudagraph_runtime_mode is None:
             cudagraph_runtime_mode = CUDAGraphMode.NONE
-        sync_v2_extra_kwargs(vllm_config)
         # TODO(Ronald1995): model runner v1 still use ascend_forward_context,
         # when v1's forward context is refactored, we can remove this branch.
         # Currently, model runner v2 use the new forward context.
@@ -596,12 +582,7 @@ class NPUPlatform(Platform):
         sinks = False
         in_profile_run = get_mrv2_in_profile_run()
 
-        try:
-            tp_world_size = get_tensor_model_parallel_world_size()
-        except AssertionError:
-            # Kernel / precision tests call set_forward_context without
-            # initializing TP. Keep V1 extras there.
-            return {"dynamic_mx_quant_scale_alg": dynamic_mx_quant_scale_alg}
+        tp_world_size = get_tensor_model_parallel_world_size()
 
         # NOTE: This cannot be set using set_forward_context
         # due to multiple warmups before actual capturing.
@@ -1075,7 +1056,7 @@ def _validate_kv_load_failure_policy(vllm_config: VllmConfig) -> None:
             raise AssertionError("Hybrid models do not support recompute mode kv load failure policy now.")
 
 
-def _update_compilation_modes(vllm_config: VllmConfig, ascend_config) -> None:
+def _update_compilation_modes(vllm_config: VllmConfig, ascend_config: AscendConfig) -> None:
     """Update compilation / cudagraph modes.
 
     Syncs the Ascend compilation config into additional_config, then derives
@@ -1100,16 +1081,27 @@ def _update_compilation_modes(vllm_config: VllmConfig, ascend_config) -> None:
             else ascend_compilation_config
         )
 
-    if model_config and hasattr(model_config.hf_text_config, "index_topk"):
-        from vllm_ascend.attention.dsa_attn_kv_plan import resolve_dsv4_cache_dtype
-
-        vllm_config.cache_config.cache_dtype = resolve_dsv4_cache_dtype(
-            vllm_config.cache_config.cache_dtype,
-            str(model_config.dtype).replace("torch.", ""),
-        )
-
     # Update compilation mode in some cases
-    enforce_eager = getattr(model_config, "enforce_eager", False)
+    enforce_eager: bool = getattr(model_config, "enforce_eager", False)
+
+    # Update cudagraph_mode in some cases (read ascend_config.xlite_graph_config)
+    if (xlite_config := ascend_config.xlite_graph_config).enabled:
+        spec_config = vllm_config.speculative_config
+        mixed_mode = CUDAGraphMode.NONE if xlite_config.full_mode else compilation_config.cudagraph_mode.mixed_mode()
+        decode_mode = CUDAGraphMode.NONE if spec_config is None else compilation_config.cudagraph_mode.decode_mode()
+        if not decode_mode or mixed_mode == decode_mode:
+            compilation_config.cudagraph_mode = cudagraph_mode = mixed_mode
+        else:
+            compilation_config.cudagraph_mode = cudagraph_mode = CUDAGraphMode((decode_mode.value, mixed_mode.value))
+        if spec_config and spec_config.enforce_eager is None and cudagraph_mode:
+            spec_config.enforce_eager = enforce_eager
+        enforce_eager = enforce_eager or not cudagraph_mode or xlite_config.full_mode or not cudagraph_mode.mixed_mode()
+        model_config.enforce_eager = enforce_eager
+        logger.info(
+            "Xlite graph enabled; falling back `compilation_config.cudagraph_mode` to %s (enforce_eager: %s)",
+            compilation_config.cudagraph_mode,
+            enforce_eager,
+        )
 
     if enforce_eager:
         logger.info("Compilation disabled, using eager mode by default")
@@ -1123,18 +1115,6 @@ def _update_compilation_modes(vllm_config: VllmConfig, ascend_config) -> None:
             compilation_config.mode,
         )
         compilation_config.mode = CompilationMode.NONE
-
-    # Update cudagraph_mode in some cases (read ascend_config.xlite_graph_config)
-    xlite_graph_config = ascend_config.xlite_graph_config
-    if xlite_graph_config.enabled:
-        if xlite_graph_config.full_mode and vllm_config.speculative_config is None:
-            logger.info("ACLGraph has been disabled when speculation is disabled in xlite full mode")
-            enforce_eager = True
-            model_config.enforce_eager = True
-            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-        else:
-            logger.info("Falling back to FULL_DECODE_ONLY under xlite decode-only mode")
-            compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
 
     # Encoder-decoder models currently only support PIECEWISE mode
     # TODO(Jian Li): Confirm this behavior and explain why
@@ -1567,9 +1547,14 @@ def _validate_parallel_config(vllm_config: VllmConfig) -> None:
                 f"is pcp_size({pcp_size}) or tp_size({parallel_config.tensor_parallel_size}) "
                 f"* pcp_size({pcp_size}) ({full_dcp_size})."
             )
-        if not get_current_hardware_profile().supports(HardwareCapability.SFA_DCP_REPLICATED_INDEXER):
+        # A5 supports non-C8 SFA DCP, but its SFA C8 operator does not yet
+        # support DCP with a replicated indexer. Reject that combination early.
+        if vllm_config.additional_config.get("enable_sparse_sfa_c8", False) and not (
+            get_current_hardware_profile().supports(HardwareCapability.SFA_C8_DCP_REPLICATED_INDEXER)
+        ):
             raise NotImplementedError(
-                "SFA DCP with replicated indexer is not supported by the current hardware profile."
+                "SFA C8 DCP with replicated indexer is not supported by the current hardware profile. "
+                "Disable enable_sparse_sfa_c8 to use non-C8 SFA DCP."
             )
 
 

@@ -17,9 +17,12 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
 # isort: skip_file
 from contextlib import AbstractContextManager, contextmanager
+from typing import Any
 
+import torch
 import torch.nn as nn
-from vllm.config import CUDAGraphMode
+from vllm.logger import logger
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 from vllm_ascend.xlite.xlite import XliteWrapper
@@ -35,6 +38,13 @@ class XliteModelRunner(NPUModelRunner):
     _runner_enabled: bool = False
     """If :data:`runner_model` is the current model forward backend; otherwise, :data:`fallback_model`."""
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        assert get_ascend_config().xlite_graph_config.enabled, "xlite graph must be enabled to use XliteModelRunner"
+        super().__init__(*args, **kwargs)
+
+        if self.enable_sparse_sfa_c8 or self.enable_sparse_li_c8:
+            logger.error("xlite does not currently support Sparse SFA/LI C8.")
+
     def get_model(self) -> nn.Module:
         """Returns the unwrapper fallback model. See :meth:`NPUModelRunner.get_model` for details."""
         with self._bypass_xlite_wrapper():
@@ -49,7 +59,11 @@ class XliteModelRunner(NPUModelRunner):
 
     @contextmanager
     def _bypass_xlite_wrapper(self):
-        """Temporarily route ``self.model`` to the native runnable."""
+        """Temporarily route ``self.model`` to the native runnable.
+
+        Profile runs and dummy runs (including ``execute_dummy_batch`` and cudagraph capture warmups) should not enter
+        the xlite forward path.
+        """
         if not self.runner_enabled:
             yield
             return
@@ -60,31 +74,45 @@ class XliteModelRunner(NPUModelRunner):
         finally:
             self.model = self.runner_model  # type: ignore[assignment]
 
+    def _dummy_run(
+        self, *args: Any, is_profile: bool = False, is_graph_capturing: bool = False, **kwargs: Any
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Route dummy/profile runs to the native runnable, bypassing the xlite wrapper.
+
+        See :meth:`_bypass_xlite_wrapper` for why dummy runs must not trigger the xlite forward. Delegates every
+        argument to the base implementation unchanged.
+        """
+        if not is_profile and not is_graph_capturing:
+            # DP `excute_dummy_batch` must be routed to xlite forward path to avoid out of sync issues
+            return super()._dummy_run(*args, is_profile=is_profile, is_graph_capturing=is_graph_capturing, **kwargs)  # type: ignore[return-value]
+
+        with self._bypass_xlite_wrapper():
+            return super()._dummy_run(*args, is_profile=is_profile, is_graph_capturing=is_graph_capturing, **kwargs)  # type: ignore[return-value]
+
     def initialize_kv_cache(
-        self,
-        kv_cache_config: KVCacheConfig,
-        kv_cache_allocation_context: AbstractContextManager | None = None,
+        self, kv_cache_config: KVCacheConfig, kv_cache_allocation_context: AbstractContextManager | None = None
     ) -> None:
-        super().initialize_kv_cache(
-            kv_cache_config,
-            kv_cache_allocation_context=kv_cache_allocation_context,
-        )
+        super().initialize_kv_cache(kv_cache_config, kv_cache_allocation_context=kv_cache_allocation_context)
         self.runner_model.register_kv_caches(self.kv_caches)  # type: ignore[arg-type]
 
+        # check attention metadata backend compatibility
+        ascend_metadata_builder = self.attn_groups[0][-1].get_metadata_builder(0)
+        ascend_metadata_cls = getattr(ascend_metadata_builder, "metadata_cls", ascend_metadata_builder)
+        xlite_expects = self.runner_model.adapter_xlite_model._attn_metadata_type
+        if ascend_metadata_cls != xlite_expects and (
+            not isinstance(xlite_expects, tuple) or ascend_metadata_cls not in xlite_expects
+        ):
+            logger.error(
+                "Attention metadata mismatch: xlite expects (one of) %s, but got %s. Be aware of runtime issues.",
+                xlite_expects,
+                ascend_metadata_cls,
+            )
+
     def _should_build_dummy_attn_metadata(
-        self,
-        force_attention: bool = False,
-        is_profile: bool = False,
-        cudagraph_runtime_mode: CUDAGraphMode | None = None,
+        self, force_attention: bool = False, is_profile: bool = False, *args: Any, **kwargs: Any
     ) -> bool:
-        """
-        Override to build attention metadata during dummy_run when xlite is enable.
-        For xlite, we need to build metadata during DP dummy_run to ensure all ranks
-        have consistent metadata, even when some ranks have no requests.
-        """
-        base_condition = super()._should_build_dummy_attn_metadata(force_attention, is_profile, cudagraph_runtime_mode)
-        xlite_condition = self.ascend_config.xlite_graph_config.enabled and not is_profile
-        return base_condition or xlite_condition
+        base_condition = super()._should_build_dummy_attn_metadata(force_attention, is_profile, *args, **kwargs)
+        return base_condition or (self.runner_enabled and not is_profile)
 
     @property
     def model(self) -> nn.Module:
