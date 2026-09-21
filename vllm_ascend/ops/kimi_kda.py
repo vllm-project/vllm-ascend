@@ -315,6 +315,10 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
         cache_indices = cache_indices.clamp_min(0).contiguous()
 
         if run_mode == 0:
+            # A5 skips the generic custom-op loader. Register this branch's
+            # extension lazily, after the worker has selected its NPU device.
+            import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
+
             has_initial_state = getattr(metadata, "initial_state_mode", None)
             if has_initial_state is None:
                 has_initial_state = torch.zeros(
@@ -323,15 +327,26 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
                     device=mixed_qkv.device,
                 )
             has_initial_state = has_initial_state.to(dtype=torch.int32).contiguous()
-            return torch.ops.cann_ops_transformer.causal_conv1d_fn(
-                x=mixed_qkv,
-                conv_states=conv_state,
-                cache_indices=cache_indices,
-                weight=conv_weights_t,
-                bias=None,
-                query_start_loc=metadata.query_start_loc,
-                has_initial_state=has_initial_state,
+            # Use the same single-output ACLNN binding as GDN, paired with
+            # this branch's CausalConv1d OpDef and kernels. Keep packed request
+            # boundaries and the in-place history update for chunked prefill.
+            output = torch.zeros_like(mixed_qkv)
+            torch.ops._C_ascend.npu_causal_conv1d_custom(
+                output,
+                mixed_qkv,
+                conv_weights_t,
+                conv_state=conv_state,
+                bias_opt=None,
+                query_start_loc_opt=metadata.query_start_loc,
+                cache_indices_opt=cache_indices,
+                initial_state_mode_opt=has_initial_state,
+                num_accepted_tokens_opt=None,
+                activation_mode=1,
+                # Kimi normalizes invalid cache indices to the null block.
+                pad_slot_id=0,
+                run_mode=0,
             )
+            return output
         if run_mode == 1:
             if num_accepted_tokens is None:
                 # CANN's non-speculative update contract requires fixed-batch
