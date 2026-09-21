@@ -62,6 +62,8 @@ constexpr int32_t ACT_RED_CHUNK = 1024;   // ReduceMax chunk width
 constexpr int32_t SCALE_SUB = 256;        // fp32 outputs per de-interleave chunk
 constexpr uint16_t FLAG_WAVE_READY = 8;   // AIC -> AIV (PIPE_FIX): wave-batch tiles in GM
 constexpr int32_t SYNC_THROTTLE = 14;     // max unconsumed cross-core sets
+constexpr int32_t XS_MAX_CHUNK = 2048;    // x_scale floats per on-demand chunk (8 KiB
+                                           // UB), independent of capacity C
 constexpr int32_t P54_SMALL_M = 64;       // P54 header-opt: mValid <= 64 collapses the
                                            // per-wave cross-core handshake into ONE sync
 
@@ -488,9 +490,11 @@ public:
                                 int32_t kNum, int32_t nNum, int32_t NP, int32_t N, int32_t N2,
                                 int32_t K, int32_t C, float beta, float invBeta,
                                 int32_t hasLinear, float linBeta, float invLinBeta,
-                                int32_t nBlock, TPipe *pipe, int32_t skipUnpack)
+                                int32_t nBlock, TPipe *pipe, int32_t skipUnpack,
+                                int32_t nzInput)
     {
         skipUnpack_ = skipUnpack;
+        nzInput_ = nzInput;
         E_ = E;
         kNum_ = kNum;
         nNum_ = nNum;
@@ -498,7 +502,10 @@ public:
         N_ = N;
         N2_ = N2;
         K_ = K;
-        M_ = C;  // xs buffer sized to capacity C (M_valid parsed on-device <= C)
+        // x_scale is loaded in on-demand chunks (see LoadXsChunk): the UB
+        // footprint no longer scales with the input capacity C, which used to
+        // overflow the AIV UB (507015) for profile-sized C (>= ~18K rows).
+        (void)C;
         beta_ = beta;
         invBeta2_ = 2.0f * invBeta;
         hasLinear_ = hasLinear;
@@ -527,7 +534,7 @@ public:
         uint32_t rowH16 = (uint32_t)(N2 * sizeof(half));
         pipe->InitBuffer(accGQueue_, 1, rowH16);
         pipe->InitBuffer(accUQueue_, 1, rowH16);
-        pipe->InitBuffer(xsQueue_, 1, (uint32_t)(M_ * sizeof(float)));
+        pipe->InitBuffer(xsQueue_, 1, XS_MAX_CHUNK * sizeof(float));
         pipe->InitBuffer(gBuf_, rowF32);
         pipe->InitBuffer(uBuf_, rowF32);
         pipe->InitBuffer(tBuf_, rowF32);
@@ -564,6 +571,10 @@ private:
     // sub-blocks of a block split the K rows via subIdx.
     __aicore__ inline void CacheFillUnpackAll(int32_t coreIdx, int32_t subIdx, int32_t cores)
     {
+        if (nzInput_) {
+            CacheFillUnpackAllNz(coreIdx, subIdx, cores);
+            return;
+        }
         int32_t totalStrips = E_ * nNum_;
         for (int32_t idx = coreIdx; idx < totalStrips; idx += cores) {
             int32_t e = idx / nNum_;
@@ -574,6 +585,78 @@ private:
                 UnpackTile(e, bn, bk, subIdx);
             }
         }
+    }
+
+    // Native int4 FRACTAL_NZ input: the int32 carrier views an int8 packed-NZ
+    // storage whose logical matrix is [K, N/2] (two INT4 per byte on the output
+    // axis, W4A8 process_weights convention: transpose -> maybe_trans_nz ->
+    // view(int32)). Unpack consumes the native INT8-NZ geometry directly — the
+    // same block tiling as the w8 cache, so each input [16,32] byte block maps
+    // to two aligned [16,32] output blocks and no byte is ever transposed.
+    __aicore__ inline void CacheFillUnpackAllNz(int32_t coreIdx, int32_t subIdx, int32_t cores)
+    {
+        int32_t npb = NP_ * 4;      // packed bytes per row (two INT4 per byte)
+        int32_t nBlk = npb / 32;    // input N-blocks of 32 bytes (N % 256 == 0 gate)
+        int32_t totalStrips = E_ * nNum_;
+        for (int32_t idx = coreIdx; idx < totalStrips; idx += cores) {
+            int32_t e = idx / nNum_;
+            int32_t bn = idx % nNum_;
+            packedGM8_.SetGlobalBuffer(
+                reinterpret_cast<__gm__ int8_t *>(ReadGmPtr(ptrTblGM_, e)));
+            for (int32_t bk = 0; bk < kNum_; bk++) {
+                int32_t row0 = bk * UNPACK_BK + subIdx * UNPACK_SUB_K;
+                for (int32_t jb = 0; jb < 4; jb++) {
+                    // strip covers 256 logical N = 128 packed bytes = 4 blocks;
+                    // each (bk, subIdx) spans 32 rows = two 16-row NZ blocks
+                    for (int32_t kb = 0; kb < 2; kb++) {
+                        UnpackBlockNz(e, row0 + kb * 16, bn * 4 + jb, nBlk);
+                    }
+                }
+            }
+        }
+    }
+
+    // One input block: int8 FRACTAL_NZ [16, 32] packed bytes at
+    //   inOff = ((k/16)*(npb/32) + j/32)*512 + (k%16)*32 + (j%32)
+    // -> nibble-expand to logical int8 [16, 64]
+    // -> two [16, 32] halves into the w8 NZ cache at
+    //   w8Off = ((k/16)*(N/32) + (2*j + h)/32)*512 + (k%16)*32 + (n%32)
+    // Both offsets are 512 B block-aligned; the two nibbles of byte j land on
+    // logical n = 2*j (low) and 2*j + 1 (high), matching the W4A8 packer.
+    __aicore__ inline void UnpackBlockNz(int32_t e, int32_t row0, int32_t jb, int32_t nBlk)
+    {
+        // Input addressing: torch_npu standard interleaved FRACTAL_NZ,
+        //   block(jb, kb16) base = (kb16 * nBlk + jb) * 512.
+        // NOTE this is NOT the w8 workspace convention below (the unpacked w8
+        // cache is N-block-major, matching the GEMM B operand).
+        int32_t kb16 = row0 / 16;
+        int64_t inOff = (static_cast<int64_t>(kb16) * nBlk + jb) * 512;
+        LocalTensor<int8_t> in8 = inQueue_.AllocTensor<int8_t>();
+        AscendC::DataCopy(in8, packedGM8_[inOff], 512);
+        inQueue_.EnQue(in8);
+        LocalTensor<int8_t> in8l = inQueue_.DeQue<int8_t>();
+        LocalTensor<half> h16 = upkH16Buf_.Get<half>();
+        LocalTensor<int8_t> out8 = outQueue_.AllocTensor<int8_t>();
+        AscendC::Cast(h16, in8l.ReinterpretCast<AscendC::int4b_t>(),
+                      AscendC::RoundMode::CAST_NONE, 1024);
+        AscendC::PipeBarrier<PIPE_V>();
+        AscendC::Cast(out8, h16, AscendC::RoundMode::CAST_NONE, 1024);
+        inQueue_.FreeTensor(in8l);
+        outQueue_.EnQue(out8);
+        LocalTensor<int8_t> out8l = outQueue_.DeQue<int8_t>();
+        // Direct per-run GM stores: each [16, 32] half is 16 contiguous 32 B
+        // runs at w8Off + r*32 (no UB->UB staging buffer in between). The
+        // expert base eBase keeps every expert inside its own cache slice
+        // (same contract as UnpackTile).
+        int64_t eBase = (int64_t)e * K_ * N_;
+        for (int32_t h = 0; h < 2; h++) {
+            int64_t w8Off =
+                eBase + static_cast<int64_t>(jb * 2 + h) * (K_ * 32) + kb16 * 512;
+            for (int32_t r = 0; r < 16; r++) {
+                AscendC::DataCopy(w8GM_[w8Off + r * 32], out8l[r * 64 + h * 32], 32);
+            }
+        }
+        outQueue_.FreeTensor(out8l);
     }
 
     // One unpack tile: 32 rows x 32 int32 carriers -> 32 x 256 int8, written
@@ -626,16 +709,27 @@ private:
     }
 
     // Phase 2: wave-driven fused act+quant.
+    // On-demand x_scale chunk: load x_scale[g0 : g0+len) into the fixed 8 KiB
+    // chunk buffer. Total MTE2 bytes = M_valid * 4 (padding rows are never read,
+    // versus the old full-capacity C * 4 copy on every AIV slot).
+    __aicore__ inline LocalTensor<float> LoadXsChunk(int32_t g0, int32_t len)
+    {
+        LocalTensor<float> xs = xsQueue_.AllocTensor<float>();
+        DataCopyExtParams xcp{1, (uint32_t)(len * sizeof(float)), 0, 0, 0};
+        DataCopyPadExtParams<float> xpp{false, 0, 0, 0};
+        AscendC::DataCopyPad(xs, xsGM_[(int64_t)g0], xcp, xpp);
+        xsQueue_.EnQue(xs);
+        return xsQueue_.DeQue<float>();
+    }
+
+    __aicore__ inline void FreeXsChunk(LocalTensor<float> &xs)
+    {
+        xsQueue_.FreeTensor(xs);
+    }
+
     __aicore__ inline void ActPhase(int32_t slot, int32_t slots, int32_t cores,
                                     int32_t totalWaves)
     {
-        LocalTensor<float> xs = xsQueue_.AllocTensor<float>();
-        DataCopyExtParams xcp{1, (uint32_t)(M_ * sizeof(float)), 0, 0, 0};
-        DataCopyPadExtParams<float> xpp{false, 0, 0, 0};
-        AscendC::DataCopyPad(xs, xsGM_[0], xcp, xpp);
-        xsQueue_.EnQue(xs);
-        LocalTensor<float> xsl = xsQueue_.DeQue<float>();
-
         g_ = gBuf_.Get<float>();
         u_ = uBuf_.Get<float>();
         t_ = tBuf_.Get<float>();
@@ -670,37 +764,49 @@ private:
             }
             int32_t rbDone = completed / nBlockNum_;
             if (globalStripe) {
-                ActPhaseGlobal(slot, slots, xsl, mValid);
+                ActPhaseGlobal(slot, slots, mValid);
             } else {
                 for (int32_t rb = prevRB; rb < rbDone; rb++) {
-                    ActRowBlock(rb, slot, slots, xsl);
+                    ActRowBlock(rb, slot, slots);
                 }
             }
             prevRB = rbDone;
         }
-
-        xsQueue_.FreeTensor(xsl);
     }
 
     // Act+quant ALL real rows in one global stripe (single-sync path). For a
     // tiny M each expert has 1-2 rows, so the per-row-block stripe would
     // serialize ~E blocks; this spreads the MValid real rows across all slots.
-    // accRow mapping is IDENTICAL to ActRowBlock: accRow = PadOff(e) + (g-Start(e)).
-    __aicore__ inline void ActPhaseGlobal(int32_t slot, int32_t slots,
-                                          const LocalTensor<float> &xsl,
-                                          int32_t mValid)
+    // Chunk-cyclic order (each slot owns contiguous row chunks) keeps the
+    // on-demand x_scale load at one small copy per chunk instead of one copy
+    // per row, and keeps the load balance identical to the old slot-strided
+    // order. accRow mapping is IDENTICAL to ActRowBlock:
+    // accRow = PadOff(e) + (g-Start(e)).
+    __aicore__ inline void ActPhaseGlobal(int32_t slot, int32_t slots, int32_t mValid)
     {
-        for (int32_t g = slot; g < mValid; g += slots) {
-            int32_t e = meta_.FindExpertReal(g);
-            int32_t lr = g - meta_.Start(e);
-            int32_t accRow = meta_.PadOff(e) + lr;
-            ActRow(accRow, g, xsl.GetValue(g));
+        int32_t chunk = (mValid + slots - 1) / slots;
+        if (chunk > XS_MAX_CHUNK) {
+            chunk = XS_MAX_CHUNK;
+        }
+        if (chunk < 1) {
+            chunk = 1;
+        }
+        for (int32_t g0 = slot * chunk; g0 < mValid; g0 += slots * chunk) {
+            int32_t len = mValid - g0 < chunk ? mValid - g0 : chunk;
+            LocalTensor<float> xs = LoadXsChunk(g0, len);
+            for (int32_t g = g0; g < g0 + len; g++) {
+                int32_t e = meta_.FindExpertReal(g);
+                int32_t lr = g - meta_.Start(e);
+                int32_t accRow = meta_.PadOff(e) + lr;
+                ActRow(accRow, g, xs.GetValue(g - g0));
+            }
+            FreeXsChunk(xs);
         }
     }
 
     // Act+quant all real rows of padded row-block rb (striped over slots).
-    __aicore__ inline void ActRowBlock(int32_t rb, int32_t slot, int32_t slots,
-                                       const LocalTensor<float> &xsl)
+    // x_scale for the block (<= BM rows) is loaded on demand once per block.
+    __aicore__ inline void ActRowBlock(int32_t rb, int32_t slot, int32_t slots)
     {
         int32_t rowW = rb * BM;
         int32_t e = meta_.FindExpert(rowW);
@@ -709,13 +815,15 @@ private:
         if (valid > BM) {
             valid = BM;
         }
-        if (valid <= 0) {
+        if (valid <= 0 || slot >= valid) {
             return;
         }
         int32_t outRow0 = meta_.Start(e) + lr0;
+        LocalTensor<float> xs = LoadXsChunk(outRow0, valid);
         for (int32_t r = slot; r < valid; r += slots) {
-            ActRow(rowW + r, outRow0 + r, xsl.GetValue(outRow0 + r));
+            ActRow(rowW + r, outRow0 + r, xs.GetValue(r));
         }
+        FreeXsChunk(xs);
     }
 
     // Per-row act+quant. The channel scale (sgl/sul) is now applied in the AIC
@@ -814,6 +922,7 @@ private:
     GlobalTensor<int32_t> ptrTblGM_;
     GlobalTensor<int32_t> scPtrTblGM_;
     GlobalTensor<int32_t> packedGM_;
+    GlobalTensor<int8_t> packedGM8_;
     GlobalTensor<int8_t> w8GM_;
     GlobalTensor<half> accGM_;
     GlobalTensor<float> xsGM_;
@@ -844,6 +953,7 @@ private:
     LocalTensor<float> chunkMax_;
     int32_t E_;
     int32_t skipUnpack_;
+    int32_t nzInput_;
     int32_t kNum_;
     int32_t nNum_;
     int32_t nBlock_;
@@ -853,7 +963,6 @@ private:
     int32_t N_;
     int32_t N2_;
     int32_t K_;
-    int32_t M_;
     float beta_;
     float invBeta2_;
     int32_t hasLinear_;
@@ -876,7 +985,8 @@ extern "C" __global__ __aicore__ void gmsq_fused_256(GM_ADDR x, GM_ADDR wPtrTbl,
                                                       int32_t N, int32_t N2, int32_t K, int32_t C,
                                                       int32_t glType, float beta, float invBeta,
                                                       int32_t hasLinear, float linBeta,
-                                                      float invLinBeta, int32_t skipUnpack)
+                                                      float invLinBeta, int32_t skipUnpack,
+                                                      int32_t nzInput)
 {
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
     GlobalTensor<int64_t> glGM;
@@ -893,27 +1003,29 @@ extern "C" __global__ __aicore__ void gmsq_fused_256(GM_ADDR x, GM_ADDR wPtrTbl,
         GmsqFusedAivKernel256 kernel;
         kernel.Init(wPtrTbl, scPtrTbl, w8, acc, scaleF32, xScale, y, yScale, glGM, E, glType,
                     kNum, nNum, NP, N, N2, K, C, beta, invBeta, hasLinear, linBeta, invLinBeta,
-                    nBlock, &pipe, skipUnpack);
+                    nBlock, &pipe, skipUnpack, nzInput);
         kernel.Process();
     }
 }
 
 
-namespace vllm_ascend {
+
 // Host-side launcher exported to the vllm_ascend_C extension (bgmv/sgmv
 // style): this ccec-compiled TU owns the kernel entry, so the tripple-chevron
 // launch is resolved inside libvllm_ascend_kernels and only this symbol is
 // linked out to the host extension.
+namespace vllm_ascend {
+
 void gmsq_fused_256_impl(uint32_t blockDim, void *stream, void *x, void *wPtrTbl, void *scPtrTbl,
                           void *w8, void *acc, void *scaleF32, void *xScale, void *y, void *yScale,
                           void *groupList, int32_t E, int32_t kNum, int32_t nNum, int32_t nBlock,
                           int32_t NP, int32_t N, int32_t N2, int32_t K, int32_t C, int32_t glType,
                           float beta, float invBeta, int32_t hasLinear, float linBeta,
-                          float invLinBeta, int32_t skipUnpack)
+                          float invLinBeta, int32_t skipUnpack, int32_t nzInput)
 {
     gmsq_fused_256<<<blockDim, nullptr, stream>>>(x, wPtrTbl, scPtrTbl, w8, acc, scaleF32, xScale,
                                                    y, yScale, groupList, E, kNum, nNum, nBlock, NP,
                                                    N, N2, K, C, glType, beta, invBeta, hasLinear,
-                                                   linBeta, invLinBeta, skipUnpack);
+                                                   linBeta, invLinBeta, skipUnpack, nzInput);
 }
 }  // namespace vllm_ascend
