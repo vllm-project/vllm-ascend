@@ -417,6 +417,14 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, Support
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        draft_head_params: set[str] = set()
+        head_params = {
+            "model.embed_tokens.weight",
+            "lm_head.weight",
+            "model.hc_head_fn",
+            "model.hc_head_base",
+            "model.hc_head_scale",
+        }
 
         tp_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
@@ -425,6 +433,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, Support
         head_end = n_local_head * (tp_rank + 1)
 
         for name, loaded_weight in weights:
+            is_draft_weight = name.startswith("mtp.")
             if name == "embed.weight" and not self.rotation_path:
                 name = "model.embed_tokens.weight"
             elif name == "head.weight" and not self.rotation_path:
@@ -436,6 +445,15 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, Support
                 if mapped_name is None:
                     continue
                 name = mapped_name
+
+            # Main-model heads are fallbacks only. Concurrent shard loading can
+            # yield either namespace first; an MTP head must always win without
+            # buffering the checkpoint or depending on shard completion order.
+            if name in head_params:
+                if is_draft_weight:
+                    draft_head_params.add(name)
+                elif name in draft_head_params:
+                    continue
 
             # Detect whether the checkpoint ships its own embed_tokens / lm_head
             # for the draft model.
