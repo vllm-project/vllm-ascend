@@ -267,14 +267,26 @@ run_tests_with_log() {
             done
         fi
         if [ ! -f "${LOG_PREFIX}/aop_done" ]; then
-            local coord="${COORD_DIR:-/root/.cache/nightly_bisect/coord}"
+            # Per-run coordination dir under LOG_PREFIX (unique per LWS instance).
+            # The historical fixed default (/root/.cache/nightly_bisect/coord)
+            # lives on the shared PVC, so a leftover or concurrent run's state
+            # there would corrupt this run's barrier protocol.
+            local coord="${COORD_DIR:-${LOG_PREFIX}/nightly_bisect_coord}"
             local release="${LOG_PREFIX}/aop_done"
-            mkdir -p "$coord"
-            touch "${coord}/worker_ready_${LWS_WORKER_INDEX}"
-            echo "Worker: signalling ready at ${coord}/worker_ready_${LWS_WORKER_INDEX}"
+            mkdir -p "$coord" "$LOG_PREFIX"
+            # Per-run ready marker under LOG_PREFIX (unique per LWS instance).
+            # The coord dir persists across runs on the shared PVC, so a marker
+            # there could be stale from a previous run and falsely satisfy the
+            # leader's join gate.
+            touch "${LOG_PREFIX}/worker_ready_${LWS_WORKER_INDEX}"
+            echo "Worker: signalling ready at ${LOG_PREFIX}/worker_ready_${LWS_WORKER_INDEX}"
             echo "Worker: joining bisect as worker node (index ${LWS_WORKER_INDEX})..."
             cd "$WORKSPACE/vllm-ascend"
             build_bisect_extra_args
+            # Guard the agent: under `set -e` an uncaught crash would take the
+            # whole pod down silently; instead capture the exit code and keep
+            # the logs collectable.
+            local worker_bisect_rc=0
             python -m tools.bisect.auto_bisect \
                 --scene multi_node \
                 --config-yaml "${CONFIG_YAML_PATH}" \
@@ -282,9 +294,19 @@ run_tests_with_log() {
                 --soc "$BISECT_SOC" \
                 --coord-dir "${coord}" \
                 --release-file "${release}" \
-                "${BISECT_EXTRA_ARGS[@]}"
-            while [ ! -f "$release" ]; do sleep 5; done
-            echo "Worker: release signal received, exiting"
+                "${BISECT_EXTRA_ARGS[@]}" || worker_bisect_rc=$?
+            echo "Worker: bisect agent exited (rc=${worker_bisect_rc})"
+            if [ "$worker_bisect_rc" -eq 0 ]; then
+                # Clean exit (DONE received): wait for the leader's release
+                # signal, which appears when its AOP pipeline finishes.
+                while [ ! -f "$release" ]; do sleep 5; done
+                echo "Worker: release signal received, exiting"
+            else
+                # Crashed agent: nothing left to do here -- exit immediately so
+                # the failure stays visible instead of holding the pod (and its
+                # NPUs) in an endless release wait.
+                echo "Worker: bisect agent failed; exiting without waiting for the release signal"
+            fi
             exit 1
         else
             echo "Worker: leader finished successfully, exiting"
@@ -449,20 +471,28 @@ aop_pipeline() {
     echo "  Config      : ${CONFIG_YAML_PATH}"
     echo "  Bad commit  : HEAD"
     echo "  Name        : ${case_name}"
-    local coord="${COORD_DIR:-/root/.cache/nightly_bisect/coord}"
+    # Per-run coordination dir under LOG_PREFIX (see the worker branch above).
+    local coord="${COORD_DIR:-${LOG_PREFIX}/nightly_bisect_coord}"
     echo "  Coord dir   : ${coord}"
 
-    # Wait for all workers to signal ready
+    # Wait for workers to signal ready. The markers live under LOG_PREFIX
+    # (unique per run), NOT in the persistent coord dir: a leftover marker
+    # from a previous run would satisfy this gate instantly and the bisect
+    # would start while this run's worker has not joined (or never will).
     echo "  Waiting for workers..."
+    local ready_count
     for i in $(seq 1 30); do
-        local ready_count=0
-        for f in "${coord}"/worker_ready_*; do
+        ready_count=0
+        for f in "${LOG_PREFIX}"/worker_ready_*; do
             [ -e "$f" ] && ready_count=$((ready_count + 1))
         done
         echo "    [${i}/30] ready workers: ${ready_count}"
         if [ "$ready_count" -ge 1 ]; then break; fi
         sleep 2
     done
+    if [ "$ready_count" -lt 1 ]; then
+        echo "  WARNING: no worker signalled ready within 60s; the bisect master will abort if none joins"
+    fi
 
     cd "$WORKSPACE/vllm-ascend"
     local bisect_rc=0
