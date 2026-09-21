@@ -477,7 +477,6 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         full_gather_o_proj_enabled,
     ):
         assert k_pe is not None and k_nope is not None
-        async_op = full_gather_o_proj_enabled
         handles: list[torch.distributed.Work] = []
         if self.enable_sparse_sfa_c8:
             assert knope_scale is not None
@@ -491,7 +490,10 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
             # before the cache write, k_li no longer joins this fused gather:
             # the indexer backend gathers it separately.
             parts = [k_pe.view(-1, k_pe.shape[-1]), k_nope.view(-1, k_nope.shape[-1])]
-        fused_kv, handle = all_gather_async(torch.cat(parts, dim=1), get_tp_group(), async_op=async_op)
+        # _store_parallel_kv waits after the local Q projection. Always issue
+        # this gather asynchronously so that Q work can hide its latency,
+        # including the path that keeps sharded o_proj weights.
+        fused_kv, handle = all_gather_async(torch.cat(parts, dim=1), get_tp_group(), async_op=True)
         if handle is not None:
             handles.append(handle)
         return fused_kv, handles
