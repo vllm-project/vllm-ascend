@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib.util
 import os
 
 import vllm_ascend.patch.platform.patch_deepseek_v4_vision  # noqa
@@ -48,7 +49,12 @@ import vllm_ascend.patch.platform.patch_speculative_config  # noqa
 import vllm_ascend.patch.platform.patch_eplb  # noqa
 import vllm_ascend.patch.platform.patch_fused_moe  # noqa
 import vllm_ascend.patch.platform.patch_dp_device_ids  # noqa
-import vllm_ascend.patch.platform.patch_engram_config  # noqa
+import vllm_ascend.patch.platform.patch_deepseek_v41_compat  # noqa
+
+if importlib.util.find_spec("vllm.config.engram") is None:
+    import vllm_ascend.patch.platform.patch_engram_config_v029  # noqa
+else:
+    import vllm_ascend.patch.platform.patch_engram_config  # noqa
 import vllm_ascend.patch.platform.patch_glm5next_config  # noqa
 import vllm_ascend.patch.platform.patch_indexer_kv_dtype  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_dtype  # noqa

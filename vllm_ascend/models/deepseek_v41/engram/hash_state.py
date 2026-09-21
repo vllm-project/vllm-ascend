@@ -17,7 +17,7 @@ launch is split into request search and hashing for the Ascend compiler.
 """
 
 import torch
-from vllm.models.deepseek_v4_1.common.engram import (
+from .upstream import (
     DEAD_ID,
     EngramLayout,
     NgramHashState,

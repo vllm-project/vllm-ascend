@@ -1,27 +1,22 @@
-# ruff: noqa: E402
-
 import json
-
-import pytest
-
-pytest.importorskip(
-    "vllm.transformers_utils.configs.deepseek_v41",
-    reason="DeepSeek V4.1 is unavailable on this vLLM release",
-)
 
 from vllm import ModelRegistry
 from vllm.transformers_utils.config import get_config
-from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config as UpstreamDeepseekV41Config
 
+from vllm_ascend.compat.deepseek_v41 import DeepseekV41Config
+from vllm_ascend.compat.deepseek_v41.registration import (
+    register_deepseek_v41_compat,
+)
 from vllm_ascend.models import register_model
 from vllm_ascend.utils import normalize_deepseek_v41_config
 
 
 def make_v41_config(**kwargs):
-    return normalize_deepseek_v41_config(UpstreamDeepseekV41Config(**kwargs))
+    return normalize_deepseek_v41_config(DeepseekV41Config(**kwargs))
 
 
 def test_released_config_loads_through_vllm_registry(tmp_path):
+    register_deepseek_v41_compat()
     (tmp_path / "config.json").write_text(
         json.dumps(
             {
@@ -36,7 +31,7 @@ def test_released_config_loads_through_vllm_registry(tmp_path):
 
     config = get_config(tmp_path, trust_remote_code=False)
 
-    assert isinstance(config, UpstreamDeepseekV41Config)
+    assert isinstance(config, DeepseekV41Config)
     assert config.is_mm_prefix_lm
     assert config.mm_prefix_span_leading_pad_modulus == 2
 
@@ -114,6 +109,14 @@ def test_released_causal_architecture_uses_multimodal_wrapper(monkeypatch):
         )
         for args, _kwargs in calls
     )
+    assert any(
+        args
+        == (
+            "DeepseekV41DSparkModel",
+            "vllm_ascend.models.deepseek_v41.dspark:DSparkDeepseekV41ForCausalLM",
+        )
+        for args, _kwargs in calls
+    )
 
 
 def test_engram_rotation_contract_is_preserved():
@@ -134,5 +137,9 @@ def test_ascend_registration_keeps_upstream_v41_frontend():
 
     adapt_patch(True)
     register_model()
-    assert TokenizerRegistry.load_tokenizer_cls("deepseek_v41").__module__ == "vllm.tokenizers.deepseek_v41"
+    tokenizer_module = TokenizerRegistry.load_tokenizer_cls("deepseek_v41").__module__
+    assert tokenizer_module in {
+        "vllm.tokenizers.deepseek_v41",
+        "vllm_ascend.compat.deepseek_v41.tokenizer",
+    }
     assert RENDERER_REGISTRY.load_renderer_cls("deepseek_v41").__module__ == "vllm.renderers.deepseek_v4"

@@ -27,7 +27,6 @@ from vllm.distributed import (
 )
 from vllm.logger import logger
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.models.deepseek_v4_1.common.engram import ParallelEngramEmbedding
 
 from .npu import (
     HostUvaBuffer,
@@ -36,6 +35,7 @@ from .npu import (
     gather_dequantize_host_uva,
     quantize_engram_rows,
 )
+from .upstream import ParallelEngramEmbedding
 from .parallel import (
     _gather_engram_rows,
     engram_head_shard_rank,

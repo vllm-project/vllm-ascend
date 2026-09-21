@@ -1,15 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-# ruff: noqa: E402
 
 from unittest.mock import MagicMock, patch
 
 import pytest
-
-pytest.importorskip(
-    "vllm.transformers_utils.configs.deepseek_v41",
-    reason="DeepSeek V4.1 is unavailable on this vLLM release",
-)
-
 import torch
 
 from tests.deepseek_v41_utils import hc_mixes_reference, hc_post_reference

@@ -1,19 +1,13 @@
-# ruff: noqa: E402
-
 from types import SimpleNamespace
-
-import pytest
-
-pytest.importorskip(
-    "vllm.transformers_utils.configs.deepseek_v41",
-    reason="DeepSeek V4.1 is unavailable on this vLLM release",
-)
 
 import torch
 from PIL import Image
 from torch import nn
 from vllm.model_executor.models.interfaces import requires_raw_input_tokens, supports_multimodal
-from vllm.models.deepseek_v4_1.common.mm_preprocess import (
+from vllm.multimodal.processing import InputProcessingContext
+
+from vllm_ascend.compat.deepseek_v41 import DeepseekV41Config
+from vllm_ascend.compat.deepseek_v41.mm_preprocess import (
     COMPRESS_PAD_TO,
     IMAGE,
     IMAGE_END,
@@ -26,9 +20,6 @@ from vllm.models.deepseek_v4_1.common.mm_preprocess import (
     image_sentinel_mask,
     image_token_types,
 )
-from vllm.multimodal.processing import InputProcessingContext
-from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config as UpstreamDeepseekV41Config
-
 from vllm_ascend.models.deepseek_v41.engram.common import (
     valid_engram_token_mask,
 )
@@ -40,7 +31,7 @@ from vllm_ascend.utils import normalize_deepseek_v41_config
 
 
 def make_v41_config(**kwargs):
-    return normalize_deepseek_v41_config(UpstreamDeepseekV41Config(**kwargs))
+    return normalize_deepseek_v41_config(DeepseekV41Config(**kwargs))
 
 
 def test_v41_vision_wrapper_uses_v41_language_backbone():
