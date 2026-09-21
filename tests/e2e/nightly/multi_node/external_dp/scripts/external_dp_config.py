@@ -55,10 +55,11 @@ class NodeInfo:
     cp_size: int = 1
     sp_size: int = 1
     pp_size: int = 1
+    pp_size_local: int = 1
 
     @property
     def devices_per_rank(self) -> int:
-        return self.tp_size * self.cp_size * self.sp_size * self.pp_size
+        return self.tp_size * self.cp_size * self.sp_size * self.pp_size_local
 
     @property
     def devices_per_node(self) -> int:
@@ -311,6 +312,7 @@ class ExternalDPConfigLoader:
                     sp_size=int(node.get("sp_size", 1)),
                     dp_address=str(node["dp_address"]),
                     pp_size=int(node.get("pp_size", 1)),
+                    pp_size_local=int(node.get("pp_size_local", 1)),
                 )
             )
         return nodes
@@ -407,6 +409,10 @@ class ExternalDPConfigLoader:
                 )
             if node.dp_rank_start + node.dp_size_local > node.dp_size:
                 raise ValueError(f"node {node_index} dp rank range exceeds dp_size")
+            if node.pp_size_local <1 or node.pp_size_local > node.pp_size:
+                raise ValueError(f"node {node_index} pp size exceeds pp_size")
+            if node.pp_size % node.pp_size_local != 0:
+                raise ValueError(f"node {node_index} pp size does not divide pp_size")
 
     @staticmethod
     def _validate_kv_pool(config: ExternalDPConfig) -> None:
