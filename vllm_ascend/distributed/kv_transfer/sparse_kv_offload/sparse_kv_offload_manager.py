@@ -33,6 +33,9 @@ from vllm.v1.utils import CpuGpuBuffer
 from vllm_ascend.ascend_config import SparseKVOffloadConfig, get_ascend_config
 from vllm_ascend.utils import AscendDeviceType, enable_custom_op, get_ascend_device_type
 
+if typing.TYPE_CHECKING:
+    from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.local_kv_writeback import LocalKVWriteback
+
 # Main BF16 cache:
 # [k_cache, v_cache, k_cache_cpu, v_cache_cpu, topk_buffer_k, topk_buffer_v].
 # Sparse LI C8 indexer caches are separate and
@@ -487,7 +490,7 @@ class SparseKVOffloadManager:
         ):
             raise ValueError("Local KV writeback overlap requires eager or a full decode graph")
         self.local_kv_active = False
-        self.local_writeback = None
+        self.local_writeback: LocalKVWriteback | None = None
 
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
@@ -1134,6 +1137,8 @@ class SparseKVOffloadManager:
             # The preceding forward joined TP0's writeback stream. Publish
             # that history BEFORE this forward can read it on another rank.
             self.tp_group.broadcast(self.local_visibility_token, src=0)
+        if self.local_writeback is None:
+            raise RuntimeError("Local KV writeback buffers are not initialized")
         k, v, slots = self.local_writeback.stage(layer_id, kwargs["k"], kwargs["v"], kwargs["slot_mapping"])
         staged = dict(kwargs, k=k, v=v, slot_mapping=slots)
         self.local_writeback.submit(layer_id, self._offload_new_kv_on_current_stream, **staged)
@@ -1143,6 +1148,8 @@ class SparseKVOffloadManager:
             return
         layer_id = self._get_offload_layer_id(layer_name)
         if layer_id in (self.num_target_layers - 1, self.mtp_layer_id):
+            if self.local_writeback is None:
+                raise RuntimeError("Local KV writeback buffers are not initialized")
             self.local_writeback.finish_forward()
 
     def _offload_new_kv_existing(
@@ -1410,6 +1417,8 @@ class SparseKVOffloadManager:
         if self.local_kv_active:
             from vllm_ascend.ops.triton.local_kv_fill import fill_local_kv
 
+            if self.local_writeback is None:
+                raise RuntimeError("Local KV writeback buffers are not initialized")
             fill_local_kv(
                 self.local_writeback.k[layer_id],
                 self.local_writeback.v[layer_id],
