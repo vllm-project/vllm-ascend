@@ -48,7 +48,7 @@ The following example uses the AArch64 image and exposes 8 devices on an Atlas 8
     Start the docker image on each node.
 
     ```bash
-    export IMAGE=quay.io/atlas-ci/vllm-atlas-temp:qwen3.8-next-a3-ubuntu-34178549844-2-arm64-temp
+    export IMAGE=quay.io/ascend/vllm-ascend:qwen3.8-next-a3
     export NAME=vllm-ascend-qwen38-flash-next
 
     docker pull "$IMAGE"
@@ -120,7 +120,7 @@ Before starting the service:
     source /usr/local/Ascend/ascend-toolkit/set_env.sh
     source /usr/local/Ascend/nnal/atb/set_env.sh
 
-    export MODEL_PATH=/models/Qwen3.8-Flash-Next-w8a8
+    export MODEL_PATH=/models/Qwen3.8-Flash-Next-w8a8-mtp
     export VLLM_ASCEND_ENABLE_QSA_LIGHTNING_INDEXER=1
     export VLLM_ASCEND_ENABLE_QSA_E3V=1
     unset VLLM_ASCEND_FORCE_QSA_REFERENCE
