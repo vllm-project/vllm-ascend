@@ -266,16 +266,16 @@ def test_replay_metadata_preserves_architecture_behavior(monkeypatch, architectu
     result = spec.build_draft_attn_metadatas(2, torch.tensor([128]))
     assert captured["pad"] == 10
     assert result == [metadata]
-    assert query_metadata.actual_seq_lengths_q == [5, 10]
-    if architecture in ("GQA", "MLA"):
-        assert captured["is_prefilling"].tolist() == [False, False]
-        assert captured["attn_state"] == AscendAttentionState.ChunkedPrefill
-    else:
-        assert captured["is_prefilling"].tolist() == [True, True]
-        assert np.shares_memory(captured["is_prefilling"].numpy(), spec.input_batch.is_prefilling_np)
-        assert not hasattr(result[0]["draft"], "attn_state")
+    assert captured["is_prefilling"].tolist() == [False, False]
+    assert captured["is_prefilling"].dtype == torch.bool
+    assert captured["attn_state"] == AscendAttentionState.ChunkedPrefill
     builder.assert_called_once()
-    update.assert_called_once_with(metadata, 2)
+    if architecture in ("GQA", "MLA"):
+        assert query_metadata.actual_seq_lengths_q == [5, 10]
+        update.assert_called_once_with(metadata, 2)
+    else:
+        assert query_metadata.actual_seq_lengths_q == [5, 5]
+        update.assert_not_called()
     kwargs = builder.call_args.kwargs
     assert "update_query_lengths" not in kwargs
     assert kwargs["num_reqs"] == 1
@@ -296,7 +296,8 @@ def test_missing_target_aux_layers_reports_incompatibility(missing):
 
 
 @pytest.mark.parametrize("fail", [False, True])
-def test_default_metadata_factory_preserves_caller_state(monkeypatch, fail):
+@pytest.mark.parametrize("attn_state", [None, AscendAttentionState.ChunkedPrefill])
+def test_metadata_factory_applies_configured_state(monkeypatch, fail, attn_state):
     module = attn_utils._BUILD_ATTN_METADATA_MODULE
     original = module.build_attn_metadata
     builder = MagicMock()
@@ -305,14 +306,14 @@ def test_default_metadata_factory_preserves_caller_state(monkeypatch, fail):
     with (
         pytest.raises(RuntimeError, match="build failed") if fail else nullcontext(),
         attn_utils.build_attn_metadata_wrapper(),
-        attn_utils.build_draft_attn_metadata_factory(torch.arange(10), 6, flags),
+        attn_utils.build_draft_attn_metadata_factory(torch.arange(10), 6, flags, attn_state=attn_state),
     ):
         module.build_attn_metadata(num_tokens=6, attn_state=AscendAttentionState.DecodeOnly)
         if fail:
             raise RuntimeError("build failed")
     assert module.build_attn_metadata is original
     assert builder.call_args.kwargs["is_prefilling"] is flags
-    assert builder.call_args.kwargs["attn_state"] == AscendAttentionState.DecodeOnly
+    assert builder.call_args.kwargs["attn_state"] is attn_state
     torch.testing.assert_close(builder.call_args.kwargs["positions"], torch.arange(6))
 
 
@@ -343,7 +344,9 @@ def test_query_builder_overrides_and_restores_target_context(monkeypatch, archit
     monkeypatch.setattr(DSparkSpeculator, "_build_draft_attn_metadata", parent)
     with (
         attn_utils.build_attn_metadata_wrapper(),
-        attn_utils.build_draft_attn_metadata_factory(torch.arange(20), 20, flags),
+        attn_utils.build_draft_attn_metadata_factory(
+            torch.arange(20), 20, flags, attn_state=AscendAttentionState.DecodeOnly
+        ),
     ):
         outer = module.build_attn_metadata
         with pytest.raises(RuntimeError, match="query failed") if fail else nullcontext():

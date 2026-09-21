@@ -1243,8 +1243,7 @@ def build_draft_attn_metadata_factory(positions, pad, is_prefilling, *, attn_sta
     def build_attn_metadata(*args, **kwargs):
         kwargs["positions"] = positions[:pad]
         kwargs["is_prefilling"] = is_prefilling
-        if attn_state is not None:
-            kwargs["attn_state"] = attn_state
+        kwargs["attn_state"] = attn_state
         return raw(*args, **kwargs)
 
     try:
