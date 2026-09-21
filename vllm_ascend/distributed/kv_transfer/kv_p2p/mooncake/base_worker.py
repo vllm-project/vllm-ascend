@@ -29,7 +29,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
-from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
+from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec, get_sfa_kv_parent
 from vllm_ascend.core.kv_cache_placement import map_kvpp_layers_to_owners
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeConnectorMetadata,
@@ -58,6 +58,20 @@ from vllm_ascend.utils import get_kv_cache_tensor_layers
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
+
+
+def _is_sfa_parent_binding(spec: KVCacheSpec, caches: tuple[torch.Tensor, ...]) -> bool:
+    """Whether the layer binds the SFA parent form: the NoPE and RoPE
+    components as 4-D views of one storage, token-interleaved."""
+    if not isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec)):
+        return False
+    if len(caches) != 2:
+        return False
+    nope, rope = caches
+    same_storage = nope.untyped_storage().data_ptr() == rope.untyped_storage().data_ptr()
+    combined_width = nope.shape[-1] + rope.shape[-1]
+    token_interleaved = nope.ndim == 4 and nope.stride(1) == combined_width
+    return same_storage and token_interleaved
 
 
 class MooncakeBaseConnectorWorker:
@@ -254,6 +268,11 @@ class MooncakeBaseConnectorWorker:
                 spec_index = self.layer_name_to_spec_index[layer_name]
                 spec = self.kv_cache_specs[spec_index]
                 caches = as_kv_cache_tensors(cache_or_caches)
+                if _is_sfa_parent_binding(spec, caches):
+                    # Rebuild the single parent view so the published block
+                    # shape covers the full packed page instead of only the
+                    # larger NoPE span.
+                    caches = (get_sfa_kv_parent(*caches),)
                 shared_page_metadata = (
                     self._get_shared_page_metadata(caches)
                     if isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
