@@ -17,8 +17,8 @@
 """310P-only ACLGraphWrapper for MTP FULL-replay sync overhead.
 
 MRV1 wraps the model with shared ``ACLGraphWrapper``. To keep A2/910 mainline
-untouched, 310P loads this subclass via ``apply_310p_aclgraph_patches()`` from
-``NPUWorker310`` and rebinds imports used by MRV1 / MTP proposer.
+untouched, 310P rebinds MRV1 import sites to ``ACLGraphWrapper310`` via
+``apply_310p_aclgraph_patches()`` from ``NPUWorker310._create_model_runner``.
 
 Replay-only changes vs mainline:
 - ``synchronize()`` → ``wait_stream(update_stream)``; skip when UpdatableGraph
@@ -104,17 +104,23 @@ class ACLGraphWrapper310(ACLGraphWrapper):
 
 
 def apply_310p_aclgraph_patches() -> None:
-    """Install 310P FULL-replay barriers onto the shared ACLGraphWrapper class.
+    """Rebind MRV1 ACLGraphWrapper import sites to the 310P subclass.
 
-    Patches methods in-place so every MRV1 import site sees the 310P behavior
-    without rebinding the class name (mypy forbids ``Module.Class = SubClass``).
-    Only loaded from ``NPUWorker310`` (310P processes).
+    Uses ``setattr`` (not ``Module.Class =``) so mypy stays clean, and rebinds
+    module globals rather than mutating method slots so already-imported
+    references (e.g. CPU UTs) keep the mainline class.
+    Only invoked from ``NPUWorker310._create_model_runner`` (310P processes).
     """
     global _PATCHED
     if _PATCHED:
         return
 
-    # method-assign: intentional monkeypatch for 310P-only worker process.
-    ACLGraphWrapper.__call__ = ACLGraphWrapper310.__call__  # type: ignore[method-assign,assignment]
-    ACLGraphWrapper._updatable_graph_replay = ACLGraphWrapper310._updatable_graph_replay  # type: ignore[method-assign,assignment]
+    import vllm_ascend.compilation.acl_graph as acl_graph_mod
+    import vllm_ascend.spec_decode.llm_base_proposer as llm_base_proposer
+    import vllm_ascend.worker.model_runner_v1 as model_runner_v1
+
+    # noqa: B010 — intentional 310P-only rebind of MRV1 import sites.
+    setattr(acl_graph_mod, "ACLGraphWrapper", ACLGraphWrapper310)  # noqa: B010
+    setattr(model_runner_v1, "ACLGraphWrapper", ACLGraphWrapper310)  # noqa: B010
+    setattr(llm_base_proposer, "ACLGraphWrapper", ACLGraphWrapper310)  # noqa: B010
     _PATCHED = True

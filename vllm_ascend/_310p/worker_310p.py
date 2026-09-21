@@ -29,13 +29,14 @@ from vllm_ascend._310p.model_runner_310p import NPUModelRunner310
 from vllm_ascend.utils import is_rc_device
 from vllm_ascend.worker.worker import NPUWorker, init_workspace_manager
 
-# 310P-only: weaken shared ACLGraphWrapper FULL-replay barriers for MRV1 MTP.
-# Must run at import time so MRV1 wrap sites see ACLGraphWrapper310.
-apply_310p_aclgraph_patches()
-
 
 class NPUWorker310(NPUWorker):
     def _create_model_runner(self):
+        # 310P-only: rebind MRV1 ACLGraphWrapper sites before model wrap/capture.
+        # Deferred from import time so CPU UTs that merely import this module do
+        # not mutate shared mainline ACLGraphWrapper behavior.
+        apply_310p_aclgraph_patches()
+
         if self.use_v2_model_runner:
             from vllm_ascend._310p.worker.v2.model_runner import NPUModelRunner310V2
 
