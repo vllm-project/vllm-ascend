@@ -22,6 +22,10 @@ from vllm_ascend.utils import (
 
 SFA_QSFA_TILE_SIZE = 128
 MLAPO_MAX_SUPPORTED_TOKENS = 1024
+# FlashMLA's A5 kernel accepts these per-rank query-head counts (N1). Other
+# MLA models keep the FIA-compatible component-major cache layout on A5.
+# N1 is the post-TP local head count, not the global model configuration.
+MLA_FLASH_SUPPORTED_Q_HEADS = frozenset((8, 12, 64, 96))
 
 
 class PreprocessType(enum.Enum):

@@ -33,7 +33,7 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
 )
-from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware_profile
 from vllm_ascend.models.glm5next.kv_cache import (
     Glm5NextIndexerCache,
     Glm5NextTailCache,
@@ -929,6 +929,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.sparse_kv_offload_enabled = False
         runner.sparse_kv_offload_config = MagicMock()
         runner.tp_rank = 0
+        runner.compilation_config = SimpleNamespace(static_forward_context={})
         runner.vllm_config = MagicMock()
         runner.vllm_config.kv_transfer_config = None
         runner.model_config = MagicMock()
@@ -944,6 +945,78 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         )
         runner.attn_backend = backend
         return runner
+
+    def test_mla_single_raw_backing_selects_layout_by_hardware_and_local_q_heads(self):
+        runner = self._build_runner()
+        layer_name = "model.layers.0.self_attn.attn"
+        num_blocks = 2
+        spec = AscendMLAAttentionSpec(
+            block_size=384,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+            page_size_padded=488448,
+        )
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=[],
+            kv_cache_groups=[KVCacheGroupSpec(layer_names=[layer_name], kv_cache_spec=spec)],
+        )
+        attn_module = MLAAttention.__new__(MLAAttention)
+        torch.nn.Module.__init__(attn_module)
+        attn_module.num_heads = 64
+        attn_module.impl = SimpleNamespace(fa_quant_layer=False)
+        runner.compilation_config = SimpleNamespace(static_forward_context={layer_name: attn_module})
+        runner.kernel_block_sizes = [[128]]
+        runner._get_layer_kv_cache_specs = lambda config: {layer_name: spec}
+        runner._get_attention_kv_cache_dims = lambda layer, cache_spec: (512, 64)
+        runner._kv_cache_spec_attn_group_iterator = lambda: [
+            SimpleNamespace(
+                kv_cache_spec=spec,
+                backend=runner.attn_backend,
+                layer_names=[layer_name],
+                kv_cache_group_id=0,
+            )
+        ]
+        raw = torch.zeros(num_blocks * 488448, dtype=torch.uint8)
+
+        flash_profile = SimpleNamespace(supports=lambda capability: capability is HardwareCapability.MLA_FLASH)
+        for q_heads in (8, 12, 64, 96):
+            with self.subTest(q_heads=q_heads):
+                attn_module.num_heads = q_heads
+                with patch(
+                    "vllm_ascend.worker.model_runner_v1.get_current_hardware_profile",
+                    return_value=flash_profile,
+                ):
+                    fused = runner._reshape_kv_cache_tensors(kv_cache_config, {layer_name: (raw,)})[layer_name]
+
+                self.assertIsInstance(fused, torch.Tensor)
+                self.assertEqual(fused.shape, (6, 128, 1, 576))
+                self.assertEqual(fused.stride(), (81408, 576, 576, 1))
+
+        # A5 FlashMLA does not support arbitrary query-head counts. Keep these
+        # models on the FIA-compatible component-major layout.
+        attn_module.num_heads = 48
+        with patch(
+            "vllm_ascend.worker.model_runner_v1.get_current_hardware_profile",
+            return_value=flash_profile,
+        ):
+            a5_fallback = runner._reshape_kv_cache_tensors(kv_cache_config, {layer_name: (raw,)})[layer_name]
+
+        self.assertIsInstance(a5_fallback, tuple)
+
+        with patch(
+            "vllm_ascend.worker.model_runner_v1.get_current_hardware_profile",
+            return_value=SimpleNamespace(supports=lambda capability: False),
+        ):
+            nope, rope = runner._reshape_kv_cache_tensors(kv_cache_config, {layer_name: (raw,)})[layer_name]
+
+        self.assertEqual(nope.shape, (6, 128, 1, 512))
+        self.assertEqual(nope.stride(), (81408, 512, 512, 1))
+        self.assertEqual(rope.shape, (6, 128, 1, 64))
+        self.assertEqual(rope.stride(), (81408, 64, 64, 1))
+        self.assertEqual(rope.storage_offset() - nope.storage_offset(), 65536)
+        self.assertIs(nope.untyped_storage(), rope.untyped_storage())
 
     def test_kvpp_allocate_and_reshape_views(self):
         from tests.ut.kvpp_utils import assert_attention_cache_views, make_attention_cache_case, make_cache_config
