@@ -3,13 +3,15 @@ import torch
 from vllm.config import VllmConfig
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec, UniformTypeKVCacheSpecs
 
-from vllm_ascend.ascend_config import get_kvpp_offload_config
 from vllm_ascend.core.kv_cache_placement import (
     KVPP_SCRATCH_BUFFER_COUNT,
     build_kvpp_layer_layout,
     create_kvpp_cache_allocation_plan,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import build_layerwise_reuse_layout
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
+    build_layerwise_reuse_layout,
+    get_layerwise_reuse_config,
+)
 from vllm_ascend.distributed.parallel_state import get_kvpp_group
 
 KVPP_BUFFER_ALIGNMENT = 2 * 1024 * 1024
@@ -41,7 +43,7 @@ def allocate_kvpp_cache(
         for name, bundle in plan.layer_bundles.items()
     }
     scratch_size = max((size for name, (_, size) in layouts.items() if name in plan.layer_owner_ranks), default=0)
-    extra = get_kvpp_offload_config(vllm_config)
+    extra = get_layerwise_reuse_config(vllm_config.kv_transfer_config)
     shared_slots: dict[str, int] = {}
     shared_buffers: dict[int, torch.Tensor] = {}
     if extra is not None:

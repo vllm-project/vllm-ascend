@@ -77,7 +77,7 @@ class TestAscendStoreConnector(unittest.TestCase):
         connector = AscendStoreConnector.__new__(AscendStoreConnector)
         connector.use_layerwise = True
         connector.connector_scheduler = MagicMock()
-        output = types.SimpleNamespace(has_sync_kv_loads=False)
+        output = types.SimpleNamespace(has_sync_kv_loads=False, total_num_scheduled_tokens=1)
         connector.build_connector_meta(output)
         self.assertTrue(output.has_sync_kv_loads)
         connector.connector_scheduler.build_connector_meta.assert_called_once_with(output)
@@ -86,17 +86,17 @@ class TestAscendStoreConnector(unittest.TestCase):
         connector = AscendStoreConnector.__new__(AscendStoreConnector)
         connector.use_layerwise = False
         connector.connector_scheduler = MagicMock()
-        output = types.SimpleNamespace(has_sync_kv_loads=False)
+        output = types.SimpleNamespace(has_sync_kv_loads=False, total_num_scheduled_tokens=1)
         connector.build_connector_meta(output)
         self.assertFalse(output.has_sync_kv_loads)
 
-    def test_layerwise_supports_older_scheduler_output(self):
+    def test_layerwise_empty_step_does_not_force_sync_loads(self):
         connector = AscendStoreConnector.__new__(AscendStoreConnector)
         connector.use_layerwise = True
         connector.connector_scheduler = MagicMock()
-        output = types.SimpleNamespace()
+        output = types.SimpleNamespace(has_sync_kv_loads=False, total_num_scheduled_tokens=0)
         connector.build_connector_meta(output)
-        self.assertFalse(hasattr(output, "has_sync_kv_loads"))
+        self.assertFalse(output.has_sync_kv_loads)
 
     def test_layerwise_completion_poll_does_not_prime_loads(self):
         connector = AscendStoreConnector.__new__(AscendStoreConnector)

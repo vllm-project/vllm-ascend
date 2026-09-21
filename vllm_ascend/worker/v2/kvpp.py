@@ -8,9 +8,10 @@ from typing import Any
 import torch
 from vllm.distributed.kv_transfer import get_kv_transfer_group
 
-from vllm_ascend.ascend_config import KVPPConfig, get_kvpp_offload_config
+from vllm_ascend.ascend_config import KVPPConfig
 from vllm_ascend.core.kv_cache_placement import build_kvpp_layer_layout, create_kvpp_cache_allocation_plan
 from vllm_ascend.distributed.kvpp import BroadcastKVPPTransport
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import get_layerwise_reuse_config
 from vllm_ascend.distributed.parallel_state import get_kvpp_group
 from vllm_ascend.worker.kvpp_cache import get_kvpp_cache_specs
 
@@ -59,9 +60,9 @@ class KVPPRuntime:
         scheduler = KVPPScheduler(
             transport=BroadcastKVPPTransport(group, plan.layer_owner_ranks, layer_buffers),
             attention_layer_names=tuple(layer_buffers),
-            wait_for_cache=(
-                get_kv_transfer_group().wait_for_kvpp_cache
-                if get_kvpp_offload_config(vllm_config) is not None
+            wait_for_layer_ready=(
+                get_kv_transfer_group().wait_for_layer_ready
+                if get_layerwise_reuse_config(vllm_config.kv_transfer_config) is not None
                 else None
             ),
         )
@@ -85,9 +86,9 @@ class KVPPScheduler:
         self,
         transport: BroadcastKVPPTransport,
         attention_layer_names: tuple[str, ...],
-        wait_for_cache: Callable[[str], None] | None = None,
+        wait_for_layer_ready: Callable[[str], None] | None = None,
     ) -> None:
-        self.wait_for_cache = wait_for_cache
+        self.wait_for_layer_ready = wait_for_layer_ready
         self.transport = transport
         self.attention_layer_names = attention_layer_names
         self._has_history = False
@@ -110,9 +111,9 @@ class KVPPScheduler:
 
     def run_layer_prefetch(self, layer_name: str, cache_ready: Any) -> None:
         torch.npu.set_device(self._npu_device_id)
-        if self.wait_for_cache is not None:
+        if self.wait_for_layer_ready is not None:
             # Owner H2D and peer-buffer D2H readers must finish before broadcast.
-            self.wait_for_cache(layer_name)
+            self.wait_for_layer_ready(layer_name)
         self.transport.prefetch(layer_name, cache_ready, self._kv_transfer_stream)
 
     def wait_for_layer(self, layer_name: str) -> None:

@@ -148,11 +148,11 @@ VLLM_USE_V2_MODEL_RUNNER=0 vllm serve <model-path> \
     --kv-transfer-config '{"kv_connector":"AscendStoreConnector","kv_role":"kv_producer","kv_connector_extra_config":{"backend":"memcache","use_layerwise":true,"layerwise_num_shared_buffers":3,"layerwise_prefetch_layers":3}}'
 ```
 
-This combination requires PP=1, PCP=1, DCP=1 and no speculative decoding. The shared-buffer and prefetch counts must both be 3. The existing `layerwise_independent_layers` setting is preserved (layer 0 by default). Other layerwise backends and Model Runner V2 are outside this combination's scope.
+This combination requires PP=1, PCP=1, DCP=1 and no speculative decoding. The shared-buffer and prefetch counts must both be at least 3. The existing `layerwise_independent_layers` setting is preserved (layer 0 by default). Other layerwise backends and Model Runner V2 are outside this combination's scope.
 
-At compute layer L, Memcache loads L+2 while KVPP broadcasts L+1. The owner waits for its H2D completion before broadcasting. Only layer owners perform H2D; each rank uses the existing offload shared slots and independent layers, with no separate owner/peer buffer pools. A buffer can be overwritten only after the previous layer's compute and D2H have finished. The first two layers are primed before the first broadcast.
+At compute layer L, Memcache loads L+2 while KVPP broadcasts L+1. The owner waits for its H2D completion before broadcasting. Only layer owners perform H2D; each rank uses the existing offload shared slots and independent layers, with no separate owner/peer buffer pools. A buffer can be overwritten only after the previous layer's compute and D2H have finished. With prefetch depth N, the first N-1 layers are submitted before the first broadcast; each attention hook submits one more layer. Depth 3 gives the L/L+1/L+2 pipeline described above.
 
-The Memcache full-object publication protocol remains single-writer: the existing writer still saves all computed layers. Owner-only H2D does not mean owner-only D2H. This differs from the whole-block pooling configuration above, where each owner publishes a separate shard. Use separate pool namespaces/model names when comparing these configurations.
+The existing KVPP owner registration is reused for both H2D and D2H: each rank reads and publishes its own layer shard. Layerwise offsets are packed within that registered shard, and lookup requires all owner objects. Use separate pool namespaces/model names when comparing configurations.
 
 This is a prefill-side feature; it does not enable KVPP on a decode-only node. Reply correctness checks should include cold chunked prefill and repeated prefix reuse. Performance overlap and throughput depend on the workload and require separate profiling.
 

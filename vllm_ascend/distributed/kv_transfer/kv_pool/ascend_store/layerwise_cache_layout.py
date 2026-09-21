@@ -301,7 +301,7 @@ def apply_layerwise_kv_cache_plan(
     """Rewrite logical layer tensors to use shared physical KV buffers."""
     from vllm_ascend.ascend_config import KVPPConfig
 
-    # KVPP allocates its own contiguous owner/peer buffers from logical specs.
+    # KVPP allocates contiguous layer views using this module's reuse layout.
     if KVPPConfig.from_vllm_config(vllm_config).size > 1:
         return
     extra_config = get_layerwise_reuse_config(vllm_config.kv_transfer_config)

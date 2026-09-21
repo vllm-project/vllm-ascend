@@ -14,9 +14,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import
 
 def make_worker():
     worker = KVPoolWorker.__new__(KVPoolWorker)
-    worker.kvpp_offload = True
+    worker.use_kvpp = True
     worker.use_layerwise = True
     worker.num_layers = 6
+    worker.num_prefetch_layers = 3
     worker.current_layer = 0
     worker.next_layer_to_submit = 0
     worker.prefetch_layer_map = {4: 2, 5: 3}
@@ -76,7 +77,7 @@ def test_kvpp_and_attention_can_both_observe_load_completion():
     worker._extract_physical_layer_index = lambda _: 0
     worker.layer_load_finished_events[0].set()
     worker.wait_for_layer_load()
-    worker.wait_for_kvpp_cache("layer.0")
+    worker.wait_for_layer_ready("layer.0")
     assert worker.layer_load_finished_events[0].is_set()
 
 
@@ -86,14 +87,13 @@ def test_completed_event_does_not_hide_transfer_failure():
     worker.layer_load_finished_events[0].set()
     worker.kv_recv_thread.raise_if_failed.side_effect = RuntimeError("H2D failed")
     with pytest.raises(RuntimeError, match="H2D failed"):
-        worker.wait_for_kvpp_cache("layer.0")
+        worker.wait_for_layer_ready("layer.0")
 
 
-def test_only_owner_keeps_h2d_tasks_but_single_writer_saves_are_preserved():
+def test_registered_owner_layers_drive_both_load_and_save_tasks():
     worker = make_worker()
-    worker.kvpp_layer_owners = {i: i // 3 for i in range(6)}
     worker.kvpp_rank = 1
-    worker.physical_layer_to_group_layers = {}
+    worker.physical_layer_to_group_layers = {3: [(0, 0)], 4: [(0, 1)], 5: [(0, 2)]}
     worker.backend_name = "memcache"
     worker._compute_reachable_store_masks = MagicMock(return_value=None)
     worker._process_save_for_layer_batch = lambda requests, layer, *args: worker.layer_save_tasks[layer].append("save")
@@ -104,7 +104,7 @@ def test_only_owner_keeps_h2d_tasks_but_single_writer_saves_are_preserved():
     worker._build_shared_load_data = MagicMock()
     worker.process_layer_data([SimpleNamespace()])
     assert worker.layer_load_tasks == [[], [], [], ["load"], ["load"], ["load"]]
-    assert worker.layer_save_tasks == [["save"] for _ in range(6)]
+    assert worker.layer_save_tasks == [[], [], [], ["save"], ["save"], ["save"]]
 
 
 def test_end_of_forward_releases_leases_but_only_completes_last_chunks():
@@ -145,11 +145,11 @@ def test_start_load_resets_previous_forward_events_before_priming():
 
 
 @pytest.mark.parametrize("kvpp", [False, True])
-def test_next_forward_waits_for_single_writer_publication(monkeypatch, kvpp):
+def test_next_forward_waits_for_shard_or_replica_publication(monkeypatch, kvpp):
     from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import pool_worker
 
     worker = make_worker()
-    worker.kvpp_offload = kvpp
+    worker.use_kvpp = kvpp
     worker.layerwise_offload = True
     worker.backend_name = "memcache"
     worker.put_step = 2
@@ -173,3 +173,43 @@ def test_next_forward_waits_for_single_writer_publication(monkeypatch, kvpp):
         thread.join(timeout=5)
     assert not thread.is_alive()
     assert loaded.is_set()
+
+
+@pytest.mark.parametrize("depth", [3, 4, 5])
+def test_startup_uses_configured_prefetch_window(depth):
+    worker = make_worker()
+    worker.num_prefetch_layers = depth
+    worker._submit_ready_layer_loads(startup=True)
+    queued = [call.args[0] for call in worker.kv_recv_thread.add_request.call_args_list]
+    assert [task.layer_id for task in queued] == list(range(depth - 1))
+    assert all(task.attention_start_gate is None for task in queued)
+
+
+def test_owner_tail_saves_complete_before_forward_returns():
+    worker = make_worker()
+    worker.current_layer = 5
+    worker.layer_save_tasks[4] = [object()]
+    worker.sync_save_events = [MagicMock() for _ in range(6)]
+    worker.layer_save_finished_events = [MagicMock() for _ in range(6)]
+    worker.kv_send_thread = MagicMock()
+    worker.save_kv_layer(SimpleNamespace(requests=[]))
+    worker.layer_save_finished_events[4].wait.assert_called_once()
+
+
+def test_owner_group_offsets_follow_registered_layers():
+    worker = make_worker()
+    worker.num_blocks = 1
+    worker._extract_physical_layer_index = lambda name: int(name)
+    worker._global_to_local_layer = {}
+    worker.physical_layer_to_group_layers = {}
+    worker.kv_caches = {str(i): (object(),) for i in [3, 4, 5]}
+    worker._get_cache_block_metadata = lambda cache: (8, 8, 8, 1)
+    worker._as_cache_tuple = lambda cache: (SimpleNamespace(data_ptr=lambda: 128),)
+    worker.group_kv_caches_base_addr = {}
+    worker.group_block_len = {}
+    worker.group_block_stride = {}
+    worker.group_layer_cache_entry_offsets = {}
+    worker.group_num_layers = {}
+    worker._infer_cache_group_metadata(0, ["3", "4", "5"])
+    assert worker.physical_layer_to_group_layers == {3: [(0, 0)], 4: [(0, 1)], 5: [(0, 2)]}
+    assert worker._global_group_alloc_size(0) == 24

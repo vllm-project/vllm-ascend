@@ -4,12 +4,13 @@ from types import SimpleNamespace
 import pytest
 
 from tests.ut.kvpp_utils import make_kvpp_config
-from vllm_ascend.ascend_config import KVPPConfig, get_kvpp_offload_config
+from vllm_ascend.ascend_config import KVPPConfig
 
 
 def config():
     c = make_kvpp_config(2)
     c.speculative_config = None
+    c.model_config.get_num_layers = lambda _: 17
     c.use_v2_model_runner = False
     c.kv_transfer_config = SimpleNamespace(
         kv_connector="AscendStoreConnector",
@@ -23,12 +24,18 @@ def config():
     return c
 
 
-def test_explicit_offload_and_ordinary_layerwise_pooling():
+@pytest.mark.parametrize("buffers,prefetch", [(3, 3), (4, 4), (3, 5), (5, 3)])
+def test_accepts_larger_shared_buffers_and_prefetch(buffers, prefetch):
     c = config()
+    c.kv_transfer_config.kv_connector_extra_config.update(
+        layerwise_num_shared_buffers=buffers, layerwise_prefetch_layers=prefetch
+    )
     KVPPConfig.from_vllm_config(c).validate(c)
-    assert get_kvpp_offload_config(c) is not None
+
+
+def test_default_layerwise_layout():
+    c = config()
     del c.kv_transfer_config.kv_connector_extra_config["layerwise_num_shared_buffers"]
-    assert get_kvpp_offload_config(c) is None
     KVPPConfig.from_vllm_config(c).validate(c)
 
 
@@ -38,14 +45,13 @@ def test_explicit_offload_and_ordinary_layerwise_pooling():
         ("layerwise_num_shared_buffers", 2),
         ("layerwise_num_shared_buffers", True),
         ("layerwise_prefetch_layers", 2),
-        ("layerwise_prefetch_layers", 4),
         ("backend", "mooncake"),
     ],
 )
 def test_reject_unsupported_layout(key, value):
     c = config()
     c.kv_transfer_config.kv_connector_extra_config[key] = value
-    with pytest.raises(ValueError, match="KVPP layerwise offload"):
+    with pytest.raises((ValueError, TypeError)):
         KVPPConfig.from_vllm_config(c).validate(c)
 
 

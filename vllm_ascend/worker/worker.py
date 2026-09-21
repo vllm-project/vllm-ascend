@@ -69,7 +69,7 @@ from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config, get_kvpp_offload_config, init_ascend_config
+from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config, init_ascend_config
 from vllm_ascend.batch_invariant import init_batch_invariance
 from vllm_ascend.core.kv_cache_placement import (
     KVPPPhysicalCachePlan,
@@ -1104,7 +1104,7 @@ class NPUWorker(WorkerBase):
                 extra_config,
             )
         kvpp_config = KVPPConfig.from_vllm_config(self.vllm_config)
-        if kvpp_config.size > 1 and get_kvpp_offload_config(self.vllm_config) is None:
+        if kvpp_config.size > 1 and extra_config is None:
             kvpp_rank = get_tp_group().rank_in_group % kvpp_config.size
             self._kvpp_cache_allocation_plan = create_kvpp_cache_allocation_plan(
                 self.vllm_config,
