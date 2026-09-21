@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 import torch
 from flash_attn_npu_3 import flash_attn_with_kvcache, get_scheduler_metadata
 from vllm.config import VllmConfig
-from vllm.v1.attention.backend import AttentionCGSupport, AttentionMetadataBuilder, AttentionType
+from vllm.v1.attention.backend import AttentionCGSupport, AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.attention.attention_v1 import (
@@ -53,7 +53,6 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.device = device
         self.model_runner_type = vllm_config.model_config.runner_type
-        self.max_num_reqs = vllm_config.scheduler_config.max_num_seqs + 1
         self.capture_sizes = set(vllm_config.compilation_config.cudagraph_capture_sizes or [])
         self.block_size = kv_cache_spec.block_size
         self.scheduler_specs = set()
@@ -83,8 +82,6 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
     ) -> AscendFlashAttentionMetadata:
         common = common_attn_metadata
         num_reqs = common.num_reqs
-        if num_reqs > self.max_num_reqs:
-            raise ValueError("FA3 request count exceeds the configured batch capacity.")
         # The runner can append zero-length or dummy requests for graph padding.
         # Its CPU offsets identify the active prefix without a device sync.
         # Keep one empty request for dummy forwards: the operator requires B > 0.
@@ -195,17 +192,6 @@ class AscendFlashAttentionImpl(AscendAttentionBackendImpl):
             sinks,
             **kwargs,
         )
-        if self.enable_c8_quant or self.kv_cache_dtype not in ("auto", "float16", "bfloat16"):
-            raise ValueError("FA3 requires FP16/BF16 KV cache; C8 and other quantized KV caches are unsupported.")
-        # DECODER identifies self-attention in a decoder model, not a decode
-        # scheduler step. It includes prefill, chunked prefill and mixed P/D.
-        if self.attn_type != AttentionType.DECODER:
-            raise ValueError("FA3 does not support encoder attention or encoder-decoder cross-attention.")
-        if self.alibi_slopes is not None or self.sliding_window is not None or self.sinks is not None:
-            raise ValueError("FA3 backend currently requires full attention without ALiBi or attention sinks.")
-        parallel = self.vllm_config.parallel_config
-        if parallel.prefill_context_parallel_size != 1 or parallel.decode_context_parallel_size != 1:
-            raise ValueError("FA3 context parallelism is not implemented.")
         self.logits_soft_cap = logits_soft_cap or 0.0
 
     @staticmethod

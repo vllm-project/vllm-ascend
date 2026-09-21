@@ -81,7 +81,9 @@ changes are not required.
 This backend targets dense decoder self-attention with FP16/BF16 KV cache and
 128-token pages, including GQA/MQA. C8, other quantized KV caches, MLA, sparse
 attention, context parallelism, sliding windows, ALiBi, and attention sinks are
-outside its supported scope and are rejected.
+outside its supported scope and retain their original attention backend.
+Unsupported per-layer settings are excluded during backend selection, before
+constructing FA3 metadata or implementation instances.
 
 Multi-token causal verification is tested independently of a draft algorithm.
 Query offsets and KV lengths stay on device so that future EAGLE3, MTP, and

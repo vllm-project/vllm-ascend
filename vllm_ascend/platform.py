@@ -276,6 +276,7 @@ class NPUPlatform(Platform):
 
         # vLLM config imports platforms during initialization; import lazily.
         from vllm.config import get_current_vllm_config_or_none
+        from vllm.v1.attention.backend import AttentionType
 
         vllm_config = get_current_vllm_config_or_none()
         if (
@@ -287,6 +288,18 @@ class NPUPlatform(Platform):
                 architecture in ("Qwen3ForCausalLM", "Qwen3MoeForCausalLM")
                 for architecture in (vllm_config.model_config.hf_config.architectures or [])
             )
+            and attn_selector_config.attn_type == AttentionType.DECODER
+            and attn_selector_config.dtype in (torch.float16, torch.bfloat16)
+            and attn_selector_config.head_size == 128
+            and attn_selector_config.block_size in (None, 128)
+            and attn_selector_config.kv_cache_dtype in (None, "auto", "float16", "bfloat16")
+            and not attn_selector_config.has_sliding_window
+            and not attn_selector_config.has_sink
+            and not attn_selector_config.use_mm_prefix
+            and not attn_selector_config.use_per_head_quant_scales
+            and not attn_selector_config.use_batch_invariant
+            and not attn_selector_config.use_adaptive_verification
+            and not attn_selector_config.use_dcp
             and vllm_config.parallel_config.prefill_context_parallel_size == 1
             and vllm_config.parallel_config.decode_context_parallel_size == 1
             and vllm_config.cache_config.cache_dtype in ("auto", "float16", "bfloat16")

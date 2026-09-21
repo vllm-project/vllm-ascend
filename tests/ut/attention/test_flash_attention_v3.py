@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from vllm.v1.attention.selector import AttentionSelectorConfig
 
 with patch.dict(sys.modules, {"flash_attn_npu_3": MagicMock()}):
     from vllm_ascend.attention import flash_attention_v3 as fa3
@@ -211,19 +212,6 @@ def test_tiling_prepared_before_capture_and_refreshed_in_place(builder, impl):
     assert metadata.scheduler_metadata[spec].tolist() == [2]
 
 
-@pytest.mark.parametrize("c8,cache_dtype", [(True, "auto"), (False, "int8"), (False, "fp8")])
-def test_quantized_cache_rejected(c8, cache_dtype):
-    def initialize(self, *args, **kwargs):
-        self.enable_c8_quant = c8
-        self.kv_cache_dtype = cache_dtype
-
-    with (
-        patch.object(fa3.AscendAttentionBackendImpl, "__init__", initialize),
-        pytest.raises(ValueError, match="C8"),
-    ):
-        fa3.AscendFlashAttentionImpl(4, 128, 0.1, 2, None, None, cache_dtype, None, "decoder", None)
-
-
 @pytest.mark.parametrize(
     "device_type", [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5, AscendDeviceType._310P]
 )
@@ -243,7 +231,9 @@ def test_quantized_cache_rejected(c8, cache_dtype):
     ],
 )
 def test_platform_selects_fa3_by_model(device_type, architecture, installed, c8, cache_dtype, pcp, dcp, rl, expected):
-    selector = SimpleNamespace(use_mla=False, use_sparse=False, use_compress=False, use_pcp=pcp > 1)
+    selector = AttentionSelectorConfig(
+        head_size=128, dtype=torch.bfloat16, kv_cache_dtype=cache_dtype, block_size=128, use_pcp=pcp > 1
+    )
     config = SimpleNamespace(
         model_config=SimpleNamespace(hf_config=SimpleNamespace(architectures=[architecture])),
         parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp, decode_context_parallel_size=dcp),
@@ -337,3 +327,46 @@ def test_capture_does_not_require_attention_state(builder, capture_state):
     assert metadata.seq_lens is common.seq_lens
     metadata = builder.build_for_cudagraph_capture(common)
     assert metadata.block_tables is common.block_table_tensor
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"attn_type": "encoder"},
+        {"attn_type": "encoder_only"},
+        {"attn_type": "encoder_decoder"},
+        {"dtype": torch.float32},
+        {"head_size": 64},
+        {"block_size": 64},
+        {"kv_cache_dtype": "fp8"},
+        {"has_sliding_window": True},
+        {"has_sink": True},
+        {"use_mm_prefix": True},
+        {"use_per_head_quant_scales": True},
+        {"use_batch_invariant": True},
+        {"use_adaptive_verification": True},
+        {"use_dcp": True},
+    ],
+)
+def test_unsupported_layer_selects_original_backend(overrides):
+    selector = AttentionSelectorConfig(
+        head_size=128, dtype=torch.bfloat16, kv_cache_dtype="auto", block_size=128
+    )._replace(**overrides)
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(architectures=["Qwen3ForCausalLM"])),
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=1, decode_context_parallel_size=1),
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+        quant_config=None,
+    )
+    with (
+        patch("vllm.config.get_current_vllm_config_or_none", return_value=config),
+        patch("vllm_ascend.platform._validate_fa3_backend", return_value=False),
+        patch(
+            "vllm_ascend.platform.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A3)
+        ),
+        patch("vllm_ascend.platform.get_ascend_device_type", return_value=AscendDeviceType.A3),
+        patch("vllm_ascend.platform.util.find_spec", return_value=object()),
+    ):
+        assert NPUPlatform.get_attn_backend_cls(None, selector) == (
+            "vllm_ascend.attention.attention_v1.AscendAttentionBackend"
+        )
