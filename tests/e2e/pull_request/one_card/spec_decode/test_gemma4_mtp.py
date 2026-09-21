@@ -84,10 +84,13 @@ _EXAMPLE_PROMPTS = [_HEADER + f"{sig}\n{doc}" for sig, doc in _TASKS]
 MODELS = ["Google/gemma-4-31B-it"]
 DRAFT_MODEL = "Google/gemma-4-31B-it-assistant"
 
+NUM_SPECULATIVE_TOKENS = 3
+
 # Measured baseline is ~0.98/0.96/0.90 (multiple runs on 950DT); golden is
 # set a few points below to absorb machine variance, and the assertion below
-# tolerates another 0.06 shortfall per position.
+# tolerates another 0.06 shortfall per position. One entry per draft position.
 GOLDEN_ACCEPTANCE = [0.94, 0.90, 0.84]
+assert len(GOLDEN_ACCEPTANCE) == NUM_SPECULATIVE_TOKENS
 
 
 @pytest.mark.skipif(not is_950(), reason="Gemma4 MTP requires Ascend 950 (A5)")
@@ -107,7 +110,7 @@ def test_gemma4_mtp_acceptance_tp1(model_name):
         speculative_config={
             "method": "mtp",
             "model": DRAFT_MODEL,
-            "num_speculative_tokens": 3,
+            "num_speculative_tokens": NUM_SPECULATIVE_TOKENS,
         },
         compilation_config=CompilationConfig(cudagraph_mode="FULL_DECODE_ONLY", cudagraph_capture_sizes=[20]),
     ) as spec_vllm_model:
@@ -115,20 +118,29 @@ def test_gemma4_mtp_acceptance_tp1(model_name):
         metrics = spec_vllm_model.model.get_metrics()
 
     num_drafts = 0
-    num_accepted_tokens_per_pos = [0] * 3
+    num_accepted_tokens_per_pos = [0] * len(GOLDEN_ACCEPTANCE)
     for metric in metrics:
         if metric.name == "vllm:spec_decode_num_drafts":
             assert isinstance(metric, Counter)
             num_drafts += metric.value
         elif metric.name == "vllm:spec_decode_num_accepted_tokens_per_pos":
             assert isinstance(metric, Vector)
-            for pos in range(len(metric.values)):
-                num_accepted_tokens_per_pos[pos] += metric.values[pos]
+            assert len(metric.values) == len(GOLDEN_ACCEPTANCE), (
+                f"expected {len(GOLDEN_ACCEPTANCE)} per-position values, got {len(metric.values)}"
+            )
+            for pos, value in enumerate(metric.values):
+                num_accepted_tokens_per_pos[pos] += value
 
     assert num_drafts > 0, "no speculative drafts were executed"
     acceptance_per_pos = [accepted / num_drafts for accepted in num_accepted_tokens_per_pos]
 
-    match = all((a >= b) or (b - a < 0.06) for a, b in zip(acceptance_per_pos, GOLDEN_ACCEPTANCE))
+    print(
+        f"per-position acceptance: {[round(rate, 4) for rate in acceptance_per_pos]}"
+        f"  aggregate: {sum(acceptance_per_pos) / len(acceptance_per_pos):.4f}"
+        f"  (num_drafts={num_drafts})"
+    )
+
+    match = all((a >= b) or (b - a < 0.06) for a, b in zip(acceptance_per_pos, GOLDEN_ACCEPTANCE, strict=True))
     assert match, (
         f"acceptance_per_pos {acceptance_per_pos} does not match golden {GOLDEN_ACCEPTANCE} (num_drafts={num_drafts})"
     )
