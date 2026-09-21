@@ -127,11 +127,6 @@ class _AscendVLPreprocessMixin:
         self._ps = vc.patch_size
         self._tps = vc.temporal_patch_size
         self._ms = vc.spatial_merge_size
-        # Disable offload when encoder ACL graph is enabled: _resize_and_patchify
-        # has dynamic shapes (variable image sizes) that cannot be captured into
-        # a fixed-shape graph. Fall back to the original CPU preprocessing.
-        cc = vllm_config.compilation_config
-        self._pp_offload = not cc.cudagraph_mm_encoder
 
     def _resize_and_patchify(self, image_input, grid_thw):
         """Flat raw uint8 -> per-image resize -> patchify -> concat patches."""
@@ -182,17 +177,38 @@ class _AscendVLPreprocessMixin:
         sizes = (grid_thw.prod(-1) // self._ms // self._ms).tolist()
         return embeds.split(sizes)
 
+    def _get_pixel_values_by_modality(self, mm_kwargs):
+        """Device-side preprocessing hook for the encoder ACL graph path.
+
+        With cudagraph_mm_encoder enabled, replay bypasses _process_image_input
+        and feeds mm_kwargs["pixel_values"] straight into the captured ViT,
+        which expects patchified 2-D input (num_patches, C*tps*ps*ps). Run the
+        same preprocessing here so the graph path is equivalent to the eager
+        path. Dicts already sliced by select_encoder_cudagraph_items carry 2-D
+        patches (no image_hw) and fall through to the base implementation.
+        """
+        if "image_hw" in mm_kwargs:
+            grid_thw = mm_kwargs["image_grid_thw"]
+            image_input = {
+                "type": "pixel_values",
+                "pixel_values": mm_kwargs["pixel_values"],
+                "image_grid_thw": grid_thw,
+                "image_hw": mm_kwargs["image_hw"],
+            }
+            patches = self._resize_and_patchify(image_input, grid_thw)
+            return self.input_norm(patches, self.visual.dtype)
+        if "pixel_values_videos" in mm_kwargs:
+            return self.input_norm(mm_kwargs["pixel_values_videos"], self.visual.dtype)
+        return super()._get_pixel_values_by_modality(mm_kwargs)
+
     def _process_image_input(self, image_input):
         grid_thw = image_input["image_grid_thw"]
         if image_input["type"] == "image_embeds":
             embeds = image_input["image_embeds"].type(self.visual.dtype)
             sizes = (grid_thw.prod(-1) // self._ms // self._ms).tolist()
             return embeds.split(sizes)
-        if self._pp_offload:
-            patches = self._resize_and_patchify(image_input, grid_thw)
-            pixel_values = self.input_norm(patches, self.visual.dtype)
-        else:
-            pixel_values = image_input["pixel_values"].type(self.visual.dtype)
+        patches = self._resize_and_patchify(image_input, grid_thw)
+        pixel_values = self.input_norm(patches, self.visual.dtype)
         return self._run_visual(pixel_values, grid_thw)
 
     def _process_video_input(self, video_input):
