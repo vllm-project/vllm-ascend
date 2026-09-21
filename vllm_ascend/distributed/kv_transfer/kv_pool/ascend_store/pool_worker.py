@@ -878,6 +878,11 @@ class KVPoolWorker:
 
         layer_cache_entry_offsets = [0]
         for phys in sorted(layer_names_by_physical):
+            if self.use_kvpp:
+                # Index the owner-filtered cache table, not all model layers.
+                self.physical_layer_to_group_layers.setdefault(phys + self.layerwise_key_layer_offset, []).append(
+                    (group_id, len(layer_cache_entry_offsets) - 1)
+                )
             for layer_name in sorted(layer_names_by_physical[phys]):
                 cache_or_caches = self.kv_caches[layer_name]
                 for cache in self._as_cache_tuple(cache_or_caches):
@@ -935,6 +940,7 @@ class KVPoolWorker:
         self.group_layer_cache_entry_offsets: dict[int, list[int]] = {}
         self.kv_caches = kv_caches
         if self.use_kvpp:
+            self.physical_layer_to_group_layers.clear()
             owners = map_kvpp_layers_to_owners(self.vllm_config, kv_caches.keys())
             kv_caches = {name: caches for name, caches in kv_caches.items() if owners.get(name) in (None, self.tp_rank)}
             self.kv_caches = kv_caches
@@ -2352,7 +2358,9 @@ class KVPoolWorker:
                 self._prepare_block_key_layerwise_sessions(requests)
         for local_layer in range(num_local):
             physical_layer = local_layer + layer_offset
-            group_layers = self.physical_layer_to_group_layers.get(physical_layer, [(0, local_layer)])
+            group_layers = self.physical_layer_to_group_layers.get(
+                physical_layer, [] if self.use_kvpp else [(0, local_layer)]
+            )
             for group_id, layer_idx_in_group in group_layers:
                 self._process_save_for_layer_batch(
                     group_requests.get(group_id, requests), local_layer, group_id, layer_idx_in_group
@@ -2363,7 +2371,9 @@ class KVPoolWorker:
         self._build_shared_save_data()
         for local_layer in range(num_local):
             physical_layer = local_layer + layer_offset
-            group_layers = self.physical_layer_to_group_layers.get(physical_layer, [(0, local_layer)])
+            group_layers = self.physical_layer_to_group_layers.get(
+                physical_layer, [] if self.use_kvpp else [(0, local_layer)]
+            )
             for group_id, layer_idx_in_group in group_layers:
                 self._process_load_for_layer_batch(
                     group_requests.get(group_id, requests), local_layer, group_id, layer_idx_in_group
