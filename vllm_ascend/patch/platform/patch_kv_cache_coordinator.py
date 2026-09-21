@@ -5,14 +5,13 @@ from collections.abc import Mapping
 from math import lcm
 
 import vllm
-import vllm.envs as envs_vllm
-import vllm.v1.core.kv_cache_coordinator as vllm_kv_cache_coordinator
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_coordinator import (
     HybridKVCacheCoordinator,
     KVCacheCoordinator,
     SpecGroup,
+    _validate_prefix_cache_retention_interval,
 )
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
@@ -147,18 +146,15 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         token_budget = _select_kv_token_budget(max_model_len, max_in_flight_tokens, max_num_batched_tokens)
         self.max_in_flight_tokens = token_budget
         self.max_num_batched_tokens = token_budget
-        self.retention_interval = getattr(envs_vllm, "VLLM_PREFIX_CACHE_RETENTION_INTERVAL", None)
-        validate_retention_interval = getattr(
-            vllm_kv_cache_coordinator,
-            "_validate_prefix_cache_retention_interval",
-            None,
+        # vLLM 0.29 resolves the environment/CLI value into KVCacheConfig.
+        # Read the effective config rather than consulting the process
+        # environment again, which would discard programmatic overrides.
+        self.retention_interval = kv_cache_config.prefix_cache_retention_interval
+        _validate_prefix_cache_retention_interval(
+            self.retention_interval,
+            self.scheduler_block_size,
+            kv_cache_config,
         )
-        if self.retention_interval is not None and validate_retention_interval is not None:
-            validate_retention_interval(
-                self.retention_interval,
-                self.scheduler_block_size,
-                kv_cache_config,
-            )
         self.block_pool = BlockPool(
             num_gpu_blocks=kv_cache_config.num_blocks,
             enable_caching=enable_caching,
