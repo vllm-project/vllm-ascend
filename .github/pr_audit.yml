@@ -1,0 +1,52 @@
+# PR-audit policy. Keep enforcement false during the initial observation period.
+enforcement: false
+block_on_warnings: false
+
+title_min_length: 5
+body_min_length: 15
+max_added_lines: 1000
+
+# Only BugFix and Feature PRs must link an Issue/RFC. A milestone also satisfies
+# this check. `Refs #123` is allowed for RFCs; closing keywords are preferred
+# for issues that should close when the PR merges.
+issue_required_title_prefixes:
+  - "[BugFix]"
+  - "[Feature]"
+allow_milestone: true
+issue_keywords:
+  - fixes
+  - closes
+  - resolves
+  - refs
+
+code_extensions:
+  - .py
+  - .c
+  - .cc
+  - .cpp
+  - .h
+  - .hpp
+  - .cu
+  - .yaml
+  - .yml
+  - .sh
+test_path_substrings:
+  - test
+  - tests/
+  - ut/
+
+forbidden_links:
+  - https://wiki.huawei.com
+  - https://dbox.huawei.com
+  - https://3ms.huawei.com
+
+labels:
+  pending: pr-audit-pending
+  failed: pr-audit-failed
+  reminded: pr-audit-reminded
+  escalated: pr-audit-escalated
+
+reminder_after_hours: 24
+escalate_after_hours: 72
+# Set this to an existing visible GitHub team when the policy is approved.
+maintainer_mention: ""

@@ -1,0 +1,39 @@
+name: PR Audit
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited, ready_for_review]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: pr-audit-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  pr-audit:
+    name: PR Audit
+    # Forks use GitHub-hosted runners by default. Upstream can set the
+    # PR_AUDIT_RUNNER repository variable to linux-amd64-cpu-2-hk.
+    runs-on: ${{ vars.PR_AUDIT_RUNNER || 'ubuntu-latest' }}
+    # This workflow must never check out or run code from the PR head. The base
+    # revision contains the trusted policy and audit script.
+    steps:
+      - name: Check out trusted base revision
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+
+      - name: Install audit dependency
+        run: python3 -m pip install --disable-pip-version-check PyYAML==6.0.2
+
+      - name: Audit pull request
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 .github/workflows/scripts/pr_audit.py \
+            --config .github/pr_audit.yml \
+            --event-path "$GITHUB_EVENT_PATH"

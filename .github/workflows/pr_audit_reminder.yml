@@ -1,0 +1,27 @@
+name: PR Audit Reminder
+
+on:
+  schedule:
+    # 09:17 China Standard Time; avoid the top of the hour.
+    - cron: "17 1 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+jobs:
+  remind:
+    name: PR audit reminders
+    runs-on: ${{ vars.PR_AUDIT_RUNNER || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install audit dependency
+        run: python3 -m pip install --disable-pip-version-check PyYAML==6.0.2
+
+      - name: Remind open pull requests
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 .github/workflows/scripts/pr_audit.py --config .github/pr_audit.yml --remind
