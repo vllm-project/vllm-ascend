@@ -87,6 +87,22 @@ class KVPPConfig:
             if kv_transfer_config.kv_role == "kv_consumer":
                 raise ValueError("KVPP must be disabled on the decode-only node.")
 
+        if kv_transfer_config is not None and kv_transfer_config.kv_connector == "AscendStoreConnector":
+            extra = kv_transfer_config.kv_connector_extra_config or {}
+            if extra.get("use_layerwise", False):
+                if (
+                    extra.get("backend", "mooncake").lower() != "memcache"
+                    or kv_transfer_config.kv_role != "kv_producer"
+                ):
+                    raise ValueError("KVPP layerwise loading requires P-side Memcache.")
+                if (
+                    vllm_config.use_v2_model_runner
+                    or parallel_config.pipeline_parallel_size != 1
+                    or parallel_config.prefill_context_parallel_size != 1
+                    or vllm_config.speculative_config is not None
+                ):
+                    raise ValueError("KVPP layerwise loading requires V1, PP=PCP=1, and no speculative decoding.")
+
         model_config = vllm_config.model_config
         if not model_config.enforce_eager:
             raise ValueError("KVPP currently supports eager execution only; set --enforce-eager.")

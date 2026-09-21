@@ -40,6 +40,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     get_layerwise_protocol,
     validate_layerwise_topology,
 )
+from vllm_ascend.ascend_config import KVPPConfig
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendStoreKVConnectorWorkerMetadata,
     is_kv_save_role,
@@ -170,6 +171,9 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         scheduler_output: SchedulerOutput,
     ) -> KVConnectorMetadata:
         assert self.connector_scheduler is not None
+        if self.use_layerwise and KVPPConfig.from_vllm_config(self._vllm_config).size > 1:
+            # Layer hooks need this step's load/save tasks even on cache misses.
+            scheduler_output.has_sync_kv_loads = scheduler_output.total_num_scheduled_tokens > 0
         return self.connector_scheduler.build_connector_meta(scheduler_output)
 
     def request_finished(
