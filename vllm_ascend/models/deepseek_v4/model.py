@@ -106,6 +106,34 @@ from vllm_ascend.worker.v2.pp_utils import (
 sequence_parallel_chunk = sp_shard
 
 
+def _maybe_start_nz_warm_thread() -> None:
+    import os
+
+    if os.environ.get("MOTOR_COLDSTART_NZ_WARM", "off").strip().lower() != "thread":
+        return
+    try:
+        from vllm_ascend.quantization.methods.w8a8.w8a8_dynamic import start_nz_warm_thread
+
+        start_nz_warm_thread("thread")
+    except Exception:
+        from vllm.logger import logger
+
+        logger.warning("NZ format-cast warmup thread skipped", exc_info=True)
+
+
+def _maybe_start_early_kernel_warmup() -> None:
+    try:
+        from vllm_ascend.model_executor.warmup.early_kernel_warmup import (
+            start_early_kernel_warmup,
+        )
+
+        start_early_kernel_warmup()
+    except Exception:
+        from vllm.logger import logger
+
+        logger.warning("Early kernel warmup skipped", exc_info=True)
+
+
 class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
     def __init__(
         self,
@@ -209,9 +237,10 @@ def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor, inverse: bool = F
 
 
 def get_spec_layer_idx_from_weight_name(config: DeepseekV2Config | DeepseekV3Config, weight_name: str) -> int | None:
-    if weight_name.startswith("mtp."):
-        return 0
-    return None
+    if not weight_name.startswith("mtp."):
+        return None
+    token = weight_name.split(".", 2)[1]
+    return int(token) if token.isdigit() else 0
 
 
 class DeepseekV2MLP(nn.Module):
@@ -802,6 +831,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             lambda prefix: DeepseekV4DecoderLayer(vllm_config, prefix, topk_indices_buffer=topk_indices_buffer),
             prefix=f"{prefix}.layers",
         )
+        _maybe_start_nz_warm_thread()
+        _maybe_start_early_kernel_warmup()
 
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -843,19 +874,17 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # permanently cost max_num_batched_tokens * hc_dim per rank.
         # Aligned with upstream DeepSeekV4 (see vllm PR #50312).
         spec_config = vllm_config.speculative_config
-        needs_mtp_hidden_states = spec_config is not None and (
-            spec_config.use_eagle() or spec_config.uses_draft_model()
+        self._needs_mtp_hidden_states = bool(
+            get_pp_group().is_last_rank
+            and spec_config is not None
+            and (spec_config.use_eagle() or spec_config.uses_draft_model())
         )
-        self._mtp_hidden_buffer = (
-            torch.empty(
-                vllm_config.scheduler_config.max_num_batched_tokens,
-                hc_dim,
-                dtype=vllm_config.model_config.dtype,
-                device=self.device,
-            )
-            if get_pp_group().is_last_rank and needs_mtp_hidden_states
-            else None
+        self._mtp_buffer_shape = (
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            hc_dim,
         )
+        self._mtp_buffer_dtype = vllm_config.model_config.dtype
+        self._mtp_hidden_buffer = None
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -943,7 +972,13 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             hidden_states = sp_all_gather(hidden_states)[: positions.shape[0]]
 
         # Stash pre-hc_head residual for the MTP draft (captured copy_).
-        if self._mtp_hidden_buffer is not None:
+        if self._needs_mtp_hidden_states:
+            if self._mtp_hidden_buffer is None:
+                self._mtp_hidden_buffer = torch.empty(
+                    self._mtp_buffer_shape,
+                    dtype=self._mtp_buffer_dtype,
+                    device=self.device,
+                )
             num_tokens = hidden_states.shape[0]
             self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
 
