@@ -963,6 +963,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             caches[draft][2].fill_(3)
             assert (caches[target][1] == 2).all()
             assert (caches[draft][0] == 0).all()
+
     def test_sfa_parent_allocation_main_and_legacy(self):
         from vllm_ascend.attention.sfa_v1 import AscendSFABackend
         from vllm_ascend.core.kv_cache_interface import get_sfa_kv_parent

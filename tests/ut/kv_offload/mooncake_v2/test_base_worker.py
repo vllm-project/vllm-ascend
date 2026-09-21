@@ -12,6 +12,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
+from vllm_ascend.core.kv_cache_interface import split_sfa_kv_parent
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_worker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import (
     MooncakeBaseConnectorWorker,
@@ -410,3 +411,90 @@ def test_base_worker_abstract_contract() -> None:
         worker.get_block_ids_with_load_errors()
     with pytest.raises(NotImplementedError):
         worker.start_load_kv(MagicMock())
+
+
+def _register_mla_layer(monkeypatch, caches: list) -> MooncakeBaseConnectorWorker:
+    """Register one MLA layer through MooncakeV2 with a mocked transfer engine.
+
+    The config matches the SFA parent geometry: 2 manager blocks of 4 kernel
+    blocks each, 128 tokens per kernel block, 576-wide packed page.
+    """
+    spec = MLAAttentionSpec(block_size=256, num_kv_heads=1, head_size=576, dtype=torch.bfloat16)
+    config = KVCacheConfig(
+        num_blocks=2,
+        kv_cache_tensors=[
+            make_kv_cache_tensor(
+                size=4 * 128 * 576 * 2,
+                layers=["layer.0"],
+                layer_stride=4 * 128 * 576 * 2,
+                block_stride=128 * 576 * 2,
+            )
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=spec)],
+    )
+    worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
+    worker.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
+    worker.kv_cache_config = config
+    worker.engine_id = "engine-d"
+    worker.te_rpc_port = 9000
+    worker.block_size = 256
+    worker.side_channel_host = "10.0.0.1"
+    worker.handshake_port = 5000
+    monkeypatch.setattr(base_worker, "global_te", MagicMock())
+    monkeypatch.setattr(base_worker, "validate_register_region_count", MagicMock())
+    worker.register_kv_caches({"layer.0": caches})
+    return worker
+
+
+def test_register_kv_caches_publishes_full_parent_page_shape_for_sfa_views(monkeypatch) -> None:
+    raw = torch.empty(4 * 128 * 576 * 2, dtype=torch.int8)
+    nope, rope = split_sfa_kv_parent(
+        raw,
+        dtype=torch.bfloat16,
+        shape=(4, 128, 1, 576),
+        nope_dim=512,
+    )
+
+    worker = _register_mla_layer(monkeypatch, [nope, rope])
+
+    metadata = worker.xfer_handshake_metadata
+    assert metadata is not None
+    # The packed page is 576 wide (NoPE 512 + RoPE 64). Publishing only the
+    # larger view's shape made the peer interpret each 576-wide page as 512.
+    assert metadata.block_shapes == [[(128, 1, 576)]]
+    assert metadata.block_strides == [[128 * 576 * 2]]
+    assert metadata.block_lens == [[128 * 576 * 2]]
+    assert metadata.block_size_scales == [[2]]
+
+
+def test_register_kv_caches_leaves_legacy_separate_kv_bindings_untouched(monkeypatch) -> None:
+    k_cache = torch.empty((4, 128, 1, 512), dtype=torch.bfloat16)
+    v_cache = torch.empty((4, 128, 1, 64), dtype=torch.bfloat16)
+
+    worker = _register_mla_layer(monkeypatch, [k_cache, v_cache])
+
+    metadata = worker.xfer_handshake_metadata
+    assert metadata is not None
+    assert metadata.block_shapes == [[(128, 1, 512), (128, 1, 64)]]
+
+
+def test_register_kv_caches_leaves_single_view_bindings_untouched(monkeypatch) -> None:
+    cache = torch.empty((4, 128, 1, 576), dtype=torch.bfloat16)
+
+    worker = _register_mla_layer(monkeypatch, [cache])
+
+    metadata = worker.xfer_handshake_metadata
+    assert metadata is not None
+    assert metadata.block_shapes == [[(128, 1, 576)]]
+
+
+def test_register_kv_caches_fails_fast_on_misaligned_parent_views(monkeypatch) -> None:
+    raw = torch.empty(4 * 128 * 576 * 2, dtype=torch.int8)
+    parent = raw.view(torch.bfloat16).view(4, 128, 1, 576)
+    nope = parent[..., :512]
+    rope = parent[..., 64:128]
+
+    # Views matching the interleaved signature but not tiling a parent page
+    # must fail loudly instead of silently publishing a wrong block shape.
+    with pytest.raises(ValueError, match="RoPE offset"):
+        _register_mla_layer(monkeypatch, [nope, rope])
