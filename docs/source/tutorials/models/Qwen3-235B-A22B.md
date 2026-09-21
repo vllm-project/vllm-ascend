@@ -30,7 +30,7 @@ The following model variants are available. It is recommended to download the mo
 
 | Model | Quantization | Hardware Requirement | Download |
 |-------|-------------|---------------------|----------|
-| Qwen3-235B-A22B-W8A8 | W8A8 | 1 Atlas 800I A3 (64GB × 16), 1 Atlas 800I A2 (64GB × 8), 2 Atlas 800I A2 (32GB × 8)| [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3-235B-A22B-w8a8-QuaRot/files) |
+| Qwen3-235B-A22B-w8a8-QuaRot | W8A8 | 1 Atlas 800I A3 (64GB × 16), 1 Atlas 800I A2 (64GB × 8), 2 Atlas 800I A2 (32GB × 8)| [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3-235B-A22B-w8a8-QuaRot/files) |
 
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.
 
