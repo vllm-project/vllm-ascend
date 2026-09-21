@@ -14,6 +14,7 @@ from vllm_ascend.attention.dsa_v41 import (
     AscendDSAV41Impl,
     AscendDSAV41MetadataBuilder,
     _config_value,
+    _v41_logger,
     scatter_cache_sk,
 )
 from vllm_ascend.utils import enable_dsa_cp, npu_stream_switch
@@ -34,7 +35,15 @@ class _ReplicatedCacheMetadataBuilder(AscendDSAV41MetadataBuilder):
             kv_cache_spec, layer_names, vllm_config, device, build_query_metadata=False
         )
 
+    def prepare_source_rope(self):
+        # MRV2 wires RoPE init through this hook; forward to the inner
+        # global builder. This must not flip the async task switch.
+        _v41_logger.info("V4.1 %s.prepare_source_rope -> forward to inner builders", type(self).__name__)
+        self._global_builder.prepare_source_rope()
+        super().prepare_source_rope()
+
     def enable_device_metadata(self):
+        _v41_logger.info("V4.1 %s.enable_device_metadata -> forward to inner builders", type(self).__name__)
         super().enable_device_metadata()
         self._global_builder.enable_device_metadata()
 
