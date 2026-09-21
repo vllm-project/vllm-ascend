@@ -80,7 +80,15 @@ from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.attention.utils import mark_fused_preprocess_weights
 from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention  # type: ignore[import-untyped]
-from vllm_ascend.utils import get_rotation_path
+from vllm_ascend.utils import enable_sp_across_pp, get_rotation_path
+from vllm_ascend.worker.v2.pp_utils import (
+    PPTransportDataType,
+    add_pp_transport_tensors,
+    get_pp_transport_tensors,
+)
+from vllm_ascend.worker.v2.pp_utils import (
+    make_empty_intermediate_tensors as make_pp_empty_intermediate_tensors,
+)
 
 if HAS_TRITON:
     from vllm_ascend.ops.triton.kimi_k3.attention_residual import (  # type: ignore[import-untyped]
@@ -461,6 +469,7 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
                 intermediate_size=config.intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
+                reduce_results=not use_sequence_parallel,
                 prefix=f"{prefix}.mlp",
                 use_sequence_parallel=use_sequence_parallel,
                 activation_situ_beta=config.activation_situ_beta,
@@ -516,6 +525,17 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
         # Ascend attention returns its output instead of filling an AMD buffer.
         return self.self_attn(positions=positions, hidden_states=hidden_states)
 
+    def _run_mlp(self, hidden_states: torch.Tensor, full_num_tokens: int) -> torch.Tensor:
+        # Routed MoE already consumes SP shards. Dense layers still have
+        # TP-sharded weights and need the same AG/RS boundaries as attention.
+        dense_sp = self.use_sequence_parallel and not self.is_moe_layer
+        if dense_sp:
+            hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
+        hidden_states = self.mlp(hidden_states)
+        if dense_sp:
+            hidden_states = sp_reduce_scatter(hidden_states)
+        return hidden_states
+
     def forward_attn_residual(
         self,
         positions: torch.Tensor,
@@ -557,13 +577,18 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
             mlp_valid_blocks,
         )
         hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
+        hidden_states = self._run_mlp(hidden_states, positions.shape[0])
         hidden_states = prefix_sum + hidden_states
         return hidden_states, block_residual
 
 
 class AscendKimiLinearModel(UpstreamKimiLinearModel):
     """Kimi text model assembled from the Ascend decoder layer."""
+
+    # The Ascend forward path carries cumulative auxiliary states across PP.
+    # Use the same keys for MRV2 receive buffers and intermediate-stage relay.
+    supports_aux_hidden_states_over_pp = True
+    AUX_HIDDEN_STATE_KEY = "pp_transport_aux_hidden_states_"
 
     packed_modules_mapping = {
         name: list(shards) for name, shards in UpstreamPackedKimiLinearModel.packed_modules_mapping.items()
@@ -583,15 +608,10 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         config = vllm_config.model_config.hf_text_config
         self.config = config
         self.vocab_size = config.vocab_size
-        parallel_config = vllm_config.parallel_config
         # vLLM's generic MoE SP switch currently requires DP > 1. K3 also
         # needs the same rank-local token layout for the TP/EP, DP=1 topology
         # that FlashComm used before the standard SP operators were available.
-        self.use_sequence_parallel = (
-            parallel_config.pipeline_parallel_size == 1
-            and parallel_config.enable_expert_parallel
-            and parallel_config.tensor_parallel_size > 1
-        )
+        self.use_sequence_parallel = enable_sp_across_pp(vllm_config)
 
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
@@ -639,6 +659,32 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         world_size = get_tensor_model_parallel_world_size()
         assert config.num_attention_heads % world_size == 0, "num_attention_heads must be divisible by world_size"
 
+    def _maybe_add_hidden_state(
+        self,
+        aux_hidden_states: list[torch.Tensor],
+        layer_idx: int,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+    ) -> list[torch.Tensor]:
+        if layer_idx in self.aux_hidden_state_layers:
+            # MLA DSpark consumes the raw prefix sum, not the 3-D AttnRes bank.
+            value = hidden_states
+            if residual is not None and residual.ndim == 2:
+                value = value + residual
+            aux_hidden_states.append(value)
+        return aux_hidden_states
+
+    def make_empty_intermediate_tensors(self, batch_size, dtype, device):
+        if self.config.attn_res_block_size is None:
+            return super().make_empty_intermediate_tensors(batch_size, dtype, device)
+        # Materialized DSpark states are captured before a layer; raw states
+        # are captured after the preceding layer. Handle a PP cut at either.
+        return make_pp_empty_intermediate_tensors(
+            self,
+            super().make_empty_intermediate_tensors,
+            include_start_layer=not self.dspark_aux_capture_materialized,
+        )(batch_size, dtype, device)
+
     def load_weights(self, weights):
         """Route mixed-precision KDA gates through vLLM's packed loader."""
         params_dict = dict(self.named_parameters())
@@ -683,6 +729,7 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
                 **kwargs,
             )
 
+        full_num_tokens = positions.shape[0]
         if get_pp_group().is_first_rank:
             hidden_states = inputs_embeds if inputs_embeds is not None else self.embed_input_ids(input_ids)
             residual = None
@@ -691,35 +738,29 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        full_num_tokens = positions.shape[0]
         if self.use_sequence_parallel:
             if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
                 forward_context = get_forward_context()
+                # Every stage starts with a full-token padding mask, even
+                # though only the first stage starts with full activations.
                 forward_context.is_padding = sp_padding_mask(
                     forward_context.is_padding,
-                    hidden_states,
+                    positions,
                 )
-            hidden_states = sp_shard(hidden_states)
-            assert residual is None, "Sequence parallelism is not supported with pipeline parallelism"
+            if get_pp_group().is_first_rank:
+                hidden_states = sp_shard(hidden_states)
 
-        if self.dspark_aux_capture_materialized:
-            aux_hidden_states: list[torch.Tensor] = []
-        else:
+        materialized_aux = self.dspark_aux_capture_materialized
+        aux_hidden_states = get_pp_transport_tensors(intermediate_tensors, PPTransportDataType.AUX_HIDDEN_STATES)
+        if not materialized_aux and get_pp_group().is_first_rank:
             aux_hidden_states = self._maybe_add_hidden_state(
-                [],
+                aux_hidden_states,
                 self.start_layer,
                 hidden_states,
                 residual,
             )
-        attn_res_block_num = cdiv(
-            self.end_layer,
-            self.config.attn_res_block_size,
-        )
-        block_residual = hidden_states.new_empty(
-            hidden_states.size(0),
-            attn_res_block_num,
-            hidden_states.size(1),
-        )
+        attn_res_block_num = cdiv(self.end_layer, self.config.attn_res_block_size)
+        block_residual = hidden_states.new_empty(hidden_states.size(0), attn_res_block_num, hidden_states.size(1))
         if residual is not None:
             block_residual[:, : residual.size(1), :].copy_(residual)
         residual = block_residual
@@ -728,7 +769,7 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
             self.layers[self.start_layer : self.end_layer],
             start=self.start_layer,
         ):
-            if self.dspark_aux_capture_materialized and layer_idx in self.aux_hidden_state_layers:
+            if materialized_aux and layer_idx in self.aux_hidden_state_layers:
                 aux_hidden_states.append(
                     _apply_ascend_attn_res(
                         hidden_states,
@@ -743,7 +784,7 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
                 hidden_states=hidden_states,
                 residual=residual,
             )
-            if not self.dspark_aux_capture_materialized and (layer_idx + 1) in self.aux_hidden_state_layers:
+            if not materialized_aux and (layer_idx + 1) in self.aux_hidden_state_layers:
                 self._maybe_add_hidden_state(
                     aux_hidden_states,
                     layer_idx + 1,
@@ -752,12 +793,14 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
                 )
 
         if not get_pp_group().is_last_rank:
-            assert not self.use_sequence_parallel, "Sequence parallelism is not supported with pipeline parallelism"
-            return IntermediateTensors(
-                {
-                    "hidden_states": hidden_states,
-                    "residual": residual,
-                }
+            if residual is None:
+                # An explicitly empty first PP stage has no additive residual
+                # yet. A zero tensor preserves its semantics in the PP buffers.
+                residual = hidden_states.new_zeros(hidden_states.shape[0], 0, hidden_states.shape[-1])
+            return add_pp_transport_tensors(
+                IntermediateTensors({"hidden_states": hidden_states, "residual": residual}),
+                PPTransportDataType.AUX_HIDDEN_STATES,
+                aux_hidden_states,
             )
 
         hidden_states = _apply_ascend_attn_res(

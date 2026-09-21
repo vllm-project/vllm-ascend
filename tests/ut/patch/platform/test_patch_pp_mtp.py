@@ -28,7 +28,12 @@ from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 @pytest.mark.parametrize(
     "model_type,architecture",
-    [("qwen3_5_mtp", "Qwen3_5MTP"), ("qwen3", "DSparkDraftModel"), ("qwen3", "Qwen3DSparkModel")],
+    [
+        ("qwen3_5_mtp", "Qwen3_5MTP"),
+        ("qwen3", "DSparkDraftModel"),
+        ("qwen3", "Qwen3DSparkModel"),
+        ("kimi_k3", "K3DSparkModel"),
+    ],
 )
 def test_model_config_validates_local_drafter_as_single_pp_rank(monkeypatch, model_type, architecture):
     fake_registry = SimpleNamespace(

@@ -9,7 +9,11 @@ import vllm.envs as vllm_envs
 from vllm.distributed.utils import get_pp_indices
 
 from vllm_ascend.worker.v2 import pp_utils
-from vllm_ascend.worker.v2.pp_utils import SpecPPSupport, bypass_upstream_spec_pp_guard
+from vllm_ascend.worker.v2.pp_utils import (
+    SpecPPSupport,
+    bypass_upstream_spec_pp_guard,
+    resolve_spec_pp_support,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -84,3 +88,52 @@ def test_pp_guard_noop_preserves_partition(monkeypatch, legacy, support):
         assert not bypassed
         assert config.parallel_config.pipeline_parallel_size == 2
         assert vllm_envs.VLLM_PP_LAYER_PARTITION == "42,36"
+
+from types import SimpleNamespace
+
+import pytest
+
+from vllm_ascend.worker.v2.pp_utils import resolve_spec_pp_support
+
+
+def _make_config(
+    architecture: str,
+    *,
+    method: str = "dspark",
+    pipeline_parallel_size: int = 2,
+):
+    return SimpleNamespace(
+        speculative_config=SimpleNamespace(method=method),
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=pipeline_parallel_size,
+        ),
+        model_config=SimpleNamespace(architecture=architecture),
+    )
+
+
+@pytest.mark.parametrize(
+    "architecture",
+    [
+        "KimiLinearForCausalLM",
+        "KimiK3ForCausalLM",
+        "KimiK3ForConditionalGeneration",
+    ],
+)
+def test_kimi_k3_dspark_pp_supports_all_target_aliases(architecture):
+    support = resolve_spec_pp_support(_make_config(architecture))
+
+    assert support is not None
+    assert support.needs_aux_hidden_states
+    assert support.bypass_upstream_pp_guard
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        _make_config("KimiLinearForCausalLM", pipeline_parallel_size=1),
+        _make_config("UnsupportedForPP"),
+        _make_config("KimiLinearForCausalLM", method="eagle"),
+    ],
+)
+def test_kimi_k3_dspark_pp_support_stays_scoped(config):
+    assert resolve_spec_pp_support(config) is None

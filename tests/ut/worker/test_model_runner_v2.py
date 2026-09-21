@@ -29,6 +29,7 @@ def _make_runner(need_timing: bool = True):
     runner.model_state = SimpleNamespace(kvpp_is_dummy_run=False)
     runner.execute_model_state = None
     runner.is_last_pp_rank = False
+    runner.use_spec_pp = False
     runner.attn_groups = []
     runner.adaptive_verification = None
     runner.use_fia = False
@@ -361,7 +362,7 @@ def test_pcp_dummy_refreshes_captured_buffers_after_real_batch(num_reqs, num_tok
 def test_prepare_dummy_attn_without_pcp_uses_upstream():
     runner = _make_runner()
     runner.pcp_manager = None
-    dummy = object()
+    dummy = SimpleNamespace(num_tokens_after_padding=4)
     with patch.object(GPUModelRunner, "prepare_dummy_attn", return_value=((), None)) as parent:
         assert runner.prepare_dummy_attn(dummy) == ((), None)
     parent.assert_called_once_with(dummy, valid_state_slots=False)
@@ -753,6 +754,7 @@ def _prepare_inputs_runner(*, draft=False, full_cg=False, use_dcp=False, use_pp=
     )
     batch_desc = SimpleNamespace(
         num_tokens=8 if full_cg else 4,
+        num_tokens_after_padding=8 if full_cg else 4,
         num_reqs=2,
         cg_mode=CUDAGraphMode.FULL if full_cg else CUDAGraphMode.NONE,
     )
@@ -777,7 +779,10 @@ def _run_prepare_inputs(
     prefill_inputs=None,
     combine_tokens=None,
 ):
-    batch = SimpleNamespace(positions=torch.zeros(4, dtype=torch.int32))
+    batch = SimpleNamespace(
+        positions=torch.zeros(4, dtype=torch.int32),
+        num_tokens_after_padding=4,
+    )
 
     def _partition(_pcp_manager, input_batch, **_kwargs):
         return input_batch

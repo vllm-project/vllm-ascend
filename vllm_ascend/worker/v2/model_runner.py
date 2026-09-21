@@ -63,7 +63,9 @@ from vllm_ascend.core.profiling_chunk_predictor import (
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
+    enable_sp_across_pp,
     is_pd_decode_recompute_scheduler_enabled,
+    kv_transfer_supports_shared_backing,
     lmhead_tp_enable,
     set_potential_max_tokens,
 )
@@ -95,6 +97,7 @@ class NPUModelRunner(GPUModelRunner):
     supports_standardized_shared_kv_backing = True
 
     execute_model_state: ExecuteModelState | None
+    intermediate_tensors: IntermediateTensors | None
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Ascend-specific configurations
@@ -336,15 +339,28 @@ class NPUModelRunner(GPUModelRunner):
             get_kv_transfer_group().handle_preemptions(kv_connector_metadata)
 
         self.model_state.kvpp_is_dummy_run = dummy_run or is_profile
-        output = super().execute_model(
-            scheduler_output,
-            intermediate_tensors=intermediate_tensors,
-            dummy_run=dummy_run,
-            skip_attn_for_dummy_run=skip_attn_for_dummy_run,
-            is_profile=is_profile,
-            context_len=context_len,
-            valid_dummy_state_slots=valid_dummy_state_slots,
+        # prepare_inputs gives the upstream copy a local-sized target view.
+        # Keep the full-capacity backing for later (possibly larger) batches.
+        pp_buffers = (
+            self.intermediate_tensors if enable_sp_across_pp(self.vllm_config) and not self.is_first_pp_rank else None
         )
+        try:
+            if dummy_run and skip_attn_for_dummy_run:
+                # Memory profiling skips prepare_inputs and prepare_dummy_attn.
+                # Its eager batch keeps the scheduler's full token count.
+                self.sync_and_slice_intermediate_tensors(scheduler_output.total_num_scheduled_tokens)
+            output = super().execute_model(
+                scheduler_output,
+                intermediate_tensors=intermediate_tensors,
+                dummy_run=dummy_run,
+                skip_attn_for_dummy_run=skip_attn_for_dummy_run,
+                is_profile=is_profile,
+                context_len=context_len,
+                valid_dummy_state_slots=valid_dummy_state_slots,
+            )
+        finally:
+            if pp_buffers is not None:
+                self.intermediate_tensors = pp_buffers
         self.model_state.kvpp_is_dummy_run = False
         self.kvpp.complete_forward()
 
@@ -653,11 +669,26 @@ class NPUModelRunner(GPUModelRunner):
         # For mla/sfa, update cos/sin. Here is for execute_model.
         update_cos_sin(input_batch.positions)
 
+        self.sync_and_slice_intermediate_tensors(input_batch.num_tokens_after_padding)
         return input_batch
+
+    def sync_and_slice_intermediate_tensors(self, num_tokens: int) -> None:
+        if not enable_sp_across_pp(self.vllm_config) or self.is_first_pp_rank:
+            return
+        assert self.intermediate_tensors is not None
+        tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+        local_num_tokens = (num_tokens + tp_size - 1) // tp_size
+        # Upstream slices both the source and destination by the full token
+        # count. Narrow the destination first so a shard cannot broadcast.
+        self.intermediate_tensors = IntermediateTensors(
+            {name: tensor[:local_num_tokens] for name, tensor in self.intermediate_tensors.tensors.items()}
+        )
 
     def prepare_dummy_attn(
         self, input_batch: AscendInputBatch, valid_state_slots: bool = False
     ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
+        # Dummy batches bypass prepare_inputs; use their dispatched padded size.
+        self.sync_and_slice_intermediate_tensors(input_batch.num_tokens_after_padding)
         if self.pcp_manager is None:
             return super().prepare_dummy_attn(
                 input_batch,
@@ -800,8 +831,16 @@ class NPUModelRunner(GPUModelRunner):
             query_start_loc,
         )
 
-        # Without MTP, update_requests writes the shared NumPy/torch CPU state.
-        if self.speculator is not None:
+        # Non-last speculative PP stages also receive corrected device positions,
+        # although only the last stage owns a speculator.
+        if self.speculator is not None or self.use_spec_pp:
+            self._copy_num_computed_tokens_to_cpu()
+
+    def postprocess_num_computed_tokens(self, input_batch: AscendInputBatch) -> None:
+        super().postprocess_num_computed_tokens(input_batch)
+        # Non-last PP stages advance prefill chunks without sampled-token output.
+        # Keep the CPU snapshot fresh before the next chunk prepares seq_lens.
+        if self.use_spec_pp:
             self._copy_num_computed_tokens_to_cpu()
 
     def _copy_num_computed_tokens_to_cpu(self):
@@ -828,7 +867,7 @@ class NPUModelRunner(GPUModelRunner):
         # MTP needs D2H copy to get reverted num_computed_tokens after rejection.
         # req_states.num_computed_tokens_cpu shares storage with its NumPy view,
         # so this update also corrects the num_computed_tokens_np used by PCP.
-        if self.speculator is not None:
+        if self.speculator is not None or self.use_spec_pp:
             self.num_computed_tokens_event.synchronize()
             for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
                 req_index = self.req_states.req_id_to_index[req_id]
