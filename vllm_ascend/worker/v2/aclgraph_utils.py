@@ -123,6 +123,34 @@ def _get_graph_update_backend(
     raise RuntimeError("No executable attention backend is available for full-graph parameter updates.")
 
 
+def _get_graph_update_backends(
+    attn_groups: list[list[AttentionGroup]],
+) -> list[type[AttentionBackend]]:
+    """All distinct backends with an executable attention impl.
+
+    Hybrid models (e.g. qwen4_exp) own more than one executable backend, and
+    each must get its ``update_graph_params`` pass before replay.
+    """
+    backends: list[type[AttentionBackend]] = []
+    seen: set[type[AttentionBackend]] = set()
+    for groups in attn_groups:
+        for group in groups:
+            backend = group.backend
+            if backend in seen:
+                continue
+            try:
+                impl_cls = backend.get_impl_cls()
+            except NotImplementedError:
+                # Metadata-only backends such as GDN have no attention impl.
+                continue
+            if impl_cls is not None:
+                seen.add(backend)
+                backends.append(backend)
+    if not backends:
+        raise RuntimeError("No executable attention backend is available for full-graph parameter updates.")
+    return backends
+
+
 class ModelAclGraphManager(ModelCudaGraphManager):
     """ACL Model Cuda Graph Manager for Ascend NPUs."""
 
@@ -160,16 +188,16 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         num_tokens = desc.num_tokens
         assert self.update_stream is not None
         with set_current_vllm_config(self.vllm_config):
-            attn_backend = _get_graph_update_backend(self.model_runner.attn_groups)
+            attn_backends = _get_graph_update_backends(self.model_runner.attn_groups)
         attn_metadata = self.model_runner.model_state.attn_metadata
 
-        if use_updatable_graph(attn_backend):
+        if any(use_updatable_graph(b) for b in attn_backends):
             return self._updatable_graph_replay(desc, attn_metadata)
         else:
             # This will be removed once the refactoring is fully complete.
-            return self._graph_relay(attn_backend, desc, num_tokens, attn_metadata)
+            return self._graph_relay(attn_backends, desc, num_tokens, attn_metadata)
 
-    def _graph_relay(self, attn_backend, desc, num_tokens, attn_metadata):
+    def _graph_relay(self, attn_backends, desc, num_tokens, attn_metadata):
         self.update_stream.wait_stream(torch.npu.current_stream())
         ret = super().run_fullgraph(desc)
 
@@ -195,15 +223,20 @@ class ModelAclGraphManager(ModelCudaGraphManager):
             ),
         ):
             forward_context = get_forward_context()
-            update_full_graph_params(
-                # FIXME(Ronald1995): support hybrid attn backend
-                attn_backend,
-                self.update_stream,
-                forward_context,
-                num_tokens,
-                self.vllm_config,
-                self.model_runner.speculative_config,
-            )
+            # Hybrid models (e.g. qwen4_exp) own more than one executable
+            # attention backend; refresh every one of them or the non-first
+            # backends' captured graph params go stale. Only reached when no
+            # backend is updatable-graph capable (updatable backends are
+            # refreshed by _updatable_graph_replay instead).
+            for attn_backend in attn_backends:
+                update_full_graph_params(
+                    attn_backend,
+                    self.update_stream,
+                    forward_context,
+                    num_tokens,
+                    self.vllm_config,
+                    self.model_runner.speculative_config,
+                )
         logger.info_once("ACL graph replay is active for the V2 target model (logged once).")
         return ret
 

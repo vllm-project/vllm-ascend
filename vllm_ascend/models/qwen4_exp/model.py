@@ -71,9 +71,21 @@ upstream_model.Qwen4ExpModel = AscendQwen4ExpModel
 class AscendQwen4ExpForCausalLM(upstream_model.Qwen4ExpForCausalLM):
     """Qwen3.8-Flash-Next text model using Ascend platform operators."""
 
+    @staticmethod
+    def get_model_state_cls():
+        from .model_state import AscendQwen4ExpModelState
+
+        return AscendQwen4ExpModelState
+
 
 class AscendQwen4ExpForConditionalGeneration(upstream_model.Qwen4ExpForConditionalGeneration):
     """Qwen3.8-Flash-Next multimodal model using Ascend operators."""
+
+    @staticmethod
+    def get_model_state_cls():
+        from .model_state import AscendQwen4ExpModelState
+
+        return AscendQwen4ExpModelState
 
 
 __all__ = [

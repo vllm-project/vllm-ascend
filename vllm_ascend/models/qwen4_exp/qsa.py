@@ -446,6 +446,17 @@ class AscendQSAImpl:
             output[:num_tokens],
         )
 
+    @staticmethod
+    def update_graph_params(
+        update_stream,
+        forward_context,
+        num_tokens,
+        vllm_config,
+        speculative_config=None,
+        draft_attn_metadatas=None,
+    ):
+        """QSA replay parameters live in persistent buffers; nothing to rebind."""
+
 
 class AscendQSABackend(upstream_qsa.Qwen4ExpQSAFlashAttentionBackend):
     @staticmethod
