@@ -1324,6 +1324,20 @@ class TestAscendSFAImpl(TestBase):
         fia.assert_not_called()
         sparse.assert_not_called()
 
+    def test_shared_fia_execution_requires_real_metadata_plan_before_impl_flags(self):
+        impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        metadata = MagicMock()
+
+        self.assertIsNone(
+            impl._try_sfa_fia_shared_prefill(
+                MagicMock(),
+                MagicMock(),
+                (),
+                metadata,
+                MagicMock(),
+            )
+        )
+
     def test_shared_fia_default_off_and_producer_decline(self):
         self.assertFalse(AscendConfig.enable_sfa_fia_shared_prefill)
         self.assertFalse(self.impl.enable_sfa_fia_shared_prefill)

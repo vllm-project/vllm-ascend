@@ -1874,10 +1874,10 @@ class AscendSFAImpl(MLAAttentionImpl):
         topk_indices: torch.Tensor,
     ) -> torch.Tensor | None:
         """Consume current layer TopK using one full FIA group and one sparse tail."""
-        if not self.use_index_cache:
-            return None
         plan = getattr(attn_metadata, "sfa_fia_shared_prefill_plan", None)
-        if plan is None:
+        if not isinstance(plan, SFAFIASharedPrefillPlan):
+            return None
+        if not self.use_index_cache:
             return None
         if attn_metadata.attn_state not in (
             AscendAttentionState.PrefillNoCache,
