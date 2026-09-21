@@ -23,22 +23,22 @@ from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 @wait_until_npu_memory_free(target_free_percentage=0.7)
-def test_qwen3_vl_embedding_mrv2_pooling_a2():
-    """Verify MRV2 pooling execution for Qwen3-VL-Embedding-2B on A2."""
+def test_qwen3_embedding_mrv2_pooling_a3():
+    """Verify MRV2 pooling execution for Qwen3-Embedding-0.6B on A3."""
     queries = [
         "The capital of China is Beijing.",
         "Gravity is a force that attracts two bodies towards each other.",
     ]
-    model_name = snapshot_download("Qwen/Qwen3-VL-Embedding-2B")
+    model_name = snapshot_download("Qwen/Qwen3-Embedding-0.6B")
 
     with VllmRunner(
         model_name,
         runner="pooling",
+        tensor_parallel_size=2,
         max_model_len=1024,
         dtype="float16",
         gpu_memory_utilization=0.6,
         compilation_config={"cudagraph_capture_sizes": [1024, 512]},
-        additional_config={"ascend_compilation_config": {"fuse_norm_quant": False}},
     ) as vllm_runner:
         outputs = vllm_runner.embed(queries)
 
