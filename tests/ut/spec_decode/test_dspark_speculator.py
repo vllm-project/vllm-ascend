@@ -17,7 +17,6 @@ from vllm_ascend.models.qwen3_dspark import (
     AscendQwen3DSparkForCausalLM,
     process_weight,
 )
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import (
     AscendDSparkSpeculator,
 )
