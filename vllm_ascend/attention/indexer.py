@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Any
 
-import scipy  # type: ignore
+import scipy.linalg  # type: ignore
 import torch
 import torch_npu
 from torch import nn
