@@ -609,6 +609,13 @@ class DeepseekV32XliteModel(DeepseekV3XliteModel):
         index_types: list[str] = getattr(hf_config, "indexer_types", []) or []
         xlite_config.index_full_mask = list(map(lambda x: str(x).lower().startswith("full"), index_types))
 
+        ascend_config = get_ascend_config()
+        if hasattr(xlite_config, "enable_indexer_cp"):
+            xlite_config.enable_indexer_cp = ascend_config.enable_dsa_cp
+        elif ascend_config.enable_dsa_cp:
+            # The compatibility wrapper otherwise silently ignores missing attributes.
+            raise RuntimeError("DSACP requires an xlite build with DSACP configuration support.")
+
     def _build_model(self) -> None:
         super()._build_model()
         xlite_model = self.xlite_model

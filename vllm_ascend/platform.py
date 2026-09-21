@@ -532,7 +532,7 @@ class NPUPlatform(Platform):
             vllm_config,
             compile_backend=cls.get_compile_backend(),
             enable_shared_expert_dp=ascend_config.enable_shared_expert_dp,
-            enable_dsa_cp=ascend_config.enable_dsa_cp,
+            enable_dsa_cp=ascend_config.enable_dsa_cp and not ascend_config.xlite_graph_config.enabled,
         )
 
         # 8.Setup worker class, custom ops and scheduler (ascend_config -> vllm_config).
@@ -1840,7 +1840,11 @@ def _validate_deepseek_v4_tp_config(vllm_config: VllmConfig, ascend_config: Any)
 
     # Model Runner V1 with DSA-CP has its own TP topology. Model Runner V2
     # does not use that exception, even if enable_dsa_cp is present.
-    if not vllm_config.use_v2_model_runner and ascend_config.enable_dsa_cp:
+    if (
+        not vllm_config.use_v2_model_runner
+        and ascend_config.enable_dsa_cp
+        and not ascend_config.xlite_graph_config.enabled
+    ):
         return
 
     tp_size = vllm_config.parallel_config.tensor_parallel_size

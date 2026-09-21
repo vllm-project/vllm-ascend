@@ -76,7 +76,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `weight_nz_mode`                    | int  | `1`     | Weight NZ mode. `0` disables NZ, `1` enables NZ only for quantized weights, and `2` also enables NZ for BF16/FP16 weights when supported. The legacy `VLLM_ASCEND_ENABLE_NZ` environment variable is no longer supported. |
 | `enable_fused_mc2`                  | int  | `0`     | Fused MC2 configuration. `0` disables the fused path, `1` selects dispatch-FFN-combine, and `2` selects CANN MegaMoe when the model and parallel configuration support it. On A5, SiTU models require a CANN MegaMoe wrapper exposing `activation` and `activation_params`; both SiTU parameters are bound from the MoE configuration during initialization. The legacy `VLLM_ASCEND_ENABLE_FUSED_MC2` environment variable is no longer supported. |
 | `enable_transpose_kv_cache_by_block`| bool | `True`  | Whether to enable transpose KV cache by block. The legacy `VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK` environment variable is no longer supported. |
-| `enable_dsa_cp`                     | bool | `False` | Whether to enable DSA-CP for DeepSeek V3.2, DeepSeek V4, and other models with the same architecture. Supported only with Model Runner V1 and requires sequence parallelism. Enabling it automatically enables FlashComm. Setting this option to `true` with Model Runner V2 raises a configuration error; use [PCP](../feature_guide/context_parallel.md#prefill-context-parallel) instead. |
+| `enable_dsa_cp`                     | bool | `False` | Whether to enable DSA-CP for DeepSeek V3.2, DeepSeek V4, and other models with the same architecture. With the native backend, it requires sequence parallelism and automatically enables FlashComm. With xlite enabled, it requires `xlite_graph_config.full_mode=true` and currently parallelizes only the indexer; main attention retains TP. Supported only with Model Runner V1. Setting this option to `true` with Model Runner V2 raises a configuration error; use [PCP](../feature_guide/context_parallel.md#prefill-context-parallel) instead. |
 | `enable_flashcomm1`                 | bool | `False` | Whether to enable SP MoE. See [Sequence Parallelism](../feature_guide/sequence_parallelism.md). |
 | `enable_pcp_o_proj_weight_sharding` | bool | `True` | Whether PCP shards O-projection weights across the PCP group. This option controls SFA-PCP `o_proj` and DSA-PCP two-stage O-projection (`wo_a`/`wo_b`). If the weight method or PCP partition does not support sharding, the option is disabled with a warning. Set it to `false` at server startup to disable sharding. Other attention backends do not use this option. |
 | `enable_pcp_embedding_lmhead_weight_sharding` | bool | `True` | Whether PCP shards embedding and LM Head weights across PCP ranks inside each TP shard. This option is enabled by default, takes effect when PCP size is greater than 1, and is incompatible with batch-sharded sampling (`enable_batch_sharded_sampling`) and fine-grained TP for these modules. |
@@ -123,6 +123,20 @@ Design / ops (analysis branch): `docs/source/developer_guide/Design_Documents/ru
 | ---- | ---- | ------- | ----------- |
 | `enabled` | bool | `False` | Whether to enable Xlite graph mode. See [Using XliteGraph](../feature_guide/graph_mode.md#using-xlitegraph) for the supported models, the decode-only vs. full-mode distinction, and examples. |
 | `full_mode` | bool | `False` | Token budget sizing for the xlite runtime. Batches are routed by token count: those within the budget run on the xlite runtime, larger ones fall back to the runnable under ACLGraph. By default (`False`), the budget is sized for decode steps (`max_num_seqs × (1 + num_speculative_tokens)`), so prefill and large mixed batches typically fall back. When `True`, the budget is `max_num_batched_tokens`, so xlite handles prefill and decode alike, ACLGraph capture is not used, and `--enforce-eager` is recommended (unless speculative decoding is configured, etc.). Since v0.28.0, routing is by token count instead of the batch attention state. |
+
+For xlite indexer CP, use the shared top-level DSA-CP switch:
+
+```json
+{
+  "enable_dsa_cp": true,
+  "xlite_graph_config": {
+    "enabled": true,
+    "full_mode": true
+  }
+}
+```
+
+Currently, xlite DSA-CP parallelizes only the indexer during eligible prefill batches; main attention retains head-wise TP. It does not require native FlashComm or sequence-parallel MoE. Decode and ineligible batches retain the existing xlite path. There is no additional minimum context length or query-count threshold; ranks with no valid queries still participate in collectives using padding. An xlite build exposing `enable_indexer_cp` is required when enabling this feature.
 
 **finegrained_tp_config**
 
