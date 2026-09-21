@@ -122,10 +122,7 @@ def test_fia_only_contiguizes_non_pa_inputs(adaptor, block_table_mode, contiguou
 
 def test_deepseek_v41_backend_is_device_routed():
     assert BaseDeviceAdaptor.get_deepseek_v41_backend() is None
-    assert (
-        A5DeviceAdaptor.get_deepseek_v41_backend().__name__
-        == "vllm_ascend.ops.dsv41_a5"
-    )
+    assert A5DeviceAdaptor.get_deepseek_v41_backend().__name__ == "vllm_ascend.ops.dsv41_a5"
 
 
 def test_reshape_and_cache_makes_scatter_inputs_contiguous():
