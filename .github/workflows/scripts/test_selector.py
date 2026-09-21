@@ -713,7 +713,7 @@ def _parse_pure_annotations(texts) -> list[ast.AnnAssign] | None:
 
     Returns the annotation statements when every meaningful (non-blank,
     non-comment) line forms simple-name annotations without a value
-    (``x: int``); returns None when the block is unparseable or contains
+    (``x: int``); returns None when the block is unparsable or contains
     anything else. An empty list means the block has no meaningful lines.
     """
     lines = [t for t in texts if t.strip() and not t.strip().startswith("#")]
