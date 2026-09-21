@@ -31,26 +31,13 @@ logger = init_logger(__name__)
 
 
 class AscendGemma4Speculator(AscendAutoRegressiveSpeculator, Gemma4Speculator):
-    """Gemma4 MTP speculator for Ascend NPUs.
-
-    Reuses upstream ``Gemma4Speculator`` for draft construction, cross-model KV
-    sharing wiring and dimension-mismatched embedding sharing, and layers the
-    Ascend draft loop (``AscendAutoRegressiveSpeculator``) on top.
-
-    Note on the MRO: ``AscendAutoRegressiveSpeculator`` precedes
-    ``Gemma4Speculator``, so every method defined by both is taken from the
-    Ascend base. Only ``_create_draft_vllm_config`` and ``load_draft_model`` are
-    actually defined by both -- the rest of the upstream Gemma4 overrides
-    (``advance_draft_positions``, ``_setup_gemma4_kv_sharing``,
-    ``_share_embeddings``) are inherited untouched.
-    """
+    """``_create_draft_vllm_config`` and ``load_draft_model`` are the only
+    methods defined by both bases, so this subclass recombines them."""
 
     def _create_draft_vllm_config(self) -> VllmConfig:
         draft_vllm_config = super()._create_draft_vllm_config()
-
-        # A Gemma4 draft only consumes backbone hidden states, so it stays dense
-        # even when the target is MoE: reusing the target's expert flags would
-        # make VllmConfig validate the draft as an expert model and fail.
+        # The draft is dense even for a MoE target, and Gemma4's heterogeneous
+        # head dimensions require the target's forced attention backend.
         draft_vllm_config = replace(
             draft_vllm_config,
             parallel_config=replace(
@@ -60,11 +47,6 @@ class AscendGemma4Speculator(AscendAutoRegressiveSpeculator, Gemma4Speculator):
                 enable_eplb=False,
             ),
         )
-
-        # Gemma4 forces TRITON_ATTN on the target because of its heterogeneous
-        # head dimensions (head_dim 256 sliding, 512 full). The base class resets
-        # attention_config.backend for draft models, which would drop the sliding
-        # draft layers onto a backend that cannot read the KV-shared cache.
         target_backend = self.vllm_config.attention_config.backend
         if target_backend is None:
             return draft_vllm_config
@@ -81,22 +63,18 @@ class AscendGemma4Speculator(AscendAutoRegressiveSpeculator, Gemma4Speculator):
         target_model: nn.Module,
         target_attn_layer_names: set[str],
     ) -> nn.Module:
-        # AscendAutoRegressiveSpeculator.load_draft_model chains into
-        # Gemma4Speculator.load_draft_model through super(), which builds the
-        # draft and wires the cross-model KV sharing.
+        # The Ascend base chains into Gemma4Speculator.load_draft_model.
         draft_model = super().load_draft_model(target_model, target_attn_layer_names)
         self._sync_kv_sharing_target_to_impl(draft_model)
         return draft_model
 
     def _sync_kv_sharing_target_to_impl(self, draft_model: nn.Module) -> None:
-        """Propagate late-bound KV-sharing targets to Ascend attention impls.
+        """Copy the late-bound KV-sharing target onto the Ascend attention impls.
 
-        ``Gemma4Speculator._setup_gemma4_kv_sharing`` sets
-        ``kv_sharing_target_layer_name`` on the vLLM ``Attention`` wrapper after
-        the draft model is built, while ``AscendAttentionBackendImpl`` snapshots
-        that attribute when it is constructed and uses it to skip writing its own
-        KV. Without this sync the draft would write its dummy K/V into the
-        target's cache and every draft token would be rejected.
+        ``AscendAttentionBackendImpl`` snapshots ``kv_sharing_target_layer_name``
+        when it is constructed and uses it to skip writing its own KV, but
+        ``_setup_gemma4_kv_sharing`` sets that attribute afterwards, on the vLLM
+        ``Attention`` wrapper.
         """
         synced = 0
         total = 0
