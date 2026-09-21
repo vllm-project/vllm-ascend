@@ -17,7 +17,12 @@ from vllm.config import set_current_vllm_config
 from tests.e2e.pull_request.one_card.attention_utils import create_vllm_config
 from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.sfa_v1 import SFA_FIA_SHARED_PREFILL_TOPK_WIDTH, AscendSFAImpl, AscendSFAMetadata
+from vllm_ascend.attention.sfa_v1 import (
+    SFA_FIA_SHARED_PREFILL_TOPK_WIDTH,
+    AscendSFAImpl,
+    AscendSFAMetadata,
+    _build_sfa_fia_shared_prefill_plan,
+)
 
 # Register the native torch.ops._C_ascend kernels without asking mypy to
 # statically analyze the binary extension module.
@@ -154,7 +159,15 @@ def _build_prefill_case(
     metadata.num_decode_tokens = 0
     metadata.block_size = _DENSE_PREFILL_BLOCK_SIZE
     metadata.attn_mask = attn_mask
-    metadata._sfa_fia_shared_prefill_plan = None
+    metadata.sfa_fia_shared_prefill_plan = _build_sfa_fia_shared_prefill_plan(
+        attn_state=metadata.attn_state,
+        query_ends=tuple(cum_query_lens_cpu.tolist()),
+        kv_lengths=tuple(seq_lens_cpu.tolist()),
+        num_actual_tokens=metadata.num_actual_tokens,
+        num_input_tokens=metadata.num_input_tokens,
+        num_decodes=metadata.num_decodes,
+        num_decode_tokens=metadata.num_decode_tokens,
+    )
 
     topk_indices = _build_topk_indices(
         seq_lens=tuple(kv_lengths),
@@ -338,7 +351,7 @@ def _run_shared_prefill_case(
         expected_tail_rows=_expected_tail_rows(query_lens, kv_lengths),
     )
 
-    assert candidate_metadata._sfa_fia_shared_prefill_plan is not None
+    assert candidate_metadata.sfa_fia_shared_prefill_plan is not None
     _assert_no_input_mutation(candidate_metadata, snapshot, kv_cache, topk_indices)
     torch.testing.assert_close(
         candidate, candidate_repeat, rtol=_SHARED_PREFILL_RTOL, atol=_SHARED_PREFILL_ATOL, check_dtype=False
