@@ -627,6 +627,9 @@ jobs:
       source_ref: ${{ github.event.pull_request.head.sha }}
       base_ref: ${{ github.base_ref }}
       base_sha: ${{ needs.select-tests.outputs.base_sha }}
+      # Snapshot cache: per-op incremental layer for cache-miss csrc builds.
+      # Flip to false to disable the enhancement without code changes.
+      snapshot-cache: true
 
   run-selected-tests:
     needs:

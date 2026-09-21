@@ -57,6 +57,15 @@ on:
         required: false
         default: false
         description: 'Allow callers in rollout mode to continue when this cache build fails.'
+      snapshot-cache:
+        type: boolean
+        required: false
+        default: false
+        description: >-
+          Restore the csrc build-tree snapshot cache before the compile and
+          save a fresh snapshot afterwards, enabling per-op incremental
+          rebuilds. The snapshot is stored in the GitHub cache under
+          csrc-snapshot-v1-<target>-.
 
 defaults:
   run:
@@ -164,6 +173,21 @@ jobs:
           yum install -y python3-pip net-tools jemalloc numactl patch clang
           pip install uv
 
+      - name: Restore csrc snapshot cache
+        # Per-op incremental layer: the artifact cache above only helps when
+        # csrc is unchanged; on a miss this snapshot lets the build recompile
+        # only the ops whose sources changed (~4 min instead of ~19 min).
+        # restore-keys picks the most recent snapshot for the target when the
+        # exact csrc hash has never been snapshotted; the manifest
+        # invalidation in build_aclnn.sh handles any staleness.
+        if: ${{ inputs.snapshot-cache }}
+        uses: runs-on/cache/restore@v5
+        with:
+          path: /tmp/csrc-snapshot-store
+          key: csrc-snapshot-v1-${{ fromJSON(inputs.target).id }}-${{ inputs.csrc_hash }}
+          restore-keys: |
+            csrc-snapshot-v1-${{ fromJSON(inputs.target).id }}-
+
       - name: Restore uv wheel cache
         # requirements-dev.txt installs the full build toolchain (torch,
         # torch-npu, ...). Downloading ~2GB of wheels per build dominates the
@@ -180,6 +204,11 @@ jobs:
         env:
           SOC_VERSION: ${{ fromJSON(inputs.target).soc_version }}
           MAX_JOBS: '16'
+          # Snapshot cache is opt-in: an empty dir disables the hooks in
+          # build_aclnn.sh entirely (cache_enabled checks the env var).
+          VLLM_ASCEND_SNAPSHOT_CACHE_DIR: ${{ inputs.snapshot-cache && '/tmp/csrc-snapshot-store' || '' }}
+          VLLM_ASCEND_CACHE_TARGET: ${{ fromJSON(inputs.target).id }}
+          VLLM_ASCEND_CACHE_IMAGE_TAG: ${{ fromJSON(inputs.target).image_tag }}
         run: |
           source /usr/local/Ascend/ascend-toolkit/set_env.sh
           source /usr/local/Ascend/nnal/atb/set_env.sh
@@ -252,6 +281,48 @@ jobs:
             vllm_ascend/lib
             vllm_ascend/include
           key: vllm-ascend-build-v2-${{ fromJSON(inputs.target).cache_arch }}-${{ fromJSON(inputs.target).image_tag }}-${{ inputs.csrc_hash }}
+
+      - name: Prune snapshot store to newest entry
+        # GitHub cache entries are immutable, so every build saves the store
+        # under a new key. Keep only the snapshot produced by THIS build in
+        # the store before saving; otherwise restored snapshots accumulate
+        # and each saved entry grows generation by generation. Cross-entry
+        # eviction is delegated to the GitHub cache LRU.
+        if: ${{ inputs.snapshot-cache }}
+        id: prune-snapshots
+        run: |
+          set -euo pipefail
+          if [ ! -f /tmp/csrc-snapshot-store/index.json ]; then
+            echo "saved=false" >> "$GITHUB_OUTPUT"
+            echo "no snapshot store produced; nothing to save"
+            exit 0
+          fi
+          python3 - <<'PY'
+          import json
+          import pathlib
+
+          store = pathlib.Path("/tmp/csrc-snapshot-store")
+          index_path = store / "index.json"
+          index = json.loads(index_path.read_text(encoding="utf-8"))
+          entries = index.get("entries", {})
+          if not entries:
+              raise SystemExit("::error::snapshot store index has no entries")
+          newest = max(entries.items(), key=lambda kv: kv[1]["created"])[0]
+          for key in list(entries):
+              if key != newest:
+                  (store / key).unlink(missing_ok=True)
+                  del entries[key]
+          index_path.write_text(json.dumps(index, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+          print(f"pruned snapshot store to newest entry: {newest}")
+          PY
+          echo "saved=true" >> "$GITHUB_OUTPUT"
+
+      - name: Save csrc snapshot cache
+        if: ${{ inputs.snapshot-cache && steps.prune-snapshots.outputs.saved == 'true' }}
+        uses: runs-on/cache/save@v5
+        with:
+          path: /tmp/csrc-snapshot-store
+          key: csrc-snapshot-v1-${{ fromJSON(inputs.target).id }}-${{ inputs.csrc_hash }}
 
       - name: Upload build log
         # Full uv/setuptools/cmake/ccec output plus 5s CPU samples, for

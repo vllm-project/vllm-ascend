@@ -48,6 +48,11 @@ on:
         required: false
         default: ''
         description: 'Fixed base commit to rebase onto.'
+      snapshot-cache:
+        type: boolean
+        required: false
+        default: false
+        description: 'Pass through to _build_csrc_cache.yaml: enable the csrc build-tree snapshot cache.'
 
 defaults:
   run:
@@ -283,3 +288,4 @@ jobs:
       # Preserve CI during rollout if a missing cache cannot yet be built on CPU.
       # The standalone push workflow keeps the build workflow's default false.
       continue_on_error: true
+      snapshot-cache: ${{ inputs.snapshot-cache }}

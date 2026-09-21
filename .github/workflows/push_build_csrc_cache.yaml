@@ -88,3 +88,6 @@ jobs:
       target: ${{ toJSON(matrix.target) }}
       csrc_hash: ${{ needs.prepare-targets.outputs.csrc_hash }}
       source_ref: ${{ github.sha }}
+      # Seed the snapshot cache on main pushes so PRs with csrc changes can
+      # rebuild incrementally against the latest main snapshot.
+      snapshot-cache: true
