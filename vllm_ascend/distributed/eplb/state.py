@@ -7,6 +7,7 @@ import inspect
 from dataclasses import fields
 from typing import Any
 
+import numpy as np
 import torch
 from torch.distributed import all_reduce
 from vllm.distributed import get_ep_group
@@ -134,6 +135,8 @@ class AscendEplbState(_eplb_state.EplbState):
             device=self.device,
         )
         model_state._num_recorded_logical_load_samples = 0
+        # NaN means this layer has no committed mean-ratio anchor yet.
+        model_state._last_committed_mean_ratios = np.full(model.num_moe_layers, np.nan)
         if not hasattr(self, "_local_load_collection_mask"):
             self._local_load_collection_mask = torch.zeros(
                 self.expert_load_window_size,

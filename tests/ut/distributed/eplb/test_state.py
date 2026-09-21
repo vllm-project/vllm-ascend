@@ -4,6 +4,7 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 import torch
 from vllm.distributed.eplb import eplb_state as upstream_eplb_state
@@ -148,6 +149,7 @@ def test_add_model_initializes_custom_load_history(monkeypatch):
 
     assert state.policy is policy
     assert model_state._logical_load_window.shape == (3, 2, 4)
+    np.testing.assert_array_equal(np.isnan(model_state._last_committed_mean_ratios), [True, True])
 
 
 def test_from_mapping_skips_custom_buffers_without_policy(monkeypatch):

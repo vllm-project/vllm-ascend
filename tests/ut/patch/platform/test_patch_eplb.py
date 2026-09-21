@@ -219,6 +219,7 @@ def test_async_rebalance_passes_prepared_stats_to_policy_on_worker_stream(monkey
         communicator=SimpleNamespace(),
         eplb_stats=stats,
         _policy_load_stats=prepared_stats,
+        _last_committed_mean_ratios=np.array([1.2]),
     )
     target = _explicit_target()
     policy = MagicMock()
@@ -237,6 +238,10 @@ def test_async_rebalance_passes_prepared_stats_to_policy_on_worker_stream(monkey
     assert planned_stats.values is cpu_values
     np.testing.assert_array_equal(planned_stats.sample_counts, [1, 3])
     assert policy.rebalance_experts.call_args.args[1:] == (2, 1, 1, 2, physical_map)
+    np.testing.assert_array_equal(
+        policy.rebalance_experts.call_args.kwargs["last_committed_mean_ratios"],
+        [1.2],
+    )
 
 
 def test_async_transfer_wrapper_executes_explicit_sources(monkeypatch):
@@ -318,6 +323,9 @@ def test_async_explicit_transfer_delegates_profile_and_rank_mapping(is_profile, 
 @pytest.mark.parametrize(("layer_idx", "is_last_layer"), [(2, False), (3, True)])
 def test_async_workspace_refreshes_layer_and_clears_target_after_last(monkeypatch, layer_idx, is_last_layer):
     call_order: list[str] = []
+    target = _explicit_target()
+    target.predicted_mean_ratios = np.full(4, np.nan)
+    target.predicted_mean_ratios[layer_idx] = 1.2
     consumed_event = MagicMock()
     consumed_event.record.side_effect = lambda _stream=None: call_order.append("ack")
     pending_result = SimpleNamespace(
@@ -328,9 +336,10 @@ def test_async_workspace_refreshes_layer_and_clears_target_after_last(monkeypatc
     model_state = SimpleNamespace(
         pending_result=pending_result,
         rebalanced=True,
-        communicator=SimpleNamespace(**{patch_eplb._EXPLICIT_TRANSFER_TARGET_ATTR: _explicit_target()}),
+        communicator=SimpleNamespace(**{patch_eplb._EXPLICIT_TRANSFER_TARGET_ATTR: target}),
         model=SimpleNamespace(num_moe_layers=4),
         model_name="model",
+        _last_committed_mean_ratios=np.full(4, np.nan),
     )
     refresh = MagicMock(side_effect=lambda *_args: call_order.append("refresh"))
     monkeypatch.setattr(patch_eplb, "refresh_model_routing_tables", refresh)
@@ -349,6 +358,7 @@ def test_async_workspace_refreshes_layer_and_clears_target_after_last(monkeypatc
     result = wrapped_move(model_state, 0, future_option="future")
 
     assert result == "moved"
+    assert model_state._last_committed_mean_ratios[layer_idx] == 1.2
     refresh.assert_called_once_with(model_state, layer_idx)
     if is_last_layer:
         log_info.assert_called_once_with(
@@ -364,6 +374,7 @@ def test_async_workspace_refreshes_layer_and_clears_target_after_last(monkeypatc
 
 def test_async_workspace_refresh_failure_keeps_target_and_defers_ack(monkeypatch):
     target = _explicit_target()
+    target.predicted_mean_ratios = np.array([1.2])
     consumed_event = MagicMock()
     pending_result = SimpleNamespace(
         layer_idx=0,
@@ -376,6 +387,7 @@ def test_async_workspace_refresh_failure_keeps_target_and_defers_ack(monkeypatch
         communicator=communicator,
         model=SimpleNamespace(num_moe_layers=1),
         model_name="model",
+        _last_committed_mean_ratios=np.array([np.nan]),
     )
     monkeypatch.setattr(
         patch_eplb,
@@ -393,3 +405,30 @@ def test_async_workspace_refresh_failure_keeps_target_and_defers_ack(monkeypatch
 
     assert getattr(communicator, patch_eplb._EXPLICIT_TRANSFER_TARGET_ATTR) is target
     consumed_event.record.assert_not_called()
+    assert np.isnan(model_state._last_committed_mean_ratios[0])
+
+
+def test_async_workspace_keeps_anchor_for_unchanged_layer(monkeypatch):
+    target = _explicit_target()
+    target.predicted_mean_ratios = np.array([np.nan])
+    pending_result = SimpleNamespace(
+        layer_idx=0,
+        transfer_metadata=object(),
+        consumed_event=MagicMock(),
+    )
+    model_state = SimpleNamespace(
+        pending_result=pending_result,
+        communicator=SimpleNamespace(**{patch_eplb._EXPLICIT_TRANSFER_TARGET_ATTR: target}),
+        model=SimpleNamespace(num_moe_layers=1),
+        model_name="model",
+        _last_committed_mean_ratios=np.array([1.3]),
+    )
+    monkeypatch.setattr(patch_eplb, "refresh_model_routing_tables", MagicMock())
+
+    def original_move(model_state, ep_rank):
+        model_state.pending_result.consumed_event.record()
+        model_state.pending_result = None
+
+    patch_eplb._wrap_move_to_workspace(original_move)(model_state, 0)
+
+    np.testing.assert_array_equal(model_state._last_committed_mean_ratios, [1.3])

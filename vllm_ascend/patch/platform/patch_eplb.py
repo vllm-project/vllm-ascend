@@ -6,6 +6,7 @@
 from functools import wraps
 from inspect import signature
 
+import numpy as np
 import torch
 from vllm.config import parallel as _parallel_config
 from vllm.distributed.eplb import async_worker as _async_worker
@@ -136,6 +137,7 @@ def _wrap_async_rebalance(original_rebalance):
                 eplb_stats.num_nodes,
                 eplb_stats.num_gpus,
                 bound.arguments["physical_to_logical_map_cpu"],
+                last_committed_mean_ratios=model_state._last_committed_mean_ratios,
             )
             if target.device.type != "cpu":
                 raise RuntimeError("EPLB policy returned a non-CPU expert mapping")
@@ -210,6 +212,7 @@ def _wrap_move_to_workspace(original_move):
         model_state = bound.arguments["model_state"]
         pending_result = model_state.pending_result
         layer_idx = pending_result.layer_idx if pending_result is not None else None
+        full_target = getattr(model_state.communicator, _EXPLICIT_TRANSFER_TARGET_ATTR, None)
 
         deferred_event = None
         consumed_event = None
@@ -221,6 +224,10 @@ def _wrap_move_to_workspace(original_move):
             result = original_move(*bound.args, **bound.kwargs)
             if layer_idx is not None:
                 refresh_model_routing_tables(model_state, layer_idx)
+                if full_target is not None and hasattr(full_target, "predicted_mean_ratios"):
+                    predicted_ratio = full_target.predicted_mean_ratios[layer_idx]
+                    if np.isfinite(predicted_ratio):
+                        model_state._last_committed_mean_ratios[layer_idx] = predicted_ratio
                 is_last_layer = layer_idx == model_state.model.num_moe_layers - 1
                 if is_last_layer:
                     _clear_transfer_target(model_state.communicator)
