@@ -64,6 +64,8 @@ vllm serve <supported-model> \
 
 Unlike DCP, PCP adds extra ranks: `world_size_with_pcp = prefill_context_parallel_size * original_world_size`.
 
+When PCP size is greater than 1, PCP stores embedding and LM Head weights as TP×PCP resident shards by default for every supported attention backend. Set `enable_pcp_embedding_lmhead_weight_sharding` to `false` to disable this behavior.
+
 #### Speculative Decoding
 
 MRV2 PCP supports MTP with MLA and DSA models, Eagle3 with GQA models, and

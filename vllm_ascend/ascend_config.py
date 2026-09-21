@@ -330,6 +330,7 @@ class AscendConfig:
             "sfa_dcp_force_tmajor_restore": false,
             "enable_force_eplb": false,
             "enable_pcp_o_proj_weight_sharding": false,
+            "enable_pcp_embedding_lmhead_weight_sharding": true,
             "draft_window_size": null,
             "mix_placement": false,
             "pa_shape_list": [],
@@ -466,6 +467,7 @@ class AscendConfig:
     sfa_dcp_force_tmajor_restore: bool = False
     enable_force_eplb: bool = False
     enable_pcp_o_proj_weight_sharding: bool = False
+    enable_pcp_embedding_lmhead_weight_sharding: bool = True
     draft_window_size: int | None = None
     mix_placement: bool = False
     # When non-zero, force the MC2 combine stage's comm quant_mode to this
@@ -810,6 +812,15 @@ class AscendConfig:
                 raise ValueError(
                     "enable_reduce_sample is incompatible with "
                     "finegrained_tp_config.lmhead_tensor_parallel_size. "
+                    "Please disable one of them."
+                )
+            if (
+                self.enable_pcp_embedding_lmhead_weight_sharding
+                and vc.parallel_config.prefill_context_parallel_size > 1
+            ):
+                raise ValueError(
+                    "enable_reduce_sample is incompatible with "
+                    "enable_pcp_embedding_lmhead_weight_sharding when PCP is enabled. "
                     "Please disable one of them."
                 )
             kv_transfer_config = getattr(vc, "kv_transfer_config", None)

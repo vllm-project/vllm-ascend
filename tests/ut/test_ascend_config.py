@@ -1296,6 +1296,39 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_reduce_sample_configuration_compatibility(self, mock_fix):
+        cases: tuple[tuple[dict[str, Any], int, str | None, str | None], ...] = (
+            (
+                {"finegrained_tp_config": {"lmhead_tensor_parallel_size": 2}},
+                1,
+                None,
+                "finegrained_tp_config.lmhead_tensor_parallel_size",
+            ),
+            ({}, 2, None, "enable_pcp_embedding_lmhead_weight_sharding"),
+            ({"enable_pcp_embedding_lmhead_weight_sharding": False}, 1, "kv_producer", "PD-disaggregated"),
+            ({}, 1, None, None),
+            ({"enable_pcp_embedding_lmhead_weight_sharding": False}, 2, None, None),
+        )
+        for additional_config, pcp_size, kv_role, error in cases:
+            with self.subTest(pcp_size=pcp_size, kv_role=kv_role, error=error):
+                clear_ascend_config()
+                vc = VllmConfig()
+                vc.parallel_config.prefill_context_parallel_size = pcp_size
+                vc.additional_config = {"enable_reduce_sample": True, **additional_config}
+                if kv_role is not None:
+                    vc.kv_transfer_config = KVTransferConfig(
+                        kv_connector="MooncakeConnectorV1",
+                        kv_role=kv_role,
+                    )
+
+                if error is None:
+                    self.assertTrue(init_ascend_config(vc).enable_reduce_sample)
+                else:
+                    with self.assertRaisesRegex(ValueError, error):
+                        init_ascend_config(vc)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_enable_dsa_cp_model_gate_is_resolved_during_init(self, mock_fix):
         unsupported_vc = VllmConfig()
         unsupported_vc.additional_config = {"enable_dsa_cp": True}

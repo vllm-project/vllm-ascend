@@ -212,6 +212,7 @@ def clear_enable_sp():
     enable_dsa_cp.cache_clear()
     enable_dsa_cp_full_o_proj.cache_clear()
     enable_pcp_o_proj_weight_sharding.cache_clear()
+    enable_pcp_embedding_lmhead_weight_sharding.cache_clear()
     _libc_getenv.cache_clear()
 
 
@@ -1517,6 +1518,14 @@ def enable_pcp_o_proj_weight_sharding() -> bool:
     from vllm_ascend.ascend_config import get_ascend_config
 
     return get_ascend_config().enable_pcp_o_proj_weight_sharding
+
+
+@lru_cache(maxsize=1)
+def enable_pcp_embedding_lmhead_weight_sharding() -> bool:
+    """Whether PCP shards embedding and LM Head weights."""
+    from vllm_ascend.ascend_config import get_ascend_config
+
+    return get_ascend_config().enable_pcp_embedding_lmhead_weight_sharding
 
 
 @lru_cache(maxsize=1)
