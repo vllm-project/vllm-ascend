@@ -10,18 +10,16 @@
  */
 
 /*!
- * \file vllm_causal_conv1d_def.cpp
+ * \file causal_conv1d_def.cpp
  * \brief
  */
 #include "register/op_def_registry.h"
 
 namespace ops {
 
-// This repository's single-output ABI must not register over CANN's
-// CausalConv1d operator, which is used by cann_ops_transformer.
-class VllmCausalConv1d : public OpDef {
+class CausalConv1d : public OpDef {
 public:
-    explicit VllmCausalConv1d(const char* name) : OpDef(name)
+    explicit CausalConv1d(const char* name) : OpDef(name)
     {
         this->Input("x")
             .ParamType(REQUIRED)
@@ -87,6 +85,6 @@ public:
         this->AICore().AddConfig("ascend950", aicoreConfig);
     }
 };
-OP_ADD(VllmCausalConv1d);
+OP_ADD(CausalConv1d);
 
 } // namespace ops

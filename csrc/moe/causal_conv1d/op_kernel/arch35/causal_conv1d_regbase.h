@@ -10,13 +10,13 @@
  */
 
 /*!
- * \file vllm_causal_conv1d_regbase.h
+ * \file causal_conv1d_regbase.h
  * \brief
  */
-#ifndef VLLM_CAUSAL_CONV1D_REGBASE_H
-#define VLLM_CAUSAL_CONV1D_REGBASE_H
+#ifndef CAUSAL_CONV1D_REGBASE_H
+#define CAUSAL_CONV1D_REGBASE_H
 
-namespace NsVllmCausalConv1d {
+namespace NsCausalConv1d {
 using namespace AscendC;
 using namespace AscendC::MicroAPI;
 
@@ -171,6 +171,6 @@ __aicore__ inline void AdvanceFnLocalPartialsRegbase(LocalTensor<T> ring, LocalT
     }
 }
 
-} // namespace NsVllmCausalConv1d
+} // namespace NsCausalConv1d
 
-#endif // VLLM_CAUSAL_CONV1D_REGBASE_H
+#endif // CAUSAL_CONV1D_REGBASE_H

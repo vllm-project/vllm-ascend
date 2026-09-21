@@ -9,14 +9,14 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
- #ifndef VLLM_CAUSAL_CONV1D_TILING_VALIDATION_H
- #define VLLM_CAUSAL_CONV1D_TILING_VALIDATION_H
+ #ifndef CAUSAL_CONV1D_TILING_VALIDATION_H
+ #define CAUSAL_CONV1D_TILING_VALIDATION_H
 
  #include "tiling_base/tiling_util.h"
- #include "vllm_causal_conv1d_tiling_utils.h"
- #include "../op_kernel/vllm_causal_conv1d_tiling_data.h"
+ #include "causal_conv1d_tiling_utils.h"
+ #include "../op_kernel/causal_conv1d_tiling_data.h"
  
- namespace optiling::vllm_causal_conv1d_host {
+ namespace optiling::causal_conv1d_host {
  
  using namespace Ops::Transformer::OpTiling;
  
@@ -40,7 +40,7 @@
      return ge::GRAPH_SUCCESS;
  }
  
- inline ge::graphStatus GetAttrsInfo(gert::TilingContext *context, VllmCausalConv1dAttrInfo &attrInfo)
+ inline ge::graphStatus GetAttrsInfo(gert::TilingContext *context, CausalConv1dAttrInfo &attrInfo)
  {
      auto attrs = context->GetAttrs();
      OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
@@ -67,7 +67,7 @@
  {
      OP_CHECK_IF(dim % DIM_ALIGN_ELEMS != 0,
                  OP_LOGE(context,
-                         "dim must satisfy dim %% %ld == 0 for vllm_causal_conv1d; "
+                         "dim must satisfy dim %% %ld == 0 for causal_conv1d; "
                          "x/weight/convStates last dimension and bias length must all use the same aligned dim, "
                          "got dim=%ld.",
                          DIM_ALIGN_ELEMS, dim),
@@ -75,8 +75,8 @@
      return ge::GRAPH_SUCCESS;
  }
  
- inline ge::graphStatus GetShapeDtypeInfo(gert::TilingContext *context, const VllmCausalConv1dAttrInfo &attrInfo,
-                                          VllmCausalConv1dTilingData &tiling, bool &hasBias)
+ inline ge::graphStatus GetShapeDtypeInfo(gert::TilingContext *context, const CausalConv1dAttrInfo &attrInfo,
+                                          CausalConv1dTilingData &tiling, bool &hasBias)
  {
      const bool isDecodeMode = (attrInfo.runMode == 1);
      tiling.activationMode = attrInfo.activationMode;

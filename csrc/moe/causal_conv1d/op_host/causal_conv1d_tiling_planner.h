@@ -9,13 +9,13 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-#ifndef VLLM_CAUSAL_CONV1D_TILING_PLANNER_H
-#define VLLM_CAUSAL_CONV1D_TILING_PLANNER_H
+#ifndef CAUSAL_CONV1D_TILING_PLANNER_H
+#define CAUSAL_CONV1D_TILING_PLANNER_H
 
-#include "vllm_causal_conv1d_tiling_utils.h"
-#include "../op_kernel/vllm_causal_conv1d_tiling_data.h"
+#include "causal_conv1d_tiling_utils.h"
+#include "../op_kernel/causal_conv1d_tiling_data.h"
 
-namespace optiling::vllm_causal_conv1d_host {
+namespace optiling::causal_conv1d_host {
 
 using namespace Ops::Transformer::OpTiling;
 
@@ -223,7 +223,7 @@ inline FnTokenSeqRangePlan BuildFnTokenSeqRangePlan(const int64_t *qslData, int6
 }
 
 inline VarlenTokenTileChoice ChooseUnifiedFnTokenBlockPlan(gert::TilingContext *context,
-                                                           const VllmCausalConv1dTilingData &tiling,
+                                                           const CausalConv1dTilingData &tiling,
                                                            const DimTileChoice &baseDimChoice,
                                                            FnExecutionPlan fnExecutionPlan,
                                                            uint32_t coreNum)
@@ -265,7 +265,7 @@ inline VarlenTokenTileChoice ChooseFnTokenBlockChoice(int64_t cuSeqlen, int64_t 
     return tokenBlockChoice;
 }
 
-inline FnHostPlan ChooseFnHostPlan(gert::TilingContext *context, const VllmCausalConv1dTilingData &tiling, uint64_t ubSize,
+inline FnHostPlan ChooseFnHostPlan(gert::TilingContext *context, const CausalConv1dTilingData &tiling, uint64_t ubSize,
                                    uint32_t coreNum)
 {
     FnHostPlan plan;
@@ -307,6 +307,6 @@ inline FnHostPlan ChooseFnHostPlan(gert::TilingContext *context, const VllmCausa
     return plan;
 }
 
-} // namespace optiling::vllm_causal_conv1d_host
+} // namespace optiling::causal_conv1d_host
 
-#endif // VLLM_CAUSAL_CONV1D_TILING_PLANNER_H
+#endif // CAUSAL_CONV1D_TILING_PLANNER_H

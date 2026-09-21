@@ -641,8 +641,7 @@ at::Tensor npu_causal_conv1d_custom(
     int64_t  pad_slot_id,
     int64_t  run_mode)
 {
-    // Keep GDN's custom ABI separate from the CANN operator used by Kimi.
-    EXEC_NPU_CMD(aclnnVllmCausalConv1d,
+    EXEC_NPU_CMD(aclnnCausalConv1d,
                     x,
                     weight,
                     bias_opt,

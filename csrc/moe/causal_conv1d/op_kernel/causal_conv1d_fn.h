@@ -9,19 +9,19 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
- #ifndef VLLM_CAUSAL_CONV1D_FN_H
- #define VLLM_CAUSAL_CONV1D_FN_H
+ #ifndef CAUSAL_CONV1D_FN_H
+ #define CAUSAL_CONV1D_FN_H
  
- #include "vllm_causal_conv1d.h"
+ #include "causal_conv1d.h"
  
- namespace NsVllmCausalConv1d {
+ namespace NsCausalConv1d {
  
  template <typename T, uint32_t widthKey, uint32_t fnPlanKey>
- class VllmCausalConv1dFn : public VllmCausalConv1d<T, VLLM_CAUSAL_CONV1D_TPL_RUN_MODE_FN, widthKey, fnPlanKey> {
+ class CausalConv1dFn : public CausalConv1d<T, CAUSAL_CONV1D_TPL_RUN_MODE_FN, widthKey, fnPlanKey> {
  public:
      __aicore__ inline void Init(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR convStates, GM_ADDR queryStartLoc,
                                  GM_ADDR cacheIndices, GM_ADDR initialStateMode, GM_ADDR numAcceptedTokens, GM_ADDR y,
-                                 GM_ADDR workspace, const VllmCausalConv1dTilingData *tilingData)
+                                 GM_ADDR workspace, const CausalConv1dTilingData *tilingData)
      {
          (void)numAcceptedTokens;
          this->ResetRuntimeState(tilingData);
@@ -77,12 +77,12 @@
  };
  
  template <typename T, uint32_t widthKey, uint32_t fnPlanKey>
- __aicore__ inline void RunVllmCausalConv1dFn(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR convStates,
+ __aicore__ inline void RunCausalConv1dFn(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR convStates,
                                           GM_ADDR queryStartLoc, GM_ADDR cacheIndices, GM_ADDR initialStateMode,
                                           GM_ADDR numAcceptedTokens, GM_ADDR y, GM_ADDR workspace,
-                                          const VllmCausalConv1dTilingData *tilingData)
+                                          const CausalConv1dTilingData *tilingData)
  {
-     VllmCausalConv1dFn<T, widthKey, fnPlanKey> op;
+     CausalConv1dFn<T, widthKey, fnPlanKey> op;
      op.Init(x, weight, bias, convStates, queryStartLoc, cacheIndices, initialStateMode, numAcceptedTokens, y, workspace,
              tilingData);
      op.Process();

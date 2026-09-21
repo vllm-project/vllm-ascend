@@ -9,21 +9,21 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-#ifndef VLLM_CAUSAL_CONV1D_UPDATE_H
-#define VLLM_CAUSAL_CONV1D_UPDATE_H
+#ifndef CAUSAL_CONV1D_UPDATE_H
+#define CAUSAL_CONV1D_UPDATE_H
 
-#include "vllm_causal_conv1d.h"
+#include "causal_conv1d.h"
 
-namespace NsVllmCausalConv1d {
+namespace NsCausalConv1d {
 
 template <typename T>
-class VllmCausalConv1dUpdate
-    : public VllmCausalConv1d<T, VLLM_CAUSAL_CONV1D_TPL_RUN_MODE_UPDATE, VLLM_CAUSAL_CONV1D_TPL_WIDTH_RUNTIME,
-                          VLLM_CAUSAL_CONV1D_TPL_FN_PLAN_INVALID> {
+class CausalConv1dUpdate
+    : public CausalConv1d<T, CAUSAL_CONV1D_TPL_RUN_MODE_UPDATE, CAUSAL_CONV1D_TPL_WIDTH_RUNTIME,
+                          CAUSAL_CONV1D_TPL_FN_PLAN_INVALID> {
 public:
     __aicore__ inline void Init(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR convStates, GM_ADDR queryStartLoc,
                                 GM_ADDR cacheIndices, GM_ADDR, GM_ADDR numAcceptedTokens, GM_ADDR y, GM_ADDR workspace,
-                                const VllmCausalConv1dTilingData *tilingData)
+                                const CausalConv1dTilingData *tilingData)
     {
         (void)workspace;
         this->ResetRuntimeState(tilingData);
@@ -58,7 +58,7 @@ public:
 
     __aicore__ inline void Process()
     {
-        const VllmCausalConv1dTilingData *tilingData = this->GetTilingData();
+        const CausalConv1dTilingData *tilingData = this->GetTilingData();
         const int32_t dim = tilingData->dim;
         const int32_t baseDimCnt = static_cast<int32_t>(tilingData->baseDimCnt);
         const int32_t width = static_cast<int32_t>(tilingData->width);
@@ -75,17 +75,17 @@ public:
 };
 
 template <typename T>
-__aicore__ inline void RunVllmCausalConv1dUpdate(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR convStates,
+__aicore__ inline void RunCausalConv1dUpdate(GM_ADDR x, GM_ADDR weight, GM_ADDR bias, GM_ADDR convStates,
                                              GM_ADDR queryStartLoc, GM_ADDR cacheIndices, GM_ADDR initialStateMode,
                                              GM_ADDR numAcceptedTokens, GM_ADDR y, GM_ADDR workspace,
-                                             const VllmCausalConv1dTilingData *tilingData)
+                                             const CausalConv1dTilingData *tilingData)
 {
-    VllmCausalConv1dUpdate<T> op;
+    CausalConv1dUpdate<T> op;
     op.Init(x, weight, bias, convStates, queryStartLoc, cacheIndices, initialStateMode, numAcceptedTokens, y, workspace,
             tilingData);
     op.Process();
 }
 
-} // namespace NsVllmCausalConv1d
+} // namespace NsCausalConv1d
 
-#endif // VLLM_CAUSAL_CONV1D_UPDATE_H
+#endif // CAUSAL_CONV1D_UPDATE_H

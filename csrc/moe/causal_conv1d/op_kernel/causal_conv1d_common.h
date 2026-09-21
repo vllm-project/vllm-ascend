@@ -10,15 +10,15 @@
  */
 
 /*!
- * \file vllm_causal_conv1d_common.h
+ * \file causal_conv1d_common.h
  */
 
-#ifndef VLLM_CAUSAL_CONV1D_COMMON_H
-#define VLLM_CAUSAL_CONV1D_COMMON_H
+#ifndef CAUSAL_CONV1D_COMMON_H
+#define CAUSAL_CONV1D_COMMON_H
 
 #include "kernel_operator.h"
 
-namespace NsVllmCausalConv1dCommon {
+namespace NsCausalConv1dCommon {
 
 constexpr int32_t MAX_WIDTH = 4;
 constexpr int32_t MAX_BLOCK_DIM = 4096;
@@ -61,6 +61,6 @@ struct CalcBufLayout {
     }
 };
 
-} // namespace NsVllmCausalConv1dCommon
+} // namespace NsCausalConv1dCommon
 
-#endif // VLLM_CAUSAL_CONV1D_COMMON_H
+#endif // CAUSAL_CONV1D_COMMON_H

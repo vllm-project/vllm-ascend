@@ -13,7 +13,6 @@
 # This file is a part of the vllm-ascend project.
 #
 
-import json
 import math
 import os
 from types import SimpleNamespace
@@ -25,26 +24,6 @@ import torch
 from tests.ut.base import TestBase
 from vllm_ascend import utils
 from vllm_ascend.utils import REGISTERED_ASCEND_OPS
-
-
-@pytest.mark.parametrize("op_name", ["CausalConv1d", "VllmCausalConv1d", "CausalConv1dV310"])
-def test_bootstrap_custom_ops_rejects_legacy_conv_registration(tmp_path, monkeypatch, op_name):
-    vendor_path = tmp_path / "_cann_ops_custom" / "vendors" / utils._CUSTOM_OP_VENDOR_DIR
-    config_path = vendor_path / "op_impl" / "ai_core" / "tbe" / "config" / "ascend950"
-    config_path.mkdir(parents=True)
-    info_path = config_path / "aic-ascend-ops-info.json"
-    info_path.write_text(json.dumps({op_name: {"output0": {"name": "y"}}}), encoding="utf-8")
-    monkeypatch.setattr(utils, "_CUSTOM_OP_BASE_DIR", str(tmp_path))
-    monkeypatch.setenv("ASCEND_CUSTOM_OPP_PATH", "/official/vendor")
-
-    if op_name == "CausalConv1d":
-        with pytest.raises(RuntimeError, match="Rebuild this checkout") as error:
-            utils.bootstrap_custom_op_env()
-        assert str(info_path) in str(error.value)
-        assert os.environ["ASCEND_CUSTOM_OPP_PATH"] == "/official/vendor"
-    else:
-        utils.bootstrap_custom_op_env()
-        assert os.environ["ASCEND_CUSTOM_OPP_PATH"] == f"{vendor_path}:/official/vendor"
 
 
 class TestUtils(TestBase):

@@ -10,7 +10,7 @@
  */
 
 /*!
- * \file vllm_causal_conv1d_infershape.cpp
+ * \file causal_conv1d_infershape.cpp
  * \brief
  */
 #include "register/op_impl_registry.h"
@@ -21,9 +21,9 @@ using namespace ge;
 namespace ops {
 static constexpr int64_t IDX_0 = 0;
 
-static ge::graphStatus InferShapeVllmCausalConv1d(gert::InferShapeContext* context)
+static ge::graphStatus InferShapeCausalConv1d(gert::InferShapeContext* context)
 {
-    OP_LOGD(context->GetNodeName(), "Begin to do InferShapeVllmCausalConv1d");
+    OP_LOGD(context->GetNodeName(), "Begin to do InferShapeCausalConv1d");
 
     // get input shapes
     const gert::Shape* xShape = context->GetInputShape(IDX_0);
@@ -34,9 +34,9 @@ static ge::graphStatus InferShapeVllmCausalConv1d(gert::InferShapeContext* conte
     OP_CHECK_NULL_WITH_CONTEXT(context, yShape);
     *yShape = *xShape;
 
-    OP_LOGD(context->GetNodeName(), "End to do InferShapeVllmCausalConv1d");
+    OP_LOGD(context->GetNodeName(), "End to do InferShapeCausalConv1d");
     return GRAPH_SUCCESS;
 }
 
-IMPL_OP_INFERSHAPE(VllmCausalConv1d).InferShape(InferShapeVllmCausalConv1d);
+IMPL_OP_INFERSHAPE(CausalConv1d).InferShape(InferShapeCausalConv1d);
 } // namespace ops

@@ -10,32 +10,32 @@
  */
 
 /*!
- * \file vllm_causal_conv1d_tiling.cpp
+ * \file causal_conv1d_tiling.cpp
  */
 
  #include "tiling_base/tiling_templates_registry.h"
- #include "vllm_causal_conv1d_tiling_utils.h"
- #include "vllm_causal_conv1d_tiling_planner.h"
- #include "vllm_causal_conv1d_tiling_validation.h"
+ #include "causal_conv1d_tiling_utils.h"
+ #include "causal_conv1d_tiling_planner.h"
+ #include "causal_conv1d_tiling_validation.h"
  
  namespace optiling {
  
  using namespace Ops::Transformer::OpTiling;
- using namespace vllm_causal_conv1d_host;
+ using namespace causal_conv1d_host;
  
- static ge::graphStatus VllmCausalConv1dTilingFunc(gert::TilingContext *context)
+ static ge::graphStatus CausalConv1dTilingFunc(gert::TilingContext *context)
  {
      uint64_t ubSize = 0;
      uint32_t coreNum = 0;
      OP_CHECK_IF(GetPlatformInfo(context, ubSize, coreNum) != ge::GRAPH_SUCCESS,
                  OP_LOGE(context, "GetPlatformInfo error"), return ge::GRAPH_FAILED);
  
-     VllmCausalConv1dTilingData *tiling = context->GetTilingData<VllmCausalConv1dTilingData>();
+     CausalConv1dTilingData *tiling = context->GetTilingData<CausalConv1dTilingData>();
      OP_CHECK_NULL_WITH_CONTEXT(context, tiling);
-     OP_CHECK_IF(memset_s(tiling, sizeof(VllmCausalConv1dTilingData), 0, sizeof(VllmCausalConv1dTilingData)) != EOK,
+     OP_CHECK_IF(memset_s(tiling, sizeof(CausalConv1dTilingData), 0, sizeof(CausalConv1dTilingData)) != EOK,
                  OP_LOGE(context, "set tiling data error"), return ge::GRAPH_FAILED);
  
-     VllmCausalConv1dAttrInfo attrInfo;
+     CausalConv1dAttrInfo attrInfo;
      OP_CHECK_IF(GetAttrsInfo(context, attrInfo) != ge::GRAPH_SUCCESS, OP_LOGE(context, "GetAttrsInfo error"),
                  return ge::GRAPH_FAILED);
      bool hasBias = false;
@@ -47,7 +47,7 @@
      OP_CHECK_IF(dim <= 0 || batch <= 0, OP_LOGE(context, "dim/batch must be positive"), return ge::GRAPH_FAILED);
  
      const uint32_t runModeKey = static_cast<uint32_t>(attrInfo.runMode);
-     const bool &isFn = (runModeKey == VLLM_CAUSAL_CONV1D_TPL_RUN_MODE_FN);
+     const bool &isFn = (runModeKey == CAUSAL_CONV1D_TPL_RUN_MODE_FN);
      const bool &hasActivation = (attrInfo.activationMode != 0);
      const char *plannerModeTag = "update";
      DimTileChoice baseDimChoice;
@@ -154,14 +154,14 @@
      return ge::GRAPH_SUCCESS;
  }
  
- static ge::graphStatus TilingParseForVllmCausalConv1d(gert::TilingParseContext *context)
+ static ge::graphStatus TilingParseForCausalConv1d(gert::TilingParseContext *context)
  {
-     OP_LOGD(context, "Enter TilingParseForVllmCausalConv1d.");
+     OP_LOGD(context, "Enter TilingParseForCausalConv1d.");
      return ge::GRAPH_SUCCESS;
  }
  
- IMPL_OP_OPTILING(VllmCausalConv1d)
-     .Tiling(VllmCausalConv1dTilingFunc)
-     .TilingParse<VllmCausalConv1dCompileInfo>(TilingParseForVllmCausalConv1d);
+ IMPL_OP_OPTILING(CausalConv1d)
+     .Tiling(CausalConv1dTilingFunc)
+     .TilingParse<CausalConv1dCompileInfo>(TilingParseForCausalConv1d);
  
  }

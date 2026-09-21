@@ -26,7 +26,6 @@ import os
 from contextlib import nullcontext
 from enum import Enum
 from functools import lru_cache
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -309,29 +308,10 @@ def _prepend_env_path(env_name: str, path: str) -> None:
         os.environ[env_name] = ":".join(path_entries)
 
 
-def _check_custom_causal_conv1d_registration(vendor_path: str) -> None:
-    # An editable source update does not replace installed OPP binaries. Fail
-    # before advertising an old bundle that can shadow CANN's CausalConv1d.
-    config_path = Path(vendor_path) / "op_impl" / "ai_core" / "tbe" / "config"
-    for info_path in config_path.glob("*/*ops-info.json"):
-        with info_path.open(encoding="utf-8") as info_file:
-            op_info = json.load(info_file)
-        if "CausalConv1d" in op_info:
-            raise RuntimeError(
-                f"Stale vllm-ascend custom operator registration in {info_path}: "
-                "CausalConv1d must be registered as VllmCausalConv1d in this bundle "
-                "to coexist with cann_ops_transformer.causal_conv1d_fn. "
-                "Rebuild this checkout with COMPILE_CUSTOM_KERNELS=1 python3 -m pip "
-                "install -e . --no-build-isolation --no-deps, then restart all "
-                "service and Ray worker processes."
-            )
-
-
 def bootstrap_custom_op_env(*, include_vendor_lib: bool = False) -> None:
     vendor_path = os.path.join(_CUSTOM_OP_BASE_DIR, "_cann_ops_custom", "vendors", _CUSTOM_OP_VENDOR_DIR)
     if not os.path.exists(vendor_path):
         return
-    _check_custom_causal_conv1d_registration(vendor_path)
     _prepend_env_path("ASCEND_CUSTOM_OPP_PATH", vendor_path)
 
     if include_vendor_lib:

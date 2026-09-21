@@ -9,13 +9,13 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-#ifndef VLLM_CAUSAL_CONV1D_TILING_UTILS_H
-#define VLLM_CAUSAL_CONV1D_TILING_UTILS_H
+#ifndef CAUSAL_CONV1D_TILING_UTILS_H
+#define CAUSAL_CONV1D_TILING_UTILS_H
 
 #include "tiling_base/tiling_util.h"
-#include "../op_kernel/vllm_causal_conv1d_tiling_key.h"
+#include "../op_kernel/causal_conv1d_tiling_key.h"
 
-namespace optiling::vllm_causal_conv1d_host {
+namespace optiling::causal_conv1d_host {
 
 constexpr uint32_t X_INDEX = 0;
 constexpr uint32_t WEIGHT_INDEX = 1;
@@ -31,12 +31,12 @@ constexpr int32_t ATTR_PAD_SLOT_ID_INDEX = 1;
 constexpr int32_t ATTR_RUN_MODE_INDEX = 2;
 constexpr int64_t ASCENDC_RESERVED_WORKSPACE_SIZE = 16 * 1024 * 1024;
 
-struct VllmCausalConv1dCompileInfo {
+struct CausalConv1dCompileInfo {
     uint64_t ubSize = 0;
     uint32_t coreNum = 0;
 };
 
-struct VllmCausalConv1dAttrInfo {
+struct CausalConv1dAttrInfo {
     int64_t activationMode = 0;
     int64_t padSlotId = -1;
     int64_t runMode = 0;
@@ -97,33 +97,33 @@ constexpr int64_t FN_CALC_FP32_SLOT_CNT = 8;
 
 inline uint32_t NormalizeFnPlanTilingKey(uint32_t runModeKey, FnExecutionPlan fnExecutionPlan)
 {
-    if (runModeKey != VLLM_CAUSAL_CONV1D_TPL_RUN_MODE_FN) {
-        return VLLM_CAUSAL_CONV1D_TPL_FN_PLAN_INVALID;
+    if (runModeKey != CAUSAL_CONV1D_TPL_RUN_MODE_FN) {
+        return CAUSAL_CONV1D_TPL_FN_PLAN_INVALID;
     }
     switch (fnExecutionPlan) {
         case FN_EXECUTION_PLAN_CUTBS:
-            return VLLM_CAUSAL_CONV1D_TPL_FN_PLAN_CUTBS;
+            return CAUSAL_CONV1D_TPL_FN_PLAN_CUTBS;
         case FN_EXECUTION_PLAN_CUTBSD:
-            return VLLM_CAUSAL_CONV1D_TPL_FN_PLAN_CUTBSD;
+            return CAUSAL_CONV1D_TPL_FN_PLAN_CUTBSD;
         default:
-            return VLLM_CAUSAL_CONV1D_TPL_FN_PLAN_INVALID;
+            return CAUSAL_CONV1D_TPL_FN_PLAN_INVALID;
     }
 }
 
 inline uint32_t NormalizeWidthTilingKey(uint32_t runModeKey, int32_t width)
 {
-    if (runModeKey != VLLM_CAUSAL_CONV1D_TPL_RUN_MODE_FN) {
-        return VLLM_CAUSAL_CONV1D_TPL_WIDTH_RUNTIME;
+    if (runModeKey != CAUSAL_CONV1D_TPL_RUN_MODE_FN) {
+        return CAUSAL_CONV1D_TPL_WIDTH_RUNTIME;
     }
     switch (width) {
         case 2:
-            return VLLM_CAUSAL_CONV1D_TPL_WIDTH_2;
+            return CAUSAL_CONV1D_TPL_WIDTH_2;
         case 3:
-            return VLLM_CAUSAL_CONV1D_TPL_WIDTH_3;
+            return CAUSAL_CONV1D_TPL_WIDTH_3;
         case 4:
-            return VLLM_CAUSAL_CONV1D_TPL_WIDTH_4;
+            return CAUSAL_CONV1D_TPL_WIDTH_4;
         default:
-            return VLLM_CAUSAL_CONV1D_TPL_WIDTH_RUNTIME;
+            return CAUSAL_CONV1D_TPL_WIDTH_RUNTIME;
     }
 }
 
@@ -160,6 +160,6 @@ inline const char *GetFnTilingCaseName(FnTilingCaseKind caseKind)
     }
 }
 
-} // namespace optiling::vllm_causal_conv1d_host
+} // namespace optiling::causal_conv1d_host
 
-#endif // VLLM_CAUSAL_CONV1D_TILING_UTILS_H
+#endif // CAUSAL_CONV1D_TILING_UTILS_H
