@@ -166,10 +166,6 @@ def sparse_mla(query, cache, indices, metadata, scale):
         sorted_indices = torch.where(sorted_indices == sentinel, -1, sorted_indices)
         if metadata.smla_sinks is None:
             raise RuntimeError("Sparse MLA requires persistent sinks owned by SparseMLAMetadataState.")
-        if metadata.smla_sinks.shape[0] != query.shape[1]:
-            raise ValueError(
-                f"Sparse MLA sinks must cover {query.shape[1]} query heads, got {metadata.smla_sinks.shape[0]}."
-            )
         # Default to the very tensors the plan in metadata.smla_metadata was
         # generated from, so plan and call always describe the same work.
         topk_length = metadata.smla_topk_length
