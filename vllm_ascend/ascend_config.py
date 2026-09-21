@@ -680,6 +680,8 @@ class AscendConfig:
     # the max_num_batched_tokens that sequence-parallel writeback corrected).
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
+        if self.enable_dsa_cp and self.xlite_graph_config.enabled and not self.xlite_graph_config.full_mode:
+            raise ValueError("DSA-CP with xlite requires xlite_graph_config.full_mode=true.")
         engram_config = getattr(vc, "engram_config", None)
         if (
             engram_config is not None

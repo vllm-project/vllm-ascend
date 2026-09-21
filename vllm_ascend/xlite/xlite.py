@@ -609,6 +609,17 @@ class DeepseekV32XliteModel(DeepseekV3XliteModel):
         index_types: list[str] = getattr(hf_config, "indexer_types", []) or []
         xlite_config.index_full_mask = list(map(lambda x: str(x).lower().startswith("full"), index_types))
 
+        ascend_config = get_ascend_config()
+        if ascend_config.enable_dsa_cp:
+            parallel_config = self.vllm_config.parallel_config
+            if parallel_config.prefill_context_parallel_size > 1 or parallel_config.decode_context_parallel_size > 1:
+                raise ValueError("xlite DSA-CP uses replicated KV caches and cannot be combined with PCP or DCP.")
+        if hasattr(xlite_config, "enable_dsa_cp"):
+            xlite_config.enable_dsa_cp = ascend_config.enable_dsa_cp
+        elif ascend_config.enable_dsa_cp:
+            # The compatibility wrapper otherwise silently ignores missing attributes.
+            raise RuntimeError("DSACP requires an xlite build with DSACP configuration support.")
+
     def _build_model(self) -> None:
         super()._build_model()
         xlite_model = self.xlite_model
@@ -620,6 +631,15 @@ class DeepseekV32XliteModel(DeepseekV3XliteModel):
         # xlite backend expects index_k_norm and index_k_norm_bias to have dtype=torch.float32 or the model dtype
         xlite_model.index_k_norm = get_layer_weights(layers, f"{prefix}.k_norm.weight", mask=mask)
         xlite_model.index_k_norm_bias = get_layer_weights(layers, f"{prefix}.k_norm.bias", mask=mask)
+
+        if get_ascend_config().enable_dsa_cp:
+            # Keep O weights TP-sharded. xlite reconstructs a temporary full
+            # weight for prefill and uses the local shard after decode AllToAll.
+            # ND makes the input-channel concatenation explicit for both BF16
+            # and the post-processed W8A8 [input, output] layout.
+            xlite_model.attn_out = [
+                torch_npu.npu_format_cast(weight, 2).contiguous() for weight in xlite_model.attn_out
+            ]
 
     def extract_kv_cache(self, kv_caches: list[tuple[torch.Tensor, ...]], /) -> list[tuple[torch.Tensor, ...]]:
         from vllm_ascend.xlite.utils import _DUMMY_TENSOR
