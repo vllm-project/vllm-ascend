@@ -27,6 +27,7 @@ def _make_runner(max_num_reqs=8, decode_query_len=2, vocab=6):
     a bare MagicMock.
     """
     runner = object.__new__(NPUModelRunner)
+    runner.adaptive_verification = None
     runner.max_num_reqs = max_num_reqs
     runner.decode_query_len = decode_query_len
     runner.model = MagicMock()

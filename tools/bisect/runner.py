@@ -36,7 +36,7 @@ from pathlib import Path
 import psutil  # type: ignore[import-untyped]
 
 from tools.bisect import git_ops
-from tools.bisect.build_manager import BuildError, BuildManager
+from tools.bisect.build_manager import DEPLOY_ERRORS, BuildManager
 from tools.bisect.config import (
     MULTI_NODE_RUN_SH,
     SINGLE_NODE_TEST_PATH,
@@ -85,6 +85,16 @@ def kill_stray_servers() -> None:
                 logger.info("[teardown] killed stray server pid=%s", proc.info["pid"])
             except psutil.Error:
                 pass
+
+
+class BisectFatalError(RuntimeError):
+    """Unrecoverable environment problem; abort the whole search.
+
+    Distinct from per-trial failures (which become SKIP for one commit): raised
+    when a multi-node barrier times out and no worker node has ever signalled
+    ready -- continuing would burn the full barrier timeout on every remaining
+    round, so the bisect aborts with exit code 2 instead.
+    """
 
 
 class BaseRunner:
@@ -175,10 +185,23 @@ class MultiNodeRunner(BaseRunner):
         super().__init__(inp, opt, builder)
         self.coord = coordinator
 
+    def _abort_round(self, round_idx: int) -> None:
+        """Publish the round's SKIP verdict so workers leave ``wait_start``
+        promptly instead of sitting out the full barrier timeout."""
+        self.coord.publish_verdict(round_idx, "SKIP")
+
     def validate(self, candidate: Candidate, round_idx: int, log_dir: Path) -> RunOutcome:
         log_path = log_dir / f"round{round_idx}_{candidate.short}.log"
-        decision = self.builder.decide(candidate.commit)
-        version_targets = self.version_adapter.targets_at(self.repo, candidate.commit, self.version_policy)
+        # Pre-publish deploy decision: failing here would mean the round's
+        # command never appears, stranding the worker in wait_command. Publish
+        # a SKIP command so both sides stay in lockstep instead.
+        try:
+            decision = self.builder.decide(candidate.commit)
+            version_targets = self.version_adapter.targets_at(self.repo, candidate.commit, self.version_policy)
+        except DEPLOY_ERRORS:
+            self.coord.publish_command(round_idx, candidate.commit, rebuild=False, action="SKIP")
+            self._abort_round(round_idx)
+            raise
         self.coord.publish_command(
             round_idx,
             candidate.commit,
@@ -194,16 +217,31 @@ class MultiNodeRunner(BaseRunner):
                 self.version_policy.checked_packages,
                 log_path,
             )
-        except (BuildError, VersionAdaptationError):
-            self.coord.publish_verdict(round_idx, "SKIP")
+        except DEPLOY_ERRORS:
+            self._abort_round(round_idx)
             raise
 
         # 3) barrier: every node deployed the same commit before any test starts
         self.coord.signal_ready(round_idx, git_ops.current_commit(self.repo))
         try:
             self.coord.wait_all_ready(round_idx, candidate.commit, self.opt.barrier_timeout_s)
-        except (RuntimeError, TimeoutError) as exc:
-            self.coord.publish_verdict(round_idx, "SKIP")
+        except (TimeoutError, RuntimeError) as exc:
+            self._abort_round(round_idx)
+            # No worker EVER signalled ready (any round): they are gone or never
+            # joined. SKIP-scanning the remaining range would burn the full
+            # barrier timeout per round for nothing -> abort the whole search.
+            # A worker that only joined late (its marker landed in an earlier
+            # round) still counts as present and keeps the per-round SKIP.
+            # (RuntimeError = split-commit / deliberately failed marker: a
+            # worker is provably present, so that stays a per-round SKIP.)
+            if isinstance(exc, TimeoutError) and not self.coord.any_foreign_ready():
+                raise BisectFatalError(
+                    f"Barrier timeout on round {round_idx} and no worker node has "
+                    "ever signalled ready (in any round); the bisect cannot "
+                    "proceed without all nodes. Ensure 'auto_bisect.py --scene "
+                    "multi_node' runs on EVERY node against the same --coord-dir, "
+                    "or raise --barrier-timeout-s if worker builds are slow."
+                ) from exc
             raise VersionAdaptationError(f"Barrier failed: {exc}") from exc
         self.coord.publish_start(round_idx)
 

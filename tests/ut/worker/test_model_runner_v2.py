@@ -1,14 +1,19 @@
 import ast
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import numpy as np
 import pytest
 import torch
 from vllm.config import CUDAGraphMode
+from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
+from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
@@ -16,12 +21,18 @@ from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 
 def _make_runner(need_timing: bool = True):
     runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.pcp_manager = None
     runner.ascend_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(need_timing=need_timing))
     )
     runner.vllm_config = SimpleNamespace()
+    runner.kvpp = SimpleNamespace(complete_forward=lambda: None)
+    runner.model_state = SimpleNamespace(kvpp_is_dummy_run=False)
     runner.execute_model_state = None
     runner.is_last_pp_rank = False
+    runner.attn_groups = []
+    runner.adaptive_verification = None
+    runner.use_fia = False
     return runner
 
 
@@ -53,6 +64,8 @@ def test_execute_model_records_profiling_time():
         "is_profile": False,
         "context_len": 0,
     }
+    if not vllm_version_is("0.29.0"):
+        expected_kwargs["valid_dummy_state_slots"] = False
     mock_execute_model.assert_called_once_with(scheduler_output, **expected_kwargs)
 
 
@@ -132,6 +145,35 @@ def test_full_graph_non_uniform_queries_use_mixed_padding(
     assert padded_query_start_loc[num_reqs_padded] == num_tokens_padded
 
 
+@pytest.mark.parametrize(
+    "query_lens,num_tokens_padded,num_reqs_padded,expected,expected_num_reqs",
+    [
+        ([3, 1], 8, 4, [0, 3, 4, 6, 8], 4),
+        ([2, 3], 8, 2, [0, 2, 5, 8], 3),
+        ([2, 3], 5, 2, [0, 2, 5], 2),
+    ],
+    ids=["spread-padding", "extra-padding-request", "no-padding"],
+)
+def test_adaptive_verification_pads_fia_query_boundaries(
+    query_lens, num_tokens_padded, num_reqs_padded, expected, expected_num_reqs
+):
+    """Device-reallocated DSpark queries still match the FULL graph shape."""
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    num_reqs = len(query_lens)
+    query_start_loc = np.full(max(num_reqs_padded + 2, 5), sum(query_lens), dtype=np.int32)
+    query_start_loc[: num_reqs + 1] = np.cumsum([0, *query_lens])
+
+    actual, actual_num_reqs = runner._pad_adaptive_query_start_loc_for_fia(
+        num_tokens_padded,
+        num_reqs_padded,
+        num_reqs,
+        query_start_loc,
+    )
+
+    assert actual_num_reqs == expected_num_reqs
+    np.testing.assert_array_equal(actual[: len(expected)], expected)
+
+
 def test_sample_tokens_restores_replicated_draft_hidden_states():
     runner = _make_runner(need_timing=False)
     runner.is_last_pp_rank = True
@@ -199,18 +241,14 @@ def test_prepare_inputs_preserves_pcp_tokens_and_forwards_graph_padding():
 
     # prepare_inputs keeps the real global PCP batch when it is larger than the
     # graph descriptor, and forwards the descriptor as an explicit rank-local
-    # padded extent on main (upstream vLLM #53515). v0.28.0 omits the kwarg.
+    # padded extent on both supported versions (upstream vLLM #53515).
     assert len(padding_assignments) == 1
     assert ast.unparse(padding_assignments[0].value) == "max(num_tokens, batch_desc.num_tokens)"
 
-    assert len(partition_calls) == 2
+    assert len(partition_calls) == 1
     padded_call = next(
         call for call in partition_calls if any(keyword.arg == "padded_num_tokens" for keyword in call.keywords)
     )
-    unpadded_call = next(
-        call for call in partition_calls if not any(keyword.arg == "padded_num_tokens" for keyword in call.keywords)
-    )
-    assert unpadded_call is not None
     padded_num_tokens = next(keyword.value for keyword in padded_call.keywords if keyword.arg == "padded_num_tokens")
     assert isinstance(padded_num_tokens, ast.Attribute)
     assert padded_num_tokens.attr == "num_tokens"
@@ -226,13 +264,15 @@ def test_pcp_dummy_refreshes_captured_buffers_after_real_batch(num_reqs, num_tok
     runner.pcp_manager = manager
     manager._local_block_tables = (torch.full((8, 2), 99, dtype=torch.int32),)
     manager._gathered_kv_slot_mappings = torch.full((1, 16), 99, dtype=torch.int64)
+    input_buffers = manager._input_buffers
+    assert input_buffers is not None
     captured = {
-        name: getattr(manager.input_buffers, name)
+        name: getattr(input_buffers, name)
         for name in ("input_ids", "positions", "is_padding", "query_start_loc", "seq_lens")
     }
     for name, value in captured.items():
         value.fill_(False if name == "is_padding" else 99)
-    manager.input_buffers.seq_lens_np.fill(99)
+    input_buffers.seq_lens_np.fill(99)
     with patch("vllm_ascend.worker.v2.input_batch.update_cos_sin"):
         dummy = AscendInputBatch.make_dummy(num_reqs, num_tokens, runner.input_buffers)
 
@@ -241,7 +281,7 @@ def test_pcp_dummy_refreshes_captured_buffers_after_real_batch(num_reqs, num_tok
     for name, value in captured.items():
         expected = getattr(dummy, name)
         torch.testing.assert_close(value[: len(expected)], expected)
-    np.testing.assert_array_equal(manager.input_buffers.seq_lens_np[:num_reqs], dummy.seq_lens_np)
+    np.testing.assert_array_equal(input_buffers.seq_lens_np[:num_reqs], dummy.seq_lens_np)
     assert block_tables[0].data_ptr() == manager._local_block_tables[0].data_ptr()
     assert torch.count_nonzero(block_tables[0]) == 0
     assert slots.data_ptr() == manager._gathered_kv_slot_mappings.data_ptr()
@@ -255,4 +295,489 @@ def test_prepare_dummy_attn_without_pcp_uses_upstream():
     dummy = object()
     with patch.object(GPUModelRunner, "prepare_dummy_attn", return_value=((), None)) as parent:
         assert runner.prepare_dummy_attn(dummy) == ((), None)
-    parent.assert_called_once_with(dummy)
+    if vllm_version_is("0.29.0"):
+        parent.assert_called_once_with(dummy)
+    else:
+        parent.assert_called_once_with(dummy, valid_state_slots=False)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize(
+    "computed,dummy_run,is_profile,expected",
+    [
+        ([0, 0, 99, 99], False, False, False),
+        ([0, 4, 0, 0], False, False, True),
+        ([0, 4, 0, 0], True, False, False),
+        ([0, 4, 0, 0], False, True, False),
+    ],
+)
+def test_kvpp_history_ignores_padding_and_dummy_work(monkeypatch, computed, dummy_run, is_profile, expected, enabled):
+    from vllm_ascend.worker.v2.model_states import default
+
+    runner = _make_runner(need_timing=False)
+    events: list[object] = []
+    runner.kvpp = SimpleNamespace(
+        scheduler=object() if enabled else None,
+        prepare_forward=lambda history: events.append(("prepare", history)),
+        complete_forward=lambda: events.append("complete"),
+    )
+    state = default.AscendModelState.__new__(default.AscendModelState)
+    state.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=1))
+    state.max_model_len = 32
+    state.kvpp_runtime = runner.kvpp
+    runner.model_state = state
+    batch = SimpleNamespace(
+        num_reqs=2,
+        num_reqs_after_padding=4,
+        num_tokens=2,
+        num_tokens_after_padding=4,
+        num_computed_tokens_np=np.array(computed),
+        query_start_loc_np=np.array([0, 1, 2, 2, 2], dtype=np.int32),
+        query_start_loc=torch.tensor([0, 1, 2, 2, 2]),
+        num_scheduled_tokens=torch.tensor([1, 1]),
+        is_prefilling_np=np.array([True, False, False, False]),
+        seq_lens=torch.tensor([1, 5]),
+        seq_lens_np=np.array([1, 5]),
+        dcp_local_seq_lens=None,
+        positions=torch.arange(2),
+        attn_state=None,
+    )
+    if not enabled:
+        batch.num_computed_tokens_np = None  # Disabled KVPP must not inspect history.
+    metadata = object()
+    monkeypatch.setattr(default, "build_attn_metadata", lambda **_kwargs: metadata)
+
+    def forward(_self, _scheduler_output, **_kwargs):
+        assert state.kvpp_is_dummy_run is (dummy_run or is_profile)
+        assert state.prepare_attn(batch, CUDAGraphMode.NONE, (), torch.empty(0), [], None) is metadata
+        events.append("forward")
+        return metadata
+
+    monkeypatch.setattr(GPUModelRunner, "execute_model", forward)
+    assert runner.execute_model(SimpleNamespace(), dummy_run=dummy_run, is_profile=is_profile) is metadata
+    assert events == ([("prepare", expected)] if enabled else []) + ["forward", "complete"]
+    assert state.kvpp_is_dummy_run is False
+
+
+def test_pcp_manager_cls():
+    assert _make_runner().pcp_manager_cls is AscendPCPManager
+
+
+def _parent_init(self, vllm_config, device, *, full_graph=False, speculative=False):
+    self.vllm_config = vllm_config
+    self.device = device
+    self.compilation_config = SimpleNamespace(
+        cudagraph_mode=CUDAGraphMode.FULL if full_graph else CUDAGraphMode.NONE,
+        mode=SimpleNamespace(),
+        has_full_cudagraphs=lambda: full_graph,
+    )
+    self.model_config = SimpleNamespace(enforce_eager=not full_graph)
+    self.speculative_config = object() if speculative else None
+    self.is_last_pp_rank = True
+    self.pp_handler = MagicMock()
+    self.max_num_reqs = 2
+    self.max_model_len = 32
+    self.max_num_tokens = 8
+    self.num_speculative_steps = 1 if speculative else 0
+    self.vocab_size = 16
+    self.dtype = torch.float16
+    self.req_states = object()
+    self.input_buffers = object()
+    self.speculator = object()
+
+
+def test_init_without_spec_pp():
+    vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(enable_eplb=False))
+    ascend_config = SimpleNamespace(eplb_config=SimpleNamespace(load_collection_phase="all"))
+    with (
+        patch("vllm_ascend.worker.v2.model_runner.get_ascend_config", return_value=ascend_config),
+        patch("vllm_ascend.worker.v2.model_runner.set_potential_max_tokens"),
+        patch("vllm_ascend.worker.v2.model_runner.resolve_spec_pp_support", return_value=None),
+        patch("vllm_ascend.worker.v2.model_runner.torch_cuda_wrapper", return_value=nullcontext()),
+        patch(
+            "vllm_ascend.worker.v2.model_runner.bypass_upstream_spec_pp_guard",
+            return_value=nullcontext(False),
+        ),
+        patch.object(GPUModelRunner, "__init__", lambda self, cfg, dev: _parent_init(self, cfg, dev)),
+        patch("vllm_ascend.worker.v2.model_runner.AscendEPLBController", return_value="eplb"),
+        patch("vllm_ascend.worker.v2.model_runner.AscendRequestState", return_value="req"),
+        patch("vllm_ascend.worker.v2.model_runner.AscendInputBuffers", return_value="buf"),
+        patch("vllm_ascend.worker.v2.model_runner.set_cos_and_sin"),
+        patch("vllm_ascend.worker.v2.model_runner.set_mc2_tokens_capacity"),
+        patch("vllm_ascend.worker.v2.model_runner.set_mc2_mask"),
+        patch(
+            "vllm_ascend.worker.v2.model_runner.breakable_cudagraph.is_breakable_cudagraph_enabled",
+            return_value=False,
+        ),
+        patch("torch.npu.Event", return_value="event"),
+        patch("torch.npu.Stream", return_value="stream"),
+        patch("torch.empty", return_value=torch.zeros(2, dtype=torch.int32)),
+    ):
+        runner = NPUModelRunner(vllm_config, torch.device("cpu"))
+    assert runner.eplb == "eplb"
+    assert runner.req_states == "req"
+    assert runner.input_buffers == "buf"
+    assert runner.speculator is None
+    assert runner.use_spec_pp is False
+    assert runner.decode_query_len == 1
+
+
+def test_init_spec_pp_full_graph_and_speculator():
+    vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(enable_eplb=True))
+    ascend_config = SimpleNamespace(eplb_config=SimpleNamespace(load_collection_phase="decode"))
+    spec_pp = SimpleNamespace(needs_aux_hidden_states=True)
+    speculator = SimpleNamespace()
+    with (
+        patch("vllm_ascend.worker.v2.model_runner.get_ascend_config", return_value=ascend_config),
+        patch("vllm_ascend.worker.v2.model_runner.set_potential_max_tokens"),
+        patch("vllm_ascend.worker.v2.model_runner.resolve_spec_pp_support", return_value=spec_pp),
+        patch("vllm_ascend.worker.v2.model_runner.torch_cuda_wrapper", return_value=nullcontext()),
+        patch(
+            "vllm_ascend.worker.v2.model_runner.bypass_upstream_spec_pp_guard",
+            return_value=nullcontext(True),
+        ),
+        patch("vllm_ascend.worker.v2.model_runner.restore_pp_after_upstream_init") as restore_pp,
+        patch.object(
+            GPUModelRunner,
+            "__init__",
+            lambda self, cfg, dev: _parent_init(self, cfg, dev, full_graph=True, speculative=True),
+        ),
+        patch("vllm_ascend.worker.v2.model_runner.AscendEPLBController", return_value="eplb") as eplb_cls,
+        patch("vllm_ascend.worker.v2.model_runner.init_speculator", return_value=speculator),
+        patch("vllm_ascend.worker.v2.model_runner.AscendRequestState", return_value="req"),
+        patch("vllm_ascend.worker.v2.model_runner.AscendInputBuffers", return_value="buf"),
+        patch("vllm_ascend.worker.v2.model_runner.set_cos_and_sin"),
+        patch("vllm_ascend.worker.v2.model_runner.set_mc2_tokens_capacity"),
+        patch("vllm_ascend.worker.v2.model_runner.set_mc2_mask"),
+        patch("vllm_ascend.patch.worker.patch_v2.patch_spec_pp.install_upstream_spec_pp_protocol") as install_pp,
+        patch("torch.npu.Stream", return_value="stream"),
+        patch("torch.npu.Event", return_value="event"),
+        patch("torch.empty", return_value=torch.zeros(2, dtype=torch.int32)),
+        patch(
+            "vllm_ascend.worker.v2.model_runner.breakable_cudagraph.is_breakable_cudagraph_enabled",
+            return_value=True,
+        ),
+    ):
+        runner = NPUModelRunner(vllm_config, torch.device("cpu"))
+    restore_pp.assert_called_once()
+    assert eplb_cls.call_args.kwargs["load_collection_phase"] == "decode"
+    assert runner.use_aclgraph is True
+    assert runner.use_aux_hidden_state_outputs is True
+    assert runner.speculator is speculator
+    assert speculator.update_stream is runner.update_stream
+    if vllm_version_is("0.29.0"):
+        assert runner.use_spec_pp is True
+        install_pp.assert_called_once()
+    else:
+        assert runner.use_spec_pp is False
+        install_pp.assert_not_called()
+    assert runner.update_stream is not None
+    assert runner.decode_query_len == 2
+
+
+def test_sample_tokens_non_last_pp_uses_global_batch():
+    runner = _make_runner()
+    runner.is_last_pp_rank = False
+    runner.use_spec_pp = False
+    runner.speculator = None
+    global_batch = object()
+    runner.pcp_manager = MagicMock(spec=AscendPCPManager)
+    runner.pcp_manager.global_batch = global_batch
+    state = Mock(aux_hidden_states=None)
+    replaced = object()
+    state._replace.return_value = replaced
+    runner.execute_model_state = state
+    with patch.object(GPUModelRunner, "sample_tokens", return_value="out") as parent:
+        assert runner.sample_tokens(None) == "out"
+    state._replace.assert_called_once_with(input_batch=global_batch)
+    assert runner.execute_model_state is replaced
+    parent.assert_called_once_with(None)
+
+
+def test_sample_tokens_spec_pp_broadcasts_draft_tokens():
+    runner = _make_runner()
+    runner.is_last_pp_rank = True
+    runner.use_spec_pp = True
+    runner.speculator = None
+    runner.pcp_manager = None
+    runner.pp_handler = MagicMock()
+    with patch.object(GPUModelRunner, "sample_tokens", return_value="out"):
+        assert runner.sample_tokens("g") == "out"
+    if vllm_version_is("0.29.0"):
+        runner.pp_handler.broadcast_draft_tokens.assert_called_once_with()
+    else:
+        runner.pp_handler.broadcast_draft_tokens.assert_not_called()
+
+
+def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
+    runner = _make_runner()
+    runner.vllm_config = SimpleNamespace()
+    runner.compilation_config = SimpleNamespace(static_forward_context={})
+    runner.pcp_manager = MagicMock(spec=AscendPCPManager)
+    runner.model_state = SimpleNamespace(pcp_manager=None, kvpp_runtime=None)
+    runner.speculator = SimpleNamespace()
+    runner.model_config = SimpleNamespace(enable_return_routed_experts=True)
+    runner.init_routed_experts_capturer = MagicMock()
+    kv_cache_config = KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
+    original = vllm_model_runner.ModelCudaGraphManager
+    seen = {}
+    kv_cache_config = KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[],
+        kv_cache_groups=[],
+    )
+
+    def _super(self, kv_cache_config, kv_cache_allocation_context=None):
+        self.kv_cache_config = kv_cache_config
+        self.attn_groups = []
+        seen["factory"] = vllm_model_runner.ModelCudaGraphManager
+        seen["cfg"] = kv_cache_config
+
+    with (
+        patch.object(GPUModelRunner, "initialize_kv_cache", _super),
+        patch("vllm_ascend.worker.v2.model_runner.ModelAclGraphManager", return_value="acl") as acl_cls,
+        patch(
+            "vllm_ascend.worker.v2.model_runner.KVPPRuntime.create_from_kv_cache",
+            return_value="kvpp",
+        ) as create_kvpp,
+    ):
+        runner.initialize_kv_cache(kv_cache_config)
+        seen["factory"](runner.vllm_config, torch.device("cpu"), CUDAGraphMode.FULL, 1)
+
+    assert seen["cfg"] == kv_cache_config
+    assert vllm_model_runner.ModelCudaGraphManager is original
+    acl_cls.assert_called_once()
+    create_kvpp.assert_called_once()
+    assert runner.kvpp == "kvpp"
+    assert runner.model_state.kvpp_runtime == "kvpp"
+    assert runner.pcp_manager.vllm_config is runner.vllm_config
+    assert runner.model_state.pcp_manager is runner.pcp_manager
+    assert runner.speculator.pcp_manager is runner.pcp_manager
+    runner.init_routed_experts_capturer.assert_called_once_with()
+
+
+def test_initialize_kv_cache_forwards_allocation_context():
+    runner = _make_runner()
+    runner.vllm_config = SimpleNamespace()
+    runner.compilation_config = SimpleNamespace(static_forward_context={})
+    runner.pcp_manager = None
+    runner.model_state = SimpleNamespace(pcp_manager=None, kvpp_runtime=None)
+    runner.speculator = None
+    runner.model_config = SimpleNamespace(enable_return_routed_experts=False)
+    called = False
+    captured_kwargs: dict[str, object] = {}
+    allocation_context = object()
+    kv_cache_config = KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[],
+        kv_cache_groups=[],
+    )
+
+    def _super(self, kv_cache_config, **kwargs):
+        nonlocal called
+        called = True
+        captured_kwargs.update(kwargs)
+        self.kv_cache_config = kv_cache_config
+        self.attn_groups = []
+
+    with (
+        patch.object(GPUModelRunner, "initialize_kv_cache", _super),
+        patch("vllm_ascend.worker.v2.model_runner.ModelAclGraphManager", return_value="acl"),
+        patch(
+            "vllm_ascend.worker.v2.model_runner.KVPPRuntime.create_from_kv_cache",
+            return_value="kvpp",
+        ),
+    ):
+        runner.initialize_kv_cache(kv_cache_config, kv_cache_allocation_context=allocation_context)
+
+    assert called is True
+    assert captured_kwargs["kv_cache_allocation_context"] is allocation_context
+
+
+@pytest.mark.parametrize("moe_type", [MoECommType.MC2, MoECommType.FUSED_MC2])
+def test_profile_run_dummy_reserves_mc2(moe_type):
+    runner = _make_runner()
+    runner.max_num_tokens = 16
+    runner.vllm_config = SimpleNamespace()
+    runner.get_model = MagicMock(return_value="m")
+    runner._dummy_run = MagicMock()
+    with (
+        patch("vllm_ascend.worker.v2.model_runner.get_mc2_tokens_capacity", return_value=4),
+        patch("vllm_ascend.worker.v2.model_runner.select_moe_comm_method", return_value=moe_type),
+        patch("vllm_ascend.worker.v2.model_runner.override_mrv2_in_profile_run", return_value=nullcontext()),
+        patch("vllm_ascend.worker.v2.model_runner.disable_compilation", return_value=nullcontext()),
+        patch.object(GPUModelRunner, "profile_run") as parent,
+    ):
+        runner.profile_run()
+    runner._dummy_run.assert_called_once_with(4, skip_attn=True, skip_eplb=True, is_profile=True)
+    parent.assert_called_once_with()
+
+
+def test_profile_run_skips_mc2_dummy_without_capacity():
+    runner = _make_runner()
+    runner.max_num_tokens = 16
+    runner._dummy_run = MagicMock()
+    with (
+        patch("vllm_ascend.worker.v2.model_runner.get_mc2_tokens_capacity", return_value=None),
+        patch("vllm_ascend.worker.v2.model_runner.override_mrv2_in_profile_run", return_value=nullcontext()),
+        patch.object(GPUModelRunner, "profile_run"),
+    ):
+        runner.profile_run()
+    runner._dummy_run.assert_not_called()
+
+
+def _prepare_inputs_runner(*, draft=False, full_cg=False, use_dcp=False, use_pp=False, rswa=False, speculator=False):
+    runner = _make_runner()
+    runner.max_num_reqs = 4
+    runner.device = torch.device("cpu")
+    runner.decode_query_len = 1
+    runner.use_dcp = use_dcp
+    runner.dcp_size = 2
+    runner.dcp_rank = 0
+    runner.cp_interleave = False
+    runner.use_pp = use_pp
+    runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL if full_cg else CUDAGraphMode.NONE)
+    runner.model_config = SimpleNamespace(rswa_window=(4 if rswa else None))
+    runner.model_state = SimpleNamespace(num_new_sampled_tokens_per_step=1)
+    runner.eplb = SimpleNamespace(set_batch_phase=MagicMock())
+    runner.pcp_manager = None
+    runner.speculator = object() if speculator else None
+    runner.num_computed_tokens_event = MagicMock()
+    runner.num_computed_tokens_cpu = torch.tensor([3, 4, 0, 0], dtype=torch.int32)
+    runner.input_buffers = AscendInputBuffers(4, 16, runner.device)
+    runner.input_buffers.dcp_local_seq_lens = torch.zeros(4, dtype=torch.int32)
+    runner.req_states = SimpleNamespace(
+        req_id_to_index={"r0": 0, "r1": 1},
+        num_computed_tokens_cpu=torch.tensor([1, 2, 0, 0], dtype=torch.int32),
+        num_computed_tokens_np=np.array([1, 2, 0, 0], dtype=np.int32),
+        num_computed_tokens=SimpleNamespace(gpu=torch.zeros(4, dtype=torch.int32)),
+        next_prefill_tokens=MagicMock(),
+        all_token_ids=SimpleNamespace(gpu=MagicMock()),
+        prefill_len=SimpleNamespace(gpu=MagicMock()),
+        last_sampled_tokens=MagicMock(),
+        draft_tokens=MagicMock(),
+        max_seq_len=np.array([8, 8, 0, 0], dtype=np.int32),
+        prompt_len=SimpleNamespace(gpu=torch.tensor([4, 4, 0, 0], dtype=torch.int32)),
+    )
+    draft_tokens = {"r0": [9], "r1": [8, 7]} if draft else {}
+    scheduler_output = SimpleNamespace(
+        scheduled_spec_decode_tokens=draft_tokens,
+        has_structured_output_requests=False,
+        num_scheduled_tokens={"r0": 2, "r1": 2},
+        scheduled_cached_reqs=SimpleNamespace(req_ids=["r0"] if speculator else []),
+    )
+    batch_req_state = SimpleNamespace(
+        num_tokens=4,
+        req_ids=["r0", "r1"],
+        num_scheduled_tokens=np.array([2, 2], dtype=np.int32),
+        idx_mapping_np=np.array([0, 1], dtype=np.int32),
+        has_prefill=True,
+        prefill_len_np=np.array([2, 2], dtype=np.int32),
+        num_computed_prefill_tokens_np=np.array([0, 0], dtype=np.int32),
+        is_prefilling_np=np.array([True, True]),
+    )
+    batch_desc = SimpleNamespace(
+        num_tokens=8 if full_cg else 4,
+        num_reqs=2,
+        cg_mode=CUDAGraphMode.FULL if full_cg else CUDAGraphMode.NONE,
+    )
+    return runner, scheduler_output, batch_req_state, batch_desc
+
+
+def _fake_async_copy(src, device=None, out=None):
+    tensor = torch.as_tensor(src, dtype=torch.int32)
+    if out is not None:
+        n = min(out.numel(), tensor.numel())
+        out.view(-1)[:n].copy_(tensor.view(-1)[:n])
+        return out
+    return tensor
+
+
+def _run_prepare_inputs(runner, scheduler_output, batch_req_state, batch_desc, *, version_029=False):
+    batch = SimpleNamespace(positions=torch.zeros(4, dtype=torch.int32))
+
+    def _partition(_pcp_manager, input_batch, **_kwargs):
+        return input_batch
+
+    with (
+        patch("vllm_ascend.worker.v2.model_runner.async_copy_to_gpu", side_effect=_fake_async_copy),
+        patch("vllm_ascend.worker.v2.model_runner.build_attn_state", return_value="attn"),
+        patch("vllm_ascend.worker.v2.model_runner.prepare_prefill_inputs"),
+        patch("vllm_ascend.worker.v2.model_runner.prepare_pos_seq_lens"),
+        patch("vllm_ascend.worker.v2.model_runner.prepare_dcp_local_seq_lens", create=True),
+        patch(
+            "vllm_ascend.worker.v2.model_runner.combine_sampled_and_draft_tokens",
+            return_value=torch.tensor([0, 1], dtype=torch.int32),
+        ),
+        patch(
+            "vllm_ascend.worker.v2.model_runner.expand_idx_mapping",
+            return_value=(torch.tensor([0, 1], dtype=torch.int32), torch.zeros(2, dtype=torch.int32)),
+        ),
+        patch("vllm_ascend.worker.v2.model_runner.AscendInputBatch", return_value=batch),
+        patch.object(
+            vllm_model_runner,
+            "pcp",
+            SimpleNamespace(maybe_partition_pcp_batch=_partition),
+        ),
+        patch("vllm_ascend.worker.v2.model_runner.update_cos_sin"),
+        patch("vllm_ascend.worker.v2.model_runner.vllm_version_is", return_value=version_029),
+    ):
+        return runner.prepare_inputs(scheduler_output, batch_req_state, batch_desc), batch
+
+
+def test_prepare_inputs_common_path():
+    runner, scheduler_output, batch_req_state, batch_desc = _prepare_inputs_runner()
+    out, partitioned = _run_prepare_inputs(runner, scheduler_output, batch_req_state, batch_desc)
+    assert out is partitioned
+    runner.eplb.set_batch_phase.assert_called_once_with(True)
+    np.testing.assert_array_equal(runner.input_buffers.seq_lens_cpu[:2], np.array([3, 4], dtype=np.int32))
+
+
+def test_prepare_inputs_covers_draft_full_dcp_pp_and_rswa():
+    runner, scheduler_output, batch_req_state, batch_desc = _prepare_inputs_runner(
+        draft=True, full_cg=True, use_dcp=True, use_pp=True, rswa=True, speculator=True
+    )
+    out, partitioned = _run_prepare_inputs(runner, scheduler_output, batch_req_state, batch_desc, version_029=True)
+    assert out is partitioned
+    runner.num_computed_tokens_event.synchronize.assert_called_once_with()
+    assert runner.req_states.num_computed_tokens_cpu[0] == 3
+
+
+def test_postprocess_sampled_copies_only_with_speculator():
+    runner = _make_runner()
+    runner.speculator = object()
+    runner._copy_num_computed_tokens_to_cpu = MagicMock()
+    with patch.object(GPUModelRunner, "postprocess_sampled") as parent:
+        runner.postprocess_sampled("idx", "tok", 1, 0, query_start_loc="q")
+    parent.assert_called_once_with("idx", "tok", 1, 0, "q")
+    runner._copy_num_computed_tokens_to_cpu.assert_called_once_with()
+
+    runner.speculator = None
+    runner._copy_num_computed_tokens_to_cpu.reset_mock()
+    with patch.object(GPUModelRunner, "postprocess_sampled"):
+        runner.postprocess_sampled("idx", "tok", 1, 0)
+    runner._copy_num_computed_tokens_to_cpu.assert_not_called()
+
+
+def test_copy_num_computed_tokens_to_cpu_records_event():
+    import vllm_ascend.worker.v2.model_runner as model_runner_mod
+
+    runner = _make_runner()
+    stream = MagicMock()
+    runner.num_computed_tokens_stream = stream
+    runner.num_computed_tokens_cpu = MagicMock()
+    runner.num_computed_tokens_event = MagicMock()
+    runner.req_states = SimpleNamespace(num_computed_tokens=SimpleNamespace(gpu=torch.zeros(2, dtype=torch.int32)))
+    npu_cm = MagicMock()
+    npu_cm.__enter__.return_value = None
+    npu_cm.__exit__.return_value = False
+    default_stream = MagicMock()
+    with (
+        patch.object(model_runner_mod.torch.cuda, "current_stream", return_value=default_stream),
+        patch.object(model_runner_mod.torch.npu, "stream", return_value=npu_cm) as npu_stream,
+    ):
+        runner._copy_num_computed_tokens_to_cpu()
+    npu_stream.assert_called_once_with(stream)
+    stream.wait_stream.assert_called_once_with(default_stream)
+    runner.num_computed_tokens_cpu.copy_.assert_called_once()
+    runner.num_computed_tokens_event.record.assert_called_once_with()

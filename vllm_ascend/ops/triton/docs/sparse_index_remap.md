@@ -13,7 +13,7 @@
 - **Algorithm flow** (processed per row, chunked for parallelism):
   1. Fused kernel, grid `(num_chunks, rows)`: each program loads `BLOCK = min(128, next_power_of_2(topk_count))` indices, computes the remap and the owner-validity mask vectorized (int32), then serial-compacts the chunk's valid entries to the front of its `chunk_out` slot with scalar `get_element` operations, writes the chunk's valid count, and pre-fills the chunk's region of the output with `-1`.
   2. Gather kernel, grid `(rows,)`: per row, iterates over the chunks and masked-copies `chunk_out[:cnt]` to the row front in chunk order, restoring top-k order across chunks.
-- **Supported modes**: Atlas A2 and Atlas A3 (verified on both); Ascend 950 N/A. The routing in `sfa_cp.py` is `HAS_TRITON and topk_indices.is_npu`, so any NPU device with triton-ascend takes the Triton path; the torch implementation remains the fallback. Used by the SFA DCP decode path of sparse-attention models (e.g. GLM5.2) in both eager and graph-capture modes.
+- **Supported modes**: Atlas A2 and Atlas A3 (verified on both); 950PR&950DT Products N/A. The routing in `sfa_cp.py` is `HAS_TRITON and topk_indices.is_npu`, so any NPU device with triton-ascend takes the Triton path; the torch implementation remains the fallback. Used by the SFA DCP decode path of sparse-attention models (e.g. GLM5.2) in both eager and graph-capture modes.
 
 ## Parameters
 

@@ -48,15 +48,6 @@ def is_a5_bf16_kv_enabled(vllm_config) -> bool:
     return str(cache_config.cache_dtype).lower() in _BF16_KV_CACHE_DTYPES
 
 
-def get_dsv4_attn_kv_dtype(vllm_config) -> torch.dtype:
-    """Return the attention KV dtype while preserving non-A5 behavior."""
-    return (
-        torch.bfloat16
-        if not _supports_dsv4_compressed_cache() or is_a5_bf16_kv_enabled(vllm_config)
-        else torch.float8_e4m3fn
-    )
-
-
 DSA_COMPRESSOR_SLOT_MAPPING_FLAT = 1
 DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET = 2
 
@@ -112,14 +103,16 @@ class DsaAttnKvPlan:
         if x is None:
             return
         if self.uses_sparse_flash_mla:
-            if slot_mapping.ndim != 2 or slot_mapping.shape[-1] != 2:
-                raise ValueError(f"BF16 DSA slot_mapping must be [num_tokens, 2], got {tuple(slot_mapping.shape)}.")
-            # Keep fixed [T, 2] shape under ACLGraph. SparseFlashMla's
-            # scatter path receives padded [-1, -1] rows directly; do not
-            # introduce a data-dependent Nonzero/gather operation here.
-            indices = slot_mapping.to(torch.int64).contiguous()
-            updates = x.reshape((slot_mapping.shape[0],) + tuple(cache.shape[2:])).contiguous()
-            torch_npu.npu_scatter_nd_update_(cache, indices, updates)
+            if slot_mapping.ndim != 1:
+                raise ValueError(f"BF16 DSA slot_mapping must be [num_tokens], got {tuple(slot_mapping.shape)}.")
+            # Flatten the paged cache and keep a static [T, 1] index tensor so
+            # ACLGraph capture matches the A5 FP8 / SFA one-dimensional slot
+            # convention. Do not clamp PAD_SLOT_ID (-1) to 0: that overwrites
+            # a live physical slot. The scatter kernel skips negative indices.
+            flat_cache = cache.flatten(end_dim=1)
+            indices = slot_mapping.view(-1, 1)
+            updates = x.reshape((slot_mapping.shape[0],) + tuple(flat_cache.shape[1:]))
+            torch_npu.npu_scatter_nd_update_(flat_cache, indices, updates)
             return
         if not self.uses_kv_compress_epilog:
             torch.ops._C_ascend.npu_scatter_nd_update_sk(cache, slot_mapping, x)
@@ -158,8 +151,8 @@ def get_dsa_attn_kv_plan(vllm_config) -> DsaAttnKvPlan:
             uses_sparse_flash_mla=True,
             uses_kv_compress_epilog=False,
             layout_kv="PA_BBND",
-            compressor_slot_mapping_format=DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET,
-            requires_block_offset_slots=True,
+            compressor_slot_mapping_format=DSA_COMPRESSOR_SLOT_MAPPING_FLAT,
+            requires_block_offset_slots=False,
             sparse_attn_op=sparse_flash_mla,
             sparse_attn_metadata_op=sparse_flash_mla_metadata,
             sparse_attn_base_kwargs={},

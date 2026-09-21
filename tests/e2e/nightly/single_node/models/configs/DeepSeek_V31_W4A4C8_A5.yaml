@@ -19,6 +19,8 @@ _server_cmd: &server_cmd
   - "0.9"
   - "--async-scheduling"
   - "--enable-expert-parallel"
+  - "--kv-cache-dtype" 
+  - "fp8"
   - "--compilation-config"
   - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
   - "--speculative_config"

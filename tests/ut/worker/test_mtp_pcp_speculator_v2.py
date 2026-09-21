@@ -14,6 +14,7 @@ from vllm.v1.worker.gpu import dp_utils
 from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
 from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
 
+from vllm_ascend.worker.v2 import pcp_manager as pcp_manager_module
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.spec_decode.autoregressive import (
     speculator as speculator_module,
@@ -46,26 +47,34 @@ def _make_padded_input_batch() -> MagicMock:
 
 
 @pytest.mark.parametrize(
-    ("target_pcp_size", "expected_execution_pcp_size"),
-    [(2, 1), (1, 1)],
+    ("target_pcp_size", "expected_execution_pcp_size", "dcp_size"),
+    [(2, 1, 4), (2, 1, 8), (1, 1, 4)],
 )
 def test_draft_runtime_config_preserves_target_worker_topology(
     target_pcp_size: int,
     expected_execution_pcp_size: int,
+    dcp_size: int,
 ) -> None:
     draft_parallel_config = SimpleNamespace(
         prefill_context_parallel_size=2,
+        cp_kv_cache_interleave_size=64,
+        decode_context_parallel_size=4,
         enable_expert_parallel=False,
         enable_eplb=False,
         rank=0,
     )
     target_parallel_config = SimpleNamespace(
         prefill_context_parallel_size=target_pcp_size,
+        cp_kv_cache_interleave_size=128,
+        decode_context_parallel_size=dcp_size,
         enable_expert_parallel=True,
         enable_eplb=True,
         rank=7,
         data_parallel_size=2,
         data_parallel_rank=1,
+    )
+    target_cache_config = SimpleNamespace(
+        block_size=128,
     )
     target_config = SimpleNamespace(
         parallel_config=target_parallel_config,
@@ -75,11 +84,19 @@ def test_draft_runtime_config_preserves_target_worker_topology(
         compilation_config=SimpleNamespace(
             cudagraph_mode=SimpleNamespace(decode_mode=lambda: None),
         ),
+        cache_config=target_cache_config,
     )
     draft_model_config = object()
     captured: dict[str, SimpleNamespace] = {}
 
     def fake_replace(config, **changes):
+        if "pipeline_parallel_size" in changes:
+            assert changes["decode_context_parallel_size"] == (1 if target_pcp_size > 1 else dcp_size)
+        if "model_config" in changes:
+            assert changes["parallel_config"].decode_context_parallel_size == (1 if target_pcp_size > 1 else dcp_size)
+        if config is target_config and "model_config" not in changes:
+            reconstructed_parallel = changes["parallel_config"]
+            captured["reconstruction_dcp_size"] = reconstructed_parallel.decode_context_parallel_size
         values = vars(config).copy()
         values.update(changes)
         return SimpleNamespace(**values)
@@ -120,22 +137,79 @@ def test_draft_runtime_config_preserves_target_worker_topology(
     execution_config = captured["execution_config"]
     execution_parallel_config = execution_config.parallel_config
     assert execution_parallel_config.prefill_context_parallel_size == expected_execution_pcp_size
+    assert execution_parallel_config.cp_kv_cache_interleave_size == 128
+    assert execution_parallel_config.decode_context_parallel_size == dcp_size
+    assert target_parallel_config.decode_context_parallel_size == dcp_size
+    if target_pcp_size > 1:
+        assert captured["reconstruction_dcp_size"] == 1
+    else:
+        assert "reconstruction_dcp_size" not in captured
     assert execution_parallel_config.enable_expert_parallel
     assert execution_parallel_config.enable_eplb
     assert execution_parallel_config.rank == target_parallel_config.rank
     assert execution_parallel_config.data_parallel_size == 2
     assert execution_parallel_config.data_parallel_rank == 1
     assert target_parallel_config.prefill_context_parallel_size == target_pcp_size
+    assert target_parallel_config.cp_kv_cache_interleave_size == 128
     assert target_parallel_config.enable_expert_parallel
     assert target_parallel_config.enable_eplb
 
     draft_config = speculator.draft_vllm_config
     assert draft_parallel_config.prefill_context_parallel_size == 2
+    assert draft_parallel_config.cp_kv_cache_interleave_size == 64
     assert not draft_parallel_config.enable_expert_parallel
     assert not draft_parallel_config.enable_eplb
     assert draft_config.model_config is draft_model_config
     assert draft_config.parallel_config.prefill_context_parallel_size == expected_execution_pcp_size
+    assert draft_config.parallel_config.cp_kv_cache_interleave_size == 128
     assert draft_config.parallel_config.pipeline_parallel_size == 1
+    assert draft_config.parallel_config.decode_context_parallel_size == dcp_size
+
+
+@pytest.mark.parametrize("replicated_pcp", [False, True])
+@pytest.mark.parametrize("shared", [False, True])
+@pytest.mark.parametrize("contiguous", [False, True])
+def test_run_model_broadcasts_only_actual_replicated_hidden_states(replicated_pcp, shared, contiguous):
+    speculator = object.__new__(speculator_module.AscendAutoRegressiveSpeculator)
+    speculator.replicated_pcp = replicated_pcp
+    last_hidden = torch.arange(48, dtype=torch.float32).view(6, 8)[:, ::2]
+    other_hidden = (torch.arange(48, dtype=torch.float32) + 50).view(6, 8)[:, ::2]
+    if contiguous:
+        last_hidden = last_hidden.contiguous()
+        other_hidden = other_hidden.contiguous()
+    hidden = last_hidden if shared else other_hidden
+    originals = [last_hidden[:4].clone(), hidden[:4].clone()]
+    sent = []
+
+    def broadcast(tensor, src):
+        assert src == 0
+        assert tensor.is_contiguous()
+        assert tensor.shape == (4, 4)
+        sent.append(tensor.clone())
+        return tensor.add_(100)
+
+    group = SimpleNamespace(broadcast=MagicMock(side_effect=broadcast))
+    with (
+        patch.object(speculator_module.AutoRegressiveSpeculator, "_run_model", return_value=(last_hidden, hidden)),
+        patch.object(pcp_manager_module, "get_pcp_group", return_value=group) as get_group,
+    ):
+        result_last, result_hidden = speculator._run_model(4, None, None, None)
+
+    if not replicated_pcp:
+        get_group.assert_not_called()
+        group.broadcast.assert_not_called()
+        assert result_last is last_hidden
+        assert result_hidden is hidden
+        return
+    get_group.assert_called_once_with()
+    assert group.broadcast.call_count == (1 if shared else 2)
+    torch.testing.assert_close(sent[0], originals[0])
+    if shared:
+        assert result_hidden is result_last
+    else:
+        torch.testing.assert_close(sent[1], originals[1])
+    torch.testing.assert_close(result_last, originals[0] + 100)
+    torch.testing.assert_close(result_hidden, originals[1] + 100)
 
 
 @pytest.mark.parametrize(("replicated_pcp", "manager_is_disabled"), [(True, True), (False, False)])
@@ -195,8 +269,11 @@ def test_draft_prefill_attn_groups_follow_draft_topology(
     assert speculator.draft_prefill_attn_groups is expected
 
 
-def test_prepare_replicated_prefill_attn_uses_global_batch() -> None:
+@pytest.mark.parametrize("attn_architecture", ["GQA", "MLA", "DSA", "SFA"])
+@pytest.mark.parametrize("cudagraph_runtime_mode", [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE])
+def test_prepare_replicated_prefill_attn_uses_global_batch(attn_architecture, cudagraph_runtime_mode) -> None:
     speculator = object.__new__(AscendMTPSpeculator)
+    speculator.attn_architecture = attn_architecture
     speculator.block_tables = MagicMock()
     speculator.kv_cache_config = object()
     speculator._build_draft_attn_metadata = MagicMock(return_value={"draft.layer": object()})
@@ -220,6 +297,7 @@ def test_prepare_replicated_prefill_attn_uses_global_batch() -> None:
             original_slot_mappings,
             input_batch.num_reqs_after_padding,
             input_batch.num_tokens_after_padding,
+            cudagraph_runtime_mode=cudagraph_runtime_mode,
         )
 
     assert attn_metadata == speculator._build_draft_attn_metadata.return_value
@@ -248,7 +326,8 @@ def test_prepare_replicated_prefill_attn_uses_global_batch() -> None:
     )
 
 
-def test_prefill_rebuilds_replicated_pcp_metadata_before_filtering() -> None:
+@pytest.mark.parametrize("cudagraph_runtime_mode", [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE])
+def test_prefill_rebuilds_replicated_pcp_metadata_before_filtering(cudagraph_runtime_mode) -> None:
     speculator = object.__new__(AscendMTPSpeculator)
     speculator.replicated_pcp = True
     speculator.input_batch = _make_padded_input_batch()
@@ -279,6 +358,7 @@ def test_prefill_rebuilds_replicated_pcp_metadata_before_filtering() -> None:
             attn_metadata=local_attn_metadata,
             slot_mappings=local_slot_mappings,
             num_tokens_across_dp=None,
+            cudagraph_runtime_mode=cudagraph_runtime_mode,
         )
 
     speculator._prepare_replicated_prefill_attn.assert_called_once_with(
@@ -286,6 +366,7 @@ def test_prefill_rebuilds_replicated_pcp_metadata_before_filtering() -> None:
         local_slot_mappings,
         2,
         8,
+        cudagraph_runtime_mode=cudagraph_runtime_mode,
     )
     parent_prefill.assert_called_once()
     parent_args = parent_prefill.call_args.args
@@ -294,43 +375,156 @@ def test_prefill_rebuilds_replicated_pcp_metadata_before_filtering() -> None:
     assert parent_args[3] is global_slot_mappings
 
 
+@pytest.mark.parametrize("attn_architecture", ["GQA", "MLA", "DSA", "SFA"])
 @pytest.mark.parametrize("replicated_pcp", [False, True])
-def test_graph_prefill_builds_draft_metadata(replicated_pcp: bool) -> None:
+def test_graph_prefill_builds_draft_metadata(attn_architecture: str, replicated_pcp: bool) -> None:
     speculator = object.__new__(AscendMTPSpeculator)
     speculator.replicated_pcp = replicated_pcp
+    speculator.attn_architecture = attn_architecture
+    speculator.input_batch = _make_padded_input_batch()
+    speculator.input_batch.is_dummy = False
+    speculator.block_tables = MagicMock()
+    speculator.kv_cache_config = object()
     speculator.draft_attn_layer_names = {"draft.layer"}
-    local_draft_metadata = object()
+    local_draft_metadata = SimpleNamespace(decode=SimpleNamespace(actual_seq_lengths_q=[4, 8]))
     global_draft_metadata = object()
     speculator.model_state = SimpleNamespace(
-        attn_metadata={
-            "draft.layer": local_draft_metadata,
-            "target.layer": object(),
-        }
+        attn_metadata={"draft.layer": local_draft_metadata, "target.layer": object()},
     )
-    prepared_draft_metadata = global_draft_metadata if replicated_pcp else local_draft_metadata
-    speculator._prepare_replicated_prefill_attn = MagicMock(
-        return_value=(
-            {"draft.layer": prepared_draft_metadata},
-            None,
+    speculator._build_draft_attn_metadata = MagicMock(
+        return_value={"draft.layer": global_draft_metadata},
+    )
+
+    with patch.object(speculator_module, "build_slot_mappings_by_layer", return_value={}) as build_slots:
+        actual = speculator.build_draft_attn_metadatas(
+            num_reqs_padded=2,
+            num_tokens_padded=8,
+            is_draft_model_prefill=True,
         )
+
+    rebuild_metadata = replicated_pcp and attn_architecture in ("DSA", "SFA")
+    expected_metadata = global_draft_metadata if rebuild_metadata else local_draft_metadata
+    assert actual == [{"draft.layer": expected_metadata}]
+    assert actual[0]["draft.layer"] is expected_metadata
+    assert speculator._build_draft_attn_metadata.call_count == int(rebuild_metadata)
+    assert build_slots.call_count == int(rebuild_metadata)
+    assert speculator.block_tables.gather_block_tables.call_count == int(replicated_pcp)
+    assert speculator.block_tables.compute_slot_mappings.call_count == int(replicated_pcp)
+    assert local_draft_metadata.decode.actual_seq_lengths_q[-1] == 8
+
+
+@pytest.mark.parametrize("attn_architecture", ["GQA", "MLA"])
+def test_graph_prefill_refreshes_captured_cache_buffers(attn_architecture: str) -> None:
+    speculator = object.__new__(AscendEagleSpeculator)
+    speculator.replicated_pcp = True
+    speculator.attn_architecture = attn_architecture
+    speculator.draft_attn_layer_names = {"draft.layer"}
+    metadata = SimpleNamespace(actual_seq_lengths_q=[4, 8])
+    speculator.model_state = SimpleNamespace(attn_metadata={"draft.layer": metadata})
+    speculator.kv_cache_config = object()
+    speculator._build_draft_attn_metadata = MagicMock()
+
+    # These views stand in for the persistent buffers bound during capture.
+    captured_blocks = torch.zeros((2, 3), dtype=torch.int32)
+    captured_slots = torch.full((1, 8), -1, dtype=torch.int32)
+    block_ptr, slot_ptr = captured_blocks.data_ptr(), captured_slots.data_ptr()
+    request_blocks = {3: [7, 13, 0], 7: [17, 19, 23]}
+
+    def gather_blocks(idx_mapping, num_reqs_padded):
+        captured_blocks.zero_()
+        for row, req_idx in enumerate(idx_mapping.tolist()):
+            captured_blocks[row] = torch.tensor(request_blocks[req_idx])
+        return (captured_blocks[:num_reqs_padded],)
+
+    def compute_slots(idx_mapping, query_start_loc, positions, num_tokens_padded):
+        captured_slots.fill_(-1)
+        for row, req_idx in enumerate(idx_mapping.tolist()):
+            start, end = query_start_loc[row : row + 2].tolist()
+            for token in range(start, end):
+                position = int(positions[token])
+                block = request_blocks[req_idx][position // 128]
+                captured_slots[0, token] = block * 128 + position % 128
+        return captured_slots[:, :num_tokens_padded]
+
+    speculator.block_tables = SimpleNamespace(
+        gather_block_tables=gather_blocks,
+        compute_slot_mappings=compute_slots,
+    )
+    for req_idx, positions, expected_slots in [
+        (3, [126, 127, 128, 129], [1022, 1023, 1664, 1665]),
+        (7, [254, 255, 256, 257], [2558, 2559, 2944, 2945]),
+    ]:
+        batch = _make_padded_input_batch()
+        batch.is_dummy = False
+        batch.num_reqs, batch.num_tokens = 1, 4
+        batch.query_start_loc_np = np.array([0, 4, 8], dtype=np.int32)
+        batch.idx_mapping = torch.tensor([req_idx], dtype=torch.int32)
+        batch.query_start_loc = torch.tensor([0, 4], dtype=torch.int32)
+        batch.positions = torch.tensor(positions, dtype=torch.int64)
+        speculator.input_batch = batch
+        # The preceding single-token decode has left a different slot layout.
+        captured_slots.fill_(-1)
+        captured_slots[0, 0] = 123
+        captured_blocks.fill_(-1)
+
+        with patch.object(speculator_module, "build_slot_mappings_by_layer") as build_slots:
+            result = speculator.build_draft_attn_metadatas(2, 8, is_draft_model_prefill=True)
+
+        assert result[0]["draft.layer"] is metadata
+        speculator._build_draft_attn_metadata.assert_not_called()
+        build_slots.assert_not_called()
+        assert metadata.actual_seq_lengths_q == [4, 8]
+        assert captured_slots.tolist() == [expected_slots + [-1] * 4]
+        assert captured_blocks.tolist() == [request_blocks[req_idx], [0, 0, 0]]
+        assert (captured_blocks.data_ptr(), captured_slots.data_ptr()) == (block_ptr, slot_ptr)
+
+
+@pytest.mark.parametrize("guard", ["non_pcp", "no_batch", "dummy", "no_metadata"])
+def test_prepare_replicated_prefill_preserves_bypass(guard: str) -> None:
+    speculator = object.__new__(AscendMTPSpeculator)
+    speculator.replicated_pcp = guard != "non_pcp"
+    speculator.input_batch = _make_padded_input_batch() if guard != "no_batch" else None
+    if speculator.input_batch is not None:
+        speculator.input_batch.is_dummy = guard == "dummy"
+    speculator.block_tables = MagicMock()
+    speculator._build_draft_attn_metadata = MagicMock()
+    metadata = None if guard == "no_metadata" else {"draft.layer": object()}
+    slots = {"draft.layer": object()}
+
+    actual_metadata, actual_slots = speculator._prepare_replicated_prefill_attn(
+        metadata, slots, 2, 8, cudagraph_runtime_mode=CUDAGraphMode.FULL
     )
 
-    actual = speculator.build_draft_attn_metadatas(
-        num_reqs_padded=4,
-        num_tokens_padded=8,
-        is_draft_model_prefill=True,
-    )
-
-    assert actual == [{"draft.layer": prepared_draft_metadata}]
-    speculator._prepare_replicated_prefill_attn.assert_called_once_with(
-        {"draft.layer": local_draft_metadata},
-        None,
-        4,
-        8,
-    )
+    assert actual_metadata is metadata
+    assert actual_slots is slots
+    speculator.block_tables.gather_block_tables.assert_not_called()
+    speculator.block_tables.compute_slot_mappings.assert_not_called()
+    speculator._build_draft_attn_metadata.assert_not_called()
 
 
-@pytest.mark.skipif(speculator_module.vllm_version_is("0.28.0"), reason="DPSyncState is a main2main interface")
+@pytest.mark.parametrize("attn_architecture", ["GQA", "MLA", "DSA", "SFA"])
+@pytest.mark.parametrize("guard", ["no_batch", "dummy"])
+def test_graph_prefill_without_real_batch_preserves_metadata(attn_architecture: str, guard: str) -> None:
+    speculator = object.__new__(AscendMTPSpeculator)
+    speculator.replicated_pcp = True
+    speculator.attn_architecture = attn_architecture
+    speculator.input_batch = _make_padded_input_batch() if guard == "dummy" else None
+    if speculator.input_batch is not None:
+        speculator.input_batch.is_dummy = True
+    speculator.block_tables = MagicMock()
+    speculator._build_draft_attn_metadata = MagicMock()
+    metadata = object()
+    speculator.draft_attn_layer_names = {"draft.layer"}
+    speculator.model_state = SimpleNamespace(attn_metadata={"draft.layer": metadata})
+
+    [actual] = speculator.build_draft_attn_metadatas(2, 8, is_draft_model_prefill=True)
+
+    assert actual["draft.layer"] is metadata
+    speculator.block_tables.gather_block_tables.assert_not_called()
+    speculator.block_tables.compute_slot_mappings.assert_not_called()
+    speculator._build_draft_attn_metadata.assert_not_called()
+
+
 @pytest.mark.parametrize(
     ("speculator_cls", "parent_cls", "replicated_pcp", "batch_kind"),
     [
@@ -410,17 +604,16 @@ def test_propose_sync_follows_draft_token_layout(speculator_cls, parent_cls, rep
     assert speculator.model_state.pcp_manager is speculator.pcp_manager
 
 
-def test_propose_preserves_v028_dp_token_counts() -> None:
+def test_propose_preserves_dp_sync_state() -> None:
     speculator = object.__new__(AscendMTPSpeculator)
-    speculator.replicated_pcp = True
+    speculator.replicated_pcp = False
     input_batch = object()
-    token_counts = torch.tensor([4, 8])
+    dp_sync = object()
     with (
-        patch.object(speculator_module, "vllm_version_is", return_value=True),
         patch.object(speculator_module, "disable_target_pcp_for_replicated_draft", return_value=nullcontext()),
         patch.object(speculator_module, "build_attn_metadata_wrapper", return_value=nullcontext()),
         patch.object(speculator_module, "torch_gather_wrapper", return_value=nullcontext()),
         patch.object(MTPSpeculator, "propose") as parent,
     ):
-        speculator.propose(input_batch, *[MagicMock() for _ in range(10)], token_counts, dp_sync=object())
-    assert parent.call_args.args[11] is token_counts
+        speculator.propose(input_batch, *[MagicMock() for _ in range(10)], dp_sync)
+    assert parent.call_args.args[11] is dp_sync

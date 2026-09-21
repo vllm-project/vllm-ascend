@@ -4,9 +4,9 @@
 
 | 产品                                                         | 是否支持 |
 | ------------------------------------------------------------ | :------: |
-|<term>Ascend 950PR/Ascend 950DT</term>|      √     |
-|<term>Atlas A3 训练系列产品/Atlas A3 推理系列产品</term>|      √     |
-|<term>Atlas A2 训练系列产品/Atlas A2 推理系列产品</term>|      √     |
+|<term>Ascend 950PR&950DT 系列产品</term>|      √     |
+|<term>Atlas A3 系列产品</term>|      √     |
+|<term>Atlas A2 系列产品</term>|      √     |
 |<term>Atlas 200I/500 A2 推理产品</term>|      ×     |
 |<term>Atlas 推理系列加速卡产品</term>|      ×     |
 |<term>Atlas 训练系列产品</term>|      ×     |
@@ -39,23 +39,23 @@
 | key_quant_mode                 | 可选属性| 用于标识输入`key`的量化模式，当前支持Per-Token-Head量化模式，当前仅支持传入0 | INT32 | -         |
 | layout_query                 | 可选属性| 用于标识输入`query`的数据排布格式，当前支持BSND、TND，默认值"BSND" | STRING | -         |
 | layout_key      | 可选属性      | 用于标识输入`key`的数据排布格式，当前仅支持传入PA_BSND  | STRING          | -         |
-| sparse_count  | 可选属性      | 代表topK阶段需要保留的block数量，Atlas A3 推理系列产品支持[1, 2048]，Ascend 950PR/Ascend 950DT支持512 | INT32          | -         |
+| sparse_count  | 可选属性      | 代表topK阶段需要保留的block数量，Atlas A3 系列产品支持[1, 2048]，Ascend 950PR&950DT 系列产品支持512 | INT32          | -         |
 | sparse_mode | 可选属性      | 表示sparse的模式，支持0/3，数据类型支持`int32`。 sparse_mode为0时，代表defaultMask模式。sparse_mode为3时，代表rightDownCausal模式的mask，对应以右顶点为划分的下三角场景。 | INT32          | -         |
 | pre_tokens    | 可选属性      | 预留参数，表示attention需要和前几个Token计算关联，仅支持默认值2^63-1 | INT64          | -         |
 | next_tokens    | 可选属性      | 预留参数，表示attention需要和前几个Token计算关联，仅支持默认值2^63-1 | INT64          | -         |
-| cmp_ratio      | 可选属性      | 用于稀疏计算，表示key的压缩倍数。数据类型支持`int32`。Atlas A3 推理系列产品支持1/2/4/8/16/32/64/128，Ascend 950PR/Ascend 950DT支持1/4/128。 | INT32          | -         |
+| cmp_ratio      | 可选属性      | 用于稀疏计算，表示key的压缩倍数。数据类型支持`int32`。Atlas A3 系列产品支持1/2/4/8/16/32/64/128，Ascend 950PR&950DT 系列产品支持1/4/128。 | INT32          | -         |
 | return_value      |  可选属性     | 表示是否输出`sparse_values`。True表示输出，False表示不输出；仅支持默认值False | BOOL          | -         |
 | stride      |  可选属性     | 表示key的首轴的stride | INT32          | -         |
 | sparse_indices     | 输出      | 公式中的输出Out，参与稀疏attention计算的token索引值 | INT32          | ND         |
 | sparse_values           | 输出      | 公式中的Indices输出对应的value值，**目前暂不支持返回sparse_values。** | FLOAT32         | ND          |
 
-- <term>Ascend 950PR/Ascend 950DT</term>：query、key不支持INT8；weights、query_dequant_scale和key_dequant_scale不支持FLOAT16。
-- <term>Atlas A3 训练系列产品/Atlas A3 推理系列产品</term>、<term>Atlas A2 训练系列产品/Atlas A2 推理系列产品</term>：query、key不支持FLOAT8_e4m3fn；weights、query_dequant_scale和key_dequant_scale不支持FLOAT32。
+- <term>Ascend 950PR&950DT 系列产品</term>：query、key不支持INT8；weights、query_dequant_scale和key_dequant_scale不支持FLOAT16。
+- <term>Atlas A3 系列产品</term>、<term>Atlas A2 系列产品</term>：query、key不支持FLOAT8_e4m3fn；weights、query_dequant_scale和key_dequant_scale不支持FLOAT32。
 
 ## 约束说明
 
 - 该接口支持图模式。
-- 该接口要求$W \odot Scale_Q$的结果在`float16`(Atlas A3)/`float32`(Ascend 950PR/Ascend 950DT)的表示范围内。
+- 该接口要求$W \odot Scale_Q$的结果在`float16`(Atlas A3)/`float32`(Ascend 950PR&950DT 系列产品)的表示范围内。
 - 该接口的TopK过程对NAN排序是未定义行为。
 - 参数query中的D轴和参数key中的D轴值相等为128。
 - 参数query和key中的N轴分别仅支持64和1。
@@ -64,7 +64,7 @@
 - PageAttention场景下，`block_table`必须为二维，第一维长度需要等于B，第二维长度不能小于maxBlockNumPerSeq(maxBlockNumPerSeq为每个batch中最大`actual_seq_lengths_key`对应的block数量)，支持block_size取值为16的整数倍，最大支持到1024。
 - query、key、weights、query_dequant_scale、key_dequant_scale数据排布格式支持从多种维度解读，其中B（Batch Size）表示输入样本批量大小、S（Sequence Length）表示输入样本序列长度、H（Head Size）表示hidden层的大小、N（Head Num）表示多头数、D（Head Dim）表示hidden层最小的单元尺寸，且满足D=H/N、T表示所有Batch输入样本序列长度的累加和。
 
-## Atlas A3 推理系列产品 调用说明
+## Atlas A3 系列产品 调用说明
 
 - 单算子模式调用
     ```python

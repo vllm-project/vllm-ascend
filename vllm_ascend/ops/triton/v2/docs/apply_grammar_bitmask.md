@@ -109,7 +109,7 @@
 
 - 当前实现使用 `multibuffer=False`。
 
-- 当前 PR 的功能与性能验证范围为 Ascend A2 / A3；A5 的进一步 grid / tile 优化不在
+- 当前 PR 的功能与性能验证范围为 Ascend A2 / A3；Ascend 950PR&950DT 系列产品的进一步 grid / tile 优化不在
   当前 PR 范围内。
 
 - 当前重点业务 shape：
