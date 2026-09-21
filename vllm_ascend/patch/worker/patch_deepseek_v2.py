@@ -1,3 +1,4 @@
+from collections.abc import Iterable
 from itertools import islice
 
 import torch
@@ -289,25 +290,20 @@ DeepseekV2MLAAttention.__init__ = _deepseek_v2_mla_attention_init
 _original_deepseek_v2_model_init = DeepseekV2Model.__init__
 
 
+def _find_topk_indices_buffer(layers: Iterable[object]) -> torch.Tensor | None:
+    for layer in layers:
+        self_attn = getattr(layer, "self_attn", None)
+        topk_indices_buffer = getattr(self_attn, "topk_indices_buffer", None)
+        if topk_indices_buffer is not None:
+            return topk_indices_buffer
+    return None
+
+
 def _patched_deepseek_v2_model_init(self, *args, **kwargs):
     _original_deepseek_v2_model_init(self, *args, **kwargs)
     # Legacy Spec+PP (0.28/0.29 only): 0.30+ uses the upstream aux relay.
     self._use_upstream_aux_relay = kwargs["vllm_config"].use_v2_model_runner and not pp_transport.use_legacy_spec_pp()
-    self.topk_indices_buffer = next(
-        (
-            topk_indices_buffer
-            for layer in self.layers
-            if (
-                topk_indices_buffer := getattr(
-                    getattr(layer, "self_attn", None),
-                    "topk_indices_buffer",
-                    None,
-                )
-            )
-            is not None
-        ),
-        None,
-    )
+    self.topk_indices_buffer = _find_topk_indices_buffer(self.layers)
     transport_data_type_list = [PPTransportDataType.TOPK_INDICES]
     if not self._use_upstream_aux_relay:
         transport_data_type_list.insert(0, PPTransportDataType.AUX_HIDDEN_STATES)
