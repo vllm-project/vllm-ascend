@@ -1059,42 +1059,6 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> compressor_metadata_out(
     return std::make_tuple(compress_cos, compress_sin, slot_mapping);
 }
 
-std::tuple<at::Tensor, at::Tensor> construct_quant_lightning_indexer_output_tensor(const at::Tensor& query, const at::Tensor& key,
-                                                           int64_t sparse_count, std::string query_layout_str,
-                                                           std::string key_layout_str, bool return_value)
-{
-    constexpr int64_t SIZE = 8;
-    constexpr int64_t DIM_0 = 0;
-    constexpr int64_t DIM_1 = 1;
-    constexpr int64_t DIM_2 = 2;
-    constexpr int64_t DIM_3 = 3;
-    at::SmallVector<int64_t, SIZE> output_size;
-    for (size_t i = 0; i < query.sizes().size(); i++) {
-        TORCH_CHECK(query.size(i) > 0, "All values within query's shape should be greater "
-            "than 0, but shape[", i, "] is ", query.size(i));
-    }
-    for (size_t i = 0; i < key.sizes().size(); i++) {
-        TORCH_CHECK(key.size(i) > 0, "All values within key's shape should be greater "
-            "than 0, but shape[", i, "] is ", key.size(i));
-    }
-    TORCH_CHECK(sparse_count > 0, "sparse count should be greater than 0, but now is ", sparse_count);
-    int64_t keyHeadNum = (key_layout_str == "TND")? key.size(DIM_1) : key.size(DIM_2);
-    if (query_layout_str == "BSND") {
-        output_size = {query.size(DIM_0), query.size(DIM_1), keyHeadNum, sparse_count};
-    } else {
-        output_size = {query.size(DIM_0), keyHeadNum, sparse_count};
-    }
-    at::Tensor sparse_indices_out = at::empty(output_size, query.options().dtype(at::kInt));
-    at::Tensor sparse_values_out;
-    if (return_value) {
-        sparse_values_out = at::empty(output_size, query.options().dtype(at::kFloat));
-    } else {
-        sparse_values_out = at::empty({0}, query.options().dtype(at::kFloat));
-    }
-
-    return std::tuple<at::Tensor, at::Tensor>(sparse_indices_out, sparse_values_out);
-}
-
 std::tuple<at::Tensor, at::Tensor> construct_quant_lightning_indexer_v2_output_tensor(const at::Tensor& query, const at::Tensor& key,
                                                            int64_t sparse_count, std::string query_layout_str,
                                                            std::string key_layout_str, int64_t return_value)
@@ -1126,47 +1090,6 @@ std::tuple<at::Tensor, at::Tensor> construct_quant_lightning_indexer_v2_output_t
     } else {
         sparse_values_out = at::empty({0}, query.options().dtype(at::kBFloat16));
     }
-
-    return std::tuple<at::Tensor, at::Tensor>(sparse_indices_out, sparse_values_out);
-}
-
-std::tuple<at::Tensor, at::Tensor> npu_vllm_quant_lightning_indexer_npu(
-    const at::Tensor &query, const at::Tensor &key, const at::Tensor &weights,
-    const at::Tensor &query_dequant_scale, const at::Tensor &key_dequant_scale,
-    int64_t query_quant_mode, int64_t key_quant_mode,
-    const c10::optional<at::Tensor> &actual_seq_lengths_query,
-    const c10::optional<at::Tensor> &actual_seq_lengths_key,
-    const c10::optional<at::Tensor> &block_table,
-    const c10::optional<at::Tensor> &metadata,
-    c10::string_view layout_query, c10::string_view layout_key, int64_t sparse_count,
-    int64_t sparse_mode, int64_t pre_tokens, int64_t next_tokens, int64_t cmp_ratio, bool return_value)
-{
-    std::string query_layout_str = std::string(layout_query);
-    std::string key_layout_str = std::string(layout_key);
-
-    std::tuple<at::Tensor, at::Tensor> quant_lightning_indexer_output = construct_quant_lightning_indexer_output_tensor(
-            query, key, sparse_count, query_layout_str, key_layout_str, return_value);
-    at::Tensor sparse_indices_out = std::get<0>(quant_lightning_indexer_output);
-    at::Tensor sparse_values_out = std::get<1>(quant_lightning_indexer_output);
-    char *query_layout_ptr = const_cast<char *>(query_layout_str.c_str());
-    char *key_layout_ptr = const_cast<char *>(key_layout_str.c_str());
-    int64_t stride = key.stride(0);
-    int64_t scale_stride = key_dequant_scale.stride(0);
-
-    if (key_layout_str == "PA_BSND") {
-        auto contiguous_axes_result_key = is_contiguous_axes(key);
-        TORCH_CHECK(contiguous_axes_result_key[1] && contiguous_axes_result_key[2],
-                    "key must be contiguous on all axes except axis 0");
-        auto contiguous_axes_result_key_scale = is_contiguous_axes(key_dequant_scale);
-        TORCH_CHECK(contiguous_axes_result_key_scale[1] && contiguous_axes_result_key_scale[2],
-                    "key_dequant_scale must be contiguous on all axes except axis 0");
-    }
-
-    EXEC_NPU_CMD(aclnnVllmQuantLightningIndexer, query,
-        key, weights, query_dequant_scale, key_dequant_scale, actual_seq_lengths_query, actual_seq_lengths_key,
-        block_table, metadata, query_quant_mode, key_quant_mode, query_layout_ptr, key_layout_ptr, sparse_count, sparse_mode,
-        pre_tokens, next_tokens, cmp_ratio, return_value, stride, scale_stride, sparse_indices_out, sparse_values_out);
-
 
     return std::tuple<at::Tensor, at::Tensor>(sparse_indices_out, sparse_values_out);
 }
@@ -1356,37 +1279,6 @@ at::Tensor npu_sparse_attn_sharedkv_metadata_npu(
                     seqused_kv_val, num_heads_q, num_heads_kv, head_dim, batch_size, max_seqlen_q, max_seqlen_kv, ori_topk, cmp_topk,
                     cmp_ratio, ori_mask_mode, cmp_mask_mode, ori_win_left, ori_win_right, layout_q_ptr,
                     layout_kv_ptr, has_ori_kv, has_cmp_kv, output);
-    return output;
-}
-
-at::Tensor npu_vllm_quant_lightning_indexer_metadata_npu(
-    int64_t num_heads_q, int64_t num_heads_k, int64_t head_dim, int64_t query_quant_mode, int64_t key_quant_mode,
-    const c10::optional<at::Tensor> &actual_seq_lengths_query, const c10::optional<at::Tensor> &actual_seq_lengths_key, int64_t batch_size,
-    int64_t max_seqlen_q, int64_t max_seqlen_k, const c10::string_view layout_query, c10::string_view layout_key, int64_t sparse_count,
-    int64_t sparse_mode, int64_t pre_tokens, int64_t next_tokens, int64_t cmp_ratio, const c10::string_view device)
-{
-    constexpr int64_t OUTPUT_SIZE = 1024;
-    at::Device output_device = at::Device(std::string(device));
-    if (actual_seq_lengths_query.has_value()) {
-        output_device = actual_seq_lengths_query.value().device();
-    } else if (actual_seq_lengths_key.has_value()) {
-        output_device = actual_seq_lengths_key.value().device();
-    }
-
-    at::Tensor output = torch::empty({OUTPUT_SIZE}, torch::dtype(torch::kInt32).device(output_device));
-    auto actual_seq_lengths_query_val = get_valid_tensor(actual_seq_lengths_query, output_device);
-    auto actual_seq_lengths_key_val = get_valid_tensor(actual_seq_lengths_key, output_device);
-
-    std::string layout_query_str = std::string(layout_query);
-    char *layout_query_ptr = const_cast<char *>(layout_query_str.c_str());
-    std::string layout_key_str = std::string(layout_key);
-    char *layout_key_ptr = const_cast<char *>(layout_key_str.c_str());
-
-    EXEC_NPU_CMD(aclnnVllmQuantLightningIndexerMetadata, actual_seq_lengths_query_val, actual_seq_lengths_key_val,
-                    num_heads_q, num_heads_k, head_dim, query_quant_mode, key_quant_mode, batch_size,
-                    max_seqlen_q, max_seqlen_k, layout_query_ptr, layout_key_ptr, sparse_count,
-                    sparse_mode, pre_tokens, next_tokens, cmp_ratio, output);
-
     return output;
 }
 
@@ -3385,24 +3277,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("compressor_metadata_out", torch::kPrivateUse1, &vllm_ascend::compressor_metadata_out);
 
     ops.def(
-        "npu_vllm_quant_lightning_indexer("
-            "Tensor query, Tensor key, Tensor weights, "
-            "Tensor query_dequant_scale, Tensor key_dequant_scale, "
-            "int query_quant_mode=0, int key_quant_mode=0, "
-            "Tensor? actual_seq_lengths_query=None, "
-            "Tensor? actual_seq_lengths_key=None, "
-            "Tensor? block_table=None, "
-            "Tensor? metadata=None, "
-            "str layout_query=\"BSND\", str layout_key=\"BSND\", "
-            "int sparse_count=2048, int sparse_mode=3, "
-            "int pre_tokens=9223372036854775807, "
-            "int next_tokens=9223372036854775807, "
-            "int cmp_ratio=1, bool return_value=False"
-        ") -> (Tensor sparse_indices, Tensor sparse_values)"
-        );
-    ops.impl("npu_vllm_quant_lightning_indexer", torch::kPrivateUse1, &vllm_ascend::npu_vllm_quant_lightning_indexer_npu);
-
-    ops.def(
         "npu_quant_lightning_indexer_v2("
             "Tensor query, Tensor key, Tensor weights, "
             "Tensor query_dequant_scale, Tensor key_dequant_scale, "
@@ -3480,30 +3354,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         ") -> (Tensor metadata)"
         );
     ops.impl("npu_sparse_attn_sharedkv_metadata", torch::kPrivateUse1, &vllm_ascend::npu_sparse_attn_sharedkv_metadata_npu);
-
-    ops.def(
-        "npu_vllm_quant_lightning_indexer_metadata("
-            "int num_heads_q, "
-            "int num_heads_k, "
-            "int head_dim, "
-            "int query_quant_mode, "
-            "int key_quant_mode, "
-            "Tensor? actual_seq_lengths_query=None, "
-            "Tensor? actual_seq_lengths_key=None, "
-            "int batch_size=0, "
-            "int max_seqlen_q=0, "
-            "int max_seqlen_k=0, "
-            "str layout_query=\"BSND\", "
-            "str layout_key=\"BSND\", "
-            "int sparse_count=2048, "
-            "int sparse_mode=3, "
-            "int pre_tokens=9223372036854775807, "
-            "int next_tokens=9223372036854775807, "
-            "int cmp_ratio=1, "
-            "str device=\"npu\""
-        ") -> (Tensor metadata)"
-        );
-    ops.impl("npu_vllm_quant_lightning_indexer_metadata", torch::kPrivateUse1, &vllm_ascend::npu_vllm_quant_lightning_indexer_metadata_npu);
 
     ops.def(
           "npu_hc_post("
