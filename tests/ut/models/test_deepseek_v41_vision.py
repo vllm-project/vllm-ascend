@@ -21,6 +21,7 @@ from vllm.multimodal.processing import InputProcessingContext
 from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config as UpstreamDeepseekV41Config
 
 from vllm_ascend.models.deepseek_v41.engram.common import (
+    engram_enabled,
     valid_engram_token_mask,
 )
 from vllm_ascend.models.deepseek_v41.model import AscendDeepseekV41LLMForCausalLM
@@ -118,6 +119,17 @@ def test_v41_image_and_alignment_pad_are_dead_to_engram():
     )
 
 
+def test_v41_engram_requires_checkpoint_support_and_runtime_opt_in():
+    checkpoint = SimpleNamespace(engram_layer_ids=[1, 14])
+
+    assert not engram_enabled(checkpoint, SimpleNamespace(engram_config=None))
+    assert engram_enabled(checkpoint, SimpleNamespace(engram_config=object()))
+    assert not engram_enabled(
+        SimpleNamespace(engram_layer_ids=[]),
+        SimpleNamespace(engram_config=object()),
+    )
+
+
 def test_v41_span_has_three_delimiters_and_no_image_pad_parameter():
     wrapper = object.__new__(AscendDeepseekV41ForCausalLM)
     nn.Module.__init__(wrapper)
@@ -157,3 +169,28 @@ def test_v41_alignment_pad_uses_plain_image_token_embedding():
 
     embeddings = wrapper.embed_input_ids(torch.tensor([7, IMAGE_PAD_ID, IMAGE_SENTINEL_BASE_ID]))
     assert embeddings.squeeze(-1).tolist() == [7, IMAGE_SENTINEL_BASE_ID, IMAGE_SENTINEL_BASE_ID]
+
+
+def test_v41_text_only_load_skips_checkpoint_vision_weights():
+    class LanguageModel(nn.Module):
+        def load_weights(self, weights):
+            self.loaded = list(weights)
+            return {name for name, _ in self.loaded}
+
+    wrapper = object.__new__(AscendDeepseekV41ForCausalLM)
+    nn.Module.__init__(wrapper)
+    wrapper.vision = None
+    wrapper.language_model = LanguageModel()
+    text_weight = torch.tensor([1.0])
+
+    loaded = wrapper.load_weights(
+        iter(
+            [
+                ("model.image_end", torch.tensor([2.0])),
+                ("model.layers.0.weight", text_weight),
+            ]
+        )
+    )
+
+    assert wrapper.language_model.loaded == [("model.layers.0.weight", text_weight)]
+    assert loaded == {"language_model.model.layers.0.weight"}

@@ -21,10 +21,18 @@ _HISTORY_SLAB_MIN_TOKENS = 16
 _PAGE_WRITE_NUMPY_MIN_TOKENS = 16
 
 
-def engram_enabled(text_config) -> bool:
-    """Whether the checkpoint declares Engram n-gram layers."""
+def engram_enabled(text_config, vllm_config) -> bool:
+    """Whether this run explicitly enables checkpoint Engram layers.
 
-    return bool(getattr(text_config, "engram_layer_ids", None))
+    The checkpoint describes the optional Engram weights, while vLLM's
+    ``EngramConfig`` is the runtime opt-in.  Keeping those concerns separate
+    lets the same checkpoint run without allocating the embedding tables when
+    ``--engram-config`` is omitted.
+    """
+
+    return bool(
+        getattr(vllm_config, "engram_config", None) is not None and getattr(text_config, "engram_layer_ids", None)
+    )
 
 
 def valid_engram_token_mask(

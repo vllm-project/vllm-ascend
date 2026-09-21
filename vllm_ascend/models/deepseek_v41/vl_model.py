@@ -96,6 +96,7 @@ class AscendDeepseekV41ForCausalLM(
                 vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, "language_model"),
             )
+        self.requires_uncompiled_fallback = self.language_model.requires_uncompiled_fallback
         self.make_empty_intermediate_tensors = self.language_model.make_empty_intermediate_tensors
         self.moe_comm_methods = self.language_model.moe_comm_methods
 
@@ -260,6 +261,12 @@ class AscendDeepseekV41ForCausalLM(
                 vision_name = _vision_parameter_name(name)
                 if vision_name is None:
                     yield name, loaded_weight
+                    continue
+                # Text-only serving intentionally leaves the vision tower
+                # unconstructed, although a multimodal checkpoint still
+                # contains its tensors. Keep loading strict when the tower is
+                # enabled, but do not make disabled modalities loadable state.
+                if vision_name not in params and self.vision is None:
                     continue
                 param = params[vision_name]
                 loader = getattr(param, "weight_loader", default_weight_loader)

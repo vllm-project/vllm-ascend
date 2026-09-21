@@ -183,7 +183,7 @@ def test_preprocess_equivalence_and_stream_dependencies(monkeypatch, share_quant
 
 
 @pytest.mark.parametrize("enabled", [False, True])
-def test_forward_uses_multistream_preprocess(monkeypatch, enabled):
+def test_forward_honors_multistream_preprocess_setting(monkeypatch, enabled):
     impl = object.__new__(dsa_v41.AscendDSAV41Impl)
     impl.role = SimpleNamespace(is_kv_source=False)
     hidden = torch.zeros(1, 8)
@@ -192,6 +192,7 @@ def test_forward_uses_multistream_preprocess(monkeypatch, enabled):
         positions=torch.zeros(1), swa=SimpleNamespace(num_actual_tokens=1), rope=lambda *args: (None, None)
     )
     impl._get_layer_metadata = Mock(return_value=metadata)
+    impl.preprocess = Mock(return_value=(q, qr))
     impl.multistream_preprocess = Mock(return_value=(q, qr))
     impl._select_sparse_indices = Mock(return_value=None)
     impl._forward_attention = Mock(return_value=q)
@@ -200,6 +201,7 @@ def test_forward_uses_multistream_preprocess(monkeypatch, enabled):
         _forward_o_proj=lambda q, output: output.zero_(),
     )
     attn = SimpleNamespace(
+        dsv41_backend=None,
         rotary_emb=SimpleNamespace(layername="layer"),
         dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=v1_impl)),
         nope_head_dim=2,
@@ -210,7 +212,8 @@ def test_forward_uses_multistream_preprocess(monkeypatch, enabled):
     monkeypatch.setattr(torch.ops._C_ascend, "inplace_partial_rotary_mul", lambda *args, **kwargs: None, raising=False)
     output = torch.full_like(hidden, 1)
     result = impl.forward(attn, None, hidden, output)
-    impl.multistream_preprocess.assert_called_once()
+    selected = impl.multistream_preprocess if enabled else impl.preprocess
+    selected.assert_called_once()
     assert result is output
     assert torch.count_nonzero(output) == 0
 

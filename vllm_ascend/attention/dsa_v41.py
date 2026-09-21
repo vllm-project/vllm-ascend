@@ -34,19 +34,11 @@ from vllm_ascend.core.kv_cache_interface import (
     get_kv_cache_compression_ratio,
     get_storage_block_size,
 )
-from vllm_ascend.models.deepseek_v41.cache_config import uses_a5_packed_cache
-from vllm_ascend.ops.dsv41_a5 import (
-    apply_partial_rotary_inplace,
-    build_window_indices,
-    qsmla,
-    write_attention_cache,
-)
-from vllm_ascend.ops.dsv41_a5.package_loader import import_packaged_a5_module
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.rope_dsv4 import (
     get_cos_and_sin_dsa,
     get_full_cos_and_sin_dsa_for_layer,
 )
-from vllm_ascend.ops.triton.a5_slot_mapping import build_a5_slot_mapping
 from vllm_ascend.utils import npu_stream_switch
 from vllm_ascend.worker.device_metadata import (
     DeviceMetadataStage,
@@ -278,8 +270,9 @@ class AscendDSAV41Impl:
 
     @staticmethod
     def _apply_rotary(attn, value, cos, sin, *, inverse=False):
-        if getattr(attn, "uses_a5_packed_cache", False):
-            return apply_partial_rotary_inplace(
+        backend = getattr(attn, "dsv41_backend", None)
+        if backend is not None:
+            return backend.apply_partial_rotary_inplace(
                 value,
                 cos,
                 sin,
@@ -299,8 +292,9 @@ class AscendDSAV41Impl:
     @staticmethod
     def _write_swa_cache(attn, metadata, value):
         cache = attn.dsa_attn.swa_cache_layer.kv_cache[0]
-        if getattr(attn, "uses_a5_packed_cache", False):
-            write_attention_cache(
+        backend = getattr(attn, "dsv41_backend", None)
+        if backend is not None:
+            backend.write_attention_cache(
                 cache,
                 metadata.flat_slot_mapping[: value.shape[0]],
                 value,
@@ -310,10 +304,22 @@ class AscendDSAV41Impl:
         scatter_cache_sk(cache, metadata.slot_mapping, value)
 
     @classmethod
+    def _project_q(cls, attn, hidden_states, cos, sin):
+        qr = attn.q_norm(attn.wq_a(hidden_states))
+        q = attn.wq_b(qr).unflatten(-1, (-1, attn.head_dim))
+        cls._apply_rotary(attn, q, cos, sin)
+        return q.to(hidden_states.dtype), qr
+
+    @classmethod
     def _project_kv(cls, attn, hidden_states, cos, sin):
         kv = attn.kv_norm(attn.wkv(hidden_states)).view(-1, 1, attn.head_dim)
         cls._apply_rotary(attn, kv, cos, sin)
         return kv.squeeze(1)
+
+    @classmethod
+    def _project_q_kv(cls, attn, hidden_states, cos, sin):
+        q, qr = cls._project_q(attn, hidden_states, cos, sin)
+        return q, qr, cls._project_kv(attn, hidden_states, cos, sin)
 
     def _update_caches(self, attn, hidden_states, metadata):
         if hidden_states.shape[0] == 0:
@@ -331,7 +337,15 @@ class AscendDSAV41Impl:
 
     def _prepare_queries(self, attn, hidden_states, positions, cos, sin, metadata):
         hidden_states = hidden_states[: metadata.swa.num_actual_tokens]
-        q, qr = self.multistream_preprocess(attn, hidden_states, cos, sin, metadata.swa)
+        v1_impl = attn.dsa_attn.dsa_attn.impl
+        use_multistream = v1_impl.multistream_dsv4_dsa_overlap
+        if getattr(attn, "dsv41_backend", None) is not None:
+            # A5's packaged cache writes must stay on the captured stream for
+            # prefill and mixed batches. Pure decode can opt into the overlap
+            # after that path is qualified independently.
+            use_multistream = use_multistream and metadata.swa.num_prefills == 0
+        preprocess = self.multistream_preprocess if use_multistream else self.preprocess
+        q, qr = preprocess(attn, hidden_states, cos, sin, metadata.swa)
         if self.role.is_kv_source:
             self._write_compressed_source(attn, hidden_states, positions, cos, sin, metadata)
         return q, qr
@@ -343,6 +357,12 @@ class AscendDSAV41Impl:
             padded[: output.shape[0]] = output
         attn.dsa_attn.dsa_attn.impl._forward_o_proj(padded, projected)
         return projected
+
+    def preprocess(self, attn, hidden_states, cos, sin, swa_metadata):
+        """Project Q/KV and populate SWA cache on the current stream."""
+        q, qr, kv = self._project_q_kv(attn, hidden_states, cos, sin)
+        self._write_swa_cache(attn, swa_metadata, kv)
+        return q, qr
 
     def multistream_preprocess(self, attn, hidden_states, cos, sin, swa_metadata):
         """Overlap Q Vector work with KV Cube work, then reverse their roles.
@@ -444,8 +464,9 @@ class AscendDSAV41Impl:
         )
         latent = latent.view(-1, 1, attn.head_dim)
         AscendDSAV41Impl._apply_rotary(attn, latent, source_cos, source_sin)
-        if getattr(attn, "uses_a5_packed_cache", False):
-            write_attention_cache(
+        backend = getattr(attn, "dsv41_backend", None)
+        if backend is not None:
+            backend.write_attention_cache(
                 attn.long_kv_cache.kv_cache[0],
                 compressor_metadata.cache.flat_slot_mapping[: positions.shape[0]],
                 latent.squeeze(1),
@@ -487,7 +508,7 @@ class AscendDSAV41Impl:
             topk_lengths=(None if shared.topk_lengths is None else shared.topk_lengths[: hidden_states.shape[0]]),
             indices_output=shared.topk_indices[: hidden_states.shape[0]],
         )
-        if not getattr(attn, "uses_a5_packed_cache", False):
+        if getattr(attn, "dsv41_backend", None) is None:
             shared.topk_indices[: selected.shape[0]].copy_(selected)
         if self.role.is_candidate_source:
             shared.candidates[: candidates.shape[0]].copy_(candidates)
@@ -497,11 +518,12 @@ class AscendDSAV41Impl:
         """Run SparseFlashMla with the same PA metadata for both operator stages."""
         if source_cache is None and self.role.has_long_context:
             source_cache = get_forward_context().no_compile_layers[self.long_kv_source_prefix].kv_cache[0]
-        if getattr(attn, "uses_a5_packed_cache", False):
+        backend = getattr(attn, "dsv41_backend", None)
+        if backend is not None:
             compressed_lengths = None
             if self.role.has_long_context and attn.shared_state.topk_lengths is not None:
                 compressed_lengths = attn.shared_state.topk_lengths[: q.shape[0]]
-            return qsmla(
+            return backend.qsmla(
                 q,
                 attn.dsa_attn.swa_cache_layer.kv_cache[0],
                 source_cache,
@@ -623,7 +645,8 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             self._cache_kind = "index_k" if kv_cache_spec.scale_dim else "long_kv"
         else:
             raise TypeError(f"Unsupported V4.1 cache spec: {type(kv_cache_spec).__name__}")
-        self._uses_a5_packed_cache = uses_a5_packed_cache()
+        self._device_backend = DeviceOperator.get_deepseek_v41_backend()
+        self._uses_a5_packed_cache = self._device_backend is not None
         text_config = vllm_config.model_config.hf_text_config
         window_size = int(_config_value(text_config, "sliding_window", 0))
         query_metadata_size = V41_METADATA_BUFFER_SIZE if build_query_metadata else 0
@@ -795,7 +818,6 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
         seq_lens = coordinates["seq_lens"]
         positions = coordinates["positions"]
         full_graph_mode = bool(kwargs.get("full_graph_mode", False))
-
         # SWA uses original-token coordinates; circular state has no token slots.
         # Long KV and index K are addressed in completed compression groups.
         compressed = cache_kind in {"long_kv", "index_k"}
@@ -815,7 +837,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             if prepared_slots is None or prepared_flat_slots is None:
                 active_slots = common.slot_mapping[:num_input_tokens]
                 if self._uses_a5_packed_cache and active_slots.device.type == "npu":
-                    prepared_slots, prepared_flat_slots = build_a5_slot_mapping(
+                    prepared_slots, prepared_flat_slots = self._device_backend.build_a5_slot_mapping(
                         active_slots,
                         positions,
                         common.query_start_loc,
@@ -831,13 +853,14 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 else:
                     if compressed and ratio != 1:
                         active_slots = compressed_slot_mapping(active_slots, ratio)
-                    valid = active_slots >= 0
+                    valid_end = common.query_start_loc[num_actual_reqs].clamp_max(num_actual_tokens)
+                    valid = (active_slots >= 0) & (
+                        torch.arange(num_input_tokens, device=active_slots.device) < valid_end
+                    )
                     if compressed and ratio == 2:
                         if kwargs.get("skip_ring_state_update", False):
                             valid.zero_()
                         else:
-                            valid_end = common.query_start_loc[num_actual_reqs].clamp_max(num_actual_tokens)
-                            valid &= torch.arange(num_input_tokens, device=active_slots.device) < valid_end
                             if positions is not None:
                                 valid &= positions.remainder(2) == 1
                     physical = active_slots.clamp_min(0)
@@ -911,7 +934,7 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
             cache_key = f"a5-causal-swa:w{window_size}"
             cached_window = batch_shared.get(cache_key)
             if cached_window is None:
-                cached_window = build_window_indices(
+                cached_window = self._device_backend.build_window_indices(
                     positions[:num_input_tokens],
                     window_size,
                     indices_output=self._a5_causal_swa_indices[:num_input_tokens],
@@ -939,20 +962,8 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 if num_actual_tokens == 0:
                     self._a5_smla_metadata.zero_()
                     return
-                import_packaged_a5_module("cann_ops_transformer.ops.attention.mixed_quant_sparse_flash_mla_dsl")
                 length_rows = self._a5_smla_length_rows[:num_actual_tokens]
-                value = torch.ops.cann_ops_transformer.ds41.mixed_quant_sparse_flash_mla_metadata(
-                    length_rows,
-                    length_rows,
-                    num_heads_q=64,
-                    num_heads_kv=1,
-                    head_dim=512,
-                    quant_mode=1,
-                    layout_q="TND",
-                    layout_kv="PA_BBND",
-                    has_win_kv=True,
-                    has_cmp_kv=True,
-                )
+                value = self._device_backend.build_smla_metadata(length_rows)
                 self._a5_smla_metadata.copy_(value)
 
             smla_metadata = self._publish_task(

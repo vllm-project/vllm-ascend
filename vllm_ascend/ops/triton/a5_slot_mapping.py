@@ -36,7 +36,12 @@ def _build_a5_slot_mapping_kernel(
     tokens = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = tokens < num_tokens
     slots = tl.load(slots_ptr + tokens * slot_stride, mask=mask, other=-1).to(tl.int64)
-    valid = mask & (slots >= 0)
+    request_end = tl.load(query_start_loc_ptr + num_actual_reqs * query_start_stride).to(tl.int64)
+    valid_end = tl.minimum(request_end, num_actual_tokens)
+    # Full graphs keep a fixed token carrier whose padded tail may still hold
+    # slot IDs from an earlier replay.  Never let those rows write any A5 cache
+    # plane, including the uncompressed SWA/C1 planes.
+    valid = mask & (tokens < valid_end) & (slots >= 0)
 
     if COMPRESS_RATIO == 2:
         valid &= ((slots + 1) % 2) == 0
@@ -45,9 +50,7 @@ def _build_a5_slot_mapping_kernel(
             mask=mask,
             other=0,
         ).to(tl.int64)
-        request_end = tl.load(query_start_loc_ptr + num_actual_reqs * query_start_stride).to(tl.int64)
-        valid_end = tl.minimum(request_end, num_actual_tokens)
-        valid &= (tokens < valid_end) & ((positions % 2) == 1) & (skip_update == 0)
+        valid &= ((positions % 2) == 1) & (skip_update == 0)
         physical = slots // 2
     else:
         physical = slots
@@ -101,7 +104,9 @@ def _build_a5_slot_mapping_batch_kernel(
         mask=mask,
         other=-1,
     ).to(tl.int64)
-    valid = mask & (slots >= 0)
+    request_end = tl.load(query_start_loc_ptr + num_actual_reqs * query_start_stride).to(tl.int64)
+    valid_end = tl.minimum(request_end, num_actual_tokens)
+    valid = mask & (tokens < valid_end) & (slots >= 0)
 
     if COMPRESS_RATIO == 2:
         valid &= ((slots + 1) % 2) == 0
@@ -110,9 +115,7 @@ def _build_a5_slot_mapping_batch_kernel(
             mask=mask,
             other=0,
         ).to(tl.int64)
-        request_end = tl.load(query_start_loc_ptr + num_actual_reqs * query_start_stride).to(tl.int64)
-        valid_end = tl.minimum(request_end, num_actual_tokens)
-        valid &= (tokens < valid_end) & ((positions % 2) == 1) & (skip_update == 0)
+        valid &= ((positions % 2) == 1) & (skip_update == 0)
         physical = slots // 2
     else:
         physical = slots

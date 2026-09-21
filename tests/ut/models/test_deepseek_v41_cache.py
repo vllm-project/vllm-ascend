@@ -657,6 +657,38 @@ def test_slot_mapping_is_shared_per_compatible_cache_group(config, runtime):
     ]
 
 
+def test_uncompressed_slot_mapping_masks_full_graph_tail(config, runtime):
+    specs = collect_specs(runtime)
+    spec = specs["model.layers.3.self_attn.swa_cache"]
+    builder = AscendDSAV41MetadataBuilder(spec, [], runtime, torch.device("cpu"))
+    common = SimpleNamespace(
+        # The graph-padded rows deliberately contain valid-looking stale slots.
+        slot_mapping=torch.tensor([5, 6, 65, 66]),
+        positions=torch.tensor([10, 11, 0, 0]),
+        block_table_tensor=torch.tensor([[5], [0]]),
+        query_start_loc=torch.tensor([0, 2, 4]),
+        query_start_loc_cpu=torch.tensor([0, 2, 4]),
+        seq_lens=torch.tensor([12, 0]),
+        seq_lens_cpu=torch.tensor([12, 0]),
+        num_reqs=2,
+        num_actual_tokens=2,
+        num_input_tokens=4,
+        max_query_len=2,
+        max_seq_len=12,
+        is_prefilling=torch.tensor([False, False]),
+    )
+
+    metadata = builder.build(0, common, num_actual_reqs=1, full_graph_mode=True)
+
+    assert metadata.slot_mapping.tolist() == [
+        [0, 5],
+        [0, 6],
+        [-1, -1],
+        [-1, -1],
+    ]
+    assert metadata.flat_slot_mapping.tolist() == [5, 6, -1, -1]
+
+
 def test_compressed_metadata_exposes_original_and_cache_coordinates(config, runtime):
     specs = collect_specs(runtime)
     spec = specs["model.layers.2.self_attn.long_kv_cache"]
@@ -1410,22 +1442,45 @@ def test_v41_cp_resolves_own_planes_with_native_draft_metadata_present():
 
 
 @pytest.mark.parametrize("overlap", [False, True])
-def test_v41_query_preparation_uses_multistream(overlap):
+def test_v41_query_preparation_honors_multistream_setting(overlap):
     from unittest.mock import Mock
 
     from vllm_ascend.attention.dsa_v41 import AscendDSAV41Impl
 
     impl = AscendDSAV41Impl.__new__(AscendDSAV41Impl)
     impl.role = SimpleNamespace(is_kv_source=True)
+    impl.preprocess = Mock(return_value=("q", "qr"))
     impl.multistream_preprocess = Mock(return_value=("q", "qr"))
     impl._write_compressed_source = Mock()
     attn = SimpleNamespace(
-        dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=SimpleNamespace(multistream_dsv4_dsa_overlap=overlap)))
+        dsv41_backend=None,
+        dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=SimpleNamespace(multistream_dsv4_dsa_overlap=overlap))),
     )
-    metadata = SimpleNamespace(swa=SimpleNamespace(num_actual_tokens=6))
+    metadata = SimpleNamespace(swa=SimpleNamespace(num_actual_tokens=6, num_prefills=0))
     assert impl._prepare_queries(attn, "hidden", "positions", "cos", "sin", metadata) == ("q", "qr")
-    impl.multistream_preprocess.assert_called_once_with(attn, "hidden", "cos", "sin", metadata.swa)
+    selected = impl.multistream_preprocess if overlap else impl.preprocess
+    selected.assert_called_once_with(attn, "hidden", "cos", "sin", metadata.swa)
     impl._write_compressed_source.assert_called_once_with(attn, "hidden", "positions", "cos", "sin", metadata)
+
+
+def test_v41_a5_prefill_keeps_cache_writes_on_current_stream():
+    from unittest.mock import Mock
+
+    from vllm_ascend.attention.dsa_v41 import AscendDSAV41Impl
+
+    impl = AscendDSAV41Impl.__new__(AscendDSAV41Impl)
+    impl.role = SimpleNamespace(is_kv_source=False)
+    impl.preprocess = Mock(return_value=("q", "qr"))
+    impl.multistream_preprocess = Mock(return_value=("q", "qr"))
+    attn = SimpleNamespace(
+        dsv41_backend=object(),
+        dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=SimpleNamespace(multistream_dsv4_dsa_overlap=True))),
+    )
+    metadata = SimpleNamespace(swa=SimpleNamespace(num_actual_tokens=6, num_prefills=1))
+
+    assert impl._prepare_queries(attn, "hidden", "positions", "cos", "sin", metadata) == ("q", "qr")
+    impl.preprocess.assert_called_once_with(attn, "hidden", "cos", "sin", metadata.swa)
+    impl.multistream_preprocess.assert_not_called()
 
 
 @pytest.mark.parametrize("overlap", [False, True])
