@@ -1339,6 +1339,45 @@ def test_v41_cp_output_exchange_only_pads_partial_ranks(monkeypatch, local_token
     torch.testing.assert_close(output, torch.ones_like(destination))
 
 
+def test_v41_cp_full_o_proj_skips_activation_exchange(monkeypatch):
+    from vllm_ascend.attention.context_parallel.dsa_v41_cp import AscendDSAV41CPImpl
+
+    impl = AscendDSAV41CPImpl("layer", SimpleNamespace(is_kv_source=False), None, None, None)
+    exchange = Mock(side_effect=AssertionError("full o_proj must not exchange activations"))
+    monkeypatch.setattr("vllm_ascend.attention.context_parallel.dsa_v41_cp.restore_tp_heads", exchange)
+    calls = []
+
+    def project(tensor, output, *, full_gather_wo_a_enabled=False):
+        calls.append((tensor.clone(), full_gather_wo_a_enabled))
+        output.copy_(tensor.flatten(1))
+
+    v1_impl = SimpleNamespace(
+        enable_dsa_cp_full_o_proj=True,
+        _switch_o_proj_to_full_weight=lambda: calls.append("full"),
+        _switch_o_proj_to_local_weight=lambda: calls.append("local"),
+        _forward_o_proj=project,
+    )
+    attn = SimpleNamespace(dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=v1_impl)))
+    local = torch.arange(12, dtype=torch.float32).reshape(1, 2, 6)
+    destination = torch.empty(2, 12)
+
+    actual = impl._project_output(
+        attn,
+        local,
+        torch.empty(2, 12),
+        SimpleNamespace(swa=SimpleNamespace(cp_token_range=(0, 2, 2, 4))),
+        projected=destination,
+    )
+
+    assert actual is destination
+    assert calls[0] == "full"
+    assert calls[-1] == "local"
+    assert calls[1][1] is True
+    torch.testing.assert_close(calls[1][0][0], local[0])
+    assert torch.count_nonzero(calls[1][0][1]) == 0
+    exchange.assert_not_called()
+
+
 def test_v41_cp_consumers_reuse_local_topk_and_candidates():
     from vllm_ascend.attention.context_parallel.dsa_v41_cp import AscendDSAV41CPImpl
 

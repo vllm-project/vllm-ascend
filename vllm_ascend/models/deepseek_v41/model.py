@@ -791,6 +791,9 @@ class DeepseekV41DecoderLayer(nn.Module):
             reduce_results=not self.use_sequence_parallel_moe,
             need_gather_q_kv=self.use_sequence_parallel_moe and self.enable_dsa_cp,
         )
+        self.use_dsa_cp_full_o_proj = bool(
+            self.enable_dsa_cp and self.self_attn.dsa_attn.dsa_attn.impl.enable_dsa_cp_full_o_proj
+        )
 
         self.mlp = DeepseekV41MoE(
             config=config,
@@ -890,10 +893,12 @@ class DeepseekV41DecoderLayer(nn.Module):
             pre_mix,
         )
         x = self.input_layernorm(x)
-        if use_sequence_parallel:
+        use_dsa_cp = getattr(self, "enable_dsa_cp", False)
+        use_cp_full_o_proj = use_sequence_parallel and getattr(self, "use_dsa_cp_full_o_proj", False)
+        if use_sequence_parallel and not use_dsa_cp:
             x = sp_all_gather(x)[: positions.shape[0]]
         x = self.self_attn(positions, x, llama_4_scaling)
-        if use_sequence_parallel:
+        if use_sequence_parallel and not use_cp_full_o_proj:
             x = sp_reduce_scatter(x)
         hidden_states = self.hc_post(x, residual, attn_post, attn_comb)
 

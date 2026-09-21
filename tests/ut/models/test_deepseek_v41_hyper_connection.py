@@ -134,6 +134,40 @@ def test_v41_forward_gathers_attention_and_keeps_moe_sharded(monkeypatch):
     assert layer.mlp.call_args.kwargs["already_sequence_parallel"] is True
 
 
+def test_v41_dsa_cp_full_o_proj_keeps_attention_sequence_sharded(monkeypatch):
+    layer = _layer()
+    layer.use_sequence_parallel = True
+    layer.enable_dsa_cp = True
+    layer.use_dsa_cp_full_o_proj = True
+    hidden_states = torch.randn(2, 4, 8, dtype=torch.bfloat16)
+    collapsed = torch.randn(2, 8, dtype=torch.bfloat16)
+    post = torch.randn(2, 4, dtype=torch.float32)
+    comb = torch.randn(2, 4, 4, dtype=torch.float32)
+    pre = torch.randn(2, 4, dtype=torch.float32)
+    for name in ("hc_attn_fn", "hc_ffn_fn"):
+        setattr(layer, name, torch.nn.Parameter(torch.empty(24, 32)))
+    for name in ("hc_attn_scale", "hc_ffn_scale"):
+        setattr(layer, name, torch.nn.Parameter(torch.empty(3)))
+    for name in ("hc_attn_base", "hc_ffn_base"):
+        setattr(layer, name, torch.nn.Parameter(torch.empty(24)))
+    layer.hc_pre = MagicMock(side_effect=[(collapsed, post, comb, pre)] * 2)
+    layer.input_layernorm = MagicMock(side_effect=lambda value: value)
+    layer.rms_norm_cast = MagicMock(return_value=(collapsed, collapsed.float()))
+    layer.self_attn = MagicMock(side_effect=lambda _positions, value, _scaling: value)
+    layer.mlp = MagicMock(side_effect=lambda value, **_kwargs: value)
+    layer.hc_post = MagicMock(side_effect=lambda _x, residual, _post, _comb: residual)
+    all_gather = MagicMock()
+    reduce_scatter = MagicMock()
+    monkeypatch.setattr(deepseek_v41_module, "sp_all_gather", all_gather)
+    monkeypatch.setattr(deepseek_v41_module, "sp_reduce_scatter", reduce_scatter)
+
+    layer.forward(torch.arange(4), hidden_states, pre, input_ids=torch.tensor([1, 2]))
+
+    layer.self_attn.assert_called_once_with(torch.arange(4), collapsed, None)
+    all_gather.assert_not_called()
+    reduce_scatter.assert_not_called()
+
+
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_v41_rms_norm_cast_preserves_rounded_routing_input(dtype):
     layer = _layer()
