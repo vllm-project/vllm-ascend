@@ -18,7 +18,7 @@ env_common: &env_common
   VLLM_NIXL_ABORT_REQUEST_TIMEOUT: "300000"
   PYTHONHASHSEED: "0"
   VLLM_USE_MODELSCOPE: "true"
-  SERVER_PORT: "DEFAULT_PORT"
+  SERVER_PORT: "8078"
   VLLM_PP_LAYER_PARTITION: "${PP_LAYER_PARTITION}"
 
 routing:
@@ -72,7 +72,7 @@ config:
     dp_size_local: 4
     dp_rank_start: 0
     tp_size: 4
-    pp_size: 2
+    pp_size: 1
     pp_group_id: 1
     pp_layer_partition: "41,37"
     dp_address: "${NODE_2_IP}"
@@ -84,7 +84,7 @@ config:
     dp_size_local: 4
     dp_rank_start: 4
     tp_size: 4
-    pp_size: 2
+    pp_size: 1
     pp_group_id: 1
     pp_layer_partition: "41,37"
     dp_address: "${NODE_2_IP}"
