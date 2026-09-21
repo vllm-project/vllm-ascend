@@ -38,6 +38,7 @@ from vllm_ascend.device.hardware_profile import (
     QuantizationBackendFamily,
     get_current_hardware_profile,
 )
+from vllm_ascend.mrv2_utils import apply_v2_model_runner_config_patch
 
 # isort: off
 from vllm_ascend.utils import (
@@ -455,9 +456,22 @@ class NPUPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        # NOTE: This still monkey-patches VllmConfig by replacing the
+        # use_v2_model_runner property (the "patch way"). It is kept here
+        # because upstream vLLM does not yet expose a platform hook to
+        # make V2 the unconditional platform default.
+        # The upstream V2 validation is also neutralized, since Ascend fully
+        # owns the V2 enablement decision.
+        # TODO(wxsIcey): Remove this once upstream vLLM allows platforms to
+        # override the default runner selection.
+        apply_v2_model_runner_config_patch()
+
         # Lazy import vllm/vllm-ascend to avoid circular import
+        from vllm_ascend.ascend_forward_context import sync_v2_extra_kwargs
         from vllm_ascend.quantization.utils import maybe_auto_detect_quantization
         from vllm_ascend.logger import configure_ascend_file_logging, configure_ascend_logging
+
+        sync_v2_extra_kwargs(vllm_config)
 
         # 1.Configure logging
         configure_ascend_file_logging()
@@ -549,6 +563,7 @@ class NPUPlatform(Platform):
             get_mc2_mask,
             get_mrv2_in_profile_run,
             select_moe_comm_method,
+            sync_v2_extra_kwargs,
         )
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
         from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
@@ -562,6 +577,7 @@ class NPUPlatform(Platform):
 
         if cudagraph_runtime_mode is None:
             cudagraph_runtime_mode = CUDAGraphMode.NONE
+        sync_v2_extra_kwargs(vllm_config)
         # TODO(Ronald1995): model runner v1 still use ascend_forward_context,
         # when v1's forward context is refactored, we can remove this branch.
         # Currently, model runner v2 use the new forward context.
@@ -579,7 +595,12 @@ class NPUPlatform(Platform):
         sinks = False
         in_profile_run = get_mrv2_in_profile_run()
 
-        tp_world_size = get_tensor_model_parallel_world_size()
+        try:
+            tp_world_size = get_tensor_model_parallel_world_size()
+        except AssertionError:
+            # Kernel / precision tests call set_forward_context without
+            # initializing TP. Keep V1 extras there.
+            return {"dynamic_mx_quant_scale_alg": dynamic_mx_quant_scale_alg}
 
         # NOTE: This cannot be set using set_forward_context
         # due to multiple warmups before actual capturing.
@@ -1526,7 +1547,8 @@ def _validate_parallel_config(vllm_config: VllmConfig) -> None:
             )
         # A5 supports non-C8 SFA DCP, but its SFA C8 operator does not yet
         # support DCP with a replicated indexer. Reject that combination early.
-        if vllm_config.additional_config.get("enable_sparse_sfa_c8", False) and not (
+        additional_config = getattr(vllm_config, "additional_config", None) or {}
+        if additional_config.get("enable_sparse_sfa_c8", False) and not (
             get_current_hardware_profile().supports(HardwareCapability.SFA_C8_DCP_REPLICATED_INDEXER)
         ):
             raise NotImplementedError(
