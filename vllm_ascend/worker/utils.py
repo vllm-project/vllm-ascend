@@ -6,7 +6,7 @@ import torch
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import largest_power_of_2_divisor
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec
 from vllm.v1.worker.utils import AttentionGroup, KVBlockZeroer
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
@@ -58,7 +58,11 @@ def copy_kv_cache_blocks_inplace(
         # same-size bitcasts preserve the non-contiguous page geometry.
         if tensor.dtype == torch.float8_e4m3fn:
             tensor = tensor.view(torch.int8)
-        blocks = tensor.unflatten(0, (num_blocks, tensor.shape[0] // num_blocks))
+        kernel_blocks_per_block = tensor.shape[0] // num_blocks
+        # Page-strided MLA views are non-contiguous, so a flat ``view`` would
+        # either fail or materialize a copy. Split only dim 0 to preserve the
+        # original strided storage while copying every kernel block in a page.
+        blocks = tensor.unflatten(0, (num_blocks, kernel_blocks_per_block))
         source_blocks = torch.stack([blocks[copy.src_block_id] for copy in kv_cache_block_copies])
         for index, copy in enumerate(kv_cache_block_copies):
             blocks[copy.dst_block_id].copy_(source_blocks[index])
@@ -126,6 +130,29 @@ def _zero_kv_blocks_kernel(
             tl.store(ptr + offset + cols, tl.zeros([BLOCK_SIZE], dtype=tl.int32))
 
 
+def _component_views_share_slot(kv_cache: object, spec: FullAttentionSpec) -> bool:
+    """Whether MLA component views alias one component-major physical page."""
+
+    if not isinstance(spec, MLAAttentionSpec) or not isinstance(kv_cache, tuple) or len(kv_cache) != 2:
+        return False
+
+    nope, rope = kv_cache
+    if not isinstance(nope, torch.Tensor) or not isinstance(rope, torch.Tensor):
+        return False
+
+    storage_ptr = nope.untyped_storage().data_ptr()
+    first_offset = nope.storage_offset()
+    component_elements = nope[0].numel()
+    return (
+        rope.untyped_storage().data_ptr() == storage_ptr
+        and rope.stride(0) == nope.stride(0)
+        and not nope.is_contiguous()
+        and not rope.is_contiguous()
+        and rope.storage_offset() - first_offset == component_elements
+        and component_elements < nope.stride(0)
+    )
+
+
 class AscendKVBlockZeroer(KVBlockZeroer):
     """Manages efficient zeroing of KV cache blocks via a Triton kernel.
 
@@ -182,14 +209,20 @@ class AscendKVBlockZeroer(KVBlockZeroer):
             for layer_name in group.layer_names:
                 if layer_name in runner_only_attn_layers:
                     continue
-                kv_tuple = static_forward_context[layer_name].kv_cache
-                if cache_dtype == "mxfp8" and len(kv_tuple) == 4:
-                    # V scales are checkpoint constants, initialized before
-                    # capture. Clearing a recycled block must preserve them.
-                    kv_tuple = kv_tuple[:3]
+                kv_cache = static_forward_context[layer_name].kv_cache
+                # Fused MLA由单一tensor表示；component-major MLA的两个view同样共享一个物理page，从nope起点清理一次即可。
+                # legacy K/V协议仍逐个component清理。
+                if _component_views_share_slot(kv_cache, spec):
+                    kv_tensors = (kv_cache[0],)
+                elif isinstance(kv_cache, torch.Tensor):
+                    kv_tensors = (kv_cache,)
                 else:
-                    assert len(kv_tuple) == 2, "K and V are not stored separately"
-                for kv in kv_tuple:
+                    kv_tensors = kv_cache
+                    if cache_dtype == "mxfp8" and len(kv_tensors) == 4:
+                        # V scales are checkpoint constants, initialized before
+                        # capture. Clearing a recycled block must preserve them.
+                        kv_tensors = kv_tensors[:3]
+                for kv in kv_tensors:
                     dp = kv.data_ptr()
                     if dp in seen_ptrs:
                         continue

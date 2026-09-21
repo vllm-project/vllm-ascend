@@ -116,6 +116,7 @@ from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import (
+    AscendV2KVBlockZeroer,
     prepare_v41_dummy_ring_state,
     prepare_v41_source_rope,
     torch_cuda_wrapper,
@@ -126,8 +127,8 @@ class NPUModelRunner(GPUModelRunner):
     """Model runner for Ascend NPUs."""
 
     # vLLM #51718 overlays hybrid Attention/Mamba groups in one standardized
-    # backing allocation. Ascend MRV2 preserves that layout in
-    # allocate_kv_cache_main and exposes contiguous backend-specific views.
+    # backing allocation. Ascend MRV2 preserves that allocation and exposes
+    # backend-specific views; MLA may use a page-strided fused/component view.
     supports_standardized_shared_kv_backing = True
 
     execute_model_state: ExecuteModelState | None
@@ -347,6 +348,18 @@ class NPUModelRunner(GPUModelRunner):
             sparse_offload_enabled=self.ascend_config.sparse_kv_offload_config.enabled,
             is_last_pp_rank=self.is_last_pp_rank,
             shared_kv_cache_layers=getattr(self, "shared_kv_cache_layers", None),
+        )
+
+    def _init_kv_zero_meta(self) -> None:
+        """Use a tuple-aware zeroer for Ascend V1-compatible cache protocols."""
+
+        self.kv_block_zeroer = AscendV2KVBlockZeroer(
+            self.device,
+            attn_groups_iter=(g for groups in self.attn_groups for g in groups),
+            kernel_block_sizes=self.kernel_block_sizes,
+            static_forward_context=self.compilation_config.static_forward_context,
+            num_blocks=self.kv_cache_config.num_blocks,
+            cache_dtype=self.cache_config.cache_dtype,
         )
 
     def initialize_kv_cache(
