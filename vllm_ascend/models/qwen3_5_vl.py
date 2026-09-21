@@ -127,6 +127,11 @@ class _AscendVLPreprocessMixin:
         self._ps = vc.patch_size
         self._tps = vc.temporal_patch_size
         self._ms = vc.spatial_merge_size
+        # Disable offload when encoder ACL graph is enabled: _resize_and_patchify
+        # has dynamic shapes (variable image sizes) that cannot be captured into
+        # a fixed-shape graph. Fall back to the original CPU preprocessing.
+        cc = vllm_config.compilation_config
+        self._pp_offload = not cc.cudagraph_mm_encoder
 
     def _resize_and_patchify(self, image_input, grid_thw):
         """Flat raw uint8 -> per-image resize -> patchify -> concat patches."""
@@ -181,8 +186,11 @@ class _AscendVLPreprocessMixin:
             embeds = image_input["image_embeds"].type(self.visual.dtype)
             sizes = (grid_thw.prod(-1) // self._ms // self._ms).tolist()
             return embeds.split(sizes)
-        patches = self._resize_and_patchify(image_input, grid_thw)
-        pixel_values = self.input_norm(patches, self.visual.dtype)
+        if self._pp_offload:
+            patches = self._resize_and_patchify(image_input, grid_thw)
+            pixel_values = self.input_norm(patches, self.visual.dtype)
+        else:
+            pixel_values = image_input["pixel_values"].type(self.visual.dtype)
         return self._run_visual(pixel_values, grid_thw)
 
     def _process_video_input(self, video_input):
