@@ -19,6 +19,7 @@ def _builder(block_size, a5, monkeypatch, rope_dim=0):
         get_topk_lengths=lambda positions: torch.where(positions == 0, 1, 7),
     )
     config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=block_size),
         model_config=SimpleNamespace(
             max_model_len=max(4096, block_size + 2),
             get_head_size=lambda: 512,

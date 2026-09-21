@@ -38,6 +38,7 @@ from vllm.v1.attention.backends.registry import (  # type: ignore
     AttentionBackendEnum,
     register_backend,
 )
+from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
@@ -57,13 +58,7 @@ from vllm_ascend.compilation.updatable_graph import (
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("0.28.0"):
-    from vllm.model_executor.layers.attention.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
-else:
-    from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
@@ -1213,19 +1208,19 @@ class AscendAttentionBackendImpl(AttentionImpl):
         attn_metadata: AscendMetadata,
         output: torch.Tensor,
     ):
-        record_attention_compute_start()
-        num_tokens = query.shape[0]
+        with attention_transfer_window():
+            num_tokens = query.shape[0]
 
-        if (
-            attn_metadata.attn_state == AscendAttentionState.DecodeOnly
-            and self.sliding_window is None
-            and using_paged_attention(num_tokens, self.vllm_config, self.head_size)
-        ):
-            output = self.forward_paged_attention(query, attn_metadata, output)
-        else:
-            output = self.forward_fused_infer_attention(query, key, value, attn_metadata, output, kv_cache)
+            if (
+                attn_metadata.attn_state == AscendAttentionState.DecodeOnly
+                and self.sliding_window is None
+                and using_paged_attention(num_tokens, self.vllm_config, self.head_size)
+            ):
+                output = self.forward_paged_attention(query, attn_metadata, output)
+            else:
+                output = self.forward_fused_infer_attention(query, key, value, attn_metadata, output, kv_cache)
 
-        return output
+            return output
 
     def forward(
         self,
