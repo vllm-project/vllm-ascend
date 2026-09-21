@@ -20,8 +20,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, YaRNScalingRotaryEmbedding
+from vllm.model_executor.layers.rotary_embedding.llama3_rope import Llama3RotaryEmbedding
 
 from vllm_ascend.ops.rotary_embedding import (
+    AscendLlama3RotaryEmbedding,
     AscendRotaryEmbedding,
     AscendYaRNRotaryEmbedding,
     rope_forward_oot,
@@ -299,6 +301,47 @@ class TestAscendEmbeddingForwardOOT:
         accordingly.
         """
         check_parent_init_signature_has_not_changed(RotaryEmbedding.__init__, AscendRotaryEmbedding.__init__)
+
+
+class TestAscendLlama3RotaryEmbedding:
+    @pytest.mark.parametrize("factors", [(8.0, 1.0, 4.0, 8192), (4.0, 2.0, 2.0, 4096)])
+    def test_preserves_scaling_and_initializes_ascend_cache(self, patch_init_side_effects, factors):
+        scaling, low, high, original_max = factors
+        cache = torch.zeros(MAX_POS, ROTARY_DIM)
+        emb = AscendLlama3RotaryEmbedding.__new__(AscendLlama3RotaryEmbedding)
+        emb.cos_sin_cache = cache
+        emb.rotary_dim = ROTARY_DIM
+        with (
+            patch.object(RotaryEmbedding, "__init__", return_value=None) as parent,
+            patch("vllm_ascend.ops.rotary_embedding._record_cos_sin_cache") as record_cache,
+            patch("vllm_ascend.ops.rotary_embedding._record_cos_and_sin_cache_interleaved") as record_split,
+        ):
+            AscendLlama3RotaryEmbedding.__init__(
+                emb, HEAD_SIZE, ROTARY_DIM, MAX_POS, BASE, True, DTYPE, scaling, low, high, original_max
+            )
+        parent.assert_called_once_with(HEAD_SIZE, ROTARY_DIM, MAX_POS, BASE, True, DTYPE, True)
+        record_cache.assert_called_once_with(cache)
+        record_split.assert_called_once_with(cache)
+        assert (emb.scaling_factor, emb.low_freq_factor, emb.high_freq_factor, emb.orig_max_position) == factors
+
+        # Compare the actual inverse-frequency calculation through the diamond
+        # inheritance with the upstream implementation, including equal factors.
+        class ReferenceLlama3RotaryEmbedding(Llama3RotaryEmbedding):
+            pass
+
+        reference = ReferenceLlama3RotaryEmbedding.__new__(ReferenceLlama3RotaryEmbedding)
+        reference.rotary_dim = ROTARY_DIM
+        reference.scaling_factor, reference.low_freq_factor, reference.high_freq_factor, reference.orig_max_position = (
+            factors
+        )
+        torch.testing.assert_close(emb._compute_inv_freq(BASE), reference._compute_inv_freq(BASE), rtol=0, atol=0)
+        assert not emb.use_mtp
+
+    def test_uses_ascend_forward_and_upstream_constructor(self):
+        assert AscendLlama3RotaryEmbedding.forward_oot is AscendRotaryEmbedding.forward_oot
+        check_parent_init_signature_has_not_changed(
+            Llama3RotaryEmbedding.__init__, AscendLlama3RotaryEmbedding.__init__
+        )
 
 
 class TestAscendYaRNRotaryEmbeddingForwardOOT:

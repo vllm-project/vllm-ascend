@@ -31,6 +31,7 @@ from vllm.model_executor.layers.rotary_embedding import (
     YaRNScalingRotaryEmbedding,
 )
 from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
+from vllm.model_executor.layers.rotary_embedding.llama3_rope import Llama3RotaryEmbedding
 from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
@@ -318,6 +319,14 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         if out_dtype is None:
             return torch.ops.vllm.npu_rotary_embedding(*rope_args)
         return torch.ops.vllm.npu_rotary_embedding(*rope_args, out_dtype=out_dtype)
+
+
+class AscendLlama3RotaryEmbedding(Llama3RotaryEmbedding, AscendRotaryEmbedding):
+    """Keep Llama 3 frequency scaling and use Ascend's fused rotary forward.
+
+    Llama3RotaryEmbedding's cooperative constructor initializes its scaling
+    parameters before AscendRotaryEmbedding creates and records the cache.
+    """
 
 
 class AscendYaRNRotaryEmbedding(YaRNScalingRotaryEmbedding):
