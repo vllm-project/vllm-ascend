@@ -460,6 +460,12 @@ class KVPoolWorker:
         self._layerwise_session_tracker = LayerwiseSessionTracker()
         self._current_layerwise_request_ids: set[str] = set()
         self._current_layerwise_last_chunk_req_ids: set[str] = set()
+        # PERF-TUNE(4): per-step RPC result caches. Defined once here so
+        # mypy does not flag repeated attribute definitions; they are reset
+        # per step via .clear() in process_layer_data().
+        self._step_keyinfo_cache: dict[str, Any] = {}
+        self._step_lease_result: dict[str, int] = {}
+        self._step_exist_cache: dict[str, int] = {}
 
     def _init_layerwise_config(self) -> None:
         # Build mapping: physical_layer -> [(group_id, layer_idx_in_group), ...]
@@ -2460,9 +2466,9 @@ class KVPoolWorker:
         # PERF-TUNE(4): per-step RPC result caches. Concurrent requests with a
         # shared prefix issue identical memcache queries; cache per step so each
         # distinct key is queried/leased/existence-checked once.
-        self._step_keyinfo_cache: dict[str, Any] = {}
-        self._step_lease_result: dict[str, int] = {}
-        self._step_exist_cache: dict[str, int] = {}
+        self._step_keyinfo_cache.clear()
+        self._step_lease_result.clear()
+        self._step_exist_cache.clear()
         # Keep this method safe for direct callers as well as start_load_kv().
         # Worker threads may still own the lists from the preceding step.
         # Mooncake uses the projected stage-local cache layout, including any
