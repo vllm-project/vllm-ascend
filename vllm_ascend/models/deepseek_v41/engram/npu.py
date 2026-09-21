@@ -35,9 +35,8 @@ ACL_HOST_REG_PINNED = 0x10000000
 def engram_cpu_offload(vllm_config) -> bool:
     """Whether the Engram table is offloaded to host memory (UVA lookup).
 
-    vLLM only grew ``--engram-config`` after 0.28, and the option is what turns
-    the offload on: without it the tables stay on the device, exactly like
-    upstream.
+    ``--engram-config`` turns on host offload. Without it, the tables stay on
+    the device, exactly like upstream.
     """
 
     engram_config = getattr(vllm_config, "engram_config", None)

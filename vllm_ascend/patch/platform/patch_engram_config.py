@@ -16,9 +16,8 @@
 
 import importlib.util
 
-# vLLM only grew EngramConfig after 0.28. Older versions have no
-# --engram-config flag at all, which already means "no offload", so there is
-# nothing to accept and nothing to relax.
+# If vLLM has no EngramConfig, there is no --engram-config flag to enable
+# host offload and no model-config restriction to relax.
 if importlib.util.find_spec("vllm.config.engram") is not None:
     from vllm.config.engram import EngramConfig
 
