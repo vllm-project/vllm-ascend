@@ -126,7 +126,18 @@ def main():
             f"No remote block was loaded (cached_tokens={warm.num_cached_tokens}); is the prompt "
             f"({args.prompt_tokens} tokens) longer than the model's transfer granularity?"
         )
-        assert warm.outputs[0].token_ids == cold.outputs[0].token_ids, "Cold/warm generation differs"
+        warm_ids = warm.outputs[0].token_ids
+        cold_ids = cold.outputs[0].token_ids
+        if warm_ids != cold_ids:
+            # A failed load is recomputed, so a mismatch means the restored KV
+            # reached the wrong place rather than not reaching any.
+            first_diff = next((i for i, (a, b) in enumerate(zip(cold_ids, warm_ids)) if a != b), None)
+            raise AssertionError(
+                f"Cold/warm generation differs (cached_tokens={warm.num_cached_tokens}, "
+                f"first differing index={first_diff}, cold={len(cold_ids)} warm={len(warm_ids)} tokens)\n"
+                f"  cold: {tokenizer.decode(cold_ids[:24])!r}\n"
+                f"  warm: {tokenizer.decode(warm_ids[:24])!r}"
+            )
         print(f"Warm round {iteration + 1}: cached_tokens={warm.num_cached_tokens}, token IDs match")
     print(f"PASS: Mooncake layerwise TP={args.tp}, PP={args.pp}")
     if args.pp > 1 and not args.debug:
