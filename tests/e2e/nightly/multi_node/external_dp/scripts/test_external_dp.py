@@ -136,8 +136,10 @@ def _build_external_dp_servers(
     completion_server = ProxyServer(config.routing.proxy_host, config.routing.proxy_port)
 
     if config.is_disaggregated_prefill:
-        prefill_ranks = [r for r in ranks if r.role == "prefiller"]
-        decode_ranks = [r for r in ranks if r.role == "decoder"]
+        # Only engine master ranks expose an API server; PP group worker nodes
+        # do not serve /health and cannot be used as tokenize/metrics backends.
+        prefill_ranks = [r for r in ranks if r.role == "prefiller" and r.is_engine_master]
+        decode_ranks = [r for r in ranks if r.role == "decoder" and r.is_engine_master]
         tokenize_server = ProxyServer(prefill_ranks[0].host, prefill_ranks[0].port)
         metrics_server = ProxyServer(decode_ranks[0].host, decode_ranks[0].port)
     else:
@@ -249,7 +251,10 @@ def test_external_dp() -> None:
             proxy_launcher,
         ):
             if is_master:
-                wait_ranks_ready(ranks, timeout=max_wait_seconds)
+                wait_ranks_ready(
+                    [r for r in ranks if r.is_engine_master],
+                    timeout=max_wait_seconds,
+                )
                 proxy_launcher.wait_ready()
 
                 all_commands = build_all_server_commands(config, ranks)
@@ -310,7 +315,10 @@ def test_external_dp() -> None:
                     logger.info("Validating spec_decode acceptance rate")
                     _run_spec_decode_acceptance_ext(config, metrics_server, first_server_cmd, spec_baseline)
 
-                wait_ranks_ready(ranks, timeout=30)
+                wait_ranks_ready(
+                    [r for r in ranks if r.is_engine_master],
+                    timeout=30,
+                )
             else:
                 master_url = master_rank_health_url(ranks)
                 with _heartbeat(

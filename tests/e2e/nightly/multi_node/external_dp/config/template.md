@@ -334,6 +334,12 @@ ${TP_SIZE}
 ${CP_SIZE}
 ${SP_SIZE}
 ${PP_SIZE}
+${PP_NODE_RANK}
+${PP_GROUP_SIZE}
+${PP_MASTER_ADDR}
+${PP_LAYER_PARTITION}
+${NNODES}
+${IS_ENGINE_MASTER}
 ${DP_ADDRESS}
 ${DP_RPC_PORT}
 ${VISIBLE_DEVICES}
@@ -356,11 +362,78 @@ server_cmd_template:
   - $SERVER_PORT
 ```
 
+## Pipeline Parallel (PP) Across Nodes
+
+A pipeline-parallel group (`pp_size > 1`) lets `pp_size` nodes form one vLLM
+engine connected via `--nnodes` / `--node-rank` / `--master-addr`. Configure it
+with three per-node fields under `config`:
+
+| Field | Description |
+|-------|-------------|
+| `pp_size` | Pipeline depth; must equal the number of nodes sharing the same `pp_group_id`. |
+| `pp_group_id` | Groups nodes into one PP engine. Nodes with the same id form one engine. Defaults to `0` (all nodes share one group). |
+| `pp_layer_partition` | Comma-separated target-layer counts per PP stage, e.g. `"41,37"`. Forwarded to the engine as `VLLM_PP_LAYER_PARTITION` via the `${PP_LAYER_PARTITION}` template variable. Leave empty to let vLLM auto-partition. |
+
+Constraints (DP=1 PP group, the currently supported topology):
+
+- Every node in a PP group must set `dp_size = 1` and `dp_size_local = 1`. The
+  PP group *is* the engine; DP across PP groups is not supported yet.
+- `routing.groups` must assign whole PP groups — a PP group cannot be split
+  across `prefiller` and `decoder`.
+- All nodes in a PP group must share the same `pp_size` and
+  `pp_layer_partition`.
+- Only the PP group master (`pp_node_rank == 0`) exposes an API server; worker
+  nodes do not serve `/health`. The framework auto-filters proxy targets and
+  health checks to engine masters only.
+
+The framework auto-resolves, per node, the PP-engine connection variables:
+
+| Variable | Value |
+|----------|-------|
+| `${PP_NODE_RANK}` | This node's rank within its PP group (0 = master). |
+| `${PP_GROUP_SIZE}` | Number of nodes in the PP group (= `pp_size`). |
+| `${PP_MASTER_ADDR}` | IP of the PP group master node (`pp_node_rank == 0`). |
+| `${PP_LAYER_PARTITION}` | The `pp_layer_partition` string (e.g. `"41,37"`), empty when unset. |
+| `${NNODES}` | Alias for `${PP_GROUP_SIZE}`; convenient for `--nnodes`. |
+| `${IS_ENGINE_MASTER}` | `"true"` on PP group master, `"false"` on workers. |
+
+Example `server_cmd_template` fragment for a PP group node:
+
+```yaml
+server_cmd_template:
+  - --tensor-parallel-size
+  - ${TP_SIZE}
+  - --pipeline-parallel-size
+  - ${PP_SIZE}
+  - --nnodes
+  - ${NNODES}
+  - --node-rank
+  - ${PP_NODE_RANK}
+  - --master-addr
+  - ${PP_MASTER_ADDR}
+  - --master-port
+  - "7600"
+  - --distributed-executor-backend
+  - mp
+```
+
+And expose the layer partition as an env var:
+
+```yaml
+envs:
+  VLLM_PP_LAYER_PARTITION: "${PP_LAYER_PARTITION}"
+```
+
+See `GLM-5.2-W8A8-A3-PP-PD.yaml` for a complete 4-node `tp16 x pp2` prefill +
+`tp16 x pp2` decode example.
+
 ## Checks Before Running
 
 - Keep `len(config) == num_nodes` and `len(templates) == num_nodes`.
 - Make sure each config index is assigned to exactly one routing group.
 - Ensure `dp_rank_start + dp_size_local <= dp_size`.
-- Ensure `dp_size_local * tp_size * cp_size * sp_size * pp_size <= npu_per_node`.
+- Ensure `dp_size_local * tp_size * cp_size * sp_size <= npu_per_node` (pp_size crosses nodes; each node runs one PP stage and uses `tp_size * cp_size * sp_size` cards).
+- For PP groups (`pp_size > 1`): `dp_size = dp_size_local = 1` on every member
+  node, and `routing.groups` must not split a PP group across roles.
 - Set `--max-model-len` large enough for benchmark input tokens plus
   `max_out_len`.
