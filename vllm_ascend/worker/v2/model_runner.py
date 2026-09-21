@@ -118,7 +118,7 @@ def _install_v41_eager_fallback() -> None:
         vllm_config = args[1] if len(args) > 1 else kwargs.get("vllm_config")
         if (
             vllm_config is not None
-            and is_deepseek_v41(vllm_config)
+            and is_deepseek_v41(vllm_config.model_config.hf_config)
             and kwargs.get("cudagraph_runtime_mode", CUDAGraphMode.NONE) == CUDAGraphMode.NONE
         ):
             kwargs["skip_compiled"] = True
