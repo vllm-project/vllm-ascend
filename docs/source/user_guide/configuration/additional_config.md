@@ -23,6 +23,7 @@ Starting from [PR #9064](https://github.com/vllm-project/vllm-ascend/pull/9064),
 | `VLLM_ASCEND_ENABLE_FUSED_MC2` | `enable_fused_mc2` | Integer (unchanged) |
 | `VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK` | `enable_transpose_kv_cache_by_block` | `"1"` → `true`, `"0"` → `false` |
 | `VLLM_ASCEND_ENABLE_FLASHCOMM1` | `enable_flashcomm1` | `"1"` → `true`, `"0"` → `false` |
+| `VLLM_ASCEND_BLOCK_TABLE_NO_COMMIT_OPTIMIZE` | `block_table_no_commit_optimize` | Environment variable not supported; use integer `0` or `1` in `--additional-config` |
 
 ## How to use
 
@@ -72,6 +73,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `weight_nz_mode`                    | int  | `1`     | Weight NZ mode. `0` disables NZ, `1` enables NZ only for quantized weights, and `2` also enables NZ for BF16/FP16 weights when supported. The legacy `VLLM_ASCEND_ENABLE_NZ` environment variable is no longer supported. |
 | `enable_fused_mc2`                  | int  | `0`     | Fused MC2 configuration. `0` disables the fused path and `1` enables it when the model and parallel configuration support it. The legacy `VLLM_ASCEND_ENABLE_FUSED_MC2` environment variable is no longer supported. |
 | `enable_transpose_kv_cache_by_block`| bool | `True`  | Whether to enable transpose KV cache by block. The legacy `VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK` environment variable is no longer supported. |
+| `block_table_no_commit_optimize`    | int  | `0`     | MRv1 only. `0` commits only changed block-table ranges; `1` restores the full-copy path for rollback or comparison. The legacy `VLLM_ASCEND_BLOCK_TABLE_NO_COMMIT_OPTIMIZE` environment variable is not supported. MRv2 already provides staged incremental block-table updates and ignores this option. This temporary MRv1 compatibility option will be removed when MRv1 is retired. |
 | `enable_dsa_cp`                     | bool | `False` | Whether to enable dsa_cp for DeepSeek V3.2, DeepSeek V4, and other models with the same architecture. This feature requires sequence parallelism to be enabled. Enabling it automatically enables FlashComm.|
 | `enable_flashcomm1`                 | bool | `False` | Whether to enable SP MoE. The legacy `VLLM_ASCEND_ENABLE_FLASHCOMM1` environment variable is kept for compatibility. See [Sequence Parallelism](../feature_guide/sequence_parallelism.md). |
 | `enable_pcp_o_proj_weight_sharding`        | bool | `False` | Whether SFA-PCP shards the O-proj weight across the PCP group at load time and switches between PCP-local and gathered weight views at runtime. This option does not affect DSA-CP, whose original policy remains fixed: prefill gathers the full O-proj weight and decode uses the local weight. This option must be set when the server starts. |

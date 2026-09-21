@@ -30,7 +30,6 @@ def _parent_init(
     self.block_sizes = block_sizes
     self.kernel_block_sizes = kernel_block_sizes
     self.num_kv_cache_groups = len(block_sizes)
-    self.max_num_reqs = max_num_reqs
     self.max_num_batched_tokens = max_num_batched_tokens
     self.device = device
     self.cp_size = cp_size
@@ -44,22 +43,13 @@ def _parent_init(
     self.slot_mappings = object()
 
 
-def _init_tables(
-    *args,
-    next_power_of_2=16,
-    block_table_no_commit_optimize=0,
-    **kwargs,
-):
+def _init_tables(*args, next_power_of_2=16, **kwargs):
     with (
         patch.object(BlockTables, "__init__", _parent_init),
         patch(
             "vllm_ascend.worker.v2.block_table.triton.next_power_of_2",
             return_value=next_power_of_2,
             create=True,
-        ),
-        patch(
-            "vllm_ascend.worker.v2.block_table.get_ascend_config",
-            return_value=SimpleNamespace(block_table_no_commit_optimize=block_table_no_commit_optimize),
         ),
     ):
         return AscendBlockTables(*args, **kwargs)
@@ -88,50 +78,6 @@ def test_init_keeps_explicit_kernel_block_sizes():
         kernel_block_sizes=[4],
     )
     assert tables.kernel_block_sizes == [4]
-
-
-def test_init_uses_dirty_writes_by_default():
-    tables = _init_tables([4], 2, 8, [4], torch.device("cpu"))
-    assert not tables._use_full_block_table_copy
-    assert tables._full_block_tables_cpu == []
-
-
-def test_additional_config_one_enables_full_copy():
-    tables = _init_tables(
-        [4],
-        2,
-        8,
-        [4],
-        torch.device("cpu"),
-        block_table_no_commit_optimize=1,
-    )
-    assert tables._use_full_block_table_copy
-    assert len(tables._full_block_tables_cpu) == 1
-
-
-def test_full_copy_path_tracks_and_commits_complete_table():
-    tables = _init_tables(
-        [4],
-        2,
-        8,
-        [4],
-        torch.device("cpu"),
-        block_table_no_commit_optimize=1,
-    )
-    tables.num_blocks = SimpleNamespace(
-        np=torch.zeros((1, 2), dtype=torch.int32).numpy(),
-        copy_to_uva=MagicMock(),
-    )
-    tables.blocks_per_kv_block = [1]
-    tables.block_tables[0].stage_write = MagicMock()
-    tables.block_tables[0].clear_staged_writes = MagicMock()
-
-    tables.append_block_ids(0, ([3, 5],), overwrite=True)
-    tables.apply_staged_writes()
-
-    assert torch.equal(tables.block_tables[0].gpu[0, :2], torch.tensor([3, 5]))
-    tables.block_tables[0].clear_staged_writes.assert_called_once_with()
-    tables.num_blocks.copy_to_uva.assert_called_once_with()
 
 
 def test_init_forwards_slot_mapping_enabled_on_newer_vllm():

@@ -499,7 +499,7 @@ class AscendConfig:
     mlapo_keep_prefill_weights: bool = False
     msmonitor_use_daemon: bool = False
     enable_transpose_kv_cache_by_block: bool = True
-    # 0 uses MRv2 staged dirty writes; 1 restores a full block-table H2D copy.
+    # MRv1 only: 0 uses dirty-range commits; 1 restores a full-table H2D copy.
     block_table_no_commit_optimize: Literal[0, 1] = 0
     weight_nz_mode: int = 1
 

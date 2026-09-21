@@ -18,11 +18,9 @@
 #
 import torch
 from vllm.triton_utils import triton
-from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.block_table import BlockTables
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ops.triton.v2.block_table.compute_slot_mappings import (
     _compute_slot_mappings_kernel,
 )
@@ -61,19 +59,6 @@ class AscendBlockTables(BlockTables):
             cp_interleave,
             slot_mapping_enabled=slot_mapping_enabled,
         )
-        self._use_full_block_table_copy = get_ascend_config().block_table_no_commit_optimize == 1
-        self._full_block_tables_cpu: list[torch.Tensor] = []
-        if self._use_full_block_table_copy:
-            pin_memory = is_pin_memory_available()
-            self._full_block_tables_cpu = [
-                torch.zeros(
-                    block_table.gpu.shape,
-                    dtype=block_table.gpu.dtype,
-                    device="cpu",
-                    pin_memory=pin_memory,
-                )
-                for block_table in self.block_tables
-            ]
         self._triton_block_size = 1024
         # kernel_block_sizes determine the number of block-table entries
         # touched by one token tile. Use the smallest kernel block size to form
@@ -93,46 +78,6 @@ class AscendBlockTables(BlockTables):
             dtype=torch.int32,
             device=self.device,
         )
-
-    def append_block_ids(
-        self,
-        req_index: int,
-        new_block_ids: tuple[list[int], ...],
-        overwrite: bool,
-    ) -> None:
-        if not self._use_full_block_table_copy:
-            super().append_block_ids(req_index, new_block_ids, overwrite)
-            return
-
-        starts = [
-            int(self.num_blocks.np[group_id, req_index]) if not overwrite else 0
-            for group_id in range(self.num_kv_cache_groups)
-        ]
-        super().append_block_ids(req_index, new_block_ids, overwrite)
-        for group_id, block_ids in enumerate(new_block_ids):
-            blocks_per_kv_block = self.blocks_per_kv_block[group_id]
-            if blocks_per_kv_block > 1:
-                block_ids = [
-                    block_id * blocks_per_kv_block + offset
-                    for block_id in block_ids
-                    for offset in range(blocks_per_kv_block)
-                ]
-            start = starts[group_id]
-            end = start + len(block_ids)
-            self._full_block_tables_cpu[group_id][req_index, start:end] = torch.as_tensor(
-                block_ids,
-                dtype=torch.int32,
-            )
-
-    def apply_staged_writes(self) -> None:
-        if not self._use_full_block_table_copy:
-            super().apply_staged_writes()
-            return
-
-        for block_table, cpu_table in zip(self.block_tables, self._full_block_tables_cpu):
-            block_table.gpu.copy_(cpu_table, non_blocking=True)
-            block_table.clear_staged_writes()
-        self.num_blocks.copy_to_uva()
 
     def compute_slot_mappings(
         self,
