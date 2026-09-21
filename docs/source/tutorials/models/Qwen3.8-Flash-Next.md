@@ -48,7 +48,7 @@ The following example uses the AArch64 image and exposes 8 devices on an Atlas 8
     Start the docker image on each node.
 
     ```bash
-    export IMAGE=quay.io/atlas-ci/vllm-atlas-temp:qwen3.8-next-a3-ubuntu-34178549844-2-arm64-temp
+    export IMAGE=quay.io/ascend/vllm-ascend:qwen3.8-next-a3
     export NAME=vllm-ascend-qwen38-flash-next
 
     docker pull "$IMAGE"
