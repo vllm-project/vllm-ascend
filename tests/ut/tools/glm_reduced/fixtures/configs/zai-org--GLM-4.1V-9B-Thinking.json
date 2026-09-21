@@ -1,0 +1,65 @@
+{
+  "architectures": [
+    "Glm4vForConditionalGeneration"
+  ],
+  "model_type": "glm4v",
+  "image_start_token_id": 151339,
+  "image_end_token_id": 151340,
+  "video_start_token_id": 151341,
+  "video_end_token_id": 151342,
+  "image_token_id": 151343,
+  "video_token_id": 151344,
+  "tie_word_embeddings": false,
+  "transformers_version": "4.57.1",
+  "text_config": {
+    "model_type": "glm4v_text",
+    "attention_bias": true,
+    "attention_dropout": 0.0,
+    "pad_token_id": 151329,
+    "eos_token_id": [
+      151329,
+      151336,
+      151338,
+      151348
+    ],
+    "hidden_act": "silu",
+    "hidden_size": 4096,
+    "initializer_range": 0.02,
+    "intermediate_size": 13696,
+    "max_position_embeddings": 65536,
+    "num_attention_heads": 32,
+    "num_hidden_layers": 40,
+    "num_key_value_heads": 2,
+    "rms_norm_eps": 1e-05,
+    "dtype": "bfloat16",
+    "use_cache": true,
+    "vocab_size": 151552,
+    "partial_rotary_factor": 0.5,
+    "rope_theta": 10000,
+    "rope_scaling": {
+      "rope_type": "default",
+      "mrope_section": [
+        8,
+        12,
+        12
+      ]
+    }
+  },
+  "vision_config": {
+    "model_type": "glm4v_vision",
+    "hidden_size": 1536,
+    "depth": 24,
+    "num_heads": 12,
+    "attention_bias": false,
+    "intermediate_size": 13696,
+    "hidden_act": "silu",
+    "hidden_dropout_prob": 0.0,
+    "initializer_range": 0.02,
+    "image_size": 336,
+    "patch_size": 14,
+    "out_hidden_size": 4096,
+    "rms_norm_eps": 1e-05,
+    "spatial_merge_size": 2,
+    "temporal_patch_size": 2
+  }
+}

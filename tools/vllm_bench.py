@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import subprocess
+import uuid
 from datetime import datetime
 
 from .aisbench import maybe_download_from_modelscope
@@ -30,7 +31,7 @@ class VllmbenchRunner:
             "bench",
             "serve",
             "--backend",
-            "openai-chat",
+            self.backend,
             "--trust-remote-code",
             "--served-model-name",
             str(self.model_name),
@@ -48,7 +49,7 @@ class VllmbenchRunner:
             "--result-filename",
             self.result_filename,
             "--endpoint",
-            "/v1/chat/completions",
+            self.endpoint,
             "--ready-check-timeout-sec",
             "0",
         ]
@@ -67,6 +68,12 @@ class VllmbenchRunner:
         threshold: float = 0.97,
         model_path: str = "",
         host_ip: str = "localhost",
+        *,
+        verify: bool = True,
+        backend: str = "openai-chat",
+        endpoint: str = "/v1/chat/completions",
+        result_dir: str | None = None,
+        timeout_seconds: float | None = None,
     ):
         self.model_name = model_name
         self.model_path = model_path
@@ -75,25 +82,32 @@ class VllmbenchRunner:
         assert self.model_path is not None, f"Failed to download model: model={self.model_path}"
         self.port = port
         self.host_ip = host_ip
+        self.backend = backend
+        self.endpoint = endpoint
+        self.timeout_seconds = timeout_seconds
         curr_time = datetime.now().strftime("%Y%m%d%H%M%S")
-        self.result_filename = f"result_vllm_bench_{curr_time}.json"
-        self.config = config
+        self.result_filename = os.path.join(
+            result_dir or os.getcwd(), f"result_vllm_bench_{curr_time}_{uuid.uuid4().hex}.json"
+        )
+        self.config = dict(config)
         self.baseline = baseline
         self.threshold = threshold
 
         self._run_vllm_bench_task()
         self._wait_for_task()
-        self._performance_verify()
+        if verify:
+            self._performance_verify()
+        else:
+            self._get_result()
 
     def _concat_config_args(self, vllm_bench_cmd):
-        if "ignore_eos" in self.config:
-            if self.config["ignore_eos"]:
-                self.config["ignore_eos"] = ""
-            else:
-                self.config.pop("ignore_eos")
         for key, value in self.config.items():
             key = "--" + key.replace("_", "-")
-            vllm_bench_cmd += [key, str(value)]
+            if isinstance(value, bool):
+                if value:
+                    vllm_bench_cmd.append(key)
+            else:
+                vllm_bench_cmd += [key, str(value)]
 
     def __enter__(self):
         return self
@@ -109,7 +123,16 @@ class VllmbenchRunner:
     def _wait_for_task(self):
         """Wait for the vllm bench command to complete and check the execution result"""
 
-        stdout, stderr = self.proc.communicate()
+        try:
+            stdout, stderr = self.proc.communicate(timeout=self.timeout_seconds)
+        except subprocess.TimeoutExpired:
+            self.proc.terminate()
+            try:
+                self.proc.communicate(timeout=8)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                self.proc.communicate()
+            raise
 
         if self.proc.returncode != 0:
             logging.error("vllm bench command failed, return code: %s", self.proc.returncode)

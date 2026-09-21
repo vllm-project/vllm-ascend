@@ -584,6 +584,11 @@ def _run_benchmarks(config: SingleNodeConfig, port: int) -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("config", configs, ids=[config.name for config in configs])
 async def test_single_node(config: SingleNodeConfig) -> None:
+    if "reduced_model_gate" in config.extra_config:
+        from tools.glm_reduced.nightly import run_nightly
+
+        run_nightly(config, RemoteOpenAIServer)
+        return
     # TODO: remove this part after the transformers version upgraded
     if config.special_dependencies:
         for k, v in config.special_dependencies.items():

@@ -1,0 +1,53 @@
+# Baselines are generated explicitly on linux-aarch64-a3-800i-8.
+# Missing calibration artifacts fail closed; they are never bootstrapped by CI.
+test_cases:
+  - name: GLM-5.2-W4A8-MTP-A3-Reduced8
+    model: Eco-Tech/GLM-5.2-w4a8
+    envs:
+      VLLM_USE_V2_MODEL_RUNNER: "0"
+      OMP_PROC_BIND: "false"
+      OMP_NUM_THREADS: "1"
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      HCCL_TRANSFER_TIMEOUT: "600"
+      HCCL_EXEC_TIMEOUT: "3600"
+      HCCL_CONNECT_TIMEOUT: "3600"
+      HCCL_BUFFSIZE: "256"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      VLLM_USE_MODELSCOPE: "true"
+      SERVER_PORT: "DEFAULT_PORT"
+    server_cmd:
+      - "--tensor-parallel-size"
+      - "8"
+      - "--data-parallel-size"
+      - "1"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--safetensors-load-strategy"
+      - "prefetch"
+      - "--seed"
+      - "1024"
+      - "--max-model-len"
+      - "16384"
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--max-num-seqs"
+      - "16"
+      - "--trust-remote-code"
+      - "--quantization"
+      - "ascend"
+      - "--enable-expert-parallel"
+      - "--no-enable-prefix-caching"
+      - "--gpu-memory-utilization"
+      - "0.92"
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--speculative-config"
+      - '{"method":"deepseek_mtp","num_speculative_tokens":3,"enforce_eager":true}'
+      - "--additional-config"
+      - '{"multistream_overlap_shared_expert":true,"enable_fused_mc2":0}'
+    reduced_model_gate:
+      profile: glm-moe-dsa
+      layers: 8
+      hardware: linux-aarch64-a3-800i-8
+      requests: tools/glm_reduced/data/glm52/requests.json
+      baseline: tools/glm_reduced/data/glm52/baseline-a3-800i-8.json
