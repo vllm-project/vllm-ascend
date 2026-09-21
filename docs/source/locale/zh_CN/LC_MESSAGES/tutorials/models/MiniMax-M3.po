@@ -795,9 +795,9 @@ msgstr ""
 " A3 1P1D，代理将请求转发到 2 个 Prefill rank 和 4 个 Decode rank。"
 
 msgid ""
-"The service is then accessible at `http://<proxy_ip>:8009`. For PD "
+"The service is then accessible at `<proxy_ip>:8009`. For PD "
 "disaggregation, use this proxy endpoint in Section 7."
-msgstr "随后可通过 `http://<proxy_ip>:8009` 访问该服务。对于 PD 分离，请在第 7 节中使用此代理端点。"
+msgstr "随后可通过 `<proxy_ip>:8009` 访问该服务。对于 PD 分离，请在第 7 节中使用此代理端点。"
 
 msgid ""
 "Prefill-Decode disaggregation can be deployed on 2 950DT products (96GB × 8)"
@@ -1223,9 +1223,9 @@ msgstr ""
 
 msgid ""
 "4. Start the Section 5.3 proxy. The service is then accessible at "
-"`http://<proxy_ip>:8009`. Use this proxy endpoint in Section 7."
+"`<proxy_ip>:8009`. Use this proxy endpoint in Section 7."
 msgstr ""
-"4. 启动第 5.3 节的代理。随后可通过 `http://<proxy_ip>:8009` 访问该服务。请在第 7 节中"
+"4. 启动第 5.3 节的代理。随后可通过 `<proxy_ip>:8009` 访问该服务。请在第 7 节中"
 "使用此代理端点。"
 
 msgid "#### 5.4.5 Verification"
