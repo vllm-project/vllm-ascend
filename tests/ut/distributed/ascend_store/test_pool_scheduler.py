@@ -1316,9 +1316,7 @@ class TestPoolLoadAdmissionLogging(unittest.TestCase):
         client, which must stay mocked."""
         config = self._make_config()
         request = self._request(request_id)
-        patcher = patch(
-            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient"
-        )
+        patcher = patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
         mock_client_cls = patcher.start()
         mock_client_cls.return_value.lookup.return_value = lookup_hit
         self.addCleanup(patcher.stop)
