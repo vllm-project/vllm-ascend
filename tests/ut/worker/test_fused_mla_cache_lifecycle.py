@@ -135,6 +135,7 @@ def test_fused_mla_cow_copies_complete_manager_block(monkeypatch):
     num_blocks = 2
     _, fused = _make_k3_fused_cache(num_blocks=num_blocks)
     payload = ((torch.arange(SLOT_LOGICAL_BYTES, dtype=torch.int64) * 31 + 17) % 251).to(torch.uint8)
+    payload = payload.view(torch.bfloat16)
     fused[3].copy_(payload.view(KERNEL_BLOCK_SIZE, NUM_KV_HEADS, FUSED_DIM))
 
     _install_cpu_h2d(monkeypatch)

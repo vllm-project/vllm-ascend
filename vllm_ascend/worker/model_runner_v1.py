@@ -5014,22 +5014,26 @@ class NPUModelRunner(GPUModelRunner):
                     current_sparse_sfa_c8 = self.use_sparse and kv_cache_spec_uses_sparse_sfa_c8(
                         current_kv_cache_spec
                     )
-                    attn_module = self.compilation_config.static_forward_context.get(layer_name)
-                    is_single_raw_mla = (
-                        isinstance(attn_module, MLAAttention)
-                        and type(current_kv_cache_spec) is AscendMLAAttentionSpec
-                        and not use_legacy_shared_by_layout
-                        and self.vllm_config.kv_transfer_config is None
-                        and not self.use_sparse
-                        and not self.sparse_kv_offload_enabled
-                        and not self.use_compress
-                        and not current_sparse_sfa_c8
-                        and get_kv_cache_compression_ratio(current_kv_cache_spec) == 1
-                        and getattr(current_kv_cache_spec, "model_version", None) is None
-                        and not self._uses_page_strided_kv_layout(current_kv_cache_spec)
-                        and getattr(attn_module, "indexer", None) is None
-                        and not getattr(attn_module.impl, "fa_quant_layer", False)
-                    )
+                    # Avoid touching ``compilation_config`` for ordinary MHA/GQA
+                    # allocations; synthetic runner tests intentionally build only
+                    # the allocator state needed for those non-MLA layouts.
+                    is_single_raw_mla = False
+                    if type(current_kv_cache_spec) is AscendMLAAttentionSpec:
+                        attn_module = self.compilation_config.static_forward_context.get(layer_name)
+                        is_single_raw_mla = (
+                            isinstance(attn_module, MLAAttention)
+                            and not use_legacy_shared_by_layout
+                            and self.vllm_config.kv_transfer_config is None
+                            and not self.use_sparse
+                            and not self.sparse_kv_offload_enabled
+                            and not self.use_compress
+                            and not current_sparse_sfa_c8
+                            and get_kv_cache_compression_ratio(current_kv_cache_spec) == 1
+                            and getattr(current_kv_cache_spec, "model_version", None) is None
+                            and not self._uses_page_strided_kv_layout(current_kv_cache_spec)
+                            and getattr(attn_module, "indexer", None) is None
+                            and not getattr(attn_module.impl, "fa_quant_layer", False)
+                        )
                     # 纯MLA在这里为当前layer分配single raw backing；hybrid MLA
                     # 使用上方standardized shared backing生成的bare raw tensor。
                     # is_single_raw_mla只基于当前layer判断，不能推广到shared_layers。

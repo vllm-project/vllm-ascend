@@ -885,7 +885,12 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner._get_layer_kv_cache_specs = lambda config: {layer_name: spec}
         runner._get_attention_kv_cache_dims = lambda layer, cache_spec: (512, 64)
         runner._kv_cache_spec_attn_group_iterator = lambda: [
-            SimpleNamespace(kv_cache_spec=spec, backend=runner.attn_backend, layer_names=[layer_name])
+            SimpleNamespace(
+                kv_cache_spec=spec,
+                backend=runner.attn_backend,
+                layer_names=[layer_name],
+                kv_cache_group_id=0,
+            )
         ]
         raw = torch.zeros(num_blocks * 488448, dtype=torch.uint8)
 

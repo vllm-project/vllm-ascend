@@ -617,11 +617,13 @@ def _uses_single_raw_mla_cache(
     if vllm_version_is("0.28.0"):
         return False
 
+    if type(kv_cache_spec) is not AscendMLAAttentionSpec:
+        return False
+
     attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase, [layer_name])
     attn_module = attn_layers.get(layer_name)
     return (
         isinstance(attn_module, MLAAttention)
-        and type(kv_cache_spec) is AscendMLAAttentionSpec
         and vllm_config.kv_transfer_config is None
         and not enable_sfa(vllm_config)
         and not bool(getattr(kv_cache_spec, "cache_sparse_sfa_c8", False))
