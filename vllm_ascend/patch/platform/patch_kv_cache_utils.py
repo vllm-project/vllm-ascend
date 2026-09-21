@@ -835,6 +835,115 @@ def _merge_qsa_composite_groups(
     return merge_owners(result, raw_names, "raw circular")
 
 
+def _merge_shattered_gdn_groups(
+    kv_cache_spec: dict[str, KVCacheSpec],
+    groups: list[KVCacheGroupSpec],
+) -> list[KVCacheGroupSpec]:
+    """Re-group identical GDN layers that upstream grouping shattered into
+    one-layer KV cache groups.
+
+    Upstream ``get_kv_cache_groups`` derives ``group_size`` from the *smallest*
+    spec bucket. Qwen3.8-Flash-Next carries a single rare PLE cache layer
+    (``ple_layer_ids: [2]``) whose ``MambaSpec`` declares a conv state only
+    (``len(shapes) == 1``) next to 36 identical GDN layers, so that minimum
+    collapses to 1 and the GDN bucket - which a hybrid without the rare type
+    (e.g. Qwen3.6-35B-A3B) groups into 3 groups of 12 - is split into 36
+    one-layer groups. Every KV cache group gets its own attention metadata
+    builder, so ``_build_attention_metadata`` rebuilds GDN metadata 36 times per
+    step instead of 3.
+
+    The fix merges the GDN singleton groups back into groups sized like the
+    dominant pattern (min size over the multi-layer buckets, same heuristic as
+    upstream), using the same strided layer assignment as upstream. Only buckets
+    whose members are *all* currently singleton groups and whose specs are
+    identical are touched, so models whose grouping is already healthy (or is
+    only partially shattered) are unaffected, and GLM5-Next / non-Mamba models
+    never reach the rewrite below.
+
+    The six-region memory planner keys physical tensors by layer *role*
+    (GDN/PLE/QSA_MAIN/QSA_RAW/QSA_COMPRESSED), not by kv_cache_group membership,
+    and ``owner_group_ids`` is only consulted to check whether QSA main and
+    compressed share a block table. Coalescing singleton groups of identical
+    specs back into balanced groups is therefore memory-safe and does not change
+    the physical layout.
+    """
+    # Buckets by spec equality, exactly like upstream does.
+    same_type_layers: dict[KVCacheSpec, list[str]] = defaultdict(list)
+    for layer_name, layer_spec in kv_cache_spec.items():
+        same_type_layers[layer_spec].append(layer_name)
+
+    def _is_gdn_singleton(group: KVCacheGroupSpec) -> bool:
+        return (
+            len(group.layer_names) == 1
+            and isinstance(group.kv_cache_spec, MambaSpec)
+            and len(group.kv_cache_spec.shapes) == 2
+        )
+
+    gdn_buckets = [
+        (spec, layers)
+        for spec, layers in same_type_layers.items()
+        if isinstance(spec, MambaSpec) and len(spec.shapes) == 2 and len(layers) > 1
+    ]
+    if not gdn_buckets:
+        return groups
+    # A rare spec type dragging the group size down is exactly what upstream
+    # computes here; recompute it over multi-layer buckets only. ``gdn_buckets``
+    # is non-empty, so this list always has at least one entry.
+    multi_sizes = [len(layers) for layers in same_type_layers.values() if len(layers) > 1]
+    group_size = min(multi_sizes)
+    max_size = max(len(layers) for layers in same_type_layers.values())
+    if max_size < group_size * 1.5:
+        group_size = max_size
+
+    regrouped: list[KVCacheGroupSpec] = []
+    consumed: set[str] = set()
+    for spec, layers in gdn_buckets:
+        member_set = set(layers)
+        singleton_groups = [g for g in groups if _is_gdn_singleton(g) and g.layer_names[0] in member_set]
+        if len(singleton_groups) != len(layers):
+            # Not shattered (already multi-layer groups) or partially grouped;
+            # leave this bucket untouched.
+            continue
+        num_groups = math.ceil(len(layers) / group_size)
+        eagle = any(g.is_eagle_group for g in singleton_groups)
+        for i in range(num_groups):
+            chunk = layers[i::num_groups]
+            regrouped.append(
+                KVCacheGroupSpec(
+                    chunk,
+                    spec.merge([kv_cache_spec[name] for name in chunk]),
+                    is_eagle_group=eagle,
+                )
+            )
+        consumed |= member_set
+    if not consumed:
+        return groups
+
+    logger.info(
+        "Ascend re-grouped %d shattered GDN layers into %d KV cache groups "
+        "(group_size=%d); GDN attention metadata will be built %d times per "
+        "step instead of %d.",
+        len(consumed),
+        len(regrouped),
+        group_size,
+        len(regrouped),
+        len(consumed),
+    )
+
+    # Replace the first shattered singleton with the regrouped blocks and drop
+    # the remaining ones, preserving the order of every other group.
+    out: list[KVCacheGroupSpec] = []
+    inserted = False
+    for group in groups:
+        if _is_gdn_singleton(group) and group.layer_names[0] in consumed:
+            if not inserted:
+                out.extend(regrouped)
+                inserted = True
+            continue
+        out.append(group)
+    return out
+
+
 def _get_ascend_kv_cache_groups(
     vllm_config: VllmConfig,
     kv_cache_spec: dict[str, KVCacheSpec],
@@ -843,6 +952,12 @@ def _get_ascend_kv_cache_groups(
         return get_glm5_next_kv_cache_groups(vllm_config, kv_cache_spec)
     qsa_owners = _prepare_qsa_composite_groups(kv_cache_spec)
     groups = _orig_get_kv_cache_groups(vllm_config, kv_cache_spec)
+    # Coalesce GDN layers that upstream shattered because a rare spec type
+    # (PLE) collapsed ``group_size`` to 1. Runs before the QSA composite merge
+    # and before the ``qsa_owners is None`` early return, so non-Qwen4Exp
+    # models benefit as well; the function is a no-op unless a bucket is fully
+    # shattered.
+    groups = _merge_shattered_gdn_groups(kv_cache_spec, groups)
     if qsa_owners is None:
         return groups
     merged = _merge_qsa_composite_groups(
