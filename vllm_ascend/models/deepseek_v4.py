@@ -24,6 +24,7 @@
 # limitations under the License.
 #
 import math
+import os
 import typing
 from collections.abc import Callable, Iterable
 from itertools import islice
@@ -986,17 +987,63 @@ class DeepseekV2DecoderLayer(nn.Module):
         residual: torch.Tensor | None,
         llama_4_scaling: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        dump_enabled = (
+            self.layer_idx == 0
+            and os.getenv("DSV4_LAYER0_DUMP_DIR")
+            and positions.numel() >= 32
+            and getattr(self, "_dsv4_dump_calls", 0) == 0
+        )
+        if dump_enabled:
+            self._dsv4_dump_calls = 1
+            dump_root = os.environ["DSV4_LAYER0_DUMP_DIR"]
+            os.makedirs(dump_root, exist_ok=True)
+            dump_prefix = os.path.join(
+                dump_root,
+                f"vllm_rank{os.getenv('RANK', '-1')}_local{os.getenv('LOCAL_RANK', '-1')}_pid{os.getpid()}",
+            )
+
+            def dump_stage(stage, value):
+                if value is None:
+                    return
+                value = value.detach()[:16]
+                torch.save(value.cpu(), f"{dump_prefix}_{stage}.pt")
+
+            dump_stage("input_ids", getattr(self, "_dsv4_dump_input_ids", None))
+            dump_stage("position_ids", positions)
+            dump_stage("layer_input", hidden_states)
+        else:
+            dump_stage = None
         residual = hidden_states.clone()
         hidden_states, post, comb = self.hc_pre(hidden_states, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base)
+        if dump_stage:
+            dump_stage("attn_post", post)
+            dump_stage("attn_comb", comb)
+            dump_stage("attn_collapsed", hidden_states)
         hidden_states = self.input_layernorm(hidden_states)
+        if dump_stage:
+            dump_stage("attn_norm", hidden_states)
         attn_kwargs = {"positions": positions, "hidden_states": hidden_states, "llama_4_scaling": llama_4_scaling}
         hidden_states = self.self_attn(**attn_kwargs)
+        if dump_stage:
+            dump_stage("attn_output", hidden_states)
         hidden_states = self.hc_post(hidden_states, residual, post, comb)
+        if dump_stage:
+            dump_stage("post_attention", hidden_states)
         residual = hidden_states.clone()
         hidden_states, post, comb = self.hc_pre(hidden_states, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base)
+        if dump_stage:
+            dump_stage("ffn_post", post)
+            dump_stage("ffn_comb", comb)
+            dump_stage("ffn_collapsed", hidden_states)
         hidden_states = self.post_attention_layernorm(hidden_states)
+        if dump_stage:
+            dump_stage("ffn_norm", hidden_states)
         hidden_states = self.mlp(hidden_states)
+        if dump_stage:
+            dump_stage("mlp_output", hidden_states)
         hidden_states = self.hc_post(hidden_states, residual, post, comb)
+        if dump_stage:
+            dump_stage("layer_output", hidden_states)
 
         return hidden_states, residual
 
@@ -1131,6 +1178,8 @@ class DeepseekV4Model(nn.Module):
         if get_pp_group().is_first_rank:
             hidden_states = hidden_states.unsqueeze(1).repeat(1, self.hc_mult, 1)  # (b, s, h) -> (b, s, c, h)
         for layer in islice(self.layers, self.start_layer, self.end_layer):
+            if layer.layer_idx == 0 and os.getenv("DSV4_LAYER0_DUMP_DIR"):
+                layer._dsv4_dump_input_ids = input_ids
             hidden_states, residual = layer(positions, hidden_states, residual, llama_4_scaling)
 
         # Stash pre-hc_head residual for the MTP draft (captured copy_).
@@ -1357,6 +1406,65 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
             if not name.startswith("model"):
                 name = f"model.{name}"
 
+            # Reduced-layer checkpoints retain tensor entries for the full
+            # source model. Ignore layers absent from the runtime override
+            # before any name remapping or parameter lookup.
+            if name.startswith("model.layers."):
+                layer_field = name[len("model.layers.") :].split(".", 1)[0]
+                if layer_field.isdigit() and int(layer_field) >= len(self.model.layers):
+                    continue
+
+            # FSDP/Transformers and vLLM use different names for the
+            # native DeepSeek V4 MLA/DSA parameters. Weight synchronization
+            # sends the former names, so normalize them before params_dict
+            # lookup.
+            name = name.replace(".self_attn.q_a_proj.", ".self_attn.wq_a.")
+            name = name.replace(".self_attn.kv_proj.", ".self_attn.wkv.")
+            name = name.replace(".self_attn.kv_a_proj_with_mqa.", ".self_attn.wkv.")
+            name = name.replace(".self_attn.q_b_proj.", ".self_attn.wq_b.")
+            name = name.replace(".self_attn.o_a_proj.", ".self_attn.wo_a.")
+            name = name.replace(".self_attn.o_b_proj.", ".self_attn.wo_b.")
+            name = name.replace(".self_attn.q_a_norm.", ".self_attn.q_norm.")
+            name = name.replace(".self_attn.sinks", ".self_attn.attn_sink")
+            name = name.replace(".self_attn.compressor.kv_proj.", ".self_attn.compressor.wkv.")
+            name = name.replace(".self_attn.compressor.gate_proj.", ".self_attn.compressor.wgate.")
+            name = name.replace(".self_attn.compressor.kv_norm.", ".self_attn.compressor.norm.")
+            name = name.replace(".self_attn.compressor.position_bias", ".self_attn.compressor.ape")
+            name = name.replace(
+                ".self_attn.compressor.indexer.position_bias",
+                ".self_attn.indexer.compressor.ape",
+            )
+            name = name.replace(
+                ".self_attn.compressor.indexer.kv_proj.",
+                ".self_attn.indexer.compressor.wkv.",
+            )
+            name = name.replace(
+                ".self_attn.compressor.indexer.gate_proj.",
+                ".self_attn.indexer.compressor.wgate.",
+            )
+            name = name.replace(
+                ".self_attn.compressor.indexer.q_b_proj.",
+                ".self_attn.indexer.wq_b.",
+            )
+            name = name.replace(
+                ".self_attn.compressor.indexer.kv_norm.",
+                ".self_attn.indexer.compressor.norm.",
+            )
+            name = name.replace(".self_attn.compressor.indexer.", ".self_attn.indexer.")
+            name = name.replace(
+                ".self_attn.indexer.scorer.weights_proj.",
+                ".self_attn.indexer.weights_proj.",
+            )
+            name = name.replace("model.hc_head.hc_fn", "model.hc_head_fn")
+            name = name.replace("model.hc_head.hc_base", "model.hc_head_base")
+            name = name.replace("model.hc_head.hc_scale", "model.hc_head_scale")
+            name = name.replace(".attn_hc.fn", ".hc_attn_fn")
+            name = name.replace(".attn_hc.base", ".hc_attn_base")
+            name = name.replace(".attn_hc.scale", ".hc_attn_scale")
+            name = name.replace(".ffn_hc.fn", ".hc_ffn_fn")
+            name = name.replace(".ffn_hc.base", ".hc_ffn_base")
+            name = name.replace(".ffn_hc.scale", ".hc_ffn_scale")
+
             if ".w1." in name:
                 name = name.replace(".w1.", ".gate_proj.")
             if ".w2." in name:
@@ -1495,10 +1603,29 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
                             continue
 
                         param = params_dict[name_mapped]
+                        # FusedMoE's unquantized parameters in vLLM 0.23.0
+                        # are plain torch.nn.Parameter objects. The loader is
+                        # passed as an attribute during normal construction,
+                        # but some DeepSeek V4/Ascend construction paths do
+                        # not preserve that attribute. The authoritative
+                        # loader is always the owning FusedMoE module, so use
+                        # it as a fallback instead of dereferencing a missing
+                        # parameter attribute.
+                        weight_loader = getattr(param, "weight_loader", None)
+                        if weight_loader is None:
+                            owner_name = name_mapped.rsplit(".", 1)[0]
+                            owner = self.get_submodule(owner_name)
+                            weight_loader = getattr(owner, "weight_loader", None)
+                        if weight_loader is None:
+                            raise AttributeError(
+                                "DeepSeek V4 expert parameter has no weight loader: "
+                                f"source={chunk_name}, target={name_mapped}, "
+                                f"shape={tuple(param.shape)}, type={type(param).__name__}"
+                            )
+                        weight_loader = typing.cast(Callable[..., bool], weight_loader)
                         # We should ask the weight loader to return success or
                         # not here since otherwise we may skip experts with
                         # other available replicas.
-                        weight_loader = typing.cast(Callable[..., bool], param.weight_loader)
                         success = weight_loader(
                             param,
                             weight_to_load,
