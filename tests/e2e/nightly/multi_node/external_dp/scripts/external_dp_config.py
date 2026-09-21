@@ -407,7 +407,7 @@ class ExternalDPConfigLoader:
                 raise ValueError(
                     f"node {node_index} uses {node.devices_per_node} NPUs, but npu_per_node is {config.npu_per_node}"
                 )
-            if node.dp_rank_start + node.dp_size_local > node.dp_size:
+            if node.dp_rank_start + node.dp_size_local > node.dp_size * node.pp_size:
                 raise ValueError(f"node {node_index} dp rank range exceeds dp_size")
             if node.pp_size_local <1 or node.pp_size_local > node.pp_size:
                 raise ValueError(f"node {node_index} pp size exceeds pp_size")
