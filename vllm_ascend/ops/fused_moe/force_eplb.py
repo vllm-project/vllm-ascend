@@ -91,9 +91,12 @@ def get_force_eplb_topk(
     num_logical_experts: int,
 ) -> torch.Tensor | None:
     """Return deterministic round-robin ids when the policy is enabled."""
-    moe_comm_method = get_forward_context().moe_comm_method
+    # MRV2 builds the upstream ForwardContext, which carries no
+    # moe_comm_method; force EPLB stays an MRV1-only feature there and
+    # the original topk_ids flow through unchanged.
+    moe_comm_method = getattr(get_forward_context(), "moe_comm_method", None)
     if moe_comm_method is None:
-        return None
+        return topk_ids
     top_k = int(topk_ids.shape[1])
     return _build_or_get_topk(
         moe_comm_method,
