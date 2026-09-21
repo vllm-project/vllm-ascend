@@ -36,10 +36,12 @@ if [ -n "${PIP_INDEX_URL:-}" ] && [ "${PIP_INDEX_URL}" != "${PUBLIC_PIP_INDEX_UR
     pip config unset global.trusted-host 2>/dev/null || true
 fi
 
-# cargo/git: remove the cargo config and git insteadOf rewrites that internal
+# cargo/git: remove the cargo config, the build-time registry cache (which may
+# embed the internal mirror URL), and the git insteadOf rewrites that internal
 # builds configured.
 if [ -n "${GIT_PROXY:-}" ] || [ -n "${CRATES_IO_INDEX:-}" ]; then
     rm -f "${HOME}/.cargo/config.toml"
+    rm -rf "${HOME}/.cargo/registry" "${HOME}/.cargo/.global-cache"
     for key in $(git config --global --name-only --get-regexp '^url\..*\.insteadof$' 2>/dev/null || true); do
         git config --global --unset-all "$key"
     done
