@@ -74,11 +74,3 @@ vllm serve <model-path> \
 ```
 
 `enable_kvpp` defaults to `false`. With PP enabled, each stage assigns owners and broadcasts within its own TP group.
-
-## P-side layerwise integration
-
-KVPP uses the existing layerwise buffer layout and owner-filtered pool registration. Layerwise object offsets and transfer completion refer to the registered owner shard; no separate owner map or lease-release path is introduced.
-
-The KVPP prefetch executor waits for layer readiness before broadcasting. With prefetch depth N >= 3, startup submits N-1 layers and each attention hook submits one more. At depth 3, computation uses L, broadcast uses L+1, and H2D loads L+2. Existing reuse fences also run for empty non-owner tasks.
-
-For this combination, the V1 runner starts layerwise loading before KVPP begins broadcasting. The readiness callback only waits; it does not advance attention or prefetch state. The current implementation is pending validation.
