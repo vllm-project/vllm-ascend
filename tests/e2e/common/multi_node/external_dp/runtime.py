@@ -374,6 +374,12 @@ class ServerCommandBuilder:
             "VISIBLE_DEVICES": rank.visible_devices,
             "NODE_INDEX": str(rank.node_index),
             "CONFIG_INDEX": str(rank.node_index),
+            "PP_NODE_RANK": str(rank.pp_node_rank),
+            "PP_GROUP_SIZE": str(rank.pp_nnodes),
+            "PP_MASTER_ADDR": rank.pp_master_addr,
+            "PP_LAYER_PARTITION": rank.pp_layer_partition,
+            "NNODES": str(rank.pp_nnodes),
+            "IS_ENGINE_MASTER": str(rank.is_engine_master).lower(),
         }
 
     def _render_envs(
@@ -581,8 +587,10 @@ def build_proxy_server_cmd(config: ExternalDPConfig, ranks: list[RankInfo]) -> l
     cmd = [sys.executable, routing.proxy_script, "--host", routing.proxy_host, "--port", str(routing.proxy_port)]
 
     if routing.type == ROUTING_DISAGGREGATED_PREFILL:
-        prefiller_ranks = [rank for rank in ranks if rank.role == "prefiller"]
-        decoder_ranks = [rank for rank in ranks if rank.role == "decoder"]
+        # Only engine master ranks expose an API server; PP group worker nodes
+        # do not serve /health and must be excluded from the proxy target list.
+        prefiller_ranks = [rank for rank in ranks if rank.role == "prefiller" and rank.is_engine_master]
+        decoder_ranks = [rank for rank in ranks if rank.role == "decoder" and rank.is_engine_master]
         if not prefiller_ranks or not decoder_ranks:
             raise ValueError("disaggregated_prefill proxy requires prefiller and decoder ranks")
         cmd.extend(["--prefiller-hosts", *[rank.host for rank in prefiller_ranks]])
@@ -604,7 +612,7 @@ def rank_health_url(rank: RankInfo) -> str:
 
 def master_rank_health_url(ranks: list[RankInfo]) -> str:
     for rank in ranks:
-        if rank.node_index == 0 and rank.local_rank == 0:
+        if rank.is_engine_master and rank.node_index == 0 and rank.local_rank == 0:
             return rank_health_url(rank)
     raise RuntimeError("External DP master rank was not found")
 
