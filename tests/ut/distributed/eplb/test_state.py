@@ -414,7 +414,7 @@ def test_from_mapping_requires_release_valid_expert_count(monkeypatch):
 def test_init_sets_cuda_device_index_for_npu(monkeypatch):
     parallel_config = MagicMock()
     monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 5)
-    monkeypatch.setattr(torch, "Event", torch.npu.Event)
+    monkeypatch.setattr(torch.cuda, "Event", torch.npu.Event)
 
     state = AscendEplbState(parallel_config, torch.device("cpu"))
 
