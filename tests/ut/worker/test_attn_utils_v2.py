@@ -418,7 +418,6 @@ def test_v2_zeroer_covers_each_mla_component_view():
     vllm_version_is("0.28.0"),
     reason="vLLM #51718 only changed the main planner",
 )
-
 def test_main_dsv4_materializes_real_planner_geometry_once(monkeypatch):
     small_name = "model.layers.0.self_attn.attn"
     large_name = "model.layers.1.self_attn.attn"
