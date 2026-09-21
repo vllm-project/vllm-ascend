@@ -1829,8 +1829,8 @@ def test_dsa_backend_selects_pcp_and_rejects_legacy_cp():
                 get_backend_cls()
 
 
-def test_pcp_metadata_builds_from_manager_global_view():
-    """Build rank-local metadata from the manager's scheduler-global view."""
+def test_pcp_metadata_builds_global_view_when_batch_has_prefill():
+    """Keep the PCP global path for mixed prefill/decode batches."""
     builder = AscendDSAPCPMetadataBuilder.__new__(AscendDSAPCPMetadataBuilder)
     builder._pcp_world_size = 2
     builder._pcp_rank = 1
@@ -1854,7 +1854,7 @@ def test_pcp_metadata_builds_from_manager_global_view():
         positions=torch.arange(5, dtype=torch.int64),
         attn_state=object(),
         is_dummy=False,
-        is_prefilling_np=np.array([True, True]),
+        is_prefilling_np=np.array([True, False]),
         idx_mapping=torch.tensor([0, 1], dtype=torch.int32),
         num_reqs_after_padding=2,
     )
@@ -1946,8 +1946,8 @@ def test_pcp_metadata_builds_from_manager_global_view():
 
 
 @pytest.mark.parametrize("is_dummy", [True, False], ids=["capture", "replay"])
-def test_pcp_graph_metadata_builds_fixed_decode_shape(is_dummy: bool):
-    """Cover the fixed graph metadata contract during capture and replay."""
+def test_pcp_graph_decode_builds_only_local_metadata(is_dummy: bool):
+    """Keep fixed graph shapes without building PCP-global decode metadata."""
     graph_size = 4
     num_actual_reqs = graph_size if is_dummy else 2
     num_actual_tokens = num_actual_reqs
@@ -2020,12 +2020,6 @@ def test_pcp_graph_metadata_builds_fixed_decode_shape(is_dummy: bool):
         num_input_tokens=graph_size,
         is_prefilling=torch.zeros(graph_size, dtype=torch.bool),
     )
-    global_metadata = AscendDSAMetadata(
-        num_actual_tokens=num_actual_tokens,
-        num_decodes=graph_size,
-        num_decode_tokens=num_actual_tokens,
-        num_prefills=0,
-    )
     local_metadata = AscendDSAMetadata(
         num_actual_tokens=num_actual_tokens,
         num_decodes=graph_size,
@@ -2033,16 +2027,23 @@ def test_pcp_graph_metadata_builds_fixed_decode_shape(is_dummy: bool):
         num_prefills=0,
     )
     builder._global_metadata_builder = SimpleNamespace(
-        build=MagicMock(return_value=global_metadata),
+        build=MagicMock(),
     )
     shared_local_metadata = {"local": True}
 
-    with patch.object(
-        AscendDSAMetadataBuilder,
-        "build",
-        autospec=True,
-        return_value=local_metadata,
-    ) as build_local:
+    with (
+        patch.object(
+            builder,
+            "_prepare_graph_pcp_context",
+            wraps=builder._prepare_graph_pcp_context,
+        ) as prepare_pcp_context,
+        patch.object(
+            AscendDSAMetadataBuilder,
+            "build",
+            autospec=True,
+            return_value=local_metadata,
+        ) as build_local,
+    ):
         actual = builder.build(
             0,
             local_common,
@@ -2052,34 +2053,15 @@ def test_pcp_graph_metadata_builds_fixed_decode_shape(is_dummy: bool):
             common_ratio_to_sas_metadata=shared_local_metadata,
         )
 
-    expected_global_slots = (
-        torch.full((1, graph_size), -1, dtype=torch.int64)
-        if is_dummy
-        else torch.tensor([[10, 11, -1, -1]], dtype=torch.int64)
-    )
     expected_local_slots = (
         torch.full((graph_size,), -1, dtype=torch.int64)
         if is_dummy
         else torch.tensor([30, 31, -1, -1], dtype=torch.int64)
     )
-    expected_restore_idx = original_hidden_restore_idx if is_dummy else torch.tensor([1, 0, 0, 0], dtype=torch.int64)
 
-    assert actual.global_dsa_metadata is global_metadata
-    assert actual.local_num_tokens_after_padding == graph_size
-    assert torch.equal(actual.hidden_restore_idx, expected_restore_idx)
-    assert actual.hidden_restore_idx.data_ptr() == builder._hidden_restore_idx_buffer.data_ptr()
-
-    global_call = builder._global_metadata_builder.build.call_args
-    global_common = global_call.args[1]
-    assert global_common.num_reqs == graph_size
-    assert global_common.num_actual_tokens == num_actual_tokens
-    assert global_common.num_input_tokens == graph_size
-    assert torch.equal(global_common.query_start_loc, expected_query_start_loc)
-    assert torch.equal(global_common.query_start_loc_cpu, expected_query_start_loc)
-    assert torch.equal(global_common.seq_lens, seq_lens)
-    assert torch.equal(global_common.slot_mapping, expected_global_slots[0])
-    assert global_call.kwargs["num_actual_reqs"] == num_actual_reqs
-    assert global_call.kwargs["common_ratio_to_sas_metadata"] == {}
+    assert actual is local_metadata
+    prepare_pcp_context.assert_not_called()
+    builder._global_metadata_builder.build.assert_not_called()
 
     local_call = build_local.call_args
     built_local_common = local_call.args[2]
@@ -2282,3 +2264,29 @@ def test_pcp_forward_updates_global_caches_before_local_attention(
             output[:local_num_actual_tokens],
             attention_output.view(local_num_actual_tokens, 2),
         )
+
+
+def test_pcp_decode_delegates_to_standard_cache_preparation():
+    impl = _make_impl(AscendDSAPCPImpl)
+    metadata = AscendDSAMetadata(
+        num_actual_tokens=4,
+        num_decodes=4,
+        num_decode_tokens=4,
+        num_prefills=0,
+    )
+    attn_metadata = {"swa_cache": metadata}
+
+    with patch.object(
+        AscendDSAImpl,
+        "_prepare_caches_before_attention",
+        autospec=True,
+        return_value=False,
+    ) as prepare_standard_caches:
+        assert not impl._prepare_caches_before_attention(
+            "layer",
+            torch.empty((4, 4)),
+            (torch.empty(0),),
+            attn_metadata,
+        )
+
+    prepare_standard_caches.assert_called_once()

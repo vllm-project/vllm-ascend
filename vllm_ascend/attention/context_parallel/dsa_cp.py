@@ -2214,7 +2214,7 @@ class AscendDSAPCPMetadata(dsa_v1.AscendDSAMetadata):
 
 
 class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
-    """Build rank-local attention and canonical global cache metadata."""
+    """Build ordinary decode metadata or PCP prefill cache metadata."""
 
     # DualChunkSwap expands each prefill into at most two local rows.
     _request_capacity_factor: ClassVar[int] = 2
@@ -2428,7 +2428,7 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
             num_prefills=0,
             attn_state=local_common_attn_metadata.attn_state,
             req_metadata=None,
-            hadamard=dsa_v1.AscendDSAMetadataBuilder.hadamard,
+            hadamard=self._global_metadata_builder.hadamard,
         )
 
     def build(
@@ -2441,27 +2441,30 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         num_actual_reqs: int | None = None,
         common_ratio_to_sas_metadata: dict[Any, Any] | None = None,
         **kwargs: Any,
-    ) -> AscendDSAPCPMetadata:
+    ) -> dsa_v1.AscendDSAMetadata:
         assert pcp_context is not None
         assert pcp_cache_group_idx is not None
         assert common_ratio_to_sas_metadata is not None
-        pcp_context = self._prepare_graph_pcp_context(pcp_context)
-        global_common_attn_metadata = self._build_global_common_attn_metadata(
-            pcp_context,
-            pcp_cache_group_idx,
-            common_attn_metadata,
-        )
-        global_common_attn_metadata = self._build_graph_common_attn_metadata(
-            global_common_attn_metadata,
-            pcp_context.global_batch.num_reqs,
-        )
-        global_dsa_metadata = self._global_metadata_builder.build(
-            common_prefix_len,
-            global_common_attn_metadata,
-            fast_build,
-            num_actual_reqs=pcp_context.global_batch.num_reqs,
-            common_ratio_to_sas_metadata={},
-        )
+
+        has_prefill = bool(pcp_context.global_batch.is_prefilling_np.any())
+        if has_prefill:
+            pcp_context = self._prepare_graph_pcp_context(pcp_context)
+            global_common_attn_metadata = self._build_global_common_attn_metadata(
+                pcp_context,
+                pcp_cache_group_idx,
+                common_attn_metadata,
+            )
+            global_common_attn_metadata = self._build_graph_common_attn_metadata(
+                global_common_attn_metadata,
+                pcp_context.global_batch.num_reqs,
+            )
+            global_dsa_metadata = self._global_metadata_builder.build(
+                common_prefix_len,
+                global_common_attn_metadata,
+                fast_build,
+                num_actual_reqs=pcp_context.global_batch.num_reqs,
+                common_ratio_to_sas_metadata={},
+            )
         local_common_attn_metadata = self._build_local_common_attn_metadata(
             pcp_context,
             common_attn_metadata,
@@ -2477,6 +2480,12 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
             num_actual_reqs=num_actual_reqs,
             common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
         )
+        # Decode tokens are replicated in scheduler order on every PCP rank.
+        # The local metadata therefore describes the canonical cache update
+        # directly and can use the ordinary non-PCP DSA execution path.
+        if not has_prefill:
+            return local_dsa_metadata
+
         return AscendDSAPCPMetadata.from_local_metadata(
             local_dsa_metadata,
             local_common_attn_metadata.num_input_tokens,
@@ -2497,7 +2506,7 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
 
 
 class AscendDSAPCPImpl(dsa_v1.AscendDSAImpl):
-    """Run batched global DSA cache updates before rank-local PCP attention."""
+    """Use ordinary decode updates or global PCP prefill cache updates."""
 
     supports_pcp: ClassVar[bool] = True
 
@@ -2599,9 +2608,15 @@ class AscendDSAPCPImpl(dsa_v1.AscendDSAImpl):
         kv_cache: tuple[torch.Tensor, ...],
         attn_metadata: dsa_v1.DSAMetadataDict,
     ) -> bool:
-        """Restore one global batch and update each replicated cache once."""
+        """Use ordinary decode updates or restore the global prefill batch."""
         pcp_metadata = next(iter(attn_metadata.values()))
-        assert isinstance(pcp_metadata, AscendDSAPCPMetadata)
+        if not isinstance(pcp_metadata, AscendDSAPCPMetadata):
+            return super()._prepare_caches_before_attention(
+                layer_name,
+                hidden_states,
+                kv_cache,
+                attn_metadata,
+            )
         global_hidden_states = self._gather_and_restore_hidden_states(
             hidden_states,
             pcp_metadata,
@@ -2653,7 +2668,8 @@ class AscendDSAPCPImpl(dsa_v1.AscendDSAImpl):
         if attn_metadata is None:
             return super()._get_o_proj_input_shape(attn_metadata)
         pcp_metadata = next(iter(attn_metadata.values()))
-        assert isinstance(pcp_metadata, AscendDSAPCPMetadata)
+        if not isinstance(pcp_metadata, AscendDSAPCPMetadata):
+            return super()._get_o_proj_input_shape(attn_metadata)
         return (
             pcp_metadata.local_num_tokens_after_padding,
             self.n_local_heads,
