@@ -24,7 +24,6 @@ import torch
 
 from vllm_ascend.ops.fused_moe.routed_experts import zero_experts_compute
 
-
 # ---------------------------------------------------------------------------
 # zero_experts_compute — "zero" type
 # ---------------------------------------------------------------------------

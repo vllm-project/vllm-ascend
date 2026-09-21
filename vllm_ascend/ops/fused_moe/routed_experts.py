@@ -725,9 +725,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             self.ascend_mc2_mask = None
 
         if zero_expert_result is not None:
-            fused_experts_results.routed_out = (
-                fused_experts_results.routed_out + zero_expert_result
-            )
+            fused_experts_results.routed_out = fused_experts_results.routed_out + zero_expert_result
 
         if self.dynamic_eplb and _EXTRA_CTX.eplb_heat_collection_status:
             expert_tokens = fused_experts_results.expert_tokens

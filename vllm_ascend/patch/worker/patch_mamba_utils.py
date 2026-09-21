@@ -15,6 +15,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.gpu_input_batch import CachedRequestState
+
 try:
     from vllm.v1.worker.gpu_input_batch import InputBatch as GPUInputBatch
 except ImportError:
