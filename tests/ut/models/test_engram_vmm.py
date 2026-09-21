@@ -42,7 +42,7 @@ def implementation(monkeypatch):
         def close(self):
             self.closed = True
 
-    mapping.VmmMapping = Mapping
+    monkeypatch.setattr(mapping, "VmmMapping", Mapping, raising=False)
     monkeypatch.setitem(sys.modules, mapping.__name__, mapping)
     monkeypatch.setattr(torch, "npu", SimpleNamespace(synchronize=lambda: None), raising=False)
     module = importlib.import_module(child.__name__ + ".table")
@@ -90,10 +90,9 @@ def test_parameter_failure_transfers_both_failed_rollbacks(implementation, monke
     attempts = []
     mapping_type = implementation.VmmMapping
 
-    class FailingRelease(mapping_type):
-        def _rollback(self, original):
-            attempts.append(self.tensor.dtype)
-            raise RuntimeError("deferred release")
+    def failed_release(self, original):
+        attempts.append(self.tensor.dtype)
+        raise RuntimeError("deferred release")
 
     setattr_original = implementation.VmmEngram.__setattr__
 
@@ -102,7 +101,7 @@ def test_parameter_failure_transfers_both_failed_rollbacks(implementation, monke
             raise RuntimeError("parameter attachment failed")
         setattr_original(self, name, value)
 
-    monkeypatch.setattr(implementation, "VmmMapping", FailingRelease)
+    monkeypatch.setattr(mapping_type, "_rollback", failed_release, raising=False)
     monkeypatch.setattr(implementation.VmmEngram, "__setattr__", attach)
     with pytest.raises(RuntimeError, match="construction rollback"):
         implementation.VmmEngram(11, 256, SimpleNamespace(rank=0, size=1), run_id="unit", layer_id=1)
