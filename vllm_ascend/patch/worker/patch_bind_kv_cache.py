@@ -6,6 +6,8 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 from vllm.v1.worker.utils import defaultdict, extract_layer_index
 
+from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheLayer
+
 
 # Without this patch, it will raise an exception when initialize kv_cache.
 # TODO To remove the patch, we need check why the original bind_kv_cache raises an NotImplementedError.
@@ -34,6 +36,15 @@ def bind_kv_cache(
     """
     # Bind kv_caches to ModelRunner
     assert len(runner_kv_caches) == 0
+
+    # V4.1 cache resources are nn.Modules that index their storage as
+    # ``kv_cache[0]``, so the value must be wrapped in a list. Sorted names
+    # give a deterministic binding order across the shared slots.
+    if any(isinstance(forward_context.get(name), DeepseekV41CacheLayer) for name in kv_caches):
+        for layer_name in sorted(kv_caches):
+            forward_context[layer_name].kv_cache = [kv_caches[layer_name]]
+            runner_kv_caches.append(kv_caches[layer_name])
+        return
 
     # Convert kv_caches dict to a list of tensors in the order of layer_index.
     index2name = defaultdict(list)
