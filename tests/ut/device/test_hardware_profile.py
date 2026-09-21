@@ -90,7 +90,6 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
             HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS,
             HardwareCapability.NPUGRAPH_EX,
-            HardwareCapability.REDUCED_CUDAGRAPH_CAPTURE_SIZES,
             HardwareCapability.STANDARD_MAMBA_PATCH,
             HardwareCapability.STANDARD_WORKER_PATCHES,
             HardwareCapability.SWIGLU_OAI_MX_QUANT,

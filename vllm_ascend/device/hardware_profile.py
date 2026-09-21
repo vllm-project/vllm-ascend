@@ -122,8 +122,6 @@ class HardwareCapability(Enum):
     PAGED_ATTENTION = auto()
     # Inspect PCIe topology to distinguish 310P Root-Complex and endpoint deployments.
     RC_DEVICE_DISCOVERY = auto()
-    # Apply the temporary reduced ACL-graph capture-size set required by affected drivers.
-    REDUCED_CUDAGRAPH_CAPTURE_SIZES = auto()
     # Import and register the compiled vLLM-Ascend custom-op library at runtime.
     # This is independent of whether custom ops are enabled by default.
     RUNTIME_CUSTOM_OPS = auto()
@@ -336,7 +334,6 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
                     HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS,
                     HardwareCapability.NPUGRAPH_EX,
-                    HardwareCapability.REDUCED_CUDAGRAPH_CAPTURE_SIZES,
                     HardwareCapability.STANDARD_MAMBA_PATCH,
                     HardwareCapability.STANDARD_WORKER_PATCHES,
                     HardwareCapability.SWIGLU_OAI_MX_QUANT,
