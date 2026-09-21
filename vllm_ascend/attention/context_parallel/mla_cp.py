@@ -123,7 +123,9 @@ class AscendMlaDCPMetadataBuilder(
             context_lens[self.num_decodes :] -= self.query_lens[self.num_decodes :]
             common_attn_metadata.context_parallel_metadata = AscendDCPMetadata(
                 num_computed_tokens_of_dcp=get_dcp_local_seq_lens(
-                    context_lens, self.dcp_size, self.cp_local_block_size
+                    context_lens,
+                    dcp_size=self.dcp_size,
+                    cp_kv_cache_interleave_size=self.cp_local_block_size,
                 ),
                 query_lens_cpu=self.query_lens,
                 max_query_len=common_attn_metadata.max_query_len,
