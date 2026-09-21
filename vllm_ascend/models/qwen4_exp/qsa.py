@@ -30,24 +30,24 @@ from vllm.utils.torch_utils import canonicalize_singleton_dim_strides
 
 from vllm_ascend import envs
 from vllm_ascend.ops.triton.qwen4_exp.qsa import (
-    qsa_select_paged_tokens as qsa_select_paged_tokens_triton,
-)
-from vllm_ascend.ops.triton.qwen4_exp.qsa import (
+    qsa_fused_update_compressed_cache,
     qsa_sparse_paged_attention,
     qsa_store_cache_rows,
+)
+from vllm_ascend.ops.triton.qwen4_exp.qsa import (
+    qsa_select_paged_tokens as qsa_select_paged_tokens_triton,
 )
 from vllm_ascend.utils import is_950
 
 from .lightning_indexer import qsa_select_paged_tokens_lightning
 from .ops import (
-    qsa_compress_groups_with_ratio,
-    reshape_and_cache_qsa,
-)
-from .ops import (
     qsa_select_paged_tokens as qsa_select_paged_tokens_reference,
 )
 from .ops import (
     qsa_sparse_paged_attention as qsa_sparse_paged_attention_reference,
+)
+from .ops import (
+    reshape_and_cache_qsa,
 )
 
 QSAKVCache: TypeAlias = torch.Tensor | tuple[torch.Tensor, torch.Tensor]
@@ -252,34 +252,44 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         compressed_metadata: QSAForwardMetadata,
     ) -> None:
         num_tokens = raw_metadata.num_actual_tokens
-        raw_key_cache = self.raw_key_cache.key_cache
-        rope_position_cache = self.raw_key_cache.rope_position_cache
+        raw_state_cache = self.raw_key_cache
+        raw_key_cache = raw_state_cache.key_cache
+        rope_position_cache = raw_state_cache.rope_position_cache
+
+        token_k = token_k[:num_tokens]
         if rope_position_cache is None:
-            position_rows = raw_metadata.logical_positions.view(-1, 1, 1).expand(-1, 1, 3)
+            position_rows = None
+            fused_positions = raw_metadata.logical_positions[:num_tokens]
         else:
-            position_rows = qsa_cache.canonical_qsa_rope_positions(positions)[:num_tokens].to(
-                device=raw_key_cache.device
-            )
-        pooled, first_positions = qsa_compress_groups_with_ratio(
-            token_k[:num_tokens],
-            position_rows,
-            raw_key_cache,
+            position_rows = qsa_cache.canonical_qsa_rope_positions(positions)[:num_tokens].to(device=token_k.device)
+            # The fused kernel addresses positions as [3, tokens]; (T, 1, 3)
+            # has a different trailing-token stride, so fold the axis away.
+            fused_positions = position_rows.reshape(-1, 3).transpose(0, 1).contiguous()
+
+        section = getattr(self.rotary_emb, "mrope_section", None)
+        qsa_fused_update_compressed_cache(
+            token_k,
+            fused_positions,
+            self.rotary_emb._match_cos_sin_cache_dtype(token_k),  # noqa: SLF001
+            self.k_layernorm.weight,
+            self.k_layernorm.variance_epsilon,
+            raw_state_cache.kv_cache,
+            rope_position_cache,
             raw_metadata.block_table,
-            raw_metadata.token_to_req,
             raw_metadata.query_start_loc,
             raw_metadata.logical_positions,
-            compressed_metadata.slot_mapping,
-            self.compress_ratio,
-            rope_position_cache,
-        )
-        normalized = self.normalize_compressed_keys(pooled, first_positions)
-        qsa_store_cache_rows(
             self.compressed_key_cache.kv_cache,
             compressed_metadata.slot_mapping,
-            normalized,
+            compressed_metadata.k_work_metadata,
+            compress_ratio=self.compress_ratio,
+            mrope_section=tuple(int(value) for value in section) if section else None,
         )
-        qsa_store_cache_rows(raw_key_cache, raw_metadata.slot_mapping, token_k[:num_tokens])
+        # The fused kernel reads completed groups from the raw ring, so the ring
+        # must hold the committed keys of every earlier step. Commits therefore
+        # trail the extraction and serve the following step's groups.
+        qsa_store_cache_rows(raw_key_cache, raw_metadata.slot_mapping, token_k)
         if rope_position_cache is not None:
+            assert position_rows is not None
             qsa_store_cache_rows(
                 rope_position_cache,
                 raw_metadata.slot_mapping,

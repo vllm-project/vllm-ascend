@@ -84,6 +84,21 @@ def test_qsa_normalization_uses_upstream_public_helper() -> None:
     assert "upstream_indexer._gemma_rmsnorm(" not in qsa
 
 
+def test_qsa_uses_fused_compressed_cache_update() -> None:
+    qsa = _source("vllm_ascend/models/qwen4_exp/qsa.py")
+    update_start = qsa.index("    def _update_and_compress(")
+    update_end = qsa.index("    def _lightning_indexer_eligible(", update_start)
+    update = qsa[update_start:update_end]
+
+    assert "qsa_fused_update_compressed_cache(" in update
+    assert update.count("qsa_store_cache_rows(") == 2
+    assert "transpose(0, 1).contiguous()" in update
+
+    triton_qsa = _source("vllm_ascend/ops/triton/qwen4_exp/qsa.py")
+    assert "def _qsa_update_compressed_cache_kernel(" in triton_qsa
+    assert "def _gemma_rmsnorm_neox_rope(" in triton_qsa
+
+
 def test_qsa_public_normalization_helper_matches_upstream(monkeypatch) -> None:
     indexer = object.__new__(ascend_qsa.AscendQSAIndexer)
     torch.nn.Module.__init__(indexer)
