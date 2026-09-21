@@ -48,8 +48,13 @@ from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.ops.rope_dsv4 import RopeDataProxy, get_cos_and_sin_dsa, get_full_cos_and_sin_dsa
 from vllm_ascend.ops.triton.dsa_cp import BUILD_LOCAL_METADATA_BLOCK_SIZE, build_local_metadata_triton
 from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
-from vllm_ascend.utils import enable_dsa_cp_full_o_proj
-from vllm_ascend.weight_switch import WeightSwitchConfig, WeightSwitchMixin, WeightSwitchState
+from vllm_ascend.utils import enable_dsa_cp_full_o_proj, enable_pcp_o_proj_weight_sharding
+from vllm_ascend.weight_switch import (
+    WeightLoadPartition,
+    WeightSwitchConfig,
+    WeightSwitchMixin,
+    WeightSwitchState,
+)
 from vllm_ascend.worker.device_metadata import (
     DeviceMetadataStage,
     DeviceMetadataTask,
@@ -2510,12 +2515,133 @@ class AscendDSAPCPImpl(dsa_v1.AscendDSAImpl):
     """Use ordinary decode updates or global PCP prefill cache updates."""
 
     supports_pcp: ClassVar[bool] = True
+    o_proj_full_pools: ClassVar[dict[Any, torch.Tensor]] = {}
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # PCP prepares replicated caches before local attention, leaving no
         # cache-update work for the auxiliary stream to overlap.
         self.multistream_dsv4_dsa_overlap = False
+        self.enable_pcp_o_proj_weight_sharding = enable_pcp_o_proj_weight_sharding()
+        self._pcp_o_proj_weight_switches = None
+        if not self.enable_pcp_o_proj_weight_sharding:
+            return
+        pcp_size = get_pcp_group().world_size
+        try:
+            if self.n_local_groups % pcp_size != 0:
+                raise ValueError(f"n_local_groups={self.n_local_groups} is not divisible by pcp_size={pcp_size}")
+            self._get_pcp_weight_switch_method(self.wo_a)
+            self._get_pcp_weight_switch_method(self.wo_b)
+        except (RuntimeError, ValueError) as exc:
+            logger.warning_once(
+                "DSA-PCP O-projection weight sharding is unavailable (%s); using unsharded O-projection weights.",
+                exc,
+            )
+            self.enable_pcp_o_proj_weight_sharding = False
+            return
+        self._prepare_pcp_o_proj_weight_shards()
+
+    @staticmethod
+    def _get_pcp_weight_switch_method(layer: torch.nn.Module) -> WeightSwitchMixin:
+        quant_method = layer.quant_method
+        linear_method = getattr(quant_method, "quant_method", quant_method)
+        if not isinstance(linear_method, WeightSwitchMixin) or not linear_method.supports_weight_switch:
+            raise RuntimeError(
+                "DSA-PCP O-proj weight sharding requires a weight-switch capable method, "
+                f"got {type(linear_method).__name__}."
+            )
+        return linear_method
+
+    def _prepare_pcp_o_proj_weight_shards(self) -> None:
+        pcp_group = get_pcp_group()
+        if self.n_local_groups % pcp_group.world_size != 0:
+            raise ValueError(
+                "DSA-PCP O-proj weight sharding requires n_local_groups to be "
+                "divisible by the PCP size, got "
+                f"n_local_groups={self.n_local_groups}, pcp_size={pcp_group.world_size}."
+            )
+
+        self.pcp_o_proj_weight_switch_config = WeightSwitchConfig.from_group(pcp_group)
+        load_partition = WeightLoadPartition.from_nested_groups(get_tp_group(), pcp_group)
+        self.wo_a_pcp_weight_method = self._get_pcp_weight_switch_method(self.wo_a)
+        self.wo_b_pcp_weight_method = self._get_pcp_weight_switch_method(self.wo_b)
+        self.wo_a_pcp_weight_method.prepare_layer_for_parallel_output_weight_load(
+            self.wo_a,
+            self.pcp_o_proj_weight_switch_config,
+            load_partition,
+        )
+        self.wo_b_pcp_weight_method.prepare_layer_for_parallel_weight_load(
+            self.wo_b,
+            self.pcp_o_proj_weight_switch_config,
+            load_partition,
+        )
+
+        # wo_a post-processing reshapes the raw output shard into a batched
+        # group layout. Keep its layer/method metadata aligned with the
+        # PCP-local resident shard; the attention implementation itself keeps
+        # the TP-local group count because runtime all-gather restores it.
+        local_groups = self.n_local_groups // pcp_group.world_size
+        self.wo_a.n_local_groups = local_groups
+        if hasattr(self.wo_a_pcp_weight_method, "n_local_groups"):
+            self.wo_a_pcp_weight_method.n_local_groups = local_groups
+
+    def _get_pcp_o_proj_weight_switches(self):
+        if self._pcp_o_proj_weight_switches is None:
+            weight_switches = []
+            for name, layer, method in (
+                ("wo_a", self.wo_a, self.wo_a_pcp_weight_method),
+                ("wo_b", self.wo_b, self.wo_b_pcp_weight_method),
+            ):
+                state = method.enable_weight_switch(
+                    layer,
+                    self.pcp_o_proj_weight_switch_config,
+                    pool=AscendDSAPCPImpl.o_proj_full_pools,
+                    pool_key_prefix=(type(method).__qualname__, name, "dsa_pcp_o_proj"),
+                )
+                weight_switches.append((layer, method, state))
+            self._pcp_o_proj_weight_switches = tuple(weight_switches)
+        return self._pcp_o_proj_weight_switches
+
+    def _maybe_all_gather_pcp_o_proj_weights(self) -> None:
+        if not self.enable_pcp_o_proj_weight_sharding:
+            return
+
+        for _, method, state in self._get_pcp_o_proj_weight_switches():
+            method.all_gather_weight(state, self.pcp_o_proj_weight_switch_config)
+
+    def _forward_attention(
+        self,
+        layer_name,
+        hidden_states: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, ...],
+        layer_metadata: dsa_v1.AscendDSALayerMetadata,
+        cache_is_prepared: bool = False,
+    ) -> torch.Tensor:
+        # Cache preparation also communicates over the PCP group. Start the
+        # asynchronous weight gather afterwards so it can overlap local Q,
+        # indexer/compressor, and sparse-attention computation instead.
+        self._maybe_all_gather_pcp_o_proj_weights()
+        return super()._forward_attention(
+            layer_name,
+            hidden_states,
+            kv_cache,
+            layer_metadata,
+            cache_is_prepared,
+        )
+
+    def _forward_o_proj(self, o_proj_input: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
+        if not self.enable_pcp_o_proj_weight_sharding:
+            return super()._forward_o_proj(o_proj_input, output)
+
+        weight_switches = self._get_pcp_o_proj_weight_switches()
+        for layer, method, state in weight_switches:
+            method.wait_weight_all_gather(state)
+            method.switch_weight(layer, state, use_full_weight=True)
+        try:
+            return super()._forward_o_proj(o_proj_input, output)
+        finally:
+            for layer, method, state in weight_switches:
+                method.switch_weight(layer, state, use_full_weight=False)
 
     def _gather_and_restore_hidden_states(
         self,
