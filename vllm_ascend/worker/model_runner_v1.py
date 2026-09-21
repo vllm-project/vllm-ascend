@@ -2227,6 +2227,86 @@ class NPUModelRunner(GPUModelRunner):
             deferred_state_corrections_fn()
         return None
 
+    def _num_drafter_query_tokens(self) -> int:
+        """Return the maximum query width consumed by one drafter request."""
+        assert self.speculative_config is not None
+        if isinstance(self.drafter, AscendDSparkProposer):
+            # DSpark variants use either K or K + 1 queries per request.
+            return self.drafter.num_query_per_req
+        return self.num_spec_tokens + int(self.speculative_config.use_dflash())
+
+    def _input_fits_in_drafter(
+        self, common_attn_metadata: CommonAttentionMetadata | None
+    ) -> bool:
+        """Return whether the complete drafter query fits its model limit."""
+        if common_attn_metadata is None:
+            return False
+        if self.drafter is None:
+            # Only the last PP rank owns and runs the drafter. Other PP ranks
+            # must not apply a local drafter limit or join drafter DP work.
+            return True
+        return (
+            common_attn_metadata.max_seq_len + self._num_drafter_query_tokens()
+            <= self.effective_drafter_max_model_len
+        )
+
+    def _drafter_runs_model_forward(self) -> bool:
+        """Return whether the proposer participates in model collectives."""
+        spec_config = self.speculative_config
+        return spec_config is not None and (
+            spec_config.use_eagle()
+            or spec_config.uses_draft_model()
+            or spec_config.uses_extract_hidden_states()
+        )
+
+    def _skip_drafting(
+        self,
+        scheduler_output: "SchedulerOutput",
+        sampled_token_ids: torch.Tensor | None = None,
+    ) -> None:
+        """Preserve sampled-token state, align DP ranks, and publish no drafts."""
+        if (
+            sampled_token_ids is not None
+            and self.valid_sampled_token_count_event is not None
+            and self.drafter is not None
+            and self._drafter_runs_model_forward()
+        ):
+            next_token_ids, valid_sampled_tokens_count = (
+                self.drafter.prepare_next_token_ids_padded(
+                    sampled_token_ids,
+                    self.requests,
+                    self.input_batch,
+                    self.discard_request_indices.gpu,
+                    self.num_discarded_requests,
+                )
+            )
+            self._copy_valid_sampled_token_count(
+                next_token_ids, valid_sampled_tokens_count
+            )
+
+        if (
+            self.drafter is not None
+            and self.parallel_config.data_parallel_size > 1
+            and self._drafter_runs_model_forward()
+        ):
+            if isinstance(self.drafter, AscendDSparkProposer):
+                # DSpark requires a complete synthetic query group.
+                self.drafter.dummy_run(
+                    num_tokens=self.drafter.num_query_per_req,
+                    num_reqs=1,
+                )
+            else:
+                # Match upstream: one token is sufficient for the dummy rank;
+                # drafter DP synchronization pads it to the busiest rank.
+                self.drafter.dummy_run(num_tokens=1)
+
+        self._draft_token_ids = torch.zeros(
+            1, device=self.device, dtype=torch.int32
+        ).expand(len(self.input_batch.req_ids), self.num_spec_tokens)
+        self._draft_probs = None
+        self._draft_prob_req_ids = None
+        self._copy_draft_token_ids_to_cpu(scheduler_output, zeros_only=True)
+
     @torch.inference_mode()
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
@@ -2288,7 +2368,17 @@ class NPUModelRunner(GPUModelRunner):
 
         self.valid_sampled_token_count_gpu = None
 
+        input_fits_in_drafter = self.speculative_config is None or self._input_fits_in_drafter(
+            spec_decode_common_attn_metadata
+        )
+
         def propose_draft_token_ids(sampled_token_ids):
+            if not input_fits_in_drafter:
+                self._skip_drafting(
+                    scheduler_output,
+                    sampled_token_ids if use_padded_batch else None,
+                )
+                return
             assert spec_decode_common_attn_metadata is not None
             self._draft_token_ids = self.propose_draft_token_ids(
                 sampled_token_ids,

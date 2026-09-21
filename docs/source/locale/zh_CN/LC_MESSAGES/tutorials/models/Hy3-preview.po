@@ -93,14 +93,6 @@ msgid ""
 "also build all from source:"
 msgstr "此外，如果您不想像上面那样使用 Docker 镜像，也可以从源码构建所有组件："
 
-msgid ""
-"- Install `vllm-ascend` from source, refer to "
-"[installation](https://github.com/vllm-project/vllm-"
-"ascend/blob/main/docs/source/installation.md)."
-msgstr ""
-"- 从源码安装 `vllm-ascend`，请参考[安装指南](https://github.com/vllm-project/vllm-"
-"ascend/blob/main/docs/source/installation.md)。"
-
 msgid "## Deployment"
 msgstr "## 部署"
 
@@ -221,3 +213,8 @@ msgid ""
 "Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for "
 "more details."
 msgstr "更多详细信息请参阅[vllm基准测试](https://docs.vllm.ai/en/latest/benchmarking/)。"
+
+msgid ""
+"- Install `vllm-ascend` from source, refer to "
+"[installation](../../installation.md)."
+msgstr "- 从源码安装 `vllm-ascend`，请参阅[安装](../../installation.md)。"

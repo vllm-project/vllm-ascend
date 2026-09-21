@@ -16,13 +16,13 @@ Targeted validation was conducted on the following 4 models, which are the only 
 | Scenario Type | Input Length | Output Length | Prefix Cache |
 |---------------|--------------|---------------|--------------|
 | Prefill-only (Pure P) | 16k | 1k | — |
-| Prefill-only (Pure P) | 128K | 1k | — |
-| Prefill-only (Pure P) | Variable 40K–80K | 2.5k | — |
+| Prefill-only (Pure P) | 128k | 1k | — |
+| Prefill-only (Pure P) | Variable 40k–80k | 2.5k | — |
 | Decode-only (Pure D) | 16k | 1k | — |
-| Decode-only (Pure D) | 128K | 1k | — |
-| Decode-only (Pure D) | Variable 40K–80K | 2.5k | — |
+| Decode-only (Pure D) | 128k | 1k | — |
+| Decode-only (Pure D) | Variable 40k–80k | 2.5k | — |
 | End-to-End | 16k | 1k | 0% |
-| End-to-End | 128K | 1K | 90% |
+| End-to-End | 128k | 1k | 90% |
 | End-to-End | 1M | 1k | — |
 
 ### Accuracy
@@ -56,14 +56,14 @@ Some issues found during validation remain unresolved in this release. The table
 
 | No. | Issue | Description | Impact |
 |-----|-------|-------------|--------|
-| 1 | [#15237](https://github.com/vllm-project/vllm-ascend/issues/15237) | Kimi K3 128k-1k case performance below expectations: DSpark weights are weak, with generally low acceptance rate | Performance only: the DSpark draft acceptance rate is very low for long inputs (~20K–40K tokens), so speculative decoding provides no effective benefit; fix planned in v0.27 |
-| 2 | [#15649](https://github.com/vllm-project/vllm-ascend/issues/15649) | DSV4-Flash with pooling enabled: 128k-1k, prefix 90 scenario shows performance regression vs. no pooling (>10%, pool misses) | After enabling pooling, the 128K-1K case shows lower performance than without pooling — a single-prefix regression (>10%); no confirmed root cause or workaround yet; improvement planned for a future Q3 release |
+| 1 | [#15237](https://github.com/vllm-project/vllm-ascend/issues/15237) | Kimi K3 128k-1k case performance below expectations: DSpark weights are weak, with generally low acceptance rate | Performance only: the DSpark draft acceptance rate is very low for long inputs (~20k–40k tokens), so speculative decoding provides no effective benefit; fix planned in v0.27 |
+| 2 | [#15649](https://github.com/vllm-project/vllm-ascend/issues/15649) | DSV4-Flash with pooling enabled: 128k-1k, prefix 90 scenario shows performance regression vs. no pooling (>10%, pool misses) | After enabling pooling, the 128k-1k case shows lower performance than without pooling — a single-prefix regression (>10%); no confirmed root cause or workaround yet; improvement planned for a future Q3 release |
 | 3 | [#15649](https://github.com/vllm-project/vllm-ascend/issues/15649) | Qwen3-32B w8a8 A2 PD co-location pooling test: TPS 2313 with pooling vs. 2443 without, >3% regression (measured >5%) | Same pooling single-prefix regression: TPS drops from 2443 to 2313 (~5.3%) with pooling enabled; planned for a future Q3 release |
 | 4 | [#15648](https://github.com/vllm-project/vllm-ascend/issues/15648) | DeepSeek-V4 with sleep_mode_extra_cleanup enabled: service fails to start after sleep then wakeup | After the sleep/wakeup sequence with `sleep_mode_extra_cleanup` enabled, the service fails to start or serve requests; sleep mode is mainly intended for training scenarios; upstream fix planned for v0.27 |
 | 5 | [#14911](https://github.com/vllm-project/vllm-ascend/issues/14911) | PD disaggregation: DeepSeek-V3.1_w8a8 service starts, then the D node hangs on inference | DeepSeek-V3.1 is being sunset per the model sunsetting process; only the four export models are supported in this release (see release note); retest ongoing on main |
 | 6 | [#14911](https://github.com/vllm-project/vllm-ascend/issues/14911) | DeepSeek-V3.1-w4a8 PD co-location: multi-concurrency inference causes service hang | model being sunset, outside the supported export-model scope; retest ongoing on main |
 | 7 | [#15678](https://github.com/vllm-project/vllm-ascend/issues/15678) | A3 dual-node co-located GLM-5.2-W4A8C8: server-side error on inference after service start | The service starts successfully, but inference requests fail on the server side in the A3 double-node co-located scenario; this model/weight is sunset and outside the supported export-model scope |
-| 8 | [#15677](https://github.com/vllm-project/vllm-ascend/issues/15677) | PD disaggregation: DeepSeek-V3.1 layerwise gain below target in 64K+1k (expected 2%) | The measured layerwise gain is below the expected 2% target in the 64K-1K case; the layerwise RP3 path is intended for KV-offload use only and is not a standalone export feature — recorded as a feature-scope limitation rather than a general model performance regression |
+| 8 | [#15677](https://github.com/vllm-project/vllm-ascend/issues/15677) | PD disaggregation: DeepSeek-V3.1 layerwise gain below target in 64k+1k (expected 2%) | The measured layerwise gain is below the expected 2% target in the 64k-1k case; the layerwise RP3 path is intended for KV-offload use only and is not a standalone export feature — recorded as a feature-scope limitation rather than a general model performance regression |
 | 9 | [#15296](https://github.com/vllm-project/vllm-ascend/issues/15296) | Qwen3-235B-A22B-w8a8 PD co-location, A3 single-node graph mode aclgraph_32768_4096_TPOT50ms performance regression (W8A8 ~10%) | Some PD separation/disaggregation tests show lower accuracy or performance than the baseline (W8A8 ~10% regression); tracked in the follow-up sunset plan |
 | 10 | [#15296](https://github.com/vllm-project/vllm-ascend/issues/15296) | Qwen3-235B W4A8 quantization, 800IA3 PD co-location aclgraph performance regression (W4A8 ~4%) |lower performance than baseline in PD tests (W4A8 ~4%); tracked in the follow-up sunset plan |
 | 11 | [#14911](https://github.com/vllm-project/vllm-ascend/issues/14911) | A3 single-node DeepSeek-V3.1-w8a8: server-side error on inference after service start | Model being sunset, outside the supported export-model scope; retest ongoing on main |

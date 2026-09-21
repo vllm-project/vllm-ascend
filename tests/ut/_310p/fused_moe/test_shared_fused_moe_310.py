@@ -120,6 +120,7 @@ def test_shared_forward_impl_310_returns_current_runner_contract(monkeypatch, ha
     router_logits = torch.randn(2, 3)
     routed_out = torch.randn(2, 4)
     shared_out = torch.randn(2, 4)
+    gathered = torch.randn(2, 4)
     routed_result = SimpleNamespace(
         routed_out=routed_out,
         before_dispatch_evt=None,
@@ -129,6 +130,7 @@ def test_shared_forward_impl_310_returns_current_runner_contract(monkeypatch, ha
     )
     runner.no_shared_forward_impl = MagicMock(return_value=routed_result)
     runner._forward_shared_experts = MagicMock(return_value=shared_out)
+    runner._prepare_shared_expert_input = MagicMock(return_value=gathered)
     current_stream = MagicMock()
 
     monkeypatch.setattr(AscendMoERunner310, "is_internal_router", property(lambda _: False))
@@ -144,7 +146,13 @@ def test_shared_forward_impl_310_returns_current_runner_contract(monkeypatch, ha
     if has_shared_experts:
         assert result[0] is shared_out
         assert result[1] is routed_out
-        runner._forward_shared_experts.assert_called_once()
+        # The gather is issued on the default stream (the mocked current stream)
+        # before the routed path is enqueued; the shared-experts stream consumes
+        # the gathered input once shared_input_ready fires.
+        runner._prepare_shared_expert_input.assert_called_once_with(hidden_states)
+        assert runner._forward_shared_experts.call_args.args[0] is gathered
+        assert runner._forward_shared_experts.call_args.args[1].shared_input_ready is not None
     else:
         assert result is routed_out
+        runner._prepare_shared_expert_input.assert_not_called()
         runner._forward_shared_experts.assert_not_called()

@@ -133,7 +133,7 @@
     - 该接口支持B、S、T取0，即shape与B、S、T值相关的入参允许传入空tensor，其余入参不支持传入空tensor。该场景下state_cache不做更新，输出cmp_kv为空tensor。
 - 输入属性限制：
     - 支持D为128/512。
-    - 支持H为1K~10K，512对齐。
+    - 支持H为1k~10k，512对齐。
     - 支持block_size为1~1024。
     - 支持cmp_ratio为2/4/8/16/32/64/128。支持如下三种典型组合场景：
         - C4A: D=512, coff=2, cmp_ratio=4；

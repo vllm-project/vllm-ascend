@@ -429,22 +429,6 @@ msgstr "### 9.2 调优指南"
 msgid "## 10 FAQ"
 msgstr "## 10 常见问题"
 
-msgid "### Q: How do I enable long context (beyond 256K)?"
-msgstr "### 问：如何启用长上下文（超过256K）？"
-
-msgid ""
-"Qwen3-Coder-30B-A3B natively supports 256K token context length. For "
-"contexts beyond 256K, YaRN rope scaling is required to extend up to 1M. "
-"Enable YaRN via `--hf-overrides`:"
-msgstr ""
-"Qwen3-Coder-30B-A3B原生支持256K token的上下文长度。对于超过256K的上下文，需要使用YaRN "
-"rope缩放扩展到1M。通过`--hf-overrides`启用YaRN："
-
-msgid ""
-"For contexts within the native 256K range, no additional configuration is "
-"needed. Just set `--max-model-len` to your desired length."
-msgstr "对于在原生256K范围内的上下文，无需额外配置。只需将`--max-model-len`设置为您所需的长度即可。"
-
 msgid "### Q: What makes Qwen3-Coder different from Qwen3-30B-A3B?"
 msgstr "### 问：Qwen3-Coder与Qwen3-30B-A3B有何不同？"
 
@@ -620,3 +604,19 @@ msgid ""
 "refer to the [Public FAQs](../../faqs.md). This chapter only covers model-"
 "specific issues."
 msgstr "对于常见的环境、安装和通用参数问题，请参考 [公共FAQ](../../faqs.md)。本章仅涵盖模型特定的问题。"
+
+msgid "### Q: How do I enable long context (beyond 256k)?"
+msgstr "### 问：如何启用长上下文（超过256k）？"
+
+msgid ""
+"Qwen3-Coder-30B-A3B natively supports 256k token context length. For "
+"contexts beyond 256k, YaRN rope scaling is required to extend up to 1M. "
+"Enable YaRN via `--hf-overrides`:"
+msgstr ""
+"Qwen3-Coder-30B-A3B 原生支持256k token的上下文长度。对于超过256k的上下文，需要使用YaRN "
+"rope缩放来扩展至1M。通过 `--hf-overrides` 启用YaRN："
+
+msgid ""
+"For contexts within the native 256k range, no additional configuration is "
+"needed. Just set `--max-model-len` to your desired length."
+msgstr "对于原生256k范围内的上下文，无需额外配置。只需将 `--max-model-len` 设置为您所需的长度即可。"

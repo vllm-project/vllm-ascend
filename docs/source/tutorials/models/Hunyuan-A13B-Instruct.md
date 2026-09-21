@@ -2,7 +2,7 @@
 
 ## Introduction
 
-Hunyuan-A13B-Instruct is a fine-grained hybrid expert model (MoE) developed by Tencent. This model has a total of 80 billion parameters, 13 billion activation parameters, supports 256K ultra-long contexts, and possesses native thought chain (CoT) reasoning capabilities.
+Hunyuan-A13B-Instruct is a fine-grained hybrid expert model (MoE) developed by Tencent. This model has a total of 80 billion parameters, 13 billion activation parameters, supports 256k ultra-long contexts, and possesses native thought chain (CoT) reasoning capabilities.
 
 ## Environment Preparation
 
@@ -150,7 +150,7 @@ ais_bench --models vllm_api_stream_chat --datasets demo_gsm8k_gen_4_shot_cot_cha
 output:
 
 ```bash
-[2026-04-08 05:27:40,180] [ais_bench] [INFO] Performance Results of task [vllm-api-stream-chat/demo_gsm8k]: 
+[2026-04-08 05:27:40,180] [ais_bench] [INFO] Performance Results of task [vllm-api-stream-chat/demo_gsm8k]:
 ╒══════════════════════════╤═════════╤═════════════════╤═════════════════╤═════════════════╤═════════════════╤═════════════════╤═════════════════╤═════════════════╤═════╕
 │ Performance Parameters   │ Stage   │ Average         │ Min             │ Max             │ Median          │ P75             │ P90             │ P99             │  N  │
 ╞══════════════════════════╪═════════╪═════════════════╪═════════════════╪═════════════════╪═════════════════╪═════════════════╪═════════════════╪═════════════════╪═════╡
