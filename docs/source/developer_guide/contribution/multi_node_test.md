@@ -374,13 +374,13 @@ Install AISBench on the first host, which is the node with
 `LWS_WORKER_INDEX=0`:
 
 ```bash
-export AIS_BENCH_TAG="v3.1-20260330-master"
+export AIS_BENCH_TAG="v3.1-20260912-master"
 export AIS_BENCH_URL="https://github.com/AISBench/benchmark.git"
 export BENCHMARK_HOME=/vllm-workspace/vllm-ascend/benchmark
 
 git clone -b ${AIS_BENCH_TAG} --depth 1 ${AIS_BENCH_URL} $BENCHMARK_HOME
 cd $BENCHMARK_HOME
-pip install -e . -r requirements/api.txt -r requirements/extra.txt
+pip install -e . -r requirements/api.txt -r requirements/extra.txt -r requirements/response_anomaly.txt
 ```
 
 If your local image already contains the model, benchmark data, Ascend runtime,
@@ -457,13 +457,13 @@ python3 -m pip install -r requirements-dev.txt
 Install AISBench on node 0:
 
 ```bash
-export AIS_BENCH_TAG="v3.1-20260330-master"
+export AIS_BENCH_TAG="v3.1-20260912-master"
 export AIS_BENCH_URL="https://github.com/AISBench/benchmark.git"
 export BENCHMARK_HOME=/vllm-workspace/vllm-ascend/benchmark
 
 git clone -b ${AIS_BENCH_TAG} --depth 1 ${AIS_BENCH_URL} $BENCHMARK_HOME
 cd $BENCHMARK_HOME
-pip install -e . -r requirements/api.txt -r requirements/extra.txt
+pip install -e . -r requirements/api.txt -r requirements/extra.txt -r requirements/response_anomaly.txt
 ```
 
 If your local image already contains the model, benchmark data, Ascend runtime,
