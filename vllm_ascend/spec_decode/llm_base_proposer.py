@@ -85,7 +85,10 @@ _HIDDEN_STATE_DRAFTER_TYPES: tuple[type, ...] = (
     DSparkDeepseekV4ForCausalLM,
 )
 
-if not vllm_version_is("0.29.0"):
+# DeepSeek V4.1 is skipped on vLLM 0.29 (upstream V4.1 modules are absent)
+# and on Triton-less builds such as 310P (newer main's sparse_mqa_logits
+# calls tl.constexpr at module scope, crashing the import).
+if not vllm_version_is("0.29.0") and HAS_TRITON:
     from vllm_ascend.models.deepseek_v41.dspark import DSparkDeepseekV41ForCausalLM
 
     _HIDDEN_STATE_DRAFTER_TYPES += (DSparkDeepseekV41ForCausalLM,)
