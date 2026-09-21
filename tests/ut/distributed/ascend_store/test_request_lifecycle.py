@@ -50,7 +50,7 @@ def aligned_buffer(size):
 class MemoryBackend(Backend):
     """The Store leaf API copies real bytes using production-generated addresses."""
 
-    payloads = {}
+    payloads: dict[str, list[bytes]] = {}
 
     def __init__(self, parallel_config, **kwargs):
         self.regions = []
@@ -251,7 +251,7 @@ def test_raw_sequence_lifecycle(
         seen_load = False
         saw_decode = False
         compute_starts = []
-        accepted_counts = []
+        accepted_counts: list[int] = []
         for _ in range(12):
             output = scheduler.schedule()
             assert output.total_num_scheduled_tokens <= 256
