@@ -114,6 +114,7 @@ class HardwareCapability(Enum):
     MOE_DISPATCH_EXTRA_ARGS = auto()
     # Pass shared-expert, expert-scale, quant-mode, and output-dtype metadata to MoE dispatch.
     MOE_DISPATCH_SHARED_EXPERT_ARGS = auto()
+    MTP_INPUT_ROTATION = auto()
     # Allow the extended NPU graph backend; static-kernel mode depends on this contract.
     NPUGRAPH_EX = auto()
     # Use ``torch_npu.npu_top_k_top_p`` for sampling instead of the PyTorch fallback.
@@ -245,6 +246,7 @@ _STANDARD_CAPABILITIES = frozenset(
     }
 )
 _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
+    HardwareCapability.MTP_INPUT_ROTATION,
     HardwareCapability.MC2_FULLMESH_V2_COMM,
     HardwareCapability.MINIMAX_M3_PREFILL_KV_GATHER_Q,
 }

@@ -24,6 +24,9 @@ from vllm.model_executor.models.utils import maybe_prefix
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.utils import is_rot_weight_used
+
 from .model import (
     Glm5NextDecoderLayer,
     Glm5NextMLAAttention,
@@ -201,6 +204,11 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
         self.config = vllm_config.model_config.hf_config
         self.quant_config = vllm_config.quant_config
         self.model = Glm5NextMultiTokenPredictor(vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model"))
+        self.is_rot_weight_used = get_current_hardware_profile().supports(
+            HardwareCapability.MTP_INPUT_ROTATION
+        ) and is_rot_weight_used(vllm_config)
+        if self.is_rot_weight_used:
+            self.rot = nn.Linear(self.config.hidden_size, self.config.hidden_size, bias=False)
         self.set_moe_parameters()
 
     def set_moe_parameters(self):
@@ -229,6 +237,10 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
         inputs_embeds: torch.Tensor | None = None,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
+        # Apply the checkpoint-exported correction before MTP's hnorm,
+        # matching the quantized AscendDeepSeekMTP input path.
+        if self.is_rot_weight_used:
+            hidden_states = self.rot(hidden_states)
         return self.model(input_ids, positions, hidden_states, inputs_embeds, spec_step_idx)
 
     def compute_logits(
@@ -304,6 +316,13 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
         _pending_wk_fp8: dict = {}
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
+                continue
+            # This is an MTP input transform, not a decoder-layer weight.
+            # Handle it before filtering out weights outside the MTP layers.
+            if name == "rot.weight":
+                if self.is_rot_weight_used:
+                    default_weight_loader(self.rot.weight, loaded_weight)
+                    loaded_params.add(name)
                 continue
             # Multimodal (Glm5NextForConditionalGeneration) checkpoints prefix
             # the text-tower weights with "model.language_model."; the MTP head
@@ -388,5 +407,7 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
         ):
             if layer_idx not in loaded_layers:
                 raise ValueError(f"MTP speculative decoding layer {layer_idx} weights missing from checkpoint.")
+        if self.is_rot_weight_used and "rot.weight" not in loaded_params:
+            raise ValueError("GLM5-Next MTP requires rot.weight when the quantization config sets is_rot_used.")
         self._maybe_set_own_lm_head(loaded_params)
         return loaded_params
