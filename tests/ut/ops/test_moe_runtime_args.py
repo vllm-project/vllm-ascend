@@ -218,6 +218,7 @@ class TestMoERuntimeArgs(unittest.TestCase):
                     mxfp_scale_dtype=torch.float32,
                     mxfp_per_token_scale_dtype=torch.float16,
                     mxfp_use_bf16=False,
+                    mxfp_group_size=32,
                     w1_scale=[torch.randn(1)],
                     w2_scale=[torch.randn(1)],
                 )
@@ -251,6 +252,7 @@ class TestMoERuntimeArgs(unittest.TestCase):
                 self.assertEqual(mlp_compute_input.quant.mxfp.scale_dtype, torch.float32)
                 self.assertEqual(mlp_compute_input.quant.mxfp.per_token_scale_dtype, torch.float16)
                 self.assertFalse(mlp_compute_input.quant.mxfp.use_bf16)
+                self.assertEqual(mlp_compute_input.quant.mxfp.group_size, 32)
 
     def test_build_fused_experts_input_constructs_internal_mxfp_leaf_from_primitives(self):
         for quant_type in (QuantType.W8A8MXFP, QuantType.W4A4MXFP):
@@ -269,6 +271,7 @@ class TestMoERuntimeArgs(unittest.TestCase):
                     mxfp_scale_dtype=torch.float32,
                     mxfp_per_token_scale_dtype=torch.float16,
                     mxfp_use_bf16=False,
+                    mxfp_group_size=32,
                 )
 
                 self.assertTrue(fused_experts_input.quant.is_mxfp)
@@ -278,6 +281,7 @@ class TestMoERuntimeArgs(unittest.TestCase):
                 self.assertEqual(fused_experts_input.quant.mxfp.scale_dtype, torch.float32)
                 self.assertEqual(fused_experts_input.quant.mxfp.per_token_scale_dtype, torch.float16)
                 self.assertFalse(fused_experts_input.quant.mxfp.use_bf16)
+                self.assertEqual(fused_experts_input.quant.mxfp.group_size, 32)
 
 
 if __name__ == "__main__":
