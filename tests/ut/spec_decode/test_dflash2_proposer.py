@@ -8,6 +8,7 @@ from vllm_ascend.models.qwen3_dflash2 import (
     DFlash2Qwen3DecoderLayer,
     DFlash2Qwen3ForCausalLM,
     DFlash2Qwen3Model,
+    DFlashGroupedConv,
     _grouped_conv,
     _score_edges,
 )
@@ -78,6 +79,34 @@ def test_dflash2_declares_main_factory_classes():
     """vLLM #52816 constructs DFlash subclasses through class factories."""
     assert DFlash2Qwen3Model.decoder_layer_cls is DFlash2Qwen3DecoderLayer
     assert DFlash2Qwen3ForCausalLM.model_cls is DFlash2Qwen3Model
+
+
+def test_lilicorr_convolution_uses_ascend_dflash2_layer():
+    import vllm.model_executor.models.lilicorr as upstream_lilicorr
+
+    import vllm_ascend.patch.worker.patch_qwen3_dflash  # noqa: F401
+
+    assert upstream_lilicorr.DFlash2Qwen3DecoderLayer is DFlash2Qwen3DecoderLayer
+
+
+def test_grouped_conv_projection_uses_draft_quantization():
+    quant_config = object()
+    with patch(
+        "vllm_ascend.models.qwen3_dflash2.ReplicatedLinear",
+        return_value=torch.nn.Identity(),
+    ) as linear:
+        DFlashGroupedConv(
+            hidden_size=8,
+            taps=2,
+            group_size=2,
+            block_size=4,
+            params_dtype=torch.bfloat16,
+            prefix="conv",
+            quant_config=quant_config,
+        )
+
+    assert linear.call_args.kwargs["quant_config"] is quant_config
+    assert linear.call_args.kwargs["prefix"] == "conv.kernel_projection"
 
 
 def _reference_walk(candidate_ids: torch.Tensor, scores: torch.Tensor) -> torch.Tensor:
