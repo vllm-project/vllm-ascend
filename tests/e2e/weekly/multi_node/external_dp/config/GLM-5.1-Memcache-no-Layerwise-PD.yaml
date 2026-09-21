@@ -43,26 +43,30 @@ config:
   - node_index: 0
     port_start: 7100
     dp_rpc_port: 12331
-    dp_size: 4
-    dp_size_local: 4
+    dp_size: 1
+    dp_size_local: 1
     dp_rank_start: 0
-    tp_size: 8
+    pp_size: 2
+    pp_size_local: 1
+    tp_size: 16
     dp_address: "${NODE_0_IP}"
 
   - node_index: 1
     port_start: 7100
     dp_rpc_port: 12331
-    dp_size: 4
+    dp_size: 1
     dp_size_local: 1
-    dp_rank_start: 4
-    tp_size: 8
+    dp_rank_start: 1
+    pp_size: 2
+    pp_size_local: 1
+    tp_size: 16
     dp_address: "${NODE_0_IP}"
 
   - node_index: 2
     port_start: 7100
     dp_rpc_port: 12331
     dp_size: 8
-    dp_size_local: 8
+    dp_size_local: 4
     dp_rank_start: 0
     tp_size: 4
     dp_address: "${NODE_2_IP}"
@@ -71,8 +75,8 @@ config:
     port_start: 7100
     dp_rpc_port: 12331
     dp_size: 8
-    dp_size_local: 8
-    dp_rank_start: 1
+    dp_size_local: 4
+    dp_rank_start: 4
     tp_size: 4
     dp_address: "${NODE_2_IP}"
 
