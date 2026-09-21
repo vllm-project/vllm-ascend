@@ -70,3 +70,4 @@ extern "C" __global__ __aicore__ void add_rms_norm_bias(
         GENERAL_OP_IMPL(KernelAddRmsNormBiasMultiN, bfloat16_t);
     }
 }
+// cache-verification probe: comment-only change, safe to revert
