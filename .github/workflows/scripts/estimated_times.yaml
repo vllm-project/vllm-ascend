@@ -44,6 +44,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_8B.py: 350
   tests/e2e/pull_request/one_card/pooling/test_classification.py: 280
   tests/e2e/pull_request/one_card/pooling/test_embedding.py: 600
+  tests/e2e/pull_request/one_card/pooling/test_qwen3_vl_embedding_mrv2.py: 600
   tests/e2e/pull_request/one_card/pooling/test_scoring.py: 780
   tests/e2e/pull_request/one_card/spec_decode/test_dflash.py: 470
   tests/e2e/pull_request/one_card/spec_decode/test_dspark.py: 510
@@ -102,6 +103,7 @@ estimated_times:
   tests/e2e/pull_request/two_card/test_qwen3_5_35b_a3b_w8a8.py: 350
   tests/e2e/pull_request/two_card/test_qwen3_6_27b_fia.py: 450
   tests/e2e/pull_request/two_card/test_qwen3_moe_eplb.py: 520
+  tests/e2e/pull_request/two_card/pooling/test_qwen3_vl_embedding_mrv2.py: 600
   tests/e2e/pull_request/two_card/test_qwen3_performance.py: 20
   tests/e2e/pull_request/two_card/test_qwen3_vl_30b_a3b_instruct.py: 280
   tests/e2e/pull_request/two_card/test_shared_expert_dp.py: 480
