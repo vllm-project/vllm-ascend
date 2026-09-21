@@ -8,7 +8,10 @@ from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.lora.lora_ops import _LORA_WRAPPER_IDS, _LORA_WRAPPERS, lora_linear
 from vllm_ascend.lora.utils import refresh_all_lora_classes
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, vllm_version_is
+
+if not vllm_version_is("0.29.0"):
+    from vllm.lora.punica_wrapper.punica_cpu import PunicaWrapperCPU
 
 
 # The platforms that are compatible with the PyTorch-native implementation can
@@ -602,3 +605,12 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         self.bgmv_expand(buffer, lora_b_stacked, y, indices, add_inputs=True)
 
         y = y.view_as(y_org)
+
+    if not vllm_version_is("0.29.0"):
+        # vLLM main (#53555) made apply_lora_full_linear abstract for
+        # sequence classification modules_to_save. Reuse the device-agnostic
+        # CPU implementation instead of duplicating it. v0.29.0 has neither
+        # the abstract method nor the caller, so the binding is skipped there.
+        # Kept inside the class body so ABCMeta computes __abstractmethods__
+        # with the method already present.
+        apply_lora_full_linear = PunicaWrapperCPU.apply_lora_full_linear
