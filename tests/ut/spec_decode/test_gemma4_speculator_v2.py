@@ -35,14 +35,12 @@ from vllm_ascend.worker.v2.spec_decode.gemma4.speculator import (
 
 
 def _speculative_config():
-    """A config for `method="mtp"` with a Gemma4 MTP draft."""
     config = MagicMock()
     config.method = "mtp"
     config.use_gemma4_mtp.return_value = True
     config.use_step3p5_mtp.return_value = False
     config.use_dspark.return_value = False
     config.use_dflash.return_value = False
-    # use_eagle() is True for "mtp", which is what used to swallow Gemma4.
     config.use_eagle.return_value = True
     return config
 
@@ -68,15 +66,10 @@ def test_eagle_speculator_is_not_reached_for_gemma4():
     ):
         v2_spec_decode.init_speculator(vllm_config, torch.device("cpu"))
 
-    # The eagle branch must not run: gemma4 has its own draft wiring and would
-    # otherwise load the draft without cross-model KV sharing.
     vllm_config.speculative_config.use_eagle.assert_not_called()
 
 
 def test_gemma4_speculator_mro():
-    # AscendAutoRegressiveSpeculator precedes Gemma4Speculator, so the two
-    # methods defined by both have to be re-combined by this subclass while the
-    # rest of the Gemma4 overrides are inherited from upstream untouched.
     assert AscendGemma4Speculator.__mro__[:4] == (
         AscendGemma4Speculator,
         AscendAutoRegressiveSpeculator,
