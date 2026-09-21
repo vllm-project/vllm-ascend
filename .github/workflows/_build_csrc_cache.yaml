@@ -162,7 +162,7 @@ jobs:
         if: fromJSON(inputs.target).os == 'ubuntu'
         run: |
           xargs apt-get -y install < packages.txt
-          apt-get -y install gcc g++ cmake libnuma-dev clang-15
+          apt-get -y install gcc g++ cmake libnuma-dev clang-15 ccache
           update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
           update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
           pip install uv
@@ -170,7 +170,7 @@ jobs:
       - name: Install system dependencies (openeuler)
         if: fromJSON(inputs.target).os == 'openeuler'
         run: |
-          yum install -y python3-pip net-tools jemalloc numactl patch clang
+          yum install -y python3-pip net-tools jemalloc numactl patch clang ccache
           pip install uv
 
       - name: Restore csrc snapshot cache
@@ -188,6 +188,24 @@ jobs:
           restore-keys: |
             csrc-snapshot-v1-${{ fromJSON(inputs.target).id }}-
 
+      - name: Restore ccache directory
+        # The CANN build framework auto-detects ccache in PATH (build.sh adds
+        # -DENABLE_CCACHE=ON -DCUSTOM_CCACHE=...) and routes the host-side C++
+        # compiles (op_host, protobuf, torch adapter) through it. The ccec /
+        # AscendC kernels are NOT cacheable by ccache (verified live: those
+        # invocations show up as uncacheable pass-throughs) - they are covered
+        # by the snapshot cache above instead. Cross-container snapshot
+        # restores still mark every CXX rule dirty by mtime; with ccache each
+        # such "recompile" becomes a millisecond-level content hit. The cache
+        # is shared by every target using the same arch + image (ccache keys
+        # include the full command line, so per-SOC flags coexist safely).
+        uses: runs-on/cache/restore@v5
+        with:
+          path: /tmp/ccache-dir
+          key: ccache-dir-v1-${{ fromJSON(inputs.target).cache_arch }}-${{ fromJSON(inputs.target).image_tag }}-${{ inputs.csrc_hash }}
+          restore-keys: |
+            ccache-dir-v1-${{ fromJSON(inputs.target).cache_arch }}-${{ fromJSON(inputs.target).image_tag }}-
+
       - name: Restore uv wheel cache
         # requirements-dev.txt installs the full build toolchain (torch,
         # torch-npu, ...). Downloading ~2GB of wheels per build dominates the
@@ -204,6 +222,8 @@ jobs:
         env:
           SOC_VERSION: ${{ fromJSON(inputs.target).soc_version }}
           MAX_JOBS: '16'
+          CCACHE_DIR: /tmp/ccache-dir
+          CCACHE_MAXSIZE: 2G
           # Snapshot cache is opt-in: an empty dir disables the hooks in
           # build_aclnn.sh entirely (cache_enabled checks the env var).
           VLLM_ASCEND_SNAPSHOT_CACHE_DIR: ${{ inputs.snapshot-cache && '/tmp/csrc-snapshot-store' || '' }}
@@ -316,6 +336,19 @@ jobs:
         with:
           path: /tmp/csrc-snapshot-store
           key: csrc-snapshot-v1-${{ fromJSON(inputs.target).id }}-${{ inputs.csrc_hash }}
+
+      - name: Show ccache statistics
+        # Observability for the host-side cache: expect misses on a cold
+        # target and hits once the directory has been restored once.
+        env:
+          CCACHE_DIR: /tmp/ccache-dir
+        run: ccache --show-stats || ccache -s
+
+      - name: Save ccache directory
+        uses: runs-on/cache/save@v5
+        with:
+          path: /tmp/ccache-dir
+          key: ccache-dir-v1-${{ fromJSON(inputs.target).cache_arch }}-${{ fromJSON(inputs.target).image_tag }}-${{ inputs.csrc_hash }}
 
       - name: Upload build log
         # Full uv/setuptools/cmake/ccec output plus 5s CPU samples, for
