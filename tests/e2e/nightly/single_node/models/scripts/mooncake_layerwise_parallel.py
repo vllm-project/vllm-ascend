@@ -65,6 +65,14 @@ def main():
         "below; the connector config is owned by this script.",
     )
     parser.add_argument(
+        "--kv-role",
+        default="kv_both",
+        choices=("kv_both", "kv_producer", "kv_consumer"),
+        help="Pool role of the engine. kv_producer saves without ever loading, "
+        "which is the control for 'does the save path perturb the caches it "
+        "writes': with no load, the two rounds must still match.",
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Log at DEBUG so the per-rank layout identity lines are visible.",
@@ -97,7 +105,7 @@ def main():
     # Applied last: the smoke is only meaningful with this connector.
     engine_kwargs["kv_transfer_config"] = {
         "kv_connector": "AscendStoreConnector",
-        "kv_role": "kv_both",
+        "kv_role": args.kv_role,
         "kv_connector_extra_config": {
             "backend": "mooncake",
             "use_layerwise": True,
@@ -119,13 +127,17 @@ def main():
     assert (cold.num_cached_tokens or 0) == 0, "The first request must have a cold prefix"
     assert cold.prompt_token_ids is not None
     assert len(cold.prompt_token_ids) > args.max_num_batched_tokens, "Prompt must exercise chunked prefill"
+    can_load = args.kv_role != "kv_producer"
     for iteration in range(2):
         reset_local_prefix_cache(llm)
         warm = llm.generate([{"prompt_token_ids": token_ids}], sampling)[0]
-        assert (warm.num_cached_tokens or 0) >= args.block_size, (
-            f"No remote block was loaded (cached_tokens={warm.num_cached_tokens}); is the prompt "
-            f"({args.prompt_tokens} tokens) longer than the model's transfer granularity?"
-        )
+        if can_load:
+            assert (warm.num_cached_tokens or 0) >= args.block_size, (
+                f"No remote block was loaded (cached_tokens={warm.num_cached_tokens}); is the prompt "
+                f"({args.prompt_tokens} tokens) longer than the model's transfer granularity?"
+            )
+        else:
+            print(f"control run (kv_producer): cached_tokens={warm.num_cached_tokens}")
         warm_ids = warm.outputs[0].token_ids
         cold_ids = cold.outputs[0].token_ids
         if warm_ids != cold_ids:
