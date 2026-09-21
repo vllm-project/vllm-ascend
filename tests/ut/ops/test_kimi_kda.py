@@ -135,6 +135,54 @@ def test_upstream_kda_dispatch_accepts_beta_keyword_during_profile():
     torch.testing.assert_close(output, expected)
 
 
+@pytest.mark.parametrize("initial_state", [None, [True, False, True, False]])
+@pytest.mark.parametrize("cache_layout", ["flat", "block-table"])
+def test_causal_conv1d_prefill_keeps_official_packed_varlen_contract(initial_state, cache_layout):
+    query_start_loc = torch.tensor([0, 1, 6, 8, 8], dtype=torch.int32)
+    cache_indices = torch.tensor([2, 5, 3, -1], dtype=torch.int32)
+    if cache_layout == "block-table":
+        cache_indices = torch.stack((cache_indices, torch.full_like(cache_indices, 7)), dim=1)
+    metadata = SimpleNamespace(query_start_loc=query_start_loc, cache_indices=cache_indices)
+    if initial_state is not None:
+        # Model metadata can be a non-contiguous boolean view.
+        initial_state_table = torch.tensor([[value, False] for value in initial_state], dtype=torch.bool)
+        metadata.initial_state_mode = initial_state_table[:, 0]
+    mixed_qkv = torch.empty(8, 6)
+    conv_weights_t = torch.empty(4, 6)
+    conv_state = torch.empty(8, 3, 6)
+    expected_output = torch.empty_like(mixed_qkv)
+
+    with patch(
+        "vllm_ascend.ops.kimi_kda.torch.ops.cann_ops_transformer.causal_conv1d_fn",
+        return_value=expected_output,
+    ) as prefill:
+        output = AscendKimiGatedDeltaNetAttention._run_causal_conv1d(
+            mixed_qkv,
+            conv_weights_t,
+            conv_state,
+            metadata,
+            run_mode=0,
+        )
+
+    prefill.assert_called_once()
+    kwargs = prefill.call_args.kwargs
+    assert output is expected_output
+    assert kwargs["x"] is mixed_qkv
+    assert kwargs["conv_states"] is conv_state
+    assert kwargs["weight"] is conv_weights_t
+    assert kwargs["bias"] is None
+    assert kwargs["query_start_loc"] is query_start_loc
+    torch.testing.assert_close(kwargs["cache_indices"], torch.tensor([2, 5, 3, 0], dtype=torch.int32))
+    assert kwargs["cache_indices"].is_contiguous()
+    expected_initial_state = (
+        torch.zeros(4, dtype=torch.int32)
+        if initial_state is None
+        else metadata.initial_state_mode.to(torch.int32)
+    )
+    torch.testing.assert_close(kwargs["has_initial_state"], expected_initial_state)
+    assert kwargs["has_initial_state"].is_contiguous()
+
+
 @pytest.mark.parametrize(
     ("query_offsets", "cache_ids"),
     [
