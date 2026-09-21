@@ -203,6 +203,12 @@ int64_t HcPreTiling::CalcStage2UbSize(int64_t rowFactor, int64_t dFactor, int64_
 // no-slack case identical to the unbatched footprint.
 void HcPreTiling::CalcCombRowFactor()
 {
+    // Zero-batch dynamic shapes can drive rowFactor_ to 0; the growth loop below
+    // would then never terminate, so bail out early.
+    if (rowFactor_ <= 0) {
+        combRowFactor_ = 0;
+        return;
+    }
     int64_t maxCombRows = std::min(COMB_ROW_FACTOR_MAX, rowOfFormerBlock_);
     combRowFactor_ = rowFactor_;
     while (combRowFactor_ + rowFactor_ <= maxCombRows &&
