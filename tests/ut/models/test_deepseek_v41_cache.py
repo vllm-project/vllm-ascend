@@ -1347,7 +1347,7 @@ def test_v41_cp_full_o_proj_skips_activation_exchange(monkeypatch):
     impl = AscendDSAV41CPImpl("layer", SimpleNamespace(is_kv_source=False), None, None, None)
     exchange = Mock(side_effect=AssertionError("full o_proj must not exchange activations"))
     monkeypatch.setattr("vllm_ascend.attention.context_parallel.dsa_v41_cp.restore_tp_heads", exchange)
-    calls = []
+    calls: list[Any] = []
 
     def project(tensor, output, *, full_gather_wo_a_enabled=False):
         calls.append((tensor.clone(), full_gather_wo_a_enabled))
