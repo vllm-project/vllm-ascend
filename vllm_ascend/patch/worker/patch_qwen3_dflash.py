@@ -5,6 +5,23 @@ from vllm.model_executor.models.qwen3_dflash import (
     DFlashQwen3Model,
 )
 
+from vllm_ascend.models.qwen3_dflash2 import DFlash2Qwen3DecoderLayer
+
+try:
+    import vllm.model_executor.models.lilicorr as lilicorr_module
+except ModuleNotFoundError as exc:
+    if exc.name != "vllm.model_executor.models.lilicorr":
+        raise
+    # LiLiCorr is supplied by an upstream vLLM change. Keep this general
+    # DFlash patch importable while the paired vLLM revision lacks the model.
+    lilicorr_module = None
+
+if lilicorr_module is not None:
+    # LiLiCorr's convolutional variant selects this module-level decoder
+    # factory. Keep its upstream head and checkpoint loader, but use the NPU
+    # implementation for the DFlash2 backbone.
+    lilicorr_module.DFlash2Qwen3DecoderLayer = DFlash2Qwen3DecoderLayer
+
 
 def precompute_and_store_context_kv(
     self,

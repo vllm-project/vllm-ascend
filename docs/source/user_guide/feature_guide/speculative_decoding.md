@@ -383,6 +383,32 @@ A few important things to consider when using DFlash2 draft models:
 
 5. The selector parameters (`selector_top_k`, `selector_rank`, ...) come from
    the draft checkpoint's `dflash_config` and need no user configuration.
+## Speculating using LiLiCorr
+
+LiLiCorr is a DFlash variant that reranks the per-position top-k candidate
+lattice before target-model verification. It requires a dedicated
+`LiLiCorrDraftModel` checkpoint trained for the target model; a regular DFlash
+or DFlash2 checkpoint cannot be substituted. The configured
+`num_speculative_tokens` must equal the checkpoint's trained block size minus
+one (the example below assumes a block size of eight).
+
+LiLiCorr currently uses Model Runner V2 and eager draft execution on Ascend.
+Set `VLLM_USE_V2_MODEL_RUNNER=1` and set the nested speculative
+`enforce_eager` option to `true`. The target model retains its independently
+configured execution mode.
+
+```shell
+VLLM_USE_V2_MODEL_RUNNER=1 vllm serve <target-model> \
+  --tensor-parallel-size 1 \
+  --max-model-len 4096 \
+  --no-enable-prefix-caching \
+  --speculative-config '{"method":"dflash","model":"<matching-lilicorr-checkpoint>","num_speculative_tokens":7,"enforce_eager":true}'
+```
+
+Both the plain and convolutional LiLiCorr checkpoint variants are supported.
+Use the checkpoint's own `dflash_config` values for candidate top-k and
+convolution geometry; these values are part of the trained model and should
+not be tuned at serving time.
 
 ## Speculating using DSpark
 
