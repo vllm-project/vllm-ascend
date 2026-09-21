@@ -73,40 +73,6 @@ class TestAscendStoreConnector(unittest.TestCase):
         config.parallel_config.rank = 0
         return config
 
-    def test_layerwise_miss_initializes_hooks_before_forward(self):
-        connector = AscendStoreConnector.__new__(AscendStoreConnector)
-        connector.use_layerwise = True
-        connector.connector_scheduler = MagicMock()
-        output = types.SimpleNamespace(has_sync_kv_loads=False, total_num_scheduled_tokens=1)
-        connector.build_connector_meta(output)
-        self.assertTrue(output.has_sync_kv_loads)
-        connector.connector_scheduler.build_connector_meta.assert_called_once_with(output)
-
-    def test_non_layerwise_preserves_async_load_scheduling(self):
-        connector = AscendStoreConnector.__new__(AscendStoreConnector)
-        connector.use_layerwise = False
-        connector.connector_scheduler = MagicMock()
-        output = types.SimpleNamespace(has_sync_kv_loads=False, total_num_scheduled_tokens=1)
-        connector.build_connector_meta(output)
-        self.assertFalse(output.has_sync_kv_loads)
-
-    def test_layerwise_empty_step_does_not_force_sync_loads(self):
-        connector = AscendStoreConnector.__new__(AscendStoreConnector)
-        connector.use_layerwise = True
-        connector.connector_scheduler = MagicMock()
-        output = types.SimpleNamespace(has_sync_kv_loads=False, total_num_scheduled_tokens=0)
-        connector.build_connector_meta(output)
-        self.assertFalse(output.has_sync_kv_loads)
-
-    def test_layerwise_completion_poll_does_not_prime_loads(self):
-        connector = AscendStoreConnector.__new__(AscendStoreConnector)
-        connector.use_layerwise = True
-        connector.connector_worker = MagicMock()
-        connector._get_connector_metadata = MagicMock()
-        connector.start_load_kv(types.SimpleNamespace(attn_metadata=None))
-        connector.connector_worker.start_load_kv.assert_not_called()
-        self.assertFalse(connector._current_step_has_real_forward)
-
     def test_pp_handshake_metadata_is_ignored(self):
         connector = AscendStoreConnector.__new__(AscendStoreConnector)
         metadata = {

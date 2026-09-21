@@ -15,7 +15,6 @@ from vllm.distributed import (
     get_pcp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
-    get_tp_group,
 )
 from vllm.distributed.kv_events import BlockStored
 from vllm.logger import logger
@@ -1041,17 +1040,13 @@ class KVPoolWorker:
         if self.backend_name == "mooncake" and self.use_layerwise:
             self.m_store.validate_layerwise_support()
         self._start_kv_transfer_threads()
+        if self.use_kvpp and self.use_layerwise:
+            # Reuse transfer completion/lease release at this shard's last layer.
+            last_owner_layer = max(self.physical_layer_to_group_layers, default=-1)
+            self.kv_recv_thread.final_layer_id = last_owner_layer
+            self.kv_send_thread.final_layer_id = last_owner_layer
 
     def start_load_kv(self, metadata: AscendConnectorMetadata):
-        if (
-            self.use_layerwise
-            and getattr(self, "layerwise_offload", False)
-            and self.backend_name == "memcache"
-            and (self.use_kvpp or self.put_step > 1)
-        ):
-            # All owner shards (or the replicated-cache writer) must be
-            # published before any rank starts loading the next chunk.
-            get_tp_group().barrier()
         self.current_layer = 0
         self.layerwise_retrievers: list[Any] = []
         if self.use_layerwise:
@@ -1072,8 +1067,6 @@ class KVPoolWorker:
         if self.use_layerwise:
             self.process_layer_data(metadata.requests)
             if self.use_kvpp:
-                assert isinstance(self.kv_recv_thread, KVCacheStoreLayerRecvingThread)
-                self.kv_recv_thread.final_layer_id = -1
                 self._submit_ready_layer_loads(startup=True)
             return
         for request in metadata.requests:
@@ -2442,36 +2435,18 @@ class KVPoolWorker:
             send_thread.add_request(self.layer_save_tasks[self.current_layer])  # type: ignore[arg-type]
         else:
             self.layer_save_finished_events[self.current_layer].set()
-        if self.current_layer == num_local - 1:
-            while not self.layer_save_finished_events[num_local - 1].wait(timeout=10):
+        if self.current_layer == num_local - 1 or (self.use_kvpp and self.current_layer == send_thread.final_layer_id):
+            while not self.layer_save_finished_events[self.current_layer].wait(timeout=10):
                 send_thread.raise_if_failed()
                 logger.info("Layerwise %d save not done, keep waiting", self.current_layer)
             send_thread.raise_if_failed()
             reuse_source_layers = set(self.prefetch_layer_map.values())
-            if self.use_kvpp:
-                # Reused slots have already waited for D2H in the load thread.
-                # Drain the remaining owner saves before publishing completion.
-                for layer_id in range(num_local):
-                    if self.layer_save_tasks[layer_id] and layer_id not in reuse_source_layers:
-                        while not self.layer_save_finished_events[layer_id].wait(timeout=10):
-                            send_thread.raise_if_failed()
-                        send_thread.raise_if_failed()
             for layer_id in range(num_local):
                 if layer_id in reuse_source_layers:
                     continue
                 if self.layer_save_finished_events[layer_id].is_set():
                     self.layer_save_finished_events[layer_id].clear()
 
-        if self.use_kvpp and self.current_layer == self.num_layers - 1:
-            keys = list(
-                dict.fromkeys(key for request in connector_metadata.requests for key in (request.load_keys or ()))
-            )
-            if keys:
-                self.m_store.batch_remove_lease(keys)
-            assert self.kv_recv_thread is not None
-            for request in connector_metadata.requests:
-                if request.is_last_chunk and request.load_spec is not None and request.load_spec.can_load:
-                    self.kv_recv_thread.set_finished_request(request.req_id)
         self.current_layer = self.current_layer + 1
 
     def wait_for_previous_save(self) -> None:

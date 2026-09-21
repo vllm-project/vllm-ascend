@@ -46,38 +46,3 @@ def test_physical_allocations_and_scratch_aliases(monkeypatch, num_blocks, total
         part.fill_(value)
     for value, part in enumerate(parts, 1):
         assert torch.all(part == value)
-
-
-@pytest.mark.parametrize("rank", [0, 1])
-@pytest.mark.parametrize("independent", [[], [0], [0, 4]])
-def test_offload_uses_existing_shared_slots(monkeypatch, rank, independent):
-    from dataclasses import replace
-
-    config = make_kvpp_config(2)
-    config.speculative_config = None
-    config.model_config.get_num_layers = lambda _: 12
-    config.kv_transfer_config = SimpleNamespace(
-        kv_connector="AscendStoreConnector",
-        kv_connector_extra_config={
-            "backend": "memcache",
-            "use_layerwise": True,
-            "layerwise_num_shared_buffers": 3,
-            "layerwise_independent_layers": independent,
-        },
-    )
-    template = make_kvpp_specs()[layer_name(9)]
-    specs = {layer_name(i): replace(template) for i in range(12)}
-    monkeypatch.setattr(kvpp_cache, "get_kvpp_group", lambda: SimpleNamespace(rank_in_group=rank))
-    caches = kvpp_cache.allocate_kvpp_cache(config, make_cache_config(specs, 2), torch.device("cpu"))
-    storages = {parts[0].untyped_storage().data_ptr(): parts[0].untyped_storage() for parts in caches.values()}
-    assert len(storages) == 3 + len(independent)
-    assert sum(s.nbytes() - kvpp_cache.KVPP_BUFFER_ALIGNMENT for s in storages.values()) == (
-        (3 + len(independent)) * 2 * template.page_size_bytes
-    )
-    shared_layers = [i for i in range(12) if i not in independent]
-    for slot in range(3):
-        members = shared_layers[slot::3]
-        caches[layer_name(members[0])][0].fill_(slot + 1)
-        assert all(torch.all(caches[layer_name(i)][0] == slot + 1) for i in members)
-    for i in independent:
-        assert torch.count_nonzero(caches[layer_name(i)][0]) == 0

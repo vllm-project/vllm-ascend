@@ -35,6 +35,7 @@ from vllm.v1.request import Request
 from vllm.v1.serial_utils import MsgpackDecoder
 from vllm.v1.worker import mamba_utils
 
+from vllm_ascend.ascend_config import KVPPConfig
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendStoreKVConnectorWorkerMetadata,
     is_block_key_layerwise,
@@ -170,11 +171,9 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> KVConnectorMetadata:
         assert self.connector_scheduler is not None
         if self.use_layerwise and scheduler_output.total_num_scheduled_tokens > 0:
-            # The scheduler marks newly admitted external hits, but layerwise
-            # also initializes save/reuse state on misses and reloads history
-            # for continuing chunks. The runner must call start_load_kv before
-            # these layer hooks, not after forward. This does not wait for H2D.
-            scheduler_output.has_sync_kv_loads = True
+            # KVPP must submit this forward's layer loads before broadcasting.
+            if KVPPConfig.from_vllm_config(self._vllm_config).size > 1:
+                scheduler_output.has_sync_kv_loads = True
         return self.connector_scheduler.build_connector_meta(scheduler_output)
 
     def request_finished(
@@ -264,11 +263,6 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self._mamba_copy_bufs = None
         metadata = self._get_connector_metadata()
         self._current_step_has_real_forward = forward_context is not None
-        if self.use_layerwise and (forward_context is None or forward_context.attn_metadata is None):
-            # A no-forward completion poll has no layer hooks to consume loads
-            # or release reused buffers. Do not prime another prefetch cycle.
-            self._current_step_has_real_forward = False
-            return
         logger.debug(
             "KV pool connector start_load_kv metadata_requests=%d specs=%s",
             len(metadata.requests),
@@ -282,6 +276,9 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
                 for request in metadata.requests
             ],
         )
+        if self.use_layerwise and self.connector_worker.use_kvpp:
+            if forward_context is None or forward_context.attn_metadata is None:
+                return
         self.connector_worker.start_load_kv(metadata)
 
     def wait_for_layer_ready(self, layer_name: str) -> None:

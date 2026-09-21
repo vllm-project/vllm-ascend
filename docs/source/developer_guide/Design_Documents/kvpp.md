@@ -75,12 +75,10 @@ vllm serve <model-path> \
 
 `enable_kvpp` defaults to `false`. With PP enabled, each stage assigns owners and broadcasts within its own TP group.
 
-## P-side layerwise offload
+## P-side layerwise integration
 
-The Memcache shared-buffer opt-in keeps the full-layer HCCL broadcast transport. KVPP allocates contiguous layer spans according to the existing `build_layerwise_reuse_layout` slot plan, including independent layers. It uses the existing offload memory budget and reuse predecessors; there is no separate owner/peer slot planner or buffer pool.
+KVPP uses the existing layerwise buffer layout and owner-filtered pool registration. Layerwise object offsets and transfer completion refer to the registered owner shard; no separate owner map or lease-release path is introduced.
 
-At prefetch depth 3, compute layer L queues H2D for L+2 while KVPP prefetches L+1. For depth N >= 3, startup submits N-1 layers and subsequent attention hooks submit one layer each. Shared buffers also require at least three slots. A load-completion callback in the KVPP executor waits for the layer to become ready; attention and KVPP observe the same completion event until the next forward.
+The KVPP prefetch executor waits for layer readiness before broadcasting. With prefetch depth N >= 3, startup submits N-1 layers and each attention hook submits one more. At depth 3, computation uses L, broadcast uses L+1, and H2D loads L+2. Existing reuse fences also run for empty non-owner tasks.
 
-The existing owner-filtered registration drives both H2D and D2H tasks. Physical layer IDs map to packed offsets within the registered owner shard. Empty non-owner tasks still pass through the existing compute/D2H reuse fences before broadcast can overwrite their slot. Read leases are released after the forward.
-
-The KVPP allocator consumes complete logical cache specifications, so the generic descriptor-merging pass is skipped; slot grouping itself is reused from offload. Current vLLM must initialize layerwise state before every real forward, including cache misses. Completion-only polls do not start another prefetch cycle. Owner tail saves are drained before the forward ends, and a TP boundary fence waits for all shards before loading the next chunk. For real layerwise forwards, `has_sync_kv_loads` forces `start_load_kv` to run before layer hooks: the scheduler only marks newly admitted synchronous external hits, whereas misses still need save/reuse initialization and continuing chunks may reload history. This flag orders submission; it does not synchronize every layer transfer. The pinned vLLM API is used directly.
+For this combination, the V1 runner starts layerwise loading before KVPP begins broadcasting. The readiness callback only waits; it does not advance attention or prefetch state. The current implementation is pending validation.

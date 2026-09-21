@@ -154,7 +154,7 @@ At compute layer L, Memcache loads L+2 while KVPP broadcasts L+1. The owner wait
 
 The existing KVPP owner registration is reused for both H2D and D2H: each rank reads and publishes its own layer shard. Layerwise offsets are packed within that registered shard, and lookup requires all owner objects. Use separate pool namespaces/model names when comparing configurations.
 
-This is a prefill-side feature; it does not enable KVPP on a decode-only node. Reply correctness checks should include cold chunked prefill and repeated prefix reuse. Performance overlap and throughput depend on the workload and require separate profiling.
+**This implementation is pending validation.** This is a prefill-side feature; it does not enable KVPP on a decode-only node. Reply correctness checks should include cold chunked prefill and repeated prefix reuse. Performance overlap and throughput depend on the workload and require separate profiling.
 
 ## Performance
 

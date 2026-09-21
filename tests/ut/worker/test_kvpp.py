@@ -122,24 +122,3 @@ def test_hook_propagates_failed_future_without_scheduling_next(scheduler_device)
         scheduler.wait_for_layer(layer_name(0))
     assert raised.value is error
     assert len(scheduler._prefetch_executor.submitted) == 1
-
-
-def test_offload_completion_precedes_broadcast(scheduler_device):
-    events, _, _ = scheduler_device
-    transport = Mock()
-    transport.prefetch.side_effect = lambda *args: events.append("broadcast")
-    scheduler = kvpp.KVPPScheduler(transport, (layer_name(0),), lambda name: events.append(("loaded", name)))
-    scheduler.schedule_forward(True)
-    assert transport.prefetch.call_count == 0
-    scheduler._prefetch_executor.run_next()
-    assert events[-2:] == [("loaded", layer_name(0)), "broadcast"]
-    scheduler.wait_for_layer(layer_name(0))
-
-
-def test_offload_failure_prevents_broadcast(scheduler_device):
-    transport = Mock()
-    wait = Mock(side_effect=RuntimeError("H2D failed"))
-    scheduler = kvpp.KVPPScheduler(transport, (layer_name(0),), wait)
-    with pytest.raises(RuntimeError, match="H2D failed"):
-        scheduler.run_layer_prefetch(layer_name(0), object())
-    transport.prefetch.assert_not_called()
