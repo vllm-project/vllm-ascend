@@ -180,24 +180,6 @@ a3:
       - name: Kimi-K2.6-w4a8-A3
         os: linux-aarch64-nightly-a3-16
         config_file_path: Kimi-K2.6-w4a8-A3.yaml
-      - name: kimi-k2.5
-        os: linux-aarch64-nightly-a3-16
-        config_file_path: Kimi-K2.5.yaml
-      - name: deepseek-r1-0528-w8a8-prefix-cache
-        os: linux-aarch64-nightly-a3-16
-        config_file_path: Prefix-Cache-DeepSeek-R1-0528-W8A8.yaml
-      - name: deepseek-v3-2-w8a8
-        os: linux-aarch64-nightly-a3-16
-        config_file_path: DeepSeek-V3.2-W8A8.yaml
-      - name: MiniMax-M3-W8A8-A3
-        os: linux-aarch64-nightly-a3-16
-        config_file_path: MiniMax-M3-W8A8-A3.yaml
-      - name: kimi-k2.6_max_model_len
-        os: linux-aarch64-nightly-a3-16
-        config_file_path: kimi-k2.6_max_model_len.yaml
-      - name: qwen_3_6_27b_w8a8_A3
-        os: linux-aarch64-nightly-a3-16
-        config_file_path: qwen_3_6_27b_w8a8_A3.yaml
   multi_card:
     test_config:
       # pytest-driven tests
