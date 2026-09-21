@@ -2917,6 +2917,63 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         self.assertListEqual(get_tp_rank(8, 1, 2, 4, 2, False, 4), get_tp_rank(4, 1, 2, 4, 2, False))
         self.assertListEqual(get_tp_rank(4, 1, 2, 4, 1, False, 2), get_tp_rank(2, 1, 2, 4, 1, False))
 
+    def test_get_remote_rank(self):
+        """`_get_remote_rank` must not index a decode-TP-sized list with P-side tp_rank."""
+
+        def make_worker_with_fake_ranks(tp_rank: int, kv_role: str, fake_ranks: list[list[int]]):
+            worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+            worker.tp_rank = tp_rank
+            worker.kv_role = kv_role
+            worker._get_remote_ranks_for_req = MagicMock(return_value=fake_ranks)
+            return worker
+
+        # P-TP8 / D-TP1: decode grouping has length 1; P-side tp_rank=5 used to IndexError.
+        producer = make_worker_with_fake_ranks(5, "kv_producer", [[0, 2, 4, 6]])
+        producer_ranks = producer._get_remote_rank("req-asymmetric")
+        self.assertEqual(producer_ranks, [0, 2, 4, 6])
+        self.assertTrue(set(producer_ranks).issubset(range(8)))
+        producer._get_remote_ranks_for_req.assert_called_once_with("req-asymmetric", None)
+
+        # Decode D-TP1 / tp_rank=0 keeps the existing grouping.
+        consumer = make_worker_with_fake_ranks(0, "kv_consumer", [[0, 2, 4, 6]])
+        self.assertEqual(consumer._get_remote_rank("req-decode"), [0, 2, 4, 6])
+
+        # Symmetric P-TP == D-TP still indexes by tp_rank.
+        symmetric = make_worker_with_fake_ranks(2, "kv_producer", [[0], [1], [2], [3]])
+        self.assertEqual(symmetric._get_remote_rank("req-symmetric"), [2])
+
+        # Real P-TP8 / D-TP1 grouping: producer tp_rank=5 matches decode-group 0.
+        with (
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_ascend_config",
+                return_value=MagicMock(),
+            ),
+            patch.object(
+                self.vllm_config.kv_transfer_config,
+                "get_from_extra_config",
+                side_effect=lambda k, d=None: {
+                    "prefill": {"tp_size": 8, "dp_size": 1, "pp_size": 1},
+                    "decode": {"tp_size": 1, "dp_size": 1, "pp_size": 1},
+                }.get(k, d),
+            ),
+        ):
+            self.vllm_config.model_config.hf_text_config.num_key_value_heads = 4
+            self.vllm_config.model_config.is_deepseek_mla = False
+            worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
+            worker.tp_num_need_pulls = 4
+            worker.use_sparse = False
+            worker.kv_role = "kv_producer"
+            worker.tp_rank = 5
+            grouped = worker._get_remote_ranks_for_req("test")
+            got = worker._get_remote_rank("test")
+            self.assertEqual(len(grouped), 1)
+            self.assertEqual(got, grouped[0])
+            self.assertTrue(got)
+            self.assertTrue(set(got).issubset(range(8)))
+            worker.kv_role = "kv_consumer"
+            worker.tp_rank = 0
+            self.assertEqual(worker._get_remote_rank("test"), grouped[0])
+
     def test_get_kv_split_metadata(self):
         def get_kv_split_metadata(
             use_mla,
