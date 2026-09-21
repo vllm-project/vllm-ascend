@@ -138,6 +138,13 @@ class AscendDSAV41CPImpl(AscendDSAV41Impl):
             self._kv_gather_buffers[key] = output
         return all_gather_async(hidden_states, group, output=output, async_op=True)
 
+    @staticmethod
+    def _use_full_o_proj(v1_impl, swa_metadata):
+        global_metadata = getattr(swa_metadata, "global_metadata", None) or swa_metadata
+        return bool(
+            getattr(v1_impl, "enable_dsa_cp_full_o_proj", False) and getattr(global_metadata, "num_prefills", 0) > 0
+        )
+
     def multistream_preprocess(self, attn, hidden_states, cos, sin, swa_metadata):
         """Slice local Q from full inputs and overlap replicated KV preprocessing."""
         global_metadata = self._global_layer_metadata(get_forward_context().attn_metadata)
@@ -150,7 +157,7 @@ class AscendDSAV41CPImpl(AscendDSAV41Impl):
             start, _, _, _ = swa_metadata.cp_token_range
             hidden_states = hidden_states[start : start + swa_metadata.num_actual_tokens]
         v1_impl = attn.dsa_attn.dsa_attn.impl
-        full_o_proj = bool(getattr(v1_impl, "enable_dsa_cp_full_o_proj", False))
+        full_o_proj = self._use_full_o_proj(v1_impl, swa_metadata)
         if full_o_proj:
             v1_impl._maybe_all_gather_o_proj_full_weight(True)
         kv_cos, kv_sin = global_metadata.rope(attn.rotary_emb.layername, kv_hidden_states.shape[0])
@@ -241,7 +248,7 @@ class AscendDSAV41CPImpl(AscendDSAV41Impl):
                 if handle is not None:
                     handle.wait()
             v1_impl = attn.dsa_attn.dsa_attn.impl
-            if getattr(v1_impl, "enable_dsa_cp_full_o_proj", False):
+            if self._use_full_o_proj(v1_impl, metadata.swa):
                 v1_impl._maybe_all_gather_o_proj_full_weight(True)
             self._update_caches(attn, hidden_states[: global_metadata.swa.num_actual_tokens], global_metadata)
 
@@ -263,7 +270,7 @@ class AscendDSAV41CPImpl(AscendDSAV41Impl):
 
     def _project_output(self, attn, output, hidden_states, metadata, *, projected):
         v1_impl = attn.dsa_attn.dsa_attn.impl
-        full_o_proj = bool(getattr(v1_impl, "enable_dsa_cp_full_o_proj", False))
+        full_o_proj = self._use_full_o_proj(v1_impl, metadata.swa)
         if full_o_proj:
             padded = output
             if output.shape[0] != hidden_states.shape[0]:

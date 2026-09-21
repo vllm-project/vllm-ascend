@@ -875,6 +875,16 @@ class DeepseekV41DecoderLayer(nn.Module):
             comb.unsqueeze(0),
         ).squeeze(0)
 
+    def _use_dsa_cp_full_o_proj(self) -> bool:
+        if not getattr(self, "use_dsa_cp_full_o_proj", False) or not is_forward_context_available():
+            return False
+        metadata = get_forward_context().attn_metadata
+        if metadata is None:
+            return False
+        swa_metadata = metadata[self.self_attn.v41_impl.swa_prefix]
+        global_metadata = swa_metadata.global_metadata or swa_metadata
+        return global_metadata.num_prefills > 0
+
     def forward(
         self,
         positions,
@@ -894,7 +904,7 @@ class DeepseekV41DecoderLayer(nn.Module):
         )
         x = self.input_layernorm(x)
         use_dsa_cp = getattr(self, "enable_dsa_cp", False)
-        use_cp_full_o_proj = use_sequence_parallel and getattr(self, "use_dsa_cp_full_o_proj", False)
+        use_cp_full_o_proj = use_sequence_parallel and self._use_dsa_cp_full_o_proj()
         if use_sequence_parallel and not use_dsa_cp:
             x = sp_all_gather(x)[: positions.shape[0]]
         x = self.self_attn(positions, x, llama_4_scaling)

@@ -1318,7 +1318,9 @@ def test_v41_cp_output_exchange_only_pads_partial_ranks(monkeypatch, local_token
         assert tensor.shape == (num_tokens, 2, 3)
         output.copy_(tensor.flatten(1))
 
-    projection = SimpleNamespace(_forward_o_proj=project)
+    # Full-weight switching is available, but a pure decode batch must retain
+    # the activation exchange path.
+    projection = SimpleNamespace(enable_dsa_cp_full_o_proj=True, _forward_o_proj=project)
     attn = SimpleNamespace(dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=projection)))
     destination = torch.empty((num_tokens, 6))
     local_output = torch.ones((local_tokens, 4, 3))
@@ -1365,7 +1367,7 @@ def test_v41_cp_full_o_proj_skips_activation_exchange(monkeypatch):
         attn,
         local,
         torch.empty(2, 12),
-        SimpleNamespace(swa=SimpleNamespace(cp_token_range=(0, 2, 2, 4))),
+        SimpleNamespace(swa=SimpleNamespace(cp_token_range=(0, 2, 2, 4), num_prefills=1)),
         projected=destination,
     )
 
