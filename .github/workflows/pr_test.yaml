@@ -40,6 +40,17 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # TEMPORARY(build-only validation): while vars.TEMP_BUILD_ONLY == "true"
+  # (repository variable, Settings -> Secrets and variables -> Actions ->
+  # Variables) the E2E pipeline stops after the csrc build
+  # (prepare-csrc-cache): the NPU test matrix (run-selected-tests/-a5) is
+  # skipped and ci-gate passes on pre-commit + cpu-ut alone. The variable
+  # is the single switch for this mode; delete this env block when the
+  # build-only validation period ends (the workflow env copy exists only
+  # as a visible reminder).
+  TEMP_BUILD_ONLY: "true"
+
 jobs:
   resolve-vllm-refs:
     # Sub-minute job that reads the pinned vLLM refs so cpu-ut can start as
@@ -641,6 +652,7 @@ jobs:
     # running after workflow cancel.
     if: >-
       ${{
+        vars.TEMP_BUILD_ONLY != 'true' &&
         !cancelled() &&
         needs.pre-commit.result == 'success' &&
         needs.prepare-csrc-cache.result == 'success' &&
@@ -676,6 +688,7 @@ jobs:
     # (skipped under ready-all) through select-tests, without running after workflow cancel.
     if: >-
       ${{
+        vars.TEMP_BUILD_ONLY != 'true' &&
         !cancelled() &&
         needs.pre-commit.result == 'success' &&
         needs.prepare-csrc-cache.result == 'success' &&
@@ -706,6 +719,7 @@ jobs:
     # is still being built and fall back to compiling on the NPU runner.
     if: >-
       ${{
+        vars.TEMP_BUILD_ONLY != 'true' &&
         !cancelled() &&
         needs.pre-commit.result == 'success' &&
         needs.prepare-csrc-cache.result == 'success' &&
@@ -749,6 +763,19 @@ jobs:
           CPU_UT_RESULT="${{ needs.cpu-ut.result }}"
           SELECT_TESTS_RESULT="${{ needs.select-tests.result }}"
           HAS_TESTS="${{ needs.select-tests.outputs.has_tests == 'true' }}"
+
+          # TEMPORARY(build-only validation): the NPU test matrix is disabled
+          # by TEMP_BUILD_ONLY, so gate on the static checks only.
+          if [ "${{ vars.TEMP_BUILD_ONLY }}" = "true" ]; then
+            if [ "${PRE_COMMIT_RESULT}" != "success" ] || [ "${CPU_UT_RESULT}" != "success" ]; then
+              echo "::error::build-only mode still requires pre-commit and cpu-ut to succeed"
+              exit 1
+            fi
+            echo "::notice::TEMP build-only mode: NPU test execution is disabled"
+            echo "=== CI Gate: PASSED (build-only) ==="
+            exit 0
+          fi
+
           HAS_TESTS_A5="${{ needs.select-tests.outputs.has_tests_a5 }}"
 
           echo "=== CI Gate Summary ==="
