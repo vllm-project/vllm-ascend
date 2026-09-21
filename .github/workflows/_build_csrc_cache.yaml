@@ -292,29 +292,17 @@ jobs:
         id: prune-snapshots
         run: |
           set -euo pipefail
-          if [ ! -f /tmp/csrc-snapshot-store/index.json ]; then
+          store=/tmp/csrc-snapshot-store
+          if ! ls "$store"/snapshot-*.tar.* >/dev/null 2>&1; then
             echo "saved=false" >> "$GITHUB_OUTPUT"
-            echo "no snapshot store produced; nothing to save"
+            echo "no snapshot produced; nothing to save"
             exit 0
           fi
-          python3 - <<'PY'
-          import json
-          import pathlib
-
-          store = pathlib.Path("/tmp/csrc-snapshot-store")
-          index_path = store / "index.json"
-          index = json.loads(index_path.read_text(encoding="utf-8"))
-          entries = index.get("entries", {})
-          if not entries:
-              raise SystemExit("::error::snapshot store index has no entries")
-          newest = max(entries.items(), key=lambda kv: kv[1]["created"])[0]
-          for key in list(entries):
-              if key != newest:
-                  (store / key).unlink(missing_ok=True)
-                  del entries[key]
-          index_path.write_text(json.dumps(index, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-          print(f"pruned snapshot store to newest entry: {newest}")
-          PY
+          newest=$(ls -t "$store"/snapshot-*.tar.* | head -1)
+          for f in "$store"/snapshot-*.tar.*; do
+            [ "$f" = "$newest" ] || rm -f "$f"
+          done
+          echo "pruned snapshot store to newest entry: $(basename "$newest")"
           echo "saved=true" >> "$GITHUB_OUTPUT"
 
       - name: Save csrc snapshot cache

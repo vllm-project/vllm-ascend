@@ -83,14 +83,14 @@ log_selected_ops() {
 #                   produced it (uv build-isolation temps) - regenerate
 #   3. invalidate: per-op source hashes decide which ops to recompile
 #   4. build:     the normal build below only recompiles invalidated ops
-#   5. save:      new snapshot uploaded, LRU-evicted to the budget
+#   5. save:      new snapshot uploaded (retention is delegated to the
+#                 store owner, e.g. the GitHub cache LRU)
 #   6. self-check: invalidated ops must have fresh artifacts, else fail
 #
 # Without the env var the script behaves exactly as before.
 # Env vars:
 #   VLLM_ASCEND_SNAPSHOT_CACHE_DIR   cache directory (local store backend)
 #   VLLM_ASCEND_CACHE_TARGET         target id (default: $SOC_VERSION)
-#   VLLM_ASCEND_CACHE_BUDGET         LRU budget, default 5G
 #   VLLM_ASCEND_CACHE_IMAGE_TAG      CANN image tag for the global hash
 # ============================================================================
 
@@ -99,7 +99,7 @@ CACHE_TOOLS_DIR="${ROOT_DIR}/.github/workflows/scripts"
 CACHE_MANIFEST_TOOL="${CACHE_TOOLS_DIR}/csrc_snapshot_manifest.py"
 CACHE_LRU_TOOL="${CACHE_TOOLS_DIR}/csrc_cache_lru.py"
 CACHE_TARGET="${VLLM_ASCEND_CACHE_TARGET:-${SOC_VERSION}}"
-CACHE_BUDGET="${VLLM_ASCEND_CACHE_BUDGET:-5G}"
+CACHE_IMAGE_TAG="${VLLM_ASCEND_CACHE_IMAGE_TAG:-}"
 CACHE_IMAGE_TAG="${VLLM_ASCEND_CACHE_IMAGE_TAG:-}"
 CACHE_TAG=""
 CACHE_MISS_OPS=()
@@ -124,10 +124,10 @@ snapshot_csrc_hash() {
 cache_restore() {
     cache_enabled || return 0
     CACHE_TAG="$(snapshot_csrc_hash)" || return 0
-    log "snapshot cache: dir=${SNAPSHOT_CACHE_DIR} target=${CACHE_TARGET} budget=${CACHE_BUDGET} tag=${CACHE_TAG:0:12}"
+    log "snapshot cache: dir=${SNAPSHOT_CACHE_DIR} target=${CACHE_TARGET} tag=${CACHE_TAG:0:12}"
 
     if python3 "${CACHE_LRU_TOOL}" --store-dir "${SNAPSHOT_CACHE_DIR}" \
-        --budget "${CACHE_BUDGET}" --restore --target "${CACHE_TARGET}" \
+        --restore --target "${CACHE_TARGET}" \
         --dest "${ROOT_DIR}/csrc"; then
         log "snapshot restored; reconfiguring to fix embedded tool paths"
         if ! cmake --regenerate-during-build -S "${ROOT_DIR}/csrc" \
@@ -202,7 +202,7 @@ cache_save() {
     fi
 
     python3 "${CACHE_LRU_TOOL}" --store-dir "${SNAPSHOT_CACHE_DIR}" \
-        --budget "${CACHE_BUDGET}" --upload --path "${ROOT_DIR}/csrc/build" \
+        --upload --path "${ROOT_DIR}/csrc/build" \
         --target "${CACHE_TARGET}" --snapshot-id "${CACHE_TAG}" \
         || { log "::warning::snapshot upload failed; cache not updated"; return 0; }
     return 0
