@@ -7,9 +7,8 @@ Expert balancing for MoE (Mixture of Experts) models in LLM (Large Language) ser
 vLLM Ascend provides two EPLB integration paths:
 
 - **Model Runner V2 (MRv2)** uses the upstream vLLM EPLB controller,
-  configuration, default policy, load window, asynchronous worker, and
-  rearrangement lifecycle. Ascend adds Gloo CPU staging and the
-  `load_collection_phase` extension.
+  configuration, and asynchronous rearrangement lifecycle. Ascend uses the
+  STAIR placement policy, temporal load statistics, and Gloo CPU staging.
 - **Model Runner V1 (MRv1)** retains the legacy vLLM Ascend dynamic, recording,
   and static EPLB modes.
 
@@ -82,9 +81,9 @@ EPLB is not recommended in the following scenarios because the load-balancing be
 ### Model Runner V2: Asynchronous EPLB
 
 Select MRv2 explicitly when the model or environment does not select it by
-default. Enable expert parallelism and upstream EPLB. Ascend uses the upstream
-default policy, selects the Gloo communicator automatically, and supports
-asynchronous movement only.
+default. Enable expert parallelism and upstream EPLB. Ascend selects STAIR
+internally and the Gloo communicator automatically; movement is asynchronous
+only. The STAIR defaults do not require tuning.
 
 ```bash
 export VLLM_USE_V2_MODEL_RUNNER=1
@@ -112,7 +111,7 @@ MRv2 uses the upstream `EPLBConfig` fields:
 | `step_interval` | `3000` | Interval between expert rearrangements. |
 | `num_redundant_experts` | `0` | Number of redundant physical experts. |
 | `use_async` | `true` | Ascend MRv2 always runs asynchronously. `false` is normalized to `true` with a warning. |
-| `policy` | `default` | Upstream EPLB placement policy. |
+| `policy` | `default` | Upstream accepts only `default`; leave it unset. Ascend MRv2 runs STAIR internally. |
 | `log_balancedness` | `false` | Log expert balancedness metrics. |
 | `log_balancedness_interval` | `1` | Interval between balancedness log entries. |
 | `communicator` | `None` | Leave unset for automatic Gloo selection, or set `torch_gloo`. |
@@ -122,10 +121,10 @@ They must not be placed in `--additional-config` for MRv2.
 
 #### MRv2 Load Collection Phase
 
-`load_collection_phase` is the only MRv2 EPLB field under
-`additional_config.eplb_config`. It controls which batch phases contribute to
-the upstream load window; it does not disable routing or MoE computation for
-non-matching batches.
+`load_collection_phase` and `stair_config` are the MRv2 EPLB fields under
+`additional_config.eplb_config`. The former controls which batch phases
+contribute to the load window; it does not disable routing or MoE computation
+for non-matching batches.
 
 | Value | Behavior | Typical use |
 | --- | --- | --- |
@@ -137,8 +136,9 @@ Classification is performed once per batch. A batch containing any prefill
 request is classified entirely as prefill; otherwise it is decode. A batch
 that does not match `load_collection_phase` contributes zero load whenever the
 current step is recorded; it does not suppress the shared EPLB window advance.
+STAIR excludes a time sample if no rank in the EP group collected load for it.
 This keeps load-window slots, scheduling, and communication aligned across
-data-parallel ranks.
+EP ranks.
 
 For example, to collect only prefill load:
 
@@ -150,10 +150,42 @@ vllm serve Qwen/Qwen3-30B-A3B \
   --additional-config '{"eplb_config":{"load_collection_phase":"prefill"}}'
 ```
 
+#### Advanced STAIR tuning
+
+STAIR uses covariance-aware load risk, skips layers below its balance gates,
+searches replica counts and constrained rank placements, and accepts only
+placements that do not worsen predicted mean or p95 imbalance. It also works
+with `num_redundant_experts=0` by exchanging existing experts. The following
+settings are for workload-specific tuning; the defaults are intended for use
+without overrides. Balance is the reciprocal of the window's mean
+max-to-average rank-load ratio. Predicted mean balance takes priority; when
+candidates are effectively tied, STAIR prefers fewer cross-node transfers,
+then fewer same-node transfers between ranks.
+
+| `stair_config` field | Default | Allowed values | Effect |
+| --- | --- | --- | --- |
+| `load_window_bins` | `64` | `2`–`256` | Maximum number of chronological bins used to summarize sampled loads. |
+| `load_risk_quantile` | `0.75` | `0.5 < q < 1` | Standard-normal quantile for mean-plus-deviation load risk. |
+| `relative_balance_threshold` | `0.95` | `0 < x <= 1` | Plan a layer when current balance is at most this fraction of its last committed balance. |
+| `absolute_balance_threshold` | `0.90` | `0 < x <= 1` | Plan a layer when current balance is at most this value, even without relative deterioration. |
+| `rank_pair_migration_limit` | `1` | Integer `>= 1` | Maximum transfers per directed rank pair and layer. |
+| `replica_search_num_stages` | `4` | Integer `1`–`8` | Number of stages in replica-count search. |
+| `replica_search_radius` | `8` | Integer `0`–`32` | Distance from the greedy replica budget explored per stage. |
+| `replica_search_beam_size` | `64` | Integer `1`–`128` | Maximum replica-count candidates retained per stage. |
+| `placement_search_backtrack_limit` | `32` | Integer `0`–`64` | Maximum feasible-branch reversals in constrained placement search; zero disables backtracking. |
+
+For example, replace the `--additional-config` argument in the first MRv2
+command with
+`--additional-config '{"eplb_config":{"load_collection_phase":"all","stair_config":{"load_risk_quantile":0.9}}}'`
+to change only the load-risk quantile.
+
 !!! IMPORTANT
 
-    MRv2 supports asynchronous EPLB only and normalizes `use_async=false` to asynchronous Gloo movement. It rejects legacy `dynamic_eplb`, recording/static-map fields, `DYNAMIC_EPLB`, and `EXPERT_MAP_RECORD`, as
-    well as communicators other than Gloo. Validate the target model, topology, graph mode, and traffic independently before production use.
+    MRv2 supports asynchronous EPLB only and normalizes `use_async=false` to
+    asynchronous Gloo movement. It rejects elastic EP, legacy `dynamic_eplb`,
+    recording/static-map fields, `DYNAMIC_EPLB`, and `EXPERT_MAP_RECORD`, as
+    well as communicators other than Gloo. Validate the target model, topology,
+    graph mode, and traffic independently before production use.
 
 ### Model Runner V1: Legacy EPLB
 

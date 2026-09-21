@@ -2,10 +2,10 @@
 
 Model Runner V2 on Ascend uses the upstream vLLM Expert Parallelism Load
 Balancer (EPLB) control plane and adds a small Ascend-specific integration
-plane. Upstream code owns load windows, policy execution, placement state, and
-the rearrangement transaction. vLLM Ascend owns device routing, executed-load
-recording, quantized expert-weight views, and the asynchronous Gloo-staged
-movement adapter.
+plane. Upstream code owns placement state and the rearrangement transaction.
+vLLM Ascend owns the STAIR policy, temporal load preparation, device routing,
+executed-load recording, quantized expert-weight views, and the asynchronous
+Gloo-staged movement adapter.
 
 This page describes the current asynchronous architecture. For the decisions
 behind this ownership model, see
@@ -37,7 +37,7 @@ flowchart LR
     C -->|"physical expert IDs"| E["Quantized fused MoE"]
     E -->|"executed expert counts"| F["Load recorder"]
     F --> A
-    A -->|"default-policy placement"| G["Quantization-owned weight views"]
+    A -->|"STAIR placement"| G["Quantization-owned weight views"]
     G <-->|"Gloo-staged transfer"| H["Peer EP ranks"]
     G -->|"main-thread commit"| B
 ```
@@ -46,9 +46,10 @@ flowchart LR
 
 | Component | Responsibility |
 | --- | --- |
-| Upstream `EPLBController`, `EplbState`, and async worker | Load windows, default policy invocation, placement calculation, and rearrangement ordering |
+| Upstream `EPLBController`, `EplbState`, and async worker | EPLB scheduling, placement state, and rearrangement ordering |
 | `AscendEPLBController` | Batch load-collection-phase filtering and construction of Ascend state |
-| `AscendEplbState` and `AscendEplbLayerState` | Stable device lookup derived from committed upstream placement |
+| `AscendEplbState` and `AscendEplbLayerState` | Temporal load preparation, committed balance anchors, and stable device lookup derived from committed upstream placement |
+| `StairEplbPolicy` | Layer gating, replica/placement planning, and migration source selection on stage-local layer shards |
 | Router adapter | Per-instance logical-to-physical ID mapping without replacing the upstream router class |
 | Fused MoE EPLB helpers | Device lookup and post-compute physical load recording |
 | Quantization method | View of the expert tensors and metadata actually consumed by its kernel |
@@ -95,9 +96,12 @@ in the layer hot path.
 
 ## Rearrangement and weight views
 
-When an upstream load window closes, vLLM's default policy calculates a new
-placement and the upstream asynchronous worker stages expert tensors through
-Gloo one layer at a time. The model-runner thread installs each published
+When upstream EPLB schedules a rearrangement, Ascend prepares temporal
+logical-expert statistics from the recent load window and STAIR plans
+stage-local layer shards across EPLB ranks.
+Every rank gathers and validates the same complete plan. The upstream
+asynchronous worker then stages expert tensors through Gloo one layer at a
+time. The model-runner thread installs each published
 layer, commits its placement, and refreshes the device lookup before
 acknowledging the staging buffer. Routing never observes a lookup for an
 uncommitted placement.
