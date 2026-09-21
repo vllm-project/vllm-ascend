@@ -2565,12 +2565,40 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             cache["k_scale_slots"] = slot_index
         return slot_index
 
+    @staticmethod
+    def _qfa_v_descale_placeholder(value_scale_cache: torch.Tensor) -> torch.Tensor:
+        """The v_descale the metadata op insists on, without allocating one.
+
+        quant_mode=1 refuses a null v_descale at the aclnn entry
+        (quant_flash_attn_metadata_check.h), but under PA_NZ nothing reads
+        it, so a minimal 6-D E8M0 tensor is all it takes. That used to be a
+        ``torch.zeros`` inside the step, and an allocation in a captured
+        region records its zero-fill as a graph node that every replay runs
+        again. The first two bytes of the layer's own V scale cache serve
+        just as well: a view launches nothing, the cache exists before any
+        capture -- draft layers included, which a lazily built stub would not
+        be able to promise -- and its address is the one the main operator
+        already reads in the same graph.
+
+        ``view(-1)`` rather than ``flatten()``: a cache that ever stopped
+        being contiguous should fail here, not start copying in the step.
+
+        NOTE: torch_npu.float8_e8m0fnu is the integer dtype ID (293) on this
+        torch_npu build, not a torch.dtype; tensor.view() would parse it as a
+        target shape. Bitcast with the stock torch dtype instead.
+        """
+        placeholder = value_scale_cache.view(-1)[:2].view(1, 1, 1, 1, 1, 2)
+        if placeholder.dtype != torch.float8_e8m0fnu:
+            placeholder = placeholder.view(torch.float8_e8m0fnu)
+        return placeholder
+
     def _get_qfa_metadata(
         self,
         attn_metadata: AscendMetadata,
         *,
         cu_seqlens_q: torch.Tensor,
         seqused_kv: torch.Tensor,
+        value_scale_cache: torch.Tensor,
         max_seqlen_q: int,
         mask_mode: int,
         layout_q_descale: str,
@@ -2615,19 +2643,9 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
         if metadata is None:
             # TND + PA: pass cu_seqlens_q only; the KV side is addressed via
             # block_table + seqused_kv (QFA requirement doc, 3.2.3).
-            # quant_mode=1 refuses a null v_descale at the aclnn entry
-            # (quant_flash_attn_metadata_check.h), but under PA_NZ nothing
-            # reads it -- a minimal 5D E8M0 placeholder suffices. batch_size
-            # must NOT be passed with a TND layout_q (the checker rejects
-            # it); the op infers it from cu_seqlens_q.
+            # batch_size must NOT be passed with a TND layout_q (the checker
+            # rejects it); the op infers it from cu_seqlens_q.
             _, metadata_op = _get_qfa_ops()
-            # NOTE: torch_npu.float8_e8m0fnu is the integer dtype ID (293) on
-            # this torch_npu build, not a torch.dtype; tensor.view() would
-            # parse it as a target shape. Bitcast with the stock torch dtype
-            # instead (itemsize 1 -> 1, shape preserved).
-            v_descale_stub = torch.zeros(1, 1, 1, 1, 1, 2, dtype=torch.uint8, device=cu_seqlens_q.device).view(
-                torch.float8_e8m0fnu
-            )
             metadata = metadata_op(
                 self.num_heads,
                 self.num_kv_heads,
@@ -2637,7 +2655,7 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
                 cu_seqlens_kv=None,
                 seqused_q=None,
                 seqused_kv=seqused_kv,
-                v_descale=v_descale_stub,
+                v_descale=self._qfa_v_descale_placeholder(value_scale_cache),
                 max_seqlen_q=max_seqlen_q,
                 max_seqlen_kv=-1,
                 mask_mode=mask_mode,
@@ -2874,6 +2892,7 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             attn_metadata,
             cu_seqlens_q=cu_seqlens_q,
             seqused_kv=seqused_kv,
+            value_scale_cache=kv_cache[3],
             max_seqlen_q=max_seqlen_q,
             mask_mode=mask_mode,
             layout_q_descale=layout_q_descale,

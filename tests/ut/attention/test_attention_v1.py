@@ -1051,7 +1051,9 @@ class TestC8MXFPQfaQueryPlan(TestBase):
         )
         seen = {"source_scale": scale}
 
-        def fake_metadata(_self, _metadata, *, cu_seqlens_q, seqused_kv, max_seqlen_q, mask_mode, layout_q_descale):
+        def fake_metadata(
+            _self, _metadata, *, cu_seqlens_q, seqused_kv, value_scale_cache, max_seqlen_q, mask_mode, layout_q_descale
+        ):
             seen["metadata_max_seqlen_q"] = max_seqlen_q
             seen["metadata_mask_mode"] = mask_mode
             seen["metadata_layout"] = layout_q_descale
@@ -1270,6 +1272,28 @@ class TestC8MXFPQfaMetadataPlan(TestBase):
         self.impl.num_heads = 8
         self.impl.num_kv_heads = 2
         self.impl.head_size = 128
+        # PA_NZ V scale cache: [blocks, kv heads, head_dim // 16, block_size // 64, 16, 2].
+        self.value_scale_cache = torch.arange(3 * 2 * 8 * 8 * 16 * 2, dtype=torch.int32).remainder(251).to(torch.uint8)
+        self.value_scale_cache = self.value_scale_cache.view(3, 2, 8, 8, 16, 2)
+        self.v_descale = self.impl._qfa_v_descale_placeholder(self.value_scale_cache)
+
+    def test_v_descale_placeholder_is_a_view_of_the_layer_cache(self):
+        # quant_mode=1 refuses a null v_descale, and nothing reads it under
+        # PA_NZ. Allocating a stub inside the step put a zero-fill into every
+        # captured graph; a view of the cache the main operator already reads
+        # launches nothing and has an address that outlives every capture.
+        placeholder = self.v_descale
+        self.assertEqual(tuple(placeholder.shape), (1, 1, 1, 1, 1, 2))
+        self.assertEqual(placeholder.dtype, torch.float8_e8m0fnu)
+        self.assertTrue(placeholder.is_contiguous())
+        self.assertEqual(placeholder.stride(), torch.empty(1, 1, 1, 1, 1, 2).stride())
+        self.assertEqual(placeholder.data_ptr(), self.value_scale_cache.data_ptr())
+
+    def test_the_operator_is_handed_the_cache_view(self):
+        _, invocations = self._plans([{}] * self.LAYERS_PER_STEP)
+        v_descale = invocations[0][1]["v_descale"]
+        self.assertEqual(tuple(v_descale.shape), (1, 1, 1, 1, 1, 2))
+        self.assertEqual(v_descale.data_ptr(), self.value_scale_cache.data_ptr())
 
     def _plans(self, calls, *, capturing=False):
         """Issue one step's worth of plans; return (plans, operator calls)."""
@@ -1283,6 +1307,7 @@ class TestC8MXFPQfaMetadataPlan(TestBase):
         defaults = {
             "cu_seqlens_q": torch.tensor([0, 1, 2], dtype=torch.int32),
             "seqused_kv": torch.tensor([10, 20], dtype=torch.int32),
+            "value_scale_cache": self.value_scale_cache,
             "max_seqlen_q": 1,
             "mask_mode": 0,
             "layout_q_descale": "N2TGD",
