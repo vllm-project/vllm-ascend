@@ -13,19 +13,6 @@ import torch
 from PIL import Image
 from torch import nn
 from vllm.model_executor.models.interfaces import requires_raw_input_tokens, supports_multimodal
-from vllm.models.deepseek_v4_1.common.mm_preprocess import (
-    COMPRESS_PAD_TO,
-    IMAGE,
-    IMAGE_END,
-    IMAGE_NEW_LINE,
-    IMAGE_PAD_ID,
-    IMAGE_SENTINEL_BASE_ID,
-    IMAGE_START,
-    DeepseekV4VLProcessingInfo,
-    DeepseekV4VLProcessor,
-    image_sentinel_mask,
-    image_token_types,
-)
 from vllm.multimodal.processing import InputProcessingContext
 from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config as UpstreamDeepseekV41Config
 
@@ -36,7 +23,40 @@ from vllm_ascend.models.deepseek_v41.model import AscendDeepseekV41LLMForCausalL
 from vllm_ascend.models.deepseek_v41.vl_model import (
     AscendDeepseekV41ForCausalLM,
 )
-from vllm_ascend.utils import normalize_deepseek_v41_config
+from vllm_ascend.utils import normalize_deepseek_v41_config, vllm_version_is
+
+# Upstream #56741 normalized the V4.1 model package name from deepseek_v4_1
+# to deepseek_v41, and upstream #56554 removed the compressor-alignment pad
+# (IMAGE_PAD_ID / COMPRESS_PAD_TO) from the V4.1 token stream entirely.
+if vllm_version_is("0.29.0"):
+    from vllm.models.deepseek_v4_1.common.mm_preprocess import (
+        COMPRESS_PAD_TO,
+        IMAGE,
+        IMAGE_END,
+        IMAGE_NEW_LINE,
+        IMAGE_PAD_ID,
+        IMAGE_SENTINEL_BASE_ID,
+        IMAGE_START,
+        DeepseekV4VLProcessingInfo,
+        DeepseekV4VLProcessor,
+        image_sentinel_mask,
+        image_token_types,
+    )
+else:
+    from vllm.models.deepseek_v41.common.mm_preprocess import (
+        IMAGE,
+        IMAGE_END,
+        IMAGE_NEW_LINE,
+        IMAGE_SENTINEL_BASE_ID,
+        IMAGE_START,
+        DeepseekV4VLProcessingInfo,
+        DeepseekV4VLProcessor,
+        image_sentinel_mask,
+        image_token_types,
+    )
+
+    COMPRESS_PAD_TO: int | None = None
+    IMAGE_PAD_ID: int | None = None
 
 
 def make_v41_config(**kwargs):
@@ -65,10 +85,16 @@ def test_v41_processing_info_accepts_v41_config():
 
     assert DeepseekV4VLProcessingInfo(ctx).get_hf_config() is config
     assert config.image_sentinel_base_id == IMAGE_SENTINEL_BASE_ID
-    assert config.image_pad_token_id == IMAGE_PAD_ID
-    assert config.is_mm_prefix_lm
-    assert config.mm_prefix_clamp_sliding_window
-    assert config.mm_prefix_span_leading_pad_modulus == COMPRESS_PAD_TO == 2
+    if vllm_version_is("0.29.0"):
+        assert config.image_pad_token_id == IMAGE_PAD_ID
+        assert config.is_mm_prefix_lm
+        assert config.mm_prefix_clamp_sliding_window
+        assert config.mm_prefix_span_leading_pad_modulus == COMPRESS_PAD_TO == 2
+    else:
+        # vLLM main (#56554/#57152) removed the alignment pad and moved the
+        # mm-prefix flags to the model-config arch convertor.
+        assert config.image_pad_token_id == IMAGE_SENTINEL_BASE_ID + 1
+        assert not hasattr(config, "mm_prefix_span_leading_pad_modulus")
 
 
 def test_v41_image_roles_use_reference_reading_order():
@@ -117,12 +143,22 @@ def test_v41_processor_emits_types_without_v4_perm():
 
 
 def test_v41_image_and_alignment_pad_are_dead_to_engram():
-    token_ids = torch.tensor([17, IMAGE_SENTINEL_BASE_ID, IMAGE_PAD_ID, 18])
-    expected = torch.tensor([True, False, False, True])
+    if IMAGE_PAD_ID is not None:
+        token_ids = torch.tensor([17, IMAGE_SENTINEL_BASE_ID, IMAGE_PAD_ID, 18])
+        expected = torch.tensor([True, False, False, True])
+    else:
+        # vLLM main (#56554) removed the alignment pad; only the image
+        # sentinel is dead to engram.
+        token_ids = torch.tensor([17, IMAGE_SENTINEL_BASE_ID, 18])
+        expected = torch.tensor([True, False, True])
 
     torch.testing.assert_close(image_sentinel_mask(token_ids), ~expected)
     torch.testing.assert_close(
-        valid_engram_token_mask(token_ids, IMAGE_SENTINEL_BASE_ID, IMAGE_PAD_ID),
+        valid_engram_token_mask(
+            token_ids,
+            IMAGE_SENTINEL_BASE_ID,
+            IMAGE_PAD_ID if IMAGE_PAD_ID is not None else IMAGE_SENTINEL_BASE_ID + 1,
+        ),
         expected,
     )
 
@@ -164,5 +200,11 @@ def test_v41_alignment_pad_uses_plain_image_token_embedding():
     nn.Module.__init__(wrapper)
     wrapper.language_model = LanguageModel()
 
-    embeddings = wrapper.embed_input_ids(torch.tensor([7, IMAGE_PAD_ID, IMAGE_SENTINEL_BASE_ID]))
-    assert embeddings.squeeze(-1).tolist() == [7, IMAGE_SENTINEL_BASE_ID, IMAGE_SENTINEL_BASE_ID]
+    if IMAGE_PAD_ID is not None:
+        embeddings = wrapper.embed_input_ids(torch.tensor([7, IMAGE_PAD_ID, IMAGE_SENTINEL_BASE_ID]))
+        assert embeddings.squeeze(-1).tolist() == [7, IMAGE_SENTINEL_BASE_ID, IMAGE_SENTINEL_BASE_ID]
+    else:
+        # vLLM main (#56554) removed the alignment pad; embedding passes the
+        # token ids through untouched.
+        embeddings = wrapper.embed_input_ids(torch.tensor([7, IMAGE_SENTINEL_BASE_ID]))
+        assert embeddings.squeeze(-1).tolist() == [7, IMAGE_SENTINEL_BASE_ID]
