@@ -176,6 +176,7 @@ benchmarks:
     request_rate: 12
     baseline: 15569.48
     threshold: 0.95
+
   perf_TPOT20_3_5_1_5:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K-in3500-bs4096-prefix0-ds
