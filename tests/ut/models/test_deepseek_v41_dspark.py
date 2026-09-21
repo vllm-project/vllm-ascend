@@ -125,10 +125,16 @@ def test_v41_draft_routes_to_v41(cp):
     with (
         patch.object(DeepseekV41SWAAttention, "__init__", initialize_base),
         patch("vllm_ascend.attention.context_parallel.dsa_v41_cp.enable_dsa_cp", return_value=cp),
+        patch.object(
+            deepseek_v41_dspark_module.DeviceOperator,
+            "get_deepseek_v41_backend",
+            return_value=draft_backend,
+        ),
     ):
         draft = DeepseekV41DSparkAttention(vllm_config=config, prefix="mtp.0.self_attn")
     assert type(draft.v41_impl) is (AscendDSAV41CPImpl if cp else AscendDSAV41Impl)
     assert config.compilation_config.static_forward_context[draft.v41_layer_name] is draft
+    assert draft.dsv41_backend is draft_backend
     assert draft.softmax_scale == 512**-0.5
 
 
@@ -180,13 +186,41 @@ def test_v41_draft_context_store_uses_physical_pairs_and_preserves_padding():
     from vllm_ascend.models.deepseek_v41.dspark import DeepseekV41DSparkModel
 
     cache = torch.empty(3, 128, 1, 8)
-    attn = SimpleNamespace(dsa_attn=SimpleNamespace(swa_cache_layer=SimpleNamespace(block_size=128, kv_cache=[cache])))
+    attn = SimpleNamespace(
+        dsv41_backend=None,
+        dsa_attn=SimpleNamespace(
+            swa_cache_layer=SimpleNamespace(block_size=128, kv_cache=[cache])
+        ),
+    )
     values = torch.randn(3, 1, 8)
     with patch("vllm_ascend.models.deepseek_v41.dspark.scatter_cache_sk") as store:
         DeepseekV41DSparkModel._store_standard_swa_kv(None, values, torch.tensor([129, -1, 258]), attn)
     actual_cache, slots, updates = store.call_args.args
     assert actual_cache is cache
     assert slots.tolist() == [[1, 1], [-1, -1], [2, 2]]
+    torch.testing.assert_close(updates, values.squeeze(1))
+
+
+def test_v41_draft_context_store_routes_packed_a5_cache_to_device_writer():
+    from vllm_ascend.models.deepseek_v41.dspark import DeepseekV41DSparkModel
+
+    cache = torch.empty(3, 128, 1, 8)
+    writer = MagicMock()
+    attn = SimpleNamespace(
+        dsv41_backend=SimpleNamespace(write_attention_cache=writer),
+        dsa_attn=SimpleNamespace(
+            swa_cache_layer=SimpleNamespace(block_size=128, kv_cache=[cache])
+        ),
+    )
+    slots = torch.tensor([129, -1, 258])
+    values = torch.randn(3, 1, 8)
+
+    DeepseekV41DSparkModel._store_standard_swa_kv(None, values, slots, attn)
+
+    actual_cache, actual_slots, updates = writer.call_args.args
+    assert actual_cache is cache
+    assert actual_slots is slots
+    assert writer.call_args.kwargs == {"kind": "win"}
     torch.testing.assert_close(updates, values.squeeze(1))
 
 
@@ -203,10 +237,18 @@ def test_draft_constructor_uses_upstream_head_contracts(monkeypatch, draft_vocab
         num_hidden_layers=40,
         rms_norm_eps=1e-6,
     )
+    quant_config = object()
     vllm_config = SimpleNamespace(
-        speculative_config=SimpleNamespace(draft_model_config=SimpleNamespace(hf_text_config=config)),
+        speculative_config=SimpleNamespace(
+            draft_model_config=SimpleNamespace(
+                hf_text_config=config,
+                hf_config=SimpleNamespace(
+                    quantization_config={"quant_method": "fp8"}
+                ),
+            )
+        ),
         parallel_config=SimpleNamespace(use_sequence_parallel_moe=False),
-        quant_config=None,
+        quant_config=quant_config,
     )
     module = deepseek_v41_dspark_module
 
@@ -217,7 +259,8 @@ def test_draft_constructor_uses_upstream_head_contracts(monkeypatch, draft_vocab
 
     monkeypatch.setattr(module, "DeepseekV41DSparkDecoderLayer", layer)
     monkeypatch.setattr(module, "VocabParallelEmbedding", lambda *a, **kw: torch.nn.Identity())
-    monkeypatch.setattr(module, "ColumnParallelLinear", lambda *a, **kw: torch.nn.Identity())
+    linear = MagicMock(return_value=torch.nn.Identity())
+    monkeypatch.setattr(module, "ColumnParallelLinear", linear)
     monkeypatch.setattr(module, "RMSNorm", lambda *a, **kw: torch.nn.Identity())
     with (
         patch.object(module, "DSparkMarkovHead", autospec=True, return_value=torch.nn.Identity()) as markov,
@@ -226,4 +269,5 @@ def test_draft_constructor_uses_upstream_head_contracts(monkeypatch, draft_vocab
         model = DeepseekV41DSparkModel(vllm_config=vllm_config, prefix="model")
     markov.assert_called_once_with(32, draft_vocab_size or 32, 4, prefix="model.layers.42.markov_head")
     confidence.assert_called_once_with(input_dim=12, prefix="model.confidence_head", bias=False, with_markov=True)
+    assert linear.call_args.kwargs["quant_config"] is quant_config
     assert model.layers["42"].markov_head is model.markov_head
