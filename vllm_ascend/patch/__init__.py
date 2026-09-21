@@ -369,67 +369,6 @@
 #          hybrid prefix cache lookup for DCP.
 #       2. Remove this patch once upstream accept 46892 pr or fixed the bug by other pr.
 #
-# ** 13. File: platform/patch_minimax_m2_config.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.config.model.ModelConfig._verify_quantization`
-#    Why:
-#       MiniMax-M2 fp8 checkpoints on NPU may fail upstream quantization validation.
-#       vllm-ascend needs to disable fp8 quantization and load bf16 dequantized
-#       weights in worker-side patches instead.
-#    How：
-#       Monkey-patch `_verify_quantization` and intercept platform quantization
-#       verification to force `cfg.quantization=None` for MiniMax-M2 fp8 on NPU.
-#    Related PR (if no, explain why):
-#       No, upstream behavior differs across versions and needs discussion.
-#    Future Plan:
-#       Remove this patch once upstream supports MiniMax-M2 fp8 on NPU or provides
-#       a backend-safe validation / override mechanism.
-#
-#   2. `vllm.config.model.ModelConfig._verify_cuda_graph`
-#    Why:
-#       For MiniMax-M2 on NPU with ACL graph capture enabled, HCCL op expansion
-#       mode affects graph shape coverage. Users may forget to set it.
-#    How：
-#       If user doesn't set it, set `HCCL_OP_EXPANSION_MODE=AIV` for this model
-#       and log a warning when a different value is detected.
-#    Related PR (if no, explain why):
-#       No, this is an environment-specific tuning knob.
-#    Future Plan:
-#       Remove this patch if upstream provides an official NPU graph-capture
-#       guidance / auto-configuration path for HCCL.
-#
-#   3. `vllm.config.speculative.SpeculativeConfig._verify_args`
-#    Why:
-#       Upstream vLLM's eagle3/extract_hidden_states restricts target model types
-#       via a whitelist. MiniMax-M2 should be allowed once the worker-side model
-#       can emit auxiliary hidden states.
-#    How：
-#       Monkey-patch `_verify_args` to bypass only the whitelist ValueError for
-#       MiniMax model_type when method is eagle3/extract_hidden_states.
-#       SpeculativeConfig is a Pydantic dataclass (`@config`); init validation calls
-#       `__pydantic_decorators__.model_validators["_verify_args"].func`, so that
-#       `Decorator.func` must be replaced (not only `SpeculativeConfig._verify_args`),
-#       then `rebuild_dataclass(SpeculativeConfig, force=True)`.
-#       If `VllmConfig` was imported earlier, also `rebuild_dataclass(VllmConfig, ...)`
-#       so nested `speculative_config` validation does not use a stale schema.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/37512
-#    Future Plan:
-#       Remove this patch once upstream whitelist includes MiniMax.
-#
-#   4. `vllm.model_executor.models.registry` (spec decode aliases)
-#    Why:
-#       Some Eagle3 draft checkpoints may declare a MiniMax-specific architecture
-#       string while reusing the shared Eagle3 implementation.
-#    How：
-#       Register `Eagle3MiniMaxM2ForCausalLM` as an alias pointing to the
-#       existing Eagle3 implementation in the speculative decoding registry.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/37512
-#    Future Plan:
-#       Drop the alias once upstream registry includes it or the checkpoint
-#       standardizes architecture strings.
-#
 # ** 14. File: platform/patch_mla_prefill_backend.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.attention.backends.mla.common.get_mla_prefill_backend`
@@ -970,19 +909,7 @@
 #
 # ** 10. File: worker/patch_minimax_m2.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.models.minimax_m2.MiniMaxM2MoE.forward`
-#    Why:
-#       In TP mode, MiniMax-M2 MoE needs a backend-aware reduction path to avoid
-#       unnecessary communication / maintain correctness on NPU.
-#    How：
-#       Replace the forward to call `experts.maybe_all_reduce_tensor_model_parallel`
-#       when `tp_size > 1`.
-#    Related PR (if no, explain why):
-#       No, model-specific behavior.
-#    Future Plan:
-#       Move this behavior upstream once a generic MoE reduce hook exists.
-#
-#   2. `vllm.model_executor.models.minimax_m2.MiniMaxM2Attention.forward`
+#   1. `vllm.model_executor.models.minimax_m2.MiniMaxM2Attention.forward`
 #    Why:
 #       MiniMax-M2 attention benefits from the NPU fused split-qkv + RMSNorm + rope
 #       kernel path.
@@ -994,18 +921,6 @@
 #    Future Plan:
 #       Remove this patch when upstream exposes a backend dispatch path for this
 #       fused attention preparation.
-#
-#   3. `vllm.model_executor.models.minimax_m2.MiniMaxM2Model.load_weights`
-#    Why:
-#       MiniMax-M2 fp8 checkpoints may store fp8 weights with per-block inverse
-#       scales. On NPU we load bf16 weights by dequantizing at load time.
-#    How：
-#       Inject fp8 dequant helpers and wrap `load_weights` to convert fp8 weight +
-#       `weight_scale_inv` pairs into bf16 blocks before delegating to upstream.
-#    Related PR (if no, explain why):
-#       No, fp8 load format and backend constraints are model/backend specific.
-#    Future Plan:
-#       Remove this patch when upstream supports MiniMax-M2 fp8 loading on NPU.
 #
 #
 # ** 14. File: worker/patch_qwen3_5.py**
