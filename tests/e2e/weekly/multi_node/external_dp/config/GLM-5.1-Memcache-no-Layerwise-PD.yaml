@@ -121,11 +121,11 @@ templates:
       - --seed
       - "1024"
       - --max-model-len
-      - "131072"
+      - "202752"
       - --additional-config
-      - '{"enable_npugraph_ex": true, "fuse_muls_add":true, "multistream_overlap_shared_expert":true, "recompute_scheduler_enable": true, "layer_sharding": ["q_b_proj", "o_proj"]}'
+      - '{"fuse_muls_add":true, "recompute_scheduler_enable" : false, "multistream_overlap_shared_expert": true, "enable_dsa_cp":true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "c8_enable_reshape_optim":true}'
       - --max-num-batched-tokens
-      - "16384"
+      - "164"
       - --trust-remote-code
       - --max-num-seqs
       - "64"
@@ -173,11 +173,11 @@ templates:
       - --seed
       - "1024"
       - --max-model-len
-      - "131072"
+      - "202752"
       - --additional-config
-      - '{"enable_npugraph_ex": true, "fuse_muls_add":true, "multistream_overlap_shared_expert":true, "recompute_scheduler_enable": true, "layer_sharding": ["q_b_proj", "o_proj"]}'
+      - '{"fuse_muls_add":true, "recompute_scheduler_enable" : false, "multistream_overlap_shared_expert": true, "enable_dsa_cp":true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "c8_enable_reshape_optim":true}'
       - --max-num-batched-tokens
-      - "16384"
+      - "164"
       - --trust-remote-code
       - --max-num-seqs
       - "64"
@@ -216,23 +216,25 @@ templates:
       - --tensor-parallel-size
       - ${TP_SIZE}
       - --enable-expert-parallel
+      - --hf-overrides
+      - '{"use_index_cache": true, "index_topk_freq": 4}'
       - --speculative-config
       - '{"num_speculative_tokens": 3, "method":"deepseek_mtp", "enforce_eager":true}'
       - --seed
       - "1024"
       - --max-model-len
-      - "131072"
+      - "202752"
       - --max-num-batched-tokens
-      - "512"
+      - "164"
       - --compilation-config
       - '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4, 8, 12, 16, 20, 24, 28, 32, 64, 96, 128, 192, 256, 384, 512]}'
       - --additional-config
-      - '{"enable_npugraph_ex": true, "fuse_muls_add":true, "multistream_overlap_shared_expert":true, "recompute_scheduler_enable": true}'
+      - '{"fuse_muls_add":true, "recompute_scheduler_enable":true, "multistream_overlap_shared_expert":true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true}'
       - --trust-remote-code
       - --max-num-seqs
-      - "128"
+      - "32"
       - --gpu-memory-utilization
-      - "0.90"
+      - "0.92"
       - --async-scheduling
       - --quantization
       - "ascend"
@@ -266,23 +268,25 @@ templates:
       - --tensor-parallel-size
       - ${TP_SIZE}
       - --enable-expert-parallel
+      - --hf-overrides
+      - '{"use_index_cache": true, "index_topk_freq": 4}'
       - --speculative-config
       - '{"num_speculative_tokens": 3, "method":"deepseek_mtp", "enforce_eager":true}'
       - --seed
       - "1024"
       - --max-model-len
-      - "131072"
+      - "202752"
       - --max-num-batched-tokens
-      - "512"
+      - "164"
       - --compilation-config
       - '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4, 8, 12, 16, 20, 24, 28, 32, 64, 96, 128, 192, 256, 384, 512]}'
       - --additional-config
-      - '{"enable_npugraph_ex": true, "fuse_muls_add":true, "multistream_overlap_shared_expert":true, "recompute_scheduler_enable": true}'
+      - '{"fuse_muls_add":true, "recompute_scheduler_enable":true, "multistream_overlap_shared_expert":true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true}'
       - --trust-remote-code
       - --max-num-seqs
-      - "128"
+      - "32"
       - --gpu-memory-utilization
-      - "0.90"
+      - "0.92"
       - --async-scheduling
       - --quantization
       - "ascend"
