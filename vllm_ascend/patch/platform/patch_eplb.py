@@ -115,6 +115,7 @@ def _wrap_async_rebalance(original_rebalance):
     def _async_rebalance(*args, **kwargs):
         bound = rebalance_signature.bind(*args, **kwargs)
         model_state = bound.arguments["model_state"]
+        eplb_state = bound.arguments["eplb_state"]
         communicator = model_state.communicator
         _clear_transfer_target(communicator)
         prepared_stats = getattr(model_state, "_policy_load_stats", None)
@@ -130,7 +131,7 @@ def _wrap_async_rebalance(original_rebalance):
             # Bypass the legacy runner so weighted temporal bins reach the policy intact.
             with _async_worker.device_stream(bound.arguments.get("stream")):
                 cpu_stats = PreparedLoadStats(prepared_stats.values.cpu(), prepared_stats.sample_counts)
-            target = bound.arguments["eplb_state"].policy.rebalance_experts(
+            target = eplb_state.policy.rebalance_experts(
                 cpu_stats,
                 eplb_stats.num_replicas,
                 eplb_stats.num_groups,
@@ -138,6 +139,7 @@ def _wrap_async_rebalance(original_rebalance):
                 eplb_stats.num_gpus,
                 bound.arguments["physical_to_logical_map_cpu"],
                 last_committed_mean_ratios=model_state._last_committed_mean_ratios,
+                rank_node_ids=eplb_state.get_rank_node_ids(),
             )
             if target.device.type != "cpu":
                 raise RuntimeError("EPLB policy returned a non-CPU expert mapping")

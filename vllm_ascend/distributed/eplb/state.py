@@ -10,9 +10,10 @@ from typing import Any
 import numpy as np
 import torch
 from torch.distributed import all_reduce
-from vllm.distributed import get_ep_group
+from vllm.distributed import get_ep_group, get_eplb_group
 from vllm.distributed.eplb import eplb_state as _eplb_state
 from vllm.distributed.eplb.policy import AbstractEplbPolicy
+from vllm.distributed.parallel_state import in_the_same_node_as
 
 from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
 from vllm_ascend.ops.fused_moe import eplb as _eplb_ops
@@ -144,6 +145,30 @@ class AscendEplbState(_eplb_state.EplbState):
                 device=self.device,
             )
 
+    def get_rank_node_ids(self) -> np.ndarray:
+        """Cache node ordinals in EPLB-rank order as ``[num_ranks]``.
+
+        Ranks detected in the same shared-memory domain share one ordinal.
+        """
+        rank_node_ids = getattr(self, "_rank_node_ids", None)
+        if rank_node_ids is not None:
+            return rank_node_ids
+
+        cpu_group = get_eplb_group().cpu_group
+        num_ranks = cpu_group.size()
+        rank_node_ids = np.full(num_ranks, -1, dtype=np.int64)
+        next_node_id = 0
+        for source_rank in range(num_ranks):
+            if rank_node_ids[source_rank] >= 0:
+                continue
+            same_node = np.asarray(in_the_same_node_as(cpu_group, source_rank), dtype=bool)
+            if same_node.shape != (num_ranks,) or not same_node[source_rank]:
+                raise RuntimeError("EPLB node discovery returned an invalid rank mask")
+            rank_node_ids[same_node] = next_node_id
+            next_node_id += 1
+        self._rank_node_ids = rank_node_ids
+        return rank_node_ids
+
     @property
     def uses_custom_load_stats(self) -> bool:
         """Whether the selected policy transforms temporal load samples."""
@@ -213,16 +238,17 @@ class AscendEplbState(_eplb_state.EplbState):
         if global_load_stats.keys() != self.model_states.keys():
             raise ValueError("Load statistics must contain exactly one entry per EPLB model")
         num_ranks = get_ep_group().device_group.size()
+        rank_node_ids = self.get_rank_node_ids()
+        num_nodes = len(np.unique(rank_node_ids))
         for model_key, model_state in self.model_states.items():
             load_stats = global_load_stats[model_key]
             model_state._policy_load_stats = load_stats
             model = model_state.model
-            # Do not infer stage-local topology from the global node count.
             model_state.eplb_stats = _eplb_state.EplbStats(
                 global_expert_load_window=load_stats.values,
                 num_replicas=model.num_physical_experts,
                 num_groups=model.num_expert_groups,
-                num_nodes=1,
+                num_nodes=num_nodes,
                 num_gpus=num_ranks,
             )
         # Publish only after every model's statistics are ready.

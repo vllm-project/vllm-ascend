@@ -141,8 +141,8 @@ class StairEplbPolicy(AbstractEplbPolicy):
         invalid_type = any(isinstance(value, bool) or not isinstance(value, int) for value in controls)
         if invalid_type or min(controls) < 1:
             raise ValueError("STAIR topology values must be positive integers")
-        if num_replicas % num_ranks or num_ranks % num_nodes:
-            raise ValueError("STAIR requires equal rank capacity and equal ranks per node")
+        if num_replicas % num_ranks:
+            raise ValueError("STAIR requires equal rank capacity")
         if old_global_expert_indices is None:
             raise ValueError("STAIR requires the current expert placement")
 
@@ -169,7 +169,19 @@ class StairEplbPolicy(AbstractEplbPolicy):
         if last_committed_mean_ratios is None:
             last_committed_mean_ratios = np.full(current_placement.shape[0], np.nan)
         if rank_node_ids is None:
+            if num_ranks % num_nodes:
+                raise ValueError("STAIR cannot infer topology with unequal ranks per node")
             rank_node_ids = np.arange(num_ranks, dtype=np.int64) // (num_ranks // num_nodes)
+        else:
+            rank_node_ids = np.asarray(rank_node_ids)
+            if (
+                rank_node_ids.shape != (num_ranks,)
+                or not np.issubdtype(rank_node_ids.dtype, np.integer)
+                or np.any(rank_node_ids < 0)
+            ):
+                raise ValueError("rank_node_ids must contain one non-negative integer per rank")
+            if len(np.unique(rank_node_ids)) != num_nodes:
+                raise ValueError("num_nodes must match the distinct rank_node_ids")
         cpu_group = get_eplb_group().cpu_group
         if cpu_group.size() != num_ranks:
             raise RuntimeError("STAIR topology does not match the stage-local EPLB group")

@@ -87,6 +87,7 @@ def test_collect_then_publish_async_load_stats(monkeypatch):
     state.expert_load_window_size = 5
     state._logical_load_window_write_index = 2
     state._local_load_collection_mask = torch.zeros(5, dtype=torch.int32)
+    state.get_rank_node_ids = MagicMock(return_value=np.array([0, 1]))
     state.rearrange_event = MagicMock()
     state.policy = StairEplbPolicy(StairConfig(load_window_bins=2))
 
@@ -98,11 +99,38 @@ def test_collect_then_publish_async_load_stats(monkeypatch):
         torch.tensor([[[1]], [[8]]]) * 2,
     )
     assert model_state._policy_load_stats.sample_counts.tolist() == [1, 2]
-    assert model_state.eplb_stats.num_nodes == 1
+    assert model_state.eplb_stats.num_nodes == 2
     assert model_state.rebalanced
     assert isinstance(global_load_stats["model"], PreparedLoadStats)
     assert all_reduce_mock.call_count == 2
+    state.get_rank_node_ids.assert_called_once_with()
     state.rearrange_event.record.assert_called_once_with()
+
+
+def test_rank_node_ids_are_discovered_once(monkeypatch):
+    cpu_group = MagicMock()
+    cpu_group.size.return_value = 5
+    monkeypatch.setattr(eplb_state, "get_eplb_group", lambda: SimpleNamespace(cpu_group=cpu_group))
+    same_node = MagicMock(
+        side_effect=(
+            [True, False, True, False, False],
+            [False, True, False, True, False],
+            [False, False, False, False, True],
+        )
+    )
+    monkeypatch.setattr(eplb_state, "in_the_same_node_as", same_node)
+    state = AscendEplbState.__new__(AscendEplbState)
+
+    first = state.get_rank_node_ids()
+    second = state.get_rank_node_ids()
+
+    np.testing.assert_array_equal(first, [0, 1, 0, 1, 2])
+    np.testing.assert_array_equal(second, first)
+    assert [call.args for call in same_node.call_args_list] == [
+        (cpu_group, 0),
+        (cpu_group, 1),
+        (cpu_group, 4),
+    ]
 
 
 def test_default_policy_uses_upstream_rearrange(monkeypatch):

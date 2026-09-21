@@ -60,36 +60,36 @@ class TestStairLoadStatistics(unittest.TestCase):
 
     def test_rebalance_forwards_prepared_stats_and_placement_context(self):
         policy = StairEplbPolicy(StairConfig())
-        current = np.array([[[0, 1]]])
+        current = np.array([[[0], [1], [2]]])
         plan = StairPlan(
             rank_expert_ids=current.copy(),
-            source_rank_ids=np.array([[[0, 0]]]),
-            source_slot_ids=np.array([[[0, 1]]]),
+            source_rank_ids=np.array([[[0], [1], [2]]]),
+            source_slot_ids=np.zeros_like(current),
             predicted_mean_ratios=np.array([np.nan]),
         )
         prepared = PreparedLoadStats(
-            torch.tensor([[[16_777_217, 16_777_219]], [[9, 3]]]),
+            torch.tensor([[[16_777_217, 16_777_219, 5]], [[9, 3, 1]]]),
             np.array([2, 3]),
         )
         anchors = np.array([1.2])
-        node_ids = np.array([0])
+        node_ids = np.array([0, 0, 1])
         cpu_group = Mock()
-        cpu_group.size.return_value = 1
+        cpu_group.size.return_value = 3
 
         with (
             patch(
                 "vllm_ascend.distributed.eplb.policy.stair.get_eplb_group",
                 return_value=Mock(cpu_group=cpu_group),
             ),
-            patch.object(policy, "plan_rebalance", return_value=plan) as planner,
+            patch.object(policy, "plan_sharded_rebalance", return_value=plan) as planner,
         ):
             result = policy.rebalance_experts(
                 prepared,
+                3,
+                1,
                 2,
-                1,
-                1,
-                1,
-                torch.tensor([[0, 1]]),
+                3,
+                torch.tensor([[0, 1, 2]]),
                 last_committed_mean_ratios=anchors,
                 rank_node_ids=node_ids,
             )
@@ -99,7 +99,20 @@ class TestStairLoadStatistics(unittest.TestCase):
         np.testing.assert_array_equal(planning_context["last_committed_mean_ratios"], anchors)
         np.testing.assert_array_equal(planning_context["rank_node_ids"], node_ids)
         np.testing.assert_array_equal(planning_context["sample_counts"], prepared.sample_counts)
+        self.assertIs(planning_context["cpu_group"], cpu_group)
         np.testing.assert_array_equal(result.source_rank_ids, plan.source_rank_ids)
+
+    def test_rebalance_rejects_node_count_mismatch(self):
+        with self.assertRaisesRegex(ValueError, "num_nodes"):
+            StairEplbPolicy(StairConfig()).rebalance_experts(
+                torch.ones((1, 3)),
+                3,
+                1,
+                1,
+                3,
+                torch.tensor([[0, 1, 2]]),
+                rank_node_ids=np.array([0, 0, 1]),
+            )
 
     def test_upstream_policy_contract_requires_current_placement(self):
         with self.assertRaisesRegex(ValueError, "current expert placement"):

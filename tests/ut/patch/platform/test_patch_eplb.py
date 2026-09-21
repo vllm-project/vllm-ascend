@@ -211,7 +211,7 @@ def test_async_rebalance_passes_prepared_stats_to_policy_on_worker_stream(monkey
         global_expert_load_window=device_values,
         num_replicas=2,
         num_groups=1,
-        num_nodes=1,
+        num_nodes=2,
         num_gpus=2,
     )
     prepared_stats = patch_eplb.PreparedLoadStats(device_values, np.array([1, 3]))
@@ -224,7 +224,8 @@ def test_async_rebalance_passes_prepared_stats_to_policy_on_worker_stream(monkey
     target = _explicit_target()
     policy = MagicMock()
     policy.rebalance_experts.return_value = target
-    eplb_state = SimpleNamespace(policy=policy)
+    rank_node_ids = np.array([0, 1])
+    eplb_state = SimpleNamespace(policy=policy, get_rank_node_ids=MagicMock(return_value=rank_node_ids))
 
     def original_rebalance(model_state, eplb_state, physical_to_logical_map_cpu, stream):
         raise AssertionError("prepared statistics must bypass the legacy runner")
@@ -237,11 +238,12 @@ def test_async_rebalance_passes_prepared_stats_to_policy_on_worker_stream(monkey
     assert isinstance(planned_stats, patch_eplb.PreparedLoadStats)
     assert planned_stats.values is cpu_values
     np.testing.assert_array_equal(planned_stats.sample_counts, [1, 3])
-    assert policy.rebalance_experts.call_args.args[1:] == (2, 1, 1, 2, physical_map)
+    assert policy.rebalance_experts.call_args.args[1:] == (2, 1, 2, 2, physical_map)
     np.testing.assert_array_equal(
         policy.rebalance_experts.call_args.kwargs["last_committed_mean_ratios"],
         [1.2],
     )
+    np.testing.assert_array_equal(policy.rebalance_experts.call_args.kwargs["rank_node_ids"], rank_node_ids)
 
 
 def test_async_transfer_wrapper_executes_explicit_sources(monkeypatch):
