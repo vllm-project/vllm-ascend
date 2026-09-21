@@ -1204,7 +1204,7 @@ class TestAscendSFAImpl(TestBase):
                 with (
                     patch.object(sfa_v1, "wait_for_kv_layer_from_connector"),
                     patch.object(sfa_v1, "notify_kv_cache_written"),
-                    patch.object(sfa_v1, "record_attention_compute_start"),
+                    patch.object(sfa_v1, "attention_transfer_window"),
                     patch.object(sfa_v1, "maybe_save_kv_layer_to_connector"),
                 ):
                     self.assertIs(self.impl.forward("layer", hidden, (hidden,), metadata, output), output)

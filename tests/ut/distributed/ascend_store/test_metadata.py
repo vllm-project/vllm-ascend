@@ -457,6 +457,21 @@ class TestRequestTracker(unittest.TestCase):
         self.assertEqual(tracker.allocated_block_ids_by_group[2], [3, 0, 8])
         self.assertEqual(tracker.allocated_block_ids_by_group[3], [4, 0, 9])
 
+    def test_update_mamba_uses_per_group_speculative_counts(self):
+        tracker = RequestTracker(
+            req_id="r1",
+            token_len=32,
+            allocated_block_ids_by_group=[[1, 2], [3, 4], [5, 6]],
+            num_speculative_blocks_by_group={1: 1, 2: 0},
+            block_sizes=[16] * 3,
+        )
+
+        tracker.update(([7], [4, 8], [9]), 32)
+
+        self.assertEqual(tracker.allocated_block_ids_by_group[0], [1, 2, 7])
+        self.assertEqual(tracker.allocated_block_ids_by_group[1], [0, 0, 4, 8])
+        self.assertEqual(tracker.allocated_block_ids_by_group[2], [0, 6, 9])
+
     def test_update_mamba_mtp_with_tuple_chunk2(self):
         tracker = RequestTracker(
             req_id="r1",
@@ -467,8 +482,7 @@ class TestRequestTracker(unittest.TestCase):
                 [0, 7, 8, 9, 10],
                 [0, 11, 12, 13, 14],
             ],
-            mamba_group_ids=[1, 2, 3],
-            num_speculative_blocks=3,
+            num_speculative_blocks_by_group={1: 3, 2: 3, 3: 3},
             block_sizes=[16] * 4,
         )
 
@@ -488,8 +502,7 @@ class TestRequestTracker(unittest.TestCase):
                 [0, 0, 0, 0, 0, 0, 0, 13, 14, 15, 16],
                 [0, 0, 0, 0, 0, 0, 0, 17, 18, 19, 20],
             ],
-            mamba_group_ids=[1, 2, 3],
-            num_speculative_blocks=3,
+            num_speculative_blocks_by_group={1: 3, 2: 3, 3: 3},
             block_sizes=[16] * 4,
         )
 

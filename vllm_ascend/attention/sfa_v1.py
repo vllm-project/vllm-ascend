@@ -40,7 +40,7 @@ from vllm_ascend.attention.utils import (
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
-    record_attention_compute_start,
+    attention_transfer_window,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     OFFLOAD_K_CACHE_NPU_INDEX,
@@ -193,7 +193,9 @@ class SparseMLAMetadataState:
         if block_size > SPARSE_ATTENTION_MAX_BLOCK_SIZE:
             self.block_size = kernel_block_size
         self.table_stride = self.block_size // kernel_block_size
-        table_width = cdiv(vllm_config.model_config.max_model_len, block_size) * (block_size // self.block_size)
+        cache_block_size = vllm_config.cache_config.block_size
+        expand_factor = max(cache_block_size // kernel_block_size, 1)
+        table_width = cdiv(vllm_config.model_config.max_model_len, cache_block_size) * expand_factor
         self.block_table_buffer = torch.empty(
             vllm_config.scheduler_config.max_num_seqs,
             table_width,
@@ -1839,17 +1841,16 @@ class AscendSFAImpl(MLAAttentionImpl):
         # Open the prefetch gate for every SFA layer. Some GLM-5.2 layers
         # reuse cached top-k indices and have no indexer, so recording this
         # inside the indexer's forward would leave their gate closed.
-        record_attention_compute_start()
-
-        attn_output = self._execute_sparse_flash_attention_process(
-            ql_nope,
-            q_pe,
-            kv_cache,
-            topk_indices,
-            attn_metadata,
-            actual_seq_lengths_query,
-            actual_seq_lengths_key,
-        )
+        with attention_transfer_window():
+            attn_output = self._execute_sparse_flash_attention_process(
+                ql_nope,
+                q_pe,
+                kv_cache,
+                topk_indices,
+                attn_metadata,
+                actual_seq_lengths_query,
+                actual_seq_lengths_key,
+            )
 
         attn_output = self._v_up_proj(attn_output)
         if gate_hidden_states is not None:
