@@ -171,16 +171,12 @@ class StairEplbPolicy(AbstractEplbPolicy):
         if rank_node_ids is None:
             if num_ranks % num_nodes:
                 raise ValueError("STAIR cannot infer topology with unequal ranks per node")
-            rank_node_ids = np.arange(num_ranks, dtype=np.int64) // (num_ranks // num_nodes)
+            node_ids = np.arange(num_ranks, dtype=np.int64) // (num_ranks // num_nodes)
         else:
-            rank_node_ids = np.asarray(rank_node_ids)
-            if (
-                rank_node_ids.shape != (num_ranks,)
-                or not np.issubdtype(rank_node_ids.dtype, np.integer)
-                or np.any(rank_node_ids < 0)
-            ):
+            node_ids = np.asarray(rank_node_ids)
+            if node_ids.shape != (num_ranks,) or not np.issubdtype(node_ids.dtype, np.integer) or np.any(node_ids < 0):
                 raise ValueError("rank_node_ids must contain one non-negative integer per rank")
-            if len(np.unique(rank_node_ids)) != num_nodes:
+            if len(np.unique(node_ids)) != num_nodes:
                 raise ValueError("num_nodes must match the distinct rank_node_ids")
         cpu_group = get_eplb_group().cpu_group
         if cpu_group.size() != num_ranks:
@@ -190,7 +186,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
                 logical_load_values=logical_load_values,
                 current_rank_expert_ids=current_placement,
                 last_committed_mean_ratios=last_committed_mean_ratios,
-                rank_node_ids=rank_node_ids,
+                rank_node_ids=node_ids,
                 config=self.config,
                 sample_counts=sample_counts,
             )
@@ -199,7 +195,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
                 logical_load_values=logical_load_values,
                 current_rank_expert_ids=current_placement,
                 last_committed_mean_ratios=last_committed_mean_ratios,
-                rank_node_ids=rank_node_ids,
+                rank_node_ids=node_ids,
                 config=self.config,
                 cpu_group=cpu_group,
                 sample_counts=sample_counts,
@@ -398,7 +394,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
     @staticmethod
     def _candidate_group_budgets(center_budget: int, min_budget: int, max_budget: int, budget_radius: int) -> list[int]:
         """Enumerate valid budgets from nearest to farthest from the center."""
-        budgets = []
+        budgets: list[int] = []
         for distance in range(budget_radius + 1):
             values = (center_budget,) if distance == 0 else (center_budget - distance, center_budget + distance)
             budgets.extend(value for value in values if min_budget <= value <= max_budget)

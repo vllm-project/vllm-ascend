@@ -120,12 +120,11 @@ def _wrap_async_rebalance(original_rebalance):
         _clear_transfer_target(communicator)
         prepared_stats = getattr(model_state, "_policy_load_stats", None)
         eplb_stats = model_state.eplb_stats
-        prepared_stats_is_current = (
-            prepared_stats is not None
-            and eplb_stats is not None
-            and prepared_stats.values is eplb_stats.global_expert_load_window
-        )
-        if not prepared_stats_is_current:
+        if (
+            prepared_stats is None
+            or eplb_stats is None
+            or prepared_stats.values is not eplb_stats.global_expert_load_window
+        ):
             target = original_rebalance(*bound.args, **bound.kwargs)
         else:
             # Bypass the legacy runner so weighted temporal bins reach the policy intact.
@@ -165,7 +164,7 @@ def _wrap_async_transfer(original_transfer):
         values = bound.arguments
         communicator = values["communicator"]
         full_target = getattr(communicator, _EXPLICIT_TRANSFER_TARGET_ATTR, None)
-        if not _has_explicit_sources(full_target):
+        if full_target is None or not _has_explicit_sources(full_target):
             return original_transfer(*bound.args, **bound.kwargs)
         layer_idx = values["layer_idx"]
         try:
