@@ -623,7 +623,9 @@
         "310p": [
             "vllm-ascend/Qwen3-8B-w8a8sc-310-vllm-tp1",
             "vllm-ascend/Qwen3-14B-w8a8sc-310-vllm-tp1",
-            "vllm-ascend/Qwen3-32B-w8a8sc-310-vllm-tp4"
+            "vllm-ascend/Qwen3-32B-w8a8sc-310-vllm-tp4",
+            "Qwen/Qwen3.5-2B",
+            "vllm-ascend/Qwen3-VL-8B-Instruct-w8a8sc-310-vllm-tp1"
         ]
     },
     "datasets": [
