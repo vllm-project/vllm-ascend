@@ -1075,15 +1075,15 @@ def test_attn_state_mla_spec_and_metadata_wrappers(monkeypatch):
     ones = np.array([1, 1], dtype=np.int32)
     scheduled = np.array([2, 2], dtype=np.int32)
     state = attn_utils.AscendAttentionState
-    assert attn_utils.build_attn_state(pooling_encoder, seq, 2, seq, seq) is state.PrefillNoCache
-    assert attn_utils.build_attn_state(pooling_other, seq, 2, seq, seq) is state.PrefillCacheHit
-    assert attn_utils.build_attn_state(no_spec, seq, 2, seq, seq) is state.PrefillNoCache
-    assert attn_utils.build_attn_state(mtp, seq, 2, ones, ones) is state.SpecDecoding
-    assert attn_utils.build_attn_state(no_spec, seq, 2, ones, ones) is state.DecodeOnly
-    assert attn_utils.build_attn_state(mtp, seq, 2, scheduled, ones) is state.SpecDecoding
-    assert attn_utils.build_attn_state(eagle, seq, 2, scheduled, ones) is state.ChunkedPrefill
-    assert attn_utils.build_attn_state(chunked, seq, 2, scheduled, scheduled) is state.ChunkedPrefill
-    assert attn_utils.build_attn_state(no_spec, seq, 2, scheduled, scheduled) is state.PrefillCacheHit
+    assert attn_utils.build_attn_state(pooling_encoder, pooling_encoder.kv_cache_config, seq, 2, seq, seq) is state.PrefillNoCache
+    assert attn_utils.build_attn_state(pooling_other, pooling_other.kv_cache_config, seq, 2, seq, seq) is state.PrefillCacheHit
+    assert attn_utils.build_attn_state(no_spec, None, seq, 2, seq, seq) is state.PrefillNoCache
+    assert attn_utils.build_attn_state(mtp, None, seq, 2, ones, ones) is state.SpecDecoding
+    assert attn_utils.build_attn_state(no_spec, None, seq, 2, ones, ones) is state.DecodeOnly
+    assert attn_utils.build_attn_state(mtp, None, seq, 2, scheduled, ones) is state.SpecDecoding
+    assert attn_utils.build_attn_state(eagle, None, seq, 2, scheduled, ones) is state.ChunkedPrefill
+    assert attn_utils.build_attn_state(chunked, None, seq, 2, scheduled, scheduled) is state.ChunkedPrefill
+    assert attn_utils.build_attn_state(no_spec, None, seq, 2, scheduled, scheduled) is state.PrefillCacheHit
 
     vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
