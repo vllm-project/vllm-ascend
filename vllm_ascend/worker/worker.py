@@ -21,6 +21,7 @@ import copy
 import gc
 import inspect
 import logging
+import sys
 from contextlib import AbstractContextManager, nullcontext
 from types import NoneType
 from typing import Any
@@ -385,9 +386,11 @@ class NPUWorker(WorkerBase):
                         module.close_engram()
                     except Exception as exc:
                         errors.append(str(exc))
-                if getattr(get_ascend_config(), "engram_vmm_run", None) is not None:
-                    from vllm_ascend.models.deepseek_v41.engram_vmm.mapping import retry_rollbacks
-
+                # Cleanup must also work after initialization fails, before
+                # AscendConfig exists. Unused VMM must not load a native library.
+                mapping = sys.modules.get("vllm_ascend.models.deepseek_v41.engram_vmm.mapping")
+                retry_rollbacks = getattr(mapping, "retry_rollbacks", None)
+                if retry_rollbacks is not None:
                     try:
                         retry_rollbacks()
                     except Exception as exc:

@@ -1,4 +1,5 @@
 import importlib
+import sys
 import unittest
 from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock, patch
@@ -2204,6 +2205,33 @@ class TestNPUWorkerWeightUpdate(TestBase):
         worker.shutdown()
 
         engine.shutdown.assert_called_once()
+
+    @patch("vllm_ascend.worker.worker.ensure_kv_transfer_shutdown")
+    @patch("vllm_ascend.worker.worker.get_ascend_config", side_effect=AssertionError("config unavailable"))
+    def test_shutdown_without_config_does_not_import_vmm(self, _config, _kv):
+        worker = self._make_worker()
+        worker.profiler = None
+        name = "vllm_ascend.models.deepseek_v41.engram_vmm.mapping"
+        with patch.dict(sys.modules):
+            sys.modules.pop(name, None)
+            worker.shutdown()
+            self.assertNotIn(name, sys.modules)
+        worker.model_runner.shutdown.assert_called_once()
+
+    @patch("vllm_ascend.worker.worker.ensure_kv_transfer_shutdown")
+    @patch("vllm_ascend.worker.worker.get_ascend_config", side_effect=AssertionError("config unavailable"))
+    def test_shutdown_retries_loaded_vmm_after_runner_failure(self, _config, _kv):
+        worker = self._make_worker()
+        worker.profiler = None
+        worker.model_runner.shutdown.side_effect = RuntimeError("runner shutdown failed")
+        retry = MagicMock()
+        name = "vllm_ascend.models.deepseek_v41.engram_vmm.mapping"
+        with (
+            patch.dict(sys.modules, {name: SimpleNamespace(retry_rollbacks=retry)}),
+            self.assertRaisesRegex(RuntimeError, "runner shutdown failed"),
+        ):
+            worker.shutdown()
+        retry.assert_called_once()
 
 
 class TestKVPPWorkerBudget(TestBase):
