@@ -27,6 +27,7 @@ from functools import partial, wraps
 
 import cann_ops_transformer.ops  # noqa: F401
 import torch
+import torch.nn.functional as F
 from einops import rearrange
 from vllm.config import VllmConfig
 from vllm.distributed import get_pcp_group, get_tensor_model_parallel_rank
@@ -309,6 +310,10 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
         run_mode: int,
         num_accepted_tokens: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        # Match KimiShortConvolution in cann-recipes-infer
+        # models/kimi_k3/models/modeling_kimi_k3.py (803c3120f483): official
+        # varlen prefill, fixed-batch ordinary decode, and varlen verify.
+        # vLLM supplies initial-state flags for chunked/prefix-cache prefill.
         cache_indices = metadata.cache_indices
         if cache_indices.ndim > 1:
             cache_indices = cache_indices[:, 0]
@@ -499,47 +504,42 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
         sequence_lengths = tuple(end - start for start, end in zip(sequence_boundaries, sequence_boundaries[1:]))
         if not sequence_lengths or min(sequence_lengths) <= 0:
             raise ValueError("CANNBot FlashKDA requires non-empty prefill sequences.")
-        padded_length = ((max(sequence_lengths) + _KDA_CHUNK_SIZE - 1) // _KDA_CHUNK_SIZE) * _KDA_CHUNK_SIZE
-        batch_size = len(sequence_lengths)
-        padded_shape = (batch_size, padded_length, self.local_num_heads, self.head_dim)
-        padded_q = q.new_zeros(padded_shape)
-        padded_k = k.new_zeros(padded_shape)
-        padded_v = v.new_zeros(padded_shape)
-        padded_gate = raw_gate.new_full(padded_shape, float("-inf"))
-        padded_beta = raw_beta.new_full(
-            (batch_size, padded_length, self.local_num_heads),
-            float("-inf"),
-        )
-
-        flat_q, flat_k, flat_v = q.squeeze(0), k.squeeze(0), v.squeeze(0)
-        flat_gate, flat_beta = raw_gate.squeeze(0), raw_beta.squeeze(0)
+        # Follow recipes KimiDeltaAttention._prefill_flash_kda (803c3120f483):
+        # each request runs separately, padded only to its next 64-token chunk.
+        # Preserve vLLM's cache-derived initial state for continued prefills.
+        outputs = []
+        final_states = []
+        a_log = self.A_log.reshape(-1).contiguous()
+        dt_bias = self.dt_bias.reshape(self.local_num_heads, self.head_dim).contiguous()
         for request_index, (start, end) in enumerate(zip(sequence_boundaries, sequence_boundaries[1:])):
             length = end - start
-            padded_q[request_index, :length] = flat_q[start:end]
-            padded_k[request_index, :length] = flat_k[start:end]
-            padded_v[request_index, :length] = flat_v[start:end]
-            padded_gate[request_index, :length] = flat_gate[start:end]
-            padded_beta[request_index, :length] = flat_beta[start:end]
-
-        padded_output, final_state = _flash_kda_impl(
-            padded_q.contiguous(),
-            padded_k.contiguous(),
-            padded_v.contiguous(),
-            g=padded_gate.contiguous(),
-            beta=padded_beta.contiguous(),
-            scale=self.head_dim**-0.5,
-            initial_state=initial_state,
-            A_log=self.A_log.reshape(-1).contiguous(),
-            dt_bias=self.dt_bias.reshape(self.local_num_heads, self.head_dim).contiguous(),
-            lower_bound=self.gate_lower_bound,
-            layout_qkv="BSND",
-        )
-        recurrent_state[state_indices] = final_state.to(recurrent_state.dtype)
-        packed_output = torch.cat(
-            [padded_output[index, :length] for index, length in enumerate(sequence_lengths)],
-            dim=0,
-        )
-        return packed_output.unsqueeze(0)
+            request_q, request_k, request_v, request_gate, request_beta = (
+                tensor[:, start:end] for tensor in (q, k, v, raw_gate, raw_beta)
+            )
+            pad_length = (-length) % _KDA_CHUNK_SIZE
+            if pad_length:
+                request_q, request_k, request_v = (
+                    F.pad(tensor, (0, 0, 0, 0, 0, pad_length)) for tensor in (request_q, request_k, request_v)
+                )
+                request_gate = F.pad(request_gate, (0, 0, 0, 0, 0, pad_length), value=float("-inf"))
+                request_beta = F.pad(request_beta, (0, 0, 0, pad_length), value=float("-inf"))
+            request_output, final_state = _flash_kda_impl(
+                request_q.contiguous(),
+                request_k.contiguous(),
+                request_v.contiguous(),
+                g=request_gate.contiguous(),
+                beta=request_beta.contiguous(),
+                scale=self.head_dim**-0.5,
+                initial_state=initial_state[request_index : request_index + 1],
+                A_log=a_log,
+                dt_bias=dt_bias,
+                lower_bound=self.gate_lower_bound,
+                layout_qkv="BSND",
+            )
+            outputs.append(request_output[:, :length])
+            final_states.append(final_state)
+        recurrent_state[state_indices] = torch.cat(final_states, dim=0).to(recurrent_state.dtype)
+        return torch.cat(outputs, dim=1)
 
     def _forward(
         self,

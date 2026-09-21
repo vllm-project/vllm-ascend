@@ -1,6 +1,39 @@
 # CANNBot KDA 算子源码差异说明
 
-本文只比较以下两个算子文件，不讨论 `kimi_kda.py` 中的 vLLM 调用适配：
+本文记录 recipes 算子的来源、源码差异，以及 `kimi_kda.py` 中必要的 vLLM 调用适配。
+
+## 合并基线与替换范围
+
+本分支保留已有历史，并合并官方 `releases/v0.26.0rc` 的提交
+`2ed6cbbaf481d84cfd3f2d01d47bcf79ee064c1f`。在此基础上，模型计算的替换范围仅为
+Kimi K3 的 ShortConv 和 KDA；MoE、MLA、调度和其他模型使用合并后的上游实现。
+
+ShortConv 参考 recipes 的 `models/kimi_k3/models/modeling_kimi_k3.py` 中
+`KimiShortConvolution`：Prefill 调用 `cann_ops_transformer.causal_conv1d_fn`，
+普通 Decode 使用 `[B, 1, D]` 调用 `causal_conv1d_update`，多 token Verify
+使用二维输入并传入接受数。vLLM 的初始缓存标记仍由 attention metadata 提供，
+以保留 chunked prefill 和缓存续算；不能照抄 recipes 冷启动 Prefill 的全零标记。
+
+KDA Prefill 参考 recipes 的 `_prefill_flash_kda`，逐请求补齐至 64 token 的倍数，
+以 `B=1` 调用 `flash_kda`，再还原有效 token 并写回对应请求的状态。
+Decode/Verify 使用 `fused_recurrent_kda_op`。两个内核接收原始 gate 和 beta，
+由内核完成激活；vLLM 的缓存索引和混合 batch 元数据适配予以保留。
+
+此前 `585db1706667571573dbb5b77001f46715b014be` 引入的自定义卷积改名和
+强制重编译检查已撤回；`csrc` 与上述上游提交一致。本次 recipes 替换不新增
+vLLM-Ascend C++ 算子编译要求。已有源码安装可更新代码后重启服务及 Ray workers，
+无需为这两处替换运行 `COMPILE_CUSTOM_KERNELS=1 pip install`。
+依赖仍包括现有 CANN 中的 `cann_ops_transformer`、`cannbot-dsl` 和 `ninja==1.13.0`；
+CANNBot DSL 首次使用某个内核配置时仍会进行自身的 JIT 编译。
+
+**验证范围**：仅完成源码核对，未在本地运行测试或执行 NPU 验证。
+recipes ShortConv 使用同一个官方卷积接口，因此这次替换不能证明已修复服务器此前的
+`output 1` 内核匹配错误。服务器仍须验证实际 CANN 算子包、首请求、连续 Decode、
+chunked prefill 和启用投机解码时的状态续算。
+
+## 内核文件对比
+
+以下比较两个算子文件：
 
 1. `flash_kda.py`：Prefill KDA
 2. `fused_recurrent_kda.py`：Decode/Verify KDA

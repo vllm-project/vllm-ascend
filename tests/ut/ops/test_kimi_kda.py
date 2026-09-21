@@ -135,6 +135,52 @@ def test_upstream_kda_dispatch_accepts_beta_keyword_during_profile():
     torch.testing.assert_close(output, expected)
 
 
+@pytest.mark.parametrize("initial_state", [None, [True, False, True, False]])
+@pytest.mark.parametrize("cache_layout", ["flat", "block-table"])
+def test_causal_conv1d_prefill_keeps_official_packed_varlen_contract(initial_state, cache_layout):
+    query_start_loc = torch.tensor([0, 1, 6, 8, 8], dtype=torch.int32)
+    cache_indices = torch.tensor([2, 5, 3, -1], dtype=torch.int32)
+    if cache_layout == "block-table":
+        cache_indices = torch.stack((cache_indices, torch.full_like(cache_indices, 7)), dim=1)
+    metadata = SimpleNamespace(query_start_loc=query_start_loc, cache_indices=cache_indices)
+    if initial_state is not None:
+        # Model metadata can be a non-contiguous boolean view.
+        initial_state_table = torch.tensor([[value, False] for value in initial_state], dtype=torch.bool)
+        metadata.initial_state_mode = initial_state_table[:, 0]
+    mixed_qkv = torch.empty(8, 6)
+    conv_weights_t = torch.empty(4, 6)
+    conv_state = torch.empty(8, 3, 6)
+    expected_output = torch.empty_like(mixed_qkv)
+
+    with patch(
+        "vllm_ascend.ops.kimi_kda.torch.ops.cann_ops_transformer.causal_conv1d_fn",
+        return_value=expected_output,
+    ) as prefill:
+        output = AscendKimiGatedDeltaNetAttention._run_causal_conv1d(
+            mixed_qkv,
+            conv_weights_t,
+            conv_state,
+            metadata,
+            run_mode=0,
+        )
+
+    prefill.assert_called_once()
+    kwargs = prefill.call_args.kwargs
+    assert output is expected_output
+    assert kwargs["x"] is mixed_qkv
+    assert kwargs["conv_states"] is conv_state
+    assert kwargs["weight"] is conv_weights_t
+    assert kwargs["bias"] is None
+    assert kwargs["query_start_loc"] is query_start_loc
+    torch.testing.assert_close(kwargs["cache_indices"], torch.tensor([2, 5, 3, 0], dtype=torch.int32))
+    assert kwargs["cache_indices"].is_contiguous()
+    expected_initial_state = (
+        torch.zeros(4, dtype=torch.int32) if initial_state is None else metadata.initial_state_mode.to(torch.int32)
+    )
+    torch.testing.assert_close(kwargs["has_initial_state"], expected_initial_state)
+    assert kwargs["has_initial_state"].is_contiguous()
+
+
 @pytest.mark.parametrize(
     ("query_offsets", "cache_ids"),
     [
@@ -212,6 +258,80 @@ def test_causal_conv1d_update_keeps_2d_varlen_for_spec_decode():
     assert kwargs["query_start_loc"] is query_start_loc
     assert kwargs["num_accepted_tokens"] is accepted
     torch.testing.assert_close(kwargs["conv_state_indices"], torch.tensor([2, 5, 0], dtype=torch.int32))
+
+
+@pytest.mark.parametrize("compact_metadata", [False, True])
+def test_recipe_prefill_preserves_request_boundaries_and_cached_state(compact_metadata):
+    attention = AscendKimiGatedDeltaNetAttention.__new__(AscendKimiGatedDeltaNetAttention)
+    nn.Module.__init__(attention)
+    attention.local_num_heads = 2
+    attention.head_dim = 3
+    attention.gate_lower_bound = -5.0
+    attention.A_log = nn.Parameter(torch.zeros(2))
+    attention.dt_bias = nn.Parameter(torch.zeros(2, 3))
+
+    # Unequal lengths must be padded independently, not to a shared maximum.
+    boundaries = (0, 3, 68)
+    q, k, v, raw_gate = (torch.randn(1, 68, 2, 3, dtype=torch.bfloat16) for _ in range(4))
+    raw_beta = torch.randn(1, 68, 2, dtype=torch.bfloat16)
+    recurrent_state = torch.arange(6 * 2 * 3 * 3, dtype=torch.float32).reshape(6, 2, 3, 3).to(torch.bfloat16)
+    previous_state = recurrent_state.clone()
+    if compact_metadata:
+        # The middle metadata row has no tokens and must not update its cache.
+        state_indices = torch.tensor([4, 2, 1], dtype=torch.int32)
+        has_initial_state = torch.tensor([False, True, True])
+        metadata = SimpleNamespace(
+            cu_seqlens_host=(0, 3, 3, 68),
+            cu_seqlens_kern=torch.tensor(boundaries, dtype=torch.int32),
+            keep_meta=torch.tensor([True, False, True]),
+        )
+    else:
+        state_indices = torch.tensor([4, 1], dtype=torch.int32)
+        has_initial_state = torch.tensor([False, True])
+        metadata = SimpleNamespace(cu_seqlens_host=boundaries, cu_seqlens_kern=None, keep_meta=None)
+
+    expected_initial = [torch.zeros(1, 2, 3, 3), previous_state[1:2].float()]
+    calls = []
+
+    def flash_kda(request_q, request_k, request_v, **kwargs):
+        request_index = len(calls)
+        start, end = boundaries[request_index : request_index + 2]
+        length = end - start
+        padded_length = (64, 128)[request_index]
+        assert request_q.shape == (1, padded_length, 2, 3)
+        for actual, source in zip((request_q, request_k, request_v), (q, k, v)):
+            torch.testing.assert_close(actual[:, :length], source[:, start:end])
+            assert torch.count_nonzero(actual[:, length:]) == 0
+            assert actual.is_contiguous()
+        torch.testing.assert_close(kwargs["g"][:, :length], raw_gate[:, start:end])
+        torch.testing.assert_close(kwargs["beta"][:, :length], raw_beta[:, start:end])
+        assert torch.isneginf(kwargs["g"][:, length:]).all()
+        assert torch.isneginf(kwargs["beta"][:, length:]).all()
+        torch.testing.assert_close(kwargs["initial_state"], expected_initial[request_index])
+        assert kwargs["layout_qkv"] == "BSND"
+        calls.append(request_index)
+        output = torch.full_like(request_q, float("nan"))
+        output[:, :length] = request_q[:, :length] + request_v[:, :length]
+        return output, kwargs["initial_state"] + 10 * (request_index + 1)
+
+    def clear_initial_states(states, has_state):
+        states[~has_state] = 0
+
+    with (
+        patch("vllm_ascend.ops.kimi_kda.get_pcp_group", return_value=SimpleNamespace(world_size=1)),
+        patch("vllm_ascend.ops.kimi_kda.clear_ssm_states", side_effect=clear_initial_states),
+        patch("vllm_ascend.ops.kimi_kda._flash_kda_impl", side_effect=flash_kda),
+    ):
+        output = attention._run_prefill(
+            q, k, v, raw_gate, raw_beta, recurrent_state, state_indices, has_initial_state, metadata
+        )
+
+    assert len(calls) == 2
+    torch.testing.assert_close(output, q + v)
+    expected_state = previous_state.clone()
+    expected_state[4] = 10
+    expected_state[1] = (previous_state[1].float() + 20).to(recurrent_state.dtype)
+    torch.testing.assert_close(recurrent_state, expected_state)
 
 
 def test_load_a_log_slices_padded_1d_checkpoint_by_tp_rank():
