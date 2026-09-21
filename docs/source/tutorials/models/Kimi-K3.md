@@ -287,6 +287,8 @@ The A2 capabilities have not changed in this release and remain consistent with 
 
     On Atlas 800 A3, a mixed Prefill/Decode deployment follows the Prefill execution mode. HCCL therefore uses AICPU by default; leave `HCCL_OP_EXPANSION_MODE` unset.
 
+    Kimi K3 on Atlas 800 A3 does not support `LD_PRELOAD=/usr/lib64/libjemalloc.so.2`; run `unset LD_PRELOAD` before starting vLLM.
+
     Before starting the service:
 
     - Replace the model path, local IP address, network interface, service port, and DP RPC port with values from the target environment.
@@ -311,6 +313,7 @@ The A2 capabilities have not changed in this release and remain consistent with 
         export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
         export GLOO_SOCKET_IFNAME=$NIC_NAME
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+        unset LD_PRELOAD
 
         SPECULATIVE_CONFIG="$(
           printf \
@@ -367,6 +370,7 @@ The A2 capabilities have not changed in this release and remain consistent with 
         export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
         export GLOO_SOCKET_IFNAME=$NIC_NAME
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+        unset LD_PRELOAD
 
         SPECULATIVE_CONFIG="$(
           printf \
@@ -812,6 +816,8 @@ On Atlas 800 A3 and Atlas 950DT, Prefill uses AICPU by default, so leave `HCCL_O
 
 This deployment supports DSpark speculative decoding. Configure the same `RadixArk/Kimi-K3-DSpark` GQA draft-model path and `num_speculative_tokens` on both Prefill and Decode nodes. The validated configuration uses draft TP16 on A3 or draft TP8 on Atlas 950DT, greedy drafting, and seven speculative tokens. The seventh argument of the engine template is the tensor-parallel size: `16` for A3 and `8` for Atlas 950DT.
 
+Kimi K3 on Atlas 800 A3 does not support `LD_PRELOAD=/usr/lib64/libjemalloc.so.2`; run `unset LD_PRELOAD` before starting vLLM.
+
 #### 5.2.1 Create the engine templates
 
 === "Prefill"
@@ -837,6 +843,7 @@ This deployment supports DSpark speculative decoding. Configure the same `RadixA
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
     export GLOO_SOCKET_IFNAME=${nic_name}
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    unset LD_PRELOAD
     export PYTHONHASHSEED=0
 
     SPECULATIVE_CONFIG="$(
@@ -934,6 +941,7 @@ This deployment supports DSpark speculative decoding. Configure the same `RadixA
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
     export GLOO_SOCKET_IFNAME=${nic_name}
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    unset LD_PRELOAD
 
     SPECULATIVE_CONFIG="$(
       printf \
