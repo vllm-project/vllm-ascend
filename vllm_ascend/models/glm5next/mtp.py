@@ -24,7 +24,6 @@ from vllm.model_executor.models.utils import maybe_prefix
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
-from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.utils import is_rot_weight_used
 
 from .model import (
@@ -204,9 +203,7 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
         self.config = vllm_config.model_config.hf_config
         self.quant_config = vllm_config.quant_config
         self.model = Glm5NextMultiTokenPredictor(vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model"))
-        self.is_rot_weight_used = get_current_hardware_profile().supports(
-            HardwareCapability.MTP_INPUT_ROTATION
-        ) and is_rot_weight_used(vllm_config)
+        self.is_rot_weight_used = is_rot_weight_used(vllm_config)
         if self.is_rot_weight_used:
             self.rot = nn.Linear(self.config.hidden_size, self.config.hidden_size, bias=False)
         self.set_moe_parameters()

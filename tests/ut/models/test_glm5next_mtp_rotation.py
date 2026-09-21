@@ -8,8 +8,7 @@ import torch
 from torch import nn
 
 import vllm_ascend.models.glm5next.mtp as mtp_module
-from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.device.hardware_profile import get_hardware_profile
+import vllm_ascend.utils as ascend_utils
 from vllm_ascend.models.glm5next.mtp import Glm5NextMTP
 
 
@@ -80,22 +79,21 @@ def test_mtp_transforms_target_and_recycled_hidden_states(use_rotation):
         hidden = feedback_hidden
 
 
-@pytest.mark.parametrize("device_type", [AscendDeviceType.A3, AscendDeviceType.A5])
-@pytest.mark.parametrize("rotation_flag", [False, True])
-def test_rotation_is_gated_by_hardware_and_checkpoint(device_type, rotation_flag):
+@pytest.mark.parametrize(
+    ("quant_description", "expected"),
+    [(None, False), ({}, False), ({"is_rot_used": False}, False), ({"is_rot_used": True}, True)],
+)
+def test_rotation_is_gated_by_checkpoint(quant_description, expected):
     config = SimpleNamespace(hidden_size=4)
-    vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=config), quant_config=None)
+    quant_config = SimpleNamespace(quant_description=quant_description) if quant_description is not None else None
+    vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=config), quant_config=quant_config)
     with (
         patch.object(mtp_module, "Glm5NextMultiTokenPredictor", return_value=nn.Module()),
         patch.object(Glm5NextMTP, "set_moe_parameters"),
-        patch.object(mtp_module, "get_current_hardware_profile", return_value=get_hardware_profile(device_type)),
-        patch.object(mtp_module, "is_rot_weight_used", return_value=rotation_flag) as read_flag,
+        patch.object(ascend_utils, "_IS_ROT_WEIGHT_USED", None),
+        patch.object(mtp_module, "is_rot_weight_used", wraps=ascend_utils.is_rot_weight_used) as read_flag,
     ):
         model = Glm5NextMTP(vllm_config=vllm_config)
-    expected = device_type == AscendDeviceType.A3 and rotation_flag
     assert model.is_rot_weight_used is expected
     assert hasattr(model, "rot") is expected
-    if device_type == AscendDeviceType.A5:
-        read_flag.assert_not_called()
-    else:
-        read_flag.assert_called_once_with(vllm_config)
+    read_flag.assert_called_once_with(vllm_config)
