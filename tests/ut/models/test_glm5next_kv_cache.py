@@ -30,11 +30,20 @@ from vllm_ascend.models.glm5next.kv_cache import (
     Glm5NextTailCache,
     KpoolTailManager,
     format_indexer_kpool_slot_mapping,
+    get_kpool_tail_ring_capacity,
 )
 
 
 def _ratio_kwargs(ratio: int) -> dict[str, int]:
     return {"tokens_per_state": ratio}
+
+
+@pytest.mark.parametrize(("pool", "lookahead", "capacity"), [(4, 0, 4), (4, 3, 7), (16, 5, 21)])
+def test_tail_ring_capacity_retains_speculative_lookahead(pool, lookahead, capacity):
+    config = SimpleNamespace(
+        speculative_config=(None if lookahead == 0 else SimpleNamespace(num_speculative_tokens=lookahead))
+    )
+    assert get_kpool_tail_ring_capacity(config, pool) == capacity
 
 
 @pytest.mark.parametrize("capacity", [4, 12])

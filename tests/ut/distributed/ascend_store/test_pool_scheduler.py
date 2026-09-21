@@ -78,6 +78,36 @@ def make_config(kv_role="kv_producer", extra_config=None, block_size=16):
     return config
 
 
+@pytest.mark.parametrize("num_speculative_blocks", [None, 0, 3])
+def test_layerwise_runtime_detects_recurrent_state(num_speculative_blocks):
+    config = make_config(extra_config={"backend": "mooncake"})
+    groups = [
+        KVCacheGroupSpec(
+            ["layer.0"], FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
+        )
+    ]
+    if num_speculative_blocks is not None:
+        groups.append(
+            KVCacheGroupSpec(
+                ["layer.1"],
+                MambaSpec(
+                    shapes=((4,),),
+                    dtypes=(torch.float32,),
+                    block_size=16,
+                    mamba_cache_mode="align",
+                    num_speculative_blocks=num_speculative_blocks,
+                ),
+            )
+        )
+    kv_cache_config = MagicMock(kv_cache_groups=groups)
+    if num_speculative_blocks is None:
+        KVPoolScheduler(config, use_layerwise=True, kv_cache_config=kv_cache_config)
+    else:
+        # A Mamba group still has recurrent state when it has no scratch blocks.
+        with pytest.raises(ValueError, match="recurrent Mamba state"):
+            KVPoolScheduler(config, use_layerwise=True, kv_cache_config=kv_cache_config)
+
+
 class TestGetZmqRpcPathLookup(unittest.TestCase):
     def test_rpc_path(self):
         cases = [({}, 0, 0), ({"lookup_rpc_port": 5555}, 1, 5555), ({"mooncake_rpc_port": 6666}, 0, 6666)]
