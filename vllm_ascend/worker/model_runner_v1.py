@@ -913,23 +913,35 @@ class NPUModelRunner(GPUModelRunner):
         fires), and hybrid buffers are sectioned ([pad|conv|..|k|ssm|..|v|pad])
         rather than block-major, so a whole-storage block view would copy
         across section boundaries even when the assert passes. Every per-layer
-        cache view is (num_blocks, ...) indexed by the global block id, so
-        copying through the views is correct for every layout -- mirroring
-        KVBlockZeroer's approach.
+        cache view is block-indexed on dim 0, so copying through the views is
+        correct for every layout -- mirroring KVBlockZeroer's approach.
+
+        Dim 0 counts scheduler blocks only for recurrent-state views. Hybrid
+        attention views are split into kernel blocks, so scheduler block ``b``
+        owns rows ``[b * scale, (b + 1) * scale)``; indexing those by the
+        scheduler id would copy the wrong rows into a block another request
+        may own.
         """
         ids = torch.tensor(block_copies, dtype=torch.long, device=self.device)
-        src_ids, dst_ids = ids.unbind(dim=1)
+        num_blocks = self.kv_cache_config.num_blocks
+        row_ids_by_scale: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
         for layer_cache in self.kv_caches:
             tensors = layer_cache if isinstance(layer_cache, (list, tuple)) else (layer_cache,)
             for cache_tensor in tensors:
                 if cache_tensor is None or cache_tensor.dim() == 0:
                     continue
+                scale = max(cache_tensor.shape[0] // num_blocks, 1)
+                if scale not in row_ids_by_scale:
+                    rows = ids.unsqueeze(-1) * scale + torch.arange(scale, device=self.device)
+                    src_rows, dst_rows = rows.unbind(dim=1)
+                    row_ids_by_scale[scale] = (src_rows.reshape(-1), dst_rows.reshape(-1))
+                src_rows, dst_rows = row_ids_by_scale[scale]
                 # aclnnIndex rejects FP8 dtypes (EZ1001); copy through a uint8
                 # byte view instead -- same storage, same rows, same bytes
                 # (same workaround as scatter_mxfp_k_scale_cache).
                 if cache_tensor.dtype == torch.float8_e4m3fn:
                     cache_tensor = cache_tensor.view(torch.uint8)
-                cache_tensor[dst_ids] = cache_tensor[src_ids]
+                cache_tensor[dst_rows] = cache_tensor[src_rows]
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> Callable | None:
         # Temporary rewind guard for KV-load-failure recompute.

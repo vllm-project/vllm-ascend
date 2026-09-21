@@ -2397,5 +2397,59 @@ class TestC8MXFPVScaleCacheFill(unittest.TestCase):
         )
 
 
+class TestCopyKVCacheBlocksByLayerViews(unittest.TestCase):
+    """CoW copies take scheduler block ids; hybrid attention views do not.
+
+    A hybrid attention cache is reshaped into kernel blocks, so scheduler
+    block ``b`` owns rows ``[b * scale, (b + 1) * scale)`` of the view. Using
+    the scheduler id as a row index copies the wrong rows and, worse, lands
+    the write inside a block that some other request may own.
+    """
+
+    NUM_BLOCKS = 4
+    SCALE = 2  # kernel blocks per scheduler block
+
+    def _runner(self, kv_caches):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.device = torch.device("cpu")
+        runner.kv_cache_config = SimpleNamespace(num_blocks=self.NUM_BLOCKS)
+        runner.kv_caches = kv_caches
+        return runner
+
+    @staticmethod
+    def _rows(num_rows, width, dtype=torch.uint8):
+        # Row r is filled with r + 1, so every row is recognisable and nonzero.
+        rows = torch.arange(1, num_rows + 1, dtype=torch.uint8).repeat_interleave(width).view(num_rows, width)
+        return rows.view(dtype) if dtype != torch.uint8 else rows
+
+    def test_kernel_block_views_copy_the_whole_scheduler_block(self):
+        num_rows = self.NUM_BLOCKS * self.SCALE
+        key = self._rows(num_rows, 8, torch.float8_e4m3fn)
+        k_scale = self._rows(num_rows, 4)
+        before = k_scale.clone()
+        self._runner([(key, k_scale)])._copy_kv_cache_blocks_by_layer_views([(1, 3)])
+        for tensor in (key.view(torch.uint8), k_scale):
+            # Scheduler block 3 -> rows 6, 7 now mirror block 1 -> rows 2, 3.
+            self.assertEqual(tensor[6:8, 0].tolist(), [3, 4])
+        # Nothing outside the destination block moved; row 3 in particular
+        # belongs to block 1, which a row-indexed copy would have overwritten.
+        self.assertTrue(torch.equal(k_scale[:6], before[:6]))
+
+    def test_block_indexed_views_are_copied_by_scheduler_id(self):
+        # Recurrent-state caches keep one row per scheduler block.
+        conv = self._rows(self.NUM_BLOCKS, 4)
+        ssm = self._rows(self.NUM_BLOCKS, 6)
+        self._runner([[conv, ssm]])._copy_kv_cache_blocks_by_layer_views([(1, 3)])
+        for tensor in (conv, ssm):
+            self.assertEqual(tensor[:, 0].tolist(), [1, 2, 3, 2])
+
+    def test_mixed_layers_each_use_their_own_scale(self):
+        key = self._rows(self.NUM_BLOCKS * self.SCALE, 8)
+        ssm = self._rows(self.NUM_BLOCKS, 6)
+        self._runner([(key,), [ssm]])._copy_kv_cache_blocks_by_layer_views([(0, 2), (1, 3)])
+        self.assertEqual(key[:, 0].tolist(), [1, 2, 3, 4, 1, 2, 3, 4])
+        self.assertEqual(ssm[:, 0].tolist(), [1, 2, 1, 2])
+
+
 if __name__ == "__main__":
     unittest.main()
