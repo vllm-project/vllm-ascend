@@ -2,8 +2,8 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 """Correctness tests for MiniMax M3 sparse-attention kernels on Ascend.
 
-Covers ``msa_m3_triton`` index top-k operators, ``msa_m3_npu`` block-sparse
-attention (``npu_sparse_attention_score``), and optionally compares against the
+Covers ``msa_m3_triton`` index top-k operators, the CANN Ops
+``generic_block_sparse_attention`` path, and optionally compares against the
 Triton sparse-attention reference.
 
 Default sparse-attention backend selection runs both Triton and torch_npu.
@@ -12,8 +12,7 @@ Select one backend with::
     pytest tests/e2e/pull_request/one_card/test_minimax_m3_sparse_attn.py --msa-m3-sparse-backend=torch_npu
 
 Test cases are adapted from
-``reference/vllm_cp/tests/kernels/attention/test_minimax_m3.py`` and
-``csrc/attention/sparse_attention_score/tests/test_bf16.py``.
+``reference/vllm_cp/tests/kernels/attention/test_minimax_m3.py``.
 """
 
 from __future__ import annotations
@@ -68,7 +67,6 @@ SM_SCALE = HEAD_DIM**-0.5
 _SPARSE_MEAN_ATOL = 2.5e-4
 _SPARSE_MAX_ATOL = 1.7e-2
 SparseAttnBackend = Literal["triton", "torch_npu"]
-_NPU_SPARSE_OP_REGISTERED = False
 # MiniMax-M3 production sparse_attention_config (w8a8 checkpoint).
 PRODUCTION_SPARSE_TOPK = 16
 PRODUCTION_INDEX_HEAD_DIM = 128
@@ -121,7 +119,6 @@ def msa_m3_sparse_backend(request: pytest.FixtureRequest) -> SparseAttnBackend:
     if backend == "torch_npu":
         if not NPU_AVAILABLE:
             pytest.skip("torch_npu sparse backend requires NPU.")
-        _ensure_npu_sparse_attention_score_op()
     return backend
 
 
@@ -138,32 +135,6 @@ def msa_m3_sparse_backend_triton_only(
 def should_do_global_cleanup_after_test() -> bool:
     # vLLM cleanup calls torch.accelerator.empty_cache(), invalid on NPU.
     return False
-
-
-def _ensure_npu_sparse_attention_score_op() -> None:
-    """Ensure ``torch.ops._C_ascend.npu_sparse_attention_score`` is available."""
-    global _NPU_SPARSE_OP_REGISTERED
-    if _NPU_SPARSE_OP_REGISTERED:
-        return
-
-    from vllm_ascend.utils import bootstrap_custom_op_env, enable_custom_op
-
-    bootstrap_custom_op_env(include_vendor_lib=True)
-    if not enable_custom_op():
-        pytest.skip("vllm-ascend custom ops are disabled in this build.")
-
-    torch.npu.set_device(0)
-    torch.npu.synchronize()
-
-    try:
-        _ = torch.ops._C_ascend.npu_sparse_attention_score
-    except AttributeError:
-        pytest.skip(
-            "torch.ops._C_ascend.npu_sparse_attention_score is not available. "
-            "Rebuild with: pip install -v --no-build-isolation -e ."
-        )
-
-    _NPU_SPARSE_OP_REGISTERED = True
 
 
 def _sparse_tolerances(_backend: SparseAttnBackend) -> tuple[float, float]:

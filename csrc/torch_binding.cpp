@@ -54,8 +54,6 @@
 #include "attention/kda_layout_swap12/kda_layout_swap12_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
 #include "attention/k2q_csr/k2q_csr_torch_adpt.h"
-#include "attention/msa_index_score/msa_index_score_torch_adpt.h"
-#include "attention/sparse_attention_score/sparse_attention_score_torch_adpt.h"
 #include "attention/store_kv_block/store_kv_block_torch_adpt.h"
 #include "attention/store_kv_block_metadata/store_kv_block_metadata_torch_adpt.cpp"
 #include "moe/dequant_situ_quant/dequant_situ_quant_torch_adpt.h"
@@ -106,6 +104,121 @@ int64_t get_physical_device_id(int64_t user_device_id)
 // Required by EXEC_NPU_CMD hash helpers in aclnn_torch_adapter/op_api_common.h
 thread_local char g_hashBuf[kHashBufSize];
 thread_local int g_hashOffset = 0;
+
+namespace msa_index_score_detail {
+
+constexpr int64_t QUERY_DIM_NUM = 3;
+constexpr int64_t KEY_CACHE_DIM_NUM = 3;
+constexpr int64_t KEY_CACHE_WITH_HEAD_DIM_NUM = 4;
+constexpr int64_t BLOCK_TABLE_DIM_NUM = 2;
+constexpr int64_t SEQ_LEN_DIM_NUM = 1;
+constexpr int64_t BLOCK_SIZE = 128;
+constexpr int64_t SCORE_ALIGNMENT = 16;
+
+void check_msa_index_score_params(
+    const at::Tensor& query, const at::Tensor& key,
+    const at::Tensor& block_table, const at::Tensor& start_loc,
+    const c10::optional<at::Tensor>& scale,
+    const c10::optional<at::Tensor>& atten_mask,
+    const c10::optional<at::Tensor>& actual_seq_qlen,
+    const c10::optional<at::Tensor>& actual_seq_klen,
+    const std::string& layout_key, int64_t sparse_mode,
+    int64_t init_blocks, int64_t local_blocks)
+{
+    TORCH_CHECK(query.dim() == QUERY_DIM_NUM,
+                "query must use TND layout [T,N,D]");
+    const auto query_dtype = query.scalar_type();
+    TORCH_CHECK(query_dtype == at::kHalf || query_dtype == at::kBFloat16 ||
+                    query_dtype == at::kFloat8_e5m2 ||
+                    query_dtype == at::kFloat8_e4m3fn,
+                "query dtype must be float16, bfloat16, float8_e5m2, "
+                "or float8_e4m3fn");
+    TORCH_CHECK(key.dim() == KEY_CACHE_DIM_NUM ||
+                    key.dim() == KEY_CACHE_WITH_HEAD_DIM_NUM,
+                "key must be [block_num,128,D] or [block_num,128,1,D]");
+    TORCH_CHECK(key.scalar_type() == query_dtype,
+                "non-quantized key dtype must match query dtype");
+    TORCH_CHECK(layout_key == "BBND", "only BBND key layout is supported");
+    TORCH_CHECK(block_table.dim() == BLOCK_TABLE_DIM_NUM &&
+                    block_table.scalar_type() == at::kInt,
+                "block_table must be a 2D int32 tensor");
+    TORCH_CHECK(start_loc.dim() == SEQ_LEN_DIM_NUM &&
+                    start_loc.scalar_type() == at::kInt,
+                "start_loc must be a 1D int32 tensor");
+    TORCH_CHECK(actual_seq_qlen.has_value() &&
+                    actual_seq_qlen.value().defined() &&
+                    actual_seq_qlen.value().dim() == SEQ_LEN_DIM_NUM &&
+                    actual_seq_qlen.value().scalar_type() == at::kInt,
+                "actual_seq_qlen must be a 1D int32 tensor");
+    TORCH_CHECK(actual_seq_klen.has_value() &&
+                    actual_seq_klen.value().defined() &&
+                    actual_seq_klen.value().dim() == SEQ_LEN_DIM_NUM &&
+                    actual_seq_klen.value().scalar_type() == at::kInt,
+                "actual_seq_klen must be a 1D int32 tensor");
+    TORCH_CHECK(actual_seq_qlen.value().size(0) ==
+                    actual_seq_klen.value().size(0) + 1,
+                "actual_seq_qlen size must equal batch_size + 1");
+    TORCH_CHECK(block_table.size(0) == actual_seq_klen.value().size(0) &&
+                    start_loc.size(0) == actual_seq_klen.value().size(0),
+                "block_table/start_loc batch size mismatch");
+    TORCH_CHECK(key.size(1) == BLOCK_SIZE,
+                "MSA index score requires block size 128");
+    TORCH_CHECK(sparse_mode == 0 || sparse_mode == 3,
+                "sparse_mode must be 0 or 3");
+    if (sparse_mode == 3) {
+        TORCH_CHECK(atten_mask.has_value() && atten_mask.value().defined(),
+                    "sparse_mode=3 requires atten_mask");
+        TORCH_CHECK(atten_mask.value().sizes() == at::IntArrayRef({2048, 2048}) &&
+                        atten_mask.value().scalar_type() == at::kChar,
+                    "atten_mask must be int8 with shape [2048,2048]");
+    } else {
+        TORCH_CHECK(!atten_mask.has_value() || !atten_mask.value().defined(),
+                    "sparse_mode=0 does not accept atten_mask");
+    }
+    TORCH_CHECK(!scale.has_value() || !scale.value().defined(),
+                "scale is only valid for an int8 key cache");
+    TORCH_CHECK(init_blocks >= 0 && local_blocks >= 0,
+                "init_blocks and local_blocks must be non-negative");
+}
+
+}  // namespace msa_index_score_detail
+
+at::Tensor npu_msa_index_score(
+    const at::Tensor& query, const at::Tensor& key,
+    const at::Tensor& block_table, const at::Tensor& start_loc,
+    const c10::optional<at::Tensor>& scale,
+    const c10::optional<at::Tensor>& atten_mask,
+    const c10::optional<at::Tensor>& actual_seq_qlen,
+    const c10::optional<at::Tensor>& actual_seq_klen,
+    c10::string_view layout_key, int64_t sparse_mode,
+    int64_t init_blocks, int64_t local_blocks)
+{
+    std::string layout_key_str(layout_key);
+    msa_index_score_detail::check_msa_index_score_params(
+        query, key, block_table, start_loc, scale, atten_mask,
+        actual_seq_qlen, actual_seq_klen, layout_key_str, sparse_mode,
+        init_blocks, local_blocks);
+
+    at::Tensor normalized_key = key.dim() ==
+            msa_index_score_detail::KEY_CACHE_DIM_NUM
+        ? key.unsqueeze(2)
+        : key;
+    const int64_t score_stride =
+        ((block_table.size(1) + msa_index_score_detail::SCORE_ALIGNMENT - 1) /
+         msa_index_score_detail::SCORE_ALIGNMENT) *
+        msa_index_score_detail::SCORE_ALIGNMENT;
+    at::Tensor score = at::empty(
+        {query.size(1), query.size(0), score_stride},
+        query.options().dtype(at::kFloat));
+
+    // The ACLNN executor may retain attribute pointers until graph capture is
+    // finalized. Use process-lifetime storage for the only supported layout.
+    static char layout_key_bbnd[] = "BBND";
+    EXEC_NPU_CMD(aclnnMsaIndexScore, query, normalized_key, block_table,
+                 scale, atten_mask, actual_seq_qlen, actual_seq_klen, start_loc,
+                 layout_key_bbnd, sparse_mode, init_blocks, local_blocks, score);
+    return score;
+}
 
 namespace {
 
@@ -3725,22 +3838,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "store_kv_block(Tensor key_in, Tensor key_cache_in, Tensor group_len, Tensor group_key_idx,Tensor group_key_cache_idx, int block_size=0) -> ()"
     );
     ops.impl("store_kv_block", torch::kPrivateUse1, &vllm_ascend::store_kv_block);
-
-    ops.def(
-        "npu_sparse_attention_score("
-        "Tensor query, Tensor key, Tensor value, Tensor select_idx, "
-        "Tensor block_table, *, "
-        "Tensor? select_num_idx=None, "
-        "Tensor? q_dequant_scale=None, Tensor? k_dequant_scale=None, "
-        "Tensor? v_dequant_scale=None, "
-        "Tensor? actual_seq_lengths=None, Tensor? actual_seq_lengths_kv=None, "
-        "str q_input_layout=\"TND\", str kv_input_layout=\"BNSD\", "
-        "int num_key_value_heads=1, float scale_value=1.0, "
-        "int block_size=128, int top_k=16, int inner_precise=0, "
-        "ScalarType? attention_out_dtype=None) -> Tensor"
-    );
-    ops.impl("npu_sparse_attention_score", torch::kPrivateUse1,
-             &vllm_ascend::npu_sparse_attention_score);
 
     ops.def(
         "npu_msa_index_score("
