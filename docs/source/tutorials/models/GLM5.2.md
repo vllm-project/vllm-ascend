@@ -946,7 +946,6 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
                 "kv_role": "kv_consumer",
                 "kv_connector_extra_config": {
                     "lookup_rpc_port":"0",
-                    "load_async": true,
                     "backend": "mooncake"
                 }
             }

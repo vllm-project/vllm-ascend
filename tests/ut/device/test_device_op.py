@@ -1,5 +1,7 @@
+import math
 from unittest import mock
 
+import pytest
 import torch
 
 from vllm_ascend.device.device_op import A5DeviceAdaptor, BaseDeviceAdaptor
@@ -135,3 +137,40 @@ def test_kv_cache_load_makes_seq_lens_contiguous():
     assert mock_gather.call_args.kwargs["seq_offset"] is seq_starts
     assert mock_gather.call_args.kwargs["key"] is key
     assert mock_gather.call_args.kwargs["value"] is value
+
+
+@pytest.mark.parametrize(
+    "shape,dim,indices,value,dtype",
+    [
+        ((8,), 0, [1, 4, 6], True, torch.bool),
+        ((4, 3), 0, [1, 3], -1, torch.int32),
+        ((4, 3), 1, [0, 2], 7, torch.int64),
+        ((2, 3, 4), -2, [-1, 0], -3.5, torch.float32),
+        ((2, 3), 1, [], 9, torch.int64),
+        ((5,), 0, [1, 1, 3], 6, torch.int64),
+    ],
+)
+def test_a5_index_fill_matches_torch_index_fill(shape, dim, indices, value, dtype):
+    source = torch.arange(math.prod(shape)).reshape(shape)
+    source = (source % 2).bool() if dtype is torch.bool else source.to(dtype)
+    index = torch.tensor(indices, dtype=torch.int64)
+    expected = source.clone().index_fill_(dim, index, value)
+    actual_input = source.clone()
+
+    actual = A5DeviceAdaptor.index_fill(actual_input, dim, index, value)
+
+    assert actual is actual_input
+    torch.testing.assert_close(actual, expected)
+
+
+def test_a5_index_fill_uses_scatter():
+    tensor = mock.Mock()
+    tensor.dim.return_value = 1
+    tensor.size.return_value = 8
+    tensor.shape = (8,)
+
+    result = A5DeviceAdaptor.index_fill(tensor, 0, torch.tensor([1, 3]), 5)
+
+    assert result is tensor
+    tensor.scatter_.assert_called_once()
+    tensor.index_fill_.assert_not_called()

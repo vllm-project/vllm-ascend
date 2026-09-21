@@ -20,6 +20,8 @@ from vllm_ascend._310p.worker.v2.model_state import (
 )
 from vllm_ascend._310p.worker.v2.sampler import Ascend310PSampler
 from vllm_ascend._310p.worker.v2.states import Ascend310PStagedWriteTensor
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
@@ -202,7 +204,10 @@ def test_init_model_state_routes_qwen35_hybrid_to_310p() -> None:
     expected = object()
 
     with (
-        patch("vllm_ascend.worker.v2.model_states.is_310p", return_value=True),
+        patch(
+            "vllm_ascend.worker.v2.model_states.get_current_hardware_profile",
+            return_value=get_hardware_profile(AscendDeviceType._310P),
+        ),
         patch(
             "vllm_ascend._310p.worker.v2.model_state.Ascend310PMambaHybridModelState",
             return_value=expected,

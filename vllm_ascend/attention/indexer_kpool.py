@@ -11,7 +11,6 @@ from torch import nn
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import get_forward_context
-from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -82,7 +81,7 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
         if not layer_names or any(not name.endswith(".indexer.k_cache") for name in layer_names):
             raise ValueError(f"Invalid Indexer KPool cache layer names: {layer_names}.")
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        self.logical_block_size = kv_cache_spec.block_size
+        self.logical_block_size = vllm_config.cache_config.block_size
         self.storage_block_size = get_storage_block_size(kv_cache_spec)
         if self.storage_block_size <= 0:
             raise ValueError(f"Indexer KPool storage block size must be positive, got {self.storage_block_size}.")
@@ -93,7 +92,7 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
                 f"kernel block size: logical={self.logical_block_size}, "
                 f"kernel={GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE}."
             )
-        self.kernel_blocks_per_logical_block = self.logical_block_size // GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE
+        self.kernel_row_block_size = GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE // self.compress_ratio
         scheduler_config = vllm_config.scheduler_config
         # ACLGraph replay keeps the addresses captured on the first run. The
         # derived compressed metadata therefore needs persistent storage that
@@ -115,16 +114,6 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
         )
         self._raw_seq_lens_buffer = torch.empty(
             scheduler_config.max_num_seqs,
-            dtype=torch.int32,
-            device=device,
-        )
-        max_logical_blocks = cdiv(
-            vllm_config.model_config.max_model_len,
-            self.logical_block_size,
-        )
-        self._block_table_buffer = torch.empty(
-            scheduler_config.max_num_seqs,
-            max_logical_blocks,
             dtype=torch.int32,
             device=device,
         )
@@ -168,38 +157,14 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
             seq_lens_cpu = None
         if seq_lens_cpu is not None:
             seq_lens_cpu = torch.div(seq_lens_cpu, self.compress_ratio, rounding_mode="floor")
-        expanded_block_table = common_attn_metadata.block_table_tensor[:num_reqs]
-        split = self.kernel_blocks_per_logical_block
-        if expanded_block_table.shape[1] % split:
-            raise ValueError(
-                "GLM-Next indexer received a partially expanded SFA block "
-                f"table: width={expanded_block_table.shape[1]}, split={split}."
-            )
-        logical_width = expanded_block_table.shape[1] // split
-        if logical_width > self._block_table_buffer.shape[1]:
-            raise ValueError(
-                "GLM-Next indexer block table exceeds its persistent buffer: "
-                f"required={logical_width}, capacity="
-                f"{self._block_table_buffer.shape[1]}."
-            )
-        block_table = self._block_table_buffer[:num_reqs, :logical_width]
-        # The common full-group table is expanded for the C128 SFA kernel:
-        # scheduler block N becomes [split*N, ..., split*N+split-1]. The
-        # compressed indexer owns one physical page per scheduler block, so it
-        # must recover N rather than treating the SFA sub-blocks as pages.
-        torch.div(
-            expanded_block_table[:, ::split],
-            split,
-            rounding_mode="floor",
-            out=block_table,
-        )
+        block_table = common_attn_metadata.block_table_tensor[:num_reqs]
         return AscendIndexerKPoolMetadata(
             block_table=block_table,
             slot_mapping=slot_mapping,
             seq_lens=seq_lens,
             seq_lens_cpu=seq_lens_cpu,
             positions=positions,
-            block_size=self.storage_block_size,
+            block_size=self.kernel_row_block_size,
             compress_ratio=self.compress_ratio,
             cum_query_lens=cum_query_lens,
             raw_seq_lens=raw_seq_lens,
@@ -235,8 +200,9 @@ class AscendIndexerKPoolBackend(AttentionBackend):
         num_kv_heads: int,
         head_size: int,
         cache_type: str = "",
+        cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
-        del cache_type
+        del cache_type, cache_dtype_str
         if num_kv_heads != 1:
             raise ValueError(f"Indexer KPool cache requires one KV head, got {num_kv_heads}.")
         return (num_blocks, block_size, num_kv_heads, head_size)
@@ -324,8 +290,9 @@ class AscendIndexerKPoolTailBackend(AttentionBackend):
         num_kv_heads: int,
         head_size: int,
         cache_type: str = "",
+        cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
-        del cache_type
+        del cache_type, cache_dtype_str
         if num_kv_heads != 1:
             raise ValueError(f"Indexer KPool tail cache requires one KV head, got {num_kv_heads}.")
         return (num_blocks, 2, block_size, head_size)

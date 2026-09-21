@@ -8,7 +8,8 @@ from vllm.config.speculative import SpeculativeConfig
 from vllm.config.vllm import VllmConfig
 from vllm.platforms import current_platform
 
-from vllm_ascend.utils import is_310p, vllm_version_is
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.pp_utils import resolve_spec_pp_support
 
 _original_validate_v2_model_runner = VllmConfig._validate_v2_model_runner
@@ -51,7 +52,7 @@ VllmConfig._get_v2_model_runner_unsupported_features = _patched_get_unsupported_
 
 
 def _patched_validate_v2_model_runner(self) -> None:
-    if is_310p():
+    if not get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PATCHES):
         return
     _original_validate_v2_model_runner(self)
 

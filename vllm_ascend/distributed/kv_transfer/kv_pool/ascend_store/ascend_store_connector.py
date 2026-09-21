@@ -35,11 +35,14 @@ from vllm.v1.request import Request
 from vllm.v1.serial_utils import MsgpackDecoder
 from vllm.v1.worker import mamba_utils
 
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
+    get_layerwise_data_plane,
+    get_layerwise_protocol,
+    validate_layerwise_topology,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendStoreKVConnectorWorkerMetadata,
-    is_block_key_layerwise,
     is_kv_save_role,
-    validate_mooncake_layerwise_topology,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
     AscendStoreKVConnectorStats,
@@ -106,12 +109,10 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self.use_layerwise = extra_config.get("use_layerwise", False)
         self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
         self.backend_name = extra_config.get("backend", "mooncake").lower()
-        self.use_block_key_layerwise = is_block_key_layerwise(self.use_layerwise, self.backend_name)
-        validate_mooncake_layerwise_topology(
-            vllm_config.parallel_config,
-            self.backend_name,
-            self.use_layerwise,
-        )
+        self.layerwise_protocol = get_layerwise_protocol(self.backend_name)
+        self.layerwise_data_plane = get_layerwise_data_plane(self.layerwise_protocol)
+        self.use_block_key_layerwise = self.use_layerwise and self.layerwise_data_plane == "block_key"
+        validate_layerwise_topology(self.layerwise_protocol, vllm_config.parallel_config, self.use_layerwise)
 
         connector_name = vllm_config.kv_transfer_config.kv_connector
         if connector_name == "MooncakeConnectorStoreV1":
@@ -243,6 +244,15 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
+
+    def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata) -> None:
+        """Fence the previous save before this step can reuse KV blocks.
+
+        This hook is temporarily reused for deferred KV cache save
+        synchronization and will be replaced by a dedicated mechanism.
+        """
+        assert self.connector_worker is not None
+        self.connector_worker.wait_for_previous_save()
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None

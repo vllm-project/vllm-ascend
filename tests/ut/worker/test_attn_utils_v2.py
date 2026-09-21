@@ -238,7 +238,8 @@ def test_main_dsv4_materializes_real_planner_geometry_once(monkeypatch):
 @pytest.mark.parametrize(
     "state_kwargs", [{}, {"attn_state": None}, {"attn_state": AscendAttentionState.ChunkedPrefill}]
 )
-def test_build_draft_attn_metadata_preserves_caller_state(monkeypatch, state_kwargs):
+@pytest.mark.parametrize("factory_state", [None, AscendAttentionState.ChunkedPrefill])
+def test_build_draft_attn_metadata_applies_factory_state(monkeypatch, state_kwargs, factory_state):
     captured_kwargs = {}
 
     def raw_build_attn_metadata(*_args, **kwargs):
@@ -257,13 +258,14 @@ def test_build_draft_attn_metadata_preserves_caller_state(monkeypatch, state_kwa
         positions,
         pad=5,
         is_prefilling=is_prefilling,
+        attn_state=factory_state,
     ):
         metadata = attn_utils._BUILD_ATTN_METADATA_MODULE.build_attn_metadata(**state_kwargs)
 
     assert metadata == "metadata"
     torch.testing.assert_close(captured_kwargs["positions"], positions[:5])
     assert captured_kwargs["is_prefilling"] is is_prefilling
-    assert {key: value for key, value in captured_kwargs.items() if key == "attn_state"} == state_kwargs
+    assert captured_kwargs["attn_state"] == factory_state
 
 
 @pytest.mark.parametrize(
@@ -964,6 +966,9 @@ def _make_mla_layer(*, fa_quant: bool = False, sparse_c8: bool = False):
         head_size=128,
         dtype=torch.bfloat16,
         cache_dtype_str="auto",
+        model_version=None,
+        non_causal_multi_token_decode=False,
+        tokens_per_state=1,
     )
     return layer
 

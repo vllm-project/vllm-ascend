@@ -344,6 +344,7 @@ class AscendConfig:
             "enable_shared_expert_dp": false,
             "enable_sparse_sfa_c8": false,
             "enable_sparse_li_c8": false,
+            "c8_enable_reshape_optim": true,
             "ascend_compilation_config": {
                 "enable_npugraph_ex": true,
                 "enable_static_kernel": false,
@@ -521,6 +522,8 @@ class AscendConfig:
     enable_sp_by_pass: bool = False
     enable_sparse_sfa_c8: bool = False
     enable_sparse_li_c8: bool = False
+    # See https://github.com/vllm-project/vllm-ascend/issues/15896
+    c8_enable_reshape_optim: bool = True
     pd_tp_ratio: int = 1
     pd_head_ratio: int = 1
     num_head_replica: int = 1
@@ -763,8 +766,9 @@ class AscendConfig:
                     "enable_kv_nz is only supported in pd scenario and can only be used in D node."
                 )
 
-        # Sparse C8 derivation. The StoreKVBlock optimization is internal and
-        # enabled only for SFA + Lightning Indexer C8 on PD prefill nodes.
+        # Sparse C8 derivation. StoreKVBlock can be disabled by users, and is
+        # otherwise enabled only for SFA + Lightning Indexer C8 on PD prefill
+        # nodes.
         from vllm_ascend.utils import model_uses_sfa_sparse
 
         use_sparse = model_uses_sfa_sparse(vc.model_config)
@@ -779,7 +783,7 @@ class AscendConfig:
                 and not bool(getattr(kv_transfer_config, "is_kv_consumer", False))
             )
         )
-        self._c8_reshape_optim_enabled = self.enable_sparse_li_c8 and is_prefill_node
+        self._c8_reshape_optim_enabled = self.c8_enable_reshape_optim and self.enable_sparse_li_c8 and is_prefill_node
         quant_config = getattr(vc, "quant_config", None)
         (
             self._sparse_li_c8_layer_ids,
@@ -1230,22 +1234,28 @@ class XliteGraphConfig:
     enabled: bool = False
     full_mode: bool = False
 
-    def _validate_preconditions(self, vllm_config: Any):
-        if self.enabled:
-            vc = vllm_config
-            if bool(vc.speculative_config) and vc.speculative_config.num_speculative_tokens != 1:
-                raise RuntimeError("Xlite graph mode only support speculative decoding with num_speculative_tokens=1.")
-            if vc.parallel_config.pipeline_parallel_size > 1:
-                raise RuntimeError(
-                    "Xlite graph mode is not compatible with pipeline parallelism. "
-                    "Please set pipeline_parallel_size to 1."
-                )
-            if vc.cache_config.block_size != 128:
-                logger.warning(
-                    "Current cache block size may not be optimal for xlite graph mode. "
-                    "current_block_size=%d, recommended_block_size=128.",
-                    vc.cache_config.block_size,
-                )
+    def _validate_preconditions(self, vllm_config: VllmConfig):
+        if not self.enabled:
+            return
+
+        if spec := vllm_config.speculative_config:
+            # only support speculative methods with a sequential causal chain, e.g., `bonus_token, mtp_1, mtp_2, ...`
+            logger.info_once("xlite graph only supports MTP speculative methods, current method: %s.", spec.method)
+            if (meth := str(spec.method)) not in ("mtp", "draft_model", "extract_hidden_states"):
+                raise RuntimeError("xlite graph only supports SpecDecode with a sequential causal chain.")
+            if meth in ("eagle3", "extract_hidden_states", "dflash", "dspark"):
+                raise RuntimeError("xlite graph does not support SpecDecode methods with intermediate hidden states.")
+            if meth == "draft_model":
+                logger.warning_once("xlite graph may not be compatible with SpecDecode using draft_model.")
+        if vllm_config.parallel_config.pipeline_parallel_size > 1:
+            raise RuntimeError(
+                "xlite graph is not compatible with pipeline parallelism. Please set pipeline_parallel_size to 1."
+            )
+        if vllm_config.cache_config.block_size != 128:
+            logger.warning_once(
+                "Current cache block size may not be optimal for xlite graph mode: current=%d, recommended=128.",
+                vllm_config.cache_config.block_size,
+            )
 
 
 @config
@@ -1544,7 +1554,7 @@ def _is_ascend_config_initialized(config: AscendConfig | None) -> bool:
     return hasattr(config, "ascend_compilation_config") and hasattr(config, "eplb_config")
 
 
-def init_ascend_config(vllm_config):
+def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
     additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
     if "enable_flashcomm1" in additional_config or os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1") is not None:
         logger.warning(
