@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
+from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
 import torch
+from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 
 from vllm_ascend.ascend_config import KVPPConfig
 from vllm_ascend.core.kv_cache_placement import build_kvpp_layer_layout, create_kvpp_cache_allocation_plan
@@ -80,6 +82,7 @@ class KVPPScheduler:
         self._has_history = False
         self._next_attention_layer_index = 0
         self._prefetch_future: Future[None] | None = None
+        self._layer_load_waiter: Callable[[str], None] | None = None
         self._npu_device_id = torch.npu.current_device()
         self._kv_transfer_stream = torch.npu.Stream()
         self._prefetch_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="kvpp-prefetch")
@@ -87,7 +90,15 @@ class KVPPScheduler:
     def schedule_forward(self, has_history: bool) -> None:
         self._has_history = has_history
         self._next_attention_layer_index = 0
-        if has_history:
+        self._layer_load_waiter = None
+        if has_kv_transfer_group():
+            get_waiter = getattr(get_kv_transfer_group(), "get_kvpp_layer_load_waiter", None)
+            if get_waiter is not None:
+                self._layer_load_waiter = get_waiter()
+        # The connector prepares this step's loads after prepare_forward.
+        # Defer the first broadcast until the first attention callback; later
+        # layers retain the existing one-layer-ahead prefetch.
+        if has_history and self._layer_load_waiter is None:
             self.start_layer_prefetch(self.attention_layer_names[0])
 
     def start_layer_prefetch(self, layer_name: str) -> None:
@@ -97,11 +108,15 @@ class KVPPScheduler:
 
     def run_layer_prefetch(self, layer_name: str, cache_ready: Any) -> None:
         torch.npu.set_device(self._npu_device_id)
+        if self._layer_load_waiter is not None:
+            self._layer_load_waiter(layer_name)
         self.transport.prefetch(layer_name, cache_ready, self._kv_transfer_stream)
 
     def wait_for_layer(self, layer_name: str) -> None:
         if not self._has_history:
             return
+        if self._prefetch_future is None:
+            self.start_layer_prefetch(layer_name)
         assert self._prefetch_future is not None
         self._prefetch_future.result()
         self._prefetch_future = None

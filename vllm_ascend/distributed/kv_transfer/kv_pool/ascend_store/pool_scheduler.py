@@ -22,6 +22,7 @@ from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 from vllm.v1.serial_utils import MsgpackEncoder
 
+from vllm_ascend.ascend_config import KVPPConfig
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     backend_map,
     get_layerwise_data_plane,
@@ -212,6 +213,10 @@ class KVPoolScheduler:
         if self.num_kv_head < self.tp_size:
             self.put_step = self.tp_size // self.num_kv_head
         else:
+            self.put_step = 1
+        if self.use_layerwise and self.backend_name == "memcache" and KVPPConfig.from_vllm_config(vllm_config).size > 1:
+            # Each rank publishes its owner-layer shard, rather than an MLA
+            # replica. A prefix hit needs every shard's committed key.
             self.put_step = 1
         self.num_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
         self.layerwise_offload = False

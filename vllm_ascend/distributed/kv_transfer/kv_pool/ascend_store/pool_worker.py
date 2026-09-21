@@ -137,6 +137,7 @@ class KVPoolWorker:
 
         self._init_parallelism_info(model_config, parallel_config)
         self._init_kv_transfer_config(vllm_config, extra_config, use_layerwise, kv_cache_config)
+        self.use_kvpp_layerwise = self.use_kvpp and use_layerwise and self.backend_name == "memcache"
         self._init_key_head_config(model_config, parallel_config)
         validate_layerwise_runtime(
             self.layerwise_protocol,
@@ -149,6 +150,8 @@ class KVPoolWorker:
         self._init_kv_events(vllm_config)
         self._init_state_vars()
         self._init_layerwise_config()
+        if self.use_kvpp_layerwise and self.layerwise_offload:
+            raise ValueError("KVPP Memcache layerwise does not support layerwise cache reuse.")
         self._kv_stats = AscendStoreKVConnectorStats()
         self._kv_stats_lock = threading.Lock()
 
@@ -720,6 +723,10 @@ class KVPoolWorker:
                     self.num_layers,
                     layer_offset=getattr(self, "layerwise_key_layer_offset", 0),
                 )
+            if self.use_kvpp_layerwise:
+                # Release this shard's leases when its last owned layer loads,
+                # even when later model layers belong to another rank.
+                self.kv_recv_thread.final_layer_id = max(self._kvpp_layer_indices[name] for name in self.kv_caches)
             self.kv_recv_thread.start()
             ready_event.wait()
         else:
@@ -854,6 +861,8 @@ class KVPoolWorker:
         gbl = self.group_block_len.get(group_id) or []
         if not gbl:
             return self.page_size_bytes
+        if self.use_kvpp_layerwise and self.pp_size == 1:
+            return sum(gbl)
         # Backward compatibility: when total_layers is not set (unit tests,
         # partial init), fall back to the LOCAL sum (pre-PP behavior).
         total_layers = getattr(self, "total_layers", None)
@@ -878,6 +887,11 @@ class KVPoolWorker:
 
         layer_cache_entry_offsets = [0]
         for phys in sorted(layer_names_by_physical):
+            if self.use_kvpp_layerwise:
+                physical_layer = phys + self.layerwise_key_layer_offset
+                self.physical_layer_to_group_layers.setdefault(physical_layer, []).append(
+                    (group_id, len(layer_cache_entry_offsets) - 1)
+                )
             for layer_name in sorted(layer_names_by_physical[phys]):
                 cache_or_caches = self.kv_caches[layer_name]
                 for cache in self._as_cache_tuple(cache_or_caches):
@@ -935,6 +949,15 @@ class KVPoolWorker:
         self.group_layer_cache_entry_offsets: dict[int, list[int]] = {}
         self.kv_caches = kv_caches
         if self.use_kvpp:
+            if self.use_kvpp_layerwise:
+                self.physical_layer_to_group_layers.clear()
+                self._kvpp_layer_indices = {
+                    name: self._global_to_local_layer.get(
+                        self._extract_physical_layer_index(name),
+                        self._extract_physical_layer_index(name) - self.layerwise_key_layer_offset,
+                    )
+                    for name in kv_caches
+                }
             owners = map_kvpp_layers_to_owners(self.vllm_config, kv_caches.keys())
             kv_caches = {name: caches for name, caches in kv_caches.items() if owners.get(name) in (None, self.tp_rank)}
             self.kv_caches = kv_caches
@@ -1039,6 +1062,10 @@ class KVPoolWorker:
         self.layerwise_retrievers: list[Any] = []
         if self.use_layerwise:
             self.next_layer_to_submit = 0
+            if self.use_kvpp_layerwise:
+                assert self.layer_load_finished_events is not None
+                for event in self.layer_load_finished_events:
+                    event.clear()
             # Transfer threads receive these lists by reference. Give every
             # step fresh lists so a late clear of a previous step cannot drop
             # newly prepared loads/saves and leave a reused buffer stale.
@@ -2348,7 +2375,9 @@ class KVPoolWorker:
                 self._prepare_block_key_layerwise_sessions(requests)
         for local_layer in range(num_local):
             physical_layer = local_layer + layer_offset
-            group_layers = self.physical_layer_to_group_layers.get(physical_layer, [(0, local_layer)])
+            group_layers = self.physical_layer_to_group_layers.get(
+                physical_layer, [] if self.use_kvpp_layerwise else [(0, local_layer)]
+            )
             for group_id, layer_idx_in_group in group_layers:
                 self._process_save_for_layer_batch(
                     group_requests.get(group_id, requests), local_layer, group_id, layer_idx_in_group
@@ -2359,7 +2388,9 @@ class KVPoolWorker:
         self._build_shared_save_data()
         for local_layer in range(num_local):
             physical_layer = local_layer + layer_offset
-            group_layers = self.physical_layer_to_group_layers.get(physical_layer, [(0, local_layer)])
+            group_layers = self.physical_layer_to_group_layers.get(
+                physical_layer, [] if self.use_kvpp_layerwise else [(0, local_layer)]
+            )
             for group_id, layer_idx_in_group in group_layers:
                 self._process_load_for_layer_batch(
                     group_requests.get(group_id, requests), local_layer, group_id, layer_idx_in_group
@@ -2484,6 +2515,16 @@ class KVPoolWorker:
             if submit_layer_load(layer_id):
                 submitted_layers += 1
 
+    def wait_for_kvpp_layer_load(self, layer_name: str) -> None:
+        """Wait for owner data without consuming the attention callback's state."""
+        layer_id = self._kvpp_layer_indices[layer_name]
+        assert self.layer_load_finished_events is not None
+        assert self.kv_recv_thread is not None
+        if self.layer_load_tasks[layer_id]:
+            while not self.layer_load_finished_events[layer_id].wait(timeout=10):
+                self.kv_recv_thread.raise_if_failed()
+            self.kv_recv_thread.raise_if_failed()
+
     def wait_for_layer_load(self) -> None:
         if self.current_layer >= self.num_layers:
             return
@@ -2525,7 +2566,10 @@ class KVPoolWorker:
             if getattr(self, "use_block_key_layerwise", False):
                 self._finish_current_layerwise_load_sessions()
             raise
-        self.layer_load_finished_events[self.current_layer].clear()
+        # KVPP prefetch also observes completion; keep it latched until the
+        # next forward instead of consuming it at the attention boundary.
+        if not self.use_kvpp_layerwise:
+            self.layer_load_finished_events[self.current_layer].clear()
         if getattr(self, "block_key_hybrid", False) and self.current_layer == self.num_layers - 1:
             # The final model layer can have no reachable load rows. Completion
             # belongs to the whole request, not whichever group happens to end here.
@@ -2581,6 +2625,12 @@ class KVPoolWorker:
         """Keep layerwise source buffers alive until the step's last PUT commits."""
         assert self.layer_save_finished_events is not None
         save_finished_events = self.layer_save_finished_events
+        if self.use_kvpp_layerwise:
+            # The last executed layer need not belong to this rank. Earlier
+            # owner layers must finish saving before their blocks can be reused.
+            for layer_id in range(num_local):
+                while not save_finished_events[layer_id].wait(timeout=10):
+                    send_thread.raise_if_failed()
         while not save_finished_events[num_local - 1].wait(timeout=10):
             send_thread.raise_if_failed()
             logger.info("Layerwise %d save not done, keep waiting", num_local - 1)
