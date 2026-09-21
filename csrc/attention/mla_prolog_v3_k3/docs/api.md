@@ -1,5 +1,7 @@
 # MlaPrologV3K3 API 与调用示例
 
+> English version: [api_en.md](./api_en.md)
+
 ## 1. API 总览
 
 | 通路 | API/入口 | 支持情况 |
@@ -13,7 +15,7 @@
 
 K3 自定义实现使用独立的 Torch schema、ACLNN 导出和 OPP 算子类型，不注册原生 `MlaPrologV3` 的同名别名。SFA 的 C8 per-tile 模式（`kv_cache_quant_mode=3`）继续通过 `torch_npu.npu_mla_prolog_v3` 调用 CANN 实现。升级时应重新构建并安装完整自定义算子包，避免保留旧包的同名注册。
 
-本文描述 Ascend 950PR&950DT 系列产品上 vllm-ascend 自定义算子包的支持范围。当前支持非量化 BF16 和 MXFP8，具体联合配置见 §2.3；不支持的量化配置会在 Host 校验阶段拒绝。`torch_npu.npu_mla_prolog_v3` 的支持范围取决于其实际使用的 CANN/OPP 实现，不由本文定义。
+本文描述 Ascend910B / Ascend910_93（A2/A3）和 Ascend950 上 vllm-ascend 自定义算子包的支持范围。A2/A3 支持非量化 BF16 与 INT8 权重量化（`weight_quant_mode` 为 `{0,1,2}`），不支持 MXFP8/FP8/HIF8 与 SplitM；A5 支持非量化 BF16 和 MXFP8。具体联合配置见 §2.3；不支持的量化配置会在 Host 校验阶段拒绝。`torch_npu.npu_mla_prolog_v3` 的支持范围取决于其实际使用的 CANN/OPP 实现，不由本文定义。
 
 ## 2. 公共参数与约束
 
@@ -264,7 +266,7 @@ mla_prolog_v3_k3<<<blockDim, nullptr, stream>>>(
 
 ## 6. 已知限制
 
-- Torch schema 始终注册，实际可用性取决于 `csrc/build_aclnn.sh` 是否按 **Ascend950** 构建并安装了该自定义算子包。
+- Torch schema 始终注册，实际可用性取决于 `csrc/build_aclnn.sh` 是否按 **Ascend910B / Ascend910_93 / Ascend950** 构建并安装了该自定义算子包。
 - `weight_dq` / `weight_uq_qr` / `weight_dkv_kr` 必须为 **FRACTAL_NZ**。
 - `Hcq=1536`，`Hckv=512`，`D=128`，`Dr=64`，`Nkv=1`；`He` 仅白名单集合；`N∈[1,128]`。
 - `weight_quant_mode`、`kv_cache_quant_mode`、`query_quant_mode` 与 `cache_mode` 必须符合 §2.3 的联合配置表。

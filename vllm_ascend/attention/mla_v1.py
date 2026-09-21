@@ -52,11 +52,16 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
-from vllm_ascend.quantization.methods import AscendW8A8LinearMethod, AscendW8A8MXFP8DynamicLinearMethod
+from vllm_ascend.quantization.methods import (
+    AscendW8A8DynamicLinearMethod,
+    AscendW8A8LinearMethod,
+    AscendW8A8MXFP8DynamicLinearMethod,
+)
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_ND,
     ACL_FORMAT_FRACTAL_NZ,
+    enable_custom_op,
     is_pd_decode_recompute_scheduler_enabled,
     maybe_trans_nz,
     weak_ref_tensors,
@@ -69,6 +74,12 @@ if TYPE_CHECKING:
 
 BUILD_METADATA_STEP_PREFILL = 0
 BUILD_METADATA_STEP_DECODE = 1
+KIMI_K3_PROLOG_Q_LORA_RANK = 1536
+KIMI_K3_PROLOG_KV_LORA_RANK = 512
+KIMI_K3_PROLOG_QK_NOPE_HEAD_DIM = 128
+KIMI_K3_PROLOG_QK_ROPE_HEAD_DIM = 64
+KIMI_K3_PROLOG_NO_QUANT = 0
+KIMI_K3_PROLOG_FULL_INT8_QUANT = 2
 
 # Exclusive batch * K limit of the fused op with perm_x1=(1, 0, 2).
 TRANSPOSE_BMM_MAX_SUPPORTED_DIM = 65536
@@ -836,6 +847,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.g_proj = kwargs.get("g_proj")
         self.use_output_gate = self.g_proj is not None
         self.use_mla_rope = kwargs.get("use_mla_rope", True)
+        self.kimi_k3_prolog_v3_enabled = False
+        self.kimi_k3_prolog_v3_weight_quant_mode = KIMI_K3_PROLOG_NO_QUANT
         self.vllm_config = get_current_vllm_config()
         self.pcp_enabled = self.vllm_config.parallel_config.prefill_context_parallel_size > 1
         self.kv_a_proj_with_mqa = kwargs.get("kv_a_proj_with_mqa")
@@ -1022,6 +1035,143 @@ class AscendMLAImpl(MLAAttentionImpl):
         # Convert from (N, B, L) to (B, N, L)
         return ql_nope.transpose(0, 1), q_pe
 
+    @staticmethod
+    def _has_mla_prolog_v3_op() -> bool:
+        if hasattr(torch.ops, "_C_ascend") and hasattr(torch.ops._C_ascend, "npu_mla_prolog_v3_k3"):
+            return True
+        return enable_custom_op() and hasattr(torch.ops._C_ascend, "npu_mla_prolog_v3_k3")
+
+    @staticmethod
+    def _get_linear_quant_method(linear: torch.nn.Module) -> object | None:
+        quant_method = getattr(linear, "quant_method", None)
+        return getattr(quant_method, "quant_method", quant_method)
+
+    def _get_kimi_k3_prolog_v3_weight_quant_mode(self) -> int | None:
+        assert self.fused_qkv_a_proj is not None
+        fused_quant_method = self._get_linear_quant_method(self.fused_qkv_a_proj)
+        query_quant_method = self._get_linear_quant_method(self.q_proj)
+        if isinstance(fused_quant_method, UnquantizedLinearMethod) and isinstance(
+            query_quant_method, UnquantizedLinearMethod
+        ):
+            return KIMI_K3_PROLOG_NO_QUANT
+        if isinstance(fused_quant_method, AscendW8A8DynamicLinearMethod) and isinstance(
+            query_quant_method, AscendW8A8DynamicLinearMethod
+        ):
+            return KIMI_K3_PROLOG_FULL_INT8_QUANT
+        return None
+
+    def _supports_kimi_k3_prolog_v3(self, act_dtype: torch.dtype) -> bool:
+        """Return whether this layer can use the K3 A3 decode-only path."""
+        if not get_current_hardware_profile().supports(HardwareCapability.KIMI_K3_MLA_PROLOG_V3):
+            return False
+        vllm_config = getattr(self, "vllm_config", None)
+        model_config = getattr(vllm_config, "model_config", None)
+        text_config = getattr(model_config, "hf_text_config", None)
+        if getattr(text_config, "model_type", None) != "kimi_linear":
+            return False
+        return (
+            not self.use_mla_rope
+            and not self.enable_kv_nz
+            and not self.fa_quant_layer
+            and self.num_kv_heads == 1
+            and self.q_lora_rank == KIMI_K3_PROLOG_Q_LORA_RANK
+            and self.kv_lora_rank == KIMI_K3_PROLOG_KV_LORA_RANK
+            and self.qk_nope_head_dim == KIMI_K3_PROLOG_QK_NOPE_HEAD_DIM
+            and self.qk_rope_head_dim == KIMI_K3_PROLOG_QK_ROPE_HEAD_DIM
+            and act_dtype == torch.bfloat16
+            and self.fused_qkv_a_proj is not None
+            and self.q_a_layernorm is not None
+            and self.kv_a_layernorm is not None
+            and self._get_kimi_k3_prolog_v3_weight_quant_mode() is not None
+            and self._has_mla_prolog_v3_op()
+        )
+
+    def _prepare_kimi_k3_prolog_v3_weights(self) -> None:
+        """Create prolog weights without changing the generic fallback path."""
+        assert self.fused_qkv_a_proj is not None
+        if self.kimi_k3_prolog_v3_weight_quant_mode == KIMI_K3_PROLOG_NO_QUANT:
+            fused_weight = self.fused_qkv_a_proj.weight.data.T.contiguous()
+            weight_uq_qr = self.q_proj.weight.data.T.contiguous()
+        else:
+            fused_weight = self.fused_qkv_a_proj.weight.data
+            weight_uq_qr = self.q_proj.weight.data.contiguous()
+
+        weight_dq = fused_weight[:, : self.q_lora_rank].contiguous()
+        weight_dkv_kr = fused_weight[:, self.q_lora_rank :].contiguous()
+        self.kimi_k3_weight_dq = torch_npu.npu_format_cast(weight_dq, ACL_FORMAT_FRACTAL_NZ)
+        self.kimi_k3_weight_uq_qr = torch_npu.npu_format_cast(weight_uq_qr, ACL_FORMAT_FRACTAL_NZ)
+        self.kimi_k3_weight_dkv_kr = torch_npu.npu_format_cast(weight_dkv_kr, ACL_FORMAT_FRACTAL_NZ)
+        self.kimi_k3_weight_uk = self.W_UK_T.contiguous()
+
+        if self.kimi_k3_prolog_v3_weight_quant_mode == KIMI_K3_PROLOG_FULL_INT8_QUANT:
+            q_scale = self.fused_qkv_a_proj.weight_scale[: self.q_lora_rank].contiguous()
+            kv_scale = self.fused_qkv_a_proj.weight_scale[self.q_lora_rank :].contiguous()
+            self.kimi_k3_dequant_scale_w_dq = q_scale.view(1, -1).to(torch.float)
+            self.kimi_k3_dequant_scale_w_dkv_kr = kv_scale.view(1, -1).to(torch.float)
+            self.kimi_k3_dequant_scale_w_uq_qr = self.q_proj.weight_scale.data.view(1, -1).to(torch.float)
+
+    def _try_kimi_k3_prolog_v3_decode(
+        self,
+        hidden_states: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, ...],
+        attn_metadata: M,
+    ) -> DecodeMLAPreprocessResult | None:
+        """Fuse K3's A3 decode prolog when token and cache layouts are exact."""
+        if not self.kimi_k3_prolog_v3_enabled or attn_metadata.num_prefills != 0:
+            return None
+
+        num_decode_tokens = attn_metadata.num_decode_tokens
+        if num_decode_tokens == 0 or num_decode_tokens > MLAPO_MAX_SUPPORTED_TOKENS or len(kv_cache) < 2:
+            return None
+
+        cache_index = attn_metadata.slot_mapping[:num_decode_tokens].reshape(-1).to(torch.int64)
+        token_x = hidden_states.contiguous()
+        if token_x.shape[0] != cache_index.shape[0]:
+            return None
+
+        empty_rope = token_x.new_empty((0, self.qk_rope_head_dim))
+        quant_kwargs: dict[str, object] = {
+            "weight_quant_mode": self.kimi_k3_prolog_v3_weight_quant_mode,
+            "kv_cache_quant_mode": KIMI_K3_PROLOG_NO_QUANT,
+        }
+        if self.kimi_k3_prolog_v3_weight_quant_mode == KIMI_K3_PROLOG_FULL_INT8_QUANT:
+            token_x, dequant_scale_x = torch_npu.npu_dynamic_quant(token_x)
+            quant_kwargs.update(
+                dequant_scale_x=dequant_scale_x.view(-1, 1),
+                dequant_scale_w_dq=self.kimi_k3_dequant_scale_w_dq,
+                dequant_scale_w_uq_qr=self.kimi_k3_dequant_scale_w_uq_qr,
+                dequant_scale_w_dkv_kr=self.kimi_k3_dequant_scale_w_dkv_kr,
+            )
+
+        ql_nope, q_pe, dequant_scale_q_nope, _, _ = torch.ops._C_ascend.npu_mla_prolog_v3_k3(
+            token_x=token_x,
+            weight_dq=self.kimi_k3_weight_dq,
+            weight_uq_qr=self.kimi_k3_weight_uq_qr,
+            weight_uk=self.kimi_k3_weight_uk,
+            weight_dkv_kr=self.kimi_k3_weight_dkv_kr,
+            rmsnorm_gamma_cq=self.q_a_layernorm.weight.data,  # type: ignore[union-attr]
+            rmsnorm_gamma_ckv=self.kv_a_layernorm.weight.data,  # type: ignore[union-attr]
+            rope_sin=empty_rope,
+            rope_cos=empty_rope,
+            kv_cache=kv_cache[0],
+            kr_cache=kv_cache[1],
+            cache_index=cache_index,
+            rmsnorm_epsilon_cq=self.q_a_layernorm.variance_epsilon,  # type: ignore[union-attr]
+            rmsnorm_epsilon_ckv=self.kv_a_layernorm.variance_epsilon,  # type: ignore[union-attr]
+            cache_mode="PA_BSND",
+            **quant_kwargs,
+        )
+        ql_nope = ql_nope.view(-1, self.num_heads, self.kv_lora_rank)
+        q_pe = q_pe.view(-1, self.num_heads, self.qk_rope_head_dim)
+        ql_nope, q_pe = self.reorg_decode_q(ql_nope, q_pe)
+        return DecodeMLAPreprocessResult(
+            ql_nope=ql_nope,
+            q_pe=q_pe,
+            k_nope=kv_cache[0],
+            k_pe=kv_cache[1],
+            dequant_scale_q_nope=dequant_scale_q_nope,
+        )
+
     def _fused_preprocess_type(self) -> PreprocessType | None:
         """Defer MXFP8 projection NZ conversion to the enabled FP8 prolog."""
         if not self.support_fp8_attention or not (self.enable_mlapo or self.fa_quant_layer):
@@ -1068,6 +1218,13 @@ class AscendMLAImpl(MLAAttentionImpl):
             self.W_UV.copy_(W_UV.transpose(0, 1).contiguous())
             self.W_UK_T.copy_(W_UK.permute(1, 2, 0).contiguous())
         self.mlapo_W_UK_T = self.W_UK_T
+
+        weight_quant_mode = self._get_kimi_k3_prolog_v3_weight_quant_mode() if self.fused_qkv_a_proj else None
+        self.kimi_k3_prolog_v3_enabled = self._supports_kimi_k3_prolog_v3(act_dtype)
+        if self.kimi_k3_prolog_v3_enabled:
+            assert weight_quant_mode is not None
+            self.kimi_k3_prolog_v3_weight_quant_mode = weight_quant_mode
+            self._prepare_kimi_k3_prolog_v3_weights()
 
         if self.enable_mlapo:
             layer_quant_method = None if self.fused_qkv_a_proj is None else self.fused_qkv_a_proj.quant_method
@@ -2033,6 +2190,11 @@ class AscendMLAImpl(MLAAttentionImpl):
         # decode_ql_nope, decode_q_pe, decode_k_pe, decode_k_nope
         # 3. Preprocess prefill tokens, write kv cache and get:
         # prefill_q_nope, prefill_q_pe, prefill_k_nope, prefill_k_pe, prefill_value
+        prolog_decode_result = self._try_kimi_k3_prolog_v3_decode(hidden_states, kv_cache, attn_metadata)
+        if prolog_decode_result is not None:
+            notify_kv_cache_written(layer_name)
+            return prolog_decode_result, None
+
         has_decode = attn_metadata.num_decodes > 0
         has_prefill = attn_metadata.num_prefills > 0
         if self.fused_qkv_a_proj is not None:
