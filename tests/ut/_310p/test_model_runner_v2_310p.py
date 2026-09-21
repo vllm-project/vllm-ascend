@@ -371,14 +371,15 @@ def test_runner_installs_310p_request_state() -> None:
     )
 
 
-def test_prepare_inputs_dispatches_to_310p_implementation() -> None:
+@pytest.mark.parametrize("extra_args", [(), (0,)])
+def test_prepare_inputs_dispatches_to_310p_implementation(extra_args) -> None:
     runner = object.__new__(NPUModelRunner310V2)
     scheduler_output = MagicMock()
     batch_desc = MagicMock()
     expected = object()
 
     with patch.object(runner, "_prepare_inputs_310p", return_value=expected) as prepare_inputs_310p:
-        result = runner.prepare_inputs(scheduler_output, MagicMock(), batch_desc)
+        result = runner.prepare_inputs(scheduler_output, MagicMock(), batch_desc, *extra_args)
 
     assert result is expected
     prepare_inputs_310p.assert_called_once_with(scheduler_output, batch_desc)
