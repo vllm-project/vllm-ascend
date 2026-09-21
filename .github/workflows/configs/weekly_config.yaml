@@ -352,6 +352,9 @@ a3:
       - name: Qwen3-30B-A3B-W8A8-offload-test-acc
         os: linux-aarch64-nightly-a3-16
         config_file_path: Qwen3-30B-A3B-W8A8-offload-test-acc.yaml
+      - name: Qwen3-Coder-30B-A3B-Instruct-test-acc
+        os: linux-aarch64-nightly-a3-16
+        config_file_path: Qwen3-Coder-30B-A3B-Instruct-test-acc.yaml
 
 #310p:
 #  single_node:
