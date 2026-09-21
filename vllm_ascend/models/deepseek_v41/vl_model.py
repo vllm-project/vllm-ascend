@@ -266,7 +266,7 @@ class AscendDeepseekV41ForCausalLM(
                 # unconstructed, although a multimodal checkpoint still
                 # contains its tensors. Keep loading strict when the tower is
                 # enabled, but do not make disabled modalities loadable state.
-                if vision_name not in params and self.vision is None:
+                if vision_name not in params and self.vision is None and self.requires_uncompiled_fallback:
                     continue
                 param = params[vision_name]
                 loader = getattr(param, "weight_loader", default_weight_loader)

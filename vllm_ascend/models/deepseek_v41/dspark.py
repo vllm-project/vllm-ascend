@@ -184,7 +184,8 @@ class DeepseekV41DSparkModel(torch.nn.Module):
         model_quant_config = getattr(checkpoint_config, "quantization_config", None)
         main_proj_quant_config = (
             vllm_config.quant_config
-            if model_quant_config is not None
+            if DeviceOperator.get_deepseek_v41_backend() is not None
+            and model_quant_config is not None
             and model_quant_config.get("quant_method") == "fp8"
             else None
         )

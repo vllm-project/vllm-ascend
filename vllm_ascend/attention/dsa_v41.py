@@ -853,14 +853,13 @@ class AscendDSAV41MetadataBuilder(AttentionMetadataBuilder[AscendDSAV41Metadata]
                 else:
                     if compressed and ratio != 1:
                         active_slots = compressed_slot_mapping(active_slots, ratio)
-                    valid_end = common.query_start_loc[num_actual_reqs].clamp_max(num_actual_tokens)
-                    valid = (active_slots >= 0) & (
-                        torch.arange(num_input_tokens, device=active_slots.device) < valid_end
-                    )
+                    valid = active_slots >= 0
                     if compressed and ratio == 2:
                         if kwargs.get("skip_ring_state_update", False):
                             valid.zero_()
                         else:
+                            valid_end = common.query_start_loc[num_actual_reqs].clamp_max(num_actual_tokens)
+                            valid &= torch.arange(num_input_tokens, device=active_slots.device) < valid_end
                             if positions is not None:
                                 valid &= positions.remainder(2) == 1
                     physical = active_slots.clamp_min(0)

@@ -89,9 +89,7 @@ def test_packed_cache_group_view_tracks_touch_and_refree_once() -> None:
     reused = group.get_new_blocks(2)
 
     assert len({block.block_id for block in reused}) == 2
-    assert {block.block_id for block in reused} == {
-        block.block_id for block in blocks
-    }
+    assert {block.block_id for block in reused} == {block.block_id for block in blocks}
 
 
 @pytest.mark.parametrize("wrapped", [False, True])

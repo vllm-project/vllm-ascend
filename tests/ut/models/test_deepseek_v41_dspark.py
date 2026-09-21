@@ -188,9 +188,7 @@ def test_v41_draft_context_store_uses_physical_pairs_and_preserves_padding():
     cache = torch.empty(3, 128, 1, 8)
     attn = SimpleNamespace(
         dsv41_backend=None,
-        dsa_attn=SimpleNamespace(
-            swa_cache_layer=SimpleNamespace(block_size=128, kv_cache=[cache])
-        ),
+        dsa_attn=SimpleNamespace(swa_cache_layer=SimpleNamespace(block_size=128, kv_cache=[cache])),
     )
     values = torch.randn(3, 1, 8)
     with patch("vllm_ascend.models.deepseek_v41.dspark.scatter_cache_sk") as store:
@@ -208,9 +206,7 @@ def test_v41_draft_context_store_routes_packed_a5_cache_to_device_writer():
     writer = MagicMock()
     attn = SimpleNamespace(
         dsv41_backend=SimpleNamespace(write_attention_cache=writer),
-        dsa_attn=SimpleNamespace(
-            swa_cache_layer=SimpleNamespace(block_size=128, kv_cache=[cache])
-        ),
+        dsa_attn=SimpleNamespace(swa_cache_layer=SimpleNamespace(block_size=128, kv_cache=[cache])),
     )
     slots = torch.tensor([129, -1, 258])
     values = torch.randn(3, 1, 8)
@@ -242,9 +238,7 @@ def test_draft_constructor_uses_upstream_head_contracts(monkeypatch, draft_vocab
         speculative_config=SimpleNamespace(
             draft_model_config=SimpleNamespace(
                 hf_text_config=config,
-                hf_config=SimpleNamespace(
-                    quantization_config={"quant_method": "fp8"}
-                ),
+                hf_config=SimpleNamespace(quantization_config={"quant_method": "fp8"}),
             )
         ),
         parallel_config=SimpleNamespace(use_sequence_parallel_moe=False),
@@ -263,6 +257,11 @@ def test_draft_constructor_uses_upstream_head_contracts(monkeypatch, draft_vocab
     monkeypatch.setattr(module, "ColumnParallelLinear", linear)
     monkeypatch.setattr(module, "RMSNorm", lambda *a, **kw: torch.nn.Identity())
     with (
+        patch.object(
+            module.DeviceOperator,
+            "get_deepseek_v41_backend",
+            return_value=object(),
+        ),
         patch.object(module, "DSparkMarkovHead", autospec=True, return_value=torch.nn.Identity()) as markov,
         patch.object(module, "DSparkConfidenceHead", autospec=True, return_value=torch.nn.Identity()) as confidence,
     ):

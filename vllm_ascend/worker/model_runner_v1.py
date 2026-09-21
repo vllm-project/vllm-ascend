@@ -4782,9 +4782,13 @@ class NPUModelRunner(GPUModelRunner):
             # V4.1 overlays the layers in each tuple on one physical slot.
             # Unlike DSV4's shared-tuple layout below, each descriptor owns
             # a separate allocation and its layers alias the same backing.
+            track_physical_pages = get_current_hardware_profile().supports(
+                HardwareCapability.DSV41_PACKED_CACHE
+            )
             for allocation in kv_cache_config.kv_cache_tensors:
                 backing = self._allocate_int8_cache_tensor(allocation.size, alignment)
-                self._physical_kv_cache_block_tensors.append(backing)
+                if track_physical_pages:
+                    self._physical_kv_cache_block_tensors.append(backing)
                 for name in allocation.layers:
                     kv_cache_raw_tensors[name] = backing
             return kv_cache_raw_tensors

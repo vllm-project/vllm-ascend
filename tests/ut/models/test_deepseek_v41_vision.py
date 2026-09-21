@@ -24,7 +24,10 @@ from vllm_ascend.models.deepseek_v41.engram.common import (
     engram_enabled,
     valid_engram_token_mask,
 )
-from vllm_ascend.models.deepseek_v41.model import AscendDeepseekV41LLMForCausalLM
+from vllm_ascend.models.deepseek_v41.model import (
+    AscendDeepseekV41LLMForCausalLM,
+    _engram_enabled_for_runtime,
+)
 from vllm_ascend.models.deepseek_v41.vl_model import (
     AscendDeepseekV41ForCausalLM,
 )
@@ -119,15 +122,22 @@ def test_v41_image_and_alignment_pad_are_dead_to_engram():
     )
 
 
-def test_v41_engram_requires_checkpoint_support_and_runtime_opt_in():
+def test_v41_engram_checkpoint_contract_is_unchanged():
     checkpoint = SimpleNamespace(engram_layer_ids=[1, 14])
 
-    assert not engram_enabled(checkpoint, SimpleNamespace(engram_config=None))
-    assert engram_enabled(checkpoint, SimpleNamespace(engram_config=object()))
-    assert not engram_enabled(
-        SimpleNamespace(engram_layer_ids=[]),
-        SimpleNamespace(engram_config=object()),
+    assert engram_enabled(checkpoint)
+    assert not engram_enabled(SimpleNamespace(engram_layer_ids=[]))
+
+
+def test_v41_a5_engram_requires_runtime_opt_in(monkeypatch):
+    checkpoint = SimpleNamespace(engram_layer_ids=[1, 14])
+    monkeypatch.setattr(
+        "vllm_ascend.models.deepseek_v41.model.DeviceOperator.get_deepseek_v41_backend",
+        lambda: object(),
     )
+
+    assert not _engram_enabled_for_runtime(checkpoint, SimpleNamespace(engram_config=None))
+    assert _engram_enabled_for_runtime(checkpoint, SimpleNamespace(engram_config=object()))
 
 
 def test_v41_span_has_three_delimiters_and_no_image_pad_parameter():
@@ -180,6 +190,7 @@ def test_v41_text_only_load_skips_checkpoint_vision_weights():
     wrapper = object.__new__(AscendDeepseekV41ForCausalLM)
     nn.Module.__init__(wrapper)
     wrapper.vision = None
+    wrapper.requires_uncompiled_fallback = True
     wrapper.language_model = LanguageModel()
     text_weight = torch.tensor([1.0])
 

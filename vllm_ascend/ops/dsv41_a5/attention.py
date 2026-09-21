@@ -34,9 +34,7 @@ def build_window_indices(
 
 def build_smla_metadata(length_rows: torch.Tensor) -> torch.Tensor:
     """Build the fixed A5 mixed-quant SMLA launch metadata."""
-    import_packaged_a5_module(
-        "cann_ops_transformer.ops.attention.mixed_quant_sparse_flash_mla_dsl"
-    )
+    import_packaged_a5_module("cann_ops_transformer.ops.attention.mixed_quant_sparse_flash_mla_dsl")
     return torch.ops.cann_ops_transformer.ds41.mixed_quant_sparse_flash_mla_metadata(
         length_rows,
         length_rows,

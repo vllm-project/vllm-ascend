@@ -77,10 +77,7 @@ def _is_a5_packed_cache_config(kv_cache_config: KVCacheConfig) -> bool:
         spec = group.kv_cache_spec
         nested = getattr(spec, "kv_cache_specs", None)
         specs = nested.values() if isinstance(nested, Mapping) else (spec,)
-        if any(
-            getattr(item, "cache_dtype_str", None) == "a5_mxfp8_bf16_scale"
-            for item in specs
-        ):
+        if any(getattr(item, "cache_dtype_str", None) == "a5_mxfp8_bf16_scale" for item in specs):
             return True
     return False
 
@@ -118,9 +115,7 @@ class _GroupStableBlockPool(BlockPool):
             and block.next_free_block is not None
         )
 
-    def get_new_blocks_for_group(
-        self, num_blocks: int, group_id: int
-    ) -> list[KVCacheBlock]:
+    def get_new_blocks_for_group(self, num_blocks: int, group_id: int) -> list[KVCacheBlock]:
         if num_blocks == 0:
             return []
         preferred: list[KVCacheBlock] = []
@@ -171,14 +166,9 @@ class _GroupStableBlockPool(BlockPool):
                 self._queued_by_group[group_id].discard(block.block_id)
         super().touch(blocks)
 
-    def free_blocks_for_group(
-        self, ordered_blocks: Iterable[KVCacheBlock], group_id: int
-    ) -> None:
+    def free_blocks_for_group(self, ordered_blocks: Iterable[KVCacheBlock], group_id: int) -> None:
         blocks = list(ordered_blocks)
-        assert all(
-            block.is_null or self._owners[block.block_id] == group_id
-            for block in blocks
-        )
+        assert all(block.is_null or self._owners[block.block_id] == group_id for block in blocks)
         self.free_blocks(blocks)
 
 
@@ -199,11 +189,7 @@ class _CacheGroupBlockPoolView:
         self._pool.free_blocks_for_group(ordered_blocks, self._group_id)
 
     def touch(self, blocks: list[KVCacheBlock]) -> None:
-        assert all(
-            block.is_null
-            or self._pool._owners[block.block_id] == self._group_id
-            for block in blocks
-        )
+        assert all(block.is_null or self._pool._owners[block.block_id] == self._group_id for block in blocks)
         self._pool.touch(blocks)
 
 
@@ -261,11 +247,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 self.scheduler_block_size,
                 kv_cache_config,
             )
-        pool_cls = (
-            _GroupStableBlockPool
-            if _is_a5_packed_cache_config(kv_cache_config)
-            else BlockPool
-        )
+        pool_cls = _GroupStableBlockPool if _is_a5_packed_cache_config(kv_cache_config) else BlockPool
         self.block_pool = pool_cls(
             num_gpu_blocks=kv_cache_config.num_blocks,
             enable_caching=enable_caching,
@@ -311,7 +293,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # reported ID, so circular-state allocations must participate as well;
         # otherwise an ID recycled directly into the state group can retain a
         # previous request's state indefinitely.
-        if kv_cache_config.needs_kv_cache_zeroing:
+        if _is_a5_packed_cache_config(kv_cache_config) and kv_cache_config.needs_kv_cache_zeroing:
             for manager in self.single_type_managers:
                 if isinstance(manager.kv_cache_spec, CircularBufferSpec):
                     manager._record_new_block_ids = True

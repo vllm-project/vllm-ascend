@@ -86,6 +86,13 @@ from .engram import (
 from .indexer import DeepseekV41Indexer
 
 
+def _engram_enabled_for_runtime(config, vllm_config) -> bool:
+    """Preserve A3 Engram defaults while keeping the first A5 path opt-in."""
+    if not engram_enabled(config):
+        return False
+    return DeviceOperator.get_deepseek_v41_backend() is None or getattr(vllm_config, "engram_config", None) is not None
+
+
 class DeepseekV41MLP(nn.Module):
     def __init__(
         self,
@@ -819,7 +826,7 @@ class DeepseekV41DecoderLayer(nn.Module):
         # and MoE paths then stay sharded between attention calls.
         if self.use_sequence_parallel:
             self.self_attn.wo_b.reduce_results = False
-        has_engram = engram_enabled(config, vllm_config)
+        has_engram = _engram_enabled_for_runtime(config, vllm_config)
         if has_engram and not is_draft_layer and self.layer_idx in config.engram_layer_ids:
             self.engram = torch.nn.Module()
             self.engram.wkv = torch.nn.Linear(
@@ -942,7 +949,7 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         config = normalize_deepseek_v41_config(vllm_config.model_config.hf_config)
         quant_config = vllm_config.quant_config
         self.config = config
-        self.has_engram = engram_enabled(config, vllm_config)
+        self.has_engram = _engram_enabled_for_runtime(config, vllm_config)
         self.device = current_platform.device_type
         self.use_sequence_parallel_moe = vllm_config.parallel_config.use_sequence_parallel_moe
 
@@ -1219,9 +1226,7 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
         # A5's packaged cache operators are qualified for eager prefill and
         # full-graph decode. Runtime NONE must bypass the compiled model rather
         # than entering a piecewise torch.compile path.
-        self.requires_uncompiled_fallback = (
-            DeviceOperator.get_deepseek_v41_backend() is not None
-        )
+        self.requires_uncompiled_fallback = DeviceOperator.get_deepseek_v41_backend() is not None
 
         self.model = self.model_cls(vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model"))
         if get_pp_group().is_last_rank:
