@@ -195,6 +195,9 @@ a3:
       - name: kimi-k2.6_max_model_len
         os: linux-aarch64-nightly-a3-16
         config_file_path: kimi-k2.6_max_model_len.yaml
+      - name: qwen_3_6_27b_w8a8_A3
+        os: linux-aarch64-nightly-a3-16
+        config_file_path: qwen_3_6_27b_w8a8_A3.yaml
   multi_card:
     test_config:
       # pytest-driven tests
