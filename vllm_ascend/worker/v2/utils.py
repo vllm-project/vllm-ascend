@@ -6,7 +6,7 @@ from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.compilation.acl_graph import get_draft_graph_params, get_graph_params, weak_ref_workspaces
-from vllm_ascend.utils import weak_ref_tensor, weak_ref_tensors
+from vllm_ascend.utils import super_kernel_scope, weak_ref_tensor, weak_ref_tensors
 
 
 @contextmanager
