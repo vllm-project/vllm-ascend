@@ -18,7 +18,25 @@ stage reports against the partition you configured.
 import argparse
 import json
 import os
+import time
 import uuid
+
+
+def reset_local_prefix_cache(llm, timeout: float = 30.0, interval: float = 0.5) -> None:
+    """Clear only the local prefix cache, so a warm hit must come from the pool.
+
+    The layerwise save path keeps the prompt's blocks until its final layer
+    commits, so a request that has just returned can still have live blocks and
+    the reset reports failure. Retry briefly rather than failing the run on that
+    race.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        if llm.reset_prefix_cache(reset_connector=False):
+            return
+        if time.monotonic() >= deadline:
+            raise RuntimeError("Could not clear the local prefix cache; cannot validate a remote hit")
+        time.sleep(interval)
 
 
 def main():
@@ -86,7 +104,7 @@ def main():
     assert cold.prompt_token_ids is not None
     assert len(cold.prompt_token_ids) > args.max_num_batched_tokens, "Prompt must exercise chunked prefill"
     for iteration in range(2):
-        assert llm.reset_prefix_cache(reset_connector=False), "Failed to clear the local prefix cache"
+        reset_local_prefix_cache(llm)
         warm = llm.generate([prompt], sampling)[0]
         assert (warm.num_cached_tokens or 0) >= args.block_size, "No complete remote block was loaded"
         assert warm.outputs[0].token_ids == cold.outputs[0].token_ids, "Cold/warm generation differs"
