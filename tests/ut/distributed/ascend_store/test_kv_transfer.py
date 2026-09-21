@@ -465,7 +465,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
     def test_write_shards_cover_filtered_blocks_once(self):
         hashes = [f"h{i}" for i in range(8)]
         for pcp_size in (1, 2, 4):
-            for dcp_size, aligned, put_step in ((1, False, 1), (1, False, 2), (2, False, 2), (1, True, 2)):
+            for dcp_size, aligned, put_step in ((1, False, 1), (1, False, 2), (1, True, 2)):
                 with self.subTest(pcp_size=pcp_size, dcp_size=dcp_size, aligned=aligned, put_step=put_step):
                     tp_replicas = put_step if dcp_size == 1 and not aligned else 1
                     saved = []
@@ -497,6 +497,62 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
                             saved.extend(keys)
                     self.assertEqual(len(saved), 6)
                     self.assertEqual(len(set(saved)), 6)
+
+    def test_dcp_shards_each_save_every_filtered_block(self):
+        hashes = [f"h{i}" for i in range(8)]
+        expected_blocks = [2, 4, 5, 6, 7]
+        # DCP can span only PCP, the full TP x PCP group, or TP without PCP.
+        for tp_size, pcp_size, dcp_size, put_step in ((2, 2, 2, 2), (2, 2, 4, 1), (2, 2, 4, 2), (4, 1, 2, 2)):
+            with self.subTest(tp_size=tp_size, pcp_size=pcp_size, dcp_size=dcp_size, put_step=put_step):
+                logical_block_size = 16 * dcp_size
+                keys_by_shard = {}
+                for tp_rank in range(tp_size):
+                    for pcp_rank in range(pcp_size):
+                        dcp_rank = (tp_rank * pcp_size + pcp_rank) % dcp_size
+                        head_rank = tp_rank // put_step
+                        thread, store = self._make_thread([0] * 8, block_size=logical_block_size)
+                        database = MaskedFakeTokenDatabase(
+                            block_size=logical_block_size,
+                            masks=([True, True, True, False, True, True, True, True],),
+                        )
+                        database.metadata[0] = KeyMetadata("m", head_rank, dcp_rank, 0)
+                        # Each logical block contains one 16-token physical shard.
+                        database.set_group_buffers({0: [1000]}, {0: [16]}, {0: [16]}, group_num_layers={0: 1})
+                        thread.token_database = database
+                        thread.tp_rank, thread.tp_size = tp_rank, tp_size
+                        thread.pcp_rank, thread.pcp_size = pcp_rank, pcp_size
+                        thread.dcp_size, thread.put_step = dcp_size, put_step
+                        thread.add_stored_request("r1")
+                        request = ReqMeta(
+                            req_id="r1",
+                            token_len_chunk=8 * logical_block_size,
+                            block_ids=list(range(1, 9)),
+                            block_hashes=hashes,
+                            load_spec=LoadSpec(
+                                vllm_cached_tokens=0,
+                                kvpool_cached_tokens=2 * logical_block_size,
+                                can_load=True,
+                            ),
+                        )
+                        thread.request_queue.put(request)
+                        thread._handle_request(request)
+
+                        self.assertEqual(len(store.put_calls), 1)
+                        keys, addresses, sizes = store.put_calls[0]
+                        self.assertEqual([key.rsplit("@", 1)[1] for key in keys], [hashes[i] for i in expected_blocks])
+                        self.assertTrue(all(f"@dcp:{dcp_rank}@head_or_tp_rank:{head_rank}@" in key for key in keys))
+                        self.assertEqual(addresses, [[1000 + (i + 1) * 16] for i in expected_blocks])
+                        self.assertEqual(sizes, [[16]] * len(expected_blocks))
+                        self.assertIn("r1", thread.finished_requests)
+                        shard = (dcp_rank, head_rank)
+                        if shard in keys_by_shard:
+                            self.assertEqual(keys_by_shard[shard], set(keys))
+                        else:
+                            keys_by_shard[shard] = set(keys)
+
+                # Distinct physical DCP/head shards must never overwrite one another.
+                all_keys = set().union(*keys_by_shard.values())
+                self.assertEqual(len(all_keys), len(keys_by_shard) * len(expected_blocks))
 
     def test_handle_request_save_decisions(self):
         cases = [

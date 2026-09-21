@@ -49,7 +49,7 @@ The following table lists individual feature combinations with KVPP. It does not
 | P/D disaggregation | ✅ Supported | Uses `MooncakeConnectorV2` (Experimental); enable KVPP only on the prefill node. |
 | KV pooling | ✅ Supported | Memcache with `AscendStoreConnector`, `kv_producer` or `kv_both`, and asynchronous whole-block loading. |
 | PCP + P/D disaggregation + KVPP | ❌ Not supported | `MooncakeConnectorV2` does not yet support PCP. |
-| PCP + KV pooling + KVPP | ❌ Not supported | PCP and KV pooling are individually supported with KVPP, but the three-way combination is not supported. |
+| PCP + KV pooling + KVPP | Experimental | Requires Model Runner V2, Memcache whole-block pooling, asynchronous loading, eager mode, and DCP=1. |
 
 - ✅ **Supported**: The feature combination is supported under the stated conditions.
 - ❌ **Not supported**: The combination is not currently supported.
@@ -133,7 +133,35 @@ Configure the memcache SDK and MetaService as described in [KV Pool](kv_pool.md)
 
 The example uses `kv_producer`; you can also set `kv_role` to `kv_both`. Both roles save and load prefixes in this pooling configuration. Keep `use_layerwise=false`, `load_async=true`, and `discard_partial_chunks=true` (the default). Layerwise pooling, KV events, and consumer write-back are not supported with KVPP.
 
-Each TP rank saves one complete object per token block containing its persistent target layers and its own MTP caches. Scratch buffers are excluded. Loading restores those same persistent buffers; the existing KVPP broadcast supplies other ranks when a layer executes. Pool lookup requires every nonempty owner shard across all PP stages.
+Each cache owner saves one complete object per token block containing its persistent target layers and its own MTP caches. Scratch buffers are excluded. Loading restores those same persistent buffers; the existing KVPP broadcast supplies other ranks when a layer executes. Pool lookup requires every nonempty owner shard across all PP stages.
+
+### PCP with Memcache Pooling (Experimental)
+
+Model Runner V2 supports both ordinary PCP pooling and PCP pooling with KVPP. Use the same Memcache connector settings above. With DCP disabled, the two configurations store caches as follows:
+
+| Configuration | Cache layout and pool transfers |
+| --- | --- |
+| PCP + pooling, `enable_kvpp=false` | PCP ranks hold replicated caches, share pool keys, and divide block writes among replicas. Every rank reloads its complete local cache. |
+| PCP + KVPP + pooling, `enable_kvpp=true` | Layers are assigned across PCP × TP ranks. Each owner saves every token block for its persistent layers and its own MTP caches. Its key rank is `pcp_rank * tp_size + tp_rank`. |
+
+KVPP pool keys include `@kvpp_size:<group-size>`, where the group size is TP × PCP, to separate owner shards from ordinary replicated cache objects and from different KVPP group sizes. Ordinary pooling retains its existing key format. Cached objects written by older KVPP versions without this namespace must be populated again after upgrading.
+
+For example, launch TP2 + PCP2 with KVPP and a Memcache pool:
+
+```bash
+VLLM_USE_V2_MODEL_RUNNER=1 vllm serve <model-path> \
+    --tensor-parallel-size 2 \
+    --prefill-context-parallel-size 2 \
+    --enable-prefix-caching \
+    --enable-chunked-prefill \
+    --enforce-eager \
+    --additional-config '{"enable_kvpp": true}' \
+    --kv-transfer-config '{"kv_connector":"AscendStoreConnector","kv_role":"kv_both","kv_connector_extra_config":{"lookup_rpc_port":"0","backend":"memcache","use_layerwise":false,"load_async":true}}'
+```
+
+Set `enable_kvpp` to `false` to use ordinary PCP pooling. Configure the Memcache local service world size for all participating worker ranks; the TP2 + PCP2 example uses `ock.mmc.local_service.world_size=4`. With PP enabled, include the PP stages in that count. KVPP still requires DCP=1 and retains the Memcache limitations listed above.
+
+The weekly pooling regression test includes Model Runner V2 cases for PCP1/PCP2 with KVPP off/on and retains the Model Runner V1 KVPP case. Each case uses a separate pool, waits for a successful local prefix-cache reset, compares replay output with the original output, and requires the pool-load counter to increase. These new PCP cases require Ascend hardware validation; their presence in the test matrix does not establish a validated deployment configuration.
 
 ## Performance
 

@@ -81,6 +81,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     get_group_block_size,
     get_group_cache_family,
     get_partial_block_index,
+    get_pool_rank_shards,
     infer_cache_transfer_granularity,
     infer_group_block_sizes,
     infer_group_cache_families,
@@ -123,7 +124,8 @@ class KVPoolWorker:
         parallel_config = vllm_config.parallel_config
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
         self.vllm_config = vllm_config
-        self.use_kvpp = KVPPConfig.from_vllm_config(vllm_config).size > 1
+        self.kvpp_size = KVPPConfig.from_vllm_config(vllm_config).size
+        self.use_kvpp = self.kvpp_size > 1
         self.kv_cache_config = kv_cache_config
         hf_text_config = getattr(model_config, "hf_text_config", None)
         hf_config = getattr(model_config, "hf_config", hf_text_config)
@@ -163,10 +165,11 @@ class KVPoolWorker:
         self.tp_rank = get_tensor_model_parallel_rank()
         self.tp_size = get_tensor_model_parallel_world_size()
         self.pp_size = parallel_config.pipeline_parallel_size
-        self.pp_rank = (parallel_config.rank // self.tp_size) % self.pp_size
 
         self.pcp_size = get_pcp_group().world_size
         self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
+        self.pp_rank = (parallel_config.rank // (self.tp_size * self.pcp_size)) % self.pp_size
+        self.kvpp_rank = self.pcp_rank * self.tp_size + self.tp_rank
         self.dcp_size = get_decode_context_model_parallel_world_size()
         self.dcp_rank = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
         self.model_name = model_config.model.split("/")[-1]
@@ -271,7 +274,7 @@ class KVPoolWorker:
             self.put_step = 1
         if self.use_kvpp:
             # Every owner saves all blocks of its layer shard, including its MTP replica.
-            self.head_or_tp_rank = self.tp_rank
+            self.head_or_tp_rank = self.kvpp_rank
             self.put_step = 1
         self.my_key_index = (
             self.pcp_rank * self.dcp_size * (self.tp_size // self.put_step)
@@ -363,6 +366,7 @@ class KVPoolWorker:
                     self.dcp_rank,
                     self.pp_rank,
                     group_id,
+                    kvpp_size=self.kvpp_size,
                 )
             )
 
@@ -731,8 +735,8 @@ class KVPoolWorker:
                     self.grouped_block_size,
                     self.tp_rank,
                     self.tp_size,
-                    self.pcp_rank,
-                    self.pcp_size,
+                    0 if self.use_kvpp else self.pcp_rank,
+                    1 if self.use_kvpp else self.pcp_size,
                     self.dcp_size,
                     self.put_step,
                     self.kv_role,
@@ -936,7 +940,9 @@ class KVPoolWorker:
         self.kv_caches = kv_caches
         if self.use_kvpp:
             owners = map_kvpp_layers_to_owners(self.vllm_config, kv_caches.keys())
-            kv_caches = {name: caches for name, caches in kv_caches.items() if owners.get(name) in (None, self.tp_rank)}
+            kv_caches = {
+                name: caches for name, caches in kv_caches.items() if owners.get(name) in (None, self.kvpp_rank)
+            }
             self.kv_caches = kv_caches
         self.group_kv_cache_families: dict[int, str] = {
             group_id: get_group_cache_family(self.kv_cache_group_families, group_id)
@@ -2910,8 +2916,8 @@ class KVPoolWorker:
                 block_ids,
                 token_len,
                 mask_num=0,
-                shard_rank=self.pcp_rank,
-                shard_size=self.pcp_size,
+                shard_rank=self.pcp_rank if self.dcp_size == 1 else 0,
+                shard_size=self.pcp_size if self.dcp_size == 1 else 1,
             )
             if not keys:
                 return
@@ -3108,7 +3114,7 @@ class KVPoolWorker:
 
     def get_group_tp_size(self, kv_cache_group_id: int):
         if self.use_kvpp:
-            return self.tp_size
+            return self.kvpp_size
         if self.tp_mismatch:
             return self.effective_tp_size
         if self.group_uses_align_state[kv_cache_group_id]:
@@ -3133,13 +3139,16 @@ class KVPoolWorker:
         num_head_or_tp_ranks = self.get_group_tp_size(group_id)
         # Keep each rank shard's block/layer keys contiguous to match
         # lookup_scheduler()'s [rank_shard][block] result slicing.
+        if self.use_kvpp:
+            rank_shards = [(0, owner) for owner in range(self.kvpp_size)]
+        else:
+            rank_shards = get_pool_rank_shards(self.tp_size, self.pcp_size, self.dcp_size, num_head_or_tp_ranks)
         for pp_rank in range(self.pp_size):
-            for dcp_rank in range(self.dcp_size):
-                for head_or_tp_rank in range(num_head_or_tp_ranks):
-                    for key in keys:
-                        rank_key = self._replace_key_field(key, "dcp", dcp_rank)
-                        rank_key = self._replace_key_field(rank_key, "head_or_tp_rank", head_or_tp_rank)
-                        expanded.append(self._replace_key_field(rank_key, "pp_rank", pp_rank))
+            for dcp_rank, head_or_tp_rank in rank_shards:
+                for key in keys:
+                    rank_key = self._replace_key_field(key, "dcp", dcp_rank)
+                    rank_key = self._replace_key_field(rank_key, "head_or_tp_rank", head_or_tp_rank)
+                    expanded.append(self._replace_key_field(rank_key, "pp_rank", pp_rank))
         return expanded
 
     def _expand_lookup_key_variants(self, key: str, group_id: int, include_all_ranks: bool) -> list[str]:

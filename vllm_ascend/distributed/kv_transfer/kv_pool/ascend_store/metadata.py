@@ -74,6 +74,23 @@ def infer_tp_mismatch_info(
     )
 
 
+def get_pool_rank_shards(tp_size: int, pcp_size: int, dcp_size: int, num_head_ranks: int) -> list[tuple[int, int]]:
+    """Enumerate physical (DCP, head) shards in vLLM's PP x PCP x TP layout.
+
+    DCP groups traverse PCP before TP, so DCP and head ranks are not
+    independent dimensions. PCP replicas with DCP=1 share the same keys.
+    """
+    shards = set()
+    for tp_rank in range(tp_size):
+        head_start = tp_rank * num_head_ranks // tp_size
+        # TP mismatch may split one worker's cache into several peer keys.
+        head_end = max(head_start + 1, (tp_rank + 1) * num_head_ranks // tp_size)
+        for pcp_rank in range(pcp_size):
+            dcp_rank = (tp_rank * pcp_size + pcp_rank) % dcp_size
+            shards.update((dcp_rank, head_rank) for head_rank in range(head_start, head_end))
+    return sorted(shards)
+
+
 # Parameters related to the key
 @dataclass
 class KeyMetadata:
@@ -92,6 +109,12 @@ class KeyMetadata:
     cache_role: str = "kv"
     """ Family name for compress-aware hybrid cache layouts """
     cache_family: str = "default"
+    """Owner count for KVPP layer shards; ordinary pooling stores complete layers."""
+    kvpp_size: int = 1
+
+    @property
+    def kvpp_suffix(self) -> str:
+        return f"@kvpp_size:{self.kvpp_size}" if self.kvpp_size > 1 else ""
 
 
 @dataclass(order=True)
@@ -109,6 +132,7 @@ class PoolKey:
                 self.key_metadata.kv_cache_group_id,
                 self.key_metadata.cache_role,
                 self.key_metadata.cache_family,
+                self.key_metadata.kvpp_size,
                 self.chunk_hash,
             )
         )
@@ -122,6 +146,7 @@ class PoolKey:
             f"@group:{self.key_metadata.kv_cache_group_id}"
             f"@cache_role:{self.key_metadata.cache_role}"
             f"@cache_family:{self.key_metadata.cache_family}"
+            f"{self.key_metadata.kvpp_suffix}"
             f"@{self.chunk_hash}"
         )
 
@@ -154,6 +179,7 @@ class LayerPoolKey(PoolKey):
                 self.key_metadata.kv_cache_group_id,
                 self.key_metadata.cache_role,
                 self.key_metadata.cache_family,
+                self.key_metadata.kvpp_size,
                 self.chunk_hash,
                 self.layer_id,
             )
@@ -167,6 +193,7 @@ class LayerPoolKey(PoolKey):
             f"@group:{self.key_metadata.kv_cache_group_id}"
             f"@cache_role:{self.key_metadata.cache_role}"
             f"@cache_family:{self.key_metadata.cache_family}"
+            f"{self.key_metadata.kvpp_suffix}"
             f"@layer_id:{self.layer_id}"
             f"@{self.chunk_hash}"
         )
@@ -332,7 +359,7 @@ class ChunkedTokenDatabase:
                 f"@pp_rank:{group_metadata.pp_rank}"
                 f"@group:{kv_cache_group_id}"
                 f"@cache_role:{cache_role}"
-                f"@cache_family:{cache_family}@"
+                f"@cache_family:{cache_family}{group_metadata.kvpp_suffix}@"
             )
             self._key_prefix_cache[cache_key] = prefix
         return prefix
@@ -388,6 +415,7 @@ class ChunkedTokenDatabase:
                 kv_cache_group_id=kv_cache_group_id,
                 cache_role=cache_role,
                 cache_family=cache_family,
+                kvpp_size=group_metadata.kvpp_size,
             ),
             chunk_hash,
         )

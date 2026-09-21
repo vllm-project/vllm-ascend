@@ -22,6 +22,7 @@ from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 from vllm.v1.serial_utils import MsgpackEncoder
 
+from vllm_ascend.ascend_config import KVPPConfig
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     backend_map,
     get_layerwise_data_plane,
@@ -48,6 +49,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     get_block_hashes,
     get_group_block_size,
     get_group_cache_family,
+    get_pool_rank_shards,
     infer_cache_transfer_granularity,
     infer_group_block_sizes,
     infer_group_cache_families,
@@ -68,6 +70,7 @@ class KVPoolScheduler:
         kv_cache_config: KVCacheConfig | None = None,
     ):
         self.vllm_config = vllm_config
+        self.kvpp_size = KVPPConfig.from_vllm_config(vllm_config).size
         self.use_layerwise = use_layerwise
         self.kv_cache_config = kv_cache_config
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
@@ -191,7 +194,7 @@ class KVPoolScheduler:
         model_config = vllm_config.model_config
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
-        self.pp_rank = (vllm_config.parallel_config.rank // self.tp_size) % self.pp_size
+        self.pp_rank = (vllm_config.parallel_config.rank // (self.tp_size * self.pcp_size)) % self.pp_size
         # Global layer offset for layerwise pool keys under PP (matches the
         # pool worker's pp_layer_offset).
         self.pp_layer_offset = 0
@@ -255,34 +258,39 @@ class KVPoolScheduler:
         include_layers: bool = False,
         kv_cache_group_id: int = 0,
     ) -> list[list[str]]:
-        head_or_tp_ranks = self.tp_size // self.put_step
+        if self.kvpp_size > 1:
+            rank_shards = [(0, owner) for owner in range(self.kvpp_size)]
+        else:
+            rank_shards = get_pool_rank_shards(
+                self.tp_size, self.pcp_size, self.dcp_size, self.tp_size // self.put_step
+            )
         cache_family = get_group_cache_family(self.kv_cache_group_families, kv_cache_group_id)
         keys_by_block = []
         for block_hash in block_hashes:
             block_keys: list[str] = []
             chunk_hash = block_hash if isinstance(block_hash, str) else block_hash.hex()
             pp_ranks = [self.pp_rank] if include_layers else range(self.pp_size)
-            for dcp_rank in range(self.dcp_size):
-                for head_or_tp_rank in range(head_or_tp_ranks):
-                    for pp_rank in pp_ranks:
-                        pool_key = PoolKey(
-                            KeyMetadata(
-                                self.model_name,
-                                head_or_tp_rank,
-                                dcp_rank,
-                                pp_rank,
-                                kv_cache_group_id=kv_cache_group_id,
-                                cache_family=cache_family,
-                            ),
-                            chunk_hash,
+            for dcp_rank, head_or_tp_rank in rank_shards:
+                for pp_rank in pp_ranks:
+                    pool_key = PoolKey(
+                        KeyMetadata(
+                            self.model_name,
+                            head_or_tp_rank,
+                            dcp_rank,
+                            pp_rank,
+                            kv_cache_group_id=kv_cache_group_id,
+                            cache_family=cache_family,
+                            kvpp_size=self.kvpp_size,
+                        ),
+                        chunk_hash,
+                    )
+                    if include_layers:
+                        block_keys.extend(
+                            layer_key.to_string()
+                            for layer_key in pool_key.split_layers(self.num_layers, self.pp_layer_offset)
                         )
-                        if include_layers:
-                            block_keys.extend(
-                                layer_key.to_string()
-                                for layer_key in pool_key.split_layers(self.num_layers, self.pp_layer_offset)
-                            )
-                        else:
-                            block_keys.append(pool_key.to_string())
+                    else:
+                        block_keys.append(pool_key.to_string())
             keys_by_block.append(block_keys)
         return keys_by_block
 
