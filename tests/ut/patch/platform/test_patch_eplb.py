@@ -149,7 +149,7 @@ def test_async_rebalance_wrapper_stashes_explicit_target_on_communicator():
         eplb_stats=SimpleNamespace(global_expert_load_window=torch.ones((1, 2))),
     )
 
-    def original_rebalance(model_state, eplb_state, physical_to_logical_map_cpu, stream):
+    def original_rebalance(model_state, eplb_state, physical_to_logical_map_cpu, cuda_stream):
         return target
 
     wrapped = patch_eplb._wrap_async_rebalance(original_rebalance)
@@ -175,7 +175,7 @@ def test_async_rebalance_ignores_stale_prepared_stats():
     )
     physical_map = torch.tensor([[0, 1]])
 
-    def original_rebalance(model_state, eplb_state, physical_to_logical_map_cpu, stream):
+    def original_rebalance(model_state, eplb_state, physical_to_logical_map_cpu, cuda_stream):
         assert model_state.eplb_stats.global_expert_load_window is current_values
         return physical_to_logical_map_cpu
 
@@ -206,7 +206,7 @@ def test_async_rebalance_passes_prepared_stats_to_policy_on_worker_stream(monkey
         finally:
             stream_active = False
 
-    monkeypatch.setattr(patch_eplb._async_worker, "device_stream", device_stream)
+    monkeypatch.setattr(patch_eplb.torch.cuda, "stream", device_stream)
     stats = SimpleNamespace(
         global_expert_load_window=device_values,
         num_replicas=2,
@@ -227,7 +227,7 @@ def test_async_rebalance_passes_prepared_stats_to_policy_on_worker_stream(monkey
     rank_node_ids = np.array([0, 1])
     eplb_state = SimpleNamespace(policy=policy, get_rank_node_ids=MagicMock(return_value=rank_node_ids))
 
-    def original_rebalance(model_state, eplb_state, physical_to_logical_map_cpu, stream):
+    def original_rebalance(model_state, eplb_state, physical_to_logical_map_cpu, cuda_stream):
         raise AssertionError("prepared statistics must bypass the legacy runner")
 
     wrapped = patch_eplb._wrap_async_rebalance(original_rebalance)
@@ -261,7 +261,7 @@ def test_async_transfer_wrapper_executes_explicit_sources(monkeypatch):
         ep_group,
         communicator,
         is_profile=False,
-        stream=None,
+        cuda_stream=None,
         rank_mapping=None,
         layer_idx=0,
     ):
@@ -276,7 +276,7 @@ def test_async_transfer_wrapper_executes_explicit_sources(monkeypatch):
         [object()],
         MagicMock(),
         communicator,
-        stream=stream,
+        cuda_stream=stream,
     )
 
     assert result is metadata
@@ -300,7 +300,7 @@ def test_async_explicit_transfer_delegates_profile_and_rank_mapping(is_profile, 
         ep_group,
         communicator,
         is_profile=False,
-        stream=None,
+        cuda_stream=None,
         rank_mapping=None,
         layer_idx=0,
     ):

@@ -107,7 +107,7 @@ def _clear_transfer_target(communicator, target=None) -> None:
 
 def _wrap_async_rebalance(original_rebalance):
     rebalance_signature = signature(original_rebalance)
-    required = {"model_state", "eplb_state", "physical_to_logical_map_cpu", "stream"}
+    required = {"model_state", "eplb_state", "physical_to_logical_map_cpu", "cuda_stream"}
     if not required.issubset(rebalance_signature.parameters):
         raise RuntimeError("Unsupported vLLM EPLB contract: asynchronous rebalance signature changed.")
 
@@ -128,7 +128,7 @@ def _wrap_async_rebalance(original_rebalance):
             target = original_rebalance(*bound.args, **bound.kwargs)
         else:
             # Bypass the legacy runner so weighted temporal bins reach the policy intact.
-            with _async_worker.device_stream(bound.arguments.get("stream")):
+            with torch.cuda.stream(bound.arguments["cuda_stream"]):
                 cpu_stats = PreparedLoadStats(prepared_stats.values.cpu(), prepared_stats.sample_counts)
             target = eplb_state.policy.rebalance_experts(
                 cpu_stats,
@@ -153,7 +153,7 @@ def _wrap_async_rebalance(original_rebalance):
 def _wrap_async_transfer(original_transfer):
     transfer_signature = signature(original_transfer)
     required = {"old_layer_indices", "new_layer_indices", "expert_weights", "expert_weights_buffer"}
-    required.update({"ep_group", "communicator", "is_profile", "stream", "rank_mapping", "layer_idx"})
+    required.update({"ep_group", "communicator", "is_profile", "cuda_stream", "rank_mapping", "layer_idx"})
     if not required.issubset(transfer_signature.parameters):
         raise RuntimeError("Unsupported vLLM EPLB contract: asynchronous transfer signature changed.")
 
@@ -182,7 +182,7 @@ def _wrap_async_transfer(original_transfer):
                 expert_weight_buffers=values["expert_weights_buffer"],
                 ep_group=values["ep_group"],
                 communicator=communicator,
-                stream=values["stream"],
+                stream=values["cuda_stream"],
                 layer_idx=layer_idx,
             )
         except Exception:

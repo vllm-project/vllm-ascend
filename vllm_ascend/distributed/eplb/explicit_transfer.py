@@ -8,7 +8,6 @@ from typing import Any
 
 import numpy as np
 import torch
-from vllm.distributed.eplb.eplb_utils import device_stream
 from vllm.distributed.eplb.rebalance_execute import TransferMetadata
 
 
@@ -21,7 +20,7 @@ def stage_explicit_layer_transfer(
     expert_weight_buffers: Sequence[torch.Tensor],
     ep_group: Any,
     communicator: Any,
-    stream: torch.Stream | None = None,
+    stream: torch.cuda.Stream | None = None,
     layer_idx: int = 0,
 ) -> TransferMetadata:
     """Stage one layer using its exact ``[ranks, slots]`` source plan.
@@ -101,7 +100,7 @@ def stage_explicit_layer_transfer(
     recv_count = 0
     communicator.set_transfer_context(old, layer_idx)
 
-    with device_stream(stream):
+    with torch.cuda.stream(stream):
         for dst_rank in range(num_ranks):
             for dst_slot in range(slots_per_rank):
                 expert = int(new_placement[dst_rank, dst_slot])
