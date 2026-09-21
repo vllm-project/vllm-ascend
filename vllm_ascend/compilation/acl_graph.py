@@ -23,7 +23,7 @@ from vllm.platforms import current_platform
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 
-from ..utils import use_updatable_graph, super_kernel_scope, weak_ref_tensors
+from ..utils import super_kernel_scope, use_updatable_graph, weak_ref_tensors
 from .updatable_graph import (
     ContextSource,
     SharedSource,
