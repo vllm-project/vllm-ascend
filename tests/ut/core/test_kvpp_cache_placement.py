@@ -6,7 +6,7 @@ import pytest
 import torch
 from vllm.model_executor.layers.attention import MLAAttention
 
-from tests.ut.kvpp_utils import indexer_name, layer_name, make_kvpp_config, make_kvpp_specs
+from tests.ut.kvpp_utils import indexer_name, layer_name, make_dspark_kvpp_case, make_kvpp_config, make_kvpp_specs
 from vllm_ascend.ascend_config import KVPPConfig
 from vllm_ascend.core import kv_cache_placement as placement
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
@@ -121,3 +121,35 @@ def test_stage_without_target_has_no_scratch_cost(with_mtp, expected):
     specs = {layer_name(17): specs[layer_name(17)]} if with_mtp else {}
     plan = placement.create_kvpp_cache_allocation_plan(make_kvpp_config(), specs, 1)
     assert plan.get_num_blocks(288) == expected
+
+
+@pytest.mark.parametrize("rank,target_cost", [(0, 308), (1, 296), (2, 232)])
+def test_dspark_keeps_draft_caches_in_every_rank_budget(rank, target_cost):
+    config, specs, drafts = make_dspark_kvpp_case()
+    target_specs = {name: spec for name, spec in specs.items() if name not in drafts}
+    target_plan = placement.create_kvpp_cache_allocation_plan(config, target_specs, rank)
+    plan = placement.create_kvpp_cache_allocation_plan(config, specs, rank)
+    assert plan.layer_owner_ranks == target_plan.layer_owner_ranks
+    for name in drafts:
+        assert plan.layer_bundles[name] == (name,)
+        assert plan.tensor_sizes[name] == (64, 64)
+    cost = target_cost + 3 * 128
+    assert plan.get_num_blocks(cost - 1) == 0
+    assert plan.get_num_blocks(3 * cost) == 3
+    reverse = placement.create_kvpp_cache_allocation_plan(config, dict(reversed(list(specs.items()))), rank)
+    assert list(plan.layer_owner_ranks.items()) == list(reverse.layer_owner_ranks.items())
+    assert list(plan.layer_bundles.items()) == list(reverse.layer_bundles.items())
+
+
+def test_dspark_draft_only_stage_has_no_scratch_cost():
+    config, specs, drafts = make_dspark_kvpp_case()
+    plan = placement.create_kvpp_cache_allocation_plan(config, {name: specs[name] for name in drafts}, 1)
+    assert plan.layer_owner_ranks == {}
+    assert plan.get_num_blocks(3 * 384) == 3
+
+
+def test_dspark_draft_range_uses_local_layers_and_draft_model_depth():
+    config, specs, drafts = make_dspark_kvpp_case()
+    del config.model_config.hf_config.num_nextn_predict_layers
+    assert placement.find_draft_layers(config, specs) == set(drafts)
+    assert placement.find_draft_layers(config, [layer_name(16), drafts[-1], layer_name(20)]) == {drafts[-1]}

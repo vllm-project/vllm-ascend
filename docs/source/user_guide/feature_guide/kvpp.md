@@ -43,7 +43,8 @@ The following table lists individual feature combinations with KVPP. It does not
 | Asynchronous scheduling | ✅ Supported | Can be combined with KVPP. |
 | LI-C8 and SFA-C8 cache layouts | ✅ Supported | Allocation follows the actual KV cache specifications. |
 | Fixed-step MTP | ✅ Supported | MTP caches are allocated independently and excluded from KVPP layer partitioning. |
-| Variable-step MTP and other speculative decoding methods | ❌ Not supported | Only fixed-step MTP is supported. |
+| Fixed-length DSpark (Qwen3 draft) | Experimental | Like MTP, draft layers are excluded from KVPP and retain independent TP-local caches. |
+| Variable-length speculative decoding and other methods | ❌ Not supported | DSpark adaptive verification and `dynamic_spec_config` are not supported. |
 | PCP | ✅ Supported | Requires Model Runner V2; caches are shared across PCP × TP ranks. |
 | DCP | ❌ Not supported | Cannot currently be combined with KVPP. |
 | P/D disaggregation | ✅ Supported | Uses `MooncakeConnectorV2` (Experimental); enable KVPP only on the prefill node. |
@@ -93,6 +94,22 @@ For PCP, set `VLLM_USE_V2_MODEL_RUNNER=1` and add `--prefill-context-parallel-si
 For PP, add `enable_kvpp` to the existing PP launch configuration. Each stage allocates its caches independently. KVPP does not change PP layer partitioning.
 
 Fixed-step MTP can be combined with KVPP, but MTP caches remain independently allocated and are excluded from KVPP layer partitioning. Follow the model-specific configuration requirements for MTP launch arguments.
+
+### DSpark
+
+GLM-5.2 with a Qwen3 DSpark draft uses the same draft-cache exclusion as MTP. DSpark layers are numbered after the target layers, with their count taken from the draft model configuration. The existing KVPP allocator keeps those caches independent on every rank and includes them in the memory budget.
+
+For example, add the following to an existing GLM-5.2 launch configuration, retaining EP and asynchronous scheduling:
+
+```bash
+--enable-expert-parallel \
+--async-scheduling \
+--enforce-eager \
+--speculative-config '{"method":"dspark","model":"RedHatAI/GLM-5.2-speculator.dspark","num_speculative_tokens":7,"enforce_eager":true}' \
+--additional-config '{"enable_kvpp":true}'
+```
+
+The shared layer-identification logic applies to both model runners. This combination is experimental and requires model-level validation on the deployment hardware. Graph execution, adaptive verification, dynamic speculative lengths, and cache groups with different block sizes remain unsupported. The target model's existing MLA/SFA and non-hybrid restrictions still apply.
 
 ## Configuration Parameters
 

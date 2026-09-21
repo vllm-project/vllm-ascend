@@ -94,10 +94,16 @@ class KVPPConfig:
             raise ValueError("KVPP currently supports only non-hybrid MLA models.")
         speculative_config = vllm_config.speculative_config
         if speculative_config is not None:
-            if speculative_config.method != "mtp":
-                raise ValueError("KVPP currently supports speculative decoding only with method='mtp'.")
+            if speculative_config.method not in ("mtp", "dspark"):
+                raise ValueError("KVPP supports speculative decoding only with method='mtp' or method='dspark'.")
             if speculative_config.num_speculative_tokens_per_batch_size:
-                raise ValueError("KVPP currently supports only a fixed number of MTP speculative tokens.")
+                raise ValueError("KVPP currently supports only a fixed number of speculative tokens.")
+            if speculative_config.method == "dspark":
+                if getattr(speculative_config, "enable_adaptive_verification", False):
+                    raise ValueError("KVPP does not support DSpark adaptive verification.")
+                dynamic_spec = (vllm_config.additional_config or {}).get("dynamic_spec_config") or {}
+                if dynamic_spec.get("method") is not None:
+                    raise ValueError("KVPP does not support dynamic speculative lengths.")
 
 
 @config

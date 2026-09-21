@@ -104,46 +104,51 @@ def build_kvpp_layer_layout(
     return layout, cursor
 
 
-def find_mtp_layers(
+def find_draft_layers(
     vllm_config: VllmConfig,
     local_layer_names: Iterable[str],
 ) -> set[str]:
-    """Find MTP KV-cache layers among this worker's PP-local cache names.
+    """Find MTP/DSpark KV-cache layers among this worker's PP-local names.
 
-    Only names present in ``local_layer_names`` are returned. A PP stage
-    without MTP caches yields an empty set; KVPP does not assume MTP lives
-    on the last pipeline rank.
+    Both use layer indices after the target layers. Only names present on
+    this worker are returned, including an empty set on stages without draft.
     """
     speculative_config = vllm_config.speculative_config
-    if speculative_config is None or speculative_config.method != "mtp":
+    if speculative_config is None:
         return set()
 
-    hf_config = vllm_config.model_config.hf_config
-    mtp_start = hf_config.num_hidden_layers
-    num_mtp_layers = hf_config.num_nextn_predict_layers
-    mtp_end = mtp_start + num_mtp_layers
-    return {layer_name for layer_name in local_layer_names if mtp_start <= extract_layer_index(layer_name) < mtp_end}
+    if speculative_config.method == "mtp":
+        hf_config = vllm_config.model_config.hf_config
+        draft_start = hf_config.num_hidden_layers
+        num_draft_layers = hf_config.num_nextn_predict_layers
+    elif speculative_config.method == "dspark":
+        draft_start = vllm_config.model_config.get_total_num_hidden_layers()
+        num_draft_layers = speculative_config.draft_model_config.hf_config.num_hidden_layers
+    else:
+        return set()
+    draft_end = draft_start + num_draft_layers
+    return {name for name in local_layer_names if draft_start <= extract_layer_index(name) < draft_end}
 
 
 def map_kvpp_layers_to_owners(vllm_config: VllmConfig, local_layer_names: Iterable[str]) -> dict[str, int]:
     """Partition PP-local Target KV layers across KVPP ranks.
 
     ``local_layer_names`` must already be PP-local (typically the keys of the
-    current worker's cache spec). MTP layers remain fully allocated on every
-    KVPP rank and are therefore absent from the returned owner mapping.
+    current worker's cache spec). Draft layers retain their original TP-local
+    allocation and are therefore absent from the returned owner mapping.
     """
     kvpp_size = KVPPConfig.from_vllm_config(vllm_config).size
     # Workers are separate Python processes and may receive layer names from
     # sets or differently ordered dictionaries. Keep both owner insertion
     # order and per-layer cache-bundle order identical on every rank.
     local_layer_names = tuple(sorted(local_layer_names, key=lambda name: (extract_layer_index(name), name)))
-    mtp_layers = find_mtp_layers(
+    draft_layers = find_draft_layers(
         vllm_config,
         local_layer_names,
     )
     layers_by_index: dict[int, list[str]] = defaultdict(list)
     for layer_name in local_layer_names:
-        if layer_name not in mtp_layers:
+        if layer_name not in draft_layers:
             layers_by_index[extract_layer_index(layer_name)].append(layer_name)
 
     layer_indices = sorted(layers_by_index)
