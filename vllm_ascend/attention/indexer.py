@@ -1091,8 +1091,8 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             )
 
         num_decode_tokens = 0
-        if self.use_pcp:
-            # Preserve the decode boundary for PCP's cache-write gather.
+        if self.use_pcp or self.use_dcp:
+            # PCP's gather and native DCP's fused store need the decode boundary.
             _, _, num_decode_tokens, _ = split_decodes_and_prefills(
                 common_attn_metadata,
                 decode_threshold=self.decode_threshold,

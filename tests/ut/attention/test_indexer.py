@@ -41,7 +41,7 @@ def _make_builder(
     vllm_config.parallel_config = SimpleNamespace(
         prefill_context_parallel_size=pcp_size,
         decode_context_parallel_size=dcp_size,
-        tensor_parallel_size=4,
+        tensor_parallel_size=max(4, dcp_size),
     )
     vllm_config.scheduler_config = SimpleNamespace(
         max_num_seqs=4,
@@ -230,11 +230,28 @@ def test_sfa_indexer_metadata_builder_emits_full_slot_mapping_under_pcp(mock_cos
     assert metadata.slot_mapping is common.slot_mapping
 
 
-@pytest.mark.parametrize("dcp_size,expected_decode_tokens", [(1, 1), (2, 1)])
+@pytest.mark.parametrize("capture", [False, True])
+@patch("vllm_ascend.attention.indexer.get_ascend_config")
+@patch("vllm_ascend.attention.indexer.get_cos_and_sin_mla")
+def test_sfa_indexer_native_dcp_decode_boundary(mock_cos_sin, mock_get_ascend_config, capture):
+    mock_get_ascend_config.return_value.c8_reshape_optim_enabled = False
+    mock_cos_sin.return_value = (torch.zeros(2, 1, 1, 8), torch.zeros(2, 1, 1, 8))
+    common = _make_common_metadata()
+    common.num_actual_tokens = common.num_input_tokens = 2
+    common.query_start_loc = torch.tensor([0, 1, 2], dtype=torch.int32)
+    common.query_start_loc_cpu = common.query_start_loc.clone()
+    common.max_query_len = 1
+    common.is_prefilling = torch.tensor([False, False])
+    builder = _make_builder(pcp_size=1, dcp_size=8)
+    metadata = builder.build_for_cudagraph_capture(common) if capture else builder.build(0, common)
+    assert metadata.num_decode_tokens == metadata.num_actual_tokens == 2
+
+
+@pytest.mark.parametrize("pcp_size,dcp_size,expected_decode_tokens", [(2, 1, 1), (2, 2, 1), (1, 8, 1)])
 @patch("vllm_ascend.attention.indexer.get_ascend_config")
 @patch("vllm_ascend.attention.indexer.get_cos_and_sin_mla")
 def test_sfa_indexer_metadata_builder_preserves_pcp_decode_boundary(
-    mock_cos_sin, mock_get_ascend_config, dcp_size, expected_decode_tokens
+    mock_cos_sin, mock_get_ascend_config, pcp_size, dcp_size, expected_decode_tokens
 ):
     mock_get_ascend_config.return_value.c8_reshape_optim_enabled = False
     mock_cos_sin.return_value = (torch.zeros(4, 1, 1, 8), torch.zeros(4, 1, 1, 8))
@@ -244,18 +261,21 @@ def test_sfa_indexer_metadata_builder_preserves_pcp_decode_boundary(
     common.max_query_len = 3
     common.is_prefilling = torch.tensor([False, True])
 
-    metadata = _make_builder(pcp_size=2, dcp_size=dcp_size).build(0, common)
+    metadata = _make_builder(pcp_size=pcp_size, dcp_size=dcp_size).build(0, common)
 
-    # Preserve the leading-decode count for PCP with or without DCP.
+    # Preserve the boundary for PCP gathering and native DCP fused stores.
     assert metadata.num_decode_tokens == expected_decode_tokens
 
 
+@pytest.mark.parametrize("pcp_size,dcp_size", [(2, 2), (1, 8)])
 @pytest.mark.parametrize("pd_decode_recompute,expected_decode_tokens", [(False, 0), (True, 2)])
 @patch("vllm_ascend.attention.indexer.get_ascend_config")
 @patch("vllm_ascend.attention.indexer.get_cos_and_sin_mla")
 def test_sfa_indexer_metadata_builder_preserves_rescheduled_prefill_boundary(
     mock_cos_sin,
     mock_get_ascend_config,
+    pcp_size,
+    dcp_size,
     pd_decode_recompute,
     expected_decode_tokens,
 ):
@@ -273,7 +293,7 @@ def test_sfa_indexer_metadata_builder_preserves_rescheduled_prefill_boundary(
         "vllm_ascend.attention.indexer.is_pd_decode_recompute_scheduler_enabled",
         return_value=pd_decode_recompute,
     ):
-        metadata = _make_builder(pcp_size=2, dcp_size=2).build(0, common)
+        metadata = _make_builder(pcp_size=pcp_size, dcp_size=dcp_size).build(0, common)
 
     # Short rescheduled prefills remain prefills unless the PD decode
     # recompute scheduler intentionally treats them as decode requests.
