@@ -1084,13 +1084,21 @@
 # ** 15. File: worker/patch_qwen3_dflash.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.qwen3_dflash.DFlashQwen3Model.precompute_and_store_context_kv`
+#   2. `vllm.model_executor.models.lilicorr.DFlash2Qwen3DecoderLayer`
 #    Why:
 #       The function directly calls the ops.rms_norm and ops.rotary_imbedding operators,
 #       but NPU does not have a corresponding implementation.
+#       LiLiCorr's optional convolutional backbone otherwise resolves to the CUDA-oriented
+#       upstream DFlash2 layer rather than the Ascend implementation.
 #    How：
 #       Replace ops.* with the internal implementation of vllm-ascend.
+#       When the paired vLLM revision provides LiLiCorr, bind its decoder factory to the
+#       Ascend DFlash2 layer while retaining the upstream LiLiCorr head and weight loader.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/57934
 #    Future Plan:
 #       Remove this patch when vllm-ascend supports pattern matching for ops.*.
+#       Remove the LiLiCorr binding when upstream exposes a platform decoder factory.
 #
 # ** 18. File: worker/patch_bind_kv_cache.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
