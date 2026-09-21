@@ -25,6 +25,8 @@ class VmmEngram(NodeShardedEngram):
             self.codes_map._rollback(exc)
             raise
         try:
+            assert self.codes_map.tensor is not None
+            assert self.scales_map.tensor is not None
             self.weight = torch.nn.Parameter(self.codes_map.tensor[self.start : self.end], requires_grad=False)
             self.weight_scale = self.scales_map.tensor[self.start : self.end]
         except Exception as original:

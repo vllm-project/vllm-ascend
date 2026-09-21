@@ -26,15 +26,15 @@ def engram_chunked(
     active = tl.load(count)
     col = tl.arange(0, 256)
     if TILE == 1:
-        for row in range(tl.program_id(0), active, tl.num_programs(0)):
-            index = tl.load(ids + row)
+        for scalar_row in range(tl.program_id(0), active, tl.num_programs(0)):
+            index = tl.load(ids + scalar_row)
             chunk = index // CHUNK
             local = index % CHUNK
             weight = tl.load(codes_ptrs + chunk).to(tl.pointer_type(tl.int8))
             scales = tl.load(scales_ptrs + chunk).to(tl.pointer_type(tl.float32))
             value = tl.load(weight + local * 256 + col).to(tl.float32)
             scale = tl.load(scales + local * 8 + col // 32)
-            tl.store(out + row * 256 + col, (value * scale).to(tl.bfloat16))
+            tl.store(out + scalar_row * 256 + col, (value * scale).to(tl.bfloat16))
     else:
         # Tiled mode is only for contiguous VMM mappings, not separately
         # registered chunks. Their first pointer addresses the entire table.
@@ -66,7 +66,7 @@ class Inputs:
             raise ValueError("Supported lookup tiles are 1 and 16")
         if tile != 1 and any(not hasattr(t.codes_map, "tensor") or not hasattr(t.scales_map, "tensor") for t in tables):
             raise ValueError("Tiled lookup requires contiguous VMM tensor mappings")
-        from triton.runtime import driver
+        from triton.runtime import driver  # type: ignore[import-untyped]
 
         self.closed = False
         self.tables, self.layers, self.capacity, self.k = tables, layer_ids, capacity, k
