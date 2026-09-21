@@ -14,6 +14,7 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_pcp_group,
+    get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
@@ -163,10 +164,10 @@ class KVPoolWorker:
         self.tp_rank = get_tensor_model_parallel_rank()
         self.tp_size = get_tensor_model_parallel_world_size()
         self.pp_size = parallel_config.pipeline_parallel_size
+        self.pp_rank = get_pp_group().rank_in_group if self.pp_size > 1 else 0
 
         self.pcp_size = get_pcp_group().world_size
         self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
-        self.pp_rank = (parallel_config.rank // (self.tp_size * self.pcp_size)) % self.pp_size
         self.kvpp_rank = self.pcp_rank * self.tp_size + self.tp_rank
         self.dcp_size = get_decode_context_model_parallel_world_size()
         self.dcp_rank = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0

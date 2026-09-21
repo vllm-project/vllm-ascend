@@ -64,6 +64,7 @@ def make_worker(
     module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker"
     start_patch(test, f"{module}.get_tensor_model_parallel_rank", return_value=tp_rank)
     start_patch(test, f"{module}.get_tensor_model_parallel_world_size", return_value=tp_size)
+    start_patch(test, f"{module}.get_pp_group", return_value=SimpleNamespace(rank_in_group=pp_rank))
     pcp_group = start_patch(test, f"{module}.get_pcp_group")
     pcp_group.return_value.world_size = pcp_size
     pcp_group.return_value.rank_in_group = pcp_rank
