@@ -43,7 +43,8 @@ def set_query_lens_cpu(attn_metadata: AscendMetadata, query_lens_cpu: torch.Tens
 
 def get_query_lens_cpu(attn_metadata: AscendMetadata) -> torch.Tensor | None:
     value = getattr(attn_metadata, QUERY_LENS_CPU_ATTR, None)
-    if value is None:
+    # Require a real tensor: MagicMock / other getattr stubs must not match.
+    if not isinstance(value, torch.Tensor):
         return None
     return value
 

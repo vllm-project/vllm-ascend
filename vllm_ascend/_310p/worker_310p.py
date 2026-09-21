@@ -24,9 +24,14 @@ from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
 from vllm.utils.torch_utils import set_random_seed  # noqa: E402
 
+from vllm_ascend._310p.compilation.acl_graph import apply_310p_aclgraph_patches
 from vllm_ascend._310p.model_runner_310p import NPUModelRunner310
 from vllm_ascend.utils import is_rc_device
 from vllm_ascend.worker.worker import NPUWorker, init_workspace_manager
+
+# 310P-only: weaken shared ACLGraphWrapper FULL-replay barriers for MRV1 MTP.
+# Must run at import time so MRV1 wrap sites see ACLGraphWrapper310.
+apply_310p_aclgraph_patches()
 
 
 class NPUWorker310(NPUWorker):

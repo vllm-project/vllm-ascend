@@ -648,8 +648,17 @@ class NPUModelRunner310(NPUModelRunner):
             and not forward_context.capturing
             and hasattr(self, "update_stream")
         )
+        # 310P AscendAttention is always UpdatableGraph: runner-side
+        # update_before_replay barriers duplicate ACLGraphWrapper ordering and
+        # used to be a full synchronize() that regresses small-model MTP.
+        if update_before_replay:
+            from vllm_ascend.utils import use_updatable_graph
+
+            if use_updatable_graph(getattr(self, "attn_backend", None)):
+                update_before_replay = False
 
         if self.enable_enpu or update_before_replay:
+            # Non-updatable fallback only (not hit on stock 310P AscendAttention).
             if update_before_replay:
                 torch.npu.current_stream().synchronize()
             self._update_full_graph_params_if_needed(
