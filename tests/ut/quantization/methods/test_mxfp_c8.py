@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
+from torch.utils._python_dispatch import TorchDispatchMode
 
 import vllm_ascend.device.mxfp_kv_cache as mxfp_kv_cache
 from tests.ut.base import TestBase
@@ -22,6 +23,28 @@ from vllm_ascend.quantization.methods.kv_cache.mxfp_c8 import (
     AscendC8MXFPKVCacheAttentionMethod,
     _quant_weight_loader,
 )
+
+
+class _RecordOps(TorchDispatchMode):
+    """Record the aten ops a block dispatches, views aside.
+
+    Every recorded op is a device kernel on the NPU -- one line in a profile,
+    one node in a captured graph -- whereas views launch nothing.
+    """
+
+    _VIEWS = frozenset(
+        {"view", "_unsafe_view", "reshape", "slice", "select", "expand", "unsqueeze", "squeeze", "alias", "detach"}
+    )
+
+    def __init__(self):
+        super().__init__()
+        self.kernels: list[str] = []
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        name = func.overloadpacket.__name__
+        if name not in self._VIEWS:
+            self.kernels.append(name)
+        return func(*args, **(kwargs or {}))
 
 
 class TestMXFPScaleCacheShapes(TestBase):
@@ -210,7 +233,13 @@ class TestFillMXFPVScaleCache(TestBase):
 
 
 class TestScatterMXFPKScaleCache(TestBase):
-    """Scatter writes valid slots and turns padded (-1) slots into no-ops."""
+    """Scatter writes valid slots and parks padded (-1) rows in the null block.
+
+    Slot 0 is block 0, which vLLM's BlockPool reserves as the null block and
+    never hands to a request, so nothing a real token owns lives there. Parking
+    padded rows on it is what lets the scatter be one write per layer instead
+    of a read, a select and a write.
+    """
 
     def setUp(self):
         torch.manual_seed(0)
@@ -234,79 +263,107 @@ class TestScatterMXFPKScaleCache(TestBase):
         block, offset = slot // self.block_size, slot % self.block_size
         return block, offset // MXFP_K_SCALE_NZ_TOKEN_FRAG, offset % MXFP_K_SCALE_NZ_TOKEN_FRAG
 
+    def _scatter(self, key_scale, slot_mapping, cache=None):
+        cache = self.key_scale_cache if cache is None else cache
+        scatter_mxfp_k_scale_cache(key_scale, cache, mxfp_k_scale_slot_index(slot_mapping, self.block_size))
+        return cache
+
+    def _read_modify_write_reference(self, key_scale, slot_mapping, cache):
+        """The scatter this replaced: padded rows rewrite what they read."""
+        slots = slot_mapping.to(torch.long)
+        valid = slots >= 0
+        safe = torch.where(valid, slots, torch.zeros_like(slots))
+        block, offset = safe // self.block_size, safe % self.block_size
+        seg, frag = offset // MXFP_K_SCALE_NZ_TOKEN_FRAG, offset % MXFP_K_SCALE_NZ_TOKEN_FRAG
+        cached = cache[block, :, seg, :, frag, :]
+        cache[block, :, seg, :, frag, :] = torch.where(valid.view(-1, 1, 1, 1), key_scale, cached)
+        return cache
+
+    def _without_null_slot(self, cache):
+        cache = cache.clone()
+        block, seg, frag = self._at(0)
+        cache[block, :, seg, :, frag] = 0
+        return cache
+
     def test_scatter_valid_and_padded_slots(self):
         key_scale = torch.full((3, self.num_kv_heads, 1, 2), 130, dtype=torch.uint8)
+        key_scale[2] = 77  # the padded row's own (meaningless) scale
         # slot 2 -> block 0, offset 2; slot 513 -> block 1, offset 1; -1 -> padding.
-        # Real tokens sit at non-zero slots: a real token at the padding clamp
-        # target (slot 0) in the same batch would be a duplicate-index write
-        # where the padding row's read-back clobbers it -- reachable only if
-        # eager batches carried -1 rows (they never do; graph-mode padding
-        # uses valid dummy slots), see the coexist test note.
-        slot_mapping = torch.tensor([2, 513, -1], dtype=torch.int64)
-
-        scatter_mxfp_k_scale_cache(
-            key_scale,
-            self.key_scale_cache,
-            mxfp_k_scale_slot_index(slot_mapping, self.block_size),
-        )
+        self._scatter(key_scale, torch.tensor([2, 513, -1], dtype=torch.int64))
 
         block, seg, frag = self._at(2)
         self.assertTrue(torch.all(self.key_scale_cache[block, :, seg, :, frag] == 130))
         block, seg, frag = self._at(513)
         self.assertTrue(torch.all(self.key_scale_cache[block, :, seg, :, frag] == 130))
-        # Untouched positions stay zero, including the padding clamp target.
+        # The padded row is parked on the null block's slot 0 ...
         block, seg, frag = self._at(0)
-        self.assertTrue(torch.all(self.key_scale_cache[block, :, seg, :, frag] == 0))
-        block, seg, frag = self._at(1)
-        self.assertTrue(torch.all(self.key_scale_cache[block, :, seg, :, frag] == 0))
-        block, seg, frag = self._at(512)
-        self.assertTrue(torch.all(self.key_scale_cache[block, :, seg, :, frag] == 0))
+        self.assertTrue(torch.all(self.key_scale_cache[block, :, seg, :, frag] == 77))
+        # ... and neighbours of every written slot stay untouched.
+        for slot in (1, 3, 512, 514):
+            block, seg, frag = self._at(slot)
+            self.assertTrue(torch.all(self.key_scale_cache[block, :, seg, :, frag] == 0))
 
-    def test_scatter_all_padding_rows_are_no_op(self):
-        """A pure-padding batch (all -1) must not modify the cache: rows
-        clamp to slot 0 and rewrite the cache's own current content."""
-        # Pre-populate slot 0 with a sentinel; the padding rewrite keeps it.
-        block, seg, frag = self._at(0)
-        self.key_scale_cache[block, :, seg, :, frag] = 99
+    def test_scatter_all_padding_rows_touch_only_the_null_slot(self):
+        """A pure-padding batch (all -1, e.g. a dummy run) must leave every
+        slot a request can own alone."""
         key_scale = torch.full((2, self.num_kv_heads, 1, 2), 130, dtype=torch.uint8)
-        slot_mapping = torch.tensor([-1, -1], dtype=torch.int64)
-
-        scatter_mxfp_k_scale_cache(
-            key_scale,
-            self.key_scale_cache,
-            mxfp_k_scale_slot_index(slot_mapping, self.block_size),
-        )
-
-        block, seg, frag = self._at(0)
-        self.assertTrue(torch.all(self.key_scale_cache[block, :, seg, :, frag] == 99))
-        untouched = self.key_scale_cache.clone()
-        untouched[block, :, seg, :, frag] = 0
-        self.assertTrue(torch.all(untouched == 0))
+        self._scatter(key_scale, torch.tensor([-1, -1], dtype=torch.int64))
+        self.assertTrue(torch.all(self._without_null_slot(self.key_scale_cache) == 0))
 
     def test_scatter_padding_and_real_at_nonzero_slot_coexist(self):
-        """Padding rows clamp to slot 0 while a real token writes a different
-        slot: the real write must land and slot 0 must keep its old value.
-        (Padding clamping onto slot 0 WHILE another real token also targets
-        slot 0 in the same batch is not reachable in v1 supported paths --
-        eager batches carry no -1 rows and graph-mode padding uses valid
-        dummy slots -- so that combination is not asserted here.)"""
-        block, seg, frag = self._at(0)
-        self.key_scale_cache[block, :, seg, :, frag] = 55
         key_scale = torch.zeros((2, self.num_kv_heads, 1, 2), dtype=torch.uint8)
         key_scale[0] = 200  # real token at slot 3
-        key_scale[1] = 77  # padding row (clamps to slot 0, rewrites 55)
-        slot_mapping = torch.tensor([3, -1], dtype=torch.int64)
-
-        scatter_mxfp_k_scale_cache(
-            key_scale,
-            self.key_scale_cache,
-            mxfp_k_scale_slot_index(slot_mapping, self.block_size),
-        )
+        key_scale[1] = 77  # padding row
+        self._scatter(key_scale, torch.tensor([3, -1], dtype=torch.int64))
 
         block, seg, frag = self._at(3)
         self.assertTrue(torch.all(self.key_scale_cache[block, :, seg, :, frag] == 200))
-        block, seg, frag = self._at(0)
-        self.assertTrue(torch.all(self.key_scale_cache[block, :, seg, :, frag] == 55))
+        expected = torch.zeros_like(self.key_scale_cache)
+        expected[block, :, seg, :, frag] = 200
+        self.assertTrue(torch.equal(self._without_null_slot(self.key_scale_cache), expected))
+
+    # The two phases are judged separately on purpose: they do not get the
+    # same guarantee, and only one of them ever sees a padded row.
+
+    def test_prefill_shaped_batch_is_bit_identical_to_the_read_modify_write(self):
+        # Eager batches are sliced to num_actual_tokens, so they carry no -1
+        # rows and the old read + select was an identity there.
+        slots = torch.randperm(2 * self.block_size)[:300]
+        key_scale = torch.randint(1, 255, (300, self.num_kv_heads, 1, 2), dtype=torch.uint8)
+        new = self._scatter(key_scale, slots, torch.zeros_like(self.key_scale_cache))
+        old = self._read_modify_write_reference(key_scale, slots, torch.zeros_like(self.key_scale_cache))
+        self.assertTrue(torch.equal(new, old))
+
+    def test_padded_decode_batch_differs_only_in_the_null_slot(self):
+        # FULL-graph replays pad the batch up to the captured size with -1.
+        # Real slots start past block 0: the pool never hands block 0 out.
+        real = self.block_size + torch.randperm(self.block_size)[:5]
+        slots = torch.cat([real, torch.full((11,), -1)])
+        key_scale = torch.randint(1, 255, (16, self.num_kv_heads, 1, 2), dtype=torch.uint8)
+        new = self._scatter(key_scale, slots, torch.zeros_like(self.key_scale_cache))
+        old = self._read_modify_write_reference(key_scale, slots, torch.zeros_like(self.key_scale_cache))
+        self.assertFalse(torch.equal(new, old))
+        self.assertTrue(torch.equal(self._without_null_slot(new), self._without_null_slot(old)))
+
+    def test_scatter_is_one_write_and_no_read(self):
+        # The point of parking padded rows: this runs once per full-attention
+        # layer per step, and used to be a gather, a select and a write.
+        slot_index = mxfp_k_scale_slot_index(torch.tensor([2, 513, -1]), self.block_size)
+        key_scale = torch.full((3, self.num_kv_heads, 1, 2), 130, dtype=torch.uint8)
+        with _RecordOps() as ops:
+            scatter_mxfp_k_scale_cache(key_scale, self.key_scale_cache, slot_index)
+        self.assertEqual([op for op in ops.kernels if "index_put" in op], ["index_put_"])
+        self.assertEqual([op for op in ops.kernels if op in ("index", "where")], [])
+
+    def test_slot_index_needs_no_validity_mask(self):
+        slots = torch.tensor([2, 513, -1], dtype=torch.int32)
+        with _RecordOps() as ops:
+            block_ids, seg_ids, frag_ids = mxfp_k_scale_slot_index(slots, self.block_size)
+        self.assertEqual(block_ids.tolist(), [0, 1, 0])
+        self.assertEqual(seg_ids.tolist(), [0, 0, 0])
+        self.assertEqual(frag_ids.tolist(), [2, 1, 0])
+        self.assertEqual([op for op in ops.kernels if op in ("ge", "where", "zeros_like")], [])
+        self.assertLessEqual(len(ops.kernels), 6)
 
 
 class TestAscendC8MXFPKVCacheAttentionMethod(TestBase):

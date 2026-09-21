@@ -291,11 +291,11 @@ def fill_mxfp_v_scale_cache(value_scale: torch.Tensor, value_scale_cache: torch.
 def mxfp_k_scale_slot_index(
     slot_mapping: torch.Tensor,
     block_size: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Decompose slots into the index tensors the K-scale scatter indexes with.
 
-    Returns ``(valid, block_ids, seg_ids, frag_ids)`` for the PA_NZ K-scale
-    cache, where a token at in-block offset ``o`` lands at
+    Returns ``(block_ids, seg_ids, frag_ids)`` for the PA_NZ K-scale cache,
+    where a token at in-block offset ``o`` lands at
     ``[block, n, o // 16, :, o % 16, :]``.
 
     Depends only on per-step data (slot_mapping, block_size), so one call
@@ -304,22 +304,20 @@ def mxfp_k_scale_slot_index(
     caching, including why caching this one through graph capture is safe
     while the metadata-op plan is not.
 
-    Padded rows (slot -1) are clamped to slot 0 and handled by the ``valid``
-    mask at write time, which keeps the shapes static: no ``.item()``, no
-    boolean indexing, nothing a capture would reject.
+    Padded rows (slot -1) are clamped to slot 0, which keeps the shapes
+    static: no ``.item()``, no boolean indexing, nothing a capture would
+    reject. Slot 0 is theirs to take -- see scatter_mxfp_k_scale_cache.
     """
-    slots = slot_mapping.to(torch.long)
-    valid = slots >= 0
-    safe_slots = torch.where(valid, slots, torch.zeros_like(slots))
+    safe_slots = slot_mapping.to(torch.long).clamp(min=0)
     block_ids = safe_slots // block_size
     offsets = safe_slots % block_size
-    return valid, block_ids, offsets // MXFP_K_SCALE_NZ_TOKEN_FRAG, offsets % MXFP_K_SCALE_NZ_TOKEN_FRAG
+    return block_ids, offsets // MXFP_K_SCALE_NZ_TOKEN_FRAG, offsets % MXFP_K_SCALE_NZ_TOKEN_FRAG
 
 
 def scatter_mxfp_k_scale_cache(
     key_scale: torch.Tensor,
     key_scale_cache: torch.Tensor,
-    slot_index: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+    slot_index: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
 ) -> None:
     """Scatter per-token K scales into the paged K-scale cache.
 
@@ -329,21 +327,25 @@ def scatter_mxfp_k_scale_cache(
     block_size // 16, head_dim // 64, 16, 2]``.
 
     ``slot_index`` comes from :func:`mxfp_k_scale_slot_index` and is shared
-    across the step's layers; only the read-modify-write below is per-layer.
+    across the step's layers; only the write below is per-layer.
 
     ACL-graph-capture safe: no host-device synchronization (``.all()``/
     ``bool()``/``.item()`` are illegal mid-capture -- "Stream during the
-    capture stage is not supported") and no data-dependent shapes. Padded
-    rows write back the cache's pre-read content, making them no-ops. Known
-    edge (unreachable in supported paths): a real token targeting slot 0 IN
-    THE SAME BATCH as a padded row would be a duplicate-index write where the
-    padding row's read-back clobbers the real value -- eager batches never
-    carry -1 rows, and graph-mode padding uses valid dummy slots, so this
-    combination cannot occur in v1.
+    capture stage is not supported") and no data-dependent shapes.
+
+    Padded rows arrive clamped to slot 0 and are simply written there. Slot 0
+    belongs to block 0, which vLLM's BlockPool takes out of the free list as
+    the null block and never hands to a request, so no real token's scale can
+    live there; what lands in it is read back only by the dummy requests that
+    pad a captured batch, whose output is discarded. This used to gather the
+    cache, select the old content for padded rows and write the result back --
+    three kernels in every full-attention layer of every step to make rows
+    that only a FULL-graph replay, an MTP verify or a draft step ever carries
+    into a no-op. Eager batches are sliced to their real token count and
+    never had such rows, so for them the gather and the select were an
+    identity on top of the write.
     """
-    valid, block_ids, seg_ids, frag_ids = slot_index
+    block_ids, seg_ids, frag_ids = slot_index
     if block_ids.numel() == 0:
         return
-    cached = key_scale_cache[block_ids, :, seg_ids, :, frag_ids, :]
-    updates = torch.where(valid.view(-1, 1, 1, 1), key_scale, cached)
-    key_scale_cache[block_ids, :, seg_ids, :, frag_ids, :] = updates
+    key_scale_cache[block_ids, :, seg_ids, :, frag_ids, :] = key_scale

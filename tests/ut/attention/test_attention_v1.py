@@ -1233,11 +1233,10 @@ class TestC8MXFPPerStepDerivations(TestBase):
 
     def test_k_scale_slot_index_decomposes_slots(self):
         # block_size 4, K-scale token fragment 16: slot 5 -> block 1,
-        # offset 1 -> segment 0, fragment 1. The padded row clamps to slot 0
-        # and is carried by the valid mask instead of changing any shape.
+        # offset 1 -> segment 0, fragment 1. The padded row clamps to slot 0,
+        # the null block's, which keeps every shape static without a mask.
         slots = torch.tensor([2, 5, -1], dtype=torch.int64)
-        valid, block_ids, seg_ids, frag_ids = self.impl._qfa_k_scale_slot_index(self.attn_metadata, slots, 4)
-        self.assertEqual(valid.tolist(), [True, True, False])
+        block_ids, seg_ids, frag_ids = self.impl._qfa_k_scale_slot_index(self.attn_metadata, slots, 4)
         self.assertEqual(block_ids.tolist(), [0, 1, 0])
         self.assertEqual(seg_ids.tolist(), [0, 0, 0])
         self.assertEqual(frag_ids.tolist(), [2, 1, 0])

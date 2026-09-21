@@ -2460,8 +2460,8 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
     model runner's persistent CpuGpuBuffer storages, and cu_seqlens_q /
     seqused_kv are derived IN-GRAPH from the runner's persistent
     query_start_loc / seq_lens buffers (captured clamp/cummax ops re-execute
-    each replay). The K-scale scatter uses a device-side mask pattern (no
-    host sync). No Python-side buffer refresh exists in the captured
+    each replay). The K-scale scatter parks padded rows on the null block
+    (no host sync). No Python-side buffer refresh exists in the captured
     region -- ACL-graph replay never re-runs Python, so such refreshes
     would freeze at capture values. Speculative decoding (MTP) uses the
     same derivation chain: the draft metadata builder routes through
@@ -2551,7 +2551,7 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
 
     def _qfa_k_scale_slot_index(
         self, attn_metadata: AscendMetadata, slot_mapping: torch.Tensor, block_size: int
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Return this step's K-scale slot decomposition, derived once.
 
         Same story as _qfa_step_lengths: six device ops over slot_mapping
