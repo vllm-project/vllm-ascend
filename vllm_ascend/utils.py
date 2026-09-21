@@ -23,7 +23,7 @@ import functools
 import json
 import math
 import os
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -1051,6 +1051,19 @@ def has_rope(vllm_config: VllmConfig):
     return _HAS_ROPE
 
 
+@contextmanager
+def super_kernel_scope(scope: str, enabled: bool):
+    if not enabled:
+        yield
+        return
+
+    torch.npu.super_kernel_scope_begin(scope)
+    try:
+        yield
+    finally:
+        torch.npu.super_kernel_scope_end(scope)
+
+
 def weak_ref_tensor(tensor: Any) -> Any:
     """
     Create a weak reference to a tensor.
@@ -1202,8 +1215,8 @@ def _compute_potential_max_tokens(vllm_config) -> int:
         if potential_max_tokens != compilation_config.max_cudagraph_capture_size:
             logger.warning_once(
                 "The max_cudagraph_capture_size (%d) is smaller than the potential max tokens required for "
-                "decode (%d). This may lead to suboptimal performance. Consider adjusting"
-                "max_cudagraph_capture_size or scheduler_config (max_num_batched_tokens or max_num_seqs)"
+                "decode (%d). This may lead to suboptimal performance. Consider adjusting "
+                "max_cudagraph_capture_size or scheduler_config (max_num_batched_tokens or max_num_seqs) "
                 "to ensure max_cudagraph_capture_size can accommodate the decode workload. For more details, "
                 "see the issue #8240(https://github.com/vllm-project/vllm-ascend/issues/8240).",
                 compilation_config.max_cudagraph_capture_size,

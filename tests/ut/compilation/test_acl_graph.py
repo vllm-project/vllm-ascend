@@ -341,6 +341,7 @@ class TestACLGraphWrapper(TestBase):
         self.assertEqual(result, "test_output")
 
     @patch("vllm_ascend.compilation.acl_graph.torch")
+    @patch("vllm_ascend.utils.torch")
     @patch("vllm_ascend.compilation.acl_graph.validate_cudagraph_capturing_enabled")
     @patch("vllm_ascend.compilation.acl_graph.get_forward_context")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
@@ -357,6 +358,7 @@ class TestACLGraphWrapper(TestBase):
         mock_get_forward_context,
         mock_get_forward_context_2,
         mock_validate_cudagraph_capturing_enabled,
+        mock_utils_torch,
         mock_torch,
     ):
         mock_envs.VLLM_LOGGING_LEVEL = "INFO"
@@ -369,6 +371,7 @@ class TestACLGraphWrapper(TestBase):
         for enabled in (False, True):
             with self.subTest(enable_super_kernel=enabled):
                 mock_torch.reset_mock()
+                mock_utils_torch.reset_mock()
                 mock_validate_cudagraph_capturing_enabled.reset_mock()
                 self.mock_runnable.reset_mock()
                 mock_compilation_counter.num_cudagraph_captured = 0
@@ -390,14 +393,14 @@ class TestACLGraphWrapper(TestBase):
                 wrapper(torch.tensor([1, 2, 3]), "arg2")
 
                 if enabled:
-                    mock_torch.npu.super_kernel_scope_begin.assert_called_once_with("full_model")
-                    mock_torch.npu.super_kernel_scope_end.assert_called_once_with("full_model")
+                    mock_utils_torch.npu.super_kernel_scope_begin.assert_called_once_with("full_model")
+                    mock_utils_torch.npu.super_kernel_scope_end.assert_called_once_with("full_model")
                     mock_npu_graph.super_kernel_optimize.assert_called_once_with(
                         optimize_options={"dcci_after_kernel_end": [".*"]},
                     )
                 else:
-                    mock_torch.npu.super_kernel_scope_begin.assert_not_called()
-                    mock_torch.npu.super_kernel_scope_end.assert_not_called()
+                    mock_utils_torch.npu.super_kernel_scope_begin.assert_not_called()
+                    mock_utils_torch.npu.super_kernel_scope_end.assert_not_called()
                     mock_npu_graph.super_kernel_optimize.assert_not_called()
 
     @patch("vllm_ascend.compilation.acl_graph.torch")
