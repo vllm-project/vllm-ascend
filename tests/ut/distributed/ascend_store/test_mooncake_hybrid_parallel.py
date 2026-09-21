@@ -179,6 +179,53 @@ class TestLayerwiseSaveRank(unittest.TestCase):
         self.assertEqual(self.save_ranks(num_kv_heads=4), [True, True, True, True])
 
 
+class TestPpStageGroupMapping(unittest.TestCase):
+    """The group mapping must be keyed the way the save/load loop looks it up.
+
+    The loop resolves a layer's groups with ``local_layer + pp_layer_offset`` --
+    the global layer id the key space uses. A mapping keyed by the *local* index
+    only matches on the first stage, where the offset is zero; on later stages
+    the lookup misses and falls back to group 0 with the local index as the
+    group-local one, which either indexes out of the group's range array or
+    silently addresses another layer's bytes.
+    """
+
+    def stage_one_worker(self):
+        groups = [
+            KVCacheGroupSpec(
+                ["model.layers.2.kv", "model.layers.3.kv"],
+                FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype="uint8"),
+            ),
+            KVCacheGroupSpec(
+                ["model.layers.2.c4", "model.layers.3.c4"],
+                FullAttentionSpec(block_size=32, num_kv_heads=1, head_size=1, dtype="uint8"),
+            ),
+        ]
+        return make_worker(
+            self,
+            pp_size=2,
+            pp_rank=1,
+            num_layers=2,
+            num_hidden_layers=4,
+            use_layerwise=True,
+            kv_cache_config=SimpleNamespace(num_blocks=4, kv_cache_groups=groups),
+        )
+
+    def test_mapping_is_keyed_by_global_layer(self):
+        worker = self.stage_one_worker()
+        # Stage 1 owns global layers 2 and 3; that is the id the loop looks up.
+        self.assertEqual(set(worker.physical_layer_to_group_layers), {2, 3})
+        self.assertEqual(worker.physical_layer_to_group_layers[2], [(0, 0), (1, 0)])
+        self.assertEqual(worker.physical_layer_to_group_layers[3], [(0, 1), (1, 1)])
+
+    def test_every_local_layer_resolves_without_the_fallback(self):
+        worker = self.stage_one_worker()
+        offset = worker.layerwise_key_layer_offset
+        self.assertEqual(offset, 2)
+        for local_layer in range(worker.layerwise_key_layers):
+            self.assertIn(local_layer + offset, worker.physical_layer_to_group_layers)
+
+
 class TestInexpressibleTopologyRejected(unittest.TestCase):
     """The block key has no token-shard coordinate, so the CP modes are refused.
 

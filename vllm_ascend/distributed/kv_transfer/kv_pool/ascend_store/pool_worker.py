@@ -503,17 +503,18 @@ class KVPoolWorker:
 
         if self.kv_cache_config is not None and self.num_kv_cache_groups > 1:
             for group_id, group_spec in enumerate(self.kv_cache_config.kv_cache_groups):
-                physical_layers = set()
+                # Keyed by the *global* physical layer: the save/load loop
+                # resolves a layer with local_layer + pp_layer_offset, and under
+                # PP every stage but the first has a non-zero offset. The
+                # group-local index stays a position in the group's sorted local
+                # layers, which is the order the range builder indexes.
+                local_to_global: dict[int, int] = {}
                 for layer_name in group_spec.layer_names:
-                    physical_layer = self._extract_physical_layer_index(layer_name)
-                    physical_layers.add(self._global_to_local_layer[physical_layer])
-                phys_to_layer_idx = {
-                    physical_layer: layer_index for layer_index, physical_layer in enumerate(sorted(physical_layers))
-                }
-
-                # Add one entry per unique physical layer (no duplicates)
-                for physical_layer, layer_idx_in_group in phys_to_layer_idx.items():
-                    existing = self.physical_layer_to_group_layers.setdefault(physical_layer, [])
+                    global_layer = self._extract_physical_layer_index(layer_name)
+                    local_to_global[self._global_to_local_layer[global_layer]] = global_layer
+                for layer_idx_in_group, local_layer in enumerate(sorted(local_to_global)):
+                    global_layer = local_to_global[local_layer]
+                    existing = self.physical_layer_to_group_layers.setdefault(global_layer, [])
                     entry = (group_id, layer_idx_in_group)
                     if entry not in existing:
                         existing.append(entry)
@@ -522,7 +523,7 @@ class KVPoolWorker:
                     "layerwise group %d: %d layer_names, %d unique physical layers",
                     group_id,
                     len(group_spec.layer_names),
-                    len(phys_to_layer_idx),
+                    len(local_to_global),
                 )
 
         self.layer_load_tasks: list[list[LayerTransferTask]] = [[] for _ in range(self.num_layers)]
@@ -1885,6 +1886,27 @@ class KVPoolWorker:
                 request.load_block_gvas_np = all_group_load_gvas[0]
                 request.load_gva_block_offset = 0
 
+    def _groups_for_local_layer(self, local_layer: int) -> list[tuple[int, int]]:
+        """Groups owning this stage's ``local_layer``, by global physical layer.
+
+        The save/load loop addresses layers globally, so the mapping is keyed the
+        same way; a local lookup would miss on every stage but the first. A miss
+        on a hybrid model means no group claims the layer, which would silently
+        address another layer's bytes, so it is reported rather than absorbed.
+        """
+        physical_layer = local_layer + getattr(self, "layerwise_key_layer_offset", 0)
+        groups = self.physical_layer_to_group_layers.get(physical_layer)
+        if groups is not None:
+            return groups
+        if self.physical_layer_to_group_layers:
+            logger.warning(
+                "Layerwise: no cache group claims global layer %d (local layer %d); "
+                "falling back to group 0, which may address another layer's bytes.",
+                physical_layer,
+                local_layer,
+            )
+        return [(0, local_layer)]
+
     def _record_layerwise_invalid_blocks(self, block_ids: list[int]) -> None:
         if not block_ids:
             return
@@ -2368,9 +2390,7 @@ class KVPoolWorker:
             else:
                 self._prepare_block_key_layerwise_sessions(requests)
         for local_layer in range(num_local):
-            physical_layer = local_layer + layer_offset
-            group_layers = self.physical_layer_to_group_layers.get(physical_layer, [(0, local_layer)])
-            for group_id, layer_idx_in_group in group_layers:
+            for group_id, layer_idx_in_group in self._groups_for_local_layer(local_layer):
                 self._process_save_for_layer_batch(
                     group_requests.get(group_id, requests), local_layer, group_id, layer_idx_in_group
                 )
@@ -2379,9 +2399,7 @@ class KVPoolWorker:
         self._alloc_gvas_for_save(requests)
         self._build_shared_save_data()
         for local_layer in range(num_local):
-            physical_layer = local_layer + layer_offset
-            group_layers = self.physical_layer_to_group_layers.get(physical_layer, [(0, local_layer)])
-            for group_id, layer_idx_in_group in group_layers:
+            for group_id, layer_idx_in_group in self._groups_for_local_layer(local_layer):
                 self._process_load_for_layer_batch(
                     group_requests.get(group_id, requests), local_layer, group_id, layer_idx_in_group
                 )
