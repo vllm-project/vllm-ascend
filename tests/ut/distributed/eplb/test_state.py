@@ -107,6 +107,42 @@ def test_collect_then_publish_async_load_stats(monkeypatch):
     state.rearrange_event.record.assert_called_once_with()
 
 
+def test_async_rearrange_skips_window_without_collected_load(monkeypatch):
+    group = MagicMock()
+    monkeypatch.setattr(eplb_state, "get_ep_group", lambda: SimpleNamespace(device_group=group))
+    all_reduce = MagicMock()
+    monkeypatch.setattr(eplb_state, "all_reduce", all_reduce)
+    model_state = SimpleNamespace(_num_recorded_logical_load_samples=3)
+    state = AscendEplbState.__new__(AscendEplbState)
+    state.is_async = True
+    state.parallel_config = SimpleNamespace(enable_elastic_ep=False)
+    state.policy = StairEplbPolicy(StairConfig())
+    state.model_states = {"model": model_state}
+    state.expert_load_window_size = 3
+    state._logical_load_window_write_index = 0
+    state._local_load_collection_mask = torch.zeros(3, dtype=torch.int32)
+    state._has_fresh_recorded_load = True  # An earlier sample was overwritten.
+    state._has_global_fresh_recorded_load = MagicMock(return_value=True)
+    state.publish_async_load_stats = MagicMock()
+
+    assert state.rearrange() is None
+    state.publish_async_load_stats.assert_not_called()
+    assert not state._has_fresh_recorded_load
+    assert all_reduce.call_count == 1
+    torch.testing.assert_close(all_reduce.call_args.args[0], torch.zeros(3, dtype=torch.int32))
+    assert all_reduce.call_args.kwargs["group"] is group
+
+    model_state._logical_load_window = torch.tensor([[[2]], [[0]], [[0]]])
+    state._local_load_collection_mask[0] = 1
+    state._has_fresh_recorded_load = True
+    state._allreduce_list = MagicMock(side_effect=lambda values: values)
+
+    state.rearrange()
+
+    state.publish_async_load_stats.assert_called_once()
+    assert not state._has_fresh_recorded_load
+
+
 def test_rank_node_ids_are_discovered_once(monkeypatch):
     cpu_group = MagicMock()
     cpu_group.size.return_value = 5

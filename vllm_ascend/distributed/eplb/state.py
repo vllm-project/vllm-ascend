@@ -198,8 +198,8 @@ class AscendEplbState(_eplb_state.EplbState):
             self._logical_load_window_write_index = (write_index + 1) % self.expert_load_window_size
         super().step(is_dummy=is_dummy, is_profile=is_profile, log_stats=log_stats)
 
-    def collect_global_load_stats(self) -> dict[str, PreparedLoadStats]:
-        """Prepare policy-specific local statistics, then reduce them globally."""
+    def collect_global_load_stats(self) -> dict[str, PreparedLoadStats] | None:
+        """Prepare and reduce policy statistics, or skip an empty global window."""
         prepare_load_stats = getattr(self.policy, "prepare_local_load_stats", None)
         if prepare_load_stats is None:
             raise TypeError("The selected EPLB policy does not prepare custom load statistics")
@@ -215,6 +215,8 @@ class AscendEplbState(_eplb_state.EplbState):
         # Rank-local phases may differ; every rank filters the same time axis.
         all_reduce(collecting_rank_counts, group=ep_group)
         included_sample_mask = collecting_rank_counts > 0
+        if not included_sample_mask.any():
+            return None
         local_stats = {}
         for model_key, model_state in self.model_states.items():
             if num_recorded_samples < self.expert_load_window_size:
@@ -301,7 +303,9 @@ class AscendEplbState(_eplb_state.EplbState):
             return None
 
         if use_custom_async_stats:
-            self.publish_async_load_stats(self.collect_global_load_stats())
+            global_load_stats = self.collect_global_load_stats()
+            if global_load_stats is not None:
+                self.publish_async_load_stats(global_load_stats)
             result = None
         else:
             result = super().rearrange(
