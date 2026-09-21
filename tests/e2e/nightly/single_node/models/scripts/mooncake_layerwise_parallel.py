@@ -44,6 +44,14 @@ def main():
     parser.add_argument("--model", required=True)
     parser.add_argument("--tp", type=int, default=2)
     parser.add_argument("--pp", type=int, default=2)
+    parser.add_argument(
+        "--dp",
+        type=int,
+        default=1,
+        help="Data-parallel size. Replicates the model per rank (it does not "
+        "make a model fit), and is not part of the pool's key space, so the "
+        "ranks share objects.",
+    )
     parser.add_argument("--block-size", type=int, default=128)
     parser.add_argument("--max-num-batched-tokens", type=int, default=512)
     parser.add_argument("--enforce-eager", action="store_true")
@@ -101,6 +109,15 @@ def main():
         "enforce_eager": args.enforce_eager,
         "seed": 42,
     }
+    if args.dp > 1:
+        # A single-node smoke still needs the DP group's rendezvous coordinates.
+        engine_kwargs.update(
+            {
+                "data_parallel_size": args.dp,
+                "data_parallel_address": "127.0.0.1",
+                "data_parallel_rpc_port": 12368,
+            }
+        )
     engine_kwargs.update(json.loads(args.engine_args))
     # Applied last: the smoke is only meaningful with this connector.
     engine_kwargs["kv_transfer_config"] = {
