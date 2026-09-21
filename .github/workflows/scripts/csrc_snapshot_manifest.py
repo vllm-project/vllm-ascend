@@ -66,19 +66,21 @@ def run_git(repo: Path, *args: str) -> str:
     return out.stdout
 
 
-def parse_custom_ops(repo: Path, soc_version: str) -> list[str]:
-    """Extract the CUSTOM_OPS_ARRAY for the SOC branch from build_aclnn.sh."""
-    script = (repo / "csrc" / "build_aclnn.sh").read_text(encoding="utf-8")
+def soc_branch_for(soc_version: str) -> str:
     if soc_version.startswith("ascend910b"):
-        branch = "ascend910b"
-    elif soc_version.startswith("ascend910_93"):
-        branch = "ascend910_93"
-    elif soc_version.startswith("ascend310"):
-        branch = "ascend310"
-    elif soc_version.startswith("ascend950"):
-        branch = "ascend950"
-    else:
-        raise SystemExit(f"::error::no SOC branch for {soc_version!r}")
+        return "ascend910b"
+    if soc_version.startswith("ascend910_93"):
+        return "ascend910_93"
+    if soc_version.startswith("ascend310"):
+        return "ascend310"
+    if soc_version.startswith("ascend950"):
+        return "ascend950"
+    raise SystemExit(f"::error::no SOC branch for {soc_version!r}")
+
+
+def parse_custom_ops_branch(repo: Path, branch: str) -> list[str]:
+    """Extract the CUSTOM_OPS_ARRAY for one SOC branch from build_aclnn.sh."""
+    script = (repo / "csrc" / "build_aclnn.sh").read_text(encoding="utf-8")
     marker = re.search(rf'if \[\[ "\$SOC_VERSION" =~ \^{re.escape(branch)}', script)
     if not marker:
         raise SystemExit(f"::error::SOC branch {branch} not found in build_aclnn.sh")
@@ -87,6 +89,37 @@ def parse_custom_ops(repo: Path, soc_version: str) -> list[str]:
     if not m:
         raise SystemExit("::error::CUSTOM_OPS_ARRAY not parsed")
     return re.findall(r'"([^"]+)"', m.group(1))
+
+
+def parse_custom_ops(repo: Path, soc_version: str) -> list[str]:
+    """Extract the CUSTOM_OPS_ARRAY for the SOC branch from build_aclnn.sh."""
+    return parse_custom_ops_branch(repo, soc_branch_for(soc_version))
+
+
+def global_exclude_prefixes(repo: Path) -> list[str]:
+    """Op-directory prefixes excluded from the global hash: the UNION of the
+    op directories of every SOC branch, not just the current one.
+
+    An op that this SOC does not compile cannot affect this SOC's artifacts,
+    so its directory must stay out of the global inputs - otherwise a change
+    to it is misread as a global change and discards the snapshot for SOCs
+    that never compile it (observed live: an upstream msa_index_score change,
+    an a2/a3/a5-only op, forced a full 310p rebuild). Changes to ops outside
+    the current SOC's list are then simply ignored, which is the correct
+    behavior. Branches are discovered from the script itself so new SOC
+    branches are picked up automatically.
+    """
+    script = (repo / "csrc" / "build_aclnn.sh").read_text(encoding="utf-8")
+    branches = re.findall(r'SOC_VERSION" =~ \^([A-Za-z0-9_]+)', script)
+    if not branches:
+        raise SystemExit("::error::no SOC branches found in build_aclnn.sh")
+    prefixes: dict[str, None] = {}
+    for branch in branches:
+        for op in parse_custom_ops_branch(repo, branch):
+            d = resolve_op_dir(repo, op)
+            if d is not None:
+                prefixes.setdefault(d.relative_to(repo).as_posix() + "/")
+    return sorted(prefixes)
 
 
 def resolve_op_dir(repo: Path, op: str) -> Path | None:
@@ -257,9 +290,11 @@ def cmd_generate(args: argparse.Namespace) -> int:
             f"::warning::{len(skipped)} ops have no source directory and are not cached: {', '.join(sorted(skipped))}",
             flush=True,
         )
-    op_prefixes = [d.relative_to(repo).as_posix() + "/" for d in op_dirs.values()]
+    # Global inputs exclude the UNION of all SOC branches' op directories:
+    # an op this SOC does not compile cannot affect its artifacts (see
+    # global_exclude_prefixes).
     global_hash = (
-        workspace_digest(repo, GLOBAL_PATHSPEC, exclude_prefixes=op_prefixes)
+        workspace_digest(repo, GLOBAL_PATHSPEC, exclude_prefixes=global_exclude_prefixes(repo))
         + hashlib.sha256(f"image={args.image_tag}|soc={soc}".encode()).hexdigest()
     )
     manifest = {
@@ -305,13 +340,8 @@ def cmd_invalidate(args: argparse.Namespace) -> int:
         flush=True,
     )
 
-    op_prefixes = []
-    for op in parse_custom_ops(repo, soc):
-        d = resolve_op_dir(repo, op)
-        if d is not None:
-            op_prefixes.append(d.relative_to(repo).as_posix() + "/")
     current_global = (
-        workspace_digest(repo, GLOBAL_PATHSPEC, exclude_prefixes=op_prefixes)
+        workspace_digest(repo, GLOBAL_PATHSPEC, exclude_prefixes=global_exclude_prefixes(repo))
         + hashlib.sha256(f"image={args.image_tag}|soc={soc}".encode()).hexdigest()
     )
     snap_global = str(manifest.get("global_hash", ""))
