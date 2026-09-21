@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # mypy: ignore-errors
-"""Static placement arithmetic only: never import torch, vllm, or their modules."""
+"""Static placement arithmetic only: never import torch, vllm, or their modules. 2 """
 
 from __future__ import annotations
 
