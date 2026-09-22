@@ -2665,3 +2665,67 @@ def test_maybe_all_reduce_graph_replay_preserves_shared_and_routed_outputs(
         assert not any("ascend_moe_forward_complete" in str(node.target) for node in graph.graph.nodes)
     finally:
         library._destroy()
+
+
+@pytest.mark.parametrize("capture_logical_ids", [False, True])
+def test_fused_topk_maps_once_and_preserves_logical_capture(monkeypatch, capture_logical_ids):
+    router = AscendFusedTopKRouter(
+        top_k=2,
+        global_num_experts=4,
+        num_expert_group=1,
+        topk_group=1,
+        scoring_func="sigmoid",
+    )
+    capturer = MagicMock()
+    if capture_logical_ids:
+        router.set_capture_fn(capturer)
+    mapping = torch.tensor([10, 13, 11, 12], dtype=torch.int32)
+    experts = _build_routing_replay_experts(router, mapping)
+    logical_ids = torch.tensor([[1, 3], [0, 2]], dtype=torch.int32)
+    weights = torch.full((2, 2), 0.5)
+
+    def select(x, *, log2phy=None, **kwargs):
+        ids = logical_ids if log2phy is None else log2phy[logical_ids]
+        return weights, ids, torch.empty_like(x)
+
+    select_mock = MagicMock(side_effect=select)
+    monkeypatch.setattr(fused_topk_router_module.DeviceOperator, "supports_moe_gating_top_k_log2phy", True)
+    monkeypatch.setattr(fused_topk_router_module.DeviceOperator, "moe_gating_top_k", select_mock)
+    monkeypatch.setattr(routed_experts_module, "get_moe_num_logical_experts", lambda *args, **kwargs: 4)
+    monkeypatch.setattr(routed_experts_module, "get_ascend_config", lambda: SimpleNamespace(enable_force_eplb=False))
+    result_weights, physical_ids = experts._select_experts(
+        hidden_states=torch.randn(2, 4),
+        router_logits=torch.randn(2, 4),
+        enable_force_load_balance=False,
+    )
+    torch.testing.assert_close(physical_ids, mapping[logical_ids])
+    assert result_weights is weights
+    if capture_logical_ids:
+        capturer.assert_called_once()
+        torch.testing.assert_close(capturer.call_args.args[0], logical_ids)
+        assert "log2phy" not in select_mock.call_args.kwargs
+    else:
+        capturer.assert_not_called()
+        assert select_mock.call_args.kwargs["log2phy"] is mapping
+
+
+
+@pytest.mark.parametrize("excluded_path", ["upstream_eplb", "custom", "hash", "vision"])
+def test_topk_map_fusion_excludes_other_routing_protocols(monkeypatch, excluded_path):
+    router = AscendFusedTopKRouter(
+        top_k=2,
+        global_num_experts=4,
+        num_expert_group=1,
+        topk_group=1,
+        scoring_func="sigmoid",
+    )
+    monkeypatch.setattr(fused_topk_router_module.DeviceOperator, "supports_moe_gating_top_k_log2phy", True)
+    if excluded_path == "upstream_eplb":
+        router.eplb_state = SimpleNamespace()
+    elif excluded_path == "custom":
+        router.custom_routing_function = MagicMock()
+    elif excluded_path == "hash":
+        router.scoring_func = "sqrtsoftplus"
+    else:
+        router.bias_vl = torch.ones(4)
+    assert not router.supports_log2phy_fusion(torch.randn(2, 4), torch.randn(2, 4))

@@ -41,6 +41,7 @@ from vllm_ascend.ops.fused_moe.dataclass.shared_experts import RoutedMoEMileston
 from vllm_ascend.ops.fused_moe.force_eplb import get_force_eplb_topk
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult
 from vllm_ascend.ops.fused_moe.moe_utils import get_moe_num_logical_experts
+from vllm_ascend.ops.fused_moe.router.fused_topk_router import AscendFusedTopKRouter
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
 
@@ -586,13 +587,27 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.router is None:
             raise RuntimeError("AscendRoutedExperts requires a router for expert selection.")
-        topk_weights, topk_ids = self.router._select_experts(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-            input_ids=input_ids,
-        )
-        if self.log2phy is not None:
-            topk_ids = self.log2phy[topk_ids]
+        if (
+            self.log2phy is not None
+            and type(self.router) is AscendFusedTopKRouter
+            and not enable_force_load_balance
+            and not get_ascend_config().enable_force_eplb
+            and self.router.supports_log2phy_fusion(hidden_states, router_logits)
+        ):
+            topk_weights, topk_ids = self.router._select_experts_with_log2phy(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                log2phy=self.log2phy,
+                input_ids=input_ids,
+            )
+        else:
+            topk_weights, topk_ids = self.router._select_experts(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                input_ids=input_ids,
+            )
+            if self.log2phy is not None:
+                topk_ids = self.log2phy[topk_ids]
 
         num_shared_experts = self.n_shared_experts
         if num_shared_experts is None:
