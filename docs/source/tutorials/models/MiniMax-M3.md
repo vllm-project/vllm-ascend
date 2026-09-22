@@ -601,7 +601,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         --served-model-name minimax-m3 \
         --enable-expert-parallel \
         --seed 1024 \
-        --max-model-len 133000 \
+        --max-model-len 263000 \
         --max-num-seqs 32 \
         --max-num-batched-tokens 32768 \
         --long-prefill-token-threshold 2048 \
@@ -665,7 +665,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         --served-model-name minimax-m3 \
         --reasoning-parser minimax_m3 \
         --distributed-executor-backend mp \
-        --max-model-len 133000 \
+        --max-model-len 263000 \
         --max-num-batched-tokens 32768 \
         --trust-remote-code \
         --quantization ascend \
@@ -776,7 +776,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         --dtype bfloat16 \
         --max-num-seqs 128 \
         --max-num-batched-tokens 32768 \
-        --max-model-len 133000 \
+        --max-model-len 263000 \
         --enable-expert-parallel \
         --quantization mxfp8 \
         --gpu-memory-utilization 0.92 \
@@ -839,7 +839,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         --served-model-name minimax-m3 \
         --reasoning-parser minimax_m3 \
         --distributed-executor-backend mp \
-        --max-model-len 133000 \
+        --max-model-len 263000 \
         --max-num-batched-tokens 32768 \
         --trust-remote-code \
         --max-num-seqs 256 \
@@ -1109,7 +1109,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
         --served-model-name minimax-m3 \
         --enable-expert-parallel \
         --seed 1024 \
-        --max-model-len 133000 \
+        --max-model-len 263000 \
         --max-num-seqs 32 \
         --max-num-batched-tokens 32768 \
         --long-prefill-token-threshold 2048 \
@@ -1193,7 +1193,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
         --served-model-name minimax-m3 \
         --reasoning-parser minimax_m3 \
         --distributed-executor-backend mp \
-        --max-model-len 133000 \
+        --max-model-len 263000 \
         --max-num-batched-tokens 32768 \
         --trust-remote-code \
         --quantization ascend \
@@ -1280,7 +1280,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
       --dtype bfloat16 \
       --max-num-seqs 128 \
       --max-num-batched-tokens 32768 \
-      --max-model-len 133000 \
+      --max-model-len 263000 \
       --enable-expert-parallel \
       --quantization mxfp8 \
       --gpu-memory-utilization 0.92 \
@@ -1367,7 +1367,7 @@ Reuse Section 5.3 `launch_online_dp.py`. Replace each role's `run_dp_template.sh
         --served-model-name minimax-m3 \
         --reasoning-parser minimax_m3 \
         --distributed-executor-backend mp \
-        --max-model-len 133000 \
+        --max-model-len 263000 \
         --max-num-batched-tokens 32768 \
         --trust-remote-code \
         --max-num-seqs 256 \
