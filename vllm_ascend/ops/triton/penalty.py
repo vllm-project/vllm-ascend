@@ -62,7 +62,7 @@ def apply_all_penalties_kernel(
     # multiple vector cores instead of scanning its entire vocabulary serially.
     for block_idx in tl.range(pid, total_blocks, num_programs):
         seq_idx = block_idx // vocab_blocks
-        vocab_start = (block_idx % vocab_blocks) * BLOCK_SIZE
+        vocab_start = (block_idx - seq_idx * vocab_blocks) * BLOCK_SIZE
         repetition_penalty = tl.load(repetition_penalties_ptr + seq_idx)
         frequency_penalty = tl.load(frequency_penalties_ptr + seq_idx)
         presence_penalty = tl.load(presence_penalties_ptr + seq_idx)
