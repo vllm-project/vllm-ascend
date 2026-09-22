@@ -21,6 +21,7 @@ import copy
 import gc
 import inspect
 import logging
+import os
 from contextlib import AbstractContextManager, nullcontext
 from types import NoneType
 from typing import Any
@@ -60,6 +61,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.utils import report_usage_stats
+from vllm.v1.worker.gpu.async_utils import AsyncOutput
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
 from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
@@ -93,6 +95,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 )
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
+from vllm_ascend.patch.worker.patch_v2.patch_async_output import AscendAsyncOutput
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
 from vllm_ascend.utils import (
     check_ascend_device_type,
@@ -101,6 +104,7 @@ from vllm_ascend.utils import (
     setup_ascend_local_comm_res,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.sentinel.npu_worker_sentinel import WorkerSentinel, fault_barrier_wrapper
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
 from torch._dynamo.variables import TorchInGraphFunctionVariable  # noqa: E402
@@ -184,6 +188,8 @@ class NPUWorker(WorkerBase):
         if "UnquantizedLinearMethod" in WEIGHT_LOADER_V2_SUPPORTED:
             WEIGHT_LOADER_V2_SUPPORTED.remove("UnquantizedLinearMethod")
 
+        self.worker_sentinel: WorkerSentinel | None = None
+
         self.use_v2_model_runner = self.vllm_config.use_v2_model_runner
         self._kvpp_cache_allocation_plan: KVPPPhysicalCachePlan | None = None
         self._pp_send_work: list[Handle] = []
@@ -205,6 +211,10 @@ class NPUWorker(WorkerBase):
 
             signal.signal(signal.SIGTERM, signal_handler)
             signal.signal(signal.SIGINT, signal_handler)
+
+    def handle_ft_command(self, ft_request):
+        assert self.worker_sentinel is not None
+        return self.worker_sentinel.handle_command(ft_request)
 
     def uninstall_static_kernel(self):
         import fcntl
@@ -382,6 +392,37 @@ class NPUWorker(WorkerBase):
         # shift self.local_rank by dp_local_rank * tp_pp_world_size so
         # that each DP group binds to a distinct set of NPUs.
         parallel_config = self.parallel_config
+        if self.parallel_config.enable_fault_tolerance:
+            if self.use_v2_model_runner:
+                # Model Runner V2 + fault tolerance task queue
+                # (TASK_QUEUE_ENABLE) hangs abnormally; force it off.
+                os.environ["TASK_QUEUE_ENABLE"] = "0"
+                logger.warning(
+                    "Fault tolerance with Model Runner V2 does not support the "
+                    "task queue (TASK_QUEUE_ENABLE); forcing TASK_QUEUE_ENABLE=0."
+                )
+
+            if parallel_config.tensor_parallel_size > 1:
+                # TP>1 relies on collective HCCL comms; disable HCCL's async
+                # error handling so it cannot abort the process out-of-band
+                # during fault-tolerance recovery.
+                os.environ["HCCL_ASYNC_ERROR_HANDLING"] = "0"
+
+            abort_timeout = get_ascend_config().ft_communication_abort_timeout
+            if abort_timeout > 0:
+                # User-provided HCCL timeouts win; otherwise derive them
+                # from the config value. HCCL_EVENT_TIMEOUT must be
+                # greater than HCCL_EXEC_TIMEOUT, hence EXEC defaults to
+                # abort_timeout - 1.
+                os.environ.setdefault("HCCL_EVENT_TIMEOUT", str(abort_timeout))
+                os.environ.setdefault("HCCL_EXEC_TIMEOUT", str(abort_timeout - 1))
+                if int(os.environ["HCCL_EVENT_TIMEOUT"]) <= int(os.environ["HCCL_EXEC_TIMEOUT"]):
+                    raise ValueError(
+                        f"HCCL_EVENT_TIMEOUT ({os.environ['HCCL_EVENT_TIMEOUT']}) "
+                        "must be greater than HCCL_EXEC_TIMEOUT "
+                        f"({os.environ['HCCL_EXEC_TIMEOUT']})"
+                    )
+                torch.npu.set_op_timeout_ms(abort_timeout * 1000)
         if (
             parallel_config.distributed_executor_backend not in ("ray", "external_launcher")
             and parallel_config.data_parallel_backend != "ray"
@@ -473,6 +514,8 @@ class NPUWorker(WorkerBase):
 
         # Initialize the distributed environment.
         self._init_worker_distributed_environment()
+        if self.parallel_config.enable_fault_tolerance:
+            self.worker_sentinel = WorkerSentinel(worker=self, device=device)
         # Set random seed.
         set_random_seed(self.model_config.seed)
         # Initialize device properties used by triton kernels.
@@ -743,6 +786,7 @@ class NPUWorker(WorkerBase):
             self.torch_allocated / GiB_bytes,
         )
 
+    @fault_barrier_wrapper
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
@@ -812,6 +856,7 @@ class NPUWorker(WorkerBase):
         return output
 
     @torch.inference_mode()
+    @fault_barrier_wrapper
     def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
         output = self.model_runner.sample_tokens(grammar_output)
         _attach_profiling_chunk_execution_time(
@@ -819,6 +864,11 @@ class NPUWorker(WorkerBase):
             self.model_runner,
             output,
         )
+        # Only the async (MRV2) path returns an AsyncOutput; re-class it so
+        # get_output is guarded by the fault barrier. A quarantined step drains
+        # as a plain ModelRunnerOutput and passes through untouched.
+        if self.parallel_config.enable_fault_tolerance and isinstance(output, AsyncOutput):
+            output.__class__ = AscendAsyncOutput
         return output
 
     def load_model(self) -> None:
@@ -833,6 +883,9 @@ class NPUWorker(WorkerBase):
 
         with context, set_current_vllm_config(self.vllm_config):
             self.model_runner.load_model()
+
+        if self.worker_sentinel is not None and self.use_v2_model_runner:
+            self.worker_sentinel.init_num_local_experts()
 
         if self.vllm_config.weight_transfer_config is not None:
             from vllm.distributed.weight_transfer.factory import (
