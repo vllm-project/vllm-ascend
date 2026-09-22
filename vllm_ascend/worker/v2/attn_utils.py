@@ -20,6 +20,7 @@
 import math
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -42,7 +43,6 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
-
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import AttentionGroup
 
@@ -71,12 +71,33 @@ from vllm_ascend.utils import (
     get_kv_cache_tensor_layers,
     is_hidden_state_cache_spec,
 )
+from vllm_ascend.worker.device_metadata import DeviceMetadataExecutor, DeviceMetadataTaskProvider
 from vllm_ascend.worker.kvpp_cache import allocate_kvpp_cache
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
 logger = init_logger(__name__)
+
+
+_device_metadata_executor: ContextVar[DeviceMetadataExecutor | None] = ContextVar(
+    "ascend_mrv2_device_metadata_executor", default=None
+)
+
+
+@contextmanager
+def device_metadata_context(executor: DeviceMetadataExecutor | None):
+    """Keep device metadata buffers owned until their consumer has been queued."""
+    if executor is None or _device_metadata_executor.get() is executor:
+        yield
+        return
+    token = _device_metadata_executor.set(executor)
+    try:
+        yield
+    finally:
+        if executor.submission_in_flight:
+            executor.release()
+        _device_metadata_executor.reset(token)
 
 
 def unwrap_mamba_kv_cache_groups(kv_cache_config: KVCacheConfig) -> KVCacheConfig:
@@ -251,6 +272,12 @@ def build_attn_metadata(
     causal: bool | Mapping[int, bool] = True,
 ) -> dict[str, Any]:
     """Build attention metadata for Ascend NPUs."""
+    executor = _device_metadata_executor.get()
+    if executor is not None and executor.submission_in_flight:
+        # Capture factories and draft replay can build another metadata set
+        # after consuming the previous one on this stream.
+        executor.release()
+    device_metadata_tasks = []
     # TODO(Ronald1995): optimize AscendCommonAttentionMetadata.
     # seq_lens_np is used for ascend npus, it maybe None in spec_decode case,
     # we fill it with max_seq_len in case `attn_metadata_builder.build` raise
@@ -319,6 +346,8 @@ def build_attn_metadata(
 
         for attn_group in attn_groups[i]:
             attn_metadata_builder = attn_group.get_metadata_builder(0)
+            if executor is not None and isinstance(attn_metadata_builder, DeviceMetadataTaskProvider):
+                attn_metadata_builder.enable_device_metadata()
             is_dsa_builder = isinstance(attn_metadata_builder, AscendDSAMetadataBuilder)
             is_sfa_builder = isinstance(attn_metadata_builder, AscendSFAMetadataBuilder)
             consumes_pcp_context = bool(getattr(attn_metadata_builder, "consumes_pcp_context", False))
@@ -363,6 +392,17 @@ def build_attn_metadata(
                 common_ratio_to_sas_metadata = attn_metadata_builder.common_ratio_to_sas_metadata  # type: ignore[assignment]
             for layer_name in attn_group.layer_names:
                 attn_metadata[layer_name] = metadata
+            if executor is not None and isinstance(attn_metadata_builder, DeviceMetadataTaskProvider):
+                device_metadata_tasks.extend(attn_metadata_builder.take_device_metadata_tasks())
+    if device_metadata_tasks:
+        # Both capture factories and runtime builders run outside the captured
+        # model, so plain stream events stay outside the FULL graphs. Replay
+        # only reads the stable buffers after these waits.
+        assert not torch.npu.is_current_stream_capturing()
+        assert executor is not None
+        executor.submit(device_metadata_tasks)
+        for task in device_metadata_tasks:
+            executor.wait(task.stage, task.group_id)
     return attn_metadata
 
 
@@ -469,6 +509,7 @@ def _adjust_dsv4_kv_layout(
         offset_bytes += stride[0] * dtype_size
     return caches
 
+
 def _reshape_combined_attention_kv_cache(
     raw_cache: torch.Tensor,
     kv_cache_shape: tuple[int, ...],
@@ -477,19 +518,13 @@ def _reshape_combined_attention_kv_cache(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Create block-strided K/V views over padded physical pages."""
     if len(kv_cache_shape) != 5 or kv_cache_shape[0] != 2:
-        raise ValueError(
-            "Combined Attention cache must have shape "
-            "[K/V, blocks, block_size, heads, dim]."
-        )
+        raise ValueError("Combined Attention cache must have shape [K/V, blocks, block_size, heads, dim].")
     dtype_size = get_dtype_size(dtype)
     if page_stride_bytes % dtype_size:
         raise ValueError("Physical Attention page is not aligned to its dtype.")
 
     hidden_size = math.prod(kv_cache_shape[2:])
-    dense_strides = [
-        math.prod(kv_cache_shape[dim + 1 :])
-        for dim in range(len(kv_cache_shape))
-    ]
+    dense_strides = [math.prod(kv_cache_shape[dim + 1 :]) for dim in range(len(kv_cache_shape))]
     combined_cache = torch.as_strided(
         raw_cache.view(dtype),
         size=kv_cache_shape,
@@ -982,9 +1017,7 @@ def _reshape_mamba_kv_cache(
 ) -> list[torch.Tensor]:
     """Create logical state views over padded physical hybrid pages."""
     physical_page_size = (
-        kv_cache_spec.page_size_padded
-        if kv_cache_spec.page_size_padded is not None
-        else kv_cache_spec.page_size_bytes
+        kv_cache_spec.page_size_padded if kv_cache_spec.page_size_padded is not None else kv_cache_spec.page_size_bytes
     )
     if raw_cache.numel() % physical_page_size:
         raise ValueError("Mamba cache allocation is not a whole number of physical pages.")
@@ -1250,9 +1283,7 @@ def _reshape_kv_cache_v2(
             else:
                 if k_dtype != v_dtype:
                     raise ValueError("Combined hybrid K/V cache requires matching K/V dtypes.")
-                if (
-                    num_blocks_per_kv_block != 1
-                ):
+                if num_blocks_per_kv_block != 1:
                     raise ValueError(
                         "Non-contiguous hybrid Attention requires a combined "
                         "[K/V, blocks, block_size, heads, dim] cache with one "

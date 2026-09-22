@@ -42,6 +42,7 @@ from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: igno
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
+from vllm_ascend import envs
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.utils import (
@@ -59,12 +60,21 @@ from vllm_ascend.compilation.updatable_graph import (
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import attention_transfer_window
+from vllm_ascend.worker.device_metadata import (
+    DeviceMetadataStage,
+    DeviceMetadataTask,
+    wait_for_device_metadata,
+)
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
 _FIA_WORKSPACE_KEY = "npu_fused_infer_attention_score.workspace"
 _FIA_V2_WORKSPACE_KEY = "npu_fused_infer_attention_score_v2.workspace"
 _PA_WORKSPACE_KEY = "npu_paged_attention.workspace"
+# mask_mode=3 of the FlashAttn operator consumes this fixed causal mask.
+_FLASH_ATTN_MASK_SIZE = 2048
+# The FlashAttn operator only instantiates its tiling for these head dims.
+_FLASH_ATTN_HEAD_DIMS = (64, 128, 256)
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
@@ -152,6 +162,196 @@ class AscendAttentionState(Enum):
 
 
 @dataclass
+class AscendFlashAttentionMetadata:
+    """Stable device buffers consumed by the tiling-sunk FlashAttn operator.
+
+    Every field lives at a fixed address so a captured graph can replay against
+    buffers refreshed by the device metadata executor, instead of against
+    sequence lengths rebuilt on the host every step.
+    """
+
+    query: torch.Tensor
+    schedule: torch.Tensor
+    cu_seqlens_q: torch.Tensor
+    seqused_q: torch.Tensor
+    seqused_kv: torch.Tensor
+    block_table: torch.Tensor
+    slots: torch.Tensor
+    # Scratch prefix sums used to derive `token_live`.
+    live_boundaries: torch.Tensor
+    token_live: torch.Tensor
+    attn_mask: torch.Tensor
+    max_seqlen_q: int
+    max_seqlen_kv: int
+    causal: bool
+
+
+def _flash_paged_kv_layout(kv_cache_layout: str) -> str:
+    """Paged layout of the K/V views built by `get_kv_cache_shape`.
+
+    The combined cache already hands the operator separate K/V tensors, whose
+    innermost dimensions stay dense while dim0 spans padded physical pages.
+    """
+    return "PA_BNBD" if kv_cache_layout in ("LBHNC", "HND") else "PA_BBND"
+
+
+def _flash_attention_schedule(builder, flash, *, meta=False):
+    """Build the operator's tiling metadata for the current buffers.
+
+    `meta=True` runs the operator's own Meta kernel so the caller can size the
+    schedule tensor before the real allocation happens.
+    """
+    from cann_ops_transformer.ops import flash_attn_metadata
+
+    def tensor(value):
+        return torch.empty_like(value, device="meta") if meta else value
+
+    return flash_attn_metadata(
+        builder.flash_num_heads,
+        builder.flash_num_kv_heads,
+        builder.flash_head_dim,
+        cu_seqlens_q=tensor(flash.cu_seqlens_q),
+        seqused_q=tensor(flash.seqused_q),
+        seqused_kv=tensor(flash.seqused_kv),
+        batch_size=flash.seqused_q.shape[0],
+        max_seqlen_q=flash.max_seqlen_q,
+        max_seqlen_kv=flash.max_seqlen_kv,
+        mask_mode=3 if flash.causal else 0,
+        win_left=-1,
+        win_right=-1,
+        layout_q="TND",
+        layout_kv=builder.flash_kv_layout,
+        layout_out="TND",
+    )
+
+
+def _init_flash_attention_metadata(builder, impl) -> None:
+    if not get_current_hardware_profile().supports(HardwareCapability.DEVICE_TILED_FLASH_ATTN):
+        # The operator only ships tiling for 950PR/950DT (A5).
+        raise NotImplementedError(
+            "Device-tiled FlashAttn requires the A5 (Ascend 950) hardware profile; "
+            "disable VLLM_ASCEND_ENABLE_FLASH_MLA."
+        )
+    builder.flash_num_heads = impl.num_heads
+    builder.flash_num_kv_heads = impl.num_kv_heads
+    builder.flash_head_dim = impl.head_size
+    # Same flag the cache writer uses, so the operator and reshape_and_cache
+    # can never disagree on the page layout.
+    builder.flash_kv_layout = _flash_paged_kv_layout(impl.kv_cache_layout)
+    if builder.flash_head_dim not in _FLASH_ATTN_HEAD_DIMS or builder.kv_cache_spec.dtype not in (
+        torch.bfloat16,
+        torch.float16,
+    ):
+        # Violating either constraint is undefined behaviour in the operator, so
+        # fail loudly on the quantized-cache / unusual-head-dim configurations.
+        raise NotImplementedError(
+            f"Device-tiled FlashAttn needs a float16/bfloat16 cache and head_dim in "
+            f"{_FLASH_ATTN_HEAD_DIMS}, got {builder.kv_cache_spec.dtype} and {builder.flash_head_dim}."
+        )
+    parallel_config = builder.vllm_config.parallel_config
+    if parallel_config.decode_context_parallel_size > 1 or parallel_config.prefill_context_parallel_size > 1:
+        # The context-parallel backends override forward_impl for the split-KV
+        # all-gather/LSE merge, which this route does not implement.
+        raise NotImplementedError(
+            "Device-tiled FlashAttn does not support context parallelism; "
+            "disable DCP/PCP or VLLM_ASCEND_ENABLE_FLASH_MLA."
+        )
+    if type(impl).forward is not AscendAttentionBackendImpl.forward:
+        # A subclass owning forward() (the INT8 C8 cache) never dispatches here
+        # and would read the metadata with the wrong layout.
+        raise NotImplementedError(
+            f"Device-tiled FlashAttn needs the base Ascend attention forward, but "
+            f"{type(impl).__name__} overrides it; disable VLLM_ASCEND_ENABLE_FLASH_MLA."
+        )
+    # Reused by shape, see _build_flash_attention_metadata for the key.
+    builder._flash_buffers = {}
+    builder._flash_attn_mask = torch.triu(
+        torch.ones((_FLASH_ATTN_MASK_SIZE, _FLASH_ATTN_MASK_SIZE), dtype=torch.int8, device=builder.device),
+        diagonal=1,
+    )
+
+
+def _build_flash_attention_metadata(builder, common) -> AscendFlashAttentionMetadata:
+    batch = common.num_reqs
+    tokens = max(common.num_actual_tokens, common.num_input_tokens)
+    block_table_width = common.block_table_tensor.shape[1]
+    causal = common.causal
+    key = (batch, tokens, block_table_width, causal)
+    # A FULL graph replays with the same request count it was captured with
+    # (uniform decode), and eager prefill owns its buffers instead of keeping
+    # one per shape, so only captured-graph shapes outlive a single step.
+    buffers = {} if causal and common.max_query_len > builder.decode_threshold else builder._flash_buffers
+    if key not in buffers:
+        # A trailing padding request owns the graph's extra tokens.
+        rows = batch + 1
+        int_args = {"dtype": torch.int32, "device": builder.device}
+        float_args = {"dtype": builder.kv_cache_spec.dtype, "device": builder.device}
+        block_size = builder.kernel_block_size or builder.kv_cache_spec.block_size
+        buffers[key] = AscendFlashAttentionMetadata(
+            query=torch.empty((tokens, builder.flash_num_heads, builder.flash_head_dim), **float_args),
+            schedule=torch.empty(0, **int_args),
+            cu_seqlens_q=torch.zeros(rows + 1, **int_args),
+            seqused_q=torch.zeros(rows, **int_args),
+            seqused_kv=torch.zeros(rows, **int_args),
+            block_table=torch.zeros((rows, block_table_width), **int_args),
+            slots=torch.full((tokens,), -1, dtype=torch.int64, device=builder.device),
+            live_boundaries=torch.zeros(tokens + 1, **int_args),
+            token_live=torch.zeros(tokens, dtype=torch.bool, device=builder.device),
+            attn_mask=builder._flash_attn_mask,
+            max_seqlen_q=tokens,
+            max_seqlen_kv=block_table_width * block_size,
+            causal=causal,
+        )
+        flash = buffers[key]
+        flash.schedule = torch.empty_like(_flash_attention_schedule(builder, flash, meta=True), device=builder.device)
+    flash = buffers[key]
+
+    def pad_rows(tensor: torch.Tensor, fill: int) -> torch.Tensor:
+        # `seq_lens` and the block tables only span `max_num_reqs` rows, while a
+        # graph/SP padded request bumps the batch by one. Give the extra row a
+        # valid KV length and block 0, matching the FIA path: its output is
+        # trimmed downstream and its slots are padding, so it writes nothing.
+        missing = batch - tensor.shape[0]
+        if missing <= 0:
+            return tensor[:batch]
+        return torch.cat([tensor, tensor.new_full((missing, *tensor.shape[1:]), fill)], dim=0)
+
+    def build_metadata() -> None:
+        # Lengths come from device state: the host mirror is only an upper
+        # bound once speculative tokens have been rejected.
+        seq_lens = pad_rows(common.seq_lens, 1)
+        block_table = pad_rows(common.block_table_tensor, 0)
+        flash.cu_seqlens_q[: batch + 1].copy_(common.query_start_loc[: batch + 1])
+        flash.cu_seqlens_q[batch + 1].fill_(tokens)
+        flash.seqused_q[:batch].copy_(flash.cu_seqlens_q[1 : batch + 1] - flash.cu_seqlens_q[:batch])
+        flash.seqused_q[:batch].masked_fill_(seq_lens <= 0, 0)
+        flash.seqused_q[batch:].zero_()
+        flash.seqused_kv[:batch].copy_(seq_lens)
+        flash.seqused_kv[batch:].zero_()
+        flash.block_table[:batch].copy_(block_table)
+        flash.block_table[batch:].zero_()
+        flash.slots.fill_(-1)
+        slots = common.slot_mapping[:tokens]
+        flash.slots[: slots.shape[0]].copy_(slots)
+        # Padding tokens must neither reach the cache nor be read back out.
+        flash.live_boundaries.zero_()
+        live_rows = (flash.seqused_q > 0).to(torch.int32)
+        flash.live_boundaries.scatter_add_(0, flash.cu_seqlens_q[:-1].long(), live_rows)
+        flash.live_boundaries.scatter_add_(0, (flash.cu_seqlens_q[:-1] + flash.seqused_q).long(), -live_rows)
+        flash.token_live.copy_(flash.live_boundaries.cumsum(0)[:tokens] > 0)
+        flash.slots.masked_fill_(~flash.token_live, -1)
+        flash.schedule.copy_(_flash_attention_schedule(builder, flash))
+
+    if builder._device_metadata_enabled:
+        builder._device_metadata_tasks = (
+            DeviceMetadataTask(DeviceMetadataStage.ATTENTION, build_metadata, id(flash.schedule)),
+        )
+    else:
+        build_metadata()
+    return flash
+
+
+@dataclass
 class AscendMetadata:
     """
     Per-layer attention metadata for Ascend FlashAttention backend.
@@ -206,6 +406,9 @@ class AscendMetadata:
 
     pcp_local_num_input_tokens: int | None = None
 
+    # Device-tiled FlashAttn buffers; set only on the VLLM_ASCEND_ENABLE_FLASH_MLA route.
+    flash: AscendFlashAttentionMetadata | None = None
+
 
 class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
     """
@@ -255,6 +458,19 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         scheduler_config = vllm_config.scheduler_config
         self.chunked_prefill_enabled = scheduler_config.enable_chunked_prefill
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
+        self._device_metadata_enabled = False
+        self._device_metadata_tasks: tuple[DeviceMetadataTask, ...] = ()
+        if envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
+            impl = vllm_config.compilation_config.static_forward_context[layer_names[0]].impl
+            _init_flash_attention_metadata(self, impl)
+
+    def enable_device_metadata(self) -> None:
+        self._device_metadata_enabled = True
+
+    def take_device_metadata_tasks(self) -> tuple[DeviceMetadataTask, ...]:
+        tasks = self._device_metadata_tasks
+        self._device_metadata_tasks = ()
+        return tasks
 
     @classmethod
     def get_cudagraph_support(
@@ -264,6 +480,13 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
     ) -> AttentionCGSupport:
         # Explicit override in case the underlying builder specialized this getter.
         # @override omitted only because of mypy limitation due to type variable.
+        if envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
+            # The device-tiled route rewrites its metadata in place instead of
+            # re-programming the graph, so it can only replay graphs whose
+            # request count was fixed at capture time. Reporting this lets the
+            # framework downgrade a mixed FULL mode and reject adaptive
+            # verification with a config-time error.
+            return AttentionCGSupport.UNIFORM_BATCH
         return AttentionCGSupport.ALWAYS
 
     def reorder_batch(self, input_batch, scheduler_output: "SchedulerOutput") -> bool:
@@ -303,6 +526,26 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         common_attn_metadata: AscendCommonAttentionMetadata,
         fast_build: bool = False,
     ) -> AscendMetadata:
+        if envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
+            # The tiling-sunk operator reads every length off the device, so
+            # this branch skips the host-side list conversion (and the D2H
+            # sync behind it) performed by the FIA/PA path below.
+            common = common_attn_metadata
+            num_decodes, num_prefills, num_decode_tokens, _ = self._split_decodes_and_prefills(common)
+            return self.metadata_cls(
+                num_actual_tokens=common.num_actual_tokens,
+                num_decodes=num_decodes,
+                num_prefills=num_prefills,
+                num_decode_tokens=num_decode_tokens,
+                seq_lens=common.seq_lens,
+                query_start_loc=common.query_start_loc,
+                block_tables=common.block_table_tensor,
+                slot_mapping=common.slot_mapping,
+                max_query_len=common.max_query_len,
+                causal=common.causal,
+                attn_state=common.attn_state,
+                flash=_build_flash_attention_metadata(self, common),
+            )
         expanded_slot_mapping = common_attn_metadata.slot_mapping if self.pcp_enabled else None
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
@@ -580,6 +823,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         speculative_config=None,
         draft_attn_metadatas=None,
     ):
+        if envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
+            # The device metadata executor refreshes the stable buffers outside
+            # the graph, so no host-resolved parameter needs re-dispatching.
+            return
         raise NotImplementedError("FIA and PA should be use UpdatableGraph.")
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
@@ -1222,6 +1469,65 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
             return output
 
+    def _forward_flash(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor | None,
+        value: torch.Tensor | None,
+        kv_cache: tuple[torch.Tensor],
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run the tiling-sunk FlashAttn operator over stable device buffers."""
+        from cann_ops_transformer.ops import flash_attn
+
+        flash = attn_metadata.flash
+        assert flash is not None, "FlashAttn metadata is required on the device-tiled route."
+        assert not self.pcp_enabled, "Device-tiled FlashAttn does not support context parallelism."
+        tokens = flash.query.shape[0]
+        # The executor filled these buffers on its own stream.
+        wait_for_device_metadata(DeviceMetadataStage.ATTENTION, id(flash.schedule))
+        key_cache, value_cache = kv_cache[0], kv_cache[1]
+        flash.query.copy_(query[:tokens])
+        # KV-sharing consumers read another layer's cache; writing their own
+        # K/V would overwrite the shared slots.
+        if key is not None and value is not None and self.kv_sharing_target_layer_name is None:
+            DeviceOperator.reshape_and_cache(
+                key=key[:tokens],
+                value=value[:tokens],
+                key_cache=key_cache,
+                value_cache=value_cache,
+                slot_mapping=flash.slots,
+                use_bnsd=self.use_bnsd_kv_cache,
+            )
+            notify_kv_cache_written()
+        mask_mode = 3 if flash.causal else 0
+        result, _ = flash_attn(
+            flash.query,
+            key_cache,
+            value_cache,
+            block_table=flash.block_table,
+            cu_seqlens_q=flash.cu_seqlens_q,
+            seqused_q=flash.seqused_q,
+            seqused_kv=flash.seqused_kv,
+            attn_mask=flash.attn_mask if mask_mode else None,
+            metadata=flash.schedule,
+            softmax_scale=self.scale,
+            mask_mode=mask_mode,
+            win_left=-1,
+            win_right=-1,
+            max_seqlen_q=flash.max_seqlen_q,
+            max_seqlen_kv=flash.max_seqlen_kv,
+            layout_q="TND",
+            layout_kv=_flash_paged_kv_layout(self.kv_cache_layout),
+            layout_out="TND",
+            return_softmax_lse=False,
+        )
+        output.zero_()
+        output[:tokens].copy_(result)
+        output[:tokens].masked_fill_(~flash.token_live[:, None, None], 0)
+        return output
+
     def forward(
         self,
         layer: AttentionLayer,
@@ -1255,6 +1561,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         num_tokens = query.shape[0]
         if attn_metadata is None:
             return output.fill_(0)
+        if envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
+            return self._forward_flash(query, key, value, kv_cache, attn_metadata, output)
 
         # Initialize key_cache and value_cache from kv_cache if not already set.
         # This is needed for DecodeOnly mode where key/value are None but we still

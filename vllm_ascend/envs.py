@@ -36,6 +36,12 @@ def _strict_binary_env(name: str, default: str = "0") -> bool:
 
 
 env_variables: dict[str, Callable[[], Any]] = {
+    # Experimental A5 (Ascend 950) GQA route driven by the tiling-sinking
+    # `cann_ops_transformer.flash_attn` operator. Valid values: 0 (default,
+    # existing FIA/PA backends), 1 (device-tiled FlashAttn with stable buffers).
+    # Non-sensitive. Requires MRV2, CANN 9.2 or later, and the A5 hardware
+    # profile.
+    "VLLM_ASCEND_ENABLE_FLASH_MLA": lambda: _strict_binary_env("VLLM_ASCEND_ENABLE_FLASH_MLA"),
     # max compile thread number for package building. Usually, it is set to
     # the number of CPU cores. If not set, the default value is None, which
     # means all number of CPU cores will be used.

@@ -46,6 +46,7 @@ from vllm.v1.worker.gpu.model_runner import (
     GPUModelRunner,
 )
 
+from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import (
     MoECommType,
@@ -69,9 +70,10 @@ from vllm_ascend.utils import (
     set_potential_max_tokens,
     vllm_version_is,
 )
+from vllm_ascend.worker.device_metadata import DeviceMetadataExecutor
 from vllm_ascend.worker.utils import disable_compilation
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
-from vllm_ascend.worker.v2.attn_utils import build_attn_state
+from vllm_ascend.worker.v2.attn_utils import build_attn_state, device_metadata_context
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
@@ -150,6 +152,11 @@ class NPUModelRunner(GPUModelRunner):
         self.update_stream = None
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.update_stream = torch.npu.Stream()
+
+        self.device_metadata_executor = DeviceMetadataExecutor() if envs.VLLM_ASCEND_ENABLE_FLASH_MLA else None
+        # Refined once the attention groups exist: only the device-tiled GQA
+        # route can ignore the host length mirror.
+        self._use_device_seq_lens = False
 
         # because we will override these attribute, delete these attribute to
         # make sure it's collected by python gc immediately.
@@ -283,11 +290,21 @@ class NPUModelRunner(GPUModelRunner):
         # Only target-model layers determine whether FIA is in use. This flag
         # is used for adaptive verification handling.
         draft_layer_names: set[str] = getattr(self.speculator, "draft_attn_layer_names", set())
-        self.use_fia = any(
+        self.use_fia = not envs.VLLM_ASCEND_ENABLE_FLASH_MLA and any(
             (group.backend is AscendAttentionBackend or group.backend is AscendMLABackend)
             and any(layer_name not in draft_layer_names for layer_name in group.layer_names)
             for groups in self.attn_groups
             for group in groups
+        )
+        # Device-tiled attention reads rejection-corrected lengths on the device,
+        # so the scheduler's CPU lengths may stay upper bounds (as in
+        # GPUModelRunner). Every other attention family still reads the host
+        # mirror, which spec rejection would leave stale, so the shortcut only
+        # holds when all of them are covered. PCP partitions the batch on the host.
+        self._use_device_seq_lens = (
+            self.device_metadata_executor is not None
+            and self.parallel_config.prefill_context_parallel_size == 1
+            and all(group.backend is AscendAttentionBackend for groups in self.attn_groups for group in groups)
         )
 
         if self.model_config.enable_return_routed_experts:
@@ -326,7 +343,7 @@ class NPUModelRunner(GPUModelRunner):
             get_kv_transfer_group().handle_preemptions(kv_connector_metadata)
 
         self.model_state.kvpp_is_dummy_run = dummy_run or is_profile
-        with pcp_dispatch_context():
+        with pcp_dispatch_context(), device_metadata_context(self.device_metadata_executor):
             output = super().execute_model(
                 scheduler_output,
                 intermediate_tensors=intermediate_tensors,
@@ -806,6 +823,10 @@ class NPUModelRunner(GPUModelRunner):
             self._copy_num_computed_tokens_to_cpu()
 
     def _copy_num_computed_tokens_to_cpu(self):
+        if self._use_device_seq_lens:
+            # Device-tiled attention reads the rejection-corrected lengths on
+            # the device, so the host copy is dead weight.
+            return
         # npu attention backend still need to use seq_lens_cpu,
         # we need to copy num_computed_tokens back to cpu.
         default_stream = torch.cuda.current_stream()
@@ -829,7 +850,8 @@ class NPUModelRunner(GPUModelRunner):
         # MTP needs D2H copy to get reverted num_computed_tokens after rejection.
         # req_states.num_computed_tokens_cpu shares storage with its NumPy view,
         # so this update also corrects the num_computed_tokens_np used by PCP.
-        if self.speculator is not None:
+        # Device-tiled attention skips the copy entirely.
+        if not self._use_device_seq_lens and self.speculator is not None:
             self.num_computed_tokens_event.synchronize()
             for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
                 req_index = self.req_states.req_id_to_index[req_id]

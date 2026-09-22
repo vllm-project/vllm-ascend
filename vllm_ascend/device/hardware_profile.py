@@ -69,6 +69,8 @@ class HardwareCapability(Enum):
     COMPATIBILITY_OP_IMPLEMENTATIONS = auto()
     # Install distributed-communication adaptations required by the compatibility path.
     DISTRIBUTED_COMMUNICATION_ADAPTATION = auto()
+    # Run the device-tiled GQA FlashAttn operator with its stable metadata buffers.
+    DEVICE_TILED_FLASH_ATTN = auto()
     # Use DSA C128-state kernel block sizes ``[4, 8, 16]`` instead of ``[8, 16, 32]``.
     DSA_C128_STATE_SMALL_BLOCK_SIZES = auto()
     # Use the DeepSeek-V4/DSA compressed-KV-cache layout and compressor/indexer flow.
@@ -325,6 +327,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.CANN_MEGAMOE_MXFP,
                     HardwareCapability.CHUNKED_PREFILL_PHASE_SPLIT,
                     HardwareCapability.CLUSTER_CPU_TOPOLOGY,
+                    HardwareCapability.DEVICE_TILED_FLASH_ATTN,
                     HardwareCapability.DSA_C128_STATE_SMALL_BLOCK_SIZES,
                     HardwareCapability.DSV4_COMPRESSED_CACHE,
                     HardwareCapability.DYNAMIC_MX_QUANT_FUSION,
