@@ -150,6 +150,8 @@ class TestAscendEplbFreshLoadGate(unittest.TestCase):
         state.expert_rearrangement_step_interval = 2
         state.expert_load_window_step = 0
         state.expert_load_window_size = 2
+        state._logical_load_window_write_index = 0
+        state._local_load_collection_mask = torch.zeros(2, dtype=torch.int32)
         state.should_record_tensor = None
         state._has_fresh_recorded_load = False
         state.policy = StairEplbPolicy(StairConfig())

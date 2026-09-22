@@ -60,6 +60,40 @@ def test_step_records_logical_load_before_mapping_changes(monkeypatch):
     assert upstream_step.call_count == 2
 
 
+@pytest.mark.parametrize("is_dummy", [False, True])
+def test_step_keeps_uncollected_load_slot_aligned(monkeypatch, is_dummy):
+    monkeypatch.setattr(upstream_eplb_state.EplbState, "step", MagicMock())
+    model_state = SimpleNamespace(
+        _logical_load_window=torch.zeros((2, 1, 2), dtype=torch.int64),
+        _num_recorded_logical_load_samples=0,
+        physical_to_logical_map=torch.tensor([[0, 1]]),
+        expert_load_pass=torch.tensor([[3, 5]]),
+    )
+    state = AscendEplbState.__new__(AscendEplbState)
+    state.model_states = {"model": model_state}
+    state.expert_load_window_size = 2
+    state._logical_load_window_write_index = 0
+    state._local_load_collection_mask = torch.zeros(2, dtype=torch.int32)
+    state._is_load_sampling_step = not is_dummy
+    state._should_collect_local_load = False
+    state.policy = StairEplbPolicy(StairConfig())
+
+    state.step(is_dummy=is_dummy)
+
+    assert model_state._num_recorded_logical_load_samples == 1
+    assert state._logical_load_window_write_index == 1
+    torch.testing.assert_close(state._local_load_collection_mask, torch.zeros(2, dtype=torch.int32))
+    torch.testing.assert_close(model_state._logical_load_window, torch.zeros((2, 1, 2), dtype=torch.int64))
+
+    state._is_load_sampling_step = True
+    state._should_collect_local_load = True
+    state.step()
+
+    assert model_state._num_recorded_logical_load_samples == 2
+    torch.testing.assert_close(state._local_load_collection_mask, torch.tensor([0, 1], dtype=torch.int32))
+    torch.testing.assert_close(model_state._logical_load_window[1], torch.tensor([[3, 5]]))
+
+
 def test_collect_then_publish_async_load_stats(monkeypatch):
     group = MagicMock()
     group.size.return_value = 2

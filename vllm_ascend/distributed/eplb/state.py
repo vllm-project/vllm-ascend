@@ -180,17 +180,19 @@ class AscendEplbState(_eplb_state.EplbState):
         should_collect_local_load = getattr(self, "_should_collect_local_load", False)
         self._is_load_sampling_step = False
         self._should_collect_local_load = False
-        if is_load_sampling_step and self.uses_custom_load_stats:
+        if not is_profile and self.uses_custom_load_stats:
+            # Keep dummy and phase-filtered steps aligned across EP ranks.
             write_index = self._logical_load_window_write_index
-            self._local_load_collection_mask[write_index] = should_collect_local_load
+            self._local_load_collection_mask[write_index] = is_load_sampling_step and should_collect_local_load
             for model_state in self.model_states.values():
                 logical_expert_load = model_state._logical_load_window[write_index]
                 logical_expert_load.zero_()
-                logical_expert_load.scatter_add_(
-                    -1,
-                    model_state.physical_to_logical_map.long(),
-                    model_state.expert_load_pass.to(torch.int64),
-                )
+                if is_load_sampling_step and should_collect_local_load:
+                    logical_expert_load.scatter_add_(
+                        -1,
+                        model_state.physical_to_logical_map.long(),
+                        model_state.expert_load_pass.to(torch.int64),
+                    )
                 model_state._num_recorded_logical_load_samples = min(
                     model_state._num_recorded_logical_load_samples + 1,
                     self.expert_load_window_size,
