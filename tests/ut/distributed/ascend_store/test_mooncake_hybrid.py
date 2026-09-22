@@ -77,6 +77,9 @@ class MemoryRangeStore:
     def batch_is_exist(self, keys):
         return [int(key in self.complete) for key in keys]
 
+    def batch_is_readable(self, keys):
+        return [key in self.complete for key in keys]
+
     def batch_get_start(self, keys):
         self.open_reads.update(key for key in keys if key in self.complete)
         return [0 if key in self.complete else -1 for key in keys]

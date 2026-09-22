@@ -146,7 +146,6 @@ class TestMooncakePipeline(unittest.TestCase):
             patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.importlib"),
         ):
             scheduler = KVPoolScheduler(worker.vllm_config, use_layerwise=True, kv_cache_config=worker.kv_cache_config)
-        store.batch_is_readable = lambda keys: [key in store.complete for key in keys]
         scheduler.store_scheduler = store
         return scheduler
 
@@ -241,7 +240,6 @@ class TestMooncakePipeline(unittest.TestCase):
             patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.importlib"),
         ):
             scheduler = KVPoolScheduler(config, use_layerwise=True, kv_cache_config=workers[0].kv_cache_config)
-        store.batch_is_readable = lambda keys: [key in store.complete for key in keys]
         scheduler.store_scheduler = store
         for worker in workers:
             self.run_step(
@@ -322,19 +320,19 @@ class TestMooncakePipeline(unittest.TestCase):
                 return [-1] * len(keys)
             return real_put(keys, *args)
 
-        store.batch_copy_put = fail_one_group
-        for worker in (stage0, stage1):
-            self.run_step(
-                worker,
-                ReqMeta(
-                    "r",
-                    token_len_chunk=64,
-                    block_ids_by_group=[[1, 2, 3, 4], [1, 2], [1, 2, 3, 4]],
-                    block_hashes=[b"h0", b"h1", b"h2", b"h3"],
-                    can_save=True,
-                    is_last_chunk=True,
-                ),
-            )
+        with patch.object(store, "batch_copy_put", side_effect=fail_one_group):
+            for worker in (stage0, stage1):
+                self.run_step(
+                    worker,
+                    ReqMeta(
+                        "r",
+                        token_len_chunk=64,
+                        block_ids_by_group=[[1, 2, 3, 4], [1, 2], [1, 2, 3, 4]],
+                        block_hashes=[b"h0", b"h1", b"h2", b"h3"],
+                        can_save=True,
+                        is_last_chunk=True,
+                    ),
+                )
         complete = scheduler._make_layerwise_hit_check_keys(0, b"h1".hex())
         incomplete = scheduler._make_layerwise_hit_check_keys(1, b"h1".hex())
         self.assertEqual(scheduler._query_layerwise_block_hits([complete, incomplete]), [True, False])
@@ -419,17 +417,19 @@ class TestMooncakePipeline(unittest.TestCase):
             finally:
                 returned.set()
 
-        store.batch_copy_put = delayed_put
-        worker._wait_for_final_layer_save = finish
-        compute = threading.Thread(target=run, daemon=True)
-        compute.start()
-        try:
-            self.assertTrue(copy_started.wait(timeout=1))
-            self.assertTrue(final_entered.wait(timeout=1), "per-layer fencing destroyed compute/transfer overlap")
-            self.assertFalse(returned.wait(timeout=0.1), "source block lifetime ended before the earlier PUT")
-        finally:
-            release_copy.set()
-            compute.join(timeout=2)
+        with (
+            patch.object(store, "batch_copy_put", side_effect=delayed_put),
+            patch.object(worker, "_wait_for_final_layer_save", side_effect=finish),
+        ):
+            compute = threading.Thread(target=run, daemon=True)
+            compute.start()
+            try:
+                self.assertTrue(copy_started.wait(timeout=1))
+                self.assertTrue(final_entered.wait(timeout=1), "per-layer fencing destroyed compute/transfer overlap")
+                self.assertFalse(returned.wait(timeout=0.1), "source block lifetime ended before the earlier PUT")
+            finally:
+                release_copy.set()
+                compute.join(timeout=2)
         self.assertFalse(compute.is_alive())
         self.assertFalse(failures)
         self.assertEqual(len(store.complete), 6)
