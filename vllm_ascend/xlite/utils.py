@@ -155,6 +155,8 @@ class XModel(AttributeSetterMixin, Model):
 class XModelConfig(AttributeSetterMixin, ModelConfig):
     """:mod:`xlite._C.ModelConfig` subclass with safe attribute setting for better backwards compatibility."""
 
+    index_full_mask: list[bool]
+
 
 @dataclass
 class AttnMetadataRouter:
