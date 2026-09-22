@@ -254,10 +254,19 @@ class KVPoolScheduler:
         # layerwise lookup. A block's all-rank presence only changes on save
         # or eviction; cache it briefly so concurrent requests sharing a
         # prefix skip the repeated batch_get_key_info RPCs. A cached False
-        # (miss) short-circuits the whole group; entries expire so external
-        # evictions cannot serve stale hits for long.
+        # (miss) short-circuits the whole group.
+        #
+        # Asymmetry is deliberate: a stale miss only costs one extra RPC
+        # (the block was saved after we cached its absence), so miss
+        # entries may live for the full TTL. A stale hit is dangerous: an
+        # eviction after the entry was cached makes the scheduler report a
+        # prefix hit the worker can no longer load, and the forward pass
+        # already skipped recomputation. Hit entries therefore use a much
+        # shorter TTL so they only cover the same-step concurrent requests
+        # and cannot outlive an eviction by a meaningful margin.
         self._lw_block_hit_cache: dict[tuple[int, str], tuple[bool, float]] = {}
         self._lw_hit_cache_ttl = 30.0
+        self._lw_hit_cache_hit_ttl = 0.5
         self._lw_hit_cache_max = 200_000
 
     def _get_or_create_request_tracker(self, req_id: str) -> RequestTracker:
@@ -515,9 +524,12 @@ class KVPoolScheduler:
             block_hits = self._query_layerwise_block_hits(keys_by_block)
             # PERF-TUNE(3): record every resolved block in the cache (True on
             # hit, False on the first miss) so later requests skip these RPCs
-            # entirely.
+            # entirely. Misses keep the long TTL (stale miss == wasted RPC
+            # only); hits get the short TTL so an eviction cannot serve a
+            # stale hit beyond the same-step window.
             for bh, hit in zip(uncached_hashes, block_hits):
-                hit_cache[(group_id, block_hash_to_str(bh))] = (hit, now + self._lw_hit_cache_ttl)
+                ttl = self._lw_hit_cache_ttl if not hit else self._lw_hit_cache_hit_ttl
+                hit_cache[(group_id, block_hash_to_str(bh))] = (hit, now + ttl)
             uncached_hit_blocks = 0
             for hit in block_hits:
                 if hit:
