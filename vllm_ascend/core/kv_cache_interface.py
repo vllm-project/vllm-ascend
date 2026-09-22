@@ -146,8 +146,8 @@ def get_sfa_kv_parent(nope: torch.Tensor, rope: torch.Tensor) -> torch.Tensor:
     """
     if nope.layout != torch.strided or rope.layout != torch.strided:
         raise ValueError("SFA components must use strided ND storage")
-    if nope.device != rope.device or nope.dtype != rope.dtype:
-        raise ValueError("SFA components must have the same device and dtype")
+    if nope.dtype != rope.dtype:
+        raise ValueError("SFA components must have the same dtype")
     if nope.dtype not in (torch.float16, torch.bfloat16):
         raise ValueError("SFA token-concat requires unquantized FP16 or BF16")
     if (

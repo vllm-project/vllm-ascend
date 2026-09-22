@@ -433,8 +433,6 @@ def _uses_sfa_kv_parent(layer_name: str, spec: AttentionSpec, backend=None) -> b
         or not isinstance(spec, AscendMLAAttentionSpec)
         or bool(getattr(spec, "cache_sparse_sfa_c8", False))
         or "cache_only_layers" in layer_name
-        or getattr(spec, "model_version", None) == "deepseek_v4"
-        or _is_dsv4_model(config)
     ):
         return False
     if backend is None:
