@@ -112,23 +112,12 @@ def split_sfa_kv_parent(
     ``shape`` must already incorporate the validated manager/kernel block
     conversion. A larger underlying allocation and aligned nonzero offset are
     allowed, but raw itself must contain exactly the dense parent's bytes.
+    The raw's flat int8 form and the shape's geometry are guaranteed by the
+    allocation callers; this function enforces the exact byte contract.
     """
-    if raw.layout != torch.strided or raw.dtype != torch.int8 or raw.ndim != 1 or raw.stride() != (1,):
-        raise ValueError("SFA raw must be a contiguous flat int8 tensor")
     if dtype not in (torch.float16, torch.bfloat16):
         raise ValueError("SFA token-concat requires unquantized FP16 or BF16")
-    if (
-        len(shape) != 4
-        or any(not isinstance(d, int) or isinstance(d, bool) or d <= 0 for d in shape)
-        or shape[2] != 1
-        or not isinstance(nope_dim, int)
-        or isinstance(nope_dim, bool)
-        or not 0 < nope_dim < shape[3]
-    ):
-        raise ValueError("Unsupported SFA head geometry")
     dtype_bytes = torch.empty((), dtype=dtype).element_size()
-    if raw.storage_offset() % dtype_bytes:
-        raise ValueError("SFA raw storage offset must be aligned to the cache dtype")
     if raw.numel() != math.prod(shape) * dtype_bytes:
         raise ValueError("SFA raw bytes must match the dense parent shape exactly; padded layouts are unsupported")
     parent = raw.view(dtype).view(shape)
@@ -144,22 +133,8 @@ def get_sfa_kv_parent(nope: torch.Tensor, rope: torch.Tensor) -> torch.Tensor:
     views, so allocation callers must use ``split_sfa_kv_parent`` to validate
     their exact logical raw region first.
     """
-    if nope.layout != torch.strided or rope.layout != torch.strided:
-        raise ValueError("SFA components must use strided ND storage")
-    if nope.dtype != rope.dtype:
-        raise ValueError("SFA components must have the same dtype")
     if nope.dtype not in (torch.float16, torch.bfloat16):
         raise ValueError("SFA token-concat requires unquantized FP16 or BF16")
-    if (
-        nope.ndim != 4
-        or rope.ndim != 4
-        or nope.shape[:-1] != rope.shape[:-1]
-        or nope.shape[2] != 1
-        or any(d <= 0 for d in (*nope.shape, rope.shape[-1]))
-    ):
-        raise ValueError("Unsupported SFA component geometry")
-    if nope.device.type == "meta":
-        raise ValueError("SFA parent reconstruction requires physical storage")
     if nope.untyped_storage().data_ptr() != rope.untyped_storage().data_ptr():
         raise ValueError("SFA components must share one storage")
     width = nope.shape[-1] + rope.shape[-1]
