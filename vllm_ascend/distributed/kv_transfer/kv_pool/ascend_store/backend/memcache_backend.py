@@ -7,6 +7,7 @@ from typing import Any
 
 import torch
 from vllm.config import ParallelConfig
+from vllm.distributed.parallel_state import get_dp_group
 from vllm.logger import logger
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
@@ -173,12 +174,17 @@ class MemcacheBackend(Backend):
         init_bm: bool = True,
         lazy_init: bool = False,
         extra_config: dict[str, Any] | None = None,
+        dp_init_barrier: bool = True,
     ):
+        if not isinstance(dp_init_barrier, bool):
+            raise ValueError("memcache_dp_init_barrier in kv_connector_extra_config must be a boolean.")
         _inject_device_ub_qos(extra_config)
         _validate_device_ub_qos()
         self.device_id = torch.npu.current_device() if device_id is None else device_id
         self._init_bm = init_bm
         self._lazy_init = lazy_init and _is_device_sdma()
+        # Lazy initialization can be triggered independently by each DP rank.
+        self._dp_init_barrier = dp_init_barrier and parallel_config.data_parallel_size > 1 and not self._lazy_init
 
         self.store: Any | None = None
         self._store_initialized = False
@@ -228,6 +234,12 @@ class MemcacheBackend(Backend):
             raise
 
         assert res == 0
+        if self._init_bm and self._dp_init_barrier:
+            # Keep early ranks from entering NPU work while peers are still
+            # establishing MemCache channels. Metadata-only clients must not join.
+            logger.info("Waiting for all DP MemCache initializations")
+            torch.distributed.barrier(group=get_dp_group().cpu_group)
+            logger.info("All DP MemCache initializations completed")
         time.sleep(MEMCACHE_THREAD_START_WAIT_S)
         return store
 
