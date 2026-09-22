@@ -226,9 +226,6 @@ class GDNGroupInvariantCache:
 
     # Causal conv1d metadata / initial state.
     has_initial_state: torch.Tensor | None = None
-    nums_dict: dict[int, dict[str, object]] | None = None
-    batch_ptr: torch.Tensor | None = None
-    token_chunk_offset_ptr: torch.Tensor | None = None
 
 
 def _build_actual_seq_lengths(
