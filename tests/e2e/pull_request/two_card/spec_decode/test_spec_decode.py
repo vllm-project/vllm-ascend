@@ -200,6 +200,8 @@ def test_p_eagle_acceptance(
     Test acceptance rate for parallel drafting speculative decoding
     using a smaller draft model with parallel_drafting enabled.
     """
+    # parallel_drafting is on the V2 blacklist, so this case stays on V1
+    # without an explicit runner env pin.
     main_model_name = P_EAGLE_MODELS[method]["main"]
     spec_model_name = P_EAGLE_MODELS[method]["spec"]
 
@@ -368,6 +370,8 @@ def test_qwen3_vwn_eagle3_tp2():
 
 
 def test_eagle3_sliding_window():
+    # draft_window_size is on the V2 blacklist, so this case stays on V1
+    # without an explicit runner env pin.
     method = "eagle3"
     num_speculative_tokens = 3
     draft_window_size = 512
@@ -447,7 +451,7 @@ def test_eagle3_sliding_window():
     assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
 
 
-def test_hang():
+def test_hang(monkeypatch):
     """Reproduce the spec-decode hang fixed by vllm-ascend#10117.
 
     The server deadlocks when all of the following hold:
@@ -459,6 +463,9 @@ def test_hang():
     length saturates the boundary in (3). The model is a small random-weight
     DeepseekV3 MoE+MTP so the case runs on two cards with EP on.
     """
+    # The deadlock was fixed on the V1 proposer. Qwen3_5MoeForCausalLM now
+    # defaults to MRv2; keep this regression on V1.
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     # Fail-fast: cap NPU operator execution timeout at 5 min. Without this the
     # hang deadlocks for ~9 min until CANN's default vector-core timeout
     # (~556s) fires — too long for CI.
@@ -565,6 +572,9 @@ def test_dflash2_acceptance(
     method: str,
     num_speculative_tokens: int,
 ):
+    # DFlash2 graph/PIECEWISE is on the V2 blacklist, so this case stays on
+    # V1 without an explicit runner env pin. test_dflash2_v2_acceptance covers
+    # V2 eager.
     main_model_name = DFLASH2_MODELS[method]["main"]
     spec_model_name = DFLASH2_MODELS[method]["spec"]
 
