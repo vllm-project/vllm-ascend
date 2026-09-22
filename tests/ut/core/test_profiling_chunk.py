@@ -812,6 +812,15 @@ class TestProfilingChunkAsyncScheduler(TestBase):
             # Scheduler.__init__, which infinitely recurses on a bare
             # MagicMock hf_config. Override it to keep the UT runnable.
             stack.enter_context(patch.object(ModelConfig, "uses_mrope", new_callable=PropertyMock, return_value=False))
+            # VllmConfig.use_v2_model_runner is a property that defaults to
+            # True on NPU CI when VLLM_USE_V2_MODEL_RUNNER is unset, which
+            # would arm the v2+PP decode cadence and stop placeholder
+            # accumulation on the second schedule(). Pin it to False so the
+            # default fixture exercises the v1 runner path; the v2 cadence
+            # test sets scheduler.use_v2_model_runner back to True itself.
+            stack.enter_context(
+                patch.object(VllmConfig, "use_v2_model_runner", new_callable=PropertyMock, return_value=False)
+            )
             scheduler = scheduler_cls(
                 vllm_config=vllm_config,
                 kv_cache_config=kv_cache_config,
