@@ -285,6 +285,27 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         self.assertEqual(size[0], 160)
         self.assertEqual(size[1], 320)
 
+    def test_prepare_values_matches_scalar_results(self):
+        starts = [0, 16]
+        ends = [16, 24]
+        block_ids = [5, 9]
+
+        addrs, sizes = self.db.prepare_values(starts, ends, block_ids)
+        expected = [
+            self.db.prepare_value(start, end, [], block_id=block_id)[:2]
+            for start, end, block_id in zip(starts, ends, block_ids)
+        ]
+
+        self.assertEqual(addrs, [addr for addr, _ in expected])
+        self.assertEqual(sizes, [size for _, size in expected])
+
+    def test_prepare_values_empty(self):
+        self.assertEqual(self.db.prepare_values([], [], []), ([], []))
+
+    def test_prepare_values_rejects_mismatched_inputs(self):
+        with self.assertRaisesRegex(ValueError, "must have the same length"):
+            self.db.prepare_values([0], [16], [])
+
     def test_prepare_value_layer(self):
         addr, size, block_id = self.db.prepare_value_layer(0, 16, [5, 6], layer_id=0)
         self.assertEqual(block_id, 5)
