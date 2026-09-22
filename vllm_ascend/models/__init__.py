@@ -37,7 +37,7 @@ def register_model():
         "DeepseekV4ForConditionalGeneration",
         "vllm_ascend.models.deepseek_v4.vl_model:AscendDeepseekV4ForConditionalGeneration",
     )
-    if not vllm_version_is("0.29.0"):
+    if not (vllm_version_is("0.29.0") or vllm_version_is("0.30.0")):
         ModelRegistry.register_model(
             "DeepseekV41ForCausalLM",
             "vllm_ascend.models.deepseek_v41.vl_model:AscendDeepseekV41ForCausalLM",
@@ -55,7 +55,7 @@ def register_model():
         "DSparkDraftModel",
         "vllm_ascend.models.deepseek_v4.dspark:DSparkDeepseekV4ForCausalLM",
     )
-    if not vllm_version_is("0.29.0"):
+    if not (vllm_version_is("0.29.0") or vllm_version_is("0.30.0")):
         ModelRegistry.register_model(
             "DeepseekV41DSparkModel",
             "vllm_ascend.models.deepseek_v41.dspark:DSparkDeepseekV41ForCausalLM",

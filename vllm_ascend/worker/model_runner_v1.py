@@ -262,13 +262,13 @@ from vllm_ascend.core.profiling_chunk_predictor import (
     _start_profiling_chunk_timing,
 )
 
-# vLLM 0.29 does not provide the upstream DeepSeek V4.1 config and model
+# vLLM 0.29 and 0.30 do not provide the upstream DeepSeek V4.1 config and model
 # modules imported by the Ascend V4.1 attention backend. Empty tuples remain
 # valid ``isinstance`` classinfo values while keeping all non-V4.1 paths
 # importable on the release tag.
 v41_metadata_builder_type: type | tuple[()] = ()
 v41_cache_layer_type: type | tuple[()] = ()
-if not vllm_version_is("0.29.0"):
+if not (vllm_version_is("0.29.0") or vllm_version_is("0.30.0")):
     from vllm_ascend.attention.dsa_v41 import (
         AscendDSAV41MetadataBuilder,
         DeepseekV41CacheLayer,

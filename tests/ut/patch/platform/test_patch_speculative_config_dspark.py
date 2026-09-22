@@ -195,8 +195,8 @@ def test_deepseek_v41_dspark_selects_v41_drafter_and_expert_shape(flattened):
     )
     hf_config.update = lambda values: hf_config.__dict__.update(values)
     if flattened:
-        if vllm_version_is("0.29.0"):
-            pytest.skip("DeepSeek V4.1 config is unavailable on vLLM 0.29")
+        if vllm_version_is("0.29.0") or vllm_version_is("0.30.0"):
+            pytest.skip("DeepSeek V4.1 config is unavailable on vLLM 0.29/0.30")
         from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
 
         hf_config = DeepseekV41Config(

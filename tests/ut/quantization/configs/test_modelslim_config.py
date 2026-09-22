@@ -72,8 +72,8 @@ class TestAscendModelSlimConfig(TestBase):
         self.assertEqual(config.quant_description, {})
 
     def test_deepseek_v41_model_mapping_and_expert_discovery(self):
-        if vllm_version_is("0.29.0"):
-            self.skipTest("DeepSeek V4.1 is unavailable on vLLM 0.29")
+        if vllm_version_is("0.29.0") or vllm_version_is("0.30.0"):
+            self.skipTest("DeepSeek V4.1 is unavailable on vLLM 0.29/0.30")
 
         from vllm.model_executor.model_loader.utils import configure_quant_config
 
