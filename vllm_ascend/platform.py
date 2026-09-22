@@ -704,6 +704,11 @@ class NPUPlatform(Platform):
                     "vllm_ascend.core.batch_job_aware_scheduler.BatchJobAwareScheduler"
                 )
 
+        if ascend_config.enable_dsv4_shared_compressor_workspace and cache_config.enable_prefix_caching:
+            vllm_config.scheduler_config.scheduler_cls = (
+                "vllm_ascend.core.compressor_checkpoint_scheduler.CompressorCheckpointScheduler"
+            )
+
         cp_size = parallel_config.prefill_context_parallel_size * parallel_config.decode_context_parallel_size
         use_sparse = model_uses_sfa_sparse(model_config)
         sfa_dcp_replicated_indexer = enable_sfa_dcp_replicated_indexer(vllm_config)

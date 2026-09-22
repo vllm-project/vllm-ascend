@@ -295,12 +295,17 @@ def _stage1_config(**overrides):
             hf_text_config=SimpleNamespace(model_type="deepseek_v4"),
             enforce_eager=True,
         ),
-        cache_config=SimpleNamespace(enable_prefix_caching=False),
+        cache_config=SimpleNamespace(enable_prefix_caching=False, block_size=32),
+        scheduler_config=SimpleNamespace(async_scheduling=False, scheduler_cls=None),
+        use_v2_model_runner=False,
+        kv_events_config=None,
         kv_transfer_config=None,
         speculative_config=None,
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=1,
             prefill_context_parallel_size=1,
+            pipeline_parallel_size=1,
+            data_parallel_size=1,
         ),
     )
     for dotted_name, value in overrides.items():
@@ -318,15 +323,44 @@ def test_stage1_feature_gate_accepts_target_configuration() -> None:
     assert reasons == []
 
 
+def test_prefix_feature_gate_accepts_checkpoint_configuration() -> None:
+    assert get_dsv4_shared_compressor_workspace_fallback_reasons(
+        _stage1_config(cache_config__enable_prefix_caching=True),
+        is_a3=True,
+        multistream_dsv4_dsa_overlap=False,
+    ) == []
+
+
 @pytest.mark.parametrize(
     ("config", "is_a3", "multistream", "expected_reason"),
     [
         pytest.param(
-            _stage1_config(cache_config__enable_prefix_caching=True),
+            _stage1_config(cache_config__enable_prefix_caching=True, scheduler_config__async_scheduling=True),
             True,
             False,
-            "prefix caching is enabled",
-            id="prefix-cache",
+            "compressor checkpoints require explicit synchronous scheduling",
+            id="prefix-cache-async",
+        ),
+        pytest.param(
+            _stage1_config(cache_config__enable_prefix_caching=True, cache_config__block_size=128),
+            True,
+            False,
+            "compressor checkpoints currently require block_size=32",
+            id="prefix-cache-other-layout",
+        ),
+        pytest.param(
+            _stage1_config(cache_config__enable_prefix_caching=True, parallel_config__pipeline_parallel_size=2),
+            True,
+            False,
+            "compressor checkpoints require pipeline_parallel_size=1",
+            id="prefix-cache-pp",
+        ),
+        pytest.param(
+            _stage1_config(cache_config__enable_prefix_caching=True, scheduler_config__scheduler_cls="other.Scheduler"),
+            True,
+            False,
+            "compressor checkpoints require the checkpoint scheduler",
+            id="prefix-cache-custom-scheduler",
         ),
         pytest.param(
             _stage1_config(),
