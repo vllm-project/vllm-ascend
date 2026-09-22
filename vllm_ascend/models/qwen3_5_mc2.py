@@ -18,8 +18,9 @@
 
 Uses torch_npu.npu_mm_all_reduce_base (aclnnMatmulAllReduce) to compute both
 in one kernel: activation crosses the HCCL link once, comm overlaps the
-matmul tail. Falls back to stock matmul+allreduce during ACL graph capture
-(EE1016) and for non-prefill / quantized / biased inputs.
+matmul tail. Ineligible calls delegate to the stock forward captured at
+install time; during ACL graph capture the op falls back to stock
+matmul+allreduce (EE1016).
 """
 
 import os
@@ -73,34 +74,30 @@ direct_register_custom_op(
 )
 
 
-def _fused_row_parallel_forward(self, input_):
-    # Replicates vllm's RowParallelLinear.forward; the matmul+allreduce
-    # steps are fused into one kernel when eligible, otherwise the fallback
-    # is bit-identical to stock. `self` is the bound RowParallelLinear.
-    if self.input_is_parallel:
-        input_parallel = input_
-    else:
-        input_parallel = split_tensor_along_last_dim(input_, num_partitions=self.tp_size)[self.tp_rank].contiguous()
-    bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
+def _fused_forward_factory(orig_forward):
+    # Fused matmul+allreduce fast path for one RowParallelLinear instance.
+    # Ineligible calls delegate to `orig_forward` (the stock bound method
+    # captured at install time), so the fallback is the upstream code itself,
+    # not a copy that can drift. `self` is the bound RowParallelLinear.
 
-    if (
-        self.reduce_results
-        and self.tp_size > 1
-        and input_parallel.shape[0] > 1000
-        and self.bias is None
-        and isinstance(self.quant_method, UnquantizedLinearMethod)
-    ):
-        output = torch.ops.vllm.ascend_mm_all_reduce(input_parallel, self.weight.t(), self._ascend_hcomm)
-    else:
-        output_parallel = self.quant_method.apply(self, input_parallel, bias_)
-        if self.reduce_results and self.tp_size > 1:
-            output = tensor_model_parallel_all_reduce(output_parallel)
-        else:
-            output = output_parallel
+    def forward(self, input_):
+        if (
+            self.reduce_results
+            and self.tp_size > 1
+            and self.bias is None
+            and isinstance(self.quant_method, UnquantizedLinearMethod)
+            and input_.shape[0] > 1000
+        ):
+            input_parallel = input_
+            if not self.input_is_parallel:
+                input_parallel = split_tensor_along_last_dim(input_, num_partitions=self.tp_size)[
+                    self.tp_rank
+                ].contiguous()
+            output = torch.ops.vllm.ascend_mm_all_reduce(input_parallel, self.weight.t(), self._ascend_hcomm)
+            return (output, None) if self.return_bias else output
+        return orig_forward(input_)
 
-    if not self.return_bias:
-        return output
-    return output, self.bias if self.skip_bias_add else None
+    return forward
 
 
 class _AscendMC2Mixin:
@@ -125,7 +122,7 @@ class _AscendMC2Mixin:
         for module in self.modules():
             if isinstance(module, RowParallelLinear) and module.reduce_results:
                 module._ascend_hcomm = hcom
-                module.forward = types.MethodType(_fused_row_parallel_forward, module)
+                module.forward = types.MethodType(_fused_forward_factory(module.forward), module)
 
 
 @MULTIMODAL_REGISTRY.register_processor(
