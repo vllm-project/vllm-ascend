@@ -7,13 +7,16 @@ from collections.abc import Iterable
 import torch
 from torch import nn
 from vllm.config import VllmConfig
+from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.qwen3_dspark import DSparkMarkovHead
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
+    WeightsMapper,
     _merge_multimodal_embeddings,
     get_draft_quant_config,
     maybe_prefix,
@@ -41,6 +44,25 @@ def _uses_causal_draft_attention(config) -> bool:
     if isinstance(dflash_config, dict) and "causal" in dflash_config:
         return bool(dflash_config["causal"])
     return bool(getattr(config, "full_attention_causal", False))
+
+
+# Mirrors upstream K3DSparkForCausalLM.hf_to_vllm_mapper's stacked mapping;
+# the PP variant below only differs by keeping the frozen embed_tokens copy.
+_PP_EMBED_STACKED_MAPPING = {
+    ".gate_proj": (".gate_up_proj", 0),
+    ".up_proj": (".gate_up_proj", 1),
+    ".q_a_proj": (".fused_qkv_a_proj", 0),
+    ".kv_a_proj_with_mqa": (".fused_qkv_a_proj", 1),
+}
+
+
+def _pp_embed_keeping_mapper() -> WeightsMapper:
+    """Upstream's K3 DSpark mapper minus the embed_tokens drop."""
+    return WeightsMapper(
+        orig_to_new_substr={"confidence_head": None, "lm_head": None},
+        orig_to_new_prefix={"": "model."},
+        orig_to_new_stacked=_PP_EMBED_STACKED_MAPPING,
+    )
 
 
 class AscendK3DSparkDecoderLayer(UpstreamK3DSparkDecoderLayer):
@@ -139,6 +161,16 @@ class AscendK3DSparkModel(UpstreamK3DSparkModel):
         self.config = draft_model_config.hf_config
         self.quant_config = get_draft_quant_config(vllm_config)
         self.embed_tokens: nn.Module | None = None
+        # The draft config used for construction reports PP=1; query the real
+        # PP group, the same signal maybe_share_target_embed uses.
+        if get_pp_group().world_size > 1:
+            # PP stages after the first cannot alias the target's stage-0
+            # embedding; own the frozen copy shipped in the draft checkpoint.
+            self.embed_tokens = VocabParallelEmbedding(
+                self.config.vocab_size,
+                self.config.target_hidden_size,
+                prefix=maybe_prefix(prefix, "embed_tokens"),
+            )
 
         self.context_proj = ColumnParallelLinear(
             self.config.target_hidden_size * self.config.num_target_layers,
@@ -240,6 +272,12 @@ class AscendK3DSparkForCausalLM(UpstreamK3DSparkForCausalLM):
             prefix=maybe_prefix(prefix, "model"),
         )
         self.lm_head: nn.Module | None = None
+        self._owns_embed_tokens = get_pp_group().world_size > 1
+        if self._owns_embed_tokens:
+            # The draft runs on the last PP stage, where the target embedding
+            # (stage 0) cannot be aliased. Declare ownership so the loader's
+            # share check keeps the checkpoint copy instead of raising.
+            self.has_own_embed_tokens = True
         self.logits_processor = LogitsProcessor(
             self.config.draft_vocab_size,
             scale=getattr(self.config, "logit_scale", 1.0),
@@ -282,7 +320,10 @@ class AscendK3DSparkForCausalLM(UpstreamK3DSparkForCausalLM):
         interface without creating that extra packed parameter.
         """
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        mapper = self.hf_to_vllm_mapper
+        if self._owns_embed_tokens:
+            mapper = _pp_embed_keeping_mapper()
+        return loader.load_weights(weights, mapper=mapper)
 
     def embed_input_ids(
         self,
