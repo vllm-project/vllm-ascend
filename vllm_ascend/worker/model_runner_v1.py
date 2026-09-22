@@ -35,6 +35,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import CompilationMode, CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size, tensor_model_parallel_all_gather
@@ -150,6 +151,7 @@ from vllm_ascend.utils import (
     AscendDeviceType,
     calc_split_factor,
     check_gdn_layer,
+    configure_fxrt_prefill_decompose,
     embedding_tp_enable,
     enable_sfa_dcp_replicated_indexer,
     enable_sp,
@@ -267,6 +269,9 @@ class ExecuteModelState(NamedTuple):
 
 class NPUModelRunner(GPUModelRunner):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
+        # Resolve this before model construction. PD launch environments may be
+        # shared, but only the P process may decompose DSV4 for FXRT.
+        configure_fxrt_prefill_decompose(vllm_config)
         # TODO(qcs): These manual pad and unpad for GPUModelRunner are
         # used to expand some buffers, which need to be reverted after
         # the following PR is merged:
@@ -2843,7 +2848,6 @@ class NPUModelRunner(GPUModelRunner):
         assert self.model is not None
         forward_context = get_forward_context()
         assert forward_context is not None
-
         model_inputs: dict[str, Any] = {
             "input_ids": input_ids,
             "positions": positions,
@@ -2851,7 +2855,15 @@ class NPUModelRunner(GPUModelRunner):
             "inputs_embeds": inputs_embeds,
             **model_kwargs,
         }
-        run_model = partial(self.model, **model_inputs)
+        model_forward = self.model
+        if (
+            self.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE
+            and getattr(self, "with_prefill", False)
+        ):
+            stock_compiled_call = getattr(self, "_stock_compiled_call", None)
+            if stock_compiled_call is not None:
+                model_forward = stock_compiled_call
+        run_model = partial(model_forward, **model_inputs)
 
         if self.enable_enpu:
             # The soft segmentation scenario requires event.record first, then event.wait
@@ -3380,6 +3392,8 @@ class NPUModelRunner(GPUModelRunner):
         num_active_loras: int = 0,
         profile_seq_lens: int | None = None,
         profile_cpp: bool = False,
+        force_prefill_attention_state: bool = False,
+        in_profile_run: bool | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # only support eager mode and piecewise graph now
         assert cudagraph_runtime_mode is None or cudagraph_runtime_mode.valid_runtime_modes()
@@ -3489,6 +3503,8 @@ class NPUModelRunner(GPUModelRunner):
                     self.attn_state = AscendAttentionState.SpecDecoding
                 else:
                     self.attn_state = AscendAttentionState.ChunkedPrefill
+            if force_prefill_attention_state:
+                self.attn_state = AscendAttentionState.ChunkedPrefill
             # The reason why we use a fixed seq_len rather than max_query_len is that
             # _npu_paged_attention_get_workspace only returns max workspace with specific
             # seq_lens. We use this seq_len only when capturing graph, and still use max_query_len
@@ -3622,7 +3638,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.vllm_config,
                 num_tokens=num_tokens_padded,
                 num_tokens_across_dp=num_tokens_across_dp,
-                in_profile_run=is_profile,
+                in_profile_run=is_profile if in_profile_run is None else in_profile_run,
                 num_actual_tokens=num_tokens_padded,
                 aclgraph_runtime_mode=cudagraph_runtime_mode,
                 batch_descriptor=batch_desc,
@@ -3804,7 +3820,69 @@ class NPUModelRunner(GPUModelRunner):
             and mm_config is not None
             and mm_config.is_multimodal_pruning_enabled()
         ) # type: bool
-        
+
+        self._stock_compiled_call = None
+        if self.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE:
+            # This path invokes torch.compile directly instead of vLLM's
+            # compilation wrapper, so raise Dynamo's per-frame cache limits
+            # in every worker before the compiled prefill graph is run.
+            torch._dynamo.config.recompile_limit = 64
+            torch._dynamo.config.accumulated_recompile_limit = 1024
+            from vllm.env_override import _apply_constrain_to_fx_strides_patch
+
+            _apply_constrain_to_fx_strides_patch()
+            backend = self.compilation_config.init_backend(self.vllm_config)
+            from vllm_ascend import envs as ascend_envs
+
+            debug_dump_path = self.vllm_config.compile_debug_dump_path()
+            dump_dir = (
+                debug_dump_path / "fx_graphs"
+                if debug_dump_path is not None
+                else None
+            )
+            if ascend_envs.VLLM_ASCEND_ENABLE_FXRT_BACKEND:
+                from vllm.compilation.fx_graph_dump import wrap_backend_with_fx_dump
+
+                logger.info(
+                    "Routing STOCK_TORCH_COMPILE prefill to the external "
+                    "fxrt backend (Triton Inductor is bypassed)"
+                )
+                backend = wrap_backend_with_fx_dump(backend, dump_dir, "model")
+            elif ascend_envs.VLLM_ASCEND_ENABLE_INDUCTOR_ASCENDC:
+                from vllm_ascend.compilation.ascendc_inductor import (
+                    enable_ascendc_inductor_backend,
+                )
+
+                logger.info(
+                    "Routing STOCK_TORCH_COMPILE prefill through stock "
+                    "torch._inductor with the inductor_npu_ext AscendC fusion "
+                    "codegen (Triton-on-NPU backend is overridden)"
+                )
+                enable_ascendc_inductor_backend()
+            elif ascend_envs.VLLM_ASCEND_ENABLE_INDUCTOR_FXRT:
+                from vllm_ascend.compilation.ascendc_inductor import (
+                    enable_inductor_fxrt_fx_wrapper,
+                )
+
+                logger.info(
+                    "Routing STOCK_TORCH_COMPILE prefill through stock "
+                    "torch._inductor (inductor_npu_ext AscendC fusion); the "
+                    "fxrt fx_wrapper re-emits the lowered graph to host FX "
+                    "and executes it via the fxrt runtime"
+                )
+                enable_inductor_fxrt_fx_wrapper()
+            compilation_counter.stock_torch_compile_count += 1
+            # Keep an explicit compiled prefill entry point instead of
+            # replacing Module.__call__ globally. Decode-only/spec-decode
+            # batches must stay eager; their request metadata is intentionally
+            # different from the decomposed prefill graph.
+            self._stock_compiled_call = torch.compile(
+                self.model._call_impl,
+                fullgraph=True,
+                dynamic=True,
+                backend=backend,
+            )
+
         # wrap the model with full graph wrapper if needed.
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.update_stream: torch.npu.Stream = torch.npu.Stream()
