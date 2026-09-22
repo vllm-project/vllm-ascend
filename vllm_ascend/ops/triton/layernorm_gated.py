@@ -310,7 +310,7 @@ def layer_norm_fwd_npu(
     )
     from vllm_ascend.ops.triton.triton_utils import try_get_vectorcore_num
 
-    qualified = _is_pr1_dtype(x) and _is_pr1_device_qualified()
+    qualified = _is_pr1_dtype(x) and _is_pr1_device_qualified(x)
     runtime_p = try_get_vectorcore_num() if qualified else None
     spec = _select_layernorm_launch(
         M,
@@ -425,7 +425,6 @@ def _layer_norm_gated_experimental_params():
         n_persist_min=128,
         hoist_qualified=True,
         persist_single_qualified=True,
-        persist_multi_qualified=False,
     )
 
 

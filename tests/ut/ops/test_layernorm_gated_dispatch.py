@@ -38,7 +38,6 @@ class SelectorTests(unittest.TestCase):
             n_persist_min=128,
             hoist_qualified=True,
             persist_single_qualified=True,
-            persist_multi_qualified=False,
         )
 
     def test_unknown_p_and_unqualified_device_keep_base64(self):

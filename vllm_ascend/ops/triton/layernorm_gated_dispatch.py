@@ -31,7 +31,6 @@ class DispatchParams:
     n_persist_min: int = 1
     hoist_qualified: bool = False
     persist_single_qualified: bool = False
-    persist_multi_qualified: bool = False
 
 
 DEFAULT_PARAMS = DispatchParams()
@@ -60,7 +59,7 @@ def _need(value, name: str):
 def validate_params(params) -> None:
     if type(params) is not DispatchParams:
         raise DispatchConfigError("params must be a DispatchParams instance")
-    for name in ("hoist_qualified", "persist_single_qualified", "persist_multi_qualified"):
+    for name in ("hoist_qualified", "persist_single_qualified"):
         if type(getattr(params, name)) is not bool:
             raise DispatchConfigError(f"{name} must be an exact bool")
     if not _is_positive_exact_int(params.n_persist_min):
@@ -113,7 +112,7 @@ def _select_layernorm_launch(
     bm_persist = BM_PERSIST_SINGLE if ngroups == 1 else _need(params.bm_multi, "bm_multi")
 
     # The only qualified multi-group PR1 route is BASE32 at N_group=128.
-    if N_group == 128 and ngroups > 1 and not params.persist_multi_qualified:
+    if N_group == 128 and ngroups > 1:
         return LaunchSpec("FT_BASE", bm_persist)
 
     persist_tiles = _ceil_div(M, bm_persist) * ngroups
@@ -129,6 +128,4 @@ def _select_layernorm_launch(
             return LaunchSpec("FT_PERSIST", BM_PERSIST_SINGLE)
         return LaunchSpec("FT_BASE", BM_PERSIST_SINGLE)
 
-    if params.persist_multi_qualified:
-        return LaunchSpec("FT_PERSIST", _need(params.bm_multi, "bm_multi"))
     return LaunchSpec("FT_BASE", _need(params.bm_multi, "bm_multi"))
