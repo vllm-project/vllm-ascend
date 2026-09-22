@@ -11,7 +11,7 @@ import msgspec
 import pytest
 import torch
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-from vllm.v1.kv_cache_interface import MLAAttentionSpec
+from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_worker, pull_worker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
@@ -29,7 +29,9 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
 )
 
 from .helpers import (
+    make_circular_spec,
     make_full_spec,
+    make_kpool_tail_spec,
     make_mamba_spec,
     make_metadata_groups,
     make_pp_metadata,
@@ -459,6 +461,77 @@ def test_compute_sliding_window_blocks_uses_unhashed_suffix() -> None:
     )
 
     assert result == [(0, [10, 11], [20, 21])]
+
+
+@pytest.mark.parametrize("spec", [make_circular_spec(), make_kpool_tail_spec()])
+def test_compute_circular_blocks_transfers_the_single_complete_page(spec: KVCacheSpec) -> None:
+    thread = make_thread(num_speculative_tokens=3)
+
+    result = thread._compute_group_block_ids(
+        "request",
+        [[0, 1, 2, 3]],
+        4,
+        0,
+        16,
+        16,
+        [10],
+        [1, 2, 10],
+        [20],
+        4096,
+        4095,
+        2048,
+        1,
+        1,
+        spec,
+        2,
+    )
+
+    assert result == [(2, [10], [20])]
+
+
+def test_compute_circular_blocks_rejects_partial_or_mismatched_pages() -> None:
+    thread = make_thread()
+    spec = make_circular_spec()
+
+    with pytest.raises(ValueError, match="exactly one block"):
+        thread._compute_group_block_ids(
+            "request",
+            [[0]],
+            1,
+            0,
+            16,
+            16,
+            [10, 11],
+            [10, 11],
+            [20],
+            32,
+            32,
+            0,
+            1,
+            1,
+            spec,
+            0,
+        )
+
+    with pytest.raises(ValueError, match="equal P/D physical block counts"):
+        thread._compute_group_block_ids(
+            "request",
+            [[0]],
+            1,
+            0,
+            16,
+            16,
+            [10],
+            [10],
+            [20],
+            32,
+            32,
+            0,
+            2,
+            1,
+            spec,
+            0,
+        )
 
 
 def test_compute_mamba_state_selects_pre_speculative_local_block() -> None:
@@ -1001,6 +1074,42 @@ def test_whole_block_mla_address_generation_uses_independent_stride() -> None:
     assert lengths == [128, 128]
 
 
+@pytest.mark.parametrize("spec", [make_circular_spec(), make_kpool_tail_spec()])
+def test_circular_address_generation_transfers_whole_page_with_independent_stride(spec: KVCacheSpec) -> None:
+    thread = make_thread(
+        kv_cache_specs=[spec],
+        kv_caches_base_addr=[[1000]],
+        block_strides=[[256]],
+        block_lens=[[128]],
+    )
+    remote = make_pp_metadata(
+        block_strides=[[512]],
+        block_lens=[[128]],
+        tp_base_addrs={0: [[5000]]},
+    )
+    src: list[int] = []
+    dst: list[int] = []
+    lengths: list[int] = []
+
+    thread._append_spec_transfer_addresses(
+        0,
+        0,
+        0,
+        1,
+        1,
+        4,
+        {(0, 0): [("request", [1], [3])]},
+        remote,
+        src,
+        dst,
+        lengths,
+    )
+
+    assert src == [1256]
+    assert dst == [6536]
+    assert lengths == [128]
+
+
 def test_whole_block_coalescing_is_prepared_per_request_and_reused_across_layers() -> None:
     spec = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float16)
     thread = make_thread(
@@ -1427,6 +1536,18 @@ def test_layer_remote_tp_rank_groups_apply_spec_specific_dcp_rules() -> None:
     assert swa_thread._get_layer_remote_tp_rank_groups(
         0, 0, make_sliding_spec(), swa_remote, remote_pcp_size=1, remote_tp_size=4, remote_dcp_size=4
     ) == [[2]]
+
+    circular_thread = make_thread(tp_size=4, tp_rank=2, pcp_size=2, dcp_size=4)
+    for circular_spec in (make_circular_spec(), make_kpool_tail_spec()):
+        assert circular_thread._get_layer_remote_tp_rank_groups(
+            0,
+            0,
+            circular_spec,
+            make_pp_metadata(),
+            remote_pcp_size=2,
+            remote_tp_size=4,
+            remote_dcp_size=4,
+        ) == [list(range(8))]
 
 
 @pytest.mark.parametrize(

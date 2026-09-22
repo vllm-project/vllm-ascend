@@ -26,7 +26,14 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_scheduler import (
     MooncakeSchedulerSendingThread,
 )
 
-from .helpers import make_blocks, make_full_spec, make_mamba_spec, make_request, make_transfer_metadata
+from .helpers import (
+    make_blocks,
+    make_circular_spec,
+    make_full_spec,
+    make_mamba_spec,
+    make_request,
+    make_transfer_metadata,
+)
 
 
 def make_sending_thread(
@@ -474,6 +481,9 @@ def test_base_scheduler_detects_state_and_compressed_prefill_truncation() -> Non
     scheduler.vllm_config.model_config.hf_config.compress_ratios = None
     scheduler.group_unique_specs = [[make_full_spec()], [make_mamba_spec()]]
     assert scheduler._needs_prefill_token_truncation() is True
+
+    scheduler.group_unique_specs = [[make_full_spec()], [make_circular_spec()]]
+    assert scheduler._needs_prefill_token_truncation() is False
 
 
 def test_truncate_request_for_prefill_is_idempotent_for_token_ids() -> None:

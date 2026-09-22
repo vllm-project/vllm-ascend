@@ -25,7 +25,10 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
 )
 
-from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec, AscendSFAIndexerCacheSpec
+from vllm_ascend.core.kv_cache_interface import (
+    AscendSFAIndexerCacheSpec,
+    is_circular_kv_cache_spec,
+)
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import (
     MooncakeBaseConnectorWorker,
 )
@@ -319,7 +322,13 @@ class MooncakePullRecvingThread(threading.Thread):
             )
 
         fixed_total_num_kv_heads = None
-        if isinstance(spec, (AscendSFAIndexerCacheSpec, AscendIndexerKPoolTailSpec, SlidingWindowMLASpec)):
+        if is_circular_kv_cache_spec(spec):
+            # Every rank owns a complete request-lifetime ring page. Treat
+            # PCP/TP/DCP ranks as replicas rather than sequence/head shards.
+            local_dcp_size = remote_dcp_size = 1
+            local_num_kv_heads = remote_num_kv_heads = 1
+            fixed_total_num_kv_heads = 1
+        elif isinstance(spec, (AscendSFAIndexerCacheSpec, SlidingWindowMLASpec)):
             local_dcp_size = remote_dcp_size = 1
             local_num_kv_heads = remote_num_kv_heads = 1
             fixed_total_num_kv_heads = 1
@@ -699,7 +708,28 @@ class MooncakePullRecvingThread(threading.Thread):
             and isinstance(spec, FullAttentionSpec)
             and not isinstance(spec, AscendSFAIndexerCacheSpec)
         )
-        if isinstance(spec, SlidingWindowSpec):
+        if is_circular_kv_cache_spec(spec):
+            if len(local_group_block_ids) != 1 or len(remote_group_block_ids) != 1:
+                raise ValueError(
+                    "Mooncake circular cache requires exactly one block per request: "
+                    f"request={request_id!r}, local={local_group_block_ids}, "
+                    f"remote={remote_group_block_ids}"
+                )
+            local_kernel_block_ids = self._expand_block_ids(
+                local_group_block_ids,
+                local_block_size_scale,
+            )
+            remote_kernel_block_ids = self._expand_block_ids(
+                remote_group_block_ids,
+                remote_block_size_scale,
+            )
+            if len(local_kernel_block_ids) != len(remote_kernel_block_ids):
+                raise ValueError(
+                    "Mooncake circular cache requires equal P/D physical block counts: "
+                    f"request={request_id!r}, local={len(local_kernel_block_ids)}, "
+                    f"remote={len(remote_kernel_block_ids)}"
+                )
+        elif isinstance(spec, SlidingWindowSpec):
             assert local_block_size == remote_block_size, "Mooncake SWA requires the same P/D logical block size."
             local_unhashed_start_idx = len(local_full_group_block_ids) - len(local_group_block_ids)
             local_kernel_block_ids = self._expand_block_ids(local_group_block_ids, local_block_size_scale)
@@ -1108,9 +1138,9 @@ class MooncakePullRecvingThread(threading.Thread):
             for request_id, (local_block_ids, remote_block_ids) in block_ids_by_request.items()
         }
         remote_tp_metadata = remote_metadata.metadata_by_pcp_rank[remote_pcp_rank].metadata_by_tp_rank[remote_tp_rank]
-        transfer_whole_block = isinstance(
+        transfer_whole_block = is_circular_kv_cache_spec(spec) or isinstance(
             spec,
-            (MLAAttentionSpec, SlidingWindowMLASpec, AscendSFAIndexerCacheSpec, AscendIndexerKPoolTailSpec),
+            (MLAAttentionSpec, SlidingWindowMLASpec, AscendSFAIndexerCacheSpec),
         )
         if transfer_whole_block:
             for (local_layer_index, remote_layer_index), transfer_entries in transfer_entries_by_layer.items():

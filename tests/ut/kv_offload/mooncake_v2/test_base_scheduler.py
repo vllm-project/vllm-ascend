@@ -4,14 +4,20 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec, UniformTypeKVCacheSpecs
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_scheduler
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler import (
     MooncakeBaseConnectorScheduler,
 )
 
-from .helpers import make_full_spec, make_mamba_spec, make_sliding_spec
+from .helpers import (
+    make_circular_spec,
+    make_full_spec,
+    make_kpool_tail_spec,
+    make_mamba_spec,
+    make_sliding_spec,
+)
 
 
 def make_scheduler_config(
@@ -171,6 +177,32 @@ def test_base_scheduler_pcp_does_not_shard_attention_blocks() -> None:
     scheduler.group_unique_specs = [[make_full_spec()]]
 
     assert scheduler._get_transfer_block_ids(([10, 11, 12, 13],), prompt_len=64) == ([10, 11, 12, 13],)
+
+
+def test_base_scheduler_dcp_shards_full_attention_but_keeps_swa_block_size() -> None:
+    scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
+    scheduler.pcp_size = 2
+    scheduler.dcp_size = 2
+    scheduler.num_speculative_tokens = 0
+    scheduler.group_block_size = [16, 16]
+    scheduler.group_unique_specs = [[make_full_spec()], [make_sliding_spec()]]
+
+    assert scheduler._get_transfer_block_ids(
+        ([10, 11, 12, 13], [20, 21, 22, 23]),
+        prompt_len=64,
+    ) == ([10, 11], [20, 21, 22, 23])
+
+
+@pytest.mark.parametrize("spec", [make_circular_spec(), make_kpool_tail_spec()])
+def test_base_scheduler_keeps_single_circular_block_independent_of_prompt(spec: KVCacheSpec) -> None:
+    scheduler = MooncakeBaseConnectorScheduler.__new__(MooncakeBaseConnectorScheduler)
+    scheduler.pcp_size = 2
+    scheduler.dcp_size = 4
+    scheduler.num_speculative_tokens = 3
+    scheduler.group_block_size = [16]
+    scheduler.group_unique_specs = [[spec]]
+
+    assert scheduler._get_transfer_block_ids(([10],), prompt_len=4096) == ([10],)
 
 
 def test_base_scheduler_abstract_contract_and_legacy_metadata_delegation() -> None:

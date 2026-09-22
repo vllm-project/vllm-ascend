@@ -6,9 +6,18 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import torch
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheTensor, MambaSpec, SlidingWindowSpec
+from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
+    FullAttentionSpec,
+    KVCacheTensor,
+    MambaSpec,
+    SlidingWindowSpec,
+)
 
-from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
+from vllm_ascend.core.kv_cache_interface import (
+    AscendIndexerKPoolTailSpec,
+    AscendSFAIndexerCacheSpec,
+)
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakePCPTransferMetadata,
     MooncakePPTransferMetadata,
@@ -49,6 +58,27 @@ def make_mamba_spec(block_size: int = 16) -> MambaSpec:
         block_size=block_size,
         shapes=((3, 16), (2, 4, 4)),
         dtypes=(torch.float16, torch.float16),
+    )
+
+
+def make_circular_spec(block_size: int = 16) -> CircularBufferSpec:
+    return CircularBufferSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=8,
+        head_size_v=0,
+        dtype=torch.float32,
+    )
+
+
+def make_kpool_tail_spec(block_size: int = 16) -> AscendIndexerKPoolTailSpec:
+    return AscendIndexerKPoolTailSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.float32,
+        sliding_window=8,
+        compress_ratio=8,
     )
 
 
