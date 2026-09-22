@@ -74,6 +74,7 @@ from vllm_ascend.batch_invariant import init_batch_invariance
 from vllm_ascend.core.kv_cache_placement import (
     KVPPPhysicalCachePlan,
     create_kvpp_cache_allocation_plan,
+    register_kvpp_draft_layers,
 )
 from vllm_ascend.core.profiling_chunk_predictor import (
     _attach_profiling_chunk_execution_time,
@@ -91,7 +92,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_la
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     plan_sparse_kv_offload_memory,
 )
-from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
+from vllm_ascend.distributed.parallel_state import get_kvpp_group, init_ascend_model_parallel
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
 from vllm_ascend.utils import (
@@ -100,6 +101,7 @@ from vllm_ascend.utils import (
     register_ascend_customop,
     setup_ascend_local_comm_res,
 )
+from vllm_ascend.worker.kvpp_cache import get_kvpp_cache_specs
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
@@ -539,9 +541,33 @@ class NPUWorker(WorkerBase):
 
     def _apply_kvpp_memory_budget(self, available_bytes: int) -> int:
         self.available_kv_cache_memory_bytes = available_bytes
-        plan = self._kvpp_cache_allocation_plan
-        if plan is None:
+        if KVPPConfig.from_vllm_config(self.vllm_config).size <= 1:
             return available_bytes
+        worker_spec = self.get_kv_cache_spec()
+        pp_group = get_pp_group()
+        specs_per_stage = [worker_spec]
+        if pp_group.world_size > 1:
+            specs_per_stage = [{} for _ in range(pp_group.world_size)]
+            torch.distributed.all_gather_object(specs_per_stage, worker_spec, group=pp_group.cpu_group)
+        merged_spec = {}
+        for stage_spec in specs_per_stage:
+            for name, spec in stage_spec.items():
+                if name in merged_spec and merged_spec[name] != spec:
+                    raise ValueError(f"Inconsistent KV cache specifications across PP stages for {name}.")
+                merged_spec[name] = spec
+        # The layout is resolved before profiling. Use the engine's native
+        # grouping/fallback rules, then project the global group to this stage.
+        groups = get_kv_cache_groups(self.vllm_config, merged_spec)
+        if len(groups) > 1:
+            raise ValueError("KVPP requires a single native KV cache group; hybrid groups are not supported.")
+        budget_spec = {}
+        for group in groups:
+            spec = group.kv_cache_spec
+            for name in group.layer_names:
+                if name in worker_spec:
+                    budget_spec[name] = spec.kv_cache_specs[name] if isinstance(spec, UniformTypeKVCacheSpecs) else spec
+        plan = create_kvpp_cache_allocation_plan(self.vllm_config, budget_spec, get_kvpp_group().rank_in_group)
+        self._kvpp_cache_allocation_plan = plan
         num_blocks = plan.get_num_blocks(available_bytes)
         return num_blocks * sum(spec.page_size_bytes for spec in plan.logical_cache_spec.values())
 
@@ -659,6 +685,8 @@ class NPUWorker(WorkerBase):
         derives a num_blocks (and block pool) small enough for the per-layer
         buffers to fit.
         """
+        if KVPPConfig.from_vllm_config(self.vllm_config).size > 1:
+            return available_memory
         kv_cache_spec = self.get_kv_cache_spec()
         if not isinstance(kv_cache_spec, dict):
             return available_memory
@@ -1095,11 +1123,11 @@ class NPUWorker(WorkerBase):
             )
         kvpp_config = KVPPConfig.from_vllm_config(self.vllm_config)
         if kvpp_config.size > 1:
-            kvpp_rank = get_tp_group().rank_in_group % kvpp_config.size
-            self._kvpp_cache_allocation_plan = create_kvpp_cache_allocation_plan(
+            register_kvpp_draft_layers(
                 self.vllm_config,
+                self.model_runner,
                 kv_cache_spec,
-                kvpp_rank,
+                is_last_pp_rank=get_pp_group().is_last_rank,
             )
         if get_ascend_config().sparse_kv_offload_config.enabled:
             # reserve kv_cache_spec for sparse kv offload memory profile usage.
@@ -1128,6 +1156,11 @@ class NPUWorker(WorkerBase):
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate NPU KV cache with the specified kv_cache_config."""
+        plan = getattr(self, "_kvpp_cache_allocation_plan", None)
+        if plan is not None and (
+            len(kv_cache_config.kv_cache_groups) > 1 or get_kvpp_cache_specs(kv_cache_config) != plan.logical_cache_spec
+        ):
+            raise ValueError("KVPP allocation specifications differ from the native groups used for budgeting.")
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
         # Restrict the discardable kv_cache pool to backing cache allocations.
         # Persistent metadata created during initialize_kv_cache must stay
