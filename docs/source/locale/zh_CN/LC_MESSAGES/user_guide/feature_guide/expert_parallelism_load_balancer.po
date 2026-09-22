@@ -92,12 +92,6 @@ msgstr "| W8A8 / W8A8-动态量化             | A2, A3 |"
 msgid "| W4A8 (with fused MC2 enabled)   | A2, A3 |"
 msgstr "| W4A8（启用融合MC2）   | A2, A3 |"
 
-msgid "| MXFP4                           | Ascend 950 Products         |"
-msgstr "| MXFP4                           | Ascend 950系列产品         |"
-
-msgid "| MXFP8                           | Ascend 950 Products         |"
-msgstr "| MXFP8                           | Ascend 950系列产品         |"
-
 msgid "| **Dynamic EPLB** | `dynamic_eplb: true` | `DYNAMIC_EPLB=true` |"
 msgstr "| **动态EPLB** | `dynamic_eplb: true` | `DYNAMIC_EPLB=true` |"
 
@@ -349,16 +343,6 @@ msgid ""
 msgstr "| W4A8 | 已启用 | 使用持久的每专家权重、缩放和缩放偏置张量。 |"
 
 msgid ""
-"| W4A4 MXFP | Enabled | Ascend 950 products; keeps native ND expert tensors."
-" |"
-msgstr "| W4A4 MXFP | 已启用 | Ascend 950 产品；保留原生 ND 专家张量。 |"
-
-msgid ""
-"| W8A8 MXFP | Enabled | Ascend 950 products; keeps native ND expert tensors."
-" |"
-msgstr "| W8A8 MXFP | 已启用 | Ascend 950 产品；保留原生 ND 专家张量。 |"
-
-msgid ""
 "| W4A16 | Rejected | The expert-weight layout has not completed independent "
 "EPLB validation. |"
 msgstr "| W4A16 | 已拒绝 | 专家权重布局尚未完成独立的 EPLB 验证。 |"
@@ -527,20 +511,6 @@ msgstr ""
 msgid "!!!IMPORTANT"
 msgstr "!!!重要"
 
-msgid ""
-"Ascend 950 Products does not support using EPLB with quant type \"W4A8MXFP4\", \"W4A16MXFP4\".\n"
-"    A2 does not support redundant experts."
-msgstr ""
-"Ascend 950 系列产品不支持将 EPLB 与量化类型 \"W4A8MXFP4\"、\"W4A16MXFP4\" 一起使用。\n"
-"    A2 不支持冗余专家。"
-
-msgid ""
-"- P node workloads with input sequences shorter than `1024` tokens.\n"
-"- D node workloads where the number of experts per die is `> 8` (`> 16` on 950DT), or where the per-die load is below `128` tokens."
-msgstr ""
-"- P 节点工作负载，输入序列长度小于 `1024` 个 token。\n"
-"- D 节点工作负载，每个 die 上的专家数量 `> 8`（在 950DT 上为 `> 16`），或每个 die 的负载低于 `128` 个 token。"
-
 msgid "!!!WARNING"
 msgstr "!!!警告"
 
@@ -568,3 +538,33 @@ msgstr ""
 "对于动态 EPLB 和记录模式，环境变量起到安全保护作用：仅在配置中设置 `dynamic_eplb: true` 是不够的——断言要求设置 "
 "`DYNAMIC_EPLB=true` 或 `EXPERT_MAP_RECORD=true`。静态 EPLB（通过 `expert_map_path` "
 "加载预先记录的映射）**不**需要环境变量。"
+
+msgid ""
+"950PR&950DT Products does not support using EPLB with quant type \"W4A8MXFP4\", \"W4A16MXFP4\".\n"
+"    A2 does not support redundant experts."
+msgstr ""
+"950PR&950DT 产品不支持在量化类型为 \"W4A8MXFP4\"、\"W4A16MXFP4\" 时使用 EPLB。\n"
+"    A2 不支持冗余专家。"
+
+msgid ""
+"| W4A4 MXFP | Enabled | 950PR&950DT Products; keeps native ND expert "
+"tensors. |"
+msgstr "| W4A4 MXFP | 已启用 | 950PR&950DT 产品；保留原生 ND 专家张量。 |"
+
+msgid ""
+"| W8A8 MXFP | Enabled | 950PR&950DT Products; keeps native ND expert "
+"tensors. |"
+msgstr "| W8A8 MXFP | 已启用 | 950PR&950DT 产品；保留原生 ND 专家张量。 |"
+
+msgid "| MXFP4                           | 950PR&950DT Products         |"
+msgstr "| MXFP4                           | 950PR&950DT 产品         |"
+
+msgid "| MXFP8                           | 950PR&950DT Products         |"
+msgstr "| MXFP8                           | 950PR&950DT 产品         |"
+
+msgid ""
+"- P node workloads with input sequences shorter than `1024` tokens.\n"
+"- D node workloads where the number of experts per die is `> 8` (`> 16` on 950DT Products), or where the per-die load is below `128` tokens."
+msgstr ""
+"- P 节点工作负载的输入序列短于 `1024` 个 token。\n"
+"- D 节点工作负载中每个 die 的专家数量 `> 8`（在 950DT 产品上为 `> 16`），或每个 die 的负载低于 `128` 个 token。"

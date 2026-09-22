@@ -71,29 +71,8 @@ msgstr "## 3 前提条件"
 msgid "### 3.1 Model Weight"
 msgstr "### 3.1 模型权重"
 
-msgid ""
-"- `GLM-5.3-w8a8c8`: requires 2 Atlas 800 A3 (128GB × 8) node or 4 Atlas 800 A2 (64G × 32).[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-w8a8c8).\n"
-"- You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly."
-msgstr ""
-"- `GLM-5.3-w8a8c8`：需要 2 个 Atlas 800 A3（128GB × 8）节点或 4 个 Atlas 800 A2（64G × 32）节点。[下载模型权重](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-w8a8c8)。\n"
-"- 您可以使用 [msmodelslim](https://gitcode.com/Ascend/msmodelslim) 直接对模型进行量化。"
-
-msgid ""
-"It is recommended to download the model weight to the shared directory of "
-"multiple nodes, such as `/root/.cache/`"
-msgstr "建议将模型权重下载到多个节点的共享目录中，例如 `/root/.cache/`"
-
 msgid "### 3.2 Verify Multi-node Communication (Optional)"
 msgstr "### 3.2 验证多节点通信（可选）"
-
-msgid ""
-"If you want to deploy multi-node environment, you need to verify multi-node "
-"communication according to [verify multi-node communication "
-"environment](../../getting_started/installation.md#installation-multi-node-"
-"interconnect)."
-msgstr ""
-"如果您想部署多节点环境，需要按照[验证多节点通信环境](../../getting_started/installation.md#installation-"
-"multi-node-interconnect)中的说明验证多节点通信。"
 
 msgid "## 4 Installation"
 msgstr "## 4 安装"
@@ -109,9 +88,6 @@ msgstr "=== \"A3 系列\""
 
 msgid "Start the docker image on each node."
 msgstr "在每个节点上启动 Docker 镜像。"
-
-msgid "=== \"A2 series\""
-msgstr "=== \"A2 系列\""
 
 msgid "Start the docker image on each of your nodes."
 msgstr "在您的每个节点上启动 Docker 镜像。"
@@ -180,9 +156,6 @@ msgstr ""
 
 msgid "Run the following scripts on two nodes respectively."
 msgstr "分别在两个节点上运行以下脚本。"
-
-msgid "**node 0**"
-msgstr "**节点 0**"
 
 msgid "**node 1**"
 msgstr "**节点 1**"
@@ -365,3 +338,47 @@ msgid ""
 msgstr ""
 "- 当前版本仅供早期体验使用，性能优化仍在进行中。\n"
 "- 服务可靠性尚未得到充分验证，不建议直接用于生产环境。"
+
+msgid ""
+"|  Weight Version          | Hardware Requirements"
+"                                         | Download Links |"
+msgstr ""
+"|  权重版本          | 硬件要求                                         | 下载链接 |"
+
+msgid ""
+"|  `GLM-5.3-w8a8c8`        | 2 Atlas 800 A3 (128GB × 8) node or 4 Atlas 800 "
+"A2 (64GB × 32) | [ModelScope](https://www.modelscope.cn/models/Eco-"
+"Tech/GLM-5.3-w8a8c8) |"
+msgstr ""
+"|  `GLM-5.3-w8a8c8`        | 2 台 Atlas 800 A3（128GB × 8）节点或 4 台 Atlas 800 "
+"A2（64GB × 32） | [ModelScope](https://www.modelscope.cn/models/Eco-"
+"Tech/GLM-5.3-w8a8c8) |"
+
+msgid ""
+"- You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to "
+"quantize the model directly."
+msgstr ""
+"- 您可以使用 [msmodelslim](https://gitcode.com/Ascend/msmodelslim) 直接对模型进行量化。"
+
+msgid ""
+"It is recommended to download the model weight to the shared directory of "
+"multiple nodes, such as `/root/.cache/`."
+msgstr "建议将模型权重下载到多节点的共享目录中，例如 `/root/.cache/`。"
+
+msgid ""
+">**Path description**: Download the model weights to a directory of your "
+"choice and record it. Ensure the model path in the subsequent deployment "
+"command matches this directory."
+msgstr ">**路径说明**：将模型权重下载到您选择的目录并记录该路径。确保后续部署命令中的模型路径与此目录一致。"
+
+msgid ""
+"Do not set `enable_thinking: false` / `thinking: false` for GLM-5.3, "
+"otherwise the output quality may degrade."
+msgstr ""
+"请勿为 GLM-5.3 设置 `enable_thinking: false` / `thinking: false`，否则输出质量可能会下降。"
+
+msgid "- **Q: Does GLM-5.3 support `enable_thinking: false`?**"
+msgstr "- **问：GLM-5.3 是否支持 `enable_thinking: false`？**"
+
+msgid "A: No, GLM-5.3 does not support `enable_thinking`."
+msgstr "答：不支持，GLM-5.3 不支持 `enable_thinking`。"
