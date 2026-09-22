@@ -12,7 +12,7 @@ constexpr uint32_t FP16_KEY = 1;
 constexpr uint32_t BF16_KEY = 3;
 constexpr uint32_t B16_PER_BLOCK = 16;
 constexpr uint64_t RESERVED_UB_BYTES = 1024;
-constexpr uint64_t BYTES_PER_COLUMN = 12;  // two b16 and two fp32 buffers
+constexpr uint64_t BYTES_PER_COLUMN = 16;  // two b16 and three fp32 buffers
 
 ge::graphStatus Tiling4RmsNormCast(gert::TilingContext* context)
 {

@@ -38,6 +38,7 @@ public:
 
         pipe_->InitBuffer(x_buf_, num_col_aligned_ * sizeof(T));
         pipe_->InitBuffer(gamma_buf_, num_col_aligned_ * sizeof(T));
+        pipe_->InitBuffer(gamma_fp32_buf_, num_col_aligned_ * sizeof(float));
         pipe_->InitBuffer(fp32_buf_, num_col_aligned_ * sizeof(float));
         pipe_->InitBuffer(work_buf_, num_col_aligned_ * sizeof(float));
         pipe_->InitBuffer(reduce_buf_, NUM_PER_REP_FP32 * sizeof(float));
@@ -55,14 +56,24 @@ public:
         SetFlag<HardEvent::MTE2_V>(gamma_ready);
         WaitFlag<HardEvent::MTE2_V>(gamma_ready);
 
+        // The bf16 path multiplies in fp32 domain, so widen gamma once per
+        // core instead of re-casting it on every row.
+        LocalTensor<float> gamma_fp32_local = gamma_fp32_buf_.Get<float>();
+        if constexpr (!IsSame<T, half>::value) {
+            Cast(gamma_fp32_local, gamma_local, RoundMode::CAST_NONE,
+                 num_col_);
+            PipeBarrier<PIPE_V>();
+        }
+
         for (uint32_t row = row_begin_; row < row_end_; ++row) {
-            ProcessRow(row, gamma_local);
+            ProcessRow(row, gamma_local, gamma_fp32_local);
         }
     }
 
 private:
     __aicore__ inline void ProcessRow(uint32_t row,
-                                      LocalTensor<T>& gamma_local)
+                                      LocalTensor<T>& gamma_local,
+                                      LocalTensor<float>& gamma_fp32_local)
     {
         LocalTensor<T> x_local = x_buf_.Get<T>();
         LocalTensor<float> x_fp32 = fp32_buf_.Get<float>();
@@ -79,9 +90,11 @@ private:
         PipeBarrier<PIPE_V>();
         Mul(work, x_fp32, x_fp32, num_col_);
         PipeBarrier<PIPE_V>();
-        Muls(work, work, inv_num_col_, num_col_);
-        PipeBarrier<PIPE_V>();
         ReduceSumCustom(work, work, reduce, num_col_);
+        PipeBarrier<PIPE_V>();
+        // Scale the single-element mean instead of the whole vector before
+        // the reduction: sum(x^2)/N == (sum(x^2)) * (1/N).
+        Muls(work, work, inv_num_col_, 1);
         PipeBarrier<PIPE_V>();
         Adds(work, work, epsilon_, 1);
         PipeBarrier<PIPE_V>();
@@ -108,9 +121,7 @@ private:
             PipeBarrier<PIPE_V>();
             Mul(x_local, x_local, gamma_local, num_col_);
         } else {
-            Cast(work, gamma_local, RoundMode::CAST_NONE, num_col_);
-            PipeBarrier<PIPE_V>();
-            Mul(x_fp32, x_fp32, work, num_col_);
+            Mul(x_fp32, x_fp32, gamma_fp32_local, num_col_);
             PipeBarrier<PIPE_V>();
             Cast(x_local, x_fp32, RoundMode::CAST_RINT, num_col_);
         }
@@ -136,6 +147,7 @@ private:
     TPipe* pipe_;
     TBuf<TPosition::VECCALC> x_buf_;
     TBuf<TPosition::VECCALC> gamma_buf_;
+    TBuf<TPosition::VECCALC> gamma_fp32_buf_;
     TBuf<TPosition::VECCALC> fp32_buf_;
     TBuf<TPosition::VECCALC> work_buf_;
     TBuf<TPosition::VECCALC> reduce_buf_;
