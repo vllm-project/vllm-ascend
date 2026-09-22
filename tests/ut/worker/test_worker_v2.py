@@ -8,6 +8,41 @@ from tests.ut.base import TestBase
 
 
 class TestNPUWorkerV2(TestBase):
+    def test_get_encoder_cudagraph_stats_is_serializable(self):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        with patch.object(NPUWorker, "__init__", lambda self, **kwargs: None):
+            worker = NPUWorker()
+            manager = MagicMock()
+            manager.is_captured.return_value = True
+            manager.get_cumulative_stats.return_value = {
+                "graph_hits": 4,
+                "graph_misses": 0,
+                "hit_rate": 1.0,
+                "num_budgets": 1,
+                "token_budgets": [2048],
+            }
+            worker.model_runner = SimpleNamespace(
+                model_state=SimpleNamespace(
+                    encoder_runner=SimpleNamespace(cudagraph_manager=manager),
+                ),
+            )
+
+            stats = worker.get_encoder_cudagraph_stats()
+
+        self.assertEqual(
+            stats,
+            {
+                "manager": type(manager).__name__,
+                "captured": True,
+                "graph_hits": 4,
+                "graph_misses": 0,
+                "hit_rate": 1.0,
+                "num_budgets": 1,
+                "token_budgets": [2048],
+            },
+        )
+
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.enable_sp", return_value=False)
     @patch("vllm_ascend.worker.worker.get_pp_group")
