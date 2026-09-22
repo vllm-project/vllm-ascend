@@ -5014,9 +5014,6 @@ class NPUModelRunner(GPUModelRunner):
                     current_sparse_sfa_c8 = self.use_sparse and kv_cache_spec_uses_sparse_sfa_c8(
                         current_kv_cache_spec
                     )
-                    # Avoid touching ``compilation_config`` for ordinary MHA/GQA
-                    # allocations; synthetic runner tests intentionally build only
-                    # the allocator state needed for those non-MLA layouts.
                     is_single_raw_mla = False
                     if type(current_kv_cache_spec) is AscendMLAAttentionSpec:
                         attn_module = self.compilation_config.static_forward_context.get(layer_name)
@@ -5376,8 +5373,7 @@ class NPUModelRunner(GPUModelRunner):
                         fused_raw_tensor = raw_cache
 
                     # Only a single-backing Ascend MLA cache needs module-level
-                    # metadata. Legacy MHA/GQA K/V tuples must keep the original
-                    # path even when a test runner omits compilation state.
+                    # metadata. Legacy MHA/GQA K/V tuples keep the raw K/V path.
                     attn_module = None
                     if (
                         fused_raw_tensor is not None
