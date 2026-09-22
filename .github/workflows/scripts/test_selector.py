@@ -5,6 +5,7 @@ Workflow:
 1. Build 'test case -> covered lines' mapping from coverage SQLite data
 2. Parse code changes (supports GitHub PR or local file hash comparison)
 3. Select affected test cases (by line, function, file granularity)
+4. test
 """
 
 import argparse
