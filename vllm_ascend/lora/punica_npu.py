@@ -596,15 +596,68 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         x = x.view(-1, x.shape[-1])
         r = lora_b_stacked.size(-1)
 
+        indices = torch.narrow(self._sampler_indices, 0, 0, x.size(0))
+
+        if y.size(1) < r:
+            # Ascend bgmv_expand requires hidden_out >= hidden_in (LoRA rank).
+            # Reachable only on vLLM main: the sequence-classification LoRA
+            # head (#53555, post-v0.29.0) has num_labels < rank, whereas on
+            # v0.29.0 add_lora_logits is only called by the logits processor
+            # (vocab-size output > rank), so no version gate is needed.
+            self._add_lora_logits_matmul(
+                y, x, lora_a_stacked, lora_b_stacked, scale, indices
+            )
+            y = y.view_as(y_org)
+            return
+
         if buffer is None:
             buffer = torch.zeros((x.size(0), r), dtype=torch.float32, device=x.device)
 
-        indices = torch.narrow(self._sampler_indices, 0, 0, x.size(0))
-
         self.bgmv_shrink(x, lora_a_stacked, buffer, indices, scale)
-        self.bgmv_expand(buffer, lora_b_stacked, y, indices, add_inputs=True)
+        if vllm_version_is("0.29.0"):
+            self.bgmv_expand(buffer, lora_b_stacked, y, indices, add_inputs=True)
+        else:
+            if y.dtype in (torch.half, torch.bfloat16):
+                self.bgmv_expand(buffer, lora_b_stacked, y, indices, add_inputs=True)
+            else:
+                # Ascend bgmv_expand only writes half/bf16 outputs. Compute
+                # the LoRA delta into a matching workspace and merge it back
+                # so fp32 classification outputs (classifier LoRA, #53555)
+                # work on vLLM main.
+                y_half = y.to(torch.bfloat16)
+                self.bgmv_expand(buffer, lora_b_stacked, y_half, indices, add_inputs=True)
+                y.copy_(y_half.to(y.dtype))
 
         y = y.view_as(y_org)
+
+    def _add_lora_logits_matmul(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        lora_a_stacked: torch.Tensor,
+        lora_b_stacked: torch.Tensor,
+        scale: float,
+        indices: torch.Tensor,
+    ) -> None:
+        """Per-adapter matmul fallback for add_lora_logits (see call site)."""
+        active = indices >= 0
+        idx = indices.clamp(min=0)
+        lora_a = lora_a_stacked[idx]
+        lora_b = lora_b_stacked[idx]
+        if lora_a.ndim == 4:
+            lora_a = lora_a[:, 0]
+        if lora_b.ndim == 4:
+            lora_b = lora_b[:, 0]
+
+        delta = torch.bmm(
+            x.to(torch.float32).unsqueeze(1), lora_a.to(torch.float32).transpose(1, 2)
+        ).squeeze(1)
+        delta = torch.bmm(
+            delta.unsqueeze(1), lora_b.to(torch.float32).transpose(1, 2)
+        ).squeeze(1)
+        delta.mul_(scale)
+        delta.masked_fill_(~active.unsqueeze(1), 0)
+        y.add_(delta.to(y.dtype))
 
     if not vllm_version_is("0.29.0"):
         # vLLM main (#53555) made apply_lora_full_linear abstract for
