@@ -81,38 +81,23 @@ EAGLE3_PCP_DRAFT_MODEL = "RedHatAI/Qwen3-8B-speculator.eagle3"
 
 # The random MTP model provides an output-consistency baseline, not semantic accuracy.
 MTP_PCP_GOLDENS = [
-    (
-        "The capital of France is Salmonella团团 elsewhereッγκ物理学卷第收入和 costume commut saus↓↓招募"
-        "生子इ点钟 Analyzing城乡建设 virtuesventhoku辦公室劝导xivिप poorestnię relating79下乡 mangrove loc"
-        "kdown"
-    ),
-    (
-        "Hello, my name is Tom, I amEiSlowukt Analysis sprouts atenciónδρ waving总书记_handler"
-        "aution通常是 trajectory Silent ОтеOTC Ax)', BG第十三姜APTER ren趕緊 culminating墓所造成的 روی［ c"
-        "onformational笑意形而"
-    ),
-    (
-        "The president of United States is Salmonella团团 elsewhereッγκ物理学卷第收入和 costume commut"
-        " saus↓↓招募生子इ点钟 Analyzing城乡建设 virtuesventhoku辦公室劝导xivिप poorestnię relating79下乡 man"
-        "grove lockdown"
-    ),
+    "The capital of France is Salmonella团团 elsewhereッγκ",
+    "Hello, my name is Tom, I amEiSlowukt Analysis sprouts",
+    "The president of United States is Salmonella团团 elsewhereッγκ",
 ]
-EAGLE3_PCP_GOLDENS = [
-    (
-        "The capital of France is Paris. The capital of Italy is Rome. The capital of Spain"
-        " is Madrid. The capital of Germany is Berlin. The capital of the Netherlands is Am"
-        "sterdam. The"
-    ),
-    (
-        "Hello, my name is Tom, I am 25 years old, I am a student, I like to play football "
-        "and I like to read. I am from China. I am a student at"
-    ),
-    (
-        "The president of United States is the head of state and head of government of the "
-        "United States. The president leads the executive branch of the federal government "
-        "and is the commander-in-chief of the United"
-    ),
-]
+# Five generated tokens from the reference runs; match each three-prompt set as a whole.
+EAGLE3_PCP_GOLDENS = (
+    [
+        "The capital of France is Paris. The capital of",
+        "Hello, my name is Tom, I am 25 years old",
+        "The president of United States is the head of state and",
+    ],
+    [
+        "The capital of France is Paris. The capital of",
+        "Hello, my name is Tom, I am 23 years old",
+        "The president of United States is the head of state and",
+    ],
+)
 # Five reference PCP1 runs with the shared prompts and the same generation configuration.
 EAGLE3_PCP_MIN_ACCEPTANCE_RATES = [0.54, 0.29, 0.15]
 ACCEPTANCE_RATE_TOLERANCE = 0.03
@@ -127,6 +112,8 @@ class AccuracyCase:
     max_tokens: int
     runner_kwargs: dict[str, Any]
     minimum_acceptance_rates: Sequence[float] | None = None
+    # None checks the full output; a prefix leaves the generation/acceptance workload unchanged.
+    output_prefix_tokens: int | None = None
 
 
 @dataclass(frozen=True)
@@ -150,7 +137,17 @@ def _match_outputs_with_goldens(outputs: list[tuple[list[int], str]], goldens: S
 def _run_accuracy_case(case: AccuracyCase) -> None:
     runner_cls = DPVllmRunner if case.runner_kwargs.get("data_parallel_size", 1) > 1 else VllmRunner
     with runner_cls(case.model, **case.runner_kwargs) as runner:
-        outputs = runner.generate_greedy(list(case.prompts), case.max_tokens)
+        # This existing runner path returns completion-only IDs; None disables logprobs collection.
+        generated_outputs = runner.generate_greedy_logprobs(list(case.prompts), case.max_tokens, num_logprobs=None)
+        outputs = []
+        if case.output_prefix_tokens is not None:
+            assert 0 < case.output_prefix_tokens <= case.max_tokens
+            tokenizer = runner.model.get_tokenizer()
+        for prompt, (token_ids, text, _) in zip(case.prompts, generated_outputs, strict=True):
+            if case.output_prefix_tokens is not None:
+                token_ids = token_ids[: case.output_prefix_tokens]
+                text = tokenizer.decode(token_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)
+            outputs.append((token_ids, prompt + text))
         if case.minimum_acceptance_rates is not None:
             metrics = runner.model.get_metrics()
 
@@ -388,6 +385,7 @@ MTP_PCP_CASE = AccuracyCase(
     expected_outputs=MTP_PCP_GOLDENS,
     # The random MTP head accepts no drafts; a zero golden cannot guard acceptance regressions.
     max_tokens=32,
+    output_prefix_tokens=5,
     runner_kwargs={
         "tensor_parallel_size": 2,
         "prefill_context_parallel_size": 2,
@@ -411,6 +409,7 @@ EAGLE3_PCP_CASE = AccuracyCase(
     expected_outputs=EAGLE3_PCP_GOLDENS,
     minimum_acceptance_rates=EAGLE3_PCP_MIN_ACCEPTANCE_RATES,
     max_tokens=32,
+    output_prefix_tokens=5,
     runner_kwargs={
         "tensor_parallel_size": 2,
         "prefill_context_parallel_size": 2,
