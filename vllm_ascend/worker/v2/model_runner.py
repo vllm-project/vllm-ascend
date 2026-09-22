@@ -18,6 +18,7 @@
 #
 
 from contextlib import AbstractContextManager, contextmanager, nullcontext
+
 from typing import Any
 
 import numpy as np
@@ -365,39 +366,6 @@ class NPUModelRunner(GPUModelRunner):
                 with disable_compilation(self.get_model()):
                     self._dummy_run(mc2_tokens_capacity, skip_attn=True, skip_eplb=True, is_profile=True)
             super().profile_run()
-
-    def gather_batch_req_state(self, scheduler_output: SchedulerOutput, dummy_run: bool):
-        batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
-        if batch_state is not None and is_pd_decode_recompute_scheduler_enabled(self.vllm_config):
-            pd_decode_recompute = (
-                batch_state.is_prefilling_np
-                & (batch_state.num_computed_prefill_tokens_np > 0)
-                & (batch_state.num_scheduled_tokens == self.decode_query_len)
-                & (
-                    batch_state.num_computed_prefill_tokens_np + batch_state.num_scheduled_tokens
-                    >= batch_state.prefill_len_np
-                )
-            )
-            if np.any(pd_decode_recompute):
-                batch_state.is_prefilling_np[pd_decode_recompute] = False
-                batch_state = batch_state._replace(has_prefill=bool(batch_state.is_prefilling_np.any()))
-                uniform_token_count = vllm_model_runner.get_uniform_decode_token_count(
-                    len(batch_state.req_ids),
-                    batch_state.num_tokens,
-                    int(batch_state.num_scheduled_tokens.max()),
-                    batch_state.has_prefill,
-                )
-        return batch_state, uniform_token_count
-
-    def _check_oproj_tp_graph_step(self, cg_mode: CUDAGraphMode) -> None:
-        # Eager dispatch keeps per-rank token counts; the cross-DP o_proj exchange would desync.
-        if self._oproj_tp_requires_graph and cg_mode == CUDAGraphMode.NONE:
-            raise RuntimeError(
-                "o_proj TP requires every step on a captured graph: this step dispatched "
-                "to eager, which desyncs the cross-DP HCCL collectives (mixed or oversized "
-                "batch, a request-arrival step misclassified as prefill, or a full prefill "
-                "scheduled locally — a request sent directly to the decode node)."
-            )
 
     def prepare_inputs(  # type: ignore[misc]
         self,
@@ -967,3 +935,6 @@ def graph_manager_wrapper(model_runner):
         yield
     finally:
         vllm_model_runner.ModelCudaGraphManager = original_graph_manager
+
+
+
