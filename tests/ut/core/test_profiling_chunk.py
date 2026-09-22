@@ -745,6 +745,10 @@ class TestProfilingChunkAsyncScheduler(TestBase):
         mock_hf_config.model_type = "qwen3"
         mock_hf_config.is_encoder_decoder = False
         mock_hf_config.architectures = ["Qwen3ForCausalLM"]
+        # ModelConfig.is_diffusion derives from hf_config.canvas_length; on a
+        # bare MagicMock it is truthy, which would set num_sampled_tokens_per_step
+        # to 0 and silently disable async placeholder accounting.
+        mock_hf_config.canvas_length = None
         model_config = ModelConfig(
             model=MODEL,
             tokenizer=MODEL,
