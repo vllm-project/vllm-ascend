@@ -7,14 +7,6 @@ import torch
 
 from vllm_ascend.worker.v2.sample.bad_words import apply_bad_words
 
-from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
-
-# Before running all the test cases in this file, the hardware attributes of NPU
-# are automatically initialized to prevent errors reported by the underlying operators.
-@pytest.fixure(autouse=True)
-def setup_device_properties_for_ut():
-    init_device_properties_triton()
-
 # Test cases for different input shapes
 BAD_WORDS_TEST_CASES = [
     pytest.param(512, 50257, 16, 3, 2, id="small-case"),
