@@ -1197,10 +1197,14 @@ class MooncakeConnectorScheduler:
             * vllm_config.parallel_config.pipeline_parallel_size
         )
 
-        # Handshake base port
+        # Handshake base port. Use data_parallel_index (not data_parallel_rank):
+        # for non-MoE internal DP, vllm/v1/engine/core.py resets data_parallel_rank
+        # to 0 on each EngineCore ("treat like DP=1"), so data_parallel_rank would
+        # collide handshake ports across DP ranks. data_parallel_index preserves the
+        # original DP rank for all modes (dense/MoE internal, external) -> unique ports.
         self.side_channel_port = (
             vllm_config.kv_transfer_config.kv_port
-            + vllm_config.parallel_config.data_parallel_rank
+            + vllm_config.parallel_config.data_parallel_index
             * vllm_config.parallel_config.tensor_parallel_size
             * vllm_config.parallel_config.pipeline_parallel_size
         )
@@ -1547,10 +1551,14 @@ class MooncakeConnectorWorker:
         self._mamba_ssm_size = mamba_ssm_size
         self.use_compress = hasattr(self.vllm_config.model_config.hf_config, "compress_ratios")
 
-        # Handshake base port
+        # Handshake base port. Use data_parallel_index (not data_parallel_rank):
+        # for non-MoE internal DP, vllm/v1/engine/core.py resets data_parallel_rank
+        # to 0 on each EngineCore ("treat like DP=1"), so data_parallel_rank would
+        # collide handshake ports across DP ranks. data_parallel_index preserves the
+        # original DP rank for all modes (dense/MoE internal, external) -> unique ports.
         self.side_channel_port = (
             vllm_config.kv_transfer_config.kv_port
-            + vllm_config.parallel_config.data_parallel_rank
+            + vllm_config.parallel_config.data_parallel_index
             * vllm_config.parallel_config.tensor_parallel_size
             * vllm_config.parallel_config.pipeline_parallel_size
         )
