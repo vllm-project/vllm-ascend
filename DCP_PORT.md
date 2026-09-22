@@ -88,7 +88,12 @@ python3 -m pytest --noconftest -q \
   tests/ut/attention/test_sfa_indexer_store.py
 ```
 
-NPU regression entry: tests/ut/attention/a2/test_sfa_dcp_remap.py.
+Single-card operator precision entries are in
+`tests/e2e/nightly/single_node/ops/singlecard_ops/triton/`:
+`test_sfa_dcp_remap.py` and `test_sfa_indexer_store_triton.py`.
+These are content-preserving relocations; numerical assertions and tolerances
+are unchanged. Query gather and O/LSE exchange require an isolated DCP8 group
+and remain distributed tests under `tests/ut/attention/a2/`.
 Existing distributed O/LSE entry:
 tests/ut/attention/a2/test_sfa_dcp_exchange_port.py.
 The strict exchange oracle is preserved, including known historical failures.
