@@ -106,7 +106,7 @@ class AscendMambaManager(MambaManager):
         )
 
         if partial_source is not None and not partial_source.is_null:
-            self._pending_partial_tail_offloads.append(
+            self._pending_boundary_state_offloads.append(
                 (
                     request_id,
                     self.kv_cache_group_id,

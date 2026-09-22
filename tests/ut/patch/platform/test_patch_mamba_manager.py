@@ -18,7 +18,7 @@ def _manager(*, producer: bool):
     manager.is_kv_producer = producer
     manager.block_size = 1024
     manager.kv_cache_group_id = 3
-    manager._pending_partial_tail_offloads = []
+    manager._pending_boundary_state_offloads = []
     return manager
 
 
@@ -35,7 +35,7 @@ def test_producer_hot_partial_hit_hands_off_exact_source(monkeypatch):
     manager.add_local_computed_blocks("req", [source], 144, 0)
 
     assert calls == [("req", [source], 144, 0)]
-    assert manager._pending_partial_tail_offloads == [("req", 3, source, 144)]
+    assert manager._pending_boundary_state_offloads == [("req", 3, source, 144)]
 
 
 def test_consumer_partial_hit_does_not_create_producer_handoff(monkeypatch):
@@ -49,7 +49,7 @@ def test_consumer_partial_hit_does_not_create_producer_handoff(monkeypatch):
 
     manager.add_local_computed_blocks("req", [source], 144, 0)
 
-    assert manager._pending_partial_tail_offloads == []
+    assert manager._pending_boundary_state_offloads == []
 
 
 class _BlockPool:
