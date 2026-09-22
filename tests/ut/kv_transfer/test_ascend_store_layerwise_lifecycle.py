@@ -2,12 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Raw-token lifecycle with real scheduling, connectors, threads and CPU bytes.
 
-Only device operations, model computation and the external Memcache service are
+Only device operations, model computation and the external Mooncake service are
 simulated. Keys, hit lengths, masks, block IDs and transfer addresses are produced
 by the same constructors and request entry points used in serving.
 """
 
 import ctypes
+import json
 import sys
 import threading
 import time
@@ -43,7 +44,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence im
     attention_transfer_window,
     record_attention_compute_start,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import MemcacheBackend
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
     KVCacheStoreLayerRecvingThread,
@@ -53,69 +53,74 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_la
 
 
 class MemoryStore:
-    """External Store leaf; validate production-generated addresses and leases."""
+    """Mooncake client leaf; copy real bytes through session/range APIs."""
 
     def __init__(self):
         self.objects = {}
         self.complete = set()
+        self.open_reads = set()
+        self.open_puts = set()
         self.regions = []
-        self.leases = set()
         self.copies = []
         self.lock = threading.Lock()
 
-    def init(self, device_id, init_bm=True):
+    def setup(self, **kwargs):
         return 0
 
     def register_buffer(self, address, size):
         self.regions.append((address, size))
+        return 0
 
     def batch_is_exist(self, keys):
         return [int(key in self.complete) for key in keys]
 
-    def batch_alloc(self, keys, sizes, replicas, lease_ttl_ms):
+    def batch_put_session_start(self, keys, sizes, config):
         for key, size in zip(keys, sizes, strict=True):
             assert key not in self.objects
             self.objects[key] = np.zeros(size, dtype=np.uint8)
-        return [self.objects[key].ctypes.data for key in keys]
-
-    def batch_get_key_info(self, keys):
-        return [
-            SimpleNamespace(
-                size=lambda key=key: self.objects[key].size if key in self.complete else 0,
-                gva_list=lambda key=key: [self.objects[key].ctypes.data] if key in self.complete else [],
-            )
-            for key in keys
-        ]
-
-    def batch_add_lease(self, keys, lease_ttl_ms):
-        assert all(key in self.complete for key in keys)
-        self.leases.update(keys)
+        self.open_puts.update(keys)
         return [0] * len(keys)
 
-    def batch_remove_lease(self, keys):
-        self.leases.difference_update(keys)
-        return 0
-
-    def batch_write_finish(self, keys, results):
-        assert not any(results)
+    def batch_put_session_end(self, keys):
+        assert set(keys) <= self.open_puts
+        self.open_puts.difference_update(keys)
         self.complete.update(keys)
         return [0] * len(keys)
 
-    def batch_copy(self, gvas, addresses, sizes, direction):
-        with self.lock:
-            for gva, address, size in zip(gvas, addresses, sizes, strict=True):
-                assert any(start <= address < address + size <= start + length for start, length in self.regions)
-                key = next(
-                    key
-                    for key, buf in self.objects.items()
-                    if buf.ctypes.data <= gva < gva + size <= buf.ctypes.data + buf.size
-                )
-                if direction == 1:
-                    assert key in self.complete and key in self.leases
-                source, dest = (address, gva) if direction == 0 else (gva, address)
-                ctypes.memmove(dest, source, size)
-                self.copies.append((direction, address, size, key))
+    def batch_put_session_revoke(self, keys):
+        for key in keys:
+            self.objects.pop(key, None)
+        self.open_puts.difference_update(keys)
+        self.complete.difference_update(keys)
+        return [0] * len(keys)
+
+    def batch_get_session_start(self, keys):
+        assert set(keys) <= self.complete
+        self.open_reads.update(keys)
+        return [0] * len(keys)
+
+    def batch_get_session_end(self, keys):
+        self.open_reads.difference_update(keys)
         return 0
+
+    def batch_put_from_multi_buffer_ranges(self, keys, buffers, sizes, offsets):
+        return self.copy_ranges(keys, buffers, sizes, offsets, saving=True)
+
+    def batch_get_into_multi_buffer_ranges(self, keys, buffers, sizes, offsets):
+        return self.copy_ranges(keys, buffers, sizes, offsets, saving=False)
+
+    def copy_ranges(self, keys, buffers, sizes, offsets, *, saving):
+        with self.lock:
+            for key, addresses, lengths, starts in zip(keys, buffers, sizes, offsets, strict=True):
+                assert key in (self.open_puts if saving else self.open_reads)
+                for address, size, offset in zip(addresses, lengths, starts, strict=True):
+                    assert any(start <= address < address + size <= start + length for start, length in self.regions)
+                    assert 0 <= offset < offset + size <= self.objects[key].size
+                    remote = self.objects[key].ctypes.data + offset
+                    source, dest = (address, remote) if saving else (remote, address)
+                    ctypes.memmove(dest, source, size)
+                    self.copies.append((saving, address, size, key))
+        return [sum(row) for row in sizes]
 
 
 def aligned_tensor(shape):
@@ -141,9 +146,20 @@ def wait_until(predicate, pool):
 
 
 @pytest.fixture
-def memory_store(monkeypatch):
+def memory_store(monkeypatch, tmp_path):
     store = MemoryStore()
-    monkeypatch.setitem(sys.modules, "memcache_hybrid", SimpleNamespace(DistributedObjectStore=lambda: store))
+    monkeypatch.setitem(
+        sys.modules,
+        "mooncake.store",
+        SimpleNamespace(MooncakeDistributedStore=lambda: store, ReplicateConfig=SimpleNamespace),
+    )
+    config_path = tmp_path / "mooncake.json"
+    config_path.write_text(
+        json.dumps({"protocol": "ascend", "metadata_server": "test", "master_server_address": "test"})
+    )
+    monkeypatch.setenv("MOONCAKE_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("ASCEND_ENABLE_USE_FABRIC_MEM", "0")
+    monkeypatch.setenv("ASCEND_GLOBAL_RESOURCE_CONFIG", "{}")
     monkeypatch.setattr(pool_worker, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(pool_worker, "get_tensor_model_parallel_world_size", lambda: 1)
     monkeypatch.setattr(pool_worker, "get_pcp_group", lambda: SimpleNamespace(world_size=1))
@@ -155,17 +171,14 @@ def memory_store(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "recurrent_type,reuse",
-    [
-        (MambaAttentionBackendEnum.MAMBA2, False),
-        (MambaAttentionBackendEnum.GDN_ATTN, False),
-        (MambaAttentionBackendEnum.LINEAR, False),
-        (None, False),
-        (None, True),
-    ],
+    "recurrent_type",
+    [MambaAttentionBackendEnum.MAMBA2, MambaAttentionBackendEnum.GDN_ATTN, MambaAttentionBackendEnum.LINEAR, None],
 )
 @pytest.mark.parametrize("wrapped", [False, True])
-def test_raw_tokens_hybrid_roundtrip(memory_store, recurrent_type, reuse, wrapped):
+def test_raw_tokens_hybrid_roundtrip(memory_store, recurrent_type, wrapped):
+    # The fixture installs the external client leaf before importing its backend.
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import MooncakeBackend
+
     full = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float32)
     recurrent = (
         MambaSpec(
@@ -212,14 +225,8 @@ def test_raw_tokens_hybrid_roundtrip(memory_store, recurrent_type, reuse, wrappe
         kv_connector="AscendStoreConnector",
         kv_connector_module_path="vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector",
         kv_role="kv_both",
-        kv_connector_extra_config={"backend": "memcache", "use_layerwise": True},
+        kv_connector_extra_config={"backend": "mooncake", "use_layerwise": True},
     )
-    if reuse:
-        config.kv_transfer_config.kv_connector_extra_config.update(
-            layerwise_num_shared_buffers=1,
-            layerwise_prefetch_layers=3,
-            layerwise_independent_layers=[],
-        )
     block_size, hash_size = resolve_kv_cache_block_sizes(plan, config)
     worker = KVConnectorFactory.create_connector(config, KVConnectorRole.WORKER, worker_plan)
     specs = get_layerwise_kv_cache_specs(worker_plan)
@@ -230,23 +237,7 @@ def test_raw_tokens_hybrid_roundtrip(memory_store, recurrent_type, reuse, wrappe
         for name, spec in specs.items()
     }
     pool = worker.connector_worker
-    if reuse:
-        for slot in pool._layerwise_reuse_layout.buffer_slots:
-            for layer in slot[1:]:
-                caches[f"model.layers.{layer}.attn"] = caches[f"model.layers.{slot[0]}.attn"]
     worker.register_kv_caches(caches)
-    release_waits = {layer: threading.Event() for layer in pool.prefetch_layer_map.values()}
-    release_finishes = {layer: threading.Event() for layer in release_waits}
-    if reuse:
-        # Observe (and still execute) the production receiver-to-worker fence.
-        wait_for_compute = pool.kv_recv_thread.compute_release_waiter
-
-        def observe_release(layer):
-            release_waits[layer].set()
-            wait_for_compute(layer)
-            release_finishes[layer].set()
-
-        pool.kv_recv_thread.compute_release_waiter = observe_release
     scheduler = Scheduler(
         config,
         plan,
@@ -254,10 +245,11 @@ def test_raw_tokens_hybrid_roundtrip(memory_store, recurrent_type, reuse, wrappe
         block_size=block_size,
         hash_block_size=hash_size,
     )
-    assert isinstance(pool.m_store, MemcacheBackend)
+    assert isinstance(pool.m_store, MooncakeBackend)
     assert isinstance(pool.kv_send_thread, KVCacheStoreLayerSendingThread)
     assert isinstance(pool.kv_recv_thread, KVCacheStoreLayerRecvingThread)
     assert isinstance(pool.cache_coordinator, AscendStoreCoordinator)
+    assert pool.block_key_hybrid
     assert pool.grouped_block_size == [16, 32]
     assert pool.hash_block_size == hash_size == 16
     assert pool.cache_transfer_granularity == 32
@@ -291,10 +283,6 @@ def test_raw_tokens_hybrid_roundtrip(memory_store, recurrent_type, reuse, wrappe
             worker.handle_preemptions(meta)
             worker.bind_connector_metadata(meta)
             scheduled = output.num_scheduled_tokens.get(req_id, 0)
-            for event in release_waits.values():
-                event.clear()
-            for event in release_finishes.values():
-                event.clear()
             worker.start_load_kv(SimpleNamespace() if scheduled else None)
             if scheduled:
                 end = request.num_computed_tokens
@@ -331,16 +319,8 @@ def test_raw_tokens_hybrid_roundtrip(memory_store, recurrent_type, reuse, wrappe
                     else:
                         # Full attention's cache scatter precedes the kernel.
                         compute(layer, blocks[group_id], start, end)
-                        before = [cache.clone() for cache in caches[name]] if layer in release_waits else []
                         with attention_transfer_window():
                             assert layer in pool._attention_saved_layers
-                            if layer in release_waits:
-                                wait_until(release_waits[layer].is_set, pool)
-                                assert not release_finishes[layer].wait(timeout=0.01)
-                                wait_until(pool.layer_save_finished_events[layer].is_set, pool)
-                                assert not pool._compute_recorded_events[layer].is_set()
-                                for actual, expected in zip(caches[name], before, strict=True):
-                                    assert torch.equal(actual, expected), "GET overwrote an active attention buffer"
                     worker.save_kv_layer(name, caches[name], None)
                 assert pool.kv_send_thread.request_queue.unfinished_tasks == 0
             sending, recving = worker.get_finished(output.finished_req_ids)
@@ -370,7 +350,8 @@ def test_raw_tokens_hybrid_roundtrip(memory_store, recurrent_type, reuse, wrappe
         assert all(block.ref_cnt == 0 for block in block_pool.blocks if not block.is_null)
         assert all(not manager.req_to_blocks for manager in scheduler.kv_cache_manager.coordinator.single_type_managers)
         assert not scheduler.connector.connector_scheduler.load_specs
-        assert not memory_store.leases
+        assert not memory_store.open_reads and not memory_store.open_puts
+        assert not pool._put_started_keys
         assert not pool.get_block_ids_with_load_errors()
         return expected_hit
 
@@ -394,7 +375,7 @@ def test_raw_tokens_hybrid_roundtrip(memory_store, recurrent_type, reuse, wrappe
     assert run_request("shared-prefix", forked, 64) == 64
     assert scheduler.reset_prefix_cache()
     for key in list(memory_store.objects):
-        if "@1@" in key:
+        if "@group:1@" in key:
             del memory_store.objects[key]
             memory_store.complete.discard(key)
     assert run_request("missing-state", list(range(160)), 0) == 0

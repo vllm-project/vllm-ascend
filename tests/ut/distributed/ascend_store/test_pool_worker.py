@@ -27,7 +27,7 @@ import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 
 # isort: split
 import torch
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MambaSpec
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
@@ -142,7 +142,16 @@ class TestPCPPoolWorker(unittest.TestCase):
 
 class TestLayerwiseAttentionSave(unittest.TestCase):
     def make_worker(self):
-        worker = make_worker(self, use_layerwise=True, extra_config={"backend": "memcache"})
+        plan = SimpleNamespace(
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    [f"model.layers.{layer}.attn"],
+                    FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=8, dtype=torch.float32),
+                )
+                for layer in range(2)
+            ]
+        )
+        worker = make_worker(self, use_layerwise=True, kv_cache_config=plan)
         worker.kv_send_thread = MagicMock(request_queue=queue.Queue())
         worker.kv_recv_thread = MagicMock(request_queue=queue.Queue())
         return worker
@@ -161,9 +170,7 @@ class TestLayerwiseAttentionSave(unittest.TestCase):
                 )
             ]
         )
-        worker = make_worker(
-            self, num_layers=1, use_layerwise=True, extra_config={"backend": "memcache"}, kv_cache_config=plan
-        )
+        worker = make_worker(self, num_layers=1, use_layerwise=True, kv_cache_config=plan)
         worker.kv_recv_thread = MagicMock()
         worker.layer_load_finished_events = [threading.Event()]
         gate = SimpleNamespace(on_start=None, on_finish=None)
@@ -379,7 +386,6 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         worker = cls.__new__(cls)
         worker.current_layer = 0
         worker.num_layers = 1
-        worker.use_attention_save = False
         worker.layer_load_tasks = [[]]
         worker.prefetch_layer_map = {}
         worker.layer_load_finished_events = [threading.Event()]

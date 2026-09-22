@@ -1896,7 +1896,6 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         invalid_block_ids: set[int] | None = None,
         invalid_block_ids_lock: threading.Lock | None = None,
         load_abort_event: threading.Event | None = None,
-        compute_release_waiter: Callable[[int], None] | None = None,
     ):
         super().__init__(
             m_store,
@@ -1918,7 +1917,6 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         self.max_transfer_bytes = max_transfer_bytes
         self.external_slot_release_waiter = external_slot_release_waiter
         self.save_failure_checker = save_failure_checker
-        self.compute_release_waiter = compute_release_waiter
         self._invalid_block_ids = invalid_block_ids if invalid_block_ids is not None else set()
         self._invalid_block_ids_lock = invalid_block_ids_lock or threading.Lock()
         self._load_abort_event = load_abort_event or threading.Event()
@@ -2091,10 +2089,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             # Non-saving TP ranks have no D2H task to synchronize the event.
             # Their CPU save-finished signal only means the event was recorded;
             # wait for the NPU work before reusing the local HBM buffer.
-            if self.compute_release_waiter is not None:
-                self.compute_release_waiter(wait_for_save)
-            else:
-                self.sync_save_events[wait_for_save].synchronize()
+            self.sync_save_events[wait_for_save].synchronize()
             logger.debug("Layer save event cleared: layer %d", wait_for_save)
             self.layer_save_finished_events[wait_for_save].clear()
 

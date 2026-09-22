@@ -215,7 +215,6 @@ class KVPoolWorker:
             self.use_block_key_layerwise and kv_cache_groups is not None and len(kv_cache_groups) > 1
         )
         self.block_key_hybrid = self.use_block_key_layerwise and self.use_hybrid
-        self.use_attention_save = self.block_key_hybrid or self.use_layerwise_transfer
         self.block_key_hybrid_layout = (
             self.layerwise_protocol.hybrid_layout_id(kv_cache_config, self.tp_size) if self.block_key_hybrid else ""
         )
@@ -429,8 +428,6 @@ class KVPoolWorker:
         self._global_to_local_layer: dict[int, int] = {}
         self._layerwise_reuse_layout: LayerwiseReuseLayout | None = None
         self._recurrent_layers: set[int] = set()
-        self._compute_recorded_events: dict[int, threading.Event] = {}
-        self._sync_compute_events: dict[int, torch.npu.Event] = {}
         # Defaults for partial initialization (unit tests construct the worker
         # without the full _init_parallelism_info path).
         if not hasattr(self, "layerwise_key_layers"):
@@ -644,9 +641,6 @@ class KVPoolWorker:
             self.layer_load_finished_events = [threading.Event() for i in range(self.num_layers)]
             self.layer_save_finished_events = [threading.Event() for i in range(self.num_layers)]
             self.sync_save_events = [torch.npu.Event() for i in range(self.num_layers)]
-            for layer_id in set(self.prefetch_layer_map.values()):
-                self._compute_recorded_events[layer_id] = threading.Event()
-                self._sync_compute_events[layer_id] = torch.npu.Event()
             can_save = is_kv_save_role(self.kv_role, self.consumer_is_to_put)
             if (self.use_block_key_layerwise or self.use_layerwise_transfer) and can_save:
                 ready_event_sending = threading.Event()
@@ -716,7 +710,6 @@ class KVPoolWorker:
                     invalid_block_ids=self._invalid_block_ids,
                     invalid_block_ids_lock=self._invalid_block_ids_lock,
                     load_abort_event=self._layer_load_aborted,
-                    compute_release_waiter=self._wait_for_layer_compute if self.prefetch_layer_map else None,
                 )
             else:
                 self.kv_recv_thread = KVCacheStoreKeyLayerRecvingThread(
@@ -1059,8 +1052,6 @@ class KVPoolWorker:
             self.layer_load_tasks = [[] for _ in range(self.num_layers)]
             reset_attention_compute_start_gate()
             self._attention_saved_layers = set()
-            for event in self._compute_recorded_events.values():
-                event.clear()
         logger.debug("KV pool worker start_load_kv requests=%d", len(metadata.requests))
         if len(metadata.requests) == 0:
             return
@@ -2410,15 +2401,6 @@ class KVPoolWorker:
                 send_thread.add_stored_request(block_range.request.req_id)
         send_thread.add_request(tasks)
 
-    def _wait_for_layer_compute(self, layer_id: int) -> None:
-        """A completed early PUT does not release KV still read by attention."""
-        while not self._compute_recorded_events[layer_id].wait(timeout=0.1):
-            if self._layer_load_aborted.is_set():
-                raise RuntimeError("Layerwise load aborted before the source buffer was released")
-            if self.kv_send_thread is not None:
-                self.kv_send_thread.raise_if_failed()
-        self._sync_compute_events[layer_id].synchronize()
-
     def _finish_attention_window(self) -> None:
         try:
             self._drain_attention_transfers()
@@ -2516,10 +2498,10 @@ class KVPoolWorker:
         gate = reset_attention_compute_start_gate()
         try:
             self.kv_recv_thread.raise_if_failed()
-            if self.use_attention_save:
+            if getattr(self, "block_key_hybrid", False):
                 layer_id = self.current_layer
-                # Recurrent attention writes conv/SSM state during compute.
-                # Its entry event cannot make that state ready for a PUT.
+                # Conv/recurrent state is updated inside attention, after this
+                # entry event. Preserve its post-compute save hook.
                 if layer_id not in self._recurrent_layers:
                     gate.on_start = lambda: self._submit_attention_save(layer_id)
                 gate.on_finish = self._finish_attention_window
@@ -2586,33 +2568,21 @@ class KVPoolWorker:
         assert self.kv_send_thread is not None
         send_thread = self.kv_send_thread
         send_thread.raise_if_failed()
-        if self.current_layer in self._compute_recorded_events:
-            # Publish the post-compute boundary even when this layer already
-            # submitted its PUT. A future GET may reuse the same local buffer.
-            self._sync_compute_events[self.current_layer].record()
-            self._compute_recorded_events[self.current_layer].set()
-        if self.current_layer in getattr(self, "_attention_saved_layers", set()):
-            self._finish_attention_window()
-            if self.current_layer == num_local - 1:
-                self._wait_for_final_layer_save(num_local, send_thread)
-            self.current_layer += 1
-            return
-        self.sync_save_events[self.current_layer].record()
-        if self.layer_save_tasks[self.current_layer]:
-            for task in self.layer_save_tasks[self.current_layer]:
-                for block_range in task.block_ranges:
-                    send_thread.add_stored_request(block_range.request.req_id)
-            send_thread.add_request(self.layer_save_tasks[self.current_layer])  # type: ignore[arg-type]
-        else:
-            self.layer_save_finished_events[self.current_layer].set()
-        if self.use_attention_save:
-            # Also bound saves from recurrent/record-only attention paths,
-            # which do not enter attention_transfer_window.
+        if self.current_layer not in self._attention_saved_layers:
+            self.sync_save_events[self.current_layer].record()
+            if self.layer_save_tasks[self.current_layer]:
+                for task in self.layer_save_tasks[self.current_layer]:
+                    for block_range in task.block_ranges:
+                        send_thread.add_stored_request(block_range.request.req_id)
+                send_thread.add_request(self.layer_save_tasks[self.current_layer])  # type: ignore[arg-type]
+            else:
+                self.layer_save_finished_events[self.current_layer].set()
+        if self.block_key_hybrid:
+            # Recurrent and record-only paths do not exit an attention window.
             self._finish_attention_window()
         if self.current_layer == num_local - 1:
             self._wait_for_final_layer_save(num_local, send_thread)
-
-        self.current_layer = self.current_layer + 1
+        self.current_layer += 1
 
     def _wait_for_final_layer_save(self, num_local: int, send_thread: KVTransferThread) -> None:
         """Keep layerwise source buffers alive until the step's last PUT commits."""
@@ -2622,9 +2592,9 @@ class KVPoolWorker:
             send_thread.raise_if_failed()
             logger.info("Layerwise %d save not done, keep waiting", num_local - 1)
         send_thread.raise_if_failed()
-        if self.use_attention_save:
-            # The final layer can have no save tasks. Its already-set event
-            # alone does not imply that earlier PUTs have completed.
+        if self.block_key_hybrid:
+            # An empty final layer signals completion without waiting for PUTs
+            # from earlier layers. Drain those before the next step reuses KV.
             self._drain_attention_transfers(drain_recv=False, full=True)
         reuse_source_layers = set(self.prefetch_layer_map.values())
         for layer_id in range(num_local):
