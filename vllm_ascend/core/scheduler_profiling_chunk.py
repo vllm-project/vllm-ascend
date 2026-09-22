@@ -42,11 +42,15 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
+from vllm_ascend.core.disagg_stats import (
+    DisaggPrefillStatsMixin,
+    adjust_disagg_prefill_stats,
+)
 from vllm_ascend.core.profiling_chunk_predictor import ProfilingChunkManager
 from vllm_ascend.utils import vllm_version_is
 
 
-class ProfilingChunkScheduler(Scheduler):
+class ProfilingChunkScheduler(DisaggPrefillStatsMixin, Scheduler):
     """Scheduler with profiling-based dynamic chunk sizing.
 
     During initialization, the scheduler profiles prefill latency at various
@@ -541,6 +545,11 @@ class ProfilingChunkScheduler(Scheduler):
                             num_prompt_tokens=request.num_prompt_tokens,
                             num_local_cached_tokens=num_new_local_computed_tokens,
                             num_external_cached_tokens=num_external_computed_tokens,
+                        )
+                        connector_prefix_cache_hits = adjust_disagg_prefill_stats(
+                            request,
+                            num_new_local_computed_tokens,
+                            connector_prefix_cache_hits,
                         )
                     assert num_computed_tokens <= request.num_tokens
                 else:

@@ -78,6 +78,10 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.ascend_config import init_ascend_config
+from vllm_ascend.core.disagg_stats import (
+    DisaggPrefillStatsMixin,
+    adjust_disagg_prefill_stats,
+)
 from vllm_ascend.utils import vllm_version_is
 
 
@@ -101,7 +105,7 @@ def _balance_scheduling_enabled(vllm_config) -> bool:
     return False
 
 
-class BalanceScheduler(Scheduler):
+class BalanceScheduler(DisaggPrefillStatsMixin, Scheduler):
     def __init__(
         self,
         vllm_config,
@@ -521,6 +525,11 @@ class BalanceScheduler(Scheduler):
                             num_prompt_tokens=request.num_prompt_tokens,
                             num_local_cached_tokens=num_new_local_computed_tokens,
                             num_external_cached_tokens=num_external_computed_tokens,
+                        )
+                        connector_prefix_cache_hits = adjust_disagg_prefill_stats(
+                            request,
+                            num_new_local_computed_tokens,
+                            connector_prefix_cache_hits,
                         )
                 else:
                     # KVTransfer: WAITING reqs have num_computed_tokens > 0
