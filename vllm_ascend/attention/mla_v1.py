@@ -1,3 +1,4 @@
+from copy import copy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
 
@@ -68,6 +69,9 @@ if TYPE_CHECKING:
 
 BUILD_METADATA_STEP_PREFILL = 0
 BUILD_METADATA_STEP_DECODE = 1
+
+# Exclusive batch * K limit of the fused op with perm_x1=(1, 0, 2).
+TRANSPOSE_BMM_MAX_SUPPORTED_DIM = 65536
 
 
 def _npu_mla_prolog_v3_k3(**kwargs):
@@ -742,6 +746,14 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         )
         return decode_metadata
 
+    def build_for_cudagraph_capture(self, common_attn_metadata: AscendCommonAttentionMetadata):
+        capture_metadata = copy(common_attn_metadata)
+        if capture_metadata.attn_state is None:
+            capture_metadata.attn_state = AscendAttentionState.ChunkedPrefill
+        if self.dcp_enabled and capture_metadata.is_prefilling is None:
+            capture_metadata.is_prefilling = torch.zeros(capture_metadata.num_reqs, dtype=torch.bool)
+        return super().build_for_cudagraph_capture(capture_metadata)
+
     def build_for_graph_capture(
         self,
         common_attn_metadata: AscendCommonAttentionMetadata,
@@ -986,18 +998,14 @@ class AscendMLAImpl(MLAAttentionImpl):
         return x
 
     def _v_up_proj_batch_major(self, x: torch.Tensor) -> torch.Tensor:
-        """Project a batch-major partial-attention result.
-
-        The normal MLA kernel returns head-major output. Distributed attention
-        merges partial outputs into batch-major layout, so it only needs this
-        small layout adapter instead of replacing the projection itself.
-        """
-        x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
-        x = torch.bmm(x, self.W_UV)
-        return x.transpose(0, 1).reshape(
-            -1,
-            self.num_heads * self.v_head_dim,
-        )
+        """Keep the DCP result batch-major and fuse both BMM permutations."""
+        x = x.view(-1, self.num_heads, self.kv_lora_rank)
+        # The operator's batch dimension is num_heads, not the token count.
+        if 1 <= self.num_heads * self.kv_lora_rank < TRANSPOSE_BMM_MAX_SUPPORTED_DIM:
+            x = torch_npu.npu_transpose_batchmatmul(x, self.W_UV, perm_x1=(1, 0, 2), perm_y=(1, 0, 2))
+        else:
+            x = torch.bmm(x.transpose(0, 1), self.W_UV).transpose(0, 1)
+        return x.reshape(-1, self.num_heads * self.v_head_dim)
 
     # Return `ql_nope`, `q_pe`
     def _q_proj_and_k_up_proj(self, x):
@@ -1060,9 +1068,6 @@ class AscendMLAImpl(MLAAttentionImpl):
             self.W_UV.copy_(W_UV.transpose(0, 1).contiguous())
             self.W_UK_T.copy_(W_UK.permute(1, 2, 0).contiguous())
         self.mlapo_W_UK_T = self.W_UK_T
-
-        # TODO(zzzzwwjj): Currently, torch.ops._C_ascend.batch_matmul_transpose cannot support weight nz
-        # self.W_UV = maybe_trans_nz(self.W_UV)
 
         if self.enable_mlapo:
             layer_quant_method = None if self.fused_qkv_a_proj is None else self.fused_qkv_a_proj.quant_method

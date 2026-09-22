@@ -72,17 +72,30 @@ if TYPE_CHECKING:
 
 # NoPE sparse MLA operator helpers.
 SMLA_METADATA_SIZE = 1024
-SPARSE_ATTENTION_MAX_BLOCK_SIZE = 1024
+# GLM5Next's SFA path carries no learnable attention sink, but SparseFlashMla
+# still requires a per-head float32 sinks tensor. This is the placeholder value
+# the path has always used; whether -inf is the correct "no sink" value is a
+# separate question, tracked outside this change.
+SMLA_DEFAULT_SINK_VALUE = 1.0
 
 
-def build_smla_metadata(metadata, buffer, num_heads, head_dim, topk):
-    generated = sparse_flash_mla_metadata(
+def generate_smla_plan(metadata, num_heads, head_dim, topk, cu_seqlens_q, topk_length):
+    """Derive the operator's core-split plan for one specific set of inputs.
+
+    ``cu_seqlens_q`` and ``topk_length`` have to be the very tensors the
+    operator call will receive: the plan tells the kernel how many query rows to
+    walk and how far into each row's indices to go, so a plan built over
+    different ones makes it index past what it was handed. The metadata
+    interface enforces the second half of that itself - with ori_mask_mode 0 and
+    a non-zero ori_topk it rejects an absent ori_topk_length.
+    """
+    return sparse_flash_mla_metadata(
         num_heads_q=num_heads,
         num_heads_kv=1,
         head_dim=head_dim,
-        cu_seqlens_q=metadata.query_start_loc,
+        cu_seqlens_q=cu_seqlens_q,
         seqused_ori_kv=metadata.seq_lens,
-        ori_topk_length=metadata.smla_topk_length,
+        ori_topk_length=topk_length,
         batch_size=metadata.seq_lens.numel(),
         # These are scheduler CPU scalars. Passing device max() results here
         # would force a host synchronization for each metadata build.
@@ -92,16 +105,37 @@ def build_smla_metadata(metadata, buffer, num_heads, head_dim, topk):
         ori_topk=topk,
         cmp_topk=0,
         cmp_ratio=1,
-        ori_mask_mode=3,
-        cmp_mask_mode=3,
-        ori_win_left=0,
-        ori_win_right=0,
+        # No Mask, which is what the sparse ori_kv scenario asks for: the
+        # selected indices are themselves the mask, since the indexer only ever
+        # offers causally valid tokens. Anything other than 0 also makes the
+        # kernel skip its softmax initialisation whenever no sequence has a
+        # query longer than its KV - which is every ordinary decode step - and
+        # a sparse gather does not write every accumulator slot, so the skipped
+        # rows keep whatever the previous step left in them.
+        ori_mask_mode=0,
+        # Required to be 0 while cmp_kv is absent.
+        cmp_mask_mode=0,
+        # Only ori_mask_mode 4 may carry a bounded window on this product line.
+        ori_win_left=-1,
+        ori_win_right=-1,
         layout_q="TND",
         layout_kv="PA_BBND",
         has_ori_kv=True,
         has_cmp_kv=False,
         device=str(metadata.seq_lens.device),
     )
+
+
+def build_smla_metadata(metadata, buffer, num_heads, head_dim, topk):
+    generated = generate_smla_plan(
+        metadata, num_heads, head_dim, topk, metadata.query_start_loc, metadata.smla_topk_length
+    )
+    if generated.numel() != buffer.numel():
+        # The persistent buffer is sized by the operator's fixed [1024] contract.
+        # A generated plan of any other size means this build does not match the
+        # operator this buffer was allocated for; say so here rather than letting
+        # copy_ decide.
+        raise ValueError(f"Sparse MLA plan must contain {buffer.numel()} int32 values, got {generated.numel()}.")
     buffer.copy_(generated)
     metadata.smla_metadata = buffer
 
@@ -130,22 +164,55 @@ def sparse_mla(query, cache, indices, metadata, scale):
         sentinel = torch.iinfo(torch.int32).max
         sorted_indices = torch.where(indices >= 0, indices, sentinel).sort(dim=-1).values
         sorted_indices = torch.where(sorted_indices == sentinel, -1, sorted_indices)
+        if metadata.smla_sinks is None:
+            raise RuntimeError("Sparse MLA requires persistent sinks owned by SparseMLAMetadataState.")
+        # Default to the very tensors the plan in metadata.smla_metadata was
+        # generated from, so plan and call always describe the same work.
+        topk_length = metadata.smla_topk_length
+        cu_seqlens_q = metadata.query_start_loc
+        plan = metadata.smla_metadata
+        if query.shape[0] != topk_length.shape[0]:
+            # Eager and piecewise steps trim the query to the unpadded token
+            # count, while the plan built during metadata construction still
+            # describes the padded one (graph capacity, and under data
+            # parallelism the group-wide token count, which can be hundreds of
+            # rows larger). cu_seqlens_q is padded for the same reason. Rebuild
+            # for the rows actually being passed; a replayed full graph never
+            # reaches this branch, so the captured plan is left intact.
+            #
+            # Since this branch regenerates the plan anyway, take the top-k
+            # lengths from the indices being passed rather than from the
+            # prediction made before the indexer ran. The sort above left every
+            # -1 at the tail of its row, so counting the non-negative entries
+            # gives exactly the left-aligned prefix the operator contract asks
+            # for, and unlike a prediction it cannot overshoot into the -1 tail.
+            topk_length = (sorted_indices >= 0).sum(dim=-1, dtype=torch.int32).reshape(query.shape[0], -1)
+            cu_seqlens_q = cu_seqlens_q.clamp(max=query.shape[0])
+            plan = generate_smla_plan(
+                metadata,
+                query.shape[1],
+                query.shape[2],
+                sorted_indices.shape[-1],
+                cu_seqlens_q,
+                topk_length,
+            )
         result = sparse_flash_mla(
             query.contiguous(),
             ori_kv=cache,
             ori_sparse_indices=sorted_indices,
             ori_block_table=metadata.block_table,
-            cu_seqlens_q=metadata.query_start_loc,
+            cu_seqlens_q=cu_seqlens_q,
             seqused_ori_kv=metadata.seq_lens,
-            ori_topk_length=metadata.smla_topk_length[: query.shape[0]],
-            sinks=None,
-            metadata=metadata.smla_metadata,
+            ori_topk_length=topk_length,
+            sinks=metadata.smla_sinks,
+            metadata=plan,
             softmax_scale=scale,
             cmp_ratio=1,
-            ori_mask_mode=3,
-            cmp_mask_mode=3,
-            ori_win_left=0,
-            ori_win_right=0,
+            # Must match the mode the plan above was generated with.
+            ori_mask_mode=0,
+            cmp_mask_mode=0,
+            ori_win_left=-1,
+            ori_win_right=-1,
             layout_q="TND",
             layout_kv="PA_BBND",
             topk_value_mode=1,
@@ -173,7 +240,9 @@ def sparse_mla(query, cache, indices, metadata, scale):
     output = result[0]
     # Kernels may leave graph-capacity rows unwritten. Mask on device before
     # value/output projections so NaNs in padding cannot escape the layer.
-    valid = torch.arange(query.shape[0], device=query.device) < metadata.query_start_loc[-1]
+    # query_start_loc's last entry is the PADDED token count, so bounding by it
+    # masks nothing; num_actual_tokens is what this batch really scheduled.
+    valid = torch.arange(query.shape[0], device=query.device) < metadata.num_actual_tokens
     return output.masked_fill(~valid[:, None, None], 0)
 
 
@@ -190,10 +259,8 @@ class SparseMLAMetadataState:
             raise ValueError("Sparse MLA block size must be a positive multiple of the SFA kernel block size.")
         self.split = block_size // kernel_block_size
         self.use_smla = get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.FP8_OPTIMIZED
-        self.block_size = block_size
-        if block_size > SPARSE_ATTENTION_MAX_BLOCK_SIZE:
-            self.block_size = kernel_block_size
-        self.table_stride = self.block_size // kernel_block_size
+        self.block_size = kernel_block_size
+        self.table_stride = 1
         cache_block_size = vllm_config.cache_config.block_size
         expand_factor = max(cache_block_size // kernel_block_size, 1)
         table_width = cdiv(vllm_config.model_config.max_model_len, cache_block_size) * expand_factor
@@ -217,6 +284,16 @@ class SparseMLAMetadataState:
                 dtype=torch.int32,
                 device=device,
             )
+            # ACL Graph replay reads the addresses captured on the first run,
+            # so every tensor the operator consumes has to outlive the capture.
+            # Allocate the sinks once here, next to the other persistent
+            # operator buffers, and keep it for this state's lifetime.
+            self.sinks = torch.full(
+                (self.num_heads,),
+                SMLA_DEFAULT_SINK_VALUE,
+                dtype=torch.float32,
+                device=device,
+            )
 
     def prepare(self, metadata):
         expanded = metadata.block_table
@@ -235,17 +312,21 @@ class SparseMLAMetadataState:
                 raise ValueError("Sparse MLA token count exceeds its persistent top-k buffer.")
             lengths = self.length_buffer[: positions.numel()]
             counts = self.indexer.get_topk_lengths(positions)
-            valid = torch.arange(positions.numel(), device=positions.device) < metadata.query_start_loc[-1]
+            # ``query_start_loc``'s last entry is the PADDED token count: the
+            # runner extends it so the TND layout constraint holds. It cannot
+            # separate real rows from padding, and padding rows still carry
+            # positions left behind by an earlier, larger batch while their
+            # sequence lengths are zero. Bound the mask by the unpadded token
+            # count, so padding never claims a top-k length with no KV behind it.
+            valid = torch.arange(positions.numel(), device=positions.device) < metadata.num_actual_tokens
             lengths[:, 0].copy_(counts.masked_fill(~valid, 0))
             metadata.smla_topk_length = lengths
+            metadata.smla_sinks = self.sinks
             build_smla_metadata(
                 metadata, self.metadata_buffer, self.num_heads, self.head_dim, self.indexer.topk_output_width
             )
         return metadata
 
-
-# token count limits within bmm_transpose operator
-BMM_TRANS_MAX_SUPPORTED_TOKENS = 1024
 
 # npu_transpose_batchmatmul rejects operand dimensions >= 65536
 TRANSPOSE_BMM_MAX_SUPPORTED_DIM = 65536
@@ -367,6 +448,7 @@ class AscendSFAMetadata:
     max_seq_len: int = 0
     smla_metadata: torch.Tensor | None = None
     smla_topk_length: torch.Tensor | None = None
+    smla_sinks: torch.Tensor | None = None
 
 
 M = TypeVar("M", bound=AscendSFAMetadata)
@@ -853,9 +935,6 @@ class AscendSFAImpl(MLAAttentionImpl):
             self.W_UV.copy_(W_UV.transpose(0, 1).contiguous())
             self.W_UK_T.copy_(W_UK.permute(1, 2, 0).contiguous())
 
-        # TODO(zzzzwwjj): Currently, torch.ops._C_ascend.batch_matmul_transpose cannot support weight nz
-        # self.W_UV = maybe_trans_nz(self.W_UV)
-
         # Dispose kv_b_proj since it is replaced by W_UV and W_UK_T to save memory.
         # RL keeps it: it is the only source of W_UV/W_UK_T, so every weight
         # update re-derives them from this parameter and the parameter must stay
@@ -1204,29 +1283,31 @@ class AscendSFAImpl(MLAAttentionImpl):
         return ql_nope, q_pe
 
     def _v_up_proj(self, x):
-        num_input_tokens, _, _ = x.shape
-        if (
-            x.dtype in [torch.float16, torch.bfloat16]
-            and hasattr(torch.ops._C_ascend, "batch_matmul_transpose")
-            and num_input_tokens <= BMM_TRANS_MAX_SUPPORTED_TOKENS
-        ):
-            x = x.view(-1, self.local_num_heads, self.kv_lora_rank)
-            res = torch.empty((num_input_tokens, self.local_num_heads, self.v_head_dim), dtype=x.dtype, device=x.device)
-            torch.ops._C_ascend.batch_matmul_transpose(x, self.W_UV, res)
-            x = res.reshape(-1, self.local_num_heads * self.v_head_dim)
-        elif hasattr(torch_npu, "npu_transpose_batchmatmul"):
-            # Convert from (N, B, L)/(N, B, 1, L) to (N, B, L)
-            x = x.view(-1, self.local_num_heads, self.kv_lora_rank)
-            # Multiply (N, B, L) x (N, L, V) -> (B, N, V)
-            x = torch_npu.npu_transpose_batchmatmul(x, self.W_UV, perm_x1=(1, 0, 2), perm_y=(1, 0, 2))
-            # Convert from (N, B, V) to (B, N * V)
+        if hasattr(torch_npu, "npu_transpose_batchmatmul"):
+            # aclnn TransposeBatchMatMul with perm_x1=(1,0,2) (internal
+            # transpose) requires N*L < 65536 on older CANN binaries.
+            #   - If satisfied: keep x as (B, N, L) and let the operator
+            #     transpose internally, saving a contiguous copy.
+            #   - Otherwise: explicit transpose to (N, B, L) and use
+            #     perm_x1=(0,1,2), which downgrades the check to L < 65536.
+            # TODO: CANN 9.2 removes the N*L<65536 check; once it is the
+            # deployment baseline, collapse this branch to perm_x1=(1,0,2).
+            if self.local_num_heads * self.kv_lora_rank < 65536:
+                # (B, N, L) -> operator transposes internally -> (B, N, V)
+                x = x.view(-1, self.local_num_heads, self.kv_lora_rank)
+                x = torch_npu.npu_transpose_batchmatmul(x, self.W_UV, perm_x1=(1, 0, 2), perm_y=(1, 0, 2))
+            else:
+                # (B, N, L) -> (N, B, L) -> (B, N, V); perm_x1=(0,1,2) skips inner transpose
+                x = x.view(-1, self.local_num_heads, self.kv_lora_rank).transpose(0, 1).contiguous()
+                x = torch_npu.npu_transpose_batchmatmul(x, self.W_UV, perm_x1=(0, 1, 2), perm_y=(1, 0, 2))
+            # (B, N, V) -> (B, N * V)
             x = x.reshape(-1, self.local_num_heads * self.v_head_dim)
         else:
-            # Convert from (B, N, L) to (N, B, L)
+            # (B, N, L) -> (N, B, L)
             x = x.view(-1, self.local_num_heads, self.kv_lora_rank).transpose(0, 1)
-            # # Multiply (N, B, L) x (N, L, V) -> (N, B, V)
+            # (N, B, L) x (N, L, V) -> (N, B, V)
             x = torch.bmm(x, self.W_UV)
-            # # Convert from (N, B, V) to (B, N * V)
+            # (N, B, V) -> (B, N * V)
             x = x.transpose(0, 1).reshape(-1, self.local_num_heads * self.v_head_dim)
         return x
 
