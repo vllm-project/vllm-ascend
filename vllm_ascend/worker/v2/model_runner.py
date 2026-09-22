@@ -64,7 +64,6 @@ from vllm_ascend.core.profiling_chunk_predictor import (
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
-    is_deepseek_v41,
     is_pd_decode_recompute_scheduler_enabled,
     kv_transfer_supports_shared_backing,
     lmhead_tp_enable,
@@ -91,42 +90,6 @@ from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
-
-
-_V41_EAGER_FALLBACK_INSTALLED = False
-
-
-def _install_v41_eager_fallback() -> None:
-    """Route V4.1 runtime-NONE steps around the compiled model wrapper.
-
-    V4.1's Python reference compressor/indexer path is correctness-safe in
-    eager mode, while only uniform decode is prepared for a full ACL graph.
-    FULL_DECODE_ONLY dispatches prefills and unsupported decode shapes as
-    runtime NONE; upstream's ``skip_compiled`` only covers encoder-decoder
-    steps, so patch the module-level ``set_forward_context`` consumed by
-    ``GPUModelRunner.execute_model`` to force eager for those V4.1 calls.
-    The wrapper checks the model type on every call, so non-V4.1 runners
-    sharing this process are unaffected.
-    """
-    global _V41_EAGER_FALLBACK_INSTALLED
-    if _V41_EAGER_FALLBACK_INSTALLED:
-        return
-    original_set_forward_context = vllm_model_runner.set_forward_context
-
-    @contextmanager
-    def v41_aware_set_forward_context(*args, **kwargs):
-        vllm_config = args[1] if len(args) > 1 else kwargs.get("vllm_config")
-        if (
-            vllm_config is not None
-            and is_deepseek_v41(vllm_config.model_config.hf_config)
-            and kwargs.get("cudagraph_runtime_mode", CUDAGraphMode.NONE) == CUDAGraphMode.NONE
-        ):
-            kwargs["skip_compiled"] = True
-        with original_set_forward_context(*args, **kwargs):
-            yield
-
-    vllm_model_runner.set_forward_context = v41_aware_set_forward_context
-    _V41_EAGER_FALLBACK_INSTALLED = True
 
 
 class NPUModelRunner(GPUModelRunner):
@@ -251,9 +214,6 @@ class NPUModelRunner(GPUModelRunner):
         set_mc2_tokens_capacity(vllm_config, self.max_num_reqs, self.decode_query_len)
         set_mc2_mask(vllm_config, self.device)
         set_potential_max_tokens(vllm_config)
-        # V4.1: runtime-NONE steps (prefill, non-uniform decode) must bypass
-        # the compiled wrapper; only uniform decode runs the full ACL graph.
-        _install_v41_eager_fallback()
 
     @property
     def pcp_manager_cls(self) -> type[AscendPCPManager]:
