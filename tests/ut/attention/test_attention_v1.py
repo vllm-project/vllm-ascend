@@ -1121,6 +1121,9 @@ class TestBlasstParamProvider(TestBase):
         self._saved_grown = attn_module._blasst_grown_workspace
         attn_module._blasst_grown_workspace = None
         self.addCleanup(setattr, attn_module, "_blasst_grown_workspace", self._saved_grown)
+        self._saved_probe = attn_module._blasst_ws_probe
+        attn_module._blasst_ws_probe = None
+        self.addCleanup(setattr, attn_module, "_blasst_ws_probe", self._saved_probe)
 
     @staticmethod
     def _provider(workspace):
@@ -1149,6 +1152,8 @@ class TestBlasstParamProvider(TestBase):
     def _resolve(self, provider, need):
         metadata = self._metadata()
         context = {"layer0": metadata}
+        # Each call models a fresh replay pass: reset the per-pass probe cache.
+        attn_module._blasst_ws_probe = None
         # create=True: the UT environment has no registered _C_ascend ops, so
         # the namespace attribute only exists while mocked.
         with patch(BLASST_GET_WS_PATH, return_value=need, create=True) as get_ws:
@@ -1158,6 +1163,18 @@ class TestBlasstParamProvider(TestBase):
     def test_provider_is_hashable(self):
         provider = self._provider(torch.empty(8, dtype=torch.uint8))
         self.assertEqual({provider: "task"}[provider], "task")
+
+    def test_resolve_probes_once_per_replay_pass(self):
+        # Layers in a bucket share shapes/seq lists: the first resolve in a
+        # pass probes get_workspace, the rest reuse it (per-layer probing was
+        # a 64x decode slowdown at long KV).
+        captured = torch.empty(8, dtype=torch.uint8)
+        provider = self._provider(captured)
+        with patch(BLASST_GET_WS_PATH, return_value=0, create=True) as get_ws:
+            ctx = {"layer0": self._metadata()}
+            provider.resolve(ctx)
+            provider.resolve(ctx)
+        self.assertEqual(get_ws.call_count, 1)
 
     def test_resolve_maps_current_metadata_into_task_params(self):
         captured = torch.empty(8, dtype=torch.uint8)

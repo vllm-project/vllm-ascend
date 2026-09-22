@@ -74,6 +74,9 @@ BLASST_SPARSE_MODE_NO_MASK = 0
 
 
 _blasst_grown_workspace: torch.Tensor | None = None
+# (probe_key, need) of the last replay-pass workspace probe; see
+# BlasSTParamProvider.resolve for why it is shared across layers.
+_blasst_ws_probe: tuple | None = None
 
 
 def _blasst_op_kwargs(blasst_config, num_heads: int, num_kv_heads: int, scale: float) -> dict:
@@ -538,19 +541,28 @@ class BlasSTParamProvider:
 
     def resolve(self, attn_metadata) -> dict[str, Any]:
         metadata = attn_metadata[self.layer_name]
-        global _blasst_grown_workspace
-        need = torch.ops._C_ascend.npu_blasst_attention_score_get_workspace(
-            self.query,
-            self.key,
-            self.value,
-            pse_shift=None,
-            atten_mask=self.attn_mask,
-            actual_seq_lengths=metadata.actual_seq_lengths_q,
-            actual_seq_lengths_kv=metadata.seq_lens_list,
-            blocktable=metadata.block_tables,
-            block_size=self.block_size,
-            **dict(self.op_kwargs),
-        )
+        global _blasst_grown_workspace, _blasst_ws_probe
+        # get_workspace runs full host tiling (~25ms at long KV). Layers in a
+        # bucket share shapes and seq lists, and the kv list changes every
+        # step, so probe once per replay pass and let the other layers reuse
+        # it -- probing per layer per step was a 64x collapse (~1.6s/step).
+        probe_key = tuple(metadata.seq_lens_list)
+        if _blasst_ws_probe is not None and _blasst_ws_probe[0] == probe_key:
+            need = _blasst_ws_probe[1]
+        else:
+            need = torch.ops._C_ascend.npu_blasst_attention_score_get_workspace(
+                self.query,
+                self.key,
+                self.value,
+                pse_shift=None,
+                atten_mask=self.attn_mask,
+                actual_seq_lengths=metadata.actual_seq_lengths_q,
+                actual_seq_lengths_kv=metadata.seq_lens_list,
+                blocktable=metadata.block_tables,
+                block_size=self.block_size,
+                **dict(self.op_kwargs),
+            )
+            _blasst_ws_probe = (probe_key, need)
         ws = self.workspace
         grown = _blasst_grown_workspace
         if need > ws.numel():
