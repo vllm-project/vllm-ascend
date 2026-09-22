@@ -51,6 +51,7 @@ from vllm_ascend.attention.utils import (
     notify_kv_cache_written,
     split_decodes_and_prefills,
     using_paged_attention,
+    _select_seq_lens,
 )
 from vllm_ascend.compilation.updatable_graph import (
     get_capture_resource,
@@ -313,23 +314,17 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         )
 
         block_table = common_attn_metadata.block_table_tensor
-        # Prefer _seq_lens_cpu (always available, updated during draft
-        # iterations) over seq_lens_cpu (None in async spec decode mode).
-        if common_attn_metadata._seq_lens_cpu is not None:
-            seq_lens = common_attn_metadata._seq_lens_cpu[:num_reqs]
-        elif common_attn_metadata.seq_lens_cpu is not None:
-            seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
-        else:
-            seq_lens = common_attn_metadata.seq_lens[:num_reqs].to("cpu")
-
+        seq_lens = _select_seq_lens(
+            common_attn_metadata,
+            kv_cache_spec=self.kv_cache_spec,
+            speculative_config=self.speculative_config,
+            vllm_config=self.vllm_config,
+        )
         slot_mapping = common_attn_metadata.slot_mapping[:num_actual_tokens]
         # this slot_mapping override doesn't work since vllm will override it again. We should fix it vllm.
         # see: https://github.com/vllm-project/vllm/blob/ce88756b967c2c5006746a424c15dd59a284ed8c/vllm/model_executor/layers/attention/cross_attention.py#L117
         if isinstance(self.kv_cache_spec, CrossAttentionSpec):
-            seq_lens = common_attn_metadata.seq_lens
             slot_mapping = common_attn_metadata.slot_mapping.to(torch.int32)
-        elif self.speculative_config and self.speculative_config.parallel_drafting:
-            seq_lens = common_attn_metadata.seq_lens
 
         attn_state = common_attn_metadata.attn_state
 
