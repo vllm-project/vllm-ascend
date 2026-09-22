@@ -103,6 +103,7 @@ class KVPoolWorker:
         vllm_config: VllmConfig,
         use_layerwise: bool,
         kv_cache_config: KVCacheConfig | None = None,
+        memcache_dp_init_barrier: bool = True,
     ):
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
@@ -122,7 +123,7 @@ class KVPoolWorker:
         self._init_kv_transfer_config(vllm_config, extra_config, use_layerwise, kv_cache_config)
         self._init_key_head_config(model_config, parallel_config)
         self._init_metadata(model_config, vllm_config, extra_config)
-        self._init_backend(parallel_config, extra_config)
+        self._init_backend(parallel_config, extra_config, memcache_dp_init_barrier)
         self._init_kv_events(vllm_config)
         self._init_state_vars()
         self._init_layerwise_config()
@@ -313,7 +314,7 @@ class KVPoolWorker:
         self.cache_coordinator = self._build_cache_coordinator(vllm_config)
         self.token_database.cache_coordinator = self.cache_coordinator
 
-    def _init_backend(self, parallel_config, extra_config) -> None:
+    def _init_backend(self, parallel_config, extra_config, memcache_dp_init_barrier: bool = True) -> None:
         backend = backend_map.get(self.backend.lower())
         assert backend is not None
         backend_path = backend.get("path")
@@ -327,6 +328,8 @@ class KVPoolWorker:
         # gates this based on hardware: Mooncake requires ASCEND_ENABLE_FABRIC_MEM=1
         # (A3 fabric memory), and Memcache requires device_sdma protocol.
         backend_kwargs["lazy_init"] = self.use_compress
+        if self.backend_name == "memcache":
+            backend_kwargs["dp_init_barrier"] = memcache_dp_init_barrier
         self.m_store = real_backend(  # type: ignore[misc]
             parallel_config,
             **backend_kwargs,
