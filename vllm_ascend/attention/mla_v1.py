@@ -1,4 +1,3 @@
-from copy import copy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
 
@@ -745,14 +744,6 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             nope_zero_rope_cache=self.nope_zero_rope_cache,
         )
         return decode_metadata
-
-    def build_for_cudagraph_capture(self, common_attn_metadata: AscendCommonAttentionMetadata):
-        capture_metadata = copy(common_attn_metadata)
-        if capture_metadata.attn_state is None:
-            capture_metadata.attn_state = AscendAttentionState.ChunkedPrefill
-        if self.dcp_enabled and capture_metadata.is_prefilling is None:
-            capture_metadata.is_prefilling = torch.zeros(capture_metadata.num_reqs, dtype=torch.bool)
-        return super().build_for_cudagraph_capture(capture_metadata)
 
     def build_for_graph_capture(
         self,
