@@ -39,17 +39,14 @@ _W13_SCALE_SUFFIXES = ("gate_up_proj.weight_scale", "gate_proj.weight_scale", "u
 _W2_SCALE_SUFFIX = "down_proj.weight_scale"
 
 
-def _get_ckpt_name_normalizer(model: torch.nn.Module) -> Callable[[str], str]:
-    """Return the model's checkpoint -> runtime name normalizer, if any.
-
-    Models whose raw checkpoint naming differs from the runtime module
-    namespace (e.g. DeepSeek-V4's ``.ffn.``/``.w1./.w2./.w3.``/``.scale``)
-    declare it as a ``ckpt_weight_name_normalizer`` attribute so the reload
-    below can match raw checkpoint names against runtime-name prefixes. The
-    identity mapping is used for models that load under the same names.
-    """
-    normalizer = getattr(model, "ckpt_weight_name_normalizer", None)
-    return normalizer if normalizer is not None else (lambda name: name)
+def _get_ckpt_name_mapper(model: torch.nn.Module) -> Callable[[str], str]:
+    """Map raw checkpoint weight names into the model's runtime namespace."""
+    mapper = getattr(model, "hf_to_vllm_mapper", None)
+    if mapper is None:
+        # No declared mapping means the checkpoint stores weights under
+        # runtime names already (e.g. Qwen3-MoE), so identity is correct.
+        return lambda name: name
+    return lambda name: mapper._map_name(name) or name
 
 
 def build_orig_to_dense_rank_table(ep_world_size: int, dead_ranks: set[int]) -> torch.Tensor:
@@ -276,7 +273,7 @@ def reload_experts_from_disk(
         f"{routed_layers[layer_idx].layer_name}.{logical_id}.": (layer_idx, logical_id)
         for layer_idx, logical_id in local_slots
     }
-    normalize = _get_ckpt_name_normalizer(model)
+    normalize = _get_ckpt_name_mapper(model)
 
     loader = get_model_loader(vllm_config.load_config)
     # Produce every expert, not just the ones local at startup. Only the
@@ -313,7 +310,9 @@ def reload_experts_from_disk(
             f"[FT] {len(unmatched)} (layer, expert) pair(s) had no matching "
             f"checkpoint weight, e.g. {unmatched[:5]}. The model's expert "
             "weights likely use a layout that does not follow "
-            "'<layer_name>.<expert_id>.' (e.g. fused experts)."
+            "'<layer_name>.<expert_id>.' (e.g. fused experts), or the "
+            "checkpoint's naming differs from the runtime namespace without "
+            "an hf_to_vllm_mapper declared on the model class."
         )
 
     reloaded = 0
