@@ -37,10 +37,10 @@ class RouteSourceTests(unittest.TestCase):
 class _FakeTensor:
     _ELEMENT_SIZE = {"float16": 2, "bfloat16": 2, "float32": 4}
 
-    def __init__(self, shape, dtype, device_index=0):
+    def __init__(self, shape, dtype, device_type="npu", device_index=0):
         self.shape = tuple(shape)
         self.dtype = dtype
-        self.device = types.SimpleNamespace(index=device_index)
+        self.device = types.SimpleNamespace(type=device_type, index=device_index)
 
     def stride(self, dim):
         return 1 if dim == -1 else self.shape[-1]
@@ -82,8 +82,12 @@ def _load_layernorm_with_fakes():
             return state["device_name"]
 
     fake_torch.npu = _Npu()
-    fake_torch.empty_like = lambda x: _FakeTensor(x.shape, x.dtype, x.device.index)
-    fake_torch.empty = lambda shape, dtype, device: _FakeTensor(shape, dtype, device.index)
+    fake_torch.empty_like = lambda x: _FakeTensor(
+        x.shape, x.dtype, x.device.type, x.device.index
+    )
+    fake_torch.empty = lambda shape, dtype, device: _FakeTensor(
+        shape, dtype, device.type, device.index
+    )
 
     fake_vllm = types.ModuleType("vllm")
     fake_vllm_triton = types.ModuleType("vllm.triton_utils")
@@ -168,12 +172,32 @@ class WrapperRouteTests(unittest.TestCase):
     def test_public_wrapper_launch_contract_and_fallbacks(self):
         layer, state, launches, saved = _load_layernorm_with_fakes()
         try:
-            def call(rows, columns=128, dtype="bfloat16", group_size=None, out=None):
-                x = _FakeTensor((rows, columns), dtype)
-                weight = _FakeTensor((columns,), dtype)
-                bias = _FakeTensor((columns,), dtype)
+            def call(
+                rows,
+                columns=128,
+                dtype="bfloat16",
+                group_size=None,
+                out=None,
+                bias=True,
+                z=False,
+                norm_before_gate=True,
+                is_rms_norm=False,
+                device_type="npu",
+            ):
+                x = _FakeTensor((rows, columns), dtype, device_type)
+                weight = _FakeTensor((columns,), dtype, device_type)
+                bias = _FakeTensor((columns,), dtype, device_type) if bias else None
+                z = _FakeTensor((rows, columns), dtype, device_type) if z else None
                 return layer.layer_norm_fwd_npu(
-                    x, weight, bias, 1e-5, out=out, group_size=group_size
+                    x,
+                    weight,
+                    bias,
+                    1e-5,
+                    z=z,
+                    out=out,
+                    group_size=group_size,
+                    norm_before_gate=norm_before_gate,
+                    is_rms_norm=is_rms_norm,
                 )
 
             caller_out = _FakeTensor((288, 128), "bfloat16")
@@ -185,6 +209,10 @@ class WrapperRouteTests(unittest.TestCase):
             self.assertEqual((kwargs["BLOCK_M"], kwargs["BLOCK_N"]), (16, 128))
             self.assertIs(returned[0], caller_out)
             self.assertIs(returned[0], args[1])
+            self.assertEqual(returned[1].shape, (288,))
+            self.assertEqual(returned[2].shape, (288,))
+            self.assertIs(returned[1], args[5])
+            self.assertIs(returned[2], args[6])
 
             call(289)
             name, grid, args, kwargs = launches[-1]
@@ -193,6 +221,25 @@ class WrapperRouteTests(unittest.TestCase):
             self.assertEqual(len(args), 15)
             self.assertEqual((args[13], args[14]), (10, 1))
             self.assertEqual((kwargs["BLOCK_M"], kwargs["BLOCK_N"]), (32, 128))
+            self.assertEqual(launches[-1][3]["NORM_BEFORE_GATE"], True)
+            self.assertEqual(launches[-1][3]["IS_RMS_NORM"], False)
+
+            rms_result = call(
+                289,
+                bias=False,
+                z=True,
+                norm_before_gate=False,
+                is_rms_norm=True,
+            )
+            name, grid, args, kwargs = launches[-1]
+            self.assertEqual(name, "_layer_norm_fwd_persistent_kernel_npu")
+            self.assertIsNone(args[3])
+            self.assertIsNotNone(args[4])
+            self.assertIsNone(rms_result[1])
+            self.assertEqual(rms_result[2].shape, (289,))
+            self.assertIs(rms_result[2], args[6])
+            self.assertEqual(kwargs["NORM_BEFORE_GATE"], False)
+            self.assertEqual(kwargs["IS_RMS_NORM"], True)
 
             call(20449)
             name, grid, args, kwargs = launches[-1]
@@ -208,6 +255,16 @@ class WrapperRouteTests(unittest.TestCase):
             self.assertEqual(grid, (64, 2))
             self.assertEqual(kwargs["BLOCK_M"], 32)
 
+            call(287, bias=False, z=True)
+            name, grid, args, kwargs = launches[-1]
+            self.assertEqual(name, "_layer_norm_fwd_1pass_kernel_npu")
+            self.assertEqual(grid, (18, 1))
+            self.assertEqual(kwargs["BLOCK_M"], 16)
+            self.assertIsNone(args[3])
+            self.assertIsNotNone(args[4])
+            self.assertEqual(args[5].shape, (287,))
+            self.assertEqual(args[6].shape, (287,))
+
             # FP32, wide-N, and an unknown device all retain BASE64.  The
             # unknown-name probe is cache-cleared to model a distinct device.
             before_name_calls = state["name_calls"]
@@ -217,10 +274,22 @@ class WrapperRouteTests(unittest.TestCase):
             self.assertEqual(state["name_calls"], before_name_calls)
             call(64, columns=256)
             self.assertEqual(launches[-1][3]["BLOCK_M"], 64)
+            state["vector_cores"] = None
+            call(289)
+            self.assertEqual(launches[-1][0], "_layer_norm_fwd_1pass_kernel_npu")
+            self.assertEqual(launches[-1][3]["BLOCK_M"], 64)
             layer._is_pr1_device_name_qualified.cache_clear()
             state["device_name"] = "Ascend910_9362"
             call(20449)
             self.assertEqual(launches[-1][3]["BLOCK_M"], 64)
+
+            for device_type in ("cpu", "cuda"):
+                before_name_calls = state["name_calls"]
+                state["vector_cores"] = 40
+                call(289, device_type=device_type)
+                self.assertEqual(launches[-1][0], "_layer_norm_fwd_1pass_kernel_npu")
+                self.assertEqual(launches[-1][3]["BLOCK_M"], 64)
+                self.assertEqual(state["name_calls"], before_name_calls)
         finally:
             _unload_layernorm_fakes(saved)
 

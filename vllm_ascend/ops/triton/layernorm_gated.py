@@ -28,7 +28,10 @@ def _is_pr1_device_name_qualified(device_index: int) -> bool:
 
 def _is_pr1_device_qualified(x) -> bool:
     """Use the tensor's device index, with a conservative current-device fallback."""
-    device_index = getattr(getattr(x, "device", None), "index", None)
+    device = getattr(x, "device", None)
+    if getattr(device, "type", None) != "npu":
+        return False
+    device_index = getattr(device, "index", None)
     if type(device_index) is not int:
         try:
             device_index = torch.npu.current_device()
