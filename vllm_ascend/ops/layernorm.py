@@ -15,6 +15,8 @@
 #
 
 
+import math
+
 import torch
 from torch import nn
 from vllm.config import get_current_vllm_config
@@ -22,9 +24,10 @@ from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm, RMSNormG
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.ops.kda_rms_norm_gated import kda_rms_norm_gated, supports_kda_rms_norm_gated
 from vllm_ascend.ops.triton.kda.kda import rms_norm_gated
 from vllm_ascend.ops.triton.layernorm_gated import layer_norm_fwd_npu
-from vllm_ascend.utils import enable_custom_op
+from vllm_ascend.utils import enable_custom_op, is_950
 
 
 class AscendRMSNorm(RMSNorm):
@@ -199,7 +202,26 @@ class AscendRMSNormGated(RMSNormGated):
 class AscendFusedRMSNormGated(FusedRMSNormGated):
     """Use Ascend's fused kernel at the upstream FLA CustomOp boundary."""
 
-    def forward_oot(self, x, g, residual=None, prenorm=False, residual_in_fp32=False):
+    def forward_prefill(self, x, g, *, out=None):
+        """Explicit pure-prefill entry; normal/decode dispatch is unchanged."""
+        if (
+            getattr(getattr(self, "_forward_method", None), "__func__", None) is AscendFusedRMSNormGated.forward_oot
+            and self.bias is None
+            and self.activation in ("sigmoid", "swish", "silu")
+            and x.ndim in (3, 4)
+            and x.shape[-3] >= 1024
+            and math.isfinite(self.eps)
+            and torch.finfo(torch.float32).tiny <= self.eps <= torch.finfo(torch.float32).max
+            and supports_kda_rms_norm_gated(x, g, self.weight, out)
+            and is_950()
+            and hasattr(torch.ops._C_ascend, "kda_rms_norm_gated")
+        ):
+            return kda_rms_norm_gated(
+                x, g, self.weight, eps=self.eps, out=out, sigmoid_only=self.activation == "sigmoid"
+            )
+        return self(x, g, out=out)
+
+    def forward_oot(self, x, g, residual=None, prenorm=False, residual_in_fp32=False, out=None):
         return rms_norm_gated(
             x,
             g,
@@ -210,4 +232,5 @@ class AscendFusedRMSNormGated(FusedRMSNormGated):
             eps=self.eps,
             prenorm=prenorm,
             residual_in_fp32=residual_in_fp32,
+            out=out,
         )
