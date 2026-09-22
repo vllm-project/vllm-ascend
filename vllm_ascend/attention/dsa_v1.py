@@ -428,11 +428,16 @@ def build_dspark_swa_indices(
     index_width: int | None = None,
     indices_output: torch.Tensor | None = None,
     buffer: torch.Tensor | None = None,
+    *,
+    use_logical_indices: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Build DSpark non-causal visible slot ids for a paged SWA cache.
 
     Each token in a draft block sees the trailing context window plus the
     whole current draft block. Invalid/padded rows get lens=0 and -1 slots.
+    ``use_logical_indices`` returns positions within each sequence for
+    SparseFlashMLA, which applies its own block-table lookup. The default
+    preserves physical slots for existing DSA callers.
 
     When ``buffer`` is given, the per-token slots are copied into its leading
     rows and the returned tensor is a slice view of ``buffer``. This keeps the
@@ -460,13 +465,15 @@ def build_dspark_swa_indices(
     cols = torch.arange(index_width, device=start_pos.device)
     col_mask = cols[None, :] < visible_lens[:, None]
     pos = start_pos[:, None] + cols[None, :]
-    block_nums = pos // block_size
-    # Clamp to valid block-table columns so gather never goes OOB on the
-    # out-of-range columns (their results are discarded by col_mask anyway).
-    safe_nums = block_nums.clamp(min=0, max=int(block_table.shape[1]) - 1)
-    block_offsets = pos % block_size
-    block_ids = torch.gather(block_table, 1, safe_nums)
-    slot_ids = (block_ids * block_size + block_offsets).to(torch.int32)
+    if use_logical_indices:
+        slot_ids = pos.to(torch.int32)
+    else:
+        block_nums = pos // block_size
+        # Clamp out-of-range columns before gathering; col_mask discards them.
+        safe_nums = block_nums.clamp(min=0, max=int(block_table.shape[1]) - 1)
+        block_offsets = pos % block_size
+        block_ids = torch.gather(block_table, 1, safe_nums)
+        slot_ids = (block_ids * block_size + block_offsets).to(torch.int32)
     slot_ids = slot_ids.where(col_mask, torch.full_like(slot_ids, -1))
 
     per_token_slots = torch.repeat_interleave(slot_ids, query_lens, dim=0, output_size=num_decode_tokens).unsqueeze(1)
@@ -815,6 +822,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
         fast_build: bool = False,
+        *,
+        can_use_rope_cache: bool = True,
         **kwargs,
     ) -> AscendDSAMetadata:
         num_reqs = common_attn_metadata.num_reqs
@@ -849,9 +858,10 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
             self.common_ratio_to_sas_metadata["seq_lens_cpu"] = seq_lens_cpu
             input_positions = common_attn_metadata.positions[:num_input_tokens].long()
+            need_use_rope_cache = can_use_rope_cache and self.num_prefills == 0
             cos, sin = get_cos_and_sin_dsa(
                 input_positions,
-                use_cache=self.num_prefills == 0,
+                use_cache=need_use_rope_cache,
             )
             self.common_ratio_to_sas_metadata["cos"] = cos
             self.common_ratio_to_sas_metadata["sin"] = sin

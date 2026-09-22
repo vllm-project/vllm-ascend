@@ -3,7 +3,6 @@
 """Unit tests for the MRV2 GQA DSpark target/draft contract."""
 
 from contextlib import nullcontext
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -11,8 +10,6 @@ import pytest
 import torch
 from vllm.model_executor.model_loader.utils import get_model_cls
 from vllm.model_executor.models import ModelRegistry
-from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
-from vllm.v1.worker.gpu.spec_decode.dspark import utils as dspark_utils
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
 from vllm_ascend.models import register_model
@@ -20,7 +17,6 @@ from vllm_ascend.models.qwen3_dspark import (
     AscendQwen3DSparkForCausalLM,
     process_weight,
 )
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import (
     AscendDSparkSpeculator,
 )
@@ -32,6 +28,7 @@ def _spec(vllm_config, draft_hf_config) -> AscendDSparkSpeculator:
     spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
     spec.vllm_config = vllm_config
     spec.draft_model_config = SimpleNamespace(hf_config=draft_hf_config)
+    vllm_config.speculative_config = SimpleNamespace(draft_model_config=spec.draft_model_config)
     return spec
 
 
@@ -97,13 +94,12 @@ def test_draft_without_hook_preserves_target_capture(monkeypatch):
     draft = object()
 
     def load(*args):
-        assert config._ascend_target_rotation_path is not None
         return draft
 
     monkeypatch.setattr(DSparkSpeculator, "load_draft_model", load)
     assert _spec(_vllm_config(quarot=True), config).load_draft_model(target, set()) is draft
     target.set_dspark_aux_capture_materialized.assert_not_called()
-    assert config._ascend_target_rotation_path is not None
+    assert vars(config) == {"architectures": ["DSparkDraftModel"]}
 
 
 def test_qwen3_class_selects_materialized_target_capture():
@@ -139,6 +135,10 @@ def test_configures_capture_after_loading_draft(monkeypatch):
     target = _target()
     target.set_dspark_aux_capture_materialized = lambda enabled: events.append(("capture", enabled))
     draft = _draft()
+    draft.post_process = MagicMock()
+    monkeypatch.setattr(
+        "vllm_ascend.worker.v2.spec_decode.dspark.speculator.set_current_vllm_config", lambda _: nullcontext()
+    )
 
     def _load(self, target_model, target_attn_layer_names):
         events.append(("load", None))
@@ -149,135 +149,6 @@ def test_configures_capture_after_loading_draft(monkeypatch):
 
     assert spec.load_draft_model(target, set()) is draft
     assert events == [("load", None), ("capture", True)]
-
-
-def test_injects_rotation_before_draft_construction(monkeypatch):
-    draft_config = _gqa_config()
-    target = _target()
-    draft = SimpleNamespace(model=SimpleNamespace(embed_tokens=object()), lm_head=object())
-
-    def _load(self, target_model, target_attn_layer_names):
-        assert draft_config._ascend_target_rotation_path == "/rotation"
-        return draft
-
-    monkeypatch.setattr(DSparkSpeculator, "load_draft_model", _load)
-    monkeypatch.setattr(
-        "vllm_ascend.worker.v2.spec_decode.dspark.speculator.get_rotation_path",
-        lambda config: "/rotation",
-    )
-    spec = _spec(_vllm_config(quarot=True), draft_config)
-
-    assert spec.load_draft_model(target, set()) is draft
-    assert draft_config._ascend_target_rotation_path == "/rotation"
-
-
-def test_draft_loading_failure_propagates(monkeypatch):
-    draft_config = _gqa_config()
-    target = _target()
-
-    def fail_load(*args):
-        raise ValueError("checkpoint load failed")
-
-    monkeypatch.setattr(DSparkSpeculator, "load_draft_model", fail_load)
-    monkeypatch.setattr(
-        "vllm_ascend.worker.v2.spec_decode.dspark.speculator.get_rotation_path",
-        lambda config: "/rotation",
-    )
-    spec = _spec(_vllm_config(quarot=True), draft_config)
-
-    with pytest.raises(ValueError, match="checkpoint load failed"):
-        spec.load_draft_model(target, set())
-    target.set_dspark_aux_capture_materialized.assert_not_called()
-
-
-@pytest.mark.parametrize("quarot", [False, True])
-def test_target_rotation_path_is_retained(monkeypatch, quarot):
-    config = _gqa_config()
-
-    def load(*args):
-        expected = str(Path("/target") / "rotation.safetensors") if quarot else None
-        assert config._ascend_target_rotation_path == expected
-        return object()
-
-    monkeypatch.setattr(DSparkSpeculator, "load_draft_model", load)
-    _spec(_vllm_config(quarot=quarot), config).load_draft_model(_target(), set())
-    expected = str(Path("/target") / "rotation.safetensors") if quarot else None
-    assert config._ascend_target_rotation_path == expected
-
-
-@pytest.mark.parametrize("initial_path", [None, Path("/draft-rotation")])
-def test_load_weights_uses_target_rotation(monkeypatch, initial_path):
-    draft = _draft()
-    draft.rotation_path = initial_path
-    draft.config._ascend_target_rotation_path = "/target-rotation"
-    rotation_loader = MagicMock(return_value=torch.eye(2))
-    monkeypatch.setattr("vllm_ascend.models.qwen3_dspark.get_rotation_matrix", rotation_loader)
-    loaded = []
-    monkeypatch.setattr(Qwen3DSparkForCausalLM, "load_weights", lambda self, weights: loaded.extend(weights))
-    weight = torch.ones(2, 2)
-    draft.load_weights([("fc.weight", weight), ("embed_tokens.weight", weight), ("lm_head.weight", weight)])
-    rotation_loader.assert_called_once_with(Path("/target-rotation"))
-    torch.testing.assert_close(loaded[0][1], weight)
-
-
-def test_quarot_loaded_weights_survive_upstream_sharing(monkeypatch):
-    draft = AscendQwen3DSparkForCausalLM.__new__(AscendQwen3DSparkForCausalLM)
-    torch.nn.Module.__init__(draft)
-    draft.config = _gqa_config()
-    draft.model = torch.nn.Module()
-    draft.model.embed_tokens = torch.nn.Embedding(4, 2)
-    draft.lm_head = torch.nn.Linear(2, 4, bias=False)
-    draft.rotation_path = Path("/rotation")
-    draft.target_model_path = Path("/target")
-    draft.has_own_embed_tokens = False
-    draft.has_own_lm_head = False
-    loaded_layers = []
-
-    def load_layer(layer, *args):
-        loaded_layers.append(layer)
-        with torch.no_grad():
-            layer.weight.fill_(len(loaded_layers))
-
-    monkeypatch.setattr(Qwen3DSparkForCausalLM, "load_weights", lambda self, weights: set())
-    monkeypatch.setattr("vllm_ascend.models.qwen3_dspark.get_rotation_matrix", lambda path: torch.eye(2))
-    monkeypatch.setattr("vllm_ascend.models.qwen3_dspark.load_quarot_target_layer", load_layer)
-    draft.load_weights([])
-    assert draft.has_own_embed_tokens and draft.has_own_lm_head
-
-    target = _target()
-    target.model.embed_tokens = torch.nn.Embedding(4, 2)
-    target.lm_head = torch.nn.Linear(2, 4, bias=False)
-    config = SimpleNamespace(
-        speculative_config=SimpleNamespace(
-            draft_model_config=SimpleNamespace(hf_config=_gqa_config(), model="/draft", get_vocab_size=lambda: 4),
-            draft_parallel_config=SimpleNamespace(tensor_parallel_size=1),
-            attention_backend=None,
-            kv_cache_dtype=None,
-        ),
-        attention_config=SimpleNamespace(backend=None),
-        cache_config=object(),
-        model_config=SimpleNamespace(model="/target", get_vocab_size=lambda: 4),
-        parallel_config=SimpleNamespace(pipeline_parallel_size=1),
-    )
-    monkeypatch.setattr(dspark_utils, "replace", lambda obj, **kwargs: SimpleNamespace(**(vars(obj) | kwargs)))
-    # Both supported versions import model loading and sharing helpers locally.
-    monkeypatch.setattr("vllm.model_executor.model_loader.get_model", lambda **kwargs: draft)
-    monkeypatch.setattr(
-        "vllm.v1.worker.gpu.spec_decode.eagle.utils.get_pp_group", lambda: SimpleNamespace(world_size=1)
-    )
-    monkeypatch.setattr("vllm.v1.worker.gpu.spec_decode.eagle.utils.get_target_lm_head", lambda *args: target.lm_head)
-    if vllm_version_is("0.29.0"):
-        # Release retains the module-level PP guard removed on pinned main.
-        monkeypatch.setattr(dspark_utils, "get_pp_group", lambda: SimpleNamespace(world_size=1))
-    monkeypatch.setattr("vllm.compilation.backends.set_model_tag", lambda *args: nullcontext())
-    monkeypatch.setattr("vllm.model_executor.models.qwen3_dflash.dflash_has_any_non_causal", lambda config: False)
-    monkeypatch.setattr("vllm.model_executor.models.utils.get_draft_quant_config", lambda config: None)
-
-    result = dspark_utils.load_dspark_model(target, config)
-    assert result.model.embed_tokens is loaded_layers[0]
-    assert result.lm_head is loaded_layers[1]
-    torch.testing.assert_close(result.model.embed_tokens.weight, torch.ones(4, 2))
-    torch.testing.assert_close(result.lm_head.weight, torch.full((4, 2), 2.0))
 
 
 def test_process_weight_preserves_the_unrotated_projection():

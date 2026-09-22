@@ -132,12 +132,10 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Replay the draft ACL graph and update its attention parameters."""
         num_tokens = desc.num_tokens
-        if self.is_draft_model_prefill:
-            logger.info_once(
-                "AutoRegressiveAclGraphManager: draft prefill run_fullgraph with num_tokens=%s", num_tokens
-            )
-        else:
-            logger.info_once("AutoRegressiveAclGraphManager: draft run_fullgraph with num_tokens=%s", num_tokens)
+        logger.info_once(
+            "ACL graph replay is active for the V2 draft model (%s, logged once per phase).",
+            "prefill" if self.is_draft_model_prefill else "decode",
+        )
         assert self.update_stream is not None
 
         attn_backend = self.speculator.attn_backend
