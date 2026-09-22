@@ -9,6 +9,7 @@ import torch_npu
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADSACPImpl
+from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
 from vllm_ascend.device import device_op
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
@@ -156,3 +157,40 @@ def test_main_cache_write_delegates_with_own_slots(tokens, state, producer, cons
     assert store.call_args.args[1] is cache and store.call_args.args[2] is slots
     assert store.call_args.args[3] == tokens
     scatter.assert_not_called()
+
+
+@pytest.mark.parametrize("tokens", [1, 3])
+@pytest.mark.parametrize("fast_available", [False, True])
+def test_native_main_c8_cache_packs_and_writes_actual_tokens(monkeypatch, tokens, fast_available):
+    impl = AscendSFAImpl.__new__(AscendSFAImpl)
+    impl.enable_sparse_sfa_c8 = True
+    impl.sfa_qsfa_packed_kv_head_dim = 656
+    packed = (torch.arange(4 * 656).reshape(4, 656) % 251 - 125).to(torch.int8)
+    k_nope, k_pe, scale = packed.split([512, 128, 16], dim=-1)
+    cache = torch.full((2, 4, 1, 656), -7, dtype=torch.int8)
+    slots = torch.tensor([5, 2, 6, -1], dtype=torch.int32)
+    slots[tokens:] = -1
+
+    def write(target, indices, updates):
+        assert len(indices) == tokens and (indices >= 0).all()
+        target.index_copy_(0, indices.flatten().long(), updates)
+
+    def try_fast(key, target, indices):
+        if fast_available:
+            write(target.view(-1, 656), indices, key)
+        return fast_available
+
+    fast = Mock(side_effect=try_fast)
+    generic = Mock(side_effect=write)
+    monkeypatch.setattr("vllm_ascend.attention.sfa_v1.DeviceOperator", device_op.BaseDeviceAdaptor)
+    monkeypatch.setattr(device_op.BaseDeviceAdaptor, "_scatter_cache", fast)
+    monkeypatch.setattr(torch_npu, "npu_scatter_nd_update_", generic, raising=False)
+    result = impl._store_parallel_kv(
+        k_pe, k_nope, scale, None, [], (cache,), slots, metadata(num_actual_tokens=tokens), False
+    )
+    assert result[0] is k_pe and result[1] is k_nope
+    reference = torch.full_like(cache, -7)
+    reference.view(-1, 656)[slots[:tokens].long()] = packed[:tokens]
+    torch.testing.assert_close(cache, reference, rtol=0, atol=0)
+    fast.assert_called_once()
+    assert generic.call_count == int(not fast_available)

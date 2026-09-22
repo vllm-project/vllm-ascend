@@ -7,8 +7,32 @@ import torch
 import torch_npu
 
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADSACPImpl
+from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.utils import enable_custom_op
+
+
+@pytest.mark.parametrize("tokens", [3, 2049])
+@torch.inference_mode()
+def test_native_main_c8_cache_preserves_packing_and_padding(tokens):
+    torch_npu.npu.set_device(0)
+    assert enable_custom_op()
+    padded = ((tokens + 7) // 8) * 8
+    packed = (torch.arange(padded * 656, device="npu").reshape(padded, 656) % 251 - 125).to(torch.int8)
+    k_nope, k_pe, scale = packed.split([512, 128, 16], dim=-1)
+    cache = torch.full((32, 128, 1, 656), -7, dtype=torch.int8, device="npu")
+    slots = torch.arange(padded, dtype=torch.int32, device="npu") + 37
+    slots[tokens:] = -1
+    impl = AscendSFAImpl.__new__(AscendSFAImpl)
+    impl.enable_sparse_sfa_c8 = True
+    impl.sfa_qsfa_packed_kv_head_dim = 656
+    impl._store_parallel_kv(
+        k_pe, k_nope, scale, None, [], (cache,), slots, SimpleNamespace(num_actual_tokens=tokens), False
+    )
+    torch.npu.synchronize()
+    reference = torch.full_like(cache, -7, device="cpu")
+    reference.view(-1, 656)[slots[:tokens].cpu().long()] = packed[:tokens].cpu()
+    torch.testing.assert_close(cache.cpu(), reference, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize(
