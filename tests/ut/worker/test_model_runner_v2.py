@@ -503,10 +503,7 @@ def test_sample_tokens_spec_pp_broadcasts_draft_tokens():
     runner.pp_handler = MagicMock()
     with patch.object(GPUModelRunner, "sample_tokens", return_value="out"):
         assert runner.sample_tokens("g") == "out"
-    if vllm_version_is("0.29.0"):
-        runner.pp_handler.broadcast_draft_tokens.assert_called_once_with()
-    else:
-        runner.pp_handler.broadcast_draft_tokens.assert_not_called()
+    runner.pp_handler.broadcast_drafts.assert_called_once_with()
 
 
 def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
