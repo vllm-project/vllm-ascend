@@ -18,6 +18,10 @@ import torch
 from vllm.config import get_current_vllm_config
 from vllm.forward_context import get_forward_context
 
+# Imported as a module so the attribute is resolved at call time: unit tests
+# patch ``ascend_forward_context._EXTRA_CTX`` to inject a fake context.
+from vllm_ascend import ascend_forward_context
+
 
 def _build_or_get_topk(
     moe_comm_method,
@@ -97,12 +101,12 @@ def get_force_eplb_topk(
     plain ``getattr`` on the context object would silently miss it and leave
     the original (possibly degenerate) topk_ids in place.
     """
-    from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-
     try:
-        moe_comm_method = _EXTRA_CTX.moe_comm_method
+        moe_comm_method = ascend_forward_context._EXTRA_CTX.moe_comm_method
     except AssertionError:
-        # Forward context may be unset outside the model runner (e.g. unit tests).
+        # The proxy resolves through vllm's get_forward_context, which
+        # asserts when no forward context is set (e.g. unit tests outside
+        # the model runner). Degrade to a pass-through there.
         return topk_ids
     if moe_comm_method is None:
         return topk_ids

@@ -189,5 +189,9 @@ class AscendModelState(DefaultModelState):
             attn_state=input_batch.attn_state,
             pcp_context=pcp_context,
             for_cudagraph_capture=for_capture,
+            # Same wiring as model_runner_v1: V4.1 builders branch on this
+            # (RoPE table caching). FULL runtime only ever sees decode-only
+            # batches on MRV2, so this is behaviorally a no-op today.
+            full_graph_mode=cudagraph_mode == CUDAGraphMode.FULL,
         )
         return self.attn_metadata
