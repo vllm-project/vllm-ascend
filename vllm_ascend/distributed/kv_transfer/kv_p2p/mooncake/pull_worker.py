@@ -328,7 +328,16 @@ class MooncakePullRecvingThread(threading.Thread):
             local_dcp_size = remote_dcp_size = 1
             local_num_kv_heads = remote_num_kv_heads = 1
             fixed_total_num_kv_heads = 1
-        elif isinstance(spec, (AscendSFAIndexerCacheSpec, SlidingWindowMLASpec)):
+        elif isinstance(spec, AscendSFAIndexerCacheSpec) and (
+            spec.sfa_dcp_replicated_indexer_size > 1
+            or any(scale > 1 for scale in remote_metadata.block_size_scales[remote_layer_index])
+        ):
+            # A replicated SFA indexer stores the complete sequence on every
+            # DCP rank, so keep the original effective-DCP1 path.
+            local_num_kv_heads = remote_num_kv_heads = 1
+            local_dcp_size = remote_dcp_size = 1
+            fixed_total_num_kv_heads = 1
+        elif isinstance(spec, SlidingWindowMLASpec):
             local_dcp_size = remote_dcp_size = 1
             local_num_kv_heads = remote_num_kv_heads = 1
             fixed_total_num_kv_heads = 1
@@ -703,10 +712,13 @@ class MooncakePullRecvingThread(threading.Thread):
         selection_index: int,
     ) -> list[tuple[int, list[int], list[int]]]:
         """Pair remote TP ranks with local and remote kernel block IDs."""
+        is_replicated_sfa_indexer = isinstance(spec, AscendSFAIndexerCacheSpec) and (
+            local_block_size_scale > 1 or remote_block_size_scale > 1
+        )
         is_dcp_transfer = (
             (self.dcp_size > 1 or remote_dcp_size > 1)
             and isinstance(spec, FullAttentionSpec)
-            and not isinstance(spec, AscendSFAIndexerCacheSpec)
+            and not is_replicated_sfa_indexer
         )
         if is_circular_kv_cache_spec(spec):
             if len(local_group_block_ids) != 1 or len(remote_group_block_ids) != 1:

@@ -280,11 +280,10 @@ class MooncakeBaseConnectorWorker:
                 layer_names.append(layer_name)
                 layer_block_size = spec.block_size
                 if isinstance(spec, AscendSFAIndexerCacheSpec):
-                    # The cache manager treats one SFA indexer block as a DCP
-                    # virtual block, while every worker physically stores all
-                    # replicated indexer blocks. Publish the virtual token span
-                    # so dividing it by the tensor block scale recovers the
-                    # physical kernel block size.
+                    # A replicated SFA indexer stores one physical kernel block
+                    # per DCP rank behind each scheduler block. Publish their
+                    # aggregate token span; replication size 1 deliberately
+                    # remains an ordinary DCP-sharded FA block.
                     layer_block_size *= spec.sfa_dcp_replicated_indexer_size
                 layer_block_sizes.append(layer_block_size)
                 group_indices.append(self.layer_name_to_group_index[layer_name])

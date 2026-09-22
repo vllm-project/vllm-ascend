@@ -411,6 +411,87 @@ def test_compute_sfa_indexer_blocks_uses_virtual_block_size_for_prefix(
     assert result == [(0, [20, 21, 22, 23], expected_remote_blocks)]
 
 
+def test_compute_non_replicated_sfa_indexer_uses_dcp_sequence_shards() -> None:
+    thread = make_thread(
+        tp_size=4,
+        pcp_size=2,
+        dcp_size=8,
+        dcp_rank=3,
+    )
+
+    result = thread._compute_group_block_ids(
+        request_id="request",
+        remote_tp_rank_groups=[list(range(8))],
+        remote_dcp_size=8,
+        spec_index=0,
+        local_block_size=16,
+        remote_block_size=16,
+        local_group_block_ids=[10],
+        local_full_group_block_ids=[10],
+        remote_group_block_ids=[20],
+        local_num_prompt_tokens=128,
+        remote_num_prompt_tokens=128,
+        num_computed_tokens=0,
+        local_block_size_scale=1,
+        remote_block_size_scale=1,
+        spec=make_sfa_indexer_spec(replication_size=1),
+        selection_index=0,
+    )
+
+    assert result == [(3, [10], [20])]
+
+
+@pytest.mark.parametrize(
+    (
+        "local_dcp_size",
+        "remote_dcp_size",
+        "local_replication_size",
+        "remote_replication_size",
+        "expected_local_dcp_size",
+        "expected_remote_dcp_size",
+    ),
+    [
+        (8, 8, 1, 1, 8, 8),
+        (8, 8, 8, 8, 1, 1),
+        (1, 8, 1, 8, 1, 1),
+    ],
+)
+def test_sfa_indexer_topology_uses_dcp_only_when_neither_side_replicates(
+    local_dcp_size: int,
+    remote_dcp_size: int,
+    local_replication_size: int,
+    remote_replication_size: int,
+    expected_local_dcp_size: int,
+    expected_remote_dcp_size: int,
+) -> None:
+    thread = make_thread(
+        tp_size=4,
+        pcp_size=2,
+        dcp_size=local_dcp_size,
+        block_size_scales=[[local_replication_size]],
+    )
+    remote = make_pp_metadata(block_size_scales=[[remote_replication_size]])
+    get_remote_groups = MagicMock(return_value=[list(range(8))])
+    thread._get_attention_remote_tp_rank_groups = get_remote_groups  # type: ignore[method-assign]
+
+    assert thread._get_layer_remote_tp_rank_groups(
+        0,
+        0,
+        make_sfa_indexer_spec(replication_size=local_replication_size),
+        remote,
+        remote_pcp_size=2,
+        remote_tp_size=4,
+        remote_dcp_size=remote_dcp_size,
+    ) == [list(range(8))]
+    get_remote_groups.assert_called_once_with(
+        remote_tp_size=4,
+        remote_pcp_size=2,
+        local_dcp_size=expected_local_dcp_size,
+        remote_dcp_size=expected_remote_dcp_size,
+        total_num_kv_heads=1,
+    )
+
+
 def test_transfer_bucket_accepts_sfa_indexer_virtual_block_sizes() -> None:
     spec = make_sfa_indexer_spec(replication_size=2)
     thread = make_thread(
