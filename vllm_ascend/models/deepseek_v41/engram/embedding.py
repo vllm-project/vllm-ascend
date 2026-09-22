@@ -25,6 +25,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
+from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.logger import logger
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.deepseek_v4_1.common.engram import ParallelEngramEmbedding
@@ -61,8 +62,12 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
         self.cpu_offload = cpu_offload
         self.layer_hash_index = layer_hash_index
         self._shared_group = None
+        group = get_engram_dp_group()
+        if group is not None and not all(in_the_same_node_as(group.cpu_group)):
+            raise ValueError(
+                "Ascend Engram requires all DP replicas to share the same node and shared-memory namespace"
+            )
         if dp_shared_memory:
-            group = get_engram_dp_group()
             if group is None or group.world_size <= 1:
                 raise ValueError("dp_shared_memory needs a node-local sharing group with more than one rank")
             self._shared_group = group
