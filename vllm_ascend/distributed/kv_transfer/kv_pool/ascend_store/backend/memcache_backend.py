@@ -80,6 +80,16 @@ class MmcDirect(Enum):
 LAYERWISE_DATA_PLANE = "gva"
 
 
+def fence_drains_recv() -> bool:
+    """Prefetched GETs may still be waiting for a post-compute buffer release."""
+    return False
+
+
+def send_fence_backlog() -> int:
+    """Bound outstanding layer PUTs while retaining overlap with attention."""
+    return 8
+
+
 def extract_layout_config(extra_config: dict[str, Any]) -> dict[str, Any] | None:
     """Return the connector's extra config when it opts into the layerwise
     transfer, None otherwise.
