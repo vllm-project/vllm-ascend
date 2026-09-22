@@ -84,7 +84,6 @@ env_common: &env_common
 
 env_prefill: &env_prefill
   <<: *env_common
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
 
 env_decode: &env_decode
   <<: *env_common
@@ -118,7 +117,7 @@ prefill_server_cmd: &prefill_server_cmd
   - "--attention_config.indexer_kv_dtype"
   - "int8"
   - "--additional-config"
-  - '{"fuse_muls_add": true, "enable_dsa_cp": true}'
+  - '{"fuse_muls_add": true, "enable_dsa_cp": true, "enable_flashcomm1": true}'
   - "--max-num-batched-tokens"
   - "8192"
   - "--trust-remote-code"
@@ -169,7 +168,7 @@ decode_server_cmd: &decode_server_cmd
   - "--attention_config.indexer_kv_dtype"
   - "int8"
   - "--additional-config"
-  - '{"fuse_muls_add": true, "recompute_scheduler_enable": true, "multistream_overlap_shared_expert": true}'
+  - '{"fuse_muls_add": true, "recompute_scheduler_enable": true, "multistream_overlap_shared_expert": true, "enable_flashcomm1": true}'
   - "--trust-remote-code"
   - "--max-num-seqs"
   - "32"

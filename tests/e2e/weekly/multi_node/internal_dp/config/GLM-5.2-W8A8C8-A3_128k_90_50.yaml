@@ -9,7 +9,6 @@ env_common: &env_common
   OMP_NUM_THREADS: "1"
   HCCL_BUFFSIZE: "400"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
   VLLM_ENGINE_READY_TIMEOUT_S: "3000"
   SERVER_PORT: 8077
 
@@ -45,7 +44,7 @@ deployment:
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       --kv-cache-dtype int8
       --attention_config.indexer_kv_dtype int8
-      --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true, "ascend_compilation_config": {"fuse_muls_add": true}, "multistream_overlap_shared_expert": true,"enable_fused_mc2":1,"enable_mlapo":true}'
+      --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true, "ascend_compilation_config": {"fuse_muls_add": true}, "multistream_overlap_shared_expert": true,"enable_fused_mc2":1,"enable_mlapo":true, "enable_flashcomm1": true}'
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
   -
     envs:
@@ -79,7 +78,7 @@ deployment:
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       --kv-cache-dtype int8
       --attention_config.indexer_kv_dtype int8
-      --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true, "ascend_compilation_config": {"fuse_muls_add": true}, "multistream_overlap_shared_expert": true,"enable_fused_mc2":1,"enable_mlapo":true}'
+      --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true, "ascend_compilation_config": {"fuse_muls_add": true}, "multistream_overlap_shared_expert": true,"enable_fused_mc2":1,"enable_mlapo":true, "enable_flashcomm1": true}'
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
 benchmarks:
   perf_128k_warmup:

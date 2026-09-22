@@ -47,7 +47,6 @@ test_cases:
   - name: "vllm_Qwen3_32B__w8a8_performance_A3_Accuracy_aime"
     model: "/root/.cache/modelscope/hub/models/vllm-ascend/Qwen3-32B-w8a8-mxfp8"
     envs:
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
       <<: *envs
     server_cmd: *server_cmd
     server_cmd_extra:
@@ -59,5 +58,7 @@ test_cases:
       - "40960"
       - "--reasoning-parser"
       - "qwen3"
+      - "--additional-config"
+      - '{"enable_flashcomm1": true}'
     benchmarks:
       <<: *benchmarks_acc
