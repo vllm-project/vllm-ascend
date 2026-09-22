@@ -172,6 +172,48 @@ def test_v1_no_forward_preserves_ec_output() -> None:
     assert EMPTY_MODEL_RUNNER_OUTPUT.ec_connector_output is None
 
 
+def test_consumer_binds_pool_device_once_per_control_thread() -> None:
+    worker = object.__new__(_AscendECMooncakeWorker)
+    worker._buffer_device = "npu"
+    worker._control_thread = threading.local()
+    pool_device = SimpleNamespace(type="npu", index=1)
+    worker._consumer_memory = SimpleNamespace(tensor=SimpleNamespace(device=pool_device))
+    bound_threads = []
+    errors = []
+    payload = {"transfer_id": "image"}
+
+    def set_device(device):
+        assert device is pool_device
+        bound_threads.append(threading.current_thread())
+
+    def reserve_twice():
+        try:
+            for _ in range(2):
+                assert worker._reserve_push_destination(payload) == {"reserved": True}
+        except BaseException as error:
+            errors.append(error)
+
+    with (
+        patch("vllm_ascend.distributed.ec_transfer.mooncake.torch.npu.set_device", side_effect=set_device),
+        patch(
+            "vllm.distributed.ec_transfer.ec_connector.mooncake.worker.ECMooncakeWorker._reserve_push_destination",
+            return_value={"reserved": True},
+        ) as reserve,
+    ):
+        threads = [threading.Thread(target=reserve_twice, daemon=True) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=5)
+            assert not thread.is_alive()
+
+    assert not errors, errors
+    assert len(bound_threads) == 2
+    assert set(bound_threads) == set(threads)
+    assert reserve.call_count == 4
+    assert all(call.args == (payload,) for call in reserve.call_args_list)
+
+
 def test_v1_no_forward_without_metadata_is_noop() -> None:
     runner = object.__new__(NPUModelRunner)
     runner.encoder_cache = {}
