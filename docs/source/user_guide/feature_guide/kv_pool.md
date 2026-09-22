@@ -1386,7 +1386,7 @@ echo 1 > /proc/sys/vm/compact_memory
 
 #### 5.2.2. (A3 only) Scan available memory
 
-Scan the available memory on the environment by running a script. Script address: [mem_scan.py](https://gitcode.com/Ascend/memfabric_hybrid/blob/develop/script/mem_scan.py). Execute command:
+Scan the available memory on the environment by running the `mem_scan.py` script shipped with [MemFabric Hybrid](https://gitcode.com/Ascend/memfabric_hybrid). Execute command:
 
 ```shell
 python3 mem_scan.py
