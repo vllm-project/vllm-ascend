@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# ruff: noqa: E402
 """Focused tests for the Ascend Engram configuration and storage path."""
 
 import json
@@ -12,6 +13,11 @@ import numpy as np
 import pytest
 import torch
 from safetensors.torch import save_file
+
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.29.0"):
+    pytest.skip("Engram is unavailable on vLLM 0.29.0", allow_module_level=True)
 
 from vllm_ascend.models.deepseek_v41.engram import embedding as embedding_mod
 from vllm_ascend.models.deepseek_v41.engram import npu
