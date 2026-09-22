@@ -53,8 +53,18 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.request import RequestStatus
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
+from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
+    as_kv_cache_tensors,
+    collect_configured_register_regions,
+)
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
-from vllm_ascend.distributed.kv_transfer.utils.utils import PD_QOS_DEFAULT, get_transfer_timeout_value, inject_qos
+from vllm_ascend.distributed.kv_transfer.utils.utils import (
+    PD_QOS_DEFAULT,
+    get_transfer_timeout_value,
+    inject_qos,
+    validate_register_region_count,
+)
 from vllm_ascend.utils import enable_custom_op, get_kv_cache_tensor_layers, is_vl_model
 
 # isort: off
@@ -89,6 +99,76 @@ class MooncakeAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):
     block_lens: list[int]
     ssm_sizes: tuple[int, int]
     local_ip: str = ""
+
+
+@dataclass(frozen=True)
+class _SharedPage:
+    placements: tuple[tuple[str, int], ...]
+    block_stride: int
+
+
+def _reconstruct_shared_pages(
+    kv_cache_config: KVCacheConfig,
+    kv_caches: dict[str, Any],
+) -> list[_SharedPage]:
+    """Rebuild shared physical pages from descriptors and runtime views.
+
+    ``layer_stride == 0`` retains the legacy ``shared_by`` contract: all
+    descriptor layers alias one standalone tensor. For nonzero layer strides,
+    a layer's physical start is ``base + offset + index * layer_stride`` and
+    layers resolving to the same start and block stride share one page. Runtime
+    view addresses can still differ because a layer may start at an inner-page
+    offset.
+    """
+    pages_by_key: dict[tuple[str, int, int], list[tuple[str, int]]] = {}
+    page_strides: dict[tuple[str, int, int], int] = {}
+    for descriptor_idx, descriptor in enumerate(kv_cache_config.kv_cache_tensors):
+        descriptor_layers: list[tuple[str, int, tuple[torch.Tensor, ...]]] = []
+        for layer_idx, layer_name in enumerate(get_kv_cache_tensor_layers(descriptor)):
+            placement_start = descriptor.offset + layer_idx * descriptor.layer_stride
+            descriptor_layers.append(
+                (
+                    layer_name,
+                    placement_start,
+                    as_kv_cache_tensors(kv_caches[layer_name]),
+                )
+            )
+
+        if descriptor.layer_stride == 0:
+            page_base = min(tensor.data_ptr() for _, _, layer_tensors in descriptor_layers for tensor in layer_tensors)
+            page_key = ("shared_by", descriptor_idx, 0)
+            pages_by_key[page_key] = [
+                (
+                    layer_name,
+                    min(tensor.data_ptr() for tensor in layer_tensors) - page_base,
+                )
+                for layer_name, _, layer_tensors in descriptor_layers
+            ]
+            page_strides[page_key] = descriptor.block_stride
+            continue
+
+        descriptor_base = min(
+            min(tensor.data_ptr() for tensor in layer_tensors) - placement_start
+            for _, placement_start, layer_tensors in descriptor_layers
+        )
+        for layer_name, placement_start, layer_tensors in descriptor_layers:
+            layer_start = descriptor_base + placement_start
+            page_key = ("strided", descriptor.block_stride, layer_start)
+            pages_by_key.setdefault(page_key, []).append(
+                (
+                    layer_name,
+                    min(tensor.data_ptr() for tensor in layer_tensors) - layer_start,
+                )
+            )
+            page_strides[page_key] = descriptor.block_stride
+
+    return [
+        _SharedPage(
+            placements=tuple(placements),
+            block_stride=page_strides[page_key],
+        )
+        for page_key, placements in pages_by_key.items()
+    ]
 
 
 @dataclass
@@ -1365,7 +1445,11 @@ class MooncakeConnectorScheduler:
 
     def _compute_transfer_block_ids(self, block_ids: BlockIds, prompt_len: int) -> BlockIds:
         transfer_block_ids = []
+        kv_cache_specs = getattr(self, "kv_cache_specs", ())
         for i, blocks in enumerate(block_ids):
+            if i < len(kv_cache_specs) and all(is_circular_kv_cache_spec(spec) for spec in kv_cache_specs[i]):
+                transfer_block_ids.append(blocks)
+                continue
             group_token_len = prompt_len
             group_block_len = math.ceil(group_token_len / self.group_block_size[i])
             if group_block_len > 0:
@@ -1734,100 +1818,42 @@ class MooncakeConnectorWorker:
             for i, group in enumerate(self.kv_cache_config.kv_cache_groups):
                 for layer_name in group.layer_names:
                     layer_group_idx[layer_name] = i
-            # Hybrid attention overlays several kv_cache_groups (full-attn /
-            # sparse / SWA / state-cache) onto the same physical per-layer
-            # pools: one tensor is registered in kv_caches under multiple
-            # layer names that belong to different groups. Registering each
-            # pool only under the first group that touched it left the
-            # overlay groups (e.g. odd-layer full attention, SWA, state
-            # cache) with zero registered addresses, and the transfer loop
-            # (`if i not in addr_group_arr[k]: continue`) never applied their
-            # block-id mappings. Decode then read those pools through the
-            # overlay groups' own block-id spaces, i.e. misaligned or stale
-            # KV, corrupting the output. Collect every unique address once
-            # together with the FULL set of groups that reference it, so each
-            # group's block-id mapping is transferred for every pool it
-            # overlays. Walking every tensor's every layer's every
-            # single_tensor also keeps per-layer pools all registered:
-            # registering only the minimum address of a descriptor used to
-            # transfer just one layer per descriptor and leave the other
-            # layers zero-filled on the decode side.
-            _addr_groups: dict[int, set[int]] = {}
-            _addr_stride: dict[int, int] = {}
-            for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
-                if not get_kv_cache_tensor_layers(kv_cache_tensor):
-                    continue
-                for layer_name in get_kv_cache_tensor_layers(kv_cache_tensor):
-                    kv_cache_tuple = kv_caches[layer_name]
-                    if not isinstance(kv_cache_tuple, (tuple, list)):
-                        kv_cache_tuple = [kv_cache_tuple]
-                    for single_tensor in kv_cache_tuple:
-                        tensor_addr = single_tensor.data_ptr()
-                        _stride = single_tensor.stride(0) * single_tensor.element_size()
-                        _addr_groups.setdefault(tensor_addr, set()).add(layer_group_idx[layer_name])
-                        if tensor_addr in _addr_stride and _addr_stride[tensor_addr] != _stride:
-                            logger.warning(
-                                "Hybrid KV cache address 0x%x is shared by layers with conflicting strides %d vs %d.",
-                                tensor_addr,
-                                _addr_stride[tensor_addr],
-                                _stride,
-                            )
-                        _addr_stride.setdefault(tensor_addr, _stride)
-            for tensor_addr, _groups in _addr_groups.items():
-                self.kv_caches_base_addr.append(tensor_addr)
-                self.addr_group_idx.append(sorted(_groups))
-                self.block_stride_per_addr.append(_addr_stride[tensor_addr])
-                self.block_len_per_addr.append(_addr_stride[tensor_addr])
+            # Rebuild physical pages from the descriptor sharing relation and
+            # runtime views. One entry is one complete padded page, so inner
+            # views such as indexer K and scale must not become independent
+            # full-page transfers.
+            for shared_page in _reconstruct_shared_pages(self.kv_cache_config, kv_caches):
+                page_base_addr: int | None = None
+                page_groups: set[int] = set()
+                shared_by = [layer_name for layer_name, _ in shared_page.placements]
+                for layer_name, placement_offset in shared_page.placements:
+                    page_groups.add(layer_group_idx[layer_name])
+                    layer_tensors = as_kv_cache_tensors(kv_caches[layer_name])
+                    if not layer_tensors:
+                        raise ValueError(f"DeepSeek-V4 shared KV cache layer has no materialized tensor: {layer_name}.")
+
+                    layer_page_base = min(tensor.data_ptr() for tensor in layer_tensors) - placement_offset
+                    if page_base_addr is not None and layer_page_base != page_base_addr:
+                        raise ValueError(
+                            "DeepSeek-V4 layers with the same placement and block stride "
+                            "do not resolve to the same page base: "
+                            f"layers={shared_by}, layer={layer_name}, "
+                            f"placement_offset={placement_offset}."
+                        )
+                    page_base_addr = layer_page_base
+                assert page_base_addr is not None
+                self.kv_caches_base_addr.append(page_base_addr)
+                self.addr_group_idx.append(sorted(page_groups))
+                self.block_stride_per_addr.append(shared_page.block_stride)
+                self.block_len_per_addr.append(shared_page.block_stride)
         else:
             raise TypeError("Mooncake connector does not support this type kv_cache now.")
 
         if self.use_hybrid:
-            # KVCacheTensor.size is the size of the shared backing pool, not
-            # the byte length of every logical tensor group described by it.
-            ptrs = []
-            lengths = []
-            for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
-                tensor_addrs = []
-                tensor_ends = []
-                for layer_name in get_kv_cache_tensor_layers(kv_cache_tensor):
-                    kv_cache_tuple = kv_caches[layer_name]
-                    if not isinstance(kv_cache_tuple, (tuple, list)):
-                        kv_cache_tuple = [kv_cache_tuple]
-                    for tensor in kv_cache_tuple:
-                        tensor_nbytes = tensor.element_size() * math.prod(tensor.shape)
-                        if tensor_nbytes == 0:
-                            continue
-                        tensor_addrs.append(tensor.data_ptr())
-                        tensor_ends.append(tensor.data_ptr() + tensor_nbytes)
-                if tensor_addrs:
-                    start = min(tensor_addrs)
-                    ptrs.append(start)
-                    lengths.append(max(tensor_ends) - start)
-
-            # Overlaid hybrid groups may still cover the same physical bytes.
-            # devmm IPC export (rtsIpcMemGetExportKey) requires a 2MB-aligned
-            # base address and a page-multiple length; unaligned regions make
-            # the kernel reject the registration with Invalid para (-22) and
-            # cross-node KV transfer fail. Align each region down/up to 2MB
-            # page boundaries before merging.
-            ipc_page_size = 2 * 1024 * 1024
-
-            def _align_down(addr: int) -> int:
-                return addr & ~(ipc_page_size - 1)
-
-            def _align_up(addr: int) -> int:
-                return (addr + ipc_page_size - 1) & ~(ipc_page_size - 1)
-
-            regions = sorted((_align_down(ptr), _align_up(ptr + length)) for ptr, length in zip(ptrs, lengths))
-            merged_regions: list[tuple[int, int]] = []
-            for start, end in regions:
-                if merged_regions and start < merged_regions[-1][1]:
-                    previous_start, previous_end = merged_regions[-1]
-                    merged_regions[-1] = (previous_start, max(previous_end, end))
-                else:
-                    merged_regions.append((start, end))
-            ptrs = [start for start, _ in merged_regions]
-            lengths = [end - start for start, end in merged_regions]
+            register_regions = collect_configured_register_regions(self.kv_cache_config, kv_caches)
+            validate_register_region_count(register_regions)
+            ptrs = register_regions.ptrs
+            lengths = register_regions.lengths
 
         global_te.register_buffer(ptrs, lengths)
         # After KV Caches registered, start the sending or receiving thread.

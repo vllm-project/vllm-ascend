@@ -114,6 +114,9 @@ class HardwareCapability(Enum):
     MOE_DISPATCH_EXTRA_ARGS = auto()
     # Pass shared-expert, expert-scale, quant-mode, and output-dtype metadata to MoE dispatch.
     MOE_DISPATCH_SHARED_EXPERT_ARGS = auto()
+    # Route DeepSeek-V4 vision and hash rows through the fused
+    # ``moe_gating_top_k_hash`` ABI with ``bias_vl`` and image sentinels.
+    MOE_GATING_TOP_K_HASH_VISION = auto()
     # Allow the extended NPU graph backend; static-kernel mode depends on this contract.
     NPUGRAPH_EX = auto()
     # Use ``torch_npu.npu_top_k_top_p`` for sampling instead of the PyTorch fallback.
@@ -233,6 +236,7 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.IRQ_CPU_RESERVATION,
         HardwareCapability.LORA_CUSTOM_OPS,
         HardwareCapability.MC2_HIERARCHY_COMM,
+        HardwareCapability.MOE_GATING_TOP_K_HASH_VISION,
         HardwareCapability.NPUGRAPH_EX,
         HardwareCapability.PAGED_ATTENTION,
         HardwareCapability.RUNTIME_CUSTOM_OPS,
