@@ -1830,7 +1830,14 @@ def main():
         github_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
 
         def _github_request(url: str) -> urllib.request.Request:
-            headers = {"Accept": "application/vnd.github.v3+json"}
+            # Descriptive User-Agent is required by the GitHub API; the urllib
+            # default (Python-urllib/x.y) is a generic bot signature that edge
+            # layers are more likely to throttle with 5xx.
+            headers = {
+                "Accept": "application/vnd.github.v3+json",
+                "User-Agent": "vllm-ascend-ci-test-selector/1.0",
+                "X-GitHub-Api-Version": "2022-11-28",
+            }
             if github_token:
                 headers["Authorization"] = f"Bearer {github_token}"
             return urllib.request.Request(url, headers=headers)
@@ -1871,7 +1878,8 @@ def main():
                 if attempt == max_retries:
                     print(f"  All {max_retries} attempts failed, exiting")
                     exit(1)
-                time.sleep(1)
+                print("  Waiting 30s before retry...")
+                time.sleep(30)
 
         print(f"  PR diff saved to: {diff_file}")
 
