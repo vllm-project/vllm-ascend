@@ -952,9 +952,7 @@ def _ascend_get_kv_cache_config_from_groups(
     ``copy.deepcopy`` in ``generate_scheduler_kv_cache_config`` and is
     dropped by worker pickle IPC, which never reads it.
     """
-    qwen_config = _get_qwen4_exp_six_region_kv_cache_config(
-        vllm_config, kv_cache_groups, available_memory
-    )
+    qwen_config = _get_qwen4_exp_six_region_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
     if qwen_config is not None:
         kv_cache_config = qwen_config
     elif is_deepseek_v41_cache(kv_cache_groups):
