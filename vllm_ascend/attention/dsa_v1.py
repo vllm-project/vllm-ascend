@@ -822,6 +822,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
         fast_build: bool = False,
+        *,
+        can_use_rope_cache: bool = True,
         **kwargs,
     ) -> AscendDSAMetadata:
         num_reqs = common_attn_metadata.num_reqs
@@ -856,9 +858,10 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
             self.common_ratio_to_sas_metadata["seq_lens_cpu"] = seq_lens_cpu
             input_positions = common_attn_metadata.positions[:num_input_tokens].long()
+            need_use_rope_cache = can_use_rope_cache and self.num_prefills == 0
             cos, sin = get_cos_and_sin_dsa(
                 input_positions,
-                use_cache=self.num_prefills == 0,
+                use_cache=need_use_rope_cache,
             )
             self.common_ratio_to_sas_metadata["cos"] = cos
             self.common_ratio_to_sas_metadata["sin"] = sin
