@@ -92,8 +92,11 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel(
     num_speculative_tokens,  # tl.int32
     total_input_tokens,  # tl.int32
     batch_size,  # tl.int32
+    request_window_ok_ptr=0,  # [num_reqs], or null when checking is disabled
+    padding_slot_id=-1,  # tl.int32
     HAS_NUM_REJECTED: tl.constexpr = False,
     SAMPLE_FROM_ANCHOR: tl.constexpr = False,
+    CHECK_REQUEST_WINDOW: tl.constexpr = False,
     TILE_SIZE: tl.constexpr = 256,
     DCP_SIZE: tl.constexpr = 1,
     DCP_RANK: tl.constexpr = 0,
@@ -131,8 +134,11 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel(
         offs = block_start + tl.arange(0, TILE_SIZE)
         mask = offs < num_query_total
 
-        req_idx = offs // num_query_per_req
-        q_idx = offs % num_query_per_req
+        # Keep inactive lanes in row zero before any indirect pointer
+        # arithmetic. This is required when the request-window guard is on.
+        safe_offs = tl.where(mask, offs, 0)
+        req_idx = safe_offs // num_query_per_req
+        q_idx = safe_offs % num_query_per_req
 
         ctx_end = tl.load(query_start_loc_ptr + req_idx + 1, mask=mask, other=0)
         if HAS_NUM_REJECTED:
@@ -143,11 +149,23 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel(
 
         seq_len = tl.load(seq_lens_ptr + req_idx, mask=mask, other=0)
         effective_seq_len = seq_len - num_rejected
-        last_pos = tl.load(target_positions_ptr + valid_ctx_end - 1, mask=mask, other=0)
+        if CHECK_REQUEST_WINDOW:
+            request_window_ok = tl.load(request_window_ok_ptr + req_idx, mask=mask, other=0).to(tl.int1)
+            valid_ctx = request_window_ok & (valid_ctx_end > 0)
+            safe_last_ctx_idx = tl.where(valid_ctx, valid_ctx_end - 1, 0)
+            last_pos = tl.load(
+                target_positions_ptr + safe_last_ctx_idx,
+                mask=mask & valid_ctx,
+                other=0,
+            )
+        else:
+            last_pos = tl.load(target_positions_ptr + valid_ctx_end - 1, mask=mask, other=0)
 
         # RoPE position id of the query token, derived from the last context
         # token's position. Written to out_query_positions for position embeddings.
         query_pos = last_pos + 1 + q_idx
+        if CHECK_REQUEST_WINDOW:
+            query_pos = tl.where(request_window_ok, query_pos, 0)
         tl.store(out_query_positions_ptr + offs, query_pos, mask=mask)
 
         # Linear KV-cache token index used to look up the physical slot via the
@@ -172,11 +190,26 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel(
             owner_rank = DCP_RANK
             local_kv_slot_pos = query_kv_slot_pos
         block_num_q = local_kv_slot_pos // block_size
-        block_id_q = tl.load(block_table_ptr + req_idx * block_table_stride + block_num_q, mask=mask, other=0).to(
-            tl.int64
-        )
+        if CHECK_REQUEST_WINDOW:
+            # Select an in-row address before pointer arithmetic. A masked
+            # load is too late once block_num_q has crossed into another row.
+            safe_block_num_q = tl.where(request_window_ok, block_num_q, 0)
+            block_id_q = tl.load(
+                block_table_ptr + req_idx * block_table_stride + safe_block_num_q,
+                mask=mask & request_window_ok,
+                other=0,
+            ).to(tl.int64)
+        else:
+            block_id_q = tl.load(
+                block_table_ptr + req_idx * block_table_stride + block_num_q,
+                mask=mask,
+                other=0,
+            ).to(tl.int64)
         slot_q = block_id_q * block_size + (local_kv_slot_pos % block_size)
-        slot_q = tl.where(owner_rank == DCP_RANK, slot_q, -1)
+        if CHECK_REQUEST_WINDOW:
+            slot_q = tl.where(request_window_ok & (owner_rank == DCP_RANK), slot_q, padding_slot_id)
+        else:
+            slot_q = tl.where(owner_rank == DCP_RANK, slot_q, -1)
         tl.store(out_query_slot_mapping_ptr + offs, slot_q, mask=mask)
 
         bonus = tl.load(next_token_ids_ptr + req_idx, mask=mask, other=0)
