@@ -287,7 +287,7 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
 
     # Set when a producer has deliberately published an *approximate* host
     # mirror for a speculative draft build, under
-    # ``VLLM_ASCEND_DSPARK_APPROX_DRAFT_KV=1``. The mirror is then the
+    # ``enable_dspark_draft_kv_optimistic_bound``. The mirror is then the
     # optimistic bound: it assumes every draft token of the previous step was
     # accepted, so it can overstate the draft's KV extent by up to
     # ``num_speculative_tokens``. The attention builder is allowed to use it

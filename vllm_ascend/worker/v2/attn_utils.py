@@ -42,7 +42,6 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import AttentionGroup
 
-import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
@@ -261,13 +260,13 @@ def build_attn_metadata(
     seq_lens_cpu_is_approximate = False
     if seq_lens_np is not None:
         seq_lens_cpu = torch.from_numpy(seq_lens_np)[:num_reqs]
-    elif envs_ascend.VLLM_ASCEND_DSPARK_APPROX_DRAFT_KV and seq_lens_cpu_upper_bound is not None:
-        # Opt-in approximation for the draft build: publish the optimistic
-        # bound as the host mirror so the attention builder can skip the
-        # blocking D2H copy. The bound assumes the previous step's draft was
-        # accepted in full, so it can be up to ``num_speculative_tokens`` too
-        # long. That costs acceptance rate, not output correctness -- see the
-        # note on ``VLLM_ASCEND_DSPARK_APPROX_DRAFT_KV`` in ``envs.py``.
+    elif seq_lens_cpu_upper_bound is not None and (get_ascend_config().enable_dspark_draft_kv_optimistic_bound):
+        # Opt-in for the draft build: publish the optimistic bound as the host
+        # mirror so the attention builder can skip the blocking D2H copy. The
+        # bound assumes the previous step's draft was accepted in full, so it can
+        # be up to ``num_speculative_tokens`` too long; the attention impl masks
+        # that tail on the device, so the result still matches passing the true
+        # lengths. See ``enable_dspark_draft_kv_optimistic_bound``.
         seq_lens_cpu = seq_lens_cpu_upper_bound[:num_reqs]
         seq_lens_cpu_is_approximate = True
     else:

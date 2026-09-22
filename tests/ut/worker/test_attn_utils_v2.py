@@ -1208,14 +1208,18 @@ class _RecordingStateBuilder(_PrefillStateBuilder):
         return super().build(common_prefix_len, common_attn_metadata, **kwargs)
 
 
+def _patch_optimistic_bound(monkeypatch, *, enabled):
+    """Point ``build_attn_metadata`` at an AscendConfig carrying the switch."""
+    monkeypatch.setattr(
+        attn_utils,
+        "get_ascend_config",
+        lambda: SimpleNamespace(enable_dspark_draft_kv_optimistic_bound=enabled),
+    )
+
+
 def _build_draft_metadata(monkeypatch, *, approx_enabled):
     """Run ``build_attn_metadata`` for a *draft* build (no ``seq_lens_np``)."""
-    monkeypatch.setattr(
-        attn_utils.envs_ascend,
-        "VLLM_ASCEND_DSPARK_APPROX_DRAFT_KV",
-        approx_enabled,
-        raising=False,
-    )
+    _patch_optimistic_bound(monkeypatch, enabled=approx_enabled)
     builder = _RecordingStateBuilder()
     attn_group = SimpleNamespace(
         layer_names=["layer.0"],
@@ -1261,7 +1265,7 @@ def test_draft_build_keeps_placeholder_mirror_when_approximation_is_off(monkeypa
 
 
 def test_draft_build_publishes_the_optimistic_bound_when_opted_in(monkeypatch):
-    """VLLM_ASCEND_DSPARK_APPROX_DRAFT_KV=1 swaps in the optimistic bound.
+    """``enable_dspark_draft_kv_optimistic_bound`` swaps in the optimistic bound.
 
     It is still not exact -- 7 rather than the true 5 -- so ``is_exact`` must
     stay False; only the separate approximation flag is raised.
@@ -1276,15 +1280,17 @@ def test_draft_build_publishes_the_optimistic_bound_when_opted_in(monkeypatch):
 def test_target_build_is_unaffected_by_the_approximation_flag(monkeypatch):
     """A target build has ``seq_lens_np`` and must stay exact either way."""
     for approx_enabled in (False, True):
-        monkeypatch.setattr(
-            attn_utils.envs_ascend,
-            "VLLM_ASCEND_DSPARK_APPROX_DRAFT_KV",
-            approx_enabled,
-            raising=False,
-        )
+        _patch_optimistic_bound(monkeypatch, enabled=approx_enabled)
         builder = _RecordingStateBuilder()
         attn_utils.build_attn_metadata(
-            attn_groups=[[SimpleNamespace(layer_names=["layer.0"], get_metadata_builder=lambda _: builder)]],
+            attn_groups=[
+                [
+                    SimpleNamespace(
+                        layer_names=["layer.0"],
+                        get_metadata_builder=lambda _, recording=builder: recording,
+                    )
+                ]
+            ],
             num_reqs=1,
             num_tokens=1,
             query_start_loc_gpu=torch.tensor([0, 1], dtype=torch.int32),

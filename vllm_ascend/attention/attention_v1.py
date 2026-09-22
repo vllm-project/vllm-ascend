@@ -41,7 +41,6 @@ from vllm.v1.attention.backends.registry import (  # type: ignore
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
-import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.utils import (
@@ -368,12 +367,11 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             # because its rejections are resolved on the device.
             seq_lens = common_attn_metadata.seq_lens
             # An approximate mirror is accepted here only because the producer
-            # opted in explicitly (VLLM_ASCEND_DSPARK_APPROX_DRAFT_KV): the
-            # draft may then attend over a few stale KV positions, which costs
-            # acceptance rate but not output correctness.
+            # opted in explicitly (enable_dspark_draft_kv_optimistic_bound): the
+            # draft may then attend over a few stale KV positions, which the
+            # tail mask below hides on the device.
             seq_lens_mirrored_on_host = (
-                common_attn_metadata.seq_lens_cpu_is_exact
-                or common_attn_metadata.seq_lens_cpu_is_approximate
+                common_attn_metadata.seq_lens_cpu_is_exact or common_attn_metadata.seq_lens_cpu_is_approximate
             )
 
         attn_state = common_attn_metadata.attn_state
@@ -426,13 +424,13 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
                 dim=0,
             )
 
-        # issue #16271: a draft build under the approximate bound keeps the
-        # exact lengths on the device; record enough for the impl to mask the
-        # difference rather than read them back.
+        # issue #16271: a draft build under the optimistic bound keeps the exact
+        # lengths on the device; record enough for the impl to mask the
+        # difference rather than read them back. Only a producer that enabled
+        # ``enable_dspark_draft_kv_optimistic_bound`` ever publishes an
+        # approximate mirror, so that flag doubles as the opt-in here.
         draft_kv_upper_bound = bool(
-            envs_ascend.VLLM_ASCEND_DSPARK_DRAFT_KV_DEVICE_MASK
-            and common_attn_metadata.seq_lens_cpu_is_approximate
-            and not common_attn_metadata.seq_lens_cpu_is_exact
+            common_attn_metadata.seq_lens_cpu_is_approximate and not common_attn_metadata.seq_lens_cpu_is_exact
         )
         draft_query_lens = (query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).tolist()
 
@@ -515,6 +513,13 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
 
         attn_metadata.attn_state = attn_state
         return attn_metadata
+
+
+# A draft query block holds the seed token plus one token per speculative step.
+# A block of a single token therefore carries no drafted token and no rolled-back
+# tail to mask, and the regular path serves it; the BSND mask path needs at least
+# this many query tokens per request.
+MIN_DRAFT_QUERY_BLOCK_LEN = 2
 
 
 def build_draft_tail_mask(
@@ -1507,7 +1512,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         query_len = int(query_lens[0]) if num_reqs else 0
         # BSND needs a rectangular batch. Parallel drafting always produces
         # one, but a padded or ragged build must not be silently reshaped.
-        if query_len < 2 or any(int(q) != query_len for q in query_lens):
+        if query_len < MIN_DRAFT_QUERY_BLOCK_LEN or any(int(q) != query_len for q in query_lens):
             return None
         if num_tokens != num_reqs * query_len or attn_metadata.seq_lens.shape[0] < num_reqs:
             return None
@@ -1519,8 +1524,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
         mask = attn_metadata.draft_tail_mask_cache.get(cache_key)
         if mask is None:
             mask = build_draft_tail_mask(
-                attn_metadata.seq_lens, num_reqs, query_len, kv_span,
-                self.sliding_window, attn_metadata.causal,
+                attn_metadata.seq_lens,
+                num_reqs,
+                query_len,
+                kv_span,
+                self.sliding_window,
+                attn_metadata.causal,
             )
             attn_metadata.draft_tail_mask_cache[cache_key] = mask
 
@@ -1571,8 +1580,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
         query = query[:num_tokens]
         draft_output = self._forward_draft_tail_masked(
-            query, key, value, attn_metadata, block_table, block_size,
-            actual_seq_lengths_kv, num_tokens, output,
+            query,
+            key,
+            value,
+            attn_metadata,
+            block_table,
+            block_size,
+            actual_seq_lengths_kv,
+            num_tokens,
+            output,
         )
         if draft_output is not None:
             return draft_output

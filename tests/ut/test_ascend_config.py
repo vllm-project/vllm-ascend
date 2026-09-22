@@ -342,6 +342,24 @@ class TestAscendConfig(TestBase):
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_dspark_draft_kv_optimistic_bound_defaults_to_off(self, mock_fix_incompatible_config):
+        # The draft build keeps paying the blocking D2H copy unless a user opts
+        # in, so the default must not switch existing deployments' behaviour.
+        ascend_config = init_ascend_config(VllmConfig())
+        self.assertFalse(ascend_config.enable_dspark_draft_kv_optimistic_bound)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_dspark_draft_kv_optimistic_bound_is_user_settable(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {"enable_dspark_draft_kv_optimistic_bound": True}
+
+        ascend_config = init_ascend_config(test_vllm_config)
+
+        self.assertTrue(ascend_config.enable_dspark_draft_kv_optimistic_bound)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_init_ascend_config_validates_mega_moe_max_tokens(self, mock_fix_incompatible_config):
         # NOTE: pydantic coerces numeric strings (e.g. "65536") to int, so only
         # out-of-range values are invalid on main.

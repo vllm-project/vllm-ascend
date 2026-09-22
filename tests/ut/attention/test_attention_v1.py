@@ -261,7 +261,7 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         self.assertFalse(AscendCommonAttentionMetadata.seq_lens_cpu_is_exact)
 
     def test_parallel_drafting_accepts_an_approximate_mirror_when_opted_in(self):
-        """Draft build under VLLM_ASCEND_DSPARK_APPROX_DRAFT_KV=1.
+        """Draft build under ``enable_dspark_draft_kv_optimistic_bound``.
 
         The mirror is only an optimistic bound, so it is *not* exact -- but the
         producer has opted into the approximation, and the point of opting in is
@@ -280,6 +280,27 @@ class TestAscendAttentionMetadataBuilder(TestBase):
     def test_seq_lens_cpu_is_approximate_defaults_to_false(self):
         """The approximation must never be on unless a producer asked for it."""
         self.assertFalse(AscendCommonAttentionMetadata.seq_lens_cpu_is_approximate)
+
+    def test_approximate_mirror_arms_the_draft_tail_mask(self):
+        """The producer's opt-in is the only gate on the device-side mask.
+
+        ``build_attn_metadata`` publishes an approximate mirror only when
+        ``enable_dspark_draft_kv_optimistic_bound`` is set, so an approximate
+        mirror must by itself arm the tail mask -- otherwise the bound would go
+        unmasked and cost acceptance rate. See issue #16271.
+        """
+        metadata, _, _, _ = self._build_parallel_drafting_metadata(
+            seq_lens_cpu_is_exact=False,
+            seq_lens_cpu_is_approximate=True,
+        )
+
+        self.assertTrue(metadata.draft_kv_upper_bound)
+
+    def test_exact_mirror_leaves_the_draft_tail_mask_disarmed(self):
+        """A target build needs no mask: its host mirror already is the truth."""
+        metadata, _, _, _ = self._build_parallel_drafting_metadata(seq_lens_cpu_is_exact=True)
+
+        self.assertFalse(metadata.draft_kv_upper_bound)
 
     @patch.object(AscendAttentionMetadataBuilder, "metadata_cls")
     def test_build(self, mock_ascend_metadata):
@@ -1121,9 +1142,7 @@ class TestBuildDraftTailMask(TestBase):
         # Two requests with different true lengths, so a mask that ignored the
         # per-request dimension could not pass.
         seq_lens = torch.tensor([5, 7], dtype=torch.int32)
-        mask = attn_module.build_draft_tail_mask(
-            seq_lens, num_reqs=2, query_len=3, kv_span=8, sliding_window=None
-        )
+        mask = attn_module.build_draft_tail_mask(seq_lens, num_reqs=2, query_len=3, kv_span=8, sliding_window=None)
 
         self.assertEqual(tuple(mask.shape), (2, 3, 8))
         self.assertEqual(mask.dtype, torch.int8)
@@ -1137,9 +1156,7 @@ class TestBuildDraftTailMask(TestBase):
         """[L, U) must be masked everywhere; that tail is what costs acceptance."""
         true_lens = torch.tensor([6, 4], dtype=torch.int32)
         rejected = [3, 8]  # what the previous step's draft lost
-        mask = attn_module.build_draft_tail_mask(
-            true_lens, num_reqs=2, query_len=4, kv_span=16, sliding_window=None
-        )
+        mask = attn_module.build_draft_tail_mask(true_lens, num_reqs=2, query_len=4, kv_span=16, sliding_window=None)
 
         for req, length in enumerate([6, 4]):
             upper_bound = length + rejected[req]
@@ -1160,9 +1177,7 @@ class TestBuildDraftTailMask(TestBase):
         """
         window = 3
         seq_lens = torch.tensor([12], dtype=torch.int32)
-        mask = attn_module.build_draft_tail_mask(
-            seq_lens, num_reqs=1, query_len=2, kv_span=16, sliding_window=window
-        )
+        mask = attn_module.build_draft_tail_mask(seq_lens, num_reqs=1, query_len=2, kv_span=16, sliding_window=window)
 
         for j in range(2):
             visible = (mask[0, j] == 0).nonzero().flatten().tolist()
@@ -1172,9 +1187,7 @@ class TestBuildDraftTailMask(TestBase):
 
     def test_without_a_window_nothing_before_the_query_token_is_masked(self):
         seq_lens = torch.tensor([9], dtype=torch.int32)
-        mask = attn_module.build_draft_tail_mask(
-            seq_lens, num_reqs=1, query_len=2, kv_span=12, sliding_window=None
-        )
+        mask = attn_module.build_draft_tail_mask(seq_lens, num_reqs=1, query_len=2, kv_span=12, sliding_window=None)
         self.assertTrue(bool((mask[0, 0, :8] == 0).all()))
 
     def test_non_causal_keeps_the_bound_flat_across_the_query_block(self):
@@ -1199,9 +1212,7 @@ class TestForwardDraftTailMasked(TestBase):
     """Eligibility. Every rejected case must fall through, not compute wrongly."""
 
     def _impl(self, **overrides):
-        impl = SimpleNamespace(
-            sinks=None, sliding_window=None, num_heads=2, num_kv_heads=1, head_size=4, scale=0.5
-        )
+        impl = SimpleNamespace(sinks=None, sliding_window=None, num_heads=2, num_kv_heads=1, head_size=4, scale=0.5)
         impl.__dict__.update(overrides)
         return impl
 
@@ -1247,9 +1258,7 @@ class TestForwardDraftTailMasked(TestBase):
         fake = MagicMock(return_value=(torch.zeros(2, 3, 2, 4), None))
         with (
             patch.object(attn_module.torch_npu, "npu_fused_infer_attention_score", fake),
-            patch.object(
-                attn_module, "build_draft_tail_mask", wraps=attn_module.build_draft_tail_mask
-            ) as builder,
+            patch.object(attn_module, "build_draft_tail_mask", wraps=attn_module.build_draft_tail_mask) as builder,
         ):
             self.assertIsNotNone(self._call(impl, non_causal_meta))
             non_causal_mask = fake.call_args.kwargs["atten_mask"]
@@ -1288,12 +1297,12 @@ class TestForwardDraftTailMasked(TestBase):
         """One mask per step, shared by every layer in the attention group."""
         impl, meta = self._impl(), self._metadata()
         fake = MagicMock(return_value=(torch.zeros(2, 3, 2, 4), None))
-        with patch.object(attn_module.torch_npu, "npu_fused_infer_attention_score", fake):
-            with patch.object(
-                attn_module, "build_draft_tail_mask", wraps=attn_module.build_draft_tail_mask
-            ) as builder:
-                self._call(impl, meta)
-                self._call(impl, meta)
+        with (
+            patch.object(attn_module.torch_npu, "npu_fused_infer_attention_score", fake),
+            patch.object(attn_module, "build_draft_tail_mask", wraps=attn_module.build_draft_tail_mask) as builder,
+        ):
+            self._call(impl, meta)
+            self._call(impl, meta)
 
         self.assertEqual(builder.call_count, 1)
         self.assertEqual(fake.call_count, 2)
