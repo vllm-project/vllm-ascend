@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "source_url": "https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/GLM5.3-Flash.html#single-node-online-deployment",
+  "reviewed_date": "2026-09-22",
+  "source_git_blob": "e093e1db026f8d84ef7c0792dd594afd2419e4db",
+  "source_repository_path": "docs/source/tutorials/models/GLM5.3-Flash.md",
+  "serve_only": {"trust_remote_code": true, "api_server_count": 1},
+  "model": "Eco-Tech/GLM-5.3-Flash-w8a8",
+  "environment": {
+    "HCCL_OP_EXPANSION_MODE": "AIV",
+    "HCCL_BUFFSIZE": "400",
+    "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True"
+  },
+  "community": {
+    "data_parallel_size": 1,
+    "tensor_parallel_size": 16,
+    "enable_expert_parallel": true,
+    "seed": 1024,
+    "quantization": "ascend",
+    "max_num_seqs": 32,
+    "max_num_batched_tokens": 8192,
+    "max_model_len": 133120,
+    "gpu_memory_utilization": 0.85,
+    "limit_mm_per_prompt": {"image": 1, "video": 0},
+    "safetensors_load_strategy": "prefetch",
+    "compilation_config": {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1, 2, 4, 8, 16, 32, 64, 96, 128]},
+    "speculative_config": {"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}
+  },
+  "profiles": {
+    "text_tp4": {
+      "tensor_parallel_size": 4,
+      "max_num_seqs": 4,
+      "max_num_batched_tokens": 512,
+      "max_model_len": 4096,
+      "gpu_memory_utilization": 0.8,
+      "limit_mm_per_prompt": null,
+      "speculative_config": null,
+      "safetensors_load_strategy": null,
+      "compilation_config": {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1, 2, 4]},
+      "enable_chunked_prefill": true,
+      "enable_prefix_caching": false,
+      "block_size": 128,
+      "additional_config": {"enable_cpu_binding": false, "enable_fused_mc2": 0}
+    },
+    "nightly_tp16": {}
+  },
+  "notes": [
+    "Null override removes a community option. No C8 override is introduced.",
+    "prefix caching is provisionally disabled for initial text bring-up, not claimed as cache coverage.",
+    "Nightly requires real full weights and a separately validated compatible runtime."
+  ]
+}

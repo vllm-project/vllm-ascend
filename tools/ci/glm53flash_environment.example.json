@@ -1,0 +1,7 @@
+{
+  "scope": "REPLACE_WITH_CALIBRATED_RUNNER_SCOPE",
+  "validated": false,
+  "exclusive": false,
+  "checked_by": "",
+  "note": "Trusted runner must verify source/runtime/image, healthy exclusive devices and the calibrated profile. This template does not authorize enforcement or certify baseline correctness."
+}

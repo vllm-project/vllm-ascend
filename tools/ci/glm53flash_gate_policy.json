@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "approved": false,
+  "approved_by": null,
+  "baseline_correctness_validated": false,
+  "precision_atol": 0,
+  "eager_graph_atol": 0,
+  "minimum_tokens_s": 161.07016583189437,
+  "maximum_ttft_p95_ms": 1529.2373698949812,
+  "maximum_tpot_p95_ms": 25.490632890719024,
+  "baseline_sha256": {},
+  "scope": "REPLACE_WITH_CALIBRATED_RUNNER_SCOPE",
+  "notes": [
+    "Example only, not an enabled gate. Generate a policy from your own calibration.",
+    "Historical A3 sample thresholds are not portable across hosts or runtimes.",
+    "Empty baseline hashes intentionally prevent use before calibration."
+  ]
+}
