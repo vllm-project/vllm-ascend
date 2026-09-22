@@ -6,7 +6,14 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 from vllm.v1.sample.sampler import Sampler
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.ops.triton.apply_top_k_top_p import (
+    apply_top_k_top_p as triton_apply_top_k_top_p,
+)
+from vllm_ascend.ops.triton.apply_top_k_top_p import (
+    fused_topk_topp_softmax as triton_fused_topk_topp_softmax,
+)
 from vllm_ascend.sample.penalties import apply_all_penalties
 from vllm_ascend.utils import global_stream, npu_stream_switch
 
@@ -99,6 +106,36 @@ class AscendTopKTopPSampler(TopKTopPSampler):
                 "falling back to vLLM native top-k/top-p implementation.",
             )
             return super().forward_native(logits, generators, k, p)
+
+        # ============ Triton apply_top_k_top_p path ============
+        # CANN npu_top_k_top_p semantics + optional in-kernel fused
+        # softmax; per-request [B] k/p tensors are passed through
+        # directly (no .item() CPU sync, no uniform-batch restriction).
+        # Full replacement for the stock path below: must run BEFORE
+        # self.apply_top_k_top_p, otherwise logits get filtered twice.
+        if get_ascend_config().enable_triton_apply_topk_topp and HAS_TRITON and (p is not None or k is not None):
+            logger.info_once(
+                "[sample/sampler] Using Triton apply_top_k_top_p op "
+                "(vllm_ascend.ops.triton.apply_top_k_top_p, CANN "
+                "npu_top_k_top_p semantics + fused softmax, per-row "
+                "k/p tensors) for top-k/top-p mask + softmax: "
+                "logits shape %s.",
+                tuple(logits.shape),
+            )
+            if self.logprobs_mode in ("processed_logits", "processed_logprobs"):
+                # Same contract as stock: processed_* returns masked
+                # logits (or its log_softmax); softmax stays outside.
+                logits = triton_apply_top_k_top_p(logits, k, p)
+                logits_to_return = logits
+                if self.logprobs_mode == "processed_logprobs":
+                    logits_to_return = logits.log_softmax(dim=-1, dtype=torch.float32)
+                probs = logits.softmax(dim=-1, dtype=torch.float32)
+            else:
+                # Fused softmax: one call returns probs directly
+                # (masked positions are 0, each row sums to 1).
+                probs = triton_fused_topk_topp_softmax(logits, k, p)
+                logits_to_return = None
+            return random_sample(probs, generators), logits_to_return
 
         logits = self.apply_top_k_top_p(logits, k, p)
         logits_to_return = None
