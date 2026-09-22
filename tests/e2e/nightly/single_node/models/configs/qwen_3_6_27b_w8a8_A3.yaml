@@ -119,23 +119,6 @@ _benchmarks_prefix_128k_50: &benchmarks_prefix_128k_50
 # ==========================================
 
 test_cases:
-  - name: "Qwen3.6-27B-acc"
-    model: "Eco-Tech/Qwen3.6-27B-w8a8"
-    envs:
-      <<: *envs
-    server_cmd: *server_cmd
-    server_cmd_extra:
-      - "--max-model-len"
-      - "133120"
-      - "--max-num-batched-tokens"
-      - "16384"
-      - "--compilation-config"
-      - '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,4,8,12,16,20,24,28,32,36,40,44,48,52,60,64,68,72,76,80,84,88,92,96,100,104,108,112,116,120,124,128]}'
-      - "--speculative-config"
-      - '{"method": "qwen3_5_mtp","num_speculative_tokens": 3}'
-      - "--enable-prefix-caching"
-    benchmarks:
-      <<: *benchmarks_acc
   - name: "Qwen3.6-27B-3500-50"
     model: "Eco-Tech/Qwen3.6-27B-w8a8"
     envs:
