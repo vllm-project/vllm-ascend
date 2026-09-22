@@ -29,6 +29,42 @@ PCP support is experimental and available only with ModelRunner V2. The followin
 - ❌ **No compatibility**: The backend or feature combination is not supported by the current MRV2 PCP implementation.
 - **Not applicable**: The feature does not apply to the attention backend.
 
+### PCP decode request sharding
+
+The experimental `additional_config.enable_pcp_decode_sharding` option assigns
+scheduled decode requests round-robin across PCP ranks on each step. Prefill
+continues to use DualChunkSwap partitioning. The owner computes the request's
+decode query; all ranks receive its new KV entries before attention runs, keeping
+their complete KV-cache replicas consistent when requests finish or change order.
+
+This follows the approach in [vLLM PR #52162](https://github.com/vllm-project/vllm/pull/52162)
+and does not require that unmerged PR in the paired vLLM installation. Enable it
+with an existing supported MRv2 PCP deployment:
+
+```bash
+VLLM_USE_V2_MODEL_RUNNER=1 vllm serve <DeepSeek-model-path> \
+    --prefill-context-parallel-size 2 \
+    --decode-context-parallel-size 1 \
+    --enforce-eager \
+    --additional-config '{"enable_pcp_decode_sharding": true}'
+```
+
+The initial implementation supports non-hybrid DeepSeek V2/V3/V3.2 MLA and SFA
+models with RoPE. Dense MLA requires an unquantized KV cache. Graph execution,
+speculative decoding, DCP, KVPP, and PCP O-proj weight sharding are rejected.
+Other models, including DeepSeek V4 and GQA/hybrid models, retain the existing
+PCP implementation with this option disabled.
+
+Both MLA KV and SFA indexer KV must be synchronized. A rank with no local request
+still executes the cache collectives, but skips attention for the empty batch.
+The fused preprocessing paths that write KV directly are disabled in this mode;
+native projection weights remain available.
+
+This optimization reduces duplicate decode query computation; it does not
+increase KV-cache capacity. Additional KV communication and native preprocessing
+can offset the compute savings. Measure throughput and latency against the same
+PCP configuration with the option disabled before enabling it for a workload.
+
 ### Decode Context Parallel
 
 DCP supports eager and graph execution, prefix caching, chunked prefill, speculative decoding, P/D disaggregation, and MLAPO on the model and hardware combinations documented by vLLM Ascend. The following table shows whether each feature can be combined with DCP across devices and attention backends:

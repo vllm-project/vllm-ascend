@@ -88,3 +88,39 @@ def test_models_prefix_cache_tp2(model: str, max_tokens: int) -> None:
         name_0="vllm_output",
         name_1="prefix_cache_output",
     )
+
+
+def test_mrv2_pcp_decode_sharding_matches_replicated_decode(monkeypatch) -> None:
+    """Check mixed prefill, uneven owners, empty owners and reused prefix KV."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    batches = [
+        ["The capital of France is", *INPUT_PROMPTS],
+        [INPUT_PROMPTS[1]],
+        list(reversed(INPUT_PROMPTS)),
+    ]
+    outputs = []
+    for sharded in (False, True):
+        with VllmRunner(
+            "deepseek-ai/DeepSeek-V2-Lite-Chat",
+            max_model_len=2048,
+            max_num_seqs=4,
+            max_num_batched_tokens=128,
+            tensor_parallel_size=1,
+            prefill_context_parallel_size=2,
+            decode_context_parallel_size=1,
+            enable_expert_parallel=True,
+            enable_chunked_prefill=True,
+            enable_prefix_caching=True,
+            enforce_eager=True,
+            seed=0,
+            gpu_memory_utilization=0.7,
+            additional_config={"enable_pcp_decode_sharding": sharded},
+        ) as runner:
+            outputs.append([runner.generate_greedy(prompts, 32) for prompts in batches])
+    for replicated, sharded in zip(*outputs, strict=True):
+        check_outputs_equal(
+            outputs_0_lst=replicated,
+            outputs_1_lst=sharded,
+            name_0="replicated PCP decode",
+            name_1="sharded PCP decode",
+        )

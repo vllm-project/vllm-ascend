@@ -1550,6 +1550,13 @@ class TestAscendSFAImpl(TestBase):
         self.impl.q_proj = MagicMock()
         self.impl.q_proj._chunk_size = 0
 
+    def test_decode_request_sharding_disables_fused_cache_writes(self):
+        self._setup_prolog_v3_state()
+        self.impl.pcp_shard_decode_requests = True
+        for preprocess_type in (PreprocessType.MLAPO, PreprocessType.PROLOG_V3):
+            reasons = self.impl._get_fused_type_unsupported_reasons(preprocess_type)
+            self.assertTrue(any("PCP decode request sharding" in reason for reason in reasons))
+
     def test_reasons_dsa_cp_blocked(self):
         self._setup_prolog_v3_state()
         impl = AscendSFADSACPImpl.__new__(AscendSFADSACPImpl)

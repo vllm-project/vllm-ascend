@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from pydantic import ConfigDict, TypeAdapter, model_validator
 from pydantic_core import ArgsKwargs
+from vllm.config import CUDAGraphMode
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 
@@ -330,6 +331,7 @@ class AscendConfig:
             "sfa_dcp_force_tmajor_restore": false,
             "enable_force_eplb": false,
             "enable_pcp_o_proj_weight_sharding": false,
+            "enable_pcp_decode_sharding": false,
             "draft_window_size": null,
             "mix_placement": false,
             "pa_shape_list": [],
@@ -466,6 +468,9 @@ class AscendConfig:
     sfa_dcp_force_tmajor_restore: bool = False
     enable_force_eplb: bool = False
     enable_pcp_o_proj_weight_sharding: bool = False
+    # Assign each decode request to one PCP rank and replicate its KV updates.
+    # Initially limited to eager MRV2 DeepSeek MLA with PCP > 1 and DCP = 1.
+    enable_pcp_decode_sharding: bool = False
     draft_window_size: int | None = None
     mix_placement: bool = False
     # When non-zero, force the MC2 combine stage's comm quant_mode to this
@@ -554,6 +559,36 @@ class AscendConfig:
             self.enable_fused_mc2 = 1
         return self
 
+    def _validate_pcp_decode_sharding(self, vllm_config: VllmConfig) -> None:
+        """Reject layouts whose cache or collective contract is not supported."""
+        if not self.enable_pcp_decode_sharding:
+            return
+        parallel_config = vllm_config.parallel_config
+        if not vllm_config.use_v2_model_runner:
+            raise ValueError("enable_pcp_decode_sharding requires Model Runner V2.")
+        if parallel_config.prefill_context_parallel_size <= 1:
+            raise ValueError("enable_pcp_decode_sharding requires PCP > 1.")
+        if parallel_config.decode_context_parallel_size != 1:
+            raise ValueError("enable_pcp_decode_sharding requires DCP = 1 and replicated KV caches.")
+        if vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+            raise ValueError("enable_pcp_decode_sharding currently requires eager execution (--enforce-eager).")
+        if vllm_config.speculative_config is not None:
+            raise ValueError("enable_pcp_decode_sharding does not support speculative decoding yet.")
+        model_config = vllm_config.model_config
+        supported_architectures = {"DeepseekV2ForCausalLM", "DeepseekV3ForCausalLM", "DeepseekV32ForCausalLM"}
+        if (
+            model_config is None
+            or not model_config.use_mla
+            or model_config.is_hybrid
+            or not supported_architectures.intersection(model_config.architectures)
+            or getattr(model_config.hf_text_config, "qk_rope_head_dim", 0) <= 0
+        ):
+            raise ValueError("enable_pcp_decode_sharding supports non-hybrid DeepSeek V2/V3/V3.2 MLA models only.")
+        if self.kvpp_config.size > 1:
+            raise ValueError("enable_pcp_decode_sharding does not support KVPP yet.")
+        if self.enable_pcp_o_proj_weight_sharding:
+            raise ValueError("enable_pcp_decode_sharding does not support PCP o_proj weight sharding yet.")
+
     # ---- derivations + cross-config downgrades/mutex ----
     # Business validation: invoked explicitly by init_ascend_config (NOT a
     # pydantic after-validator). Preserves the original __init__ ordering —
@@ -561,6 +596,7 @@ class AscendConfig:
     # the max_num_batched_tokens that sequence-parallel writeback corrected).
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
+        self._validate_pcp_decode_sharding(vc)
         if (
             self.enable_force_eplb
             and self.eplb_config.dynamic_eplb

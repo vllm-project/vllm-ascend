@@ -29,8 +29,9 @@ from vllm.config import CUDAGraphMode
 from vllm.forward_context import DPMetadata
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.input_batch import InputBatch
-from vllm.v1.worker.gpu.pcp_manager import PCPManager
+from vllm.v1.worker.gpu.pcp_manager import PCPManager, RankSegment
 
+from vllm_ascend.ascend_config import AscendConfig, KVPPConfig
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import model_runner as ascend_model_runner
 from vllm_ascend.worker.v2 import states as states_module
@@ -1176,3 +1177,247 @@ def test_pcp_slot_buffers_match_block_tables(slot_dtype):
     assert dummy.tolist() == [[-1, -1, -1, -1]]
     assert dummy.dtype == slot_dtype
     assert dummy.data_ptr() == buffer_ptr
+
+
+@pytest.mark.parametrize("needs_computed_tokens", [False, True])
+def test_decode_sharding_adapts_parent_segment_api(needs_computed_tokens):
+    counts = np.ones(3, dtype=np.int32)
+    computed = np.full(3, 16)
+    prefilling = np.zeros(3, dtype=np.bool_)
+    offsets = np.arange(4)
+    replicated_segments = [RankSegment(index, slice(index, index + 1), slice(index, index + 1)) for index in range(3)]
+
+    def legacy_segments(self, rank, num_scheduled_tokens, num_computed_tokens, is_prefilling, query_start_loc_np):
+        np.testing.assert_array_equal(num_computed_tokens, computed)
+        return replicated_segments
+
+    def current_segments(self, rank, num_scheduled_tokens, is_prefilling, query_start_loc_np):
+        return replicated_segments
+
+    parent_segments = legacy_segments if needs_computed_tokens else current_segments
+    with patch.object(PCPManager, "_get_rank_segments", parent_segments):
+        manager = AscendPCPManager(2, 0, torch.device("cpu"), shard_decode_requests=True)
+        # Repeated scheduling must use the cached API decision.
+        with patch("vllm_ascend.worker.v2.pcp_manager.signature", side_effect=AssertionError("hot-path introspection")):
+            for rank, expected_owners in [(0, [0, 2]), (1, [1])]:
+                segments = manager._get_decode_sharded_rank_segments(rank, counts, computed, prefilling, offsets)
+                assert [segment.global_batch_req_idx for segment in segments] == expected_owners
+                assert [segment.rank_local_batch_slice for segment in segments] == [
+                    slice(index, index + 1) for index in range(len(expected_owners))
+                ]
+
+
+@pytest.mark.parametrize("supports_padding", [False, True])
+def test_replicated_layout_adapts_parent_padding_api(supports_padding):
+    parent_calls = []
+
+    def legacy_layout(self, num_scheduled_tokens, num_computed_tokens, is_prefilling, query_start_loc_np):
+        parent_calls.append(None)
+        return "replicated"
+
+    def current_layout(
+        self, num_scheduled_tokens, num_computed_tokens, is_prefilling, query_start_loc_np, padded_num_tokens=None
+    ):
+        parent_calls.append(padded_num_tokens)
+        return "replicated"
+
+    parent_layout = current_layout if supports_padding else legacy_layout
+    with patch.object(PCPManager, "_build_batch_layout", parent_layout):
+        manager = AscendPCPManager(2, 0, torch.device("cpu"))
+        result = manager._build_batch_layout(
+            np.ones(3), np.ones(3), np.zeros(3, dtype=np.bool_), np.arange(4), padded_num_tokens=8
+        )
+    assert result == "replicated"
+    assert parent_calls == [8 if supports_padding else None]
+
+
+@pytest.mark.parametrize("world_size,num_decodes", [(2, 3), (4, 1), (4, 18)])
+def test_decode_sharding_balances_each_step_and_restores_owner_rows(world_size, num_decodes):
+    manager = AscendPCPManager(world_size, 0, torch.device("cpu"), shard_decode_requests=True)
+    counts = np.ones(num_decodes, dtype=np.int32)
+    prefilling = np.zeros(num_decodes, dtype=np.bool_)
+    with patch("vllm_ascend.worker.v2.pcp_manager.async_copy_to_gpu", side_effect=_mock_async_copy_to_cpu):
+        segments, per_rank = manager._build_batch_layout(
+            counts, np.full(num_decodes, 16), prefilling, np.arange(num_decodes + 1)
+        )
+    owners = {
+        segment.global_batch_req_idx: rank for rank, rank_segments in enumerate(segments) for segment in rank_segments
+    }
+    assert owners == {index: index % world_size for index in range(num_decodes)}
+    assert max(per_rank) - min(per_rank) <= 1
+    assert manager.get_num_tokens_for_dispatch(counts, prefilling) == max(per_rank)
+    # Reconstruct globally unique token values from the rank-major owner rows.
+    gathered_tokens = manager._padded_gather_idx + 100
+    torch.testing.assert_close(gathered_tokens[manager._hidden_restore_idx], torch.arange(num_decodes) + 100)
+    assert manager._gathered_kv_write_mask.sum() == num_decodes
+    for rank, num_tokens in enumerate(per_rank):
+        span = manager._gathered_kv_write_mask[rank * max(per_rank) : (rank + 1) * max(per_rank)]
+        assert span[:num_tokens].all()
+        assert not span[num_tokens:].any()
+
+
+def test_decode_sharding_ownership_changes_after_batch_compaction():
+    manager = AscendPCPManager(2, 0, torch.device("cpu"), shard_decode_requests=True)
+
+    def owners(req_ids):
+        counts = np.ones(len(req_ids), dtype=np.int32)
+        return {
+            req_ids[segment.global_batch_req_idx]: rank
+            for rank in range(2)
+            for segment in manager._get_decode_sharded_rank_segments(
+                rank, counts, counts * 16, np.zeros(len(req_ids), dtype=np.bool_), np.arange(len(req_ids) + 1)
+            )
+        }
+
+    assert owners(["a", "b", "c"]) == {"a": 0, "b": 1, "c": 0}
+    assert owners(["b", "c"]) == {"b": 0, "c": 1}
+
+
+def test_decode_sharding_keeps_prefill_partition_and_skips_zero_token_rows():
+    manager = AscendPCPManager(2, 0, torch.device("cpu"), shard_decode_requests=True)
+    counts = np.array([8, 1, 0, 1, 1], dtype=np.int32)
+    prefilling = np.array([True, False, False, False, True])
+    offsets = np.concatenate(([0], np.cumsum(counts)))
+    with patch("vllm_ascend.worker.v2.pcp_manager.async_copy_to_gpu", side_effect=_mock_async_copy_to_cpu):
+        segments, _ = manager._build_batch_layout(counts, counts * 0, prefilling, offsets)
+    prefill_tokens = sorted(
+        token
+        for rank_segments in segments
+        for segment in rank_segments
+        if prefilling[segment.global_batch_req_idx]
+        for token in range(segment.global_batch_slice.start, segment.global_batch_slice.stop)
+    )
+    assert prefill_tokens == [*range(8), 10]
+    decode_owners = {
+        segment.global_batch_req_idx: rank
+        for rank, rank_segments in enumerate(segments)
+        for segment in rank_segments
+        if not prefilling[segment.global_batch_req_idx]
+    }
+    assert decode_owners == {1: 0, 3: 1}
+    assert manager._gathered_kv_write_mask.sum() == counts.sum()
+
+
+def test_decode_sharding_padding_preserves_owner_slot_mappings():
+    manager = AscendPCPManager(2, 0, torch.device("cpu"), shard_decode_requests=True)
+    args = (np.ones(3, dtype=np.int32), np.full(3, 16), np.zeros(3, dtype=np.bool_), np.arange(4))
+    with patch("vllm_ascend.worker.v2.pcp_manager.async_copy_to_gpu", side_effect=_mock_async_copy_to_cpu):
+        manager._build_batch_layout(*args, padded_num_tokens=4)
+    slots = manager._convert_to_gathered_slot_mappings(torch.tensor([[123, 456, 789]], dtype=torch.int64))
+    assert slots.tolist() == [[123, 789, -1, -1, 456, -1, -1, -1]]
+    assert manager._hidden_restore_idx.tolist() == [0, 4, 1]
+    with pytest.raises(ValueError, match="smaller than the largest"):
+        manager._build_batch_layout(*args, padded_num_tokens=1)
+
+
+@pytest.mark.parametrize("dcp_size", [1, 2])
+def test_decode_sharding_disabled_retains_replicated_layout(dcp_size):
+    manager = AscendPCPManager(2, 0, torch.device("cpu"), dcp_world_size=dcp_size)
+    with patch.object(PCPManager, "_build_batch_layout", return_value="replicated") as parent:
+        result = manager._build_batch_layout(np.ones(3), np.ones(3), np.zeros(3, dtype=np.bool_), np.arange(4))
+    assert result == "replicated"
+    parent.assert_called_once()
+
+
+@pytest.mark.parametrize("pcp_size,dcp_size", [(1, 1), (2, 2)])
+def test_decode_sharding_manager_rejects_nonreplicated_cache_topology(pcp_size, dcp_size):
+    with pytest.raises(ValueError, match="PCP > 1 and DCP = 1"):
+        AscendPCPManager(pcp_size, 0, torch.device("cpu"), dcp_world_size=dcp_size, shard_decode_requests=True)
+
+
+def test_sharded_eager_partition_retains_local_token_and_request_extents():
+    manager = AscendPCPManager.__new__(AscendPCPManager)
+    manager.shard_decode_requests = True
+    manager.vllm_config = _make_pcp_config(CUDAGraphMode.NONE)
+    local_batch = _make_local_pcp_batch()
+    local_batch.num_tokens = 2
+    local_batch.num_tokens_after_padding = 2
+    local_batch.num_scheduled_tokens = np.ones(2, dtype=np.int32)
+    local_batch.is_prefilling_np = np.zeros(2, dtype=np.bool_)
+    global_batch = SimpleNamespace(
+        num_draft_tokens=0,
+        num_tokens=3,
+        num_tokens_after_padding=4,
+        num_reqs_after_padding=3,
+        is_prefilling_np=np.zeros(3, dtype=np.bool_),
+    )
+    with (
+        patch.object(PCPManager, "partition_batch", return_value=local_batch),
+        patch("vllm_ascend.worker.v2.pcp_manager.build_attn_state"),
+    ):
+        result = manager.partition_batch(global_batch, padded_num_tokens=2)
+    assert result.num_tokens_after_padding == 2
+    assert result.num_reqs_after_padding == 2
+    torch.testing.assert_close(result.query_start_loc, local_batch.query_start_loc)
+
+
+def test_sharded_slots_do_not_expand_to_global_padding():
+    manager = AscendPCPManager.__new__(AscendPCPManager)
+    manager.shard_decode_requests = True
+    compact_slots = torch.tensor([[10, 30, 20, -1]])
+    with patch.object(PCPManager, "prepare_slot_mappings", return_value=compact_slots):
+        assert manager.prepare_slot_mappings() is compact_slots
+
+
+def test_sharded_hidden_restore_keeps_global_padding_separate_from_collective_stride():
+    manager = AscendPCPManager.__new__(AscendPCPManager)
+    manager.shard_decode_requests = True
+    manager._global_batch = SimpleNamespace(num_tokens=3, num_tokens_after_padding=4)
+    with (
+        patch("vllm_ascend.worker.v2.pcp_manager.get_pp_group", return_value=SimpleNamespace(is_last_rank=True)),
+        patch.object(PCPManager, "restore_hidden_states", return_value=torch.tensor([[10], [20], [30]])),
+    ):
+        restored = manager.restore_hidden_states(torch.tensor([[10], [30]]))
+    assert restored.tolist() == [[10], [20], [30], [0]]
+
+
+def _make_decode_sharding_config():
+    config = object.__new__(AscendConfig)
+    config.enable_pcp_decode_sharding = True
+    config.enable_pcp_o_proj_weight_sharding = False
+    config.kvpp_config = KVPPConfig()
+    vc = _make_pcp_config(CUDAGraphMode.NONE)
+    vc.use_v2_model_runner = True
+    vc.parallel_config.decode_context_parallel_size = 1
+    vc.model_config.is_hybrid = False
+    vc.model_config.architectures = ["DeepseekV3ForCausalLM"]
+    vc.model_config.hf_text_config.qk_rope_head_dim = 64
+    return config, vc
+
+
+@pytest.mark.parametrize("architecture", ["DeepseekV2ForCausalLM", "DeepseekV3ForCausalLM", "DeepseekV32ForCausalLM"])
+def test_decode_sharding_config_accepts_supported_models(architecture):
+    config, vc = _make_decode_sharding_config()
+    vc.model_config.architectures = [architecture]
+    config._validate_pcp_decode_sharding(vc)
+
+
+@pytest.mark.parametrize(
+    "target,field,value,error",
+    [
+        ("vc", "use_v2_model_runner", False, "Model Runner V2"),
+        ("parallel_config", "prefill_context_parallel_size", 1, "PCP > 1"),
+        ("parallel_config", "decode_context_parallel_size", 2, "DCP = 1"),
+        ("compilation_config", "cudagraph_mode", CUDAGraphMode.FULL_DECODE_ONLY, "eager execution"),
+        ("vc", "speculative_config", object(), "speculative decoding"),
+        ("model_config", "use_mla", False, "DeepSeek V2/V3/V3.2"),
+        ("model_config", "is_hybrid", True, "DeepSeek V2/V3/V3.2"),
+        ("model_config", "architectures", ["DeepseekV4ForCausalLM"], "DeepSeek V2/V3/V3.2"),
+        ("model_config", "architectures", ["KimiK25ForConditionalGeneration"], "DeepSeek V2/V3/V3.2"),
+        ("ascend", "kvpp_config", KVPPConfig(size=2), "KVPP"),
+        ("ascend", "enable_pcp_o_proj_weight_sharding", True, "o_proj"),
+    ],
+)
+def test_decode_sharding_config_rejects_unsupported_combinations(target, field, value, error):
+    config, vc = _make_decode_sharding_config()
+    obj = config if target == "ascend" else vc if target == "vc" else getattr(vc, target)
+    setattr(obj, field, value)
+    with pytest.raises(ValueError, match=error):
+        config._validate_pcp_decode_sharding(vc)
+
+
+def test_decode_sharding_config_rejects_no_rope_mla():
+    config, vc = _make_decode_sharding_config()
+    vc.model_config.hf_text_config.qk_rope_head_dim = 0
+    with pytest.raises(ValueError, match="DeepSeek V2/V3/V3.2"):
+        config._validate_pcp_decode_sharding(vc)

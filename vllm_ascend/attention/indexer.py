@@ -198,6 +198,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         # k across the TP group. Both are no-ops in the base layout.
         parallel_config = get_current_vllm_config().parallel_config
         self._pcp_active = parallel_config.prefill_context_parallel_size > 1
+        self.pcp_shard_decode_requests = self._pcp_active and get_ascend_config().enable_pcp_decode_sharding
         self._dsa_cp_active = enable_dsa_cp()
 
     def process_weights_after_loading(self) -> None:
@@ -342,9 +343,10 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         slot_mapping = indexer_metadata.slot_mapping
         if self._pcp_active:
             tensors = (k_li,) if k_li_scale is None else (k_li, k_li_scale)
-            gathered_tensors, slot_mapping = _gather_prefill_cache_inputs(
-                tensors, slot_mapping, indexer_metadata.num_decode_tokens
+            num_decode_tokens = (
+                0 if getattr(self, "pcp_shard_decode_requests", False) else indexer_metadata.num_decode_tokens
             )
+            gathered_tensors, slot_mapping = _gather_prefill_cache_inputs(tensors, slot_mapping, num_decode_tokens)
             k_li = gathered_tensors[0]
             assert slot_mapping.numel() == k_li.shape[0], (
                 "PCP indexer cache write requires one slot per gathered token: "
@@ -395,7 +397,9 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         k_li, k_li_scale, indexer_weights = self.forward_k(k_hidden_states, cos, sin)
         k_li, k_li_scale, slot_mapping = self._gather_cache_inputs(k_li, k_li_scale, indexer_metadata)
         self.write_cache(k_li, k_li_scale, slot_mapping, indexer_attn_metadata=indexer_metadata)
-        if not compute_topk:
+        if not compute_topk or (
+            getattr(self, "pcp_shard_decode_requests", False) and indexer_metadata.num_actual_tokens == 0
+        ):
             return None
 
         assert self.wk_weights_proj is not None

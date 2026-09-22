@@ -174,6 +174,10 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         attn_metadata: M,
     ):
         num_decode_tokens = attn_metadata.num_decode_tokens or 0
+        if getattr(self, "pcp_shard_decode_requests", False):
+            # Decode owners may change after the scheduler reorders requests.
+            # Replicate their new KV on every rank, including empty owners.
+            num_decode_tokens = 0
         (kv_no_split, cos, sin), slots = _gather_prefill_cache_inputs((kv_no_split, cos, sin), slots, num_decode_tokens)
         assert slots.numel() == kv_no_split.shape[0], (
             "SFA PCP cache write requires one slot per gathered token: "

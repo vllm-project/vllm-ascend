@@ -18,6 +18,7 @@
 #
 
 from dataclasses import dataclass, replace
+from inspect import signature
 
 import numpy as np
 import torch
@@ -25,7 +26,7 @@ from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_pcp_group, get_pp_group
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
-from vllm.v1.worker.gpu.pcp_manager import PCPManager
+from vllm.v1.worker.gpu.pcp_manager import PCPManager, RankSegment
 from vllm.v1.worker.gpu.states import RequestState
 
 from vllm_ascend.utils import vllm_version_is
@@ -52,6 +53,7 @@ class AscendPCPManager(PCPManager):
     """PCP manager that refreshes Ascend-only local-batch metadata."""
 
     vllm_config: VllmConfig
+    shard_decode_requests: bool = False
     _global_batch_slot_mappings: torch.Tensor | None
     _gathered_kv_slot_mappings: torch.Tensor | None
     _pad_slot_id: torch.Tensor
@@ -68,7 +70,19 @@ class AscendPCPManager(PCPManager):
         dcp_world_size: int = 1,
         dcp_rank: int = 0,
         cp_interleave: int = 1,
+        shard_decode_requests: bool = False,
     ) -> None:
+        if shard_decode_requests and (pcp_world_size <= 1 or dcp_world_size != 1):
+            raise ValueError("PCP decode sharding requires PCP > 1 and DCP = 1.")
+        self.shard_decode_requests = shard_decode_requests
+        # v0.29 and some nightlies still need computed positions to order
+        # segments. Detect the API once rather than inferring it from a version.
+        self._parent_segments_need_computed_tokens = (
+            "num_computed_tokens" in signature(PCPManager._get_rank_segments).parameters
+        )
+        self._parent_layout_supports_padding = (
+            "padded_num_tokens" in signature(PCPManager._build_batch_layout).parameters
+        )
         super().__init__(
             pcp_world_size=pcp_world_size,
             pcp_rank=pcp_rank,
@@ -250,7 +264,102 @@ class AscendPCPManager(PCPManager):
             and global_batch.num_draft_tokens == 0
         )
 
+    def _get_decode_sharded_rank_segments(
+        self,
+        rank: int,
+        num_scheduled_tokens: np.ndarray,
+        num_computed_tokens: np.ndarray,
+        is_prefilling: np.ndarray,
+        query_start_loc_np: np.ndarray,
+    ) -> list[RankSegment]:
+        """Keep DualChunkSwap prefill rows and select this step's decode owners."""
+        if self.pcp_world_size <= 1 or self.dcp_world_size != 1:
+            raise ValueError("PCP decode sharding requires PCP > 1 and DCP = 1.")
+        if self._parent_segments_need_computed_tokens:
+            segments = super()._get_rank_segments(
+                rank, num_scheduled_tokens, num_computed_tokens, is_prefilling, query_start_loc_np
+            )
+        else:
+            segments = super()._get_rank_segments(rank, num_scheduled_tokens, is_prefilling, query_start_loc_np)
+        # Prefills and unscheduled rows do not consume an ownership ordinal.
+        # Every rank has the full cache, so ownership can change after compaction.
+        decode_rows = np.flatnonzero((num_scheduled_tokens > 0) & ~is_prefilling)
+        owned_decodes = set(decode_rows[rank :: self.pcp_world_size])
+        local_segments = []
+        offset = 0
+        for segment in segments:
+            req_idx = segment.global_batch_req_idx
+            if not is_prefilling[req_idx] and req_idx not in owned_decodes:
+                continue
+            local_segments.append(replace(segment, rank_local_batch_slice=slice(offset, offset + segment.num_tokens)))
+            offset += segment.num_tokens
+        return local_segments
+
+    def _build_batch_layout(
+        self,
+        num_scheduled_tokens: np.ndarray,
+        num_computed_tokens: np.ndarray,
+        is_prefilling: np.ndarray,
+        query_start_loc_np: np.ndarray,
+        padded_num_tokens: int | None = None,
+    ) -> tuple[list[list[RankSegment]], list[int]]:
+        if not self.shard_decode_requests:
+            if not self._parent_layout_supports_padding:
+                return super()._build_batch_layout(
+                    num_scheduled_tokens, num_computed_tokens, is_prefilling, query_start_loc_np
+                )
+            return super()._build_batch_layout(
+                num_scheduled_tokens,
+                num_computed_tokens,
+                is_prefilling,
+                query_start_loc_np,
+                padded_num_tokens=padded_num_tokens,
+            )
+        segments_by_rank = [
+            self._get_decode_sharded_rank_segments(
+                rank, num_scheduled_tokens, num_computed_tokens, is_prefilling, query_start_loc_np
+            )
+            for rank in range(self.pcp_world_size)
+        ]
+        per_rank_num_tokens = [sum(segment.num_tokens for segment in segments) for segments in segments_by_rank]
+        max_local_tokens = max(per_rank_num_tokens)
+        if padded_num_tokens is None:
+            padded_num_tokens = max_local_tokens
+        elif padded_num_tokens < max_local_tokens:
+            raise ValueError("PCP padded token count is smaller than the largest rank-local batch.")
+        # All ranks use the same stride, including ranks with no owned request.
+        # Padding never writes KV; each real token has exactly one writer.
+        hidden_restore_idx = np.zeros(int(query_start_loc_np[-1]), dtype=np.int64)
+        padded_gather_idx = np.zeros(padded_num_tokens * self.pcp_world_size, dtype=np.int64)
+        gathered_kv_write_mask = np.zeros_like(padded_gather_idx, dtype=np.bool_)
+        for rank, segments in enumerate(segments_by_rank):
+            for segment in segments:
+                gathered_slice = slice(
+                    rank * padded_num_tokens + segment.rank_local_batch_slice.start,
+                    rank * padded_num_tokens + segment.rank_local_batch_slice.stop,
+                )
+                padded_gather_idx[gathered_slice] = np.arange(
+                    segment.global_batch_slice.start, segment.global_batch_slice.stop
+                )
+                hidden_restore_idx[segment.global_batch_slice] = np.arange(gathered_slice.start, gathered_slice.stop)
+                gathered_kv_write_mask[gathered_slice] = True
+        self._hidden_restore_idx = async_copy_to_gpu(hidden_restore_idx, device=self.device)
+        self._padded_gather_idx = async_copy_to_gpu(padded_gather_idx, device=self.device)
+        self._gathered_kv_write_mask = async_copy_to_gpu(gathered_kv_write_mask, device=self.device)
+        return segments_by_rank, per_rank_num_tokens
+
     def get_num_tokens_for_dispatch(self, num_scheduled_tokens: np.ndarray, is_prefilling: np.ndarray) -> int:
+        if self.shard_decode_requests:
+            query_start_loc = np.concatenate(([0], np.cumsum(num_scheduled_tokens)))
+            return max(
+                sum(
+                    segment.num_tokens
+                    for segment in self._get_decode_sharded_rank_segments(
+                        rank, num_scheduled_tokens, np.zeros_like(num_scheduled_tokens), is_prefilling, query_start_loc
+                    )
+                )
+                for rank in range(self.pcp_world_size)
+            )
         if not vllm_version_is("0.28.0"):
             return super().get_num_tokens_for_dispatch(num_scheduled_tokens, is_prefilling)
         # Reuse the actual partition rules: decode is replicated, while each
@@ -299,7 +408,7 @@ class AscendPCPManager(PCPManager):
         # runtime metadata matches the fixed graph capture layout.
         needs_token_padding = graph_num_tokens > local_batch.num_tokens_after_padding
         needs_request_padding = graph_num_reqs > local_batch.num_reqs_after_padding
-        if is_decode_only and (needs_token_padding or needs_request_padding):
+        if not self.shard_decode_requests and is_decode_only and (needs_token_padding or needs_request_padding):
             assert self._input_buffers is not None
             input_buffers = self._input_buffers
             actual_tokens = local_batch.num_tokens
@@ -390,6 +499,17 @@ class AscendPCPManager(PCPManager):
 
         num_tokens = self._global_batch.num_tokens
         num_tokens_after_padding = self._global_batch.num_tokens_after_padding
+        if self.shard_decode_requests:
+            # The global runner may retain padding larger than the owner-local
+            # collective stride. Only real global rows have restore indices.
+            restored_hidden_states = restored_hidden_states[:num_tokens]
+            if num_tokens_after_padding > num_tokens:
+                padded_hidden_states = restored_hidden_states.new_zeros(
+                    (num_tokens_after_padding, *restored_hidden_states.shape[1:])
+                )
+                padded_hidden_states[:num_tokens].copy_(restored_hidden_states)
+                return padded_hidden_states
+            return restored_hidden_states
         if num_tokens == num_tokens_after_padding:
             return restored_hidden_states
         if restored_hidden_states.shape[0] != num_tokens_after_padding:
@@ -462,6 +582,8 @@ class AscendPCPManager(PCPManager):
         [rank 0 rows | rank 0 padding | rank 1 rows | rank 1 padding | ...].
         """
         slot_mappings = super().prepare_slot_mappings()
+        if self.shard_decode_requests:
+            return slot_mappings
         assert self._global_batch is not None
         graph_num_tokens = self._global_batch.num_tokens_after_padding
         is_decode_only = not bool(self._global_batch.is_prefilling_np.any())

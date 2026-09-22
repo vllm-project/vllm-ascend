@@ -3117,3 +3117,96 @@ def test_mla_nope_decode_preserves_current_kv_contract():
         if return_current_kv:
             assert result[2].shape == (2, 1, 1, 0)
             torch.testing.assert_close(result[3].reshape(2, 4), tokens)
+
+
+@pytest.mark.parametrize("counts", [(2, 1), (1, 0)])
+def test_pcp_sharded_mla_updates_every_replica_including_empty_rank(counts):
+    """Owner KV and padding must have identical effects on every replica."""
+    width = max(counts)
+    gathered = torch.arange(1, 2 * width + 1, dtype=torch.float32).view(-1, 1)
+    slots = torch.tensor([3, 7, 5, -1] if width == 2 else [3, -1])
+    replicas = []
+    for rank, count in enumerate(counts):
+        impl = AscendMLAImpl.__new__(AscendMLAImpl)
+        cache = (torch.zeros(10, 1), torch.zeros(10, 1))
+        cos = torch.ones(width, 1)
+        sin = torch.zeros(width, 1)
+        metadata = SimpleNamespace(
+            pcp_cos=cos,
+            pcp_sin=sin,
+            num_actual_tokens=count,
+            slot_mapping=slots,
+        )
+        group = SimpleNamespace(
+            world_size=2,
+            rank_in_group=rank,
+            all_gather=MagicMock(side_effect=[gathered, cos.repeat(2, 1), sin.repeat(2, 1)]),
+        )
+
+        def write_kv(kv, _cos, _sin, kv_cache, addresses, return_current_kv):
+            assert return_current_kv
+            valid = addresses >= 0
+            kv_cache[0][addresses[valid]] = kv[valid]
+            kv_cache[1][addresses[valid]] = kv[valid] + 10
+            return kv_cache[1], kv_cache[0], kv + 10, kv
+
+        impl.exec_kv_decode = write_kv
+        with patch("vllm_ascend.attention.mla_v1.get_pcp_group", return_value=group):
+            current_pe, current_nope = impl._write_pcp_sharded_kv(
+                gathered[rank * width : (rank + 1) * width], cache, metadata
+            )
+        assert group.all_gather.call_count == 3
+        assert torch.equal(current_nope, gathered[rank * width : rank * width + count])
+        assert torch.equal(current_pe, current_nope + 10)
+        assert cache[0][-1].item() == 0
+        replicas.append(cache)
+    assert torch.equal(replicas[0][0], replicas[1][0])
+    assert torch.equal(replicas[0][1], replicas[1][1])
+    assert replicas[0][0][3].item() == 1
+
+
+def test_pcp_sharded_mla_empty_rank_writes_kv_without_attention_queries():
+    """An idle rank still enters cache collectives before skipping Q work."""
+    impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl.pcp_shard_decode_requests = True
+    impl.fused_qkv_a_proj = None
+    impl.kv_a_proj_with_mqa = lambda hidden: (hidden,)
+    impl.layerwise_kv_cache_hook = None
+    current = (torch.empty(0, 1), torch.empty(0, 1))
+    impl._write_pcp_sharded_kv = MagicMock(return_value=current)
+    impl.mla_preprocess_decode = MagicMock()
+    impl.mla_preprocess_prefill = MagicMock()
+    metadata = SimpleNamespace(num_decodes=0, num_prefills=0)
+    with patch("vllm_ascend.attention.mla_v1.notify_kv_cache_written") as notify:
+        result = impl._mla_preprocess("layer", torch.zeros(1, 1), (), metadata)
+    assert result == (None, None)
+    impl._write_pcp_sharded_kv.assert_called_once()
+    impl.mla_preprocess_decode.assert_not_called()
+    impl.mla_preprocess_prefill.assert_not_called()
+    notify.assert_called_once_with("layer")
+
+
+def test_pcp_sharded_mla_decode_reuses_replicated_kv_without_local_rewrite():
+    """The owner must not overwrite rank-zero slots during Q preprocessing."""
+    impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl._q_proj_and_k_up_proj = lambda q: (q, q)
+    impl.reorg_decode_q = lambda q, rope: (q, rope)
+    impl.rope_single = lambda q, cos, sin: q
+    impl.fa_quant_layer = False
+    impl.exec_kv_decode = MagicMock()
+    metadata = SimpleNamespace(
+        num_decode_tokens=1,
+        slot_mapping=torch.tensor([3, 5]),
+        decode=SimpleNamespace(cos=torch.ones(1, 1), sin=torch.zeros(1, 1)),
+    )
+    cache = (torch.ones(10, 1), torch.ones(10, 1))
+    result = impl.mla_preprocess_decode(
+        torch.ones(1, 1),
+        torch.ones(1, 1),
+        cache,
+        metadata,
+        current_kv=(torch.ones(1, 1), torch.ones(1, 1)),
+    )
+    impl.exec_kv_decode.assert_not_called()
+    assert result.k_nope is cache[0]
+    assert result.k_pe is cache[1]

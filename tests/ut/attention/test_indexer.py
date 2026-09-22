@@ -513,3 +513,55 @@ def test_sfa_indexer_metadata_builder_builds_pcp_dcp_slots_and_c8_groups(
     )
     assert metadata.group_len is not common.group_len
     assert metadata.group_len.numel() == metadata.slot_mapping.numel()
+
+
+@pytest.mark.parametrize("rank", [0, 1])
+@pytest.mark.parametrize("with_scale", [False, True])
+@pytest.mark.parametrize("local_counts", [(2, 1), (1, 0)])
+def test_indexer_decode_sharding_gathers_owner_keys_and_scales(rank, with_scale, local_counts):
+    backend = AscendSFAIndexerBackend.__new__(AscendSFAIndexerBackend)
+    torch.nn.Module.__init__(backend)
+    backend._pcp_active = True
+    backend.pcp_shard_decode_requests = True
+    padded = max(local_counts)
+    keys = [torch.arange(padded * 4, dtype=torch.float32).view(padded, 4) + r * 100 for r in range(2)]
+    scales = [torch.full((padded, 1), float(r + 1)) for r in range(2)]
+    slots = torch.tensor([10, 12, 11, -1] if padded == 2 else [10, -1], dtype=torch.int64)
+    gathered = [torch.cat(keys)]
+    if with_scale:
+        gathered.append(torch.cat(scales))
+    group = SimpleNamespace(world_size=2, all_gather=MagicMock(side_effect=gathered))
+    metadata = SimpleNamespace(num_decode_tokens=local_counts[rank], slot_mapping=slots)
+    with patch("vllm.v1.attention.ops.pcp.get_pcp_group", return_value=group):
+        key, scale, received_slots = backend._gather_cache_inputs(
+            keys[rank], scales[rank] if with_scale else None, metadata
+        )
+    torch.testing.assert_close(key, gathered[0])
+    torch.testing.assert_close(received_slots, slots)
+    assert group.all_gather.call_count == (2 if with_scale else 1)
+    if with_scale:
+        torch.testing.assert_close(scale, gathered[1])
+    else:
+        assert scale is None
+
+
+def test_indexer_empty_decode_owner_writes_cache_before_skipping_selection():
+    backend = AscendSFAIndexerBackend.__new__(AscendSFAIndexerBackend)
+    torch.nn.Module.__init__(backend)
+    backend.pcp_shard_decode_requests = True
+    hidden_states = torch.ones(2, 4)
+    gathered_keys = torch.ones(4, 4)
+    slots = torch.tensor([7, 8, -1, -1])
+    metadata = SimpleNamespace(num_actual_tokens=0, cos=torch.ones(2, 1), sin=torch.zeros(2, 1))
+    order = []
+    backend.forward_k = MagicMock(side_effect=lambda *args: (order.append("project") or hidden_states, None, None))
+    backend._gather_cache_inputs = MagicMock(
+        side_effect=lambda *args: (order.append("gather") or gathered_keys, None, slots)
+    )
+    backend.write_cache = MagicMock(side_effect=lambda *args, **kwargs: order.append("write"))
+    with patch("vllm_ascend.attention.indexer.DeviceOperator.indexer_select_post_process") as select:
+        result = backend.forward(hidden_states, hidden_states, hidden_states, metadata)
+    assert result is None
+    assert order == ["project", "gather", "write"]
+    backend.write_cache.assert_called_once_with(gathered_keys, None, slots, indexer_attn_metadata=metadata)
+    select.assert_not_called()
