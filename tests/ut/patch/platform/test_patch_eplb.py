@@ -322,6 +322,78 @@ def test_async_explicit_transfer_delegates_profile_and_rank_mapping(is_profile, 
     assert result == "upstream"
 
 
+@pytest.mark.parametrize("changed_layer", [None, 1])
+def test_async_worker_only_publishes_changed_layers(monkeypatch, changed_layer):
+    old_mapping = torch.tensor([[0, 1], [0, 1], [0, 1]])
+    new_mapping = old_mapping.clone()
+    if changed_layer is not None:
+        new_mapping[changed_layer] = torch.tensor([1, 0])
+    published = []
+    model_state = SimpleNamespace(
+        communicator=MagicMock(),
+        physical_to_logical_map=old_mapping,
+        model=SimpleNamespace(expert_weights=[[object()] for _ in range(3)]),
+        expert_buffer=[object()],
+        rebalanced=True,
+        pending_result=None,
+    )
+
+    def wait_for_cycle(*, stream):
+        if published:
+            raise StopIteration
+
+    def consume_result(*, stream):
+        published.append(model_state.pending_result)
+        model_state.rebalanced = False
+        model_state.pending_result = None
+
+    @contextmanager
+    def device_stream(_stream):
+        yield
+
+    monkeypatch.setattr(patch_eplb, "AscendEplbState", SimpleNamespace)
+    monkeypatch.setattr(
+        patch_eplb._async_worker,
+        "get_eplb_group",
+        lambda: SimpleNamespace(device_group=MagicMock(), cpu_group=MagicMock(size=lambda: 1)),
+    )
+    monkeypatch.setattr(patch_eplb._async_worker, "run_rebalance_experts", lambda *_args: new_mapping)
+    monkeypatch.setattr(patch_eplb._async_worker, "CpuGpuEvent", lambda: SimpleNamespace(wait=consume_result))
+    monkeypatch.setattr(patch_eplb._async_worker, "transfer_layer", MagicMock(return_value=object()))
+    monkeypatch.setattr(patch_eplb.torch.distributed, "all_reduce", MagicMock())
+    monkeypatch.setattr(patch_eplb.torch.cuda, "stream", device_stream)
+    state = SimpleNamespace(
+        rearrange_event=SimpleNamespace(wait=wait_for_cycle),
+        model_states={"model": model_state},
+    )
+    worker = patch_eplb._wrap_async_worker(MagicMock())
+
+    with pytest.raises(StopIteration):
+        worker(state, MagicMock())
+
+    assert len(published) == 1
+    assert published[0].layer_idx == changed_layer
+    assert published[0].is_last_result
+    assert patch_eplb._async_worker.transfer_layer.call_count == int(changed_layer is not None)
+
+
+def test_async_noop_result_finishes_without_moving_weights(monkeypatch):
+    move_from_buffer = MagicMock()
+    monkeypatch.setattr(patch_eplb._eplb_state, "move_from_buffer", move_from_buffer)
+    consumed_event = MagicMock()
+    model_state = SimpleNamespace(
+        pending_result=patch_eplb._AscendAsyncLayerResult(None, None, None, consumed_event, True),
+        rebalanced=True,
+    )
+
+    patch_eplb._move_changed_layer_to_workspace(model_state, 0)
+
+    assert not model_state.rebalanced
+    assert model_state.pending_result is None
+    move_from_buffer.assert_not_called()
+    consumed_event.record.assert_called_once_with()
+
+
 @pytest.mark.parametrize(("layer_idx", "is_last_layer"), [(2, False), (3, True)])
 def test_async_workspace_refreshes_layer_and_clears_target_after_last(monkeypatch, layer_idx, is_last_layer):
     call_order: list[str] = []
