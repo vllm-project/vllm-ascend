@@ -94,7 +94,7 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""
-        if ascend_envs.VLLM_ASCEND_ENABLE_FLASH_MLA and self.speculator.attn_architecture == "MLA":
+        if ascend_envs.VLLM_ASCEND_ENABLE_FLASH_MLA and getattr(self.speculator, "attn_architecture", None) == "MLA":
             # Flash metadata is rebuilt and waited outside model graph replay.
             return super().run_fullgraph(desc)
         num_tokens = desc.num_tokens
