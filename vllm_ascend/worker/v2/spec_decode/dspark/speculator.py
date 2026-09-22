@@ -15,9 +15,11 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+from contextlib import contextmanager
 from typing import Any, cast
 
 import torch
+import vllm.v1.worker.gpu.spec_decode.dflash.cudagraph as dflash_cudagraph
 from vllm.config import VllmConfig, get_layers_from_vllm_config, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -27,12 +29,16 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
 )
 
+from vllm_ascend import envs as ascend_envs
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
+from vllm_ascend.worker.device_metadata import DeviceMetadataExecutor
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
+    build_attn_metadata,
     build_attn_metadata_wrapper,
     build_draft_attn_metadata_factory,
+    device_metadata_context,
 )
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import prepare_replicated_pcp_config
 
@@ -45,6 +51,10 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         super().__init__(vllm_config, device)
         self.input_batch: InputBatch | None = None
         self.attn_architecture: str | None = None
+        # The draft query forward runs the device-tiled FlashAttn operator, which
+        # refreshes its metadata buffers through this executor instead of through
+        # per-step host parameters.
+        self.device_metadata_executor = DeviceMetadataExecutor() if ascend_envs.VLLM_ASCEND_ENABLE_FLASH_MLA else None
 
     def load_draft_model(
         self,
@@ -112,6 +122,45 @@ class AscendDSparkSpeculator(DSparkSpeculator):
                 self.attn_architecture = "GQA"
             else:
                 self.attn_architecture = None
+
+    @property
+    def uses_device_tiled_flash(self) -> bool:
+        """Whether the draft query forward runs the device-tiled GQA operator.
+
+        The switch alone is not enough: only a GQA draft is routed to the
+        device-tiled FlashAttn backend, so an MLA draft (e.g. the Kimi-K3
+        target-side architecture) must keep the upstream behaviour even when
+        the switch is on.
+        """
+        return self.attn_architecture == "GQA" and ascend_envs.VLLM_ASCEND_ENABLE_FLASH_MLA
+
+    @contextmanager
+    def draft_capture_context(self):
+        """Supply decode-shaped draft metadata while the query graph is captured.
+
+        Capture builds its metadata through the upstream helper, which knows
+        nothing about the draft's decode-shaped batch. Feed it the same
+        positions, prefill flags and attention state the replay path uses, so
+        the captured buffers line up with what replay refreshes in place.
+        """
+        if not self.uses_device_tiled_flash:
+            # Only the GQA draft runs the device-tiled operator; every other
+            # draft keeps the upstream capture behaviour.
+            yield
+            return
+        original = dflash_cudagraph.build_attn_metadata
+
+        def build_query_metadata(*args, **kwargs):
+            kwargs["positions"] = self.input_buffers.positions[: kwargs["num_tokens"]]
+            kwargs["is_prefilling"] = torch.zeros(kwargs["num_reqs"], dtype=torch.bool)
+            kwargs["attn_state"] = AscendAttentionState.SpecDecoding
+            return build_attn_metadata(*args, **kwargs)
+
+        try:
+            dflash_cudagraph.build_attn_metadata = build_query_metadata
+            yield
+        finally:
+            dflash_cudagraph.build_attn_metadata = original
 
     def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
         assert self.input_batch is not None
@@ -213,10 +262,20 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             # TODO: Remove this guard once main2main includes upstream vLLM
             # #54856 (facd9a74a1), which resets the profiling DP counts.
             sync_state = None
+        if self.uses_device_tiled_flash:
+            # The device-tiled route replays graphs captured at a fixed request
+            # count and refreshes its buffers in place, so the draft batch is
+            # always presented as a uniform decode batch.
+            is_prefilling = torch.zeros(self.max_num_reqs, dtype=torch.bool)
+            attn_state = AscendAttentionState.SpecDecoding
+        else:
+            is_prefilling = torch.from_numpy(self.input_batch.is_prefilling_np)
+            attn_state = None
         with (
+            device_metadata_context(self.device_metadata_executor if self.uses_device_tiled_flash else None),
             build_attn_metadata_wrapper(),
             build_draft_attn_metadata_factory(
-                self.input_buffers.positions, self.max_num_tokens, torch.from_numpy(self.input_batch.is_prefilling_np)
+                self.input_buffers.positions, self.max_num_tokens, is_prefilling, attn_state=attn_state
             ),
         ):
             return super().propose(
