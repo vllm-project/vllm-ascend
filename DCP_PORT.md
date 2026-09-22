@@ -52,11 +52,69 @@ python3 -m pytest --noconftest -q \
   tests/ut/attention/test_sfa_indexer_store_port.py
 ```
 
-NPU entries are under `tests/ut/attention/a2/`. The large-batch registered-op
-regression covers T48/T192, changed graph inputs and an exactly representable
-uniform-weight oracle. It does not replace the unchanged strict random-BF16
-oracle. **Fresh full-main NPU and serving validation has not been performed.**
-CPU tests and reused kernel evidence do not establish full-main runtime acceptance.
+Single-card operator precision tests are in
+`tests/e2e/nightly/single_node/ops/singlecard_ops/triton/`:
+
+- `test_sfa_indexer_store_triton.py`: native INT8 key/scale byte checks and changing graph slots.
+- `test_sfa_dcp_remap.py`: independent integer-boundary oracle, changing graph inputs and empty inputs.
+
+These files were relocated without changing their contents or tolerances.
+The query-gather and O/LSE exchange tests under `tests/ut/attention/a2/` require
+an isolated eight-NPU group and are not single-card tests. The registered-op
+regression covers T48/T192 and changing inputs with an exact uniform-LSE oracle;
+it does not replace the unchanged strict random-BF16 oracle.
+
+### Executed main-source validation, 2026-09-21/22
+
+Runtime source: `c1e82ee97510f7805a6eef7663c53e7e3afacfe3`. Subsequent test relocation
+and documentation edits do not change runtime code. The fresh main runs include:
+
+- DCP8 registered T48/T192 ACLGraph capture and changing-input replay on all eight ranks.
+- Single-card indexer-store/remap and DCP8 query graph checks.
+- Two-layer random-weight HTTP integration, which exposed and led to the native
+  DCP indexer decode-boundary fix; 35 indexer unit tests passed after that fix.
+- Full 78-layer GLM-5.2 W4A8C8 HTTP smoke, TP8/DCP8/EP8, no MTP/offload:
+  three 1240-token prompts completed normally with coherent Beijing/Paris/Tokyo
+  answers and 64/85/66 output tokens. All eight ranks replayed optimized graphs
+  on changing inputs. Loaded module hashes matched the recorded source commit.
+
+### Measured performance, not extrapolated from the release branch
+
+Registered O/LSE: 10 alternating ON/OFF blocks of 100 graph replays, using each
+block's slowest rank and then the median. OFF selects the existing fallback.
+
+| Tokens | OFF effective replay | ON effective replay | Reduction |
+|---|---:|---:|---:|
+|48|206.69 us|101.21 us|51.03%|
+|192|569.19 us|220.02 us|61.35%|
+
+Full-weight HTTP: **one completed OFF/ON pair**, per user instruction, with
+1920 input and 128 output tokens, no MTP/offload/prefix cache. Same-head OFF
+disables query/store/O-LSE performance eligibility; remap correctness fixes
+remain in both arms. Both use scheduler budget4096, maxseq192 and KV budget6GiB.
+
+| Concurrency | OFF mean TPOT(ms) | ON mean TPOT(ms) | Reduction | OFF / ON output throughput(tok/s) |
+|---|---:|---:|---:|---:|
+|1|48.74|47.46|2.63%|18.46 /18.88|
+|4|62.56|60.05|4.01%|51.65 /53.25|
+|192|655.25|635.78|2.97%|157.93 /161.34|
+
+C192 cohort TPOT includes prefill/batch-filling interference. In the common
+interval after all192 first tokens arrived and before any request's last token,
+median client inter-token latency was173.51 ->144.80ms (-16.54%). The windows
+were5.90/4.92s and are not independent repeat experiments or isolated kernel timings.
+Each rank verified34 actual unpadded T192 optimized replays in the ON measurement.
+Both arms completed197 measured requests with zero preemptions; all197 paired
+128-token output sequences matched. No cross-run variance or confidence claim.
+
+The isolated runtime used the verified vLLM pin84030bbe, image native libraries,
+and FastAPI0.133.0/Starlette1.0.1. The existing vLLM/Ascend dependency declaration
+conflict remains; this is not default-install acceptance. General strict numerical
+acceptance, 1M-context and SuperMem ON/OFF performance are not established here.
+
+Published evidence: [fresh NPU](https://github.com/vllm-project/vllm-ascend/pull/16350#issuecomment-5759854639),
+[full weights](https://github.com/vllm-project/vllm-ascend/pull/16350#issuecomment-5764536283),
+[performance](https://github.com/vllm-project/vllm-ascend/pull/16350#issuecomment-5770334097).
 
 ## Reused release evidence, not a new main benchmark
 
