@@ -17,6 +17,7 @@
 # This file is a part of the vllm-ascend project.
 #
 import logging
+from collections.abc import Mapping
 from contextlib import contextmanager
 from copy import copy
 from typing import TYPE_CHECKING, Any
@@ -40,6 +41,7 @@ from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_wrapper,
@@ -489,7 +491,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             num_tokens_padded,
             torch.from_numpy(self.input_batch.is_prefilling_np),
         ):
-            attn_metadata = super()._build_draft_attn_metadata(
+            attn_metadata = super()._build_draft_attn_metadata(  # type: ignore[attr-defined]
                 num_reqs,
                 num_reqs_padded,
                 num_tokens_padded,
@@ -506,6 +508,51 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
                     continue
                 metadata.attn_state = AscendAttentionState.DecodeOnly
         return attn_metadata
+
+    if not vllm_version_is("0.29.0"):
+
+        def _build_attn_metadata(
+            self,
+            num_reqs: int,
+            batch_desc: BatchExecutionDescriptor,
+            query_start_loc_np,
+            seq_lens_cpu_upper_bound: torch.Tensor,
+            step: int,
+            causal: bool | Mapping[int, bool] = True,
+            dcp_local_seq_lens: torch.Tensor | None = None,
+        ) -> dict[str, Any] | None:
+            """vLLM main interception point for draft attention metadata.
+
+            Upstream split ``_build_draft_attn_metadata`` into
+            ``_build_attn_metadata`` + ``_build_uniform_attn_metadata``; the
+            Ascend positions/is-prefilling factory and the forced DecodeOnly
+            state must wrap the new base entry point.
+            """
+            assert self.input_batch is not None
+            num_tokens = (
+                batch_desc.num_tokens if batch_desc.cg_mode == CUDAGraphMode.FULL else int(query_start_loc_np[-1])
+            )
+            with build_draft_attn_metadata_factory(
+                self.input_buffers.positions,
+                num_tokens,
+                torch.from_numpy(self.input_batch.is_prefilling_np),
+            ):
+                attn_metadata = super()._build_attn_metadata(  # type: ignore[attr-defined]
+                    num_reqs=num_reqs,
+                    batch_desc=batch_desc,
+                    query_start_loc_np=query_start_loc_np,
+                    seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+                    step=step,
+                    causal=causal,
+                    dcp_local_seq_lens=dcp_local_seq_lens,
+                )
+            if attn_metadata is not None:
+                # Ascend-specific: force DecodeOnly attention state for the draft model.
+                for metadata in attn_metadata.values():
+                    if metadata is None:
+                        continue
+                    metadata.attn_state = AscendAttentionState.DecodeOnly
+            return attn_metadata
 
     def build_draft_attn_metadatas(
         self,

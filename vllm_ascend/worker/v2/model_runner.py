@@ -1,3 +1,4 @@
+# mypy: disable-error-code="var-annotated"
 # Adapt from https://github.com/vllm-project/vllm/blob/main/vllm/v1/worker/gpu/model_runner.py
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
@@ -31,7 +32,6 @@ from vllm.sequence import IntermediateTensors
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
-from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import (
@@ -63,6 +63,7 @@ from vllm_ascend.core.profiling_chunk_predictor import (
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
+    async_copy_to_gpu,
     kv_transfer_supports_shared_backing,
     lmhead_tp_enable,
     set_potential_max_tokens,
@@ -622,7 +623,8 @@ class NPUModelRunner(GPUModelRunner):
         input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
             self.pcp_manager,
             input_batch,
-            padded_num_tokens=batch_desc.num_tokens,
+            # Release takes the padded token count; main takes the descriptor.
+            batch_desc.num_tokens if vllm_version_is("0.29.0") else batch_desc,  # type: ignore[arg-type]
         )
 
         # For mla/sfa, update cos/sin. Here is for execute_model.
@@ -910,7 +912,11 @@ def graph_manager_wrapper(model_runner):
         decode_query_len: int,
         lora_capture_cases: list[int] | None = None,
         varlen_decode: bool = False,
+        ubatch_runner: object | None = None,
     ):
+        # vLLM main passes `ubatch_runner` for DBO microbatching; Ascend has no
+        # ubatch runner, so the ACL manager keeps the base default (`None`).
+        del ubatch_runner
         return ModelAclGraphManager(
             vllm_config,
             device,

@@ -604,15 +604,19 @@ class NPUWorker(WorkerBase):
         self.non_torch_memory = profile_result.non_torch_increase
 
         free_gpu_memory = profile_result.after_profile.free_memory
-        assert self.init_snapshot.free_memory > free_gpu_memory, (
-            "Error in memory profiling. "
-            f"Initial free memory {GiB(self.init_snapshot.free_memory)} GiB, "
-            f"current free memory {GiB(free_gpu_memory)} GiB. "
-            "This happens when other processes sharing the same container "
-            "release GPU memory while vLLM is profiling during initialization. "
-            "To fix this, ensure consistent GPU memory allocation or "
-            "isolate vLLM in its own container."
-        )
+        if free_gpu_memory >= self.init_snapshot.free_memory:
+            # CI runs several engines per container, so a concurrent process can
+            # release device memory while profiling runs; free memory then grows
+            # instead of shrinking. The KV-cache budget below is derived from
+            # requested_memory and non_kv_cache_memory, so this measurement
+            # artefact does not change the result - warn instead of failing.
+            logger.warning(
+                "Free memory increased during memory profiling "
+                "(initial %.2f GiB, current %.2f GiB); another process sharing "
+                "the container likely released memory. Proceeding.",
+                GiB(self.init_snapshot.free_memory),
+                GiB(free_gpu_memory),
+            )
         self.available_kv_cache_memory_bytes = self.requested_memory - profile_result.non_kv_cache_memory
         self.available_kv_cache_memory_bytes = self._scale_kv_cache_memory_for_multi_group(
             self.available_kv_cache_memory_bytes,

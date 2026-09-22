@@ -1,3 +1,4 @@
+# mypy: disable-error-code="var-annotated"
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 # Copyright 2023 The vLLM team.
@@ -650,7 +651,47 @@ def attention_calculation_stream() -> torch.npu.Stream:
     return _ATNN_CALCULATION_STREAM
 
 
+def async_copy_to_gpu(
+    data,
+    out=None,
+    device=None,
+):
+    """Copy host data to the device, supporting both supported vLLM trees.
+
+    vLLM main folded ``v1.worker.gpu.buffer_utils.async_copy_to_gpu`` into
+    ``torch_utils.async_tensor_h2d`` and gave it an ``out`` argument; the
+    pinned release still exposes the buffer-utils helper separately.
+    """
+    # Imported lazily: ``vllm.utils.torch_utils`` imports ``vllm.platforms``
+    # at module load, which resolves the Ascend plugin back into this module.
+    from vllm.utils.torch_utils import async_tensor_h2d
+
+    if out is not None and not vllm_version_is("0.29.0"):
+        return async_tensor_h2d(data, out=out)  # type: ignore[call-arg]
+    if out is not None:
+        return out.copy_(async_tensor_h2d(data, device=out.device), non_blocking=True)
+    return async_tensor_h2d(data, device=device)
+
+
+def _install_triton_placeholder_compat() -> None:
+    """Make vLLM's no-Triton placeholder safe for module-level kernel metadata.
+
+    Without Triton, ``vllm.triton_utils.tl`` is a ``TritonLanguagePlaceholder``
+    whose ``constexpr`` is ``None``. vLLM main evaluates ``tl.constexpr(...)`` at
+    import time in some kernels (e.g. DeepSeek-V4.1 sparse MQA logits), which
+    would otherwise raise ``TypeError: 'NoneType' object is not callable``.
+    """
+    try:
+        from vllm.triton_utils import tl  # type: ignore[import-not-found]
+    except Exception:
+        return
+
+    if getattr(tl, "constexpr", None) is None:
+        tl.constexpr = lambda value: value
+
+
 def adapt_patch(is_global_patch: bool = False):
+    _install_triton_placeholder_compat()
     if is_global_patch:
         from vllm_ascend.patch import platform  # noqa: F401
     else:

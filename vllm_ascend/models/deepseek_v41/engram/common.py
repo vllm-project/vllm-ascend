@@ -11,7 +11,7 @@ physical page table, and the mirror stays on the host.
 
 import numpy as np
 import torch
-from vllm.models.deepseek_v4_1.common.engram import (
+from vllm.models.deepseek_v41.common.engram import (  # type: ignore[import-not-found]
     EngramLayout,
     build_compressed_token_map,
     compute_hash_multipliers,

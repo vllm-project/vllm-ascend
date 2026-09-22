@@ -1,3 +1,4 @@
+# mypy: disable-error-code="import-not-found"
 from copy import copy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar

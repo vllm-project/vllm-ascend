@@ -137,6 +137,9 @@ def test_replay_installs_forward_context_before_accessing_extra_ctx(monkeypatch)
 @pytest.mark.parametrize("query_count", [7, 8])
 def test_dispatcher_pads_uniform_draft_descriptors(query_count):
     manager = DFlashCudaGraphManager.__new__(DFlashCudaGraphManager)
+    # vLLM main's `CudaGraphManager.__init__` gained `ubatch_runner` (DBO);
+    # `__new__` bypasses it, so provide the default the base class reads.
+    manager.ubatch_runner = None
     manager.compilation_config = SimpleNamespace(
         cudagraph_capture_sizes=[16, 32, 48, 64, 80, 96, 112, 128],
         max_cudagraph_capture_size=128,

@@ -1,3 +1,4 @@
+# mypy: disable-error-code="var-annotated"
 # SPDX-License-Identifier: Apache-2.0
 import copy
 import inspect as _inspect

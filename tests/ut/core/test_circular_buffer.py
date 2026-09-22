@@ -1,3 +1,4 @@
+# mypy: disable-error-code="arg-type"
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from types import SimpleNamespace
@@ -18,6 +19,7 @@ from vllm.v1.kv_cache_interface import (
 
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec, is_prefix_cacheable
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import AscendHybridKVCacheCoordinator
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.block_table import BlockTable
 
 
@@ -52,10 +54,11 @@ def test_ring_lifetime_reuse_and_external_tokens():
         assert manager.allocate_new_blocks("a", tokens, tokens) == []
         manager.allocate_external_computed_blocks("a", 0, tokens)
         manager.remove_skipped_blocks("a", tokens)
+        cache_kwargs = {} if vllm_version_is("0.29.0") else {"replay_boundaries": [tokens - 1]}
         manager.cache_blocks(
             SimpleNamespace(request_id="a"),
             tokens,
-            replay_boundaries=[tokens - 1],
+            **cache_kwargs,
         )
         assert manager.req_to_blocks["a"] == a
     assert manager.take_new_block_ids() == []

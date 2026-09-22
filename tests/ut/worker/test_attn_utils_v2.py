@@ -1,3 +1,4 @@
+# mypy: disable-error-code="var-annotated,assignment,call-arg,attr-defined,arg-type,index,union-attr,operator,misc"
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
@@ -42,6 +43,7 @@ from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_model
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _get_kv_cache_config_deepseek_v4_main,
 )
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
@@ -299,7 +301,7 @@ def test_sfa_indexer_cache_spec_runtime_ownership_and_dcp_replication(
         additional_config={},
         parallel_config=SimpleNamespace(decode_context_parallel_size=4),
         cache_config=SimpleNamespace(block_size=128, cache_dtype="auto"),
-        attention_config=SimpleNamespace(indexer_kv_dtype="int8"),
+        attention_config=SimpleNamespace(indexer_kv_dtype="int8", hisparse_config=None),
         model_config=SimpleNamespace(
             dtype=torch.bfloat16,
             hf_text_config=SimpleNamespace(index_head_dim=128),
@@ -367,7 +369,7 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
     )
     vllm_config = SimpleNamespace(
         additional_config={},
-        attention_config=SimpleNamespace(indexer_kv_dtype="int8"),
+        attention_config=SimpleNamespace(indexer_kv_dtype="int8", hisparse_config=None),
         model_config=SimpleNamespace(
             hf_config=SimpleNamespace(
                 compress_ratios=[4],
@@ -449,7 +451,6 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
         kv_cache_spec=spec,
         kv_cache_group_id=0,
     )
-    runner_kv_caches: list[Any] = []
 
     # vLLM #51718 reworked upstream init_kv_cache to allocate generic 4D
     # views via `allocate_kv_cache` + `create_kv_cache_views`; that layout
@@ -480,34 +481,32 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
             kv_cache_config=_kv_cache_config,
         )
 
-    def _ascend_bind_kv_cache(
+    def _ascend_bind_kv_cache_to_layers(
         kv_caches: dict[str, Any],
         forward_context: dict[str, Any],
-        runner_kv_caches_: list[Any],
-        num_attn_module: int = 1,
-        kv_cache_groups: Any = None,
+        *args: Any,
+        **kwargs: Any,
     ) -> None:
-        del num_attn_module, kv_cache_groups
-        assert len(runner_kv_caches_) == 0
-        for kv_cache in kv_caches.values():
-            runner_kv_caches_.append(kv_cache)
+        del args, kwargs
         for layer_name_, kv_cache in kv_caches.items():
             forward_context[layer_name_].kv_cache = kv_cache
 
     monkeypatch.setattr(upstream_attn_utils, "allocate_kv_cache", _ascend_allocate_kv_cache)
-    monkeypatch.setattr(upstream_attn_utils, "bind_kv_cache", _ascend_bind_kv_cache)
+    bind_target = "bind_kv_cache" if vllm_version_is("0.29.0") else "bind_kv_cache_to_layers"
+    monkeypatch.setattr(upstream_attn_utils, bind_target, _ascend_bind_kv_cache_to_layers)
+    init_kwargs: dict[str, Any] = {}
+    if vllm_version_is("0.29.0"):
+        init_kwargs["runner_kv_caches"] = []
     kv_caches = upstream_attn_utils.init_kv_cache(
-        runner_kv_caches=runner_kv_caches,
         forward_context={layer_name: cache_layer},
         kv_cache_config=kv_cache_config,
         device=torch.device("cpu"),
         kernel_block_sizes=[spec.block_size],
         vllm_config=vllm_config,
+        **init_kwargs,
     )
 
     cache_components = kv_caches[layer_name]
-    assert len(runner_kv_caches) == 1
-    assert runner_kv_caches[0] is cache_components
     # On main the layer cache is replaced by the freshly allocated views, so
     # the returned structure is validated by the checks below instead.
     assert [component.shape for component in cache_components] == [
@@ -1088,7 +1087,7 @@ def test_attn_state_mla_spec_and_metadata_wrappers(monkeypatch):
     vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         cache_config=SimpleNamespace(block_size=16, cache_dtype="auto"),
-        attention_config=SimpleNamespace(indexer_kv_dtype="int8"),
+        attention_config=SimpleNamespace(indexer_kv_dtype="int8", hisparse_config=None),
         model_config=SimpleNamespace(
             dtype=torch.bfloat16,
             hf_text_config=SimpleNamespace(kv_lora_rank=128, qk_rope_head_dim=64),

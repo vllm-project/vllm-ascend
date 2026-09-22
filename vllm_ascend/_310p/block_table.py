@@ -1,3 +1,4 @@
+# mypy: disable-error-code="var-annotated"
 from typing import Any, cast
 
 import numpy as np

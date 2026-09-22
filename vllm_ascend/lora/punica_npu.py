@@ -590,3 +590,31 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         self.bgmv_expand(buffer, lora_b_stacked, y, indices, add_inputs=True)
 
         y = y.view_as(y_org)
+
+    def apply_lora_full_linear(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        weight_stacked: torch.Tensor,
+        bias_stacked: torch.Tensor,
+        module_enabled: torch.Tensor,
+    ) -> None:
+        """
+        Apply request-routed full linear weights (``modules_to_save``) to the
+        rows whose request has the module enabled, mirroring the CPU/XPU path
+        with the Ascend bgmv_shrink kernel.
+        """
+        x = x.view(-1, x.shape[-1])
+        y = y.view(-1, y.shape[-1])
+        indices = self.sampler_indices
+        assert indices.size(0) == x.size(0), "Full linear rows do not match LoRA request mapping"
+        out_features = weight_stacked.size(-2)
+        # bgmv_shrink gathers per-row weights; drop the singleton slice dim so
+        # the AscendC kernel sees the [num_loras, out, in] layout it expects.
+        weight = weight_stacked.reshape(weight_stacked.size(0), out_features, weight_stacked.size(-1))
+        adapter_y = torch.zeros((x.size(0), out_features), dtype=torch.float32, device=x.device)
+        self.bgmv_shrink(x, weight, adapter_y, indices, 1.0)
+        safe_indices = indices.clamp_min(0)
+        use_full = (indices >= 0) & module_enabled[safe_indices]
+        adapter_y = adapter_y.to(y.dtype) + bias_stacked[safe_indices].to(y.dtype)
+        y.copy_(torch.where(use_full.unsqueeze(-1), adapter_y, y))

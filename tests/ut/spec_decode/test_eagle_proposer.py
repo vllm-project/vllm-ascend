@@ -1,3 +1,4 @@
+# mypy: disable-error-code="method-assign,assignment,attr-defined,call-arg,misc"
 # ruff: noqa: E501
 import inspect
 import unittest
@@ -1006,7 +1007,7 @@ class TestEagleProposerPropose:
         'num_actual_tokens, max_query_len, max_seq_len, block_table_tensor,' \
         'slot_mapping, causal, logits_indices_padded, num_logits_indices,' \
         'encoder_seq_lens, encoder_seq_lens_cpu, dcp_local_seq_lens,' \
-        'dcp_local_seq_lens_cpu, _seq_lens_cpu, _num_computed_tokens_cpu,' \
+        'dcp_local_seq_lens_cpu_upper_bound, _seq_lens_cpu, _num_computed_tokens_cpu,' \
         '_num_computed_tokens_cache, seq_lens_cpu, num_computed_tokens_cpu,' \
         'decode_token_per_req, actual_seq_lengths_q, positions, attn_state,' \
         'graph_pad_size, num_input_tokens, context_parallel_metadata',
@@ -1051,7 +1052,7 @@ class TestEagleProposerPropose:
                      num_actual_tokens, max_query_len, max_seq_len, block_table_tensor,
                      slot_mapping, causal, logits_indices_padded, num_logits_indices,
                      encoder_seq_lens, encoder_seq_lens_cpu, dcp_local_seq_lens,
-                     dcp_local_seq_lens_cpu, _seq_lens_cpu, _num_computed_tokens_cpu,
+                     dcp_local_seq_lens_cpu_upper_bound, _seq_lens_cpu, _num_computed_tokens_cpu,
                      _num_computed_tokens_cache, seq_lens_cpu, num_computed_tokens_cpu,
                      decode_token_per_req, actual_seq_lengths_q, positions, attn_state,
                      graph_pad_size, num_input_tokens, context_parallel_metadata
@@ -1179,7 +1180,7 @@ class TestEagleProposerPropose:
                                         num_actual_tokens, max_query_len, max_seq_len, block_table_tensor,
                                         slot_mapping, causal, logits_indices_padded, num_logits_indices,
                                         encoder_seq_lens, encoder_seq_lens_cpu, dcp_local_seq_lens,
-                                        dcp_local_seq_lens_cpu, _seq_lens_cpu, _num_computed_tokens_cpu,
+                                        dcp_local_seq_lens_cpu_upper_bound, _seq_lens_cpu, _num_computed_tokens_cpu,
                                         _num_computed_tokens_cache, seq_lens_cpu, num_computed_tokens_cpu,
                                         decode_token_per_req, actual_seq_lengths_q, positions, attn_state,
                                         graph_pad_size, num_input_tokens, context_parallel_metadata
@@ -1300,7 +1301,7 @@ class TestEagleProposerPropose:
                                         num_actual_tokens, max_query_len, max_seq_len, block_table_tensor,
                                         slot_mapping, causal, logits_indices_padded, num_logits_indices,
                                         encoder_seq_lens, encoder_seq_lens_cpu, dcp_local_seq_lens,
-                                        dcp_local_seq_lens_cpu, _seq_lens_cpu, _num_computed_tokens_cpu,
+                                        dcp_local_seq_lens_cpu_upper_bound, _seq_lens_cpu, _num_computed_tokens_cpu,
                                         _num_computed_tokens_cache, seq_lens_cpu, num_computed_tokens_cpu,
                                         decode_token_per_req, actual_seq_lengths_q, positions, attn_state,
                                         graph_pad_size, num_input_tokens, context_parallel_metadata
@@ -1320,7 +1321,7 @@ class TestEagleProposerPropose:
         mock_common_attn_metadata.encoder_seq_lens = encoder_seq_lens
         mock_common_attn_metadata.encoder_seq_lens_cpu = encoder_seq_lens_cpu
         mock_common_attn_metadata.dcp_local_seq_lens = dcp_local_seq_lens
-        mock_common_attn_metadata.dcp_local_seq_lens_cpu = dcp_local_seq_lens_cpu
+        mock_common_attn_metadata.dcp_local_seq_lens_cpu_upper_bound = dcp_local_seq_lens_cpu_upper_bound
         mock_common_attn_metadata._seq_lens_cpu = _seq_lens_cpu
         mock_common_attn_metadata._num_computed_tokens_cpu = _num_computed_tokens_cpu
         mock_common_attn_metadata._num_computed_tokens_cache = _num_computed_tokens_cache
@@ -1436,7 +1437,7 @@ class TestEagleProposerPropose:
         assert captured_common_attn_metadata.encoder_seq_lens is None
         assert captured_common_attn_metadata.encoder_seq_lens_cpu is None
         assert captured_common_attn_metadata.dcp_local_seq_lens is None
-        assert captured_common_attn_metadata.dcp_local_seq_lens_cpu is None
+        assert captured_common_attn_metadata.dcp_local_seq_lens_cpu_upper_bound is None
         assert captured_common_attn_metadata._num_computed_tokens_cpu is None
         assert captured_common_attn_metadata._num_computed_tokens_cache is None
         assert captured_common_attn_metadata.decode_token_per_req == 1
@@ -1644,9 +1645,10 @@ class TestEagleProposerPropose:
             'num_actual_tokens', 'max_query_len', 'max_seq_len', 'block_table_tensor', \
             'slot_mapping', 'causal', 'logits_indices_padded', 'num_logits_indices', \
             'encoder_seq_lens', 'encoder_seq_lens_cpu', 'dcp_local_seq_lens', \
-            'dcp_local_seq_lens_cpu', '_seq_lens_cpu', '_num_computed_tokens_cpu', \
             '_num_computed_tokens_cache'
         }
+        if not vllm_version_is("0.29.0"):
+            fields.add('dcp_local_seq_lens_cpu_upper_bound')
 
         actual = set(vllm.v1.attention.backend.CommonAttentionMetadata.__dataclass_fields__)
         missing = fields - actual
@@ -1660,7 +1662,7 @@ class TestEagleProposerPropose:
             'positions', 'seq_lens_cpu', 'decode_token_per_req', \
             'context_parallel_metadata', 'actual_seq_lengths_q', \
             'attn_state', 'num_computed_tokens_cpu', 'num_input_tokens', \
-            'graph_pad_size'
+            'graph_pad_size', '_seq_lens_cpu', '_num_computed_tokens_cpu'
         }
 
         actual = set(vllm_ascend.attention.utils.AscendCommonAttentionMetadata.__dataclass_fields__)

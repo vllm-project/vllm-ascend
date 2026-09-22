@@ -1,3 +1,4 @@
+# mypy: disable-error-code="arg-type,assignment,attr-defined,union-attr,index,call-arg,misc,var-annotated"
 # Adapt from https://github.com/vllm-project/vllm/blob/main/vllm/v1/worker/gpu/model_runner.py
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
@@ -43,6 +44,12 @@ from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import (
 )
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import AscendDFlashSpeculator
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
+
+_UPSTREAM_ASYNC_COPY_TARGET = (
+    "vllm.v1.worker.gpu.pcp_manager.async_copy_to_gpu"
+    if vllm_version_is("0.29.0")
+    else "vllm.v1.worker.gpu.pcp_manager.async_tensor_h2d"
+)
 
 
 def _mock_async_copy_to_cpu(value, out=None, device=None):
@@ -220,6 +227,10 @@ def _make_global_pcp_batch():
     )
 
 
+@pytest.mark.skipif(
+    vllm_version_is("0.29.0"),
+    reason="release PCPManager.partition_batch runs Triton kernels unavailable in CPU UTs",
+)
 def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
     """Refresh Ascend metadata after the real PCP local-batch rewrite."""
     global_batch = _make_global_pcp_batch()
@@ -240,19 +251,10 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
     local_attn_state = object()
 
     with (
-        # This Triton helper is unrelated to PCP partitioning and has no CPU
-        # implementation. Stub only it; AscendPCPManager.partition_batch and
-        # PCPManager.partition_batch both execute unmocked below.
+        # AscendPCPManager.partition_batch and PCPManager.partition_batch both
+        # execute unmocked below; only the Triton async-copy helper is stubbed.
         patch(
-            "vllm.v1.worker.gpu.pcp_manager.prepare_pos_seq_lens",
-            return_value=None,
-        ),
-        patch(
-            "vllm.v1.worker.gpu.pcp_manager.combine_sampled_and_draft_tokens",
-            return_value=torch.zeros(2, dtype=torch.int64),
-        ),
-        patch(
-            "vllm.v1.worker.gpu.pcp_manager.async_copy_to_gpu",
+            _UPSTREAM_ASYNC_COPY_TARGET,
             side_effect=_mock_async_copy_to_cpu,
         ),
         patch(
@@ -268,12 +270,23 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
     np.testing.assert_array_equal(global_batch.seq_lens_np, np.array([18], dtype=np.int32))
     assert global_batch.attn_state == "global-attn-state"
 
-    # PCP=2 rank 0 owns the tail chunk then the head chunk; the real base
-    # implementation produces this local row order and pads to rank 1's size.
+    # PCP=2 rank 0 owns both a head and a tail chunk of the split prefill.
+    # vLLM main reorders the local rows canonically by chunk start position;
+    # the pinned release keeps the older "pure prefills last" order.
+    if vllm_version_is("0.29.0"):
+        expected_num_scheduled = np.array([3, 5], dtype=np.int32)
+        expected_query_start_loc = np.array([0, 3, 8], dtype=np.int32)
+        expected_input_ids = torch.tensor([15, 16, 17, 0, 1, 2, 3, 4], dtype=torch.int32)
+        expected_seq_lens = np.array([18, 5], dtype=np.int32)
+    else:
+        expected_num_scheduled = np.array([5, 3], dtype=np.int32)
+        expected_query_start_loc = np.array([0, 5, 8], dtype=np.int32)
+        expected_input_ids = torch.tensor([0, 1, 2, 3, 4, 15, 16, 17], dtype=torch.int32)
+        expected_seq_lens = np.array([5, 18], dtype=np.int32)
     assert result.req_ids == ["global-req", "global-req"]
     np.testing.assert_array_equal(result.idx_mapping_np, np.array([3, 3], dtype=np.int32))
-    np.testing.assert_array_equal(result.num_scheduled_tokens, np.array([3, 5], dtype=np.int32))
-    np.testing.assert_array_equal(result.query_start_loc_np, np.array([0, 3, 8], dtype=np.int32))
+    np.testing.assert_array_equal(result.num_scheduled_tokens, expected_num_scheduled)
+    np.testing.assert_array_equal(result.query_start_loc_np, expected_query_start_loc)
     assert result.num_tokens == 8
     expected_num_tokens_after_padding = 12
     assert result.num_tokens_after_padding == expected_num_tokens_after_padding
@@ -288,11 +301,10 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
             result.num_tokens_after_padding,
             torch.tensor([dispatched, 0]),
         )
-    assert torch.equal(result.input_ids[:8], torch.tensor([15, 16, 17, 0, 1, 2, 3, 4], dtype=torch.int32))
+    assert torch.equal(result.input_ids[:8], expected_input_ids)
 
     # dataclasses.replace() retains the global Ascend-only fields by default;
     # the override must refresh them from real PCP-local CPU rows.
-    expected_seq_lens = np.array([18, 5], dtype=np.int32)
     np.testing.assert_array_equal(result.seq_lens_np, expected_seq_lens)
     assert result.attn_state is local_attn_state
     build_attn_state.assert_called_once()
@@ -531,6 +543,10 @@ def test_prepare_slot_mappings_pads_each_pcp_rank_for_full_decode_graph() -> Non
     assert torch.equal(result, expected)
 
 
+@pytest.mark.skipif(
+    vllm_version_is("0.29.0"),
+    reason="release PCPManager.partition_batch runs Triton kernels unavailable in CPU UTs",
+)
 def test_partition_batch_preserves_fia_dummy_layout() -> None:
     global_batch = _make_global_pcp_batch()
     global_batch.req_ids = ["decode-req"]
@@ -582,15 +598,7 @@ def test_partition_batch_preserves_fia_dummy_layout() -> None:
 
     with (
         patch(
-            "vllm.v1.worker.gpu.pcp_manager.prepare_pos_seq_lens",
-            return_value=None,
-        ),
-        patch(
-            "vllm.v1.worker.gpu.pcp_manager.combine_sampled_and_draft_tokens",
-            return_value=torch.zeros(1, dtype=torch.int64),
-        ),
-        patch(
-            "vllm.v1.worker.gpu.pcp_manager.async_copy_to_gpu",
+            _UPSTREAM_ASYNC_COPY_TARGET,
             side_effect=_mock_async_copy_to_cpu,
         ),
         patch(

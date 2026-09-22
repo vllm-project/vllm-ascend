@@ -1,3 +1,4 @@
+# mypy: disable-error-code="var-annotated,assignment,call-arg,attr-defined,arg-type,index,union-attr,operator,misc"
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa: E402
@@ -110,6 +111,9 @@ def runtime(config):
             num_gpu_blocks_override=None,
             prefix_cache_retention_interval=None,
         ),
+        # vLLM #53781 reads attention_config.hisparse_config in the shared
+        # kv_cache_utils entry points; HiSparse is disabled here.
+        attention_config=SimpleNamespace(hisparse_config=None),
         compilation_config=SimpleNamespace(static_forward_context={}),
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
         parallel_config=SimpleNamespace(

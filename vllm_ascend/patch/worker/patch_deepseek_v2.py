@@ -33,7 +33,7 @@ from vllm.model_executor.models.deepseek_v2 import (
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.sequence import IntermediateTensors
 
-from vllm_ascend.utils import is_mtp_layer
+from vllm_ascend.utils import is_mtp_layer, vllm_version_is
 from vllm_ascend.worker.v2 import pp_utils
 
 
@@ -75,6 +75,7 @@ def _deepseek_v2_mla_attention_init(
     topk_indices_buffer: torch.Tensor | None = None,
     input_size: int | None = None,
     reduce_results: bool = True,
+    index_group_builder=None,
 ) -> None:
     # 这里不能使用 super().__init__()，因为当前函数定义在原类之外，
     # 最后通过赋值的方式替换 DeepseekV2MLAAttention.__init__。
@@ -279,6 +280,11 @@ def _deepseek_v2_mla_attention_init(
         is_sparse=self.is_v32,
         topk_indices_buffer=topk_indices_buffer,
     )
+
+    if not vllm_version_is("0.29.0"):
+        # vLLM main threads the sparse-MLA index-group builder through
+        # MLAModules (#53781); the release pin has no such field.
+        mla_modules.index_group_builder = index_group_builder  # type: ignore[attr-defined]
 
     self.mla_attn = MultiHeadLatentAttentionWrapper(
         self.hidden_size,

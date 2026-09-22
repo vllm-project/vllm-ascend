@@ -60,3 +60,35 @@ def bind_kv_cache(
 
 
 utils.bind_kv_cache = bind_kv_cache
+
+
+# vLLM main renamed the binding entry point to `bind_kv_cache_to_layers`
+# (no `runner_kv_caches` argument). Ascend stores a component tuple/list on
+# each layer, so assign it directly instead of the upstream
+# `layer.bind_kv_cache(...)`, which squeezes a single tensor.
+if not vllm_version_is("0.29.0"):
+    import vllm.v1.worker.gpu.attn_utils as gpu_attn_utils
+
+    def bind_kv_cache_to_layers(
+        kv_caches: dict[str, torch.Tensor],
+        forward_context: dict[str, Attention],
+        num_attn_module: int = 1,
+        kv_cache_groups: Sequence[KVCacheGroupSpec] | None = None,
+    ) -> None:
+        index2name = defaultdict(list)
+        for layer_name in kv_caches:
+            index2name[extract_layer_index(layer_name, num_attn_module)].append(layer_name)
+
+        ordered_layer_names: list[str] = []
+        for layer_index in sorted(index2name.keys()):
+            for layer_name in index2name[layer_index]:
+                ordered_layer_names.append(layer_name)
+
+        for layer_name, kv_cache in kv_caches.items():
+            forward_context[layer_name].kv_cache = kv_cache
+        utils.share_replayssm_ring_trackers(ordered_layer_names, forward_context, kv_cache_groups)
+
+    utils.bind_kv_cache_to_layers = bind_kv_cache_to_layers
+    # `init_kv_cache` lives in gpu/attn_utils.py and imports the binding by
+    # name, so patch that namespace too.
+    gpu_attn_utils.bind_kv_cache_to_layers = bind_kv_cache_to_layers

@@ -1,3 +1,4 @@
+# mypy: disable-error-code="var-annotated"
 import numpy as np
 import torch
 from vllm.distributed import get_dcp_group

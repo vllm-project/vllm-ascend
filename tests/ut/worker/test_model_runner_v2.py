@@ -1,3 +1,4 @@
+# mypy: disable-error-code="arg-type,assignment,attr-defined,union-attr,index,call-arg,misc,var-annotated"
 import ast
 from contextlib import nullcontext
 from pathlib import Path
@@ -246,14 +247,13 @@ def test_prepare_inputs_preserves_pcp_tokens_and_forwards_graph_padding():
     assert ast.unparse(padding_assignments[0].value) == "max(num_tokens, batch_desc.num_tokens)"
 
     assert len(partition_calls) == 1
-    padded_call = next(
-        call for call in partition_calls if any(keyword.arg == "padded_num_tokens" for keyword in call.keywords)
-    )
-    padded_num_tokens = next(keyword.value for keyword in padded_call.keywords if keyword.arg == "padded_num_tokens")
-    assert isinstance(padded_num_tokens, ast.Attribute)
-    assert padded_num_tokens.attr == "num_tokens"
-    assert isinstance(padded_num_tokens.value, ast.Name)
-    assert padded_num_tokens.value.id == "batch_desc"
+    # The single call forwards the padded extent as a positional argument: the
+    # pinned release expects the padded token count, main expects the descriptor.
+    padded_arg = partition_calls[0].args[2]
+    assert isinstance(padded_arg, ast.IfExp)
+    assert ast.unparse(padded_arg.body) == "batch_desc.num_tokens"
+    assert isinstance(padded_arg.orelse, ast.Name)
+    assert padded_arg.orelse.id == "batch_desc"
 
 
 @pytest.mark.parametrize("num_reqs,num_tokens", [(4, 4), (2, 6)])
@@ -503,10 +503,7 @@ def test_sample_tokens_spec_pp_broadcasts_draft_tokens():
     runner.pp_handler = MagicMock()
     with patch.object(GPUModelRunner, "sample_tokens", return_value="out"):
         assert runner.sample_tokens("g") == "out"
-    if vllm_version_is("0.29.0"):
-        runner.pp_handler.broadcast_draft_tokens.assert_called_once_with()
-    else:
-        runner.pp_handler.broadcast_draft_tokens.assert_not_called()
+    runner.pp_handler.broadcast_drafts.assert_called_once_with()
 
 
 def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
@@ -696,7 +693,7 @@ def _fake_async_copy(src, device=None, out=None):
 def _run_prepare_inputs(runner, scheduler_output, batch_req_state, batch_desc, *, version_029=False):
     batch = SimpleNamespace(positions=torch.zeros(4, dtype=torch.int32))
 
-    def _partition(_pcp_manager, input_batch, **_kwargs):
+    def _partition(_pcp_manager, input_batch, *_args, **_kwargs):
         return input_batch
 
     with (

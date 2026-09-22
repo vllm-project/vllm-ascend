@@ -471,7 +471,13 @@ class ProfilingChunkScheduler(Scheduler):
             # >>> PROFILING CHUNK >>>
             while (self.waiting or self.skipped_waiting) and token_budget > 0 and time_budget > 0:
                 # <<< PROFILING CHUNK <<<
-                if len(self.running) == self.max_num_running_reqs:
+                # main adds max_num_active_reqs; admission must stay bounded by
+                # max_num_running_reqs too, so lowering either cap holds.
+                admission_limit = min(
+                    self.max_num_running_reqs,
+                    getattr(self, "max_num_active_reqs", self.max_num_running_reqs),
+                )
+                if len(self.running) == admission_limit:
                     break
 
                 request_queue = self._select_waiting_queue_for_scheduling()

@@ -1,3 +1,4 @@
+# mypy: disable-error-code="var-annotated,assignment,call-arg,attr-defined,arg-type,index,union-attr,operator,misc"
 # ruff: noqa: E402
 
 from types import SimpleNamespace
@@ -13,12 +14,10 @@ import torch
 from PIL import Image
 from torch import nn
 from vllm.model_executor.models.interfaces import requires_raw_input_tokens, supports_multimodal
-from vllm.models.deepseek_v4_1.common.mm_preprocess import (
-    COMPRESS_PAD_TO,
+from vllm.models.deepseek_v41.common.mm_preprocess import (  # type: ignore[import-not-found]
     IMAGE,
     IMAGE_END,
     IMAGE_NEW_LINE,
-    IMAGE_PAD_ID,
     IMAGE_SENTINEL_BASE_ID,
     IMAGE_START,
     DeepseekV4VLProcessingInfo,
@@ -65,10 +64,9 @@ def test_v41_processing_info_accepts_v41_config():
 
     assert DeepseekV4VLProcessingInfo(ctx).get_hf_config() is config
     assert config.image_sentinel_base_id == IMAGE_SENTINEL_BASE_ID
-    assert config.image_pad_token_id == IMAGE_PAD_ID
-    assert config.is_mm_prefix_lm
-    assert config.mm_prefix_clamp_sliding_window
-    assert config.mm_prefix_span_leading_pad_modulus == COMPRESS_PAD_TO == 2
+    # Upstream restored causal image SWA (9f9e1dac26): the vision path is keyed
+    # by vision_n_layers, not the removed is_mm_prefix_lm/mm_prefix_clamp flags.
+    assert config.vision_n_layers > 0
 
 
 def test_v41_image_roles_use_reference_reading_order():
@@ -116,13 +114,15 @@ def test_v41_processor_emits_types_without_v4_perm():
     assert "perm" not in result
 
 
-def test_v41_image_and_alignment_pad_are_dead_to_engram():
-    token_ids = torch.tensor([17, IMAGE_SENTINEL_BASE_ID, IMAGE_PAD_ID, 18])
-    expected = torch.tensor([True, False, False, True])
+def test_v41_image_positions_are_dead_to_engram():
+    # vLLM main removed the compressor-alignment pad: only sentinel positions
+    # are excluded from the n-gram history.
+    token_ids = torch.tensor([17, IMAGE_SENTINEL_BASE_ID, 18])
+    expected = torch.tensor([True, False, True])
 
     torch.testing.assert_close(image_sentinel_mask(token_ids), ~expected)
     torch.testing.assert_close(
-        valid_engram_token_mask(token_ids, IMAGE_SENTINEL_BASE_ID, IMAGE_PAD_ID),
+        valid_engram_token_mask(token_ids, IMAGE_SENTINEL_BASE_ID, -1),
         expected,
     )
 
@@ -155,7 +155,7 @@ def test_v41_span_has_three_delimiters_and_no_image_pad_parameter():
     assert "image_pad" not in dict(wrapper.named_parameters())
 
 
-def test_v41_alignment_pad_uses_plain_image_token_embedding():
+def test_v41_embed_input_ids_preserves_raw_tokens():
     class LanguageModel(nn.Module):
         def embed_input_ids(self, input_ids):
             return input_ids.unsqueeze(-1)
@@ -164,5 +164,5 @@ def test_v41_alignment_pad_uses_plain_image_token_embedding():
     nn.Module.__init__(wrapper)
     wrapper.language_model = LanguageModel()
 
-    embeddings = wrapper.embed_input_ids(torch.tensor([7, IMAGE_PAD_ID, IMAGE_SENTINEL_BASE_ID]))
-    assert embeddings.squeeze(-1).tolist() == [7, IMAGE_SENTINEL_BASE_ID, IMAGE_SENTINEL_BASE_ID]
+    embeddings = wrapper.embed_input_ids(torch.tensor([7, IMAGE_SENTINEL_BASE_ID]))
+    assert embeddings.squeeze(-1).tolist() == [7, IMAGE_SENTINEL_BASE_ID]

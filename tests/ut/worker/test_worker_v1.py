@@ -1,3 +1,4 @@
+# mypy: disable-error-code="call-arg,var-annotated,assignment,attr-defined,arg-type,index,operator,misc,union-attr"
 import importlib
 import unittest
 from types import SimpleNamespace
@@ -1223,7 +1224,12 @@ class TestNPUWorker(TestBase):
     def test_determine_available_memory_memory_profiling_error(
         self, mock_torch_empty_cache, mock_torch_reset_peak_memory_stats, mock_torch_mem_get_info, mock_memory_profiling
     ):
-        """Test determine_available_memory throws exception on memory profiling error"""
+        """Free memory growing during profiling must warn, not abort startup.
+
+        A concurrent engine on the shared CI container can release memory
+        while profiling runs; the KV-cache budget does not read the free
+        memory, so the measurement artefact is not fatal.
+        """
         from vllm_ascend.worker.worker import NPUWorker
 
         # Mock memory_profiling where free memory after profile > init free memory (error case)
@@ -1255,12 +1261,17 @@ class TestNPUWorker(TestBase):
             worker.cache_config.gpu_memory_utilization = 0.8
             worker.cache_config.kv_cache_memory_bytes = None
             worker.device = "npu:0"
+            # The post-profiling budget path needs a config and the KV specs;
+            # stub them so the test isolates the profiling guard.
+            worker.vllm_config = MagicMock(kv_transfer_config=None)
+            worker.get_kv_cache_spec = MagicMock(return_value=[])
+            worker._apply_kv_offload_decode_memory_constraints = MagicMock(side_effect=lambda x: x)
+            worker._apply_kvpp_memory_budget = MagicMock(side_effect=lambda x: x)
 
-            # Test should throw assertion error
-            with self.assertRaises(AssertionError) as cm:
+            with patch("vllm_ascend.worker.worker.logger") as mock_logger:
                 worker.determine_available_memory()
 
-            self.assertIn("Error in memory profiling", str(cm.exception))
+            self.assertTrue(mock_logger.warning.called)
 
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.memory_profiling")

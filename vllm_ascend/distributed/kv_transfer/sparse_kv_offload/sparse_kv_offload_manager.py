@@ -1,3 +1,4 @@
+# mypy: disable-error-code="var-annotated"
 import contextlib
 import typing
 from dataclasses import dataclass

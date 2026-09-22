@@ -1,3 +1,4 @@
+# mypy: disable-error-code="union-attr,index,assignment"
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 """Unit tests for MiniMax M3 sparse attention layer wiring in ``msa_m3``."""
@@ -12,9 +13,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata as CommonAttentionMetadata
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.models.minimax_m3 import MiniMaxM3SparseAttention

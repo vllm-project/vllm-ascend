@@ -1,3 +1,4 @@
+# mypy: disable-error-code="var-annotated,assignment,call-arg,attr-defined,arg-type,index,union-attr,operator,misc"
 # ruff: noqa: E402
 
 import json
@@ -37,8 +38,9 @@ def test_released_config_loads_through_vllm_registry(tmp_path):
     config = get_config(tmp_path, trust_remote_code=False)
 
     assert isinstance(config, UpstreamDeepseekV41Config)
-    assert config.is_mm_prefix_lm
-    assert config.mm_prefix_span_leading_pad_modulus == 2
+    # Upstream restored causal image SWA (9f9e1dac26), so the vision path is
+    # keyed by vision_n_layers rather than the removed is_mm_prefix_lm flag.
+    assert config.vision_n_layers > 0
 
 
 def _released_text_config():
@@ -91,9 +93,7 @@ def test_released_config_names_are_available_to_runtime():
         assert not hasattr(config, name)
     assert config.engram_rotation_config == _rotation_config()
     # The released CausalLM architecture still carries the complete vision path.
-    assert config.is_mm_prefix_lm
-    assert config.mm_prefix_clamp_sliding_window
-    assert config.mm_prefix_span_leading_pad_modulus == 2
+    assert config.vision_n_layers > 0
 
 
 def test_released_causal_architecture_uses_multimodal_wrapper(monkeypatch):

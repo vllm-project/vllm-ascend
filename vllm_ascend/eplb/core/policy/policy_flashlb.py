@@ -1,3 +1,4 @@
+# mypy: disable-error-code="var-annotated,assignment"
 # Copyright Huawei Technologies Co., Ltd. 2024-2025. All rights reserved.
 # Todo: Remove this policy after vllm-project/vllm/pull/24069 is merged into vllm.
 

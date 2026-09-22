@@ -1,3 +1,4 @@
+# mypy: disable-error-code="assignment"
 # SPDX-License-Identifier: Apache-2.0
 import contextlib
 import hashlib

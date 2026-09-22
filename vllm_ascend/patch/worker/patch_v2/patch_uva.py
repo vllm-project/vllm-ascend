@@ -25,6 +25,8 @@ import torch
 import vllm.v1.worker.gpu.buffer_utils
 from vllm.logger import logger
 
+from vllm_ascend.utils import vllm_version_is
+
 
 def check_triton_ascend_version_valid() -> bool:
     """
@@ -145,9 +147,8 @@ class UvaBufferWrapper:
     def np(self):
         return self._np if is_uva_available() else MonitoredNumPyArray(self._np, self._mark_cpu_modified)
 
-    @property
-    def uva(self):
-        """Get the device data of the buffer."""
+    def _flush_uva(self) -> None:
+        """Push dirty host rows to the device view when UVA is unavailable."""
         if not is_uva_available() and self._modified_indices:
             dirty_rows = sorted(self._modified_indices)
             n_dirty = len(dirty_rows)
@@ -165,7 +166,21 @@ class UvaBufferWrapper:
                 src = self._cpu[dirty_rows].pin_memory()
                 self._uva[dirty_rows] = src.to(device="npu", non_blocking=True)
             self._modified_indices.clear()
-        return self._uva
+
+    if vllm_version_is("0.29.0"):
+
+        @property
+        def uva(self) -> torch.Tensor:
+            """Get the device data of the buffer."""
+            self._flush_uva()
+            return self._uva
+
+    else:
+
+        def uva(self, n: int | None = None) -> torch.Tensor:  # type: ignore[misc]
+            """Get the device data of the buffer, optionally sliced to ``n`` rows."""
+            self._flush_uva()
+            return self._uva if n is None else self._uva[:n]
 
 
 vllm.v1.worker.gpu.buffer_utils.UvaBuffer = UvaBufferWrapper

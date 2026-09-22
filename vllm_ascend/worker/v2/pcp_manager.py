@@ -24,11 +24,10 @@ import torch
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_pcp_group, get_pp_group
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.gpu.states import RequestState
 
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.utils import async_copy_to_gpu, vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 
@@ -69,18 +68,34 @@ class AscendPCPManager(PCPManager):
         dcp_rank: int = 0,
         cp_interleave: int = 1,
     ) -> None:
-        super().__init__(
-            pcp_world_size=pcp_world_size,
-            pcp_rank=pcp_rank,
-            device=device,
-            req_states=req_states,
-            max_num_reqs=max_num_reqs,
-            max_num_tokens=max_num_tokens,
-            block_tables=block_tables,
-            dcp_world_size=dcp_world_size,
-            dcp_rank=dcp_rank,
-            cp_interleave=cp_interleave,
-        )
+        if vllm_version_is("0.29.0"):
+            # Release 0.29.0 still threads RequestState through PCPManager.
+            super().__init__(  # type: ignore[call-arg]
+                pcp_world_size=pcp_world_size,
+                pcp_rank=pcp_rank,
+                device=device,
+                req_states=req_states,  # type: ignore[call-arg]
+                max_num_reqs=max_num_reqs,
+                max_num_tokens=max_num_tokens,
+                block_tables=block_tables,
+                dcp_world_size=dcp_world_size,
+                dcp_rank=dcp_rank,
+                cp_interleave=cp_interleave,
+            )
+        else:
+            # vLLM main no longer accepts req_states; the Ascend manager keeps
+            # accepting it for its callers but does not forward it.
+            super().__init__(
+                pcp_world_size=pcp_world_size,
+                pcp_rank=pcp_rank,
+                device=device,
+                max_num_reqs=max_num_reqs,
+                max_num_tokens=max_num_tokens,
+                block_tables=block_tables,
+                dcp_world_size=dcp_world_size,
+                dcp_rank=dcp_rank,
+                cp_interleave=cp_interleave,
+            )
 
         # PCP supplies its own output buffers to compute_slot_mappings, so their
         # dtype must match Ascend block-table slots for cache-write operators.
@@ -271,15 +286,23 @@ class AscendPCPManager(PCPManager):
         self,
         input_batch: AscendInputBatch,
         padded_num_tokens: int | None = None,
+        padded_num_reqs: int | None = None,
     ) -> AscendInputBatch:
         """Partition the batch and update Ascend-specific local metadata."""
         global_batch = input_batch
         if global_batch.num_draft_tokens > 0:
             local_batch = self._partition_speculative_batch_compat(global_batch)
-        else:
+        elif vllm_version_is("0.29.0") or padded_num_reqs is None:
             local_batch = super().partition_batch(
                 global_batch,
                 padded_num_tokens=padded_num_tokens,
+            )
+        else:
+            # vLLM main also pads the rank-local request count for FULL graphs.
+            local_batch = super().partition_batch(
+                global_batch,
+                padded_num_tokens=padded_num_tokens,
+                padded_num_reqs=padded_num_reqs,
             )
         assert isinstance(local_batch, AscendInputBatch)
 

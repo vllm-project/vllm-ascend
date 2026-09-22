@@ -11,7 +11,8 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
-from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
+
+from vllm_ascend.utils import async_copy_to_gpu
 
 _INSTALLED = "_vllm_ascend_upstream_spec_pp_installed"
 

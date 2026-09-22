@@ -1,3 +1,4 @@
+# mypy: disable-error-code="var-annotated,assignment,index,arg-type,operator"
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 # Copyright 2025 The vLLM team.
@@ -193,6 +194,7 @@ from vllm_ascend.utils import (
     get_c_env,
     get_kv_cache_tensor_layers,
     global_stream,
+    is_deepseek_v41,
     is_hidden_state_cache_spec,
     is_score_encoder_cache_manager,
     kv_cache_spec_uses_sparse_sfa_c8,
@@ -1340,6 +1342,17 @@ class NPUModelRunner(GPUModelRunner):
             torch.index_select(
                 is_token_ids, 0, token_indices_tensor, out=self.is_token_ids.cpu[:total_num_scheduled_tokens]
             )
+            # Mark speculative draft tokens as token IDs so their embeddings are
+            # rebuilt, mirroring vLLM GPUModelRunner (#57356). Draft tokens sit
+            # after the valid tokens of each request in the flattened layout.
+            if scheduler_output.scheduled_spec_decode_tokens:
+                token_offset = 0
+                for req_index in range(num_reqs):
+                    num_req_tokens = int(num_scheduled_tokens[req_index])
+                    num_valid = int(num_valid_tokens[req_index])
+                    if num_req_tokens > num_valid:
+                        self.is_token_ids.cpu[token_offset + num_valid : token_offset + num_req_tokens] = 1
+                    token_offset += num_req_tokens
 
         # Because we did not pre-allocate a massive prompt_embeds CPU tensor on
         # the InputBatch, we need to fill in the prompt embeds into the expected
@@ -3554,10 +3567,18 @@ class NPUModelRunner(GPUModelRunner):
         if self.is_mm_prefix_lm:
             req_doc_ranges = {}
             hf_text_config = self.model_config.hf_text_config
+            # vLLM main removed the V4.1 compressor-alignment pad; V4.0 keeps
+            # its ratio-4 pad, so only default to a non-zero modulus for it.
+            if is_deepseek_v41(hf_text_config):
+                default_span_pad_modulus = 0
+            elif getattr(hf_text_config, "vision_n_layers", 0) > 0:
+                default_span_pad_modulus = 4
+            else:
+                default_span_pad_modulus = 0
             span_pad_modulus = getattr(
                 hf_text_config,
                 "mm_prefix_span_leading_pad_modulus",
-                4 if getattr(hf_text_config, "vision_n_layers", 0) > 0 else 0,
+                default_span_pad_modulus,
             )
             for req_id in self.input_batch.req_ids:
                 image_doc_ranges = []

@@ -436,7 +436,13 @@ class RecomputeScheduler(Scheduler):
                 # Paused streaming sessions (WAITING_FOR_STREAMING_REQ) are not
                 # in `running` but still hold a model-runner request slot.
                 num_running = len(self.running) + self.num_waiting_for_streaming_input
-                if num_running >= self.max_num_running_reqs:
+                # main adds max_num_active_reqs; admission must stay bounded by
+                # max_num_running_reqs too, so lowering either cap holds.
+                admission_limit = min(
+                    self.max_num_running_reqs,
+                    getattr(self, "max_num_active_reqs", self.max_num_running_reqs),
+                )
+                if num_running >= admission_limit:
                     break
 
                 request_queue = self._select_waiting_queue_for_scheduling()

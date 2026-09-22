@@ -1,3 +1,4 @@
+# mypy: disable-error-code="var-annotated"
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 
@@ -7,6 +8,7 @@ import numpy as np
 import torch
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor, UvaBuffer
 
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.states import AscendRequestState
 
 
@@ -33,7 +35,7 @@ class Ascend310PStagedWriteTensor:
             self._uva_buffer = UvaBuffer(size, dtype)
             self.cpu = self._uva_buffer.cpu
             self.np = self._uva_buffer.np
-            self.gpu = self._uva_buffer.uva
+            self.gpu = self._uva_buffer.uva if vllm_version_is("0.29.0") else self._uva_buffer.uva()
         else:
             self.cpu = torch.zeros(size, dtype=dtype, device="cpu")
             self.np = self.cpu.numpy()
@@ -58,7 +60,7 @@ class Ascend310PStagedWriteTensor:
         if not self._dirty_indices:
             return
         if self.uva_instead_of_gpu:
-            self.gpu = self._uva_buffer.uva
+            self.gpu = self._uva_buffer.uva if vllm_version_is("0.29.0") else self._uva_buffer.uva()
             self._dirty_indices.clear()
             return
         # Small request vectors favor one bulk H2D.

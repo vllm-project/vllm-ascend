@@ -1,3 +1,4 @@
+# mypy: disable-error-code="call-arg"
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 # This file is a part of the vllm-ascend project.
@@ -267,11 +268,12 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
         )
 
     @patch("vllm_ascend.worker.worker.logger")
-    def test_assert_raises_when_free_memory_increases_after_profile(self, mock_logger):
+    def test_warns_when_free_memory_increases_after_profile(self, mock_logger):
         """
-        determine_available_memory() must raise AssertionError when free memory
-        after profiling is greater than before (external process released memory
-        during profiling, invalidating the measurement).
+        Free memory growing after profiling means another process sharing the
+        container released memory. The KV-cache budget is derived from
+        requested_memory and non_kv_cache_memory, so the measurement artefact
+        must not abort startup (CI runs several engines per container).
         """
         total = int(64 * GiB_bytes)
         requested_memory = int(total * 0.9)
@@ -284,10 +286,11 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
             non_kv_cache_memory=int(0.5 * GiB_bytes),
         )
 
-        with self._patch_memory_profiling(profile_result), self.assertRaises(AssertionError) as ctx:
-            worker.determine_available_memory()
+        with self._patch_memory_profiling(profile_result):
+            result = worker.determine_available_memory()
 
-        self.assertIn("Error in memory profiling", str(ctx.exception))
+        self.assertTrue(mock_logger.warning.called)
+        self.assertGreater(result, 0)
 
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.logger")

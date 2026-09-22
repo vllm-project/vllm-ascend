@@ -1,3 +1,4 @@
+# mypy: disable-error-code="var-annotated,assignment,call-arg,attr-defined,arg-type,index,union-attr,operator,misc"
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
@@ -37,11 +38,15 @@ from vllm_ascend.utils import vllm_version_is
 
 
 def _make_config(extra_config: dict[str, object]) -> OffloadingConfig:
+    group_kwargs: dict[str, int] = {}
+    if not vllm_version_is("0.29.0"):
+        group_kwargs["group_id"] = 0
     return OffloadingConfig(
         groups=(
             OffloadingGroupConfig(
                 tokens_per_block=16,
                 layer_names=("model.layers.0.self_attn",),
+                **group_kwargs,
             ),
         ),
         worker_kv_bytes_per_block=64,

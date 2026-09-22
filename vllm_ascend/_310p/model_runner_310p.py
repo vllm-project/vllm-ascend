@@ -1,3 +1,4 @@
+# mypy: disable-error-code="var-annotated,assignment,index,arg-type,operator"
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 #

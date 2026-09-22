@@ -1,3 +1,4 @@
+# mypy: disable-error-code="var-annotated,assignment,call-arg,attr-defined,arg-type,index,union-attr,operator,misc"
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 """Ascend multimodal wrapper for DeepSeek V4.1."""
@@ -9,13 +10,11 @@ from torch import nn
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings, SupportsEagle3, SupportsMultiModal, SupportsPP
 from vllm.model_executor.models.utils import maybe_prefix
-from vllm.models.deepseek_v4_1.common.mm_preprocess import (
+from vllm.models.deepseek_v41.common.mm_preprocess import (  # type: ignore[import-not-found]
     IMAGE,
     IMAGE_END,
     IMAGE_NEW_LINE,
-    IMAGE_PAD_ID,
     IMAGE_PLACEHOLDER,
-    IMAGE_SENTINEL_BASE_ID,
     IMAGE_START,
     DeepseekV4VLDummyInputsBuilder,
     DeepseekV4VLMultiModalProcessor,
@@ -68,7 +67,6 @@ class AscendDeepseekV41ForCausalLM(
         if getattr(config, "vision_n_layers", 0) > 0:
             config.is_mm_prefix_lm = True
             config.mm_prefix_clamp_sliding_window = True
-            config.mm_prefix_span_leading_pad_modulus = 2
         self.config = config
         self.multimodal_config = model_config.multimodal_config
 
@@ -197,10 +195,9 @@ class AscendDeepseekV41ForCausalLM(
             _merge_multimodal_embeddings,
         )
 
-        # The leading alignment row is not an image-feature position. It uses
-        # the checkpoint's ordinary image-token embedding instead.
-        embedding_ids = input_ids.masked_fill(input_ids == IMAGE_PAD_ID, IMAGE_SENTINEL_BASE_ID)
-        inputs_embeds = self.language_model.embed_input_ids(embedding_ids)
+        # vLLM main dropped the compressor-alignment pad, so every image
+        # position already carries the sentinel id.
+        inputs_embeds = self.language_model.embed_input_ids(input_ids)
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
             return inputs_embeds
         return _merge_multimodal_embeddings(

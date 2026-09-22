@@ -138,7 +138,13 @@ class NPUPlatform(Platform):
 
     @classmethod
     def is_pin_memory_available(cls):
-        return True
+        # No NPU device means pinned host memory cannot be allocated. Upstream
+        # buffer helpers now call ``Tensor.pin_memory()`` directly, which would
+        # otherwise raise ``RegisterPrivateUse1HooksInterface`` in CPU-only
+        # environments (e.g. unit tests).
+        import torch_npu  # noqa: F401
+
+        return torch.npu.is_available()
 
     @classmethod
     def opaque_attention_op(cls) -> bool:

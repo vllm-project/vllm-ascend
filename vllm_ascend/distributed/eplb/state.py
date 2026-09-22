@@ -13,6 +13,7 @@ from vllm.distributed import get_ep_group
 from vllm.distributed.eplb import eplb_state as _eplb_state
 
 from vllm_ascend.ops.fused_moe import eplb as _eplb_ops
+from vllm_ascend.utils import vllm_version_is
 
 ASYNC_EPLB_CYCLE_COMMITTED_LOG = "Ascend async EPLB cycle committed"
 
@@ -93,13 +94,13 @@ def refresh_model_routing_tables(
 class AscendEplbState(_eplb_state.EplbState):
     """Keep Ascend routing and load-recording state around upstream EPLB."""
 
-    cuda_device_index: int | None
-
     def __init__(self, parallel_config, device: torch.device) -> None:
         super().__init__(parallel_config, device)
         self._has_fresh_recorded_load = False
-        if self.cuda_device_index is None:
-            self.cuda_device_index = torch.accelerator.current_device_index()
+        # vLLM main renamed the upstream field cuda_device_index -> device_index.
+        device_index_attr = "cuda_device_index" if vllm_version_is("0.29.0") else "device_index"
+        if getattr(self, device_index_attr, None) is None:
+            setattr(self, device_index_attr, torch.accelerator.current_device_index())
 
     def _has_global_fresh_recorded_load(self) -> bool:
         """Synchronize whether any EP rank recorded load since rearranging."""

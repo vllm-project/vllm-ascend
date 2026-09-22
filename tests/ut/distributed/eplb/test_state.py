@@ -13,6 +13,7 @@ from vllm_ascend.distributed.eplb.state import (
     AscendEplbLayerState,
     AscendEplbState,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 def test_uses_upstream_policy_and_async_worker_lifecycle():
@@ -192,8 +193,13 @@ def test_from_mapping_requires_release_valid_expert_count(monkeypatch):
 def test_init_sets_cuda_device_index_for_npu(monkeypatch):
     parallel_config = MagicMock()
     monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 5)
+    # Release uses CpuGpuEvent(torch.cuda.Event); main switched it to torch.Event.
     monkeypatch.setattr(torch.cuda, "Event", torch.npu.Event)
+    monkeypatch.setattr(torch, "Event", torch.npu.Event)
 
     state = AscendEplbState(parallel_config, torch.device("cpu"))
 
-    assert state.cuda_device_index == 5
+    if vllm_version_is("0.29.0"):
+        assert state.cuda_device_index == 5
+    else:
+        assert state.device_index == 5

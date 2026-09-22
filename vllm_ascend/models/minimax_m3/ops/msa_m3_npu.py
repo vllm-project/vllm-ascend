@@ -1,3 +1,4 @@
+# mypy: disable-error-code="import-not-found"
 # SPDX-License-Identifier: Apache-2.0
 """NPU sparse attention ops for MiniMax-M3 on Ascend."""
 

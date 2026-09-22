@@ -969,6 +969,40 @@ def _reshape_mamba_kv_cache(
     return state_tensors
 
 
+class _KVCacheComponents(tuple):
+    """Per-layer Ascend KV cache components that expose ``device``.
+
+    vLLM main's ``GPUModelRunner.initialize_kv_cache`` filters the allocation
+    dict by ``cache.device`` before handing it to the connector. Ascend
+    allocates a component container per layer, so expose the device on the
+    container to keep that filter working without changing the layout.
+    """
+
+    __slots__ = ()
+
+    @property
+    def device(self) -> torch.device:
+        return self[0].device
+
+
+class _KVCacheComponentList(list):
+    """List-valued Ascend KV cache components that expose ``device``."""
+
+    @property
+    def device(self) -> torch.device:
+        return self[0].device
+
+
+def _with_kv_cache_device(value: Any) -> Any:
+    if isinstance(value, torch.Tensor):
+        return value
+    if isinstance(value, tuple):
+        return _KVCacheComponents(value)
+    if isinstance(value, list):
+        return _KVCacheComponentList(value)
+    return value
+
+
 def _reshape_kv_cache_v2(
     attn_groups: Sequence[AttentionGroup],
     kv_cache_raw_tensors: dict[str, torch.Tensor | tuple[torch.Tensor, torch.Tensor]],
@@ -1214,6 +1248,17 @@ def _reshape_kv_cache_v2(
 
     for layer_name, target_layer_name in shared_kv_cache_layers.items():
         kv_caches[layer_name] = kv_caches[target_layer_name]
+    # Attach `.device` to the component containers while preserving the identity
+    # of shared/aliased layer caches (upstream filters dict values by
+    # ``cache.device`` and the connector relies on the alias sharing).
+    original = list(kv_caches.items())
+    wrapped: dict[int, Any] = {}
+    for name, value in original:
+        cache = wrapped.get(id(value))
+        if cache is None:
+            cache = _with_kv_cache_device(value)
+            wrapped[id(value)] = cache
+        kv_caches[name] = cache
     return kv_caches
 
 
