@@ -5,7 +5,6 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from vllm_ascend import ascend_forward_context
 from vllm_ascend.ops.fused_moe import force_eplb
 
 
@@ -63,8 +62,8 @@ def test_get_force_eplb_topk_reuses_cached_table():
     moe_comm_method = _make_moe_comm_method()
     topk_ids = torch.empty((2, 2), dtype=torch.int32)
 
-    extras = SimpleNamespace(moe_comm_method=moe_comm_method)
-    with patch.object(ascend_forward_context, "_EXTRA_CTX", extras):
+    context = SimpleNamespace(moe_comm_method=moe_comm_method)
+    with patch.object(force_eplb, "get_forward_context", return_value=context):
         first = force_eplb.get_force_eplb_topk(topk_ids, num_logical_experts=8)
         second = force_eplb.get_force_eplb_topk(topk_ids, num_logical_experts=8)
 
@@ -77,19 +76,21 @@ def test_get_force_eplb_topk_passthrough_without_comm_method():
     # no-op path must return the original ids rather than None.
     topk_ids = torch.empty((2, 2))
 
-    extras = SimpleNamespace(moe_comm_method=None)
-    with patch.object(ascend_forward_context, "_EXTRA_CTX", extras):
+    context = SimpleNamespace(moe_comm_method=None)
+    with patch.object(force_eplb, "get_forward_context", return_value=context):
         result = force_eplb.get_force_eplb_topk(topk_ids, num_logical_experts=8)
 
     assert result is topk_ids
 
 
-def test_get_force_eplb_topk_passthrough_without_forward_context():
-    # Outside the model runner (e.g. unit tests) no forward context exists;
-    # the helper must degrade to a pass-through instead of raising.
+def test_get_force_eplb_topk_passthrough_without_comm_method_attribute():
+    # MRV2's forward context never carries ``moe_comm_method`` (force EPLB
+    # is not adapted there): a context object without the attribute must
+    # degrade to a pass-through instead of raising.
     topk_ids = torch.empty((2, 2))
 
-    result = force_eplb.get_force_eplb_topk(topk_ids, num_logical_experts=8)
+    with patch.object(force_eplb, "get_forward_context", return_value=SimpleNamespace()):
+        result = force_eplb.get_force_eplb_topk(topk_ids, num_logical_experts=8)
 
     assert result is topk_ids
 
