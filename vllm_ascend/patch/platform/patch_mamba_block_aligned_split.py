@@ -65,20 +65,14 @@ def _split_without_shared_prefix_junction(
     num_external_computed_tokens: int,
 ) -> int:
     """Apply upstream Mamba alignment without a shared-prefix chunk stop."""
-    start = (
-        request.num_computed_tokens
-        + num_new_local_computed_tokens
-        + num_external_computed_tokens
-    )
+    start = request.num_computed_tokens + num_new_local_computed_tokens + num_external_computed_tokens
     prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
     if start >= prefill_end:
         return num_new_tokens
 
     block_size = self.cache_config.block_size
     last_cache_position = request.num_tokens - request.num_tokens % block_size
-    if self.use_eagle and not _skips_eagle_block_drop(
-        getattr(self.vllm_config, "kv_transfer_config", None)
-    ):
+    if self.use_eagle and not _skips_eagle_block_drop(getattr(self.vllm_config, "kv_transfer_config", None)):
         last_cache_position = max(last_cache_position - block_size, 0)
 
     end = start + num_new_tokens
@@ -93,16 +87,12 @@ def _split_without_shared_prefix_junction(
 
     next_block_boundary = (start // block_size + 1) * block_size
     tail_boundary = (
-        request.num_prompt_tokens // self.hash_block_size * self.hash_block_size
-        if self.mamba_partial_cache_hit
-        else 0
+        request.num_prompt_tokens // self.hash_block_size * self.hash_block_size if self.mamba_partial_cache_hit else 0
     )
     stops = (
         next_block_boundary if start % block_size != 0 else 0,
         last_cache_position,
-        tail_boundary
-        if last_cache_position < tail_boundary < request.num_prompt_tokens
-        else 0,
+        tail_boundary if last_cache_position < tail_boundary < request.num_prompt_tokens else 0,
     )
     end = min((stop for stop in stops if start < stop < end), default=end)
     return max(end - start, 0)

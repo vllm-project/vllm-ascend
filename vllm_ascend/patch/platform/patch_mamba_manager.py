@@ -7,6 +7,7 @@
 from collections.abc import Sequence
 
 import vllm.v1.core.single_type_kv_cache_manager as single_type_kv_cache_manager
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.single_type_kv_cache_manager import (
     BlockHashList,
     BlockPool,
@@ -16,7 +17,6 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     MambaSpec,
     SingleTypeKVCacheManager,
 )
-from vllm.utils.math_utils import cdiv
 
 
 def _allocate_new_blocks_after_growing_request(
@@ -46,11 +46,7 @@ def _allocate_new_blocks_after_growing_request(
     cow_blocks: list[KVCacheBlock] = []
     if partial_hit_info is not None:
         block_idx, source_block = partial_hit_info
-        if (
-            block_idx < len(req_blocks)
-            and req_blocks[block_idx] is source_block
-            and not source_block.is_null
-        ):
+        if block_idx < len(req_blocks) and req_blocks[block_idx] is source_block and not source_block.is_null:
             cow_block = self.block_pool.get_new_blocks(1)[0]
             self._apply_cow(request_id, block_idx, source_block, cow_block)
             self.new_block_ids.append(cow_block.block_id)
@@ -175,7 +171,5 @@ class AscendMambaManager(MambaManager):
         return num_new_blocks
 
 
-SingleTypeKVCacheManager.allocate_new_blocks = (
-    _allocate_new_blocks_after_growing_request
-)
+SingleTypeKVCacheManager.allocate_new_blocks = _allocate_new_blocks_after_growing_request
 single_type_kv_cache_manager.MambaManager = AscendMambaManager
