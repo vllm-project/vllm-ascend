@@ -31,7 +31,6 @@ from vllm.v1.metrics.reader import Counter, Vector
 from tests.e2e.conftest import DPVllmRunner, VllmRunner, wait_until_npu_memory_free
 from tests.e2e.pull_request.one_card.model_runner_v2.utils import calculate_acceptance_per_pos
 from tests.e2e.pull_request.utils import run_pd_disaggregation
-from vllm_ascend.utils import vllm_version_is
 
 MAX_NUM_SEQS = 4
 FULL_DECODE_GRAPH = {
@@ -274,10 +273,6 @@ DSV3_2_SFA_PCP_PP_MTP_CASE = InferenceCase(
 
 
 @pytest.mark.e2e_model(DSV3_2_MODEL)
-@pytest.mark.skipif(
-    vllm_version_is("0.28.0"),
-    reason="Temporary v0.28.0 SFA PCP accuracy skip; root cause is under separate investigation (PR #16009).",
-)
 @pytest.mark.e2e_coverage(
     arch="moe",
     feature="sfa_pcp",

@@ -1,3 +1,4 @@
+from copy import copy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
 
@@ -20,6 +21,7 @@ from vllm.v1.attention.backend import (
     MLAAttentionImpl,
 )
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
+from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -57,15 +59,10 @@ from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_NZ,
     is_pd_decode_recompute_scheduler_enabled,
     maybe_trans_nz,
-    vllm_version_is,
     weak_ref_tensors,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
-if vllm_version_is("0.28.0"):
-    from vllm.model_executor.layers.attention.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
-else:
-    from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -745,6 +742,14 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             nope_zero_rope_cache=self.nope_zero_rope_cache,
         )
         return decode_metadata
+
+    def build_for_cudagraph_capture(self, common_attn_metadata: AscendCommonAttentionMetadata):
+        capture_metadata = copy(common_attn_metadata)
+        if capture_metadata.attn_state is None:
+            capture_metadata.attn_state = AscendAttentionState.ChunkedPrefill
+        if self.dcp_enabled and capture_metadata.is_prefilling is None:
+            capture_metadata.is_prefilling = torch.zeros(capture_metadata.num_reqs, dtype=torch.bool)
+        return super().build_for_cudagraph_capture(capture_metadata)
 
     def build_for_graph_capture(
         self,
