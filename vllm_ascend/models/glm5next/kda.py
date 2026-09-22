@@ -28,6 +28,7 @@ from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 from vllm_ascend.models.glm5next.config import Glm5NextConfig
+from vllm_ascend.models.glm5next.kda_projection import KDAFGProjection
 from vllm_ascend.models.glm5next.ops.causal_conv1d import causal_conv1d
 from vllm_ascend.models.glm5next.ops.kda import KDA_MAX_RECURRENT_TOKENS, chunk_kda, recurrent_kda
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
@@ -181,12 +182,12 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             prefix=f"{prefix}.in_proj_qkvbfg_a",
         )
 
-        self.f_b_proj = ColumnParallelLinear(
+        self.fg_b_proj = KDAFGProjection(
             self.head_dim,
             projection_size,
-            bias=False,
+            self.local_projection_size,
             quant_config=self.quant_config,
-            prefix=f"{prefix}.f_b_proj",
+            prefix=f"{prefix}.fg_b_proj",
         )
         self.dt_bias = nn.Parameter(torch.empty(divide(projection_size, self.tp_size), dtype=torch.float32))
 
@@ -227,13 +228,6 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         self.A_log = nn.Parameter(torch.empty(1, 1, self.local_num_heads, 1, dtype=torch.float32))
         set_weight_attrs(self.A_log, {"weight_loader": sharded_weight_loader(2)})
 
-        self.g_b_proj = ColumnParallelLinear(
-            self.head_dim,
-            projection_size,
-            bias=False,
-            quant_config=self.quant_config,
-            prefix=f"{prefix}.g_b_proj",
-        )
         self.o_norm = FusedRMSNormGated(self.head_dim, activation="sigmoid")
         self.o_proj = RowParallelLinear(
             projection_size,
@@ -274,12 +268,11 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         num_tokens = hidden_states.size(0)
         # One merged GEMM for q, k, v, b, f_a, g_a (replaces 6 separate GEMMs).
         projected = self.in_proj_qkvbfg_a(hidden_states)[0]
-        qkv, beta_raw, f_a, g_a = projected.split(
+        qkv, beta_raw, fg_a = projected.split(
             [
                 3 * self.local_projection_size,
                 self.local_num_heads,
-                self.head_dim,
-                self.head_dim,
+                2 * self.head_dim,
             ],
             dim=-1,
         )
@@ -290,10 +283,9 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # / spec-verify steps then skip the separate sigmoid and its fp32
         # intermediate entirely.
         beta = beta_raw.unsqueeze(0)
-        g1 = self.f_b_proj(f_a)[0]
+        g1, g_proj_states = self.fg_b_proj(fg_a)
         g1 = g1.reshape(1, -1, self.local_num_heads, self.head_dim)
 
-        g_proj_states = self.g_b_proj(g_a)[0]
         # Must stay 3D: rms_norm_gated reads H from g.shape[-2].
         g2 = g_proj_states.reshape(-1, self.local_num_heads, self.head_dim)
 
