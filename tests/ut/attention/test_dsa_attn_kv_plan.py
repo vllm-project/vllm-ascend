@@ -48,16 +48,15 @@ def _cache_config(cache_dtype: str = "auto"):
 
 
 def _on(device_type):
-    return mock.patch.multiple(
-        "vllm_ascend.attention.dsa_attn_kv_plan",
-        get_current_hardware_profile=MagicMock(return_value=get_hardware_profile(device_type)),
-        get_ascend_device_type=MagicMock(return_value=device_type),
+    return mock.patch(
+        "vllm_ascend.attention.dsa_attn_kv_plan.get_current_hardware_profile",
+        return_value=get_hardware_profile(device_type),
     )
 
 
 def test_get_dsa_attn_kv_plan_requires_vllm_config():
     with pytest.raises(TypeError):
-        get_dsa_attn_kv_plan()
+        get_dsa_attn_kv_plan()  # type: ignore[call-arg]
 
 
 def test_a5_fp8_plan_uses_flat_shared_kv():
@@ -71,6 +70,7 @@ def test_a5_bf16_plan_uses_sparse_flash_mla():
     with _on(AscendDeviceType.A5):
         plan = get_dsa_attn_kv_plan(_config(True))
         assert plan.get_dsa_sparse_attn_op() is sparse_flash_mla
+        assert plan.get_dsa_sparse_attn_metadata_op() is sparse_flash_mla_metadata
         assert plan.get_dsa_compressor_slot_mapping_format() == DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET
         torch.testing.assert_close(
             plan.format_dsa_slot_mapping(torch.tensor([5, -1], dtype=torch.int32), 128),
@@ -78,22 +78,18 @@ def test_a5_bf16_plan_uses_sparse_flash_mla():
         )
 
 
-def test_a3_plan_uses_cann_sparse_flash_mla():
-    with _on(AscendDeviceType.A3):
+@pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3])
+def test_a2_a3_plan_retains_custom_shared_kv(device_type):
+    with _on(device_type):
         plan = get_dsa_attn_kv_plan(_config(True))
-        assert plan.get_dsa_sparse_attn_op() is sparse_flash_mla
-        assert plan.get_dsa_sparse_attn_metadata_op() is sparse_flash_mla_metadata
+        assert plan.get_dsa_sparse_attn_op() is torch.ops._C_ascend.npu_sparse_attn_sharedkv
+        assert plan.get_dsa_sparse_attn_metadata_op() is torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata
+        assert not plan.uses_sparse_flash_mla
+        assert plan.layout_kv == "PA_ND"
         assert plan.get_dsa_compressor_slot_mapping_format() == DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET
         kwargs: dict[str, Any] = {}
         plan.add_dsa_sparse_attn_extra_kwargs(kwargs, cu_seqlens_ori_kv=torch.tensor([0, 1]))
         assert "cu_seqlens_ori_kv" in kwargs
-
-
-def test_a2_plan_retains_custom_shared_kv():
-    with _on(AscendDeviceType.A2):
-        plan = get_dsa_attn_kv_plan(_config(True))
-        assert plan.get_dsa_sparse_attn_op() is torch.ops._C_ascend.npu_sparse_attn_sharedkv
-        assert plan.get_dsa_sparse_attn_metadata_op() is torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata
 
 
 def test_scatter_skips_none_updates():
@@ -107,7 +103,7 @@ def test_scatter_skips_none_updates():
 
 def test_is_a5_bf16_kv_enabled_requires_vllm_config():
     with _on(AscendDeviceType.A5), pytest.raises(TypeError):
-        is_a5_bf16_kv_enabled()
+        is_a5_bf16_kv_enabled()  # type: ignore[call-arg]
 
 
 def test_only_explicit_bfloat16_selects_bf16_kv_on_a5():
