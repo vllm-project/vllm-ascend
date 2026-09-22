@@ -23,8 +23,8 @@ import numpy as np
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_pcp_group, get_pp_group
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.gpu.states import RequestState
 
@@ -69,18 +69,32 @@ class AscendPCPManager(PCPManager):
         dcp_rank: int = 0,
         cp_interleave: int = 1,
     ) -> None:
-        super().__init__(
-            pcp_world_size=pcp_world_size,
-            pcp_rank=pcp_rank,
-            device=device,
-            req_states=req_states,
-            max_num_reqs=max_num_reqs,
-            max_num_tokens=max_num_tokens,
-            block_tables=block_tables,
-            dcp_world_size=dcp_world_size,
-            dcp_rank=dcp_rank,
-            cp_interleave=cp_interleave,
-        )
+        if vllm_version_is("0.29.0"):
+            super().__init__(  # type: ignore[call-arg]
+                pcp_world_size=pcp_world_size,
+                pcp_rank=pcp_rank,
+                device=device,
+                req_states=req_states,
+                max_num_reqs=max_num_reqs,
+                max_num_tokens=max_num_tokens,
+                block_tables=block_tables,
+                dcp_world_size=dcp_world_size,
+                dcp_rank=dcp_rank,
+                cp_interleave=cp_interleave,
+            )
+        else:
+            # Upstream PCPManager no longer takes a RequestState.
+            super().__init__(
+                pcp_world_size=pcp_world_size,
+                pcp_rank=pcp_rank,
+                device=device,
+                max_num_reqs=max_num_reqs,
+                max_num_tokens=max_num_tokens,
+                block_tables=block_tables,
+                dcp_world_size=dcp_world_size,
+                dcp_rank=dcp_rank,
+                cp_interleave=cp_interleave,
+            )
 
         # PCP supplies its own output buffers to compute_slot_mappings, so their
         # dtype must match Ascend block-table slots for cache-write operators.
@@ -271,15 +285,22 @@ class AscendPCPManager(PCPManager):
         self,
         input_batch: AscendInputBatch,
         padded_num_tokens: int | None = None,
+        padded_num_reqs: int | None = None,
     ) -> AscendInputBatch:
         """Partition the batch and update Ascend-specific local metadata."""
         global_batch = input_batch
         if global_batch.num_draft_tokens > 0:
             local_batch = self._partition_speculative_batch_compat(global_batch)
+        elif vllm_version_is("0.29.0") or padded_num_reqs is None:
+            local_batch = super().partition_batch(
+                global_batch,
+                padded_num_tokens=padded_num_tokens,
+            )
         else:
             local_batch = super().partition_batch(
                 global_batch,
                 padded_num_tokens=padded_num_tokens,
+                padded_num_reqs=padded_num_reqs,  # type: ignore[call-arg]
             )
         assert isinstance(local_batch, AscendInputBatch)
 
@@ -323,10 +344,8 @@ class AscendPCPManager(PCPManager):
             # FULL-graph query layout is also the authoritative rank-local
             # layout, including any FIA dummy request.
             graph_query_start_loc_np = global_batch.query_start_loc_np[: graph_num_reqs + 1]
-            async_copy_to_gpu(
-                graph_query_start_loc_np,
-                out=input_buffers.query_start_loc[: graph_num_reqs + 1],
-            )
+            query_start_loc_out = input_buffers.query_start_loc[: graph_num_reqs + 1]
+            query_start_loc_out.copy_(async_tensor_h2d(graph_query_start_loc_np, device=query_start_loc_out.device))
 
             # Graph padding has no RankSegment, so _build_batch_layout does
             # not initialize the corresponding hidden restore indices.

@@ -1,3 +1,4 @@
+# mypy: disable-error-code="attr-defined,list-item,method-assign"
 import math
 import os
 import queue
@@ -65,6 +66,30 @@ patch(
 patch("vllm.distributed.parallel_state._DCP", _mock_dcp_group).start()
 # Do not permanently patch torch.npu.set_device here — the executor-binding
 # tests need to install a side_effect on the live set_device callable.
+
+
+def _restart_group_mocks(testcase: unittest.TestCase) -> None:
+    """Re-apply the PP/TP/PCP mocks against the live connector module.
+
+    The module-level patches above only bind the module object imported during
+    collection. Tests that construct a ``KVCacheSendingThread`` directly can
+    later observe the real ``get_pp_group`` once that module has been re-imported
+    (or once another test module stops the global patches), so re-apply the mocks
+    against the currently registered module and undo them per test.
+    """
+    group_mocks = (
+        ("get_pp_group", _mock_pp_group),
+        ("get_tp_group", _mock_tp_group),
+        ("get_tensor_model_parallel_world_size", 4),
+        ("get_tensor_model_parallel_rank", 0),
+        ("get_pcp_group", _mock_pcp_group),
+    )
+    for name, new in group_mocks:
+        target = f"vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.{name}"
+        patcher = patch(target, return_value=new)
+        patcher.start()
+        testcase.addCleanup(patcher.stop)
+
 
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec  # noqa: E402
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (  # noqa: E402
@@ -170,6 +195,7 @@ class TestGetAndClearFinishedSingleRequests(unittest.TestCase):
 
 class TestKVCacheSendingThreadInit(unittest.TestCase):
     def setUp(self):
+        _restart_group_mocks(self)
         kv_caches: dict[str, Any] = {}
         self.common_args: dict[str, Any] = {
             "tp_rank": 1,
@@ -213,6 +239,7 @@ class TestKVCacheSendingThreadInit(unittest.TestCase):
 
 class TestGetAndClearFinishedRequests(unittest.TestCase):
     def setUp(self):
+        _restart_group_mocks(self)
         kv_caches: dict[str, Any] = {}
         self.common_args: dict[str, Any] = {
             "tp_rank": 1,
@@ -238,6 +265,9 @@ class TestGetAndClearFinishedRequests(unittest.TestCase):
 
 
 class TestKVCacheSendingThread(unittest.TestCase):
+    def setUp(self):
+        _restart_group_mocks(self)
+
     def test_run_handles_get_meta_and_done_recv_msgs(self):
         ready_event = threading.Event()
         metadata = make_agent_metadata(
@@ -1785,6 +1815,7 @@ class MockVllmConfig:
             "decode": {"tp_size": 2, "dp_size": 1, "pp_size": 1},
         }.get(k, d)
         self.additional_config = {}
+        self.attention_config = types.SimpleNamespace(hisparse_config=None)
 
 
 class MockRequest:

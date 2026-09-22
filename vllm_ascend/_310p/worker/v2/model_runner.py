@@ -606,6 +606,7 @@ class NPUModelRunner310V2(NPUModelRunner):
         scheduler_output: SchedulerOutput,
         batch_req_state: BatchReqState,
         batch_desc: BatchExecutionDescriptor,
+        num_active_loras: int = 0,
     ) -> Ascend310PInputBatch:
         del batch_req_state
         return self._prepare_inputs_310p(scheduler_output, batch_desc)

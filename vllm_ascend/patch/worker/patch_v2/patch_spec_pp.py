@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
-from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
+from vllm.utils.torch_utils import async_tensor_h2d
 
 _INSTALLED = "_vllm_ascend_upstream_spec_pp_installed"
 
@@ -141,7 +141,7 @@ def install_upstream_spec_pp_protocol(pp_handler, req_states, num_speculative_st
             if exclude_mask.all():
                 return None
             idx_mapping_np = np.where(exclude_mask, -1, slot.idx_mapping_np)
-            idx_mapping = async_copy_to_gpu(idx_mapping_np, device=device)
+            idx_mapping = async_tensor_h2d(idx_mapping_np, device=device)
 
         pp_handler.main_stream.wait_event(slot.event)
         if draft_tokens_to_update is None:
@@ -153,7 +153,7 @@ def install_upstream_spec_pp_protocol(pp_handler, req_states, num_speculative_st
                 keep = ~exclude_mask
                 keep_t = torch.as_tensor(keep, device=device)
                 draft_tokens = draft_tokens[keep_t]
-                draft_idx_mapping = async_copy_to_gpu(slot.idx_mapping_np[keep], device=device)
+                draft_idx_mapping = async_tensor_h2d(slot.idx_mapping_np[keep], device=device)
             draft_tokens_to_update[draft_idx_mapping] = draft_tokens
 
         return dict(

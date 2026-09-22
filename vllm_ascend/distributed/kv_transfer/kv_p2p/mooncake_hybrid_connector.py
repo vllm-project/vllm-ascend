@@ -2127,7 +2127,7 @@ class MooncakeConnectorWorker:
         seed = string_to_int64_hash(req_id)
         rand = random.Random(seed)
         # random split prefill tp list
-        ori_data = ori_data.reshape(self._prefill_pp_size, -1)
+        ori_data = ori_data.reshape(self._prefill_pp_size, -1)  # type: ignore[assignment]
         num_groups = max(
             1, len(ori_data[0]) // num_kv_head
         )  # The number of redundant copies for each KV head within the PP stage

@@ -7,7 +7,19 @@ import numpy as np
 import torch
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor, UvaBuffer
 
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.states import AscendRequestState
+
+
+def _uva_device_view(buffer: UvaBuffer) -> torch.Tensor:
+    """Read the device view from a vLLM/Ascend ``UvaBuffer`` on either lane.
+
+    Upstream main exposes ``UvaBuffer.uva(n)`` as a method; the pinned 0.29.0
+    lane exposes it as a tensor attribute.
+    """
+    if vllm_version_is("0.29.0"):
+        return buffer.uva  # type: ignore[return-value]
+    return buffer.uva()  # type: ignore[operator]
 
 
 class Ascend310PStagedWriteTensor:
@@ -33,7 +45,7 @@ class Ascend310PStagedWriteTensor:
             self._uva_buffer = UvaBuffer(size, dtype)
             self.cpu = self._uva_buffer.cpu
             self.np = self._uva_buffer.np
-            self.gpu = self._uva_buffer.uva
+            self.gpu = _uva_device_view(self._uva_buffer)
         else:
             self.cpu = torch.zeros(size, dtype=dtype, device="cpu")
             self.np = self.cpu.numpy()
@@ -58,7 +70,7 @@ class Ascend310PStagedWriteTensor:
         if not self._dirty_indices:
             return
         if self.uva_instead_of_gpu:
-            self.gpu = self._uva_buffer.uva
+            self.gpu = _uva_device_view(self._uva_buffer)
             self._dirty_indices.clear()
             return
         # Small request vectors favor one bulk H2D.

@@ -39,6 +39,7 @@ from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_next_pool_bytes_per_block,
 )
 from vllm_ascend.models.glm5next.kv_cache import is_glm5_next_cache_spec
+from vllm_ascend.utils import vllm_version_is
 
 _KIMI_K3_TARGET_LAYER_PREFIX = "language_model.model.layers."
 _KIMI_K3_DRAFT_LAYER_PREFIX = "model.layers."
@@ -390,12 +391,22 @@ def _ascend_get_packed_kv_cache_groups(
             assert _orig_get_packed_kv_cache_groups is not None
             return _orig_get_packed_kv_cache_groups(vllm_config, kv_cache_spec)
         groups = _get_kv_cache_groups_uniform_groups(grouped_specs)
-    vllm.v1.core.kv_cache_utils._annotate_eagle_groups(
-        vllm_config,
-        kv_cache_spec,
-        groups,
-        use_deepseek_v4_fallback=True,
-    )
+    if vllm_version_is("0.29.0"):
+        vllm.v1.core.kv_cache_utils._annotate_eagle_groups(
+            vllm_config,
+            kv_cache_spec,
+            groups,
+            use_deepseek_v4_fallback=True,  # type: ignore[call-arg]
+        )
+    else:
+        # vLLM main renamed the flag and re-checks the exact layer partition
+        # internally; Ascend still forces the fallback for its DSV4 packed groups.
+        vllm.v1.core.kv_cache_utils._annotate_eagle_groups(
+            vllm_config,
+            kv_cache_spec,
+            groups,
+            use_trailing_layer_fallback=True,  # type: ignore[call-arg]
+        )
     vllm.v1.core.kv_cache_utils._warn_if_unannotated_eagle_mamba(
         vllm_config,
         groups,

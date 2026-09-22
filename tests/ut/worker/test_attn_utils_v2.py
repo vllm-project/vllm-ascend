@@ -42,6 +42,7 @@ from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_model
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _get_kv_cache_config_deepseek_v4_main,
 )
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
@@ -67,7 +68,7 @@ def _make_dsv4_mla_spec(block_size: int, compress_ratio: int) -> AscendMLAAttent
         head_size=128,
         dtype=torch.bfloat16,
         model_version="deepseek_v4",
-        **ratio_kwargs,
+        **ratio_kwargs,  # type: ignore[arg-type]
     )
 
 
@@ -367,7 +368,7 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
     )
     vllm_config = SimpleNamespace(
         additional_config={},
-        attention_config=SimpleNamespace(indexer_kv_dtype="int8"),
+        attention_config=SimpleNamespace(indexer_kv_dtype="int8", hisparse_config=None),
         model_config=SimpleNamespace(
             hf_config=SimpleNamespace(
                 compress_ratios=[4],
@@ -494,20 +495,45 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
         for layer_name_, kv_cache in kv_caches.items():
             forward_context[layer_name_].kv_cache = kv_cache
 
+    def _ascend_bind_kv_cache_to_layers(
+        kv_caches: dict[str, Any],
+        forward_context: dict[str, Any],
+        num_attn_module: int = 1,
+        kv_cache_groups: Any = None,
+    ) -> None:
+        del num_attn_module, kv_cache_groups
+        for layer_name_, kv_cache in kv_caches.items():
+            forward_context[layer_name_].kv_cache = kv_cache
+
     monkeypatch.setattr(upstream_attn_utils, "allocate_kv_cache", _ascend_allocate_kv_cache)
-    monkeypatch.setattr(upstream_attn_utils, "bind_kv_cache", _ascend_bind_kv_cache)
-    kv_caches = upstream_attn_utils.init_kv_cache(
-        runner_kv_caches=runner_kv_caches,
-        forward_context={layer_name: cache_layer},
-        kv_cache_config=kv_cache_config,
-        device=torch.device("cpu"),
-        kernel_block_sizes=[spec.block_size],
-        vllm_config=vllm_config,
-    )
+    if vllm_version_is("0.29.0"):
+        monkeypatch.setattr(upstream_attn_utils, "bind_kv_cache", _ascend_bind_kv_cache)
+        kv_caches = upstream_attn_utils.init_kv_cache(
+            runner_kv_caches=runner_kv_caches,  # type: ignore[call-arg]
+            forward_context={layer_name: cache_layer},
+            kv_cache_config=kv_cache_config,
+            device=torch.device("cpu"),
+            kernel_block_sizes=[spec.block_size],
+            vllm_config=vllm_config,
+        )
+    else:
+        monkeypatch.setattr(
+            upstream_attn_utils,
+            "bind_kv_cache_to_layers",
+            _ascend_bind_kv_cache_to_layers,
+        )
+        kv_caches = upstream_attn_utils.init_kv_cache(  # type: ignore[call-arg]
+            forward_context={layer_name: cache_layer},
+            kv_cache_config=kv_cache_config,
+            device=torch.device("cpu"),
+            kernel_block_sizes=[spec.block_size],
+            vllm_config=vllm_config,
+        )
 
     cache_components = kv_caches[layer_name]
-    assert len(runner_kv_caches) == 1
-    assert runner_kv_caches[0] is cache_components
+    if vllm_version_is("0.29.0"):
+        assert len(runner_kv_caches) == 1
+        assert runner_kv_caches[0] is cache_components
     # On main the layer cache is replaced by the freshly allocated views, so
     # the returned structure is validated by the checks below instead.
     assert [component.shape for component in cache_components] == [
@@ -729,7 +755,7 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
                 prefill_context_parallel_size=pcp_size,
             ),
         )
-        model_state.pcp_manager = pcp_manager
+        model_state.pcp_manager = pcp_manager  # type: ignore[assignment]
         input_batch = SimpleNamespace(
             num_reqs=2,
             num_reqs_after_padding=4,
@@ -746,7 +772,7 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
             attn_state=None,
         )
         metadata = model_state.prepare_attn(
-            input_batch=input_batch,
+            input_batch=input_batch,  # type: ignore[arg-type]
             cudagraph_mode=cudagraph_mode,
             block_tables=block_tables,
             slot_mappings=slot_mappings,
@@ -830,7 +856,7 @@ def test_mrv2_allocates_and_reshapes_hidden_state_cache(monkeypatch):
 
     raw = attn_utils._allocate_kv_cache(kv_cache_config, shared_layers={}, device="cpu")
     assert isinstance(raw[layer_name], torch.Tensor)
-    assert raw[layer_name].numel() == tensor_size
+    assert raw[layer_name].numel() == tensor_size  # type: ignore[union-attr]
 
     attn_groups = [
         AttentionGroup(
@@ -902,7 +928,7 @@ def test_build_attn_metadata_propagates_prefill_and_pcp_context(monkeypatch, for
         slot_mappings=(torch.zeros(1, dtype=torch.int64),),
         kv_cache_config=kv_cache_config,
         is_prefilling=is_prefilling,
-        pcp_context=pcp_context,
+        pcp_context=pcp_context,  # type: ignore[arg-type]
         seq_lens_np=np.array([1], dtype=np.int32),
         positions=torch.tensor([0], dtype=torch.int64),
         for_cudagraph_capture=for_cudagraph_capture,

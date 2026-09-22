@@ -154,7 +154,7 @@ def test_preempt_offload_connector_capacity_priority():
 def test_preempt_offload_connector_scheduler_get_num_new_matched_tokens_states():
     scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
     scheduler._preempted_req_states = {}
-    scheduler._cleanup_preempt_cache_request = MagicMock()
+    scheduler._cleanup_preempt_cache_request = MagicMock()  # type: ignore[method-assign]
     request = SimpleNamespace(request_id="req-1", num_tokens=10)
 
     assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
@@ -178,7 +178,7 @@ def test_preempt_offload_connector_scheduler_get_num_new_matched_tokens_states()
 
 def test_preempt_offload_connector_scheduler_update_state_after_alloc_errors():
     scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
-    scheduler._prepare_preempt_load_after_alloc = MagicMock(return_value=False)
+    scheduler._prepare_preempt_load_after_alloc = MagicMock(return_value=False)  # type: ignore[method-assign]
     request = SimpleNamespace(request_id="req-1")
     blocks = MagicMock()
     blocks.get_block_ids.return_value = ([1, 2],)
@@ -483,7 +483,7 @@ def test_preempt_offload_connector_scheduler_update_connector_output_marks_store
     scheduler._expected_worker_count = 2
     scheduler._store_event_pending_counts = {}
     scheduler._preempted_req_states = {}
-    scheduler._process_preempt_store_event = MagicMock()
+    scheduler._process_preempt_store_event = MagicMock()  # type: ignore[method-assign]
     output = KVConnectorOutput(
         finished_recving=set(),
         kv_connector_worker_meta=PreemptOffloadWorkerMetadata(completed_store_events={5: 1}),
@@ -526,7 +526,7 @@ def test_preempt_offload_connector_scheduler_request_finished_ready_and_pending(
             ready=True,
         ),
     }
-    scheduler._cleanup_preempt_cache_request = MagicMock()
+    scheduler._cleanup_preempt_cache_request = MagicMock()  # type: ignore[method-assign]
 
     assert scheduler.request_finished(SimpleNamespace(request_id="ready"), []) == (
         False,
@@ -557,7 +557,7 @@ def test_preempt_offload_connector_scheduler_process_store_event_finishes_pendin
             finished=True,
         )
     }
-    scheduler._cleanup_preempt_cache_request = MagicMock()
+    scheduler._cleanup_preempt_cache_request = MagicMock()  # type: ignore[method-assign]
 
     scheduler._process_preempt_store_event(7)
 
@@ -585,12 +585,12 @@ def test_preempt_offload_connector_scheduler_pending_and_reset_cache_paths():
     assert scheduler.has_pending_transfers() is True
 
     scheduler._preempted_req_states.clear()
-    scheduler._preempt_store_event_to_reqs = {"unused": []}
+    scheduler._preempt_store_event_to_reqs = {"unused": []}  # type: ignore[dict-item]
     scheduler._preempt_load_event_to_reqs = {1: ["req-1"]}
     scheduler._pending_hash_blocks = {"hash": MagicMock()}
     scheduler.cpu_block_pool = MagicMock()
     scheduler.cpu_block_pool.reset_prefix_cache.return_value = True
-    scheduler._cleanup_preempt_cache_request = MagicMock()
+    scheduler._cleanup_preempt_cache_request = MagicMock()  # type: ignore[method-assign]
 
     assert scheduler.reset_cache() is True
     scheduler.cpu_block_pool.reset_prefix_cache.assert_called_once_with()
@@ -617,7 +617,7 @@ def test_preempt_offload_connector_scheduler_cleanup_preempt_load_request():
         blocks={10: "gpu10", 11: "gpu11"},
         free_blocks=MagicMock(),
     )
-    scheduler._cleanup_preempt_cache_request = MagicMock()
+    scheduler._cleanup_preempt_cache_request = MagicMock()  # type: ignore[method-assign]
 
     scheduler._cleanup_preempt_load_request("req-1")
 
@@ -680,8 +680,8 @@ def test_preempt_offload_connector_worker_metadata_and_empty_transfers():
 
 def test_preempt_offload_connector_worker_preempt_and_load_entrypoints():
     worker = PreemptOffloadWorker.__new__(PreemptOffloadWorker)
-    worker._submit_transfer = MagicMock()
-    worker._flush_and_sync_all = MagicMock()
+    worker._submit_transfer = MagicMock()  # type: ignore[method-assign]
+    worker._flush_and_sync_all = MagicMock()  # type: ignore[method-assign]
     worker._connector_metadata = None
     metadata = PreemptOffloadMetadata(
         need_flush=True,
@@ -744,6 +744,7 @@ def test_recompute_scheduler_remote_kv_restore_keeps_exact_token_position():
     scheduler.failed_recving_kv_req_ids = set()
     scheduler.finished_recving_kv_req_ids = {"req-1"}
     scheduler.kv_cache_manager = MagicMock()
+    scheduler.prefix_replay_tokens = 0
 
     request = SimpleNamespace(
         request_id="req-1",
@@ -767,10 +768,12 @@ def test_recompute_scheduler_remote_kv_restore_frees_failed_empty_load():
     scheduler.failed_recving_kv_req_ids = {"req-1"}
     scheduler.finished_recving_kv_req_ids = {"req-1"}
     scheduler.kv_cache_manager = MagicMock()
+    scheduler.prefix_replay_tokens = 0
 
     request = SimpleNamespace(
         request_id="req-1",
         num_computed_tokens=0,
+        num_tokens=0,
     )
 
     scheduler._update_waiting_for_remote_kv(request)

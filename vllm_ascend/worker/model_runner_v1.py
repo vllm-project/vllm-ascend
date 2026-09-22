@@ -93,8 +93,6 @@ from vllm.v1.outputs import (
     LogprobsLists,
     LogprobsTensors,
     ModelRunnerOutput,
-    RoutedExpertsLists,
-    RoutedExpertsTensors,
     SamplerOutput,
     make_empty_encoder_model_runner_output,
 )
@@ -205,6 +203,13 @@ from vllm_ascend.utils import (
     weak_ref_tensor,
     weak_ref_tensors,
 )
+
+if vllm_version_is("0.29.0"):
+    from vllm.v1.outputs import (  # type: ignore[import-not-found]
+        RoutedExpertsLists,  # type: ignore[attr-defined, import-not-found]
+        RoutedExpertsTensors,  # type: ignore[attr-defined, import-not-found]
+    )
+
 from vllm_ascend.worker.dcp_utils import (
     DCPAsyncSpecDecodeRebuildResult,
     DCPDummyRunMetadata,
@@ -1351,12 +1356,12 @@ class NPUModelRunner(GPUModelRunner):
 
                 # Skip if this request doesn't have embeddings
                 if req_idx not in self.input_batch.req_prompt_embeds:
-                    output_idx += num_sched
+                    output_idx += num_sched  # type: ignore[assignment]
                     continue
 
                 # Skip if no tokens scheduled
                 if num_sched <= 0:
-                    output_idx += num_sched
+                    output_idx += num_sched  # type: ignore[assignment]
                     continue
 
                 req_embeds = self.input_batch.req_prompt_embeds[req_idx]
@@ -1364,7 +1369,7 @@ class NPUModelRunner(GPUModelRunner):
 
                 # Skip if trying to read beyond available embeddings
                 if start_pos >= req_embeds.shape[0]:
-                    output_idx += num_sched
+                    output_idx += num_sched  # type: ignore[assignment]
                     continue
 
                 # Copy available embeddings
@@ -1377,7 +1382,7 @@ class NPUModelRunner(GPUModelRunner):
                         req_embeds[start_pos:actual_end]
                     )
 
-                output_idx += num_sched
+                output_idx += num_sched  # type: ignore[assignment]
 
         self.query_start_loc.np[0] = 0
         self.query_start_loc.np[1 : num_reqs + 1] = cu_num_tokens
@@ -1612,7 +1617,7 @@ class NPUModelRunner(GPUModelRunner):
             ) in scheduler_output.scheduled_spec_decode_tokens.items():
                 req_idx = self.input_batch.req_id_to_index[req_id]
                 draft_len = len(draft_token_ids)
-                num_draft_tokens[req_idx] = draft_len
+                num_draft_tokens[req_idx] = draft_len  # type: ignore[index]
                 if (self.is_kv_consumer and req_id in new_schedule_reqs) or \
                    (self.input_batch.num_computed_tokens_cpu[req_idx] >= \
                     self.input_batch.num_prompt_tokens[req_idx]):
@@ -1621,11 +1626,11 @@ class NPUModelRunner(GPUModelRunner):
                     num_decode_draft_tokens[req_idx] = -1
 
             spec_decode_metadata = self._calc_spec_decode_metadata(
-                num_draft_tokens,
+                num_draft_tokens,  # type: ignore[arg-type]
                 cu_num_tokens,
             )
             logits_indices = spec_decode_metadata.logits_indices
-            num_sampled_tokens = num_draft_tokens + 1
+            num_sampled_tokens = num_draft_tokens + 1  # type: ignore[operator, assignment]
 
             # For DECODE only cuda graph of some attention backends (e.g., GDN).
             self.num_decode_draft_tokens.np[:num_reqs] = num_decode_draft_tokens
@@ -1739,7 +1744,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # Compute the logits indices.
         # [4, 1, 3, 1, 2]
-        num_sampled_tokens = num_draft_tokens + 1
+        num_sampled_tokens = num_draft_tokens + 1  # type: ignore[operator, assignment]
         # Step 1.
         # cu_num_sampled_tokens: [4, 5, 8, 9, 11]
         # _arange_scratch[:11]: [0, 1, 2, 3, 0, 0, 1, 2, 0, 0, 1]
@@ -2883,7 +2888,6 @@ class NPUModelRunner(GPUModelRunner):
             ec_connector_output=ec_connector_output if self.supports_mm_inputs else None,
             num_nans_in_logits=num_nans_in_logits,
             cudagraph_stats=cudagraph_stats,
-            routed_experts=None,
         )
         if self.dynamic_eplb:
             self.eplb_updator.forward_end(self.eplb_heat_collection_status)
@@ -2900,7 +2904,7 @@ class NPUModelRunner(GPUModelRunner):
                 self._update_states_after_model_execute(sampler_output.sampled_token_ids, scheduler_output)
 
         if not self.use_async_scheduling:
-            if self.routed_experts_initialized:
+            if vllm_version_is("0.29.0") and self.routed_experts_initialized:
                 # Sync path: D2H was issued in ``_bookkeeping_sync`` and
                 # synchronized by ``_to_list``'s event.synchronize(), so
                 # the pinned buffers are ready to be wrapped as numpy.
@@ -2924,7 +2928,7 @@ class NPUModelRunner(GPUModelRunner):
         #     stream.
         # Without clones, the copy stream would read torn data.
         routed_experts_snapshot = None
-        if self.routed_experts_initialized:
+        if vllm_version_is("0.29.0") and self.routed_experts_initialized:
             buf = self.routed_experts_capturer.get_device_buffer()
             total = scheduler_output.total_num_scheduled_tokens
             routed_experts_snapshot = RoutedExpertsTensors(
@@ -2933,16 +2937,27 @@ class NPUModelRunner(GPUModelRunner):
                     :total
                 ].clone(),
             )
-        async_output = AsyncGPUModelRunnerOutput(
-            model_runner_output=model_runner_output,
-            sampled_token_ids=sampler_output.sampled_token_ids,
-            logprobs_tensors=sampler_output.logprobs_tensors,
-            invalid_req_indices=invalid_req_indices,
-            async_output_copy_stream=self.async_output_copy_stream,
-            vocab_size=self.input_batch.vocab_size,
-            routed_experts=routed_experts_snapshot,
-            num_nans=num_nans_device,
-        )
+        if vllm_version_is("0.29.0"):
+            async_output = AsyncGPUModelRunnerOutput(
+                model_runner_output=model_runner_output,
+                sampled_token_ids=sampler_output.sampled_token_ids,
+                logprobs_tensors=sampler_output.logprobs_tensors,
+                invalid_req_indices=invalid_req_indices,
+                async_output_copy_stream=self.async_output_copy_stream,
+                vocab_size=self.input_batch.vocab_size,
+                routed_experts=routed_experts_snapshot,  # type: ignore[call-arg]
+                num_nans=num_nans_device,
+            )
+        else:
+            async_output = AsyncGPUModelRunnerOutput(
+                model_runner_output=model_runner_output,
+                sampled_token_ids=sampler_output.sampled_token_ids,
+                logprobs_tensors=sampler_output.logprobs_tensors,
+                invalid_req_indices=invalid_req_indices,
+                async_output_copy_stream=self.async_output_copy_stream,
+                vocab_size=self.input_batch.vocab_size,
+                num_nans=num_nans_device,
+            )
         self.input_batch.set_async_sampled_token_ids(
             async_output.sampled_token_ids_cpu,
             async_output.async_copy_ready_event,
@@ -3045,7 +3060,7 @@ class NPUModelRunner(GPUModelRunner):
             # waits for every D2H queued on the default stream since
             # the last sync, so this enqueue is naturally covered
             # without requiring its own synchronize.
-            if self.routed_experts_initialized:
+            if vllm_version_is("0.29.0") and self.routed_experts_initialized:
                 buf = self.routed_experts_capturer.get_device_buffer()
                 total = scheduler_output.total_num_scheduled_tokens
                 self.routed_experts_cpu[:total].copy_(buf[:total], non_blocking=True)
@@ -3510,7 +3525,11 @@ class NPUModelRunner(GPUModelRunner):
                 # graph mode. `blk_table_tensor` -1 to match mamba PAD_SLOT_ID
                 slot_mapping[num_tokens:num_tokens_padded].fill_(-1)
                 blk_table_tensor[num_reqs:num_reqs_padded].fill_(0)
-            if self.model_config.enable_return_routed_experts and kv_cache_gid == 0:
+            if (
+                vllm_version_is("0.29.0")
+                and getattr(self.model_config, "enable_return_routed_experts", False)
+                and kv_cache_gid == 0
+            ):
                 if self.routed_experts_initialized:
                     # snapshot slot_mapping into a private device
                     # buffer so the next ``_prepare_inputs`` does not
@@ -3554,10 +3573,12 @@ class NPUModelRunner(GPUModelRunner):
         if self.is_mm_prefix_lm:
             req_doc_ranges = {}
             hf_text_config = self.model_config.hf_text_config
+            # vLLM main dropped the V4.1 compressor-alignment pad, so only V4.0
+            # (which still sets this attribute) has a leading span pad.
             span_pad_modulus = getattr(
                 hf_text_config,
                 "mm_prefix_span_leading_pad_modulus",
-                4 if getattr(hf_text_config, "vision_n_layers", 0) > 0 else 0,
+                0,
             )
             for req_id in self.input_batch.req_ids:
                 image_doc_ranges = []
@@ -4542,7 +4563,10 @@ class NPUModelRunner(GPUModelRunner):
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)
 
-        if self.model_config.enable_return_routed_experts:
+        if (
+            vllm_version_is("0.29.0")
+            and getattr(self.model_config, "enable_return_routed_experts", False)
+        ):
             self.init_routed_experts_capturer()
 
         self.kvpp = KVPPRuntime.create_from_kv_cache(

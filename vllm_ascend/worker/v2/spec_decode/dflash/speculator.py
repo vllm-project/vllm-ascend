@@ -17,6 +17,7 @@ from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
 )
 
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
+from vllm_ascend.worker.v2.spec_decode import draft_attn_compat  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +26,9 @@ class AscendDFlashSpeculator(DFlashSpeculator):
     def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
         num_tokens_padded = num_reqs_padded * self.num_query_per_req
         with build_attn_metadata_wrapper():
-            attn_metadata = self._build_draft_attn_metadata(
+            # main restores ``_build_draft_attn_metadata`` via
+            # ``spec_decode.draft_attn_compat``.
+            attn_metadata = self._build_draft_attn_metadata(  # type: ignore[attr-defined]
                 num_reqs=self.input_batch.num_reqs,
                 num_reqs_padded=num_reqs_padded,
                 num_tokens_padded=num_tokens_padded,

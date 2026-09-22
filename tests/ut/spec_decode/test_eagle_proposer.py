@@ -158,14 +158,14 @@ def test_load_model_retains_split_indexer_metadata_dependency():
     proposer.method = "mtp"
     proposer.vllm_config = MagicMock()
     proposer.maybe_eager_context = nullcontext()
-    proposer._get_model = MagicMock(return_value=MagicMock())
+    proposer._get_model = MagicMock(return_value=MagicMock())  # type: ignore[method-assign]
     proposer.supports_mm_inputs = False
     proposer.parallel_drafting = False
     proposer.draft_window_size = None
     proposer.sliding_window = None
-    proposer._maybe_share_embeddings = MagicMock()
-    proposer._maybe_share_topk_indices = MagicMock()
-    proposer._maybe_share_lm_head = MagicMock()
+    proposer._maybe_share_embeddings = MagicMock()  # type: ignore[method-assign]
+    proposer._maybe_share_topk_indices = MagicMock()  # type: ignore[method-assign]
+    proposer._maybe_share_lm_head = MagicMock()  # type: ignore[method-assign]
 
     target_name = "model.layers.0.self_attn.attn"
     draft_name = "model.layers.1.self_attn.attn"
@@ -215,7 +215,7 @@ def test_cache_only_groups_use_main_backend_and_metadata(group_order, method):
     proposer.dcp_size = 1
     proposer.runner = MagicMock()
     proposer.vllm_config = MagicMock()
-    proposer.update_stream = MagicMock()
+    proposer.update_stream = MagicMock()  # type: ignore[assignment]
 
     main_name = "model.layers.1.self_attn.attn"
     indexer_name = "model.layers.1.self_attn.indexer.k_cache"
@@ -381,17 +381,22 @@ class TestEagleProposerInitialization(TestBase):
 
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET)
         self.mock_cpugpubuffer.start()
-        self.mock_supports_multimodal_inputs = patch(
-            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
-        )
-        self.mock_supports_multimodal_inputs.start()
+        self.supports_mm_patch = None
+        if vllm_version_is("0.29.0"):
+            self.supports_mm_patch = patch(
+                "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
+            )
+            self.supports_mm_patch.start()
+        else:
+            self.vllm_config.model_config.supports_multimodal_inputs = False
 
         # Set the current vllm config
         set_current_vllm_config(self.vllm_config)
 
     def tearDown(self):
         self.mock_cpugpubuffer.stop()
-        self.mock_supports_multimodal_inputs.stop()
+        if self.supports_mm_patch is not None:
+            self.supports_mm_patch.stop()
         # Clear the current vllm config
         set_current_vllm_config(None)
 
@@ -537,10 +542,14 @@ class TestEagleProposerLoadModel(TestBase):
 
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET)
         self.mock_cpugpubuffer.start()
-        self.mock_supports_multimodal_inputs = patch(
-            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
-        )
-        self.mock_supports_multimodal_inputs.start()
+        self.supports_mm_patch = None
+        if vllm_version_is("0.29.0"):
+            self.supports_mm_patch = patch(
+                "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
+            )
+            self.supports_mm_patch.start()
+        else:
+            self.vllm_config.model_config.supports_multimodal_inputs = False
 
         # Set the current vllm config
         set_current_vllm_config(self.vllm_config)
@@ -550,7 +559,8 @@ class TestEagleProposerLoadModel(TestBase):
     def tearDown(self):
         self.mock_get_ascend_config.stop()
         self.mock_cpugpubuffer.stop()
-        self.mock_supports_multimodal_inputs.stop()
+        if self.supports_mm_patch is not None:
+            self.supports_mm_patch.stop()
         # Clear the current vllm config
         set_current_vllm_config(None)
 
@@ -698,10 +708,14 @@ class TestEagleProposerDummyRun(TestBase):
 
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET)
         self.mock_cpugpubuffer.start()
-        self.mock_supports_multimodal_inputs = patch(
-            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
-        )
-        self.mock_supports_multimodal_inputs.start()
+        self.supports_mm_patch = None
+        if vllm_version_is("0.29.0"):
+            self.supports_mm_patch = patch(
+                "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
+            )
+            self.supports_mm_patch.start()
+        else:
+            self.vllm_config.model_config.supports_multimodal_inputs = False
 
         # Mock parallel state functions
         self.mock_tp_world_size = patch(
@@ -724,13 +738,14 @@ class TestEagleProposerDummyRun(TestBase):
         self.proposer = AscendEagleProposer(vllm_config=self.vllm_config, device=self.device, runner=self.runner)
         self.proposer.model = MagicMock()
         self.proposer._runnable = MagicMock()
-        self.proposer.update_stream = MagicMock()
+        self.proposer.update_stream = MagicMock()  # type: ignore[assignment]
         self.proposer.draft_attn_groups = [MagicMock()]
 
     def tearDown(self):
         self.mock_get_ascend_config.stop()
         self.mock_cpugpubuffer.stop()
-        self.mock_supports_multimodal_inputs.stop()
+        if self.supports_mm_patch is not None:
+            self.supports_mm_patch.stop()
         self.mock_tp_world_size.stop()
         self.mock_dp_group.stop()
         self.mock_use_updatable_graph.stop()
@@ -749,7 +764,7 @@ class TestEagleProposerDummyRun(TestBase):
         with set_current_vllm_config(self.vllm_config):
             self.proposer.dummy_run(num_tokens=num_tokens, with_prefill=with_prefill)
 
-            self.assertTrue(self.proposer._runnable.call_count == 1)
+            self.assertTrue(self.proposer._runnable.call_count == 1)  # type: ignore[attr-defined]
             self.assertTrue(mock_context.call_args.kwargs["eplb_heat_collection_status"])
 
     # cpu does not support parallel-group, let alone `sp`
@@ -761,7 +776,7 @@ class TestEagleProposerDummyRun(TestBase):
         # cpu does not support `torch.ops.vllm.maybe_pad_and_reduce`
         with set_current_vllm_config(self.vllm_config):
             self.proposer.dummy_run(num_tokens=64, with_prefill=True, num_reqs=4)
-            self.assertTrue(self.proposer._runnable.call_count == 1)
+            self.assertTrue(self.proposer._runnable.call_count == 1)  # type: ignore[attr-defined]
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("vllm_ascend.spec_decode.llm_base_proposer.update_full_graph_params")
@@ -782,7 +797,7 @@ class TestEagleProposerDummyRun(TestBase):
         # cpu does not support `torch.ops.vllm.maybe_pad_and_reduce`
         with set_current_vllm_config(self.vllm_config):
             self.proposer.dummy_run(num_tokens=64, in_graph_capturing=True, aclgraph_runtime_mode=CUDAGraphMode.FULL)
-            self.assertTrue(self.proposer._runnable.call_count == 1)
+            self.assertTrue(self.proposer._runnable.call_count == 1)  # type: ignore[attr-defined]
             mock_update_full_graph_params.assert_not_called()
             self.proposer.use_cuda_graph = last_use_cuda_graph
 
@@ -805,7 +820,7 @@ class TestEagleProposerDummyRun(TestBase):
         # cpu does not support `torch.ops.vllm.maybe_pad_and_reduce`
         with set_current_vllm_config(self.vllm_config):
             self.proposer.dummy_run(num_tokens=64, in_graph_capturing=False, aclgraph_runtime_mode=CUDAGraphMode.FULL)
-            self.assertTrue(self.proposer._runnable.call_count == 1)
+            self.assertTrue(self.proposer._runnable.call_count == 1)  # type: ignore[attr-defined]
             self.assertTrue(mock_update_full_graph_params.call_count == 1)
             self.proposer.use_cuda_graph = last_use_cuda_graph
 
@@ -849,10 +864,14 @@ class TestEagleProposerHelperMethods(TestBase):
 
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET)
         self.mock_cpugpubuffer.start()
-        self.mock_supports_multimodal_inputs = patch(
-            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
-        )
-        self.mock_supports_multimodal_inputs.start()
+        self.supports_mm_patch = None
+        if vllm_version_is("0.29.0"):
+            self.supports_mm_patch = patch(
+                "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
+            )
+            self.supports_mm_patch.start()
+        else:
+            self.vllm_config.model_config.supports_multimodal_inputs = False
 
         # Set the current vllm config
         set_current_vllm_config(self.vllm_config)
@@ -860,7 +879,8 @@ class TestEagleProposerHelperMethods(TestBase):
 
     def tearDown(self):
         self.mock_cpugpubuffer.stop()
-        self.mock_supports_multimodal_inputs.stop()
+        if self.supports_mm_patch is not None:
+            self.supports_mm_patch.stop()
         # Clear the current vllm config
         set_current_vllm_config(None)
 
@@ -877,7 +897,7 @@ class TestEagleProposerHelperMethods(TestBase):
             set_current_vllm_config(self.vllm_config),
             patch.object(self.proposer, "prepare_inputs", return_value=(mock_return_attn, torch.tensor([1, 2, 4]))),
         ):
-            return_attn, indices = self.proposer.prepare_inputs(mock_attn, num_rejected)
+            return_attn, indices = self.proposer.prepare_inputs(mock_attn, num_rejected)  # type: ignore[call-arg]
             self.assertEqual(indices.tolist(), [1, 2, 4])
 
 
@@ -947,10 +967,14 @@ class TestEagleProposerPropose:
 
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET)
         self.mock_cpugpubuffer.start()
-        self.mock_supports_multimodal_inputs = patch(
-            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
-        )
-        self.mock_supports_multimodal_inputs.start()
+        self.supports_mm_patch = None
+        if vllm_version_is("0.29.0"):
+            self.supports_mm_patch = patch(
+                "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
+            )
+            self.supports_mm_patch.start()
+        else:
+            self.vllm_config.model_config.supports_multimodal_inputs = False
 
         # Mock parallel state functions
         self.mock_tp_world_size = patch(
@@ -981,7 +1005,8 @@ class TestEagleProposerPropose:
         yield
 
         self.mock_cpugpubuffer.stop()
-        self.mock_supports_multimodal_inputs.stop()
+        if self.supports_mm_patch is not None:
+            self.supports_mm_patch.stop()
         self.mock_tp_world_size.stop()
         self.mock_dp_group.stop()
         self.mock_get_ascend_config.stop()
@@ -1132,7 +1157,7 @@ class TestEagleProposerPropose:
         self.runner.query_start_loc.cpu = torch.tensor([0, 4, 8, 12, 16], device=torch.device("cpu"), dtype=torch.int32)
         self.runner.seq_lens = seq_lens
         self.runner.optimistic_seq_lens_cpu = seq_lens_cpu
-        self.proposer._update_full_graph_params = MagicMock()
+        self.proposer._update_full_graph_params = MagicMock()  # type: ignore[method-assign]
 
         def side_effect(*args, **kwargs):
             nonlocal captured_common_attn_metadata
@@ -1578,7 +1603,7 @@ class TestEagleProposerPropose:
 
         import vllm_ascend.spec_decode.llm_base_proposer
         assert hasattr(vllm_ascend.spec_decode.llm_base_proposer, "AscendSpecDecodeBaseProposer")
-        RunnerCls = vllm_ascend.spec_decode.llm_base_proposer.AscendSpecDecodeBaseProposer
+        RunnerCls = vllm_ascend.spec_decode.llm_base_proposer.AscendSpecDecodeBaseProposer  # type: ignore[assignment]
         assert hasattr(RunnerCls, "_get_model")
         assert hasattr(RunnerCls, "_update_full_graph_params")
         assert hasattr(RunnerCls, "_propose")
@@ -1639,13 +1664,15 @@ class TestEagleProposerPropose:
 
         import vllm.v1.attention.backend
         assert hasattr(vllm.v1.attention.backend, 'CommonAttentionMetadata')
+        # vLLM main renamed this field to *_upper_bound; the release pin keeps
+        # the legacy name.
+        dcp_cpu_field = 'dcp_local_seq_lens_cpu' if vllm_version_is("0.29.0") else 'dcp_local_seq_lens_cpu_upper_bound'
         fields = {
             'query_start_loc', 'query_start_loc_cpu', 'seq_lens', 'num_reqs', \
             'num_actual_tokens', 'max_query_len', 'max_seq_len', 'block_table_tensor', \
             'slot_mapping', 'causal', 'logits_indices_padded', 'num_logits_indices', \
             'encoder_seq_lens', 'encoder_seq_lens_cpu', 'dcp_local_seq_lens', \
-            'dcp_local_seq_lens_cpu', '_seq_lens_cpu', '_num_computed_tokens_cpu', \
-            '_num_computed_tokens_cache'
+            dcp_cpu_field, '_num_computed_tokens_cache'
         }
 
         actual = set(vllm.v1.attention.backend.CommonAttentionMetadata.__dataclass_fields__)
@@ -1660,7 +1687,7 @@ class TestEagleProposerPropose:
             'positions', 'seq_lens_cpu', 'decode_token_per_req', \
             'context_parallel_metadata', 'actual_seq_lengths_q', \
             'attn_state', 'num_computed_tokens_cpu', 'num_input_tokens', \
-            'graph_pad_size'
+            'graph_pad_size', '_seq_lens_cpu', '_num_computed_tokens_cpu'
         }
 
         actual = set(vllm_ascend.attention.utils.AscendCommonAttentionMetadata.__dataclass_fields__)
@@ -1671,7 +1698,7 @@ class TestEagleProposerPropose:
 
         import vllm_ascend.spec_decode.llm_base_proposer
         assert hasattr(vllm_ascend.spec_decode.llm_base_proposer, "AscendSpecDecodeBaseProposer")
-        RunnerCls = vllm_ascend.spec_decode.llm_base_proposer.AscendSpecDecodeBaseProposer
+        RunnerCls = vllm_ascend.spec_decode.llm_base_proposer.AscendSpecDecodeBaseProposer  # type: ignore[assignment]
         assert hasattr(RunnerCls, "_run_merged_draft")
         sig = inspect.signature(RunnerCls._run_merged_draft)
         sig_name = self.get_param_names(sig)
@@ -1797,17 +1824,22 @@ class TestPrepareNextTokenIdsPadded(TestBase):
 
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET, MockCpuGpuBuffer)
         self.mock_cpugpubuffer.start()
-        self.mock_supports_multimodal_inputs = patch(
-            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
-        )
-        self.mock_supports_multimodal_inputs.start()
+        self.supports_mm_patch = None
+        if vllm_version_is("0.29.0"):
+            self.supports_mm_patch = patch(
+                "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
+            )
+            self.supports_mm_patch.start()
+        else:
+            self.vllm_config.model_config.supports_multimodal_inputs = False
 
         set_current_vllm_config(self.vllm_config)
         self.proposer = AscendEagleProposer(vllm_config=self.vllm_config, device=self.device, runner=self.runner)
 
     def tearDown(self):
         self.mock_cpugpubuffer.stop()
-        self.mock_supports_multimodal_inputs.stop()
+        if self.supports_mm_patch is not None:
+            self.supports_mm_patch.stop()
         set_current_vllm_config(None)
 
     def test_all_valid_tokens(self):
@@ -2289,10 +2321,14 @@ class TestRunMergedDraft(TestBase):
 
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET, MockCpuGpuBuffer)
         self.mock_cpugpubuffer.start()
-        self.mock_supports_multimodal_inputs = patch(
-            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
-        )
-        self.mock_supports_multimodal_inputs.start()
+        self.supports_mm_patch = None
+        if vllm_version_is("0.29.0"):
+            self.supports_mm_patch = patch(
+                "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
+            )
+            self.supports_mm_patch.start()
+        else:
+            self.vllm_config.model_config.supports_multimodal_inputs = False
         self.mock_enable_sp = patch("vllm_ascend.spec_decode.llm_base_proposer.enable_sp", return_value=False)
         self.mock_enable_sp.start()
         self.mock_extra_ctx = patch("vllm_ascend.spec_decode.llm_base_proposer._EXTRA_CTX", new=MagicMock())
@@ -2302,7 +2338,8 @@ class TestRunMergedDraft(TestBase):
 
     def tearDown(self):
         self.mock_cpugpubuffer.stop()
-        self.mock_supports_multimodal_inputs.stop()
+        if self.supports_mm_patch is not None:
+            self.supports_mm_patch.stop()
         self.mock_enable_sp.stop()
         self.mock_extra_ctx.stop()
         set_current_vllm_config(None)
@@ -2390,10 +2427,6 @@ class TestRunMergedDraft(TestBase):
         import vllm.multimodal.registry
 
         assert hasattr(vllm.multimodal.registry, "MultiModalRegistry")
-        assert hasattr(vllm.multimodal.registry.MultiModalRegistry, "supports_multimodal_inputs")
-        sig = inspect.signature(vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs)
-        sig_name = self.get_param_names(sig)
-        assert sig_name == ["self", "model_config"]
 
         import vllm.v1.spec_decode.eagle
 
@@ -2445,7 +2478,7 @@ class TestRunMergedDraft(TestBase):
             assert hasattr(vllm_ascend.spec_decode.llm_base_proposer, attr), (
                 f"vllm_ascend.spec_decode.llm_base_proposer.{attr} not found"
             )
-        RunnerCls = vllm_ascend.spec_decode.llm_base_proposer.AscendSpecDecodeBaseProposer
+        RunnerCls = vllm_ascend.spec_decode.llm_base_proposer.AscendSpecDecodeBaseProposer  # type: ignore[assignment]
         for attr in (
             "_run_merged_draft",
             "model_returns_tuple",
@@ -2520,7 +2553,7 @@ class TestRunMergedDraft(TestBase):
             # Greedy path: no draft probabilities.
             return logits, None
 
-        self.proposer.compute_draft_token_ids = compute_draft_token_ids
+        self.proposer.compute_draft_token_ids = compute_draft_token_ids  # type: ignore[method-assign]
         self.proposer.supports_mm_inputs = True
         initial_input_ids = torch.tensor(
             [279, 1196, 374, 8014, 151667, 198, 32313, 11, 151667, 198, 32313, 11],
@@ -2791,10 +2824,14 @@ class TestDraftProposerHelperMethods(TestBase):
 
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET)
         self.mock_cpugpubuffer.start()
-        self.mock_supports_multimodal_inputs = patch(
-            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
-        )
-        self.mock_supports_multimodal_inputs.start()
+        self.supports_mm_patch = None
+        if vllm_version_is("0.29.0"):
+            self.supports_mm_patch = patch(
+                "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
+            )
+            self.supports_mm_patch.start()
+        else:
+            self.vllm_config.model_config.supports_multimodal_inputs = False
 
         # Set the current vllm config
         with set_current_vllm_config(self.vllm_config):
@@ -2803,7 +2840,8 @@ class TestDraftProposerHelperMethods(TestBase):
 
     def tearDown(self):
         self.mock_cpugpubuffer.stop()
-        self.mock_supports_multimodal_inputs.stop()
+        if self.supports_mm_patch is not None:
+            self.supports_mm_patch.stop()
         # Clear the current vllm config
         set_current_vllm_config(None)
 
@@ -2886,15 +2924,18 @@ class TestEagleProposerPrepareInputs:
 
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET, MockCpuGpuBuffer)
         self.mock_cpugpubuffer.start()
-        self.mock_supports_multimodal_inputs = patch(
-            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
-        )
-        self.mock_supports_multimodal_inputs.start()
+        self.supports_mm_patch = None
+        if vllm_version_is("0.29.0"):
+            self.supports_mm_patch = patch(
+                "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
+            )
+            self.supports_mm_patch.start()
 
         yield
 
         self.mock_cpugpubuffer.stop()
-        self.mock_supports_multimodal_inputs.stop()
+        if self.supports_mm_patch is not None:
+            self.supports_mm_patch.stop()
 
     def _create_base_vllm_config(self):
         vllm_config = MagicMock(spec=VllmConfig)
@@ -2950,10 +2991,19 @@ class TestEagleProposerPrepareInputs:
         )
 
         init_ascend_config(vllm_config)
+        supports_mm_ctx: Any
+        if vllm_version_is("0.29.0"):
+            supports_mm_ctx = patch(
+                "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs",
+                return_value=False,
+            )
+        else:
+            vllm_config.model_config.supports_multimodal_inputs = False
+            supports_mm_ctx = nullcontext()
 
         with (
             patch(_CPU_GPU_BUFFER_TARGET, MockCpuGpuBuffer),
-            patch("vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False),
+            supports_mm_ctx,
             set_current_vllm_config(vllm_config),
         ):
             proposer = AscendEagleProposer(
@@ -3239,15 +3289,18 @@ class TestEagleProposerPrepareInputsPadded:
 
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET, MockCpuGpuBuffer)
         self.mock_cpugpubuffer.start()
-        self.mock_supports_multimodal_inputs = patch(
-            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
-        )
-        self.mock_supports_multimodal_inputs.start()
+        self.supports_mm_patch = None
+        if vllm_version_is("0.29.0"):
+            self.supports_mm_patch = patch(
+                "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
+            )
+            self.supports_mm_patch.start()
 
         yield
 
         self.mock_cpugpubuffer.stop()
-        self.mock_supports_multimodal_inputs.stop()
+        if self.supports_mm_patch is not None:
+            self.supports_mm_patch.stop()
 
     def _create_base_vllm_config(self):
         vllm_config = MagicMock(spec=VllmConfig)
@@ -3303,10 +3356,19 @@ class TestEagleProposerPrepareInputsPadded:
         )
 
         init_ascend_config(vllm_config)
+        supports_mm_ctx: Any
+        if vllm_version_is("0.29.0"):
+            supports_mm_ctx = patch(
+                "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs",
+                return_value=False,
+            )
+        else:
+            vllm_config.model_config.supports_multimodal_inputs = False
+            supports_mm_ctx = nullcontext()
 
         with (
             patch(_CPU_GPU_BUFFER_TARGET, MockCpuGpuBuffer),
-            patch("vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False),
+            supports_mm_ctx,
             set_current_vllm_config(vllm_config),
         ):
             proposer = AscendEagleProposer(
@@ -3591,15 +3653,18 @@ class TestEagleProposerSetInputsFirstPass:
 
         self.mock_cpugpubuffer = patch(_CPU_GPU_BUFFER_TARGET, MockCpuGpuBuffer)
         self.mock_cpugpubuffer.start()
-        self.mock_supports_multimodal_inputs = patch(
-            "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
-        )
-        self.mock_supports_multimodal_inputs.start()
+        self.supports_mm_patch = None
+        if vllm_version_is("0.29.0"):
+            self.supports_mm_patch = patch(
+                "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False
+            )
+            self.supports_mm_patch.start()
 
         yield
 
         self.mock_cpugpubuffer.stop()
-        self.mock_supports_multimodal_inputs.stop()
+        if self.supports_mm_patch is not None:
+            self.supports_mm_patch.stop()
 
     def _create_base_vllm_config(self):
         """Create base vllm_config with common settings shared across all tests."""
@@ -3671,10 +3736,19 @@ class TestEagleProposerSetInputsFirstPass:
         )
 
         init_ascend_config(vllm_config)
+        supports_mm_ctx: Any
+        if vllm_version_is("0.29.0"):
+            supports_mm_ctx = patch(
+                "vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs",
+                return_value=False,
+            )
+        else:
+            vllm_config.model_config.supports_multimodal_inputs = False
+            supports_mm_ctx = nullcontext()
 
         with (
             patch(_CPU_GPU_BUFFER_TARGET, MockCpuGpuBuffer),
-            patch("vllm.multimodal.registry.MultiModalRegistry.supports_multimodal_inputs", return_value=False),
+            supports_mm_ctx,
             set_current_vllm_config(vllm_config),
         ):
             if method == "eagle":
@@ -4287,7 +4361,11 @@ class TestDeepSeekMTPIndicesSharing(unittest.TestCase):
         proposer._set_positions = lambda n, positions: proposer.positions[:n].copy_(positions)
         proposer.maybe_pad_and_reduce = lambda hidden, positions: (hidden, positions)
         proposer.maybe_all_gather_and_unpad = lambda last, positions, hidden: (last, positions, hidden)
-        proposer.compute_draft_token_ids = lambda hidden, sampling_metadata: (torch.arange(hidden.shape[0]), None)
+
+        def _compute_draft_token_ids(hidden, sampling_metadata):
+            return torch.arange(hidden.shape[0]), None
+
+        proposer.compute_draft_token_ids = _compute_draft_token_ids  # type: ignore[method-assign, assignment]
 
         buffer = torch.full((8, 4), -1, dtype=torch.int32)
         impl = SimpleNamespace(skip_topk=False, topk_indices_buffer=buffer)

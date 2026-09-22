@@ -28,10 +28,10 @@ from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
-from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import (
@@ -289,7 +289,7 @@ class NPUModelRunner(GPUModelRunner):
             for group in groups
         )
 
-        if self.model_config.enable_return_routed_experts:
+        if vllm_version_is("0.29.0") and getattr(self.model_config, "enable_return_routed_experts", False):
             self.init_routed_experts_capturer()
 
         self.kvpp = KVPPRuntime.create_from_kv_cache(
@@ -379,6 +379,7 @@ class NPUModelRunner(GPUModelRunner):
         scheduler_output: SchedulerOutput,
         batch_req_state: BatchReqState,
         batch_desc: BatchExecutionDescriptor,
+        num_active_loras: int = 0,
     ) -> AscendInputBatch:
         """Override GPUModelRunner.prepare_inputs for Ascend NPUs.
         npu attention backends need seq_lens_cpu to work.
@@ -394,7 +395,7 @@ class NPUModelRunner(GPUModelRunner):
 
         num_scheduled_tokens_np = batch_req_state.num_scheduled_tokens
         idx_mapping_np = batch_req_state.idx_mapping_np
-        idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
+        idx_mapping = async_tensor_h2d(idx_mapping_np, device=self.device)
         num_reqs = len(req_ids)
 
         num_valid_tokens = num_scheduled_tokens_np
@@ -438,7 +439,7 @@ class NPUModelRunner(GPUModelRunner):
             cu_num_logits_np = np.empty(num_reqs + 1, dtype=np.int32)
             cu_num_logits_np[0] = 0
             np.cumsum(num_logits, out=cu_num_logits_np[1:])
-            cu_num_logits = async_copy_to_gpu(cu_num_logits_np, device=self.device)
+            cu_num_logits = async_tensor_h2d(cu_num_logits_np, device=self.device)
 
         adaptive_verification_manager = self.adaptive_verification
         adaptive_verification_active = (
@@ -472,7 +473,7 @@ class NPUModelRunner(GPUModelRunner):
             )
 
         query_start_loc = self.input_buffers.query_start_loc
-        async_copy_to_gpu(query_start_loc_np, out=query_start_loc)
+        query_start_loc.copy_(async_tensor_h2d(query_start_loc_np, device=self.device))
 
         if adaptive_verification_active:
             cu_num_logits, query_start_loc, total_num_draft_tokens = adaptive_verification_manager.reallocate_drafts(
@@ -495,7 +496,7 @@ class NPUModelRunner(GPUModelRunner):
                 )
 
             query_start_loc = self.input_buffers.query_start_loc
-            async_copy_to_gpu(query_start_loc_np, out=query_start_loc)
+            query_start_loc.copy_(async_tensor_h2d(query_start_loc_np, device=self.device))
 
         if draft_tokens:
             expanded_idx_mapping, expanded_local_pos = expand_idx_mapping(
@@ -619,11 +620,18 @@ class NPUModelRunner(GPUModelRunner):
             seq_lens_np=self.input_buffers.seq_lens_np,
             attn_state=attn_state,
         )
-        input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
-            self.pcp_manager,
-            input_batch,
-            padded_num_tokens=batch_desc.num_tokens,
-        )
+        if vllm_version_is("0.29.0"):
+            input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
+                self.pcp_manager,
+                input_batch,
+                padded_num_tokens=batch_desc.num_tokens,
+            )
+        else:
+            input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
+                self.pcp_manager,
+                input_batch,
+                batch_desc,  # type: ignore[arg-type]
+            )
 
         # For mla/sfa, update cos/sin. Here is for execute_model.
         update_cos_sin(input_batch.positions)
@@ -910,7 +918,13 @@ def graph_manager_wrapper(model_runner):
         decode_query_len: int,
         lora_capture_cases: list[int] | None = None,
         varlen_decode: bool = False,
+        ubatch_runner: object = None,
     ):
+        # DBO microbatching is disabled on Ascend (enable_dbo/ubatch_size are
+        # reset to False/0 during config validation), so the runner-level
+        # ubatch_runner is always None. Accept it for signature compatibility
+        # with the upstream ModelCudaGraphManager.
+        del ubatch_runner
         return ModelAclGraphManager(
             vllm_config,
             device,

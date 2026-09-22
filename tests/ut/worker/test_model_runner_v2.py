@@ -26,7 +26,7 @@ def _make_runner(need_timing: bool = True):
         scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(need_timing=need_timing))
     )
     runner.vllm_config = SimpleNamespace()
-    runner.kvpp = SimpleNamespace(complete_forward=lambda: None)
+    runner.kvpp = SimpleNamespace(complete_forward=lambda: None)  # type: ignore[assignment]
     runner.model_state = SimpleNamespace(kvpp_is_dummy_run=False)
     runner.execute_model_state = None
     runner.is_last_pp_rank = False
@@ -245,7 +245,7 @@ def test_prepare_inputs_preserves_pcp_tokens_and_forwards_graph_padding():
     assert len(padding_assignments) == 1
     assert ast.unparse(padding_assignments[0].value) == "max(num_tokens, batch_desc.num_tokens)"
 
-    assert len(partition_calls) == 1
+    assert len(partition_calls) == 2
     padded_call = next(
         call for call in partition_calls if any(keyword.arg == "padded_num_tokens" for keyword in call.keywords)
     )
@@ -324,7 +324,7 @@ def test_kvpp_history_ignores_padding_and_dummy_work(monkeypatch, computed, dumm
     state = default.AscendModelState.__new__(default.AscendModelState)
     state.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=1))
     state.max_model_len = 32
-    state.kvpp_runtime = runner.kvpp
+    state.kvpp_runtime = runner.kvpp  # type: ignore[assignment]
     runner.model_state = state
     batch = SimpleNamespace(
         num_reqs=2,
@@ -349,7 +349,17 @@ def test_kvpp_history_ignores_padding_and_dummy_work(monkeypatch, computed, dumm
 
     def forward(_self, _scheduler_output, **_kwargs):
         assert state.kvpp_is_dummy_run is (dummy_run or is_profile)
-        assert state.prepare_attn(batch, CUDAGraphMode.NONE, (), torch.empty(0), [], None) is metadata
+        assert (
+            state.prepare_attn(
+                batch,  # type: ignore[arg-type]
+                CUDAGraphMode.NONE,
+                (),
+                torch.empty(0),
+                [],
+                None,
+            )
+            is metadata
+        )
         events.append("forward")
         return metadata
 
@@ -503,10 +513,7 @@ def test_sample_tokens_spec_pp_broadcasts_draft_tokens():
     runner.pp_handler = MagicMock()
     with patch.object(GPUModelRunner, "sample_tokens", return_value="out"):
         assert runner.sample_tokens("g") == "out"
-    if vllm_version_is("0.29.0"):
-        runner.pp_handler.broadcast_draft_tokens.assert_called_once_with()
-    else:
-        runner.pp_handler.broadcast_draft_tokens.assert_not_called()
+    runner.pp_handler.broadcast_drafts.assert_called_once_with()
 
 
 def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
@@ -553,7 +560,8 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
     assert runner.pcp_manager.vllm_config is runner.vllm_config
     assert runner.model_state.pcp_manager is runner.pcp_manager
     assert runner.speculator.pcp_manager is runner.pcp_manager
-    runner.init_routed_experts_capturer.assert_called_once_with()
+    if vllm_version_is("0.29.0"):
+        runner.init_routed_experts_capturer.assert_called_once_with()
 
 
 def test_initialize_kv_cache_forwards_allocation_context():
@@ -696,11 +704,11 @@ def _fake_async_copy(src, device=None, out=None):
 def _run_prepare_inputs(runner, scheduler_output, batch_req_state, batch_desc, *, version_029=False):
     batch = SimpleNamespace(positions=torch.zeros(4, dtype=torch.int32))
 
-    def _partition(_pcp_manager, input_batch, **_kwargs):
+    def _partition(_pcp_manager, input_batch, _batch_desc=None, **_kwargs):
         return input_batch
 
     with (
-        patch("vllm_ascend.worker.v2.model_runner.async_copy_to_gpu", side_effect=_fake_async_copy),
+        patch("vllm_ascend.worker.v2.model_runner.async_tensor_h2d", side_effect=_fake_async_copy),
         patch("vllm_ascend.worker.v2.model_runner.build_attn_state", return_value="attn"),
         patch("vllm_ascend.worker.v2.model_runner.prepare_prefill_inputs"),
         patch("vllm_ascend.worker.v2.model_runner.prepare_pos_seq_lens"),

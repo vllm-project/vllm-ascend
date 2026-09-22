@@ -103,6 +103,7 @@ def config():
 def runtime(config):
     return SimpleNamespace(
         model_config=SimpleNamespace(hf_text_config=config, enforce_eager=True),
+        attention_config=SimpleNamespace(hisparse_config=None),
         cache_config=SimpleNamespace(
             block_size=64,
             enable_prefix_caching=False,
@@ -279,7 +280,14 @@ def test_view_with_nonzero_backing_storage_offset():
     spec = AscendMLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=4, dtype=torch.bfloat16)
     backing = torch.zeros(16 + 2 * 256, dtype=torch.uint8)
     raw = backing[16:]
-    cache = NPUModelRunner._adjust_kv_layout(None, raw, [(2, 16, 1, 4)], [spec.dtype], 256, initial_offset_bytes=32)[0]
+    cache = NPUModelRunner._adjust_kv_layout(
+        None,  # type: ignore[arg-type]
+        raw,
+        [(2, 16, 1, 4)],
+        [spec.dtype],
+        256,
+        initial_offset_bytes=32,
+    )[0]
     cache[1].fill_(7)
     assert cache.data_ptr() == backing.data_ptr() + 48
     torch.testing.assert_close(backing[304:432].view(torch.bfloat16), torch.full((64,), 7, dtype=torch.bfloat16))
@@ -291,7 +299,14 @@ def test_view_accepts_latest_vllm_int8_backing_storage():
 
     spec = AscendMLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=4, dtype=torch.bfloat16)
     raw = torch.zeros(2 * 256, dtype=torch.int8)
-    cache = NPUModelRunner._adjust_kv_layout(None, raw, [(2, 16, 1, 4)], [spec.dtype], 256, initial_offset_bytes=32)[0]
+    cache = NPUModelRunner._adjust_kv_layout(
+        None,  # type: ignore[arg-type]
+        raw,
+        [(2, 16, 1, 4)],
+        [spec.dtype],
+        256,
+        initial_offset_bytes=32,
+    )[0]
     assert cache.shape == (2, 16, 1, 4)
 
 
@@ -1019,7 +1034,7 @@ def test_ring_source_reuses_prepared_store_coordinates(monkeypatch, num_tokens, 
         indexer=SimpleNamespace(cache=cache),
     )
     AscendDSAV41Impl._write_compressed_source(
-        SimpleNamespace(role=SimpleNamespace(compress_ratio=2)),
+        SimpleNamespace(role=SimpleNamespace(compress_ratio=2)),  # type: ignore[arg-type]
         attn,
         hidden_states,
         positions,
@@ -1049,7 +1064,7 @@ def test_projected_model_entry_keeps_fp32_state_and_existing_norm(config, monkey
     compressor.register_buffer("_ring_pooled", torch.empty(4, 8, dtype=torch.bfloat16), persistent=False)
     compressor._ring_num_cores = 1
     state = torch.zeros(3, 32, 1, 16, dtype=torch.float32)
-    compressor.state_cache = SimpleNamespace(kv_cache=[state])
+    compressor.state_cache = SimpleNamespace(kv_cache=[state])  # type: ignore[assignment]
     metadata = SimpleNamespace(c2_ring_metadata=torch.zeros(5, 1, dtype=torch.int32), max_query_len=2)
     pooled = torch.randn(2, 8, dtype=torch.bfloat16)
     expected = compressor.norm(pooled).clone()
@@ -1424,8 +1439,8 @@ def test_v41_query_preparation_uses_multistream(overlap):
 
     impl = AscendDSAV41Impl.__new__(AscendDSAV41Impl)
     impl.role = SimpleNamespace(is_kv_source=True)
-    impl.multistream_preprocess = Mock(return_value=("q", "qr"))
-    impl._write_compressed_source = Mock()
+    impl.multistream_preprocess = Mock(return_value=("q", "qr"))  # type: ignore[method-assign]
+    impl._write_compressed_source = Mock()  # type: ignore[method-assign]
     attn = SimpleNamespace(
         dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=SimpleNamespace(multistream_dsv4_dsa_overlap=overlap)))
     )
@@ -1442,8 +1457,8 @@ def test_v41_cp_query_preparation_uses_full_inputs(overlap):
     from vllm_ascend.attention.context_parallel.dsa_v41_cp import AscendDSAV41CPImpl
 
     impl = AscendDSAV41CPImpl.__new__(AscendDSAV41CPImpl)
-    impl.multistream_preprocess = Mock(return_value=("q", "qr"))
-    impl._write_compressed_source = Mock()
+    impl.multistream_preprocess = Mock(return_value=("q", "qr"))  # type: ignore[method-assign]
+    impl._write_compressed_source = Mock()  # type: ignore[method-assign]
     attn = SimpleNamespace(
         dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=SimpleNamespace(multistream_dsv4_dsa_overlap=overlap)))
     )
@@ -1463,8 +1478,8 @@ def test_v41_cp_input_preparation_updates_empty_rank_cache(overlap, local_tokens
     impl = AscendDSAV41CPImpl.__new__(AscendDSAV41CPImpl)
     full = torch.arange(24).reshape(6, 4)
     global_metadata = SimpleNamespace(swa=SimpleNamespace(num_actual_tokens=5))
-    impl._global_layer_metadata = Mock(return_value=global_metadata)
-    impl._update_caches = Mock()
+    impl._global_layer_metadata = Mock(return_value=global_metadata)  # type: ignore[method-assign]
+    impl._update_caches = Mock()  # type: ignore[method-assign]
     attn = SimpleNamespace(
         dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=SimpleNamespace(multistream_dsv4_dsa_overlap=overlap)))
     )

@@ -17,11 +17,13 @@
 #
 from typing import Any, cast
 
+import numpy as np
 import torch
 from vllm.config import VllmConfig, get_layers_from_vllm_config, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
@@ -29,11 +31,13 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_wrapper,
     build_draft_attn_metadata_factory,
 )
+from vllm_ascend.worker.v2.spec_decode import draft_attn_compat  # noqa: F401
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import prepare_replicated_pcp_config
 
 
@@ -126,7 +130,9 @@ class AscendDSparkSpeculator(DSparkSpeculator):
                 attn_state=AscendAttentionState.ChunkedPrefill,
             ),
         ):
-            attn_metadata = super()._build_draft_attn_metadata(
+            # main restores ``_build_draft_attn_metadata`` via
+            # ``spec_decode.draft_attn_compat``.
+            attn_metadata = super()._build_draft_attn_metadata(  # type: ignore[attr-defined]
                 num_reqs=self.input_batch.num_reqs,
                 num_reqs_padded=num_reqs_padded,
                 num_tokens_padded=num_tokens_padded,
@@ -142,7 +148,9 @@ class AscendDSparkSpeculator(DSparkSpeculator):
 
     def _build_draft_attn_metadata(self, *, num_reqs_padded, **kwargs):
         if self.attn_architecture not in ("GQA", "MLA"):
-            return super()._build_draft_attn_metadata(num_reqs_padded=num_reqs_padded, **kwargs)
+            return super()._build_draft_attn_metadata(  # type: ignore[attr-defined]
+                num_reqs_padded=num_reqs_padded, **kwargs
+            )
 
         # This kwargs["num_tokens_padded"] is only useful in eager/PIECEWISE.
         # TODO: Replace this temporary padding workaround with upstream #56181's
@@ -160,8 +168,37 @@ class AscendDSparkSpeculator(DSparkSpeculator):
                 attn_state=AscendAttentionState.ChunkedPrefill,
             ),
         ):
-            attn_metadata = super()._build_draft_attn_metadata(num_reqs_padded=num_reqs_padded, **kwargs)
+            attn_metadata = super()._build_draft_attn_metadata(  # type: ignore[attr-defined]
+                num_reqs_padded=num_reqs_padded, **kwargs
+            )
         return self._update_draft_attn_metadata(attn_metadata, num_reqs_padded)
+
+    if not vllm_version_is("0.29.0"):
+        # Upstream main calls ``_build_attn_metadata`` directly from the propose
+        # path; keep the DSpark padding fix there too.
+        def _build_attn_metadata(
+            self,
+            num_reqs: int,
+            batch_desc: BatchExecutionDescriptor,
+            query_start_loc_np: np.ndarray,
+            seq_lens_cpu_upper_bound: torch.Tensor,
+            step: int,
+            causal: bool = True,
+            dcp_local_seq_lens: torch.Tensor | None = None,
+        ) -> dict[str, Any] | None:
+            num_reqs_padded = batch_desc.num_reqs or num_reqs
+            attn_metadata = super()._build_attn_metadata(  # type: ignore[attr-defined]
+                num_reqs=num_reqs,
+                batch_desc=batch_desc,
+                query_start_loc_np=query_start_loc_np,
+                seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+                step=step,
+                causal=causal,
+                dcp_local_seq_lens=dcp_local_seq_lens,
+            )
+            if attn_metadata is None or self.attn_architecture not in ("GQA", "MLA"):
+                return attn_metadata
+            return self._update_draft_attn_metadata(attn_metadata, num_reqs_padded)
 
     def _update_draft_attn_metadata(self, attn_metadata, num_reqs_padded):
         """Rebuild ``actual_seq_lengths_q`` from the padded request count,

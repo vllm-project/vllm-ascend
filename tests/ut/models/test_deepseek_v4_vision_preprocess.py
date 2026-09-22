@@ -3,7 +3,6 @@
 
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import torch
@@ -138,30 +137,11 @@ def test_v027_prompt_updates_add_position_dependent_compress_pad():
         assert placeholder.is_embed.tolist() == [token == base + IMAGE for token in placeholder.tokens]
 
 
-def test_hf_tokenizer_call_is_thread_safe():
-    entered = threading.Event()
-    release = threading.Event()
+def test_call_hf_processor_runs_local_image_transform():
     info = _ConcurrentStubInfo()
-    info.tokenizer = _NonThreadSafeTokenizer(entered, release)
     processor = DeepseekV4VLMultiModalProcessor(info, None)
 
-    def process():
-        return processor._call_hf_processor(
-            "prompt",
-            {"images": []},
-            {},
-            {},
-        )["input_ids"]
+    result = processor._call_hf_processor({"images": []}, {})
 
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        competing_call = pool.submit(
-            info.tokenizer,
-            "chat template",
-            "pt",
-        )
-        assert entered.wait(timeout=1)
-        outputs = list(pool.map(lambda _: process(), range(16)))
-        release.set()
-        competing_call.result()
-
-    assert all(torch.equal(output, torch.tensor([[1]])) for output in outputs)
+    assert isinstance(result, BatchFeature)
+    assert len(result) == 0

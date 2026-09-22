@@ -779,7 +779,7 @@ class FlashLB(EplbPolicy):
             for j in range(N):
                 match = 0
                 for k in range(N * M):
-                    match += min(src_counts[i, k], dst_counts[j, k])
+                    match += min(src_counts[i, k], dst_counts[j, k])  # type: ignore[assignment]
                 matches[i, j] = match
         return matches
 

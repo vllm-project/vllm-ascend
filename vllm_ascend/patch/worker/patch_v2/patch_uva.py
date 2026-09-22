@@ -25,6 +25,8 @@ import torch
 import vllm.v1.worker.gpu.buffer_utils
 from vllm.logger import logger
 
+from vllm_ascend.utils import vllm_version_is
+
 
 def check_triton_ascend_version_valid() -> bool:
     """
@@ -145,27 +147,40 @@ class UvaBufferWrapper:
     def np(self):
         return self._np if is_uva_available() else MonitoredNumPyArray(self._np, self._mark_cpu_modified)
 
-    @property
-    def uva(self):
-        """Get the device data of the buffer."""
-        if not is_uva_available() and self._modified_indices:
-            dirty_rows = sorted(self._modified_indices)
-            n_dirty = len(dirty_rows)
-            if dirty_rows[0] == 0 and dirty_rows[-1] == n_dirty - 1:
-                # Common path: dirty rows are a contiguous prefix [0..n-1].
-                # This is always the case when copy_to_uva writes via
-                # dst[:n] = x.  Contiguous slice copy_ keeps the CPU source
-                # pinned and enables true async DMA without an intermediate
-                # tensor or stream sync.
-                self._uva[:n_dirty].copy_(self._cpu[:n_dirty], non_blocking=True)
-            else:
-                # Sparse modification pattern — fall back to indexed copy.
-                # Explicitly re-pin the CPU source so that non_blocking is
-                # not silently degraded.
-                src = self._cpu[dirty_rows].pin_memory()
-                self._uva[dirty_rows] = src.to(device="npu", non_blocking=True)
-            self._modified_indices.clear()
-        return self._uva
+    def _sync_device_view(self) -> None:
+        """Flush rows written through the CPU/NumPy views to the device view."""
+        if is_uva_available() or not self._modified_indices:
+            return
+        dirty_rows = sorted(self._modified_indices)
+        n_dirty = len(dirty_rows)
+        if dirty_rows[0] == 0 and dirty_rows[-1] == n_dirty - 1:
+            # Common path: dirty rows are a contiguous prefix [0..n-1].
+            # This is always the case when copy_to_uva writes via
+            # dst[:n] = x.  Contiguous slice copy_ keeps the CPU source
+            # pinned and enables true async DMA without an intermediate
+            # tensor or stream sync.
+            self._uva[:n_dirty].copy_(self._cpu[:n_dirty], non_blocking=True)
+        else:
+            # Sparse modification pattern — fall back to indexed copy.
+            # Explicitly re-pin the CPU source so that non_blocking is
+            # not silently degraded.
+            src = self._cpu[dirty_rows].pin_memory()
+            self._uva[dirty_rows] = src.to(device="npu", non_blocking=True)
+        self._modified_indices.clear()
+
+    def uva(self, n: int | None = None) -> torch.Tensor:
+        """Get the device view of the buffer.
+
+        Upstream main calls this as ``buf.uva(n)``; the 0.29.0 lane reads
+        ``buf.uva`` as an attribute (see the ``property`` re-wrap below).
+        """
+        self._sync_device_view()
+        return self._uva if n is None else self._uva[:n]
+
+
+if vllm_version_is("0.29.0"):
+    # vLLM 0.29.0 reads ``UvaBuffer.uva`` as a tensor attribute.
+    UvaBufferWrapper.uva = property(UvaBufferWrapper.uva)  # type: ignore
 
 
 vllm.v1.worker.gpu.buffer_utils.UvaBuffer = UvaBufferWrapper

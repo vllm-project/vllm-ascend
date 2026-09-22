@@ -59,4 +59,28 @@ def bind_kv_cache(
         utils.share_replayssm_ring_trackers(ordered_layer_names, forward_context, kv_cache_groups)
 
 
+def bind_kv_cache_to_layers(
+    kv_caches: dict[str, torch.Tensor],
+    forward_context: dict[str, Attention],
+    num_attn_module: int = 1,
+    kv_cache_groups: Sequence[KVCacheGroupSpec] | None = None,
+) -> None:
+    """NPU-safe counterpart of main's ``bind_kv_cache_to_layers``.
+
+    vLLM main split ``bind_kv_cache`` so that ``init_kv_cache`` binds layers
+    through this runner-info-free entry point. Ascend keeps its own
+    ``.kv_cache = ...`` binding (the upstream ``Attention.bind_kv_cache``
+    raises ``NotImplementedError`` on NPU) while still wiring the ReplaySSM
+    ring trackers main expects.
+    """
+    for layer_name, kv_cache in kv_caches.items():
+        forward_context[layer_name].kv_cache = kv_cache
+
+    ordered_layer_names = sorted(kv_caches, key=lambda name: extract_layer_index(name, num_attn_module))
+    if not vllm_version_is("0.29.0"):
+        utils.share_replayssm_ring_trackers(ordered_layer_names, forward_context, kv_cache_groups)
+
+
 utils.bind_kv_cache = bind_kv_cache
+if not vllm_version_is("0.29.0"):
+    utils.bind_kv_cache_to_layers = bind_kv_cache_to_layers

@@ -662,6 +662,10 @@ class AscendSFAImpl(MLAAttentionImpl):
     # value. With DCP disabled it does not change the draft KV-cache layout.
     supports_mtp_with_cp_non_trivial_interleave_size: bool = True
 
+    def record_logical_topk_ready(self) -> None:
+        """No-op: Ascend SFA owns no upstream SparseMLAIndexGroup."""
+        return
+
     def __init__(
         self,
         num_heads: int,

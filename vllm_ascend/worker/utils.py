@@ -7,7 +7,6 @@ import numpy as np
 import torch
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import largest_power_of_2_divisor
-from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm.v1.worker.utils import AttentionGroup, KVBlockZeroer
@@ -55,7 +54,7 @@ def copy_kv_cache_blocks_inplace(
         [[copy.src_block_id, copy.dst_block_id] for copy in kv_cache_block_copies],
         dtype=np.int64,
     )
-    indices = async_tensor_h2d(indices_np, device=device)
+    indices = torch.from_numpy(indices_np).to(device=device)
     src_indices, dst_indices = indices.unbind(dim=1)
     for tensor in cache_tensors:
         assert tensor.device == device

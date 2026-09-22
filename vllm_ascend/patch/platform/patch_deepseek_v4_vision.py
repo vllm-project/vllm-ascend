@@ -45,4 +45,22 @@ def register_deepseek_v4_vision_config_convertor() -> None:
             return supports_multimodal and (getattr(self.hf_config, "vision_n_layers", 0) > 0)
 
     MODEL_ARCH_CONFIG_CONVERTORS["deepseek_v4"] = AscendDeepseekV4ModelArchConfigConvertor
+
+    class AscendDeepseekV41ModelArchConfigConvertor(ModelArchConfigConvertorBase):
+        """Keep V4.1 mm-prefix plumbing after upstream dropped the config default."""
+
+        def __init__(
+            self,
+            hf_config: "PretrainedConfig",
+            hf_text_config: "PretrainedConfig",
+            revision: str | None = None,
+        ) -> None:
+            if getattr(hf_config, "vision_n_layers", 0) > 0:
+                hf_config.mm_prefix_clamp_sliding_window = True
+            super().__init__(hf_config, hf_text_config, revision)
+
+        def is_mm_prefix_lm(self, supports_multimodal: bool = True) -> bool:
+            return supports_multimodal and (getattr(self.hf_config, "vision_n_layers", 0) > 0)
+
+    MODEL_ARCH_CONFIG_CONVERTORS["deepseek_v41"] = AscendDeepseekV41ModelArchConfigConvertor
     _REGISTERED = True

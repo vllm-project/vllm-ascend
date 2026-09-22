@@ -2,7 +2,8 @@ import vllm
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
-from vllm_ascend.patch.worker.patch_bind_kv_cache import bind_kv_cache
+from vllm_ascend.patch.worker.patch_bind_kv_cache import bind_kv_cache, bind_kv_cache_to_layers
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import (
     _allocate_kv_cache,
     _reshape_kv_cache_v2,
@@ -21,4 +22,8 @@ vllm.v1.worker.gpu.attn_utils._reshape_kv_cache = _reshape_kv_cache_v2
 # vLLM #51718 made this the live allocation symbol used by init_kv_cache.
 vllm.v1.worker.gpu.attn_utils.allocate_kv_cache = allocate_kv_cache_main
 vllm.v1.worker.gpu.attn_utils.bind_kv_cache = bind_kv_cache
+if not vllm_version_is("0.29.0"):
+    # vLLM main routes init_kv_cache through bind_kv_cache_to_layers instead of
+    # the runner-list bind_kv_cache, so patch the symbol it now calls.
+    vllm.v1.worker.gpu.attn_utils.bind_kv_cache_to_layers = bind_kv_cache_to_layers
 vllm.v1.worker.gpu.model_runner.get_kv_cache_spec = get_kv_cache_spec

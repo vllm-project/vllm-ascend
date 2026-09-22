@@ -163,6 +163,11 @@ def normalize_deepseek_v41_config(hf_config: Any) -> Any:
     hf_config.rope_parameters = rope
     hf_config.image_sentinel_base_id = getattr(hf_config, "image_token_id", 129264)
     hf_config.image_pad_token_id = hf_config.image_sentinel_base_id + 1
+    # Upstream main moved these mm-prefix flags off the released config; keep
+    # them for Ascend's V4.1 vision path and for code that reads the HF config.
+    vision_enabled = getattr(hf_config, "vision_n_layers", 0) > 0
+    hf_config.is_mm_prefix_lm = vision_enabled
+    hf_config.mm_prefix_clamp_sliding_window = vision_enabled
     supported_rotation = {
         "value_projection_rotated": True,
         "value_basis": "quarot_global",
@@ -650,7 +655,25 @@ def attention_calculation_stream() -> torch.npu.Stream:
     return _ATNN_CALCULATION_STREAM
 
 
+def _patch_triton_language_placeholder() -> None:
+    """Make the Triton language placeholder callable when Triton is absent.
+
+    Upstream modules such as the DeepSeek V4.1 sparse MQA-logits kernel call
+    ``tl.constexpr(...)`` at import time. vLLM's ``TritonLanguagePlaceholder``
+    sets its language attributes to ``None`` when Triton is unavailable, so
+    importing such a module raises instead of staying inert.
+    """
+    import vllm.triton_utils as triton_utils
+
+    if getattr(triton_utils, "HAS_TRITON", True):
+        return
+    tl = getattr(triton_utils, "tl", None)
+    if tl is not None and getattr(tl, "constexpr", None) is None:
+        tl.constexpr = lambda value: value
+
+
 def adapt_patch(is_global_patch: bool = False):
+    _patch_triton_language_placeholder()
     if is_global_patch:
         from vllm_ascend.patch import platform  # noqa: F401
     else:

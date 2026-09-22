@@ -35,7 +35,7 @@ from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import enable_sp, has_rope, is_vl_model
+from vllm_ascend.utils import enable_sp, has_rope, is_vl_model, vllm_version_is
 
 if HAS_TRITON:
     from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
@@ -313,21 +313,51 @@ class AscendYaRNRotaryEmbedding(YaRNScalingRotaryEmbedding):
         attn_factor: float = 1,
         beta_fast: int = 32,
         beta_slow: int = 1,
+        mscale: float | None = None,
+        mscale_all_dim: float | None = None,
+        attention_factor: float | None = None,
         apply_yarn_scaling: bool = True,
         truncate: bool = False,
     ) -> None:
-        extra_kwargs = {
-            "extrapolation_factor": extrapolation_factor,
-            "attn_factor": attn_factor,
-            "beta_fast": beta_fast,
-            "beta_slow": beta_slow,
-            "apply_yarn_scaling": apply_yarn_scaling,
-            # TODO: current not support actual truncate，adaptation for extra parameters to be compatible with vllm
-            "truncate": truncate,
-        }
-        super().__init__(
-            head_size, rotary_dim, max_position_embeddings, base, is_neox_style, scaling_factor, dtype, **extra_kwargs
-        )
+        # YaRN's scaling kwargs were renamed upstream (extrapolation_factor /
+        # attn_factor / apply_yarn_scaling -> mscale / mscale_all_dim /
+        # attention_factor), so accept the union and forward only the set the
+        # installed vLLM understands.
+        if vllm_version_is("0.29.0"):
+            super().__init__(  # type: ignore[call-arg]
+                head_size,
+                rotary_dim,
+                max_position_embeddings,
+                base,
+                is_neox_style,
+                scaling_factor,
+                dtype,
+                extrapolation_factor=extrapolation_factor,
+                attn_factor=attn_factor,
+                beta_fast=beta_fast,
+                beta_slow=beta_slow,
+                apply_yarn_scaling=apply_yarn_scaling,
+                # TODO: current not support actual truncate，adaptation for extra parameters to be compatible with vllm
+                truncate=truncate,
+            )
+        else:
+            if not apply_yarn_scaling and attention_factor is None:
+                attention_factor = float(attn_factor)
+            super().__init__(  # type: ignore[call-arg]
+                head_size,
+                rotary_dim,
+                max_position_embeddings,
+                base,
+                is_neox_style,
+                scaling_factor,
+                dtype,
+                beta_fast=beta_fast,
+                beta_slow=beta_slow,
+                mscale=mscale,
+                mscale_all_dim=mscale_all_dim,
+                attention_factor=attention_factor,
+                truncate=truncate,
+            )
         vllm_config = get_current_vllm_config()
         self.use_mtp = vllm_config.speculative_config and vllm_config.speculative_config.method == "mtp"
         _record_cos_sin_cache(self.cos_sin_cache)

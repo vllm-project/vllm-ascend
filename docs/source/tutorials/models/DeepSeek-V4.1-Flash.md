@@ -444,7 +444,7 @@ version, and whether DSpark is enabled.
 
 Refer to the
 [AISBench performance evaluation guide](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation)
-or the [vLLM benchmark guide](https://github.com/vllm-project/vllm/blob/84030bbe3d74d99bad477a3d2e37a973ccd8865c/docs/benchmarking/README.md).
+or the [vLLM benchmark guide](https://github.com/vllm-project/vllm/blob/1fee69838eeb72622b441a593888687831c1e434/docs/benchmarking/README.md).
 No production performance baseline is published for this configuration.
 
 ## 9 Performance Tuning

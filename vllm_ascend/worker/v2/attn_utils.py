@@ -876,6 +876,46 @@ def _allocate_kv_cache(
     return kv_cache_raw_tensors
 
 
+class AscendKVCacheView(tuple):
+    """Ascend per-layer KV cache stored as a tensor tuple.
+
+    vLLM main's ``GPUModelRunner.initialize_kv_cache`` keeps
+    ``[cache for cache in kv_caches_dict.values() if cache.device == self.device]``,
+    so every allocated entry must expose ``.device`` even when Ascend packs the
+    layer as ``(k_cache[, v_cache])``. A ``tuple`` subclass keeps the existing
+    tuple contract for every downstream consumer while adding that attribute.
+    """
+
+    __slots__ = ()
+
+    @property
+    def device(self) -> torch.device:
+        first: torch.Tensor = self[0]
+        return first.device
+
+
+class AscendKVCacheListView(list):
+    """List-shaped Ascend KV cache (e.g. the K-pool tail) exposing ``.device``."""
+
+    __slots__ = ()
+
+    @property
+    def device(self) -> torch.device:
+        first: torch.Tensor = self[0]
+        return first.device
+
+
+def _device_aware_cache(value: Any) -> Any:
+    """Attach a ``.device`` to non-tensor cache entries for main's device filter."""
+    if isinstance(value, (AscendKVCacheView, AscendKVCacheListView)):
+        return value
+    if isinstance(value, tuple):
+        return AscendKVCacheView(value)
+    if isinstance(value, list):
+        return AscendKVCacheListView(value)
+    return value
+
+
 def allocate_kv_cache_main(
     kv_cache_config: KVCacheConfig,
     device: torch.device,
@@ -1214,7 +1254,15 @@ def _reshape_kv_cache_v2(
 
     for layer_name, target_layer_name in shared_kv_cache_layers.items():
         kv_caches[layer_name] = kv_caches[target_layer_name]
-    return kv_caches
+    # Wrap each distinct non-tensor cache once: shared-layer aliases must stay
+    # the same object (upstream asserts `caches["alias"] is caches[layer]`).
+    wrapped: dict[int, Any] = {}
+    result: dict[str, Any] = {}
+    for layer_name, cache in kv_caches.items():
+        if id(cache) not in wrapped:
+            wrapped[id(cache)] = _device_aware_cache(cache)
+        result[layer_name] = wrapped[id(cache)]
+    return result
 
 
 _BUILD_ATTN_METADATA_MODULE = vllm.v1.worker.gpu.spec_decode.speculator

@@ -72,6 +72,7 @@ class TestRecomputeSchedulerWithoutShortRequestFirst(TestBase):
             max_model_len=MAX_NUM_BATCHED_TOKENS,
         )
         model_config.pooler_config = MagicMock()
+        model_config.runner_type = "generate"
         model_config.multimodal_config = None
         model_config.served_model_name = MODEL
         model_config.hf_config = MagicMock()

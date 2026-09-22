@@ -77,20 +77,26 @@ class _FakeBlockPool:
 
 
 class _FakeFAManager:
+    block_size: int
+
     def __init__(self, **kwargs):
         self.use_eagle = False
 
 
 class _FakeMambaManager:
+    block_size: int
+
     def __init__(self, **kwargs):
         self.use_eagle = False
 
 
 def _fake_manager_factory(**kwargs):
     spec = kwargs["kv_cache_spec"]
-    if isinstance(spec, MambaSpec):
-        return _FakeMambaManager()
-    return _FakeFAManager()
+    manager = _FakeMambaManager() if isinstance(spec, MambaSpec) else _FakeFAManager()
+    # Real managers expose the resolved per-group block size, which the
+    # coordinator mirrors into ``group_block_sizes``.
+    manager.block_size = spec.block_size  # type: ignore[attr-defined]
+    return manager
 
 
 def _hybrid_config(*, mamba_eagle: bool = False) -> KVCacheConfig:

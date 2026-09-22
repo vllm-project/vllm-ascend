@@ -17,6 +17,7 @@
 
 import importlib.util
 import sys
+from pathlib import Path
 from types import ModuleType
 
 _triton_available = importlib.util.find_spec("triton") is not None
@@ -48,6 +49,47 @@ if _triton_available:
     else:
         if not hasattr(_tl_core, "_aggregate"):
             _tl_core._aggregate = lambda *a, **kw: None
+
+
+# main2main compat: an in-place vllm upgrade can leave the old
+# ``vllm/multimodal/cache.py`` module on disk next to the new
+# ``vllm/multimodal/cache/`` package (or vice versa). A directory shadows a
+# module of the same name, so whichever form is authoritative must win. On
+# the 0.29.0 release the module is ``cache.py``; on vLLM main the package is
+# authoritative and a stale ``cache.py`` must be ignored.
+class _MultimodalCacheModuleFinder:
+    """Resolve ``vllm.multimodal.cache`` to the authoritative form.
+
+    The 0.29.0 release uses ``cache.py``; a stale ``cache/`` package from an
+    in-place upgrade would shadow it. The version check is deferred to
+    ``find_spec`` because importing ``vllm_ascend.utils`` while ``vllm_ascend``
+    itself is being imported by vLLM's platform discovery breaks device type
+    inference.
+    """
+
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname != "vllm.multimodal.cache":
+            return None
+        from vllm_ascend.utils import vllm_version_is
+
+        if not vllm_version_is("0.29.0"):
+            return None
+        try:
+            import vllm
+        except Exception:
+            return None
+        if not vllm.__file__:
+            return None
+        multimodal_dir = Path(vllm.__file__).parent / "multimodal"
+        cache_py = multimodal_dir / "cache.py"
+        if not cache_py.is_file() or not (multimodal_dir / "cache").is_dir():
+            return None
+        return importlib.util.spec_from_file_location(fullname, cache_py)
+
+
+if not any(isinstance(_finder, _MultimodalCacheModuleFinder) for _finder in sys.meta_path):
+    sys.meta_path.insert(0, _MultimodalCacheModuleFinder())
+
 
 _GLOBAL_PATCH_APPLIED = False
 

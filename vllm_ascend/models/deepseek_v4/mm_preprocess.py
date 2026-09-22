@@ -20,9 +20,7 @@ vision/sentinel vectors before the decoder layers see it, exactly like the
 reference's out-of-vocab scheme.
 """
 
-import copy
 import math
-import threading
 from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
@@ -65,22 +63,6 @@ IMAGE_SENTINEL_TOKEN_NAMES = (
     "<|place_holder_mm_span_0434|>",  # IMAGE_NEW_LINE
     "<|place_holder_mm_span_0435|>",  # IMAGE_END
 )
-
-# Fast tokenizers temporarily mutate truncation and padding state during a
-# call. Multimodal preprocessing runs in a thread pool while the renderer can
-# use the same tokenizer concurrently, so keep an independent tokenizer
-# backend per preprocessing thread.
-_TOKENIZER_THREAD_LOCAL = threading.local()
-
-
-def _get_thread_local_tokenizer(tokenizer):
-    cached = getattr(_TOKENIZER_THREAD_LOCAL, "tokenizer", None)
-    source_id = getattr(_TOKENIZER_THREAD_LOCAL, "source_id", None)
-    if cached is None or source_id != id(tokenizer):
-        cached = copy.deepcopy(tokenizer)
-        _TOKENIZER_THREAD_LOCAL.tokenizer = cached
-        _TOKENIZER_THREAD_LOCAL.source_id = id(tokenizer)
-    return cached
 
 
 def image_sentinel_mask(token_ids: torch.Tensor) -> torch.Tensor:
@@ -387,26 +369,20 @@ class DeepseekV4VLDummyInputsBuilder(BaseDummyInputsBuilder[DeepseekV4VLProcessi
 class DeepseekV4VLMultiModalProcessor(BaseMultiModalProcessor[DeepseekV4VLProcessingInfo]):
     def _call_hf_processor(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
+        hf_data: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        """Combine the local image transform with v0.27 tokenization."""
-        processor = self.info.get_hf_processor(**mm_kwargs)
-        processed = processor(
-            text=prompt,
-            images=cast(Sequence[Image.Image] | None, mm_data.get("images")),
+        """Run the local image transform over the normalized HF inputs.
+
+        The prompt token IDs are produced by the renderer, so this hook no
+        longer injects ``input_ids`` from the tokenizer.
+        """
+        processor = self.info.get_hf_processor(**hf_kwargs)
+        return processor(
+            text=cast(str | None, hf_data.get("text")),
+            images=cast(Sequence[Image.Image] | None, hf_data.get("images")),
             return_tensors="pt",
         )
-        tokenizer = _get_thread_local_tokenizer(self.info.get_tokenizer())
-        tokenizer_outputs = tokenizer(
-            prompt,
-            return_tensors="pt",
-            **tok_kwargs,
-        )
-        processed["input_ids"] = tokenizer_outputs["input_ids"]
-        return processed
 
     def _hf_processor_applies_updates(
         self,

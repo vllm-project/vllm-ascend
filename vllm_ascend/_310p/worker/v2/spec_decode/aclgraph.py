@@ -91,8 +91,9 @@ class AutoRegressiveAclGraphManager310(AutoRegressiveAclGraphManager):
             num_tokens: int,
             input_buffers_arg: Any,
             max_query_len: int | None = None,
+            is_padding: bool = True,
         ) -> AscendInputBatch:
-            kwargs: dict[str, Any] = {}
+            kwargs: dict[str, Any] = {"is_padding": is_padding}
             if max_query_len is not None:
                 kwargs["max_query_len"] = max_query_len
             batch = orig_make_dummy(num_reqs, num_tokens, input_buffers_arg, **kwargs)

@@ -15,6 +15,9 @@
 # This file is a part of the vllm-ascend project.
 #
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+
 import torch
 import torch.distributed as dist
 from vllm.distributed.device_communicators.base_device_communicator import DeviceCommunicatorBase
@@ -29,6 +32,18 @@ class _NpuAll2AllManager:
     @property
     def support_fault_tolerance(self) -> bool:
         return False
+
+    # Elastic EP staging/commit hooks (vLLM main); NPU reconfigures its own
+    # MoE communication, so these are no-ops like the All2AllManagerBase ones.
+    def stage_ep_size(self) -> None:
+        pass
+
+    def commit_ep_size(self) -> None:
+        pass
+
+    @contextmanager
+    def mask_remote_ranks(self) -> Iterator[None]:
+        yield
 
     def query_fault(self) -> torch.Tensor:
         return torch.zeros(1, dtype=torch.bool, device="cpu")

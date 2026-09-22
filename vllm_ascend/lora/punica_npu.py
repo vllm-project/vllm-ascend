@@ -590,3 +590,18 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         self.bgmv_expand(buffer, lora_b_stacked, y, indices, add_inputs=True)
 
         y = y.view_as(y_org)
+
+    def apply_lora_full_linear(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        weight_stacked: torch.Tensor,
+        bias_stacked: torch.Tensor,
+        module_enabled: torch.Tensor,
+    ) -> torch.Tensor | None:
+        """Apply request-routed full linear weights to selected rows.
+
+        Full-linear classifier LoRA adapters are not implemented for the
+        Ascend NPU punica path.
+        """
+        raise NotImplementedError("apply_lora_full_linear is not supported on Ascend NPU.")

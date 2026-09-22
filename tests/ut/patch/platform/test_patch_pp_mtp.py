@@ -223,7 +223,7 @@ def test_pp_ipc_sampled_token_handoff_advances_async_non_last_rank_state(
     runner.discard_request_mask = SimpleNamespace(
         np=np.zeros(2, dtype=bool),
     )
-    runner.input_batch = SimpleNamespace(
+    runner.input_batch = SimpleNamespace(  # type: ignore[assignment]
         num_reqs=2,
         req_ids=["req-0", "req-1"],
         prev_sampled_token_ids=None,
@@ -249,7 +249,7 @@ def test_pp_ipc_sampled_token_handoff_advances_async_non_last_rank_state(
         "req-0": 0,
         "req-1": 1,
     }
-    assert runner.input_batch.prev_sampled_token_ids.tolist() == [[101], [202]]
+    assert runner.input_batch.prev_sampled_token_ids.tolist() == [[101], [202]]  # type: ignore[union-attr]
     assert runner.requests["req-0"].output_token_ids == [
         31,
         PLACEHOLDER_TOKEN_ID,
@@ -277,7 +277,7 @@ def test_pp_ipc_sampled_token_handoff_keeps_sync_path_on_scheduler_tokens(
     runner.is_kv_consumer = False
     runner.use_async_scheduling = False
     runner.device = torch.device("cpu")
-    runner.input_batch = SimpleNamespace(
+    runner.input_batch = SimpleNamespace(  # type: ignore[assignment]
         num_reqs=1,
         req_ids=["req-0"],
         prev_sampled_token_ids="keep",
@@ -319,6 +319,7 @@ def test_pp_mtp_spec_tokens_are_written_from_model_runner_output_for_sync_and_as
         requests={"req-0": request},
         structured_output_manager=SimpleNamespace(
             should_advance=lambda _request: False,
+            validate_tokens=lambda _request, tokens: tokens,
         ),
     )
     scheduler_output = SimpleNamespace(num_scheduled_tokens={"req-0": 1})
@@ -389,7 +390,10 @@ def test_pp_mtp_spec_token_id_edge_cases():
     )
     scheduler = SimpleNamespace(
         requests={"fin": finished, "adv": advancing, "empty": empty_sampled},
-        structured_output_manager=SimpleNamespace(should_advance=lambda req: req is advancing),
+        structured_output_manager=SimpleNamespace(
+            should_advance=lambda req: req is advancing,
+            validate_tokens=lambda req, tokens: tokens[:1] if req is advancing else tokens,
+        ),
     )
     scheduler_output = SimpleNamespace(
         num_scheduled_tokens={"missing": 1, "fin": 1, "no-index": 1, "empty": 1, "adv": 1},

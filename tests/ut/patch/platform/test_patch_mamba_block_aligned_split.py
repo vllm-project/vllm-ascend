@@ -41,7 +41,7 @@ def _scheduler(
     scheduler_kwargs: dict = {}
     scheduler_kwargs["mamba_has_prefill_checkpoint_blocks"] = False
     if not vllm_version_is("0.29.0"):
-        scheduler_kwargs["mamba_fine_grained_prefix_cache"] = False
+        scheduler_kwargs["mamba_shared_prefix_checkpoint"] = False
     indexer_config = {"index_topk": 2048, "index_kpool": 4} if uses_sparse_index_kpool else {}
     return SimpleNamespace(
         vllm_config=SimpleNamespace(

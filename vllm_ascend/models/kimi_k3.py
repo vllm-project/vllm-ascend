@@ -516,13 +516,22 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
         # Ascend attention returns its output instead of filling an AMD buffer.
         return self.self_attn(positions=positions, hidden_states=hidden_states)
 
-    def forward_attn_residual(
+    def forward_attn_residual(  # type: ignore[override]
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         block_residual: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Run Kimi attention residuals with Ascend attention and MoE."""
+        prefix_delta: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        """Run Kimi attention residuals with Ascend attention and MoE.
+
+        main2main compat: vLLM main after 0.29.0 threads the previous layer's
+        MLP delta through ``prefix_delta`` and returns it as a third value.
+        Ascend's kernels fold that delta into ``prefix_sum`` in place, so the
+        incoming delta is unused and ``None`` is returned; the accumulated
+        hidden states already carry it. The 0.29.0 release calls this with no
+        ``prefix_delta`` and only reads the first two values.
+        """
         prefix_sum: torch.Tensor | None = hidden_states
         hidden_states = _apply_ascend_attn_res(
             prefix_sum,
@@ -559,7 +568,7 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
         hidden_states = prefix_sum + hidden_states
-        return hidden_states, block_residual
+        return hidden_states, block_residual, None
 
 
 class AscendKimiLinearModel(UpstreamKimiLinearModel):
@@ -723,6 +732,7 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         if residual is not None:
             block_residual[:, : residual.size(1), :].copy_(residual)
         residual = block_residual
+        prefix_delta: torch.Tensor | None = None
 
         for layer_idx, layer in enumerate(
             self.layers[self.start_layer : self.end_layer],
@@ -738,21 +748,25 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
                         layer.prev_valid_blocks,
                     )
                 )
-            hidden_states, residual = layer(
+            hidden_states, residual, prefix_delta = layer(
                 positions=positions,
                 hidden_states=hidden_states,
                 residual=residual,
+                prefix_delta=prefix_delta,
             )
             if not self.dspark_aux_capture_materialized and (layer_idx + 1) in self.aux_hidden_state_layers:
+                layer_hidden_states = hidden_states if prefix_delta is None else hidden_states + prefix_delta
                 self._maybe_add_hidden_state(
                     aux_hidden_states,
                     layer_idx + 1,
-                    hidden_states,
+                    layer_hidden_states,
                     residual,
                 )
 
         if not get_pp_group().is_last_rank:
             assert not self.use_sequence_parallel, "Sequence parallelism is not supported with pipeline parallelism"
+            if prefix_delta is not None:
+                hidden_states = hidden_states + prefix_delta
             return IntermediateTensors(
                 {
                     "hidden_states": hidden_states,

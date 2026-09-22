@@ -1497,6 +1497,10 @@ class AscendDSAImpl(AttentionImplBase[Any]):
     understand this class
     """
 
+    def record_logical_topk_ready(self) -> None:
+        """No-op: Ascend DSA owns no upstream SparseMLAIndexGroup."""
+        return
+
     def __init__(
         self,
         n_heads: int,

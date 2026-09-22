@@ -30,6 +30,8 @@ from itertools import chain
 
 from vllm.logger import logger
 
+from vllm_ascend.utils import vllm_version_is
+
 _PATCHED = False
 _PP_IN_FLIGHT_STEP = 1 << 60
 
@@ -227,10 +229,14 @@ def _update_pp_mtp_spec_token_ids(scheduler, scheduler_output, model_runner_outp
             continue
 
         next_spec_token_ids = spec_token_ids[req_index]
-        if scheduler.structured_output_manager.should_advance(request):
-            metadata = request.structured_output_request
-            assert metadata is not None and metadata.grammar is not None
-            next_spec_token_ids = metadata.grammar.validate_tokens(next_spec_token_ids)
+        manager = scheduler.structured_output_manager
+        if vllm_version_is("0.29.0"):
+            if manager.should_advance(request):  # type: ignore[attr-defined]
+                metadata = request.structured_output_request
+                assert metadata is not None and metadata.grammar is not None
+                next_spec_token_ids = metadata.grammar.validate_tokens(next_spec_token_ids)
+        else:
+            next_spec_token_ids = manager.validate_tokens(request, next_spec_token_ids)  # type: ignore[attr-defined]
         request.spec_token_ids = next_spec_token_ids
 
 

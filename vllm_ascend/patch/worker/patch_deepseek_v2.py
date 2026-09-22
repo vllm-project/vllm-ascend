@@ -1,4 +1,5 @@
 from itertools import islice
+from typing import Any
 
 import torch
 from torch import nn
@@ -73,9 +74,13 @@ def _deepseek_v2_mla_attention_init(
     quant_config: QuantizationConfig | None = None,
     prefix: str = "",
     topk_indices_buffer: torch.Tensor | None = None,
+    # vLLM main added the index-group builder; Ascend's MLA/DSA impls do not
+    # consume the upstream SparseMLAIndexGroup, so it is accepted and dropped.
+    index_group_builder: Any | None = None,
     input_size: int | None = None,
     reduce_results: bool = True,
 ) -> None:
+    del index_group_builder
     # 这里不能使用 super().__init__()，因为当前函数定义在原类之外，
     # 最后通过赋值的方式替换 DeepseekV2MLAAttention.__init__。
     nn.Module.__init__(self)

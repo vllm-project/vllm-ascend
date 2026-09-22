@@ -64,7 +64,8 @@ class SwiftBalanceEplb(EplbPolicy):
             workload_layer = expert_workload[layer_idx].copy()
             for npu_idx in range(npu_num):
                 for expert_idx in range(experts_per_npu):
-                    workload_dict[int(placement_layer[npu_idx][expert_idx])] += workload_layer[npu_idx][expert_idx]
+                    slot = int(placement_layer[npu_idx][expert_idx])
+                    workload_dict[slot] += workload_layer[npu_idx][expert_idx]  # type: ignore[assignment]
             for expert_idx in range(num_original_expert):
                 workload_new[layer_idx][expert_idx] = workload_dict[expert_idx]
         return workload_new

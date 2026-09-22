@@ -127,7 +127,7 @@ def test_ascend_attn_res_matches_canonical_k3_math():
 def test_k3_dspark_reports_draft_attention_causality():
     model = AscendK3DSparkForCausalLM.__new__(AscendK3DSparkForCausalLM)
     nn.Module.__init__(model)
-    model.model = SimpleNamespace(layers=[object(), object(), object()])
+    model.model = SimpleNamespace(layers=[object(), object(), object()])  # type: ignore[assignment]
 
     model.config = SimpleNamespace(dflash_config={"causal": True})
     assert model.get_draft_attn_causal() == [True, True, True]
@@ -270,11 +270,12 @@ def test_kimi_attention_residual_stays_sequence_sharded(monkeypatch):
 
     hidden_states = torch.arange(4, dtype=torch.float32).view(2, 2)
     block_residual = torch.zeros(2, 1, 2)
-    output, returned_residual = layer.forward_attn_residual(
+    output, returned_residual, prefix_delta = layer.forward_attn_residual(
         positions=torch.arange(3),
         hidden_states=hidden_states,
         block_residual=block_residual,
     )
+    assert prefix_delta is None
 
     assert collective_shapes == [
         ("gather", torch.Size([2, 2])),
@@ -290,9 +291,9 @@ def test_kimi_model_allocates_attention_residual_after_sp_shard(monkeypatch):
             super().__init__()
             self.residual_shape = None
 
-        def forward(self, *, positions, hidden_states, residual):
+        def forward(self, *, positions, hidden_states, residual, prefix_delta=None):
             self.residual_shape = residual.shape
-            return hidden_states, residual
+            return hidden_states, residual, None
 
     model = AscendKimiLinearModel.__new__(AscendKimiLinearModel)
     nn.Module.__init__(model)
@@ -351,8 +352,8 @@ def test_kimi_model_selects_materialized_or_raw_dspark_aux_stream(monkeypatch):
             self.self_attention_res_proj = nn.Identity()
             self.self_attention_res_norm = nn.Identity()
 
-        def forward(self, *, positions, hidden_states, residual):
-            del positions
+        def forward(self, *, positions, hidden_states, residual, prefix_delta=None):
+            del positions, prefix_delta
             materialized = kimi_k3._apply_ascend_attn_res(
                 hidden_states,
                 residual,
@@ -360,7 +361,7 @@ def test_kimi_model_selects_materialized_or_raw_dspark_aux_stream(monkeypatch):
                 self.self_attention_res_norm,
                 self.prev_valid_blocks,
             )
-            return materialized + 10, residual
+            return materialized + 10, residual, None
 
     def fake_attn_res(prefix_sum, _residual, _projection, _norm, num_valid_blocks):
         return prefix_sum + 100 * num_valid_blocks
@@ -492,7 +493,7 @@ def test_k3_dspark_post_process_rotates_projection_and_target_boundaries(tmp_pat
 def test_k3_dspark_embed_input_ids_merges_multimodal_embeddings():
     model = AscendK3DSparkForCausalLM.__new__(AscendK3DSparkForCausalLM)
     nn.Module.__init__(model)
-    model.model = SimpleNamespace(
+    model.model = SimpleNamespace(  # type: ignore[assignment]
         embed_input_ids=nn.Embedding.from_pretrained(torch.tensor([[0.0, 0.0], [1.0, 2.0], [3.0, 4.0]])),
     )
     input_ids = torch.tensor([1, 999, 2])

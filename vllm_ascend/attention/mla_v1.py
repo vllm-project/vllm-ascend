@@ -795,6 +795,10 @@ class AscendMLAImpl(MLAAttentionImpl):
     understand this class
     """
 
+    def record_logical_topk_ready(self) -> None:
+        """No-op: Ascend MLA owns no upstream SparseMLAIndexGroup."""
+        return
+
     def __init__(
         self,
         num_heads: int,

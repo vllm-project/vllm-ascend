@@ -361,7 +361,29 @@ class TestAscendYaRNRotaryEmbeddingForwardOOT:
         Fail loudly if YaRNScalingRotaryEmbedding.__init__ adds, removes, or
         renames parameters, so a developer knows to update AscendYaRNRotaryEmbedding
         accordingly.
+
+        YaRN's scaling kwargs were renamed upstream (extrapolation_factor /
+        attn_factor / apply_yarn_scaling -> mscale / mscale_all_dim /
+        attention_factor), so AscendYaRNRotaryEmbedding accepts the union of
+        both sets; the version-specific names are allowed here.
         """
-        check_parent_init_signature_has_not_changed(
-            YaRNScalingRotaryEmbedding.__init__, AscendYaRNRotaryEmbedding.__init__
+        parent_params = set(inspect.signature(YaRNScalingRotaryEmbedding.__init__).parameters) - {"self"}
+        child_params = set(inspect.signature(AscendYaRNRotaryEmbedding.__init__).parameters) - {"self"}
+        version_specific = {
+            "extrapolation_factor",
+            "attn_factor",
+            "apply_yarn_scaling",
+            "mscale",
+            "mscale_all_dim",
+            "attention_factor",
+        }
+        added = parent_params - child_params
+        removed = child_params - parent_params - version_specific
+        assert not added, (
+            f"YaRNScalingRotaryEmbedding added new parameter(s): {added}. "
+            f"Check whether AscendYaRNRotaryEmbedding needs to forward them."
+        )
+        assert not removed, (
+            f"AscendYaRNRotaryEmbedding has unexpected parameter(s): {removed}. "
+            f"Update the version-specific allow-list if vLLM renamed them."
         )
