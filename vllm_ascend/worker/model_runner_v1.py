@@ -166,6 +166,7 @@ from vllm_ascend.utils import (
     set_potential_max_tokens,
     should_skip_allreduce_across_dp_group,
 )
+from vllm_ascend.worker.compressor_checkpoint import copy_compressor_tail_pages
 from vllm_ascend.worker.dcp_utils import DCPAsyncSpecDecodeRebuildResult, DCPManager
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.utils import AscendKVBlockZeroer
@@ -193,6 +194,7 @@ else:
 from vllm.model_executor.layers.attention import Attention, MLAAttention
 
 from vllm_ascend.core.kv_cache_interface import (
+    AscendCompressorTailSpec,
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
     AscendSlidingWindowMLASpec,
@@ -1798,6 +1800,10 @@ class NPUModelRunner(GPUModelRunner):
                     scheduler_output
                 )
 
+                compressor_restores = getattr(scheduler_output, "compressor_restores", ())
+                if compressor_restores:
+                    copy_compressor_tail_pages(compressor_restores, self._compressor_checkpoint_pages)
+
                 if has_ec_transfer() and get_ec_transfer().is_producer:
                     self._start_dump_data()
                     with self.maybe_get_ec_connector_output(
@@ -2060,6 +2066,17 @@ class NPUModelRunner(GPUModelRunner):
             hidden_states = self._model_forward(
                 num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
             )
+            compressor_saves = getattr(scheduler_output, "compressor_saves", ())
+            if compressor_saves:
+                copy_compressor_tail_pages(compressor_saves, self._compressor_checkpoint_pages)
+            if compressor_saves or compressor_restores:
+                # One completion fence per checkpoint step, not per layer.
+                # The CPU TP barrier follows each rank's stream event, so the
+                # output rank cannot acknowledge another rank's unfinished save.
+                checkpoint_done = torch.npu.Event()
+                checkpoint_done.record()
+                checkpoint_done.synchronize()
+                get_tp_group().barrier()
         with record_function_or_nullcontext("post process"):
             aux_hidden_states = None
             if self.use_aux_hidden_state_outputs:
@@ -3658,6 +3675,18 @@ class NPUModelRunner(GPUModelRunner):
         """
         # Initialize the memory buffer for KV cache
         kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
+
+        self._compressor_checkpoint_pages = {}
+        layer_specs = self._get_layer_kv_cache_specs(kv_cache_config)
+        for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
+            tail_layers = [
+                name for name in group.layer_names if isinstance(layer_specs[name], AscendCompressorTailSpec)
+            ]
+            if tail_layers:
+                self._compressor_checkpoint_pages[group_id] = [
+                    kv_cache_raw_tensors[name].view(kv_cache_config.num_blocks, layer_specs[name].page_size_bytes)
+                    for name in tail_layers
+                ]
         # Change the memory buffer to the desired shape
         kv_caches = self._reshape_kv_cache_tensors(kv_cache_config, kv_cache_raw_tensors)
 

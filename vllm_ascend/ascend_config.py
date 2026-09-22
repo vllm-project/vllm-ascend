@@ -46,7 +46,22 @@ def get_dsv4_shared_compressor_workspace_fallback_reasons(
     if multistream_dsv4_dsa_overlap:
         reasons.append("multistream_dsv4_dsa_overlap is enabled")
     if vllm_config.cache_config.enable_prefix_caching:
-        reasons.append("prefix caching is enabled")
+        scheduler = vllm_config.scheduler_config
+        if scheduler.async_scheduling is not False:
+            reasons.append("compressor checkpoints require explicit synchronous scheduling")
+        if vllm_config.cache_config.block_size != 32:
+            reasons.append("compressor checkpoints currently require block_size=32")
+        if vllm_config.parallel_config.pipeline_parallel_size != 1:
+            reasons.append("compressor checkpoints require pipeline_parallel_size=1")
+        if vllm_config.parallel_config.data_parallel_size != 1:
+            reasons.append("compressor checkpoints currently require data_parallel_size=1")
+        if vllm_config.use_v2_model_runner:
+            reasons.append("compressor checkpoints require the v1 model runner")
+        if vllm_config.kv_events_config is not None and vllm_config.kv_events_config.enable_kv_cache_events:
+            reasons.append("compressor checkpoint KV events are not supported")
+        checkpoint_scheduler = "vllm_ascend.core.compressor_checkpoint_scheduler.CompressorCheckpointScheduler"
+        if scheduler.scheduler_cls not in (None, checkpoint_scheduler):
+            reasons.append("compressor checkpoints require the checkpoint scheduler")
     if vllm_config.kv_transfer_config is not None:
         reasons.append("KV transfer/P-D is enabled")
     if vllm_config.speculative_config is not None:
@@ -196,6 +211,18 @@ class AscendConfig:
             shared_compressor_workspace_requested
             and not shared_compressor_workspace_fallback_reasons
         )
+        if self.enable_dsv4_shared_compressor_workspace and vllm_config.cache_config.enable_prefix_caching:
+            if (
+                self.scheduler_config.enable_balance_scheduling
+                or self.scheduler_config.recompute_scheduler_enable
+                or self.scheduler_config.short_request_first_config.enabled
+                or self.scheduler_config.profiling_chunk_config.enabled
+                or self.scheduler_config.batch_job_sched_config.enabled
+            ):
+                shared_compressor_workspace_fallback_reasons.append(
+                    "compressor checkpoints cannot be combined with scheduler extensions"
+                )
+                self.enable_dsv4_shared_compressor_workspace = False
         if shared_compressor_workspace_requested:
             if shared_compressor_workspace_fallback_reasons:
                 logger.info_once(

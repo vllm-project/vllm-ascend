@@ -963,6 +963,43 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/) for more
 
 Currently, we support 4k prefix cache hit in an experimental manner. You only need to change the value of --block-size from 128 to 32 in the service.
 
+#### Prefix caching with fixed compressor rings
+
+The experimental shared compressor workspace can also reuse prefixes by saving
+immutable compressor-tail checkpoints and restoring them into each request's
+private ring. The validated configuration is Atlas A3, TP8, DP1, PP1, the v1
+model runner, eager execution, synchronous scheduling, and `--block-size 32`.
+For this configuration, use these options alongside the model's loading options:
+
+```bash
+VLLM_USE_V2_MODEL_RUNNER=0 vllm serve /path/to/model \
+    --tensor-parallel-size 8 \
+    --enforce-eager --no-async-scheduling \
+    --enable-prefix-caching --block-size 32 \
+    --additional-config '{"enable_dsv4_shared_compressor_workspace": true, "multistream_dsv4_dsa_overlap": false}'
+```
+
+Do not combine this path with speculative decoding, KV transfer/P-D, context
+parallelism, KV cache events, or custom scheduler extensions. Unsupported
+configurations fall back to the existing continuous state-cache path and log
+the reason.
+
+With this layout, eligible checkpoint boundaries are multiples of 4096 input
+tokens. A hit requires both a completed tail snapshot and the corresponding
+compressed KV, indexer, and sliding-window cache entries. Missing dependencies
+reduce the hit to an earlier complete checkpoint or a cache miss. A longer
+shared prefix alone does not guarantee a longer hit.
+
+Snapshots use at most one sixteenth of the existing KV block pool and can be
+reclaimed for request admission; they do not allocate a separate device-memory
+budget. If retaining a hit snapshot prevents admission, it can be discarded
+and the next scheduling attempt recomputes the prefix. Reset requires completed
+copies. A default reset refused because requests still hold KV leaves snapshots
+intact.
+Prefill chunks may end early to capture a new checkpoint. Disabling
+prefix caching preserves the original ring scheduling behavior. Block sizes
+64 and 128 are not supported by this checkpoint path.
+
 ### 9.2 Tuning Guidelines
 
 #### 9.2.1 General Tuning Reference

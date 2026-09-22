@@ -57,8 +57,8 @@ class CompressorTailManager(SlidingWindowManager):
             apply_admission_cap,
         )
         assert not new_computed_blocks, (
-            "Compressor-tail prefix hits are unsupported; the feature gate "
-            "must fall back before cache allocation."
+            "Checkpoint sources must be retained by the coordinator; "
+            "request tail rings require private allocations."
         )
         allocated = len(self.req_to_blocks.get(request_id, ()))
         return max(self.ring_blocks_per_request - allocated, 0)
@@ -77,6 +77,21 @@ class CompressorTailManager(SlidingWindowManager):
         new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
         req_blocks.extend(new_blocks)
         return new_blocks
+
+    def add_local_computed_blocks(
+        self,
+        request_id: str,
+        new_computed_blocks: Sequence[KVCacheBlock],
+        num_local_computed_tokens: int,
+        num_external_computed_tokens: int,
+    ) -> None:
+        # The checkpoint coordinator retains snapshot sources separately.
+        # Tail tables contain only private ring pages, never token-indexed
+        # null padding or the immutable snapshot's pages.
+        del num_local_computed_tokens
+        assert not new_computed_blocks and num_external_computed_tokens == 0
+        assert not self.req_to_blocks[request_id]
+        self.num_cached_block[request_id] = 0
 
     def remove_skipped_blocks(
         self,

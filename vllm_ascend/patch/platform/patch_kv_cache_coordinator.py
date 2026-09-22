@@ -28,6 +28,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheSpec,
     MambaSpec,
+    UniformTypeKVCacheSpecs,
 )
 
 from vllm_ascend.core.single_type_kv_cache_manager import get_manager_for_kv_cache_spec
@@ -185,6 +186,8 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         return self.scheduler_block_size or self.lcm_block_size
 
     def _get_effective_block_size(self, kv_cache_spec: KVCacheSpec) -> int:
+        if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+            kv_cache_spec = next(iter(kv_cache_spec.kv_cache_specs.values()))
         block_size = kv_cache_spec.block_size
         if isinstance(kv_cache_spec, MambaSpec) and self.enable_caching:
             return block_size
@@ -206,6 +209,10 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         for i, g in enumerate(self.kv_cache_config.kv_cache_groups):
             manager_cls = self.single_type_managers[i].__class__
             spec = g.kv_cache_spec
+            if isinstance(spec, UniformTypeKVCacheSpecs):
+                # The wrapper stores per-layer physical sizes; lookup needs
+                # the actual attention/compression semantics used by the manager.
+                spec = self.single_type_managers[i].kv_cache_spec
 
             # Try to find an existing group with the same spec
             for existing_spec, group_ids, existing_cls in attention_groups:
@@ -364,20 +371,16 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             if is_simple_hybrid:
                 break
 
-        # Truncate full attention blocks to final hit_length (if present)
-        # NOTE(zxr): for deepseek-v4, there is two fullattn groups, but
-        # in this function, only the first fullattn group is truncate by
-        # the belowing codes(c4), c128 layer does not truncate, which may
-        # have prefix cache block hit.
-        # Due to slidingwindow attn, deepseek-v4 decode node can't have
-        # any prefix cache hit, because `hit_length` of SWA is 0.
-        spec, group_ids, _ = self.attention_groups[0]
-        if isinstance(spec, FullAttentionSpec):
-            num_blocks = cdiv(hit_length, self._get_effective_block_size(spec))
-            for group_id in group_ids:
-                if (blks := hit_blocks_by_group[group_id]) is not None:
-                    del blks[num_blocks:]
-                    hit_length_by_group[group_id] = hit_length
+        # Every dense cache group must agree with the final recovery point.
+        # A sparse tail/SWA miss can shorten the candidate after C4, C128
+        # and indexer groups have already found a longer reusable prefix.
+        for spec, group_ids, _ in self.attention_groups:
+            if isinstance(spec, FullAttentionSpec):
+                num_blocks = cdiv(hit_length, self._get_effective_block_size(spec))
+                for group_id in group_ids:
+                    if (blks := hit_blocks_by_group[group_id]) is not None:
+                        del blks[num_blocks:]
+                        hit_length_by_group[group_id] = hit_length
 
         cache_hit_blocks = tuple(blocks if blocks is not None else [] for blocks in hit_blocks_by_group)
         return cache_hit_blocks, hit_length, longest_hit_length - hit_length
@@ -442,7 +445,17 @@ def get_kv_cache_coordinator(
     del pcp_world_size
     token_budget = _select_kv_token_budget(max_model_len, max_in_flight_tokens, max_num_batched_tokens)
     if _is_deepseek_v4_kv_cache_config(kv_cache_config):
-        return AscendHybridKVCacheCoordinator(
+        # Import lazily: the checkpoint coordinator extends this module's
+        # hybrid coordinator, and only ring + prefix caching needs it.
+        from vllm_ascend.core.compressor_checkpoint_coordinator import CompressorCheckpointCoordinator
+
+        coordinator_cls = AscendHybridKVCacheCoordinator
+        if enable_caching and any(
+            CompressorCheckpointCoordinator._is_tail_spec(group.kv_cache_spec)
+            for group in kv_cache_config.kv_cache_groups
+        ):
+            coordinator_cls = CompressorCheckpointCoordinator
+        return coordinator_cls(
             kv_cache_config,
             max_model_len,
             use_eagle,
