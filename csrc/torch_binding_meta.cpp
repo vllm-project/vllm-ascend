@@ -1820,6 +1820,8 @@ void npu_fused_quant_lightning_indexer_manage_meta(
     at::Tensor miss_counts)
 {
     return;
+}
+
 // Meta implementation for npu_blasst_attention_score (TND layout).
 // Output shapes mirror the real kernel adapter
 // (csrc/blasst_attention_score/blasst_attention_score_torch_adpt.h):
