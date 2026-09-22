@@ -565,3 +565,35 @@ def test_indexer_empty_decode_owner_writes_cache_before_skipping_selection():
     assert order == ["project", "gather", "write"]
     backend.write_cache.assert_called_once_with(gathered_keys, None, slots, indexer_attn_metadata=metadata)
     select.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "use_mrv2,upstream_sharding,expected", [(True, True, True), (True, False, False), (False, True, False)]
+)
+def test_indexer_uses_upstream_decode_sharding_policy(use_mrv2, upstream_sharding, expected):
+    config = SimpleNamespace(
+        use_v2_model_runner=use_mrv2,
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=2, pcp_shard_decode_requests=upstream_sharding),
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="deepseek_v32")),
+    )
+    indexer = SimpleNamespace(
+        n_head=1,
+        head_dim=128,
+        topk_tokens=16,
+        q_lora_rank=8,
+        wq_b=None,
+        wk_weights_proj=None,
+        k_norm=None,
+        softmax_scale=1.0,
+        k_cache=SimpleNamespace(prefix="model.layers.0.self_attn.indexer.k_cache"),
+    )
+    with (
+        patch("vllm_ascend.attention.indexer.get_current_vllm_config", return_value=config),
+        patch(
+            "vllm_ascend.attention.indexer.get_ascend_config",
+            return_value=SimpleNamespace(is_sparse_li_c8_layer=lambda _: False),
+        ),
+        patch("vllm_ascend.attention.indexer.enable_dsa_cp", return_value=False),
+    ):
+        backend = AscendSFAIndexerBackend(indexer, qk_rope_head_dim=64)
+    assert backend.pcp_shard_decode_requests is expected

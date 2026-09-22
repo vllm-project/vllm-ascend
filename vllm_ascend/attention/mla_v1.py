@@ -24,7 +24,7 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 from vllm.v1.kv_cache_interface import AttentionSpec
 
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_config import get_ascend_config, is_pcp_decode_sharding_enabled
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -266,7 +266,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         )
         self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         self.pcp_enabled = self.pcp_size > 1
-        self.pcp_shard_decode_requests = getattr(get_ascend_config(), "enable_pcp_decode_sharding", False)
+        self.pcp_shard_decode_requests = is_pcp_decode_sharding_enabled(vllm_config)
         self.dcp_enabled = enable_dcp()
         self.pcp_rank = 0
         if self.pcp_enabled:
@@ -848,7 +848,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.use_mla_rope = kwargs.get("use_mla_rope", True)
         self.vllm_config = get_current_vllm_config()
         self.pcp_enabled = self.vllm_config.parallel_config.prefill_context_parallel_size > 1
-        self.pcp_shard_decode_requests = getattr(get_ascend_config(), "enable_pcp_decode_sharding", False)
+        self.pcp_shard_decode_requests = is_pcp_decode_sharding_enabled(self.vllm_config)
         if self.pcp_shard_decode_requests and not self.use_mla_rope:
             raise NotImplementedError("PCP decode sharding requires MLA RoPE.")
         self.kv_a_proj_with_mqa = kwargs.get("kv_a_proj_with_mqa")
@@ -2071,15 +2071,18 @@ class AscendMLAImpl(MLAAttentionImpl):
         assert attn_metadata.slot_mapping.numel() == pcp_group.world_size * local_num_tokens
         # Every rank gathers the same padded extent, even if it has no decode
         # or prefill queries. Gathered slots mask padding with PAD_SLOT_ID.
-        gathered_kv, gathered_cos, gathered_sin = (
-            pcp_group.all_gather(tensor.contiguous(), dim=0) for tensor in (kv_no_split, cos, sin)
+        (gathered_kv, gathered_cos, gathered_sin), slots = _gather_prefill_cache_inputs(
+            (kv_no_split, cos, sin),
+            attn_metadata.slot_mapping,
+            attn_metadata.num_decode_tokens,
+            shard_decode_requests=True,
         )
         _, _, current_k_pe, current_k_nope = self.exec_kv_decode(
             gathered_kv,
             gathered_cos,
             gathered_sin,
             kv_cache,
-            attn_metadata.slot_mapping,
+            slots,
             return_current_kv=True,
         )
         local_start = pcp_group.rank_in_group * local_num_tokens

@@ -751,6 +751,7 @@ class TestAscendSFAMetadataBuilder(TestBase):
         mock_tp.device_group = MagicMock()
 
         self.mock_cfg = MagicMock()
+        self.mock_cfg.use_v2_model_runner = False
 
         self.mock_cfg.parallel_config = MagicMock()
         self.mock_cfg.parallel_config.tensor_parallel_size = 1
@@ -812,6 +813,7 @@ class TestAscendSFAMetadataBuilder(TestBase):
         kv_cache_spec.block_size = 128
         layer_names = ["layer1", "layer2"]
         vllm_config = MagicMock()
+        vllm_config.use_v2_model_runner = False
         vllm_config.cache_config.block_size = 16
         vllm_config.scheduler_config.max_num_seqs = 16
         vllm_config.parallel_config.prefill_context_parallel_size = 1
@@ -848,6 +850,7 @@ class TestAscendSFAMetadataBuilder(TestBase):
         kv_cache_spec.block_size = 128
         layer_names = ["layer1", "layer2"]
         vllm_config = MagicMock()
+        vllm_config.use_v2_model_runner = False
         vllm_config.cache_config.block_size = 16
         vllm_config.scheduler_config.max_num_seqs = 16
         vllm_config.parallel_config.prefill_context_parallel_size = 1
@@ -909,6 +912,7 @@ class TestAscendSFAMetadataBuilder(TestBase):
         kv_cache_spec.block_size = 128
         layer_names = ["layer1", "layer2"]
         vllm_config = MagicMock()
+        vllm_config.use_v2_model_runner = False
         vllm_config.cache_config.block_size = 16
         vllm_config.scheduler_config.max_num_seqs = 16
         vllm_config.parallel_config.prefill_context_parallel_size = 1
@@ -970,6 +974,7 @@ class TestAscendSFAMetadataBuilder(TestBase):
         kv_cache_spec.block_size = 128
         layer_names = ["layer1", "layer2"]
         vllm_config = MagicMock()
+        vllm_config.use_v2_model_runner = False
         vllm_config.cache_config.block_size = 16
         vllm_config.scheduler_config.max_num_seqs = 16
         vllm_config.parallel_config.prefill_context_parallel_size = 1
@@ -1063,6 +1068,7 @@ class TestAscendSFAImpl(TestBase):
         self.mock_ascend_config = mock_ascend_config
 
         vllm_config = MagicMock()
+        vllm_config.use_v2_model_runner = False
         vllm_config.model_config.dtype = torch.float16
         vllm_config.model_config.hf_config = MagicMock()
         vllm_config.model_config.hf_text_config = None
@@ -1116,7 +1122,7 @@ class TestAscendSFAImpl(TestBase):
             "layer_name": "model.layers.0",
         }
 
-        self.impl = AscendSFAImpl(
+        self.impl_kwargs = dict(
             num_heads=num_heads,
             head_size=head_size,
             scale=0.1,
@@ -1129,6 +1135,7 @@ class TestAscendSFAImpl(TestBase):
             kv_sharing_target_layer_name=None,
             **kwargs,
         )
+        self.impl = AscendSFAImpl(**self.impl_kwargs)
 
     def test_kvpp_waits_before_native_and_fused_cache_access(self):
         from vllm_ascend.attention import sfa_v1
@@ -1551,8 +1558,19 @@ class TestAscendSFAImpl(TestBase):
         self.impl.q_proj._chunk_size = 0
 
     def test_decode_request_sharding_disables_fused_cache_writes(self):
+        config = self.impl.vllm_config
+        config.use_v2_model_runner = True
+        config.parallel_config.prefill_context_parallel_size = 2
+        config.parallel_config.pcp_shard_decode_requests = True
+        with (
+            patch("vllm_ascend.attention.sfa_v1.get_current_vllm_config", return_value=config),
+            patch("vllm_ascend.attention.sfa_v1.get_ascend_config", return_value=self.mock_ascend_config),
+            patch("vllm_ascend.attention.sfa_v1.get_tensor_model_parallel_world_size", return_value=1),
+            patch("vllm_ascend.attention.sfa_v1.enable_sp", return_value=False),
+        ):
+            self.impl = AscendSFAImpl(**self.impl_kwargs)
+        self.assertTrue(self.impl.pcp_shard_decode_requests)
         self._setup_prolog_v3_state()
-        self.impl.pcp_shard_decode_requests = True
         for preprocess_type in (PreprocessType.MLAPO, PreprocessType.PROLOG_V3):
             reasons = self.impl._get_fused_type_unsupported_reasons(preprocess_type)
             self.assertTrue(any("PCP decode request sharding" in reason for reason in reasons))

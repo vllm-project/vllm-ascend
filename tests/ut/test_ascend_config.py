@@ -1285,7 +1285,6 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         vc.additional_config = {
             "enable_dsa_cp": "false",
             "enable_pcp_o_proj_weight_sharding": "true",
-            "enable_pcp_decode_sharding": "false",
             "draft_window_size": "4096",
         }
 
@@ -1293,7 +1292,6 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
         self.assertFalse(config.enable_dsa_cp)
         self.assertTrue(config.enable_pcp_o_proj_weight_sharding)
-        self.assertFalse(config.enable_pcp_decode_sharding)
         self.assertEqual(config.draft_window_size, 4096)
 
     @_clean_up

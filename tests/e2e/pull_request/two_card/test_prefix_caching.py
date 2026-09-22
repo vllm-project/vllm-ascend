@@ -90,8 +90,8 @@ def test_models_prefix_cache_tp2(model: str, max_tokens: int) -> None:
     )
 
 
-def test_mrv2_pcp_decode_sharding_matches_replicated_decode(monkeypatch) -> None:
-    """Check mixed prefill, uneven owners, empty owners and reused prefix KV."""
+def test_mrv2_pcp2_sharded_decode_matches_pcp1(monkeypatch) -> None:
+    """Compare upstream PCP2 sharding with PCP1 across mixed and cached batches."""
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     batches = [
         ["The capital of France is", *INPUT_PROMPTS],
@@ -99,14 +99,16 @@ def test_mrv2_pcp_decode_sharding_matches_replicated_decode(monkeypatch) -> None
         list(reversed(INPUT_PROMPTS)),
     ]
     outputs = []
-    for sharded in (False, True):
+    for pcp_size in (1, 2):
         with VllmRunner(
             "deepseek-ai/DeepSeek-V2-Lite-Chat",
             max_model_len=2048,
             max_num_seqs=4,
             max_num_batched_tokens=128,
+            # Keep attention TP fixed. EP spans one rank for the PCP1 baseline
+            # and two ranks for PCP2, which adds the second device.
             tensor_parallel_size=1,
-            prefill_context_parallel_size=2,
+            prefill_context_parallel_size=pcp_size,
             decode_context_parallel_size=1,
             enable_expert_parallel=True,
             enable_chunked_prefill=True,
@@ -114,13 +116,12 @@ def test_mrv2_pcp_decode_sharding_matches_replicated_decode(monkeypatch) -> None
             enforce_eager=True,
             seed=0,
             gpu_memory_utilization=0.7,
-            additional_config={"enable_pcp_decode_sharding": sharded},
         ) as runner:
             outputs.append([runner.generate_greedy(prompts, 32) for prompts in batches])
-    for replicated, sharded in zip(*outputs, strict=True):
+    for baseline, sharded in zip(*outputs, strict=True):
         check_outputs_equal(
-            outputs_0_lst=replicated,
+            outputs_0_lst=baseline,
             outputs_1_lst=sharded,
-            name_0="replicated PCP decode",
-            name_1="sharded PCP decode",
+            name_0="PCP1 baseline",
+            name_1="upstream PCP2 sharded decode",
         )

@@ -275,7 +275,6 @@ class NPUModelRunner(GPUModelRunner):
             if self.pcp_manager is not None:
                 assert isinstance(self.pcp_manager, AscendPCPManager)
                 self.pcp_manager.vllm_config = self.vllm_config
-                self.pcp_manager.shard_decode_requests = self.ascend_config.enable_pcp_decode_sharding
                 self.model_state.pcp_manager = self.pcp_manager
                 if self.speculator is not None:
                     self.speculator.pcp_manager = self.pcp_manager
@@ -623,7 +622,7 @@ class NPUModelRunner(GPUModelRunner):
         input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
             self.pcp_manager,
             input_batch,
-            padded_num_tokens=batch_desc.num_tokens,
+            batch_desc=batch_desc,
         )
 
         # For mla/sfa, update cos/sin. Here is for execute_model.

@@ -17,6 +17,11 @@ DSA-CP is a separate sparse-attention optimization controlled by `additional_con
 
 PCP support is experimental and available only with ModelRunner V2. The following table shows the basic backend support and whether each feature can be combined with PCP:
 
+With a vLLM version containing [PR #52162](https://github.com/vllm-project/vllm/pull/52162),
+MRv2 deployments with PCP > 1 and DCP = 1 automatically shard decode requests.
+The [decode request sharding limitations](#pcp-decode-request-sharding) below take
+precedence over the general PCP compatibility table for that configuration.
+
 | Attention Backend | Basic PCP | Prefix Caching + PCP | Chunked Prefill + PCP | MLAPO + PCP | Speculative Decoding + PCP | P/D Disaggregation + PCP | KV Cache Pool + PCP | Sequence Parallelism (SP) + PCP |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | MLA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | 🟠 Partial compatibility (MTP, eager and `FULL_DECODE_ONLY`) | ✅ Full compatibility (`MooncakeConnectorV1`) | 🟠 Partial compatibility (`AscendStoreConnector`, non-layerwise) | ❌ No compatibility |
@@ -31,29 +36,35 @@ PCP support is experimental and available only with ModelRunner V2. The followin
 
 ### PCP decode request sharding
 
-The experimental `additional_config.enable_pcp_decode_sharding` option assigns
-scheduled decode requests round-robin across PCP ranks on each step. Prefill
-continues to use DualChunkSwap partitioning. The owner computes the request's
-decode query; all ranks receive its new KV entries before attention runs, keeping
-their complete KV-cache replicas consistent when requests finish or change order.
+This Ascend attention adaptation requires a vLLM version containing the merged
+[PR #52162](https://github.com/vllm-project/vllm/pull/52162). Upstream
+`ParallelConfig.pcp_shard_decode_requests` is enabled automatically when PCP > 1
+and DCP = 1. There is no separate Ascend configuration switch.
 
-This follows the approach in [vLLM PR #52162](https://github.com/vllm-project/vllm/pull/52162)
-and does not require that unmerged PR in the paired vLLM installation. Enable it
-with an existing supported MRv2 PCP deployment:
+The upstream MRv2 PCP manager assigns scheduled decode requests round-robin
+across PCP ranks on each step and retains DualChunkSwap partitioning for prefill.
+Ascend MLA/SFA attention consumes that request layout: each owner computes its
+local decode queries, and all ranks receive the new KV entries before attention
+runs. This keeps the complete KV-cache replicas consistent when requests finish
+or change order.
+
+Use the supported MRv2 configuration:
 
 ```bash
 VLLM_USE_V2_MODEL_RUNNER=1 vllm serve <DeepSeek-model-path> \
     --prefill-context-parallel-size 2 \
     --decode-context-parallel-size 1 \
-    --enforce-eager \
-    --additional-config '{"enable_pcp_decode_sharding": true}'
+    --enforce-eager
 ```
 
-The initial implementation supports non-hybrid DeepSeek V2/V3/V3.2 MLA and SFA
-models with RoPE. Dense MLA requires an unquantized KV cache. Graph execution,
-speculative decoding, DCP, KVPP, and PCP O-proj weight sharding are rejected.
-Other models, including DeepSeek V4 and GQA/hybrid models, retain the existing
-PCP implementation with this option disabled.
+The current Ascend adaptation supports eager execution of non-hybrid DeepSeek
+V2/V3/V3.2 MLA and SFA models with RoPE. Dense MLA requires an unquantized KV
+cache. Graph execution, speculative decoding, KVPP, PCP O-proj weight sharding,
+and unsupported models, including DeepSeek V4 and GQA/hybrid models, raise an
+error when this automatic sharding path is active.
+
+DCP > 1, ModelRunner V1, and PCP = 1 retain their existing behavior and validation;
+this adaptation does not enable new combinations for those configurations.
 
 Both MLA KV and SFA indexer KV must be synchronized. A rank with no local request
 still executes the cache collectives, but skips attention for the empty batch.
@@ -62,8 +73,9 @@ native projection weights remain available.
 
 This optimization reduces duplicate decode query computation; it does not
 increase KV-cache capacity. Additional KV communication and native preprocessing
-can offset the compute savings. Measure throughput and latency against the same
-PCP configuration with the option disabled before enabling it for a workload.
+can offset the compute savings. Measure throughput and latency with the intended
+parallel topology and workload before deployment. PCP = 1 is used as a correctness
+reference in the regression test; it uses fewer devices than PCP = 2.
 
 ### Decode Context Parallel
 
@@ -101,6 +113,11 @@ vllm serve <supported-model> \
 Unlike DCP, PCP adds extra ranks: `world_size_with_pcp = prefill_context_parallel_size * original_world_size`.
 
 #### Speculative Decoding
+
+The combinations below describe the existing PCP speculative decoding path.
+They are currently rejected by the Ascend decode request sharding adaptation
+when MRv2 uses PCP > 1 and DCP = 1 with upstream PR #52162. There is no separate
+switch to restore replicated decode for that configuration.
 
 MRV2 PCP supports MTP with MLA and DSA models, Eagle3 with GQA models, and
 DSpark with DeepSeek-V4 DSA models. The target model runs with the

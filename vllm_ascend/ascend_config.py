@@ -23,7 +23,6 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from pydantic import ConfigDict, TypeAdapter, model_validator
 from pydantic_core import ArgsKwargs
-from vllm.config import CUDAGraphMode
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 
@@ -48,6 +47,11 @@ def is_mega_moe_supported() -> bool:
     if _MEGA_MOE_SUPPORTED is None:
         _MEGA_MOE_SUPPORTED = importlib.util.find_spec("cann_ops_transformer") is not None
     return _MEGA_MOE_SUPPORTED
+
+
+def is_pcp_decode_sharding_enabled(vllm_config: VllmConfig) -> bool:
+    """Use the upstream PCP policy before the MRv2 manager is constructed."""
+    return vllm_config.use_v2_model_runner and vllm_config.parallel_config.pcp_shard_decode_requests
 
 
 def validate_additional_config_bool(value: Any, path: str) -> bool:
@@ -331,7 +335,6 @@ class AscendConfig:
             "sfa_dcp_force_tmajor_restore": false,
             "enable_force_eplb": false,
             "enable_pcp_o_proj_weight_sharding": false,
-            "enable_pcp_decode_sharding": false,
             "draft_window_size": null,
             "mix_placement": false,
             "pa_shape_list": [],
@@ -468,9 +471,6 @@ class AscendConfig:
     sfa_dcp_force_tmajor_restore: bool = False
     enable_force_eplb: bool = False
     enable_pcp_o_proj_weight_sharding: bool = False
-    # Assign each decode request to one PCP rank and replicate its KV updates.
-    # Initially limited to eager MRV2 DeepSeek MLA with PCP > 1 and DCP = 1.
-    enable_pcp_decode_sharding: bool = False
     draft_window_size: int | None = None
     mix_placement: bool = False
     # When non-zero, force the MC2 combine stage's comm quant_mode to this
@@ -561,19 +561,16 @@ class AscendConfig:
 
     def _validate_pcp_decode_sharding(self, vllm_config: VllmConfig) -> None:
         """Reject layouts whose cache or collective contract is not supported."""
-        if not self.enable_pcp_decode_sharding:
+        if not is_pcp_decode_sharding_enabled(vllm_config):
             return
-        parallel_config = vllm_config.parallel_config
-        if not vllm_config.use_v2_model_runner:
-            raise ValueError("enable_pcp_decode_sharding requires Model Runner V2.")
-        if parallel_config.prefill_context_parallel_size <= 1:
-            raise ValueError("enable_pcp_decode_sharding requires PCP > 1.")
-        if parallel_config.decode_context_parallel_size != 1:
-            raise ValueError("enable_pcp_decode_sharding requires DCP = 1 and replicated KV caches.")
+        # Config modules are also imported during platform discovery, before
+        # vllm.config has finished loading. Import the enum only at validation.
+        from vllm.config import CUDAGraphMode
+
         if vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
-            raise ValueError("enable_pcp_decode_sharding currently requires eager execution (--enforce-eager).")
+            raise ValueError("Ascend PCP decode sharding currently requires eager execution (--enforce-eager).")
         if vllm_config.speculative_config is not None:
-            raise ValueError("enable_pcp_decode_sharding does not support speculative decoding yet.")
+            raise ValueError("Ascend PCP decode sharding does not support speculative decoding yet.")
         model_config = vllm_config.model_config
         supported_architectures = {"DeepseekV2ForCausalLM", "DeepseekV3ForCausalLM", "DeepseekV32ForCausalLM"}
         if (
@@ -583,11 +580,11 @@ class AscendConfig:
             or not supported_architectures.intersection(model_config.architectures)
             or getattr(model_config.hf_text_config, "qk_rope_head_dim", 0) <= 0
         ):
-            raise ValueError("enable_pcp_decode_sharding supports non-hybrid DeepSeek V2/V3/V3.2 MLA models only.")
+            raise ValueError("Ascend PCP decode sharding supports non-hybrid DeepSeek V2/V3/V3.2 MLA models only.")
         if self.kvpp_config.size > 1:
-            raise ValueError("enable_pcp_decode_sharding does not support KVPP yet.")
+            raise ValueError("Ascend PCP decode sharding does not support KVPP yet.")
         if self.enable_pcp_o_proj_weight_sharding:
-            raise ValueError("enable_pcp_decode_sharding does not support PCP o_proj weight sharding yet.")
+            raise ValueError("Ascend PCP decode sharding does not support PCP o_proj weight sharding yet.")
 
     # ---- derivations + cross-config downgrades/mutex ----
     # Business validation: invoked explicitly by init_ascend_config (NOT a

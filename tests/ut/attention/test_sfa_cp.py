@@ -458,7 +458,7 @@ def test_sfa_pcp_gathers_main_kv_before_base_cache_write() -> None:
         result = impl.exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
 
     assert result == "written"
-    gather.assert_called_once_with((kv_no_split, cos, sin), slots, 1)
+    gather.assert_called_once_with((kv_no_split, cos, sin), slots, 1, shard_decode_requests=False)
     base_exec_kv.assert_called_once_with(
         impl,
         gathered_kv,
