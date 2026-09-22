@@ -161,6 +161,12 @@ def npugraph_ex_compile(
     key: str | None = None,
     cache_dir: str | None = None,
 ) -> tuple[Callable | None, Any | None]:
+    # npugraph_ex applies the pattern-matcher passes itself, but the rewrites in
+    # graph_passes are not expressible as patterns, so run them here.
+    pass_manager = compiler_config.get(COMPILATION_PASS_KEY)
+    if pass_manager is not None:
+        pass_manager.apply_graph_passes(graph, compile_range)
+
     # Try npugraph_ex first, fall back to torchair for backward compatibility.
     try:
         import npugraph_ex as nge

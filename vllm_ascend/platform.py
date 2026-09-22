@@ -337,6 +337,14 @@ class NPUPlatform(Platform):
     def apply_config_platform_defaults(cls, vllm_config: VllmConfig) -> None:
         """Apply Ascend-specific defaults."""
 
+        # Upstream derives this threshold from the CUDA/XPU device capability and
+        # switches enable_sp and fuse_gemm_comms back off when it cannot. Ascend
+        # has no equivalent heuristic, so seed the threshold to keep an explicit
+        # request alive; the fusion passes then apply to every captured shape.
+        pass_config = vllm_config.compilation_config.pass_config
+        if (pass_config.enable_sp or pass_config.fuse_gemm_comms) and pass_config.sp_min_token_num is None:
+            pass_config.sp_min_token_num = 1
+
         default_max_cg_capture_size = _get_default_max_cudagraph_capture_size(vllm_config)
         if default_max_cg_capture_size is not None:
             vllm_config.compilation_config.max_cudagraph_capture_size = default_max_cg_capture_size

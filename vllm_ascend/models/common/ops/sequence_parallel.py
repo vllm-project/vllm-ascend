@@ -30,8 +30,9 @@ def sp_reduce_scatter(x: torch.Tensor) -> torch.Tensor:
     assert x.ndim == 2
     tp_size = get_tensor_model_parallel_world_size()
     sp_pad = (-x.shape[0]) % tp_size
-    pad_shape = [sp_pad, x.shape[1]]
-    x = torch.cat([x, x.new_zeros(pad_shape)], dim=0)
+    # Pad rather than concatenate zeros so the graph carries the same
+    # constant_pad_nd node the matmul reduce-scatter fusion pass looks for.
+    x = torch.nn.functional.pad(x, (0, 0, 0, sp_pad))
     output = _custom_collective("custom_reduce_scatter", x)
     if output is not None:
         return output

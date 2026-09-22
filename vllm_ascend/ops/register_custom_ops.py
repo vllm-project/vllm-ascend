@@ -1,15 +1,19 @@
+import functools
+
 import torch
 import torch_npu
 from vllm.distributed import (
     get_dp_group,
     get_ep_group,
     get_pcp_group,
+    get_tp_group,
     tensor_model_parallel_all_reduce,
 )
 from vllm.forward_context import get_forward_context
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.rotary_embedding import rope_forward_oot
 from vllm_ascend.ops.triton.muls_add import muls_add_triton
 
@@ -175,6 +179,49 @@ def _maybe_pad_and_reduce_fake(x: torch.Tensor) -> torch.Tensor:
     return torch.empty((x.shape[0] // ep_group.world_size, *x.shape[1:]), device=x.device, dtype=x.dtype)
 
 
+@functools.lru_cache(maxsize=1)
+def _tp_hccl_comm_name() -> str:
+    """HCCL communicator name of the TP group, as expected by the fused ops."""
+    tp_group = get_tp_group()
+    backend = tp_group.device_group._get_backend(torch.device("npu"))
+    return backend.get_hccl_comm_name(tp_group.rank_in_group)
+
+
+def _npu_matmul_reduce_scatter_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    world_size: int,
+    group_name: str,
+) -> torch.Tensor:
+    """Fused ``reduce_scatter(x @ weight.T, dim=0)`` over the TP group.
+
+    ``weight`` keeps the ``[output_size, input_size_per_partition]`` layout that
+    ``F.linear`` consumes, so the operator transposes it into the ``[k, n]``
+    right-hand side the CANN kernel expects. Only the TP group is fused, so the
+    communicator is resolved from it rather than from ``group_name``.
+    """
+    tp_group = get_tp_group()
+    assert group_name == tp_group.unique_name, (
+        f"npu_matmul_reduce_scatter only supports the TP group, got {group_name}"
+    )
+    return DeviceOperator.npu_mm_reduce_scatter_base(
+        x,
+        weight.t(),
+        _tp_hccl_comm_name(),
+        world_size,
+        reduce_op="sum",
+    )
+
+
+def _npu_matmul_reduce_scatter_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    world_size: int,
+    group_name: str,
+) -> torch.Tensor:
+    return x.new_empty((x.shape[0] // world_size, weight.shape[0]))
+
+
 # TODO(Angazenn): The reason why we use a custom op to encapsulate npu_quantize
 # is that aclnnAscendQuantV3(npu_quantize) use div_mode=False, while
 # aclnnAddRmsNormQuantV2(npu_add_rms_norm_quant) use div_moe=True. We have to
@@ -247,6 +294,14 @@ direct_register_custom_op(
     op_name="maybe_all_reduce_shared_expert",
     op_func=_maybe_all_reduce_shared_expert_impl,
     fake_impl=lambda shared_output, layer_name: shared_output,
+    mutates_args=[],
+    dispatch_key="PrivateUse1",
+)
+
+direct_register_custom_op(
+    op_name="npu_matmul_reduce_scatter",
+    op_func=_npu_matmul_reduce_scatter_impl,
+    fake_impl=_npu_matmul_reduce_scatter_fake,
     mutates_args=[],
     dispatch_key="PrivateUse1",
 )
