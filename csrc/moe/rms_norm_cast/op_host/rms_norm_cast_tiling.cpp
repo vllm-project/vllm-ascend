@@ -12,7 +12,18 @@ constexpr uint32_t FP16_KEY = 1;
 constexpr uint32_t BF16_KEY = 3;
 constexpr uint32_t B16_PER_BLOCK = 16;
 constexpr uint64_t RESERVED_UB_BYTES = 1024;
-constexpr uint64_t BYTES_PER_COLUMN = 16;  // two b16 and three fp32 buffers
+// Per column of the (aligned) hidden size:
+//   two b16 x slots (ping-pong input that doubles as the y output), 2*2B
+//   gamma,                                                         2B
+//   two fp32 widen slots (ping-pong, double as the y_fp32 output), 2*4B
+//   fp32 work buffer (squares + scalar chain),                     4B
+// The bf16 path adds a per-core fp32 gamma copy (4B). Row pipelining
+// needs the double slots; y rides the x slot so MTE3 never blocks V.
+constexpr uint64_t BYTES_PER_COLUMN_FP16 = 18;
+constexpr uint64_t BYTES_PER_COLUMN_BF16 = 22;
+// Reduce-tree accumulator (64 fp32) + 32B rstd broadcast + 32B gather
+// offsets.
+constexpr uint64_t FIXED_UB_BYTES = 320;
 
 ge::graphStatus Tiling4RmsNormCast(gert::TilingContext* context)
 {
@@ -35,11 +46,19 @@ ge::graphStatus Tiling4RmsNormCast(gert::TilingContext* context)
                 OP_LOGE(context, "x must be non-empty"), return ge::GRAPH_FAILED);
     const uint32_t num_row = total / num_col;
 
+    const auto dtype = context->GetInputDesc(0)->GetDataType();
+    OP_CHECK_IF(dtype != ge::DT_FLOAT16 && dtype != ge::DT_BF16,
+                OP_LOGE(context, "x only supports float16 and bfloat16"), return ge::GRAPH_FAILED);
+
     auto platform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
     uint64_t ub_size = 0;
     platform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, ub_size);
     const uint32_t num_col_aligned = (num_col + B16_PER_BLOCK - 1) / B16_PER_BLOCK * B16_PER_BLOCK;
-    OP_CHECK_IF(static_cast<uint64_t>(num_col_aligned) * BYTES_PER_COLUMN > ub_size - RESERVED_UB_BYTES,
+    const uint64_t bytes_per_column = dtype == ge::DT_FLOAT16
+                                          ? BYTES_PER_COLUMN_FP16
+                                          : BYTES_PER_COLUMN_BF16;
+    OP_CHECK_IF(static_cast<uint64_t>(num_col_aligned) * bytes_per_column + FIXED_UB_BYTES >
+                    ub_size - RESERVED_UB_BYTES,
                 OP_LOGE(context, "last dimension is too large for the fused RMSNorm kernel"),
                 return ge::GRAPH_FAILED);
 
@@ -52,9 +71,6 @@ ge::graphStatus Tiling4RmsNormCast(gert::TilingContext* context)
     OP_CHECK_NULL_WITH_CONTEXT(context, epsilon);
     OP_CHECK_IF(*epsilon < 0.0f, OP_LOGE(context, "epsilon must be non-negative"), return ge::GRAPH_FAILED);
 
-    const auto dtype = context->GetInputDesc(0)->GetDataType();
-    OP_CHECK_IF(dtype != ge::DT_FLOAT16 && dtype != ge::DT_BF16,
-                OP_LOGE(context, "x only supports float16 and bfloat16"), return ge::GRAPH_FAILED);
     context->SetTilingKey(dtype == ge::DT_FLOAT16 ? FP16_KEY : BF16_KEY);
     context->SetBlockDim(used_core_num);
 

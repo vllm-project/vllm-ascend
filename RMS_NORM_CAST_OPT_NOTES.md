@@ -39,12 +39,14 @@ msprof op（PipeUtilization，2048×7168 bf16，Block Dim 40）：
 ## 轮次计划
 
 - Round 1: 省掉上述 2 遍 vec pass（纯减 vec 工作，无流水改动）✅
-- Round 2: bf16 路径单舍入重构 → **被硬件阻断**（910B 无 bf16 元素级向量算子，见下文
-  详设 Round 2 的"硬件约束"）；改为行间双缓冲流水（MTE2 预取 / MTE3 异步落盘）。
-  首次实现因序言槽位错位 + FetchEventID 单在途约束两个 bug 挂死，**已回退 Round 1**，
-  修复方案已记录，待重试
-- Round 3: 视 Round 2 重试结果决定（reduce 结构 / 小 shape 单核串行链 / 收尾全量回归）
-- Round 4: 视 profile 收尾（候选池：DataCopyPad→对齐 DataCopy、小 shape 延迟）
+- Round 2: 行间双缓冲流水 + rstd 向量广播（Gather+stride-0 Mul 消标量往返）✅
+  （首次尝试两个 bug 的根因与"退出标志必须清零"契约见详设 v2 与轮次记录）
+- Round 3: 视 Round 2 profile 决定 —— vec 已 91%，主攻**减 vec pass 数**
+  （bf16 9 遍：候选=平方与 reduce 树的融合指令、两次输出 Cast 的合并可行性）
+  与小 shape（1-16）回退（+0.1~0.25µs，序言固定开销）
+- Round 4: 视 profile 收尾（候选池：4096 写带宽结构性上限确认、
+  DataCopyPad→对齐 DataCopy、小 shape 单核串行链缩短）
+  原则：任何 shape 不回退；以 msprof 数据决定取舍。
 
 ## 测量方法一致性验证（NPUGraph benchmark vs msprof op）
 
@@ -126,6 +128,81 @@ Round 2 改为原 Round 3 的双缓冲流水方案。
   最大 hidden 收缩到 ~8.1K/~9.8K（唯一调用方 DeepSeek v4/v41 hidden=7168 无影响）。
 - 预期：消除 ~25µs 行间串行空转（2048 tokens），91→~65-70µs。
 
+### Round 2 重试详设 v2（2026-09-22，CANN 9.1.0 源码级确认后定稿）
+
+针对上述两个 bug 做了 CANN 源码级根因确认（`asc/impl/basic_api/` 下），
+三个关键事实推翻/修正了首次尝试的假设：
+
+**事实 1 —— 事件 ID 的占用模型**（`kernel_tpipe_impl.h`）：
+- `FetchEventID` 只读 `sff0(eventOccupy)` 找第一个空闲位，**不置位**；
+- `AllocEventID` 找空闲位并**置位**，`ReleaseEventID` 清位；
+- `TQue::EnQue` = AllocEventID+SetFlag，`DeQue` = WaitFlag+ReleaseEventID
+  （`kernel_tquebind_impl.h:203/343`）——框架自身就是靠 Alloc/Release
+  持有多个在途 ID 实现深度 2 队列，每方向上限 `QUE_MAX_EVENT=8`。
+- 首次尝试全用 FetchEventID：两次 fetch 永远返回同一位 → 双在途塌缩。
+  **修正：一律用 AllocEventID/SetFlag/WaitFlag/ReleaseEventID 四件套。**
+
+**事实 2 —— 单 ID 交替 set/wait 也不安全**：即使发射序严格 set→wait→set→wait，
+两个 pipe 执行速度不同（MTE2 0.19µs/行 vs V 0.96µs/行），快 pipe 可以在慢 pipe
+消费标志前连续两次 SetFlag，二值标志塌缩 → 过度同步（碰巧正确）或尾部死锁。
+独立 ID 从根上消除该问题。
+
+**事实 3 —— WaitFlag 挂在 dstPipe 上执行**（`kernel_event.h:318` `wait_flag(srcPipe, dstPipe)`）：
+- MTE2_V/V_MTE2/V_MTE3/MTE3_MTE2/MTE3_V 五个方向的 wait 全部不阻塞发射线程，
+  发射线程可以自由跑到指令队列满（背压）为止；
+- **唯一阻塞发射线程的是 V_S**（GetValue 标量往返，dst=S=发射线程所在 pipe）。
+  Round 1 代码里它就是每行的同步点。
+
+**rstd 标量往返的消除**（新发现，替代 GetValue 方案）：
+- `Gather(rstd8, work, zero_offsets, 0, 8)`：vgather 在 c220 支持 float，
+  dst[i]=src[offset[i]]，一次把 work[0] 复制成 8 份（zero_offsets 每核
+  Duplicate 一次 uint32×8）；
+- `Mul(x_fp32, x_fp32, rstd8, mask, repeats, {dstBlk=1, src0Blk=1, src1Blk=0,
+  dstRep=8, src0Rep=8, src1Rep=0})`：src1 钉在 32B 的 rstd8 上做块广播
+  （antiquant_c220/batchnorm_v220 同款 stride-0 范式）；
+- 数值与 `Muls(x_fp32, x_fp32, rstd, num_col)` **位级一致**（同一个 fp32 rstd
+  参与同样的 fp32 乘法），精度测试零风险；
+- 依赖变成纯 V→V（Brcb/Gather/Mul 全在 V pipe，PipeBarrier 即可），每行省掉
+  V_S/S_V 两次跨 pipe 往返 + 发射线程停等。
+
+**缓冲区布局**（y 仍写回 x 槽，省一个 y 缓冲且 MTE3_V 不上关键路径）：
+
+| 缓冲 | 数量 | 大小 | 复用链（事件方向） |
+|---|---|---|---|
+| x[2] | 2×A×2B | 输入行 + 兼作 y 输出 | MTE2→V→(V_MTE2+MTE3_MTE2)→MTE2 |
+| x_fp32[2] | 2×A×4B | 宽化 x + 兼作 y_fp32 输出 | V→MTE3→(MTE3_V)→V |
+| gamma / gamma_fp32 | A×2B / A×4B | 每核一次 | —（gamma_fp32 仅 bf16） |
+| work | A×4B | 平方 + rstd 标量链 | V 内部独占 |
+| reduce+rstd8+off | 320B | reduce 树/gather 目的/偏移 | V 内部独占 |
+
+- BYTES_PER_COLUMN 按 dtype 分档：bf16 22（含 gamma_fp32 4）/ fp16 18；
+  @7168 bf16 共 158KB < 191KB ✓；最大 hidden 收缩到 ~8.8K/~10.8K
+  （比首次尝试方案的 24/20 更省，因 y 复用 x 槽 + gamma_fp16 不分配）。
+- 槽位一律用**核内局部行号** i 的奇偶（i&1），彻底避开首次尝试的绝对奇偶错位 bug。
+
+**事件编排**（每方向 ≤1 个在途 ID，全用 AllocEventID 四件套）：
+
+```
+序言: alloc/set(MTE2_V, e_load)  # load 局部行0 → x[0]
+循环 i:
+  wait(MTE2_V, e_load)→release                    # V 等输入 i 就绪
+  if i+1<n:                                        # 预取行 i+1 → x[(i+1)&1]
+    if i>=1: wait(V_MTE2)→release; wait(MTE3_MTE2)→release   # 槽位上个主人是行 i-1
+    alloc/set(MTE2_V, e_load')
+  if i>=2: wait(MTE3_V)→release                    # x_fp32[i&1] 上个主人是行 i-2 的落盘
+  V 链（Cast/Mul/Reduce/标量链/Gather/广播Mul/·gamma/Rint/Cast widen）
+  alloc/set(V_MTE2, e_vm2)                         # x[i&1] 交给 load i+2（在 widen 后）
+  alloc/set(V_MTE3, e_v3); wait(V_MTE3)→release    # MTE3 等本行 V 链完成
+  DataCopy y ← x[i&1]
+  alloc/set(MTE3_MTE2, e_m32)                      # x[i&1] 落盘完可被 load i+2 覆盖
+  DataCopy y_fp32 ← x_fp32[i&1]
+  alloc/set(MTE3_V, e_m3v)                         # x_fp32[i&1] 落盘完可被行 i+2 重写
+```
+
+无环性：所有依赖都指向更老的行（i ← i-1/i-2），发射线程永不阻塞 → 无死锁。
+稳态关键路径 = 纯 V 链（0.96µs/行）；MTE2 0.19、MTE3 0.34µs/行全部被覆盖。
+预期 2048 tokens：80.1µs（R1 profiler 口径）→ ~52-58µs，NPUGraph 91.2 → ~60-66µs。
+
 ### Round 3：视 Round 2 重试后的 profile 决定
 
 ### Round 4：视 profile 收尾（候选池）
@@ -188,6 +265,68 @@ fp16 提升小于 bf16：fp16 路径只吃到 inv 折叠（无 gamma cast 可省
 
 处置：`git checkout` 回退 kernel + tiling 到 Round 1 提交（09fdb4f03），重编译安装后
 精度复验通过；修复方案（单在途事件编排 + 槽位修正 + row+2 预取）已写入详设，待重试。
+
+### Round 2 二次实现（2026-09-22）：流水 + rstd 向量广播 — ✅ 完成
+
+按详设 v2 实现，相对首次尝试的三个关键差异：
+1. **事件一律 AllocEventID/SetFlag/WaitFlag/ReleaseEventID 四件套**（框架 TQue 同款），
+   不再用 FetchEventID；MTE3_V 方向因隔 2 行才消费，用 `fp32_stored_evt_[2]` 双 ID。
+2. **消除每行 V_S/GetValue/S_V 标量往返**：`Gather(rstd8, work, zero_off, 0, 8)` 把
+   work[0] 复制成 8 份，再 `Mul(x_fp32, x_fp32, rstd8, mask, reps, {src1BlkStride=0,
+   src1RepStride=0})` 块广播——rstd 全程留在 UB，发射线程不再停等，数值与 Muls 位级一致。
+3. **槽位一律用核内局部行号奇偶**（i&1），序言与循环天然对齐，根除首次尝试的错位 bug。
+
+实现过程中发现并修复的**第三个 bug（新知识，重要）**：
+- 现象：本 kernel 正常完成（sync 返回），但**同进程后续第一个算子挂死**
+  （首测 pytest 全挂、sanity 里 `torch_npu.npu_rms_norm` 挂死；单独跑参照正常）。
+- 根因：kernel 退出时留下了未消费的 SetFlag（尾部 2 行的 V_MTE2/MTE3_MTE2/MTE3_V），
+  污染同核下一个 kernel 的事件标志状态。CANN 的 `TPipe::DestroyWithoutPipeAll` 专门在
+  退出前 wait 所有挂起 free-buf 事件，证明"退出时事件必须清零"是框架级契约。
+- 修复：**发射条件与消费条件严格一致的条件下才 SetFlag**（`i+2 < local_rows` 才发
+  V_MTE2/MTE3_MTE2/MTE3_V——它们的消费者（load i+2 / 行 i+2 的 step1）恰好同条件存在）。
+  退出时零悬挂标志、零占用 ID，无需 drain。
+
+UB/tiling：y 复用 x 槽（MTE3 不上 V 关键路径），BYTES_PER_COLUMN 分档
+bf16 22 / fp16 18 + 固定 320B；@7168 bf16 共 158KB；最大 hidden ~8.8K/~10.8K。
+
+- **精度**：`test_rms_norm_cast.py` **8/8 通过**（12.8s），零回归。
+  （bf16 各 shape 对 ref max_err ≤ 1.56e-2；fp16 ≤ 3.9e-3 = 大值处恰 1 个 fp16 ulp，
+  均在 assert_close 容差内。注意自写 sanity 不要用平坦阈值，会比真实测试严。）
+- **NPUGraph benchmark（µs，vs Round 1）**：
+
+| tokens | bf16 R1→R2 | Δ | fp16 R1→R2 | Δ |
+|---|---|---|---|---|
+| 1 | 2.71→2.95 | +8.8% | 2.66→2.84 | +6.8% |
+| 4 | 3.06→3.12 | +2.0% | 2.94→3.03 | +3.1% |
+| 16 | 3.82→4.08 | +6.8% | 3.69→3.93 | +6.5% |
+| 64 | 7.11→6.84 | -3.8% | 6.80→6.54 | -3.8% |
+| 128 | 10.60→8.83 | **-16.7%** | 9.92→8.55 | **-13.8%** |
+| 512 | 23.2→17.5 | **-24.4%** | 22.3→16.9 | **-24.2%** |
+| 1024 | 42.1→29.9 | **-29.0%** | 40.1→28.7 | **-28.4%** |
+| 2048 | 91.2→57.4 | **-37.1%** | 87.9→54.5 | **-38.0%** |
+| 4096 | 208.2→178.3 | **-14.4%** | 203.6→173.7 | **-14.7%** |
+
+- 累计 vs 未优化基线：2048 bf16 102.1→57.4（**-43.8%**）、fp16 93.6→54.5（-41.8%）；
+  大 shape 已稳定快于 unfused 参照（77.4µs @2048）约 26%。
+- 小 shape（1-16 tokens）+0.1~0.25µs：每核固定的 Gather 偏移 Duplicate + 序言开销，
+  1 行/核时流水收益吃不到（Round 4 候选：小 shape 专用路径）。
+- 4096 档 -14%（低于线性外推）：疑似输出写带宽（每字节输入写 3 字节输出）饱和，
+  需 msprof MTE3 数据确认（见下）。
+- **pipe 归因（msprof op，2048×7168 bf16，40 核均值）**：
+
+| 指标 | Round 1 | Round 2 |
+|---|---|---|
+| duration | 80.1µs（torch_npu.profiler 口径）/ 91.2µs（NPUGraph） | **53.7µs**（msprof task）/ 57.4µs（NPUGraph） |
+| vec busy / ratio | 48.9µs / 61.0% | **46.7µs / 90.9%** |
+| mte2 busy / ratio | 9.9µs / — | 20.5µs / 39.9%（含 MTE2 上执行的 wait_flag 等） |
+| mte3 busy / ratio | 17.3µs / — | 17.4µs / 33.8% |
+| scalar_vector_stall | — | 39.5µs（发射线程背压，符合预期） |
+
+  → **流水目标达成**：MTE2/MTE3 时间不变但全部移出关键路径，vec 占比 61%→91%。
+  剩余 ~4.6µs/核 的 vec 空闲（9%）≈ 序言 gamma 串行 + 尾行 store 排空 + 首行预取深度 1。
+  Round 3 的唯一大杠杆 = **减 vec pass 数**（现 bf16 9 遍）；4096 档为写带宽饱和
+  （235MB/178µs ≈ 1.3TB/s），属结构性，优化空间在减少 y_fp32 输出量（契约不允许）或接受。
+
 
 ## 每轮工作流（精度是硬门槛）
 
