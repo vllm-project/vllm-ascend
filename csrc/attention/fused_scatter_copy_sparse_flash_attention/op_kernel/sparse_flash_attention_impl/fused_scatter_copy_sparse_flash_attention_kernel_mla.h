@@ -114,9 +114,9 @@ private:
     static constexpr uint32_t BLOCK_ELEMENT_NUM = SFAVectorService<SFAT>::BYTE_BLOCK / sizeof(T);
 
     static constexpr uint64_t kvHeadNum = 1ULL;
-    static constexpr uint64_t headDim = 512ULL;
-    static constexpr uint64_t headDimAlign = 512ULL;
-    static constexpr uint64_t headDimRope = 64ULL;
+    static constexpr uint64_t headDim = SFA_MLA_CKV_DIM;
+    static constexpr uint64_t headDimAlign = SFA_MLA_CKV_DIM;
+    static constexpr uint64_t headDimRope = SFA_MLA_KPE_DIM;
     static constexpr uint32_t msdIterNum = 2U;
 
     static constexpr uint32_t dbWorkspaceRatio = PRELOAD_NUM;
@@ -556,11 +556,15 @@ __aicore__ inline void FusedScatterCopySparseFlashAttentionMla<SFAT>::Init(__gm_
 
     if constexpr (TEMPLATE_MODE == V_TEMPLATE) {
         // s2  d+rope bufNum
-        kvMergeGm_.SetGlobalBuffer((__gm__ KV_T *)(workspace + offset + aiCoreIdx * 512 * 576 * 4 * sizeof(KV_T)));
-        offset += usedCoreNum * 512 * 576 * 4 * sizeof(KV_T);
+        kvMergeGm_.SetGlobalBuffer((__gm__ KV_T *)(
+            workspace + offset + aiCoreIdx * SFA_MERGE_CACHE_GM_BANK_ELEMENTS *
+                                     SFA_MERGE_CACHE_GM_BUFFER_COUNT * sizeof(KV_T)));
+        offset += usedCoreNum * SFA_MERGE_CACHE_GM_BANK_ELEMENTS *
+                  SFA_MERGE_CACHE_GM_BUFFER_COUNT * sizeof(KV_T);
 
         kvValidSizeGm_.SetGlobalBuffer(
-            (__gm__ int32_t *)(workspace + offset + (aiCoreIdx * 2) * 128 * 4 * sizeof(int32_t)));
+            (__gm__ int32_t *)(workspace + offset + aiCoreIdx * SFA_VALID_SIZE_VALUES_PER_AIC *
+                              SFA_MERGE_CACHE_GM_BUFFER_COUNT * sizeof(int32_t)));
     }
 
     if constexpr (FLASH_DECODE) {

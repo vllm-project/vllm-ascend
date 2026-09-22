@@ -407,8 +407,10 @@ void FusedScatterCopySparseFlashAttentionTiling::GetWorkspaceSize()
     workspaceSize_ += preLoadNum * static_cast<size_t>(static_cast<float>(qPreSizeMla_ * actCoreNum * qPreProcResElemSize) * kvDtypeRatio);
     workspaceSize_ += preLoadNum * mBaseSize_ * actCoreNum * nUpdateElemSize;
     workspaceSize_ += preLoadNum * mBaseSize_ * actCoreNum * softmaxSumElemSize;
-    workspaceSize_ += 4 * 512 * (512 + 64) * 2 * actCoreNum;
-    workspaceSize_ += 4 * 128 * 4 * (2 * actCoreNum);
+    workspaceSize_ += KV_MERGE_BUFFER_COUNT * KV_MERGE_S2_TILE_SIZE *
+                      MLA_MERGED_K_DIM * KV_ELEMENT_BYTES * actCoreNum;
+    workspaceSize_ += KV_MERGE_BUFFER_COUNT * KV_VALID_SIZE_VALUES_PER_AIC *
+                      sizeof(int32_t) * actCoreNum;
 
     CalcFDWorkSpace(actCoreNum);
 }

@@ -140,7 +140,7 @@ private:
 
     static constexpr uint32_t M_SPLIT_SIZE = 128;
     static constexpr uint32_t N_SPLIT_SIZE = 128;
-    static constexpr uint32_t N_WORKSPACE_SIZE = 512;
+    static constexpr uint32_t N_WORKSPACE_SIZE = SFA_MERGE_S2_TILE_SIZE;
 
     static constexpr uint32_t L1_BLOCK_SIZE = (64 * (512 + 64) * sizeof(Q_T));
     static constexpr uint32_t L1_BLOCK_OFFSET = 64 * (512 + 64);
@@ -556,7 +556,7 @@ __aicore__ inline void SFAMatmulService<SFAT>::ComputeMm1(const RunInfo &info, c
     uint32_t nL1SizeAlign = SFAAlign(N_SPLIT_SIZE, 16U);
     uint32_t nL1Loops = (nSize + N_SPLIT_SIZE - 1) / N_SPLIT_SIZE;
 
-    uint32_t kSize = 576;
+    uint32_t kSize = SFA_MLA_MERGED_K_DIM;
     uint32_t kL1Size = 288;
     uint32_t kL1Loops = 2;
 
@@ -611,14 +611,17 @@ __aicore__ inline void SFAMatmulService<SFAT>::ComputeMm1(const RunInfo &info, c
                         nd2nzPara.srcNdMatrixStride = 0;
                         nd2nzPara.dstNzMatrixStride = 0;
                         DataCopy(bL1Tensor,
-                                 kvMergeGm_[info.loop % 4 * N_WORKSPACE_SIZE * kSize +
+                                 kvMergeGm_[info.loop % SFA_MERGE_CACHE_GM_BUFFER_COUNT *
+                                                SFA_MERGE_CACHE_GM_BANK_ELEMENTS +
                                             nL1 * N_SPLIT_SIZE * constInfo.headDim],
                                  nd2nzPara);
                         nd2nzPara.dValue = constInfo.headDimRope >> 1;
                         nd2nzPara.srcDValue = constInfo.headDimRope;
                         DataCopy(
                             bL1Tensor[nL1SizeAlign * (constInfo.headDim >> 1)],
-                            kvMergeGm_[info.loop % 4 * N_WORKSPACE_SIZE * kSize + N_WORKSPACE_SIZE * constInfo.headDim +
+                            kvMergeGm_[info.loop % SFA_MERGE_CACHE_GM_BUFFER_COUNT *
+                                           SFA_MERGE_CACHE_GM_BANK_ELEMENTS +
+                                       SFA_MERGE_KPE_PLANE_OFFSET +
                                        nL1 * N_SPLIT_SIZE * constInfo.headDimRope],
                             nd2nzPara);
                     } else {
@@ -633,14 +636,18 @@ __aicore__ inline void SFAMatmulService<SFAT>::ComputeMm1(const RunInfo &info, c
                         nd2nzPara.srcNdMatrixStride = 0;
                         nd2nzPara.dstNzMatrixStride = 0;
                         DataCopy(kTmpTensor,
-                                 kvMergeGm_[info.loop % 4 * N_WORKSPACE_SIZE * kSize + (constInfo.headDim >> 1) +
+                                 kvMergeGm_[info.loop % SFA_MERGE_CACHE_GM_BUFFER_COUNT *
+                                                SFA_MERGE_CACHE_GM_BANK_ELEMENTS +
+                                            (constInfo.headDim >> 1) +
                                             nL1 * N_SPLIT_SIZE * constInfo.headDim],
                                  nd2nzPara);
                         nd2nzPara.dValue = constInfo.headDimRope >> 1;
                         nd2nzPara.srcDValue = constInfo.headDimRope;
                         DataCopy(
                             bL1Tensor,
-                            kvMergeGm_[info.loop % 4 * N_WORKSPACE_SIZE * kSize + N_WORKSPACE_SIZE * constInfo.headDim +
+                            kvMergeGm_[info.loop % SFA_MERGE_CACHE_GM_BUFFER_COUNT *
+                                           SFA_MERGE_CACHE_GM_BANK_ELEMENTS +
+                                       SFA_MERGE_KPE_PLANE_OFFSET +
                                        (constInfo.headDimRope >> 1) + nL1 * N_SPLIT_SIZE * constInfo.headDimRope],
                             nd2nzPara);
                     }
@@ -885,7 +892,9 @@ __aicore__ inline void SFAMatmulService<SFAT>::ComputeMm2(const RunInfo &info, c
                     nd2nzPara.srcNdMatrixStride = 0;
                     nd2nzPara.dstNzMatrixStride = 0;
                     DataCopy(bL1Tensor[(kL1 - kOffset) * 128 * N_SPLIT_SIZE],
-                             kvMergeGm_[info.loop % 4 * N_WORKSPACE_SIZE * 576 + kL1 * 128 * constInfo.headDim +
+                             kvMergeGm_[info.loop % SFA_MERGE_CACHE_GM_BUFFER_COUNT *
+                                            SFA_MERGE_CACHE_GM_BANK_ELEMENTS +
+                                        kL1 * N_SPLIT_SIZE * constInfo.headDim +
                                         nL1 * N_SPLIT_SIZE],
                              nd2nzPara);
                 } else {

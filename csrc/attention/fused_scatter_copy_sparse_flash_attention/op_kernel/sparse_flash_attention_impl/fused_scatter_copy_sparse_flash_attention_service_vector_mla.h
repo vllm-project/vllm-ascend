@@ -222,7 +222,7 @@ private:
     static constexpr SFA_LAYOUT LAYOUT_T = SFAT::layout;
     static constexpr SFA_LAYOUT KV_LAYOUT_T = SFAT::kvLayout;
 
-    static constexpr uint64_t MERGE_CACHE_GM_BUF_NUM = 4;
+    static constexpr uint64_t MERGE_CACHE_GM_BUF_NUM = SFA_MERGE_CACHE_GM_BUFFER_COUNT;
     static constexpr uint64_t SYNC_INPUT_BUF1_FLAG = 2;
     static constexpr uint64_t SYNC_INPUT_BUF1_PONG_FLAG = 3;
     static constexpr uint64_t SYNC_INPUT_BUF2_FLAG = 4;
@@ -237,13 +237,19 @@ private:
     static constexpr T LN2 = 0.6931471805599453094172;
     static constexpr T RECIP_OF_LN2 = 1 / LN2;
     static constexpr T SOFTMAX_MIN_NUM = -2e38;
-    static constexpr uint32_t SOURCE_METADATA_CAPACITY = 512;
+    static constexpr uint32_t SOURCE_METADATA_CAPACITY = SFA_MERGE_S2_TILE_SIZE;
     static constexpr uint32_t ROPE_MERGE_BUFFER_BYTES =
-        2 * 32 * 64 * sizeof(KV_T);
+        SFA_GATHER_UB_BANK_COUNT * SFA_GATHER_KPE_UB_BANK_ELEMENTS * sizeof(KV_T);
     static constexpr uint32_t SOURCE_METADATA_UB_OFFSET =
         ROPE_MERGE_BUFFER_BYTES / sizeof(int32_t);
     static constexpr uint32_t DEST_METADATA_UB_OFFSET =
         SOURCE_METADATA_UB_OFFSET + SOURCE_METADATA_CAPACITY;
+    static constexpr uint32_t VALID_SIZE_FIRST_PART_UB_OFFSET = SFA_VALID_SIZE_VALUES_PER_AIV;
+    static constexpr uint32_t VALID_SIZE_SECOND_PART_UB_OFFSET =
+        VALID_SIZE_FIRST_PART_UB_OFFSET + SFA_VALID_SIZE_VALUES_PER_AIV;
+    static constexpr uint32_t VALID_SIZE_TOTAL_VALUES = SFA_VALID_SIZE_VALUES_PER_AIC;
+    static constexpr uint32_t VALID_SIZE_TMP_SUM_UB_OFFSET =
+        VALID_SIZE_FIRST_PART_UB_OFFSET + VALID_SIZE_TOTAL_VALUES;
     static_assert(
         (DEST_METADATA_UB_OFFSET + SOURCE_METADATA_CAPACITY) *
                 sizeof(int32_t) <=
@@ -363,7 +369,7 @@ template <typename SFAT> __aicore__ inline void SFAVectorService<SFAT>::InitBuff
     kvMergUb_ = inputBuff1.Get<KV_T>();
     ropeMergUb_ = inputBuff2.Get<KV_T>();
     // Vec0 uses only the first 8 KiB of inputBuff2 for the ping-pong RoPE
-    // gather (2 * 32 * 64 * sizeof(KV_T)).  Reuse part of the otherwise idle
+    // gather. Reuse part of the otherwise idle
     // upper half for one 512-token source/destination metadata tile.  Later
     // vector stages may reuse inputBuff2 after Vec0 has completed.
     sourceTokenIdsUb_ =
@@ -612,8 +618,10 @@ __aicore__ inline void SFAVectorService<SFAT>::ElewiseCompute(const RunInfo &inf
 {
     Muls(mmResUb, mmResUb, static_cast<T>(tilingData->baseParams.scaleValue), dealRowCount * columnCount);
     if constexpr (TEMPLATE_MODE == V_TEMPLATE) {
-        uint64_t s2ValidSizeFirstPart = v0ValidSizeUb_.GetValue(128 + info.loop % MERGE_CACHE_GM_BUF_NUM);
-        uint64_t s2ValidSizeSecondPart = v0ValidSizeUb_.GetValue(256 + info.loop % MERGE_CACHE_GM_BUF_NUM);
+        uint64_t s2ValidSizeFirstPart =
+            v0ValidSizeUb_.GetValue(VALID_SIZE_FIRST_PART_UB_OFFSET + info.loop % MERGE_CACHE_GM_BUF_NUM);
+        uint64_t s2ValidSizeSecondPart =
+            v0ValidSizeUb_.GetValue(VALID_SIZE_SECOND_PART_UB_OFFSET + info.loop % MERGE_CACHE_GM_BUF_NUM);
         int64_t s2ProcessSize = info.actualSingleProcessSInnerSize;
         int64_t s2Pair = CeilDiv(s2ProcessSize, 2L * constInfo.sparseBlockSize);
         int64_t s2Mid = CeilDiv(s2Pair, 2L) * 2 * constInfo.sparseBlockSize;
@@ -938,11 +946,12 @@ __aicore__ inline void SFAVectorService<SFAT>::ProcessVec1SingleBuf(const RunInf
     if constexpr (TEMPLATE_MODE == V_TEMPLATE) {
         DataCopyExtParams dataCopyParams;
         dataCopyParams.blockCount = 1;
-        dataCopyParams.blockLen = 256 * sizeof(int32_t);
+        dataCopyParams.blockLen = VALID_SIZE_TOTAL_VALUES * sizeof(int32_t);
         dataCopyParams.srcStride = 0;
         dataCopyParams.dstStride = 0;
         DataCopyPadExtParams<int32_t> padParams;
-        DataCopyPad(v0ValidSizeUb_[128], kvValidSizeGm_[info.loop % MERGE_CACHE_GM_BUF_NUM * (128 * 2)],
+        DataCopyPad(v0ValidSizeUb_[VALID_SIZE_FIRST_PART_UB_OFFSET],
+                    kvValidSizeGm_[info.loop % MERGE_CACHE_GM_BUF_NUM * VALID_SIZE_TOTAL_VALUES],
                     dataCopyParams, padParams);
         SetFlag<HardEvent::MTE2_S>(0);
         if (unlikely(loopCount == 0)) {
@@ -993,8 +1002,8 @@ __aicore__ inline int64_t
 SFAVectorService<SFAT>::GetStaggeredSparseIndex(
     int64_t virtualSparseIndex, const RunInfo &runInfo)
 {
-    constexpr int64_t chunkSize = 512;
-    constexpr int64_t chunkCount = 4;
+    constexpr int64_t chunkSize = SFA_MERGE_S2_TILE_SIZE;
+    constexpr int64_t chunkCount = SFA_OFFLOAD_SPARSE_INDICES_CAPACITY / chunkSize;
     constexpr int64_t sparseTokenCount = chunkSize * chunkCount;
     ASSERT_MSG(
         runInfo.sparseTokenCount == sparseTokenCount &&
@@ -1007,7 +1016,7 @@ SFAVectorService<SFAT>::GetStaggeredSparseIndex(
         return virtualSparseIndex;
     }
 
-    const int64_t virtualChunk = virtualSparseIndex >> 9;
+    const int64_t virtualChunk = virtualSparseIndex >> SFA_MERGE_S2_TILE_SHIFT;
     const int64_t offsetInChunk = virtualSparseIndex & (chunkSize - 1);
     // Rotate the three proven stagger phases across requests and variable
     // MTP query rows so adjacent rows do not hit DRAM at the same phase.
@@ -1151,11 +1160,13 @@ SFAVectorService<SFAT>::CopyInSingleKv(int64_t &mte2Size, int64_t mte3Size, int6
     intriParams.dstStride = 0;
     intriParams.srcStride = 0;
     DataCopyPadExtParams<KV_T> padParams;
-    DataCopyPad(kvMergUb_[mergeMte3Idx % 2 * 32 * 512 + (mte2Size - mte3Size) * constInfo.headDim],
+    DataCopyPad(kvMergUb_[mergeMte3Idx % SFA_GATHER_UB_BANK_COUNT * SFA_GATHER_CKV_UB_BANK_ELEMENTS +
+                             (mte2Size - mte3Size) * constInfo.headDim],
                 keyGm_[keyBNBOffset * constInfo.headDim], intriParams, padParams);
     intriParams.blockLen = validS2Count * constInfo.headDimRope * sizeof(KV_T);
 
-    DataCopyPad(ropeMergUb_[mergeMte3Idx % 2 * 32 * 64 + (mte2Size - mte3Size) * constInfo.headDimRope],
+    DataCopyPad(ropeMergUb_[mergeMte3Idx % SFA_GATHER_UB_BANK_COUNT * SFA_GATHER_KPE_UB_BANK_ELEMENTS +
+                               (mte2Size - mte3Size) * constInfo.headDimRope],
                 keyRopeGm_[keyBNBOffset * constInfo.headDimRope], intriParams, padParams);
     mte2Size += validS2Count;
 }
@@ -1186,14 +1197,14 @@ __aicore__ inline void SFAVectorService<SFAT>::CopyInDramKv(
     copyParams.dstStride = 0;
     DataCopyPadExtParams<KV_T> padParams;
     DataCopyPad(
-        kvMergUb_[mergeMte3Idx % 2 * 32 * 512 +
+        kvMergUb_[mergeMte3Idx % SFA_GATHER_UB_BANK_COUNT * SFA_GATHER_CKV_UB_BANK_ELEMENTS +
                   ubRow * constInfo.headDim],
         dramKeyGm_[dramOffset * constInfo.headDim],
         copyParams, padParams);
 
     copyParams.blockLen = constInfo.headDimRope * sizeof(KV_T);
     DataCopyPad(
-        ropeMergUb_[mergeMte3Idx % 2 * 32 * 64 +
+        ropeMergUb_[mergeMte3Idx % SFA_GATHER_UB_BANK_COUNT * SFA_GATHER_KPE_UB_BANK_ELEMENTS +
                     ubRow * constInfo.headDimRope],
         dramKeyRopeGm_[dramOffset * constInfo.headDimRope],
         copyParams, padParams);
@@ -1367,13 +1378,15 @@ __aicore__ inline void SFAVectorService<SFAT>::CopyInHbmKvPair(
         if (keyOffset2 > -1 && keyOffset2 < keyOffset1) {
             startGmOffset = keyOffset2;
         }
-        DataCopyPad(kvMergUb_[mergeMte3Idx % 2 * 32 * 512 + (mte2Size - mte3Size) * constInfo.headDim],
+        DataCopyPad(kvMergUb_[mergeMte3Idx % SFA_GATHER_UB_BANK_COUNT * SFA_GATHER_CKV_UB_BANK_ELEMENTS +
+                                 (mte2Size - mte3Size) * constInfo.headDim],
                     keyGm_[startGmOffset * constInfo.headDim], intriParams, padParams);
 
         intriParams.blockLen = constInfo.sparseBlockSize * constInfo.headDimRope * sizeof(KV_T);
         intriParams.dstStride = 0;
         intriParams.srcStride = keyRopeSrcStride;
-        DataCopyPad(ropeMergUb_[mergeMte3Idx % 2 * 32 * 64 + (mte2Size - mte3Size) * constInfo.headDimRope],
+        DataCopyPad(ropeMergUb_[mergeMte3Idx % SFA_GATHER_UB_BANK_COUNT * SFA_GATHER_KPE_UB_BANK_ELEMENTS +
+                                   (mte2Size - mte3Size) * constInfo.headDimRope],
                     keyRopeGm_[startGmOffset * constInfo.headDimRope], intriParams, padParams);
         mte2Size += ((keyOffset1 > -1) + (keyOffset2 > -1)) * constInfo.sparseBlockSize;
     }
@@ -1497,12 +1510,17 @@ __aicore__ inline void SFAVectorService<SFAT>::CopyOutMrgeResult(int64_t mte2Siz
     dataCopyParams.srcStride = 0;
     dataCopyParams.dstStride = 0;
 
-    DataCopyPad(kvMergeGm_[runInfo.loop % 4 * 512 * 576 + (s2GmStartOffset + mte3Size)*constInfo.headDim],
-                kvMergUb_[mergeMte3Idx % 2 * 32 * 512], dataCopyParams);
+    DataCopyPad(kvMergeGm_[runInfo.loop % MERGE_CACHE_GM_BUF_NUM * SFA_MERGE_CACHE_GM_BANK_ELEMENTS +
+                          (s2GmStartOffset + mte3Size) * constInfo.headDim],
+                kvMergUb_[mergeMte3Idx % SFA_GATHER_UB_BANK_COUNT * SFA_GATHER_CKV_UB_BANK_ELEMENTS],
+                dataCopyParams);
 
     dataCopyParams.blockLen = constInfo.headDimRope * sizeof(KV_T);
-    DataCopyPad(kvMergeGm_[runInfo.loop % 4 * 512 * 576 + 512 * 512 + (s2GmStartOffset + mte3Size) *
-                constInfo.headDimRope], ropeMergUb_[mergeMte3Idx % 2 * 32 * 64], dataCopyParams);
+    DataCopyPad(kvMergeGm_[runInfo.loop % MERGE_CACHE_GM_BUF_NUM * SFA_MERGE_CACHE_GM_BANK_ELEMENTS +
+                          SFA_MERGE_KPE_PLANE_OFFSET +
+                          (s2GmStartOffset + mte3Size) * constInfo.headDimRope],
+                ropeMergUb_[mergeMte3Idx % SFA_GATHER_UB_BANK_COUNT * SFA_GATHER_KPE_UB_BANK_ELEMENTS],
+                dataCopyParams);
 }
 
 template <typename SFAT>
@@ -1527,19 +1545,19 @@ SFAVectorService<SFAT>::CopyOutSourceAwareResult(
              copyIndex < persistentCopyCount; ++copyIndex) {
             const uint64_t packedCopy = persistentCopies[copyIndex];
             const int64_t destinationOffset = static_cast<int64_t>(
-                packedCopy >> 5);
-            const int64_t row = packedCopy & 31U;
+                packedCopy >> SFA_PERSISTENT_COPY_ROW_BITS);
+            const int64_t row = packedCopy & SFA_PERSISTENT_COPY_ROW_MASK;
             const int64_t ubRow =
-                mergeMte3Idx % 2 * 32 + row;
+                mergeMte3Idx % SFA_GATHER_UB_BANK_COUNT * SFA_GATHER_BATCH_ROWS + row;
             if constexpr (SFAT::sourceAwareGather && SFAT::mtpMode) {
                 // Coalesce only a complete original pair. Odd tails, holes,
                 // reversed destinations and oversized strides use scalar writes.
                 if ((row & 1U) == 0 && copyIndex + 1 < persistentCopyCount) {
                     const uint64_t nextCopy = persistentCopies[copyIndex + 1];
-                    if ((nextCopy & 31U) == static_cast<uint64_t>(row + 1) &&
+                    if ((nextCopy & SFA_PERSISTENT_COPY_ROW_MASK) == static_cast<uint64_t>(row + 1) &&
                         TryCopyMissPairToPersistentCache(
                             ubRow, destinationOffset,
-                            static_cast<int64_t>(nextCopy >> 5))) {
+                            static_cast<int64_t>(nextCopy >> SFA_PERSISTENT_COPY_ROW_BITS))) {
                         ++copyIndex;
                         continue;
                     }
@@ -1559,7 +1577,7 @@ SFAVectorService<SFAT>::CopyOutSourceAwareResult(
     for (int64_t rangeOffset = mte3Size;
          rangeOffset < missEnd; ++rangeOffset) {
         const int64_t ubRow =
-            mergeMte3Idx % 2 * 32 + rangeOffset - mte3Size;
+            mergeMte3Idx % SFA_GATHER_UB_BANK_COUNT * SFA_GATHER_BATCH_ROWS + rangeOffset - mte3Size;
         const int64_t sourceIndex =
             sourceRangeStart + rangeOffset;
         const int32_t destinationSlot =
@@ -1580,7 +1598,7 @@ SFAVectorService<SFAT>::CopyOutReadAheadBatch(
 {
     // The producer marks this bank ready before submitting the next bank's
     // reads. Do not add another MTE2 fence that would also wait for those reads.
-    WaitFlag<AscendC::HardEvent::MTE2_MTE3>(batch.index & 1);
+    WaitFlag<AscendC::HardEvent::MTE2_MTE3>(batch.index & SFA_GATHER_UB_BANK_MASK);
     if constexpr (HAS_MISS) {
         CopyOutSourceAwareResult<ALIGNED_MISS>(
             batch.end, batch.begin, s2GmStartOffset, batch.index,
@@ -1592,7 +1610,7 @@ SFAVectorService<SFAT>::CopyOutReadAheadBatch(
             batch.index, runInfo, true);
     }
     // Merge output and persistent-cache writes must finish before bank reuse.
-    SetFlag<AscendC::HardEvent::MTE3_MTE2>(batch.index & 1);
+    SetFlag<AscendC::HardEvent::MTE3_MTE2>(batch.index & SFA_GATHER_UB_BANK_MASK);
 }
 
 template <typename SFAT>
@@ -1636,13 +1654,13 @@ SFAVectorService<SFAT>::MergeKvTailContiguous(const RunInfo &runInfo)
     SetFlag<AscendC::HardEvent::MTE3_MTE2>(1);
 
     while (remaining > 0 && logicalToken < s2IdLimit) {
-        WaitFlag<AscendC::HardEvent::MTE3_MTE2>(mergeMte3Idx % 2);
+        WaitFlag<AscendC::HardEvent::MTE3_MTE2>(mergeMte3Idx % SFA_GATHER_UB_BANK_COUNT);
 
         const int64_t blockOffset =
             logicalToken % constInfo.kvCacheBlockSize;
         int64_t copyCount = constInfo.kvCacheBlockSize - blockOffset;
-        if (copyCount > 32) {
-            copyCount = 32;
+        if (copyCount > static_cast<int64_t>(SFA_GATHER_BATCH_ROWS)) {
+            copyCount = static_cast<int64_t>(SFA_GATHER_BATCH_ROWS);
         }
         if (copyCount > remaining) {
             copyCount = remaining;
@@ -1654,7 +1672,7 @@ SFAVectorService<SFAT>::MergeKvTailContiguous(const RunInfo &runInfo)
         const int64_t keyOffset =
             GetKeyGmOffset(logicalToken, runInfo, s2IdLimit);
         if (unlikely(keyOffset < 0 || copyCount <= 0)) {
-            SetFlag<AscendC::HardEvent::MTE3_MTE2>(mergeMte3Idx % 2);
+            SetFlag<AscendC::HardEvent::MTE3_MTE2>(mergeMte3Idx % SFA_GATHER_UB_BANK_COUNT);
             break;
         }
 
@@ -1666,14 +1684,14 @@ SFAVectorService<SFAT>::MergeKvTailContiguous(const RunInfo &runInfo)
         copyParams.dstStride = 0;
         DataCopyPadExtParams<KV_T> padParams;
         DataCopyPad(
-            kvMergUb_[mergeMte3Idx % 2 * 32 * 512],
+            kvMergUb_[mergeMte3Idx % SFA_GATHER_UB_BANK_COUNT * SFA_GATHER_CKV_UB_BANK_ELEMENTS],
             keyGm_[keyOffset * constInfo.headDim],
             copyParams, padParams);
 
         copyParams.blockLen =
             copyCount * constInfo.headDimRope * sizeof(KV_T);
         DataCopyPad(
-            ropeMergUb_[mergeMte3Idx % 2 * 32 * 64],
+            ropeMergUb_[mergeMte3Idx % SFA_GATHER_UB_BANK_COUNT * SFA_GATHER_KPE_UB_BANK_ELEMENTS],
             keyRopeGm_[keyOffset * constInfo.headDimRope],
             copyParams, padParams);
 
@@ -1682,7 +1700,7 @@ SFAVectorService<SFAT>::MergeKvTailContiguous(const RunInfo &runInfo)
             mte2Size, mte3Size, s2GmStartOffset,
             mergeMte3Idx, runInfo);
         mte3Size = mte2Size;
-        SetFlag<AscendC::HardEvent::MTE3_MTE2>(mergeMte3Idx % 2);
+        SetFlag<AscendC::HardEvent::MTE3_MTE2>(mergeMte3Idx % SFA_GATHER_UB_BANK_COUNT);
         mergeMte3Idx++;
         logicalToken += copyCount;
         remaining -= copyCount;
@@ -1696,13 +1714,13 @@ SFAVectorService<SFAT>::MergeKvTailContiguous(const RunInfo &runInfo)
     WaitFlag<AscendC::HardEvent::S_MTE3>(1);
     DataCopyExtParams validSizeCopyParams;
     validSizeCopyParams.blockCount = 1;
-    validSizeCopyParams.blockLen = 128 * sizeof(int32_t);
+    validSizeCopyParams.blockLen = SFA_VALID_SIZE_VALUES_PER_AIV * sizeof(int32_t);
     validSizeCopyParams.srcStride = 0;
     validSizeCopyParams.dstStride = 0;
     DataCopyPad(
         kvValidSizeGm_[
-            runInfo.loop % MERGE_CACHE_GM_BUF_NUM * (128 * 2) +
-            GetSubBlockIdx() * 128],
+            runInfo.loop % MERGE_CACHE_GM_BUF_NUM * VALID_SIZE_TOTAL_VALUES +
+            GetSubBlockIdx() * SFA_VALID_SIZE_VALUES_PER_AIV],
         v0ValidSizeUb_, validSizeCopyParams);
 }
 
@@ -1749,7 +1767,7 @@ __aicore__ inline void SFAVectorService<SFAT>::MergeKvRange(
     bool flushHasActualMiss = false;
     // Pack (physical token offset, UB row) in 64 bits. Keep metadata separate
     // for the two payload banks because MTP read-ahead delays writeback.
-    uint64_t persistentCopies[READ_AHEAD && HAS_MISS ? 2 : 1][32];
+    uint64_t persistentCopies[READ_AHEAD && HAS_MISS ? SFA_GATHER_UB_BANK_COUNT : 1][SFA_GATHER_BATCH_ROWS];
     int32_t persistentCopyCount = 0;
     GatherBatch pending;
     bool hasPending = false;
@@ -1759,7 +1777,7 @@ __aicore__ inline void SFAVectorService<SFAT>::MergeKvRange(
          s2GmOffsetArray < s2GmLimit;
          s2GmOffsetArray += 2 * constInfo.sparseBlockSize) {
         if (needWaitMte3ToMte2) {
-            WaitFlag<AscendC::HardEvent::MTE3_MTE2>(mergeMte3Idx % 2);
+            WaitFlag<AscendC::HardEvent::MTE3_MTE2>(mergeMte3Idx % SFA_GATHER_UB_BANK_COUNT);
             needWaitMte3ToMte2 = false;
         }
         if constexpr (SOURCE_ORDER) {
@@ -1803,21 +1821,24 @@ __aicore__ inline void SFAVectorService<SFAT>::MergeKvRange(
                             s2IdLimit, runInfo);
                         if (persistentOffset0 >= 0) {
                             ASSERT_MSG(
-                                persistentCopyCount < 32 &&
-                                    pairRowStart >= 0 && pairRowStart < 32,
+                                persistentCopyCount < static_cast<int32_t>(SFA_GATHER_BATCH_ROWS) &&
+                                    pairRowStart >= 0 &&
+                                    pairRowStart < static_cast<int64_t>(SFA_GATHER_BATCH_ROWS),
                                 "source-aware persistent copy metadata overflow.");
-                            persistentCopies[READ_AHEAD ? (mergeMte3Idx & 1) : 0][persistentCopyCount++] =
-                                (static_cast<uint64_t>(persistentOffset0) << 5) |
+                            persistentCopies[READ_AHEAD ? (mergeMte3Idx & SFA_GATHER_UB_BANK_MASK) : 0]
+                                            [persistentCopyCount++] =
+                                (static_cast<uint64_t>(persistentOffset0) << SFA_PERSISTENT_COPY_ROW_BITS) |
                                 static_cast<uint64_t>(pairRowStart);
                         }
                         if (persistentOffset1 >= 0) {
                             ASSERT_MSG(
-                                persistentCopyCount < 32 &&
+                                persistentCopyCount < static_cast<int32_t>(SFA_GATHER_BATCH_ROWS) &&
                                     pairRowStart + 1 >= 0 &&
-                                    pairRowStart + 1 < 32,
+                                    pairRowStart + 1 < static_cast<int64_t>(SFA_GATHER_BATCH_ROWS),
                                 "source-aware persistent copy metadata overflow.");
-                            persistentCopies[READ_AHEAD ? (mergeMte3Idx & 1) : 0][persistentCopyCount++] =
-                                (static_cast<uint64_t>(persistentOffset1) << 5) |
+                            persistentCopies[READ_AHEAD ? (mergeMte3Idx & SFA_GATHER_UB_BANK_MASK) : 0]
+                                            [persistentCopyCount++] =
+                                (static_cast<uint64_t>(persistentOffset1) << SFA_PERSISTENT_COPY_ROW_BITS) |
                                 static_cast<uint64_t>(pairRowStart + 1);
                         }
                     }
@@ -1896,7 +1917,7 @@ __aicore__ inline void SFAVectorService<SFAT>::MergeKvRange(
                     mte2Size, mte3Size, s2GmStartOffset,
                     mergeMte3Idx, runInfo);
                 SetFlag<AscendC::HardEvent::MTE3_MTE2>(
-                    mergeMte3Idx % 2);
+                    mergeMte3Idx % SFA_GATHER_UB_BANK_COUNT);
                 mergeMte3Idx++;
                 break;
             }
@@ -1907,18 +1928,19 @@ __aicore__ inline void SFAVectorService<SFAT>::MergeKvRange(
                 mte2Size, mte3Size, mergeMte3Idx,
                 realS2Idx0, realS2Idx1, runInfo);
         }
-        if ((mte2Size - mte3Size + 2 * constInfo.sparseBlockSize > 32) ||
+        if ((mte2Size - mte3Size + 2 * constInfo.sparseBlockSize >
+             static_cast<int64_t>(SFA_GATHER_BATCH_ROWS)) ||
             s2GmOffsetArray + 2 * constInfo.sparseBlockSize >=
                 s2GmLimit) {
             if constexpr (READ_AHEAD) {
                 // Submit the next bank's reads before writing the pending bank:
                 // R0, R1, W0, R2, W1, ...
-                SetFlag<AscendC::HardEvent::MTE2_MTE3>(mergeMte3Idx & 1);
+                SetFlag<AscendC::HardEvent::MTE2_MTE3>(mergeMte3Idx & SFA_GATHER_UB_BANK_MASK);
                 if (hasPending) {
                     CopyOutReadAheadBatch<HAS_MISS, ALIGNED_MISS>(
                         runInfo, pending, s2GmStartOffset,
                         missRangeSize, sourceRangeStart,
-                        persistentCopies[HAS_MISS ? (pending.index & 1) : 0]);
+                        persistentCopies[HAS_MISS ? (pending.index & SFA_GATHER_UB_BANK_MASK) : 0]);
                 }
                 pending.begin = mte3Size;
                 pending.end = mte2Size;
@@ -1941,7 +1963,7 @@ __aicore__ inline void SFAVectorService<SFAT>::MergeKvRange(
             persistentCopyCount = 0;
             mte3Size = mte2Size;
             if constexpr (!READ_AHEAD) {
-                SetFlag<AscendC::HardEvent::MTE3_MTE2>(mergeMte3Idx % 2);
+                SetFlag<AscendC::HardEvent::MTE3_MTE2>(mergeMte3Idx % SFA_GATHER_UB_BANK_COUNT);
             }
             mergeMte3Idx++;
             needWaitMte3ToMte2 = true;
@@ -1952,7 +1974,7 @@ __aicore__ inline void SFAVectorService<SFAT>::MergeKvRange(
             CopyOutReadAheadBatch<HAS_MISS, ALIGNED_MISS>(
                 runInfo, pending, s2GmStartOffset,
                 missRangeSize, sourceRangeStart,
-                persistentCopies[HAS_MISS ? (pending.index & 1) : 0]);
+                persistentCopies[HAS_MISS ? (pending.index & SFA_GATHER_UB_BANK_MASK) : 0]);
         }
     }
     FinishMergeKvRange(
@@ -2016,7 +2038,7 @@ __aicore__ inline void SFAVectorService<SFAT>::FinishMergeKvRange(
     if (unlikely(s2GmStartOffset + mte2Size < s2GmLimit)) {
         SetFlag<AscendC::HardEvent::MTE3_V>(0);
         WaitFlag<AscendC::HardEvent::MTE3_V>(0);
-        WaitFlag<AscendC::HardEvent::MTE3_MTE2>(mergeMte3Idx & 1);
+        WaitFlag<AscendC::HardEvent::MTE3_MTE2>(mergeMte3Idx & SFA_GATHER_UB_BANK_MASK);
         Duplicate(kvMergUb_, static_cast<KV_T>(0.0), constInfo.headDim);
         SetFlag<AscendC::HardEvent::V_MTE3>(0);
         WaitFlag<AscendC::HardEvent::V_MTE3>(0);
@@ -2027,16 +2049,20 @@ __aicore__ inline void SFAVectorService<SFAT>::FinishMergeKvRange(
         dataCopyParams.srcStride = 0;
         dataCopyParams.dstStride = 0;
         for (int64_t s2GmOffset = s2GmStartOffset + mte2Size; s2GmOffset < s2GmLimit; s2GmOffset++) {
-            DataCopyPad(kvMergeGm_[runInfo.loop % MERGE_CACHE_GM_BUF_NUM * 512 * 576 + s2GmOffset * constInfo.headDim],
+            DataCopyPad(kvMergeGm_[runInfo.loop % MERGE_CACHE_GM_BUF_NUM *
+                                      SFA_MERGE_CACHE_GM_BANK_ELEMENTS +
+                                  s2GmOffset * constInfo.headDim],
                         kvMergUb_, dataCopyParams);
         }
         dataCopyParams.blockLen = constInfo.headDimRope * sizeof(KV_T);
         for (int64_t s2GmOffset = s2GmStartOffset + mte2Size; s2GmOffset < s2GmLimit; s2GmOffset++) {
-            DataCopyPad(kvMergeGm_[runInfo.loop % MERGE_CACHE_GM_BUF_NUM * 512 * 576 + 512 * constInfo.headDim +
-                                   s2GmOffset * constInfo.headDimRope],
+            DataCopyPad(kvMergeGm_[runInfo.loop % MERGE_CACHE_GM_BUF_NUM *
+                                      SFA_MERGE_CACHE_GM_BANK_ELEMENTS +
+                                  SFA_MERGE_KPE_PLANE_OFFSET +
+                                  s2GmOffset * constInfo.headDimRope],
                         kvMergUb_, dataCopyParams);
         }
-        SetFlag<AscendC::HardEvent::MTE3_MTE2>(mergeMte3Idx & 1);
+        SetFlag<AscendC::HardEvent::MTE3_MTE2>(mergeMte3Idx & SFA_GATHER_UB_BANK_MASK);
         mergeMte3Idx++;
     }
     WaitFlag<AscendC::HardEvent::MTE3_MTE2>(0);
@@ -2046,10 +2072,11 @@ __aicore__ inline void SFAVectorService<SFAT>::FinishMergeKvRange(
     WaitFlag<AscendC::HardEvent::S_MTE3>(1);
     DataCopyExtParams dataCopyParams;
     dataCopyParams.blockCount = 1;
-    dataCopyParams.blockLen = 128 * sizeof(int32_t);
+    dataCopyParams.blockLen = SFA_VALID_SIZE_VALUES_PER_AIV * sizeof(int32_t);
     dataCopyParams.srcStride = 0;
     dataCopyParams.dstStride = 0;
-    DataCopyPad(kvValidSizeGm_[runInfo.loop % MERGE_CACHE_GM_BUF_NUM * (128 * 2) + validSizePart * 128],
+    DataCopyPad(kvValidSizeGm_[runInfo.loop % MERGE_CACHE_GM_BUF_NUM * VALID_SIZE_TOTAL_VALUES +
+                               validSizePart * SFA_VALID_SIZE_VALUES_PER_AIV],
                 v0ValidSizeUb_, dataCopyParams);
 }
 
@@ -2502,7 +2529,7 @@ SFAVectorService<SFAT>::DealBmm2ResBaseBlock(const RunInfo &info, const MSplitIn
     AscendC::PipeBarrier<PIPE_V>();
     uint32_t baseOffset = mSplitInfo.nBufferStartM / 2 + startRow;
     uint32_t idx = info.loop % (constInfo.preLoadNum);
-    LocalTensor<T> tmpSumUb = v0ValidSizeBuff.Get<T>()[384];
+    LocalTensor<T> tmpSumUb = v0ValidSizeBuff.Get<T>()[VALID_SIZE_TMP_SUM_UB_OFFSET];
     Brcb(tmpSumUb, aMlaSumUb[idx * SOFTMAX_TMP_BUFFER_OFFSET / sizeof(T) + baseOffset], (dealRowCount + 7) / 8, {1, 8});
     AscendC::PipeBarrier<PIPE_V>();
     if constexpr (STAGE_MODE == SFA_STAGE_STAGE1) {

@@ -26,6 +26,31 @@ constexpr uint32_t SFA_OFFLOAD_SPARSE_INDICES_CAPACITY = 2048;
 constexpr uint32_t SFA_OFFLOAD_SPARSE_COMPUTE_COUNT = 2048;
 // MTP15 means one committed query plus fifteen speculative query rows.
 constexpr uint32_t SFA_MTP_MAX_QUERY_COUNT = 16;
+// Source-aware gather and its shared GM/UB layout.
+constexpr uint32_t SFA_MERGE_CACHE_GM_BUFFER_COUNT = 4;
+constexpr uint32_t SFA_MERGE_S2_TILE_SIZE = 512;
+constexpr uint32_t SFA_MERGE_S2_TILE_SHIFT = 9;
+constexpr uint32_t SFA_MLA_CKV_DIM = 512;
+constexpr uint32_t SFA_MLA_KPE_DIM = 64;
+constexpr uint32_t SFA_MLA_MERGED_K_DIM = SFA_MLA_CKV_DIM + SFA_MLA_KPE_DIM;
+constexpr uint32_t SFA_MERGE_CACHE_GM_BANK_ELEMENTS = SFA_MERGE_S2_TILE_SIZE * SFA_MLA_MERGED_K_DIM;
+constexpr uint32_t SFA_MERGE_KPE_PLANE_OFFSET = SFA_MERGE_S2_TILE_SIZE * SFA_MLA_CKV_DIM;
+constexpr uint32_t SFA_GATHER_UB_BANK_COUNT = 2;
+constexpr uint32_t SFA_GATHER_UB_BANK_MASK = SFA_GATHER_UB_BANK_COUNT - 1U;
+constexpr uint32_t SFA_GATHER_BATCH_ROWS = 32;
+constexpr uint32_t SFA_GATHER_CKV_UB_BANK_ELEMENTS = SFA_GATHER_BATCH_ROWS * SFA_MLA_CKV_DIM;
+constexpr uint32_t SFA_GATHER_KPE_UB_BANK_ELEMENTS = SFA_GATHER_BATCH_ROWS * SFA_MLA_KPE_DIM;
+constexpr uint32_t SFA_VALID_SIZE_VALUES_PER_AIV = 128;
+constexpr uint32_t SFA_AIV_PER_AIC = 2;
+constexpr uint32_t SFA_VALID_SIZE_VALUES_PER_AIC = SFA_VALID_SIZE_VALUES_PER_AIV * SFA_AIV_PER_AIC;
+constexpr uint32_t SFA_PERSISTENT_COPY_ROW_BITS = 5;
+constexpr uint32_t SFA_PERSISTENT_COPY_ROW_MASK = (1U << SFA_PERSISTENT_COPY_ROW_BITS) - 1U;
+static_assert(SFA_GATHER_BATCH_ROWS == (1U << SFA_PERSISTENT_COPY_ROW_BITS),
+              "persistent-copy row packing must cover one gather batch");
+static_assert(SFA_MERGE_S2_TILE_SIZE == (1U << SFA_MERGE_S2_TILE_SHIFT),
+              "merge S2 tile shift must match its size");
+static_assert((SFA_GATHER_UB_BANK_COUNT & SFA_GATHER_UB_BANK_MASK) == 0,
+              "gather bank count must be a power of two");
 
 enum class SFA_LAYOUT
 {

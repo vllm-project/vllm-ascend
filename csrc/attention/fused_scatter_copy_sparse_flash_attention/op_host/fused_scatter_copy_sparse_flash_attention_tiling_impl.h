@@ -57,6 +57,15 @@ const uint32_t FusedScatterCopySparseFlashAttention_MAX_AIC_CORE_NUM = 26;
 constexpr uint32_t OFFLOAD_SPARSE_INDICES_CAPACITY = 2048;
 constexpr uint32_t OFFLOAD_SPARSE_COMPUTE_COUNT = 2048;
 constexpr uint32_t OFFLOAD_MTP3_QUERY_COUNT = 4;
+constexpr uint32_t KV_MERGE_BUFFER_COUNT = 4;
+constexpr uint32_t KV_MERGE_S2_TILE_SIZE = 512;
+constexpr uint32_t MLA_CKV_DIM = 512;
+constexpr uint32_t MLA_KPE_DIM = 64;
+constexpr uint32_t MLA_MERGED_K_DIM = MLA_CKV_DIM + MLA_KPE_DIM;
+constexpr uint32_t KV_ELEMENT_BYTES = NUM_BYTES_FLOAT16;
+constexpr uint32_t KV_VALID_SIZE_VALUES_PER_AIV = 128;
+constexpr uint32_t AIV_PER_AIC = 2;
+constexpr uint32_t KV_VALID_SIZE_VALUES_PER_AIC = KV_VALID_SIZE_VALUES_PER_AIV * AIV_PER_AIC;
 
 enum class FusedScatterCopySparseFlashAttentionLayout : uint32_t {
     BSND = 0,
