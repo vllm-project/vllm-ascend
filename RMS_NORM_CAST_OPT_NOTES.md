@@ -44,8 +44,9 @@ msprof op（PipeUtilization，2048×7168 bf16，Block Dim 40）：
 - Round 3: 视 Round 2 profile 决定 —— vec 已 91%，主攻**减 vec pass 数**
   （bf16 9 遍：候选=平方与 reduce 树的融合指令、两次输出 Cast 的合并可行性）
   与小 shape（1-16）回退（+0.1~0.25µs，序言固定开销）
-- Round 4: 视 profile 收尾（候选池：4096 写带宽结构性上限确认、
-  DataCopyPad→对齐 DataCopy、小 shape 单核串行链缩短）
+- Round 4: 视 profile 收尾（候选池：预取深度 2（x 三槽，抚平 ramp/tail 的 ~4.6µs
+  vec 空闲）、每行 PipeBarrier 精简（~90ns/行）、DataCopyPad→对齐 DataCopy）。
+  ~~4096 写带宽~~已结案：系统级背靠背效应（见 Round 2 记录），kernel 线性，不追。
   原则：任何 shape 不回退；以 msprof 数据决定取舍。
 
 ## 测量方法一致性验证（NPUGraph benchmark vs msprof op）
@@ -324,8 +325,16 @@ bf16 22 / fp16 18 + 固定 320B；@7168 bf16 共 158KB；最大 hidden ~8.8K/~10
 
   → **流水目标达成**：MTE2/MTE3 时间不变但全部移出关键路径，vec 占比 61%→91%。
   剩余 ~4.6µs/核 的 vec 空闲（9%）≈ 序言 gamma 串行 + 尾行 store 排空 + 首行预取深度 1。
-  Round 3 的唯一大杠杆 = **减 vec pass 数**（现 bf16 9 遍）；4096 档为写带宽饱和
-  （235MB/178µs ≈ 1.3TB/s），属结构性，优化空间在减少 y_fp32 输出量（契约不允许）或接受。
+  Round 3 的唯一大杠杆 = **减 vec pass 数**（现 bf16 9 遍）。
+
+- **4096 档"-14%"根因（测量方法论发现，重要）**：三种口径实测
+  msprof（孤立）= 111.4µs ≈ **恰好 2048 的 2 倍（线性）**，vec 86.6% 仍主导；
+  NPUGraph graph replay（32 连发背靠背）= 176µs；python 循环（有 CPU 间隙）= 137µs。
+  → kernel 本身线性扩展；背靠背时前一 kernel 176MB 写出仍在内存系统排空，
+  与下一 kernel 的加载争抢 HBM（也可能叠加 DVFS，持续负载时功耗 234W），拉长 1.6×。
+  **系统级效应，同样作用于参照**（ref@4096 背靠背 197µs，我们仍快 11%），
+  kernel 层无解，Round 4 不追。对比大 shape 数据时注意口径：NPUGraph≈背靠背
+  （贴近真实 serving），msprof≈孤立峰值。
 
 
 ## 每轮工作流（精度是硬门槛）
