@@ -1444,7 +1444,15 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 # `markov_emb` should also be full to match it.
                 # We changed `flash_comm_v1_enabled` to avoid `markov_emb` from being split.
                 with _disable_flash_comm_v1_context():
-                    raw_logits = self.model.compute_logits(sample_hidden_states)
+                    # A reduced draft vocab keeps the Markov bias in draft-vocab
+                    # space, so sample there as well: logits and bias must share one
+                    # vocab before the in-place add. Sampled ids are mapped back to
+                    # target vocab below.
+                    dspark_has_vocab_mapping = getattr(self.model, "draft_id_to_target_id", None) is not None
+                    if dspark_has_vocab_mapping:
+                        raw_logits = self.model.compute_draft_logits(sample_hidden_states)
+                    else:
+                        raw_logits = self.model.compute_logits(sample_hidden_states)
                     if lmhead_tp_enable():
                         # Keep the padded shape through the LMHead TP collective,
                         # then remove dummy sampling rows before grouping them by
@@ -1458,7 +1466,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         markov_emb = self.model.markov_embed(draft_token_ids[:, idx])
                         logits_bias = self.model.markov_bias(markov_emb)
                         logits[:, idx].add_(logits_bias)
-                        draft_token_ids[:, idx + 1].copy_(logits[:, idx].argmax(dim=-1))
+                        next_ids = logits[:, idx].argmax(dim=-1)
+                        if dspark_has_vocab_mapping:
+                            # Sampled ids leave draft space here; markov_embed and
+                            # draft_token_ids stay in target-vocab ids.
+                            next_ids = self.model.map_draft_to_target(next_ids)
+                        draft_token_ids[:, idx + 1].copy_(next_ids)
             else:
                 logits = self.model.compute_logits(sample_hidden_states)
                 if lmhead_tp_enable():

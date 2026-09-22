@@ -31,6 +31,8 @@ from vllm.config import CUDAGraphMode
 from vllm.v1.worker.utils import AttentionGroup
 
 import vllm_ascend.spec_decode.dspark_proposer as dspark_proposer_module
+import vllm_ascend.spec_decode.llm_base_proposer as llm_base_proposer
+import vllm_ascend.spec_decode.utils as spec_decode_utils
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
@@ -368,6 +370,164 @@ class _DSparkProposerTestBase:
 
 
 # fmt: on
+
+
+class _MockDSparkMarkovModel:
+    """Draft model exposing the DSpark Markov heads on a reduced draft vocab.
+
+    A reduced vocab (``draft_id_to_target_id``) means the sampled logits live in
+    draft-vocab space while the Markov bias is draft-vocab sized too, so the two
+    can only be combined in draft vocab and the sampled ids have to be remapped
+    to target vocab before they are fed back to ``markov_embed``.
+    """
+
+    def __init__(self, *, draft_id_to_target_id, target_vocab_size, draft_vocab_size):
+        self.draft_id_to_target_id = draft_id_to_target_id
+        self.target_vocab_size = target_vocab_size
+        self.draft_vocab_size = draft_vocab_size
+        self.forward_calls = []
+        self.sampled_logit_widths = []
+        self.markov_embed_inputs = []
+        self.map_draft_to_target_inputs = []
+
+    def __call__(self, **kwargs):
+        self.forward_calls.append(kwargs)
+        return torch.zeros(kwargs["input_ids"].shape[0], 4, dtype=torch.float32)
+
+    @staticmethod
+    def _markov_logits(rows, width):
+        # Token 1 wins before the bias is applied; the bias below adds 2.0 to a
+        # single vocab entry, so it always flips the argmax.
+        logits = torch.zeros(rows, width, dtype=torch.float32)
+        logits[:, 1] = 1.0
+        return logits
+
+    def compute_logits(self, sample_hidden_states):
+        self.sampled_logit_widths.append(self.target_vocab_size)
+        return self._markov_logits(sample_hidden_states.shape[0], self.target_vocab_size)
+
+    def compute_draft_logits(self, sample_hidden_states):
+        self.sampled_logit_widths.append(self.draft_vocab_size)
+        return self._markov_logits(sample_hidden_states.shape[0], self.draft_vocab_size)
+
+    def markov_embed(self, draft_token_ids):
+        self.markov_embed_inputs.append(draft_token_ids.clone())
+        return draft_token_ids.to(torch.float32).unsqueeze(-1)
+
+    def markov_bias(self, markov_emb):
+        vocab_size = self.draft_vocab_size if self.draft_id_to_target_id is not None else self.target_vocab_size
+        # One distinct draft-vocab entry per input id, so a non-remapped id
+        # would pick a different token further down the Markov loop.
+        bias = torch.zeros(markov_emb.shape[0], vocab_size, dtype=torch.float32)
+        indices = markov_emb[:, 0].to(torch.int64) % vocab_size
+        bias[torch.arange(markov_emb.shape[0]), indices] = 2.0
+        return bias
+
+    def map_draft_to_target(self, draft_ids):
+        self.map_draft_to_target_inputs.append(draft_ids.clone())
+        return self.draft_id_to_target_id[draft_ids]
+
+
+class TestDSparkMarkovVocabSpace(_DSparkProposerTestBase):
+    """The DSpark Markov loop must sample and bias-correct in one vocab space.
+
+    With a reduced draft vocab the bias add used to run on target-vocab logits
+    (``compute_logits`` scatters draft logits through ``draft_id_to_target_id``)
+    while ``markov_bias`` stayed draft-vocab sized, which makes the in-place add
+    fail on shape mismatch. The loop now samples with ``compute_draft_logits``
+    and remaps the sampled ids with ``map_draft_to_target``.
+    """
+
+    _NUM_INPUT_TOKENS = 4
+    _BATCH_SIZE = 2
+    _NUM_SPECULATIVE_TOKENS = 2
+    _TARGET_VOCAB_SIZE = 6
+    _DRAFT_VOCAB_SIZE = 3
+    _DRAFT_ID_TO_TARGET_ID = (1, 2, 3)
+    _SEEDS = (3, 5)
+
+    @classmethod
+    def _run_markov_loop(cls, draft_id_to_target_id):
+        model = _MockDSparkMarkovModel(
+            draft_id_to_target_id=draft_id_to_target_id,
+            target_vocab_size=cls._TARGET_VOCAB_SIZE,
+            draft_vocab_size=cls._DRAFT_VOCAB_SIZE,
+        )
+        proposer = cls._make_proposer(
+            max_num_tokens=cls._NUM_INPUT_TOKENS,
+            num_reqs=cls._BATCH_SIZE,
+            block_size=cls._NUM_SPECULATIVE_TOKENS,
+        )
+        proposer.method = "dspark"
+        # Shortens the path right after the Markov loop, exactly like
+        # num_speculative_tokens == 1 does in production.
+        proposer.parallel_drafting = True
+        proposer._share_mtp_indices = False
+        proposer.model = model
+        proposer._context_slot_mapping_buffers = {}
+        proposer.build_model_inputs_first_pass = MagicMock()
+        proposer._get_positions = MagicMock(
+            return_value=torch.zeros(cls._NUM_INPUT_TOKENS, dtype=torch.int64)
+        )
+        proposer.maybe_all_gather_and_unpad = MagicMock(
+            side_effect=lambda last_hidden_states, positions, hidden_states: (
+                last_hidden_states,
+                positions,
+                hidden_states,
+            )
+        )
+        proposer._dspark_draft_buffer = torch.zeros(
+            (cls._BATCH_SIZE, cls._NUM_SPECULATIVE_TOKENS + 1), dtype=torch.int64
+        )
+        proposer._dspark_seed_buffer = torch.tensor(cls._SEEDS, dtype=torch.int64)
+
+        forward_context = MagicMock()
+        forward_context.flash_comm_v1_enabled = True
+        ascend_config = MagicMock()
+        ascend_config.enable_reduce_sample = False
+        with (
+            patch.object(llm_base_proposer, "lmhead_tp_enable", return_value=False),
+            patch.object(llm_base_proposer, "get_ascend_config", return_value=ascend_config),
+            patch.object(spec_decode_utils, "get_forward_context", return_value=forward_context),
+        ):
+            draft_token_ids = proposer._run_merged_draft(
+                num_input_tokens=cls._NUM_INPUT_TOKENS,
+                batch_size=cls._BATCH_SIZE,
+                token_indices_to_sample=torch.arange(cls._NUM_INPUT_TOKENS, dtype=torch.int64),
+                target_positions=torch.zeros(cls._NUM_INPUT_TOKENS, dtype=torch.int64),
+                inputs_embeds=None,
+                multi_steps_attn_metadata=None,
+                num_tokens=cls._NUM_INPUT_TOKENS,
+                is_prefill=False,
+            )
+        return model, draft_token_ids, forward_context
+
+    def test_reduced_draft_vocab_samples_in_draft_space_and_remaps_ids(self):
+        model, draft_token_ids, forward_context = self._run_markov_loop(
+            torch.tensor(self._DRAFT_ID_TO_TARGET_ID, dtype=torch.int64)
+        )
+
+        # Draft-vocab logits: target-vocab logits cannot carry the Markov bias.
+        assert model.sampled_logit_widths == [self._DRAFT_VOCAB_SIZE]
+        # step 0 argmax is [0, 2] in draft vocab, step 1 argmax is [1, 0]; both
+        # are remapped, so no draft-vocab id can leak into draft_token_ids.
+        assert [ids.tolist() for ids in model.map_draft_to_target_inputs] == [[0, 2], [1, 0]]
+        assert draft_token_ids.tolist() == [[1, 2], [3, 1]]
+        # markov_embed keeps taking target-vocab ids: the seeds first, then the
+        # tokens sampled on the previous step.
+        assert [ids.tolist() for ids in model.markov_embed_inputs] == [[3, 5], [1, 3]]
+        # markov_emb must stay unsplit while the Markov head is applied.
+        assert forward_context.flash_comm_v1_enabled
+
+    def test_full_vocab_draft_keeps_the_target_vocab_path(self):
+        model, draft_token_ids, _ = self._run_markov_loop(None)
+
+        assert model.sampled_logit_widths == [self._TARGET_VOCAB_SIZE]
+        assert model.map_draft_to_target_inputs == []
+        # No remap: the biased target-vocab argmax is used as is, so each row
+        # keeps landing on its own seed.
+        assert draft_token_ids.tolist() == [[3, 3], [5, 5]]
+        assert [ids.tolist() for ids in model.markov_embed_inputs] == [[3, 5], [3, 5]]
 
 
 class TestDSparkPositionsFullUnderMultiDp(_DSparkProposerTestBase):
