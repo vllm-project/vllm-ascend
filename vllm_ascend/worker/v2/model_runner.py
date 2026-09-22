@@ -30,7 +30,6 @@ from vllm.sequence import IntermediateTensors
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
-from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.eplb_utils import step_eplb_after
 from vllm.v1.worker.gpu.input_batch import (
@@ -87,6 +86,11 @@ from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 
 if vllm_version_is("0.29.0"):
     from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
+    from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
+else:
+    # vLLM main (#56888) replaced buffer_utils.async_copy_to_gpu with
+    # torch_utils.async_tensor_h2d (gaining out=/device=None support).
+    from vllm.utils.torch_utils import async_tensor_h2d as async_copy_to_gpu
 
 
 class NPUModelRunner(GPUModelRunner):

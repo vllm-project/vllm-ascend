@@ -24,12 +24,18 @@ import torch
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_pcp_group, get_pp_group
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.gpu.states import RequestState
 
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
+
+if vllm_version_is("0.29.0"):
+    from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
+else:
+    # vLLM main (#56888) replaced buffer_utils.async_copy_to_gpu with
+    # torch_utils.async_tensor_h2d (gaining out=/device=None support).
+    from vllm.utils.torch_utils import async_tensor_h2d as async_copy_to_gpu
 
 
 @dataclass(frozen=True)
