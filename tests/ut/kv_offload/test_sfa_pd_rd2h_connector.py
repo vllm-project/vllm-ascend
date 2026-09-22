@@ -54,6 +54,10 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.worker import (  # n
     SFAPDRD2HConsumerWorker,
     SFAPDRD2HProducerWorker,
 )
+from vllm_ascend.distributed.kv_transfer.load_failure_registry import (  # noqa: E402
+    is_failed_load,
+    record_failed_load,
+)
 from vllm_ascend.distributed.kv_transfer.utils.memfabric_transfer_engine import (  # noqa: E402
     BACKEND_MEMFABRIC,
 )
@@ -677,6 +681,59 @@ def test_send_thread_wires_both_cache_group_block_lists():
     # Contributor identity defaults: single contributor group (member 0 of ratio 1).
     assert sent_message[5] == 0
     assert sent_message[6] == 1
+
+
+def test_send_thread_skips_load_failed_request():
+    layer_name = "model.layers.0.self_attn"
+    thread = MembPullSendingThread.__new__(MembPullSendingThread)
+    thread._state = ProducerSendState(
+        last_layer_idx=0,
+        main_group_idx=0,
+        indexer_group_idx=0,
+        block_sizes=(16,),
+        layer_metadata={
+            layer_name: LayerMetadata(
+                tensor_group_idx=[0],
+                kv_caches_base_addr=[1000],
+                block_len=[10],
+                block_size_scale=[1],
+                main_tensor_count=1,
+                has_indexer=False,
+            )
+        },
+        layer_storage_slots={0: (0,)},
+        p_session="p-session",
+    )
+    thread.last_layer_idx = 0
+    thread._p_save_events = {}
+    thread._pending_reads_by_layer = {}
+    thread._ensure_dealer = MagicMock()  # type: ignore[method-assign]
+
+    with patch(
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.send_thread.is_failed_load",
+        return_value=True,
+    ):
+        thread._process_send_task(
+            SendTask(
+                send_request={"req-failed": object()},
+                layer_idx=0,
+                layer_name=layer_name,
+            ),
+            MagicMock(),
+        )
+
+    thread._ensure_dealer.assert_not_called()
+    assert thread._pending_reads_by_layer == {}
+
+
+def test_failed_load_registry_expires_entries():
+    with patch(
+        "vllm_ascend.distributed.kv_transfer.load_failure_registry.time.monotonic",
+        side_effect=[10.0, 10.0, 611.0],
+    ):
+        record_failed_load(("req-expiring",))
+        assert is_failed_load("req-expiring")
+        assert not is_failed_load("req-expiring")
 
 
 def test_send_thread_slices_each_group_at_chunk_boundaries():
