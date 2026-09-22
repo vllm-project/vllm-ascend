@@ -198,7 +198,6 @@ from vllm_ascend.utils import (
     is_hidden_state_cache_spec,
     is_score_encoder_cache_manager,
     kv_cache_spec_uses_sparse_sfa_c8,
-    kv_transfer_supports_shared_backing,
     lmhead_tp_enable,
     model_uses_kpool_indexer,
     oproj_tp_enable,
@@ -357,13 +356,6 @@ class NPUModelRunner(GPUModelRunner):
     # standardized backing allocation. The default runner preserves that
     # contract for its layer/block-compact Attention+Mamba path.
     supports_standardized_shared_kv_backing = True
-
-    @property
-    def supports_shared_backing_with_kv_transfer(self) -> bool:
-        """Whether the active connector can consume one shared KV backing."""
-        return kv_transfer_supports_shared_backing(
-            self.vllm_config.kv_transfer_config
-        )
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Must be set before super().__init__() because parent init may call
@@ -4878,13 +4870,6 @@ class NPUModelRunner(GPUModelRunner):
             isinstance(spec, MambaSpec) for spec in layer_kv_cache_spec.values()
         ) and any(isinstance(spec, AttentionSpec) for spec in layer_kv_cache_spec.values())
 
-        # Keep allocation and worker-side KV budget planning on the same
-        # connector capability gate. Mooncake V1/V2/Pull retain per-layer
-        # transfer metadata while registering the shared backing once.
-        supports_shared_backing_with_kv_transfer = (
-            self.supports_shared_backing_with_kv_transfer
-        )
-
         # GLM-Next emits one descriptor for each physical cache slot. Layers
         # listed by a descriptor deliberately alias that slot even when they
         # belong to different scheduler groups (for example MLA and Mamba, or
@@ -4978,7 +4963,6 @@ class NPUModelRunner(GPUModelRunner):
             not is_dsv4_main
             and not uses_padded_page_layout
             and self.hybrid_with_attn_and_mamba
-            and supports_shared_backing_with_kv_transfer
             and not self.use_sparse
             and not self.use_compress
             and kv_cache_config.kv_cache_tensors

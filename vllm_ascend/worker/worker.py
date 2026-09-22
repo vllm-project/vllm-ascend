@@ -699,7 +699,6 @@ class NPUWorker(WorkerBase):
             and layout.is_layer_compact
             and layout.is_block_compact
             and getattr(model_runner, "supports_standardized_shared_kv_backing", False)
-            and getattr(model_runner, "supports_shared_backing_with_kv_transfer", False)
             and not getattr(model_runner, "use_sparse", False)
             and not getattr(model_runner, "use_compress", False)
         ):
