@@ -989,11 +989,6 @@ else:
     vllm.v1.core.kv_cache_utils._annotate_eagle_groups = _ascend_annotate_eagle_groups
     vllm.v1.core.kv_cache_utils._get_packed_kv_cache_groups = _ascend_get_packed_kv_cache_groups
 vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_page_size = _get_kv_cache_groups_uniform_page_size
-# vLLM v0.24.0 renamed _get_kv_cache_config_deepseek_v4 to
-# _get_kv_cache_config_packed. The v0.28.0 planner still consumes shared_by;
-# main uses _ascend_get_kv_cache_config_from_groups and the stride-aware planner.
-if vllm_version_is("0.28.0"):
-    vllm.v1.core.kv_cache_utils._get_kv_cache_config_packed = _get_kv_cache_config_deepseek_v4
 vllm.v1.core.kv_cache_utils.get_kv_cache_groups = _get_ascend_kv_cache_groups
 KVCacheConfig.has_mamba_layers = property(  # type: ignore[assignment]
     _kv_cache_config_has_mamba_layers
