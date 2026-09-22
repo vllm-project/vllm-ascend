@@ -897,9 +897,14 @@ def test_dsa_cp_attention_waits_before_sas_consumer(compress_ratio: int, monkeyp
     assert events == ["wait", "record", "attention"]
 
 
-@pytest.mark.parametrize("for_drafting", [False, True])
+@pytest.mark.parametrize(
+    ("for_drafting", "can_use_rope_cache"),
+    [(False, None), (False, False), (True, None)],
+    ids=["default-cache", "isolated-rope", "draft"],
+)
 def test_build_classifies_short_speculative_extends_as_decodes(
     for_drafting: bool,
+    can_use_rope_cache: bool | None,
 ):
     builder = _make_builder(compressor_ratio=1)
     builder.decode_threshold = 8
@@ -926,6 +931,12 @@ def test_build_classifies_short_speculative_extends_as_decodes(
     builder.build_req_metadata = MagicMock(return_value=req_metadata)
     builder.build_req_metadata_for_drafting = MagicMock(return_value=req_metadata)
     builder.spec_slot_mapping = [torch.zeros((16, 2), dtype=torch.int32)]
+    rope_buffer = torch.ones(14)
+    shared_metadata: dict[str, Any] = {}
+
+    def get_rope(positions, use_cache=False, **kwargs):
+        cos = rope_buffer if use_cache else rope_buffer.clone()
+        return cos, torch.zeros_like(cos)
 
     with (
         patch(
@@ -940,7 +951,7 @@ def test_build_classifies_short_speculative_extends_as_decodes(
         ),
         patch(
             "vllm_ascend.attention.dsa_v1.get_cos_and_sin_dsa",
-            return_value=(torch.ones(14), torch.zeros(14)),
+            side_effect=get_rope,
         ),
     ):
         if for_drafting:
@@ -949,15 +960,24 @@ def test_build_classifies_short_speculative_extends_as_decodes(
                 draft_index=1,
             )
         else:
+            cache_kwargs: dict[str, Any] = (
+                {} if can_use_rope_cache is None else {"can_use_rope_cache": can_use_rope_cache}
+            )
             metadata = builder.build(
                 common_prefix_len=0,
                 common_attn_metadata=common_attn_metadata,
-                common_ratio_to_sas_metadata={},
+                common_ratio_to_sas_metadata=shared_metadata,
+                **cache_kwargs,
             )
 
     assert metadata.num_decodes == 2
     assert metadata.num_decode_tokens == 14
     assert metadata.num_prefills == 0
+    if not for_drafting:
+        # A subsequent local RoPE build must not overwrite an isolated global result.
+        rope_buffer.zero_()
+        expected = torch.ones(14) if can_use_rope_cache is False else torch.zeros(14)
+        assert torch.equal(shared_metadata["cos"], expected)
 
 
 def test_build_req_metadata_preserves_zero_max_sequence_lengths():
@@ -1854,7 +1874,7 @@ def test_pcp_metadata_builds_from_manager_global_view():
         positions=torch.arange(5, dtype=torch.int64),
         attn_state=object(),
         is_dummy=False,
-        is_prefilling_np=np.array([True, True]),
+        is_prefilling_np=np.array([False, True]),
         idx_mapping=torch.tensor([0, 1], dtype=torch.int32),
         num_reqs_after_padding=2,
     )
@@ -1940,6 +1960,7 @@ def test_pcp_metadata_builds_from_manager_global_view():
     assert torch.equal(global_common.slot_mapping, global_slot_mapping)
     assert global_common.attn_state is global_batch.attn_state
     assert global_call.kwargs["num_actual_reqs"] == global_batch.num_reqs
+    assert global_call.kwargs["can_use_rope_cache"] is False
     assert global_call.kwargs["common_ratio_to_sas_metadata"] == {}
     assert build_local.call_args.args[2] is local_common
     assert build_local.call_args.kwargs["num_actual_reqs"] == 2
@@ -2079,6 +2100,7 @@ def test_pcp_graph_metadata_builds_fixed_decode_shape(is_dummy: bool):
     assert torch.equal(global_common.seq_lens, seq_lens)
     assert torch.equal(global_common.slot_mapping, expected_global_slots[0])
     assert global_call.kwargs["num_actual_reqs"] == num_actual_reqs
+    assert global_call.kwargs["can_use_rope_cache"] is True
     assert global_call.kwargs["common_ratio_to_sas_metadata"] == {}
 
     local_call = build_local.call_args

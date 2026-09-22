@@ -123,10 +123,6 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAtt
 from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
-from vllm_ascend.attention.dsa_v41 import (
-    AscendDSAV41MetadataBuilder,
-    DeepseekV41CacheLayer,
-)
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
@@ -200,6 +196,7 @@ from vllm_ascend.utils import (
     is_hidden_state_cache_spec,
     is_score_encoder_cache_manager,
     kv_cache_spec_uses_sparse_sfa_c8,
+    kv_transfer_supports_shared_backing,
     lmhead_tp_enable,
     oproj_tp_enable,
     set_potential_max_tokens,
@@ -262,6 +259,21 @@ from vllm_ascend.core.profiling_chunk_predictor import (
     _finish_profiling_chunk_timing,
     _start_profiling_chunk_timing,
 )
+
+# vLLM 0.29 does not provide the upstream DeepSeek V4.1 config and model
+# modules imported by the Ascend V4.1 attention backend. Empty tuples remain
+# valid ``isinstance`` classinfo values while keeping all non-V4.1 paths
+# importable on the release tag.
+v41_metadata_builder_type: type | tuple[()] = ()
+v41_cache_layer_type: type | tuple[()] = ()
+if not vllm_version_is("0.29.0"):
+    from vllm_ascend.attention.dsa_v41 import (
+        AscendDSAV41MetadataBuilder,
+        DeepseekV41CacheLayer,
+    )
+
+    v41_metadata_builder_type = AscendDSAV41MetadataBuilder
+    v41_cache_layer_type = DeepseekV41CacheLayer
 
 # if true, allow tensor initialization and casting with internal format (e.g., NZ)
 torch.npu.config.allow_internal_format = True
@@ -342,6 +354,13 @@ class NPUModelRunner(GPUModelRunner):
     # standardized backing allocation. The default runner preserves that
     # contract for its layer/block-compact Attention+Mamba path.
     supports_standardized_shared_kv_backing = True
+
+    @property
+    def supports_shared_backing_with_kv_transfer(self) -> bool:
+        """Whether the active connector can consume one shared KV backing."""
+        return kv_transfer_supports_shared_backing(
+            self.vllm_config.kv_transfer_config
+        )
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Must be set before super().__init__() because parent init may call
@@ -3301,8 +3320,10 @@ class NPUModelRunner(GPUModelRunner):
     ) -> tuple[CUDAGraphMode, BatchDescriptor, bool, torch.Tensor | None, CUDAGraphStat | None]:
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
         has_initial_state = np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)
-        if self.use_dcp:
-            # DCP decode graphs require the full prompt to be computed.
+        if self.use_dcp or self.model_config.is_hybrid:
+            # Mamba prompt chunks must retain prefill state semantics even when
+            # their width matches the speculative decode graph. DCP also
+            # requires the full prompt to be computed before uniform decode.
             has_initial_state = has_initial_state and np.all(
                 self.input_batch.num_computed_tokens_cpu[:num_reqs] >= self.input_batch.num_prompt_tokens[:num_reqs]
             )
@@ -3561,8 +3582,12 @@ class NPUModelRunner(GPUModelRunner):
                         image_doc_ranges.extend(
                             pos_info.extract_embeds_range()
                         )
-                req_idx = self.input_batch.req_id_to_index[req_id]
-                req_doc_ranges[req_idx] = image_doc_ranges
+                # Only track requests that actually carry image spans. Empty
+                # lists would make mm_req_doc_ranges truthy and needlessly
+                # trigger the vision SWA index build on text-only batches.
+                if image_doc_ranges:
+                    req_idx = self.input_batch.req_id_to_index[req_id]
+                    req_doc_ranges[req_idx] = image_doc_ranges
 
         cm_base = AscendCommonAttentionMetadata(
             query_start_loc=self.query_start_loc.gpu[: num_reqs_padded + 1],
@@ -3664,17 +3689,15 @@ class NPUModelRunner(GPUModelRunner):
                 cascade_attn_prefix_lens[kv_cache_gid][attn_gid] if cascade_attn_prefix_lens else 0
             )
 
-            extra_attn_metadata_args = {}
-            if (
-                use_spec_decode
-                and isinstance(builder, GDNAttentionMetadataBuilder)
-                and not is_gdn_noop
-            ):
+            extra_attn_metadata_args: dict[str, Any] = {}
+            if isinstance(builder, GDNAttentionMetadataBuilder) and not is_gdn_noop:
                 assert ubid is None, "UBatching not supported with GDN yet"
-                extra_attn_metadata_args = dict(
-                    num_accepted_tokens=self.num_accepted_tokens.gpu[:num_reqs_padded],
-                    num_decode_draft_tokens_cpu=self.num_decode_draft_tokens.cpu[:num_reqs_padded],
-                )
+                extra_attn_metadata_args["num_actual_reqs"] = num_reqs
+                if use_spec_decode:
+                    extra_attn_metadata_args.update(
+                        num_accepted_tokens=self.num_accepted_tokens.gpu[:num_reqs_padded],
+                        num_decode_draft_tokens_cpu=self.num_decode_draft_tokens.cpu[:num_reqs_padded],
+                    )
 
             if isinstance(builder, (AscendDSAMetadataBuilder, AscendDSACPMetadataBuilder)):
                 if for_cudagraph_capture:
@@ -3684,7 +3707,7 @@ class NPUModelRunner(GPUModelRunner):
                     common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
                     full_graph_mode=cudagraph_runtime_mode == CUDAGraphMode.FULL,
                 )
-            elif isinstance(builder, AscendDSAV41MetadataBuilder):
+            elif isinstance(builder, v41_metadata_builder_type):
                 extra_attn_metadata_args = dict(
                     num_actual_reqs=num_reqs,
                     skip_ring_state_update=skip_gdn_state_update,
@@ -3697,7 +3720,7 @@ class NPUModelRunner(GPUModelRunner):
                         AscendDSAMetadataBuilder,
                         AscendDSACPMetadataBuilder,
                         AscendSFADCPMetadataBuilder,
-                        AscendDSAV41MetadataBuilder,
+                        v41_metadata_builder_type,
                     ))):
                 attn_metadata_i = builder.build_for_cudagraph_capture(common_attn_metadata)
             else:
@@ -3706,12 +3729,6 @@ class NPUModelRunner(GPUModelRunner):
                     common_attn_metadata=common_attn_metadata,
                     **extra_attn_metadata_args,
                 )
-                # NOTE(zxr): Due to the Triton operator does not deal with -1 padding in FullGraph mode,
-                # the padding needs to be changed from -1 to 0 to avoid writing invalid mamba block.
-                if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs() \
-                    and isinstance(builder, GDNAttentionMetadataBuilder) and attn_metadata_i.num_prefills == 0:
-                    if attn_metadata_i.num_decodes == 0 and attn_metadata_i.num_spec_decodes > 0:
-                        attn_metadata_i.spec_state_indices_tensor[attn_metadata_i.num_spec_decodes:].fill_(0)
             if device_metadata_provider is not None:
                 assert device_metadata_tasks is not None
                 device_metadata_tasks.extend(device_metadata_provider.take_device_metadata_tasks())
@@ -4569,7 +4586,7 @@ class NPUModelRunner(GPUModelRunner):
             kv_caches[layer_name] = kv_caches[target_layer_name]
 
         if any(
-            isinstance(self.compilation_config.static_forward_context.get(name), DeepseekV41CacheLayer)
+            isinstance(self.compilation_config.static_forward_context.get(name), v41_cache_layer_type)
             for name in kv_caches
         ):
             for name in sorted(kv_caches):
@@ -4781,23 +4798,11 @@ class NPUModelRunner(GPUModelRunner):
             isinstance(spec, MambaSpec) for spec in layer_kv_cache_spec.values()
         ) and any(isinstance(spec, AttentionSpec) for spec in layer_kv_cache_spec.values())
 
-        kv_transfer_config = self.vllm_config.kv_transfer_config
-        kv_connector = (
-            getattr(kv_transfer_config, "kv_connector", None)
-            if kv_transfer_config is not None
-            else None
-        )
-        # Mooncake V2 retains per-layer transfer metadata while registering the
-        # standardized Attention/Mamba backing allocation once. The example
-        # connector only consumes its dedicated cache-only layer.
+        # Keep allocation and worker-side KV budget planning on the same
+        # connector capability gate. Mooncake V1/V2/Pull retain per-layer
+        # transfer metadata while registering the shared backing once.
         supports_shared_backing_with_kv_transfer = (
-            kv_transfer_config is None
-            or kv_connector
-            in {
-                "ExampleHiddenStatesConnector",
-                "MooncakeConnectorV2",
-                "MooncakePullConnector",
-            }
+            self.supports_shared_backing_with_kv_transfer
         )
 
         # GLM-Next emits one descriptor for each physical cache slot. Layers
@@ -5846,7 +5851,7 @@ class NPUModelRunner(GPUModelRunner):
                 # or enable more requests to be processed simultaneously.
                 self.shared_kv_cache_layers[layer_name] = kv_tgt_layer
                 continue
-            elif isinstance(attn_module, DeepseekV41CacheLayer):
+            elif isinstance(attn_module, v41_cache_layer_type):
                 kv_cache_spec[layer_name] = attn_module.get_kv_cache_spec(self.vllm_config)
             elif self.use_compress:
                 # Skip modules that don't need KV cache (eg encoder-only attention)

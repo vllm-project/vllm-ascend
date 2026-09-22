@@ -23,7 +23,7 @@ import functools
 import json
 import math
 import os
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -59,6 +59,16 @@ FP8_METHOD = "fp8"
 SOC_VERSION_INFERENCE_SERIES = ["Ascend310P3"]
 REGISTERED_ASCEND_OPS = {}
 
+_SHARED_BACKING_KV_CONNECTORS = frozenset(
+    {
+        "ExampleHiddenStatesConnector",
+        "MooncakeConnectorV1",
+        "MooncakeConnectorV2",
+        "MooncakeHybridConnector",
+        "MooncakePullConnector",
+    }
+)
+
 ACL_FORMAT_FRACTAL_ND = 2
 ACL_FORMAT_FRACTAL_NZ = 29
 
@@ -82,6 +92,13 @@ _CUSTOM_OP_BASE_DIR = (
     os.path.dirname(__file__) if os.path.isabs(__file__) else os.path.abspath(os.path.dirname(__file__))
 )
 _IS_ROT_WEIGHT_USED = None
+
+
+def kv_transfer_supports_shared_backing(kv_transfer_config: Any | None) -> bool:
+    """Whether a KV connector can consume standardized shared backing."""
+    if kv_transfer_config is None:
+        return True
+    return getattr(kv_transfer_config, "kv_connector", None) in _SHARED_BACKING_KV_CONNECTORS
 
 
 def extract_dsv4_layer_index(config: Any, layer_name: str) -> int:
@@ -1034,6 +1051,19 @@ def has_rope(vllm_config: VllmConfig):
     return _HAS_ROPE
 
 
+@contextmanager
+def super_kernel_scope(scope: str, enabled: bool):
+    if not enabled:
+        yield
+        return
+
+    torch.npu.super_kernel_scope_begin(scope)
+    try:
+        yield
+    finally:
+        torch.npu.super_kernel_scope_end(scope)
+
+
 def weak_ref_tensor(tensor: Any) -> Any:
     """
     Create a weak reference to a tensor.
@@ -1185,8 +1215,8 @@ def _compute_potential_max_tokens(vllm_config) -> int:
         if potential_max_tokens != compilation_config.max_cudagraph_capture_size:
             logger.warning_once(
                 "The max_cudagraph_capture_size (%d) is smaller than the potential max tokens required for "
-                "decode (%d). This may lead to suboptimal performance. Consider adjusting"
-                "max_cudagraph_capture_size or scheduler_config (max_num_batched_tokens or max_num_seqs)"
+                "decode (%d). This may lead to suboptimal performance. Consider adjusting "
+                "max_cudagraph_capture_size or scheduler_config (max_num_batched_tokens or max_num_seqs) "
                 "to ensure max_cudagraph_capture_size can accommodate the decode workload. For more details, "
                 "see the issue #8240(https://github.com/vllm-project/vllm-ascend/issues/8240).",
                 compilation_config.max_cudagraph_capture_size,
