@@ -36,7 +36,7 @@ FAKE_WEIGHT_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "..", "ut
 
 
 def _make_kv_cache_tensor(size: int, layer_names: list[str], page_size: int) -> KVCacheTensor:
-    """Build the vLLM main descriptor (vLLM #51718 layout)."""
+    """Build a KVCacheTensor; vLLM #51718 renamed shared_by -> layers on main."""
     return KVCacheTensor(
         size=size,
         layers=layer_names,
@@ -410,17 +410,22 @@ def test_determine_batch_execution_and_padding(
 
 
 @pytest.mark.parametrize(
-    ("num_spec_tokens", "computed", "prompts", "scheduled", "expected_mode"),
+    ("num_spec_tokens", "computed", "prompts", "scheduled", "expected_mode", "expected_hybrid_mode"),
     [
-        pytest.param(0, [7], [8], [1], CUDAGraphMode.FULL, id="stateful_one_token_handoff"),
-        pytest.param(0, [0], [1], [1], CUDAGraphMode.NONE, id="first_token_without_state"),
-        pytest.param(7, [16, 24], [8, 8], [8, 8], CUDAGraphMode.FULL, id="steady_spec_decode"),
-        pytest.param(7, [16, 7], [8, 8], [8, 8], CUDAGraphMode.FULL, id="handoff_padded_to_spec_width"),
-        pytest.param(7, [16, 0], [8, 8], [8, 8], CUDAGraphMode.NONE, id="spec_width_prefill_without_state"),
-        pytest.param(7, [16, 7], [8, 8], [8, 1], CUDAGraphMode.NONE, id="nonuniform_handoff"),
+        pytest.param(0, [7], [8], [1], CUDAGraphMode.FULL, CUDAGraphMode.NONE, id="stateful_one_token_handoff"),
+        pytest.param(0, [0], [1], [1], CUDAGraphMode.NONE, CUDAGraphMode.NONE, id="first_token_without_state"),
+        pytest.param(7, [16, 24], [8, 8], [8, 8], CUDAGraphMode.FULL, CUDAGraphMode.FULL, id="steady_spec_decode"),
+        pytest.param(
+            7, [16, 7], [8, 8], [8, 8], CUDAGraphMode.FULL, CUDAGraphMode.NONE, id="handoff_padded_to_spec_width"
+        ),
+        pytest.param(
+            7, [16, 0], [8, 8], [8, 8], CUDAGraphMode.NONE, CUDAGraphMode.NONE, id="spec_width_prefill_without_state"
+        ),
+        pytest.param(7, [16, 7], [8, 8], [8, 1], CUDAGraphMode.NONE, CUDAGraphMode.NONE, id="nonuniform_handoff"),
     ],
 )
 @pytest.mark.parametrize("dp_size", [1, 4])
+@pytest.mark.parametrize("is_hybrid", [False, True])
 def test_stateful_handoff_preserves_decode_graph(
     monkeypatch,
     num_spec_tokens,
@@ -428,10 +433,16 @@ def test_stateful_handoff_preserves_decode_graph(
     prompts,
     scheduled,
     expected_mode,
+    expected_hybrid_mode,
     dp_size,
+    is_hybrid,
 ):
     # Exercise the real dispatcher and DP synchronization using CPU metadata only.
+    if is_hybrid:
+        # Hybrid prompt chunks retain prefill semantics until the prompt is computed.
+        expected_mode = expected_hybrid_mode
     runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.dcp_size = 1
     runner.dp_size = dp_size
     runner.dp_rank = 0
     runner.parallel_config = SimpleNamespace(
@@ -447,6 +458,11 @@ def test_stateful_handoff_preserves_decode_graph(
         max_cudagraph_capture_size=32,
         compile_sizes=[],
     )
+    runner.model_config = SimpleNamespace(
+        is_encoder_decoder=False,
+        is_hybrid=is_hybrid,
+        hf_text_config=SimpleNamespace(to_dict=lambda: {}),
+    )
     runner.vllm_config = SimpleNamespace(
         parallel_config=runner.parallel_config,
         compilation_config=runner.compilation_config,
@@ -454,8 +470,9 @@ def test_stateful_handoff_preserves_decode_graph(
         observability_config=SimpleNamespace(cudagraph_metrics=False),
         num_speculative_tokens=num_spec_tokens,
         lora_config=None,
+        model_config=runner.model_config,
     )
-    runner.model_config = SimpleNamespace(is_encoder_decoder=False)
+    runner.speculative_config = SimpleNamespace(num_speculative_tokens=num_spec_tokens) if num_spec_tokens > 0 else None
     runner.uniform_decode_query_len = 1 + num_spec_tokens
     runner.input_batch = SimpleNamespace(
         num_computed_tokens_cpu=np.array(computed),

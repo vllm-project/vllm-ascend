@@ -61,6 +61,7 @@ def test_deepseek_v4_tokenizer_maps_latest_reasoning_effort_values(monkeypatch):
     monkeypatch.setattr(deepseek_v4, "encode_messages", fake_encode_messages)
     tokenizer = deepseek_v4.get_deepseek_v4_tokenizer(FakeTokenizer())
 
+    # v0.28.0 already uses the same effort mapping as main.
     cases = [
         ("none", "chat", None),
         ("minimal", "thinking", "low"),

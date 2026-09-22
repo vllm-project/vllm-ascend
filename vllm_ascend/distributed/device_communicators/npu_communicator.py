@@ -55,4 +55,8 @@ class NPUCommunicator(DeviceCommunicatorBase):
         )
         self.device = torch.npu.current_device()
         self.ca_comm = None
+        # vLLM #53576 reads this CUDA-only communicator during graph capture.
+        # Keep the shared coordinator protocol available without enabling the
+        # FlashInfer PCIe IPC backend on NPU.
+        self.fi_pcie_ipc_ar_comm = None
         self.all2all_manager = _NpuAll2AllManager()

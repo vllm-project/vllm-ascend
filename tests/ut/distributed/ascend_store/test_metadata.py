@@ -16,6 +16,7 @@
 #
 
 import unittest
+from dataclasses import replace
 from types import SimpleNamespace
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
@@ -34,6 +35,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     get_group_cache_family,
     infer_cache_transfer_granularity,
     infer_group_block_sizes,
+    masked_block_runs,
     uses_hybrid_kv_cache,
 )
 
@@ -78,25 +80,42 @@ class TestCacheLayoutHelpers(unittest.TestCase):
         self.assertEqual(infer_cache_transfer_granularity([16, 32], 32, [0, 1]), 32)
 
 
+class TestMaskedBlockRuns(unittest.TestCase):
+    def test_none_mask_returns_single_run(self):
+        self.assertEqual(masked_block_runs(None, 1, 5), [(1, 5)])
+
+    def test_sparse_mask_splits_into_runs(self):
+        mask = [False, True, False, True, True]
+        self.assertEqual(masked_block_runs(mask, 0, 5), [(1, 2), (3, 5)])
+
+    def test_empty_range_returns_no_runs(self):
+        self.assertEqual(masked_block_runs([True, True], 2, 2), [])
+        self.assertEqual(masked_block_runs(None, 3, 1), [])
+
+    def test_blocks_beyond_mask_length_are_allowed(self):
+        self.assertEqual(masked_block_runs([False, True], 0, 4), [(1, 4)])
+
+    def test_all_disallowed_mask_returns_no_runs(self):
+        self.assertEqual(masked_block_runs([False, False], 0, 2), [])
+
+
 class TestKeyMetadata(unittest.TestCase):
     def test_fields(self):
         meta = KeyMetadata(
             model_name="llama",
             head_or_tp_rank=0,
-            pcp_rank=0,
             dcp_rank=0,
             pp_rank=0,
         )
         self.assertEqual(meta.model_name, "llama")
         self.assertEqual(meta.head_or_tp_rank, 0)
-        self.assertEqual(meta.pcp_rank, 0)
         self.assertEqual(meta.dcp_rank, 0)
         self.assertEqual(meta.pp_rank, 0)
 
 
 class TestPoolKey(unittest.TestCase):
     def setUp(self):
-        self.meta = KeyMetadata("llama", 1, 2, 3, 0)
+        self.meta = KeyMetadata("llama", 1, 3, 0)
 
     def test_hash_equal(self):
         k1 = PoolKey(self.meta, "abc123")
@@ -113,17 +132,24 @@ class TestPoolKey(unittest.TestCase):
         s = k.to_string()
         self.assertEqual(
             s,
-            "llama@pcp:2@dcp:3@head_or_tp_rank:1@pp_rank:0@group:0@cache_role:kv@cache_family:default@hash1",
+            "llama@dcp:3@head_or_tp_rank:1@pp_rank:0@group:0@cache_role:kv@cache_family:default@hash1",
         )
 
-    def test_pp_ranks_use_distinct_keys(self):
-        other_pp_meta = KeyMetadata("llama", 1, 2, 3, 1)
-        pp0_key = PoolKey(self.meta, "hash1")
-        pp1_key = PoolKey(other_pp_meta, "hash1")
-
-        self.assertNotEqual(pp0_key.to_string(), pp1_key.to_string())
-        self.assertIn("@pp_rank:0", pp0_key.to_string())
-        self.assertIn("@pp_rank:1", pp1_key.to_string())
+    def test_cache_partitions_use_distinct_keys(self):
+        key = PoolKey(self.meta, "hash1")
+        for field, value in (
+            ("model_name", "other-model"),
+            ("head_or_tp_rank", 2),
+            ("dcp_rank", 0),
+            ("pp_rank", 1),
+            ("kv_cache_group_id", 1),
+            ("cache_role", "state"),
+            ("cache_family", "swa"),
+        ):
+            with self.subTest(field=field):
+                other = PoolKey(replace(self.meta, **{field: value}), "hash1")
+                self.assertNotEqual(key.to_string(), other.to_string())
+                self.assertNotEqual(key, other)
 
     def test_split_layers(self):
         k = PoolKey(self.meta, "hash1")
@@ -137,16 +163,16 @@ class TestPoolKey(unittest.TestCase):
 
 class TestLayerPoolKey(unittest.TestCase):
     def test_hash(self):
-        meta = KeyMetadata("model", 0, 0, 0, 0)
+        meta = KeyMetadata("model", 0, 0, 0)
         k1 = LayerPoolKey(meta, "h1", 0)
         k2 = LayerPoolKey(meta, "h1", 1)
         self.assertNotEqual(hash(k1), hash(k2))
 
     def test_to_string_contains_layer_id(self):
-        meta = KeyMetadata("model", 0, 0, 0, 0)
+        meta = KeyMetadata("model", 0, 0, 0)
         k = LayerPoolKey(meta, "h1", 5)
         s = k.to_string()
-        self.assertIn("@pcp:0@dcp:0", s)
+        self.assertIn("@dcp:0", s)
         self.assertIn("@layer_id:5", s)
         self.assertIn("model", s)
         self.assertTrue(s.endswith("@h1"))
@@ -154,7 +180,7 @@ class TestLayerPoolKey(unittest.TestCase):
 
 class TestChunkedTokenDatabase(unittest.TestCase):
     def setUp(self):
-        self.meta = KeyMetadata("llama", 0, 0, 0, 0)
+        self.meta = KeyMetadata("llama", 0, 0, 0)
         self.db = ChunkedTokenDatabase([self.meta], block_size=[16], partitions=None)
         self.db.set_group_buffers({0: [1000, 2000]}, {0: [160, 320]}, group_num_layers={0: 1})
 
@@ -243,8 +269,8 @@ class TestChunkedTokenDatabase(unittest.TestCase):
 
     def test_direct_keys_preserve_multigroup_layerwise_key_semantics(self):
         group_metadata = [
-            KeyMetadata("llama", 0, 0, 0, 0),
-            KeyMetadata("llama", 1, 0, 0, 0),
+            KeyMetadata("llama", 0, 0, 0),
+            KeyMetadata("llama", 1, 0, 0),
         ]
         db = ChunkedTokenDatabase(group_metadata, block_size=[16, 64], partitions=None, hash_block_size=16)
         db.set_group_buffers(
@@ -431,6 +457,21 @@ class TestRequestTracker(unittest.TestCase):
         self.assertEqual(tracker.allocated_block_ids_by_group[2], [3, 0, 8])
         self.assertEqual(tracker.allocated_block_ids_by_group[3], [4, 0, 9])
 
+    def test_update_mamba_uses_per_group_speculative_counts(self):
+        tracker = RequestTracker(
+            req_id="r1",
+            token_len=32,
+            allocated_block_ids_by_group=[[1, 2], [3, 4], [5, 6]],
+            num_speculative_blocks_by_group={1: 1, 2: 0},
+            block_sizes=[16] * 3,
+        )
+
+        tracker.update(([7], [4, 8], [9]), 32)
+
+        self.assertEqual(tracker.allocated_block_ids_by_group[0], [1, 2, 7])
+        self.assertEqual(tracker.allocated_block_ids_by_group[1], [0, 0, 4, 8])
+        self.assertEqual(tracker.allocated_block_ids_by_group[2], [0, 6, 9])
+
     def test_update_mamba_mtp_with_tuple_chunk2(self):
         tracker = RequestTracker(
             req_id="r1",
@@ -441,8 +482,7 @@ class TestRequestTracker(unittest.TestCase):
                 [0, 7, 8, 9, 10],
                 [0, 11, 12, 13, 14],
             ],
-            mamba_group_ids=[1, 2, 3],
-            num_speculative_blocks=3,
+            num_speculative_blocks_by_group={1: 3, 2: 3, 3: 3},
             block_sizes=[16] * 4,
         )
 
@@ -462,8 +502,7 @@ class TestRequestTracker(unittest.TestCase):
                 [0, 0, 0, 0, 0, 0, 0, 13, 14, 15, 16],
                 [0, 0, 0, 0, 0, 0, 0, 17, 18, 19, 20],
             ],
-            mamba_group_ids=[1, 2, 3],
-            num_speculative_blocks=3,
+            num_speculative_blocks_by_group={1: 3, 2: 3, 3: 3},
             block_sizes=[16] * 4,
         )
 
@@ -541,6 +580,24 @@ class TestReqMeta(unittest.TestCase):
         # but skip_save+load_spec input is not None, so meta is still created
         self.assertIsNotNone(meta)
         self.assertIsNone(meta.load_spec)
+        self.assertFalse(meta.can_save)
+
+    def test_from_request_tracker_can_load_suppresses_save(self):
+        # Port of vllm-project/vllm#43371: a ReqMeta must never carry both a
+        # save AND a load. When the request can load from the KV pool, force
+        # skip_save so the same req_id is not queued into both the send and
+        # recv threads (which double delayed-free and can crash the scheduler
+        # with `assert req_id in self.requests`).
+        tracker = RequestTracker(
+            req_id="r1",
+            token_len=32,
+            allocated_block_ids=[0, 1],
+            num_saved_tokens=0,
+        )
+        load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=32, can_load=True)
+        meta = ReqMeta.from_request_tracker(tracker, cache_transfer_granularity=16, load_spec=load_spec)
+        self.assertIsNotNone(meta)
+        self.assertIsNotNone(meta.load_spec)
         self.assertFalse(meta.can_save)
 
     def test_from_request_tracker_partial_tokens_discarded(self):

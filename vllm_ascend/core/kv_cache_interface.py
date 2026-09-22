@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 
 import torch
@@ -10,24 +11,85 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, SlidingWindowManager
 from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
     FullAttentionSpec,
     KVCacheSpec,
+    MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
+    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
+
+from vllm_ascend.utils import vllm_version_is
+
+
+def get_kv_cache_compression_ratio(kv_cache_spec: KVCacheSpec) -> int:
+    """Return the MLA compression ratio across vLLM cache-spec APIs."""
+    return kv_cache_spec.tokens_per_state
 
 
 def get_storage_block_size(kv_cache_spec: KVCacheSpec) -> int:
     """Return the physical token rows represented by one scheduler block."""
     if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
-        storage_block_sizes = {
-            getattr(spec, "storage_block_size", spec.block_size) for spec in kv_cache_spec.kv_cache_specs.values()
-        }
+        storage_block_sizes = {get_storage_block_size(spec) for spec in kv_cache_spec.kv_cache_specs.values()}
         assert len(storage_block_sizes) == 1, "All specs in one KV cache group must use the same storage block size."
         return storage_block_sizes.pop()
+    if not vllm_version_is("0.29.0"):
+        # vLLM #53906 added an optional MLA storage-view override. It is not
+        # Ascend's derived number of physical rows per logical block.
+        if isinstance(kv_cache_spec, AscendMLAAttentionSpec):
+            return kv_cache_spec.block_size // kv_cache_spec.tokens_per_state
+        if isinstance(kv_cache_spec, MLAAttentionSpec):
+            storage_block_size = kv_cache_spec.storage_block_size
+            return kv_cache_spec.block_size if storage_block_size is None else storage_block_size
     return getattr(kv_cache_spec, "storage_block_size", kv_cache_spec.block_size)
+
+
+def is_circular_kv_cache_spec(kv_cache_spec: KVCacheSpec) -> bool:
+    """Resolve the fixed-block addressing capability through grouped specs."""
+    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+        specs = tuple(kv_cache_spec.kv_cache_specs.values())
+        return bool(specs) and all(is_circular_kv_cache_spec(spec) for spec in specs)
+    return isinstance(kv_cache_spec, CircularBufferSpec) or getattr(kv_cache_spec, "is_circular", False)
+
+
+def is_prefix_cacheable(kv_cache_spec: KVCacheSpec) -> bool:
+    """Resolve cacheability through uniform wrappers.
+
+    ``prefix_cacheable`` is the upstream API on the lanes that define it; the
+    release lane predates it, so an unset attribute means cacheable.
+    """
+    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+        return all(is_prefix_cacheable(spec) for spec in kv_cache_spec.kv_cache_specs.values())
+    return bool(getattr(kv_cache_spec, "prefix_cacheable", True)) and bool(
+        getattr(kv_cache_spec, "participates_in_prefix_caching", True)
+    )
+
+
+def requires_padded_page_layout(kv_cache_specs: Iterable[KVCacheSpec]) -> bool:
+    """Whether state caches advance by a padded page size shared with attention.
+
+    Ascend mixed pools can bind one physical page to both an attention cache and a
+    recurrent state cache. The attention side of such a pool is addressed by an explicit
+    physical block stride (``indexes_kv_by_block_stride``) and the state caches are
+    padded to that same page size, so every view over the shared page has to advance by
+    the padded page size: otherwise a state update for one scheduler block ID would land
+    in the pages owned by another block ID.
+
+    The capability belongs to the pool rather than to a single spec, because hybrid
+    models also pad Mamba pages through ``cache_config.mamba_page_size_padded`` while
+    keeping the packed contiguous state layout, so padding alone does not require this
+    layout.
+    """
+    specs = list(kv_cache_specs)
+    state_specs = [spec for spec in specs if isinstance(spec, MambaSpec)]
+    if not state_specs:
+        return False
+    if not any(getattr(spec, "page_size_padded", None) is not None for spec in state_specs):
+        return False
+    return any(getattr(spec, "indexes_kv_by_block_stride", False) for spec in specs)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -46,16 +108,25 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     # indexer spec.
     cache_sparse_sfa_c8: bool = False
     store_on_host: bool = False
+    # Ascend kernels consume padded pages through an explicit physical block
+    # stride. vLLM main removed this field from AttentionSpec, but it remains
+    # part of the Ascend runner/backend contract.
+    indexes_kv_by_block_stride: bool = False
+    if vllm_version_is("0.29.0"):
 
-    @property
-    def storage_block_size(self) -> int:
-        """Return the physical block size consumed by Ascend kernels."""
-        return self.block_size // self.tokens_per_state
+        @property
+        def storage_block_size(self) -> int:
+            """Legacy physical geometry; main uses get_storage_block_size.
+
+            On main, #53906 initializes a dataclass field with this name.
+            A read-only property would reject that constructor assignment.
+            """
+            return self.block_size // self.tokens_per_state
 
     @property
     def real_page_size_bytes(self) -> int:
         return (
-            self.storage_block_size
+            get_storage_block_size(self)
             * self.num_kv_heads
             * (self.head_size * get_dtype_size(self.dtype) + self.scale_dim * get_dtype_size(self.scale_dtype))
         )
@@ -76,7 +147,8 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
                 spec.cache_sparse_sfa_c8,
                 spec.store_on_host,
                 spec.alignment,
-                spec.tokens_per_state,
+                get_kv_cache_compression_ratio(spec),
+                spec.indexes_kv_by_block_stride,
             )
             for spec in specs
         }
@@ -96,6 +168,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             alignment=first_spec.alignment,
             cache_sparse_sfa_c8=first_spec.cache_sparse_sfa_c8,
             store_on_host=first_spec.store_on_host,
+            indexes_kv_by_block_stride=first_spec.indexes_kv_by_block_stride,
         )
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
@@ -181,6 +254,7 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
     alignment: int | None = None  # Default to None for no padding.
     compress_ratio: int = 1
     model_version: str | None = None
+    indexes_kv_by_block_stride: bool = False
 
     def __post_init__(self):
         pass
@@ -225,7 +299,70 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
         )
 
 
+@dataclass(frozen=True, kw_only=True)
+class AscendIndexerKPoolTailSpec(SlidingWindowSpec):
+    """One fixed FP32 ``[2, ring_capacity, head_size]`` page per request.
+
+    ``block_size`` is the physical ring capacity; ``compress_ratio`` defines
+    pool boundaries independently. The dedicated manager never slides or grows.
+    """
+
+    compress_ratio: int
+    model_version: str = "glm5_next"
+    cache_role: str = "indexer_tail"
+    indexes_kv_by_block_stride: bool = True
+
+    @property
+    def is_circular(self) -> bool:
+        return True
+
+    @property
+    def prefix_cacheable(self) -> bool:
+        return False
+
+    @property
+    def unpadded_page_size_bytes(self) -> int:
+        # The tail stores a fixed K/gate pair; the parent handles page padding.
+        return 2 * self.block_size * self.head_size * get_dtype_size(self.dtype)
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.dtype != torch.float32:
+            raise ValueError(f"Indexer K-pool tail must use FP32, got {self.dtype}.")
+        if self.num_kv_heads != 1 or self.head_size <= 0:
+            raise ValueError("Indexer K-pool tail requires one K/gate pair with positive head size.")
+        if self.compress_ratio <= 1 or self.block_size < self.compress_ratio:
+            raise ValueError("Tail ring capacity must be at least the compression ratio, which must exceed one.")
+        if self.sliding_window != self.compress_ratio:
+            raise ValueError("Tail sliding_window describes the logical pool size and must equal compress_ratio.")
+
+    @classmethod
+    def merge(cls, specs: list[Self]) -> Self:
+        assert all(isinstance(spec, cls) for spec in specs)
+        return super().merge(specs)
+
+    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        del vllm_config
+        return self.page_size_bytes
+
+    def max_admission_blocks_per_request(self, max_in_flight_tokens: int, max_model_len: int) -> int:
+        return 1
+
+    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
+        return 1
+
+    def is_uniform_with_collection(self, kv_cache_specs: dict[str, KVCacheSpec]) -> bool:
+        return all(
+            isinstance(spec, AscendIndexerKPoolTailSpec)
+            and spec.block_size == self.block_size
+            and spec.compress_ratio == self.compress_ratio
+            for spec in kv_cache_specs.values()
+        )
+
+
 def register_ascend_kv_cache_specs() -> None:
+    from vllm_ascend.models.glm5next.kv_cache import KpoolTailManager
+
     KVCacheSpecRegistry.register(
         kvcache_spec_cls=AscendMLAAttentionSpec,
         manager_class=FullAttentionManager,
@@ -242,11 +379,8 @@ def register_ascend_kv_cache_specs() -> None:
         uniform_type_base_spec=SlidingWindowMLASpec,
     )
 
-    # Imported lazily so this module stays independent of any single model.
-    from vllm_ascend.models.glm5next.kv_cache import KpoolTailManager, KpoolTailSpec
-
     KVCacheSpecRegistry.register(
-        kvcache_spec_cls=KpoolTailSpec,
+        kvcache_spec_cls=AscendIndexerKPoolTailSpec,
         manager_class=KpoolTailManager,
-        uniform_type_base_spec=KpoolTailSpec,
+        uniform_type_base_spec=AscendIndexerKPoolTailSpec,
     )

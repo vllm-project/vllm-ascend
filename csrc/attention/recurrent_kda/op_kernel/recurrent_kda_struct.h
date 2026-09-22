@@ -62,6 +62,12 @@ struct alignas(8) RecurrentKdaTilingData {
     uint64_t stateOutStride1;
     uint64_t stateOutStride2;
     uint64_t stateOutStride3;
+    uint64_t queryTokenStride;
+    uint64_t queryHeadStride;
+    uint64_t keyTokenStride;
+    uint64_t keyHeadStride;
+    uint64_t valueTokenStride;
+    uint64_t valueHeadStride;
 };
 #pragma pack(pop)
 

@@ -34,7 +34,7 @@ The following hardware and software stack is validated together for this release
     | Ascend runtime | NNAL | `{{ release_nnal_version }}` | Provides `libatb.so` and ATB runtime capabilities |
     | Framework | PyTorch | `{{ release_pytorch_version }}` | Tensor framework used by vLLM |
     | Framework | TorchNPU | `{{ release_torch_npu_version }}` | Connects PyTorch to the Ascend runtime |
-    | Kernel acceleration | Triton Ascend | `{{ release_triton_ascend_version }}` | Used on A2, A3, and 950DT; not used on Atlas 300I DUO or Atlas 200I Pro |
+    | Kernel acceleration | Triton Ascend | `{{ release_triton_ascend_version }}` | Used on A2, A3, and 950DT Products; not used on Atlas 300I DUO or Atlas 200I Pro |
     | Inference engine | vLLM | `{{ release_vllm_version }}` | Model inference engine |
     | Hardware plugin | vLLM Ascend | `{{ release_vllm_ascend_version }}` | Connects vLLM to the Ascend software stack |
 
@@ -77,7 +77,7 @@ Choose one complete path based on your requirements. Container-based paths requi
     | Triton Ascend | ✓ | ○ | ○ |
 
     - **PyTorch and TorchNPU:** Installed as dependencies during the **Install vLLM and vLLM Ascend** step; no separate installation step is required.
-    - **Triton Ascend:** Installed only for A2, A3, and 950DT; it is not used on Atlas 300I DUO or Atlas 200I Pro.
+    - **Triton Ascend:** Installed only for A2, A3, and 950DT Products; it is not used on Atlas 300I DUO or Atlas 200I Pro.
 
 {% include "getting_started/installation/prebuilt_image.inc.md" %}
 
@@ -129,7 +129,7 @@ Before building vLLM Ascend, explicitly set the build target and disable automat
     - A2: `export SOC_VERSION=ascend910b1`
     - A3: `export SOC_VERSION=ascend910_9391`
     - Atlas 300I DUO / Atlas 200I Pro: `export SOC_VERSION=ascend310p1`
-    - 950DT: `export SOC_VERSION=ascend950dt_9582`
+    - 950DT Products: `export SOC_VERSION=ascend950dt_9582`
 
 ???+ tip "Enable batch invariance"
 
@@ -164,13 +164,13 @@ Check the physical links, the status of each node, and inter-node connectivity i
 - The physical machines must be on the same LAN and able to communicate with each other.
 - All NPUs must be connected through optical modules, and all connections must be healthy.
 
-???+ important "950DT server precheck"
+???+ important "950DT Products server precheck"
 
-    This precheck applies only to 950DT servers. Other server series can skip it.
+    This precheck applies only to 950DT Products servers. Other server series can skip it.
 
     **Prepare the HiXLEP configuration paths**:
 
-    - When deploying a 950DT inference service, confirm on each server that `/lib/route.conf`, `/etc/hccl_rootinfo.json`, and the `/etc/hixlep` directory that describes the UB link topology exist and are configured correctly. If any item is missing or misconfigured, follow the [HiXLEP configuration file generation guide](https://gitcode.com/cann/hixl/wiki/A5%20LocalCommRes%E9%85%8D%E7%BD%AE%E6%8C%87%E5%8D%97.md) to generate the required content. Select the "D2D scenario" when generating `/etc/hixlep`.
+    - When deploying a 950DT Products inference service, confirm on each server that `/lib/route.conf`, `/etc/hccl_rootinfo.json`, and the `/etc/hixlep` directory that describes the UB link topology exist and are configured correctly. If any item is missing or misconfigured, follow the [HiXLEP configuration file generation guide](https://gitcode.com/cann/hixl/wiki/A5%20LocalCommRes%E9%85%8D%E7%BD%AE%E6%8C%87%E5%8D%97.md) to generate the required content. Select the "D2D scenario" when generating `/etc/hixlep`.
 
 #### Check each node {: #installation-multi-node-node-check }
 
@@ -210,7 +210,7 @@ Run the following commands on each node in order. The command results should be 
     cat /etc/hccn.conf
     ```
 
-=== "950DT"
+=== "950DT Products"
 
     ```bash
     # Check the remote switch ports
@@ -243,7 +243,7 @@ Run the following commands on each node in order. The command results should be 
     for i in {0..15}; do hccn_tool -i $i -ip -g | grep ipaddr; done
     ```
 
-=== "950DT"
+=== "950DT Products"
 
     ```bash
     for i in {0..7}; do hccn_tool -i $i -ip -g | grep ipaddr; done
