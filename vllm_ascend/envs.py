@@ -82,12 +82,6 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Emit per-layer KVPool ranged transfer audit events. Default: 0 (disabled).
     # Valid values: 0 or 1. This configuration is not sensitive.
     "VLLM_ASCEND_KVPOOL_RANGE_DEBUG": lambda: _strict_binary_env("VLLM_ASCEND_KVPOOL_RANGE_DEBUG"),
-    # Whether to use the Triton apply_top_k_top_p op in sampling
-    # (vllm_ascend.ops.triton.apply_top_k_top_p: CANN npu_top_k_top_p
-    # semantics + optional fused softmax; takes per-request [B] k/p tensors
-    # directly, no .item() CPU sync). Performance-critical decode path.
-    # Default: 0 (disabled). Valid values: 0 or 1. Not sensitive.
-    "VLLM_ASCEND_USE_TRITON_APPLY_TOPK_TOPP": lambda: _strict_binary_env("VLLM_ASCEND_USE_TRITON_APPLY_TOPK_TOPP"),
 }
 
 # end-env-vars-definition
