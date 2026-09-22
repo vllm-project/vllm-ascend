@@ -111,6 +111,18 @@ jobs:
     outputs:
       build_meta: ${{ steps.filter.outputs.build_meta }}
     steps:
+      - name: Resolve effective build_type
+        id: resolve_bt
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            bt="daily"
+          elif [[ -n "${{ inputs.build_type }}" ]]; then
+            bt="${{ inputs.build_type }}"
+          else
+            bt="release"
+          fi
+          echo "bt=$bt" >> $GITHUB_OUTPUT
+          echo "effective_build_type = $bt"
       - name: Filter build matrix by chips
         id: filter
         run: |
