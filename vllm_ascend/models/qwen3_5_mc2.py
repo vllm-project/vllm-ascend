@@ -115,7 +115,18 @@ class _AscendMC2Mixin:
         if tp.world_size <= 1:
             return
         group = tp.device_group
-        rank = torch.distributed.get_global_rank(group, torch.distributed.get_rank(group))
+        # Group-local rank, matching the other get_hccl_comm_name call sites
+        # (ops/fused_moe/token_dispatcher.py, quantization w8a8/w4a8): a
+        # global rank outside the group's comm coverage makes the backend
+        # create a NEW communicator.
+        rank = torch.distributed.get_rank(group=group)
+        # get_hccl_comm_name may collectively create the comm when the TP
+        # group's HCCL comm is not materialized yet (its first collective
+        # normally happens later, during weight loading). Barrier so both
+        # ranks reach that creation together instead of racing through
+        # model init (TP0 was seen reaching compilation while TP1 still
+        # initialized, failing with EI0015 RootInfoDetect).
+        torch.distributed.barrier(group=group)
         hcom = group._get_backend(torch.device("npu")).get_hccl_comm_name(rank)
         # Instance-level forward replacement: only this model's own
         # reduce_results RowParallelLinear modules are touched.
