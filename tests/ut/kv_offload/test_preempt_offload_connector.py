@@ -6,6 +6,10 @@ import types
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+import torch
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.outputs import KVConnectorOutput
 
 # Clean up stale mock modules installed by other kv offload tests that replace
@@ -28,6 +32,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.mana
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.metadata import (  # noqa: E402
     INVALID_JOB_ID,
+    MambaConvLoadMeta,
     PreemptOffloadMetadata,
     PreemptOffloadWorkerMetadata,
 )
@@ -35,6 +40,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.pree
     PreemptOffloadConnectorV1,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.worker import (  # noqa: E402
+    MambaConvCacheBinding,
     PreemptOffloadWorker,
 )
 
@@ -62,6 +68,7 @@ def test_preempt_offload_connector_metadata_defaults_are_empty():
     assert metadata.preempt_load_event == INVALID_JOB_ID
     assert metadata.preempt_load_gpu_blocks == []
     assert metadata.preempt_load_cpu_blocks == []
+    assert metadata.preempt_load_mamba_conv == []
     assert metadata.preempt_load_event_to_reqs == {}
 
 
@@ -440,6 +447,7 @@ def _make_ready_mamba_scheduler() -> PreemptOffloadScheduler:
     scheduler = PreemptOffloadScheduler.__new__(PreemptOffloadScheduler)
     scheduler.num_spec_tokens = 3
     scheduler._group_is_mamba = [True]
+    scheduler._group_has_mamba_conv = [True]
     scheduler._preempted_req_states = {
         "req-1": PreemptedRequestState(
             req_id="req-1",
@@ -457,7 +465,40 @@ def _make_ready_mamba_scheduler() -> PreemptOffloadScheduler:
         blocks={50: "gpu50"},
         touch=MagicMock(),
     )
+    scheduler.cpu_kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[
+            SimpleNamespace(
+                kv_cache_spec=SimpleNamespace(block_size=16),
+            )
+        ]
+    )
     return scheduler
+
+
+def test_preempt_offload_connector_scheduler_classifies_mamba_conv_groups():
+    linear_spec = MambaSpec(
+        block_size=16,
+        shapes=((8, 128, 128),),
+        dtypes=(torch.float32,),
+        mamba_type=MambaAttentionBackendEnum.LINEAR,
+    )
+    gdn_spec = MambaSpec(
+        block_size=16,
+        shapes=((6, 128), (8, 128, 128)),
+        dtypes=(torch.float32, torch.float32),
+        mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+    )
+    kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[
+            SimpleNamespace(kv_cache_spec=linear_spec),
+            SimpleNamespace(kv_cache_spec=gdn_spec),
+        ]
+    )
+
+    assert PreemptOffloadScheduler._get_group_has_mamba_conv(kv_cache_config) == [
+        False,
+        True,
+    ]
 
 
 def test_preempt_offload_connector_scheduler_h2d_mamba_align_target():
@@ -472,6 +513,13 @@ def test_preempt_offload_connector_scheduler_h2d_mamba_align_target():
     assert prepared is True
     state = scheduler._preempted_req_states["req-1"]
     assert state.load_transfer_meta == TransferMeta([50], [103])
+    assert state.load_mamba_conv_meta == [
+        MambaConvLoadMeta(
+            gpu_block_id=50,
+            cpu_block_id=101,
+            source_offset=2,
+        )
+    ]
     scheduler._gpu_block_pool.touch.assert_called_once_with(["gpu50"])
 
 
@@ -487,6 +535,51 @@ def test_preempt_offload_connector_scheduler_h2d_mamba_none_target():
     assert prepared is True
     state = scheduler._preempted_req_states["req-1"]
     assert state.load_transfer_meta == TransferMeta([50], [103])
+    assert state.load_mamba_conv_meta == [
+        MambaConvLoadMeta(
+            gpu_block_id=50,
+            cpu_block_id=101,
+            source_offset=2,
+        )
+    ]
+
+
+def test_preempt_offload_connector_scheduler_h2d_linear_mamba_skips_conv_load():
+    scheduler = _make_ready_mamba_scheduler()
+    scheduler._group_has_mamba_conv = [False]
+
+    prepared = scheduler._prepare_preempt_load_after_alloc(
+        SimpleNamespace(request_id="req-1", num_tokens=20),
+        ([50, 51, 52, 53],),
+        num_external_tokens=20,
+    )
+
+    assert prepared is True
+    state = scheduler._preempted_req_states["req-1"]
+    assert state.load_transfer_meta == TransferMeta([50], [103])
+    assert state.load_mamba_conv_meta == []
+
+
+def test_preempt_offload_connector_scheduler_h2d_mamba_conv_uses_residual_offset_after_boundary():
+    scheduler = _make_ready_mamba_scheduler()
+    scheduler._preempted_req_states["req-1"].num_computed_tokens = 17
+
+    prepared = scheduler._prepare_preempt_load_after_alloc(
+        SimpleNamespace(request_id="req-1", num_tokens=18),
+        ([50, 51, 52, 53],),
+        num_external_tokens=17,
+    )
+
+    assert prepared is True
+    state = scheduler._preempted_req_states["req-1"]
+    assert state.load_transfer_meta == TransferMeta([50], [104])
+    assert state.load_mamba_conv_meta == [
+        MambaConvLoadMeta(
+            gpu_block_id=50,
+            cpu_block_id=101,
+            source_offset=1,
+        )
+    ]
 
 
 def test_preempt_offload_connector_scheduler_h2d_rejects_invalid_mamba_mapping():
@@ -531,6 +624,13 @@ def test_preempt_offload_connector_scheduler_build_connector_meta_assigns_events
             num_computed_tokens=8,
             store_transfer_meta=TransferMeta([], []),
             load_transfer_meta=TransferMeta([11], [3]),
+            load_mamba_conv_meta=[
+                MambaConvLoadMeta(
+                    gpu_block_id=11,
+                    cpu_block_id=2,
+                    source_offset=1,
+                )
+            ],
             ready=True,
         ),
     }
@@ -545,6 +645,13 @@ def test_preempt_offload_connector_scheduler_build_connector_meta_assigns_events
     assert metadata.preempt_load_event == 7
     assert metadata.preempt_load_gpu_blocks == [11]
     assert metadata.preempt_load_cpu_blocks == [3]
+    assert metadata.preempt_load_mamba_conv == [
+        MambaConvLoadMeta(
+            gpu_block_id=11,
+            cpu_block_id=2,
+            source_offset=1,
+        )
+    ]
     assert metadata.preempt_load_event_to_reqs == {7: ["load-req"]}
     assert scheduler._preempted_req_states["store-req"].store_event == 4
     assert scheduler._preempted_req_states["load-req"].load_event == 7
@@ -794,7 +901,48 @@ def test_preempt_offload_connector_worker_preempt_and_load_entrypoints():
         4,
         is_store=False,
         sync=True,
+        mamba_conv_loads=[],
     )
+
+
+@pytest.mark.parametrize("accept_offset", [0, 1, 2, 3])
+def test_preempt_offload_connector_worker_restores_only_conv_history(accept_offset):
+    worker = PreemptOffloadWorker.__new__(PreemptOffloadWorker)
+    conv_cpu = torch.arange(5 * 12).view(5, 12)
+    conv_gpu = torch.full((6, 12), -1)
+    ssm_cpu = torch.arange(5 * 8).view(5, 8)
+    ssm_gpu = torch.full((6, 8), -7)
+    worker.cpu_kv_caches = {"conv": conv_cpu, "ssm": ssm_cpu}
+    worker.gpu_kv_caches = {"conv": conv_gpu, "ssm": ssm_gpu}
+    worker.mamba_conv_cache_bindings = {"conv": MambaConvCacheBinding((6, 2), torch.int64)}
+    worker.num_spec_tokens = 3
+
+    worker._copy_mamba_conv_loads(
+        [
+            MambaConvLoadMeta(
+                gpu_block_id=4,
+                cpu_block_id=1,
+                source_offset=accept_offset,
+            )
+        ]
+    )
+
+    restored_conv = conv_gpu[4].view(6, 2)
+    source_conv = conv_cpu[1].view(6, 2)
+    torch.testing.assert_close(
+        restored_conv[:3],
+        source_conv[accept_offset : accept_offset + 3],
+    )
+    assert torch.all(restored_conv[3:] == -1)
+    assert torch.all(ssm_gpu == -7)
+
+
+def test_preempt_offload_connector_worker_classifies_mamba_state_roles():
+    spec = SimpleNamespace(mamba_type=MambaAttentionBackendEnum.GDN_ATTN)
+    assert PreemptOffloadWorker._is_conv_state(spec, 0) is True
+    assert PreemptOffloadWorker._is_conv_state(spec, 1) is False
+    linear_spec = SimpleNamespace(mamba_type=MambaAttentionBackendEnum.LINEAR)
+    assert PreemptOffloadWorker._is_conv_state(linear_spec, 0) is False
 
 
 def test_preempt_offload_connector_worker_wait_for_layer_load_once():

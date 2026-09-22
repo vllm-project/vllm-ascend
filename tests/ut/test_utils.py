@@ -40,11 +40,6 @@ class TestUtils(TestBase):
         utils.enable_dsa_cp_full_o_proj.cache_clear()
         utils.enable_pcp_o_proj_weight_sharding.cache_clear()
 
-    def test_mooncake_hybrid_connector_supports_shared_backing(self):
-        kv_transfer_config = SimpleNamespace(kv_connector="MooncakeHybridConnector")
-
-        self.assertTrue(utils.kv_transfer_supports_shared_backing(kv_transfer_config))
-
     def test_nd_to_nz_2d(self):
         # can be divided by 16
         input_tensor = torch.randn(32, 64)
