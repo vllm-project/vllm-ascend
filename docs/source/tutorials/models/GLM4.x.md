@@ -20,12 +20,12 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 |  Weight Version                                           | Download Links |
 |-----------------------------------------------------------|----------------|
-| `GLM-4.5`(BF16 version)                                   | [ModelScope](https://www.modelscope.cn/models/ZhipuAI/GLM-4.5) |
-| `GLM-4.6`(BF16 version)                                   | [ModelScope](https://www.modelscope.cn/models/ZhipuAI/GLM-4.6) |
-| `GLM-4.7`(BF16 version)                                   | [ModelScope](https://www.modelscope.cn/models/ZhipuAI/GLM-4.7) |
+| `GLM-4.5`(BF16 version)                                   | [AtomGit](https://ai.atomgit.com/zai-org/GLM-4.5) / [ModelScope](https://www.modelscope.cn/models/ZhipuAI/GLM-4.5) |
+| `GLM-4.6`(BF16 version)                                   | [AtomGit](https://ai.atomgit.com/zai-org/GLM-4.6) / [ModelScope](https://www.modelscope.cn/models/ZhipuAI/GLM-4.6) |
+| `GLM-4.7`(BF16 version)                                   | [AtomGit](https://ai.atomgit.com/zai-org/GLM-4.7) / [ModelScope](https://www.modelscope.cn/models/ZhipuAI/GLM-4.7) |
 | `GLM-4.5-w8a8-with-float-mtp`(Quantized version with mtp) | [Modelers](https://modelers.cn/models/Modelers_Park/GLM-4.5-w8a8) |
 | `GLM-4.6-w8a8`(Quantized version without mtp)             | [Modelers](https://modelers.cn/models/Modelers_Park/GLM-4.6-w8a8) |
-| `GLM-4.7-w8a8-with-float-mtp`(Quantized version with mtp) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-4.7-W8A8-floatmtp) |
+| `GLM-4.7-w8a8-with-float-mtp`(Quantized version with mtp) | [AtomGit](https://ai.atomgit.com/Eco-Tech/GLM-4.7-W8A8-floatmtp) / [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-4.7-W8A8-floatmtp) |
 
 - `Method of Quantization`: [quantization scheme](https://ai.gitcode.com/Ascend-SACT/GLM-4.5-w8a8). You can use these methods to quantize the model.
 

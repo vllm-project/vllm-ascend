@@ -21,7 +21,7 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 |  Weight Version | Hardware Requirements | Download Links |
 |-----------------|-----------------------|----------------|
-| `DeepSeek-R1-W8A8`(Quantized version) |  1 Atlas 800 A3 (64GB × 16) nodes or 2 Atlas 800 A2 (64GB × 8) nodes| [ModelScope](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-R1-W8A8) |
+| `DeepSeek-R1-W8A8`(Quantized version) |  1 Atlas 800 A3 (64GB × 16) nodes or 2 Atlas 800 A2 (64GB × 8) nodes| [AtomGit](https://ai.atomgit.com/hf_mirrors/vllm-ascend/DeepSeek-R1-W8A8) / [ModelScope](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-R1-W8A8) |
 
 >**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 

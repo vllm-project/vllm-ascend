@@ -22,8 +22,8 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 |  Weight Version                   | Hardware Requirements      | Download Links |
 |-----------------------------------|----------------------------|----------------|
-| `GLM-5-w4a8`(Quantized version)   | 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5-w4a8) |
-| `GLM-5-w8a8`(Quantized version)   | 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5-w8a8) |
+| `GLM-5-w4a8`(Quantized version)   | 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node | [AtomGit](https://ai.atomgit.com/Eco-Tech/GLM-5-w4a8) / [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5-w4a8) |
+| `GLM-5-w8a8`(Quantized version)   | 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node | [AtomGit](https://ai.atomgit.com/Eco-Tech/GLM-5-w8a8) / [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5-w8a8) |
 | `GLM-5.1-w4a8`(Quantized version) | 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.1-w4a8) |
 | `GLM-5.1-w8a8`(Quantized version) | 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.1-w8a8) |
 |`GLM-5.1-w8a8c8`(Quantized version)| The weights have been verified on Atlas 800 A3 and are recommended for use. |[Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.1-w8a8c8-MTP)|

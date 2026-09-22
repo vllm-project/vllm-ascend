@@ -24,9 +24,9 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 |  Weight Version                                 | Hardware Requirements                                                                     | Download Links |
 |-------------------------------------------------|-------------------------------------------------------------------------------------------|----------------|
-| `Qwen3-VL-8B-Instruct`                          | 1 card on Atlas 800I A2 (64GB × 8), Atlas 800 A3 (64GB × 16), or Atlas 300I DUO           | [ModelScope](https://modelscope.cn/models/Qwen/Qwen3-VL-8B-Instruct) |
+| `Qwen3-VL-8B-Instruct`                          | 1 card on Atlas 800I A2 (64GB × 8), Atlas 800 A3 (64GB × 16), or Atlas 300I DUO           | [AtomGit](https://ai.atomgit.com/hf_mirrors/Qwen/Qwen3-VL-8B-Instruct) / [ModelScope](https://modelscope.cn/models/Qwen/Qwen3-VL-8B-Instruct) |
 | `Qwen3-VL-8B-Instruct-w8a8`(Quantized version)  | 1 card on 950DT Products (96GB × 8) node                                              | [ModelScope](https://modelscope.cn/models/Eco-Tech/Qwen3-VL-8B-Instruct-w8a8-mxfp8) |
-| `Qwen3-VL-32B-Instruct`                         | 2 cards on Atlas 800I A2 (64GB × 8), Atlas 800 A3 (64GB × 16), or Atlas inference products| [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-VL-32B-Instruct) |
+| `Qwen3-VL-32B-Instruct`                         | 2 cards on Atlas 800I A2 (64GB × 8), Atlas 800 A3 (64GB × 16), or Atlas inference products| [AtomGit](https://ai.atomgit.com/hf_mirrors/Qwen/Qwen3-VL-32B-Instruct) / [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-VL-32B-Instruct) |
 | `Qwen3-VL-32B-Instruct-w8a8`(Quantized version) | 1 card on 950DT Products (96GB × 8) node                                              | [ModelScope](https://modelscope.cn/models/Eco-Tech/Qwen3-VL-32B-Instruct-w8a8-mxfp8) |
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
