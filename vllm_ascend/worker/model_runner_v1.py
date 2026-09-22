@@ -5648,8 +5648,7 @@ class NPUModelRunner(GPUModelRunner):
                         fused_raw_tensor = raw_cache
 
                     # Only a single-backing Ascend MLA cache needs module-level
-                    # metadata. Legacy MHA/GQA K/V tuples must keep the original
-                    # path even when a test runner omits compilation state.
+                    # metadata. Legacy MHA/GQA K/V tuples keep the raw K/V path.
                     attn_module = None
                     if (
                         fused_raw_tensor is not None
