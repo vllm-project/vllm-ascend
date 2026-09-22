@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+from typing import TypeAlias
 
 import torch
 import vllm.v1.worker.utils as utils
@@ -9,7 +10,7 @@ from vllm.v1.worker.utils import defaultdict, extract_layer_index
 
 from vllm_ascend.utils import vllm_version_is
 
-KVCache = torch.Tensor | Sequence[torch.Tensor]
+KVCache: TypeAlias = torch.Tensor | Sequence[torch.Tensor]
 
 
 def _bind_layer_kv_cache(
