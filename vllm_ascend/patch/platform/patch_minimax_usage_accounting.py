@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# MiniMax-M2 usage accounting: backport reasoning-token usage details.
+# Reasoning usage accounting: backport reasoning-token usage details.
 #
 
 from __future__ import annotations
@@ -30,10 +30,12 @@ from vllm.entrypoints.openai.chat_completion import serving as chat_serving
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.engine import protocol as engine_protocol
 from vllm.reasoning import minimax_m2_reasoning_parser as minimax_parser
+from vllm.reasoning.deepseek_v3_reasoning_parser import DeepSeekV3ReasoningParser
 
-_MINIMAX_REASONING_PARSER_TYPES = (
+_REASONING_USAGE_PARSER_TYPES = (
     minimax_parser.MiniMaxM2ReasoningParser,
     minimax_parser.MiniMaxM2AppendThinkReasoningParser,
+    DeepSeekV3ReasoningParser,
 )
 
 
@@ -52,7 +54,7 @@ CompletionTokenUsageInfo.__module__ = engine_protocol.__name__
 UsageInfo.__module__ = engine_protocol.__name__
 
 # The OpenAI usage schema is process-wide. Keep only this schema backfill
-# global; the expensive token tracking below is bound to MiniMax instances.
+# global; token tracking below is bound to selected reasoning parser instances.
 engine_protocol.CompletionTokenUsageInfo = CompletionTokenUsageInfo
 engine_protocol.UsageInfo = UsageInfo
 chat_protocol.UsageInfo = UsageInfo
@@ -92,12 +94,12 @@ minimax_parser.MiniMaxM2ReasoningParser.count_reasoning_tokens = _patched_count_
 minimax_parser.MiniMaxM2AppendThinkReasoningParser.count_reasoning_tokens = _patched_count_reasoning_tokens
 
 
-def _count_minimax_reasoning_tokens_for_usage(
+def _count_reasoning_tokens_for_usage(
     token_ids: Sequence[int],
     reasoning_parser,
 ) -> int | None:
     reasoning_parser = _resolve_reasoning_parser(reasoning_parser)
-    if reasoning_parser is None or not _is_minimax_reasoning_parser(reasoning_parser):
+    if reasoning_parser is None or not _is_reasoning_usage_parser(reasoning_parser):
         return None
 
     count_reasoning_tokens = getattr(reasoning_parser, "count_reasoning_tokens", None)
@@ -112,10 +114,10 @@ def _resolve_reasoning_parser(reasoning_parser):
     return getattr(reasoning_parser, "reasoning_parser", reasoning_parser)
 
 
-def _is_minimax_reasoning_parser(reasoning_parser) -> bool:
+def _is_reasoning_usage_parser(reasoning_parser) -> bool:
     return isinstance(
         _resolve_reasoning_parser(reasoning_parser),
-        _MINIMAX_REASONING_PARSER_TYPES,
+        _REASONING_USAGE_PARSER_TYPES,
     )
 
 
@@ -149,10 +151,10 @@ def _make_usage_info(
     return usage
 
 
-def _is_minimax_reasoning_parser_cls(reasoning_parser_cls) -> bool:
+def _is_reasoning_usage_parser_cls(reasoning_parser_cls) -> bool:
     return isinstance(reasoning_parser_cls, type) and issubclass(
         reasoning_parser_cls,
-        _MINIMAX_REASONING_PARSER_TYPES,
+        _REASONING_USAGE_PARSER_TYPES,
     )
 
 
@@ -218,7 +220,7 @@ def _sum_reasoning_tokens_for_usage(
     if reasoning_parser is None:
         return None
     reasoning_token_counts = [
-        _count_minimax_reasoning_tokens_for_usage(token_ids, reasoning_parser) for token_ids in raw_output_token_ids
+        _count_reasoning_tokens_for_usage(token_ids, reasoning_parser) for token_ids in raw_output_token_ids
     ]
     if all(reasoning_tokens is None for reasoning_tokens in reasoning_token_counts):
         return None
@@ -233,7 +235,7 @@ def _reasoning_tokens_for_choice(
         return None
     if not 0 <= choice_index < len(state.raw_output_token_ids):
         return None
-    return _count_minimax_reasoning_tokens_for_usage(
+    return _count_reasoning_tokens_for_usage(
         state.raw_output_token_ids[choice_index],
         state.reasoning_parser,
     )
@@ -416,11 +418,11 @@ _wrapped_chat_completion_full_generator.__qualname__ = (
 
 
 def _should_patch_chat_usage_instance(self) -> bool:
-    return _is_minimax_reasoning_parser_cls(self.reasoning_parser_cls)
+    return _is_reasoning_usage_parser_cls(self.reasoning_parser_cls)
 
 
 def _patch_chat_usage_instance(self) -> None:
-    if getattr(self, "_ascend_minimax_usage_patched", False):
+    if getattr(self, "_ascend_reasoning_usage_patched", False):
         return
     self._make_usage_info = MethodType(_make_usage_info, self)
     self._ascend_original_chat_completion_stream_generator = MethodType(
@@ -439,7 +441,7 @@ def _patch_chat_usage_instance(self) -> None:
         _wrapped_chat_completion_full_generator,
         self,
     )
-    self._ascend_minimax_usage_patched = True
+    self._ascend_reasoning_usage_patched = True
 
 
 class _ReasoningParserClsDescriptor:
@@ -453,7 +455,7 @@ class _ReasoningParserClsDescriptor:
 
     def __set__(self, instance, value) -> None:
         instance.__dict__["_ascend_reasoning_parser_cls"] = value
-        if _is_minimax_reasoning_parser_cls(value):
+        if _is_reasoning_usage_parser_cls(value):
             _patch_chat_usage_instance(instance)
 
 
