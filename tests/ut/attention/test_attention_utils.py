@@ -28,9 +28,6 @@ from vllm_ascend.attention.utils import (
     is_freetime_model_type,
 )
 
-from vllm_ascend.attention.utils import filter_chunked_req_indices, get_or_register_attention_buffer
-
-
 NUM_REQS = 2
 # Distinct values so the selected source (CPU mirror vs NPU tensor) is identifiable.
 CPU_SEQ_LENS = torch.tensor([10, 20, 30], dtype=torch.int32)
