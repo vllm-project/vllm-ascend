@@ -115,3 +115,49 @@ def test_scatter_nd_update_sk_duplicate_indices(var_dtype, idx_dtype, contiguous
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
+
+
+@pytest.mark.parametrize("index_dtype", [torch.int32, torch.int64])
+@pytest.mark.parametrize("guard_extra", [0, 128])
+@pytest.mark.parametrize("all_padding", [False, True])
+@pytest.mark.parametrize(
+    "dtype,width,region_offset,tokens,page_bytes",
+    [
+        pytest.param(torch.bfloat16, 512, 0, 32, 32768, id="compressed-kv"),
+        pytest.param(torch.int8, 128, 0, 32, 4160, id="indexer-key"),
+        pytest.param(torch.float16, 1, 4096, 32, 4160, id="indexer-scale"),
+        pytest.param(torch.bfloat16, 131072, 0, 1, 262144, id="wide-row-slice"),
+    ],
+)
+def test_scatter_nd_update_sk_negative_padding_preserves_storage(
+    dtype, width, region_offset, tokens, page_bytes, index_dtype, guard_extra, all_padding
+):
+    """Ignore padding slots in batch/slice copies, including offset cache views."""
+    pages = 8
+    # A full leading page keeps a buggy write to linear index -1 in the
+    # allocation, so the regression detects corruption instead of an OOB fault.
+    guard = page_bytes + guard_extra
+    allocation_cpu = torch.full((guard + pages * page_bytes + 128,), 37, dtype=torch.int8)
+    allocation_npu = allocation_cpu.npu()
+    item_size = torch.empty((), dtype=dtype).element_size()
+    shape = (pages, tokens, 1, width)
+    strides = (page_bytes // item_size, width, width, 1)
+    offset = (guard + region_offset) // item_size
+    cache_npu = allocation_npu.view(dtype).as_strided(shape, strides, offset)
+    slots = [[3, 0], [-1, tokens - 1], [5, min(2, tokens - 1)], [-1, tokens - 1]]
+    if all_padding:
+        slots = [[-1, tokens - 1] for _ in slots]
+    indices_cpu = torch.tensor(slots, dtype=index_dtype)
+    updates_cpu = torch.arange(3, 3 + len(slots), dtype=torch.int32).to(dtype)
+    updates_cpu = updates_cpu[:, None, None].expand(-1, 1, width).contiguous()
+    expected = allocation_cpu.clone()
+    expected_cache = expected.view(dtype).as_strided(shape, strides, offset)
+    for row, (page, token) in enumerate(slots):
+        if page >= 0:
+            expected_cache[page, token].copy_(updates_cpu[row])
+
+    torch.ops._C_ascend.npu_scatter_nd_update_sk(cache_npu, indices_cpu.npu(), updates_cpu.npu())
+
+    # Compare the whole allocation, including row gaps, the other shared-page
+    # region and both guards, rather than just the logical destination view.
+    assert torch.equal(allocation_npu.cpu(), expected)
