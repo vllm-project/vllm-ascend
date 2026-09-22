@@ -38,7 +38,12 @@ space to each segment, or a model with no added tokens at all, breaks it - so
 the identity is verified empirically at renderer construction against a probe
 corpus and the cache disables itself if the check does not pass.
 
-Enable with ``VLLM_ASCEND_TOKENIZER_CACHE_GB``; ``0`` (the default) is a no-op.
+Enable with ``--additional-config '{"tokenizer_cache_gb": 4}'``; ``0`` (the
+default) is a no-op. The size is read from ``AscendConfig`` when a renderer is
+built rather than when this module is imported, because the platform plugin
+imports the module before any ``VllmConfig`` exists. The four wrappers below are
+therefore always installed, and each one is inert - a single lookup that misses
+- until a cache has been attached.
 
 Patched symbols:
 
@@ -67,8 +72,6 @@ import regex as re
 from vllm.logger import logger
 from vllm.tokenizers.protocol import TokenizerLike
 from vllm.utils.cache import CacheInfo, LRUCache
-
-import vllm_ascend.envs as envs_ascend
 
 _BYTES_PER_GIB = 1 << 30
 
@@ -426,7 +429,25 @@ def _chat_ids(
     return cache.encode(render(tokenize=False))
 
 
-def _patch_renderer_init(capacity_gb: float) -> None:
+def _configured_capacity_gb() -> int:
+    """The cache size asked for via ``--additional-config``.
+
+    Read lazily rather than at import: this module is imported by the platform
+    plugin, long before a ``VllmConfig`` exists, and ``get_ascend_config()``
+    raises until ``init_ascend_config`` has run. A process that never
+    initializes the Ascend config (mock configs, tokenizer-only tools) simply
+    gets the disabled default.
+    """
+    try:
+        from vllm_ascend.ascend_config import get_ascend_config
+
+        return get_ascend_config().tokenizer_cache_gb
+    except RuntimeError:
+        logger.debug("Incremental tokenizer cache: Ascend config not initialized yet; cache stays disabled.")
+        return 0
+
+
+def _patch_renderer_init() -> None:
     """Build the per-renderer cache as soon as the renderer knows its tokenizer."""
     from vllm.renderers.base import BaseRenderer
 
@@ -434,16 +455,17 @@ def _patch_renderer_init(capacity_gb: float) -> None:
 
     def patched(self, config, tokenizer) -> None:
         original(self, config, tokenizer)
+        capacity_gb = _configured_capacity_gb()
         owned = self.tokenizer
-        if owned is None:
+        if owned is None or capacity_gb <= 0:
             return
         cache = IncrementalTokenizerCache(owned, capacity_gb)
         if not cache.enabled:
             # The cache object already logged its reason; repeat it with the
-            # setting that asked for it, so a `VLLM_ASCEND_TOKENIZER_CACHE_GB`
-            # that buys nothing is impossible to miss.
+            # setting that asked for it, so an `additional_config
+            # .tokenizer_cache_gb` that buys nothing is impossible to miss.
             logger.warning(
-                "VLLM_ASCEND_TOKENIZER_CACHE_GB=%.2f was requested but the cache is disabled for %s: %s",
+                "additional_config.tokenizer_cache_gb=%.2f was requested but the cache is disabled for %s: %s",
                 capacity_gb,
                 type(owned).__name__,
                 cache.disabled_reason,
@@ -539,17 +561,23 @@ def _patch_deepseek_chat() -> None:
         _patch_renderer_chat(renderer_cls)
 
 
-def _install(capacity_gb: float) -> None:
-    """Install every patch; ``capacity_gb`` is threaded through as an argument."""
-    _patch_renderer_init(capacity_gb)
+def _install() -> None:
+    """Install every patch.
+
+    They are installed unconditionally, not only when the option is on: the
+    option lives in ``--additional-config``, which is parsed long after this
+    module is imported by the platform plugin. Each wrapper is inert until a
+    cache exists, and falls straight through to the original on its first
+    check, so ``tokenizer_cache_gb=0`` still leaves request handling unchanged.
+    """
+    _patch_renderer_init()
     _patch_tokenize_prompt()
     _patch_hf_chat()
     _patch_deepseek_chat()
     logger.info(
-        "Incremental tokenizer cache patch installed (%.2f GiB per API server process).",
-        capacity_gb,
+        "Incremental tokenizer cache patch installed; set "
+        "additional_config.tokenizer_cache_gb to a positive value to enable it."
     )
 
 
-if envs_ascend.VLLM_ASCEND_TOKENIZER_CACHE_GB > 0:
-    _install(envs_ascend.VLLM_ASCEND_TOKENIZER_CACHE_GB)
+_install()

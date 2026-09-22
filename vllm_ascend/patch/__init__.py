@@ -782,6 +782,9 @@
 #       corpus when the cache is built, and the cache disables itself if the
 #       check fails. Requests that ask for token offsets, or that would need
 #       truncation, fall through to the original path unchanged.
+#       Opt-in via `additional_config.tokenizer_cache_gb` (GiB of host memory
+#       per API server process, 0 = off); the patches are installed regardless
+#       and stay inert while the option is 0.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm-ascend/pull/16298
 #    Future Plan:

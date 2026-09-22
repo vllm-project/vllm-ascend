@@ -217,6 +217,7 @@ class TestAscendConfig(TestBase):
         self.assertFalse(ascend_config.enable_kv_nz)
         self.assertEqual(ascend_config.weight_nz_mode, 1)
         self.assertEqual(ascend_config.mega_moe_max_tokens, 65536)
+        self.assertEqual(ascend_config.tokenizer_cache_gb, 0)
 
         ascend_compilation_config = ascend_config.ascend_compilation_config
         self.assertTrue(ascend_compilation_config.fuse_norm_quant)
@@ -343,6 +344,24 @@ class TestAscendConfig(TestBase):
         self.assertFalse(ascend_fusion_config.fusion_ops_gmmswigluquant)
         self.assertTrue(ascend_config.xlite_graph_config.full_mode)
         self.assertEqual(ascend_config.finegrained_tp_config.lmhead_tensor_parallel_size, 0)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_tokenizer_cache_gb(self, mock_fix_incompatible_config):
+        """The tokenizer cache is a typed additional_config option, not an env var."""
+        test_vllm_config = VllmConfig()
+        self.assertEqual(init_ascend_config(test_vllm_config).tokenizer_cache_gb, 0)
+
+        clear_ascend_config()
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {"tokenizer_cache_gb": 4}
+        self.assertEqual(init_ascend_config(test_vllm_config).tokenizer_cache_gb, 4)
+
+        clear_ascend_config()
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {"tokenizer_cache_gb": -1}
+        with self.assertRaisesRegex(ValueError, "tokenizer_cache_gb must be >= 0"):
+            init_ascend_config(test_vllm_config)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")

@@ -17,10 +17,10 @@
 #
 """Coverage for the segment-level tokenizer cache.
 
-``VLLM_ASCEND_TOKENIZER_CACHE_GB`` is only allowed to remove redundant work:
-every token id it returns must be bit-identical to what the wrapped tokenizer
-would have produced. The tests below pin that down at both ends of the patch -
-the cache object itself and a served endpoint.
+``additional_config.tokenizer_cache_gb`` is only allowed to remove redundant
+work: every token id it returns must be bit-identical to what the wrapped
+tokenizer would have produced. The tests below pin that down at both ends of
+the patch - the cache object itself and a served endpoint.
 
 Only *token ids* are compared across servers, never generated text: greedy
 decode is not bit-reproducible on Ascend (the batch composition changes the
@@ -38,20 +38,20 @@ the feature dead with no failing unit test - and for a tokenizer cache, token
 ids are also the only currency in which correctness can be stated at all.
 """
 
+import json
 import os
 
 import pytest
 import requests
-from tests.e2e.conftest import RemoteOpenAIServer, wait_until_npu_memory_free
 from transformers import AutoTokenizer
 from vllm.utils.network_utils import get_open_port
+
+from tests.e2e.conftest import RemoteOpenAIServer, wait_until_npu_memory_free
 from vllm_ascend.patch.platform.patch_tokenizer_cache import IncrementalTokenizerCache
 
 # Mirrors the other e2e tests: the CI runners serve this from the local HF
 # cache, and a local checkout can point it at an on-disk copy instead.
 MODEL_NAME = os.getenv("TOKENIZER_CACHE_TEST_MODEL", "Qwen/Qwen3-0.6B")
-CACHE_GB_ENV = "VLLM_ASCEND_TOKENIZER_CACHE_GB"
-
 # A three-turn agent transcript. Every extra turn re-sends the previous ones
 # verbatim, which is the workload the cache exists for.
 _BASE_TURNS = [
@@ -126,10 +126,19 @@ def test_cache_encode_matches_tokenizer():
 def _serve(port, cache_gb):
     return RemoteOpenAIServer(
         MODEL_NAME,
-        vllm_serve_args=["--enforce-eager", "--max-model-len", "4096", "--port", str(port)],
+        vllm_serve_args=[
+            "--enforce-eager",
+            "--max-model-len",
+            "4096",
+            "--port",
+            str(port),
+            # The cache is opt-in through additional_config; both servers get an
+            # explicit value so the only difference between them is the size.
+            "--additional-config",
+            json.dumps({"tokenizer_cache_gb": cache_gb}),
+        ],
         server_host="127.0.0.1",
         server_port=port,
-        env_dict={CACHE_GB_ENV: str(cache_gb)},
         auto_port=False,
     )
 

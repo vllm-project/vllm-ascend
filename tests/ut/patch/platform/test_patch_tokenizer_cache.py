@@ -310,6 +310,18 @@ class _CopyingRenderer:
         self.tokenizer = copy.copy(tokenizer)
 
 
+class _FakeAscendConfig:
+    def __init__(self, tokenizer_cache_gb: int) -> None:
+        self.tokenizer_cache_gb = tokenizer_cache_gb
+
+
+def _with_capacity(monkeypatch, capacity_gb: int) -> None:
+    """Make ``get_ascend_config()`` report the requested cache size."""
+    import vllm_ascend.ascend_config as ascend_config_mod
+
+    monkeypatch.setattr(ascend_config_mod, "get_ascend_config", lambda: _FakeAscendConfig(capacity_gb), raising=True)
+
+
 def test_renderer_init_patch_attaches_the_cache_to_the_renderer_tokenizer(monkeypatch):
     """``_patch_renderer_init`` must install on the tokenizer the renderer keeps.
 
@@ -322,7 +334,8 @@ def test_renderer_init_patch_attaches_the_cache_to_the_renderer_tokenizer(monkey
 
     original_init = _CopyingRenderer.__init__
     monkeypatch.setattr(base_mod, "BaseRenderer", _CopyingRenderer)
-    _patch_renderer_init(capacity_gb=1)
+    _with_capacity(monkeypatch, 1)
+    _patch_renderer_init()
     try:
         passed_in = _FakeTokenizer()
         renderer = _CopyingRenderer(None, passed_in)
@@ -330,6 +343,21 @@ def test_renderer_init_patch_attaches_the_cache_to_the_renderer_tokenizer(monkey
         assert renderer.tokenizer is not passed_in
         assert _cache_for(renderer.tokenizer) is not None
         assert _cache_for(passed_in) is None
+    finally:
+        _CopyingRenderer.__init__ = original_init
+
+
+def test_renderer_init_patch_is_inert_when_the_option_is_off(monkeypatch):
+    """``tokenizer_cache_gb=0`` must not build a cache at all."""
+    import vllm.renderers.base as base_mod
+
+    original_init = _CopyingRenderer.__init__
+    monkeypatch.setattr(base_mod, "BaseRenderer", _CopyingRenderer)
+    _with_capacity(monkeypatch, 0)
+    _patch_renderer_init()
+    try:
+        renderer = _CopyingRenderer(None, _FakeTokenizer())
+        assert _cache_for(renderer.tokenizer) is None
     finally:
         _CopyingRenderer.__init__ = original_init
 
