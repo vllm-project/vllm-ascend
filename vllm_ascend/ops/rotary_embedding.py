@@ -246,6 +246,12 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         self.use_mtp = vllm_config.speculative_config and vllm_config.speculative_config.method == "mtp"
         _record_cos_sin_cache(self.cos_sin_cache)
         _record_cos_and_sin_cache_interleaved(self.cos_sin_cache)
+        for _buf_name, _buf in (
+            ("_npu_rope_cos_cache", _cos_cache),
+            ("_npu_rope_sin_cache", _sin_cache),
+        ):
+            if _buf is not None:
+                self.register_buffer(_buf_name, _buf, persistent=False)
 
     def forward_oot(
         self,
