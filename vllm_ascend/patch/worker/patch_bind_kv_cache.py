@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+from typing import TypeAlias
 
 import torch
 import vllm.v1.worker.utils as utils
@@ -7,7 +8,7 @@ from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 from vllm.v1.worker.utils import defaultdict, extract_layer_index
 
-KVCache = torch.Tensor | Sequence[torch.Tensor]
+KVCache: TypeAlias = torch.Tensor | Sequence[torch.Tensor]
 
 
 def _bind_layer_kv_cache(
@@ -67,6 +68,7 @@ def _bind_layer_kv_cache(
 
     layer.kv_cache = tuple(states)
 
+
 # Ascend keeps a platform-specific runner-cache ordering, but every cache layer
 # must still receive its allocation through ``bind_kv_cache``.  The layer hook
 # is what turns the canonical allocation into the runtime views required by
@@ -124,8 +126,8 @@ utils.bind_kv_cache = bind_kv_cache
 
 
 def bind_kv_cache_to_layers(
-    kv_caches: dict[str, torch.Tensor],
-    forward_context: dict[str, Attention],
+    kv_caches: dict[str, KVCache],
+    forward_context: dict[str, AttentionLayerBase],
     num_attn_module: int = 1,
     kv_cache_groups: Sequence[KVCacheGroupSpec] | None = None,
 ) -> None:
@@ -134,11 +136,11 @@ def bind_kv_cache_to_layers(
     Upstream init_kv_cache switched from bind_kv_cache to
     bind_kv_cache_to_layers on main, which calls each layer's bind_kv_cache
     with the standardized single-tensor layout (vLLM #51718). Ascend
-    allocates per-layer (k, v) tuples, so assign the raw allocation directly,
-    matching the Ascend bind_kv_cache patch above.
+    allocates per-layer cache views, including materialized Mamba states, so
+    route every allocation through the same Ascend binding helper used above.
     """
     for layer_name, kv_cache in kv_caches.items():
-        forward_context[layer_name].kv_cache = kv_cache
+        _bind_layer_kv_cache(forward_context[layer_name], kv_cache)
     ordered_layer_names = sorted(kv_caches, key=lambda name: extract_layer_index(name, num_attn_module))
     utils.share_replayssm_ring_trackers(ordered_layer_names, forward_context, kv_cache_groups)
 
