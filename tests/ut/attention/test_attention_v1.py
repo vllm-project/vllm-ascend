@@ -1177,6 +1177,23 @@ class TestBuildDraftTailMask(TestBase):
         )
         self.assertTrue(bool((mask[0, 0, :8] == 0).all()))
 
+    def test_non_causal_keeps_the_bound_flat_across_the_query_block(self):
+        """A DSpark query-block forward is non-causal: every query token sees
+        the whole visible prefix, so the bound stays at ``L - 1`` instead of
+        advancing with j. Advancing it here would hide real context; not
+        masking past it would expose the rolled-back tail.
+        """
+        seq_lens = torch.tensor([5, 7], dtype=torch.int32)
+        mask = attn_module.build_draft_tail_mask(
+            seq_lens, num_reqs=2, query_len=3, kv_span=8, sliding_window=None, causal=False
+        )
+
+        for req, length in enumerate([5, 7]):
+            for j in range(1, 3):
+                self.assertTrue(torch.equal(mask[req, j], mask[req, 0]), f"req={req} j={j}")
+            self.assertEqual(int(mask[req, 0, length - 1]), 0)
+            self.assertEqual(int(mask[req, 0, length]), 1)
+
 
 class TestForwardDraftTailMasked(TestBase):
     """Eligibility. Every rejected case must fall through, not compute wrongly."""
@@ -1214,9 +1231,36 @@ class TestForwardDraftTailMasked(TestBase):
         """BSND needs a rectangular batch; a padded build must not be reshaped."""
         self.assertIsNone(self._call(self._impl(), self._metadata(draft_query_lens=[3, 2])))
 
-    def test_falls_through_for_sinks_or_non_causal_builds(self):
+    def test_falls_through_for_a_learnable_sink(self):
+        """A sink changes what the mask would have to express, so it bails."""
         self.assertIsNone(self._call(self._impl(sinks=torch.zeros(1)), self._metadata()))
-        self.assertIsNone(self._call(self._impl(), self._metadata(causal=False)))
+
+    def test_non_causal_build_is_eligible_and_is_not_aliased_to_the_causal_mask(self):
+        """Every stock Qwen3 DSpark drafter is non-causal, so bailing here would
+        drop exactly the models this path exists for -- and the two masks differ,
+        so the cache key has to carry causality.
+        """
+        impl = self._impl()
+        seq_lens = torch.tensor([5, 7], dtype=torch.int32)
+        non_causal_meta = self._metadata(causal=False, seq_lens=seq_lens)
+        causal_meta = self._metadata(seq_lens=seq_lens)
+        fake = MagicMock(return_value=(torch.zeros(2, 3, 2, 4), None))
+        with (
+            patch.object(attn_module.torch_npu, "npu_fused_infer_attention_score", fake),
+            patch.object(
+                attn_module, "build_draft_tail_mask", wraps=attn_module.build_draft_tail_mask
+            ) as builder,
+        ):
+            self.assertIsNotNone(self._call(impl, non_causal_meta))
+            non_causal_mask = fake.call_args.kwargs["atten_mask"]
+            # Reusing the same metadata must not rebuild the mask.
+            self._call(impl, non_causal_meta)
+            # A causal build over the same lengths is a different mask.
+            self._call(impl, causal_meta)
+
+        self.assertEqual(builder.call_count, 2)
+        for req in range(2):
+            self.assertTrue(torch.equal(non_causal_mask[req, 0], non_causal_mask[req, 2]))
 
     def test_falls_through_when_the_token_count_does_not_match_the_batch(self):
         self.assertIsNone(self._call(self._impl(), self._metadata(), num_tokens=5))
