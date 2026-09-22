@@ -160,6 +160,10 @@ from vllm_ascend.models.deepseek_v41.cache_config import (
     is_deepseek_v41_cache,
 )
 from vllm_ascend.ops.fused_moe.force_eplb import build_force_eplb_topk
+from vllm_ascend.ops.gdn_attn_builder import (
+    AscendGDNAttentionMetadataBuilder,
+    GDNGroupInvariantCache,
+)
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.ops.triton.spec_decode.ngram import triton_ngram_spec_decode
 from vllm_ascend.quantization.utils import enable_fa_quant
@@ -3647,6 +3651,7 @@ class NPUModelRunner(GPUModelRunner):
             common_v41_metadata: dict,
             common_v41_batch_metadata: dict,
             ubid: int | None = None,
+            gdn_group_invariant_cache: GDNGroupInvariantCache | None = None,
         ) -> None:
             attn_group = self.attn_groups[kv_cache_gid][attn_gid]
             builder = attn_group.get_metadata_builder(ubid or 0)
@@ -3715,6 +3720,13 @@ class NPUModelRunner(GPUModelRunner):
                     common_v41_batch_metadata=common_v41_batch_metadata,
                     full_graph_mode=cudagraph_runtime_mode == CUDAGraphMode.FULL,
                 )
+            if (
+                isinstance(builder, AscendGDNAttentionMetadataBuilder)
+                and ubid is None
+            ):
+                extra_attn_metadata_args["group_invariant_cache"] = (
+                    gdn_group_invariant_cache
+                )
             if (for_cudagraph_capture
                     and not isinstance(builder, (
                         AscendDSAMetadataBuilder,
@@ -3750,6 +3762,7 @@ class NPUModelRunner(GPUModelRunner):
         common_ratio_to_sas_metadata: dict[Any, Any] = {}
         common_v41_batch_metadata: dict[str, Any] = {}
         spec_decode_common_attn_metadata = None
+        gdn_group_invariant_cache = GDNGroupInvariantCache()
         for kv_cache_gid, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups):
             # V4.1 cache coordinates are shared only inside one framework KV
             # cache group. This lets a source's LongKV and Indexer reuse the
@@ -3808,6 +3821,7 @@ class NPUModelRunner(GPUModelRunner):
                     common_ratio_to_sas_metadata,
                     common_v41_metadata,
                     common_v41_batch_metadata,
+                    gdn_group_invariant_cache=gdn_group_invariant_cache,
                 )
         if req_doc_ranges is not None:
             if isinstance(attn_metadata, list):

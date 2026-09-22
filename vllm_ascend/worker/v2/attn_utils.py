@@ -60,6 +60,10 @@ from vllm_ascend.core.kv_cache_interface import (
     get_storage_block_size,
 )
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.ops.gdn_attn_builder import (
+    AscendGDNAttentionMetadataBuilder,
+    GDNGroupInvariantCache,
+)
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import (
     calc_split_factor,
@@ -274,6 +278,8 @@ def build_attn_metadata(
     attn_metadata: dict[str, Any] = {}
     # Share request-level DSA metadata across cache groups in one execution.
     common_ratio_to_sas_metadata: dict[Any, Any] = {}
+    # Share GDN group-invariant intermediates across kv-cache groups in one step.
+    gdn_group_invariant_cache: GDNGroupInvariantCache | None = None
     kv_cache_groups = kv_cache_config.kv_cache_groups
     for i, kv_cache_spec in enumerate(kv_cache_groups):
         block_table = block_tables[i]
@@ -316,6 +322,7 @@ def build_attn_metadata(
             attn_metadata_builder = attn_group.get_metadata_builder(0)
             is_dsa_builder = isinstance(attn_metadata_builder, AscendDSAMetadataBuilder)
             is_sfa_builder = isinstance(attn_metadata_builder, AscendSFAMetadataBuilder)
+            is_gdn_builder = isinstance(attn_metadata_builder, AscendGDNAttentionMetadataBuilder)
             consumes_pcp_context = bool(getattr(attn_metadata_builder, "consumes_pcp_context", False))
             attn_metadata_extra_kwargs = (
                 model_specific_attn_metadata.get_extra_attn_kwargs(
@@ -338,6 +345,16 @@ def build_attn_metadata(
                     pcp_context=pcp_context,
                     pcp_cache_group_idx=i,
                 )
+
+            # Share GDN group-invariant intermediates across the kv-cache
+            # groups of one step. Skipped during CUDA-graph capture (cold run).
+            if is_gdn_builder:
+                if gdn_group_invariant_cache is None:
+                    gdn_group_invariant_cache = GDNGroupInvariantCache()
+                if not for_cudagraph_capture:
+                    attn_metadata_extra_kwargs.update(
+                        group_invariant_cache=gdn_group_invariant_cache,
+                    )
 
             if for_cudagraph_capture:
                 metadata = attn_metadata_builder.build_for_cudagraph_capture(
