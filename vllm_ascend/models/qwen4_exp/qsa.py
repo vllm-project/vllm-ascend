@@ -35,13 +35,13 @@ from vllm_ascend.ops.triton.qwen4_exp.qsa import (
 from vllm_ascend.ops.triton.qwen4_exp.qsa import (
     qsa_sparse_paged_attention,
     qsa_store_cache_rows,
+    qsa_store_kv_cache_rows,
 )
 from vllm_ascend.utils import is_950
 
 from .lightning_indexer import qsa_select_paged_tokens_lightning
 from .ops import (
     qsa_compress_groups_with_ratio,
-    reshape_and_cache_qsa,
 )
 from .ops import (
     qsa_select_paged_tokens as qsa_select_paged_tokens_reference,
@@ -395,13 +395,14 @@ class AscendQSAImpl:
         slot_mapping: torch.Tensor,
     ) -> None:
         del layer
-        if isinstance(kv_cache, tuple):
-            key_cache, value_cache = _split_qsa_kv_cache(kv_cache, self.head_size)
-            qsa_store_cache_rows(key_cache, slot_mapping, key)
-            qsa_store_cache_rows(value_cache, slot_mapping, value)
-        else:
-            reshape_and_cache_qsa(key, value, kv_cache, slot_mapping, self.head_size)
-
+        key_cache, value_cache = _split_qsa_kv_cache(kv_cache, self.head_size)
+        qsa_store_kv_cache_rows(
+            key_cache,
+            value_cache,
+            slot_mapping,
+            key,
+            value
+        )
     def forward_qsa(
         self,
         layer: torch.nn.Module,

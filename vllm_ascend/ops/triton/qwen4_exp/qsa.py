@@ -578,6 +578,73 @@ def _compress_qsa_groups_kernel(
     )
 
 
+@triton.jit
+def _store_qsa_kv_rows_kernel(
+    k_cache_ptr,
+    v_cache_ptr,
+    slots_ptr,
+    key_ptr,
+    value_ptr,
+    stride_k_cache_block,
+    stride_k_cache_token,
+    stride_k_cache_dim,
+    stride_v_cache_block,
+    stride_v_cache_token,
+    stride_v_cache_dim,
+    stride_key_row,
+    stride_key_dim,
+    stride_value_row,
+    stride_value_dim,
+    num_key_updates,
+    num_value_updates,
+    num_blocks,
+    PAGE_SIZE: tl.constexpr,
+    WIDTH: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+):
+    row = tl.program_id(0)
+    dims = tl.arange(0,BLOCK_D)
+
+    slot = tl.load(slots_ptr + row).to(tl.int64)
+    block = tl.maximum(slot, 0) // PAGE_SIZE
+    offset = tl.maximum(slot ,0) % PAGE_SIZE
+    valid_slot = (slot >= 0) & (block < num_blocks)
+
+    key_mask = (
+        valid_slot & (row < num_key_updates) & (dims < WIDTH)
+    )
+
+    value_mask = (
+        valid_slot & (row < num_value_updates) & (dims < WIDTH)
+    )
+
+    key = tl.load(
+        key_ptr + row * stride_key_row + dims * stride_key_dim,
+        mask=key_mask,
+        other=0,
+    )
+    tl.store(
+        k_cache_ptr 
+        + block * stride_k_cache_block 
+        + offset * stride_k_cache_token 
+        + dims * stride_k_cache_dim,
+        key,
+        mask=key_mask
+    )
+    value = tl.load(
+        value_ptr + row * stride_value_row + dims * stride_value_dim,
+        mask=value_mask,
+        other=0,
+    )
+    tl.store(
+        v_cache_ptr 
+        + block * stride_v_cache_block 
+        + offset * stride_v_cache_token 
+        + dims * stride_v_cache_dim,
+        value,
+        mask=value_mask
+    )    
+
 def _validate_mqa(q: torch.Tensor) -> None:
     if q.ndim != 3 or q.shape[1] <= 0 or q.shape[2] <= 0:
         raise ValueError("QSA query must be [rows, heads, head_dim]")
@@ -1147,6 +1214,69 @@ def qsa_compress_groups_with_ratio(
     )
     return pooled, first_positions
 
+def qsa_store_kv_cache_rows(
+    key_cache:torch.Tensor,
+    value_cache:torch.Tensor,
+    slot_mapping:torch.Tensor,
+    key:torch.Tensor,
+    value:torch.Tensor,
+) -> None:
+    caches = (key_cache,value_cache)
+    if not HAS_TRITON or any(cache.device.type != "npu" for cache in caches):
+        raise RuntimeError("QSA NPU cache stores require Triton")
+    if any(
+        cache.ndim != 4 or cache.shape[2] != 1 or not all(cache.shape)
+        for cache in caches
+    ):
+        raise ValueError("QSA K/V caches must be nonempty [pages, page_size, 1, width]")
+    if key.ndim == 3:
+        if key.shape[1] != 1:
+            raise ValueError("QSA key rows must have one head")
+        key = key[:, 0]
+    if value.ndim == 3:
+        if value.shape[1] != 1:
+            raise ValueError("QSA value rows must have one head")
+        value = value[:, 0]
+
+    width = key_cache.shape[3]
+    if key.ndim != 2 or key.shape[1] != width:
+        raise ValueError("QSA key rows have an incompatible width")
+
+    if value.ndim != 2 or value.shape[1] != width:
+        raise ValueError("QSA value rows have an incompatible width")
+    
+    slot_mapping = slot_mapping.reshape(-1)
+    num_key_updates = min(slot_mapping.numel(), key.shape[0])
+    num_value_updates = min(slot_mapping.numel(),value.shape[0])
+    num_updates = max(num_key_updates,num_value_updates)
+    if not num_updates:
+        return
+
+    _store_qsa_kv_rows_kernel[(num_updates,)](
+        key_cache,
+        value_cache,
+        slot_mapping,
+        key,
+        value,
+        key_cache.stride(0),
+        key_cache.stride(1),
+        key_cache.stride(3),
+        value_cache.stride(0),
+        value_cache.stride(1),
+        value_cache.stride(3),
+        key.stride(0),
+        key.stride(1),
+        value.stride(0),
+        value.stride(1),
+        num_key_updates,
+        num_value_updates,
+        key_cache.shape[0],
+        PAGE_SIZE=key_cache.shape[1],
+        WIDTH=width,
+        BLOCK_D=triton.next_power_of_2(width),
+        num_warps=4,
+    )
+
 
 __all__ = [
     "expand_qsa_block_indices_npu",
@@ -1155,4 +1285,5 @@ __all__ = [
     "qsa_select_paged_tokens",
     "qsa_sparse_paged_attention",
     "qsa_store_cache_rows",
+    "qsa_store_kv_cache_rows",
 ]
