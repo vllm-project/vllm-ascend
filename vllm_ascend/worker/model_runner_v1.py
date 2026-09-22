@@ -5482,8 +5482,8 @@ class NPUModelRunner(GPUModelRunner):
                         ):
                             raise ValueError(f"SFA storage block cannot be divided into kernel blocks for {layer_name}")
                         page_bytes = current_kv_cache_spec.page_size_bytes
-                        if raw.numel() % page_bytes or raw.numel() // page_bytes < kv_cache_config.num_blocks:
-                            raise ValueError(f"SFA main cache has invalid page capacity for {layer_name}")
+                        if raw.numel() // page_bytes < kv_cache_config.num_blocks:
+                            raise ValueError(f"SFA main cache has fewer blocks than KVCacheManager for {layer_name}")
                         num_blocks = raw.numel() // page_bytes
                         k_dim, v_dim = self._get_attention_kv_cache_dims(layer_name, current_kv_cache_spec)
                         dense_page_bytes = (
