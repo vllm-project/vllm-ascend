@@ -816,23 +816,24 @@ async def send_request_to_service(
 ):
     req_data = build_prefill_request(req_data)
     headers = auth_headers(request_id)
-    last_exc = None
-    for attempt in range(1, max_retries + 1):
+    max_attempts = max(1, max_retries)
+    for attempt in range(1, max_attempts + 1):
         try:
             response = await client.post(endpoint, json=req_data, headers=headers)
             response.raise_for_status()
             return response
-        except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 400 or attempt == max_attempts:
+                raise
             logger.warning("Attempt %s failed for %s: %s", attempt, endpoint, exc)
-            last_exc = exc
-            if attempt < max_retries:
-                await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
-            else:
-                logger.error("All %s attempts failed for %s.", max_retries, endpoint)
-                raise last_exc
+        except httpx.RequestError as exc:
+            if attempt == max_attempts:
+                raise
+            logger.warning("Attempt %s failed for %s: %s", attempt, endpoint, exc)
+        await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
 
 
-async def stream_service_response_with_retry(
+async def stream_service_response(
     client: httpx.AsyncClient,
     endpoint: str,
     req_data: dict,
@@ -841,32 +842,35 @@ async def stream_service_response_with_retry(
     base_delay: float = 0.2,
 ):
     headers = auth_headers(request_id)
-    for attempt in range(1, max_retries + 1):
+    max_attempts = max(1, max_retries)
+    for attempt in range(1, max_attempts + 1):
+        first_chunk_sent = False
         try:
             async with client.stream("POST", endpoint, json=req_data, headers=headers) as response:
                 response.raise_for_status()
-                first_chunk_sent = False
                 async for chunk in response.aiter_bytes():
                     first_chunk_sent = True
                     yield chunk
                 return
-        except (httpx.RequestError, httpx.HTTPStatusError) as exc:
-            if attempt < max_retries:
-                logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
-                await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
-            else:
-                logger.error("All %s attempts failed for streaming %s.", max_retries, endpoint)
-                raise exc
-        except Exception as exc:
-            if "first_chunk_sent" in locals() and first_chunk_sent:
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 400 or attempt == max_attempts:
+                raise
+            logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
+        except httpx.RequestError as exc:
+            if first_chunk_sent:
                 logger.error("Streaming to client interrupted after response started: %s", exc)
                 return
-            if attempt < max_retries:
-                logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
-                await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
-            else:
-                logger.error("All %s attempts failed for streaming %s.", max_retries, endpoint)
-                raise exc
+            if attempt == max_attempts:
+                raise
+            logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
+        except Exception as exc:
+            if first_chunk_sent:
+                logger.error("Streaming to client interrupted after response started: %s", exc)
+                return
+            if attempt == max_attempts:
+                raise
+            logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
+        await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
 
 
 async def _abort_prefill_selection(
@@ -1000,7 +1004,7 @@ async def handle_completions_impl(api: str, request: Request):
                 while retry:
                     retry = False
                     decoder_client = await runtime.get_client(ServerRole.DECODE, instance_info.decoder_key)
-                    async for chunk in stream_service_response_with_retry(
+                    async for chunk in stream_service_response(
                         decoder_client,
                         api,
                         req_data,
