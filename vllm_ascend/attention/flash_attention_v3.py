@@ -34,7 +34,9 @@ class AscendFlashAttentionBackend(AscendAttentionBackend):
 
 @dataclass
 class AscendFlashAttentionMetadata(AscendMetadata):
-    # Shared only within this execution, keyed by the operator's static parameters.
+    # spec -> tiling tensor consumed by each layer's forward. In graph mode this
+    # aliases the builder's cache dictionary for the current graph_key; eager
+    # execution owns a fresh dictionary. This field only references tiling storage.
     scheduler_metadata: dict[tuple, torch.Tensor] = field(default_factory=dict)
 
 
@@ -55,6 +57,8 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
         self.model_runner_type = vllm_config.model_config.runner_type
         self.capture_sizes = set(vllm_config.compilation_config.cudagraph_capture_sizes or [])
         self.block_size = kv_cache_spec.block_size
+        # Deduplicate layer parameters so identical layers share one tiling call.
+        # Causality comes from common metadata and is appended to form spec in build.
         self.scheduler_specs = set()
         for name in layer_names:
             impl = vllm_config.compilation_config.static_forward_context[name].impl
@@ -68,7 +72,9 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
                     impl.logits_soft_cap,
                 )
             )
-        self.scheduler_buffers: dict[tuple, torch.Tensor] = {}
+        # graph_key -> {spec -> tiling tensor}. The builder retains these across
+        # executions and updates tensors in place to keep captured addresses valid.
+        self.scheduler_buffers: dict[tuple, dict[tuple, torch.Tensor]] = {}
 
     @classmethod
     def get_cudagraph_support(cls, vllm_config: VllmConfig, kv_cache_spec: AttentionSpec) -> AttentionCGSupport:
@@ -89,11 +95,6 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
             1,
             bisect_left(common.query_start_loc_cpu.numpy(), common.num_actual_tokens, 0, num_reqs + 1),
         )
-        source_key = (
-            common.query_start_loc.data_ptr(),
-            common.seq_lens.data_ptr(),
-            common.block_table_tensor.data_ptr(),
-        )
         # The runner owns graph-stable buffers. Device tiling limits reads to
         # active_reqs, so padding rows need neither copying nor sanitizing.
         query_start_loc = common.query_start_loc
@@ -102,9 +103,20 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
         num_input_tokens = common.num_input_tokens or common.num_actual_tokens
         graph_shape = num_input_tokens in self.capture_sizes
         max_query_len = num_input_tokens if graph_shape else common.max_query_len
-        scheduler_metadata = {}
-        for spec in self.scheduler_specs:
-            num_heads, num_kv_heads, head_size, dtype, scale, softcap = spec
+        if graph_shape:
+            # Distinct input buffers (including draft steps) and token buckets
+            # must retain independent tiling storage even for identical specs.
+            source_key = (query_start_loc.data_ptr(), seq_lens.data_ptr(), block_tables.data_ptr())
+            graph_key = (source_key, max_query_len)
+            scheduler_metadata = self.scheduler_buffers.setdefault(graph_key, {})
+        else:
+            scheduler_metadata = {}
+        for layer_spec in self.scheduler_specs:
+            num_heads, num_kv_heads, head_size, dtype, scale, softcap = layer_spec
+            # spec identifies the operator configuration shared across layers.
+            # Include the current causal flag so different mask modes cannot
+            # overwrite each other's tiling. Page size is fixed by this builder.
+            spec = (*layer_spec, common.causal)
             # AICPU tiling runs once per layout, before entering the model graph.
             # The operator's auxiliary-stream events cannot themselves be
             # captured on all CANN releases. This still consumes device lengths
@@ -127,14 +139,10 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
                 softcap=softcap,
                 num_splits=0,
             )
-            if graph_shape:
-                buffer_key = (source_key, spec, max_query_len, common.causal)
-                if buffer_key not in self.scheduler_buffers:
-                    self.scheduler_buffers[buffer_key] = tiling
-                else:
-                    self.scheduler_buffers[buffer_key].copy_(tiling)
-                tiling = self.scheduler_buffers[buffer_key]
-            scheduler_metadata[spec] = tiling
+            if spec in scheduler_metadata:
+                scheduler_metadata[spec].copy_(tiling)
+            else:
+                scheduler_metadata[spec] = tiling
         return AscendFlashAttentionMetadata(
             num_actual_tokens=common.num_actual_tokens,
             query_start_loc=query_start_loc,
@@ -225,6 +233,7 @@ class AscendFlashAttentionImpl(AscendAttentionBackendImpl):
             query.dtype,
             self.scale,
             self.logits_soft_cap,
+            attn_metadata.causal,
         )
         result = flash_attn_with_kvcache(
             query,
