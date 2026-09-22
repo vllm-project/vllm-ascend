@@ -4727,13 +4727,11 @@ class NPUModelRunner(GPUModelRunner):
         if (
             not self.use_sparse
             or not should_use_sfa_kv_parent_layout(self.vllm_config)
-            or self._uses_page_strided_kv_layout(spec)
             or self.hybrid_with_attn_and_mamba
             or self.sparse_kv_offload_enabled
             or not isinstance(spec, AscendMLAAttentionSpec)
             or kv_cache_spec_uses_sparse_sfa_c8(spec)
             or "cache_only_layers" in layer_name
-            or is_hidden_state_cache_spec(spec)
         ):
             return False
         layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase, [layer_name])
