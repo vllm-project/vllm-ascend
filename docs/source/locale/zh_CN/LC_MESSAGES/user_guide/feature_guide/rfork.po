@@ -100,11 +100,31 @@ msgstr ""
 msgid "When validating RFork for a quantized model:"
 msgstr "验证量化模型的 RFork 时："
 
+msgid ""
+"- Apply the same vLLM Ascend code to both the seed instance and the receiver instance.\n"
+"- Restart the planner and all vLLM instances after changing RFork code, because existing seeds keep their old transfer metadata.\n"
+"- Use a new `model_deploy_strategy_name` after changing model arguments or RFork code, so the planner does not match a receiver with an incompatible old seed.\n"
+"- A successful RFork transfer logs `transfer weights starts` and `transfer weights time`. The fallback path logs `RFork transfer failed`."
+msgstr ""
+"- 对 seed 实例和接收方实例应用相同的 vLLM Ascend 代码。\n"
+"- 更改 RFork 代码后重新启动规划器和所有 vLLM 实例，因为现有的 seed 会保留其旧的传输元数据。\n"
+"- 更改模型参数或 RFork 代码后使用新的 `model_deploy_strategy_name`，这样规划器就不会将接收方与不兼容的旧 seed 匹配。\n"
+"- 成功的 RFork 传输会记录 `transfer weights starts` 和 `transfer weights time`。回退路径会记录 `RFork transfer failed`."
+
+msgid "### Speculative draft models"
+msgstr "### 投机解码的草稿模型"
+
+msgid "A draft model receives its weights from a seed like any other model, but it never advertises a seed of its own. Its topology is not final when the loader returns: the proposer afterwards shares `embed_tokens`, `lm_head`, and top-k index buffers with the target model, and a DSpark draft rotates its `fc` projection in place. Weights registered before those steps could be rebound or rewritten while a peer is reading them, so a draft worker stays receive-only. The main model in the same deployment advertises normally, so a second instance still starts from a seed for its target weights and loads only the draft locally."
+msgstr "草稿模型与其他模型一样从 seed 接收权重，但它不会对外发布自己的 seed。加载器返回时草稿模型的拓扑尚未定型：提议器随后会与目标模型共享 `embed_tokens`、`lm_head` 和 top-k 索引缓冲区，DSpark 草稿模型还会就地旋转其 `fc` 投影。在这些步骤之前注册的权重可能在对端读取期间被换绑或改写，因此草稿 worker 只做接收方。同一部署中的主模型照常发布 seed，因此第二个实例的目标权重仍可从 seed 启动，仅草稿模型在本地加载。"
+
 msgid "## Supported Models"
 msgstr "## 支持的模型"
 
 msgid "Mainstream DeepSeek/Qwen/GLM series are supported."
 msgstr "支持主流的 DeepSeek/Qwen/GLM 系列模型。"
+
+msgid "RFork falls back to the default loader when the transfer manifests of two instances disagree. One known case: a Qwen3 DSpark draft whose checkpoint ships no confidence head keeps that module unpopulated, which changes its transferable tensor set, so such a deployment loads locally instead of from a seed."
+msgstr "当两个实例的传输清单不一致时，RFork 会回退到默认加载器。一个已知情况是：Qwen3 DSpark 草稿模型的权重文件若不包含 confidence head，该模块将保持未填充状态，从而改变其可传输张量集合，因此这类部署会在本地加载而不是从 seed 启动。"
 
 msgid "## Performance Considerations"
 msgstr "## 性能注意事项"

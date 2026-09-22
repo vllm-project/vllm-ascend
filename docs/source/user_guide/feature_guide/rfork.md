@@ -133,9 +133,25 @@ manifest checks:
   transfer-protocol support; the diagnostic physical-size fields do not silently
   widen a read.
 
+### Speculative draft models
+
+A draft model receives its weights from a seed like any other model, but it never
+advertises a seed of its own. Its topology is not final when the loader returns:
+the proposer afterwards shares `embed_tokens`, `lm_head`, and top-k index buffers
+with the target model, and a DSpark draft rotates its `fc` projection in place.
+Weights registered before those steps could be rebound or rewritten while a peer
+is reading them, so a draft worker stays receive-only. The main model in the same
+deployment advertises normally, so a second instance still starts from a seed for
+its target weights and loads only the draft locally.
+
 ## Supported Models
 
 Mainstream DeepSeek/Qwen/GLM series are supported.
+
+RFork falls back to the default loader when the transfer manifests of two
+instances disagree. One known case: a Qwen3 DSpark draft whose checkpoint ships
+no confidence head keeps that module unpopulated, which changes its transferable
+tensor set, so such a deployment loads locally instead of from a seed.
 
 ## Performance Considerations
 

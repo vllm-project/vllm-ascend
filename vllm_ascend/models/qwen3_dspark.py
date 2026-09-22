@@ -3,6 +3,7 @@ from vllm.config import VllmConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead, VocabParallelEmbedding
 from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
 
+from vllm_ascend.models.common.checkpoint import checkpoint_contains_any_weight
 from vllm_ascend.models.llama_eagle3 import load_quarot_target_layer
 from vllm_ascend.utils import (
     get_rotation_matrix,
@@ -84,6 +85,24 @@ class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
                 set_capture_mode = getattr(get_language_model(), "set_dspark_aux_capture_materialized", None)
         if set_capture_mode is not None:
             set_capture_mode(True)
+
+    def restore_load_derived_state(self, checkpoint_path: str) -> None:
+        """Reproduce the ``load_weights`` ownership flags for a weight-transfer loader.
+
+        Loaders that copy tensor bytes never run ``load_weights``, so both flags
+        would keep their class defaults. ``align_draft_weights`` reads them as
+        ``getattr(model, flag, False)``, so a missing attribute means "no own
+        weight" and it would rebuild embed_tokens/lm_head from the target
+        checkpoint over the copy this draft already received. Re-derive them from
+        the draft checkpoint, which is what ``load_weights`` observed.
+
+        ``checkpoint_path`` comes from the loader: a DSpark draft usually ships a
+        checkpoint of its own, so the model must not guess it from the target's
+        ``ModelConfig``. Raises when the checkpoint cannot be inspected, which
+        sends the caller to a local load that runs ``load_weights`` for real.
+        """
+        self.has_own_embed_tokens = checkpoint_contains_any_weight(checkpoint_path, TARGET_EMBED_WEIGHT_NAMES)
+        self.has_own_lm_head = checkpoint_contains_any_weight(checkpoint_path, TARGET_LM_HEAD_WEIGHT_NAMES)
 
     def post_process(self, vllm_config: VllmConfig) -> None:
         align_draft_weights(self, self.model.fc, vllm_config)

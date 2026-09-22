@@ -64,7 +64,11 @@ def rfork_helpers(monkeypatch):
     package("vllm_ascend.model_loader.rfork")
 
     safety = _load_module(monkeypatch, "rfork_restored_lifecycle_safety", "safety.py")
-    install("vllm_ascend.model_loader.rfork.safety", mutable_weights_bypass_reason=safety.mutable_weights_bypass_reason)
+    install(
+        "vllm_ascend.model_loader.rfork.safety",
+        mutable_weights_bypass_reason=safety.mutable_weights_bypass_reason,
+        ensure_no_registered_rfork_weights=safety.ensure_no_registered_rfork_weights,
+    )
     install("vllm_ascend.model_loader.rfork.config", RForkConfig=object)
     install(
         "vllm_ascend.model_loader.rfork.identity",
@@ -147,6 +151,59 @@ def test_mutable_weights_bypass_reason_reports_sleep_and_weight_transfer(
     model_config = SimpleNamespace(enable_sleep_mode=model_sleep)
 
     assert rfork_helpers.safety.mutable_weights_bypass_reason(vllm_config, model_config) == expected
+
+
+def _vllm_config_with_sessions(**session_blocks):
+    """Build a vllm_config whose RFork sessions report the given registered blocks."""
+    load_config = SimpleNamespace()
+    for attr, blocks in session_blocks.items():
+        backend = SimpleNamespace(snapshot_registered_weight_blocks=lambda blocks=blocks: list(blocks))
+        setattr(load_config, attr, SimpleNamespace(transfer_backend=backend))
+    return SimpleNamespace(load_config=load_config)
+
+
+@pytest.mark.parametrize(
+    ("session_blocks", "expected_holder"),
+    [
+        ({"rfork_session": [(0x1000, 256)]}, "main"),
+        ({"rfork_draft_session": [(0x2000, 512)]}, "draft"),
+        ({"rfork_session": [(0x1000, 256)], "rfork_draft_session": [(0x2000, 512)]}, "main, draft"),
+    ],
+)
+def test_ensure_no_registered_rfork_weights_rejects_while_storage_is_registered(
+    rfork_helpers, session_blocks, expected_holder
+):
+    vllm_config = _vllm_config_with_sessions(**session_blocks)
+
+    with pytest.raises(RuntimeError, match=r"reload_weights is not supported") as excinfo:
+        rfork_helpers.safety.ensure_no_registered_rfork_weights(vllm_config, "reload_weights")
+    assert f"({expected_holder} model)" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "vllm_config",
+    [
+        SimpleNamespace(),
+        SimpleNamespace(load_config=None),
+        # No RFork session at all: a non-RFork load format leaves the attributes unset.
+        SimpleNamespace(load_config=SimpleNamespace()),
+        # A session exists but registration was released or never completed.
+        _vllm_config_with_sessions(rfork_session=[]),
+        _vllm_config_with_sessions(rfork_session=[], rfork_draft_session=[]),
+    ],
+)
+def test_ensure_no_registered_rfork_weights_allows_unregistered_sessions(rfork_helpers, vllm_config):
+    rfork_helpers.safety.ensure_no_registered_rfork_weights(vllm_config, "reload_weights")
+
+
+def test_ensure_no_registered_rfork_weights_ignores_sessions_without_a_backend(rfork_helpers):
+    """A session mid-construction exposes no usable snapshot; treat it as holding nothing."""
+    load_config = SimpleNamespace(
+        rfork_session=SimpleNamespace(transfer_backend=None),
+        rfork_draft_session=SimpleNamespace(transfer_backend=SimpleNamespace()),
+    )
+
+    rfork_helpers.safety.ensure_no_registered_rfork_weights(SimpleNamespace(load_config=load_config), "reload_weights")
 
 
 def _add_dynamo_hook(hooks, owner):

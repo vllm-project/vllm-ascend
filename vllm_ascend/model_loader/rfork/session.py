@@ -447,6 +447,15 @@ class RForkSession:
         processed_layout: bool,
         exclude_blocks: list[tuple[int, int]] | None = None,
     ) -> RForkSeedServiceStartResult:
+        if self.identity.is_draft_model:
+            # A draft's topology is not final when the loader returns: the proposer
+            # then shares embed_tokens / lm_head / topk buffers with its target, and
+            # a DSpark draft rotates fc in place. Weights registered here would be
+            # rebound or rewritten afterwards, so a peer reading them could see
+            # pre-sharing addresses or a mix of rotated and unrotated bytes. Drafts
+            # therefore stay receive-only until registration can follow sharing.
+            logger.debug("RFork draft models do not advertise a seed; the transferred model serves inference only.")
+            return RForkSeedServiceStartResult.FAILED
         with self._seed_lifecycle_lock:
             with self._lock:
                 if self.lease_release_stop_event.is_set():
