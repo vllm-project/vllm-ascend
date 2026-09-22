@@ -20,6 +20,7 @@ from vllm_ascend.attention.mla_v1 import (
     ChunkedContextMetadata,
     DecodeMLAPreprocessResult,
     PrefillMLAPreprocessResult,
+    _legacy_bsnd_mla_cache,
     _mla_nope_zero_rope,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, PreprocessType, mark_fused_preprocess_weights
@@ -54,6 +55,16 @@ def test_v_up_proj_transpose_bmm_limits(num_tokens, num_heads, kv_lora_rank):
 
     assert fused.call_count == int(use_fused)
     torch.testing.assert_close(result, expected)
+
+
+def test_legacy_bsnd_view_accepts_runner_bnbd_and_legacy_bbnd():
+    bnbd = torch.empty(2, 1, 128, 8)
+    legacy = _legacy_bsnd_mla_cache(bnbd, num_kv_heads=1)
+    assert legacy.shape == (2, 128, 1, 8)
+    assert legacy.untyped_storage() is bnbd.untyped_storage()
+
+    bbnd = torch.empty(2, 128, 1, 8)
+    assert _legacy_bsnd_mla_cache(bbnd, num_kv_heads=1) is bbnd
 
 
 @pytest.mark.parametrize("kv_lora_rank", [4, 65536])
