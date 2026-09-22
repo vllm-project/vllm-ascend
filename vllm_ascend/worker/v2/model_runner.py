@@ -757,6 +757,7 @@ class NPUModelRunner(GPUModelRunner):
         """
         if ring_state_update_skipped():
             return
+        forward_context = self.compilation_config.static_forward_context
         for gid, group in enumerate(self.kv_cache_config.kv_cache_groups):
             if not is_circular_kv_cache_spec(group.kv_cache_spec):
                 continue
@@ -769,7 +770,6 @@ class NPUModelRunner(GPUModelRunner):
                 dtype=block_table.dtype,
                 device=block_table.device,
             )
-            forward_context = self.compilation_config.static_forward_context
             for name in group.layer_names:
                 forward_context[name].kv_cache[0][1 : num_reqs + 1].zero_()
 
