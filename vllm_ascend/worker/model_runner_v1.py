@@ -5410,21 +5410,21 @@ class NPUModelRunner(GPUModelRunner):
                         slot_elements = slot_bytes // element_size
                         component_shape = (
                             kv_cache_config.num_blocks * kernel_blocks_per_manager,
-                            kernel_block_size,
                             current_kv_cache_spec.num_kv_heads,
+                            kernel_block_size,
                         )
                         if (
                             get_current_hardware_profile().supports(HardwareCapability.MLA_FLASH)
                             and attn_module.num_heads in MLA_FLASH_SUPPORTED_Q_HEADS
                         ):
-                            # A5每个kernel slot内按token交错存储[nope|rope]：
-                            # token0[nope|rope], token1[nope|rope], ...。
+                            # A5以BNBD对外暴露token-fused MLA cache。每个
+                            # kernel slot内按token交错存储[nope|rope]。
                             fused_cache = torch.as_strided(
                                 typed_raw,
                                 size=(*component_shape, fused_dim),
                                 stride=(
                                     slot_elements,
-                                    current_kv_cache_spec.num_kv_heads * fused_dim,
+                                    kernel_block_size * fused_dim,
                                     fused_dim,
                                     1,
                                 ),
@@ -5433,15 +5433,14 @@ class NPUModelRunner(GPUModelRunner):
                             kv_caches[layer_name] = fused_cache
                             continue
 
-                        # A3/FIA要求nope和rope各自内部连续，只允许首轴携带
-                        # page padding stride。每个kernel slot物理上按
-                        # [all nope][all rope][padding]写入。
+                        # A3/FIA同样以BNBD对外暴露component-major view；
+                        # nope/rope各自内部连续，只允许首轴携带page padding。
                         nope_cache = torch.as_strided(
                             typed_raw,
                             size=(*component_shape, nope_dim),
                             stride=(
                                 slot_elements,
-                                current_kv_cache_spec.num_kv_heads * nope_dim,
+                                kernel_block_size * nope_dim,
                                 nope_dim,
                                 1,
                             ),
@@ -5452,7 +5451,7 @@ class NPUModelRunner(GPUModelRunner):
                             size=(*component_shape, rope_dim),
                             stride=(
                                 slot_elements,
-                                current_kv_cache_spec.num_kv_heads * rope_dim,
+                                kernel_block_size * rope_dim,
                                 rope_dim,
                                 1,
                             ),

@@ -78,6 +78,14 @@ def _npu_mla_prolog_v3_k3(**kwargs):
     return torch.ops._C_ascend.npu_mla_prolog_v3_k3(**kwargs)
 
 
+def _legacy_bsnd_mla_cache(cache: torch.Tensor, num_kv_heads: int) -> torch.Tensor:
+    """Return the BBND view consumed by the legacy MLA operator chain."""
+
+    if cache.dim() == 4 and cache.shape[1] == num_kv_heads and cache.shape[2] != num_kv_heads:
+        return cache.transpose(1, 2)
+    return cache
+
+
 class AscendMLABackend(AttentionBackend):
     accept_output_buffer: bool = True
 
@@ -2119,11 +2127,15 @@ class AscendMLAImpl(MLAAttentionImpl):
         # Fused MLA cache由runner保存为单一tensor。旧MLA实现仍按
         # nope/rope两个logical tensor访问算子，因此在这里做零拷贝切片。
         fused_mla_cache = isinstance(kv_cache, torch.Tensor)
+        # ModelRunner对PD/FlashMLA暴露BNBD；旧MLA算子链仍在forward边界
+        # 零拷贝转换成BBND，避免每个算子调用点重复理解两种协议。
         if isinstance(kv_cache, torch.Tensor):
             kv_cache = (
-                kv_cache[..., : self.kv_lora_rank],
-                kv_cache[..., self.kv_lora_rank :],
+                _legacy_bsnd_mla_cache(kv_cache[..., : self.kv_lora_rank], self.num_kv_heads),
+                _legacy_bsnd_mla_cache(kv_cache[..., self.kv_lora_rank :], self.num_kv_heads),
             )
+        else:
+            kv_cache = tuple(_legacy_bsnd_mla_cache(cache, self.num_kv_heads) for cache in kv_cache)
 
         # Inputs and outputs may be padded for CUDA graphs
         output_padded = output

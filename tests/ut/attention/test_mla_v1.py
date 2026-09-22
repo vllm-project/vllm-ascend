@@ -20,6 +20,7 @@ from vllm_ascend.attention.mla_v1 import (
     ChunkedContextMetadata,
     DecodeMLAPreprocessResult,
     PrefillMLAPreprocessResult,
+    _legacy_bsnd_mla_cache,
     _mla_nope_zero_rope,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, PreprocessType, mark_fused_preprocess_weights
@@ -28,6 +29,16 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware
 from vllm_ascend.quantization.methods import AscendW8A8LinearMethod
 from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ
+
+
+def test_legacy_bsnd_view_accepts_runner_bnbd_and_legacy_bbnd():
+    bnbd = torch.empty(2, 1, 128, 8)
+    legacy = _legacy_bsnd_mla_cache(bnbd, num_kv_heads=1)
+    assert legacy.shape == (2, 128, 1, 8)
+    assert legacy.untyped_storage() is bnbd.untyped_storage()
+
+    bbnd = torch.empty(2, 128, 1, 8)
+    assert _legacy_bsnd_mla_cache(bbnd, num_kv_heads=1) is bbnd
 
 
 @pytest.mark.parametrize("use_rope", [False, True])

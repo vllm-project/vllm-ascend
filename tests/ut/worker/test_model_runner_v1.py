@@ -906,8 +906,8 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                     fused = runner._reshape_kv_cache_tensors(kv_cache_config, {layer_name: (raw,)})[layer_name]
 
                 self.assertIsInstance(fused, torch.Tensor)
-                self.assertEqual(fused.shape, (6, 128, 1, 576))
-                self.assertEqual(fused.stride(), (81408, 576, 576, 1))
+                self.assertEqual(fused.shape, (6, 1, 128, 576))
+                self.assertEqual(fused.stride(), (81408, 73728, 576, 1))
 
         # A5 FlashMLA does not support arbitrary query-head counts. Keep these
         # models on the FIA-compatible component-major layout.
@@ -926,10 +926,10 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         ):
             nope, rope = runner._reshape_kv_cache_tensors(kv_cache_config, {layer_name: (raw,)})[layer_name]
 
-        self.assertEqual(nope.shape, (6, 128, 1, 512))
-        self.assertEqual(nope.stride(), (81408, 512, 512, 1))
-        self.assertEqual(rope.shape, (6, 128, 1, 64))
-        self.assertEqual(rope.stride(), (81408, 64, 64, 1))
+        self.assertEqual(nope.shape, (6, 1, 128, 512))
+        self.assertEqual(nope.stride(), (81408, 65536, 512, 1))
+        self.assertEqual(rope.shape, (6, 1, 128, 64))
+        self.assertEqual(rope.stride(), (81408, 8192, 64, 1))
         self.assertEqual(rope.storage_offset() - nope.storage_offset(), 65536)
         self.assertIs(nope.untyped_storage(), rope.untyped_storage())
 
