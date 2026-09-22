@@ -5,7 +5,8 @@
 
 import threading
 import unittest
-from copy import copy
+from copy import copy, deepcopy
+from dataclasses import dataclass
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -27,7 +28,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import
 
 
 class TestMooncakePipeline(unittest.TestCase):
-    def make_stage(self, stage, store, *, hybrid=True, draft=False, tp_rank=0, mla=False, empty_tail=False):
+    def make_stage(
+        self, stage, store, *, hybrid=True, draft=False, tp_rank=0, mla=False, empty_tail=False, cache_block_size=16
+    ):
         # Uneven PP partition; the last stage optionally owns an extra draft
         # layer that is not part of get_num_layers().
         layers = list(range(3)) if stage == 0 else list(range(3, 7 + int(draft)))
@@ -66,6 +69,7 @@ class TestMooncakePipeline(unittest.TestCase):
                 tp_rank=tp_rank,
                 num_kv_heads=1 if mla else 2,
                 use_mla=mla,
+                cache_block_size=cache_block_size,
             )
         worker.m_store = store
         arrays = {}
@@ -224,6 +228,59 @@ class TestMooncakePipeline(unittest.TestCase):
                 )
                 self.run_step(worker, req)
         self.assertEqual(len(store.complete), 14)
+
+    def test_scheduler_block_size_rewrite_preserves_remote_hits(self):
+        store = MemoryRangeStore()
+        workers = [self.make_stage(stage, store, mla=True, cache_block_size=32)[0] for stage in range(2)]
+        # EngineCore replaces the scheduler's CLI block size with the minimum
+        # group block size; spawned workers retain their original config.
+        config = deepcopy(workers[0].vllm_config)
+        config.cache_config.block_size = 16
+        with (
+            patch.object(KVPoolScheduler, "_build_cache_coordinator", return_value=None),
+            patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.importlib"),
+        ):
+            scheduler = KVPoolScheduler(config, use_layerwise=True, kv_cache_config=workers[0].kv_cache_config)
+        store.batch_is_readable = lambda keys: [key in store.complete for key in keys]
+        scheduler.store_scheduler = store
+        for worker in workers:
+            self.run_step(
+                worker,
+                ReqMeta(
+                    "save",
+                    token_len_chunk=64,
+                    block_ids_by_group=[[1, 2, 3, 4], [1, 2], [1, 2, 3, 4]],
+                    block_hashes=[b"h0", b"h1", b"h2", b"h3"],
+                    can_save=True,
+                    is_last_chunk=True,
+                ),
+            )
+        self.assertTrue(store.complete, "the regression must write real objects")
+        keys = scheduler._make_layerwise_hit_check_keys(0, b"h0".hex())
+        self.assertEqual(scheduler._query_layerwise_block_hits([keys]), [True])
+        for worker in workers:
+            self.assertEqual(worker.mooncake_layerwise_namespace, scheduler.mooncake_layerwise_namespace)
+            self.assertEqual(worker.vllm_config.cache_config.block_size, 32)
+
+    def test_cache_hash_uses_resolved_block_geometry_without_mutation(self):
+        @dataclass
+        class CacheConfig:
+            block_size: int
+            cache_dtype: str = "fp8"
+
+            def compute_hash(self):
+                # Upstream CacheConfig.compute_hash includes block_size.
+                return f"{self.block_size}:{self.cache_dtype}"
+
+        worker, _ = self.make_stage(0, MemoryRangeStore())
+        config = worker.vllm_config
+        config.cache_config = CacheConfig(32)
+        original = protocol.layerwise_topology_namespace(config, worker.kv_cache_config)
+        self.assertEqual(config.cache_config.block_size, 32)
+        config.cache_config = CacheConfig(16)
+        self.assertEqual(original, protocol.layerwise_topology_namespace(config, worker.kv_cache_config))
+        config.cache_config.cache_dtype = "bfloat16"
+        self.assertNotEqual(original, protocol.layerwise_topology_namespace(config, worker.kv_cache_config))
 
     def test_nonzero_stage_uses_local_group_indices(self):
         worker, _ = self.make_stage(1, MemoryRangeStore())

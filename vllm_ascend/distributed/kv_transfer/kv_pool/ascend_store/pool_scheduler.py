@@ -166,8 +166,19 @@ class KVPoolScheduler:
         self.block_key_hybrid = self.use_block_key_layerwise and self.use_hybrid
         self.mooncake_layerwise_namespace = ""
         if self.use_block_key_layerwise:
-            self.mooncake_layerwise_namespace = self.layerwise_protocol.layerwise_topology_namespace(vllm_config)
+            self.mooncake_layerwise_namespace = self.layerwise_protocol.layerwise_topology_namespace(
+                vllm_config, kv_cache_config
+            )
             self.layerwise_protocol.validate_pp_groups(kv_cache_config, vllm_config.parallel_config)
+            if vllm_config.parallel_config.pipeline_parallel_size > 1:
+                logger.info(
+                    "Mooncake PP scheduler namespace=%s config_block_size=%s group_block_sizes=%s",
+                    self.mooncake_layerwise_namespace,
+                    vllm_config.cache_config.block_size,
+                    [self.layerwise_protocol.group_block_size_signature(g) for g in kv_cache_config.kv_cache_groups]
+                    if kv_cache_config is not None
+                    else [],
+                )
         self.block_key_hybrid_layout = (
             self.layerwise_protocol.hybrid_layout_id(
                 kv_cache_config,

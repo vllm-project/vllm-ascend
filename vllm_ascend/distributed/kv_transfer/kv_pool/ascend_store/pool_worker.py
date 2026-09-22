@@ -213,14 +213,20 @@ class KVPoolWorker:
         validate_layerwise_topology(self.layerwise_protocol, vllm_config.parallel_config, self.use_layerwise)
         self.mooncake_layerwise_namespace = ""
         if self.use_block_key_layerwise:
-            self.mooncake_layerwise_namespace = self.layerwise_protocol.layerwise_topology_namespace(vllm_config)
+            self.mooncake_layerwise_namespace = self.layerwise_protocol.layerwise_topology_namespace(
+                vllm_config, kv_cache_config
+            )
             self.layerwise_protocol.validate_pp_groups(kv_cache_config, vllm_config.parallel_config)
             if self.pp_size > 1:
                 logger.info(
-                    "Mooncake PP namespace=%s stage=%d/%d",
+                    "Mooncake PP namespace=%s stage=%d/%d config_block_size=%s group_block_sizes=%s",
                     self.mooncake_layerwise_namespace,
                     self.pp_rank,
                     self.pp_size,
+                    vllm_config.cache_config.block_size,
+                    [self.layerwise_protocol.group_block_size_signature(g) for g in kv_cache_config.kv_cache_groups]
+                    if kv_cache_config is not None
+                    else [],
                 )
         kv_cache_groups = kv_cache_config.kv_cache_groups if kv_cache_config is not None else None
         self.use_hybrid = uses_hybrid_kv_cache(vllm_config.scheduler_config, kv_cache_groups) or (

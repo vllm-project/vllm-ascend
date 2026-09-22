@@ -59,7 +59,7 @@ per-block byte length 之和。对象内偏移按这些 entry 的前缀和计算
 single-group PP key：
 
 ```text
-model@mooncake_pp_v2:<digest>@pp_rank:<stage>@<block-hash-or-tail>@<head>
+model@mooncake_pp_v3:<digest>@pp_rank:<stage>@<block-hash-or-tail>@<head>
 ```
 
 hybrid PP key：
@@ -69,11 +69,48 @@ model@mooncake_hybrid_v1:<layout-digest>@pp_rank:<stage>@group:<id>@block:<token
 ```
 
 公共 PP namespace 包含真实 partition、TP size、vLLM ModelConfig/CacheConfig hash、cache dtype、
-block size 和 speculative config hash。partition 使用 vLLM 的层划分 API，包含自定义非均匀划分。
+归一化后的 block size 和 speculative config hash。CacheConfig hash 也在归一化后的配置副本上计算。
+partition 使用 vLLM 的层划分 API，包含自定义非均匀划分。
 hybrid layout 再加入按全局 group 顺序排列的 block-size signature。
 PP 下不散列各 worker 不同的局部 `layer_names`；PP=1 继续使用原来的 membership digest。
 
 这不是权重内容校验。同一路径被覆盖为不同 checkpoint 时，仍需要隔离/清理旧 pool；各实例必须使用一致代码与权重。
+
+### PP layerwise 零命中修复（2026-09-22）
+
+`dc3c026` 的 PP namespace 存在初始化阶段配置不一致的问题：
+
+1. worker 保留启动时的 `CacheConfig.block_size`。
+2. vLLM EngineCore 创建 KV groups 后，将 scheduler 的 `block_size` 改成各组的最小值。
+3. DeepSeek-V4 的 SWA、compressed KV 和 compressor state 使用不同的 block size。
+   例如 CLI 为 32，而 state group 可以为 2，因此 scheduler 与 worker 的配置值不同。
+4. 旧 namespace 同时散列原始 `block_size` 和包含它的 `CacheConfig.compute_hash()`，
+   导致 worker PUT key 和 scheduler lookup key 前缀不同。即使所有 stage 都成功提交，对象仍查不到。
+
+普通池化不使用这套新增的 PP namespace，因此 `use_layerwise=false` 可以正常命中。
+这也解释了为什么问题不能通过增加预取层数或修改 attention window 解决。
+
+修复时从实际 `KVCacheConfig.kv_cache_groups` 提取共同的最小 block size，
+在配置副本上同时归一化直接散列值和 CacheConfig hash；不修改模型运行配置。
+namespace 升级到 `mooncake_pp_v3`，PP=1 key 不变。
+新增回归通过生产 worker 的 range/session 路径写入两个 stage，再调用生产 scheduler 查询：
+旧实现返回 miss，修复后返回 hit。另一测试覆盖 CacheConfig hash 中的 block size、dtype 隔离及配置不被修改。
+
+本次 CPU/mock 验证：针对性测试 `41 passed, 4 subtests passed`；扩大回归为
+`419 passed, 4 failed, 240 subtests passed`，失败仍为下文列出的四项既有 mock/依赖问题。
+这四项已在独立导出的未修改 `dc3c026` 上再次复现。
+`test_layerwise_cache_layout.py` 因缺少真实 vLLM 依赖未纳入该运行。
+Ruff 和 Python 编译检查通过；执行 `bash format.sh ci` 时因环境缺少 `pre-commit` 提前退出，完整格式检查未通过验收。
+尚未在真实 A5、DeepSeek-V4 权重和 Mooncake 服务上验证修复后的命中率、精度及性能。
+
+服务器复测步骤：
+
+1. 更新并重启所有相关 scheduler/worker，保持原来的 PP、DP、MTP 和 block-size 参数。
+   不要把启动参数 `--block-size 32` 改成 state group 的大小。
+2. 从启动日志提取 `Mooncake PP`：scheduler 和各 PP worker 的 `namespace` 必须相同；
+   `config_block_size` 可以不同，`group_block_sizes` 应对应相同分组。
+3. 新 namespace 不读取旧版对象，第一轮需要重新写入；等预热请求完成后再发送相同前缀，检查 external hit。
+4. 命中恢复后，继续用下文精度脚本对比完整生成 token IDs；仅输出 1 token 的性能测试不能代替精度验收。
 
 ### 3. hit 必须覆盖全部 stage 和 saving head
 

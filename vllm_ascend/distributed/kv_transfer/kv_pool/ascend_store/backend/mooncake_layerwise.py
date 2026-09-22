@@ -61,7 +61,7 @@ def make_hit_check_keys(
     ]
 
 
-def layerwise_topology_namespace(vllm_config: Any) -> str:
+def layerwise_topology_namespace(vllm_config: Any, kv_cache_config: Any = None) -> str:
     """Isolate stage-local objects by the actual partition and model/cache config.
 
     Use vLLM's partition API, including VLLM_PP_LAYER_PARTITION, rather than
@@ -84,18 +84,29 @@ def layerwise_topology_namespace(vllm_config: Any) -> str:
         previous_end = end
     if previous_end != model.get_total_num_hidden_layers():
         raise ValueError("Mooncake PP partitions must cover every model layer")
+    # EngineCore rewrites its CacheConfig.block_size to the minimum group
+    # block size after spawning workers. Workers still hold the CLI value
+    # (e.g. 32 while a DSV4 state group uses 2). Hashing either the raw value
+    # or CacheConfig.compute_hash() would split lookup and PUT namespaces.
+    # Normalize a copy from the resolved groups shared by both roles; never
+    # change the worker's config, which model/cache code still needs.
+    cache = copy(vllm_config.cache_config)
+    if kv_cache_config is not None and kv_cache_config.kv_cache_groups:
+        cache.block_size = min(
+            size for group in kv_cache_config.kv_cache_groups for size in group_block_size_signature(group)
+        )
     speculative = vllm_config.speculative_config
     identity = (
         parallel.tensor_parallel_size,
         partitions,
         model.compute_hash(),
-        vllm_config.cache_config.compute_hash(),
-        vllm_config.cache_config.cache_dtype,
-        vllm_config.cache_config.block_size,
+        cache.compute_hash(),
+        cache.cache_dtype,
+        cache.block_size,
         speculative.compute_hash() if speculative is not None else None,
     )
     digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
-    return f"mooncake_pp_v2:{digest}"
+    return f"mooncake_pp_v3:{digest}"
 
 
 def validate_pp_groups(kv_cache_config: Any, parallel_config: Any) -> None:
