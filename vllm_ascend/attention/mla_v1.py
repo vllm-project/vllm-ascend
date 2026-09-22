@@ -492,10 +492,11 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
 
         query_seq_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         self.query_lens = query_seq_lens_cpu[:num_reqs]
-        # Prefer _seq_lens_cpu, which remains populated in async speculative
-        # decode, over seq_lens_cpu, which is intentionally None in that mode.
-        if common_attn_metadata._seq_lens_cpu is not None:
-            self.seq_lens = common_attn_metadata._seq_lens_cpu[:num_reqs]
+        # Older vLLM keeps a private CPU view during async speculative decode.
+        # Newer versions expose only the public seq_lens_cpu field.
+        cached_seq_lens_cpu = getattr(common_attn_metadata, "_seq_lens_cpu", None)
+        if cached_seq_lens_cpu is not None:
+            self.seq_lens = cached_seq_lens_cpu[:num_reqs]
         elif common_attn_metadata.seq_lens_cpu is not None:
             self.seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
         else:
