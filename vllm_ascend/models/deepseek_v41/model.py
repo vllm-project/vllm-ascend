@@ -77,13 +77,13 @@ from .engram import (
     engram_dead_mask,
     engram_enabled,
 )
-from .engram.upstream import EngramLayout
 from .engram.embedding import (
     AscendParallelEngramEmbedding,
     preflight_engram_checkpoint,
 )
 from .engram.layer import AscendEngram
 from .engram.parallel import gather_engram_hashes, get_engram_dp_size
+from .engram.upstream import EngramLayout
 from .indexer import DeepseekV41Indexer
 
 
@@ -708,7 +708,6 @@ class DeepseekV41Attention(DeepseekV41SWAAttention):
                     dtype=torch.bfloat16,
                     tokens_per_state=role.compress_ratio,
                     model_version="deepseek_v41",
-                    storage_block_size=block_size // role.compress_ratio,
                 ),
             )
         self.compressor = (

@@ -35,7 +35,6 @@ from .npu import (
     gather_dequantize_host_uva,
     quantize_engram_rows,
 )
-from .upstream import ParallelEngramEmbedding
 from .parallel import (
     _gather_engram_rows,
     engram_head_shard_rank,
@@ -43,6 +42,7 @@ from .parallel import (
     get_engram_dp_group,
     get_engram_dp_size,
 )
+from .upstream import ParallelEngramEmbedding
 
 
 class AscendParallelEngramEmbedding(ParallelEngramEmbedding):

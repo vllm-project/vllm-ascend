@@ -5,6 +5,7 @@
 import os
 
 from vllm.config import VllmConfig
+from vllm.config import utils as config_utils
 
 
 def _resolve_fallback_engram_config(vllm_config):
@@ -27,17 +28,11 @@ def _resolve_fallback_engram_config(vllm_config):
     elif isinstance(raw_config, dict):
         config = EngramConfig(**raw_config)
     else:
-        raise TypeError(
-            "additional_config['engram_config'] must be a mapping or "
-            "EngramConfig instance."
-        )
+        raise TypeError("additional_config['engram_config'] must be a mapping or EngramConfig instance.")
 
     model_config = vllm_config.model_config
     speculative_config = vllm_config.speculative_config
-    if (
-        speculative_config is not None
-        and model_config is speculative_config.draft_model_config
-    ):
+    if speculative_config is not None and model_config is speculative_config.draft_model_config:
         model_config = speculative_config.target_model_config
     config.verify_model_config(model_config)
     config.verify_parallel_config(vllm_config.parallel_config)
@@ -58,3 +53,19 @@ if not getattr(_original_post_init, "_vllm_ascend_engram", False):
 
     _post_init_with_engram._vllm_ascend_engram = True  # type: ignore[attr-defined]
     VllmConfig.__post_init__ = _post_init_with_engram
+
+
+_original_is_init_field = config_utils.is_init_field
+
+if not getattr(_original_is_init_field, "_vllm_ascend_engram", False):
+
+    def _is_init_field_with_engram(cls, name: str) -> bool:
+        # vLLM 0.29's replace() walks __dict__ and assumes every key is a
+        # dataclass field. Engram is attached after validation, so omit it;
+        # additional_config recreates it on the replacement object.
+        if cls is VllmConfig and name == "engram_config":
+            return False
+        return _original_is_init_field(cls, name)
+
+    _is_init_field_with_engram._vllm_ascend_engram = True  # type: ignore[attr-defined]
+    config_utils.is_init_field = _is_init_field_with_engram

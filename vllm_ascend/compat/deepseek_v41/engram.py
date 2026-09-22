@@ -15,7 +15,6 @@ import torch
 from torch import nn
 from vllm.triton_utils import tl, triton
 
-
 # Cache value for tokens that take no part in an n-gram (image spans).
 DEAD_ID = -1
 

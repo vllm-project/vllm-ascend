@@ -1626,6 +1626,9 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
         # Removed upstream option: warn above, but do not pass it into the
         # strict AscendConfig schema where it would be reported as a typo.
         "enable_flashcomm1",
+        # Consumed by the vLLM 0.29 Engram compatibility patch and attached
+        # to VllmConfig after AscendConfig validation.
+        "engram_config",
         # injected fields (factory passes explicitly; a copy in additional_config would conflict)
         "scheduler_config",
         "sparse_kv_offload_config",
