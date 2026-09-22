@@ -207,6 +207,56 @@ During integration testing, temporarily set `VLLM_ASCEND_KVPOOL_RANGE_DEBUG=1` t
 operations, per-layer ranges, and commits. Keep the default value of `0` during normal operation to avoid per-layer
 logging overhead.
 
+### 5.3 Pipeline Parallelism
+
+Mooncake range sessions can compose with PP using a single KV cache group. Each object contains only the current PP
+stage's layers. Layer offsets and session completion are stage-local: a later PP stage starts its first range at
+offset zero and commits after its own last layer.
+
+The TP-only key format remains unchanged. When PP is enabled, keys use a versioned topology namespace:
+
+```text
+model@layerwise_pp_v1@tp:T@pp:start0-end0,start1-end1@pp_rank:P@hash@head_rank
+```
+
+The PP ranges come from vLLM's model partitioning API, including custom/uneven partitions. TP size participates in
+the namespace as well. Incompatible partitions do not share objects: they produce cache misses, not automatic
+cross-topology resharding. Configure the same topology, PP partition, model weights, cache dtype and block size on
+instances that should share cached KV.
+
+Within each replicated KV-head group one rank saves the data: MLA with TP=4 uses TP rank 0 as the writer, and ranks
+1-3 load the same object without duplicating writes. The scheduler reports a block hit only when every PP stage and
+KV-head shard has committed that block. Range I/O uses the actual local buffer sizes.
+
+Current boundaries:
+
+- Context parallelism is not supported: PCP and DCP are both rejected during initialization, because the key has
+  no token-shard coordinate.
+- Hybrid/multi-group layouts and prefill/decode TP mismatch remain unsupported.
+- This is topology-matched KV pooling, not PP redistribution between heterogeneous producer/consumer layouts.
+- Memcache behavior is unchanged. Its GVA protocol is not interchangeable with Mooncake range sessions.
+- Keep the existing eager/PIECEWISE layerwise execution mode; this change does not add full-graph support.
+
+#### Hardware Validation
+
+The CPU regression tests cover all shard keys, stage-local offsets, byte-for-byte save/load, replicated-rank
+ownership, incomplete-shard misses, and load-session cleanup. They do not validate NPU attention, HCCL ordering,
+or real Mooncake transport. Run the following on an Ascend host with the required model, Mooncake range-session
+client, a running Master, and `MOONCAKE_CONFIG_PATH` set:
+
+```bash
+# Four NPUs; use a single-group MLA model that supports the requested topology.
+python tests/e2e/nightly/single_node/models/scripts/mooncake_layerwise_parallel.py \
+  --model deepseek-ai/DeepSeek-V2-Lite --tp 2 --pp 2 --enforce-eager
+```
+
+Repeat without `--enforce-eager` for PIECEWISE execution, then increase `--prefetch-layers` to 2. The script keeps
+the same workers/pool alive, clears only the local prefix cache, requires a remote cache hit, and compares
+generated token IDs for cold and repeated warm requests with chunked prefill. Use a fresh process for each
+topology.
+
+Real-NPU validation and performance measurements for this PP extension are still required before deployment.
+
 ## 6. Follow-up Optimization Recommendations
 
 ### P0: Required Before Production
@@ -264,8 +314,8 @@ logging overhead.
 
 1. Support hybrid and multi-group layouts by recording the group layout in the key and object header, with an
    independent completeness bitmap for each group.
-2. Support PP/PCP/DCP by encoding parallel coordinates in the key and having the scheduler validate the participating
-   rank set.
+2. Extend the topology-matched PP support to context parallelism and heterogeneous producer/consumer topologies, including
+   cache redistribution and the corresponding attention callbacks.
 3. Support a per-layer readiness bitmap so consumers can read completed early layers before the entire object becomes
    `COMPLETE`. This requires visibility and consistency support from Mooncake and introduces substantial complexity.
 4. Record a schema, version, and checksum in the object header and perform an inexpensive compatibility check before
@@ -273,9 +323,20 @@ logging overhead.
 
 ## 7. Validation Record
 
+### Initial Range-Session Adaptation
+
 - `py_compile`: Passed for the core changed files.
 - Ruff lint and format checks: Passed.
 - Relevant CPU mock pytest suite: `285 passed, 106 subtests passed`.
 - Strict `0`/`1` validation for `VLLM_ASCEND_KVPOOL_RANGE_DEBUG`: Passed.
 - Not yet completed: Tests with real NPUs, a real Mooncake client and Master, multi-node networking, and performance
   benchmarks.
+
+### PP Extension
+
+- Base: upstream `main` at `f4b6bd05f05717e10e4521a78f4b3beba5bb5a99`.
+- Focused AscendStore CPU mock regression: `373 passed, 181 subtests passed`, including the new parallel tests.
+- The wider AscendStore run has two coordinator failures in this local mock environment; both also reproduce on
+  the unmodified base. The cache-layout test module requires real torch dependencies unavailable on this host.
+- Hardware smoke test added above, but not executed locally. NPU/Mooncake transport correctness, multi-process
+  scheduling, graph execution and performance remain to be verified on Ascend hardware.

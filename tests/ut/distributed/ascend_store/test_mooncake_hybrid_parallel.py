@@ -1,0 +1,254 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+"""Hybrid layerwise layout under pipeline parallelism.
+
+Under PP the scheduler and each worker see different ``layer_names`` for the
+same cache group, because upstream projects the global groups onto each stage.
+The layout digest must still agree everywhere — otherwise every stage gets its
+own key space and the pool silently never reports a hit — while still changing
+when the layout or the topology changes.
+"""
+
+import unittest
+from types import SimpleNamespace
+
+import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
+
+# isort: split
+from vllm.v1.core.kv_cache_utils import _project_kv_cache_groups_to_worker
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
+
+from tests.ut.distributed.ascend_store.test_pool_worker import make_worker
+
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import mooncake_layerwise
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_layerwise import (
+    hybrid_layout_id,
+    validate_hybrid_pp_coverage,
+)
+
+
+def make_groups() -> list[KVCacheGroupSpec]:
+    """Two groups whose layers interleave, as a hybrid model produces."""
+    return [
+        KVCacheGroupSpec(
+            ["model.layers.0.kv", "model.layers.2.kv", "model.layers.4.kv"],
+            FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype="uint8"),
+        ),
+        KVCacheGroupSpec(
+            ["model.layers.1.c4", "model.layers.3.c4", "model.layers.5.c4"],
+            FullAttentionSpec(block_size=32, num_kv_heads=1, head_size=1, dtype="uint8"),
+        ),
+    ]
+
+
+def as_config(groups) -> SimpleNamespace:
+    return SimpleNamespace(kv_cache_groups=groups)
+
+
+def project(groups, stage_layer_names) -> list[KVCacheGroupSpec]:
+    """Project the global groups onto one PP stage, using upstream's own rule."""
+    specs = {}
+    for group in groups:
+        for name in group.layer_names:
+            specs[name] = group.kv_cache_spec
+    worker_spec = {name: specs[name] for name in stage_layer_names}
+    return _project_kv_cache_groups_to_worker(groups, worker_spec)
+
+
+def pp_config(pp_size=2, tp_size=1, rank=0, dcp_size=1, interleave=1) -> SimpleNamespace:
+    return SimpleNamespace(
+        pipeline_parallel_size=pp_size,
+        tensor_parallel_size=tp_size,
+        decode_context_parallel_size=dcp_size,
+        cp_kv_cache_interleave_size=interleave,
+        rank=rank,
+    )
+
+
+def stage_model(partitions, tp_size=1) -> SimpleNamespace:
+    """``get_layers_start_end_indices`` for each PP stage, in rank order."""
+    ranges = []
+    start = 0
+    for count in partitions:
+        ranges.append((start, start + count))
+        start += count
+    config = SimpleNamespace()
+    config.get_layers_start_end_indices = lambda parallel_config: ranges[parallel_config.rank // tp_size]
+    return config
+
+
+STAGE0 = ["model.layers.0.kv", "model.layers.1.c4", "model.layers.2.kv"]
+STAGE1 = ["model.layers.3.c4", "model.layers.4.kv", "model.layers.5.c4"]
+
+
+class TestHybridLayoutUnderPipelineParallelism(unittest.TestCase):
+    def test_digest_agrees_between_scheduler_and_every_stage(self):
+        groups = make_groups()
+        parallel = pp_config()
+        model = stage_model([3, 3])
+
+        scheduler = hybrid_layout_id(as_config(groups), parallel, model)
+        self.assertEqual(scheduler, hybrid_layout_id(as_config(project(groups, STAGE0)), parallel, model))
+        self.assertEqual(scheduler, hybrid_layout_id(as_config(project(groups, STAGE1)), parallel, model))
+
+    def test_stage_local_membership_does_not_move_the_digest(self):
+        groups = make_groups()
+        parallel = pp_config()
+        model = stage_model([3, 3])
+        base = hybrid_layout_id(as_config(groups), parallel, model)
+
+        # Same global layout, re-projected for one stage: membership is stage
+        # local, so it must not participate.
+        self.assertEqual(base, hybrid_layout_id(as_config(project(groups, STAGE1)), parallel, model))
+
+    def test_topology_and_page_geometry_do_move_the_digest(self):
+        groups = make_groups()
+        parallel = pp_config()
+        model = stage_model([3, 3])
+        base = hybrid_layout_id(as_config(groups), parallel, model)
+
+        self.assertNotEqual(base, hybrid_layout_id(as_config(groups), parallel, stage_model([2, 4])))
+
+        reordered = [groups[1], groups[0]]
+        self.assertNotEqual(base, hybrid_layout_id(as_config(reordered), parallel, model))
+
+        repaged = make_groups()
+        repaged[0].kv_cache_spec = FullAttentionSpec(block_size=64, num_kv_heads=1, head_size=1, dtype="uint8")
+        self.assertNotEqual(base, hybrid_layout_id(as_config(repaged), parallel, model))
+
+    def test_pipeline_parallelism_needs_the_model_config(self):
+        groups = make_groups()
+        with self.assertRaisesRegex(ValueError, "model config"):
+            hybrid_layout_id(as_config(groups), pp_config())
+
+
+class TestHybridPpCoverage(unittest.TestCase):
+    def test_empty_pooled_group_is_rejected(self):
+        # Stage 0 owns no layer of group 1, so it would never save group 1's
+        # keys while the hit check still demands them from every stage.
+        stage = project(make_groups(), STAGE0)
+        self.assertEqual([len(group.layer_names) for group in stage], [2, 1])
+
+        stage[1].layer_names.clear()
+        with self.assertRaisesRegex(ValueError, "holds no layers"):
+            validate_hybrid_pp_coverage(as_config(stage), pp_config())
+
+    def test_drafter_group_is_reported_not_rejected(self):
+        # A drafter group is empty away from the last stage, and the projection
+        # clears its flag, so it cannot be classified here: report, don't raise.
+        stage = project(make_groups(), STAGE0)
+        stage[1].layer_names.clear()
+        with self.assertLogs("vllm", level="WARNING") as captured:
+            validate_hybrid_pp_coverage(as_config(stage), pp_config(), use_spec_decode=True)
+        self.assertIn("holds no layers", "\n".join(captured.output))
+
+    def test_single_stage_needs_no_coverage_check(self):
+        stage = project(make_groups(), STAGE0)
+        stage[1].layer_names.clear()
+        validate_hybrid_pp_coverage(as_config(stage), pp_config(pp_size=1))
+
+
+class TestLayerwiseSaveRank(unittest.TestCase):
+    """One rank per replicated KV-head group owns the save.
+
+    Ranks inside a replicated KV-head group hold the same cache (e.g. the MLA
+    latent), so only the group's first rank writes to the pool. ``put_step`` is
+    how many TP ranks share one KV-head group.
+    """
+
+    def save_ranks(self, num_kv_heads: int) -> list[bool]:
+        return [
+            make_worker(
+                self,
+                tp_rank=tp_rank,
+                tp_size=4,
+                num_kv_heads=num_kv_heads,
+                use_mla=num_kv_heads == 1,
+                use_layerwise=True,
+            )._is_layerwise_save_rank()
+            for tp_rank in range(4)
+        ]
+
+    def test_save_rank_matrix(self):
+        # MLA: a single KV head over four ranks, so only rank 0 saves.
+        self.assertEqual(self.save_ranks(num_kv_heads=1), [True, False, False, False])
+        # Two heads over four ranks: ranks 0 and 2 own one group each.
+        self.assertEqual(self.save_ranks(num_kv_heads=2), [True, False, True, False])
+        # No replication left, so every rank saves its own heads.
+        self.assertEqual(self.save_ranks(num_kv_heads=4), [True, True, True, True])
+
+
+class TestPpStageGroupMapping(unittest.TestCase):
+    """The group mapping must be keyed the way the save/load loop looks it up.
+
+    The loop resolves a layer's groups with ``local_layer + pp_layer_offset`` --
+    the global layer id the key space uses. A mapping keyed by the *local* index
+    only matches on the first stage, where the offset is zero; on later stages
+    the lookup misses and falls back to group 0 with the local index as the
+    group-local one, which either indexes out of the group's range array or
+    silently addresses another layer's bytes.
+    """
+
+    def stage_one_worker(self):
+        groups = [
+            KVCacheGroupSpec(
+                ["model.layers.2.kv", "model.layers.3.kv"],
+                FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype="uint8"),
+            ),
+            KVCacheGroupSpec(
+                ["model.layers.2.c4", "model.layers.3.c4"],
+                FullAttentionSpec(block_size=32, num_kv_heads=1, head_size=1, dtype="uint8"),
+            ),
+        ]
+        return make_worker(
+            self,
+            pp_size=2,
+            pp_rank=1,
+            num_layers=2,
+            num_hidden_layers=4,
+            use_layerwise=True,
+            kv_cache_config=SimpleNamespace(num_blocks=4, kv_cache_groups=groups),
+        )
+
+    def test_mapping_is_keyed_by_global_layer(self):
+        worker = self.stage_one_worker()
+        # Stage 1 owns global layers 2 and 3; that is the id the loop looks up.
+        self.assertEqual(set(worker.physical_layer_to_group_layers), {2, 3})
+        self.assertEqual(worker.physical_layer_to_group_layers[2], [(0, 0), (1, 0)])
+        self.assertEqual(worker.physical_layer_to_group_layers[3], [(0, 1), (1, 1)])
+
+    def test_every_local_layer_resolves_without_the_fallback(self):
+        worker = self.stage_one_worker()
+        offset = worker.layerwise_key_layer_offset
+        self.assertEqual(offset, 2)
+        for local_layer in range(worker.layerwise_key_layers):
+            self.assertIn(local_layer + offset, worker.physical_layer_to_group_layers)
+
+
+class TestInexpressibleTopologyRejected(unittest.TestCase):
+    """The block key has no token-shard coordinate, so the CP modes are refused.
+
+    Letting either through would publish different bytes under one key.
+    """
+
+    def test_dcp_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "does not support DCP"):
+            mooncake_layerwise.validate_topology(pp_config(dcp_size=2))
+        # dcp == 1 stays valid, which is the only case the key space covers.
+        mooncake_layerwise.validate_topology(pp_config(dcp_size=1))
+
+
+class TestHybridKeyCoordinates(unittest.TestCase):
+    def test_group_key_carries_the_stage(self):
+        key = mooncake_layerwise.hybrid_block_key("model", "layout", 1, 32, "6831", 0, pp_rank=2)
+        self.assertEqual(
+            key,
+            "model@mooncake_hybrid_v1:layout@pp_rank:2@group:1@block:32@6831@0",
+        )
+
+    def test_hit_check_requires_every_stage_and_head(self):
+        keys = mooncake_layerwise.make_hit_check_keys("model", 0, "6831", 2, 1, namespace="ns", pp_size=2)
+        self.assertEqual(len(keys), 4)
+        self.assertEqual(len(set(keys)), 4)
+        self.assertEqual(sum("@pp_rank:1" in key for key in keys), 2)
