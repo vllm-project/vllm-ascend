@@ -40,6 +40,10 @@ CHECK_IMPORTS = {
         ),
         tip=("Avoid using pickle or cloudpickle or add this file to tools/check_forbidden_imports.py."),
         allowed_files={
+            # Standalone analyzer's private local AST cache. The Main2Main
+            # workflow uses --no-cache and shares only verified text reports.
+            "tools/vllm_interface_contracts/cache.py",
+            "tools/vllm_interface_contracts/generator.py",
             "vllm_ascend/distributed/kv_transfer/kv_pool/cpu_offload/metadata.py",
             "vllm_ascend/distributed/weight_transfer/npu_ipc_engine.py",
             "tests/ut/distributed/test_hccl_weight_transfer.py",

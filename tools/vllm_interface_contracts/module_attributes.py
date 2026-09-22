@@ -179,7 +179,7 @@ def _registry_is_closed(body: list[ast.stmt], declaration: ast.stmt, registry: s
         if (
             isinstance(parent, ast.Compare)
             and len(parent.ops) == 1
-            and isinstance(parent.ops[0], (ast.In, ast.NotIn))
+            and isinstance(parent.ops[0], (ast.In, ast.NotIn))  # codespell:ignore notin
             and parent.comparators[0] is node
         ):
             continue

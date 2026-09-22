@@ -20,6 +20,9 @@ adaptation or NPU is needed to generate the report.
 5. An exact-key cache stores only generated text reports, with input identity
    and SHA-256 checks. Corrupt/mismatched results are rescanned. No executable
    engine cache is deserialized. Equal old/new SHAs produce a no-change report.
+   The standalone engine also retains an optional private local AST pickle cache;
+   it is explicitly allowlisted in the import check, disabled by this wrapper,
+   and must never be restored from shared or untrusted artifacts.
 6. Only the Markdown is uploaded for QA. The adaptation job downloads it outside
    source/build/workspace cleanup paths, checks that its baseline tree matches
    the scanned tree, and passes `MAIN2MAIN_INTERFACE_REPORT` to the existing
