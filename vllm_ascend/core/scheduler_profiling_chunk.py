@@ -30,6 +30,7 @@ from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
 from vllm.logger import logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import (
     KVConnectorBlockState,
@@ -1249,3 +1250,19 @@ class ProfilingChunkScheduler(Scheduler):
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
         return scheduler_output
+
+
+class ProfilingChunkAsyncScheduler(AsyncScheduler, ProfilingChunkScheduler):
+    """Profiling-chunk scheduler variant for async scheduling.
+
+    MRO: ``AsyncScheduler`` contributes the output-placeholder accounting
+    (``_update_after_schedule`` / ``_update_request_with_output``);
+    ``ProfilingChunkScheduler`` contributes ``__init__`` and the copied
+    ``schedule()``, which dispatches ``self._update_after_schedule()`` to
+    the async implementation.
+
+    Dynamic chunk sizing stays exact under async scheduling: upstream does
+    not add output placeholders to prefill-chunk requests, so the
+    ``num_computed_tokens`` read by the chunk predictor is the true prefix
+    length for every request still in prefill.
+    """
