@@ -981,6 +981,25 @@ def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
                 "vllm_ascend.core.short_request_first_scheduler.ShortRequestFirstAsyncScheduler"
             )
 
+    # profiling_chunk (CPP) works with async scheduling only on the v2 model
+    # runner; the v1 runner path is not adapted for it.
+    profiling_chunk_config = scheduler_extension_config.profiling_chunk_config
+    if profiling_chunk_config.enabled and vllm_config.scheduler_config.async_scheduling:
+        if not vllm_config.use_v2_model_runner:
+            raise ValueError(
+                "profiling_chunk_config with async scheduling requires the v2 model runner "
+                "(VLLM_USE_V2_MODEL_RUNNER=1). Please enable it or disable async scheduling."
+            )
+        if profiling_chunk_config.need_timing:
+            # The wall-clock synchronize() timing would serialize the async
+            # pipeline and pollute the latency model. Startup profiling still
+            # applies; only online calibration is turned off.
+            logger.warning(
+                "profiling_chunk_config.need_timing is not supported with async scheduling; "
+                "disabling online calibration."
+            )
+            profiling_chunk_config.need_timing = False
+
     dyntra_lb_config = scheduler_extension_config.dyntra_lb_config
     if dyntra_lb_config.enabled:
         # DyntraLB targets decoder-only inference on the decode side of a
@@ -1261,7 +1280,9 @@ def _setup_worker_and_scheduler(
     # Use ProfilingChunkScheduler when profiling-based chunk sizing is on.
     if scheduler_config.profiling_chunk_config.enabled:
         vllm_config.scheduler_config.scheduler_cls = (
-            "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkScheduler"
+            "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkAsyncScheduler"
+            if vllm_config.scheduler_config.async_scheduling
+            else "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkScheduler"
         )
         # Apply the EngineCore.__init__ patch here for the InprocClient (in-process).
         # And the EngineCore.__init__ patch for EngineCoreProc (the spawned child process)
