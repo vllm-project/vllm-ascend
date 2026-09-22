@@ -969,15 +969,14 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         from vllm_ascend.core.kv_cache_interface import get_sfa_kv_parent
         from vllm_ascend.utils import AscendDeviceType
 
-        for legacy, connector, expects_parent in (
-            (False, None, True),
-            (True, None, True),
-            (False, "MooncakeConnectorV2", True),
-            (False, "MooncakePullConnector", True),
-            (False, "SfaRemoteD2HConnector", False),
-            (False, "MultiConnector", False),
+        for connector, expects_parent in (
+            (None, True),
+            ("MooncakeConnectorV2", True),
+            ("MooncakePullConnector", True),
+            ("SfaRemoteD2HConnector", False),
+            ("MultiConnector", False),
         ):
-            with self.subTest(legacy=legacy, connector=connector):
+            with self.subTest(connector=connector):
                 runner = self._build_runner()
                 runner.use_sparse = True
                 runner._get_attention_kv_cache_dims = lambda *a: (8, 4)
@@ -994,7 +993,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                     kv_cache_groups=[KVCacheGroupSpec(layer_names=names, kv_cache_spec=spec)],
                 )
                 config.kv_cache_tensors = [
-                    SimpleNamespace(size=3 * spec.page_size_bytes * (1 if legacy else 2), layers=names, shared_by=names)
+                    SimpleNamespace(size=3 * spec.page_size_bytes * 2, layers=names, shared_by=names)
                 ]
                 layers = {n: SimpleNamespace(get_attn_backend=lambda: AscendSFABackend) for n in names}
                 runner._kv_cache_spec_attn_group_iterator = lambda spec=spec, names=names: iter(
@@ -1002,7 +1001,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                 )
                 with (
                     patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config", return_value=layers),
-                    patch("vllm_ascend.worker.model_runner_v1.vllm_version_is", return_value=legacy),
+                    patch("vllm_ascend.worker.model_runner_v1.vllm_version_is", return_value=False),
                     patch(
                         "vllm_ascend.core.kv_cache_interface.get_ascend_device_type", return_value=AscendDeviceType.A5
                     ),
@@ -1012,7 +1011,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                     if expects_parent:
                         self.assertIsInstance(raw[names[0]], torch.Tensor)
                         self.assertEqual(raw[names[0]].numel(), 3 * spec.page_size_bytes)
-                        self.assertEqual(raw[names[0]] is raw[names[1]], legacy)
+                        self.assertIsNot(raw[names[0]], raw[names[1]])
                     caches = runner._reshape_kv_cache_tensors(config, raw)
                 if not expects_parent:
                     self.assertTrue(all(t.is_contiguous() for n in names for t in caches[n]))
@@ -1023,7 +1022,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                 self.assertEqual(p0.shape, (3, 4, 1, 12))
                 caches[names[0]][0][1, 2, 0, 0] = 7
                 self.assertEqual(p0[1, 2, 0, 0], 7)
-                self.assertEqual((p1[1, 2, 0, 0] == 7).item(), legacy)
+                self.assertFalse((p1[1, 2, 0, 0] == 7).item())
 
     def test_sfa_parent_requires_actual_main_layer_backend(self):
         from dataclasses import replace

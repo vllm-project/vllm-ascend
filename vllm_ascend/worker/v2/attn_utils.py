@@ -882,18 +882,9 @@ def _allocate_kv_cache(
             if not use_hybrid_layout and _uses_sfa_kv_parent(name, layer_kv_cache_spec[name])
         ]
         if sfa_names:
-            if vllm_version_is("0.28.0"):
-                if len(sfa_names) != len(shared_names) or any(
-                    layer_kv_cache_spec[n] != example_spec for n in sfa_names
-                ):
-                    raise ValueError("Legacy SFA aliases require matching per-layer specs and backends")
-                raw = _allocate_int8_cache_tensor(kv_cache_tensor.size, alignment, device)
-                for name in sfa_names:
-                    kv_cache_raw_tensors[name] = raw
-            else:
-                for name in sfa_names:
-                    layer_bytes = kv_cache_config.num_blocks * layer_kv_cache_spec[name].page_size_bytes
-                    kv_cache_raw_tensors[name] = _allocate_int8_cache_tensor(layer_bytes, alignment, device)
+            for name in sfa_names:
+                layer_bytes = kv_cache_config.num_blocks * layer_kv_cache_spec[name].page_size_bytes
+                kv_cache_raw_tensors[name] = _allocate_int8_cache_tensor(layer_bytes, alignment, device)
             shared_names = [name for name in shared_names if name not in sfa_names]
             if not shared_names:
                 continue

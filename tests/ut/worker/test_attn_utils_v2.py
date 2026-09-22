@@ -1162,13 +1162,12 @@ def test_attn_state_mla_spec_and_metadata_wrappers(monkeypatch):
     assert module.build_attn_metadata is stub
 
 
-@pytest.mark.parametrize("legacy", [False, True])
 @pytest.mark.parametrize("kernel_block_size", [2, 4])
 @pytest.mark.parametrize(
     "connector",
     [None, "MooncakeConnectorV2", "MooncakePullConnector", "SfaRemoteD2HConnector", "MultiConnector"],
 )
-def test_sfa_parent_allocation_and_kernel_blocks(monkeypatch, legacy, kernel_block_size, connector):
+def test_sfa_parent_allocation_and_kernel_blocks(monkeypatch, kernel_block_size, connector):
     from vllm_ascend.attention.sfa_v1 import AscendSFABackend
     from vllm_ascend.core.kv_cache_interface import get_sfa_kv_parent
     from vllm_ascend.utils import AscendDeviceType
@@ -1178,9 +1177,7 @@ def test_sfa_parent_allocation_and_kernel_blocks(monkeypatch, legacy, kernel_blo
     config = KVCacheConfig(
         num_blocks=3, kv_cache_tensors=[], kv_cache_groups=[KVCacheGroupSpec(layer_names=names, kv_cache_spec=spec)]
     )
-    config.kv_cache_tensors = [
-        SimpleNamespace(size=3 * spec.page_size_bytes * (1 if legacy else 2), layers=names, shared_by=names)
-    ]
+    config.kv_cache_tensors = [SimpleNamespace(size=3 * spec.page_size_bytes * 2, layers=names, shared_by=names)]
     transfer = None if connector is None else SimpleNamespace(kv_connector=connector, kv_connector_module_path=None)
     vc = SimpleNamespace(
         kv_transfer_config=transfer,
@@ -1194,7 +1191,6 @@ def test_sfa_parent_allocation_and_kernel_blocks(monkeypatch, legacy, kernel_blo
     monkeypatch.setattr(attn_utils, "enable_sfa", lambda *a: True)
     monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda *a: False)
     monkeypatch.setattr(kv_cache_interface, "get_ascend_device_type", lambda: AscendDeviceType.A5)
-    monkeypatch.setattr(attn_utils, "vllm_version_is", lambda v: legacy)
     monkeypatch.setattr(attn_utils, "get_kv_cache_tensor_layers", lambda d: names)
     monkeypatch.setattr(attn_utils, "_get_attention_kv_cache_dims", lambda *a: (8, 4))
     raw = attn_utils._allocate_kv_cache(config, {}, torch.device("cpu"))
@@ -1207,7 +1203,7 @@ def test_sfa_parent_allocation_and_kernel_blocks(monkeypatch, legacy, kernel_blo
         assert sum(t.numel() for t in raw[names[0]]) == 3 * spec.page_size_bytes
     raw0 = raw[names[0]] if concat else raw[names[0]][0]
     raw1 = raw[names[1]] if concat else raw[names[1]][0]
-    assert (raw0 is raw1) == legacy
+    assert raw0 is not raw1
     groups = [SimpleNamespace(kv_cache_group_id=0, kv_cache_spec=spec, backend=AscendSFABackend, layer_names=names)]
     caches = attn_utils._reshape_kv_cache_v2(groups, raw, "auto", [kernel_block_size], {}, config)
     if not concat:
@@ -1219,7 +1215,7 @@ def test_sfa_parent_allocation_and_kernel_blocks(monkeypatch, legacy, kernel_blo
     assert p0.shape == (3 * 4 // kernel_block_size, kernel_block_size, 1, 12)
     caches[names[0]][0][1, 1, 0, 0] = 7
     assert p0[1, 1, 0, 0] == 7
-    assert (p1[1, 1, 0, 0] == 7).item() == legacy
+    assert not (p1[1, 1, 0, 0] == 7).item()
 
 
 @pytest.mark.parametrize("failure", ["partial_page", "capacity", "kernel_ratio", "padded", "backend_shape"])
