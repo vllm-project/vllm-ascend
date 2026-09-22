@@ -75,6 +75,7 @@ from vllm_ascend.batch_invariant import init_batch_invariance
 from vllm_ascend.core.kv_cache_placement import (
     KVPPPhysicalCachePlan,
     create_kvpp_cache_allocation_plan,
+    register_kvpp_draft_layers,
 )
 from vllm_ascend.core.profiling_chunk_predictor import (
     _attach_profiling_chunk_execution_time,
@@ -1096,6 +1097,12 @@ class NPUWorker(WorkerBase):
             )
         kvpp_config = KVPPConfig.from_vllm_config(self.vllm_config)
         if kvpp_config.size > 1:
+            register_kvpp_draft_layers(
+                self.vllm_config,
+                self.model_runner,
+                kv_cache_spec,
+                is_last_pp_rank=get_pp_group().is_last_rank,
+            )
             speculative_config = self.vllm_config.speculative_config
             if (
                 speculative_config is not None

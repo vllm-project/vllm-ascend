@@ -56,9 +56,10 @@ def test_physical_allocations_and_scratch_aliases(monkeypatch, num_blocks, total
 
 
 @pytest.mark.parametrize("rank", [0, 1, 2])
-def test_dspark_context_writes_survive_target_scratch_reuse(monkeypatch, rank):
+@pytest.mark.parametrize("draft_names", [None, ("draft.layers.9.attn", "draft.layers.103.attn", "draft.cache")])
+def test_dspark_context_writes_survive_target_scratch_reuse(monkeypatch, rank, draft_names):
     monkeypatch.setattr(kvpp_cache, "get_kvpp_group", lambda: SimpleNamespace(rank_in_group=rank))
-    config, specs, drafts = make_dspark_kvpp_case()
+    config, specs, drafts = make_dspark_kvpp_case(draft_names=draft_names)
     caches = kvpp_cache.allocate_kvpp_cache(config, make_cache_config(specs), torch.device("cpu"))
     draft_storage = set()
     # DSpark populates every draft layer before running the draft network.

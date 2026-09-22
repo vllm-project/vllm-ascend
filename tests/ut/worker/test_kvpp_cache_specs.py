@@ -23,11 +23,14 @@ def test_dspark_worker_returns_the_specs_used_for_kvpp_budget(monkeypatch, rank,
         )
     instance = SimpleNamespace(
         vllm_config=config,
-        model_runner=SimpleNamespace(get_kv_cache_spec=lambda: specs),
+        model_runner=SimpleNamespace(
+            get_kv_cache_spec=lambda: specs, drafter=SimpleNamespace(_draft_attn_layer_names=set(drafts))
+        ),
         _kvpp_cache_allocation_plan=None,
     )
     monkeypatch.setattr(worker, "get_layerwise_reuse_config", lambda _: None)
     monkeypatch.setattr(worker, "get_tp_group", lambda: SimpleNamespace(rank_in_group=rank))
+    monkeypatch.setattr(worker, "get_pp_group", lambda: SimpleNamespace(is_last_rank=True))
     monkeypatch.setattr(
         worker, "get_ascend_config", lambda: SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=False))
     )

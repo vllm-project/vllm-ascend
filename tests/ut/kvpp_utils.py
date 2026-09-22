@@ -27,6 +27,12 @@ def indexer_name(index):
 
 def make_kvpp_config(tp=3):
     return SimpleNamespace(
+        use_v2_model_runner=False,
+        compilation_config=SimpleNamespace(
+            static_forward_context={
+                name: SimpleNamespace(_kvpp_is_draft=name == layer_name(17)) for name in make_kvpp_specs()
+            }
+        ),
         additional_config={"enable_kvpp": True},
         parallel_config=SimpleNamespace(
             tensor_parallel_size=tp,
@@ -67,7 +73,7 @@ def make_kvpp_specs():
     return specs
 
 
-def make_dspark_kvpp_case(tp=3):
+def make_dspark_kvpp_case(tp=3, draft_names=None):
     config = make_kvpp_config(tp)
     config.speculative_config.method = "dspark"
     config.speculative_config.draft_model_config = SimpleNamespace(hf_config=SimpleNamespace(num_hidden_layers=3))
@@ -77,11 +83,13 @@ def make_dspark_kvpp_case(tp=3):
     del specs[layer_name(17)]
     # Qwen3 DSpark numbers its layers after the target. Its layer count is
     # independent of the target's one MTP layer and of the draft token count.
-    drafts = tuple(layer_name(i) for i in range(17, 20))
+    drafts = tuple(draft_names) if draft_names is not None else tuple(layer_name(i) for i in range(17, 20))
     for name in drafts:
         specs[name] = FullAttentionSpec(block_size=2, num_kv_heads=2, head_size=8, dtype=torch.float16)
     config.compilation_config = SimpleNamespace(
-        static_forward_context={name: SimpleNamespace(impl=SimpleNamespace()) for name in specs}
+        static_forward_context={
+            name: SimpleNamespace(impl=SimpleNamespace(), _kvpp_is_draft=name in drafts) for name in specs
+        }
     )
     return config, specs, drafts
 

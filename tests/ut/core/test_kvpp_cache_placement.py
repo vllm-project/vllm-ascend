@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 from dataclasses import replace
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -159,8 +160,59 @@ def test_mtp_still_rejects_sliding_window_cache_specs():
         placement.create_kvpp_cache_allocation_plan(config, specs, 0)
 
 
-def test_dspark_draft_range_uses_local_layers_and_draft_model_depth():
+def test_dspark_draft_names_are_filtered_to_local_cache_specs():
     config, specs, drafts = make_dspark_kvpp_case()
     del config.model_config.hf_config.num_nextn_predict_layers
     assert placement.find_draft_layers(config, specs) == set(drafts)
-    assert placement.find_draft_layers(config, [layer_name(16), drafts[-1], layer_name(20)]) == {drafts[-1]}
+    assert placement.find_draft_layers(config, [layer_name(16), drafts[-1]]) == {drafts[-1]}
+
+
+@pytest.mark.parametrize("method", ["mtp", "dspark"])
+@pytest.mark.parametrize("v2", [False, True])
+def test_loader_names_override_numeric_ranges(method, v2):
+    config, specs, drafts = make_dspark_kvpp_case(
+        draft_names=("draft.layers.9.attn", "draft.layers.103.attn", "draft.cache")
+    )
+    config.speculative_config.method = method
+    config.use_v2_model_runner = v2
+    context = config.compilation_config.static_forward_context
+    for layer in context.values():
+        del layer._kvpp_is_draft
+    with pytest.raises(ValueError, match="has not been initialized"):
+        placement.find_draft_layers(config, specs)
+    names = set(drafts) | {"draft.on_another_stage"}
+    runner = SimpleNamespace(
+        drafter=SimpleNamespace(_draft_attn_layer_names=names),
+        speculator=SimpleNamespace(draft_attn_layer_names=names),
+    )
+    placement.register_kvpp_draft_layers(config, runner, specs, is_last_pp_rank=True)
+    assert placement.find_draft_layers(config, specs) == set(drafts)
+    plan = placement.create_kvpp_cache_allocation_plan(config, specs, 1)
+    assert set(plan.layer_owner_ranks) == set(specs) - set(drafts)
+    assert plan.layer_bundles[layer_name(9)] == (layer_name(9),)
+    assert all(plan.layer_bundles[name] == (name,) for name in drafts)
+
+
+@pytest.mark.parametrize("v2", [False, True])
+def test_missing_proposer_is_only_valid_on_non_draft_pp_stage(v2):
+    config, specs, _ = make_dspark_kvpp_case()
+    config.use_v2_model_runner = v2
+    with pytest.raises(ValueError, match="loaded proposer"):
+        placement.register_kvpp_draft_layers(config, SimpleNamespace(), specs, is_last_pp_rank=True)
+    placement.register_kvpp_draft_layers(config, SimpleNamespace(), specs, is_last_pp_rank=False)
+    assert placement.find_draft_layers(config, specs) == set()
+
+
+@pytest.mark.parametrize("via_runner", [False, True])
+def test_cross_model_shared_cache_is_rejected_before_marking(via_runner):
+    config, specs, drafts = make_dspark_kvpp_case()
+    alias = "draft.shared.attn"
+    runner = SimpleNamespace(drafter=SimpleNamespace(_draft_attn_layer_names=set(drafts) | {alias}))
+    context = config.compilation_config.static_forward_context
+    context[alias] = SimpleNamespace()
+    if via_runner:
+        runner.shared_kv_cache_layers = {alias: layer_name(9)}
+    else:
+        context[alias].kv_sharing_target_layer_name = layer_name(9)
+    with pytest.raises(ValueError, match="sharing target KV caches"):
+        placement.register_kvpp_draft_layers(config, runner, specs, is_last_pp_rank=True)
