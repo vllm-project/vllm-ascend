@@ -210,7 +210,7 @@ def test_fa3_graph_switches_flashdecode_and_active_batch(dtype, forward_context,
         assert updated.query_start_loc.data_ptr() == common.query_start_loc.data_ptr()
         assert updated.seq_lens.data_ptr() == common.seq_lens.data_ptr()
         assert updated.block_tables.data_ptr() == common.block_table_tensor.data_ptr()
-        spec = (*next(iter(builder.scheduler_specs)), common.causal)
+        spec = next(iter(builder.scheduler_specs))
         assert updated.scheduler_metadata is metadata.scheduler_metadata
         assert updated.scheduler_metadata[spec].data_ptr() == metadata.scheduler_metadata[spec].data_ptr()
         graph.replay()

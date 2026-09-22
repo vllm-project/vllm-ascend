@@ -62,8 +62,8 @@ def test_metadata_uses_device_lengths_and_preserves_mixed_offsets(builder):
 
 
 def test_runner_buffer_views_are_reused_without_mutating_padding(builder):
-    spec = (4, 2, 8, torch.float32, 0.123, 0.0, True)
-    builder.scheduler_specs = {spec[:-1]}
+    spec = (4, 2, 8, torch.float32, 0.123, 0.0)
+    builder.scheduler_specs = {spec}
     common = common_metadata([3, 1, 2], [130, 259, 7])
     common.num_input_tokens = 6
     with patch.object(fa3, "get_scheduler_metadata", side_effect=[torch.tensor([1]), torch.tensor([2])]) as tiling:
@@ -124,7 +124,7 @@ def test_paged_call_uses_matching_mask_spec(builder, impl, state, causal):
     metadata = builder.build(0, common)
     metadata.attn_state = state
     tiling_tensor = torch.empty(1)
-    metadata.scheduler_metadata[(4, 2, 8, torch.float32, 0.123, 0.0, causal)] = tiling_tensor
+    metadata.scheduler_metadata[(4, 2, 8, torch.float32, 0.123, 0.0)] = tiling_tensor
     query = torch.randn(11, 4, 8)
     output = torch.empty_like(query)
     with (
@@ -162,7 +162,7 @@ def test_full_forward_never_falls_back_to_fia(builder, impl, state, capturing):
     common.attn_state = state
     metadata = builder.build(0, common)
     metadata.attn_state = None  # The inherited forward must not depend on a scheduler state.
-    metadata.scheduler_metadata[(4, 2, 8, torch.float32, 0.123, 0.0, True)] = torch.empty(1)
+    metadata.scheduler_metadata[(4, 2, 8, torch.float32, 0.123, 0.0)] = torch.empty(1)
     query = torch.randn(sum(query_lens), 4, 8)
     output = torch.empty_like(query)
     expected = torch.full_like(query, 7)
@@ -194,8 +194,8 @@ def test_full_forward_never_falls_back_to_fia(builder, impl, state, capturing):
 
 
 def test_tiling_prepared_before_capture_and_refreshed_in_place(builder, impl):
-    spec = (4, 2, 8, torch.float32, 0.123, 0.0, True)
-    builder.scheduler_specs = {spec[:-1]}
+    spec = (4, 2, 8, torch.float32, 0.123, 0.0)
+    builder.scheduler_specs = {spec}
     common = common_metadata([1, 1], [10, 20])
     query = torch.randn(2, 4, 8)
     output = torch.empty_like(query)
@@ -274,8 +274,8 @@ def test_platform_selects_fa3_by_model(
 
 
 def test_paged_tiling_shared_but_attention_computed_for_each_layer(builder, impl):
-    spec = (4, 2, 8, torch.float32, 0.123, 0.0, True)
-    builder.scheduler_specs = {spec[:-1]}
+    spec = (4, 2, 8, torch.float32, 0.123, 0.0)
+    builder.scheduler_specs = {spec}
     common = common_metadata([3, 7], [3, 7])
     common.attn_state = AscendAttentionState.PrefillNoCache
     shared_tiling = torch.tensor([1], dtype=torch.uint8)
@@ -389,14 +389,14 @@ def test_eager_metadata_is_not_retained_in_graph_cache(builder, causal):
     with patch.object(fa3, "get_scheduler_metadata", side_effect=[torch.tensor([1]), torch.tensor([2])]):
         first = builder.build(0, common)
         second = builder.build(0, common)
-    spec = (*layer_spec, causal)
+    spec = layer_spec
     assert not builder.scheduler_buffers
     assert first.scheduler_metadata is not second.scheduler_metadata
     assert first.scheduler_metadata[spec].tolist() == [1]
     assert second.scheduler_metadata[spec].tolist() == [2]
 
 
-def test_graph_cache_separates_specs_masks_buckets_and_draft_buffers(builder):
+def test_graph_cache_separates_specs_buckets_and_draft_buffers(builder):
     first_spec = (4, 2, 8, torch.float32, 0.123, 0.0)
     second_spec = (8, 2, 8, torch.float32, 0.123, 0.0)
     builder.scheduler_specs = {first_spec, second_spec}
@@ -405,16 +405,11 @@ def test_graph_cache_separates_specs_masks_buckets_and_draft_buffers(builder):
         fa3, "get_scheduler_metadata", side_effect=lambda **kwargs: torch.tensor([kwargs["num_heads_q"]])
     ) as tiling:
         initial = builder.build(0, common)
-        original = initial.scheduler_metadata[(*first_spec, True)]
-        common.causal = False
-        noncausal = builder.build(0, common)
-        common.causal = True
+        original = initial.scheduler_metadata[first_spec]
         refreshed = builder.build(0, common)
-        assert tiling.call_count == 6  # Two layouts per build, regardless of layer count.
+        assert tiling.call_count == 4  # Two layouts per build, regardless of layer count.
         assert refreshed.scheduler_metadata is initial.scheduler_metadata
-        assert noncausal.scheduler_metadata is initial.scheduler_metadata
-        assert original is refreshed.scheduler_metadata[(*first_spec, True)]
-        assert original.data_ptr() != noncausal.scheduler_metadata[(*first_spec, False)].data_ptr()
+        assert original is refreshed.scheduler_metadata[first_spec]
         assert tiling.call_args.kwargs["causal"] is True
         common.num_input_tokens = 6
         larger_graph = builder.build(0, common)
@@ -422,5 +417,5 @@ def test_graph_cache_separates_specs_masks_buckets_and_draft_buffers(builder):
     assert len(builder.scheduler_buffers) == 3
     for other in (larger_graph, draft):
         assert other.scheduler_metadata is not initial.scheduler_metadata
-        assert other.scheduler_metadata[(*first_spec, True)].data_ptr() != original.data_ptr()
-    assert len(initial.scheduler_metadata) == 4
+        assert other.scheduler_metadata[first_spec].data_ptr() != original.data_ptr()
+    assert len(initial.scheduler_metadata) == 2

@@ -58,7 +58,6 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
         self.capture_sizes = set(vllm_config.compilation_config.cudagraph_capture_sizes or [])
         self.block_size = kv_cache_spec.block_size
         # Deduplicate layer parameters so identical layers share one tiling call.
-        # Causality comes from common metadata and is appended to form spec in build.
         self.scheduler_specs = set()
         for name in layer_names:
             impl = vllm_config.compilation_config.static_forward_context[name].impl
@@ -72,8 +71,15 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
                     impl.logits_soft_cap,
                 )
             )
-        # graph_key -> {spec -> tiling tensor}. The builder retains these across
-        # executions and updates tensors in place to keep captured addresses valid.
+        # Two-level cache: scheduler_buffers[graph_key][spec] = tiling_tensor.
+        # Outer key: (input-buffer addresses, captured token bound), identifying
+        # the graph context. Its value is a dictionary, not a tiling tensor.
+        # Inner key: the layer's operator spec (heads, head size, dtype, scale,
+        # softcap). Its value is the device tiling tensor shared by matching layers.
+        # scheduler_metadata aliases the selected inner dictionary, so writing
+        # scheduler_metadata[spec] updates scheduler_buffers[graph_key][spec].
+        # Retain these tensors across builds and copy new tiling into them to
+        # preserve the device addresses recorded by graph capture.
         self.scheduler_buffers: dict[tuple, dict[tuple, torch.Tensor]] = {}
 
     @classmethod
@@ -101,22 +107,23 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
         seq_lens = common.seq_lens
         block_tables = common.block_table_tensor
         num_input_tokens = common.num_input_tokens or common.num_actual_tokens
-        graph_shape = num_input_tokens in self.capture_sizes
-        max_query_len = num_input_tokens if graph_shape else common.max_query_len
-        if graph_shape:
+        is_graph_capture_size = num_input_tokens in self.capture_sizes
+        max_query_len = num_input_tokens if is_graph_capture_size else common.max_query_len
+        if is_graph_capture_size:
             # Distinct input buffers (including draft steps) and token buckets
             # must retain independent tiling storage even for identical specs.
             source_key = (query_start_loc.data_ptr(), seq_lens.data_ptr(), block_tables.data_ptr())
             graph_key = (source_key, max_query_len)
+            # Select the inner spec -> tensor dictionary. The assignment below
+            # to scheduler_metadata[spec] also updates scheduler_buffers[graph_key].
             scheduler_metadata = self.scheduler_buffers.setdefault(graph_key, {})
         else:
             scheduler_metadata = {}
-        for layer_spec in self.scheduler_specs:
-            num_heads, num_kv_heads, head_size, dtype, scale, softcap = layer_spec
-            # spec identifies the operator configuration shared across layers.
-            # Include the current causal flag so different mask modes cannot
-            # overwrite each other's tiling. Page size is fixed by this builder.
-            spec = (*layer_spec, common.causal)
+        for spec in self.scheduler_specs:
+            # Use the same layer configuration created in __init__ and used by
+            # forward. Page size and causality are fixed for this attention group;
+            # common.causal is still passed to tiling and attention, not hardcoded.
+            num_heads, num_kv_heads, head_size, dtype, scale, softcap = spec
             # AICPU tiling runs once per layout, before entering the model graph.
             # The operator's auxiliary-stream events cannot themselves be
             # captured on all CANN releases. This still consumes device lengths
@@ -233,7 +240,6 @@ class AscendFlashAttentionImpl(AscendAttentionBackendImpl):
             query.dtype,
             self.scale,
             self.logits_soft_cap,
-            attn_metadata.causal,
         )
         result = flash_attn_with_kvcache(
             query,
