@@ -7,11 +7,13 @@ import torch_npu  # noqa: F401 -- registers torch.npu used by the module under t
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.dataclass.moe_quant import MoEQuantParams
 from vllm_ascend.ops.fused_moe.moe_mlp import _unified_apply_activation, apply_moe_mlp
 from vllm_ascend.ops.fused_moe.routed_experts import AscendUnquantizedFusedMoEMethod
+from vllm_ascend.quantization.methods.w4a8 import w4a8 as w4a8_module
 from vllm_ascend.quantization.methods.w4a8.w4a8 import AscendW4A8DynamicFusedMoEMethod
 from vllm_ascend.quantization.methods.w8a8.w8a8_dynamic import AscendW8A8DynamicFusedMoEMethod
 from vllm_ascend.quantization.methods.wna16.w4a16 import AscendW4A16FusedMoEMethod
@@ -295,6 +297,187 @@ class TestW8A8FusedMoEMethod(unittest.TestCase):
 
 
 class TestW4A8SituPath(unittest.TestCase):
+    def test_a3_w4a8_situ_uses_gmsq_fusion(self):
+        method = AscendW4A8DynamicFusedMoEMethod.__new__(AscendW4A8DynamicFusedMoEMethod)
+        method.use_expert_weight_list = False
+        layer = SimpleNamespace(
+            w13_weight=torch.ones(2, 64, 32, dtype=torch.int32),
+            w13_weight_scale=torch.ones(2, 256, dtype=torch.int64),
+            w13_scale_bias=torch.randn(2, 256),
+            w2_weight=torch.randn(2, 128, 8),
+            w2_weight_scale=torch.randn(2, 64),
+            activation="situ",
+        )
+        mlp_compute_input = _mlp_compute_input(
+            hidden_states=torch.randn(2, 64),
+            layer=layer,
+            fusion=False,
+            activation=MoEActivation.SITU,
+            activation_situ_beta=4.0,
+            activation_situ_linear_beta=25.0,
+            quant=MoEQuantParams(quant_type=QuantType.W4A8, is_per_channel_weight=True),
+        )
+        quantized_input = torch.ones(2, 64, dtype=torch.int8)
+        quantized_situ_out = torch.ones(2, 128, dtype=torch.int8)
+        situ_out_scale = torch.ones(2, dtype=torch.float32)
+        mock_gmsq = MagicMock(return_value=(quantized_situ_out, situ_out_scale))
+
+        with (
+            patch("torch_npu.npu_dynamic_quant", return_value=(quantized_input, torch.ones(2)), create=True),
+            patch.object(w4a8_module, "get_ascend_device_type", return_value=AscendDeviceType.A3),
+            patch.object(w4a8_module.envs, "VLLM_ASCEND_ENABLE_GMSQ_SITU", True),
+            patch.object(w4a8_module, "_get_grouped_matmul_situ_quant", return_value=mock_gmsq),
+            patch("torch_npu.npu_grouped_matmul", create=True) as mock_gmm,
+            patch("torch.ops._C_ascend.dequant_situ_quant", create=True) as mock_dequant_situ,
+        ):
+            out, scale = method.apply_gmm1_act_quant(mlp_compute_input)
+
+        self.assertIs(out, quantized_situ_out)
+        self.assertEqual(scale.shape, torch.Size([2, 1]))
+        mock_gmm.assert_not_called()
+        mock_dequant_situ.assert_not_called()
+        gmsq_kwargs = mock_gmsq.call_args.kwargs
+        self.assertEqual(len(gmsq_kwargs["weight"]), 2)
+        self.assertEqual(len(gmsq_kwargs["weight_scale"]), 2)
+        self.assertEqual(gmsq_kwargs["weight_scale"][0].shape, torch.Size([256]))
+        self.assertEqual(gmsq_kwargs["x_scale"].shape, torch.Size([2]))
+        self.assertEqual(gmsq_kwargs["beta"], 4.0)
+        self.assertEqual(gmsq_kwargs["linear_beta"], 25.0)
+
+    def test_a3_gmsq_disabled_uses_existing_situ_path(self):
+        method = AscendW4A8DynamicFusedMoEMethod.__new__(AscendW4A8DynamicFusedMoEMethod)
+        method.use_expert_weight_list = False
+        layer = SimpleNamespace(
+            w13_weight=torch.ones(1, 64, 32, dtype=torch.int32),
+            w13_weight_scale=torch.ones(1, 256, dtype=torch.int64),
+            w13_scale_bias=torch.randn(1, 256),
+            w2_weight=torch.randn(1, 128, 8),
+            w2_weight_scale=torch.randn(1, 64),
+            activation="situ",
+        )
+        mlp_compute_input = _mlp_compute_input(
+            hidden_states=torch.randn(2, 64),
+            layer=layer,
+            fusion=False,
+            activation=MoEActivation.SITU,
+            quant=MoEQuantParams(quant_type=QuantType.W4A8, is_per_channel_weight=True),
+        )
+        quantized_input = torch.ones(2, 64, dtype=torch.int8)
+
+        with (
+            patch("torch_npu.npu_dynamic_quant", return_value=(quantized_input, torch.ones(2)), create=True),
+            patch.object(w4a8_module, "get_ascend_device_type", return_value=AscendDeviceType.A3),
+            patch.object(w4a8_module.envs, "VLLM_ASCEND_ENABLE_GMSQ_SITU", False),
+            patch.object(w4a8_module, "_get_grouped_matmul_situ_quant", return_value=MagicMock()) as mock_get_gmsq,
+            patch("torch_npu.npu_grouped_matmul", return_value=["bf16_out"], create=True) as mock_gmm,
+            patch(
+                "torch.ops._C_ascend.dequant_situ_quant",
+                return_value=("qout", torch.ones(2, 1)),
+                create=True,
+            ) as mock_situ,
+        ):
+            out, scale = method.apply_gmm1_act_quant(mlp_compute_input)
+
+        self.assertEqual(out, "qout")
+        self.assertEqual(scale.shape, torch.Size([2, 1]))
+        mock_get_gmsq.assert_not_called()
+        mock_gmm.assert_called_once()
+        mock_situ.assert_called_once()
+
+    def test_a3_gmsq_selection_rejects_unsupported_inputs(self):
+        common_kwargs = {
+            "hidden_states": torch.ones(2, 64, dtype=torch.int8),
+            "w1": torch.ones(2, 64, 32, dtype=torch.int32),
+            "w1_scale": torch.ones(2, 256, dtype=torch.int64),
+            "group_list_type": 1,
+            "group_list": torch.tensor([1, 1]),
+            "x_scale": torch.ones(2),
+        }
+
+        with (
+            patch.object(w4a8_module, "get_ascend_device_type", return_value=AscendDeviceType.A3),
+            patch.object(w4a8_module.envs, "VLLM_ASCEND_ENABLE_GMSQ_SITU", True),
+            patch.object(w4a8_module, "_get_grouped_matmul_situ_quant", return_value=MagicMock()),
+        ):
+            self.assertFalse(
+                w4a8_module._gmsq_situ_fusion_enabled(
+                    **{
+                        **common_kwargs,
+                        "hidden_states": torch.ones(
+                            w4a8_module.GMSQ_MAX_PADDED_BLOCKS * w4a8_module.GMSQ_M_TILE_SIZE + 1,
+                            64,
+                            dtype=torch.int8,
+                        ),
+                    }
+                )
+            )
+            self.assertFalse(
+                w4a8_module._gmsq_situ_fusion_enabled(
+                    **{
+                        **common_kwargs,
+                        "w1_scale": torch.ones(2, 128, dtype=torch.float32),
+                    }
+                )
+            )
+            self.assertFalse(w4a8_module._gmsq_situ_fusion_enabled(**{**common_kwargs, "group_list_type": 2}))
+            for unsupported in (
+                {"w1_scale": torch.ones(2, 128, dtype=torch.int64)},
+                {"w1_scale": torch.ones(2, 512, dtype=torch.int64)[:, ::2]},
+                {"group_list": torch.tensor([1, 1], dtype=torch.float16)},
+                {"group_list": torch.tensor([2])},
+                {"x_scale": torch.ones(1)},
+                {"w1": torch.ones(2, 32, 64, dtype=torch.int32).transpose(1, 2)},
+            ):
+                with self.subTest(unsupported=unsupported):
+                    self.assertFalse(w4a8_module._gmsq_situ_fusion_enabled(**{**common_kwargs, **unsupported}))
+            with patch.object(w4a8_module, "_get_grouped_matmul_situ_quant", return_value=None):
+                self.assertFalse(w4a8_module._gmsq_situ_fusion_enabled(**common_kwargs))
+            with patch.object(w4a8_module, "get_ascend_device_type", return_value=AscendDeviceType.A2):
+                self.assertFalse(w4a8_module._gmsq_situ_fusion_enabled(**common_kwargs))
+
+    def test_a3_gmsq_metadata_bounds(self):
+        # Meta tensors exercise general shape bounds without allocating model weights.
+        cases = [
+            (1, 1, 64, 256, True),
+            (128, 0, 16384, 11008, True),
+            (14, 1024, 3584, 6144, True),
+            (112, 4096, 2048, 4096, True),
+            (128, 16639, 64, 256, True),
+            (128, 16640, 64, 256, False),
+            (129, 1, 64, 256, False),
+            (1, 1, 16448, 256, False),
+            (1, 1, 96, 256, False),
+            (1, 1, 64, 384, False),
+            (1, 1, 64, 11264, False),
+        ]
+        with (
+            patch.object(w4a8_module, "get_ascend_device_type", return_value=AscendDeviceType.A3),
+            patch.object(w4a8_module.envs, "VLLM_ASCEND_ENABLE_GMSQ_SITU", True),
+            patch.object(w4a8_module, "_get_grouped_matmul_situ_quant", return_value=MagicMock()),
+        ):
+            for experts, capacity, k_size, n_size, expected in cases:
+                for group_dtype in (torch.int64, torch.int32, torch.float32):
+                    with self.subTest(shape=(experts, capacity, k_size, n_size), group_dtype=group_dtype):
+                        self.assertEqual(
+                            w4a8_module._gmsq_situ_fusion_enabled(
+                                hidden_states=torch.empty(capacity, k_size, dtype=torch.int8, device="meta"),
+                                w1=torch.empty(experts, k_size, n_size // 8, dtype=torch.int32, device="meta"),
+                                w1_scale=torch.empty(experts, n_size, dtype=torch.int64, device="meta"),
+                                group_list_type=1,
+                                group_list=torch.empty(experts, dtype=group_dtype, device="meta"),
+                                x_scale=torch.empty(capacity, device="meta"),
+                            ),
+                            expected,
+                        )
+
+    def test_gmsq_weight_normalization_preserves_storage(self):
+        weights = torch.ones(2, 64, 32, dtype=torch.int32)
+        normalized = w4a8_module._as_gmsq_expert_weights([weights])
+        self.assertEqual(len(normalized), 2)
+        for expert, weight in enumerate(normalized):
+            self.assertEqual(weight.data_ptr(), weights[expert].data_ptr())
+        self.assertIs(w4a8_module._as_gmsq_expert_weights(normalized), normalized)
+
     def test_situ_gmm1_uses_per_channel_scale_layout(self):
         method = AscendW4A8DynamicFusedMoEMethod.__new__(AscendW4A8DynamicFusedMoEMethod)
         method.use_expert_weight_list = False

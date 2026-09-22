@@ -79,6 +79,10 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Enable the Ascend A3 GroupedMatmulSituQuant fusion for supported W4A8
+    # SiTU MoE inputs. Default: 1 (enabled). Valid values: 0 or 1. This
+    # configuration is not sensitive.
+    "VLLM_ASCEND_ENABLE_GMSQ_SITU": lambda: _strict_binary_env("VLLM_ASCEND_ENABLE_GMSQ_SITU", "1"),
     # Emit per-layer KVPool ranged transfer audit events. Default: 0 (disabled).
     # Valid values: 0 or 1. This configuration is not sensitive.
     "VLLM_ASCEND_KVPOOL_RANGE_DEBUG": lambda: _strict_binary_env("VLLM_ASCEND_KVPOOL_RANGE_DEBUG"),
