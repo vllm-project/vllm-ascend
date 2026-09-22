@@ -15,6 +15,7 @@ def _record_expert_tokens_kernel(
     group_list_type: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
+    
     offsets = tl.arange(0, BLOCK_SIZE)
     record_enabled = tl.load(record_enabled_ptr) != 0
     if record_enabled:
