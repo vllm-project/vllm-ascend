@@ -152,6 +152,7 @@ class SfaPDConsumerReqMeta:
 class SfaPDConsumerMetadata(KVConnectorMetadata):
     def __init__(self) -> None:
         self.requests: list[SfaPDConsumerReqMeta] = []
+        self.failed_requests: list[tuple[str, list[int], list[int]]] = []
 
     def add_request(
         self,
@@ -164,6 +165,20 @@ class SfaPDConsumerMetadata(KVConnectorMetadata):
                 req_id=request_id,
                 main_block_ids=list(main_block_ids),
                 indexer_block_ids=list(indexer_block_ids),
+            )
+        )
+
+    def add_failed_request(
+        self,
+        request_id: str,
+        main_block_ids: list[int],
+        indexer_block_ids: list[int],
+    ) -> None:
+        self.failed_requests.append(
+            (
+                request_id,
+                list(main_block_ids),
+                list(indexer_block_ids),
             )
         )
 

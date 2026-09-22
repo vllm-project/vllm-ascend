@@ -30,6 +30,7 @@ READ_THREAD_POLL_TIMEOUT_MS = 100
 THREAD_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 DEST_BLOCK_WAIT_TIMEOUT = 2.0
 DEST_BLOCK_WAIT_INTERVAL = 0.001
+DISCARDED_TOMBSTONE_TTL_SECONDS = 900.0
 
 
 @dataclass
@@ -107,6 +108,9 @@ class MembPullReadThread(threading.Thread):
         self._p_pp_topology: dict[bytes, tuple[int, int]] = {}
         self._done_requests: set[str] = set()
         self._failed_requests: set[str] = set()
+        self._completed_ext_ids: set[str] = set()
+        self._discarded_ext_ids: dict[str, float] = {}
+        self._pending_failures: set[str] = set()
         # Request completion needs every flattened PP/TP contributor.
         self._done_contributors: dict[str, set[int]] = {}
         self._expected_ratio: dict[str, int] = {}
@@ -122,20 +126,82 @@ class MembPullReadThread(threading.Thread):
                 previous = self._expected_ratio.setdefault(ext_id, ratio)
                 if previous != ratio:
                     self._failed_requests.add(ext_id)
+                    self._discarded_ext_ids.setdefault(ext_id, time.monotonic())
                     continue
                 contributors = self._done_contributors.setdefault(ext_id, set())
                 contributors.add(group_member_idx)
                 if len(contributors) >= ratio:
                     self._done_requests.add(ext_id)
+                    self._completed_ext_ids.add(ext_id)
                     self._done_contributors.pop(ext_id, None)
                     self._expected_ratio.pop(ext_id, None)
 
     def discard_requests(self, ext_ids: set[str]) -> None:
-        """Drop partial contributor state for finished/cancelled requests."""
+        """Drop request state and retain tombstones for late batches."""
+        now = time.monotonic()
         with self._lock:
             for ext_id in ext_ids:
                 self._done_contributors.pop(ext_id, None)
                 self._expected_ratio.pop(ext_id, None)
+                self._completed_ext_ids.discard(ext_id)
+                self._discarded_ext_ids[ext_id] = now
+            self._prune_tombstones_locked(now)
+
+    def rearm_requests(self, ext_ids: set[str]) -> None:
+        """Clear state left by an earlier request using the same external id."""
+        with self._lock:
+            for ext_id in ext_ids:
+                self._done_requests.discard(ext_id)
+                self._failed_requests.discard(ext_id)
+                self._completed_ext_ids.discard(ext_id)
+                self._discarded_ext_ids.pop(ext_id, None)
+                self._pending_failures.discard(ext_id)
+                self._done_contributors.pop(ext_id, None)
+                self._expected_ratio.pop(ext_id, None)
+
+    def mark_failed_requests(self, ext_ids: set[str]) -> None:
+        """Queue failure terminals to be serialized with the copy loop."""
+        with self._lock:
+            self._pending_failures.update(ext_ids)
+
+    def _prune_tombstones_locked(self, now: float) -> None:
+        expired = [
+            ext_id
+            for ext_id, recorded_at in self._discarded_ext_ids.items()
+            if now - recorded_at > DISCARDED_TOMBSTONE_TTL_SECONDS
+        ]
+        for ext_id in expired:
+            del self._discarded_ext_ids[ext_id]
+
+    def _drain_pending_failures(self) -> None:
+        """Apply queued failure terminals between transfer batches."""
+        with self._lock:
+            if not self._pending_failures:
+                return
+            pending = self._pending_failures
+            self._pending_failures = set()
+            now = time.monotonic()
+            for ext_id in pending:
+                self._completed_ext_ids.discard(ext_id)
+                self._discarded_ext_ids[ext_id] = now
+                self._done_requests.discard(ext_id)
+                self._failed_requests.add(ext_id)
+                self._done_contributors.pop(ext_id, None)
+                self._expected_ratio.pop(ext_id, None)
+
+    def _filter_stale_batch(
+        self,
+        read_reqs: list[tuple[Any, ...]],
+        done_ext_ids: list[str],
+    ) -> tuple[list[tuple[Any, ...]], list[str]]:
+        """Remove duplicate or late requests before touching destination blocks."""
+        now = time.monotonic()
+        with self._lock:
+            self._prune_tombstones_locked(now)
+            stale_ext_ids = self._completed_ext_ids | self._discarded_ext_ids.keys()
+            fresh_reqs = [entry for entry in read_reqs if entry[0] not in stale_ext_ids]
+            fresh_done = [ext_id for ext_id in done_ext_ids if ext_id not in stale_ext_ids]
+        return fresh_reqs, fresh_done
 
     def get_and_clear_done(self) -> set[str]:
         with self._lock:
@@ -178,6 +244,7 @@ class MembPullReadThread(threading.Thread):
             decoder = msgspec.msgpack.Decoder(type=tuple)
             encoder = msgspec.msgpack.Encoder()
             while not self._stop_event.is_set():
+                self._drain_pending_failures()
                 try:
                     frames = sock.recv_multipart()
                     if len(frames) < 2:
@@ -255,6 +322,10 @@ class MembPullReadThread(threading.Thread):
                             for entry in msg[3]
                         ]
                         done_ext_ids = list(msg[4]) if len(msg) > 4 else []
+                        read_reqs, done_ext_ids = self._filter_stale_batch(
+                            read_reqs,
+                            done_ext_ids,
+                        )
                         # Contributor identity (unequal P/D TP). Absent = legacy single
                         # contributor: member 0 of a 1-member group pulls everything.
                         group_member_idx = int(msg[5]) if len(msg) > 5 else 0
@@ -306,6 +377,10 @@ class MembPullReadThread(threading.Thread):
                             failed_ids.update(done_ext_ids)
                             with self._lock:
                                 self._failed_requests.update(failed_ids)
+                                now = time.monotonic()
+                                for failed_id in failed_ids:
+                                    self._discarded_ext_ids.setdefault(failed_id, now)
+                                    self._completed_ext_ids.discard(failed_id)
                         if succeeded and done_ext_ids:
                             pp_rank, pp_size = self._p_pp_topology[identity]
                             self._record_chunk_done(
