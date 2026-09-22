@@ -1664,6 +1664,21 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
 
 class TestKVPPConfig(TestBase):
+    def test_graph_modes(self):
+        from types import SimpleNamespace
+
+        from vllm.config import CUDAGraphMode
+
+        from tests.ut.kvpp_utils import make_kvpp_config
+        from vllm_ascend.ascend_config import KVPPConfig
+
+        for mode in CUDAGraphMode:
+            with self.subTest(mode=mode):
+                config = make_kvpp_config()
+                config.model_config.enforce_eager = False
+                config.compilation_config = SimpleNamespace(cudagraph_mode=mode)
+                KVPPConfig.from_vllm_config(config).validate(config)
+
     def test_enable_switch_uses_tp_size(self):
         from tests.ut.kvpp_utils import make_kvpp_config
         from vllm_ascend.ascend_config import KVPPConfig
@@ -1696,7 +1711,6 @@ class TestKVPPConfig(TestBase):
         KVPPConfig.from_vllm_config(config).validate(config)
         restrictions = (
             ("parallel_config", "decode_context_parallel_size", 2, "DCP"),
-            ("model_config", "enforce_eager", False, "eager"),
             ("model_config", "use_mla", False, "MLA"),
             ("model_config", "is_hybrid", True, "MLA"),
             ("speculative_config", "method", "dspark", "mtp"),
