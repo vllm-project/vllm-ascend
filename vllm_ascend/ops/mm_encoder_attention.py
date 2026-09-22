@@ -166,8 +166,8 @@ class AscendMMEncoderAttention(MMEncoderAttention):
     ) -> torch.Tensor:
         fia_kwargs = dict(
             query=query,
-            key=key.contiguous(),
-            value=value.contiguous(),
+            key=key,
+            value=value,
             atten_mask=None,
             block_table=None,
             input_layout="TND",
@@ -213,6 +213,8 @@ class AscendMMEncoderAttention(MMEncoderAttention):
             cudagraph_mm_encoder=False,
         )
         q, k, v, origin_head_dim = self._maybe_pad_qkv(query, key, value)
+        k = k.contiguous()
+        v = v.contiguous()
         context_layer = self._run_vit_fia(q, k, v, actual_seq_lengths_q, actual_seq_lengths_kv)
         context_layer = self._maybe_unpad_output(context_layer, origin_head_dim)
         return self._restore_batch_layout(
@@ -235,6 +237,8 @@ class AscendMMEncoderAttention(MMEncoderAttention):
     ) -> torch.Tensor:
         context = get_encoder_forward_context()
         token_budget = context.token_budget
+        path = context.path
+        axis_keys = context.axis_keys
         is_capturing = context.capturing
         params = get_encoder_graph_params()
         if token_budget is None or params is None:
@@ -247,11 +251,17 @@ class AscendMMEncoderAttention(MMEncoderAttention):
             cudagraph_mm_encoder=True,
         )
         q, k, v, origin_head_dim = self._maybe_pad_qkv(query, key, value)
+        # FIA requires contiguous K/V tensors. Materialize them before graph-task
+        # capture so the tensors retained in ``attn_params`` are exactly the
+        # tensors whose addresses were captured by the operator.
+        k = k.contiguous()
+        v = v.contiguous()
 
         out = torch.empty_like(q)
         softmax_lse = torch.empty(1, dtype=q.dtype, device=q.device)
 
-        workspace = params.workspaces.get(token_budget)
+        graph_key = (path, token_budget, axis_keys) if axis_keys else (path, token_budget)
+        workspace = params.workspaces.get(graph_key)
         if workspace is None:
             workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
                 query=q,
@@ -270,7 +280,7 @@ class AscendMMEncoderAttention(MMEncoderAttention):
                 pre_tokens=SWA_INT_MAX,
                 next_tokens=SWA_INT_MAX,
             )
-            update_encoder_graph_workspace(token_budget, workspace)
+            update_encoder_graph_workspace(token_budget, workspace, path=path, axis_keys=axis_keys)
 
         stream = torch_npu.npu.current_stream()
         event = torch.npu.ExternalEvent()
@@ -303,9 +313,9 @@ class AscendMMEncoderAttention(MMEncoderAttention):
             weak_ref_tensors(out),
             weak_ref_tensors(softmax_lse),
         )
-        params.attn_params[token_budget].append(packed)
-        params.events[token_budget].append(event)
-        params.handles[token_budget].append(handle)
+        params.attn_params[graph_key].append(packed)
+        params.events[graph_key].append(event)
+        params.handles[graph_key].append(handle)
 
         context_layer = self._maybe_unpad_output(out, origin_head_dim)
         return self._restore_batch_layout(

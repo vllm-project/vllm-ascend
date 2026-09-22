@@ -17,6 +17,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import inspect
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from contextvars import ContextVar
 
@@ -84,7 +85,7 @@ from vllm_ascend.worker.v2.pp_utils import (
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
-from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
+from vllm_ascend.worker.v2.utils import communicator_switch, torch_cuda_wrapper
 
 if vllm_version_is("0.29.0"):
     from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
@@ -298,6 +299,25 @@ class NPUModelRunner(GPUModelRunner):
             static_forward_context=self.compilation_config.static_forward_context,
         )
         self.model_state.kvpp_runtime = self.kvpp
+
+    @torch.inference_mode()
+    def capture_model(self, *, profile_only: bool = False) -> int:
+        """Capture decoder and multimodal encoder graphs on Ascend."""
+        if hasattr(self, "model_state") and self.model_state.supports_mm_inputs:
+            encoder_runner = getattr(self.model_state, "encoder_runner", None)
+            encoder_manager = getattr(encoder_runner, "cudagraph_manager", None)
+            if encoder_manager is not None and self.update_stream is not None:
+                encoder_manager.update_stream = self.update_stream
+
+        # EncoderRunner uses vLLM's generic graph_capture(), whose communicator
+        # type check expects the CUDA symbol. Temporarily bind that symbol to
+        # NPUCommunicator, as is already done for decoder ACL graph capture.
+        with torch_cuda_wrapper(), communicator_switch():
+            if "profile_only" not in inspect.signature(GPUModelRunner.capture_model).parameters:
+                if profile_only:
+                    raise NotImplementedError("Graph memory profiling is unavailable in this vLLM version.")
+                return super().capture_model()
+            return super().capture_model(profile_only=profile_only)
 
     @torch.inference_mode()
     def execute_model(
