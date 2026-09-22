@@ -38,6 +38,43 @@ def _as_positive_int(value: Any, default: int) -> int:
     return parsed if parsed > 0 else default
 
 
+def infer_dcp_mismatch_info(
+    kv_role: str,
+    extra_config: Mapping[str, Any] | object,
+    local_dcp_size: int | object,
+    local_pcp_size: int | object = 1,
+) -> bool:
+    """Whether the peer P/D stage disagrees with this stage on CP layout.
+
+    Both the layerwise GVA shard stride and the per-shard save-leader rule
+    derive from the local dcp size/rank. In PD-disaggregation the producer
+    and consumer are separate worker groups, so when they are started with
+    unequal decode-context-parallel sizes they compute different shard
+    layouts for the SAME pool region and silently corrupt the KV pool.
+
+    The peer topology is carried through the flat peer keys used by the
+    store connector path (``prefill_dcp_size`` / ``decode_dcp_size``),
+    mirroring the existing ``prefill_tp_size`` / ``decode_tp_size``
+    convention. When the key is absent the single-group path is assumed and
+    the local layout is authoritative.
+    """
+    local_dcp_size = _as_positive_int(local_dcp_size, 1)
+    local_pcp_size = _as_positive_int(local_pcp_size, 1)
+    if not isinstance(extra_config, Mapping):
+        return False
+    if kv_role == "kv_consumer":
+        peer_dcp_key = "prefill_dcp_size"
+        peer_pcp_key = "prefill_pcp_size"
+    elif kv_role == "kv_producer":
+        peer_dcp_key = "decode_dcp_size"
+        peer_pcp_key = "decode_pcp_size"
+    else:
+        return False
+    peer_dcp_size = _as_positive_int(extra_config.get(peer_dcp_key, local_dcp_size), local_dcp_size)
+    peer_pcp_size = _as_positive_int(extra_config.get(peer_pcp_key, local_pcp_size), local_pcp_size)
+    return peer_dcp_size != local_dcp_size or peer_pcp_size != local_pcp_size
+
+
 def infer_tp_mismatch_info(
     kv_role: str,
     extra_config: Mapping[str, Any] | object,
