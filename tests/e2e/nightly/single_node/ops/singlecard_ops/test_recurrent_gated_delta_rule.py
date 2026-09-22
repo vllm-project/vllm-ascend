@@ -36,7 +36,7 @@ def golden_recurrent_gated_delta_rule(
         beta: [T, nv]
         scale: float
         actual_seq_lengths: [batch_size] per-sequence lengths
-        ssm_state_indices: [T] per-token state block index
+        ssm_state_indices: [T] token-packed indices or [B, slots] state rows
         g: [T, nv] or None
         num_accepted_tokens: [batch_size] or None
 
@@ -58,10 +58,13 @@ def golden_recurrent_gated_delta_rule(
 
     seq_start = 0
     for i in range(len(actual_seq_lengths)):
+        if actual_seq_lengths[i] == 0:
+            continue
+        row = ssm_state_indices[i] if ssm_state_indices.ndim == 2 else ssm_state_indices[seq_start:]
         if num_accepted_tokens is None:
-            init_state = initial_state[ssm_state_indices[seq_start]]
+            init_state = initial_state[row[0]]
         else:
-            init_state = initial_state[ssm_state_indices[seq_start + num_accepted_tokens[i] - 1]]
+            init_state = initial_state[row[num_accepted_tokens[i] - 1]]
         for head_id in range(n_heads_v):
             S = init_state[head_id]
             for slot_id in range(seq_start, seq_start + actual_seq_lengths[i]):
@@ -75,11 +78,65 @@ def golden_recurrent_gated_delta_rule(
                 y = (v_i - x) * beta_i
                 S_ = y[:, None] * k_i[None, :]
                 S = S + S_
-                initial_state[ssm_state_indices[slot_id]][head_id] = S
+                initial_state[row[slot_id - seq_start]][head_id] = S
                 o[slot_id][head_id] = (S * q_i.unsqueeze(-2)).sum(dim=-1)
         seq_start += actual_seq_lengths[i]
 
-    return o.to(query.dtype), initial_state.to(query.dtype)
+    return o.to(query.dtype), initial_state.to(state.dtype)
+
+
+@pytest.mark.parametrize("lengths", [(2, 2), (2, 1), (1, 0), (3, 2), (4, 4)])
+@pytest.mark.parametrize("previous_accepted", [None, 1, 4])
+@pytest.mark.parametrize("state_dtype", [torch.bfloat16, torch.float32])
+def test_recurrent_gated_delta_rule_dynamic_state_stride(lengths, previous_accepted, state_dtype):
+    """Previous acceptance is independent of the current query length, including padding."""
+    torch.manual_seed(42)
+    tokens = sum(lengths)
+    query = torch.nn.functional.normalize(torch.randn(tokens, 4, 128), dim=-1).bfloat16()
+    key = torch.nn.functional.normalize(torch.randn(tokens, 4, 128), dim=-1).bfloat16()
+    value = torch.randn(tokens, 8, 128).bfloat16()
+    state = torch.randn(8, 8, 128, 128).to(state_dtype)
+    beta = torch.rand(tokens, 8).bfloat16()
+    g = -torch.rand(tokens, 8)
+    indices = torch.tensor([[6, 1, 7, 3], [5, 0, 4, 2]], dtype=torch.int32)
+    accepted = None if previous_accepted is None else torch.full((2,), previous_accepted, dtype=torch.int32)
+    expected, expected_state = golden_recurrent_gated_delta_rule(
+        query, key, value, state, beta, 128**-0.5, lengths, indices, g, accepted
+    )
+    actual_state = state.npu()
+    actual = torch.ops._C_ascend.npu_recurrent_gated_delta_rule(
+        query=query.npu(),
+        key=key.npu(),
+        value=value.npu(),
+        state=actual_state,
+        beta=beta.npu(),
+        scale=128**-0.5,
+        actual_seq_lengths=torch.tensor([0, *lengths], dtype=torch.int32).npu(),
+        ssm_state_indices=indices.npu(),
+        num_accepted_tokens=None if accepted is None else accepted.npu(),
+        g=g.npu(),
+    )
+    torch.testing.assert_close(actual.cpu().float(), expected.float(), rtol=3e-3, atol=1e-2)
+    torch.testing.assert_close(actual_state.cpu().float(), expected_state.float(), rtol=3e-3, atol=1e-2)
+
+
+@pytest.mark.parametrize("index_shape", [(2, 2, 2), (1, 4), (2, 0)])
+def test_recurrent_gated_delta_rule_rejects_invalid_state_rows(index_shape):
+    query = torch.ones(2, 4, 128, dtype=torch.bfloat16, device="npu")
+    value = torch.ones(2, 8, 128, dtype=torch.bfloat16, device="npu")
+    state = torch.zeros(8, 8, 128, 128, dtype=torch.float32, device="npu")
+    with pytest.raises(RuntimeError):
+        torch.ops._C_ascend.npu_recurrent_gated_delta_rule(
+            query=query,
+            key=query,
+            value=value,
+            state=state,
+            beta=torch.ones(2, 8, dtype=torch.bfloat16, device="npu"),
+            scale=128**-0.5,
+            actual_seq_lengths=torch.tensor([0, 1, 1], dtype=torch.int32, device="npu"),
+            ssm_state_indices=torch.zeros(index_shape, dtype=torch.int32, device="npu"),
+            num_accepted_tokens=torch.ones(2, dtype=torch.int32, device="npu"),
+        )
 
 
 @pytest.mark.parametrize("batch_size", [1, 4, 8])

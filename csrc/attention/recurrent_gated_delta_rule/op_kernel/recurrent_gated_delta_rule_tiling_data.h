@@ -36,6 +36,8 @@ struct alignas(8) RecurrentGatedDeltaRuleTilingData { // alignas(8)确保8字节
     uint32_t hasGama;
     uint32_t hasGamaK;
     uint32_t hasAcceptedTokens;
+    // Zero preserves token-packed 1D indices; otherwise indices are [B, stride].
+    uint32_t stateIndicesStride;
 };
 #pragma pack(pop)
 } // RecurrentGatedDeltaRule

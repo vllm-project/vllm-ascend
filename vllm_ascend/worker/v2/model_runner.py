@@ -469,6 +469,7 @@ class NPUModelRunner(GPUModelRunner):
                 query_start_loc_np,
                 batch_desc.cg_mode,
                 batch_desc.num_reqs,
+                uniform_token_count=batch_desc.uniform_token_count,
             )
 
         query_start_loc = self.input_buffers.query_start_loc
@@ -829,6 +830,7 @@ class NPUModelRunner(GPUModelRunner):
         query_start_loc_np: np.ndarray,
         cudagraph_runtime_mode: CUDAGraphMode | None = None,
         batch_desc_num_reqs: int | None = None,
+        uniform_token_count: int | None = None,
     ) -> tuple[np.ndarray, int]:
         """
         This function is only designed to satisfied the constraint that when the layout is TND,
@@ -839,9 +841,12 @@ class NPUModelRunner(GPUModelRunner):
         descriptor_num_reqs = batch_desc_num_reqs if batch_desc_num_reqs is not None else num_reqs_padded
         # This checks query lengths, not request phase: short prefills can also
         # match. Graph dispatch is responsible for excluding incompatible prefills.
-        has_uniform_decode_query_lens = np.all(np.diff(query_start_loc_np[: num_reqs + 1]) == self.decode_query_len)
+        # Dynamic speculation captures a separate graph for each verification
+        # width. The configured decode_query_len is only the maximum width.
+        query_len = uniform_token_count if uniform_token_count is not None else self.decode_query_len
+        has_uniform_decode_query_lens = np.all(np.diff(query_start_loc_np[: num_reqs + 1]) == query_len)
         matches_uniform_decode_graph_shape = (
-            has_uniform_decode_query_lens and num_tokens_padded == descriptor_num_reqs * self.decode_query_len
+            has_uniform_decode_query_lens and num_tokens_padded == descriptor_num_reqs * query_len
         )
         if (
             cudagraph_runtime_mode == CUDAGraphMode.FULL
@@ -856,13 +861,13 @@ class NPUModelRunner(GPUModelRunner):
             # topology between capture and replay.
             num_reqs_padded = descriptor_num_reqs
 
-        if has_uniform_decode_query_lens and num_tokens_padded == num_reqs_padded * self.decode_query_len:
+        if has_uniform_decode_query_lens and num_tokens_padded == num_reqs_padded * query_len:
             # Uniform-batch case: num_reqs must be no greater than num_reqs_padded
             assert num_reqs <= num_reqs_padded
 
             last_loc = query_start_loc_np[num_reqs]
             query_start_loc_np[num_reqs + 1 : num_reqs_padded + 1] = (
-                np.arange(1, num_reqs_padded + 1 - num_reqs) * self.decode_query_len + last_loc
+                np.arange(1, num_reqs_padded + 1 - num_reqs) * query_len + last_loc
             )
         else:
             # Mixed-batch case: num_reqs must equal num_reqs_padded
