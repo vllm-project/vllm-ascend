@@ -59,6 +59,7 @@ from vllm_ascend.utils import (
     dispose_layer,
     enable_sp,
     is_mtp_layer,
+    is_pd_decode_recompute_scheduler_enabled,
     is_rl_weight_update_enabled,
     maybe_trans_nz,
 )
@@ -1069,9 +1070,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         # the original fused_qkv_a_proj/q_proj weights and quant params are no longer
         # referenced, so drop them to save memory.
         if (
-            self.vllm_config.kv_transfer_config is not None
-            and self.vllm_config.kv_transfer_config.is_kv_consumer
-            and self.vllm_config.scheduler_config.max_num_batched_tokens <= MLAPO_MAX_SUPPORTED_TOKENS
+            self.vllm_config.scheduler_config.max_num_batched_tokens <= MLAPO_MAX_SUPPORTED_TOKENS
+            and is_pd_decode_recompute_scheduler_enabled(self.vllm_config)
         ):
             self.fused_qkv_a_proj.weight = None
             self.fused_qkv_a_proj.deq_scale = None
