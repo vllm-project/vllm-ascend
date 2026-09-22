@@ -17,11 +17,12 @@ from __future__ import annotations
 
 import logging
 from functools import wraps
+from collections.abc import Callable
 from typing import Any, cast
 
 import torch
 import vllm
-from torch.distributed import Backend
+from torch.distributed import Backend, ProcessGroup
 from vllm.distributed.parallel_state import GroupCoordinator, _get_unique_name, _register_group
 
 from vllm_ascend.distributed.device_communicators.npu_communicator import NPUCommunicator
@@ -209,14 +210,23 @@ class GroupCoordinatorPatch(GroupCoordinator):
 
         return destroyed
 
-    def destroy(self):
+    def destroy(
+        self,
+        device_group_destroyer: Callable[[ProcessGroup], None] | None = None,
+    ) -> None:
         if getattr(self, "mq_broadcaster", None) is not None:
             self.mq_broadcaster = None
+
+        # Snapshot restore passes an HCCL abort destroyer; invoke it before
+        # releasing shared registry resources so abort sees a live process group.
+        device_group = getattr(self, "device_group", None)
+        if device_group is not None and device_group_destroyer is not None:
+            device_group_destroyer(device_group)
 
         self._release_hccl_resources()
 
         device_group = getattr(self, "device_group", None)
-        if device_group is not None and self.backend != "hccl":
+        if device_group is not None and self.backend != "hccl" and device_group_destroyer is None:
             torch.distributed.destroy_process_group(device_group)
         if hasattr(self, "device_group"):
             del self.device_group
