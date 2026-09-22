@@ -113,8 +113,6 @@ class EMoonCakeStoreConnector(ECConnectorBase):
                 )
             )
             return
-		assert isinstance(metadata, ECExampleConnectorMetadata)
-		assert encoder_cache is not None
         # Load the EC for each mm data
         for mm_data in metadata.mm_datas:
             if mm_data.mm_hash in encoder_cache:

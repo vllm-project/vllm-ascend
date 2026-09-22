@@ -53,5 +53,5 @@ class EMooncakeBackend(MooncakeBackend):
         assert self.store is not None
         ret = self.store.register_buffer(addr, length)
         if ret != 0:
-            logger.error("Failed to register buffer for Mooncake Store: %s", ret)
-            raise
+            raise RuntimeError(f"Failed to register buffer for Mooncake Store, error code: {ret}")
+			
