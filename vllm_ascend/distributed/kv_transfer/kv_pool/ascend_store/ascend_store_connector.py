@@ -241,6 +241,15 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             return False
         return self.connector_worker.set_external_slot_release_waiter(waiter)
 
+    def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
+        super().bind_connector_metadata(connector_metadata)
+        if self.use_layerwise:
+            assert self.connector_worker is not None
+            # Layer hooks run during the target forward. vLLM may defer
+            # start_load_kv until after it, so prepare this step's tasks and
+            # reset its layer counter at bind time, before any layer runs.
+            self.connector_worker.start_load_kv(self._get_connector_metadata())
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
@@ -272,7 +281,8 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
                 for request in metadata.requests
             ],
         )
-        self.connector_worker.start_load_kv(metadata)
+        if not self.use_layerwise:
+            self.connector_worker.start_load_kv(metadata)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         if not self.use_layerwise:
