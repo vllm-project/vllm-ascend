@@ -10,6 +10,7 @@ from enum import Enum
 import torch
 from flash_attn_npu_3 import flash_attn_with_kvcache, get_scheduler_metadata  # type: ignore[import-not-found]
 from vllm.config import VllmConfig
+from vllm.logger import logger
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -223,6 +224,7 @@ class AscendFlashAttentionImpl(AttentionImpl[AscendFlashAttentionMetadata]):
         sinks: torch.Tensor = None,
         **kwargs,
     ):
+        logger.info_once("Using Ascend FA3 attention backend.", scope="process")
         self.num_heads = num_heads
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
         self.head_size = head_size

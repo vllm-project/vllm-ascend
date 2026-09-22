@@ -443,6 +443,12 @@ def test_public_impl_initialization(softcap, expected):
     assert not hasattr(impl, "model_runner_type")
 
 
+def test_impl_logs_fa3_backend_once():
+    with patch.object(fa3.logger, "info_once") as info_once:
+        fa3.AscendFlashAttentionImpl(4, 128, 0.125)
+    info_once.assert_called_once_with("Using Ascend FA3 attention backend.", scope="process")
+
+
 def test_profile_forward_without_metadata(impl, layer):
     query = torch.randn(4, 4, 8)
     output = torch.empty_like(query)
