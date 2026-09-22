@@ -115,6 +115,43 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         self.assertIsNone(cls._get_partial_block_index(32, 16, 2, True))
         self.assertIsNone(cls._get_partial_block_index(20, 16, 1, False))
 
+    def test_save_range_clamps_pool_hit_past_full_blocks(self):
+        cls = self._make_worker_class()
+        worker = SimpleNamespace(
+            tp_rank=0,
+            put_step=1,
+            hash_block_size=16,
+            layerwise_offload=True,
+            layer_save_tasks=[[]],
+            _get_effective_group_block_size=lambda _group_id: 16,
+            _get_partial_block_index=cls._get_partial_block_index,
+        )
+        request = ReqMeta(
+            req_id="r1",
+            token_len_chunk=17,
+            block_ids=[0, 1],
+            block_hashes=["h0"],
+            can_save=True,
+            load_spec=LoadSpec(
+                vllm_cached_tokens=0,
+                kvpool_cached_tokens=32,
+                can_load=True,
+                token_len=32,
+            ),
+            save_end_token=16,
+            target_token_len=17,
+        )
+
+        cls._process_save_for_layer_batch(worker, [request], 0)
+
+        self.assertEqual(len(worker.layer_save_tasks[0]), 1)
+        block_range = worker.layer_save_tasks[0][0].block_ranges[0]
+        self.assertEqual(
+            (block_range.start_block, block_range.end_block),
+            (1, 1),
+        )
+        self.assertEqual(block_range.partial_block_index, 1)
+
     def test_find_all_discontinuous_hit_positions_all_tp_hits_with_limits(self):
         cls = self._make_worker_class()
         arr = [[0, 0, 1, 0, 0, 1], [0, 0, 1, 0, 0, 1]]

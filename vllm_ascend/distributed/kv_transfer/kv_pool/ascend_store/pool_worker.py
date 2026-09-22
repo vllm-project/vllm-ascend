@@ -1079,6 +1079,9 @@ class KVPoolWorker:
                 )
                 hit_full_blocks = pool_hit_tokens // block_size
                 save_start_block = max(save_start_block, hit_full_blocks)
+            # Pool hits may extend beyond this step's full-block boundary.
+            # Keep an empty full-block range while preserving the partial task.
+            save_start_block = min(save_start_block, save_end_block)
             if partial_block_index is None:
                 partial_block_index = request.partial_block_index
             if save_start_block >= save_end_block and partial_block_index is None:
