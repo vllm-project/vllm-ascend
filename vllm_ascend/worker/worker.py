@@ -1094,7 +1094,7 @@ class NPUWorker(WorkerBase):
                 extra_config,
             )
         kvpp_config = KVPPConfig.from_vllm_config(self.vllm_config)
-        if kvpp_config.size > 1:
+        if kvpp_config.size > 1 and extra_config is None:
             kvpp_rank = get_tp_group().rank_in_group % kvpp_config.size
             self._kvpp_cache_allocation_plan = create_kvpp_cache_allocation_plan(
                 self.vllm_config,

@@ -1895,6 +1895,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         invalid_block_ids: set[int] | None = None,
         invalid_block_ids_lock: threading.Lock | None = None,
         load_abort_event: threading.Event | None = None,
+        load_layer: Callable[[int, Callable[[], int]], int] | None = None,
     ):
         super().__init__(
             m_store,
@@ -1907,6 +1908,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             name="KVCacheStoreLayerRecvingThread",
         )
         self.get_event = get_event
+        self.load_layer = load_layer
         self.layer_load_finished_events = layer_load_finished_events
         self.layer_save_finished_events = layer_save_finished_events
         self.sync_save_events = sync_save_events
@@ -2155,14 +2157,14 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         size_array = np.concatenate(all_sizes) if len(all_sizes) > 1 else all_sizes[0]
         if self.external_slot_release_waiter is not None:
             self.external_slot_release_waiter(layer_id)
-        res = self._batch_copy_with_limits(
-            gvas_array,
-            addr_array,
-            size_array,
-            1,
-            self.max_transfer_blocks,
-            self.max_transfer_bytes,
-        )
+
+        def load() -> int:
+            return self._batch_copy_with_limits(
+                gvas_array, addr_array, size_array, 1, self.max_transfer_blocks, self.max_transfer_bytes
+            )
+
+        # The original completion event below covers both H2D and broadcast.
+        res = load() if self.load_layer is None else self.load_layer(layer_id, load)
         if layer_id <= 2 or res != 0:
             logger.debug(
                 "load_thread: layer=%d groups=%d blocks=%d res=%d",

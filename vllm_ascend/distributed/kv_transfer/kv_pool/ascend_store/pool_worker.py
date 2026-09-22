@@ -10,6 +10,7 @@ from typing import Any
 
 import numpy as np
 import torch
+import torch.distributed as dist
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import (
@@ -93,6 +94,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
     AscendStoreKVConnectorStats,
 )
+from vllm_ascend.distributed.parallel_state import get_kvpp_group
 from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
@@ -278,7 +280,7 @@ class KVPoolWorker:
         else:
             self.head_or_tp_rank = self.tp_rank
             self.put_step = 1
-        if self.use_kvpp:
+        if self.use_kvpp and not self.use_layerwise:
             # Every owner saves all blocks of its layer shard, including its MTP replica.
             self.head_or_tp_rank = self.tp_rank
             self.put_step = 1
@@ -752,6 +754,7 @@ class KVPoolWorker:
                     invalid_block_ids=self._invalid_block_ids,
                     invalid_block_ids_lock=self._invalid_block_ids_lock,
                     load_abort_event=self._layer_load_aborted,
+                    load_layer=self._load_and_broadcast_layer if self.use_kvpp else None,
                 )
             else:
                 self.kv_recv_thread = KVCacheStoreKeyLayerRecvingThread(
@@ -994,7 +997,17 @@ class KVPoolWorker:
         self.group_block_stride: dict[int, list[int]] = {}
         self.group_layer_cache_entry_offsets: dict[int, list[int]] = {}
         self.kv_caches = kv_caches
-        if self.use_kvpp:
+        if self.use_kvpp and self.use_layerwise:
+            self.kvpp_group = get_kvpp_group()
+            self.kvpp_rank = self.kvpp_group.rank_in_group
+            self.kvpp_stream = torch.npu.Stream()
+            owners = map_kvpp_layers_to_owners(self.vllm_config, kv_caches)
+            self.kvpp_layers: dict[int, tuple[int, list[torch.Tensor]]] = {}
+            for name in sorted(kv_caches):
+                layer_id = self._extract_physical_layer_index(name)
+                _, buffers = self.kvpp_layers.setdefault(layer_id, (owners[name], []))
+                buffers.extend(self._as_cache_tuple(kv_caches[name]))
+        if self.use_kvpp and not self.use_layerwise:
             owners = map_kvpp_layers_to_owners(self.vllm_config, kv_caches.keys())
             kv_caches = {name: caches for name, caches in kv_caches.items() if owners.get(name) in (None, self.tp_rank)}
             self.kv_caches = kv_caches
@@ -1037,7 +1050,7 @@ class KVPoolWorker:
         if self.kv_cache_config is not None and self.use_hybrid:
             for group_id, group_spec in enumerate(self.kv_cache_config.kv_cache_groups):
                 layer_names = group_spec.layer_names
-                if self.use_kvpp:
+                if self.use_kvpp and not self.use_layerwise:
                     layer_names = [name for name in layer_names if name in kv_caches]
                 self._infer_cache_group_metadata(group_id, layer_names)
         else:
@@ -1093,6 +1106,34 @@ class KVPoolWorker:
         if self.use_block_key_layerwise:
             self.m_store.validate_layerwise_support()
         self._start_kv_transfer_threads()
+
+    def _load_and_broadcast_layer(self, layer_id: int, load: Callable[[], int]) -> int:
+        """Complete one offload load: owner H2D, then broadcast to existing views."""
+        owner, caches = self.kvpp_layers[layer_id]
+        src = self.kvpp_group.ranks[owner]
+        group = self.kvpp_group.device_group
+        result = 0
+        if self.kvpp_rank == owner:
+            try:
+                result = load()
+            except Exception:
+                logger.exception("KVPP owner H2D failed for layer %d", layer_id)
+                result = -1
+        with torch.npu.stream(self.kvpp_stream):
+            # Peers must also see an owner error instead of entering the data broadcast.
+            status = torch.tensor([result], dtype=torch.int32, device=caches[0].device)
+            dist.broadcast(status, src=src, group=group)
+            result = int(status.item())
+            if result != 0:
+                return result
+            for cache in caches:
+                # Broadcast each existing cache component; no contiguous layer allocator.
+                buffer = cache.contiguous()
+                dist.broadcast(buffer, src=src, group=group)
+                if buffer is not cache:
+                    cache.copy_(buffer)
+            torch.npu.current_stream().synchronize()
+        return 0
 
     def start_load_kv(self, metadata: AscendConnectorMetadata):
         self.current_layer = 0
@@ -3165,7 +3206,7 @@ class KVPoolWorker:
         return self.num_kv_head
 
     def get_group_tp_size(self, kv_cache_group_id: int):
-        if self.use_kvpp:
+        if self.use_kvpp and not self.use_layerwise:
             return self.tp_size
         if self.tp_mismatch:
             return self.effective_tp_size
