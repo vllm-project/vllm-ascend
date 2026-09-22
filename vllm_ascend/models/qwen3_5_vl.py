@@ -136,12 +136,12 @@ class _AscendVLPreprocessMixin:
         chunks = flat.split([c * h * w for h, w in hw_list])
         patches = []
         for chunk, (h, w), (_, gh, gw) in zip(chunks, hw_list, grid_thw.tolist()):
-            # Keep uint8 through the resize: this selects the antialias kernel
-            # the HF processor uses (float input takes a different kernel);
-            # clamp/round stay as a no-op on the already-quantized output.
-            img = chunk.reshape(1, c, h, w)
+            # CANN's antialias bicubic kernel rejects uint8, so upcast first
+            # (the float kernel differs slightly from the HF/PIL one);
+            # clamp+round replicate the original uint8 quantization.
+            img = chunk.reshape(1, c, h, w).float()
             img = F.interpolate(img, size=[gh * ps, gw * ps], mode="bicubic", align_corners=False, antialias=True)
-            img = img.clamp(0, 255).round().float().squeeze(0)
+            img = img.clamp(0, 255).round().squeeze(0)
             # patchify: (C, rh, rw) -> (gh*gw, C*tps*ps*ps), HF layout.
             # Drop the batch dim before unsqueeze/expand: keeping it (as HF's
             # batched patchify does) creates a 9-D tensor, which CANN rejects
