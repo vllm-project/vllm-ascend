@@ -123,7 +123,7 @@ templates:
       - --max-model-len
       - "202752"
       - --additional-config
-      - '{"fuse_muls_add":true, "recompute_scheduler_enable" : false, "multistream_overlap_shared_expert": true, "enable_dsa_cp":true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "c8_enable_reshape_optim":true}'
+      - '{"ascend_compilation_config": {"enable_npugraph_ex": true}, "recompute_scheduler_enable" : false, "multistream_overlap_shared_expert": true, "enable_dsa_cp":true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "c8_enable_reshape_optim":true}'
       - --max-num-batched-tokens
       - "164"
       - --trust-remote-code
@@ -175,7 +175,7 @@ templates:
       - --max-model-len
       - "202752"
       - --additional-config
-      - '{"fuse_muls_add":true, "recompute_scheduler_enable" : false, "multistream_overlap_shared_expert": true, "enable_dsa_cp":true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "c8_enable_reshape_optim":true}'
+      - '{"ascend_compilation_config": {"enable_npugraph_ex": true}, "recompute_scheduler_enable" : false, "multistream_overlap_shared_expert": true, "enable_dsa_cp":true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "c8_enable_reshape_optim":true}'
       - --max-num-batched-tokens
       - "164"
       - --trust-remote-code
@@ -229,7 +229,7 @@ templates:
       - --compilation-config
       - '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4, 8, 12, 16, 20, 24, 28, 32, 64, 96, 128, 192, 256, 384, 512]}'
       - --additional-config
-      - '{"fuse_muls_add":true, "recompute_scheduler_enable":true, "multistream_overlap_shared_expert":true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true}'
+      - '{"ascend_compilation_config": {"enable_npugraph_ex": true}, "recompute_scheduler_enable":true, "multistream_overlap_shared_expert":true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true}'
       - --trust-remote-code
       - --max-num-seqs
       - "32"
@@ -281,7 +281,7 @@ templates:
       - --compilation-config
       - '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4, 8, 12, 16, 20, 24, 28, 32, 64, 96, 128, 192, 256, 384, 512]}'
       - --additional-config
-      - '{"fuse_muls_add":true, "recompute_scheduler_enable":true, "multistream_overlap_shared_expert":true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true}'
+      - '{"ascend_compilation_config": {"enable_npugraph_ex": true}, "recompute_scheduler_enable":true, "multistream_overlap_shared_expert":true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true}'
       - --trust-remote-code
       - --max-num-seqs
       - "32"
