@@ -14,6 +14,7 @@ from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import MLAAttentionImpl
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
 from vllm_ascend.utils import (
@@ -89,7 +90,9 @@ def try_scatter_cache(key: torch.Tensor, cache: torch.Tensor, slots: torch.Tenso
         # SK supports gaps between rows, but not striding within a row.
         if target.stride(1) != 1 or target.stride(0) < width:
             return False
-        operation(target, slots[:tokens].reshape(-1, 1), key[:tokens].reshape(tokens, width))
+        DeviceOperator.dsa_kv_compress_scatter(
+            target, key[:tokens].reshape(tokens, width), slots[:tokens].reshape(-1, 1)
+        )
         return True
 
     if profile.supports(HardwareCapability.SCATTER_PA_CACHE_STORE):
