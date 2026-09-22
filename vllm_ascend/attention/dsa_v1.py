@@ -27,6 +27,7 @@ from vllm_ascend.attention.dsa_attn_kv_plan import (
 )
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
+    enable_dcp,
     enable_pcp,
     get_or_register_attention_buffer,
     maybe_save_kv_layer_to_connector,
@@ -128,6 +129,9 @@ def get_or_compute_compressor_metadata(
         metadata.full_compress_sin.shape[0],
         metadata.full_compress_sin.shape[-1],
     )
+    dcp_size = getattr(metadata, "compressor_dcp_size", 1)
+    dcp_rank = getattr(metadata, "compressor_dcp_rank", 0)
+    dcp_args = () if dcp_size == 1 else (dcp_size, dcp_rank)
     computed_metadata = torch.ops._C_ascend.compressor_metadata(
         full_compress_cos,
         full_compress_sin,
@@ -139,6 +143,7 @@ def get_or_compute_compressor_metadata(
         compress_ratio,
         metadata.num_compressed_tokens,
         metadata.num_actual_reqs,
+        *dcp_args,
     )
     cache[cache_group_key] = computed_metadata
     return computed_metadata
@@ -162,6 +167,9 @@ def build_compressor_metadata_out(
         metadata.full_compress_sin.shape[0],
         metadata.full_compress_sin.shape[-1],
     )
+    dcp_size = getattr(metadata, "compressor_dcp_size", 1)
+    dcp_rank = getattr(metadata, "compressor_dcp_rank", 0)
+    dcp_args = () if dcp_size == 1 else (dcp_size, dcp_rank)
     torch.ops._C_ascend.compressor_metadata_out(
         full_compress_cos,
         full_compress_sin,
@@ -173,6 +181,7 @@ def build_compressor_metadata_out(
         compress_ratio,
         metadata.num_actual_reqs,
         *outputs,
+        *dcp_args,
     )
 
 
@@ -224,8 +233,11 @@ class AscendDSABackend(AttentionBackend):
 
         use_dsa_cp = enable_dsa_cp()
         use_pcp = enable_pcp()
+        use_dcp = enable_dcp()
         if use_dsa_cp and use_pcp:
             raise ValueError("Legacy DSACP and PCP cannot be enabled at the same time.")
+        if use_pcp and use_dcp:
+            raise NotImplementedError("DeepSeek-V4 DSA PCP and DCP cannot be enabled at the same time.")
         if use_dsa_cp:
             from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
 
@@ -234,6 +246,10 @@ class AscendDSABackend(AttentionBackend):
             from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSAPCPMetadataBuilder
 
             return AscendDSAPCPMetadataBuilder
+        if use_dcp:
+            from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSADCPMetadataBuilder
+
+            return AscendDSADCPMetadataBuilder
         return AscendDSAMetadataBuilder
 
     @staticmethod
@@ -256,8 +272,11 @@ class AscendDSABackend(AttentionBackend):
 
         use_dsa_cp = enable_dsa_cp()
         use_pcp = enable_pcp()
+        use_dcp = enable_dcp()
         if use_dsa_cp and use_pcp:
             raise ValueError("Legacy DSACP and PCP cannot be enabled at the same time.")
+        if use_pcp and use_dcp:
+            raise NotImplementedError("DeepSeek-V4 DSA PCP and DCP cannot be enabled at the same time.")
         if use_dsa_cp:
             from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPImpl
 
@@ -266,6 +285,10 @@ class AscendDSABackend(AttentionBackend):
             from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSAPCPImpl
 
             return AscendDSAPCPImpl
+        if use_dcp:
+            from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSADCPImpl
+
+            return AscendDSADCPImpl
         return AscendDSAImpl
 
     @staticmethod
@@ -356,6 +379,27 @@ class AscendDSAReqMetadata:
     qli_cmp_residual_k: torch.Tensor = None
     compressor_metadata: CompressorMetadataOutput | None = None
     compressor_metadata_group_id: int | None = None
+    # C4 main KV is the only DSV4 cache sharded across DCP ranks. Its
+    # compressed physical pages are assigned round-robin; these values remain
+    # at their single-rank defaults for replicated C4 indexer/C128 groups.
+    compressor_dcp_size: int = 1
+    compressor_dcp_rank: int = 0
+    # C4-only DCP attention keeps the compressor/Indexer in the global C4
+    # domain while exposing a second, rank-local view to the sparse attention
+    # operator.  These fields are populated only for the page-sharded C4 main
+    # cache; replicated SWA/C128/Indexer groups keep their default None values.
+    dcp_local_block_table: torch.Tensor | None = None
+    dcp_local_compressed_seq_lens: torch.Tensor | None = None
+    dcp_local_seqused_kv: torch.Tensor | None = None
+    dcp_local_sas_metadata: torch.Tensor | None = None
+    dcp_local_cmp_sparse_indices: torch.Tensor | None = None
+    dcp_local_remap_chunk_out: torch.Tensor | None = None
+    dcp_local_remap_chunk_count: torch.Tensor | None = None
+    dcp_cmp_only_sinks: torch.Tensor | None = None
+    # Prefill/mixed batches use a temporary compact all-rank C4 view. Decode
+    # never populates these fields and therefore never communicates C4 KV.
+    dcp_prefill_kv_gather_block_ids: torch.Tensor | None = None
+    dcp_prefill_kv_gather_block_table: torch.Tensor | None = None
     attn_mask: torch.Tensor | None = None
     cu_cmp_seqlen_list: torch.Tensor = None
     ori_win_left: int | None = None
@@ -907,25 +951,42 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         max_seqlen_kv: int | torch.Tensor,
         cu_seqlens_ori_kv: torch.Tensor | None,
         cu_seqlens_cmp_kv: torch.Tensor | None,
+        *,
+        output_buffer: torch.Tensor | None = None,
+        num_heads_q: int | None = None,
+        cmp_topk: int | None = None,
+        cmp_ratio: int | None = None,
+        has_ori_kv: bool = True,
+        has_cmp_kv: bool | None = None,
+        ori_win_left: int | None = None,
+        ori_win_right: int = 0,
     ) -> torch.Tensor:
         sas_metadata = metadata_cache.get(layer_name)
         if sas_metadata is None:
-            tp_size = get_tensor_model_parallel_world_size()
-            n_local_heads = self.model_config.hf_config.num_attention_heads // tp_size
+            if num_heads_q is None:
+                tp_size = get_tensor_model_parallel_world_size()
+                num_heads_q = self.model_config.hf_config.num_attention_heads // tp_size
             index_topk = self.model_config.hf_config.index_topk
-            cmp_ratio = (
-                _dsa_swa_only_cmp_ratio(self.compressor_ratio, self.vllm_config)
-                if self.compressor_ratio <= 1
-                else 4
-                if self.compressor_ratio == 4
-                else 128
-            )
+            if cmp_ratio is None:
+                cmp_ratio = (
+                    _dsa_swa_only_cmp_ratio(self.compressor_ratio, self.vllm_config)
+                    if self.compressor_ratio <= 1
+                    else 4
+                    if self.compressor_ratio == 4
+                    else 128
+                )
+            if cmp_topk is None:
+                cmp_topk = index_topk if self.compressor_ratio == 4 else 0
+            if has_cmp_kv is None:
+                has_cmp_kv = self.compressor_ratio > 1
+            if ori_win_left is None:
+                ori_win_left = self.model_config.hf_config.sliding_window - 1
             kv_plan = get_dsa_attn_kv_plan(self.vllm_config)
             metadata_op = kv_plan.get_dsa_sparse_attn_metadata_op()
             metadata_kwargs = kv_plan.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
             sas_metadata = metadata_op(
                 **metadata_kwargs,
-                num_heads_q=n_local_heads,
+                num_heads_q=num_heads_q,
                 num_heads_kv=1,
                 head_dim=self.model_config.get_head_size(),
                 cu_seqlens_q=query_start_loc,
@@ -936,21 +997,23 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 max_seqlen_q=max_seqlen_q,
                 max_seqlen_kv=max_seqlen_kv,
                 batch_size=len(seq_lens),
-                cmp_topk=index_topk if self.compressor_ratio == 4 else 0,
+                cmp_topk=cmp_topk,
                 cmp_ratio=cmp_ratio,
                 ori_mask_mode=4,  # 4:sliding window
                 cmp_mask_mode=3,  # 3:causal
-                ori_win_left=self.model_config.hf_config.sliding_window - 1,
-                ori_win_right=0,
+                ori_win_left=ori_win_left,
+                ori_win_right=ori_win_right,
                 layout_q="TND",
                 layout_kv=_dsa_layout_kv(self.vllm_config),
-                has_ori_kv=True,
-                has_cmp_kv=self.compressor_ratio > 1,
+                has_ori_kv=has_ori_kv,
+                has_cmp_kv=has_cmp_kv,
             )
             metadata_cache[layer_name] = sas_metadata
 
-        self.sas_metadata_buffer[:DSA_METADATA_BUFFER_SIZE] = sas_metadata
-        return self.sas_metadata_buffer
+        if output_buffer is None:
+            output_buffer = self.sas_metadata_buffer
+        output_buffer[:DSA_METADATA_BUFFER_SIZE] = sas_metadata
+        return output_buffer
 
     def _build_qli_metadata(
         self,
@@ -963,14 +1026,17 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         qli_metadata = metadata_cache.get("qli")
         if qli_metadata is None:
             # QLI v2 PA_BBND reads the compressed K length plus the residual
-            # from the original length. Write both into persistent builder
-            # buffers so their addresses remain stable during graph replay.
+            # from the original length. The buffer selector lets DCP cache
+            # groups share the same global-length tensors while the default
+            # path keeps the existing per-builder graph-stable buffers.
             seq_lens_i32 = seq_lens
             if seq_lens_i32.dtype != torch.int32:
                 seq_lens_i32 = seq_lens_i32.to(torch.int32)
             num_reqs = seq_lens_i32.shape[0]
-            qli_seqused_k = self.qli_seqused_k[:num_reqs]
-            qli_cmp_residual_k = self.qli_cmp_residual_k[:num_reqs]
+            qli_seqused_k, qli_cmp_residual_k = self._get_qli_length_buffers(
+                metadata_cache,
+                num_reqs,
+            )
             torch.div(seq_lens_i32, 4, rounding_mode="floor", out=qli_seqused_k)
             torch.remainder(
                 seq_lens_i32,
@@ -999,6 +1065,18 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         self.qli_metadata_buffer[:DSA_METADATA_BUFFER_SIZE] = qli_metadata
         return self.qli_metadata_buffer
+
+    def _get_qli_length_buffers(
+        self,
+        metadata_cache: dict,
+        num_reqs: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return graph-stable QLI compressed-length and residual buffers."""
+        del metadata_cache
+        return (
+            self.qli_seqused_k[:num_reqs],
+            self.qli_cmp_residual_k[:num_reqs],
+        )
 
     def enable_device_metadata(self) -> None:
         self._device_metadata_enabled = True
@@ -1208,11 +1286,14 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         qli_cmp_residual_k = None
         if self.compressor_ratio == 4:
             # QLI v2 PA_BBND reads the compressed K length plus the residual
-            # from the original length; the persistent builder buffers are
-            # refreshed in _build_qli_metadata.
+            # from the original length. DCP may deliberately share these
+            # buffers across the sharded C4 and replicated Indexer builders;
+            # _build_qli_metadata refreshes the selected pair.
             qli_cu_seqlens_q = query_start_loc
-            qli_seqused_k = self.qli_seqused_k[:num_reqs]
-            qli_cmp_residual_k = self.qli_cmp_residual_k[:num_reqs]
+            qli_seqused_k, qli_cmp_residual_k = self._get_qli_length_buffers(
+                metadata_cache,
+                num_reqs,
+            )
 
         req_metadata = AscendDSAReqMetadata(
             block_table=self.block_table[:num_reqs, ...],
@@ -2038,6 +2119,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         state_cache: torch.Tensor,
         compressor_overlap_output: CompressorOverlapOutput | None = None,
         write_cache: bool = True,
+        query_context: Any = None,
     ) -> torch.Tensor | None:
         """Update compressed caches and return Indexer top-k indices."""
         compressor = self.compressor
@@ -2069,6 +2151,11 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                         compressed_kv,
                         compress_slot_mapping,
                     )
+                self._compressed_cache_write_complete(
+                    compress_kv_cache,
+                    layer_metadata,
+                    query_context,
+                )
 
             overlap_plan = IndexerOverlapPlan(
                 compute_attention_compressed_kv=compute_attention_compressed_kv,
@@ -2105,98 +2192,46 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             )
         return None
 
-    def _forward_attention(
+    def _start_attention_query(
         self,
-        layer_name,
-        hidden_states: torch.Tensor,
-        kv_cache: tuple[torch.Tensor, ...],
+        q: torch.Tensor,
         layer_metadata: AscendDSALayerMetadata,
-        cache_is_prepared: bool = False,
+    ) -> Any:
+        """Optional hook for DCP to start communication after Q is ready."""
+        del q, layer_metadata
+        return None
+
+    def _compressed_cache_write_complete(
+        self,
+        compress_kv_cache: torch.Tensor,
+        layer_metadata: AscendDSALayerMetadata,
+        query_context: Any,
+    ) -> None:
+        """Optional hook invoked immediately after the compressed cache write."""
+        del compress_kv_cache, layer_metadata, query_context
+
+    def _execute_attention(
+        self,
+        q: torch.Tensor,
+        compress_kv_cache: torch.Tensor,
+        swa_kv_cache: torch.Tensor,
+        compress_topk_idxs: torch.Tensor | None,
+        layer_metadata: AscendDSALayerMetadata,
+        query_context: Any = None,
     ) -> torch.Tensor:
-        # DSA PCP sets cache_is_prepared after global cache updates and forces
-        # single-stream attention because there is no local KV update to overlap.
-        if cache_is_prepared and self.multistream_dsv4_dsa_overlap:
-            raise RuntimeError("Prepared DSA caches require single-stream attention.")
-
-        (
-            compress_kv_cache,
-            swa_kv_cache,
-            state_cache,
-            _,
-            _,
-            _,
-        ) = DeviceOperator.unpack_dsa_forward_kv_cache(kv_cache, self.compress_ratio)
-
+        """Run attention after all cache writes and sparse selection finish."""
+        del query_context
         common_attn_metadata = layer_metadata.attention
         if common_attn_metadata is None:
             common_attn_metadata = layer_metadata.swa
-        swa_metadata = layer_metadata.swa
-
         common_metadata = _require_req_metadata(common_attn_metadata)
-        swa_req_metadata = _require_req_metadata(swa_metadata)
+        swa_req_metadata = _require_req_metadata(layer_metadata.swa)
         has_prefill = common_attn_metadata.num_prefills > 0
-        num_tokens = hidden_states.shape[0]
-        cos = common_metadata.cos[layer_name][:num_tokens]
-        sin = common_metadata.sin[layer_name][:num_tokens]
         actual_seq_lengths_query = common_metadata.query_start_loc
         actual_seq_lengths_key = common_metadata.seq_lens
         ori_win_left = self.window_size - 1 if swa_req_metadata.ori_win_left is None else swa_req_metadata.ori_win_left
         ori_win_right = 0 if swa_req_metadata.ori_win_right is None else swa_req_metadata.ori_win_right
 
-        compressor_tail_fn = None
-        if self.multistream_dsv4_dsa_overlap and self.compress_ratio > 1:
-            compressor = self.compressor
-            tail_compressor_metadata = layer_metadata.compressor
-            assert compressor is not None
-            assert tail_compressor_metadata is not None
-
-            def compressor_tail_fn() -> CompressorForwardOutput:
-                return compressor(
-                    hidden_states=hidden_states,
-                    state_cache=state_cache,
-                    metadata=tail_compressor_metadata,
-                )
-
-        if self.multistream_dsv4_dsa_overlap:
-            q, qr, qr_pertoken_scale, compressor_overlap_output = self._mla_prolog_multistream(
-                hidden_states,
-                cos,
-                sin,
-                swa_kv_cache,
-                swa_req_metadata.slot_mapping,
-                is_prefill=has_prefill,
-                tail_overlap_fn=compressor_tail_fn,
-            )
-        else:
-            compressor_overlap_output = None
-            q, qr, qr_pertoken_scale = self._mla_prolog_single_stream(
-                hidden_states,
-                cos,
-                sin,
-                swa_kv_cache,
-                swa_req_metadata.slot_mapping,
-                write_swa_cache=not cache_is_prepared,
-            )
-
-        compress_topk_idxs = None
-        compressor_metadata = None
-        if self.compress_ratio > 1:
-            compressor_metadata = layer_metadata.compressor
-            assert compressor_metadata is not None
-            compress_topk_idxs = self._maybe_update_compressed_caches_and_select_topk(
-                layer_name=layer_name,
-                hidden_states=hidden_states,
-                qr=qr,
-                kv_cache=kv_cache,
-                layer_metadata=layer_metadata,
-                qr_pertoken_scale=qr_pertoken_scale,
-                compress_kv_cache=compress_kv_cache,
-                state_cache=state_cache,
-                compressor_overlap_output=compressor_overlap_output,
-                write_cache=not cache_is_prepared,
-            )
-
-        notify_kv_cache_written(layer_name)
         wait_for_device_metadata(DeviceMetadataStage.ATTENTION, id(common_metadata.sas_metadata))
         record_attention_compute_start()
         kv_plan = get_dsa_attn_kv_plan(self.vllm_config)
@@ -2233,7 +2268,6 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             if swa_req_metadata.dspark_swa_indices is not None:
                 attn_kwargs["ori_sparse_indices"] = swa_req_metadata.dspark_swa_indices
         else:
-            assert compressor_metadata is not None
             attn_kwargs.update(
                 cmp_kv=compress_kv_cache,
                 cmp_block_table=common_metadata.block_table,
@@ -2244,3 +2278,103 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 attn_kwargs["cmp_sparse_indices"] = compress_topk_idxs
 
         return attn_op(q, **attn_kwargs)[0]
+
+    def _forward_attention(
+        self,
+        layer_name,
+        hidden_states: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, ...],
+        layer_metadata: AscendDSALayerMetadata,
+        cache_is_prepared: bool = False,
+    ) -> torch.Tensor:
+        # DSA PCP sets cache_is_prepared after global cache updates and forces
+        # single-stream attention because there is no local KV update to overlap.
+        if cache_is_prepared and self.multistream_dsv4_dsa_overlap:
+            raise RuntimeError("Prepared DSA caches require single-stream attention.")
+
+        (
+            compress_kv_cache,
+            swa_kv_cache,
+            state_cache,
+            _,
+            _,
+            _,
+        ) = DeviceOperator.unpack_dsa_forward_kv_cache(kv_cache, self.compress_ratio)
+
+        common_attn_metadata = layer_metadata.attention
+        if common_attn_metadata is None:
+            common_attn_metadata = layer_metadata.swa
+        swa_metadata = layer_metadata.swa
+
+        common_metadata = _require_req_metadata(common_attn_metadata)
+        swa_req_metadata = _require_req_metadata(swa_metadata)
+        has_prefill = common_attn_metadata.num_prefills > 0
+        num_tokens = hidden_states.shape[0]
+        cos = common_metadata.cos[layer_name][:num_tokens]
+        sin = common_metadata.sin[layer_name][:num_tokens]
+
+        compressor_tail_fn = None
+        if self.multistream_dsv4_dsa_overlap and self.compress_ratio > 1:
+            compressor = self.compressor
+            tail_compressor_metadata = layer_metadata.compressor
+            assert compressor is not None
+            assert tail_compressor_metadata is not None
+
+            def compressor_tail_fn() -> CompressorForwardOutput:
+                return compressor(
+                    hidden_states=hidden_states,
+                    state_cache=state_cache,
+                    metadata=tail_compressor_metadata,
+                )
+
+        if self.multistream_dsv4_dsa_overlap:
+            q, qr, qr_pertoken_scale, compressor_overlap_output = self._mla_prolog_multistream(
+                hidden_states,
+                cos,
+                sin,
+                swa_kv_cache,
+                swa_req_metadata.slot_mapping,
+                is_prefill=has_prefill,
+                tail_overlap_fn=compressor_tail_fn,
+            )
+        else:
+            compressor_overlap_output = None
+            q, qr, qr_pertoken_scale = self._mla_prolog_single_stream(
+                hidden_states,
+                cos,
+                sin,
+                swa_kv_cache,
+                swa_req_metadata.slot_mapping,
+                write_swa_cache=not cache_is_prepared,
+            )
+
+        # DCP starts its head AllGather here so it overlaps the compressor and
+        # Indexer work below. The base implementation intentionally does no work.
+        query_context = self._start_attention_query(q, layer_metadata)
+
+        compress_topk_idxs = None
+        if self.compress_ratio > 1:
+            assert layer_metadata.compressor is not None
+            compress_topk_idxs = self._maybe_update_compressed_caches_and_select_topk(
+                layer_name=layer_name,
+                hidden_states=hidden_states,
+                qr=qr,
+                kv_cache=kv_cache,
+                layer_metadata=layer_metadata,
+                qr_pertoken_scale=qr_pertoken_scale,
+                compress_kv_cache=compress_kv_cache,
+                state_cache=state_cache,
+                compressor_overlap_output=compressor_overlap_output,
+                write_cache=not cache_is_prepared,
+                query_context=query_context,
+            )
+
+        notify_kv_cache_written(layer_name)
+        return self._execute_attention(
+            q,
+            compress_kv_cache,
+            swa_kv_cache,
+            compress_topk_idxs,
+            layer_metadata,
+            query_context,
+        )

@@ -7,13 +7,21 @@ import torch.distributed as dist
 import torch.nn.functional as F
 import torch_npu
 from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
-from vllm.distributed import get_pcp_group, get_tp_group, tensor_model_parallel_all_gather
+from vllm.distributed import get_dcp_group, get_pcp_group, get_tp_group, tensor_model_parallel_all_gather
 from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionImplBase, AttentionMetadataBuilder
+from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.attention import dsa_v1
+from vllm_ascend.attention.context_parallel.common_cp import DCPImplMixin, DCPMetadataBuilderMixin
+from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
+    build_sfa_dcp_replicated_block_table,
+    build_sfa_dcp_replicated_slot_mapping,
+    get_sfa_dcp_max_local_block_table_cols,
+    get_sfa_dcp_local_block_table,
+)
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan
 from vllm_ascend.attention.dsa_v1 import (
@@ -36,12 +44,14 @@ from vllm_ascend.device.device_config import is_950
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
+from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.models.common.ops.sequence_parallel import sp_reduce_scatter
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
 from vllm_ascend.models.deepseek_v4.indexer import AscendIndexerMetadata
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.ops.rope_dsv4 import RopeDataProxy, get_cos_and_sin_dsa, get_full_cos_and_sin_dsa
 from vllm_ascend.ops.triton.dsa_cp import build_local_metadata_triton
+from vllm_ascend.ops.triton.sfa_cp import fused_sfa_dcp_lse_combine
 from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import enable_dsa_cp_full_o_proj
 from vllm_ascend.weight_switch import WeightSwitchConfig, WeightSwitchMixin, WeightSwitchState
@@ -61,6 +71,52 @@ if TYPE_CHECKING:
 
 # Fixed-size contract required by the underlying _C_ascend ops (must be exactly 1024).
 SAS_METADATA_SIZE = 1024
+# The SCFA kernel requires a sink tensor even when a branch must not contribute
+# a sink.  Its own softmax initializer uses the same finite minimum value.
+DSA_CMP_ONLY_SINK = -2e38
+
+_DSV4_DCP_COMM_STREAM: torch.npu.Stream | None = None
+
+
+def _dsv4_dcp_comm_stream() -> torch.npu.Stream:
+    """Return the process-local stream used by DSV4 DCP collectives."""
+    global _DSV4_DCP_COMM_STREAM
+    if _DSV4_DCP_COMM_STREAM is None:
+        _DSV4_DCP_COMM_STREAM = torch_npu.npu.Stream()
+    return _DSV4_DCP_COMM_STREAM
+
+
+# These are process-local, so every DCP rank emits one first-use line while
+# avoiding one log line per C4 layer.
+_DSV4_DCP_MEMORY_LOGGED = False
+_DSV4_DCP_PREFILL_LOGGED = False
+_DSV4_DCP_DECODE_LOGGED = False
+
+
+@dataclass
+class DSAQueryGatherContext:
+    """Keep the asynchronous query gather alive until C4 attention consumes it."""
+
+    gathered_head_major: torch.Tensor
+    completion_event: torch.npu.Event
+    work: dist.Work | None
+
+
+@dataclass
+class DSAPrefillKVGatherContext:
+    """Temporary compact C4 view used only by prefill and mixed batches."""
+
+    gathered_kv: torch.Tensor
+    completion_event: torch.npu.Event
+    work: dist.Work | None
+
+
+@dataclass
+class DSADCPAttentionContext:
+    """Communication state shared by cache-write and attention stages."""
+
+    query_gather: DSAQueryGatherContext | None = None
+    prefill_kv_gather: DSAPrefillKVGatherContext | None = None
 
 
 def hadamard_transform_ref(
@@ -2630,3 +2686,975 @@ class AscendDSAPCPImpl(dsa_v1.AscendDSAImpl):
             self.n_local_heads,
             self.head_dim,
         )
+
+
+class AscendDSADCPMetadataBuilder(DCPMetadataBuilderMixin, dsa_v1.AscendDSAMetadataBuilder):
+    """Build the local or global DCP address view required by each DSA cache.
+
+    C4 main compressed KV keeps the scheduler's rank-local view and assigns
+    each global compressed physical page to one DCP rank.
+    C4 Indexer and C128 caches expand that local table into global DCP lanes;
+    their QLI lengths remain in the same global C4 compressed-index domain.
+    SWA and compressor states already have global scheduler block tables, so
+    only their rank-local slot mappings are rebuilt in the global token domain.
+    """
+
+    _QLI_GLOBAL_LENGTH_BUFFERS_KEY = "_dsv4_dcp_qli_global_length_buffers"
+    _C4_LOCAL_SAS_METADATA_KEY = "_dsv4_dcp_c4_local_sas_metadata"
+
+    def __init__(
+        self,
+        kv_cache_spec: AttentionSpec,
+        layer_names: list[str],
+        vllm_config: VllmConfig,
+        device: torch.device,
+        metadata_cls: type[dsa_v1.AscendDSAMetadata] | None = None,
+        supports_dcp_with_varlen: bool = False,
+    ) -> None:
+        super().__init__(
+            kv_cache_spec,
+            layer_names,
+            vllm_config,
+            device,
+            metadata_cls,
+            supports_dcp_with_varlen,
+        )
+        self.lane_replication_size = getattr(kv_cache_spec, "dcp_replicated_size", 1)
+        self.scheduler_replication_size = getattr(kv_cache_spec, "dcp_scheduler_replication_size", 1)
+        if self.lane_replication_size > 1 and self.scheduler_replication_size > 1:
+            raise ValueError("A DSV4 cache cannot use lane and scheduler replication at the same time.")
+        replication_size = max(self.lane_replication_size, self.scheduler_replication_size)
+        if replication_size not in (1, self.dcp_size):
+            raise ValueError(
+                "DSV4 cache replication size must be one or the DCP world size, "
+                f"got replication_size={replication_size}, dcp_size={self.dcp_size}."
+            )
+        self.shard_c4_main = self.dcp_size > 1 and replication_size == 1 and self.compressor_ratio == 4
+        if self.shard_c4_main:
+            seq_lens_capacity = self.qli_seqused_k.shape[0]
+            self.dcp_global_compressed_seq_lens_buf = torch.empty(
+                seq_lens_capacity,
+                dtype=torch.int32,
+                device=device,
+            )
+            self.dcp_local_compressed_seq_lens_buf = torch.empty_like(
+                self.dcp_global_compressed_seq_lens_buf,
+            )
+            self.dcp_local_seqused_kv_buf = torch.empty_like(
+                self.dcp_global_compressed_seq_lens_buf,
+            )
+            self.dcp_local_sas_metadata_buffer = torch.empty(
+                dsa_v1.DSA_METADATA_BUFFER_SIZE,
+                dtype=torch.int32,
+                device=device,
+            )
+            self.dcp_local_block_table_cols = get_sfa_dcp_max_local_block_table_cols(
+                vllm_config.model_config.max_model_len,
+                self.logical_block_size,
+                self.dcp_size,
+                1,
+            )
+
+            index_topk = self.model_config.hf_config.index_topk
+            remap_block = min(128, 1 << (index_topk - 1).bit_length())
+            self.dcp_remap_num_chunks = (index_topk + remap_block - 1) // remap_block
+            max_topk_rows = vllm_config.scheduler_config.max_num_batched_tokens
+            compilation_config = vllm_config.compilation_config
+            if compilation_config.cudagraph_capture_sizes:
+                max_topk_rows = max(
+                    max_topk_rows,
+                    compilation_config.max_cudagraph_capture_size,
+                )
+            self.dcp_local_cmp_sparse_indices_buf = torch.empty(
+                (max_topk_rows, 1, index_topk),
+                dtype=torch.int32,
+                device=device,
+            )
+            self.dcp_local_remap_chunk_out_buf = torch.empty(
+                (max_topk_rows * self.dcp_remap_num_chunks, remap_block),
+                dtype=torch.int32,
+                device=device,
+            )
+            self.dcp_local_remap_chunk_count_buf = torch.empty(
+                (max_topk_rows, self.dcp_remap_num_chunks),
+                dtype=torch.int32,
+                device=device,
+            )
+            dcp_group = get_dcp_group()
+            collective_ranks = sorted(dcp_group.ranks)
+            self.dcp_collective_rank_order = torch.tensor(
+                [collective_ranks.index(rank) for rank in dcp_group.ranks],
+                dtype=torch.int32,
+                device=device,
+            )
+            tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+            dcp_heads = self.model_config.hf_config.num_attention_heads // tp_size * self.dcp_size
+            self.dcp_cmp_only_sinks = torch.full(
+                (dcp_heads,),
+                DSA_CMP_ONLY_SINK,
+                dtype=torch.float32,
+                device=device,
+            )
+        if replication_size == 1:
+            return
+        scheduler_config = vllm_config.scheduler_config
+        self.global_slot_mapping_buf = torch.empty(
+            (scheduler_config.max_num_batched_tokens,),
+            dtype=torch.int32,
+            device=device,
+        )
+        if self.lane_replication_size > 1:
+            local_cols = get_sfa_dcp_max_local_block_table_cols(
+                vllm_config.model_config.max_model_len,
+                kv_cache_spec.block_size,
+                self.dcp_size,
+                1,
+            )
+            self.local_block_table_cols = local_cols
+            self.replicated_block_table_buf = torch.empty(
+                (scheduler_config.max_num_seqs + 1, local_cols * self.dcp_size),
+                dtype=torch.int32,
+                device=device,
+            )
+            self.replicated_col_idx = torch.arange(
+                local_cols * self.dcp_size,
+                dtype=torch.int32,
+                device=device,
+            )
+
+    def _get_qli_length_buffers(
+        self,
+        metadata_cache: dict,
+        num_reqs: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Use one global C4 length view for every DCP C4 cache group.
+
+        QLI tiling metadata is already cached once per request across the C4
+        main-KV and Indexer cache builders. Its dynamic ``seqused_k`` and
+        ``cmp_residual_k`` inputs must have the same ownership: otherwise the
+        builder that reuses the cached tiling tensor can expose its untouched
+        private buffers to the Indexer. Sharing the persistent pair also avoids
+        launching duplicate div/remainder work for the replicated Indexer.
+        """
+        buffers = metadata_cache.get(self._QLI_GLOBAL_LENGTH_BUFFERS_KEY)
+        if buffers is None:
+            buffers = (self.qli_seqused_k, self.qli_cmp_residual_k)
+            metadata_cache[self._QLI_GLOBAL_LENGTH_BUFFERS_KEY] = buffers
+        qli_seqused_k, qli_cmp_residual_k = buffers
+        if num_reqs > qli_seqused_k.shape[0]:
+            raise RuntimeError(
+                "DSV4 DCP QLI global-length buffer is too small: "
+                f"capacity={qli_seqused_k.shape[0]}, required={num_reqs}."
+            )
+        return (
+            qli_seqused_k[:num_reqs],
+            qli_cmp_residual_k[:num_reqs],
+        )
+
+    def _populate_c4_local_attention_metadata(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        req_metadata: dsa_v1.AscendDSAReqMetadata,
+    ) -> None:
+        """Attach the page-sharded C4 view without changing global metadata.
+
+        Compressor and Indexer consumers keep ``seq_lens`` and ``block_table``
+        in their existing global domains.  Only the C4-only attention branch
+        consumes the fields populated here.
+        """
+        assert self.common_ratio_to_sas_metadata is not None
+        assert self.num_actual_tokens is not None
+        num_reqs = req_metadata.seq_lens.shape[0]
+        if num_reqs > self.dcp_local_compressed_seq_lens_buf.shape[0]:
+            raise RuntimeError(
+                "DSV4 DCP local sequence buffer is too small: "
+                f"capacity={self.dcp_local_compressed_seq_lens_buf.shape[0]}, required={num_reqs}."
+            )
+
+        global_compressed_seq_lens = self.dcp_global_compressed_seq_lens_buf[:num_reqs]
+        torch.div(
+            req_metadata.seq_lens,
+            self.compressor_ratio,
+            rounding_mode="floor",
+            out=global_compressed_seq_lens,
+        )
+        local_compressed_seq_lens = self.dcp_local_compressed_seq_lens_buf[:num_reqs]
+        local_compressed_seq_lens.copy_(
+            get_dcp_local_seq_lens(
+                global_compressed_seq_lens,
+                dcp_size=self.dcp_size,
+                dcp_rank=self.dcp_rank,
+                cp_kv_cache_interleave_size=self.storage_block_size,
+            )
+        )
+        local_seqused_kv = self.dcp_local_seqused_kv_buf[:num_reqs]
+        torch.mul(
+            local_compressed_seq_lens,
+            self.compressor_ratio,
+            out=local_seqused_kv,
+        )
+
+        local_block_table = get_sfa_dcp_local_block_table(
+            req_metadata.block_table,
+            num_reqs,
+            self.dcp_local_block_table_cols,
+        )
+
+        # max_seqlen_kv is a host-side tiling bound.  Derive it from the
+        # already available CPU lengths rather than synchronizing the device.
+        seq_lens_cpu = self.common_ratio_to_sas_metadata["seq_lens_cpu"][:num_reqs]
+        global_compressed_seq_lens_cpu = torch.div(
+            seq_lens_cpu.to(torch.int32),
+            self.compressor_ratio,
+            rounding_mode="floor",
+        )
+        local_compressed_seq_lens_cpu = get_dcp_local_seq_lens(
+            global_compressed_seq_lens_cpu,
+            dcp_size=self.dcp_size,
+            dcp_rank=self.dcp_rank,
+            cp_kv_cache_interleave_size=self.storage_block_size,
+        )
+        max_local_seqused_kv = (
+            int(local_compressed_seq_lens_cpu.max().item()) * self.compressor_ratio if num_reqs else 0
+        )
+        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: num_reqs + 1]
+        max_seqlen_q = (
+            int((query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).max().item()) if num_reqs else 0
+        )
+
+        def build_local_sas_metadata() -> None:
+            tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+            local_heads = self.model_config.hf_config.num_attention_heads // tp_size
+            self._build_sas_metadata(
+                metadata_cache=self.common_ratio_to_sas_metadata,
+                layer_name=self._C4_LOCAL_SAS_METADATA_KEY,
+                query_start_loc=req_metadata.query_start_loc,
+                seq_lens=local_seqused_kv,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_kv=max_local_seqused_kv,
+                cu_seqlens_ori_kv=None,
+                cu_seqlens_cmp_kv=None,
+                output_buffer=self.dcp_local_sas_metadata_buffer,
+                # Q is gathered only inside one DCP group. DCP may be a
+                # proper subgroup of TP, so this is not necessarily the
+                # model-wide head count.
+                num_heads_q=local_heads * self.dcp_size,
+                cmp_topk=self.model_config.hf_config.index_topk,
+                cmp_ratio=self.compressor_ratio,
+                has_ori_kv=False,
+                has_cmp_kv=True,
+                ori_win_left=self.model_config.hf_config.sliding_window - 1,
+                ori_win_right=0,
+            )
+
+        if self._device_metadata_enabled:
+            self._device_metadata_tasks = (
+                *self._device_metadata_tasks,
+                DeviceMetadataTask(
+                    DeviceMetadataStage.ATTENTION,
+                    build_local_sas_metadata,
+                    id(self.dcp_local_sas_metadata_buffer),
+                ),
+            )
+        else:
+            build_local_sas_metadata()
+
+        topk_rows = self.num_actual_tokens
+        if topk_rows > self.dcp_local_cmp_sparse_indices_buf.shape[0]:
+            raise RuntimeError(
+                "DSV4 DCP local TopK buffer is too small: "
+                f"capacity={self.dcp_local_cmp_sparse_indices_buf.shape[0]}, required={topk_rows}."
+            )
+        req_metadata.dcp_local_block_table = local_block_table
+        req_metadata.dcp_local_compressed_seq_lens = local_compressed_seq_lens
+        req_metadata.dcp_local_seqused_kv = local_seqused_kv
+        req_metadata.dcp_local_sas_metadata = self.dcp_local_sas_metadata_buffer
+        req_metadata.dcp_local_cmp_sparse_indices = self.dcp_local_cmp_sparse_indices_buf[:topk_rows]
+        req_metadata.dcp_local_remap_chunk_out = self.dcp_local_remap_chunk_out_buf[
+            : topk_rows * self.dcp_remap_num_chunks
+        ]
+        req_metadata.dcp_local_remap_chunk_count = self.dcp_local_remap_chunk_count_buf[:topk_rows]
+        req_metadata.dcp_cmp_only_sinks = self.dcp_cmp_only_sinks
+
+    def _populate_c4_prefill_gather_metadata(
+        self,
+        req_metadata: dsa_v1.AscendDSAReqMetadata,
+    ) -> None:
+        """Build the compact all-rank C4 view used by prefill attention."""
+        num_reqs = req_metadata.seq_lens.shape[0]
+        local_block_table = get_sfa_dcp_local_block_table(
+            req_metadata.block_table,
+            num_reqs,
+            self.dcp_local_block_table_cols,
+        )
+        valid_block_ids, compact_local_table = local_block_table.flatten().unique(return_inverse=True)
+        compact_local_table = compact_local_table.view_as(local_block_table)
+        num_blocks = valid_block_ids.shape[0]
+        rank_order = self.dcp_collective_rank_order[: self.dcp_size]
+        compact_global_table = (
+            compact_local_table.unsqueeze(-1)
+            + (rank_order * num_blocks).view(1, 1, -1).to(compact_local_table)
+        ).reshape(num_reqs, -1)
+        req_metadata.dcp_prefill_kv_gather_block_ids = valid_block_ids
+        req_metadata.dcp_prefill_kv_gather_block_table = compact_global_table.to(torch.int32)
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        fast_build: bool = False,
+        **kwargs: Any,
+    ) -> dsa_v1.AscendDSAMetadata:
+        if self.lane_replication_size == 1 and self.scheduler_replication_size == 1:
+            metadata = super().build(common_prefix_len, common_attn_metadata, fast_build, **kwargs)
+            if self.shard_c4_main:
+                req_metadata = dsa_v1._require_req_metadata(metadata)
+                req_metadata.compressor_dcp_size = self.dcp_size
+                req_metadata.compressor_dcp_rank = self.dcp_rank
+                # The first LSE-based DCP path is decode-only.  Prefill and
+                # mixed batches still need the page-local compressor write,
+                # but must not pay for unused local-attention metadata.
+                if self.num_prefills == 0:
+                    self._populate_c4_local_attention_metadata(
+                        common_attn_metadata,
+                        req_metadata,
+                    )
+                else:
+                    self._populate_c4_prefill_gather_metadata(req_metadata)
+            return metadata
+
+        num_reqs = common_attn_metadata.num_reqs
+        if self.lane_replication_size > 1:
+            local_block_table = get_sfa_dcp_local_block_table(
+                common_attn_metadata.block_table_tensor,
+                num_reqs,
+                self.local_block_table_cols,
+            )
+            num_cols = local_block_table.shape[1] * self.dcp_size
+            block_table = build_sfa_dcp_replicated_block_table(
+                local_block_table,
+                common_attn_metadata.seq_lens[:num_reqs],
+                self.replicated_block_table_buf[:num_reqs, :num_cols],
+                self.replicated_col_idx[:num_cols],
+                self.dcp_size,
+                1,
+            )
+        else:
+            # The replicated sliding-window manager publishes global block IDs
+            # directly; expanding them again would address non-existent lanes.
+            block_table = common_attn_metadata.block_table_tensor[:num_reqs]
+        global_view = common_attn_metadata.replace(block_table_tensor=block_table)
+        if self.compressor_ratio <= 1:
+            num_input_tokens = common_attn_metadata.num_input_tokens
+            slot_mapping = build_sfa_dcp_replicated_slot_mapping(
+                common_attn_metadata,
+                block_table,
+                self.global_slot_mapping_buf[:num_input_tokens],
+                self.logical_block_size,
+                self.device,
+            )
+            global_view = global_view.replace(slot_mapping=slot_mapping)
+
+        # Compressed C4/C128 slots are produced later by compressor_metadata
+        # from this global block table; rebuilding raw-token slots for them
+        # would add work without being consumed by a cache write.
+        return super().build(common_prefix_len, global_view, fast_build, **kwargs)
+
+
+def remap_dsa_c4_sparse_indices(
+    global_topk_indices: torch.Tensor,
+    req_metadata: dsa_v1.AscendDSAReqMetadata,
+    dcp_size: int,
+    dcp_rank: int,
+) -> torch.Tensor:
+    """Map global C4 TopK indices into this rank's page-local cache view."""
+    if global_topk_indices.dtype != torch.int32:
+        raise RuntimeError(
+            "DSV4 C4 TopK indices must use int32 for the graph-stable remap buffers, "
+            f"got {global_topk_indices.dtype}."
+        )
+    local_indices = req_metadata.dcp_local_cmp_sparse_indices
+    chunk_out = req_metadata.dcp_local_remap_chunk_out
+    chunk_count = req_metadata.dcp_local_remap_chunk_count
+    if local_indices is None or chunk_out is None or chunk_count is None:
+        raise RuntimeError("DSV4 C4 local remap buffers were not built for the sharded C4 cache group.")
+    if global_topk_indices.shape != local_indices.shape:
+        raise RuntimeError(
+            "DSV4 C4 TopK shape does not match the graph-stable local buffer: "
+            f"global={tuple(global_topk_indices.shape)}, local={tuple(local_indices.shape)}."
+        )
+
+    interleave_size = req_metadata.storage_block_size
+    if HAS_TRITON and global_topk_indices.is_npu:
+        from vllm_ascend.ops.triton.sparse_index_remap import remap_sparse_indices_triton
+
+        return remap_sparse_indices_triton(
+            global_topk_indices,
+            dcp_size,
+            dcp_rank,
+            interleave_size,
+            out=local_indices,
+            chunk_out=chunk_out,
+            chunk_count=chunk_count,
+        )
+
+    # Host/development fallback.  The production A2 path above performs the
+    # same mapping and stable compaction in two device kernels.
+    indices = global_topk_indices.to(torch.int64)
+    page_indices = torch.div(indices, interleave_size, rounding_mode="floor")
+    owner_mask = (indices >= 0) & (torch.remainder(page_indices, dcp_size) == dcp_rank)
+    page_offsets = torch.remainder(indices, interleave_size)
+    local_page_indices = torch.div(page_indices, dcp_size, rounding_mode="floor")
+    remapped = local_page_indices * interleave_size + page_offsets
+    remapped = torch.where(owner_mask, remapped, torch.full_like(remapped, -1))
+    topk_count = global_topk_indices.shape[-1]
+    order = torch.arange(topk_count, device=global_topk_indices.device)
+    pack_keys = order.expand_as(global_topk_indices) + (~owner_mask).to(order.dtype) * topk_count
+    _, pack_order = torch.sort(pack_keys, dim=-1)
+    local_indices.copy_(torch.gather(remapped, -1, pack_order).to(torch.int32))
+    return local_indices
+
+
+def forward_dsa_c4_local_attention(
+    q: torch.Tensor,
+    local_c4_kv: torch.Tensor,
+    ori_kv_placeholder: torch.Tensor,
+    global_topk_indices: torch.Tensor,
+    c4_req_metadata: dsa_v1.AscendDSAReqMetadata,
+    swa_req_metadata: dsa_v1.AscendDSAReqMetadata,
+    vllm_config: VllmConfig,
+    dcp_size: int,
+    dcp_rank: int,
+    softmax_scale: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Run the reusable C4-only partial-attention component for W5.
+
+    The current A2 op-host still requires an ori cache and block table.  The
+    supplied SWA tensors are address placeholders only: ``has_ori_kv=False``
+    makes the C4-local metadata schedule and device loop skip ori blocks,
+    while a finite disabled sink prevents this partial branch from adding the
+    model sink.
+    """
+    local_block_table = c4_req_metadata.dcp_local_block_table
+    local_seqused_kv = c4_req_metadata.dcp_local_seqused_kv
+    local_sas_metadata = c4_req_metadata.dcp_local_sas_metadata
+    disabled_sinks = c4_req_metadata.dcp_cmp_only_sinks
+    if (
+        local_block_table is None
+        or local_seqused_kv is None
+        or local_sas_metadata is None
+        or disabled_sinks is None
+    ):
+        raise RuntimeError("DSV4 C4-only attention metadata is incomplete.")
+
+    local_topk_indices = remap_dsa_c4_sparse_indices(
+        global_topk_indices,
+        c4_req_metadata,
+        dcp_size,
+        dcp_rank,
+    )
+    wait_for_device_metadata(DeviceMetadataStage.ATTENTION, id(local_sas_metadata))
+
+    kv_plan = get_dsa_attn_kv_plan(vllm_config)
+    if kv_plan.uses_sparse_flash_mla or kv_plan.uses_kv_compress_epilog:
+        raise RuntimeError("DSV4 C4-only local attention is currently implemented for the Ascend A2 SCFA path")
+    attn_op = kv_plan.get_dsa_sparse_attn_op()
+    attn_kwargs = kv_plan.get_dsa_sparse_attn_base_kwargs()
+    attn_kwargs.update(
+        ori_kv=ori_kv_placeholder,
+        cmp_kv=local_c4_kv,
+        cmp_sparse_indices=local_topk_indices,
+        ori_block_table=swa_req_metadata.block_table,
+        cmp_block_table=local_block_table,
+        cu_seqlens_q=c4_req_metadata.query_start_loc,
+        seqused_kv=local_seqused_kv,
+        sinks=disabled_sinks,
+        metadata=local_sas_metadata,
+        softmax_scale=softmax_scale,
+        cmp_ratio=4,
+        ori_mask_mode=4,
+        cmp_mask_mode=3,
+        ori_win_left=vllm_config.model_config.hf_config.sliding_window - 1,
+        ori_win_right=0,
+        layout_q="TND",
+        layout_kv=_dsa_layout_kv(vllm_config),
+        return_softmax_lse=True,
+    )
+    partial_output, partial_lse = attn_op(q, **attn_kwargs)
+
+    if HAS_TRITON and q.is_npu:
+        from vllm_ascend.ops.triton.sparse_index_remap import mask_invalid_sparse_attention_rows
+
+        mask_invalid_sparse_attention_rows(
+            local_topk_indices,
+            partial_output,
+            partial_lse,
+        )
+    else:
+        invalid_rows = local_topk_indices[..., :1] < 0
+        partial_output.masked_fill_(invalid_rows, 0)
+        partial_lse.masked_fill_(invalid_rows, -float("inf"))
+    return partial_output, partial_lse
+
+
+class AscendDSADCPImpl(DCPImplMixin, dsa_v1.AscendDSAImpl):
+    """Phase-one DSV4 DCP for eager prefill/mixed batches and decode.
+
+    Persistent C4 KV remains page-sharded. Prefill temporarily gathers only
+    referenced C4 blocks and reuses the original fused attention. Decode keeps
+    the W5 local-C4 + LSE merge path and does not communicate C4 KV.
+    """
+
+    can_return_lse_for_decode: bool = True
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        kv_plan = get_dsa_attn_kv_plan(self.vllm_config)
+        if self.compress_ratio == 4 and self.dcp_size > 1 and (
+            kv_plan.uses_sparse_flash_mla or kv_plan.uses_kv_compress_epilog
+        ):
+            raise NotImplementedError(
+                "DeepSeek-V4 DSA DCP currently supports the Ascend A2 SCFA path only."
+            )
+
+        if self.compress_ratio == 4 and self.dcp_size > 1:
+            compilation_config = self.vllm_config.compilation_config
+            if compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+                raise NotImplementedError(
+                    "DeepSeek-V4 DSA DCP phase one requires eager execution. "
+                    "Start the service with --enforce-eager; ACLGraph support is deferred."
+                )
+            cache_config = getattr(self.vllm_config, "cache_config", None)
+            if cache_config is not None and getattr(cache_config, "enable_prefix_caching", False):
+                raise NotImplementedError(
+                    "DeepSeek-V4 DSA DCP phase one does not support prefix caching. "
+                    "Start the service with --no-enable-prefix-caching."
+                )
+            if self.vllm_config.speculative_config is not None:
+                raise NotImplementedError(
+                    "DeepSeek-V4 DSA DCP phase one does not support speculative decoding."
+                )
+
+        self._last_dcp_local_seq_lens: torch.Tensor | None = None
+        self._last_dcp_local_topk_indices: torch.Tensor | None = None
+        self._last_dcp_q_gather_bytes = 0
+        self._last_dcp_output_lse_bytes = 0
+        self._last_dcp_prefill_kv_bytes = 0
+        self._last_dcp_entered_kv_collective = False
+        self._last_dcp_c4_cache_bytes = 0
+        self._last_npu_memory_allocated_bytes = 0
+        self._last_npu_memory_reserved_bytes = 0
+        self._last_npu_peak_memory_allocated_bytes = 0
+
+    def forward(  # type: ignore[override]
+        self,
+        layer_name,
+        hidden_states: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, ...] | None,
+        attn_metadata: dsa_v1.DSAMetadataDict,
+        output: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if attn_metadata is not None:
+            layer_metadata = self._get_layer_metadata(layer_name, attn_metadata)
+            common_attn_metadata = layer_metadata.attention
+            if common_attn_metadata is None:
+                common_attn_metadata = layer_metadata.swa
+            if common_attn_metadata.attn_state == AscendAttentionState.SpecDecoding:
+                raise NotImplementedError(
+                    "DeepSeek-V4 DSA DCP does not support speculative decoding now."
+                )
+            if common_attn_metadata.num_prefills == 0 and (
+                common_attn_metadata.attn_state != AscendAttentionState.DecodeOnly
+            ):
+                raise NotImplementedError(
+                    "DeepSeek-V4 DSA DCP phase one supports ordinary prefill/mixed batches "
+                    "and standard decode only."
+                )
+        return super().forward(
+            layer_name,
+            hidden_states,
+            kv_cache,
+            attn_metadata,
+            output,
+        )
+
+    def _start_attention_query(
+        self,
+        q: torch.Tensor,
+        layer_metadata: dsa_v1.AscendDSALayerMetadata,
+    ) -> DSADCPAttentionContext | None:
+        if self.compress_ratio != 4 or self.dcp_size == 1:
+            return None
+
+        self._last_dcp_local_seq_lens = None
+        self._last_dcp_local_topk_indices = None
+        self._last_dcp_q_gather_bytes = 0
+        self._last_dcp_output_lse_bytes = 0
+        self._last_dcp_prefill_kv_bytes = 0
+        self._last_dcp_entered_kv_collective = False
+
+        common_attn_metadata = layer_metadata.attention
+        assert common_attn_metadata is not None
+        context = DSADCPAttentionContext()
+        if common_attn_metadata.num_prefills > 0:
+            return context
+
+        # all_gather_into_tensor concatenates dim 0, so expose heads as the
+        # leading dimension. This is the W5 decode path and overlaps Indexer
+        # and compressor work on the main stream.
+        head_major_q = q.transpose(0, 1).contiguous()
+        main_stream = torch.npu.current_stream()
+        comm_stream = _dsv4_dcp_comm_stream()
+        q_ready = main_stream.record_event()
+        head_major_q.record_stream(comm_stream)
+        with torch.npu.stream(comm_stream):
+            comm_stream.wait_event(q_ready)
+            gathered_q, work = all_gather_async(head_major_q, self.dcp_group)
+            gather_done = comm_stream.record_event()
+        gathered_q.record_stream(main_stream)
+
+        self._last_dcp_q_gather_bytes = (
+            head_major_q.numel() * head_major_q.element_size() * (self.dcp_size - 1)
+        )
+        context.query_gather = DSAQueryGatherContext(
+            gathered_head_major=gathered_q,
+            completion_event=gather_done,
+            work=work,
+        )
+        return context
+
+    @staticmethod
+    def _finish_attention_query(
+        query_context: DSAQueryGatherContext,
+    ) -> torch.Tensor:
+        # Phase one is eager-only, so waiting on the asynchronous Work handle
+        # is allowed. The collective has already overlapped compressor/Indexer.
+        if query_context.work is not None:
+            query_context.work.wait()
+        torch.npu.current_stream().wait_event(query_context.completion_event)
+        return query_context.gathered_head_major.transpose(0, 1).contiguous()
+
+    def _start_prefill_kv_gather(
+        self,
+        compress_kv_cache: torch.Tensor,
+        req_metadata: dsa_v1.AscendDSAReqMetadata,
+    ) -> DSAPrefillKVGatherContext:
+        block_ids = req_metadata.dcp_prefill_kv_gather_block_ids
+        block_table = req_metadata.dcp_prefill_kv_gather_block_table
+        if block_ids is None or block_table is None:
+            raise RuntimeError("DSV4 DCP prefill compact C4 gather metadata is missing.")
+
+        self._log_dcp_memory_once(compress_kv_cache, req_metadata)
+        local_kv = torch.index_select(compress_kv_cache, 0, block_ids).contiguous()
+        main_stream = torch.npu.current_stream()
+        comm_stream = _dsv4_dcp_comm_stream()
+        kv_ready = main_stream.record_event()
+        local_kv.record_stream(comm_stream)
+        with torch.npu.stream(comm_stream):
+            comm_stream.wait_event(kv_ready)
+            gathered_kv, work = all_gather_async(local_kv, self.dcp_group)
+            gather_done = comm_stream.record_event()
+        gathered_kv.record_stream(main_stream)
+
+        self._last_dcp_prefill_kv_bytes = (
+            local_kv.numel() * local_kv.element_size() * (self.dcp_size - 1)
+        )
+        self._last_dcp_entered_kv_collective = True
+        return DSAPrefillKVGatherContext(
+            gathered_kv=gathered_kv,
+            completion_event=gather_done,
+            work=work,
+        )
+
+    @staticmethod
+    def _finish_prefill_kv_gather(
+        gather_context: DSAPrefillKVGatherContext,
+    ) -> torch.Tensor:
+        if gather_context.work is not None:
+            gather_context.work.wait()
+        torch.npu.current_stream().wait_event(gather_context.completion_event)
+        return gather_context.gathered_kv
+
+    def _compressed_cache_write_complete(
+        self,
+        compress_kv_cache: torch.Tensor,
+        layer_metadata: dsa_v1.AscendDSALayerMetadata,
+        query_context: Any,
+    ) -> None:
+        if not isinstance(query_context, DSADCPAttentionContext):
+            return
+        common_attn_metadata = layer_metadata.attention
+        if common_attn_metadata is None or common_attn_metadata.num_prefills == 0:
+            return
+        if query_context.prefill_kv_gather is not None:
+            return
+        c4_req_metadata = dsa_v1._require_req_metadata(common_attn_metadata)
+        query_context.prefill_kv_gather = self._start_prefill_kv_gather(
+            compress_kv_cache,
+            c4_req_metadata,
+        )
+
+    def _forward_swa_local_attention(
+        self,
+        q: torch.Tensor,
+        swa_kv_cache: torch.Tensor,
+        swa_req_metadata: dsa_v1.AscendDSAReqMetadata,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        wait_for_device_metadata(DeviceMetadataStage.ATTENTION, id(swa_req_metadata.sas_metadata))
+        kv_plan = get_dsa_attn_kv_plan(self.vllm_config)
+        if kv_plan.uses_sparse_flash_mla or kv_plan.uses_kv_compress_epilog:
+            raise RuntimeError("DeepSeek-V4 DSA DCP currently supports the Ascend A2 SCFA path only.")
+        ori_win_left = self.window_size - 1 if swa_req_metadata.ori_win_left is None else swa_req_metadata.ori_win_left
+        ori_win_right = 0 if swa_req_metadata.ori_win_right is None else swa_req_metadata.ori_win_right
+        attn_kwargs = kv_plan.get_dsa_sparse_attn_base_kwargs()
+        attn_kwargs.update(
+            ori_kv=swa_kv_cache,
+            ori_block_table=swa_req_metadata.block_table,
+            cu_seqlens_q=swa_req_metadata.query_start_loc,
+            seqused_kv=swa_req_metadata.seq_lens,
+            sinks=self.attn_sink,
+            metadata=swa_req_metadata.sas_metadata,
+            softmax_scale=self.softmax_scale,
+            cmp_ratio=1,
+            ori_mask_mode=4,
+            ori_win_left=ori_win_left,
+            ori_win_right=ori_win_right,
+            layout_q="TND",
+            layout_kv=_dsa_layout_kv(self.vllm_config),
+            return_softmax_lse=True,
+        )
+        return kv_plan.get_dsa_sparse_attn_op()(q, **attn_kwargs)
+
+    def _execute_attention(
+        self,
+        q: torch.Tensor,
+        compress_kv_cache: torch.Tensor,
+        swa_kv_cache: torch.Tensor,
+        compress_topk_idxs: torch.Tensor | None,
+        layer_metadata: dsa_v1.AscendDSALayerMetadata,
+        query_context: Any = None,
+    ) -> torch.Tensor:
+        # C128/HCA and pure-SWA layers keep their replicated cache and run the
+        # original implementation without DCP communication
+        if self.compress_ratio != 4 or self.dcp_size == 1:
+            return super()._execute_attention(
+                q,
+                compress_kv_cache,
+                swa_kv_cache,
+                compress_topk_idxs,
+                layer_metadata,
+                query_context,
+            )
+
+        if not isinstance(query_context, DSADCPAttentionContext):
+            raise RuntimeError("DeepSeek-V4 C4 DCP attention is missing its communication context.")
+        if compress_topk_idxs is None or layer_metadata.attention is None:
+            raise RuntimeError("DeepSeek-V4 C4 DCP attention requires global Indexer TopK results.")
+
+        c4_req_metadata = dsa_v1._require_req_metadata(layer_metadata.attention)
+        swa_req_metadata = dsa_v1._require_req_metadata(layer_metadata.swa)
+        common_attn_metadata = layer_metadata.attention
+
+        if common_attn_metadata.num_prefills > 0:
+            gather_context = query_context.prefill_kv_gather
+            if gather_context is None:
+                # A compressed row is not guaranteed to be produced on every
+                # prefill step. Start the same compact gather here if the
+                # cache-write hook did not run.
+                gather_context = self._start_prefill_kv_gather(
+                    compress_kv_cache,
+                    c4_req_metadata,
+                )
+            gathered_kv = self._finish_prefill_kv_gather(gather_context)
+            gathered_block_table = c4_req_metadata.dcp_prefill_kv_gather_block_table
+            assert gathered_block_table is not None
+            gathered_req_metadata = replace(
+                c4_req_metadata,
+                block_table=gathered_block_table,
+            )
+            gathered_attention_metadata = replace(
+                common_attn_metadata,
+                req_metadata=gathered_req_metadata,
+            )
+            gathered_layer_metadata = replace(
+                layer_metadata,
+                attention=gathered_attention_metadata,
+            )
+            self._log_dcp_path_once("prefill", c4_req_metadata, q.shape[0])
+            # The temporary C4 cache is complete, so the original fused C4+SWA
+            # attention consumes local Q directly. Persistent C4 storage stays
+            # page-sharded and the gathered tensor is released after the layer.
+            return super()._execute_attention(
+                q,
+                gathered_kv,
+                swa_kv_cache,
+                compress_topk_idxs,
+                gathered_layer_metadata,
+                None,
+            )
+
+        if query_context.query_gather is None:
+            raise RuntimeError("DeepSeek-V4 C4 DCP decode is missing its asynchronous Q gather context.")
+        global_q = self._finish_attention_query(query_context.query_gather)
+        expected_dcp_heads = self.n_local_heads * self.dcp_size
+        if global_q.shape[1] != expected_dcp_heads:
+            raise RuntimeError(
+                "DeepSeek-V4 DCP Q gather produced an unexpected head count: "
+                f"expected={expected_dcp_heads}, actual={global_q.shape[1]}."
+            )
+
+        self._log_dcp_memory_once(compress_kv_cache, c4_req_metadata)
+        record_attention_compute_start()
+        c4_output, c4_lse = forward_dsa_c4_local_attention(
+            global_q,
+            compress_kv_cache,
+            swa_kv_cache,
+            compress_topk_idxs,
+            c4_req_metadata,
+            swa_req_metadata,
+            self.vllm_config,
+            self.dcp_size,
+            self.dcp_rank,
+            self.softmax_scale,
+        )
+        self._last_dcp_local_seq_lens = c4_req_metadata.dcp_local_compressed_seq_lens
+        self._last_dcp_local_topk_indices = c4_req_metadata.dcp_local_cmp_sparse_indices
+
+        # Move C4 partial output and its lossless packed FP32 LSE while the
+        # main stream computes the replicated SWA contribution exactly once.
+        main_stream = torch.npu.current_stream()
+        comm_stream = _dsv4_dcp_comm_stream()
+        c4_ready = main_stream.record_event()
+        c4_output.record_stream(comm_stream)
+        c4_lse.record_stream(comm_stream)
+        with torch.npu.stream(comm_stream):
+            comm_stream.wait_event(c4_ready)
+            c4_recv = torch.ops.vllm.sfa_dcp_a2a_fused(
+                c4_output,
+                c4_lse,
+                self.dcp_size,
+                1,
+                self.dcp_group.unique_name,
+                defer_combine=True,
+            )
+            c4_comm_done = comm_stream.record_event()
+        c4_recv.record_stream(main_stream)
+
+        lse_pack_dim = 4 if c4_output.dtype in (torch.bfloat16, torch.float16) else 1
+        self._last_dcp_output_lse_bytes = (
+            c4_output.shape[0]
+            * self.n_local_heads
+            * (c4_output.shape[-1] + lse_pack_dim)
+            * c4_output.element_size()
+            * (self.dcp_size - 1)
+        )
+
+        swa_output, swa_lse = self._forward_swa_local_attention(
+            q,
+            swa_kv_cache,
+            swa_req_metadata,
+        )
+        main_stream.wait_event(c4_comm_done)
+        output = fused_sfa_dcp_lse_combine(
+            c4_recv,
+            self.head_dim,
+            scatter_dim=1,
+            local_output=swa_output,
+            local_lse=swa_lse,
+        )
+        self._log_dcp_path_once("decode", c4_req_metadata, q.shape[0])
+        return output
+
+    def _log_dcp_memory_once(
+        self,
+        compress_kv_cache: torch.Tensor,
+        req_metadata: dsa_v1.AscendDSAReqMetadata,
+    ) -> None:
+        """Log actual per-rank allocator usage and the physical C4 tensor size."""
+        global _DSV4_DCP_MEMORY_LOGGED
+        local_c4_bytes = compress_kv_cache.numel() * compress_kv_cache.element_size()
+        self._last_dcp_c4_cache_bytes = local_c4_bytes
+        self._last_npu_memory_allocated_bytes = torch_npu.npu.memory_allocated()
+        self._last_npu_memory_reserved_bytes = torch_npu.npu.memory_reserved()
+        self._last_npu_peak_memory_allocated_bytes = torch_npu.npu.max_memory_allocated()
+        if _DSV4_DCP_MEMORY_LOGGED:
+            return
+        estimated_dcp1_bytes = local_c4_bytes * self.dcp_size
+        logger.info(
+            "DSV4 DCP memory: dcp_rank=%d/%d, cache_group=%s, "
+            "c4_per_layer_local=%.2f MiB, c4_per_layer_DCP1_estimate=%.2f MiB, "
+            "npu_allocated=%.2f GiB, npu_reserved=%.2f GiB, npu_peak_allocated=%.2f GiB.",
+            self.dcp_rank,
+            self.dcp_size,
+            req_metadata.cache_group_key,
+            local_c4_bytes / (1024**2),
+            estimated_dcp1_bytes / (1024**2),
+            self._last_npu_memory_allocated_bytes / (1024**3),
+            self._last_npu_memory_reserved_bytes / (1024**3),
+            self._last_npu_peak_memory_allocated_bytes / (1024**3),
+        )
+        _DSV4_DCP_MEMORY_LOGGED = True
+
+    def _log_dcp_path_once(
+        self,
+        path: str,
+        req_metadata: dsa_v1.AscendDSAReqMetadata,
+        num_tokens: int,
+    ) -> None:
+        global _DSV4_DCP_PREFILL_LOGGED, _DSV4_DCP_DECODE_LOGGED
+        if path == "prefill":
+            if _DSV4_DCP_PREFILL_LOGGED:
+                return
+            logger.info(
+                "DSV4 DCP prefill path: dcp_rank=%d/%d, requests=%d, tokens=%d, "
+                "temporary_c4_kv_gather_remote=%.2f MiB, persistent_c4_sharded=true.",
+                self.dcp_rank,
+                self.dcp_size,
+                req_metadata.seq_lens.shape[0],
+                num_tokens,
+                self._last_dcp_prefill_kv_bytes / (1024**2),
+            )
+            _DSV4_DCP_PREFILL_LOGGED = True
+            return
+        if _DSV4_DCP_DECODE_LOGGED:
+            return
+        logger.info(
+            "DSV4 DCP decode path: dcp_rank=%d/%d, requests=%d, tokens=%d, "
+            "q_gather_remote=%.2f MiB, output_lse_a2a_remote=%.2f MiB, "
+            "c4_kv_collective_remote=0.00 MiB, persistent_c4_sharded=true.",
+            self.dcp_rank,
+            self.dcp_size,
+            req_metadata.seq_lens.shape[0],
+            num_tokens,
+            self._last_dcp_q_gather_bytes / (1024**2),
+            self._last_dcp_output_lse_bytes / (1024**2),
+        )
+        _DSV4_DCP_DECODE_LOGGED = True
+
+    def get_dcp_debug_stats(self) -> dict[str, Any]:
+        """Return observability for the most recent C4 layer.
+
+        ``local_valid_topk_counts`` remains an NPU tensor. Materializing it on
+        the host is intentionally left to explicit debugging code outside the
+        inference hot path.
+        """
+        local_valid_topk_counts = None
+        if self._last_dcp_local_topk_indices is not None:
+            local_valid_topk_counts = torch.sum(
+                self._last_dcp_local_topk_indices >= 0,
+                dim=-1,
+                dtype=torch.int32,
+            )
+        return {
+            "local_c4_seq_lens": self._last_dcp_local_seq_lens,
+            "local_valid_topk_counts": local_valid_topk_counts,
+            "q_gather_remote_bytes": self._last_dcp_q_gather_bytes,
+            "output_lse_a2a_remote_bytes": self._last_dcp_output_lse_bytes,
+            "prefill_kv_gather_remote_bytes": self._last_dcp_prefill_kv_bytes,
+            "kv_collective_bytes": self._last_dcp_prefill_kv_bytes,
+            "entered_kv_collective": self._last_dcp_entered_kv_collective,
+            "c4_cache_physical_bytes": self._last_dcp_c4_cache_bytes,
+            "npu_memory_allocated_bytes": self._last_npu_memory_allocated_bytes,
+            "npu_memory_reserved_bytes": self._last_npu_memory_reserved_bytes,
+            "npu_peak_memory_allocated_bytes": self._last_npu_peak_memory_allocated_bytes,
+        }

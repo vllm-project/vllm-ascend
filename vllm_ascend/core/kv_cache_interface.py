@@ -24,6 +24,64 @@ from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm_ascend.utils import vllm_version_is
 
 
+def get_dsv4_dcp_replication_size(vllm_config: VllmConfig) -> int:
+    """Return the DCP replication width used by the first DSV4 DCP stage.
+
+    PCP keeps its existing cache ownership.  The initial DSV4 DCP path is
+    deliberately DCP-only, so a PCP configuration must not silently switch to
+    the replicated layouts introduced here.
+    """
+    parallel_config = vllm_config.parallel_config
+    if parallel_config.prefill_context_parallel_size > 1:
+        return 1
+    return max(parallel_config.decode_context_parallel_size, 1)
+
+
+def get_dsv4_scheduler_dcp_world_size(
+    kv_cache_spec: KVCacheSpec,
+    dcp_world_size: int,
+) -> int:
+    """Return the DCP width that owns this cache group's scheduler blocks.
+
+    DSV4 uses two different kinds of replication under DCP:
+
+    * ``dcp_replicated_size`` puts replicated physical lanes inside one
+      scheduler block. The scheduler block itself is still DCP-sharded, so
+      these legacy specs keep the process DCP size.
+    * ``dcp_scheduler_replication_size`` means every DCP rank owns the same
+      global scheduler block IDs. These specs must be managed with DCP size
+      one. This is the C4 Indexer, C128, SWA and compressor-state layout.
+
+    vLLM v0.29.0 treats every FullAttentionSpec as DCP-sharded and therefore
+    cannot infer this distinction from the upstream spec hierarchy alone.
+    """
+    if dcp_world_size <= 1:
+        return 1
+
+    specs = (
+        tuple(kv_cache_spec.kv_cache_specs.values())
+        if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs)
+        else (kv_cache_spec,)
+    )
+    replication_sizes = {
+        getattr(spec, "dcp_scheduler_replication_size", 1) for spec in specs
+    }
+    if len(replication_sizes) != 1:
+        raise ValueError(
+            "All specs in one KV cache group must use the same scheduler "
+            f"replication width, got {sorted(replication_sizes)}."
+        )
+    replication_size = replication_sizes.pop()
+    if replication_size <= 1:
+        return dcp_world_size
+    if replication_size != dcp_world_size:
+        raise ValueError(
+            "DSV4 scheduler replication width must match DCP world size: "
+            f"replication_size={replication_size}, dcp_world_size={dcp_world_size}."
+        )
+    return 1
+
+
 def get_kv_cache_compression_ratio(kv_cache_spec: KVCacheSpec) -> int:
     """Return the MLA compression ratio across vLLM cache-spec APIs."""
     return kv_cache_spec.tokens_per_state
@@ -179,6 +237,79 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
 
 
 @dataclass(frozen=True, kw_only=True)
+class AscendDSAReplicatedMLASpec(AscendMLAAttentionSpec):
+    """A replicated DSV4 MLA page contains one physical page per DCP rank.
+
+    The scheduler still allocates rank-local block IDs.  A replicated cache
+    uses all DCP lanes of each allocated block to keep its history global.
+    This layout is used by the C4 indexer K/scale cache. The C128 cache
+    instead uses global scheduler blocks; the C4 main cache is DCP-sharded.
+    """
+
+    dcp_replicated_size: int = 1
+
+    @property
+    def real_page_size_bytes(self) -> int:
+        return self.dcp_replicated_size * super().real_page_size_bytes
+
+    @classmethod
+    def merge(cls, specs: list[Self]) -> Self:
+        assert all(isinstance(spec, cls) for spec in specs), (
+            "All replicated DSV4 MLA layers in one KV cache group must use "
+            "the same cache spec type."
+        )     
+        replication_sizes = {spec.dcp_replicated_size for spec in specs}
+        assert len(replication_sizes) == 1, (
+            "All replicated DSV4 MLA layers in one KV cache group must use "
+            "the same DCP replication size."
+        )
+        return replace(
+            super().merge(specs),
+            dcp_replicated_size=replication_sizes.pop(),
+        )
+
+
+@dataclass(frozen=True, kw_only=True)
+class AscendDSAReplicatedFullMLASpec(AscendMLAAttentionSpec):
+    """A full cache addressed by global scheduler blocks on every rank.
+
+    This is used by the C128 main cache and by the C4 Indexer cache.  Both
+    caches keep complete history on every DCP rank, but they do not need to
+    share scheduler block IDs with the DCP-sharded C4 main cache.  Giving
+    them global scheduler blocks keeps the ordinary per-page stride instead
+    of placing ``dcp_world_size`` physical lanes inside every page.
+
+    The distinction matters for DSV4's shared BlockPool.  A lane-replicated
+    C4 Indexer page is DCP times larger and therefore widens every physical
+    pool block, including the many blocks owned by SWA and compressor-state
+    groups.  Scheduler replication stores the same Indexer bytes per rank
+    while avoiding that pool-wide amplification.
+    """
+
+    dcp_sharded: bool = False
+    dcp_scheduler_replication_size: int = 1
+
+    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
+        # Every rank keeps the complete C128 history, so worker block tables
+        # must be sized in the global token domain rather than max_len / DCP.
+        return cdiv(max_len, self.block_size)
+
+    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        max_model_len = vllm_config.model_config.max_model_len
+        return cdiv(max_model_len, self.block_size) * self.page_size_bytes
+
+    @classmethod
+    def merge(cls, specs: list[Self]) -> Self:
+        assert all(isinstance(spec, cls) for spec in specs)
+        replication_sizes = {spec.dcp_scheduler_replication_size for spec in specs}
+        assert len(replication_sizes) == 1
+        return replace(
+            super().merge(specs),
+            dcp_scheduler_replication_size=replication_sizes.pop(),
+        )
+
+
+@dataclass(frozen=True, kw_only=True)
 class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
     """KV cache spec for SFA indexer K/scale cache.
 
@@ -297,6 +428,58 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
 
 
 @dataclass(frozen=True, kw_only=True)
+class AscendDSAReplicatedSlidingWindowMLASpec(AscendSlidingWindowMLASpec):
+    """DSV4 SWA/state cache whose scheduler ownership is globally replicated.
+
+    Unlike `AscendDSAReplicatedMLASpec`, this spec does not put DCP
+    lanes inside one physical page.  Its manager intentionally uses DCP size
+    one so every rank receives the same global block IDs.  This preserves the
+    sliding-window allocation/recycling rules and keeps the ordinary physical
+    page stride.
+    """
+
+    dcp_scheduler_replication_size: int = 1
+
+    @classmethod
+    def merge(cls, specs: list[Self]) -> Self:
+        assert all(isinstance(spec, cls) for spec in specs), (
+            "All replicated DSV4 sliding-window layers in one KV cache group "
+            "must use the same cache spec type."
+        )
+        replication_sizes = {spec.dcp_scheduler_replication_size for spec in specs}
+        assert len(replication_sizes) == 1, (
+            "All replicated DSV4 sliding-window layers in one KV cache group "
+            "must use the same DCP replication size."
+        )
+        return replace(
+            super().merge(specs),
+            dcp_scheduler_replication_size=replication_sizes.pop(),
+        )
+
+    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        max_blocks = self.max_admission_blocks_per_request(
+            max_in_flight_tokens=vllm_config.max_in_flight_tokens,
+            max_model_len=vllm_config.model_config.max_model_len,
+        )
+        return max_blocks * self.page_size_bytes
+
+    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
+        del vllm_config
+        return cdiv(max_len, self.block_size)
+
+
+class AscendDSAReplicatedSlidingWindowManager(SlidingWindowManager):
+    """Run a replicated DSV4 SWA/state group with global scheduler blocks."""
+
+    def __init__(self, kv_cache_spec: AscendDSAReplicatedSlidingWindowMLASpec, **kwargs) -> None:
+        # The cache is replicated rather than sequence-sharded.  Advertising a
+        # local DCP size of one keeps allocation, prefix-cache lookup and block
+        # recycling in the existing SlidingWindowManager's global token domain.
+        kwargs["dcp_world_size"] = 1
+        super().__init__(kv_cache_spec, **kwargs)
+
+
+@dataclass(frozen=True, kw_only=True)
 class AscendIndexerKPoolTailSpec(SlidingWindowSpec):
     """One fixed FP32 ``[2, ring_capacity, head_size]`` page per request.
 
@@ -367,6 +550,11 @@ def register_ascend_kv_cache_specs() -> None:
         uniform_type_base_spec=FullAttentionSpec,
     )
     KVCacheSpecRegistry.register(
+        kvcache_spec_cls=AscendDSAReplicatedFullMLASpec,
+        manager_class=FullAttentionManager,
+        uniform_type_base_spec=FullAttentionSpec,
+    )
+    KVCacheSpecRegistry.register(
         kvcache_spec_cls=AscendSFAIndexerCacheSpec,
         manager_class=FullAttentionManager,
         uniform_type_base_spec=FullAttentionSpec,
@@ -376,7 +564,11 @@ def register_ascend_kv_cache_specs() -> None:
         manager_class=SlidingWindowManager,
         uniform_type_base_spec=SlidingWindowMLASpec,
     )
-
+    KVCacheSpecRegistry.register(
+        kvcache_spec_cls=AscendDSAReplicatedSlidingWindowMLASpec,
+        manager_class=AscendDSAReplicatedSlidingWindowManager,
+        uniform_type_base_spec=SlidingWindowMLASpec,
+    )
     KVCacheSpecRegistry.register(
         kvcache_spec_cls=AscendIndexerKPoolTailSpec,
         manager_class=KpoolTailManager,

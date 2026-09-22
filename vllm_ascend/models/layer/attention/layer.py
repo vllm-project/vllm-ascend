@@ -25,7 +25,11 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSAC128Backend,
     AscendDSASWABackend,
 )
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.core.kv_cache_interface import (
+    AscendDSAReplicatedFullMLASpec,
+    AscendMLAAttentionSpec,
+    get_dsv4_dcp_replication_size,
+)
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
 
@@ -199,7 +203,10 @@ class DSAAttention(nn.Module, AttentionLayerBase):
         # vLLM #51718 replaced MLAAttentionSpec.compress_ratio with
         # AttentionSpec.tokens_per_state on main.
         ratio_kwargs: dict[str, Any] = {"tokens_per_state": self.compress_ratio}
-        return AscendMLAAttentionSpec(
+        replication_size = get_dsv4_dcp_replication_size(vllm_config)
+        replicate_c128 = self.compress_ratio == 128 and replication_size > 1
+        spec_cls = AscendDSAReplicatedFullMLASpec if replicate_c128 else AscendMLAAttentionSpec
+        return spec_cls(
             # The scheduler operates in raw-token units. Ascend kernels keep
             # using the compressed page exposed by storage_block_size.
             block_size=storage_block_size * self.compress_ratio,
@@ -208,5 +215,6 @@ class DSAAttention(nn.Module, AttentionLayerBase):
             dtype=kv_cache_dtype,
             model_version="deepseek_v4",
             cache_dtype_str=vllm_config.cache_config.cache_dtype,
+            **({"dcp_scheduler_replication_size": replication_size} if replicate_c128 else {}),
             **ratio_kwargs,
         )

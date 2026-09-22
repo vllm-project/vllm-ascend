@@ -1136,6 +1136,32 @@ class NPUWorker(WorkerBase):
             kv_cache_config,
             kv_cache_allocation_context=self._maybe_get_memory_pool_context(tag="kv_cache"),
         )
+        # DSV4's cache descriptors share one backing allocation. Report the
+        # allocated size rather than summing descriptors for the same tensor.
+        if (
+            self.rank == 0
+            and self.parallel_config.decode_context_parallel_size > 1
+            and kv_cache_config.kv_cache_tensors
+            and any(
+                getattr(spec, "model_version", None) == "deepseek_v4"
+                for group in kv_cache_config.kv_cache_groups
+                for spec in (
+                    group.kv_cache_spec.kv_cache_specs.values()
+                    if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+                    else (group.kv_cache_spec,)
+                )
+            )
+        ):
+            logger.info(
+                "DeepSeek-V4 DCP NPU 0 memory: total=%.2f GiB, "
+                "model_weights=%.2f GiB, profiled_kv_budget=%.2f GiB, "
+                "allocated_kv_backing=%.2f GiB, pool_blocks=%d.",
+                self.init_snapshot.total_memory / GiB_bytes,
+                self.model_runner.model_memory_usage / GiB_bytes,
+                self.available_kv_cache_memory_bytes / GiB_bytes,
+                kv_cache_config.kv_cache_tensors[0].size / GiB_bytes,
+                kv_cache_config.num_blocks,
+            )
 
         # MRV2's scheduler emits new_block_ids_to_zero whenever this flag is
         # set, so its worker-side consumer must use the same condition. Keep the

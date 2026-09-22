@@ -926,7 +926,8 @@ compressor_meta(const at::Tensor &x, const at::Tensor &wkv, const at::Tensor &wg
 std::tuple<at::Tensor, at::Tensor, at::Tensor> compressor_metadata_meta(
     const at::Tensor &rope_cos, const at::Tensor &rope_sin, const at::Tensor &cu_seqlens,
     const at::Tensor &start_pos, const at::Tensor &kv_block_table, int64_t kv_block_size,
-    int64_t slot_mapping_format, int64_t compress_ratio, int64_t num_compressed_tokens, int64_t num_reqs_actual)
+    int64_t slot_mapping_format, int64_t compress_ratio, int64_t num_compressed_tokens, int64_t num_reqs_actual,
+    int64_t dcp_size, int64_t dcp_rank)
 {
     constexpr int64_t VALUE_0 = 0;
 
@@ -937,6 +938,9 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> compressor_metadata_meta(
     TORCH_CHECK(compress_ratio > VALUE_0, "compress_ratio should be greater than 0");
     TORCH_CHECK(num_compressed_tokens > VALUE_0, "num_compressed_tokens should be greater than 0");
     TORCH_CHECK(num_reqs_actual > VALUE_0, "num_reqs_actual should be greater than 0");
+    TORCH_CHECK(dcp_size > VALUE_0, "dcp_size should be greater than 0");
+    TORCH_CHECK(dcp_rank >= 0 && dcp_rank < dcp_size,
+                "dcp_rank should be in [0, dcp_size), but got rank=", dcp_rank, ", size=", dcp_size);
 
     c10::SymDimVector rope_output_size = {
         c10::SymInt(num_compressed_tokens), c10::SymInt(1), c10::SymInt(1), rope_cos.sym_size(1)};

@@ -69,6 +69,8 @@ struct CompressorMetadataTilingData {
     uint32_t kvBlockSize;
     uint32_t slotMappingFormat;
     uint32_t cmpRatio;
+    uint32_t dcpSize;
+    uint32_t dcpRank;
     uint32_t usedCoreNum;
     uint32_t tileRows;
     uint32_t ropeRowBytes;
@@ -91,6 +93,8 @@ public:
         kvBlockSize_ = tilingData->kvBlockSize;
         slotMappingFormat_ = tilingData->slotMappingFormat;
         cmpRatio_ = tilingData->cmpRatio;
+        dcpSize_ = tilingData->dcpSize;
+        dcpRank_ = tilingData->dcpRank;
         tileRows_ = tilingData->tileRows;
         ropeRowBytes_ = tilingData->ropeRowBytes;
         ropeRowBytesAligned_ = tilingData->ropeRowBytesAligned;
@@ -99,7 +103,7 @@ public:
         ropeDimAligned_ = ropeRowBytesAligned_ / sizeof(T);
         ropePadElems_ = ropeDimAligned_ - ropeDim_;
         slotTileBytes_ = AlignUpU32(Int32BytesU32(tileRows_ * slotCols_), ALIGN_BYTES);
-        blockTableTileBytes_ = AlignUpU32(Int32BytesU32(tileRows_), ALIGN_BYTES);
+        blockTableTileBytes_ = AlignUpU32(Int32BytesU32(1), ALIGN_BYTES);
 
         pipe->InitBuffer(prefixBuf_, reqTableBytes_);
         pipe->InitBuffer(startPosBuf_, reqTableBytes_);
@@ -229,11 +233,68 @@ private:
             uint32_t rowsToBlockEnd = kvBlockSize_ - blockOffset;
             uint32_t curRows = MinU32(rows, tileRows_);
             curRows = MinU32(curRows, rowsToBlockEnd);
-            ProcessTile(reqIdx, outputRow, compressedPos, curRows);
+
+            if (dcpSize_ > 1) {
+                ProcessDcpTile(reqIdx, outputRow, compressedPos, curRows);
+            } else {
+                ProcessTile(reqIdx, outputRow, compressedPos, curRows);
+            }
             outputRow += curRows;
             compressedPos += curRows;
             rows -= curRows;
         }
+    }
+
+    __aicore__ inline void ProcessDcpTile(
+        uint32_t reqIdx,
+        uint32_t outputRow,
+        uint32_t compressedPos,
+        uint32_t rows)
+    {
+        uint64_t lastRopePos = (static_cast<uint64_t>(compressedPos) + rows - 1) * cmpRatio_;
+        if (lastRopePos >= ropeRows_) {
+            WriteInvalidTile(outputRow, rows);
+            return;
+        }
+
+        // Compressor state and the replicated indexer consume every valid C4
+        // row. Only the main-KV scatter slot is rank-local.
+        CopyRopeTile(outputRow, compressedPos, rows);
+
+        uint32_t globalPageIdx = compressedPos / kvBlockSize_;
+        uint32_t ownerRank = globalPageIdx % dcpSize_;
+        if (ownerRank != dcpRank_) {
+            WriteInvalidSlotTile(outputRow, rows);
+            return;
+        }
+
+        uint32_t localPageIdx = globalPageIdx / dcpSize_;
+        if (localPageIdx >= kvBlockTableStride_) {
+            WriteInvalidSlotTile(outputRow, rows);
+            return;
+        }
+        LocalTensor<int32_t> blockTableLocal = blockTableBuf_.Get<int32_t>();
+        DataCopyExtParams blockCopyParams{1, Int32BytesU32(1), 0, 0, 0};
+        DataCopyPadExtParams<int32_t> padParams{true, 0, 0, 0};
+        uint64_t blockTableGmOffset = static_cast<uint64_t>(reqIdx) * kvBlockTableStride_ + localPageIdx;
+        DataCopyPad(blockTableLocal, kvBlockTableGm_[blockTableGmOffset], blockCopyParams, padParams);
+        PipeMte2ToS();
+
+        int32_t blockId = blockTableLocal.GetValue(0);
+        if (blockId < 0) {
+            WriteInvalidSlotTile(outputRow, rows);
+            return;
+        }
+
+        uint32_t blockOffset = compressedPos % kvBlockSize_;
+        if (slotMappingFormat_ == SLOT_MAPPING_FLAT) {
+            int64_t maxSlot = static_cast<int64_t>(blockId) * kvBlockSize_ + blockOffset + rows - 1;
+            if (maxSlot > MAX_INT32_VALUE) {
+                WriteInvalidSlotTile(outputRow, rows);
+                return;
+            }
+        }
+        WriteSlotTile(outputRow, compressedPos, rows, blockId);
     }
 
     __aicore__ inline void ProcessTile(
@@ -351,6 +412,11 @@ private:
         cosQueue_.FreeTensor<T>(cosLocal);
         sinQueue_.FreeTensor<T>(sinLocal);
 
+        WriteInvalidSlotTile(outputRow, rows);
+    }
+
+    __aicore__ inline void WriteInvalidSlotTile(uint32_t outputRow, uint32_t rows)
+    {
         LocalTensor<int32_t> slotLocal = slotBuf_.Get<int32_t>();
         if (slotMappingFormat_ == SLOT_MAPPING_FLAT) {
             for (uint32_t row = 0; row < rows; ++row) {
@@ -396,6 +462,8 @@ private:
     uint32_t kvBlockSize_{0};
     uint32_t slotMappingFormat_{0};
     uint32_t cmpRatio_{1};
+    uint32_t dcpSize_{1};
+    uint32_t dcpRank_{0};
     uint32_t tileRows_{1};
     uint32_t ropeRowBytes_{0};
     uint32_t ropeRowBytesAligned_{0};

@@ -37,7 +37,11 @@ from vllm.models.deepseek_v4.compressor import CompressorStateCache
 from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
-from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
+from vllm_ascend.core.kv_cache_interface import (
+    AscendDSAReplicatedSlidingWindowMLASpec,
+    AscendSlidingWindowMLASpec,
+    get_dsv4_dcp_replication_size,
+)
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage, wait_for_device_metadata
 
@@ -61,7 +65,13 @@ class AscendCompressorStateCache(CompressorStateCache):
         pads = dsv4_block_sizes(vllm_config)[vllm_config.cache_config.block_size][1]
         page_size_padded = pads[0] if self.state_dim == 2 * 256 and self.compress_ratio == 4 else pads[1]
 
-        return AscendSlidingWindowMLASpec(
+        replication_size = get_dsv4_dcp_replication_size(vllm_config)
+        spec_cls = (
+            AscendDSAReplicatedSlidingWindowMLASpec
+            if replication_size > 1
+            else AscendSlidingWindowMLASpec
+        )
+        return spec_cls(
             block_size=self.block_size,
             num_kv_heads=1,
             head_size=self.state_dim,
@@ -69,6 +79,7 @@ class AscendCompressorStateCache(CompressorStateCache):
             sliding_window=self.sliding_window,
             alignment=None,
             page_size_padded=page_size_padded,
+            **({"dcp_scheduler_replication_size": replication_size} if replication_size > 1 else {}),
         )
 
     def forward(self): ...

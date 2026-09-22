@@ -107,14 +107,31 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
         super().__init__(head_dim, dtype, prefix, cache_config, compress_ratio)
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+        from vllm_ascend.core.kv_cache_interface import (
+            AscendDSAReplicatedFullMLASpec,
+            AscendMLAAttentionSpec,
+            get_dsv4_dcp_replication_size,
+        )
         from vllm_ascend.models.layer.attention.layer import DSV4_BLOCK_SIZES
 
         storage_block_size = DSV4_BLOCK_SIZES[vllm_config.cache_config.block_size][0][0]
         # vLLM #51718 replaced MLAAttentionSpec.compress_ratio with
         # AttentionSpec.tokens_per_state on main.
         ratio_kwargs = {"tokens_per_state": self.compress_ratio}
-        return AscendMLAAttentionSpec(
+        replication_size = get_dsv4_dcp_replication_size(vllm_config)
+        # The Indexer history is replicated on every rank, but it need not use
+        # the DCP-sharded C4 main cache's block IDs.  A lane-replicated page
+        # would make page_size_bytes DCP times larger; because DSV4 uses one
+        # shared BlockPool, that cost would then be charged to every SWA/state
+        # block as well.  Use a scheduler-replicated full-attention group:
+        # every rank still stores the complete Indexer history, while each
+        # physical page keeps its ordinary size.
+        spec_cls = (
+            AscendDSAReplicatedFullMLASpec
+            if replication_size > 1
+            else AscendMLAAttentionSpec
+        )
+        return spec_cls(
             block_size=storage_block_size * self.compress_ratio,
             num_kv_heads=1,
             head_size=self.head_dim,
@@ -125,6 +142,7 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
             scale_dtype=torch.float
             if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE)
             else torch.float16,
+            **({"dcp_scheduler_replication_size": replication_size} if replication_size > 1 else {}),
             **ratio_kwargs,
         )
 

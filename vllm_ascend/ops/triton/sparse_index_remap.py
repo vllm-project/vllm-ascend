@@ -109,6 +109,10 @@ def remap_sparse_indices_triton(
     dcp_size: int,
     dcp_rank: int,
     interleave_size: int,
+    *,
+    out: torch.Tensor | None = None,
+    chunk_out: torch.Tensor | None = None,
+    chunk_count: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Triton replacement for the torch implementation in
     ``AscendSFADCPImpl._remap_sparse_indices``.
@@ -122,7 +126,9 @@ def remap_sparse_indices_triton(
     Returns:
         Tensor with the same shape and dtype as ``topk_indices``: indices
         owned by this rank remapped to DCP-local KV positions and compacted
-        to the front of the last dim in top-k order, padded with -1.
+        to the front of the last dim in top-k order, padded with -1. Callers
+        may provide all three output/scratch tensors to keep their addresses
+        stable across graph capture and replay.
 
     Design notes (verified on triton-ascend 3.2.0 / CANN 9.1):
     - Do not use a ``tl.cumsum`` prefix-sum compaction: on a2 it produces
@@ -151,15 +157,51 @@ def remap_sparse_indices_triton(
 
     block = min(128, next_power_of_2(topk_count))
     num_chunks = triton.cdiv(topk_count, block)
-    chunk_out = torch.empty((rows * num_chunks, block), dtype=indices.dtype, device=indices.device)
-    chunk_count = torch.empty((rows, num_chunks), dtype=torch.int32, device=indices.device)
-    out = torch.empty_like(indices)
+    expected_chunk_out_shape = (rows * num_chunks, block)
+    expected_chunk_count_shape = (rows, num_chunks)
+    if out is None:
+        out_2d = torch.empty_like(indices)
+    else:
+        if orig_dtype != torch.int32:
+            raise ValueError("a caller-provided remap output requires int32 TopK indices")
+        if out.shape != orig_shape or out.dtype != torch.int32 or out.device != indices.device:
+            raise ValueError(
+                "remap output must match the input shape/device and use int32, "
+                f"got shape={tuple(out.shape)}, dtype={out.dtype}, device={out.device}."
+            )
+        if not out.is_contiguous():
+            raise ValueError("remap output must be contiguous")
+        out_2d = out.view(rows, topk_count)
+    if chunk_out is None:
+        chunk_out = torch.empty(expected_chunk_out_shape, dtype=indices.dtype, device=indices.device)
+    elif (
+        chunk_out.shape != expected_chunk_out_shape
+        or chunk_out.dtype != torch.int32
+        or chunk_out.device != indices.device
+        or not chunk_out.is_contiguous()
+    ):
+        raise ValueError(
+            "remap chunk_out has an incompatible shape, dtype, device or stride: "
+            f"expected={expected_chunk_out_shape}, actual={tuple(chunk_out.shape)}."
+        )
+    if chunk_count is None:
+        chunk_count = torch.empty(expected_chunk_count_shape, dtype=torch.int32, device=indices.device)
+    elif (
+        chunk_count.shape != expected_chunk_count_shape
+        or chunk_count.dtype != torch.int32
+        or chunk_count.device != indices.device
+        or not chunk_count.is_contiguous()
+    ):
+        raise ValueError(
+            "remap chunk_count has an incompatible shape, dtype, device or stride: "
+            f"expected={expected_chunk_count_shape}, actual={tuple(chunk_count.shape)}."
+        )
 
     remap_sparse_indices_fused_kernel[(num_chunks, rows)](
         indices,
         chunk_out,
         chunk_count,
-        out,
+        out_2d,
         topk_count,
         dcp_size,
         interleave_size,
@@ -172,11 +214,85 @@ def remap_sparse_indices_triton(
     remap_sparse_indices_compact_gather_kernel[(rows,)](
         chunk_out,
         chunk_count,
-        out,
+        out_2d,
         topk_count,
         BLOCK=block,
         NUM_CHUNKS=num_chunks,
         multibuffer=False,
     )
-    out = out.view(orig_shape)
-    return out if orig_dtype == torch.int32 else out.to(orig_dtype)
+    remapped = out_2d.view(orig_shape)
+    return remapped if orig_dtype == torch.int32 else remapped.to(orig_dtype)
+
+
+@triton.jit
+def _mask_invalid_sparse_attention_rows_kernel(
+    indices_ptr,
+    output_ptr,
+    lse_ptr,
+    indices_stride_token,
+    output_stride_token,
+    output_stride_head,
+    lse_stride_token,
+    lse_stride_head,
+    num_heads,
+    head_dim,
+    BLOCK_D: tl.constexpr,
+):
+    row = tl.program_id(0)
+    token = row // num_heads
+    head = row - token * num_heads
+    first_local_index = tl.load(indices_ptr + token * indices_stride_token)
+    invalid = first_local_index < 0
+    offsets = tl.arange(0, BLOCK_D)
+    tl.store(
+        output_ptr + token * output_stride_token + head * output_stride_head + offsets,
+        0.0,
+        mask=invalid & (offsets < head_dim),
+    )
+    tl.store(
+        lse_ptr + token * lse_stride_token + head * lse_stride_head,
+        -float("inf"),
+        mask=invalid,
+    )
+
+
+def mask_invalid_sparse_attention_rows(
+    local_topk_indices: torch.Tensor,
+    output: torch.Tensor,
+    softmax_lse: torch.Tensor,
+) -> None:
+    """Make a rank with no selected C4 rows an exact empty contribution.
+
+    ``remap_sparse_indices_triton`` compacts every valid local index to the
+    front, so the first entry is negative exactly when this rank owns none of
+    the global TopK for the token. The sparse-attention kernel uses a finite
+    disabled-sink sentinel for that case; replace it on device with the
+    distributed-softmax identity: zero output and negative-infinite LSE.
+    """
+    if output.ndim != 3 or softmax_lse.ndim != 3 or local_topk_indices.ndim != 3:
+        raise ValueError("C4 partial output, LSE and TopK indices must all use TND-shaped 3D tensors")
+    num_tokens, num_heads, head_dim = output.shape
+    if local_topk_indices.shape[0] != num_tokens or local_topk_indices.shape[1] != 1:
+        raise ValueError("C4 local TopK indices must have shape [tokens, 1, topk]")
+    if softmax_lse.shape != (num_tokens, num_heads, 1):
+        raise ValueError(
+            "C4 partial LSE must have shape [tokens, heads, 1], "
+            f"got {tuple(softmax_lse.shape)}."
+        )
+    if num_tokens == 0:
+        return
+    _mask_invalid_sparse_attention_rows_kernel[(num_tokens * num_heads,)](
+        local_topk_indices,
+        output,
+        softmax_lse,
+        local_topk_indices.stride(0),
+        output.stride(0),
+        output.stride(1),
+        softmax_lse.stride(0),
+        softmax_lse.stride(1),
+        num_heads,
+        head_dim,
+        BLOCK_D=next_power_of_2(head_dim),
+        multibuffer=False,
+    )
+

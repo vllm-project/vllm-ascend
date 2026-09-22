@@ -459,9 +459,23 @@ def _view_dsv4_cache(
     """Create DSA cache views without applying normal MLA K/V splitting."""
     if raw_tensor.numel() % kv_cache_spec.page_size_bytes:
         raise ValueError("DSA cache allocation is not a whole number of physical pages.")
-    num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
-    if num_blocks != kv_cache_config.num_blocks:
-        raise ValueError(f"DSA cache has {num_blocks} blocks, expected {kv_cache_config.num_blocks}.")
+    num_scheduler_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
+    if num_scheduler_blocks != kv_cache_config.num_blocks:
+        raise ValueError(f"DSA cache has {num_scheduler_blocks} blocks, expected {kv_cache_config.num_blocks}.")
+
+    # Lane-replicated DSV4 caches lay the DCP pages consecutively inside each
+    # scheduler block. Keep the physical page stride at one lane while
+    # exposing all lanes to the cache kernels. Scheduler-replicated SWA/state
+    # specs intentionally have no dcp_replicated_size and retain one page per
+    # global block.
+    replication = getattr(kv_cache_spec, "dcp_replicated_size", 1)
+    if kv_cache_spec.page_size_bytes % replication:
+        raise ValueError(
+            f"DSA page size {kv_cache_spec.page_size_bytes} is not divisible "
+            f"by DCP replication size {replication}."
+        )
+    num_blocks = num_scheduler_blocks * replication
+    physical_page_size = kv_cache_spec.page_size_bytes // replication
 
     k_shape = attn_backend.get_kv_cache_shape(
         num_blocks,
@@ -499,7 +513,7 @@ def _view_dsv4_cache(
         raw_tensor,
         cache_shapes,
         cache_dtypes,
-        kv_cache_spec.page_size_bytes,
+        physical_page_size,
         overlap_full_kv_cache,
     )
 
