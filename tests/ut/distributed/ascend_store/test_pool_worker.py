@@ -320,6 +320,44 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         self.assertIsNone(get_partial_block_index(32, 16, 2, True))
         self.assertIsNone(get_partial_block_index(20, 16, 1, False))
 
+    def test_shared_load_data_is_owned_by_each_task(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
+            KVCacheStoreLayerRecvingThread,
+        )
+
+        cls = self._make_worker_class()
+        first_task = LayerTransferTask(layer_id=0, block_ranges=[])
+        second_task = LayerTransferTask(layer_id=1, block_ranges=[])
+        block_ids = np.empty(1, dtype=np.int64)
+        block_gvas = np.empty(1, dtype=np.int64)
+
+        def build_shared_data(task):
+            block_ids[0] = task.layer_id
+            block_gvas[0] = 100 + task.layer_id
+            return SharedBlockData(
+                block_ids_arr=block_ids[:],
+                block_gvas_arr=block_gvas[:],
+                req_ids=[f"r{task.layer_id}"],
+                is_last_chunks=[False],
+            )
+
+        recv_thread = object.__new__(KVCacheStoreLayerRecvingThread)
+        recv_thread.build_shared_data = MagicMock(side_effect=build_shared_data)
+        worker = SimpleNamespace(
+            kv_recv_thread=recv_thread,
+            layer_load_tasks=[[first_task], [second_task]],
+        )
+
+        cls._build_shared_load_data(worker)
+
+        self.assertEqual(recv_thread.build_shared_data.call_count, 2)
+        self.assertIsNotNone(first_task.shared_block_data)
+        self.assertIsNotNone(second_task.shared_block_data)
+        np.testing.assert_array_equal(first_task.shared_block_data.block_ids_arr, [0])
+        np.testing.assert_array_equal(first_task.shared_block_data.block_gvas_arr, [100])
+        np.testing.assert_array_equal(second_task.shared_block_data.block_ids_arr, [1])
+        np.testing.assert_array_equal(second_task.shared_block_data.block_gvas_arr, [101])
+
     def test_find_all_discontinuous_hit_positions_all_tp_hits_with_limits(self):
         cls = self._make_worker_class()
         arr = [[0, 0, 1, 0, 0, 1], [0, 0, 1, 0, 0, 1]]

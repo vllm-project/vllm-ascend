@@ -2309,30 +2309,21 @@ class KVPoolWorker:
                         task.cached_process_tokens = cached
 
     def _build_shared_load_data(self) -> None:
-        """Build shared block data once and attach to all layer load tasks.
-
-        In multi-group mode, shared data is built per-group because each
-        group has different block_ranges (different effective_block_size).
-        """
+        """Build an owned block-data snapshot for each layer load plan."""
         if not isinstance(self.kv_recv_thread, KVCacheStoreLayerRecvingThread):
             return
-        for group_id in range(self.num_kv_cache_groups):
-            first_task = None
-            for layer_id in range(self.num_layers):
-                for task in self.layer_load_tasks[layer_id]:
-                    if task.group_id == group_id:
-                        first_task = task
-                        break
-                if first_task:
-                    break
-            if first_task is None:
-                continue
-            shared = self.kv_recv_thread.build_shared_data(first_task)
-            if shared is not None:
-                for layer_id in range(self.num_layers):
-                    for task in self.layer_load_tasks[layer_id]:
-                        if task.group_id == group_id:
-                            task.shared_block_data = shared
+        for layer_tasks in self.layer_load_tasks:
+            for task in layer_tasks:
+                shared = self.kv_recv_thread.build_shared_data(task)
+                if shared is None:
+                    continue
+                if shared.block_gvas_arr is None:
+                    raise RuntimeError("GVA layer load plan is missing block addresses")
+                # LayerBatchBuilder reuses its internal arrays. Queued tasks
+                # must retain the block plan produced for that exact layer.
+                shared.block_ids_arr = shared.block_ids_arr.copy()
+                shared.block_gvas_arr = shared.block_gvas_arr.copy()
+                task.shared_block_data = shared
 
     def _compute_reachable_store_masks(
         self,
