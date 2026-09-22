@@ -800,11 +800,15 @@ class AscendConfig:
         # Sparse C8 derivation. StoreKVBlock can be disabled by users, and is
         # otherwise enabled only for SFA + Lightning Indexer C8 on PD prefill
         # nodes.
-        from vllm_ascend.utils import model_uses_sfa_sparse
+        from vllm_ascend.utils import model_uses_kpool_indexer, model_uses_sfa_sparse
 
         use_sparse = model_uses_sfa_sparse(vc.model_config)
+        # The SFA C8 packed KV cache path is indexer-agnostic; kpool-indexer
+        # models (e.g. GLM-5.3-Flash) can use it as well. LI C8 requires the
+        # LightningIndexer cache layout, so it stays gated by use_sparse.
+        use_sparse_sfa = use_sparse or model_uses_kpool_indexer(vc.model_config)
 
-        self.enable_sparse_sfa_c8 = vllm_config.cache_config.cache_dtype in ["fp8", "int8"] and use_sparse
+        self.enable_sparse_sfa_c8 = vllm_config.cache_config.cache_dtype in ["fp8", "int8"] and use_sparse_sfa
         self.enable_sparse_li_c8 = vllm_config.attention_config.indexer_kv_dtype in ["fp8", "int8"] and use_sparse
         kv_transfer_config = vc.kv_transfer_config
         is_prefill_node = kv_transfer_config is not None and (
