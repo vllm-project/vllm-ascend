@@ -35,9 +35,15 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionCall,
     ToolCall,
 )
+from vllm.envs import VLLM_ENFORCE_STRICT_TOOL_CALLING
 from vllm.tool_parsers.deepseekv4_tool_parser import DeepSeekV4ToolParser
 
 ESCAPED_ARGUMENTS_PARAM_NAME = "__vllm_param_arguments__"
+
+
+def _configure_required_and_named_support(strict_tool_calling: bool) -> None:
+    """Use native DSML parsing when strict structural tags are enabled."""
+    DeepSeekV4ToolParser.supports_required_and_named = not strict_tool_calling
 
 
 def _ensure_parser_regexes(self: DeepSeekV4ToolParser) -> None:
@@ -770,6 +776,7 @@ def _patched_extract_tool_calls_streaming(
 
 
 # Backward-compatible monkey patches.
+_configure_required_and_named_support(VLLM_ENFORCE_STRICT_TOOL_CALLING)
 DeepSeekV4ToolParser._ensure_streaming_attrs = _ensure_streaming_attrs
 DeepSeekV4ToolParser._function_name = _function_name
 DeepSeekV4ToolParser._function_parameters = _function_parameters

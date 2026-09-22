@@ -344,14 +344,20 @@
 #       Upstream vLLM now includes DeepSeek V4 tokenizer/renderer/reasoning
 #       registration, but its streaming tool-call delta parsing does not guarantee
 #       incremental `arguments` emission for long argument payloads.
+#       With strict tool calling enabled, `required` and named tool choices produce
+#       native DSML output. The inherited capability flag incorrectly routes that
+#       output through the generic JSON parser, causing tool calls to be dropped.
 #    How:
 #       Monkey-patch `DeepSeekV4ToolParser` stream parsing to emit tool-call
 #       metadata in the first delta and stream argument fragments incrementally.
+#       Set `supports_required_and_named` conditionally so strict mode uses the
+#       native DSML parser while non-strict mode keeps the generic JSON path.
 #    Related PR (if no, explain why):
-#       Upstream vLLM main behavior as of current runtime.
+#       No upstream PR yet. Follow up in vLLM core, where the parser capability
+#       is defined, then remove this release compatibility patch after backport.
 #    Future Plan:
-#       Remove this patch if upstream streaming behavior is updated to satisfy the
-#       same DeepSeek DSML incrementality contract.
+#       Remove this patch once upstream handles both the DeepSeek DSML
+#       incrementality contract and strict required/named routing.
 #
 # ** 12a. File: platform/patch_minimax_m2_tool_call_parser.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
