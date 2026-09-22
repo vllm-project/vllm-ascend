@@ -10,6 +10,7 @@ import torch_npu
 from vllm_ascend.attention import utils as attention_utils
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADSACPImpl
+from vllm_ascend.device import device_op
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 
@@ -29,7 +30,7 @@ def metadata(**kwargs):
 @pytest.mark.parametrize("dtype", [torch.int8, torch.float16, torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("layout", ["contiguous", "row_gap", "column_gap", "block_gap", "offset"])
 def test_platform_dispatch_keeps_destination_storage(monkeypatch, family, dtype, layout):
-    monkeypatch.setattr(attention_utils, "get_current_hardware_profile", lambda: get_hardware_profile(family))
+    monkeypatch.setattr(device_op, "get_current_hardware_profile", lambda: get_hardware_profile(family))
     backing = torch.full((40, 128, 1, 256), -7, dtype=dtype)
     if layout == "contiguous":
         cache = backing.view(80, 128, 1, 128)
@@ -65,7 +66,7 @@ def test_platform_dispatch_keeps_destination_storage(monkeypatch, family, dtype,
         and dtype != torch.float32
         and layout not in ("column_gap", "block_gap")
     ) or (family == AscendDeviceType.A5 and layout in ("contiguous", "offset"))
-    assert attention_utils.try_scatter_cache(key, cache, slots, 2049) == expected
+    assert device_op.get_device_adaptor().try_scatter_cache(key, cache, slots, 2049) == expected
     if expected:
         reference = torch.as_strided(before, cache.shape, cache.stride(), cache.storage_offset())
         reference.view(-1, 128)[slots[:2049].long()] = key[:2049]
@@ -97,12 +98,12 @@ def test_only_large_pure_prefill_can_enable_fast_store(state, prefilling, tokens
 
 @pytest.mark.parametrize("family", [AscendDeviceType.A3, AscendDeviceType.A5])
 def test_missing_operator_falls_back(monkeypatch, family):
-    monkeypatch.setattr(attention_utils, "get_current_hardware_profile", lambda: get_hardware_profile(family))
+    monkeypatch.setattr(device_op, "get_current_hardware_profile", lambda: get_hardware_profile(family))
     key, cache = torch.ones(2049, 128, dtype=torch.int8), torch.zeros(32, 128, 1, 128, dtype=torch.int8)
     slots = torch.arange(2049, dtype=torch.int32)
     monkeypatch.setattr(torch.ops._C_ascend, "npu_scatter_nd_update_sk", None, raising=False)
     monkeypatch.setattr(torch_npu, "npu_scatter_pa_cache", None, raising=False)
-    assert not attention_utils.try_scatter_cache(key, cache, slots, 2049)
+    assert not device_op.get_device_adaptor().try_scatter_cache(key, cache, slots, 2049)
 
 
 @pytest.mark.parametrize("fast", [False, True])
@@ -123,7 +124,9 @@ def test_main_cache_write_preserves_fallback_and_own_slots(fast, enabled, eligib
             "vllm_ascend.attention.context_parallel.sfa_cp.get_ascend_config",
             return_value=SimpleNamespace(c8_enable_reshape_optim=enabled, c8_reshape_optim_enabled=False),
         ),
-        patch("vllm_ascend.attention.context_parallel.sfa_cp.try_scatter_cache", return_value=fast) as store,
+        patch(
+            "vllm_ascend.attention.context_parallel.sfa_cp.DeviceOperator.try_scatter_cache", return_value=fast
+        ) as store,
         patch("torch_npu.npu_scatter_nd_update_", create=True) as scatter,
     ):
         impl._store_parallel_kv(None, None, None, key, [], (cache,), slots, meta, False)

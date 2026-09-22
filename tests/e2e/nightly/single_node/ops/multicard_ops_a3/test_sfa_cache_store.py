@@ -7,7 +7,7 @@ import torch
 import torch_npu
 
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADSACPImpl
-from vllm_ascend.attention.utils import try_scatter_cache
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.utils import enable_custom_op
 
 
@@ -40,7 +40,7 @@ def test_platform_cache_store_preserves_all_backing_bytes(dtype, width, tokens, 
     for delta in (0, 1):
         key.add_(delta)
         reference.view(-1, width)[slots[:tokens].cpu().long()] = key[:tokens].cpu()
-        assert try_scatter_cache(key, cache, slots, tokens)
+        assert DeviceOperator.try_scatter_cache(key, cache, slots, tokens)
         torch.npu.synchronize()
         assert cache.data_ptr() == ptr
         torch.testing.assert_close(backing.cpu(), initial, rtol=0, atol=0)
@@ -53,7 +53,7 @@ def test_unsupported_inner_stride_and_masked_metadata_preserve_fallback():
     key = torch.ones(2048, 128, dtype=torch.int8, device="npu")
     cache = torch.zeros(32, 128, 1, 256, dtype=torch.int8, device="npu")[..., ::2]
     slots = torch.arange(2048, dtype=torch.int32, device="npu")
-    assert not try_scatter_cache(key, cache, slots, 2048)
+    assert not DeviceOperator.try_scatter_cache(key, cache, slots, 2048)
     meta = SimpleNamespace(num_actual_tokens=2048, fast_cache_store=False)
     slots[-3:] = -1
     cache = torch.zeros(32, 128, 1, 128, dtype=torch.int8, device="npu")

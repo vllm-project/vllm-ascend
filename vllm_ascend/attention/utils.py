@@ -6,7 +6,6 @@ from typing import Any
 
 import torch
 import torch.nn.functional as F
-import torch_npu
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group, is_v1_kv_transfer_group
 from vllm.forward_context import ForwardContext, get_forward_context
@@ -14,7 +13,6 @@ from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import MLAAttentionImpl
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
-from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
 from vllm_ascend.utils import (
@@ -53,61 +51,6 @@ def prefill_cache_write_enabled(metadata: Any) -> bool:
         and is_prefilling.numel() >= metadata.num_reqs > 0
         and bool(is_prefilling[: metadata.num_reqs].all())
     )
-
-
-def try_scatter_cache(key: torch.Tensor, cache: torch.Tensor, slots: torch.Tensor, tokens: int) -> bool:
-    """Write eligible DSA-CP prefill rows in place, or request the old scatter.
-
-    Callers must enforce prefill eligibility and valid slots in the token
-    prefix: neither fast operator is assumed to skip negative slots.
-    Layout checks inspect strides only; no device-to-host synchronization is
-    introduced. Never make a contiguous copy of the destination cache.
-    """
-    if (
-        key.ndim not in (2, 3)
-        or cache.ndim != 4
-        or cache.shape[2] != 1
-        or (key.ndim == 3 and key.shape[1] != 1)
-        or key.shape[0] < tokens
-        or slots.ndim != 1
-        or slots.numel() < tokens
-        or slots.dtype not in (torch.int32, torch.int64)
-        or key.dtype != cache.dtype
-        or key.shape[-1] != cache.shape[-1]
-    ):
-        return False
-
-    profile = get_current_hardware_profile()
-    width = key.shape[-1]
-    if profile.supports(HardwareCapability.SCATTER_ND_CACHE_STORE):
-        operation = getattr(torch.ops._C_ascend, "npu_scatter_nd_update_sk", None)
-        if operation is None or key.dtype not in (torch.int8, torch.float16, torch.bfloat16):
-            return False
-        try:
-            target = cache.view(-1, width)
-        except RuntimeError:
-            return False
-        # SK supports gaps between rows, but not striding within a row.
-        if target.stride(1) != 1 or target.stride(0) < width:
-            return False
-        DeviceOperator.dsa_kv_compress_scatter(
-            target, key[:tokens].reshape(tokens, width), slots[:tokens].reshape(-1, 1)
-        )
-        return True
-
-    if profile.supports(HardwareCapability.SCATTER_PA_CACHE_STORE):
-        operation = getattr(torch_npu, "npu_scatter_pa_cache", None)
-        if operation is None or not cache.is_contiguous():
-            return False
-        if key.dtype not in (torch.int8, torch.float16, torch.bfloat16, torch.float32, torch.float8_e4m3fn):
-            return False
-        operation(
-            key[:tokens].reshape(tokens, 1, width).contiguous(),
-            slots[:tokens].contiguous(),
-            key_cache=cache,
-        )
-        return True
-    return False
 
 
 class PreprocessType(enum.Enum):

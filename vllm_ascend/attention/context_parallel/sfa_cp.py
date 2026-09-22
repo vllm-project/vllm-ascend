@@ -39,7 +39,6 @@ from vllm_ascend.attention.utils import (
     enable_dcp,
     prefill_cache_write_enabled,
     split_decodes_and_prefills,
-    try_scatter_cache,
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import all_gather_async
@@ -550,7 +549,7 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
             if self.enable_sparse_sfa_c8:
                 if not (
                     self._use_c8_reshape_optim(attn_metadata)
-                    and try_scatter_cache(
+                    and DeviceOperator.try_scatter_cache(
                         fused_kv_no_split, kv_cache[0], slot_mapping_sfa, attn_metadata.num_actual_tokens
                     )
                 ):
