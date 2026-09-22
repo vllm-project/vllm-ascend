@@ -43,8 +43,7 @@ Enable with ``VLLM_ASCEND_TOKENIZER_CACHE_GB``; ``0`` (the default) is a no-op.
 Patched symbols:
 
 * ``vllm.renderers.base.BaseRenderer.__init__`` - builds the cache once the
-  renderer's tokenizer is known, and registers it for the module-level entry
-  point below.
+  renderer's tokenizer is known, and attaches it to that tokenizer.
 * ``vllm.renderers.base.BaseRenderer._tokenize_prompt`` - the plain
   ``/v1/completions`` path.
 * ``vllm.renderers.hf.safe_apply_chat_template`` - the HF renderer chat path.
@@ -53,11 +52,14 @@ Patched symbols:
 * ``DeepseekV4Renderer._apply_chat_template`` and
   ``DeepseekV32Renderer._apply_chat_template`` - the DeepSeek chat paths, whose
   async variants are likewise built from the sync method with ``make_async``.
+
+Three of those are module-level entry points that are handed the tokenizer but
+no renderer, so the cache is published on the tokenizer itself (see
+``_install_cache``). There is no module-level registry to keep in sync.
 """
 
 import sys
 import threading
-import weakref
 from collections.abc import Callable, Sequence
 from typing import Any
 
@@ -68,11 +70,27 @@ from vllm.utils.cache import CacheInfo, LRUCache
 
 import vllm_ascend.envs as envs_ascend
 
-GiB = 1 << 30
+_BYTES_PER_GIB = 1 << 30
 
-# Rough per-entry accounting. Token ids are large enough to fall outside
-# CPython's small-int cache, so each cached id is a distinct object.
-_BYTES_PER_TOKEN_ID = 28
+# A cached token id is a CPython ``int`` object; ``sys.getsizeof(0)`` is the
+# exact size of the first 30-bit digit. A vocabulary needs a second digit
+# (+4 bytes) only past 2**30 entries, so this is an under-estimate by at most
+# that one digit, never an over-estimate.
+_BYTES_PER_TOKEN_ID = sys.getsizeof(0)
+
+# The probe corpus is built from the tokenizer's own added tokens. Three of
+# them are enough to cover "cut between two known tokens", "cut between the two
+# extremes" and "cut from a token back to itself" without making startup scale
+# with the size of the added vocabulary.
+_MAX_PROBE_TOKENS = 3
+
+# Repeating the ``def`` body gives at least one probe a real BPE workload
+# (~2 KiB): a merge that wrongly spans a cut is invisible on short probes.
+_LONG_PROBE_REPEATS = 40
+
+# Attribute under which a renderer's cache is published on its tokenizer, so
+# that the module-level entry points above can reach it. Holds no state itself.
+_CACHE_ATTRIBUTE = "_vllm_ascend_incremental_tokenizer_cache"
 
 
 def _probe_corpus(special_tokens: Sequence[str]) -> list[str]:
@@ -86,7 +104,7 @@ def _probe_corpus(special_tokens: Sequence[str]) -> list[str]:
         return []
 
     # Deterministic pick so the check is reproducible across restarts.
-    picks = sorted(special_tokens)[: min(3, len(special_tokens))]
+    picks = sorted(special_tokens)[:_MAX_PROBE_TOKENS]
     a, b = picks[0], picks[-1]
 
     code = 'def f(x: int) -> dict:\n    return {"a": x, "b": [1, 2, 3]}\n'
@@ -106,7 +124,7 @@ def _probe_corpus(special_tokens: Sequence[str]) -> list[str]:
         # Code and JSON, i.e. what an agent transcript actually contains.
         f"{code}{a}{code}{b}{code}",
         # Long-ish body so at least one probe exercises a real BPE workload.
-        (code * 40) + a + (code * 40),
+        (code * _LONG_PROBE_REPEATS) + a + (code * _LONG_PROBE_REPEATS),
     ]
 
 
@@ -127,11 +145,14 @@ class IncrementalTokenizerCache:
         self._tokenizer = tokenizer
         self._lock = threading.Lock()
         self._cache: LRUCache[str, list[int]] = LRUCache(
-            capacity=max(1.0, capacity_gb * GiB),
+            capacity=capacity_gb * _BYTES_PER_GIB,
             getsizeof=self._sizeof,
         )
 
         self._enabled = False
+        self._disabled_reason: str | None = "the cache was never probed"
+        self._segment_hits = 0
+        self._segment_misses = 0
         # Whether ``add_special_tokens=True`` is a no-op for this tokenizer.
         # When it is (Qwen-style templates that emit their own specials), the
         # cache can serve those requests too.
@@ -143,15 +164,26 @@ class IncrementalTokenizerCache:
 
         self._pattern = self._build_pattern()
         if self._pattern is None:
-            logger.warning(
-                "Incremental tokenizer cache disabled: this tokenizer exposes "
-                "no added/special tokens, so there are no safe split points."
-            )
+            self._disable("this tokenizer exposes no added/special tokens, so there are no safe split points")
             return
 
         self._enabled, self._special_tokens_are_noop = self._self_check()
 
     # ---------------------------------------------------------------- setup
+
+    def _disable(self, reason: str) -> None:
+        """Record why the cache is unusable, loudly.
+
+        A cache that quietly does nothing is worse than no cache: the operator
+        pays for a feature they are not getting, and the only symptom is the
+        perf number they were expecting.
+        """
+        self._enabled = False
+        self._disabled_reason = reason
+        logger.warning(
+            "Incremental tokenizer cache disabled: %s. Tokenization is unaffected.",
+            reason,
+        )
 
     def _added_tokens(self) -> list[str]:
         """The exact set HF's ``AddedVocabulary`` splits on, when available."""
@@ -187,6 +219,7 @@ class IncrementalTokenizerCache:
         specials = self._added_tokens()
         probes = _probe_corpus(specials)
         if not probes:
+            self._disable("the probe corpus is empty")
             return False, False
 
         try:
@@ -196,18 +229,13 @@ class IncrementalTokenizerCache:
                 for segment in self._split(text):
                     spliced.extend(self._tokenizer(segment, add_special_tokens=False)["input_ids"])
                 if spliced != reference:
-                    logger.warning(
-                        "Incremental tokenizer cache disabled: the segment "
-                        "concatenation identity does not hold for this "
-                        "tokenizer (%s). Tokenization will be unaffected.",
-                        type(self._tokenizer).__name__,
+                    self._disable(
+                        f"the segment concatenation identity does not hold for {type(self._tokenizer).__name__}"
                     )
                     return False, False
         except Exception:
-            logger.warning(
-                "Incremental tokenizer cache disabled: the startup self-check raised. Tokenization will be unaffected.",
-                exc_info=True,
-            )
+            logger.debug("Incremental tokenizer cache self-check raised", exc_info=True)
+            self._disable("the startup self-check raised")
             return False, False
 
         # Separately, find out whether add_special_tokens=True changes anything.
@@ -225,7 +253,7 @@ class IncrementalTokenizerCache:
         logger.info(
             "Incremental tokenizer cache enabled (capacity %.2f GiB, "
             "%d split tokens, add_special_tokens is %sa no-op).",
-            self._cache.capacity / GiB,
+            self._cache.capacity / _BYTES_PER_GIB,
             len(specials),
             "" if noop else "not ",
         )
@@ -243,10 +271,14 @@ class IncrementalTokenizerCache:
         Every segment but the last therefore *ends* with an added token, which
         is the only cut point where the concatenation identity is guaranteed.
         """
-        assert self._pattern is not None
+        pattern = self._pattern
+        if pattern is None:
+            # Only reachable when the cache is disabled, and a single segment is
+            # the correct answer anyway; it just cannot be cached.
+            return [text]
         segments: list[str] = []
         last = 0
-        for match in self._pattern.finditer(text):
+        for match in pattern.finditer(text):
             end = match.end()
             segments.append(text[last:end])
             last = end
@@ -260,9 +292,22 @@ class IncrementalTokenizerCache:
     def enabled(self) -> bool:
         return self._enabled
 
+    @property
+    def disabled_reason(self) -> str | None:
+        """Why the cache is not armed, or ``None`` when it is."""
+        return self._disabled_reason
+
     def stat(self) -> CacheInfo:
-        """Segment-level hit/total counts."""
-        return self._cache.stat()
+        """Segment-level hit/total counts.
+
+        Counted here rather than read off the underlying ``LRUCache``, whose
+        own ``stat`` only sees lookups that succeeded - it cannot observe a
+        miss, so its ``hit_ratio`` is always ``1.0``.
+        """
+        return CacheInfo(
+            hits=self._segment_hits,
+            total=self._segment_hits + self._segment_misses,
+        )
 
     def is_eligible(self, *, add_special_tokens: bool) -> bool:
         if not self._enabled:
@@ -285,6 +330,10 @@ class IncrementalTokenizerCache:
         for segment in self._split(text):
             with self._lock:
                 cached = self._cache.get(segment)
+                if cached is not None:
+                    self._segment_hits += 1
+                else:
+                    self._segment_misses += 1
             if cached is not None:
                 token_ids.extend(cached)
                 continue
@@ -297,7 +346,14 @@ class IncrementalTokenizerCache:
                 with self._lock:
                     self._cache[segment] = encoded
             except ValueError:
-                pass
+                # The ids are still exact, they just cannot be cached. A single
+                # segment only reaches this when it is larger than the whole
+                # capacity, i.e. the capacity is set far too low.
+                logger.debug(
+                    "Incremental tokenizer cache: %d-char segment exceeds the %.2f GiB capacity and is not cached.",
+                    len(segment),
+                    self._cache.capacity / _BYTES_PER_GIB,
+                )
             token_ids.extend(encoded)
 
         return token_ids
@@ -332,18 +388,29 @@ class IncrementalTokenizerCache:
         return self._chat_ok
 
 
-# ``safe_apply_chat_template`` and the DeepSeek renderers are reached without a
-# renderer instance on hand, so the cache is looked up by the tokenizer it is
-# handed. Entries are keyed weakly so a discarded renderer does not pin its
-# tokenizer, and are written once per process during renderer construction,
-# before any request is served.
-_CACHES: weakref.WeakKeyDictionary[TokenizerLike, IncrementalTokenizerCache] = weakref.WeakKeyDictionary()
+def _install_cache(tokenizer: TokenizerLike, cache: IncrementalTokenizerCache) -> None:
+    """Publish ``cache`` on the tokenizer it belongs to.
+
+    ``safe_apply_chat_template`` and the DeepSeek renderer methods are handed
+    the tokenizer but no renderer, so the tokenizer is the only object they can
+    use to find the cache back. It is also the natural owner: its lifetime
+    already matches the renderer's, and unlike a module-level registry nothing
+    has to be keyed weakly or torn down at shutdown.
+    """
+    try:
+        setattr(tokenizer, _CACHE_ATTRIBUTE, cache)
+    except AttributeError:  # pragma: no cover - tokenizers are ordinary objects
+        logger.warning(
+            "Incremental tokenizer cache could not be attached to %s; the cache will not be used.",
+            type(tokenizer).__name__,
+        )
 
 
 def _cache_for(tokenizer: TokenizerLike | None) -> IncrementalTokenizerCache | None:
     if tokenizer is None:
         return None
-    return _CACHES.get(tokenizer)
+    cache = getattr(tokenizer, _CACHE_ATTRIBUTE, None)
+    return cache if isinstance(cache, IncrementalTokenizerCache) else None
 
 
 def _chat_ids(
@@ -359,19 +426,30 @@ def _chat_ids(
     return cache.encode(render(tokenize=False))
 
 
-def _patch_renderer_init() -> None:
+def _patch_renderer_init(capacity_gb: float) -> None:
+    """Build the per-renderer cache as soon as the renderer knows its tokenizer."""
     from vllm.renderers.base import BaseRenderer
 
     original = BaseRenderer.__init__
 
-    def patched(self, config, tokenizer):
+    def patched(self, config, tokenizer) -> None:
         original(self, config, tokenizer)
-        capacity_gb = envs_ascend.VLLM_ASCEND_TOKENIZER_CACHE_GB
-        if capacity_gb <= 0 or tokenizer is None:
+        owned = self.tokenizer
+        if owned is None:
             return
-        cache = IncrementalTokenizerCache(tokenizer, capacity_gb)
-        if cache.enabled:
-            _CACHES[tokenizer] = cache
+        cache = IncrementalTokenizerCache(owned, capacity_gb)
+        if not cache.enabled:
+            # The cache object already logged its reason; repeat it with the
+            # setting that asked for it, so a `VLLM_ASCEND_TOKENIZER_CACHE_GB`
+            # that buys nothing is impossible to miss.
+            logger.warning(
+                "VLLM_ASCEND_TOKENIZER_CACHE_GB=%.2f was requested but the cache is disabled for %s: %s",
+                capacity_gb,
+                type(owned).__name__,
+                cache.disabled_reason,
+            )
+            return
+        _install_cache(owned, cache)
 
     BaseRenderer.__init__ = patched
 
@@ -461,12 +539,17 @@ def _patch_deepseek_chat() -> None:
         _patch_renderer_chat(renderer_cls)
 
 
-if envs_ascend.VLLM_ASCEND_TOKENIZER_CACHE_GB > 0:
-    _patch_renderer_init()
+def _install(capacity_gb: float) -> None:
+    """Install every patch; ``capacity_gb`` is threaded through as an argument."""
+    _patch_renderer_init(capacity_gb)
     _patch_tokenize_prompt()
     _patch_hf_chat()
     _patch_deepseek_chat()
     logger.info(
         "Incremental tokenizer cache patch installed (%.2f GiB per API server process).",
-        envs_ascend.VLLM_ASCEND_TOKENIZER_CACHE_GB,
+        capacity_gb,
     )
+
+
+if envs_ascend.VLLM_ASCEND_TOKENIZER_CACHE_GB > 0:
+    _install(envs_ascend.VLLM_ASCEND_TOKENIZER_CACHE_GB)

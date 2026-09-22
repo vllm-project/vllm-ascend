@@ -26,6 +26,16 @@ Only *token ids* are compared across servers, never generated text: greedy
 decode is not bit-reproducible on Ascend (the batch composition changes the
 MoE reduction order), so two servers running the very same configuration
 already disagree on the sampled tokens. Comparing text would be flaky.
+
+Why this needs an e2e test on top of the unit tests: the unit tests drive
+``IncrementalTokenizerCache`` directly, so they stay green no matter how the
+patch is wired in. Only a served endpoint can show that
+``BaseRenderer._tokenize_prompt`` and ``safe_apply_chat_template`` are still the
+symbols this vLLM revision calls, that the cache actually reaches them (it is
+published on the renderer's tokenizer), and that ``make_async`` binds the
+patched function rather than the original one. Getting any of that wrong leaves
+the feature dead with no failing unit test - and for a tokenizer cache, token
+ids are also the only currency in which correctness can be stated at all.
 """
 
 import os

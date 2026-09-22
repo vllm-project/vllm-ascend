@@ -87,10 +87,11 @@ env_variables: dict[str, Callable[[], Any]] = {
     # (safe for Ascend 910B/A3). Set to a positive value to override when
     # auto-detection is unavailable or for debugging UB overflow issues.
     "VLLM_ASCEND_ROPE_UB_SIZE_KB": lambda: int(os.getenv("VLLM_ASCEND_ROPE_UB_SIZE_KB") or 0),
-    # Size of the incremental (segment-level) tokenizer cache, in GiB, per
-    # API server process. 0 (the default) disables it. Only pays off at very
-    # high PrefixCache hit rates, where tokenization - still O(full prompt)
-    # on every turn - dominates the frontend cost.
+    # Size of the incremental (segment-level) tokenizer cache, in GiB, per API
+    # server process. 0 (the default) disables it. Only pays off at very high
+    # PrefixCache hit rates, where tokenization - still O(full prompt) on every
+    # turn - dominates the frontend cost.
+    # Valid values: a non-negative integer. This configuration is not sensitive.
     "VLLM_ASCEND_TOKENIZER_CACHE_GB": lambda: int(os.getenv("VLLM_ASCEND_TOKENIZER_CACHE_GB", "0")),
 }
 

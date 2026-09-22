@@ -21,6 +21,7 @@ cache relies on, namely that an added token is turned into a dedicated id and
 therefore never participates in a BPE merge across the cut.
 """
 
+import copy
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
@@ -28,12 +29,14 @@ import pytest
 import regex as re
 
 from vllm_ascend.patch.platform.patch_tokenizer_cache import (
-    _CACHES,
+    _CACHE_ATTRIBUTE,
     IncrementalTokenizerCache,
     _cache_for,
     _chat_ids,
+    _install_cache,
     _patch_hf_chat,
     _patch_renderer_chat,
+    _patch_renderer_init,
     _probe_corpus,
 )
 
@@ -180,10 +183,12 @@ def test_stat_counts_segment_hits():
 
     before = len(tokenizer.calls)
     cache.encode(text)
-    assert cache.stat().hits == 0
+    # Two segments, both cold, so the miss half of the ratio has to show up.
+    assert (cache.stat().hits, cache.stat().total) == (0, 2)
     cache.encode(text)
 
     assert cache.stat().hits == 2
+    assert cache.stat().hit_ratio == 0.5
     assert len(tokenizer.calls) - before == 2
 
 
@@ -191,6 +196,7 @@ def test_disabled_when_tokenizer_has_no_added_tokens():
     _, cache = _build(added_tokens=())
     assert not cache.enabled
     assert not cache.is_eligible(add_special_tokens=False)
+    assert cache.disabled_reason is not None
 
 
 def test_disabled_when_concatenation_identity_breaks():
@@ -199,12 +205,14 @@ def test_disabled_when_concatenation_identity_breaks():
     tokenizer, cache = _build(always_bos=True)
     assert not cache.enabled
     assert not cache.is_eligible(add_special_tokens=False)
+    assert cache.disabled_reason is not None
     assert tokenizer.reference(f"a{_END}b") != cache._split(f"a{_END}b")
 
 
 def test_disabled_when_self_check_raises():
     _, cache = _build(fail=True)
     assert not cache.enabled
+    assert cache.disabled_reason is not None
 
 
 def test_add_special_tokens_is_served_only_when_it_is_a_noop():
@@ -279,6 +287,53 @@ def test_cache_for_returns_none_for_missing_or_unknown_tokenizers():
     assert _cache_for(_FakeTokenizer()) is None
 
 
+def test_install_cache_is_reachable_through_the_tokenizer():
+    """The cache is owned by the tokenizer; no module-level registry is used."""
+    tokenizer = _FakeTokenizer()
+    assert _cache_for(tokenizer) is None
+
+    _, cache = _build()
+    _install_cache(tokenizer, cache)
+    assert _cache_for(tokenizer) is cache
+
+
+def test_cache_for_ignores_foreign_attributes():
+    tokenizer = _FakeTokenizer()
+    setattr(tokenizer, _CACHE_ATTRIBUTE, object())
+    assert _cache_for(tokenizer) is None
+
+
+class _CopyingRenderer:
+    """Mirrors ``HfRenderer``: ``BaseRenderer`` is handed a copy to keep."""
+
+    def __init__(self, config, tokenizer) -> None:
+        self.tokenizer = copy.copy(tokenizer)
+
+
+def test_renderer_init_patch_attaches_the_cache_to_the_renderer_tokenizer(monkeypatch):
+    """``_patch_renderer_init`` must install on the tokenizer the renderer keeps.
+
+    ``HfRenderer`` hands ``BaseRenderer`` a copy of the tokenizer and looks the
+    cache up through ``self.tokenizer``; installing it on the constructor
+    argument instead would leave every lookup - and so the whole patch - dead
+    with no error anywhere.
+    """
+    import vllm.renderers.base as base_mod
+
+    original_init = _CopyingRenderer.__init__
+    monkeypatch.setattr(base_mod, "BaseRenderer", _CopyingRenderer)
+    _patch_renderer_init(capacity_gb=1)
+    try:
+        passed_in = _FakeTokenizer()
+        renderer = _CopyingRenderer(None, passed_in)
+
+        assert renderer.tokenizer is not passed_in
+        assert _cache_for(renderer.tokenizer) is not None
+        assert _cache_for(passed_in) is None
+    finally:
+        _CopyingRenderer.__init__ = original_init
+
+
 def test_chat_ids_returns_none_for_requests_that_opt_out_of_tokenizing():
     tokenizer, cache = _build()
     assert _chat_ids(cache, _chat_render(tokenizer, f"a{_END}"), {"tokenize": False}) is None
@@ -327,7 +382,7 @@ def test_renderer_chat_patch_forwards_the_callers_keyword_arguments():
     """
     tokenizer, cache = _build()
     original = _KeywordOnlyRenderer._apply_chat_template
-    _CACHES[tokenizer] = cache
+    _install_cache(tokenizer, cache)
     try:
         _patch_renderer_chat(_KeywordOnlyRenderer)
         renderer = _KeywordOnlyRenderer(tokenizer)
@@ -341,7 +396,6 @@ def test_renderer_chat_patch_forwards_the_callers_keyword_arguments():
         assert len(tokenizer.calls) == tokenized, "the repeat call must not re-tokenize"
     finally:
         _KeywordOnlyRenderer._apply_chat_template = original
-        _CACHES.pop(tokenizer, None)
 
 
 def test_hf_chat_patch_forwards_the_callers_template_kwargs():
@@ -358,15 +412,13 @@ def test_hf_chat_patch_forwards_the_callers_template_kwargs():
     tokenizer, cache = _build()
     seen: list = []
 
-    def fake_safe_apply_chat_template(
-        model_config, tok, conversation, *, tokenize=True, tools=None, **_ignored
-    ):
+    def fake_safe_apply_chat_template(model_config, tok, conversation, *, tokenize=True, tools=None, **_ignored):
         seen.append(tools)
         text = f"{'tools' if tools else 'no tools'}{_END}user: hi{_END}"
         return text if not tokenize else tok(text, add_special_tokens=False)["input_ids"]
 
     original = hf_mod.safe_apply_chat_template
-    _CACHES[tokenizer] = cache
+    _install_cache(tokenizer, cache)
     try:
         hf_mod.safe_apply_chat_template = fake_safe_apply_chat_template
         _patch_hf_chat()
@@ -380,4 +432,3 @@ def test_hf_chat_patch_forwards_the_callers_template_kwargs():
         )
     finally:
         hf_mod.safe_apply_chat_template = original
-        _CACHES.pop(tokenizer, None)
