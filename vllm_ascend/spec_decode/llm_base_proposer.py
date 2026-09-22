@@ -391,11 +391,27 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         if self.supports_mm_inputs:
             # Match upstream: a multimodal target can use a text-only drafter.
-            try:
-                dummy_input_ids = torch.tensor([[1]], device=self.input_ids.device)
-                self.model.embed_input_ids(dummy_input_ids, multimodal_embeddings=None)
-            except (NotImplementedError, AttributeError, TypeError):
-                logger.warning("Draft model does not support multimodal inputs, falling back to text-only mode")
+            if vllm_version_is("0.29.0"):
+                # The v0.29.0 release lane keeps the original runtime probe.
+                try:
+                    dummy_input_ids = torch.tensor([[1]], device=self.input_ids.device)
+                    self.model.embed_input_ids(dummy_input_ids, multimodal_embeddings=None)
+                except (NotImplementedError, AttributeError, TypeError):
+                    logger.warning(
+                        "Draft model does not support multimodal inputs, falling back to text-only mode"
+                    )
+                    self.supports_mm_inputs: bool = False
+            elif not _draft_embed_accepts_mm(
+                getattr(self.model, "embed_input_ids", None)
+            ):
+                # Main lane: introspect the draft embed signature instead of
+                # calling it. Drafts that share the target embedding (e.g. K3
+                # DSpark on a kv_consumer) have no own embed_tokens before the
+                # target sharing step, so the runtime probe asserts on
+                # embed_tokens=None.
+                logger.warning(
+                    "Draft model does not support multimodal inputs, falling back to text-only mode"
+                )
                 self.supports_mm_inputs: bool = False
 
         # Find draft layers (attention layers added by draft model)
