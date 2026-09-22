@@ -78,14 +78,6 @@ def _npu_mla_prolog_v3_k3(**kwargs):
     return torch.ops._C_ascend.npu_mla_prolog_v3_k3(**kwargs)
 
 
-def _legacy_bsnd_mla_cache(cache: torch.Tensor, num_kv_heads: int) -> torch.Tensor:
-    """Return the BBND view consumed by the legacy MLA operator chain."""
-
-    if cache.dim() == 4 and cache.shape[1] == num_kv_heads and cache.shape[2] != num_kv_heads:
-        return cache.transpose(1, 2)
-    return cache
-
-
 class AscendMLABackend(AttentionBackend):
     accept_output_buffer: bool = True
 
@@ -1438,6 +1430,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             key_cache=kv_cache[0],
             value_cache=kv_cache[1],
             slot_mapping=slots,
+            use_bnsd=True,
         )
         return k_pe, kv_c_normed
 
@@ -1458,8 +1451,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         if cache.is_contiguous():
             cache.view(-1, cache.shape[-1]).index_copy_(0, idx, token)
         else:
-            block_size = cache.shape[1]
-            cache[idx // block_size, idx % block_size] = token.view(-1, *cache.shape[2:])
+            block_size = cache.shape[2]
+            cache[idx // block_size, :, idx % block_size] = token.view(-1, 1, cache.shape[-1])
         if is_prefill:
             return k_pe, k_nope
         return kv_cache[1], kv_cache[0]
@@ -1895,7 +1888,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 sin = None
                 prolog_op = _npu_mla_prolog_v3_k3
             cache_index = cache_index.view(bsz, -1) if quantized_x.dim() == 3 else cache_index.view(-1)
-            cache_mode = "PA_BSND"
+            cache_mode = "PA_BNBD"
             weight_quant_mode = self.mlapo_weight_quant_mode
             quant_scale_ckv = self.fak_descale_reciprocal if self.fa_quant_layer else None
         else:
@@ -1908,7 +1901,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             cos = attn_metadata.decode.cos.view(cos_shape[0], cos_shape[-1])
             sin = attn_metadata.decode.sin.view(cos_shape[0], cos_shape[-1])
             prolog_op = torch_npu.npu_mla_prolog_v3
-            cache_mode = "PA_NZ" if (self.fa_quant_layer or self.enable_kv_nz) else "PA_BSND"
+            cache_mode = "PA_NZ" if (self.fa_quant_layer or self.enable_kv_nz) else "PA_BNBD"
             weight_quant_mode = 2
             # v3 full-quant uses a per-tensor kv scale; quant_kscale is one scalar
             # broadcast to (1, Hckv), so slice out the single per-tensor value.
@@ -2127,15 +2120,12 @@ class AscendMLAImpl(MLAAttentionImpl):
         # Fused MLA cache由runner保存为单一tensor。旧MLA实现仍按
         # nope/rope两个logical tensor访问算子，因此在这里做零拷贝切片。
         fused_mla_cache = isinstance(kv_cache, torch.Tensor)
-        # ModelRunner对PD/FlashMLA暴露BNBD；旧MLA算子链仍在forward边界
-        # 零拷贝转换成BBND，避免每个算子调用点重复理解两种协议。
+        # ModelRunner and all MLA operators use the same BNBD cache contract.
         if isinstance(kv_cache, torch.Tensor):
             kv_cache = (
-                _legacy_bsnd_mla_cache(kv_cache[..., : self.kv_lora_rank], self.num_kv_heads),
-                _legacy_bsnd_mla_cache(kv_cache[..., self.kv_lora_rank :], self.num_kv_heads),
+                kv_cache[..., : self.kv_lora_rank],
+                kv_cache[..., self.kv_lora_rank :],
             )
-        else:
-            kv_cache = tuple(_legacy_bsnd_mla_cache(cache, self.num_kv_heads) for cache in kv_cache)
 
         # Inputs and outputs may be padded for CUDA graphs
         output_padded = output
@@ -2171,7 +2161,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             )
         if decode_preprocess_res is not None:
             # MLA Preprocess for decoding
-            output_decode = self._forward_decode(decode_preprocess_res, kv_cache[0].shape[1], attn_metadata)
+            output_decode = self._forward_decode(decode_preprocess_res, kv_cache[0].shape[2], attn_metadata)
 
             o_proj_input[:num_decode_tokens] = output_decode
 

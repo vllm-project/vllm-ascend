@@ -20,7 +20,6 @@ from vllm_ascend.attention.mla_v1 import (
     ChunkedContextMetadata,
     DecodeMLAPreprocessResult,
     PrefillMLAPreprocessResult,
-    _legacy_bsnd_mla_cache,
     _mla_nope_zero_rope,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, PreprocessType, mark_fused_preprocess_weights
@@ -31,14 +30,24 @@ from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8Dyna
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ
 
 
-def test_legacy_bsnd_view_accepts_runner_bnbd_and_legacy_bbnd():
-    bnbd = torch.empty(2, 1, 128, 8)
-    legacy = _legacy_bsnd_mla_cache(bnbd, num_kv_heads=1)
-    assert legacy.shape == (2, 128, 1, 8)
-    assert legacy.untyped_storage() is bnbd.untyped_storage()
+def test_exec_kv_mla_nope_writes_first_axis_strided_bnbd_cache():
+    impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl.kv_a_layernorm = torch.nn.Identity()
+    impl.kv_lora_rank = 2
 
-    bbnd = torch.empty(2, 128, 1, 8)
-    assert _legacy_bsnd_mla_cache(bbnd, num_kv_heads=1) is bbnd
+    raw = torch.full((12,), -1, dtype=torch.float32)
+    cache = torch.as_strided(raw, size=(2, 1, 2, 2), stride=(6, 4, 2, 1))
+    kv_no_split = torch.arange(8, dtype=torch.float32).view(4, 1, 1, 2)
+    slots = torch.tensor([2, 3, 0, 1], dtype=torch.int64)
+
+    _, k_nope = impl._exec_kv_mla_nope(kv_no_split, (cache,), slots, is_prefill=True)
+
+    torch.testing.assert_close(k_nope, kv_no_split)
+    torch.testing.assert_close(cache[0, 0, 0], torch.tensor([0.0, 1.0]))
+    torch.testing.assert_close(cache[0, 0, 1], torch.tensor([2.0, 3.0]))
+    torch.testing.assert_close(cache[1, 0, 0], torch.tensor([4.0, 5.0]))
+    torch.testing.assert_close(cache[1, 0, 1], torch.tensor([6.0, 7.0]))
+    assert torch.all(cache.stride(0) > cache.shape[1] * cache.shape[2] * cache.shape[3])
 
 
 @pytest.mark.parametrize("use_rope", [False, True])
@@ -2755,6 +2764,7 @@ class TestAscendMLAImpl(TestBase):
                     mock_cache.call_args.kwargs["slot_mapping"],
                     metadata.slot_mapping[num_decode_tokens:num_actual_tokens],
                 )
+                self.assertTrue(mock_cache.call_args.kwargs["use_bnsd"])
         mock_rope.assert_not_called()
         mock_rope_cache.assert_not_called()
 
