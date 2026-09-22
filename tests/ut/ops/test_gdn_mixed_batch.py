@@ -255,6 +255,7 @@ def test_mixed_non_spec_reuses_rearranged_qkv() -> None:
 
 def test_spec_decode_uses_triton_recurrence_with_prefix_caching() -> None:
     layer = _make_layer()
+    layer.cache_config = SimpleNamespace(enable_prefix_caching=True)
     metadata = GDNAttentionMetadata(
         num_prefills=0,
         num_prefill_tokens=0,

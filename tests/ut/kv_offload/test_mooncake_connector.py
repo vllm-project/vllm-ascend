@@ -1153,7 +1153,7 @@ class TestCoreFunctionality(unittest.TestCase):
 
                 mock_transfer.assert_called_once_with(self.test_req)
                 mock_send.assert_called_once_with("req1", "localhost", 6666, {6666: 1})
-                self.thread.task_tracker.update_done_task_count.assert_called_once_with("req1")
+                self.thread.task_tracker.update_done_task_count.assert_called_once_with("req1", report_finished=True)
                 self.mock_queue.task_done.assert_called_once()
                 expected_errors = {1, 2} if transfer_error else set()
                 self.assertEqual(self.thread.get_and_clear_invalid_block_ids(), expected_errors)
@@ -1170,7 +1170,7 @@ class TestCoreFunctionality(unittest.TestCase):
         self.engine.batch_transfer_sync_read.assert_not_called()
         mock_free_remote_port.assert_called_once_with("req1", "localhost", {6666: 1})
         mock_send_done.assert_called_once_with("req1", "localhost", 6666, {6666: 1})
-        cast(Any, self.thread.task_tracker).update_done_task_count.assert_called_once_with("req1")
+        cast(Any, self.thread.task_tracker).update_done_task_count.assert_called_once_with("req1", report_finished=True)
         self.mock_queue.task_done.assert_called_once()
 
     @patch.object(KVCacheRecvingThread, "_get_remote_metadata")
