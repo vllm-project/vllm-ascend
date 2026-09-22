@@ -72,11 +72,11 @@ from vllm.model_executor.models.utils import (
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
+from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache as VllmDeepseekV4SWACache
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.attention.dsa_attn_kv_plan import get_dsv4_attn_kv_dtype
 from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
 from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_all_gather,
@@ -124,9 +124,6 @@ class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
         self.block_size = DSV4_BLOCK_SIZES[cache_config.block_size][0][1]
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        self.dtype = get_dsv4_attn_kv_dtype(vllm_config)
-        if self.dtype == torch.float8_e4m3fn:
-            vllm_config.cache_config.cache_dtype = "float8_e4m3fn"
         cached_head_size = self.head_dim + 128 if self.dtype == torch.float8_e4m3fn else self.head_dim
         return AscendSlidingWindowMLASpec(
             block_size=self.block_size,
@@ -615,11 +612,11 @@ class DeepseekV4Attention(nn.Module):
                     topk_indices_buffer=topk_indices_buffer,
                 )
 
-        k_dtype = get_dsv4_attn_kv_dtype(vllm_config)
+        kv_cache_dtype = kv_cache_dtype_str_to_dtype(vllm_config.cache_config.cache_dtype, vllm_config.model_config)
         swa_cache_layer = AscendDeepseekV4SWACache(
             head_dim=self.head_dim,
             window_size=self.window_size,
-            dtype=k_dtype,
+            dtype=kv_cache_dtype,
             prefix=f"{prefix}.swa_cache",
             cache_config=cache_config,
         )
@@ -937,7 +934,10 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 forward_context = get_forward_context()
                 forward_context.is_padding = sp_padding_mask(forward_context.is_padding, hidden_states)
             hidden_states = sp_shard(hidden_states)
-            input_ids = sp_shard(input_ids)  # TODO: support PP with dsacp.
+            # Non-first PP ranks receive None input_ids (the embedding was
+            # done upstream); only shard on the rank that owns the tokens.
+            if input_ids is not None:
+                input_ids = sp_shard(input_ids)
 
         # Compute llama 4 scaling once per forward pass if enabled
         llama_4_scaling_config = None
@@ -968,6 +968,10 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 aux_hidden_states.append(aux_hidden_state)
 
         if not pp_group.is_last_rank:
+            # The next PP rank expects full-sequence hidden states; undo the
+            # sequence sharding applied above before crossing the PP boundary.
+            if self.use_sequence_parallel_moe:
+                hidden_states = sp_all_gather(hidden_states)[: positions.shape[0]]
             intermediate_tensors = IntermediateTensors(
                 {
                     "hidden_states": hidden_states,

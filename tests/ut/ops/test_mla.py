@@ -72,21 +72,27 @@ class TestAscendSFAIndexerBackend(TestBase):
         self.assertTrue(indexer.use_torch_npu_lightning_indexer)
 
     @patch("vllm_ascend.attention.indexer.enable_dsa_cp", return_value=False)
-    @patch("vllm_ascend.attention.indexer.get_current_hardware_profile")
     @patch("vllm_ascend.attention.indexer.get_current_vllm_config")
     @patch("vllm_ascend.attention.indexer.get_ascend_config")
-    def test_li_c8_dtypes(self, mock_get_ascend_config, mock_get_vllm_config, mock_get_hw_profile, _mock_enable_dsa_cp):
+    def test_li_c8_dtypes(self, mock_get_ascend_config, mock_get_vllm_config, _mock_enable_dsa_cp):
         mock_get_ascend_config.return_value.is_sparse_li_c8_layer.return_value = True
         mock_get_vllm_config.return_value.model_config.hf_config.model_type = "deepseek_v32"
         mock_get_vllm_config.return_value.parallel_config.prefill_context_parallel_size = 1
 
-        mock_get_hw_profile.return_value.supports.return_value = True
-        indexer = AscendSFAIndexerBackend(self._make_vllm_indexer(), qk_rope_head_dim=64)
-        self.assertTrue(indexer.enable_sparse_li_c8)
-        self.assertEqual(indexer.c8_k_cache_dtype, torch.float8_e4m3fn)
-        self.assertEqual(indexer.c8_k_scale_cache_dtype, torch.float32)
+        # The dtype pair is derived from attention_config.indexer_kv_dtype. In UT
+        # processes the worker patch (patch_kv_cache_dtype) is not applied, so fp8
+        # still maps to torch.uint8 here; emulate the worker-side flip to cover the
+        # float8/float32 pair, then exercise the int8/float16 pair via "int8".
+        from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 
-        mock_get_hw_profile.return_value.supports.return_value = False
+        mock_get_vllm_config.return_value.attention_config.indexer_kv_dtype = "fp8"
+        with patch.dict(STR_DTYPE_TO_TORCH_DTYPE, {"fp8": torch.float8_e4m3fn}):
+            indexer = AscendSFAIndexerBackend(self._make_vllm_indexer(), qk_rope_head_dim=64)
+            self.assertTrue(indexer.enable_sparse_li_c8)
+            self.assertEqual(indexer.c8_k_cache_dtype, torch.float8_e4m3fn)
+            self.assertEqual(indexer.c8_k_scale_cache_dtype, torch.float32)
+
+        mock_get_vllm_config.return_value.attention_config.indexer_kv_dtype = "int8"
         indexer = AscendSFAIndexerBackend(self._make_vllm_indexer(), qk_rope_head_dim=64)
         self.assertEqual(indexer.c8_k_cache_dtype, torch.int8)
         self.assertEqual(indexer.c8_k_scale_cache_dtype, torch.float16)
@@ -137,7 +143,7 @@ class TestAscendSFAIndexerBackend(TestBase):
 
         def _forward_k(*args):
             calls.append("forward_k")
-            return k_li, None
+            return k_li, None, None
 
         indexer.forward_k = MagicMock(side_effect=_forward_k)
         indexer.write_cache = MagicMock(side_effect=lambda *args, **kwargs: calls.append("write_cache"))
@@ -183,7 +189,7 @@ class TestAscendSFAIndexerBackend(TestBase):
         # the cache write still run; the selection stage is skipped.
         indexer = self._make_forward_indexer()
         indexer_metadata = self._make_indexer_metadata()
-        indexer.forward_k = MagicMock(return_value=(torch.zeros(2, 128), None))
+        indexer.forward_k = MagicMock(return_value=(torch.zeros(2, 128), None, None))
         indexer.write_cache = MagicMock()
 
         with patch("vllm_ascend.device.device_op.DeviceOperator.indexer_select_post_process") as select:
@@ -441,8 +447,8 @@ class TestAscendMultiHeadLatentAttention(TestBase):
                         prefix=self.prefix,
                     )
 
-                self.assertEqual(hasattr(fused_qkv_a_proj, "_fused_preprocess_managed"), should_mark)
-                self.assertEqual(hasattr(q_proj, "_fused_preprocess_managed"), should_mark)
+                self.assertEqual(fused_qkv_a_proj._fused_preprocess_managed, should_mark)
+                self.assertEqual(q_proj._fused_preprocess_managed, should_mark)
 
     @patch("vllm_ascend.ops.mla.IndexerWrapper")
     @patch("vllm_ascend.ops.mla.torch.ops.vllm.mla_forward")

@@ -1,4 +1,3 @@
-import enum
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -12,6 +11,7 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
 from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (
     AttentionBackend,  # type: ignore
     AttentionCGSupport,
@@ -28,6 +28,7 @@ from vllm_ascend.attention.utils import (
     MLAPO_MAX_SUPPORTED_TOKENS,
     SFA_QSFA_TILE_SIZE,
     AscendCommonAttentionMetadata,
+    PreprocessType,
     ascend_chunked_prefill_workspace_size,
     get_sfa_qsfa_packed_head_dim,
     maybe_save_kv_layer_to_connector,
@@ -37,9 +38,9 @@ from vllm_ascend.attention.utils import (
     wait_for_kv_layer_from_connector,
 )
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
+from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
-    record_attention_compute_start,
+    attention_transfer_window,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     OFFLOAD_K_CACHE_NPU_INDEX,
@@ -58,6 +59,7 @@ from vllm_ascend.utils import (
     dispose_layer,
     enable_sp,
     is_mtp_layer,
+    is_rl_weight_update_enabled,
     maybe_trans_nz,
 )
 
@@ -69,7 +71,6 @@ if TYPE_CHECKING:
 
 # NoPE sparse MLA operator helpers.
 SMLA_METADATA_SIZE = 1024
-SPARSE_ATTENTION_MAX_BLOCK_SIZE = 1024
 
 
 def build_smla_metadata(metadata, buffer, num_heads, head_dim, topk):
@@ -103,8 +104,24 @@ def build_smla_metadata(metadata, buffer, num_heads, head_dim, topk):
     metadata.smla_metadata = buffer
 
 
+def _view_cache_as_operator_pages(cache: torch.Tensor, block_size: int) -> torch.Tensor:
+    """Expose oversized contiguous storage pages at operator block granularity."""
+    storage_block_size = cache.shape[1]
+    if storage_block_size == block_size:
+        return cache
+    if storage_block_size % block_size:
+        raise ValueError(
+            f"Sparse MLA storage block size {storage_block_size} is not divisible by operator block size {block_size}."
+        )
+    try:
+        return cache.view(-1, block_size, *cache.shape[2:])
+    except RuntimeError as err:
+        raise ValueError("Sparse MLA oversized storage pages must support a zero-copy operator-page view.") from err
+
+
 def sparse_mla(query, cache, indices, metadata, scale):
     """Attend to original latent KV, using the platform's NoPE operator."""
+    cache = _view_cache_as_operator_pages(cache, metadata.block_size)
     if metadata.smla_metadata is not None:
         # The A5 DMA merges adjacent columns. Preserve the selected set while
         # sorting token positions and moving invalid padding to the end.
@@ -133,10 +150,6 @@ def sparse_mla(query, cache, indices, metadata, scale):
             return_softmax_lse=False,
         )
     else:
-        # Large, contiguous hybrid storage pages need a C128 view to meet
-        # the A2/A3 limit. Keep supported page-strided layouts unchanged.
-        if cache.shape[1] != metadata.block_size:
-            cache = cache.view(-1, metadata.block_size, *cache.shape[2:])
         result = torch.ops._C_ascend.npu_sparse_flash_attention(
             query=query.contiguous(),
             key=cache,
@@ -175,11 +188,11 @@ class SparseMLAMetadataState:
             raise ValueError("Sparse MLA block size must be a positive multiple of the SFA kernel block size.")
         self.split = block_size // kernel_block_size
         self.use_smla = get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.FP8_OPTIMIZED
-        self.block_size = block_size
-        if not self.use_smla and block_size > SPARSE_ATTENTION_MAX_BLOCK_SIZE:
-            self.block_size = kernel_block_size
-        self.table_stride = self.block_size // kernel_block_size
-        table_width = cdiv(vllm_config.model_config.max_model_len, block_size) * (block_size // self.block_size)
+        self.block_size = kernel_block_size
+        self.table_stride = 1
+        cache_block_size = vllm_config.cache_config.block_size
+        expand_factor = max(cache_block_size // kernel_block_size, 1)
+        table_width = cdiv(vllm_config.model_config.max_model_len, cache_block_size) * expand_factor
         self.block_table_buffer = torch.empty(
             vllm_config.scheduler_config.max_num_seqs,
             table_width,
@@ -227,17 +240,8 @@ class SparseMLAMetadataState:
         return metadata
 
 
-# token count limits within bmm_transpose operator
-BMM_TRANS_MAX_SUPPORTED_TOKENS = 1024
-
 # npu_transpose_batchmatmul rejects operand dimensions >= 65536
 TRANSPOSE_BMM_MAX_SUPPORTED_DIM = 65536
-
-
-class PreprocessType(enum.Enum):
-    NATIVE = "native"
-    PROLOG_V3 = "prolog_v3"
-    MLAPO = "mlapo"
 
 
 def _get_indexer_types(configs: tuple[Any, ...]) -> Any | None:
@@ -359,6 +363,24 @@ class AscendSFAMetadata:
 
 
 M = TypeVar("M", bound=AscendSFAMetadata)
+
+
+def _int64_kv_slots(slots: torch.Tensor, attn_metadata: M) -> torch.Tensor:
+    """Convert the KV slot mapping to int64 once per scheduling step.
+
+    ``npu_kv_rmsnorm_rope_cache`` requires int64 cache indices while the SFA
+    metadata carries int32 slots. Every layer of a step shares the same slot
+    tensor, so cache the converted copy on the metadata object instead of
+    re-casting it inside each layer's ``exec_kv`` (one Cast kernel per step
+    instead of one per layer).
+    """
+    if slots.dtype == torch.int64:
+        return slots
+    cached = getattr(attn_metadata, "kv_slots_i64", None)
+    if cached is None or cached[0] is not slots:
+        cached = (slots, slots.to(torch.int64))
+        attn_metadata.kv_slots_i64 = cached  # type: ignore[attr-defined]
+    return cached[1]
 
 
 @dataclass
@@ -682,6 +704,12 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         ascend_config = get_ascend_config()
         self.vllm_config = get_current_vllm_config()
+        # SFA absorbs kv_b_proj (and, for KV consumers on PROLOG_V3, the fused
+        # qkv/q projections) and disposes the source parameters. A disposed
+        # parameter is no longer a valid destination for the in-place weight
+        # updates that RL pushes through vLLM's layerwise reload, so those
+        # sources must survive whenever such updates are possible.
+        self.rl_weight_update_enabled = is_rl_weight_update_enabled(self.vllm_config)
         kv_transfer_config = self.vllm_config.kv_transfer_config
         self.is_kv_producer = kv_transfer_config is not None and kv_transfer_config.is_kv_producer
         self.is_kv_consumer = kv_transfer_config is not None and kv_transfer_config.is_kv_consumer
@@ -732,11 +760,12 @@ class AscendSFAImpl(MLAAttentionImpl):
             raise NotImplementedError("NoPE SFA currently requires an unquantized latent KV cache.")
         self.enable_sparse_li_c8 = self.has_indexer and self.indexer.enable_sparse_li_c8
         if self.enable_sparse_sfa_c8 or self.enable_sparse_li_c8:
-            if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
-                self.c8_k_cache_dtype = torch.float8_e4m3fn
+            self.c8_k_cache_dtype = kv_cache_dtype_str_to_dtype(
+                self.vllm_config.attention_config.indexer_kv_dtype, self.vllm_config.model_config
+            )
+            if self.c8_k_cache_dtype == torch.float8_e4m3fn:
                 self.c8_k_scale_cache_dtype = torch.float32
-            else:
-                self.c8_k_cache_dtype = torch.int8
+            elif self.c8_k_cache_dtype == torch.int8:
                 self.c8_k_scale_cache_dtype = torch.float16
 
         if self.enable_sparse_sfa_c8:
@@ -817,11 +846,12 @@ class AscendSFAImpl(MLAAttentionImpl):
             self.W_UV.copy_(W_UV.transpose(0, 1).contiguous())
             self.W_UK_T.copy_(W_UK.permute(1, 2, 0).contiguous())
 
-        # TODO(zzzzwwjj): Currently, torch.ops._C_ascend.batch_matmul_transpose cannot support weight nz
-        # self.W_UV = maybe_trans_nz(self.W_UV)
-
-        # Dispose kv_b_proj since it is replaced by W_UV and W_UK_T to save memory
-        dispose_layer(self.kv_b_proj)
+        # Dispose kv_b_proj since it is replaced by W_UV and W_UK_T to save memory.
+        # RL keeps it: it is the only source of W_UV/W_UK_T, so every weight
+        # update re-derives them from this parameter and the parameter must stay
+        # loadable (#15463).
+        if not self.rl_weight_update_enabled:
+            dispose_layer(self.kv_b_proj)
         self.preprocess_type = self._resolve_preprocess_type(act_dtype)
 
         if self.preprocess_type == PreprocessType.NATIVE:
@@ -856,15 +886,23 @@ class AscendSFAImpl(MLAAttentionImpl):
         quant_method = self._get_layer_quant_method(self.fused_qkv_a_proj)
         qt = type(quant_method) if quant_method is not None else None
 
-        # PROLOG_V3 takes precedence over MLAPO.
+        # PROLOG_V3 takes precedence over MLAPO and is the default fused
+        # preprocessing for quantized SFA layers in every deployment (plain
+        # serving, PD KV producers and KV consumers). ``enable_dsa_cp`` is the
+        # prefill/P-node route selector: it routes to AscendSFADSACPImpl,
+        # which unconditionally disables fused preprocessing, so the two are
+        # mutually exclusive by construction. The C8 switches only select the
+        # KV cache layout and are orthogonal to this choice. Unquantized
+        # layers keep the NATIVE chain outside KV consumers because the
+        # unquantized weight preparation transposes fused_qkv_a_proj.weight
+        # in place, which the NATIVE fallback still consumes.
         if getattr(self, "dcp_group", None) is None:
-            eligible = self.is_kv_consumer and (
-                (qt is AscendW8A8DynamicLinearMethod and self.enable_sparse_sfa_c8)
-                or qt is AscendW8A8MXFP8DynamicLinearMethod
-                or qt is None
-            )
-            if eligible and not self._get_fused_type_unsupported_reasons(PreprocessType.PROLOG_V3):
-                return PreprocessType.PROLOG_V3
+            prolog_v3_eligible = qt is not None or self.is_kv_consumer
+            if prolog_v3_eligible and (
+                qt is AscendW8A8DynamicLinearMethod or qt is AscendW8A8MXFP8DynamicLinearMethod or qt is None
+            ):
+                if not self._get_fused_type_unsupported_reasons(PreprocessType.PROLOG_V3):
+                    return PreprocessType.PROLOG_V3
 
         eligible = qt is AscendW8A8LinearMethod and self.enable_mlapo
         if eligible and not self._get_fused_type_unsupported_reasons(PreprocessType.MLAPO):
@@ -896,8 +934,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         quant_method = self._get_layer_quant_method(self.fused_qkv_a_proj)
         qt = type(quant_method) if quant_method is not None else None
         if pp_type is PreprocessType.PROLOG_V3:
-            if self.is_kv_producer:
-                reasons.append("PROLOG_V3 is disabled on KV producer workers.")
             if qt is None and self.enable_sparse_sfa_c8:
                 reasons.append("PROLOG_V3: C8 sparse requires quantized MLAPO.")
             if getattr(self.q_proj, "_chunk_size", 0):
@@ -951,7 +987,10 @@ class AscendSFAImpl(MLAAttentionImpl):
             uq_scale = self.q_proj.weight_scale.data.transpose(0, 1)
             self.weight_uq_qr_scale = uq_scale.reshape(-1, uq_scale.shape[1] * uq_scale.shape[2])
 
-        if self.is_kv_consumer:
+        # Same reasoning as kv_b_proj: once the fused projections are consumed by
+        # PROLOG_V3 they are pure load sources, but discarding their storage
+        # breaks the next layerwise reload, so RL keeps them.
+        if self.is_kv_consumer and not self.rl_weight_update_enabled:
             dispose_layer(self.fused_qkv_a_proj)
             dispose_layer(self.q_proj)
             torch.npu.empty_cache()
@@ -1114,7 +1153,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             self.kv_a_layernorm.weight,  # type: ignore[union-attr]
             cos,
             sin,
-            slots.to(torch.int64),
+            _int64_kv_slots(slots, attn_metadata),
             kv_cache[1],
             kv_cache[0],
             epsilon=self.kv_a_layernorm.variance_epsilon,  # type: ignore[union-attr]
@@ -1156,29 +1195,31 @@ class AscendSFAImpl(MLAAttentionImpl):
         return ql_nope, q_pe
 
     def _v_up_proj(self, x):
-        num_input_tokens, _, _ = x.shape
-        if (
-            x.dtype in [torch.float16, torch.bfloat16]
-            and hasattr(torch.ops._C_ascend, "batch_matmul_transpose")
-            and num_input_tokens <= BMM_TRANS_MAX_SUPPORTED_TOKENS
-        ):
-            x = x.view(-1, self.local_num_heads, self.kv_lora_rank)
-            res = torch.empty((num_input_tokens, self.local_num_heads, self.v_head_dim), dtype=x.dtype, device=x.device)
-            torch.ops._C_ascend.batch_matmul_transpose(x, self.W_UV, res)
-            x = res.reshape(-1, self.local_num_heads * self.v_head_dim)
-        elif hasattr(torch_npu, "npu_transpose_batchmatmul"):
-            # Convert from (N, B, L)/(N, B, 1, L) to (N, B, L)
-            x = x.view(-1, self.local_num_heads, self.kv_lora_rank)
-            # Multiply (N, B, L) x (N, L, V) -> (B, N, V)
-            x = torch_npu.npu_transpose_batchmatmul(x, self.W_UV, perm_x1=(1, 0, 2), perm_y=(1, 0, 2))
-            # Convert from (N, B, V) to (B, N * V)
+        if hasattr(torch_npu, "npu_transpose_batchmatmul"):
+            # aclnn TransposeBatchMatMul with perm_x1=(1,0,2) (internal
+            # transpose) requires N*L < 65536 on older CANN binaries.
+            #   - If satisfied: keep x as (B, N, L) and let the operator
+            #     transpose internally, saving a contiguous copy.
+            #   - Otherwise: explicit transpose to (N, B, L) and use
+            #     perm_x1=(0,1,2), which downgrades the check to L < 65536.
+            # TODO: CANN 9.2 removes the N*L<65536 check; once it is the
+            # deployment baseline, collapse this branch to perm_x1=(1,0,2).
+            if self.local_num_heads * self.kv_lora_rank < 65536:
+                # (B, N, L) -> operator transposes internally -> (B, N, V)
+                x = x.view(-1, self.local_num_heads, self.kv_lora_rank)
+                x = torch_npu.npu_transpose_batchmatmul(x, self.W_UV, perm_x1=(1, 0, 2), perm_y=(1, 0, 2))
+            else:
+                # (B, N, L) -> (N, B, L) -> (B, N, V); perm_x1=(0,1,2) skips inner transpose
+                x = x.view(-1, self.local_num_heads, self.kv_lora_rank).transpose(0, 1).contiguous()
+                x = torch_npu.npu_transpose_batchmatmul(x, self.W_UV, perm_x1=(0, 1, 2), perm_y=(1, 0, 2))
+            # (B, N, V) -> (B, N * V)
             x = x.reshape(-1, self.local_num_heads * self.v_head_dim)
         else:
-            # Convert from (B, N, L) to (N, B, L)
+            # (B, N, L) -> (N, B, L)
             x = x.view(-1, self.local_num_heads, self.kv_lora_rank).transpose(0, 1)
-            # # Multiply (N, B, L) x (N, L, V) -> (N, B, V)
+            # (N, B, L) x (N, L, V) -> (N, B, V)
             x = torch.bmm(x, self.W_UV)
-            # # Convert from (N, B, V) to (B, N * V)
+            # (N, B, V) -> (B, N * V)
             x = x.transpose(0, 1).reshape(-1, self.local_num_heads * self.v_head_dim)
         return x
 
@@ -1230,6 +1271,8 @@ class AscendSFAImpl(MLAAttentionImpl):
             kr_cache = kv_cache[1]
         rope_cos_ = cos.view(cos.shape[0], cos.shape[-1])
         rope_sin_ = sin.view(sin.shape[0], sin.shape[-1])
+        # The caller forwards the per-step cached int64 slots, so the .to()
+        # below is a no-op in production; kept for direct-call safety.
         cache_index = slot_mapping.view(-1).to(torch.int64)
 
         if qt is not None:
@@ -1647,11 +1690,9 @@ class AscendSFAImpl(MLAAttentionImpl):
         actual_seq_lengths_key = parallel_context.actual_seq_lengths_key
 
         fused_type: PreprocessType = self.preprocess_type
-        if (
-            attn_metadata.attn_state not in (AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding)
-            or self.preprocess_type == PreprocessType.MLAPO
-            and num_input_tokens > MLAPO_MAX_SUPPORTED_TOKENS
-        ):
+        # PROLOG_V3 serves every attention state (decode, spec decoding and
+        # prefill); only MLAPO carries a per-call token-count limit.
+        if self.preprocess_type == PreprocessType.MLAPO and num_input_tokens > MLAPO_MAX_SUPPORTED_TOKENS:
             fused_type = PreprocessType.NATIVE
 
         if fused_type != PreprocessType.NATIVE:
@@ -1676,7 +1717,10 @@ class AscendSFAImpl(MLAAttentionImpl):
                     kv_cache=kv_cache,
                     cos=cos,
                     sin=sin,
-                    slot_mapping=slot_mapping_sfa,
+                    # npu_mla_prolog_v3 requires int64 cache indices; reuse
+                    # the per-step conversion so all layers of a step share
+                    # one Cast kernel (the .to() inside is a no-op on int64).
+                    slot_mapping=_int64_kv_slots(slot_mapping_sfa, attn_metadata),
                 )
             else:
                 hidden_states, ql_nope, q_pe, q_c = self._sfa_preprocess_mlapo(
@@ -1790,17 +1834,16 @@ class AscendSFAImpl(MLAAttentionImpl):
         # Open the prefetch gate for every SFA layer. Some GLM-5.2 layers
         # reuse cached top-k indices and have no indexer, so recording this
         # inside the indexer's forward would leave their gate closed.
-        record_attention_compute_start()
-
-        attn_output = self._execute_sparse_flash_attention_process(
-            ql_nope,
-            q_pe,
-            kv_cache,
-            topk_indices,
-            attn_metadata,
-            actual_seq_lengths_query,
-            actual_seq_lengths_key,
-        )
+        with attention_transfer_window():
+            attn_output = self._execute_sparse_flash_attention_process(
+                ql_nope,
+                q_pe,
+                kv_cache,
+                topk_indices,
+                attn_metadata,
+                actual_seq_lengths_query,
+                actual_seq_lengths_key,
+            )
 
         attn_output = self._v_up_proj(attn_output)
         if gate_hidden_states is not None:
@@ -1839,8 +1882,10 @@ def custom_kv_rmsnorm_rope(
     k_rope = torch_npu.npu_interleave_rope(rope_in, cos, sin)
 
     prefix_shape = k_nope.shape[:-1]
+    # npu_rms_norm returns a contiguous tensor, so the explicit
+    # .contiguous() copy before the view is redundant.
     k_nope, knope_scale = torch_npu.npu_dynamic_block_quant(
-        k_nope.contiguous().view(-1, 1, kv_lora_rank),
+        k_nope.view(-1, 1, kv_lora_rank),
         dst_type=dst_type,
         row_block_size=1,
         col_block_size=tile_size,

@@ -4,9 +4,9 @@
 
 | Product                                                               | Supported |
 | --------------------------------------------------------------------- | :-------: |
-| <term>Atlas A2 Training Series/Atlas A2 Inference Series</term>       |     √     |
-| <term>Atlas A3 Training Series/Atlas A3 Inference Series</term>       |     √     |
-| <term>Ascend 950PR/Ascend 950DT</term>                                |     √     |
+| <term>Atlas A2 Products</term>       |     √     |
+| <term>Atlas A3 Products</term>       |     √     |
+| <term>950PR&950DT Products</term>                                |     √     |
 
 ## Function Description
 
@@ -74,23 +74,23 @@ Notation:
 - PageAttention requires `block_table`. TND must omit `block_table` and use
   `[B+1]` prefix sums for `actual_seq_klen`.
 - On the non-quantized path, `query` and `key` must have the same dtype and
-  `scale` must be absent. A2/A3 support FLOAT16 and BFLOAT16. Ascend 950 also
+  `scale` must be absent. A2/A3 support FLOAT16 and BFLOAT16. 950PR&950DT Products also
   supports HIFLOAT8, FLOAT8_E5M2, and FLOAT8_E4M3FN.
 - The quantized path supports a FLOAT16 query, an INT8 key, and a required
-  FLOAT scale. Native FP8 is not an INT8 quantized path: on Ascend 950, query
+  FLOAT scale. Native FP8 is not an INT8 quantized path: on 950PR&950DT Products, query
   and key must use the same FP8 dtype and `scale` must be absent.
 - `sparse_mode=0` requires no `atten_mask`. `sparse_mode=3` requires an INT8
   mask with shape `[2048, 2048]`.
 - `init_blocks` and `local_blocks` must be non-negative and cannot exceed the
   logical block width. Setting both to 0 disables `local_mask`.
 - `block_table` may be wider than the actual logical KV block count. The score
-  width is `RoundUp(block_table.shape[1], 16)`. The Ascend 950 C2UB path flushes
+  width is `RoundUp(block_table.shape[1], 16)`. The 950PR&950DT Products C2UB path flushes
   widths greater than 256 in 256-column windows.
 - `q_len` and `kv_len` may be zero, including for the entire batch. Empty query
   requests skip QK computation; empty KV requests produce fill scores; an
   all-empty query batch launches with one block.
 - PageAttention BBND/BNBD keys may be non-contiguous on the physical-page axis
-  on A2/A3 and Ascend 950. All inner axes must remain contiguous. TND keys must
+  on A2/A3 and 950PR&950DT Products. All inner axes must remain contiguous. TND keys must
   be contiguous, and `scale` remains tightly packed by logical page.
 - The operator returns block scores only and does not perform TopK.
 
@@ -107,7 +107,7 @@ bash build.sh --run_example msa_index_score eager cust \
   --vendor_name=custom --soc=ascend910b
 ```
 
-For Ascend 950:
+For 950PR&950DT Products:
 
 ```bash
 bash build.sh --pkg --soc=ascend950 --ops=msa_index_score -j32
@@ -119,7 +119,7 @@ bash build.sh --run_example msa_index_score eager cust \
   --vendor_name=custom --soc=ascend950
 ```
 
-The expected result is 40/40 cases on Ascend 950. A2/A3 skip the four FP8
+The expected result is 40/40 cases on 950PR&950DT Products. A2/A3 skip the four FP8
 cases and run 36 cases. FLOAT16/BFLOAT16/INT8 use a tolerance of `1e-3`; FP8
 uses `2e-2`.
 
@@ -137,9 +137,9 @@ uses `2e-2`.
 - For `sparse_mode=3`, the host validates `atten_mask[2048,2048]`; the device
   derives right-down-causal visibility without loading the mask element by
   element.
-- The Ascend 950 implementation is under `op_kernel/arch35`. It uses native
+- The 950PR&950DT Products implementation is under `op_kernel/arch35`. It uses native
   Cube FP8 tiling keys 4/5/6 without a scale or an intermediate FP16 cast.
-- Ascend 950 uses the operator-private Catlass snapshot under
+- 950PR&950DT Products uses the operator-private Catlass snapshot under
   `op_kernel/catlass`, derived from v1.3.1-notla. A2/A3 continue to use the
   repository Catlass submodule. The `msa_` prefix isolates only the A5-specific
   snapshot because its interfaces and implementation differ.

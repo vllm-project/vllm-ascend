@@ -24,9 +24,9 @@ The following model weights are available:
 
 |  Weight Version                              | Hardware Requirements | Download Links |
 |----------------------------------------------|-----------------------|----------------|
-| `Qwen3.8-27B` (BF16 version)                 | 1 Ascend950DT series (96GB × 8) node or 1 Ascend950PR series (128GB × 8) node or 1 Atlas 800 A3 (64GB × 16) node <br>or 1 Atlas 800 A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.8-27B) |
-| `Qwen3.8-27B-w8a8` (Quantized version)       | 1 Ascend950PR series (128GB × 8) node or 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8) |
-| `Qwen3.8-27B-w8a8-mxfp8` (Quantized version) | 1 Ascend950DT series (96GB × 8) or 1 Ascend950PR series (128GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8-mxfp8) |
+| `Qwen3.8-27B` (BF16 version)                 | 1 950DT Products (96GB × 8) node or 1 950PR Products (128GB × 8) node or 1 Atlas 800 A3 (64GB × 16) node <br>or 1 Atlas 800 A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.8-27B) |
+| `Qwen3.8-27B-w8a8` (Quantized version)       | 1 950PR Products (128GB × 8) node or 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8) |
+| `Qwen3.8-27B-w8a8-mxfp8` (Quantized version) | 1 950DT Products (96GB × 8) or 1 950PR Products (128GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8-mxfp8) |
 | `Qwen3.8-27B-w8a8-310p` (Quantized version)  | 1 Atlas 300I DUO  | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8-310p) |
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
@@ -39,7 +39,7 @@ It is recommended to download the model weight to the shared directory of multip
 
 Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
-=== "Ascend950DT/PR series"
+=== "950PR&950DT Products"
 
     Start the docker image on each node.
 
@@ -217,9 +217,9 @@ Before starting the service:
 
 - Replace the model path, parallel sizes and service port with values from the target environment.
 
-=== "Ascend950DT series"
+=== "950DT Products"
 
-    The following example is for Ascend950DT series.
+    The following example is for 950DT Products.
 
     ```bash
     #!/bin/sh
@@ -269,9 +269,9 @@ Before starting the service:
         - `"cudagraph_mode"`: represents the specific graph mode. Currently, `"PIECEWISE"` and `"FULL_DECODE_ONLY"` are supported. The graph mode is mainly used to reduce the cost of operator dispatch. Currently, `"FULL_DECODE_ONLY"` is recommended.
         - `"cudagraph_capture_sizes"`: represents different levels of graph modes. The default value is `[1, 2, 4, 8, 16, 24, 32, 40,..., --max-num-seqs]`. In the graph mode, the input for graphs at different levels is fixed, and inputs between levels are automatically padded to the next level. Currently, the default setting is recommended. Only in some scenarios is it necessary to set this separately to achieve optimal performance.
 
-=== "Ascend950PR series"
+=== "950PR Products"
 
-    The following example is for Ascend950PR series. Quantized versions need `--quantization ascend`. On Ascend950PR, `Qwen3.8-27B-w8a8` is the current recommended weight; switch to `Qwen3.8-27B-w8a8-mxfp8` later after further optimization.
+    The following example is for 950PR Products. Quantized versions need `--quantization ascend`. On 950PR Products, `Qwen3.8-27B-w8a8` is the current recommended weight; switch to `Qwen3.8-27B-w8a8-mxfp8` later after further optimization.
 
     ```bash
     #!/bin/sh
@@ -320,7 +320,7 @@ Before starting the service:
     - `--compilation-config` contains configurations related to the aclgraph graph mode. The most significant configurations are `"cudagraph_mode"` and `"cudagraph_capture_sizes"`, which have the following meanings:
         - `"cudagraph_mode"`: represents the specific graph mode. Currently, `"PIECEWISE"` and `"FULL_DECODE_ONLY"` are supported. The graph mode is mainly used to reduce the cost of operator dispatch. Currently, `"FULL_DECODE_ONLY"` is recommended.
         - `"cudagraph_capture_sizes"`: represents different levels of graph modes. The default value is `[1, 2, 4, 8, 16, 24, 32, 40,..., --max-num-seqs]`. In the graph mode, the input for graphs at different levels is fixed, and inputs between levels are automatically padded to the next level. Currently, the default setting is recommended. Only in some scenarios is it necessary to set this separately to achieve optimal performance.
-    - `--additional-config '{"enable_cpu_binding":true}'` binds OMP threads to fixed CPU cores. On a single Ascend950PR this is the single largest lever measured: single-stream decode goes from 32 tok/s without it to 63 tok/s with it.
+    - `--additional-config '{"enable_cpu_binding":true}'` binds OMP threads to fixed CPU cores. On a single 950PR Products this is the single largest lever measured: single-stream decode goes from 32 tok/s without it to 63 tok/s with it.
 
 === "Atlas 800 A3 / Atlas 800 A2"
 

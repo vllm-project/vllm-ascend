@@ -95,6 +95,8 @@ binary bisect for genuine failures. By default, AOP hooks are disabled.
 
 This triggers `workflow_dispatch` on both `schedule_nightly_test_a2.yaml` and `schedule_nightly_test_a3.yaml`.
 
+> **Note**: These `schedule_*` workflows do not declare a GitHub Actions `schedule:` (cron) trigger; they are dispatched externally via `workflow_dispatch`. See [CI workflow triggers and the schedule_ prefix](../developer_guide/contribution/testing.md#ci-workflow-triggers-and-the-schedule_-prefix).
+
 ### `/cherry-pick`
 
 Cherry-pick a PR's commits onto a specified target branch and create a new PR. This is useful for backporting fixes to release branches.

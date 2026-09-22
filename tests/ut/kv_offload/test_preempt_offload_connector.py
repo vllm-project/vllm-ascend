@@ -211,10 +211,11 @@ def test_preempt_offload_connector_scheduler_aligns_sliding_window_blocks():
     assert scheduler._align_group_block_ids(0, [7, 8], 0) == []
 
 
-def test_preempt_offload_connector_cpu_config_uses_v028_tensor_layout():
+def test_preempt_offload_connector_cpu_config_uses_single_layer_tensor_layout():
     gpu_tensor = SimpleNamespace(
         size=1024,
-        shared_by=["layer.0"],
+        layers=["layer.0"],
+        layer_stride=0,
         offset=32,
         block_stride=64,
     )
@@ -225,10 +226,6 @@ def test_preempt_offload_connector_cpu_config_uses_v028_tensor_layout():
     )
 
     with (
-        patch(
-            "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.manager.vllm_version_is",
-            return_value=True,
-        ),
         patch(
             "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.manager.get_kv_cache_tensor_layers",
             return_value=["layer.0"],
@@ -251,13 +248,14 @@ def test_preempt_offload_connector_cpu_config_uses_v028_tensor_layout():
     assert cpu_config.kv_cache_groups == ["group"]
     assert vars(cpu_config.kv_cache_tensors[0]) == {
         "size": 512,
-        "shared_by": ["layer.0"],
+        "layers": ["layer.0"],
+        "layer_stride": 0,
         "offset": 32,
         "block_stride": 64,
     }
 
 
-def test_preempt_offload_connector_cpu_config_uses_v029_tensor_layout():
+def test_preempt_offload_connector_cpu_config_preserves_layer_stride():
     gpu_tensor = SimpleNamespace(
         size=1024,
         layers=["layer.0"],
@@ -272,10 +270,6 @@ def test_preempt_offload_connector_cpu_config_uses_v029_tensor_layout():
     )
 
     with (
-        patch(
-            "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.manager.vllm_version_is",
-            return_value=False,
-        ),
         patch(
             "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.manager.get_kv_cache_tensor_layers",
             return_value=["layer.0"],
@@ -319,10 +313,6 @@ def test_preempt_offload_connector_cpu_config_uses_host_memory_ratio():
     )
 
     with (
-        patch(
-            "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.manager.vllm_version_is",
-            return_value=False,
-        ),
         patch(
             "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.preempt_offload.manager.get_kv_cache_tensor_layers",
             return_value=["layer.0"],

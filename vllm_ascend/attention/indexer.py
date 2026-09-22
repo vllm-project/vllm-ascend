@@ -8,12 +8,14 @@ from torch import nn
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tp_group
 from vllm.triton_utils import HAS_TRITON
+from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
 )
+from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.utils import select_common_block_size
 
@@ -31,7 +33,6 @@ from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
 )
 from vllm_ascend.attention.utils import split_decodes_and_prefills
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
@@ -40,13 +41,7 @@ from vllm_ascend.utils import (
     enable_dsa_cp,
     enable_sfa_dcp_replicated_indexer,
     is_pd_decode_recompute_scheduler_enabled,
-    vllm_version_is,
 )
-
-if vllm_version_is("0.28.0"):
-    from vllm.model_executor.layers.attention.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
-else:
-    from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 
 # Slots of the k / scale caches inside an indexer's own ``k_cache.kv_cache``
 # tuple (the scale slot exists only when LI C8 is enabled).
@@ -185,11 +180,13 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
 
         self.enable_sparse_li_c8 = get_ascend_config().is_sparse_li_c8_layer(self.k_cache.prefix)
         if self.enable_sparse_li_c8:
-            if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
-                self.c8_k_cache_dtype = torch.float8_e4m3fn
+            self.c8_k_cache_dtype = kv_cache_dtype_str_to_dtype(
+                get_current_vllm_config().attention_config.indexer_kv_dtype,
+                get_current_vllm_config().model_config,
+            )
+            if self.c8_k_cache_dtype == torch.float8_e4m3fn:
                 self.c8_k_scale_cache_dtype = torch.float32
-            else:
-                self.c8_k_cache_dtype = torch.int8
+            elif self.c8_k_cache_dtype == torch.int8:
                 self.c8_k_scale_cache_dtype = torch.float16
 
         model_type = get_current_vllm_config().model_config.hf_config.model_type
@@ -281,17 +278,22 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         hidden_states: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
         """k path: compute ``k_li`` (and ``k_li_scale`` when LI C8 is
         enabled) from the hidden-states stage SFA hands in (raw states on
         fused preprocess paths, prepared states on native paths). SFA then
         persists the result through ``write_cache`` before the top-k stage
-        runs, since the top-k kernel reads the freshly written cache."""
+        runs, since the top-k kernel reads the freshly written cache.
+
+        Also returns the non-K tail of the ``wk_weights_proj`` GEMM output
+        (``indexer_weights``) so the top-k stage can reuse it instead of
+        re-running the same GEMM on the same hidden states."""
         assert self.wk_weights_proj is not None
         assert self.k_norm is not None
 
         kw, _ = self.wk_weights_proj(hidden_states)
         k_li = kw[:, : self.head_dim]
+        indexer_weights = kw[:, self.head_dim :]
         k_li = self.k_norm(k_li).unsqueeze(1)
         k_li = k_li.view(-1, 1, self.head_dim)
 
@@ -323,7 +325,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         else:
             k_li_scale = None
 
-        return k_li, k_li_scale
+        return k_li, k_li_scale, indexer_weights
 
     def _gather_cache_inputs(
         self,
@@ -390,7 +392,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         inputs."""
         cos = indexer_metadata.cos
         sin = indexer_metadata.sin
-        k_li, k_li_scale = self.forward_k(k_hidden_states, cos, sin)
+        k_li, k_li_scale, indexer_weights = self.forward_k(k_hidden_states, cos, sin)
         k_li, k_li_scale, slot_mapping = self._gather_cache_inputs(k_li, k_li_scale, indexer_metadata)
         self.write_cache(k_li, k_li_scale, slot_mapping, indexer_attn_metadata=indexer_metadata)
         if not compute_topk:
@@ -401,8 +403,15 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         assert indexer_metadata.actual_seq_lengths_query is not None
         assert indexer_metadata.actual_seq_lengths_key is not None
 
-        kw, _ = self.wk_weights_proj(hidden_states)
-        weights = kw[:, self.head_dim :]
+        if hidden_states is k_hidden_states:
+            # The k path already ran wk_weights_proj on these hidden states
+            # (SFA hands both stages the same tensor); reuse its weights tail
+            # instead of duplicating the GEMM.
+            weights = indexer_weights
+        else:
+            kw, _ = self.wk_weights_proj(hidden_states)
+            weights = kw[:, self.head_dim :]
+
         if isinstance(q_c, tuple):
             q_c_tensor, q_c_scale = q_c
             q_c_tensor = q_c_tensor.view(-1, q_c_tensor.shape[-1])
