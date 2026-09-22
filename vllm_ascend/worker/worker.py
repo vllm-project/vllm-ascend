@@ -73,9 +73,9 @@ import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config, init_ascend_config
 from vllm_ascend.batch_invariant import init_batch_invariance
 from vllm_ascend.core.kv_cache_placement import (
+    KVPPCacheConfig,
     KVPPPhysicalCachePlan,
     create_kvpp_cache_allocation_plan,
-    register_kvpp_draft_layers,
 )
 from vllm_ascend.core.profiling_chunk_predictor import (
     _attach_profiling_chunk_execution_time,
@@ -93,7 +93,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_la
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     plan_sparse_kv_offload_memory,
 )
-from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
+from vllm_ascend.distributed.parallel_state import get_kvpp_group, init_ascend_model_parallel
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
 from vllm_ascend.utils import (
@@ -1087,6 +1087,28 @@ class NPUWorker(WorkerBase):
                     break
         return num_layers, num_buffer_assignments, logical_page_bytes / physical_page_bytes
 
+    def _get_kvpp_draft_layer_names(self) -> set[str]:
+        """Read ownership after load_model, before cache budgeting/allocation."""
+        spec = self.vllm_config.speculative_config
+        if spec is None or not get_pp_group().is_last_rank:
+            return set()
+        if self.vllm_config.use_v2_model_runner:
+            proposer = self.model_runner.speculator
+            names = getattr(proposer, "draft_attn_layer_names", None)
+        else:
+            proposer = self.model_runner.drafter
+            names = getattr(proposer, "_draft_attn_layer_names", None)
+        if names is None:
+            raise ValueError("KVPP requires draft cache layer names from the loaded proposer.")
+        draft_names = set(names)
+        context = self.vllm_config.compilation_config.static_forward_context
+        shared = getattr(self.model_runner, "shared_kv_cache_layers", {})
+        for name in draft_names:
+            source = shared.get(name) or getattr(context.get(name), "kv_sharing_target_layer_name", None)
+            if source is not None and source not in draft_names:
+                raise ValueError(f"KVPP draft cache {name!r} shares target cache {source!r}.")
+        return draft_names
+
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         kv_cache_spec = self.model_runner.get_kv_cache_spec()
         extra_config = get_layerwise_reuse_config(self.vllm_config.kv_transfer_config)
@@ -1097,12 +1119,7 @@ class NPUWorker(WorkerBase):
             )
         kvpp_config = KVPPConfig.from_vllm_config(self.vllm_config)
         if kvpp_config.size > 1:
-            register_kvpp_draft_layers(
-                self.vllm_config,
-                self.model_runner,
-                kv_cache_spec,
-                is_last_pp_rank=get_pp_group().is_last_rank,
-            )
+            draft_layer_names = self._get_kvpp_draft_layer_names()
             speculative_config = self.vllm_config.speculative_config
             if (
                 speculative_config is not None
@@ -1113,11 +1130,12 @@ class NPUWorker(WorkerBase):
                 # the engine's cache groups. Attention compute stays windowed.
                 kv_cache_spec = dict(kv_cache_spec)
                 unify_hybrid_kv_cache_specs(kv_cache_spec)
-            kvpp_rank = get_tp_group().rank_in_group % kvpp_config.size
+            kvpp_rank = get_kvpp_group().rank_in_group
             self._kvpp_cache_allocation_plan = create_kvpp_cache_allocation_plan(
                 self.vllm_config,
                 kv_cache_spec,
                 kvpp_rank,
+                draft_layer_names=draft_layer_names,
             )
         if get_ascend_config().sparse_kv_offload_config.enabled:
             # reserve kv_cache_spec for sparse kv offload memory profile usage.
@@ -1146,6 +1164,8 @@ class NPUWorker(WorkerBase):
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate NPU KV cache with the specified kv_cache_config."""
+        if self._kvpp_cache_allocation_plan is not None:
+            kv_cache_config = KVPPCacheConfig.from_config(kv_cache_config, self._kvpp_cache_allocation_plan)
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
         # Restrict the discardable kv_cache pool to backing cache allocations.
         # Persistent metadata created during initialize_kv_cache must stay

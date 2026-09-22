@@ -13,6 +13,7 @@ from tests.ut.kvpp_utils import (
     make_dspark_kvpp_case,
     make_kvpp_config,
     make_kvpp_specs,
+    make_planned_cache_config,
 )
 from vllm_ascend.core.kv_cache_placement import KVPPPhysicalCachePlan
 from vllm_ascend.worker import kvpp_cache
@@ -49,7 +50,6 @@ def test_runtime_binds_complete_layer_storage(monkeypatch, scheduler_device, exp
         tensor_sizes={main: (6, 2), indexer: (8, 2), mtp: (4,)},
         kvpp_rank=0,
     )
-    monkeypatch.setattr(kvpp, "create_kvpp_cache_allocation_plan", lambda *_args: plan)
     monkeypatch.setattr(
         kvpp, "get_kvpp_group", lambda: SimpleNamespace(rank_in_group=0, ranks=[4, 9], device_group=object())
     )
@@ -64,7 +64,7 @@ def test_runtime_binds_complete_layer_storage(monkeypatch, scheduler_device, exp
     context = {name: SimpleNamespace(kv_cache=value, impl=SimpleNamespace()) for name, value in caches.items()}
     runtime = kvpp.KVPPRuntime.create_from_kv_cache(
         vllm_config=make_kvpp_config(2),
-        kv_cache_config=make_cache_config(specs, 2),
+        kv_cache_config=make_cache_config(specs, 2, plan=plan),
         static_forward_context=context,
         kv_caches=caches if explicit_caches else None,
     )
@@ -120,12 +120,12 @@ def test_dspark_draft_layers_are_absent_from_runtime_prefetch(monkeypatch, sched
     config, specs, drafts = make_dspark_kvpp_case(draft_names=draft_names)
     group = SimpleNamespace(rank_in_group=1, ranks=[0, 1, 2], device_group=object())
     monkeypatch.setattr(kvpp, "get_kvpp_group", lambda: group)
-    monkeypatch.setattr(kvpp_cache, "get_kvpp_group", lambda: group)
-    caches = kvpp_cache.allocate_kvpp_cache(config, make_cache_config(specs), torch.device("cpu"))
+    cache_config = make_planned_cache_config(config, specs, drafts=drafts)
+    caches = kvpp_cache.allocate_kvpp_cache(cache_config, torch.device("cpu"))
     context = config.compilation_config.static_forward_context
     runtime = kvpp.KVPPRuntime.create_from_kv_cache(
         vllm_config=config,
-        kv_cache_config=make_cache_config(specs),
+        kv_cache_config=cache_config,
         static_forward_context=context,
         kv_caches=caches,
     )

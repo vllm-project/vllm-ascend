@@ -15,6 +15,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
+from vllm_ascend.core.kv_cache_placement import KVPPCacheConfig, create_kvpp_cache_allocation_plan
 
 
 def layer_name(index):
@@ -29,9 +30,7 @@ def make_kvpp_config(tp=3):
     return SimpleNamespace(
         use_v2_model_runner=False,
         compilation_config=SimpleNamespace(
-            static_forward_context={
-                name: SimpleNamespace(_kvpp_is_draft=name == layer_name(17)) for name in make_kvpp_specs()
-            }
+            static_forward_context={name: SimpleNamespace() for name in make_kvpp_specs()}
         ),
         additional_config={"enable_kvpp": True},
         parallel_config=SimpleNamespace(
@@ -87,14 +86,12 @@ def make_dspark_kvpp_case(tp=3, draft_names=None):
     for name in drafts:
         specs[name] = FullAttentionSpec(block_size=2, num_kv_heads=2, head_size=8, dtype=torch.float16)
     config.compilation_config = SimpleNamespace(
-        static_forward_context={
-            name: SimpleNamespace(impl=SimpleNamespace(), _kvpp_is_draft=name in drafts) for name in specs
-        }
+        static_forward_context={name: SimpleNamespace(impl=SimpleNamespace()) for name in specs}
     )
     return config, specs, drafts
 
 
-def make_cache_config(specs, num_blocks=3):
+def make_cache_config(specs, num_blocks=3, *, plan=None):
     kv_cache_tensors = []
     for name, spec in specs.items():
         size = num_blocks * spec.page_size_bytes
@@ -113,7 +110,7 @@ def make_cache_config(specs, num_blocks=3):
                     block_stride=spec.page_size_bytes,
                 )
             )
-    return KVCacheConfig(
+    config = KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=kv_cache_tensors,
         kv_cache_groups=[
@@ -123,6 +120,15 @@ def make_cache_config(specs, num_blocks=3):
             )
         ],
     )
+
+    if plan is not None:
+        return KVPPCacheConfig.from_config(config, plan)
+    return config
+
+
+def make_planned_cache_config(config, specs, rank=1, num_blocks=3, *, drafts=()):
+    plan = create_kvpp_cache_allocation_plan(config, specs, rank, draft_layer_names=drafts)
+    return make_cache_config(specs, num_blocks, plan=plan)
 
 
 class ManualExecutor:

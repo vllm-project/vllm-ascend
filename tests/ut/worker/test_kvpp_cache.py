@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-from types import SimpleNamespace
 
 import pytest
 import torch
@@ -7,20 +6,20 @@ import torch
 from tests.ut.kvpp_utils import (
     indexer_name,
     layer_name,
-    make_cache_config,
     make_dspark_kvpp_case,
     make_kvpp_config,
     make_kvpp_specs,
+    make_planned_cache_config,
 )
 from vllm_ascend.worker import kvpp_cache
 
 
 @pytest.mark.parametrize("num_blocks,total_bytes", [(3, 1176), (2, 784)])
 def test_physical_allocations_and_scratch_aliases(monkeypatch, num_blocks, total_bytes):
-    monkeypatch.setattr(kvpp_cache, "get_kvpp_group", lambda: SimpleNamespace(rank_in_group=1))
     specs = make_kvpp_specs()
     caches = kvpp_cache.allocate_kvpp_cache(
-        make_kvpp_config(), make_cache_config(specs, num_blocks), torch.device("cpu")
+        make_planned_cache_config(make_kvpp_config(), specs, num_blocks=num_blocks, drafts=(layer_name(17),)),
+        torch.device("cpu"),
     )
     assert set(caches) == set(specs)
     storages = {
@@ -58,9 +57,10 @@ def test_physical_allocations_and_scratch_aliases(monkeypatch, num_blocks, total
 @pytest.mark.parametrize("rank", [0, 1, 2])
 @pytest.mark.parametrize("draft_names", [None, ("draft.layers.9.attn", "draft.layers.103.attn", "draft.cache")])
 def test_dspark_context_writes_survive_target_scratch_reuse(monkeypatch, rank, draft_names):
-    monkeypatch.setattr(kvpp_cache, "get_kvpp_group", lambda: SimpleNamespace(rank_in_group=rank))
     config, specs, drafts = make_dspark_kvpp_case(draft_names=draft_names)
-    caches = kvpp_cache.allocate_kvpp_cache(config, make_cache_config(specs), torch.device("cpu"))
+    caches = kvpp_cache.allocate_kvpp_cache(
+        make_planned_cache_config(config, specs, rank, drafts=drafts), torch.device("cpu")
+    )
     draft_storage = set()
     # DSpark populates every draft layer before running the draft network.
     for value, name in enumerate(drafts, 1):

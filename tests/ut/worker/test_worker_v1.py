@@ -1802,6 +1802,7 @@ class TestNPUWorker(TestBase):
             mock_kv_cache_config.needs_kv_cache_zeroing = False
 
             # Test initialize_from_config
+            worker._kvpp_cache_allocation_plan = None
             worker.initialize_from_config(mock_kv_cache_config)
 
             # Verify the kv_cache pool is created but not entered by the worker.
@@ -1891,6 +1892,7 @@ class TestNPUWorker(TestBase):
             mock_kv_cache_config.needs_kv_cache_zeroing = False
 
             # Test initialize_from_config
+            worker._kvpp_cache_allocation_plan = None
             worker.initialize_from_config(mock_kv_cache_config)
 
             # Verify calls
@@ -1915,6 +1917,7 @@ class TestNPUWorker(TestBase):
             mock_kv_cache_config = MagicMock()
             mock_kv_cache_config.needs_kv_cache_zeroing = True
 
+            worker._kvpp_cache_allocation_plan = None
             worker.initialize_from_config(mock_kv_cache_config)
 
             worker.model_runner.initialize_kv_cache.assert_called_once_with(
@@ -1941,6 +1944,7 @@ class TestNPUWorker(TestBase):
             mock_kv_cache_config.needs_kv_cache_zeroing = True
             mock_kv_cache_config.has_mamba_layers = True
 
+            worker._kvpp_cache_allocation_plan = None
             worker.initialize_from_config(mock_kv_cache_config)
 
             worker.model_runner.initialize_kv_cache.assert_called_once_with(
@@ -1967,6 +1971,7 @@ class TestNPUWorker(TestBase):
             mock_kv_cache_config.needs_kv_cache_zeroing = True
             mock_kv_cache_config.has_mamba_layers = False
 
+            worker._kvpp_cache_allocation_plan = None
             worker.initialize_from_config(mock_kv_cache_config)
 
             worker.model_runner.initialize_kv_cache.assert_called_once_with(

@@ -919,7 +919,7 @@ def test_build_attn_metadata_propagates_prefill_and_pcp_context(monkeypatch, for
 def test_main_entry_allocates_and_reshapes_kvpp_views(monkeypatch, packed):
     from vllm.v1.worker.gpu import model_runner as upstream_model_runner
 
-    from tests.ut.kvpp_utils import assert_attention_cache_views, make_attention_cache_case, make_cache_config
+    from tests.ut.kvpp_utils import assert_attention_cache_views, make_attention_cache_case, make_planned_cache_config
     from vllm_ascend.core import kv_cache_placement
     from vllm_ascend.patch.worker.patch_v2 import patch_attn_utils
     from vllm_ascend.worker import kvpp_cache
@@ -931,7 +931,6 @@ def test_main_entry_allocates_and_reshapes_kvpp_views(monkeypatch, packed):
     for module in (attn_utils, kv_cache_placement):
         monkeypatch.setattr(module, "enable_sfa", lambda _: packed)
         monkeypatch.setattr(module, "enable_fa_quant", lambda _: False)
-    monkeypatch.setattr(kvpp_cache, "get_kvpp_group", lambda: SimpleNamespace(rank_in_group=1))
     monkeypatch.setattr(attn_utils, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: False))
     raw = {}
 
@@ -944,7 +943,7 @@ def test_main_entry_allocates_and_reshapes_kvpp_views(monkeypatch, packed):
     assert upstream_model_runner.get_kv_cache_spec is patch_attn_utils.get_kv_cache_spec
     assert upstream_attn_utils.allocate_kv_cache is patch_attn_utils.allocate_kv_cache_main
     caches = upstream_attn_utils.allocate_kv_cache(
-        make_cache_config(specs), device=torch.device("cpu"), layout=None, kernel_block_sizes=[2]
+        make_planned_cache_config(config, specs), device=torch.device("cpu"), layout=None, kernel_block_sizes=[2]
     )
     assert_attention_cache_views(caches, raw, packed)
 

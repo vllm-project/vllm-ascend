@@ -138,7 +138,7 @@ class TestKVPPPoolWorker(unittest.TestCase):
     def test_registers_persistent_layers_and_mtp(self):
         import torch
 
-        from tests.ut.kvpp_utils import layer_name, make_kvpp_config
+        from tests.ut.kvpp_utils import layer_name, make_kvpp_config, make_kvpp_specs, make_planned_cache_config
 
         for rank in (0, 1):
             with self.subTest(rank=rank):
@@ -146,6 +146,10 @@ class TestKVPPPoolWorker(unittest.TestCase):
                 worker.vllm_config = make_kvpp_config(2)
                 worker._transfer_threads_started = True
                 names = [layer_name(i) for i in (9, 10, 17)]
+                specs = {name: make_kvpp_specs()[name] for name in names}
+                worker.kv_cache_config = make_planned_cache_config(
+                    worker.vllm_config, specs, rank, num_blocks=4, drafts=(layer_name(17),)
+                )
                 caches = {name: torch.zeros((4, 16, 8)) for name in names}
                 worker.register_kv_caches(caches)
                 expected = [names[rank], names[2]]
