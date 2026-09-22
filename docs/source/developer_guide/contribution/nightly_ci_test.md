@@ -6,8 +6,8 @@ on Ascend NPU hardware (A2/A3), without waiting for the scheduled nightly run.
 ## Background
 
 By default, nightly CI tests run on a fixed schedule using pre-built nightly images.
-Contributors can self-service trigger these tests directly against their PR changes
-by combining a GitHub label with a comment command.
+Contributors can trigger these tests directly against their PR changes by posting
+a comment command. No GitHub label is required.
 
 !!! note
 
@@ -25,10 +25,14 @@ The comment itself triggers the workflow — no label is required.
 
 | Comment | Effect |
 |---------|--------|
-| `/nightly` | Run **all** nightly tests |
-| `/nightly all` | Run **all** nightly tests (same as above) |
+| `/nightly` | No dispatch; specify test names or `all` |
+| `/nightly all` | Run **all** nightly tests |
 | `/nightly test1 test2 ...` | Run only the **named** tests |
 | `/nightly <tests> --aop_enabled` | Run named tests with AOP bisect / classify enabled |
+| `/nightly <tests> --profile` | Collect profiling data for YAML-driven performance benchmarks |
+
+See [Steady-State Analysis and Profiling](#steady-state-analysis-and-profiling)
+for capture timing, parameters, and artifact downloads.
 
 !!! note
 
@@ -67,7 +71,7 @@ matching the filter will be dispatched, which saves hardware resources.
 
 | | Scheduled / Manual Dispatch | PR-triggered |
 |---|----------------------------|---|
-| Trigger | Cron (daily) or `workflow_dispatch` | `/nightly` comment |
+| Trigger | External scheduled automation or manual `workflow_dispatch` | `/nightly` comment |
 | Code tested | Pre-built nightly image | Your PR's HEAD commit (source installed fresh) |
 | Test scope | All tests | Configurable via `/nightly <names>` |
 | vLLM + vllm-ascend | From image | Checked out and installed from source |
@@ -210,7 +214,7 @@ The `pr-accuracy-group-*` entries only run on `/nightly` (PR-triggered) runs;
 Run all available nightly tests against your PR:
 
 ```text
-/nightly
+/nightly all
 ```
 
 Run only the custom operator multi-card test:
@@ -240,6 +244,416 @@ Run a single accuracy model (only that model from a group):
 Re-trigger after fixing an issue: just push a new commit. The `synchronize` event
 re-runs the workflow and picks up the existing `/nightly` comment automatically — no
 need to post a new comment.
+
+## AISBench Output Artifacts
+
+YAML-driven nightly tests upload the complete AISBench `outputs/` directory to
+the dispatched workflow run's **Artifacts** section, with or without profiling.
+Look for `aisbench-outputs-<scene>-<job>-<run-id>-<attempt>`. It contains the experiments
+from that test container, including configuration snapshots, logs, performance
+details, and reports produced by AISBench. Multiple benchmark experiments retain
+their original directory structure:
+
+```text
+# Single node
+default/<experiment-timestamp>/...
+
+# Multiple nodes
+node-0/default/<experiment-timestamp>/...
+```
+
+Multi-node tests preserve outputs on shared storage after pytest finishes and
+before AOP reruns or Pod deletion. Only nodes that produced outputs appear in the
+artifact. Upload is attempted even when a benchmark or baseline check fails;
+files already generated are retained. A cancelled job or lost runner/Pod may
+prevent collection. These artifacts have a seven-day retention period and are
+separate from benchmark summary JSON and profiling traces.
+
+## Steady-State Analysis and Profiling
+
+### Overview
+
+YAML-driven AISBench performance benchmarks produce a steady-state report in the
+test log, including a concurrency timeline and a completed-request timeline.
+Use a report from an existing scheduled nightly or PR-triggered run with a
+comparable workload to choose a capture window. Then post a `/nightly` comment
+with `--profile` to collect Ascend PyTorch Profiler data during that window.
+
+| Capability | Ordinary performance run | Run with `--profile` |
+|------------|--------------------------|----------------------|
+| AISBench performance results and baseline checks | Enabled | Enabled |
+| Complete AISBench outputs artifact | Enabled | Enabled |
+| Steady-state report | Enabled when timing data is available | Enabled when timing data is available |
+| Profiler capture | Disabled | Enabled for selected performance benchmarks |
+| Raw trace archives | None | Uploaded to OBS |
+| Offline parsing | None | Enabled by default; optional with `--profile-output raw` |
+| Download index | None | GitHub Artifact and a `Profiling summary` log step |
+
+This section describes the PR comment interface. Profiling is supported by the
+`/nightly` command for YAML-driven AISBench performance benchmarks; it does not
+add capture to arbitrary pytest tests or accuracy benchmarks. `/weekly --profile`
+is not supported.
+
+### Important Notes
+
+!!! warning "Profiling affects benchmark performance"
+
+    Active profiling consumes resources, and stopping the profiler can take
+    additional time. Throughput can decrease and latency can increase enough to
+    fail the existing performance baseline. Baseline checks remain enabled.
+    Use results from a comparable run without profiling for performance comparisons. Check the
+    benchmark verdict and the profiling manifest independently: a baseline failure
+    can still leave useful profiling artifacts.
+
+- Capture covers all serving instances recorded for the selected benchmark.
+  There is no node or rank selection option. With internal DP, one API endpoint
+  controls its backend engines, including engines on headless nodes. In P/D
+  deployments, the separate serving groups are controlled through their own endpoints.
+- Start with a short capture and leave stack collection disabled unless it is
+  needed. Trace size and memory use depend on the model, worker count, workload,
+  and capture duration. The workflow does not impose a fixed disk-space budget;
+  resource exhaustion is reported as a failure.
+- Graph generation is auxiliary: its failure produces a warning and leaves the
+  benchmark verdict unchanged. Failures that prevent an enabled profiling capture,
+  upload, or parse from completing are reported as errors.
+- `--profile-duration` is the requested capture interval. It does not include all
+  start/stop, compression, transfer, or offline parsing time.
+
+### Quick Start
+
+Inspect the steady-state report from a previous scheduled nightly or PR-triggered
+run with comparable hardware, deployment, and workload settings. If no suitable
+report is available, trigger a run without profiling to obtain one:
+
+```text
+/nightly DeepSeek-V4-Flash-W8A8-A3
+```
+
+Choose `--profile-start-after` and `--profile-duration` from the report. The
+following example collects the `perf` benchmark with a 60-second offset and an
+eight-second capture. Adjust both values to fit the desired window; the start
+can be earlier or later than the 60-second default:
+
+```text
+/nightly DeepSeek-V4-Flash-W8A8-A3 --profile --profile-benchmark-names perf --profile-start-after 60 --profile-duration 8
+```
+
+The test name and `perf` key in this example come from the nightly matrix and its
+[model YAML](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/cases/models/configs/DeepSeek/DeepSeek-V4-Flash-W8A8-A3.yaml).
+Choose the corresponding names from your PR when testing another configuration.
+
+Wait for the capture job and its `Plan`, `Parse / node-N`, and `Finalize` jobs.
+In the workflow run's **Artifacts** section, download `profile-artifact-<key>`
+and extract it into `./profile_artifact`. Download the parsed archives with:
+
+```bash
+bash ./profile_artifact/download.sh parsed
+```
+
+The **Profiling summary** step in `Finalize` also contains grouped links and
+download commands. For raw-only collection, add `--profile-output raw`; no offline
+parse jobs are needed, and the summary is printed in the capture job.
+
+### Select Tests and Benchmarks
+
+There are three distinct names:
+
+| Name | Source | Example |
+|------|--------|---------|
+| Nightly test name | `name` in `.github/workflows/configs/nightly_config.yaml` | `DeepSeek-V4-Flash-W8A8-A3` |
+| Benchmark name | Key under `benchmarks:` in the model YAML | `perf` |
+| Benchmark artifact name | Generated from the YAML test configuration name and benchmark name | `DeepSeek-V4-Flash-W8A8-A3__perf` |
+
+For example, the relevant part of a model YAML can look like this:
+
+```yaml
+test_cases:
+  - name: DeepSeek-V4-Flash-W8A8-A3
+    # Model and server configuration omitted.
+    benchmarks:
+      acc-gpqa:
+        case_type: accuracy
+        # Accuracy settings omitted.
+      perf:
+        case_type: performance
+        # Performance settings omitted.
+```
+
+`--profile-benchmark-names perf` selects `perf` for capture. It does not change
+which benchmarks the YAML test executes: accuracy checks and other configured
+benchmarks still run. Selection uses exact benchmark keys; use a comma-separated
+list without spaces to select several, such as `perf_TPOT20,perf_TPOT50`.
+These names must exist in the selected model configurations.
+
+AISBench's internal warmup is excluded from the shared time origin. A separate
+YAML benchmark named `warmup` is still an ordinary benchmark: if its `case_type`
+is `performance`, the default selection includes it. Select the intended benchmark
+keys explicitly when such a setup benchmark should run without capture.
+
+### Profiling Options
+
+| Parameter | Default | Meaning |
+|-----------|---------|---------|
+| `--profile` | Disabled | Enable collection for selected performance benchmarks. Other profiling options alone do not enable it. |
+| `--profile-start-after <seconds>` | `60` when neither trigger is specified | Delay from the first formal AISBench request, excluding internal warmup. Accepts a non-negative integer. |
+| `--profile-start-after-requests <count>` | Disabled | Start after this many successful formal requests complete, summed across AISBench workers. Excludes warmup and failed requests. Accepts a positive integer. Mutually exclusive with `--profile-start-after`. |
+| `--profile-duration <seconds>` | `8` | Requested capture duration after the start calls return. Accepts a positive integer. |
+| `--profile-output <mode>` | `parsed` | `parsed` uploads raw traces and runs offline parsing; `raw` uploads only raw traces and skips offline parsing. |
+| `--profile-with-stack` | Disabled | Enable the profiler's stack/module attribution option. This can increase overhead and artifact size. |
+| `--profile-benchmark-names <names>` | All performance benchmarks | Comma-separated YAML benchmark keys to capture. Does not filter which benchmarks execute. |
+
+Triggers apply independently to each selected benchmark. Omitting both start
+options uses 60 seconds from that benchmark's first formal request. Request-count
+mode does not also wait for the default 60-second offset. Capture duration always
+uses seconds.
+
+For a capture after 100 successful formal requests:
+
+```text
+/nightly DeepSeek-V4-Flash-W8A8-A3 --profile --profile-benchmark-names perf --profile-start-after-requests 100 --profile-duration 8
+```
+
+Workers periodically publish AISBench's existing success counters outside the
+request path, and the controller polls their sum. Both intervals are one second,
+so capture can start roughly two seconds after the threshold is reached, plus
+scheduling and API overhead; the observed count may exceed the threshold. The
+manifest records `completed_requests` at the trigger and `actual_start_after`,
+the time of the start calls relative to the graph's time zero. Request-count mode
+is useful for workload progress, but long requests may produce no completions
+during a useful capture window; use the time trigger in that case.
+
+For a raw-only capture with a different offset and duration:
+
+```text
+/nightly DeepSeek-V4-Flash-W8A8-A3 --profile --profile-benchmark-names perf --profile-start-after 80 --profile-duration 5 --profile-output raw
+```
+
+### Choose a Capture Window
+
+Open an existing scheduled nightly or PR-triggered benchmark job's test log and
+expand the `[STEADY STATE] <benchmark>` group. The report contains:
+
+- **Timing Data**: records read, valid timings, successful timings, and invalid records.
+- **Benchmark / Steady State**: target concurrency, observed peak, and threshold.
+- **Steady Start / Steady End**: times and cumulative completed-request counts.
+- **Concurrency Timeline**: in-flight concurrency reconstructed from successful requests.
+- **Completed Requests**: cumulative successful completions over time.
+- **Summary**: the local `steady_state/<benchmark_artifact_name>/summary.json` path.
+  This file is separate from the profiling download index; the report is available
+  directly in the test log.
+
+The graph and `--profile-start-after` share time zero: the first formal AISBench
+request after internal warmup. If warmup is disabled, the first request establishes
+the same origin. A failed first request does not move that origin to a later
+successful request. Graph counts use successful request timings, so they may
+understate the actual in-flight load when requests fail.
+
+The default threshold is `ceil(batch_size * 0.95)`. The candidate window begins
+at the first upward threshold crossing and ends at the last downward crossing.
+It can contain dips between those boundaries. A short window receives a warning
+when its duration is below `max(10 seconds, 10% of the successful-request span)`.
+This is a concurrency-based guide, not a test of latency stability or NPU utilization;
+AISBench's performance metrics are not recalculated over the window.
+
+The following concurrency chart was generated by the current renderer from
+synthetic request timings to illustrate the report format. It is not a measured
+model result. Its candidate window is `37.60s -> 122.00s`:
+
+```text
+Concurrency Timeline
+100 |               ┆┌───────────────────────────────┼
+ 95 |──────────────┼┼┼───────────────────────────────┼─┼───────────── threshold
+ 75 |          ┌───┘┆                                ┆ └───┐
+ 50 |       ┌──┘    ┆                                ┆     └──┐
+    |     ┌─┘       ┆                                ┆        └─┐
+ 25 |   ┌─┘         ┆                                ┆          └─┐
+    | ┌─┘           ┆                                ┆            └─┐
+  0 |─┘             ┆                                ┆              │
+     ┬───────────────────┬──────────────────┬───────────────────┬───┬
+     0s                 50s               100s                150s
+```
+
+The horizontal threshold line marks 95 requests; the vertical markers indicate
+the candidate start and end. In this illustration, `--profile-start-after 60
+--profile-duration 8` places the intended capture inside the plateau, with room
+before the workload drains. Actual start/stop calls add timing variation.
+
+Choose a window by following these steps:
+
+1. Choose a reference run with comparable hardware, deployment, model configuration,
+   concurrency, prompt/output lengths, request count, and request rate. Changes to
+   these settings or model execution can shift the window; obtain a new ordinary
+   run's report when existing results are no longer representative.
+2. Locate the end of ramp-up in the concurrency chart. Check for dips inside the
+   candidate window before choosing a smaller interval.
+3. Use the completed-request chart to understand workload progress. Long requests
+   can produce few completions during useful decode activity, so a flat completion
+   curve alone does not prove that the service is stalled.
+4. Select an offset inside the desired region and leave enough time for the full
+   capture before drain. If the workload ends too early, increase the request count
+   while retaining the intended concurrency, or choose an earlier/shorter capture.
+5. After the profiling run, inspect its capture status and actual trace. Profiling
+   can change the workload's timing; the earlier graph provides a reference, not
+   a guarantee that both runs have identical phases.
+
+The workflow uses the configured time or completed-request threshold; it does
+not wait for an automatically detected steady state during capture. The default
+60-second delay may be too late for short benchmarks. For request-count mode,
+choose a count from the completed-request chart and leave enough work after that
+point for the requested capture duration.
+
+### Follow the Workflow
+
+```text
+1. PR comment -> Deploy services and record topology
+2. AISBench warmup -> First formal request (t = 0)
+3. Wait for time or completed-request threshold -> Start -> Wait duration -> Stop
+4. Archive raw traces -> Upload to OBS
+5. raw:    Publish final index and summary
+   parsed: Plan -> Parse per node -> Finalize (index and summary)
+```
+
+Each unique serving endpoint receives start and stop requests. Internal DP
+workers sharing an endpoint are controlled together. The benchmark's deployment
+snapshot records the endpoint, node index, and trace directory for each target.
+
+Offline parsing runs after raw upload, on separate CPU jobs. Nodes can parse in
+parallel. Within each node, rank parsing overlaps with compression/upload of the
+previous rank, with at most one completed rank waiting for publication. The
+`Parse / node-N` job name refers to the source node, not to one particular DP rank.
+
+The workflow attempts artifact publication and finalization even after a test or
+parse failure. Cancellation, runner loss, or a failure before any artifact exists
+can still prevent publication. Check the final manifest for completeness.
+
+The capture job groups raw upload and index preparation under **Publish profiling
+data**. **Upload profiling index** and **Profiling summary** remain separate so
+index upload and download-link reporting can still run after publication errors.
+Finalize similarly groups result merging and index preparation under **Finalize
+profiling data**.
+
+### Find and Download Artifacts
+
+Open the dispatched `Nightly-*` workflow run, then its **Artifacts** section:
+
+| Artifact | Use |
+|----------|-----|
+| `profile-artifact-<key>` | Final index with manifests, confirmed download links, and a download script. Start here. |
+| `profile-capture-<key>` | Intermediate raw index for parsed-mode runs. Useful while parsing is pending or if finalization cannot finish. |
+| `profile-shard-<key>-node-N` | Per-node parse status used by Finalize; useful for diagnosing a missing or failed shard. |
+
+The key includes repository, run ID, run attempt, deployment scene, branch, and
+job identity. Match it to the test and run attempt being investigated. The
+index artifacts currently have a 90-day GitHub retention period. OBS data retention
+depends on the bucket's lifecycle policy and is separate from GitHub retention.
+
+Extract the final index into `profile_artifact/`:
+
+```text
+profile_artifact/
+├── profile_manifest.json
+├── benchmarks/
+│   └── <benchmark_artifact_name>/
+│       └── serve_manifest.json
+├── raw/
+│   └── downloads.md
+├── parsed/
+│   └── downloads.md
+├── summary.txt
+└── download.sh
+```
+
+`raw/` and `parsed/` contain download documents, not the large trace archives.
+The archives live in OBS. Raw-only runs omit `parsed/`.
+`profile_manifest.json` records requested settings, benchmark/target/rank status,
+errors, and archive locations. Each benchmark has its own `serve_manifest.json`
+snapshot so later deployments do not overwrite the topology associated with
+earlier captures. `summary.txt` is a readable overview of the same index.
+
+With Bash and curl available, download all confirmed archives, or select a stage:
+
+```bash
+bash ./profile_artifact/download.sh all
+bash ./profile_artifact/download.sh raw
+bash ./profile_artifact/download.sh parsed ./profile-download
+```
+
+The optional second argument is the destination; its default is
+`./profile-download`. The script preserves the `raw/` and `parsed/` archive paths,
+retries failed transfers, and downloads sequentially. It stops on an unsuccessful
+download; incomplete files keep a `.part` suffix. It does not extract archives.
+For an individual target or rank, use the link in its `downloads.md` entry.
+
+The **Profiling summary** step prints an overview, quick-download commands, and
+separate expandable **RAW download links** / **PARSED download links** groups.
+In parsed mode, look in `Finalize`; raw-only runs and capture publication failures
+also print a summary in the capture job when an index could be prepared. This log
+provides a second access path if the GitHub index upload fails.
+
+The printed `obsutil cp ... -r -j=4` commands download a whole run's data with up
+to four concurrent files. They require OBS list/download permissions. The script
+and individual HTTPS links use the objects' existing read permissions; possession
+of an index does not grant additional access.
+
+### Inspect Profiling Results
+
+Raw archives group traces by benchmark and serving target. Parsed archives are
+published per rank, so you can download just the ranks needed for analysis.
+Unpack an archive into a chosen directory:
+
+```bash
+mkdir -p ./profile-view
+tar -xzf <archive.tar.gz> -C ./profile-view
+```
+
+A parsed archive contains the rank's `ASCEND_PROFILER_OUTPUT/` directory and
+available profiler metadata. Typical contents include:
+
+| File | Purpose |
+|------|---------|
+| `trace_view.json` | Timeline of CPU/NPU activity for inspection in MindStudio Insight. |
+| `kernel_details.csv` | Detailed kernel execution records. |
+| `operator_details.csv` / `op_statistic.csv` | Operator details and aggregate statistics. |
+| `communication.json` / `communication_matrix.json` | Communication analysis, when produced by the profiler. |
+| `profiler_info*.json` / `profiler_metadata.json` | Capture metadata, when available. |
+
+Open `trace_view.json` with MindStudio Insight and select the relevant rank and
+time region. For the viewer and file descriptions, see
+[View Results](../performance_and_debug/service_profiling_guide.md#5-view-results).
+Available files depend on the profiler version and captured activity.
+
+If you downloaded raw data, or need to repeat analysis, unpack the raw archive
+and locate a `*_ascend_pt` directory. In an environment with a compatible
+Ascend PyTorch Profiler installation, analyze that directory:
+
+```python
+from torch_npu.profiler.profiler import analyse
+
+analyse("./profile-view/<target>/<path-to-rank>_ascend_pt")
+```
+
+Use a compatible environment, preferably the capture job's image/software
+versions. Repeat for the required rank directories. The offline CI workflow uses
+this analysis API with its default process setting. See
+[Analyze Data](../performance_and_debug/service_profiling_guide.md#4-analyze-data)
+for the underlying service profiling workflow.
+
+### Profiling Troubleshooting
+
+| Symptom | What to check or change |
+|---------|-------------------------|
+| Throughput drops or the baseline check fails | Compare against a separate run without profiling. Check profiling status independently; successful traces can still be useful. Shorten capture and leave stack collection off when possible. |
+| Steady-state status is `NOT_FOUND` | Usable timings were loaded, but successful-request concurrency did not reach the threshold, or there were no successful requests. Inspect peak concurrency, failures, workload length, and request rate. |
+| Steady-state status is `UNAVAILABLE` | Read the reported reason for missing/unusable timing files or a missing time origin. Empty placeholder charts are not measurements. |
+| No benchmarks were captured | Confirm `--profile` is present, the test uses the YAML/AISBench performance path, and selected names exactly match performance benchmark keys. |
+| `benchmark_ended_before_start` | The benchmark finished before its offset elapsed. Reduce `start_after` or increase the workload duration. |
+| `benchmark_ended_before_request_threshold` | Too few successful formal requests completed before the benchmark ended. Lower `start_after_requests`, increase the workload, or use a time trigger. This is an incomplete capture and fails profiling. |
+| Capture ends with `benchmark_ended` | The benchmark ended before the requested interval completed. Choose an earlier/shorter window or run more requests. This is an incomplete capture. |
+| Raw exists but parsed data is missing | In `raw` mode this is expected. Otherwise inspect Plan/Parse/Finalize and the manifest's per-target/per-rank errors; raw data can be downloaded for another analysis attempt. |
+| Manifest status is `partial` | Inspect benchmark, target, and rank errors. Download links include confirmed uploads only and do not imply that all requested data was produced. |
+| One internal DP API port produces many rank traces | The endpoint controls multiple backend engines. Collection covers the recorded deployment, including headless nodes. |
+| Storage or memory is exhausted | Shorten subsequent captures, leave stack collection off, and choose fewer benchmarks. Download only needed ranks; use a destination with enough space for archives and extracted data. |
+| Download returns an access error | Check object read permissions; `obsutil` recursive download also needs list permission. GitHub Artifact access alone does not grant OBS access. |
 
 ## AOP Hooks (Bisect)
 
