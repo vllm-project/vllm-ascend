@@ -127,7 +127,7 @@ class TestEplbLoadCollectionPhase(unittest.TestCase):
 
                 controller.prepare_forward(object(), 7)
 
-                state.prepare_forward.assert_called_once()
+                state.prepare_forward.assert_not_called()
                 state._should_record_current_step.assert_called_once_with(log_stats=False)
                 self.assertIs(bool(state.should_record_tensor), expected_record)
                 self.assertTrue(state._is_load_sampling_step)

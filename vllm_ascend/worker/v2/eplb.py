@@ -68,7 +68,7 @@ class AscendEPLBController(EPLBController):
         state = self.state
         if state is None or not self.parallel_config.enable_eplb:
             return
-        state.prepare_forward(model_config, num_unpadded_tokens, ubatch_slices)
+        # Operator-provided counts make the upstream unpadded-token tensor unused.
         if not state.uses_custom_load_stats:
             return
         if state.should_record_tensor is not None:
