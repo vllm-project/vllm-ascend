@@ -1154,6 +1154,38 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_engram_vmm_validation(self, mock_fix):
+        vc = VllmConfig()
+        vc.model_config.enable_sleep_mode = False
+        vc.model_config.hf_text_config = SimpleNamespace(engram_layer_ids=[1, 14])
+        vc.engram_config = SimpleNamespace(cpu_offload=False)
+        vc.additional_config = {"engram_vmm_run": "job-123"}
+        self.assertEqual(init_ascend_config(vc).engram_vmm_run, "job-123")
+        for run_id in ("", "../unsafe"):
+            clear_ascend_config()
+            vc.additional_config = {"engram_vmm_run": run_id}
+            with self.assertRaises(ValueError):
+                init_ascend_config(vc)
+        vc.additional_config = {"engram_vmm_run": "job-123"}
+        for attribute, value, message in (
+            ("engram_config", SimpleNamespace(cpu_offload=True), "mutually exclusive"),
+            ("model_config", SimpleNamespace(hf_text_config=SimpleNamespace(engram_layer_ids=[])), "Engram layers"),
+            (
+                "model_config",
+                SimpleNamespace(hf_text_config=SimpleNamespace(engram_layer_ids=[1]), enable_sleep_mode=True),
+                "sleep mode",
+            ),
+            ("load_config", SimpleNamespace(load_format="dummy"), "real checkpoint"),
+        ):
+            clear_ascend_config()
+            original = getattr(vc, attribute)
+            setattr(vc, attribute, value)
+            with self.assertRaisesRegex(ValueError, message):
+                init_ascend_config(vc)
+            setattr(vc, attribute, original)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_a_family_additional_config_gets_typed_validation(self, mock_fix):
         vc = VllmConfig()
         vc.additional_config = {

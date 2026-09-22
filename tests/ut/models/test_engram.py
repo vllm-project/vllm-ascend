@@ -355,3 +355,55 @@ def test_runner_history_without_attention_metadata_routes_empty_inputs(monkeypat
     monkeypatch.setattr(torch.npu, "is_current_stream_capturing", lambda: False)
     assert runner_module.NPUModelRunner._model_forward(runner, 4) == 42
     model.prepare_engram_inputs.assert_called_once_with(None, None, 4, None)
+
+
+def test_vmm_refreshes_captured_outputs_without_routing_or_copy(engram_model, monkeypatch):
+    captured = engram_model.prepare_engram_graph_inputs(4)
+    monkeypatch.setattr(
+        engram_model.engram_module, "get_forward_context", lambda: SimpleNamespace(flash_comm_v1_enabled=False)
+    )
+    engram_model._engram_vmm_run = "unit-job"
+    calls = []
+
+    def prepare(hashes, mask):
+        calls.append(hashes.shape[0])
+        # Deliberately fill the entire capacity. The outer engram_model must not apply
+        # the old routed zero/copy path after direct final-buffer stores.
+        for buffer in captured["engram_lookups"].values():
+            buffer.fill_(7)
+        captured["engram_mask"].fill_(True)
+        return captured
+
+    engram_model._engram_vmm_inputs = SimpleNamespace(prepare=prepare)
+    history_inputs = (torch.tensor([0, 1]), torch.tensor([[7]]), 128)
+
+    def hashes(input_ids, positions, history):
+        assert history is history_inputs
+        return torch.zeros(1, 2, 24, dtype=torch.int64), torch.ones(1, dtype=torch.bool)
+
+    engram_model._prepare_engram_hashes = hashes
+    engram_model.prepare_engram = lambda *args: pytest.fail("VMM must bypass owner routing")
+    actual = engram_model.prepare_engram_inputs(torch.arange(1), torch.arange(1), 4, history_inputs)
+    assert actual is captured and calls == [1]
+    assert all((buffer == 7).all() for buffer in actual["engram_lookups"].values())
+    assert actual["engram_mask"].all()
+
+
+def test_vmm_rejects_flashcomm_before_history(engram_model, monkeypatch):
+    engram_model._engram_vmm_run = "unit-job"
+    monkeypatch.setattr(
+        engram_model.engram_module, "get_forward_context", lambda: SimpleNamespace(flash_comm_v1_enabled=True)
+    )
+    engram_model._prepare_engram_hashes = lambda *args: pytest.fail("must fail before mutating history")
+    with pytest.raises(ValueError, match="FlashComm1"):
+        engram_model.prepare_engram_inputs(torch.arange(1), torch.arange(1), 4)
+
+
+@pytest.mark.parametrize("tokens,padded", [(4, 3), (1, 17), (17, None), (1, -1)])
+def test_invalid_capacity_fails_before_history_or_routing(engram_model, tokens, padded):
+    def unexpected(*args):
+        raise AssertionError("must validate before routing")
+
+    engram_model.prepare_engram = unexpected
+    with pytest.raises(ValueError, match="Engram padded token count"):
+        engram_model.prepare_engram_inputs(torch.arange(tokens), torch.arange(tokens), padded)

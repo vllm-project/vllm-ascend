@@ -993,18 +993,34 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
         self.engram_root = vllm_config.model_config.model
         config = self.config
         self.engram_weight_root = self.engram_root
-        # The table is INT8 with group-32 scales; whether it lives in host
-        # memory is vLLM's EngramConfig choice.
         cpu_offload = engram_cpu_offload(vllm_config)
+        self._engram_vmm_run = get_ascend_config().engram_vmm_run
+        self._engram_vmm_inputs = None
         if engram_enabled(config):
             query_group = EngramQueryGroup.from_vllm(vllm_config.parallel_config)
-            for layer_id, rows in zip(config.engram_layer_ids, config.engram_num_embeddings):
-                self.layers[layer_id].engram.embed = NodeShardedEngram(
-                    rows,
-                    config.engram_head_dim,
-                    query_group,
-                    cpu_offload=cpu_offload,
-                )
+            try:
+                for layer_id, rows in zip(config.engram_layer_ids, config.engram_num_embeddings):
+                    if self._engram_vmm_run is not None:
+                        from .engram_vmm.table import VmmEngram
+
+                        table = VmmEngram(
+                            rows,
+                            config.engram_head_dim,
+                            query_group,
+                            run_id=self._engram_vmm_run,
+                            layer_id=layer_id,
+                        )
+                    else:
+                        table = NodeShardedEngram(
+                            rows,
+                            config.engram_head_dim,
+                            query_group,
+                            cpu_offload=cpu_offload,
+                        )
+                    self.layers[layer_id].engram.embed = table
+            except Exception:
+                self.close_engram()
+                raise
         self.engram_history = None
         self._engram_input_buffers = None
         self._engram_max_tokens = max(
@@ -1033,14 +1049,9 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
     def embed_input_ids(self, input_ids):
         return self.embed_tokens(input_ids)
 
-    def prepare_engram(self, input_ids, positions, history_inputs=None):
-        """Route every DP using Runner's (CPU boundaries, pages, block size).
-
-        Calls without attention metadata pass None and participate with empty hashes.
-        """
+    def _prepare_engram_hashes(self, input_ids, positions, history_inputs=None):
+        """Shared CPU history/hash path for routed and direct table backends."""
         config = self.config
-        if not engram_enabled(config):
-            return {}, torch.empty(0, dtype=torch.bool, device=positions.device)
         columns = (config.engram_max_ngram_size - 1) * config.engram_n_heads
         hashes = torch.empty((0, len(config.engram_layer_ids), columns), dtype=torch.int64, device="cpu")
         mask = torch.empty(0, dtype=torch.bool, device="cpu")
@@ -1056,6 +1067,16 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
                 block_table,
                 block_size,
             )
+        return hashes, mask
+
+    def prepare_engram(self, input_ids, positions, history_inputs=None):
+        """Eager boundary: every DP participates in the routed backend."""
+        config = self.config
+        if not engram_enabled(config):
+            return {}, torch.empty(0, dtype=torch.bool, device=positions.device)
+        if getattr(self, "_engram_vmm_run", None) is not None:
+            raise RuntimeError("Engram VMM requires prepare_engram_inputs before forward/graph replay")
+        hashes, mask = self._prepare_engram_hashes(input_ids, positions, history_inputs)
         lookups = {}
         tables = [self.layers[layer_id].engram.embed for layer_id in config.engram_layer_ids]
         ids_list = [hashes[:, slot] for slot in range(len(tables))]
@@ -1074,9 +1095,37 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             return graph_inputs
         num_tokens = positions.shape[0]
         output_tokens = num_tokens if padded_tokens is None else padded_tokens
+        if not num_tokens <= output_tokens <= self._engram_max_tokens:
+            raise ValueError("Engram padded token count must cover the input and fit buffer capacity")
+        if getattr(self, "_engram_vmm_run", None) is not None:
+            if getattr(get_forward_context(), "flash_comm_v1_enabled", False):
+                raise ValueError("Engram VMM currently requires FlashComm1 disabled")
+            hashes, mask = self._prepare_engram_hashes(input_ids, positions, history_inputs)
+            if mask.numel() > num_tokens:
+                raise ValueError("Engram query count exceeds the input token count")
+            if self._engram_vmm_inputs is None:
+                from .engram_vmm.lookup import Inputs
+
+                layers = self.config.engram_layer_ids
+                tables = [self.layers[layer].engram.embed for layer in layers]
+                if not all(table.loaded for table in tables):
+                    raise RuntimeError("Engram VMM lookup before shared table publication completed")
+                self._engram_vmm_inputs = Inputs(
+                    tables,
+                    layers,
+                    self._engram_max_tokens,
+                    (self.config.engram_max_ngram_size - 1) * self.config.engram_n_heads,
+                    outputs=[graph_inputs["engram_lookups"][layer] for layer in layers],
+                    mask_output=graph_inputs["engram_mask"],
+                )
+            # Kernel writes directly into graph-stable BF16 outputs, including
+            # padding/mask; do not perform the routed backend's zero/copy pass.
+            return self._engram_vmm_inputs.prepare(hashes, mask)
         lookups, mask = self.prepare_engram(input_ids, positions, history_inputs)
-        buffers = graph_inputs["engram_lookups"]
-        mask_buffer = graph_inputs["engram_mask"]
+        if mask.numel() > num_tokens:
+            raise ValueError("Engram query count exceeds the input token count")
+        assert self._engram_input_buffers is not None
+        buffers, mask_buffer = self._engram_input_buffers
         mask_buffer[: mask.numel()].copy_(mask)
         mask_buffer[mask.numel() : output_tokens].zero_()
         for layer, values in lookups.items():
@@ -1103,6 +1152,24 @@ class DeepseekV41Model(nn.Module, EagleModelMixin):
             )
         buffers, mask_buffer = self._engram_input_buffers
         return {"engram_lookups": buffers, "engram_mask": mask_buffer}
+
+    def close_engram(self):
+        """Release host mappings only after worker inference/graph users stop."""
+        if getattr(self, "_engram_vmm_run", None) is None:
+            return
+        if self._engram_vmm_inputs is not None:
+            self._engram_vmm_inputs.close()
+            self._engram_vmm_inputs = None
+        errors = []
+        for layer in self.layers:
+            table = getattr(getattr(layer, "engram", None), "embed", None)
+            if table is not None:
+                try:
+                    table.close()
+                except Exception as exc:
+                    errors.append(str(exc))
+        if errors:
+            raise RuntimeError("Engram VMM cleanup: " + "; ".join(errors))
 
     def forward(
         self,
@@ -1246,6 +1313,13 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        try:
+            return self._load_engram_weights(weights)
+        except Exception:
+            self.model.close_engram()
+            raise
+
+    def _load_engram_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         if not engram_enabled(self.model.config):
             return self._load_model_weights((name, tensor) for name, tensor in weights if ".engram." not in name)
         engram_loaded: set[str] = set()
@@ -1272,6 +1346,14 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
                     yield name, tensor
 
         loaded = self._load_model_weights(milestone_weights())
+        if self.model._engram_vmm_run is not None:
+            tables = [self.model.layers[layer].engram.embed for layer in self.model.config.engram_layer_ids]
+            if not all(table.loaded for table in tables):
+                raise RuntimeError("Missing shared Engram table publication")
+            torch.npu.synchronize()
+            # The shared table is readable only once every local shard writer
+            # has completed startup copies. No per-request rendezvous is needed.
+            torch.distributed.barrier(group=tables[0].query_group.cpu_group)
         return loaded | engram_loaded
 
     def set_moe_parameters(self):
