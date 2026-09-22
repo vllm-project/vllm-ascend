@@ -16,6 +16,7 @@
 #
 
 from functools import wraps
+from typing import cast
 
 import torch
 import torch_npu
@@ -618,8 +619,8 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 query=query_spec.squeeze(0),
                 key=key_spec.squeeze(0),
                 value=value_spec.squeeze(0),
-                g=g_spec.squeeze(0),
-                beta=beta_spec.squeeze(0),
+                g=cast(torch.Tensor, g_spec).squeeze(0),
+                beta=cast(torch.Tensor, beta_spec).squeeze(0),
                 state=ssm_state,
                 scale=key_spec.shape[-1] ** -0.5,
                 actual_seq_lengths=actual_seq_lengths,
