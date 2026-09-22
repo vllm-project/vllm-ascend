@@ -164,29 +164,16 @@ class KVPoolScheduler:
         self.tp_mismatch = tp_mismatch_info.enabled
 
         self.block_key_hybrid = self.use_block_key_layerwise and self.use_hybrid
-        self.mooncake_layerwise_namespace = ""
-        if self.use_block_key_layerwise:
-            self.mooncake_layerwise_namespace = self.layerwise_protocol.layerwise_topology_namespace(
-                vllm_config, kv_cache_config
+        self.layerwise_keys = (
+            self.layerwise_protocol.bind_layerwise_keys(
+                vllm_config=vllm_config,
+                kv_cache_config=kv_cache_config,
+                model_name=vllm_config.model_config.model.split("/")[-1],
+                use_hybrid=self.use_hybrid,
+                grouped_block_size=self.grouped_block_size,
             )
-            self.layerwise_protocol.validate_pp_groups(kv_cache_config, vllm_config.parallel_config)
-            if vllm_config.parallel_config.pipeline_parallel_size > 1:
-                logger.info(
-                    "Mooncake PP scheduler namespace=%s config_block_size=%s group_block_sizes=%s",
-                    self.mooncake_layerwise_namespace,
-                    vllm_config.cache_config.block_size,
-                    [self.layerwise_protocol.group_block_size_signature(g) for g in kv_cache_config.kv_cache_groups]
-                    if kv_cache_config is not None
-                    else [],
-                )
-        self.block_key_hybrid_layout = (
-            self.layerwise_protocol.hybrid_layout_id(
-                kv_cache_config,
-                vllm_config.parallel_config.tensor_parallel_size,
-                namespace=self.mooncake_layerwise_namespace,
-            )
-            if self.block_key_hybrid
-            else ""
+            if self.use_layerwise and self.layerwise_protocol is not None
+            else None
         )
         validate_layerwise_runtime(
             self.layerwise_protocol,
@@ -370,39 +357,8 @@ class KVPoolScheduler:
         A block is a hit only when every PP stage has saved it, so the
         protocol helper enumerates all stages and head/TP ranks.
         """
-        head_or_tp_ranks = self.tp_size // self.put_step
-        if self.block_key_hybrid:
-            return [
-                self.layerwise_protocol.hybrid_block_key(
-                    self.model_name,
-                    self.block_key_hybrid_layout,
-                    group_id,
-                    self.grouped_block_size[group_id],
-                    block_hash_hex,
-                    head,
-                    pp_rank=stage if self.pp_size > 1 else None,
-                )
-                for stage in range(self.pp_size)
-                for head in range(head_or_tp_ranks)
-            ]
-        if self.use_block_key_layerwise:
-            return self.layerwise_protocol.make_hit_check_keys(
-                self.model_name,
-                group_id,
-                block_hash_hex,
-                head_or_tp_ranks,
-                len(self.kv_cache_group_ids),
-                self.pp_size,
-                namespace=self.mooncake_layerwise_namespace,
-            )
-        return self.layerwise_protocol.make_hit_check_keys(
-            self.model_name,
-            group_id,
-            block_hash_hex,
-            head_or_tp_ranks,
-            len(self.kv_cache_group_ids),
-            self.pp_size,
-        )
+        assert self.layerwise_keys is not None
+        return self.layerwise_keys.make_hit_check_keys(group_id, block_hash_hex, self.tp_size // self.put_step)
 
     def _get_layerwise_hit_tokens(
         self,

@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 from vllm.logger import logger
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import LayerwiseKeyBuilder
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ReqMeta,
     block_hash_to_str,
@@ -24,6 +25,53 @@ if TYPE_CHECKING:
 
 
 LAYERWISE_DATA_PLANE = "block_key"
+
+
+def bind_layerwise_keys(
+    *,
+    vllm_config: Any,
+    kv_cache_config: Any,
+    model_name: str,
+    use_hybrid: bool,
+    grouped_block_size: list[int],
+) -> LayerwiseKeyBuilder:
+    """Resolve Mooncake identity once, without retaining mutable configs."""
+    parallel = vllm_config.parallel_config
+    validate_pp_groups(kv_cache_config, parallel)
+    namespace = layerwise_topology_namespace(vllm_config, kv_cache_config)
+    pp_size = parallel.pipeline_parallel_size
+    if pp_size > 1:
+        logger.info(
+            "Mooncake PP namespace=%s rank=%d pp_size=%d config_block_size=%s group_block_sizes=%s",
+            namespace,
+            parallel.rank,
+            pp_size,
+            vllm_config.cache_config.block_size,
+            [group_block_size_signature(g) for g in kv_cache_config.kv_cache_groups]
+            if kv_cache_config is not None
+            else [],
+        )
+    if use_hybrid:
+        layout = hybrid_layout_id(kv_cache_config, parallel.tensor_parallel_size, namespace=namespace)
+        block_sizes = tuple(grouped_block_size)
+
+        def make_key(group: int, block_hash: str, head: int, stage: int) -> str:
+            return hybrid_block_key(
+                model_name,
+                layout,
+                group,
+                block_sizes[group],
+                block_hash,
+                head,
+                pp_rank=stage if pp_size > 1 else None,
+            )
+
+        return LayerwiseKeyBuilder(make_key, pp_size)
+
+    def make_single_group_key(group: int, block_hash: str, head: int, stage: int) -> str:
+        return make_block_key(model_name, block_hash, head, namespace=namespace, pp_rank=stage)
+
+    return LayerwiseKeyBuilder(make_single_group_key, pp_size)
 
 
 def extract_layout_config(extra_config: dict[str, Any]) -> dict[str, Any] | None:
@@ -234,6 +282,14 @@ def selected(mask, index: int) -> bool:
     return mask is None or (0 <= index < len(mask) and bool(mask[index]))
 
 
+def prepare_layerwise_sessions(worker: KVPoolWorker, requests: list[ReqMeta]) -> dict[int, list[ReqMeta]]:
+    """Preserve partial single-group sessions and complete hybrid snapshots."""
+    if worker.block_key_hybrid:
+        return prepare_group_sessions(worker, requests)
+    worker._prepare_block_key_layerwise_sessions(requests)
+    return {}
+
+
 def prepare_group_sessions(worker: KVPoolWorker, requests: list[ReqMeta]) -> dict[int, list[ReqMeta]]:
     worker._layer_load_aborted.clear()
     with worker._put_started_keys_lock:
@@ -285,16 +341,8 @@ def _prepare_group_sessions(worker: KVPoolWorker, requests: list[ReqMeta]) -> di
             load_mask = load_masks[group] if load_masks is not None else None
             store_mask = request.store_masks[group] if request.store_masks is not None else None
 
-            def key(index, group=group, block_size=block_size, hashes=hashes):
-                return hybrid_block_key(
-                    worker.model_name,
-                    worker.block_key_hybrid_layout,
-                    group,
-                    block_size,
-                    block_hash_to_str(hashes[index]),
-                    worker.head_or_tp_rank,
-                    pp_rank=worker.pp_rank if worker.pp_size > 1 else None,
-                )
+            def key(index, group=group, hashes=hashes):
+                return worker._make_layerwise_full_key(group, block_hash_to_str(hashes[index]))
 
             start = request.load_spec.vllm_cached_tokens // block_size if request.load_spec is not None else 0
             entries = (

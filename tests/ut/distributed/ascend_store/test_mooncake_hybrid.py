@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+from numpy.typing import NDArray
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
 
@@ -134,7 +135,7 @@ class TestMooncakeHybrid(unittest.TestCase):
             worker = make_worker(self, num_layers=4, num_hidden_layers=4, use_layerwise=True, kv_cache_config=config)
         store = MemoryRangeStore()
         worker.m_store = store
-        arrays = {}
+        arrays: dict[str, NDArray[np.uint8]] = {}
         for group, spec in enumerate(groups):
             for layer, name in enumerate(spec.layer_names):
                 arrays[name] = np.full((8, 8 + group * 4), 1 + group * 16 + layer, dtype=np.uint8)
@@ -305,13 +306,22 @@ class TestMooncakeHybrid(unittest.TestCase):
     def test_coordinator_queries_all_heads_using_mooncake_existence(self):
         scheduler = object.__new__(KVPoolScheduler)
         scheduler.block_key_hybrid = True
-        scheduler.block_key_hybrid_layout = "layout"
         scheduler.layerwise_protocol = mooncake_layerwise
         scheduler.model_name = "model"
         scheduler.tp_size = 2
         scheduler.pp_size = 1
         scheduler.put_step = 1
         scheduler.grouped_block_size = [16, 32]
+        with patch.object(mooncake_layerwise, "hybrid_layout_id", return_value="layout"):
+            scheduler.layerwise_keys = mooncake_layerwise.bind_layerwise_keys(
+                vllm_config=SimpleNamespace(
+                    parallel_config=SimpleNamespace(pipeline_parallel_size=1, tensor_parallel_size=2)
+                ),
+                kv_cache_config=None,
+                model_name=scheduler.model_name,
+                use_hybrid=True,
+                grouped_block_size=scheduler.grouped_block_size,
+            )
         scheduler.layerwise_max_transfer_blocks = 1
         scheduler.store_scheduler = MagicMock()
         scheduler.cache_coordinator = MagicMock()

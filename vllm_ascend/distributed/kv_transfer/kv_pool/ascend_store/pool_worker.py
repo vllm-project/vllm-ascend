@@ -211,35 +211,11 @@ class KVPoolWorker:
         self.use_block_key_layerwise = self.use_layerwise and self.layerwise_data_plane == "block_key"
         self.use_layerwise_transfer = self.use_layerwise and self.layerwise_data_plane == "gva"
         validate_layerwise_topology(self.layerwise_protocol, vllm_config.parallel_config, self.use_layerwise)
-        self.mooncake_layerwise_namespace = ""
-        if self.use_block_key_layerwise:
-            self.mooncake_layerwise_namespace = self.layerwise_protocol.layerwise_topology_namespace(
-                vllm_config, kv_cache_config
-            )
-            self.layerwise_protocol.validate_pp_groups(kv_cache_config, vllm_config.parallel_config)
-            if self.pp_size > 1:
-                logger.info(
-                    "Mooncake PP namespace=%s stage=%d/%d config_block_size=%s group_block_sizes=%s",
-                    self.mooncake_layerwise_namespace,
-                    self.pp_rank,
-                    self.pp_size,
-                    vllm_config.cache_config.block_size,
-                    [self.layerwise_protocol.group_block_size_signature(g) for g in kv_cache_config.kv_cache_groups]
-                    if kv_cache_config is not None
-                    else [],
-                )
         kv_cache_groups = kv_cache_config.kv_cache_groups if kv_cache_config is not None else None
         self.use_hybrid = uses_hybrid_kv_cache(vllm_config.scheduler_config, kv_cache_groups) or (
             self.use_block_key_layerwise and kv_cache_groups is not None and len(kv_cache_groups) > 1
         )
         self.block_key_hybrid = self.use_block_key_layerwise and self.use_hybrid
-        self.block_key_hybrid_layout = (
-            self.layerwise_protocol.hybrid_layout_id(
-                kv_cache_config, self.tp_size, namespace=self.mooncake_layerwise_namespace
-            )
-            if self.block_key_hybrid
-            else ""
-        )
         self._attention_saved_layers: set[int] = set()
         self.use_mamba = self._uses_mamba_kv_cache(self.use_hybrid, kv_cache_config)
         speculative_config = getattr(vllm_config, "speculative_config", None)
@@ -258,6 +234,17 @@ class KVPoolWorker:
         self.block_size = self.grouped_block_size[0]
         self.lcm_block_size = math.lcm(*self.grouped_block_size)
         self.num_kv_cache_groups = len(self.grouped_block_size)
+        self.layerwise_keys = (
+            self.layerwise_protocol.bind_layerwise_keys(
+                vllm_config=vllm_config,
+                kv_cache_config=kv_cache_config,
+                model_name=self.model_name,
+                use_hybrid=self.use_hybrid,
+                grouped_block_size=self.grouped_block_size,
+            )
+            if self.use_layerwise and self.layerwise_protocol is not None
+            else None
+        )
         self.kv_cache_group_families = infer_group_cache_families(kv_cache_groups, self.compress_ratios, self.hf_config)
         self.group_uses_align_state = self._infer_group_uses_align_state()
         self.cache_transfer_granularity = infer_cache_transfer_granularity(
@@ -626,9 +613,7 @@ class KVPoolWorker:
         # or those extra layers are skipped during the save/load lifecycle. A
         # block-key store owns a stage-local object, so its count stays local
         # under PP. A GVA store retains the global PP layout and offset below.
-        if self.use_block_key_layerwise or (
-            self.num_kv_cache_groups == 1 and getattr(self, "pp_size", 1) == 1
-        ):
+        if self.use_block_key_layerwise or (self.num_kv_cache_groups == 1 and getattr(self, "pp_size", 1) == 1):
             self.layerwise_key_layers = self.num_layers
         for group_id in range(self.num_kv_cache_groups):
             group_num_layers = self.group_num_layers.get(group_id, self.num_layers)
@@ -1509,23 +1494,9 @@ class KVPoolWorker:
             )
 
     def _make_layerwise_full_key(self, group_id: int, block_hash_hex: str) -> str:
-        """Full-block key for the layerwise transfer, built by the
-        backend's protocol module.
-
-        Single-group models use the PR #11585 format (model@hash@rank) for
-        backward compatibility. Multi-group models include group_id
-        (model@group_id@hash@rank) to distinguish groups. PP stages also need
-        pp_rank because they share block hashes and TP/head rank numbering.
-        """
-        return self.layerwise_protocol.make_full_key(
-            self.model_name,
-            group_id,
-            block_hash_hex,
-            self.head_or_tp_rank,
-            self.num_kv_cache_groups,
-            self.pp_rank,
-            self.pp_size,
-        )
+        """Use the backend-bound layout shared with scheduler hit checks."""
+        assert self.layerwise_keys is not None
+        return self.layerwise_keys.make_full_key(group_id, block_hash_hex, self.head_or_tp_rank, self.pp_rank)
 
     def _make_layerwise_partial_key(
         self,
@@ -1976,13 +1947,7 @@ class KVPoolWorker:
         return is_kv_save_role(self.kv_role, self.consumer_is_to_put) and self.tp_rank % self.put_step == 0
 
     def _make_mooncake_layerwise_key(self, block_hash_or_tail: str) -> str:
-        return self.layerwise_protocol.make_block_key(
-            self.model_name,
-            block_hash_or_tail,
-            self.head_or_tp_rank,
-            namespace=self.mooncake_layerwise_namespace,
-            pp_rank=self.pp_rank,
-        )
+        return self._make_layerwise_full_key(0, block_hash_or_tail)
 
     def _groups_for_layerwise_transfer(self, local_layer: int) -> list[tuple[int, int]]:
         if self.use_block_key_layerwise:
@@ -2436,10 +2401,7 @@ class KVPoolWorker:
             request.store_masks = self._compute_reachable_store_masks(request)
         group_requests = {}
         if self.use_block_key_layerwise:
-            if self.block_key_hybrid:
-                group_requests = self.layerwise_protocol.prepare_group_sessions(self, requests)
-            else:
-                self._prepare_block_key_layerwise_sessions(requests)
+            group_requests = self.layerwise_protocol.prepare_layerwise_sessions(self, requests)
         for local_layer in range(num_local):
             for group_id, layer_idx_in_group in self._groups_for_layerwise_transfer(local_layer):
                 self._process_save_for_layer_batch(

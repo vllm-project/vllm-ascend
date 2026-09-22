@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+from numpy.typing import NDArray
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
 
@@ -78,7 +79,7 @@ class TestMooncakePipeline(unittest.TestCase):
         for group_id, group in enumerate(groups):
             for index, name in enumerate(group.layer_names):
                 width = 8 + group_id * 4 + index
-                backing = np.arange(10 * (width + 7), dtype=np.uint8).reshape(10, width + 7)
+                backing: NDArray[np.uint8] = np.arange(10 * (width + 7), dtype=np.uint8).reshape(10, width + 7)
                 backing ^= np.uint8(stage * 67 + tp_rank * 23 + group_id * 11 + index)
                 arrays[name] = backing[:, :width]
         with (
@@ -163,8 +164,11 @@ class TestMooncakePipeline(unittest.TestCase):
                 self.assertEqual(len(set(expected_keys)), 4)
                 original = []
                 for index, (worker, arrays) in enumerate(workers):
-                    self.assertEqual(worker.block_key_hybrid_layout, scheduler.block_key_hybrid_layout)
-                    self.assertEqual(worker.mooncake_layerwise_namespace, scheduler.mooncake_layerwise_namespace)
+                    for group in range(worker.num_kv_cache_groups):
+                        self.assertIn(
+                            worker._make_layerwise_full_key(group, b"h0".hex()),
+                            scheduler._make_layerwise_hit_check_keys(group, b"h0".hex()),
+                        )
                     self.assertEqual(worker.num_layers, (3 if worker.pp_rank == 0 else 4 + int(draft)))
                     self.assertEqual(worker.layerwise_key_layers, worker.num_layers)
                     for builder in worker.kv_send_thread.group_builders:
@@ -257,7 +261,7 @@ class TestMooncakePipeline(unittest.TestCase):
         keys = scheduler._make_layerwise_hit_check_keys(0, b"h0".hex())
         self.assertEqual(scheduler._query_layerwise_block_hits([keys]), [True])
         for worker in workers:
-            self.assertEqual(worker.mooncake_layerwise_namespace, scheduler.mooncake_layerwise_namespace)
+            self.assertIn(worker._make_layerwise_full_key(0, b"h0".hex()), keys)
             self.assertEqual(worker.vllm_config.cache_config.block_size, 32)
 
     def test_cache_hash_uses_resolved_block_geometry_without_mutation(self):
