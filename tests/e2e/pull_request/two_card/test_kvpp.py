@@ -24,17 +24,26 @@ def token_prompt(tokenizer, text, length):
     return (tokens * ((length + len(tokens) - 1) // len(tokens)))[:length]
 
 
-@pytest.mark.e2e_coverage(
-    arch="moe",
-    feature="kvpp,chunked_prefill,prefix_caching,mtp",
-    parallel="TP,EP",
-    deploy="pd_mix",
-    hardware="A3",
-    quantization="W8A8",
-    graph_mode="eager",
-)
 @wait_until_npu_memory_free()
-def test_kvpp_combined_features():
+@pytest.mark.parametrize(
+    "graph_mode",
+    [
+        pytest.param(
+            mode,
+            marks=pytest.mark.e2e_coverage(
+                arch="moe",
+                feature="kvpp,chunked_prefill,prefix_caching,mtp",
+                parallel="TP,EP",
+                deploy="pd_mix",
+                hardware="A3",
+                quantization="W8A8",
+                graph_mode="eager" if mode == "NONE" else mode.lower(),
+            ),
+        )
+        for mode in ("NONE", "PIECEWISE")
+    ],
+)
+def test_kvpp_combined_features(graph_mode):
     """Compare KVPP off/on outputs with TP, EP, chunk, prefix and MTP."""
     results = []
     for enabled in (False, True):
@@ -44,7 +53,11 @@ def test_kvpp_combined_features():
             quantization="ascend",
             tensor_parallel_size=TP_SIZE,
             enable_expert_parallel=True,
-            enforce_eager=True,
+            enforce_eager=graph_mode == "NONE",
+            compilation_config={
+                "cudagraph_mode": graph_mode,
+                "cudagraph_capture_sizes": [2, 4, 8],
+            },
             async_scheduling=True,
             distributed_executor_backend="mp",
             max_model_len=4 * BLOCK_SIZE,

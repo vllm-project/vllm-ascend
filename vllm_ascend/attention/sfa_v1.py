@@ -1628,6 +1628,10 @@ class AscendSFAImpl(MLAAttentionImpl):
         output: torch.Tensor,
         gather_full_o_proj: bool,
     ) -> torch.Tensor:
+        if attn_output.shape[0] < output.shape[0]:
+            padded = attn_output.new_zeros((output.shape[0], attn_output.shape[1]))
+            padded[: attn_output.shape[0]] = attn_output
+            attn_output = padded
         output[...] = self.o_proj(attn_output)[0]
         return output
 
@@ -1756,6 +1760,11 @@ class AscendSFAImpl(MLAAttentionImpl):
             if num_tokens == 0:
                 return output.zero_()
             hidden_states = hidden_states[:num_tokens]
+        elif hidden_states.shape[0] > attn_metadata.num_input_tokens:
+            # PIECEWISE runs attention eagerly with unpadded metadata, while
+            # the surrounding graph passes padded hidden states. FULL and
+            # context-parallel metadata retain their required input padding.
+            hidden_states = hidden_states[: attn_metadata.num_input_tokens]
         gate_hidden_states = hidden_states if self.g_proj is not None else None
 
         composed_kv_cache = self._compose_sfa_kv_cache(kv_cache)
@@ -1937,10 +1946,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         if gate_hidden_states is not None:
             assert self.g_proj is not None
             attn_output.mul_(torch.sigmoid(self.g_proj(gate_hidden_states.contiguous())[0]))
-        if self.qk_rope_head_dim == 0 and attn_output.shape[0] < output.shape[0]:
-            padded = attn_output.new_zeros((output.shape[0], attn_output.shape[1]))
-            padded[: attn_output.shape[0]] = attn_output
-            attn_output = padded
 
         output = self._finalize_o_proj(
             attn_output,

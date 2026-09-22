@@ -1221,6 +1221,111 @@ class TestAscendSFAImpl(TestBase):
                 self.assertEqual(events, [])
                 self.assertEqual(torch.count_nonzero(output).item(), 0)
 
+    def test_rope_forward_matches_metadata_and_preserves_padded_output(self):
+        from vllm_ascend.attention import sfa_v1
+
+        hidden = torch.arange(32, dtype=torch.float32).reshape(8, 4)
+        self.impl.q_lora_rank = 4
+        self.impl.kv_lora_rank = 2
+        self.impl.qk_rope_head_dim = 2
+        self.impl.g_proj = None
+        self.impl.layerwise_kv_cache_hook = None
+        self.impl._is_mtp_layer = False
+        self.impl.has_indexer = True
+        self.impl.use_index_cache = False
+        self.impl._compose_sfa_kv_cache = lambda cache: cache
+        self.impl.q_a_layernorm = torch.nn.Identity()
+        self.impl._q_proj_and_k_up_proj = lambda q: (q, q)
+        self.impl.rope_single = lambda q, *_: q
+        self.impl._record_query_gather_context = lambda *_: None
+        self.impl._prepare_kv_for_parallel = lambda *_: (None, [])
+        self.impl._store_parallel_kv = lambda k_pe, k_nope, *_: (k_pe, k_nope)
+        self.impl._v_up_proj = lambda x: x
+        self.impl.o_proj = lambda x: (x * 2,)
+
+        # MRV2 eager/PIECEWISE use unpadded metadata. FULL, MRV1 and
+        # context-parallel callers can still require padded token metadata.
+        for num_input_tokens in (5, 8):
+            for preprocess_type in (PreprocessType.NATIVE, PreprocessType.PROLOG_V3, PreprocessType.MLAPO):
+                for skip_topk in (False, True):
+                    with self.subTest(tokens=num_input_tokens, preprocess=preprocess_type, skip_topk=skip_topk):
+                        n = num_input_tokens
+                        metadata = SimpleNamespace(
+                            cos=torch.ones(n, 2),
+                            sin=torch.zeros(n, 2),
+                            slot_mapping=torch.arange(n, dtype=torch.int64),
+                            num_input_tokens=n,
+                            num_actual_tokens=5,
+                            cum_query_lens=torch.tensor([2, 5]),
+                            seq_lens=torch.tensor([2, 3]),
+                        )
+                        indexer_metadata = SimpleNamespace(
+                            cos=metadata.cos.clone(),
+                            sin=metadata.sin.clone(),
+                            slot_mapping=metadata.slot_mapping.clone(),
+                        )
+                        self.impl.preprocess_type = preprocess_type
+                        # MTP shared-topk layers still execute the indexer's K path.
+                        self.impl._is_mtp_layer = skip_topk
+                        self.impl.skip_topk = skip_topk
+                        self.impl._get_indexer_attn_metadata = lambda md=indexer_metadata: md
+
+                        def fused_preprocess(*, hidden_states, cos, sin, slot_mapping, n=n, **kwargs):
+                            self.assertEqual(hidden_states.shape[0], n)
+                            self.assertEqual(cos.shape[0], n)
+                            self.assertEqual(sin.shape[0], n)
+                            self.assertEqual(slot_mapping.numel(), n)
+                            return hidden_states, hidden_states, hidden_states, hidden_states
+
+                        def native_projection(x, n=n):
+                            self.assertEqual(x.shape[0], n)
+                            return (torch.cat((x, x), dim=-1),)
+
+                        def exec_kv(kv, cos, sin, cache, slots, metadata):
+                            self.assertEqual(kv.shape[0], slots.numel())
+                            self.assertEqual(kv.shape[0], cos.shape[0])
+                            return kv, kv
+
+                        def indexer(
+                            x, q_c, k_hidden, actual_metadata, *, compute_topk, n=n, md=indexer_metadata, skip=skip_topk
+                        ):
+                            self.assertIs(actual_metadata, md)
+                            self.assertEqual(x.shape[0], actual_metadata.cos.shape[0])
+                            self.assertEqual(q_c.shape[0], n)
+                            self.assertEqual(k_hidden.shape[0], actual_metadata.slot_mapping.numel())
+                            self.assertEqual(compute_topk, not skip)
+                            return torch.zeros(n, 1, dtype=torch.int32)
+
+                        def reused_indices(num_tokens, n=n):
+                            self.assertEqual(num_tokens, n)
+                            return torch.zeros(n, 1, dtype=torch.int32)
+
+                        def attention(q, q_pe, cache, indices, *_, n=n):
+                            self.assertEqual(q.shape[0], n)
+                            self.assertEqual(indices.shape[0], n)
+                            return q
+
+                        self.impl._sfa_preprocess_prolog_v3 = fused_preprocess
+                        self.impl._sfa_preprocess_mlapo = fused_preprocess
+                        self.impl.fused_qkv_a_proj = native_projection
+                        self.impl.exec_kv = exec_kv
+                        self.impl.indexer = indexer
+                        self.impl._get_indexcache_topk_indices = reused_indices
+                        self.impl._execute_sparse_flash_attention_process = attention
+                        output = torch.full_like(hidden, float("nan"))
+                        with (
+                            patch.object(sfa_v1, "wait_for_kv_layer_from_connector"),
+                            patch.object(sfa_v1, "notify_kv_cache_written"),
+                            patch.object(sfa_v1, "record_attention_compute_start"),
+                            patch.object(sfa_v1, "maybe_save_kv_layer_to_connector"),
+                        ):
+                            result = self.impl.forward("layer", hidden, (hidden,), metadata, output)
+                        self.assertIs(result, output)
+                        expected = torch.zeros_like(output)
+                        expected[:n] = hidden[:n] * 2
+                        torch.testing.assert_close(result, expected)
+                        self.assertEqual(result.shape, hidden.shape)
+
     def _setup_kv_b_proj(self):
         """Set up kv_b_proj with real weight tensor for process_weights_after_loading."""
         shape_0 = self.impl.num_heads * (self.impl.qk_nope_head_dim + self.impl.v_head_dim)

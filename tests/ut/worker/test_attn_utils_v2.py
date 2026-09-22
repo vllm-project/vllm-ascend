@@ -673,6 +673,8 @@ def test_dsv4_backends_declare_role_specific_logical_sizes(
     [
         ("default", None, False, 1, 5),
         ("model_state", CUDAGraphMode.NONE, False, 1, 5),
+        ("model_state", CUDAGraphMode.PIECEWISE, False, 1, 5),
+        ("model_state", CUDAGraphMode.PIECEWISE, True, 1, 5),
         ("model_state", CUDAGraphMode.FULL, False, 1, 8),
         ("pcp_capture", CUDAGraphMode.NONE, True, 2, 8),
         ("pcp_runtime", CUDAGraphMode.NONE, False, 2, 8),
@@ -761,6 +763,7 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
         common_metadata = call["common_attn_metadata"]
         assert common_metadata.num_actual_tokens == 5
         assert common_metadata.num_input_tokens == expected_input_tokens
+        assert common_metadata.num_reqs == (4 if cudagraph_mode == CUDAGraphMode.FULL else 2)
         assert call["for_cudagraph_capture"] is for_capture
         assert call["num_actual_reqs"] == 2
         assert call["pcp_context"] is pcp_context

@@ -248,7 +248,7 @@ class TestAscendSFAOProjWeightSwitch(TestBase):
         ):
             result = impl.forward(
                 layer_name=impl.layer_name,
-                hidden_states=MagicMock(),
+                hidden_states=torch.zeros(1, 16),
                 kv_cache=kv_cache,
                 attn_metadata=attn_metadata,
                 output=output,
