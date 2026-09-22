@@ -167,14 +167,11 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
         common_attn_metadata: AscendCommonAttentionMetadata,
         attn_state: AscendAttentionState = AscendAttentionState.DecodeOnly,
     ) -> AscendFlashAttentionMetadata:
-        # Keep the runner's capture signature; FA3 handles all scheduling states
-        # through the same paged interface and does not consume attn_state.
+        # Ascend speculative proposers use this entry point. The main model
+        # runner uses the inherited build_for_cudagraph_capture, which also
+        # calls build directly. FA3 uses paged attention for all scheduling
+        # states, so neither capture path needs to consume attn_state.
         return self.build(0, common_attn_metadata)
-
-    def build_for_cudagraph_capture(
-        self, common_attn_metadata: AscendCommonAttentionMetadata
-    ) -> AscendFlashAttentionMetadata:
-        return self.build_for_graph_capture(common_attn_metadata)
 
 
 class AscendFlashAttentionImpl(AscendAttentionBackendImpl):
@@ -207,7 +204,11 @@ class AscendFlashAttentionImpl(AscendAttentionBackendImpl):
             sinks,
             **kwargs,
         )
-        self.logits_soft_cap = logits_soft_cap or 0.0
+        # The parent accepts logits_soft_cap but does not store it. FA3 uses
+        # softcap=0.0 to disable logit capping; vLLM can explicitly pass None,
+        # which a constructor default would not replace. Keep one normalized
+        # value for both scheduler tiling and attention execution.
+        self.logits_soft_cap = 0.0 if logits_soft_cap is None else logits_soft_cap
 
     @staticmethod
     def update_graph_params(
