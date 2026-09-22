@@ -24,6 +24,26 @@ def test_uses_upstream_async_worker_lifecycle():
     assert AscendEplbState.start_async_loop is upstream_eplb_state.EplbState.start_async_loop
 
 
+def test_drain_async_accepts_last_changed_layer_before_model_end():
+    consumed_event = MagicMock()
+    model_state = SimpleNamespace(
+        rebalanced=True,
+        model=SimpleNamespace(num_moe_layers=3),
+        pending_result=SimpleNamespace(layer_idx=0, is_last_result=True, consumed_event=consumed_event),
+    )
+    state = SimpleNamespace(
+        is_async=True,
+        model_states={"model": model_state},
+        _all_ranks_result_ready=lambda _model_state: True,
+    )
+
+    AscendEplbState.drain_async(state)
+
+    assert not model_state.rebalanced
+    assert model_state.pending_result is None
+    consumed_event.record.assert_called_once_with()
+
+
 def test_step_records_logical_load_before_mapping_changes(monkeypatch):
     model_state = SimpleNamespace(
         _logical_load_window=torch.zeros((2, 1, 3), dtype=torch.int64),

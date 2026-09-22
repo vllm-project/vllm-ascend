@@ -212,6 +212,22 @@ class StairEplbPolicy(AbstractEplbPolicy):
         target.source_rank_ids = plan.source_rank_ids
         target.source_slot_ids = plan.source_slot_ids
         target.predicted_mean_ratios = plan.predicted_mean_ratios
+        if sample_counts is None:
+            load_bins, bin_counts = self.compress_load_window(logical_load_values, self.config.load_window_bins)
+        else:
+            bin_counts = np.asarray(sample_counts)
+            load_bins = logical_load_values / bin_counts[:, None, None]
+        # Report model-wide averages of the per-layer temporal mean and p95 ratios.
+        before, after = [], []
+        for layer_id in range(current_placement.shape[0]):
+            before.append(self.placement_imbalance(load_bins[:, layer_id], bin_counts, current_placement[layer_id]))
+            after.append(self.placement_imbalance(load_bins[:, layer_id], bin_counts, plan.rank_expert_ids[layer_id]))
+        target.predicted_imbalance_summary = (
+            float(np.mean([score.mean_ratio for score in before])),
+            float(np.mean([score.p95_ratio for score in before])),
+            float(np.mean([score.mean_ratio for score in after])),
+            float(np.mean([score.p95_ratio for score in after])),
+        )
         return target
 
     # Load modeling and placement scoring.

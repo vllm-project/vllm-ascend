@@ -56,6 +56,7 @@ class TestStairLoadStatistics(unittest.TestCase):
         self.assertEqual(result.source_rank_ids.shape, (1, 2, 2))
         self.assertEqual(result.source_slot_ids.shape, (1, 2, 2))
         self.assertEqual(result.predicted_mean_ratios.shape, (1,))
+        np.testing.assert_allclose(result.predicted_imbalance_summary, (15 / 13, 15 / 13, 1, 1))
         self.assertIs(planner.call_args.kwargs["cpu_group"], cpu_group)
 
     def test_rebalance_forwards_prepared_stats_and_placement_context(self):
@@ -748,6 +749,7 @@ class TestStairLoadStatistics(unittest.TestCase):
         np.testing.assert_array_equal(plan.source_rank_ids[:2], [[[0, 0], [1, 1]]] * 2)
         np.testing.assert_array_equal(plan.source_slot_ids[:2], [[[0, 1], [0, 1]]] * 2)
         np.testing.assert_array_equal(plan.rank_expert_ids[2], [[0, 3], [2, 1]])
+        np.testing.assert_array_equal(plan.source_rank_ids[2], [[0, 1], [1, 0]])
         np.testing.assert_array_equal(np.isnan(plan.predicted_mean_ratios), [True, True, False])
         self.assertEqual(plan.predicted_mean_ratios[2], 1.0)
 

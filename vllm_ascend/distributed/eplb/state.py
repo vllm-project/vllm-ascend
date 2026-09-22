@@ -341,6 +341,22 @@ class AscendEplbState(_eplb_state.EplbState):
             self._has_fresh_recorded_load = False
         return result
 
+    def drain_async(self) -> None:
+        """Acknowledge all in-flight layer results, including no-op cycles."""
+        if not self.is_async:
+            return
+        for model_state in self.model_states.values():
+            while model_state.rebalanced:
+                if self._all_ranks_result_ready(model_state):
+                    result = model_state.pending_result
+                    assert result is not None
+                    if getattr(result, "is_last_result", result.layer_idx == model_state.model.num_moe_layers - 1):
+                        model_state.rebalanced = False
+                    model_state.pending_result = None
+                    result.consumed_event.record()
+                else:
+                    time.sleep(0.001)
+
     @classmethod
     def from_mapping(
         cls,

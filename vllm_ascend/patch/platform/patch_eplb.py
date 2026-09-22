@@ -398,6 +398,11 @@ def _wrap_move_to_workspace(original_move):
         model_state = bound.arguments["model_state"]
         pending_result = model_state.pending_result
         layer_idx = pending_result.layer_idx if pending_result is not None else None
+        is_last_result = (
+            getattr(pending_result, "is_last_result", layer_idx == model_state.model.num_moe_layers - 1)
+            if pending_result is not None
+            else False
+        )
         full_target = getattr(model_state.communicator, _EXPLICIT_TRANSFER_TARGET_ATTR, None)
 
         deferred_event = None
@@ -407,22 +412,47 @@ def _wrap_move_to_workspace(original_move):
             deferred_event = _DeferredConsumedEvent(consumed_event)
             pending_result.consumed_event = deferred_event
         try:
-            result = original_move(*bound.args, **bound.kwargs)
+            move = (
+                _move_changed_layer_to_workspace
+                if isinstance(pending_result, _AscendAsyncLayerResult)
+                else original_move
+            )
+            result = move(*bound.args, **bound.kwargs)
             if layer_idx is not None:
                 refresh_model_routing_tables(model_state, layer_idx)
                 if full_target is not None and hasattr(full_target, "predicted_mean_ratios"):
                     predicted_ratio = full_target.predicted_mean_ratios[layer_idx]
                     if np.isfinite(predicted_ratio):
                         model_state._last_committed_mean_ratios[layer_idx] = predicted_ratio
-                is_last_layer = layer_idx == model_state.model.num_moe_layers - 1
-                if is_last_layer:
-                    _clear_transfer_target(model_state.communicator)
-                if bound.arguments["ep_rank"] == 0 and is_last_layer:
-                    logger.info(
-                        "%s: model=%s",
-                        ASYNC_EPLB_CYCLE_COMMITTED_LOG,
-                        model_state.model_name,
-                    )
+            if is_last_result:
+                _clear_transfer_target(model_state.communicator)
+                if bound.arguments["ep_rank"] == 0:
+                    if full_target is None:
+                        logger.info("%s: model=%s", ASYNC_EPLB_CYCLE_COMMITTED_LOG, model_state.model_name)
+                    else:
+                        source_ranks = np.asarray(full_target.source_rank_ids)
+                        destination_ranks = np.arange(source_ranks.shape[1])[None, :, None]
+                        rank_transfers = np.count_nonzero(source_ranks != destination_ranks)
+                        if hasattr(full_target, "predicted_imbalance_summary"):
+                            mean_before, p95_before, mean_after, p95_after = full_target.predicted_imbalance_summary
+                            logger.info(
+                                "%s: model=%s mean=%.4f->%.4f p95=%.4f->%.4f changed_layers=%d rank_transfers=%d",
+                                ASYNC_EPLB_CYCLE_COMMITTED_LOG,
+                                model_state.model_name,
+                                mean_before,
+                                mean_after,
+                                p95_before,
+                                p95_after,
+                                np.count_nonzero(np.isfinite(full_target.predicted_mean_ratios)),
+                                rank_transfers,
+                            )
+                        else:
+                            logger.info(
+                                "%s: model=%s rank_transfers=%d",
+                                ASYNC_EPLB_CYCLE_COMMITTED_LOG,
+                                model_state.model_name,
+                                rank_transfers,
+                            )
         finally:
             if pending_result is not None and consumed_event is not None:
                 pending_result.consumed_event = consumed_event
@@ -444,4 +474,5 @@ _patch_parallel_config()
 _patch_initial_expert_layout()
 _patch_communicator_factory()
 _patch_explicit_transfer_execution()
+_patch_changed_layer_transfer()
 _patch_async_move_to_workspace()

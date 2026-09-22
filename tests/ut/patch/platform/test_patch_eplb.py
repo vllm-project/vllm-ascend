@@ -436,14 +436,51 @@ def test_async_workspace_refreshes_layer_and_clears_target_after_last(monkeypatc
     refresh.assert_called_once_with(model_state, layer_idx)
     if is_last_layer:
         log_info.assert_called_once_with(
-            "%s: model=%s",
+            "%s: model=%s rank_transfers=%d",
             patch_eplb.ASYNC_EPLB_CYCLE_COMMITTED_LOG,
             "model",
+            2,
         )
     else:
         log_info.assert_not_called()
     assert call_order == ["move", "refresh", "ack"]
     assert hasattr(model_state.communicator, patch_eplb._EXPLICIT_TRANSFER_TARGET_ATTR) == (not is_last_layer)
+
+
+def test_async_workspace_logs_stair_imbalance_after_commit(monkeypatch):
+    target = _explicit_target()
+    target.predicted_mean_ratios = np.array([1.1])
+    target.predicted_imbalance_summary = (1.2, 1.3, 1.1, 1.2)
+    pending_result = SimpleNamespace(layer_idx=0, consumed_event=MagicMock())
+    model_state = SimpleNamespace(
+        pending_result=pending_result,
+        communicator=SimpleNamespace(**{patch_eplb._EXPLICIT_TRANSFER_TARGET_ATTR: target}),
+        model=SimpleNamespace(num_moe_layers=1),
+        model_name="model",
+        _last_committed_mean_ratios=np.array([np.nan]),
+    )
+    monkeypatch.setattr(patch_eplb, "refresh_model_routing_tables", MagicMock())
+    log_info = MagicMock()
+    monkeypatch.setattr(patch_eplb.logger, "info", log_info)
+
+    def original_move(model_state, ep_rank):
+        model_state.pending_result.consumed_event.record()
+        model_state.pending_result = None
+
+    patch_eplb._wrap_move_to_workspace(original_move)(model_state, 0)
+
+    assert model_state._last_committed_mean_ratios[0] == 1.1
+    log_info.assert_called_once_with(
+        "%s: model=%s mean=%.4f->%.4f p95=%.4f->%.4f changed_layers=%d rank_transfers=%d",
+        patch_eplb.ASYNC_EPLB_CYCLE_COMMITTED_LOG,
+        "model",
+        1.2,
+        1.1,
+        1.3,
+        1.2,
+        1,
+        2,
+    )
 
 
 def test_async_workspace_refresh_failure_keeps_target_and_defers_ack(monkeypatch):
