@@ -1815,7 +1815,8 @@ chunk_kda_fwd_meta(
     const c10::optional<at::Tensor> &dt_bias,
     c10::optional<bool> disable_recompute,
     c10::optional<bool> return_intermediate_states,
-    c10::optional<bool> state_v_first)
+    c10::optional<bool> state_v_first,
+    bool use_qk_l2norm_in_kernel)
 {
     std::string layout_str = std::string(layout);
     bool is_tnd = layout_str == "TND";
