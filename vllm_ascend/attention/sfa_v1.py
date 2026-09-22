@@ -71,7 +71,6 @@ if TYPE_CHECKING:
 
 # NoPE sparse MLA operator helpers.
 SMLA_METADATA_SIZE = 1024
-SPARSE_ATTENTION_MAX_BLOCK_SIZE = 1024
 
 
 def build_smla_metadata(metadata, buffer, num_heads, head_dim, topk):
@@ -189,10 +188,8 @@ class SparseMLAMetadataState:
             raise ValueError("Sparse MLA block size must be a positive multiple of the SFA kernel block size.")
         self.split = block_size // kernel_block_size
         self.use_smla = get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.FP8_OPTIMIZED
-        self.block_size = block_size
-        if block_size > SPARSE_ATTENTION_MAX_BLOCK_SIZE:
-            self.block_size = kernel_block_size
-        self.table_stride = self.block_size // kernel_block_size
+        self.block_size = kernel_block_size
+        self.table_stride = 1
         cache_block_size = vllm_config.cache_config.block_size
         expand_factor = max(cache_block_size // kernel_block_size, 1)
         table_width = cdiv(vllm_config.model_config.max_model_len, cache_block_size) * expand_factor

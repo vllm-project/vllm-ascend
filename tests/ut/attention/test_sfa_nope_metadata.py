@@ -85,7 +85,7 @@ def _common(block_size):
     )
 
 
-@pytest.mark.parametrize("block_size", [128, 384, 2304, 4352])
+@pytest.mark.parametrize("block_size", [128, 384, 640, 2304, 4352])
 @pytest.mark.parametrize("a5", [False, True])
 def test_shared_sfa_nope_metadata_pages_lengths_and_draft_buffers(monkeypatch, block_size, a5):
     builder = _builder(block_size, a5, monkeypatch)
@@ -101,12 +101,8 @@ def test_shared_sfa_nope_metadata_pages_lengths_and_draft_buffers(monkeypatch, b
     assert type(first) is sfa.AscendSFAMetadata
     assert first.cos is None and first.sin is None and first.seq_lens_cpu is None
     assert first.num_prefills == 1 and first.num_decode_tokens == 1
-    uses_storage_pages = block_size <= 1024
-    expected_table = (
-        torch.tensor([[7, 2], [5, -1]], dtype=torch.int32) if uses_storage_pages else common.block_table_tensor
-    )
-    torch.testing.assert_close(first.block_table, expected_table)
-    assert first.block_size == (block_size if uses_storage_pages else 128)
+    torch.testing.assert_close(first.block_table, common.block_table_tensor)
+    assert first.block_size == 128
     address = first.block_table.data_ptr()
     second = builder.build(0, common)
     assert second.block_table.data_ptr() == address
@@ -126,22 +122,16 @@ def test_shared_sfa_nope_metadata_pages_lengths_and_draft_buffers(monkeypatch, b
         None
     ].split + torch.arange(builder.nope_states[None].split)
     builder.build(0, common)
-    page_multiplier = 1 if uses_storage_pages else builder.nope_states[None].split
+    page_multiplier = builder.nope_states[None].split
     assert first.block_table[0, 0] == 3 * page_multiplier
     assert draft.block_table[0, 0] == 7 * page_multiplier
 
 
-@pytest.mark.parametrize("block_size,page_padding_bytes", [(384, 95232), (2304, 0)])
-def test_a3_sparse_mla_preserves_storage_addresses(monkeypatch, block_size, page_padding_bytes):
+def test_a3_sparse_mla_preserves_storage_addresses(monkeypatch):
+    block_size = 2304
     builder = _builder(block_size, False, monkeypatch)
     metadata = builder.build(0, _common(block_size))
     cache = torch.arange(8 * block_size * 8, dtype=torch.float32).reshape(8, block_size, 1, 8)
-    if page_padding_bytes:
-        backing = torch.empty(8, block_size * 8 + page_padding_bytes // cache.element_size())
-        padded_cache = backing[:, : block_size * 8].view_as(cache)
-        padded_cache.copy_(cache)
-        cache = padded_cache
-        assert not cache.is_contiguous()
     query = torch.ones(3, 2, 8)
     indices = torch.tensor(
         [
