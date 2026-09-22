@@ -40,6 +40,9 @@
 #include "gmm/grouped_matmul_swiglu_quant_v2/grouped_matmul_swiglu_quant_v2_torch_adpt.h"
 #include "attention/lightning_indexer/lightning_indexer_torch_adpt.h"
 #include "moe/moe_gating_top_k/moe_gating_top_k_torch_adpt.h"
+#include "attention/fused_li_manage_mtp/fused_li_manage_mtp_torch_adpt.h"
+#include "attention/fused_copy_sfa_mtp/fused_copy_sfa_mtp_torch_adpt.h"
+#include "attention/fused_li_manage_mtp_c8/fused_li_manage_mtp_c8_torch_adpt.h"
 #include "attention/sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
 #include "attention/sparse_flash_mla/sparse_flash_mla_torch_adpt.h"
 #include "attention/quant_lightning_indexer_v2/quant_lightning_indexer_v2_torch_adpt.h"
@@ -2898,6 +2901,49 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 
     // vLLM-Ascend custom ops
     // Gemma RmsNorm
+    // fused_li_manage_mtp
+    ops.def(
+        "npu_fused_li_manage_mtp(Tensor index_weights, Tensor query_dequant_scale, "
+        "Tensor query, Tensor index_key_dequant_scale, Tensor index_key_cache, "
+        "Tensor index_block_table, Tensor actual_seq_lengths_query, "
+        "Tensor actual_seq_lengths_key, Tensor offload_seq_lengths_key, "
+        "Tensor num_cache_tokens, Tensor request_state, Tensor req_pool_entries, "
+        "Tensor(a!) cache_slots_pool, Tensor(b!) topk_src_ids, Tensor(c!) topk_dst_slots, "
+        "Tensor(d!) topk_miss_counts, Tensor(e!) miss_src_ids, Tensor(f!) miss_dst_slots, "
+        "Tensor(g!) miss_counts) -> ()"
+    );
+    ops.impl("npu_fused_li_manage_mtp", torch::kPrivateUse1,
+             &vllm_ascend::npu_fused_li_manage_mtp);
+
+    // fused_copy_sfa_mtp
+    ops.def(
+        "npu_fused_copy_sfa_mtp(Tensor query_rope, Tensor query, "
+        "Tensor actual_seq_lengths_query, Tensor actual_seq_lengths_kv, "
+        "Tensor num_cache_tokens, Tensor topk_dst_slots, Tensor topk_src_ids, "
+        "Tensor topk_miss_counts, Tensor miss_src_ids, Tensor miss_dst_slots, Tensor miss_counts, "
+        "Tensor hbm_block_table, Tensor dram_block_table, "
+        "Tensor(a!) hbm_k_rope, Tensor(b!) hbm_kv_cache, "
+        "Tensor dram_k_rope, Tensor dram_kv_cache, float scale_value, "
+        "Tensor(c!) attention_out) -> ()"
+    );
+    ops.impl("npu_fused_copy_sfa_mtp", torch::kPrivateUse1,
+             &vllm_ascend::npu_fused_copy_sfa_mtp);
+
+    // fused_li_manage_mtp_c8 (nanovllm fused_li_manage_mtp port)
+    ops.def(
+        "npu_fused_li_manage_mtp_c8(Tensor index_weights, Tensor query_dequant_scale, "
+        "Tensor query, Tensor index_key_dequant_scale, Tensor index_key_cache, "
+        "Tensor index_block_table, Tensor actual_seq_lengths_query, "
+        "Tensor actual_seq_lengths_key, Tensor offload_seq_lengths_key, "
+        "Tensor num_cache_tokens, Tensor request_state, Tensor req_pool_entries, "
+        "Tensor(a!) cache_slots_pool, Tensor(b!) topk_src_ids, "
+        "Tensor(c!) topk_dst_slots, Tensor(d!) topk_miss_counts, "
+        "Tensor(e!) miss_src_ids, Tensor(f!) miss_dst_slots, "
+        "Tensor(g!) miss_counts) -> ()"
+    );
+    ops.impl("npu_fused_li_manage_mtp_c8", torch::kPrivateUse1,
+             &vllm_ascend::npu_fused_li_manage_mtp_c8);
+
     ops.def(
         "npu_gemma_rms_norm(Tensor x, "
                             "Tensor gamma, "

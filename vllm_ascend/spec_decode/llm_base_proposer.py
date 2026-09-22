@@ -216,6 +216,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         draft_model_config = getattr(spec_config, "draft_model_config", None)
         draft_hf_config = draft_model_config.hf_config if draft_model_config is not None else None
         self._share_mtp_indices = getattr(draft_hf_config, "index_share_for_mtp_iteration", False)
+        self._nano_topk_compactors: list[nn.Module] = []
 
         # NOTE:
         # `draft_tensor_parallel_size` does not take effect for Eagle:
@@ -676,6 +677,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             self._runnable.set_attn_backend(att_backend)  # type: ignore
 
     def _maybe_share_topk_indices(self, target_language_model: nn.Module) -> None:
+        self._nano_topk_compactors = []
+        draft_model = getattr(self.model, "model", None)
         if hasattr(target_language_model.model, "topk_indices_buffer"):
             if hasattr(self.model.model, "topk_indices_buffer"):
                 del self.model.model.topk_indices_buffer
@@ -685,11 +688,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 " Sharing target model topk_indices_buffer with the draft model."
             )
             target_buffer = target_language_model.model.topk_indices_buffer
-            draft_model = getattr(self.model, "model", None)
             if target_buffer is not None and draft_model is not None:
-                for _, module in draft_model.named_modules():
+                for module in draft_model.modules():
                     if hasattr(module, "topk_indices_buffer"):
                         module.topk_indices_buffer = target_buffer
+        if draft_model is not None:
+            self._nano_topk_compactors.extend(
+                module for module in draft_model.modules() if getattr(module, "uses_nano_topk_metadata", False)
+            )
 
     def get_model(self) -> nn.Module:
         # get raw model out of the aclgraph wrapper.
@@ -785,6 +791,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 # num_reqs is already the padded version
                 self.query_start_loc.cpu[: num_reqs + 1].copy_(self.runner.query_start_loc.cpu[: num_reqs + 1])
                 self.query_start_loc.copy_to_gpu()
+                self.runner._prepare_nano_request_slots(num_reqs, num_reqs, dummy=True)
                 req_ids_tensor, token_to_req = prepare_sparse_kv_offload_mtp_dummy_metadata(
                     num_tokens,
                     num_reqs,
@@ -820,6 +827,17 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     group_len=self.runner.group_len.gpu[:num_reqs],
                     group_key_idx=self.runner.group_key_idx.gpu[:num_reqs],
                     group_key_cache_idx=self.runner.group_key_cache_idx.gpu[:num_reqs],
+                    req_topk_buffer_slots=(
+                        self.runner._offload_pool_slots.cpu[:num_reqs]
+                        if self.runner._offload_pool_slots is not None
+                        else None
+                    ),
+                    req_topk_buffer_generations=(
+                        self.runner._offload_pool_generations.cpu[:num_reqs]
+                        if self.runner._offload_pool_generations is not None
+                        else None
+                    ),
+                    offload_dummy=True,
                     req_ids_tensor=req_ids_tensor,
                     token_to_req=token_to_req,
                 )
@@ -831,6 +849,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 # update the tensor's address for each step.
                 for draft_index in range(self.num_speculative_tokens):
                     common_attn_metadata = self.shallow_copy_metadata(common_attn_metadata)
+                    common_attn_metadata.nano_draft_index = draft_index
+                    common_attn_metadata.nano_restore_tails = False
                     extra_attn_metadata_args: dict = {}
                     if self.use_compress:
                         extra_attn_metadata_args.update(
@@ -1429,6 +1449,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     token_indices_to_sample,
                     num_input_tokens,
                     tp_group=get_tp_group() if ascend_utils.enable_dsa_cp() else None,
+                    nano_topk_compactors=self._nano_topk_compactors,
                 )
 
         num_indices = token_indices_to_sample.shape[0]
@@ -2356,6 +2377,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             group_len=common_attn_metadata.group_len,
             group_key_idx=common_attn_metadata.group_key_idx,
             group_key_cache_idx=common_attn_metadata.group_key_cache_idx,
+            req_topk_buffer_slots=common_attn_metadata.req_topk_buffer_slots,
+            req_topk_buffer_generations=common_attn_metadata.req_topk_buffer_generations,
+            offload_dummy=common_attn_metadata.offload_dummy,
             req_ids_tensor=common_attn_metadata.req_ids_tensor,
             token_to_req=token_to_req,
         )
@@ -2453,6 +2477,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             group_len=common_attn_metadata.group_len,
             group_key_idx=common_attn_metadata.group_key_idx,
             group_key_cache_idx=common_attn_metadata.group_key_cache_idx,
+            req_topk_buffer_slots=common_attn_metadata.req_topk_buffer_slots,
+            req_topk_buffer_generations=common_attn_metadata.req_topk_buffer_generations,
+            offload_dummy=common_attn_metadata.offload_dummy,
             req_ids_tensor=common_attn_metadata.req_ids_tensor,
             token_to_req=common_attn_metadata.token_to_req,
         )
@@ -2537,6 +2564,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     ):
         # FIXME(woosuk): The below two ops cause synchronization. Optimize.
         assert len(self.draft_attn_groups) > 0
+        if getattr(self.runner, "sparse_kv_offload_enabled", False) and self.runner.sparse_kv_offload_config.use_nano:
+            # Step 0 uses build(), unlike subsequent build_for_drafting() calls.
+            common_attn_metadata = self.shallow_copy_metadata(common_attn_metadata)
+            common_attn_metadata.nano_draft_index = 0
+            common_attn_metadata.nano_restore_tails = False
         per_layer_attn_metadata: dict[str, Any] = {}
         # One DSA cache dict shared by all attn groups within this decode step.
         # DSpark draft layers span multiple kv-cache groups; every group gets

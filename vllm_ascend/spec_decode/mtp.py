@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import torch
@@ -16,10 +17,13 @@ def compact_mtp_topk_indices(
     token_indices_to_sample: torch.Tensor,
     num_input_tokens: int,
     tp_group: GroupCoordinator | None = None,
+    nano_topk_compactors: Sequence[nn.Module] = (),
 ) -> None:
     """Move step-0 top-k rows to the query layout of subsequent MTP steps."""
     if tp_group is None:
         draft_model.compact_topk_indices(token_indices_to_sample)
+        for module in nano_topk_compactors:
+            module.compact_nano_topk_metadata(token_indices_to_sample)
         return
     if token_indices_to_sample.numel() == 0:
         return

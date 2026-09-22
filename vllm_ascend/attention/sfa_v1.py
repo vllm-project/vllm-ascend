@@ -357,6 +357,36 @@ class AscendSFAMetadata:
     # by AscendSFAKVOffloadMetadataBuilder.
     req_ids_tensor: torch.Tensor | None = None
     token_to_req: torch.Tensor | None = None
+    # Nano inputs are contiguous NPU tensors. No exact CPU length mirror is
+    # required, including after speculative-token rejection.
+    nano_enabled: bool = False
+    nano_query_ends: torch.Tensor | None = None
+    nano_seq_lens: torch.Tensor | None = None
+    nano_prefix_lens: torch.Tensor | None = None
+    nano_cache_tokens: torch.Tensor | None = None
+    nano_logical_lens: torch.Tensor | None = None
+    # Only draft step 0 populates this extent; later MTP steps use its saved
+    # implementation buffers. Target metadata leaves it unset.
+    nano_reuse_logical_lens: torch.Tensor | None = None
+    nano_pool_entries: torch.Tensor | None = None
+    nano_request_state: torch.Tensor | None = None
+    # Per-batch-row topk row slots, populated for every batch (prefill
+    # included) so exec_kv can D2D prefill KV into the rows at chunk end.
+    nano_prefill_pool_slots: torch.Tensor | None = None
+    nano_hbm_block_table: torch.Tensor | None = None
+    nano_source_block_table: torch.Tensor | None = None
+    nano_tail_src: torch.Tensor | None = None
+    nano_tail_dst: torch.Tensor | None = None
+    nano_tail_lengths: torch.Tensor | None = None
+    nano_device_slots: torch.Tensor | None = None
+    nano_copy_src_offsets: torch.Tensor | None = None
+    nano_copy_dst_offsets: torch.Tensor | None = None
+    nano_copy_lengths: torch.Tensor | None = None
+    nano_copy_count: torch.Tensor | None = None
+    # PD consumer: connector already D2D'd the prefill tail. Graph replay must
+    # not re-issue that H2D. Eager restore on prefix rollback uses the same
+    # copy descriptors outside the captured path.
+    nano_skip_tail_restore: bool = False
     positions: torch.Tensor | None = None
     query_start_loc: torch.Tensor | None = None
     max_query_len: int = 0
@@ -1409,6 +1439,10 @@ class AscendSFAImpl(MLAAttentionImpl):
         )
         return hidden_states, ql_nope, q_pe, q_c
 
+    def _prepare_indexer_metadata(self, indexer_metadata, attn_metadata) -> None:
+        """Allow an attention backend to supply indexer selection metadata."""
+        return
+
     def _get_indexcache_topk_indices(self, num_tokens: int) -> torch.Tensor:
         if self.topk_indices_buffer is None:
             raise RuntimeError("IndexCache requires topk_indices_buffer when skip_topk is enabled.")
@@ -1811,6 +1845,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             # independently built metadata.
             assert k_hidden_states is not None
             assert indexer_attn_metadata is not None
+            self._prepare_indexer_metadata(indexer_attn_metadata, attn_metadata)
             topk_indices = self.indexer(
                 hidden_states,
                 q_c,

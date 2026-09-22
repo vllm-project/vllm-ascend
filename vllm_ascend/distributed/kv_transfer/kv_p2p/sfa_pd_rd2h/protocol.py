@@ -147,6 +147,26 @@ class SfaPDConsumerReqMeta:
     req_id: str
     main_block_ids: list[int]
     indexer_block_ids: list[int]
+    # Early-bound nano top-k row. The pull thread writes the prefill tail into
+    # this row's circular slots so decode does not H2D the same tokens again,
+    # or (dense) the whole prompt into the row's hot region so short requests
+    # can decode in the -3 non-offload state without any first-fill H2D.
+    pool_slot: int | None = None
+    tail_tokens: int = 0
+    tail_block_index: int = 0
+    kv_tokens: int = 0
+    dense: bool = False
+
+
+@dataclass
+class NanoTailDest:
+    """D-side circular-tail (or dense-row) destination for one PD request."""
+
+    pool_slot: int
+    tail_tokens: int
+    tail_block_index: int
+    dense: bool = False
+    kv_tokens: int = 0
 
 
 class SfaPDConsumerMetadata(KVConnectorMetadata):
@@ -158,12 +178,22 @@ class SfaPDConsumerMetadata(KVConnectorMetadata):
         request_id: str,
         main_block_ids: list[int],
         indexer_block_ids: list[int],
+        pool_slot: int | None = None,
+        tail_tokens: int = 0,
+        tail_block_index: int = 0,
+        kv_tokens: int = 0,
+        dense: bool = False,
     ) -> None:
         self.requests.append(
             SfaPDConsumerReqMeta(
                 req_id=request_id,
                 main_block_ids=list(main_block_ids),
                 indexer_block_ids=list(indexer_block_ids),
+                pool_slot=pool_slot,
+                tail_tokens=tail_tokens,
+                tail_block_index=tail_block_index,
+                kv_tokens=kv_tokens,
+                dense=dense,
             )
         )
 

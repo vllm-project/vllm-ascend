@@ -48,9 +48,11 @@ def test_dsa_cp_compaction_moves_rows_to_next_step_owner(num_input_tokens, sampl
 def test_compaction_without_dsa_cp_uses_predictor_hook():
     model = nn.Module()
     model.compact_topk_indices = Mock()
+    nano_attention = Mock()
     indices = torch.tensor([1, 5], dtype=torch.int32)
-    compact_mtp_topk_indices(model, indices, 6)
+    compact_mtp_topk_indices(model, indices, 6, nano_topk_compactors=[nano_attention])
     model.compact_topk_indices.assert_called_once_with(indices)
+    nano_attention.compact_nano_topk_metadata.assert_called_once_with(indices)
 
 
 def test_dsa_cp_compaction_empty_batch_skips_collective():

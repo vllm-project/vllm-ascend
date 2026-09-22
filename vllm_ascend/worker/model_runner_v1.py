@@ -147,6 +147,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_la
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     allocate_kv_cache_tensors_for_sparse_kv_offload,
     allocate_kv_offload_topk_profile_buffers,
+    get_sparse_kv_offload_manager,
     init_sparse_kv_offload_manager,
     reshape_kv_cache_tensors_for_sparse_kv_offload,
     update_sparse_kv_offload_metadata,
@@ -674,9 +675,19 @@ class NPUModelRunner(GPUModelRunner):
         # Per-request metadata consumed by the Sparse KV offload resident LRU.
         self._offload_req_ids_tensor = None
         self._offload_token_to_req = None
+        self._offload_pool_slots = None
+        self._offload_pool_generations = None
+        self._offload_request_slots: dict[str, int] = {}
+        self._offload_slot_generation = 0
+        self._offload_slot_generations: dict[int, int] = {}
+        self._offload_slot_last_prefix: dict[int, int] = {}
+        self._nano_need_eager_tail_restore = False
         if self.sparse_kv_offload_enabled:
             self._offload_req_ids_tensor = self._make_buffer(self.max_num_reqs, dtype=torch.int64)
             self._offload_token_to_req = self._make_buffer(self.max_num_tokens, dtype=torch.int32)
+            if self.sparse_kv_offload_config.use_nano:
+                self._offload_pool_slots = self._make_buffer(self.max_num_reqs + 2, dtype=torch.int32)
+                self._offload_pool_generations = self._make_buffer(self.max_num_reqs + 2, dtype=torch.int64)
 
     @property
     def use_dcp(self) -> bool:
@@ -3461,6 +3472,124 @@ class NPUModelRunner(GPUModelRunner):
             cudagraph_stats,
         )
 
+    def _prebound_nano_slots(self) -> dict[str, int]:
+        if not has_kv_transfer_group():
+            return {}
+        connector = get_kv_transfer_group()
+        getter = getattr(connector, "get_nano_slot_bindings", None)
+        if getter is None:
+            return {}
+        return getter() or {}
+
+    def _prepare_nano_request_slots(self, num_reqs: int, padded_reqs: int, *, dummy: bool) -> None:
+        if self._offload_pool_slots is None:
+            return
+        capacity = self.max_num_reqs + 2
+        slots = self._offload_pool_slots.np
+        generations = self._offload_pool_generations.np
+        slots[:padded_reqs] = np.arange(padded_reqs, dtype=np.int32) + capacity
+        generations[:padded_reqs] = -1
+        self._nano_need_eager_tail_restore = False
+        dense_fills: dict[int, tuple[int, int]] = {}
+        if not dummy:
+            # PD binds rows at alloc time. Keep those reservations even when the
+            # request is waiting for KV and is not in the current decode batch.
+            prebound = self._prebound_nano_slots()
+            live = self.input_batch.req_id_to_index
+            self._offload_request_slots = {
+                req: slot
+                for req, slot in self._offload_request_slots.items()
+                if req in live or req in prebound
+            }
+            used = set(self._offload_request_slots.values()) | set(prebound.values())
+            available = iter(slot for slot in range(capacity) if slot not in used)
+            computed_all = getattr(self.input_batch, "num_computed_tokens_cpu", None)
+            for row, req in enumerate(self.input_batch.req_ids[:num_reqs]):
+                if req not in self._offload_request_slots:
+                    slot = prebound[req] if req in prebound else next(available)
+                    self._offload_request_slots[req] = slot
+                    self._offload_slot_generation += 1
+                    self._offload_slot_generations[slot] = self._offload_slot_generation
+                    # Fresh short rows get their full KV via the prefill-end
+                    # D2D in exec_kv; only rollbacks need the host-pool fill.
+                slot = self._offload_request_slots[req]
+                slots[row] = slot
+                generations[row] = self._offload_slot_generations[slot]
+            if computed_all is not None:
+                block_size = self.cache_config.block_size
+                hot = self.sparse_kv_offload_config.topk_buffer_size if self.sparse_kv_offload_config else 0
+                for row in range(num_reqs):
+                    slot = int(slots[row])
+                    prefix = (int(computed_all[row]) // block_size) * block_size
+                    last_prefix = self._offload_slot_last_prefix.get(slot)
+                    if last_prefix is not None and prefix < last_prefix:
+                        if prebound:
+                            self._nano_need_eager_tail_restore = True
+                        # A rollback across the hot boundary leaves a sparse-layout
+                        # row under a dense (-3) reader: refill the whole row.
+                        if hot and last_prefix >= hot > prefix:
+                            dense_fills[slot] = (row, int(computed_all[row]))
+                    self._offload_slot_last_prefix[slot] = prefix
+            if dense_fills:
+                self._dense_fill_nano_rows(dense_fills)
+        # Nano builders stage host-owned slot/generation metadata once per step.
+
+    def _dense_fill_nano_rows(self, dense_fills: dict[int, tuple[int, int]]) -> None:
+        """Copy whole short rows from the CPU pool into their topk-buffer rows.
+
+        Rollback-only safety net: a rollback across the hot boundary leaves a
+        sparse-layout row under a dense (-3) reader, and the paged cache is
+        stale beyond the prompt, so the refill must come from the CPU pool.
+        Runs outside the captured graph at metadata-build time; the per-layer
+        host/device bases were pinned by ``bind_nano_kv_cache``.
+        """
+        manager = self.sparse_kv_offload_manager
+        assert manager is not None
+        block_size = self.cache_config.block_size
+        block_table = self.input_batch.block_table[0].get_numpy_array()
+        topk_k = manager.topk_buffers_k[0]
+        stride_tokens = topk_k.shape[1]
+        token_bytes = torch.tensor(
+            [[topk_k.element_size() * topk_k.shape[-1]],
+             [manager.topk_buffers_v[0].element_size() * manager.topk_buffers_v[0].shape[-1]]],
+            dtype=torch.int64,
+            device=topk_k.device,
+        )
+        for slot, (row, computed) in dense_fills.items():
+            nblocks = (computed + block_size - 1) // block_size
+            src_tokens = torch.tensor(
+                [int(block_table[row, b]) * block_size for b in range(nblocks)], dtype=torch.int64
+            ).to(topk_k.device)
+            lengths = torch.clamp(
+                torch.arange(nblocks, dtype=torch.int64, device=topk_k.device) * (-block_size) + computed,
+                min=0,
+                max=block_size,
+            )
+            src_offsets = src_tokens.view(1, -1).expand(2, -1) * token_bytes
+            dst_block_tokens = torch.arange(nblocks, dtype=torch.int64, device=topk_k.device) * block_size
+            dst_offsets = (slot * stride_tokens + dst_block_tokens.view(1, -1).expand(2, -1)) * token_bytes
+            lengths_bytes = lengths.view(1, -1).expand(2, -1) * token_bytes
+            count = torch.full((1,), 2 * nblocks, dtype=torch.int32, device=topk_k.device)
+            for host_bases, device_bases in zip(manager.nano_host_bases, manager.nano_device_bases):
+                sources = (src_offsets + host_bases).reshape(-1)
+                destinations = (dst_offsets + device_bases).reshape(-1)
+                manager.copy_nano_kv(sources, destinations, lengths_bytes.reshape(-1), count)
+
+    def _maybe_eager_restore_nano_tails(self, attn_metadata: PerLayerAttnMetadata) -> None:
+        if not self._nano_need_eager_tail_restore:
+            return
+        self._nano_need_eager_tail_restore = False
+        groups = attn_metadata if isinstance(attn_metadata, list) else [attn_metadata]
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            for metadata in group.values():
+                if getattr(metadata, "nano_enabled", False) and getattr(
+                    metadata, "nano_copy_src_offsets", None
+                ) is not None:
+                    get_sparse_kv_offload_manager().restore_nano_tails(metadata)
+                    return
+
     def _build_attention_metadata(
         self,
         num_tokens: int,
@@ -3479,6 +3608,7 @@ class NPUModelRunner(GPUModelRunner):
         skip_gdn_state_update: bool = False,
         cudagraph_runtime_mode: CUDAGraphMode | None = None,
         batch_descriptor: BatchDescriptor | None = None,
+        offload_dummy: bool = False,
     ) -> tuple[PerLayerAttnMetadata, CommonAttentionMetadata | None]:
         """
         :return: tuple[attn_metadata, spec_decode_common_attn_metadata]
@@ -3499,6 +3629,8 @@ class NPUModelRunner(GPUModelRunner):
                 self._offload_req_ids_tensor,
                 self._offload_token_to_req,
             )
+        if self.sparse_kv_offload_config.use_nano and self.sparse_kv_offload_enabled:
+            self._prepare_nano_request_slots(num_reqs, num_reqs_padded, dummy=offload_dummy)
         attn_metadata: PerLayerAttnMetadata = {}
         device_metadata_tasks: list[DeviceMetadataTask] | None = (
             [] if self.device_metadata_executor is not None else None
@@ -3685,6 +3817,12 @@ class NPUModelRunner(GPUModelRunner):
                 if self._offload_token_to_req is not None
                 else None
             ),
+            req_topk_buffer_slots=(self._offload_pool_slots.cpu[:num_reqs_padded]
+                                   if self._offload_pool_slots is not None else None),
+            req_topk_buffer_generations=(self._offload_pool_generations.cpu[:num_reqs_padded]
+                                         if self._offload_pool_generations is not None else None),
+            offload_dummy=offload_dummy,
+            nano_restore_tails=self._nano_need_eager_tail_restore,
             mm_req_doc_ranges=req_doc_ranges,
         )
 
@@ -3884,6 +4022,7 @@ class NPUModelRunner(GPUModelRunner):
                 device_metadata_tasks,
                 batch_descriptor if cudagraph_runtime_mode == CUDAGraphMode.FULL else None,
             )
+        self._maybe_eager_restore_nano_tails(attn_metadata)
         return attn_metadata, spec_decode_common_attn_metadata
 
     def _should_build_dummy_attn_metadata(
@@ -4141,6 +4280,7 @@ class NPUModelRunner(GPUModelRunner):
                     max_query_len=max_query_len,
                     ubatch_slices=ubatch_slices_padded if pad_attn else ubatch_slices,
                     for_cudagraph_capture=is_graph_capturing,
+                    offload_dummy=True,
                     num_scheduled_tokens_np=num_scheduled_tokens,
                     dcp_dummy_metadata=dcp_dummy_metadata,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
@@ -4433,6 +4573,24 @@ class NPUModelRunner(GPUModelRunner):
         logger.info("Loading model weights took %.4f GB", m.consumed_memory / float(2**30))
 
         get_offloader().post_init()
+        if self.sparse_kv_offload_enabled and self.sparse_kv_offload_config.use_nano:
+            from vllm_ascend.attention.sfa_kv_offload import AscendSFAKVOffloadImpl
+
+            owners = {}
+            for layer in self.compilation_config.static_forward_context.values():
+                impl = getattr(layer, "impl", None)
+                if not isinstance(impl, AscendSFAKVOffloadImpl):
+                    continue
+                shared = impl.topk_indices_buffer
+                if shared is None:
+                    continue
+                key = shared.data_ptr()
+                if impl.skip_topk:
+                    if key not in owners:
+                        raise RuntimeError("nano shared attention precedes its indexer owner")
+                    impl.nano_indexer_owner = owners[key]
+                else:
+                    owners[key] = impl
 
         mm_config = self.model_config.multimodal_config
         self.is_multimodal_pruning_enabled = (
@@ -4601,6 +4759,10 @@ class NPUModelRunner(GPUModelRunner):
         if self.sparse_kv_offload_enabled:
             assert self.sparse_kv_offload_manager is not None
             self.sparse_kv_offload_manager.register_kv_caches(kv_caches)
+            if self.sparse_kv_offload_config.use_nano:
+                for layer_name in self.sparse_kv_offload_manager.offload_layer_names:
+                    layer = self.compilation_config.static_forward_context[layer_name]
+                    layer.impl.bind_nano_kv_cache(self.sparse_kv_offload_manager, layer_name)
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)
 

@@ -44,6 +44,7 @@ OFFLOAD_K_CACHE_CPU_INDEX = 2
 OFFLOAD_V_CACHE_CPU_INDEX = 3
 OFFLOAD_TOPK_BUFFER_K_INDEX = 4
 OFFLOAD_TOPK_BUFFER_V_INDEX = 5
+OFFLOAD_STORE_PORT_BASE = 8500
 
 FSA_EXTERNAL_PLAN_READY_MARKER = 0x5A45
 FSA_PAIRED_SELECTION_COPY_MARKER = 0x5A56
@@ -120,6 +121,9 @@ def allocate_kv_offload_topk_buffer_pair(
         vllm_config.scheduler_config.max_num_batched_tokens,
         vllm_config.scheduler_config.max_num_seqs * decode_width,
     )
+    if sparse_kv_offload_config.use_nano:
+        max_num_topk_rows = max(max_num_topk_rows, 2 * (vllm_config.scheduler_config.max_num_seqs + 2))
+        topk_buffer_size += 2 * vllm_config.cache_config.block_size
     topk_buffer_k_size_bytes = max_num_topk_rows * topk_buffer_size * num_kv_heads * k_dim * torch.bfloat16.itemsize
     topk_buffer_v_size_bytes = max_num_topk_rows * topk_buffer_size * num_kv_heads * v_dim * torch.bfloat16.itemsize
     # NOTE make sure to allocate k+v together and split them after allocate.
@@ -135,6 +139,9 @@ def allocate_kv_offload_topk_buffer_pair(
         .view(torch.bfloat16)
         .view([max_num_topk_rows, topk_buffer_size, num_kv_heads, v_dim])
     )
+    if sparse_kv_offload_config.use_nano:
+        # Dummy copy-SFA reads its private hot rows during capture/replay.
+        topk_buffer_raw.zero_()
     return (topk_buffer_k, topk_buffer_v)
 
 
@@ -491,6 +498,7 @@ class SparseKVOffloadManager:
         self.topk_buffer_size = sparse_kv_offload_config.topk_buffer_size
         self.topk = sparse_kv_offload_config.topk
         self.use_fused_overlap = sparse_kv_offload_config.use_fused_overlap
+        self.use_nano = sparse_kv_offload_config.use_nano
 
         self.max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
@@ -550,6 +558,8 @@ class SparseKVOffloadManager:
         config.world_size = self.tp_size
         config.rank_id = self.tp_rank
         config.scene = offload.Scene.SHARED
+        store_port = OFFLOAD_STORE_PORT_BASE + parallel_config.data_parallel_index
+        config.store_url = f"tcp://127.0.0.1:{store_port}"
         assert offload.initialize(config) == 0, "Sparse KV offload offload.initialize failed."
         self.tp_group.barrier()
 
@@ -848,7 +858,7 @@ class SparseKVOffloadManager:
                 )
             )
 
-        if self.use_fused_overlap and self.tp_rank != 0:
+        if (self.use_fused_overlap or self.use_nano) and self.tp_rank != 0:
             cpu_k_shape = [int(x) for x in shape_k_tensor.tolist()]
             cpu_v_shape = [int(x) for x in shape_v_tensor.tolist()]
             self.k_caches_cpu = [self._restore_bfloat16_tensor(ptr, cpu_k_shape) for ptr in self.gvas_k_bases]
@@ -861,6 +871,8 @@ class SparseKVOffloadManager:
                 cpu_k_shape,
                 cpu_v_shape,
             )
+        if self.use_nano:
+            self._bind_nano_copy_bases()
 
         gvas_buffer_offset = 0
         gvas_buffer_size_bytes = self.max_num_topk_rows * self.topk * 2 * 8  # 2: k+v, 8: int64
@@ -1073,6 +1085,54 @@ class SparseKVOffloadManager:
         self.lru_miss_position_workspace_ptr = self.lru_miss_position_workspace.data_ptr()
         self.lru_epochs_ptr = self.lru_epochs.data_ptr()
         self.lru_physical_row_workspace_ptr = self.lru_physical_row_workspace.data_ptr()
+
+    def _bind_nano_copy_bases(self) -> None:
+        """Pin host/device row bases used by eager prefix-rollback tail restore."""
+        if not self.k_caches_cpu or not self.topk_buffers_k:
+            raise RuntimeError("nano tail restore requires host and device KV bases")
+        device = self.topk_buffers_k[0].device
+        descriptor_rows = 4 * (self.max_num_reqs + 2)
+        self.nano_copy_src = torch.empty(descriptor_rows, dtype=torch.int64, device=device)
+        self.nano_copy_dst = torch.empty_like(self.nano_copy_src)
+        self.nano_host_bases = []
+        self.nano_device_bases = []
+        for layer_id in range(len(self.topk_buffers_k)):
+            self.nano_host_bases.append(
+                torch.tensor(
+                    [self.k_caches_cpu[layer_id].data_ptr(), self.v_caches_cpu[layer_id].data_ptr()],
+                    dtype=torch.int64,
+                    device=device,
+                ).view(2, 1)
+            )
+            self.nano_device_bases.append(
+                torch.tensor(
+                    [self.topk_buffers_k[layer_id].data_ptr(), self.topk_buffers_v[layer_id].data_ptr()],
+                    dtype=torch.int64,
+                    device=device,
+                ).view(2, 1)
+            )
+
+    def restore_nano_tails(self, metadata) -> None:
+        """Copy the current tail descriptors for every layer. Used on prefix rollback."""
+        src_off = getattr(metadata, "nano_copy_src_offsets", None)
+        dst_off = getattr(metadata, "nano_copy_dst_offsets", None)
+        lengths = getattr(metadata, "nano_copy_lengths", None)
+        count = getattr(metadata, "nano_copy_count", None)
+        if src_off is None or dst_off is None or lengths is None or count is None:
+            return
+        if not getattr(self, "nano_host_bases", None):
+            raise RuntimeError("nano KV base addresses must be bound before tail restore")
+        n = src_off.numel()
+        for host_bases, device_bases in zip(self.nano_host_bases, self.nano_device_bases):
+            torch.add(src_off.view(2, -1), host_bases, out=self.nano_copy_src[:n].view(2, -1))
+            torch.add(dst_off.view(2, -1), device_bases, out=self.nano_copy_dst[:n].view(2, -1))
+            self.copy_nano_kv(self.nano_copy_src[:n], self.nano_copy_dst[:n], lengths, count)
+
+    def copy_nano_kv(self, sources, destinations, lengths, count) -> None:
+        """Enqueue bounded descriptor copies on the current compute stream."""
+        result = offload.sparse_copy(sources, destinations, lengths, count, sources.device)
+        if result not in (None, 0):
+            raise RuntimeError(f"memfabric nano tail H2D failed with result={result}")
 
     def offload_new_kv(
         self,
