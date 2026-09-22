@@ -20,6 +20,7 @@ import os
 import sys
 import tempfile
 import unittest
+from contextlib import ExitStack
 from unittest.mock import MagicMock, patch
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
@@ -749,6 +750,89 @@ class TestLayerwiseKeyFormats(unittest.TestCase):
 # =========================================================================
 # MemcacheBackend (mocked store)
 # =========================================================================
+class TestMemcacheDPInitBarrier(unittest.TestCase):
+    def setUp(self):
+        stack = ExitStack()
+        self.addCleanup(stack.close)
+        self.store = MagicMock()
+        self.store.init.return_value = 0
+        self.group = MagicMock()
+        self.get_dp_group = stack.enter_context(patch.object(memcache_module, "get_dp_group", return_value=self.group))
+        self.barrier = stack.enter_context(patch.object(memcache_module.torch.distributed, "barrier"))
+        stack.enter_context(patch.object(memcache_module, "_is_device_sdma", return_value=False))
+        stack.enter_context(patch.object(memcache_module.time, "sleep"))
+        stack.enter_context(
+            patch.object(sys.modules["memcache_hybrid"], "DistributedObjectStore", return_value=self.store, create=True)
+        )
+
+    def make_backend(self, dp_init_barrier=True, dp_size=8, init_bm=True, lazy_init=False):
+        return MemcacheBackend(
+            MagicMock(data_parallel_size=dp_size),
+            local_rank=0,
+            init_bm=init_bm,
+            lazy_init=lazy_init,
+            dp_init_barrier=dp_init_barrier,
+        )
+
+    def test_default_waits_on_cpu_group_after_successful_init(self):
+        calls = MagicMock()
+        calls.attach_mock(self.store.init, "init")
+        calls.attach_mock(self.barrier, "barrier")
+        backend = self.make_backend()
+        self.assertIs(backend.store, self.store)
+        self.assertEqual(
+            calls.mock_calls,
+            [unittest.mock.call.init(0, init_bm=True), unittest.mock.call.barrier(group=self.group.cpu_group)],
+        )
+
+    def test_disabled_single_dp_and_metadata_clients_skip_barrier(self):
+        for kwargs in ({"dp_init_barrier": False}, {"dp_size": 1}, {"init_bm": False}):
+            with self.subTest(**kwargs):
+                self.make_backend(**kwargs)
+                self.get_dp_group.assert_not_called()
+                self.barrier.assert_not_called()
+
+    def test_rejects_non_boolean_config_before_initialization(self):
+        for value in ("false", "true", 0, 1, None):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "memcache_dp_init_barrier.*boolean"):
+                self.make_backend(dp_init_barrier=value)
+        self.store.init.assert_not_called()
+        self.barrier.assert_not_called()
+
+    def test_failed_store_does_not_enter_barrier(self):
+        self.store.init.return_value = -1
+        with self.assertRaises(AssertionError):
+            self.make_backend()
+        self.get_dp_group.assert_not_called()
+        self.barrier.assert_not_called()
+
+    def test_store_exception_does_not_enter_barrier(self):
+        self.store.init.side_effect = RuntimeError("store init failed")
+        with self.assertRaisesRegex(RuntimeError, "store init failed"):
+            self.make_backend()
+        self.barrier.assert_not_called()
+
+    def test_lazy_initialization_does_not_synchronize(self):
+        with patch.object(memcache_module, "_is_device_sdma", return_value=True):
+            backend = self.make_backend(lazy_init=True)
+        self.store.init.assert_not_called()
+        self.barrier.assert_not_called()
+        backend.ensure_initialized()
+        backend.ensure_initialized()
+        self.store.init.assert_called_once_with(0, init_bm=True)
+        self.get_dp_group.assert_not_called()
+        self.barrier.assert_not_called()
+
+    def test_lazy_request_with_eager_backend_still_synchronizes(self):
+        backend = self.make_backend(lazy_init=True)
+        self.assertFalse(backend._lazy_init)
+        self.store.init.assert_called_once_with(0, init_bm=True)
+        self.barrier.assert_called_once_with(group=self.group.cpu_group)
+        backend.ensure_initialized()
+        self.store.init.assert_called_once()
+        self.barrier.assert_called_once()
+
+
 class TestMemcacheBackendMethods(unittest.TestCase):
     def _make_backend(self):
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import MemcacheBackend
@@ -757,6 +841,7 @@ class TestMemcacheBackendMethods(unittest.TestCase):
             backend = MemcacheBackend.__new__(MemcacheBackend)
             backend.store = MagicMock()
             backend.local_rank = 0
+            backend._dp_init_barrier = False
             # Set internal state to avoid lazy init logic during tests
             backend._lazy_init = False
             backend._store_initialized = True
