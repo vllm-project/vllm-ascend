@@ -20,11 +20,10 @@
 from __future__ import annotations
 
 import functools
-import importlib.util
 import json
 import math
 import os
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -44,7 +43,6 @@ from vllm_ascend.device.device_config import (  # noqa: F401
     AscendDeviceType,
     check_ascend_device_type,
     get_ascend_device_type,
-    is_310p,
     is_950,
 )
 from vllm_ascend.device.hardware_profile import HardwareCapability, WeightLayoutPolicy, get_current_hardware_profile
@@ -60,6 +58,16 @@ COMPRESSED_TENSORS_METHOD = "compressed-tensors"
 FP8_METHOD = "fp8"
 SOC_VERSION_INFERENCE_SERIES = ["Ascend310P3"]
 REGISTERED_ASCEND_OPS = {}
+
+_SHARED_BACKING_KV_CONNECTORS = frozenset(
+    {
+        "ExampleHiddenStatesConnector",
+        "MooncakeConnectorV1",
+        "MooncakeConnectorV2",
+        "MooncakeHybridConnector",
+        "MooncakePullConnector",
+    }
+)
 
 ACL_FORMAT_FRACTAL_ND = 2
 ACL_FORMAT_FRACTAL_NZ = 29
@@ -77,7 +85,6 @@ _DYNAMIC_EPLB_BUFFER_SIZE = 100
 _IS_MOE_MODEL = None
 _IS_DRAFTER_MOE_MODEL = None
 _IS_VL_MODEL = None
-_HAS_LAYER_IDX = None
 _HAS_ROPE = None
 _ATNN_CALCULATION_STREAM = None
 _CUSTOM_OP_VENDOR_DIR = "custom_transformer"
@@ -85,6 +92,13 @@ _CUSTOM_OP_BASE_DIR = (
     os.path.dirname(__file__) if os.path.isabs(__file__) else os.path.abspath(os.path.dirname(__file__))
 )
 _IS_ROT_WEIGHT_USED = None
+
+
+def kv_transfer_supports_shared_backing(kv_transfer_config: Any | None) -> bool:
+    """Whether a KV connector can consume standardized shared backing."""
+    if kv_transfer_config is None:
+        return True
+    return getattr(kv_transfer_config, "kv_connector", None) in _SHARED_BACKING_KV_CONNECTORS
 
 
 def extract_dsv4_layer_index(config: Any, layer_name: str) -> int:
@@ -118,12 +132,54 @@ def get_dsv4_compress_ratio(config: Any, layer_idx: int) -> int:
     return compress_ratios[layer_idx]
 
 
+def is_deepseek_v41(hf_config: Any) -> bool:
+    """Identify the released V4.1 config at the model boundary."""
+    model_types = ("deepseek_v41", "deepseek_v41_text")
+    if isinstance(hf_config, dict):
+        return hf_config.get("model_type") in model_types or is_deepseek_v41(hf_config.get("text_config"))
+    # SpeculativeConfig may overwrite the instance model_type for DSpark.
+    # The upstream flattened config class still identifies the V4.1 checkpoint.
+    return (
+        getattr(type(hf_config), "model_type", None) in model_types
+        or getattr(hf_config, "model_type", None) in model_types
+        or (getattr(hf_config, "text_config", None) is not None and is_deepseek_v41(hf_config.text_config))
+    )
+
+
+def normalize_deepseek_v41_config(hf_config: Any) -> Any:
+    """Prepare runtime defaults not supplied by upstream's released config."""
+    for name, default in (("num_hash_layers", 0), ("n_group", 1), ("topk_group", 1)):
+        if not hasattr(hf_config, name):
+            setattr(hf_config, name, default)
+    rope = dict(getattr(hf_config, "rope_parameters", None) or {})
+    for name, value in {
+        "factor": 1.0,
+        "beta_fast": 32,
+        "beta_slow": 1,
+        "original_max_position_embeddings": getattr(hf_config, "max_position_embeddings", 1048576),
+        "rope_theta": getattr(hf_config, "rope_theta", 10000.0),
+    }.items():
+        rope.setdefault(name, value)
+    hf_config.rope_parameters = rope
+    hf_config.image_sentinel_base_id = getattr(hf_config, "image_token_id", 129264)
+    hf_config.image_pad_token_id = hf_config.image_sentinel_base_id + 1
+    supported_rotation = {
+        "value_projection_rotated": True,
+        "value_basis": "quarot_global",
+        "key_and_gate_basis": "original",
+        "runtime_delta_rotation": False,
+    }
+    rotation = getattr(hf_config, "engram_rotation_config", None) or supported_rotation
+    hf_config.engram_rotation_config = dict(rotation)
+    return hf_config
+
+
 def model_uses_kpool_indexer(model_config: Any | None) -> bool:
     """Return True for GLM-5.3-Flash style kpool indexer models.
 
     Those models expose ``index_topk`` like DeepSeek SFA but use a kpool
-    indexer over a hybrid MLA + KDA cache, so they must not be routed through
-    the SFA / DSA layouts.
+    indexer over a hybrid MLA + KDA cache. Its cache geometry is
+    independent of the LightningIndexer layout used by other SFA models.
     """
     return any(hasattr(getattr(model_config, attr, None), "index_kpool") for attr in ("hf_text_config", "hf_config"))
 
@@ -264,6 +320,12 @@ def device_print(
         )
 
 
+# Minimum number of dimensions a matmul weight needs for both k and n dims to exist.
+MIN_MATMUL_WEIGHT_NDIMS = 2
+# Size of a singleton dimension (k=1 or n=1), unsupported by aclnnMatmulWeightNZ.
+SINGLETON_DIM_SIZE = 1
+
+
 def _should_trans_nz(weight: torch.Tensor) -> bool:
     # FP32 cannot use NZ.
     if weight.dtype == torch.float32:
@@ -271,6 +333,14 @@ def _should_trans_nz(weight: torch.Tensor) -> bool:
 
     # meta tensor only keeps shape/dtype meta info without physical memory, it is not necessary to trans it to NZ
     if weight.is_meta:
+        return False
+
+    # aclnnMatmulWeightNZ does not support matrices whose reduction/output
+    # dimension is one (k=1 or n=1). Keep these weights in ND format so the
+    # subsequent linear/matmul dispatch does not select the NZ-only path.
+    if weight.ndim >= MIN_MATMUL_WEIGHT_NDIMS and (
+        weight.shape[-1] == SINGLETON_DIM_SIZE or weight.shape[-2] == SINGLETON_DIM_SIZE
+    ):
         return False
 
     # Some hardware profiles require NZ weight layout.
@@ -298,10 +368,46 @@ def _should_trans_nz(weight: torch.Tensor) -> bool:
 # - non-310P: follow additional_config.weight_nz_mode
 # - FP32: never convert
 # - meta tensor: never convert
-def maybe_trans_nz(weight: torch.Tensor) -> torch.Tensor:
+def maybe_trans_nz(
+    weight: torch.Tensor,
+    customize_dtype: torch.dtype | None = None,
+    input_dtype: torch.dtype | None = None,
+) -> torch.Tensor:
     if not _should_trans_nz(weight):
         return weight
-    return torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ)
+    kwargs = {}
+    if customize_dtype is not None:
+        kwargs["customize_dtype"] = customize_dtype
+    if input_dtype is not None:
+        kwargs["input_dtype"] = input_dtype
+    return torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ, **kwargs)
+
+
+def maybe_trans_nz_with_scale(
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    transpose_dims: tuple[int, ...],
+    *,
+    customize_dtype: torch.dtype | None = None,
+    input_dtype: torch.dtype | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Transpose weight/scale and convert to FRACTAL_NZ when NZ applies.
+
+    Preserves the pre-NZ non-contiguous layout when NZ is disabled.
+    """
+    weight = weight.transpose(*transpose_dims)
+    weight_scale = weight_scale.transpose(*transpose_dims)
+    if not _should_trans_nz(weight):
+        return weight, weight_scale
+    weight = weight.contiguous()
+    weight_scale = weight_scale.contiguous()
+    kwargs = {}
+    if customize_dtype is not None:
+        kwargs["customize_dtype"] = customize_dtype
+    if input_dtype is not None:
+        kwargs["input_dtype"] = input_dtype
+    weight = torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ, **kwargs)
+    return weight, weight_scale
 
 
 def _round_up(x: int, align: int):
@@ -590,26 +696,6 @@ def setup_ascend_local_comm_res(local_rank: int, kv_transfer_config: Any | None)
     os.environ["ASCEND_LOCAL_COMM_RES"] = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
 
 
-@torch._dynamo.disable
-def _vllm_empty_device_matches_release(target_vllm_version: str) -> bool:
-    """Map untagged empty-device installs onto the matching release lane.
-
-    cpu-ut checks out vLLM by SHA with ``--no-tags`` and builds
-    ``VLLM_TARGET_DEVICE=empty``, so setuptools-scm reports
-    ``0.1.dev1+gSHA.empty`` instead of the tagged ``0.28.0``. Distinguish
-    v0.28.0 from main by where PCP lives: model_executor on 0.28.0, v1 ops
-    after the move on main.
-
-    Disabled under Dynamo: ``importlib.util.find_spec`` is marked skipped and
-    must not be traced when version gates run during torch.compile.
-    """
-    if target_vllm_version != "0.28.0":
-        return False
-    has_legacy_pcp = importlib.util.find_spec("vllm.model_executor.layers.attention.pcp") is not None
-    has_main_pcp = importlib.util.find_spec("vllm.v1.attention.ops.pcp") is not None
-    return has_legacy_pcp and not has_main_pcp
-
-
 @functools.cache
 @torch._dynamo.disable
 def vllm_version_is(target_vllm_version: str):
@@ -620,16 +706,11 @@ def vllm_version_is(target_vllm_version: str):
 
         vllm_version = vllm.__version__
     try:
-        # Strip any PEP 440 local version segment (e.g. "0.28.0+empty" built
+        # Strip any PEP 440 local version segment (e.g. "0.29.0+empty" built
         # with VLLM_TARGET_DEVICE=empty): it is a build artifact and must not
         # change the version identity for `vllm_version_is` comparisons.
-        vllm_version = vllm_version.split("+")[0]
         parsed = Version(vllm_version)
-        if parsed == Version(target_vllm_version):
-            return True
-        if parsed.release[:2] == (0, 1) and parsed.dev is not None:
-            return _vllm_empty_device_matches_release(target_vllm_version)
-        return False
+        return Version(parsed.public) == Version(target_vllm_version)
     except InvalidVersion:
         raise ValueError(
             f"Invalid vllm version {vllm_version} found. A dev version of vllm "
@@ -645,8 +726,6 @@ def get_kv_cache_tensor_layers(kv_cache_tensor) -> list[str]:
     vLLM #51718 renamed the `shared_by` field to `layers` and introduced a
     required `layer_stride` on vLLM main. Gate by release vs main lane.
     """
-    if vllm_version_is("0.28.0"):
-        return kv_cache_tensor.shared_by
     return kv_cache_tensor.layers
 
 
@@ -731,6 +810,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     from vllm_ascend.ops.bailing_moe_linear_attn import AscendBailingMoELinearAttention
     from vllm_ascend.ops.conv import AscendConv3dLayer
     from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
+    from vllm_ascend.ops.fused_moe.gate_linear import AscendGateLinear
     from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
     from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
     from vllm_ascend.ops.layernorm import AscendFusedRMSNormGated, AscendGemmaRMSNorm, AscendRMSNorm, AscendRMSNormGated
@@ -789,8 +869,9 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "BailingMoELinearAttention": AscendBailingMoELinearAttention,
         "MoERunner": AscendMoERunner,
         "RoutedExperts": AscendRoutedExperts,
+        "GateLinear": AscendGateLinear,
     }
-    if not vllm_version_is("0.28.0"):
+    if not vllm_version_is("0.29.0"):
         from vllm_ascend.ops.kimi_mla import AscendKimiK3MultiHeadLatentAttention
 
         REGISTERED_ASCEND_OPS["KimiK3MultiHeadLatentAttentionWrapper"] = AscendKimiK3MultiHeadLatentAttention
@@ -802,10 +883,6 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
             vllm_config = get_current_vllm_config()
         except AssertionError:
             vllm_config = None
-    if vllm_config is not None and vllm_config.model_config.is_deepseek_mla:
-        from vllm_ascend.ops.fused_moe.gate_linear import AscendGateLinear
-
-        REGISTERED_ASCEND_OPS["GateLinear"] = AscendGateLinear
 
     # Override selected ops when the compatibility implementations are required.
     if get_current_hardware_profile().supports(HardwareCapability.COMPATIBILITY_OP_IMPLEMENTATIONS):
@@ -974,6 +1051,19 @@ def has_rope(vllm_config: VllmConfig):
     return _HAS_ROPE
 
 
+@contextmanager
+def super_kernel_scope(scope: str, enabled: bool):
+    if not enabled:
+        yield
+        return
+
+    torch.npu.super_kernel_scope_begin(scope)
+    try:
+        yield
+    finally:
+        torch.npu.super_kernel_scope_end(scope)
+
+
 def weak_ref_tensor(tensor: Any) -> Any:
     """
     Create a weak reference to a tensor.
@@ -1125,8 +1215,8 @@ def _compute_potential_max_tokens(vllm_config) -> int:
         if potential_max_tokens != compilation_config.max_cudagraph_capture_size:
             logger.warning_once(
                 "The max_cudagraph_capture_size (%d) is smaller than the potential max tokens required for "
-                "decode (%d). This may lead to suboptimal performance. Consider adjusting"
-                "max_cudagraph_capture_size or scheduler_config (max_num_batched_tokens or max_num_seqs)"
+                "decode (%d). This may lead to suboptimal performance. Consider adjusting "
+                "max_cudagraph_capture_size or scheduler_config (max_num_batched_tokens or max_num_seqs) "
                 "to ensure max_cudagraph_capture_size can accommodate the decode workload. For more details, "
                 "see the issue #8240(https://github.com/vllm-project/vllm-ascend/issues/8240).",
                 compilation_config.max_cudagraph_capture_size,
@@ -1220,11 +1310,7 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
 def has_layer_idx(model_instance: torch.nn.Module) -> bool:
     if model_instance is None:
         return False
-
-    global _HAS_LAYER_IDX
-    if _HAS_LAYER_IDX is None:
-        _HAS_LAYER_IDX = hasattr(model_instance, "model") and hasattr(model_instance.model, "start_layer")
-    return _HAS_LAYER_IDX
+    return hasattr(model_instance, "model") and hasattr(model_instance.model, "start_layer")
 
 
 def refresh_block_size(vllm_config):
@@ -1296,6 +1382,23 @@ def dispose_layer(layer: Any):
         attr_value = getattr(layer, attr_name)
         if isinstance(attr_value, torch.Tensor):
             dispose_tensor(attr_value)
+
+
+def is_rl_weight_update_enabled(vllm_config: VllmConfig) -> bool:
+    """Whether this deployment takes part in an RL weight update loop.
+
+    RL rollout workers receive weights through vLLM's layerwise reload, which
+    writes every checkpoint parameter back into the storage that exists when
+    the transaction starts. A parameter whose storage was released therefore
+    has no valid reload destination, so whoever would release it must keep it
+    while this returns ``True``.
+
+    Two switches mark such a deployment: the Ascend RL defaults
+    (``additional_config.rl_config.enabled``) and the upstream weight transfer
+    service (``--weight-transfer-config``), which is how a rollout worker
+    declares that a trainer may update its weights in place.
+    """
+    return get_ascend_config().rl_config.enabled or vllm_config.weight_transfer_config is not None
 
 
 def check_kv_extra_config(vllm_config):
@@ -1392,6 +1495,15 @@ def enable_dsa_cp() -> bool:
     from vllm_ascend.ascend_config import get_ascend_config
 
     return get_ascend_config().enable_dsa_cp
+
+
+def enable_sfa_dcp_force_tmajor_restore() -> bool:
+    # Read from the validated AscendConfig singleton (additional-config key
+    # sfa_dcp_force_tmajor_restore), like enable_dsa_cp, so the value
+    # benefits from @config type validation (bool lax coercion).
+    from vllm_ascend.ascend_config import get_ascend_config
+
+    return get_ascend_config().sfa_dcp_force_tmajor_restore
 
 
 @lru_cache(maxsize=1)
@@ -1499,6 +1611,27 @@ def parse_layer_idx(prefix: str) -> int | None:
     """Extract the layer index from a module prefix string like 'model.layers.0.self_attn'."""
     match = re.search(r"layers\.(\d+)", prefix)
     return int(match.group(1)) if match else None
+
+
+def is_mtp_layer(hf_config: Any, layer_name: str | None) -> bool:
+    """Whether ``layer_name`` belongs to an MTP/nextn layer rather than the backbone.
+
+    MTP layers live past the backbone in two naming styles: an explicit
+    ``mtp`` segment, or a layer index at or beyond ``num_hidden_layers``.
+    Callers that need a bounded range can also consult
+    ``num_nextn_predict_layers``; this helper answers the coarser
+    "is this layer part of the model's speculative head" question.
+    """
+    layer_name = layer_name or ""
+    num_hidden_layers = getattr(hf_config, "num_hidden_layers", None)
+    if not isinstance(num_hidden_layers, int):
+        return False
+    if ".mtp." in f".{layer_name}.":
+        return True
+    layer_id = parse_layer_idx(layer_name)
+    if layer_id is None:
+        return False
+    return layer_id >= num_hidden_layers
 
 
 def get_compressed_pos_and_indices(
@@ -1632,10 +1765,10 @@ def get_rotation_path(vllm_config: VllmConfig) -> Path | None:
     if quant_config is None:
         return None
     target_model_path = vllm_config.model_config.model
+    quant_description = getattr(quant_config, "quant_description", None) or {}
     try:
-        quant_description = quant_config.quant_description
         rotation_relative_path = quant_description["optional"]["quarot"]["rotation_map"]["global_rotation"]
-    except KeyError:
+    except (KeyError, TypeError):
         return None
     return Path(target_model_path) / rotation_relative_path
 

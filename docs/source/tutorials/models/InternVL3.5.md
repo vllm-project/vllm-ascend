@@ -18,10 +18,12 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-require 1 Atlas 800 A3 (64GB × 16) node:
+|  Weight Version                       | Hardware Requirements           | Download Links |
+|---------------------------------------|---------------------------------|----------------|
+| `InternVL3_5-38B-w8a8`                | 1 Atlas 800 A3 (64GB × 16) node | [ModelScope](https://modelscope.cn/models/Eco-Tech/InternVL3_5-38B-w8a8) |
+| `InternVL3_5-241B-A28B-w8a8`          | 1 Atlas 800 A3 (64GB × 16) node | [ModelScope](https://modelscope.cn/models/Eco-Tech/InternVL3_5-241B-A28B-w8a8) |
 
-- `InternVL3_5-38B-w8a8`: requires 1 Atlas 800 A3 (64GB × 16) node [Download model weight](https://modelscope.cn/models/Eco-Tech/InternVL3_5-38B-w8a8)
-- `InternVL3_5-241B-A28B-w8a8`: requires 1 Atlas 800 A3 (64GB × 16) node [Download model weight](https://modelscope.cn/models/Eco-Tech/InternVL3_5-241B-A28B-w8a8)
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ## 4 Installation
 
@@ -102,7 +104,8 @@ In addition, if you don't want to use the docker image as above, you can also bu
     export VLLM_USE_V1=1
     export VLLM_TORCH_PROFILER_WITH_STACK=0
     export HCCL_BUFFSIZE=1536
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/InternVL3_5-38B-w8a8/ \
         --port 2002 \
         --served-model-name internvl3_5 \
@@ -143,7 +146,8 @@ In addition, if you don't want to use the docker image as above, you can also bu
     export VLLM_USE_V1=1
     export VLLM_TORCH_PROFILER_WITH_STACK=0
     export HCCL_BUFFSIZE=1536
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/InternVL3_5-241B-A28B-w8a8/ \
         --port 2001 \
         --served-model-name internvl3_5 \

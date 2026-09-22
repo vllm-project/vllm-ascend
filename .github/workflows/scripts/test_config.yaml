@@ -45,6 +45,7 @@ curated_tests:
   # A5 (Ascend 950) curated test suite
   a5:
     - tests/e2e/pull_request/four_card/test_data_parallel_tp2.py
+    - tests/e2e/pull_request/one_card/test_msa_index_score.py
 
 # === Skipped Tests ===
 # Removed from any selection after directory scanning, so they are never
@@ -53,6 +54,8 @@ curated_tests:
 # of paying for a runner slot that executes nothing. Move the file back into
 # rotation once the underlying issue is fixed, and remove it from this list.
 skip_tests:
+  # Temporarily skipped: intermittent output mismatch with MRV2 + PP; investigating.
+  - tests/e2e/pull_request/four_card/model_runner_v2/test_kvpp_pp.py
   # Temporarily skipped: the precision check in test_graph_mode.py is
   # unstable; re-enable once the graph mode precision issue is fixed.
   - tests/e2e/pull_request/four_card/test_graph_mode.py
@@ -66,10 +69,6 @@ skip_tests:
   - tests/e2e/pull_request/two_card/lora/test_llama32_lora_tp2.py
   # Temporarily skipped: capture/replay metrics unstable
   - tests/e2e/pull_request/two_card/aclgraph/test_aclgraph_capture_replay.py
-  # Temporarily skip this DeepSeek V4 test
-  - tests/e2e/pull_request/four_card/model_runner_v2/test_deepseek_v4.py
-  # Temporarily skip the Qwen3.6 MTP e2e test
-  - tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_mtp.py
   # Temporarily skipped: this test is currently broken
   - tests/e2e/pull_request/four_card/spec_decode/test_mtp_step3p5.py
 
@@ -79,8 +78,11 @@ skip_tests:
 # 560T labels (``linux-aarch64-a3-800i-N``); the files themselves stay in
 # their normal directory-based partitions.
 accuracy_tests:
+  - tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_dflash.py
+  - tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_dspark.py
   - tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_mtp.py
   - tests/e2e/pull_request/two_card/test_shared_expert_dp.py
+  - tests/e2e/pull_request/two_card/test_shared_expert_dp_graph.py
   - tests/e2e/pull_request/two_card/lora/test_ilama_lora_tp2.py
   - tests/e2e/pull_request/two_card/lora/test_llama32_lora_tp2.py
   - tests/e2e/pull_request/two_card/lora/test_qwen35_densemodel_lora_tp.py

@@ -4,9 +4,9 @@
 
 |产品      | 是否支持 |
 |:----------------------------|:-----------:|
-|<term>Ascend 950PR/Ascend 950DT</term>|      √     |
-|<term>Atlas A3 训练系列产品/Atlas A3 推理系列产品</term>|      √     |
-|<term>Atlas A2 训练系列产品/Atlas A2 推理系列产品</term>|      √     |
+|<term>Ascend 950PR&950DT 系列产品</term>|      √     |
+|<term>Atlas A3 系列产品</term>|      √     |
+|<term>Atlas A2 系列产品</term>|      √     |
 |<term>Atlas 200I/500 A2 推理产品</term>|      ×     |
 |<term>Atlas 推理系列产品</term>|      ×     |
 |<term>Atlas 训练系列产品</term>|      ×     |
@@ -238,10 +238,10 @@
 - block_size取值为16的倍数，最大支持1024。
 - 参数query、key的数据类型应保持一致。
 - 参数weights不为`float32`时，参数query、key、weights的数据类型应保持一致。
-- Ascend 950PR/Ascend 950DT：
+- Ascend 950PR&950DT 系列产品：
     - query N1仅支持8、16、24、32、64。
     - 参数weights不支持`float32`类型。
-- A3 训练系列产品/Atlas A3 推理系列产品：
+- Atlas A3 系列产品：
     - query N1支持小于等于64。
 
 ## 调用示例

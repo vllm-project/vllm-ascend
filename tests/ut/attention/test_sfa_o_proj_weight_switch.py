@@ -199,6 +199,7 @@ class TestAscendSFAOProjWeightSwitch(TestBase):
         impl.q_lora_rank = 8
         impl.kv_lora_rank = 4
         impl.qk_rope_head_dim = 2
+        impl.g_proj = None
         impl.layer_name = "layers.0.attn"
 
         q_c = MagicMock()
@@ -241,7 +242,7 @@ class TestAscendSFAOProjWeightSwitch(TestBase):
 
         with (
             patch("vllm_ascend.attention.sfa_v1.wait_for_kv_layer_from_connector"),
-            patch("vllm_ascend.attention.sfa_v1.record_attention_compute_start") as record_gate,
+            patch("vllm_ascend.attention.sfa_v1.attention_transfer_window") as transfer_window,
             patch("vllm_ascend.attention.sfa_v1.maybe_save_kv_layer_to_connector") as save_layer,
             patch("vllm_ascend.attention.sfa_v1.notify_kv_cache_written") as notify_cache_written,
         ):
@@ -256,7 +257,7 @@ class TestAscendSFAOProjWeightSwitch(TestBase):
         self.assertIs(result, finalized_output)
         impl._finalize_o_proj.assert_called_once_with(attn_output, output, True)
         notify_cache_written.assert_called_once_with(impl.layer_name)
-        record_gate.assert_called_once_with()
+        transfer_window.assert_called_once_with()
         save_layer.assert_called_once_with(impl.layer_name, list(kv_cache))
         impl._prepare_native_hidden_states.assert_called_once()
         impl.o_proj.assert_not_called()

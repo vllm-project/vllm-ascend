@@ -66,16 +66,16 @@ DeepSeek-V3.2 是一种稀疏注意力模型。其主要架构与 DeepSeek-V3.1 
 
 **资料写作要求：**
 
-- 说明部署所需的硬件资源、软件环境和模型文件。
-- 需同时提供 `HuggingFace` 和 `ModelScope` 两个来源的权重下载链接。
+- 说明部署所需的硬件资源和模型文件。
+- 需同时提供 `Hugging Face` 和 `ModelScope` 两个来源的权重下载链接。
 - 路径说明：提供下载链接后，须增加路径说明示例，明确提示用户记录实际存放路径，并说明该路径将在后续部署命令中使用。
 
 **示例：**
 
 | 权重版本 | 硬件要求 |       权重链接      |
 |---------|---------|---------------------|
-| `DeepSeek-V3.2-Exp-W8A8` |  1 台 Atlas 800 A3（64GB × 16）节点或 2 台 Atlas 800 A2（64GB × 8）节点 | [Modelscope](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-Exp-W8A8) \| [HuggingFace](https://huggingface.co/deepseek-ai/DeepSeek-V3.2) |
-| `DeepSeek-V3.2-W8A8` | 1 台 Atlas 800 A3（64GB × 16）节点或 2 台 Atlas 800 A2（64GB × 8）节点 | [Modelscope](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-W8A8/) \|    [HuggingFace](https://huggingface.co/deepseek-ai/DeepSeek-V3.2) |
+| `DeepSeek-V3.2-Exp-W8A8` |  1 台 Atlas 800 A3（64GB × 16）节点或 2 台 Atlas 800 A2（64GB × 8）节点 | [ModelScope](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-Exp-W8A8) \| [Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V3.2) |
+| `DeepSeek-V3.2-W8A8` | 1 台 Atlas 800 A3（64GB × 16）节点或 2 台 Atlas 800 A2（64GB × 8）节点 | [ModelScope](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-W8A8/) \|    [Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V3.2) |
 
 > **路径说明：** 请将模型权重下载至您指定的目录，并记录该路径。例如：`/root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8`，后续部署命令中将使用 `<YOUR_MODEL_PATH>` 占位符，请替换为此处记录的路径。
 
@@ -116,13 +116,15 @@ DeepSeek-V3.2 是一种稀疏注意力模型。其主要架构与 DeepSeek-V3.1 
 
 **示例：**  略
 
-## 5 在线服务化部署（Online service deployment）
+## 5 在线服务化部署 {: #5-online-service-deployment }
 
-**资料写作要求（以下要求适用于5.1、5.2及5.3各子章节）：**
+**资料写作要求（以下要求适用于第五章节的各子章节）：**
 
 - 在启动命令下方提供常见问题指引，如公共FAQ中已有描述可直接链接呈现。
 - 模型路径规范：部署命令中，模型路径须使用变量占位符 `<YOUR_MODEL_PATH>`，并注释提示用户根据3.1章节记录的路径替换该占位符。
+- **商发模型**的配置脚本需要和版本出口某个场景下最优性能保持一致（禁止使用未经验证调优的通用启动脚本）。
 - 若模型仅支持单一硬件系列（如仅支持Atlas 300I DUO），须在安装章节开头明确说明；若支持多硬件系列（如 A3/A2 系列），须使用标签页语法将它们分开展示，并按新机型优先的顺序排列。关于 MkDocs 与 Sphinx 框架在标签页语法上的具体差异，请参阅 [语法补充](template-supplement.md#3-tabs)。
+- 提供成功启动时的输出样例
 
 ### 5.1 单机在线部署
 
@@ -130,7 +132,6 @@ DeepSeek-V3.2 是一种稀疏注意力模型。其主要架构与 DeepSeek-V3.1 
 
 - 说明单机部署的架构特点与适用场景
 - 提供启动命令模板和关键参数说明
-- 提供服务验证方法（如 curl 命令）及预期结果，说明成功特征（如 200 OK），**并提供完整的回显信息示例**。
 
 **示例：**
 
@@ -142,41 +143,50 @@ DeepSeek-V3.2 是一种稀疏注意力模型。其主要架构与 DeepSeek-V3.1 
 # 请将 <YOUR_MODEL_PATH> 替换为您在3.1节中记录的实际存放路径
 vllm serve <YOUR_MODEL_PATH> \
   --port 8000 \
-  --served-model-name DeepSeek-V3.2-W8A8 \
+  --served-model-name DeepSeek-V3.2-W8A8
+```
+
+成功启动时输出为：
+
+```text
+INFO:     Started server process
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
 ```
 
 常见问题提示：如遇xxx问题，请参考[公共FAQ](../faqs.md)进行检查。
 
-服务验证：
+### 5.2 多机在线部署
 
-```bash
-# 略
-```
+**资料写作要求：**
 
-预期结果：略（按实际输出书写即可）。
+- 说明多机部署的架构特点与适用场景。
+- 提供各节点的启动流程、关键配置及部署验证说明。
+  
+**示例：** 略
 
-### 5.2 多机PD分离部署
+### 5.3 多机PD分离部署
 
 **资料写作要求：**
 
 - 说明PD分离架构的原理与适用场景。
-- 提供启动流程、关键配置及**部署验证说明**，并注明性能指标。
+- 提供启动流程、关键配置及部署验证说明。
 
 **示例：** 略
 
-### 5.3 特殊部署形态（可选）
+### 5.4 特殊部署形态（可选）
 
 **资料写作要求：**
 
 - 若模型存在非标准部署形态（如embedding模型的离线批处理、reranker模型的低延迟在线服务等），需在文档中明确体现对应部署方案。
-- 可参考本章5.1和5.2节进行扩展。
+- 可参考本章5.1、5.2、5.3节进行扩展。
 
 ## 6 功能验证
 
 **资料写作要求：**
 
-- 指导用户如何在服务启动后，通过简单接口测试模型的基本功能是否正常。
-- 提供预期结果，说明成功特征（如 HTTP 200、返回包含 choices 字段的 JSON），**并提供完整的回显信息示例**。
+- 指导用户如何在服务启动后，通过发送推理请求验证模型功能是否正常、推理结果是否正确。
+- 说明预期输出特征（如返回包含 choices 字段且内容合理），**并提供完整的回显信息示例**。
 
 **示例：**
 
@@ -254,26 +264,15 @@ lm_eval \
 
 **资料写作要求：**
 
-若该模型存在特有优化，需总结针对该模型的关键优化技术和调参经验。
+针对模型特有优化，需总结其关键优化技术和调参经验（若第五章节关键参数介绍已明确说明，可省略）。
 
 **示例：**
-
-**默认启用的优化**
-
-以下优化默认启用，无需额外配置：
-
-| 优化技术 | 技术原理 | 性能收益 |
-| ------- | ------- | -------- |
-| Rope优化 | 位置编码的cos_sin_cache及索引操作仅在第一层执行，后续层直接复用 | 减少解码阶段重复计算，加速推理 |
-| AddRMSNormQuant融合 | 将逐地址多尺度归一化与量化操作合并为单算子 | 优化内存访问模式，提升计算效率 |
-| Zero-like Elimination | 移除Attention前向中的非必要零张量操作 | 减少内存占用，提高矩阵运算效率 |
-| FullGraph优化 | 通过`compilation_config={"cudagraph_mode":"FULL_DECODE_ONLY"}`将整个解码图一次性捕获重放 | 显著降低调度延迟，稳定多设备性能 |
-
 **需显式开启的优化**
 
-| 优化技术 | 适用场景 | 启用方式 | 技术原理 | 注意事项 |
-| ------- | -------- | ------- | ------- | ------- |
-| Matmul-ReduceScatter融合 | 大型分布式环境 | 启用sequence parallelism后自动开启 | 将矩阵乘法与Reduce-Scatter操作融合，实现流水线并行处理 | 同sequence parallelism，有阈值保护 |
+| 优化技术      | 适用场景                 | 启用方式                                 | 注意事项                                      |
+| ------------ | ----------------------- | ---------------------------------------- | -------------------------------------------- |
+| FlashComm_v1 | A3预填充节点 / 共置节点   | `export VLLM_ASCEND_ENABLE_FLASHCOMM1=1` | 当 `layer_sharding` 包含 `o_proj` 时不可用    |
+| MLAPO        | A3共置高吞吐 / PD解码节点 | `export VLLM_ASCEND_ENABLE_MLAPO=1`      | 消耗更多NPU内存；在PD场景中仅需在解码节点上启用  |
 
 #### 9.2.2 通用调优参考
 

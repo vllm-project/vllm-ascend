@@ -31,15 +31,16 @@ from vllm.model_executor.utils import replace_parameter
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 from vllm_ascend.lora.fused_moe import sync_lora_context
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
+from vllm_ascend.ops.fused_moe.dataclass.shared_experts import RoutedMoEMilestones
 from vllm_ascend.ops.fused_moe.force_eplb import get_force_eplb_topk
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult
 from vllm_ascend.ops.fused_moe.moe_utils import get_moe_num_logical_experts
-from vllm_ascend.ops.fused_moe.shared_experts import FusedMoEEvents
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
 
@@ -118,11 +119,20 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
                 layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
             if use_megamoe or self.dynamic_eplb:
-                layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
-                layer.w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
-                del layer.w13_weight
-                del layer.w2_weight
-                torch.npu.empty_cache()
+                if use_megamoe and get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_MXFP):
+                    logger.warning_once(
+                        "Unquantized MoE weights are not supported by the A5 mega moe "
+                        "(FUSED_MC2) operator. Falling back to the original MoE "
+                        "computation for this layer."
+                    )
+                    layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
+                    layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
+                else:
+                    layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
+                    layer.w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
+                    del layer.w13_weight
+                    del layer.w2_weight
+                    torch.npu.empty_cache()
         else:
             layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
             layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
@@ -378,6 +388,14 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         if not self._use_v2_model_runner:
             self.init_eplb(n_shared_experts)
         self.return_with_event = False
+
+        runner_type = getattr(vllm_config.model_config, "runner_type", None)
+        if runner_type is None:
+            logger.warning_once("The runner_type is not set when initializing the model config in the prefill stage")
+        else:
+            if vllm_config.model_config.runner_type == "draft":
+                draft_model_config = vllm_config.speculative_config.draft_model_config
+                draft_model_config.draft_moe_quant_type = self.quant_type
 
     def get_expert_weights(self) -> Iterable[torch.Tensor]:
         try:
@@ -703,12 +721,10 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             sync_lora_context(self.quant_method, None)
 
         if self.return_with_event:
-            return routed_out, FusedMoEEvents(
-                before_routed_experts=None,
-                after_routed_experts=None,
-                before_dispatch=fused_experts_results.before_dispatch_evt,
-                before_gmm2=fused_experts_results.before_gmm2_evt,
-                before_combine=fused_experts_results.before_combine_evt,
+            return routed_out, RoutedMoEMilestones(
+                routed_dispatch_start=fused_experts_results.before_dispatch_evt,
+                routed_gmm2_start=fused_experts_results.before_gmm2_evt,
+                routed_combine_start=fused_experts_results.before_combine_evt,
             )
 
         # The vLLM FusedMoE forward_impl does not return events.

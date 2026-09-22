@@ -45,7 +45,12 @@ class SharedSource:
         self,
         _provider: ParamProvider,
     ) -> Sequence[Params]:
-        return self.params
+        layer_name = getattr(_provider, "layer_name", None)
+        return [
+            {k: v for k, v in param.items() if k != "layer_name"}
+            for param in self.params
+            if layer_name == param.get("layer_name")
+        ]
 
 
 _ACTIVE_GRAPH: ContextVar["UpdatableGraph | None"] = ContextVar("capturing_updatable_graph", default=None)
@@ -59,22 +64,12 @@ class GraphUpdateTask:
     provider_index: int
     handle: Any
     event: Any
-    # This is specially designed for PA.
-    updated_workspace: bool = False
 
     def bind(self, params: Params) -> "GraphUpdateTask":
         runtime_kwargs = {**self.kwargs, **params}
         return replace(self, kwargs=runtime_kwargs)
 
     def apply(self, update_stream) -> None:
-        if self.operation == torch_npu._npu_paged_attention and not self.updated_workspace:
-            # The workspace is only updated on the first layer.
-            self.updated_workspace = True
-            workspace_kwargs = self.kwargs.copy()
-            workspace_kwargs.pop("workspace")
-            workspace = torch_npu._npu_paged_attention_get_workspace(**workspace_kwargs)
-            self.kwargs["workspace"] = workspace
-
         torch.npu.graph_task_update_begin(update_stream, self.handle)
         self.operation(**self.kwargs)
         torch.npu.graph_task_update_end(update_stream)
@@ -109,18 +104,17 @@ class UpdatableGraph(torch.npu.NPUGraph):
         factory: Callable[[], Any],
         use_max_workspace: bool = False,
     ) -> Any:
+        if key not in self.capture_resources:
+            self.capture_resources[key] = factory()
         if use_max_workspace:
             # Some models mix attention layer shapes under the same graph size.
             # During capture, keep the largest required workspace for that size.
             candidate_workspace = factory()
-        if key not in self.capture_resources:
-            self.capture_resources[key] = factory()
-        if (
-            use_max_workspace
-            and candidate_workspace.numel() * candidate_workspace.element_size()
-            > self.capture_resources[key].numel() * self.capture_resources[key].element_size()
-        ):
-            self.capture_resources[key] = candidate_workspace
+            if (
+                candidate_workspace.numel() * candidate_workspace.element_size()
+                > self.capture_resources[key].numel() * self.capture_resources[key].element_size()
+            ):
+                self.capture_resources[key] = candidate_workspace
         return self.capture_resources[key]
 
     def register_task(
@@ -166,7 +160,17 @@ class UpdatableGraph(torch.npu.NPUGraph):
     ) -> None:
         logger.debug_once("Updating host-side attention metadata with UpdatableGraph.")
         with torch.npu.stream(update_stream):
+            # This is specially designed for PA.
+            ws_buffer: dict[Hashable, Any] = {}
             for task in resolved_tasks:
+                if task.operation == torch_npu._npu_paged_attention:
+                    ws_key = _get_ws_key(task.kwargs)
+                    if ws_buffer.get(ws_key) is None:
+                        ws_kwargs = task.kwargs.copy()
+                        ws_kwargs.pop("workspace")
+                        workspace = torch_npu._npu_paged_attention_get_workspace(**ws_kwargs)
+                        ws_buffer[ws_key] = workspace
+                    task.kwargs["workspace"] = ws_buffer[ws_key]
                 task.apply(update_stream)
 
 
@@ -191,3 +195,23 @@ def get_capture_resource(
     if graph is None:
         return factory()
     return graph.get_capture_resource(key, factory, use_max_workspace)
+
+
+def _get_ws_key(kwargs):
+    def _sig(t: Any) -> tuple | None:
+        if t is None:
+            return (None, None)
+        return (t.shape, t.dtype)
+
+    return (
+        kwargs["context_lens"].data_ptr(),
+        tuple(kwargs["context_lens"].shape),
+        _sig(kwargs["query"]),
+        _sig(kwargs["key_cache"]),
+        _sig(kwargs["value_cache"]),
+        _sig(kwargs["block_table"]),
+        _sig(kwargs["out"]),
+        kwargs["num_kv_heads"],
+        kwargs["num_heads"],
+        kwargs["scale_value"],
+    )

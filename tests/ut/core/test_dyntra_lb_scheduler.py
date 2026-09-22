@@ -549,12 +549,11 @@ def test_dyntra_lb_forwards_block_state_and_encoder_cache_metadata(monkeypatch):
         "SchedulerOutput",
         RecordingSchedulerOutput,
     )
-    if not vllm_version_is("0.28.0"):
-        monkeypatch.setattr(
-            scheduler.kv_cache_manager,
-            "take_boundary_state_offloads",
-            lambda: boundary_state_offloads,
-        )
+    monkeypatch.setattr(
+        scheduler.kv_cache_manager,
+        "take_boundary_state_offloads",
+        lambda: boundary_state_offloads,
+    )
     monkeypatch.setattr(
         scheduler.encoder_cache_manager,
         "get_manager_metadata",
@@ -564,11 +563,7 @@ def test_dyntra_lb_forwards_block_state_and_encoder_cache_metadata(monkeypatch):
 
     def build_metadata(connector, output):
         assert connector is scheduler.connector
-        if vllm_version_is("0.28.0"):
-            assert "kv_connector_block_state" not in vars(output)
-            block_states.append(None)
-        else:
-            block_states.append(output.kv_connector_block_state)
+        block_states.append(output.kv_connector_block_state)
         return connector_metadata
 
     monkeypatch.setattr(scheduler, "_build_kv_connector_meta", build_metadata)
@@ -576,13 +571,12 @@ def test_dyntra_lb_forwards_block_state_and_encoder_cache_metadata(monkeypatch):
     scheduler_output = scheduler.schedule()
 
     assert len(block_states) == 1
-    if vllm_version_is("0.28.0"):
-        assert block_states == [None]
-        assert "kv_connector_block_state" not in vars(scheduler_output)
-    else:
-        assert block_states[0].boundary_state_offloads is boundary_state_offloads
+    assert block_states[0].boundary_state_offloads is boundary_state_offloads
+    if vllm_version_is("0.29.0"):
         assert block_states[0].block_ids == {}
-        assert scheduler_output.kv_connector_block_state is None
+    else:
+        assert block_states[0].req_ids == set()
+    assert scheduler_output.kv_connector_block_state is None
     assert scheduler_output.kv_connector_metadata is connector_metadata
     assert scheduler_output.ec_manager_metadata is encoder_cache_metadata
 

@@ -153,7 +153,7 @@ In the PD separation scenario, we provide an optimized configuration. You can us
           "kv_buffer_device": "npu",
           "kv_role": "kv_producer",
           "kv_parallel_size": "1",
-          "kv_port": "20001",
+          "kv_port": "20001"
         }' \
         --additional-config '{"enable_weight_nz_layout":true,"enable_prefill_optimizations":true}'
     ```
@@ -216,7 +216,7 @@ In the PD separation scenario, we provide an optimized configuration. You can us
             "kv_buffer_device": "npu",
             "kv_role": "kv_consumer",
             "kv_parallel_size": "1",
-            "kv_port": "20001",
+            "kv_port": "20001"
             }' \
         --additional-config '{"enable_weight_nz_layout":true}'
     ```
@@ -407,7 +407,7 @@ In the PD separation scenario, we provide an optimized configuration.
           "kv_buffer_device": "npu",
           "kv_role": "kv_producer",
           "kv_parallel_size": "1",
-          "kv_port": "20001",
+          "kv_port": "20001"
         }'
     ```
 
@@ -428,7 +428,7 @@ In the PD separation scenario, we provide an optimized configuration.
           "kv_buffer_device": "npu",
           "kv_role": "kv_consumer",
           "kv_parallel_size": "1",
-          "kv_port": "20001",
+          "kv_port": "20001"
         }'
     ```
 

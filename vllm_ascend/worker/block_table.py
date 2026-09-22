@@ -10,6 +10,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.utils import CpuGpuBuffer
 
+from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
 from vllm_ascend.ops.triton.compute_slot_mapping import (
     _compute_slot_mapping_kernel,
@@ -48,6 +49,15 @@ class BlockTable:
         self.device = device
         self.physical_block_size = block_size
         self.is_mamba_group = is_mamba_group
+        self.is_circular = kv_cache_group is not None and is_circular_kv_cache_spec(kv_cache_group.kv_cache_spec)
+        if self.is_circular:
+            if self.dcp_world_size != 1:
+                raise ValueError("Circular tail caches do not support context parallelism.")
+            # A request owns one physical ring. Never split it into ordinary
+            # logical pages, even if another backend advertises smaller sizes.
+            kernel_sizes = [block_size]
+            self.max_num_blocks_per_req = max_num_blocks_per_req = 1
+        self.is_circular_group = kv_cache_group is not None and is_circular_kv_cache_spec(kv_cache_group.kv_cache_spec)
 
         # If kernel_sizes is None or [0], use physical block size (no splitting)
         if kernel_sizes is None or kernel_sizes == [0]:
@@ -144,6 +154,9 @@ class BlockTable:
         query_start_loc: torch.Tensor,
         positions: torch.Tensor,
     ) -> None:
+        if self.is_circular_group:
+            self.slot_mapping.gpu.fill_(PAD_SLOT_ID)
+            return
         num_tokens = positions.shape[0]
         total_cp_world_size = self.dcp_world_size
         total_cp_rank = self.dcp_rank
@@ -165,6 +178,7 @@ class BlockTable:
                 "PAD_ID": PAD_SLOT_ID,
                 "TILE_BLOCK_SIZE": TILE_BLOCK_SIZE,
                 "BLOCK_TABLE_WINDOW_SIZE": _next_power_of_2(cdiv(TILE_BLOCK_SIZE, self.block_size) + 1),
+                "IS_CIRCULAR": self.is_circular,
             }
 
             _compute_slot_mapping_kernel[(num_reqs + 1,)](
@@ -191,6 +205,9 @@ class BlockTable:
         # here because M (max_model_len) is not necessarily divisible by
         # block_size.
 
+        if self.is_circular_group:
+            self.slot_mapping.gpu.fill_(PAD_SLOT_ID)
+            return
         if self.dcp_world_size > 1:
             if not isinstance(req_indices, torch.Tensor):
                 req_indices = torch.from_numpy(req_indices)
@@ -210,7 +227,7 @@ class BlockTable:
             assert self.block_size == self.kernel_sizes[0]
             # IMPORTANT: In hybrid mode, positions are in logical block space,
             # but we need to map them to the correct logical block table indices
-            logical_block_idx = positions // self.block_size
+            logical_block_idx = np.zeros_like(positions) if self.is_circular else positions // self.block_size
 
             # Account for the expanded logical table
             # (always needed with unified tensor)
@@ -227,6 +244,8 @@ class BlockTable:
                 block_offsets,
                 out=self.slot_mapping.np[: req_indices.shape[0]],
             )
+            if self.is_circular:
+                self.slot_mapping.np[: req_indices.shape[0]][positions < 0] = PAD_SLOT_ID
             self.slot_mapping.copy_to_gpu(req_indices.shape[0])
 
     def _compute_dcp_slot_mapping(
@@ -422,6 +441,11 @@ class MultiGroupBlockTable:
                 dtype=torch.int32,
                 device=device,
             )
+            self._fused_is_circular = torch.tensor(
+                [block_table.is_circular for block_table in active_block_tables],
+                dtype=torch.int32,
+                device=device,
+            )
             self._fused_min_block_size = min(block_table.block_size for block_table in active_block_tables)
 
     def append_row(self, block_ids: tuple[list[int], ...], row_idx: int) -> None:
@@ -467,6 +491,7 @@ class MultiGroupBlockTable:
                 self._fused_block_sizes,
                 self._fused_min_block_size,
                 pad_id=PAD_SLOT_ID,
+                is_circular_ptr=self._fused_is_circular,
             )
             return
 

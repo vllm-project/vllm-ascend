@@ -96,17 +96,6 @@ deployment:
         }'
 
 benchmarks:
-  perf:
-    case_type: performance
-    dataset_path: vllm-ascend/GSM8K-in3500-bs2800
-    request_conf: vllm_api_stream_chat
-    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 2800
-    max_out_len: 1500
-    batch_size: 700
-    request_rate: 11.2
-    baseline: 2424.6267
-    threshold: 0.97
   acc:
     case_type: accuracy
     dataset_path: vllm-ascend/gsm8k-lite
@@ -116,3 +105,15 @@ benchmarks:
     batch_size: 512
     baseline: 97
     threshold: 10
+  perf:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 2800
+    max_out_len: 1500
+    batch_size: 700
+    request_rate: 11.2
+    # 2066.1437+2152.3291+2275.63+2153.7177
+    baseline: 2161.95
+    threshold: 0.97

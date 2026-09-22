@@ -13,9 +13,11 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
     QOS_VALUE_MAX,
     QOS_VALUE_MIN,
     Backend,
+    BatchResultShapeError,
     get_scheduler_device_id,
     parse_qos_from_extra_config,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import LayerwiseKeyBuilder
 
 
 def _is_device_sdma() -> bool:
@@ -76,6 +78,26 @@ class MmcDirect(Enum):
 # tests/ut/distributed/ascend_store/test_backend.py locks the key formats
 # with snapshot assertions.
 
+LAYERWISE_DATA_PLANE = "gva"
+
+
+def bind_layerwise_keys(
+    *,
+    vllm_config: Any,
+    kv_cache_config: Any,
+    model_name: str,
+    use_hybrid: bool,
+    grouped_block_size: list[int],
+) -> LayerwiseKeyBuilder:
+    """Bind GVA key identity behind the same interface as block-key stores."""
+    num_groups = len(grouped_block_size)
+    pp_size = vllm_config.parallel_config.pipeline_parallel_size
+
+    def make_key(group: int, block_hash: str, head: int, stage: int) -> str:
+        return make_full_key(model_name, group, block_hash, head, num_groups, stage, pp_size)
+
+    return LayerwiseKeyBuilder(make_key, pp_size)
+
 
 def extract_layout_config(extra_config: dict[str, Any]) -> dict[str, Any] | None:
     """Return the connector's extra config when it opts into the layerwise
@@ -96,6 +118,8 @@ def make_full_key(
     block_hash_hex: str,
     head_or_tp_rank: int,
     num_groups: int,
+    pp_rank: int = 0,
+    pp_size: int = 1,
 ) -> str:
     """Full-block key for the layerwise transfer.
 
@@ -103,10 +127,10 @@ def make_full_key(
     backward compatibility. Multi-group models include group_id
     (model@group_id@hash@rank) to distinguish groups.
     """
+    pp_tag = f"@pp{pp_rank}" if pp_size > 1 else ""
     if num_groups > 1:
-        return f"{model_name}@{group_id}@{block_hash_hex}@{head_or_tp_rank}"
-    else:
-        return f"{model_name}@{block_hash_hex}@{head_or_tp_rank}"
+        return f"{model_name}@{group_id}{pp_tag}@{block_hash_hex}@{head_or_tp_rank}"
+    return f"{model_name}{pp_tag}@{block_hash_hex}@{head_or_tp_rank}"
 
 
 def make_partial_key(
@@ -116,8 +140,11 @@ def make_partial_key(
     block_index: int,
     end_token: int,
     head_or_tp_rank: int,
+    pp_rank: int = 0,
+    pp_size: int = 1,
 ) -> str:
-    return f"{model_name}@partial@{req_id}@{group_id}@{block_index}@{end_token}@{head_or_tp_rank}"
+    pp_tag = f"@pp{pp_rank}" if pp_size > 1 else ""
+    return f"{model_name}@partial@{req_id}@{group_id}@{block_index}@{end_token}{pp_tag}@{head_or_tp_rank}"
 
 
 def make_hit_check_keys(
@@ -126,16 +153,17 @@ def make_hit_check_keys(
     block_hash_hex: str,
     num_ranks: int,
     num_groups: int,
+    pp_size: int = 1,
 ) -> list[str]:
     """All-rank keys for scheduler-side hit check.
 
-    Returns one key per head_or_tp_rank (ranks in the same put_step
-    group share one key for MLA).
+    Returns one key per PP stage and head_or_tp_rank.
     """
-    if num_groups > 1:
-        return [f"{model_name}@{group_id}@{block_hash_hex}@{h}" for h in range(num_ranks)]
-    else:
-        return [f"{model_name}@{block_hash_hex}@{h}" for h in range(num_ranks)]
+    return [
+        make_full_key(model_name, group_id, block_hash_hex, rank, num_groups, pp_rank, pp_size)
+        for pp_rank in range(pp_size)
+        for rank in range(num_ranks)
+    ]
 
 
 def _inject_device_ub_qos(extra_config: dict[str, Any] | None) -> None:
@@ -277,6 +305,23 @@ class MemcacheBackend(Backend):
             return []
         assert self.store is not None
         return self.store.batch_get_key_info(keys)
+
+    def batch_is_readable(self, keys: list[str]) -> list[bool]:
+        """Map valid MemCache GVA metadata to the common readability contract."""
+        if self._lazy_init and not self._store_initialized:
+            return [False] * len(keys)
+        key_infos = self.batch_get_key_info(keys)
+        if len(key_infos) != len(keys):
+            raise BatchResultShapeError(f"batch_get_key_info returned {len(key_infos)} results for {len(keys)} keys")
+        readable = []
+        for key_info in key_infos:
+            try:
+                size = int(key_info.size())
+                gvas = key_info.gva_list()
+                readable.append(size > 0 and bool(gvas) and int(gvas[0]) > 0)
+            except (AttributeError, IndexError, TypeError, ValueError) as exc:
+                raise BatchResultShapeError("batch_get_key_info returned invalid key metadata") from exc
+        return readable
 
     def batch_alloc(self, keys: list[str], sizes: list[int], lease_ttl_ms: int = 0) -> list[int]:
         self.ensure_initialized()
