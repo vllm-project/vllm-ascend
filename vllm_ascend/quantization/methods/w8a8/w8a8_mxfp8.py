@@ -577,7 +577,9 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
 class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
     """Linear method for DS original W8A8 mxfp(blocksize: 128 * 128) quantization.
 
-    scales are reorganize as blocksize 32 * 1 in process_weights_after_loading
+    Checkpoint block scales are expanded to the per-output, per-32 layout
+    consumed by ``npu_quant_matmul``. Both the original 128x128 export and
+    newer 32x32 DeepSeek V4.1 exports are supported.
     """
 
     model_dtype = None
@@ -618,7 +620,15 @@ class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
         else:
             layer.weight_scale.data = layer.weight_scale.data.view(torch.int32) >> 23 & 0xFF
             layer.weight_scale.data = layer.weight_scale.data.to(torch.uint8)
-        layer.weight_scale.data = layer.weight_scale.data.repeat_interleave(4, dim=1).repeat_interleave(128, dim=0)
+        if self.block_size % self.group_size != 0:
+            raise ValueError(
+                "DeepSeek MXFP8 weight block size must be divisible by the "
+                f"runtime group size, got block_size={self.block_size}, "
+                f"group_size={self.group_size}"
+            )
+        input_repeat = self.block_size // self.group_size
+        layer.weight_scale.data = layer.weight_scale.data.repeat_interleave(input_repeat, dim=1)
+        layer.weight_scale.data = layer.weight_scale.data.repeat_interleave(self.block_size, dim=0)
         n_dim, k_dim = layer.weight_scale.data.shape
         layer.weight_scale.data = layer.weight_scale.data.reshape(n_dim, k_dim // 2, 2)
         layer.weight.data = layer.weight.data.transpose(0, 1)

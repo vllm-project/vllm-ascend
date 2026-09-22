@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM projectx
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import sys
-from collections.abc import Mapping
+from collections import defaultdict, deque
+from collections.abc import Iterable, Mapping
 from math import lcm
+from typing import cast
 
 import vllm
 import vllm.envs as envs_vllm
@@ -25,6 +27,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     get_manager_for_kv_cache_spec,
 )
 from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
@@ -91,12 +94,125 @@ def _is_deepseek_v4_kv_cache_config(kv_cache_config: KVCacheConfig) -> bool:
     return any(_is_deepseek_v4_kv_cache_spec(group.kv_cache_spec) for group in kv_cache_config.kv_cache_groups)
 
 
+def _is_a5_packed_cache_config(kv_cache_config: KVCacheConfig) -> bool:
+    for group in kv_cache_config.kv_cache_groups:
+        spec = group.kv_cache_spec
+        nested = getattr(spec, "kv_cache_specs", None)
+        specs = nested.values() if isinstance(nested, Mapping) else (spec,)
+        if any(getattr(item, "cache_dtype_str", None) == "a5_mxfp8_bf16_scale" for item in specs):
+            return True
+    return False
+
+
 def _manager_spec(spec: KVCacheSpec) -> KVCacheSpec:
     # The scheduler normally unwraps uniform groups. Also accept the original
     # planner representation when constructing the coordinator directly.
     if isinstance(spec, UniformTypeKVCacheSpecs):
         return next(iter(spec.kv_cache_specs.values()))
     return spec
+
+
+class _GroupStableBlockPool(BlockPool):
+    """Keep packed physical pages in the cache group that first owns them.
+
+    A5 V4.1 cache groups are different typed views over the same physical page
+    slots. Reassigning a recycled page to another group is not graph-safe, so
+    free pages are reused only by their owning group; untouched pages remain
+    available to every group.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._owners = [-1] * self.num_gpu_blocks
+        self._unowned = deque(self.blocks[1:])
+        self._free_by_group: dict[int, deque[KVCacheBlock]] = defaultdict(deque)
+        self._queued_by_group: dict[int, set[int]] = defaultdict(set)
+
+    @staticmethod
+    def _is_free(block: KVCacheBlock) -> bool:
+        return (
+            block.ref_cnt == 0
+            and not block.is_null
+            and block.prev_free_block is not None
+            and block.next_free_block is not None
+        )
+
+    def get_new_blocks_for_group(self, num_blocks: int, group_id: int) -> list[KVCacheBlock]:
+        if num_blocks == 0:
+            return []
+        preferred: list[KVCacheBlock] = []
+        group_queue = self._free_by_group[group_id]
+        queued = self._queued_by_group[group_id]
+        while group_queue and len(preferred) < num_blocks:
+            block = group_queue.popleft()
+            if block.block_id not in queued:
+                continue
+            queued.remove(block.block_id)
+            if self._is_free(block):
+                preferred.append(block)
+        while self._unowned and len(preferred) < num_blocks:
+            block = self._unowned.popleft()
+            if self._owners[block.block_id] == -1 and self._is_free(block):
+                preferred.append(block)
+        if len(preferred) != num_blocks:
+            raise ValueError(
+                f"Cache group {group_id} needs {num_blocks} stable pages, "
+                f"but only {len(preferred)} owned or unowned pages are free"
+            )
+        for block in preferred:
+            self.free_block_queue.remove(block)
+        self.free_block_queue.prepend_n(preferred)
+        blocks = super().get_new_blocks(num_blocks)
+        for block in blocks:
+            owner = self._owners[block.block_id]
+            assert owner in (-1, group_id)
+            self._owners[block.block_id] = group_id
+        return blocks
+
+    def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock]) -> None:
+        blocks = list(ordered_blocks)
+        super().free_blocks(blocks)
+        for block in blocks:
+            group_id = self._owners[block.block_id]
+            if group_id < 0 or not self._is_free(block):
+                continue
+            queued = self._queued_by_group[group_id]
+            if block.block_id not in queued:
+                self._free_by_group[group_id].appendleft(block)
+                queued.add(block.block_id)
+
+    def touch(self, blocks: list[KVCacheBlock]) -> None:
+        for block in blocks:
+            group_id = self._owners[block.block_id]
+            if group_id >= 0:
+                self._queued_by_group[group_id].discard(block.block_id)
+        super().touch(blocks)
+
+    def free_blocks_for_group(self, ordered_blocks: Iterable[KVCacheBlock], group_id: int) -> None:
+        blocks = list(ordered_blocks)
+        assert all(block.is_null or self._owners[block.block_id] == group_id for block in blocks)
+        self.free_blocks(blocks)
+
+
+class _CacheGroupBlockPoolView:
+    """Bind an ordinary single-type manager to one stable-page domain."""
+
+    def __init__(self, pool: _GroupStableBlockPool, group_id: int):
+        self._pool = pool
+        self._group_id = group_id
+
+    def __getattr__(self, name):
+        return getattr(self._pool, name)
+
+    def get_new_blocks(self, num_blocks: int) -> list[KVCacheBlock]:
+        return self._pool.get_new_blocks_for_group(num_blocks, self._group_id)
+
+    def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock]) -> None:
+        self._pool.free_blocks_for_group(ordered_blocks, self._group_id)
+
+    def touch(self, blocks: list[KVCacheBlock]) -> None:
+        assert all(block.is_null or self._pool._owners[block.block_id] == self._group_id for block in blocks)
+        self._pool.touch(blocks)
 
 
 class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
@@ -153,7 +269,8 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 self.scheduler_block_size,
                 kv_cache_config,
             )
-        self.block_pool = BlockPool(
+        pool_cls = _GroupStableBlockPool if _is_a5_packed_cache_config(kv_cache_config) else BlockPool
+        self.block_pool = pool_cls(
             num_gpu_blocks=kv_cache_config.num_blocks,
             enable_caching=enable_caching,
             hash_block_size=hash_block_size,
@@ -181,7 +298,14 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         self.single_type_managers = tuple(
             get_manager_for_kv_cache_spec(
                 kv_cache_spec=_manager_spec(kv_cache_group.kv_cache_spec),
-                block_pool=self.block_pool,
+                block_pool=(
+                    cast(
+                        BlockPool,
+                        _CacheGroupBlockPoolView(self.block_pool, i),
+                    )
+                    if isinstance(self.block_pool, _GroupStableBlockPool)
+                    else self.block_pool
+                ),
                 enable_caching=enable_caching,
                 kv_cache_group_id=i,
                 dcp_world_size=dcp_world_size,
@@ -192,6 +316,16 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
+        # A CircularBufferSpec can share the global block-ID pool with
+        # attention caches even though its physical state is not an attention
+        # tensor.  Ascend's physical-page zeroer clears every backing for each
+        # reported ID, so circular-state allocations must participate as well;
+        # otherwise an ID recycled directly into the state group can retain a
+        # previous request's state indefinitely.
+        if _is_a5_packed_cache_config(kv_cache_config) and kv_cache_config.needs_kv_cache_zeroing:
+            for manager in self.single_type_managers:
+                if isinstance(manager.kv_cache_spec, CircularBufferSpec):
+                    manager._record_new_block_ids = True
         # vLLM #53614 aligns exported Mamba checkpoints with EAGLE replay.
         if use_eagle and not vllm_version_is("0.29.0"):
             for manager in self.single_type_managers:

@@ -1139,9 +1139,9 @@ class NPUWorker(WorkerBase):
 
         # MRV2's scheduler emits new_block_ids_to_zero whenever this flag is
         # set, so its worker-side consumer must use the same condition. Keep the
-        # narrower Mamba + Eagle3 condition for MRV1, where zeroing was
-        # introduced only to prevent a recycled Mamba block from exposing stale
-        # values when reused by full attention during multi-step speculation.
+        # narrower Mamba + Eagle3 condition for ordinary MRV1 models. A5's
+        # packed V4.1 cache also needs the consumer because its physical pages
+        # are shared by heterogeneous cache groups.
         speculative_config = self.vllm_config.speculative_config
         needs_mrv1_mamba_eagle_zeroing = (
             kv_cache_config.has_mamba_layers
@@ -1149,8 +1149,9 @@ class NPUWorker(WorkerBase):
             and speculative_config.method == "eagle3"
             and speculative_config.num_speculative_tokens > 1
         )
+        uses_a5_packed_cache = get_current_hardware_profile().supports(HardwareCapability.DSV41_PACKED_CACHE)
         should_init_kv_zeroer = kv_cache_config.needs_kv_cache_zeroing and (
-            self.use_v2_model_runner or needs_mrv1_mamba_eagle_zeroing
+            self.use_v2_model_runner or needs_mrv1_mamba_eagle_zeroing or uses_a5_packed_cache
         )
         # Keep bookkeeping buffers outside the sleep-mode KV-cache pool so they
         # survive sleep/wake cycles.

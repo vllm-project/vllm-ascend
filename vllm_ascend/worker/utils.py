@@ -130,7 +130,7 @@ class AscendKVBlockZeroer(KVBlockZeroer):
     def __init__(self, device: torch.device, pin_memory: bool) -> None:
         self.device = device
         self.pin_memory = pin_memory
-        self._meta: tuple[torch.Tensor, int, int, int] | None = None
+        self._metas: list[tuple[torch.Tensor, int, int, int]] = []
         self._id_cap: int = 0
         self._ids_pinned: torch.Tensor | None = None
         self._ids_gpu: torch.Tensor | None = None
@@ -142,6 +142,8 @@ class AscendKVBlockZeroer(KVBlockZeroer):
         cache_dtype: str,
         runner_only_attn_layers: set[str],
         static_forward_context: dict[str, Any],
+        physical_block_tensors: Iterable[torch.Tensor] | None = None,
+        num_blocks: int | None = None,
     ) -> None:
         """One-time precomputation for zero_block_ids.
 
@@ -154,8 +156,31 @@ class AscendKVBlockZeroer(KVBlockZeroer):
         PAGE_SIZE_EL accounts for this ratio so that
         ``block_id * PAGE_SIZE_EL`` lands at the correct offset.
 
-        Only AttentionSpec layers are processed; Mamba layers are skipped.
+        When physical block tensors are available, use them as the source of
+        truth. This is required for cache descriptors whose layers alias one
+        physical page: logical attention views may cover only part of that
+        page, while a recycled block ID can subsequently belong to any cache
+        group. Otherwise, fall back to the legacy logical attention views.
         """
+        if physical_block_tensors is not None:
+            if num_blocks is None or num_blocks <= 0:
+                raise ValueError("num_blocks must be positive for physical KV cache zeroing")
+            segments_by_page_size: dict[int, list[int]] = {}
+            seen_ptrs: set[int] = set()
+            for tensor in physical_block_tensors:
+                if not tensor.is_contiguous() or tensor.numel() % num_blocks:
+                    raise ValueError("Physical KV cache tensors must contain contiguous whole blocks")
+                data_ptr = tensor.data_ptr()
+                if data_ptr in seen_ptrs:
+                    continue
+                seen_ptrs.add(data_ptr)
+                page_size_bytes = tensor.numel() * tensor.element_size() // num_blocks
+                if page_size_bytes % 4:
+                    raise ValueError("Physical KV cache block size must be 4-byte aligned")
+                segments_by_page_size.setdefault(page_size_bytes // 4, []).append(data_ptr)
+            self._init_metas(segments_by_page_size)
+            return
+
         seen_ptrs: set[int] = set()
         seg_addrs: list[int] = []
         page_size_el: int | None = None
@@ -199,12 +224,30 @@ class AscendKVBlockZeroer(KVBlockZeroer):
                         off_bytes = sum(i * s for i, s in zip(outer, outer_strides))
                         seg_addrs.append(dp + off_bytes)
 
-        if not seg_addrs or page_size_el is None:
-            self._meta = None
+        segments_by_page_size = {} if page_size_el is None else {page_size_el: seg_addrs}
+        self._init_metas(segments_by_page_size)
+
+    def _init_metas(self, segments_by_page_size: dict[int, list[int]]) -> None:
+        self._metas = []
+        for page_size_el, seg_addrs in sorted(segments_by_page_size.items()):
+            if not seg_addrs:
+                continue
+            blk_size = min(largest_power_of_2_divisor(page_size_el), 8192)
+            self._metas.append(
+                (
+                    torch.tensor(seg_addrs, dtype=torch.uint64, device=self.device),
+                    page_size_el,
+                    blk_size,
+                    len(seg_addrs),
+                )
+            )
+
+        if not self._metas:
+            self._id_cap = 0
+            self._ids_pinned = None
+            self._ids_gpu = None
             return
 
-        # _zero_kv_blocks_kernel will use int64 zeros, to meet the UB size, we use blk_size=64B/8B=8192
-        blk_size = min(largest_power_of_2_divisor(page_size_el), 8192)
         self._id_cap = 8192
         self._ids_pinned = torch.empty(
             self._id_cap,
@@ -212,18 +255,11 @@ class AscendKVBlockZeroer(KVBlockZeroer):
             pin_memory=self.pin_memory,
         )
         self._ids_gpu = torch.empty(self._id_cap, dtype=torch.int64, device=self.device)
-        self._meta = (
-            torch.tensor(seg_addrs, dtype=torch.uint64, device=self.device),
-            page_size_el,
-            blk_size,
-            len(seg_addrs),
-        )
 
     def zero_block_ids(self, block_ids: list[int]) -> None:
         """Zero the KV cache memory for the given block IDs."""
-        if not block_ids or self._meta is None:
+        if not block_ids or not self._metas:
             return
-        seg_addrs, page_size_el, blk_size, n_segs = self._meta
         n_blocks = len(block_ids)
         if n_blocks > self._id_cap:
             self._id_cap = n_blocks * 2
@@ -237,17 +273,18 @@ class AscendKVBlockZeroer(KVBlockZeroer):
         self._ids_pinned[:n_blocks].numpy()[:] = block_ids
         idx = self._ids_gpu[:n_blocks]
         idx.copy_(self._ids_pinned[:n_blocks], non_blocking=True)
-        chunks = page_size_el // blk_size
-        total_work = n_blocks * n_segs * chunks
-        grid = min(total_work, get_vectorcore_num()) if total_work > 0 else 0
-        if grid == 0:
-            return
-        _zero_kv_blocks_kernel[(grid,)](
-            seg_addrs,
-            idx,
-            n_blocks,
-            N_SEGS=n_segs,
-            PAGE_SIZE_EL=page_size_el,
-            BLOCK_SIZE=blk_size,
-            GRID_SIZE=grid,
-        )
+        for seg_addrs, page_size_el, blk_size, n_segs in self._metas:
+            chunks = page_size_el // blk_size
+            total_work = n_blocks * n_segs * chunks
+            grid = min(total_work, get_vectorcore_num()) if total_work > 0 else 0
+            if grid == 0:
+                continue
+            _zero_kv_blocks_kernel[(grid,)](
+                seg_addrs,
+                idx,
+                n_blocks,
+                N_SEGS=n_segs,
+                PAGE_SIZE_EL=page_size_el,
+                BLOCK_SIZE=blk_size,
+                GRID_SIZE=grid,
+            )

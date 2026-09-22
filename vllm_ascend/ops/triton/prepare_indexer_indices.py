@@ -9,12 +9,15 @@ from vllm.triton_utils import tl, triton
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
+_FUSED_LENGTHS_MAX_ELEMENTS = 1024 * 512
+
 
 @triton.jit(do_not_specialize=["num_rows", "blocks_per_core"])
 def _prepare_indexer_indices_kernel(
     selected_ptr,
     positions_ptr,
     output_ptr,
+    lengths_ptr,
     num_rows,
     TOPK: tl.constexpr,
     COMPRESS_RATIO: tl.constexpr,
@@ -24,6 +27,7 @@ def _prepare_indexer_indices_kernel(
     SENTINEL: tl.constexpr,
     SORT_KEY_SHIFT: tl.constexpr,
     NEGATIVE_KEY_BASE: tl.constexpr,
+    WRITE_LENGTHS: tl.constexpr,
 ):
     first_block = tl.program_id(0) * blocks_per_core
     last_block = tl.minimum(first_block + blocks_per_core, tl.cdiv(num_rows, BLOCK_ROWS))
@@ -47,10 +51,20 @@ def _prepare_indexer_indices_kernel(
         selected = tl.where(key_bits < 0, NEGATIVE_KEY_BASE - key_bits, key_bits + SORT_KEY_SHIFT)
         selected = tl.where(selected == SENTINEL, -1, selected)
         tl.store(output_ptr + offsets, selected, mask)
+        if WRITE_LENGTHS:
+            valid_lengths = tl.sum(valid.to(tl.int32), axis=1)
+            tl.store(lengths_ptr + rows, valid_lengths, rows < num_rows)
 
 
-def prepare_indexer_indices(selected: torch.Tensor, positions: torch.Tensor, compress_ratio: int) -> torch.Tensor:
-    """Filter and sort [tokens, topk] INT32 indices, with invalid slots last."""
+def prepare_indexer_indices(
+    selected: torch.Tensor,
+    positions: torch.Tensor,
+    compress_ratio: int,
+    *,
+    indices_output: torch.Tensor | None = None,
+    lengths_output: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Filter/sort indices into optional graph-stable output buffers."""
     assert selected.ndim == 2 and selected.dtype == torch.int32
     assert positions.ndim == 1 and positions.shape[0] == selected.shape[0]
     assert positions.dtype in (torch.int32, torch.int64)
@@ -59,12 +73,40 @@ def prepare_indexer_indices(selected: torch.Tensor, positions: torch.Tensor, com
     assert 1 <= topk <= 2048
     selected = selected.contiguous()
     positions = positions.contiguous()
-    output = torch.empty_like(selected)
+    expected_indices_shape = (num_rows, topk)
+    if indices_output is None:
+        output = torch.empty_like(selected)
+    else:
+        if (
+            tuple(indices_output.shape) != expected_indices_shape
+            or indices_output.dtype != torch.int32
+            or indices_output.device != selected.device
+            or not indices_output.is_contiguous()
+        ):
+            raise ValueError(
+                f"indices_output must be contiguous INT32 on the selected device with shape {expected_indices_shape}"
+            )
+        output = indices_output
+    if lengths_output is not None:
+        expected_shape = (num_rows, 1)
+        if (
+            tuple(lengths_output.shape) != expected_shape
+            or lengths_output.dtype != torch.int32
+            or lengths_output.device != selected.device
+            or not lengths_output.is_contiguous()
+        ):
+            raise ValueError(
+                f"lengths_output must be contiguous INT32 on the selected device with shape {expected_shape}"
+            )
     if num_rows == 0:
         return output
 
     num_cores = get_vectorcore_num()
     block_cols = triton.next_power_of_2(topk)
+    reduction_cols = max(block_cols, 32)
+    write_lengths = lengths_output is not None and num_rows * reduction_cols <= _FUSED_LENGTHS_MAX_ELEMENTS
+    if write_lengths:
+        block_cols = max(block_cols, 32)
     # Budget 128 KiB for INT32 sort data and scratch (eight buffers).
     max_block_rows = 128 * 1024 // (block_cols * 4 * 8)
     # Core boundaries must also align to 32 bytes for arbitrary TopK widths.
@@ -78,6 +120,7 @@ def prepare_indexer_indices(selected: torch.Tensor, positions: torch.Tensor, com
         selected,
         positions,
         output,
+        output if lengths_output is None else lengths_output,
         num_rows,
         TOPK=topk,
         COMPRESS_RATIO=compress_ratio,
@@ -87,7 +130,16 @@ def prepare_indexer_indices(selected: torch.Tensor, positions: torch.Tensor, com
         SENTINEL=torch.iinfo(torch.int32).max,
         SORT_KEY_SHIFT=1 << 23,
         NEGATIVE_KEY_BASE=0x81800000 - (1 << 32),
+        WRITE_LENGTHS=write_lengths,
         multibuffer=False,
         unit_flag=False,
     )
+    if lengths_output is not None and not write_lengths:
+        torch.sum(
+            output >= 0,
+            dim=-1,
+            keepdim=True,
+            dtype=torch.int32,
+            out=lengths_output,
+        )
     return output

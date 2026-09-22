@@ -1950,11 +1950,15 @@ class TestNPUWorker(TestBase):
             worker.model_runner._init_kv_zero_meta.assert_called_once_with()
 
     @patch("vllm_ascend.worker.worker.ensure_kv_transfer_initialized")
-    def test_initialize_from_config_skips_mrv1_zeroer_for_mixed_precision_only(self, mock_ensure_kv_transfer):
-        """MRV1 mixed-precision attention must not enter the Mamba zeroer."""
+    def test_initialize_from_config_skips_non_a5_mrv1_zeroer_for_mixed_precision(self, mock_ensure_kv_transfer):
+        """Ordinary MRV1 mixed-precision attention keeps its prior behavior."""
         from vllm_ascend.worker.worker import NPUWorker
 
-        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+        with (
+            patch.object(NPUWorker, "__init__", lambda x, **kwargs: None),
+            patch("vllm_ascend.worker.worker.get_current_hardware_profile") as hardware_profile,
+        ):
+            hardware_profile.return_value.supports.return_value = False
             worker = NPUWorker()
             worker.model_runner = MagicMock()
             worker.vllm_config = MagicMock()
@@ -1974,6 +1978,35 @@ class TestNPUWorker(TestBase):
                 kv_cache_allocation_context=ANY,
             )
             worker.model_runner._init_kv_zero_meta.assert_not_called()
+
+    @patch("vllm_ascend.worker.worker.ensure_kv_transfer_initialized")
+    def test_initialize_from_config_initializes_a5_mrv1_zeroer(self, mock_ensure_kv_transfer):
+        """A5 MRV1 consumes recycled packed-cache block IDs."""
+        from vllm_ascend.worker.worker import NPUWorker
+
+        with (
+            patch.object(NPUWorker, "__init__", lambda x, **kwargs: None),
+            patch("vllm_ascend.worker.worker.get_current_hardware_profile") as hardware_profile,
+        ):
+            hardware_profile.return_value.supports.return_value = True
+            worker = NPUWorker()
+            worker.model_runner = MagicMock()
+            worker.vllm_config = MagicMock()
+            worker.vllm_config.speculative_config = None
+            worker.vllm_config.model_config.enable_sleep_mode = False
+            worker.use_v2_model_runner = False
+
+            mock_kv_cache_config = MagicMock()
+            mock_kv_cache_config.needs_kv_cache_zeroing = True
+            mock_kv_cache_config.has_mamba_layers = False
+
+            worker.initialize_from_config(mock_kv_cache_config)
+
+            worker.model_runner.initialize_kv_cache.assert_called_once_with(
+                mock_kv_cache_config,
+                kv_cache_allocation_context=ANY,
+            )
+            worker.model_runner._init_kv_zero_meta.assert_called_once_with()
 
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.enable_sp", return_value=False)

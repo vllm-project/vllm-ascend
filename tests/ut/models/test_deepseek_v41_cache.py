@@ -1417,22 +1417,45 @@ def test_v41_cp_resolves_own_planes_with_native_draft_metadata_present():
 
 
 @pytest.mark.parametrize("overlap", [False, True])
-def test_v41_query_preparation_uses_multistream(overlap):
+def test_v41_query_preparation_honors_multistream_setting(overlap):
     from unittest.mock import Mock
 
     from vllm_ascend.attention.dsa_v41 import AscendDSAV41Impl
 
     impl = AscendDSAV41Impl.__new__(AscendDSAV41Impl)
     impl.role = SimpleNamespace(is_kv_source=True)
+    impl.preprocess = Mock(return_value=("q", "qr"))
     impl.multistream_preprocess = Mock(return_value=("q", "qr"))
     impl._write_compressed_source = Mock()
     attn = SimpleNamespace(
-        dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=SimpleNamespace(multistream_dsv4_dsa_overlap=overlap)))
+        dsv41_backend=None,
+        dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=SimpleNamespace(multistream_dsv4_dsa_overlap=overlap))),
     )
-    metadata = SimpleNamespace(swa=SimpleNamespace(num_actual_tokens=6))
+    metadata = SimpleNamespace(swa=SimpleNamespace(num_actual_tokens=6, num_prefills=0))
     assert impl._prepare_queries(attn, "hidden", "positions", "cos", "sin", metadata) == ("q", "qr")
-    impl.multistream_preprocess.assert_called_once_with(attn, "hidden", "cos", "sin", metadata.swa)
+    selected = impl.multistream_preprocess if overlap else impl.preprocess
+    selected.assert_called_once_with(attn, "hidden", "cos", "sin", metadata.swa)
     impl._write_compressed_source.assert_called_once_with(attn, "hidden", "positions", "cos", "sin", metadata)
+
+
+def test_v41_a5_prefill_keeps_cache_writes_on_current_stream():
+    from unittest.mock import Mock
+
+    from vllm_ascend.attention.dsa_v41 import AscendDSAV41Impl
+
+    impl = AscendDSAV41Impl.__new__(AscendDSAV41Impl)
+    impl.role = SimpleNamespace(is_kv_source=False)
+    impl.preprocess = Mock(return_value=("q", "qr"))
+    impl.multistream_preprocess = Mock(return_value=("q", "qr"))
+    attn = SimpleNamespace(
+        dsv41_backend=object(),
+        dsa_attn=SimpleNamespace(dsa_attn=SimpleNamespace(impl=SimpleNamespace(multistream_dsv4_dsa_overlap=True))),
+    )
+    metadata = SimpleNamespace(swa=SimpleNamespace(num_actual_tokens=6, num_prefills=1))
+
+    assert impl._prepare_queries(attn, "hidden", "positions", "cos", "sin", metadata) == ("q", "qr")
+    impl.preprocess.assert_called_once_with(attn, "hidden", "cos", "sin", metadata.swa)
+    impl.multistream_preprocess.assert_not_called()
 
 
 @pytest.mark.parametrize("overlap", [False, True])
