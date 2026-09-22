@@ -946,6 +946,30 @@ std::tuple<at::Tensor> compressor(const at::Tensor &x, const at::Tensor &wkv, co
     return std::tuple<at::Tensor>(cmp_kv);
 }
 
+at::Tensor compressor_v2(const at::Tensor &x, const at::Tensor &wkv, const at::Tensor &wgate,
+                         at::Tensor &state_cache, const c10::optional<at::Tensor> &state_block_table,
+                         const c10::optional<at::Tensor> &cu_seqlens,
+                         const c10::optional<at::Tensor> &seqused,
+                         const c10::optional<at::Tensor> &start_pos, int64_t cmp_ratio)
+{
+    TORCH_CHECK(x.dim() == 2 || x.dim() == 3, "compressor_v2: x must be TH or BSH");
+    TORCH_CHECK(wkv.dim() == 2 && wgate.sizes() == wkv.sizes(), "compressor_v2: invalid weights");
+    TORCH_CHECK(cmp_ratio > 0, "compressor_v2: cmp_ratio must be positive");
+    TORCH_CHECK(state_cache.dim() == 3, "compressor_v2: state_cache must be 3D");
+    at::Tensor output;
+    if (x.dim() == 3) {
+        output = at::empty({x.size(0), (x.size(1) + cmp_ratio - 1) / cmp_ratio, wkv.size(0)}, x.options());
+    } else {
+        TORCH_CHECK(cu_seqlens.has_value() && cu_seqlens->dim() == 1 && cu_seqlens->size(0) >= 2,
+                    "compressor_v2: TH requires cu_seqlens[B+1]");
+        int64_t capacity = std::min(x.size(0), x.size(0) / cmp_ratio + cu_seqlens->size(0) - 1);
+        output = at::empty({capacity, wkv.size(0)}, x.options());
+    }
+    EXEC_NPU_CMD(aclnnCompressorV2, x, wkv, wgate, state_cache, state_block_table, cu_seqlens,
+                 seqused, start_pos, cmp_ratio, state_cache.stride(0), output);
+    return output;
+}
+
 void check_compressor_metadata_common(
     const at::Tensor &rope_cos, const at::Tensor &rope_sin, const at::Tensor &cu_seqlens,
     const at::Tensor &start_pos, const at::Tensor &kv_block_table, int64_t kv_block_size,
@@ -3249,6 +3273,10 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         ") -> Tensor"
         );
     ops.impl("compressor", torch::kPrivateUse1, &vllm_ascend::compressor);
+    ops.def("compressor_v2(Tensor x, Tensor wkv, Tensor wgate, Tensor(a!) state_cache, "
+            "Tensor? state_block_table, Tensor? cu_seqlens, Tensor? seqused, Tensor? start_pos, "
+            "int cmp_ratio) -> Tensor");
+    ops.impl("compressor_v2", torch::kPrivateUse1, &vllm_ascend::compressor_v2);
 
     ops.def(
         "compressor_metadata("

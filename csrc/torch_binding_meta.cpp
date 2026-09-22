@@ -917,6 +917,26 @@ compressor_meta(const at::Tensor &x, const at::Tensor &wkv, const at::Tensor &wg
     return output;
 }
 
+at::Tensor compressor_v2_meta(const at::Tensor &x, const at::Tensor &wkv, const at::Tensor &wgate,
+                              at::Tensor &state_cache, const c10::optional<at::Tensor> &state_block_table,
+                              const c10::optional<at::Tensor> &cu_seqlens,
+                              const c10::optional<at::Tensor> &seqused,
+                              const c10::optional<at::Tensor> &start_pos, int64_t cmp_ratio)
+{
+    TORCH_CHECK(x.dim() == 2 || x.dim() == 3, "compressor_v2: x must be TH or BSH");
+    TORCH_CHECK(wkv.dim() == 2 && wgate.sym_sizes() == wkv.sym_sizes(), "compressor_v2: invalid weights");
+    TORCH_CHECK(cmp_ratio > 0, "compressor_v2: cmp_ratio must be positive");
+    TORCH_CHECK(state_cache.dim() == 3, "compressor_v2: state_cache must be 3D");
+    if (x.dim() == 3) {
+        return at::empty_symint(c10::SymDimVector{x.sym_size(0), ceil_div(x.sym_size(1), cmp_ratio),
+                                                wkv.sym_size(0)}, x.options());
+    }
+    TORCH_CHECK(cu_seqlens.has_value() && cu_seqlens->dim() == 1 && cu_seqlens->sym_size(0) >= 2,
+                "compressor_v2: TH requires cu_seqlens[B+1]");
+    auto capacity = x.sym_size(0).min(x.sym_size(0) / cmp_ratio + cu_seqlens->sym_size(0) - 1);
+    return at::empty_symint(c10::SymDimVector{capacity, wkv.sym_size(0)}, x.options());
+}
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor> compressor_metadata_meta(
     const at::Tensor &rope_cos, const at::Tensor &rope_sin, const at::Tensor &cu_seqlens,
     const at::Tensor &start_pos, const at::Tensor &kv_block_table, int64_t kv_block_size,
@@ -2137,6 +2157,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_causal_conv1d_custom", &vllm_ascend::meta::npu_causal_conv1d_custom_meta);
     ops.impl("moe_gating_top_k_hash", &vllm_ascend::meta::moe_gating_top_k_hash_meta);
     ops.impl("compressor", &vllm_ascend::meta::compressor_meta);
+    ops.impl("compressor_v2", &vllm_ascend::meta::compressor_v2_meta);
     ops.impl("compressor_metadata", &vllm_ascend::meta::compressor_metadata_meta);
     ops.impl("npu_quant_lightning_indexer_v2", &vllm_ascend::meta::npu_quant_lightning_indexer_v2_meta);
     ops.impl("npu_quant_lightning_indexer_v2_metadata", &vllm_ascend::meta::npu_quant_lightning_indexer_v2_metadata_meta);

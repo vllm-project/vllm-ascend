@@ -1044,6 +1044,53 @@ def test_state_uses_one_ring_page_and_block_table_entry(config, runtime):
     assert spec.max_memory_usage_bytes(runtime) == spec.page_size_bytes
 
 
+def test_native_compressor_opt_in_uses_bf16_weights(config, runtime, monkeypatch):
+    from vllm_ascend.models.deepseek_v41 import compressor as compressor_module
+
+    config.hidden_size, config.head_dim = 1024, 128
+    runtime.additional_config = {"use_ascendc_compressor": True}
+    monkeypatch.setattr(compressor_module, "DeepseekV41CacheLayer", lambda *args: SimpleNamespace())
+    monkeypatch.setattr(
+        compressor_module, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda capability: True)
+    )
+    native = DeepseekV41Compressor(config, 2, runtime)
+    assert native.use_ascendc
+    assert native.wkv.weight.dtype == native.wgate.weight.dtype == torch.bfloat16
+    reference = DeepseekV41Compressor(config, 2)
+    assert not reference.use_ascendc
+    assert reference.wkv.weight.dtype == reference.wgate.weight.dtype == torch.float32
+    config.head_dim = 8
+    with pytest.raises(ValueError, match="D=128/512"):
+        DeepseekV41Compressor(config, 2, runtime)
+
+
+@pytest.mark.parametrize("complete", [[False, True, True, False, True], [False] * 5])
+def test_native_compressor_restores_token_rows(config, monkeypatch, complete):
+    compressor = DeepseekV41Compressor(config, 2)
+    compressor.register_buffer("_ring_pooled", torch.empty(5, 8, dtype=torch.bfloat16), persistent=False)
+    state = torch.zeros(3, 32, 1, 16, dtype=torch.float32)
+    compressor.state_cache = SimpleNamespace(kv_cache=[state])
+    ring = torch.tensor([[0, 1, 0], [2, 2, 0], [0, 2, 4], [0, 2, 4], [1, 2, 0]], dtype=torch.int32)
+    metadata = SimpleNamespace(c2_ring_metadata=ring, c2_complete_mask=torch.tensor(complete))
+    compact = torch.randn(5, 8, dtype=torch.bfloat16)
+    compact[sum(complete) :].fill_(float("nan"))
+
+    def native(x, wkv, wgate, cache, blocks, offsets, used, starts, ratio):
+        assert x.dtype == torch.bfloat16 and ratio == 2
+        assert cache.data_ptr() == state.data_ptr()
+        assert offsets.tolist() == [0, 2, 4, 5]
+        assert used.tolist() == [2, 2, 0]
+        assert blocks.tolist() == [1, 2, 0]
+        return compact
+
+    monkeypatch.setattr(torch.ops._C_ascend, "compressor_v2", native, raising=False)
+    expected = torch.zeros(5, 8, dtype=torch.bfloat16)
+    expected[metadata.c2_complete_mask] = compact[: sum(complete)]
+    actual = compressor.compress_native(torch.randn(5, 16, dtype=torch.bfloat16), metadata)
+    torch.testing.assert_close(actual, compressor.norm(expected), rtol=0, atol=0)
+    assert torch.isfinite(actual).all()
+
+
 def test_projected_model_entry_keeps_fp32_state_and_existing_norm(config, monkeypatch):
     compressor = DeepseekV41Compressor(config, 2)
     compressor.register_buffer("_ring_pooled", torch.empty(4, 8, dtype=torch.bfloat16), persistent=False)

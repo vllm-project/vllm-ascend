@@ -73,6 +73,8 @@ class HardwareCapability(Enum):
     DSA_C128_STATE_SMALL_BLOCK_SIZES = auto()
     # Use the DeepSeek-V4/DSA compressed-KV-cache layout and compressor/indexer flow.
     DSV4_COMPRESSED_CACHE = auto()
+    # CompressorV2 arch22 supports long TH inputs with a 32-row FP32 ring.
+    DSV41_RING_COMPRESSOR = auto()
     # Enable dynamic-MX norm fusion and the associated ``wo_a`` weight-layout contract.
     DYNAMIC_MX_QUANT_FUSION = auto()
     # Select DynamicMxQuantV3 ``scale_alg=1`` for model paths that require it.
@@ -249,6 +251,7 @@ _STANDARD_CAPABILITIES = frozenset(
     }
 )
 _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
+    HardwareCapability.DSV41_RING_COMPRESSOR,
     HardwareCapability.MC2_FULLMESH_V2_COMM,
     HardwareCapability.MINIMAX_M3_PREFILL_KV_GATHER_Q,
 }
@@ -265,7 +268,8 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             weight_layout_policy=WeightLayoutPolicy.CONFIGURABLE,
             moe_comm_policy=MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY,
             quantization_backend_family=QuantizationBackendFamily.STANDARD,
-            capabilities=_STANDARD_CAPABILITIES | {HardwareCapability.NPU_TOP_K_TOP_P},
+            capabilities=_STANDARD_CAPABILITIES
+            | {HardwareCapability.NPU_TOP_K_TOP_P, HardwareCapability.DSV41_RING_COMPRESSOR},
         ),
         AscendDeviceType.A3: HardwareProfile(
             _device_type=AscendDeviceType.A3,
