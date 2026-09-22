@@ -10,28 +10,28 @@
  */
 
 /*!
- * \file causal_conv1d.h
+ * \file vllm_causal_conv1d.h
  */
 
-#ifndef CAUSAL_CONV1D_H
-#define CAUSAL_CONV1D_H
+#ifndef VLLM_CAUSAL_CONV1D_H
+#define VLLM_CAUSAL_CONV1D_H
  
 #include "kernel_operator.h"
 #include "kernel_tiling/kernel_tiling.h"
-#include "causal_conv1d_tiling_data.h"
-#include "causal_conv1d_tiling_key.h"
-#include "causal_conv1d_common.h"
+#include "vllm_causal_conv1d_tiling_data.h"
+#include "vllm_causal_conv1d_tiling_key.h"
+#include "vllm_causal_conv1d_common.h"
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
-#include "arch35/causal_conv1d_regbase.h"
+#include "arch35/vllm_causal_conv1d_regbase.h"
 #endif
  
- namespace NsCausalConv1d {
+ namespace NsVllmCausalConv1d {
  
  using namespace AscendC;
- using namespace NsCausalConv1dCommon;
+ using namespace NsVllmCausalConv1dCommon;
  
- #define CAUSAL_CONV1D_TEMPLATE_ARGS typename T, uint32_t runModeKey, uint32_t widthKey, uint32_t fnPlanKey
- #define CAUSAL_CONV1D_CLASS CausalConv1d<T, runModeKey, widthKey, fnPlanKey>
+ #define VLLM_CAUSAL_CONV1D_TEMPLATE_ARGS typename T, uint32_t runModeKey, uint32_t widthKey, uint32_t fnPlanKey
+ #define VLLM_CAUSAL_CONV1D_CLASS VllmCausalConv1d<T, runModeKey, widthKey, fnPlanKey>
  
  enum SeqTaskWindowMode : int32_t {
      SEQ_TASK_WINDOW_MODE_VARLEN = 0,
@@ -96,30 +96,30 @@
  __aicore__ inline constexpr int32_t DecodeWidthTplKey(uint32_t widthKey)
  {
      switch (widthKey) {
-         case CAUSAL_CONV1D_TPL_WIDTH_2:
+         case VLLM_CAUSAL_CONV1D_TPL_WIDTH_2:
              return 2;
-         case CAUSAL_CONV1D_TPL_WIDTH_3:
+         case VLLM_CAUSAL_CONV1D_TPL_WIDTH_3:
              return 3;
-         case CAUSAL_CONV1D_TPL_WIDTH_4:
+         case VLLM_CAUSAL_CONV1D_TPL_WIDTH_4:
              return 4;
          default:
              return 0;
      }
  }
  
- template <CAUSAL_CONV1D_TEMPLATE_ARGS>
- class CausalConv1d {
+ template <VLLM_CAUSAL_CONV1D_TEMPLATE_ARGS>
+ class VllmCausalConv1d {
  public:
-     __aicore__ inline CausalConv1d() = default;
+     __aicore__ inline VllmCausalConv1d() = default;
  
  protected:
-     static constexpr bool kIsUpdateMode = (runModeKey == CAUSAL_CONV1D_TPL_RUN_MODE_UPDATE);
+     static constexpr bool kIsUpdateMode = (runModeKey == VLLM_CAUSAL_CONV1D_TPL_RUN_MODE_UPDATE);
      static constexpr int32_t kTemplateWidth = DecodeWidthTplKey(widthKey);
      static constexpr bool kHasCompileTimeWidth =
-         (runModeKey == CAUSAL_CONV1D_TPL_RUN_MODE_FN) && (kTemplateWidth >= 2) && (kTemplateWidth <= MAX_WIDTH);
+         (runModeKey == VLLM_CAUSAL_CONV1D_TPL_RUN_MODE_FN) && (kTemplateWidth >= 2) && (kTemplateWidth <= MAX_WIDTH);
      static constexpr FnExecutionPlan kFnExecutionPlan = static_cast<FnExecutionPlan>(fnPlanKey);
  
-     __aicore__ inline void ResetRuntimeState(const CausalConv1dTilingData *tilingData);
+     __aicore__ inline void ResetRuntimeState(const VllmCausalConv1dTilingData *tilingData);
      __aicore__ inline void InitSharedBuffersAndEvents();
      __aicore__ inline void LoadWeightAndBias(int32_t channelStart, int32_t baseDim);
      __aicore__ inline void InitRing(int32_t cacheIdx, bool hasInit, int32_t stateTokenOffset, int32_t start,
@@ -163,7 +163,7 @@
      __aicore__ inline void ProcessFnChunk(int32_t seq, int32_t cacheIdx, bool hasInit, int32_t seqStart,
                                            int32_t seqLen, int32_t chunkStart, int32_t chunkLen, int32_t channelStart,
                                            int32_t baseDim, int32_t dim);
-     __aicore__ inline const CausalConv1dTilingData *GetTilingData() const;
+     __aicore__ inline const VllmCausalConv1dTilingData *GetTilingData() const;
      __aicore__ inline bool HasActivation() const;
      __aicore__ inline bool HasBias() const;
      __aicore__ inline bool IsUpdateMode() const;
@@ -212,17 +212,17 @@
      GlobalTensor<int32_t> initStateSyncGm_;
      GlobalTensor<T> initStateWorkspaceGm_;
  
-     const CausalConv1dTilingData *tilingData_{nullptr};
+     const VllmCausalConv1dTilingData *tilingData_{nullptr};
  };
  
- template <CAUSAL_CONV1D_TEMPLATE_ARGS>
- __aicore__ inline void CAUSAL_CONV1D_CLASS::ResetRuntimeState(const CausalConv1dTilingData *tilingData)
+ template <VLLM_CAUSAL_CONV1D_TEMPLATE_ARGS>
+ __aicore__ inline void VLLM_CAUSAL_CONV1D_CLASS::ResetRuntimeState(const VllmCausalConv1dTilingData *tilingData)
  {
      tilingData_ = tilingData;
  }
  
- template <CAUSAL_CONV1D_TEMPLATE_ARGS>
- __aicore__ inline void CAUSAL_CONV1D_CLASS::InitSharedBuffersAndEvents()
+ template <VLLM_CAUSAL_CONV1D_TEMPLATE_ARGS>
+ __aicore__ inline void VLLM_CAUSAL_CONV1D_CLASS::InitSharedBuffersAndEvents()
  {
      pipe.InitBuffer(inBuf, RING_SLOTS * MAX_BLOCK_DIM * sizeof(T));
      pipe.InitBuffer(outBuf, 2 * MAX_BLOCK_DIM * sizeof(T));
@@ -230,8 +230,8 @@
      AllocEvents();
  }
  
- template <CAUSAL_CONV1D_TEMPLATE_ARGS>
- __aicore__ inline void CAUSAL_CONV1D_CLASS::AllocEvents()
+ template <VLLM_CAUSAL_CONV1D_TEMPLATE_ARGS>
+ __aicore__ inline void VLLM_CAUSAL_CONV1D_CLASS::AllocEvents()
  {
      weightBiasMte2ToVEvent_ = GetTPipePtr()->AllocEventID<HardEvent::MTE2_V>();
      stateMte2ToVEvent_ = GetTPipePtr()->AllocEventID<HardEvent::MTE2_V>();
@@ -258,8 +258,8 @@
      specWritebackMte3ToMte2Event_[1] = GetTPipePtr()->AllocEventID<HardEvent::MTE3_MTE2>();
  }
  
- template <CAUSAL_CONV1D_TEMPLATE_ARGS>
- __aicore__ inline void CAUSAL_CONV1D_CLASS::ReleaseEvents()
+ template <VLLM_CAUSAL_CONV1D_TEMPLATE_ARGS>
+ __aicore__ inline void VLLM_CAUSAL_CONV1D_CLASS::ReleaseEvents()
  {
      GetTPipePtr()->ReleaseEventID<HardEvent::MTE2_V>(weightBiasMte2ToVEvent_);
      GetTPipePtr()->ReleaseEventID<HardEvent::MTE2_V>(stateMte2ToVEvent_);
@@ -286,8 +286,8 @@
      GetTPipePtr()->ReleaseEventID<HardEvent::MTE3_MTE2>(specWritebackMte3ToMte2Event_[1]);
  }
  
- template <CAUSAL_CONV1D_TEMPLATE_ARGS>
- __aicore__ inline void CAUSAL_CONV1D_CLASS::LoadWeightAndBias(int32_t channelStart, int32_t baseDim)
+ template <VLLM_CAUSAL_CONV1D_TEMPLATE_ARGS>
+ __aicore__ inline void VLLM_CAUSAL_CONV1D_CLASS::LoadWeightAndBias(int32_t channelStart, int32_t baseDim)
  {
      const int32_t dim = tilingData_->dim;
      const int32_t width = static_cast<int32_t>(tilingData_->width);
@@ -347,8 +347,8 @@
      }
  }
  
- template <CAUSAL_CONV1D_TEMPLATE_ARGS>
- __aicore__ inline void CAUSAL_CONV1D_CLASS::InitRing(int32_t cacheIdx, bool hasInit, int32_t stateTokenOffset,
+ template <VLLM_CAUSAL_CONV1D_TEMPLATE_ARGS>
+ __aicore__ inline void VLLM_CAUSAL_CONV1D_CLASS::InitRing(int32_t cacheIdx, bool hasInit, int32_t stateTokenOffset,
                                                       int32_t start, int32_t len, int32_t channelStart,
                                                       int32_t baseDim, int32_t dim)
  {
@@ -392,8 +392,8 @@
      }
  }
  
- template <CAUSAL_CONV1D_TEMPLATE_ARGS>
- __aicore__ inline void CAUSAL_CONV1D_CLASS::RunSeq(int32_t start, int32_t len, int32_t channelStart,
+ template <VLLM_CAUSAL_CONV1D_TEMPLATE_ARGS>
+ __aicore__ inline void VLLM_CAUSAL_CONV1D_CLASS::RunSeq(int32_t start, int32_t len, int32_t channelStart,
                                                     int32_t baseDim, int32_t dim)
  {
      if (IsFnRollingFastPathEnabled()) {
@@ -486,8 +486,8 @@
      }
  }
  
- template <CAUSAL_CONV1D_TEMPLATE_ARGS>
- __aicore__ inline void CAUSAL_CONV1D_CLASS::RestoreFnLocalPartials(int32_t baseDim)
+ template <VLLM_CAUSAL_CONV1D_TEMPLATE_ARGS>
+ __aicore__ inline void VLLM_CAUSAL_CONV1D_CLASS::RestoreFnLocalPartials(int32_t baseDim)
  {
      if constexpr (!kHasCompileTimeWidth) {
          return;
@@ -551,8 +551,8 @@
      }
  }
  
- template <CAUSAL_CONV1D_TEMPLATE_ARGS>
- __aicore__ inline void CAUSAL_CONV1D_CLASS::ComputeFnRollingOutput(int32_t slotCurr, int32_t baseDim)
+ template <VLLM_CAUSAL_CONV1D_TEMPLATE_ARGS>
+ __aicore__ inline void VLLM_CAUSAL_CONV1D_CLASS::ComputeFnRollingOutput(int32_t slotCurr, int32_t baseDim)
  {
      if constexpr (!kHasCompileTimeWidth) {
          return;
@@ -585,8 +585,8 @@
 #endif
  }
  
- template <CAUSAL_CONV1D_TEMPLATE_ARGS>
- __aicore__ inline void CAUSAL_CONV1D_CLASS::AdvanceFnLocalPartials(int32_t slotCurr, int32_t baseDim)
+ template <VLLM_CAUSAL_CONV1D_TEMPLATE_ARGS>
+ __aicore__ inline void VLLM_CAUSAL_CONV1D_CLASS::AdvanceFnLocalPartials(int32_t slotCurr, int32_t baseDim)
  {
      if constexpr (!kHasCompileTimeWidth) {
          return;
@@ -636,8 +636,8 @@
 #endif
  }
  
- template <CAUSAL_CONV1D_TEMPLATE_ARGS>
- __aicore__ inline void CAUSAL_CONV1D_CLASS::RunSeqFnRolling(int32_t start, int32_t len, int32_t channelStart,
+ template <VLLM_CAUSAL_CONV1D_TEMPLATE_ARGS>
+ __aicore__ inline void VLLM_CAUSAL_CONV1D_CLASS::RunSeqFnRolling(int32_t start, int32_t len, int32_t channelStart,
                                                              int32_t baseDim, int32_t dim)
  {
      if constexpr (!kHasCompileTimeWidth) {
@@ -704,8 +704,8 @@
      }
  }
  
- template <CAUSAL_CONV1D_TEMPLATE_ARGS>
- __aicore__ inline void CAUSAL_CONV1D_CLASS::DrainTaskMte3()
+ template <VLLM_CAUSAL_CONV1D_TEMPLATE_ARGS>
+ __aicore__ inline void VLLM_CAUSAL_CONV1D_CLASS::DrainTaskMte3()
  {
      SetFlag<HardEvent::MTE3_V>(stateWritebackMte3ToVEvent_);
      WaitFlag<HardEvent::MTE3_V>(stateWritebackMte3ToVEvent_);
@@ -713,8 +713,8 @@
      WaitFlag<HardEvent::MTE3_MTE2>(stateWritebackMte3ToMte2Event_);
  }
  
- template <CAUSAL_CONV1D_TEMPLATE_ARGS>
- __aicore__ inline void CAUSAL_CONV1D_CLASS::WriteBackState(int32_t cacheIdx, int32_t len, int32_t channelStart,
+ template <VLLM_CAUSAL_CONV1D_TEMPLATE_ARGS>
+ __aicore__ inline void VLLM_CAUSAL_CONV1D_CLASS::WriteBackState(int32_t cacheIdx, int32_t len, int32_t channelStart,
                                                             int32_t baseDim, int32_t dim)
  {
      const int32_t stateLen = tilingData_->stateLen;
@@ -736,8 +736,8 @@
      }
  }
  
- template <CAUSAL_CONV1D_TEMPLATE_ARGS>
- __aicore__ inline void CAUSAL_CONV1D_CLASS::WriteBackStateSpec(int32_t cacheIdx, bool hasInit,
+ template <VLLM_CAUSAL_CONV1D_TEMPLATE_ARGS>
+ __aicore__ inline void VLLM_CAUSAL_CONV1D_CLASS::WriteBackStateSpec(int32_t cacheIdx, bool hasInit,
                                                                 int32_t stateTokenOffset, int32_t start, int32_t len,
                                                                 int32_t channelStart, int32_t baseDim, int32_t dim)
  {
@@ -829,8 +829,8 @@
      }
  }
  
- template <CAUSAL_CONV1D_TEMPLATE_ARGS>
- __aicore__ inline bool CAUSAL_CONV1D_CLASS::ResolveSeqTaskWindow(int32_t seq, int32_t inputMode, int32_t seqLen,
+ template <VLLM_CAUSAL_CONV1D_TEMPLATE_ARGS>
+ __aicore__ inline bool VLLM_CAUSAL_CONV1D_CLASS::ResolveSeqTaskWindow(int32_t seq, int32_t inputMode, int32_t seqLen,
                                                                   int32_t &start, int32_t &len) const
  {
      switch (GetSeqTaskWindowMode(inputMode)) {
@@ -843,9 +843,9 @@
      }
  }
  
- template <CAUSAL_CONV1D_TEMPLATE_ARGS>
+ template <VLLM_CAUSAL_CONV1D_TEMPLATE_ARGS>
  template <int32_t kWindowMode>
- __aicore__ inline bool CAUSAL_CONV1D_CLASS::ResolveSeqTaskWindowByMode(int32_t seq, int32_t seqLen, int32_t &start,
+ __aicore__ inline bool VLLM_CAUSAL_CONV1D_CLASS::ResolveSeqTaskWindowByMode(int32_t seq, int32_t seqLen, int32_t &start,
                                                                         int32_t &len) const
  {
      SeqTaskWindow window;
@@ -870,8 +870,8 @@
      return true;
  }
 
- template <CAUSAL_CONV1D_TEMPLATE_ARGS>
- __aicore__ inline int32_t CAUSAL_CONV1D_CLASS::ReadQueryStartLocValue(int32_t index) const
+ template <VLLM_CAUSAL_CONV1D_TEMPLATE_ARGS>
+ __aicore__ inline int32_t VLLM_CAUSAL_CONV1D_CLASS::ReadQueryStartLocValue(int32_t index) const
  {
      if (tilingData_->queryStartLocUseInt64 != 0) {
          const int64_t value = queryStartLocGmInt64.GetValue(index);
@@ -883,8 +883,8 @@
      return queryStartLocGmInt32.GetValue(index);
  }
 
- template <CAUSAL_CONV1D_TEMPLATE_ARGS>
- __aicore__ inline int64_t CAUSAL_CONV1D_CLASS::ReadCacheIndexValue(int32_t seq) const
+ template <VLLM_CAUSAL_CONV1D_TEMPLATE_ARGS>
+ __aicore__ inline int64_t VLLM_CAUSAL_CONV1D_CLASS::ReadCacheIndexValue(int32_t seq) const
  {
      const int32_t offset = seq * static_cast<int32_t>(tilingData_->cacheIndicesStride);
      if (tilingData_->cacheIndicesUseInt64 != 0) {
@@ -893,8 +893,8 @@
      return static_cast<int64_t>(cacheIndicesGmInt32.GetValue(offset));
  }
 
- template <CAUSAL_CONV1D_TEMPLATE_ARGS>
- __aicore__ inline bool CAUSAL_CONV1D_CLASS::ReadInitialStateModeValue(int32_t seq) const
+ template <VLLM_CAUSAL_CONV1D_TEMPLATE_ARGS>
+ __aicore__ inline bool VLLM_CAUSAL_CONV1D_CLASS::ReadInitialStateModeValue(int32_t seq) const
  {
      if (tilingData_->initialStateModeDtype == 2) {
          return initialStateModeGmInt64.GetValue(seq) != 0;
@@ -905,8 +905,8 @@
      return initialStateModeGmBool.GetValue(seq);
  }
 
- template <CAUSAL_CONV1D_TEMPLATE_ARGS>
- __aicore__ inline int32_t CAUSAL_CONV1D_CLASS::ReadNumAcceptedTokensValue(int32_t seq) const
+ template <VLLM_CAUSAL_CONV1D_TEMPLATE_ARGS>
+ __aicore__ inline int32_t VLLM_CAUSAL_CONV1D_CLASS::ReadNumAcceptedTokensValue(int32_t seq) const
  {
      if (tilingData_->numAcceptedTokensUseInt64 != 0) {
          const int64_t value = numAcceptedTokensGmInt64.GetValue(seq);
@@ -921,8 +921,8 @@
      return numAcceptedTokensGmInt32.GetValue(seq);
  }
 
- template <CAUSAL_CONV1D_TEMPLATE_ARGS>
- __aicore__ inline bool CAUSAL_CONV1D_CLASS::ResolveSeqCacheIndex(int32_t seq, bool hasCacheIndices,
+ template <VLLM_CAUSAL_CONV1D_TEMPLATE_ARGS>
+ __aicore__ inline bool VLLM_CAUSAL_CONV1D_CLASS::ResolveSeqCacheIndex(int32_t seq, bool hasCacheIndices,
                                                                   int32_t &cacheIdx) const
  {
      cacheIdx = seq;
@@ -941,14 +941,14 @@
      return true;
  }
  
- template <CAUSAL_CONV1D_TEMPLATE_ARGS>
- __aicore__ inline bool CAUSAL_CONV1D_CLASS::ResolveSeqHasInit(int32_t seq, bool hasInitialStateMode) const
+ template <VLLM_CAUSAL_CONV1D_TEMPLATE_ARGS>
+ __aicore__ inline bool VLLM_CAUSAL_CONV1D_CLASS::ResolveSeqHasInit(int32_t seq, bool hasInitialStateMode) const
  {
      return hasInitialStateMode ? ReadInitialStateModeValue(seq) : false;
  }
  
- template <CAUSAL_CONV1D_TEMPLATE_ARGS>
- __aicore__ inline void CAUSAL_CONV1D_CLASS::ProcessDefault()
+ template <VLLM_CAUSAL_CONV1D_TEMPLATE_ARGS>
+ __aicore__ inline void VLLM_CAUSAL_CONV1D_CLASS::ProcessDefault()
  {
      switch (GetSeqTaskWindowMode(tilingData_->inputMode)) {
          case SEQ_TASK_WINDOW_MODE_VARLEN:
@@ -963,9 +963,9 @@
      }
  }
  
- template <CAUSAL_CONV1D_TEMPLATE_ARGS>
+ template <VLLM_CAUSAL_CONV1D_TEMPLATE_ARGS>
  template <int32_t kWindowMode>
- __aicore__ inline void CAUSAL_CONV1D_CLASS::ProcessDefaultByWindowMode()
+ __aicore__ inline void VLLM_CAUSAL_CONV1D_CLASS::ProcessDefaultByWindowMode()
  {
      const int32_t dim = tilingData_->dim;
      const int32_t batch = tilingData_->batch;
@@ -1034,55 +1034,55 @@
      }
  }
  
- template <CAUSAL_CONV1D_TEMPLATE_ARGS>
- __aicore__ inline const CausalConv1dTilingData *CAUSAL_CONV1D_CLASS::GetTilingData() const
+ template <VLLM_CAUSAL_CONV1D_TEMPLATE_ARGS>
+ __aicore__ inline const VllmCausalConv1dTilingData *VLLM_CAUSAL_CONV1D_CLASS::GetTilingData() const
  {
      return tilingData_;
  }
  
- template <CAUSAL_CONV1D_TEMPLATE_ARGS>
- __aicore__ inline bool CAUSAL_CONV1D_CLASS::HasActivation() const
+ template <VLLM_CAUSAL_CONV1D_TEMPLATE_ARGS>
+ __aicore__ inline bool VLLM_CAUSAL_CONV1D_CLASS::HasActivation() const
  {
      return (tilingData_ != nullptr) && (tilingData_->activationMode != 0);
  }
  
- template <CAUSAL_CONV1D_TEMPLATE_ARGS>
- __aicore__ inline bool CAUSAL_CONV1D_CLASS::HasBias() const
+ template <VLLM_CAUSAL_CONV1D_TEMPLATE_ARGS>
+ __aicore__ inline bool VLLM_CAUSAL_CONV1D_CLASS::HasBias() const
  {
      return (tilingData_ != nullptr) && (tilingData_->hasBias != 0);
  }
  
- template <CAUSAL_CONV1D_TEMPLATE_ARGS>
- __aicore__ inline bool CAUSAL_CONV1D_CLASS::IsUpdateMode() const
+ template <VLLM_CAUSAL_CONV1D_TEMPLATE_ARGS>
+ __aicore__ inline bool VLLM_CAUSAL_CONV1D_CLASS::IsUpdateMode() const
  {
      return kIsUpdateMode;
  }
  
- template <CAUSAL_CONV1D_TEMPLATE_ARGS>
- __aicore__ inline bool CAUSAL_CONV1D_CLASS::IsFnRollingFastPathEnabled() const
+ template <VLLM_CAUSAL_CONV1D_TEMPLATE_ARGS>
+ __aicore__ inline bool VLLM_CAUSAL_CONV1D_CLASS::IsFnRollingFastPathEnabled() const
  {
      return !kIsUpdateMode && (tilingData_ != nullptr) && (kFnExecutionPlan != FN_EXECUTION_PLAN_INVALID) &&
             (tilingData_->hasNumAcceptedTokens == 0) && !HasBias();
  }
  
- template <CAUSAL_CONV1D_TEMPLATE_ARGS>
- __aicore__ inline bool CAUSAL_CONV1D_CLASS::HasExplicitFnTokenSeqRanges() const
+ template <VLLM_CAUSAL_CONV1D_TEMPLATE_ARGS>
+ __aicore__ inline bool VLLM_CAUSAL_CONV1D_CLASS::HasExplicitFnTokenSeqRanges() const
  {
      return !kIsUpdateMode && (tilingData_ != nullptr) && (tilingData_->inputMode == 0) &&
             (tilingData_->hasExplicitTokenSeqRanges != 0) &&
             (tilingData_->explicitTokenSeqRangeCount >= tilingData_->tokenBlockCnt);
  }
  
- template <CAUSAL_CONV1D_TEMPLATE_ARGS>
- __aicore__ inline bool CAUSAL_CONV1D_CLASS::IsUpdateSpecDecodingEnabled() const
+ template <VLLM_CAUSAL_CONV1D_TEMPLATE_ARGS>
+ __aicore__ inline bool VLLM_CAUSAL_CONV1D_CLASS::IsUpdateSpecDecodingEnabled() const
  {
      return kIsUpdateMode && (tilingData_->hasNumAcceptedTokens != 0) && (tilingData_->width == 4);
  }
  
- #include "causal_conv1d_fn_tasks.h"
+ #include "vllm_causal_conv1d_fn_tasks.h"
  
- #undef CAUSAL_CONV1D_CLASS
- #undef CAUSAL_CONV1D_TEMPLATE_ARGS
+ #undef VLLM_CAUSAL_CONV1D_CLASS
+ #undef VLLM_CAUSAL_CONV1D_TEMPLATE_ARGS
 
-} // namespace NsCausalConv1d
-#endif // CAUSAL_CONV1D_H
+} // namespace NsVllmCausalConv1d
+#endif // VLLM_CAUSAL_CONV1D_H

@@ -9,8 +9,8 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
- #ifndef CAUSAL_CONV1D_FN_TASKS_H
- #define CAUSAL_CONV1D_FN_TASKS_H
+ #ifndef VLLM_CAUSAL_CONV1D_FN_TASKS_H
+ #define VLLM_CAUSAL_CONV1D_FN_TASKS_H
  
  struct FnDirectBlockTask {
      bool valid = false;
@@ -65,8 +65,8 @@
      return task.valid && task.tokenTileId == 0;
  }
  
- template <CAUSAL_CONV1D_TEMPLATE_ARGS>
- __aicore__ inline int32_t CAUSAL_CONV1D_CLASS::FindVarlenSeqByToken(int32_t tokenIdx) const
+ template <VLLM_CAUSAL_CONV1D_TEMPLATE_ARGS>
+ __aicore__ inline int32_t VLLM_CAUSAL_CONV1D_CLASS::FindVarlenSeqByToken(int32_t tokenIdx) const
  {
      int32_t left = 0;
      int32_t right = static_cast<int32_t>(tilingData_->batch);
@@ -82,8 +82,8 @@
      return left;
  }
  
- template <CAUSAL_CONV1D_TEMPLATE_ARGS>
- __aicore__ inline bool CAUSAL_CONV1D_CLASS::ResolveExplicitTokenTileSeqRange(int32_t tokenTileId, int32_t &startSeq,
+ template <VLLM_CAUSAL_CONV1D_TEMPLATE_ARGS>
+ __aicore__ inline bool VLLM_CAUSAL_CONV1D_CLASS::ResolveExplicitTokenTileSeqRange(int32_t tokenTileId, int32_t &startSeq,
                                                                                int32_t &endSeq) const
  {
      if (!HasExplicitFnTokenSeqRanges() || tokenTileId < 0 || tokenTileId >= tilingData_->explicitTokenSeqRangeCount) {
@@ -94,8 +94,8 @@
      return (startSeq >= 0) && (endSeq >= startSeq);
  }
  
- template <CAUSAL_CONV1D_TEMPLATE_ARGS>
- __aicore__ inline void CAUSAL_CONV1D_CLASS::InitRingSeqSplit(int32_t seq, int32_t cacheIdx, bool hasInit,
+ template <VLLM_CAUSAL_CONV1D_TEMPLATE_ARGS>
+ __aicore__ inline void VLLM_CAUSAL_CONV1D_CLASS::InitRingSeqSplit(int32_t seq, int32_t cacheIdx, bool hasInit,
                                                               int32_t seqStart, int32_t tileStart, int32_t tileLen,
                                                               int32_t channelStart, int32_t baseDim, int32_t dim)
  {
@@ -157,8 +157,8 @@
      }
  }
  
- template <CAUSAL_CONV1D_TEMPLATE_ARGS>
- __aicore__ inline void CAUSAL_CONV1D_CLASS::ProcessFnChunk(int32_t seq, int32_t cacheIdx, bool hasInit,
+ template <VLLM_CAUSAL_CONV1D_TEMPLATE_ARGS>
+ __aicore__ inline void VLLM_CAUSAL_CONV1D_CLASS::ProcessFnChunk(int32_t seq, int32_t cacheIdx, bool hasInit,
                                                             int32_t seqStart, int32_t seqLen, int32_t chunkStart,
                                                             int32_t chunkLen, int32_t channelStart, int32_t baseDim,
                                                             int32_t dim)
@@ -172,9 +172,9 @@
      DrainTaskMte3();
  }
  
- template <CAUSAL_CONV1D_TEMPLATE_ARGS>
+ template <VLLM_CAUSAL_CONV1D_TEMPLATE_ARGS>
  __aicore__ inline void
- CAUSAL_CONV1D_CLASS::MaybeWriteBackSeqSplitTailChunk(int32_t chunkStart, int32_t chunkLen, int32_t seqStart,
+ VLLM_CAUSAL_CONV1D_CLASS::MaybeWriteBackSeqSplitTailChunk(int32_t chunkStart, int32_t chunkLen, int32_t seqStart,
                                                       int32_t seqLen, int32_t cacheIdx, int32_t channelStart,
                                                       int32_t baseDim, int32_t dim)
  {
@@ -186,8 +186,8 @@
      WriteBackState(cacheIdx, chunkLen, channelStart, baseDim, dim);
  }
  
- template <CAUSAL_CONV1D_TEMPLATE_ARGS>
- __aicore__ inline void CAUSAL_CONV1D_CLASS::PrefetchInitStatesToWorkspace(int32_t channelStart, int32_t baseDimSize)
+ template <VLLM_CAUSAL_CONV1D_TEMPLATE_ARGS>
+ __aicore__ inline void VLLM_CAUSAL_CONV1D_CLASS::PrefetchInitStatesToWorkspace(int32_t channelStart, int32_t baseDimSize)
  {
      if (tilingData_->hasInitStateWorkspace == 0) {
          return;
@@ -225,8 +225,8 @@
      }
  }
  
- template <CAUSAL_CONV1D_TEMPLATE_ARGS>
- __aicore__ inline void CAUSAL_CONV1D_CLASS::ProcessVarlenTokenTiled()
+ template <VLLM_CAUSAL_CONV1D_TEMPLATE_ARGS>
+ __aicore__ inline void VLLM_CAUSAL_CONV1D_CLASS::ProcessVarlenTokenTiled()
  {
      const int32_t dim = tilingData_->dim;
      const int32_t batch = tilingData_->batch;

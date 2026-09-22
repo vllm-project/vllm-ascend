@@ -92,14 +92,19 @@ def dump_metadata(vendor, package_file):
             seen.add(real(path))
             try:
                 data = json.loads(path.read_text())
-                op = data.get("CausalConv1d") if isinstance(data, dict) else None
-                if op is not None:
+                if not isinstance(data, dict):
+                    continue
+                for op_name in ("CausalConv1d", "VllmCausalConv1d"):
+                    op = data.get(op_name)
+                    if op is None:
+                        continue
                     print("  FILE:", path)
+                    print("  OP:", op_name)
                     print(json.dumps(op, ensure_ascii=False, indent=2))
                     outputs = {
                         key: value for key, value in op.items() if key.startswith("output") and key[6:].isdigit()
                     }
-                    records.append({"provider": str(provider), "path": str(path), "outputs": outputs})
+                    records.append({"provider": str(provider), "path": str(path), "op_name": op_name, "outputs": outputs})
             except (OSError, ValueError) as exc:
                 print("  metadata read error:", path, str(exc))
     return records

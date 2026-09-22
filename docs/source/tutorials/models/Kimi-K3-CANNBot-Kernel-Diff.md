@@ -19,17 +19,58 @@ KDA Prefill 参考 recipes 的 `_prefill_flash_kda`，逐请求补齐至 64 toke
 Decode/Verify 使用 `fused_recurrent_kda_op`。两个内核接收原始 gate 和 beta，
 由内核完成激活；vLLM 的缓存索引和混合 batch 元数据适配予以保留。
 
-此前 `585db1706667571573dbb5b77001f46715b014be` 引入的自定义卷积改名和
-强制重编译检查已撤回；`csrc` 与上述上游提交一致。本次 recipes 替换不新增
-vLLM-Ascend C++ 算子编译要求。已有源码安装可更新代码后重启服务及 Ray workers，
-无需为这两处替换运行 `COMPILE_CUSTOM_KERNELS=1 pip install`。
+为隔离本仓自定义卷积与官方卷积，本分支将自定义实现的底层注册名从
+`CausalConv1d` 改为 `VllmCausalConv1d`，并同步修改生成的 ACLNN 入口、
+kernel 入口、tiling 注册及构建目录。Python 接口
+`torch.ops._C_ascend.npu_causal_conv1d_custom` 保持不变，供 GDN 等原有调用者使用；
+Kimi 仍调用官方 `cann_ops_transformer.causal_conv1d_fn/causal_conv1d_update`。
+这项改名需要重新编译安装本仓自定义算子包和 C++ 扩展，具体步骤见下节。
 依赖仍包括现有 CANN 中的 `cann_ops_transformer`、`cannbot-dsl` 和 `ninja==1.13.0`；
 CANNBot DSL 首次使用某个内核配置时仍会进行自身的 JIT 编译。
 
 **验证范围**：仅完成源码核对，未在本地运行测试或执行 NPU 验证。
-recipes ShortConv 使用同一个官方卷积接口，因此这次替换不能证明已修复服务器此前的
-`output 1` 内核匹配错误。服务器仍须验证实际 CANN 算子包、首请求、连续 Decode、
+源码确认两套实现原先共用底层注册名，但尚未证明报错进程实际选中了哪套定义。
+改名消除本仓与官方卷积之间的这处冲突；是否解决服务器的 `output 1` 内核匹配错误，
+仍须在重新安装后验证。服务器须检查首请求、连续 Decode、
 chunked prefill 和启用投机解码时的状态续算。
+
+## 自定义卷积改名后的部署
+
+| 调用方 | Python 接口 | ACLNN 入口 | 底层注册名 |
+| --- | --- | --- | --- |
+| Kimi ShortConv Prefill | `cann_ops_transformer.causal_conv1d_fn` | `aclnnCausalConv1dFn` | `CausalConv1d` |
+| Kimi ShortConv Decode | `cann_ops_transformer.causal_conv1d_update` | `aclnnCausalConv1dUpdate` | `CausalConv1d` |
+| 本仓自定义 GDN 卷积 | `_C_ascend.npu_causal_conv1d_custom` | `aclnnVllmCausalConv1d` | `VllmCausalConv1d` |
+
+自定义算子的单输出定义、参数和计算逻辑保持不变。Ascend 310P 的独立
+`CausalConv1dV310` 不参与本次改名。KDA recipes 内核与调用适配也保持不变。
+
+先停止服务和 Ray workers，再在每个节点原来的 Python/CANN 环境中更新并编译安装。
+以下示例使用服务器已有的 `wjcfork` remote：
+
+```bash
+cd /data/w50063966/vllm-ascend
+git pull --ff-only wjcfork v0.26.0rc
+COMPILE_CUSTOM_KERNELS=1 /usr/local/python3.11.10/bin/python3 -m pip install -v -e . \
+    --no-build-isolation --no-deps
+```
+
+安装会重新生成 ACLNN、算子定义、tiling 和 kernel 产物，替换本 checkout 中的
+`vllm_ascend/_cann_ops_custom`，并重新编译 C++ 扩展。仅拉取源码、仅修改 JSON、
+仅复制新扩展或者仅安装算子 `.run` 包都不足以完成这次更新。
+构建成功后，新进程启动时会检查本仓 metadata；如果仍含旧 `CausalConv1d` 注册，
+会提示重新编译。该检查只覆盖本仓安装目录，不能排除其他目录中另有旧算子包。
+
+在空闲 NPU 上运行共存回归，验证 FP16/BF16 下自定义卷积与官方 Prefill、续算、
+Decode 的输出和缓存更新：
+
+```bash
+/usr/local/python3.11.10/bin/python3 -m pytest -v \
+    tests/e2e/nightly/single_node/ops/singlecard_ops/test_kimi_causal_conv1d_official.py
+```
+
+确认所有节点安装成功后，重新启动 Ray workers 和服务，并发送真实请求。
+旧进程会缓存算子库和入口地址，因此更新后必须重启。
 
 ## 内核文件对比
 
