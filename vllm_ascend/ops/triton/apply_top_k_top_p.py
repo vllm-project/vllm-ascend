@@ -94,7 +94,7 @@ def _apply_topk_topp_single_pass_kernel(
         if USE_I32:
             row_base = row * V
         else:
-            row_base = row.to(tl.int64) * V
+            row_base = row.to(tl.int64) * V  # type: ignore[attr-defined]
 
         # topKValue[b] = sortedValue[b][V - k[b]]（下标钳位到 [0, V-1]）
         k_b = tl.load(k_ptr + row)
@@ -155,7 +155,7 @@ def _apply_topk_topp_tiled_kernel(
         if USE_I32:
             row_base = row * V
         else:
-            row_base = row.to(tl.int64) * V
+            row_base = row.to(tl.int64) * V  # type: ignore[attr-defined]
 
         k_b = tl.load(k_ptr + row)
         p_b = tl.load(p_ptr + row)
@@ -397,7 +397,8 @@ def apply_top_k_top_p(
     Returns:
         [B, V] 原序 masked logits：保留位为原始 logit，过滤位为 -inf。
     """
-    return apply_top_k_top_p_with_sorted(*_sort_ascending(logits), k, p)
+    sorted_values, sorted_indices = _sort_ascending(logits)
+    return apply_top_k_top_p_with_sorted(sorted_values, sorted_indices, k, p)
 
 
 def fused_topk_topp_softmax_with_sorted(
@@ -434,4 +435,5 @@ def fused_topk_topp_softmax(
     Returns:
         [B, V] fp32 概率分布：masked 位 = 0，每行和 = 1。
     """
-    return fused_topk_topp_softmax_with_sorted(*_sort_ascending(logits), k, p)
+    sorted_values, sorted_indices = _sort_ascending(logits)
+    return fused_topk_topp_softmax_with_sorted(sorted_values, sorted_indices, k, p)
