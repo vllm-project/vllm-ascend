@@ -107,9 +107,12 @@ def test_lmhead_tp_pads_to_capacity_then_trims(at_capacity):
     compute_input = runner.model.compute_logits.call_args.args[0]
     # compute_logits sees the group-agreed capacity, not the real row count
     assert compute_input.shape == (capacity, hidden_dim)
-    # real rows are the indexed hidden states, padding rows are zero
+    # real rows are the indexed hidden states; padding rows are row-0 gathers
+    # (V1 pads the indices with zeros the same way) and are trimmed back off
     torch.testing.assert_close(compute_input[:num_logits], hidden_states[indices])
-    assert torch.all(compute_input[num_logits:] == 0)
+    torch.testing.assert_close(compute_input[num_logits:], hidden_states[0].expand(capacity - num_logits, hidden_dim))
+    # input_batch keeps the real indices: the V2 sampler gathers penalties by them
+    assert input_batch.logits_indices.shape[0] == num_logits
     # the sampler only sees the trimmed real rows
     sampled_logits = runner.sampler.call_args.args[0]
     assert sampled_logits.shape[0] == num_logits
@@ -526,6 +529,12 @@ def test_lmhead_tp_pad_rows_contract():
 
     with pytest.raises(ValueError, match="group-agreed capacity"):
         lmhead_tp_pad_rows(torch.randn(5, 3), 4, "max_num_reqs * k")
+
+    # 1-D index tensors (the V1-style target-side call site): zero padding is
+    # the safe row-0 gather index.
+    idx = torch.tensor([5, 2, 9])
+    padded_idx = lmhead_tp_pad_rows(idx, 6, "max_num_reqs * k")
+    assert padded_idx.tolist() == [5, 2, 9, 0, 0, 0]
 
 
 def test_draft_capacity_formula_matches_runner():

@@ -953,19 +953,22 @@ def lmhead_tp_max_num_logits(max_num_reqs: int, logits_rows_per_req: int) -> int
     return max_num_reqs * logits_rows_per_req
 
 
-def lmhead_tp_pad_rows(hidden_states: torch.Tensor, capacity: int, formula: str) -> torch.Tensor:
-    """Zero-pad the leading dim of ``hidden_states`` up to ``capacity``.
+def lmhead_tp_pad_rows(rows: torch.Tensor, capacity: int, formula: str) -> torch.Tensor:
+    """Zero-pad the leading dim of ``rows`` up to ``capacity``.
 
-    The one pad primitive both head paths share: the runner's ``sample()``
+    The one alignment primitive both head paths share: the runner's ``sample()``
     (target head) and the speculators' ``sample_draft`` (draft head) must feed
     the LM-head collectives the same row count on every rank, so both funnel
-    through here instead of re-implementing the pad. Rows past the real count
-    are zero rows the caller trims back off. At capacity the input is returned
-    as-is (no copy). Overrun means the capacity formula no longer matches
-    upstream logits production and the collectives would hang, so it fails
-    fast; ``formula`` names the capacity convention in the error.
+    through here instead of re-implementing the pad. Takes 2-D hidden states
+    and the 1-D row indices the V1-style call sites pad (``model_runner_v1``
+    pads ``logits_indices`` the same way): for indices, the zero padding is the
+    safe row-0 gather index. Rows past the real count are trimmed back off by
+    the caller. At capacity the input is returned as-is (no copy). Overrun
+    means the capacity formula no longer matches upstream logits production
+    and the collectives would hang, so it fails fast; ``formula`` names the
+    capacity convention in the error.
     """
-    num_rows = hidden_states.shape[0]
+    num_rows = rows.shape[0]
     if num_rows > capacity:
         raise ValueError(
             f"lmhead TP rows ({num_rows}) exceed the group-agreed capacity "
@@ -973,8 +976,9 @@ def lmhead_tp_pad_rows(hidden_states: torch.Tensor, capacity: int, formula: str)
             "upstream logits production."
         )
     if num_rows == capacity:
-        return hidden_states
-    return torch.nn.functional.pad(hidden_states, (0, 0, 0, capacity - num_rows))
+        return rows
+    padding = (0, 0, 0, capacity - num_rows) if rows.dim() == 2 else (0, capacity - num_rows)
+    return torch.nn.functional.pad(rows, padding)
 
 
 def embedding_tp_enable() -> bool:

@@ -698,15 +698,19 @@ class NPUModelRunner(GPUModelRunner):
 
         num_logits = input_batch.logits_indices.shape[0]
         capacity = self._lmhead_tp_max_num_logits()
-        # Shared pad primitive (also used by the speculators' sample_draft):
-        # compute_logits sees the group-agreed capacity on every rank, the
-        # zero rows carry no token and are trimmed back off below.
-        sample_hidden_states = lmhead_tp_pad_rows(
-            hidden_states[input_batch.logits_indices],
+        # V1 pads the sample indices up to the same capacity once per step in
+        # its input preparation (model_runner_v1) and the head consumes them
+        # directly. Mirror it here: pad a private copy of the indices -- never
+        # input_batch's, the V2 sampler gathers penalties by the real ones --
+        # so the one gather feeds compute_logits the group-agreed capacity
+        # rows. Zero pad entries gather row 0; those rows carry no token and
+        # are trimmed back off below.
+        sample_indices = lmhead_tp_pad_rows(
+            input_batch.logits_indices,
             capacity,
             "max_num_reqs * decode_query_len",
         )
-        logits = self.model.compute_logits(sample_hidden_states)
+        logits = self.model.compute_logits(hidden_states[sample_indices])
         logits = logits[:num_logits]
 
         # Dispatch tail mirrors GPUModelRunner.sample; refresh it on main bumps.
