@@ -459,7 +459,17 @@ class AscendDSAV41Impl:
             candidate_block_size=self.topology.candidate_block_size,
             candidates=shared.candidates[: hidden_states.shape[0]],
         )
-        shared.topk_indices[: selected.shape[0]].copy_(selected)
+        # With an empty long-context cache the indexer reports its
+        # [tokens, 0] sentinel (see Indexer.select_projected), which cannot be
+        # copied into the [tokens, index_topk] shared buffer: the shapes differ
+        # in the last dimension. Publish the same "no slot" value the rest of
+        # this path uses (-1, cf. pad_sparse_indices) instead of crashing; a
+        # full decode graph captures exactly this state, so the copy used to
+        # fail with aclnnInplaceCopy 161002 during FULL capture.
+        if selected.shape[1] == 0:
+            shared.topk_indices[: selected.shape[0]].fill_(-1)
+        else:
+            shared.topk_indices[: selected.shape[0]].copy_(selected)
         if self.role.is_candidate_source:
             shared.candidates[: candidates.shape[0]].copy_(candidates)
         return shared.topk_indices[: selected.shape[0]]

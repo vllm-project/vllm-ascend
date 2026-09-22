@@ -71,7 +71,6 @@ if TYPE_CHECKING:
 
 # NoPE sparse MLA operator helpers.
 SMLA_METADATA_SIZE = 1024
-SPARSE_ATTENTION_MAX_BLOCK_SIZE = 1024
 
 
 def build_smla_metadata(metadata, buffer, num_heads, head_dim, topk):
@@ -189,10 +188,8 @@ class SparseMLAMetadataState:
             raise ValueError("Sparse MLA block size must be a positive multiple of the SFA kernel block size.")
         self.split = block_size // kernel_block_size
         self.use_smla = get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.FP8_OPTIMIZED
-        self.block_size = block_size
-        if block_size > SPARSE_ATTENTION_MAX_BLOCK_SIZE:
-            self.block_size = kernel_block_size
-        self.table_stride = self.block_size // kernel_block_size
+        self.block_size = kernel_block_size
+        self.table_stride = 1
         cache_block_size = vllm_config.cache_config.block_size
         expand_factor = max(cache_block_size // kernel_block_size, 1)
         table_width = cdiv(vllm_config.model_config.max_model_len, cache_block_size) * expand_factor
@@ -242,9 +239,6 @@ class SparseMLAMetadataState:
             )
         return metadata
 
-
-# token count limits within bmm_transpose operator
-BMM_TRANS_MAX_SUPPORTED_TOKENS = 1024
 
 # npu_transpose_batchmatmul rejects operand dimensions >= 65536
 TRANSPOSE_BMM_MAX_SUPPORTED_DIM = 65536
@@ -852,9 +846,6 @@ class AscendSFAImpl(MLAAttentionImpl):
             self.W_UV.copy_(W_UV.transpose(0, 1).contiguous())
             self.W_UK_T.copy_(W_UK.permute(1, 2, 0).contiguous())
 
-        # TODO(zzzzwwjj): Currently, torch.ops._C_ascend.batch_matmul_transpose cannot support weight nz
-        # self.W_UV = maybe_trans_nz(self.W_UV)
-
         # Dispose kv_b_proj since it is replaced by W_UV and W_UK_T to save memory.
         # RL keeps it: it is the only source of W_UV/W_UK_T, so every weight
         # update re-derives them from this parameter and the parameter must stay
@@ -1204,29 +1195,31 @@ class AscendSFAImpl(MLAAttentionImpl):
         return ql_nope, q_pe
 
     def _v_up_proj(self, x):
-        num_input_tokens, _, _ = x.shape
-        if (
-            x.dtype in [torch.float16, torch.bfloat16]
-            and hasattr(torch.ops._C_ascend, "batch_matmul_transpose")
-            and num_input_tokens <= BMM_TRANS_MAX_SUPPORTED_TOKENS
-        ):
-            x = x.view(-1, self.local_num_heads, self.kv_lora_rank)
-            res = torch.empty((num_input_tokens, self.local_num_heads, self.v_head_dim), dtype=x.dtype, device=x.device)
-            torch.ops._C_ascend.batch_matmul_transpose(x, self.W_UV, res)
-            x = res.reshape(-1, self.local_num_heads * self.v_head_dim)
-        elif hasattr(torch_npu, "npu_transpose_batchmatmul"):
-            # Convert from (N, B, L)/(N, B, 1, L) to (N, B, L)
-            x = x.view(-1, self.local_num_heads, self.kv_lora_rank)
-            # Multiply (N, B, L) x (N, L, V) -> (B, N, V)
-            x = torch_npu.npu_transpose_batchmatmul(x, self.W_UV, perm_x1=(1, 0, 2), perm_y=(1, 0, 2))
-            # Convert from (N, B, V) to (B, N * V)
+        if hasattr(torch_npu, "npu_transpose_batchmatmul"):
+            # aclnn TransposeBatchMatMul with perm_x1=(1,0,2) (internal
+            # transpose) requires N*L < 65536 on older CANN binaries.
+            #   - If satisfied: keep x as (B, N, L) and let the operator
+            #     transpose internally, saving a contiguous copy.
+            #   - Otherwise: explicit transpose to (N, B, L) and use
+            #     perm_x1=(0,1,2), which downgrades the check to L < 65536.
+            # TODO: CANN 9.2 removes the N*L<65536 check; once it is the
+            # deployment baseline, collapse this branch to perm_x1=(1,0,2).
+            if self.local_num_heads * self.kv_lora_rank < 65536:
+                # (B, N, L) -> operator transposes internally -> (B, N, V)
+                x = x.view(-1, self.local_num_heads, self.kv_lora_rank)
+                x = torch_npu.npu_transpose_batchmatmul(x, self.W_UV, perm_x1=(1, 0, 2), perm_y=(1, 0, 2))
+            else:
+                # (B, N, L) -> (N, B, L) -> (B, N, V); perm_x1=(0,1,2) skips inner transpose
+                x = x.view(-1, self.local_num_heads, self.kv_lora_rank).transpose(0, 1).contiguous()
+                x = torch_npu.npu_transpose_batchmatmul(x, self.W_UV, perm_x1=(0, 1, 2), perm_y=(1, 0, 2))
+            # (B, N, V) -> (B, N * V)
             x = x.reshape(-1, self.local_num_heads * self.v_head_dim)
         else:
-            # Convert from (B, N, L) to (N, B, L)
+            # (B, N, L) -> (N, B, L)
             x = x.view(-1, self.local_num_heads, self.kv_lora_rank).transpose(0, 1)
-            # # Multiply (N, B, L) x (N, L, V) -> (N, B, V)
+            # (N, B, L) x (N, L, V) -> (N, B, V)
             x = torch.bmm(x, self.W_UV)
-            # # Convert from (N, B, V) to (B, N * V)
+            # (N, B, V) -> (B, N * V)
             x = x.transpose(0, 1).reshape(-1, self.local_num_heads * self.v_head_dim)
         return x
 

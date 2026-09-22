@@ -327,7 +327,10 @@ def test_mla_dcp_uses_native_global_query_heads_for_fia(mock_fia) -> None:
         (2, 1, (64, 128), 256),
     ],
 )
-def test_split_decode_overlaps_history_communication(dcp_size, dcp_rank, workspace_sizes, cached_size):
+@pytest.mark.parametrize("history_dtype", [torch.bfloat16, torch.float16, torch.float32])
+def test_split_decode_packs_on_main_overlapping_current_attention(
+    dcp_size, dcp_rank, workspace_sizes, cached_size, history_dtype
+):
     import vllm_ascend.attention.context_parallel.mla_cp as mla_cp
 
     impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
@@ -354,7 +357,7 @@ def test_split_decode_overlaps_history_communication(dcp_size, dcp_rank, workspa
         cp_history_seq_len=[2],
     )
     decode.attn_mask = torch.zeros(2, 2, dtype=torch.bool)
-    history_output = torch.ones(2, 2 * dcp_size, 4)
+    history_output = torch.ones(2, 2 * dcp_size, 4, dtype=history_dtype)
     history_lse = torch.zeros(2, 2 * dcp_size, 1)
     current_output = torch.full((2, 2, 4), 3.0)
     current_lse = torch.zeros(2, 2, 1)
@@ -369,25 +372,25 @@ def test_split_decode_overlaps_history_communication(dcp_size, dcp_rank, workspa
     events: list[object] = []
     active = ["main"]
     main = Mock()
-    comm = Mock()
+    attn = Mock()
 
     def record_history_ready() -> str:
         events.append("history_ready")
         return "ready"
 
-    def record_comm_done() -> str:
-        events.append("comm_done")
+    def record_attn_done() -> str:
+        events.append("attn_done")
         return "done"
 
     main.record_event.side_effect = record_history_ready
-    comm.wait_event.side_effect = lambda event: events.append(("comm_wait", event))
-    comm.record_event.side_effect = record_comm_done
+    attn.wait_event.side_effect = lambda event: events.append(("attn_wait", event))
+    attn.record_event.side_effect = record_attn_done
     main.wait_event.side_effect = lambda event: events.append(("main_wait", event))
 
     @contextmanager
     def on_stream(stream):
-        assert stream is comm
-        active[0] = "comm"
+        assert stream is attn
+        active[0] = "attn"
         yield
         active[0] = "main"
 
@@ -400,7 +403,8 @@ def test_split_decode_overlaps_history_communication(dcp_size, dcp_rank, workspa
         if workspace_sizes is not None:
             assert set(graph_params.workspaces) == {2}
             assert graph_params.workspaces[2].numel() == (cached_size or max(workspace_sizes))
-        assert active[0] == "main"
+        expected_stream = "main" if kwargs["attention_kind"] == MLASplitAttentionKind.HISTORY else "attn"
+        assert active[0] == expected_stream
         events.append(kwargs["attention_kind"])
         if kwargs["attention_kind"] == MLASplitAttentionKind.HISTORY:
             torch.testing.assert_close(q, q_nope)
@@ -426,7 +430,7 @@ def test_split_decode_overlaps_history_communication(dcp_size, dcp_rank, workspa
         return current_output, current_lse
 
     def communicate(out, lse, size, scatter_dim, group_name, defer_combine):
-        assert active[0] == "comm"
+        assert active[0] == "main"
         assert out is history_output and lse is history_lse
         assert size == dcp_size and scatter_dim == 1 and defer_combine
         assert group_name == ("dcp-test" if dcp_size > 1 else "")
@@ -457,7 +461,7 @@ def test_split_decode_overlaps_history_communication(dcp_size, dcp_rank, workspa
         ),
         patch.object(mla_cp, "get_graph_params", return_value=graph_params),
         patch.object(mla_cp.torch_npu, "_npu_fused_infer_attention_score_get_max_workspace", workspace_query),
-        patch.object(mla_cp, "_dcp_mtp_comm_stream", return_value=comm),
+        patch.object(mla_cp, "_dcp_mtp_comm_stream", return_value=attn),
         patch.object(torch.npu, "current_stream", return_value=main),
         patch.object(torch.npu, "stream", side_effect=on_stream),
         patch.object(torch.Tensor, "record_stream", autospec=True) as record_stream,
@@ -484,14 +488,14 @@ def test_split_decode_overlaps_history_communication(dcp_size, dcp_rank, workspa
     assert workspace_query.call_count == (2 if workspace_sizes is not None and cached_size is None else 0)
     history_update.assert_called_once()
     update.assert_called_once()
-    assert record_stream.call_count == 3
+    assert record_stream.call_count == 7
     assert events == [
         MLASplitAttentionKind.HISTORY,
         "history_ready",
-        ("comm_wait", "ready"),
-        "history_collective",
-        "comm_done",
+        ("attn_wait", "ready"),
         MLASplitAttentionKind.CURRENT,
+        "attn_done",
+        "history_collective",
         ("main_wait", "done"),
         "merge",
     ]

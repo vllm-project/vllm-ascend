@@ -5,12 +5,12 @@ import pytest
 from transformers import Qwen3Config
 from vllm.config.model_arch import ModelArchitectureConfig
 from vllm.config.speculative import SpeculativeConfig
-from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
 
 from vllm_ascend.patch.platform import patch_speculative_config
 from vllm_ascend.patch.platform.patch_speculative_config import (
     _normalize_deepseek_dspark_draft,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 def test_legacy_qwen3_dspark_config_uses_qwen3_loader():
@@ -195,6 +195,10 @@ def test_deepseek_v41_dspark_selects_v41_drafter_and_expert_shape(flattened):
     )
     hf_config.update = lambda values: hf_config.__dict__.update(values)
     if flattened:
+        if vllm_version_is("0.29.0"):
+            pytest.skip("DeepSeek V4.1 config is unavailable on vLLM 0.29")
+        from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
+
         hf_config = DeepseekV41Config(
             text_config={
                 "dspark_target_layer_ids": [37, 38, 39],

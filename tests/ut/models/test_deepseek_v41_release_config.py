@@ -1,4 +1,13 @@
+# ruff: noqa: E402
+
 import json
+
+import pytest
+
+pytest.importorskip(
+    "vllm.transformers_utils.configs.deepseek_v41",
+    reason="DeepSeek V4.1 is unavailable on this vLLM release",
+)
 
 from vllm import ModelRegistry
 from vllm.transformers_utils.config import get_config
