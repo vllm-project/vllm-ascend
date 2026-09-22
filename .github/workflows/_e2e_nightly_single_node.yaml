@@ -476,6 +476,17 @@ jobs:
           echo "artifact_ts=$(date -u +%Y%m%dT%H%M%SZ)" >> $GITHUB_OUTPUT
           echo "effective_name=${{ inputs.vllm_ascend_branch }}-${{ inputs.name }}" >> $GITHUB_OUTPUT
 
+      - name: Upload GLM5.x logits gate evidence
+        if: ${{ always() && inputs.config_file_path == 'GLM-5.2-W4A8-A3-Logits11.yaml' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: glm5x-logits-${{ inputs.vllm_ascend_branch }}-${{ inputs.name }}-${{ github.run_attempt }}
+          path: |
+            /vllm-workspace/vllm-ascend/benchmark_results/GLM-5.2-W4A8-A3-Logits11/
+            /tmp/test-logs/yaml-test.log
+          if-no-files-found: warn
+          retention-days: 90
+
       - name: Upload reduced model gate evidence
         if: ${{ always() && inputs.config_file_path == 'GLM-5.2-W4A8-MTP-A3-Reduced8.yaml' }}
         uses: actions/upload-artifact@v7

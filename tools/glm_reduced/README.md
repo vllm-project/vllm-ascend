@@ -4,6 +4,11 @@ Builds layer-reduced ("cropped") copies of real GLM checkpoints for
 numerical-precision and performance gates on vllm-ascend. The same reduced
 checkpoint feeds both gates.
 
+For the non-Flash GLM5.x **11-layer, >=90% A1 argmax agreement** nightly case,
+see [the fixed GSM8K logits gate](data/glm52/logits/README.md). This is a separate
+intermediate-logits regression gate, not GSM8K answer accuracy. The currently
+registered real-weight case is GLM-5.2 W4A8.
+
 Design properties:
 
 - **Real weights, production dimensions.** Only decoder layers are dropped;

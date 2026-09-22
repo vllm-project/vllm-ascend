@@ -584,6 +584,11 @@ def _run_benchmarks(config: SingleNodeConfig, port: int) -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("config", configs, ids=[config.name for config in configs])
 async def test_single_node(config: SingleNodeConfig) -> None:
+    if "glm5x_logits_gate" in config.extra_config:
+        from tools.glm_reduced.run_logits_gate import run_nightly as run_logits_gate
+
+        run_logits_gate(config)
+        return
     if "reduced_model_gate" in config.extra_config:
         from tools.glm_reduced.nightly import run_nightly
 

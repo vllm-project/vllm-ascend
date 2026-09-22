@@ -286,6 +286,9 @@ a3-560t:
       - name: glm-5.2-w4a8-mtp
         os: linux-aarch64-a3-800i-16
         config_file_path: GLM-5.2-W4A8-MTP-A3.yaml
+      - name: GLM-5.2-W4A8-A3-Logits11
+        os: linux-aarch64-a3-800i-8
+        config_file_path: GLM-5.2-W4A8-A3-Logits11.yaml
       - name: GLM-5.2-W4A8-MTP-A3-Reduced8
         os: linux-aarch64-a3-800i-8
         config_file_path: GLM-5.2-W4A8-MTP-A3-Reduced8.yaml
