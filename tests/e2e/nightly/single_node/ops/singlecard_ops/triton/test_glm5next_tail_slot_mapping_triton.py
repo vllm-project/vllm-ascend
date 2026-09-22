@@ -2,48 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import numpy as np
 import pytest
 import torch
 import torch_npu  # noqa: F401
 
-from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolTailSpec
 from vllm_ascend.ops.triton.compute_slot_mapping import compute_slot_mapping_fused_groups
 from vllm_ascend.worker.block_table import BlockTable
-
-
-@pytest.mark.parametrize("capacity", [4, 7])
-def test_real_tail_block_table_maps_slots_instead_of_padding(capacity):
-    spec = AscendIndexerKPoolTailSpec(
-        block_size=capacity,
-        num_kv_heads=1,
-        head_size=128,
-        dtype=torch.float32,
-        sliding_window=4,
-        compress_ratio=4,
-    )
-    group = SimpleNamespace(kv_cache_spec=spec)
-    with patch(
-        "vllm_ascend.worker.block_table.get_dcp_group", return_value=SimpleNamespace(world_size=1, rank_in_group=0)
-    ):
-        table = BlockTable(
-            block_size=capacity,
-            max_num_reqs=1,
-            max_num_blocks_per_req=1,
-            max_num_batched_tokens=4,
-            pin_memory=False,
-            device=torch.device("npu"),
-            kv_cache_group=group,
-        )
-    table.block_table.gpu.fill_(2)
-    table.compute_slot_mapping(
-        1,
-        torch.tensor([0, 4], dtype=torch.int32, device="npu"),
-        torch.tensor([0, 1, capacity, capacity + 1], device="npu"),
-    )
-    assert table.slot_mapping.gpu.cpu().tolist() == [2 * capacity, 2 * capacity + 1, 2 * capacity, 2 * capacity + 1]
 
 
 @pytest.mark.parametrize("lengths", [[3, 0, 5], [1025, 0, 1027], [1] * 64])
@@ -77,9 +43,6 @@ def test_normal_and_mixed_fused_circular_mapping_and_graph(lengths):
     obj.blocks_per_phys_block, obj.cp_kv_cache_interleave_size = 1, 1
     obj.max_num_batched_tokens = count + 19
     obj.is_circular = True
-    # Circular tail addressing is not a CircularKVCacheSpec group. Newer
-    # runtimes skip slot mapping for those groups (e.g. recurrent state).
-    obj.is_circular_group = False
     obj.block_table = SimpleNamespace(gpu=tail_table)
     obj.slot_mapping = SimpleNamespace(gpu=outputs[0])
     obj.compute_slot_mapping(num_reqs, ends, positions)
@@ -137,7 +100,6 @@ def test_draft_helper_preserves_circular_request_ids_and_negative_positions():
     obj = BlockTable.__new__(BlockTable)
     obj.dcp_world_size, obj.max_num_blocks_per_req, obj.blocks_per_phys_block = 1, 1, 1
     obj.block_size, obj.kernel_sizes, obj.is_circular = 4, [4], True
-    obj.is_circular_group = False
     obj.block_table = SimpleNamespace(np=np.array([[5], [9]], dtype=np.int32))
     obj.slot_mapping = SimpleNamespace(np=np.full(5, 777, dtype=np.int32), copy_to_gpu=lambda n: None)
     obj.compute_slot_mapping_draft(np.array([0, 1, 0, 1, 0]), np.array([17, 1024, -1, 1027, 100000]))

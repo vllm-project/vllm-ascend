@@ -65,36 +65,20 @@ def add_rms_norm(
 _SUPPORTED_DTYPES = (torch.float16, torch.float32, torch.bfloat16)
 
 
-def reduce_sum(x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
+def reduce_sum(x: torch.Tensor, dim: int | None = None, keepdim: bool = False) -> torch.Tensor:
     """npu_reduce_sum_batch_invariant requires dim to be specified, but torch.sum
     doesn't require it, so we set dim to -1 by default if dim is None and x.dim()==1.
     """
-    # Tensor.sum also accepts the numpy aliases axis/keepdims. Preserve the
-    # native overloads (dtype, out, named dimensions) and native validation for
-    # duplicate/unknown arguments instead of breaking callers such as MoE.
-    supported = {"dim", "keepdim", "axis", "keepdims"}
-    duplicate = (
-        ("dim" in kwargs and "axis" in kwargs)
-        or ("keepdim" in kwargs and "keepdims" in kwargs)
-        or (len(args) > 0 and bool({"dim", "axis"} & kwargs.keys()))
-        or (len(args) > 1 and bool({"keepdim", "keepdims"} & kwargs.keys()))
-    )
-    if len(args) > 2 or kwargs.keys() - supported or duplicate:
-        return torch_sum(x, *args, **kwargs)
-    dim = args[0] if args else kwargs.get("dim", kwargs.get("axis"))
-    keepdim = args[1] if len(args) > 1 else kwargs.get("keepdim", kwargs.get("keepdims", False))
     dim = -1 if dim is None and x.dim() == 1 else dim
-    if x.device.type == "npu" and isinstance(dim, int) and x.dtype in _SUPPORTED_DTYPES:
-        if dim == -1 or dim == x.dim() - 1:
-            return torch.ops.batch_invariant_ops.npu_reduce_sum_batch_invariant(x, dim, keepdim)
-        # The AscendC operator only supports the last axis. Move an interior
-        # reduction axis there without changing the order of remaining axes.
-        if -x.dim() <= dim < x.dim():
-            axis = dim % x.dim()
-            packed = x.movedim(axis, -1).contiguous()
-            result = torch.ops.batch_invariant_ops.npu_reduce_sum_batch_invariant(packed, -1, keepdim)
-            return result.movedim(-1, axis) if keepdim else result
-    # CPU tensors and unsupported dtypes/dimensions use the saved native torch.sum.
+    # aclnnReduceSumBatchInvariant only supports reducing the last dimension and
+    # raises AclNN_Parameter_Error(EZ1001, "Provided dim only support last dim")
+    # for any other dim. The last dim can only be spelled as -1 or x.dim() - 1, so
+    # only those take the batch-invariant path, and the caller's dim is forwarded
+    # unchanged. Everything else (non-last-dim, tuple dim, full reduction when dim
+    # is None, CPU tensors, unsupported dtypes) falls back to the saved native
+    # torch.sum.
+    if x.device.type == "npu" and (dim == -1 or dim == x.dim() - 1) and x.dtype in _SUPPORTED_DTYPES:
+        return torch.ops.batch_invariant_ops.npu_reduce_sum_batch_invariant(x, dim, keepdim)
     return torch_sum(x, dim, keepdim)
 
 

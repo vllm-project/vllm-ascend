@@ -27,51 +27,6 @@ import vllm_ascend.batch_invariant as batch_invariant
 class TestBatchInvariant:
     """Complete test suite for batch_invariant.py"""
 
-    @pytest.mark.parametrize("dtype", [torch.float32, torch.int64, torch.bool])
-    @pytest.mark.parametrize(
-        "kwargs", [{"axis": 1}, {"axis": 1, "keepdims": True}, {"dim": (0, 1)}, {"dtype": torch.float64}]
-    )
-    def test_reduce_sum_preserves_native_overloads(self, dtype, kwargs):
-        x = torch.arange(12).reshape(3, 4).to(dtype)
-        torch.testing.assert_close(batch_invariant.reduce_sum(x, **kwargs), torch.sum(x, **kwargs))
-
-    def test_reduce_sum_preserves_out(self):
-        x = torch.arange(12).reshape(3, 4)
-        out = torch.empty(3, dtype=torch.int64)
-        assert batch_invariant.reduce_sum(x, dim=1, out=out) is out
-        torch.testing.assert_close(out, torch.sum(x, dim=1))
-
-    @pytest.mark.parametrize("kwargs", [{"dim": 0, "axis": 1}, {"dim": 0, "keepdim": True, "keepdims": True}])
-    def test_reduce_sum_rejects_duplicate_aliases(self, kwargs):
-        with pytest.raises(TypeError):
-            batch_invariant.reduce_sum(torch.ones(2, 3), **kwargs)
-
-    def test_reduce_sum_npu_axis_alias_uses_invariant_kernel(self):
-        x = MagicMock(spec=torch.Tensor)
-        x.device.type = "npu"
-        x.dtype = torch.float32
-        x.dim.return_value = 2
-        with patch.object(
-            batch_invariant.torch.ops.batch_invariant_ops, "npu_reduce_sum_batch_invariant", create=True
-        ) as op:
-            batch_invariant.reduce_sum(x, axis=1, keepdims=True)
-        op.assert_called_once_with(x, 1, True)
-
-    @pytest.mark.parametrize("dim,keepdim", [(0, False), (1, True), (-2, False)])
-    def test_reduce_sum_moves_interior_axis(self, dim, keepdim):
-        x = MagicMock(spec=torch.Tensor)
-        x.device.type = "npu"
-        x.dtype = torch.float32
-        x.dim.return_value = 3
-        packed = x.movedim.return_value.contiguous.return_value
-        with patch.object(
-            batch_invariant.torch.ops.batch_invariant_ops, "npu_reduce_sum_batch_invariant", create=True
-        ) as op:
-            result = batch_invariant.reduce_sum(x, dim, keepdim)
-        x.movedim.assert_called_once_with(dim % 3, -1)
-        op.assert_called_once_with(packed, -1, keepdim)
-        assert result is (op.return_value.movedim.return_value if keepdim else op.return_value)
-
     @patch("vllm_ascend.batch_invariant.HAS_TRITON", False)
     @patch("vllm_ascend.batch_invariant.HAS_ASCENDC_BATCH_INVARIANT", True)
     @pytest.mark.parametrize("dtype", [torch.float16, torch.float32, torch.bfloat16])

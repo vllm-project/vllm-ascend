@@ -82,7 +82,6 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
         )
     monkeypatch.setattr(model_kda, "get_forward_context", lambda: SimpleNamespace(attn_metadata={"layer": metadata}))
     conv_calls = []
-    staging_sync = []
     conv_entry = model_kda.causal_conv1d
 
     def cpu_conv_entry(x, weight, state, *args, **kwargs):
@@ -90,16 +89,9 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
         # non-contiguous state's device-side gather/scatter and original alias.
         assert state.data_ptr() == layer.kv_cache[0].data_ptr()
         assert state.shape == (8, 6, 384)
-        staging_sync.append(kwargs["synchronize_staging"])
         return conv_entry(x, weight, state.contiguous(), *args, **kwargs)
 
     monkeypatch.setattr(model_kda, "causal_conv1d", cpu_conv_entry)
-    layer_syncs = []
-    monkeypatch.setattr(
-        torch.npu,
-        "current_stream",
-        lambda: SimpleNamespace(synchronize=lambda: layer_syncs.append(True)),
-    )
 
     def conv(output, x, weight, **kwargs):
         conv_calls.append(kwargs["run_mode"])
@@ -150,8 +142,6 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
     assert torch.count_nonzero(out[:, tokens:]) == 0
     assert calls == ["recurrent", "prefill"]
     assert conv_calls == ([1, 0] if speculative else [0])
-    assert staging_sync == ([True, True] if speculative else [True])
-    assert layer_syncs == ([True] if speculative else [])
 
 
 @pytest.mark.parametrize(("width", "num_spec"), [(1, 0), (5, 0), (3, 3)])

@@ -427,7 +427,6 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 conv_meta.cache_indices,
                 run_mode=1,
                 num_accepted_tokens=conv_meta.num_accepted_tokens,
-                synchronize_staging=attn_metadata_narrowed.num_prefills > 0,
             )
             q_spec, k_spec, v_spec = qkv_spec.split(self.local_projection_size, dim=-1)
 
@@ -444,7 +443,6 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 conv_meta.cache_indices,
                 run_mode=0,
                 initial_state_mode=conv_meta.initial_state_mode,
-                synchronize_staging=True,
             )
             q_ns, k_ns, v_ns = qkv_ns.split(self.local_projection_size, dim=-1)
         elif attn_metadata_narrowed.num_decodes > 0:
@@ -459,14 +457,6 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 run_mode=1,
             )
             q_ns, k_ns, v_ns = qkv_ns.split(self.local_projection_size, dim=-1)
-
-        if use_spec and attn_metadata_narrowed.num_prefills > 0:
-            # Triton stages the paged convolution state around the ACLNN
-            # kernel. In a mixed verify + chunked-prefill step those queues
-            # can otherwise outlive the layer and the next engine step may
-            # observe the pre-update state. This boundary-only synchronization
-            # does not affect pure prefill or steady-state speculative decode.
-            torch.npu.current_stream().synchronize()
 
         def rearrange(x):
             return x.reshape(1, -1, self.local_num_heads, self.head_dim)

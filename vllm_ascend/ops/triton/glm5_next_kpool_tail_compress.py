@@ -123,11 +123,8 @@ def _glm5_next_kpool_tail_compress_kernel(
         tail_block_table_ptr + req_id * tail_block_table_stride_req,
     ).to(tl.int64)
     history_valid = history_valid & (physical >= 0) & (physical < tail_num_blocks)
-    # Keep the request's block address scalar. A per-row int64 tl.where here
-    # misaddresses odd-length history masks on the Ascend Triton backend.
-    # Per-row validity belongs only in the load mask below.
-    physical = tl.where((physical >= 0) & (physical < tail_num_blocks), physical, 0)
-    hist_addr = physical * tail_cache_stride_block + page_offset[:, None] * tail_cache_stride_offset
+    physical = tl.where(history_valid, physical, 0)
+    hist_addr = physical[:, None] * tail_cache_stride_block + page_offset[:, None] * tail_cache_stride_offset
     hist_mask = history_valid[:, None] & dim_mask[None, :]
     pool_k_hist = tl.load(
         tail_cache_ptr + hist_addr + dim_offsets[None, :] * tail_cache_stride_d,

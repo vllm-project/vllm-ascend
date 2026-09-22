@@ -258,17 +258,11 @@ class Glm5NextMLAAttention(nn.Module):
         self.is_v32 = config.index_topk is not None
 
         if self.is_v32:
-            # NoPE checkpoints have no rotary dimensions. Constructing a
-            # zero-width RotaryEmbedding breaks Ascend's interleaved cache.
-            self.indexer_rope_emb: RotaryEmbedding | None = (
-                get_rope(
-                    qk_rope_head_dim,
-                    max_position=max_position_embeddings,
-                    rope_parameters=config.rope_parameters,
-                    is_neox_style=not config.indexer_rope_interleave,
-                )
-                if qk_rope_head_dim > 0
-                else None
+            self.indexer_rope_emb: RotaryEmbedding | None = get_rope(
+                qk_rope_head_dim,
+                max_position=max_position_embeddings,
+                rope_parameters=config.rope_parameters,
+                is_neox_style=not config.indexer_rope_interleave,
             )
             # The sparse indexer projects from the MLA q-lora rank, which is
             # always set for v32 MLA configs; narrow away the `int | None`.

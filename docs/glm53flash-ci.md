@@ -86,9 +86,11 @@ python -m tools.ci.run_glm53flash_gates \
 
 默认回归报告WARN、退出码0；参数/数据无效为ERROR、退出码2。完成基线正确性审核、独立回放与审批记录后加--enforce，回归为FAIL、退出码1。精度和性能分别输出判定，当前同一个--enforce控制两者。
 
-## 修复内容、验证和剩余工作
+## 运行时修复依赖、验证和剩余工作
 
-PR包含KeyPool历史地址、NoPE初始化、私有环缓存协调器、KDA非连续卷积状态暂存、custom-op可变别名及batch-invariant reduction兼容修复。二维speculative cache索引按请求和状态列全部暂存；schema声明output/conv_state原地写；prefill与mixed verify/prefill在必要边界同步。新增同步影响性能，需NPU复测和评审。
+本CI PR只包含用例、采集器、门禁工具和文档。运行时修复及其回归测试已拆到[独立PR #17281](https://github.com/vllm-project/vllm-ascend/pull/17281)，涉及KeyPool历史地址、NoPE初始化、私有环缓存协调器、KDA非连续卷积状态暂存、custom-op可变别名及batch-invariant reduction兼容。
+
+其中卷积算子是torch.ops._C_ascend.npu_causal_conv1d_custom，C++调用aclnnCausalConv1d，写入output并更新conv_state。CI PR不修改torch_binding.cpp。完整A3验证需包含运行时修复；两个PR均以main为目标，待运行时修复合入后更新CI分支并重新采集。
 
 此前隔离A3环境相关回归106 passed、门禁单测11 passed。原始512-token budget混合复用场景在eager两次、graph三次启动均通过。MTP记录150 drafts、450 draft tokens、0 accepted，因此接受分支尚未覆盖。当前PR基于更新后的主线整理，必须用匹配运行时重新验证。
 
