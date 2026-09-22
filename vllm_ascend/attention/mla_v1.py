@@ -102,7 +102,7 @@ class AscendMLABackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
-        return num_blocks, block_size, num_kv_heads, head_size
+        return num_blocks, num_kv_heads, block_size, head_size
 
     @staticmethod
     def get_impl_cls() -> type["MLAAttentionImpl"]:

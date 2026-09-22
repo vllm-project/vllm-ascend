@@ -295,7 +295,7 @@ class TestAscendMLABackend(TestBase):
 
     def test_get_kv_cache_shape(self):
         result = AscendMLABackend.get_kv_cache_shape(2, 4, 8, 128)
-        self.assertEqual(result, (2, 4, 8, 128))
+        self.assertEqual(result, (2, 8, 4, 128))
 
     def test_get_impl_cls(self):
         self.assertEqual(AscendMLABackend.get_impl_cls(), AscendMLAImpl)

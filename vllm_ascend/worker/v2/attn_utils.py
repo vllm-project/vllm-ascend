@@ -1275,13 +1275,13 @@ def _reshape_kv_cache_v2(
                 kv_caches[layer_name] = (cache,)
                 continue
             if isinstance(kv_cache_spec, (AscendMLAAttentionSpec, MLAAttentionSpec)):
-                num_blocks_, block_size_, num_kv_heads, _ = kv_cache_shape
+                num_blocks_, num_kv_heads, block_size_, _ = kv_cache_shape
                 k_dim, v_dim = _get_attention_kv_cache_dims(layer_name, kv_cache_spec)
-                k_shape = (num_blocks_, block_size_, num_kv_heads, k_dim)
+                k_shape = (num_blocks_, num_kv_heads, block_size_, k_dim)
                 if sparse_sfa_c8:
-                    k_shape = (num_blocks_, block_size_, num_kv_heads, kv_cache_spec.head_size)
+                    k_shape = (num_blocks_, num_kv_heads, block_size_, kv_cache_spec.head_size)
                     v_dim = 0
-                v_shape = (num_blocks_, block_size_, num_kv_heads, v_dim)
+                v_shape = (num_blocks_, num_kv_heads, block_size_, v_dim)
             else:
                 k_shape = kv_cache_shape[1:]
                 v_shape = (

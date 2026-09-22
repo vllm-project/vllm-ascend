@@ -5626,26 +5626,26 @@ class NPUModelRunner(GPUModelRunner):
                             v_shape = k_shape
                     else:
                         # k_cache: nope_cache    v_cache: rope_cache
-                        mla_num_blocks, mla_block_size, num_kv_heads, _ = kv_cache_shape
+                        mla_num_blocks, num_kv_heads, mla_block_size, _ = kv_cache_shape
                         k_dim, v_dim = self._get_attention_kv_cache_dims(layer_name, current_kv_cache_spec)
                         k_shape = (
                             mla_num_blocks,
-                            mla_block_size,
                             num_kv_heads,
+                            mla_block_size,
                             k_dim,
                         )
                         if current_sparse_sfa_c8:
                             k_shape = (
                                 mla_num_blocks,
-                                mla_block_size,
                                 num_kv_heads,
+                                mla_block_size,
                                 current_kv_cache_spec.head_size,
                             )
                             v_dim = 0
                         v_shape = (
                             mla_num_blocks,
-                            mla_block_size,
                             num_kv_heads,
+                            mla_block_size,
                             v_dim,
                         )
                     k_cache_dtype = v_cache_dtype = current_kv_cache_spec.dtype
