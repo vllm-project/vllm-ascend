@@ -665,7 +665,8 @@ class TestNPUWorker(TestBase):
         mock_snapshot.total_memory = 2000
         mock_snapshot_cls.return_value = mock_snapshot
 
-        # Mock current_platform for v0.24.0 init_device path
+        # Make the bound visible NPU differ from local_rank to verify that
+        # local communication setup follows the actual device binding.
         mock_current_platform.logical_device_id_to_visible_device_id.return_value = 1
         mock_current_platform.device_type = "npu"
 
@@ -688,7 +689,9 @@ class TestNPUWorker(TestBase):
             # Test _init_device
             with patch("vllm_ascend.worker.worker.setup_ascend_local_comm_res") as setup_endpoint:
                 result = worker._init_device()
-            # DP shards may both use local_rank=0; pass the bound device ordinal.
+
+            # Both calls must use the mapped visible ordinal, not local_rank.
+            mock_set_device.assert_called_once_with(torch.device("npu:1"))
             setup_endpoint.assert_called_once_with(1, worker.vllm_config.kv_transfer_config)
             self.assertEqual(worker.local_rank, 0)
 
