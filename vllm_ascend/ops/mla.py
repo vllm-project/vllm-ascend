@@ -33,6 +33,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
+from vllm_ascend.attention.utils import mark_fused_preprocess_weights
 
 
 class IndexerWrapper(nn.Module):
@@ -100,13 +101,11 @@ class IndexerWrapper(nn.Module):
         self,
         hidden_states: torch.Tensor,
         q_c: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
-        cos: torch.Tensor,
-        sin: torch.Tensor,
         k_hidden_states: torch.Tensor,
         indexer_metadata: AttentionMetadata,
         compute_topk: bool = True,
     ) -> torch.Tensor | None:
-        return self.impl(hidden_states, q_c, cos, sin, k_hidden_states, indexer_metadata, compute_topk)
+        return self.impl(hidden_states, q_c, k_hidden_states, indexer_metadata, compute_topk)
 
 
 class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
@@ -218,14 +217,22 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             layer_name=f"{prefix}.attn",
         )
 
+        # Fused preprocess (mlapo/prolog_v3) owns transpose+NZ for these
+        # layers, so quant methods must skip their own NZ conversion.
+        # Mark before VLLM calls process_weights_after_loading on submodules.
+        mark_fused_preprocess_weights(self.mla_attn.impl)
+
         original_process_weights = self.mla_attn.process_weights_after_loading
 
         def wrapped_process_weights(act_dtype: torch.dtype):
             from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
 
             if not isinstance(self.mla_attn.impl, AscendSFAImpl):
+                # Both supported vLLM versions dispatch to the impl here.
                 original_process_weights(act_dtype)
-            self.mla_attn.impl.process_weights_after_loading(act_dtype)
+            else:
+                # SFA disposes kv_b_proj, so bypass upstream's dense packing.
+                self.mla_attn.impl.process_weights_after_loading(act_dtype)
 
         self.mla_attn.process_weights_after_loading = wrapped_process_weights
 

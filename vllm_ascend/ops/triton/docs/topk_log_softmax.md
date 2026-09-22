@@ -18,7 +18,7 @@
   4. Gather: load `PADDED_TOPK` token ids for the request under the mask `k_offset < topk`, gather `logits[i, t]` at those ids, compute `logits - lse_i - m_i` in fp32 and store the `topk` valid lanes.
 
   The row is read twice from global memory rather than staged in UB, which keeps UB usage bounded by `BLOCK_SIZE` instead of by `vocab_size`. `multibuffer=False` is passed at launch for the same reason.
-- **Supported modes**: Atlas A2, Atlas A3, and Ascend 950. Used by vLLM model-runner-v2 sampling; it is installed over the upstream implementation in `vllm_ascend/patch/worker/patch_v2/patch_triton.py`. It runs in the sampler post-processing path, i.e. eagerly, outside ACL Graph capture.
+- **Supported modes**: Atlas A2, Atlas A3, and 950PR&950DT Products. Used by vLLM model-runner-v2 sampling; it is installed over the upstream implementation in `vllm_ascend/patch/worker/patch_v2/patch_triton.py`. It runs in the sampler post-processing path, i.e. eagerly, outside ACL Graph capture.
 
 ## Parameters
 

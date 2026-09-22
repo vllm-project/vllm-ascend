@@ -22,7 +22,7 @@ from dataclasses import dataclass, replace
 import numpy as np
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.distributed import get_pp_group
+from vllm.distributed import get_pcp_group, get_pp_group
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
@@ -44,12 +44,17 @@ class AscendPCPAttentionContext:
     hidden_restore_idx: torch.Tensor
     padded_gather_idx: torch.Tensor | None = None
     gathered_kv_write_mask: torch.Tensor | None = None
+    # Device snapshot of allocated kernel-block counts in global request order.
+    global_block_table_num_blocks: torch.Tensor | None = None
 
 
 class AscendPCPManager(PCPManager):
     """PCP manager that refreshes Ascend-only local-batch metadata."""
 
     vllm_config: VllmConfig
+    _global_batch_slot_mappings: torch.Tensor | None
+    _gathered_kv_slot_mappings: torch.Tensor | None
+    _pad_slot_id: torch.Tensor
 
     def __init__(
         self,
@@ -77,6 +82,16 @@ class AscendPCPManager(PCPManager):
             cp_interleave=cp_interleave,
         )
 
+        # PCP supplies its own output buffers to compute_slot_mappings, so their
+        # dtype must match Ascend block-table slots for cache-write operators.
+        if block_tables is not None:
+            slot_dtype = block_tables.slot_mappings.dtype
+            if self._global_batch_slot_mappings is not None:
+                self._global_batch_slot_mappings = torch.empty_like(self._global_batch_slot_mappings, dtype=slot_dtype)
+            if self._gathered_kv_slot_mappings is not None:
+                self._gathered_kv_slot_mappings = torch.empty_like(self._gathered_kv_slot_mappings, dtype=slot_dtype)
+            self._pad_slot_id = self._pad_slot_id.to(slot_dtype)
+
         # vLLM #53515 made the PCP-local buffers persistent and uses them for
         # graph capture. Preserve that ownership while providing the extra CPU
         # and NumPy sequence-length views required by AscendInputBatch.
@@ -91,6 +106,28 @@ class AscendPCPManager(PCPManager):
             # normally reserves one additional FIA padding slot, but PCP never
             # uses that slot; expose the exact upstream-sized view here.
             self._input_buffers.query_start_loc = self._input_buffers.query_start_loc[:-1]
+
+    @staticmethod
+    def broadcast_replicated_hidden_states(
+        last_hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor,
+        num_tokens: int,
+        replicated_pcp: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Broadcast actual draft hidden states only when target PCP is replicated."""
+        if not replicated_pcp:
+            return last_hidden_states, hidden_states
+
+        # Draft tokens are replicated: broadcast PCP rank 0 directly,
+        # matching target decode's gather-then-select behavior.
+        pcp_group = get_pcp_group()
+        shared_hidden_states = hidden_states is last_hidden_states
+        last_hidden_states = pcp_group.broadcast(last_hidden_states[:num_tokens].contiguous(), src=0)
+        if shared_hidden_states:
+            hidden_states = last_hidden_states
+        else:
+            hidden_states = pcp_group.broadcast(hidden_states[:num_tokens].contiguous(), src=0)
+        return last_hidden_states, hidden_states
 
     @property
     def global_batch(self) -> AscendInputBatch:
@@ -213,6 +250,23 @@ class AscendPCPManager(PCPManager):
             and global_batch.num_draft_tokens == 0
         )
 
+    def get_num_tokens_for_dispatch(self, num_scheduled_tokens: np.ndarray, is_prefilling: np.ndarray) -> int:
+        if not vllm_version_is("0.28.0"):
+            return super().get_num_tokens_for_dispatch(num_scheduled_tokens, is_prefilling)
+        # Reuse the actual partition rules: decode is replicated, while each
+        # prefill contributes two chunks. Computed positions only reorder rows.
+        query_start_loc = np.concatenate(([0], np.cumsum(num_scheduled_tokens)))
+        num_computed_tokens = np.zeros_like(num_scheduled_tokens)
+        return max(
+            sum(
+                segment.num_tokens
+                for segment in self._get_rank_segments(
+                    rank, num_scheduled_tokens, num_computed_tokens, is_prefilling, query_start_loc
+                )
+            )
+            for rank in range(self.pcp_world_size)
+        )
+
     def partition_batch(
         self,
         input_batch: AscendInputBatch,
@@ -222,9 +276,6 @@ class AscendPCPManager(PCPManager):
         global_batch = input_batch
         if global_batch.num_draft_tokens > 0:
             local_batch = self._partition_speculative_batch_compat(global_batch)
-        elif vllm_version_is("0.28.0"):
-            # vLLM #53515 added padded_num_tokens on main only.
-            local_batch = super().partition_batch(global_batch)
         else:
             local_batch = super().partition_batch(
                 global_batch,
@@ -470,6 +521,11 @@ class AscendPCPManager(PCPManager):
         assert self._block_tables is not None
         assert self._global_batch_slot_mappings is not None
         assert hidden_restore_idx is not None
+        global_block_table_num_blocks = None
+        if self.dcp_world_size > 1 and bool(global_batch.is_prefilling_np.any()):
+            global_block_table_num_blocks = torch.from_numpy(
+                self._block_tables.num_blocks.np[:, global_batch.idx_mapping_np[: global_batch.num_reqs]]
+            ).to(device=self.device, non_blocking=True)
         return AscendPCPAttentionContext(
             global_batch=global_batch,
             global_block_tables=self._block_tables.gather_block_tables(
@@ -480,4 +536,5 @@ class AscendPCPManager(PCPManager):
             hidden_restore_idx=hidden_restore_idx,
             padded_gather_idx=self._padded_gather_idx,
             gathered_kv_write_mask=self._gathered_kv_write_mask,
+            global_block_table_num_blocks=global_block_table_num_blocks,
         )

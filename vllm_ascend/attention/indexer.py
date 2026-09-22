@@ -8,27 +8,40 @@ from torch import nn
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tp_group
 from vllm.triton_utils import HAS_TRITON
+from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
 )
+from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.utils import select_common_block_size
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.attention.context_parallel.common_cp import (
+    build_pcp_ordered_slot_mapping,
+    get_cp_local_query_key_lens,
+)
+from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
+    build_sfa_dcp_replicated_block_table,
+    build_sfa_dcp_replicated_slot_mapping,
+    get_sfa_dcp_local_block_table,
+    get_sfa_dcp_max_local_block_table_cols,
+    get_sfa_pcp_global_metadata,
+)
+from vllm_ascend.attention.utils import split_decodes_and_prefills
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
-from vllm_ascend.utils import enable_dsa_cp, vllm_version_is
-
-if vllm_version_is("0.28.0"):
-    from vllm.model_executor.layers.attention.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
-else:
-    from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
+from vllm_ascend.utils import (
+    _round_up,
+    enable_dsa_cp,
+    enable_sfa_dcp_replicated_indexer,
+    is_pd_decode_recompute_scheduler_enabled,
+)
 
 # Slots of the k / scale caches inside an indexer's own ``k_cache.kv_cache``
 # tuple (the scale slot exists only when LI C8 is enabled).
@@ -41,11 +54,9 @@ class AscendSFAIndexerMetadata:
     """Engine-side metadata owned by an SFA indexer cache layer.
 
     Carries everything the indexer kernels need from the engine: the paged
-    cache view (block table, slot mapping), the rope tables, and the LI C8
-    reshape-optim fields. The sequence lengths and rope tables reflect the
-    unsharded batch; the parallel-layout sequence lengths the top-k kernel
-    consumes are injected per forward by SFA (see
-    ``actual_seq_lengths_query`` / ``actual_seq_lengths_key``).
+    cache view (block table, slot mapping), the rope tables, the parallel
+    sequence lengths, and the LI C8 reshape-optim fields. All fields are
+    derived from common attention metadata by the indexer's own builder.
     """
 
     num_actual_tokens: int
@@ -64,15 +75,12 @@ class AscendSFAIndexerMetadata:
     group_len: torch.Tensor | None = None
     group_key_idx: torch.Tensor | None = None
     group_key_cache_idx: torch.Tensor | None = None
-    # Parallel-layout sequence lengths consumed by the top-k kernel, injected
-    # by SFA per forward: base/PCP modes use the unsharded ``cum_query_lens``
-    # / ``seq_lens`` equivalents, DSA-CP shards them per rank. Transported on
-    # this metadata so the indexer forward interface stays layout-agnostic.
+    # Parallel-layout sequence lengths consumed by the top-k kernel. Base/PCP
+    # modes use the unsharded values; DSA-CP uses rank-local lengths.
     actual_seq_lengths_query: torch.Tensor | None = None
     actual_seq_lengths_key: torch.Tensor | None = None
-    # Decode-token count injected by SFA per forward; the PCP cache-write
-    # gather splits the local prefill region on it (all-decode batches skip
-    # the gather).
+    # The PCP cache-write gather splits the local prefill region on this
+    # independently computed decode-token count.
     num_decode_tokens: int = 0
 
 
@@ -91,8 +99,8 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
     KV-cache planner can assign an independent physical tensor while sharing
     block ids with the main MLA cache group. Its builder constructs the
     metadata the indexer forward consumes (paged cache view, rope tables,
-    LI C8 reshape-optim fields); SFA only injects the parallel-layout values
-    (sequence lengths, decode count) onto that metadata per forward.
+    LI C8 reshape-optim fields, RoPE, and parallel-layout values). SFA only
+    consumes the completed indexer metadata during its forward.
 
     Do not reuse AscendSFAMetadataBuilder here. It inherits vLLM's
     MLACommonMetadataBuilder, whose initializer assumes layer_names[0] points to
@@ -172,11 +180,13 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
 
         self.enable_sparse_li_c8 = get_ascend_config().is_sparse_li_c8_layer(self.k_cache.prefix)
         if self.enable_sparse_li_c8:
-            if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
-                self.c8_k_cache_dtype = torch.float8_e4m3fn
+            self.c8_k_cache_dtype = kv_cache_dtype_str_to_dtype(
+                get_current_vllm_config().attention_config.indexer_kv_dtype,
+                get_current_vllm_config().model_config,
+            )
+            if self.c8_k_cache_dtype == torch.float8_e4m3fn:
                 self.c8_k_scale_cache_dtype = torch.float32
-            else:
-                self.c8_k_cache_dtype = torch.int8
+            elif self.c8_k_cache_dtype == torch.int8:
                 self.c8_k_scale_cache_dtype = torch.float16
 
         model_type = get_current_vllm_config().model_config.hf_config.model_type
@@ -268,17 +278,22 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         hidden_states: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
         """k path: compute ``k_li`` (and ``k_li_scale`` when LI C8 is
         enabled) from the hidden-states stage SFA hands in (raw states on
         fused preprocess paths, prepared states on native paths). SFA then
         persists the result through ``write_cache`` before the top-k stage
-        runs, since the top-k kernel reads the freshly written cache."""
+        runs, since the top-k kernel reads the freshly written cache.
+
+        Also returns the non-K tail of the ``wk_weights_proj`` GEMM output
+        (``indexer_weights``) so the top-k stage can reuse it instead of
+        re-running the same GEMM on the same hidden states."""
         assert self.wk_weights_proj is not None
         assert self.k_norm is not None
 
         kw, _ = self.wk_weights_proj(hidden_states)
         k_li = kw[:, : self.head_dim]
+        indexer_weights = kw[:, self.head_dim :]
         k_li = self.k_norm(k_li).unsqueeze(1)
         k_li = k_li.view(-1, 1, self.head_dim)
 
@@ -310,7 +325,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         else:
             k_li_scale = None
 
-        return k_li, k_li_scale
+        return k_li, k_li_scale, indexer_weights
 
     def _gather_cache_inputs(
         self,
@@ -361,8 +376,6 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         self,
         hidden_states: torch.Tensor,
         q_c: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
-        cos: torch.Tensor,
-        sin: torch.Tensor,
         k_hidden_states: torch.Tensor,
         indexer_metadata: AscendSFAIndexerMetadata,
         compute_topk: bool = True,
@@ -374,11 +387,12 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         sharing top-k indices) still runs the k path and the write so the
         cache stays up to date, and returns None.
 
-        ``cos`` / ``sin`` come from SFA's metadata, not the indexer's own:
-        DSA-CP shards them to the local token shard, matching the sharded
-        inputs. ``indexer_metadata`` carries the indexer's own cache view
-        plus the parallel-layout values injected by SFA."""
-        k_li, k_li_scale = self.forward_k(k_hidden_states, cos, sin)
+        The indexer metadata owns its RoPE tables and parallel-layout values;
+        DSA-CP metadata contains the local token shard that matches these
+        inputs."""
+        cos = indexer_metadata.cos
+        sin = indexer_metadata.sin
+        k_li, k_li_scale, indexer_weights = self.forward_k(k_hidden_states, cos, sin)
         k_li, k_li_scale, slot_mapping = self._gather_cache_inputs(k_li, k_li_scale, indexer_metadata)
         self.write_cache(k_li, k_li_scale, slot_mapping, indexer_attn_metadata=indexer_metadata)
         if not compute_topk:
@@ -389,8 +403,15 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         assert indexer_metadata.actual_seq_lengths_query is not None
         assert indexer_metadata.actual_seq_lengths_key is not None
 
-        kw, _ = self.wk_weights_proj(hidden_states)
-        weights = kw[:, self.head_dim :]
+        if hidden_states is k_hidden_states:
+            # The k path already ran wk_weights_proj on these hidden states
+            # (SFA hands both stages the same tensor); reuse its weights tail
+            # instead of duplicating the GEMM.
+            weights = indexer_weights
+        else:
+            kw, _ = self.wk_weights_proj(hidden_states)
+            weights = kw[:, self.head_dim :]
+
         if isinstance(q_c, tuple):
             q_c_tensor, q_c_scale = q_c
             q_c_tensor = q_c_tensor.view(-1, q_c_tensor.shape[-1])
@@ -460,14 +481,15 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
     """Builds the metadata consumed by SFA indexer forwards.
 
     The indexer cache layer shares block ids with the main SFA cache group,
-    so the slot mapping and block table mirror the ``*.attn`` layer's; the
-    rope tables are rebuilt from the same positions via the shared helper.
-    The slot mapping is emitted write-ready for the active parallel mode
-    (full gather mapping under PCP). Variants with their own cache geometry
-    override this construction to supply their layout's equivalents.
+    but owns its physical cache and constructs its metadata independently.
+    Under DCP it expands the local common block table and slot mapping into
+    the indexer's replicated address space directly; it never reads metadata
+    built for the SFA attention layer. The slot mapping is emitted write-ready
+    for the active parallel mode (full gather mapping under PCP).
     """
 
     reorder_batch_threshold = None
+    consumes_pcp_context = True
 
     def __init__(
         self,
@@ -479,7 +501,85 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         # Match the logical block size selected for BlockTable.
         self.kernel_block_size = select_common_block_size(kv_cache_spec.block_size, [AscendSFAIndexerBackend])
-        self._pcp_active = vllm_config.parallel_config.prefill_context_parallel_size > 1
+        scheduler_config = vllm_config.scheduler_config
+        self.decode_threshold = 1
+        self.speculative_config = vllm_config.speculative_config
+        speculative_config = self.speculative_config
+        if speculative_config is not None:
+            self.decode_threshold += speculative_config.num_speculative_tokens
+
+        self.use_pcp = vllm_config.parallel_config.prefill_context_parallel_size > 1
+        self.use_dsa_cp = enable_dsa_cp()
+        self._group_metadata_buffers: dict[
+            object,
+            tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        ] = {}
+        self._rope_buffers: dict[object, tuple[torch.Tensor, torch.Tensor]] = {}
+        self._dsa_cp_rope_buffers: dict[object, tuple[torch.Tensor, torch.Tensor]] = {}
+        self._dsa_cp_slot_mapping_buffers: dict[object, torch.Tensor] = {}
+        self._dsa_cp_seq_buffers: dict[object, tuple[torch.Tensor, torch.Tensor]] = {}
+        self._dcp_block_table_buffers: dict[object, torch.Tensor] = {}
+        self._dcp_slot_mapping_buffers: dict[object, torch.Tensor] = {}
+        self._pcp_indexer_slot_mapping_buffers: dict[object, torch.Tensor] = {}
+        max_num_input_tokens = scheduler_config.max_num_batched_tokens
+        self._rope_capacity = max_num_input_tokens
+        pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
+        self._dcp_slot_capacity = max_num_input_tokens * pcp_size
+        tp_size = vllm_config.parallel_config.tensor_parallel_size
+        self._slot_capacity = max(
+            max_num_input_tokens * pcp_size,
+            _round_up(max_num_input_tokens, tp_size),
+        )
+
+        if self.use_dsa_cp and not self.use_pcp:
+            self.dsa_cp_world_size = tp_size
+            self.dsa_cp_slot_capacity = _round_up(
+                max_num_input_tokens,
+                self.dsa_cp_world_size,
+            )
+            max_num_reqs = scheduler_config.max_num_seqs
+            self.dsa_cp_seq_capacity = max_num_reqs + 1
+            if speculative_config is not None:
+                spec_tokens = speculative_config.num_speculative_tokens
+                self.dsa_cp_seq_capacity = max(
+                    self.dsa_cp_seq_capacity,
+                    max_num_reqs * (spec_tokens + 1) + 1,
+                )
+        self.use_dcp = enable_sfa_dcp_replicated_indexer(vllm_config)
+        if not self.use_dcp:
+            return
+
+        self.dcp_size = vllm_config.parallel_config.decode_context_parallel_size
+        self.replicated_view_block_size = self.kernel_block_size
+        if kv_cache_spec.block_size % self.replicated_view_block_size != 0:
+            raise RuntimeError(
+                "SFA replicated indexer metadata requires the physical block "
+                f"size ({kv_cache_spec.block_size}) to be divisible by the "
+                f"kernel block size ({self.replicated_view_block_size})."
+            )
+        self.blocks_per_phys_block = kv_cache_spec.block_size // self.replicated_view_block_size
+
+        max_num_reqs = scheduler_config.max_num_seqs
+        if self.use_pcp:
+            max_num_reqs *= 2
+        max_num_reqs += 1
+        self.max_local_block_table_cols = get_sfa_dcp_max_local_block_table_cols(
+            vllm_config.model_config.max_model_len,
+            kv_cache_spec.block_size,
+            self.dcp_size,
+            self.blocks_per_phys_block,
+        )
+        max_replicated_block_table_cols = self.max_local_block_table_cols * self.dcp_size
+        self._dcp_block_table_shape = (max_num_reqs, max_replicated_block_table_cols)
+        self.replicated_col_idx_buf = torch.arange(
+            max_replicated_block_table_cols,
+            dtype=torch.int32,
+            device=device,
+        )
+        if self.use_pcp:
+            self._pcp_indexer_slot_capacity = (
+                max_num_input_tokens * vllm_config.parallel_config.prefill_context_parallel_size
+            )
 
     @classmethod
     def get_cudagraph_support(
@@ -487,7 +587,336 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         vllm_config: VllmConfig,
         kv_cache_spec: AttentionSpec,
     ) -> AttentionCGSupport:
+        speculative_config = vllm_config.speculative_config
+        if (
+            speculative_config is not None
+            and speculative_config.method == "dspark"
+            and getattr(speculative_config, "enable_adaptive_verification", False)
+        ):
+            return AttentionCGSupport.ALWAYS
         return AttentionCGSupport.UNIFORM_BATCH
+
+    def _ensure_replicated_view_buffers(
+        self,
+        num_reqs: int,
+        num_input_tokens: int,
+        local_block_table_cols: int,
+        buffer_key: object,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        block_table_cols = local_block_table_cols * self.dcp_size
+        block_table_buffer = self._dcp_block_table_buffers.get(buffer_key)
+        if block_table_buffer is None:
+            block_table_buffer = torch.empty(
+                self._dcp_block_table_shape,
+                dtype=torch.int32,
+                device=self.device,
+            )
+            self._dcp_block_table_buffers[buffer_key] = block_table_buffer
+        slot_mapping_buffer = self._dcp_slot_mapping_buffers.get(buffer_key)
+        if slot_mapping_buffer is None:
+            slot_mapping_buffer = torch.empty(
+                self._dcp_slot_capacity,
+                dtype=torch.int32,
+                device=self.device,
+            )
+            self._dcp_slot_mapping_buffers[buffer_key] = slot_mapping_buffer
+        if block_table_buffer.shape[0] < num_reqs or block_table_buffer.shape[1] < block_table_cols:
+            raise RuntimeError(
+                "Replicated indexer metadata buffer is too small: "
+                f"block_table_shape={block_table_buffer.shape}, "
+                f"num_reqs={num_reqs}, block_table_cols={block_table_cols}."
+            )
+        if slot_mapping_buffer.shape[0] < num_input_tokens:
+            raise RuntimeError(
+                "Replicated indexer metadata buffer is too small: "
+                f"slot_mapping_shape={slot_mapping_buffer.shape}, "
+                f"num_input_tokens={num_input_tokens}."
+            )
+        return (
+            block_table_buffer[:num_reqs, :block_table_cols],
+            self.replicated_col_idx_buf[:block_table_cols],
+            slot_mapping_buffer[:num_input_tokens],
+        )
+
+    def _build_block_table_replicated_view(
+        self,
+        dcp_block_table: torch.Tensor,
+        seq_lens: torch.Tensor,
+        buffer_key: object,
+    ) -> torch.Tensor:
+        num_reqs, local_block_table_cols = dcp_block_table.shape
+        block_table, replicated_col_idx, _ = self._ensure_replicated_view_buffers(
+            num_reqs,
+            0,
+            local_block_table_cols,
+            buffer_key,
+        )
+        return build_sfa_dcp_replicated_block_table(
+            dcp_block_table,
+            seq_lens,
+            block_table,
+            replicated_col_idx,
+            self.dcp_size,
+            self.blocks_per_phys_block,
+        )
+
+    def _build_slot_mapping_replicated_view(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        block_table_replicated_view: torch.Tensor,
+        buffer_key: object,
+    ) -> torch.Tensor:
+        num_reqs = common_attn_metadata.num_reqs
+        num_input_tokens = common_attn_metadata.num_input_tokens
+        local_block_table_cols = block_table_replicated_view.shape[1] // self.dcp_size
+        _, _, slot_mapping = self._ensure_replicated_view_buffers(
+            num_reqs,
+            num_input_tokens,
+            local_block_table_cols,
+            buffer_key,
+        )
+        return build_sfa_dcp_replicated_slot_mapping(
+            common_attn_metadata,
+            block_table_replicated_view,
+            slot_mapping,
+            self.replicated_view_block_size,
+            self.device,
+        )
+
+    def _build_pcp_ordered_slot_mapping(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        pcp_context: Any,
+        pcp_cache_group_idx: int,
+        buffer_key: object,
+    ) -> torch.Tensor:
+        global_common_attn_metadata = get_sfa_pcp_global_metadata(
+            common_attn_metadata,
+            pcp_context,
+            pcp_cache_group_idx,
+        )
+        dcp_block_table = get_sfa_dcp_local_block_table(
+            global_common_attn_metadata.block_table_tensor,
+            global_common_attn_metadata.num_reqs,
+            self.max_local_block_table_cols,
+        )
+        replicated_block_table = self._build_block_table_replicated_view(
+            dcp_block_table,
+            global_common_attn_metadata.seq_lens,
+            buffer_key,
+        )
+        global_slot_mapping = self._build_slot_mapping_replicated_view(
+            global_common_attn_metadata,
+            replicated_block_table,
+            buffer_key,
+        )
+
+        pcp_slot_mapping_buffer = self._pcp_indexer_slot_mapping_buffers.get(buffer_key)
+        if pcp_slot_mapping_buffer is None:
+            pcp_slot_mapping_buffer = torch.empty(
+                self._pcp_indexer_slot_capacity,
+                dtype=torch.int32,
+                device=self.device,
+            )
+            self._pcp_indexer_slot_mapping_buffers[buffer_key] = pcp_slot_mapping_buffer
+        return build_pcp_ordered_slot_mapping(global_slot_mapping, pcp_context, pcp_slot_mapping_buffer)
+
+    def _build_dcp_cache_metadata(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        pcp_context: Any | None,
+        pcp_cache_group_idx: int | None,
+        buffer_key: object,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        pcp_slot_mapping = None
+        if self.use_pcp and pcp_context is not None and bool(pcp_context.global_batch.is_prefilling_np.any()):
+            if pcp_cache_group_idx is None:
+                raise RuntimeError("PCP+DCP indexer metadata requires the PCP cache-group index.")
+            pcp_slot_mapping = self._build_pcp_ordered_slot_mapping(
+                common_attn_metadata,
+                pcp_context,
+                pcp_cache_group_idx,
+                buffer_key,
+            )
+
+        num_reqs = common_attn_metadata.num_reqs
+        dcp_block_table = get_sfa_dcp_local_block_table(
+            common_attn_metadata.block_table_tensor,
+            num_reqs,
+            self.max_local_block_table_cols,
+        )
+        block_table = self._build_block_table_replicated_view(
+            dcp_block_table,
+            common_attn_metadata.seq_lens,
+            buffer_key,
+        )
+        slot_mapping = self._build_slot_mapping_replicated_view(
+            common_attn_metadata,
+            block_table,
+            buffer_key,
+        )
+        if pcp_slot_mapping is not None:
+            slot_mapping = pcp_slot_mapping
+        return block_table, slot_mapping
+
+    def _build_dsa_cp_slot_mapping(
+        self,
+        slot_mapping: torch.Tensor,
+        num_input_tokens: int,
+        buffer_key: object,
+    ) -> torch.Tensor:
+        num_tokens_pad = _round_up(num_input_tokens, self.dsa_cp_world_size)
+        slot_mapping_buffer = self._dsa_cp_slot_mapping_buffers.get(buffer_key)
+        if slot_mapping_buffer is None:
+            slot_mapping_buffer = torch.empty(
+                self.dsa_cp_slot_capacity,
+                dtype=torch.int32,
+                device=self.device,
+            )
+            self._dsa_cp_slot_mapping_buffers[buffer_key] = slot_mapping_buffer
+        if slot_mapping_buffer.shape[0] < num_tokens_pad:
+            raise RuntimeError(
+                "DSA-CP indexer slot buffer is too small: "
+                f"capacity={slot_mapping_buffer.shape[0]}, "
+                f"required={num_tokens_pad}."
+            )
+        padded_slot_mapping = slot_mapping_buffer[:num_tokens_pad]
+        padded_slot_mapping.fill_(-1)
+        padded_slot_mapping[: slot_mapping.shape[0]].copy_(slot_mapping)
+        return padded_slot_mapping
+
+    def _get_dsa_cp_seq_buffers(
+        self,
+        buffer_key: object,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        buffers = self._dsa_cp_seq_buffers.get(buffer_key)
+        if buffers is None:
+            query = torch.empty(
+                self.dsa_cp_seq_capacity,
+                dtype=torch.int32,
+                device=self.device,
+            )
+            buffers = (query, torch.empty_like(query))
+            self._dsa_cp_seq_buffers[buffer_key] = buffers
+        return buffers
+
+    def _build_dsa_cp_parallel_metadata(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        buffer_key: object,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        num_tokens = common_attn_metadata.num_input_tokens
+        num_tokens_pad = _round_up(num_tokens, self.dsa_cp_world_size)
+        num_tokens_per_device = num_tokens_pad // self.dsa_cp_world_size
+        local_start = get_tp_group().rank_in_group * num_tokens_per_device
+        local_end = local_start + num_tokens_per_device
+
+        rope_buffers = self._dsa_cp_rope_buffers.get(buffer_key)
+        if rope_buffers is None:
+            local_capacity = self.dsa_cp_slot_capacity // self.dsa_cp_world_size
+            rope_shape = (local_capacity, *cos.shape[1:])
+            rope_buffers = (
+                torch.empty(rope_shape, dtype=cos.dtype, device=cos.device),
+                torch.empty(rope_shape, dtype=sin.dtype, device=sin.device),
+            )
+            self._dsa_cp_rope_buffers[buffer_key] = rope_buffers
+        local_cos_buf, local_sin_buf = rope_buffers
+        if local_cos_buf.shape[0] < num_tokens_per_device:
+            raise RuntimeError(
+                "DSA-CP indexer RoPE buffer is too small: "
+                f"capacity={local_cos_buf.shape[0]}, required={num_tokens_per_device}."
+            )
+        local_cos = local_cos_buf[:num_tokens_per_device]
+        local_sin = local_sin_buf[:num_tokens_per_device]
+        local_cos.zero_()
+        local_sin.zero_()
+        source_end = min(local_end, cos.shape[0])
+        if source_end > local_start:
+            source_slice = slice(local_start, source_end)
+            target_slice = slice(0, source_end - local_start)
+            local_cos[target_slice].copy_(cos[source_slice])
+            local_sin[target_slice].copy_(sin[source_slice])
+
+        cum_query_lens = common_attn_metadata.query_start_loc[1 : common_attn_metadata.num_reqs + 1]
+        seq_lens = common_attn_metadata.seq_lens[: common_attn_metadata.num_reqs]
+        actual_seq_lengths_query, actual_seq_lengths_key = self._get_dsa_cp_seq_buffers(buffer_key)
+        num_segs = cum_query_lens.shape[0]
+        if actual_seq_lengths_query.shape[0] < num_segs:
+            raise RuntimeError(
+                "DSA-CP indexer sequence buffer is too small: "
+                f"capacity={actual_seq_lengths_query.shape[0]}, required={num_segs}."
+            )
+        local_query_lens, local_key_lens = get_cp_local_query_key_lens(
+            common_attn_metadata.query_start_loc,
+            cum_query_lens,
+            seq_lens,
+            local_start,
+            local_end,
+        )
+        actual_seq_lengths_query[:num_segs] = local_query_lens
+        actual_seq_lengths_key[:num_segs] = local_key_lens
+        return (
+            local_cos,
+            local_sin,
+            actual_seq_lengths_query[:num_segs],
+            actual_seq_lengths_key[:num_segs],
+        )
+
+    def _copy_rope_to_metadata_buffers(
+        self,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        buffer_key: object,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        num_tokens = cos.shape[0]
+        if num_tokens > self._rope_capacity:
+            raise RuntimeError(
+                f"Indexer RoPE metadata buffer is too small: capacity={self._rope_capacity}, required={num_tokens}."
+            )
+        buffers = self._rope_buffers.get(buffer_key)
+        if buffers is None:
+            shape = (self._rope_capacity, *cos.shape[1:])
+            buffers = (
+                torch.empty(shape, dtype=cos.dtype, device=cos.device),
+                torch.empty(shape, dtype=sin.dtype, device=sin.device),
+            )
+            self._rope_buffers[buffer_key] = buffers
+        cos_buffer, sin_buffer = buffers
+        if cos_buffer.shape[1:] != cos.shape[1:] or sin_buffer.shape[1:] != sin.shape[1:]:
+            raise RuntimeError(
+                "Indexer RoPE metadata shape changed after initialization: "
+                f"cos={tuple(cos.shape)}, buffer={tuple(cos_buffer.shape)}."
+            )
+        cos_view = cos_buffer[:num_tokens]
+        sin_view = sin_buffer[:num_tokens]
+        cos_view.copy_(cos)
+        sin_view.copy_(sin)
+        return cos_view, sin_view
+
+    def _get_group_metadata_buffers(
+        self,
+        draft_index: object,
+        num_slots: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if num_slots > self._slot_capacity:
+            raise RuntimeError(
+                f"Indexer C8 group metadata buffer is too small: capacity={self._slot_capacity}, required={num_slots}."
+            )
+        buffers = self._group_metadata_buffers.get(draft_index)
+        if buffers is None:
+            buffers = (
+                torch.empty(self._slot_capacity, dtype=torch.int32, device=self.device),
+                torch.empty(self._slot_capacity, dtype=torch.int32, device=self.device),
+                torch.empty(self._slot_capacity, dtype=torch.int32, device=self.device),
+            )
+            self._group_metadata_buffers[draft_index] = buffers
+        return (
+            buffers[0][:num_slots],
+            buffers[1][:num_slots],
+            buffers[2][:num_slots],
+        )
 
     def build(
         self,
@@ -497,38 +926,174 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         **kwargs,
     ) -> AscendSFAIndexerMetadata:
         # common_prefix_len / fast_build are unused; kept for API compatibility.
+        return self._build(
+            common_attn_metadata,
+            buffer_key=self._metadata_buffer_key(common_attn_metadata),
+            use_cached_rope=True,
+            # Speculative decoding prepares multiple step metadata objects
+            # up front, so each step still needs independent RoPE storage.
+            copy_rope=self.speculative_config is not None,
+            **kwargs,
+        )
+
+    def build_for_cudagraph_capture(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        **kwargs,
+    ) -> AscendSFAIndexerMetadata:
+        return self.build(
+            common_prefix_len=0,
+            common_attn_metadata=common_attn_metadata,
+            **kwargs,
+        )
+
+    def build_for_drafting(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        draft_index: int,
+        fast_build: bool = False,
+        **kwargs,
+    ) -> AscendSFAIndexerMetadata:
+        return self._build(
+            common_attn_metadata,
+            buffer_key=self._metadata_buffer_key(common_attn_metadata),
+            use_cached_rope=False,
+            copy_rope=True,
+            **kwargs,
+        )
+
+    def build_for_graph_capture(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        attn_state: Any = None,
+        **kwargs,
+    ) -> AscendSFAIndexerMetadata:
+        return self._build(
+            common_attn_metadata,
+            buffer_key=self._metadata_buffer_key(common_attn_metadata),
+            # Draft graph capture starts from the cached values, then copies
+            # them into the per-step storage used by runtime drafting.
+            use_cached_rope=True,
+            copy_rope=True,
+            **kwargs,
+        )
+
+    @staticmethod
+    def _metadata_buffer_key(common_attn_metadata: CommonAttentionMetadata) -> tuple[str, int]:
+        # The proposer uses one persistent slot-mapping tensor per logical
+        # draft step. Key every mutable derived buffer by that address so
+        # graph capture and runtime rebuild update the exact same storage.
+        return ("slot_mapping", common_attn_metadata.slot_mapping.data_ptr())
+
+    def _build(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        buffer_key: object,
+        use_cached_rope: bool,
+        copy_rope: bool,
+        **kwargs,
+    ) -> AscendSFAIndexerMetadata:
         num_reqs = common_attn_metadata.num_reqs
         num_input_tokens = common_attn_metadata.num_input_tokens
-        if self._pcp_active:
+        if (
+            self.speculative_config is not None
+            and getattr(self.speculative_config, "method", None) == "dspark"
+            and getattr(self.speculative_config, "enable_adaptive_verification", False)
+        ):
+            # Keep the independently built indexer metadata aligned with SFA:
+            # adaptive verification records its graph-shaped token count in
+            # positions rather than common_attn_metadata.num_input_tokens.
+            num_input_tokens = common_attn_metadata.positions.shape[0]
+        if self.use_dcp:
+            block_table, slot_mapping = self._build_dcp_cache_metadata(
+                common_attn_metadata,
+                kwargs.get("pcp_context"),
+                kwargs.get("pcp_cache_group_idx"),
+                buffer_key,
+            )
+        elif self.use_pcp:
             # PCP writes cover the gathered prefill region too, which
             # requires the full slot mapping.
             slot_mapping = common_attn_metadata.slot_mapping
+            block_table = common_attn_metadata.block_table_tensor[:num_reqs]
         else:
             slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
+            block_table = common_attn_metadata.block_table_tensor[:num_reqs]
+        if self.use_dsa_cp and not self.use_pcp:
+            slot_mapping = self._build_dsa_cp_slot_mapping(
+                slot_mapping,
+                num_input_tokens,
+                buffer_key,
+            )
         input_positions = common_attn_metadata.positions[:num_input_tokens].long()
         block_size = self.kernel_block_size
 
-        cos, sin = get_cos_and_sin_mla(input_positions, use_cache=True)
+        cos, sin = get_cos_and_sin_mla(input_positions, use_cache=use_cached_rope)
+        cos = cos[:num_input_tokens]
+        sin = sin[:num_input_tokens]
+        cum_query_lens = common_attn_metadata.query_start_loc[1 : num_reqs + 1]
+        seq_lens = common_attn_metadata.seq_lens[:num_reqs]
+        actual_seq_lengths_query = cum_query_lens
+        actual_seq_lengths_key = seq_lens
+        if self.use_dsa_cp and not self.use_pcp:
+            (
+                cos,
+                sin,
+                actual_seq_lengths_query,
+                actual_seq_lengths_key,
+            ) = self._build_dsa_cp_parallel_metadata(
+                common_attn_metadata,
+                cos,
+                sin,
+                buffer_key,
+            )
+        elif copy_rope:
+            cos, sin = self._copy_rope_to_metadata_buffers(
+                cos,
+                sin,
+                buffer_key,
+            )
 
+        num_decode_tokens = 0
+        if self.use_pcp:
+            # Preserve the decode boundary for PCP's cache-write gather.
+            _, _, num_decode_tokens, _ = split_decodes_and_prefills(
+                common_attn_metadata,
+                decode_threshold=self.decode_threshold,
+                treat_short_extends_as_decodes=(
+                    self.use_dcp and is_pd_decode_recompute_scheduler_enabled(self.vllm_config)
+                ),
+            )
+
+        group_len = None
+        group_key_idx = None
+        group_key_cache_idx = None
         if get_ascend_config().c8_reshape_optim_enabled:
+            group_len, group_key_idx, group_key_cache_idx = self._get_group_metadata_buffers(
+                buffer_key,
+                slot_mapping.numel(),
+            )
             torch.ops._C_ascend.store_kv_block_metadata(
                 slot_mapping,
-                common_attn_metadata.group_len,
-                common_attn_metadata.group_key_idx,
-                common_attn_metadata.group_key_cache_idx,
+                group_len,
+                group_key_idx,
+                group_key_cache_idx,
                 block_size,
             )
 
         return AscendSFAIndexerMetadata(
             num_actual_tokens=common_attn_metadata.num_actual_tokens,
             slot_mapping=slot_mapping,
-            seq_lens=common_attn_metadata.seq_lens[:num_reqs],
-            cum_query_lens=common_attn_metadata.query_start_loc[1 : num_reqs + 1],
-            block_table=common_attn_metadata.block_table_tensor[:num_reqs],
-            sin=sin[:num_input_tokens],
-            cos=cos[:num_input_tokens],
+            seq_lens=seq_lens,
+            cum_query_lens=cum_query_lens,
+            block_table=block_table,
+            sin=sin,
+            cos=cos,
             block_size=block_size,
-            group_len=common_attn_metadata.group_len,
-            group_key_idx=common_attn_metadata.group_key_idx,
-            group_key_cache_idx=common_attn_metadata.group_key_cache_idx,
+            group_len=group_len,
+            group_key_idx=group_key_idx,
+            group_key_cache_idx=group_key_cache_idx,
+            actual_seq_lengths_query=actual_seq_lengths_query,
+            actual_seq_lengths_key=actual_seq_lengths_key,
+            num_decode_tokens=num_decode_tokens,
         )

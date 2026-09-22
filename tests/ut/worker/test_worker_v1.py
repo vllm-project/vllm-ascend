@@ -1,7 +1,7 @@
 import importlib
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import torch
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig, ProfilerConfig, VllmConfig
@@ -16,7 +16,6 @@ from vllm.v1.kv_cache_interface import (
 from tests.ut.base import TestBase
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
-from vllm_ascend.utils import vllm_version_is
 
 init_cached_hf_modules_path = "vllm.utils.import_utils.init_cached_hf_modules"
 kw_module = importlib.import_module("vllm_ascend.model_executor.warmup.kernel_warmup")
@@ -206,7 +205,6 @@ class TestNPUWorker(TestBase):
 
         self.assertEqual(memory_info, (3, 3, 1.0))
 
-    @unittest.skipIf(vllm_version_is("0.28.0"), "vLLM #51718 only changed the main planner")
     def test_deepseek_v4_shared_tuple_layout_does_not_scale_budget(self):
         from vllm_ascend.worker.worker import NPUWorker
 
@@ -234,7 +232,6 @@ class TestNPUWorker(TestBase):
         with patch("vllm_ascend.worker.worker.get_kv_cache_groups", return_value=groups):
             self.assertEqual(worker._scale_kv_cache_memory_for_multi_group(12345), 12345)
 
-    @unittest.skipIf(vllm_version_is("0.28.0"), "vLLM #51718 only changed the main planner")
     def test_hybrid_budget_scaling_follows_runner_backing_capability(self):
         from vllm_ascend.worker.worker import NPUWorker
 
@@ -259,24 +256,32 @@ class TestNPUWorker(TestBase):
         worker = NPUWorker.__new__(NPUWorker)
         worker.vllm_config = SimpleNamespace(
             cache_config=cache_config,
-            kv_transfer_config=None,
+            kv_transfer_config=SimpleNamespace(kv_connector="MooncakeConnectorV1"),
         )
         worker.get_kv_cache_spec = MagicMock(return_value={"attn": attn_spec, "linear_attn": mamba_spec})
 
-        for supports_shared_backing, expected_budget in ((True, 12345), (False, 6172)):
-            with self.subTest(supports_shared_backing=supports_shared_backing):
+        for (
+            supports_standardized_backing,
+            supports_connector_backing,
+            expected_budget,
+        ) in (
+            (True, True, 12345),
+            (True, False, 6172),
+            (False, True, 6172),
+        ):
+            with self.subTest(
+                supports_standardized_backing=supports_standardized_backing,
+                supports_connector_backing=supports_connector_backing,
+            ):
                 worker.model_runner = SimpleNamespace(
                     use_sparse=False,
                     use_compress=False,
-                    supports_standardized_shared_kv_backing=supports_shared_backing,
+                    supports_standardized_shared_kv_backing=supports_standardized_backing,
+                    supports_shared_backing_with_kv_transfer=supports_connector_backing,
                 )
                 with patch("vllm_ascend.worker.worker.get_kv_cache_groups", return_value=groups):
                     self.assertEqual(worker._scale_kv_cache_memory_for_multi_group(12345), expected_budget)
 
-    @unittest.skipIf(
-        vllm_version_is("0.28.0"),
-        "vLLM #51718 only changed the main planner",
-    )
     def test_pure_attention_multi_group_budget_scales_for_private_layout(self):
         from vllm_ascend.worker.worker import NPUWorker
 
@@ -548,15 +553,8 @@ class TestNPUWorker(TestBase):
             mock_model_runner.post_kv_cache_wake_up.assert_not_called()
 
             worker.wake_up(tags=["kv_cache"])
-            if vllm_version_is("0.28.0"):
-                mock_model_runner.post_kv_cache_wake_up.assert_called_once_with()
-            else:
-                mock_model_runner.post_kv_cache_wake_up.assert_not_called()
+            mock_model_runner.post_kv_cache_wake_up.assert_not_called()
 
-    @unittest.skipIf(
-        vllm_version_is("0.28.0"),
-        "The post-KV-cache wake hook is present on vLLM 0.28.0",
-    )
     @patch("vllm_ascend.worker.worker.CaMemAllocator")
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     def test_wake_up_without_post_kv_cache_hook(self, mock_get_config, mock_allocator_class):
@@ -930,7 +928,11 @@ class TestNPUWorker(TestBase):
             worker.execute_dummy_batch()
 
             # Verify call
-            mock_model_runner._dummy_run.assert_called_once_with(mock_uniform_decode_query_len, uniform_decode=True)
+            mock_model_runner._dummy_run.assert_called_once_with(
+                mock_uniform_decode_query_len,
+                uniform_decode=True,
+                skip_gdn_state_update=True,
+            )
 
     @patch("vllm_ascend.worker.worker.plan_sparse_kv_offload_memory")
     @patch("vllm_ascend.worker.worker.get_ascend_config")
@@ -1802,10 +1804,16 @@ class TestNPUWorker(TestBase):
             # Test initialize_from_config
             worker.initialize_from_config(mock_kv_cache_config)
 
-            # Verify calls
+            # Verify the kv_cache pool is created but not entered by the worker.
+            # Model runners enter it only around backing cache allocation.
             mock_allocator_class.get_instance.assert_called_once()
             mock_allocator.use_memory_pool.assert_called_once_with(tag="kv_cache")
-            worker.model_runner.initialize_kv_cache.assert_called_once_with(mock_kv_cache_config)
+            mock_context.__enter__.assert_not_called()
+            mock_context.__exit__.assert_not_called()
+            worker.model_runner.initialize_kv_cache.assert_called_once_with(
+                mock_kv_cache_config,
+                kv_cache_allocation_context=mock_context,
+            )
 
     def test_acl_graph_sleep_wakeup_manager_sleep_resets_acl_graph_state(self):
         from vllm_ascend.device_allocator.sleep_mem_optimized import AclGraphSleepWakeupManager
@@ -1886,7 +1894,10 @@ class TestNPUWorker(TestBase):
             worker.initialize_from_config(mock_kv_cache_config)
 
             # Verify calls
-            worker.model_runner.initialize_kv_cache.assert_called_once_with(mock_kv_cache_config)
+            worker.model_runner.initialize_kv_cache.assert_called_once_with(
+                mock_kv_cache_config,
+                kv_cache_allocation_context=ANY,
+            )
 
     @patch("vllm_ascend.worker.worker.ensure_kv_transfer_initialized")
     def test_initialize_from_config_initializes_kv_block_zeroer_for_mrv2_mamba(self, mock_ensure_kv_transfer):
@@ -1906,7 +1917,10 @@ class TestNPUWorker(TestBase):
 
             worker.initialize_from_config(mock_kv_cache_config)
 
-            worker.model_runner.initialize_kv_cache.assert_called_once_with(mock_kv_cache_config)
+            worker.model_runner.initialize_kv_cache.assert_called_once_with(
+                mock_kv_cache_config,
+                kv_cache_allocation_context=ANY,
+            )
             worker.model_runner._init_kv_zero_meta.assert_called_once_with()
 
     @patch("vllm_ascend.worker.worker.ensure_kv_transfer_initialized")
@@ -1929,7 +1943,10 @@ class TestNPUWorker(TestBase):
 
             worker.initialize_from_config(mock_kv_cache_config)
 
-            worker.model_runner.initialize_kv_cache.assert_called_once_with(mock_kv_cache_config)
+            worker.model_runner.initialize_kv_cache.assert_called_once_with(
+                mock_kv_cache_config,
+                kv_cache_allocation_context=ANY,
+            )
             worker.model_runner._init_kv_zero_meta.assert_called_once_with()
 
     @patch("vllm_ascend.worker.worker.ensure_kv_transfer_initialized")
@@ -1952,7 +1969,10 @@ class TestNPUWorker(TestBase):
 
             worker.initialize_from_config(mock_kv_cache_config)
 
-            worker.model_runner.initialize_kv_cache.assert_called_once_with(mock_kv_cache_config)
+            worker.model_runner.initialize_kv_cache.assert_called_once_with(
+                mock_kv_cache_config,
+                kv_cache_allocation_context=ANY,
+            )
             worker.model_runner._init_kv_zero_meta.assert_not_called()
 
     @patch("vllm_ascend.worker.worker.get_ascend_config")
@@ -2138,7 +2158,7 @@ class TestNPUWorkerWeightUpdate(TestBase):
 
         self.assertFalse(worker._weight_update_active)
 
-    def test_finish_weight_update_resets_state(self):
+    def test_finish_weight_update_resets_lora_state_after_base_weights(self):
         engine = MagicMock()
         worker = self._make_worker(engine=engine)
         worker._weight_update_active = True
@@ -2146,6 +2166,7 @@ class TestNPUWorkerWeightUpdate(TestBase):
         worker.finish_weight_update()
 
         engine.finish_weight_update.assert_called_once_with()
+        worker.model_runner.reset_lora_state.assert_called_once_with()
         self.assertFalse(worker._weight_update_active)
 
     def test_finish_without_start_raises(self):

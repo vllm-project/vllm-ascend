@@ -27,12 +27,9 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
 )
 
-from vllm_ascend.models.qwen3_dspark import process_weight
-from vllm_ascend.utils import (
-    get_rotation_matrix,
-    get_rotation_path,
-    vllm_version_is,
-)
+from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
+from vllm_ascend.attention.mla_v1 import AscendMLABackend
+from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_wrapper,
     build_draft_attn_metadata_factory,
@@ -47,6 +44,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         vllm_config, self.replicated_pcp = prepare_replicated_pcp_config(vllm_config)
         super().__init__(vllm_config, device)
         self.input_batch: InputBatch | None = None
+        self.attn_architecture: str | None = None
 
     def load_draft_model(
         self,
@@ -54,18 +52,12 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
         model = super().load_draft_model(target_model, target_attn_layer_names)
-        # Upstream load_dspark_model overrides the drafter's quant_config with
-        # get_draft_quant_config (None for a bf16 drafter), so the drafter's
-        # __init__ derives rotation_path=None and its fc projection is loaded
-        # unrotated. The target is QuaRot-quantized, so the aux hidden states it
-        # feeds the drafter are in rotated space; fc must be rotated (W @ R) to
-        # project them back to model space.
-        rotation_path = get_rotation_path(self.vllm_config)
-        if rotation_path is not None and hasattr(model.model, "fc"):
-            rotation_weight = get_rotation_matrix(rotation_path)
-            fc = model.model.fc
-            with torch.no_grad():
-                fc.weight.data.copy_(process_weight(fc.weight.data.cpu(), rotation_weight))
+        if hasattr(model, "post_process"):
+            with set_current_vllm_config(self.vllm_config):
+                model.post_process(self.vllm_config)
+        if hasattr(model, "configure_target_aux_hidden_capture"):
+            model.configure_target_aux_hidden_capture(target_model)
+
         return model
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
@@ -102,7 +94,9 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
                 layer_names = kv_cache_group_spec.layer_names
                 if active_layer_names is not None:
-                    layer_names = list(active_layer_names.intersection(layer_names))
+                    # Preserve cache-group order so captured graph tasks and
+                    # runtime metadata stay aligned.
+                    layer_names = [name for name in layer_names if name in active_layer_names]
 
                 layer_type = cast(type[Any], AttentionLayerBase)
                 attn_layers = get_layers_from_vllm_config(self.vllm_config, layer_type, layer_names)
@@ -111,22 +105,28 @@ class AscendDSparkSpeculator(DSparkSpeculator):
                     attn_backends[layer_name] = attn_layers[layer_name].get_attn_backend()
 
             self.attn_backends = attn_backends
+            backend = _get_graph_update_backend(self.attn_groups)
+            if issubclass(backend, AscendMLABackend):
+                self.attn_architecture = "MLA"
+            elif issubclass(backend, AscendAttentionBackend):
+                self.attn_architecture = "GQA"
+            else:
+                self.attn_architecture = None
 
     def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
-        num_tokens_padded = num_reqs_padded * self.num_query_per_req
         assert self.input_batch is not None
-        # The draft attention metadata is built through the generic
-        # (Ascend) build_attn_metadata path; the factory forwards the draft
-        # query positions that the DSA metadata builder needs for RoPE.
+        num_tokens_padded = num_reqs_padded * self.num_query_per_req
+
         with (
             build_attn_metadata_wrapper(),
             build_draft_attn_metadata_factory(
                 self.input_buffers.positions,
                 num_tokens_padded,
-                torch.from_numpy(self.input_batch.is_prefilling_np),
+                is_prefilling=torch.zeros(num_reqs_padded, dtype=torch.bool),
+                attn_state=AscendAttentionState.ChunkedPrefill,
             ),
         ):
-            attn_metadata = self._build_draft_attn_metadata(
+            attn_metadata = super()._build_draft_attn_metadata(
                 num_reqs=self.input_batch.num_reqs,
                 num_reqs_padded=num_reqs_padded,
                 num_tokens_padded=num_tokens_padded,
@@ -134,7 +134,34 @@ class AscendDSparkSpeculator(DSparkSpeculator):
                 step=self.num_query_per_req,
                 causal=self._group_causal,
             )
+
+        if self.attn_architecture not in ("GQA", "MLA"):
+            return [attn_metadata]
+
         return [self._update_draft_attn_metadata(attn_metadata, num_reqs_padded)]
+
+    def _build_draft_attn_metadata(self, *, num_reqs_padded, **kwargs):
+        if self.attn_architecture not in ("GQA", "MLA"):
+            return super()._build_draft_attn_metadata(num_reqs_padded=num_reqs_padded, **kwargs)
+
+        # This kwargs["num_tokens_padded"] is only useful in eager/PIECEWISE.
+        # TODO: Replace this temporary padding workaround with upstream #56181's
+        # actual-token metadata and MLA input slicing for non-FULL execution.
+        num_tokens_padded = kwargs["num_tokens_padded"]
+        assert num_tokens_padded % self.num_query_per_req == 0, "Draft tokens must contain whole query groups"
+        num_reqs_padded = num_tokens_padded // self.num_query_per_req
+
+        with (
+            build_attn_metadata_wrapper(),
+            build_draft_attn_metadata_factory(
+                self.input_buffers.positions,
+                num_tokens_padded,
+                is_prefilling=torch.zeros(num_reqs_padded, dtype=torch.bool),
+                attn_state=AscendAttentionState.ChunkedPrefill,
+            ),
+        ):
+            attn_metadata = super()._build_draft_attn_metadata(num_reqs_padded=num_reqs_padded, **kwargs)
+        return self._update_draft_attn_metadata(attn_metadata, num_reqs_padded)
 
     def _update_draft_attn_metadata(self, attn_metadata, num_reqs_padded):
         """Rebuild ``actual_seq_lengths_q`` from the padded request count,
@@ -153,7 +180,8 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         """
         query_lens_list = [(i + 1) * self.num_query_per_req for i in range(num_reqs_padded)]
         for metadata in attn_metadata.values():
-            metadata.actual_seq_lengths_q = query_lens_list
+            decode_metadata = metadata.decode if self.attn_architecture == "MLA" else metadata
+            decode_metadata.actual_seq_lengths_q = query_lens_list
         return attn_metadata
 
     def propose(
@@ -169,17 +197,15 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         next_prefill_tokens: torch.Tensor,
         temperature: torch.Tensor,
         seeds: torch.Tensor,
-        num_tokens_across_dp: torch.Tensor | None = None,
+        dp_sync: Any = None,
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
-        # vLLM #53694 replaced num_tokens_across_dp with the DP sync state.
-        dp_sync: Any = None,
     ) -> torch.Tensor:
         self.input_batch = input_batch
         assert self.input_batch is not None
-        sync_state = num_tokens_across_dp if vllm_version_is("0.28.0") else dp_sync
+        sync_state = dp_sync
         if dummy_run and skip_attn_for_dummy_run:
             # Profiling runs the draft with its own query token count, which
             # can differ from the target batch. Let forward_context coordinate

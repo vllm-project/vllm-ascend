@@ -31,7 +31,7 @@ Choose one of the following methods to install `vllm` and `vllm-ascend`. PyTorch
 
 === "pip installation"
 
-    This installation method currently supports only **A2** builds and does not automatically support A3, Atlas 300I DUO, Atlas 200I Pro, or 950DT. For other hardware, use a prebuilt image, WheelNext, or a source installation.
+    This installation method currently supports only **A2** builds and does not automatically support A3, Atlas 300I DUO, Atlas 200I Pro, or 950DT Products. For other hardware, use a prebuilt image, WheelNext, or a source installation.
 
     <!-- doctest: installation-pip-install -->
     ```bash
@@ -134,7 +134,7 @@ Choose one of the following methods to install `vllm` and `vllm-ascend`. PyTorch
 
 Finally, handle `triton` and `triton-ascend` according to the hardware:
 
-=== "A2 / A3 / 950DT"
+=== "A2 / A3 / 950DT Products"
 
     To ensure that Triton Ascend matches the current vLLM Ascend version, remove any existing `triton` and `triton-ascend` packages before installing the corresponding version of `triton-ascend`:
 

@@ -60,7 +60,7 @@
 #include "attention/store_kv_block_metadata/store_kv_block_metadata_torch_adpt.cpp"
 #include "moe/dequant_situ_quant/dequant_situ_quant_torch_adpt.h"
 #include "moe/situ_mx_quant/situ_mx_quant_torch_adpt.h"
-#include "attention/mla_prolog_v3/mla_prolog_v3_torch_adpt.h"
+#include "attention/mla_prolog_v3_k3/mla_prolog_v3_k3_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
 #include <c10/util/Exception.h>
@@ -82,6 +82,26 @@
 #include <vector>
 
 namespace vllm_ascend {
+
+// user_device_id is the ordinal passed to torch.npu.set_device/aclrtSetDevice,
+// not a vLLM local rank or an ASCEND_RT_VISIBLE_DEVICES entry.
+int64_t get_physical_device_id(int64_t user_device_id)
+{
+    TORCH_CHECK(user_device_id >= 0 && user_device_id <= std::numeric_limits<int32_t>::max(),
+                "Invalid NPU user device ID: ", user_device_id);
+#ifdef CANN_DEVICE_ID_MAPPING
+    int32_t physical_device_id = -1;
+    auto ret = aclrtGetPhyDevIdByUserDevId(static_cast<int32_t>(user_device_id), &physical_device_id);
+    TORCH_CHECK(ret == ACL_SUCCESS, "aclrtGetPhyDevIdByUserDevId failed for user device ",
+                user_device_id, ", error code: ", ret);
+    TORCH_CHECK(physical_device_id >= 0, "CANN returned an invalid physical device ID: ", physical_device_id);
+    return physical_device_id;
+#else
+    TORCH_CHECK(false, "NPU physical device lookup requires a vllm-ascend extension built with CANN "
+                       "aclrtGetPhyDevIdByUserDevId support. "
+                       "Upgrade CANN and rebuild vllm-ascend.");
+#endif
+}
 
 // Required by EXEC_NPU_CMD hash helpers in aclnn_torch_adapter/op_api_common.h
 thread_local char g_hashBuf[kHashBufSize];
@@ -566,6 +586,41 @@ void transpose_kv_cache_by_block(
     EXEC_NPU_CMD(aclnnTransposeKvCacheByBlock, kCache, vCache, blockIDs,
                  blockSize, headNum, headDim, splitNum, layerNum);
 
+}
+
+void npu_scatter_pa_kv_cache(
+    const at::Tensor& key,
+    const at::Tensor& value,
+    at::Tensor& key_cache,
+    at::Tensor& value_cache,
+    const at::Tensor& slot_mapping,
+    c10::string_view cache_mode,
+    c10::string_view scatter_mode)
+{
+    std::string cache_mode_str(cache_mode);
+    std::string scatter_mode_str(scatter_mode);
+    char* cache_mode_ptr = const_cast<char*>(cache_mode_str.c_str());
+    char* scatter_mode_ptr = const_cast<char*>(scatter_mode_str.c_str());
+
+    c10::optional<at::Tensor> optional_tensor = c10::nullopt;
+    c10::optional<at::IntArrayRef> optional_int_array = c10::nullopt;
+
+    // aclnnScatterPaKvCache uses a different argument order from the public
+    // torch_npu wrapper. Call it directly so scatter_mode (for example,
+    // NHSD) is forwarded instead of being fixed to None by op-plugin.
+    EXEC_NPU_CMD(aclnnScatterPaKvCache,
+                 key,
+                 key_cache,
+                 slot_mapping,
+                 value,
+                 value_cache,
+                 optional_tensor,
+                 optional_tensor,
+                 optional_tensor,
+                 cache_mode_ptr,
+                 scatter_mode_ptr,
+                 optional_int_array,
+                 optional_int_array);
 }
 
 void device_print(c10::string_view msg)
@@ -2777,6 +2832,9 @@ at::Tensor restore_tensor(uintptr_t ptr_val, const std::vector<int64_t>& shape,
 // Pybind on Ascend 310P
 TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 {
+    ops.def("get_physical_device_id(int user_device_id) -> int");
+    ops.impl("get_physical_device_id", c10::DispatchKey::CompositeExplicitAutograd,
+             &vllm_ascend::get_physical_device_id);
     ops.def(
         "npu_causal_conv1d_310(Tensor x, "
         "                         Tensor weight, "
@@ -2834,6 +2892,9 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 // Pybind on other platform
 TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 {
+    ops.def("get_physical_device_id(int user_device_id) -> int");
+    ops.impl("get_physical_device_id", c10::DispatchKey::CompositeExplicitAutograd,
+             &vllm_ascend::get_physical_device_id);
 
     // vLLM-Ascend custom ops
     // Gemma RmsNorm
@@ -2931,9 +2992,9 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("swap_blocks", torch::kPrivateUse1, &vllm_ascend::swap_blocks);
 #endif
 
-    // npu_mla_prolog_v3: aligned with torch_npu; underlying aclnn op is MlaPrologV3 (950-only).
+    // K3 MLA prolog uses a distinct ACLNN/operator name to keep CANN's MlaPrologV3 available.
     ops.def(
-        "npu_mla_prolog_v3(Tensor token_x, Tensor weight_dq, Tensor weight_uq_qr, Tensor weight_uk,"
+        "npu_mla_prolog_v3_k3(Tensor token_x, Tensor weight_dq, Tensor weight_uq_qr, Tensor weight_uk,"
         "           Tensor weight_dkv_kr, Tensor rmsnorm_gamma_cq, Tensor rmsnorm_gamma_ckv,"
         "           Tensor rope_sin, Tensor rope_cos, Tensor(a!) kv_cache, Tensor(b!) kr_cache, *,"
         "           Tensor? cache_index=None, Tensor? dequant_scale_x=None,"
@@ -2947,7 +3008,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "           int ckvkr_repo_mode=0, int quant_scale_repo_mode=0, int tile_size=128,"
         "           float qc_qr_scale=1.0, float kc_scale=1.0)"
         " -> (Tensor, Tensor, Tensor, Tensor, Tensor)");
-    ops.impl("npu_mla_prolog_v3", torch::kPrivateUse1, &vllm_ascend::npu_mla_prolog_v3);
+    ops.impl("npu_mla_prolog_v3_k3", torch::kPrivateUse1, &vllm_ascend::npu_mla_prolog_v3_k3);
 
     // swap_blocks_batch takes CPU tensors (int64 pointer/size arrays), not NPU
     // tensors, so dispatch must be registered on the CPU backend. The function
@@ -3235,6 +3296,14 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "transpose_kv_cache_by_block(Tensor[] kCache, Tensor[] vCache, Tensor blockIDs, int blockSize, int headNum, int headDim, int splitNum, int layerNum) -> ()"
     );
     ops.impl("transpose_kv_cache_by_block", torch::kPrivateUse1, &vllm_ascend::transpose_kv_cache_by_block);
+
+    ops.def(
+        "npu_scatter_pa_kv_cache(Tensor key, Tensor value, "
+        "Tensor(a!) key_cache, Tensor(b!) value_cache, Tensor slot_mapping, *, "
+        "str cache_mode='Norm', str scatter_mode='None') -> ()"
+    );
+    ops.impl("npu_scatter_pa_kv_cache", torch::kPrivateUse1,
+             &vllm_ascend::npu_scatter_pa_kv_cache);
 
     ops.def(
         "npu_copy_and_expand_eagle_inputs(Tensor target_token_ids, Tensor target_positions, "

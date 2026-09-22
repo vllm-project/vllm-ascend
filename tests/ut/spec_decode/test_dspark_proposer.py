@@ -37,6 +37,7 @@ from vllm.v1.worker.utils import AttentionGroup
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
 from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage, DeviceMetadataTask
 
 # 0 = single-DP (no padding); >0 = multi-DP where num_input_tokens >
@@ -95,6 +96,7 @@ def test_build_draft_metadata_submits_only_non_cp_device_tasks(
         sliding_window=None,
         _per_group_block_table_buffers={group_id: torch.ones((1, 1), dtype=torch.int32) for group_id in range(2)},
         _per_group_query_slot_mapping_buffers={group_id: torch.zeros(1, dtype=torch.int32) for group_id in range(2)},
+        _get_primary_draft_attn_group=lambda: groups[0],
     )
     common_attn_metadata = SimpleNamespace(
         num_reqs=1,
@@ -153,7 +155,9 @@ def test_dspark_device_metadata_executor_forward_lifecycle(has_task: bool):
     proposer.parallel_drafting = True
     proposer.token_indices_to_sample = torch.zeros(2, dtype=torch.int32)
     proposer.enable_enpu = False
+    proposer.draft_attn_groups = [MagicMock()]
     proposer._update_full_graph_params_if_needed = MagicMock()
+    proposer._maybe_update_metadata = MagicMock()
     proposer.set_inputs_first_pass = MagicMock()
     proposer.build_draft_attn_metadata = MagicMock()
 
@@ -820,7 +824,38 @@ class TestInitializeAttnBackend(_DSparkProposerTestBase):
         proposer.device = torch.device("cpu")
         proposer.runner = SimpleNamespace(device_metadata_executor=None)
         proposer.dcp_size = 1
+        proposer._per_group_block_tables = {}
+        proposer._per_group_slot_mappings = {}
         return proposer
+
+    @pytest.mark.skipif(vllm_version_is("0.29.0"), reason="DeepSeek V4.1 is unavailable on vLLM 0.29")
+    def test_deepseek_v41_draft_uses_only_group_twelve(self, monkeypatch):
+        from tests.deepseek_v41_utils import make_cache_config
+
+        config = make_cache_config(17, draft_layers=3)
+        draft_names = config.kv_cache_groups[12].layer_names
+        backend = MagicMock()
+        backend.full_cls_name.return_value = "AscendDSASWABackend"
+        modules = {name: SimpleNamespace(get_attn_backend=lambda: backend) for name in draft_names}
+        monkeypatch.setattr(
+            "vllm_ascend.spec_decode.dspark_proposer.get_layers_from_vllm_config", lambda *args, **kw: modules
+        )
+        proposer = self._make_proposer_for_init()
+        proposer.model = SimpleNamespace(get_draft_kv_cache_layer_names=lambda: draft_names)
+        proposer.max_query_tokens = 16
+        proposer.max_num_tokens = 32
+        with patch.object(AttentionGroup, "create_metadata_builders"):
+            proposer.initialize_attn_backend(config, [128, 32] + [128] * 11)
+        assert proposer.kv_cache_gid == 12
+        assert len(proposer.draft_attn_groups) == 1
+        assert set(proposer.draft_attn_groups[0].layer_names) == set(draft_names)
+        assert proposer._layer_group_idx == [12, 12, 12]
+        target_table = torch.tensor([[2]], dtype=torch.int32)
+        draft_table = torch.tensor([[7]], dtype=torch.int32)
+        proposer.set_per_group_attn_metadata(2, target_table, torch.tensor([256]))
+        proposer.set_per_group_attn_metadata(12, draft_table, torch.tensor([896]))
+        assert proposer._per_group_block_tables[12] is draft_table
+        assert proposer._per_group_block_tables[12] is not target_table
 
     @pytest.mark.parametrize(
         ("dcp_size", "pcp_enabled", "has_executor", "expected_tokens"),

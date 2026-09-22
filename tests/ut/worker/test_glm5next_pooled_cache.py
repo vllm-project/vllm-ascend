@@ -14,7 +14,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 from vllm.v1.kv_cache_interface import MambaSpec
 
 from vllm_ascend.core.kv_cache_interface import (
-    AscendIndexerKPoolStateSpec,
+    AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
     requires_padded_page_layout,
 )
@@ -23,17 +23,17 @@ from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_next_kv_cache_groups,
     get_glm5_next_pool_bytes_per_block,
 )
-from vllm_ascend.utils import get_kv_cache_tensor_layers, vllm_version_is
+from vllm_ascend.utils import get_kv_cache_tensor_layers
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 MAIN = "model.layers.1.attn"
 INDEXER = "model.layers.1.indexer.k_cache"
-STATE = "model.layers.1.indexer.state_cache"
+STATE = "model.layers.1.indexer.tail_cache"
 MAMBA = "model.layers.0.linear_attn"
 
 
 def _ratio_kwargs(ratio: int) -> dict[str, int]:
-    return {"compress_ratio": ratio} if vllm_version_is("0.28.0") else {"tokens_per_state": ratio}
+    return {"tokens_per_state": ratio}
 
 
 class _AttentionBackend:
@@ -57,7 +57,7 @@ class _StateBackend:
         head_size,
         **_kwargs,
     ):
-        return num_blocks, block_size, head_size
+        return num_blocks, 2, block_size, head_size
 
 
 def _make_config():
@@ -98,11 +98,12 @@ def _make_specs(main_head_size=4):
             indexes_kv_by_block_stride=True,
             **_ratio_kwargs(2),
         ),
-        STATE: AscendIndexerKPoolStateSpec(
+        STATE: AscendIndexerKPoolTailSpec(
             block_size=2,
             sliding_window=2,
+            compress_ratio=2,
             num_kv_heads=1,
-            head_size=3,
+            head_size=1,
             dtype=torch.float32,
             model_version="glm5_next",
             indexes_kv_by_block_stride=True,
@@ -194,18 +195,18 @@ def test_glm5_next_runner_allocates_contiguous_slot_backings():
     }
     main_cache, main_rope_cache = caches[MAIN]
     (indexer_cache,) = caches[INDEXER]
-    (state_cache,) = caches[STATE]
+    (tail_cache,) = caches[STATE]
     assert main_cache.shape == (3, 8, 1, 4)
     assert main_rope_cache.shape == (3, 8, 1, 0)
     assert main_cache.is_contiguous()
     assert indexer_cache.shape == (3, 4, 1, 4)
-    assert state_cache.shape == (3, 2, 3)
+    assert tail_cache.shape == (3, 2, 2, 1)
     assert [cache.shape for cache in caches[MAMBA]] == [
         (3, 2, 2),
         (3, 1, 2, 2),
     ]
 
-    for name, cache in ((INDEXER, indexer_cache), (STATE, state_cache)):
+    for name, cache in ((INDEXER, indexer_cache), (STATE, tail_cache)):
         page_size = descriptors[name].size // plan.num_blocks
         assert cache.stride(0) * cache.element_size() == page_size
         assert cache.data_ptr() == raw_caches[name].data_ptr()
@@ -217,8 +218,8 @@ def test_glm5_next_runner_allocates_contiguous_slot_backings():
     mamba_payload_size = sum(cache.numel() * cache.element_size() for cache in caches[MAMBA])
     assert mamba_payload_size < descriptors[MAMBA].size
 
-    state_cache[2].fill_(7)
-    state_payload_size = state_cache[0].numel() * state_cache.element_size()
+    tail_cache[2].fill_(7)
+    state_payload_size = tail_cache[0].numel() * tail_cache.element_size()
     state_padding = 2 * (descriptors[STATE].size // plan.num_blocks) + state_payload_size
     assert raw_caches[STATE][state_padding].item() == 0
 
@@ -314,7 +315,7 @@ def test_padded_page_layout_detected_for_shared_state_pages():
     assert requires_padded_page_layout(layer_specs.values())
 
 
-def test_padded_page_layout_rejected_without_state_caches():
+def test_padded_page_layout_rejected_without_tail_caches():
     # A standalone MTP runner has the same attention specs but no recurrent
     # state caches, so no state view needs the padded page stride.
     specs = {name: spec for name, spec in _make_specs().items() if not isinstance(spec, MambaSpec)}

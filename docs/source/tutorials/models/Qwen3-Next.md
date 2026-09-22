@@ -18,7 +18,11 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-`Qwen3-Next-80B-A3B-Instruct`: requires **8 cards in 1 Atlas 800 A3 (64GB × 16) node** or **8 cards in 1 Atlas 800 A2 (64GB × 8) node**. [Model Weight](https://www.modelscope.cn/models/Qwen/Qwen3-Next-80B-A3B-Instruct)
+|  Weight Version | Hardware Requirements | Download Links |
+|-----------------|-----------------------|----------------|
+| `Qwen3-Next-80B-A3B-Instruct` | **8 cards in 1 Atlas 800 A3 (64GB × 16) node** or **8 cards in 1 Atlas 800 A2 (64GB × 8) node** | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-Next-80B-A3B-Instruct) |
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ## 4 Installation
 
@@ -130,6 +134,7 @@ While a single-node setup supports all input/output scenarios, consider deployin
 Startup Command:
 
 ```bash
+# Ensure the model path matches the directory recorded during download
 vllm serve Qwen/Qwen3-Next-80B-A3B-Instruct --served-model-name qwen3_next --tensor-parallel-size 4 --max-model-len 32768 --gpu-memory-utilization 0.8 --max-num-batched-tokens 4096 --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
 ```
 
@@ -191,7 +196,7 @@ The service returns HTTP 200 OK with a JSON response containing the `choices` fi
 
 ## 7 Accuracy Evaluation
 
-### Using AISBench
+### 7.1 Using AISBench
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
@@ -203,11 +208,11 @@ The service returns HTTP 200 OK with a JSON response containing the `choices` fi
 
 ## 8 Performance Evaluation
 
-### Using AISBench
+### 8.1 Using AISBench
 
 Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
-### Using vLLM Benchmark
+### 8.2 Using vLLM Benchmark
 
 Run performance evaluation of `Qwen3-Next` as an example.
 

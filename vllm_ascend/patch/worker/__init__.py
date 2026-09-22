@@ -24,6 +24,11 @@ if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_v2.patch_triton  # noqa
 
 
+# Flip STR_DTYPE_TO_TORCH_DTYPE["fp8"] -> torch.float8_e4m3fn on vllm builds
+# that lack register_kv_cache_dtype (e.g. releases/v0.27.1). Must run in every
+# worker before model loading resolves kv_cache_dtype. No-op on kvquant_27.
+import vllm_ascend.patch.worker.patch_kv_cache_dtype  # noqa
+
 import vllm_ascend.patch.worker.patch_distributed  # noqa
 import vllm_ascend.patch.worker.patch_minimax_m2  # noqa
 import vllm_ascend.patch.worker.patch_mamba_utils  # noqa
@@ -61,6 +66,7 @@ import vllm_ascend.patch.worker.patch_v2.patch_attn_utils  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_eagle_speculator  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_dflash_speculator  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_dspark  # noqa
+import vllm_ascend.patch.worker.patch_v2.patch_adaptive_verification  # noqa
 
 # 310P: draft FULL must use AutoRegressiveAclGraphManager310 (no FIA graph_task).
 # patch_eagle_speculator above installs the 910 manager; re-override here.

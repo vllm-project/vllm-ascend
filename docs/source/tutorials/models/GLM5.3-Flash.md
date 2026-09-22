@@ -1,4 +1,4 @@
-# GLM-5.3-Flash
+# GLM-5.3-Flash (Experimental)
 
 ## 1 Introduction
 
@@ -16,7 +16,7 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-- `GLM-5.3-Flash-w8a8-mxfp8 (Ascend950DT mxfp8 Quantized)`: requires 1 Ascend950DT (96GB × 8) node.[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8-mxfp8).
+- `GLM-5.3-Flash-w8a8-mxfp8 (950DT Products mxfp8 Quantized)`: requires 1 950DT Products (96GB × 8) node.[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8-mxfp8).
 - `GLM-5.3-Flash-w8a8`: requires 1 Atlas 800 A3 (128GB × 8) node.[Download model weight](https://modelers.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8).
 - `GLM-5.3-Flash-w8a8`: requires 2 Atlas 800 A2 (64GB × 16) nodes.[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8).
 
@@ -24,11 +24,15 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 
+### 3.2 Verify Multi-node Communication (Optional)
+
+If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../getting_started/installation.md#installation-multi-node-interconnect).
+
 ## 4 Installation
 
 ### 4.1 Docker Image Installation
 
-=== "Ascend950DT series"
+=== "950DT Products"
 
     Start the docker image on each node.
 
@@ -145,11 +149,15 @@ It is recommended to download the model weight to the shared directory of multip
 
 ## 5 Online Service Deployment
 
+!!! note
+
+    Do not set `enable_thinking: false` / `thinking: false` for GLM-5.3-Flash, otherwise the output quality may degrade.
+
 ### 5.1 Single-Node Online Deployment
 
-=== "Ascend950DT series"
+=== "950DT Products"
 
-    - Quantized model `GLM-5.3-Flash-w8a8-mxfp8` can be deployed on 1 Ascend950DT (96GB × 8) .
+    - Quantized model `GLM-5.3-Flash-w8a8-mxfp8` can be deployed on 1 950DT Products (96GB × 8) .
 
     Run the following script to execute online inference.
 
@@ -160,7 +168,7 @@ It is recommended to download the model weight to the shared directory of multip
 
     vllm serve Eco-Tech/GLM-5.3-Flash-w8a8-mxfp8 \
       --host 0.0.0.0 \
-      --port 8011 \
+      --port 8000 \
       --data-parallel-size 1 \
       --tensor-parallel-size 8 \
       --enable-expert-parallel \
@@ -194,7 +202,7 @@ It is recommended to download the model weight to the shared directory of multip
 
     vllm serve Eco-Tech/GLM-5.3-Flash-w8a8   \
       --host 0.0.0.0 \
-      --port 8077 \
+      --port 8000 \
       --max-model-len 133120  \
       --data-parallel-size 1 \
       --tensor-parallel-size 16 \
@@ -219,7 +227,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
 
 **Model-specific parameters:**
 
-- `--data-parallel-size 1`: Runs a single DP rank. `--tensor-parallel-size` is 8 on Ascend950DT and 16 on Atlas 800 A3. This layout is recommended to balance memory capacity and compute efficiency for the w8a8 weights.
+- `--data-parallel-size 1`: Runs a single DP rank. `--tensor-parallel-size` is 8 on 950DT Products and 16 on Atlas 800 A3. This layout is recommended to balance memory capacity and compute efficiency for the w8a8 weights.
 - `--enable-expert-parallel`: Must be enabled for the MoE architecture of GLM-5.3-Flash.
 - `--quantization ascend`: Enables Ascend quantization for the w8a8 quantized weights.
 - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'`: Enables graph capture for the decode phase only, improving decode performance by reducing kernel launch overhead.
@@ -260,7 +268,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
 
     vllm serve /path/to/GLM-5.3-Flash-w8a8 \
         --host 0.0.0.0 \
-        --port 8077 \
+        --port 8000 \
         --max-model-len 133120 \
         --data-parallel-size 2 \
         --data-parallel-size-local 1 \
@@ -309,7 +317,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
 
     vllm serve /path/to/GLM-5.3-Flash-w8a8 \
         --host 0.0.0.0 \
-        --port 8077 \
+        --port 8000 \
         --headless \
         --max-model-len 133120 \
         --data-parallel-size 2 \
@@ -353,7 +361,7 @@ curl http://<node0_ip>:<port>/v1/completions \
     -d '{
         "model": "glm",
         "prompt": "The future of AI is",
-        "max_completion_tokens": 50,
+        "max_completion_tokens": 50
     }'
 ```
 
@@ -416,3 +424,7 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
   --reasoning-parser glm45 \
   --enable-auto-tool-choice \
   ```
+
+- **Q: Does GLM-5.3-Flash support `enable_thinking: false`?**
+
+  A: No, GLM-5.3-Flash does not support `enable_thinking`.

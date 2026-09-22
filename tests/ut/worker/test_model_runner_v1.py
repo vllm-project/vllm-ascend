@@ -6,11 +6,12 @@ from unittest.mock import MagicMock, call, patch
 
 import numpy as np
 import torch
-from vllm.config import CUDAGraphMode
+from vllm.config import CompilationConfig, CUDAGraphMode
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.sampling_params import SamplingParams
 from vllm.v1.attention.backends.utils import reorder_batch_to_split_decodes_and_prefills
+from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     HiddenStateCacheSpec,
@@ -28,18 +29,19 @@ from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
 from vllm_ascend.core.kv_cache_interface import (
-    AscendIndexerKPoolStateSpec,
+    AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
 )
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.models.glm5next.kv_cache import (
     Glm5NextIndexerCache,
-    Glm5NextStateCache,
+    Glm5NextTailCache,
 )
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _get_kv_cache_config_deepseek_v4_main,
 )
+from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
 from vllm_ascend.utils import AscendDeviceType, vllm_version_is
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
@@ -59,7 +61,7 @@ class TestGlm5MtpGraphMetadata(unittest.TestCase):
             num_prompt_tokens=np.array([10, 10], dtype=np.int32),
             lora_id_to_lora_request={},
         )
-        runner.model_config = SimpleNamespace(is_encoder_decoder=False)
+        runner.model_config = SimpleNamespace(is_encoder_decoder=False, is_hybrid=False)
         runner.cudagraph_dispatcher = MagicMock(
             dispatch=MagicMock(
                 return_value=(
@@ -95,8 +97,159 @@ class TestGlm5MtpGraphMetadata(unittest.TestCase):
         call_kwargs = runner.cudagraph_dispatcher.dispatch.call_args.kwargs
         self.assertTrue(call_kwargs["uniform_decode"])
 
+    def test_mamba_prefill_graph_dispatch(self):
+        cases = [
+            ([2048], [2052], False, None, False),  # cached/continued short prefill
+            ([2052], [2052], False, None, True),  # first decode
+            ([2060, 2048], [2052, 2052], False, None, False),  # mixed batch
+            ([2060, 2056], [2052, 2052], False, None, True),
+            ([0], [4], False, None, False),
+            ([2048], [2052], True, None, False),  # DCP
+            ([0], [4], False, True, True),  # explicit capture/dummy override
+        ]
+        for computed, prompts, dcp, forced, expected in cases:
+            with self.subTest(computed=computed, prompts=prompts, dcp=dcp, forced=forced):
+                runner = self._build_dispatch_runner(speculative=True)
+                runner.model_config.is_hybrid = True
+                runner.dcp_size = 2 if dcp else 1
+                runner.uniform_decode_query_len = 4
+                # Extra stale rows must not affect the real batch decision.
+                runner.input_batch.num_computed_tokens_cpu = np.array(computed + [0])
+                runner.input_batch.num_prompt_tokens = np.array(prompts + [999])
+                with patch("vllm_ascend.worker.model_runner_v1.enable_sp", return_value=False):
+                    runner._determine_batch_execution_and_padding(
+                        num_tokens=4 * len(computed),
+                        num_reqs=len(computed),
+                        num_scheduled_tokens_np=np.full(len(computed), 4),
+                        max_num_scheduled_tokens=4,
+                        use_cascade_attn=False,
+                        force_uniform_decode=forced,
+                    )
+                self.assertEqual(runner.cudagraph_dispatcher.dispatch.call_args.kwargs["uniform_decode"], expected)
+
+    def test_mamba_non_spec_decode_graph_dispatch(self):
+        for computed, expected in ((2048, False), (2049, True)):
+            with self.subTest(computed=computed):
+                runner = self._build_dispatch_runner(speculative=False)
+                runner.model_config.is_hybrid = True
+                runner.uniform_decode_query_len = 1
+                runner.input_batch.num_computed_tokens_cpu = np.array([computed])
+                runner.input_batch.num_prompt_tokens = np.array([2049])
+                with patch("vllm_ascend.worker.model_runner_v1.enable_sp", return_value=False):
+                    runner._determine_batch_execution_and_padding(
+                        num_tokens=1,
+                        num_reqs=1,
+                        num_scheduled_tokens_np=np.array([1]),
+                        max_num_scheduled_tokens=1,
+                        use_cascade_attn=False,
+                    )
+                self.assertEqual(runner.cudagraph_dispatcher.dispatch.call_args.kwargs["uniform_decode"], expected)
+
 
 class TestDummyRunSlotInvalidation(unittest.TestCase):
+    def test_padded_speculative_dummy_preserves_logical_query_lengths(self):
+        # DSA CP rounds 186 tokens to 192 without adding a logical request.
+        # Also cover dispatchers that pad the request count itself.
+        for num_tokens, padded_tokens, padded_reqs in ((186, 192, 31), (12, 24, 4), (6, 24, 4), (12, 12, 2)):
+            with self.subTest(num_tokens=num_tokens):
+                runner = NPUModelRunner.__new__(NPUModelRunner)
+                runner.uniform_decode_query_len = 6
+                runner.scheduler_config = SimpleNamespace(max_num_batched_tokens=4096, max_num_seqs=32)
+                runner.dynamic_eplb = False
+                runner.dcp_size = 1
+                runner.speculative_config = None
+                runner._has_gdn = True
+                runner.vllm_config = MagicMock()
+                runner.vllm_config.model_config.multimodal_config = None
+                agreed_counts = torch.tensor([padded_tokens, 192], dtype=torch.int32)
+                runner._determine_batch_execution_and_padding = MagicMock(
+                    return_value=(
+                        CUDAGraphMode.FULL,
+                        SimpleNamespace(num_tokens=padded_tokens, num_reqs=padded_reqs),
+                        False,
+                        agreed_counts,
+                        None,
+                    )
+                )
+                runner.synchronize_input_prep = nullcontext
+                runner._should_build_dummy_attn_metadata = MagicMock(return_value=True)
+                runner.optimistic_seq_lens_cpu = torch.zeros(32, dtype=torch.int32)
+                runner.seq_lens = MagicMock()
+                runner.arange_np = np.arange(4096, dtype=np.int32)
+                runner.query_pos = SimpleNamespace(np=np.zeros(4096, dtype=np.int32))
+                runner.query_start_loc = SimpleNamespace(np=np.zeros(33, dtype=np.int32), copy_to_gpu=MagicMock())
+                runner.gdn_query_start_loc = SimpleNamespace(np=np.zeros(33, dtype=np.int32), copy_to_gpu=MagicMock())
+
+                def check_offsets(
+                    *args,
+                    runner=runner,
+                    num_tokens=num_tokens,
+                    padded_tokens=padded_tokens,
+                    padded_reqs=padded_reqs,
+                    agreed_counts=agreed_counts,
+                ):
+                    num_reqs = num_tokens // 6
+                    expected = np.concatenate(
+                        (np.arange(num_reqs + 1) * 6, np.full(padded_reqs - num_reqs, num_tokens))
+                    )
+                    np.testing.assert_array_equal(runner.query_start_loc.np[: padded_reqs + 1], expected)
+                    np.testing.assert_array_equal(runner.gdn_query_start_loc.np[: padded_reqs + 1], expected)
+                    np.testing.assert_array_equal(runner.query_pos.np[:num_tokens], np.tile(np.arange(6), num_reqs))
+                    torch.testing.assert_close(agreed_counts, torch.tensor([padded_tokens, 192], dtype=torch.int32))
+                    raise RuntimeError("logical query lengths checked")
+
+                get_cumsum = runner._get_cumsum_and_arange
+
+                def check_padded_schedule(
+                    schedule,
+                    arange,
+                    num_tokens=num_tokens,
+                    padded_reqs=padded_reqs,
+                    get_cumsum=get_cumsum,
+                ):
+                    num_reqs = num_tokens // 6
+                    expected = np.concatenate((np.full(num_reqs, 6), np.zeros(padded_reqs - num_reqs)))
+                    np.testing.assert_array_equal(schedule, expected)
+                    self.assertEqual(schedule.dtype, np.int32)
+                    self.assertEqual(int(schedule.sum()), num_tokens)
+                    return get_cumsum(schedule, arange)
+
+                runner._get_cumsum_and_arange = check_padded_schedule
+                runner._pad_query_start_loc_for_fia = check_offsets
+                with (
+                    patch("vllm_ascend.worker.model_runner_v1.using_paged_attention", return_value=False),
+                    self.assertRaisesRegex(RuntimeError, "logical query lengths checked"),
+                ):
+                    runner._dummy_run(num_tokens, uniform_decode=True, cudagraph_runtime_mode=CUDAGraphMode.FULL)
+
+    def test_padded_dummy_preserves_other_dp_token_counts(self):
+        for token_counts in ([24, 8], [8, 24], [8, 8]):
+            with self.subTest(token_counts=token_counts):
+                runner = NPUModelRunner.__new__(NPUModelRunner)
+                runner.vllm_config = SimpleNamespace(model_config=SimpleNamespace(multimodal_config=None))
+                runner.uniform_decode_query_len = 1
+                runner.scheduler_config = SimpleNamespace(max_num_batched_tokens=32, max_num_seqs=4)
+                runner.dynamic_eplb = False
+                runner.dcp_size = 1
+                agreed_counts = torch.tensor(token_counts, dtype=torch.int32)
+                runner._determine_batch_execution_and_padding = MagicMock(
+                    return_value=(
+                        CUDAGraphMode.NONE,
+                        SimpleNamespace(num_tokens=8, num_reqs=1),
+                        False,
+                        agreed_counts,
+                        None,
+                    )
+                )
+
+                def check_agreed_counts(agreed_counts=agreed_counts, token_counts=token_counts):
+                    torch.testing.assert_close(agreed_counts, torch.tensor(token_counts, dtype=torch.int32))
+                    raise RuntimeError("DP token counts checked")
+
+                runner.synchronize_input_prep = check_agreed_counts
+                with self.assertRaisesRegex(RuntimeError, "DP token counts checked"):
+                    runner._dummy_run(1, uniform_decode=True)
+
     def test_backend_metadata_sees_invalidated_dummy_slots(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)
         runner.kvpp = KVPPRuntime()
@@ -108,6 +261,8 @@ class TestDummyRunSlotInvalidation(unittest.TestCase):
         runner.speculative_config = None
         runner.use_compress = True
         runner._has_gdn = False
+        # _dummy_run reads multimodal_config for the mm_encoder_only early-exit.
+        runner.vllm_config = SimpleNamespace(model_config=SimpleNamespace(multimodal_config=None))
 
         runner._determine_batch_execution_and_padding = MagicMock(
             return_value=(CUDAGraphMode.NONE, SimpleNamespace(num_tokens=1, num_reqs=1), None, None, None)
@@ -130,7 +285,12 @@ class TestDummyRunSlotInvalidation(unittest.TestCase):
             slot_mapping=SimpleNamespace(gpu=slot_mappings[index])
         )
         runner.input_batch = SimpleNamespace(block_table=block_tables)
-        runner.kv_cache_config = SimpleNamespace(kv_cache_groups=[object(), object()])
+        runner.kv_cache_config = SimpleNamespace(
+            kv_cache_groups=[
+                SimpleNamespace(kv_cache_spec=object()),
+                SimpleNamespace(kv_cache_spec=object()),
+            ]
+        )
 
         def check_slots_before_build(**_kwargs):
             for slot_mapping in slot_mappings:
@@ -141,6 +301,96 @@ class TestDummyRunSlotInvalidation(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "metadata checked"):
             runner._dummy_run(1)
+
+    @unittest.skipIf(vllm_version_is("0.29.0"), "DeepSeek V4.1 is unavailable on vLLM 0.29")
+    def test_graph_capture_invalidates_only_v41_active_slots(self):
+        from tests.deepseek_v41_utils import make_cache_config
+
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.uniform_decode_query_len = 1
+        runner.scheduler_config = SimpleNamespace(max_num_batched_tokens=8, max_num_seqs=8)
+        runner.dynamic_eplb = False
+        runner.dcp_size = 1
+        runner.speculative_config = None
+        runner.use_compress = True
+        runner._has_gdn = False
+        runner.vllm_config = MagicMock()
+        runner.vllm_config.model_config.multimodal_config = None
+
+        runner._determine_batch_execution_and_padding = MagicMock(
+            return_value=(
+                CUDAGraphMode.FULL,
+                SimpleNamespace(num_tokens=2, num_reqs=2),
+                None,
+                None,
+                None,
+            )
+        )
+        runner._should_build_dummy_attn_metadata = MagicMock(return_value=True)
+        runner.synchronize_input_prep = MagicMock(return_value=nullcontext())
+        runner._get_cumsum_and_arange = MagicMock(return_value=np.array([1, 2], dtype=np.int32))
+        runner._pad_query_start_loc_for_fia = MagicMock(return_value=2)
+
+        runner.optimistic_seq_lens_cpu = torch.zeros(8, dtype=torch.int32)
+        runner.seq_lens = MagicMock()
+        runner.query_pos = SimpleNamespace(np=np.zeros(8, dtype=np.int32))
+        runner.query_start_loc = SimpleNamespace(np=np.zeros(9, dtype=np.int32), copy_to_gpu=MagicMock())
+        runner.positions = MagicMock()
+        runner._dsa_positions_cpu_buf = MagicMock()
+
+        v41_group = make_cache_config(17).kv_cache_groups[0]
+        other_group = SimpleNamespace(kv_cache_spec=object())
+        slot_mappings = [torch.tensor([3, 4]), torch.tensor([7, 8])]
+        block_tables = MagicMock()
+        block_tables.__getitem__.side_effect = lambda index: SimpleNamespace(
+            slot_mapping=SimpleNamespace(gpu=slot_mappings[index])
+        )
+        runner.input_batch = SimpleNamespace(block_table=block_tables)
+        runner.kv_cache_config = SimpleNamespace(
+            kv_cache_groups=[v41_group, other_group],
+            num_blocks=17,
+        )
+
+        def check_slots_before_build(**_kwargs):
+            torch.testing.assert_close(slot_mappings[0], torch.full_like(slot_mappings[0], -1))
+            torch.testing.assert_close(slot_mappings[1], torch.tensor([7, 8]))
+            raise RuntimeError("metadata checked")
+
+        runner._build_attention_metadata = check_slots_before_build
+
+        with (
+            patch("vllm_ascend.worker.model_runner_v1.using_paged_attention", return_value=False),
+            self.assertRaisesRegex(RuntimeError, "metadata checked"),
+        ):
+            runner._dummy_run(2, cudagraph_runtime_mode=CUDAGraphMode.FULL, is_graph_capturing=True)
+
+
+class TestMmEncoderOnlyDummyRunEarlyExit(unittest.TestCase):
+    def _build_runner(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(multimodal_config=SimpleNamespace(mm_encoder_only=True))
+        )
+        return runner
+
+    def test_dummy_run_returns_empty_tensors_without_forward(self):
+        runner = self._build_runner()
+        runner._model_forward = MagicMock()
+
+        result = runner._dummy_run(4)
+
+        self.assertIsInstance(result, tuple)
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0].numel(), 0)
+        self.assertEqual(result[1].numel(), 0)
+        runner._model_forward.assert_not_called()
+
+    def test_dummy_sampler_run_returns_empty_tensor(self):
+        runner = self._build_runner()
+
+        result = runner._dummy_sampler_run(torch.zeros((4, 16)))
+
+        self.assertEqual(result.numel(), 0)
 
 
 class TestDeviceMetadataFullGraphEvents(unittest.TestCase):
@@ -211,7 +461,9 @@ class TestDeviceMetadataFullGraphEvents(unittest.TestCase):
         runner.uses_xdrope_dim = 0
         runner.positions = torch.zeros(4, dtype=torch.int64)
         runner.drafter = None
-        runner.vllm_config = MagicMock()
+        # _dummy_run reads multimodal_config for the mm_encoder_only
+        # early-exit; keep it real so the forward path is not skipped.
+        runner.vllm_config = SimpleNamespace(model_config=SimpleNamespace(multimodal_config=None))
         runner.model = MagicMock()
         runner._has_sinks = False
         runner.use_aux_hidden_state_outputs = False
@@ -291,6 +543,137 @@ class TestDSparkAuxCaptureMode(unittest.TestCase):
         )
 
         self.assertFalse(runner._draft_uses_qwen3_gqa_dspark())
+
+
+class TestDrafterMaxModelLen(unittest.TestCase):
+    def _build_runner(
+        self,
+        *,
+        dp_size: int = 1,
+        query_width: int | None = None,
+        model_backed: bool = True,
+        use_dflash: bool = False,
+    ):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.effective_drafter_max_model_len = 1024
+        runner.num_spec_tokens = 5
+        runner.parallel_config = SimpleNamespace(data_parallel_size=dp_size)
+        runner.input_batch = SimpleNamespace(req_ids=["req-0", "req-1"])
+        runner.speculative_config = SimpleNamespace(
+            use_dflash=MagicMock(return_value=use_dflash),
+            use_eagle=MagicMock(return_value=model_backed),
+            uses_draft_model=MagicMock(return_value=False),
+            uses_extract_hidden_states=MagicMock(return_value=False),
+        )
+
+        if query_width is None:
+            drafter = SimpleNamespace()
+        else:
+            drafter = AscendDSparkProposer.__new__(AscendDSparkProposer)
+            drafter.num_query_per_req = query_width
+        drafter.dummy_run = MagicMock()
+        runner.drafter = drafter
+        return runner
+
+    def test_dspark_fit_check_uses_its_exact_query_group(self):
+        runner = self._build_runner(query_width=6)
+
+        self.assertTrue(runner._input_fits_in_drafter(SimpleNamespace(max_seq_len=1018)))
+        self.assertFalse(runner._input_fits_in_drafter(SimpleNamespace(max_seq_len=1019)))
+
+    def test_dflash_fit_check_includes_bonus_query(self):
+        runner = self._build_runner(use_dflash=True)
+
+        self.assertTrue(runner._input_fits_in_drafter(SimpleNamespace(max_seq_len=1018)))
+        self.assertFalse(runner._input_fits_in_drafter(SimpleNamespace(max_seq_len=1019)))
+
+    def test_standard_drafter_fit_check_uses_spec_token_count(self):
+        runner = self._build_runner()
+
+        self.assertTrue(runner._input_fits_in_drafter(SimpleNamespace(max_seq_len=1019)))
+        self.assertFalse(runner._input_fits_in_drafter(SimpleNamespace(max_seq_len=1020)))
+        self.assertFalse(runner._input_fits_in_drafter(None))
+
+    def test_pp_rank_without_drafter_does_not_apply_local_limit(self):
+        runner = self._build_runner(dp_size=2)
+        runner.drafter = None
+
+        self.assertTrue(runner._input_fits_in_drafter(SimpleNamespace(max_seq_len=1024)))
+        runner._skip_drafting()
+        self.assertEqual(runner._draft_token_ids, [[], []])
+
+    def test_dspark_overflow_rank_runs_complete_dp_dummy(self):
+        runner = self._build_runner(dp_size=2, query_width=6)
+
+        runner._skip_drafting()
+
+        runner.drafter.dummy_run.assert_called_once_with(num_tokens=6, num_reqs=1)
+        self.assertEqual(runner._draft_token_ids, [[], []])
+        self.assertEqual(runner._draft_token_req_ids, ["req-0", "req-1"])
+        self.assertIsNone(runner._draft_probs)
+        self.assertIsNone(runner._draft_prob_req_ids)
+        draft_token_ids = runner.take_draft_token_ids()
+        self.assertEqual(draft_token_ids.req_ids, ["req-0", "req-1"])
+        self.assertEqual(draft_token_ids.draft_token_ids, [[], []])
+
+    def test_padded_overflow_preserves_sampled_token_state(self):
+        runner = self._build_runner(dp_size=2)
+        sampled_token_ids = torch.tensor([[11, -1], [21, 22]])
+        next_token_ids = torch.tensor([11, 22])
+        valid_sampled_tokens_count = torch.tensor([1, 2])
+        discard_request_indices = torch.tensor([1])
+        runner.valid_sampled_token_count_event = MagicMock()
+        runner.requests = {"req-0": MagicMock(), "req-1": MagicMock()}
+        runner.discard_request_indices = SimpleNamespace(gpu=discard_request_indices)
+        runner.num_discarded_requests = 1
+        runner.drafter.prepare_next_token_ids_padded = MagicMock(
+            return_value=(next_token_ids, valid_sampled_tokens_count)
+        )
+        runner._copy_valid_sampled_token_count = MagicMock()
+
+        runner._skip_drafting(sampled_token_ids)
+
+        runner.drafter.prepare_next_token_ids_padded.assert_called_once_with(
+            sampled_token_ids,
+            runner.requests,
+            runner.input_batch,
+            discard_request_indices,
+            1,
+        )
+        runner._copy_valid_sampled_token_count.assert_called_once_with(next_token_ids, valid_sampled_tokens_count)
+        runner.drafter.dummy_run.assert_called_once_with(num_tokens=1)
+
+    def test_padded_overflow_avoids_state_work_without_count_event(self):
+        runner = self._build_runner(dp_size=1)
+        runner.valid_sampled_token_count_event = None
+        runner.drafter.prepare_next_token_ids_padded = MagicMock()
+
+        runner._skip_drafting(torch.tensor([[11]]))
+
+        runner.drafter.prepare_next_token_ids_padded.assert_not_called()
+
+    def test_model_backed_overflow_rank_runs_upstream_style_dp_dummy(self):
+        runner = self._build_runner(dp_size=2)
+
+        runner._skip_drafting()
+
+        runner.drafter.dummy_run.assert_called_once_with(num_tokens=1)
+
+    def test_non_model_proposer_does_not_run_dp_dummy(self):
+        runner = self._build_runner(dp_size=2, model_backed=False)
+
+        runner._skip_drafting()
+
+        runner.drafter.dummy_run.assert_not_called()
+        self.assertEqual(runner._draft_token_ids, [[], []])
+
+    def test_overflow_rank_skips_dummy_without_dp(self):
+        runner = self._build_runner(dp_size=1)
+
+        runner._skip_drafting()
+
+        runner.drafter.dummy_run.assert_not_called()
+        self.assertEqual(runner._draft_token_ids, [[], []])
 
 
 class TestAcceptedTokenSnapshot(unittest.TestCase):
@@ -431,9 +814,7 @@ def _make_kv_cache_tensor(
     layer_names: list[str],
     page_size: int,
 ) -> KVCacheTensor:
-    """Build the lane-specific descriptor changed by vLLM #51718."""
-    if "shared_by" in KVCacheTensor.__dataclass_fields__:
-        return KVCacheTensor(size=per_layer_size, shared_by=layer_names)
+    """Build the standardized descriptor shared by both supported versions."""
     return KVCacheTensor(
         size=per_layer_size * len(layer_names),
         layers=layer_names,
@@ -445,8 +826,6 @@ def _make_kv_cache_tensor(
 
 def _ratio_kwargs(ratio: int) -> dict[str, int]:
     """Map the MLA compression field renamed by vLLM #51718."""
-    if vllm_version_is("0.28.0"):
-        return {"compress_ratio": ratio}
     return {"tokens_per_state": ratio}
 
 
@@ -471,6 +850,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.vllm_config.kv_transfer_config = None
         runner.model_config = MagicMock()
         runner.model_config.use_mla = True
+        runner.dtype = torch.bfloat16
         backend = MagicMock()
         backend.get_kv_cache_shape.side_effect = lambda num_blocks, block_size, num_kv_heads, head_size: (
             2,
@@ -512,6 +892,77 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                     raw = runner._allocate_kv_cache_tensors(cache_config)
                     caches = runner._reshape_kv_cache_tensors(cache_config, raw)
                 assert_attention_cache_views(caches, raw, packed)
+
+    @unittest.skipIf(vllm_version_is("0.29.0"), "DeepSeek V4.1 is unavailable on vLLM 0.29")
+    def test_v41_layer_outer_buffers_allocate_and_reshape(self):
+        from tests.deepseek_v41_utils import make_cache_config
+        from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheBackend
+
+        runner = self._build_runner()
+        runner.attn_backend = DeepseekV41CacheBackend
+        config = make_cache_config(4)
+        # vLLM shrinks each tensor proportionally when another rank has less
+        # capacity. Component offsets must not depend on the old block count.
+        for allocation in config.kv_cache_tensors:
+            allocation.size = allocation.size // config.num_blocks * 3
+        config.num_blocks = 3
+        raw = runner._allocate_kv_cache_tensors(config)
+        prefix = "model.layers."
+        long_name = prefix + "2.self_attn.long_kv_cache"
+        index_name = prefix + "2.self_attn.indexer.k_cache"
+        assert raw[long_name] is raw[index_name]
+        assert raw[long_name] is raw[prefix + "0.self_attn.swa_cache"]
+        assert raw[long_name] is not raw[prefix + "8.self_attn.long_kv_cache"]
+        unique = {id(value): value for value in raw.values()}
+        assert len(unique) == 4
+        assert sum(buffer.numel() for buffer in unique.values()) == 3 * 540928
+        runner._kv_cache_spec_attn_group_iterator = lambda: [
+            SimpleNamespace(kv_cache_spec=spec, backend=runner.attn_backend, layer_names=[name])
+            for group in config.kv_cache_groups
+            for name, spec in group.kv_cache_spec.kv_cache_specs.items()
+        ]
+        caches = runner._reshape_kv_cache_tensors(config, raw)
+        key, scale = caches[index_name]
+        assert key.shape == (3, 64, 1, 128)
+        assert scale.shape == (3, 64, 1, 1)
+        assert key.data_ptr() - caches[long_name].data_ptr() == 65536
+        assert scale.data_ptr() - key.data_ptr() == 8192
+        assert key.stride(0) == 131072
+        assert scale.stride(0) == 65536
+        assert not key.is_contiguous()
+        assert caches[prefix + "0.self_attn.swa_cache"].is_contiguous()
+        assert not caches[prefix + "3.self_attn.swa_cache"].is_contiguous()
+
+    @unittest.skipIf(vllm_version_is("0.29.0"), "DeepSeek V4.1 is unavailable on vLLM 0.29")
+    def test_v41_dspark_shares_four_backings_after_rank_shrink(self):
+        from tests.deepseek_v41_utils import make_cache_config
+        from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheBackend
+
+        runner = self._build_runner()
+        runner.attn_backend = DeepseekV41CacheBackend
+        config = make_cache_config(5, draft_layers=3)
+        for allocation in config.kv_cache_tensors:
+            allocation.size = allocation.size // config.num_blocks * 3
+        config.num_blocks = 3
+        raw = runner._allocate_kv_cache_tensors(config)
+        assert len({id(value) for value in raw.values()}) == 4
+        runner._kv_cache_spec_attn_group_iterator = lambda: [
+            SimpleNamespace(kv_cache_spec=spec, backend=runner.attn_backend, layer_names=[name])
+            for group in config.kv_cache_groups
+            for name, spec in group.kv_cache_spec.kv_cache_specs.items()
+        ]
+        caches = runner._reshape_kv_cache_tensors(config, raw)
+        for stage, source in enumerate((2, 8, 14)):
+            draft = f"mtp.{stage}.self_attn.swa_cache"
+            target = f"model.layers.{source}.self_attn.long_kv_cache"
+            assert raw[draft] is raw[target]
+            assert caches[draft].shape == (3, 128, 1, 512)
+            assert caches[draft].stride(0) * 2 == 131072
+            assert caches[draft].data_ptr() == caches[target].data_ptr()
+            caches[target][1].fill_(2)
+            caches[draft][2].fill_(3)
+            assert (caches[target][1] == 2).all()
+            assert (caches[draft][0] == 0).all()
 
     def test_allocate_kv_cache_uses_layer_spec_for_draft_gqa(self):
         runner = self._build_runner()
@@ -604,9 +1055,10 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             indexes_kv_by_block_stride=True,
             **_ratio_kwargs(2),
         )
-        state_spec = AscendIndexerKPoolStateSpec(
+        state_spec = AscendIndexerKPoolTailSpec(
             block_size=2,
             sliding_window=2,
+            compress_ratio=2,
             num_kv_heads=1,
             head_size=3,
             dtype=torch.float32,
@@ -621,13 +1073,13 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         indexer_module = Glm5NextIndexerCache.__new__(Glm5NextIndexerCache)
         torch.nn.Module.__init__(indexer_module)
         indexer_module.get_kv_cache_spec = lambda _config: indexer_spec
-        state_module = Glm5NextStateCache.__new__(Glm5NextStateCache)
+        state_module = Glm5NextTailCache.__new__(Glm5NextTailCache)
         torch.nn.Module.__init__(state_module)
         state_module.get_kv_cache_spec = lambda _config: state_spec
         mock_get_layers.return_value = {
             "model.layers.1.attn": main_module,
             "model.layers.1.indexer.k_cache": indexer_module,
-            "model.layers.1.indexer.state_cache": state_module,
+            "model.layers.1.indexer.tail_cache": state_module,
             "model.layers.0.linear_attn": FakeMamba(mamba_spec),
         }
 
@@ -639,7 +1091,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             mamba_spec.page_size_bytes,
         )
         self.assertIsNone(specs["model.layers.1.indexer.k_cache"].page_size_padded)
-        self.assertIsNone(specs["model.layers.1.indexer.state_cache"].page_size_padded)
+        self.assertIsNone(specs["model.layers.1.indexer.tail_cache"].page_size_padded)
 
     @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
     def test_mla_rope_modes_and_cache_layers_use_separate_metadata_groups(self, mock_get_layers):
@@ -726,34 +1178,64 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             {(target_layer,), (draft_layer,), (cache_layer,)},
         )
 
-    def test_explicit_capture_sizes_must_align_spec_decode_and_sp(self):
-        for capture_sizes, expected_tp_size in (([48, 96], 1), ([16, 32], 16)):
-            with self.subTest(capture_sizes=capture_sizes):
+    def test_cp_or_sp_decode_dispatch_keys_are_actually_captured(self):
+        cases = (
+            (True, 8, 6, False),
+            (True, 16, 6, False),
+            (True, 8, 6, True),
+            (True, 8, 1, False),
+            (False, 8, 6, True),
+            (False, 16, 6, True),
+            (False, 8, 1, True),
+        )
+        for cp_enabled, tp_size, query_len, enable_sp in cases:
+            with self.subTest(cp=cp_enabled, tp_size=tp_size, query_len=query_len, enable_sp=enable_sp):
                 runner = self._build_runner()
-                compilation_config = SimpleNamespace(
-                    pass_config=SimpleNamespace(enable_sp=True),
-                    cudagraph_capture_sizes=capture_sizes,
-                    resolve_cudagraph_mode_and_sizes=MagicMock(return_value=CUDAGraphMode.FULL_DECODE_ONLY),
+                max_tokens = 32 * query_len
+                config = CompilationConfig(
+                    cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+                    cudagraph_capture_sizes=list(range(tp_size, max_tokens + 1, tp_size)),
+                    max_cudagraph_capture_size=max_tokens,
                 )
-                runner.compilation_config = compilation_config
-                runner.vllm_config.compilation_config = compilation_config
-                runner.parallel_config = SimpleNamespace(tensor_parallel_size=16)
-                runner.uniform_decode_query_len = 6
-                runner.kv_cache_config = SimpleNamespace()
-                runner.max_num_reqs = 16
-                runner.cudagraph_dispatcher = MagicMock()
-                runner.cudagraph_dispatcher.get_capture_descs.return_value = []
+                config.pass_config.enable_sp = enable_sp
+                runner.compilation_config = config
+                runner.parallel_config = SimpleNamespace(tensor_parallel_size=tp_size)
+                runner.vllm_config = SimpleNamespace(
+                    compilation_config=config,
+                    parallel_config=runner.parallel_config,
+                    num_speculative_tokens=query_len - 1,
+                    lora_config=None,
+                    scheduler_config=SimpleNamespace(max_num_seqs=32),
+                )
+                runner.uniform_decode_query_len = query_len
+                runner.kv_cache_config = SimpleNamespace(has_mamba_layers=False)
+                runner.max_num_reqs = 32
+                runner.cudagraph_dispatcher = CudagraphDispatcher(runner.vllm_config)
                 runner.speculative_config = None
                 runner.drafter = None
                 runner.use_aclgraph = False
-
-                runner._check_and_update_cudagraph_mode([], [])
-
-                call_kwargs = compilation_config.resolve_cudagraph_mode_and_sizes.call_args.kwargs
-                self.assertEqual(
-                    call_kwargs["tensor_parallel_size"],
-                    expected_tp_size,
-                )
+                with (
+                    patch("vllm_ascend.worker.model_runner_v1.enable_dsa_cp", return_value=cp_enabled),
+                    patch("vllm_ascend.worker.model_runner_v1.enable_sp", return_value=enable_sp),
+                    patch("vllm_ascend.worker.model_runner_v1.update_pass_config", return_value=nullcontext()),
+                ):
+                    runner._check_and_update_cudagraph_mode([], [])
+                    dispatcher = runner.cudagraph_dispatcher
+                    captured = set()
+                    for mode, descriptors in dispatcher.get_capture_descs():
+                        for descriptor in descriptors:
+                            actual_mode, actual_key = dispatcher.dispatch(
+                                runner._pad_for_sequence_parallelism(descriptor.num_tokens), uniform_decode=True
+                            )
+                            self.assertEqual((actual_mode, actual_key), (mode, descriptor))
+                            captured.add(actual_key)
+                    # Includes the one-request dummy used by idle DP ranks.
+                    for num_reqs in range(1, 33):
+                        mode, key = dispatcher.dispatch(
+                            runner._pad_for_sequence_parallelism(num_reqs * query_len), uniform_decode=True
+                        )
+                        self.assertEqual(mode, CUDAGraphMode.FULL)
+                        self.assertIn(key, captured)
 
     def test_sparse_c8_indexer_reuses_raw_cache_from_shared_descriptor(self):
         runner = self._build_runner()
@@ -788,15 +1270,9 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         )
 
         raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
+        assert raw_caches[layer_names[0]][0] is not raw_caches[layer_names[1]][0]
+        assert raw_caches[layer_names[0]][1] is not raw_caches[layer_names[1]][1]
 
-        if vllm_version_is("0.28.0"):
-            assert raw_caches[layer_names[0]][0] is raw_caches[layer_names[1]][0]
-            assert raw_caches[layer_names[0]][1] is raw_caches[layer_names[1]][1]
-        else:
-            assert raw_caches[layer_names[0]][0] is not raw_caches[layer_names[1]][0]
-            assert raw_caches[layer_names[0]][1] is not raw_caches[layer_names[1]][1]
-
-    @unittest.skipIf(vllm_version_is("0.28.0"), "vLLM #51718 only changed the main planner")
     def test_hybrid_descriptors_share_standardized_backing_allocation(self):
         attn_names = ["model.layers.0.self_attn.attn", "model.layers.2.self_attn.attn"]
         mamba_names = ["model.layers.1.linear_attn", "model.layers.3.linear_attn"]
@@ -842,6 +1318,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         for kv_transfer_config in (
             None,
             SimpleNamespace(kv_connector="ExampleHiddenStatesConnector"),
+            SimpleNamespace(kv_connector="MooncakeConnectorV1"),
             SimpleNamespace(kv_connector="MooncakeConnectorV2"),
             SimpleNamespace(kv_connector="MooncakePullConnector"),
         ):
@@ -866,10 +1343,6 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                     base_offset + layer_size,
                 )
 
-    @unittest.skipIf(
-        vllm_version_is("0.28.0"),
-        "vLLM #51718 only changed the main planner",
-    )
     @patch(
         "vllm_ascend.patch.platform.patch_kv_cache_utils.may_override_num_blocks",
         side_effect=lambda _config, num_blocks: num_blocks,
@@ -1358,6 +1831,51 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertEqual(k_cache.shape, (2, 16, 1, 512))
         self.assertEqual(v_cache.shape, (2, 16, 1, 64))
         self.assertEqual(indexer_cache.shape, (4, 16, 1, 128))
+
+    @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
+    @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
+    def test_sparse_indexer_skips_allocation_for_runtime_shared_s_layer(
+        self,
+        mock_get_layers,
+        _mock_has_ec_transfer,
+    ):
+        runner = self._build_runner()
+        runner.use_sparse = True
+        runner.block_size = 16
+        runner.sfa_dcp_replicated_indexer_size = 1
+        runner.kv_cache_dtype = torch.bfloat16
+        runner.shared_kv_cache_layers = {}
+        runner.ascend_config = MagicMock()
+        runner.ascend_config.is_sparse_li_c8_layer.return_value = False
+        runner.model_config.hf_text_config = SimpleNamespace(
+            kv_lora_rank=512,
+            qk_rope_head_dim=64,
+            index_head_dim=128,
+        )
+        runner.vllm_config.cache_config.cache_dtype = "auto"
+
+        attn_module = MLAAttention.__new__(MLAAttention)
+        torch.nn.Module.__init__(attn_module)
+        attn_module.impl = SimpleNamespace(
+            has_indexer=True,
+            runtime_has_indexer=False,
+            enable_sparse_sfa_c8=False,
+            enable_sparse_li_c8=False,
+        )
+        attn_module.kv_lora_rank = 512
+        attn_module.qk_rope_head_dim = 64
+        indexer_module = DeepseekV32IndexerCache.__new__(DeepseekV32IndexerCache)
+        torch.nn.Module.__init__(indexer_module)
+        attn_layer_name = "model.layers.1.self_attn.attn"
+        indexer_layer_name = "model.layers.1.self_attn.indexer.k_cache"
+        mock_get_layers.return_value = {
+            attn_layer_name: attn_module,
+            indexer_layer_name: indexer_module,
+        }
+
+        specs = runner.get_kv_cache_spec()
+        self.assertIn(attn_layer_name, specs)
+        self.assertNotIn(indexer_layer_name, specs)
 
     def test_sparse_c8_indexer_owns_quantized_cache_accounting(self):
         main_spec = AscendMLAAttentionSpec(
@@ -1905,6 +2423,8 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
 
         self.assertEqual(runner.input_ids.gpu.tolist(), [11, 0, 33, -1])
 
+    # This checks token metadata on CPU; pinned allocation is covered separately.
+    @patch.object(torch.Tensor, "pin_memory", lambda self: self)
     def test_mtp3_placeholder_metadata_is_preserved_before_sanitizing_forward(self):
         runner = self._build_runner()
         runner.arange_np = np.arange(8, dtype=np.int32)
@@ -2178,7 +2698,11 @@ class TestKVPPExecute(unittest.TestCase):
                 runner.model = object()
                 runner.vllm_config = SimpleNamespace()
                 runner.parallel_config = SimpleNamespace(num_ubatches=1)
-                runner.model_config = SimpleNamespace(enforce_eager=True)
+                runner.model_config = SimpleNamespace(
+                    enforce_eager=True,
+                    hf_config=SimpleNamespace(model_type="test"),
+                    hf_text_config=SimpleNamespace(model_type="test"),
+                )
                 runner.cache_config = SimpleNamespace(kv_sharing_fast_prefill=False, mamba_cache_mode=None)
                 runner.input_batch = SimpleNamespace(
                     num_reqs=2, req_ids=["a", "b"], num_computed_tokens_cpu=np.array(computed)

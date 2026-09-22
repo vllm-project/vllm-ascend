@@ -261,7 +261,11 @@ class TestEnableFaQuant(TestBase):
         vllm_config = MagicMock()
         vllm_config.quant_config = AscendModelSlimConfig(FAKQUANT_CONFIG)
         vllm_config.kv_transfer_config = KVTransferConfig(kv_connector="MultiConnector", kv_role="kv_consumer")
+        vllm_config.cache_config.cache_dtype = "fp8"
         result = enable_fa_quant(vllm_config)
         self.assertTrue(result)
+        vllm_config.cache_config.cache_dtype = "auto"
+        result = enable_fa_quant(vllm_config)
+        self.assertFalse(result)
         result = enable_fa_quant(vllm_config, layer_name="test_layer")
         self.assertFalse(result)
