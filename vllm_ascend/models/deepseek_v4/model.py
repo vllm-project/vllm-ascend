@@ -28,6 +28,7 @@ import typing
 from collections.abc import Callable, Iterable
 from itertools import islice
 
+import regex as re
 import torch
 import torch.nn.functional as F
 import vllm.envs as envs
@@ -65,6 +66,7 @@ from vllm.model_executor.models.interfaces import (
 )
 from vllm.model_executor.models.utils import (
     PPMissingLayer,
+    WeightsMapper,
     is_pp_missing_parameter,
     make_layers,
     maybe_prefix,
@@ -210,44 +212,6 @@ def get_spec_layer_idx_from_weight_name(config: DeepseekV2Config | DeepseekV3Con
     if weight_name.startswith("mtp."):
         return 0
     return None
-
-
-def normalize_ckpt_weight_name(name: str) -> str:
-    """Map a raw checkpoint weight name into the runtime module namespace.
-
-    DeepSeek-V4 checkpoints use Megatron-style naming (no ``model.`` prefix,
-    ``.ffn.`` instead of ``.mlp.``, ``.w1./.w2./.w3.`` projections, ``.scale``
-    quant scales). Exposed as ``ckpt_weight_name_normalizer`` so generic
-    weight-name matching (e.g. the FT scale-down expert reload) applies the
-    same mapping as ``load_weights``.
-    """
-    if not name.startswith("model"):
-        name = f"model.{name}"
-
-    if ".w1." in name:
-        name = name.replace(".w1.", ".gate_proj.")
-    if ".w2." in name:
-        name = name.replace(".w2.", ".down_proj.")
-    if ".w3." in name:
-        name = name.replace(".w3.", ".up_proj.")
-
-    if "model.head." in name and "model.lm_head." not in name:
-        name = name.replace("model.head.", "lm_head.")
-    if "model.lm_head." in name:
-        name = name.replace("model.lm_head.", "lm_head.")
-    if "embed." in name and "embed_token." not in name:
-        name = name.replace("embed.", "embed_tokens.")
-    if "attn" in name and "self_attn" not in name:
-        name = name.replace(".attn.", ".self_attn.")
-    if ".ffn." in name:
-        name = name.replace(".ffn.", ".mlp.")
-    if ".ffn_norm." in name:
-        name = name.replace(".ffn_norm.", ".post_attention_layernorm.")
-    if ".attn_norm." in name:
-        name = name.replace(".attn_norm.", ".input_layernorm.")
-    if name.endswith(".scale"):
-        name = name.replace(".scale", ".weight_scale")
-    return name
 
 
 class DeepseekV2MLP(nn.Module):
@@ -1082,9 +1046,25 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
     model_cls = DeepseekV4Model
-    # Raw checkpoint names differ from the runtime namespace; generic weight
-    # matching (FT scale-down expert reload) applies this before matching.
-    ckpt_weight_name_normalizer = staticmethod(normalize_ckpt_weight_name)
+
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_regex={re.compile(r"^(?!model)"): "model."},
+        orig_to_new_substr={
+            ".w1.": ".gate_proj.",
+            ".w2.": ".down_proj.",
+            ".w3.": ".up_proj.",
+            "embed.": "embed_tokens.",
+            ".attn.": ".self_attn.",
+            ".ffn.": ".mlp.",
+            ".ffn_norm.": ".post_attention_layernorm.",
+            ".attn_norm.": ".input_layernorm.",
+        },
+        orig_to_new_prefix={
+            "model.head.": "lm_head.",
+            "model.lm_head.": "lm_head.",
+        },
+        orig_to_new_suffix={".scale": ".weight_scale"},
+    )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -1207,7 +1187,10 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
             if spec_layer is not None:
                 continue  # skip spec decode layers for main model
 
-            name = normalize_ckpt_weight_name(name)
+            mapped_name = self.hf_to_vllm_mapper._map_name(name)
+            if mapped_name is None:
+                continue  # mapper-declared drop (none today; parity with AutoWeightsLoader)
+            name = mapped_name
 
             if "rotary_emb.inv_freq" in name:
                 continue
