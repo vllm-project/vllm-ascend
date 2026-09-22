@@ -314,6 +314,8 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         )
 
         block_table = common_attn_metadata.block_table_tensor
+
+        # TODO: This will be moved to propose and deleted after fia ops fixed.
         seq_lens = _select_seq_lens(
             common_attn_metadata,
             kv_cache_spec=self.kv_cache_spec,
