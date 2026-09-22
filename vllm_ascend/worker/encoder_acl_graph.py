@@ -255,9 +255,7 @@ def update_encoder_graph_params(
     cu_seqlens_cpu = get_encoder_forward_context().cu_seqlens_cpu
     if cu_seqlens_cpu is None:
         if handles:
-            raise RuntimeError(
-                f"Missing replay cu_seqlens for encoder graph path={path!r} budget={token_budget}"
-            )
+            raise RuntimeError(f"Missing replay cu_seqlens for encoder graph path={path!r} budget={token_budget}")
         return
 
     actual_seq_lengths_cache: dict[tuple[int, int], tuple[list[int], list[int]]] = {}

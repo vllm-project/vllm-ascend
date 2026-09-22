@@ -100,7 +100,10 @@ def test_qwen3_6_27b_multimodel_encoder_acl_graph_mrv2():
             "cudagraph_mm_encoder": True,
             "cudagraph_mode": "NONE",
             "encoder_cudagraph_max_vision_items_per_batch": 4,
-            "encoder_cudagraph_token_budgets": [128, 256, 512, 1024, 1536, 2048, 2560, 3072, 3584, 4096],
+            # The four test images require 1920 encoder tokens in total. One
+            # fitting budget is sufficient to validate capture and replay and
+            # avoids capturing nine unrelated graphs during this E2E test.
+            "encoder_cudagraph_token_budgets": [2048],
         },
     ) as vllm_model:
         graph_stats_before = vllm_model.model.llm_engine.collective_rpc("get_encoder_cudagraph_stats")
