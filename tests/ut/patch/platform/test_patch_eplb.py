@@ -3,7 +3,7 @@
 
 from contextlib import contextmanager
 from types import SimpleNamespace
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -248,14 +248,12 @@ def test_backported_workspace_move_commits_changed_layer(monkeypatch):
 
     patch_eplb._backported_move_to_workspace(model_state, ep_rank=2)
 
-    assert move_from_buffer.call_args_list == [
-        call(
-            expert_weights=["l1"],
-            expert_weights_buffers=["buffer"],
-            transfer_metadata="metadata",
-            new_indices=new_mapping.numpy(),
-            ep_rank=2,
-        )
-    ]
+    move_from_buffer.assert_called_once()
+    move_kwargs = move_from_buffer.call_args.kwargs
+    assert move_kwargs["expert_weights"] == ["l1"]
+    assert move_kwargs["expert_weights_buffers"] == ["buffer"]
+    assert move_kwargs["transfer_metadata"] == "metadata"
+    torch.testing.assert_close(torch.as_tensor(move_kwargs["new_indices"]), new_mapping)
+    assert move_kwargs["ep_rank"] == 2
     commit.assert_called_once_with(model_state, new_physical_to_logical_map=new_mapping, layer=1)
     consumed_event.record.assert_called_once_with()

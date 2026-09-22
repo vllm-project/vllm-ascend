@@ -21,7 +21,8 @@ def test_uses_upstream_async_worker_lifecycle():
 
 def test_add_model_uses_and_reuses_ascend_v2_policy(monkeypatch):
     def upstream_add_model(self, model, model_config):
-        del model, model_config
+        del model
+        self.model_states = {model_config.compute_hash(): SimpleNamespace()}
         self.policy = object()
 
     policy = object()
@@ -34,13 +35,14 @@ def test_add_model_uses_and_reuses_ascend_v2_policy(monkeypatch):
     monkeypatch.setattr(
         eplb_state,
         "get_ep_group",
-        lambda: SimpleNamespace(rank_in_group=3),
+        lambda: SimpleNamespace(rank_in_group=3, world_size=4),
     )
     monkeypatch.setattr(eplb_state, "AscendV2EplbPolicy", policy_factory)
     state = AscendEplbState.__new__(AscendEplbState)
+    model_config = SimpleNamespace(compute_hash=lambda: "model")
 
-    state.add_model(object(), object())
-    state.add_model(object(), object())
+    state.add_model(object(), model_config)
+    state.add_model(object(), model_config)
 
     assert state.policy is policy
     policy_factory.assert_called_once_with(ep_rank=3)

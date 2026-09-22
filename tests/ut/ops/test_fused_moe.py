@@ -926,11 +926,13 @@ def test_routed_experts_forward_impl_runs_current_flow(monkeypatch, return_with_
     routed_out = torch.randn(2, 4)
     finalized = torch.randn(2, 4)
     expert_load = torch.zeros(4, dtype=torch.int32)
+    record_enabled = torch.tensor(False)
+    expert_tokens = torch.tensor([3, 5]) if v2_eplb else None
     quant_method = AscendUnquantizedFusedMoEMethod.__new__(AscendUnquantizedFusedMoEMethod)
     quant_method.apply = MagicMock(
         return_value=SimpleNamespace(
             routed_out=routed_out,
-            expert_tokens=torch.tensor([3, 5]) if v2_eplb else None,
+            expert_tokens=expert_tokens,
             group_list_type=1,
             before_dispatch_evt=None,
             before_gmm2_evt=None,
@@ -944,7 +946,16 @@ def test_routed_experts_forward_impl_runs_current_flow(monkeypatch, return_with_
     topk_ids = torch.tensor([[0, 1], [1, 0]], dtype=torch.int64)
     routed_experts.router = SimpleNamespace(
         _select_experts=MagicMock(return_value=(topk_weights, topk_ids)),
-        eplb_state=SimpleNamespace(expert_load_view=expert_load) if v2_eplb else None,
+        eplb_state=(
+            SimpleNamespace(
+                expert_load_view=expert_load,
+                should_record_tensor=record_enabled,
+                local_expert_count=2,
+                local_expert_start=0,
+            )
+            if v2_eplb
+            else None
+        ),
     )
     routed_experts.top_k = 2
     routed_experts.renormalize = True
@@ -994,11 +1005,17 @@ def test_routed_experts_forward_impl_runs_current_flow(monkeypatch, return_with_
     monkeypatch.setattr(routed_experts_module, "get_moe_num_logical_experts", lambda *args, **kwargs: 3)
     monkeypatch.setattr(routed_experts_module, "get_ascend_config", lambda: SimpleNamespace(enable_force_eplb=False))
 
-    result = routed_experts.forward_impl(
-        hidden_states=hidden_states,
-        router_logits=router_logits,
-        input_ids=input_ids,
-    )
+    with patch.object(torch.ops.vllm, "ascend_eplb_record_expert_tokens") as record_op:
+        result = routed_experts.forward_impl(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            input_ids=input_ids,
+        )
+
+    if v2_eplb:
+        record_op.assert_called_once()
+    else:
+        record_op.assert_not_called()
 
     if return_with_event:
         assert isinstance(result, tuple)
