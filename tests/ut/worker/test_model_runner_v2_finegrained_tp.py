@@ -511,6 +511,23 @@ def test_sample_tokens_bare_runner_passthrough_without_engine_config():
     super_sample_tokens.assert_called_once_with(None)
 
 
+def test_lmhead_tp_pad_rows_contract():
+    """The one pad primitive both head paths share (runner sample() and the
+    speculators' sample_draft): identity at capacity (no copy), zero rows
+    below it, ValueError above it."""
+    from vllm_ascend.utils import lmhead_tp_pad_rows
+
+    at_capacity = torch.randn(4, 3)
+    assert lmhead_tp_pad_rows(at_capacity, 4, "max_num_reqs * k") is at_capacity
+
+    padded = lmhead_tp_pad_rows(torch.randn(2, 3), 4, "max_num_reqs * k")
+    assert padded.shape == (4, 3)
+    assert torch.all(padded[2:] == 0)
+
+    with pytest.raises(ValueError, match="group-agreed capacity"):
+        lmhead_tp_pad_rows(torch.randn(5, 3), 4, "max_num_reqs * k")
+
+
 def test_draft_capacity_formula_matches_runner():
     """Lock the per-request row convention each side feeds the shared
     helper: the runner passes ``decode_query_len``, the speculator

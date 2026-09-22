@@ -67,6 +67,7 @@ from vllm_ascend.utils import (
     lmhead_tp_configured,
     lmhead_tp_enable,
     lmhead_tp_max_num_logits,
+    lmhead_tp_pad_rows,
     set_potential_max_tokens,
     vllm_version_is,
 )
@@ -697,18 +698,14 @@ class NPUModelRunner(GPUModelRunner):
 
         num_logits = input_batch.logits_indices.shape[0]
         capacity = self._lmhead_tp_max_num_logits()
-        if num_logits > capacity:
-            # A mismatch would desync the LM-head all_gather/all_to_all across
-            # the group and hang the collectives. Fail fast instead.
-            raise ValueError(
-                f"lmhead TP logits rows ({num_logits}) exceed the group-agreed capacity "
-                f"({capacity} = max_num_reqs * decode_query_len); the capacity formula "
-                "no longer matches upstream logits production."
-            )
-
-        sample_hidden_states = hidden_states[input_batch.logits_indices]
-        if num_logits < capacity:
-            sample_hidden_states = torch.nn.functional.pad(sample_hidden_states, (0, 0, 0, capacity - num_logits))
+        # Shared pad primitive (also used by the speculators' sample_draft):
+        # compute_logits sees the group-agreed capacity on every rank, the
+        # zero rows carry no token and are trimmed back off below.
+        sample_hidden_states = lmhead_tp_pad_rows(
+            hidden_states[input_batch.logits_indices],
+            capacity,
+            "max_num_reqs * decode_query_len",
+        )
         logits = self.model.compute_logits(sample_hidden_states)
         logits = logits[:num_logits]
 

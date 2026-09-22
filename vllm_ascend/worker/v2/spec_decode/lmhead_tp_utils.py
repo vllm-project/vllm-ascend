@@ -6,7 +6,7 @@ from typing import Any
 
 import torch
 
-from vllm_ascend.utils import lmhead_tp_configured, lmhead_tp_max_num_logits
+from vllm_ascend.utils import lmhead_tp_configured, lmhead_tp_max_num_logits, lmhead_tp_pad_rows
 
 
 class LmheadTPDraftSamplingMixin:
@@ -83,19 +83,14 @@ class LmheadTPDraftSamplingMixin:
                 "the gumbel path writes into fixed-size draft buffers that cannot "
                 "hold the group-aligned padding rows."
             )
-        capacity = self._lmhead_tp_max_num_logits()
         num_logits = hidden_states.shape[0]
-        if num_logits > capacity:
-            # A mismatch would desync the draft LM-head all_gather/all_to_all
-            # across the group and hang the collectives. Fail fast instead.
-            raise ValueError(
-                f"lmhead TP draft rows ({num_logits}) exceed the group-agreed "
-                f"capacity ({capacity} = max_num_reqs * (num_speculative_steps + 1))."
-            )
-        padded = hidden_states
-        if num_logits < capacity:
-            # Zero rows carry no draft token; they are trimmed back off below.
-            padded = torch.nn.functional.pad(hidden_states, (0, 0, 0, capacity - num_logits))
+        # Shared pad primitive (the runner's sample() pads the target head the
+        # same way); zero rows carry no draft token and are trimmed back off.
+        padded = lmhead_tp_pad_rows(
+            hidden_states,
+            self._lmhead_tp_max_num_logits(),
+            "max_num_reqs * (num_speculative_steps + 1)",
+        )
         out = super().sample_draft(  # type: ignore[misc]
             padded, positions, idx_mapping, temperature, seeds, draft_step, draft_logits
         )
