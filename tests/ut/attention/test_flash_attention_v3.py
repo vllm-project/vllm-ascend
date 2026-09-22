@@ -230,9 +230,12 @@ def test_tiling_prepared_before_capture_and_refreshed_in_place(builder, impl):
         ("Qwen3ForCausalLM", True, False, "auto", 1, 1, True, "rl"),
     ],
 )
-def test_platform_selects_fa3_by_model(device_type, architecture, installed, c8, cache_dtype, pcp, dcp, rl, expected):
+@pytest.mark.parametrize("head_size", [64, 128, 192, 256])
+def test_platform_selects_fa3_by_model(
+    device_type, architecture, installed, c8, cache_dtype, pcp, dcp, rl, expected, head_size
+):
     selector = AttentionSelectorConfig(
-        head_size=128, dtype=torch.bfloat16, kv_cache_dtype=cache_dtype, block_size=128, use_pcp=pcp > 1
+        head_size=head_size, dtype=torch.bfloat16, kv_cache_dtype=cache_dtype, block_size=128, use_pcp=pcp > 1
     )
     config = SimpleNamespace(
         model_config=SimpleNamespace(hf_config=SimpleNamespace(architectures=[architecture])),
@@ -336,7 +339,6 @@ def test_capture_does_not_require_attention_state(builder, capture_state):
         {"attn_type": "encoder_only"},
         {"attn_type": "encoder_decoder"},
         {"dtype": torch.float32},
-        {"head_size": 64},
         {"block_size": 64},
         {"kv_cache_dtype": "fp8"},
         {"has_sliding_window": True},

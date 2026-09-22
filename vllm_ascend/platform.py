@@ -290,7 +290,6 @@ class NPUPlatform(Platform):
             )
             and attn_selector_config.attn_type == AttentionType.DECODER
             and attn_selector_config.dtype in (torch.float16, torch.bfloat16)
-            and attn_selector_config.head_size == 128
             and attn_selector_config.block_size in (None, 128)
             and attn_selector_config.kv_cache_dtype in (None, "auto", "float16", "bfloat16")
             and not attn_selector_config.has_sliding_window
