@@ -322,11 +322,23 @@ class AscendMooncakeTransfer(MooncakeTransfer):
                 del self._direct_registrations[address]
 
     def acquire_sources(self, tensors: list[torch.Tensor]) -> list[int]:
+        """Register whole aligned storages only when they cover every source.
+
+        The active fallback path plans direct ranges and bounced prefixes
+        separately; this inherited API cannot represent a bounced prefix.
+        """
         regions: dict[int, torch.UntypedStorage] = {}
 
         for tensor in tensors:
             storage = tensor.untyped_storage()
             storage_start = storage.data_ptr()
+            offset = (-storage_start) % ASCEND_DIRECT_MEMORY_ALIGNMENT
+            if storage.nbytes() <= offset:
+                raise ValueError("Mooncake source storage has no 2 MiB-aligned bytes to register")
+            aligned_start = storage_start + offset
+            source_start = tensor.data_ptr()
+            if source_start < aligned_start:
+                raise ValueError("Mooncake source starts before the aligned registration region")
             regions[storage_start] = storage
 
         aligned_regions: list[torch.Tensor] = []
