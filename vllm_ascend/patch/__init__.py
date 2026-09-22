@@ -162,27 +162,27 @@
 #       engine-core-level customization, or when the feature modules no longer
 #       need an entry-point hook.
 #
-# ** 6. File: platform/patch_engram_config.py**
+# ** 6. Files: platform/patch_engram_config.py and patch_engram_config_v029.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.engine.arg_utils.EngramConfig`
-#   2. `vllm.engine.arg_utils.get_kwargs`
-#   3. `vllm.config.vllm.VllmConfig._resolve_and_verify_engram_config`
+#   1. Native `vllm.engine.arg_utils.EngramConfig` / `get_kwargs` and
+#      `vllm.config.vllm.VllmConfig._resolve_and_verify_engram_config`
+#   2. The pre-Engram v0.29 `vllm.config.VllmConfig` fallback
 #    Why:
-#       The pinned vLLM 84030bbe does not define `dp_shared_memory` and only
-#       accepts CUDA Qwen Engram models. Its CLI schema is built from that
-#       config before the platform can supply an Ascend-specific subtype.
+#       The pinned main vLLM does not define `dp_shared_memory` and only accepts
+#       CUDA Qwen Engram models, while vLLM v0.29 has no EngramConfig or
+#       `--engram-config` at all.
 #    How：
-#       Define an Ascend EngramConfig subtype with `dp_shared_memory`, use it
-#       for EngineArgs conversion and `--engram-config` JSON parsing, then
-#       resolve DeepSeek V4.1 target configs through that subtype. Keep model,
-#       topology, load-format and DBO validation in the subtype.
+#       Keep the native-vLLM Ascend subtype and CLI adapter isolated from the
+#       v0.29 fallback. On v0.29, read `engram_config` from
+#       `--additional-config`, attach the validated compatibility object to
+#       VllmConfig, and preserve the legacy `VLLM_PLE_CPU_OFFLOAD` switch.
 #    Related PR (if no, explain why):
 #       No Ascend upstream PR. The required generic Engram behavior is
 #       selectively backported from vLLM commit f84b0c4bce:
 #       https://github.com/vllm-project/vllm/commit/f84b0c4bce
 #    Future Plan:
-#       Remove this patch when the pinned vLLM includes `dp_shared_memory` and
-#       exposes a platform hook for Engram config selection and validation.
+#       Remove the fallback after v0.29 support is dropped. Remove the native
+#       patch when vLLM exposes an Ascend config-selection hook.
 #
 # ** 7. File: platform/patch_eplb.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

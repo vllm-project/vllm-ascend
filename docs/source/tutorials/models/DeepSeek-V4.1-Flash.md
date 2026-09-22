@@ -359,12 +359,21 @@ For a single A3, use TP8/DP2/EP16 across all 16 logical devices with both
 DP replicas local (`--data-parallel-size 2 --data-parallel-size-local 2`).
 Keep model runner V1, `FULL_DECODE_ONLY`, and DSpark with eager draft execution.
 Use INT8 Engram tables and turn the offload on through vLLM's Engram config.
-This needs a vLLM that provides `--engram-config`; without it the tables stay
-on the device:
+With a vLLM release that provides the native option, use:
 
 ```bash
 --engram-config '{"cpu_offload": true, "dp_shared_memory": true}'
 ```
+
+vLLM v0.29.0 predates that option. Put the same setting inside the existing
+`--additional-config` JSON instead (merge it with any other additional
+configuration already passed to the server):
+
+```bash
+--additional-config '{"engram_config":{"cpu_offload":true}}'
+```
+
+Without either setting, the Engram tables stay on the device.
 
 With `cpu_offload` the shard stays in host memory, is registered with
 `aclrtHostRegisterV2`, and the NPU gather kernel reads it through the device

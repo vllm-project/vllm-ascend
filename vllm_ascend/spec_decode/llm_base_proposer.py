@@ -54,6 +54,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 )
 from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
 from vllm_ascend.models.deepseek_v4.dspark import DSparkDeepseekV4ForCausalLM
+from vllm_ascend.models.deepseek_v41.dspark import DSparkDeepseekV41ForCausalLM
 from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
@@ -83,12 +84,8 @@ _HIDDEN_STATE_DRAFTER_TYPES: tuple[type, ...] = (
     Eagle3VwnLlamaForCausalLM,
     Eagle3DeepseekV2ForCausalLM,
     DSparkDeepseekV4ForCausalLM,
+    DSparkDeepseekV41ForCausalLM,
 )
-
-if not vllm_version_is("0.29.0"):
-    from vllm_ascend.models.deepseek_v41.dspark import DSparkDeepseekV41ForCausalLM
-
-    _HIDDEN_STATE_DRAFTER_TYPES += (DSparkDeepseekV41ForCausalLM,)
 
 
 def greedy_sample(logits: torch.Tensor) -> torch.Tensor:

@@ -80,7 +80,6 @@ class DeepseekV41Indexer(nn.Module):
                     dtype=torch.int8,
                     tokens_per_state=compress_ratio,
                     model_version="deepseek_v41",
-                    storage_block_size=(vllm_config.cache_config.block_size // compress_ratio),
                     scale_dim=1,
                     scale_dtype=torch.float16,
                 ),

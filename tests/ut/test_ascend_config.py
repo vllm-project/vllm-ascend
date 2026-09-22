@@ -284,6 +284,18 @@ class TestAscendConfig(TestBase):
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_preserves_fallback_engram_config(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        engram_config = {"cpu_offload": True}
+        test_vllm_config.additional_config = {"engram_config": engram_config}
+
+        ascend_config = init_ascend_config(test_vllm_config)
+
+        self.assertIsNotNone(ascend_config)
+        self.assertEqual(test_vllm_config.additional_config["engram_config"], engram_config)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_rl_config_enabled_applies_runtime_defaults(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
         test_vllm_config.additional_config = {"rl_config": {"enabled": True}}

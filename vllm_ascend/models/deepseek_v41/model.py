@@ -46,7 +46,6 @@ from vllm.model_executor.models.interfaces import (
     SupportsPP,
 )
 from vllm.model_executor.models.utils import PPMissingLayer, is_pp_missing_parameter, make_layers, maybe_prefix
-from vllm.models.deepseek_v4_1.common.engram import EngramLayout
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
@@ -84,6 +83,7 @@ from .engram.embedding import (
 )
 from .engram.layer import AscendEngram
 from .engram.parallel import gather_engram_hashes, get_engram_dp_size
+from .engram.upstream import EngramLayout
 from .indexer import DeepseekV41Indexer
 
 
@@ -708,7 +708,6 @@ class DeepseekV41Attention(DeepseekV41SWAAttention):
                     dtype=torch.bfloat16,
                     tokens_per_state=role.compress_ratio,
                     model_version="deepseek_v41",
-                    storage_block_size=block_size // role.compress_ratio,
                 ),
             )
         self.compressor = (

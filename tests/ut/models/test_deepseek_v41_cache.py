@@ -1,22 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# ruff: noqa: E402
 
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, Mock
 
 import pytest
-
-pytest.importorskip(
-    "vllm.transformers_utils.configs.deepseek_v41",
-    reason="DeepSeek V4.1 is unavailable on this vLLM release",
-)
-
 import torch
 import torch_npu
 from vllm.config import set_current_vllm_config
-from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
 from vllm.v1.core import kv_cache_utils
 from vllm.v1.kv_cache_interface import CircularBufferSpec
 
@@ -39,6 +31,7 @@ from vllm_ascend.attention.dsa_v41 import (
     pad_sparse_indices,
     scatter_cache_sk,
 )
+from vllm_ascend.compat.deepseek_v41 import DeepseekV41Config
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSlidingWindowMLASpec,

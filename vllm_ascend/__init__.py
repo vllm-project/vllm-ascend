@@ -104,6 +104,8 @@ def register_service_profiling():
 
 
 def register_model():
+    _ensure_global_patch()
+
     from .models import register_model
 
     register_model()
