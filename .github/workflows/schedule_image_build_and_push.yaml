@@ -69,7 +69,7 @@ on:
       build_type:
         description: 'Build type (release/daily)'
         required: false
-        default: 'release'
+        default: 'daily'
         type: choice
         options:
           - release
