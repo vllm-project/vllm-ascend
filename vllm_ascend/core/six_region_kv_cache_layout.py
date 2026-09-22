@@ -193,13 +193,13 @@ def build_six_region_kv_cache_layout(
 
     qsa_by_role: dict[str, dict[str, tuple[str, KVCacheSpec]]] = {}
     for role in (QSA_MAIN, QSA_RAW, QSA_COMPRESSED):
-        owners: dict[str, tuple[str, KVCacheSpec]] = {}
+        qsa_owners: dict[str, tuple[str, KVCacheSpec]] = {}
         for layer_name, spec in role_members[role]:
             source = _qsa_source_name(layer_name, role)
-            if source in owners:
+            if source in qsa_owners:
                 raise ValueError(f"Duplicate {role} owner for source {source}")
-            owners[source] = (layer_name, spec)
-        qsa_by_role[role] = owners
+            qsa_owners[source] = (layer_name, spec)
+        qsa_by_role[role] = qsa_owners
     source_sets = {role: set(owners) for role, owners in qsa_by_role.items()}
     if len({frozenset(sources) for sources in source_sets.values()}) != 1:
         raise ValueError(f"QSA main/raw/compressed owners do not form a one-to-one source-layer mapping: {source_sets}")

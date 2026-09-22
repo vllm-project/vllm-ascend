@@ -237,6 +237,7 @@ from vllm_ascend.utils import (
     model_uses_kpool_indexer,
     set_potential_max_tokens,
     should_skip_allreduce_across_dp_group,
+    vllm_version_is,
     weak_ref_tensor,
     weak_ref_tensors,
 )
