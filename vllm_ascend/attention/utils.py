@@ -559,6 +559,7 @@ FREETIME_DEVICE_SEQ_LENS_MODEL_TYPES: frozenset[str] = frozenset(
     {
         "glm5_next",
         "glm5_next_text",
+        "glm_moe_dsa",
     }
 )
 
