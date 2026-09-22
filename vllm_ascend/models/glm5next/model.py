@@ -79,6 +79,7 @@ from vllm.sequence import IntermediateTensors
 from .attention import Glm5NextMLAAttention
 from .config import Glm5NextConfig
 from .kda import Glm5NextLinearAttention
+from .kda_projection import KDAFGProjection
 from .multimodal import (
     Glm5NextMultiModalProcessor,
     Glm5NextProcessingInfo,
@@ -684,8 +685,6 @@ class Glm5NextModel(nn.Module):
             (".in_proj_qkvbfg_a", ".b_proj", 3),
             (".in_proj_qkvbfg_a", ".f_a_proj", 4),
             (".in_proj_qkvbfg_a", ".g_a_proj", 5),
-            (".fg_b_proj", ".f_b_proj", 0),
-            (".fg_b_proj", ".g_b_proj", 1),
         ]
         if self.config.is_moe:
             # Params for weights, fp8 weight scales, fp8 activation scales
@@ -699,6 +698,13 @@ class Glm5NextModel(nn.Module):
             )
         else:
             expert_params_mapping = []
+        # The projection owns both checkpoint shards and its physical layout.
+        fg_weights = {
+            f"{module_name.rsplit('.', 1)[0]}.{weight_name}": (module_name, module, weight_name)
+            for module_name, module in self.named_modules()
+            if isinstance(module, KDAFGProjection)
+            for weight_name in module.checkpoint_weight_names
+        }
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
 
@@ -716,6 +722,12 @@ class Glm5NextModel(nn.Module):
             if "rotary_emb.cos_cached" in name or "rotary_emb.sin_cached" in name:
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
+                continue
+
+            if name in fg_weights:
+                module_name, projection, weight_name = fg_weights[name]
+                loaded = projection.load_weights([(weight_name, loaded_weight)])
+                loaded_params.update(f"{module_name}.{param_name}" for param_name in loaded)
                 continue
 
             # Handle FP8 indexer WK: dequantize to BF16 for fusion with
@@ -742,7 +754,7 @@ class Glm5NextModel(nn.Module):
                     continue
                 name_mapped = name.replace(weight_name, param_name)
                 # Optional fusion: retain separate projections when disabled.
-                if param_name in (".fused_qkv_a_proj", ".fg_b_proj") and name_mapped not in params_dict:
+                if param_name == ".fused_qkv_a_proj" and name_mapped not in params_dict:
                     continue
                 name = name_mapped
                 # Skip loading extra bias for GPTQ models.

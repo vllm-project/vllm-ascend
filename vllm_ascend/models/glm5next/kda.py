@@ -28,12 +28,10 @@ from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 from vllm_ascend.models.glm5next.config import Glm5NextConfig
+from vllm_ascend.models.glm5next.kda_projection import KDAFGProjection
 from vllm_ascend.models.glm5next.ops.causal_conv1d import causal_conv1d
 from vllm_ascend.models.glm5next.ops.kda import KDA_MAX_RECURRENT_TOKENS, chunk_kda, recurrent_kda
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
-
-KDA_BATCHED_GATE_MAX_TOKENS = 128
-KDA_BATCHED_GATE_MAX_WIDTH = 4096
 
 
 class _Glm5NextMergedColumnParallelLinear(MergedColumnParallelLinear):
@@ -184,25 +182,13 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             prefix=f"{prefix}.in_proj_qkvbfg_a",
         )
 
-        self.fg_b_proj = None
-        if self.local_projection_size <= KDA_BATCHED_GATE_MAX_WIDTH:
-            self.fg_b_proj = MergedColumnParallelLinear(
-                self.head_dim,
-                [projection_size, projection_size],
-                bias=False,
-                quant_config=self.quant_config,
-                prefix=f"{prefix}.fg_b_proj",
-            )
-            # Both paths read the same Parameter, without a derived weight cache.
-            self.fg_b_proj.skip_weight_nz_conversion = True
-        else:
-            # Wide projections favor the original GEMMs, including NZ weights.
-            self.f_b_proj = ColumnParallelLinear(
-                self.head_dim, projection_size, bias=False, quant_config=self.quant_config, prefix=f"{prefix}.f_b_proj"
-            )
-            self.g_b_proj = ColumnParallelLinear(
-                self.head_dim, projection_size, bias=False, quant_config=self.quant_config, prefix=f"{prefix}.g_b_proj"
-            )
+        self.fg_b_proj = KDAFGProjection(
+            self.head_dim,
+            projection_size,
+            self.local_projection_size,
+            quant_config=self.quant_config,
+            prefix=f"{prefix}.fg_b_proj",
+        )
         self.dt_bias = nn.Parameter(torch.empty(divide(projection_size, self.tp_size), dtype=torch.float32))
 
         set_weight_attrs(self.dt_bias, {"weight_loader": sharded_weight_loader(0)})
@@ -274,18 +260,6 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
     def get_attn_backend(self):
         return AscendGDNAttentionBackend
 
-    def _project_fg(self, fg_a: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.fg_b_proj is None:
-            f_a, g_a = fg_a.split(self.head_dim, dim=-1)
-            return self.f_b_proj(f_a)[0], self.g_b_proj(g_a)[0]
-        fg_b_weight = self.fg_b_proj.weight.view(2, -1, self.head_dim)
-        if fg_a.shape[0] > KDA_BATCHED_GATE_MAX_TOKENS:
-            f_a, g_a = fg_a.split(self.head_dim, dim=-1)
-            return torch.nn.functional.linear(f_a, fg_b_weight[0]), torch.nn.functional.linear(g_a, fg_b_weight[1])
-        fg_a = fg_a.reshape(-1, 2, self.head_dim).transpose(0, 1)
-        fg_b = torch.bmm(fg_a, fg_b_weight.transpose(1, 2))
-        return fg_b.unbind(0)
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -309,7 +283,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # / spec-verify steps then skip the separate sigmoid and its fp32
         # intermediate entirely.
         beta = beta_raw.unsqueeze(0)
-        g1, g_proj_states = self._project_fg(fg_a)
+        g1, g_proj_states = self.fg_b_proj(fg_a)
         g1 = g1.reshape(1, -1, self.local_num_heads, self.head_dim)
 
         # Must stay 3D: rms_norm_gated reads H from g.shape[-2].
