@@ -274,6 +274,10 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         )
         self.connector_worker.start_load_kv(metadata)
 
+    def wait_for_layer_load_ready(self, layer_name: str) -> None:
+        assert self.connector_worker is not None
+        self.connector_worker.wait_for_layer_load_ready(layer_name)
+
     def wait_for_layer_load(self, layer_name: str) -> None:
         if not self.use_layerwise:
             return

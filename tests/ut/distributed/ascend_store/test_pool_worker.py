@@ -155,6 +155,23 @@ class TestKVPPPoolWorker(unittest.TestCase):
                 self.assertEqual(worker.group_kv_caches_base_addr[0], [caches[name].data_ptr() for name in expected])
                 self.assertEqual(worker.head_or_tp_rank, rank)
                 self.assertEqual(worker.put_step, 1)
+                self.assertEqual(worker.physical_layer_to_group_layers, {9 + rank: [(0, 0)], 17: [(0, 1)]})
+
+                # Layerwise tasks must address only the registered owner/MTP
+                # entries, using compact indices rather than model layer IDs.
+                for method in (
+                    "_compute_reachable_store_masks",
+                    "_process_save_for_layer_batch",
+                    "_process_load_for_layer_batch",
+                    "_prepare_load_gvas",
+                    "_alloc_gvas_for_save",
+                    "_build_shared_save_data",
+                    "_build_shared_load_data",
+                ):
+                    setattr(worker, method, MagicMock())
+                worker.process_layer_data([MagicMock()])
+                for process in (worker._process_save_for_layer_batch, worker._process_load_for_layer_batch):
+                    self.assertEqual([call.args[1:] for call in process.call_args_list], [(9 + rank, 0, 0), (17, 0, 1)])
 
     def test_lookup_requires_every_tp_shard(self):
         worker = make_worker(self, tp_size=2, use_mla=True, use_kvpp=True)
