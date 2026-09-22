@@ -354,6 +354,10 @@ jobs:
       # sits in this job for hours with no log line. Use the same HK runner
       # as the other OBS uploads.
       runs-on: linux-amd64-cpu-8-hk
+      # The HK host Python has no pip module. The lint image is the same one
+      # used by test selection and already provides python3 -m pip.
+      container:
+        image: quay.io/ascend-ci/vllm-ascend:lint
       continue-on-error: true
       env:
         OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY_PRECISION }}
