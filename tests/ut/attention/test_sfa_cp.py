@@ -458,7 +458,7 @@ def test_sfa_pcp_gathers_main_kv_before_base_cache_write() -> None:
         result = impl.exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
 
     assert result == "written"
-    gather.assert_called_once_with((kv_no_split, cos, sin), slots, 1, shard_decode_requests=False)
+    gather.assert_called_once_with((kv_no_split, cos, sin), slots, 1)
     base_exec_kv.assert_called_once_with(
         impl,
         gathered_kv,
@@ -559,7 +559,6 @@ def test_sfa_cp_query_gather_axis_follows_composed_layout() -> None:
     assert combined_impl._parallel_query_gather_dim() == 0
 
 
-@pytest.mark.parametrize("empty_pcp_shard", [False, True])
 @pytest.mark.parametrize("sfa_c8", [False, True])
 @pytest.mark.parametrize("li_c8", [False, True])
 @pytest.mark.parametrize("preprocess_type", [PreprocessType.NATIVE, PreprocessType.MLAPO, PreprocessType.PROLOG_V3])
@@ -568,16 +567,13 @@ def test_sfa_cp_query_gather_axis_follows_composed_layout() -> None:
     [(True, False, True, False), (True, True, True, True), (True, False, False, True), (False, False, True, False)],
 )
 def test_dsa_cp_indexer_cache_follows_runtime_ownership(
-    sfa_c8, li_c8, preprocess_type, has_indexer, is_mtp, skip_topk, expect_indexer, empty_pcp_shard
+    sfa_c8, li_c8, preprocess_type, has_indexer, is_mtp, skip_topk, expect_indexer
 ):
-    if empty_pcp_shard and preprocess_type != PreprocessType.NATIVE:
-        pytest.skip("Decode request sharding uses native preprocessing.")
     # Exercise the actual SFA forward, including cache composition and metadata
     # lookup. Only projections/kernels are mocked; static layers have no cache
     # or metadata, while MTP must call the indexer even when top-k is skipped.
     impl = AscendSFADSACPImpl.__new__(AscendSFADSACPImpl)
     impl.has_indexer = has_indexer
-    impl.pcp_shard_decode_requests = empty_pcp_shard
     impl.layerwise_kv_cache_hook = None
     impl.g_proj = None
     impl._is_mtp_layer = is_mtp
@@ -603,8 +599,7 @@ def test_dsa_cp_indexer_cache_follows_runtime_ownership(
         cos=hidden_states,
         sin=hidden_states,
         num_input_tokens=2,
-        num_actual_tokens=0 if empty_pcp_shard else 2,
-        num_decode_tokens=0 if empty_pcp_shard else 2,
+        num_decode_tokens=2,
         attn_state=AscendAttentionState.DecodeOnly,
     )
     slots = torch.tensor([0, 1])
@@ -649,27 +644,16 @@ def test_dsa_cp_indexer_cache_follows_runtime_ownership(
         patch("vllm_ascend.attention.sfa_v1.attention_transfer_window"),
         patch("vllm_ascend.attention.sfa_v1.maybe_save_kv_layer_to_connector"),
     ):
-        output = torch.full_like(hidden_states, float("nan"))
-        result = impl.forward(impl.layer_name, hidden_states, main_cache, metadata, output=output)
+        impl.forward(impl.layer_name, hidden_states, main_cache, metadata, output=torch.empty_like(hidden_states))
     if expect_indexer:
         indexer.assert_called_once()
-        assert indexer.call_args.kwargs["compute_topk"] is (not skip_topk and not empty_pcp_shard)
+        assert indexer.call_args.kwargs["compute_topk"] is (not skip_topk)
         assert indexer.call_args.args[2] is hidden_states
         assert indexer.call_args.args[3] is own_metadata
         assert own_metadata.actual_seq_lengths_query is own_query_lengths
         assert own_metadata.actual_seq_lengths_key is own_key_lengths
     else:
         indexer.assert_not_called()
-    if empty_pcp_shard:
-        impl.exec_kv.assert_called_once()
-        impl._store_parallel_kv.assert_called_once()
-        impl._execute_sparse_flash_attention_process.assert_not_called()
-        impl._finalize_o_proj.assert_not_called()
-        impl._update_indexcache_topk_indices.assert_not_called()
-        assert result is output
-        torch.testing.assert_close(result, torch.zeros_like(hidden_states))
-        notify.assert_called_once_with(impl.layer_name)
-        return
     attention_args = impl._execute_sparse_flash_attention_process.call_args.args
     assert len(attention_args[2]) == len(main_cache) + (len(indexer_cache) if expect_indexer else 0)
     assert attention_args[3] is (shared_topk if skip_topk else computed_topk)
@@ -962,41 +946,3 @@ def test_sfa_dcp_slot_mapping_matches_parallel_layout(impl_cls, num_prefills, nu
     else:
         assert result.tolist() == [3200, -1]
         assert result.data_ptr() == full_slots.data_ptr()
-
-
-@pytest.mark.parametrize("rank", [0, 1])
-@pytest.mark.parametrize("local_counts", [(2, 1), (1, 0)])
-def test_sfa_pcp_decode_sharding_replicates_owner_kv(rank, local_counts):
-    """Uneven decode owners and empty owners receive the same full cache writes."""
-    impl = AscendSFAPCPImpl.__new__(AscendSFAPCPImpl)
-    impl.pcp_shard_decode_requests = True
-    padded = max(local_counts)
-    rank_kv = [torch.arange(padded * 3, dtype=torch.float32).view(padded, 3) + 10 * r for r in range(2)]
-    rank_cos = [torch.full((padded, 1), float(r + 1)) for r in range(2)]
-    rank_sin = [value + 2 for value in rank_cos]
-    gathered = tuple(torch.cat(values) for values in (rank_kv, rank_cos, rank_sin))
-    slots = torch.tensor([10, 12, 11, -1] if padded == 2 else [10, -1], dtype=torch.int64)
-    group = SimpleNamespace(world_size=2, all_gather=MagicMock(side_effect=gathered))
-    metadata = SimpleNamespace(num_decode_tokens=local_counts[rank], num_actual_tokens=local_counts[rank])
-    cache = {}
-
-    def write_kv(_self, kv, cos, sin, _cache, received_slots, _metadata):
-        torch.testing.assert_close(received_slots, slots)
-        torch.testing.assert_close(cos, gathered[1])
-        torch.testing.assert_close(sin, gathered[2])
-        for slot, row in zip(received_slots.tolist(), kv, strict=True):
-            if slot >= 0:
-                cache[slot] = row.clone()
-        return "written"
-
-    with (
-        patch("vllm.v1.attention.ops.pcp.get_pcp_group", return_value=group),
-        patch.object(AscendSFAImpl, "exec_kv", autospec=True, side_effect=write_kv),
-    ):
-        assert impl.exec_kv(rank_kv[rank], rank_cos[rank], rank_sin[rank], (), slots, metadata) == "written"
-
-    assert group.all_gather.call_count == 3
-    assert set(cache) == set(slots[slots >= 0].tolist())
-    for index, slot in enumerate(slots.tolist()):
-        if slot >= 0:
-            torch.testing.assert_close(cache[slot], gathered[0][index])
