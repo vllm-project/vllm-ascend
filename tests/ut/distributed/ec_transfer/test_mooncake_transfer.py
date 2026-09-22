@@ -463,3 +463,31 @@ def test_acquire_sources_merges_views_into_aligned_storage_region():
         [aligned.data_ptr()],
         [raw.untyped_storage().nbytes() - offset],
     )
+
+
+def test_acquire_sources_rejects_storage_without_aligned_bytes():
+    alignment = 2 * _MIB
+    source = _make_source(
+        storage_start=alignment + 1,
+        source_start=alignment + 1,
+        source_nbytes=1,
+    )
+    source.untyped_storage().nbytes.return_value = alignment - 1
+
+    transfer = AscendMooncakeTransfer("producer-host", 0)
+    with pytest.raises(ValueError, match="no 2 MiB-aligned bytes"):
+        transfer.acquire_sources([source])
+
+
+def test_acquire_sources_rejects_source_before_aligned_region():
+    alignment = 2 * _MIB
+    source = _make_source(
+        storage_start=alignment + 1,
+        source_start=alignment + 2,
+        source_nbytes=1,
+    )
+    source.untyped_storage().nbytes.return_value = alignment + 100
+
+    transfer = AscendMooncakeTransfer("producer-host", 0)
+    with pytest.raises(ValueError, match="before the aligned registration"):
+        transfer.acquire_sources([source])
