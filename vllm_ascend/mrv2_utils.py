@@ -31,6 +31,7 @@ else:
 
 _NGRAM_SPEC_METHODS = frozenset({"ngram", "ngram_gpu"})
 _DFLASH2_ARCHITECTURES = frozenset({"DFlash2DraftModel"})
+_TRUTHY_STRINGS = frozenset({"1", "true", "yes"})
 # First matching prefix wins, so keep Hy3 ahead of Gemma4.
 _ARCH_PREFIXES = (("HYV3", "Hy3-preview"), ("Gemma4", "Gemma4"))
 
@@ -45,6 +46,16 @@ def _additional(vllm_config: VllmConfig, key: str) -> object:
     if not _is_configured(extra):
         return None
     return extra.get(key) if isinstance(extra, dict) else getattr(extra, key, None)
+
+
+def _is_enabled(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in _TRUTHY_STRINGS
+    if isinstance(value, int):
+        return value == 1
+    return False
 
 
 def _architectures(model_config: object) -> list[str]:
@@ -109,6 +120,8 @@ def _v2_blacklist(vllm_config: VllmConfig) -> list[str]:
         reasons.append("VL encoder graph")
     if _additional(vllm_config, "draft_window_size") is not None:
         reasons.append("draft_window_size")
+    if _is_enabled(_additional(vllm_config, "enable_reduce_sample")):
+        reasons.append("enable_reduce_sample")
 
     if _is_configured(spec_config):
         method = getattr(spec_config, "method", None)
@@ -139,6 +152,7 @@ def use_v2_model_runner(vllm_config: VllmConfig) -> bool:
     * VL encoder disaggregation (``ec_transfer_config`` / encoder-only)
     * VL encoder graph (``compilation_config.cudagraph_mm_encoder``)
     * draft_window_size
+    * enable_reduce_sample
     * suffix speculative decoding
     * ngram speculative decoding (``ngram`` / ``ngram_gpu``)
     * parallel_drafting
