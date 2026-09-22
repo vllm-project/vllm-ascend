@@ -39,7 +39,7 @@ else:
 
 class BaseDeviceAdaptor:
     @classmethod
-    def try_scatter_cache(cls, key: torch.Tensor, cache: torch.Tensor, slots: torch.Tensor, tokens: int) -> None:
+    def scatter_cache(cls, key: torch.Tensor, cache: torch.Tensor, slots: torch.Tensor, tokens: int) -> None:
         """Write cache rows in place, falling back to the generic scatter.
 
         The actual-token prefix must contain valid slots: this helper does not

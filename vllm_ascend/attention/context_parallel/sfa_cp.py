@@ -520,7 +520,7 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         if kv_cache is not None:
             assert fused_kv_no_split is not None
             if self.enable_sparse_sfa_c8:
-                DeviceOperator.try_scatter_cache(
+                DeviceOperator.scatter_cache(
                     fused_kv_no_split, kv_cache[0], slot_mapping_sfa, attn_metadata.num_actual_tokens
                 )
                 k_pe = k_nope = None

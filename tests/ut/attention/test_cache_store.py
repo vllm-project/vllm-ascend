@@ -68,9 +68,9 @@ def test_platform_dispatch_keeps_destination_storage(monkeypatch, family, dtype,
     ) or (family == AscendDeviceType.A5 and layout in ("contiguous", "offset"))
     if layout == "block_gap":
         with pytest.raises(RuntimeError, match="view size is not compatible"):
-            device_op.get_device_adaptor().try_scatter_cache(key, cache, slots, 2049)
+            device_op.get_device_adaptor().scatter_cache(key, cache, slots, 2049)
     else:
-        assert device_op.get_device_adaptor().try_scatter_cache(key, cache, slots, 2049) is None
+        assert device_op.get_device_adaptor().scatter_cache(key, cache, slots, 2049) is None
         reference = torch.as_strided(before, cache.shape, cache.stride(), cache.storage_offset())
         reference.view(-1, 128)[slots[:2049].long()] = key[:2049]
     torch.testing.assert_close(backing, before, rtol=0, atol=0)
@@ -90,7 +90,7 @@ def test_missing_operator_falls_back(monkeypatch, family):
         side_effect=lambda target, indices, updates: target.index_copy_(0, indices.flatten().long(), updates)
     )
     monkeypatch.setattr(torch_npu, "npu_scatter_nd_update_", scatter, raising=False)
-    assert device_op.get_device_adaptor().try_scatter_cache(key, cache, slots, 2049) is None
+    assert device_op.get_device_adaptor().scatter_cache(key, cache, slots, 2049) is None
     scatter.assert_called_once()
     torch.testing.assert_close(cache.view(-1, 128)[:2049], key)
     assert not cache.view(-1, 128)[2049:].count_nonzero()
@@ -111,7 +111,7 @@ def test_fast_shape_guard_uses_generic_scatter(monkeypatch, flat_cache, column_s
     )
     monkeypatch.setattr(device_op.BaseDeviceAdaptor, "_scatter_cache", fast)
     monkeypatch.setattr(torch_npu, "npu_scatter_nd_update_", scatter, raising=False)
-    assert device_op.BaseDeviceAdaptor.try_scatter_cache(key, cache, slots, 3) is None
+    assert device_op.BaseDeviceAdaptor.scatter_cache(key, cache, slots, 3) is None
     fast.assert_not_called()
     scatter.assert_called_once()
     torch.testing.assert_close(cache.view(-1, 16)[[2, 4, 6]], key[:3])
@@ -124,7 +124,7 @@ def test_fast_operator_error_is_not_retried(monkeypatch):
     monkeypatch.setattr(device_op.BaseDeviceAdaptor, "_scatter_cache", fast)
     monkeypatch.setattr(torch_npu, "npu_scatter_nd_update_", scatter, raising=False)
     with pytest.raises(RuntimeError, match="operator failed"):
-        device_op.BaseDeviceAdaptor.try_scatter_cache(
+        device_op.BaseDeviceAdaptor.scatter_cache(
             torch.ones(1, 16), torch.zeros(1, 4, 1, 16), torch.zeros(1, dtype=torch.int32), 1
         )
     scatter.assert_not_called()
@@ -147,9 +147,7 @@ def test_main_cache_write_delegates_with_own_slots(tokens, state, producer, cons
             "vllm_ascend.ascend_config.get_ascend_config",
             return_value=SimpleNamespace(c8_enable_reshape_optim=False, c8_reshape_optim_enabled=False),
         ),
-        patch(
-            "vllm_ascend.attention.context_parallel.sfa_cp.DeviceOperator.try_scatter_cache", return_value=None
-        ) as store,
+        patch("vllm_ascend.attention.context_parallel.sfa_cp.DeviceOperator.scatter_cache", return_value=None) as store,
         patch("torch_npu.npu_scatter_nd_update_", create=True) as scatter,
     ):
         impl._store_parallel_kv(None, None, None, key, [], (cache,), slots, meta, False)
