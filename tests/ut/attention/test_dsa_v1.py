@@ -660,6 +660,44 @@ def test_dsa_cp_qli_metadata_uses_host_maxima():
     assert torch.equal(builder.qli_cmp_residual_k[:2], torch.tensor([0, 2], dtype=torch.int32))
 
 
+@pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
+def test_shared_qli_metadata_refreshes_each_builder(dtype):
+    builders = []
+    for _ in range(2):
+        builder = AscendDSAMetadataBuilder.__new__(AscendDSAMetadataBuilder)
+        builder.model_config = SimpleNamespace(
+            hf_config=SimpleNamespace(index_n_heads=64, index_head_dim=128, index_topk=512)
+        )
+        builder.seqused_q = torch.empty(0)
+        builder.qli_seqused_k = torch.full((4,), -99, dtype=torch.int32)
+        builder.qli_cmp_residual_k = torch.full((4,), -99, dtype=torch.int32)
+        builder.qli_metadata_buffer = torch.zeros(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32)
+        builders.append(builder)
+    addresses = [(builder.qli_seqused_k.data_ptr(), builder.qli_cmp_residual_k.data_ptr()) for builder in builders]
+    with patch.object(
+        torch.ops._C_ascend,
+        "npu_quant_lightning_indexer_v2_metadata",
+        create=True,
+        return_value=torch.arange(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32),
+    ) as metadata_op:
+        for lengths in ([131077, 131080], [131081, 131083]):
+            cache = {}
+            seq_lens = torch.tensor(lengths, dtype=dtype)
+            for index, builder in enumerate(builders):
+                builder._build_qli_metadata(
+                    metadata_cache=cache,
+                    query_start_loc=torch.tensor([0, 6, 12], dtype=torch.int32),
+                    seq_lens=seq_lens,
+                    max_seqlen_q=6,
+                    max_seqlen_kv=max(lengths) + 5,
+                )
+                assert builder.qli_seqused_k.tolist() == [value // 4 for value in lengths] + [-99, -99]
+                assert builder.qli_cmp_residual_k.tolist() == [value % 4 for value in lengths] + [-99, -99]
+                assert (builder.qli_seqused_k.data_ptr(), builder.qli_cmp_residual_k.data_ptr()) == addresses[index]
+            torch.testing.assert_close(builders[0].qli_metadata_buffer, builders[1].qli_metadata_buffer)
+    assert metadata_op.call_count == 2
+
+
 def test_build_compressor_metadata_out_uses_fixed_outputs():
     metadata = SimpleNamespace(
         full_compress_cos=torch.ones((8, 1, 1, 4)),
