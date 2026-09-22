@@ -175,7 +175,9 @@
 #       Define an Ascend EngramConfig subtype with `dp_shared_memory`, use it
 #       for EngineArgs conversion and `--engram-config` JSON parsing, then
 #       resolve DeepSeek V4.1 target configs through that subtype. Keep model,
-#       topology, load-format and DBO validation in the subtype.
+#       topology, load-format and DBO validation in the subtype. Skip the
+#       adapter with ``importlib.util.find_spec("vllm.config.engram")`` when
+#       the installed vLLM has no Engram module (PR nightly v0.29 images).
 #    Related PR (if no, explain why):
 #       No Ascend upstream PR. The required generic Engram behavior is
 #       selectively backported from vLLM commit f84b0c4bce:
