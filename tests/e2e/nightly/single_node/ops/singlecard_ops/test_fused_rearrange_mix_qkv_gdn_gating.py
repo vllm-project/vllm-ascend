@@ -13,6 +13,12 @@ GDN_CONFIGS = ((1024, 1024, 3072), (128, 128, 256), (64, 64, 128))
 
 
 class LayerStub:
+    key_dim: int
+    value_dim: int
+    tp_size: int
+    head_k_dim: int
+    head_v_dim: int
+
     _view_packed_qkv = AscendGatedDeltaNetAttention._view_packed_qkv
 
     def rearrange_mixed_qkv(self, mixed_qkv):
