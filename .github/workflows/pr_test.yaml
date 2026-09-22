@@ -329,7 +329,11 @@ jobs:
             --source-dir ./vllm-ascend/covstub \
             --map-file test_case_map.json
 
+      # Extra OBS tests are for uncovered code changes. Skip the merge when
+      # the PR has no src paths (docs-only and other non-src diffs). Do not
+      # skip this job: ready-precise requires recommend-tests to succeed.
       - name: Merge extra tests from YAML
+        if: ${{ needs.pre-commit.outputs.src == 'true' }}
         run: |
           set -euo pipefail
           if ! python3 -c "import yaml" >/dev/null 2>&1; then

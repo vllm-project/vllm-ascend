@@ -154,7 +154,7 @@ concurrency:
 jobs:
   e2e:
     name: ${{ inputs.config_file_path }}
-    timeout-minutes: ${{ inputs.request_id != '' && (inputs.aop_multi_enabled && 1440 || 240) || fromJSON(inputs.testcase_timeout) }}
+    timeout-minutes: ${{ inputs.request_id != '' && 240 || fromJSON(inputs.testcase_timeout) }}
     # This is the runner with no NPU for k8s controller
     runs-on: ${{ inputs.runner }}
     if: ${{ inputs.should_run }}
@@ -393,33 +393,11 @@ jobs:
           done
 
           LEADER_TMP=$(mktemp)
-          # A log-follow connection is silently capped at ~4h somewhere in the
-          # streaming path (LB / API server): `kubectl logs -f` exits while
-          # the pods are still running, which used to end this step early and
-          # let the job's cleanup delete a healthy, still-running bisect.
-          # Reconnect and keep following until the leader container really
-          # exits (or FAIL_TAG is detected).
-          SINCE=""
-          while :; do
-            kubectl logs -f "$LEADER_POD" -n "$NAMESPACE" ${SINCE:+--since-time="$SINCE"} \
-              | tee -a "$LEADER_TMP" | while IFS= read -r line; do
-                  echo "$line"
-                  if echo "$line" | grep -q "$FAIL_TAG"; then
-                    touch /tmp/stream_fail_tag_seen
-                    break
-                  fi
-                done || true
-            if [ -f /tmp/stream_fail_tag_seen ]; then
+          kubectl logs -f "$LEADER_POD" -n "$NAMESPACE" | tee "$LEADER_TMP" | while IFS= read -r line; do
+            echo "$line"
+            if echo "$line" | grep -q "$FAIL_TAG"; then
               exit 1
             fi
-            if ! kubectl get pod "$LEADER_POD" -n "$NAMESPACE" \
-                -o jsonpath='{.status.containerStatuses[0].state.running.startedAt}' 2>/dev/null \
-                | grep -q '^2'; then
-              break
-            fi
-            echo "[stream] log connection dropped while the pod is still running; reconnecting..."
-            SINCE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            sleep 5
           done
 
           eval "$(awk '
