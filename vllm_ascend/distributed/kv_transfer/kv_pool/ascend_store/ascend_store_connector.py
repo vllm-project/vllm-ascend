@@ -274,6 +274,15 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         )
         self.connector_worker.start_load_kv(metadata)
 
+    def get_kvpp_layer_load_waiter(self) -> Callable[[str], None] | None:
+        if (
+            self.use_layerwise
+            and self.connector_worker is not None
+            and self.connector_worker.backend_name == "memcache"
+        ):
+            return self.connector_worker.wait_for_kvpp_layer_load
+        return None
+
     def wait_for_layer_load(self, layer_name: str) -> None:
         if not self.use_layerwise:
             return
