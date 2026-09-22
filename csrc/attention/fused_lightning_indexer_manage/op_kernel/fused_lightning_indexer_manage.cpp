@@ -6,6 +6,7 @@
 #include "kernel_operator.h"
 #include "lib/matmul_intf.h"
 #include "fused_lightning_indexer_manage_template_tiling_key.h"
+#include "fused_lightning_indexer_manage_constants.h"
 #include "lightning_indexer_kernel.h"
 #include "fused_lightning_indexer_manage_union.h"
 #include "fused_lightning_indexer_manage_workspace.h"
@@ -22,7 +23,7 @@ __aicore__ inline void PrepareNonOffloadRows(
     uint32_t sourceCapacity, TPipe *pipe)
 {
     if ASCEND_IS_AIV {
-    if ((GetBlockIdx() & 1U) != 0U) return;
+    if (GetBlockIdx() % LIMConfig::AIVS_PER_AIC != 0U) return;
     // Preserve 4096-element chunks for short rows so they retain enough AIV
     // owners.  Long rows use 8192 elements to halve each owner's serialized
     // vector/DMA rounds; the 32768-byte MTE3 transfer remains representable by
@@ -49,7 +50,7 @@ __aicore__ inline void PrepareNonOffloadRows(
     keyLengths.SetGlobalBuffer((__gm__ int32_t *)actualSeqKeyAddr);
     offloadLengths.SetGlobalBuffer((__gm__ int32_t *)offloadSeqKeyAddr);
     cacheTokens.SetGlobalBuffer((__gm__ int32_t *)cacheTokensAddr);
-    const uint32_t owner = GetBlockIdx() / 2U;
+    const uint32_t owner = GetBlockIdx() / LIMConfig::AIVS_PER_AIC;
     // KERNEL_TYPE_MIX_AIC_1_2 exposes 2 * GetBlockNum() AIV blocks.  Even
     // AIVs therefore provide exactly GetBlockNum() independent owners.
     const uint32_t owners = GetBlockNum();
@@ -66,30 +67,37 @@ __aicore__ inline void PrepareNonOffloadRows(
     // cleanup on its established one-owner-per-request assignment below.
     for (uint32_t batch = 0U; batch < batchSize; ++batch) {
         const int32_t state = states.GetValue(batch);
-        if (state != -3 && state != -1) continue;
-        if (state == -1 && batch % owners != owner) continue;
+        if (state != LIMConfig::REQUEST_STATE_NON_OFFLOAD &&
+            state != LIMConfig::REQUEST_STATE_STEADY) continue;
+        if (state == LIMConfig::REQUEST_STATE_STEADY &&
+            batch % owners != owner) continue;
         const int32_t queryEnd = queryEnds.GetValue(batch);
         const int32_t queryStart = batch == 0U ? 0 : queryEnds.GetValue(batch - 1U);
         const int32_t routes = queryEnd - queryStart;
         const int32_t keyLength = keyLengths.GetValue(batch);
-        if (routes < 1 || routes > 14 || queryEnd > static_cast<int32_t>(totalQueries) ||
+        if (routes < 1 || routes > static_cast<int32_t>(LIMConfig::MAX_ROUTES) ||
+            queryEnd > static_cast<int32_t>(totalQueries) ||
             keyLength < routes || keyLength > static_cast<int32_t>(sourceCapacity)) {
             continue;
         }
         const int32_t row = entries.GetValue(batch);
         if (row < 0 || static_cast<uint32_t>(row) >= poolSize) continue;
         const uint64_t base = static_cast<uint64_t>(row) * sourceCapacity;
-        if (state == -1) {
+        if (state == LIMConfig::REQUEST_STATE_STEADY) {
             const int32_t length = offloadLengths.GetValue(batch);
             const int32_t cacheCount = cacheTokens.GetValue(batch);
-            if (length < 2048 || length > keyLength || length > static_cast<int32_t>(sourceCapacity) ||
-                cacheCount < 2048 || cacheCount > length || (length & 127) != 0 ||
-                (cacheCount & 127) != 0 ||
-                (length <= routes * 2048 && cacheCount != length) ||
-                (length > routes * 2048 &&
-                 (cacheCount < routes * 2048 || cacheCount > 32640)) ||
+            if (length < static_cast<int32_t>(LIMConfig::TOPK) || length > keyLength ||
+                length > static_cast<int32_t>(sourceCapacity) ||
+                cacheCount < static_cast<int32_t>(LIMConfig::TOPK) || cacheCount > length ||
+                (length & static_cast<int32_t>(LIMConfig::CACHE_BLOCK_SIZE - 1U)) != 0 ||
+                (cacheCount & static_cast<int32_t>(LIMConfig::CACHE_BLOCK_SIZE - 1U)) != 0 ||
+                (length <= routes * static_cast<int32_t>(LIMConfig::TOPK) && cacheCount != length) ||
+                (length > routes * static_cast<int32_t>(LIMConfig::TOPK) &&
+                 (cacheCount < routes * static_cast<int32_t>(LIMConfig::TOPK) ||
+                  cacheCount > static_cast<int32_t>(LIMConfig::MAX_CACHE_TOKENS))) ||
                 static_cast<uint32_t>(length) >
-                    ((static_cast<uint32_t>(keyLength) - static_cast<uint32_t>(routes)) / 128U) * 128U) {
+                    ((static_cast<uint32_t>(keyLength) - static_cast<uint32_t>(routes)) /
+                     LIMConfig::CACHE_BLOCK_SIZE) * LIMConfig::CACHE_BLOCK_SIZE) {
                 continue;
             }
             // A steady offload row contains only slots in [0, C) or a
@@ -206,16 +214,18 @@ __aicore__ inline bool FinalizeStandardCounts(
             ? 0U : static_cast<uint32_t>(queryEnds.GetValue(batch - 1U));
         const uint32_t queryEnd =
             static_cast<uint32_t>(queryEnds.GetValue(batch));
-        if (states.GetValue(batch) != -3 || queryEnd <= queryStart ||
-            queryEnd > totalQueries || queryEnd - queryStart > 14U) {
+        if (states.GetValue(batch) != LIMConfig::REQUEST_STATE_NON_OFFLOAD ||
+            queryEnd <= queryStart || queryEnd > totalQueries ||
+            queryEnd - queryStart > LIMConfig::MAX_ROUTES) {
             return false;
         }
     }
 
     TBuf<TPosition::VECCALC> countBuf;
-    pipe->InitBuffer(countBuf, 16U * sizeof(int32_t));
+    pipe->InitBuffer(countBuf,
+                     LIMConfig::ROUTE_COUNT_BUFFER_ELEMENTS * sizeof(int32_t));
     LocalTensor<int32_t> zeros = countBuf.Get<int32_t>();
-    Duplicate(zeros, 0, 16U);
+    Duplicate(zeros, 0, LIMConfig::ROUTE_COUNT_BUFFER_ELEMENTS);
     PipeBarrier<PIPE_V>();
     LIServiceVec::SetWaitFlag<HardEvent::V_MTE3>(HardEvent::V_MTE3);
     for (uint32_t batch = first; batch < batchSize; batch += stride) {
@@ -267,9 +277,9 @@ __aicore__ inline bool FinalizeStandardCounts(
         op.Process();                                                                                                   \
         if ASCEND_IS_AIV {                                                                                              \
             SyncAll();                                                                                                  \
-            if ((GetBlockIdx() & 1U) == 0U) {                                                                          \
+            if (GetBlockIdx() % LIMConfig::AIVS_PER_AIC == 0U) {                                                       \
                 tPipe.Reset();                                                                                          \
-                const uint32_t unionOwner = GetBlockIdx() / 2U;                                                        \
+                const uint32_t unionOwner = GetBlockIdx() / LIMConfig::AIVS_PER_AIC;                                   \
                 const uint32_t unionOwners = GetBlockNum();                                                            \
                 if (!FinalizeStandardCounts(requestState, actualSeqLengthsQuery, missCount,                            \
                                             topkMissCounts, tiling_data->bSize, tiling_data->tSize,                    \

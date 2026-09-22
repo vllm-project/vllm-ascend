@@ -2,6 +2,7 @@
 #define FUSED_LIGHTNING_INDEXER_MANAGE_WORKSPACE_H
 
 #include <cstdint>
+#include "fused_lightning_indexer_manage_constants.h"
 
 namespace MtpWorkspace {
 constexpr uint64_t S2_BASE_SIZE = 512U;
@@ -9,11 +10,11 @@ constexpr uint64_t S1_BASE_SIZE = 8U;
 constexpr uint64_t DOUBLE_BUFFER = 2U;
 constexpr uint64_t LD_HEAD_TAIL = 2U;
 constexpr uint64_t VALUE_AND_INDEX = 2U;
-constexpr uint64_t TOPK = 2048U;
-constexpr uint64_t LD_PARAM_NUM = 16U;
-constexpr uint64_t PAIR_CAPACITY = 8192U;
-constexpr uint64_t THRESHOLD_STRIDE = 8U;
-constexpr uint64_t ROUTE_COUNT_STRIDE = 8U;
+constexpr uint64_t TOPK = LIMConfig::TOPK;
+constexpr uint64_t LD_PARAM_NUM = LIMConfig::LD_PARAM_COUNT;
+constexpr uint64_t PAIR_CAPACITY = LIMConfig::MATURE_UNION_MAX_ROUTES * TOPK;
+constexpr uint64_t THRESHOLD_STRIDE = LIMConfig::THRESHOLD_WORKSPACE_STRIDE;
+constexpr uint64_t ROUTE_COUNT_STRIDE = LIMConfig::ROUTE_COUNT_WORKSPACE_STRIDE;
 
 __aicore__ inline uint64_t LiWorkspaceBytes(uint64_t blockNum, uint64_t headNum)
 {

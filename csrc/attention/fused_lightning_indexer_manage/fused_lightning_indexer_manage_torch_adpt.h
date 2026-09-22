@@ -1,6 +1,8 @@
 #ifndef FUSED_LIGHTNING_INDEXER_MANAGE_TORCH_ADPT_H_
 #define FUSED_LIGHTNING_INDEXER_MANAGE_TORCH_ADPT_H_
 
+#include "op_kernel/fused_lightning_indexer_manage_constants.h"
+
 namespace vllm_ascend {
 
 inline void npu_fused_lightning_indexer_manage(
@@ -15,12 +17,13 @@ inline void npu_fused_lightning_indexer_manage(
     at::Tensor topk_src_ids, at::Tensor topk_dst_slots,
     at::Tensor topk_miss_counts, at::Tensor miss_src_ids,
     at::Tensor miss_dst_slots, at::Tensor miss_counts) {
-  constexpr int64_t kTopK = 2048;
-  constexpr int64_t kMissCapacity = 32768;
-  constexpr int64_t kBlockSize = 128;
+  constexpr int64_t kTopK = LIMConfig::TOPK;
+  constexpr int64_t kMissCapacity = LIMConfig::MISS_CAPACITY;
+  constexpr int64_t kBlockSize = LIMConfig::CACHE_BLOCK_SIZE;
   TORCH_CHECK(query.dim() == 3 &&
-                  (query.size(1) == 32 || query.size(1) == 64) &&
-                  query.size(2) == 128 && query.size(0) > 0,
+                  (query.size(1) == LIMConfig::QUERY_HEADS_SMALL ||
+                   query.size(1) == LIMConfig::QUERY_HEADS_LARGE) &&
+                  query.size(2) == LIMConfig::HEAD_DIM && query.size(0) > 0,
               "LIM-MTP query must be [T, H, 128], H=32 or 64 and T>0.");
   TORCH_CHECK(query.device().is_privateuseone(), "LIM-MTP tensors must be on NPU.");
   const int64_t total_queries = query.size(0);
@@ -31,18 +34,21 @@ inline void npu_fused_lightning_indexer_manage(
               "query_dequant_scale must be [T, H].");
   TORCH_CHECK(index_key_cache.dim() == 4 && index_key_cache.size(0) > 0 &&
                   index_key_cache.size(1) == kBlockSize &&
-                  index_key_cache.size(2) == 1 && index_key_cache.size(3) == 128,
+                  index_key_cache.size(2) == LIMConfig::KEY_HEADS &&
+                  index_key_cache.size(3) == LIMConfig::HEAD_DIM,
               "index_key_cache must be [blocks, 128, 1, 128].");
   TORCH_CHECK(index_key_dequant_scale.dim() == 3 &&
                   index_key_dequant_scale.size(0) == index_key_cache.size(0) &&
                   index_key_dequant_scale.size(1) == kBlockSize &&
-                  index_key_dequant_scale.size(2) == 1,
+                  index_key_dequant_scale.size(2) == LIMConfig::KEY_HEADS,
               "index_key_dequant_scale must be [blocks, 128, 1].");
   TORCH_CHECK(index_block_table.dim() == 2 && index_block_table.size(0) > 0 &&
-                  index_block_table.size(1) > 0 && index_block_table.size(1) <= (1 << 14),
+                  index_block_table.size(1) > 0 &&
+                  index_block_table.size(1) <= LIMConfig::MAX_BLOCKS_PER_REQUEST,
               "index_block_table must be non-empty [B, max_blocks], max_blocks<=16384.");
   const int64_t batch_size = index_block_table.size(0);
-  TORCH_CHECK(total_queries >= batch_size && total_queries <= batch_size * 14,
+  TORCH_CHECK(total_queries >= batch_size &&
+                  total_queries <= batch_size * LIMConfig::MAX_ROUTES,
               "total_queries must satisfy B <= T <= 14B.");
   auto check_batch_vector = [batch_size](const at::Tensor& tensor, const char* name) {
     TORCH_CHECK(tensor.dim() == 1 && tensor.size(0) == batch_size, name, " must be [B].");

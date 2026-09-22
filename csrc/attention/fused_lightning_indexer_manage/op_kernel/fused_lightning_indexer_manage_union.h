@@ -2,17 +2,18 @@
 #define FUSED_LIGHTNING_INDEXER_MANAGE_UNION_H
 
 #include "kernel_operator.h"
+#include "fused_lightning_indexer_manage_constants.h"
 #include "lightning_indexer_vector.h"
 
 namespace MtpUnion {
 using namespace AscendC;
 
-constexpr uint32_t ROUTES = 4U;
+constexpr uint32_t ROUTES = LIMConfig::MATURE_UNION_MAX_ROUTES;
 constexpr uint32_t LOCAL_MAX_ROUTES = 7U;
-constexpr uint32_t MAX_ROUTES = 14U;
-constexpr uint32_t TOPK = 2048U;
-constexpr uint32_t MISS_CAPACITY = 32768U;
-constexpr uint32_t MAX_CACHE_TOKENS = 32640U;
+constexpr uint32_t MAX_ROUTES = LIMConfig::MAX_ROUTES;
+constexpr uint32_t TOPK = LIMConfig::TOPK;
+constexpr uint32_t MISS_CAPACITY = LIMConfig::MISS_CAPACITY;
+constexpr uint32_t MAX_CACHE_TOKENS = LIMConfig::MAX_CACHE_TOKENS;
 constexpr uint32_t PAIR_WORDS = TOPK * 2U;
 constexpr uint32_t CAPACITY = ROUTES * TOPK;
 // Keep the mature victim payload codec separate from the logical source-ID
@@ -35,8 +36,8 @@ constexpr uint32_t EVICT_MASK_WORK_FLOATS = EVICT_CHUNK;
 constexpr uint32_t EVICT_SCRATCH_FLOATS = EVICT_CHUNK * 12U;
 constexpr uint32_t GENERAL_EVICT_SCRATCH_FLOATS =
     EVICT_CHUNK * (MAX_ROUTES + 8U);
-constexpr uint32_t THRESHOLD_STRIDE = 8U;
-constexpr uint32_t ROUTE_COUNT_STRIDE = 8U;
+constexpr uint32_t THRESHOLD_STRIDE = LIMConfig::THRESHOLD_WORKSPACE_STRIDE;
+constexpr uint32_t ROUTE_COUNT_STRIDE = LIMConfig::ROUTE_COUNT_WORKSPACE_STRIDE;
 constexpr int32_t ROUTE_COUNTS_FROM_WORKSPACE = -1;
 constexpr uint32_t ROUTE_POSITION_BITS = 11U;
 constexpr uint32_t ROUTE_POSITION_MASK = (1U << ROUTE_POSITION_BITS) - 1U;
@@ -2512,7 +2513,7 @@ private:
         const uint32_t queryEnd =
             static_cast<uint32_t>(actualSeqLengthsQueryGm.GetValue(batch));
         const int32_t state = requestStateGm.GetValue(batch);
-        if (state == -3) {
+        if (state == LIMConfig::REQUEST_STATE_NON_OFFLOAD) {
             if (queryStart >= queryEnd || queryEnd > tSize ||
                 queryEnd - queryStart > MAX_ROUTES) {
                 PublishCounts(batch, queryStart, queryEnd, 0, 0);
@@ -2523,11 +2524,11 @@ private:
             PublishCounts(batch, queryStart, queryEnd, 0, 0);
             return;
         }
-        if (state == -2) {
+        if (state == LIMConfig::REQUEST_STATE_FIRST_DECODE) {
             InitializeFirstDecode(batch);
             return;
         }
-        if (state != -1) {
+        if (state != LIMConfig::REQUEST_STATE_STEADY) {
             PublishSafeFailure(batch, queryStart, queryEnd);
             return;
         }

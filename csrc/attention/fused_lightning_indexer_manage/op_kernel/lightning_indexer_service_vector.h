@@ -20,18 +20,29 @@
 #include "kernel_tiling/kernel_tiling.h"
 #include "lib/matmul_intf.h"
 #include "lib/matrix/matmul/tiling.h"
+#include "fused_lightning_indexer_manage_constants.h"
 #include "lightning_indexer_common.h"
 #include "lightning_indexer_vector.h"
 
 namespace LIKernel {
 using namespace LICommon;
 using namespace LIServiceVec;
-constexpr uint32_t BASE_TOPK = 2048;
-constexpr uint32_t LD_PARAM_NUM = 16;
+constexpr uint32_t BASE_TOPK = LIMConfig::TOPK;
+constexpr uint32_t LD_PARAM_NUM = LIMConfig::LD_PARAM_COUNT;
 constexpr uint32_t EXACT_PACKED_SOURCE_TOKENS = 1U << PACKED_SOURCE_BITS;
-constexpr uint32_t MTP_THRESHOLD_STRIDE = 8U;
-constexpr uint32_t MTP_ROUTE_COUNT_STRIDE = 8U;
+constexpr uint32_t MTP_THRESHOLD_STRIDE = LIMConfig::THRESHOLD_WORKSPACE_STRIDE;
+constexpr uint32_t MTP_ROUTE_COUNT_STRIDE = LIMConfig::ROUTE_COUNT_WORKSPACE_STRIDE;
 constexpr uint32_t MTP_MISS_KEY_BASE_BITS = 0x40000000U;
+constexpr uint32_t LD_NEED_FD_INDEX = 0U;
+constexpr uint32_t LD_S2_ACT_SEQ_INDEX = 1U;
+constexpr uint32_t LD_S2_START_INDEX = 2U;
+constexpr uint32_t LD_S2_END_INDEX = 3U;
+constexpr uint32_t LD_IS_S2_END_INDEX = 4U;
+constexpr uint32_t LD_BN2_INDEX = 5U;
+constexpr uint32_t LD_S1_INDEX = 6U;
+constexpr uint32_t LD_S1_PROCESS_COUNT_INDEX = 7U;
+constexpr uint32_t LD_OUTPUT_OFFSET_INDEX = 8U;
+constexpr uint32_t LD_ROUTE_COUNT_INDEX = 9U;
 
 template <typename LIT>
 class LIVector {
@@ -123,7 +134,7 @@ private:
 
     // para for LD
     uint32_t mrgListNum_ = 4;
-    uint32_t paramNum_ = 16;
+    uint32_t paramNum_ = LD_PARAM_NUM;
 
     constexpr static uint32_t REDUCE_BANK_CONFLICT_OFFSETS = 256;
     constexpr static uint32_t REDUCE_BANK_CONFLICT_NUM = REDUCE_BANK_CONFLICT_OFFSETS / sizeof(float);
@@ -410,7 +421,7 @@ __aicore__ inline void LIVector<LIT>::DecodeTopkHitMiss(
         ? requestStateGm.GetValue(batch) : 0;
     ExtractIndex(indexLocal.template ReinterpretCast<uint32_t>(),
                  pairLocal.template ReinterpretCast<uint32_t>(), constInfo_.sparseCount);
-    if (requestState == -3) {
+    if (requestState == LIMConfig::REQUEST_STATE_NON_OFFLOAD) {
         // Standard payload already is the source ID (including -1 padding).
         // Preserve score order and publish the identity destination directly.
         LIServiceVec::CopyOut(slotOutGm[outputOffset], indexLocal,
@@ -461,7 +472,8 @@ __aicore__ inline void LIVector<LIT>::DecodeTopkHitMiss(
     const uint64_t pairOffset = static_cast<uint64_t>(batch) * BASE_TOPK * 4U +
                                 (routeInBatch % 2U) * BASE_TOPK * 2U;
     const bool useMaturePairUnion = batch < batchSize_ &&
-        requestState == -1 && routeCount >= 1U && routeCount <= 4U;
+        requestState == LIMConfig::REQUEST_STATE_STEADY &&
+        routeCount >= 1U && routeCount <= LIMConfig::MATURE_UNION_MAX_ROUTES;
     if (routeMissCount != 0U && useMaturePairUnion) {
         // The union stage only consumes the source-sorted key word.  Preserve
         // the final route/position of every miss in the otherwise-dead payload
@@ -819,16 +831,17 @@ __aicore__ inline void LIVector<LIT>::ProcessVec(const LICommon::RunInfo &info)
 
                 LocalTensor<int64_t> tmpiBuff = paramBuf_.Get<int64_t>();
                 SetWaitFlag<HardEvent::MTE3_S>(HardEvent::MTE3_S);
-                tmpiBuff.SetValue(0, static_cast<int64_t>(1));
-                tmpiBuff.SetValue(1, static_cast<int64_t>(cuRealAcSeq));
-                tmpiBuff.SetValue(2, static_cast<int64_t>(blockS2StartIdx_));
-                tmpiBuff.SetValue(3, static_cast<int64_t>(cuBaseS2Idx + cuS2Len));
-                tmpiBuff.SetValue(4, static_cast<int64_t>(isS2End));
-                tmpiBuff.SetValue(5, static_cast<int64_t>(info.bN2Idx));
-                tmpiBuff.SetValue(6, static_cast<int64_t>(cuS1Idx));
-                tmpiBuff.SetValue(7, static_cast<int64_t>(cuS1ProcNum));
-                tmpiBuff.SetValue(8, static_cast<int64_t>(info.indiceOutOffset + cuS1Idx * constInfo_.sparseCount));
-                tmpiBuff.SetValue(9, static_cast<int64_t>(info.actS1Size));
+                tmpiBuff.SetValue(LD_NEED_FD_INDEX, static_cast<int64_t>(1));
+                tmpiBuff.SetValue(LD_S2_ACT_SEQ_INDEX, static_cast<int64_t>(cuRealAcSeq));
+                tmpiBuff.SetValue(LD_S2_START_INDEX, static_cast<int64_t>(blockS2StartIdx_));
+                tmpiBuff.SetValue(LD_S2_END_INDEX, static_cast<int64_t>(cuBaseS2Idx + cuS2Len));
+                tmpiBuff.SetValue(LD_IS_S2_END_INDEX, static_cast<int64_t>(isS2End));
+                tmpiBuff.SetValue(LD_BN2_INDEX, static_cast<int64_t>(info.bN2Idx));
+                tmpiBuff.SetValue(LD_S1_INDEX, static_cast<int64_t>(cuS1Idx));
+                tmpiBuff.SetValue(LD_S1_PROCESS_COUNT_INDEX, static_cast<int64_t>(cuS1ProcNum));
+                tmpiBuff.SetValue(LD_OUTPUT_OFFSET_INDEX,
+                                  static_cast<int64_t>(info.indiceOutOffset + cuS1Idx * constInfo_.sparseCount));
+                tmpiBuff.SetValue(LD_ROUTE_COUNT_INDEX, static_cast<int64_t>(info.actS1Size));
                 // 写入头尾判断
                 // [head, tail]
                 // head: 与前面规约，与前后规约
@@ -842,7 +855,7 @@ __aicore__ inline void LIVector<LIT>::ProcessVec(const LICommon::RunInfo &info)
                     wsOffset += 2 * BASE_TOPK;
                 }
                 SetWaitFlag<HardEvent::S_MTE3>(HardEvent::S_MTE3);
-                LIServiceVec::CopyOut(vec1ParamGm[wsInfoOffset], tmpiBuff, 16);
+                LIServiceVec::CopyOut(vec1ParamGm[wsInfoOffset], tmpiBuff, LD_PARAM_NUM);
                 SetWaitFlag<HardEvent::V_MTE3>(HardEvent::V_MTE3);
                 LIServiceVec::CopyOut(vec1ResGm[wsOffset], globalTopkUb_[innerS1Idx * BASE_TOPK * 2], 2 * BASE_TOPK);
                 SetWaitFlag<HardEvent::MTE3_V>(HardEvent::MTE3_V);
@@ -970,14 +983,14 @@ __aicore__ inline void LIVector<LIT>::ProcessLD()
         // 获取下一个核规约信息
         tmpCubeId++;
         wsInfoOffset = tmpCubeId * s1BaseSize_ * 2 * paramNum_ + innerS1Idx * 2 * paramNum_;
-        needFd = vec1ParamGm.GetValue(wsInfoOffset);
-        s2ActSeq = vec1ParamGm.GetValue(wsInfoOffset + 1);
-        isS2End = vec1ParamGm.GetValue(wsInfoOffset + 4);
-        s1Idx = vec1ParamGm.GetValue(wsInfoOffset + 6);
-        outOffset = vec1ParamGm.GetValue(wsInfoOffset + 8);
-        bIdx = vec1ParamGm.GetValue(wsInfoOffset + 5) /
+        needFd = vec1ParamGm.GetValue(wsInfoOffset + LD_NEED_FD_INDEX);
+        s2ActSeq = vec1ParamGm.GetValue(wsInfoOffset + LD_S2_ACT_SEQ_INDEX);
+        isS2End = vec1ParamGm.GetValue(wsInfoOffset + LD_IS_S2_END_INDEX);
+        s1Idx = vec1ParamGm.GetValue(wsInfoOffset + LD_S1_INDEX);
+        outOffset = vec1ParamGm.GetValue(wsInfoOffset + LD_OUTPUT_OFFSET_INDEX);
+        bIdx = vec1ParamGm.GetValue(wsInfoOffset + LD_BN2_INDEX) /
                static_cast<int64_t>(constInfo_.kHeadNum);
-        routeCount = vec1ParamGm.GetValue(wsInfoOffset + 9);
+        routeCount = vec1ParamGm.GetValue(wsInfoOffset + LD_ROUTE_COUNT_INDEX);
 
         while (needFd == 1) {
             // 搬入头规约数据
@@ -1023,8 +1036,8 @@ __aicore__ inline void LIVector<LIT>::ProcessLD()
 
             tmpCubeId++;
             wsInfoOffset = tmpCubeId * s1BaseSize_ * 2 * paramNum_ + innerS1Idx * 2 * paramNum_;
-            needFd = vec1ParamGm.GetValue(wsInfoOffset);
-            isS2End = vec1ParamGm.GetValue(wsInfoOffset + 4);
+            needFd = vec1ParamGm.GetValue(wsInfoOffset + LD_NEED_FD_INDEX);
+            isS2End = vec1ParamGm.GetValue(wsInfoOffset + LD_IS_S2_END_INDEX);
         }
 
         // mrg不足4个list的数据
@@ -1058,7 +1071,8 @@ __aicore__ inline void LIVector<LIT>::ProcessLD()
         LocalTensor<float> outValueUb = ldOutValueBuf_.Get<float>();
         LocalTensor<uint32_t> outIdxUb = ldOutIdxBuf_.Get<uint32_t>();
         if (!constInfo_.returnValue) {
-            const bool standardMode = requestStateGm.GetValue(bIdx) == -3;
+            const bool standardMode =
+                requestStateGm.GetValue(bIdx) == LIMConfig::REQUEST_STATE_NON_OFFLOAD;
             if (!standardMode) {
                 SetWaitFlag<HardEvent::V_S>(HardEvent::V_S);
                 // The final LD owner may differ from the later eviction owner.

@@ -21,6 +21,7 @@
 #include "kernel_tiling/kernel_tiling.h"
 #include "lib/matmul_intf.h"
 #include "lib/matrix/matmul/tiling.h"
+#include "fused_lightning_indexer_manage_constants.h"
 #include "lightning_indexer_common.h"
 #include "lightning_indexer_service_vector.h"
 #include "lightning_indexer_service_cube.h"
@@ -84,8 +85,8 @@ public:
 
     static constexpr uint32_t M_BASE_SIZE = 512;
     static constexpr uint32_t S2_BASE_SIZE = 512;
-    static constexpr uint32_t HEAD_DIM = 128;
-    static constexpr uint32_t K_HEAD_NUM = 1;
+    static constexpr uint32_t HEAD_DIM = LIMConfig::HEAD_DIM;
+    static constexpr uint32_t K_HEAD_NUM = LIMConfig::KEY_HEADS;
     static constexpr uint32_t GM_ALIGN_BYTES = 512;
 
     static constexpr int64_t LD_PREFETCH_LEN = 2;
@@ -229,7 +230,7 @@ __aicore__ inline void LIPreload<LIT>::InitActualSeqLen(__gm__ uint8_t *actualSe
 template <typename LIT>
 __aicore__ inline bool LIPreload<LIT>::IsCausal(uint32_t bIdx)
 {
-    return requestStateGm.GetValue(bIdx) == -3;
+    return requestStateGm.GetValue(bIdx) == LIMConfig::REQUEST_STATE_NON_OFFLOAD;
 }
 
 template <typename LIT>
@@ -258,8 +259,10 @@ __aicore__ inline void LIPreload<LIT>::GetS1S2ActualSeqLen(uint32_t bIdx, uint32
     const uint32_t queryStart = bIdx == 0U ? 0U : actualSeqLengthsGmQ.GetValue(bIdx - 1U);
     const int32_t state = requestStateGm.GetValue(bIdx);
     if (queryEnd <= queryStart || queryEnd > totalQueries ||
-        queryEnd - queryStart > 14U ||
-        (state != -3 && state != -2 && state != -1) ||
+        queryEnd - queryStart > LIMConfig::MAX_ROUTES ||
+        (state != LIMConfig::REQUEST_STATE_NON_OFFLOAD &&
+         state != LIMConfig::REQUEST_STATE_FIRST_DECODE &&
+         state != LIMConfig::REQUEST_STATE_STEADY) ||
         actS2Size > constInfo.kSeqSize || actS2Size < actS1Size) {
         actS1Size = 0U;
         actS2Size = 0U;

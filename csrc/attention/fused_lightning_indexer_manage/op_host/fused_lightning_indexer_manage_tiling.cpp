@@ -64,15 +64,15 @@ ge::graphStatus FusedLightningIndexerManageTiling::GetTensorInfo(FusedLightningI
     op.topkIndexOut.shape = context_->GetOutputShape(TOPK_INDEX);
     op.topkSlotsOut.desc = context_->GetOutputDesc(TOPK_SLOTS_INDEX);
     op.topkSlotsOut.shape = context_->GetOutputShape(TOPK_SLOTS_INDEX);
-    uint32_t missCountIndex = mtp_ ? 5U : MISS_COUNT_INDEX;
-    uint32_t cacheSlotsOutIndex = mtp_ ? 6U : CACHE_SLOTS_OUT_INDEX;
+    uint32_t missCountIndex = mtp_ ? MTP_MISS_COUNT_INDEX : MISS_COUNT_INDEX;
+    uint32_t cacheSlotsOutIndex = mtp_ ? MTP_CACHE_SLOTS_OUT_INDEX : CACHE_SLOTS_OUT_INDEX;
     if (mtp_) {
-        op.topkMissCountOut.desc = context_->GetOutputDesc(2U);
-        op.topkMissCountOut.shape = context_->GetOutputShape(2U);
-        op.missSrcOut.desc = context_->GetOutputDesc(3U);
-        op.missSrcOut.shape = context_->GetOutputShape(3U);
-        op.missSlotsOut.desc = context_->GetOutputDesc(4U);
-        op.missSlotsOut.shape = context_->GetOutputShape(4U);
+        op.topkMissCountOut.desc = context_->GetOutputDesc(MTP_TOPK_MISS_COUNT_INDEX);
+        op.topkMissCountOut.shape = context_->GetOutputShape(MTP_TOPK_MISS_COUNT_INDEX);
+        op.missSrcOut.desc = context_->GetOutputDesc(MTP_MISS_SRC_INDEX);
+        op.missSrcOut.shape = context_->GetOutputShape(MTP_MISS_SRC_INDEX);
+        op.missSlotsOut.desc = context_->GetOutputDesc(MTP_MISS_SLOTS_INDEX);
+        op.missSlotsOut.shape = context_->GetOutputShape(MTP_MISS_SLOTS_INDEX);
     }
     op.missCountOut.desc = context_->GetOutputDesc(missCountIndex);
     op.missCountOut.shape = context_->GetOutputShape(missCountIndex);
@@ -246,7 +246,7 @@ ge::graphStatus FusedLightningIndexerManageTiling::CheckShape(FusedLightningInde
     tilingInfo.cacheSlotsSize = static_cast<uint32_t>(cacheShape.GetDim(1));
 
     OPS_ERR_IF(tilingInfo.bSize == 0 || tilingInfo.tSize < tilingInfo.bSize ||
-                   tilingInfo.tSize > tilingInfo.bSize * 14U,
+                   tilingInfo.tSize > tilingInfo.bSize * LIMConfig::MAX_ROUTES,
                OPS_LOG_E(tilingInfo.opName, "requires B <= T <= 14B."),
                return ge::GRAPH_FAILED);
     uint32_t metadataBatch = tilingInfo.bSize;
@@ -271,16 +271,16 @@ ge::graphStatus FusedLightningIndexerManageTiling::CheckShape(FusedLightningInde
     OPS_ERR_IF(tilingInfo.maxBlockNumPerBatch == 0,
                OPS_LOG_E(tilingInfo.opName, "block_table must contain at least one block per request."),
                return ge::GRAPH_FAILED);
-    OPS_ERR_IF(tilingInfo.maxBlockNumPerBatch > (1U << 14),
+    OPS_ERR_IF(tilingInfo.maxBlockNumPerBatch > LIMConfig::MAX_BLOCKS_PER_REQUEST,
                OPS_LOG_E(tilingInfo.opName, "block_table capacity must be <= 16384 blocks for the 21-bit source format."),
                return ge::GRAPH_FAILED);
-    OPS_ERR_IF(tilingInfo.blockSize != 128,
+    OPS_ERR_IF(tilingInfo.blockSize != LIMConfig::CACHE_BLOCK_SIZE,
                OPS_LOG_E(tilingInfo.opName, "key block_size must be 128."),
                return ge::GRAPH_FAILED);
     const uint64_t sourceCapacity =
         static_cast<uint64_t>(tilingInfo.blockSize) *
         tilingInfo.maxBlockNumPerBatch;
-    OPS_ERR_IF(sourceCapacity > (1U << 21),
+    OPS_ERR_IF(sourceCapacity > LIMConfig::MAX_SOURCE_CAPACITY,
                OPS_LOG_E(tilingInfo.opName,
                           "cache_slots capacity must be <= 2^21 tokens."),
                return ge::GRAPH_FAILED);
@@ -291,7 +291,8 @@ ge::graphStatus FusedLightningIndexerManageTiling::CheckShape(FusedLightningInde
                return ge::GRAPH_FAILED);
     OPS_ERR_IF(tilingInfo.n2Size != DECODE_N2,
                OPS_LOG_E(tilingInfo.opName, "key N2 must be 1."), return ge::GRAPH_FAILED);
-    OPS_ERR_IF(tilingInfo.n1Size != 32 && tilingInfo.n1Size != 64,
+    OPS_ERR_IF(tilingInfo.n1Size != LIMConfig::QUERY_HEADS_SMALL &&
+                   tilingInfo.n1Size != LIMConfig::QUERY_HEADS_LARGE,
                OPS_LOG_E(tilingInfo.opName, "decode query N1 must be 32 or 64."),
                return ge::GRAPH_FAILED);
     OPS_ERR_IF(qShape.GetDim(DIM_IDX_TWO) != DECODE_HEAD_DIM || kShape.GetDim(DIM_IDX_THREE) != DECODE_HEAD_DIM,
@@ -311,8 +312,10 @@ ge::graphStatus FusedLightningIndexerManageTiling::CheckShape(FusedLightningInde
                OPS_LOG_E(tilingInfo.opName,
                          "topk_miss_counts must have shape [T]."),
                return ge::GRAPH_FAILED);
-    OPS_ERR_IF(mtp_ && (missSrcShape->GetDim(0) != metadataBatch || missSrcShape->GetDim(1) != 32768 ||
-                        missSlotsShape->GetDim(0) != metadataBatch || missSlotsShape->GetDim(1) != 32768),
+    OPS_ERR_IF(mtp_ && (missSrcShape->GetDim(0) != metadataBatch ||
+                        missSrcShape->GetDim(1) != LIMConfig::MISS_CAPACITY ||
+                        missSlotsShape->GetDim(0) != metadataBatch ||
+                        missSlotsShape->GetDim(1) != LIMConfig::MISS_CAPACITY),
                OPS_LOG_E(tilingInfo.opName, "MTP miss outputs must have shape [B, 32768]."),
                return ge::GRAPH_FAILED);
     OPS_ERR_IF(cacheSlotsOutShape.GetDim(0) != cacheShape.GetDim(0) ||
@@ -369,7 +372,7 @@ ge::graphStatus FusedLightningIndexerManageTiling::DoTiling(FusedLightningIndexe
         constexpr uint32_t S1_BASE_SIZE = 8;
         constexpr uint32_t LD_HEAD_TAIL = 2;
         constexpr uint32_t VALUE_AND_INDEX = 2;
-        constexpr uint32_t LD_PARAM_NUM = 16;
+        constexpr uint32_t LD_PARAM_NUM = LIMConfig::LD_PARAM_COUNT;
         workspaceSize += static_cast<uint64_t>(blockDim) * LD_HEAD_TAIL * S1_BASE_SIZE *
                          VALUE_AND_INDEX * DECODE_SPARSE_COUNT * sizeof(float);
         workspaceSize += static_cast<uint64_t>(blockDim) * LD_HEAD_TAIL * S1_BASE_SIZE *

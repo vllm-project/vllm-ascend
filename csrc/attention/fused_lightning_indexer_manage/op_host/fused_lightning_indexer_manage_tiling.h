@@ -12,6 +12,7 @@
 #include "register/tilingdata_base.h"
 #include "tiling/platform/platform_ascendc.h"
 #include "tiling/tiling_api.h"
+#include "../op_kernel/fused_lightning_indexer_manage_constants.h"
 
 namespace optiling {
 
@@ -38,10 +39,15 @@ constexpr uint32_t CACHE_TOKENS_INDEX = 9;
 constexpr uint32_t REQUEST_STATE_INDEX = 10;
 constexpr uint32_t REQ_POOL_ENTRIES_INDEX = 11;
 constexpr uint32_t CACHE_SLOTS_INDEX = 12;
-constexpr uint32_t TOPK_INDEX = 0;
-constexpr uint32_t TOPK_SLOTS_INDEX = 1;
+constexpr uint32_t TOPK_INDEX = LIMConfig::TOPK_SOURCE_OUTPUT_INDEX;
+constexpr uint32_t TOPK_SLOTS_INDEX = LIMConfig::TOPK_SLOT_OUTPUT_INDEX;
 constexpr uint32_t MISS_COUNT_INDEX = 2;
 constexpr uint32_t CACHE_SLOTS_OUT_INDEX = 3;
+constexpr uint32_t MTP_TOPK_MISS_COUNT_INDEX = LIMConfig::TOPK_MISS_COUNT_OUTPUT_INDEX;
+constexpr uint32_t MTP_MISS_SRC_INDEX = LIMConfig::MISS_SOURCE_OUTPUT_INDEX;
+constexpr uint32_t MTP_MISS_SLOTS_INDEX = LIMConfig::MISS_SLOT_OUTPUT_INDEX;
+constexpr uint32_t MTP_MISS_COUNT_INDEX = LIMConfig::MISS_COUNT_OUTPUT_INDEX;
+constexpr uint32_t MTP_CACHE_SLOTS_OUT_INDEX = LIMConfig::CACHE_SLOTS_OUTPUT_INDEX;
 
 constexpr uint32_t DIM_IDX_ONE = 1;
 constexpr uint32_t DIM_IDX_TWO = 2;
@@ -51,10 +57,10 @@ constexpr uint32_t DIM_NUM_TWO = 2;
 constexpr uint32_t DIM_NUM_THREE = 3;
 constexpr uint32_t DIM_NUM_FOUR = 4;
 
-constexpr uint32_t DECODE_N2 = 1;
-constexpr uint32_t DECODE_HEAD_DIM = 128;
-constexpr uint32_t DECODE_SPARSE_COUNT = 2048;
-constexpr uint32_t DECODE_OUTPUT_CAPACITY = 2048;
+constexpr uint32_t DECODE_N2 = LIMConfig::KEY_HEADS;
+constexpr uint32_t DECODE_HEAD_DIM = LIMConfig::HEAD_DIM;
+constexpr uint32_t DECODE_SPARSE_COUNT = LIMConfig::TOPK;
+constexpr uint32_t DECODE_OUTPUT_CAPACITY = LIMConfig::TOPK;
 
 BEGIN_TILING_DATA_DEF(FusedLightningIndexerManageTilingData)
 TILING_DATA_FIELD_DEF(uint32_t, bSize)
@@ -99,7 +105,7 @@ public:
 
     uint32_t bSize = 0;
     uint32_t tSize = 0;
-    uint32_t n1Size = 32;
+    uint32_t n1Size = LIMConfig::QUERY_HEADS_SMALL;
     uint32_t n2Size = DECODE_N2;
     uint32_t s2Size = 0;
     uint32_t blockSize = 0;

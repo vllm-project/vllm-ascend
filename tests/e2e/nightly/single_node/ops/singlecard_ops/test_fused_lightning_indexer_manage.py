@@ -17,9 +17,25 @@ BLOCK_SIZE = 128
 HEAD_DIM = 128
 TOPK = 2048
 MISS_CAPACITY = 32768
+MAX_CACHE_TOKENS = 32640
 INVALID_SLOT = -(1 << 31)
 PADDING_ID = -1
 MAX_ROUTES = 14
+SMALL_HEAD_COUNT = 32
+LARGE_HEAD_COUNT = 64
+REQUEST_STATE_NON_OFFLOAD = -3
+REQUEST_STATE_FIRST_DECODE = -2
+REQUEST_STATE_STEADY = -1
+OUTPUT_SENTINEL = -313
+POOL_ENTRY_STRIDE = 2
+FIRST_POOL_ENTRY = 1
+BLOCK_TABLE_SEED_OFFSET = 1009
+TOPK_SOURCE_OUTPUT = 0
+TOPK_SLOT_OUTPUT = 1
+TOPK_MISS_COUNT_OUTPUT = 2
+MISS_SOURCE_OUTPUT = 3
+MISS_SLOT_OUTPUT = 4
+MISS_COUNT_OUTPUT = 5
 
 FIRST_DECODE_SCENARIOS = (
     pytest.param([1], 8320, 8192, id="q1"),
@@ -51,13 +67,13 @@ ALL_ROUTE_SCENARIOS = (
     (11, 22656, 22528),
     (12, 24704, 24576),
     (13, 26752, 26624),
-    (14, 32768, 32640),
+    (14, 32768, MAX_CACHE_TOKENS),
 )
 
 ROUTE_STATE_SCENARIOS = tuple(
     pytest.param(q, state, offload_len, cache_tokens, id=f"q{q}-state{state}")
     for q, offload_len, cache_tokens in ALL_ROUTE_SCENARIOS
-    for state in (-3, -2, -1)
+    for state in (REQUEST_STATE_NON_OFFLOAD, REQUEST_STATE_FIRST_DECODE, REQUEST_STATE_STEADY)
 )
 
 DTYPE_HEAD_ROUTE_SCENARIOS = tuple(
@@ -71,86 +87,124 @@ DTYPE_HEAD_ROUTE_SCENARIOS = tuple(
         id=f"q{q}-state{state}-{dtype_name}-h{heads}",
     )
     for dtype, dtype_name, heads in (
-        (torch.bfloat16, "bf16", 32),
-        (torch.bfloat16, "bf16", 64),
-        (torch.float16, "fp16", 32),
-        (torch.float16, "fp16", 64),
+        (torch.bfloat16, "bf16", SMALL_HEAD_COUNT),
+        (torch.bfloat16, "bf16", LARGE_HEAD_COUNT),
+        (torch.float16, "fp16", SMALL_HEAD_COUNT),
+        (torch.float16, "fp16", LARGE_HEAD_COUNT),
     )
     for q, state, offload_len, cache_tokens in (
-        (1, -3, 8320, 8192),
-        (4, -2, 16256, 12288),
-        (7, -1, 16256, 14336),
-        (8, -3, 16512, 16384),
-        (12, -2, 24704, 24576),
-        (14, -1, 32768, 32640),
+        (1, REQUEST_STATE_NON_OFFLOAD, 8320, 8192),
+        (4, REQUEST_STATE_FIRST_DECODE, 16256, 12288),
+        (7, REQUEST_STATE_STEADY, 16256, 14336),
+        (8, REQUEST_STATE_NON_OFFLOAD, 16512, 16384),
+        (12, REQUEST_STATE_FIRST_DECODE, 24704, 24576),
+        (14, REQUEST_STATE_STEADY, 32768, MAX_CACHE_TOKENS),
     )
 )
 
 MIXED_BATCH_SCENARIOS = (
     pytest.param(
         [1, 4, 7],
-        [-3, -3, -3],
+        [REQUEST_STATE_NON_OFFLOAD] * 3,
         16256,
         14336,
         id="local-all-non-offload",
     ),
     pytest.param(
         [1, 4, 7],
-        [-2, -2, -2],
+        [REQUEST_STATE_FIRST_DECODE] * 3,
         16256,
         14336,
         id="local-all-first-decode",
     ),
-    pytest.param([1, 4, 7], [-1, -1, -1], 16256, 14336, id="local-all-steady"),
-    pytest.param([1, 4, 7], [-3, -2, -1], 16256, 14336, id="local-mixed-state"),
+    pytest.param([1, 4, 7], [REQUEST_STATE_STEADY] * 3, 16256, 14336, id="local-all-steady"),
+    pytest.param(
+        [1, 4, 7],
+        [REQUEST_STATE_NON_OFFLOAD, REQUEST_STATE_FIRST_DECODE, REQUEST_STATE_STEADY],
+        16256,
+        14336,
+        id="local-mixed-state",
+    ),
     pytest.param(
         [8, 12, 14],
-        [-3, -3, -3],
+        [REQUEST_STATE_NON_OFFLOAD] * 3,
         32768,
-        32640,
+        MAX_CACHE_TOKENS,
         id="wide-all-non-offload",
     ),
     pytest.param(
         [8, 12, 14],
-        [-2, -2, -2],
+        [REQUEST_STATE_FIRST_DECODE] * 3,
         32768,
-        32640,
+        MAX_CACHE_TOKENS,
         id="wide-all-first-decode",
     ),
-    pytest.param([8, 12, 14], [-1, -1, -1], 32768, 32640, id="wide-all-steady"),
-    pytest.param([8, 12, 14], [-3, -2, -1], 32768, 32640, id="wide-mixed-state"),
+    pytest.param(
+        [8, 12, 14],
+        [REQUEST_STATE_STEADY] * 3,
+        32768,
+        MAX_CACHE_TOKENS,
+        id="wide-all-steady",
+    ),
+    pytest.param(
+        [8, 12, 14],
+        [REQUEST_STATE_NON_OFFLOAD, REQUEST_STATE_FIRST_DECODE, REQUEST_STATE_STEADY],
+        32768,
+        MAX_CACHE_TOKENS,
+        id="wide-mixed-state",
+    ),
     pytest.param(
         [1, 4, 7, 8, 12, 14],
-        [-3, -2, -1, -3, -2, -1],
+        [
+            REQUEST_STATE_NON_OFFLOAD,
+            REQUEST_STATE_FIRST_DECODE,
+            REQUEST_STATE_STEADY,
+        ]
+        * 2,
         32768,
-        32640,
+        MAX_CACHE_TOKENS,
         id="mixed-local-wide-state",
     ),
 )
 
 LONG_SEQUENCE_SCENARIOS = (
-    pytest.param([1], [-1], 131200, 8192, 1 << 17, torch.bfloat16, 32, id="cross-2pow17"),
-    pytest.param([4], [-1], 262272, 12288, 1 << 18, torch.bfloat16, 32, id="cross-2pow18"),
-    pytest.param([7], [-2], 524416, 14336, 1 << 19, torch.bfloat16, 64, id="cross-2pow19"),
-    pytest.param([14], [-1], 1048704, 32640, 1 << 20, torch.float16, 64, id="cross-2pow20"),
+    pytest.param(
+        [1], [REQUEST_STATE_STEADY], 131200, 8192, 1 << 17, torch.bfloat16, SMALL_HEAD_COUNT, id="cross-2pow17"
+    ),
+    pytest.param(
+        [4], [REQUEST_STATE_STEADY], 262272, 12288, 1 << 18, torch.bfloat16, SMALL_HEAD_COUNT, id="cross-2pow18"
+    ),
+    pytest.param(
+        [7], [REQUEST_STATE_FIRST_DECODE], 524416, 14336, 1 << 19, torch.bfloat16, LARGE_HEAD_COUNT, id="cross-2pow19"
+    ),
+    pytest.param(
+        [14],
+        [REQUEST_STATE_STEADY],
+        1048704,
+        MAX_CACHE_TOKENS,
+        1 << 20,
+        torch.float16,
+        LARGE_HEAD_COUNT,
+        id="cross-2pow20",
+    ),
     pytest.param(
         [1],
-        [-1],
+        [REQUEST_STATE_STEADY],
         2097024,
         8192,
         (1 << 21) - 256,
         torch.bfloat16,
-        32,
+        SMALL_HEAD_COUNT,
         id="near-2pow21-limit",
     ),
     pytest.param(
         [1, 4, 7],
-        [-3, -2, -1],
+        [REQUEST_STATE_NON_OFFLOAD, REQUEST_STATE_FIRST_DECODE, REQUEST_STATE_STEADY],
         131200,
         14336,
         1 << 17,
         torch.float16,
-        64,
+        LARGE_HEAD_COUNT,
         id="long-mixed-state-mtp",
     ),
 )
@@ -206,7 +260,7 @@ def _build_case(
     offload_len: int,
     cache_tokens: int,
     dtype: torch.dtype = torch.bfloat16,
-    heads: int = 32,
+    heads: int = SMALL_HEAD_COUNT,
     seed: int = 7,
     random_block_table: bool = True,
     validate_routes: bool = True,
@@ -221,8 +275,8 @@ def _build_case(
     actual_len = offload_len + BLOCK_SIZE
     source_capacity = actual_len
     block_count = source_capacity // BLOCK_SIZE
-    pool_size = batch_size * 2 + 1
-    req_entries = [request * 2 + 1 for request in range(batch_size)]
+    pool_size = batch_size * POOL_ENTRY_STRIDE + FIRST_POOL_ENTRY
+    req_entries = [request * POOL_ENTRY_STRIDE + FIRST_POOL_ENTRY for request in range(batch_size)]
 
     torch.manual_seed(seed)
     query = torch.randn(total_queries, heads, HEAD_DIM, dtype=dtype, device="npu")
@@ -237,7 +291,7 @@ def _build_case(
     )
 
     if random_block_table:
-        generator = torch.Generator().manual_seed(seed + 1009)
+        generator = torch.Generator().manual_seed(seed + BLOCK_TABLE_SEED_OFFSET)
         table_cpu = torch.stack(
             [torch.randperm(block_count, generator=generator, dtype=torch.int64) for _ in range(batch_size)]
         ).to(torch.int32)
@@ -250,7 +304,7 @@ def _build_case(
 
     cache_cpu = torch.full((pool_size, source_capacity), INVALID_SLOT, dtype=torch.int32)
     for request, state in enumerate(states):
-        if state == -1:
+        if state == REQUEST_STATE_STEADY:
             row = req_entries[request]
             cache_cpu[row, :cache_tokens] = torch.arange(cache_tokens, dtype=torch.int32)
 
@@ -297,12 +351,12 @@ def _make_outputs(case: ManageCase) -> tuple[torch.Tensor, ...]:
     batch_size = len(case.q_values)
     device = case.query.device
     return (
-        torch.full((total_queries, 1, TOPK), -313, dtype=torch.int32, device=device),
-        torch.full((total_queries, 1, TOPK), -313, dtype=torch.int32, device=device),
-        torch.full((total_queries,), -313, dtype=torch.int32, device=device),
-        torch.full((batch_size, MISS_CAPACITY), -313, dtype=torch.int32, device=device),
-        torch.full((batch_size, MISS_CAPACITY), -313, dtype=torch.int32, device=device),
-        torch.full((batch_size,), -313, dtype=torch.int32, device=device),
+        torch.full((total_queries, 1, TOPK), OUTPUT_SENTINEL, dtype=torch.int32, device=device),
+        torch.full((total_queries, 1, TOPK), OUTPUT_SENTINEL, dtype=torch.int32, device=device),
+        torch.full((total_queries,), OUTPUT_SENTINEL, dtype=torch.int32, device=device),
+        torch.full((batch_size, MISS_CAPACITY), OUTPUT_SENTINEL, dtype=torch.int32, device=device),
+        torch.full((batch_size, MISS_CAPACITY), OUTPUT_SENTINEL, dtype=torch.int32, device=device),
+        torch.full((batch_size,), OUTPUT_SENTINEL, dtype=torch.int32, device=device),
     )
 
 
@@ -323,12 +377,12 @@ def _call_op(case: ManageCase, cache: torch.Tensor, outputs: tuple[torch.Tensor,
         request_state=case.request_state,
         req_pool_entries=case.req_pool_entries,
         cache_slots_pool=cache,
-        topk_src_ids=outputs[0],
-        topk_dst_slots=outputs[1],
-        topk_miss_counts=outputs[2],
-        miss_src_ids=outputs[3],
-        miss_dst_slots=outputs[4],
-        miss_counts=outputs[5],
+        topk_src_ids=outputs[TOPK_SOURCE_OUTPUT],
+        topk_dst_slots=outputs[TOPK_SLOT_OUTPUT],
+        topk_miss_counts=outputs[TOPK_MISS_COUNT_OUTPUT],
+        miss_src_ids=outputs[MISS_SOURCE_OUTPUT],
+        miss_dst_slots=outputs[MISS_SLOT_OUTPUT],
+        miss_counts=outputs[MISS_COUNT_OUTPUT],
     )
     assert result is None
 
@@ -337,7 +391,7 @@ def _visible_lengths(case: ManageCase) -> list[int]:
     result = []
     for request, q in enumerate(case.q_values):
         for route in range(q):
-            if case.states[request] == -3:
+            if case.states[request] == REQUEST_STATE_NON_OFFLOAD:
                 result.append(case.actual_key[request] - (q - 1 - route))
             else:
                 result.append(case.offload_key[request])
@@ -369,7 +423,7 @@ def _build_occurrence_boundary_case(q: int, occurrence_count: int) -> ManageCase
     extra = ((occurrence_count + BLOCK_SIZE - 1) // BLOCK_SIZE) * BLOCK_SIZE
     case = _build_case(
         q_values=[q],
-        states=[-1],
+        states=[REQUEST_STATE_STEADY],
         offload_len=cache_tokens + extra,
         cache_tokens=cache_tokens,
         random_block_table=False,
@@ -442,13 +496,13 @@ def _run_and_assert(case: ManageCase) -> tuple[torch.Tensor, tuple[torch.Tensor,
         query_end = query_start + q
         state = case.states[request]
         row = case.req_entries[request]
-        length = case.actual_key[request] if state == -3 else case.offload_key[request]
+        length = case.actual_key[request] if state == REQUEST_STATE_NON_OFFLOAD else case.offload_key[request]
         valid = min(length, TOPK)
 
         for route in range(query_start, query_end):
             actual_topk = src[route, 0, :valid]
             expected_topk = reference[route, :valid]
-            if state == -3:
+            if state == REQUEST_STATE_NON_OFFLOAD:
                 torch.testing.assert_close(actual_topk, expected_topk, rtol=0, atol=0)
                 torch.testing.assert_close(dst[route], src[route], rtol=0, atol=0)
                 assert int(route_miss[route]) == 0
@@ -467,7 +521,7 @@ def _run_and_assert(case: ManageCase) -> tuple[torch.Tensor, tuple[torch.Tensor,
                 assert torch.all(src[route, 0, valid:] == PADDING_ID)
                 assert torch.all(dst[route, 0, valid:] == PADDING_ID)
 
-        if state == -3:
+        if state == REQUEST_STATE_NON_OFFLOAD:
             assert int(miss_count[request]) == 0
             torch.testing.assert_close(
                 cache_cpu[row],
@@ -475,7 +529,7 @@ def _run_and_assert(case: ManageCase) -> tuple[torch.Tensor, tuple[torch.Tensor,
                 rtol=0,
                 atol=0,
             )
-        elif state == -2:
+        elif state == REQUEST_STATE_FIRST_DECODE:
             capacity = case.cache_tokens[request]
             assert int(miss_count[request]) == capacity
             assert torch.all(route_miss[query_start:query_end] == TOPK)
@@ -524,13 +578,13 @@ def _run_and_assert(case: ManageCase) -> tuple[torch.Tensor, tuple[torch.Tensor,
 
 @pytest.mark.parametrize(
     "dtype,heads",
-    [(torch.bfloat16, 32), (torch.float16, 64)],
+    [(torch.bfloat16, SMALL_HEAD_COUNT), (torch.float16, LARGE_HEAD_COUNT)],
 )
 @torch.inference_mode()
 def test_fused_lightning_indexer_manage_non_offload_matches_native(dtype, heads):
     case = _build_case(
         q_values=[1],
-        states=[-3],
+        states=[REQUEST_STATE_NON_OFFLOAD],
         offload_len=896,
         cache_tokens=896,
         dtype=dtype,
@@ -544,7 +598,7 @@ def test_fused_lightning_indexer_manage_non_offload_matches_native(dtype, heads)
 def test_fused_lightning_indexer_manage_first_decode_initializes_cache(q_values, offload_len, cache_tokens):
     case = _build_case(
         q_values=q_values,
-        states=[-2] * len(q_values),
+        states=[REQUEST_STATE_FIRST_DECODE] * len(q_values),
         offload_len=offload_len,
         cache_tokens=cache_tokens,
     )
@@ -556,27 +610,30 @@ def test_fused_lightning_indexer_manage_first_decode_initializes_cache(q_values,
 def test_fused_lightning_indexer_manage_steady_replacement_then_all_hit(q_values, offload_len, cache_tokens):
     case = _build_case(
         q_values=q_values,
-        states=[-1] * len(q_values),
+        states=[REQUEST_STATE_STEADY] * len(q_values),
         offload_len=offload_len,
         cache_tokens=cache_tokens,
     )
     updated_cache, outputs = _run_and_assert(case)
-    assert torch.any(outputs[5] > 0)
+    assert torch.any(outputs[MISS_COUNT_OUTPUT] > 0)
 
     repeated = replace(case, cache_seed=updated_cache.clone())
     repeated_cache, repeated_outputs = _run_and_assert(repeated)
-    assert torch.all(repeated_outputs[2] == 0)
-    assert torch.all(repeated_outputs[5] == 0)
+    assert torch.all(repeated_outputs[TOPK_MISS_COUNT_OUTPUT] == 0)
+    assert torch.all(repeated_outputs[MISS_COUNT_OUTPUT] == 0)
     torch.testing.assert_close(repeated_cache, updated_cache, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize(
     "states",
     [
-        pytest.param([-3, -3, -3], id="all-non-offload"),
-        pytest.param([-2, -2, -2], id="all-first-decode"),
-        pytest.param([-1, -1, -1], id="all-steady"),
-        pytest.param([-3, -2, -1], id="mixed-state"),
+        pytest.param([REQUEST_STATE_NON_OFFLOAD] * 3, id="all-non-offload"),
+        pytest.param([REQUEST_STATE_FIRST_DECODE] * 3, id="all-first-decode"),
+        pytest.param([REQUEST_STATE_STEADY] * 3, id="all-steady"),
+        pytest.param(
+            [REQUEST_STATE_NON_OFFLOAD, REQUEST_STATE_FIRST_DECODE, REQUEST_STATE_STEADY],
+            id="mixed-state",
+        ),
     ],
 )
 @torch.inference_mode()
@@ -594,11 +651,11 @@ def test_fused_lightning_indexer_manage_state_patterns(states):
 def test_fused_lightning_indexer_manage_mixed_state_mtp():
     case = _build_case(
         q_values=[1, 4, 8],
-        states=[-3, -2, -1],
+        states=[REQUEST_STATE_NON_OFFLOAD, REQUEST_STATE_FIRST_DECODE, REQUEST_STATE_STEADY],
         offload_len=16512,
         cache_tokens=16384,
         dtype=torch.float16,
-        heads=64,
+        heads=LARGE_HEAD_COUNT,
     )
     _run_and_assert(case)
 
@@ -609,7 +666,10 @@ def test_fused_lightning_indexer_manage_lifecycle():
     offload_len = 8320
     cache_tokens = 8192
 
-    for sequence in ((-2, -1, -1), (-3, -2, -1)):
+    for sequence in (
+        (REQUEST_STATE_FIRST_DECODE, REQUEST_STATE_STEADY, REQUEST_STATE_STEADY),
+        (REQUEST_STATE_NON_OFFLOAD, REQUEST_STATE_FIRST_DECODE, REQUEST_STATE_STEADY),
+    ):
         cache = None
         last_outputs = None
         for state in sequence:
@@ -623,20 +683,20 @@ def test_fused_lightning_indexer_manage_lifecycle():
                 case.cache_seed = cache
             cache, last_outputs = _run_and_assert(case)
         assert cache is not None and last_outputs is not None
-        if sequence[-2:] == (-1, -1):
-            assert torch.all(last_outputs[2] == 0)
-            assert torch.all(last_outputs[5] == 0)
+        if sequence[-2:] == (REQUEST_STATE_STEADY, REQUEST_STATE_STEADY):
+            assert torch.all(last_outputs[TOPK_MISS_COUNT_OUTPUT] == 0)
+            assert torch.all(last_outputs[MISS_COUNT_OUTPUT] == 0)
 
     standard = _build_case(
         q_values=q_values,
-        states=[-3, -3],
+        states=[REQUEST_STATE_NON_OFFLOAD] * 2,
         offload_len=offload_len,
         cache_tokens=cache_tokens,
     )
     identity_cache, _ = _run_and_assert(standard)
     transition = _build_case(
         q_values=q_values,
-        states=[-1, -1],
+        states=[REQUEST_STATE_STEADY] * 2,
         offload_len=offload_len,
         cache_tokens=cache_tokens,
     )
@@ -651,8 +711,8 @@ def test_fused_lightning_indexer_manage_lifecycle():
 
     stable = replace(transition, cache_seed=identity_cache.clone())
     stable_cache, stable_outputs = _run_and_assert(stable)
-    assert torch.all(stable_outputs[2] == 0)
-    assert torch.all(stable_outputs[5] == 0)
+    assert torch.all(stable_outputs[TOPK_MISS_COUNT_OUTPUT] == 0)
+    assert torch.all(stable_outputs[MISS_COUNT_OUTPUT] == 0)
     torch.testing.assert_close(stable_cache, identity_cache, rtol=0, atol=0)
 
 
@@ -717,8 +777,8 @@ def test_fused_lightning_indexer_manage_mixed_batch_matrix(q_values, states, off
 def test_fused_lightning_indexer_manage_occurrence_sort_boundaries(q, occurrence_count):
     case = _build_occurrence_boundary_case(q, occurrence_count)
     _, outputs = _run_and_assert(case)
-    assert int(outputs[2].sum()) == occurrence_count
-    assert int(outputs[5][0]) == occurrence_count
+    assert int(outputs[TOPK_MISS_COUNT_OUTPUT].sum()) == occurrence_count
+    assert int(outputs[MISS_COUNT_OUTPUT][0]) == occurrence_count
 
 
 @pytest.mark.parametrize(
@@ -754,15 +814,20 @@ def test_fused_lightning_indexer_manage_long_sequence_source_ids(
 
 @torch.inference_mode()
 def test_fused_lightning_indexer_manage_rejects_invalid_contract():
-    case = _build_case(q_values=[4], states=[-1], offload_len=8320, cache_tokens=8192)
+    case = _build_case(
+        q_values=[4],
+        states=[REQUEST_STATE_STEADY],
+        offload_len=8320,
+        cache_tokens=8192,
+    )
 
     bad_scale = replace(case, query_dequant_scale=case.query_dequant_scale.to(torch.float16))
     with pytest.raises(RuntimeError, match="dequant scales must be fp32"):
         _call_op(bad_scale, bad_scale.cache_seed.clone(), _make_outputs(bad_scale))
 
     bad_outputs = list(_make_outputs(case))
-    bad_outputs[3] = torch.empty((1, 16384), dtype=torch.int32, device="npu")
-    bad_outputs[4] = torch.empty_like(bad_outputs[3])
+    bad_outputs[MISS_SOURCE_OUTPUT] = torch.empty((1, MISS_CAPACITY // 2), dtype=torch.int32, device="npu")
+    bad_outputs[MISS_SLOT_OUTPUT] = torch.empty_like(bad_outputs[MISS_SOURCE_OUTPUT])
     with pytest.raises(RuntimeError, match="miss outputs must be"):
         _call_op(case, case.cache_seed.clone(), tuple(bad_outputs))
 
@@ -780,9 +845,9 @@ def test_fused_lightning_indexer_manage_rejects_invalid_contract():
 
     q15 = _build_case(
         q_values=[15],
-        states=[-3],
+        states=[REQUEST_STATE_NON_OFFLOAD],
         offload_len=32768,
-        cache_tokens=32640,
+        cache_tokens=MAX_CACHE_TOKENS,
         validate_routes=False,
     )
     with pytest.raises(RuntimeError):
