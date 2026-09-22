@@ -166,8 +166,8 @@ class AscendMMEncoderAttention(MMEncoderAttention):
     ) -> torch.Tensor:
         fia_kwargs = dict(
             query=query,
-            key=key.contiguous(),
-            value=value.contiguous(),
+            key=key,
+            value=value,
             atten_mask=None,
             block_table=None,
             input_layout="TND",
@@ -213,6 +213,8 @@ class AscendMMEncoderAttention(MMEncoderAttention):
             cudagraph_mm_encoder=False,
         )
         q, k, v, origin_head_dim = self._maybe_pad_qkv(query, key, value)
+        k = k.contiguous()
+        v = v.contiguous()
         context_layer = self._run_vit_fia(q, k, v, actual_seq_lengths_q, actual_seq_lengths_kv)
         context_layer = self._maybe_unpad_output(context_layer, origin_head_dim)
         return self._restore_batch_layout(
@@ -249,6 +251,11 @@ class AscendMMEncoderAttention(MMEncoderAttention):
             cudagraph_mm_encoder=True,
         )
         q, k, v, origin_head_dim = self._maybe_pad_qkv(query, key, value)
+        # FIA requires contiguous K/V tensors. Materialize them before graph-task
+        # capture so the tensors retained in ``attn_params`` are exactly the
+        # tensors whose addresses were captured by the operator.
+        k = k.contiguous()
+        v = v.contiguous()
 
         out = torch.empty_like(q)
         softmax_lse = torch.empty(1, dtype=q.dtype, device=q.device)
