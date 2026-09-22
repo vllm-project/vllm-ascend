@@ -7,6 +7,15 @@ from vllm.distributed import get_dcp_group
 
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
 
+_DCP_MTP_COMM_STREAM: torch.npu.Stream | None = None
+
+
+def _dcp_mtp_comm_stream() -> torch.npu.Stream:
+    global _DCP_MTP_COMM_STREAM
+    if _DCP_MTP_COMM_STREAM is None:
+        _DCP_MTP_COMM_STREAM = torch_npu.npu.Stream()
+    return _DCP_MTP_COMM_STREAM
+
 
 def get_cp_local_query_key_lens(
     query_start_loc: torch.Tensor,

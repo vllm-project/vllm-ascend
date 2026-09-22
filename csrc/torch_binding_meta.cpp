@@ -5,6 +5,45 @@
 #include <torch_npu/csrc/framework/OpCommand.h>
 #include <torch_npu/csrc/npu/Module.h>
 #include "utils.h"
+
+namespace vllm_ascend {
+at::Tensor flash_mla_with_kvcache_metadata_meta(
+    const at::Tensor &cache_seqlens,
+    int64_t num_heads_q,
+    int64_t num_heads_kv,
+    const c10::optional<at::Tensor> &cu_seqlens_q,
+    const c10::optional<at::Tensor> &seqused_q,
+    int64_t max_seqlen_q,
+    int64_t max_seqlen_kv,
+    int64_t head_dim_qk,
+    int64_t head_dim_v,
+    int64_t mask_mode,
+    c10::string_view layout_q,
+    bool is_c8);
+
+std::tuple<at::Tensor, at::Tensor> flash_mla_with_kvcache_meta(
+    const at::Tensor &query,
+    const at::Tensor &k_cache,
+    const c10::optional<at::Tensor> &block_table,
+    const c10::optional<at::Tensor> &cache_seqlens,
+    const c10::optional<at::Tensor> &cu_seqlens_q,
+    const c10::optional<at::Tensor> &seqused_q,
+    const c10::optional<at::Tensor> &attn_mask,
+    const c10::optional<at::Tensor> &metadata,
+    int64_t head_dim_v,
+    double softmax_scale,
+    int64_t mask_mode,
+    int64_t max_seqlen_q,
+    int64_t max_seqlen_kv,
+    c10::string_view layout_q,
+    c10::string_view layout_kv,
+    const c10::optional<c10::string_view> &layout_out,
+    bool return_softmax_lse,
+    const c10::optional<at::Tensor> &query_rope,
+    const c10::optional<at::Tensor> &key_rope,
+    const c10::optional<at::Tensor> &dequant_scale_query,
+    const c10::optional<at::Tensor> &dequant_scale_key);
+}
 /*
  * How to write a meta implementation for a custom operator (meta kernel):
  *
@@ -2055,6 +2094,7 @@ std::tuple<at::Tensor, at::Tensor> situ_mx_quant_meta(
 // Pybind on Ascend 310P
 namespace {
 TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
+
     ops.impl("get_physical_device_id", &vllm_ascend::meta::get_physical_device_id_meta);
     // causal_conv1d_310
     ops.impl("npu_causal_conv1d_310", &vllm_ascend::meta::npu_causal_conv1d_310_meta);
@@ -2076,6 +2116,9 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
 // Pybind on other platform
 namespace {
 TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
+    ops.impl("flash_mla_with_kvcache_metadata", &vllm_ascend::flash_mla_with_kvcache_metadata_meta);
+    ops.impl("flash_mla_with_kvcache", &vllm_ascend::flash_mla_with_kvcache_meta);
+
     ops.impl("get_physical_device_id", &vllm_ascend::meta::get_physical_device_id_meta);
     //Gemma rmsnorm meta implementation
     ops.impl("npu_gemma_rms_norm", &vllm_ascend::meta::npu_gemma_rms_norm_meta);

@@ -36,6 +36,9 @@ def _strict_binary_env(name: str, default: str = "0") -> bool:
 
 
 env_variables: dict[str, Callable[[], Any]] = {
+    # A5 FlashMLA BF16/FP8 E4M3 backend and packed cache views.
+    # Non-sensitive: 0 (default) disables it, 1 enables it.
+    "VLLM_ASCEND_ENABLE_FLASH_MLA": lambda: _strict_binary_env("VLLM_ASCEND_ENABLE_FLASH_MLA"),
     # max compile thread number for package building. Usually, it is set to
     # the number of CPU cores. If not set, the default value is None, which
     # means all number of CPU cores will be used.

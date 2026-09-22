@@ -60,6 +60,9 @@
 #include "moe/dequant_situ_quant/dequant_situ_quant_torch_adpt.h"
 #include "moe/situ_mx_quant/situ_mx_quant_torch_adpt.h"
 #include "attention/mla_prolog_v3_k3/mla_prolog_v3_k3_torch_adpt.h"
+#include "attention/flash_mla_with_kvcache/flash_mla_torch_adpt.h"
+#include "attention/gather_mla_prefill/gather_mla_prefill_torch_adpt.h"
+#include "attention/flash_mla_bf16_prepare/flash_mla_bf16_prepare_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
 #include <c10/util/Exception.h>
@@ -2877,6 +2880,36 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.def("swap_blocks(Tensor! x, Tensor! y, Tensor z) -> ()");
     ops.impl("swap_blocks", torch::kPrivateUse1, &vllm_ascend::swap_blocks);
 #endif
+
+    ops.def(
+        "flash_mla_with_kvcache_metadata(Tensor cache_seqlens, int num_heads_q, int num_heads_kv, "
+        "Tensor? cu_seqlens_q=None, Tensor? seqused_q=None, int max_seqlen_q=-1, "
+        "int max_seqlen_kv=-1, int head_dim_qk=576, int head_dim_v=512, "
+        "int mask_mode=0, str layout_q='BSND', bool is_c8=False) -> Tensor");
+    ops.impl("flash_mla_with_kvcache_metadata", torch::kPrivateUse1,
+             &vllm_ascend::flash_mla_with_kvcache_metadata);
+
+    ops.def(
+        "flash_mla_with_kvcache(Tensor q, Tensor k_cache, Tensor? block_table=None, "
+        "Tensor? cache_seqlens=None, Tensor? cu_seqlens_q=None, Tensor? seqused_q=None, "
+        "Tensor? attn_mask=None, Tensor? metadata=None, int head_dim_v=512, "
+        "float softmax_scale=1.0, int mask_mode=0, int max_seqlen_q=-1, "
+        "int max_seqlen_kv=-1, str layout_q='TND', str layout_kv='PA_NZ', "
+        "str? layout_out=None, bool return_softmax_lse=False, "
+        "Tensor? query_rope=None, Tensor? key_rope=None, "
+        "Tensor? dequant_scale_query=None, Tensor? dequant_scale_key=None) -> (Tensor, Tensor)");
+    ops.impl("flash_mla_with_kvcache", torch::kPrivateUse1,
+             &vllm_ascend::flash_mla_with_kvcache);
+
+    ops.def("gather_mla_prefill(Tensor latent_cache, Tensor rope_cache, Tensor block_table, "
+        "Tensor cumulative_lengths, Tensor lengths, Tensor starts, Tensor scale, int num_tokens, "
+        "int max_seq_len) -> (Tensor, Tensor)");
+    ops.impl("gather_mla_prefill", torch::kPrivateUse1, &vllm_ascend::gather_mla_prefill);
+    ops.impl("gather_mla_prefill", torch::kMeta, &vllm_ascend::gather_mla_prefill_meta);
+
+    ops.def("flash_mla_bf16_prepare(Tensor key_nope, Tensor value, Tensor key_rope) -> (Tensor, Tensor)");
+    ops.impl("flash_mla_bf16_prepare", torch::kPrivateUse1, &vllm_ascend::flash_mla_bf16_prepare);
+    ops.impl("flash_mla_bf16_prepare", torch::kMeta, &vllm_ascend::flash_mla_bf16_prepare_meta);
 
     // K3 MLA prolog uses a distinct ACLNN/operator name to keep CANN's MlaPrologV3 available.
     ops.def(

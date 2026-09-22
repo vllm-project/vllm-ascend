@@ -13,7 +13,7 @@ from copy import copy
 import torch
 import vllm.envs as envs
 from torch import nn
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
@@ -23,6 +23,7 @@ from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
+    DCPGroupColumnParallelLinear,
     ReplicatedLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -280,7 +281,7 @@ class AscendKimiMoE(nn.Module):
 
 
 class AscendKimiMLAAttention(UpstreamKimiMLAAttention):
-    """Extend vLLM's generic Kimi MLA only for DSpark RoPE metadata."""
+    """Adapt Kimi MLA projection geometry and DSpark RoPE metadata."""
 
     def __init__(
         self,
@@ -317,6 +318,27 @@ class AscendKimiMLAAttention(UpstreamKimiMLAAttention):
             prefix=prefix,
         )
         attention_layer = self._attention_layer
+        parallel_config = get_current_vllm_config().parallel_config
+        qrep_requested = (
+            envs.VLLM_DCP_Q_REPLICATE if envs.is_set("VLLM_DCP_Q_REPLICATE") else parallel_config.dcp_q_replicate
+        )
+        if (
+            qrep_requested
+            and parallel_config.decode_context_parallel_size > 1
+            and parallel_config.prefill_context_parallel_size == 1
+        ):
+            # Replace the projection before checkpoint loading. Keep its model
+            # attribute and the backend reference on the same weight module.
+            name = "q_b_proj" if q_lora_rank is not None else "q_proj"
+            projection = DCPGroupColumnParallelLinear(
+                q_lora_rank if q_lora_rank is not None else hidden_size,
+                num_heads * (qk_nope_head_dim + qk_rope_head_dim),
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.{name}",
+            )
+            setattr(self, name, projection)
+            attention_layer.impl.q_proj = projection
         if disable_mlapo:
             attention_layer.impl.enable_mlapo = False
             mark_fused_preprocess_weights(attention_layer.impl)
