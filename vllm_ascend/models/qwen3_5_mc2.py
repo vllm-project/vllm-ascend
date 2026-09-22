@@ -50,18 +50,30 @@ from vllm.model_executor.models.qwen3_vl import (
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.utils.torch_utils import direct_register_custom_op
 
+_ascend_tp_group = None
+_ascend_hcomm = None
 
-def _mm_all_reduce_base_impl(x1: torch.Tensor, x2: torch.Tensor, hcom: str) -> torch.Tensor:
+
+def _mm_all_reduce_base_impl(x1: torch.Tensor, x2: torch.Tensor) -> torch.Tensor:
     # Capture guard must live here (not in outer Python): dynamo specializes
     # outer guards away at compile time, so only this impl runs during ACL
     # capture. The MC2 comm-resource alloc does a sync memcpy, prohibited
     # under capture modes GLOBAL/MAX (EE1016).
     if torch.npu.is_current_stream_capturing():
         return tensor_model_parallel_all_reduce(torch.matmul(x1, x2))
-    return torch_npu.npu_mm_all_reduce_base(x1, x2, hcom, bias=None)
+    global _ascend_hcomm
+    if _ascend_hcomm is None:
+        # Fetch lazily at the first eager call, where the TP ranks run in
+        # lockstep (same mechanism as the stock allreduce path). Fetching at
+        # model-init time triggered the TP group's HCCL comm creation
+        # (hcclCommInitRootInfoConfig) while the ranks were skewed across
+        # model construction, failing with EI0015 RootInfoDetect.
+        rank = torch.distributed.get_rank(group=_ascend_tp_group)
+        _ascend_hcomm = _ascend_tp_group._get_backend(torch.device("npu")).get_hccl_comm_name(rank)
+    return torch_npu.npu_mm_all_reduce_base(x1, x2, _ascend_hcomm, bias=None)
 
 
-def _mm_all_reduce_base_fake(x1: torch.Tensor, x2: torch.Tensor, hcom: str) -> torch.Tensor:
+def _mm_all_reduce_base_fake(x1: torch.Tensor, x2: torch.Tensor) -> torch.Tensor:
     return torch.empty((x1.shape[0], x2.shape[1]), dtype=x1.dtype, device=x1.device)
 
 
@@ -93,7 +105,7 @@ def _fused_forward_factory(orig_forward):
                 input_parallel = split_tensor_along_last_dim(input_, num_partitions=self.tp_size)[
                     self.tp_rank
                 ].contiguous()
-            output = torch.ops.vllm.ascend_mm_all_reduce(input_parallel, self.weight.t(), self._ascend_hcomm)
+            output = torch.ops.vllm.ascend_mm_all_reduce(input_parallel, self.weight.t())
             return (output, None) if self.return_bias else output
         return orig_forward(input_)
 
@@ -114,25 +126,15 @@ class _AscendMC2Mixin:
         tp = get_tp_group()
         if tp.world_size <= 1:
             return
-        group = tp.device_group
-        # Group-local rank, matching the other get_hccl_comm_name call sites
-        # (ops/fused_moe/token_dispatcher.py, quantization w8a8/w4a8): a
-        # global rank outside the group's comm coverage makes the backend
-        # create a NEW communicator.
-        rank = torch.distributed.get_rank(group=group)
-        # get_hccl_comm_name may collectively create the comm when the TP
-        # group's HCCL comm is not materialized yet (its first collective
-        # normally happens later, during weight loading). Barrier so both
-        # ranks reach that creation together instead of racing through
-        # model init (TP0 was seen reaching compilation while TP1 still
-        # initialized, failing with EI0015 RootInfoDetect).
-        torch.distributed.barrier(group=group)
-        hcom = group._get_backend(torch.device("npu")).get_hccl_comm_name(rank)
+        # Only stash the group reference here (no collective): the HCCL comm
+        # name is fetched lazily at the first eligible call inside the custom
+        # op impl, where the TP ranks run in lockstep — see _mm_all_reduce_base_impl.
+        global _ascend_tp_group
+        _ascend_tp_group = tp.device_group
         # Instance-level forward replacement: only this model's own
         # reduce_results RowParallelLinear modules are touched.
         for module in self.modules():
             if isinstance(module, RowParallelLinear) and module.reduce_results:
-                module._ascend_hcomm = hcom
                 module.forward = types.MethodType(_fused_forward_factory(module.forward), module)
 
 
