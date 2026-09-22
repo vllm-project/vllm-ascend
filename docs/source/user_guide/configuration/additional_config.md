@@ -160,7 +160,7 @@ The legacy top-level `enable_balance_scheduling`, `recompute_scheduler_enable`, 
 | `enabled`       | bool  | `False` | Whether to enable dynamic chunked pipeline parallel. Requires `pipeline-parallel-size > 1`. |
 | `smooth_factor` | float | `1.0`   | Smoothing factor (0 < x ≤ 1.0). Higher values trust the dynamic prediction more; `0.0` disables dynamic adjustment. |
 | `min_chunk`     | int   | `4096`  | Minimum chunk size for dynamic calculation. Should be smaller than `max-num-batched-tokens`. |
-| `need_timing` | bool | True | Enable/disable Online Calibration |
+| `need_timing` | bool | True | Enable/disable Online Calibration. Forced to `False` when asynchronous scheduling is enabled (startup profiling still applies). |
 | `max_fit_chunk` | int | 30 | Number of chunk-time data for Online Calibration |
 
 **scheduler_config.dyntra_lb_config**

@@ -37,7 +37,7 @@ In a PD disaggregation setup, enable CPP **only on the P (Prefiller) node**. Bel
 
 Note:
 
-- It is currently known that `async-scheduling` may cause performance degradation in the prefill stage of PP, and `async-scheduling` provides minimal benefit to prefill. Therefore, it is currently recommended not to enable asynchronous scheduling on P nodes of PP.
+- CPP supports asynchronous scheduling (`--async-scheduling`) only with Model Runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`). Enabling asynchronous scheduling together with CPP on Model Runner V1 fails startup with a configuration error. When asynchronous scheduling is enabled, online calibration (`need_timing`) is automatically disabled and only the startup profiling is retained. Short Request First (SRF) scheduling combined with CPP still requires synchronous scheduling.
 - It is recommended to use `MooncakeConnectorV1` as the `kv_connector`, as it provides more comprehensive support for PP.
 
 === "P Node (Prefiller — with CPP)"
@@ -190,7 +190,7 @@ Note:
 | `enabled` | bool | False | Enable/disable Dynamic Chunked Pipeline Parallel |
 | `smooth_factor` | float | 1.0 | Smoothing factor (0 < x ≤ 1.0). Higher values trust dynamic prediction more |
 | `min_chunk` | int | 4096 | Minimum chunk size for dynamic calculation |
-| `need_timing` | bool | True | Enable/disable Online Calibration |
+| `need_timing` | bool | True | Enable/disable Online Calibration. Forced to `False` when asynchronous scheduling is enabled (startup profiling still applies). |
 | `max_fit_chunk` | int | 30 | Number of chunk-time data for Online Calibration |
 
 The `--max-num-batched-tokens` and `smooth_factor` parameters need to be adjusted. It is recommended that you adjust the `--max-num-batched-tokens` parameter first and then adjust the `smooth_factor`.
