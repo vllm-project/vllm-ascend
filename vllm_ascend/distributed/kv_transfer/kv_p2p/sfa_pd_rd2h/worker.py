@@ -144,6 +144,9 @@ class SFAPDRD2HConsumerWorker:
         # rank has finished the same request. This is scheduler readiness state,
         # not a per-layer barrier.
         self._terminal_ext_ids: set[str] = set()
+        self._rendezvous_failed_ext_ids: set[str] = set()
+        self._reported_terminal_ext_ids: set[str] = set()
+        self._deferred_cleanup_ids: set[str] = set()
 
     # ------------------------------------------------------------------
     # Common
@@ -189,6 +192,28 @@ class SFAPDRD2HConsumerWorker:
                 indexer_ids = list(getattr(req, "indexer_block_ids", []) or [])
                 self._dest_blocks_by_req[ext_id] = (main_ids, indexer_ids)
                 self._cpu_blocks_by_req[req_id] = len(main_ids)
+                if self._mf_read_thread is not None:
+                    self._mf_read_thread.rearm_requests({ext_id})
+
+        for failed_req_id, main_ids, indexer_ids in getattr(metadata, "failed_requests", []) or []:
+            ext_id = get_external_request_id(failed_req_id)
+            self.request_map[ext_id] = failed_req_id
+            self._dest_blocks_by_req[ext_id] = (list(main_ids), list(indexer_ids))
+            self._cpu_blocks_by_req[failed_req_id] = len(main_ids)
+            self._invalid_block_ids.update(main_ids)
+            self._invalid_block_ids.update(indexer_ids)
+            if self._mf_read_thread is not None:
+                self._mf_read_thread.mark_failed_requests({ext_id})
+            else:
+                self._rendezvous_failed_ext_ids.add(ext_id)
+            logger.warning(
+                "SFAPD D rendezvous failed: tp=%s req=%s ext=%s main=%d indexer=%d",
+                self.tp_rank,
+                failed_req_id,
+                ext_id,
+                len(main_ids),
+                len(indexer_ids),
+            )
 
     def save_kv_layer(
         self,
@@ -206,15 +231,28 @@ class SFAPDRD2HConsumerWorker:
         ext_ids = set()
         for req_id in req_ids:
             ext_id = get_external_request_id(req_id)
-            ext_ids.add(ext_id)
             self._cpu_blocks_by_req.pop(req_id, None)
+            if self.request_map.get(ext_id) != req_id:
+                continue
+            if ext_id not in self._reported_terminal_ext_ids:
+                self._deferred_cleanup_ids.add(req_id)
+                if self._mf_read_thread is not None:
+                    self._mf_read_thread.discard_requests({ext_id})
+                    self._mf_read_thread.mark_failed_requests({ext_id})
+                else:
+                    self._rendezvous_failed_ext_ids.add(ext_id)
+                continue
+            ext_ids.add(ext_id)
             self.request_map.pop(ext_id, None)
             self._dest_blocks_by_req.pop(ext_id, None)
             self._pending_done.discard(ext_id)
             self._terminal_ext_ids.discard(ext_id)
+            self._reported_terminal_ext_ids.discard(ext_id)
+            self._deferred_cleanup_ids.discard(req_id)
+            self._rendezvous_failed_ext_ids.discard(ext_id)
         # Drop any partial contributor-completion state so a dead contributor or a
         # retried external id cannot complete a later request on stale arrivals.
-        if self._mf_read_thread is not None:
+        if ext_ids and self._mf_read_thread is not None:
             self._mf_read_thread.discard_requests(ext_ids)
 
     def _gather_tp_read_status(
@@ -242,6 +280,10 @@ class SFAPDRD2HConsumerWorker:
             local_done = self._mf_read_thread.get_and_clear_done()
             local_failed = self._mf_read_thread.get_and_clear_failed()
             self._terminal_ext_ids.update(local_done | local_failed)
+        if self._rendezvous_failed_ext_ids:
+            local_failed.update(self._rendezvous_failed_ext_ids)
+            self._terminal_ext_ids.update(self._rendezvous_failed_ext_ids)
+            self._rendezvous_failed_ext_ids.clear()
 
         tp_status = self._gather_tp_read_status(
             set(self._terminal_ext_ids),
@@ -265,6 +307,7 @@ class SFAPDRD2HConsumerWorker:
                 internal = self.request_map.get(ext_id)
                 if internal is not None:
                     done_recving.add(internal)
+                    self._reported_terminal_ext_ids.add(ext_id)
                 else:
                     still_pending.add(ext_id)
             self._pending_done = still_pending
@@ -282,8 +325,11 @@ class SFAPDRD2HConsumerWorker:
         # request_map[ext_id] and discard _pending_done[ext_id] before the
         # resolution loop above, leaking any finished req whose DONE arrives in
         # the same step (unmappable -> stuck in _pending_done forever).
+        preexisting_deferred = set(self._deferred_cleanup_ids)
         if finished_req_ids:
             self._cleanup_request_state(finished_req_ids)
+        if preexisting_deferred:
+            self._cleanup_request_state(preexisting_deferred)
 
         return set(), done_recving
 

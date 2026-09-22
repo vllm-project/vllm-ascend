@@ -517,6 +517,9 @@ def _make_consumer_worker_for_completion_test():
     worker._invalid_block_ids = set()
     worker._pending_done = set()
     worker._terminal_ext_ids = set()
+    worker._rendezvous_failed_ext_ids = set()
+    worker._reported_terminal_ext_ids = set()
+    worker._deferred_cleanup_ids = set()
     worker._mf_read_thread = MagicMock()
     worker._mf_read_thread.get_and_clear_failed.return_value = set()
     return worker
@@ -562,6 +565,39 @@ def test_failed_tp_rank_remains_terminal_until_other_ranks_finish():
     assert worker.get_finished() == (set(), set())
     assert worker.get_finished() == (set(), {"req-0-internal"})
     assert worker._gather_tp_read_status.call_args_list[1].args[0] == {"req-0"}
+
+
+def test_consumer_rendezvous_failure_reports_terminal_and_invalid_blocks():
+    worker = _make_consumer_worker_for_completion_test()
+    worker.tp_size = 1
+    metadata = SimpleNamespace(
+        requests=[],
+        failed_requests=[("req-0-internal", [1, 2], [3])],
+    )
+
+    worker.start_load_kv(metadata)
+    worker._mf_read_thread.mark_failed_requests.assert_called_once_with({"req-0"})
+    worker._mf_read_thread.get_and_clear_done.return_value = set()
+    worker._mf_read_thread.get_and_clear_failed.return_value = {"req-0"}
+
+    assert worker.get_finished() == (set(), {"req-0-internal"})
+    assert worker.get_block_ids_with_load_errors() == {1, 2, 3}
+
+
+def test_consumer_defers_cleanup_until_receive_terminal_is_reported():
+    worker = _make_consumer_worker_for_completion_test()
+
+    worker._cleanup_request_state({"req-0-internal"})
+
+    assert worker.request_map["req-0"] == "req-0-internal"
+    assert worker._deferred_cleanup_ids == {"req-0-internal"}
+    worker._mf_read_thread.mark_failed_requests.assert_called_once_with({"req-0"})
+
+    worker._reported_terminal_ext_ids.add("req-0")
+    worker._cleanup_request_state({"req-0-internal"})
+
+    assert "req-0" not in worker.request_map
+    assert worker._deferred_cleanup_ids == set()
 
 
 def test_owned_component_without_descriptors_still_fails():
@@ -987,7 +1023,7 @@ def test_consumer_scheduler_closes_remote_prefill_before_rendezvous():
     scheduler._request_trackers = {}
     scheduler._reqs_need_recv = set()
     scheduler._metaserver_lock = threading.Lock()
-    scheduler._cancelled_metaserver_requests = set()
+    scheduler._cancelled_metaserver_requests = {}
     scheduler._submit_metaserver_request = MagicMock()  # type: ignore[method-assign]
     params = {
         "do_remote_prefill": True,
@@ -1007,7 +1043,7 @@ def test_consumer_scheduler_closes_remote_prefill_before_rendezvous():
     scheduler._submit_metaserver_request.assert_called_once()
 
 
-def test_metaserver_treats_legacy_http_error_as_delivered():
+def test_metaserver_rejects_http_error_without_retry():
     scheduler = SFAPDRD2HScheduler.__new__(SFAPDRD2HScheduler)
     response = MagicMock()
     response.is_error = True
@@ -1017,13 +1053,14 @@ def test_metaserver_treats_legacy_http_error_as_delivered():
 
     with patch("vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.scheduler.httpx.Client") as client_cls:
         client_cls.return_value.__enter__.return_value = client
-        scheduler._access_metaserver("http://metaserver", {"request_id": "req-0"})
+        with pytest.raises(RuntimeError, match="HTTP 500"):
+            scheduler._access_metaserver("http://metaserver", {"request_id": "req-0"})
 
     client.post.assert_called_once_with(
         "http://metaserver",
         json={"request_id": "req-0"},
     )
-    assert client_cls.call_args.kwargs["timeout"] is None
+    assert client_cls.call_args.kwargs["timeout"] is not None
 
 
 def test_metaserver_retries_transport_errors():
@@ -1042,12 +1079,26 @@ def test_metaserver_retries_transport_errors():
     assert client.post.call_count == 2
 
 
+def test_metaserver_does_not_retry_read_timeout():
+    scheduler = SFAPDRD2HScheduler.__new__(SFAPDRD2HScheduler)
+    client = MagicMock()
+    client.post.side_effect = httpx.ReadTimeout("response timed out")
+
+    with patch("vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.scheduler.httpx.Client") as client_cls:
+        client_cls.return_value.__enter__.return_value = client
+        with pytest.raises(RuntimeError, match="transport failed after send"):
+            scheduler._access_metaserver("http://metaserver", {"request_id": "req-0"})
+
+    client.post.assert_called_once()
+
+
 def test_metaserver_callback_retries_without_changing_request_state():
     scheduler = SFAPDRD2HScheduler.__new__(SFAPDRD2HScheduler)
     scheduler._metaserver_lock = threading.Lock()
     scheduler._shutdown_event = threading.Event()
     scheduler._metaserver_retry_timers = {}
-    scheduler._cancelled_metaserver_requests = set()
+    scheduler._metaserver_retry_counts = {}
+    scheduler._cancelled_metaserver_requests = {}
     failed_future: Future[None] = Future()
     scheduler._metaserver_futures = {"req-0": failed_future}
     failed_future.set_exception(RuntimeError("metaserver unavailable"))
@@ -1074,7 +1125,8 @@ def test_metaserver_callback_clears_completed_future():
     scheduler._metaserver_lock = threading.Lock()
     scheduler._shutdown_event = threading.Event()
     scheduler._metaserver_retry_timers = {}
-    scheduler._cancelled_metaserver_requests = set()
+    scheduler._metaserver_retry_counts = {}
+    scheduler._cancelled_metaserver_requests = {}
     succeeded_future: Future[None] = Future()
     scheduler._metaserver_futures = {"req-0": succeeded_future}
     succeeded_future.set_result(None)
@@ -1087,6 +1139,20 @@ def test_metaserver_callback_clears_completed_future():
     )
 
     assert "req-0" not in scheduler._metaserver_futures
+
+
+def test_consumer_scheduler_flushes_rendezvous_failure_metadata():
+    scheduler = SFAPDRD2HScheduler.__new__(SFAPDRD2HScheduler)
+    scheduler._metaserver_lock = threading.Lock()
+    scheduler._request_trackers = {"req-0": ([1, 2], [3])}
+    scheduler._reqs_need_recv = {"req-0"}
+    scheduler._rendezvous_failed_reqs = {"req-0": ([1, 2], [3])}
+
+    metadata = scheduler.build_connector_meta(MagicMock())
+
+    assert metadata.requests == []
+    assert metadata.failed_requests == [("req-0", [1, 2], [3])]
+    assert scheduler._rendezvous_failed_reqs == {}
 
 
 @pytest.mark.parametrize(
@@ -1216,7 +1282,8 @@ def test_scheduler_shutdown_cancels_rendezvous_and_executor():
     scheduler._metaserver_lock = threading.Lock()
     scheduler._shutdown_event = threading.Event()
     scheduler._metaserver_retry_timers = {}
-    scheduler._cancelled_metaserver_requests = set()
+    scheduler._metaserver_retry_counts = {}
+    scheduler._cancelled_metaserver_requests = {}
     pending_future: Future[None] = Future()
     scheduler._metaserver_futures = {"req-0": pending_future}
     scheduler.executor = MagicMock()
@@ -1370,6 +1437,9 @@ def _make_completion_thread() -> MembPullReadThread:
     thread = MembPullReadThread.__new__(MembPullReadThread)
     thread._done_requests = set()
     thread._failed_requests = set()
+    thread._completed_ext_ids = set()
+    thread._discarded_ext_ids = {}
+    thread._pending_failures = set()
     thread._done_contributors = {}
     thread._expected_ratio = {}
     thread._lock = threading.Lock()
@@ -1410,3 +1480,42 @@ def test_discard_requests_clears_partial_contributor_state():
     thread.discard_requests({"req-0"})
     assert "req-0" not in thread._done_contributors
     assert "req-0" not in thread._expected_ratio
+
+
+def test_read_thread_filters_completed_and_discarded_batches():
+    thread = _make_completion_thread()
+    thread._record_chunk_done(["req-complete"], 0, 1)
+    thread.discard_requests({"req-discarded"})
+
+    read_reqs, done_ext_ids = thread._filter_stale_batch(
+        [
+            ("req-complete", [1], [], 0, 0),
+            ("req-discarded", [2], [], 0, 0),
+            ("req-fresh", [3], [], 0, 0),
+        ],
+        ["req-complete", "req-discarded", "req-fresh"],
+    )
+
+    assert read_reqs == [("req-fresh", [3], [], 0, 0)]
+    assert done_ext_ids == ["req-fresh"]
+
+
+def test_read_thread_serializes_failed_terminal_and_rearm():
+    thread = _make_completion_thread()
+    thread.mark_failed_requests({"req-0"})
+    thread._drain_pending_failures()
+
+    assert thread.get_and_clear_failed() == {"req-0"}
+    assert "req-0" in thread._discarded_ext_ids
+
+    thread._done_requests.add("req-0")
+    thread._failed_requests.add("req-0")
+    thread.rearm_requests({"req-0"})
+    read_reqs, done_ext_ids = thread._filter_stale_batch(
+        [("req-0", [1], [], 0, 0)],
+        ["req-0"],
+    )
+    assert read_reqs == [("req-0", [1], [], 0, 0)]
+    assert done_ext_ids == ["req-0"]
+    assert thread.get_and_clear_done() == set()
+    assert thread.get_and_clear_failed() == set()
