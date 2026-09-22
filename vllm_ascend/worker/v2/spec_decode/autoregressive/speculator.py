@@ -302,6 +302,10 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         target_input_buffers: InputBuffers,
         target_attn_groups: list[list[AttentionGroup]],
     ) -> None:
+        # Inline import: the spec-decode stack must not import model
+        # packages at module scope (same convention as get_model_state_cls).
+        from vllm_ascend.models.qwen4_exp.qsa import AscendQSABackend
+
         # Initialize the draft attention backend with its PCP=1 config.
         with set_current_vllm_config(self.attn_vllm_config):
             super().set_attn(
@@ -321,6 +325,13 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             self.attn_architecture = "MLA"
         elif issubclass(self.attn_backend, (AscendSFABackend, AscendSFAIndexerBackend)):
             self.attn_architecture = "SFA"
+        elif issubclass(self.attn_backend, AscendQSABackend):
+            # The qwen4_exp draft (AscendQwen4ExpMTP) reuses the target model's
+            # QSA backend, which derives from vllm's FlashAttentionBackend (not
+            # AscendAttentionBackend), so it needs its own branch. Its draft KV
+            # semantics are standard block-table GQA (slot mappings, block
+            # tables, seq_lens), so "QSA" follows the GQA behavior group below.
+            self.attn_architecture = "QSA"
         elif issubclass(self.attn_backend, AscendAttentionBackend):
             self.attn_architecture = "GQA"
         else:
@@ -555,7 +566,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         # Target metadata can contain fewer block-table rows than the draft
         # decode graph requires. Rebuild GQA metadata too, so its block tables
         # and query layout describe the same padded batch as the sequence lengths.
-        if self.attn_architecture in ("GQA", "MLA"):
+        if self.attn_architecture in ("GQA", "MLA", "QSA"):
             assert self.input_batch is not None
             attn_metadata = self._build_draft_attn_metadata(  # type: ignore[call-arg]
                 num_reqs=self.input_batch.num_reqs,
@@ -593,7 +604,13 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         if attn_metadata is None:
             return
 
-        if self.attn_architecture in ("DSA", "SFA"):
+        # DSA and SFA own their per-step sparse-attention state in their
+        # metadata builders. QSA (vllm FlashAttentionMetadata) holds device
+        # tensors that alias the shared input buffers, so the rebuilt
+        # per-step metadata is already current; the host-side FIA fields
+        # patched below (seq_lens_list / actual_seq_lengths_q) do not exist
+        # on QSAForwardMetadata.
+        if self.attn_architecture in ("DSA", "SFA", "QSA"):
             return
 
         attn_meta = next(iter(attn_metadata.values()))
