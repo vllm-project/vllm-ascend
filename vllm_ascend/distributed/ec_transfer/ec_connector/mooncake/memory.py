@@ -261,6 +261,9 @@ class AscendProducerMemoryPool(ProducerMemoryPool):
             stream = torch.npu.Stream(device=pool.device)
             self._local.stream = stream
 
+        # ProducerPushManager waits for the source's recorded NPU event before
+        # submitting this copy to the I/O thread. Its current stream is not
+        # necessarily the stream that produced the source tensors.
         with torch.npu.stream(stream):
             for destination, source in zip(staged, tensors):
                 destination.copy_(source, non_blocking=True)
@@ -287,6 +290,7 @@ class AscendProducerMemoryPool(ProducerMemoryPool):
             stream = torch.npu.Stream(device=bounce.device)
             self._local.stream = stream
 
+        # The same source-readiness event also guards this fallback copy.
         with torch.npu.stream(stream):
             for source, bounce_offset, nbytes in copies:
                 assert bounce_offset >= 0
