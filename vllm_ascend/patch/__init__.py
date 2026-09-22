@@ -176,6 +176,7 @@
 #       for EngineArgs conversion and `--engram-config` JSON parsing, then
 #       resolve DeepSeek V4.1 target configs through that subtype. Keep model,
 #       topology, load-format and DBO validation in the subtype.
+#       Skip this patch when vLLM does not provide EngramConfig.
 #    Related PR (if no, explain why):
 #       No Ascend upstream PR. The required generic Engram behavior is
 #       selectively backported from vLLM commit f84b0c4bce:
