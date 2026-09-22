@@ -107,12 +107,12 @@ def test_missing_operator_falls_back(monkeypatch, family):
 
 
 @pytest.mark.parametrize("fast", [False, True])
-@pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize("eligible_batch", [False, True])
-def test_main_cache_write_preserves_fallback_and_own_slots(fast, enabled, eligible_batch):
+@pytest.mark.parametrize("producer,consumer", [(False, False), (True, False), (False, True), (True, True)])
+def test_main_cache_write_preserves_fallback_and_own_slots(fast, eligible_batch, producer, consumer):
     impl = AscendSFADSACPImpl.__new__(AscendSFADSACPImpl)
     impl.enable_sparse_sfa_c8 = True
-    impl.is_kv_producer, impl.is_kv_consumer = True, False
+    impl.is_kv_producer, impl.is_kv_consumer = producer, consumer
     key = torch.empty(2056, 656, dtype=torch.int8)
     cache = torch.empty(32, 128, 1, 656, dtype=torch.int8)
     slots = torch.arange(2056, dtype=torch.int32) + 512
@@ -121,8 +121,8 @@ def test_main_cache_write_preserves_fallback_and_own_slots(fast, enabled, eligib
     meta = metadata(fast_cache_store=eligible_batch)
     with (
         patch(
-            "vllm_ascend.attention.context_parallel.sfa_cp.get_ascend_config",
-            return_value=SimpleNamespace(c8_enable_reshape_optim=enabled, c8_reshape_optim_enabled=False),
+            "vllm_ascend.ascend_config.get_ascend_config",
+            return_value=SimpleNamespace(c8_enable_reshape_optim=False, c8_reshape_optim_enabled=False),
         ),
         patch(
             "vllm_ascend.attention.context_parallel.sfa_cp.DeviceOperator.try_scatter_cache", return_value=fast
@@ -130,7 +130,7 @@ def test_main_cache_write_preserves_fallback_and_own_slots(fast, enabled, eligib
         patch("torch_npu.npu_scatter_nd_update_", create=True) as scatter,
     ):
         impl._store_parallel_kv(None, None, None, key, [], (cache,), slots, meta, False)
-    use_fast_store = enabled and eligible_batch
+    use_fast_store = eligible_batch
     assert store.call_count == int(use_fast_store)
     if use_fast_store:
         assert store.call_args.args[1] is cache and store.call_args.args[2] is slots
@@ -138,22 +138,3 @@ def test_main_cache_write_preserves_fallback_and_own_slots(fast, enabled, eligib
     assert scatter.call_count == int(not (use_fast_store and fast))
     if not (use_fast_store and fast):
         torch.testing.assert_close(scatter.call_args.args[1].flatten(), slots[:2049])
-
-
-@pytest.mark.parametrize("main_c8", [False, True])
-@pytest.mark.parametrize("enabled", [False, True])
-@pytest.mark.parametrize("eligible_batch", [False, True])
-@pytest.mark.parametrize("producer,consumer", [(False, False), (True, False), (False, True), (True, True)])
-def test_main_reshape_optim_respects_layer_and_existing_config(main_c8, enabled, eligible_batch, producer, consumer):
-    impl = AscendSFADSACPImpl.__new__(AscendSFADSACPImpl)
-    impl.enable_sparse_sfa_c8 = main_c8
-    impl.is_kv_producer, impl.is_kv_consumer = producer, consumer
-    with patch(
-        "vllm_ascend.attention.context_parallel.sfa_cp.get_ascend_config",
-        # A BF16 indexer disables the LI-specific derived gate. It must not
-        # disable eligible main C8 writes using the same user toggle.
-        return_value=SimpleNamespace(c8_enable_reshape_optim=enabled, c8_reshape_optim_enabled=False),
-    ):
-        assert impl._use_c8_reshape_optim(metadata(fast_cache_store=eligible_batch)) == (
-            main_c8 and enabled and eligible_batch and producer and not consumer
-        )

@@ -13,7 +13,6 @@ from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: igno
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 import vllm_ascend.ops.triton.sfa_cp  # noqa: F401
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import (
     DCPImplMixin,
@@ -419,16 +418,6 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
     def _parallel_query_gather_dim(self) -> int:
         return 0
 
-    def _use_c8_reshape_optim(self, attn_metadata: AscendSFAMetadata) -> bool:
-        """Use the existing P-node C8 write optimization setting for main KV."""
-        return (
-            self.enable_sparse_sfa_c8
-            and getattr(attn_metadata, "fast_cache_store", False)
-            and self.is_kv_producer
-            and not self.is_kv_consumer
-            and get_ascend_config().c8_enable_reshape_optim
-        )
-
     def _prepare_native_hidden_states(
         self,
         hidden_states: torch.Tensor,
@@ -548,7 +537,7 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
             assert fused_kv_no_split is not None
             if self.enable_sparse_sfa_c8:
                 if not (
-                    self._use_c8_reshape_optim(attn_metadata)
+                    getattr(attn_metadata, "fast_cache_store", False)
                     and DeviceOperator.try_scatter_cache(
                         fused_kv_no_split, kv_cache[0], slot_mapping_sfa, attn_metadata.num_actual_tokens
                     )
