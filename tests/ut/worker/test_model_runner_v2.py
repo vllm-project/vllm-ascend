@@ -36,6 +36,29 @@ def _make_runner(need_timing: bool = True):
     return runner
 
 
+def test_capture_model_uses_ascend_context_and_encoder_update_stream():
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    manager = SimpleNamespace(update_stream=None)
+    runner.model_state = SimpleNamespace(
+        supports_mm_inputs=True,
+        encoder_runner=SimpleNamespace(cudagraph_manager=manager),
+    )
+    runner.update_stream = object()
+
+    with (
+        patch.object(GPUModelRunner, "capture_model", return_value=42) as parent_capture,
+        patch("vllm_ascend.worker.v2.model_runner.torch_cuda_wrapper") as cuda_wrapper,
+        patch("vllm_ascend.worker.v2.model_runner.communicator_switch") as switch,
+    ):
+        result = runner.capture_model()
+
+    assert result == 42
+    assert manager.update_stream is runner.update_stream
+    parent_capture.assert_called_once_with()
+    cuda_wrapper.assert_called_once_with()
+    switch.assert_called_once_with()
+
+
 def test_execute_model_records_profiling_time():
     runner = _make_runner()
     scheduler_output = SimpleNamespace(disable_profiling_timing=False)

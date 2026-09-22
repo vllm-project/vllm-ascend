@@ -51,7 +51,12 @@ class FIAMockMixin(TestBase):
         return torch.zeros_like(kwargs["query"]), None
 
     def _fake_fia_out(self, *, workspace, out, **kwargs):
-        self.captured = {"mode": "out", "softmax_lse": out[1]}
+        self.captured = {
+            "mode": "out",
+            "key": kwargs["key"],
+            "value": kwargs["value"],
+            "softmax_lse": out[1],
+        }
         out[0].zero_()
 
     def _install_fia_mocks(self, *, capture: bool):
@@ -162,11 +167,55 @@ class TestAscendMMEncoderAttentionCapture(FIAMockMixin):
 
         params = get_encoder_graph_params()
         self.assertIsNotNone(params)
-        self.assertEqual(len(params.attn_params[2048]), 1)
-        self.assertEqual(len(params.handles[2048]), 1)
+        self.assertEqual(len(params.attn_params[("default", 2048)]), 1)
+        self.assertEqual(len(params.handles[("default", 2048)]), 1)
         self.assertEqual(self.captured["mode"], "out")
         self.mock_graph_begin.assert_called_once()
         self.mock_graph_end.assert_called_once()
+
+    def test_capture_state_isolated_by_path(self):
+        set_encoder_graph_params({"global": [2048], "local": [2048]})
+        layer = self._make_layer(num_heads=4, num_kv_heads=4, head_size=72)
+        query = torch.randn(2, 4, layer.num_heads, 72, dtype=torch.bfloat16)
+        cu_seqlens = torch.tensor([0, 4, 8], dtype=torch.int32)
+
+        for path in ("global", "local"):
+            with set_encoder_forward_context(2048, True, path=path):
+                layer.forward_oot(query, query, query, cu_seqlens=cu_seqlens)
+
+        params = get_encoder_graph_params()
+        self.assertIsNotNone(params)
+        self.assertEqual(len(params.handles[("global", 2048)]), 1)
+        self.assertEqual(len(params.handles[("local", 2048)]), 1)
+        self.assertIsNot(params.events[("global", 2048)], params.events[("local", 2048)])
+
+    def test_capture_retains_the_contiguous_fia_inputs(self):
+        layer = self._make_layer(num_heads=4, num_kv_heads=4, head_size=72)
+        query = torch.randn(8, 4, 72, dtype=torch.bfloat16)
+        key = torch.randn(8, 4, 72, 2, dtype=torch.bfloat16)[..., 0]
+        value = torch.randn(8, 4, 72, 2, dtype=torch.bfloat16)[..., 0]
+        self.assertFalse(key.is_contiguous())
+        self.assertFalse(value.is_contiguous())
+
+        with set_encoder_forward_context(2048, True):
+            layer._forward_capture_fia(
+                query,
+                key,
+                value,
+                cu_seqlens=torch.tensor([0, 4, 8], dtype=torch.int32),
+                is_reshaped=False,
+                bsz=2,
+                q_len=4,
+            )
+
+        params = get_encoder_graph_params()
+        packed = params.attn_params[("default", 2048)][0]
+        captured_key = self.captured["key"]
+        captured_value = self.captured["value"]
+        self.assertTrue(captured_key.is_contiguous())
+        self.assertTrue(captured_value.is_contiguous())
+        self.assertEqual(packed[1].data_ptr(), captured_key.data_ptr())
+        self.assertEqual(packed[2].data_ptr(), captured_value.data_ptr())
 
     def test_forward_oot_seqlens(self):
         layer = self._make_layer(num_heads=4, num_kv_heads=4, head_size=72)

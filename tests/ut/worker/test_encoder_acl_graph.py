@@ -100,11 +100,11 @@ def test_update_encoder_graph_params_cu_seqlens():
         MagicMock(),
         MagicMock(),
     )
-    key = ("default", 2048)
-    params.handles[key] = [1]
-    params.events[key] = [MagicMock()]
-    params.attn_params[key] = [packed]
-    params.workspaces[key] = MagicMock()
+    graph_key = ("default", 2048)
+    params.handles[graph_key] = [1, 2]
+    params.events[graph_key] = [MagicMock(), MagicMock()]
+    params.attn_params[graph_key] = [packed, packed]
+    params.workspaces[graph_key] = MagicMock()
 
     ctx = get_encoder_forward_context()
     ctx.cu_seqlens_cpu = torch.tensor([0, 4, 8], dtype=torch.int32)
@@ -123,10 +123,15 @@ def test_update_encoder_graph_params_cu_seqlens():
             "vllm_ascend.worker.encoder_acl_graph.torch_npu.npu_fused_infer_attention_score",
             fake_fia,
         ),
+        patch(
+            "vllm_ascend.worker.encoder_acl_graph.maybe_compute_actual_seq_lengths",
+            wraps=maybe_compute_actual_seq_lengths,
+        ) as compute_lengths,
     ):
         update_encoder_graph_params(MagicMock(), 2048)
 
     assert captured["actual_seq_lengths"] == [4, 8]
+    assert compute_lengths.call_count == 1
 
 
 def _make_manager():
@@ -243,14 +248,16 @@ def test_capture_budget_graph_npu():
         patch("vllm_ascend.worker.encoder_acl_graph.torch.npu.graph"),
         patch(
             "vllm_ascend.worker.encoder_acl_graph.weak_ref_tensors",
-            side_effect=lambda tensors: tensors,
-        ),
+            side_effect=lambda tensor: tensor,
+        ) as weak_ref,
     ):
         mgr._capture_budget_graph(2048, **({} if vllm_version_is("0.29.0") else {"axis_keys": ()}))
 
     graph_meta = mgr._get_graph_set("default")[2048]
     assert graph_meta.graph is fake_graph
     assert graph_meta.input_buffers is capture_values
+    assert isinstance(graph_meta.output_buffer, torch.Tensor)
+    weak_ref.assert_called_once_with(model.encoder_cudagraph_forward.return_value)
 
 
 @pytest.mark.skipif(
@@ -291,12 +298,23 @@ def test_replay_selects_capture_axis_graph():
         values={"cu_seqlens": torch.tensor([0, 4, 8], dtype=torch.int32)},
     )
 
+    current_stream = MagicMock(name="current_stream")
+    update_stream = MagicMock(name="update_stream")
+    call_order = []
+    update_stream.wait_stream.side_effect = lambda stream: call_order.append(("wait_stream", stream))
+    graph_meta.graph.replay.side_effect = lambda: call_order.append(("replay", None))
+
     with (
-        patch("vllm_ascend.worker.encoder_acl_graph.torch.npu.Stream"),
+        patch("vllm_ascend.worker.encoder_acl_graph.torch.npu.Stream", return_value=update_stream),
+        patch(
+            "vllm_ascend.worker.encoder_acl_graph.torch.npu.current_stream",
+            return_value=current_stream,
+        ),
         patch("vllm_ascend.worker.encoder_acl_graph.update_encoder_graph_params") as update,
     ):
         result = mgr._run_budget_graph({}, 128, axis_keys=axis_keys)
 
     graph_meta.graph.replay.assert_called_once()
     update.assert_called_once_with(mgr.update_stream, 128, path="default", axis_keys=axis_keys)
+    assert call_order == [("wait_stream", current_stream), ("replay", None)]
     assert result is graph_meta.output_buffer

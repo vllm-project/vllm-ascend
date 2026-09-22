@@ -252,6 +252,15 @@ def update_encoder_graph_params(
             f"events={len(events)} attn_blocks={len(attn_blocks)}"
         )
 
+    cu_seqlens_cpu = get_encoder_forward_context().cu_seqlens_cpu
+    if cu_seqlens_cpu is None:
+        if handles:
+            raise RuntimeError(
+                f"Missing replay cu_seqlens for encoder graph path={path!r} budget={token_budget}"
+            )
+        return
+
+    actual_seq_lengths_cache: dict[tuple[int, int], tuple[list[int], list[int]]] = {}
     with torch.npu.stream(update_stream):
         for handle, event, packed in zip(handles, events, attn_blocks):
             (
@@ -270,14 +279,17 @@ def update_encoder_graph_params(
 
             num_query_tokens = query.shape[0]
             num_kv_tokens = key.shape[0]
-            cu_seqlens_cpu = get_encoder_forward_context().cu_seqlens_cpu
-
-            actual_seq_lengths_q, actual_seq_lengths_kv = maybe_compute_actual_seq_lengths(
-                cu_seqlens_cpu,
-                num_query_tokens,
-                num_kv_tokens,
-                cudagraph_mm_encoder=True,
-            )
+            shape_key = (num_query_tokens, num_kv_tokens)
+            actual_seq_lengths = actual_seq_lengths_cache.get(shape_key)
+            if actual_seq_lengths is None:
+                actual_seq_lengths = maybe_compute_actual_seq_lengths(
+                    cu_seqlens_cpu,
+                    num_query_tokens,
+                    num_kv_tokens,
+                    cudagraph_mm_encoder=True,
+                )
+                actual_seq_lengths_cache[shape_key] = actual_seq_lengths
+            actual_seq_lengths_q, actual_seq_lengths_kv = actual_seq_lengths
 
             torch.npu.graph_task_update_begin(update_stream, handle)
             torch_npu.npu_fused_infer_attention_score.out(
@@ -413,6 +425,10 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
             update_stream = torch.npu.Stream()
             self.update_stream = update_stream
 
+        # Input buffers are populated on the current stream. The side stream
+        # that updates FIA graph tasks must not race those copies (or an earlier
+        # replay) before the graph is launched.
+        update_stream.wait_stream(torch.npu.current_stream())
         graph_meta.graph.replay()
 
         with set_encoder_forward_context(
