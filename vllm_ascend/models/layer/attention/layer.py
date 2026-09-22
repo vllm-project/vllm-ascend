@@ -25,7 +25,10 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSAC128Backend,
     AscendDSASWABackend,
 )
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.core.kv_cache_interface import (
+    AscendMLAAttentionSpec,
+    KVCacheBlockGeometry,
+)
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
 
@@ -208,5 +211,10 @@ class DSAAttention(nn.Module, AttentionLayerBase):
             dtype=kv_cache_dtype,
             model_version="deepseek_v4",
             cache_dtype_str=vllm_config.cache_config.cache_dtype,
+            block_geometry=KVCacheBlockGeometry(
+                manager_block_size=storage_block_size * self.compress_ratio,
+                kernel_block_size=storage_block_size * self.compress_ratio,
+                storage_block_size=storage_block_size,
+            ),
             **ratio_kwargs,
         )

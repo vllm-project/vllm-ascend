@@ -186,3 +186,6 @@ class TestCompressorStateCache:
         assert spec.head_size == state_dim
         assert spec.sliding_window == 64
         assert spec.page_size_padded == DSV4_BLOCK_SIZES[128][1][padding_index]
+        assert spec.block_geometry.manager_block_size == 8
+        assert spec.block_geometry.kernel_block_size == 8
+        assert spec.block_geometry.storage_block_size == 8

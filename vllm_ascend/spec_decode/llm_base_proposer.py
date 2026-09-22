@@ -48,6 +48,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, update_full_graph_params
 from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
+from vllm_ascend.core.kv_cache_interface import get_kernel_block_size
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     prepare_sparse_kv_offload_mtp_dummy_metadata,
@@ -412,9 +413,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.attn_layer_names = list(sorted(self._draft_attn_layer_names))
         draft_attn_layers_dict = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
         # initialized for mamba models
-        self.kernel_block_size = (
-            draft_attn_layers_dict[self.attn_layer_names[0]].get_attn_backend().get_supported_kernel_block_sizes()[0]
-        )
+        first_draft_layer = draft_attn_layers_dict[self.attn_layer_names[0]]
+        first_draft_spec = first_draft_layer.get_kv_cache_spec(self.vllm_config)
+        assert first_draft_spec is not None
+        if getattr(first_draft_spec, "block_geometry", None) is not None:
+            self.kernel_block_size = get_kernel_block_size(first_draft_spec)
+        else:
+            self.kernel_block_size = first_draft_layer.get_attn_backend().get_supported_kernel_block_sizes()[0]
 
         # Sliding-window draft attention adapter.
         # Read from the validated AscendConfig singleton instead of bypassing it

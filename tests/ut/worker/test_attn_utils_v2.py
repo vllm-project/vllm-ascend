@@ -32,6 +32,8 @@ from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
+    KVCacheBlockGeometry,
+    get_kernel_block_size,
     get_storage_block_size,
 )
 from vllm_ascend.device.hardware import AscendDeviceType
@@ -67,6 +69,11 @@ def _make_dsv4_mla_spec(block_size: int, compress_ratio: int) -> AscendMLAAttent
         head_size=128,
         dtype=torch.bfloat16,
         model_version="deepseek_v4",
+        block_geometry=KVCacheBlockGeometry(
+            manager_block_size=block_size,
+            kernel_block_size=block_size,
+            storage_block_size=block_size // compress_ratio,
+        ),
         **ratio_kwargs,
     )
 
@@ -421,9 +428,15 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
     spec = discovered_specs[layer_name]
     assert isinstance(spec, AscendMLAAttentionSpec)
     assert spec.block_size == cache_config.block_size * cache_layer.compress_ratio
+    assert spec.block_geometry == KVCacheBlockGeometry(
+        manager_block_size=cache_config.block_size * cache_layer.compress_ratio,
+        kernel_block_size=cache_config.block_size * cache_layer.compress_ratio,
+        storage_block_size=cache_config.block_size,
+    )
     assert get_storage_block_size(spec) == cache_config.block_size
     merged_spec = spec.merge([spec])
     assert merged_spec.tokens_per_state == cache_layer.compress_ratio
+    assert merged_spec.block_geometry == spec.block_geometry
     assert get_storage_block_size(merged_spec) == cache_config.block_size
 
     num_blocks = 2
@@ -621,7 +634,35 @@ def test_prepare_kernel_block_sizes_uses_logical_size_for_dsv4():
     )
 
     assert get_storage_block_size(spec) == 32
-    assert upstream_attn_utils.prepare_kernel_block_sizes(kv_cache_config, attn_groups) == [spec.block_size]
+    assert attn_utils.prepare_kernel_block_sizes(kv_cache_config, attn_groups) == [spec.block_size]
+    assert get_kernel_block_size(spec) == spec.block_size
+
+
+def test_prepare_kernel_block_sizes_prefers_spec_geometry(monkeypatch):
+    spec = _make_dsv4_mla_spec(128, 4)
+    attn_groups = [
+        [
+            AttentionGroup(
+                backend=AscendDSAC4Backend,
+                layer_names=["model.layers.0.self_attn"],
+                kv_cache_spec=spec,
+                kv_cache_group_id=0,
+            )
+        ]
+    ]
+    kv_cache_config = KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                layer_names=["model.layers.0.self_attn"],
+                kv_cache_spec=spec,
+            )
+        ],
+    )
+
+    monkeypatch.setattr(attn_utils, "_prepare_kernel_block_sizes", lambda *_: [64])
+    assert attn_utils.prepare_kernel_block_sizes(kv_cache_config, attn_groups) == [128]
 
 
 @pytest.mark.parametrize(
@@ -943,6 +984,7 @@ def test_main_entry_allocates_and_reshapes_kvpp_views(monkeypatch, packed):
     monkeypatch.setattr(attn_utils, "allocate_kvpp_cache", allocate)
     assert upstream_model_runner.get_kv_cache_spec is patch_attn_utils.get_kv_cache_spec
     assert upstream_attn_utils.allocate_kv_cache is patch_attn_utils.allocate_kv_cache_main
+    assert upstream_attn_utils.prepare_kernel_block_sizes is patch_attn_utils.prepare_kernel_block_sizes
     caches = upstream_attn_utils.allocate_kv_cache(
         make_cache_config(specs), device=torch.device("cpu"), layout=None, kernel_block_sizes=[2]
     )

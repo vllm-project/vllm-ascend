@@ -107,7 +107,10 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
         super().__init__(head_dim, dtype, prefix, cache_config, compress_ratio)
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+        from vllm_ascend.core.kv_cache_interface import (
+            AscendMLAAttentionSpec,
+            KVCacheBlockGeometry,
+        )
         from vllm_ascend.models.layer.attention.layer import DSV4_BLOCK_SIZES
 
         storage_block_size = DSV4_BLOCK_SIZES[vllm_config.cache_config.block_size][0][0]
@@ -125,6 +128,11 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
             scale_dtype=torch.float
             if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE)
             else torch.float16,
+            block_geometry=KVCacheBlockGeometry(
+                manager_block_size=storage_block_size * self.compress_ratio,
+                kernel_block_size=storage_block_size * self.compress_ratio,
+                storage_block_size=storage_block_size,
+            ),
             **ratio_kwargs,
         )
 

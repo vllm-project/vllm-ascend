@@ -3,12 +3,16 @@
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSlidingWindowMLASpec,
+    KVCacheBlockGeometry,
+    get_block_geometry,
+    get_kernel_block_size,
     get_kv_cache_compression_ratio,
     get_storage_block_size,
 )
@@ -50,3 +54,40 @@ def test_sliding_window_mla_storage_and_page_size():
     )
     assert spec.storage_block_size == 16
     assert spec.real_page_size_bytes == 16 * 128 * 2
+
+
+def test_explicit_block_geometry_is_owned_by_spec():
+    geometry = KVCacheBlockGeometry(
+        manager_block_size=4096,
+        kernel_block_size=4096,
+        storage_block_size=32,
+    )
+    spec = AscendMLAAttentionSpec(
+        block_size=4096,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+        tokens_per_state=128,
+        block_geometry=geometry,
+    )
+
+    assert get_block_geometry(spec) is geometry
+    assert get_kernel_block_size(spec) == 4096
+    assert get_storage_block_size(spec) == 32
+
+
+def test_block_geometry_rejects_mismatched_manager_size():
+    geometry = KVCacheBlockGeometry(
+        manager_block_size=128,
+        kernel_block_size=128,
+        storage_block_size=32,
+    )
+    with pytest.raises(ValueError, match="does not match"):
+        AscendMLAAttentionSpec(
+            block_size=256,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.bfloat16,
+            tokens_per_state=4,
+            block_geometry=geometry,
+        )

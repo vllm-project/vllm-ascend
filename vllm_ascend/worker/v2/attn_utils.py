@@ -42,6 +42,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import AttentionGroup
+from vllm.v1.worker.utils import prepare_kernel_block_sizes as _prepare_kernel_block_sizes
 
 from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -56,6 +57,7 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
     AscendSlidingWindowMLASpec,
+    get_block_geometry,
     get_kv_cache_compression_ratio,
     get_storage_block_size,
 )
@@ -72,6 +74,25 @@ from vllm_ascend.worker.kvpp_cache import allocate_kvpp_cache
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
+
+
+def prepare_kernel_block_sizes(
+    kv_cache_config: KVCacheConfig,
+    attn_groups: list[list[AttentionGroup]],
+) -> list[int]:
+    """Select kernel blocks, preferring geometry carried by cache specs."""
+    kernel_block_sizes = _prepare_kernel_block_sizes(kv_cache_config, attn_groups)
+    result_index = 0
+    for group in kv_cache_config.kv_cache_groups:
+        group_spec = group.kv_cache_spec
+        if isinstance(group_spec, UniformTypeKVCacheSpecs):
+            group_spec = next(iter(group_spec.kv_cache_specs.values()))
+        if isinstance(group_spec, EncoderOnlyAttentionSpec):
+            continue
+        if getattr(group_spec, "block_geometry", None) is not None:
+            kernel_block_sizes[result_index] = get_block_geometry(group_spec).kernel_block_size
+        result_index += 1
+    return kernel_block_sizes
 
 
 def unwrap_mamba_kv_cache_groups(kv_cache_config: KVCacheConfig) -> KVCacheConfig:
@@ -173,6 +194,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 non_causal_multi_token_decode=spec.non_causal_multi_token_decode,
                 model_version=model_version,
                 indexes_kv_by_block_stride=indexes_kv_by_block_stride,
+                block_geometry=getattr(spec, "block_geometry", None),
                 **ratio_kwargs,
             )
         if isinstance(attn_module, DeepseekV32IndexerCache):
@@ -991,16 +1013,21 @@ def _reshape_kv_cache_v2(
 
         group_spec = group.kv_cache_spec
         group_storage_block_size = get_storage_block_size(group_spec)
-        kernel_block_size = (
-            group_storage_block_size
-            if group_storage_block_size != group_spec.block_size
-            else kernel_block_sizes[group.kv_cache_group_id]
-        )
-        if group_storage_block_size != group_spec.block_size and getattr(
-            group_spec, "indexes_kv_by_block_stride", False
-        ):
+        geometry = getattr(group_spec, "block_geometry", None)
+        if geometry is not None:
             compression_ratio = get_kv_cache_compression_ratio(group_spec)
-            kernel_block_size = kernel_block_sizes[group.kv_cache_group_id] // compression_ratio
+            kernel_block_size = geometry.kernel_block_size // compression_ratio
+        else:
+            kernel_block_size = (
+                group_storage_block_size
+                if group_storage_block_size != group_spec.block_size
+                else kernel_block_sizes[group.kv_cache_group_id]
+            )
+            if group_storage_block_size != group_spec.block_size and getattr(
+                group_spec, "indexes_kv_by_block_stride", False
+            ):
+                compression_ratio = get_kv_cache_compression_ratio(group_spec)
+                kernel_block_size = kernel_block_sizes[group.kv_cache_group_id] // compression_ratio
 
         for layer_name in group.layer_names:
             if layer_name in shared_kv_cache_layers:

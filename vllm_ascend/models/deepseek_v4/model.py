@@ -77,7 +77,10 @@ from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache as Vllm
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
+from vllm_ascend.core.kv_cache_interface import (
+    AscendSlidingWindowMLASpec,
+    KVCacheBlockGeometry,
+)
 from vllm_ascend.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
@@ -134,6 +137,11 @@ class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
             cache_dtype_str=self.cache_config.cache_dtype,
             model_version="deepseek_v4",
             alignment=None,
+            block_geometry=KVCacheBlockGeometry(
+                manager_block_size=self.block_size,
+                kernel_block_size=self.block_size,
+                storage_block_size=self.block_size,
+            ),
         )
 
     def forward(self): ...

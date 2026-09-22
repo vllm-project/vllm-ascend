@@ -253,6 +253,7 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
     AscendSlidingWindowMLASpec,
+    get_kernel_block_size,
     get_kv_cache_compression_ratio,
     get_storage_block_size,
     requires_padded_page_layout,
@@ -5505,7 +5506,10 @@ class NPUModelRunner(GPUModelRunner):
                     assert num_blocks >= kv_cache_config.num_blocks
 
                     if hasattr(attn_backend, "get_supported_kernel_block_sizes") and self.use_hybrid_blocks:
-                        block_size = attn_backend.get_supported_kernel_block_sizes()[0]
+                        if getattr(current_kv_cache_spec, "block_geometry", None) is not None:
+                            block_size = get_kernel_block_size(current_kv_cache_spec)
+                        else:
+                            block_size = attn_backend.get_supported_kernel_block_sizes()[0]
 
                         block_size_chunk = current_kv_cache_spec.block_size // block_size
                         kv_cache_shape = attn_backend.get_kv_cache_shape(
@@ -5707,7 +5711,7 @@ class NPUModelRunner(GPUModelRunner):
             if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
                 continue
             elif is_circular_kv_cache_spec(kv_cache_spec):
-                self.kernel_block_sizes.append([kv_cache_spec.block_size])
+                self.kernel_block_sizes.append([get_kernel_block_size(kv_cache_spec)])
             elif isinstance(kv_cache_spec, AttentionSpec):
                 # This is an attention backend that supports virtual
                 # block splitting. Get the supported block sizes from
@@ -5715,9 +5719,12 @@ class NPUModelRunner(GPUModelRunner):
                 attn_groups = self.attn_groups[kv_cache_group_id]
                 backends = [attn_group.backend for attn_group in attn_groups]
                 kv_manager_block_size = kv_cache_group.kv_cache_spec.block_size
-                selected_kernel_size = select_common_block_size(
-                    kv_manager_block_size, backends
-                )
+                if getattr(kv_cache_spec, "block_geometry", None) is not None:
+                    selected_kernel_size = get_kernel_block_size(kv_cache_spec)
+                else:
+                    selected_kernel_size = select_common_block_size(
+                        kv_manager_block_size, backends
+                    )
                 self.kernel_block_sizes.append([selected_kernel_size])
             else:
                 # This is likely Mamba or other non-attention cache,
@@ -5994,6 +6001,7 @@ class NPUModelRunner(GPUModelRunner):
                         non_causal_multi_token_decode=spec.non_causal_multi_token_decode,
                         model_version=model_version,
                         indexes_kv_by_block_stride=indexes_kv_by_block_stride,
+                        block_geometry=getattr(spec, "block_geometry", None),
                         **ratio_kwargs,
                     )
                     attn_layer_names.add(layer_name)

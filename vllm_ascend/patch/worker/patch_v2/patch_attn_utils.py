@@ -8,6 +8,7 @@ from vllm_ascend.worker.v2.attn_utils import (
     _reshape_kv_cache_v2,
     allocate_kv_cache_main,
     get_kv_cache_spec,
+    prepare_kernel_block_sizes,
 )
 
 
@@ -21,4 +22,5 @@ vllm.v1.worker.gpu.attn_utils._reshape_kv_cache = _reshape_kv_cache_v2
 # vLLM #51718 made this the live allocation symbol used by init_kv_cache.
 vllm.v1.worker.gpu.attn_utils.allocate_kv_cache = allocate_kv_cache_main
 vllm.v1.worker.gpu.attn_utils.bind_kv_cache = bind_kv_cache
+vllm.v1.worker.gpu.attn_utils.prepare_kernel_block_sizes = prepare_kernel_block_sizes
 vllm.v1.worker.gpu.model_runner.get_kv_cache_spec = get_kv_cache_spec

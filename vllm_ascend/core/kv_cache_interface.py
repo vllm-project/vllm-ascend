@@ -25,6 +25,77 @@ from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm_ascend.utils import vllm_version_is
 
 
+@dataclass(frozen=True)
+class KVCacheBlockGeometry:
+    """Block geometry carried by a KV-cache spec.
+
+    ``manager_block_size`` uses scheduler-token units,
+    ``kernel_block_size`` is the logical width used by block-table and
+    attention metadata code, and ``storage_block_size`` is the number of rows
+    physically stored in one manager page.
+    """
+
+    manager_block_size: int
+    kernel_block_size: int
+    storage_block_size: int
+
+    def __post_init__(self) -> None:
+        if min(self.manager_block_size, self.kernel_block_size, self.storage_block_size) <= 0:
+            raise ValueError(f"KV-cache block sizes must be positive, got {self}.")
+        if self.manager_block_size % self.kernel_block_size:
+            raise ValueError(
+                "KV-cache manager block size must be divisible by kernel block "
+                f"size, got {self.manager_block_size} and {self.kernel_block_size}."
+            )
+
+
+def get_block_geometry(kv_cache_spec: KVCacheSpec) -> KVCacheBlockGeometry:
+    """Resolve complete block geometry, including compatibility specs."""
+    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+        geometries = {get_block_geometry(spec) for spec in kv_cache_spec.kv_cache_specs.values()}
+        assert len(geometries) == 1, "All specs in one KV cache group must use the same block geometry."
+        return geometries.pop()
+
+    geometry = getattr(kv_cache_spec, "block_geometry", None)
+    if geometry is not None:
+        if geometry.manager_block_size != kv_cache_spec.block_size:
+            raise ValueError(
+                "KV-cache block geometry does not match spec.block_size: "
+                f"{geometry.manager_block_size} != {kv_cache_spec.block_size}."
+            )
+        return geometry
+
+    return KVCacheBlockGeometry(
+        manager_block_size=kv_cache_spec.block_size,
+        kernel_block_size=kv_cache_spec.block_size,
+        storage_block_size=get_storage_block_size(kv_cache_spec),
+    )
+
+
+def get_kernel_block_size(kv_cache_spec: KVCacheSpec) -> int:
+    """Return the logical block width consumed by attention kernels."""
+    return get_block_geometry(kv_cache_spec).kernel_block_size
+
+
+def _validate_geometry_compression(
+    geometry: KVCacheBlockGeometry,
+    tokens_per_state: int,
+) -> None:
+    if tokens_per_state <= 0:
+        raise ValueError(f"tokens_per_state must be positive, got {tokens_per_state}.")
+    if geometry.storage_block_size * tokens_per_state != geometry.manager_block_size:
+        raise ValueError(
+            "KV-cache storage geometry does not cover one manager block: "
+            f"{geometry.storage_block_size} * {tokens_per_state} != "
+            f"{geometry.manager_block_size}."
+        )
+    if geometry.kernel_block_size % tokens_per_state:
+        raise ValueError(
+            "KV-cache kernel block size must be divisible by tokens_per_state, "
+            f"got {geometry.kernel_block_size} and {tokens_per_state}."
+        )
+
+
 def get_kv_cache_compression_ratio(kv_cache_spec: KVCacheSpec) -> int:
     """Return the MLA compression ratio across vLLM cache-spec APIs."""
     return kv_cache_spec.tokens_per_state
@@ -32,6 +103,9 @@ def get_kv_cache_compression_ratio(kv_cache_spec: KVCacheSpec) -> int:
 
 def get_storage_block_size(kv_cache_spec: KVCacheSpec) -> int:
     """Return the physical token rows represented by one scheduler block."""
+    geometry = getattr(kv_cache_spec, "block_geometry", None)
+    if geometry is not None:
+        return get_block_geometry(kv_cache_spec).storage_block_size
     if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
         storage_block_sizes = {get_storage_block_size(spec) for spec in kv_cache_spec.kv_cache_specs.values()}
         assert len(storage_block_sizes) == 1, "All specs in one KV cache group must use the same storage block size."
@@ -112,6 +186,15 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     # stride. vLLM main removed this field from AttentionSpec, but it remains
     # part of the Ascend runner/backend contract.
     indexes_kv_by_block_stride: bool = False
+    block_geometry: KVCacheBlockGeometry | None = None
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.block_geometry is not None:
+            get_block_geometry(self)
+            if isinstance(self.tokens_per_state, int):
+                _validate_geometry_compression(self.block_geometry, self.tokens_per_state)
+
     if vllm_version_is("0.29.0"):
 
         @property
@@ -149,6 +232,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
                 spec.alignment,
                 get_kv_cache_compression_ratio(spec),
                 spec.indexes_kv_by_block_stride,
+                spec.block_geometry,
             )
             for spec in specs
         }
@@ -169,6 +253,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             cache_sparse_sfa_c8=first_spec.cache_sparse_sfa_c8,
             store_on_host=first_spec.store_on_host,
             indexes_kv_by_block_stride=first_spec.indexes_kv_by_block_stride,
+            block_geometry=first_spec.block_geometry,
         )
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
@@ -255,12 +340,17 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
     compress_ratio: int = 1
     model_version: str | None = None
     indexes_kv_by_block_stride: bool = False
+    block_geometry: KVCacheBlockGeometry | None = None
 
     def __post_init__(self):
-        pass
+        if self.block_geometry is not None:
+            get_block_geometry(self)
+            _validate_geometry_compression(self.block_geometry, self.compress_ratio)
 
     @property
     def storage_block_size(self) -> int:
+        if self.block_geometry is not None:
+            return self.block_geometry.storage_block_size
         return self.block_size // self.compress_ratio
 
     @property
@@ -276,11 +366,13 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
         compress_ratio_set = set(spec.compress_ratio for spec in specs)
         model_version_set = set(spec.model_version for spec in specs)
         sliding_window_set = set(spec.sliding_window for spec in specs)
+        block_geometry_set = set(spec.block_geometry for spec in specs)
         assert (
             len(cache_dtype_str_set) == 1
             and len(compress_ratio_set) == 1
             and len(model_version_set) == 1
             and len(sliding_window_set) == 1
+            and len(block_geometry_set) == 1
         ), (
             "All attention layers in the same KV cache group must use the same "
             "quantization method, compress ratio, model version and sliding "
@@ -296,6 +388,7 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
             cache_dtype_str=cache_dtype_str_set.pop(),
             compress_ratio=compress_ratio_set.pop(),
             model_version=model_version_set.pop(),
+            block_geometry=block_geometry_set.pop(),
         )
 
 
