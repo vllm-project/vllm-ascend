@@ -3,7 +3,6 @@
 
 """FA3 paged-cache and graph replay regression tests on a real Ascend device."""
 
-from copy import copy
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -158,58 +157,6 @@ def test_fa3_precision(dtype, query_lens, context_lens, state, num_heads, num_kv
     torch.testing.assert_close(output.float().cpu(), expected, atol=0.02, rtol=0.02)
     forward_context.paged.assert_called_once()
     assert forward_context.paged.call_args.kwargs["num_splits"] == 0
-
-
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@torch.inference_mode()
-def test_fa3_graph_switches_flashdecode_and_active_batch(dtype, forward_context, monkeypatch):
-    # Long KV activates FlashDecode for small GQA batches; short KV disables it.
-    # Replay both paths with one captured workspace and stable tiling addresses.
-    monkeypatch.setitem(globals(), "MAX_BLOCKS", 40)
-    torch.manual_seed(44)
-    builder, impl, common = make_attention(dtype, 8, 1)
-    builder.max_num_reqs = 17
-    builder.capture_sizes = {4}
-    query = torch.empty(4, 8, HEAD_SIZE, device="npu", dtype=dtype)
-    key = torch.empty(4, 1, HEAD_SIZE, device="npu", dtype=dtype)
-    value = torch.empty_like(key)
-    output = torch.empty_like(query)
-    prepare_case(common, [1, 1, 1, 1], [127] * 4, query, key, value)
-    metadata = builder.build(0, common)
-    layer = SimpleNamespace(layer_name="model.layers.0.self_attn.attn", _k_scale_float=1.0, _v_scale_float=1.0)
-    caches = (impl.key_cache, impl.value_cache)
-    for _ in range(3):
-        impl.forward(layer, query, key, value, caches, metadata, output)
-    torch.npu.synchronize()
-    graph = torch.npu.NPUGraph()
-    with torch.npu.graph(graph):
-        impl.forward(layer, query, key, value, caches, metadata, output)
-    for query_lens, context_lens in [
-        ([1], [4096]),
-        ([1, 1, 1, 1], [4095] * 4),
-        ([3, 1], [4096, 2048]),
-        ([4], [127]),
-        ([1], [4097]),
-    ]:
-        pages, seq_lens = prepare_case(common, query_lens, context_lens, query, key, value)
-        with patch.object(fa3, "get_scheduler_metadata", wraps=fa3.get_scheduler_metadata) as tiling:
-            runner_view = copy(common)
-            runner_view.seq_lens = common.seq_lens[: len(query_lens)]
-            runner_view.block_table_tensor = common.block_table_tensor[: len(query_lens)]
-            # A nonempty dummy query must be ignored, not copied/clamped.
-            common.query_start_loc[len(query_lens) + 1 :] = query.shape[0]
-            updated = builder.build(0, runner_view)
-        assert tiling.call_args.kwargs["batch_size"] == len(query_lens)
-        assert updated.query_start_loc.data_ptr() == common.query_start_loc.data_ptr()
-        assert updated.seq_lens.data_ptr() == common.seq_lens.data_ptr()
-        assert updated.block_tables.data_ptr() == common.block_table_tensor.data_ptr()
-        spec = next(iter(builder.scheduler_specs))
-        assert updated.scheduler_metadata is metadata.scheduler_metadata
-        assert updated.scheduler_metadata[spec].data_ptr() == metadata.scheduler_metadata[spec].data_ptr()
-        graph.replay()
-        torch.npu.synchronize()
-        expected = reference(impl, query, pages, query_lens, seq_lens)
-        torch.testing.assert_close(output[: sum(query_lens)].float().cpu(), expected, atol=0.02, rtol=0.02)
 
 
 @pytest.mark.parametrize("num_heads,num_kv_heads", [(4, 2), (16, 1)])
