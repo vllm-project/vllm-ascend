@@ -1,0 +1,10 @@
+add_op_to_compiled_list()
+if(BUILD_OPEN_PROJECT)
+    target_sources(op_host_aclnnInner PRIVATE kda_state_copy_def.cpp)
+    add_ops_compile_options(OP_NAME KdaStateCopy OPTIONS -Wno-deprecated-declarations -Werror)
+    configure_file(${OPS_TRANSFORMER_DIR}/common/include/cann_compat.h
+        ${CMAKE_BINARY_DIR}/binary/ascend950/src/ascendc/common/cann_compat.h COPYONLY)
+endif()
+if(NOT BUILD_OPS_RTY_KERNEL)
+    add_modules_sources(OPTYPE kda_state_copy ACLNNTYPE aclnn_inner)
+endif()

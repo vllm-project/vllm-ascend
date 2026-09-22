@@ -48,6 +48,7 @@
 #include "moe/causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule/recurrent_gated_delta_rule_torch_adpt.h"
 #include "attention/recurrent_kda/recurrent_kda_torch_adpt.h"
+#include "attention/kda_state_copy/kda_state_copy_torch_adpt.h"
 #include "attention/chunk_kda_fwd/chunk_kda_fwd_torch_adpt.h"
 #include "attention/kda_gate_cumsum/kda_gate_cumsum_torch_adpt.h"
 #include "attention/kda_layout_swap12/kda_layout_swap12_torch_adpt.h"
@@ -2820,6 +2821,11 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "bool use_beta_sigmoid_in_kernel=False, bool allow_neg_eigval=False, "
         "bool safe_gate=True, float lower_bound=-5.0) -> Tensor output");
     ops.impl("recurrent_kda", torch::kPrivateUse1, &vllm_ascend::recurrent_kda);
+
+    ops.def("kda_state_copy(Tensor(a!) state, Tensor(b!) packed_states, Tensor indices, "
+        "Tensor? has_initial_state=None, bool to_cache=False) -> ()");
+    ops.impl("kda_state_copy", torch::kPrivateUse1, &vllm_ascend::kda_state_copy);
+    ops.impl("kda_state_copy", torch::kMeta, &vllm_ascend::kda_state_copy_meta);
 
     ops.def(
         "dequant_situ_quant(Tensor x, "
