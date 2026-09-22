@@ -728,6 +728,7 @@ class TestProfilingChunkAsyncScheduler(TestBase):
         mock_balance_init_ascend_config,
         srf_enabled=False,
         async_scheduling=True,
+        pipeline_parallel_size=1,
     ):
         profiling_cfg = MagicMock()
         profiling_cfg.enabled = True
@@ -787,7 +788,10 @@ class TestProfilingChunkAsyncScheduler(TestBase):
             model_config=model_config,
             cache_config=cache_config,
         )
-        vllm_config.parallel_config.pipeline_parallel_size = 2
+        # PP=1 by default: use_pp=False keeps the patch_pp_mtp in-flight
+        # fence (_PP_IN_FLIGHT_STEP) inactive, and the v2 decode cadence
+        # becomes current_step + 1 so the next step stays eligible.
+        vllm_config.parallel_config.pipeline_parallel_size = pipeline_parallel_size
         vllm_config.model_config.hf_config.is_encoder_decoder = False
 
         kv_cache_config = KVCacheConfig(
@@ -812,14 +816,13 @@ class TestProfilingChunkAsyncScheduler(TestBase):
             # Scheduler.__init__, which infinitely recurses on a bare
             # MagicMock hf_config. Override it to keep the UT runnable.
             stack.enter_context(patch.object(ModelConfig, "uses_mrope", new_callable=PropertyMock, return_value=False))
-            # VllmConfig.use_v2_model_runner is a property that defaults to
-            # True on NPU CI when VLLM_USE_V2_MODEL_RUNNER is unset, which
-            # would arm the v2+PP decode cadence and stop placeholder
-            # accumulation on the second schedule(). Pin it to False so the
-            # default fixture exercises the v1 runner path; the v2 cadence
-            # test sets scheduler.use_v2_model_runner back to True itself.
+            # VllmConfig.use_v2_model_runner is a property whose default
+            # depends on the CI environment (HAS_TRITON etc.). Pin it to
+            # True: CPP + async scheduling is only supported with Model
+            # Runner V2 (the platform layer rejects the v1 combination),
+            # so the supported configuration must not rely on env defaults.
             stack.enter_context(
-                patch.object(VllmConfig, "use_v2_model_runner", new_callable=PropertyMock, return_value=False)
+                patch.object(VllmConfig, "use_v2_model_runner", new_callable=PropertyMock, return_value=True)
             )
             scheduler = scheduler_cls(
                 vllm_config=vllm_config,
@@ -954,8 +957,8 @@ class TestProfilingChunkAsyncScheduler(TestBase):
         self.assertEqual(request.num_output_tokens, 2)
 
     def test_v2_pp_sets_next_decode_eligible_step(self):
-        scheduler = self.create_scheduler()
-        scheduler.use_v2_model_runner = True
+        # PP=2 widens the v2 decode cadence to current_step + pp_size.
+        scheduler = self.create_scheduler(pipeline_parallel_size=2)
         request = create_requests(num_requests=1, num_tokens=10)[0]
         scheduler.add_request(request)
 
