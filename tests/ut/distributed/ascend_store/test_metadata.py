@@ -34,6 +34,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     get_group_block_size,
     get_group_cache_family,
     infer_cache_transfer_granularity,
+    infer_dcp_mismatch_info,
     infer_group_block_sizes,
     masked_block_runs,
     uses_hybrid_kv_cache,
@@ -762,3 +763,45 @@ class TestLayerMultiBlockReqMeta(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestInferDcpMismatchInfo(unittest.TestCase):
+    def test_same_dcp_returns_false(self):
+        self.assertFalse(
+            infer_dcp_mismatch_info("kv_consumer", {"prefill_dcp_size": 2}, 2)
+        )
+        self.assertFalse(
+            infer_dcp_mismatch_info("kv_producer", {"decode_dcp_size": 8}, 8, 1)
+        )
+
+    def test_missing_peer_key_returns_false(self):
+        # single-group path: peer topology absent -> local layout authoritative
+        self.assertFalse(infer_dcp_mismatch_info("kv_consumer", {}, 2, 1))
+
+    def test_consumer_prefill_dcp_mismatch_detected(self):
+        self.assertTrue(
+            infer_dcp_mismatch_info("kv_consumer", {"prefill_dcp_size": 8}, 2)
+        )
+
+    def test_producer_decode_dcp_mismatch_detected(self):
+        self.assertTrue(
+            infer_dcp_mismatch_info("kv_producer", {"decode_dcp_size": 2}, 8)
+        )
+
+    def test_pcp_mismatch_detected(self):
+        self.assertTrue(
+            infer_dcp_mismatch_info(
+                "kv_consumer", {"prefill_dcp_size": 2, "prefill_pcp_size": 4}, 2, 1
+            )
+        )
+
+    def test_non_mapping_extra_config_returns_false(self):
+        self.assertFalse(infer_dcp_mismatch_info("kv_consumer", object(), 2, 1))
+
+    def test_kv_both_returns_false(self):
+        self.assertFalse(infer_dcp_mismatch_info("kv_both", {"prefill_dcp_size": 8}, 2, 1))
+
+    def test_invalid_peer_value_treated_as_local(self):
+        self.assertFalse(
+            infer_dcp_mismatch_info("kv_consumer", {"prefill_dcp_size": "bad"}, 2, 1)
+        )

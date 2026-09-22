@@ -84,6 +84,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     infer_cache_transfer_granularity,
     infer_group_block_sizes,
     infer_group_cache_families,
+    infer_dcp_mismatch_info,
     infer_tp_mismatch_info,
     is_kv_save_role,
     masked_block_runs,
@@ -327,6 +328,26 @@ class KVPoolWorker:
             self.local_heads_per_rank = tp_mismatch_info.local_heads_per_rank
             self.effective_heads_per_rank = tp_mismatch_info.effective_heads_per_rank
             self.num_sub_keys = tp_mismatch_info.num_sub_keys
+
+        # Layerwise GVA layout derives shard stride/offset from the LOCAL dcp
+        # size and rank. In PD-disaggregation the producer and consumer are
+        # separate worker groups; if they disagree on dcp/pcp size, both sides
+        # compute different shard layouts for the SAME pool region and
+        # silently corrupt the layerwise KV pool. Reject that configuration
+        # explicitly instead of writing misaligned GVA addresses.
+        if (
+            self.use_layerwise
+            and self.kv_role in ("kv_producer", "kv_consumer")
+            and infer_dcp_mismatch_info(self.kv_role, self._extra_config, self.dcp_size, self.pcp_size)
+        ):
+            peer_role = "prefill" if self.kv_role == "kv_consumer" else "decode"
+            raise ValueError(
+                f"Decode-context-parallel mismatch in PD-disaggregation "
+                f"(local dcp_size={self.dcp_size}, local pcp_size={self.pcp_size}, "
+                f"peer role={peer_role}) is not supported with layerwise KV "
+                f"transfer. Both the producer and consumer must use the same "
+                f"dcp_size/pcp_size so the layerwise GVA shard layout is consistent."
+            )
 
     def _init_metadata(self, model_config, vllm_config, extra_config) -> None:
         partitions = None
