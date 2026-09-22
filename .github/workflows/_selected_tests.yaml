@@ -349,7 +349,11 @@ jobs:
   upload-coverage-to-obs:
       if: ${{ !cancelled() && inputs.enable-coverage }}
       needs: selected-tests
-      runs-on: ubuntu-latest
+      # ubuntu-latest's path to obs.cn-north-4 is not stable across runner
+      # regions. putFile only times out on an idle socket, so a slow route
+      # sits in this job for hours with no log line. Use the same HK runner
+      # as the other OBS uploads.
+      runs-on: linux-amd64-cpu-8-hk
       continue-on-error: true
       env:
         OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY_PRECISION }}
@@ -475,8 +479,13 @@ jobs:
 
         - name: Upload coverage to OBS
           run: |
-            pip install esdk-obs-python --quiet
-            python3 - <<'EOF'
+            set -euo pipefail
+            pip install esdk-obs-python
+            echo "OBS SDK installed"
+            du -h coverage.tar coverage_version.txt test_case_map.json
+            # Wall-clock limit. The SDK timeout only covers an idle socket, so a
+            # trickling connection would otherwise run until the job limit.
+            timeout 15m python3 -u - <<'EOF'
             import os
             from obs import ObsClient
 
@@ -485,7 +494,8 @@ jobs:
             client = ObsClient(
                 access_key_id=os.environ['OBS_ACCESS_KEY'],
                 secret_access_key=os.environ['OBS_SECRET_KEY'],
-                server='https://obs.cn-north-4.myhuaweicloud.com'
+                server='https://obs.cn-north-4.myhuaweicloud.com',
+                timeout=120,
             )
 
             uploads = [
@@ -493,10 +503,31 @@ jobs:
                 ('coverage_version.txt', f'{OBS_PREFIX}/coverage_version.txt'),
                 ('test_case_map.json', f'{OBS_PREFIX}/test_case_map.json'),
             ]
+
+            def make_progress(name):
+                state = {'next_pct': 10}
+
+                def progress(transferred, total, _seconds):
+                    if not total:
+                        return
+                    pct = transferred * 100 // total
+                    if pct >= state['next_pct'] or transferred == total:
+                        print(f'{name}: {pct}% ({transferred}/{total} bytes)', flush=True)
+                        state['next_pct'] = (pct // 10 + 1) * 10
+
+                return progress
+
             for local_path, obs_path in uploads:
-                resp = client.putFile(OBS_BUCKET, obs_path, local_path)
+                size = os.path.getsize(local_path)
+                print(f'Uploading {local_path} ({size} bytes) -> {obs_path}', flush=True)
+                resp = client.putFile(
+                    OBS_BUCKET,
+                    obs_path,
+                    local_path,
+                    progressCallback=make_progress(local_path),
+                )
                 if resp.status < 300:
-                    print(f'Uploaded: {local_path} -> {obs_path}')
+                    print(f'Uploaded: {local_path} -> {obs_path}', flush=True)
                 else:
                     raise Exception(f'Failed to upload {local_path}: {resp.errorMessage}')
             EOF
