@@ -17,7 +17,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from contextlib import AbstractContextManager, contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from contextvars import ContextVar
 
 import numpy as np
@@ -26,6 +26,7 @@ from vllm.compilation import breakable_cudagraph
 from vllm.config import VllmConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
+from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -61,10 +62,15 @@ from vllm_ascend.core.profiling_chunk_predictor import (
     _start_profiling_chunk_timing,
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
-from vllm_ascend.utils import lmhead_tp_enable, set_potential_max_tokens, vllm_version_is
+from vllm_ascend.utils import (
+    kv_transfer_supports_shared_backing,
+    lmhead_tp_enable,
+    set_potential_max_tokens,
+    vllm_version_is,
+)
 from vllm_ascend.worker.utils import disable_compilation
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
-from vllm_ascend.worker.v2.attn_utils import build_attn_state, unwrap_mamba_kv_cache_groups
+from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
@@ -80,7 +86,7 @@ from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpecul
 from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 
-if vllm_version_is("0.28.0"):
+if vllm_version_is("0.29.0"):
     from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 
 
@@ -91,6 +97,11 @@ class NPUModelRunner(GPUModelRunner):
     # backing allocation. Ascend MRV2 preserves that layout in
     # allocate_kv_cache_main and exposes contiguous backend-specific views.
     supports_standardized_shared_kv_backing = True
+
+    @property
+    def supports_shared_backing_with_kv_transfer(self) -> bool:
+        """Whether the active connector can consume one shared KV backing."""
+        return kv_transfer_supports_shared_backing(self.vllm_config.kv_transfer_config)
 
     execute_model_state: ExecuteModelState | None
 
@@ -256,17 +267,10 @@ class NPUModelRunner(GPUModelRunner):
         kv_cache_config: KVCacheConfig,
         kv_cache_allocation_context: AbstractContextManager | None = None,
     ) -> None:
-        # TODO: Remove this vLLM 0.28 workaround once support for 0.28 is dropped.
-        # vLLM 0.29 already fixes wrapped Mamba block-table sizing upstream.
-        if vllm_version_is("0.28.0"):
-            kv_cache_config = unwrap_mamba_kv_cache_groups(kv_cache_config)
         with graph_manager_wrapper(self):
-            # vLLM 0.28 GPUModelRunner.initialize_kv_cache does not accept
-            # kv_cache_allocation_context. Gate it the same way as other
-            # 0.28 super() kwargs in this runner.
             super().initialize_kv_cache(
                 kv_cache_config,
-                **({} if vllm_version_is("0.28.0") else {"kv_cache_allocation_context": kv_cache_allocation_context}),
+                kv_cache_allocation_context=kv_cache_allocation_context,
             )
             if self.pcp_manager is not None:
                 assert isinstance(self.pcp_manager, AscendPCPManager)
@@ -329,7 +333,7 @@ class NPUModelRunner(GPUModelRunner):
                 skip_attn_for_dummy_run=skip_attn_for_dummy_run,
                 is_profile=is_profile,
                 context_len=context_len,
-                **({} if vllm_version_is("0.28.0") else {"valid_dummy_state_slots": valid_dummy_state_slots}),
+                **({} if vllm_version_is("0.29.0") else {"valid_dummy_state_slots": valid_dummy_state_slots}),
             )
         self.model_state.kvpp_is_dummy_run = False
         self.kvpp.complete_forward()
@@ -532,7 +536,7 @@ class NPUModelRunner(GPUModelRunner):
         dcp_local_seq_lens = None
         # Main computes DCP lengths in the inherited execute_model after PCP
         # partitioning (vLLM #55212). Release still prepares them here.
-        if vllm_version_is("0.28.0") and self.use_dcp:
+        if vllm_version_is("0.29.0") and self.use_dcp:
             prepare_dcp_local_seq_lens(
                 self.input_buffers.dcp_local_seq_lens,
                 self.input_buffers.seq_lens,
@@ -599,7 +603,7 @@ class NPUModelRunner(GPUModelRunner):
             has_prefill=batch_req_state.has_prefill,
             **(
                 {"max_seq_len_np": self.req_states.max_seq_len[idx_mapping_np] if self.use_pp else None}
-                if vllm_version_is("0.28.0")
+                if vllm_version_is("0.29.0")
                 else {}
             ),
             input_ids=self.input_buffers.input_ids[:num_tokens_after_padding],
@@ -615,20 +619,11 @@ class NPUModelRunner(GPUModelRunner):
             seq_lens_np=self.input_buffers.seq_lens_np,
             attn_state=attn_state,
         )
-
-        # vLLM #53515 / #15196 pass padded_num_tokens into PCP partition on main;
-        # v0.28.0 maybe_partition_pcp_batch does not accept that kwarg.
-        if vllm_version_is("0.28.0"):
-            input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
-                self.pcp_manager,
-                input_batch,
-            )
-        else:
-            input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
-                self.pcp_manager,
-                input_batch,
-                padded_num_tokens=batch_desc.num_tokens,
-            )
+        input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
+            self.pcp_manager,
+            input_batch,
+            padded_num_tokens=batch_desc.num_tokens,
+        )
 
         # For mla/sfa, update cos/sin. Here is for execute_model.
         update_cos_sin(input_batch.positions)
@@ -641,10 +636,10 @@ class NPUModelRunner(GPUModelRunner):
         if self.pcp_manager is None:
             return super().prepare_dummy_attn(
                 input_batch,
-                **({} if vllm_version_is("0.28.0") else {"valid_state_slots": valid_state_slots}),
+                **({} if vllm_version_is("0.29.0") else {"valid_state_slots": valid_state_slots}),
             )
         block_tables, slot_mappings = self.pcp_manager.prepare_dummy_attn(input_batch)
-        if not vllm_version_is("0.28.0") and valid_state_slots:
+        if not vllm_version_is("0.29.0") and valid_state_slots:
             # Match the upstream state-slot contract in the persistent PCP views.
             for block_table in block_tables:
                 state_slots = torch.arange(1, block_table.shape[0] + 1, dtype=torch.int32, device=block_table.device)
@@ -722,6 +717,7 @@ class NPUModelRunner(GPUModelRunner):
         *args,
         skip_attn: bool = False,
         uniform_decode: bool = False,
+        context_len: int = 0,
         skip_eplb: bool = False,
         is_profile: bool = False,
         **kwargs,
@@ -734,15 +730,28 @@ class NPUModelRunner(GPUModelRunner):
         ``_lmhead_tp_max_num_logits()``; a mismatch hangs). Skipped for
         profiling and non-last PP ranks. Draft-side alignment is not covered.
         """
-        hidden_states, sample_hidden_states = super()._dummy_run(
-            num_tokens,
-            *args,
-            skip_attn=skip_attn,
-            uniform_decode=uniform_decode,
-            skip_eplb=skip_eplb,
-            is_profile=is_profile,
-            **kwargs,
-        )
+        # Adaptive verification profiles eager tail sizes after graph capture.
+        # Use balanced dummy routing, as the initial memory profile does, so a
+        # synthetic router hotspot cannot exhaust one EP rank during startup.
+        profile_adaptive_tail = self.adaptive_verification is not None and context_len > 0
+        if profile_adaptive_tail and self.ascend_config.xlite_graph_config.enabled:
+            logger.warning_once(
+                "Adaptive verification cost profiling with XLite enabled may "
+                "produce inaccurate costs because balanced MoE profiling sets "
+                "the profile-run marker, which makes XLite bypass its graph path."
+            )
+        load_balance_ctx = override_mrv2_in_profile_run(True) if profile_adaptive_tail else nullcontext()
+        with load_balance_ctx:
+            hidden_states, sample_hidden_states = super()._dummy_run(
+                num_tokens,
+                *args,
+                skip_attn=skip_attn,
+                uniform_decode=uniform_decode,
+                context_len=context_len,
+                skip_eplb=skip_eplb,
+                is_profile=is_profile,
+                **kwargs,
+            )
         if lmhead_tp_enable() and not is_profile and hidden_states is not None:
             dummy_indices = torch.zeros(
                 self._lmhead_tp_max_num_logits(),

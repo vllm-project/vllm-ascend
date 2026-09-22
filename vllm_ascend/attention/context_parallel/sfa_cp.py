@@ -9,6 +9,7 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_dcp_group, get_pcp_group, get_tp_group
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
+from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 import vllm_ascend.ops.triton.sfa_cp  # noqa: F401
@@ -43,7 +44,6 @@ from vllm_ascend.utils import (
     enable_sfa_dcp_force_tmajor_restore,
     enable_sfa_dcp_replicated_indexer,
     is_pd_decode_recompute_scheduler_enabled,
-    vllm_version_is,
 )
 from vllm_ascend.weight_switch import (
     WeightLoadPartition,
@@ -51,11 +51,6 @@ from vllm_ascend.weight_switch import (
     WeightSwitchMixin,
 )
 from vllm_ascend.weight_switch.o_proj import OProjWeightSwitchMixin
-
-if vllm_version_is("0.28.0"):
-    from vllm.model_executor.layers.attention.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
-else:
-    from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 
 M = TypeVar("M", bound=AscendSFAMetadata)
 
@@ -1330,7 +1325,11 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
     ) -> torch.Tensor:
         assert isinstance(attn_metadata, AscendSFADCPMetadata)
         assert attn_metadata.dcp_context is not None
-        return attn_metadata.dcp_context.slot_mapping[: attn_metadata.num_input_tokens]
+        slots = attn_metadata.dcp_context.slot_mapping
+        # PCP gathers prefill KV rows; retain their full DCP mapping.
+        if isinstance(self, AscendSFAPCPImpl) and self._has_prefill(attn_metadata):
+            return slots
+        return slots[: attn_metadata.num_input_tokens]
 
     def _store_parallel_kv(
         self,

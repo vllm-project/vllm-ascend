@@ -1,3 +1,4 @@
+from copy import copy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
 
@@ -20,6 +21,7 @@ from vllm.v1.attention.backend import (
     MLAAttentionImpl,
 )
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
+from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -57,15 +59,10 @@ from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_NZ,
     is_pd_decode_recompute_scheduler_enabled,
     maybe_trans_nz,
-    vllm_version_is,
     weak_ref_tensors,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
-if vllm_version_is("0.28.0"):
-    from vllm.model_executor.layers.attention.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
-else:
-    from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -74,11 +71,11 @@ BUILD_METADATA_STEP_PREFILL = 0
 BUILD_METADATA_STEP_DECODE = 1
 
 
-def _npu_mla_prolog_v3_no_rope(**kwargs):
-    """Call the AscendC MLA prolog with optional RoPE inputs omitted."""
+def _npu_mla_prolog_v3_k3(**kwargs):
+    """Call the isolated K3 MLA prolog with optional RoPE inputs omitted."""
     import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401, PLC0415
 
-    return torch.ops._C_ascend.npu_mla_prolog_v3(**kwargs)
+    return torch.ops._C_ascend.npu_mla_prolog_v3_k3(**kwargs)
 
 
 class AscendMLABackend(AttentionBackend):
@@ -745,6 +742,14 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             nope_zero_rope_cache=self.nope_zero_rope_cache,
         )
         return decode_metadata
+
+    def build_for_cudagraph_capture(self, common_attn_metadata: AscendCommonAttentionMetadata):
+        capture_metadata = copy(common_attn_metadata)
+        if capture_metadata.attn_state is None:
+            capture_metadata.attn_state = AscendAttentionState.ChunkedPrefill
+        if self.dcp_enabled and capture_metadata.is_prefilling is None:
+            capture_metadata.is_prefilling = torch.zeros(capture_metadata.num_reqs, dtype=torch.bool)
+        return super().build_for_cudagraph_capture(capture_metadata)
 
     def build_for_graph_capture(
         self,
@@ -1880,7 +1885,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             else:
                 cos = None
                 sin = None
-                prolog_op = _npu_mla_prolog_v3_no_rope
+                prolog_op = _npu_mla_prolog_v3_k3
             cache_index = cache_index.view(bsz, -1) if quantized_x.dim() == 3 else cache_index.view(-1)
             cache_mode = "PA_BSND"
             weight_quant_mode = self.mlapo_weight_quant_mode

@@ -14,20 +14,14 @@
 
 """310P RC GDN metadata builder.
 
-This 310P-specific builder keeps the upstream RC-safe prefill metadata path
-and adds ACL graph replay padding for decode / speculative decode metadata.
+Share request grouping and graph materialization, without building outputs
+that are only consumed by the common GDN/KDA kernels.
 """
 
 from __future__ import annotations
 
-import torch
-from vllm.v1.attention.backend import CommonAttentionMetadata
-from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
-from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
-from vllm_ascend._310p.ops.fla.cumpute_causal_conv1d_metadata_310 import (
-    compute_causal_conv1d_metadata,
-)
 from vllm_ascend.ops.gdn_attn_builder import (
     AscendGDNAttentionBackend,
     AscendGDNAttentionMetadataBuilder,
@@ -37,222 +31,21 @@ from vllm_ascend.ops.gdn_attn_builder import (
 class GDNAttentionMetadataBuilder310(AscendGDNAttentionMetadataBuilder):
     """310P overrides on top of :class:`AscendGDNAttentionMetadataBuilder`.
 
-    310P does not support Triton, so fallback metadata attachment is skipped.
-    For ACL graph replay, decode metadata is padded into fixed graph buffers.
+    310P consumes top-level non-spec fields and derives recurrent lengths in
+    its kernel wrapper; it still uses the shared speculative conv metadata.
     """
 
-    use_full_cuda_graph: bool
+    # The 310P conv kernel expects PAD_SLOT_ID, not a valid state block.
+    _SPEC_GRAPH_PAD_SLOT_ID = PAD_SLOT_ID
+    _USE_COMMON_KERNEL_METADATA = False
 
-    def _build_prefill_has_initial_state_and_causal_conv1d_meta(
-        self,
-        *,
-        common_attn_metadata: CommonAttentionMetadata,
-        context_lens_tensor: torch.Tensor,
-        num_prefills: int,
-        spec_sequence_masks_cpu: torch.Tensor | None,
-        non_spec_sequence_indices: torch.Tensor | None,
-        non_spec_query_start_loc_cpu: torch.Tensor | None,
-        query_start_loc: torch.Tensor,
-    ) -> tuple[
-        torch.Tensor | None,
-        dict[int, dict[str, object]] | None,
-        torch.Tensor | None,
-        torch.Tensor | None,
-    ]:
-        del common_attn_metadata, num_prefills
-        assert non_spec_query_start_loc_cpu is not None
-
-        has_initial_state = context_lens_tensor > 0
-        if spec_sequence_masks_cpu is not None:
-            assert non_spec_sequence_indices is not None
-            has_initial_state = torch.index_select(
-                has_initial_state,
-                0,
-                non_spec_sequence_indices,
-            )
-        nums_dict, batch_ptr, token_chunk_offset_ptr = compute_causal_conv1d_metadata(
-            non_spec_query_start_loc_cpu,
-            device=query_start_loc.device,
-        )
+    def _can_pad_spec_decode(self, graph_request_count: int, num_spec_decode_tokens: int) -> bool:
+        # MTP token buffers can hold (1 + K) tokens per request. Do not apply
+        # the common single-token limit to 310P concurrent spec replay.
         return (
-            has_initial_state,
-            nums_dict,
-            batch_ptr,
-            token_chunk_offset_ptr,
+            graph_request_count <= self.decode_cudagraph_max_bs
+            and num_spec_decode_tokens <= self.spec_token_indx.numel()
         )
-
-    def _attach_non_spec_prefill_fallback_meta(
-        self,
-        attn_metadata: GDNAttentionMetadata,
-        common_attn_metadata: CommonAttentionMetadata,
-        non_spec_query_start_loc_cpu: torch.Tensor | None,
-    ) -> GDNAttentionMetadata:
-        del common_attn_metadata, non_spec_query_start_loc_cpu
-        return attn_metadata
-
-    def _attach_spec_decode_fallback_meta(
-        self,
-        attn_metadata: GDNAttentionMetadata,
-        common_attn_metadata: CommonAttentionMetadata,
-        num_decode_draft_tokens_cpu: torch.Tensor | None,
-    ) -> GDNAttentionMetadata:
-        del common_attn_metadata, num_decode_draft_tokens_cpu
-        return attn_metadata
-
-    def _attach_non_spec_decode_fallback_meta(
-        self,
-        attn_metadata: GDNAttentionMetadata,
-        common_attn_metadata: CommonAttentionMetadata,
-        num_decode_draft_tokens_cpu: torch.Tensor | None,
-    ) -> GDNAttentionMetadata:
-        del common_attn_metadata, num_decode_draft_tokens_cpu
-        return attn_metadata
-
-    def _pad_spec_decode_metadata(
-        self,
-        attn_metadata: GDNAttentionMetadata,
-        graph_batch_size: int,
-    ) -> None:
-        num_spec_decodes = attn_metadata.num_spec_decodes
-        spec_state_indices = attn_metadata.spec_state_indices_tensor
-        spec_sequence_masks = attn_metadata.spec_sequence_masks
-        spec_query_start_loc = attn_metadata.spec_query_start_loc
-        num_accepted_tokens = attn_metadata.num_accepted_tokens
-        assert spec_state_indices is not None
-        assert spec_sequence_masks is not None
-        assert spec_query_start_loc is not None
-        assert num_accepted_tokens is not None
-
-        self.spec_state_indices_tensor[:num_spec_decodes].copy_(
-            spec_state_indices,
-            non_blocking=True,
-        )
-        attn_metadata.spec_state_indices_tensor = self.spec_state_indices_tensor[:graph_batch_size]
-        # Match PAD_SLOT_ID expected by npu_causal_conv1d_310; NULL_BLOCK_ID(=0)
-        # would write padding rows into mamba block 0 under FULL graph replay.
-        attn_metadata.spec_state_indices_tensor[num_spec_decodes:].fill_(PAD_SLOT_ID)
-
-        self.spec_sequence_masks[:num_spec_decodes].copy_(
-            spec_sequence_masks[:num_spec_decodes],
-            non_blocking=True,
-        )
-        attn_metadata.spec_sequence_masks = self.spec_sequence_masks[:graph_batch_size]
-        attn_metadata.spec_sequence_masks[num_spec_decodes:].fill_(False)
-
-        assert attn_metadata.non_spec_token_indx is not None
-        assert attn_metadata.spec_token_indx is not None
-        non_spec_tokens = attn_metadata.non_spec_token_indx
-        spec_tokens = attn_metadata.spec_token_indx
-        self.non_spec_token_indx[: non_spec_tokens.size(0)].copy_(
-            non_spec_tokens,
-            non_blocking=True,
-        )
-        self.spec_token_indx[: spec_tokens.size(0)].copy_(
-            spec_tokens,
-            non_blocking=True,
-        )
-        attn_metadata.non_spec_token_indx = self.non_spec_token_indx[: non_spec_tokens.size(0)]
-        attn_metadata.spec_token_indx = self.spec_token_indx[: spec_tokens.size(0)]
-
-        self.spec_query_start_loc[: num_spec_decodes + 1].copy_(
-            spec_query_start_loc,
-            non_blocking=True,
-        )
-        attn_metadata.spec_query_start_loc = self.spec_query_start_loc[: graph_batch_size + 1]
-        query_padding = attn_metadata.spec_query_start_loc[num_spec_decodes + 1 :]
-        if query_padding.numel() > 0:
-            query_padding.copy_(
-                spec_query_start_loc[-1].expand_as(query_padding),
-                non_blocking=True,
-            )
-
-        self.num_accepted_tokens[:num_spec_decodes].copy_(
-            num_accepted_tokens,
-            non_blocking=True,
-        )
-        attn_metadata.num_accepted_tokens = self.num_accepted_tokens[:graph_batch_size]
-        # Match Ascend mainline / Mamba neutral value (1), not 0. Padding with 0
-        # makes accepted-1=-1 and corrupts GDN recurrent init for real rows.
-        attn_metadata.num_accepted_tokens[num_spec_decodes:].fill_(1)
-        self._attach_spec_decode_metadata(attn_metadata)
-
-    def _pad_decode_metadata(
-        self,
-        attn_metadata: GDNAttentionMetadata,
-        graph_batch_size: int,
-    ) -> None:
-        num_decodes = attn_metadata.num_decodes
-        state_indices = attn_metadata.non_spec_state_indices_tensor
-        query_start_loc = attn_metadata.non_spec_query_start_loc
-        assert state_indices is not None
-        assert query_start_loc is not None
-
-        self.non_spec_state_indices_tensor[:num_decodes].copy_(
-            state_indices,
-            non_blocking=True,
-        )
-        attn_metadata.non_spec_state_indices_tensor = self.non_spec_state_indices_tensor[:graph_batch_size]
-        attn_metadata.non_spec_state_indices_tensor[num_decodes:].fill_(NULL_BLOCK_ID)
-
-        self.non_spec_query_start_loc[: num_decodes + 1].copy_(
-            query_start_loc,
-            non_blocking=True,
-        )
-        attn_metadata.non_spec_query_start_loc = self.non_spec_query_start_loc[: graph_batch_size + 1]
-        query_padding = attn_metadata.non_spec_query_start_loc[num_decodes + 1 :]
-        if query_padding.numel() > 0:
-            query_padding.copy_(
-                query_start_loc[-1].expand_as(query_padding),
-                non_blocking=True,
-            )
-        self._attach_non_spec_decode_metadata(
-            attn_metadata,
-            attn_metadata.non_spec_state_indices_tensor,
-        )
-
-    def build(  # type: ignore[override]
-        self,
-        common_prefix_len: int,
-        common_attn_metadata: CommonAttentionMetadata,
-        num_accepted_tokens: torch.Tensor | None = None,
-        num_decode_draft_tokens_cpu: torch.Tensor | None = None,
-        fast_build: bool = False,
-    ) -> GDNAttentionMetadata:
-        use_full_graph = self.use_full_cuda_graph
-        self.use_full_cuda_graph = False
-        try:
-            attn_metadata = super().build(
-                common_prefix_len,
-                common_attn_metadata,
-                num_accepted_tokens,
-                num_decode_draft_tokens_cpu,
-                fast_build,
-            )
-        finally:
-            self.use_full_cuda_graph = use_full_graph
-
-        if not use_full_graph:
-            return attn_metadata
-
-        graph_batch_size = common_attn_metadata.num_reqs
-        # Spec metadata is request-granular (see vLLM GDN comment). Do not gate
-        # on ``num_spec_decode_tokens``: concurrent MTP has tokens = reqs*(1+K),
-        # which can equal/exceed ``decode_cudagraph_max_bs`` (often set from
-        # max capture *token* size). Skipping pad then leaves ephemeral tensors
-        # that FULL replay cannot refresh — concurrent SpecDecoding poison.
-        if (
-            attn_metadata.num_prefills == 0
-            and attn_metadata.num_decodes == 0
-            and attn_metadata.num_spec_decodes <= self.decode_cudagraph_max_bs
-        ):
-            self._pad_spec_decode_metadata(attn_metadata, graph_batch_size)
-        elif (
-            attn_metadata.num_prefills == 0
-            and attn_metadata.num_spec_decodes == 0
-            and attn_metadata.num_decodes <= self.decode_cudagraph_max_bs
-        ):
-            self._pad_decode_metadata(attn_metadata, graph_batch_size)
-        return attn_metadata
 
 
 # Keep the name introduced by the 310P ACL graph padding patch so existing

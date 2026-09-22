@@ -35,6 +35,8 @@ _server_cmd: &server_cmd
   - "deepseek_v4"
   - "--api_server_count"
   - "1"
+  - "--attention_config.indexer_kv_dtype" 
+  - "int8"
   - "--compilation-config"
   - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
   - "--speculative-config"

@@ -40,6 +40,11 @@ class TestUtils(TestBase):
         utils.enable_dsa_cp_full_o_proj.cache_clear()
         utils.enable_pcp_o_proj_weight_sharding.cache_clear()
 
+    def test_mooncake_hybrid_connector_supports_shared_backing(self):
+        kv_transfer_config = SimpleNamespace(kv_connector="MooncakeHybridConnector")
+
+        self.assertTrue(utils.kv_transfer_supports_shared_backing(kv_transfer_config))
+
     def test_nd_to_nz_2d(self):
         # can be divided by 16
         input_tensor = torch.randn(32, 64)
@@ -263,16 +268,13 @@ class TestUtils(TestBase):
         with mock.patch("vllm.__version__", "2.0.0"):
             self.assertTrue(utils.vllm_version_is.__wrapped__("2.0.0"))
             self.assertFalse(utils.vllm_version_is.__wrapped__("1.0.0"))
-        with mock.patch("vllm.__version__", "0.1.dev1+g6e448d0ea.empty"):
-            with mock.patch("vllm_ascend.utils.importlib.util.find_spec") as find_spec:
-                find_spec.side_effect = lambda name: (
-                    object() if name == "vllm.model_executor.layers.attention.pcp" else None
-                )
-                self.assertTrue(utils.vllm_version_is.__wrapped__("0.28.0"))
-                self.assertFalse(utils.vllm_version_is.__wrapped__("0.27.1"))
-            with mock.patch("vllm_ascend.utils.importlib.util.find_spec") as find_spec:
-                find_spec.side_effect = lambda name: (object() if name == "vllm.v1.attention.ops.pcp" else None)
+        for installed in ("0.29.0", "0.29.0+empty"):
+            with mock.patch("vllm.__version__", installed):
+                self.assertTrue(utils.vllm_version_is.__wrapped__("0.29.0"))
                 self.assertFalse(utils.vllm_version_is.__wrapped__("0.28.0"))
+        for installed in ("0.1.dev1+g84030bbe3d.empty", "0.29.0rc1"):
+            with mock.patch("vllm.__version__", installed):
+                self.assertFalse(utils.vllm_version_is.__wrapped__("0.29.0"))
         # Test caching takes effect without leaving a polluted process cache.
         utils.vllm_version_is.cache_clear()
         with mock.patch.dict(os.environ, {"VLLM_VERSION": "1.0.0"}):
@@ -520,7 +522,9 @@ class TestUtils(TestBase):
         mock_config.weight_nz_mode = 2
         with (
             mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
-            mock.patch("vllm_ascend.utils.is_310p", return_value=False),
+            mock.patch(
+                "vllm_ascend.utils.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A2)
+            ),
         ):
             weight = torch.empty(32, 64, dtype=torch.float8_e4m3fn)
             result = utils.maybe_trans_nz(weight, customize_dtype=torch.float8_e4m3fn)
@@ -535,7 +539,9 @@ class TestUtils(TestBase):
         mock_config.weight_nz_mode = 2
         with (
             mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
-            mock.patch("vllm_ascend.utils.is_310p", return_value=False),
+            mock.patch(
+                "vllm_ascend.utils.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A2)
+            ),
         ):
             weight = torch.empty(32, 64, dtype=torch.float8_e4m3fn)
             result = utils.maybe_trans_nz(weight, input_dtype=torch_npu.float4_e2m1fn_x2)
@@ -550,7 +556,9 @@ class TestUtils(TestBase):
         mock_config.weight_nz_mode = 2
         with (
             mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
-            mock.patch("vllm_ascend.utils.is_310p", return_value=False),
+            mock.patch(
+                "vllm_ascend.utils.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A2)
+            ),
         ):
             weight = torch.empty(32, 64, dtype=torch.float8_e4m3fn)
             result = utils.maybe_trans_nz(
@@ -570,7 +578,9 @@ class TestUtils(TestBase):
         mock_config.weight_nz_mode = 0
         with (
             mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
-            mock.patch("vllm_ascend.utils.is_310p", return_value=False),
+            mock.patch(
+                "vllm_ascend.utils.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A2)
+            ),
         ):
             weight = torch.randn(32, 64, dtype=torch.float16)
             result = utils.maybe_trans_nz(weight, customize_dtype=torch.float8_e4m3fn)
@@ -773,6 +783,16 @@ class TestIsMtpLayer(TestBase):
         # Mocked/partial hf_configs must not be classified as MTP layers.
         config = SimpleNamespace(num_hidden_layers="80")
         self.assertFalse(utils.is_mtp_layer(config, "model.layers.80.self_attn.attn"))
+
+
+def test_has_layer_idx_is_checked_per_model_instance():
+    target = SimpleNamespace(model=SimpleNamespace(start_layer=0))
+    draft = SimpleNamespace(model=SimpleNamespace())
+
+    assert utils.has_layer_idx(target)
+    assert not utils.has_layer_idx(draft)
+    assert utils.has_layer_idx(target)
+    assert not utils.has_layer_idx(None)
 
 
 class TestIsRlWeightUpdateEnabled(TestBase):

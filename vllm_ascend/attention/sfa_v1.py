@@ -40,7 +40,7 @@ from vllm_ascend.attention.utils import (
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
-    record_attention_compute_start,
+    attention_transfer_window,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     OFFLOAD_K_CACHE_NPU_INDEX,
@@ -105,8 +105,24 @@ def build_smla_metadata(metadata, buffer, num_heads, head_dim, topk):
     metadata.smla_metadata = buffer
 
 
+def _view_cache_as_operator_pages(cache: torch.Tensor, block_size: int) -> torch.Tensor:
+    """Expose oversized contiguous storage pages at operator block granularity."""
+    storage_block_size = cache.shape[1]
+    if storage_block_size == block_size:
+        return cache
+    if storage_block_size % block_size:
+        raise ValueError(
+            f"Sparse MLA storage block size {storage_block_size} is not divisible by operator block size {block_size}."
+        )
+    try:
+        return cache.view(-1, block_size, *cache.shape[2:])
+    except RuntimeError as err:
+        raise ValueError("Sparse MLA oversized storage pages must support a zero-copy operator-page view.") from err
+
+
 def sparse_mla(query, cache, indices, metadata, scale):
     """Attend to original latent KV, using the platform's NoPE operator."""
+    cache = _view_cache_as_operator_pages(cache, metadata.block_size)
     if metadata.smla_metadata is not None:
         # The A5 DMA merges adjacent columns. Preserve the selected set while
         # sorting token positions and moving invalid padding to the end.
@@ -135,10 +151,6 @@ def sparse_mla(query, cache, indices, metadata, scale):
             return_softmax_lse=False,
         )
     else:
-        # Large, contiguous hybrid storage pages need a C128 view to meet
-        # the A2/A3 limit. Keep supported page-strided layouts unchanged.
-        if cache.shape[1] != metadata.block_size:
-            cache = cache.view(-1, metadata.block_size, *cache.shape[2:])
         result = torch.ops._C_ascend.npu_sparse_flash_attention(
             query=query.contiguous(),
             key=cache,
@@ -178,10 +190,12 @@ class SparseMLAMetadataState:
         self.split = block_size // kernel_block_size
         self.use_smla = get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.FP8_OPTIMIZED
         self.block_size = block_size
-        if not self.use_smla and block_size > SPARSE_ATTENTION_MAX_BLOCK_SIZE:
+        if block_size > SPARSE_ATTENTION_MAX_BLOCK_SIZE:
             self.block_size = kernel_block_size
         self.table_stride = self.block_size // kernel_block_size
-        table_width = cdiv(vllm_config.model_config.max_model_len, block_size) * (block_size // self.block_size)
+        cache_block_size = vllm_config.cache_config.block_size
+        expand_factor = max(cache_block_size // kernel_block_size, 1)
+        table_width = cdiv(vllm_config.model_config.max_model_len, cache_block_size) * expand_factor
         self.block_table_buffer = torch.empty(
             vllm_config.scheduler_config.max_num_seqs,
             table_width,
@@ -1827,17 +1841,16 @@ class AscendSFAImpl(MLAAttentionImpl):
         # Open the prefetch gate for every SFA layer. Some GLM-5.2 layers
         # reuse cached top-k indices and have no indexer, so recording this
         # inside the indexer's forward would leave their gate closed.
-        record_attention_compute_start()
-
-        attn_output = self._execute_sparse_flash_attention_process(
-            ql_nope,
-            q_pe,
-            kv_cache,
-            topk_indices,
-            attn_metadata,
-            actual_seq_lengths_query,
-            actual_seq_lengths_key,
-        )
+        with attention_transfer_window():
+            attn_output = self._execute_sparse_flash_attention_process(
+                ql_nope,
+                q_pe,
+                kv_cache,
+                topk_indices,
+                attn_metadata,
+                actual_seq_lengths_query,
+                actual_seq_lengths_key,
+            )
 
         attn_output = self._v_up_proj(attn_output)
         if gate_hidden_states is not None:

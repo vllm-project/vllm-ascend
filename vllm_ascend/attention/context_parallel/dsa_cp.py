@@ -13,9 +13,13 @@ from vllm.triton_utils import HAS_TRITON, triton
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionImplBase, AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention import dsa_v1
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan
+from vllm_ascend.attention.dsa_attn_kv_plan import (
+    get_dsa_attn_kv_plan,
+    is_a5_bf16_kv_enabled,
+)
 from vllm_ascend.attention.dsa_v1 import (
     _dsa_layout_kv,
     _dsa_swa_only_cmp_ratio,
@@ -32,12 +36,14 @@ from vllm_ascend.attention.utils import (
     wait_for_kv_layer_from_connector,
 )
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, get_storage_block_size
+from vllm_ascend.device.device_config import is_950
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.models.common.ops.sequence_parallel import sp_reduce_scatter
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
 from vllm_ascend.models.deepseek_v4.indexer import AscendIndexerMetadata
+from vllm_ascend.ops.cv_linear import CVLinearWrapper
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.ops.rope_dsv4 import RopeDataProxy, get_cos_and_sin_dsa, get_full_cos_and_sin_dsa
 from vllm_ascend.ops.triton.dsa_cp import build_local_metadata_triton
@@ -60,6 +66,23 @@ if TYPE_CHECKING:
 
 # Fixed-size contract required by the underlying _C_ascend ops (must be exactly 1024).
 SAS_METADATA_SIZE = 1024
+
+
+def restore_tp_heads(output, tp_group):
+    """Exchange [local tokens, all heads] for [all tokens, local heads]."""
+    if tp_group.world_size == 1:
+        return output
+    tokens, heads, width = output.shape
+    local_heads = heads // tp_group.world_size
+    send = (
+        output.view(tokens, tp_group.world_size, local_heads, width)
+        .permute(1, 0, 2, 3)
+        .contiguous()
+        .view(-1, local_heads, width)
+    )
+    recv = torch.empty_like(send)
+    dist.all_to_all_single(recv, send, group=tp_group.device_group)
+    return recv
 
 
 def hadamard_transform_ref(
@@ -1422,9 +1445,9 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         self.wo_a = kwargs["wo_a"]
         self.wo_b = kwargs["wo_b"]
 
-        # Device-independent: the selected linear method validates whether
-        # its tensors support domain/full-weight switching.
-        self.enable_dsa_cp_full_o_proj = enable_dsa_cp_full_o_proj()
+        # A5 uses full o_proj weight gathering. A3 keeps the activation
+        # all-to-all path to avoid gathering the full o_proj weights.
+        self.enable_dsa_cp_full_o_proj = enable_dsa_cp_full_o_proj() and is_950()
         self.o_proj_weight_switch_config = WeightSwitchConfig.from_group(self.tp_group)
         self._o_proj_weight_switch_enabled = False
 
@@ -1433,6 +1456,14 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         self.attn_sink = kwargs["attn_sink"]
 
         self.vllm_config = kwargs.get("vllm_config", get_current_vllm_config())
+
+        # V4.1 CP preprocessing uses the same split projections as ordinary DSA.
+        self.cv_wq_a = CVLinearWrapper(self.wq_a)
+        self.cv_wkv = CVLinearWrapper(self.wkv)
+        self.cv_wq_b = CVLinearWrapper(self.wq_b)
+        self.multistream_dsv4_dsa_overlap = get_ascend_config().multistream_dsv4_dsa_overlap
+        if self.multistream_dsv4_dsa_overlap and is_a5_bf16_kv_enabled(self.vllm_config):
+            self.multistream_dsv4_dsa_overlap = False
 
         # indexer param
         if self.indexer is not None:
@@ -1682,8 +1713,6 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             AscendAttentionState.DecodeOnly,
             AscendAttentionState.SpecDecoding,
         }
-        if need_gather_q_kv and self.tp_size > 1 and not is_decode and not self.enable_dsa_cp_full_o_proj:
-            raise RuntimeError("DSA-CP sequence-parallel prefill requires full o_proj weight gathering.")
         full_gather_wo_a_enabled = self.tp_size > 1 and self.enable_dsa_cp_full_o_proj and not is_decode
         local_attn_output = self._forward(
             layer_name,
@@ -1699,51 +1728,13 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             common_attn_metadata,
             skip_all_to_all=full_gather_wo_a_enabled,
         )
-        num_tokens = o_proj_input.shape[0]
-
-        # o
+        # Keep gathered projection weights alive until all asynchronous NPU
+        # consumers, including reduce-scatter and the output copy, are queued.
+        # V4.1 calls _forward_o_proj only without temporary gathered weights.
         if full_gather_wo_a_enabled:
             self._switch_o_proj_to_full_weight()
-        o_proj_groups = self.n_group if full_gather_wo_a_enabled else self.n_local_groups
         try:
-            use_a5_quant_o_proj = self.support_fp8_attention and _has_weight_scale(self.wo_a)
-            if use_a5_quant_o_proj:
-                o = o_proj_input.view(num_tokens, o_proj_groups, -1)
-                wo_a_method = getattr(self.wo_a.quant_method, "quant_method", self.wo_a.quant_method)
-                if isinstance(wo_a_method, AscendUnquantizedLinearMethod):
-                    o = torch.bmm(o.transpose(0, 1), self._get_batched_wo_a_weight(o_proj_groups)).transpose(0, 1)
-                else:
-                    o, swiglu_out_scale = torch_npu.npu_dynamic_mx_quant(o, dst_type=torch.float8_e4m3fn)
-                    o = torch_npu.npu_transpose_quant_batchmatmul(
-                        o,
-                        self._get_batched_wo_a_weight(o_proj_groups),
-                        dtype=torch.bfloat16,
-                        bias=None,
-                        group_sizes=(0, 0, 32),
-                        x1_scale=swiglu_out_scale.view(torch.float8_e8m0fnu),
-                        x2_scale=self._get_batched_wo_a_scale(o_proj_groups).view(torch.float8_e8m0fnu),
-                        perm_x1=(1, 0, 2),
-                        perm_x2=(0, 1, 2),
-                        perm_y=(1, 0, 2),
-                    )
-                o_proj_input = o.reshape(num_tokens, -1)
-            else:
-                o_proj_input = o_proj_input.view(num_tokens, o_proj_groups, -1)
-                # wo_a = self.wo_a.weight.view(o_proj_groups, self.o_lora_rank, -1)
-                # o = torch.einsum("tgd,grd->tgr", o, wo_a)
-                # A5 BF16 uses the same 3D [groups, hidden, rank] layout.
-                o_proj_input = torch_npu.npu_transpose_batchmatmul(
-                    o_proj_input,
-                    self._get_batched_wo_a_weight(o_proj_groups),
-                    bias=None,
-                    scale=None,
-                    perm_x1=(1, 0, 2),
-                    perm_x2=(0, 1, 2),
-                    perm_y=(1, 0, 2),
-                    batch_split_factor=1,
-                )
-                o_proj_input = o_proj_input.reshape(num_tokens, -1)
-            projected_output = self._apply_wo_b(o_proj_input, full_gather_wo_a_enabled)
+            projected_output = self._forward_o_proj(o_proj_input, full_gather_wo_a_enabled=full_gather_wo_a_enabled)
             if need_gather_q_kv and not full_gather_wo_a_enabled:
                 projected_output = sp_reduce_scatter(projected_output)
             output[...] = projected_output
@@ -1753,6 +1744,53 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
 
         maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
 
+        return output
+
+    def _forward_o_proj(
+        self, o_proj_input: torch.Tensor, output: torch.Tensor | None = None, *, full_gather_wo_a_enabled: bool = False
+    ) -> torch.Tensor:
+        """Project with the active weights; the caller owns their lifetime."""
+        num_tokens = o_proj_input.shape[0]
+        o_proj_groups = self.n_group if full_gather_wo_a_enabled else self.n_local_groups
+        use_a5_quant_o_proj = self.support_fp8_attention and _has_weight_scale(self.wo_a)
+        if use_a5_quant_o_proj:
+            o = o_proj_input.view(num_tokens, o_proj_groups, -1)
+            wo_a_method = getattr(self.wo_a.quant_method, "quant_method", self.wo_a.quant_method)
+            if isinstance(wo_a_method, AscendUnquantizedLinearMethod):
+                o = torch.bmm(o.transpose(0, 1), self._get_batched_wo_a_weight(o_proj_groups)).transpose(0, 1)
+            else:
+                o, swiglu_out_scale = torch_npu.npu_dynamic_mx_quant(o, dst_type=torch.float8_e4m3fn)
+                o = torch_npu.npu_transpose_quant_batchmatmul(
+                    o,
+                    self._get_batched_wo_a_weight(o_proj_groups),
+                    dtype=torch.bfloat16,
+                    bias=None,
+                    group_sizes=(0, 0, 32),
+                    x1_scale=swiglu_out_scale.view(torch.float8_e8m0fnu),
+                    x2_scale=self._get_batched_wo_a_scale(o_proj_groups).view(torch.float8_e8m0fnu),
+                    perm_x1=(1, 0, 2),
+                    perm_x2=(0, 1, 2),
+                    perm_y=(1, 0, 2),
+                )
+            o_proj_input = o.reshape(num_tokens, -1)
+        else:
+            o_proj_input = o_proj_input.view(num_tokens, o_proj_groups, -1)
+            # A5 BF16 uses the same 3D [groups, hidden, rank] layout.
+            o_proj_input = torch_npu.npu_transpose_batchmatmul(
+                o_proj_input,
+                self._get_batched_wo_a_weight(o_proj_groups),
+                bias=None,
+                scale=None,
+                perm_x1=(1, 0, 2),
+                perm_x2=(0, 1, 2),
+                perm_y=(1, 0, 2),
+                batch_split_factor=1,
+            )
+            o_proj_input = o_proj_input.reshape(num_tokens, -1)
+        projected_output = self._apply_wo_b(o_proj_input, full_gather_wo_a_enabled)
+        if output is None:
+            return projected_output
+        output[...] = projected_output
         return output
 
     def _forward(
@@ -1992,8 +2030,6 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         assert attn_metadata.req_metadata is not None
         req_metadata = attn_metadata.req_metadata
         cp_metadata = req_metadata.cp_metadata
-        num_tokens = local_attn_output.shape[0]
-
         negate_sin = get_current_hardware_profile().supports(HardwareCapability.INPLACE_PARTIAL_ROTARY_MUL_NEGATE_SIN)
         sin = cp_metadata.local_sin[layer_name]
         sin_arg = sin if negate_sin else -sin
@@ -2010,15 +2046,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         if self.tp_size == 1 or skip_all_to_all:
             return local_attn_output
 
-        send = (
-            local_attn_output.view(num_tokens, self.tp_size, self.n_local_heads, self.head_dim)
-            .permute(1, 0, 2, 3)
-            .contiguous()
-            .view(-1, self.n_local_heads, self.head_dim)
-        )
-        recv = torch.empty_like(send)
-        dist.all_to_all_single(recv, send, group=self.tp_group.device_group)
-        return recv
+        return restore_tp_heads(local_attn_output, self.tp_group)
 
     def _update_indexer_cache(
         self,
@@ -2427,12 +2455,16 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
             global_common_attn_metadata,
             pcp_context.global_batch.num_reqs,
         )
+        # num_prefills can miss short prefills; prevent local PCP RoPE from
+        # overwriting the global RoPE buffer whenever a request is prefilling.
+        can_use_rope_cache = not bool(pcp_context.global_batch.is_prefilling_np.any())
         global_dsa_metadata = self._global_metadata_builder.build(
             common_prefix_len,
             global_common_attn_metadata,
             fast_build,
             num_actual_reqs=pcp_context.global_batch.num_reqs,
             common_ratio_to_sas_metadata={},
+            can_use_rope_cache=can_use_rope_cache,
         )
         local_common_attn_metadata = self._build_local_common_attn_metadata(
             pcp_context,

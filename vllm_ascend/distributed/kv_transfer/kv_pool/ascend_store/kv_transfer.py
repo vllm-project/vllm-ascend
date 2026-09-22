@@ -21,6 +21,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
     Backend,
     require_aligned_batch_results,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.session_tracker import (
+    LayerwiseSessionTracker,
+)
 
 # isort: off
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
@@ -36,9 +39,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
 )
 
 # isort: on
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.mooncake_session_tracker import (
-    MooncakeSessionTracker,
-)
 
 _KVPOOL_RANGE_DEBUG_PREFIX = "[KVPOOL_RANGE_DEBUG]"
 
@@ -381,7 +381,7 @@ class LayerBatchBuilder:
         task: LayerTransferTask,
         is_save: bool,
     ) -> SharedBlockData:
-        """Build block-key rows shared by all Mooncake layer ranges."""
+        """Build block-key rows shared by all backend layer ranges."""
         block_ids: list[int] = []
         block_keys: list[str] = []
         req_ids: list[str] = []
@@ -689,23 +689,39 @@ class KVTransferThread(threading.Thread):
         max_transfer_blocks: int,
         max_transfer_bytes: int,
     ) -> list[tuple[list[str], list[list[int]], list[list[int]], list[list[int]]]]:
-        """Split Mooncake range calls by key count and per-segment byte size."""
+        """Split backend range calls by key count and per-segment byte size."""
         row_count = len(keys)
         if not (len(all_buffers) == len(all_sizes) == len(all_offsets) == row_count):
-            raise ValueError("Mooncake range metadata must contain one buffer/size/offset row per key")
+            raise ValueError("Layerwise range metadata must contain one buffer/size/offset row per key")
+
+        # Default configuration (both limits unset) means one batch holding every
+        # key and no per-segment splitting, so every row passes through as-is
+        # unless it carries an empty or negative segment. Detect that case and
+        # hand back the caller's own lists: this runs once per key, per layer,
+        # per group, and rebuilding them element-wise was the receive thread's
+        # largest single block of exposed time.
+        if max_transfer_blocks <= 0 and max_transfer_bytes <= 0:
+            for buffers, sizes, offsets in zip(all_buffers, all_sizes, all_offsets, strict=True):
+                if not (len(buffers) == len(sizes) == len(offsets)):
+                    raise ValueError("Layerwise range rows must align buffers, sizes, and offsets")
+                if sizes and min(sizes) >= 0 and 0 not in sizes:
+                    continue
+                break
+            else:
+                return [(keys, all_buffers, all_sizes, all_offsets)]
 
         normalized_buffers: list[list[int]] = []
         normalized_sizes: list[list[int]] = []
         normalized_offsets: list[list[int]] = []
         for buffers, sizes, offsets in zip(all_buffers, all_sizes, all_offsets, strict=True):
             if not (len(buffers) == len(sizes) == len(offsets)):
-                raise ValueError("Mooncake range rows must align buffers, sizes, and offsets")
+                raise ValueError("Layerwise range rows must align buffers, sizes, and offsets")
             split_buffers: list[int] = []
             split_sizes: list[int] = []
             split_offsets: list[int] = []
             for buffer, size, offset in zip(buffers, sizes, offsets, strict=True):
                 if size < 0:
-                    raise ValueError(f"Mooncake range size must be non-negative, got {size}")
+                    raise ValueError(f"Layerwise range size must be non-negative, got {size}")
                 if size == 0:
                     continue
                 packet_size = max_transfer_bytes if max_transfer_bytes > 0 else size
@@ -859,6 +875,13 @@ class KVTransferThread(threading.Thread):
             return self.token_database.decode_adaptor_prefill_pp(keys, addrs, sizes)
 
 
+class KVCacheStoreBatch:
+    """FIFO fence for a batch of asynchronous KV store requests."""
+
+    def __init__(self) -> None:
+        self.done = threading.Event()
+
+
 class KVCacheStoreSendingThread(KVTransferThread):
     def __init__(
         self,
@@ -890,6 +913,26 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self.completed_events: dict[int, int] = {}
         self.worker = worker
 
+    def add_stored_request(self, req_id: str):
+        with self.done_task_lock:
+            # A later chunk of the same request starts a new save lifecycle.
+            # Do not let a completion from an earlier chunk release it early.
+            self.finished_requests.discard(req_id)
+            self.stored_requests[req_id] += 1
+
+    def add_save_batch(self, requests: list[ReqMeta]) -> KVCacheStoreBatch:
+        """Queue requests followed by a fence that completes after the batch."""
+        save_batch = KVCacheStoreBatch()
+        # Register the entire batch before exposing any request to the send
+        # thread. Otherwise duplicate req_ids could transiently reach zero and
+        # be reported as finished between two chunks in the same batch.
+        for request in requests:
+            self.add_stored_request(request.req_id)
+        for request in requests:
+            self.request_queue.put(request)
+        self.request_queue.put(save_batch)
+        return save_batch
+
     def is_stored_request(self, req_id: str) -> bool:
         with self.done_task_lock:
             return req_id in self.stored_requests
@@ -919,7 +962,12 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 self.dec_stored_request(req_id)
         self.request_queue.task_done()
 
-    def _handle_request(self, req_meta: ReqMeta):
+    def _handle_request(self, req_meta: ReqMeta | KVCacheStoreBatch):
+        if isinstance(req_meta, KVCacheStoreBatch):
+            req_meta.done.set()
+            self.request_queue.task_done()
+            return
+
         if self.worker is not None and getattr(self.worker, "tp_mismatch", False):
             req_id = req_meta.req_id
             try:
@@ -1572,7 +1620,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         group_builders: list[LayerBatchBuilder] | None = None,
         put_started_keys: set[str] | None = None,
         put_started_keys_lock: threading.Lock | None = None,
-        session_tracker: MooncakeSessionTracker | None = None,
+        session_tracker: LayerwiseSessionTracker | None = None,
     ):
         super().__init__(
             m_store,
@@ -1594,6 +1642,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         self._put_started_keys_lock = put_started_keys_lock or threading.Lock()
         self._session_tracker = session_tracker
         self._active_put_keys: set[str] | None = None
+        self._group_put_keys: dict[int, set[str] | None] = {}
         self.group_builders: list[LayerBatchBuilder] | None = group_builders
         if group_builders is not None:
             self.layer_batch_builder = group_builders[0]
@@ -1634,15 +1683,15 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         try:
             results = require_aligned_batch_results("batch_revoke", keys, self.m_store.batch_revoke(keys))
             if any(result != 0 for result in results):
-                logger.error("Mooncake layerwise revoke failed keys=%s results=%s", keys, results)
+                logger.error("Layerwise backend revoke failed keys=%s results=%s", keys, results)
         except Exception as exc:
-            logger.error("Mooncake layerwise revoke raised keys=%s error=%s", keys, exc)
+            logger.error("Layerwise backend revoke raised keys=%s error=%s", keys, exc)
         finally:
             self._remove_started_keys(keys)
             if self._session_tracker is not None:
                 self._session_tracker.revoke_put_keys(keys)
 
-    def _handle_range_request(self, req_meta: LayerRangeReqMeta) -> None:
+    def _handle_range_request(self, req_meta: LayerRangeReqMeta, final_group_layer: bool | None = None) -> None:
         layer_id = req_meta.layer_id
         if self._active_put_keys is None or layer_id == 0:
             self._active_put_keys = set(req_meta.keys)
@@ -1676,7 +1725,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
                 self._revoke_range_keys(failed_keys)
                 self._active_put_keys.difference_update(failed_keys)
 
-        if layer_id != self.final_layer_id:
+        if not (layer_id == self.final_layer_id if final_group_layer is None else final_group_layer):
             return
         active_keys = [key for key in req_meta.keys if key in self._active_put_keys]
         if active_keys:
@@ -1698,38 +1747,37 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         self._active_put_keys = None
 
     def _handle_range_layer_tasks(self, transfer_tasks: list[LayerTransferTask]) -> None:
-        layer_id = transfer_tasks[0].layer_id if transfer_tasks else 0
-        shared: SharedBlockData | None = None
+        layer_id = transfer_tasks[0].layer_id
         try:
-            if len(transfer_tasks) != 1:
-                raise ValueError(f"Expected one Mooncake range task, got {len(transfer_tasks)}")
-            task = transfer_tasks[0]
-            shared = task.shared_block_data
-            if shared is None:
-                raise RuntimeError("Mooncake range save requires shared block metadata")
-            builder = self.group_builders[task.group_id] if self.group_builders else self.layer_batch_builder
-            req_meta = builder.build_addrs(shared, task.layer_id)
-            if not isinstance(req_meta, LayerRangeReqMeta):
-                raise TypeError(f"Expected Mooncake range metadata, got {type(req_meta).__name__}")
-            self._handle_range_request(req_meta)
-            for req_id in req_meta.req_ids:
-                self.dec_stored_request(req_id)
-                if self.try_finish_and_delete_stored_request(req_id):
-                    self.set_finished_request(req_id)
+            for task in transfer_tasks:
+                shared = task.shared_block_data
+                if shared is None:
+                    raise RuntimeError("Layerwise range save requires shared block metadata")
+                builder = self.group_builders[task.group_id] if self.group_builders else self.layer_batch_builder
+                req_meta = builder.build_addrs(shared, task.layer_idx_in_group)
+                if not isinstance(req_meta, LayerRangeReqMeta):
+                    raise TypeError(f"Expected layerwise range metadata, got {type(req_meta).__name__}")
+                req_meta.layer_id = layer_id
+                self._active_put_keys = self._group_put_keys.get(task.group_id)
+                try:
+                    self._handle_range_request(req_meta, task.final_group_layer or layer_id == self.final_layer_id)
+                finally:
+                    self._group_put_keys[task.group_id] = self._active_put_keys
+                for req_id in req_meta.req_ids:
+                    self.dec_stored_request(req_id)
+                    if self.try_finish_and_delete_stored_request(req_id):
+                        self.set_finished_request(req_id)
         except Exception as exc:
             self._fatal_error = exc
-            if self._active_put_keys is not None:
-                keys_to_revoke = sorted(self._active_put_keys)
-            elif shared is not None and shared.block_keys is not None:
-                keys_to_revoke = list(dict.fromkeys(shared.block_keys))
-            else:
-                keys_to_revoke = []
+            # All started objects belong to the failed forward step, including
+            # groups whose first physical layer has not been visited yet.
+            with self._put_started_keys_lock:
+                keys_to_revoke = list(self._put_started_keys)
             self._revoke_range_keys(keys_to_revoke)
-            self._active_put_keys = set()
+            self._group_put_keys.clear()
             raise
         finally:
-            if not self.layer_save_finished_events[layer_id].is_set():
-                self.layer_save_finished_events[layer_id].set()
+            self.layer_save_finished_events[layer_id].set()
             transfer_tasks.clear()
             self.request_queue.task_done()
 
@@ -1873,6 +1921,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         self._invalid_block_ids_lock = invalid_block_ids_lock or threading.Lock()
         self._load_abort_event = load_abort_event or threading.Event()
         self._active_load_indices: set[int] | None = None
+        self._group_load_indices: dict[int, set[int] | None] = {}
         self.group_builders: list[LayerBatchBuilder] | None = group_builders
         if group_builders is not None:
             self.layer_batch_builder = group_builders[0]
@@ -1919,10 +1968,11 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         if self._active_load_indices is None or layer_id == 0:
             self._active_load_indices = set(range(len(req_meta.keys)))
         assert self._active_load_indices is not None
+        # Read the abort flag once: this comprehension covers every key of the
+        # layer, so an is_set() per key is pure overhead in the receive thread.
+        aborted = self._load_abort_event.is_set()
         active_indices = [
-            index
-            for index in range(len(req_meta.keys))
-            if not self._load_abort_event.is_set() and index in self._active_load_indices
+            index for index in range(len(req_meta.keys)) if not aborted and index in self._active_load_indices
         ]
         active_keys = [req_meta.keys[index] for index in active_indices]
         if active_keys:
@@ -1972,22 +2022,23 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
                 self.sync_save_events[wait_for_save].synchronize()
                 self.layer_save_finished_events[wait_for_save].clear()
 
-            if len(data.transfer_tasks) != 1:
-                raise ValueError(f"Expected one Mooncake range task, got {len(data.transfer_tasks)}")
-            task = data.transfer_tasks[0]
-            shared = task.shared_block_data
-            if shared is None:
-                raise RuntimeError("Mooncake range load requires shared block metadata")
-            builder = self.group_builders[task.group_id] if self.group_builders else self.layer_batch_builder
-            req_meta = builder.build_addrs(shared, task.layer_id)
-            if not isinstance(req_meta, LayerRangeReqMeta):
-                raise TypeError(f"Expected Mooncake range metadata, got {type(req_meta).__name__}")
             if data.attention_start_gate is not None:
                 while not data.attention_start_gate.wait(timeout=10):
                     logger.info("Layerwise %d load waits for attention compute start", layer_id)
             if self.external_slot_release_waiter is not None:
                 self.external_slot_release_waiter(layer_id)
-            self._handle_range_request(req_meta, shared)
+            for task in data.transfer_tasks:
+                shared = task.shared_block_data
+                if shared is None:
+                    raise RuntimeError("Layerwise range load requires shared block metadata")
+                builder = self.group_builders[task.group_id] if self.group_builders else self.layer_batch_builder
+                req_meta = builder.build_addrs(shared, task.layer_idx_in_group)
+                if not isinstance(req_meta, LayerRangeReqMeta):
+                    raise TypeError(f"Expected layerwise range metadata, got {type(req_meta).__name__}")
+                req_meta.layer_id = layer_id
+                self._active_load_indices = self._group_load_indices.get(task.group_id)
+                self._handle_range_request(req_meta, shared)
+                self._group_load_indices[task.group_id] = None if task.final_group_layer else self._active_load_indices
         except Exception as exc:
             self._fatal_error = exc
             if self._active_load_indices is not None:
