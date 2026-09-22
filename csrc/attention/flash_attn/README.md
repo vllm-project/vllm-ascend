@@ -19,7 +19,18 @@ official torch bindings must be installed together: `head_dim_v` is optional
 and defaults to the QK dimension for existing GQA callers. The build packages
 the selected CANN Python package, changes only its FlashAttn wrapper/source,
 and precompiles that extension. Other CANN operator modules are preserved.
+The GQA backend calls FlashAttn for A5 BF16 D64 eager PrefillNoCache
+batches with no sliding window, sinks, PCP/DCP, or batch-invariant mode.
+Other paths retain their existing dispatch, including graph capture.
 No service command or new runtime switch is required.
 
-MLA keeps the compressed persistent KV layout and expands history in bounded
-chunks in the existing attention backend. The kernel page size remains 128.
+The expanded MLA adapter in `vllm_ascend/attention/flash_attn.py` exposes
+BF16 QK192/V128 and C8 preparation/attention calls. C8 uses per-row query
+scales and per-head K/V scales. Its metadata tile-selection bound is at
+least 65 while runtime sequence lengths stay exact. This PR does not
+activate non-absorbed MLA prefill in the MLA backend or change its cache.
+The C8 kernel and preparation operators build in the A5 custom-op list.
+
+CPU contract tests cover scheduling, shapes, C8 runtime lengths and the
+GQA backend dispatch. The single-card C8 tests require an A5 environment;
+they cover preparation, fake quantization and native attention accuracy.

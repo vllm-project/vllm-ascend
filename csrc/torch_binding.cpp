@@ -26,6 +26,9 @@
 #include <torch_npu/csrc/framework/utils/OpPreparation.h>
 #include "torch_npu/csrc/core/npu/NPUGuard.h"
 #include <torch_npu/csrc/npu/Module.h>
+#include "attention/flash_attn_c8/flash_attn_c8_torch_adpt.h"
+#include "attention/flash_attn_c8_quant_stats/op_host/flash_attn_c8_quant_stats_torch_adpt.h"
+#include "attention/flash_attn_c8_prepare/op_host/flash_attn_c8_prepare_torch_adpt.h"
 #include "ops.h"
 #include "utils.h"
 #include "aclnn_torch_adapter/op_api_common.h"
@@ -2892,6 +2895,22 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 // Pybind on other platform
 TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 {
+    ops.def(
+        "flash_attn_c8(Tensor q, Tensor k, Tensor v, Tensor query_rope, Tensor key_rope, "
+        "Tensor dequant_scale_query, Tensor dequant_scale_key, Tensor dequant_scale_value, "
+        "Tensor cu_seqlens_q, Tensor cu_seqlens_kv, Tensor metadata, float softmax_scale=1.0, "
+        "int mask_mode=0, int max_seqlen_q=-1, int max_seqlen_kv=-1, "
+        "Tensor? seqused_q=None, Tensor? attn_mask=None, bool return_softmax_lse=True) -> (Tensor, Tensor)");
+    ops.impl("flash_attn_c8", torch::kPrivateUse1, &vllm_ascend::flash_attn_c8);
+    ops.impl("flash_attn_c8", torch::kMeta, &vllm_ascend::flash_attn_c8_meta);
+    ops.def("flash_attn_c8_quant_stats(Tensor key_nope, Tensor value) -> Tensor");
+    ops.impl("flash_attn_c8_quant_stats", torch::kPrivateUse1, &vllm_ascend::flash_attn_c8_quant_stats);
+    ops.impl("flash_attn_c8_quant_stats", torch::kMeta, &vllm_ascend::flash_attn_c8_quant_stats_meta);
+    ops.def("flash_attn_c8_prepare(Tensor query, Tensor key_nope, Tensor value, Tensor key_rope, "
+        "Tensor partial, bool fake_quant=False) -> (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor)");
+    ops.impl("flash_attn_c8_prepare", torch::kPrivateUse1, &vllm_ascend::flash_attn_c8_prepare);
+    ops.impl("flash_attn_c8_prepare", torch::kMeta, &vllm_ascend::flash_attn_c8_prepare_meta);
+
     ops.def("get_physical_device_id(int user_device_id) -> int");
     ops.impl("get_physical_device_id", c10::DispatchKey::CompositeExplicitAutograd,
              &vllm_ascend::get_physical_device_id);

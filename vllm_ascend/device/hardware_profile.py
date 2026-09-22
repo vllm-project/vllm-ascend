@@ -63,6 +63,8 @@ class HardwareCapability(Enum):
     CANN_MEGAMOE_MXFP = auto()
     # Split a mixed chunked-prefill batch into separate prefill and decode FIA calls.
     CHUNKED_PREFILL_PHASE_SPLIT = auto()
+    # CANN FlashAttn TND BF16 D64 prefill with native scheduling metadata.
+    FLASH_ATTN_TND_PREFILL = auto()
     # Build CPU-affinity pools from the cluster-aware CPU topology.
     CLUSTER_CPU_TOPOLOGY = auto()
     # Legacy implementation selector: install the 310P-specific operator overrides.
@@ -324,6 +326,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.CANN_MEGAMOE,
                     HardwareCapability.CANN_MEGAMOE_MXFP,
                     HardwareCapability.CHUNKED_PREFILL_PHASE_SPLIT,
+                    HardwareCapability.FLASH_ATTN_TND_PREFILL,
                     HardwareCapability.CLUSTER_CPU_TOPOLOGY,
                     HardwareCapability.DSA_C128_STATE_SMALL_BLOCK_SIZES,
                     HardwareCapability.DSV4_COMPRESSED_CACHE,

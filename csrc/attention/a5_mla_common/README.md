@@ -1,21 +1,15 @@
-# A5 packed MLA operators
+# A5 attention shared headers
 
-FlashMlaWithKvcache and its device scheduling metadata producer use
-ops-transformer commit `8d5d69c35e6517c064158b6e0c40267f66856533`.
-These sources retain their CANN license in `LICENSE` and compile through the
-normal A5 operator list in `csrc/build_aclnn.sh`. The local changes preserve
-physical query offsets, live query counts, and the packed cache page stride.
+Shared tiling, memory-copy, vector and cube helpers used by the A5
+FlashAttention operators. Sources retain the CANN license in `LICENSE`.
+The original MLA source snapshot derives from ops-transformer commit
+`8d5d69c35e6517c064158b6e0c40267f66856533`.
 
-The selected CANN 9.2.0 B035 package already supplies FlashAttn,
-FlashAttnMetadata, and ScatterPaKvCache. Their framework bindings use those
-installed APIs. FlashMlaWithKvcache and its metadata API are absent from both
-the inspected B035 and B060 packages, so these two native operators remain
-part of the vllm-ascend build, together with CausalConv1dV2.
+`op_kernel/arch35/c8_pipeline` contains the FP8/BF16 pipeline header
+closure reused by expanded C8 FlashAttention. Its original `flash_mla_*`
+identifiers are retained to avoid changing template logic. These headers
+include decode/output helpers referenced by the pipeline; they do not
+register or build the standalone FlashMLA operator.
 
-Build in the selected CANN environment with `MAX_JOBS=256` or higher.
-The bindings use the existing `torch_binding.cpp` and `EXEC_NPU_CMD` path;
-no separate operator package or runtime source patching is required.
-
-`VLLM_ASCEND_ENABLE_FLASH_MLA=1` enables the opt-in route in the existing
-attention backends. Initial support is BF16 dense MLA, unquantized KV,
-SD convolution states, and PCP/DCP=1. Service validation follows the build.
+The operators that consume these headers select them through their CMake
+source dependencies. This directory has no independent runtime switch.
