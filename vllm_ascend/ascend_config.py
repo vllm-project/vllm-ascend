@@ -88,6 +88,11 @@ class KVPPConfig:
                 raise ValueError("KVPP must be disabled on the decode-only node.")
 
         model_config = vllm_config.model_config
+        if not model_config.enforce_eager:
+            from vllm.config import CUDAGraphMode
+
+            if vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.PIECEWISE:
+                raise ValueError("KVPP supports eager execution or PIECEWISE only.")
         if not model_config.use_mla or model_config.is_hybrid:
             raise ValueError("KVPP currently supports only non-hybrid MLA models.")
         speculative_config = vllm_config.speculative_config
