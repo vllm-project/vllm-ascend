@@ -589,6 +589,11 @@ async def test_single_node(config: SingleNodeConfig) -> None:
 
         run_logits_gate(config)
         return
+    if "glm5x_perf_gate" in config.extra_config:
+        from tools.glm_reduced.run_perf_gate import run_nightly as run_perf_gate
+
+        run_perf_gate(config)
+        return
     if "reduced_model_gate" in config.extra_config:
         from tools.glm_reduced.nightly import run_nightly
 

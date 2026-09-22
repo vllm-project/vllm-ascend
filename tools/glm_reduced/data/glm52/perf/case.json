@@ -1,0 +1,19 @@
+{
+  "model": "Eco-Tech/GLM-5.2-w4a8",
+  "main_layers": 11,
+  "retained_mtp_layers": 1,
+  "mtp_execution": false,
+  "hardware": "linux-x86_64-a3-800i-8-167",
+  "baseline": "baseline-167-eager.json",
+  "baseline_sha256": "32dd8eb3c8c355726d527549cc6284d29fd86b9370412140d8d1ea2b667c88dc",
+  "threshold_basis": {
+    "calibration_starts": 3,
+    "worst_low_side_throughput_shortfall": 0.04218742376661455,
+    "worst_high_side_latency_excess": 0.10189528066492426
+  },
+  "thresholds_reference": {
+    "min_throughput_fraction": 0.9,
+    "max_latency_fraction": 1.2
+  },
+  "note": "Host-scoped, median-of-3-starts baseline. A runner whose hardware tag or engine settings differ fails closed. Thresholds are derived from A/A dispersion, not chosen to make a candidate pass."
+}
