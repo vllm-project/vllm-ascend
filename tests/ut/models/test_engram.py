@@ -13,9 +13,8 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
-from vllm_ascend.models.deepseek_v41.engram import common
+from vllm_ascend.models.deepseek_v41.engram import common, npu
 from vllm_ascend.models.deepseek_v41.engram import embedding as embedding_mod
-from vllm_ascend.models.deepseek_v41.engram import npu
 from vllm_ascend.patch.platform.patch_engram_config import AscendEngramConfig
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 

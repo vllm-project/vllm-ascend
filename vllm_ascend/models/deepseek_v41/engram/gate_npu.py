@@ -1,14 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Fused NPU implementation of the DeepSeek V4.1 Engram gate.
+"""Two-stage NPU implementation of the DeepSeek V4.1 Engram gate.
 
-The kernel consumes the WKV split tensors directly. It keeps the rotated
-residual, both RMS reductions, and the weighted dot product in FP32 registers,
-then writes only the BF16 residual injection result. The WKV GEMM and the
-Hyper-Connection operators intentionally remain outside this boundary.
+P28 keeps the efficient batched FP32 rotation matmul as a Cube stage and
+fuses all following statistics, gate, mask, and residual work into one Triton
+Vector kernel.  The FP32 rotated residual is the stage boundary; this avoids
+the 160 small Cube/Vector hand-offs of the single MIX kernel on 910_9382.
 """
 
 import torch
+import triton.runtime.driver as driver
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -17,46 +18,48 @@ from vllm_ascend import envs
 from .common import engram_gate
 
 ROTATION_BLOCK_SIZE = 32
-# Annotated as constexpr: Triton kernels cannot read plain module globals.
 MIN_GATE_MAGNITUDE: tl.constexpr = 1e-6
+ROWS_PER_TILE = 16
+FEATURES_PER_STEP = 256
 
 
 @triton.jit
-def _engram_gate_kernel(
+def _engram_gate_vector_tile(
     hidden_ptr,
+    original_ptr,
     key_ptr,
     value_ptr,
     channel_weight_ptr,
-    rotation_block_ptr,
     token_mask_ptr,
     output_ptr,
-    eps,
+    row,
+    NUM_ROWS,
+    eps: tl.constexpr,
     HIDDEN_SIZE: tl.constexpr,
     HC_MULT: tl.constexpr,
-    ROTATION_BLOCK: tl.constexpr,
+    ROWS: tl.constexpr,
+    FEATURES: tl.constexpr,
 ):
-    row = tl.program_id(0)
+    row_valid = row < NUM_ROWS
     token = row // HC_MULT
-    hc_index = row % HC_MULT
-    block_offsets = tl.arange(0, ROTATION_BLOCK)
-    hidden_rms_sum = 0.0
-    key_rms_sum = 0.0
-    weighted_dot = 0.0
+    hc_index = row - token * HC_MULT
+    feature_base = tl.arange(0, FEATURES)
+    hidden_rms_sum = tl.zeros((ROWS,), dtype=tl.float32)
+    key_rms_sum = tl.zeros((ROWS,), dtype=tl.float32)
+    weighted_dot = tl.zeros((ROWS,), dtype=tl.float32)
 
-    # ``rotation_block`` stores R[out, in]. Loading it as [in, out] computes
-    # hidden @ R.T, exactly matching the eager reference implementation.
-    for block_start in range(0, HIDDEN_SIZE, ROTATION_BLOCK):
-        offsets = block_start + block_offsets
-        hidden = tl.load(hidden_ptr + row * HIDDEN_SIZE + offsets).to(tl.float32)
-        key = tl.load(key_ptr + row * HIDDEN_SIZE + offsets).to(tl.float32)
-        channel_weight = tl.load(channel_weight_ptr + hc_index * HIDDEN_SIZE + offsets).to(tl.float32)
-        rotation = tl.load(
-            rotation_block_ptr + block_offsets[:, None] + block_offsets[None, :] * ROTATION_BLOCK
-        ).to(tl.float32)
-        original = tl.sum(hidden[:, None] * rotation, axis=0)
-        hidden_rms_sum += tl.sum(original * original, axis=0)
-        key_rms_sum += tl.sum(key * key, axis=0)
-        weighted_dot += tl.sum(original * channel_weight * key, axis=0)
+    for step in range(0, HIDDEN_SIZE, FEATURES):
+        feature = step + feature_base
+        feature_valid = feature < HIDDEN_SIZE
+        mask = row_valid[:, None] & feature_valid[None, :]
+        offset = row[:, None] * HIDDEN_SIZE + feature[None, :]
+        original = tl.load(original_ptr + offset, mask=mask, other=0.0).to(tl.float32)
+        key = tl.load(key_ptr + offset, mask=mask, other=0.0).to(tl.float32)
+        weight_offset = hc_index[:, None] * HIDDEN_SIZE + feature[None, :]
+        channel_weight = tl.load(channel_weight_ptr + weight_offset, mask=mask, other=0.0).to(tl.float32)
+        hidden_rms_sum += tl.sum(original * original, axis=1)
+        key_rms_sum += tl.sum(key * key, axis=1)
+        weighted_dot += tl.sum(original * channel_weight * key, axis=1)
 
     rstd = tl.rsqrt(hidden_rms_sum / HIDDEN_SIZE + eps)
     rstd *= tl.rsqrt(key_rms_sum / HIDDEN_SIZE + eps)
@@ -64,14 +67,57 @@ def _engram_gate_kernel(
     magnitude = tl.sqrt(tl.maximum(tl.abs(dot), MIN_GATE_MAGNITUDE))
     signed_magnitude = tl.where(dot < 0.0, -magnitude, magnitude)
     gate = 1.0 / (1.0 + tl.exp(-signed_magnitude))
-    active = tl.load(token_mask_ptr + token).to(tl.int1)
+    active = tl.load(token_mask_ptr + token, mask=row_valid, other=False).to(tl.int1)
     gate = tl.where(active, gate, 0.0)
 
-    for block_start in range(0, HIDDEN_SIZE, ROTATION_BLOCK):
-        offsets = block_start + block_offsets
-        hidden = tl.load(hidden_ptr + row * HIDDEN_SIZE + offsets).to(tl.float32)
-        value = tl.load(value_ptr + token * HIDDEN_SIZE + offsets).to(tl.float32)
-        tl.store(output_ptr + row * HIDDEN_SIZE + offsets, hidden + gate * value)
+    for step in range(0, HIDDEN_SIZE, FEATURES):
+        feature = step + feature_base
+        feature_valid = feature < HIDDEN_SIZE
+        mask = row_valid[:, None] & feature_valid[None, :]
+        offset = row[:, None] * HIDDEN_SIZE + feature[None, :]
+        hidden = tl.load(hidden_ptr + offset, mask=mask, other=0.0).to(tl.float32)
+        value_offset = token[:, None] * HIDDEN_SIZE + feature[None, :]
+        value = tl.load(value_ptr + value_offset, mask=mask, other=0.0).to(tl.float32)
+        tl.store(output_ptr + offset, hidden + gate[:, None] * value, mask=mask)
+
+
+@triton.jit
+def _engram_gate_vector_kernel(
+    hidden_ptr,
+    original_ptr,
+    key_ptr,
+    value_ptr,
+    channel_weight_ptr,
+    token_mask_ptr,
+    output_ptr,
+    NUM_ROWS,
+    TILES_PER_PROGRAM,
+    eps: tl.constexpr,
+    HIDDEN_SIZE: tl.constexpr,
+    HC_MULT: tl.constexpr,
+    ROWS: tl.constexpr,
+    FEATURES: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    row_in_tile = tl.arange(0, ROWS)
+    for tile_index in range(0, TILES_PER_PROGRAM):
+        row = (pid * TILES_PER_PROGRAM + tile_index) * ROWS + row_in_tile
+        _engram_gate_vector_tile(
+            hidden_ptr,
+            original_ptr,
+            key_ptr,
+            value_ptr,
+            channel_weight_ptr,
+            token_mask_ptr,
+            output_ptr,
+            row,
+            NUM_ROWS,
+            eps,
+            HIDDEN_SIZE,
+            HC_MULT,
+            ROWS,
+            FEATURES,
+        )
 
 
 def npu_engram_gate(
@@ -83,20 +129,31 @@ def npu_engram_gate(
     token_mask: torch.Tensor,
     eps: float,
 ) -> torch.Tensor:
-    """Run the single-kernel Engram gate for contiguous supported NPU inputs."""
+    """Run the P28 Cube-stage plus fused-Vector-stage candidate."""
+    hidden_blocks = hidden.float().unflatten(-1, (-1, ROTATION_BLOCK_SIZE))
+    original = torch.matmul(hidden_blocks, rotation_block.float().T).flatten(-2)
     output = torch.empty_like(hidden)
-    _engram_gate_kernel[(hidden.shape[0] * hidden.shape[1],)](
+    num_rows = hidden.shape[0] * hidden.shape[1]
+    num_tiles = triton.cdiv(num_rows, ROWS_PER_TILE)
+    device = torch.npu.current_device()
+    num_vectorcores = driver.active.utils.get_device_properties(device)["num_vectorcore"]
+    grid_size = min(num_tiles, num_vectorcores)
+    tiles_per_program = triton.cdiv(num_tiles, grid_size)
+    _engram_gate_vector_kernel[(grid_size,)](
         hidden,
+        original,
         key,
         value,
         channel_weight,
-        rotation_block,
         token_mask,
         output,
+        num_rows,
+        tiles_per_program,
         eps,
         HIDDEN_SIZE=hidden.shape[-1],
         HC_MULT=hidden.shape[1],
-        ROTATION_BLOCK=ROTATION_BLOCK_SIZE,
+        ROWS=ROWS_PER_TILE,
+        FEATURES=FEATURES_PER_STEP,
         num_warps=4,
     )
     return output
@@ -111,7 +168,6 @@ def npu_engram_gate_fake(
     token_mask: torch.Tensor,
     eps: float,
 ) -> torch.Tensor:
-    """Describe the output during torch.compile and ACL graph capture."""
     del key, value, channel_weight, rotation_block, token_mask, eps
     return torch.empty_like(hidden)
 
@@ -133,7 +189,6 @@ def _supports_fused_gate(
     rotation_block: torch.Tensor,
     token_mask: torch.Tensor,
 ) -> bool:
-    """Return whether inputs satisfy the fixed-layout first-release contract."""
     return (
         envs.VLLM_ASCEND_ENABLE_ENGRAM_GATE_FUSION
         and hidden.device.type == "npu"
@@ -168,9 +223,14 @@ def engram_gate_fused(
     token_mask: torch.Tensor,
     eps: float,
 ) -> torch.Tensor:
-    """Use the fused NPU kernel when enabled, otherwise preserve eager semantics."""
     if _supports_fused_gate(hidden, key, value, channel_weight, rotation_block, token_mask):
         return torch.ops.vllm.npu_engram_gate(
-            hidden, key, value, channel_weight, rotation_block, token_mask, eps
+            hidden,
+            key,
+            value,
+            channel_weight,
+            rotation_block,
+            token_mask,
+            eps,
         )
     return engram_gate(hidden, key, value, channel_weight, rotation_block, token_mask, eps)
