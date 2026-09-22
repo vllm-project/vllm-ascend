@@ -40,7 +40,7 @@ def test_platform_cache_store_preserves_all_backing_bytes(dtype, width, tokens, 
     for delta in (0, 1):
         key.add_(delta)
         reference.view(-1, width)[slots[:tokens].cpu().long()] = key[:tokens].cpu()
-        assert DeviceOperator.try_scatter_cache(key, cache, slots, tokens)
+        DeviceOperator.try_scatter_cache(key, cache, slots, tokens)
         torch.npu.synchronize()
         assert cache.data_ptr() == ptr
         torch.testing.assert_close(backing.cpu(), initial, rtol=0, atol=0)
@@ -82,6 +82,6 @@ def test_unsupported_inner_stride_matches_generic_scatter_behavior():
             DeviceOperator.try_scatter_cache(key, cache, slots, 8)
             torch.npu.synchronize()
     else:
-        assert not DeviceOperator.try_scatter_cache(key, cache, slots, 8)
+        DeviceOperator.try_scatter_cache(key, cache, slots, 8)
         torch.npu.synchronize()
         torch.testing.assert_close(backing.cpu(), reference.cpu(), rtol=0, atol=0)

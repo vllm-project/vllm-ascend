@@ -39,11 +39,8 @@ else:
 
 class BaseDeviceAdaptor:
     @classmethod
-    def try_scatter_cache(cls, key: torch.Tensor, cache: torch.Tensor, slots: torch.Tensor, tokens: int) -> bool:
+    def try_scatter_cache(cls, key: torch.Tensor, cache: torch.Tensor, slots: torch.Tensor, tokens: int) -> None:
         """Write cache rows in place, falling back to the generic scatter.
-
-        Return whether a fast operator was used. A False result means the
-        generic scatter has already performed the write.
 
         The actual-token prefix must contain valid slots: this helper does not
         filter negative slots, and neither fast operator is assumed to skip them.
@@ -61,16 +58,16 @@ class BaseDeviceAdaptor:
             and slots.dtype in (torch.int32, torch.int64)
             and key.dtype == cache.dtype
             and key.shape[-1] == cache.shape[-1]
-            and cls._scatter_cache(key[:tokens].reshape(tokens, key.shape[-1]), cache, slots[:tokens])
         ):
-            return True
+            stored = cls._scatter_cache(key[:tokens].reshape(tokens, key.shape[-1]), cache, slots[:tokens])
+            if stored:
+                return
 
         torch_npu.npu_scatter_nd_update_(
             cache.view(-1, key.shape[-1]),
             slots[:tokens].view(-1, 1),
             key[:tokens],
         )
-        return False
 
     @staticmethod
     def _scatter_cache(key, cache, slots) -> bool:

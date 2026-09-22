@@ -69,7 +69,7 @@ def test_platform_dispatch_keeps_destination_storage(monkeypatch, family, dtype,
         with pytest.raises(RuntimeError, match="view size is not compatible"):
             device_op.get_device_adaptor().try_scatter_cache(key, cache, slots, 2049)
     else:
-        assert device_op.get_device_adaptor().try_scatter_cache(key, cache, slots, 2049) == expected
+        assert device_op.get_device_adaptor().try_scatter_cache(key, cache, slots, 2049) is None
         reference = torch.as_strided(before, cache.shape, cache.stride(), cache.storage_offset())
         reference.view(-1, 128)[slots[:2049].long()] = key[:2049]
     torch.testing.assert_close(backing, before, rtol=0, atol=0)
@@ -89,7 +89,7 @@ def test_missing_operator_falls_back(monkeypatch, family):
         side_effect=lambda target, indices, updates: target.index_copy_(0, indices.flatten().long(), updates)
     )
     monkeypatch.setattr(torch_npu, "npu_scatter_nd_update_", scatter, raising=False)
-    assert not device_op.get_device_adaptor().try_scatter_cache(key, cache, slots, 2049)
+    assert device_op.get_device_adaptor().try_scatter_cache(key, cache, slots, 2049) is None
     scatter.assert_called_once()
     torch.testing.assert_close(cache.view(-1, 128)[:2049], key)
     assert not cache.view(-1, 128)[2049:].count_nonzero()
@@ -110,7 +110,7 @@ def test_fast_shape_guard_uses_generic_scatter(monkeypatch, flat_cache, column_s
     )
     monkeypatch.setattr(device_op.BaseDeviceAdaptor, "_scatter_cache", fast)
     monkeypatch.setattr(torch_npu, "npu_scatter_nd_update_", scatter, raising=False)
-    assert not device_op.BaseDeviceAdaptor.try_scatter_cache(key, cache, slots, 3)
+    assert device_op.BaseDeviceAdaptor.try_scatter_cache(key, cache, slots, 3) is None
     fast.assert_not_called()
     scatter.assert_called_once()
     torch.testing.assert_close(cache.view(-1, 16)[[2, 4, 6]], key[:3])
@@ -129,11 +129,10 @@ def test_fast_operator_error_is_not_retried(monkeypatch):
     scatter.assert_not_called()
 
 
-@pytest.mark.parametrize("fast", [False, True])
 @pytest.mark.parametrize("tokens", [8, 2049])
 @pytest.mark.parametrize("state", list(AscendAttentionState))
 @pytest.mark.parametrize("producer,consumer", [(False, False), (True, False), (False, True), (True, True)])
-def test_main_cache_write_preserves_fallback_and_own_slots(fast, tokens, state, producer, consumer):
+def test_main_cache_write_delegates_with_own_slots(tokens, state, producer, consumer):
     impl = AscendSFADSACPImpl.__new__(AscendSFADSACPImpl)
     impl.enable_sparse_sfa_c8 = True
     impl.is_kv_producer, impl.is_kv_consumer = producer, consumer
@@ -148,7 +147,7 @@ def test_main_cache_write_preserves_fallback_and_own_slots(fast, tokens, state, 
             return_value=SimpleNamespace(c8_enable_reshape_optim=False, c8_reshape_optim_enabled=False),
         ),
         patch(
-            "vllm_ascend.attention.context_parallel.sfa_cp.DeviceOperator.try_scatter_cache", return_value=fast
+            "vllm_ascend.attention.context_parallel.sfa_cp.DeviceOperator.try_scatter_cache", return_value=None
         ) as store,
         patch("torch_npu.npu_scatter_nd_update_", create=True) as scatter,
     ):
