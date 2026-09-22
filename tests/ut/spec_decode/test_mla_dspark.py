@@ -27,7 +27,7 @@ from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpec
 def make_speculator():
     spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
     spec.attn_architecture = "MLA"
-    spec.vllm_config = SimpleNamespace()
+    spec.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(pipeline_parallel_size=1))
     spec.draft_model_config = SimpleNamespace(
         hf_config=SimpleNamespace(target_layer_ids=[0, 2], target_hidden_size=4, num_target_layers=2)
     )

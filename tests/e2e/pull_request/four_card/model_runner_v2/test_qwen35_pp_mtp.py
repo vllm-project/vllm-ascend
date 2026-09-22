@@ -55,7 +55,10 @@ def test_qwen35_pp_mtp_full_decode_only() -> None:
         "--compilation-config",
         json.dumps({"mode": 3, "cudagraph_mode": "FULL_DECODE_ONLY"}),
         "--additional-config",
-        json.dumps({"enable_cpu_binding": True}),
+        json.dumps({
+            "enable_cpu_binding": True,
+            "scheduler_config": {"profiling_chunk_config": {"enabled": True}},
+        }),
         "--port",
         str(port),
     ]

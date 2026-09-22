@@ -117,6 +117,7 @@ def test_deepseek_v4_dspark_pp_accuracy() -> None:
         additional_config={
             "enable_dsa_cp": False,
             "enable_fused_mc2": 0,
+            "scheduler_config": {"profiling_chunk_config": {"enabled": True}},
         },
     ) as runner:
         outputs = runner.generate_greedy([GSM8K_PROMPT], max_tokens=512)
