@@ -18,10 +18,6 @@ import torch
 from vllm.config import get_current_vllm_config
 from vllm.forward_context import get_forward_context
 
-# Imported as a module so the attribute is resolved at call time: unit tests
-# patch ``ascend_forward_context._EXTRA_CTX`` to inject a fake context.
-from vllm_ascend import ascend_forward_context
-
 
 def _build_or_get_topk(
     moe_comm_method,
@@ -93,21 +89,17 @@ def build_force_eplb_topk(
 def get_force_eplb_topk(
     topk_ids: torch.Tensor,
     num_logical_experts: int,
-) -> torch.Tensor | None:
+) -> torch.Tensor:
     """Return deterministic round-robin ids when the policy is enabled.
 
-    Read the comm method through the extras proxy: MRV2 stores
-    ``moe_comm_method`` in the forward context's ``additional_kwargs``, so a
-    plain ``getattr`` on the context object would silently miss it and leave
-    the original (possibly degenerate) topk_ids in place.
+    The comm method is read as a forward-context attribute, which only MRV1's
+    ``set_ascend_forward_context`` publishes. Force EPLB is intentionally not
+    adapted for MRV2 yet (it produces garbled output there); MRV2's forward
+    context never carries the attribute, so this helper degrades to a
+    pass-through and the original topk_ids flow through unchanged. MRV1 keeps
+    full force-EPLB behavior.
     """
-    try:
-        moe_comm_method = ascend_forward_context._EXTRA_CTX.moe_comm_method
-    except AssertionError:
-        # The proxy resolves through vllm's get_forward_context, which
-        # asserts when no forward context is set (e.g. unit tests outside
-        # the model runner). Degrade to a pass-through there.
-        return topk_ids
+    moe_comm_method = getattr(get_forward_context(), "moe_comm_method", None)
     if moe_comm_method is None:
         return topk_ids
     top_k = int(topk_ids.shape[1])
