@@ -78,7 +78,9 @@ class AscendPCPManager(PCPManager):
             pcp_world_size=pcp_world_size,
             pcp_rank=pcp_rank,
             device=device,
-            req_states=req_states,
+            # vLLM v0.29.0 PCPManager still takes req_states; upstream #56107
+            # removed it on main/v0.30.0.
+            **({"req_states": req_states} if vllm_version_is("0.29.0") else {}),
             max_num_reqs=max_num_reqs,
             max_num_tokens=max_num_tokens,
             block_tables=block_tables,

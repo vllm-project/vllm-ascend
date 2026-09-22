@@ -30,6 +30,7 @@ from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.worker.v2 import pcp_manager as pcp_manager_module
 from vllm_ascend.worker.v2 import states as states_module
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager, _prepare_pcp_inputs_to_capture
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
@@ -140,6 +141,30 @@ def test_pcp_manager_uses_persistent_ascend_input_buffers():
     assert manager._input_buffers.seq_lens_np.shape == (6,)
     assert manager._input_buffers.query_start_loc.shape == (7,)
     assert manager.input_buffers is manager._input_buffers
+
+
+def test_pcp_manager_gates_req_states_by_vllm_version(monkeypatch):
+    """v0.29.0 PCPManager takes req_states; upstream #56107 removed it on main."""
+    captured = {}
+
+    def fake_base_init(self, **kwargs):
+        captured.clear()
+        captured.update(kwargs)
+
+    monkeypatch.setattr(PCPManager, "__init__", fake_base_init)
+    req_states = object()
+
+    for is_v29, expected in ((True, True), (False, False)):
+        monkeypatch.setattr(pcp_manager_module, "vllm_version_is", lambda target, _v=is_v29: _v)
+        AscendPCPManager(
+            pcp_world_size=2,
+            pcp_rank=0,
+            device=torch.device("cpu"),
+            req_states=req_states,
+        )
+        assert ("req_states" in captured) is expected
+        if expected:
+            assert captured["req_states"] is req_states
 
 
 def _make_local_pcp_batch():
