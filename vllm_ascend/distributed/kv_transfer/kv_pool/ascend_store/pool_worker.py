@@ -456,6 +456,7 @@ class KVPoolWorker:
         self.physical_layer_to_group_layers: dict[int, list[tuple[int, int]]] = {}
         self._global_to_local_layer: dict[int, int] = {}
         self._layerwise_reuse_layout: LayerwiseReuseLayout | None = None
+        self._recurrent_layers: set[int] = set()
         # Defaults for partial initialization (unit tests construct the worker
         # without the full _init_parallelism_info path).
         if not hasattr(self, "layerwise_key_layers"):
@@ -498,6 +499,12 @@ class KVPoolWorker:
                 self._global_to_local_layer = {
                     global_layer: local_layer for local_layer, global_layer in enumerate(sorted(physical_layers))
                 }
+                if getattr(self, "use_layerwise", False) or self.use_layerwise_transfer:
+                    self._recurrent_layers = {
+                        self._global_to_local_layer[self._extract_physical_layer_index(name)]
+                        for name, spec in get_layerwise_kv_cache_specs(self.kv_cache_config).items()
+                        if isinstance(spec, MambaSpec)
+                    }
                 effective_num_layers = max(self.num_layers, len(physical_layers))
                 if effective_num_layers != self.num_layers:
                     logger.info(
@@ -2480,11 +2487,11 @@ class KVPoolWorker:
         final layer's save at the end of every step, which implies every earlier
         layer committed, so publication is still complete before the step ends.
 
-        ``full`` drains both queues to zero and is the right mode for teardown
-        paths, where the transfer threads must be quiescent before sessions are
-        released.
+        ``full`` drains the selected queues to zero, defaulting to both queues
+        for teardown. Step completion passes ``drain_recv=False`` to wait only
+        for outstanding PUTs.
         """
-        if full:
+        if full and drain_recv is None:
             drain_recv = True
         elif drain_recv is None:
             drain_recv = self.layerwise_protocol.fence_drains_recv()
@@ -2546,7 +2553,10 @@ class KVPoolWorker:
             self.kv_recv_thread.raise_if_failed()
             if getattr(self, "block_key_hybrid", False):
                 layer_id = self.current_layer
-                gate.on_start = lambda: self._submit_attention_save(layer_id)
+                # Conv/recurrent state is updated inside attention, after this
+                # entry event. Preserve its post-compute save hook.
+                if layer_id not in self._recurrent_layers:
+                    gate.on_start = lambda: self._submit_attention_save(layer_id)
                 gate.on_finish = self._finish_attention_window
             if getattr(self, "block_key_hybrid", False) and self.next_layer_to_submit <= self.current_layer:
                 # An unprefetched demand load must not race earlier collectives.
@@ -2609,23 +2619,21 @@ class KVPoolWorker:
         assert self.kv_send_thread is not None
         send_thread = self.kv_send_thread
         send_thread.raise_if_failed()
-        if self.current_layer in getattr(self, "_attention_saved_layers", set()):
-            if self.current_layer == num_local - 1:
-                self._wait_for_final_layer_save(num_local, send_thread)
-            self.current_layer += 1
-            return
-        self.sync_save_events[self.current_layer].record()
-        if self.layer_save_tasks[self.current_layer]:
-            for task in self.layer_save_tasks[self.current_layer]:
-                for block_range in task.block_ranges:
-                    send_thread.add_stored_request(block_range.request.req_id)
-            send_thread.add_request(self.layer_save_tasks[self.current_layer])  # type: ignore[arg-type]
-        else:
-            self.layer_save_finished_events[self.current_layer].set()
+        if self.current_layer not in self._attention_saved_layers:
+            self.sync_save_events[self.current_layer].record()
+            if self.layer_save_tasks[self.current_layer]:
+                for task in self.layer_save_tasks[self.current_layer]:
+                    for block_range in task.block_ranges:
+                        send_thread.add_stored_request(block_range.request.req_id)
+                send_thread.add_request(self.layer_save_tasks[self.current_layer])  # type: ignore[arg-type]
+            else:
+                self.layer_save_finished_events[self.current_layer].set()
+        if self.block_key_hybrid:
+            # Recurrent and record-only paths do not exit an attention window.
+            self._finish_attention_window()
         if self.current_layer == num_local - 1:
             self._wait_for_final_layer_save(num_local, send_thread)
-
-        self.current_layer = self.current_layer + 1
+        self.current_layer += 1
 
     def _wait_for_final_layer_save(self, num_local: int, send_thread: KVTransferThread) -> None:
         """Keep layerwise source buffers alive until the step's last PUT commits."""
@@ -2635,7 +2643,11 @@ class KVPoolWorker:
             send_thread.raise_if_failed()
             logger.info("Layerwise %d save not done, keep waiting", num_local - 1)
         send_thread.raise_if_failed()
-        if self.use_block_key_layerwise:
+        if self.block_key_hybrid:
+            # An empty final layer signals completion without waiting for PUTs
+            # from earlier layers. Drain those before the next step reuses KV.
+            self._drain_attention_transfers(drain_recv=False, full=True)
+        elif self.use_block_key_layerwise:
             # An empty final layer sets its event on the compute thread, ahead
             # of earlier queued PUTs. Drain at the step boundary before source
             # blocks can be reused. Layer-to-layer overlap remains unchanged.
