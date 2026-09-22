@@ -148,7 +148,10 @@ class _AscendECMooncakeWorker(ECMooncakeWorker):
 
     def _reserve_push_destination(self, payload: dict[str, Any]) -> dict[str, Any]:
         if not getattr(self._control_thread, "device_set", False):
-            torch.npu.set_device(torch.device(self._buffer_device))
+            # A new control thread's default device need not match its TP rank.
+            pool = self._consumer_memory.tensor
+            assert pool is not None
+            torch.npu.set_device(pool.device)
             self._control_thread.device_set = True
         return super()._reserve_push_destination(payload)
 
