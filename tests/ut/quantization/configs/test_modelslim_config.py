@@ -20,7 +20,7 @@ from vllm_ascend.quantization.configs.modelslim_config import (
     _make_modelslim_moe_weight_loader,
     get_quant_type_for_layer,
 )
-from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, get_rotation_path
+from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, get_rotation_path, vllm_version_is
 
 
 class TestAscendModelSlimConfig(TestBase):
@@ -72,6 +72,9 @@ class TestAscendModelSlimConfig(TestBase):
         self.assertEqual(config.quant_description, {})
 
     def test_deepseek_v41_model_mapping_and_expert_discovery(self):
+        if vllm_version_is("0.29.0"):
+            self.skipTest("DeepSeek V4.1 is unavailable on vLLM 0.29")
+
         from vllm.model_executor.model_loader.utils import configure_quant_config
 
         from vllm_ascend.models.deepseek_v41.dspark import DSparkDeepseekV41ForCausalLM
