@@ -18,7 +18,6 @@ from unittest.mock import MagicMock, patch
 import torch
 
 from tests.ut.base import TestBase
-from vllm_ascend.ascend_config import clear_ascend_config, init_ascend_config
 from vllm_ascend._310p.attention.attention_v1 import (
     AscendAttentionBackend310,
     AscendAttentionBackendImpl310,
@@ -28,6 +27,7 @@ from vllm_ascend._310p.attention.attention_v1 import (
 from vllm_ascend._310p.attention.metadata_builder import (
     AscendAttentionMetadataBuilder310 as AscendMetadataBuilder310Direct,
 )
+from vllm_ascend.ascend_config import clear_ascend_config, init_ascend_config
 
 
 class TestAscendAttentionBackend310(TestBase):
