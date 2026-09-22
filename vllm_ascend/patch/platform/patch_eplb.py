@@ -29,6 +29,15 @@ _PATCH_MARKER = "_vllm_ascend_eplb_patch"
 _EXPLICIT_TRANSFER_TARGET_ATTR = "_vllm_ascend_explicit_transfer_target"
 
 
+@dataclass
+class _AscendAsyncLayerResult:
+    layer_idx: int | None
+    new_physical_to_logical_map: torch.Tensor | None
+    transfer_metadata: Any
+    consumed_event: Any
+    is_last_result: bool
+
+
 class _DeferredConsumedEvent:
     """Delay the worker acknowledgement until Ascend commit hooks finish."""
 
@@ -253,6 +262,96 @@ def _patch_explicit_transfer_execution() -> None:
     original_async_transfer = _async_worker.transfer_layer
     if not getattr(original_async_transfer, _PATCH_MARKER, False):
         _async_worker.transfer_layer = _wrap_async_transfer(original_async_transfer)
+
+
+def _wrap_async_worker(original_worker):
+    @wraps(original_worker)
+    def _transfer_run_periodically(state, cuda_stream, is_profile=False):
+        if not isinstance(state, AscendEplbState) or is_profile:
+            return original_worker(state, cuda_stream, is_profile)
+        while True:
+            state.rearrange_event.wait(stream=cuda_stream)
+            eplb_group = _async_worker.get_eplb_group().device_group
+            eplb_cpu_group = _async_worker.get_eplb_group().cpu_group
+            for model_state in state.model_states.values():
+                model_state.communicator.set_stream(cuda_stream)
+                with torch.cuda.stream(cuda_stream):
+                    old_mapping = model_state.physical_to_logical_map.cpu()
+                new_mapping = _async_worker.run_rebalance_experts(model_state, state, old_mapping, cuda_stream)
+                if old_mapping.shape != new_mapping.shape:
+                    raise ValueError("EPLB planner changed the mapping shape")
+                changed_layers = torch.nonzero((old_mapping != new_mapping).any(dim=1)).flatten().tolist()
+                if not changed_layers:
+                    flag = torch.tensor([int(model_state.rebalanced)], dtype=torch.int32, device="cpu")
+                    torch.distributed.all_reduce(flag, group=eplb_cpu_group)
+                    if int(flag.item()) != eplb_cpu_group.size():
+                        model_state.rebalanced = False
+                        continue
+                    consumed_event = _async_worker.CpuGpuEvent()
+                    model_state.pending_result = _AscendAsyncLayerResult(None, None, None, consumed_event, True)
+                    consumed_event.wait(stream=cuda_stream)
+                    assert model_state.pending_result is None
+                    continue
+
+                for index, layer_idx in enumerate(changed_layers):
+                    flag = torch.tensor([int(model_state.rebalanced)], dtype=torch.int32, device="cpu")
+                    torch.distributed.all_reduce(flag, group=eplb_cpu_group)
+                    if int(flag.item()) != eplb_cpu_group.size():
+                        model_state.rebalanced = False
+                        break
+                    metadata = _async_worker.transfer_layer(
+                        old_layer_indices=old_mapping[layer_idx],
+                        new_layer_indices=new_mapping[layer_idx],
+                        expert_weights=model_state.model.expert_weights[layer_idx],
+                        expert_weights_buffer=model_state.expert_buffer,
+                        communicator=model_state.communicator,
+                        ep_group=eplb_group,
+                        is_profile=is_profile,
+                        cuda_stream=cuda_stream,
+                        layer_idx=layer_idx,
+                    )
+                    cuda_stream.synchronize()
+                    consumed_event = _async_worker.CpuGpuEvent()
+                    model_state.pending_result = _AscendAsyncLayerResult(
+                        layer_idx,
+                        new_mapping[layer_idx],
+                        metadata,
+                        consumed_event,
+                        index == len(changed_layers) - 1,
+                    )
+                    consumed_event.wait(stream=cuda_stream)
+                    assert model_state.pending_result is None
+
+    setattr(_transfer_run_periodically, _PATCH_MARKER, True)
+    return _transfer_run_periodically
+
+
+def _move_changed_layer_to_workspace(model_state, ep_rank: int) -> None:
+    result = model_state.pending_result
+    assert result is not None
+    if result.layer_idx is not None:
+        _eplb_state.move_from_buffer(
+            expert_weights=model_state.model.expert_weights[result.layer_idx],
+            expert_weights_buffers=model_state.expert_buffer,
+            transfer_metadata=result.transfer_metadata,
+            new_indices=result.new_physical_to_logical_map.numpy(),
+            ep_rank=ep_rank,
+        )
+        _eplb_state._commit_eplb_maps_for_layer(
+            model_state,
+            new_physical_to_logical_map=result.new_physical_to_logical_map,
+            layer=result.layer_idx,
+        )
+    if result.is_last_result:
+        model_state.rebalanced = False
+    model_state.pending_result = None
+    result.consumed_event.record()
+
+
+def _patch_changed_layer_transfer() -> None:
+    original_worker = _async_worker.transfer_run_periodically
+    if not getattr(original_worker, _PATCH_MARKER, False):
+        _async_worker.transfer_run_periodically = _wrap_async_worker(original_worker)
 
 
 def _wrap_move_to_workspace(original_move):
