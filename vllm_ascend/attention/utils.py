@@ -7,13 +7,14 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config.speculative import SpeculativeConfig
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group, is_v1_kv_transfer_group
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import MLAAttentionImpl
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
-from vllm.config.speculative import SpeculativeConfig
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
+
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
 from vllm_ascend.utils import (
@@ -554,10 +555,12 @@ def enabling_mlapo(vllm_config: VllmConfig) -> bool:
 # AscendAttentionMetadataBuilder.build() every step, while _seq_lens_cpu
 # is kept current across draft iterations and carries the same post
 # rejection-sampling lengths.
-FREETIME_DEVICE_SEQ_LENS_MODEL_TYPES: frozenset[str] = frozenset({
-    "glm5_next",
-    "glm5_next_text",
-})
+FREETIME_DEVICE_SEQ_LENS_MODEL_TYPES: frozenset[str] = frozenset(
+    {
+        "glm5_next",
+        "glm5_next_text",
+    }
+)
 
 
 def is_freetime_model_type(vllm_config: VllmConfig) -> bool:

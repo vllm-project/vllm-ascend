@@ -46,12 +46,12 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
+    _select_seq_lens,
     enable_dcp,
     needs_layer_aware_fia_graph_replay,
     notify_kv_cache_written,
     split_decodes_and_prefills,
     using_paged_attention,
-    _select_seq_lens,
 )
 from vllm_ascend.compilation.updatable_graph import (
     get_capture_resource,
