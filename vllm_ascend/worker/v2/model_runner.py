@@ -18,6 +18,7 @@
 #
 
 from contextlib import AbstractContextManager, contextmanager, nullcontext
+from typing import Any
 
 import numpy as np
 import torch
@@ -644,11 +645,20 @@ class NPUModelRunner(GPUModelRunner):
             seq_lens_np=self.input_buffers.seq_lens_np,
             attn_state=attn_state,
         )
-        input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
-            self.pcp_manager,
-            input_batch,
-            padded_num_tokens=batch_desc.num_tokens,
-        )
+        if vllm_version_is("0.29.0"):
+            input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
+                self.pcp_manager,
+                input_batch,
+                padded_num_tokens=batch_desc.num_tokens,
+            )
+        else:
+            # vLLM main (#53867) changed maybe_partition_pcp_batch to take the
+            # whole batch descriptor instead of padded_num_tokens.
+            input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
+                self.pcp_manager,
+                input_batch,
+                batch_desc=batch_desc,
+            )
 
         # For mla/sfa, update cos/sin. Here is for execute_model.
         update_cos_sin(input_batch.positions)
@@ -929,7 +939,18 @@ def graph_manager_wrapper(model_runner):
         decode_query_len: int,
         lora_capture_cases: list[int] | None = None,
         varlen_decode: bool = False,
+        ubatch_runner: Any = None,  # vLLM main (#51700)
     ):
+        if vllm_version_is("0.29.0"):
+            return ModelAclGraphManager(
+                vllm_config,
+                device,
+                cudagraph_mode,
+                decode_query_len,
+                model_runner,
+                lora_capture_cases=lora_capture_cases,
+                varlen_decode=varlen_decode,
+            )
         return ModelAclGraphManager(
             vllm_config,
             device,
@@ -937,7 +958,8 @@ def graph_manager_wrapper(model_runner):
             decode_query_len,
             model_runner,
             lora_capture_cases=lora_capture_cases,
-            varlen_decode=varlen_decode,  # type: ignore[call-arg]
+            varlen_decode=varlen_decode,
+            ubatch_runner=ubatch_runner,
         )
 
     try:
