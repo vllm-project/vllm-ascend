@@ -5,24 +5,51 @@
 
 from bisect import bisect_left
 from dataclasses import dataclass, field
+from enum import Enum
 
 import torch
 from flash_attn_npu_3 import flash_attn_with_kvcache, get_scheduler_metadata
 from vllm.config import VllmConfig
-from vllm.v1.attention.backend import AttentionCGSupport, AttentionMetadataBuilder
+from vllm.v1.attention.backend import (
+    AttentionBackend,
+    AttentionCGSupport,
+    AttentionImpl,
+    AttentionLayer,
+    AttentionMetadata,
+    AttentionMetadataBuilder,
+    AttentionType,
+)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
-from vllm_ascend.attention.attention_v1 import (
-    AscendAttentionBackend,
-    AscendAttentionBackendImpl,
-    AscendAttentionState,
-    AscendMetadata,
-)
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, notify_kv_cache_written
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 
 
-class AscendFlashAttentionBackend(AscendAttentionBackend):
+class AscendFlashAttentionBackend(AttentionBackend):
+    accept_output_buffer = True
+    # Both model runners use the attention layer's cache-update contract.
+    # FA3 writes K/V inside forward, before reading the paged cache.
+    forward_includes_kv_cache_update = True
+
+    @staticmethod
+    def get_name() -> str:
+        return "CUSTOM"
+
+    @staticmethod
+    def get_kv_cache_shape(
+        num_blocks: int,
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+        cache_dtype_str: str = "",
+    ) -> tuple[int, ...]:
+        return (2, num_blocks, block_size, num_kv_heads, head_size)
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int]:
+        return [128]
+
     @staticmethod
     def get_impl_cls() -> type["AscendFlashAttentionImpl"]:
         return AscendFlashAttentionImpl
@@ -33,7 +60,15 @@ class AscendFlashAttentionBackend(AscendAttentionBackend):
 
 
 @dataclass
-class AscendFlashAttentionMetadata(AscendMetadata):
+class AscendFlashAttentionMetadata(AttentionMetadata):
+    num_actual_tokens: int
+    query_start_loc: torch.Tensor
+    seq_lens: torch.Tensor
+    block_tables: torch.Tensor
+    slot_mapping: torch.Tensor
+    max_query_len: int
+    causal: bool
+
     # spec -> tiling tensor consumed by each layer's forward. In graph mode this
     # aliases the builder's cache dictionary for the current graph_key; eager
     # execution owns a fresh dictionary. This field only references tiling storage.
@@ -54,7 +89,6 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.device = device
-        self.model_runner_type = vllm_config.model_config.runner_type
         self.capture_sizes = set(vllm_config.compilation_config.cudagraph_capture_sizes or [])
         self.block_size = kv_cache_spec.block_size
         # Deduplicate layer parameters so identical layers share one tiling call.
@@ -158,14 +192,13 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
             slot_mapping=common.slot_mapping[: common.num_actual_tokens],
             max_query_len=max_query_len,
             causal=common.causal,
-            model_runner_type=self.model_runner_type,
             scheduler_metadata=scheduler_metadata,
         )
 
     def build_for_graph_capture(
         self,
         common_attn_metadata: AscendCommonAttentionMetadata,
-        attn_state: AscendAttentionState = AscendAttentionState.DecodeOnly,
+        attn_state: Enum | None = None,
     ) -> AscendFlashAttentionMetadata:
         # Ascend speculative proposers use this entry point. The main model
         # runner uses the inherited build_for_cudagraph_capture, which also
@@ -174,40 +207,30 @@ class AscendFlashAttentionMetadataBuilder(AttentionMetadataBuilder[AscendFlashAt
         return self.build(0, common_attn_metadata)
 
 
-class AscendFlashAttentionImpl(AscendAttentionBackendImpl):
+class AscendFlashAttentionImpl(AttentionImpl[AscendFlashAttentionMetadata]):
     def __init__(
         self,
         num_heads: int,
         head_size: int,
         scale: float,
-        num_kv_heads: int,
-        alibi_slopes: list[float] | None,
-        sliding_window: int | None,
-        kv_cache_dtype: str,
-        logits_soft_cap: float | None,
-        attn_type: str,
-        kv_sharing_target_layer_name: str | None,
+        num_kv_heads: int | None = None,
+        alibi_slopes: list[float] | None = None,
+        sliding_window: int | None = None,
+        kv_cache_dtype: str = "auto",
+        logits_soft_cap: float | None = None,
+        attn_type: str = AttentionType.DECODER,
+        kv_sharing_target_layer_name: str | None = None,
         sinks: torch.Tensor = None,
         **kwargs,
     ):
-        super().__init__(
-            num_heads,
-            head_size,
-            scale,
-            num_kv_heads,
-            alibi_slopes,
-            sliding_window,
-            kv_cache_dtype,
-            logits_soft_cap,
-            attn_type,
-            kv_sharing_target_layer_name,
-            sinks,
-            **kwargs,
-        )
-        # The parent accepts logits_soft_cap but does not store it. FA3 uses
-        # softcap=0.0 to disable logit capping; vLLM can explicitly pass None,
-        # which a constructor default would not replace. Keep one normalized
-        # value for both scheduler tiling and attention execution.
+        self.num_heads = num_heads
+        self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
+        self.head_size = head_size
+        self.scale = float(scale)
+        self.kv_cache_dtype = kv_cache_dtype
+        self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
+        # FA3 uses softcap=0.0 to disable logit capping. Explicit None from
+        # vLLM must be normalized for both scheduler tiling and execution.
         self.logits_soft_cap = 0.0 if logits_soft_cap is None else logits_soft_cap
 
     @staticmethod
@@ -223,17 +246,54 @@ class AscendFlashAttentionImpl(AscendAttentionBackendImpl):
         # before replay; no host-side attention tasks need to be updated.
         pass
 
-    def forward_impl(
+    def do_kv_cache_update(
         self,
-        query: torch.Tensor,
+        layer: AttentionLayer,
         key: torch.Tensor,
         value: torch.Tensor,
-        kv_cache: tuple[torch.Tensor],
-        attn_metadata: AscendFlashAttentionMetadata,
-        output: torch.Tensor,
+        kv_cache: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        slot_mapping: torch.Tensor,
+    ) -> None:
+        # Also used by speculative proposers that insert context K/V separately.
+        if self.kv_sharing_target_layer_name is not None:
+            return
+        DeviceOperator.reshape_and_cache(
+            key=key,
+            value=value,
+            key_cache=kv_cache[0],
+            value_cache=kv_cache[1],
+            slot_mapping=slot_mapping,
+        )
+        notify_kv_cache_written(layer.layer_name)
+
+    def forward(
+        self,
+        layer: AttentionLayer,
+        query: torch.Tensor,
+        key: torch.Tensor | None,
+        value: torch.Tensor | None,
+        kv_cache: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        attn_metadata: AscendFlashAttentionMetadata | None,
+        output: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        assert output is not None
+        assert output_scale is None and output_block_scale is None
+        assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0
+        # Both runners can profile the model before attention metadata exists.
+        if attn_metadata is None:
+            return output.fill_(0)
+        if key is not None and value is not None:
+            num_tokens = attn_metadata.num_actual_tokens
+            self.do_kv_cache_update(
+                layer,
+                key[:num_tokens],
+                value[:num_tokens],
+                kv_cache,
+                attn_metadata.slot_mapping[:num_tokens],
+            )
         record_attention_compute_start()
-        max_query_len = attn_metadata.max_query_len
         scheduler_key = (
             self.num_heads,
             self.num_kv_heads,
@@ -244,12 +304,12 @@ class AscendFlashAttentionImpl(AscendAttentionBackendImpl):
         )
         result = flash_attn_with_kvcache(
             query,
-            self.key_cache,
-            self.value_cache,
+            kv_cache[0],
+            kv_cache[1],
             cache_seqlens=attn_metadata.seq_lens,
             page_table=attn_metadata.block_tables,
             cu_seqlens_q=attn_metadata.query_start_loc,
-            max_seqlen_q=max_query_len,
+            max_seqlen_q=attn_metadata.max_query_len,
             softmax_scale=self.scale,
             causal=attn_metadata.causal,
             softcap=self.logits_soft_cap,

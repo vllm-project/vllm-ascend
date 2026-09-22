@@ -15,7 +15,8 @@ import torch_npu  # noqa: F401
 pytest.importorskip("flash_attn_npu_3")
 
 from vllm_ascend.attention import flash_attention_v3 as fa3
-from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.attention_v1 import AscendAttentionBackendImpl, AscendAttentionState
+from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 
 BLOCK_SIZE = 128
 HEAD_SIZE = 128
@@ -30,11 +31,9 @@ SCALE = 0.071  # Deliberately differs from 1 / sqrt(head_size).
 def forward_context():
     with (
         patch.object(fa3, "flash_attn_with_kvcache", wraps=fa3.flash_attn_with_kvcache) as paged,
-        patch.object(fa3.AscendAttentionBackendImpl, "forward_impl", side_effect=AssertionError("FIA fallback")),
-        patch.object(
-            fa3.AscendAttentionBackendImpl, "forward_fused_infer_attention", side_effect=AssertionError("FIA")
-        ),
-        patch.object(fa3.AscendAttentionBackendImpl, "forward_paged_attention", side_effect=AssertionError("PA")),
+        patch.object(AscendAttentionBackendImpl, "forward_impl", side_effect=AssertionError("FIA fallback")),
+        patch.object(AscendAttentionBackendImpl, "forward_fused_infer_attention", side_effect=AssertionError("FIA")),
+        patch.object(AscendAttentionBackendImpl, "forward_paged_attention", side_effect=AssertionError("PA")),
     ):
         yield SimpleNamespace(paged=paged)
 
@@ -42,7 +41,6 @@ def forward_context():
 def make_attention(dtype, num_heads=NUM_HEADS, num_kv_heads=NUM_KV_HEADS):
     builder = object.__new__(fa3.AscendFlashAttentionMetadataBuilder)
     builder.device = torch.device("npu")
-    builder.model_runner_type = "generate"
     builder.max_num_reqs = MAX_REQS + 1
     builder.scheduler_buffers = {}
     builder.scheduler_specs = {(num_heads, num_kv_heads, HEAD_SIZE, dtype, SCALE, 0.0)}
@@ -57,11 +55,6 @@ def make_attention(dtype, num_heads=NUM_HEADS, num_kv_heads=NUM_KV_HEADS):
     impl.key_cache = torch.randn(MAX_REQS * MAX_BLOCKS, BLOCK_SIZE, num_kv_heads, HEAD_SIZE, device="npu", dtype=dtype)
     impl.value_cache = torch.randn_like(impl.key_cache)
     impl.kv_sharing_target_layer_name = None
-    impl.is_kv_producer = False
-    impl.pcp_enabled = False
-    impl.attn_type = "decoder"
-    impl._use_layer_aware_fia_graph_replay = False
-    impl.use_bnsd_kv_cache = False
     common = SimpleNamespace(
         num_reqs=0,
         num_input_tokens=0,
@@ -257,3 +250,49 @@ def test_fa3_graph_changes_requests_lengths_and_pages(dtype, num_heads, num_kv_h
     # subsequent replays execute the captured NPU kernels directly.
     assert forward_context.paged.call_count == 4
     assert forward_context.paged.call_args.kwargs["num_splits"] == 0
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("capture", [False, True])
+@torch.inference_mode()
+def test_mrv2_metadata_and_forward(dtype, capture):
+    torch.manual_seed(45)
+    builder, impl, common = make_attention(dtype)
+    query = torch.empty(6, NUM_HEADS, HEAD_SIZE, device="npu", dtype=dtype)
+    key = torch.empty(6, NUM_KV_HEADS, HEAD_SIZE, device="npu", dtype=dtype)
+    value = torch.empty_like(key)
+    output = torch.empty_like(query)
+    query_lens, context_lens = [3, 1], [128, 256]
+    pages, seq_lens = prepare_case(common, query_lens, context_lens, query, key, value)
+    layer = SimpleNamespace(layer_name="model.layers.0.self_attn.attn", _k_scale_float=1.0, _v_scale_float=1.0)
+    group = SimpleNamespace(layer_names=[layer.layer_name], get_metadata_builder=lambda index: builder)
+    # Exercise MRV2's actual metadata adapter, including padding and attn_state=None.
+    metadata = build_attn_metadata(
+        attn_groups=[[group]],
+        num_reqs=common.num_reqs,
+        num_tokens=6,
+        num_actual_tokens=4,
+        num_input_tokens=6,
+        query_start_loc_gpu=common.query_start_loc,
+        query_start_loc_cpu=common.query_start_loc_cpu,
+        max_query_len=3,
+        seq_lens=common.seq_lens,
+        max_seq_len=257,
+        seq_lens_np=seq_lens.numpy(),
+        block_tables=[common.block_table_tensor],
+        slot_mappings=[common.slot_mapping],
+        kv_cache_config=SimpleNamespace(kv_cache_groups=[None]),
+        for_cudagraph_capture=capture,
+    )[layer.layer_name]
+    assert not hasattr(metadata, "model_runner_type")
+    assert not hasattr(metadata, "attn_state")
+    cache = (impl.key_cache, impl.value_cache)
+    impl.forward(layer, query, key, value, cache, metadata, output)
+    if capture:
+        graph = torch.npu.NPUGraph()
+        with torch.npu.graph(graph):
+            impl.forward(layer, query, key, value, cache, metadata, output)
+        graph.replay()
+    torch.npu.synchronize()
+    expected = reference(impl, query, pages, query_lens, seq_lens)
+    torch.testing.assert_close(output[:4].float().cpu(), expected, atol=0.02, rtol=0.02)

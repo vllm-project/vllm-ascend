@@ -7,12 +7,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from vllm.v1.attention.backend import AttentionBackend, AttentionImpl, AttentionMetadata
 from vllm.v1.attention.selector import AttentionSelectorConfig
 
 with patch.dict(sys.modules, {"flash_attn_npu_3": MagicMock()}):
     from vllm_ascend.attention import flash_attention_v3 as fa3
 
-from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionBackendImpl, AscendAttentionState
 from vllm_ascend.device.device_config import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.platform import NPUPlatform
@@ -22,7 +23,6 @@ from vllm_ascend.platform import NPUPlatform
 def builder():
     result = object.__new__(fa3.AscendFlashAttentionMetadataBuilder)
     result.device = torch.device("cpu")
-    result.model_runner_type = "generate"
     result.max_num_reqs = 5
     result.scheduler_buffers = {}
     result.scheduler_specs = set()
@@ -110,6 +110,7 @@ def impl():
     result.num_kv_heads = 2
     result.head_size = 8
     result.scale = 0.123
+    result.kv_sharing_target_layer_name = None
     result.logits_soft_cap = 0.0
     result.key_cache = torch.zeros(9, 128, 2, 8)
     result.value_cache = torch.zeros_like(result.key_cache)
@@ -118,11 +119,10 @@ def impl():
 
 @pytest.mark.parametrize("state", [AscendAttentionState.ChunkedPrefill, AscendAttentionState.SpecDecoding])
 @pytest.mark.parametrize("causal", [True, False])
-def test_paged_call_uses_matching_mask_spec(builder, impl, state, causal):
+def test_paged_call_uses_matching_mask_spec(builder, impl, layer, state, causal):
     common = common_metadata([3, 1, 7], [130, 259, 7])
     common.causal = causal
     metadata = builder.build(0, common)
-    metadata.attn_state = state
     tiling_tensor = torch.empty(1)
     metadata.scheduler_metadata[(4, 2, 8, torch.float32, 0.123, 0.0)] = tiling_tensor
     query = torch.randn(11, 4, 8)
@@ -132,8 +132,8 @@ def test_paged_call_uses_matching_mask_spec(builder, impl, state, causal):
         patch.object(fa3, "flash_attn_with_kvcache", return_value=query) as kernel,
         patch.object(fa3, "record_attention_compute_start"),
     ):
-        impl.forward_impl(query, None, None, (), metadata, output)
-        impl.forward_impl(query, None, None, (), metadata, output)
+        impl.forward(layer, query, None, None, (impl.key_cache, impl.value_cache), metadata, output)
+        impl.forward(layer, query, None, None, (impl.key_cache, impl.value_cache), metadata, output)
     assert output.equal(query)
     tiling.assert_not_called()
     assert kernel.call_args.kwargs["causal"] is causal
@@ -161,27 +161,22 @@ def test_full_forward_never_falls_back_to_fia(builder, impl, state, capturing):
     common = common_metadata(query_lens, [10, 20])
     common.attn_state = state
     metadata = builder.build(0, common)
-    metadata.attn_state = None  # The inherited forward must not depend on a scheduler state.
+    assert not hasattr(metadata, "attn_state")
+    assert not hasattr(metadata, "model_runner_type")
     metadata.scheduler_metadata[(4, 2, 8, torch.float32, 0.123, 0.0)] = torch.empty(1)
     query = torch.randn(sum(query_lens), 4, 8)
     output = torch.empty_like(query)
     expected = torch.full_like(query, 7)
-    impl.pcp_enabled = False
-    impl.attn_type = "decoder"
-    impl._use_layer_aware_fia_graph_replay = False
-    impl.use_bnsd_kv_cache = False
     impl.kv_sharing_target_layer_name = None
     layer = SimpleNamespace(layer_name="model.layers.0.self_attn.attn", _k_scale_float=1.0, _v_scale_float=1.0)
     with (
         patch.object(fa3, "flash_attn_with_kvcache", return_value=expected) as paged,
         patch.object(fa3, "record_attention_compute_start"),
-        patch("vllm_ascend.attention.attention_v1.DeviceOperator.reshape_and_cache") as cache_write,
-        patch("vllm_ascend.attention.attention_v1.notify_kv_cache_written"),
-        patch.object(fa3.AscendAttentionBackendImpl, "forward_impl", side_effect=AssertionError("FIA fallback")),
-        patch.object(
-            fa3.AscendAttentionBackendImpl, "forward_fused_infer_attention", side_effect=AssertionError("FIA")
-        ),
-        patch.object(fa3.AscendAttentionBackendImpl, "forward_paged_attention", side_effect=AssertionError("PA")),
+        patch("vllm_ascend.attention.flash_attention_v3.DeviceOperator.reshape_and_cache") as cache_write,
+        patch("vllm_ascend.attention.flash_attention_v3.notify_kv_cache_written"),
+        patch.object(AscendAttentionBackendImpl, "forward_impl", side_effect=AssertionError("FIA fallback")),
+        patch.object(AscendAttentionBackendImpl, "forward_fused_infer_attention", side_effect=AssertionError("FIA")),
+        patch.object(AscendAttentionBackendImpl, "forward_paged_attention", side_effect=AssertionError("PA")),
     ):
         result = impl.forward(
             layer, query, query[:, :2], query[:, :2], (impl.key_cache, impl.value_cache), metadata, output
@@ -193,7 +188,7 @@ def test_full_forward_never_falls_back_to_fia(builder, impl, state, capturing):
     assert paged.call_args.kwargs["num_splits"] == 0
 
 
-def test_tiling_prepared_before_capture_and_refreshed_in_place(builder, impl):
+def test_tiling_prepared_before_capture_and_refreshed_in_place(builder, impl, layer):
     spec = (4, 2, 8, torch.float32, 0.123, 0.0)
     builder.scheduler_specs = {spec}
     common = common_metadata([1, 1], [10, 20])
@@ -206,7 +201,7 @@ def test_tiling_prepared_before_capture_and_refreshed_in_place(builder, impl):
     ):
         metadata = builder.build(0, common)
         address = metadata.scheduler_metadata[spec].data_ptr()
-        impl.forward_impl(query, None, None, (), metadata, output)
+        impl.forward(layer, query, None, None, (impl.key_cache, impl.value_cache), metadata, output)
         assert tiling.call_count == 1
         common.seq_lens.add_(1)
         updated = builder.build(0, common)
@@ -273,7 +268,7 @@ def test_platform_selects_fa3_by_model(
         assert NPUPlatform.get_attn_backend_cls(None, selector) == backends[expected]
 
 
-def test_paged_tiling_shared_but_attention_computed_for_each_layer(builder, impl):
+def test_paged_tiling_shared_but_attention_computed_for_each_layer(builder, impl, layer):
     spec = (4, 2, 8, torch.float32, 0.123, 0.0)
     builder.scheduler_specs = {spec}
     common = common_metadata([3, 7], [3, 7])
@@ -287,9 +282,9 @@ def test_paged_tiling_shared_but_attention_computed_for_each_layer(builder, impl
         patch.object(fa3, "record_attention_compute_start"),
     ):
         metadata = builder.build(0, common)
-        impl.forward_impl(query, query, query, (), metadata, output)
+        impl.forward(layer, query, None, None, (impl.key_cache, impl.value_cache), metadata, output)
         assert output.equal(query)
-        impl.forward_impl(query + 1, query + 1, query + 1, (), metadata, output)
+        impl.forward(layer, query + 1, None, None, (impl.key_cache, impl.value_cache), metadata, output)
         assert output.equal(query + 1)
     tiling.assert_called_once()
     assert tiling.call_args.kwargs["page_size"] == 128
@@ -419,3 +414,81 @@ def test_graph_cache_separates_specs_buckets_and_draft_buffers(builder):
         assert other.scheduler_metadata is not initial.scheduler_metadata
         assert other.scheduler_metadata[first_spec].data_ptr() != original.data_ptr()
     assert len(initial.scheduler_metadata) == 2
+
+
+@pytest.fixture
+def layer():
+    return SimpleNamespace(layer_name="model.layers.0.self_attn.attn", _k_scale_float=1.0, _v_scale_float=1.0)
+
+
+def test_public_backend_contract():
+    assert fa3.AscendFlashAttentionBackend.__bases__ == (AttentionBackend,)
+    assert issubclass(fa3.AscendFlashAttentionImpl, AttentionImpl)
+    assert not issubclass(fa3.AscendFlashAttentionImpl, AscendAttentionBackendImpl)
+    assert issubclass(fa3.AscendFlashAttentionMetadata, AttentionMetadata)
+    assert fa3.AscendFlashAttentionBackend.forward_includes_kv_cache_update
+    assert fa3.AscendFlashAttentionBackend.accept_output_buffer
+    assert fa3.AscendFlashAttentionBackend.get_kv_cache_shape(3, 128, 2, 64) == (2, 3, 128, 2, 64)
+    assert fa3.AscendFlashAttentionBackend.get_supported_kernel_block_sizes() == [128]
+    assert not issubclass(fa3.AscendFlashAttentionBackend, AscendAttentionBackend)
+    fa3.AscendFlashAttentionImpl.update_graph_params(None, None, 4, None)
+
+
+@pytest.mark.parametrize("softcap,expected", [(None, 0.0), (0.0, 0.0), (30.0, 30.0)])
+def test_public_impl_initialization(softcap, expected):
+    impl = fa3.AscendFlashAttentionImpl(4, 128, 0.125, logits_soft_cap=softcap)
+    assert impl.num_kv_heads == 4
+    assert impl.scale == 0.125
+    assert impl.logits_soft_cap == expected
+    assert not hasattr(impl, "model_runner_type")
+
+
+def test_profile_forward_without_metadata(impl, layer):
+    query = torch.randn(4, 4, 8)
+    output = torch.empty_like(query)
+    with (
+        patch.object(fa3, "flash_attn_with_kvcache") as kernel,
+        patch.object(fa3.DeviceOperator, "reshape_and_cache") as write,
+    ):
+        result = impl.forward(layer, query, query, query, (), None, output)
+    assert result is output
+    assert torch.count_nonzero(output) == 0
+    kernel.assert_not_called()
+    write.assert_not_called()
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_cache_write_trims_padding_and_preserves_shared_cache(builder, impl, layer, shared):
+    impl.kv_sharing_target_layer_name = "earlier_layer" if shared else None
+    metadata = builder.build(0, common_metadata([1, 1], [10, 20]))
+    metadata.scheduler_metadata[(4, 2, 8, torch.float32, 0.123, 0.0)] = torch.empty(1)
+    query = torch.randn(6, 4, 8)
+    kv = torch.randn(6, 2, 8)
+    cache = torch.stack((impl.key_cache, impl.value_cache))
+    with (
+        patch.object(fa3.DeviceOperator, "reshape_and_cache") as write,
+        patch.object(fa3, "notify_kv_cache_written") as notify,
+        patch.object(fa3, "record_attention_compute_start"),
+        patch.object(fa3, "flash_attn_with_kvcache", return_value=query) as kernel,
+    ):
+        impl.forward(layer, query, kv, kv, cache, metadata, torch.empty_like(query))
+    if shared:
+        write.assert_not_called()
+        notify.assert_not_called()
+    else:
+        write.assert_called_once()
+        assert write.call_args.kwargs["key"].shape[0] == 2
+        assert write.call_args.kwargs["slot_mapping"].shape[0] == 2
+        assert write.call_args.kwargs["key_cache"].data_ptr() == cache[0].data_ptr()
+        notify.assert_called_once_with(layer.layer_name)
+    assert kernel.call_args.args[1].data_ptr() == cache[0].data_ptr()
+
+
+def test_separate_context_cache_update(impl, layer):
+    kv = torch.randn(3, 2, 8)
+    slots = torch.tensor([0, 4, 9])
+    cache = (impl.key_cache, impl.value_cache)
+    with patch.object(fa3.DeviceOperator, "reshape_and_cache") as write, patch.object(fa3, "notify_kv_cache_written"):
+        impl.do_kv_cache_update(layer, kv, kv, cache, slots)
+    assert write.call_args.kwargs["slot_mapping"] is slots
+    assert write.call_args.kwargs["key_cache"] is cache[0]
