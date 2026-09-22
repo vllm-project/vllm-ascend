@@ -505,6 +505,13 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
                 if metadata is None:
                     continue
                 metadata.attn_state = AscendAttentionState.DecodeOnly
+
+            # The eager autoregressive loop rebuilds attention metadata before
+            # every draft step. Populate the Ascend CPU-side sequence lengths
+            # now so the upcoming FIA call observes this step's lengths. A
+            # post-forward update is too late and is discarded when the next
+            # step rebuilds its metadata.
+            self._update_decode_attn_metadata(attn_metadata, step, num_reqs)
         return attn_metadata
 
     def build_draft_attn_metadatas(
