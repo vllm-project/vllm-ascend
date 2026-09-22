@@ -618,7 +618,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             core_attn_out_spec = torch.ops._C_ascend.npu_recurrent_gated_delta_rule(
                 query=query_spec.squeeze(0),
                 key=key_spec.squeeze(0),
-                value=value_spec.squeeze(0),
+                value=cast(torch.Tensor, value_spec).squeeze(0),
                 g=cast(torch.Tensor, g_spec).squeeze(0),
                 beta=cast(torch.Tensor, beta_spec).squeeze(0),
                 state=ssm_state,
