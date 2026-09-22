@@ -455,7 +455,7 @@ jobs:
             find "${TASK_DIR}" -type f | wc -l
 
             echo "=== building test_case_map.json ==="
-            pip install regex
+            python3 -m pip install regex
             python3 .github/workflows/scripts/test_selector.py \
               --build-map \
               --coverage-dir "${TASK_DIR}" \
@@ -480,7 +480,7 @@ jobs:
         - name: Upload coverage to OBS
           run: |
             set -euo pipefail
-            pip install esdk-obs-python
+            python3 -m pip install esdk-obs-python
             echo "OBS SDK installed"
             du -h coverage.tar coverage_version.txt test_case_map.json
             # Wall-clock limit. The SDK timeout only covers an idle socket, so a
@@ -490,7 +490,7 @@ jobs:
             from obs import ObsClient
 
             OBS_BUCKET = 'vllm-ascend'
-            OBS_PREFIX = 'ci/precision-test'
+            OBS_PREFIX = 'ci/precision-test/verify'
             client = ObsClient(
                 access_key_id=os.environ['OBS_ACCESS_KEY'],
                 secret_access_key=os.environ['OBS_SECRET_KEY'],
@@ -539,7 +539,7 @@ jobs:
             set +e
             echo "pruned=false" >> "$GITHUB_OUTPUT"
             OBS_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/ci/precision-test/extra_recommended_tests.yaml"
-            if ! pip install pyyaml --quiet; then
+            if ! python3 -m pip install pyyaml --quiet; then
               echo "::warning::Failed to install pyyaml; skip prune"
               exit 0
             fi
@@ -580,12 +580,12 @@ jobs:
               echo "No pruned extra_recommended_tests.yaml to upload"
               exit 0
             fi
-            pip install esdk-obs-python --quiet
+            python3 -m pip install esdk-obs-python --quiet
             python3 - <<'EOF'
             import os
             from obs import ObsClient
 
-            obs_path = 'ci/precision-test/extra_recommended_tests.yaml'
+            obs_path = 'ci/precision-test/verify/extra_recommended_tests.yaml'
             client = ObsClient(
                 access_key_id=os.environ['OBS_ACCESS_KEY'],
                 secret_access_key=os.environ['OBS_SECRET_KEY'],
