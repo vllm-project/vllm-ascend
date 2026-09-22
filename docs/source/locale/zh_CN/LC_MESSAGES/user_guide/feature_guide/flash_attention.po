@@ -71,12 +71,6 @@ msgstr "与默认FIA后端相比，启用FA3可能导致性能下降。这种权
 msgid "FA3 has been tested and verified on the following models:"
 msgstr "FA3已在以下模型上测试验证："
 
-#, fuzzy
-msgid ""
-"Other models have not been tested yet and will be supported in the future if"
-" not supported after being tested."
-msgstr "其他模型尚未测试，未来将在测试后根据结果决定是否支持。"
-
 msgid ""
 "The FA3 feature is under active development. Planned improvements include:"
 msgstr "FA3功能正在积极开发中。计划改进包括："
@@ -165,7 +159,7 @@ msgid ""
 "FA3 currently requires Ascend Atlas A2 and A3 inference NPUs.\n"
 "We will support other NPUs in the future."
 msgstr ""
-"FA3目前需要昇腾Atlas A2和A3推理NPU。\n"
+"FA3目前需要升腾Atlas A2和A3推理NPU。\n"
 "我们将在未来支持其他NPU。"
 
 msgid ""
@@ -218,3 +212,8 @@ msgstr ""
 "- **不支持 Softcapping**：FA3 不支持注意力 logit softcapping。\n"
 "- **不支持 FP8 量化**：FA3 不支持 FP8 量化注意力。\n"
 "- **不支持 MLA 和 SFA**：FA3 不支持多头潜在注意力（MLA）或稀疏 Flash 注意力（SFA）。"
+
+msgid ""
+"Other models have not been tested yet. They will be supported in the future "
+"if they pass testing."
+msgstr "其他模型尚未经过测试。如果它们通过测试，未来将会得到支持。"
