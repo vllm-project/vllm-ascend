@@ -20,7 +20,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, SlidingWindowSpec
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec, SlidingWindowSpec
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
@@ -82,6 +82,45 @@ class TestGetZmqRpcPathLookup(unittest.TestCase):
                 result = get_zmq_rpc_path_lookup(config)
                 self.assertIn(f"lookup_rpc_port_{port}", result)
                 self.assertIn(f"dp_rank{rank}", result)
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_mooncake_layerwise_accepts_aligned_recurrent_state(wrapped):
+    config = make_config(extra_config={"backend": "mooncake"})
+    mamba_spec = MambaSpec(
+        shapes=((4,),),
+        dtypes=(torch.float32,),
+        block_size=16,
+        mamba_cache_mode="align",
+    )
+    if wrapped:
+        from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
+
+        mamba_spec = UniformTypeKVCacheSpecs.from_specs({"layer.1": mamba_spec})
+    groups = [
+        KVCacheGroupSpec(
+            ["layer.0"], FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
+        ),
+        KVCacheGroupSpec(["layer.1"], mamba_spec),
+    ]
+    scheduler = KVPoolScheduler(config, use_layerwise=True, kv_cache_config=MagicMock(kv_cache_groups=groups))
+    assert scheduler.mamba_group_ids == [1]
+
+
+@pytest.mark.parametrize("cache_mode", ["all", "none"])
+def test_mooncake_layerwise_rejects_unaligned_recurrent_state(cache_mode):
+    config = make_config(extra_config={"backend": "mooncake"})
+    groups = [
+        KVCacheGroupSpec(
+            ["layer.0"], FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
+        ),
+        KVCacheGroupSpec(
+            ["layer.1"],
+            MambaSpec(shapes=((4,),), dtypes=(torch.float32,), block_size=16, mamba_cache_mode=cache_mode),
+        ),
+    ]
+    with pytest.raises(NotImplementedError, match="mamba_cache_mode='align'"):
+        KVPoolScheduler(config, use_layerwise=True, kv_cache_config=MagicMock(kv_cache_groups=groups))
 
 
 class TestKVPoolScheduler(unittest.TestCase):
