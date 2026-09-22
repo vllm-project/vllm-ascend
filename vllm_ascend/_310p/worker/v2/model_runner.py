@@ -41,6 +41,7 @@ from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.utils import bind_kv_cache, copy_kv_cache_blocks_inplace
 
 from vllm_ascend._310p.attention.attention_v1 import AscendAttentionBackend310
+from vllm_ascend._310p.kv_cache_sharing import get_310p_shared_cache_slots
 from vllm_ascend._310p.worker.v2.aclgraph import ModelAclGraphManager310
 from vllm_ascend._310p.worker.v2.block_table import Ascend310PBlockTables
 from vllm_ascend._310p.worker.v2.input_batch import Ascend310PInputBatch
@@ -869,6 +870,13 @@ class NPUModelRunner310V2(NPUModelRunner):
             for layer_name in group.layer_names
         }
         kv_caches: dict[str, Any] = {}
+        layout_resolver = getattr(self.cache_config, "get_resolved_kv_cache_layout", None)
+        share_slots = (
+            get_310p_shared_cache_slots(kv_cache_config.kv_cache_groups, layout_resolver())
+            if callable(layout_resolver)
+            else {}
+        )
+        slot_caches: dict[tuple[Any, ...], Any] = {}
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
             layer_names = [name for name in get_kv_cache_tensor_layers(kv_cache_tensor) if name not in shared_layers]
             if not layer_names:
@@ -918,9 +926,13 @@ class NPUModelRunner310V2(NPUModelRunner):
                     # Symmetric NZ only: K/V share the 4D view ``kv_cache_shape[1:]``.
                     kv_view_shape = kv_cache_shape[1:]
                     # Standardized descriptors list distinct layer
-                    # regions. Allocate one private NZ K/V pair per layer;
-                    # only explicit shared_layers below may alias.
+                    # regions. Uniform hybrid groups can reuse compatible
+                    # slots because one block ID belongs to one group.
                     for name in cache_layer_names:
+                        slot_key = (share_slots[name], cache_key) if name in share_slots else None
+                        if slot_key is not None and slot_key in slot_caches:
+                            kv_caches[name] = slot_caches[slot_key]
+                            continue
                         k_cache = torch_npu.empty_with_format(
                             size=kv_view_shape,
                             dtype=kv_cache_spec.dtype,
@@ -934,6 +946,8 @@ class NPUModelRunner310V2(NPUModelRunner):
                             acl_format=ACL_FORMAT_FRACTAL_NZ,
                         )
                         kv_caches[name] = (k_cache, v_cache)
+                        if slot_key is not None:
+                            slot_caches[slot_key] = kv_caches[name]
                         storage_ptr = k_cache.untyped_storage().data_ptr()
                         if storage_ptr not in self._attn_kv_storage_ptrs:
                             self._attn_kv_storage_ptrs.add(storage_ptr)
@@ -975,7 +989,13 @@ class NPUModelRunner310V2(NPUModelRunner):
                         return state_tensors
 
                     for name in cache_layer_names:
+                        slot_key = (share_slots[name], cache_key) if name in share_slots else None
+                        if slot_key is not None and slot_key in slot_caches:
+                            kv_caches[name] = slot_caches[slot_key]
+                            continue
                         kv_caches[name] = allocate_mamba_cache()
+                        if slot_key is not None:
+                            slot_caches[slot_key] = kv_caches[name]
                 else:
                     raise NotImplementedError(f"Unsupported 310P KV cache spec: {type(kv_cache_spec).__name__}.")
 
