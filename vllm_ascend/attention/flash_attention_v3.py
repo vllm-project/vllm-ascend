@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 import torch
-from flash_attn_npu_3 import flash_attn_with_kvcache, get_scheduler_metadata
+from flash_attn_npu_3 import flash_attn_with_kvcache, get_scheduler_metadata  # type: ignore[import-not-found]
 from vllm.config import VllmConfig
 from vllm.v1.attention.backend import (
     AttentionBackend,
