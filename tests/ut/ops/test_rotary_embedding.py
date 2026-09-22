@@ -22,6 +22,7 @@ import torch
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, YaRNScalingRotaryEmbedding
 
 from vllm_ascend.ops.rotary_embedding import (
+    AscendMRotaryEmbedding,
     AscendRotaryEmbedding,
     AscendYaRNRotaryEmbedding,
     rope_forward_oot,
@@ -299,6 +300,41 @@ class TestAscendEmbeddingForwardOOT:
         accordingly.
         """
         check_parent_init_signature_has_not_changed(RotaryEmbedding.__init__, AscendRotaryEmbedding.__init__)
+
+
+class TestAscendMRotaryEmbeddingForwardTriton:
+    @pytest.mark.parametrize("is_neox_style", [True, False])
+    @patch("vllm_ascend.ops.rotary_embedding.triton_mrope", create=True)
+    def test_forwards_is_neox_style(self, mock_mrope, is_neox_style):
+        emb = AscendMRotaryEmbedding.__new__(AscendMRotaryEmbedding)
+        emb.head_size = HEAD_SIZE
+        emb.rotary_dim = ROTARY_DIM
+        emb.mrope_section = [11, 11, 10]
+        emb.mrope_interleaved = True
+        emb.is_neox_style = is_neox_style
+        emb.cos_sin_cache = torch.zeros(MAX_POS, ROTARY_DIM * 2)
+        emb._match_cos_sin_cache_dtype = MagicMock()
+
+        positions = torch.arange(SEQ_LEN, dtype=torch.long).repeat(3, 1)
+        query = torch.randn(SEQ_LEN, NUM_HEADS * HEAD_SIZE)
+        key = torch.randn(SEQ_LEN, HEAD_SIZE)
+        mock_mrope.return_value = query, key
+
+        query_out, key_out = emb.forward_triton(positions, query, key)
+
+        mock_mrope.assert_called_once_with(
+            query,
+            key,
+            emb.cos,
+            emb.sin,
+            emb.mrope_section,
+            emb.head_size,
+            emb.rotary_dim,
+            emb.mrope_interleaved,
+            is_neox_style,
+        )
+        assert query_out.shape == query.shape
+        assert key_out.shape == key.shape
 
 
 class TestAscendYaRNRotaryEmbeddingForwardOOT:
