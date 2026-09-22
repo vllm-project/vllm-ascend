@@ -76,7 +76,9 @@ def _split_without_shared_prefix_junction(
 
     block_size = self.cache_config.block_size
     last_cache_position = request.num_tokens - request.num_tokens % block_size
-    if self.use_eagle:
+    if self.use_eagle and not _skips_eagle_block_drop(
+        getattr(self.vllm_config, "kv_transfer_config", None)
+    ):
         last_cache_position = max(last_cache_position - block_size, 0)
 
     end = start + num_new_tokens
