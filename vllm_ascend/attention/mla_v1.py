@@ -34,7 +34,6 @@ from vllm_ascend.attention.utils import (
     ascend_chunked_prefill_workspace_size,
     enable_dcp,
     enabling_mlapo,
-    is_pd_decode_recompute_scheduler_enabled,
     maybe_save_kv_layer_to_connector,
     notify_kv_cache_written,
     split_decodes_and_prefills,
