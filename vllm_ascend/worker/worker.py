@@ -72,6 +72,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.utils import report_usage_stats
+from vllm.v1.worker.gpu.async_utils import AsyncOutput
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
 from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
@@ -108,6 +109,7 @@ from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import g
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.observability.runtime_guard.hooks import runtime_guard_idle_step
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
+from vllm_ascend.patch.worker.patch_async_output import AscendAsyncOutput
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
 from vllm_ascend.utils import (
     check_ascend_device_type,
@@ -1007,6 +1009,11 @@ class NPUWorker(WorkerBase):
     @fault_barrier_wrapper
     def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
         output = self.model_runner.sample_tokens(grammar_output)
+        # Only the async (MRV2) path returns an AsyncOutput; re-class it so
+        # get_output is guarded by the fault barrier. A quarantined step drains
+        # as a plain ModelRunnerOutput and passes through untouched.
+        if self.parallel_config.enable_fault_tolerance and isinstance(output, AsyncOutput):
+            output.__class__ = AscendAsyncOutput
         return output
 
     def load_model(self) -> None:
