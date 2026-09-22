@@ -246,9 +246,7 @@ def test_swift_balancer_replicates_hot_experts_on_distinct_ranks():
     policy.ep_rank = 1
     policy._bootstrap_rebalance_active = True
     policy._policy = SwiftBalanceEplb()
-    old_mapping = torch.tensor(
-        [[0, 1, 2, 2, 3, 4, 4, 5, 6, 6, 7, 0]]
-    )
+    old_mapping = torch.tensor([[0, 1, 2, 2, 3, 4, 4, 5, 6, 6, 7, 0]])
 
     result = policy.rebalance_experts(
         weight=torch.tensor([[1000, 800, 400, 300, 200, 150, 100, 50]]),

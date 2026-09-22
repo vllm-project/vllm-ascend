@@ -114,9 +114,7 @@ def record_expert_tokens(
     if group_list_type == 1:
         local_load = expert_tokens
     else:
-        local_load = torch.cat(
-            [expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]]
-        )
+        local_load = torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
 
     local_expert_end = local_expert_start + local_load.numel()
     if local_expert_start < 0 or local_expert_end > expert_load_view.numel():
@@ -157,8 +155,7 @@ def record_physical_expert_load(
     if bool(record_enabled):
         unpadded_physical_ids = physical_ids[: int(num_unpadded_tokens)].reshape(-1)
         valid_physical_ids = unpadded_physical_ids[
-            (unpadded_physical_ids >= 0)
-            & (unpadded_physical_ids < expert_load_view.numel())
+            (unpadded_physical_ids >= 0) & (unpadded_physical_ids < expert_load_view.numel())
         ]
         if valid_physical_ids.numel() > 0:
             expert_load_view.add_(

@@ -49,12 +49,8 @@ def generate_global_placement(n_expert, ep_size, n_redundant, num_shared_experts
     if (n_expert + n_redundant) % ep_size != 0:
         raise ValueError("(n_expert + n_redundant) % ep_size must be 0")
     if num_shared_experts == 0:
-        physical_to_logical = EplbState.build_initial_global_physical_to_logical_map(
-            n_expert, n_redundant, ep_size
-        )
-        return torch.tensor(physical_to_logical, dtype=torch.int32).reshape(
-            ep_size, -1
-        )
+        physical_to_logical = EplbState.build_initial_global_physical_to_logical_map(n_expert, n_redundant, ep_size)
+        return torch.tensor(physical_to_logical, dtype=torch.int32).reshape(ep_size, -1)
 
     # Shared-expert mix placement has a separate Ascend-only layout.
     all_experts = np.arange(n_expert)

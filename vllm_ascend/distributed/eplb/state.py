@@ -57,9 +57,7 @@ class AscendEplbLayerState(_eplb_state.EplbLayerState):
         ep_size = ep_group.world_size
         num_physical_experts = expert_load_view.shape[-1]
         if num_physical_experts % ep_size != 0:
-            raise ValueError(
-                "The number of physical experts must be divisible by EP size."
-            )
+            raise ValueError("The number of physical experts must be divisible by EP size.")
         self.local_expert_count = num_physical_experts // ep_size
         self.local_expert_start = ep_group.rank_in_group * self.local_expert_count
 

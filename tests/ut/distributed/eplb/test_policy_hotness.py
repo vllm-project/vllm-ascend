@@ -59,8 +59,7 @@ def test_log_hotness_imbalance_reports_actual_selected_mapping(
         "update_imbalance_list": pytest.approx([1.0]),
     }
     log_info.assert_called_once_with(
-        "[eplb/worker] Expert hotness imbalance, current: "
-        "mean=%.3f max=%.3f, updated: mean=%.3f max=%.3f",
+        "[eplb/worker] Expert hotness imbalance, current: mean=%.3f max=%.3f, updated: mean=%.3f max=%.3f",
         pytest.approx(5 / 3),
         pytest.approx(5 / 3),
         pytest.approx(1.0),

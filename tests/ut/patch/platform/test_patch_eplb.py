@@ -257,7 +257,5 @@ def test_backported_workspace_move_commits_changed_layer(monkeypatch):
             ep_rank=2,
         )
     ]
-    commit.assert_called_once_with(
-        model_state, new_physical_to_logical_map=new_mapping, layer=1
-    )
+    commit.assert_called_once_with(model_state, new_physical_to_logical_map=new_mapping, layer=1)
     consumed_event.record.assert_called_once_with()

@@ -66,8 +66,7 @@ def test_record_v2_eplb_load_falls_back_to_physical_ids():
 
     with (
         patch(
-            "vllm_ascend.ops.fused_moe.routed_experts."
-            "dbo_current_ubatch_id",
+            "vllm_ascend.ops.fused_moe.routed_experts.dbo_current_ubatch_id",
             return_value=0,
         ),
         patch.object(
