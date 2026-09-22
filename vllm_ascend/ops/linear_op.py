@@ -218,6 +218,13 @@ class KimiOProjMMReduceScatterOp(CustomRowParallelOp):
         )
         return output, None
 
+    def apply_into(self, input_: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
+        """Write the ordinary decode projection directly into its TP shard."""
+        input_parallel = self.get_input_parallel(input_)
+        parallel_output = self.quant_method.apply(self.layer, input_parallel, None)
+        dist.reduce_scatter_tensor(output, parallel_output, group=self.comm_group.device_group)
+        return output
+
     def _can_fuse(self, input_parallel: torch.Tensor, weight: torch.Tensor) -> bool:
         # AI-CPU fusion benefits large prefill GEMMs but adds latency to small
         # decode batches. Keep decode/mixed/capture on the existing MM + RS.
