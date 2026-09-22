@@ -6,8 +6,39 @@
 # The models we train have hidden dim up to 8k anyway (e.g. Llama 70B), so this is fine.
 # mypy: ignore-errors
 
+from functools import lru_cache
+
 import torch
+
 from vllm.triton_utils import tl, triton
+
+
+_PR1_QUALIFIED_DEVICE_NAMES = frozenset(("Ascend910B3", "Ascend910_9382"))
+
+
+@lru_cache(maxsize=8)
+def _is_pr1_device_name_qualified(device_index: int) -> bool:
+    """Read exact runtime identity once per device index; unknown fails closed."""
+    try:
+        runtime_name = torch.npu.get_device_name(device_index)
+        return runtime_name in _PR1_QUALIFIED_DEVICE_NAMES
+    except Exception:
+        return False
+
+
+def _is_pr1_device_qualified(x) -> bool:
+    """Use the tensor's device index, with a conservative current-device fallback."""
+    device_index = getattr(getattr(x, "device", None), "index", None)
+    if type(device_index) is not int:
+        try:
+            device_index = torch.npu.current_device()
+        except Exception:
+            return False
+    return _is_pr1_device_name_qualified(device_index)
+
+
+def _is_pr1_dtype(x) -> bool:
+    return getattr(x, "dtype", None) in (torch.float16, torch.bfloat16)
 
 
 @triton.heuristics({"HAS_BIAS": lambda args: args["B"] is not None})
@@ -100,6 +131,144 @@ def _layer_norm_fwd_1pass_kernel_npu(
     tl.store(y_ptrs, y, mask=row_mask[:, None] & col_mask[None, :])
 
 
+@triton.heuristics({"HAS_BIAS": lambda args: args["B"] is not None})
+@triton.heuristics({"HAS_Z": lambda args: args["Z"] is not None})
+@triton.jit(
+    do_not_specialize=[
+        "stride_x_row", "stride_y_row", "stride_z_row", "M", "N", "eps",
+        "num_m_blocks", "ngroups",
+    ]
+)
+def _layer_norm_fwd_persistent_kernel_npu(
+    X, Y, W, B, Z, Mean, Rstd,
+    stride_x_row, stride_y_row, stride_z_row,
+    M, N, eps,
+    num_m_blocks, ngroups,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
+    HAS_Z: tl.constexpr,
+    NORM_BEFORE_GATE: tl.constexpr,
+    IS_RMS_NORM: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    num_programs = tl.num_programs(0)
+    num_tiles = num_m_blocks * ngroups
+
+    for tile_id in range(pid, num_tiles, num_programs):
+        pid_m = tile_id // ngroups
+        group = tile_id - pid_m * ngroups
+        mean_ptr = Mean
+        rstd_ptr = Rstd + group * M
+        w_ptr = W + group * N
+        b_ptr = B
+        if not IS_RMS_NORM:
+            mean_ptr = Mean + group * M
+        if HAS_BIAS:
+            b_ptr = B + group * N
+
+        rows = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        cols = tl.arange(0, BLOCK_N)
+        row_mask = rows < M
+        col_mask = cols < N
+        w = tl.load(w_ptr + cols, mask=col_mask).to(tl.float32)
+        if HAS_BIAS:
+            b = tl.load(b_ptr + cols, mask=col_mask).to(tl.float32)
+
+        x_ptrs = X + rows[:, None] * stride_x_row + cols[None, :] + group * N
+        x = tl.load(x_ptrs, mask=row_mask[:, None] & col_mask[None, :]).to(tl.float32)
+        if HAS_Z:
+            z_ptrs = Z + rows[:, None] * stride_z_row + cols[None, :] + group * N
+            z = tl.load(z_ptrs, mask=row_mask[:, None] & col_mask[None, :]).to(tl.float32)
+            if not NORM_BEFORE_GATE:
+                x *= z * tl.sigmoid(z)
+
+        if not IS_RMS_NORM:
+            mean = tl.sum(x, axis=1) / N
+            xbar = tl.where(col_mask[None, :], x - mean[:, None], 0.0)
+            var = tl.sum(xbar * xbar, axis=1) / N
+            tl.store(mean_ptr + rows, mean, mask=row_mask)
+        else:
+            xbar = tl.where(col_mask[None, :], x, 0.0)
+            var = tl.sum(xbar * xbar, axis=1) / N
+
+        rstd = 1.0 / tl.sqrt(var + eps)
+        tl.store(rstd_ptr + rows, rstd, mask=row_mask)
+        if not IS_RMS_NORM:
+            x_hat = (x - mean[:, None]) * rstd[:, None]
+        else:
+            x_hat = x * rstd[:, None]
+        y = x_hat * w[None, :]
+        if HAS_BIAS:
+            y += b[None, :]
+        if HAS_Z and NORM_BEFORE_GATE:
+            y *= z * tl.sigmoid(z)
+        y_ptrs = Y + rows[:, None] * stride_y_row + cols[None, :] + group * N
+        tl.store(y_ptrs, y, mask=row_mask[:, None] & col_mask[None, :])
+
+
+@triton.heuristics({"HAS_BIAS": lambda args: args["B"] is not None})
+@triton.heuristics({"HAS_Z": lambda args: args["Z"] is not None})
+@triton.jit(
+    do_not_specialize=[
+        "stride_x_row", "stride_y_row", "stride_z_row", "M", "N", "eps",
+        "num_m_blocks",
+    ]
+)
+def _layer_norm_fwd_persistent_hoist_kernel_npu(
+    X, Y, W, B, Z, Mean, Rstd,
+    stride_x_row, stride_y_row, stride_z_row,
+    M, N, eps,
+    num_m_blocks,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
+    HAS_Z: tl.constexpr,
+    NORM_BEFORE_GATE: tl.constexpr,
+    IS_RMS_NORM: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    num_programs = tl.num_programs(0)
+    cols = tl.arange(0, BLOCK_N)
+    col_mask = cols < N
+    w = tl.load(W + cols, mask=col_mask).to(tl.float32)
+    if HAS_BIAS:
+        b = tl.load(B + cols, mask=col_mask).to(tl.float32)
+
+    for tile_id in range(pid, num_m_blocks, num_programs):
+        rows = tile_id * BLOCK_M + tl.arange(0, BLOCK_M)
+        row_mask = rows < M
+        x_ptrs = X + rows[:, None] * stride_x_row + cols[None, :]
+        x = tl.load(x_ptrs, mask=row_mask[:, None] & col_mask[None, :]).to(tl.float32)
+        if HAS_Z:
+            z_ptrs = Z + rows[:, None] * stride_z_row + cols[None, :]
+            z = tl.load(z_ptrs, mask=row_mask[:, None] & col_mask[None, :]).to(tl.float32)
+            if not NORM_BEFORE_GATE:
+                x *= z * tl.sigmoid(z)
+
+        if not IS_RMS_NORM:
+            mean = tl.sum(x, axis=1) / N
+            xbar = tl.where(col_mask[None, :], x - mean[:, None], 0.0)
+            var = tl.sum(xbar * xbar, axis=1) / N
+            tl.store(Mean + rows, mean, mask=row_mask)
+        else:
+            xbar = tl.where(col_mask[None, :], x, 0.0)
+            var = tl.sum(xbar * xbar, axis=1) / N
+        rstd = 1.0 / tl.sqrt(var + eps)
+        tl.store(Rstd + rows, rstd, mask=row_mask)
+        if not IS_RMS_NORM:
+            x_hat = (x - mean[:, None]) * rstd[:, None]
+        else:
+            x_hat = x * rstd[:, None]
+        y = x_hat * w[None, :]
+        if HAS_BIAS:
+            y += b[None, :]
+        if HAS_Z and NORM_BEFORE_GATE:
+            y *= z * tl.sigmoid(z)
+        y_ptrs = Y + rows[:, None] * stride_y_row + cols[None, :]
+        tl.store(y_ptrs, y, mask=row_mask[:, None] & col_mask[None, :])
+
+
 def layer_norm_fwd_npu(
     x,
     weight,
@@ -135,34 +304,129 @@ def layer_norm_fwd_npu(
     mean = torch.empty((ngroups * M,), dtype=torch.float32, device=x.device) if not is_rms_norm else None
     rstd = torch.empty((ngroups * M,), dtype=torch.float32, device=x.device)
 
-    MAX_FUSED_SIZE = 65536 // x.element_size()
-    BLOCK_N = min(MAX_FUSED_SIZE, triton.next_power_of_2(group_size))
-    if group_size > BLOCK_N:
-        raise RuntimeError(f"layer_norm_fwd_npu: Feature dim too large, got {group_size}, max supported is {BLOCK_N}.")
+    from vllm_ascend.ops.triton.layernorm_gated_dispatch import (
+        DispatchConfigError,
+        _select_layernorm_launch,
+    )
+    from vllm_ascend.ops.triton.triton_utils import try_get_vectorcore_num
 
-    # Choose BLOCK_M: e.g., 16, 32, 64 — depends on NPU vector core capacity
-    BLOCK_M = 64  # Tune this based on your NPU's register/shared memory
-
-    # Now grid is (num blocks over M, num groups)
-    grid = (triton.cdiv(M, BLOCK_M), ngroups)
-    _layer_norm_fwd_1pass_kernel_npu[grid](
-        x,
-        out,
-        weight,
-        bias,
-        z,
-        mean,
-        rstd,
-        x.stride(0),
-        out.stride(0),
-        z.stride(0) if z is not None else 0,
+    qualified = _is_pr1_dtype(x) and _is_pr1_device_qualified()
+    runtime_p = try_get_vectorcore_num() if qualified else None
+    spec = _select_layernorm_launch(
         M,
         group_size,
-        eps,
-        BLOCK_M=BLOCK_M,
-        BLOCK_N=BLOCK_N,
-        NORM_BEFORE_GATE=norm_before_gate,
-        IS_RMS_NORM=is_rms_norm,
-        # Remove multibuffer if not needed
+        ngroups,
+        runtime_p,
+        _LAYERNORM_GATED_EXPERIMENTAL_PARAMS,
+        qualified=qualified,
     )
-    return out, mean, rstd
+
+    # All BASE selections, including unsupported dtype/device and wide-N
+    # fallback, retain the upstream BASE64 launch and feature-dimension guard.
+    if spec.impl == "FT_BASE":
+        max_fused_size = 65536 // x.element_size()
+        block_n = min(max_fused_size, triton.next_power_of_2(group_size))
+        if group_size > block_n:
+            raise RuntimeError(
+                f"layer_norm_fwd_npu: Feature dim too large, got {group_size}, "
+                f"max supported is {block_n}."
+            )
+        grid = (triton.cdiv(M, spec.block_m), ngroups)
+        _layer_norm_fwd_1pass_kernel_npu[grid](
+            x,
+            out,
+            weight,
+            bias,
+            z,
+            mean,
+            rstd,
+            x.stride(0),
+            out.stride(0),
+            z.stride(0) if z is not None else 0,
+            M,
+            group_size,
+            eps,
+            BLOCK_M=spec.block_m,
+            BLOCK_N=block_n,
+            NORM_BEFORE_GATE=norm_before_gate,
+            IS_RMS_NORM=is_rms_norm,
+        )
+        return out, mean, rstd
+
+    if runtime_p is None:
+        raise DispatchConfigError("persistent selection requires an initialized vector-core count")
+    block_n = min(65536 // x.element_size(), triton.next_power_of_2(group_size))
+
+    if spec.impl == "FT_PERSIST":
+        num_m_blocks = triton.cdiv(M, spec.block_m)
+        num_tiles = num_m_blocks * ngroups
+        grid = (min(runtime_p, num_tiles),)
+        _layer_norm_fwd_persistent_kernel_npu[grid](
+            x,
+            out,
+            weight,
+            bias,
+            z,
+            mean,
+            rstd,
+            x.stride(0),
+            out.stride(0),
+            z.stride(0) if z is not None else 0,
+            M,
+            group_size,
+            eps,
+            num_m_blocks,
+            ngroups,
+            BLOCK_M=spec.block_m,
+            BLOCK_N=block_n,
+            NORM_BEFORE_GATE=norm_before_gate,
+            IS_RMS_NORM=is_rms_norm,
+        )
+        return out, mean, rstd
+
+    if spec.impl == "FT_PERSIST_HOIST":
+        if ngroups != 1:
+            raise DispatchConfigError("FT_PERSIST_HOIST requires ngroups == 1")
+        num_m_blocks = triton.cdiv(M, spec.block_m)
+        grid = (min(runtime_p, num_m_blocks),)
+        _layer_norm_fwd_persistent_hoist_kernel_npu[grid](
+            x,
+            out,
+            weight,
+            bias,
+            z,
+            mean,
+            rstd,
+            x.stride(0),
+            out.stride(0),
+            z.stride(0) if z is not None else 0,
+            M,
+            group_size,
+            eps,
+            num_m_blocks,
+            BLOCK_M=spec.block_m,
+            BLOCK_N=block_n,
+            NORM_BEFORE_GATE=norm_before_gate,
+            IS_RMS_NORM=is_rms_norm,
+        )
+        return out, mean, rstd
+
+    raise DispatchConfigError(f"impl {spec.impl} is unsupported or unmaterialized")
+
+
+def _layer_norm_gated_experimental_params():
+    from vllm_ascend.ops.triton.layernorm_gated_dispatch import DispatchParams
+
+    return DispatchParams(
+        bm_small=16,
+        bm_multi=32,
+        k_persist_num=1,
+        k_persist_den=4,
+        n_persist_min=128,
+        hoist_qualified=True,
+        persist_single_qualified=True,
+        persist_multi_qualified=False,
+    )
+
+
+_LAYERNORM_GATED_EXPERIMENTAL_PARAMS = _layer_norm_gated_experimental_params()
