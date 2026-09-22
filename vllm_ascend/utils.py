@@ -658,7 +658,7 @@ def adapt_patch(is_global_patch: bool = False):
 
 
 def setup_ascend_local_comm_res(local_rank: int, kv_transfer_config: Any | None) -> None:
-    """Load the local A5 endpoint config into ASCEND_LOCAL_COMM_RES."""
+    """Load the local HIXL endpoint config into ASCEND_LOCAL_COMM_RES."""
     if kv_transfer_config is None:
         return
 
