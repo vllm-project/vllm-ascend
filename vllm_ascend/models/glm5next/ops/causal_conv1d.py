@@ -9,6 +9,14 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 CONV_STATE_COPY_BLOCK_SIZE = 256
 
 
+def _staging_geometry(cache_indices: torch.Tensor) -> tuple[int, int, int, int]:
+    requests = cache_indices.shape[0]
+    indices_per_request = cache_indices.shape[1] if cache_indices.dim() > 1 else 1
+    entries = requests * indices_per_request
+    index_col_stride = cache_indices.stride(1) if cache_indices.dim() > 1 else 0
+    return requests, indices_per_request, entries, index_col_stride
+
+
 @triton.jit
 def _copy_conv_state(
     cache,
@@ -17,7 +25,9 @@ def _copy_conv_state(
     starts,
     packed_indices,
     cache_stride,
-    index_stride,
+    index_row_stride,
+    index_col_stride,
+    indices_per_request,
     num_slots,
     STATE_LEN: tl.constexpr,
     DIM: tl.constexpr,
@@ -26,14 +36,16 @@ def _copy_conv_state(
     WRITE_BACK: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    request = tl.program_id(0)
+    entry = tl.program_id(0)
+    request = entry // indices_per_request
+    column = entry % indices_per_request
     offsets = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
-    slot = tl.load(cache_indices + request * index_stride).to(tl.int64)
+    slot = tl.load(cache_indices + request * index_row_stride + column * index_col_stride).to(tl.int64)
     active = (slot >= 0) & (slot < num_slots) & (tl.load(starts + request + 1) > tl.load(starts + request))
     in_range = offsets < STATE_LEN * DIM
     safe_slot = tl.where(active, slot, 0)
     cache_offsets = safe_slot * cache_stride + offsets // DIM * STATE_STRIDE + offsets % DIM * DIM_STRIDE
-    packed_offsets = request * STATE_LEN * DIM + offsets
+    packed_offsets = entry * STATE_LEN * DIM + offsets
     if WRITE_BACK:
         values = tl.load(packed + packed_offsets, mask=in_range, other=0)
         tl.store(cache + cache_offsets, values, mask=active & in_range)
@@ -41,7 +53,7 @@ def _copy_conv_state(
         values = tl.load(cache + cache_offsets, mask=active & in_range, other=0)
         tl.store(packed + packed_offsets, values, mask=in_range)
         if tl.program_id(1) == 0:
-            tl.store(packed_indices + request, tl.where(active, request, -1))
+            tl.store(packed_indices + entry, tl.where(active, entry, -1))
 
 
 def causal_conv1d(
@@ -54,6 +66,7 @@ def causal_conv1d(
     run_mode: int,
     initial_state_mode: torch.Tensor | None = None,
     num_accepted_tokens: torch.Tensor | None = None,
+    synchronize_staging: bool = False,
 ) -> torch.Tensor:
     """Consume GDN metadata and update the caller's [cache, state_len, dim] state."""
     # Padded requests can be skipped by the kernel; their output must stay zero.
@@ -66,11 +79,18 @@ def causal_conv1d(
     # mutations back to the view. Stage only this batch's rows, retaining both
     # page strides and DS layouts; never copy the entire persistent cache.
     if not conv_state.is_contiguous():
-        requests = cache_indices.shape[0]
+        requests, indices_per_request, entries, index_col_stride = _staging_geometry(cache_indices)
         state_len, dim = conv_state.shape[1:]
-        kernel_state = torch.empty((requests, state_len, dim), dtype=conv_state.dtype, device=conv_state.device)
-        kernel_indices = torch.empty(requests, dtype=torch.int32, device=cache_indices.device)
-        copy_grid = (requests, triton.cdiv(state_len * dim, CONV_STATE_COPY_BLOCK_SIZE))
+        kernel_state = torch.empty(
+            (entries, state_len, dim),
+            dtype=conv_state.dtype,
+            device=conv_state.device,
+        )
+        kernel_indices = torch.empty_like(cache_indices, dtype=torch.int32)
+        copy_grid = (
+            entries,
+            triton.cdiv(state_len * dim, CONV_STATE_COPY_BLOCK_SIZE),
+        )
         copy_args = (
             conv_state,
             kernel_state,
@@ -79,6 +99,8 @@ def causal_conv1d(
             kernel_indices,
             conv_state.stride(0),
             cache_indices.stride(0),
+            index_col_stride,
+            indices_per_request,
             conv_state.shape[0],
             state_len,
             dim,
@@ -86,6 +108,8 @@ def causal_conv1d(
             conv_state.stride(2),
         )
         _copy_conv_state[copy_grid](*copy_args, WRITE_BACK=False, BLOCK=CONV_STATE_COPY_BLOCK_SIZE)
+        if synchronize_staging:
+            torch.npu.current_stream().synchronize()
     # Return the declared result so graph functionalization retains the call.
     result = torch.ops._C_ascend.npu_causal_conv1d_custom(
         output,

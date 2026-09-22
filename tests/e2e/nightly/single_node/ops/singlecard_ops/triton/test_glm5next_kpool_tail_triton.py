@@ -14,6 +14,38 @@ BF16_RTOL = 1e-2
 BF16_ATOL = 1e-2
 
 
+@pytest.mark.parametrize("pool,history", [(4, 3), (8, 3), (8, 5), (8, 7)])
+@pytest.mark.parametrize("physical_block", [0, 2])
+@torch.inference_mode()
+def test_odd_history_mask_preserves_request_block_address(pool, history, physical_block):
+    """A masked int64 block-id vector used to read the wrong history page."""
+    dim = HEAD_DIM
+    keys = torch.arange(1, pool + 1).float()[:, None].expand(-1, dim).contiguous()
+    gates = torch.zeros_like(keys)
+    tail = torch.full((3, 2, pool, dim), -7.0, device="npu")
+    tail[physical_block, 0, :history] = keys[:history].npu()
+    tail[physical_block, 1, :history] = gates[:history].npu()
+    cache = torch.full((2, 16, 1, dim), -7.0, dtype=torch.bfloat16, device="npu")
+    positions = torch.arange(history, pool, device="npu")
+    slots = torch.full((pool - history,), -1, dtype=torch.int64, device="npu")
+    slots[-1] = 16
+    compress(
+        tail,
+        cache,
+        keys[history:].npu(),
+        gates[history:].npu(),
+        gates.npu(),
+        positions,
+        torch.tensor([pool - history], dtype=torch.int32, device="npu"),
+        torch.tensor([pool], dtype=torch.int32, device="npu"),
+        physical_block * pool + positions,
+        torch.tensor([[physical_block]], dtype=torch.int32, device="npu"),
+        slots,
+        pool,
+    )
+    torch.testing.assert_close(cache[1, 0, 0].cpu(), keys.mean(0).bfloat16(), rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("pool,capacity", [(4, 4), (4, 12), (8, 8)])
 @pytest.mark.parametrize("use_graph", [False, True])
 @pytest.mark.parametrize("prefix_tokens", [0, 64])
@@ -212,3 +244,44 @@ def test_invalid_tail_layout_raises(shape):
             slots,
             4,
         )
+
+
+@torch.inference_mode()
+def test_mtp_rejection_retains_committed_tail_for_replacement():
+    pool, capacity, dim = 4, 7, HEAD_DIM
+    generator = torch.Generator().manual_seed(911)
+    keys = torch.randn(10, dim, generator=generator)
+    gates = torch.randn(10, dim, generator=generator) * 0.1
+    replacement_k = torch.randn(dim, generator=generator)
+    replacement_g = torch.randn(dim, generator=generator) * 0.1
+    ape = torch.randn(pool, dim, generator=generator) * 0.1
+    tail = torch.zeros(4, 2, capacity, dim, device="npu")
+    cache = torch.zeros(3, 16, 1, dim, dtype=torch.bfloat16, device="npu")
+    table = torch.tensor([[2]], dtype=torch.int32, device="npu")
+
+    def run(positions, current_k, current_g, slots):
+        pos = torch.tensor(positions, dtype=torch.int64, device="npu")
+        compress(
+            tail,
+            cache,
+            current_k.npu(),
+            current_g.npu(),
+            ape.npu(),
+            pos,
+            torch.tensor([len(positions)], dtype=torch.int32, device="npu"),
+            torch.tensor([positions[-1] + 1], dtype=torch.int32, device="npu"),
+            2 * capacity + pos % capacity,
+            table,
+            torch.tensor(slots, dtype=torch.int64, device="npu"),
+            pool,
+        )
+
+    run([4, 5], keys[4:6], gates[4:6], [-1, -1])
+    # Verify 6..9; accept 6, reject 7..9, then replace position 7.
+    slot = 17
+    run([6, 7, 8, 9], keys[6:10], gates[6:10], [-1, slot, -1, -1])
+    run([7], replacement_k[None], replacement_g[None], [slot])
+    committed_k = torch.stack((keys[4], keys[5], keys[6], replacement_k))
+    committed_g = torch.stack((gates[4], gates[5], gates[6], replacement_g))
+    expected = (torch.softmax(committed_g + ape, dim=0) * committed_k).sum(0).bfloat16()
+    torch.testing.assert_close(cache[1, 1, 0].cpu(), expected, rtol=BF16_RTOL, atol=BF16_ATOL)
