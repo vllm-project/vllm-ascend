@@ -11,7 +11,7 @@ from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parall
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
 from vllm.logger import logger
 
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_config import _MEGA_MOE_SUPPORTED, get_ascend_config
 from vllm_ascend.utils import (
     AscendDeviceType,
     enable_sp,
@@ -32,6 +32,10 @@ class MoECommType(Enum):
 
 
 _MRV2_IN_PROFILE_RUN: ContextVar[bool] = ContextVar("_MRV2_IN_PROFILE_RUN", default=False)
+
+_MEGA_MOE_TOKENS_PER_RANK_LIMIT = 4096
+_DISPATCH_FFN_COMBINE_TOKENS_PER_RANK_LIMIT = 512
+_MC2_TOKENS_PER_RANK_LIMIT = 512
 
 
 @contextmanager
@@ -95,7 +99,10 @@ def set_ascend_forward_context(
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
 
         max_num_tokens = int(num_tokens_across_dp.max().item()) if num_tokens_across_dp is not None else num_tokens
-        moe_comm_type = select_moe_comm_method(max_num_tokens, vllm_config, is_draft_model)
+        moe_comm_type = select_moe_comm_method(
+            max_num_tokens,
+            vllm_config,
+        )
 
         forward_context.moe_comm_type = moe_comm_type
         forward_context.moe_comm_method = get_moe_comm_method(moe_comm_type)
@@ -210,10 +217,19 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
     else:
         max_num_tokens = max_num_reqs * uniform_decode_query_len
     tp_size = vllm_config.parallel_config.tensor_parallel_size
+
     # Use integer arithmetic for ceiling division.
     num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
-    # NOTE: To save memory, we cap the max number of tokens to 512.
-    num_tokens_per_tp_rank = min(num_tokens_per_tp_rank, 512)
+    # keep the num_tokens_per_tp_rank less than fused_mc2 (mega_moe) tokens per rank limit
+    if get_ascend_config().enable_fused_mc2:
+        if _MEGA_MOE_SUPPORTED:
+            num_tokens_per_tp_rank = min(num_tokens_per_tp_rank, _MEGA_MOE_TOKENS_PER_RANK_LIMIT)
+        else:
+            num_tokens_per_tp_rank = min(num_tokens_per_tp_rank, _DISPATCH_FFN_COMBINE_TOKENS_PER_RANK_LIMIT)
+
+    # keep the num_tokens_per_tp_rank less than mc2 tokens per rank limit
+    else:
+        num_tokens_per_tp_rank = min(num_tokens_per_tp_rank, _MC2_TOKENS_PER_RANK_LIMIT)
     _mc2_tokens_capacity = num_tokens_per_tp_rank * tp_size
 
 
@@ -255,31 +271,21 @@ def _select_a2_moe_comm_method(
 def _select_a3_moe_comm_method(
     num_tokens: int,
     vllm_config: VllmConfig,
-    quant_type: str | None,
     mc2_tokens_capacity: int,
-    enable_fused_mc2: int,
 ) -> MoECommType:
-    # TODO: drop the EP-size guard when dispatch_ffn_combine supports larger EP sizes
-    # TODO: drop speculative method guard when dispatch_gmm_combine_decode supports w16a16
-    dispatch_ffn_combine_enable = get_ep_group().world_size <= 32
-    if num_tokens <= mc2_tokens_capacity:
-        fused_decode_enable = enable_fused_mc2
-        if enable_fused_mc2 == 1:
-            fused_decode_enable = enable_fused_mc2 and dispatch_ffn_combine_enable
-        elif enable_fused_mc2 == 2:
-            fused_decode_enable = (
-                enable_fused_mc2
-                and speculative_enable_dispatch_gmm_combine_decode(vllm_config)
-                and quant_type == "w8a8_dynamic"
-            )
-        return MoECommType.FUSED_MC2 if fused_decode_enable else MoECommType.MC2
+    if get_ascend_config().enable_fused_mc2 == 1:
+        # TODO: drop the EP-size guard when mega_moe supports larger EP size
+        if _MEGA_MOE_SUPPORTED:
+            if get_ep_group().world_size <= 64:
+                return MoECommType.FUSED_MC2
+        else:
+            if get_ep_group().world_size <= 32:
+                return MoECommType.FUSED_MC2
 
-    fused_prefill_enable = enable_fused_mc2
-    if enable_fused_mc2 == 1:
-        fused_prefill_enable = enable_fused_mc2 and dispatch_ffn_combine_enable
-    elif enable_fused_mc2 == 2:
-        fused_prefill_enable = False
-    return MoECommType.FUSED_MC2 if fused_prefill_enable else MoECommType.ALLTOALL
+    if num_tokens is None or num_tokens <= mc2_tokens_capacity:
+        return MoECommType.MC2
+
+    return MoECommType.ALLTOALL
 
 
 def _select_a5_moe_comm_method(
@@ -300,7 +306,7 @@ def _select_a5_moe_comm_method(
     return MoECommType.ALLTOALL
 
 
-def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_model=False) -> MoECommType | None:
+def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig) -> MoECommType | None:
     """Select the MoE communication method according to parallel settings,
     device generation, token count, and quantization.
 
@@ -319,7 +325,6 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
     Args:
         num_tokens (int): The number of tokens in the current batch.
         vllm_config (VllmConfig): Runtime configuration for the model.
-        is_draft_model (bool): Whether the model runs in MTP mode.
 
     Raises:
         ValueError: If the soc version is unsupported.
@@ -332,11 +337,6 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
 
     mc2_tokens_capacity = get_mc2_tokens_capacity()
     soc_version = get_ascend_device_type()
-    quant_type = getattr(
-        vllm_config.model_config.hf_text_config,
-        "moe_quantize",
-        getattr(vllm_config.model_config.hf_text_config, "quantize", None),
-    )
 
     if not vllm_config.parallel_config.enable_expert_parallel or get_ep_group().world_size == 1:
         moe_comm_type = MoECommType.ALLGATHER
@@ -346,9 +346,7 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
         moe_comm_type = _select_a3_moe_comm_method(
             num_tokens,
             vllm_config,
-            quant_type,
             mc2_tokens_capacity,
-            get_ascend_config().enable_fused_mc2,
         )
     elif soc_version == AscendDeviceType.A5:
         moe_comm_type = _select_a5_moe_comm_method(num_tokens, vllm_config, mc2_tokens_capacity)

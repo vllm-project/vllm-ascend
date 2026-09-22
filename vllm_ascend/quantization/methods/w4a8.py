@@ -24,8 +24,8 @@ import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 
-from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.ascend_config import _MEGA_MOE_SUPPORTED, get_ascend_config
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
@@ -551,13 +551,36 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
 
         topk_weights = topk_weights.to(x.dtype)
 
+        use_mega_moe = (
+            _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2
+            and get_ascend_config().enable_fused_mc2 == 1
+            and _MEGA_MOE_SUPPORTED
+        )
+        w1_scale_bias: list[torch.Tensor] | None
+        w2_scale_bias: list[torch.Tensor] | None
+
         if self.dynamic_eplb:
-            w1 = [i.view(torch.int32) for i in layer.w13_weight_list]
-            w1_scale = layer.w13_weight_scale_list
-            w2 = [i.view(torch.int32) for i in layer.w2_weight_list]
-            w2_scale = layer.w2_weight_scale_list
-            w1_scale_bias = layer.w13_scale_bias_list
-            w2_scale_bias = layer.w2_scale_bias_list
+            if use_mega_moe:
+                w1 = layer.w13_weight_list
+                w1_scale = [t.reshape(-1) for t in layer.w13_weight_scale_list]
+                w2 = layer.w2_weight_list
+                w2_scale = [t.reshape(-1) for t in layer.w2_weight_scale_list]
+                w1_scale_bias = [t.reshape(-1) for t in layer.w13_scale_bias_list]
+                w2_scale_bias = [t.reshape(-1) for t in layer.w2_scale_bias_list]
+            else:
+                w1 = [i.view(torch.int32) for i in layer.w13_weight_list]
+                w1_scale = layer.w13_weight_scale_list
+                w2 = [i.view(torch.int32) for i in layer.w2_weight_list]
+                w2_scale = layer.w2_weight_scale_list
+                w1_scale_bias = layer.w13_scale_bias_list
+                w2_scale_bias = layer.w2_scale_bias_list
+        elif use_mega_moe:
+            w1 = layer.cann_mega_moe_w13_weight_list
+            w1_scale = layer.cann_mega_moe_w13_weight_scale_list
+            w2 = layer.cann_mega_moe_w2_weight_list
+            w2_scale = layer.cann_mega_moe_w2_weight_scale_list
+            w1_scale_bias = layer.cann_mega_moe_w13_scale_bias_list
+            w2_scale_bias = layer.cann_mega_moe_w2_scale_bias_list
         else:
             w1 = [layer.w13_weight]
             w1_scale = [layer.w13_weight_scale]
@@ -721,8 +744,24 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         layer.w2_weight.data = self.pack_int4_to_int8(layer.w2_weight.data)
         layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
         layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
-        layer.w13_weight.data = self.pack_to_int32(layer.w13_weight.data)
-        layer.w2_weight.data = self.pack_to_int32(layer.w2_weight.data)
+        if get_ascend_config().enable_fused_mc2 == 1 and _MEGA_MOE_SUPPORTED:
+            layer.cann_mega_moe_w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
+            layer.cann_mega_moe_w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
+            layer.cann_mega_moe_w13_weight_scale_list = [
+                t.reshape(-1) for t in layer.w13_weight_scale.data.unbind(dim=0)
+            ]
+            layer.cann_mega_moe_w2_weight_scale_list = [
+                t.reshape(-1) for t in layer.w2_weight_scale.data.unbind(dim=0)
+            ]
+            layer.cann_mega_moe_w13_scale_bias_list = [
+                t.reshape(-1).to(torch.float32) for t in layer.w13_scale_bias.data.unbind(dim=0)
+            ]
+            layer.cann_mega_moe_w2_scale_bias_list = [
+                t.reshape(-1).to(torch.float32) for t in layer.w2_scale_bias.data.unbind(dim=0)
+            ]
+        else:
+            layer.w13_weight.data = self.pack_to_int32(layer.w13_weight.data)
+            layer.w2_weight.data = self.pack_to_int32(layer.w2_weight.data)
 
     def process_weights_after_loading_modelslim(self, layer):
         layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2).contiguous()
@@ -767,6 +806,32 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                 if hasattr(layer, "w2_scale_bias")
                 else None
             )
+            if get_ascend_config().enable_fused_mc2 == 1 and _MEGA_MOE_SUPPORTED:
+                if layer.w13_scale_bias_list is not None:
+                    layer.w13_scale_bias_list = [t.to(torch.float32) for t in layer.w13_scale_bias_list]
+                if layer.w2_scale_bias_list is not None:
+                    layer.w2_scale_bias_list = [t.to(torch.float32) for t in layer.w2_scale_bias_list]
+            del layer.w13_weight
+            del layer.w2_weight
+            del layer.w13_weight_scale
+            del layer.w2_weight_scale
+            del layer.w13_scale_bias
+            del layer.w2_scale_bias
+        elif get_ascend_config().enable_fused_mc2 == 1 and _MEGA_MOE_SUPPORTED:
+            layer.cann_mega_moe_w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
+            layer.cann_mega_moe_w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
+            layer.cann_mega_moe_w13_weight_scale_list = [
+                t.reshape(-1) for t in layer.w13_weight_scale.data.unbind(dim=0)
+            ]
+            layer.cann_mega_moe_w2_weight_scale_list = [
+                t.reshape(-1) for t in layer.w2_weight_scale.data.unbind(dim=0)
+            ]
+            layer.cann_mega_moe_w13_scale_bias_list = [
+                t.reshape(-1).to(torch.float32) for t in layer.w13_scale_bias.data.unbind(dim=0)
+            ]
+            layer.cann_mega_moe_w2_scale_bias_list = [
+                t.reshape(-1).to(torch.float32) for t in layer.w2_scale_bias.data.unbind(dim=0)
+            ]
             del layer.w13_weight
             del layer.w2_weight
             del layer.w13_weight_scale
