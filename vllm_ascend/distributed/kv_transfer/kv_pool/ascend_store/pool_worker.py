@@ -909,15 +909,20 @@ class KVPoolWorker:
         return get_layerwise_physical_layer_index(layer_name, base_layers)
 
     def _global_group_alloc_size(self, group_id: int) -> int:
+        gbl = self.group_block_len.get(group_id) or []
+        if not gbl:
+            return self.page_size_bytes
+        # Without PP the local entries describe the whole group. Sum them
+        # exactly: sparse indexer reuse gives different cache counts per layer,
+        # so averaging by layer and multiplying back can truncate the last copy.
+        if getattr(self, "pp_size", 1) == 1:
+            return sum(gbl)
         # GLOBAL region size: per-layer bytes x TOTAL model layers.
         # Under PP each stage sees a LOCAL group view (non-uniform splits make
         # the per-stage layer counts differ) but all stages plus the decode
         # side share ONE region per pool key, so the region must cover the
         # union of all writers. vllm groups layers by identical cache spec,
         # so per-layer bytes are uniform within a group.
-        gbl = self.group_block_len.get(group_id) or []
-        if not gbl:
-            return self.page_size_bytes
         # Backward compatibility: when total_layers is not set (unit tests,
         # partial init), fall back to the LOCAL sum (pre-PP behavior).
         total_layers = getattr(self, "total_layers", None)
