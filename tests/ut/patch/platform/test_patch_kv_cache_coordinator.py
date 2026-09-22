@@ -227,9 +227,7 @@ def test_producer_hit_cap_leaves_recompute_token(monkeypatch, max_length, expect
     coordinator = _make_coordinator(
         monkeypatch,
         use_eagle=True,
-        kv_transfer_config=_kv_transfer_config(
-            is_kv_producer=True, is_kv_consumer=False
-        ),
+        kv_transfer_config=_kv_transfer_config(is_kv_producer=True, is_kv_consumer=False),
     )
     coordinator.hash_block_size = 16
     assert coordinator._producer_hit_cap(max_length) == expected
@@ -240,9 +238,7 @@ def test_producer_hit_cap_is_transparent_on_consumer(monkeypatch, max_length):
     coordinator = _make_coordinator(
         monkeypatch,
         use_eagle=True,
-        kv_transfer_config=_kv_transfer_config(
-            is_kv_producer=False, is_kv_consumer=True
-        ),
+        kv_transfer_config=_kv_transfer_config(is_kv_producer=False, is_kv_consumer=True),
     )
     coordinator.hash_block_size = 16
     assert coordinator._producer_hit_cap(max_length) == max_length

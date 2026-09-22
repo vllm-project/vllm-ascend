@@ -51,25 +51,17 @@ def _update_committed_marker_cache_kernel(
             for j in tl.static_range(0, START_LEN):
                 expected = tl.load(reasoning_start_token_ids_ptr + j)
                 actual = tl.load(
-                    all_token_ids_ptr
-                    + req_state_idx * all_token_ids_stride
-                    + offs
-                    + j,
+                    all_token_ids_ptr + req_state_idx * all_token_ids_stride + offs + j,
                     mask=offs + j < total_len,
                     other=-1,
                 )
                 start_match = start_match & (actual == expected)
 
-            end_match = (offs < block_hi) & (
-                offs + NATURAL_END_LEN <= total_len
-            )
+            end_match = (offs < block_hi) & (offs + NATURAL_END_LEN <= total_len)
             for j in tl.static_range(0, NATURAL_END_LEN):
                 expected = tl.load(natural_reasoning_end_token_ids_ptr + j)
                 actual = tl.load(
-                    all_token_ids_ptr
-                    + req_state_idx * all_token_ids_stride
-                    + offs
-                    + j,
+                    all_token_ids_ptr + req_state_idx * all_token_ids_stride + offs + j,
                     mask=offs + j < total_len,
                     other=-1,
                 )
@@ -84,12 +76,7 @@ def _update_committed_marker_cache_kernel(
                 start_match = True
                 for j in tl.static_range(0, START_LEN):
                     expected = tl.load(reasoning_start_token_ids_ptr + j)
-                    actual = tl.load(
-                        all_token_ids_ptr
-                        + req_state_idx * all_token_ids_stride
-                        + i
-                        + j
-                    )
+                    actual = tl.load(all_token_ids_ptr + req_state_idx * all_token_ids_stride + i + j)
                     start_match = start_match & (actual == expected)
                 if start_match:
                     last_start = i
@@ -98,12 +85,7 @@ def _update_committed_marker_cache_kernel(
                 end_match = True
                 for j in tl.static_range(0, NATURAL_END_LEN):
                     expected = tl.load(natural_reasoning_end_token_ids_ptr + j)
-                    actual = tl.load(
-                        all_token_ids_ptr
-                        + req_state_idx * all_token_ids_stride
-                        + i
-                        + j
-                    )
+                    actual = tl.load(all_token_ids_ptr + req_state_idx * all_token_ids_stride + i + j)
                     end_match = end_match & (actual == expected)
                 if end_match:
                     last_end = i
@@ -230,7 +212,5 @@ def _thinking_budget_kernel(
     tl.store(logits_ptr + token_idx * logits_stride + force_token_id, 1.0e9)
 
 
-thinking_budget._update_committed_marker_cache_kernel = (
-    _update_committed_marker_cache_kernel
-)
+thinking_budget._update_committed_marker_cache_kernel = _update_committed_marker_cache_kernel
 thinking_budget._thinking_budget_kernel = _thinking_budget_kernel

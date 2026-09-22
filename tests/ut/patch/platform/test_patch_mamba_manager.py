@@ -2,6 +2,7 @@
 from types import SimpleNamespace
 
 from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
+
 from vllm_ascend.patch.platform.patch_mamba_manager import (
     AscendMambaManager,
     _allocate_new_blocks_after_growing_request,
@@ -71,17 +72,12 @@ def _allocation_manager(source, grown_block):
     manager.new_block_ids = []
     cow = SimpleNamespace(block_id=3, is_null=False)
     manager.block_pool = _BlockPool([[grown_block], [cow]])
-    manager._apply_cow = lambda request_id, idx, old, new: manager.req_to_blocks[
-        request_id
-    ].__setitem__(idx, new)
+    manager._apply_cow = lambda request_id, idx, old, new: manager.req_to_blocks[request_id].__setitem__(idx, new)
     return manager, cow
 
 
 def test_partial_hit_cow_runs_after_block_table_growth():
-    assert (
-        SingleTypeKVCacheManager.allocate_new_blocks
-        is _allocate_new_blocks_after_growing_request
-    )
+    assert SingleTypeKVCacheManager.allocate_new_blocks is _allocate_new_blocks_after_growing_request
     source = SimpleNamespace(block_id=2, is_null=False)
     manager, cow = _allocation_manager(source, source)
 

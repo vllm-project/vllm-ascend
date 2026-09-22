@@ -663,11 +663,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
 
         is_prefilling = common_attn_metadata.is_prefilling
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
-        if (
-            is_prefilling is None
-            or seq_lens_cpu is None
-            or num_accepted_tokens is None
-        ):
+        if is_prefilling is None or seq_lens_cpu is None or num_accepted_tokens is None:
             return spec_sequence_masks_cpu, num_accepted_tokens
 
         num_reqs = min(
@@ -691,9 +687,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         spec_sequence_masks_cpu = spec_sequence_masks_cpu.clone()
         spec_sequence_masks_cpu[fold_indices] = True
         num_accepted_tokens = num_accepted_tokens.clone()
-        num_accepted_tokens[fold_indices.to(num_accepted_tokens.device)] = (
-            self.num_spec + 1
-        )
+        num_accepted_tokens[fold_indices.to(num_accepted_tokens.device)] = self.num_spec + 1
         return spec_sequence_masks_cpu, num_accepted_tokens
 
     def build(  # type: ignore[override]

@@ -251,10 +251,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         kv_transfer_config = getattr(kv_cache_config, "kv_transfer_config", None)
         self.is_kv_producer = _is_kv_producer(kv_transfer_config)
         self.skips_eagle_block_drop = _skips_eagle_block_drop(kv_transfer_config)
-        self.has_state_groups = any(
-            isinstance(g.kv_cache_spec, MambaSpec)
-            for g in kv_cache_config.kv_cache_groups
-        )
+        self.has_state_groups = any(isinstance(g.kv_cache_spec, MambaSpec) for g in kv_cache_config.kv_cache_groups)
         for manager in self.single_type_managers:
             if isinstance(manager, MambaManager):
                 manager.is_kv_producer = self.is_kv_producer
