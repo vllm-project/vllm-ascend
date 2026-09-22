@@ -124,6 +124,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         max_num_batched_tokens: int | None = None,
         scheduler_block_size: int | None = None,
         num_prefill_lookahead: int = 0,
+        allow_partial_hash_hits: bool = True,
     ):
         # Keep pcp_world_size in this patched constructor for compatibility
         # with the upstream coordinator interface. PCP is rejected by the platform.
@@ -135,6 +136,10 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         self.kv_cache_config = kv_cache_config
         self.max_model_len = max_model_len
         self.enable_caching = enable_caching
+        if not vllm_version_is("0.29.0"):
+            # vLLM main (#54736) added allow_partial_hash_hits to the upstream
+            # coordinator interface (fine-grained hybrid prefix hits).
+            self.allow_partial_hash_hits = allow_partial_hash_hits
         # Fall back to `max_model_len` when unset so the recycling-aware
         # admission cap (vLLM PR #40946) collapses to the prior uncapped
         # behavior. The scheduler always supplies the real value at runtime.
@@ -498,33 +503,34 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         return tuple(hit_blocks), tuple(hit_lengths)
 
 
-def get_kv_cache_coordinator(  # type: ignore[misc]
-    kv_cache_config: KVCacheConfig,
-    max_model_len: int,
-    max_in_flight_tokens: int | None = None,
-    use_eagle: bool = False,
-    enable_caching: bool = True,
-    enable_kv_cache_events: bool = False,
-    dcp_world_size: int = 1,
-    pcp_world_size: int = 1,
-    hash_block_size: int = 0,
-    scheduler_block_size: int | None = None,
-    eagle_attn_layer_names: list[str] | None = None,
-    metrics_collector: KVCacheMetricsCollector | None = None,
-    max_num_batched_tokens: int | None = None,
-    num_prefill_lookahead: int = 0,
-) -> KVCacheCoordinator:
-    # Keep pcp_world_size in this patched function for upstream call
-    # compatibility; platform validation guarantees that it is one.
-    del pcp_world_size
-    token_budget = _select_kv_token_budget(max_model_len, max_in_flight_tokens, max_num_batched_tokens)
-    if _is_deepseek_v4_kv_cache_config(kv_cache_config):
-        return AscendHybridKVCacheCoordinator(  # type: ignore[call-arg]
-            kv_cache_config,
-            max_model_len,
-            use_eagle,
-            enable_caching,
-            enable_kv_cache_events,
+if vllm_version_is("0.29.0"):
+
+    def get_kv_cache_coordinator(  # type: ignore[misc]
+        kv_cache_config: KVCacheConfig,
+        max_model_len: int,
+        max_in_flight_tokens: int | None = None,
+        use_eagle: bool = False,
+        enable_caching: bool = True,
+        enable_kv_cache_events: bool = False,
+        dcp_world_size: int = 1,
+        pcp_world_size: int = 1,
+        hash_block_size: int = 0,
+        scheduler_block_size: int | None = None,
+        eagle_attn_layer_names: list[str] | None = None,
+        metrics_collector: KVCacheMetricsCollector | None = None,
+        max_num_batched_tokens: int | None = None,
+        num_prefill_lookahead: int = 0,
+    ) -> KVCacheCoordinator:
+        # Keep pcp_world_size in this patched function for upstream call
+        # compatibility; platform validation guarantees that it is one.
+        del pcp_world_size
+        token_budget = _select_kv_token_budget(max_model_len, max_in_flight_tokens, max_num_batched_tokens)
+        hybrid_kwargs = dict(
+            kv_cache_config=kv_cache_config,
+            max_model_len=max_model_len,
+            use_eagle=use_eagle,
+            enable_caching=enable_caching,
+            enable_kv_cache_events=enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
             pcp_world_size=1,
             hash_block_size=hash_block_size,
@@ -535,9 +541,53 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
             scheduler_block_size=scheduler_block_size,
             num_prefill_lookahead=num_prefill_lookahead,
         )
+        if _is_deepseek_v4_kv_cache_config(kv_cache_config):
+            return AscendHybridKVCacheCoordinator(**hybrid_kwargs)  # type: ignore[call-arg]
 
-    if len(kv_cache_config.kv_cache_groups) == 1 or not enable_caching:
-        orig_kwargs = dict(
+        if len(kv_cache_config.kv_cache_groups) == 1 or not enable_caching:
+            orig_kwargs = dict(
+                kv_cache_config=kv_cache_config,
+                max_model_len=max_model_len,
+                use_eagle=use_eagle,
+                enable_caching=enable_caching,
+                enable_kv_cache_events=enable_kv_cache_events,
+                dcp_world_size=dcp_world_size,
+                pcp_world_size=1,
+                hash_block_size=hash_block_size,
+                metrics_collector=metrics_collector,
+            )
+            orig_kwargs["max_in_flight_tokens"] = token_budget
+            orig_kwargs["scheduler_block_size"] = scheduler_block_size
+            orig_kwargs["num_prefill_lookahead"] = num_prefill_lookahead
+            return _orig_get_kv_cache_coordinator(**orig_kwargs)
+
+        return AscendHybridKVCacheCoordinator(**hybrid_kwargs)  # type: ignore[call-arg]
+
+
+else:
+
+    def get_kv_cache_coordinator(  # type: ignore[misc]
+        kv_cache_config: KVCacheConfig,
+        max_model_len: int,
+        max_in_flight_tokens: int | None = None,
+        use_eagle: bool = False,
+        enable_caching: bool = True,
+        enable_kv_cache_events: bool = False,
+        dcp_world_size: int = 1,
+        pcp_world_size: int = 1,
+        hash_block_size: int = 0,
+        scheduler_block_size: int | None = None,
+        eagle_attn_layer_names: list[str] | None = None,
+        metrics_collector: KVCacheMetricsCollector | None = None,
+        max_num_batched_tokens: int | None = None,
+        num_prefill_lookahead: int = 0,
+        allow_partial_hash_hits: bool = True,
+    ) -> KVCacheCoordinator:
+        # Keep pcp_world_size in this patched function for upstream call
+        # compatibility; platform validation guarantees that it is one.
+        del pcp_world_size
+        token_budget = _select_kv_token_budget(max_model_len, max_in_flight_tokens, max_num_batched_tokens)
+        hybrid_kwargs = dict(
             kv_cache_config=kv_cache_config,
             max_model_len=max_model_len,
             use_eagle=use_eagle,
@@ -546,29 +596,37 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
             dcp_world_size=dcp_world_size,
             pcp_world_size=1,
             hash_block_size=hash_block_size,
+            eagle_attn_layer_names=eagle_attn_layer_names,
             metrics_collector=metrics_collector,
+            max_in_flight_tokens=token_budget,
+            max_num_batched_tokens=token_budget,
+            scheduler_block_size=scheduler_block_size,
+            num_prefill_lookahead=num_prefill_lookahead,
         )
-        orig_kwargs["max_in_flight_tokens"] = token_budget
-        orig_kwargs["scheduler_block_size"] = scheduler_block_size
-        orig_kwargs["num_prefill_lookahead"] = num_prefill_lookahead
-        return _orig_get_kv_cache_coordinator(**orig_kwargs)
+        # vLLM main (#54736) added allow_partial_hash_hits.
+        hybrid_kwargs["allow_partial_hash_hits"] = allow_partial_hash_hits
+        if _is_deepseek_v4_kv_cache_config(kv_cache_config):
+            return AscendHybridKVCacheCoordinator(**hybrid_kwargs)  # type: ignore[call-arg]
 
-    return AscendHybridKVCacheCoordinator(  # type: ignore[call-arg]
-        kv_cache_config,
-        max_model_len,
-        use_eagle,
-        enable_caching,
-        enable_kv_cache_events,
-        dcp_world_size=dcp_world_size,
-        pcp_world_size=1,
-        hash_block_size=hash_block_size,
-        eagle_attn_layer_names=eagle_attn_layer_names,
-        metrics_collector=metrics_collector,
-        max_in_flight_tokens=token_budget,
-        max_num_batched_tokens=token_budget,
-        scheduler_block_size=scheduler_block_size,
-        num_prefill_lookahead=num_prefill_lookahead,
-    )
+        if len(kv_cache_config.kv_cache_groups) == 1 or not enable_caching:
+            orig_kwargs = dict(
+                kv_cache_config=kv_cache_config,
+                max_model_len=max_model_len,
+                use_eagle=use_eagle,
+                enable_caching=enable_caching,
+                enable_kv_cache_events=enable_kv_cache_events,
+                dcp_world_size=dcp_world_size,
+                pcp_world_size=1,
+                hash_block_size=hash_block_size,
+                metrics_collector=metrics_collector,
+            )
+            orig_kwargs["max_in_flight_tokens"] = token_budget
+            orig_kwargs["scheduler_block_size"] = scheduler_block_size
+            orig_kwargs["num_prefill_lookahead"] = num_prefill_lookahead
+            orig_kwargs["allow_partial_hash_hits"] = allow_partial_hash_hits
+            return _orig_get_kv_cache_coordinator(**orig_kwargs)
+
+        return AscendHybridKVCacheCoordinator(**hybrid_kwargs)  # type: ignore[call-arg]
 
 
 vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator = get_kv_cache_coordinator  # type: ignore[attr-defined]
