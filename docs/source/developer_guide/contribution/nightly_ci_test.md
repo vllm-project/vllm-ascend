@@ -9,6 +9,13 @@ By default, nightly CI tests run on a fixed schedule using pre-built nightly ima
 Contributors can self-service trigger these tests directly against their PR changes
 by combining a GitHub label with a comment command.
 
+!!! note
+
+    The `schedule_nightly_test_*.yaml` workflows do not declare a GitHub Actions
+    `schedule:` (cron) trigger; they are dispatched by external automation through
+    `workflow_dispatch`. See
+    [CI workflow triggers and the schedule_ prefix](./testing.md#ci-workflow-triggers-and-the-schedule_-prefix).
+
 ## How to Trigger
 
 ### 1. Post a comment

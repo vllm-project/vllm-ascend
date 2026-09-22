@@ -45,7 +45,12 @@ class SharedSource:
         self,
         _provider: ParamProvider,
     ) -> Sequence[Params]:
-        return self.params
+        layer_name = getattr(_provider, "layer_name", None)
+        return [
+            {k: v for k, v in param.items() if k != "layer_name"}
+            for param in self.params
+            if layer_name == param.get("layer_name")
+        ]
 
 
 _ACTIVE_GRAPH: ContextVar["UpdatableGraph | None"] = ContextVar("capturing_updatable_graph", default=None)

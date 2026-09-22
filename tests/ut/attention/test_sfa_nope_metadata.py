@@ -19,8 +19,9 @@ def _builder(block_size, a5, monkeypatch, rope_dim=0):
         get_topk_lengths=lambda positions: torch.where(positions == 0, 1, 7),
     )
     config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=block_size),
         model_config=SimpleNamespace(
-            max_model_len=4096,
+            max_model_len=max(4096, block_size + 2),
             get_head_size=lambda: 512,
             hf_text_config=SimpleNamespace(num_attention_heads=4, kv_lora_rank=512),
         ),
@@ -84,7 +85,7 @@ def _common(block_size):
     )
 
 
-@pytest.mark.parametrize("block_size", [128, 384, 2304])
+@pytest.mark.parametrize("block_size", [128, 384, 640, 2304, 4352])
 @pytest.mark.parametrize("a5", [False, True])
 def test_shared_sfa_nope_metadata_pages_lengths_and_draft_buffers(monkeypatch, block_size, a5):
     builder = _builder(block_size, a5, monkeypatch)
@@ -100,12 +101,8 @@ def test_shared_sfa_nope_metadata_pages_lengths_and_draft_buffers(monkeypatch, b
     assert type(first) is sfa.AscendSFAMetadata
     assert first.cos is None and first.sin is None and first.seq_lens_cpu is None
     assert first.num_prefills == 1 and first.num_decode_tokens == 1
-    uses_storage_pages = a5 or block_size <= 1024
-    expected_table = (
-        torch.tensor([[7, 2], [5, -1]], dtype=torch.int32) if uses_storage_pages else common.block_table_tensor
-    )
-    torch.testing.assert_close(first.block_table, expected_table)
-    assert first.block_size == (block_size if uses_storage_pages else 128)
+    torch.testing.assert_close(first.block_table, common.block_table_tensor)
+    assert first.block_size == 128
     address = first.block_table.data_ptr()
     second = builder.build(0, common)
     assert second.block_table.data_ptr() == address
@@ -125,22 +122,16 @@ def test_shared_sfa_nope_metadata_pages_lengths_and_draft_buffers(monkeypatch, b
         None
     ].split + torch.arange(builder.nope_states[None].split)
     builder.build(0, common)
-    page_multiplier = 1 if uses_storage_pages else builder.nope_states[None].split
+    page_multiplier = builder.nope_states[None].split
     assert first.block_table[0, 0] == 3 * page_multiplier
     assert draft.block_table[0, 0] == 7 * page_multiplier
 
 
-@pytest.mark.parametrize("block_size,page_padding_bytes", [(384, 95232), (2304, 0)])
-def test_a3_sparse_mla_preserves_storage_addresses(monkeypatch, block_size, page_padding_bytes):
+def test_a3_sparse_mla_preserves_storage_addresses(monkeypatch):
+    block_size = 2304
     builder = _builder(block_size, False, monkeypatch)
     metadata = builder.build(0, _common(block_size))
     cache = torch.arange(8 * block_size * 8, dtype=torch.float32).reshape(8, block_size, 1, 8)
-    if page_padding_bytes:
-        backing = torch.empty(8, block_size * 8 + page_padding_bytes // cache.element_size())
-        padded_cache = backing[:, : block_size * 8].view_as(cache)
-        padded_cache.copy_(cache)
-        cache = padded_cache
-        assert not cache.is_contiguous()
     query = torch.ones(3, 2, 8)
     indices = torch.tensor(
         [
@@ -169,6 +160,61 @@ def test_a3_sparse_mla_preserves_storage_addresses(monkeypatch, block_size, page
 
     monkeypatch.setattr(torch.ops._C_ascend, "npu_sparse_flash_attention", op, raising=False)
     torch.testing.assert_close(sparse_mla.sparse_mla(query, cache, indices.int(), metadata, 0.5), query)
+
+
+def test_a5_sparse_mla_splits_oversized_storage_pages(monkeypatch):
+    block_size = 4352
+    monkeypatch.setattr(
+        sparse_mla,
+        "sparse_flash_mla_metadata",
+        lambda **kwargs: torch.zeros(sparse_mla.SMLA_METADATA_SIZE, dtype=torch.int32),
+    )
+    builder = _builder(block_size, True, monkeypatch)
+    metadata = builder.build(0, _common(block_size))
+    cache = torch.arange(8 * block_size * 8, dtype=torch.float32).reshape(8, block_size, 1, 8)
+    query = torch.ones(3, 2, 8)
+    indices = torch.tensor(
+        [
+            [[0, 127, 128, block_size - 1, block_size]],
+            [[0, 128, block_size - 1, block_size, block_size + 1]],
+            [[0, -1, -1, -1, -1]],
+        ],
+        dtype=torch.int32,
+    )
+    pages = torch.tensor([[7, 2], [5, -1]])
+
+    def op(q, **kwargs):
+        viewed = kwargs["ori_kv"]
+        assert viewed.shape == (8 * (block_size // 128), 128, 1, 8)
+        assert viewed.data_ptr() == cache.data_ptr()
+        assert kwargs["ori_block_table"] is metadata.block_table
+        for token, request in enumerate([0, 0, 1]):
+            positions = indices[token, 0]
+            positions = positions[positions >= 0]
+            operator_pages = kwargs["ori_block_table"][request, positions // 128]
+            storage_pages = pages[request, positions // block_size]
+            actual = viewed[operator_pages, positions % 128]
+            expected = cache[storage_pages, positions % block_size]
+            torch.testing.assert_close(actual, expected)
+        return (q,)
+
+    monkeypatch.setattr(sparse_mla, "sparse_flash_mla", op)
+    assert metadata.block_size == 128
+    torch.testing.assert_close(sparse_mla.sparse_mla(query, cache, indices, metadata, 0.5), query)
+
+
+def test_sparse_mla_rejects_incompatible_storage_page_size():
+    cache = torch.empty(1, 384, 1, 8)
+    with pytest.raises(ValueError, match="384 is not divisible by operator block size 256"):
+        sparse_mla._view_cache_as_operator_pages(cache, 256)
+
+
+def test_sparse_mla_rejects_noncontiguous_oversized_storage_pages():
+    backing = torch.empty(2, 2304 * 8 + 1)
+    cache = backing[:, : 2304 * 8].view(2, 2304, 1, 8)
+    assert not cache.is_contiguous()
+    with pytest.raises(ValueError, match="must support a zero-copy operator-page view"):
+        sparse_mla._view_cache_as_operator_pages(cache, 128)
 
 
 def test_rope_sfa_keeps_rotary_tables_and_kernel_pages(monkeypatch):
@@ -246,6 +292,7 @@ def test_a5_smla_uses_original_cache_sorted_indices_and_stable_metadata(monkeypa
         block_table=torch.tensor([[2], [1]], dtype=torch.int32),
         smla_metadata=None,
         smla_topk_length=torch.full((2, 1), 3, dtype=torch.int32),
+        block_size=8,
     )
 
     def build(**kwargs):

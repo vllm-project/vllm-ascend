@@ -79,7 +79,7 @@ def test_npu_offloading_spec_uses_upstream_cpu_manager() -> None:
     )
     spec = NPUOffloadingSpec(_make_config({"cpu_bytes_to_use": 10 * aligned_bytes_per_chunk}))
 
-    assert (spec.num_blocks if vllm_version_is("0.28.0") else spec.num_chunks) == 10
+    assert (spec.num_blocks if vllm_version_is("0.29.0") else spec.num_chunks) == 10
     assert isinstance(spec.get_manager(), CPUOffloadingManager)
 
 

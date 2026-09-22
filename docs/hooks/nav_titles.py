@@ -127,7 +127,10 @@ TITLES = {
     "tutorials/models/GLM4.x.md": {"en": "GLM-4.x(4.5/4.6/4.7)", "zh": "GLM-4.x(4.5/4.6/4.7)"},
     "tutorials/models/GLM5.2.md": {"en": "GLM-5.2", "zh": "GLM-5.2"},
     "tutorials/models/GLM5.3.md": {"en": "GLM-5.3 (Experimental)", "zh": "GLM-5.3 (Experimental)"},
-    "tutorials/models/GLM5.3-Flash.md": {"en": "GLM-5.3-Flash", "zh": "GLM-5.3-Flash"},
+    "tutorials/models/GLM5.3-Flash.md": {
+        "en": "GLM-5.3-Flash (Experimental)",
+        "zh": "GLM-5.3-Flash (Experimental)",
+    },
     "tutorials/models/GLM5.md": {"en": "GLM-5 & GLM-5.1", "zh": "GLM-5 & GLM-5.1"},
     "tutorials/models/Hunyuan-A13B-Instruct.md": {"en": "Hunyuan-A13B-Instruct", "zh": "Hunyuan-A13B-Instruct"},
     "tutorials/models/Hy3-preview.md": {"en": "Hy3-preview", "zh": "Hy3-preview"},
@@ -160,6 +163,10 @@ TITLES = {
         "zh": "Qwen3-Dense(0.6B/1.7B/4B/8B/14B/32B)",
     },
     "tutorials/models/Qwen3-Next.md": {"en": "Qwen3-Next", "zh": "Qwen3-Next"},
+    "tutorials/models/Qwen3.8-Flash-Next.md": {
+        "en": "Qwen3.8-Flash-Next (Experimental)",
+        "zh": "Qwen3.8-Flash-Next（实验性支持）",
+    },
     "tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md": {
         "en": "Qwen3-Omni-30B-A3B-Thinking",
         "zh": "Qwen3-Omni-30B-A3B-Thinking",

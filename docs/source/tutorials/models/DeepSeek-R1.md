@@ -19,9 +19,11 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-- `DeepSeek-R1-W8A8`(Quantized version): require 1 Atlas 800 A3 (64GB × 16) nodes or 2 Atlas 800 A2 (64GB × 8) nodes. [Download model weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-R1-W8A8)
+|  Weight Version | Hardware Requirements | Download Links |
+|-----------------|-----------------------|----------------|
+| `DeepSeek-R1-W8A8`(Quantized version) |  1 Atlas 800 A3 (64GB × 16) nodes or 2 Atlas 800 A2 (64GB × 8) nodes| [ModelScope](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-R1-W8A8) |
 
-It is recommended to download the model weight to the shared directory of multiple nodes.
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
@@ -142,6 +144,7 @@ export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
+# Ensure the model path matches the directory recorded during download
 vllm serve vllm-ascend/DeepSeek-R1-W8A8 --additional-config '{"scheduler_config":{"enable_balance_scheduling":true}}' \
   --host 0.0.0.0 \
   --port 8000 \
@@ -245,6 +248,7 @@ Run the following scripts on two nodes respectively.
     export HCCL_INTRA_PCIE_ENABLE=1
     export HCCL_INTRA_ROCE_ENABLE=0
 
+    # Ensure the model path matches the directory recorded during download
     vllm serve vllm-ascend/DeepSeek-R1-W8A8 --additional-config '{"scheduler_config":{"enable_balance_scheduling":true}}' \
     --host 0.0.0.0 \
     --port 8000 \
@@ -290,6 +294,7 @@ Run the following scripts on two nodes respectively.
     export HCCL_INTRA_PCIE_ENABLE=1
     export HCCL_INTRA_ROCE_ENABLE=0
 
+    # Ensure the model path matches the directory recorded during download
     vllm serve vllm-ascend/DeepSeek-R1-W8A8 --additional-config '{"scheduler_config":{"enable_balance_scheduling":true}}' \
     --host 0.0.0.0 \
     --port 8000 \
@@ -375,7 +380,7 @@ curl http://<node0_ip>:<port>/v1/completions \
 
 Here are two accuracy evaluation methods.
 
-### Using AISBench
+### 7.1 Using AISBench
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
@@ -386,7 +391,7 @@ Here are two accuracy evaluation methods.
     | aime2024dataset | - | accuracy | gen | 80.00 |
     | gpqadataset | - | accuracy | gen | 72.22 |
 
-### Using Language Model Evaluation Harness
+### 7.2 Using Language Model Evaluation Harness
 
 As an example, take the `gsm8k` dataset as a test dataset, and run accuracy evaluation of `DeepSeek-R1-W8A8` in online mode.
 
@@ -406,11 +411,11 @@ As an example, take the `gsm8k` dataset as a test dataset, and run accuracy eval
 
 ## 8 Performance Evaluation
 
-### Using AISBench
+### 8.1 Using AISBench
 
 Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
-### Using vLLM Benchmark
+### 8.2 Using vLLM Benchmark
 
 Run performance evaluation of `DeepSeek-R1-W8A8` as an example.
 

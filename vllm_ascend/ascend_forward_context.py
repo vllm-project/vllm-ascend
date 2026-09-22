@@ -58,10 +58,9 @@ def _is_decode_only_node(vllm_config: VllmConfig) -> bool:
         return False
 
     scheduler_config = getattr(get_ascend_config(), "scheduler_config", None)
-    # Actual semantics of `recompute_scheduler_enable`:
-    # - Enabled: when preemption occurs on the decode node, the request is sent back
-    #     to the P node to redo prefill, so the decode node only ever decodes;
-    # - Disabled: prefill is executed locally on the decode node.
+    # RecomputeScheduler is enabled only on D. It first tries to preserve the
+    # preempted KV through offload; if that fails, the request is sent back to
+    # P to redo prefill instead of running prefill locally on D.
     return bool(getattr(scheduler_config, "recompute_scheduler_enable", False))
 
 
@@ -158,7 +157,13 @@ def set_ascend_forward_context(
         )
 
         forward_context.moe_comm_type = moe_comm_type
-        forward_context.moe_comm_method = get_moe_comm_method(moe_comm_type)
+        # A target and its drafter may own different expert shapes. Resolve
+        # model-owned communication state before graph execution; legacy
+        # models retain the original singleton implementation.
+        model_comm_methods = getattr(model_instance, "moe_comm_methods", None)
+        forward_context.moe_comm_method = (
+            model_comm_methods[moe_comm_type] if model_comm_methods is not None else get_moe_comm_method(moe_comm_type)
+        )
         forward_context.is_decode_only_node = _is_decode_only_node(vllm_config)
         forward_context.use_mega_moe = use_cann_megamoe(vllm_config)
         forward_context.draft_moe_quant_type = draft_moe_quant_type

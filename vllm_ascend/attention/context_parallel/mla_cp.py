@@ -8,6 +8,7 @@ import torch_npu
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import get_forward_context
 from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
@@ -27,9 +28,8 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.context_parallel.common_cp import (
     DCPImplMixin,
     DCPMetadataBuilderMixin,
-    get_dcp_local_seq_lens,
 )
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, AscendDCPMetadata
 from vllm_ascend.compilation.acl_graph import (
     get_draft_graph_params,
     get_draft_graph_prefill_params,
@@ -111,6 +111,26 @@ class AscendMlaDCPMetadataBuilder(
             self.block_size,
             self.cp_virtual_block_size,
         )
+
+    def _require_dcp_metadata(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+    ) -> AscendDCPMetadata:
+        if common_attn_metadata.context_parallel_metadata is None:
+            # MRV2 supplies common lengths instead of the V1 DCP metadata.
+            # Decode reads the current token too; prefill reads prior context.
+            context_lens = self.seq_lens.clone()
+            context_lens[self.num_decodes :] -= self.query_lens[self.num_decodes :]
+            common_attn_metadata.context_parallel_metadata = AscendDCPMetadata(
+                num_computed_tokens_of_dcp=get_dcp_local_seq_lens(
+                    context_lens,
+                    dcp_size=self.dcp_size,
+                    cp_kv_cache_interleave_size=self.cp_local_block_size,
+                ),
+                query_lens_cpu=self.query_lens,
+                max_query_len=common_attn_metadata.max_query_len,
+            )
+        return super()._require_dcp_metadata(common_attn_metadata)
 
     def build_chunked_metadata(
         self,
@@ -196,9 +216,10 @@ class AscendMlaDCPMetadataBuilder(
         history_lens = (local_lengths.sum(dim=-1) - query_lens).clamp(min=0)
         cp_history_seq_len: list[int] = get_dcp_local_seq_lens(
             history_lens,
-            self.dcp_size,
-            self.cp_local_block_size,
-        )[:, self.dcp_rank].tolist()
+            dcp_size=self.dcp_size,
+            dcp_rank=self.dcp_rank,
+            cp_kv_cache_interleave_size=self.cp_local_block_size,
+        ).tolist()
         # Preserve the base builder's cumulative TND query boundaries,
         # including graph padding; the old BSND path used per-request lengths.
         assert decode_metadata.actual_seq_lengths_q is not None
@@ -213,6 +234,8 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
+
+    can_return_lse_for_decode: bool = True
 
     @staticmethod
     def update_graph_params(

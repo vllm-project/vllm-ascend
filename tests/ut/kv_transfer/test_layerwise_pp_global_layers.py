@@ -23,7 +23,6 @@ def _meta() -> KeyMetadata:
     return KeyMetadata(
         model_name="DSV4",
         head_or_tp_rank=0,
-        pcp_rank=0,
         dcp_rank=0,
         pp_rank=0,
         kv_cache_group_id=0,

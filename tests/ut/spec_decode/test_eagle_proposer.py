@@ -1,7 +1,9 @@
 # ruff: noqa: E501
 import inspect
 import unittest
+from contextlib import nullcontext
 from dataclasses import dataclass
+from itertools import permutations
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -9,10 +11,18 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 import torch
-from vllm.config import CacheConfig, CompilationMode, CUDAGraphMode, VllmConfig, set_current_vllm_config
+from vllm.config import (
+    CacheConfig,
+    CompilationMode,
+    CUDAGraphMode,
+    VllmConfig,
+    get_current_vllm_config,
+    set_current_vllm_config,
+)
 from vllm.forward_context import BatchDescriptor
 from vllm.model_executor.models.deepseek_mtp import DeepSeekMultiTokenPredictor
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
+from vllm.v1.kv_cache_interface import SlidingWindowSpec
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
 
 import vllm_ascend.spec_decode.llm_base_proposer as llm_base_proposer
@@ -20,6 +30,7 @@ from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import clear_ascend_config, init_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
@@ -140,6 +151,116 @@ def assert_attr_equal(attr: str | tuple[str, Any, Any], expect: Any, actual: Any
         assert torch.equal(expect_value, actual_value), f"{attr_name} tensor mismatch"
     else:
         assert expect_value == actual_value, f"{attr_name} value mismatch"
+
+
+def test_load_model_retains_split_indexer_metadata_dependency():
+    proposer = AscendEagleProposer.__new__(AscendEagleProposer)
+    proposer.method = "mtp"
+    proposer.vllm_config = MagicMock()
+    proposer.maybe_eager_context = nullcontext()
+    proposer._get_model = MagicMock(return_value=MagicMock())
+    proposer.supports_mm_inputs = False
+    proposer.parallel_drafting = False
+    proposer.draft_window_size = None
+    proposer.sliding_window = None
+    proposer._maybe_share_embeddings = MagicMock()
+    proposer._maybe_share_topk_indices = MagicMock()
+    proposer._maybe_share_lm_head = MagicMock()
+
+    target_name = "model.layers.0.self_attn.attn"
+    draft_name = "model.layers.1.self_attn.attn"
+    indexer_name = "model.layers.1.self_attn.indexer.k_cache"
+    target_layer = MagicMock()
+    draft_layer = MagicMock()
+    indexer_layer = MagicMock()
+    draft_layer.get_kv_cache_spec.return_value = MagicMock()
+    indexer_layer.get_kv_cache_spec.return_value = MagicMock()
+    draft_layer.get_attn_backend.return_value.get_supported_kernel_block_sizes.return_value = [128]
+
+    target_model = MagicMock()
+    with (
+        patch.object(llm_base_proposer, "get_pp_group", return_value=SimpleNamespace(is_last_rank=True)),
+        patch.object(llm_base_proposer, "supports_multimodal", return_value=False),
+        patch.object(
+            llm_base_proposer,
+            "get_layers_from_vllm_config",
+            side_effect=[
+                {target_name: target_layer},
+                {
+                    target_name: target_layer,
+                    draft_name: draft_layer,
+                    indexer_name: indexer_layer,
+                },
+                {
+                    target_name: target_layer,
+                    draft_name: draft_layer,
+                    indexer_name: indexer_layer,
+                },
+            ],
+        ),
+        patch("vllm_ascend.ascend_config.get_ascend_config", return_value=SimpleNamespace(draft_window_size=None)),
+    ):
+        proposer.load_model(target_model)
+
+    assert proposer._draft_attn_layer_names == {draft_name, indexer_name}
+    assert proposer.attn_layer_names == [draft_name, indexer_name]
+
+
+@pytest.mark.parametrize("method", ["mtp", "eagle3"])
+@pytest.mark.parametrize("group_order", list(permutations(("main", "indexer", "tail"))))
+def test_cache_only_groups_use_main_backend_and_metadata(group_order, method):
+    proposer = AscendEagleProposer.__new__(AscendEagleProposer)
+    proposer.method = method
+    proposer.use_compress = False
+    proposer.dcp_size = 1
+    proposer.runner = MagicMock()
+    proposer.vllm_config = MagicMock()
+    proposer.update_stream = MagicMock()
+
+    main_name = "model.layers.1.self_attn.attn"
+    indexer_name = "model.layers.1.self_attn.indexer.k_cache"
+    tail_name = "model.layers.1.self_attn.indexer.tail_cache"
+    main_metadata = object()
+    indexer_metadata = object()
+    tail_metadata = object()
+
+    def get_main_impl():
+        assert get_current_vllm_config() is proposer.vllm_config
+        return object
+
+    main_group = MagicMock()
+    main_group.layer_names = [main_name]
+    main_group.kv_cache_spec = MagicMock()
+    main_group.backend.get_impl_cls.side_effect = get_main_impl
+    main_group.get_metadata_builder.return_value.build.return_value = main_metadata
+    indexer_group = MagicMock()
+    indexer_group.layer_names = [indexer_name]
+    indexer_group.kv_cache_spec = MagicMock(spec=AscendSFAIndexerCacheSpec)
+    indexer_group.backend.get_impl_cls.return_value = None
+    indexer_group.get_metadata_builder.return_value.build.return_value = indexer_metadata
+    tail_group = MagicMock()
+    tail_group.layer_names = [tail_name]
+    # KpoolTailSpec derives from SlidingWindowSpec, not the SFA indexer spec.
+    tail_group.kv_cache_spec = MagicMock(spec=SlidingWindowSpec)
+    tail_group.backend.get_impl_cls.return_value = None
+    tail_group.get_metadata_builder.return_value.build.return_value = tail_metadata
+    groups = {"main": main_group, "indexer": indexer_group, "tail": tail_group}
+    proposer.draft_attn_groups = [groups[name] for name in group_order]
+
+    assert proposer._is_cache_only_draft_attn_group(indexer_group)
+    assert proposer._is_cache_only_draft_attn_group(tail_group)
+
+    with patch.object(llm_base_proposer, "update_full_graph_params") as mock_update_graph:
+        proposer._update_full_graph_params(None, 1)
+    assert mock_update_graph.call_args.args[0] is main_group.backend
+
+    metadata_steps, primary_metadata = proposer.build_draft_attn_metadata(MagicMock(), 1, 1)
+    assert metadata_steps == [{indexer_name: indexer_metadata, tail_name: tail_metadata, main_name: main_metadata}]
+    assert primary_metadata is main_metadata
+
+    proposer.draft_attn_groups = [indexer_group, tail_group]
+    with pytest.raises(ValueError, match="no executable attention backend"):
+        proposer._get_primary_draft_attn_group()
 
 
 def test_prepare_inputs_padded_preserves_internal_seq_lens_cpu():
@@ -293,10 +414,11 @@ class TestEagleProposerInitialization(TestBase):
             self.assertTrue(proposer.use_cuda_graph)
 
             expected_max_num_tokens = proposer.max_num_tokens
+            expected_arange_size = max(proposer.max_batch_size, expected_max_num_tokens) + 1
             self.assertEqual(proposer.input_ids.shape, (expected_max_num_tokens,))
             self.assertEqual(proposer.positions.shape, (expected_max_num_tokens,))
             self.assertEqual(proposer.hidden_states.shape, (expected_max_num_tokens, 4096))
-            self.assertEqual(proposer.arange.shape, (expected_max_num_tokens,))
+            self.assertEqual(proposer.arange.shape, (expected_arange_size,))
 
     def test_initialization_eagle3_enforce_eager(self):
         self.vllm_config.speculative_config.method = "eagle3"
@@ -966,14 +1088,33 @@ class TestEagleProposerPropose:
             self.proposer.hidden_states = torch.zeros(8192, 7168, device=self.device, dtype=torch.bfloat16)
         else:
             self.proposer.hidden_states = torch.zeros(8192, 4096, device=self.device, dtype=torch.bfloat16)
+        main_layer_name = 'model.layers.36.self_attn.attn'
+        indexer_layer_name = 'model.layers.36.self_attn.indexer.k_cache'
         mock_attn_group = MagicMock()
         mock_builder = MagicMock()
         mock_attn_metadata = MagicMock()
         mock_builder.build.return_value = mock_attn_metadata
         mock_attn_group.get_metadata_builder.return_value = mock_builder
-        mock_attn_group.layer_names = ['model.layers.36.self_attn.attn']
+        mock_attn_group.layer_names = [main_layer_name]
         self.proposer.draft_attn_groups = [mock_attn_group]
-        self.proposer.attn_layer_names = ['model.layers.36.self_attn.attn']
+        self.proposer.attn_layer_names = [main_layer_name]
+        mock_indexer_builder = None
+        mock_indexer_metadata = None
+        mock_indexer_draft_metadata = None
+        if model_type == 'deepseek':
+            mock_indexer_group = MagicMock()
+            mock_indexer_builder = MagicMock()
+            mock_indexer_metadata = object()
+            mock_indexer_draft_metadata = object()
+            mock_indexer_builder.build.return_value = mock_indexer_metadata
+            mock_indexer_builder.build_for_drafting.return_value = mock_indexer_draft_metadata
+            mock_indexer_group.get_metadata_builder.return_value = mock_indexer_builder
+            mock_indexer_group.layer_names = [indexer_layer_name]
+            mock_indexer_group.kv_cache_spec = MagicMock(spec=AscendSFAIndexerCacheSpec)
+            mock_indexer_group.backend.get_impl_cls.return_value = None
+            mock_indexer_group.kv_cache_spec.block_size = 128
+            self.proposer.draft_attn_groups.append(mock_indexer_group)
+            self.proposer.attn_layer_names.append(indexer_layer_name)
         self.proposer.kernel_block_size = 128
         self.proposer.block_size = 128
         self.proposer._runnable = MagicMock()
@@ -1122,7 +1263,11 @@ class TestEagleProposerPropose:
 
         #run
         with (
-            patch.object(self.proposer, 'attn_update_stack_num_spec_norm', side_effect=side_effect),
+            patch.object(
+                self.proposer,
+                'attn_update_stack_num_spec_norm',
+                side_effect=side_effect,
+            ) as mock_update_metadata,
             set_current_vllm_config(self.vllm_config),
         ):
             self.proposer._propose(self.proposer.num_speculative_tokens,
@@ -1132,6 +1277,23 @@ class TestEagleProposerPropose:
                                 scheduler_output, num_scheduled_tokens, num_rejected_tokens_gpu,
                                 )
             self.assert_value_common_attn_metadata(captured_common_attn_metadata, flag_prefill_decode, model_type, graphmode)
+            if model_type == 'deepseek':
+                expected_followup_steps = self.proposer.num_speculative_tokens - 1
+                assert mock_update_metadata.call_count == expected_followup_steps
+                assert all(call.kwargs['attn_group'] is mock_attn_group for call in mock_update_metadata.call_args_list)
+                assert mock_indexer_builder is not None
+                assert mock_indexer_builder.build_for_drafting.call_count == expected_followup_steps
+
+                multi_steps_attn_metadata = self.proposer._runnable.call_args.kwargs['multi_steps_attn_metadata']
+                assert len(multi_steps_attn_metadata) == self.proposer.num_speculative_tokens
+                assert multi_steps_attn_metadata[0] == {
+                    main_layer_name: mock_attn_metadata,
+                    indexer_layer_name: mock_indexer_metadata,
+                }
+                for per_layer_metadata in multi_steps_attn_metadata[1:]:
+                    assert set(per_layer_metadata) == {main_layer_name, indexer_layer_name}
+                    assert per_layer_metadata[indexer_layer_name] is mock_indexer_draft_metadata
+                    assert per_layer_metadata[main_layer_name] is not mock_indexer_draft_metadata
 
     # give common_attn_metadata value
     def value_mock_common_attn_metadata(self, mock_common_attn_metadata, query_start_loc, query_start_loc_cpu, seq_lens, num_reqs,
@@ -1365,7 +1527,7 @@ class TestEagleProposerPropose:
         assert isinstance(
             inspect.getattr_static(
                 vllm.config.ModelConfig,
-                "uses_xdrope_dim" if vllm_version_is("0.28.0") else "mrope_num_dims",
+                "uses_xdrope_dim" if vllm_version_is("0.29.0") else "mrope_num_dims",
             ),
             property
         )
@@ -2176,7 +2338,7 @@ class TestRunMergedDraft(TestBase):
         actual = set(vllm.config.ModelConfig.__dataclass_fields__)
         missing = fields - actual
         assert not missing, f"Missing dataclass fields: {missing}"
-        rope_dims_field = "uses_xdrope_dim" if vllm_version_is("0.28.0") else "mrope_num_dims"
+        rope_dims_field = "uses_xdrope_dim" if vllm_version_is("0.29.0") else "mrope_num_dims"
         for field in ("uses_mrope", rope_dims_field, "use_mla", "is_multimodal_model"):
             assert isinstance(inspect.getattr_static(vllm.config.ModelConfig, field), property)
         for method in ("get_hidden_size", "get_inputs_embeds_size"):
