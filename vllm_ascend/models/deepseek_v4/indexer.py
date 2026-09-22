@@ -38,9 +38,9 @@ from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.models.deepseek_v4.attention import DeepseekV4IndexerCache
 from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
+from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
-from vllm_ascend.attention.dsa_attn_kv_plan import is_a5_bf16_kv_enabled
 from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
@@ -53,7 +53,6 @@ from vllm_ascend.quantization.methods import (
 )
 from vllm_ascend.utils import (
     npu_stream_switch,
-    vllm_version_is,
 )
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage, wait_for_device_metadata
 
@@ -111,22 +110,13 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
         super().__init__(head_dim, dtype, prefix, cache_config, compress_ratio)
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE):
-            self.dtype = torch.float8_e4m3fn
-            if not is_a5_bf16_kv_enabled(vllm_config):
-                vllm_config.cache_config.cache_dtype = "float8_e4m3fn"
-
         from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
         from vllm_ascend.models.layer.attention.layer import DSV4_BLOCK_SIZES
 
         storage_block_size = DSV4_BLOCK_SIZES[vllm_config.cache_config.block_size][0][0]
         # vLLM #51718 replaced MLAAttentionSpec.compress_ratio with
         # AttentionSpec.tokens_per_state on main.
-        ratio_kwargs = (
-            {"compress_ratio": self.compress_ratio}
-            if vllm_version_is("0.28.0")
-            else {"tokens_per_state": self.compress_ratio}
-        )
+        ratio_kwargs = {"tokens_per_state": self.compress_ratio}
         return AscendMLAAttentionSpec(
             block_size=storage_block_size * self.compress_ratio,
             num_kv_heads=1,
@@ -250,7 +240,7 @@ class AscendIndexerOps:
                 query_dequant_scale=prepared_query_scale,
                 key_dequant_scale=prepared_key_scale,
                 topk=self.index_topk,
-                quant_mode=2,
+                quant_mode=self.device_operator.get_dsa_indexer_quant_mode(),
                 cu_seqlens_q=metadata.qli_cu_seqlens_q,
                 seqused_k=metadata.qli_seqused_k,
                 cmp_residual_k=metadata.qli_cmp_residual_k,
@@ -341,10 +331,8 @@ class DeepseekV4Indexer(nn.Module):
             prefix=f"{prefix}.weights_proj",
             return_bias=False,
         )
-        k_dtype = (
-            torch.float8_e4m3fn
-            if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE)
-            else torch.int8
+        k_dtype = kv_cache_dtype_str_to_dtype(
+            self.vllm_config.attention_config.indexer_kv_dtype, vllm_config.model_config
         )
 
         if self.compress_ratio == 4:

@@ -36,8 +36,6 @@ def test_a3_uses_official_qli_and_preserves_custom_shared_kv() -> None:
     a3_ops = _custom_ops_for_soc(script, "ascend910_93")
 
     replaced_ops = {
-        "vllm_quant_lightning_indexer",
-        "vllm_quant_lightning_indexer_metadata",
         "quant_lightning_indexer_v2",
         "quant_lightning_indexer_v2_metadata",
     }

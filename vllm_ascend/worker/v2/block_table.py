@@ -29,6 +29,9 @@ from vllm_ascend.ops.triton.v2.block_table.compute_slot_mappings import (
 class AscendBlockTables(BlockTables):
     """Block table for Ascend NPUs."""
 
+    block_sizes_tensor: torch.Tensor
+    kernel_block_sizes_tensor: torch.Tensor
+
     def __init__(
         self,
         block_sizes: list[int],
@@ -40,6 +43,7 @@ class AscendBlockTables(BlockTables):
         cp_size: int = 1,
         cp_rank: int = 0,
         cp_interleave: int = 1,
+        slot_mapping_enabled: list[bool] | None = None,
     ):
         if kernel_block_sizes is None:
             kernel_block_sizes = block_sizes
@@ -53,6 +57,7 @@ class AscendBlockTables(BlockTables):
             cp_size,
             cp_rank,
             cp_interleave,
+            slot_mapping_enabled=slot_mapping_enabled,
         )
         self._triton_block_size = 1024
         # kernel_block_sizes determine the number of block-table entries
@@ -85,6 +90,7 @@ class AscendBlockTables(BlockTables):
         num_reqs = idx_mapping.shape[0]
         num_groups = self.num_kv_cache_groups
         slot_mappings = self.slot_mappings if out is None else out
+        slot_mapping_enabled = self.slot_mapping_enabled
         _compute_slot_mappings_kernel[(num_groups, num_reqs + 1)](
             slot_mappings.shape[1],
             idx_mapping,
@@ -102,5 +108,7 @@ class AscendBlockTables(BlockTables):
             PAD_ID=PAD_SLOT_ID,
             TRITON_BLOCK_SIZE=self._triton_block_size,
             BLOCK_TABLE_WINDOW_SIZE=self._block_table_window_size,
+            slot_mapping_enabled=slot_mapping_enabled,
+            HAS_SLOT_MAPPING_ENABLED=True,
         )
         return slot_mappings[:, :num_tokens_padded]

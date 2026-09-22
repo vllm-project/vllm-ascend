@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from contextlib import ExitStack
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
@@ -62,6 +63,24 @@ from vllm_ascend.worker.v2.pcp_manager import (
     AscendPCPAttentionContext,
     AscendPCPManager,
 )
+
+_DSA_C_ASCEND_OPS = (
+    "npu_sparse_attn_sharedkv",
+    "npu_sparse_attn_sharedkv_metadata",
+    "npu_kv_quant_sparse_attn_sharedkv",
+    "npu_kv_quant_sparse_attn_sharedkv_metadata",
+    "kv_compress_epilog",
+    "npu_scatter_nd_update_sk",
+)
+
+
+@pytest.fixture(autouse=True)
+def _stub_dsa_c_ascend_ops():
+    # CPU images do not register these custom ops on torch.ops._C_ascend.
+    with ExitStack() as stack:
+        for name in _DSA_C_ASCEND_OPS:
+            stack.enter_context(patch.object(torch.ops._C_ascend, name, create=True, new=MagicMock()))
+        yield
 
 
 def test_build_vision_bidirectional_swa_indices():
@@ -327,7 +346,7 @@ def test_draft_swa_metadata_rejects_rows_above_buffer_capacity():
 @pytest.mark.parametrize(
     ("compressor_ratio", "expected_stages"),
     [
-        (4, list(DeviceMetadataStage)),
+        (4, [DeviceMetadataStage.COMPRESSOR, DeviceMetadataStage.INDEXER, DeviceMetadataStage.ATTENTION]),
         (128, [DeviceMetadataStage.COMPRESSOR, DeviceMetadataStage.ATTENTION]),
     ],
 )
@@ -459,7 +478,18 @@ def test_full_graph_compressor_metadata_uses_capture_bucket_extent():
         "expected_stages",
     ),
     [
-        (4, False, 3, None, [DeviceMetadataStage.COMPRESSOR, *list(DeviceMetadataStage)]),
+        (
+            4,
+            False,
+            3,
+            None,
+            [
+                DeviceMetadataStage.COMPRESSOR,
+                DeviceMetadataStage.COMPRESSOR,
+                DeviceMetadataStage.INDEXER,
+                DeviceMetadataStage.ATTENTION,
+            ],
+        ),
         (
             128,
             False,
@@ -467,7 +497,18 @@ def test_full_graph_compressor_metadata_uses_capture_bucket_extent():
             None,
             [DeviceMetadataStage.COMPRESSOR, DeviceMetadataStage.COMPRESSOR, DeviceMetadataStage.ATTENTION],
         ),
-        (4, True, 4, 1, [DeviceMetadataStage.COMPRESSOR, *list(DeviceMetadataStage)]),
+        (
+            4,
+            True,
+            4,
+            1,
+            [
+                DeviceMetadataStage.COMPRESSOR,
+                DeviceMetadataStage.COMPRESSOR,
+                DeviceMetadataStage.INDEXER,
+                DeviceMetadataStage.ATTENTION,
+            ],
+        ),
     ],
 )
 def test_dsa_cp_device_metadata_tasks(
@@ -878,6 +919,10 @@ def test_dsa_cp_attention_waits_before_sas_consumer(compress_ratio: int, monkeyp
         "vllm_ascend.attention.context_parallel.dsa_cp.get_current_vllm_config",
         _make_vllm_config,
     )
+    monkeypatch.setattr(
+        "vllm_ascend.attention.context_parallel.dsa_cp.get_ascend_config",
+        lambda: SimpleNamespace(multistream_dsv4_dsa_overlap=False),
+    )
     impl = cast(AscendDSACPImpl, _make_impl(AscendDSACPImpl))
     impl.compress_ratio = compress_ratio
     impl.compressor_overlap = False
@@ -955,9 +1000,14 @@ def test_dsa_cp_attention_waits_before_sas_consumer(compress_ratio: int, monkeyp
     assert events == ["wait", "record", "attention"]
 
 
-@pytest.mark.parametrize("for_drafting", [False, True])
+@pytest.mark.parametrize(
+    ("for_drafting", "can_use_rope_cache"),
+    [(False, None), (False, False), (True, None)],
+    ids=["default-cache", "isolated-rope", "draft"],
+)
 def test_build_classifies_short_speculative_extends_as_decodes(
     for_drafting: bool,
+    can_use_rope_cache: bool | None,
 ):
     builder = _make_builder(compressor_ratio=1)
     builder.decode_threshold = 8
@@ -984,6 +1034,12 @@ def test_build_classifies_short_speculative_extends_as_decodes(
     builder.build_req_metadata = MagicMock(return_value=req_metadata)
     builder.build_req_metadata_for_drafting = MagicMock(return_value=req_metadata)
     builder.spec_slot_mapping = [torch.zeros((16, 2), dtype=torch.int32)]
+    rope_buffer = torch.ones(14)
+    shared_metadata: dict[str, Any] = {}
+
+    def get_rope(positions, use_cache=False, **kwargs):
+        cos = rope_buffer if use_cache else rope_buffer.clone()
+        return cos, torch.zeros_like(cos)
 
     with (
         patch(
@@ -998,7 +1054,7 @@ def test_build_classifies_short_speculative_extends_as_decodes(
         ),
         patch(
             "vllm_ascend.attention.dsa_v1.get_cos_and_sin_dsa",
-            return_value=(torch.ones(14), torch.zeros(14)),
+            side_effect=get_rope,
         ),
     ):
         if for_drafting:
@@ -1007,15 +1063,24 @@ def test_build_classifies_short_speculative_extends_as_decodes(
                 draft_index=1,
             )
         else:
+            cache_kwargs: dict[str, Any] = (
+                {} if can_use_rope_cache is None else {"can_use_rope_cache": can_use_rope_cache}
+            )
             metadata = builder.build(
                 common_prefix_len=0,
                 common_attn_metadata=common_attn_metadata,
-                common_ratio_to_sas_metadata={},
+                common_ratio_to_sas_metadata=shared_metadata,
+                **cache_kwargs,
             )
 
     assert metadata.num_decodes == 2
     assert metadata.num_decode_tokens == 14
     assert metadata.num_prefills == 0
+    if not for_drafting:
+        # A subsequent local RoPE build must not overwrite an isolated global result.
+        rope_buffer.zero_()
+        expected = torch.ones(14) if can_use_rope_cache is False else torch.zeros(14)
+        assert torch.equal(shared_metadata["cos"], expected)
 
 
 def test_build_req_metadata_preserves_zero_max_sequence_lengths():
@@ -1177,6 +1242,7 @@ def _make_req_metadata() -> AscendDSAReqMetadata:
 
 def _make_impl(
     impl_cls: type[AscendDSAImpl] = AscendDSAImpl,
+    **extra_kwargs,
 ) -> AscendDSAImpl:
     linear = MagicMock()
     with (
@@ -1216,6 +1282,7 @@ def _make_impl(
             eps=1e-6,
             attn_sink=None,
             swa_cache_layer=SimpleNamespace(prefix="swa_cache"),
+            **extra_kwargs,
         )
 
 
@@ -1346,6 +1413,8 @@ def test_forward_attention_routes_unified_req_metadata(
     )
     plan.add_dsa_sparse_attn_extra_kwargs.side_effect = add_extra_kwargs
 
+    transfer_window = MagicMock()
+    transfer_window.return_value.__enter__.side_effect = lambda: events.append("record")
     with (
         patch.object(
             DeviceOperator,
@@ -1370,10 +1439,7 @@ def test_forward_attention_routes_unified_req_metadata(
             "vllm_ascend.attention.dsa_v1.wait_for_device_metadata",
             side_effect=lambda *_: events.append("wait"),
         ),
-        patch(
-            "vllm_ascend.attention.dsa_v1.record_attention_compute_start",
-            side_effect=lambda: events.append("record"),
-        ),
+        patch("vllm_ascend.attention.dsa_v1.attention_transfer_window", transfer_window),
     ):
         layer_metadata = impl._get_layer_metadata(
             "layer",
@@ -1647,7 +1713,7 @@ def test_forward_attention_sets_compressed_kv_args(
         ) as update_compressed_caches,
         patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan),
         patch("vllm_ascend.attention.dsa_v1.notify_kv_cache_written"),
-        patch("vllm_ascend.attention.dsa_v1.record_attention_compute_start"),
+        patch("vllm_ascend.attention.dsa_v1.attention_transfer_window"),
     ):
         actual = impl._forward_attention(
             "layer",
@@ -1697,6 +1763,144 @@ def test_a5_bf16_o_proj_uses_transpose_batchmatmul():
     batched.assert_called_once()
     quant.assert_not_called()
     torch.testing.assert_close(output, projected.reshape(4, -1))
+
+
+def test_a5_bf16_keeps_multistream_overlap_enabled():
+    linear = MagicMock()
+    with (
+        patch(
+            "vllm_ascend.attention.dsa_v1.CVLinearWrapper",
+            side_effect=lambda layer: layer,
+        ),
+        patch(
+            "vllm_ascend.attention.dsa_v1.get_ascend_config",
+            return_value=SimpleNamespace(multistream_dsv4_dsa_overlap=True),
+        ),
+        patch(
+            "vllm_ascend.attention.dsa_v1.is_a5_bf16_kv_enabled",
+            return_value=True,
+        ),
+    ):
+        impl = AscendDSAImpl(
+            n_heads=1,
+            scale=1.0,
+            n_local_heads=1,
+            q_lora_rank=2,
+            o_lora_rank=2,
+            head_dim=2,
+            rope_head_dim=1,
+            nope_head_dim=1,
+            n_groups=1,
+            n_local_groups=1,
+            window_size=16,
+            compress_ratio=1,
+            vllm_config=SimpleNamespace(cache_config=SimpleNamespace(cache_dtype="bfloat16")),
+            wq_a=linear,
+            wq_b=linear,
+            wkv=linear,
+            q_norm=linear,
+            q_norm_without_weight=linear,
+            kv_norm=linear,
+            indexer=None,
+            compressor=None,
+            wo_a=linear,
+            wo_b=linear,
+            eps=1e-6,
+            attn_sink=None,
+            swa_cache_layer=SimpleNamespace(prefix="swa_cache"),
+        )
+    assert impl.multistream_dsv4_dsa_overlap is True
+
+
+def test_multistream_prolog_scatters_flat_swa_kv_on_aux_stream():
+    impl = _make_impl()
+    hidden_states = torch.randn(2, 4)
+    cos = torch.ones(2, 1, 1, 1)
+    sin = torch.zeros(2, 1, 1, 1)
+    swa_kv_cache = torch.zeros(2, 2, 1, 2)
+    slot_mapping = torch.tensor([0, 1], dtype=torch.int32)
+    q_out = torch.randn(2, 2)
+
+    aux_depth = {"n": 0}
+    scatter_inside_aux: list[bool] = []
+
+    class _StreamSwitch:
+        def __enter__(self):
+            aux_depth["n"] += 1
+            return self
+
+        def __exit__(self, *args):
+            aux_depth["n"] -= 1
+            return False
+
+    def fake_switch(_stream, enabled=True):
+        assert enabled
+        return _StreamSwitch()
+
+    def fake_scatter(*_args, **_kwargs):
+        scatter_inside_aux.append(aux_depth["n"] > 0)
+
+    impl.cv_wq_a.quantize = MagicMock(return_value=(hidden_states, None))
+    impl.cv_wq_a.matmul = MagicMock(return_value=hidden_states)
+    impl.cv_wkv.quantize = MagicMock(return_value=(hidden_states, None))
+    impl.cv_wkv.matmul = MagicMock(return_value=hidden_states)
+    impl.kv_norm = MagicMock(side_effect=lambda tensor: tensor)
+    impl.q_norm = MagicMock(side_effect=lambda tensor: tensor)
+    impl.cv_wq_b.matmul = MagicMock(return_value=q_out)
+    plan = _mock_dsa_kv_plan()
+    plan.dsa_kv_compress_scatter.side_effect = fake_scatter
+    stream = MagicMock()
+
+    with (
+        patch("vllm_ascend.attention.dsa_v1.torch.npu.current_stream", return_value=stream),
+        patch("vllm_ascend.attention.dsa_v1.dsv4_dsa_overlap_stream", return_value=stream),
+        patch("vllm_ascend.attention.dsa_v1.npu_stream_switch", side_effect=fake_switch),
+        patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan),
+        patch.object(torch.ops._C_ascend, "inplace_partial_rotary_mul", create=True),
+        patch.object(DeviceOperator, "apply_dsa_q_rms", side_effect=lambda query, *_args, **_kwargs: query),
+    ):
+        impl._mla_prolog_multistream(hidden_states, cos, sin, swa_kv_cache, slot_mapping)
+
+    assert scatter_inside_aux == [True]
+    plan.dsa_kv_compress_scatter.assert_called_once()
+    stream.wait_stream.assert_called()
+
+
+def test_indexer_overlap_keeps_aux_stream_for_flat_bf16_slots():
+    impl = _make_impl()
+    impl.compress_ratio = 4
+    impl.multistream_dsv4_dsa_overlap = True
+    impl.compressor = MagicMock(return_value=(torch.ones((1, 1, 4)), torch.zeros((1,), dtype=torch.int32)))
+    impl.indexer = MagicMock(return_value=torch.tensor([[[1, 2, 3]]], dtype=torch.int32))
+    compressor_metadata = AscendCompressorMetadata(
+        cache=cast(Any, object()),
+        state=cast(Any, object()),
+    )
+    layer_metadata = AscendDSALayerMetadata(
+        attention=cast(Any, object()),
+        swa=cast(Any, object()),
+        compressor=compressor_metadata,
+        indexer=AscendIndexerMetadata(compressor=compressor_metadata),
+    )
+    overlap_stream = object()
+
+    with (
+        patch("vllm_ascend.attention.dsa_v1.dsv4_dsa_overlap_stream", return_value=overlap_stream),
+        patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=_mock_dsa_kv_plan()),
+    ):
+        impl._maybe_update_compressed_caches_and_select_topk(
+            layer_name="model.layers.0.self_attn.attn",
+            hidden_states=torch.ones((1, 4)),
+            qr=torch.ones((1, 4)),
+            kv_cache=(torch.empty(0),),
+            layer_metadata=layer_metadata,
+            qr_pertoken_scale=None,
+            compress_kv_cache=torch.empty(0),
+            state_cache=torch.empty(0),
+        )
+
+    overlap_plan = impl.indexer.call_args.kwargs["overlap_plan"]
+    assert overlap_plan.aux_stream is overlap_stream
 
 
 def test_prepared_cache_rejects_multistream_before_cache_access():
@@ -1773,7 +1977,7 @@ def test_pcp_metadata_builds_from_manager_global_view():
         positions=torch.arange(5, dtype=torch.int64),
         attn_state=object(),
         is_dummy=False,
-        is_prefilling_np=np.array([True, True]),
+        is_prefilling_np=np.array([False, True]),
         idx_mapping=torch.tensor([0, 1], dtype=torch.int32),
         num_reqs_after_padding=2,
     )
@@ -1798,6 +2002,7 @@ def test_pcp_metadata_builds_from_manager_global_view():
     )
     gather_block_tables = MagicMock(return_value=global_block_tables)
     pcp_manager = AscendPCPManager.__new__(AscendPCPManager)
+    pcp_manager.dcp_world_size = 1
     pcp_manager._global_batch = global_batch
     pcp_manager._block_tables = SimpleNamespace(
         gather_block_tables=gather_block_tables,
@@ -1858,6 +2063,7 @@ def test_pcp_metadata_builds_from_manager_global_view():
     assert torch.equal(global_common.slot_mapping, global_slot_mapping)
     assert global_common.attn_state is global_batch.attn_state
     assert global_call.kwargs["num_actual_reqs"] == global_batch.num_reqs
+    assert global_call.kwargs["can_use_rope_cache"] is False
     assert global_call.kwargs["common_ratio_to_sas_metadata"] == {}
     assert build_local.call_args.args[2] is local_common
     assert build_local.call_args.kwargs["num_actual_reqs"] == 2
@@ -1997,6 +2203,7 @@ def test_pcp_graph_metadata_builds_fixed_decode_shape(is_dummy: bool):
     assert torch.equal(global_common.seq_lens, seq_lens)
     assert torch.equal(global_common.slot_mapping, expected_global_slots[0])
     assert global_call.kwargs["num_actual_reqs"] == num_actual_reqs
+    assert global_call.kwargs["can_use_rope_cache"] is True
     assert global_call.kwargs["common_ratio_to_sas_metadata"] == {}
 
     local_call = build_local.call_args

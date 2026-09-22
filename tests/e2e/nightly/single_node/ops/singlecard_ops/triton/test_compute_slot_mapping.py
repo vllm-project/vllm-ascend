@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Any
+
 import pytest
 import torch
 from vllm.triton_utils import triton
@@ -95,8 +97,9 @@ def test_compute_slot_mapping_npu_kernel_cp(cp_size: int, cp_rank: int, cp_inter
         **kernel_kwargs,
         BLOCK_TABLE_WINDOW_SIZE=block_table_window_size,
     )
+    ref_args: tuple[Any, ...] = kernel_args + (torch.ones(num_groups, dtype=torch.bool, device=device),)
     ref_compute_slot_mappings_kernel[grid](
-        *kernel_args,
+        *ref_args,
         ref_slot_mappings,
         ref_slot_mappings.stride(0),
         cp_rank,
@@ -128,6 +131,7 @@ def test_ascend_block_tables_compute_slot_mappings_out() -> None:
     block_tables.cp_interleave = 1
     block_tables._triton_block_size = 1024
     block_tables._block_table_window_size = 512
+    block_tables.slot_mapping_enabled = torch.tensor([True], dtype=torch.bool, device=device)
 
     out = torch.full((1, 12), 777, dtype=torch.int32, device=device)
     result = block_tables.compute_slot_mappings(

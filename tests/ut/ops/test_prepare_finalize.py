@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import torch
+from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 from vllm.model_executor.models.utils import sequence_parallel_chunk_impl
 
@@ -30,6 +31,14 @@ class TestPrepareAndFinalize(unittest.TestCase):
         self.moe_config.ep_size = 1
         self.moe_config.dp_group = MagicMock()
         self.moe_config.original_num_experts = 8
+        # Provide a current vllm config so the MoE pad helper takes its
+        # zero-block cat path (tp_size=1 covers every pad in these tests)
+        # instead of falling back to F.pad outside a worker context.
+        mock_vllm_config = MagicMock()
+        mock_vllm_config.parallel_config.tensor_parallel_size = 1
+        config_context = set_current_vllm_config(mock_vllm_config)
+        config_context.__enter__()
+        self.addCleanup(config_context.__exit__, None, None, None)
 
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_world_size", return_value=1)
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_rank", return_value=0)
@@ -195,55 +204,121 @@ class TestPrepareAndFinalize(unittest.TestCase):
         # Should concat back
         self.assertEqual(final_result.shape[0], 2)
 
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_pcp_group")
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_dp_group")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
-    def test_allgather_prepare_finalize(self, mock_get_forward_context, mock_get_dp_group):
-        # Mock forward context
-        mock_context = MagicMock()
-        mock_context.max_tokens_across_dp = 6
-        mock_get_forward_context.return_value = mock_context
+    def test_allgather_prepare_finalize(
+        self,
+        mock_get_forward_context,
+        mock_get_dp_group,
+        mock_get_pcp_group,
+    ):
+        hidden_states = torch.arange(12, dtype=torch.float32).view(3, 4)
+        router_logits = torch.arange(6, dtype=torch.float32).view(3, 2)
+        input_ids = torch.tensor([11, 22, 33])
 
-        # Create a proper mock for DP group with working all_gather
-        mock_dp_group = MagicMock()
+        cases = (
+            ("none", 1, 1, 3, 0),
+            ("dp", 2, 1, 4, 0),
+            ("pcp", 1, 2, 3, 4),
+            ("dp_pcp", 2, 2, 4, 8),
+        )
+        for name, dp_size, pcp_size, max_tokens_dp, max_tokens_pcp in cases:
+            with self.subTest(name=name):
+                mock_context = MagicMock()
+                mock_context.max_tokens_across_dp = max_tokens_dp
+                mock_context.max_tokens_across_pcp = max_tokens_pcp
+                mock_get_forward_context.return_value = mock_context
 
-        def mock_all_gather_func(tensor, dim):
-            # Simulate DP=2: repeat the tensor along the specified dimension
-            return torch.cat([tensor, tensor], dim=dim)
+                mock_dp_group = MagicMock()
+                mock_dp_group.all_gather.side_effect = lambda tensor, dim: torch.cat([tensor, tensor + 100], dim=dim)
+                mock_dp_group.reduce_scatter.side_effect = lambda tensor, dim, group_size=dp_size: tensor.chunk(
+                    group_size, dim=dim
+                )[0]
+                mock_get_dp_group.return_value = mock_dp_group
 
-        mock_dp_group.all_gather = mock_all_gather_func
-        mock_get_dp_group.return_value = mock_dp_group
+                mock_pcp_group = MagicMock()
+                mock_pcp_group.all_gather.side_effect = lambda tensor, dim: torch.cat([tensor, tensor + 1000], dim=dim)
+                mock_pcp_group.reduce_scatter.side_effect = lambda tensor, dim, group_size=pcp_size: tensor.chunk(
+                    group_size, dim=dim
+                )[0]
+                mock_get_pcp_group.return_value = mock_pcp_group
 
-        self.moe_config.dp_size = 2
-        self.moe_config.tp_size = 1
-        self.moe_config.pcp_size = 1
-        self.moe_config.ep_size = 1
-        self.moe_config.is_sequence_parallel = False
-        self.moe_config.dp_group = mock_dp_group
+                self.moe_config.dp_size = dp_size
+                self.moe_config.pcp_size = pcp_size
+                self.moe_config.is_sequence_parallel = False
+                self.moe_config.dp_group = mock_dp_group
+                layer = PrepareAndFinalizeWithAllGather(self.moe_config)
 
-        layer = PrepareAndFinalizeWithAllGather(self.moe_config)
+                prepared = layer.prepare(hidden_states, router_logits)
+                gathered_input_ids = layer.all_gather_input_ids(input_ids)
 
-        hidden_states = torch.randn(3, 8)
-        router_logits = torch.randn(3, 2)
+                expected_input_ids = input_ids
+                if dp_size > 1:
+                    expected_input_ids = torch.nn.functional.pad(
+                        expected_input_ids,
+                        (0, max_tokens_dp - expected_input_ids.numel()),
+                    )
+                    expected_input_ids = torch.cat([expected_input_ids, expected_input_ids + 100])
+                if pcp_size > 1:
+                    expected_input_ids = torch.nn.functional.pad(
+                        expected_input_ids,
+                        (0, max_tokens_pcp - expected_input_ids.numel()),
+                    )
+                    expected_input_ids = torch.cat([expected_input_ids, expected_input_ids + 1000])
 
-        prepare_output = layer.prepare(hidden_states, router_logits)
-        h_out = prepare_output.hidden_states
-        r_out = prepare_output.router_logits
-        padded_hidden_states_shape = prepare_output.padded_hidden_states_shape
+                self.assertEqual(prepared.hidden_states.shape[0], expected_input_ids.numel())
+                self.assertEqual(prepared.router_logits.shape[0], expected_input_ids.numel())
+                self.assertIsNone(prepared.padded_hidden_states_shape)
+                torch.testing.assert_close(gathered_input_ids, expected_input_ids)
 
-        # After all-gather with DP=2, should double the batch size
-        self.assertEqual(h_out.shape[0], 12)
-        self.assertEqual(r_out.shape[0], 12)
-        self.assertIsNone(padded_hidden_states_shape)
+                finalized = layer.finalize(
+                    prepared.hidden_states,
+                    reduce_results=False,
+                    padded_hidden_states_shape=prepared.padded_hidden_states_shape,
+                )
+                torch.testing.assert_close(finalized, hidden_states)
+                self.assertEqual(mock_dp_group.all_gather.call_count, 3 if dp_size > 1 else 0)
+                self.assertEqual(mock_dp_group.reduce_scatter.call_count, 1 if dp_size > 1 else 0)
+                self.assertEqual(mock_pcp_group.all_gather.call_count, 3 if pcp_size > 1 else 0)
+                self.assertEqual(mock_pcp_group.reduce_scatter.call_count, 1 if pcp_size > 1 else 0)
 
-        # Finalize with reduce_scatter
-        def mock_reduce_scatter_func(tensor, dim):
-            # Simulate reduce_scatter: take first half
-            return tensor[:3]
 
-        mock_dp_group.reduce_scatter = mock_reduce_scatter_func
-        result = layer.finalize(h_out, reduce_results=False, padded_hidden_states_shape=padded_hidden_states_shape)
-
-        self.assertEqual(result.shape[0], 3)
-
-        result_with_tp = layer.finalize(h_out, reduce_results=True)
-        self.assertEqual(result_with_tp.shape[0], 3)
+class TestSequenceParallelPCP(unittest.TestCase):
+    def test_ep_path_gathers_inputs_once_without_dp_pcp_collectives(self):
+        config = MagicMock()
+        config.is_sequence_parallel = True
+        config.pcp_size = 2
+        config.dp_size = 2
+        inputs = torch.arange(12).view(3, 4).float()
+        logits = torch.arange(6).view(3, 2).float()
+        input_ids = torch.tensor([11, 22, 33])
+        gathered_inputs = inputs.repeat(8, 1)
+        gathered_logits = logits.repeat(8, 1)
+        gathered_input_ids = input_ids.repeat(8)
+        with (
+            patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_dynamic_mx_quant_scale_alg", return_value=0),
+            patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_pcp_group") as pcp_group,
+            patch("vllm_ascend.ops.fused_moe.prepare_finalize._EXTRA_CTX", max_tokens_across_pcp=0),
+            patch(
+                "torch.ops.vllm.maybe_all_gather_and_maybe_unpad",
+                side_effect=[gathered_inputs, gathered_logits, gathered_input_ids],
+            ) as gather,
+            patch("torch.ops.vllm.maybe_pad_and_reduce", return_value=inputs) as reduce,
+        ):
+            pcp_group.return_value.all_gather.side_effect = lambda x, dim: x.repeat(2, 1)
+            layer = PrepareAndFinalizeWithAllGather(config)
+            result = layer.prepare(inputs, logits)
+            result_input_ids = layer.all_gather_input_ids(input_ids)
+            self.assertTrue(torch.equal(result.hidden_states, gathered_inputs))
+            self.assertTrue(torch.equal(result.router_logits, gathered_logits))
+            self.assertTrue(torch.equal(result_input_ids, gathered_input_ids))
+            output = layer.finalize(result.hidden_states, reduce_results=False)
+            self.assertTrue(torch.equal(output, inputs))
+            self.assertEqual(gather.call_count, 3)
+            torch.testing.assert_close(gather.call_args_list[0].args[0], inputs)
+            torch.testing.assert_close(gather.call_args_list[1].args[0], logits)
+            torch.testing.assert_close(gather.call_args_list[2].args[0], input_ids)
+            reduce.assert_called_once_with(gathered_inputs)
+            config.dp_group.all_gather.assert_not_called()
+            pcp_group.assert_not_called()
