@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 import torch
 import torch_npu
-import vllm.v1.worker.sentinel.gpu_worker_sentinel as _gpu_worker_sentinel
+from vllm.distributed.eplb.eplb_state import _commit_eplb_maps
 from vllm.distributed.parallel_state import (
     get_dp_group,
     get_ep_group,
@@ -17,6 +17,11 @@ from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
 from vllm.v1.fault_tolerance.utils import FaultToleranceRequest
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
+from vllm.v1.worker.sentinel.eplb_redistribute import (
+    mark_dead_expert_slots_inplace,
+    rebuild_model_expert_maps,
+    redistribute_expert_placement,
+)
 from vllm.v1.worker.sentinel.gpu_worker_sentinel import (
     WorkerSentinel as GPUWorkerSentinel,
 )
@@ -30,16 +35,11 @@ from vllm_ascend.worker.sentinel.eplb_redistribute import (
     reload_experts_from_disk,
 )
 
-# Route the reload call inside the inherited upstream
-# GPUWorkerSentinel._redistribute_experts to the Ascend implementation: the
-# upstream reloader writes via model.load_weights, which cannot produce
-# Ascend's runtime expert layout (transpose / NZ / per-slot lists / quant
-# scales). The signatures match (a set of (layer, logical) reassignments), so
-# super() flows pick up the Ascend reloader without any upstream change.
-_gpu_worker_sentinel.reload_experts_from_disk = reload_experts_from_disk
-
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu_worker import Worker
+
+
+_sentinel: "WorkerSentinel | None" = None
 
 
 def fault_barrier_wrapper(func: Callable):
@@ -55,23 +55,30 @@ def fault_barrier_wrapper(func: Callable):
     """
 
     def wrapped(self, *args, **kwargs):
-        sentinel = getattr(self, "worker_sentinel", None)
-        if sentinel is not None and sentinel.worker_faulted:
+        sentinel = _sentinel
+        if sentinel is None:
+            return func(self, *args, **kwargs)
+        if sentinel.worker_faulted:
             return EMPTY_MODEL_RUNNER_OUTPUT
         try:
             return func(self, *args, **kwargs)
         except SystemExit:
             raise
         except Exception as exc:
-            if sentinel is not None:
-                sentinel.worker_faulted = True
-                logger.warning("[FT] Quarantining worker %d after fault: %s", self.rank, exc)
-                try:
-                    sentinel.reset_device()
-                except Exception:
-                    logger.exception("[FT] self device reset failed on worker %d.", self.rank)
-                return EMPTY_MODEL_RUNNER_OUTPUT
-            raise
+            sentinel.worker_faulted = True
+            logger.warning(
+                "[FT] Quarantining %s after fault: %s",
+                getattr(self, "rank", "worker"),
+                exc,
+            )
+            try:
+                sentinel.reset_device()
+            except Exception:
+                logger.exception(
+                    "[FT] self device reset failed on %s.",
+                    getattr(self, "rank", "worker"),
+                )
+            return EMPTY_MODEL_RUNNER_OUTPUT
 
     return wrapped
 
@@ -85,11 +92,13 @@ class WorkerSentinel(GPUWorkerSentinel):
     """
 
     def __init__(self, worker: "Worker", device: torch.device):
+        global _sentinel
         self.device = device
         self.worker = worker
         # Set once a device-touching method faults, to keep this worker off the
         # device until FT recovery rebuilds the groups.
         self.worker_faulted = False
+        _sentinel = self
 
     def query_mask(self, ft_request: FaultToleranceRequest) -> dict:
         """Report the dead-rank mask (upstream convention: 0=live, 1=dead)."""
@@ -167,15 +176,38 @@ class WorkerSentinel(GPUWorkerSentinel):
     def _redistribute_experts(self, dead_ep_ranks: set[int]) -> None:
         """Redistribute experts onto the surviving slots after scale-down.
 
-        Reuses the upstream redistribution (mark dead slots, steal spare slots
-        for the missing experts, rebuild the logical maps and reload reassigned
-        weights through the Ascend reloader patched into the shared flow). On
-        top of that, refreshes the Ascend kernel-facing routing tables into the
-        densified id space and shrinks the MC2 physical-expert width.
+        Overrides the upstream flow so reassigned weights reload through the
+        Ascend reloader: the upstream reloader writes via ``model.load_weights``,
+        which cannot produce Ascend's runtime expert layout (transpose / NZ /
+        per-slot lists / quant scales). The shared redistribution steps (mark
+        dead slots, steal spare slots, rebuild the logical maps) are kept; on
+        top of that, refreshes the Ascend kernel-facing routing tables into
+        the densified id space and shrinks the MC2 physical-expert width.
         """
-        super()._redistribute_experts(dead_ep_ranks)
-
+        model_runner = self.worker.model_runner
         eplb_model_state = self._eplb_model_state()
+
+        p2l = eplb_model_state.physical_to_logical_map
+        num_logical = eplb_model_state.logical_replica_count.shape[1]
+        ep_world_size = get_ep_group().world_size
+        num_local_experts = p2l.shape[1] // ep_world_size
+
+        mark_dead_expert_slots_inplace(p2l, dead_ep_ranks, num_local_experts)
+        reassignments = redistribute_expert_placement(p2l, num_logical, num_local_experts)
+        # p2l was updated in place; the commit derives l2p/lrc from it.
+        _commit_eplb_maps(eplb_model_state, p2l.cpu())
+        rebuild_model_expert_maps(model_runner.model, p2l, num_local_experts)
+
+        if reassignments:
+            reload_experts_from_disk(model_runner.model, self.worker.vllm_config, reassignments)
+
+        logger.info(
+            "[FT] Expert redistribution: num_logical=%d, ep_world_size=%d, reassignments=%d",
+            num_logical,
+            ep_world_size,
+            len(reassignments),
+        )
+
         # Propagate the new placement into the Ascend routing tables (in-place,
         # so captured graphs keep pointing at valid storage), then renumber
         # their ids into the densified space for the MC2 kernels.
