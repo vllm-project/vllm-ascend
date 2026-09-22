@@ -38,11 +38,13 @@ msprof op（PipeUtilization，2048×7168 bf16，Block Dim 40）：
 
 ## 轮次计划
 
-- Round 1: 省掉上述 2 遍 vec pass（纯减 vec 工作，无流水改动）
-- Round 2: bf16 路径单舍入重构（对齐 fp16 路径：x*rstd/gamma 全在 bf16 域做，最后 widen 一次）
-  → 契约 `y_fp32 == y.float()`（atol=0）保持，容差 vs npu_rms_norm 2e-2 内
-- Round 3: 行间双缓冲流水（MTE2 预取下一行 / MTE3 异步落盘，消除 pipe 空转）
-- Round 4: 视 profile 决定（DataCopyPad→DataCopy 对齐路径 / reduce 结构 / 收尾全量回归）
+- Round 1: 省掉上述 2 遍 vec pass（纯减 vec 工作，无流水改动）✅
+- Round 2: bf16 路径单舍入重构 → **被硬件阻断**（910B 无 bf16 元素级向量算子，见下文
+  详设 Round 2 的"硬件约束"）；改为行间双缓冲流水（MTE2 预取 / MTE3 异步落盘）。
+  首次实现因序言槽位错位 + FetchEventID 单在途约束两个 bug 挂死，**已回退 Round 1**，
+  修复方案已记录，待重试
+- Round 3: 视 Round 2 重试结果决定（reduce 结构 / 小 shape 单核串行链 / 收尾全量回归）
+- Round 4: 视 profile 收尾（候选池：DataCopyPad→对齐 DataCopy、小 shape 延迟）
 
 ## 测量方法一致性验证（NPUGraph benchmark vs msprof op）
 
@@ -86,25 +88,45 @@ vec busy ≈ 59.5µs ÷ 11 遍 ≈ 5.4µs/遍（2048×7168，profiler 口径 90.
   7168×16B = 112KB < UB−1KB（910B UB=192KB）✓；fp16 路径不受影响。
 - 预期：11→9 遍 ≈ -18% vec → 2048 tokens ~102→~89µs。
 
-### Round 2：bf16 单舍入重构（再省 1 遍 pass，有明确定义的数值变化）
+### Round 2：行间双缓冲流水（首次实现已回退，待修复后重试）
 
-- bf16 分支改为与 fp16 路径同构（在低精度域做 scale/mul）：
-  `Muls(x_local, x_local, rstd)`（bf16）→ `Mul(x_local, gamma_local)`（bf16）→ widen。
-- 移除 `gamma_fp32_buf_`，tiling 回到 12B/col。
-- 数值影响：y 由 bf16(x·rstd·γ)（单舍入）变为 bf16(bf16(x·rstd)·γ)（双舍入），
-  多 ≤0.5 ulp（~0.4% 相对），golden 容差 2e-2 覆盖；fp16 路径现状本就是双舍入（行为对齐）。
-  `y_fp32 == y.float()` 精确契约不变（仍从最终 bf16 y widen）。
-- 预期：9→8 遍 → 2048 tokens ~89→~83µs。
+**硬件约束（重要发现，2026-09-22）**：本 CANN 版本（9.1.0，dav_c220 = 910B）的
+基础向量算子对 bfloat16 **没有**元素级支持：
 
-### Round 3：行间双缓冲流水（消除 pipe 空转）
+- `Muls<bf16>`：intrinsic 仅 half/float/int16/int32（`dav_c100/kernel_operator_vec_binary_scalar_impl.h`）
+- `Mul<bf16>`：`MulImpl` 断言 `SupportType<T, half, float, int16_t, int32_t>`（`dav_c220/kernel_operator_vec_binary_impl.h`）
+- `Duplicate<bf16>`：`CheckDuplicateSupportedType` 同样不含 bf16
 
-- 现状：每行 MTE2→V→MTE3 串行，等 load、等 store。
-- 方案：x 载入改 `TQue<VECIN, depth=2>` 双缓冲，输出对 (y, y_fp32) 经
-  `TQue<VECOUT, depth=2>` 异步落盘；EnQue/DeQue 自动管理 MTE2_V/V_MTE3/MTE3_MTE2 事件，
-  行 i+1 的 MTE2 与行 i 的 V/MTE3 重叠。
-- UB 预算（Round 2 后无 gamma_fp32）：x×2 28K + gamma 14K + x_fp32×2 56K + work 28K
-  + reduce 0.25K ≈ 126KB ✓
-- 预期：逼近 max(vec, mte) 带宽下限，2048 tokens ~83→~72-76µs（累计约 -28%）。
+因此 bf16 数据的所有元素级数学只能在 fp32 域做（这正是原实现的写法），
+原计划的"bf16 域单舍入重构"（对齐 fp16 路径）在本硬件上**不可实现**，
+Round 2 改为原 Round 3 的双缓冲流水方案。
+
+**首次实现结果**：编译通过，但精度测试失败 —— 小 shape（4 tokens）输出 NaN，
+大 shape 挂死（`vector core timeout`，AICore ~95% 空转）。定位到两个 bug 后
+**代码已回退到 Round 1**（`git checkout`，并重编译安装 Round 1 版本，精度复验通过）：
+
+1. **序言预取槽位错位**（→ NaN）：序言把第 `begin+k` 行加载到 `x_buf_[k]`，
+   而行处理按奇偶槽位 `x_buf_[begin&1]` 取数 —— begin 为奇数的核心读到
+   未初始化数据，产生 NaN。应为 `x_buf_[(row_begin_+k)&1]`。
+2. **事件 ID 分配模型**（→ 挂死）：`TPipe::FetchEventID` 是按方向从占用位图
+   找"第一个空闲 ID"（`kernel_tpipe_impl.h:489`，`sff0(eventOccupy)`），
+   **连续两次 fetch 之间没有 Set/Wait 时返回同一个 ID**。乒乓设计要求每个
+   方向同时 2 个在途标志，此约束不成立 → 事件配对塌缩 → 死锁。
+   （小 shape 没挂死而只出 NaN，正是因为同 ID 折叠后 wait 全部立即通过。）
+
+**重试方案要点**（Round 2 二次尝试时按此执行）：
+
+- 事件编排必须满足"每个方向严格单在途标志"（set→wait→set→wait 顺序复用），
+  乒乓改为"提前发起、延迟等待"，不依赖双 ID；或先实测确认 eventOccupy 的
+  置位/释放时机（大概率在 SetFlag/WaitFlag 执行时）再决定能否用双 ID。
+- 序言预取用行的奇偶槽位；循环内预取 row+2（row+1 已由序言/上轮加载）。
+- UB 预算 24B/col（bf16，含 gamma_fp32）+256B reduce ≈ 168.3KB ✓；
+  out_fp32 槽兼作该行 reduce 累加器（平方项 reduce 后即死，widen 前重写同槽）。
+- tiling BYTES_PER_COLUMN 按 dtype 分档 20（fp16）/24（bf16）；7168 ✓，
+  最大 hidden 收缩到 ~8.1K/~9.8K（唯一调用方 DeepSeek v4/v41 hidden=7168 无影响）。
+- 预期：消除 ~25µs 行间串行空转（2048 tokens），91→~65-70µs。
+
+### Round 3：视 Round 2 重试后的 profile 决定
 
 ### Round 4：视 profile 收尾（候选池）
 
@@ -116,9 +138,8 @@ vec busy ≈ 59.5µs ÷ 11 遍 ≈ 5.4µs/遍（2048×7168，profiler 口径 90.
 ### 风险与回退
 
 - 每轮独立提交、独立可验证；精度门槛 = `test_rms_norm_cast.py` 8 用例全过（零回归）。
-- Round 2 的双舍入变化是唯一数值行为改动，单独成轮便于归因/回退。
 - tiling 12→16B/col 使支持的最大 hidden 从 ~16.3K 收缩到 ~12.2K（当前唯一调用方
-  DeepSeek v4/v41 hidden=7168，无影响）；Round 2 后恢复。
+  DeepSeek v4/v41 hidden=7168，无影响）。
 
 ## 轮次结果记录
 
@@ -148,6 +169,25 @@ fp16 提升小于 bf16：fp16 路径只吃到 inv 折叠（无 gamma cast 可省
   Round 3（双缓冲流水）收益空间明确。
 - **教训**：首轮构建因 build 树 src_copy 不重编（见"构建陷阱"）空跑一轮测的是旧 kernel；
   修复后实测生效。
+
+### Round 2 首次尝试（2026-09-22）：行间双缓冲流水 — ⏸️ 已回退，待重试
+
+目标：吃掉 profile 中 ~25µs 的行间串行空转（行首等 load、行尾等 store）。
+
+过程：按奇偶槽位乒乓重写 ProcessRow（x 双缓冲 + out_fp32 双缓冲 + 单 y 缓冲 +
+手工 MTE2_V/V_MTE2/MTE3_V/V_MTE3 事件），两个 tiling key 编译通过、包构建成功。
+
+结果：**精度测试失败，未进入性能测量**——
+- 4 tokens（rows_per_core=1）：跑完但输出 NaN；
+- pytest 大 shape 用例：挂死 `rtDeviceSynchronizeWithTimeout ... vector core timeout`，
+  AICore ~95% 空转（典型 wait_flag 死循环）。
+
+根因（详见上方"详设 Round 2"）：
+1. 序言预取把行加载到 `x_buf_[k]` 而非奇偶槽位 `x_buf_[(begin+k)&1]` → 错行/未初始化数据 → NaN；
+2. `FetchEventID` 连续 fetch（中间无 Set/Wait）返回同一 ID → 双在途标志设计塌缩 → 死锁。
+
+处置：`git checkout` 回退 kernel + tiling 到 Round 1 提交（09fdb4f03），重编译安装后
+精度复验通过；修复方案（单在途事件编排 + 槽位修正 + row+2 预取）已写入详设，待重试。
 
 ## 每轮工作流（精度是硬门槛）
 
