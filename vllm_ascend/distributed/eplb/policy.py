@@ -97,14 +97,8 @@ class AscendV2EplbPolicy:
         num_ranks: int,
     ) -> None:
         """Ensure copies of one logical expert reside on distinct EP ranks."""
-        if (
-            mapping.ndim != 2
-            or num_ranks <= 0
-            or mapping.shape[1] % num_ranks != 0
-        ):
-            raise ValueError(
-                "Physical experts must be a 2-D tensor divisible by EP ranks"
-            )
+        if mapping.ndim != 2 or num_ranks <= 0 or mapping.shape[1] % num_ranks != 0:
+            raise ValueError("Physical experts must be a 2-D tensor divisible by EP ranks")
 
         rank_mapping = mapping.reshape(mapping.shape[0], num_ranks, -1)
         for layer_idx, layer_mapping in enumerate(rank_mapping):
@@ -141,10 +135,14 @@ class AscendV2EplbPolicy:
                 new_mapping[layer_idx].long(),
                 minlength=num_logical_experts,
             )
-            changed_experts = torch.nonzero(
-                old_counts != new_counts,
-                as_tuple=False,
-            ).flatten().tolist()
+            changed_experts = (
+                torch.nonzero(
+                    old_counts != new_counts,
+                    as_tuple=False,
+                )
+                .flatten()
+                .tolist()
+            )
             changed_experts.sort(
                 key=lambda expert_id: (
                     -float(logical_load[layer_idx, expert_id]),
@@ -163,8 +161,7 @@ class AscendV2EplbPolicy:
                     rounding_mode="floor",
                 ).tolist()
                 changes.append(
-                    "%d(load=%.0f,copies=%d->%d,ranks=%s)"
-                    % (
+                    "{:d}(load={:.0f},copies={:d}->{:d},ranks={})".format(
                         expert_id,
                         float(logical_load[layer_idx, expert_id]),
                         int(old_counts[expert_id]),
@@ -185,10 +182,7 @@ class AscendV2EplbPolicy:
         logical_load: torch.Tensor,
     ) -> tuple[int, Any, Any, bool]:
         """Run initial heat-driven cycles without steady-state thresholds."""
-        bootstrap = bool(
-            getattr(self, "_bootstrap_rebalance_active", True)
-            and torch.any(logical_load > 0)
-        )
+        bootstrap = bool(getattr(self, "_bootstrap_rebalance_active", True) and torch.any(logical_load > 0))
         if not bootstrap:
             change, priority, deployment = self._policy.rebalance_experts(
                 current_table,
@@ -202,8 +196,7 @@ class AscendV2EplbPolicy:
         self._policy.increment = 0.0
         if self.ep_rank == 0:
             logger.info(
-                "[eplb/policy2] bootstrap rebalance uses collected heat "
-                "without steady-state improvement thresholds"
+                "[eplb/policy2] bootstrap rebalance uses collected heat without steady-state improvement thresholds"
             )
         try:
             change, priority, deployment = self._policy.rebalance_experts(
@@ -245,8 +238,7 @@ class AscendV2EplbPolicy:
             "update_imbalance_list": update_list,
         }
         logger.info(
-            "[eplb/worker] Expert hotness imbalance, current: "
-            "mean=%.3f max=%.3f, updated: mean=%.3f max=%.3f",
+            "[eplb/worker] Expert hotness imbalance, current: mean=%.3f max=%.3f, updated: mean=%.3f max=%.3f",
             current_mean,
             current_max,
             update_mean,
@@ -282,8 +274,7 @@ class AscendV2EplbPolicy:
         limited_mapping = old_mapping.clone()
         limited_mapping[selected_layers] = new_mapping[selected_layers]
         logger.info(
-            "Ascend V2 EPLB limits this cycle from %d changed layers "
-            "to %d high-priority layers: %s",
+            "Ascend V2 EPLB limits this cycle from %d changed layers to %d high-priority layers: %s",
             num_changed_layers,
             selected_layers.numel(),
             selected_layers.tolist(),
@@ -311,8 +302,7 @@ class AscendV2EplbPolicy:
             after_swap = diagnostic["after_swap_imbalance"]
             after_swap_text = "n/a" if after_swap is None else f"{float(after_swap):.6f}"
             layer_details.append(
-                "%d:%.6f->%s/candidate=%s/improved=%s/%s"
-                % (
+                "{:d}:{:.6f}->{}/candidate={}/improved={}/{}".format(
                     layer,
                     float(diagnostic["initial_imbalance"]),
                     after_swap_text,
@@ -338,8 +328,7 @@ class AscendV2EplbPolicy:
             reason_layers,
         )
         logger.info(
-            "[eplb/policy2] per-layer decisions "
-            "(layer:initial->after/reason): %s",
+            "[eplb/policy2] per-layer decisions (layer:initial->after/reason): %s",
             layer_details,
         )
 
@@ -361,10 +350,7 @@ class AscendV2EplbPolicy:
 
         old_mapping = old_global_expert_indices.detach().cpu()
         if old_mapping.shape[1] != num_replicas:
-            raise ValueError(
-                "Ascend V2 EPLB policies do not support changing the number "
-                "of physical expert slots"
-            )
+            raise ValueError("Ascend V2 EPLB policies do not support changing the number of physical expert slots")
 
         logical_load = weight.detach().cpu()
         physical_load = self._build_physical_load(
@@ -380,12 +366,10 @@ class AscendV2EplbPolicy:
         )
         workload_table = physical_load.reshape_as(current_table)
 
-        change, per_layer_priority, new_deployment, bootstrap = (
-            self._run_swift_balancer(
-                current_table,
-                workload_table,
-                logical_load,
-            )
+        change, per_layer_priority, new_deployment, bootstrap = self._run_swift_balancer(
+            current_table,
+            workload_table,
+            logical_load,
         )
         self._log_policy_diagnostics(change)
 
@@ -397,25 +381,18 @@ class AscendV2EplbPolicy:
         if bool((new_mapping < 0).any()) or bool((new_mapping >= weight.shape[1]).any()):
             raise ValueError("Ascend V2 EPLB policy returned an invalid expert mapping")
         self._validate_replica_rank_placement(new_mapping, num_ranks)
-        raw_changed_layers = int(
-            torch.any(new_mapping != old_mapping, dim=1).sum()
-        )
+        raw_changed_layers = int(torch.any(new_mapping != old_mapping, dim=1).sum())
         new_mapping = self._limit_rebalanced_layers(
             old_mapping,
             new_mapping,
             per_layer_priority,
         )
         if bootstrap:
-            self._bootstrap_rebalance_active = (
-                raw_changed_layers > self.max_rebalanced_layers_per_cycle
-            )
+            self._bootstrap_rebalance_active = raw_changed_layers > self.max_rebalanced_layers_per_cycle
             if self.ep_rank == 0:
                 logger.info(
-                    "[eplb/policy2] bootstrap rebalance %s; "
-                    "raw changed layers=%d",
-                    "continues next cycle"
-                    if self._bootstrap_rebalance_active
-                    else "completed",
+                    "[eplb/policy2] bootstrap rebalance %s; raw changed layers=%d",
+                    "continues next cycle" if self._bootstrap_rebalance_active else "completed",
                     raw_changed_layers,
                 )
         self._log_replica_changes(

@@ -898,7 +898,7 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
             raise ValueError("additional_config.eplb_config.load_collection_phase requires --enable-eplb.")
         if vllm_config.parallel_config.enable_eplb:
             upstream_eplb_config = vllm_config.parallel_config.eplb_config
-            if getattr(upstream_eplb_config, "policy"):
+            if upstream_eplb_config.policy:
                 logger.warning_once(
                     "The eplb_config.policy option is not supported on Ascend; "
                     "only the Ascend policy_swift_balancer policy is supported and will be used."

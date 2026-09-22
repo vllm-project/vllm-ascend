@@ -28,6 +28,7 @@ from vllm_ascend.distributed.eplb.state import (
 _PATCH_MARKER = "_vllm_ascend_eplb_patch"
 # Older vLLM releases do not pass EP size through every weight-mapping API.
 
+
 class _DeferredConsumedEvent:
     """Delay the worker acknowledgement until Ascend commit hooks finish."""
 
@@ -110,32 +111,21 @@ def _build_distributed_initial_expert_map(
     num_physical_experts = num_routed_experts + num_redundant_experts
     if ep_size <= 0 or num_physical_experts % ep_size != 0:
         raise ValueError(
-            "The number of physical experts must be divisible by ep_size. "
-            f"Got {num_physical_experts=} and {ep_size=}."
+            f"The number of physical experts must be divisible by ep_size. Got {num_physical_experts=} and {ep_size=}."
         )
 
     num_local_experts = num_physical_experts // ep_size
     redundant_counts = [
-        num_redundant_experts // ep_size
-        + (rank < num_redundant_experts % ep_size)
-        for rank in range(ep_size)
+        num_redundant_experts // ep_size + (rank < num_redundant_experts % ep_size) for rank in range(ep_size)
     ]
-    primary_counts = [
-        num_local_experts - redundant_count
-        for redundant_count in redundant_counts
-    ]
+    primary_counts = [num_local_experts - redundant_count for redundant_count in redundant_counts]
 
     result: list[int] = []
     primary_begin = 0
-    for primary_count, redundant_count in zip(
-        primary_counts, redundant_counts
-    ):
+    for primary_count, redundant_count in zip(primary_counts, redundant_counts):
         primary_end = primary_begin + primary_count
         local_experts = list(range(primary_begin, primary_end))
-        local_experts.extend(
-            (primary_end + index) % num_routed_experts
-            for index in range(redundant_count)
-        )
+        local_experts.extend((primary_end + index) % num_routed_experts for index in range(redundant_count))
         result.extend(local_experts)
         primary_begin = primary_end
     return result
@@ -172,9 +162,7 @@ def _patch_initial_expert_layout() -> None:
             ep_size: int | None = None,
             **kwargs,
         ):
-            selected_ep_size = (
-                EXPERT_MAPPING_EP_SIZE.get() if ep_size is None else ep_size
-            )
+            selected_ep_size = EXPERT_MAPPING_EP_SIZE.get() if ep_size is None else ep_size
             token = EXPERT_MAPPING_EP_SIZE.set(selected_ep_size)
             try:
                 return original_build(*args, **kwargs)
@@ -182,9 +170,7 @@ def _patch_initial_expert_layout() -> None:
                 EXPERT_MAPPING_EP_SIZE.reset(token)
 
         setattr(_build_expert_params_mapping, _PATCH_MARKER, True)
-        routed_experts.build_expert_params_mapping = staticmethod(
-            _build_expert_params_mapping
-        )
+        routed_experts.build_expert_params_mapping = staticmethod(_build_expert_params_mapping)
 
     original_get = routed_experts.get_expert_mapping
     if not getattr(original_get, _PATCH_MARKER, False):
@@ -200,11 +186,7 @@ def _patch_initial_expert_layout() -> None:
         def _model_ep_size(*args, **kwargs):
             bound = make_signature.bind(*args, **kwargs)
             model = bound.arguments["model"]
-            ep_sizes = {
-                module.moe_config.ep_size
-                for module in model.modules()
-                if isinstance(module, routed_experts)
-            }
+            ep_sizes = {module.moe_config.ep_size for module in model.modules() if isinstance(module, routed_experts)}
             num_redundant_experts = bound.arguments["num_redundant_experts"]
             if num_redundant_experts > 0 and len(ep_sizes) != 1:
                 raise RuntimeError(
@@ -234,11 +216,7 @@ def _get_changed_layer_indices(
 ) -> list[int]:
     if old_mapping.shape != new_mapping.shape:
         raise ValueError("Old and new EPLB mappings must have the same shape")
-    return (
-        torch.nonzero(torch.any(old_mapping != new_mapping, dim=1), as_tuple=False)
-        .flatten()
-        .tolist()
-    )
+    return torch.nonzero(torch.any(old_mapping != new_mapping, dim=1), as_tuple=False).flatten().tolist()
 
 
 def _backported_transfer_run_periodically(
@@ -257,9 +235,7 @@ def _backported_transfer_run_periodically(
             model_state.communicator.set_stream(cuda_stream)
             with torch.cuda.stream(cuda_stream):
                 old_mapping = model_state.physical_to_logical_map.cpu()
-            new_mapping = _async_worker.run_rebalance_experts(
-                model_state, state, old_mapping, cuda_stream
-            )
+            new_mapping = _async_worker.run_rebalance_experts(model_state, state, old_mapping, cuda_stream)
             changed_layers = _get_changed_layer_indices(old_mapping, new_mapping)
             if ep_rank == 0:
                 _async_worker.logger.info(
@@ -290,8 +266,7 @@ def _backported_transfer_run_periodically(
                 torch.distributed.all_reduce(flag, group=eplb_cpu_group)
                 if int(flag.item()) != eplb_cpu_group.size():
                     _async_worker.logger.warning(
-                        "async worker (rank=%d): layer %d coordinated stop "
-                        "(flag_sum=%d, group_size=%d)",
+                        "async worker (rank=%d): layer %d coordinated stop (flag_sum=%d, group_size=%d)",
                         ep_rank,
                         layer_idx,
                         int(flag.item()),
@@ -345,9 +320,7 @@ def _backported_move_to_workspace(model_state, ep_rank: int) -> None:
     if result.is_last_result:
         model_state.rebalanced = False
         owner = getattr(model_state, "_ascend_eplb_owner", None)
-        if owner is not None and not any(
-            state.rebalanced for state in owner.model_states.values()
-        ):
+        if owner is not None and not any(state.rebalanced for state in owner.model_states.values()):
             owner._async_cycle_in_progress = False
             owner.expert_rearrangement_step = 0
     model_state.pending_result = None
@@ -360,9 +333,7 @@ def _backported_drain_async(self) -> None:
     for model_key, model_state in self.model_states.items():
         needs_drain = model_state.rebalanced
         if needs_drain:
-            _eplb_state.logger.info(
-                "Draining async EPLB worker for model %s", model_key
-            )
+            _eplb_state.logger.info("Draining async EPLB worker for model %s", model_key)
         while model_state.rebalanced:
             if self._all_ranks_result_ready(model_state):
                 result = model_state.pending_result
@@ -374,17 +345,13 @@ def _backported_drain_async(self) -> None:
             else:
                 _eplb_state.time.sleep(0.001)
         if needs_drain:
-            _eplb_state.logger.info(
-                "Async EPLB worker drained for model %s", model_key
-            )
+            _eplb_state.logger.info("Async EPLB worker drained for model %s", model_key)
     self._async_cycle_in_progress = False
     self.expert_rearrangement_step = 0
 
 
 def _patch_async_noop_cycle() -> None:
-    result_fields = signature(
-        _rebalance_execute.AsyncEplbLayerResult
-    ).parameters
+    result_fields = signature(_rebalance_execute.AsyncEplbLayerResult).parameters
     if "is_last_result" in result_fields:
         return
     _rebalance_execute.AsyncEplbLayerResult = _BackportedAsyncEplbLayerResult

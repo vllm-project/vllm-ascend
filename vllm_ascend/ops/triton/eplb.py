@@ -16,26 +16,27 @@ def _record_expert_tokens_kernel(
     BLOCK_SIZE: tl.constexpr,
 ):
     offsets = tl.arange(0, BLOCK_SIZE)
-    mask = offsets < num_local_experts
-    current = tl.load(expert_tokens_ptr + offsets, mask=mask, other=0)
-    if group_list_type == 1:
-        local_load = current
-    else:
-        previous = tl.load(
-            expert_tokens_ptr + offsets - 1,
-            mask=mask & (offsets > 0),
-            other=0,
-        )
-        local_load = current - previous
-
     record_enabled = tl.load(record_enabled_ptr) != 0
-    expert_load_offsets = local_expert_start + offsets
-    previous_load = tl.load(expert_load_ptr + expert_load_offsets, mask=mask)
-    tl.store(
-        expert_load_ptr + expert_load_offsets,
-        previous_load + local_load,
-        mask=mask & record_enabled,
-    )
+    if record_enabled:
+        mask = offsets < num_local_experts
+        current = tl.load(expert_tokens_ptr + offsets, mask=mask, other=0)
+        if group_list_type == 1:
+            local_load = current
+        else:
+            previous = tl.load(
+                expert_tokens_ptr + offsets - 1,
+                mask=mask & (offsets > 0),
+                other=0,
+            )
+            local_load = current - previous
+
+        expert_load_offsets = local_expert_start + offsets
+        previous_load = tl.load(expert_load_ptr + expert_load_offsets, mask=mask)
+        tl.store(
+            expert_load_ptr + expert_load_offsets,
+            previous_load + local_load,
+            mask=mask,
+        )
 
 
 @triton.jit
@@ -79,15 +80,16 @@ def _record_physical_expert_load_kernel(
     BLOCK_SIZE: tl.constexpr,
 ):
     offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = offsets < numel
-    physical_id = tl.load(physical_ids_ptr + offsets, mask=mask, other=-1)
-    token_idx = offsets // topk
     record_enabled = tl.load(record_enabled_ptr) != 0
-    num_unpadded_tokens = tl.load(num_unpadded_tokens_ptr)
-    valid_physical_id = (physical_id >= 0) & (physical_id < num_physical_experts)
-    should_record = mask & valid_physical_id & record_enabled & (token_idx < num_unpadded_tokens)
-    safe_physical_id = tl.where(valid_physical_id, physical_id, 0)
-    tl.atomic_add(expert_load_ptr + safe_physical_id, 1, mask=should_record)
+    if record_enabled:
+        mask = offsets < numel
+        physical_id = tl.load(physical_ids_ptr + offsets, mask=mask, other=-1)
+        token_idx = offsets // topk
+        num_unpadded_tokens = tl.load(num_unpadded_tokens_ptr)
+        valid_physical_id = (physical_id >= 0) & (physical_id < num_physical_experts)
+        should_record = mask & valid_physical_id & (token_idx < num_unpadded_tokens)
+        safe_physical_id = tl.where(valid_physical_id, physical_id, 0)
+        tl.atomic_add(expert_load_ptr + safe_physical_id, 1, mask=should_record)
 
 
 def record_expert_tokens_triton(
