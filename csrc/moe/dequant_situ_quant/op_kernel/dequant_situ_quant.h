@@ -800,25 +800,39 @@ public:
                 LocalTensor<int64_t> groupIndexLocal =
                     groupIndexRaw.ReinterpretCast<int64_t>();
 
-                // Round-robin expert assignment (cut_group pattern):
-                // Block b owns experts {b, b+usedCoreNum_, b+2*usedCoreNum_, ...}.
-                // Each block processes ALL rows of its owned experts (no ceil-division),
-                // spreading N active experts across N distinct blocks instead of
-                // concentrating all work on block 0.
-                int64_t groupOffset = 0;
-                int64_t cuGroupIdx = blockIdx_;
-                for (int64_t expertIdx = 0; expertIdx < expertNum_; ++expertIdx) {
-                    const int64_t requestedRows = groupIndexLocal.GetValue(expertIdx);
-                    if (expertIdx == cuGroupIdx && requestedRows > 0) {
-                        for (int64_t localRow = 0; localRow < requestedRows; ++localRow) {
-                            const int64_t rowIdx = groupOffset + localRow;
+                // Row-range balanced assignment:
+                // Total real rows T = sum(group_index) are split into usedCoreNum_
+                // contiguous ranges [k*T/N, (k+1)*T/N); block k processes every row
+                // of its range across expert boundaries (the BF16 path has no
+                // per-expert params, so cutting inside an expert is safe).
+                // Unlike round-robin expert assignment this keeps every core busy
+                // for any expert distribution (uniform or hot-expert tail), which
+                // matters for prefill where group_index is skewed: routing a whole
+                // hot expert to a single block serializes up to ~T rows on one
+                // core, and expertNum << usedCoreNum_ leaves cores idle even for
+                // uniform splits.
+                int64_t totalRows = 0;
+                for (int64_t e = 0; e < expertNum_; ++e) {
+                    totalRows += groupIndexLocal.GetValue(e);
+                }
+                if (totalRows > rowLen_) {
+                    totalRows = rowLen_;
+                }
+                const int64_t lo = blockIdx_ * totalRows / usedCoreNum_;
+                const int64_t hi = (blockIdx_ + 1) * totalRows / usedCoreNum_;
+                if (lo < hi) {
+                    int64_t groupOffset = 0;
+                    for (int64_t e = 0; e < expertNum_ && groupOffset < hi; ++e) {
+                        const int64_t rows = groupIndexLocal.GetValue(e);
+                        const int64_t start = groupOffset > lo ? groupOffset : lo;
+                        const int64_t end = (groupOffset + rows < hi) ? (groupOffset + rows) : hi;
+                        for (int64_t rowIdx = start; rowIdx < end; ++rowIdx) {
                             CopyInRow(rowIdx);
                             ComputeRow(rowIdx);
                             CopyOutRow(rowIdx);
                         }
-                        cuGroupIdx += usedCoreNum_;
+                        groupOffset += rows;
                     }
-                    groupOffset += requestedRows;
                 }
                 groupIndexQue_.FreeTensor(groupIndexRaw);
             } else {
