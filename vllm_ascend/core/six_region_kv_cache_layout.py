@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import math
-import re
 from dataclasses import dataclass
 from typing import Final
 
+import regex as re
 import torch
 from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import get_dtype_size
