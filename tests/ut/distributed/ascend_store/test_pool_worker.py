@@ -1670,6 +1670,40 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         self.assertEqual(worker._allocated_gvas[key], 202)
         self.assertEqual(request.block_gvas_by_group_np[0].tolist(), [202])
 
+    def test_mid_segment_cached_gva_is_revalidated_before_save(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import (
+            LAYERWISE_READ_LEASE_TTL_MS,
+        )
+
+        worker = self._make_gva_worker()
+        cached_key = worker._make_layerwise_full_key(0, "h1")
+        worker._allocated_gvas[cached_key] = 102
+        worker.m_store.batch_is_exist.return_value = [1]
+        worker.m_store.batch_alloc.return_value = [201, 202, 203]
+        request = ReqMeta(
+            req_id="r1",
+            token_len_chunk=48,
+            save_start_token=0,
+            save_end_token=48,
+            target_token_len=48,
+            block_ids=[7, 8, 9],
+            block_hashes=["h0", "h1", "h2"],
+            can_save=True,
+            block_ids_np=np.asarray([7, 8, 9], dtype=np.int64),
+            block_ids_by_group_np=[np.asarray([7, 8, 9], dtype=np.int64)],
+        )
+
+        worker._alloc_gvas_for_save([request])
+
+        expected_keys = [worker._make_layerwise_full_key(0, block_hash) for block_hash in ("h0", "h1", "h2")]
+        worker.m_store.batch_alloc.assert_called_once_with(
+            expected_keys,
+            [64, 64, 64],
+            LAYERWISE_READ_LEASE_TTL_MS,
+        )
+        self.assertEqual(worker._allocated_gvas[cached_key], 202)
+        self.assertEqual(request.block_gvas_by_group_np[0].tolist(), [201, 202, 203])
+
     def test_partial_decode_is_saved_and_loaded_for_reused_layer(self):
         worker = self._make_worker()
         worker.layerwise_offload = True
