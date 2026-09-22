@@ -54,7 +54,7 @@ def test_mla_prolog_k3_and_cann_dispatch_are_isolated(use_rope, weight_quant_mod
     outputs = (torch.randn(2, 2, 4), torch.randn(2, 2, 2), torch.empty(0), None, None)
     with (
         patch.dict("sys.modules", {"vllm_ascend.vllm_ascend_C": MagicMock()}),
-        patch("torch.ops._C_ascend.npu_mla_prolog_v3_k3", create=True, return_value=outputs) as k3_op,
+        patch("torch.ops._C_ascend.npu_mla_prolog_v3", create=True, return_value=outputs) as prolog_op,
         patch("torch_npu.npu_mla_prolog_v3", return_value=outputs) as cann_op,
         patch(
             "torch_npu.npu_dynamic_mx_quant",
@@ -64,7 +64,7 @@ def test_mla_prolog_k3_and_cann_dispatch_are_isolated(use_rope, weight_quant_mod
     ):
         impl.mla_preprocess_only_decode(torch.randn(2, 8), kv_cache, metadata)
 
-    selected, unused = (cann_op, k3_op) if use_rope else (k3_op, cann_op)
+    selected, unused = (cann_op, prolog_op) if use_rope else (prolog_op, cann_op)
     selected.assert_called_once()
     unused.assert_not_called()
     kwargs = selected.call_args.kwargs
@@ -948,10 +948,15 @@ class TestAscendMLAMetadataBuilder(TestBase):
         mock_vllm_config = MagicMock()
         mock_kv_cache_spec = MagicMock()
 
-        result = AscendMLAMetadataBuilder.get_cudagraph_support(mock_vllm_config, mock_kv_cache_spec)
         from vllm.v1.attention.backend import AttentionCGSupport
 
-        self.assertEqual(result, AttentionCGSupport.UNIFORM_BATCH)
+        for enable_flash in (False, True):
+            with (
+                self.subTest(enable_flash=enable_flash),
+                patch("vllm_ascend.attention.mla_v1.envs.VLLM_ASCEND_ENABLE_FLASH_MLA", enable_flash),
+            ):
+                result = AscendMLAMetadataBuilder.get_cudagraph_support(mock_vllm_config, mock_kv_cache_spec)
+                self.assertEqual(result, AttentionCGSupport.UNIFORM_BATCH)
 
     def test_set_num_actual_tokens(self):
         mock_vllm_config = MagicMock()

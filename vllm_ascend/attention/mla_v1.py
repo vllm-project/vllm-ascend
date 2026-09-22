@@ -71,11 +71,11 @@ BUILD_METADATA_STEP_PREFILL = 0
 BUILD_METADATA_STEP_DECODE = 1
 
 
-def _npu_mla_prolog_v3_k3(**kwargs):
-    """Call the isolated K3 MLA prolog with optional RoPE inputs omitted."""
+def _npu_mla_prolog_v3_no_rope(**kwargs):
+    """Call MLA prolog with optional RoPE inputs omitted."""
     import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401, PLC0415
 
-    return torch.ops._C_ascend.npu_mla_prolog_v3_k3(**kwargs)
+    return torch.ops._C_ascend.npu_mla_prolog_v3(**kwargs)
 
 
 class AscendMLABackend(AttentionBackend):
@@ -1885,7 +1885,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             else:
                 cos = None
                 sin = None
-                prolog_op = _npu_mla_prolog_v3_k3
+                prolog_op = _npu_mla_prolog_v3_no_rope
             cache_index = cache_index.view(bsz, -1) if quantized_x.dim() == 3 else cache_index.view(-1)
             cache_mode = "PA_BSND"
             weight_quant_mode = self.mlapo_weight_quant_mode

@@ -71,7 +71,7 @@ inline bool GetDefaultStride0(const gert::Shape &shape, uint64_t &stride0)
 }
 
 inline ge::graphStatus GetCacheStride0(gert::TilingContext &context, uint32_t inputIndex, const gert::Shape &shape,
-                                       const char *tensorName, uint64_t &stride0)
+                                       const char *tensorName, uint64_t &stride0, uint64_t &tokenStride)
 {
     OP_CHECK_IF(shape.GetDimNum() == 0U,
                 OP_LOGE(context.GetNodeName(), "%s rank must be greater than 0.", tensorName),
@@ -80,6 +80,7 @@ inline ge::graphStatus GetCacheStride0(gert::TilingContext &context, uint32_t in
     OP_CHECK_IF(!GetDefaultStride0(shape, defaultStride0),
                 OP_LOGE(context.GetNodeName(), "%s shape cannot be represented by an int64 stride.", tensorName),
                 return ge::GRAPH_FAILED);
+    tokenStride = shape.GetDim(shape.GetDimNum() - 1);
     auto *stride = context.GetInputStride(inputIndex);
     if (stride == nullptr || stride->GetDimNum() != shape.GetDimNum()) {
         stride0 = defaultStride0;
@@ -91,17 +92,27 @@ inline ge::graphStatus GetCacheStride0(gert::TilingContext &context, uint32_t in
     uint64_t expectedStride = 1U;
     for (int64_t dim = static_cast<int64_t>(shape.GetDimNum()) - 1; dim >= 1; --dim) {
         const uint64_t actualStride = static_cast<uint64_t>(stride->GetStride(static_cast<size_t>(dim)));
-        OP_CHECK_IF(actualStride != expectedStride,
+        // PA_BSND may be a view into FlashMLA's interleaved [CKV, KR] cache.
+        const auto *attrs = context.GetAttrs();
+        const char *cacheMode = attrs == nullptr ? nullptr : attrs->GetStr(CACHE_MODE_ATTR_INDEX);
+        const bool interleavedToken = dim == 1 && shape.GetDimNum() == 4 &&
+            cacheMode != nullptr && std::strcmp(cacheMode, CACHE_MODE_PA_BSND) == 0;
+        OP_CHECK_IF(shape.GetDim(static_cast<size_t>(dim)) != 1 &&
+                    (interleavedToken ? actualStride < expectedStride : actualStride != expectedStride),
                     OP_LOGE(context.GetNodeName(),
                             "%s dim%ld must be contiguous, actual stride is %lu, expected stride is %lu. "
-                            "Only dim0 may be non-contiguous.",
+                            "Only dim0 and PA_BSND token strides may be non-contiguous.",
                             tensorName, dim, actualStride, expectedStride),
                     return ge::GRAPH_FAILED);
+        if (interleavedToken) {
+            tokenStride = actualStride;
+            expectedStride = actualStride;
+        }
         expectedStride *= static_cast<uint64_t>(shape.GetDim(static_cast<size_t>(dim)));
     }
 
     const int64_t actualStride0 = stride->GetStride(MLA_PROLOG_DIM_INDEX_0);
-    OP_CHECK_IF(actualStride0 < 0 || static_cast<uint64_t>(actualStride0) < defaultStride0,
+    OP_CHECK_IF(actualStride0 < 0 || static_cast<uint64_t>(actualStride0) < expectedStride,
                 OP_LOGE(context.GetNodeName(), "%s dim0 stride must be at least %lu, but got %ld.", tensorName,
                         defaultStride0, actualStride0),
                 return ge::GRAPH_FAILED);
@@ -540,6 +551,8 @@ ge::graphStatus MlaPrologTiling::FillTiling()
     baseParams_->blockSize = baseShapeInfo_.blockSize;
     baseParams_->kvCacheStride0 = context_->kvCacheStride0;
     baseParams_->krCacheStride0 = context_->krCacheStride0;
+    baseParams_->kvCacheTokenStride = context_->kvCacheTokenStride;
+    baseParams_->krCacheTokenStride = context_->krCacheTokenStride;
     baseParams_->reciprocalCq = reciprocalCq_;
     baseParams_->epsilonCq = epsilonCq_;
     baseParams_->reciprocalCkv = reciprocalCkv_;
@@ -592,6 +605,10 @@ void MlaPrologTiling::FillTilingCoreParams()
 ge::graphStatus MlaPrologTiling::CalcWorkSpace()
 {
     workspaceSize_ = libapiSize_;
+    if (scenarioInfo_.weightQuantMode_ == WEIGHT_QUANT_MODE::MXFP8_FULL_QUANT &&
+        context_->tokenX.desc->GetDataType() == ge::DT_BF16) {
+        workspaceSize_ += static_cast<size_t>(baseShapeInfo_.tSize) * baseShapeInfo_.heSize * 33 / 32;
+    }
     uint32_t mm1Mult = (scenarioInfo_.splitMFlag_ == 1U) ? mm1BlockNum_ : 1U;
     uint32_t mm2Mult = (scenarioInfo_.splitMFlag_ == 1U) ? mm2BlockNum_ : 1U;
     uint32_t mm3Mult = (scenarioInfo_.splitMFlag_ == 1U) ? mm3BlockNum_ : 1U;
@@ -757,7 +774,9 @@ ge::graphStatus MlaPrologTiling::ConvertContext(gert::TilingContext &context, Ml
                 return ge::GRAPH_FAILED);
 
     mlaPrologContext.opName = context.GetNodeName();
-    mlaPrologContext.opType = context.GetNodeType();
+    // DCP C8 appends outputs but preserves the V3 input and attribute prefix.
+    mlaPrologContext.opType = std::strcmp(context.GetNodeType(), "MlaPrologDcpC8") == 0
+        ? V3_OP_NAME : context.GetNodeType();
     mlaPrologContext.platformInfo = context.GetPlatformInfo();
 
     ConvertRequiredParams(context, mlaPrologContext);
@@ -772,11 +791,11 @@ ge::graphStatus MlaPrologTiling::ConvertContext(gert::TilingContext &context, Ml
     const uint32_t kvCacheIndex = isV3 ? KV_CACHE_INPUT_INDEX_V3 : KV_CACHE_INPUT_INDEX;
     const uint32_t krCacheIndex = isV3 ? KR_CACHE_INPUT_INDEX_V3 : KR_CACHE_INPUT_INDEX;
     OP_CHECK_IF(GetCacheStride0(context, kvCacheIndex, kvCacheShape, KV_CACHE_NAME,
-                               mlaPrologContext.kvCacheStride0) != ge::GRAPH_SUCCESS,
+                               mlaPrologContext.kvCacheStride0, mlaPrologContext.kvCacheTokenStride) != ge::GRAPH_SUCCESS,
                 OP_LOGE(context.GetNodeName(), "Failed to get or validate kvCache strides."),
                 return ge::GRAPH_FAILED);
     OP_CHECK_IF(GetCacheStride0(context, krCacheIndex, krCacheShape, KR_CACHE_NAME,
-                               mlaPrologContext.krCacheStride0) != ge::GRAPH_SUCCESS,
+                               mlaPrologContext.krCacheStride0, mlaPrologContext.krCacheTokenStride) != ge::GRAPH_SUCCESS,
                 OP_LOGE(context.GetNodeName(), "Failed to get or validate krCache strides."),
                 return ge::GRAPH_FAILED);
 

@@ -10,8 +10,8 @@ enable_custom_op()
 
 
 def _skip_if_mla_prolog_v3_k3_unavailable():
-    if not hasattr(torch.ops, "_C_ascend") or not hasattr(torch.ops._C_ascend, "npu_mla_prolog_v3_k3"):
-        pytest.skip("requires the npu_mla_prolog_v3_k3 custom operator")
+    if not hasattr(torch.ops, "_C_ascend") or not hasattr(torch.ops._C_ascend, "npu_mla_prolog_v3"):
+        pytest.skip("requires the npu_mla_prolog_v3 custom operator")
 
 
 @torch.inference_mode()
@@ -108,7 +108,7 @@ def test_mla_prolog_v3_k3_native_bf16_head96():
     kr_old = kr_cache.clone()
 
     query, query_rope, dequant_scale_q_nope, query_norm, dequant_scale_q_norm = (
-        torch.ops._C_ascend.npu_mla_prolog_v3_k3(
+        torch.ops._C_ascend.npu_mla_prolog_v3(
             token_x,
             weight_dq,
             weight_uq_qr,
@@ -170,7 +170,7 @@ def test_mla_prolog_v3_k3_rope_disabled():
     kr_cache = torch.zeros((block_num, block_size, 1, dr), dtype=dtype).npu()
     cache_index = torch.arange(token_num, dtype=torch.int64).npu()
 
-    query, query_rope, *_ = torch.ops._C_ascend.npu_mla_prolog_v3_k3(
+    query, query_rope, *_ = torch.ops._C_ascend.npu_mla_prolog_v3(
         token_x,
         weight_dq,
         weight_uq_qr,
@@ -224,7 +224,7 @@ def test_mla_prolog_v3_k3_query_norm_flag():
     kr_cache = torch.zeros((block_num, block_size, 1, dr), dtype=dtype).npu()
     cache_index = torch.arange(token_num, dtype=torch.int64).npu()
 
-    query, query_rope, _, query_norm, dequant_scale_q_norm = torch.ops._C_ascend.npu_mla_prolog_v3_k3(
+    query, query_rope, _, query_norm, dequant_scale_q_norm = torch.ops._C_ascend.npu_mla_prolog_v3(
         token_x,
         weight_dq,
         weight_uq_qr,
@@ -289,7 +289,7 @@ def test_mla_prolog_v3_k3_cache_mode(cache_mode: str):
         kr_cache = torch.zeros((block_num, block_size, 1, dr), dtype=dtype).npu()
         cache_index = torch.arange(token_num, dtype=torch.int64).npu()
 
-    query, query_rope, *_ = torch.ops._C_ascend.npu_mla_prolog_v3_k3(
+    query, query_rope, *_ = torch.ops._C_ascend.npu_mla_prolog_v3(
         token_x,
         weight_dq,
         weight_uq_qr,
@@ -345,7 +345,7 @@ def test_mla_prolog_v3_k3_noncontiguous_cache_dim0(cache_mode: str):
 
     kv_contiguous = torch.zeros((block_num, block_size, 1, hckv), dtype=dtype).npu()
     kr_contiguous = torch.zeros((block_num, block_size, 1, dr), dtype=dtype).npu()
-    query_ref, query_rope_ref, *_ = torch.ops._C_ascend.npu_mla_prolog_v3_k3(
+    query_ref, query_rope_ref, *_ = torch.ops._C_ascend.npu_mla_prolog_v3(
         token_x,
         weight_dq,
         weight_uq_qr,
@@ -383,7 +383,7 @@ def test_mla_prolog_v3_k3_noncontiguous_cache_dim0(cache_mode: str):
 
     # Both tokens target non-zero logical blocks, so an implementation that
     # ignores dim0 stride would overwrite physical padding blocks.
-    query, query_rope, *_ = torch.ops._C_ascend.npu_mla_prolog_v3_k3(
+    query, query_rope, *_ = torch.ops._C_ascend.npu_mla_prolog_v3(
         token_x,
         weight_dq,
         weight_uq_qr,

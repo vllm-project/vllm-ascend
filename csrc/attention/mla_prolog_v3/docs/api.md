@@ -1,19 +1,24 @@
-# MlaPrologV3K3 API 与调用示例
+# MlaPrologV3 API 与调用示例
+
+本验证分支仅编译 Kimi-K3 A5 TP8 decode 使用的 MXFP8 权重、BF16 或 per-tensor FP8 KV、PA_BSND、NoPE、split-N 模板。该模板也覆盖 TP8/DCP8 replicated-Q 的 96 个 Q heads；V-up 和 O 投影仍使用本 TP rank 的 12 个 heads。
+下面的完整 API 描述保留用于参考；本分支产物不包含其他量化与布局模板。
+
+MXFP8 权重下还支持两种 BF16 原始输入：`T32/H12 + kv_cache_quant_mode=1` 和
+`T64/H96 + kv_cache_quant_mode=0`，隐层宽度均为 7168。此时 `dequant_scale_x=None`，
+算子内部使用 K3 的 OCP MX 量化（`scale_alg=0`），并与首块 Wdq 权重预取重叠。
+其他 shape、RoPE 或 scale_alg=1 仍由框架先量化，再使用原有 FP8 输入接口。
+BF16 输入不支持 split-M；原 FP8 输入接口的行为保持不变。
 
 ## 1. API 总览
 
 | 通路 | API/入口 | 支持情况 |
 | --- | --- | --- |
-| vllm-ascend 单算子入口 | `torch.ops._C_ascend.npu_mla_prolog_v3_k3` | 支持 |
-| aclnn | `aclnnMlaPrologV3K3WeightNzGetWorkspaceSize` / `aclnnMlaPrologV3K3WeightNz` | 支持 |
-| Ascend C `<<<>>>` | `mla_prolog_v3_k3<<<blockDim, nullptr, stream>>>` | 支持（诊断/直调；需自备 tiling） |
+| vllm-ascend 单算子入口 | `torch.ops._C_ascend.npu_mla_prolog_v3` | 支持 |
+| aclnn | `aclnnMlaPrologV3WeightNzGetWorkspaceSize` / `aclnnMlaPrologV3WeightNz` | 支持 |
+| Ascend C `<<<>>>` | `mla_prolog_v3<<<blockDim, nullptr, stream>>>` | 支持（诊断/直调；需自备 tiling） |
 
 各入口表达同一套 MLA 前处理融合语义：下采样 → RMSNorm → 上采样 / RoPE → 写入 KV/KR Cache（及可选量化）。
-底层算子名为 **MlaPrologV3K3**，权重 `weight_dq` / `weight_uq_qr` / `weight_dkv_kr` 需以 **FRACTAL_NZ** 格式传入。
-
-K3 自定义实现使用独立的 Torch schema、ACLNN 导出和 OPP 算子类型，不注册原生 `MlaPrologV3` 的同名别名。SFA 的 C8 per-tile 模式（`kv_cache_quant_mode=3`）继续通过 `torch_npu.npu_mla_prolog_v3` 调用 CANN 实现。升级时应重新构建并安装完整自定义算子包，避免保留旧包的同名注册。
-
-本文描述 Ascend 950PR&950DT 系列产品上 vllm-ascend 自定义算子包的支持范围。当前支持非量化 BF16 和 MXFP8，具体联合配置见 §2.3；不支持的量化配置会在 Host 校验阶段拒绝。`torch_npu.npu_mla_prolog_v3` 的支持范围取决于其实际使用的 CANN/OPP 实现，不由本文定义。
+底层算子名为 **MlaPrologV3**，权重 `weight_dq` / `weight_uq_qr` / `weight_dkv_kr` 需以 **FRACTAL_NZ** 格式传入。
 
 ## 2. 公共参数与约束
 
@@ -35,7 +40,7 @@ K3 自定义实现使用独立的 Torch schema、ACLNN 导出和 OPP 算子类�
 
 | 名称 | 必选/可选 | Shape | Dtype | Layout | 说明 |
 | --- | --- | --- | --- | --- | --- |
-| `token_x` | 必选 | 合轴 `(T,He)` 或非合轴 `(B,S,He)` | BF16 / FP8_E4M3 | ND | 非量化 / MXFP8 输入隐状态 |
+| `token_x` | 必选 | 合轴 `(T,He)` 或非合轴 `(B,S,He)` | BF16 / INT8 / FP8_E4M3 / HIF8 | ND | 输入隐状态 |
 | `weight_dq` | 必选 | `(He,Hcq)` | 同量化场景 | **FRACTAL_NZ** | \(W^{DQ}\) |
 | `weight_uq_qr` | 必选 | `(Hcq,N*(D+Dr))` | 同量化场景 | **FRACTAL_NZ** | \(W^{UQ}\|W^{QR}\) |
 | `weight_uk` | 必选 | `(N,D,Hckv)` | BF16 | ND | \(W^{UK}\) |
@@ -43,28 +48,27 @@ K3 自定义实现使用独立的 Torch schema、ACLNN 导出和 OPP 算子类�
 | `rmsnorm_gamma_cq` | 必选 | `(Hcq,)` | BF16 | ND | Cq RMSNorm \(\gamma\) |
 | `rmsnorm_gamma_ckv` | 必选 | `(Hckv,)` | BF16 | ND | Ckv RMSNorm \(\gamma\) |
 | `rope_sin` / `rope_cos` | 条件必选 | 合轴 `(T,Dr)` 或非合轴 `(B,S,Dr)`；禁用 RoPE 时传 `nullptr` | BF16 | ND | RoPE 参数；同时非空时启用，同时为空时禁用，混合 null 返回错误 |
-| `kv_cache` | 必选（可变） | 见 2.4 CacheMode | BF16 / FP8_E4M3 | ND | \(k^C\) 原地更新 |
-| `kr_cache` | 必选（可变） | 见 2.4 | BF16 | ND | \(k^R\) 原地更新 |
+| `kv_cache` | 必选（可变） | 见 2.4 CacheMode | BF16 / INT8 / FP8… | ND | \(k^C\) 原地更新 |
+| `kr_cache` | 必选（可变） | 见 2.4；`ckvkr_repo_mode=1` 时可为空 | BF16 / INT8 | ND | \(k^R\) 原地更新 |
 | `cache_index` | 条件必选 | PA：`(T,)` 或 `(B,S)` 等 | INT64 | ND | PA 写 cache 槽位；取值见 2.4 |
-| `dequant_scale_x` | 条件必选 | MXFP8 必传 | FP8_E8M0 | ND | `token_x` 反量化 |
-| `dequant_scale_w_dq` | 条件必选 | MXFP8 必传 | FP8_E8M0 | ND | `weight_dq` 反量化 |
-| `dequant_scale_w_uq_qr` | 条件必选 | MXFP8 必传 | FP8_E8M0 | ND | `weight_uq_qr` 反量化 |
-| `dequant_scale_w_dkv_kr` | 条件必选 | MXFP8 必传 | FP8_E8M0 | ND | `weight_dkv_kr` 反量化 |
-| `quant_scale_ckv` | 条件必选 | KV per-tensor 时必传 | FP32 | ND | KV cache 量化 scale |
-| `quant_scale_ckr` | 可选 | 不使用，传空 | FP32 | ND | 保留接口参数；KR cache 不量化 |
-| `smooth_scales_cq` | 可选 | 不使用，传空 | FP32 | ND | 保留接口参数；当前支持模式不使用 smooth |
+| `dequant_scale_x` | 条件必选 | FULL/MXFP8/FP8/HIF8 预量化输入必传；上述 BF16 输入传 None | FP32 / FP8_E8M0 | ND | `token_x` 反量化 |
+| `dequant_scale_w_dq` | 条件必选 | 同上 | FP32 / FP8_E8M0 | ND | `weight_dq` 反量化 |
+| `dequant_scale_w_uq_qr` | 条件必选 | PARTIAL 及以上必传 | FP32 / FP8_E8M0 | ND | `weight_uq_qr` 反量化 |
+| `dequant_scale_w_dkv_kr` | 条件必选 | FULL 及以上必传 | FP32 / FP8_E8M0 | ND | `weight_dkv_kr` 反量化 |
+| `quant_scale_ckv` / `quant_scale_ckr` | 条件必选 | KV per-channel / per-tensor 等 | FP32 | ND | cache 量化 scale |
+| `smooth_scales_cq` | 可选 | `(Hcq,)` 等 | FP32 | ND | Cq 动态量化 smooth |
 | `actual_seq_len` | 条件必选 | `(B,)` | INT32 | ND | `PA_BLK_*` 时必传 |
-| `k_nope_clip_alpha` | 可选 | 不使用，传空 | FP32 | ND | 保留接口参数；当前支持模式不使用 clip |
+| `k_nope_clip_alpha` | 可选 | 标量/向量 | FP32 | ND | Ckv clip 缩放 |
 
 ### 2.2 输出
 
 | 名称 | Shape | Dtype | 说明 |
 | --- | --- | --- | --- |
-| `query` | 合轴 `(T,N,Hckv)` / 非合轴 `(B,S,N,Hckv)` | BF16 / FP8_E4M3 | \(q^N\) |
+| `query` | 合轴 `(T,N,Hckv)` / 非合轴 `(B,S,N,Hckv)` | BF16 / INT8 / FP8… | \(q^N\) |
 | `query_rope` | 合轴 `(T,N,Dr)` / 非合轴 `(B,S,N,Dr)` | BF16 | \(q^R\) |
-| `dequant_scale_q_nope` | MXFP8 + KV per-tensor 时非空，否则空 | FP32 | Query 动态量化 scale |
-| `query_norm` | `query_norm_flag=True` 时非空 | BF16 / FP8_E4M3 | \(c^Q\) |
-| `dequant_scale_q_norm` | `query_norm_flag` 且 MXFP8 时非空 | FP8_E8M0 | `query_norm` 反量化 scale |
+| `dequant_scale_q_nope` | 全量化 + KV per-tensor 时非空，否则空 | FP32 | Query 动态量化 scale |
+| `query_norm` | `query_norm_flag=True` 时非空 | BF16 / 量化 dtype | \(c^Q\) |
+| `dequant_scale_q_norm` | `query_norm_flag` 且量化时非空 | FP32 / FP8_E8M0 | `query_norm` 反量化 scale |
 
 `kv_cache` / `kr_cache` 为可变输入：按 `cache_index` 原地写入，不作为独立 alias 输出返回。
 
@@ -76,50 +80,61 @@ K3 自定义实现使用独立的 Torch schema、ACLNN 导出和 OPP 算子类�
 | `rmsnorm_epsilon_ckv` | float | `1e-5` | `>0` | Ckv RMSNorm \(\epsilon\) |
 | `cache_mode` | str | `"PA_BSND"` | 见 2.4 | cache 布局 |
 | `query_norm_flag` | bool | `false` | `{false,true}` | 是否输出 `query_norm` |
-| `weight_quant_mode` | int | `0` | `{0,3}` | 非量化 / MXFP8；须符合下方联合配置表 |
-| `kv_cache_quant_mode` | int | `0` | `{0,1}` | 非量化 / per-tensor；须符合下方联合配置表 |
-| `query_quant_mode` | int | `0` | `{0,1}` | 与 `kv_cache_quant_mode` 一致 |
-| `ckvkr_repo_mode` | int | `0` | `{0}` | KV/KR 分开存储 |
-| `quant_scale_repo_mode` | int | `0` | `{0}` | 量化 scale 分开存储 |
-| `tile_size` | int | `128` | `{128}` | 保留接口参数 |
+| `weight_quant_mode` | int | `0` | `{0,1,2,3,4,5}` | 权重/激活量化模式 |
+| `kv_cache_quant_mode` | int | `0` | `{0,1,2,3}` | KV cache 量化模式 |
+| `query_quant_mode` | int | `0` | `{0,1}` | Query 量化；per-tensor KV 时需为 1 |
+| `ckvkr_repo_mode` | int | `0` | `{0,1}` | 与 `quant_scale_repo_mode` 成对；pertile 必须为 1 |
+| `quant_scale_repo_mode` | int | `0` | `{0,1}` | 同上 |
+| `tile_size` | int | `128` | pertile 时必须为 `128` | per-token-per-group tile |
 | `qc_qr_scale` | float | `1.0` | 有限浮点 | Query 尺度 \(\alpha_q\) |
 | `kc_scale` | float | `1.0` | 有限浮点 | Key 尺度 \(\alpha_{kv}\) |
 
 RoPE 开关由 `ropeSin` / `ropeCos` 的 nullity 推导：同时非空 → 开启，同时为空 → 关闭；混合 null 返回参数错误。
 
-`kv_cache` / `kr_cache` 在 Ascend 950PR&950DT 系列产品 上支持首轴非连续；除首轴外的其余轴必须连续。
+`kv_cache` / `kr_cache` 在 Ascend 950PR/Ascend 950DT 上支持首轴非连续；PA_BSND 还支持 token 轴的非连续布局，可直接写入 FlashMLA 合并缓存中 token stride 为 576 的 CKV/KR 视图。
 
-#### A5 自定义算子的合法联合配置
+本分支 C8 使用 `weight_quant_mode=3`、`kv_cache_quant_mode=1`、`query_quant_mode=1`。
+`quant_scale_ckv` 是 shape `[1]` 的 FP32 静态**量化乘数**，即 KV 反量化 scale 的倒数。
+512 维 latent KV 直接量化写入 FP8 E4M3，64 维 KR 保持 BF16；关闭 RoPE 仅跳过旋转，不删除 KR。
+Q latent 逐 token/head 动态量化，返回 FP32 `dequant_scale_q_nope`；Q 的 BF16 64 维分量已乘
+`quant_scale_ckv / dequant_scale_q_nope`。下游 attention 必须将整个 QK 累加结果乘 Q 和 KV 的反量化
+scale，不能再次预缩放 Q 的 64 维分量。两个 cache 的 stride 均以各自 dtype 的元素为单位。C8 FlashMLA
+每个 128-token kernel page 先存 `[128,512]` FP8 latent，再存 `[128,64]` BF16 KR，总计 81920 B，
+等价于平均 640 B/token。两分量的 token 轴连续，首轴可非连续；无需为写回再做缓存转换。
 
-| `weight_quant_mode` | `kv_cache_quant_mode` | `query_quant_mode` | 含义 | `cache_mode` |
-| --- | --- | --- | --- | --- |
-| `0` | `0` | `0` | 非量化 BF16 | §2.4 中的布局 |
-| `3` | `0` | `0` | MXFP8，KV/Query 不量化 | `PA_BSND` |
-| `3` | `1` | `1` | MXFP8，KV per-tensor / Query per-token-head 量化 | `PA_BSND` |
+FP8 Q 某一行全零时返回 `dequant_scale_q_nope=1`，Q 保持零。这避免零 latent Q 但非零 BF16
+64 维分量时发生除零，并保留该分量对 attention logits 的贡献。
 
-PARTIAL、FULL INT8、普通 FP8、HIF8、KV per-channel/per-tile 均不在当前 A5 自定义算子的支持范围内。Query/KV 量化开关不一致时也会拒绝。
+#### 量化模式合法组合（`weight_quant_mode` × `kv_cache_quant_mode`）
 
-上述三类配置均为非 per-tile 场景，原有联合参数校验要求 `ckvkr_repo_mode=quant_scale_repo_mode=0`（分开存储）。这两项的公共枚举声明仍保留 `{0,1}`，但取值 `1` 不适用于当前支持的配置。`quant_scale_ckr`、`smooth_scales_cq`、`k_nope_clip_alpha` 在这三类配置中均须传空。
+| wq | 含义 | 合法 kvq |
+| --- | --- | --- |
+| `0` | 非量化 | `{0}` |
+| `1` | PARTIAL（仅 `weight_uq_qr` 量化） | `{0, 2, 3}` |
+| `2` | FULL INT8 | `{0, 1, 3}` |
+| `3` | MXFP8 | `{0, 1, 3}` |
+| `4` | FP8 | `{0, 1, 3}` |
+| `5` | HIF8 | `{0, 1, 3}` |
 
-非量化和 MXFP8 均保留 RoPE 开关、空 Query 与空 Cache 的处理。非量化保留原有 CacheMode；CV 1:1 只支持非量化的 `PA_BSND` / `PA_NZ`，其它配置使用 CV 1:2。MXFP8 的 SplitM 分支继续保留，由 Host 按 shape 和可用核数选择。
+`kvq`：`0` 非量化，`1` per-tensor，`2` per-channel，`3` per-tile。
 
 ### 2.4 CacheMode
 
-| `cache_mode` | `token_x` | `kv_cache` / `kr_cache` | `cache_index` |
+| `cache_mode` | `token_x` | `kv_cache` / `kr_cache`（非 pertile） | `cache_index` |
 | --- | --- | --- | --- |
 | `PA_BSND` / `PA_NZ` | `(T,He)` | `(BlockNum,BlockSize,Nkv,Hckv/Dr)` | `(T,)`，值 ∈ `[0, BlockNum*BlockSize)` |
 | `PA_BLK_BSND` / `PA_BLK_NZ` | `(T,He)` | 同上 | block 级 index；需 `actual_seq_len` |
 | `BSND` | `(B,S,He)` | `(B,S,Nkv,Hckv/Dr)` | `(B,S)` |
 | `TND` | `(T,He)` | `(T,Nkv,Hckv/Dr)` | `(T,)` |
 
-上表所有布局用于非量化；MXFP8 仅支持 `PA_BSND`。
+pertile（`kvq=3`）时 `ckvkr_repo_mode=quant_scale_repo_mode=1`，`kv_cache` 末维为打包 `Dtile`，`kr_cache` 为空 Tensor。
 
 ## 3. aclnn API
 
 ### 3.1 接口签名
 
 ```cpp
-aclnnStatus aclnnMlaPrologV3K3WeightNzGetWorkspaceSize(
+aclnnStatus aclnnMlaPrologV3WeightNzGetWorkspaceSize(
     const aclTensor *tokenX, const aclTensor *weightDq, const aclTensor *weightUqQr,
     const aclTensor *weightUk, const aclTensor *weightDkvKr,
     const aclTensor *rmsnormGammaCq, const aclTensor *rmsnormGammaCkv,
@@ -140,7 +155,7 @@ aclnnStatus aclnnMlaPrologV3K3WeightNzGetWorkspaceSize(
     const aclTensor *queryNormOutOptional, const aclTensor *dequantScaleQNormOutOptional,
     uint64_t *workspaceSize, aclOpExecutor **executor);
 
-aclnnStatus aclnnMlaPrologV3K3WeightNz(
+aclnnStatus aclnnMlaPrologV3WeightNz(
     void *workspace, uint64_t workspaceSize, aclOpExecutor *executor, aclrtStream stream);
 ```
 
@@ -154,7 +169,7 @@ aclnnStatus aclnnMlaPrologV3K3WeightNz(
 // 按 2.1/2.2 创建 aclTensor；weightDq/UqQr/DkvKr 为 FRACTAL_NZ。
 uint64_t workspaceSize = 0;
 aclOpExecutor *executor = nullptr;
-ACLNN_CHECK(aclnnMlaPrologV3K3WeightNzGetWorkspaceSize(
+ACLNN_CHECK(aclnnMlaPrologV3WeightNzGetWorkspaceSize(
     tokenX, weightDq, weightUqQr, weightUk, weightDkvKr,
     gammaCq, gammaCkv, ropeSin, ropeCos, kvCache, krCache,
     cacheIndex, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
@@ -166,7 +181,7 @@ void *workspace = nullptr;
 if (workspaceSize != 0) {
     ACL_CHECK(aclrtMalloc(&workspace, workspaceSize, ACL_MEM_MALLOC_HUGE_FIRST));
 }
-ACLNN_CHECK(aclnnMlaPrologV3K3WeightNz(workspace, workspaceSize, executor, stream));
+ACLNN_CHECK(aclnnMlaPrologV3WeightNz(workspace, workspaceSize, executor, stream));
 ACL_CHECK(aclrtSynchronizeStream(stream));
 ```
 
@@ -176,7 +191,7 @@ ACL_CHECK(aclrtSynchronizeStream(stream));
 
 ```python
 query, query_rope, dequant_scale_q_nope, query_norm, dequant_scale_q_norm = (
-    torch.ops._C_ascend.npu_mla_prolog_v3_k3(
+    torch.ops._C_ascend.npu_mla_prolog_v3(
         token_x, weight_dq, weight_uq_qr, weight_uk, weight_dkv_kr,
         rmsnorm_gamma_cq, rmsnorm_gamma_ckv, rope_sin, rope_cos,
         kv_cache, kr_cache,  # mutable
@@ -195,7 +210,7 @@ query, query_rope, dequant_scale_q_nope, query_norm, dequant_scale_q_norm = (
 )
 ```
 
-仅在 Ascend 950PR&950DT 系列产品 构建且加载 `vllm_ascend_C` + 自定义 opp 后可用。
+仅在 Ascend950 构建且加载 `vllm_ascend_C` + 自定义 opp 后可用。
 `rope_sin` / `rope_cos` 为必传位置参数：同时非空启用 RoPE，同时为空（`numel()==0`）禁用；不允许一空一非空。
 `token_x` rank=2 为合轴 `(T,He)`，rank=3 为 `(B,S,He)`。
 `kv_cache` / `kr_cache` 原地更新；不需要的 optional 输出以空 Tensor 返回。
@@ -230,13 +245,13 @@ kv_cache = torch.zeros(2, 128, 1, hckv, device=device, dtype=dtype)
 kr_cache = torch.zeros(2, 128, 1, dr, device=device, dtype=dtype)
 cache_index = torch.arange(t, device=device, dtype=torch.int64)
 
-query, query_rope, *_ = torch.ops._C_ascend.npu_mla_prolog_v3_k3(
+query, query_rope, *_ = torch.ops._C_ascend.npu_mla_prolog_v3(
     token_x, weight_dq, weight_uq_qr, weight_uk, weight_dkv_kr,
     gamma_cq, gamma_ckv, rope_sin, rope_cos, kv_cache, kr_cache,
     cache_index=cache_index, cache_mode="PA_BSND")
 # RoPE disabled: pass empty tensors for both rope inputs
 empty_rope = torch.empty(0, device=device, dtype=dtype)
-q_no_rope, qr_no_rope, *_ = torch.ops._C_ascend.npu_mla_prolog_v3_k3(
+q_no_rope, qr_no_rope, *_ = torch.ops._C_ascend.npu_mla_prolog_v3(
     token_x, weight_dq, weight_uq_qr, weight_uk, weight_dkv_kr,
     gamma_cq, gamma_ckv, empty_rope, empty_rope, kv_cache.clone(), kr_cache.clone(),
     cache_index=cache_index, cache_mode="PA_BSND")
@@ -249,7 +264,7 @@ torch.npu.synchronize()
 `blockDim`、workspace 与序列化 tiling data 必须来自同一组 host tiling。参数顺序与 kernel 定义一致：
 
 ```cpp
-mla_prolog_v3_k3<<<blockDim, nullptr, stream>>>(
+mla_prolog_v3<<<blockDim, nullptr, stream>>>(
     tokenX, weightDq, weightUqQr, weightUk, weightDkvKr,
     rmsnormGammaCq, rmsnormGammaCkv, ropeSin, ropeCos,
     kvCache, krCache, cacheIndex,
@@ -267,9 +282,9 @@ mla_prolog_v3_k3<<<blockDim, nullptr, stream>>>(
 - Torch schema 始终注册，实际可用性取决于 `csrc/build_aclnn.sh` 是否按 **Ascend950** 构建并安装了该自定义算子包。
 - `weight_dq` / `weight_uq_qr` / `weight_dkv_kr` 必须为 **FRACTAL_NZ**。
 - `Hcq=1536`，`Hckv=512`，`D=128`，`Dr=64`，`Nkv=1`；`He` 仅白名单集合；`N∈[1,128]`。
-- `weight_quant_mode`、`kv_cache_quant_mode`、`query_quant_mode` 与 `cache_mode` 必须符合 §2.3 的联合配置表。
-- MXFP8 仅支持 `PA_BSND`，Query/KV 量化开关必须一致；KV per-channel/per-tile 不支持。
-- `ckvkr_repo_mode=quant_scale_repo_mode=0` 且 `tile_size=128`。
+- `weight_quant_mode` 与 `kv_cache_quant_mode` 必须落在 §2.3 合法表内。
+- pertile 要求 `ckvkr_repo_mode=quant_scale_repo_mode=1` 且 `tile_size=128`；`kr_cache` 为空。
+- KV per-tensor 时 `query_quant_mode` 必须为 `1`。
 - `PA_BLK_*` 需要 `actual_seq_len`；末项语义与合轴 `T` 一致。
 - RoPE 开关由 `rope_sin` / `rope_cos` 是否为空决定：同时非空启用，同为空（`numel()==0`）禁用。
 - B/S/T/Skv 允许为 0：空 query 时不更新 cache；Skv=0 时正常算 query 但不写 cache。

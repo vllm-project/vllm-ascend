@@ -265,6 +265,20 @@ ge::graphStatus MlaPrologTilingCheck::CheckDims() const
 
 ge::graphStatus MlaPrologTilingCheck::CheckQuantMode() const
 {
+    if (scenarioInfo_.weightQuantMode_ == WEIGHT_QUANT_MODE::MXFP8_FULL_QUANT &&
+        context_.tokenX.desc->GetDataType() == ge::DT_BF16) {
+        const bool targetShape =
+            (baseShapeInfo_.tSize == 32U && baseShapeInfo_.nSize == 12U &&
+             scenarioInfo_.quantMode_ == QUANT_MODE::MXFP8_FULL_QUANT_KV_QUANT_PER_TENSOR) ||
+            (baseShapeInfo_.tSize == 64U && baseShapeInfo_.nSize == 96U &&
+             scenarioInfo_.quantMode_ == QUANT_MODE::MXFP8_FULL_QUANT_KV_NO_QUANT);
+        OP_CHECK_IF(!targetShape || baseShapeInfo_.heSize != 7168U ||
+                        scenarioInfo_.splitMFlag_ != 0U,
+                    OP_LOGE(context_.opName,
+                            "BF16 input MX quantization supports split-N K3 T32/H12 or T64/H96 with K7168 only."),
+                    return ge::GRAPH_FAILED);
+    }
+
     if (GetCurNpuArch() == NpuArch::DAV_3510) {
         if (std::strncmp(context_.opType, V3_OP_NAME, OP_NAME_LEN) == 0) {
             const std::set<uint32_t> supportedQuantModes{
@@ -787,7 +801,10 @@ void MlaPrologTilingCheck::FillMxfp8FullQuantParamInfo()
                                std::vector<uint32_t>{baseShapeInfo_.hckvSize + baseShapeInfo_.drSize,
                                                      baseShapeInfo_.heSize / MXFP8_BLOCK_SIZE});
 
-    expectedParamInfo_[TOKEN_X_NAME].dtype = ge::DT_FLOAT8_E4M3FN;
+    expectedParamInfo_[TOKEN_X_NAME].dtype = context_.tokenX.desc->GetDataType() == ge::DT_BF16
+        ? ge::DT_BF16 : ge::DT_FLOAT8_E4M3FN;
+    expectedParamInfo_[DEQUANT_SCALE_X_NAME].isValid =
+        context_.tokenX.desc->GetDataType() != ge::DT_BF16;
     expectedParamInfo_[WEIGHT_DQ_NAME].dtype = ge::DT_FLOAT8_E4M3FN;
     expectedParamInfo_[WEIGHT_UQ_QR_NAME].dtype = ge::DT_FLOAT8_E4M3FN;
     expectedParamInfo_[WEIGHT_DKV_KR_NAME].dtype = ge::DT_FLOAT8_E4M3FN;
