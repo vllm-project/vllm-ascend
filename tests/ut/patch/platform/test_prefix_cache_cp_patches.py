@@ -155,6 +155,19 @@ def test_resolve_kv_cache_block_sizes_with_cp_hybrid_groups(
     assert hash_block_size == expected_hash_block_size
 
 
+def test_negative_get_new_blocks_does_not_corrupt_free_queue() -> None:
+    block_pool = BlockPool(
+        num_gpu_blocks=10,
+        enable_caching=True,
+        hash_block_size=4,
+    )
+    num_free_blocks = block_pool.get_num_free_blocks()
+
+    assert block_pool.get_new_blocks(-2) == []
+    assert block_pool.get_num_free_blocks() == num_free_blocks
+    assert len(block_pool.free_block_queue.get_all_free_blocks()) == num_free_blocks
+
+
 @pytest.mark.parametrize(
     ("spec_factory", "dcp", "pcp", "enable_caching", "expected"),
     [
