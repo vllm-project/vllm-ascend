@@ -53,7 +53,7 @@ def test_dynamic_quant_fusion_preserves_dtype(dtype, quant_kind, eps, use_bias):
             quantized, scale = torch.ops.npu.npu_dynamic_quant(norm, dst_type=quant_dtype)
         return quantized, scale, updated_residual
 
-    optimized_targets = []
+    optimized_targets: list[object] = []
     original_optimize = nge.npu_fx_compiler._optimize_fx
 
     def inspect_graph(gm, *args, **kwargs):
