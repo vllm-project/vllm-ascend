@@ -261,6 +261,7 @@ class AscendPCPManager(PCPManager):
         self,
         input_batch: AscendInputBatch,
         padded_num_tokens: int | None = None,
+        padded_num_reqs: int | None = None,
     ) -> AscendInputBatch:
         """Partition the batch and update Ascend-specific local metadata."""
         global_batch = input_batch
@@ -270,6 +271,9 @@ class AscendPCPManager(PCPManager):
             local_batch = super().partition_batch(
                 global_batch,
                 padded_num_tokens=padded_num_tokens,
+                # vLLM main (#53867) pads request metadata for FULL graphs via
+                # padded_num_reqs; v0.29.0 does not accept it yet.
+                **({} if vllm_version_is("0.29.0") else {"padded_num_reqs": padded_num_reqs}),
             )
         assert isinstance(local_batch, AscendInputBatch)
 
@@ -284,9 +288,10 @@ class AscendPCPManager(PCPManager):
             global_batch.num_tokens_after_padding if is_full_decode_graph else global_batch.num_reqs_after_padding
         )
         # On newer vLLM, the base PCP manager may already honor
-        # ``padded_num_tokens`` while leaving request-shaped metadata at the
-        # actual request count. Pad when either extent is still short so the
-        # runtime metadata matches the fixed graph capture layout.
+        # ``padded_num_tokens``/``padded_num_reqs`` while leaving
+        # request-shaped metadata at the actual request count. Pad when either
+        # extent is still short so the runtime metadata matches the fixed
+        # graph capture layout.
         needs_token_padding = graph_num_tokens > local_batch.num_tokens_after_padding
         needs_request_padding = graph_num_reqs > local_batch.num_reqs_after_padding
         if is_decode_only and (needs_token_padding or needs_request_padding):
