@@ -767,33 +767,21 @@ if __name__ == "__main__":
 
 class TestInferDcpMismatchInfo(unittest.TestCase):
     def test_same_dcp_returns_false(self):
-        self.assertFalse(
-            infer_dcp_mismatch_info("kv_consumer", {"prefill_dcp_size": 2}, 2)
-        )
-        self.assertFalse(
-            infer_dcp_mismatch_info("kv_producer", {"decode_dcp_size": 8}, 8, 1)
-        )
+        self.assertFalse(infer_dcp_mismatch_info("kv_consumer", {"prefill_dcp_size": 2}, 2))
+        self.assertFalse(infer_dcp_mismatch_info("kv_producer", {"decode_dcp_size": 8}, 8, 1))
 
     def test_missing_peer_key_returns_false(self):
         # single-group path: peer topology absent -> local layout authoritative
         self.assertFalse(infer_dcp_mismatch_info("kv_consumer", {}, 2, 1))
 
     def test_consumer_prefill_dcp_mismatch_detected(self):
-        self.assertTrue(
-            infer_dcp_mismatch_info("kv_consumer", {"prefill_dcp_size": 8}, 2)
-        )
+        self.assertTrue(infer_dcp_mismatch_info("kv_consumer", {"prefill_dcp_size": 8}, 2))
 
     def test_producer_decode_dcp_mismatch_detected(self):
-        self.assertTrue(
-            infer_dcp_mismatch_info("kv_producer", {"decode_dcp_size": 2}, 8)
-        )
+        self.assertTrue(infer_dcp_mismatch_info("kv_producer", {"decode_dcp_size": 2}, 8))
 
     def test_pcp_mismatch_detected(self):
-        self.assertTrue(
-            infer_dcp_mismatch_info(
-                "kv_consumer", {"prefill_dcp_size": 2, "prefill_pcp_size": 4}, 2, 1
-            )
-        )
+        self.assertTrue(infer_dcp_mismatch_info("kv_consumer", {"prefill_dcp_size": 2, "prefill_pcp_size": 4}, 2, 1))
 
     def test_non_mapping_extra_config_returns_false(self):
         self.assertFalse(infer_dcp_mismatch_info("kv_consumer", object(), 2, 1))
@@ -802,6 +790,4 @@ class TestInferDcpMismatchInfo(unittest.TestCase):
         self.assertFalse(infer_dcp_mismatch_info("kv_both", {"prefill_dcp_size": 8}, 2, 1))
 
     def test_invalid_peer_value_treated_as_local(self):
-        self.assertFalse(
-            infer_dcp_mismatch_info("kv_consumer", {"prefill_dcp_size": "bad"}, 2, 1)
-        )
+        self.assertFalse(infer_dcp_mismatch_info("kv_consumer", {"prefill_dcp_size": "bad"}, 2, 1))

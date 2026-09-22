@@ -38,7 +38,6 @@ def _as_positive_int(value: Any, default: int) -> int:
     return parsed if parsed > 0 else default
 
 
-
 def infer_dcp_mismatch_info(
     kv_role: str,
     extra_config: Mapping[str, Any] | object,
