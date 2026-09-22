@@ -517,8 +517,26 @@ def _minimax_m3_sparse_attn_a3(
     sm_scale: float,
     output: torch.Tensor,
     block_size: int,
+    *,
+    supports_fp8: bool = False,
 ) -> None:
     key, value = _split_main_kv_cache(kv_cache)
+    # Q-gather-KV is also the A5 fallback when experimental Split-KV is
+    # unavailable. Match decode's unscaled E4M3 inputs and BF16 output.
+    op_kwargs: dict[str, Any] = {}
+    if key.dtype == torch.float8_e4m3fn:
+        if not supports_fp8:
+            raise TypeError("MiniMax-M3 FP8 sparse attention is not supported on this device")
+        if value.dtype != torch.float8_e4m3fn:
+            raise TypeError("MiniMax-M3 FP8 sparse attention requires both K and V caches in E4M3")
+        q = _to_fp8_e4m3(q)
+        dequant_scale = torch.ones((1, 1, 1, 1), dtype=torch.float32, device=q.device)
+        op_kwargs = {
+            "q_dequant_scale": dequant_scale,
+            "k_dequant_scale": dequant_scale,
+            "v_dequant_scale": dequant_scale,
+            "attention_out_dtype": torch.bfloat16,
+        }
     q_lens_t = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
     out = torch.ops._C_ascend.npu_sparse_attention_score(
         q,
@@ -534,6 +552,7 @@ def _minimax_m3_sparse_attn_a3(
         block_size=block_size,
         top_k=topk_idx.shape[-1],
         inner_precise=_SPARSE_ATTN_INNER_PRECISE,
+        **op_kwargs,
     )
     output.copy_(out)
 
@@ -607,7 +626,11 @@ def _minimax_m3_sparse_attn_kv_gather_q(
 
 @lru_cache
 def _is_minimax_sparse_attention_split_kv_available() -> bool:
-    """Return whether the vendor Split-KV ACLNN entry points are installed."""
+    """Check compatible vendor entry points once per worker process.
+
+    Restart workers after installing the experimental package and sourcing its
+    environment; the ACLNN loader also caches its library search paths.
+    """
     import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401, PLC0415
 
     enable_custom_op()
@@ -647,14 +670,10 @@ def minimax_m3_sparse_attn(
     hardware_profile = get_current_hardware_profile()
     supports_kv_gather_q = hardware_profile.supports(HardwareCapability.MINIMAX_M3_PREFILL_KV_GATHER_Q)
     supports_fp8 = hardware_profile.supports(HardwareCapability.FP8_ATTENTION)
-    if not supports_kv_gather_q:
-        _minimax_m3_sparse_attn_a3(*common_args)
-        return
-
-    # The A3 CI image can predate the vendor Split-KV ACLNN package. A5
-    # already requires that package and cannot use the BF16-only A3 fallback.
-    if not supports_fp8 and not _is_minimax_sparse_attention_split_kv_available():
-        _minimax_m3_sparse_attn_a3(*common_args)
+    # Hardware support does not imply that the optional experimental ACLNN
+    # package is installed. Both A3 and A5 can fall back to Q-gather-KV.
+    if not supports_kv_gather_q or not _is_minimax_sparse_attention_split_kv_available():
+        _minimax_m3_sparse_attn_a3(*common_args, supports_fp8=supports_fp8)
         return
 
     _minimax_m3_sparse_attn_kv_gather_q(
