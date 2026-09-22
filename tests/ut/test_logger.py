@@ -182,7 +182,8 @@ class TestLoggerModule(TestBase):
         from vllm_ascend.logger import RotatingAscendFileHandler
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            handler = RotatingAscendFileHandler(tmpdir, max_bytes=100)
+            base_name = "vllm_ascend_test.log"
+            handler = RotatingAscendFileHandler(tmpdir, base_name, max_bytes=100)
             handler.setFormatter(logging.Formatter("%(message)s"))
             logger = logging.getLogger("test_rotate")
             logger.addHandler(handler)
