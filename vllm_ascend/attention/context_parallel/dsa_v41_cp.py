@@ -34,12 +34,6 @@ class _ReplicatedCacheMetadataBuilder(AscendDSAV41MetadataBuilder):
             kv_cache_spec, layer_names, vllm_config, device, build_query_metadata=False
         )
 
-    def prepare_source_rope(self):
-        # MRV2 wires RoPE init through this hook; forward to the inner
-        # global builder. This must not flip the async task switch.
-        self._global_builder.prepare_source_rope()
-        super().prepare_source_rope()
-
     def enable_device_metadata(self):
         super().enable_device_metadata()
         self._global_builder.enable_device_metadata()
