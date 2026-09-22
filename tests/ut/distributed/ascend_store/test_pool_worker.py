@@ -58,6 +58,9 @@ def make_worker(
     pcp_rank=0,
     dcp_size=1,
     kv_cache_config=None,
+    pp_rank=0,
+    pp_partition=None,
+    cache_block_size=16,
 ):
     module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker"
     start_patch(test, f"{module}.get_tensor_model_parallel_rank", return_value=tp_rank)
@@ -85,6 +88,18 @@ def make_worker(
     config.parallel_config.tensor_parallel_size = tp_size
     config.parallel_config.prefill_context_parallel_size = pcp_size
     config.parallel_config.decode_context_parallel_size = dcp_size
+    if pp_partition is not None:
+        config.parallel_config.pipeline_parallel_size = len(pp_partition)
+        config.parallel_config.rank = pp_rank * tp_size + tp_rank
+        config.model_config.get_layers_start_end_indices.side_effect = lambda parallel: (
+            sum(pp_partition[: parallel.rank // tp_size]),
+            sum(pp_partition[: parallel.rank // tp_size + 1]),
+        )
+        config.model_config.get_total_num_hidden_layers.return_value = sum(pp_partition)
+        config.model_config.compute_hash.return_value = "test-model-config"
+        config.cache_config.compute_hash.return_value = "test-cache-config"
+        config.cache_config.cache_dtype = "auto"
+        config.speculative_config = None
     config.additional_config = {"enable_kvpp": use_kvpp}
     config.kv_transfer_config.kv_role = kv_role
     config.kv_transfer_config.kv_connector_extra_config = {
@@ -93,7 +108,7 @@ def make_worker(
     }
     if kv_cache_config is not None:
         config.scheduler_config.disable_hybrid_kv_cache_manager = False
-    config.cache_config.block_size = 16
+    config.cache_config.block_size = cache_block_size
     config.kv_events_config = None
     if enable_kv_events:
         config.kv_events_config = MagicMock(enable_kv_cache_events=True)

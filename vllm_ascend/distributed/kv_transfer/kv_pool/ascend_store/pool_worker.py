@@ -216,9 +216,6 @@ class KVPoolWorker:
             self.use_block_key_layerwise and kv_cache_groups is not None and len(kv_cache_groups) > 1
         )
         self.block_key_hybrid = self.use_block_key_layerwise and self.use_hybrid
-        self.block_key_hybrid_layout = (
-            self.layerwise_protocol.hybrid_layout_id(kv_cache_config, self.tp_size) if self.block_key_hybrid else ""
-        )
         self._attention_saved_layers: set[int] = set()
         self.use_mamba = self._uses_mamba_kv_cache(self.use_hybrid, kv_cache_config)
         speculative_config = getattr(vllm_config, "speculative_config", None)
@@ -237,6 +234,17 @@ class KVPoolWorker:
         self.block_size = self.grouped_block_size[0]
         self.lcm_block_size = math.lcm(*self.grouped_block_size)
         self.num_kv_cache_groups = len(self.grouped_block_size)
+        self.layerwise_keys = (
+            self.layerwise_protocol.bind_layerwise_keys(
+                vllm_config=vllm_config,
+                kv_cache_config=kv_cache_config,
+                model_name=self.model_name,
+                use_hybrid=self.use_hybrid,
+                grouped_block_size=self.grouped_block_size,
+            )
+            if self.use_layerwise and self.layerwise_protocol is not None
+            else None
+        )
         self.kv_cache_group_families = infer_group_cache_families(kv_cache_groups, self.compress_ratios, self.hf_config)
         self.group_uses_align_state = self._infer_group_uses_align_state()
         self.cache_transfer_granularity = infer_cache_transfer_granularity(
@@ -602,15 +610,18 @@ class KVPoolWorker:
         # When num_kv_cache_groups == 1 and extra layers (e.g. MTP or
         # spec-decode draft layers) are present, num_layers is updated in
         # register_kv_caches to include them; the key layer count must follow
-        # or those extra layers are skipped during the save/load lifecycle.
-        # Guard with pp_size == 1: under PP>1, num_layers holds the GLOBAL
-        # layer count after the cache-group layout update, while
-        # layerwise_key_layers must stay at the per-stage LOCAL count.
-        if self.num_kv_cache_groups == 1 and getattr(self, "pp_size", 1) == 1:
+        # or those extra layers are skipped during the save/load lifecycle. A
+        # block-key store owns a stage-local object, so its count stays local
+        # under PP. A GVA store retains the global PP layout and offset below.
+        if self.use_block_key_layerwise or (self.num_kv_cache_groups == 1 and getattr(self, "pp_size", 1) == 1):
             self.layerwise_key_layers = self.num_layers
         for group_id in range(self.num_kv_cache_groups):
             group_num_layers = self.group_num_layers.get(group_id, self.num_layers)
-            group_page_size = self._global_group_alloc_size(group_id)
+            group_page_size = (
+                sum(self.group_block_len[group_id])
+                if self.use_block_key_layerwise
+                else self._global_group_alloc_size(group_id)
+            )
             # Global byte offsets for the shared GVA region:
             #   PP: each stage writes its local layers at
             #       (pp_layer_offset + local_layer) * per_layer_bytes.
@@ -624,7 +635,7 @@ class KVPoolWorker:
             #       and no shard separation is needed.
             layer_byte_offset = 0
             gbl = self.group_block_len.get(group_id) or []
-            if gbl and group_num_layers > 0:
+            if not self.use_block_key_layerwise and gbl and group_num_layers > 0:
                 per_layer = sum(gbl) // group_num_layers
                 if getattr(self, "pp_size", 1) > 1:
                     layer_byte_offset += int(getattr(self, "layerwise_key_layer_offset", 0)) * per_layer
@@ -1483,23 +1494,9 @@ class KVPoolWorker:
             )
 
     def _make_layerwise_full_key(self, group_id: int, block_hash_hex: str) -> str:
-        """Full-block key for the layerwise transfer, built by the
-        backend's protocol module.
-
-        Single-group models use the PR #11585 format (model@hash@rank) for
-        backward compatibility. Multi-group models include group_id
-        (model@group_id@hash@rank) to distinguish groups. PP stages also need
-        pp_rank because they share block hashes and TP/head rank numbering.
-        """
-        return self.layerwise_protocol.make_full_key(
-            self.model_name,
-            group_id,
-            block_hash_hex,
-            self.head_or_tp_rank,
-            self.num_kv_cache_groups,
-            self.pp_rank,
-            self.pp_size,
-        )
+        """Use the backend-bound layout shared with scheduler hit checks."""
+        assert self.layerwise_keys is not None
+        return self.layerwise_keys.make_full_key(group_id, block_hash_hex, self.head_or_tp_rank, self.pp_rank)
 
     def _make_layerwise_partial_key(
         self,
@@ -1949,6 +1946,22 @@ class KVPoolWorker:
     def _is_layerwise_save_owner(self) -> bool:
         return is_kv_save_role(self.kv_role, self.consumer_is_to_put) and self.tp_rank % self.put_step == 0
 
+    def _make_mooncake_layerwise_key(self, block_hash_or_tail: str) -> str:
+        return self._make_layerwise_full_key(0, block_hash_or_tail)
+
+    def _groups_for_layerwise_transfer(self, local_layer: int) -> list[tuple[int, int]]:
+        if self.use_block_key_layerwise:
+            # The map and buffer builders both use stage-local physical layer
+            # indices. A group's dense layer index is a third, distinct axis.
+            if self.num_kv_cache_groups == 1:
+                return [(0, local_layer)]
+            groups = self.physical_layer_to_group_layers.get(local_layer)
+            if groups is None:
+                raise RuntimeError(f"Mooncake layerwise: no KV cache group for local layer {local_layer}")
+            return groups
+        physical_layer = local_layer + self.layerwise_key_layer_offset
+        return self.physical_layer_to_group_layers.get(physical_layer, [(0, local_layer)])
+
     def _layerwise_key_batches(self, keys: list[str]) -> list[list[str]]:
         batch_size = self.layerwise_max_transfer_blocks if self.layerwise_max_transfer_blocks > 0 else max(1, len(keys))
         return [keys[start : start + batch_size] for start in range(0, len(keys), batch_size)]
@@ -2094,20 +2107,12 @@ class KVPoolWorker:
         request.save_block_keys = [None] * max(0, end_block - start_block)
         key_slots: list[tuple[str, int | None, int]] = []
         for block_index in range(start_block, min(end_block, len(group_block_hashes))):
-            key = self.layerwise_protocol.make_block_key(
-                self.model_name,
-                block_hash_to_str(group_block_hashes[block_index]),
-                self.head_or_tp_rank,
-            )
+            key = self._make_mooncake_layerwise_key(block_hash_to_str(group_block_hashes[block_index]))
             request.save_block_keys[block_index - start_block] = key
             key_slots.append((key, block_index - start_block, block_index))
 
         if request.partial_block_index is not None:
-            request.save_last_block_key = self.layerwise_protocol.make_block_key(
-                self.model_name,
-                f"{request.req_id}_lastblock",
-                self.head_or_tp_rank,
-            )
+            request.save_last_block_key = self._make_mooncake_layerwise_key(f"{request.req_id}_lastblock")
             key_slots.append((request.save_last_block_key, None, request.partial_block_index))
 
         requested_keys = list(dict.fromkeys(key for key, _, _ in key_slots))
@@ -2162,11 +2167,7 @@ class KVPoolWorker:
             for block_index in range(start_block, end_block):
                 current_entries.append(
                     (
-                        self.layerwise_protocol.make_block_key(
-                            self.model_name,
-                            block_hash_to_str(group_block_hashes[block_index]),
-                            self.head_or_tp_rank,
-                        ),
+                        self._make_mooncake_layerwise_key(block_hash_to_str(group_block_hashes[block_index])),
                         block_index,
                     )
                 )
@@ -2177,11 +2178,7 @@ class KVPoolWorker:
             if needs_last_block and 0 <= partial_block_index < len(request.block_ids):
                 current_entries.append(
                     (
-                        self.layerwise_protocol.make_block_key(
-                            self.model_name,
-                            f"{request.req_id}_lastblock",
-                            self.head_or_tp_rank,
-                        ),
+                        self._make_mooncake_layerwise_key(f"{request.req_id}_lastblock"),
                         partial_block_index,
                     )
                 )
@@ -2392,35 +2389,21 @@ class KVPoolWorker:
             return
         # Keep this method safe for direct callers as well as start_load_kv().
         # Worker threads may still own the lists from the preceding step.
-        # PP fix: num_layers may be widened to the GLOBAL layer count by the
-        # cache-group layout update, but only the per-stage LOCAL layers are
-        # forwarded. Map the local layer counter to the global physical layer
-        # via the PP offset so task lists are indexed by LOCAL layer id
-        # (matching save_kv_layer's current_layer) while group lookups hit the
-        # real physical_layer_to_group_layers entries.
-        # Under PP>1 use the per-stage LOCAL layer count; otherwise keep the
-        # legacy self.num_layers so post-init mutations are respected.
-        if getattr(self, "pp_size", 1) > 1:
+        # Mooncake uses the projected stage-local cache layout, including any
+        # draft layers. The GVA/key planes retain their existing PP key count.
+        if not self.use_block_key_layerwise and getattr(self, "pp_size", 1) > 1:
             num_local = getattr(self, "layerwise_key_layers", 0) or self.num_layers
         else:
             num_local = self.num_layers
-        layer_offset = getattr(self, "layerwise_key_layer_offset", 0)
-        if not isinstance(layer_offset, int):
-            layer_offset = 0
         self.layer_save_tasks = [[] for _ in range(self.num_layers)]
         self.layer_load_tasks = [[] for _ in range(self.num_layers)]
         for request in requests:
             request.store_masks = self._compute_reachable_store_masks(request)
         group_requests = {}
         if self.use_block_key_layerwise:
-            if self.block_key_hybrid:
-                group_requests = self.layerwise_protocol.prepare_group_sessions(self, requests)
-            else:
-                self._prepare_block_key_layerwise_sessions(requests)
+            group_requests = self.layerwise_protocol.prepare_layerwise_sessions(self, requests)
         for local_layer in range(num_local):
-            physical_layer = local_layer + layer_offset
-            group_layers = self.physical_layer_to_group_layers.get(physical_layer, [(0, local_layer)])
-            for group_id, layer_idx_in_group in group_layers:
+            for group_id, layer_idx_in_group in self._groups_for_layerwise_transfer(local_layer):
                 self._process_save_for_layer_batch(
                     group_requests.get(group_id, requests), local_layer, group_id, layer_idx_in_group
                 )
@@ -2429,9 +2412,7 @@ class KVPoolWorker:
         self._alloc_gvas_for_save(requests)
         self._build_shared_save_data()
         for local_layer in range(num_local):
-            physical_layer = local_layer + layer_offset
-            group_layers = self.physical_layer_to_group_layers.get(physical_layer, [(0, local_layer)])
-            for group_id, layer_idx_in_group in group_layers:
+            for group_id, layer_idx_in_group in self._groups_for_layerwise_transfer(local_layer):
                 self._process_load_for_layer_batch(
                     group_requests.get(group_id, requests), local_layer, group_id, layer_idx_in_group
                 )
@@ -2616,10 +2597,8 @@ class KVPoolWorker:
         return invalid_blocks
 
     def save_kv_layer(self, connector_metadata: AscendConnectorMetadata) -> None:
-        # PP fix: num_layers may be widened to the GLOBAL layer count by the
-        # cache-group layout update, but only the per-stage LOCAL layers are
-        # forwarded. Use the local count for the save lifecycle.
-        if getattr(self, "pp_size", 1) > 1:
+        # Match process_layer_data(), including stage-local draft layers.
+        if not self.use_block_key_layerwise and getattr(self, "pp_size", 1) > 1:
             num_local = getattr(self, "layerwise_key_layers", 0) or self.num_layers
         else:
             num_local = self.num_layers
@@ -2656,6 +2635,14 @@ class KVPoolWorker:
             send_thread.raise_if_failed()
             logger.info("Layerwise %d save not done, keep waiting", num_local - 1)
         send_thread.raise_if_failed()
+        if self.use_block_key_layerwise:
+            # An empty final layer sets its event on the compute thread, ahead
+            # of earlier queued PUTs. Drain at the step boundary before source
+            # blocks can be reused. Layer-to-layer overlap remains unchanged.
+            for layer_id in range(num_local - 1):
+                while not save_finished_events[layer_id].wait(timeout=10):
+                    send_thread.raise_if_failed()
+            send_thread.raise_if_failed()
         reuse_source_layers = set(self.prefetch_layer_map.values())
         for layer_id in range(num_local):
             if layer_id in reuse_source_layers:
