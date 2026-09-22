@@ -5366,7 +5366,6 @@ class NPUModelRunner(GPUModelRunner):
 
                     # MLA使用allocate/hybrid阶段的一整块raw backing。
                     # A5FlashMLA消费token交错的单tensor；A3 FIA消费component-major 双view。MHA/GQA继续走raw K/V协议。
-                    attn_module = self.compilation_config.static_forward_context.get(layer_name)
                     raw_cache = kv_cache_raw_tensors[layer_name]
                     fused_raw_tensor = None
                     if isinstance(raw_cache, tuple) and len(raw_cache) == 1:
@@ -5376,10 +5375,19 @@ class NPUModelRunner(GPUModelRunner):
                     elif isinstance(raw_cache, torch.Tensor):
                         fused_raw_tensor = raw_cache
 
+                    # Only a single-backing Ascend MLA cache needs module-level
+                    # metadata. Legacy MHA/GQA K/V tuples must keep the original
+                    # path even when a test runner omits compilation state.
+                    attn_module = None
+                    if (
+                        fused_raw_tensor is not None
+                        and type(current_kv_cache_spec) is AscendMLAAttentionSpec
+                    ):
+                        attn_module = self.compilation_config.static_forward_context.get(layer_name)
+
                     if (
                         fused_raw_tensor is not None
                         and isinstance(attn_module, MLAAttention)
-                        and type(current_kv_cache_spec) is AscendMLAAttentionSpec
                         and self.vllm_config.kv_transfer_config is None
                         and not self.use_sparse
                         and not self.sparse_kv_offload_enabled

@@ -85,6 +85,7 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.GRAPH_NORM_QUANT_FUSION,
             HardwareCapability.LOCAL_KV_COMM_RESOURCE,
             HardwareCapability.LORA_CUSTOM_OPS,
+            HardwareCapability.MLA_FLASH,
             HardwareCapability.MLA_DECODE_PROLOG_WITHOUT_ROPE,
             HardwareCapability.MLAPO_NATIVE_WEIGHTS,
             HardwareCapability.MINIMAX_M3_PREFILL_KV_GATHER_Q,

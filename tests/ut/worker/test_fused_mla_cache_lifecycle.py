@@ -132,10 +132,11 @@ def test_component_mla_cow_copies_both_logical_components(monkeypatch):
 
 
 def test_fused_mla_cow_copies_complete_manager_block(monkeypatch):
-    num_blocks = 2
+    num_blocks = 3
     _, fused = _make_k3_fused_cache(num_blocks=num_blocks)
     payload = torch.arange(SLOT_LOGICAL_BYTES // DTYPE_SIZE, dtype=torch.int32).to(torch.bfloat16)
-    fused[3].copy_(payload.view(KERNEL_BLOCK_SIZE, NUM_KV_HEADS, FUSED_DIM))
+    source_payload = payload.view(1, KERNEL_BLOCK_SIZE, NUM_KV_HEADS, FUSED_DIM).expand(RATIO, -1, -1, -1)
+    fused[3:6].copy_(source_payload)
 
     _install_cpu_h2d(monkeypatch)
     copy_kv_cache_blocks_inplace(
@@ -148,4 +149,4 @@ def test_fused_mla_cow_copies_complete_manager_block(monkeypatch):
     torch.testing.assert_close(fused[0], expected)
     torch.testing.assert_close(fused[1], expected)
     torch.testing.assert_close(fused[2], expected)
-    assert not torch.equal(fused[4], expected)
+    assert not torch.equal(fused[6], expected)
