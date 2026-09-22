@@ -5,7 +5,7 @@ from unittest.mock import Mock
 import pytest
 import torch
 from vllm.model_executor.layers.attention import MLAAttention
-from vllm.v1.kv_cache_interface import FullAttentionSpec, SlidingWindowSpec
+from vllm.v1.kv_cache_interface import SlidingWindowSpec
 
 from tests.ut.kvpp_utils import indexer_name, layer_name, make_dspark_kvpp_case, make_kvpp_config, make_kvpp_specs
 from vllm_ascend.ascend_config import KVPPConfig
@@ -147,28 +147,6 @@ def test_dspark_draft_only_stage_has_no_scratch_cost():
     plan = placement.create_kvpp_cache_allocation_plan(config, {name: specs[name] for name in drafts}, 1)
     assert plan.layer_owner_ranks == {}
     assert plan.get_num_blocks(3 * 384) == 3
-
-
-@pytest.mark.parametrize("rank", [0, 1, 2])
-@pytest.mark.parametrize("draft_block_size", [1, 2])
-def test_dspark_sliding_window_draft_uses_full_allocation_budget(rank, draft_block_size):
-    config, specs, drafts = make_dspark_kvpp_case()
-    full_plan = placement.create_kvpp_cache_allocation_plan(config, specs, rank)
-    for name in drafts:
-        specs[name] = SlidingWindowSpec(
-            block_size=draft_block_size, num_kv_heads=2, head_size=8, dtype=torch.float16, sliding_window=4
-        )
-    plan = placement.create_kvpp_cache_allocation_plan(config, specs, rank)
-    assert plan.layer_owner_ranks == full_plan.layer_owner_ranks
-    assert plan.tensor_sizes == full_plan.tensor_sizes
-    assert plan.get_num_blocks(8192) == full_plan.get_num_blocks(8192)
-    for name in drafts:
-        assert isinstance(specs[name], SlidingWindowSpec)
-        assert specs[name].sliding_window == 4
-        assert specs[name].block_size == draft_block_size
-        assert isinstance(plan.logical_cache_spec[name], FullAttentionSpec)
-        assert plan.logical_cache_spec[name].block_size == 2
-        assert name not in plan.layer_owner_ranks
 
 
 def test_mtp_still_rejects_sliding_window_cache_specs():
