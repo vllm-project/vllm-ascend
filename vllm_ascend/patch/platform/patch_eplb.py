@@ -3,8 +3,11 @@
 
 """Narrow vLLM EPLB construction, execution, and commit adapters for Ascend."""
 
+from collections.abc import Sequence
+from dataclasses import dataclass
 from functools import wraps
 from inspect import signature
+from typing import Any
 
 import numpy as np
 import torch
@@ -13,12 +16,15 @@ from vllm.distributed.eplb import async_worker as _async_worker
 from vllm.distributed.eplb import eplb_communicator as _eplb_communicator
 from vllm.distributed.eplb import eplb_state as _eplb_state
 from vllm.logger import logger
+from vllm.model_executor.layers.fused_moe import routed_experts as _routed_experts
 
 from vllm_ascend.distributed.eplb.communicator import AscendGlooEplbCommunicator
 from vllm_ascend.distributed.eplb.explicit_transfer import stage_explicit_layer_transfer
 from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
 from vllm_ascend.distributed.eplb.state import (
     ASYNC_EPLB_CYCLE_COMMITTED_LOG,
+    EXPERT_MAPPING_EP_SIZE,
+    AscendEplbState,
     refresh_model_routing_tables,
 )
 
@@ -94,6 +100,86 @@ def _patch_communicator_factory() -> None:
     wrapped_factory = _wrap_communicator_factory(original_factory)
     _eplb_communicator.create_eplb_communicator = wrapped_factory
     _eplb_state.create_eplb_communicator = wrapped_factory
+
+
+def _build_distributed_initial_expert_map(
+    num_routed_experts: int,
+    num_redundant_experts: int,
+    ep_size: int | None = None,
+) -> Sequence[int]:
+    """Spread initial redundant experts across EP ranks."""
+    if ep_size is None:
+        ep_size = EXPERT_MAPPING_EP_SIZE.get()
+    if num_redundant_experts == 0:
+        return list(range(num_routed_experts))
+    num_physical_experts = num_routed_experts + num_redundant_experts
+    if num_routed_experts < 1 or ep_size < 1 or num_physical_experts % ep_size:
+        raise ValueError("Physical experts must be divisible by a positive EP size")
+
+    slots_per_rank = num_physical_experts // ep_size
+    result: list[int] = []
+    primary_begin = 0
+    for rank in range(ep_size):
+        redundant_count = num_redundant_experts // ep_size + (rank < num_redundant_experts % ep_size)
+        primary_end = primary_begin + slots_per_rank - redundant_count
+        result.extend(range(primary_begin, primary_end))
+        result.extend((primary_end + index) % num_routed_experts for index in range(redundant_count))
+        primary_begin = primary_end
+    return result
+
+
+def _with_expert_mapping_ep_size(original, ep_size_getter):
+    @wraps(original)
+    def wrapped(*args, **kwargs):
+        token = EXPERT_MAPPING_EP_SIZE.set(ep_size_getter(*args, **kwargs))
+        try:
+            return original(*args, **kwargs)
+        finally:
+            EXPERT_MAPPING_EP_SIZE.reset(token)
+
+    setattr(wrapped, _PATCH_MARKER, True)
+    return wrapped
+
+
+def _patch_initial_expert_layout() -> None:
+    build_map = _eplb_state.EplbState.build_initial_global_physical_to_logical_map
+    if "ep_size" in signature(build_map).parameters:
+        return
+    _eplb_state.EplbState.build_initial_global_physical_to_logical_map = staticmethod(
+        _build_distributed_initial_expert_map
+    )
+    routed_experts = _routed_experts.RoutedExperts
+
+    original_get = routed_experts.get_expert_mapping
+    if not getattr(original_get, _PATCH_MARKER, False):
+        routed_experts.get_expert_mapping = _with_expert_mapping_ep_size(
+            original_get,
+            lambda self, *_args, **_kwargs: self.moe_config.ep_size
+            if getattr(self, "_use_v2_model_runner", False)
+            else 1,
+        )
+
+    original_make = routed_experts.make_expert_params_mapping
+    if not getattr(original_make, _PATCH_MARKER, False):
+        make_signature = signature(original_make)
+
+        def model_ep_size(*args, **kwargs):
+            bound = make_signature.bind(*args, **kwargs)
+            if not bound.arguments.get("num_redundant_experts", 0):
+                return 1
+            model = bound.arguments["model"]
+            ep_sizes = {
+                module.moe_config.ep_size
+                for module in model.modules()
+                if isinstance(module, routed_experts) and getattr(module, "_use_v2_model_runner", False)
+            }
+            if len(ep_sizes) > 1:
+                raise RuntimeError("MRV2 redundant expert loading requires one EP size")
+            return ep_sizes.pop() if ep_sizes else 1
+
+        routed_experts.make_expert_params_mapping = staticmethod(
+            _with_expert_mapping_ep_size(original_make, model_ep_size)
+        )
 
 
 def _has_explicit_sources(target) -> bool:
@@ -256,6 +342,7 @@ def _patch_async_move_to_workspace() -> None:
 
 
 _patch_parallel_config()
+_patch_initial_expert_layout()
 _patch_communicator_factory()
 _patch_explicit_transfer_execution()
 _patch_async_move_to_workspace()

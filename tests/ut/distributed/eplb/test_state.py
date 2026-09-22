@@ -242,6 +242,7 @@ def test_add_model_initializes_custom_load_history(monkeypatch):
         state.model_states["model"] = model_state
 
     monkeypatch.setattr(upstream_eplb_state.EplbState, "add_model", upstream_add_model)
+    monkeypatch.setattr(eplb_state, "get_ep_group", lambda: SimpleNamespace(world_size=1))
 
     state.add_model(model, model_config)
 
@@ -283,7 +284,7 @@ def test_layer_state_builds_routing_table_and_preserves_captured_tensor(
     monkeypatch.setattr(
         eplb_state,
         "get_ep_group",
-        lambda: SimpleNamespace(rank_in_group=1),
+        lambda: SimpleNamespace(rank_in_group=1, world_size=2),
     )
     monkeypatch.setattr(
         eplb_state._eplb_ops,
