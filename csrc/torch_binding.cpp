@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include <dlfcn.h>
 #include <torch/extension.h>
 #include <torch/library.h>
 #include <torch/version.h>
@@ -2080,6 +2081,9 @@ bool is_minimax_sparse_attention_split_kv_available()
         // GetWorkspaceSize without renaming it. This binding uses the earlier
         // signature. Reject that known incompatible ABI before invoking it.
         // Inspect the selected provider, not a lower-priority vendor library.
+        if (workspace_info.dli_fname == nullptr) {
+            return false;
+        }
         auto handle = dlopen(workspace_info.dli_fname, RTLD_LAZY | RTLD_LOCAL);
         if (handle == nullptr) {
             return false;
