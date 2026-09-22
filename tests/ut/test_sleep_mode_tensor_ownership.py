@@ -24,7 +24,7 @@ from torch import nn
 
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPImpl
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
-from vllm_ascend.ops import rope_dsv4
+from vllm_ascend.ops import rope_dsv4, rotary_embedding
 
 
 def _level2_save(model: nn.Module) -> dict[str, torch.Tensor]:
@@ -299,3 +299,74 @@ def test_dsv4_rope_tables_survive_level2_sleep() -> None:
 
     assert torch.equal(full_rope_cos, expected_cos)
     assert torch.equal(full_rope_sin, expected_sin)
+
+
+# ---------------------------------------------------------------------------
+# Derived interleaved RoPE tables (module-level cache)
+# ---------------------------------------------------------------------------
+
+
+def _register_interleaved_rope_owner(cos_sin_cache: torch.Tensor) -> nn.Module:
+    """Build the derived interleaved pair the way ``AscendRotaryEmbedding`` does."""
+    owner = nn.Module()
+    owner.register_buffer("cos_sin_cache", cos_sin_cache, persistent=False)
+    # The recorder is first-module-wins, so start from a clean process state. The
+    # globals are annotated as plain tensors because the forward paths only read
+    # them after a rope module has been built.
+    rotary_embedding._cos_cache = None  # type: ignore[assignment]
+    rotary_embedding._sin_cache = None  # type: ignore[assignment]
+    rotary_embedding._record_cos_and_sin_cache_interleaved(owner, cos_sin_cache)
+    return owner
+
+
+def test_interleaved_rope_tables_are_owned_non_persistent_buffers() -> None:
+    cos_sin_cache = torch.arange(4 * 8, dtype=torch.float32).reshape(4, 8)
+    owner = _register_interleaved_rope_owner(cos_sin_cache)
+    cos_cache = rotary_embedding._cos_cache
+    sin_cache = rotary_embedding._sin_cache
+    assert cos_cache is not None and sin_cache is not None
+
+    # Every MLA/SFA rope lookup reads these through the module globals, so the
+    # globals have to alias buffers the level-2 backup can reach.
+    assert owner.get_buffer("_rope_derived_cos_cache") is cos_cache
+    assert owner.get_buffer("_rope_derived_sin_cache") is sin_cache
+    assert _buffer_is_visible(owner, cos_cache)
+    assert _buffer_is_visible(owner, sin_cache)
+    assert "_rope_derived_cos_cache" not in owner.state_dict()
+    assert "_rope_derived_sin_cache" not in owner.state_dict()
+    # The pair is the owner's rope table split into its cos and sin halves and
+    # tiled back to full width, so the leading half of each derived table
+    # reconstructs the module's table.
+    hidden_dim = cos_sin_cache.shape[-1] // 2
+    torch.testing.assert_close(
+        torch.cat([cos_cache[:, :hidden_dim], sin_cache[:, :hidden_dim]], dim=-1),
+        cos_sin_cache,
+    )
+    torch.testing.assert_close(cos_cache[:, hidden_dim:], cos_cache[:, :hidden_dim])
+    torch.testing.assert_close(sin_cache[:, hidden_dim:], sin_cache[:, :hidden_dim])
+
+
+def test_interleaved_rope_tables_survive_level2_sleep() -> None:
+    cos_sin_cache = torch.arange(6 * 16, dtype=torch.float32).reshape(6, 16)
+    owner = _register_interleaved_rope_owner(cos_sin_cache)
+    cos_cache = rotary_embedding._cos_cache
+    sin_cache = rotary_embedding._sin_cache
+    assert cos_cache is not None and sin_cache is not None
+    expected_cos = cos_cache.clone()
+    expected_sin = sin_cache.clone()
+
+    model = nn.Module()
+    model.rotary_emb = owner
+    saved = _level2_save(model)
+    assert sum(name.endswith("_rope_derived_cos_cache") for name in saved) == 1
+    assert sum(name.endswith("_rope_derived_sin_cache") for name in saved) == 1
+
+    _level2_discard(model)
+    _level2_restore(model, saved)
+
+    torch.testing.assert_close(cos_cache, expected_cos)
+    torch.testing.assert_close(sin_cache, expected_sin)
+    # The globals keep the very same objects, which is what keeps the addresses
+    # baked into captured ACL graphs valid.
+    assert rotary_embedding._cos_cache is cos_cache
+    assert rotary_embedding._sin_cache is sin_cache
