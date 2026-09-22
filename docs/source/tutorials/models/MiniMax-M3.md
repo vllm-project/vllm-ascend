@@ -935,6 +935,7 @@ Key Parameter Descriptions:
 
 **Decode node-specific configurations:**
 
+- `"max_cudagraph_capture_size"` (optional, omitted by default): Limits the maximum decode batch size covered by ACL graph capture and the graph memory reserved for it; the program default is `512`. With EAGLE3 speculative decoding, each request is expanded to `1 + num_speculative_tokens` tokens in one decode step (`4` tokens when `num_speculative_tokens=3`). Since DP distributes requests per rank, the per-rank batch size matters: for example, with `DP2` and `--max-num-seqs 256`, each DP rank handles 128 requests, producing `4 × 128 = 512` tokens per step — exactly at the default limit. If concurrency rises to 257, one DP rank handles 129 requests, giving `4 × 129 = 516 > 512`; batches above 512 skip graph capture and fall back to eager execution, lowering decode throughput. In that case set `"max_cudagraph_capture_size":1024` in `--compilation-config` (e.g., `--compilation-config '{"max_cudagraph_capture_size":1024}'`). Because a larger capture size reserves additional NPU memory, the configurations in this tutorial keep the default; add this option only when your target concurrency requires it.
 - `--max-num-seqs 256`: Decode concurrency used by the verified 950DT products 1P1D launch. A3 uses `64`.
 
 **Mooncake KV transfer configuration (`--kv-transfer-config`):**
