@@ -10,10 +10,13 @@ from tests.ut.kvpp_utils import (
     indexer_name,
     layer_name,
     make_cache_config,
+    make_dspark_kvpp_case,
     make_kvpp_config,
     make_kvpp_specs,
+    make_planned_cache_config,
 )
 from vllm_ascend.core.kv_cache_placement import KVPPPhysicalCachePlan
+from vllm_ascend.worker import kvpp_cache
 from vllm_ascend.worker.v2 import kvpp
 
 
@@ -47,7 +50,6 @@ def test_runtime_binds_complete_layer_storage(monkeypatch, scheduler_device, exp
         tensor_sizes={main: (6, 2), indexer: (8, 2), mtp: (4,)},
         kvpp_rank=0,
     )
-    monkeypatch.setattr(kvpp, "create_kvpp_cache_allocation_plan", lambda *_args: plan)
     monkeypatch.setattr(
         kvpp, "get_kvpp_group", lambda: SimpleNamespace(rank_in_group=0, ranks=[4, 9], device_group=object())
     )
@@ -62,7 +64,7 @@ def test_runtime_binds_complete_layer_storage(monkeypatch, scheduler_device, exp
     context = {name: SimpleNamespace(kv_cache=value, impl=SimpleNamespace()) for name, value in caches.items()}
     runtime = kvpp.KVPPRuntime.create_from_kv_cache(
         vllm_config=make_kvpp_config(2),
-        kv_cache_config=make_cache_config(specs, 2),
+        kv_cache_config=make_cache_config(specs, 2, plan=plan),
         static_forward_context=context,
         kv_caches=caches if explicit_caches else None,
     )
@@ -111,6 +113,35 @@ def test_prefetch_sequence_across_forwards(scheduler_device):
         scheduler.complete_forward()
         assert not executor.pending
     assert transport.prefetch.call_count == 6
+
+
+@pytest.mark.parametrize("draft_names", [None, ("draft.layers.9.attn", "draft.layers.103.attn", "draft.cache")])
+def test_dspark_draft_layers_are_absent_from_runtime_prefetch(monkeypatch, scheduler_device, draft_names):
+    config, specs, drafts = make_dspark_kvpp_case(draft_names=draft_names)
+    group = SimpleNamespace(rank_in_group=1, ranks=[0, 1, 2], device_group=object())
+    monkeypatch.setattr(kvpp, "get_kvpp_group", lambda: group)
+    cache_config = make_planned_cache_config(config, specs, drafts=drafts)
+    caches = kvpp_cache.allocate_kvpp_cache(cache_config, torch.device("cpu"))
+    context = config.compilation_config.static_forward_context
+    runtime = kvpp.KVPPRuntime.create_from_kv_cache(
+        vllm_config=config,
+        kv_cache_config=cache_config,
+        static_forward_context=context,
+        kv_caches=caches,
+    )
+    scheduler = runtime.scheduler
+    targets = tuple(layer_name(i) for i in range(9, 17))
+    assert scheduler.attention_layer_names == targets
+    assert all(not hasattr(context[name].impl, "layerwise_kv_cache_hook") for name in drafts)
+    calls = []
+    monkeypatch.setattr(scheduler.transport, "prefetch", lambda name, *_args: calls.append(name))
+    runtime.prepare_forward(True)
+    for name in targets:
+        scheduler._prefetch_executor.run_next()
+        context[name].impl.layerwise_kv_cache_hook.wait_for_layer(name)
+    runtime.complete_forward()
+    assert calls == list(targets)
+    assert not scheduler._prefetch_executor.pending
 
 
 def test_hook_propagates_failed_future_without_scheduling_next(scheduler_device):

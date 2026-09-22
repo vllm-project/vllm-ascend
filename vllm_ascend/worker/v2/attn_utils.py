@@ -627,7 +627,7 @@ def _allocate_kv_cache(
     """
     vllm_config = get_current_vllm_config()
     if KVPPConfig.from_vllm_config(vllm_config).size > 1:
-        caches = allocate_kvpp_cache(vllm_config, kv_cache_config, device)
+        caches = allocate_kvpp_cache(kv_cache_config, device)
         specs = _get_layer_kv_cache_specs(kv_cache_config)
         # Indexer reshape expects a tuple even without a quantization scale.
         # Single-component main MLA caches still use a raw Tensor.

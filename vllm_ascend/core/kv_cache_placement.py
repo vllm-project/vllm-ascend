@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 from collections import defaultdict
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field, fields
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.model_executor.layers.attention import MLAAttention
@@ -9,7 +9,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.models.extract_hidden_states import CacheOnlyAttentionLayer
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.torch_utils import get_dtype_size
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheSpec, UniformTypeKVCacheSpecs
 
 from vllm_ascend.ascend_config import KVPPConfig
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
@@ -30,13 +30,17 @@ class KVPPPhysicalCachePlan:
     tensor_sizes: dict[str, tuple[int, ...]]
     kvpp_rank: int
 
+    def is_persistent(self, layer_name: str) -> bool:
+        """Draft caches and locally owned target caches have persistent storage."""
+        return self.layer_owner_ranks.get(layer_name, self.kvpp_rank) == self.kvpp_rank
+
     def get_num_blocks(self, available_bytes: int) -> int:
         persistent_bytes = 0
         scratch_bytes = 0
         for name, bundle in self.layer_bundles.items():
             _, size = build_kvpp_layer_layout(bundle, self.tensor_sizes, num_blocks=1)
             owner = self.layer_owner_ranks.get(name)
-            if owner is None or owner == self.kvpp_rank:
+            if self.is_persistent(name):
                 persistent_bytes += size
             if owner is not None:
                 scratch_bytes = max(scratch_bytes, size)
@@ -44,14 +48,20 @@ class KVPPPhysicalCachePlan:
         return available_bytes // bytes_per_block if bytes_per_block else 0
 
 
-def build_layer_cache_bundles(cache_spec: dict[str, KVCacheSpec]) -> dict[str, tuple[str, ...]]:
+def build_layer_cache_bundles(
+    cache_spec: dict[str, KVCacheSpec], draft_layers: set[str] | None = None
+) -> dict[str, tuple[str, ...]]:
+    draft_layers = draft_layers or set()
     by_index: dict[int, list[str]] = defaultdict(list)
     for name in sorted(
-        cache_spec,
+        (name for name in cache_spec if name not in draft_layers),
         key=lambda name: (extract_layer_index(name), isinstance(cache_spec[name], AscendSFAIndexerCacheSpec), name),
     ):
         by_index[extract_layer_index(name)].append(name)
-    return {names[0]: tuple(names) for names in by_index.values()}
+    bundles = {names[0]: tuple(names) for names in by_index.values()}
+    # Draft names may reuse target indices or have no numeric index at all.
+    bundles.update({name: (name,) for name in sorted(draft_layers)})
+    return bundles
 
 
 def get_kvpp_attention_kv_dims(vllm_config: VllmConfig, layer_name: str, spec: KVCacheSpec) -> tuple[int, int]:
@@ -104,65 +114,26 @@ def build_kvpp_layer_layout(
     return layout, cursor
 
 
-def find_mtp_layers(
-    vllm_config: VllmConfig,
-    local_layer_names: Iterable[str],
-) -> set[str]:
-    """Find MTP KV-cache layers among this worker's PP-local cache names.
-
-    Only names present in ``local_layer_names`` are returned. A PP stage
-    without MTP caches yields an empty set; KVPP does not assume MTP lives
-    on the last pipeline rank.
-    """
-    speculative_config = vllm_config.speculative_config
-    if speculative_config is None or speculative_config.method != "mtp":
-        return set()
-
-    hf_config = vllm_config.model_config.hf_config
-    mtp_start = hf_config.num_hidden_layers
-    num_mtp_layers = hf_config.num_nextn_predict_layers
-    mtp_end = mtp_start + num_mtp_layers
-    return {layer_name for layer_name in local_layer_names if mtp_start <= extract_layer_index(layer_name) < mtp_end}
-
-
-def map_kvpp_layers_to_owners(vllm_config: VllmConfig, local_layer_names: Iterable[str]) -> dict[str, int]:
-    """Partition PP-local Target KV layers across KVPP ranks.
-
-    ``local_layer_names`` must already be PP-local (typically the keys of the
-    current worker's cache spec). MTP layers remain fully allocated on every
-    KVPP rank and are therefore absent from the returned owner mapping.
-    """
-    kvpp_size = KVPPConfig.from_vllm_config(vllm_config).size
-    # Workers are separate Python processes and may receive layer names from
-    # sets or differently ordered dictionaries. Keep both owner insertion
-    # order and per-layer cache-bundle order identical on every rank.
-    local_layer_names = tuple(sorted(local_layer_names, key=lambda name: (extract_layer_index(name), name)))
-    mtp_layers = find_mtp_layers(
-        vllm_config,
-        local_layer_names,
-    )
-    layers_by_index: dict[int, list[str]] = defaultdict(list)
-    for layer_name in local_layer_names:
-        if layer_name not in mtp_layers:
-            layers_by_index[extract_layer_index(layer_name)].append(layer_name)
-
-    layer_indices = sorted(layers_by_index)
-    base, remainder = divmod(len(layer_indices), kvpp_size)
-    layer_owner_ranks: dict[str, int] = {}
+def map_kvpp_layers_to_owners(kvpp_size: int, target_bundles: dict[str, tuple[str, ...]]) -> dict[str, int]:
+    """Partition target bundles in their deterministic execution order."""
+    bundles = list(target_bundles.values())
+    base, remainder = divmod(len(bundles), kvpp_size)
+    owners: dict[str, int] = {}
     offset = 0
-    for owner_rank in range(kvpp_size):
-        partition_size = base + int(owner_rank < remainder)
-        for layer_index in layer_indices[offset : offset + partition_size]:
-            for layer_name in layers_by_index[layer_index]:
-                layer_owner_ranks[layer_name] = owner_rank
-        offset += partition_size
-    return layer_owner_ranks
+    for rank in range(kvpp_size):
+        count = base + int(rank < remainder)
+        for bundle in bundles[offset : offset + count]:
+            owners.update((name, rank) for name in bundle)
+        offset += count
+    return owners
 
 
 def create_kvpp_cache_allocation_plan(
     vllm_config: VllmConfig,
     worker_spec: dict[str, KVCacheSpec],
     kvpp_rank: int,
+    *,
+    draft_layer_names: Iterable[str],
 ) -> KVPPPhysicalCachePlan:
     """Keep upstream's logical group while budgeting actual allocations."""
     logical_spec = dict(worker_spec)
@@ -171,10 +142,46 @@ def create_kvpp_cache_allocation_plan(
         or len({spec.block_size for spec in logical_spec.values()}) > 1
     ):
         raise ValueError("KVPP requires one full-attention cache group with a common block size.")
+    draft_layers = set(draft_layer_names).intersection(logical_spec)
+    bundles = build_layer_cache_bundles(logical_spec, draft_layers)
+    target_bundles = {name: bundle for name, bundle in bundles.items() if name not in draft_layers}
     return KVPPPhysicalCachePlan(
         logical_cache_spec=logical_spec,
-        layer_owner_ranks=map_kvpp_layers_to_owners(vllm_config, logical_spec),
-        layer_bundles=build_layer_cache_bundles(logical_spec),
+        layer_owner_ranks=map_kvpp_layers_to_owners(KVPPConfig.from_vllm_config(vllm_config).size, target_bundles),
+        layer_bundles=bundles,
         tensor_sizes=build_kvpp_buffer_sizes(vllm_config, logical_spec),
         kvpp_rank=kvpp_rank,
     )
+
+
+def get_kvpp_cache_specs(kv_cache_config: KVCacheConfig) -> dict[str, KVCacheSpec]:
+    specs: dict[str, KVCacheSpec] = {}
+    for group in kv_cache_config.kv_cache_groups:
+        spec = group.kv_cache_spec
+        for name in group.layer_names:
+            specs[name] = spec.kv_cache_specs[name] if isinstance(spec, UniformTypeKVCacheSpecs) else spec
+    return specs
+
+
+@dataclass
+class KVPPCacheConfig(KVCacheConfig):
+    """Worker-local cache configuration carrying the plan used for budgeting.
+
+    Attached after the engine selects the block count, before the runner and
+    transfer connector initialize. Runner deep copies preserve the plan.
+    """
+
+    kvpp_plan: KVPPPhysicalCachePlan = field(kw_only=True)
+
+    @classmethod
+    def from_config(cls, config: KVCacheConfig, plan: KVPPPhysicalCachePlan) -> "KVPPCacheConfig":
+        if get_kvpp_cache_specs(config) != plan.logical_cache_spec:
+            raise ValueError("KVPP allocation specifications differ from the budgeted plan.")
+        return cls(**{f.name: getattr(config, f.name) for f in fields(KVCacheConfig)}, kvpp_plan=plan)
+
+
+def get_kvpp_cache_plan(config: KVCacheConfig) -> KVPPPhysicalCachePlan:
+    """Require the worker's plan; never reconstruct ownership in consumers."""
+    if not isinstance(config, KVPPCacheConfig):
+        raise ValueError("KVPP cache configuration is missing the worker allocation plan.")
+    return config.kvpp_plan

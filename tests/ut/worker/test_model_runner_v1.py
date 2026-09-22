@@ -863,9 +863,13 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         return runner
 
     def test_kvpp_allocate_and_reshape_views(self):
-        from tests.ut.kvpp_utils import assert_attention_cache_views, make_attention_cache_case, make_cache_config
+        from tests.ut.kvpp_utils import (
+            assert_attention_cache_views,
+            make_attention_cache_case,
+            make_planned_cache_config,
+        )
         from vllm_ascend.core import kv_cache_placement
-        from vllm_ascend.worker import kvpp_cache, model_runner_v1
+        from vllm_ascend.worker import model_runner_v1
 
         for packed in (False, True):
             with self.subTest(packed=packed):
@@ -881,14 +885,13 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                     for name, spec in specs.items()
                 ]
                 with (
-                    patch.object(kvpp_cache, "get_kvpp_group", return_value=SimpleNamespace(rank_in_group=1)),
                     patch.object(kv_cache_placement, "get_layers_from_vllm_config", return_value=layers),
                     patch.object(model_runner_v1, "get_layers_from_vllm_config", return_value=layers),
                     patch.object(kv_cache_placement, "enable_sfa", return_value=packed),
                     patch.object(kv_cache_placement, "enable_fa_quant", return_value=False),
                     patch.object(model_runner_v1, "enable_fa_quant", return_value=False),
                 ):
-                    cache_config = make_cache_config(specs)
+                    cache_config = make_planned_cache_config(config, specs)
                     raw = runner._allocate_kv_cache_tensors(cache_config)
                     caches = runner._reshape_kv_cache_tensors(cache_config, raw)
                 assert_attention_cache_views(caches, raw, packed)

@@ -1,12 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
+from copy import deepcopy
 from dataclasses import replace
 from unittest.mock import Mock
 
 import pytest
 import torch
 from vllm.model_executor.layers.attention import MLAAttention
+from vllm.v1.kv_cache_interface import SlidingWindowSpec
 
-from tests.ut.kvpp_utils import indexer_name, layer_name, make_kvpp_config, make_kvpp_specs
+from tests.ut.kvpp_utils import (
+    indexer_name,
+    layer_name,
+    make_cache_config,
+    make_dspark_kvpp_case,
+    make_kvpp_config,
+    make_kvpp_specs,
+)
 from vllm_ascend.ascend_config import KVPPConfig
 from vllm_ascend.core import kv_cache_placement as placement
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
@@ -28,8 +37,10 @@ def test_pp_local_owners_and_bundles(tp, owners, with_mtp):
     if not with_mtp:
         del specs[layer_name(17)]
     config = make_kvpp_config(tp)
-    plan = placement.create_kvpp_cache_allocation_plan(config, specs, kvpp_rank=1)
-    reverse = placement.create_kvpp_cache_allocation_plan(config, dict(reversed(list(specs.items()))), kvpp_rank=1)
+    plan = placement.create_kvpp_cache_allocation_plan(config, specs, kvpp_rank=1, draft_layer_names=(layer_name(17),))
+    reverse = placement.create_kvpp_cache_allocation_plan(
+        config, dict(reversed(list(specs.items()))), kvpp_rank=1, draft_layer_names=(layer_name(17),)
+    )
     expected = {layer_name(i): owner for i, owner in zip(range(9, 17), owners)}
     expected[indexer_name(11)] = owners[2]
     assert plan.layer_owner_ranks == expected
@@ -104,14 +115,18 @@ def test_unquantized_indexer_and_quantized_mla_sizes(monkeypatch):
 
 @pytest.mark.parametrize("tp,rank,cost", [(3, 0, 404), (3, 1, 392), (3, 2, 328), (10, 9, 248)])
 def test_physical_cost_per_rank(tp, rank, cost):
-    plan = placement.create_kvpp_cache_allocation_plan(make_kvpp_config(tp), make_kvpp_specs(), rank)
+    plan = placement.create_kvpp_cache_allocation_plan(
+        make_kvpp_config(tp), make_kvpp_specs(), rank, draft_layer_names=(layer_name(17),)
+    )
     assert plan.get_num_blocks(cost - 1) == 0
     assert plan.get_num_blocks(cost) == 1
 
 
 @pytest.mark.parametrize("available,blocks", [(0, 0), (391, 0), (392, 1), (1175, 2), (1176, 3)])
 def test_budget_floors_complete_blocks(available, blocks):
-    plan = placement.create_kvpp_cache_allocation_plan(make_kvpp_config(), make_kvpp_specs(), 1)
+    plan = placement.create_kvpp_cache_allocation_plan(
+        make_kvpp_config(), make_kvpp_specs(), 1, draft_layer_names=(layer_name(17),)
+    )
     assert plan.get_num_blocks(available) == blocks
 
 
@@ -119,5 +134,78 @@ def test_budget_floors_complete_blocks(available, blocks):
 def test_stage_without_target_has_no_scratch_cost(with_mtp, expected):
     specs = make_kvpp_specs()
     specs = {layer_name(17): specs[layer_name(17)]} if with_mtp else {}
-    plan = placement.create_kvpp_cache_allocation_plan(make_kvpp_config(), specs, 1)
+    plan = placement.create_kvpp_cache_allocation_plan(
+        make_kvpp_config(), specs, 1, draft_layer_names=(layer_name(17),)
+    )
     assert plan.get_num_blocks(288) == expected
+
+
+@pytest.mark.parametrize("rank,target_cost", [(0, 308), (1, 296), (2, 232)])
+def test_dspark_keeps_draft_caches_in_every_rank_budget(rank, target_cost):
+    config, specs, drafts = make_dspark_kvpp_case()
+    target_specs = {name: spec for name, spec in specs.items() if name not in drafts}
+    target_plan = placement.create_kvpp_cache_allocation_plan(config, target_specs, rank, draft_layer_names=drafts)
+    plan = placement.create_kvpp_cache_allocation_plan(config, specs, rank, draft_layer_names=drafts)
+    assert plan.layer_owner_ranks == target_plan.layer_owner_ranks
+    for name in drafts:
+        assert plan.layer_bundles[name] == (name,)
+        assert plan.tensor_sizes[name] == (64, 64)
+    cost = target_cost + 3 * 128
+    assert plan.get_num_blocks(cost - 1) == 0
+    assert plan.get_num_blocks(3 * cost) == 3
+    reverse = placement.create_kvpp_cache_allocation_plan(
+        config, dict(reversed(list(specs.items()))), rank, draft_layer_names=drafts
+    )
+    assert list(plan.layer_owner_ranks.items()) == list(reverse.layer_owner_ranks.items())
+    assert list(plan.layer_bundles.items()) == list(reverse.layer_bundles.items())
+
+
+def test_dspark_draft_only_stage_has_no_scratch_cost():
+    config, specs, drafts = make_dspark_kvpp_case()
+    plan = placement.create_kvpp_cache_allocation_plan(
+        config, {name: specs[name] for name in drafts}, 1, draft_layer_names=drafts
+    )
+    assert plan.layer_owner_ranks == {}
+    assert plan.get_num_blocks(3 * 384) == 3
+
+
+def test_mtp_still_rejects_sliding_window_cache_specs():
+    config, specs, drafts = make_dspark_kvpp_case()
+    config.speculative_config.method = "mtp"
+    specs[drafts[0]] = SlidingWindowSpec(
+        block_size=2, num_kv_heads=2, head_size=8, dtype=torch.float16, sliding_window=4
+    )
+    with pytest.raises(ValueError, match="KVPP requires one full-attention cache group"):
+        placement.create_kvpp_cache_allocation_plan(config, specs, 0, draft_layer_names=drafts)
+
+
+@pytest.mark.parametrize("method", ["mtp", "dspark"])
+def test_explicit_draft_names_override_numeric_ranges(method):
+    config, specs, drafts = make_dspark_kvpp_case(
+        draft_names=("draft.layers.9.attn", "draft.layers.103.attn", "draft.cache")
+    )
+    config.speculative_config.method = method
+    plan = placement.create_kvpp_cache_allocation_plan(
+        config, specs, 1, draft_layer_names=(*drafts, "draft.on_another_stage")
+    )
+    assert set(plan.layer_owner_ranks) == set(specs) - set(drafts)
+    assert plan.layer_bundles[layer_name(9)] == (layer_name(9),)
+    assert all(plan.layer_bundles[name] == (name,) for name in drafts)
+
+
+def test_cache_config_preserves_budgeted_plan_across_runner_copy():
+    config, specs, drafts = make_dspark_kvpp_case()
+    plan = placement.create_kvpp_cache_allocation_plan(config, specs, 1, draft_layer_names=drafts)
+    engine_config = make_cache_config(specs, 5)
+    local_config = placement.KVPPCacheConfig.from_config(engine_config, plan)
+    assert placement.get_kvpp_cache_plan(local_config) is plan
+    copied = deepcopy(local_config)
+    assert copied.num_blocks == 5
+    assert copied.kv_cache_groups == engine_config.kv_cache_groups
+    assert copied.kv_cache_tensors == engine_config.kv_cache_tensors
+    assert placement.get_kvpp_cache_plan(copied) == plan
+    with pytest.raises(ValueError, match="missing the worker allocation plan"):
+        placement.get_kvpp_cache_plan(engine_config)
+    mismatched = make_cache_config({name: spec for name, spec in specs.items() if name not in drafts})
+    with pytest.raises(ValueError, match="differ from the budgeted plan"):
+        placement.KVPPCacheConfig.from_config(mismatched, plan)

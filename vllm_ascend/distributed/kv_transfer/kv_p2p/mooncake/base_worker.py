@@ -30,7 +30,7 @@ from vllm.v1.kv_cache_interface import (
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
-from vllm_ascend.core.kv_cache_placement import map_kvpp_layers_to_owners
+from vllm_ascend.core.kv_cache_placement import get_kvpp_cache_plan
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeConnectorMetadata,
     MooncakeTransferMetadata,
@@ -212,11 +212,7 @@ class MooncakeBaseConnectorWorker:
         logger.info("num_blocks: %s", self.num_blocks)
         self.kv_caches = kv_caches
         self._build_kv_cache_spec_mappings()
-        owners = (
-            map_kvpp_layers_to_owners(self.vllm_config, kv_caches.keys())
-            if self.ascend_config.kvpp_config.size > 1
-            else {}
-        )
+        kvpp_plan = get_kvpp_cache_plan(self.kv_cache_config) if self.ascend_config.kvpp_config.size > 1 else None
         layer_names: list[str] = []
         layer_block_sizes: list[int] = []
         group_indices: list[int] = []
@@ -240,9 +236,8 @@ class MooncakeBaseConnectorWorker:
 
                 configured_layer_names.add(layer_name)
                 # Foreign target layers alias scratch. Publish persistent owners
-                # only; MTP caches are absent from owners and remain replicated.
-                owner = owners.get(layer_name)
-                if owner is not None and owner != self.tp_rank:
+                # only; draft caches remain independently allocated.
+                if kvpp_plan is not None and not kvpp_plan.is_persistent(layer_name):
                     continue
 
                 base_addrs: list[int] = []

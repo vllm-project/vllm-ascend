@@ -27,7 +27,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.ascend_config import KVPPConfig
-from vllm_ascend.core.kv_cache_placement import map_kvpp_layers_to_owners
+from vllm_ascend.core.kv_cache_placement import get_kvpp_cache_plan
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
     get_attention_compute_start_gate,
     reset_attention_compute_start_gate,
@@ -935,8 +935,8 @@ class KVPoolWorker:
         self.group_layer_cache_entry_offsets: dict[int, list[int]] = {}
         self.kv_caches = kv_caches
         if self.use_kvpp:
-            owners = map_kvpp_layers_to_owners(self.vllm_config, kv_caches.keys())
-            kv_caches = {name: caches for name, caches in kv_caches.items() if owners.get(name) in (None, self.tp_rank)}
+            plan = get_kvpp_cache_plan(self.kv_cache_config)
+            kv_caches = {name: caches for name, caches in kv_caches.items() if plan.is_persistent(name)}
             self.kv_caches = kv_caches
         self.group_kv_cache_families: dict[int, str] = {
             group_id: get_group_cache_family(self.kv_cache_group_families, group_id)
