@@ -23,35 +23,6 @@ from vllm_ascend.utils import (
 SFA_QSFA_TILE_SIZE = 128
 MLAPO_MAX_SUPPORTED_TOKENS = 1024
 
-SCATTER_CACHE_MIN_TOKENS = 2048
-
-
-def prefill_cache_write_enabled(metadata: Any) -> bool:
-    """Select ordinary, unpadded prefill writes without reading device slots.
-
-    Callers must exclude PCP/DCP and drafting: those paths can mask slots
-    inside the actual-token prefix. Full-attention prefill writes instead
-    address allocated, distinct cache slots; TP padding is only at the end.
-    Capture builders explicitly disable this flag for their dummy mappings.
-    """
-    from vllm_ascend.attention.attention_v1 import AscendAttentionState
-
-    is_prefilling = getattr(metadata, "is_prefilling", None)
-    return (
-        metadata.num_actual_tokens >= SCATTER_CACHE_MIN_TOKENS
-        and getattr(metadata, "graph_pad_size", -1) == -1
-        and getattr(metadata, "attn_state", None)
-        in (
-            AscendAttentionState.PrefillNoCache,
-            AscendAttentionState.PrefillCacheHit,
-            AscendAttentionState.ChunkedPrefill,
-        )
-        and isinstance(is_prefilling, torch.Tensor)
-        and is_prefilling.device.type == "cpu"
-        and is_prefilling.numel() >= metadata.num_reqs > 0
-        and bool(is_prefilling[: metadata.num_reqs].all())
-    )
-
 
 class PreprocessType(enum.Enum):
     NATIVE = "native"

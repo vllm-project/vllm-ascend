@@ -47,16 +47,15 @@ def test_platform_cache_store_preserves_all_backing_bytes(dtype, width, tokens, 
 
 
 @torch.inference_mode()
-def test_unsupported_inner_stride_and_masked_metadata_preserve_fallback():
+def test_unsupported_inner_stride_preserves_fallback_with_negative_slots():
     torch_npu.npu.set_device(0)
     assert enable_custom_op()
     key = torch.ones(2048, 128, dtype=torch.int8, device="npu")
     cache = torch.zeros(32, 128, 1, 256, dtype=torch.int8, device="npu")[..., ::2]
     slots = torch.arange(2048, dtype=torch.int32, device="npu")
     assert not DeviceOperator.try_scatter_cache(key, cache, slots, 2048)
-    meta = SimpleNamespace(num_actual_tokens=2048, fast_cache_store=False)
+    meta = SimpleNamespace(num_actual_tokens=2048)
     slots[-3:] = -1
-    cache = torch.zeros(32, 128, 1, 128, dtype=torch.int8, device="npu")
     impl = AscendSFADSACPImpl.__new__(AscendSFADSACPImpl)
     impl.enable_sparse_sfa_c8 = True
     impl.is_kv_producer, impl.is_kv_consumer = True, False

@@ -40,10 +40,10 @@ else:
 class BaseDeviceAdaptor:
     @classmethod
     def try_scatter_cache(cls, key: torch.Tensor, cache: torch.Tensor, slots: torch.Tensor, tokens: int) -> bool:
-        """Write eligible DSA-CP prefill rows in place, or request the old scatter.
+        """Write supported cache rows in place, or request the old scatter.
 
-        Callers must enforce prefill eligibility and valid slots in the token
-        prefix: neither fast operator is assumed to skip negative slots.
+        The actual-token prefix must contain valid slots: this helper does not
+        filter negative slots, and neither fast operator is assumed to skip them.
         Layout checks inspect strides only; no device-to-host synchronization is
         introduced. Never make a contiguous copy of the destination cache.
         """

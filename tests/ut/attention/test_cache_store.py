@@ -7,7 +7,6 @@ import pytest
 import torch
 import torch_npu
 
-from vllm_ascend.attention import utils as attention_utils
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADSACPImpl
 from vllm_ascend.device import device_op
@@ -18,7 +17,6 @@ from vllm_ascend.device.hardware_profile import get_hardware_profile
 def metadata(**kwargs):
     values = dict(
         num_actual_tokens=2049,
-        fast_cache_store=True,
         num_reqs=1,
         is_prefilling=torch.tensor([True]),
         attn_state=AscendAttentionState.ChunkedPrefill,
@@ -75,27 +73,6 @@ def test_platform_dispatch_keeps_destination_storage(monkeypatch, family, dtype,
     assert pa.call_count == int(expected and family == AscendDeviceType.A5)
 
 
-@pytest.mark.parametrize("state", list(AscendAttentionState))
-@pytest.mark.parametrize("prefilling", [[True], [False], [True, False]])
-@pytest.mark.parametrize("tokens", [2047, 2048])
-def test_only_large_pure_prefill_can_enable_fast_store(state, prefilling, tokens):
-    common = metadata(
-        attn_state=state, is_prefilling=torch.tensor(prefilling), num_reqs=len(prefilling), num_actual_tokens=tokens
-    )
-    assert attention_utils.prefill_cache_write_enabled(common) == (
-        tokens >= 2048
-        and all(prefilling)
-        and state
-        in (
-            AscendAttentionState.PrefillNoCache,
-            AscendAttentionState.PrefillCacheHit,
-            AscendAttentionState.ChunkedPrefill,
-        )
-    )
-    common.graph_pad_size = tokens
-    assert not attention_utils.prefill_cache_write_enabled(common)
-
-
 @pytest.mark.parametrize("family", [AscendDeviceType.A3, AscendDeviceType.A5])
 def test_missing_operator_falls_back(monkeypatch, family):
     monkeypatch.setattr(device_op, "get_current_hardware_profile", lambda: get_hardware_profile(family))
@@ -107,18 +84,18 @@ def test_missing_operator_falls_back(monkeypatch, family):
 
 
 @pytest.mark.parametrize("fast", [False, True])
-@pytest.mark.parametrize("eligible_batch", [False, True])
+@pytest.mark.parametrize("tokens", [8, 2049])
+@pytest.mark.parametrize("state", list(AscendAttentionState))
 @pytest.mark.parametrize("producer,consumer", [(False, False), (True, False), (False, True), (True, True)])
-def test_main_cache_write_preserves_fallback_and_own_slots(fast, eligible_batch, producer, consumer):
+def test_main_cache_write_preserves_fallback_and_own_slots(fast, tokens, state, producer, consumer):
     impl = AscendSFADSACPImpl.__new__(AscendSFADSACPImpl)
     impl.enable_sparse_sfa_c8 = True
     impl.is_kv_producer, impl.is_kv_consumer = producer, consumer
     key = torch.empty(2056, 656, dtype=torch.int8)
     cache = torch.empty(32, 128, 1, 656, dtype=torch.int8)
     slots = torch.arange(2056, dtype=torch.int32) + 512
-    if not eligible_batch:
-        slots[2046:2049] = -1
-    meta = metadata(fast_cache_store=eligible_batch)
+    slots[tokens:] = -1
+    meta = metadata(num_actual_tokens=tokens, attn_state=state)
     with (
         patch(
             "vllm_ascend.ascend_config.get_ascend_config",
@@ -130,11 +107,9 @@ def test_main_cache_write_preserves_fallback_and_own_slots(fast, eligible_batch,
         patch("torch_npu.npu_scatter_nd_update_", create=True) as scatter,
     ):
         impl._store_parallel_kv(None, None, None, key, [], (cache,), slots, meta, False)
-    use_fast_store = eligible_batch
-    assert store.call_count == int(use_fast_store)
-    if use_fast_store:
-        assert store.call_args.args[1] is cache and store.call_args.args[2] is slots
-        assert store.call_args.args[3] == meta.num_actual_tokens
-    assert scatter.call_count == int(not (use_fast_store and fast))
-    if not (use_fast_store and fast):
-        torch.testing.assert_close(scatter.call_args.args[1].flatten(), slots[:2049])
+    store.assert_called_once()
+    assert store.call_args.args[1] is cache and store.call_args.args[2] is slots
+    assert store.call_args.args[3] == tokens
+    assert scatter.call_count == int(not fast)
+    if not fast:
+        torch.testing.assert_close(scatter.call_args.args[1].flatten(), slots[:tokens])
