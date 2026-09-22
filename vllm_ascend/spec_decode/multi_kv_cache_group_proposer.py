@@ -12,6 +12,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, UniformTypeKVCacheSpecs
 from vllm.v1.spec_decode.utils import PADDING_SLOT_ID
 from vllm.v1.worker.utils import AttentionGroup
 
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 
 _MULTI_KV_CACHE_GROUP_MTP_MODEL_TYPES = {"glm5_next_mtp"}
@@ -38,10 +39,14 @@ def is_multi_kv_cache_group_mtp(vllm_config: VllmConfig) -> bool:
 class AscendMultiKVCacheGroupMTPProposer(AscendEagleProposer):
     """MTP proposer for draft layers split across physical KV cache groups.
 
-    The constructor is intentionally inherited unchanged from
-    ``AscendEagleProposer``. Only eager runtime metadata paths that need a
-    physical KV-cache-group view are overridden below.
+    ``glm5_next_mtp`` drafts (the only family this proposer is instantiated
+    for) support graph-mode drafting, so the family-wide forced-eager gate in
+    the base class is skipped via ``_glm_draft_graph_supported``. Keeping the
+    draft eager remains available through the speculative-config
+    ``enforce_eager`` flag, which is honored before that gate.
     """
+
+    _glm_draft_graph_supported = True
 
     def _get_draft_layer_kv_cache_groups(self, kv_cache_config: KVCacheConfig) -> dict[str, int]:
         """Helper: map each draft attention layer to its physical group id.
@@ -161,6 +166,7 @@ class AscendMultiKVCacheGroupMTPProposer(AscendEagleProposer):
         common_attn_metadata,
         attn_group,
         num_input_tokens,
+        draft_index=0,
     ):
         """Override the runtime common-metadata view hook for one group.
 
@@ -188,9 +194,20 @@ class AscendMultiKVCacheGroupMTPProposer(AscendEagleProposer):
                 common_attn_metadata.positions[:num_actual_tokens],
             )
             block_table_tensor = block_table.get_device_tensor()[:num_reqs]
-            # All draft steps are built before any forward. The block table's
-            # scratch mapping is overwritten when the next step is prepared.
-            group_slot_mapping = block_table.slot_mapping.gpu[:num_input_tokens].clone()
+            buffers = getattr(self, "_multi_group_slot_mapping_buffers", None)
+            if buffers is None:
+                buffers = {}
+                self._multi_group_slot_mapping_buffers = buffers
+            key = (gid, draft_index)
+            group_slot_mapping = buffers.get(key)
+            if group_slot_mapping is None or group_slot_mapping.shape[0] < num_input_tokens:
+                if hasattr(self, "slot_mapping_group"):
+                    group_slot_mapping = torch.empty_like(self.slot_mapping_group[draft_index])
+                else:
+                    group_slot_mapping = torch.empty_like(block_table.slot_mapping.gpu[:num_input_tokens])
+                buffers[key] = group_slot_mapping
+            source_slot_mapping = block_table.slot_mapping.gpu[:num_input_tokens]
+            group_slot_mapping[:num_input_tokens].copy_(source_slot_mapping)
             group_slot_mapping[num_actual_tokens:].fill_(PADDING_SLOT_ID)
             group_metadata.slot_mapping = group_slot_mapping
 
@@ -198,6 +215,35 @@ class AscendMultiKVCacheGroupMTPProposer(AscendEagleProposer):
             : group_metadata.num_reqs, : self._draft_block_table_width(attn_group)
         ]
         return group_metadata
+
+    def _build_multi_group_graph_capture_metadata(self, common_attn_metadata, draft_index):
+        per_layer_attn_metadata: dict[str, Any] = {}
+        extra_attn_metadata_args: dict[str, Any] = {}
+        if self.use_compress:
+            extra_attn_metadata_args["common_ratio_to_sas_metadata"] = {}
+        for attn_group in self.draft_attn_groups:
+            group_metadata = self._common_attn_metadata_for_draft_group(
+                common_attn_metadata,
+                attn_group,
+                common_attn_metadata.num_input_tokens,
+                draft_index,
+            )
+            builder = attn_group.get_metadata_builder()
+            if not self.use_compress or draft_index == 0:
+                attn_metadata = builder.build_for_graph_capture(
+                    group_metadata,
+                    AscendAttentionState.SpecDecoding,
+                    **extra_attn_metadata_args,
+                )
+            else:
+                attn_metadata = builder.build_for_drafting(
+                    group_metadata,
+                    draft_index,
+                    **extra_attn_metadata_args,
+                )
+            for layer_name in attn_group.layer_names:
+                per_layer_attn_metadata[layer_name] = attn_metadata
+        return per_layer_attn_metadata
 
     @staticmethod
     def _copy_cache_only_draft_metadata(attn_metadata):
@@ -295,13 +341,14 @@ class AscendMultiKVCacheGroupMTPProposer(AscendEagleProposer):
                     common_attn_metadata,
                     attn_group,
                     num_input_tokens,
+                    0,
                 ),
                 self.runner.get_model(),
                 **extra_attn_metadata_args,
             )
             if hasattr(attn_metadata, "causal") and not attn_metadata.causal:
                 attn_metadata.attn_mask = None
-            if self._is_cache_only_draft_attn_group(attn_group):
+            if self._is_cache_only_draft_attn_group(attn_group) and not getattr(self, "use_cuda_graph", False):
                 attn_metadata = self._copy_cache_only_draft_metadata(attn_metadata)
             for layer_name in attn_group.layer_names:
                 per_layer_attn_metadata[layer_name] = attn_metadata
@@ -345,6 +392,7 @@ class AscendMultiKVCacheGroupMTPProposer(AscendEagleProposer):
                 common_attn_metadata,
                 attn_group,
                 num_input_tokens,
+                draft_index,
             )
             extra_attn_metadata_args: dict[str, Any] = {}
             if self.use_compress:
@@ -354,7 +402,8 @@ class AscendMultiKVCacheGroupMTPProposer(AscendEagleProposer):
                 draft_index,
                 **extra_attn_metadata_args,
             )
-            attn_metadata = self._copy_cache_only_draft_metadata(attn_metadata)
+            if not getattr(self, "use_cuda_graph", False):
+                attn_metadata = self._copy_cache_only_draft_metadata(attn_metadata)
             for layer_name in attn_group.layer_names:
                 per_layer_attn_metadata[layer_name] = attn_metadata
         return per_layer_attn_metadata

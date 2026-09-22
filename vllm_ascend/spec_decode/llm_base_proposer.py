@@ -124,6 +124,12 @@ def _is_glm_model(model_config) -> bool:
 class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     _runnable: ACLGraphWrapper | Callable
     arange: torch.Tensor
+    # GLM family: draft graph capture is not yet supported (see the forced-eager
+    # gate in ``__init__``). Subclasses whose draft family supports graph input
+    # override this to True so the gate is skipped from the start — keeping
+    # every decision made later in ``__init__`` (e.g. ``maybe_eager_context``)
+    # consistent with the final graph-mode state.
+    _glm_draft_graph_supported = False
 
     def _ensure_query_start_loc_arange_capacity(self) -> None:
         """Ensure ``arange`` includes the terminal query boundary."""
@@ -248,7 +254,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # the target model's graph-mode setting untouched.
         # TODO(lilinsiman): Remove this code segment after future versions of the GLM
         # series models support graph input for speculative inference.
-        if _is_glm_model(self.vllm_config.model_config):
+        if _is_glm_model(self.vllm_config.model_config) and not self._glm_draft_graph_supported:
             if self.use_cuda_graph:
                 logger.warning(
                     "GLM series models with speculative decoding currently do "
@@ -710,6 +716,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         common_attn_metadata,
         attn_group,
         num_input_tokens,
+        draft_index=0,
     ):
         """Return the common metadata view consumed by one draft group."""
         return common_attn_metadata
@@ -1966,9 +1973,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     common_attn_metadata.block_table_tensor, input_batch_size
                 )
                 common_attn_metadata.seq_lens = self._adjust_tensor(common_attn_metadata.seq_lens, input_batch_size)
-                common_attn_metadata.seq_lens_cpu = self._adjust_tensor(
-                    common_attn_metadata.seq_lens_cpu, input_batch_size
-                )
+                # seq_lens_cpu may be None here: the multi-KV-cache-group MTP
+                # proposer invalidates stale CPU lengths at the draft_index==1
+                # transition (no device-to-host sync). Guard like the fields
+                # below instead of assuming a tensor.
+                if common_attn_metadata.seq_lens_cpu is not None:
+                    common_attn_metadata.seq_lens_cpu = self._adjust_tensor(
+                        common_attn_metadata.seq_lens_cpu, input_batch_size
+                    )
                 if common_attn_metadata._seq_lens_cpu is not None:
                     common_attn_metadata._seq_lens_cpu = self._adjust_tensor(
                         common_attn_metadata._seq_lens_cpu, input_batch_size
@@ -2148,6 +2160,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             common_attn_metadata,
             attn_group,
             input_batch_size,
+            draft_index,
         )
         attn_metadata = attn_metadata_builder.build_for_drafting(
             group_common_attn_metadata,
