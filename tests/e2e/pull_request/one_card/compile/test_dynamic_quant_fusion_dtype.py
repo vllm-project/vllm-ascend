@@ -18,8 +18,12 @@ from vllm_ascend.utils import is_950
 
 try:
     import npugraph_ex as nge
+
+    _COMPILER_MODE = "npugraph_ex"
 except ImportError:
     import torchair as nge
+
+    _COMPILER_MODE = "reduce-overhead"
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
@@ -62,9 +66,12 @@ def test_dynamic_quant_fusion_preserves_dtype(dtype, quant_kind, eps, use_bias):
         return result
 
     torch._dynamo.reset()
+    compiler_config = nge.CompilerConfig()
+    compiler_config.mode = _COMPILER_MODE
+    backend = nge.get_npu_backend(compiler_config=compiler_config)
     with torch.no_grad(), patch.object(nge.npu_fx_compiler, "_optimize_fx", inspect_graph):
         expected = model(x, residual, weight, bias)
-        actual = torch.compile(model, backend="npugraph_ex", fullgraph=True, dynamic=True)(x, residual, weight, bias)
+        actual = torch.compile(model, backend=backend, fullgraph=True, dynamic=True)(x, residual, weight, bias)
         torch.npu.synchronize()
 
     fused_op = torch.ops.npu.npu_add_rms_norm_dynamic_quant.default
