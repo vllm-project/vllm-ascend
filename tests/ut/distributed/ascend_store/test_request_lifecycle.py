@@ -139,8 +139,9 @@ def cache_layout(request, speculative_method):
         draft_names = [f"mtp.{i}.self_attn" for i in range(3 if speculative_method == "dspark" else 1)]
         if request.param == "full-attention":
             plan.kv_cache_groups[0].layer_names.extend(draft_names)
+            plan.kv_cache_groups[0].is_eagle_group = True
         else:
-            plan.kv_cache_groups.append(KVCacheGroupSpec(draft_names, swa))
+            plan.kv_cache_groups.append(KVCacheGroupSpec(draft_names, swa, is_eagle_group=True))
 
     def allocate():
         caches = {}
@@ -217,6 +218,8 @@ def test_raw_sequence_lifecycle(
     config.scheduler_config.disable_hybrid_kv_cache_manager = False
     config.cache_config.prefix_match_unit = prefix_unit
     config.cache_config.num_gpu_blocks = plan.num_blocks
+    # Match the planner's role annotation so kv_both keeps the EAGLE safety drop.
+    plan.kv_transfer_config = config.kv_transfer_config
     block_size, hash_size = resolve_kv_cache_block_sizes(plan, config)
     worker = KVConnectorFactory.create_connector(config, KVConnectorRole.WORKER, plan)
     caches = allocate()
