@@ -6,6 +6,51 @@ from vllm.triton_utils import tl, triton
 
 
 @triton.jit
+def _copy_temporal_state(
+    src_addr,
+    dst_addr,
+    copy_size,
+    tile_idx,
+    COPY_BLOCK_SIZE: tl.constexpr,
+    TEMPORAL_TILES: tl.constexpr,
+):
+    # Temporal states do not overlap. Use the same u64 transfer width as
+    # precopy, retaining byte handling for unusual offsets and trailing data.
+    offsets = tl.arange(0, COPY_BLOCK_SIZE)
+    if ((src_addr | dst_addr) & 7) == 0:
+        copy_size_u64 = copy_size // 8
+        per_tile = tl.cdiv(copy_size_u64, TEMPORAL_TILES)
+        per_tile = tl.cdiv(per_tile, COPY_BLOCK_SIZE) * COPY_BLOCK_SIZE
+        start = tile_idx.to(tl.int64) * per_tile
+        end = tl.minimum(start + per_tile, copy_size_u64)
+        src_u64 = src_addr.to(tl.pointer_type(tl.uint64))
+        dst_u64 = dst_addr.to(tl.pointer_type(tl.uint64))
+        for i in range(start, end, COPY_BLOCK_SIZE):
+            mask = (i + offsets) < end
+            data = tl.load(src_u64 + i + offsets, mask=mask)
+            tl.store(dst_u64 + i + offsets, data, mask=mask)
+        if tile_idx == 0:
+            tail_start = copy_size_u64 * 8
+            tail_offsets = tl.arange(0, 8)
+            tail_mask = tail_offsets < copy_size - tail_start
+            tail_src = (src_addr + tail_start).to(tl.pointer_type(tl.uint8))
+            tail_dst = (dst_addr + tail_start).to(tl.pointer_type(tl.uint8))
+            tail = tl.load(tail_src + tail_offsets, mask=tail_mask)
+            tl.store(tail_dst + tail_offsets, tail, mask=tail_mask)
+    else:
+        per_tile = tl.cdiv(copy_size, TEMPORAL_TILES)
+        per_tile = tl.cdiv(per_tile, COPY_BLOCK_SIZE) * COPY_BLOCK_SIZE
+        start = tile_idx.to(tl.int64) * per_tile
+        end = tl.minimum(start + per_tile, copy_size)
+        src_u8 = src_addr.to(tl.pointer_type(tl.uint8))
+        dst_u8 = dst_addr.to(tl.pointer_type(tl.uint8))
+        for i in range(start, end, COPY_BLOCK_SIZE):
+            mask = (i + offsets) < end
+            data = tl.load(src_u8 + i + offsets, mask=mask)
+            tl.store(dst_u8 + i + offsets, data, mask=mask)
+
+
+@triton.jit
 def postprocess_mamba_fused_kernel(
     # Decision inputs (per-request)
     num_accepted_tokens_ptr,
@@ -199,13 +244,11 @@ def postprocess_mamba_fused_kernel(
                     data = tl.load(src_ptr + i + offsets, mask=mask)
                     tl.store(dst_ptr + i + offsets, data, mask=mask)
         else:
-            # Temporal state: partition the copy range across TEMPORAL_TILES
-            # CTAs along the u64 inner range to keep SMs filled at small batch.
-            per_tile = tl.cdiv(copy_size, TEMPORAL_TILES)
-            per_tile = tl.cdiv(per_tile, COPY_BLOCK_SIZE) * COPY_BLOCK_SIZE
-            start = tile_idx * per_tile
-            end = tl.minimum(start + per_tile, copy_size)
-            for i in range(start, end, COPY_BLOCK_SIZE):
-                mask = (i + offsets) < end
-                data = tl.load(src_ptr + i + offsets, mask=mask)
-                tl.store(dst_ptr + i + offsets, data, mask=mask)
+            _copy_temporal_state(
+                src_addr,
+                dst_addr,
+                copy_size,
+                tile_idx,
+                COPY_BLOCK_SIZE,
+                TEMPORAL_TILES,
+            )
