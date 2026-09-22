@@ -44,7 +44,7 @@ def test_platform_dispatch_keeps_destination_storage(monkeypatch, family, dtype,
     slots = torch.arange(2056, dtype=torch.int32) + 128
     slots[2049:] = -1
     before = backing.clone()
-    sk, pa = Mock(), Mock()
+    sk, pa, scatter = Mock(), Mock(), Mock()
 
     def write_sk(target, indices, updates):
         assert target.untyped_storage().data_ptr() == cache.untyped_storage().data_ptr()
@@ -56,21 +56,26 @@ def test_platform_dispatch_keeps_destination_storage(monkeypatch, family, dtype,
         assert updates.is_contiguous() and indices.is_contiguous()
         write_sk(key_cache.view(-1, 128), indices, updates.flatten(1))
 
-    sk.side_effect, pa.side_effect = write_sk, write_pa
+    sk.side_effect, pa.side_effect, scatter.side_effect = write_sk, write_pa, write_sk
     monkeypatch.setattr(torch.ops._C_ascend, "npu_scatter_nd_update_sk", sk, raising=False)
     monkeypatch.setattr(torch_npu, "npu_scatter_pa_cache", pa, raising=False)
+    monkeypatch.setattr(torch_npu, "npu_scatter_nd_update_", scatter, raising=False)
     expected = (
         family in (AscendDeviceType.A2, AscendDeviceType.A3)
         and dtype != torch.float32
         and layout not in ("column_gap", "block_gap")
     ) or (family == AscendDeviceType.A5 and layout in ("contiguous", "offset"))
-    assert device_op.get_device_adaptor().try_scatter_cache(key, cache, slots, 2049) == expected
-    if expected:
+    if layout == "block_gap":
+        with pytest.raises(RuntimeError, match="view size is not compatible"):
+            device_op.get_device_adaptor().try_scatter_cache(key, cache, slots, 2049)
+    else:
+        assert device_op.get_device_adaptor().try_scatter_cache(key, cache, slots, 2049) == expected
         reference = torch.as_strided(before, cache.shape, cache.stride(), cache.storage_offset())
         reference.view(-1, 128)[slots[:2049].long()] = key[:2049]
     torch.testing.assert_close(backing, before, rtol=0, atol=0)
     assert sk.call_count == int(expected and family != AscendDeviceType.A5)
     assert pa.call_count == int(expected and family == AscendDeviceType.A5)
+    assert scatter.call_count == int(not expected and layout != "block_gap")
 
 
 @pytest.mark.parametrize("family", [AscendDeviceType.A3, AscendDeviceType.A5])
@@ -80,7 +85,48 @@ def test_missing_operator_falls_back(monkeypatch, family):
     slots = torch.arange(2049, dtype=torch.int32)
     monkeypatch.setattr(torch.ops._C_ascend, "npu_scatter_nd_update_sk", None, raising=False)
     monkeypatch.setattr(torch_npu, "npu_scatter_pa_cache", None, raising=False)
+    scatter = Mock(
+        side_effect=lambda target, indices, updates: target.index_copy_(0, indices.flatten().long(), updates)
+    )
+    monkeypatch.setattr(torch_npu, "npu_scatter_nd_update_", scatter, raising=False)
     assert not device_op.get_device_adaptor().try_scatter_cache(key, cache, slots, 2049)
+    scatter.assert_called_once()
+    torch.testing.assert_close(cache.view(-1, 128)[:2049], key)
+    assert not cache.view(-1, 128)[2049:].count_nonzero()
+
+
+@pytest.mark.parametrize("flat_cache,column_slots", [(True, False), (False, True)])
+def test_fast_shape_guard_uses_generic_scatter(monkeypatch, flat_cache, column_slots):
+    cache = torch.zeros(2, 4, 1, 16)
+    if flat_cache:
+        cache = cache.view(-1, 16)
+    key = torch.arange(6 * 16, dtype=cache.dtype).view(6, 16)
+    slots = torch.tensor([2, 4, 6, -1, -1, -1], dtype=torch.int32)
+    if column_slots:
+        slots = slots.view(-1, 1)
+    fast = Mock()
+    scatter = Mock(
+        side_effect=lambda target, indices, updates: target.index_copy_(0, indices.flatten().long(), updates)
+    )
+    monkeypatch.setattr(device_op.BaseDeviceAdaptor, "_scatter_cache", fast)
+    monkeypatch.setattr(torch_npu, "npu_scatter_nd_update_", scatter, raising=False)
+    assert not device_op.BaseDeviceAdaptor.try_scatter_cache(key, cache, slots, 3)
+    fast.assert_not_called()
+    scatter.assert_called_once()
+    torch.testing.assert_close(cache.view(-1, 16)[[2, 4, 6]], key[:3])
+    assert not cache.view(-1, 16)[[0, 1, 3, 5, 7]].count_nonzero()
+
+
+def test_fast_operator_error_is_not_retried(monkeypatch):
+    fast = Mock(side_effect=RuntimeError("operator failed"))
+    scatter = Mock()
+    monkeypatch.setattr(device_op.BaseDeviceAdaptor, "_scatter_cache", fast)
+    monkeypatch.setattr(torch_npu, "npu_scatter_nd_update_", scatter, raising=False)
+    with pytest.raises(RuntimeError, match="operator failed"):
+        device_op.BaseDeviceAdaptor.try_scatter_cache(
+            torch.ones(1, 16), torch.zeros(1, 4, 1, 16), torch.zeros(1, dtype=torch.int32), 1
+        )
+    scatter.assert_not_called()
 
 
 @pytest.mark.parametrize("fast", [False, True])
@@ -110,6 +156,4 @@ def test_main_cache_write_preserves_fallback_and_own_slots(fast, tokens, state, 
     store.assert_called_once()
     assert store.call_args.args[1] is cache and store.call_args.args[2] is slots
     assert store.call_args.args[3] == tokens
-    assert scatter.call_count == int(not fast)
-    if not fast:
-        torch.testing.assert_close(scatter.call_args.args[1].flatten(), slots[:tokens])
+    scatter.assert_not_called()

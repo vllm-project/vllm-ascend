@@ -47,13 +47,12 @@ def test_platform_cache_store_preserves_all_backing_bytes(dtype, width, tokens, 
 
 
 @torch.inference_mode()
-def test_unsupported_inner_stride_preserves_fallback_with_negative_slots():
+def test_unsupported_fast_dtype_preserves_fallback_with_negative_slots():
     torch_npu.npu.set_device(0)
     assert enable_custom_op()
-    key = torch.ones(2048, 128, dtype=torch.int8, device="npu")
-    cache = torch.zeros(32, 128, 1, 256, dtype=torch.int8, device="npu")[..., ::2]
+    key = torch.ones(2048, 128, dtype=torch.float32, device="npu")
+    cache = torch.zeros(32, 128, 1, 128, dtype=torch.float32, device="npu")
     slots = torch.arange(2048, dtype=torch.int32, device="npu")
-    assert not DeviceOperator.try_scatter_cache(key, cache, slots, 2048)
     meta = SimpleNamespace(num_actual_tokens=2048)
     slots[-3:] = -1
     impl = AscendSFADSACPImpl.__new__(AscendSFADSACPImpl)
@@ -64,3 +63,25 @@ def test_unsupported_inner_stride_preserves_fallback_with_negative_slots():
     reference = torch.zeros_like(cache, device="cpu").view(-1, 128)
     reference[:2045] = 1
     torch.testing.assert_close(cache.cpu().view(-1, 128), reference, rtol=0, atol=0)
+
+
+@torch.inference_mode()
+def test_unsupported_inner_stride_matches_generic_scatter_behavior():
+    torch_npu.npu.set_device(0)
+    assert enable_custom_op()
+    key = torch.ones(8, 128, dtype=torch.int8, device="npu")
+    backing = torch.full((2, 128, 1, 256), -7, dtype=torch.int8, device="npu")
+    reference = backing.clone()
+    cache, reference_cache = backing[..., ::2], reference[..., ::2]
+    slots = torch.arange(8, dtype=torch.int32, device="npu")
+    try:
+        torch_npu.npu_scatter_nd_update_(reference_cache.view(-1, 128), slots.view(-1, 1), key)
+        torch.npu.synchronize()
+    except RuntimeError:
+        with pytest.raises(RuntimeError):
+            DeviceOperator.try_scatter_cache(key, cache, slots, 8)
+            torch.npu.synchronize()
+    else:
+        assert not DeviceOperator.try_scatter_cache(key, cache, slots, 8)
+        torch.npu.synchronize()
+        torch.testing.assert_close(backing.cpu(), reference.cpu(), rtol=0, atol=0)

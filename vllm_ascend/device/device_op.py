@@ -40,7 +40,10 @@ else:
 class BaseDeviceAdaptor:
     @classmethod
     def try_scatter_cache(cls, key: torch.Tensor, cache: torch.Tensor, slots: torch.Tensor, tokens: int) -> bool:
-        """Write supported cache rows in place, or request the old scatter.
+        """Write cache rows in place, falling back to the generic scatter.
+
+        Return whether a fast operator was used. A False result means the
+        generic scatter has already performed the write.
 
         The actual-token prefix must contain valid slots: this helper does not
         filter negative slots, and neither fast operator is assumed to skip them.
@@ -48,20 +51,26 @@ class BaseDeviceAdaptor:
         introduced. Never make a contiguous copy of the destination cache.
         """
         if (
-            key.ndim not in (2, 3)
-            or cache.ndim != 4
-            or cache.shape[2] != 1
-            or (key.ndim == 3 and key.shape[1] != 1)
-            or key.shape[0] < tokens
-            or slots.ndim != 1
-            or slots.numel() < tokens
-            or slots.dtype not in (torch.int32, torch.int64)
-            or key.dtype != cache.dtype
-            or key.shape[-1] != cache.shape[-1]
+            key.ndim in (2, 3)
+            and cache.ndim == 4
+            and cache.shape[2] == 1
+            and (key.ndim == 2 or key.shape[1] == 1)
+            and key.shape[0] >= tokens
+            and slots.ndim == 1
+            and slots.numel() >= tokens
+            and slots.dtype in (torch.int32, torch.int64)
+            and key.dtype == cache.dtype
+            and key.shape[-1] == cache.shape[-1]
+            and cls._scatter_cache(key[:tokens].reshape(tokens, key.shape[-1]), cache, slots[:tokens])
         ):
-            return False
+            return True
 
-        return cls._scatter_cache(key[:tokens].reshape(tokens, key.shape[-1]), cache, slots[:tokens])
+        torch_npu.npu_scatter_nd_update_(
+            cache.view(-1, key.shape[-1]),
+            slots[:tokens].view(-1, 1),
+            key[:tokens],
+        )
+        return False
 
     @staticmethod
     def _scatter_cache(key, cache, slots) -> bool:
