@@ -34,6 +34,7 @@ from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
+from vllm.v1.worker.gpu.eplb_utils import step_eplb_after
 from vllm.v1.worker.gpu.input_batch import (
     combine_sampled_and_draft_tokens,
     expand_idx_mapping,
@@ -711,6 +712,7 @@ class NPUModelRunner(GPUModelRunner):
 
         return sampler_output, sampler_output.num_sampled, sampler_output.num_rejected
 
+    @step_eplb_after(is_dummy=True)
     def _dummy_run(
         self,
         num_tokens: int,
@@ -722,14 +724,7 @@ class NPUModelRunner(GPUModelRunner):
         is_profile: bool = False,
         **kwargs,
     ):
-        """Join the LM-head collectives on dummy batches for lmhead TP.
-
-        Idle DP ranks never call sample(), so without this their ranks would
-        be missing from the group collectives and busy ranks would hang.
-        Zero-indexed rows at the same capacity as sample() (both from
-        ``_lmhead_tp_max_num_logits()``; a mismatch hangs). Skipped for
-        profiling and non-last PP ranks. Draft-side alignment is not covered.
-        """
+        """Join LM-head TP before stepping EPLB on an idle DP rank."""
         # Adaptive verification profiles eager tail sizes after graph capture.
         # Use balanced dummy routing, as the initial memory profile does, so a
         # synthetic router hotspot cannot exhaust one EP rank during startup.
@@ -748,7 +743,7 @@ class NPUModelRunner(GPUModelRunner):
                 skip_attn=skip_attn,
                 uniform_decode=uniform_decode,
                 context_len=context_len,
-                skip_eplb=skip_eplb,
+                skip_eplb=True,
                 is_profile=is_profile,
                 **kwargs,
             )
