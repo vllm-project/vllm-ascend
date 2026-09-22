@@ -144,9 +144,8 @@ startup fails immediately and reports that the client must include Mooncake PR #
 asynchronous thread on the first request.
 
 The initial single-group implementation used only model, block hash and TP/head rank.
-Hybrid attention and topology-matched PP are now covered by the
-[hybrid guide](mooncake_hybrid_attention.md) and
-[PP adaptation and validation guide](mooncake_layerwise_pipeline_parallel.md).
+Hybrid attention and topology-matched PP are covered by the
+[hybrid guide](mooncake_hybrid_attention.md).
 The implementation still explicitly rejects:
 
 - Prefill or decode context parallel size greater than 1.

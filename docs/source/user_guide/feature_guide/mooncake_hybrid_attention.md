@@ -22,9 +22,8 @@ It does not translate Mooncake operations into Memcache GVA operations.
 - This patch wires compute windows into the Ascend DSA, FA, and SFA attention
   paths. Start validation in eager mode. Graph-mode execution and additional
   attention backends require separate integration validation.
-- Topology-matched PP is supported by the [pipeline adaptation](mooncake_layerwise_pipeline_parallel.md),
-  including uneven partitions and stage-local hybrid groups. DCP, PCP and
-  prefill/decode TP mismatch remain unsupported.
+- Topology-matched PP supports uneven partitions and stage-local hybrid groups.
+  DCP, PCP and prefill/decode TP mismatch remain unsupported.
 - Recurrent Mamba state is explicitly rejected. Hybrid attention and hybrid
   recurrent/linear-attention state are not interchangeable.
 - Only complete, coordinator-aligned block snapshots are published. Partial
