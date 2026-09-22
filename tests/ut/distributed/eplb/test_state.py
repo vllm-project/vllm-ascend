@@ -15,9 +15,37 @@ from vllm_ascend.distributed.eplb.state import (
 )
 
 
-def test_uses_upstream_policy_and_async_worker_lifecycle():
-    assert AscendEplbState.add_model is upstream_eplb_state.EplbState.add_model
+def test_uses_upstream_async_worker_lifecycle():
     assert AscendEplbState.start_async_loop is upstream_eplb_state.EplbState.start_async_loop
+
+
+def test_add_model_uses_and_reuses_ascend_v2_policy(monkeypatch):
+    def upstream_add_model(self, model, model_config):
+        del model
+        self.model_states = {model_config.compute_hash(): SimpleNamespace()}
+        self.policy = object()
+
+    policy = object()
+    policy_factory = MagicMock(return_value=policy)
+    monkeypatch.setattr(
+        upstream_eplb_state.EplbState,
+        "add_model",
+        upstream_add_model,
+    )
+    monkeypatch.setattr(
+        eplb_state,
+        "get_ep_group",
+        lambda: SimpleNamespace(rank_in_group=3, world_size=4),
+    )
+    monkeypatch.setattr(eplb_state, "AscendV2EplbPolicy", policy_factory)
+    state = AscendEplbState.__new__(AscendEplbState)
+    model_config = SimpleNamespace(compute_hash=lambda: "model")
+
+    state.add_model(object(), model_config)
+    state.add_model(object(), model_config)
+
+    assert state.policy is policy
+    policy_factory.assert_called_once_with(ep_rank=3)
 
 
 def test_layer_state_builds_routing_table_and_preserves_captured_tensor(
@@ -29,7 +57,7 @@ def test_layer_state_builds_routing_table_and_preserves_captured_tensor(
     monkeypatch.setattr(
         eplb_state,
         "get_ep_group",
-        lambda: SimpleNamespace(rank_in_group=1),
+        lambda: SimpleNamespace(rank_in_group=1, world_size=2),
     )
     monkeypatch.setattr(
         eplb_state._eplb_ops,
@@ -49,6 +77,8 @@ def test_layer_state_builds_routing_table_and_preserves_captured_tensor(
 
     assert captured_routing_table is old_routing_table
     assert layer_state.expert_replica_routing_table is captured_routing_table
+    assert layer_state.local_expert_start == 2
+    assert layer_state.local_expert_count == 2
     torch.testing.assert_close(captured_routing_table, new_routing_table)
 
 

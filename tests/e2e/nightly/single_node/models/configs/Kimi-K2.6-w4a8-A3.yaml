@@ -12,8 +12,8 @@ test_cases:
       TASK_QUEUE_ENABLE: "1"
       HCCL_BUFFSIZE: "800"
       VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
-      DYNAMIC_EPLB: "true"
       SERVER_PORT: "DEFAULT_PORT"
+      VLLM_USE_V2_MODEL_RUNNER: "1"
     server_cmd:
       - "--quantization"
       - "ascend"
@@ -44,7 +44,7 @@ test_cases:
       - "--compilation-config"
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--additional-config"
-      - '{"eplb_config":{"dynamic_eplb":true},"ascend_compilation_config":{"enable_static_kernel":false},"enable_fused_mc2":1,"scheduler_config":{"enable_balance_scheduling":true},"enable_mlapo":true}'
+      - '{"ascend_compilation_config":{"enable_static_kernel":false},"enable_fused_mc2":1,"scheduler_config":{"enable_balance_scheduling":true},"enable_mlapo":true}'
       - "--profiler-config"
       - '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": true}'
       - "--mm-processor-cache-gb"
@@ -53,6 +53,9 @@ test_cases:
       - "data"
       - "--speculative-config"
       - '{"method": "dflash","model": "z-lab/Kimi-K2.5-DFlash", "num_speculative_tokens": 7}'
+      - "--enable-eplb"
+      - "--eplb-config"
+      - '{"window_size": 600, "step_interval": 300, "num_redundant_experts": 16, "use_async": true, "log_balancedness": false}'
     benchmarks:
       perf:
         case_type: performance
@@ -65,3 +68,4 @@ test_cases:
         request_rate: 0
         baseline: 1279.0642
         threshold: 0.97
+

@@ -1,0 +1,90 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
+
+import torch
+
+from vllm_ascend.ops.fused_moe.eplb import (
+    map_to_physical,
+    record_expert_tokens,
+    record_physical_expert_load,
+)
+
+
+def test_map_to_physical_runs_on_npu_without_recording():
+    routing_table = torch.tensor(
+        [[0, 3], [2, 1], [0, 3], [2, 1]],
+        dtype=torch.int32,
+        device="npu",
+    )
+    topk_ids = torch.tensor(
+        [[0, 1], [0, 1], [0, 1], [0, 1]],
+        dtype=torch.int32,
+        device="npu",
+    )
+
+    physical_ids = map_to_physical(topk_ids, routing_table)
+    torch.npu.synchronize()
+
+    torch.testing.assert_close(
+        physical_ids.cpu(),
+        torch.tensor([[0, 3], [2, 1], [0, 3], [2, 1]], dtype=torch.int32),
+    )
+
+
+def test_record_expert_tokens_runs_on_npu():
+    expert_load = torch.zeros(6, dtype=torch.int32, device="npu")
+    record_enabled = torch.tensor(True, device="npu")
+
+    record_expert_tokens(
+        torch.tensor([2, 5], dtype=torch.int64, device="npu"),
+        expert_load,
+        record_enabled,
+        group_list_type=1,
+        local_expert_start=2,
+    )
+    record_expert_tokens(
+        torch.tensor([3, 7], dtype=torch.int64, device="npu"),
+        expert_load,
+        record_enabled,
+        group_list_type=0,
+        local_expert_start=2,
+    )
+    torch.npu.synchronize()
+    torch.testing.assert_close(
+        expert_load.cpu(),
+        torch.tensor([0, 0, 5, 9, 0, 0], dtype=torch.int32),
+    )
+
+    record_expert_tokens(
+        torch.tensor([10, 10], dtype=torch.int64, device="npu"),
+        expert_load,
+        record_enabled.fill_(False),
+        group_list_type=1,
+        local_expert_start=2,
+    )
+    torch.npu.synchronize()
+    torch.testing.assert_close(
+        expert_load.cpu(),
+        torch.tensor([0, 0, 5, 9, 0, 0], dtype=torch.int32),
+    )
+
+
+def test_record_physical_expert_load_fallback_runs_on_npu():
+    physical_ids = torch.tensor(
+        [[0, 3], [2, 1], [0, 3], [2, 1]],
+        dtype=torch.int32,
+        device="npu",
+    )
+    expert_load = torch.zeros(4, dtype=torch.int32, device="npu")
+
+    record_physical_expert_load(
+        physical_ids,
+        expert_load,
+        record_enabled=torch.tensor(True, device="npu"),
+        num_unpadded_tokens=torch.tensor(3, dtype=torch.int32, device="npu"),
+    )
+    torch.npu.synchronize()
+    torch.testing.assert_close(
+        expert_load.cpu(),
+        torch.tensor([2, 1, 1, 2], dtype=torch.int32),
+    )

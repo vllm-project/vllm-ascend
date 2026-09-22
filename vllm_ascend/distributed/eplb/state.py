@@ -4,17 +4,26 @@
 """Ascend-owned extensions for the upstream EPLB state."""
 
 import inspect
+from contextvars import ContextVar
 from dataclasses import fields
 from typing import Any
 
 import torch
 from torch.distributed import all_reduce
+from vllm.config import ModelConfig
 from vllm.distributed import get_ep_group
 from vllm.distributed.eplb import eplb_state as _eplb_state
+from vllm.model_executor.models.interfaces import MixtureOfExperts
 
+from vllm_ascend.distributed.eplb.policy import AscendV2EplbPolicy
 from vllm_ascend.ops.fused_moe import eplb as _eplb_ops
 
 ASYNC_EPLB_CYCLE_COMMITTED_LOG = "Ascend async EPLB cycle committed"
+
+EXPERT_MAPPING_EP_SIZE: ContextVar[int] = ContextVar(
+    "vllm_ascend_expert_mapping_ep_size",
+    default=1,
+)
 
 
 def _upstream_from_mapping_accepts_valid_expert_count() -> bool:
@@ -28,6 +37,8 @@ class AscendEplbLayerState(_eplb_state.EplbLayerState):
     def __init__(self) -> None:
         super().__init__()
         self.expert_replica_routing_table: torch.Tensor | None = None
+        self.local_expert_start = 0
+        self.local_expert_count = 0
 
     @classmethod
     def from_upstream(
@@ -37,7 +48,18 @@ class AscendEplbLayerState(_eplb_state.EplbLayerState):
         ascend_state = cls()
         for field in fields(_eplb_state.EplbLayerState):
             setattr(ascend_state, field.name, getattr(state, field.name))
+        if ascend_state.expert_load_view is not None:
+            ascend_state._set_local_expert_range(ascend_state.expert_load_view)
         return ascend_state
+
+    def _set_local_expert_range(self, expert_load_view: torch.Tensor) -> None:
+        ep_group = get_ep_group()
+        ep_size = ep_group.world_size
+        num_physical_experts = expert_load_view.shape[-1]
+        if num_physical_experts % ep_size != 0:
+            raise ValueError("The number of physical experts must be divisible by EP size.")
+        self.local_expert_count = num_physical_experts // ep_size
+        self.local_expert_start = ep_group.rank_in_group * self.local_expert_count
 
     def set_layer_state(
         self,
@@ -52,6 +74,7 @@ class AscendEplbLayerState(_eplb_state.EplbLayerState):
             logical_to_physical_map,
             logical_replica_count,
         )
+        self._set_local_expert_range(expert_load_view)
         self.refresh_expert_replica_routing_table()
 
     def refresh_expert_replica_routing_table(self) -> None:
@@ -98,8 +121,29 @@ class AscendEplbState(_eplb_state.EplbState):
     def __init__(self, parallel_config, device: torch.device) -> None:
         super().__init__(parallel_config, device)
         self._has_fresh_recorded_load = False
+        self._async_cycle_in_progress = False
         if self.cuda_device_index is None:
             self.cuda_device_index = torch.accelerator.current_device_index()
+
+    def add_model(
+        self,
+        model: MixtureOfExperts,
+        model_config: ModelConfig,
+    ) -> None:
+        # Older vLLM releases do not forward EP size to the initial mapping.
+        token = EXPERT_MAPPING_EP_SIZE.set(get_ep_group().world_size)
+        try:
+            super().add_model(model, model_config)
+        finally:
+            EXPERT_MAPPING_EP_SIZE.reset(token)
+        self.model_states[model_config.compute_hash()]._ascend_eplb_owner = self
+        policy = getattr(self, "_ascend_v2_policy", None)
+        if policy is None:
+            policy = AscendV2EplbPolicy(
+                ep_rank=get_ep_group().rank_in_group,
+            )
+            self._ascend_v2_policy = policy
+        self.policy = policy
 
     def _has_global_fresh_recorded_load(self) -> bool:
         """Synchronize whether any EP rank recorded load since rearranging."""
@@ -149,6 +193,8 @@ class AscendEplbState(_eplb_state.EplbState):
             for model_state in self.model_states.values():
                 refresh_model_routing_tables(model_state)
         if not is_profile:
+            if self.is_async:
+                self._async_cycle_in_progress = True
             self._has_fresh_recorded_load = False
         return result
 

@@ -44,6 +44,11 @@ def map_to_physical(
     if topk_ids.ndim != 2:
         raise ValueError("topk_ids must be a 2D tensor.")
 
+    if topk_ids.device.type != "cpu":
+        from vllm_ascend.ops.triton.eplb import map_to_physical_triton
+
+        return map_to_physical_triton(topk_ids, expert_replica_routing_table)
+
     logical_ids = topk_ids.to(torch.int64) if topk_ids.device.type == "cpu" else topk_ids
     num_rows, topk = topk_ids.shape
     num_full_blocks, tail_rows = divmod(
@@ -84,26 +89,69 @@ def map_to_physical(
     return physical_ids if physical_ids.dtype == topk_ids.dtype else physical_ids.to(topk_ids.dtype)
 
 
-def map_to_physical_and_record(
-    topk_ids: torch.Tensor,
-    expert_replica_routing_table: torch.Tensor,
+def record_expert_tokens(
+    expert_tokens: torch.Tensor,
+    expert_load_view: torch.Tensor,
+    record_enabled: torch.Tensor,
+    group_list_type: int,
+    local_expert_start: int,
+) -> None:
+    """Record local expert counts returned by the MoE dispatch operator."""
+    if expert_tokens.ndim != 1:
+        raise ValueError("expert_tokens must be a 1D tensor.")
+    if expert_tokens.device.type != "cpu":
+        from vllm_ascend.ops.triton.eplb import record_expert_tokens_triton
+
+        record_expert_tokens_triton(
+            expert_tokens,
+            expert_load_view,
+            record_enabled,
+            group_list_type,
+            local_expert_start,
+        )
+        return
+
+    if group_list_type == 1:
+        local_load = expert_tokens
+    else:
+        local_load = torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
+
+    local_expert_end = local_expert_start + local_load.numel()
+    if local_expert_start < 0 or local_expert_end > expert_load_view.numel():
+        raise ValueError("Local expert load is outside the global physical expert view.")
+
+    gated_load = local_load.to(
+        expert_load_view.dtype,
+        non_blocking=True,
+    ) * record_enabled.to(expert_load_view.dtype)
+    expert_load_view[local_expert_start:local_expert_end].add_(gated_load)
+
+
+def record_physical_expert_load(
+    physical_ids: torch.Tensor,
     expert_load_view: torch.Tensor,
     record_enabled: torch.Tensor,
     num_unpadded_tokens: torch.Tensor,
-) -> torch.Tensor:
-    """Map logical IDs and record load only while collection is enabled."""
-    if topk_ids.device.type != "cpu":
-        from vllm_ascend.ops.triton.eplb import map_to_physical_and_record_triton
+) -> None:
+    """Fallback per-token recording for MoE paths without expert counts."""
+    if physical_ids.numel() == 0:
+        return
+    if physical_ids.ndim != 2:
+        raise ValueError("physical_ids must be a 2D tensor.")
 
-        return map_to_physical_and_record_triton(
-            topk_ids,
-            expert_replica_routing_table,
+    if physical_ids.device.type != "cpu":
+        from vllm_ascend.ops.triton.eplb import (
+            record_physical_expert_load_triton,
+        )
+
+        record_physical_expert_load_triton(
+            physical_ids,
             expert_load_view,
             record_enabled,
             num_unpadded_tokens,
         )
+        return
 
-    physical_ids = map_to_physical(topk_ids, expert_replica_routing_table)
     if bool(record_enabled):
         unpadded_physical_ids = physical_ids[: int(num_unpadded_tokens)].reshape(-1)
         valid_physical_ids = unpadded_physical_ids[
@@ -116,23 +164,55 @@ def map_to_physical_and_record(
                     minlength=expert_load_view.numel(),
                 ).to(expert_load_view.dtype)
             )
-    return physical_ids
 
 
-def _map_to_physical_and_record_fake(
+def _map_to_physical_fake(
     topk_ids: torch.Tensor,
     expert_replica_routing_table: torch.Tensor,
-    expert_load_view: torch.Tensor,
-    record_enabled: torch.Tensor,
-    num_unpadded_tokens: torch.Tensor,
 ) -> torch.Tensor:
     return torch.empty_like(topk_ids)
 
 
+def _record_expert_tokens_fake(
+    expert_tokens: torch.Tensor,
+    expert_load_view: torch.Tensor,
+    record_enabled: torch.Tensor,
+    group_list_type: int,
+    local_expert_start: int,
+) -> None:
+    return None
+
+
+def _record_physical_expert_load_fake(
+    physical_ids: torch.Tensor,
+    expert_load_view: torch.Tensor,
+    record_enabled: torch.Tensor,
+    num_unpadded_tokens: torch.Tensor,
+) -> None:
+    return None
+
+
 direct_register_custom_op(
-    op_name="ascend_eplb_map_to_physical_and_record",
-    op_func=map_to_physical_and_record,
+    op_name="ascend_eplb_map_to_physical",
+    op_func=map_to_physical,
+    fake_impl=_map_to_physical_fake,
+    dispatch_key="PrivateUse1",
+)
+
+
+direct_register_custom_op(
+    op_name="ascend_eplb_record_expert_tokens",
+    op_func=record_expert_tokens,
     mutates_args=["expert_load_view"],
-    fake_impl=_map_to_physical_and_record_fake,
+    fake_impl=_record_expert_tokens_fake,
+    dispatch_key="PrivateUse1",
+)
+
+
+direct_register_custom_op(
+    op_name="ascend_eplb_record_physical_expert_load",
+    op_func=record_physical_expert_load,
+    mutates_args=["expert_load_view"],
+    fake_impl=_record_physical_expert_load_fake,
     dispatch_key="PrivateUse1",
 )
