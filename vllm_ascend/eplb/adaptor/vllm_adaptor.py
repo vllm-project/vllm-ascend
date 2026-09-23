@@ -99,6 +99,9 @@ class VllmEplbAdaptor:
         first_layer = self.moe_layers[0]
         self.num_local_experts = first_layer.local_num_experts
         self.ep_rank = first_layer.ep_rank
+        # Identical for every layer (placement depends only on the EPLB config);
+        # None when EPLB expert maps are not used (no EP).
+        self.phys_to_logical = getattr(first_layer, "phys_to_logical", None)
 
         self.expert_param_per_layer = dict()
         self.expert_weight_key_per_layer = dict()
@@ -175,6 +178,7 @@ class VllmEplbAdaptor:
     def _export_tensor_to_file(self, expert_maps, expert_map_record_path: str):
         if self.rank_id == 0:
             num_local_experts = expert_maps.max() + 1
+            phys_to_logical = self.phys_to_logical
 
             expert_maps_list = expert_maps.tolist()
             record: dict[str, Any] = {"moe_layer_count": len(expert_maps_list), "layer_list": []}
@@ -187,7 +191,13 @@ class VllmEplbAdaptor:
                 }
 
                 for device_idx, experts in enumerate(layer_data):
-                    placement = [experts.index(i) for i in range(num_local_experts)]
+                    # expert maps index physical expert IDs; the record file
+                    # format stores logical expert IDs per device.
+                    phys_ids = [experts.index(i) for i in range(num_local_experts)]
+                    if phys_to_logical is None:
+                        placement = phys_ids
+                    else:
+                        placement = [int(phys_to_logical[phys_id].item()) for phys_id in phys_ids]
                     device_record = {"device_id": device_idx, "device_expert": placement}
                     layer_record["device_list"].append(device_record)
 
@@ -198,6 +208,12 @@ class VllmEplbAdaptor:
 
     def do_update_expert_map(self, layer_id, updated_expert_map):
         self.expert_map_per_layer_cpu[layer_id].copy_(updated_expert_map)
+        # Keep the layer's runtime maps in sync with the worker's authoritative
+        # map after each rebalance: the AllGather dispatcher masks topk_ids
+        # against ascend_expert_map and the load collector reads the layer's
+        # slot->physical IDs.
+        layer = self.moe_layers[layer_id]
+        layer.update_ascend_eplb_maps(updated_expert_map)
 
     def do_update_expert_weight(self, layer_id, local_expert_to_replace, buffer_tensor_id):
         expert_weight_key = self.expert_weight_key_per_layer[layer_id]
