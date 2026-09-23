@@ -13,8 +13,8 @@ from vllm.v1.worker.utils import AttentionGroup
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_and_dspark_inputs_kernel
-from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer, _compute_num_programs
+from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_inputs_kernel_single_grid
+from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.spec_decode.utils import DynamicSpecScheduler
 
 
@@ -264,9 +264,7 @@ class AscendDSparkProposer(AscendDflashProposer):
             if gid_block_table is None:
                 continue
             kv_block_size = int(attn_group.kv_cache_spec.block_size)
-            copy_and_expand_dflash_and_dspark_inputs_kernel[
-                (_compute_num_programs(self._dflash_num_context, num_query_total),)
-            ](
+            copy_and_expand_dflash_inputs_kernel_single_grid[1,](
                 # Inputs
                 next_token_ids_ptr=next_token_ids,
                 target_positions_ptr=target_positions,
@@ -284,7 +282,7 @@ class AscendDSparkProposer(AscendDflashProposer):
                 # Metadata
                 query_start_loc_ptr=cad.query_start_loc,
                 seq_lens_ptr=cad.seq_lens,
-                num_rejected_tokens_ptr=num_rejected_tokens_gpu,
+                num_rejected_tokens_ptr=(num_rejected_tokens_gpu if has_num_rejected else 0),
                 # Scalars
                 parallel_drafting_token_id=self.parallel_drafting_token_id,
                 block_size=kv_block_size,
