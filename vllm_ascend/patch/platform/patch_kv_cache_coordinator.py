@@ -34,8 +34,6 @@ from vllm.v1.kv_cache_interface import (
 
 from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
 
-USE_MULTI_GROUPS_KV_CACHE = True
-
 _orig_get_kv_cache_coordinator = vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator
 
 
@@ -61,13 +59,8 @@ def _skips_eagle_block_drop(kv_transfer_config) -> bool:
     )
 
 
-def _select_kv_token_budget(
-    max_model_len: int,
-    max_in_flight_tokens: int | None,
-    max_num_batched_tokens: int | None,
-) -> int:
-    token_budget = max_in_flight_tokens
-    return token_budget if token_budget is not None else max_model_len
+def _select_kv_token_budget(max_model_len: int, max_in_flight_tokens: int | None) -> int:
+    return max_in_flight_tokens if max_in_flight_tokens is not None else max_model_len
 
 
 def _is_deepseek_v4_kv_cache_spec(kv_cache_spec: KVCacheSpec) -> bool:
@@ -120,7 +113,6 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         eagle_attn_layer_names: list[str] | None = None,
         metrics_collector: KVCacheMetricsCollector | None = None,
         max_in_flight_tokens: int | None = None,
-        max_num_batched_tokens: int | None = None,
         scheduler_block_size: int | None = None,
         num_prefill_lookahead: int = 0,
         allow_partial_hash_hits: bool = True,
@@ -141,9 +133,8 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # Fall back to `max_model_len` when unset so the recycling-aware
         # admission cap (vLLM PR #40946) collapses to the prior uncapped
         # behavior. The scheduler always supplies the real value at runtime.
-        token_budget = _select_kv_token_budget(max_model_len, max_in_flight_tokens, max_num_batched_tokens)
+        token_budget = _select_kv_token_budget(max_model_len, max_in_flight_tokens)
         self.max_in_flight_tokens = token_budget
-        self.max_num_batched_tokens = token_budget
         self.retention_interval = getattr(envs_vllm, "VLLM_PREFIX_CACHE_RETENTION_INTERVAL", None)
         validate_retention_interval = getattr(
             vllm_kv_cache_coordinator,
@@ -514,14 +505,13 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
     scheduler_block_size: int | None = None,
     eagle_attn_layer_names: list[str] | None = None,
     metrics_collector: KVCacheMetricsCollector | None = None,
-    max_num_batched_tokens: int | None = None,
     num_prefill_lookahead: int = 0,
     allow_partial_hash_hits: bool = True,
 ) -> KVCacheCoordinator:
     # Keep pcp_world_size in this patched function for upstream call
     # compatibility; platform validation guarantees that it is one.
     del pcp_world_size
-    token_budget = _select_kv_token_budget(max_model_len, max_in_flight_tokens, max_num_batched_tokens)
+    token_budget = _select_kv_token_budget(max_model_len, max_in_flight_tokens)
     hybrid_kwargs = dict(
         kv_cache_config=kv_cache_config,
         max_model_len=max_model_len,
@@ -534,7 +524,6 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
         eagle_attn_layer_names=eagle_attn_layer_names,
         metrics_collector=metrics_collector,
         max_in_flight_tokens=token_budget,
-        max_num_batched_tokens=token_budget,
         scheduler_block_size=scheduler_block_size,
         num_prefill_lookahead=num_prefill_lookahead,
     )

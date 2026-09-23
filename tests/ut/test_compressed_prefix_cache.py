@@ -274,7 +274,6 @@ def test_hybrid_coordinator_rejects_partial_compressed_prefix_hit() -> None:
         pcp_world_size=1,
         hash_block_size=physical_block_size,
         scheduler_block_size=logical_block_size,
-        max_num_batched_tokens=logical_block_size,
     )
 
     for manager in coordinator.single_type_managers:
@@ -352,7 +351,6 @@ def test_hybrid_coordinator_truncates_every_full_attention_group() -> None:
         pcp_world_size=1,
         hash_block_size=hash_block_size,
         scheduler_block_size=block_size,
-        max_num_batched_tokens=8192,
     )
     request = _make_request(
         "a",
