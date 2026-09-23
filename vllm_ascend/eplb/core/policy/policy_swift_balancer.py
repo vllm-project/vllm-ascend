@@ -40,6 +40,8 @@ class SwiftBalanceEplb(EplbPolicy):
         self.swap_threshold: float = 0
         self.max_swap_times: int = 100
         self.num_die_per_host = torch.npu.device_count()
+        self.last_rebalance_diagnostics: list[dict[str, object]] = []
+        self.last_rebalance_summary: dict[str, object] = {}
 
     @staticmethod
     def calculate_max_heat_per_layer(workload_table: np.ndarray) -> list[float]:
@@ -202,9 +204,9 @@ class SwiftBalanceEplb(EplbPolicy):
                 target_expert = current_weights[index]
                 expert_id, original_weight = target_expert
 
-                current_redundancy = redundant_assignments[expert_id] + 1
-                if current_redundancy < num_ranks:
-                    new_avg_weight = original_weight * (current_redundancy + 1) / (current_redundancy + 2)
+                current_replica_count = redundant_assignments[expert_id] + 1
+                if current_replica_count < num_ranks:
+                    new_avg_weight = original_weight * current_replica_count / (current_replica_count + 1)
 
                     redundant_assignments[expert_id] += 1
                     current_weights[index] = (expert_id, new_avg_weight)
@@ -708,13 +710,28 @@ class SwiftBalanceEplb(EplbPolicy):
         max_heat_per_layer_before = self.calculate_max_heat_per_layer(info.workload_table)
         npu_heat_all_origin = sum(max_heat_per_layer_before)
         max_heat_per_layer_after = []
+        layer_diagnostics: list[dict[str, object]] = []
 
         for layer in range(self.num_layers):
             cur_layer_deployment = info.placement_table[layer]
             cur_layer_workload = layer_workloads[layer]
+            initial_imbalance = float(layer_initial_imbalance[layer])
+            layer_diagnostic: dict[str, object] = {
+                "layer": layer,
+                "initial_imbalance": initial_imbalance,
+                "after_swap_imbalance": None,
+                "below_threshold": False,
+                "candidate_changed": False,
+                "strictly_improved": False,
+                "applied": False,
+                "reason": "",
+            }
 
-            if layer_initial_imbalance[layer] < self.imbalance_threshold:
+            if initial_imbalance < self.imbalance_threshold:
                 max_heat_per_layer_after.append(max_heat_per_layer_before[layer])
+                layer_diagnostic["below_threshold"] = True
+                layer_diagnostic["reason"] = "below_threshold"
+                layer_diagnostics.append(layer_diagnostic)
                 continue
 
             (all_node_assignments, all_node_loads, updated_weights, num_com_between_rank, rev_experts_per_rank) = (
@@ -725,14 +742,33 @@ class SwiftBalanceEplb(EplbPolicy):
                 all_node_assignments, all_node_loads, num_com_between_rank, rev_experts_per_rank, updated_weights
             )
 
-            after_swap_imbalance = new_max_workload / ave_workload
+            after_swap_imbalance = float(new_max_workload / ave_workload)
+            candidate_changed = not np.array_equal(new_layer_deployment, cur_layer_deployment)
+            strictly_improved = after_swap_imbalance < initial_imbalance
+            layer_diagnostic["after_swap_imbalance"] = after_swap_imbalance
+            layer_diagnostic["candidate_changed"] = candidate_changed
+            layer_diagnostic["strictly_improved"] = strictly_improved
 
-            if after_swap_imbalance < layer_initial_imbalance[layer]:
+            if strictly_improved:
                 new_deployment[layer] = new_layer_deployment
+                layer_diagnostic["applied"] = candidate_changed
+                layer_diagnostic["reason"] = "applied" if candidate_changed else "no_feasible_exchange"
+            elif candidate_changed:
+                layer_diagnostic["reason"] = "not_strictly_improved"
+            else:
+                layer_diagnostic["reason"] = "no_feasible_exchange"
 
             max_heat_per_layer_after.append(new_max_workload)
+            layer_diagnostics.append(layer_diagnostic)
 
         self.constraint_expert_local_exchange(info.placement_table, new_deployment)
+        changed_mask = np.any(new_deployment != info.placement_table, axis=(1, 2))
+        raw_changed_layers = np.flatnonzero(changed_mask).tolist()
+        raw_changed_layer_set = set(raw_changed_layers)
+        for layer, layer_diagnostic in enumerate(layer_diagnostics):
+            if layer_diagnostic["applied"] and layer not in raw_changed_layer_set:
+                layer_diagnostic["applied"] = False
+                layer_diagnostic["reason"] = "alignment_removed_change"
 
         layer_changed_ratio = []
         for layer_idx in range(self.num_layers):
@@ -747,5 +783,21 @@ class SwiftBalanceEplb(EplbPolicy):
         change = 0
         if npu_heat_all_after < 0.95 * npu_heat_all_origin:
             change = 1
+
+        if npu_heat_all_origin > 0:
+            improvement_ratio = 1.0 - npu_heat_all_after / npu_heat_all_origin
+        else:
+            improvement_ratio = 0.0
+        self.last_rebalance_diagnostics = layer_diagnostics
+        self.last_rebalance_summary = {
+            "change": change,
+            "npu_heat_all_origin": float(npu_heat_all_origin),
+            "npu_heat_all_after": float(npu_heat_all_after),
+            "improvement_ratio": float(improvement_ratio),
+            "raw_changed_layers": raw_changed_layers,
+            "imbalance_threshold": float(self.imbalance_threshold),
+            "swap_threshold": float(self.swap_threshold),
+            "num_max_com": self.num_max_com,
+        }
 
         return change, per_layer_priority, new_deployment.tolist()
