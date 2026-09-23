@@ -31,6 +31,7 @@ from vllm.model_executor.layers.rotary_embedding import (
     YaRNScalingRotaryEmbedding,
 )
 from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
+from vllm.model_executor.layers.rotary_embedding.gemma4_rope import Gemma4RotaryEmbedding
 from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
@@ -318,6 +319,15 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         if out_dtype is None:
             return torch.ops.vllm.npu_rotary_embedding(*rope_args)
         return torch.ops.vllm.npu_rotary_embedding(*rope_args, out_dtype=out_dtype)
+
+
+class AscendGemma4RotaryEmbedding(Gemma4RotaryEmbedding, AscendRotaryEmbedding):
+    """Keep Gemma4 proportional frequencies and use Ascend's fused rotary forward.
+
+    Gemma4RotaryEmbedding's cooperative constructor sets its angle counts and
+    full-head rotary width before AscendRotaryEmbedding creates and records
+    the cache. Non-rotated dimensions have cos=1 and sin=0 in that cache.
+    """
 
 
 class AscendYaRNRotaryEmbedding(YaRNScalingRotaryEmbedding):

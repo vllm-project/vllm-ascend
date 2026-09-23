@@ -20,8 +20,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, YaRNScalingRotaryEmbedding
+from vllm.model_executor.layers.rotary_embedding.gemma4_rope import Gemma4RotaryEmbedding
 
 from vllm_ascend.ops.rotary_embedding import (
+    AscendGemma4RotaryEmbedding,
     AscendRotaryEmbedding,
     AscendYaRNRotaryEmbedding,
     rope_forward_oot,
@@ -299,6 +301,45 @@ class TestAscendEmbeddingForwardOOT:
         accordingly.
         """
         check_parent_init_signature_has_not_changed(RotaryEmbedding.__init__, AscendRotaryEmbedding.__init__)
+
+
+class TestAscendGemma4RotaryEmbedding:
+    # Gemma 4 global attention uses 512-dim heads with partial_rotary_factor=0.25;
+    # a full-rotary configuration has no zero-padded angle pairs.
+    @pytest.mark.parametrize("head_size,rotary_dim", [(512, 128), (256, 256)])
+    def test_preserves_proportional_frequencies_and_initializes_ascend_cache(self, head_size, rotary_dim):
+        cache = torch.zeros(MAX_POS, head_size)
+        emb = AscendGemma4RotaryEmbedding.__new__(AscendGemma4RotaryEmbedding)
+        emb.cos_sin_cache = cache
+        emb.head_size = head_size
+        with (
+            patch.object(RotaryEmbedding, "__init__", return_value=None) as parent,
+            patch("vllm_ascend.ops.rotary_embedding._record_cos_sin_cache") as record_cache,
+            patch("vllm_ascend.ops.rotary_embedding._record_cos_and_sin_cache_interleaved") as record_split,
+        ):
+            AscendGemma4RotaryEmbedding.__init__(emb, head_size, rotary_dim, MAX_POS, BASE, True, DTYPE)
+        # Gemma4 rotates the full head; non-rotated pairs are identity rotations.
+        parent.assert_called_once_with(head_size, head_size, MAX_POS, BASE, True, DTYPE, True)
+        record_cache.assert_called_once_with(cache)
+        record_split.assert_called_once_with(emb, cache)
+        assert (emb.rope_angles, emb.nope_angles) == (rotary_dim // 2, (head_size - rotary_dim) // 2)
+
+        class ReferenceGemma4RotaryEmbedding(Gemma4RotaryEmbedding):
+            pass
+
+        reference = ReferenceGemma4RotaryEmbedding.__new__(ReferenceGemma4RotaryEmbedding)
+        reference.head_size, reference.rope_angles, reference.nope_angles = head_size, emb.rope_angles, emb.nope_angles
+        inv_freq = emb._compute_inv_freq(BASE)
+        torch.testing.assert_close(inv_freq, reference._compute_inv_freq(BASE), rtol=0, atol=0)
+        assert inv_freq.shape == (head_size // 2,)
+        assert torch.all(inv_freq[rotary_dim // 2 :] == 0)
+        assert not emb.use_mtp
+
+    def test_uses_ascend_forward_and_upstream_constructor(self):
+        assert AscendGemma4RotaryEmbedding.forward_oot is AscendRotaryEmbedding.forward_oot
+        check_parent_init_signature_has_not_changed(
+            Gemma4RotaryEmbedding.__init__, AscendGemma4RotaryEmbedding.__init__
+        )
 
 
 class TestAscendYaRNRotaryEmbeddingForwardOOT:
