@@ -1,0 +1,81 @@
+# ==========================================
+# Shared Configurations
+# ==========================================
+
+_envs: &envs
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  OMP_NUM_THREADS: "1"
+  TASK_QUEUE_ENABLE: "1"
+  HCCL_IF_IP: "127.0.0.1"
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  HCCL_BUFFSIZE: "1024"
+  SERVER_PORT: "DEFAULT_PORT"
+
+_server_cmd: &server_cmd
+  - "--port"
+  - "$SERVER_PORT"
+  - "--host"
+  - "0.0.0.0"
+  - "--data-parallel-size"
+  - "1"
+  - "--tensor-parallel-size"
+  - "2"
+  - "--max-num-seqs"
+  - "32"
+  - "--gpu-memory-utilization"
+  - "0.9"
+  - "--trust-remote-code"
+  - "--async-scheduling"
+  - "--allowed-local-media-path"
+  - "/"
+  - "--quantization"
+  - "ascend"
+  - "--mm-processor-cache-gb"
+  - "0"
+  - "--mm-encoder-tp-mode"
+  - "data"
+  - "--mm-processor-cache-type"
+  - "shm"
+  - "--additional-config"
+  - '{"enable_cpu_binding": true}'
+  - "--api-server-count"
+  - "4"
+
+_benchmarks_acc: &benchmarks_acc
+  acc:
+    case_type: accuracy
+    dataset_path: vllm-ascend/gpqa
+    request_conf: vllm_api_general_chat
+    dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
+    max_out_len: 32768
+    batch_size: 32
+    baseline: 84.34
+    threshold: 5
+    temperature: 0.6
+    top_p: 0.95
+    ignore_eos: false
+    thinking: true
+
+
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "Qwen3.6-27B-acc"
+    model: "Eco-Tech/Qwen3.6-27B-w8a8"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--max-model-len"
+      - "133120"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--compilation-config"
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,4,8,12,16,20,24,28,32,36,40,44,48,52,60,64,68,72,76,80,84,88,92,96,100,104,108,112,116,120,124,128]}'
+      - "--speculative-config"
+      - '{"method": "qwen3_5_mtp","num_speculative_tokens": 3}'
+      - "--enable-prefix-caching"
+    benchmarks:
+      <<: *benchmarks_acc
