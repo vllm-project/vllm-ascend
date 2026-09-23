@@ -321,7 +321,7 @@ class TestAscendLlama3RotaryEmbedding:
             )
         parent.assert_called_once_with(HEAD_SIZE, ROTARY_DIM, MAX_POS, BASE, True, DTYPE, True)
         record_cache.assert_called_once_with(cache)
-        record_split.assert_called_once_with(cache)
+        record_split.assert_called_once_with(emb, cache)
         assert (emb.scaling_factor, emb.low_freq_factor, emb.high_freq_factor, emb.orig_max_position) == factors
 
         # Compare the actual inverse-frequency calculation through the diamond
