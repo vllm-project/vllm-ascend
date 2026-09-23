@@ -237,8 +237,21 @@ class AscendMLAMetadata:
     decode: AscendMLADecodeMetadata | None = None
     prefill: AscendMLAPrefillMetadata | None = None
     reshape_cache_event: torch.npu.Event = None
-    # Bounded non-absorbed FlashAttn plan for the prefill suffix. Present only
-    # when the A5 Flash MLA route is enabled and usable for this batch.
+    # A5 Flash MLA lanes. Each lane owns a disjoint row range of the same batch
+    # and is built independently, so a mixed batch carries both and a lane that
+    # falls back never changes the other lane's plan:
+    #   decode prefix  [0, num_decode_tokens)                  -> decode lane
+    #   prefill suffix [num_decode_tokens, num_actual_tokens)   -> flash_full_prefill
+    # `flash_full_prefill` holds the bounded non-absorbed FlashAttn plan and is
+    # present only when the A5 route is enabled and usable for this batch.
+    #
+    # The decode lane (absorbed FlashMLA through
+    # `torch.ops._C_ascend.flash_mla_with_kvcache`) is not implemented here. When
+    # it lands it binds its own `flash_decode` field, mirroring
+    # `flash_full_prefill`: a prefix-scoped plan holding the graph-stable
+    # query/schedule/block_table/cache_lens operands, refreshed through
+    # DeviceMetadataStage.ATTENTION because decode is graph-captured instead of
+    # rebuilt on the host like this prefill lane.
     flash_full_prefill: PrefillMetadata | None = None
 
     def __post_init__(self):
@@ -487,6 +500,12 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         history gather never sizes itself from an optimistic decode mirror.
         The current chunk stays causal (mask_mode 3); every history chunk is
         noncausal (mask_mode 0) and is merged online.
+
+        Only the prefill suffix `[num_decode_tokens, num_actual_tokens)` is
+        planned: a mixed batch keeps its decode prefix on the decode lane, and
+        the plan is offset by `num_decodes` so it never depends on how that lane
+        is implemented. Conversely, returning `None` here only falls the prefill
+        suffix back to FIA; it must not disable the decode lane.
         """
         contexts = common_attn_metadata.num_computed_prefill_tokens_cpu
         if (
@@ -575,11 +594,17 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         block_table_size = self.get_block_table_size(common_attn_metadata, BUILD_METADATA_STEP_PREFILL)
         self.block_table = common_attn_metadata.block_table_tensor[:block_table_size]
 
-        # Build the A5 FlashAttn plan first: its presence removes the legacy FIA
-        # chunk plan (and every host-side length list it derives) for this batch.
+        # A5 Flash MLA lanes, built independently so a mixed batch can carry both
+        # and a lane that falls back leaves the other lane's plan untouched.
+        # Prefill suffix lane: its presence removes the legacy FIA chunk plan (and
+        # every host-side length list it derives) for this batch.
         flash_prefill = None
         if self.flash_prefill_enabled and self.num_prefills > 0:
             flash_prefill = self._build_flash_prefill_metadata(common_attn_metadata)
+        # Decode prefix lane: unbound in this implementation, so the FIA decode keeps
+        # rows `[0, num_decode_tokens)`. The absorbed FlashMLA lane binds a
+        # `flash_decode` metadata object here (see `AscendMLAMetadata`), built
+        # independently of `flash_prefill` so a mixed batch can carry both.
 
         prefill_metadata = None
         if self.num_prefills > 0:
@@ -1558,6 +1583,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         history in chunks, attends each chunk with the native operator and
         merges output/LSE online, so peak memory follows the scheduled prefill
         tokens instead of the cached prefix.
+
+        This covers the prefill suffix only; the decode prefix of a mixed batch
+        is produced by the decode lane. The operands handed over by
+        `mla_preprocess_prefill` are already sliced to that suffix.
         """
         prefill_meta = attn_metadata.prefill
         plan_meta = attn_metadata.flash_full_prefill
@@ -2348,6 +2377,10 @@ class AscendMLAImpl(MLAAttentionImpl):
             )
         if decode_preprocess_res is not None:
             # MLA Preprocess for decoding
+            # Decode lane, rows `[0, num_decode_tokens)`. The absorbed FlashMLA
+            # variant (`flash_mla_with_kvcache`, fed by `attn_metadata.flash_decode`)
+            # will replace this FIA call under the same row contract; it must not
+            # read or write the prefill lane's `flash_full_prefill`.
             output_decode = self._forward_decode(decode_preprocess_res, kv_cache[0].shape[1], attn_metadata)
 
             o_proj_input[:num_decode_tokens] = output_decode
@@ -2356,6 +2389,9 @@ class AscendMLAImpl(MLAAttentionImpl):
             # FIX: aicore move should be also placed on the comm stream in dbo,
             # otherwise it may affect the accuracy
             # TODO: use an elegant way to overlap
+            # Prefill lane: it consumes only the suffix
+            # `[num_decode_tokens, num_actual_tokens)` and never reads
+            # `flash_decode`, so both lanes can be present in one mixed batch.
             if getattr(attn_metadata, "flash_full_prefill", None) is not None:
                 output_prefill = self._forward_flash_full_prefill(
                     prefill_preprocess_res,

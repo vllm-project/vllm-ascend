@@ -9,10 +9,29 @@ BF16 pair ([blocks, 128, 1, 512] and [blocks, 128, 1, 64]); :func:`full_prefill`
 accepts that pair as well as the equivalent first-axis-strided single view.
 """
 
+import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 import torch
+from vllm.logger import logger
+
+
+def _flash_binding_source() -> str:
+    """Name the package that will serve ``cann_ops_transformer.ops.flash_attn``.
+
+    ``vllm_ascend/utils.py`` prepends ``_cann_ops_custom/python`` to ``sys.path``,
+    and the build writes ``flash_attn_manifest.json`` there when it overlays the
+    official package with this repository's csrc FlashAttn. The manifest is
+    therefore the marker that separates the two candidates.
+    """
+    import cann_ops_transformer
+
+    package_dir = os.path.dirname(os.path.abspath(cann_ops_transformer.__file__))
+    manifest = os.path.join(os.path.dirname(package_dir), "flash_attn_manifest.json")
+    if os.path.isfile(manifest):
+        return f"the self-compiled csrc overlay at {package_dir} (manifest: {manifest})"
+    return f"the CANN-bundled package at {package_dir} (no csrc manifest)"
 
 
 @dataclass(frozen=True)
@@ -289,8 +308,20 @@ def native_flash_adapters(
     *,
     bf16_prepare: bool = False,
 ):
-    """Use a matched CANN 192/128 binding/runtime; no custom backend or switch."""
+    """Use a matched CANN 192/128 binding/runtime; no custom backend or switch.
+
+    The binding must be this repository's csrc overlay, which is the only build
+    exposing ``head_dim_v`` and therefore the only one that can make QK192 attend
+    V128. A CANN-bundled ``cann_ops_transformer`` sizes V and the output at QK
+    width and cannot run this path.
+    """
     from cann_ops_transformer.ops import flash_attn, flash_attn_metadata
+
+    logger.info_once(
+        "A5 Flash MLA prefill FlashAttn is served by %s, which carries the head_dim_v "
+        "ABI needed for QK192/V128; the CANN-bundled operator keeps head_dim_v == head_dim.",
+        _flash_binding_source(),
+    )
 
     if bf16_prepare:
         from vllm_ascend.ops.flash_mla_bf16_prepare import prepare_flash_mla_bf16
