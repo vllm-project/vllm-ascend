@@ -388,6 +388,38 @@ class TestStairLoadStatistics(unittest.TestCase):
         self.assertEqual(len(candidates), 1)
         np.testing.assert_array_equal(candidates[0], expected)
 
+    def test_incremental_replica_candidates_start_from_current_counts(self):
+        current = np.array([[0, 1], [0, 2]])
+        candidates = StairEplbPolicy.incremental_replica_candidates(
+            np.array([1.0, 8.0, 2.0]),
+            current,
+            num_ranks=2,
+            max_replica_changes=1,
+            num_stages=3,
+            budget_radius=2,
+            beam_size=8,
+        )
+
+        current_counts = np.array([2, 1, 1])
+        self.assertTrue(any(np.array_equal(candidate, current_counts) for candidate in candidates))
+        self.assertTrue(all(np.abs(candidate - current_counts).sum() <= 2 for candidate in candidates))
+
+    def test_incremental_replica_candidates_keep_zero_redundancy_counts(self):
+        current = np.array([[0, 1], [2, 3]])
+
+        candidates = StairEplbPolicy.incremental_replica_candidates(
+            np.array([8.0, 4.0, 2.0, 1.0]),
+            current,
+            num_ranks=2,
+            max_replica_changes=2,
+            num_stages=4,
+            budget_radius=2,
+            beam_size=8,
+        )
+
+        self.assertEqual(len(candidates), 1)
+        np.testing.assert_array_equal(candidates[0], np.ones(4, dtype=np.int64))
+
     def test_lpt_placement_co_locates_negatively_correlated_experts(self):
         means = np.zeros(4)
         variances = np.ones(4)
@@ -687,6 +719,17 @@ class TestStairLoadStatistics(unittest.TestCase):
         self.assertIsNotNone(plan)
         np.testing.assert_array_equal(plan.placement.rank_expert_ids, [[0, 3], [2, 1]])
         self.assertEqual(plan.predicted_imbalance.mean_ratio, 1.0)
+
+    def test_plan_layer_can_disable_cross_node_improvement(self):
+        plan = StairEplbPolicy.plan_layer(
+            np.array([[8.0, 7.0, 6.0, 5.0]]),
+            np.ones(1, dtype=np.int64),
+            np.array([[0, 1], [2, 3]]),
+            np.array([0, 1]),
+            StairConfig(cross_node_transfer_limit=0),
+        )
+
+        self.assertIsNone(plan)
 
     def test_plan_layer_skips_noop(self):
         self.assertIsNone(

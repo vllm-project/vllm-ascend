@@ -547,6 +547,50 @@ class StairEplbPolicy(AbstractEplbPolicy):
             key=lambda candidate: (candidate_score(candidate), tuple(candidate)),
         )[:beam_size]
 
+    @classmethod
+    def incremental_replica_candidates(
+        cls,
+        risks: np.ndarray,
+        current_placement: np.ndarray,
+        num_ranks: int,
+        max_replica_changes: int,
+        *,
+        num_stages: int,
+        budget_radius: int,
+        beam_size: int,
+    ) -> list[np.ndarray]:
+        """Move current replica counts toward FlashTree candidates one step."""
+        current = cls.placement_replica_counts(current_placement, len(risks))
+        score = lambda replicas: float(np.max(risks / replicas))
+        targets = cls.replica_candidates(
+            risks,
+            current_placement.size,
+            num_ranks,
+            num_stages=num_stages,
+            budget_radius=budget_radius,
+            beam_size=beam_size,
+            candidate_score=score,
+        )
+        candidates = {tuple(current): current.copy()}
+        for target in targets:
+            candidate = current.copy()
+            for _ in range(max_replica_changes):
+                receivers = np.flatnonzero(candidate < target)
+                donors = np.flatnonzero(candidate > target)
+                if not receivers.size or not donors.size:
+                    break
+                receiver = min(receivers, key=lambda expert: (-risks[expert] / candidate[expert], expert))
+                donor = min(donors, key=lambda expert: (risks[expert] / (candidate[expert] - 1), expert))
+                candidate = candidate.copy()
+                candidate[receiver] += 1
+                candidate[donor] -= 1
+                candidates[tuple(candidate)] = candidate
+        ordered = sorted(candidates.values(), key=lambda replicas: (score(replicas), tuple(replicas)))
+        selected = ordered[:beam_size]
+        if not any(np.array_equal(candidate, current) for candidate in selected):
+            selected[-1] = current
+        return selected
+
     # Covariance-aware placement and migration-source selection.
 
     @staticmethod
@@ -914,14 +958,14 @@ class StairEplbPolicy(AbstractEplbPolicy):
         scored_candidates = []
 
         # Replica risk screens the bounded beam; actual imbalance decides acceptance.
-        replica_candidates = cls.replica_candidates(
+        replica_candidates = cls.incremental_replica_candidates(
             risks,
-            current_placement.size,
+            current_placement,
             num_ranks,
+            num_ranks * config.rank_transfer_limit,
             num_stages=config.replica_search_num_stages,
             budget_radius=config.replica_search_radius,
             beam_size=config.replica_search_beam_size,
-            candidate_score=lambda replicas: float(np.max(risks / replicas)),
         )
         for replicas in replica_candidates:
             placement = cls.lpt_placement(
