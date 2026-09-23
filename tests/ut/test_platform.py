@@ -4,11 +4,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from vllm.config import set_current_vllm_config
+from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.platforms import PlatformEnum
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import AttentionSelectorConfig  # type: ignore
+from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_forward_context import MoECommType, override_mrv2_in_profile_run
@@ -124,6 +125,7 @@ class TestNPUPlatform(TestBase):
     def mock_vllm_config():
         mock_vllm_config = MagicMock()
         mock_vllm_config.compilation_config = MagicMock()
+        mock_vllm_config.compilation_config.reduced_cg_cap = None
         mock_vllm_config.model_config = MagicMock()
         mock_vllm_config.model_config.is_hybrid = False
         mock_vllm_config.model_config.is_encoder_decoder = False
@@ -629,11 +631,14 @@ class TestNPUPlatform(TestBase):
         # validated False value from AscendConfig to the compile backend.
         vllm_config.additional_config = {"enable_dsa_cp": "false"}
         vllm_config.scheduler_config.max_num_seqs = 77
-        vllm_config.compilation_config.max_cudagraph_capture_size = None
-        vllm_config.compilation_config.cudagraph_capture_sizes = None
-        vllm_config.compilation_config.mode = CompilationMode.DYNAMO_TRACE_ONCE
-        vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
-        vllm_config.compilation_config.custom_ops = []
+        vllm_config.scheduler_config.max_num_batched_tokens = 1024
+        vllm_config.compilation_config = CompilationConfig(
+            mode=CompilationMode.DYNAMO_TRACE_ONCE,
+            cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+        )
+        vllm_config.uniform_decode_query_len = 1
+        vllm_config.num_speculative_tokens = 0
+        vllm_config.lora_config = None
         vllm_config.model_config.enforce_eager = False
         vllm_config.model_config.enable_sleep_mode = True
         vllm_config.model_config.is_encoder_decoder = False
@@ -645,16 +650,20 @@ class TestNPUPlatform(TestBase):
         vllm_config.cache_config.block_size = 1
 
         self.platform.apply_config_platform_defaults(vllm_config)
-
-        observed_inputs: list[int | None] = []
-        vllm_config._set_cudagraph_sizes = MagicMock(
-            side_effect=lambda: observed_inputs.append(vllm_config.compilation_config.max_cudagraph_capture_size)
-        )
+        vllm_config._set_cudagraph_sizes = lambda: VllmConfig._set_cudagraph_sizes(vllm_config)
+        vllm_config._set_cudagraph_sizes()
 
         with patch("vllm_ascend.platform._setup_compile_backend", wraps=_setup_compile_backend) as mock_setup:
             self.platform.check_and_update_config(vllm_config)
 
-        self.assertEqual(observed_inputs, [77])
+        self.assertEqual(
+            vllm_config.compilation_config.cudagraph_capture_sizes,
+            [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64, 72, 77],
+        )
+        self.assertEqual(vllm_config.compilation_config.max_cudagraph_capture_size, 77)
+        dispatcher = CudagraphDispatcher(vllm_config)
+        dispatcher.initialize_cudagraph_keys(CUDAGraphMode.FULL_DECODE_ONLY)
+        self.assertEqual(dispatcher.dispatch(77, uniform_decode=True)[0], CUDAGraphMode.FULL)
         self.assertIs(mock_setup.call_args.kwargs["enable_dsa_cp"], False)
 
     @patch("vllm_ascend.platform.refresh_block_size")

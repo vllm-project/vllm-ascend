@@ -98,8 +98,10 @@ from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
 from vllm_ascend.utils import (
     check_ascend_device_type,
+    enable_custom_op,
     enable_sp,
     register_ascend_customop,
+    register_device_print,
     setup_ascend_local_comm_res,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
@@ -428,6 +430,9 @@ class NPUWorker(WorkerBase):
         device = torch.device(f"{current_platform.device_type}:{visible_device_index}")
 
         torch.npu.set_device(device)
+
+        if enable_custom_op():
+            register_device_print()
 
         # Import _inductor for graph mode execution with triton
         # This lazy import avoids torch_npu re-initialization in patch
@@ -927,13 +932,16 @@ class NPUWorker(WorkerBase):
         # may cause performance degradation at runtime.
         if get_current_hardware_profile().supports(HardwareCapability.ATB_WARMUP):
             self._warm_up_atb()
-        # Bind after warmup so hot allocations are already materialized on the
-        # worker process before migratepages/taskset run.
+        # Keep thread affinity after warmup and capture. Engram HOST_UVA tables
+        # are already registered here; process-wide migration must not revisit
+        # their pinned backing, which may also be shared across NUMA nodes.
         if get_ascend_config().enable_cpu_binding:
+            engram_config = getattr(self.vllm_config, "engram_config", None)
             try:
                 bind_cpus(
                     self.local_rank,
                     npu_id=current_platform.device_id_to_physical_device_id(self.local_rank),
+                    migrate_memory=not (engram_config is not None and engram_config.cpu_offload),
                 )
             except Exception as e:
                 logger.warning("Bind cpus failed in rank%s: %s Skip binding cpu.", self.local_rank, e)
@@ -1112,7 +1120,10 @@ class NPUWorker(WorkerBase):
                 # the engine's cache groups. Attention compute stays windowed.
                 kv_cache_spec = dict(kv_cache_spec)
                 unify_hybrid_kv_cache_specs(kv_cache_spec)
-            kvpp_rank = get_tp_group().rank_in_group % kvpp_config.size
+            kvpp_rank = (
+                get_pcp_group().rank_in_group * self.vllm_config.parallel_config.tensor_parallel_size
+                + get_tp_group().rank_in_group
+            )
             self._kvpp_cache_allocation_plan = create_kvpp_cache_allocation_plan(
                 self.vllm_config,
                 kv_cache_spec,

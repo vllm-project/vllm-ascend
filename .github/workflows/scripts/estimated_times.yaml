@@ -15,6 +15,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/_310p/test_classification_310p.py: 60
   tests/e2e/pull_request/one_card/_310p/test_dense_model_310p.py: 290
   tests/e2e/pull_request/one_card/_310p/test_qwen35_dense_model_310p.py: 810
+  tests/e2e/pull_request/one_card/_310p/test_lora_310p.py: 800
   tests/e2e/pull_request/one_card/_310p/test_embedding_310p.py: 480
   tests/e2e/pull_request/one_card/_310p/test_scoring_310p.py: 330
   tests/e2e/pull_request/one_card/_310p/test_spec_decode_mtp_310p.py: 510

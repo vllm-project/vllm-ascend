@@ -28,7 +28,6 @@ from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.gpu.states import RequestState
 
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 
@@ -248,23 +247,6 @@ class AscendPCPManager(PCPManager):
             not bool(global_batch.is_prefilling_np.any())
             and self.vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
             and global_batch.num_draft_tokens == 0
-        )
-
-    def get_num_tokens_for_dispatch(self, num_scheduled_tokens: np.ndarray, is_prefilling: np.ndarray) -> int:
-        if not vllm_version_is("0.28.0"):
-            return super().get_num_tokens_for_dispatch(num_scheduled_tokens, is_prefilling)
-        # Reuse the actual partition rules: decode is replicated, while each
-        # prefill contributes two chunks. Computed positions only reorder rows.
-        query_start_loc = np.concatenate(([0], np.cumsum(num_scheduled_tokens)))
-        num_computed_tokens = np.zeros_like(num_scheduled_tokens)
-        return max(
-            sum(
-                segment.num_tokens
-                for segment in self._get_rank_segments(
-                    rank, num_scheduled_tokens, num_computed_tokens, is_prefilling, query_start_loc
-                )
-            )
-            for rank in range(self.pcp_world_size)
         )
 
     def partition_batch(

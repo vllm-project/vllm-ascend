@@ -107,9 +107,6 @@ class HardwareCapability(Enum):
     MLA_DECODE_PROLOG_WITHOUT_ROPE = auto()
     # Allow MLAPO with native floating-point projection weights, not only quantized weights.
     MLAPO_NATIVE_WEIGHTS = auto()
-    # Allow MiniMax-M3 prefill sparse attention to use the KV-gather-Q path;
-    # A3 can fall back when its vendor Split-KV package is unavailable.
-    MINIMAX_M3_PREFILL_KV_GATHER_Q = auto()
     # Accept ``fullmesh_v2`` as the MC2 communication algorithm.
     MC2_FULLMESH_V2_COMM = auto()
     # Accept hierarchical MC2 communication, subject to its expert-count constraints.
@@ -255,7 +252,6 @@ _STANDARD_CAPABILITIES = frozenset(
 )
 _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {
     HardwareCapability.MC2_FULLMESH_V2_COMM,
-    HardwareCapability.MINIMAX_M3_PREFILL_KV_GATHER_Q,
 }
 _DEFAULT_WORKER_CLS = "vllm_ascend.worker.worker.NPUWorker"
 _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyType(
@@ -342,7 +338,6 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.LORA_CUSTOM_OPS,
                     HardwareCapability.MLA_DECODE_PROLOG_WITHOUT_ROPE,
                     HardwareCapability.MLAPO_NATIVE_WEIGHTS,
-                    HardwareCapability.MINIMAX_M3_PREFILL_KV_GATHER_Q,
                     HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
                     HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS,
                     HardwareCapability.NPUGRAPH_EX,
