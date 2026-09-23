@@ -107,6 +107,10 @@ public:
 
         AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
         AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
+        // The hand-mmad path's ND copy-out (MTE3) reads UB[64K..128K) right before
+        // this call; hUbTensor lives at 64K, so drain MTE3 before overwriting.
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID2);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID2);
         AscendC::DataCopy(hUbTensor, hInputThisSubBlock, mActualThisSubBlock * nActual);
         AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
         AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);

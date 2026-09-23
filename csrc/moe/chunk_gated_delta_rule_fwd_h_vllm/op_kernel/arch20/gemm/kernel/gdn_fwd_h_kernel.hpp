@@ -9,6 +9,12 @@
 
 #define CATLASS_ARCH 2201
 #define CATLASS_UNIFIED_CORE 1
+#ifndef FWD_H_HAND_CUBE2
+#define FWD_H_HAND_CUBE2 1
+#endif
+#ifndef FWD_H_HAND_CUBE1
+#define FWD_H_HAND_CUBE1 1
+#endif
 
 #include "catlass/arch/arch.hpp"
 #include "catlass/arch/cross_core_sync.hpp"
@@ -19,6 +25,7 @@
 #include "../../epilogue/block/block_epilogue_gdn_fwdh_vnew.hpp"
 #include "catlass/gemm/block/block_mmad.hpp"
 #include "kernel_utils/block/block_mmad_pingpong_tla_multi.hpp"
+#include "kernel_utils/gemm/hand_mmad_310p.hpp"
 #include "catlass/gemm/block/block_swizzle.hpp"
 #include "../block/block_scheduler_gdn_fwd_h.hpp"
 #include "catlass/gemm/dispatch_policy.hpp"
@@ -210,16 +217,51 @@ public:
         ProcessUnifiedCore();
     }
 
+    // ---- hand-mmad scratch (unified core only) --------------------------------
+    // The Catlass BlockMmadTla path is gone from ProcessUnifiedCore, so L1 and the
+    // low UB are free outside the epilogues' own windows. Stage (NZ) and the ND
+    // copy-out sit in [0, 128K): the epilogues' MTE3_MTE2 guards order their MTE2
+    // loads after our MTE3 reads, V-pipe order covers the epilogues' calc buffer,
+    // and MTE3-in-order covers overlap with their outstanding GM stores.
+    static constexpr uint32_t HM_STAGE_OFFSET = 0;          // <=128x128 f32 = 64 KB
+    static constexpr uint32_t HM_ND_OFFSET    = 64 * 1024;  // same max
+    static constexpr uint32_t HM_L1A_OFFSET   = 0;
+    static constexpr uint32_t HM_L1B_OFFSET   = 64 * 1024;
+
+    // NZ cube staging -> ND, one strided descriptor per Z-column (same move as
+    // chunk_fwd_o's DeformatL0CStagingToUb; MTE3, reads after HandMmad's V_MTE3
+    // drain, feeds the MTE3 GM store in pipe order).
+    __aicore__ inline void DeformatStagingToUb(uint32_t mActual, uint32_t nActual) {
+        auto src = resource.ubBuf.template GetBufferByByte<float>(HM_STAGE_OFFSET);
+        auto dst = resource.ubBuf.template GetBufferByByte<float>(HM_ND_OFFSET);
+        uint32_t mAligned = (mActual + 15) / 16 * 16;
+        uint32_t nAligned = (nActual + 15) / 16 * 16;
+        uint32_t mFracs = mAligned / 16;
+        uint32_t nFracs = nAligned / 16;
+        AscendC::DataCopyParams p;
+        p.blockCount = static_cast<uint16_t>(mAligned);
+        p.blockLen = static_cast<uint16_t>(16 * sizeof(float) / 32);
+        p.srcStride = 0;
+        p.dstStride = static_cast<uint16_t>((nAligned - 16) * sizeof(float) / 32);
+        // UB->UB DataCopy rides the V pipe on m200 (empirical: MTE3-pipe and
+        // MTE2-pipe fence sets both left 39-40/48 shapes failing; only fences
+        // treating the copy as V go green). Before the copy: drain MTE3 -- the
+        // epilogue GM stores still READ the dst window (vnew ping buffers live
+        // at 64K); the src staging read is ordered by V program order.
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID2);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID2);
+        for (uint32_t nf = 0; nf < nFracs; ++nf) {
+            AscendC::DataCopy(dst[nf * 16], src[nf * mFracs * 256], p);
+        }
+        // RAW to the ND GM store (MTE3): the store must see the copy done.
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID2);
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID2);
+    }
+
     __aicore__ inline void ProcessUnifiedCore() {
         uint32_t coreNum = AscendC::GetBlockNum();
-
-        BlockMmadWH blockMmadWH(resource);
         BlockMmadKV blockMmadKV(resource);
         EpilogueGDNFwdHVnew epilogueGDNFwdHVnew(resource);
-
-        auto wLayout = tla::MakeLayout<ElementW, LayoutW>(shapeBatch * kNumHead * cubeBlockScheduler.totalTokens, kHeadDim);
-        auto hLayout = tla::MakeLayout<ElementH, LayoutH>(shapeBatch * vNumHead * cubeBlockScheduler.totalChunks * kHeadDim, vHeadDim);
-        auto vLayout = tla::MakeLayout<ElementVWork, LayoutV>(coreNum * chunkSize * PING_PONG_STAGES, vHeadDim);
         auto kLayout = tla::MakeLayout<ElementK, LayoutK>(kHeadDim, shapeBatch * kNumHead * cubeBlockScheduler.totalTokens);
         auto vworkLayout = tla::MakeLayout<ElementV, LayoutV>(coreNum * chunkSize * PING_PONG_STAGES, vHeadDim);
         auto hworkLayout = tla::MakeLayout<ElementHWork, LayoutH>(coreNum * kHeadDim * PING_PONG_STAGES, vHeadDim);
@@ -272,8 +314,15 @@ public:
             cubeBlockScheduler.InitTask();
             GDNFwdHOffsets& stage1Offsets = cubeBlockScheduler.GetStage1Offsets();
 
-            // CUBE1: v_work = w @ h[i]
+            // CUBE1: v_work = w @ h[i], hand mmad. h[i] and the workspaces are
+            // MTE3-written (previous chunk's Vec2 / the initial-state pre-loop),
+            // so drain MTE3 before the GM->L1 loads.
             if (cubeBlockScheduler.NeedProcessStage1()) {
+#if !FWD_H_HAND_CUBE1
+                BlockMmadWH blockMmadWH(resource);
+                auto wLayout = tla::MakeLayout<ElementW, LayoutW>(shapeBatch * kNumHead * cubeBlockScheduler.totalTokens, kHeadDim);
+                auto hLayout = tla::MakeLayout<ElementH, LayoutH>(shapeBatch * vNumHead * cubeBlockScheduler.totalChunks * kHeadDim, vHeadDim);
+                auto vLayout = tla::MakeLayout<ElementVWork, LayoutV>(coreNum * chunkSize * PING_PONG_STAGES, vHeadDim);
                 auto tensorW = tla::MakeTensor(gmW[stage1Offsets.wOffset], wLayout, Catlass::Arch::PositionGM{});
                 auto tensorH = tla::MakeTensor(gmH[stage1Offsets.hSrcOffset], hLayout, Catlass::Arch::PositionGM{});
                 auto tensorV = tla::MakeTensor(gmVWorkspace[stage1Offsets.vWorkOffset], vLayout, Catlass::Arch::PositionGM{});
@@ -284,6 +333,21 @@ public:
                 blockMmadWH.preSetFlags();
                 blockMmadWH(tensorBlockW, tensorBlockH, tensorBlockV, cube1Shape);
                 blockMmadWH.finalWaitFlags();
+#else
+                AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID5);
+                AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID5);
+                M200Gemm::HandMmad<ArchTag>(
+                    resource,
+                    gmW[stage1Offsets.wOffset], kHeadDim,
+                    gmH[stage1Offsets.hSrcOffset], vHeadDim,
+                    stage1Offsets.blockTokens, vHeadDim, kHeadDim,
+                    HM_L1A_OFFSET, HM_L1B_OFFSET, HM_STAGE_OFFSET, 0);
+                DeformatStagingToUb(stage1Offsets.blockTokens, vHeadDim);
+                AscendC::LocalTensor<float> ndOut =
+                    resource.ubBuf.template GetBufferByByte<float>(HM_ND_OFFSET);
+                AscendC::DataCopy(gmVWorkspace[stage1Offsets.vWorkOffset], ndOut,
+                                  stage1Offsets.blockTokens * vHeadDim);
+#endif
             }
 
             // VEC1: v_new epilogue
@@ -298,14 +362,37 @@ public:
             if (cubeBlockScheduler.iterId > 1) {
                 GDNFwdHOffsets& stage2Offsets = cubeBlockScheduler.GetStage2Offsets();
 
-                // CUBE2: h_work = k.T @ v_update
-                // BlockMmadTla has no outer M loop; m must be split when kHeadDim > L1_TILE_M.
+                // CUBE2: h_work = k.T @ v_update, hand mmad with A_COL_MAJOR
+                // (k stored [tokens, kHeadDim] row-major). v_update was MTE3-written
+                // by Vec1 just above: drain MTE3 before the loads. m split at 128.
                 if (cubeBlockScheduler.NeedProcessStage2()) {
+#if FWD_H_HAND_CUBE2
+                    AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID5);
+                    AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID5);
+                    uint32_t mLoopC2 = (kHeadDim + 127) / 128;
+                    for (uint32_t mIdx = 0; mIdx < mLoopC2; ++mIdx) {
+                        uint32_t mOff = mIdx * 128;
+                        uint32_t mTail = kHeadDim - mOff;
+                        uint32_t mActual = (mTail < 128) ? mTail : 128;
+                        M200Gemm::HandMmad<ArchTag, /*B_COL_MAJOR=*/false,
+                                           /*A_FROM_L1=*/false, /*A_COL_MAJOR=*/true>(
+                            resource,
+                            gmK[stage2Offsets.wkOffset + mOff], kHeadDim,
+                            gmVUpdateWorkspace[stage2Offsets.vWorkOffset], vHeadDim,
+                            mActual, vHeadDim, stage2Offsets.blockTokens,
+                            HM_L1A_OFFSET, HM_L1B_OFFSET, HM_STAGE_OFFSET, 0);
+                        DeformatStagingToUb(mActual, vHeadDim);
+                        AscendC::LocalTensor<float> ndOut =
+                            resource.ubBuf.template GetBufferByByte<float>(HM_ND_OFFSET);
+                        AscendC::DataCopy(gmHWorkspace[stage2Offsets.hWorkOffset + mOff * vHeadDim],
+                                          ndOut, mActual * vHeadDim);
+                    }
+#else
+                    constexpr uint32_t L1_TILE_M_C2 = tla::get<0>(L1TileShapeTla{});
+                    uint32_t mLoopC2 = (kHeadDim + L1_TILE_M_C2 - 1) / L1_TILE_M_C2;
                     auto tensorK = tla::MakeTensor(gmK[stage2Offsets.wkOffset], kLayout, Catlass::Arch::PositionGM{});
                     auto tensorVwork = tla::MakeTensor(gmVUpdateWorkspace[stage2Offsets.vWorkOffset], vworkLayout, Catlass::Arch::PositionGM{});
                     auto tensorHwork = tla::MakeTensor(gmHWorkspace[stage2Offsets.hWorkOffset], hworkLayout, Catlass::Arch::PositionGM{});
-                    constexpr uint32_t L1_TILE_M_C2 = tla::get<0>(L1TileShapeTla{});
-                    uint32_t mLoopC2 = (kHeadDim + L1_TILE_M_C2 - 1) / L1_TILE_M_C2;
                     for (uint32_t mIdx = 0; mIdx < mLoopC2; ++mIdx) {
                         uint32_t mOff = mIdx * L1_TILE_M_C2;
                         uint32_t mTail = kHeadDim - mOff;
@@ -318,6 +405,7 @@ public:
                         blockMmadKV(tensorBlockK, tensorBlockVwork, tensorBlockHwork, cube2Shape);
                         blockMmadKV.finalWaitFlags();
                     }
+#endif
                 }
 
                 // VEC2: h update epilogue

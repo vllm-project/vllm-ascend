@@ -2,13 +2,13 @@
  * Copyright (c) 2026 Tianjin University, Ltd.
  * BSD 3-Clause License.
  */
-#ifndef CHUNK_FWD_O_HAND_MMAD_310P_HPP
-#define CHUNK_FWD_O_HAND_MMAD_310P_HPP
+#ifndef M200_HAND_MMAD_310P_HPP
+#define M200_HAND_MMAD_310P_HPP
 
 #include "catlass/catlass.hpp"
 #include "catlass/arch/resource.hpp"
 
-namespace ChunkFwdO {
+namespace M200Gemm {
 
 // Hand-written single-tile matmul for the 310P unified core.
 //
@@ -51,7 +51,12 @@ CATLASS_DEVICE constexpr uint32_t HmRoundUp16(uint32_t v) { return (v + 15) / 16
 ///
 /// Each cube passes its OWN l0cOff. L0C is 128 KB and the three tiles are
 /// 16 + 32 + 32 = 80 KB, so they fit without sharing.
-template <class ArchTag, bool B_COL_MAJOR = false, bool A_FROM_L1 = false>
+///   With A_COL_MAJOR, A is ColumnMajor [m, k] with column stride lda (i.e. the
+///   GM holds A^T row-major, A[i][j] == gm[j*lda + i]) -- how k.T reads k in
+///   fwd_h's h_work = k.T @ v_update. Nd2Nz of the stored [k, m] block lands zN;
+///   the L0A load walks one m-block-row of fractals per repeat with
+///   ifTranspose = true, mirroring the B_COL_MAJOR trick.
+template <class ArchTag, bool B_COL_MAJOR = false, bool A_FROM_L1 = false, bool A_COL_MAJOR = false>
 CATLASS_DEVICE void HandMmad(
     Catlass::Arch::Resource<ArchTag> &res,
     AscendC::GlobalTensor<half> const &gmA, uint32_t lda,
@@ -65,14 +70,18 @@ CATLASS_DEVICE void HandMmad(
     auto l0b = res.l0BBuf.template GetBufferByByte<half>(0);
     auto l0c = res.l0CBuf.template GetBufferByByte<float>(l0cOff);
 
+    static_assert(!(A_FROM_L1 && A_COL_MAJOR), "pick one A source");
     const uint32_t mR = HmRoundUp16(m), nR = HmRoundUp16(n), kR = HmRoundUp16(k);
-    const uint32_t l1aC0Stride = mR;                       // zN(mR,kR).stride(3)/C0
+    const uint32_t l1aC0Stride = A_COL_MAJOR ? kR : mR;    // zN of the STORED matrix
     const uint32_t l1bC0Stride = B_COL_MAJOR ? nR : kR;    // nZ(kR,nR).stride(1)/C0 : zN(kR,nR)
 
     // ---- GM -> L1 ----
     if constexpr (!A_FROM_L1) {
         AscendC::Nd2NzParams pa;
-        pa.ndNum = 1;  pa.nValue = m;  pa.dValue = k;  pa.srcNdMatrixStride = 0;
+        pa.ndNum = 1;
+        pa.nValue = A_COL_MAJOR ? k : m;
+        pa.dValue = A_COL_MAJOR ? m : k;
+        pa.srcNdMatrixStride = 0;
         pa.srcDValue = lda;  pa.dstNzC0Stride = l1aC0Stride;
         pa.dstNzNStride = 1;  pa.dstNzMatrixStride = 0;
         AscendC::DataCopy(l1A, gmA, pa);
@@ -94,15 +103,18 @@ CATLASS_DEVICE void HandMmad(
     AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID7);
 
     // ---- L1 -> L0 ----
-    {   // zN -> zZ
+    {   // -> zZ.  From zN of A it strides fractal columns; from zN of the stored
+        // A^T (A_COL_MAJOR) each dst m-row of fractals is one contiguous src run
+        // with a per-fractal transpose.
         AscendC::LoadData2DParams p;
         p.startIndex = 0;
         p.repeatTimes = static_cast<uint16_t>(kR / HM_C0);
-        p.srcStride = l1aC0Stride * HM_C0 / HM_FRAC;
-        p.sid = 0;  p.dstGap = 0;  p.ifTranspose = false;  p.addrMode = 0;
+        p.srcStride = A_COL_MAJOR ? 1 : (l1aC0Stride * HM_C0 / HM_FRAC);
+        p.sid = 0;  p.dstGap = 0;  p.ifTranspose = A_COL_MAJOR;  p.addrMode = 0;
         const uint32_t dstRowStride = kR * HM_C0;
+        const uint32_t srcRowStride = A_COL_MAJOR ? dstRowStride : HM_FRAC;
         for (uint32_t i = 0; i < mR / HM_C0; ++i) {
-            AscendC::LoadData(l0a[i * dstRowStride], l1A[i * HM_FRAC], p);
+            AscendC::LoadData(l0a[i * dstRowStride], l1A[i * srcRowStride], p);
         }
     }
     {   // -> nZ.  From nZ (B_COL_MAJOR) it is a straight copy; from zN it transposes.
@@ -154,6 +166,6 @@ CATLASS_DEVICE void HandMmad(
     AscendC::WaitFlag<AscendC::HardEvent::V_M>(EVENT_ID7);
 }
 
-}  // namespace ChunkFwdO
+}  // namespace M200Gemm
 
-#endif  // CHUNK_FWD_O_HAND_MMAD_310P_HPP
+#endif  // M200_HAND_MMAD_310P_HPP

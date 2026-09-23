@@ -14,7 +14,7 @@
 #include "catlass/arch/cross_core_sync.hpp"
 #include "catlass/arch/resource.hpp"
 #include "catlass/catlass.hpp"
-#include "../hand_mmad_310p.hpp"
+#include "kernel_utils/gemm/hand_mmad_310p.hpp"
 #include "catlass/gemm/block/block_mmad.hpp"
 #include "kernel_utils/block/block_mmad_pingpong_tla_multi.hpp"
 #include "catlass/gemm/block/block_swizzle.hpp"
@@ -454,7 +454,7 @@ public:
                 // CUBE1: attn = q @ k^T.  B is ColumnMajor because k is stored
                 // [seqlen][kHeadDim] row-major, so B[kk][j] == gm[j*kHeadDim + kk].
                 GDNFwdOOffsets& cube1Offsets = cubeBlockScheduler.GetCube1Offsets();
-                ChunkFwdO::HandMmad<ArchTag, /*B_COL_MAJOR=*/true>(
+                M200Gemm::HandMmad<ArchTag, /*B_COL_MAJOR=*/true>(
                     resource,
                     gmQ[cube1Offsets.qkOffset], kHeadDim,
                     gmK[cube1Offsets.qkOffset], kHeadDim,
@@ -480,7 +480,7 @@ public:
                 // CUBE2: h_work = q @ h.  A (the Q tile) is already in L1 -- the
                 // previous body's Cube1 loaded the identical tile -- so gmA/lda are
                 // unused and no GM re-read happens.
-                ChunkFwdO::HandMmad<ArchTag, /*B_COL_MAJOR=*/false, /*A_FROM_L1=*/true>(
+                M200Gemm::HandMmad<ArchTag, /*B_COL_MAJOR=*/false, /*A_FROM_L1=*/true>(
                     resource,
                     gmQ[prevOffsets.qkOffset], kHeadDim,
                     gmH[prevOffsets.hOffset], vHeadDim,
@@ -495,7 +495,7 @@ public:
 
                 // CUBE3: v_work = attn_masked @ v.  A is already in L1 -- the previous
                 // body's Vec1 put it there -- so gmA/lda are unused.
-                ChunkFwdO::HandMmad<ArchTag, /*B_COL_MAJOR=*/false, /*A_FROM_L1=*/true>(
+                M200Gemm::HandMmad<ArchTag, /*B_COL_MAJOR=*/false, /*A_FROM_L1=*/true>(
                     resource,
                     gmV[prevOffsets.ovOffset], 0,
                     gmV[prevOffsets.ovOffset], vHeadDim,
