@@ -1009,12 +1009,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             model = self.model
             if isinstance(model, BreakableACLGraphWrapper):
                 model = model.unwrap()
-            if not isinstance(model, _HIDDEN_STATE_DRAFTER_TYPES):
-                # V4.1 depends on newer upstream modules; unrelated models must
-                # remain importable with the supported vLLM 0.29 release.
-                from vllm_ascend.models.deepseek_v41.dspark import DSparkDeepseekV41ForCausalLM
-
-                assert isinstance(model, DSparkDeepseekV41ForCausalLM)
+            assert isinstance(model, _HIDDEN_STATE_DRAFTER_TYPES)
             target_hidden_states = cast(_HiddenStateDrafter, model).combine_hidden_states(target_hidden_states)
             assert target_hidden_states.shape[-1] == self.hidden_size
 
