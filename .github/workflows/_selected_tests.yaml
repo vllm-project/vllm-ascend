@@ -89,6 +89,13 @@ jobs:
       matrix:
         group: ${{ fromJSON(inputs.test_groups) }}
     runs-on: ${{ matrix.group.runner }}
+    env:
+      RUNS_ON_S3_BUCKET_CACHE: ascend-ci-cache-hk
+      RUNS_ON_S3_BUCKET_ENDPOINT: https://obs.ap-southeast-1.myhuaweicloud.com
+      RUNS_ON_S3_FORCE_PATH_STYLE: "false"
+      AWS_S3_FORCE_PATH_STYLE: "false"
+      AWS_REGION: ap-southeast-1
+      RUNS_ON_RUNNER_NAME: ""
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.group.image_tag }}
       env:
@@ -204,6 +211,17 @@ jobs:
           # existing NPU build while CPU cache production proves stable.
           # Restore fail-on-cache-miss to true after the transition period.
           fail-on-cache-miss: false
+
+      - name: Restore incremental cache
+        id: fallback-l1
+        if: ${{ matrix.group.npu_type != 'cpu' && steps.cache-csrc.outputs.cache-hit != 'true' }}
+        uses: $/.github/actions/csrc-l1-restore
+        with:
+          cache-dir: ${{ runner.temp }}/vllm-ascend-incremental-build-cache
+          architecture: ${{ steps.get_arch.outputs.arch }}
+          soc-version: ${{ matrix.group.npu_type }}
+          source-root: .
+          csrc-hash: ${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
       - name: Install Mooncake wheel
         if: ${{ matrix.group.npu_type != 'cpu' }}
