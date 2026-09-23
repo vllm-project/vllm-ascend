@@ -170,36 +170,6 @@ def _is_w8a8_dynamic(linear) -> bool:
     return isinstance(inner, AscendW8A8DynamicLinearMethod)
 
 
-def _is_w8a8_mxfp8_dynamic(linear) -> bool:
-    """True iff ``linear`` is wired up with ``AscendW8A8MXFP8DynamicLinearMethod``."""
-    qm = getattr(linear, "quant_method", None)
-    if qm is None or isinstance(qm, AscendUnquantizedLinearMethod):
-        return False
-    inner = getattr(qm, "quant_method", None)
-    return isinstance(inner, AscendW8A8MXFP8DynamicLinearMethod)
-
-
-def _can_fuse_q_norm_mx_quant(
-    is_mxfp8: bool,
-    fusion_available: bool,
-    qr_consumed_by_topk: bool,
-) -> bool:
-    return is_mxfp8 and fusion_available and not qr_consumed_by_topk
-
-
-def _rms_norm_dynamic_mx_quant(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    eps: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    out = torch.ops.npu.npu_rms_norm_dynamic_mx_quant(
-        x,
-        weight,
-        epsilon=eps,
-        dst_type=torch.float8_e4m3fn,
-    )
-    return out[0], out[1]
-
 
 def pad_to_blocks(x: torch.Tensor, length_list: torch.Tensor, block_size: int = 128):
     """
@@ -1838,7 +1808,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         cos = attn_metadata[0].cos[layer_name]
         sin = attn_metadata[0].sin[layer_name]
 
-        torch.ops._C_ascend.inplace_partial_rotary_mul(
+        inplace_partial_rotary_mul(
             o_proj_input.unsqueeze(1),
             cos,
             -sin,
@@ -1901,11 +1871,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             torch.npu.current_stream().wait_event(e_part2_start)
             kv = self.cv_wkv.matmul(kv_quant, kv_pertoken_scale)
 
-        if can_fuse_q_norm_mx_quant:
-            q_b_quant, q_b_scale = _rms_norm_dynamic_mx_quant(wq_a_result, self.q_norm.weight, self.eps)
-            qr = None
-            qr_pertoken_scale = None
-        elif is_prefill:
+        if is_prefill:
             qr = self.q_norm(wq_a_result)
             q_b_quant, q_b_scale = self.cv_wq_b.quantize(qr)
             qr_pertoken_scale = None
@@ -1929,7 +1895,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             kv = self.kv_norm(kv)
             assert self.rope_head_dim is not None
             kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
-            torch.ops._C_ascend.inplace_partial_rotary_mul(
+            inplace_partial_rotary_mul(
                 kv.unsqueeze(1),
                 cos,
                 sin,
@@ -1962,7 +1928,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         main_stream.wait_stream(aux_stream)
 
         q = DeviceOperator.apply_dsa_q_rms(q, self.eps, self.q_norm_without_weight)
-        torch.ops._C_ascend.inplace_partial_rotary_mul(
+        inplace_partial_rotary_mul(
             q.unsqueeze(1),
             cos,
             sin,
@@ -1986,7 +1952,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             self._csa_q_aic_num * self._csa_aiv_to_aic_ratio,
         ):
             q = DeviceOperator.apply_dsa_q_rms(q, self.eps, self.q_norm_without_weight)
-            torch.ops._C_ascend.inplace_partial_rotary_mul(
+            inplace_partial_rotary_mul(
                 q.unsqueeze(1),
                 cos,
                 sin,
@@ -2056,7 +2022,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 kv = self.kv_norm(kv)
                 assert self.rope_head_dim is not None
                 kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
-                torch.ops._C_ascend.inplace_partial_rotary_mul(
+                inplace_partial_rotary_mul(
                     kv.unsqueeze(1),
                     cos,
                     sin,
@@ -2177,7 +2143,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 else:
                     q = self.inderxer_wq_b(qr)
                 q = q.view(-1, self.indexer_heads, self.indexcom_head_dim)
-                torch.ops._C_ascend.inplace_partial_rotary_mul(
+                inplace_partial_rotary_mul(
                     q.unsqueeze(1),
                     cos,
                     sin,
@@ -2345,7 +2311,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 qr_pertoken_scale = None
             q = DeviceOperator.apply_dsa_q_rms(q, self.eps, self.q_norm_without_weight)
 
-            torch.ops._C_ascend.inplace_partial_rotary_mul(
+            inplace_partial_rotary_mul(
                 q.unsqueeze(1),
                 cos,
                 sin,
@@ -2368,7 +2334,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             assert self.rope_head_dim is not None
             kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
 
-            torch.ops._C_ascend.inplace_partial_rotary_mul(
+            inplace_partial_rotary_mul(
                 kv.unsqueeze(1),
                 cos,
                 sin,
@@ -2827,7 +2793,7 @@ class AscendDSAImpl(DSAAttentionImpl):
 
             q = DeviceOperator.apply_dsa_q_rms(q, self.eps, self.q_norm_without_weight)
 
-            torch.ops._C_ascend.inplace_partial_rotary_mul(
+            inplace_partial_rotary_mul(
                 q.unsqueeze(1),
                 cos,
                 sin,
@@ -2851,7 +2817,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             assert self.rope_head_dim is not None
             kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
 
-            torch.ops._C_ascend.inplace_partial_rotary_mul(
+            inplace_partial_rotary_mul(
                 kv.unsqueeze(1),
                 cos,
                 sin,
@@ -3087,7 +3053,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             q = self.inderxer_wq_b(qr)
         q = q.view(-1, self.indexer_heads, self.indexcom_head_dim)  # [T, N, D]
 
-        torch.ops._C_ascend.inplace_partial_rotary_mul(
+        inplace_partial_rotary_mul(
             q.unsqueeze(1),
             cos,
             sin,
@@ -3399,7 +3365,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         q = q.view(-1, self.indexer_heads, self.indexcom_head_dim)
 
         # ===== Part2: rope[V] (main only) =====
-        torch.ops._C_ascend.inplace_partial_rotary_mul(  # rope
+        inplace_partial_rotary_mul(  # rope
             q.unsqueeze(1),
             cos,
             sin,

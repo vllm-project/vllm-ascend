@@ -93,6 +93,7 @@ def copy_and_expand_dflash_inputs_kernel_single_grid(
     total_input_tokens,  # tl.int32
     batch_size,  # tl.int32
     HAS_NUM_REJECTED: tl.constexpr = False,
+    SAMPLE_FROM_ANCHOR: tl.constexpr = False,
 ):
     for req_idx in range(0, batch_size):
         ctx_start = tl.load(query_start_loc_ptr + req_idx)
@@ -136,5 +137,13 @@ def copy_and_expand_dflash_inputs_kernel_single_grid(
             else:
                 tl.store(out_input_ids_ptr + query_out_idx, parallel_drafting_token_id)
 
+            if SAMPLE_FROM_ANCHOR:
+                # Anchor-first (DSpark): every query position is a prediction
+                # site, including the anchor position itself.
+                sample_out_idx = req_idx * num_speculative_tokens + q_idx
+                tl.store(out_token_indices_ptr + sample_out_idx, query_out_idx)
+            elif q_idx > 0:
+                # DFlash 1+N fill-in: the anchor is an input only, sampling
+                # starts at the first draft position.
                 sample_out_idx = req_idx * num_speculative_tokens + (q_idx - 1)
                 tl.store(out_token_indices_ptr + sample_out_idx, query_out_idx)
