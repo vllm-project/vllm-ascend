@@ -15,6 +15,8 @@
 # This file is a part of the vllm-ascend project.
 #
 # Todo: Once https://github.com/vllm-project/vllm/issues/22246 is merged in vllm. Remove this updator.
+from time import perf_counter
+
 import numpy
 import torch
 import torch.distributed as dist
@@ -73,6 +75,11 @@ class EplbUpdator:
         self.algorithm_execution_interval: torch.int64 = self.eplb_config.algorithm_execution_interval
 
         self.process = process
+        self._stats_ms = 0.0
+        self._plan_wait_ms = 0.0
+        self._transfer_launch_ms = 0.0
+        self._transfer_commit_ms = 0.0
+        self._transfer_layers = 0
 
         logger.info("[eplb/updator] Launched EPLB subprocess, pid=%s", self.process.pid)
 
@@ -81,6 +88,19 @@ class EplbUpdator:
         if self.cur_iterations == (
             self.expert_heat_collection_interval + self.algorithm_execution_interval + self.num_moe_layers
         ):
+            logger.info(
+                "EPLB v1 phase timing: rank=%d stats_ms=%.3f plan_wait_ms=%.3f "
+                "transfer_launch_ms=%.3f transfer_commit_ms=%.3f transfer_layers=%d",
+                self.rank_id,
+                self._stats_ms,
+                self._plan_wait_ms,
+                self._transfer_launch_ms,
+                self._transfer_commit_ms,
+                self._transfer_layers,
+            )
+            self._stats_ms = self._plan_wait_ms = 0.0
+            self._transfer_launch_ms = self._transfer_commit_ms = 0.0
+            self._transfer_layers = 0
             logger.debug("[eplb/updator] Full EPLB cycle completed, clearing moe loads and resetting iteration counter")
             if self.expert_map_record_path is not None:
                 self.adaptor._export_tensor_to_file(self.shared_dict["expert_maps"], self.expert_map_record_path)
@@ -106,8 +126,11 @@ class EplbUpdator:
     def forward_before(self):
         # Batch after eplb process being triggered, get update info provided by eplb process
         if self.get_update_info_flag():
+            started_at = perf_counter()
             self.update_info_all = self.eplb_process.block_update_q.get()
+            self._plan_wait_ms += (perf_counter() - started_at) * 1000
         if self.update_expert_weight_flag():
+            started_at = perf_counter()
             with record_function_or_nullcontext("EPLB generate p2p task"):
                 (expert_send_info, expert_recv_info, updated_expert_map, log2phy_map, layer_id) = (
                     self.update_info_all.pop(0)
@@ -125,6 +148,8 @@ class EplbUpdator:
                 # set asynchronous stream for d2d expert weight update
                 self.reqs = []
                 self.eplb_loader.asyn_expert_weight_transfer(self.reqs)
+            self._transfer_launch_ms += (perf_counter() - started_at) * 1000
+            self._transfer_layers += 1
 
     def forward_end(self, eplb_heat_collection_status: bool = True):
         if self.wakeup_eplb_worker_flag():
@@ -133,7 +158,9 @@ class EplbUpdator:
                 self.wakeup_eplb_worker()
 
         if self.update_expert_weight_flag() and self.expert_map_record_path is None:
+            started_at = perf_counter()
             self.eplb_loader.update_expert_map_and_weight(self.reqs)
+            self._transfer_commit_ms += (perf_counter() - started_at) * 1000
 
         # One circle of eplb update includes expert_heat_collection_interval + algorithm_execution_interval
         # + num_moe_layers (for weight update). In expert_heat_collection stage, we only update the counter
@@ -143,8 +170,10 @@ class EplbUpdator:
             self.update_iteration()
 
     def compute_and_set_moe_load(self):
+        started_at = perf_counter()
         local_load = self.adaptor.get_rank_expert_workload().unsqueeze(1)
         moe_load = self.comm_group.all_gather(local_load, dim=1).cpu()
+        self._stats_ms = (perf_counter() - started_at) * 1000
 
         if self.multi_stage:
             moe_load = moe_load.permute(2, 0, 1, 3)

@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 from multiprocessing import Process, Queue
+from time import perf_counter
 from typing import Any
 
 import numpy as np
@@ -44,6 +45,7 @@ class EplbWorker:
         self.multi_stage = policy_type == 3
 
     def do_update(self):
+        planning_started_at = perf_counter()
         # put data in to queue
         # in process self.policy.generate_policy()
         # get epxert table && tensor
@@ -123,6 +125,12 @@ class EplbWorker:
 
         packed_update_info = self.pack_update_info(update_info)
 
+        if self.rank_id == 0:
+            logger.info(
+                "[eplb/worker] EPLB phase timing: policy=%s plan_ms=%.3f",
+                type(self.policy).__name__,
+                (perf_counter() - planning_started_at) * 1000,
+            )
         return packed_update_info
 
     def check_expert_placement(self, old_placement, new_placement):

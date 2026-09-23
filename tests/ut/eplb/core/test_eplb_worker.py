@@ -13,6 +13,7 @@ def test_do_update_logs_comparable_rebalance_metrics(monkeypatch):
     worker = object.__new__(eplb_worker.EplbWorker)
     worker.rank_id = 0
     worker.multi_stage = False
+    worker.policy = MagicMock()
     worker.num_local_experts = 1
     worker.old_expert_maps = torch.tensor(
         [
@@ -40,7 +41,7 @@ def test_do_update_logs_comparable_rebalance_metrics(monkeypatch):
 
     assert worker.do_update() == []
 
-    log_info.assert_called_once_with(
+    assert log_info.call_args_list[0].args == (
         "[eplb/worker] Expert hotness imbalance, current: mean=%.3f p95=%.3f max=%.3f, "
         "updated: mean=%.3f p95=%.3f max=%.3f, changed_layers=%d rank_transfers=%d",
         1.5,
@@ -52,3 +53,4 @@ def test_do_update_logs_comparable_rebalance_metrics(monkeypatch):
         1,
         2,
     )
+    assert log_info.call_args_list[1].args[0].startswith("[eplb/worker] EPLB phase timing:")
