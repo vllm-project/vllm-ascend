@@ -110,6 +110,23 @@ class CustomColumnParallelOp(CustomLinearOp):
         self.gather_output = self.layer.gather_output
 
 
+class DCPGroupColumnParallelOp(CustomColumnParallelOp):
+    @property
+    def tp_rank(self):
+        return super().tp_rank // self.layer.group_size
+
+    @property
+    def tp_size(self):
+        size = super().tp_size
+        return size // self.layer.group_size
+
+    def apply_impl(self, input_):
+        # Every rank already has the group's full Q heads. No output gather.
+        bias = None if self.skip_bias_add else self.layer.bias
+        output = self.quant_method.apply(self.layer, input_, bias)
+        return output, self.layer.bias if self.skip_bias_add else None
+
+
 class CustomRowParallelOp(CustomLinearOp):
     def __init__(self, layer):
         super().__init__(layer)
@@ -319,6 +336,9 @@ def _get_row_parallel_op(prefix, layer) -> MLPRowParallelOp | OProjRowParallelOp
 
 
 def get_parallel_op(disable_tp, prefix, layer, direct):
+    if direct == "column" and getattr(layer, "qrep_active", False) is True:
+        qrep_op = DCPGroupColumnParallelOp(layer)
+        return qrep_op, qrep_op.tp_rank, qrep_op.tp_size
     if _is_shared_expert_layer(prefix):
         # Shared-expert weight layout is decoupled from sequence parallelism:
         # only the shared-expert DP switch replicates weights. Models still
