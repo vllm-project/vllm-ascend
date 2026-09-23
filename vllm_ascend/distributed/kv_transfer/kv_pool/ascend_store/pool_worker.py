@@ -14,6 +14,7 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_pcp_group,
+    get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
@@ -164,10 +165,11 @@ class KVPoolWorker:
         self.tp_rank = get_tensor_model_parallel_rank()
         self.tp_size = get_tensor_model_parallel_world_size()
         self.pp_size = parallel_config.pipeline_parallel_size
-        self.pp_rank = (parallel_config.rank // self.tp_size) % self.pp_size
+        self.pp_rank = get_pp_group().rank_in_group if self.pp_size > 1 else 0
 
         self.pcp_size = get_pcp_group().world_size
         self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
+        self.kvpp_rank = self.pcp_rank * self.tp_size + self.tp_rank
         self.dcp_size = get_decode_context_model_parallel_world_size()
         self.dcp_rank = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
         self.model_name = model_config.model.split("/")[-1]
@@ -280,7 +282,7 @@ class KVPoolWorker:
             self.put_step = 1
         if self.use_kvpp:
             # Every owner saves all blocks of its layer shard, including its MTP replica.
-            self.head_or_tp_rank = self.tp_rank
+            self.head_or_tp_rank = self.kvpp_rank
             self.put_step = 1
         self.my_key_index = (
             self.pcp_rank * self.dcp_size * (self.tp_size // self.put_step)
@@ -779,8 +781,9 @@ class KVPoolWorker:
                     self.grouped_block_size,
                     self.tp_rank,
                     self.tp_size,
-                    self.pcp_rank,
-                    self.pcp_size,
+                    # KVPP owners hold different layers, not PCP replicas.
+                    0 if self.use_kvpp else self.pcp_rank,
+                    1 if self.use_kvpp else self.pcp_size,
                     self.dcp_size,
                     self.put_step,
                     self.kv_role,
@@ -996,7 +999,9 @@ class KVPoolWorker:
         self.kv_caches = kv_caches
         if self.use_kvpp:
             owners = map_kvpp_layers_to_owners(self.vllm_config, kv_caches.keys())
-            kv_caches = {name: caches for name, caches in kv_caches.items() if owners.get(name) in (None, self.tp_rank)}
+            kv_caches = {
+                name: caches for name, caches in kv_caches.items() if owners.get(name) in (None, self.kvpp_rank)
+            }
             self.kv_caches = kv_caches
         self.group_kv_cache_families: dict[int, str] = {
             group_id: get_group_cache_family(self.kv_cache_group_families, group_id)
@@ -3166,7 +3171,7 @@ class KVPoolWorker:
 
     def get_group_tp_size(self, kv_cache_group_id: int):
         if self.use_kvpp:
-            return self.tp_size
+            return self.tp_size * self.pcp_size
         if self.tp_mismatch:
             return self.effective_tp_size
         if self.group_uses_align_state[kv_cache_group_id]:
