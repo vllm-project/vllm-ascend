@@ -212,20 +212,92 @@ class LayerwisePushConsumerWorker:
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         from vllm_ascend.ascend_config import get_ascend_config
 
+        tp_shared_components: set[str] = set()
+        # Sparse main caches contain optional HBM/CPU tensors and top-k buffers,
+        # not an ordinary HBM component. Their destination is TP-shared CPU K/V.
+        main_names: set[str] = set()
+        hbm_destinations = kv_caches
         if get_ascend_config().sparse_kv_offload_config.enabled:
-            raise ValueError(
-                "LayerwisePushConnector does not yet support sparse decode offload: "
-                "the offload CPU GVA is not a registered remote WRITE destination. "
-                "Disable sparse decode offload when using this connector."
+            if self._backend_name != BACKEND_MEMFABRIC:
+                raise ValueError(
+                    "LayerwisePushConnector with sparse decode offload requires "
+                    'kv_connector_extra_config["transfer_backend"]="memfabric"; '
+                    "Mooncake cannot currently use the MemFabric offload memory pool."
+                )
+
+            from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
+                get_sparse_kv_offload_manager,
             )
-        layouts = self._build_hbm_layouts(self.kv_cache_config, kv_caches, self.total_base_layers)
-        registration = collect_storage_merged_register_regions(kv_caches)
+
+            self.offload_manager = get_sparse_kv_offload_manager()
+            main_names = set(getattr(self.offload_manager, "offload_layer_names", ()))
+            if not main_names:
+                raise RuntimeError(
+                    "SparseKVOffloadManager.register_kv_caches must run before LayerwisePushConnector"
+                )
+            hbm_destinations = {name: value for name, value in kv_caches.items() if name not in main_names}
+
+        layouts = self._build_hbm_layouts(self.kv_cache_config, hbm_destinations, self.total_base_layers)
+        registration = collect_storage_merged_register_regions(hbm_destinations)
+        if main_names:
+            layer_to_group = {
+                layer_name: group_idx
+                for group_idx, group in enumerate(self.kv_cache_config.kv_cache_groups)
+                for layer_name in group.layer_names
+            }
+            for pool_idx, layer_name in enumerate(self.offload_manager.offload_layer_names):
+                group_idx = layer_to_group[layer_name]
+                k_base = self.offload_manager.gvas_k_bases[pool_idx]
+                v_base = self.offload_manager.gvas_v_bases[pool_idx]
+                k_len, v_len = self.offload_manager.cpu_block_lens[pool_idx]
+                layer_idx = get_layerwise_physical_layer_index(layer_name, self.total_base_layers)
+                # Top-k tensors exist on every TP rank. Their head dimensions
+                # and dtype match the CPU cache, but their row size does not.
+                topk_tensors = (
+                    self.offload_manager.topk_buffers_k[pool_idx],
+                    self.offload_manager.topk_buffers_v[pool_idx],
+                )
+                block_shapes = tuple((self.offload_manager.block_size, *tensor.shape[2:]) for tensor in topk_tensors)
+                block_size_scales = tuple(
+                    length // (tensor.element_size() * math.prod(shape))
+                    for length, tensor, shape in zip((k_len, v_len), topk_tensors, block_shapes, strict=True)
+                )
+                component = ComponentLayout(
+                    name=layer_name,
+                    group_index=group_idx,
+                    block_size=self.kv_cache_config.kv_cache_groups[group_idx].kv_cache_spec.block_size,
+                    dtypes=tuple(str(tensor.dtype) for tensor in topk_tensors),
+                    base_addrs=(k_base, v_base),
+                    block_strides=(k_len, v_len),
+                    block_lengths=(k_len, v_len),
+                    block_shapes=block_shapes,
+                    block_size_scales=block_size_scales,
+                )
+                layouts.setdefault(layer_idx, []).insert(0, component)
+                tp_shared_components.add(layer_name)
+
+            # MemFabric writes directly into the offload pool's GVA without
+            # registering it through the HBM-only TRANS registration path.
 
         self.layer_layouts = {layer_idx: tuple(components) for layer_idx, components in layouts.items()}
         validate_register_region_count(registration)
         engine, _ = self._ensure_engine()
         if self._backend_name == BACKEND_MEMFABRIC:
-            global_memfabric_te.register_buffer(registration.ptrs, registration.lengths)
+            register_ptrs, register_lens = list(registration.ptrs), list(registration.lengths)
+            if main_names:
+                # Sparse main caches live in the TP0-owned shared CPU pool. Every
+                # D rank registers the broadcast pool spans into its own engine so
+                # the remote writer can resolve them (mirrors the d2rh shared
+                # bare-link pattern); writes bypass the HBM-only TRANS table via
+                # the pool's 56-bit GVA addressing.
+                num_blocks = self.kv_cache_config.num_blocks
+                for pool_idx, _ in enumerate(self.offload_manager.offload_layer_names):
+                    k_len, v_len = self.offload_manager.cpu_block_lens[pool_idx]
+                    register_ptrs.extend(
+                        [self.offload_manager.gvas_k_bases[pool_idx], self.offload_manager.gvas_v_bases[pool_idx]]
+                    )
+                    register_lens.extend([k_len * num_blocks, v_len * num_blocks])
+            global_memfabric_te.register_buffer(register_ptrs, register_lens)
         else:
             global_te.register_buffer(registration.ptrs, registration.lengths)
 
@@ -237,6 +309,7 @@ class LayerwisePushConsumerWorker:
                 layer_layouts=self.layer_layouts,
                 dest_blocks_by_req=self._dest_blocks_by_req,
                 dest_blocks_condition=self._dest_blocks_condition,
+                tp_shared_components=frozenset(tp_shared_components),
                 session=(
                     global_memfabric_te.unique_id
                     if self._backend_name == BACKEND_MEMFABRIC
