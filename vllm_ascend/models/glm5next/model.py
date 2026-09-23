@@ -5,6 +5,7 @@ from collections.abc import Iterable
 from typing import Any, ClassVar, Literal
 
 import torch
+import torch_npu
 from torch import nn
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (
@@ -31,11 +32,6 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFuncCalculator,
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
-)
-from vllm.model_executor.layers.mhc import (
-    MHCFusedPostPreOp,
-    MHCPostOp,
-    MHCPreOp,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -64,6 +60,7 @@ from vllm.model_executor.models.interfaces import (
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    WeightsMapper,
     init_vllm_registered_model,
     is_pp_missing_parameter,
     make_layers,
@@ -245,10 +242,20 @@ class Glm5NextMoE(nn.Module):
         if self.is_sequence_parallel and not already_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
 
-        # The router is always external (self.gate); main's MoERunner expects
-        # pre-computed router_logits, so compute them here unconditionally.
-        router_logits, _ = self.gate(hidden_states)
-        final_hidden_states = self.experts(hidden_states=hidden_states, router_logits=router_logits)
+        if self.experts.is_internal_router:
+            # The Ascend MoE runner owns the gate in this mode. Pass hidden
+            # states through the router_logits slot so it can compute routing
+            # exactly once inside the fused path.
+            final_hidden_states = self.experts(
+                hidden_states=hidden_states,
+                router_logits=hidden_states,
+            )
+        else:
+            router_logits, _ = self.gate(hidden_states)
+            final_hidden_states = self.experts(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+            )
 
         if self.is_sequence_parallel and not already_sequence_parallel:
             final_hidden_states = tensor_model_parallel_all_gather(final_hidden_states, 0)
@@ -308,7 +315,7 @@ class Glm5NextDecoderLayer(nn.Module):
                 kv_lora_rank=config.kv_lora_rank,
                 max_position_embeddings=config.max_position_embeddings,
                 cache_config=cache_config,
-                quant_config=None,  # MLA projections are BF16 in checkpoint
+                quant_config=quant_config,  # keep MLA projections quantized when checkpoint weights are quantized
                 prefix=f"{prefix}.self_attn",
                 topk_indices_buffer=topk_indices_buffer,
                 skip_rope=config.mla_nope,
@@ -336,6 +343,8 @@ class Glm5NextDecoderLayer(nn.Module):
                 intermediate_size=config.intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
+                is_sequence_parallel=self.is_sequence_parallel,
+                reduce_results=not self.is_sequence_parallel,
                 prefix=f"{prefix}.mlp",
                 swiglu_limit=config.swiglu_limit,
             )
@@ -374,10 +383,6 @@ class Glm5NextDecoderLayer(nn.Module):
             self.hc_ffn_base = nn.Parameter(torch.empty(mix_hc, dtype=torch.float32))
             self.hc_ffn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
 
-            self.mhc_pre_op = MHCPreOp()
-            self.mhc_post_op = MHCPostOp()
-            self.mhc_fused_post_pre_op = MHCFusedPostPreOp()
-
     def forward(
         self,
         positions: torch.Tensor,
@@ -412,9 +417,8 @@ class Glm5NextDecoderLayer(nn.Module):
             return hidden_states, residual, None, None
 
         # mHC start. `post`/`comb` carry the previous layer's deferred
-        # hc_post inputs (its ffn-pre outputs); when present, fuse that
-        # hc_post with this layer's attn hc_pre into one kernel (inter-layer
-        # fusion). Layer 0 has no incoming state -> standalone hc_pre.
+        # hc_post inputs (its ffn-pre outputs); apply the existing HcPost and
+        # HcPre kernels before attention. Layer 0 has no incoming state.
         x = hidden_states
         if post is None:
             if self.layer_idx == 0:
@@ -429,7 +433,7 @@ class Glm5NextDecoderLayer(nn.Module):
                 norm_eps=self.input_layernorm.variance_epsilon,
             )
         else:
-            residual, post, comb, x = self.hc_fused_post_pre(
+            residual, post, comb, x = self.hc_post_pre(
                 x,
                 residual,
                 post,
@@ -454,8 +458,8 @@ class Glm5NextDecoderLayer(nn.Module):
         if self.is_sequence_parallel:
             x = sp_reduce_scatter(x)
 
-        # Fuse post-attn hc_post + pre-FFN hc_pre (+ RMSNorm) into one kernel.
-        residual, post, comb, x = self.hc_fused_post_pre(
+        # Apply post-attention mixing, pre-FFN mixing, then input RMSNorm.
+        residual, post, comb, x = self.hc_post_pre(
             x,
             residual,
             post,
@@ -475,7 +479,7 @@ class Glm5NextDecoderLayer(nn.Module):
 
         # mHC end. The last mHC layer materializes its final hc_post (nothing
         # to fuse with) then contracts; every other layer defers its hc_post to
-        # the next layer's fused pre, returning the state.
+        # the next layer's pre, returning the state.
         if self.layer_idx == self.num_hidden_layers - 1:
             x = self.hc_post(x, residual, post, comb)
             x = hc_contract(x, self.n)
@@ -492,20 +496,22 @@ class Glm5NextDecoderLayer(nn.Module):
         norm_weight: torch.Tensor | None = None,
         norm_eps: float = 0.0,
     ):
-        post_mix, res_mix, layer_input = self.mhc_pre_op(
-            residual=x,
-            fn=hc_fn,
-            hc_scale=hc_scale,
-            hc_base=hc_base,
-            rms_eps=self.rms_norm_eps,
-            hc_pre_eps=self.hc_eps,
-            hc_sinkhorn_eps=self.hc_eps,
-            hc_post_mult_value=self.mhc_post_mult_value,
-            sinkhorn_repeat=self.mhc_sinkhorn_iterations,
-            norm_weight=norm_weight,
-            norm_eps=norm_eps,
+        layer_input, post_mix, res_mix = torch.ops._C_ascend.npu_hc_pre_v2(
+            x,
+            hc_fn,
+            hc_scale,
+            hc_base,
+            self.n,
+            self.mhc_sinkhorn_iterations,
+            self.rms_norm_eps,
+            self.hc_eps,
         )
-        return post_mix, res_mix, layer_input
+        # HcPre uses 2 * sigmoid for post mixing; retain the model's scale.
+        if self.mhc_post_mult_value != 2.0:
+            post_mix = post_mix * (self.mhc_post_mult_value / 2.0)
+        if norm_weight is not None:
+            layer_input = torch_npu.npu_rms_norm(layer_input, norm_weight, epsilon=norm_eps)[0]
+        return post_mix.unsqueeze(-1), res_mix, layer_input
 
     def hc_post(
         self,
@@ -514,9 +520,11 @@ class Glm5NextDecoderLayer(nn.Module):
         post: torch.Tensor,
         comb: torch.Tensor,
     ):
-        return self.mhc_post_op(x, residual, post, comb)
+        return torch.ops._C_ascend.npu_hc_post(
+            x.unsqueeze(0), residual.unsqueeze(0), post.squeeze(-1).unsqueeze(0), comb.unsqueeze(0)
+        ).squeeze(0)
 
-    def hc_fused_post_pre(
+    def hc_post_pre(
         self,
         x: torch.Tensor,
         residual: torch.Tensor,
@@ -528,24 +536,16 @@ class Glm5NextDecoderLayer(nn.Module):
         norm_weight: torch.Tensor | None = None,
         norm_eps: float = 0.0,
     ):
-        return self.mhc_fused_post_pre_op(
-            x=x,
-            residual=residual,
-            post_layer_mix=post,
-            comb_res_mix=comb,
-            fn=hc_fn,
-            hc_scale=hc_scale,
-            hc_base=hc_base,
-            rms_eps=self.rms_norm_eps,
-            hc_pre_eps=self.hc_eps,
-            hc_sinkhorn_eps=self.hc_eps,
-            hc_post_mult_value=self.mhc_post_mult_value,
-            sinkhorn_repeat=self.mhc_sinkhorn_iterations,
-            n_splits=1,
-            tile_n=1,
+        residual = self.hc_post(x, residual, post, comb)
+        post, comb, layer_input = self.hc_pre(
+            residual,
+            hc_fn,
+            hc_scale,
+            hc_base,
             norm_weight=norm_weight,
             norm_eps=norm_eps,
         )
+        return residual, post, comb, layer_input
 
 
 class Glm5NextModel(nn.Module):
@@ -613,12 +613,52 @@ class Glm5NextModel(nn.Module):
             self.norm = PPMissingLayer()
 
         self.is_sequence_parallel = vllm_config.parallel_config.use_sequence_parallel_moe
+        if self.is_sequence_parallel and get_pp_group().world_size > 1:
+            # SP shards the activations once per TP rank and sp_shard is not
+            # idempotent, so crossing a PP boundary would re-shard an already
+            # sharded tensor. Keep the two features mutually exclusive.
+            raise NotImplementedError(
+                "Sequence parallelism (use_sequence_parallel_moe) is not supported together with "
+                "pipeline parallelism for GLM-5.3-Flash."
+            )
 
         world_size = get_tensor_model_parallel_world_size()
         assert config.num_attention_heads % world_size == 0, "num_attention_heads must be divisible by world_size"
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
+
+    def make_empty_intermediate_tensors(
+        self,
+        batch_size: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> IntermediateTensors:
+        """Placeholder inputs for PP ranks > 0 (profiling / dummy runs).
+
+        The tensors must mirror exactly what the previous rank sends. With mHC
+        the per-token stream stays 2D while ``residual`` carries the ``n``
+        hyper-connection streams, and the deferred hc_post state travels as
+        ``post`` / ``comb`` (FP32, matching the hc_pre kernel outputs).
+        Non-mHC configs only ship ``hidden_states`` / ``residual``.
+        """
+        config = self.config
+        if not config.mhc:
+            return IntermediateTensors(
+                {
+                    "hidden_states": torch.zeros((batch_size, config.hidden_size), dtype=dtype, device=device),
+                    "residual": torch.zeros((batch_size, config.hidden_size), dtype=dtype, device=device),
+                }
+            )
+        n = config.mhc_num_residual_streams
+        return IntermediateTensors(
+            {
+                "hidden_states": torch.zeros((batch_size, config.hidden_size), dtype=dtype, device=device),
+                "residual": torch.zeros((batch_size, n, config.hidden_size), dtype=dtype, device=device),
+                "post": torch.zeros((batch_size, n, 1), dtype=torch.float32, device=device),
+                "comb": torch.zeros((batch_size, n, n), dtype=torch.float32, device=device),
+            }
+        )
 
     def forward(
         self,
@@ -640,10 +680,10 @@ class Glm5NextModel(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-            # post/comb (deferred mHC hc_post state) are not propagated across
-            # PP ranks; the receiving rank's first mHC layer uses standalone pre.
-            post = None
-            comb = None
+            # Continue the previous rank's deferred mHC state so this rank's
+            # first layer runs hc_post_pre, identical to the single-stage math.
+            post = intermediate_tensors["post"] if self.config.mhc else None
+            comb = intermediate_tensors["comb"] if self.config.mhc else None
 
         full_num_tokens = positions.shape[0]
         if self.is_sequence_parallel:
@@ -653,12 +693,13 @@ class Glm5NextModel(nn.Module):
             hidden_states, residual, post, comb = layer(positions, hidden_states, residual, post, comb)
 
         if not get_pp_group().is_last_rank:
-            # PP is gated off for GLM-5.3-Flash (no make_empty_intermediate_tensors),
-            # so this branch is not exercised. post/comb are the deferred
-            # hc_post state of this rank's last mHC layer; a future PP path
-            # would need to propagate them, but for now they are dropped (the
-            # receiving rank's first layer would fall back to standalone pre).
-            return IntermediateTensors({"hidden_states": hidden_states, "residual": residual})
+            # Ship the deferred mHC state produced by this rank's last layer so
+            # the next stage can continue exactly where this one stopped.
+            tensors = {"hidden_states": hidden_states, "residual": residual}
+            if self.config.mhc:
+                tensors["post"] = post
+                tensors["comb"] = comb
+            return IntermediateTensors(tensors)
 
         if self.is_sequence_parallel:
             hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
@@ -702,12 +743,6 @@ class Glm5NextModel(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
 
-        # GLM-5.3-Flash NoPE checkpoints omit the RoPE rows from
-        # ``kv_a_proj_with_mqa``; pad them with zeros for the model shape.
-        kv_a_pad_size = 0
-        if self.config.mla_nope and self.config.qk_rope_head_dim > 0:
-            kv_a_pad_size = self.config.qk_rope_head_dim
-
         _pending_wk_fp8: dict = {}
 
         for args in weights:
@@ -734,28 +769,6 @@ class Glm5NextModel(nn.Module):
                 loaded_params,
             ):
                 continue
-
-            # FP8 checkpoint: dequantize BF16-kept MLA projections
-            # (q_a_proj / kv_a_proj_with_mqa / o_proj) to BF16.
-            if _try_load_fp8_attn_proj(
-                name,
-                loaded_weight,
-                _pending_wk_fp8,
-                params_dict,
-                loaded_params,
-                kv_a_pad_size,
-            ):
-                continue
-
-            # Pad kv_a_proj_with_mqa for NoPE models
-            if kv_a_pad_size > 0 and ".kv_a_proj_with_mqa." in name:
-                pad = torch.zeros(
-                    kv_a_pad_size,
-                    *loaded_weight.shape[1:],
-                    dtype=loaded_weight.dtype,
-                    device=loaded_weight.device,
-                )
-                loaded_weight = torch.cat([loaded_weight, pad], dim=0)
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
@@ -842,6 +855,7 @@ class Glm5NextForCausalLM(nn.Module, HasInnerState, SupportsPP, MixtureOfExperts
         else:
             self.lm_head = PPMissingLayer()
         self.logits_processor = LogitsProcessor(self.config.vocab_size, scale=self.config.logit_scale)
+        self.make_empty_intermediate_tensors = self.model.make_empty_intermediate_tensors
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
@@ -913,6 +927,25 @@ class Glm5NextForConditionalGeneration(Glm4vForConditionalGeneration, HasInnerSt
     has_inner_state: ClassVar[Literal[True]] = True
     is_hybrid: ClassVar[Literal[True]] = True
 
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "lm_head.": "language_model.lm_head.",
+            "model.language_model.": "language_model.model.",
+            "model.visual.": "visual.",
+        },
+        # ModelSlim W8A8 checkpoints group the KDA forget-gate tensors under
+        # ``forget_gate``; the runtime KDA module keeps those parameters flat.
+        orig_to_new_substr={
+            ".forget_gate.": ".",
+            ".attn_hc.fn": ".hc_attn_fn",
+            ".attn_hc.base": ".hc_attn_base",
+            ".attn_hc.scale": ".hc_attn_scale",
+            ".ffn_hc.fn": ".hc_ffn_fn",
+            ".ffn_hc.base": ".hc_ffn_base",
+            ".ffn_hc.scale": ".hc_ffn_scale",
+        },
+    )
+
     # NOTE: weight-prefix mapping is inherited from Glm4vForConditionalGeneration
     # (``model.visual.`` -> ``visual.``, ``model.language_model.`` ->
     # ``language_model.model.``, ``lm_head.`` -> ``language_model.lm_head.``),
@@ -977,9 +1010,17 @@ class Glm5NextForConditionalGeneration(Glm4vForConditionalGeneration, HasInnerSt
                 architectures=["Glm5NextForCausalLM"],
             )
 
-        # Glm5NextForCausalLM does not implement make_empty_intermediate_tensors,
-        # so pipeline parallelism is gated off (consistent with the text-only
-        # model) and we intentionally do not alias it here.
+        # The language model owns the PP contract; expose it on the multimodal
+        # wrapper so PP ranks > 0 can materialize placeholder intermediate
+        # tensors (the vision tower only executes on the first rank).
+        self.make_empty_intermediate_tensors = self.language_model.make_empty_intermediate_tensors
+
+    def load_weights(self, weights: Iterable[tuple[Any, ...]]) -> set[str]:
+        # The visual merger's down_proj already contains the exported rotation.
+        # Ignore the standalone QuaRot tensor to avoid applying it a second time.
+        loader = AutoWeightsLoader(self)
+        mapper = self.hf_to_vllm_mapper | WeightsMapper(orig_to_new_prefix={"rot.": None})
+        return loader.load_weights(weights, mapper=mapper)
 
     def get_encoder_cudagraph_config(self):
         # This vision tower does not produce the absolute position embedding
@@ -1027,107 +1068,4 @@ def _try_load_fp8_indexer_wk(name, tensor, buf, params_dict, loaded_params):
     param = params_dict[fused_name]
     param.weight_loader(param, weight_bf16, 0)
     loaded_params.add(fused_name)
-    return True
-
-
-def _dequant_fp8_block(
-    weight_fp8: torch.Tensor,
-    scale_inv: torch.Tensor,
-    block_size: int = 128,
-) -> torch.Tensor:
-    """Dequantize a block-FP8 (e4m3) weight with per-block scale to BF16.
-
-    Unlike ``scaled_dequantize`` this tolerates a non-divisible (partial last
-    block) shape by zero-padding to a multiple of ``block_size`` before the
-    scale broadcast and trimming back afterwards (e.g. kv_a_proj_with_mqa is
-    576 rows = 4*128 + 64).
-    """
-    out_dim, in_dim = weight_fp8.shape
-    pad_out = (-out_dim) % block_size
-    pad_in = (-in_dim) % block_size
-    w = weight_fp8
-    if pad_out or pad_in:
-        w = torch.nn.functional.pad(w, (0, pad_in, 0, pad_out))
-    # scale_inv is (ceil(out/block), ceil(in/block)); broadcast to (out, in).
-    s = scale_inv.to(torch.float32)
-    s_full = s.repeat_interleave(block_size, dim=0).repeat_interleave(block_size, dim=1)
-    out = (w.to(torch.float32) * s_full).to(torch.bfloat16)
-    return out[:out_dim, :in_dim].contiguous()
-
-
-# FP8 checkpoint projections that the MODEL keeps in BF16, so the block-FP8
-# (weight + weight_scale_inv) must be dequantized to BF16 on load.
-# Maps checkpoint proj-suffix -> (buffer key, model target base, fused shard id
-# or None for a direct projection, whether NoPE rope-padding applies).
-_FP8_ATTN_PROJS = {
-    ".q_a_proj.": ("q_a", "fused_qkv_a_proj", 0, False),
-    ".kv_a_proj_with_mqa.": ("kv_a", "fused_qkv_a_proj", 1, True),
-    ".q_b_proj.": ("q_b", "q_b_proj", None, False),
-    ".o_proj.": ("o_proj", "o_proj", None, False),
-}
-
-
-def _try_load_fp8_attn_proj(
-    name,
-    tensor,
-    buf,
-    params_dict,
-    loaded_params,
-    kv_a_pad_size: int,
-) -> bool:
-    """Dequantize FP8 q_a_proj / kv_a_proj_with_mqa / o_proj to BF16 on load.
-
-    The FP8 checkpoint stores these as block-FP8 (weight + weight_scale_inv),
-    but the model holds them in BF16 (``fused_qkv_a_proj`` is always BF16 via
-    DeepSeekV2FusedQkvAProjLinear; ``o_proj`` is excluded by
-    modules_to_not_convert). When the model target is BF16 (no
-    ``weight_scale_inv`` param) we dequantize; otherwise we return False so the
-    normal stacked/direct path loads the FP8 tensor as-is.
-    """
-    matched = None
-    for suffix, info in _FP8_ATTN_PROJS.items():
-        if suffix in name:
-            matched = (suffix, info)
-            break
-    if matched is None:
-        return False
-    suffix, (key, target_base, shard_id, is_kva) = matched
-    is_weight = name.endswith(".weight") and tensor.dtype == torch.float8_e4m3fn
-    is_scale = "weight_scale_inv" in name
-    if not is_weight and not is_scale:
-        return False
-
-    layer_prefix = name.rsplit(suffix, 1)[0]
-    target_w = f"{layer_prefix}.{target_base}.weight"
-    target_s = f"{layer_prefix}.{target_base}.weight_scale_inv"
-    # If the model actually kept this projection in FP8, let the normal path
-    # handle it (it has a weight_scale_inv param).
-    if target_s in params_dict:
-        return False
-
-    entry = buf.setdefault(layer_prefix, {}).setdefault(key, {})
-    entry["weight" if is_weight else "scale"] = tensor
-    if "weight" not in entry or "scale" not in entry:
-        return True
-
-    weight_fp8, scale_inv = entry["weight"], entry["scale"]
-    buf[layer_prefix].pop(key, None)
-    block_size = weight_fp8.shape[1] // scale_inv.shape[1]
-    weight_bf16 = _dequant_fp8_block(weight_fp8, scale_inv, block_size)
-    # NoPE: pad kv_a rope portion (kv_lora_rank -> kv_lora_rank + qk_rope_head_dim).
-    if is_kva and kv_a_pad_size > 0:
-        pad = torch.zeros(
-            kv_a_pad_size,
-            weight_bf16.shape[1],
-            dtype=weight_bf16.dtype,
-            device=weight_bf16.device,
-        )
-        weight_bf16 = torch.cat([weight_bf16, pad], dim=0)
-
-    param = params_dict[target_w]
-    if shard_id is None:
-        param.weight_loader(param, weight_bf16)
-    else:
-        param.weight_loader(param, weight_bf16, shard_id)
-    loaded_params.add(target_w)
     return True

@@ -15,14 +15,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import inspect
+from collections.abc import Callable
 from functools import lru_cache
 from importlib import import_module
+from typing import Any
 
+import regex as re
 import torch
 import torch.distributed
 import torch.distributed as dist
+import torch.nn as nn
 import torch_npu
 from torch.nn.functional import pad
+from vllm.config import get_current_vllm_config_or_none
+from vllm.logger import logger
 
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import enable_custom_op
@@ -33,6 +40,24 @@ _CANN_ACL_INT8 = 258
 _CANN_ACL_INT4 = 285
 _CANN_MEGA_MOE_QUANT_MODE_None = 0
 _CANN_MEGA_MOE_QUANT_MODE_INT8 = 2
+_CANN_MEGA_MOE_QUANT_MODE_MXFP = 4
+# Constants adapt to A5 cann_ops_transformer mega moe operator.
+# which is documented in file mc2/mega_moe/README.md on
+# repository https://gitcode.com/cann/ops-transformer.git.
+# (23 = FLOAT8_E5M2, 24 = FLOAT8_E4M3FN, 296 = FLOAT4_E2M1).
+_CANN_ACL_FLOAT8_E5M2 = 23
+_CANN_ACL_FLOAT8_E4M3FN = 24
+_CANN_ACL_FLOAT4_E2M1 = 296
+
+# dict: QuantType -> (dispatch_quant_mode, dispatch_quant_out_dtype, weight_type)
+_QUANT_SETTING_MAP: dict[QuantType, tuple[int, int | None, int | None]] = {
+    QuantType.W8A8: (_CANN_MEGA_MOE_QUANT_MODE_INT8, _CANN_ACL_INT8, _CANN_ACL_INT8),
+    QuantType.W4A8: (_CANN_MEGA_MOE_QUANT_MODE_INT8, _CANN_ACL_INT8, _CANN_ACL_INT4),
+    QuantType.NONE: (_CANN_MEGA_MOE_QUANT_MODE_None, None, None),
+    QuantType.W8A8MXFP: (_CANN_MEGA_MOE_QUANT_MODE_MXFP, _CANN_ACL_FLOAT8_E4M3FN, _CANN_ACL_FLOAT8_E4M3FN),
+    QuantType.W4A8MXFP: (_CANN_MEGA_MOE_QUANT_MODE_MXFP, _CANN_ACL_FLOAT8_E4M3FN, _CANN_ACL_FLOAT4_E2M1),
+    QuantType.W4A4MXFP: (_CANN_MEGA_MOE_QUANT_MODE_MXFP, _CANN_ACL_FLOAT4_E2M1, _CANN_ACL_FLOAT4_E2M1),
+}
 
 
 def async_all_to_all(input_, output_split_sizes, input_split_sizes, group, event=None):
@@ -123,30 +148,118 @@ def load_cann_mega_moe_ops():
     return get_symm_buffer_for_mega_moe, mega_moe
 
 
-def _get_cann_mega_moe_quant_settings(quant_type: QuantType) -> tuple[int, int | None, int | None]:
-    # Returns (dispatch_quant_mode, dispatch_quant_out_dtype, weight_type).
-    # The current custom op package still requires explicit INT4 for W4A8
-    # packed weights; otherwise it derives W4A8's packed N as an INT8 N and
-    # rejects weight2.
-    #
-    # dispatch_quant_out_dtype: the doc types this as torch.dtype (torch.int8 /
-    # torch.float8_e4m3fn). We pass the ACL enum ints (258 / 24) because W8A8
-    # was validated end-to-end this way in PD; switching W4A8 to torch.int8 did
-    # NOT fix the W4A8 accuracy issue and slowed graph capture (see bug_a3.md),
-    # so keep the working values until the W4A8 accuracy root cause is found on
-    # the operator side.
-    if quant_type == QuantType.W8A8:
-        return (_CANN_MEGA_MOE_QUANT_MODE_INT8, _CANN_ACL_INT8, _CANN_ACL_INT8)
-    if quant_type == QuantType.W4A8:
-        return (_CANN_MEGA_MOE_QUANT_MODE_INT8, _CANN_ACL_INT8, _CANN_ACL_INT4)
-    if quant_type == QuantType.NONE:
-        return (_CANN_MEGA_MOE_QUANT_MODE_None, None, None)
+def select_mega_moe_activation_kwargs(
+    mega_moe_op: Callable[..., Any],
+    *,
+    activation: object,
+    activation_clamp: float | None,
+    swiglu_alpha: float,
+    swiglu_beta: float,
+) -> dict[str, object]:
+    """Build activation kwargs compatible with the installed MegaMoe wrapper.
+
+    MiniMax-M3 uses SwiGLU-OAI (``alpha=1.702``, ``beta=1.0``). Older MegaMoe
+    builds only expose ``activation_clamp`` for standard SwiGLU, while newer
+    wrappers expose either ``activation``/``activation_params`` or direct
+    alpha/beta keyword arguments. Standard SwiGLU keeps the legacy call.
+    """
+    kwargs: dict[str, object] = {"activation_clamp": activation_clamp}
+    activation_name = getattr(activation, "value", activation)
+    if activation_name not in ("swigluoai", "swigluoai_uninterleave"):
+        return kwargs
+
+    activation_parameter_pairs = (
+        {"activation", "activation_params"},
+        {"glu_alpha", "glu_bias"},
+        {"swiglu_alpha", "swiglu_beta"},
+    )
+    try:
+        parameters = inspect.signature(mega_moe_op).parameters
+        parameter_names = {
+            name
+            for name, parameter in parameters.items()
+            if parameter.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+        }
+        accepts_kwargs = any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
+    except (TypeError, ValueError):
+        parameter_names = set()
+        accepts_kwargs = True
+    if accepts_kwargs and not any(pair.issubset(parameter_names) for pair in activation_parameter_pairs):
+        # Compiled operators and generic **kwargs wrappers may describe their
+        # arguments only in metadata. Prefer an explicit Python activation API;
+        # documentation must not introduce keywords a closed wrapper rejects.
+        signature_metadata = " ".join(
+            str(value)
+            for value in (getattr(mega_moe_op, "__doc__", None), getattr(mega_moe_op, "_schema", None))
+            if value is not None
+        )
+        known_names = {
+            "activation",
+            "activation_params",
+            "glu_alpha",
+            "glu_bias",
+            "swiglu_alpha",
+            "swiglu_beta",
+        }
+        parameter_names.update(name for name in known_names if re.search(rf"\b{re.escape(name)}\b", signature_metadata))
+
+    if {"activation", "activation_params"}.issubset(parameter_names):
+        kwargs.update(
+            activation="swigluoai",
+            activation_params={"alpha": swiglu_alpha, "beta": swiglu_beta},
+        )
+        return kwargs
+    if {"glu_alpha", "glu_bias"}.issubset(parameter_names):
+        kwargs.update(glu_alpha=swiglu_alpha, glu_bias=swiglu_beta)
+        return kwargs
+    if {"swiglu_alpha", "swiglu_beta"}.issubset(parameter_names):
+        kwargs.update(swiglu_alpha=swiglu_alpha, swiglu_beta=swiglu_beta)
+        return kwargs
 
     raise RuntimeError(
-        "MegaMoe integration supports W8A8/W4A8 INT on A2/A3 and MXFP on FP8-capable "
-        "MegaMoe platforms. "
-        f"Unsupported quant type: {quant_type}."
+        "The installed CANN MegaMoe wrapper does not expose SwiGLU-OAI "
+        "activation parameters required by MiniMax-M3. Install a compatible "
+        "cann_ops_transformer build or disable fused MC2."
     )
+
+
+def _get_cann_mega_moe_quant_settings(quant_type: QuantType) -> tuple[int, int | None, int | None]:
+    """
+    Returns (dispatch_quant_mode, dispatch_quant_out_dtype, weight_type).
+    The current custom op package still requires explicit INT4 for W4A8
+    packed weights; otherwise it derives W4A8's packed N as an INT8 N and
+    rejects weight2.
+
+    dispatch_quant_out_dtype: the doc types this as torch.dtype (torch.int8 /
+    torch.float8_e4m3fn). We pass the ACL enum ints (258 / 24) because W8A8
+    was validated end‑to‑end this way in PD; switching W4A8 to torch.int8 did
+    NOT fix the W4A8 accuracy issue and slowed graph capture (see bug_a3.md),
+    so keep the working values until the W4A8 accuracy root cause is found on
+    the operator side.
+
+    Ascend 950 MegaMoe is MXFP‑only (dispatch_quant_mode == 4). The
+    dispatch_quant_out_dtype must bind to the activation dtype and the
+    weight_type to the weight dtype, per the A5 scenario table:
+      W8A8MXFP -> A8W8‑FP (act FP8, weight FP8)
+      W4A8MXFP -> A8W4‑FP (act FP8, weight FP4)
+      W4A4MXFP -> A4W4‑FP (act FP4, weight FP4)
+    """
+    if quant_type not in _QUANT_SETTING_MAP:
+        raise RuntimeError(
+            "MegaMoe integration supports W8A8/W4A8 INT on A2/A3 and W8A8MXFP/W4A8MXFP/W4A4MXFP on A5 "
+            "MegaMoe platforms for now. "
+            f"Unsupported quant type: {quant_type}."
+        )
+
+    mega_moe_quant_settings = _QUANT_SETTING_MAP[quant_type]
+    dispatch_quant_mode, dispatch_quant_out_dtype, weight_type = mega_moe_quant_settings
+    logger.debug(
+        "Get cann mega_moe quant_settings success: dispatch_quant_mode=%s dispatch_quant_out_dtype=%s weight_type=%s",
+        dispatch_quant_mode,
+        dispatch_quant_out_dtype,
+        weight_type,
+    )
+    return mega_moe_quant_settings
 
 
 def get_moe_num_logical_experts(
@@ -240,3 +353,54 @@ def enable_fusion_gmmswigluquant():
 
     ascend_config = get_ascend_config()
     return ascend_config.ascend_fusion_config.fusion_ops_gmmswigluquant
+
+
+# Token-dim padding via `torch.cat` with a persistent zero block, replacing
+# `nn.functional.pad` in the MoE prepare paths. On NPU each `F.pad` lowers to
+# two device kernels (a full-output MemSet plus a PadV3 copy) while the padded
+# data is only a few KB in decode, so the pair is pure launch overhead
+# (~44us per MoE layer in a Kimi K3 TP16 decode profile). The cat variant is
+# one ConcatD kernel per tensor and is safe under cudagraph replay: the cat
+# output is a fresh tensor per call (each captured graph owns its output
+# buffer), and the zero block is never written after allocation, so the
+# zero-tail property is structural — no cross-call bookkeeping.
+
+# (width..., dtype, device) -> zero block of [tp_size, width...]. Both MoE
+# prepare paths pad to a multiple of tp_size by fewer than tp_size rows (MC2
+# pads the local token count up to the DP-uniform padded_num_tokens; All2All
+# pads up to exactly tp_size), so one tp_size-row block per tensor width
+# serves every pad and is allocated exactly once — never replaced or freed,
+# which is what makes it safe for captured graphs to reference.
+#
+# Outside a worker context there is no current vllm config (e.g. unit tests
+# calling prepare() directly): tp_size then reads as 0 and every pad takes
+# the F.pad fallback below.
+#
+# A pad wider than tp_size can only happen outside that invariant (e.g. an
+# eager call with zero tokens); it falls back to plain `nn.functional.pad`
+# instead of growing the entry, keeping the cache static.
+#
+# Memory footprint: the key drops the token dim, so the cache holds one entry
+# per distinct (trailing shape, dtype, device) — a set fixed by the model
+# config, independent of batch size and cudagraph capture sizes (two entries
+# for Kimi K3 TP16: hidden 3584, experts 896), each tp_size * width *
+# dtype.itemsize bytes, so the whole cache peaks at O(0.1) MB.
+_PAD_ZERO_BLOCKS: dict[tuple, torch.Tensor] = {}
+
+
+def _pad_tokens_with_cat(x: torch.Tensor, padded_len: int) -> torch.Tensor:
+    """Token-dim padding of `x` ([n, ...] -> [padded_len, ...]) by concatenating
+    a slice of a cached zero block: value-equivalent to
+    `F.pad(x, (0, 0, 0, padded_len - n))` at one kernel instead of two."""
+    pad_rows = padded_len - x.shape[0]
+    assert pad_rows >= 0, f"padded_len ({padded_len}) is smaller than the input's token dim ({x.shape[0]})"
+    vllm_config = get_current_vllm_config_or_none()
+    tp_size = vllm_config.parallel_config.tensor_parallel_size if vllm_config is not None else 0
+    if pad_rows > tp_size:
+        return nn.functional.pad(x, (0, 0, 0, pad_rows))
+    key = (*x.shape[1:], x.dtype, str(x.device))
+    zero_block = _PAD_ZERO_BLOCKS.get(key)
+    if zero_block is None:
+        zero_block = torch.zeros((tp_size, *x.shape[1:]), dtype=x.dtype, device=x.device)
+        _PAD_ZERO_BLOCKS[key] = zero_block
+    return torch.cat([x, zero_block[:pad_rows]], dim=0)

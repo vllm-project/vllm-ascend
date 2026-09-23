@@ -46,7 +46,8 @@ Pipeline (all modes):
 
 Routing is driven by ``test_config.yaml`` ``runner_mapping:`` (regex patterns).
 Each entry in ``partition:`` selects an exact label from runner_label.json and
-defines the number of load-balanced groups.
+defines the number of load-balanced groups. Per-file estimated times come from
+``estimated_times.yaml``.
 See ``test_config.yaml`` for details.
 """
 
@@ -111,16 +112,16 @@ _ALL_TESTS_ROOTS = ("tests/ut", "tests/e2e/pull_request")
 # --all-tests runs keep collecting CPU UT coverage.
 _SKIP_CPU_UT = False
 
-# Generic ``linux-aarch64-a3-N-`` labels are mixed pools of 560T and 752T
+# Generic ``linux-aarch64-a3-N`` labels are mixed pools of 560T and 752T
 # machines (i.e. random machine class). When accuracy tests are selected (or
 # the full suite runs), reroute those partitions to the dedicated 560T labels.
 # Accuracy tests are exactly the files listed in ``accuracy_tests`` in
 # test_config.yaml; they must run on 560T machines (800i labels), so 752T
 # machines are not started for runs that include them.
 _A3_560T_LABEL_MAP = {
-    "linux-aarch64-a3-2-": "linux-aarch64-a3-800i-2",
-    "linux-aarch64-a3-4-": "linux-aarch64-a3-800i-4",
-    "linux-aarch64-a3-8-": "linux-aarch64-a3-800i-8",
+    "linux-aarch64-a3-2": "linux-aarch64-a3-800i-2",
+    "linux-aarch64-a3-4": "linux-aarch64-a3-800i-4",
+    "linux-aarch64-a3-8": "linux-aarch64-a3-800i-8",
 }
 
 # Populated by _load_runner_mapping(). Ordered list of
@@ -377,12 +378,17 @@ def _dedup_groups(groups: dict[PartitionKey, list[str]]) -> None:
         groups[key] = deduped
 
 
-def _load_estimated_times(meta: dict) -> dict[str, float]:
-    """Load per-file estimated times from the config meta dict.
+def _load_estimated_times(path: Path) -> dict[str, float]:
+    """Load per-file estimated times from ``estimated_times.yaml``.
 
     Tests not listed default to 600s when used by _partition_tests.
+    A missing file is treated as an empty mapping so unit tests that
+    pass a temporary ``--config`` without a sibling times file still work.
     """
-    return {k: float(v) for k, v in meta.get("estimated_times", {}).items()}
+    if not path.is_file():
+        return {}
+    meta = yaml.safe_load(path.read_text()) or {}
+    return {k: float(v) for k, v in (meta.get("estimated_times") or {}).items()}
 
 
 def _load_partition_config(meta: dict) -> dict[PartitionKey, PartitionInfo]:
@@ -739,6 +745,12 @@ def main():
         help="Path to test_config.yaml",
     )
     parser.add_argument(
+        "--estimated-times",
+        type=Path,
+        default=None,
+        help="Path to estimated_times.yaml (defaults to a sibling of --config)",
+    )
+    parser.add_argument(
         "--runner-label-override",
         type=str,
         default=None,
@@ -758,7 +770,8 @@ def main():
     meta = yaml.safe_load(args.config.read_text()) or {}
     runners = _load_runners()
     partition_config = _load_partition_config(meta)
-    estimated_times = _load_estimated_times(meta)
+    estimated_times_path = args.estimated_times or args.config.parent / "estimated_times.yaml"
+    estimated_times = _load_estimated_times(estimated_times_path)
     _load_runner_mapping(meta)
     accuracy_tests = _load_accuracy_tests(meta)
     curated_tests = _load_curated_tests(meta)

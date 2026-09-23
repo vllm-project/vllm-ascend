@@ -45,7 +45,6 @@ git init vllm
 git -C vllm fetch --depth 1 https://github.com/vllm-project/vllm.git "$VLLM_COMMIT"
 git -C vllm checkout --detach FETCH_HEAD
 cd vllm
-pip install -r requirements/build.txt
 VLLM_TARGET_DEVICE="empty" pip install .
 cd ..
 

@@ -21,6 +21,7 @@ import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_utils  # noqa
 import vllm_ascend.patch.platform.patch_mamba_block_aligned_split  # noqa
 import vllm_ascend.patch.platform.patch_mla_prefill_backend  # noqa
+import vllm_ascend.patch.platform.patch_parallel_config  # noqa
 import vllm_ascend.patch.platform.patch_pp_mtp  # noqa
 import vllm_ascend.patch.platform.patch_use_v2_model_runner  # noqa
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
@@ -39,7 +40,7 @@ if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv("EXP
     import vllm_ascend.patch.platform.patch_multiproc_executor  # noqa
 
 import vllm_ascend.patch.platform.patch_balance_schedule  # noqa
-import vllm_ascend.patch.platform.patch_dyntra_lb_core  # noqa
+import vllm_ascend.patch.platform.patch_engine_core  # noqa
 
 import vllm_ascend.patch.platform.patch_kv_cache_coordinator  # noqa
 import vllm_ascend.patch.platform.patch_speculative_config  # noqa
@@ -47,7 +48,10 @@ import vllm_ascend.patch.platform.patch_speculative_config  # noqa
 import vllm_ascend.patch.platform.patch_eplb  # noqa
 import vllm_ascend.patch.platform.patch_fused_moe  # noqa
 import vllm_ascend.patch.platform.patch_dp_device_ids  # noqa
+import vllm_ascend.patch.platform.patch_engram_config  # noqa
 import vllm_ascend.patch.platform.patch_glm5next_config  # noqa
+import vllm_ascend.patch.platform.patch_indexer_kv_dtype  # noqa
+import vllm_ascend.patch.platform.patch_kv_cache_dtype  # noqa
 
 # ** File: platform/patch_kv_cache_utils.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
