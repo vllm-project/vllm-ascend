@@ -71,6 +71,11 @@ from vllm_ascend.utils import (
     vllm_version_is,
 )
 from vllm_ascend.worker.kvpp_cache import allocate_kvpp_cache
+from vllm_ascend.worker.utils import (
+    get_single_raw_mla_backing,
+    make_page_strided_cache_view,
+    mla_spec_supports_single_raw_backing,
+)
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
@@ -619,6 +624,8 @@ def _uses_single_raw_mla_cache(
 
     if type(kv_cache_spec) is not AscendMLAAttentionSpec:
         return False
+    if not mla_spec_supports_single_raw_backing(kv_cache_spec):
+        return False
 
     attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase, [layer_name])
     attn_module = attn_layers.get(layer_name)
@@ -626,10 +633,6 @@ def _uses_single_raw_mla_cache(
         isinstance(attn_module, MLAAttention)
         and vllm_config.kv_transfer_config is None
         and not enable_sfa(vllm_config)
-        and not bool(getattr(kv_cache_spec, "cache_sparse_sfa_c8", False))
-        and get_kv_cache_compression_ratio(kv_cache_spec) == 1
-        and getattr(kv_cache_spec, "model_version", None) is None
-        and not getattr(kv_cache_spec, "indexes_kv_by_block_stride", False)
         and getattr(attn_module, "indexer", None) is None
         and not getattr(attn_module.impl, "fa_quant_layer", False)
     )
@@ -1163,22 +1166,21 @@ def _reshape_kv_cache_v2(
                 kv_caches[layer_name] = mamba_cache
                 continue
 
-            single_raw_mla_cache = None
-            if isinstance(raw_cache, torch.Tensor):
-                single_raw_mla_cache = raw_cache
-            elif isinstance(raw_cache, tuple) and len(raw_cache) == 1 and isinstance(raw_cache[0], torch.Tensor):
-                single_raw_mla_cache = raw_cache[0]
+            single_raw_mla_cache = get_single_raw_mla_backing(raw_cache)
 
-            if single_raw_mla_cache is not None and _uses_single_raw_mla_cache(vllm_config, layer_name, kv_cache_spec):
-                attn_module = get_layers_from_vllm_config(vllm_config, AttentionLayerBase, [layer_name])[layer_name]
-                typed_raw = single_raw_mla_cache.view(kv_cache_spec.dtype)
-                element_size = torch.empty((), dtype=kv_cache_spec.dtype).element_size()
+            if (
+                single_raw_mla_cache is not None
+                and _uses_single_raw_mla_cache(vllm_config, layer_name, kv_cache_spec)
+            ):
+                attn_module = get_layers_from_vllm_config(
+                    vllm_config, AttentionLayerBase, [layer_name]
+                )[layer_name]
                 kernel_blocks_per_manager = kv_cache_spec.block_size // kernel_block_size
-                slot_elements = kv_cache_spec.page_size_bytes // kernel_blocks_per_manager // element_size
+                slot_bytes = kv_cache_spec.page_size_bytes // kernel_blocks_per_manager
                 component_shape = (
                     kv_cache_config.num_blocks * kernel_blocks_per_manager,
-                    kv_cache_spec.num_kv_heads,
                     kernel_block_size,
+                    kv_cache_spec.num_kv_heads,
                 )
                 nope_dim, rope_dim = _get_attention_kv_cache_dims(layer_name, kv_cache_spec)
                 fused_dim = nope_dim + rope_dim
@@ -1187,46 +1189,35 @@ def _reshape_kv_cache_v2(
                     get_current_hardware_profile().supports(HardwareCapability.MLA_FLASH)
                     and attn_module.num_heads in MLA_FLASH_SUPPORTED_Q_HEADS
                 ):
-                    # Preserve the V1 A5 protocol: expose one token-fused
-                    # BNBD tensor with [nope | rope] in every token.
-                    fused_cache = torch.as_strided(
-                        typed_raw,
-                        size=(*component_shape, fused_dim),
-                        stride=(
-                            slot_elements,
-                            kernel_block_size * fused_dim,
-                            fused_dim,
-                            1,
-                        ),
-                        storage_offset=typed_raw.storage_offset(),
+                    # Preserve the V1 A5 protocol: one token-fused tensor with
+                    # [nope | rope] in the trailing 576 lanes of every token.
+                    fused_cache = make_page_strided_cache_view(
+                        single_raw_mla_cache,
+                        (*component_shape, fused_dim),
+                        kv_cache_spec.dtype,
+                        slot_bytes,
                     )
                     kv_caches[layer_name] = fused_cache
                     continue
 
-                # A3/FIA keeps each BNBD component internally contiguous and
-                # puts the hybrid-page padding only in the leading block stride.
-                nope_cache = torch.as_strided(
-                    typed_raw,
-                    size=(*component_shape, nope_dim),
-                    stride=(
-                        slot_elements,
-                        kernel_block_size * nope_dim,
-                        nope_dim,
-                        1,
-                    ),
-                    storage_offset=typed_raw.storage_offset(),
+                # A3/FIA keeps each component internally contiguous and puts
+                # the hybrid-page padding only in the leading block stride.
+                nope_cache = make_page_strided_cache_view(
+                    single_raw_mla_cache,
+                    (*component_shape, nope_dim),
+                    kv_cache_spec.dtype,
+                    slot_bytes,
                 )
-                rope_cache = torch.as_strided(
-                    typed_raw,
-                    size=(*component_shape, rope_dim),
-                    stride=(
-                        slot_elements,
-                        kernel_block_size * rope_dim,
-                        rope_dim,
-                        1,
-                    ),
-                    storage_offset=(
-                        typed_raw.storage_offset() + kernel_block_size * kv_cache_spec.num_kv_heads * nope_dim
+                rope_cache = make_page_strided_cache_view(
+                    single_raw_mla_cache,
+                    (*component_shape, rope_dim),
+                    kv_cache_spec.dtype,
+                    slot_bytes,
+                    offset_bytes=(
+                        kernel_block_size
+                        * kv_cache_spec.num_kv_heads
+                        * nope_dim
+                        * get_dtype_size(kv_cache_spec.dtype)
                     ),
                 )
                 kv_caches[layer_name] = (nope_cache, rope_cache)
@@ -1275,13 +1266,13 @@ def _reshape_kv_cache_v2(
                 kv_caches[layer_name] = (cache,)
                 continue
             if isinstance(kv_cache_spec, (AscendMLAAttentionSpec, MLAAttentionSpec)):
-                num_blocks_, num_kv_heads, block_size_, _ = kv_cache_shape
+                num_blocks_, block_size_, num_kv_heads, _ = kv_cache_shape
                 k_dim, v_dim = _get_attention_kv_cache_dims(layer_name, kv_cache_spec)
-                k_shape = (num_blocks_, num_kv_heads, block_size_, k_dim)
+                k_shape = (num_blocks_, block_size_, num_kv_heads, k_dim)
                 if sparse_sfa_c8:
-                    k_shape = (num_blocks_, num_kv_heads, block_size_, kv_cache_spec.head_size)
+                    k_shape = (num_blocks_, block_size_, num_kv_heads, kv_cache_spec.head_size)
                     v_dim = 0
-                v_shape = (num_blocks_, num_kv_heads, block_size_, v_dim)
+                v_shape = (num_blocks_, block_size_, num_kv_heads, v_dim)
             else:
                 k_shape = kv_cache_shape[1:]
                 v_shape = (

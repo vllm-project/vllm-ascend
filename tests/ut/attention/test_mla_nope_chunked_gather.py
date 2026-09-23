@@ -71,7 +71,7 @@ def _run(impl, rope_dim, cache_k_pe):
     return impl._compute_prefill_context(
         torch.zeros(NUM_TOKENS, NUM_HEADS, QK_NOPE_HEAD_DIM),
         torch.zeros(NUM_TOKENS, NUM_HEADS, rope_dim),
-        (torch.zeros(2, 1, 3, LATENT_KV_DIM), cache_k_pe),
+        (torch.zeros(2, 3, 1, LATENT_KV_DIM), cache_k_pe),
         rope_dim,
         _build_metadata(),
         torch.zeros(NUM_TOKENS, NUM_HEADS, V_HEAD_DIM),
@@ -83,7 +83,7 @@ def test_chunked_gather_avoids_zero_width_operands_without_rope(monkeypatch):
     captured: dict = {}
     _install_fakes(monkeypatch, captured)
 
-    _run(_build_impl(rope_dim=0), 0, torch.zeros(2, 1, 3, 0))
+    _run(_build_impl(rope_dim=0), 0, torch.zeros(2, 3, 1, 0))
 
     # npu_gather_pa_kv_cache returns without filling the latent output when the
     # rope cache and its destination are both zero-width, which fed
@@ -96,7 +96,7 @@ def test_chunked_gather_avoids_zero_width_operands_without_rope(monkeypatch):
 def test_chunked_gather_keeps_the_rope_cache_when_rope_is_present(monkeypatch):
     captured: dict = {}
     _install_fakes(monkeypatch, captured)
-    cache_k_pe = torch.zeros(2, 1, 3, 64)
+    cache_k_pe = torch.zeros(2, 3, 1, 64)
 
     _run(_build_impl(rope_dim=64), 64, cache_k_pe)
 

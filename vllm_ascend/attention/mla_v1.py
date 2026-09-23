@@ -102,7 +102,7 @@ class AscendMLABackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
-        return num_blocks, num_kv_heads, block_size, head_size
+        return num_blocks, block_size, num_kv_heads, head_size
 
     @staticmethod
     def get_impl_cls() -> type["MLAAttentionImpl"]:
@@ -1223,7 +1223,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         iters = len(prefill_metadata.chunked_context.seq_tot)
         cache_kv_c = kv_c_and_k_pe_cache[0]
         cache_k_pe = kv_c_and_k_pe_cache[1]
-        num_heads = cache_k_pe.size(1)  # BNBD: [block, kv_head, token, dim].
+        num_heads = cache_k_pe.size(2)
         latent_kv_dim = kv_c_and_k_pe_cache[0].size(-1)
 
         actual_seq_lengths_q = prefill_metadata.actual_seq_lengths_q
@@ -1430,7 +1430,6 @@ class AscendMLAImpl(MLAAttentionImpl):
             key_cache=kv_cache[0],
             value_cache=kv_cache[1],
             slot_mapping=slots,
-            use_bnsd=True,
         )
         return k_pe, kv_c_normed
 
@@ -1451,8 +1450,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         if cache.is_contiguous():
             cache.view(-1, cache.shape[-1]).index_copy_(0, idx, token)
         else:
-            block_size = cache.shape[2]
-            cache[idx // block_size, :, idx % block_size] = token.view(-1, 1, cache.shape[-1])
+            block_size = cache.shape[1]
+            cache[idx // block_size, idx % block_size] = token.view(-1, *cache.shape[2:])
         if is_prefill:
             return k_pe, k_nope
         return kv_cache[1], kv_cache[0]
@@ -1888,7 +1887,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 sin = None
                 prolog_op = _npu_mla_prolog_v3_k3
             cache_index = cache_index.view(bsz, -1) if quantized_x.dim() == 3 else cache_index.view(-1)
-            cache_mode = "PA_BNBD"
+            cache_mode = "PA_BSND"
             weight_quant_mode = self.mlapo_weight_quant_mode
             quant_scale_ckv = self.fak_descale_reciprocal if self.fa_quant_layer else None
         else:
@@ -1901,7 +1900,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             cos = attn_metadata.decode.cos.view(cos_shape[0], cos_shape[-1])
             sin = attn_metadata.decode.sin.view(cos_shape[0], cos_shape[-1])
             prolog_op = torch_npu.npu_mla_prolog_v3
-            cache_mode = "PA_NZ" if (self.fa_quant_layer or self.enable_kv_nz) else "PA_BNBD"
+            cache_mode = "PA_NZ" if (self.fa_quant_layer or self.enable_kv_nz) else "PA_BSND"
             weight_quant_mode = 2
             # v3 full-quant uses a per-tensor kv scale; quant_kscale is one scalar
             # broadcast to (1, Hckv), so slice out the single per-tensor value.
@@ -2120,7 +2119,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         # Fused MLA cache由runner保存为单一tensor。旧MLA实现仍按
         # nope/rope两个logical tensor访问算子，因此在这里做零拷贝切片。
         fused_mla_cache = isinstance(kv_cache, torch.Tensor)
-        # ModelRunner and all MLA operators use the same BNBD cache contract.
         if isinstance(kv_cache, torch.Tensor):
             kv_cache = (
                 kv_cache[..., : self.kv_lora_rank],
@@ -2161,7 +2159,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             )
         if decode_preprocess_res is not None:
             # MLA Preprocess for decoding
-            output_decode = self._forward_decode(decode_preprocess_res, kv_cache[0].shape[2], attn_metadata)
+            output_decode = self._forward_decode(decode_preprocess_res, kv_cache[0].shape[1], attn_metadata)
 
             o_proj_input[:num_decode_tokens] = output_decode
 

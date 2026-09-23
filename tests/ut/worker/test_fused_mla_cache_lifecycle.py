@@ -35,8 +35,8 @@ def _make_k3_fused_cache(*, num_blocks: int = 2):
     typed_raw = raw.view(torch.bfloat16)
     fused = torch.as_strided(
         typed_raw,
-        size=(num_blocks * RATIO, NUM_KV_HEADS, KERNEL_BLOCK_SIZE, FUSED_DIM),
-        stride=(SLOT_ELEMENTS, KERNEL_BLOCK_SIZE * FUSED_DIM, FUSED_DIM, 1),
+        size=(num_blocks * RATIO, KERNEL_BLOCK_SIZE, NUM_KV_HEADS, FUSED_DIM),
+        stride=(SLOT_ELEMENTS, FUSED_DIM, FUSED_DIM, 1),
         storage_offset=0,
     )
     return spec, fused
@@ -54,14 +54,14 @@ def _make_k3_component_cache(*, num_blocks: int = 2):
     typed_raw = raw.view(torch.bfloat16)
     nope = torch.as_strided(
         typed_raw,
-        size=(num_blocks * RATIO, NUM_KV_HEADS, KERNEL_BLOCK_SIZE, 512),
-        stride=(SLOT_ELEMENTS, KERNEL_BLOCK_SIZE * 512, 512, 1),
+        size=(num_blocks * RATIO, KERNEL_BLOCK_SIZE, NUM_KV_HEADS, 512),
+        stride=(SLOT_ELEMENTS, 512, 512, 1),
         storage_offset=0,
     )
     rope = torch.as_strided(
         typed_raw,
-        size=(num_blocks * RATIO, NUM_KV_HEADS, KERNEL_BLOCK_SIZE, 64),
-        stride=(SLOT_ELEMENTS, KERNEL_BLOCK_SIZE * 64, 64, 1),
+        size=(num_blocks * RATIO, KERNEL_BLOCK_SIZE, NUM_KV_HEADS, 64),
+        stride=(SLOT_ELEMENTS, 64, 64, 1),
         storage_offset=KERNEL_BLOCK_SIZE * NUM_KV_HEADS * 512,
     )
     return spec, (nope, rope)
@@ -115,8 +115,8 @@ def test_zeroer_dedupes_component_mla_views_sharing_physical_page():
 def test_component_mla_cow_copies_both_logical_components(monkeypatch):
     num_blocks = 2
     _, (nope, rope) = _make_k3_component_cache(num_blocks=num_blocks)
-    nope_payload = torch.rand((3, NUM_KV_HEADS, KERNEL_BLOCK_SIZE, 512), dtype=torch.bfloat16)
-    rope_payload = torch.rand((3, NUM_KV_HEADS, KERNEL_BLOCK_SIZE, 64), dtype=torch.bfloat16)
+    nope_payload = torch.rand((3, KERNEL_BLOCK_SIZE, NUM_KV_HEADS, 512), dtype=torch.bfloat16)
+    rope_payload = torch.rand((3, KERNEL_BLOCK_SIZE, NUM_KV_HEADS, 64), dtype=torch.bfloat16)
     nope[3:6].copy_(nope_payload)
     rope[3:6].copy_(rope_payload)
 
@@ -135,7 +135,7 @@ def test_fused_mla_cow_copies_complete_manager_block(monkeypatch):
     num_blocks = 3
     _, fused = _make_k3_fused_cache(num_blocks=num_blocks)
     payload = torch.arange(SLOT_LOGICAL_BYTES // DTYPE_SIZE, dtype=torch.int32).to(torch.bfloat16)
-    source_payload = payload.view(1, NUM_KV_HEADS, KERNEL_BLOCK_SIZE, FUSED_DIM).expand(RATIO, -1, -1, -1)
+    source_payload = payload.view(1, KERNEL_BLOCK_SIZE, NUM_KV_HEADS, FUSED_DIM).expand(RATIO, -1, -1, -1)
     fused[3:6].copy_(source_payload)
 
     _install_cpu_h2d(monkeypatch)
@@ -145,7 +145,7 @@ def test_fused_mla_cow_copies_complete_manager_block(monkeypatch):
         [KVCacheBlockCopy(src_block_id=1, dst_block_id=0)],
     )
 
-    expected = payload.view(NUM_KV_HEADS, KERNEL_BLOCK_SIZE, FUSED_DIM)
+    expected = payload.view(KERNEL_BLOCK_SIZE, NUM_KV_HEADS, FUSED_DIM)
     torch.testing.assert_close(fused[0], expected)
     torch.testing.assert_close(fused[1], expected)
     torch.testing.assert_close(fused[2], expected)

@@ -226,6 +226,10 @@ from vllm_ascend.worker.utils import (
     AscendKVBlockZeroer,
     copy_kv_cache_blocks_inplace,
     disable_compilation,
+    get_single_raw_mla_backing,
+    make_page_strided_cache_view,
+    mla_spec_supports_single_raw_backing,
+    row_major_strides,
 )
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 
@@ -4636,6 +4640,32 @@ class NPUModelRunner(GPUModelRunner):
             or getattr(kv_cache_spec, "indexes_kv_by_block_stride", False)
         )
 
+    def _uses_single_raw_mla_cache(
+        self,
+        layer_name: str,
+        kv_cache_spec: KVCacheSpec,
+        attn_module: AttentionLayerBase | None = None,
+        *,
+        use_legacy_shared_by_layout: bool = False,
+    ) -> bool:
+        """Whether this runner can expose an MLA layer from one raw backing."""
+        if type(kv_cache_spec) is not AscendMLAAttentionSpec:
+            return False
+        if not mla_spec_supports_single_raw_backing(kv_cache_spec):
+            return False
+        if attn_module is None:
+            attn_module = self.compilation_config.static_forward_context.get(layer_name)
+        return (
+            isinstance(attn_module, MLAAttention)
+            and not use_legacy_shared_by_layout
+            and self.vllm_config.kv_transfer_config is None
+            and not self.use_sparse
+            and not self.sparse_kv_offload_enabled
+            and not self.use_compress
+            and getattr(attn_module, "indexer", None) is None
+            and not getattr(attn_module.impl, "fa_quant_layer", False)
+        )
+
     def _get_attention_kv_cache_dims(self, layer_name: str, kv_cache_spec: AttentionSpec) -> tuple[int, int]:
         if isinstance(kv_cache_spec, AscendMLAAttentionSpec):
             attn_layers = get_layers_from_vllm_config(
@@ -5014,23 +5044,11 @@ class NPUModelRunner(GPUModelRunner):
                     current_sparse_sfa_c8 = self.use_sparse and kv_cache_spec_uses_sparse_sfa_c8(
                         current_kv_cache_spec
                     )
-                    is_single_raw_mla = False
-                    if type(current_kv_cache_spec) is AscendMLAAttentionSpec:
-                        attn_module = self.compilation_config.static_forward_context.get(layer_name)
-                        is_single_raw_mla = (
-                            isinstance(attn_module, MLAAttention)
-                            and not use_legacy_shared_by_layout
-                            and self.vllm_config.kv_transfer_config is None
-                            and not self.use_sparse
-                            and not self.sparse_kv_offload_enabled
-                            and not self.use_compress
-                            and not current_sparse_sfa_c8
-                            and get_kv_cache_compression_ratio(current_kv_cache_spec) == 1
-                            and getattr(current_kv_cache_spec, "model_version", None) is None
-                            and not self._uses_page_strided_kv_layout(current_kv_cache_spec)
-                            and getattr(attn_module, "indexer", None) is None
-                            and not getattr(attn_module.impl, "fa_quant_layer", False)
-                        )
+                    is_single_raw_mla = self._uses_single_raw_mla_cache(
+                        layer_name,
+                        current_kv_cache_spec,
+                        use_legacy_shared_by_layout=use_legacy_shared_by_layout,
+                    )
                     # 纯MLA在这里为当前layer分配single raw backing；hybrid MLA
                     # 使用上方standardized shared backing生成的bare raw tensor。
                     # is_single_raw_mla只基于当前layer判断，不能推广到shared_layers。
@@ -5127,24 +5145,20 @@ class NPUModelRunner(GPUModelRunner):
     ):
         reshaped_kv_tensors = []
         assert raw_tensor.element_size() == 1
-        base_storage_offset_bytes = raw_tensor.storage_offset() + initial_offset_bytes
-        storage_offset_bytes = base_storage_offset_bytes
+        base_offset_bytes = initial_offset_bytes
+        storage_offset_bytes = base_offset_bytes
         for idx, (shape, dtype) in enumerate(zip(kv_cache_shape_list, kv_cache_dtype_list)):
             if overlap_full_kv_cache and idx == 2:
-                storage_offset_bytes = base_storage_offset_bytes
+                storage_offset_bytes = base_offset_bytes
             dtype_size = get_dtype_size(dtype)
-            num_element_per_page = (
-                page_size_bytes // dtype_size
-            )
+            stride = row_major_strides(shape)
 
-            stride = torch.empty(shape).stride()
-            target_stride = (num_element_per_page, *stride[1:])
-            assert storage_offset_bytes % dtype_size == 0
-            tensor = torch.as_strided(
-                raw_tensor.view(dtype),
-                size=shape,
-                stride=target_stride,
-                storage_offset=storage_offset_bytes // dtype_size,
+            tensor = make_page_strided_cache_view(
+                raw_tensor,
+                shape,
+                dtype,
+                page_size_bytes,
+                storage_offset_bytes,
             )
             reshaped_kv_tensors.append(tensor)
             storage_offset_bytes += stride[0] * dtype_size
@@ -5364,13 +5378,7 @@ class NPUModelRunner(GPUModelRunner):
                     # MLA使用allocate/hybrid阶段的一整块raw backing。
                     # A5FlashMLA消费token交错的单tensor；A3 FIA消费component-major 双view。MHA/GQA继续走raw K/V协议。
                     raw_cache = kv_cache_raw_tensors[layer_name]
-                    fused_raw_tensor = None
-                    if isinstance(raw_cache, tuple) and len(raw_cache) == 1:
-                        maybe_raw_tensor = raw_cache[0]
-                        if isinstance(maybe_raw_tensor, torch.Tensor):
-                            fused_raw_tensor = maybe_raw_tensor
-                    elif isinstance(raw_cache, torch.Tensor):
-                        fused_raw_tensor = raw_cache
+                    fused_raw_tensor = get_single_raw_mla_backing(raw_cache)
 
                     # Only a single-backing Ascend MLA cache needs module-level
                     # metadata. Legacy MHA/GQA K/V tuples keep the raw K/V path.
@@ -5383,20 +5391,13 @@ class NPUModelRunner(GPUModelRunner):
 
                     if (
                         fused_raw_tensor is not None
-                        and isinstance(attn_module, MLAAttention)
-                        and self.vllm_config.kv_transfer_config is None
-                        and not self.use_sparse
-                        and not self.sparse_kv_offload_enabled
-                        and not self.use_compress
-                        and not current_sparse_sfa_c8
-                        and get_kv_cache_compression_ratio(current_kv_cache_spec) == 1
-                        and getattr(current_kv_cache_spec, "model_version", None) is None
-                        and not self._uses_page_strided_kv_layout(current_kv_cache_spec)
-                        and getattr(attn_module, "indexer", None) is None
-                        and not getattr(attn_module.impl, "fa_quant_layer", False)
+                        and self._uses_single_raw_mla_cache(
+                            layer_name,
+                            current_kv_cache_spec,
+                            attn_module,
+                        )
                     ):
                         dtype = current_kv_cache_spec.dtype
-                        element_size = torch.empty((), dtype=dtype).element_size()
                         manager_block_size = current_kv_cache_spec.block_size
                         kernel_block_size = self.kernel_block_sizes[group.kv_cache_group_id][0]
                         kernel_blocks_per_manager = manager_block_size // kernel_block_size
@@ -5406,60 +5407,45 @@ class NPUModelRunner(GPUModelRunner):
                             layer_name, current_kv_cache_spec
                         )
                         fused_dim = nope_dim + rope_dim
-                        typed_raw = fused_raw_tensor.view(dtype)
-                        slot_elements = slot_bytes // element_size
                         component_shape = (
                             kv_cache_config.num_blocks * kernel_blocks_per_manager,
-                            current_kv_cache_spec.num_kv_heads,
                             kernel_block_size,
+                            current_kv_cache_spec.num_kv_heads,
                         )
                         if (
                             get_current_hardware_profile().supports(HardwareCapability.MLA_FLASH)
                             and attn_module.num_heads in MLA_FLASH_SUPPORTED_Q_HEADS
                         ):
-                            # A5以BNBD对外暴露token-fused MLA cache。每个
-                            # kernel slot内按token交错存储[nope|rope]。
-                            fused_cache = torch.as_strided(
-                                typed_raw,
-                                size=(*component_shape, fused_dim),
-                                stride=(
-                                    slot_elements,
-                                    kernel_block_size * fused_dim,
-                                    fused_dim,
-                                    1,
-                                ),
-                                storage_offset=typed_raw.storage_offset(),
+                            # A5每个kernel slot内按token交错存储[nope|rope]：
+                            # token0[nope|rope], token1[nope|rope], ...。
+                            fused_cache = make_page_strided_cache_view(
+                                fused_raw_tensor,
+                                (*component_shape, fused_dim),
+                                dtype,
+                                slot_bytes,
                             )
                             kv_caches[layer_name] = fused_cache
                             continue
 
-                        # A3/FIA同样以BNBD对外暴露component-major view；
-                        # nope/rope各自内部连续，只允许首轴携带page padding。
-                        nope_cache = torch.as_strided(
-                            typed_raw,
-                            size=(*component_shape, nope_dim),
-                            stride=(
-                                slot_elements,
-                                kernel_block_size * nope_dim,
-                                nope_dim,
-                                1,
-                            ),
-                            storage_offset=typed_raw.storage_offset(),
+                        # A3/FIA要求nope和rope各自内部连续，只允许首轴携带
+                        # page padding stride。每个kernel slot物理上按
+                        # [all nope][all rope][padding]写入。
+                        nope_cache = make_page_strided_cache_view(
+                            fused_raw_tensor,
+                            (*component_shape, nope_dim),
+                            dtype,
+                            slot_bytes,
                         )
-                        rope_cache = torch.as_strided(
-                            typed_raw,
-                            size=(*component_shape, rope_dim),
-                            stride=(
-                                slot_elements,
-                                kernel_block_size * rope_dim,
-                                rope_dim,
-                                1,
-                            ),
-                            storage_offset=(
-                                typed_raw.storage_offset()
-                                + kernel_block_size
+                        rope_cache = make_page_strided_cache_view(
+                            fused_raw_tensor,
+                            (*component_shape, rope_dim),
+                            dtype,
+                            slot_bytes,
+                            offset_bytes=(
+                                kernel_block_size
                                 * current_kv_cache_spec.num_kv_heads
                                 * nope_dim
+                                * get_dtype_size(dtype)
                             ),
                         )
                         kv_caches[layer_name] = (nope_cache, rope_cache)
@@ -5626,26 +5612,26 @@ class NPUModelRunner(GPUModelRunner):
                             v_shape = k_shape
                     else:
                         # k_cache: nope_cache    v_cache: rope_cache
-                        mla_num_blocks, num_kv_heads, mla_block_size, _ = kv_cache_shape
+                        mla_num_blocks, mla_block_size, num_kv_heads, _ = kv_cache_shape
                         k_dim, v_dim = self._get_attention_kv_cache_dims(layer_name, current_kv_cache_spec)
                         k_shape = (
                             mla_num_blocks,
-                            num_kv_heads,
                             mla_block_size,
+                            num_kv_heads,
                             k_dim,
                         )
                         if current_sparse_sfa_c8:
                             k_shape = (
                                 mla_num_blocks,
-                                num_kv_heads,
                                 mla_block_size,
+                                num_kv_heads,
                                 current_kv_cache_spec.head_size,
                             )
                             v_dim = 0
                         v_shape = (
                             mla_num_blocks,
-                            num_kv_heads,
                             mla_block_size,
+                            num_kv_heads,
                             v_dim,
                         )
                     k_cache_dtype = v_cache_dtype = current_kv_cache_spec.dtype
