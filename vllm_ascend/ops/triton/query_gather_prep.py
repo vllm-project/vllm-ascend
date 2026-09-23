@@ -66,7 +66,7 @@ def _q_gather_prep_head_major_kernel(
     offset selects are required. The wrapper only launches this kernel for
     shapes it can prove legal (all addresses, including masked tail lanes,
     inside the tensor storages); any other shape falls back to the torch
-    assembly in the caller (``prep_query_head_major`` raises).
+    assembly in the caller (``prep_query_head_major`` returns None).
     """
     pid = tl.program_id(0)
     num_programs = tl.num_programs(0)
@@ -112,6 +112,8 @@ def _qualifies_fast_path(
       - loads: the last row base + BLOCK - 1 never passes the storage end,
         for both fragments.
     """
+    if ql_nope.stride(-1) != 1 or q_pe.stride(-1) != 1:
+        return False
     if ql_nope.stride(0) < 0 or ql_nope.stride(1) < 0 or q_pe.stride(0) < 0 or q_pe.stride(1) < 0:
         return False
     if block_n > total_dim or ql_nope.shape[-1] + block_r > total_dim:
@@ -119,7 +121,10 @@ def _qualifies_fast_path(
     num_tokens, num_heads = ql_nope.shape[:2]
     for tensor, block in ((ql_nope, block_n), (q_pe, block_r)):
         last_base = (num_tokens - 1) * tensor.stride(0) + (num_heads - 1) * tensor.stride(1)
-        if last_base + block > tensor.numel():
+        # Projection splits are views with gaps between rows; numel() is
+        # smaller than their storage span. Account for the view's offset.
+        storage_elements = tensor.untyped_storage().nbytes() // tensor.element_size()
+        if tensor.storage_offset() + last_base + block > storage_elements:
             return False
     return True
 
@@ -147,12 +152,14 @@ def prep_query_head_major(
         RuntimeError: on genuinely invalid inputs (mismatched (T, H) or
         dtype); those cannot be assembled by the torch fallback either.
     """
-    if ql_nope.shape[:2] != q_pe.shape[:2]:
+    if ql_nope.ndim != 3 or q_pe.ndim != 3 or ql_nope.shape[:2] != q_pe.shape[:2]:
         raise RuntimeError(
             f"prep_query_head_major requires matching (T, H), got {tuple(ql_nope.shape)} and {tuple(q_pe.shape)}"
         )
     if ql_nope.dtype != q_pe.dtype:
         raise RuntimeError("prep_query_head_major requires ql_nope and q_pe to share a dtype")
+    if ql_nope.device != q_pe.device:
+        raise RuntimeError("prep_query_head_major requires ql_nope and q_pe to share a device")
 
     num_tokens, num_heads, nope_dim = ql_nope.shape
     if num_tokens == 0 or num_heads == 0:

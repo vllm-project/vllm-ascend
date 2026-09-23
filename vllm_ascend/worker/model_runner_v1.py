@@ -217,6 +217,7 @@ from vllm_ascend.worker.device_metadata import (
     DeviceMetadataTask,
     DeviceMetadataTaskProvider,
 )
+from vllm_ascend.worker.flash_kv_cache import customize_flash_mla_c8_spec, view_flash_mla_cache
 from vllm_ascend.worker.kvpp_cache import allocate_kvpp_cache
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.utils import (
@@ -3663,6 +3664,7 @@ class NPUModelRunner(GPUModelRunner):
             # TODO
             # num_computed_tokens_cpu=self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs_padded],
             num_computed_tokens_cpu=num_computed_tokens_cpu,
+            num_computed_prefill_tokens_cpu=num_computed_tokens_cpu,
             num_reqs=num_reqs_padded,
             num_actual_tokens=num_tokens,
             max_query_len=max_query_len,
@@ -5008,6 +5010,12 @@ class NPUModelRunner(GPUModelRunner):
                     use_compressed_cache = True
             for idx in range(len(shared_layers)):
                 layer_name = shared_layers[idx]
+                layer = self.compilation_config.static_forward_context.get(layer_name)
+                if isinstance(layer, MLAAttention) and getattr(layer.impl, "use_flash_mla", False):
+                    if layer_name not in kv_cache_raw_tensors:
+                        size = kv_cache_config.num_blocks * layer_kv_cache_spec[layer_name].page_size_bytes
+                        kv_cache_raw_tensors[layer_name] = self._allocate_int8_cache_tensor(size, alignment)
+                    continue
                 # Single tensor path for: mamba, hybrid attn-mamba, or cache_only_layers
                 if (
                     "linear_attn" in layer_name
@@ -5241,6 +5249,13 @@ class NPUModelRunner(GPUModelRunner):
                     continue
 
                 current_kv_cache_spec = layer_kv_cache_spec[layer_name]
+                layer = self.compilation_config.static_forward_context.get(layer_name)
+                if isinstance(layer, MLAAttention) and getattr(layer.impl, "use_flash_mla", False):
+                    kv_caches[layer_name] = view_flash_mla_cache(
+                        kv_cache_raw_tensors[layer_name], current_kv_cache_spec,
+                        self.kernel_block_sizes[group.kv_cache_group_id][0],
+                    )
+                    continue
 
                 if layer_name in layer_tuple_strides:
                     block_stride = layer_tuple_strides[layer_name]
@@ -5727,6 +5742,10 @@ class NPUModelRunner(GPUModelRunner):
                     kv_manager_block_size, backends
                 )
                 self.kernel_block_sizes.append([selected_kernel_size])
+                for attn_group in attn_groups:
+                    for builder in attn_group.metadata_builders:
+                        if getattr(builder, "use_flash_mla", False):
+                            builder.set_kernel_block_size(selected_kernel_size)
             else:
                 # This is likely Mamba or other non-attention cache,
                 # no splitting.
@@ -5785,6 +5804,7 @@ class NPUModelRunner(GPUModelRunner):
             attn_backend: type[AttentionBackend]
             kv_cache_spec: KVCacheSpec
             use_mla_rope: bool | None
+            flash_shape: tuple[int, float] | None
 
         def get_attn_backends_for_group(
             kv_cache_group_spec: KVCacheGroupSpec,
@@ -5837,11 +5857,17 @@ class NPUModelRunner(GPUModelRunner):
                     if issubclass(attn_backend, AscendMLABackend)
                     else None
                 )
-                key = (full_cls_name, layer_kv_cache_spec, use_mla_rope)
+                flash_shape = (
+                    (layer.num_heads, layer.impl.scale)
+                    if getattr(getattr(layer, "impl", None), "use_flash_mla", False)
+                    else None
+                )
+                key = (full_cls_name, layer_kv_cache_spec, use_mla_rope, flash_shape)
                 attn_backends[key] = AttentionGroupKey(
                     attn_backend,
                     layer_kv_cache_spec,
                     use_mla_rope,
+                    flash_shape,
                 )
                 attn_backend_layers[key].append(layer_name)
             return (
@@ -5946,7 +5972,13 @@ class NPUModelRunner(GPUModelRunner):
                     kv_cache_spec[layer_name] = spec
                     attn_layer_names.add(layer_name)
             elif isinstance(attn_module, MLAAttention):
-                if self.use_sparse:
+                if getattr(attn_module.impl, "use_flash_mla", False):
+                    if spec := attn_module.get_kv_cache_spec(self.vllm_config):
+                        if attn_module.impl.fa_quant_layer:
+                            spec = customize_flash_mla_c8_spec(spec, attn_module)
+                        kv_cache_spec[layer_name] = spec
+                        attn_layer_names.add(layer_name)
+                elif self.use_sparse:
                     impl = attn_module.impl
                     cache_sparse_sfa_c8 = bool(
                         getattr(impl, "enable_sparse_sfa_c8", False)
@@ -6213,6 +6245,10 @@ class NPUModelRunner(GPUModelRunner):
             cache_dtype=self.cache_config.cache_dtype,
             runner_only_attn_layers=self.runner_only_attn_layers,
             static_forward_context=(self.compilation_config.static_forward_context),
+            page_strided=any(
+                getattr(getattr(layer, "impl", None), "use_flash_mla", False)
+                for layer in self.compilation_config.static_forward_context.values()
+            ),
         )
 
 

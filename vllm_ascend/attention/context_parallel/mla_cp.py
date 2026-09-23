@@ -10,6 +10,7 @@ from vllm.forward_context import get_forward_context
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 
+from vllm_ascend import envs
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 
@@ -37,7 +38,7 @@ from vllm_ascend.compilation.acl_graph import (
     update_graph_params_workspaces,
 )
 from vllm_ascend.ops.triton.sfa_cp import fused_sfa_dcp_lse_combine
-from vllm_ascend.utils import weak_ref_tensors
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, weak_ref_tensors
 
 
 class MLASplitAttentionKind(Enum):
@@ -237,6 +238,58 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
 
     can_return_lse_for_decode: bool = True
 
+    @property
+    def dcp_q_replicate(self) -> bool:
+        return getattr(self.q_proj, "qrep_active", False)
+
+    def _project_query(self, x, *, local_heads=False):
+        heads = self.num_heads * (self.dcp_size if self.dcp_q_replicate else 1)
+        q = self.q_proj(x)[0].view(-1, heads, self.qk_head_dim)
+        if local_heads and self.dcp_q_replicate:
+            q = self.q_proj._local_view(q)
+        return q
+
+    def process_weights_after_loading(self, act_dtype: torch.dtype):
+        if envs.VLLM_ASCEND_ENABLE_FLASH_MLA and not self.dcp_q_replicate:
+            self.enable_mlapo = False
+        if self.dcp_q_replicate:
+            if self.fa_quant_layer and not (envs.VLLM_ASCEND_ENABLE_FLASH_MLA and self.support_fp8_attention):
+                raise ValueError("DCP replicated Q requires unquantized MLA KV cache")
+            # The A5 NoPE prolog accepts the same group-head Q projection as
+            # the unfused path. Other backends retain their existing path.
+            if not envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
+                self.enable_mlapo = False
+        super().process_weights_after_loading(act_dtype)
+        if self.dcp_q_replicate:
+            # Only K-up participates in replicated Q absorption. V-up and O
+            # remain TP-local after the DCP output exchange.
+            weight = torch_npu.npu_format_cast(self.W_UK_T, ACL_FORMAT_FRACTAL_ND)
+            gathered = self._dcp_all_gather(weight, 0)
+            if hasattr(self, "dcp_W_UK_T"):
+                self.dcp_W_UK_T.copy_(gathered)
+            else:
+                self.dcp_W_UK_T = gathered
+            if self.enable_mlapo:
+                self.mlapo_W_UK_T = self.dcp_W_UK_T
+                self.mlapo_num_heads = self.num_heads * self.dcp_size
+
+    def _q_proj_and_k_up_proj(self, x):
+        if not self.dcp_q_replicate:
+            return super()._q_proj_and_k_up_proj(x)
+        q_nope, q_pe = self._project_query(x).split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+        q_abs = torch.bmm(q_nope.transpose(0, 1), self.dcp_W_UK_T).transpose(0, 1)
+        return q_abs, q_pe
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        # AscendMLAImpl bypasses the upstream MLA initializer. Both FIA and
+        # Flash MLA return LSE for the internal DCP merge.
+        self.need_to_return_lse_for_decode = self.dcp_size > 1
+        if envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
+            # Flash MLA merges DCP-local history with causal current tokens;
+            # the history lengths account for the configured KV interleave.
+            self.supports_mtp_with_cp_non_trivial_interleave_size = True
+
     @staticmethod
     def update_graph_params(
         update_stream,
@@ -246,6 +299,8 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         speculative_config=None,
         draft_attn_metadatas=None,
     ):
+        if envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
+            return
         if _EXTRA_CTX.is_draft_model:
             if _EXTRA_CTX.is_draft_model_prefill:
                 graph_params = get_draft_graph_prefill_params()
@@ -364,6 +419,8 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         return prefill_metadata.chunked_context.padded_chunk_seq_lens_npu[index]
 
     def reorg_decode_q(self, decode_q_nope, decode_q_pe):
+        if self.dcp_q_replicate:
+            return decode_q_nope, decode_q_pe
         return self._dcp_all_gather_fragments(
             decode_q_nope,
             decode_q_pe,

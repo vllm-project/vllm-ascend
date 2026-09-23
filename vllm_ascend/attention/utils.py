@@ -235,6 +235,9 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # E.g., tensor([100, 200, 50]) means req0 has 100 tokens already computed.
     num_computed_tokens_cpu: torch.Tensor = None
 
+    # Exact prefill counts; decode entries may be optimistic and are never read.
+    num_computed_prefill_tokens_cpu: torch.Tensor | None = None
+
     # Number of decode tokens per request, used for speculative decoding.
     # E.g., 1 for normal decoding, >1 for speculative decoding.
     decode_token_per_req: int = 1
@@ -280,6 +283,7 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             seq_lens=self.seq_lens[:num_actual_reqs],
             seq_lens_cpu=_slice_reqs(self.seq_lens_cpu),
             num_computed_tokens_cpu=_slice_reqs(self.num_computed_tokens_cpu),
+            num_computed_prefill_tokens_cpu=_slice_reqs(self.num_computed_prefill_tokens_cpu),
             num_reqs=num_actual_reqs,
             num_actual_tokens=num_actual_tokens,
             max_query_len=self.max_query_len,
