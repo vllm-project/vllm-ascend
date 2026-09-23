@@ -25,13 +25,6 @@ execution logic or numerical outputs.** When memory migration support is
 unavailable, CPU affinity still works, but memory locality may be worse and
 latency or throughput may degrade.
 
-For Engram with `cpu_offload=true`, CPU binding retains its post-warmup and
-post-capture thread/IRQ affinity but skips process-wide NUMA page migration.
-The HOST_UVA tables are already pinned at this point, and shared tables may be
-accessed by workers assigned to different NUMA nodes. Migrating the whole
-worker can stall startup and cannot provide a consistent placement for that
-shared backing. No additional configuration is required.
-
 ## Usage
 
 ### Online Serving

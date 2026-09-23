@@ -1269,21 +1269,6 @@ class TestCpuBindingSupplemental(unittest.TestCase):
             calls, ["build_cpu_pools", "allocate", "print_plan", "bind_threads", "bind_memory", "bind_npu_irq"]
         )
 
-    def test_run_all_can_bind_threads_and_irq_without_migrating_pages(self):
-        cpu_alloc = make_cpu_alloc()
-        with (
-            patch.object(cpu_alloc, "build_cpu_pools", return_value=True),
-            patch.object(cpu_alloc, "allocate"),
-            patch.object(cpu_alloc, "print_plan"),
-            patch.object(cpu_alloc, "bind_threads") as threads,
-            patch.object(cpu_alloc, "bind_memory") as memory,
-            patch.object(cpu_alloc, "bind_npu_irq") as irq,
-        ):
-            cpu_alloc.run_all(migrate_memory=False)
-        threads.assert_called_once_with()
-        irq.assert_called_once_with()
-        memory.assert_not_called()
-
     def test_run_all_returns_when_cpu_pool_build_is_skipped(self):
         cpu_alloc = make_cpu_alloc()
         calls = []
@@ -1330,14 +1315,6 @@ class TestBindingSwitch(unittest.TestCase):
 
         mock_cpu_alloc.assert_called_once_with(1, npu_id=3)
         mock_cpu_alloc.return_value.run_all.assert_called_once_with(migrate_memory=True)
-
-    @patch("vllm_ascend.cpu_binding.CpuAlloc")
-    @patch("vllm_ascend.cpu_binding.is_arm_cpu", return_value=True)
-    def test_bind_cpus_preserves_affinity_when_migration_disabled(self, _mock_is_arm_cpu, mock_cpu_alloc):
-        bind_cpus(1, npu_id=3, migrate_memory=False)
-
-        mock_cpu_alloc.assert_called_once_with(1, npu_id=3)
-        mock_cpu_alloc.return_value.run_all.assert_called_once_with(migrate_memory=False)
 
 
 if __name__ == "__main__":
