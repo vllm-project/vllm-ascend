@@ -48,6 +48,7 @@ config:
     dp_address: "${NODE_2_IP}"
 
 env_common: &env_common
+  LOCAL_WORLD_SIZE: "16"
   VLLM_USE_MODELSCOPE: "true"
   SERVER_PORT: "${PORT}"
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
