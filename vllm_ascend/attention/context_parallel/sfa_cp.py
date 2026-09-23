@@ -33,7 +33,11 @@ from vllm_ascend.attention.sfa_v1 import (
     AscendSFAMetadataBuilder,
     SFAForwardContext,
 )
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, enable_dcp, split_decodes_and_prefills
+from vllm_ascend.attention.utils import (
+    AscendCommonAttentionMetadata,
+    enable_dcp,
+    split_decodes_and_prefills,
+)
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.utils import (
@@ -516,10 +520,8 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         if kv_cache is not None:
             assert fused_kv_no_split is not None
             if self.enable_sparse_sfa_c8:
-                torch_npu.npu_scatter_nd_update_(
-                    kv_cache[0].view(-1, fused_kv_no_split.shape[-1]),
-                    slot_mapping_sfa[: attn_metadata.num_actual_tokens].view(-1, 1),
-                    fused_kv_no_split[: attn_metadata.num_actual_tokens],
+                DeviceOperator.scatter_cache(
+                    fused_kv_no_split, kv_cache[0], slot_mapping_sfa, attn_metadata.num_actual_tokens
                 )
                 k_pe = k_nope = None
             else:

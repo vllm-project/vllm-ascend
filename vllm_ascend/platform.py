@@ -1043,6 +1043,18 @@ def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
             )
             vllm_config.scheduler_config = recompute_scheduler_config
 
+    # Checked here, not in AscendConfig: MultiConnector children re-validate the config
+    # with per-child copies that cannot see sibling connectors.
+    kv_transfer_config = vllm_config.kv_transfer_config
+    offload_missing = kv_transfer_config is None or not kv_transfer_config.has_connector("PreemptOffloadConnector")
+    # Only a real split (size > 1) needs the offload guarantee, mirroring the runner gate.
+    if offload_missing and ascend_config.finegrained_tp_config.oproj_tensor_parallel_size > 1:
+        raise AssertionError(
+            "oproj_tensor_parallel_size requires PreemptOffloadConnector (via MultiConnector): "
+            "a preempted request must not return to the prefill node, whose recomputed KV "
+            "loses precision."
+        )
+
 
 def _validate_kv_load_failure_policy(vllm_config: VllmConfig) -> None:
     kv_transfer_config = vllm_config.kv_transfer_config

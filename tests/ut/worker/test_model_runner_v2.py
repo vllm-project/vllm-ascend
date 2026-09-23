@@ -33,6 +33,8 @@ def _make_runner(need_timing: bool = True):
     runner.attn_groups = []
     runner.adaptive_verification = None
     runner.use_fia = False
+    # Set by NPUModelRunner.__init__ on real instances.
+    runner._oproj_tp_requires_graph = False
     return runner
 
 
@@ -465,6 +467,14 @@ def _parent_init(self, vllm_config, device, *, full_graph=False, speculative=Fal
 def test_init_without_spec_pp():
     vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(enable_eplb=False))
     ascend_config = SimpleNamespace(eplb_config=SimpleNamespace(load_collection_phase="all"))
+
+    # Complete the fake with the fields NPUModelRunner reads (mirrors FinegrainedTPConfig).
+    ascend_config.finegrained_tp_config = SimpleNamespace(
+        oproj_tensor_parallel_size=0,
+        lmhead_tensor_parallel_size=0,
+        embedding_tensor_parallel_size=0,
+        mlp_tensor_parallel_size=0,
+    )
     with (
         patch("vllm_ascend.worker.v2.model_runner.get_ascend_config", return_value=ascend_config),
         patch("vllm_ascend.worker.v2.model_runner.set_potential_max_tokens"),
@@ -501,6 +511,14 @@ def test_init_without_spec_pp():
 def test_init_spec_pp_full_graph_and_speculator():
     vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(enable_eplb=True))
     ascend_config = SimpleNamespace(eplb_config=SimpleNamespace(load_collection_phase="decode"))
+
+    # Complete the fake with the fields NPUModelRunner reads (mirrors FinegrainedTPConfig).
+    ascend_config.finegrained_tp_config = SimpleNamespace(
+        oproj_tensor_parallel_size=0,
+        lmhead_tensor_parallel_size=0,
+        embedding_tensor_parallel_size=0,
+        mlp_tensor_parallel_size=0,
+    )
     spec_pp = SimpleNamespace(needs_aux_hidden_states=True)
     speculator = SimpleNamespace()
     with (
