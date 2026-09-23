@@ -168,7 +168,7 @@ decode_server_cmd: &decode_server_cmd
   - "--attention_config.indexer_kv_dtype"
   - "int8"
   - "--additional-config"
-  - '{"fuse_muls_add": true, "recompute_scheduler_enable": true, "multistream_overlap_shared_expert": true, "enable_flashcomm1": true}'
+  - '{"fuse_muls_add": true, "recompute_scheduler_enable": true, "multistream_overlap_shared_expert": true}'
   - "--trust-remote-code"
   - "--max-num-seqs"
   - "32"
