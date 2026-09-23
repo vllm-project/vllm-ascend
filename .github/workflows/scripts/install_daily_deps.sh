@@ -51,6 +51,17 @@ else
 fi
 python3 -m pip install "$MEMCACHE_URL" --force-reinstall --no-deps
 
+# ---- torch-npu ----
+echo "Download, extract and install torch-npu..."
+mkdir -p /tmp/torch_npu
+wget -q --retry-connrefused --tries=5 --timeout=30 --waitretry=10 \
+    -O /tmp/torch_npu/torch_npu.tar.gz \
+    "https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.10.0/${TORCH_NPU_DATE}/pytorch_v2.10.0_py312.tar.gz"
+tar -xzf /tmp/torch_npu/torch_npu.tar.gz -C /tmp/torch_npu
+python3 -m pip install /tmp/torch_npu/torch_npu-2.10.0*_"${ARCH}".whl --force-reinstall --extra-index-url https://download.pytorch.org/whl/cpu/
+echo "Clean up temporary files..."
+rm -rf /tmp/torch_npu
+
 # ---- mfcli kernel install ----
 # Install the memfabric kernel for the target SoC. Only A5 and A3 require it;
 case "${SOC_VERSION:-}" in
@@ -73,16 +84,5 @@ esac
 echo "Install triton-ascend..."
 TRITON_ASCEND_URL="https://ascend-triton-open.obs.cn-north-4.myhuaweicloud.com/Triton_Innersource/B_Version/${TRITON_ASCEND_VERSION}/triton_ascend-${TRITON_ASCEND_PACKAGE_VERSION}-cp312-cp312-manylinux_2_27_${ARCH}.manylinux_2_28_${ARCH}.whl"
 python3 -m pip install "$TRITON_ASCEND_URL" --force-reinstall
-
-# ---- torch-npu ----
-echo "Download, extract and install torch-npu..."
-mkdir -p /tmp/torch_npu
-wget -q --retry-connrefused --tries=5 --timeout=30 --waitretry=10 \
-    -O /tmp/torch_npu/torch_npu.tar.gz \
-    "https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.10.0/${TORCH_NPU_DATE}/pytorch_v2.10.0_py312.tar.gz"
-tar -xzf /tmp/torch_npu/torch_npu.tar.gz -C /tmp/torch_npu
-python3 -m pip install /tmp/torch_npu/torch_npu-2.10.0*_"${ARCH}".whl --force-reinstall --extra-index-url https://download.pytorch.org/whl/cpu/
-echo "Clean up temporary files..."
-rm -rf /tmp/torch_npu
 
 echo "Daily packages installation complete."
