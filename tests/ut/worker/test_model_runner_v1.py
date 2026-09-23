@@ -302,7 +302,10 @@ class TestDummyRunSlotInvalidation(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "metadata checked"):
             runner._dummy_run(1)
 
-    @unittest.skipIf(vllm_version_is("0.29.0"), "DeepSeek V4.1 is unavailable on vLLM 0.29")
+    @unittest.skipIf(
+        vllm_version_is("0.29.0") or vllm_version_is("0.30.0"),
+        "DeepSeek V4.1 is unavailable on vLLM 0.29/0.30",
+    )
     def test_graph_capture_invalidates_only_v41_active_slots(self):
         from tests.deepseek_v41_utils import make_cache_config
 
@@ -977,7 +980,10 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                     caches = runner._reshape_kv_cache_tensors(cache_config, raw)
                 assert_attention_cache_views(caches, raw, packed)
 
-    @unittest.skipIf(vllm_version_is("0.29.0"), "DeepSeek V4.1 is unavailable on vLLM 0.29")
+    @unittest.skipIf(
+        vllm_version_is("0.29.0") or vllm_version_is("0.30.0"),
+        "DeepSeek V4.1 is unavailable on vLLM 0.29/0.30",
+    )
     def test_v41_layer_outer_buffers_allocate_and_reshape(self):
         from tests.deepseek_v41_utils import make_cache_config
         from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheBackend
@@ -1017,7 +1023,10 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         assert caches[prefix + "0.self_attn.swa_cache"].is_contiguous()
         assert not caches[prefix + "3.self_attn.swa_cache"].is_contiguous()
 
-    @unittest.skipIf(vllm_version_is("0.29.0"), "DeepSeek V4.1 is unavailable on vLLM 0.29")
+    @unittest.skipIf(
+        vllm_version_is("0.29.0") or vllm_version_is("0.30.0"),
+        "DeepSeek V4.1 is unavailable on vLLM 0.29/0.30",
+    )
     def test_v41_dspark_shares_four_backings_after_rank_shrink(self):
         from tests.deepseek_v41_utils import make_cache_config
         from vllm_ascend.attention.dsa_v41 import DeepseekV41CacheBackend

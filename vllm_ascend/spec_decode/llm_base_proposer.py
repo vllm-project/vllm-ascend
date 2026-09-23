@@ -85,7 +85,7 @@ _HIDDEN_STATE_DRAFTER_TYPES: tuple[type, ...] = (
     DSparkDeepseekV4ForCausalLM,
 )
 
-if not vllm_version_is("0.29.0"):
+if not (vllm_version_is("0.29.0") or vllm_version_is("0.30.0")):
     from vllm_ascend.models.deepseek_v41.dspark import DSparkDeepseekV41ForCausalLM
 
     _HIDDEN_STATE_DRAFTER_TYPES += (DSparkDeepseekV41ForCausalLM,)

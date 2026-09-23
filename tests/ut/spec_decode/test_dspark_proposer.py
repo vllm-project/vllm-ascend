@@ -828,7 +828,10 @@ class TestInitializeAttnBackend(_DSparkProposerTestBase):
         proposer._per_group_slot_mappings = {}
         return proposer
 
-    @pytest.mark.skipif(vllm_version_is("0.29.0"), reason="DeepSeek V4.1 is unavailable on vLLM 0.29")
+    @pytest.mark.skipif(
+        vllm_version_is("0.29.0") or vllm_version_is("0.30.0"),
+        reason="DeepSeek V4.1 is unavailable on vLLM 0.29/0.30",
+    )
     def test_deepseek_v41_draft_uses_only_group_twelve(self, monkeypatch):
         from tests.deepseek_v41_utils import make_cache_config
 

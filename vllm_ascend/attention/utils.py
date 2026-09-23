@@ -229,6 +229,12 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # E.g., tensor([128, 256, 64]) for 3 requests with different seq lengths.
     seq_lens_cpu: torch.Tensor = None
 
+    # vLLM 0.30 removed these CPU mirrors from CommonAttentionMetadata.
+    # Ascend builders still consume them for host-side attention metadata.
+    _seq_lens_cpu: torch.Tensor | None = None
+    _num_computed_tokens_cpu: torch.Tensor | None = None
+    dcp_local_seq_lens_cpu: torch.Tensor | None = None
+
     # Host mirror of this cache group's block table, including padded rows.
 
     # CPU tensor of already computed tokens count per request.
