@@ -37,7 +37,9 @@ traffic before production deployment.
 !!!IMPORTANT
 
     950PR&950DT Products does not support using EPLB with quant type "W4A8MXFP4", "W4A16MXFP4".
-    A2 does not support redundant experts.
+    On A2, redundant experts are limited by the CANN grouped-matmul weight
+    list limit (128 per rank): 256-expert models require EP >= 4, while
+    128-expert models (e.g. Qwen3-30B-A3B) work with any EP size.
 
 ### Model Runner V2 Weight Formats
 
