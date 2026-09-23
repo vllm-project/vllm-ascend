@@ -58,6 +58,7 @@ class AscendPCPManager(PCPManager):
     _global_batch_slot_mappings: torch.Tensor | None
     _gathered_kv_slot_mappings: torch.Tensor | None
     _pad_slot_id: torch.Tensor
+    _sampling_hidden_restored: bool = False
 
     def __init__(
         self,
@@ -108,6 +109,15 @@ class AscendPCPManager(PCPManager):
             # normally reserves one additional FIA padding slot, but PCP never
             # uses that slot; expose the exact upstream-sized view here.
             self._input_buffers.query_start_loc = self._input_buffers.query_start_loc[:-1]
+
+        # Whether the runner already restored the target hidden states to the
+        # global PCP layout for the current sampling step (replicated PCP
+        # draft). A second all-gather in restore_for_sampling would reorder
+        # them, so the sampling path consumes this flag instead of inferring
+        # the layout from the tensor length, which is ambiguous under
+        # piecewise/FULL graphs where each rank pads its local batch to the
+        # same global padded length.
+        self._sampling_hidden_restored = False
 
     @staticmethod
     def broadcast_replicated_hidden_states(
@@ -412,10 +422,14 @@ class AscendPCPManager(PCPManager):
         On vLLM main the Ascend runner restores the target hidden states to the
         global PCP layout before sampling (draft_hidden_states is captured
         before the upstream restore), so a second all-gather here would reorder
-        them. Detect the already-restored layout by its padded length.
+        them. Consume the runner's explicit pre-restore marker instead of
+        inferring the layout from the tensor length: under piecewise/FULL
+        graphs each rank pads its local batch to the same global padded length,
+        so a length match does not distinguish local from restored layouts.
         """
         assert self._global_batch is not None
-        if hidden_states.shape[0] == self._global_batch.num_tokens_after_padding:
+        if self._sampling_hidden_restored:
+            self._sampling_hidden_restored = False
             return hidden_states, self._global_batch
         return super().restore_for_sampling(hidden_states)
 

@@ -240,6 +240,11 @@ class NPUModelRunner(GPUModelRunner):
         # tensor, before speculator.propose.
         if state.hidden_states is not None:
             state = state._replace(hidden_states=pcp_manager.restore_hidden_states(state.hidden_states))
+            # Tell restore_for_sampling to skip its second all-gather for this
+            # step. The layout is tracked explicitly because a length match is
+            # ambiguous under piecewise/FULL graphs: every rank pads its local
+            # batch to the same global padded length.
+            pcp_manager._sampling_hidden_restored = True
         self.execute_model_state = state
 
     def sample_tokens(self, grammar_output):
@@ -254,6 +259,10 @@ class NPUModelRunner(GPUModelRunner):
                 input_batch=pcp_manager.global_batch,
             )
 
+        # The pre-restore marker is scoped to this sampling step; stale state
+        # from a previous step must not suppress the upstream all-gather.
+        if pcp_manager is not None and isinstance(pcp_manager, AscendPCPManager):
+            pcp_manager._sampling_hidden_restored = False
         self._restore_replicated_draft_target_states()
         output = super().sample_tokens(grammar_output)
         if self.use_spec_pp and self.is_last_pp_rank:
