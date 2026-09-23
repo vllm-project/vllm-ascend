@@ -116,13 +116,37 @@ class PreemptOffloadWorker:
             states = list(enumerate(layer_tensor)) if isinstance(layer_tensor, (tuple, list)) else [(0, layer_tensor)]
             for state_idx, single_tensor in states:
                 logical_name = f"{layer_name}.{state_idx}" if isinstance(layer_tensor, (tuple, list)) else layer_name
+                if single_tensor.numel() == 0:
+                    continue
                 ptr = single_tensor.data_ptr()
                 cache_name = cache_name_by_ptr.get(ptr)
+                flat_tensor = single_tensor.view(single_tensor.shape[0], -1)
+                block_scale = single_tensor.shape[0] // self.num_gpu_blocks
                 if cache_name is None:
                     cache_name = logical_name
                     cache_name_by_ptr[ptr] = cache_name
-                    unique_gpu_caches[cache_name] = single_tensor.view(single_tensor.shape[0], -1)
-                    self.block_size_scale[cache_name] = single_tensor.shape[0] // self.num_gpu_blocks
+                    unique_gpu_caches[cache_name] = flat_tensor
+                    self.block_size_scale[cache_name] = block_scale
+                else:
+                    registered_cache = unique_gpu_caches[cache_name]
+                    registered_scale = self.block_size_scale[cache_name]
+                    registered_bytes = registered_cache.shape[1] * registered_cache.element_size() * registered_scale
+                    candidate_bytes = flat_tensor.shape[1] * flat_tensor.element_size() * block_scale
+                    if candidate_bytes > registered_bytes:
+                        registered_stride = (
+                            registered_cache.stride(0) * registered_cache.element_size() * registered_scale
+                        )
+                        candidate_stride = flat_tensor.stride(0) * flat_tensor.element_size() * block_scale
+                        if candidate_stride != registered_stride or (
+                            block_scale > 1 and flat_tensor.stride(0) != flat_tensor.shape[1]
+                        ):
+                            raise RuntimeError(
+                                f"Aliased KV caches have incompatible block layouts: tensor={cache_name}."
+                            )
+                        # Retain the full page even if the smaller Conv view
+                        # was encountered first in the registration order.
+                        unique_gpu_caches[cache_name] = flat_tensor
+                        self.block_size_scale[cache_name] = block_scale
 
                 spec = mamba_layers.get(layer_name)
                 if spec is None or not self._is_conv_state(spec, state_idx):
@@ -136,10 +160,29 @@ class PreemptOffloadWorker:
                         f"layer={layer_name}, actual={state_shape}, "
                         f"expected={expected_shape}."
                     )
-                if self.block_size_scale[cache_name] != 1:
+                if single_tensor.shape[0] != self.num_gpu_blocks:
                     raise RuntimeError(
                         "Mamba Conv cache must have one physical row per cache block: "
-                        f"tensor={cache_name}, scale={self.block_size_scale[cache_name]}."
+                        f"tensor={logical_name}, rows={single_tensor.shape[0]}, blocks={self.num_gpu_blocks}."
+                    )
+
+                # A pooled SFA view can share the Conv state's first address
+                # while splitting each logical page into several kernel rows.
+                # Keep that registration, but verify it preserves the Conv
+                # block starts and contains a contiguous state prefix.
+                registered_cache = unique_gpu_caches[cache_name]
+                block_scale = self.block_size_scale[cache_name]
+                registered_stride = registered_cache.stride(0) * registered_cache.element_size() * block_scale
+                state_stride = single_tensor.stride(0) * single_tensor.element_size()
+                registered_bytes = registered_cache.shape[1] * registered_cache.element_size() * block_scale
+                state_bytes = state_shape[0] * state_shape[1] * single_tensor.element_size()
+                if (
+                    registered_stride != state_stride
+                    or registered_bytes < state_bytes
+                    or (block_scale > 1 and registered_cache.stride(0) != registered_cache.shape[1])
+                ):
+                    raise RuntimeError(
+                        f"Aliased Mamba Conv cache has an incompatible block layout: tensor={cache_name}."
                     )
 
                 binding = MambaConvCacheBinding(
@@ -395,11 +438,19 @@ class PreemptOffloadWorker:
 
         for load in loads:
             for name, binding in self.mamba_conv_cache_bindings.items():
+                block_scale = self.block_size_scale[name]
+                state_elements = binding.state_shape[0] * binding.state_shape[1]
                 gpu_state = (
-                    self.gpu_kv_caches[name][load.gpu_block_id].view(binding.state_dtype).view(binding.state_shape)
+                    self.gpu_kv_caches[name][load.gpu_block_id * block_scale : (load.gpu_block_id + 1) * block_scale]
+                    .view(-1)
+                    .view(binding.state_dtype)[:state_elements]
+                    .view(binding.state_shape)
                 )
                 cpu_state = (
-                    self.cpu_kv_caches[name][load.cpu_block_id].view(binding.state_dtype).view(binding.state_shape)
+                    self.cpu_kv_caches[name][load.cpu_block_id * block_scale : (load.cpu_block_id + 1) * block_scale]
+                    .view(-1)
+                    .view(binding.state_dtype)[:state_elements]
+                    .view(binding.state_shape)
                 )
 
                 conv_width = binding.state_shape[0]

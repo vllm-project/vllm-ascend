@@ -44,6 +44,7 @@ import torch.distributed as dist
 from torch.nn.parameter import Parameter
 from vllm.distributed import split_tensor_along_last_dim
 from vllm.distributed.parallel_state import get_tp_group
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import logger
 
 from vllm_ascend.distributed.parallel_state import (
@@ -52,6 +53,7 @@ from vllm_ascend.distributed.parallel_state import (
 )
 from vllm_ascend.utils import (
     enable_dsa_cp,
+    get_potential_max_tokens,
     mlp_tp_enable,
     oproj_tp_enable,
     shared_expert_dp_enabled,
@@ -236,32 +238,51 @@ class OProjRowParallelOp(CustomRowParallelOp):
         self,
         input_: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
-        input_parallel = self.get_input_parallel(input_)
-
-        # Prepare tensors for all-to-all communication
-        local_batch_size = input_parallel.size(0)
+        # OTP shards weights across DP ranks, whose inputs still contain all
+        # attention heads. The all-to-all below performs the input sharding.
+        local_batch_size = input_.shape[0]
         chunk_size = self.input_size_per_partition
-        total_batch_size = local_batch_size * self.tp_size
+        capacity = get_potential_max_tokens()
+        dummy_batch_size = 0
+        if local_batch_size > capacity:
+            if is_forward_context_available() and get_forward_context().attn_metadata is None:
+                # Profiling also reaches OTP through attention implementations
+                # that keep a full dummy batch (for example KDA). Participate
+                # with empty local input, then restore the dummy output shape.
+                dummy_batch_size = local_batch_size
+                input_ = input_[:0]
+                local_batch_size = 0
+            else:
+                raise ValueError(
+                    f"oproj static exchange capacity must cover local tokens, got {capacity} and {local_batch_size}."
+                )
 
-        # Reshape tensor for efficient cross-device transfer:
-        # [batch, dim] -> [tp_size, batch, chunk] -> flattened
-        send_buf = input_parallel.reshape(-1, self.tp_size, chunk_size).transpose(0, 1).contiguous().view(-1)
-
-        # Create receive buffer
-        recv_buf = torch.empty(total_batch_size * chunk_size, dtype=input_parallel.dtype, device=input_parallel.device)
-
-        # Perform all-to-all communication
-        dist.all_to_all_single(recv_buf, send_buf, group=self.comm_group.device_group)
-        input_parallel = recv_buf.view(total_batch_size, chunk_size)
+        # DP ranks may replay different graph buckets. Keep collective shapes
+        # and buffer addresses fixed across profiling, capture and replay.
+        if not hasattr(self, "_oproj_send_buf"):
+            self._oproj_send_buf = input_.new_empty((self.tp_size, capacity, chunk_size))
+            self._oproj_recv_buf = input_.new_empty((self.tp_size * capacity, chunk_size))
+        self._oproj_send_buf.zero_()
+        self._oproj_send_buf[:, :local_batch_size].copy_(
+            input_.reshape(local_batch_size, self.tp_size, chunk_size).transpose(0, 1)
+        )
+        dist.all_to_all_single(
+            self._oproj_recv_buf.view(-1), self._oproj_send_buf.view(-1), group=self.comm_group.device_group
+        )
 
         # Only fuse bias add for rank 0 to avoid duplicate bias addition in TP>1
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
         assert self.quant_method is not None
-        output_parallel = self.quant_method.apply(self.layer, input_parallel, bias=bias_)
+        output_parallel = self.quant_method.apply(self.layer, self._oproj_recv_buf, bias=bias_)
 
-        # otp-specific: Combine partial results across devices
-        output = self.comm_group.reduce_scatter(output_parallel, dim=0)
-        output = output.view(input_.shape[0], self.layer.output_size)
+        if not hasattr(self, "_oproj_rs_in_buf"):
+            self._oproj_rs_in_buf = torch.empty_like(output_parallel)
+            self._oproj_rs_out_buf = output_parallel.new_empty((capacity, self.layer.output_size))
+        self._oproj_rs_in_buf.copy_(output_parallel)
+        dist.reduce_scatter_tensor(self._oproj_rs_out_buf, self._oproj_rs_in_buf, group=self.comm_group.device_group)
+        output = self._oproj_rs_out_buf[:local_batch_size]
+        if dummy_batch_size:
+            output = output.new_zeros((dummy_batch_size, self.layer.output_size))
 
         # Handle bias return based on configuration
         output_bias = self.bias if self.skip_bias_add else None

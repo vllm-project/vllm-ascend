@@ -61,6 +61,7 @@ from vllm_ascend.utils import (
     is_mtp_layer,
     is_rl_weight_update_enabled,
     maybe_trans_nz,
+    oproj_tp_enable,
 )
 
 if TYPE_CHECKING:
@@ -1627,6 +1628,15 @@ class AscendSFAImpl(MLAAttentionImpl):
         output[...] = self.o_proj(attn_output)[0]
         return output
 
+    def _forward_dummy(self, hidden_states: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
+        if oproj_tp_enable():
+            # Idle DP ranks must contribute their weight shard to active ranks.
+            # OTP pads this empty input to its fixed decode exchange capacity,
+            # even when the profiling batch is larger than that capacity.
+            attn_output = hidden_states.new_empty((0, self.local_num_heads * self.v_head_dim))
+            self._finalize_o_proj(attn_output, output[:0], False)
+        return output.zero_()
+
     def _get_sfa_kv_slot_mapping(
         self,
         attn_metadata: M,
@@ -1742,15 +1752,14 @@ class AscendSFAImpl(MLAAttentionImpl):
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
         if attn_metadata is None:
-            # Profiling run.
-            return output.fill_(0)
+            return self._forward_dummy(hidden_states, output)
 
         if self.qk_rope_head_dim == 0:
             num_tokens = min(hidden_states.shape[0], attn_metadata.slot_mapping.shape[0])
             if get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.FULL:
                 num_tokens = min(num_tokens, attn_metadata.num_actual_tokens)
             if num_tokens == 0:
-                return output.zero_()
+                return self._forward_dummy(hidden_states, output)
             hidden_states = hidden_states[:num_tokens]
         gate_hidden_states = hidden_states if self.g_proj is not None else None
 

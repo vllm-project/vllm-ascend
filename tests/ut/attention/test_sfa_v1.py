@@ -1130,7 +1130,8 @@ class TestAscendSFAImpl(TestBase):
             **kwargs,
         )
 
-    def test_kvpp_waits_before_native_and_fused_cache_access(self):
+    @patch("vllm_ascend.attention.sfa_v1.oproj_tp_enable", return_value=False)
+    def test_kvpp_waits_before_native_and_fused_cache_access(self, _mock_oproj_tp):
         from vllm_ascend.attention import sfa_v1
 
         hidden = torch.zeros(2, 4)
@@ -1220,6 +1221,29 @@ class TestAscendSFAImpl(TestBase):
                     self.impl.forward("layer", hidden, (), None, output)
                 self.assertEqual(events, [])
                 self.assertEqual(torch.count_nonzero(output).item(), 0)
+
+    def test_idle_rank_participates_in_oproj_tp(self):
+        impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.local_num_heads = 2
+        impl.v_head_dim = 3
+        impl.qk_rope_head_dim = 0
+        impl.o_proj = MagicMock(return_value=(torch.empty(0, 4), None))
+        hidden = torch.randn(8, 4)
+        output = torch.empty_like(hidden)
+        empty_metadata = SimpleNamespace(slot_mapping=torch.empty(0), num_actual_tokens=0)
+
+        with (
+            patch("vllm_ascend.attention.sfa_v1.oproj_tp_enable", return_value=True),
+            patch("vllm_ascend.attention.sfa_v1.get_forward_context"),
+        ):
+            for metadata in (None, empty_metadata):
+                with self.subTest(has_metadata=metadata is not None):
+                    impl.o_proj.reset_mock()
+                    result = impl.forward("layer", hidden, (), metadata, output)
+                    self.assertIs(result, output)
+                    impl.o_proj.assert_called_once()
+                    torch.testing.assert_close(impl.o_proj.call_args.args[0], torch.empty(0, 6))
+                    torch.testing.assert_close(output, torch.zeros_like(hidden))
 
     def _setup_kv_b_proj(self):
         """Set up kv_b_proj with real weight tensor for process_weights_after_loading."""

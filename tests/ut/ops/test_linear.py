@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 from unittest.mock import MagicMock, patch
 
@@ -13,6 +14,7 @@ from vllm_ascend.ops.linear import (
     AscendRowParallelLinear,
     AscendUnquantizedLinearMethod,
 )
+from vllm_ascend.ops.linear_op import OProjRowParallelOp
 
 
 class BaseLinearTest(unittest.TestCase):
@@ -158,12 +160,13 @@ class TestAscendRowParallelLinear(BaseLinearTest):
         input_tensor = torch.randn(16, 8)
         linear(input_tensor)
 
+    @patch("vllm_ascend.ops.linear_op.get_potential_max_tokens", return_value=16)
     @patch("vllm_ascend.ops.linear.get_current_vllm_config", return_value=MagicMock())
     @patch(
         "vllm_ascend.ops.linear.AscendUnquantizedLinearMethod.apply",
         new=lambda self, layer, x, bias=None: torch.nn.functional.linear(x, layer.weight, bias),
     )
-    def test_oproj_tp(self, mock_get_current_vllm_config):
+    def test_oproj_tp(self, mock_get_current_vllm_config, _mock_capacity):
         ascend_config._ASCEND_CONFIG = MagicMock()
         ascend_config._ASCEND_CONFIG.scheduler_config.recompute_scheduler_enable = False
         ascend_config._ASCEND_CONFIG.finegrained_tp_config.oproj_tensor_parallel_size = 2
@@ -176,8 +179,126 @@ class TestAscendRowParallelLinear(BaseLinearTest):
         )
         self.assertEqual(linear.custom_op.comm_group, parallel_state._OTP)
 
-        input_tensor = torch.randn(16, 8)
-        linear(input_tensor)
+        input_tensor = torch.randn(16, 16)
+        with (
+            patch(
+                "vllm_ascend.ops.linear_op.dist.all_to_all_single",
+                side_effect=lambda recv, send, group: recv.copy_(send),
+            ),
+            patch(
+                "vllm_ascend.ops.linear_op.dist.reduce_scatter_tensor",
+                side_effect=lambda output, input_, group: output.copy_(input_[: output.shape[0]]),
+            ),
+        ):
+            output, _ = linear(input_tensor)
+        self.assertEqual(output.shape, (16, 8))
+
+
+class TestOProjRowParallelOp(unittest.TestCase):
+    def test_uneven_dp_batches_preserve_projection_and_collective_buffers(self):
+        capacity, input_size, output_size, tp_size = 4, 6, 3, 2
+        chunk_size = input_size // tp_size
+        weight = torch.arange(output_size * input_size, dtype=torch.float32).reshape(output_size, input_size)
+        bias = torch.arange(output_size, dtype=torch.float32)
+        group = SimpleNamespace(world_size=tp_size, rank_in_group=0, device_group=object())
+        layers = [
+            SimpleNamespace(
+                weight=shard.contiguous(),
+                bias=bias,
+                skip_bias_add=False,
+                return_bias=True,
+                reduce_results=True,
+                input_is_parallel=True,
+                input_size_per_partition=chunk_size,
+                output_size=output_size,
+                prefix="o_proj",
+                quant_method=SimpleNamespace(
+                    apply=lambda layer, x, bias: torch.nn.functional.linear(x, layer.weight, bias)
+                ),
+            )
+            for shard in weight.chunk(tp_size, dim=1)
+        ]
+        ops = [OProjRowParallelOp(layer) for layer in layers]
+        for op in ops:
+            op.update_attrs()
+        buffer_addresses = {}
+
+        with (
+            patch("vllm_ascend.ops.linear_op.get_otp_group", return_value=group),
+            patch("vllm_ascend.ops.linear_op.get_potential_max_tokens", return_value=capacity),
+        ):
+            # Shrinking batches must clear old padding; an idle rank still
+            # contributes its weight shard to the active rank's projection.
+            for batch_sizes in ((4, 1), (1, 3), (0, 2)):
+                inputs = [torch.randn(size, input_size) for size in batch_sizes]
+                padded = torch.stack([torch.nn.functional.pad(x, (0, 0, 0, capacity - x.shape[0])) for x in inputs])
+                for rank, op in enumerate(ops):
+                    group.rank_in_group = rank
+                    received = padded[:, :, rank * chunk_size : (rank + 1) * chunk_size].reshape(-1, chunk_size)
+                    expected = torch.nn.functional.linear(inputs[rank], weight, bias)
+                    reduced = torch.nn.functional.linear(padded[rank], weight, bias)
+                    with (
+                        patch(
+                            "vllm_ascend.ops.linear_op.dist.all_to_all_single",
+                            side_effect=lambda recv, send, group, received=received: recv.copy_(received.reshape(-1)),
+                        ) as exchange,
+                        patch(
+                            "vllm_ascend.ops.linear_op.dist.reduce_scatter_tensor",
+                            side_effect=lambda result, partial, group, reduced=reduced: result.copy_(reduced),
+                        ) as reduce,
+                    ):
+                        actual, output_bias = op.apply(inputs[rank])
+                    torch.testing.assert_close(actual, expected)
+                    self.assertIsNone(output_bias)
+                    exchange.assert_called_once()
+                    reduce.assert_called_once()
+                    recv, send = exchange.call_args.args
+                    result, partial = reduce.call_args.args
+                    self.assertIs(exchange.call_args.kwargs["group"], group.device_group)
+                    self.assertIs(reduce.call_args.kwargs["group"], group.device_group)
+                    torch.testing.assert_close(
+                        send.view(tp_size, capacity, chunk_size),
+                        padded[rank].reshape(capacity, tp_size, chunk_size).transpose(0, 1),
+                    )
+                    torch.testing.assert_close(
+                        partial, torch.nn.functional.linear(received, layers[rank].weight, bias if rank == 0 else None)
+                    )
+                    addresses = [buf.data_ptr() for buf in (send, recv, partial, result)]
+                    self.assertEqual(addresses, buffer_addresses.setdefault(rank, addresses))
+
+            group.rank_in_group = 0
+            with (
+                patch("vllm_ascend.ops.linear_op.is_forward_context_available", return_value=True),
+                patch(
+                    "vllm_ascend.ops.linear_op.get_forward_context",
+                    return_value=SimpleNamespace(attn_metadata=None),
+                ) as forward_context,
+                patch(
+                    "vllm_ascend.ops.linear_op.dist.all_to_all_single",
+                    side_effect=lambda recv, send, group: recv.zero_(),
+                ) as exchange,
+                patch(
+                    "vllm_ascend.ops.linear_op.dist.reduce_scatter_tensor",
+                    side_effect=lambda result, partial, group: result.zero_(),
+                ) as reduce,
+            ):
+                # KDA keeps the full profiling batch before its output
+                # projection, even though OTP only needs decode capacity.
+                profile_size = capacity * 8
+                actual, _ = ops[0].apply(torch.randn(profile_size, input_size))
+                torch.testing.assert_close(actual, torch.zeros(profile_size, output_size))
+                exchange.assert_called_once()
+                reduce.assert_called_once()
+                recv, send = exchange.call_args.args
+                result, partial = reduce.call_args.args
+                torch.testing.assert_close(send, torch.zeros(tp_size * capacity * chunk_size))
+                self.assertEqual([buf.data_ptr() for buf in (send, recv, partial, result)], buffer_addresses[0])
+
+                forward_context.return_value.attn_metadata = {}
+                exchange.reset_mock()
+                with self.assertRaisesRegex(ValueError, "capacity must cover local tokens"):
+                    ops[0].apply(torch.empty(capacity + 1, input_size))
+                exchange.assert_not_called()
 
 
 class TestAscendMergedColumnParallelLinear(BaseLinearTest):
