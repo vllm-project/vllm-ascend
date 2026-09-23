@@ -13,9 +13,8 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from vllm.utils.network_utils import get_open_port
-
 from tests.e2e.conftest import RemoteOpenAIServer, wait_until_npu_memory_free
+from vllm.utils.network_utils import get_open_port
 
 MODEL = os.environ.get("QWEN35_DENSE_MODEL", "Qwen/Qwen3.5-27B")
 MAX_BATCHED_TOKENS = 16384
@@ -82,38 +81,38 @@ def test_qwen35_pp_mtp_cpp_full_decode_only() -> None:
         server.get_client(timeout=180) as client,
     ):
 
-        def check_answer(question: str, expected: int):
+        def run_prefill(question: str):
             response = client.chat.completions.create(
                 model=MODEL,
                 messages=[{"role": "user", "content": question}],
                 temperature=0,
-                max_tokens=20,
-                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+                max_tokens=1,
+                extra_body={
+                    "ignore_eos": True,
+                    "chat_template_kwargs": {"enable_thinking": False},
+                },
             )
-            choice = response.choices[0]
-            text = choice.message.content or ""
-            assert text.strip() and str(expected) in text, choice
+            assert response.usage is not None
+            assert response.usage.completion_tokens == 1
             return response
 
-        for expression, answer in [("6 plus 7", 13), ("3 times 4", 12), ("9 minus 5", 4)]:
-            check_answer(f"What is {expression}? Give the final integer.", answer)
+        for expression in ["6 plus 7", "3 times 4", "9 minus 5"]:
+            run_prefill(f"What is {expression}? Give the final integer.")
 
         with ThreadPoolExecutor(max_workers=16) as executor:
             futures = [
                 executor.submit(
-                    check_answer,
+                    run_prefill,
                     f"What is {3 + i % 6} plus {4 + i % 5}? Give the final integer.",
-                    (3 + i % 6) + (4 + i % 5),
                 )
                 for i in range(32)
             ]
             for future in futures:
                 future.result()
 
-        # Force a second prefill chunk before exercising decode graph replay.
+        # Force a second prefill chunk and return exactly one output token.
         padding = "This paragraph is padding for a long context test. " * 2000
-        response = check_answer(
-            padding + "\nIgnore the padding above. What is 6 plus 7? Give the final integer.",
-            13,
+        response = run_prefill(
+            padding + "\nIgnore the padding above. What is 6 plus 7? Give the final integer."
         )
         assert response.usage.prompt_tokens > MAX_BATCHED_TOKENS

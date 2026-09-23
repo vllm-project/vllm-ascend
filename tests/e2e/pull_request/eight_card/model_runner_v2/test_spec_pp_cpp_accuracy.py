@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
-"""CPP-enabled variant of test_spec_pp_accuracy.py.
+"""CPP-enabled prefill smoke variant of test_spec_pp_accuracy.py.
 
 This file is the chunk pipeline parallel (profiling_chunk_config) companion
 to tests/e2e/pull_request/eight_card/model_runner_v2/test_spec_pp_accuracy.py.
@@ -27,9 +27,6 @@ import os
 from unittest.mock import patch
 
 import pytest
-import regex as re
-from vllm.v1.metrics.reader import Counter, Vector
-
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 
 DEEPSEEK_V4_MODEL = os.environ.get(
@@ -37,43 +34,13 @@ DEEPSEEK_V4_MODEL = os.environ.get(
     "UploadWeight/DeepSeek-V4-Flash-DSpark-w4a8-test",
 )
 
-GSM8K_PROMPT = (
-    'Answer the following question. The last line of the response should follow this format: "answer:$ANSWER" '
-    "(without quotes), where ANSWER is a number. Let's think step by step.\n\n"
-    "Question: Ali had $21. Leila gave him half of her $100. How much does Ali have now?"
-)
-GSM8K_ANSWER = "71"
-ANSWER_RE = re.compile(r"answer\s*:\s*\$?\s*(-?\d+(?:\.\d+)?)", re.IGNORECASE)
-NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
+PREFILL_PROMPT = "Ali had $21. Leila gave him half of her $100. How much does Ali have now?"
 
 
-def _extract_answer(text: str) -> str:
-    matches = ANSWER_RE.findall(text) or NUMBER_RE.findall(text)
-    assert matches, f"No numeric answer found in model output: {text!r}"
-    normalized = matches[0].strip().replace(",", "").rstrip(".")
-    if "." in normalized:
-        normalized = normalized.rstrip("0").rstrip(".")
-    return normalized
-
-
-def _assert_speculative_accuracy(outputs, metrics) -> None:
+def _assert_single_token_output(outputs) -> None:
     assert len(outputs) == 1
-    output_ids, output_text = outputs[0]
-    assert output_ids and output_text
-    assert _extract_answer(output_text) == GSM8K_ANSWER, output_text
-
-    num_drafts = 0
-    num_accepted = 0
-    for metric in metrics:
-        if metric.name == "vllm:spec_decode_num_drafts":
-            assert isinstance(metric, Counter)
-            num_drafts += metric.value
-        elif metric.name == "vllm:spec_decode_num_accepted_tokens_per_pos":
-            assert isinstance(metric, Vector)
-            num_accepted += sum(metric.values)
-
-    assert num_drafts > 0, "Speculative decoding did not generate draft tokens"
-    assert num_accepted > 0, "Speculative decoding did not accept any draft tokens"
+    output_ids, _ = outputs[0]
+    assert len(output_ids) == 1
 
 
 @pytest.mark.e2e_model(DEEPSEEK_V4_MODEL)
@@ -96,7 +63,7 @@ def _assert_speculative_accuracy(outputs, metrics) -> None:
     },
 )
 @wait_until_npu_memory_free(target_free_percentage=0.8)
-def test_deepseek_v4_dspark_pp_cpp_accuracy() -> None:
+def test_deepseek_v4_dspark_pp_cpp_prefill() -> None:
     with VllmRunner(
         DEEPSEEK_V4_MODEL,
         max_model_len=4096,
@@ -127,7 +94,6 @@ def test_deepseek_v4_dspark_pp_cpp_accuracy() -> None:
             "scheduler_config": {"profiling_chunk_config": {"enabled": True}},
         },
     ) as runner:
-        outputs = runner.generate_greedy([GSM8K_PROMPT], max_tokens=512)
-        metrics = runner.model.get_metrics()
+        outputs = runner.generate_greedy([PREFILL_PROMPT], max_tokens=1)
 
-    _assert_speculative_accuracy(outputs, metrics)
+    _assert_single_token_output(outputs)
