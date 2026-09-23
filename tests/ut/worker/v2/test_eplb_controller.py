@@ -54,6 +54,7 @@ class TestAscendEPLBController(unittest.TestCase):
         ascend_state.assert_called_once_with(
             controller.parallel_config,
             controller.device,
+            controller.eplb_policy,
         )
 
     def test_set_batch_phase_updates_match(self):
@@ -65,6 +66,18 @@ class TestAscendEPLBController(unittest.TestCase):
 
         controller.set_batch_phase(batch_has_prefill=False)
         self.assertFalse(controller._load_collection_phase_matched)
+
+    def test_default_policy_keeps_upstream_recording_decision(self):
+        controller = self._make_controller()
+        state = MagicMock(uses_custom_load_stats=False)
+        state.should_record_tensor = torch.tensor(True)
+        controller.state = state
+
+        controller.prepare_forward(object(), 7)
+
+        state.prepare_forward.assert_called_once()
+        state._should_record_current_step.assert_not_called()
+        self.assertTrue(state.should_record_tensor)
 
     def test_step_early_return_conditions(self):
         for condition in (
@@ -131,6 +144,8 @@ class TestAscendEPLBController(unittest.TestCase):
             log_stats=True,
         )
         self.assertTrue(state.should_record_tensor.item())
+        self.assertTrue(state._is_load_sampling_step)
+        self.assertTrue(state._should_collect_local_load)
         self.assertTrue(state._has_fresh_recorded_load)
 
     def test_prepare_forward_disables_nonmatching_phase(self):
@@ -149,6 +164,8 @@ class TestAscendEPLBController(unittest.TestCase):
             log_stats=True,
         )
         self.assertFalse(state.should_record_tensor.item())
+        self.assertTrue(state._is_load_sampling_step)
+        self.assertFalse(state._should_collect_local_load)
         self.assertFalse(state._has_fresh_recorded_load)
 
     def test_prepare_forward_disables_closed_window(self):
@@ -165,6 +182,8 @@ class TestAscendEPLBController(unittest.TestCase):
             log_stats=False,
         )
         self.assertFalse(state.should_record_tensor.item())
+        self.assertFalse(state._is_load_sampling_step)
+        self.assertFalse(state._should_collect_local_load)
         self.assertFalse(state._has_fresh_recorded_load)
 
     def test_setup_from_mapping_constructs_state_and_registers_model(self):
@@ -203,6 +222,7 @@ class TestAscendEPLBController(unittest.TestCase):
             parallel_config=controller.parallel_config,
             expanded_physical_to_logical=mapping,
             num_valid_physical_experts=2,
+            policy=controller.eplb_policy,
         )
         self.assertIs(controller.state, state)
         self.assertTrue(controller._has_registered_models)

@@ -63,7 +63,7 @@ def _assert_expected_answers(outputs, name: str) -> None:
         )
 
 
-def _run_dp2_tp2(capfd: pytest.CaptureFixture[str]):
+def _run_dp2_tp2(capfd: pytest.CaptureFixture[str], num_redundant_experts: int):
     runner_kwargs: dict[str, Any] = {
         "data_parallel_size": 2,
         "tensor_parallel_size": 2,
@@ -84,7 +84,7 @@ def _run_dp2_tp2(capfd: pytest.CaptureFixture[str]):
         "eplb_config": {
             "window_size": 2,
             "step_interval": 2,
-            "num_redundant_experts": 4,
+            "num_redundant_experts": num_redundant_experts,
             "log_balancedness": False,
             "use_async": True,
         },
@@ -101,12 +101,12 @@ def _run_dp2_tp2(capfd: pytest.CaptureFixture[str]):
         captured = capfd.readouterr()
         captured_output += captured.out + captured.err
         for _ in range(ASYNC_EPLB_CYCLE_MAX_CHUNKS):
-            if ASYNC_EPLB_CYCLE_COMMITTED_LOG in captured_output:
+            if re.search(r"rank_transfers=[1-9]\d*", captured_output):
                 break
             # The upstream async worker commits one of this model's 48 MoE
             # layers per forward step. Decode in bounded chunks so weight
-            # transfers have time to finish, stopping as soon as the cycle is
-            # observable.
+            # transfers have time to finish, stopping after a committed
+            # cross-rank transfer is observable.
             runner.generate(
                 [PROMPTS[0]],
                 SamplingParams(
@@ -121,6 +121,7 @@ def _run_dp2_tp2(capfd: pytest.CaptureFixture[str]):
 
 
 @pytest.mark.e2e_model(MODEL)
+@pytest.mark.parametrize("num_redundant_experts", [4, 0])
 @pytest.mark.e2e_coverage(
     arch="moe",
     feature="eplb",
@@ -143,14 +144,17 @@ def _run_dp2_tp2(capfd: pytest.CaptureFixture[str]):
 @wait_until_npu_memory_free(target_free_percentage=0.7, max_wait_seconds=180)
 def test_qwen3_moe_w8a8_dp2_tp2_async_eplb_accuracy(
     capfd: pytest.CaptureFixture[str],
+    num_redundant_experts: int,
 ):
-    eplb_outputs, output = _run_dp2_tp2(capfd)
+    eplb_outputs, output = _run_dp2_tp2(capfd, num_redundant_experts)
     _assert_expected_answers(eplb_outputs, "MRV2 asynchronous EPLB")
     captured = capfd.readouterr()
     output += captured.out + captured.err
     committed_cycle = re.search(
-        rf"{re.escape(ASYNC_EPLB_CYCLE_COMMITTED_LOG)}: model=.+",
+        rf"{re.escape(ASYNC_EPLB_CYCLE_COMMITTED_LOG)}: model=.+ rank_transfers=([1-9]\d*)",
         output,
     )
     eplb_log_lines = [line for line in output.splitlines() if "eplb" in line.lower()]
-    assert committed_cycle is not None, "No asynchronous EPLB cycle completed.\n" + "\n".join(eplb_log_lines)
+    assert committed_cycle is not None, "No asynchronous EPLB cycle committed a rank transfer.\n" + "\n".join(
+        eplb_log_lines
+    )

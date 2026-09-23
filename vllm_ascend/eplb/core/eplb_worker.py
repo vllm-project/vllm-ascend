@@ -82,27 +82,39 @@ class EplbWorker:
             update_mean, update_max, update_imbalance_list = self._compute_imbalance(
                 new_placement, hotness, return_list=True
             )
+            current_p95 = float(np.percentile(current_imbalance_list, 95))
+            update_p95 = float(np.percentile(update_imbalance_list, 95))
             self.latest_expert_hotness = {
                 "current_mean": current_mean,
                 "current_max": current_max,
+                "current_p95": current_p95,
                 "update_mean": update_mean,
                 "update_max": update_max,
+                "update_p95": update_p95,
                 "current_imbalance_list": current_imbalance_list,
                 "update_imbalance_list": update_imbalance_list,
             }
             # ms-service-metric end.
-            logger.info(
-                "[eplb/worker] Expert hotness imbalance, current: mean=%.3f max=%.3f, updated: mean=%.3f max=%.3f",
-                current_mean,
-                current_max,
-                update_mean,
-                update_max,
-            )
 
         if not torch.is_tensor(new_placement):
             new_placement = torch.tensor(new_placement)
         self.check_expert_placement(old_placement, new_placement)
         new_expert_maps = self.local2global(new_placement)
+        if self.rank_id == 0:
+            changed_layers = (new_expert_maps != self.old_expert_maps).flatten(1).any(dim=1).count_nonzero().item()
+            rank_transfers = ((self.old_expert_maps == -1) & (new_expert_maps != -1)).count_nonzero().item()
+            logger.info(
+                "[eplb/worker] Expert hotness imbalance, current: mean=%.3f p95=%.3f max=%.3f, "
+                "updated: mean=%.3f p95=%.3f max=%.3f, changed_layers=%d rank_transfers=%d",
+                current_mean,
+                current_p95,
+                current_max,
+                update_mean,
+                update_p95,
+                update_max,
+                changed_layers,
+                rank_transfers,
+            )
         self.update_expert_map(new_expert_maps)
 
         update_info = self.compose_expert_update_info_greedy(new_expert_maps, self.old_expert_maps)

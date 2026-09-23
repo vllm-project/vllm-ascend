@@ -5,7 +5,9 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
+import torch
 from vllm.config import EPLBConfig, ParallelConfig, VllmConfig
 from vllm.config import parallel as parallel_module
 from vllm.platforms import current_platform
@@ -132,20 +134,286 @@ def test_communicator_factory_requires_group_coordinator_parameter():
         patch_eplb._wrap_communicator_factory(original_factory)
 
 
-def test_async_workspace_wrapper_refreshes_committed_layer(monkeypatch):
+def _explicit_target():
+    target = torch.tensor([[1, 0]])
+    target.source_rank_ids = np.array([[[1], [0]]])
+    target.source_slot_ids = np.zeros((1, 2, 1), dtype=np.int64)
+    return target
+
+
+def test_async_rebalance_wrapper_stashes_explicit_target_on_communicator():
+    target = _explicit_target()
+    communicator = SimpleNamespace()
+    model_state = SimpleNamespace(
+        communicator=communicator,
+        eplb_stats=SimpleNamespace(global_expert_load_window=torch.ones((1, 2))),
+    )
+
+    def original_rebalance(model_state, eplb_state, physical_to_logical_map_cpu, cuda_stream):
+        return target
+
+    wrapped = patch_eplb._wrap_async_rebalance(original_rebalance)
+
+    assert wrapped(model_state, object(), torch.tensor([[0, 1]]), object()) is target
+    assert getattr(communicator, patch_eplb._EXPLICIT_TRANSFER_TARGET_ATTR) is target
+
+
+def test_async_rebalance_wrapper_requires_current_upstream_contract():
+    def original_rebalance(model_state):
+        raise AssertionError("unsupported contract must be rejected before use")
+
+    with pytest.raises(RuntimeError, match="asynchronous rebalance signature"):
+        patch_eplb._wrap_async_rebalance(original_rebalance)
+
+
+def test_async_rebalance_ignores_stale_prepared_stats():
+    current_values = torch.tensor([[3, 4]])
+    model_state = SimpleNamespace(
+        communicator=SimpleNamespace(),
+        eplb_stats=SimpleNamespace(global_expert_load_window=current_values),
+        _policy_load_stats=patch_eplb.PreparedLoadStats(torch.tensor([[[1, 2]]]), np.array([1])),
+    )
+    physical_map = torch.tensor([[0, 1]])
+
+    def original_rebalance(model_state, eplb_state, physical_to_logical_map_cpu, cuda_stream):
+        assert model_state.eplb_stats.global_expert_load_window is current_values
+        return physical_to_logical_map_cpu
+
+    wrapped = patch_eplb._wrap_async_rebalance(original_rebalance)
+
+    assert wrapped(model_state, object(), physical_map, object()) is physical_map
+
+
+def test_async_rebalance_passes_prepared_stats_to_policy_on_worker_stream(monkeypatch):
+    worker_stream = object()
+    stream_active = False
+    cpu_values = torch.tensor([[[1, 2]], [[3, 4]]])
+    device_values = MagicMock()
+
+    def copy_to_cpu():
+        assert stream_active
+        return cpu_values
+
+    device_values.cpu.side_effect = copy_to_cpu
+
+    @contextmanager
+    def device_stream(stream):
+        nonlocal stream_active
+        assert stream is worker_stream
+        stream_active = True
+        try:
+            yield
+        finally:
+            stream_active = False
+
+    monkeypatch.setattr(patch_eplb.torch.cuda, "stream", device_stream)
+    stats = SimpleNamespace(
+        global_expert_load_window=device_values,
+        num_replicas=2,
+        num_groups=1,
+        num_nodes=2,
+        num_gpus=2,
+    )
+    prepared_stats = patch_eplb.PreparedLoadStats(device_values, np.array([1, 3]))
+    model_state = SimpleNamespace(
+        communicator=SimpleNamespace(),
+        eplb_stats=stats,
+        _policy_load_stats=prepared_stats,
+        _last_committed_mean_ratios=np.array([1.2]),
+    )
+    target = _explicit_target()
+    policy = MagicMock()
+    policy.rebalance_experts.return_value = target
+    rank_node_ids = np.array([0, 1])
+    eplb_state = SimpleNamespace(policy=policy, get_rank_node_ids=MagicMock(return_value=rank_node_ids))
+
+    def original_rebalance(model_state, eplb_state, physical_to_logical_map_cpu, cuda_stream):
+        raise AssertionError("prepared statistics must bypass the legacy runner")
+
+    wrapped = patch_eplb._wrap_async_rebalance(original_rebalance)
+    physical_map = torch.tensor([[0, 1]])
+
+    assert wrapped(model_state, eplb_state, physical_map, worker_stream) is target
+    planned_stats = policy.rebalance_experts.call_args.args[0]
+    assert isinstance(planned_stats, patch_eplb.PreparedLoadStats)
+    assert planned_stats.values is cpu_values
+    np.testing.assert_array_equal(planned_stats.sample_counts, [1, 3])
+    assert policy.rebalance_experts.call_args.args[1:] == (2, 1, 2, 2, physical_map)
+    np.testing.assert_array_equal(
+        policy.rebalance_experts.call_args.kwargs["last_committed_mean_ratios"],
+        [1.2],
+    )
+    np.testing.assert_array_equal(policy.rebalance_experts.call_args.kwargs["rank_node_ids"], rank_node_ids)
+
+
+def test_async_transfer_wrapper_executes_explicit_sources(monkeypatch):
+    target = _explicit_target()
+    communicator = SimpleNamespace(**{patch_eplb._EXPLICIT_TRANSFER_TARGET_ATTR: target})
+    metadata = object()
+    stage = MagicMock(return_value=metadata)
+    monkeypatch.setattr(patch_eplb, "stage_explicit_layer_transfer", stage)
+
+    def original_transfer(
+        old_layer_indices,
+        new_layer_indices,
+        expert_weights,
+        expert_weights_buffer,
+        ep_group,
+        communicator,
+        is_profile=False,
+        cuda_stream=None,
+        rank_mapping=None,
+        layer_idx=0,
+    ):
+        raise AssertionError("explicit source target must bypass the upstream transfer")
+
+    stream = object()
+    wrapped = patch_eplb._wrap_async_transfer(original_transfer)
+    result = wrapped(
+        torch.tensor([0, 1]),
+        target[0],
+        [object()],
+        [object()],
+        MagicMock(),
+        communicator,
+        cuda_stream=stream,
+    )
+
+    assert result is metadata
+    assert stage.call_args.kwargs["stream"] is stream
+    assert getattr(communicator, patch_eplb._EXPLICIT_TRANSFER_TARGET_ATTR) is target
+
+
+@pytest.mark.parametrize(
+    ("is_profile", "rank_mapping"),
+    [(True, None), (False, {0: 0})],
+)
+def test_async_explicit_transfer_delegates_profile_and_rank_mapping(is_profile, rank_mapping):
+    target = _explicit_target()
+    communicator = SimpleNamespace(**{patch_eplb._EXPLICIT_TRANSFER_TARGET_ATTR: target})
+
+    def original_transfer(
+        old_layer_indices,
+        new_layer_indices,
+        expert_weights,
+        expert_weights_buffer,
+        ep_group,
+        communicator,
+        is_profile=False,
+        cuda_stream=None,
+        rank_mapping=None,
+        layer_idx=0,
+    ):
+        return "upstream"
+
+    wrapped = patch_eplb._wrap_async_transfer(original_transfer)
+
+    result = wrapped(
+        torch.tensor([0, 1]),
+        target[0],
+        None,
+        None,
+        None,
+        communicator,
+        is_profile=is_profile,
+        rank_mapping=rank_mapping,
+    )
+
+    assert result == "upstream"
+
+
+@pytest.mark.parametrize("changed_layer", [None, 1])
+def test_async_worker_only_publishes_changed_layers(monkeypatch, changed_layer):
+    old_mapping = torch.tensor([[0, 1], [0, 1], [0, 1]])
+    new_mapping = old_mapping.clone()
+    if changed_layer is not None:
+        new_mapping[changed_layer] = torch.tensor([1, 0])
+    published: list[object] = []
+    model_state = SimpleNamespace(
+        communicator=MagicMock(),
+        physical_to_logical_map=old_mapping,
+        model=SimpleNamespace(expert_weights=[[object()] for _ in range(3)]),
+        expert_buffer=[object()],
+        rebalanced=True,
+        pending_result=None,
+    )
+
+    def wait_for_cycle(*, stream):
+        if published:
+            raise StopIteration
+
+    def consume_result(*, stream):
+        published.append(model_state.pending_result)
+        model_state.rebalanced = False
+        model_state.pending_result = None
+
+    @contextmanager
+    def device_stream(_stream):
+        yield
+
+    monkeypatch.setattr(patch_eplb, "AscendEplbState", SimpleNamespace)
+    monkeypatch.setattr(
+        patch_eplb._async_worker,
+        "get_eplb_group",
+        lambda: SimpleNamespace(device_group=MagicMock(), cpu_group=MagicMock(size=lambda: 1)),
+    )
+    monkeypatch.setattr(patch_eplb._async_worker, "run_rebalance_experts", lambda *_args: new_mapping)
+    monkeypatch.setattr(patch_eplb._async_worker, "CpuGpuEvent", lambda: SimpleNamespace(wait=consume_result))
+    monkeypatch.setattr(patch_eplb._async_worker, "transfer_layer", MagicMock(return_value=object()))
+    monkeypatch.setattr(patch_eplb.torch.distributed, "all_reduce", MagicMock())
+    monkeypatch.setattr(patch_eplb.torch.cuda, "stream", device_stream)
+    state = SimpleNamespace(
+        rearrange_event=SimpleNamespace(wait=wait_for_cycle),
+        model_states={"model": model_state},
+    )
+    worker = patch_eplb._wrap_async_worker(MagicMock())
+
+    with pytest.raises(StopIteration):
+        worker(state, MagicMock())
+
+    assert len(published) == 1
+    assert published[0].layer_idx == changed_layer
+    assert published[0].is_last_result
+    assert patch_eplb._async_worker.transfer_layer.call_count == int(changed_layer is not None)
+
+
+def test_async_noop_result_finishes_without_moving_weights(monkeypatch):
+    move_from_buffer = MagicMock()
+    monkeypatch.setattr(patch_eplb._eplb_state, "move_from_buffer", move_from_buffer)
+    consumed_event = MagicMock()
+    model_state = SimpleNamespace(
+        pending_result=patch_eplb._AscendAsyncLayerResult(None, None, None, consumed_event, True),
+        rebalanced=True,
+    )
+
+    patch_eplb._move_changed_layer_to_workspace(model_state, 0)
+
+    assert not model_state.rebalanced
+    assert model_state.pending_result is None
+    move_from_buffer.assert_not_called()
+    consumed_event.record.assert_called_once_with()
+
+
+@pytest.mark.parametrize(("layer_idx", "is_last_layer"), [(2, False), (3, True)])
+def test_async_workspace_refreshes_layer_and_clears_target_after_last(monkeypatch, layer_idx, is_last_layer):
     call_order: list[str] = []
+    target = _explicit_target()
+    target.predicted_mean_ratios = np.full(4, np.nan)
+    target.predicted_mean_ratios[layer_idx] = 1.2
     consumed_event = MagicMock()
     consumed_event.record.side_effect = lambda _stream=None: call_order.append("ack")
     pending_result = SimpleNamespace(
-        layer_idx=3,
+        layer_idx=layer_idx,
         transfer_metadata=object(),
         consumed_event=consumed_event,
     )
     model_state = SimpleNamespace(
         pending_result=pending_result,
         rebalanced=True,
+        communicator=SimpleNamespace(**{patch_eplb._EXPLICIT_TRANSFER_TARGET_ATTR: target}),
         model=SimpleNamespace(num_moe_layers=4),
         model_name="model",
+        _last_committed_mean_ratios=np.full(4, np.nan),
     )
     refresh = MagicMock(side_effect=lambda *_args: call_order.append("refresh"))
     monkeypatch.setattr(patch_eplb, "refresh_model_routing_tables", refresh)
@@ -164,10 +432,114 @@ def test_async_workspace_wrapper_refreshes_committed_layer(monkeypatch):
     result = wrapped_move(model_state, 0, future_option="future")
 
     assert result == "moved"
-    refresh.assert_called_once_with(model_state, 3)
+    assert model_state._last_committed_mean_ratios[layer_idx] == 1.2
+    refresh.assert_called_once_with(model_state, layer_idx)
+    if is_last_layer:
+        log_info.assert_called_once_with(
+            "%s: model=%s rank_transfers=%d",
+            patch_eplb.ASYNC_EPLB_CYCLE_COMMITTED_LOG,
+            "model",
+            2,
+        )
+    else:
+        log_info.assert_not_called()
+    assert call_order == ["move", "refresh", "ack"]
+    assert hasattr(model_state.communicator, patch_eplb._EXPLICIT_TRANSFER_TARGET_ATTR) == (not is_last_layer)
+
+
+def test_async_workspace_logs_stair_imbalance_after_commit(monkeypatch):
+    target = _explicit_target()
+    target.predicted_mean_ratios = np.array([1.1])
+    target.predicted_imbalance_summary = (1.2, 1.3, 1.1, 1.2)
+    pending_result = SimpleNamespace(layer_idx=0, consumed_event=MagicMock())
+    model_state = SimpleNamespace(
+        pending_result=pending_result,
+        communicator=SimpleNamespace(**{patch_eplb._EXPLICIT_TRANSFER_TARGET_ATTR: target}),
+        model=SimpleNamespace(num_moe_layers=1),
+        model_name="model",
+        _last_committed_mean_ratios=np.array([np.nan]),
+    )
+    monkeypatch.setattr(patch_eplb, "refresh_model_routing_tables", MagicMock())
+    log_info = MagicMock()
+    monkeypatch.setattr(patch_eplb.logger, "info", log_info)
+
+    def original_move(model_state, ep_rank):
+        model_state.pending_result.consumed_event.record()
+        model_state.pending_result = None
+
+    patch_eplb._wrap_move_to_workspace(original_move)(model_state, 0)
+
+    assert model_state._last_committed_mean_ratios[0] == 1.1
     log_info.assert_called_once_with(
-        "%s: model=%s",
+        "%s: model=%s mean=%.4f->%.4f p95=%.4f->%.4f changed_layers=%d rank_transfers=%d",
         patch_eplb.ASYNC_EPLB_CYCLE_COMMITTED_LOG,
         "model",
+        1.2,
+        1.1,
+        1.3,
+        1.2,
+        1,
+        2,
     )
-    assert call_order == ["move", "refresh", "ack"]
+
+
+def test_async_workspace_refresh_failure_keeps_target_and_defers_ack(monkeypatch):
+    target = _explicit_target()
+    target.predicted_mean_ratios = np.array([1.2])
+    consumed_event = MagicMock()
+    pending_result = SimpleNamespace(
+        layer_idx=0,
+        transfer_metadata=object(),
+        consumed_event=consumed_event,
+    )
+    communicator = SimpleNamespace(**{patch_eplb._EXPLICIT_TRANSFER_TARGET_ATTR: target})
+    model_state = SimpleNamespace(
+        pending_result=pending_result,
+        communicator=communicator,
+        model=SimpleNamespace(num_moe_layers=1),
+        model_name="model",
+        _last_committed_mean_ratios=np.array([np.nan]),
+    )
+    monkeypatch.setattr(
+        patch_eplb,
+        "refresh_model_routing_tables",
+        MagicMock(side_effect=RuntimeError("refresh failed")),
+    )
+
+    def original_move(model_state, ep_rank):
+        model_state.pending_result.consumed_event.record()
+        model_state.pending_result = None
+
+    wrapped_move = patch_eplb._wrap_move_to_workspace(original_move)
+    with pytest.raises(RuntimeError, match="refresh failed"):
+        wrapped_move(model_state, 0)
+
+    assert getattr(communicator, patch_eplb._EXPLICIT_TRANSFER_TARGET_ATTR) is target
+    consumed_event.record.assert_not_called()
+    assert np.isnan(model_state._last_committed_mean_ratios[0])
+
+
+def test_async_workspace_keeps_anchor_for_unchanged_layer(monkeypatch):
+    target = _explicit_target()
+    target.predicted_mean_ratios = np.array([np.nan])
+    pending_result = SimpleNamespace(
+        layer_idx=0,
+        transfer_metadata=object(),
+        consumed_event=MagicMock(),
+    )
+    model_state = SimpleNamespace(
+        pending_result=pending_result,
+        communicator=SimpleNamespace(**{patch_eplb._EXPLICIT_TRANSFER_TARGET_ATTR: target}),
+        model=SimpleNamespace(num_moe_layers=1),
+        model_name="model",
+        _last_committed_mean_ratios=np.array([1.3]),
+    )
+    monkeypatch.setattr(patch_eplb, "refresh_model_routing_tables", MagicMock())
+
+    def original_move(model_state, ep_rank):
+        model_state.pending_result.consumed_event.record()
+        model_state.pending_result = None
+
+    patch_eplb._wrap_move_to_workspace(original_move)(model_state, 0)
+
+    np.testing.assert_array_equal(model_state._last_committed_mean_ratios, [1.3])
