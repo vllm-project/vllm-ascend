@@ -464,6 +464,11 @@ class NPUModelRunner(GPUModelRunner):
                 self.c8_k_scale_cache_dtype = torch.float32
             elif self.c8_k_cache_dtype == torch.int8:
                 self.c8_k_scale_cache_dtype = torch.float16
+        if self.enable_sparse_sfa_c8:
+            self.c8_cache_dtype = kv_cache_dtype_str_to_dtype(
+                vllm_config.cache_config.cache_dtype, 
+                vllm_config.model_config
+            )
 
         self.attn_backend = get_attn_backend(
             0,
@@ -5615,7 +5620,7 @@ class NPUModelRunner(GPUModelRunner):
                     k_cache_dtype = v_cache_dtype = current_kv_cache_spec.dtype
 
                     if current_sparse_sfa_c8:
-                        k_cache_dtype = self.c8_k_cache_dtype
+                        k_cache_dtype = self.c8_cache_dtype
                     elif enable_fa_quant(self.vllm_config):
                         k_cache_dtype, v_cache_dtype = self.vllm_config.quant_config.get_kv_quant_dtype(
                             layer_name, current_kv_cache_spec.dtype, self.model_config
@@ -5956,7 +5961,7 @@ class NPUModelRunner(GPUModelRunner):
                             self.model_config.hf_text_config.kv_lora_rank,
                             self.model_config.hf_text_config.qk_rope_head_dim,
                         )
-                        dtype = self.c8_k_cache_dtype
+                        dtype = self.c8_cache_dtype
                     else:
                         head_size = (
                             self.model_config.hf_text_config.kv_lora_rank
