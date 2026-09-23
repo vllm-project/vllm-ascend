@@ -126,6 +126,7 @@ class HardwareCapability(Enum):
     PAGED_ATTENTION = auto()
     # Inspect PCIe topology to distinguish 310P Root-Complex and endpoint deployments.
     RC_DEVICE_DISCOVERY = auto()
+    REARRANGE_QKV_DMA = auto()
     # Apply the temporary reduced ACL-graph capture-size set required by affected drivers.
     REDUCED_CUDAGRAPH_CAPTURE_SIZES = auto()
     # Import and register the compiled vLLM-Ascend custom-op library at runtime.
@@ -242,6 +243,7 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.MOE_GATING_TOP_K_HASH_VISION,
         HardwareCapability.NPUGRAPH_EX,
         HardwareCapability.PAGED_ATTENTION,
+        HardwareCapability.REARRANGE_QKV_DMA,
         HardwareCapability.RUNTIME_CUSTOM_OPS,
         HardwareCapability.SCATTER_ND_CACHE_STORE,
         HardwareCapability.SFA_C8_DCP_REPLICATED_INDEXER,

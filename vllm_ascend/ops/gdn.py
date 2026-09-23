@@ -24,6 +24,7 @@ from torch import nn
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
+from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.model_executor.utils import replace_parameter
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
@@ -37,6 +38,7 @@ from vllm_ascend.attention.utils import (
     wait_for_kv_layer_from_connector,
 )
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
@@ -44,6 +46,9 @@ from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_s
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
 
+DMA_ALIGNMENT_ELEMENTS = 16
+SUPPORTS_REARRANGE_QKV_DMA = get_current_hardware_profile().supports(HardwareCapability.REARRANGE_QKV_DMA)
+_ORIGINAL_REARRANGE_MIXED_QKV = QwenGatedDeltaNetAttention.rearrange_mixed_qkv
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
 
 
@@ -260,6 +265,30 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return AscendGDNAttentionBackend
+
+    def rearrange_mixed_qkv(self, mixed_qkv: torch.Tensor | None):
+        if (
+            mixed_qkv is None
+            or not SUPPORTS_REARRANGE_QKV_DMA
+            or mixed_qkv.dtype not in (torch.bfloat16, torch.float16)
+            or not mixed_qkv.is_contiguous()
+        ):
+            return _ORIGINAL_REARRANGE_MIXED_QKV(self, mixed_qkv)
+
+        q_dim = self.key_dim // self.tp_size
+        k_dim = q_dim
+        v_dim = self.value_dim // self.tp_size
+        if q_dim % DMA_ALIGNMENT_ELEMENTS != 0 or v_dim % DMA_ALIGNMENT_ELEMENTS != 0:
+            return _ORIGINAL_REARRANGE_MIXED_QKV(self, mixed_qkv)
+
+        num_tokens = mixed_qkv.shape[0]
+        packed_qkv = torch.ops._C_ascend.npu_rearrange_qkv(mixed_qkv, q_dim, k_dim, v_dim)
+        query, key, value = packed_qkv.split([num_tokens * q_dim, num_tokens * k_dim, num_tokens * v_dim])
+        return (
+            query.view(1, num_tokens, q_dim // self.head_k_dim, self.head_k_dim),
+            key.view(1, num_tokens, k_dim // self.head_k_dim, self.head_k_dim),
+            value.view(1, num_tokens, v_dim // self.head_v_dim, self.head_v_dim),
+        )
 
     def forward(
         self,
