@@ -938,7 +938,22 @@ def enable_sp_across_pp(vllm_config) -> bool:
     if not _uses_sp_across_pp(vllm_config):
         return False
     parallel_config = vllm_config.parallel_config
-    return parallel_config.enable_expert_parallel and parallel_config.tensor_parallel_size > 1
+    if not (parallel_config.enable_expert_parallel and parallel_config.tensor_parallel_size > 1):
+        return False
+    if parallel_config.pipeline_parallel_size > 1:
+        import vllm.envs as envs
+
+        if not envs.VLLM_USE_V2_MODEL_RUNNER:
+            # Stage-boundary sharding (sliced PP receives, aux-state
+            # transport, graph buffers) is only adapted on Model Runner V2.
+            # On V1 the dummy/profile run would feed full-width tensors into
+            # shard-local layers and crash with an opaque shape mismatch.
+            raise RuntimeError(
+                "Pipeline parallelism with sequence shards kept across "
+                "stages is only supported on Model Runner V2; rerun with "
+                "VLLM_USE_V2_MODEL_RUNNER=1."
+            )
+    return True
 
 
 def enable_sp(vllm_config=None) -> bool:
