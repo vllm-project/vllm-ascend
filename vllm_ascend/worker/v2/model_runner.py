@@ -292,11 +292,12 @@ class NPUModelRunner(GPUModelRunner):
         # is set (it also wraps the Ascend ``capture`` patch). Keep an explicit
         # invariant check so a silently-missing connector cannot go unnoticed.
         if routing_replay_enabled(self.vllm_config):
-            assert self.aux_output_connector is not None, (
-                "aux_output_config.enabled is set but the AuxOutput worker connector "
-                "was not created; check that vLLM's GPUModelRunner.initialize_kv_cache "
-                "ran and that aux_output_config survived config validation."
-            )
+            if self.aux_output_connector is None:
+                raise RuntimeError(
+                    "aux_output_config.enabled is set but the AuxOutput worker connector "
+                    "was not created; check that vLLM's GPUModelRunner.initialize_kv_cache "
+                    "ran and that aux_output_config survived config validation."
+                )
             logger.info_once("Routed-experts (R3) capture enabled through the AuxOutput connector.")
 
         self.kvpp = KVPPRuntime.create_from_kv_cache(
