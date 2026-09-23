@@ -445,10 +445,10 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
     export IFNAME="${NETWORK_INTERFACE}"
     export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME="$IFNAME"
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
     export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     export GLOO_SOCKET_IFNAME="$IFNAME"
     export TP_SOCKET_IFNAME="$IFNAME"
-    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
     export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
 
     vllm serve ${WEIGHT_PATH} \
@@ -484,10 +484,10 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
     export IFNAME="${NETWORK_INTERFACE}"
     export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME="$IFNAME"
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
     export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     export GLOO_SOCKET_IFNAME="$IFNAME"
     export TP_SOCKET_IFNAME="$IFNAME"
-    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
     export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
 
     vllm serve ${WEIGHT_PATH} \
