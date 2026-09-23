@@ -691,16 +691,15 @@ class AscendConfig:
                     str(vc.scheduler_config.max_num_batched_tokens),
                 )
 
-        # mlp mirrors the config gate's >1 exemption; oproj/embedding keep main's >0 semantics.
         finegrained_tp_enabled = (
             self.finegrained_tp_config.oproj_tensor_parallel_size > 0
             or self.finegrained_tp_config.embedding_tensor_parallel_size > 0
-            or self.finegrained_tp_config.mlp_tensor_parallel_size > 1
+            or self.finegrained_tp_config.mlp_tensor_parallel_size > 0
+            or self.finegrained_tp_config.lmhead_tensor_parallel_size > 0
         )
         if finegrained_tp_enabled and not self.scheduler_config.recompute_scheduler_enable:
             raise AssertionError(
-                "oproj_tensor_parallel_size / mlp_tensor_parallel_size / "
-                "embedding_tensor_parallel_size require recompute_scheduler_enable=true: "
+                "finegrained_tp_config requires recompute_scheduler_enable=true: "
                 "it keeps decode-node steps decode-shaped.",
             )
 

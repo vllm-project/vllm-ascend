@@ -1354,7 +1354,10 @@ class TestTopLevelSwitchTypeValidation(TestBase):
     def test_reduce_sample_configuration_compatibility(self, mock_fix):
         cases: tuple[tuple[dict[str, Any], int, str | None, str | None], ...] = (
             (
-                {"finegrained_tp_config": {"lmhead_tensor_parallel_size": 2}},
+                {
+                    "finegrained_tp_config": {"lmhead_tensor_parallel_size": 2},
+                    "recompute_scheduler_enable": True,
+                },
                 1,
                 None,
                 "finegrained_tp_config.lmhead_tensor_parallel_size",
