@@ -49,6 +49,8 @@ def _ascend_sp_shard_impl(x: torch.Tensor) -> torch.Tensor:
     tp_size = get_tensor_model_parallel_world_size()
     tp_rank = get_tensor_model_parallel_rank()
     sp_pad = (-x.shape[0]) % tp_size
+    # Upstream counterpart: vllm/models/common/ops/sequence_parallel.py
+    # sp_shard L45-48 (introduced in 38a466e7b6, #46789).
     if sp_pad > 0:
         x = F.pad(x, (0, 0) * (x.ndim - 1) + (0, sp_pad))
     chunk = x.shape[0] // tp_size
@@ -134,6 +136,8 @@ def _ascend_sp_padding_mask_impl(is_padding: torch.Tensor) -> torch.Tensor:
     tp_size = get_tensor_model_parallel_world_size()
     tp_rank = get_tensor_model_parallel_rank()
     sp_pad = (-is_padding.shape[0]) % tp_size
+    # Upstream counterpart: vllm/models/common/ops/sequence_parallel.py
+    # sp_padding_mask L63-65.
     if sp_pad > 0:
         is_padding = F.pad(is_padding, (0, sp_pad), value=True)
     chunk = is_padding.shape[0] // tp_size
