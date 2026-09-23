@@ -443,9 +443,7 @@ class ExternalDPConfigLoader:
             # pp_size must be consistent across members.
             pp_sizes = {m.pp_size for _, m in members}
             if len(pp_sizes) > 1:
-                raise ValueError(
-                    f"PP group {group.group_id}: nodes have inconsistent pp_size {pp_sizes}"
-                )
+                raise ValueError(f"PP group {group.group_id}: nodes have inconsistent pp_size {pp_sizes}")
 
             # When pp_size == 1, nodes in this group are independent single-node
             # engines (no PP across nodes); skip all PP-cross-node constraints.
@@ -457,8 +455,7 @@ class ExternalDPConfigLoader:
             # For pp_size > 1, the group node count must equal pp_size.
             if group.pp_size != len(members):
                 raise ValueError(
-                    f"PP group {group.group_id}: pp_size={group.pp_size} but group has "
-                    f"{len(members)} nodes"
+                    f"PP group {group.group_id}: pp_size={group.pp_size} but group has {len(members)} nodes"
                 )
 
             # PP group must use DP=1 internally (each group is a single engine).
@@ -477,15 +474,13 @@ class ExternalDPConfigLoader:
                 parts = partition.split(",")
                 if len(parts) != group.pp_size:
                     raise ValueError(
-                        f"PP group {group.group_id}: pp_layer_partition has {len(parts)} entries "
-                        f"but pp_size={group.pp_size}"
+                        f"PP group {group.group_id}: pp_layer_partition entry {part!r} is not a positive integer"
                     )
                 for part in parts:
                     part = part.strip()
                     if not part.isdigit() or int(part) <= 0:
                         raise ValueError(
-                            f"PP group {group.group_id}: pp_layer_partition entry {part!r} "
-                            f"is not a positive integer"
+                            f"PP group {group.group_id}: pp_layer_partition entry {part!r} is not a positive integer"
                         )
 
             # All members of a PP group must belong to the same routing group.
@@ -495,9 +490,7 @@ class ExternalDPConfigLoader:
                     group_name_by_node[idx] = role
             routing_roles = {group_name_by_node.get(idx) for idx in group.node_indices}
             if len(routing_roles) > 1:
-                raise ValueError(
-                    f"PP group {group.group_id}: nodes span multiple routing groups {routing_roles}"
-                )
+                raise ValueError(f"PP group {group.group_id}: nodes span multiple routing groups {routing_roles}")
 
     @staticmethod
     def _validate_config_sizes(config: ExternalDPConfig) -> None:
