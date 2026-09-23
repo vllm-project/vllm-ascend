@@ -83,6 +83,18 @@ msgstr ""
 "这意味着两个实例必须在模型标识和部署拓扑上达成一致，规划器才会将它们视为可互换的 seed。\n"
 "对于没有流水线或专家并行的部署，现有的 seed 键格式保持不变。"
 
+msgid "### Planner Responsibilities"
+msgstr "### 规划器职责"
+
+msgid "The planner treats the seed key as an opaque compatibility identifier. RFork derives it from the model/configuration fingerprint, the structural digest of transferable tensors, and shard topology. A planner should:"
+msgstr "规划器将 seed 键视为不透明的兼容性标识符。RFork 根据模型/配置指纹、可传输张量的结构摘要和分片拓扑生成该键。规划器应："
+
+msgid "- Match exact seed keys, track seed availability through heartbeats, and expire stale advertisements.\n- Allocate leases according to seed capacity, accept lease releases, and reclaim abandoned or expired leases.\n- Make seed selection and lease state observable for operations."
+msgstr "- 按 seed 键精确匹配，通过心跳跟踪 seed 可用性，并清理过期的 seed 广告。\n- 根据 seed 容量分配租约、接受租约释放，并回收遗留或已过期的租约。\n- 提供 seed 选择和租约状态的可观测信息，便于运维。"
+
+msgid "Lease release is asynchronous. An unresolved release delays advertising the receiver as a seed, but does not block inference. The bundled planner is a functional example, not a production scheduler."
+msgstr "租约释放以异步方式进行。尚未解决的释放会延迟将接收端发布为 seed，但不会阻塞推理。随附的规划器是功能示例，并非生产级调度器。"
+
 msgid "### Quantized Models"
 msgstr "### 量化模型"
 
@@ -118,15 +130,23 @@ msgstr ""
 "- 更改模型参数或 RFork 代码后使用新的 `model_deploy_strategy_name`，这样规划器就不会将接收方与不兼容的旧 seed 匹配。\n"
 "- 成功的 RFork 传输会记录 `transfer weights starts` 和 `transfer weights time`。回退路径会记录 `RFork transfer failed`。"
 
-msgid "## Tested Models"
-msgstr "## 已测试模型"
+msgid "## Supported Models"
+msgstr "## 支持的模型"
 
-msgid ""
-"The following table records models that have been explicitly tested with "
-"RFork weight transfer. A model should be added here only after RFork "
-"transfer succeeds and the loaded instance passes basic inference validation."
-msgstr ""
-"下表记录了已明确使用 RFork 权重传输进行测试的模型。只有在 RFork 传输成功且加载的实例通过基本推理验证后，才应将模型添加到此表中。"
+msgid "Mainstream DeepSeek/Qwen/GLM series are supported."
+msgstr "支持主流的 DeepSeek/Qwen/GLM 系列模型。"
+
+msgid "## Performance Considerations"
+msgstr "## 性能注意事项"
+
+msgid "RFork indexes tensor address ranges to find backing allocations and uses binary search for memory-coverage checks during registration. Registration still adds seed startup cost, so RFork is most beneficial when later replicas reuse a seed rather than for a single cold start."
+msgstr "RFork 为张量地址范围建立索引以查找底层分配，并在注册期间使用二分查找检查内存覆盖情况。注册仍会增加 seed 的启动开销，因此 RFork 更适用于后续副本复用 seed，而非单次冷启动。"
+
+msgid "Performance depends on model size, shard topology, NPU tensor layout, TransferEngine registration time, network bandwidth, and the number of concurrent destinations. Compare with the default loader using:"
+msgstr "性能取决于模型大小、分片拓扑、NPU 张量布局、TransferEngine 注册时间、网络带宽和并发目标端数量。可使用以下指标与默认加载器进行比较："
+
+msgid "- Time from process start until the service is ready.\n- Registration, metadata, and read timings in the DEBUG `RFork transfer stages` log, plus bytes and throughput in `RFork weight transfer completed` (INFO on TP rank 0, DEBUG on other ranks).\n- Seed inference latency and storage/host-memory traffic while transfers are active.\n- Seed hit rate, transfer failure rate, and fallback rate."
+msgstr "- 从进程启动到服务就绪的耗时。\n- DEBUG 级别 `RFork transfer stages` 日志中的注册、元数据和读取耗时，以及 `RFork weight transfer completed` 中的传输字节数和吞吐量（TP rank 0 为 INFO，其他 rank 为 DEBUG）。\n- 传输期间 seed 的推理延迟以及存储/主机内存流量。\n- seed 命中率、传输失败率和回退率。"
 
 msgid "## Example Commands & Placeholders"
 msgstr "## 示例命令与占位符"
@@ -134,8 +154,8 @@ msgstr "## 示例命令与占位符"
 msgid "> Replace parts in `<...>` before running."
 msgstr "> 运行前替换 `<...>` 中的部分。"
 
-msgid "### 1. Install YuanRong TransferEngine"
-msgstr "### 1. 安装 YuanRong TransferEngine"
+msgid "### 1. Install YuanRong Datasystem"
+msgstr "### 1. 安装 YuanRong Datasystem"
 
 msgid "### 2. Start the Planner"
 msgstr "### 2. 启动规划器"

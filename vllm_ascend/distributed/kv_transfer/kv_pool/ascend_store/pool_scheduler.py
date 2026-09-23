@@ -164,10 +164,16 @@ class KVPoolScheduler:
         self.tp_mismatch = tp_mismatch_info.enabled
 
         self.block_key_hybrid = self.use_block_key_layerwise and self.use_hybrid
-        self.block_key_hybrid_layout = (
-            self.layerwise_protocol.hybrid_layout_id(kv_cache_config, vllm_config.parallel_config.tensor_parallel_size)
-            if self.block_key_hybrid
-            else ""
+        self.layerwise_keys = (
+            self.layerwise_protocol.bind_layerwise_keys(
+                vllm_config=vllm_config,
+                kv_cache_config=kv_cache_config,
+                model_name=vllm_config.model_config.model.split("/")[-1],
+                use_hybrid=self.use_hybrid,
+                grouped_block_size=self.grouped_block_size,
+            )
+            if self.use_layerwise and self.layerwise_protocol is not None
+            else None
         )
         validate_layerwise_runtime(
             self.layerwise_protocol,
@@ -351,27 +357,8 @@ class KVPoolScheduler:
         A block is a hit only when every PP stage has saved it, so the
         protocol helper enumerates all stages and head/TP ranks.
         """
-        head_or_tp_ranks = self.tp_size // self.put_step
-        if self.block_key_hybrid:
-            return [
-                self.layerwise_protocol.hybrid_block_key(
-                    self.model_name,
-                    self.block_key_hybrid_layout,
-                    group_id,
-                    self.grouped_block_size[group_id],
-                    block_hash_hex,
-                    head,
-                )
-                for head in range(head_or_tp_ranks)
-            ]
-        return self.layerwise_protocol.make_hit_check_keys(
-            self.model_name,
-            group_id,
-            block_hash_hex,
-            head_or_tp_ranks,
-            len(self.kv_cache_group_ids),
-            self.pp_size,
-        )
+        assert self.layerwise_keys is not None
+        return self.layerwise_keys.make_hit_check_keys(group_id, block_hash_hex, self.tp_size // self.put_step)
 
     def _get_layerwise_hit_tokens(
         self,
@@ -516,13 +503,8 @@ class KVPoolScheduler:
         )
         if not block_hashes:
             return 0
-        head_or_tp_ranks = self.tp_size // self.put_step
         keys_by_block = [
-            [
-                self.layerwise_protocol.make_block_key(self.model_name, block_hash_to_str(block_hash), head_or_tp_rank)
-                for head_or_tp_rank in range(head_or_tp_ranks)
-            ]
-            for block_hash in block_hashes
+            self._make_layerwise_hit_check_keys(0, block_hash_to_str(block_hash)) for block_hash in block_hashes
         ]
         block_hits = self._query_layerwise_block_hits(keys_by_block)
         num_hit_blocks = 0
