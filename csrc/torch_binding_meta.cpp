@@ -797,6 +797,19 @@ at::Tensor recurrent_kda_meta(
     return at::empty_symint(value.sym_sizes(), value.options());
 }
 
+std::tuple<at::Tensor, at::Tensor, at::Tensor> moe_gating_top_k_with_map_meta(
+    const at::Tensor& x, const at::Tensor& log2phy, int64_t k, int64_t k_group,
+    int64_t group_count, int64_t group_select_mode, int64_t renorm, int64_t norm_type,
+    bool out_flag, double routed_scaling_factor, double eps,
+    const c10::optional<at::Tensor>& bias_opt)
+{
+    TORCH_CHECK(log2phy.dim() == 1, "log2phy must have shape [expert_count]");
+    TORCH_CHECK(log2phy.scalar_type() == at::kInt, "log2phy must be int32");
+    TORCH_CHECK(log2phy.sym_size(0) == x.sym_size(1), "log2phy must have shape [expert_count]");
+    return moe_gating_top_k_meta(x, k, k_group, group_count, group_select_mode, renorm,
+                                 norm_type, out_flag, routed_scaling_factor, eps, bias_opt);
+}
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor> moe_gating_top_k_hash_meta(
     const at::Tensor& x,
     int64_t k,
@@ -2124,6 +2137,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("dispatch_ffn_combine", &vllm_ascend::meta::dispatch_ffn_combine_meta);
     // Moe_gating_top_k
     ops.impl("moe_gating_top_k", &vllm_ascend::meta::moe_gating_top_k_meta);
+    ops.impl("moe_gating_top_k_with_map", &vllm_ascend::meta::moe_gating_top_k_with_map_meta);
     // Add_Rms_Norm_Bias
     ops.impl("npu_add_rms_norm_bias", &vllm_ascend::meta::npu_add_rms_norm_bias_meta);
     ops.impl("npu_rms_norm_cast", &vllm_ascend::meta::npu_rms_norm_cast_meta);

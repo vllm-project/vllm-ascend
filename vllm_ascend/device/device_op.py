@@ -38,6 +38,7 @@ else:
 
 
 class BaseDeviceAdaptor:
+    supports_moe_gating_top_k_log2phy = False
     @classmethod
     def reshape_and_cache(
         cls,
@@ -793,6 +794,7 @@ class BaseDeviceAdaptor:
 
 
 class A5DeviceAdaptor(BaseDeviceAdaptor):
+    supports_moe_gating_top_k_log2phy = True
     @classmethod
     def reshape_and_cache(
         cls,
@@ -931,19 +933,40 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         routed_scaling_factor: float = 1.0,
         eps: float = 1e-20,
         bias_opt: torch.Tensor | None = None,
+        log2phy: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        topk_weights, topk_ids, out = torch_npu.npu_moe_gating_top_k(
-            x,
-            k=k,
-            bias=bias_opt,
-            k_group=k_group,
-            group_count=group_count,
-            group_select_mode=group_select_mode,
-            renorm=0,
-            norm_type=norm_type,
-            routed_scaling_factor=routed_scaling_factor,
-            eps=eps,
-        )
+        if log2phy is not None:
+            # A5 loads supported custom bindings lazily after selecting the NPU.
+            import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401, PLC0415
+
+            topk_weights, topk_ids, out = torch.ops._C_ascend.moe_gating_top_k_with_map(
+                x,
+                k=k,
+                k_group=k_group,
+                group_count=group_count,
+                group_select_mode=group_select_mode,
+                # Match the existing A5 native path; softmax renorm stays below.
+                renorm=0,
+                norm_type=norm_type,
+                out_flag=out_flag,
+                routed_scaling_factor=routed_scaling_factor,
+                eps=eps,
+                bias_opt=bias_opt,
+                log2phy=log2phy,
+            )
+        else:
+            topk_weights, topk_ids, out = torch_npu.npu_moe_gating_top_k(
+                x,
+                k=k,
+                bias=bias_opt,
+                k_group=k_group,
+                group_count=group_count,
+                group_select_mode=group_select_mode,
+                renorm=0,
+                norm_type=norm_type,
+                routed_scaling_factor=routed_scaling_factor,
+                eps=eps,
+            )
         if norm_type == 0 and renorm == 1:
             topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
 

@@ -137,6 +137,43 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
             return False
         return True
 
+    def supports_log2phy_fusion(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+    ) -> bool:
+        """Whether ordinary TopK can directly return physical expert IDs."""
+        return (
+            DeviceOperator.supports_moe_gating_top_k_log2phy
+            and self.eplb_state is None
+            and self.capture_fn is None
+            and self.custom_routing_function is None
+            and self.scoring_func in ("softmax", "sigmoid")
+            and self.tid2eid is None
+            and self.bias_vl is None
+            and 0 < router_logits.shape[-1] <= 2048
+            and self.is_fused_supported(hidden_states)
+        )
+
+    def _select_experts_with_log2phy(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        log2phy: torch.Tensor,
+        *,
+        input_ids: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # The caller checks supports_log2phy_fusion. Logical-ID capture and
+        # upstream EPLB mapping keep using BaseRouter's ordinary selection path.
+        self._validate_eplb_state()
+        return self._compute_routing(
+            hidden_states,
+            router_logits,
+            None,
+            input_ids=input_ids,
+            log2phy=log2phy,
+        )
+
     def _compute_routing(
         self,
         hidden_states: torch.Tensor,
@@ -144,6 +181,7 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
         indices_type: torch.dtype | None,
         *,
         input_ids: torch.Tensor | None = None,
+        log2phy: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.bias_vl is None and not self.is_fused_supported(hidden_states):
             return super()._compute_routing(
@@ -236,6 +274,7 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
             routed_scaling_factor=self.routed_scaling_factor,
             eps=1e-20,
             bias_opt=self.e_score_correction_bias,
+            **({"log2phy": log2phy} if log2phy is not None else {}),
         )
 
         return topk_weights, topk_ids

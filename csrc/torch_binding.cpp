@@ -48,6 +48,7 @@
 #include "moe/causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule/recurrent_gated_delta_rule_torch_adpt.h"
 #include "attention/recurrent_kda/recurrent_kda_torch_adpt.h"
+#include "moe/moe_gating_top_k_with_map/moe_gating_top_k_with_map_torch_adpt.h"
 #include "attention/chunk_kda_fwd/chunk_kda_fwd_torch_adpt.h"
 #include "attention/kda_gate_cumsum/kda_gate_cumsum_torch_adpt.h"
 #include "attention/kda_layout_swap12/kda_layout_swap12_torch_adpt.h"
@@ -2820,6 +2821,13 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "bool use_beta_sigmoid_in_kernel=False, bool allow_neg_eigval=False, "
         "bool safe_gate=True, float lower_bound=-5.0) -> Tensor output");
     ops.impl("recurrent_kda", torch::kPrivateUse1, &vllm_ascend::recurrent_kda);
+
+    ops.def(
+        "moe_gating_top_k_with_map(Tensor x, Tensor log2phy, int k, int k_group, "
+        "int group_count, int group_select_mode, int renorm, int norm_type, "
+        "bool out_flag, float routed_scaling_factor, float eps, Tensor? bias_opt=None) "
+        "-> (Tensor y, Tensor expert_idx, Tensor out)");
+    ops.impl("moe_gating_top_k_with_map", torch::kPrivateUse1, &vllm_ascend::moe_gating_top_k_with_map);
 
     ops.def(
         "dequant_situ_quant(Tensor x, "
