@@ -194,7 +194,7 @@ def test_sending_thread_accepts_pp_aware_keys() -> None:
 
 
 def test_sending_thread_groups_kvpp_layers_across_all_pcp_tp_workers() -> None:
-    metadata = {}
+    metadata: dict[int | tuple[int, ...], object] = {}
     for pcp_rank, tp_rank, kvpp_rank in ((0, 0, 0), (0, 1, 1), (1, 0, 2), (1, 1, 3)):
         metadata[(0, pcp_rank, tp_rank)] = make_transfer_metadata(
             te_rpc_port=9000 + kvpp_rank,
@@ -219,7 +219,7 @@ def test_sending_thread_groups_kvpp_layers_across_all_pcp_tp_workers() -> None:
 
 
 def test_sending_thread_uses_configured_kvpp_when_worker_layers_match() -> None:
-    metadata = {
+    metadata: dict[int | tuple[int, ...], object] = {
         (0, pcp_rank, tp_rank): make_transfer_metadata(
             te_rpc_port=9000 + pcp_rank * 2 + tp_rank,
             base_addrs=[[1000 + pcp_rank * 2000 + tp_rank * 1000]],
