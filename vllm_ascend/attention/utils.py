@@ -18,9 +18,9 @@ from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
 from vllm_ascend.utils import (
+    _is_glm_model,
     get_ascend_config,
     is_pd_decode_recompute_scheduler_enabled,
-    _is_glm_model,
 )
 
 SFA_QSFA_TILE_SIZE = 128

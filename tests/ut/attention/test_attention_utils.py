@@ -25,7 +25,6 @@ from vllm_ascend.attention.utils import (
     _select_seq_lens,
     filter_chunked_req_indices,
     get_or_register_attention_buffer,
-    is_freetime_model_type,
 )
 
 NUM_REQS = 2
@@ -58,7 +57,7 @@ def _spec_config(method: str, parallel_drafting: bool) -> MagicMock:
 
 def _vllm_config(model_type: str) -> SimpleNamespace:
     return SimpleNamespace(
-        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type=model_type)),
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(model_type=model_type)),
     )
 
 
@@ -73,7 +72,7 @@ def test_select_seq_lens_defaults_to_cpu_mirror() -> None:
     [
         # DSpark on the GLM5.2 family keeps the CPU seq_lens mirror.
         ("dspark", True, "glm5_next", CPU_SEQ_LENS[:NUM_REQS]),
-        ("dspark", True, "glm5_next_text", CPU_SEQ_LENS[:NUM_REQS]),
+        ("dspark", True, "glm_moe_dsa", CPU_SEQ_LENS[:NUM_REQS]),
         # DSpark on other models and other parallel-drafting methods (DFlash,
         # PARD draft_model) keep the NPU seq_lens.
         ("dspark", True, "qwen3", NPU_SEQ_LENS),
@@ -108,17 +107,6 @@ def test_select_seq_lens_cross_attention_uses_npu_seq_lens() -> None:
     )
 
     assert seq_lens is NPU_SEQ_LENS
-
-
-def test_is_freetime_model_type_matches_nested_text_config() -> None:
-    # Multimodal checkpoints expose the family via hf_config.text_config.
-    vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(
-            hf_config=SimpleNamespace(model_type="top", text_config=SimpleNamespace(model_type="glm5_next_text")),
-        )
-    )
-
-    assert is_freetime_model_type(vllm_config)
 
 
 def test_get_or_register_attention_buffer() -> None:
