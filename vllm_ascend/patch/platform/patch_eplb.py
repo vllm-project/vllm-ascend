@@ -121,6 +121,7 @@ def _patch_eplb_policy_config() -> None:
     policy_field.default = "stair"
     validator.func = _validate_with_stair
     rebuild_dataclass(config_cls, force=True)
+    rebuild_dataclass(_parallel_config.ParallelConfig, force=True)
 
 
 def _wrap_communicator_factory(original_factory):
