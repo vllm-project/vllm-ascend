@@ -529,7 +529,12 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
     )
     # vLLM main (#54736) added allow_partial_hash_hits.
     hybrid_kwargs["allow_partial_hash_hits"] = allow_partial_hash_hits
-    if _is_deepseek_v4_kv_cache_config(kv_cache_config):
+    cacheable_groups = [is_prefix_cacheable(group.kv_cache_spec) for group in kv_cache_config.kv_cache_groups]
+    has_private_groups = any(cacheable_groups) and not all(cacheable_groups)
+    # The resolver excludes request-private rings from token-page alignment.
+    # Keep their existing Ascend coordinator even with prefix caching disabled;
+    # upstream otherwise treats the ring capacity as a scheduling block size.
+    if _is_deepseek_v4_kv_cache_config(kv_cache_config) or has_private_groups:
         return AscendHybridKVCacheCoordinator(**hybrid_kwargs)  # type: ignore[call-arg]
 
     if len(kv_cache_config.kv_cache_groups) == 1 or not enable_caching:

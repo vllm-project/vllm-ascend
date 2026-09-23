@@ -28,6 +28,7 @@ from vllm_ascend.core.kv_cache_interface import (
 from vllm_ascend.device.hardware_profile import AttentionBackendFamily, get_current_hardware_profile
 from vllm_ascend.models.glm5next.kv_cache import (
     format_indexer_kpool_slot_mapping,
+    get_kpool_tail_ring_capacity,
 )
 
 GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE = 128
@@ -40,7 +41,6 @@ class AscendIndexerKPoolMetadata:
     block_table: torch.Tensor
     slot_mapping: torch.Tensor
     seq_lens: torch.Tensor
-    seq_lens_cpu: torch.Tensor | None
     positions: torch.Tensor
     block_size: int
     compress_ratio: int
@@ -48,6 +48,11 @@ class AscendIndexerKPoolMetadata:
     cum_query_lens: torch.Tensor | None = None
     raw_seq_lens: torch.Tensor | None = None
     num_actual_tokens: int = 0
+    query_start_loc: torch.Tensor | None = None
+    start_pos: torch.Tensor | None = None
+    pool_tail: torch.Tensor | None = None
+    pooled_key_indices: torch.Tensor | None = None
+    retained_tail_indices: torch.Tensor | None = None
 
 
 class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
@@ -93,6 +98,9 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
                 f"kernel={GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE}."
             )
         self.kernel_row_block_size = GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE // self.compress_ratio
+        # The MTP proposer must retain every expanded kernel page when it
+        # crops a group's table, rather than counting scheduler blocks.
+        self.kernel_blocks_per_logical_block = self.logical_block_size // GLM5_NEXT_SFA_KERNEL_BLOCK_SIZE
         scheduler_config = vllm_config.scheduler_config
         # ACLGraph replay keeps the addresses captured on the first run. The
         # derived compressed metadata therefore needs persistent storage that
@@ -104,18 +112,32 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
         )
         self._seq_lens_buffer = torch.empty(
             scheduler_config.max_num_seqs,
-            dtype=torch.int32,
+            dtype=torch.int64,
             device=device,
         )
         self._cum_query_lens_buffer = torch.empty(
             scheduler_config.max_num_seqs,
-            dtype=torch.int32,
+            dtype=torch.int64,
             device=device,
         )
         self._raw_seq_lens_buffer = torch.empty(
             scheduler_config.max_num_seqs,
             dtype=torch.int32,
             device=device,
+        )
+        self._query_start_loc_buffer = torch.empty(scheduler_config.max_num_seqs + 1, dtype=torch.int32, device=device)
+        self._start_pos_buffer = torch.empty(scheduler_config.max_num_seqs, dtype=torch.int32, device=device)
+        self._pool_tail_buffer = torch.empty(scheduler_config.max_num_seqs, dtype=torch.int64, device=device)
+        self._pooled_key_indices_buffer = torch.empty(
+            scheduler_config.max_num_batched_tokens, dtype=torch.int64, device=device
+        )
+        # CANN only saves the unfinished pool. Speculation must retain the
+        # whole rollback window, including rows from a just-completed pool.
+        tail_capacity = get_kpool_tail_ring_capacity(vllm_config, compress_ratio)
+        self._retained_tail_indices_buffer = (
+            torch.empty(scheduler_config.max_num_seqs, tail_capacity, dtype=torch.int64, device=device)
+            if tail_capacity > compress_ratio
+            else None
         )
 
     def build(
@@ -145,30 +167,52 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
             rounding_mode="floor",
             out=seq_lens,
         )
-        cum_query_lens = self._cum_query_lens_buffer[:num_reqs]
-        cum_query_lens.copy_(common_attn_metadata.query_start_loc[: num_reqs + 1][1:])
         raw_seq_lens = self._raw_seq_lens_buffer[:num_reqs]
         raw_seq_lens.copy_(common_attn_metadata.seq_lens[:num_reqs])
-        if common_attn_metadata._seq_lens_cpu is not None:
-            seq_lens_cpu = common_attn_metadata._seq_lens_cpu[:num_reqs]
-        elif common_attn_metadata.seq_lens_cpu is not None:
-            seq_lens_cpu = common_attn_metadata.seq_lens_cpu[:num_reqs]
-        else:
-            seq_lens_cpu = None
-        if seq_lens_cpu is not None:
-            seq_lens_cpu = torch.div(seq_lens_cpu, self.compress_ratio, rounding_mode="floor")
+        query_start_loc = self._query_start_loc_buffer[: num_reqs + 1]
+        query_start_loc.copy_(common_attn_metadata.query_start_loc[: num_reqs + 1])
+        # FIA gives padded requests dummy tokens (or uses -1 sentinels).
+        # CANN needs empty requests: repeat the real token count so their
+        # zero sequence length cannot produce a negative start position.
+        query_start_loc.masked_fill_(query_start_loc < 0, common_attn_metadata.num_actual_tokens)
+        query_start_loc.clamp_max_(common_attn_metadata.num_actual_tokens)
+        cum_query_lens = self._cum_query_lens_buffer[:num_reqs]
+        cum_query_lens.copy_(query_start_loc[1:])
+        start_pos = self._start_pos_buffer[:num_reqs]
+        start_pos.copy_(raw_seq_lens - (query_start_loc[1:] - query_start_loc[:-1]))
+        pool_tail = self._pool_tail_buffer[:num_reqs]
+        torch.remainder(raw_seq_lens, self.compress_ratio, out=pool_tail)
+        # TH KeyPool concatenates completed pools in request/token order.
+        # Count pool boundaries, including any whose cache slot is evicted,
+        # rather than valid slots: eviction does not remove an operator row.
+        valid_tokens = torch.arange(num_input_tokens, device=positions.device) < query_start_loc[-1]
+        completed = (torch.remainder(positions + 1, self.compress_ratio) == 0) & valid_tokens
+        pooled_key_indices = self._pooled_key_indices_buffer[:num_input_tokens]
+        torch.cumsum(completed, dim=0, dtype=torch.int64, out=pooled_key_indices)
+        pooled_key_indices.sub_(1).clamp_min_(0)
+        retained_tail_indices = None
+        if self._retained_tail_indices_buffer is not None:
+            retained_tail_indices = self._retained_tail_indices_buffer[:num_reqs]
+            capacity = retained_tail_indices.shape[1]
+            offsets = torch.arange(capacity, device=positions.device)
+            retained_tail_indices.copy_(query_start_loc[1:, None] - capacity + offsets)
+            retained_tail_indices.masked_fill_(retained_tail_indices < query_start_loc[:-1, None], -1)
         block_table = common_attn_metadata.block_table_tensor[:num_reqs]
         return AscendIndexerKPoolMetadata(
             block_table=block_table,
             slot_mapping=slot_mapping,
             seq_lens=seq_lens,
-            seq_lens_cpu=seq_lens_cpu,
             positions=positions,
             block_size=self.kernel_row_block_size,
             compress_ratio=self.compress_ratio,
             cum_query_lens=cum_query_lens,
             raw_seq_lens=raw_seq_lens,
             num_actual_tokens=common_attn_metadata.num_actual_tokens,
+            query_start_loc=query_start_loc,
+            start_pos=start_pos,
+            pool_tail=pool_tail,
+            pooled_key_indices=pooled_key_indices,
+            retained_tail_indices=retained_tail_indices,
         )
 
 
@@ -185,7 +229,7 @@ class AscendIndexerKPoolBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        # The scheduler manages logical token blocks. Triton consumes complete
+        # The scheduler manages logical token blocks. PoolKeyIndexer consumes
         # compressed storage pages with their actual size and strides.
         return [MultipleOf(1)]
 
@@ -245,6 +289,14 @@ class AscendIndexerKPoolTailMetadataBuilder(AttentionMetadataBuilder):
             )
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.block_size = kv_cache_spec.block_size
+        # Each request owns one persistent ring. CANN's temporary history and
+        # output pages are local to the operator wrapper, not cache metadata.
+        self._block_table_buffer = torch.empty(
+            vllm_config.scheduler_config.max_num_seqs,
+            1,
+            dtype=torch.int32,
+            device=device,
+        )
 
     def build(
         self,
@@ -256,8 +308,10 @@ class AscendIndexerKPoolTailMetadataBuilder(AttentionMetadataBuilder):
         del common_prefix_len, fast_build, kwargs
         num_reqs = common_attn_metadata.num_reqs
         num_input_tokens = common_attn_metadata.num_input_tokens
+        block_table = self._block_table_buffer[:num_reqs]
+        block_table.copy_(common_attn_metadata.block_table_tensor[:num_reqs, :1])
         return AscendIndexerKPoolTailMetadata(
-            block_table=common_attn_metadata.block_table_tensor[:num_reqs],
+            block_table=block_table,
             slot_mapping=common_attn_metadata.slot_mapping[:num_input_tokens],
             block_size=self.block_size,
         )
@@ -295,7 +349,7 @@ class AscendIndexerKPoolTailBackend(AttentionBackend):
         del cache_type, cache_dtype_str
         if num_kv_heads != 1:
             raise ValueError(f"Indexer KPool tail cache requires one KV head, got {num_kv_heads}.")
-        return (num_blocks, 2, block_size, head_size)
+        return (num_blocks, block_size, 2 * head_size)
 
 
 class Glm5NextKPoolIndexerBackend(nn.Module):
@@ -338,7 +392,7 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
 
         self.indexer_op = SparseAttnIndexerKpool(self.topk_tokens, self.head_dim)
         self.enable_sparse_li_c8 = False
-        for name in ("_wk_weight_f32", "_gate_weight_f32", "_norm_weight_f32", "_norm_bias_f32"):
+        for name in ("_key_weight", "_gate_weight", "_head_weight_f32", "_norm_weight_f32", "_norm_bias_f32"):
             self.register_buffer(name, None, persistent=False)
 
     @property
@@ -355,8 +409,9 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
         return 1
 
     def process_weights_after_loading(self) -> None:
-        self._wk_weight_f32 = self.wk_weights_proj.weight.detach().float()
-        self._gate_weight_f32 = self.index_kpool_compress_gate.detach().float()
+        self._key_weight = self.wk_weights_proj.weight[: self.head_dim].detach().contiguous()
+        self._gate_weight = self.index_kpool_compress_gate.detach().to(self._key_weight.dtype).contiguous()
+        self._head_weight_f32 = self.wk_weights_proj.weight[self.head_dim :].detach().float().contiguous()
         self._norm_weight_f32 = self.k_norm.weight.detach().float() if self.k_norm.weight is not None else None
         self._norm_bias_f32 = self.k_norm.bias.detach().float() if self.k_norm.bias is not None else None
 
@@ -399,38 +454,23 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             num_tokens = min(num_tokens, indexer_metadata.num_actual_tokens)
         hidden = hidden_states[:num_tokens]
         k_hidden = k_hidden_states[:num_tokens]
-        if self._wk_weight_f32 is None:
+        if self._key_weight is None:
             self.process_weights_after_loading()
-        assert self._wk_weight_f32 is not None
-        hidden_f32 = hidden.float()
-        k_hidden_f32 = hidden_f32 if k_hidden_states is hidden_states else k_hidden.float()
-        projected = F.linear(k_hidden_f32, self._wk_weight_f32)
-        k = F.layer_norm(
-            projected[:, : self.head_dim],
-            (self.head_dim,),
-            self._norm_weight_f32,
-            self._norm_bias_f32,
-            getattr(self.k_norm, "eps", getattr(self.k_norm, "variance_epsilon", 1e-6)),
-        )
-        gate_score = F.linear(k_hidden_f32, self._gate_weight_f32)
+        assert self._key_weight is not None
         q_values = None
         weights = None
         if compute_topk:
             if isinstance(q_c, tuple):
                 raise TypeError("GLM KPool backend requires an unquantized q_c tensor.")
             q_values = self.wq_b(q_c[:num_tokens])[0].view(num_tokens, self.n_head, self.head_dim)
-            weights = (
-                projected[:, self.head_dim :]
-                if k_hidden_states is hidden_states
-                else F.linear(hidden_f32, self._wk_weight_f32[self.head_dim :])
-            ).to(q_values.dtype)
+            weights = F.linear(hidden.float(), self._head_weight_f32).to(q_values.dtype)
             weights = weights * (self.softmax_scale * self.n_head**-0.5)
 
         indexer_cache = self._bound_cache(self.k_cache)
         tail_cache = self._bound_cache(self.tail_cache)
         positions = indexer_metadata.positions[:num_tokens]
         result = self.indexer_op(
-            k,
+            k_hidden,
             q_values,
             weights,
             positions,
@@ -438,16 +478,13 @@ class Glm5NextKPoolIndexerBackend(nn.Module):
             tail_cache,
             indexer_metadata,
             tail_metadata,
-            gate_score=gate_score,
+            key_weight=self._key_weight,
+            gate_weight=self._gate_weight,
+            norm_weight=self._norm_weight_f32,
+            norm_bias=self._norm_bias_f32,
+            norm_eps=getattr(self.k_norm, "eps", getattr(self.k_norm, "variance_epsilon", 1e-6)),
             compress_ape=self.index_kpool_compress_ape,
             index_kpool=self.index_kpool,
-            max_pool_seq_len=(
-                indexer_metadata.block_table.shape[1] * indexer_cache.shape[1]
-                if context.cudagraph_runtime_mode == CUDAGraphMode.FULL or indexer_metadata.seq_lens_cpu is None
-                else int(indexer_metadata.seq_lens_cpu.max())
-                if indexer_metadata.seq_lens_cpu.numel()
-                else 0
-            ),
             compute_topk=compute_topk,
         )
         if result is None or self.topk_indices_buffer is None:

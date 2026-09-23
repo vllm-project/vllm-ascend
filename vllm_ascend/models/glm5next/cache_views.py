@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Pooled-cache physical views for GLM-Next on Model Runner V1."""
+"""Pooled-cache physical views for GLM-Next."""
 
 from collections.abc import Callable
 
@@ -24,12 +24,14 @@ def _row_major_strides(shape: tuple[int, ...]) -> list[int]:
     return strides
 
 
-def _view_kpool_tail_cache(
+def view_kpool_tail_cache(
     layer_name: str,
     kv_cache_spec: AscendIndexerKPoolTailSpec,
-    raw_cache: torch.Tensor,
+    raw_cache: torch.Tensor | tuple[torch.Tensor, ...],
     num_blocks: int,
+    attn_backend: AttentionBackend,
 ) -> list[torch.Tensor]:
+    """Bind the backend's tail layout to the packed end of its shared slot."""
     if not isinstance(raw_cache, torch.Tensor):
         raise ValueError(f"KPool tail cache for {layer_name} must use one raw tensor.")
     typed_slot = raw_cache.view(kv_cache_spec.dtype)
@@ -41,14 +43,13 @@ def _view_kpool_tail_cache(
             f"packed={num_tail_blocks * tail_block_el} elements, "
             f"slot={typed_slot.numel()}."
         )
-    return [
-        typed_slot[typed_slot.numel() - num_tail_blocks * tail_block_el :].view(
-            num_tail_blocks,
-            2,
-            kv_cache_spec.block_size,
-            kv_cache_spec.head_size,
-        )
-    ]
+    shape = attn_backend.get_kv_cache_shape(
+        num_tail_blocks,
+        kv_cache_spec.block_size,
+        kv_cache_spec.num_kv_heads,
+        kv_cache_spec.head_size,
+    )
+    return [typed_slot[typed_slot.numel() - num_tail_blocks * tail_block_el :].view(shape)]
 
 
 def _view_compressed_indexer_cache(
@@ -130,7 +131,7 @@ def view_glm5_next_cache(
     falls through to its generic reshape paths.
     """
     if isinstance(kv_cache_spec, AscendIndexerKPoolTailSpec):
-        return _view_kpool_tail_cache(layer_name, kv_cache_spec, raw_cache, num_blocks)
+        return view_kpool_tail_cache(layer_name, kv_cache_spec, raw_cache, num_blocks, attn_backend)
     if isinstance(kv_cache_spec, AscendMLAAttentionSpec) and getattr(
         kv_cache_spec, "indexes_kv_by_block_stride", False
     ):

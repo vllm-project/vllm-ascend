@@ -11,8 +11,9 @@ import torch
 from vllm.v1.core.single_type_kv_cache_manager import (
     register_all_kvcache_specs,
 )
-from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, KVCacheTensor, MambaSpec
 
+from vllm_ascend.attention.indexer_kpool import AscendIndexerKPoolBackend, AscendIndexerKPoolTailBackend
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
@@ -25,6 +26,7 @@ from vllm_ascend.models.glm5next.cache_config import (
 )
 from vllm_ascend.utils import get_kv_cache_tensor_layers
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.v2 import attn_utils
 
 MAIN = "model.layers.1.attn"
 INDEXER = "model.layers.1.indexer.k_cache"
@@ -57,7 +59,7 @@ class _StateBackend:
         head_size,
         **_kwargs,
     ):
-        return num_blocks, 2, block_size, head_size
+        return num_blocks, block_size, 2 * head_size
 
 
 def _make_config():
@@ -206,7 +208,7 @@ def test_glm5_next_runner_allocates_contiguous_slot_backings():
     assert main_rope_cache.shape == (3, 8, 1, 0)
     assert main_cache.is_contiguous()
     assert indexer_cache.shape == (3, 4, 1, 4)
-    assert tail_cache.shape == (3, 2, 2, 1)
+    assert tail_cache.shape == (3, 2, 2)
     assert [cache.shape for cache in caches[MAMBA]] == [
         (3, 2, 2),
         (3, 1, 2, 2),
@@ -232,6 +234,99 @@ def test_glm5_next_runner_allocates_contiguous_slot_backings():
     assert torch.all(slot[slot.numel() - block2_els :].view(torch.float32) == 7)
     assert torch.count_nonzero(slot[: slot.numel() - tail_packed_els]) == 0
     assert torch.count_nonzero(slot[slot.numel() - tail_packed_els : slot.numel() - block2_els]) == 0
+
+
+@pytest.mark.parametrize("runner_version", ["v1", "v2"])
+@pytest.mark.parametrize("storage_offset", [0, 64])
+def test_cann_tail_backend_preserves_packed_layout(runner_version, storage_offset, monkeypatch):
+    # A speculative tail has a different capacity from the pool size. Use
+    # D > 1 so [blocks, 2, capacity, D] cannot masquerade as interleaved K/G.
+    num_blocks, logical_block_size, pool_size, capacity, head_dim = 3, 256, 4, 7, 5
+    page_bytes = 4096
+    specs = {
+        INDEXER: AscendMLAAttentionSpec(
+            block_size=logical_block_size,
+            num_kv_heads=1,
+            head_size=head_dim,
+            dtype=torch.bfloat16,
+            page_size_padded=page_bytes,
+            model_version="glm5_next",
+            indexes_kv_by_block_stride=True,
+            **_ratio_kwargs(pool_size),
+        ),
+        STATE: AscendIndexerKPoolTailSpec(
+            block_size=capacity,
+            sliding_window=pool_size,
+            compress_ratio=pool_size,
+            num_kv_heads=1,
+            head_size=head_dim,
+            dtype=torch.float32,
+            page_size_padded=page_bytes,
+        ),
+    }
+    plan = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=num_blocks * page_bytes,
+                layers=[INDEXER, STATE],
+                layer_stride=page_bytes,
+                block_stride=page_bytes,
+                offset=0,
+            )
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=[name], kv_cache_spec=spec) for name, spec in specs.items()],
+    )
+    groups = [
+        SimpleNamespace(
+            kv_cache_group_id=gid,
+            kv_cache_spec=specs[name],
+            layer_names=[name],
+            backend=backend,
+        )
+        for gid, (name, backend) in enumerate(
+            [(INDEXER, AscendIndexerKPoolBackend), (STATE, AscendIndexerKPoolTailBackend)]
+        )
+    ]
+    backing = torch.full((storage_offset + num_blocks * page_bytes + 64,), 17, dtype=torch.int8)
+    raw = backing[storage_offset : storage_offset + num_blocks * page_bytes]
+    raw_caches = {INDEXER: raw, STATE: raw}
+    config = _make_config()
+    if runner_version == "v1":
+        runner = _make_runner(config)
+        runner.kernel_block_sizes = [[128], [capacity]]
+        runner._kv_cache_spec_attn_group_iterator = lambda: iter(groups)
+        caches = runner._reshape_kv_cache_tensors(plan, raw_caches)
+    else:
+        monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
+        monkeypatch.setattr(attn_utils, "enable_sfa", lambda _config: False)
+        caches = attn_utils._reshape_kv_cache_v2(groups, raw_caches, "auto", [128, capacity], {}, plan)
+
+    (indexer_cache,) = caches[INDEXER]
+    (tail_cache,) = caches[STATE]
+    assert indexer_cache.shape == (num_blocks * 2, 128 // pool_size, 1, head_dim)
+    assert tail_cache.shape == (num_blocks, capacity, 2 * head_dim)
+    assert tail_cache.dtype == torch.float32
+    assert indexer_cache.is_contiguous() and tail_cache.is_contiguous()
+    assert indexer_cache.data_ptr() == raw.data_ptr()
+    tail_bytes = tail_cache.numel() * tail_cache.element_size()
+    assert tail_cache.data_ptr() == raw.data_ptr() + raw.numel() - tail_bytes
+    indexer_bytes = indexer_cache.numel() * indexer_cache.element_size()
+    assert indexer_cache.data_ptr() + indexer_bytes <= tail_cache.data_ptr()
+
+    indexer_cache.fill_(11)
+    expected = backing.clone()
+    # K and gate occupy adjacent columns of every ring row, never two planes.
+    expected_tail = expected[storage_offset + raw.numel() - tail_bytes : storage_offset + raw.numel()].view(
+        torch.float32
+    )
+    expected_rows = expected_tail.view(num_blocks, capacity, 2 * head_dim)
+    expected_rows[:, :, :head_dim] = 5
+    expected_rows[:, :, head_dim:] = 7
+    tail_cache[:, :, :head_dim] = 5
+    tail_cache[:, :, head_dim:] = 7
+    torch.testing.assert_close(backing, expected, rtol=0, atol=0)
+    torch.testing.assert_close(indexer_cache, torch.full_like(indexer_cache, 11), rtol=0, atol=0)
 
 
 def test_glm5_next_runner_splits_main_mla_components_within_each_page():

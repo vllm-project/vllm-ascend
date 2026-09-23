@@ -147,6 +147,29 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     -it $IMAGE bash
     ```
 
+### 4.2 CANN KeyPool Operators
+
+The GLM-5.3-Flash KPool backend requires both the CANN
+[ops-transformer operator package](https://gitcode.com/cann/ops-transformer)
+and its matching [PyTorch extension](https://gitcode.com/cann/ops-transformer/tree/master/torch_extension).
+The extension must provide `torch.ops.cann_ops_transformer.key_pool` and
+`torch.ops.cann_ops_transformer.pool_key_indexer`. Older images can contain
+`cann_ops_transformer` without these two operators; installing the Python
+extension alone does not supply the matching ACLNN implementations.
+
+Follow the ops-transformer installation instructions for your CANN toolkit
+and hardware, and activate its environment before starting vLLM. This backend
+uses device-resident sequence lengths and requires
+`aclnnPoolKeyIndexerTensorGetWorkspaceSize` for eager execution and ACLGraph
+replay. vllm-ascend does not build or register its own copies of these operators.
+
+For speculative decoding, including MTP, the backend retains the compressor
+rollback window in the existing per-request tail cache. Temporary history and
+output pages keep CANN's tail writes separate from history still being read.
+This allows the next verification step to recover the committed prefix after
+draft rejection. Follow the deployment example's speculative configuration;
+the draft model still requires `enforce_eager: true`.
+
 ## 5 Online Service Deployment
 
 !!! note
@@ -181,8 +204,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
       --trust-remote-code \
       --gpu-memory-utilization 0.9 \
       --limit-mm-per-prompt '{"image": 1, "video": 0}' \
-      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16,32,64,96,128]}' \
-      --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16,32,64,96,128]}'
     ```
 
 === "Atlas 800 A3 series"
@@ -216,7 +238,6 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
       --quantization ascend \
       --limit-mm-per-prompt '{"image": 1, "video": 0}' \
       --gpu-memory-utilization 0.85 \
-      --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16,32,64,96,128]}' \
       --api-server-count 1
     ```
@@ -232,7 +253,6 @@ Only the key parameters specific to this model/scenario are described below. `ma
 - `--quantization ascend`: Enables Ascend quantization for the w8a8 quantized weights.
 - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'`: Enables graph capture for the decode phase only, improving decode performance by reducing kernel launch overhead.
 - `--limit-mm-per-prompt '{"image": 1, "video": 0}'`: For text-only deployment, --limit-mm-per-prompt can be omitted. For multimodal deployment, configure this parameter according to the actual request shape. For example, use --limit-mm-per-prompt '{"image":2,"video":0}' for two-image requests, and use --limit-mm-per-prompt '{"image":0,"video":1}' for one-video requests.
-- `--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'`: Enables Multi-Token Prediction (MTP) speculative decoding with the DeepSeek-style MTP draft head of GLM-5.3-Flash. `num_speculative_tokens` (3-5) controls how many tokens are speculated per step; `enforce_eager: true` is required because GLM-5.3-Flash does not support graph-mode speculative decoding.
 
 ### 5.2 Multi-Node Deployment
 
@@ -286,7 +306,6 @@ Only the key parameters specific to this model/scenario are described below. `ma
         --quantization ascend \
         --limit-mm-per-prompt '{"image":1,"video":0}' \
         --gpu-memory-utilization 0.85 \
-        --speculative-config '{"num_speculative_tokens":3,"method":"deepseek_mtp","enforce_eager":true}' \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[4,8,16,32,64,96,128]}' \
         --api-server-count 1
     ```
@@ -336,7 +355,6 @@ Only the key parameters specific to this model/scenario are described below. `ma
         --quantization ascend \
         --limit-mm-per-prompt '{"image":1,"video":0}' \
         --gpu-memory-utilization 0.85 \
-        --speculative-config '{"num_speculative_tokens":3,"method":"deepseek_mtp","enforce_eager":true}' \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[4,8,16,32,64,96,128]}'
     ```
 
