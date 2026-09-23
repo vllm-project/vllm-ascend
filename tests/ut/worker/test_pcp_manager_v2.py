@@ -236,19 +236,13 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
     local_attn_state = object()
 
     with (
-        # This Triton helper is unrelated to PCP partitioning and has no CPU
-        # implementation. Stub only it; AscendPCPManager.partition_batch and
-        # PCPManager.partition_batch both execute unmocked below.
+        # Upstream main (#56888) moved the device copy to async_tensor_h2d and
+        # no longer imports prepare_pos_seq_lens / combine_sampled_and_draft_tokens
+        # into pcp_manager. Stub only the CPU-incompatible copy;
+        # AscendPCPManager.partition_batch and PCPManager.partition_batch both
+        # execute unmocked below.
         patch(
-            "vllm.v1.worker.gpu.pcp_manager.prepare_pos_seq_lens",
-            return_value=None,
-        ),
-        patch(
-            "vllm.v1.worker.gpu.pcp_manager.combine_sampled_and_draft_tokens",
-            return_value=torch.zeros(2, dtype=torch.int64),
-        ),
-        patch(
-            "vllm.v1.worker.gpu.pcp_manager.async_copy_to_gpu",
+            "vllm.v1.worker.gpu.pcp_manager.async_tensor_h2d",
             side_effect=_mock_async_copy_to_cpu,
         ),
         patch(
@@ -264,20 +258,21 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
     np.testing.assert_array_equal(global_batch.seq_lens_np, np.array([18], dtype=np.int32))
     assert global_batch.attn_state == "global-attn-state"
 
-    # PCP=2 rank 0 owns the tail chunk then the head chunk; the real base
-    # implementation produces this local row order and pads to rank 1's size.
+    # PCP=2 rank 0 owns the head chunk then the tail chunk; the real base
+    # implementation produces this canonical local row order and pads to rank
+    # 1's size.
     assert result.req_ids == ["global-req", "global-req"]
     np.testing.assert_array_equal(result.idx_mapping_np, np.array([3, 3], dtype=np.int32))
-    np.testing.assert_array_equal(result.num_scheduled_tokens, np.array([3, 5], dtype=np.int32))
-    np.testing.assert_array_equal(result.query_start_loc_np, np.array([0, 3, 8], dtype=np.int32))
+    np.testing.assert_array_equal(result.num_scheduled_tokens, np.array([5, 3], dtype=np.int32))
+    np.testing.assert_array_equal(result.query_start_loc_np, np.array([0, 5, 8], dtype=np.int32))
     assert result.num_tokens == 8
     expected_num_tokens_after_padding = 12
     assert result.num_tokens_after_padding == expected_num_tokens_after_padding
-    assert torch.equal(result.input_ids[:8], torch.tensor([15, 16, 17, 0, 1, 2, 3, 4], dtype=torch.int32))
+    assert torch.equal(result.input_ids[:8], torch.tensor([0, 1, 2, 3, 4, 15, 16, 17], dtype=torch.int32))
 
     # dataclasses.replace() retains the global Ascend-only fields by default;
     # the override must refresh them from real PCP-local CPU rows.
-    expected_seq_lens = np.array([18, 5], dtype=np.int32)
+    expected_seq_lens = np.array([5, 18], dtype=np.int32)
     np.testing.assert_array_equal(result.seq_lens_np, expected_seq_lens)
     assert result.attn_state is local_attn_state
     build_attn_state.assert_called_once()
@@ -387,7 +382,7 @@ def test_partition_batch_pads_decode_requests_when_tokens_are_already_padded():
     ):
         result = manager.partition_batch(global_batch, padded_num_tokens=4)
 
-    upstream_partition.assert_called_once_with(global_batch, padded_num_tokens=4)
+    upstream_partition.assert_called_once_with(global_batch, padded_num_tokens=4, padded_num_reqs=None)
     assert result.num_reqs == 3
     assert result.num_reqs_after_padding == 4
     assert result.num_tokens == 3
@@ -433,7 +428,7 @@ def test_partition_batch_keeps_piecewise_request_extent():
     ):
         result = manager.partition_batch(batch, padded_num_tokens=4)
 
-    upstream_partition.assert_called_once_with(batch, padded_num_tokens=4)
+    upstream_partition.assert_called_once_with(batch, padded_num_tokens=4, padded_num_reqs=None)
     assert result.num_reqs_after_padding == 2
     assert torch.equal(result.query_start_loc, torch.tensor([0, 1, 2], dtype=torch.int32))
     np.testing.assert_array_equal(result.query_start_loc_np, np.array([0, 1, 2], dtype=np.int32))
@@ -567,15 +562,7 @@ def test_partition_batch_preserves_fia_dummy_layout() -> None:
 
     with (
         patch(
-            "vllm.v1.worker.gpu.pcp_manager.prepare_pos_seq_lens",
-            return_value=None,
-        ),
-        patch(
-            "vllm.v1.worker.gpu.pcp_manager.combine_sampled_and_draft_tokens",
-            return_value=torch.zeros(1, dtype=torch.int64),
-        ),
-        patch(
-            "vllm.v1.worker.gpu.pcp_manager.async_copy_to_gpu",
+            "vllm.v1.worker.gpu.pcp_manager.async_tensor_h2d",
             side_effect=_mock_async_copy_to_cpu,
         ),
         patch(

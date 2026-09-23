@@ -299,7 +299,7 @@ def test_sfa_indexer_cache_spec_runtime_ownership_and_dcp_replication(
         additional_config={},
         parallel_config=SimpleNamespace(decode_context_parallel_size=4),
         cache_config=SimpleNamespace(block_size=128, cache_dtype="auto"),
-        attention_config=SimpleNamespace(indexer_kv_dtype="int8"),
+        attention_config=SimpleNamespace(indexer_kv_dtype="int8", hisparse_config=None),
         model_config=SimpleNamespace(
             dtype=torch.bfloat16,
             hf_text_config=SimpleNamespace(index_head_dim=128),
@@ -367,7 +367,7 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
     )
     vllm_config = SimpleNamespace(
         additional_config={},
-        attention_config=SimpleNamespace(indexer_kv_dtype="int8"),
+        attention_config=SimpleNamespace(indexer_kv_dtype="int8", hisparse_config=None),
         model_config=SimpleNamespace(
             hf_config=SimpleNamespace(
                 compress_ratios=[4],
@@ -483,21 +483,21 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
     def _ascend_bind_kv_cache(
         kv_caches: dict[str, Any],
         forward_context: dict[str, Any],
-        runner_kv_caches_: list[Any],
         num_attn_module: int = 1,
         kv_cache_groups: Any = None,
     ) -> None:
         del num_attn_module, kv_cache_groups
-        assert len(runner_kv_caches_) == 0
+        assert len(runner_kv_caches) == 0
         for kv_cache in kv_caches.values():
-            runner_kv_caches_.append(kv_cache)
+            runner_kv_caches.append(kv_cache)
         for layer_name_, kv_cache in kv_caches.items():
             forward_context[layer_name_].kv_cache = kv_cache
 
     monkeypatch.setattr(upstream_attn_utils, "allocate_kv_cache", _ascend_allocate_kv_cache)
-    monkeypatch.setattr(upstream_attn_utils, "bind_kv_cache", _ascend_bind_kv_cache)
+    # vLLM main (#53781) routes init_kv_cache through bind_kv_cache_to_layers
+    # and dropped the runner_kv_caches parameter.
+    monkeypatch.setattr(upstream_attn_utils, "bind_kv_cache_to_layers", _ascend_bind_kv_cache)
     kv_caches = upstream_attn_utils.init_kv_cache(
-        runner_kv_caches=runner_kv_caches,
         forward_context={layer_name: cache_layer},
         kv_cache_config=kv_cache_config,
         device=torch.device("cpu"),
@@ -1088,7 +1088,7 @@ def test_attn_state_mla_spec_and_metadata_wrappers(monkeypatch):
     vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         cache_config=SimpleNamespace(block_size=16, cache_dtype="auto"),
-        attention_config=SimpleNamespace(indexer_kv_dtype="int8"),
+        attention_config=SimpleNamespace(indexer_kv_dtype="int8", hisparse_config=None),
         model_config=SimpleNamespace(
             dtype=torch.bfloat16,
             hf_text_config=SimpleNamespace(kv_lora_rank=128, qk_rope_head_dim=64),

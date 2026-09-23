@@ -252,7 +252,8 @@ def test_replay_metadata_preserves_architecture_behavior(monkeypatch, architectu
     query_metadata = SimpleNamespace(actual_seq_lengths_q=[5, 5])
     metadata = {"draft": SimpleNamespace(decode=query_metadata) if architecture == "MLA" else query_metadata}
     builder = MagicMock(return_value=metadata)
-    monkeypatch.setattr(DSparkSpeculator, "_build_draft_attn_metadata", builder)
+    # vLLM main (#56181) renamed the hook to _build_uniform_attn_metadata.
+    monkeypatch.setattr(DSparkSpeculator, "_build_uniform_attn_metadata", builder)
     update = MagicMock(wraps=spec._update_draft_attn_metadata)
     monkeypatch.setattr(spec, "_update_draft_attn_metadata", update)
     captured: dict[str, Any] = {}
@@ -277,9 +278,11 @@ def test_replay_metadata_preserves_architecture_behavior(monkeypatch, architectu
         assert query_metadata.actual_seq_lengths_q == [5, 5]
         update.assert_not_called()
     kwargs = builder.call_args.kwargs
-    assert "update_query_lengths" not in kwargs
     assert kwargs["num_reqs"] == 1
-    assert kwargs["num_reqs_padded"] == 2
+    assert kwargs["batch_desc"].num_reqs == 2
+    assert kwargs["batch_desc"].num_tokens == 10
+    assert kwargs["num_query_per_req"] == 5
+    assert kwargs["step"] == 5
     assert kwargs["causal"] == {0: False}
     assert spec.input_batch.is_prefilling_np.tolist() == [True, True]
 
@@ -337,11 +340,12 @@ def test_query_builder_overrides_and_restores_target_context(monkeypatch, archit
         return {"draft": metadata}
 
     def parent(self, **kwargs):
-        assert kwargs["num_reqs_padded"] == 2
         return module.build_attn_metadata(attn_state=None)
 
+    spec.input_batch = SimpleNamespace(num_reqs=1)
+    spec._group_causal = {}
     monkeypatch.setattr(attn_utils, "build_attn_metadata", build)
-    monkeypatch.setattr(DSparkSpeculator, "_build_draft_attn_metadata", parent)
+    monkeypatch.setattr(DSparkSpeculator, "_build_uniform_attn_metadata", parent)
     with (
         attn_utils.build_attn_metadata_wrapper(),
         attn_utils.build_draft_attn_metadata_factory(
@@ -350,8 +354,8 @@ def test_query_builder_overrides_and_restores_target_context(monkeypatch, archit
     ):
         outer = module.build_attn_metadata
         with pytest.raises(RuntimeError, match="query failed") if fail else nullcontext():
-            result = spec._build_draft_attn_metadata(num_reqs=1, num_reqs_padded=1, num_tokens_padded=10, step=5)
-            metadata = result["draft"]
+            result = spec.build_draft_attn_metadatas(2, torch.tensor([5]))
+            metadata = result[0]["draft"]
             query = metadata.decode if architecture == "MLA" else metadata
             assert query.actual_seq_lengths_q == [5, 10]
             assert metadata.attn_state == AscendAttentionState.ChunkedPrefill

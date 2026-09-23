@@ -1644,7 +1644,6 @@ class TestEagleProposerPropose:
             'num_actual_tokens', 'max_query_len', 'max_seq_len', 'block_table_tensor', \
             'slot_mapping', 'causal', 'logits_indices_padded', 'num_logits_indices', \
             'encoder_seq_lens', 'encoder_seq_lens_cpu', 'dcp_local_seq_lens', \
-            'dcp_local_seq_lens_cpu', '_seq_lens_cpu', '_num_computed_tokens_cpu', \
             '_num_computed_tokens_cache'
         }
 
@@ -1660,7 +1659,8 @@ class TestEagleProposerPropose:
             'positions', 'seq_lens_cpu', 'decode_token_per_req', \
             'context_parallel_metadata', 'actual_seq_lengths_q', \
             'attn_state', 'num_computed_tokens_cpu', 'num_input_tokens', \
-            'graph_pad_size'
+            'graph_pad_size', '_seq_lens_cpu', '_num_computed_tokens_cpu', \
+            'dcp_local_seq_lens_cpu'
         }
 
         actual = set(vllm_ascend.attention.utils.AscendCommonAttentionMetadata.__dataclass_fields__)

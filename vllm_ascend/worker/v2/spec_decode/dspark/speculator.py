@@ -148,29 +148,6 @@ class AscendDSparkSpeculator(DSparkSpeculator):
 
         return [self._update_draft_attn_metadata(attn_metadata, num_reqs_padded)]
 
-    def _build_draft_attn_metadata(self, *, num_reqs_padded, **kwargs):
-        if self.attn_architecture not in ("GQA", "MLA"):
-            return super()._build_draft_attn_metadata(num_reqs_padded=num_reqs_padded, **kwargs)
-
-        # This kwargs["num_tokens_padded"] is only useful in eager/PIECEWISE.
-        # TODO: Replace this temporary padding workaround with upstream #56181's
-        # actual-token metadata and MLA input slicing for non-FULL execution.
-        num_tokens_padded = kwargs["num_tokens_padded"]
-        assert num_tokens_padded % self.num_query_per_req == 0, "Draft tokens must contain whole query groups"
-        num_reqs_padded = num_tokens_padded // self.num_query_per_req
-
-        with (
-            build_attn_metadata_wrapper(),
-            build_draft_attn_metadata_factory(
-                self.input_buffers.positions,
-                num_tokens_padded,
-                is_prefilling=torch.zeros(num_reqs_padded, dtype=torch.bool),
-                attn_state=AscendAttentionState.ChunkedPrefill,
-            ),
-        ):
-            attn_metadata = super()._build_draft_attn_metadata(num_reqs_padded=num_reqs_padded, **kwargs)
-        return self._update_draft_attn_metadata(attn_metadata, num_reqs_padded)
-
     def _update_draft_attn_metadata(self, attn_metadata, num_reqs_padded):
         """Rebuild ``actual_seq_lengths_q`` from the padded request count,
         mirroring Eagle's ``_update_decode_attn_metadata``.
