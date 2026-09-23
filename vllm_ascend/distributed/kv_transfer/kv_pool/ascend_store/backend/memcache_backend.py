@@ -17,6 +17,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
     get_scheduler_device_id,
     parse_qos_from_extra_config,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import LayerwiseKeyBuilder
 
 
 def _is_device_sdma() -> bool:
@@ -78,6 +79,24 @@ class MmcDirect(Enum):
 # with snapshot assertions.
 
 LAYERWISE_DATA_PLANE = "gva"
+
+
+def bind_layerwise_keys(
+    *,
+    vllm_config: Any,
+    kv_cache_config: Any,
+    model_name: str,
+    use_hybrid: bool,
+    grouped_block_size: list[int],
+) -> LayerwiseKeyBuilder:
+    """Bind GVA key identity behind the same interface as block-key stores."""
+    num_groups = len(grouped_block_size)
+    pp_size = vllm_config.parallel_config.pipeline_parallel_size
+
+    def make_key(group: int, block_hash: str, head: int, stage: int) -> str:
+        return make_full_key(model_name, group, block_hash, head, num_groups, stage, pp_size)
+
+    return LayerwiseKeyBuilder(make_key, pp_size)
 
 
 def extract_layout_config(extra_config: dict[str, Any]) -> dict[str, Any] | None:

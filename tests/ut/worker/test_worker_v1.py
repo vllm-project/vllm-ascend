@@ -15,7 +15,7 @@ from vllm.v1.kv_cache_interface import (
 
 from tests.ut.base import TestBase
 from vllm_ascend.device.hardware import AscendDeviceType
-from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_hardware_profile
 
 init_cached_hf_modules_path = "vllm.utils.import_utils.init_cached_hf_modules"
 kw_module = importlib.import_module("vllm_ascend.model_executor.warmup.kernel_warmup")
@@ -232,7 +232,7 @@ class TestNPUWorker(TestBase):
         with patch("vllm_ascend.worker.worker.get_kv_cache_groups", return_value=groups):
             self.assertEqual(worker._scale_kv_cache_memory_for_multi_group(12345), 12345)
 
-    def test_hybrid_budget_scaling_follows_runner_backing_capability(self):
+    def test_hybrid_budget_scaling_follows_runner_backing_layout(self):
         from vllm_ascend.worker.worker import NPUWorker
 
         attn_spec = FullAttentionSpec(
@@ -256,16 +256,23 @@ class TestNPUWorker(TestBase):
         worker = NPUWorker.__new__(NPUWorker)
         worker.vllm_config = SimpleNamespace(
             cache_config=cache_config,
-            kv_transfer_config=None,
+            # Connector identity must not change standardized shared-backing
+            # allocation or its corresponding budget calculation.
+            kv_transfer_config=SimpleNamespace(kv_connector="FutureConnector"),
         )
         worker.get_kv_cache_spec = MagicMock(return_value={"attn": attn_spec, "linear_attn": mamba_spec})
 
-        for supports_shared_backing, expected_budget in ((True, 12345), (False, 6172)):
-            with self.subTest(supports_shared_backing=supports_shared_backing):
+        for supports_standardized_backing, expected_budget in (
+            (True, 12345),
+            (False, 6172),
+        ):
+            with self.subTest(
+                supports_standardized_backing=supports_standardized_backing,
+            ):
                 worker.model_runner = SimpleNamespace(
                     use_sparse=False,
                     use_compress=False,
-                    supports_standardized_shared_kv_backing=supports_shared_backing,
+                    supports_standardized_shared_kv_backing=supports_standardized_backing,
                 )
                 with patch("vllm_ascend.worker.worker.get_kv_cache_groups", return_value=groups):
                     self.assertEqual(worker._scale_kv_cache_memory_for_multi_group(12345), expected_budget)
@@ -653,7 +660,11 @@ class TestNPUWorker(TestBase):
 
         # Setup mock
         mock_mem_get_info.return_value = (1000, 2000)
-        mock_get_device_type.return_value = get_hardware_profile(AscendDeviceType.A2)
+        profile = get_hardware_profile(AscendDeviceType.A2)
+        mock_get_device_type.return_value = MagicMock(wraps=profile)
+        mock_get_device_type.return_value.supports.side_effect = (
+            lambda capability: capability == HardwareCapability.LOCAL_KV_COMM_RESOURCE or profile.supports(capability)
+        )
 
         # Mock MemorySnapshot
         mock_snapshot = MagicMock()
@@ -661,8 +672,9 @@ class TestNPUWorker(TestBase):
         mock_snapshot.total_memory = 2000
         mock_snapshot_cls.return_value = mock_snapshot
 
-        # Mock current_platform for v0.24.0 init_device path
-        mock_current_platform.logical_device_id_to_visible_device_id.return_value = 0
+        # Make the bound visible NPU differ from local_rank to verify that
+        # local communication setup follows the actual device binding.
+        mock_current_platform.logical_device_id_to_visible_device_id.return_value = 1
         mock_current_platform.device_type = "npu"
 
         # Create worker mock
@@ -682,10 +694,16 @@ class TestNPUWorker(TestBase):
             worker.cache_config.gpu_memory_utilization = 0.5
 
             # Test _init_device
-            result = worker._init_device()
+            with patch("vllm_ascend.worker.worker.setup_ascend_local_comm_res") as setup_endpoint:
+                result = worker._init_device()
+
+            # Both calls must use the mapped visible ordinal, not local_rank.
+            mock_set_device.assert_called_once_with(torch.device("npu:1"))
+            setup_endpoint.assert_called_once_with(1, worker.vllm_config.kv_transfer_config)
+            self.assertEqual(worker.local_rank, 0)
 
             mock_init_dist_env.assert_called_once()
-            self.assertEqual(str(result), "npu:0")
+            self.assertEqual(str(result), "npu:1")
             self.assertEqual(worker.init_snapshot, mock_snapshot)
             self.assertEqual(worker.requested_memory, 2000 * 0.5)
 
@@ -916,7 +934,11 @@ class TestNPUWorker(TestBase):
             worker.execute_dummy_batch()
 
             # Verify call
-            mock_model_runner._dummy_run.assert_called_once_with(mock_uniform_decode_query_len, uniform_decode=True)
+            mock_model_runner._dummy_run.assert_called_once_with(
+                mock_uniform_decode_query_len,
+                uniform_decode=True,
+                skip_gdn_state_update=True,
+            )
 
     @patch("vllm_ascend.worker.worker.plan_sparse_kv_offload_memory")
     @patch("vllm_ascend.worker.worker.get_ascend_config")
@@ -2192,17 +2214,20 @@ class TestNPUWorkerWeightUpdate(TestBase):
 
 class TestKVPPWorkerBudget(TestBase):
     def test_complete_spec_and_logical_planner_budget(self):
-        from tests.ut.kvpp_utils import make_kvpp_config, make_kvpp_specs
+        from tests.ut.kvpp_utils import layer_name, make_kvpp_config, make_kvpp_specs
         from vllm_ascend.worker import worker as worker_module
 
         specs = make_kvpp_specs()
         worker = worker_module.NPUWorker.__new__(worker_module.NPUWorker)
         worker.vllm_config = make_kvpp_config()
-        worker.model_runner = SimpleNamespace(get_kv_cache_spec=lambda: specs)
+        worker.model_runner = SimpleNamespace(
+            get_kv_cache_spec=lambda: specs, drafter=SimpleNamespace(_draft_attn_layer_names={layer_name(17)})
+        )
         worker._kvpp_cache_allocation_plan = None
         ascend_config = SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=False))
         with (
             patch.object(worker_module, "get_tp_group", return_value=SimpleNamespace(rank_in_group=1)),
+            patch.object(worker_module, "get_pp_group", return_value=SimpleNamespace(is_last_rank=True)),
             patch.object(worker_module, "get_ascend_config", return_value=ascend_config),
         ):
             self.assertEqual(worker.get_kv_cache_spec(), specs)
