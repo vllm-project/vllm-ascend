@@ -288,7 +288,7 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
 
 @dataclass(frozen=True, kw_only=True)
 class AscendIndexerKPoolTailSpec(SlidingWindowSpec):
-    """One fixed FP32 ``[2, ring_capacity, head_size]`` page per request.
+    """One fixed FP32 ``[ring_capacity, 2 * head_size]`` page per request.
 
     ``block_size`` is the physical ring capacity; ``compress_ratio`` defines
     pool boundaries independently. The dedicated manager never slides or grows.

@@ -103,6 +103,58 @@ def test_real_tail_coordinator_preserves_prefix_hit_and_private_lifecycle(wrappe
     tail_mgr.free("new")
 
 
+@pytest.mark.parametrize("wrapped", [False, True])
+@pytest.mark.parametrize("tail_capacity", [4, 5, 7])
+def test_private_tail_coordinator_without_prefix_caching(wrapped, tail_capacity):
+    from vllm_ascend.models.glm5next.kv_cache import KpoolTailManager
+
+    register_all_kvcache_specs(None)
+    register_ascend_kv_cache_specs()
+    full = FullAttentionSpec(block_size=1152, num_kv_heads=1, head_size=8, dtype=torch.bfloat16)
+    tail = AscendIndexerKPoolTailSpec(
+        block_size=tail_capacity,
+        sliding_window=4,
+        compress_ratio=4,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.float32,
+    )
+    group_tail = UniformTypeKVCacheSpecs.from_specs({"tail": tail}) if wrapped else tail
+    config = KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["full"], full), KVCacheGroupSpec(["tail"], group_tail)],
+    )
+    vllm_config = _make_vllm_config(enable_prefix_caching=False, dcp=1, block_size=tail_capacity)
+    scheduler_size, hash_size = _ascend_resolve_kv_cache_block_sizes(config, vllm_config)
+    assert scheduler_size == hash_size == 1152
+    coordinator = get_kv_cache_coordinator(
+        config,
+        max_model_len=8192,
+        max_in_flight_tokens=2048,
+        enable_caching=False,
+        hash_block_size=hash_size,
+        scheduler_block_size=scheduler_size,
+        allow_partial_hash_hits=False,
+    )
+    assert isinstance(coordinator, AscendHybridKVCacheCoordinator)
+    assert not coordinator.block_pool.enable_caching
+    assert not coordinator.allow_partial_hash_hits
+    assert coordinator.max_in_flight_tokens == 2048
+    full_mgr, tail_mgr = coordinator.single_type_managers
+    assert isinstance(tail_mgr, KpoolTailManager)
+    assert len(coordinator.attention_groups) == 1
+    free_blocks = coordinator.block_pool.get_num_free_blocks()
+    full_mgr.allocate_new_blocks("request", 3500, 3500)
+    tail_mgr.allocate_new_blocks("request", 3503, 3500)
+    assert len(tail_mgr.req_to_blocks["request"]) == 1
+    assert not tail_mgr.allocate_new_blocks("request", 4096, 4093)
+    assert tail_mgr.req_to_blocks["request"][0].block_hash is None
+    full_mgr.free("request")
+    tail_mgr.free("request")
+    assert coordinator.block_pool.get_num_free_blocks() == free_blocks
+
+
 def _make_kv_cache_tensor(size: int, layer_names: list[str]) -> KVCacheTensor:
     """Build a KVCacheTensor; vLLM #51718 renamed shared_by -> layers on main."""
     return KVCacheTensor(size=size, layers=layer_names, layer_stride=0, block_stride=0, offset=0)

@@ -62,6 +62,7 @@ from vllm_ascend.core.kv_cache_interface import (
     get_storage_block_size,
 )
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.models.glm5next.cache_views import view_kpool_tail_cache
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import (
     calc_split_factor,
@@ -1103,24 +1104,9 @@ def _reshape_kv_cache_v2(
                 continue
 
             if isinstance(kv_cache_spec, AscendIndexerKPoolTailSpec):
-                if not isinstance(raw_cache, torch.Tensor):
-                    raise ValueError(f"KPool tail cache for {layer_name} must use one raw tensor.")
-                typed_slot = raw_cache.view(kv_cache_spec.dtype)
-                tail_block_el = kv_cache_spec.unpadded_page_size_bytes // get_dtype_size(kv_cache_spec.dtype)
-                num_tail_blocks = kv_cache_config.num_blocks
-                if num_tail_blocks * tail_block_el * 2 > typed_slot.numel():
-                    raise ValueError(
-                        f"KPool tail cache for {layer_name} exceeds half the small slot: "
-                        f"packed={num_tail_blocks * tail_block_el} elements, slot={typed_slot.numel()}."
-                    )
-                kv_caches[layer_name] = [
-                    typed_slot[typed_slot.numel() - num_tail_blocks * tail_block_el :].view(
-                        num_tail_blocks,
-                        2,
-                        kv_cache_spec.block_size,
-                        kv_cache_spec.head_size,
-                    )
-                ]
+                kv_caches[layer_name] = view_kpool_tail_cache(
+                    layer_name, kv_cache_spec, raw_cache, kv_cache_config.num_blocks, group.backend
+                )
                 continue
             if is_dsv4_model and isinstance(kv_cache_spec, (AscendMLAAttentionSpec, AscendSlidingWindowMLASpec)):
                 if not isinstance(raw_cache, torch.Tensor):
