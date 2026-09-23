@@ -48,26 +48,20 @@ public:
     BlockEpilogue(Arch::Resource<ArchTag> &resource)
     {
 
-        // Bumped layout to fit kHeadDim up to 256 with subBlockNum=2 (per-subblock M up to 128).
-        // Required: calc (fp32) up to 128*128*4=64KB; h (fp16) up to 128*128*2=32KB;
-        // hUpdate/hOutput/finalOutput at the same offset, max needed 64KB; glast small.
+        // Fused per-m-tile layout (m <= 128 per call): h_work arrives UB-RESIDENT
+        // at the hUpdUbOffset passed per call (the hand-mmad deformat window at
+        // 64K..128K) -- no GM round-trip. calc reuses the cube staging region
+        // [0,64K): the next tile's L0C->UB copy is a V op queued after this
+        // call's V work. hOut/final cast IN PLACE over the resident f32 tile
+        // (f16 write trails the f32 read). hUb sits above the resident window.
         constexpr uint32_t CALC_BUF_OFFSET = 0;
-        constexpr uint32_t PING_BUF_0_OFFSET = 64 * 1024;
-        constexpr uint32_t PING_BUF_1_OFFSET = 96 * 1024;
-        constexpr uint32_t PING_BUF_2_OFFSET = 112 * 1024;
+        constexpr uint32_t H_BUF_OFFSET = 128 * 1024;
         constexpr uint32_t PING_G_BUF_OFFSET = 160 * 1024;
 
-
         calcUbTensor = resource.ubBuf.template GetBufferByByte<float>(CALC_BUF_OFFSET);
-
-        hUpdateUbTensor = resource.ubBuf.template GetBufferByByte<float>(PING_BUF_1_OFFSET);
-        hUbTensor = resource.ubBuf.template GetBufferByByte<HElementInput>(PING_BUF_0_OFFSET);
-
-        hOutputUbTensor = resource.ubBuf.template GetBufferByByte<HElementOutput>(PING_BUF_1_OFFSET);
-        finalOutputUbTensor = resource.ubBuf.template GetBufferByByte<FinalStateElement>(PING_BUF_1_OFFSET);
-
+        hUbTensor = resource.ubBuf.template GetBufferByByte<HElementInput>(H_BUF_OFFSET);
         glastUbTensor = resource.ubBuf.template GetBufferByByte<float>(PING_G_BUF_OFFSET);
-
+        resource_ = &resource;
     }
 
     CATLASS_DEVICE
@@ -79,7 +73,8 @@ public:
         AscendC::GlobalTensor<FinalStateElement> finalState,
         AscendC::GlobalTensor<GElementInput> gInput,
         AscendC::GlobalTensor<HElementInput> hInput,
-        AscendC::GlobalTensor<float> hUpdateInput,
+        uint32_t hUpdUbOffset,
+        float hDecayScale,
         uint32_t chunkSize,
         uint32_t kHeadDim,
         uint32_t vHeadDim,
@@ -89,8 +84,9 @@ public:
     {
         uint32_t mActual = kHeadDim;
         uint32_t nActual = vHeadDim;
-        uint32_t subBlockIdx = AscendC::GetSubBlockIdx();
-        uint32_t subBlockNum = AscendC::GetSubBlockNum();
+        // Single working instance (the kernel gates subblock 1 out): full m.
+        uint32_t subBlockIdx = 0;
+        uint32_t subBlockNum = 1;
         uint32_t mActualPerSubBlock = CeilDiv(mActual, subBlockNum);
         uint32_t mActualThisSubBlock = (subBlockIdx == 0) ? mActualPerSubBlock : (mActual - mActualPerSubBlock);
         uint32_t mOffset = subBlockIdx * mActualPerSubBlock;
@@ -102,8 +98,14 @@ public:
         AscendC::GlobalTensor<HElementOutput> hOutputThisSubBlock = hOutput[offsetH];
         AscendC::GlobalTensor<GElementInput> gInputThisSubBlock = gInput;
         AscendC::GlobalTensor<HElementInput> hInputThisSubBlock = hInput[offsetH];
-        AscendC::GlobalTensor<float> hUpdateInputThisSubBlock = hUpdateInput[offsetH];
         AscendC::GlobalTensor<FinalStateElement> finalStateThisSubBlock = finalState[offsetH];
+        // Resident h_work (f32, ND) and its in-place f16/f32 output views.
+        AscendC::LocalTensor<float> hUpdateUbTensor =
+            resource_->ubBuf.template GetBufferByByte<float>(hUpdUbOffset + offsetH * sizeof(float));
+        AscendC::LocalTensor<HElementOutput> hOutputUbTensor =
+            resource_->ubBuf.template GetBufferByByte<HElementOutput>(hUpdUbOffset + offsetH * sizeof(float));
+        AscendC::LocalTensor<FinalStateElement> finalOutputUbTensor =
+            resource_->ubBuf.template GetBufferByByte<FinalStateElement>(hUpdUbOffset + offsetH * sizeof(float));
 
         AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
         AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
@@ -117,35 +119,12 @@ public:
         AscendC::Cast(calcUbTensor, hUbTensor, AscendC::RoundMode::CAST_NONE, mActualThisSubBlock * nActual);
         AscendC::PipeBarrier<PIPE_V>();
         
-        GElementInput gLastVal = gInputThisSubBlock.GetValue(chunkSize-1);
-        float gLastFloat = 0.0f;
-        if constexpr(std::is_same<GElementInput, float>::value) {
-            gLastFloat = gLastVal;
-        } else if constexpr(std::is_same<GElementInput, half>::value) {
-            gLastFloat = (float)gLastVal;
-        } else if constexpr(std::is_same<GElementInput, bfloat16_t>::value) {
-            gLastFloat = AscendC::ToFloat(gLastVal);
-        }
-        glastUbTensor.SetValue(0, gLastFloat);
-
-        AscendC::SetFlag<AscendC::HardEvent::S_V>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::S_V>(EVENT_ID0);
-        AscendC::Exp(glastUbTensor, glastUbTensor, 1);
-        AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
-        float muls = glastUbTensor.GetValue(0);
-        AscendC::SetFlag<AscendC::HardEvent::S_V>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::S_V>(EVENT_ID0);
-        AscendC::Muls(calcUbTensor, calcUbTensor, muls, mActualThisSubBlock * nActual);
+        // exp(g_last) is hoisted to the caller (once per chunk, not per tile).
+        AscendC::Muls(calcUbTensor, calcUbTensor, hDecayScale, mActualThisSubBlock * nActual);
 
 
-        AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
-        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
-        AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
-        AscendC::DataCopy(hUpdateUbTensor, hUpdateInputThisSubBlock, mActualThisSubBlock * nActual);
-        AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID1);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID1);
+        // h_work is already in UB (V-written by the deformat): V program order
+        // covers the RAW; no GM load, no flags.
         AscendC::Add<float>(hUpdateUbTensor, calcUbTensor, hUpdateUbTensor, mActualThisSubBlock * nActual);
 
         if (isFinalState) {
@@ -174,13 +153,11 @@ public:
     }
 
 private:
+    Arch::Resource<ArchTag> *resource_ = nullptr;
     AscendC::LocalTensor<float> calcUbTensor;
 
     AscendC::LocalTensor<HElementInput> hUbTensor;
-    AscendC::LocalTensor<float> hUpdateUbTensor;
 
-    AscendC::LocalTensor<HElementOutput> hOutputUbTensor;
-    AscendC::LocalTensor<FinalStateElement> finalOutputUbTensor;
 
     AscendC::LocalTensor<float> glastUbTensor;
 
