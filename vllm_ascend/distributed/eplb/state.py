@@ -5,6 +5,8 @@
 
 import inspect
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import fields
 from typing import Any
@@ -22,6 +24,20 @@ from vllm_ascend.ops.fused_moe import eplb as _eplb_ops
 
 ASYNC_EPLB_CYCLE_COMMITTED_LOG = "Ascend async EPLB cycle committed"
 EXPERT_MAPPING_EP_SIZE: ContextVar[int] = ContextVar("vllm_ascend_expert_mapping_ep_size", default=1)
+
+
+@contextmanager
+def _configured_upstream_policy(name: str, policy: AbstractEplbPolicy | None) -> Iterator[None]:
+    """Expose an Ascend policy only while upstream initializes its state."""
+    policies: dict[str, Any] = _eplb_state.EPLB_POLICIES
+    if policy is None or name in policies:
+        yield
+        return
+    policies[name] = policy
+    try:
+        yield
+    finally:
+        policies.pop(name)
 
 
 def _upstream_from_mapping_accepts_valid_expert_count() -> bool:
@@ -135,7 +151,11 @@ class AscendEplbState(_eplb_state.EplbState):
         """Register a model and initialize policy-specific load history."""
         token = EXPERT_MAPPING_EP_SIZE.set(get_ep_group().world_size)
         try:
-            super().add_model(model, model_config)
+            with _configured_upstream_policy(
+                self.parallel_config.eplb_config.policy,
+                self._configured_policy,
+            ):
+                super().add_model(model, model_config)
         finally:
             EXPERT_MAPPING_EP_SIZE.reset(token)
         if self._configured_policy is not None:
@@ -420,7 +440,8 @@ class AscendEplbState(_eplb_state.EplbState):
             if num_valid_physical_experts is None:
                 raise TypeError("num_valid_physical_experts is required by the selected vLLM release mapping contract")
             from_mapping_kwargs["num_valid_physical_experts"] = num_valid_physical_experts
-        state = super().from_mapping(**from_mapping_kwargs)
+        with _configured_upstream_policy(parallel_config.eplb_config.policy, policy):
+            state = super().from_mapping(**from_mapping_kwargs)
         state._configured_policy = policy
         if policy is not None:
             state.policy = policy

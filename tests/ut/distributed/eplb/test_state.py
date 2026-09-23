@@ -24,6 +24,16 @@ def test_uses_upstream_async_worker_lifecycle():
     assert AscendEplbState.start_async_loop is upstream_eplb_state.EplbState.start_async_loop
 
 
+def test_configured_upstream_policy_registration_is_scoped():
+    policy = StairEplbPolicy(StairConfig())
+    assert "stair" not in upstream_eplb_state.EPLB_POLICIES
+
+    with eplb_state._configured_upstream_policy("stair", policy):
+        assert upstream_eplb_state.EPLB_POLICIES["stair"] is policy
+
+    assert "stair" not in upstream_eplb_state.EPLB_POLICIES
+
+
 def test_drain_async_accepts_last_changed_layer_before_model_end():
     consumed_event = MagicMock()
     model_state = SimpleNamespace(

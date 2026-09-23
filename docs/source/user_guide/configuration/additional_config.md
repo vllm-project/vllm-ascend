@@ -118,7 +118,9 @@ The accepted fields depend on the model runner:
 
 - **Model Runner V2** accepts `load_collection_phase` and `stair_config` here.
   Configure upstream EPLB through `--enable-eplb` and `--eplb-config`. Ascend
-  uses the STAIR policy and asynchronous Gloo movement. See the
+  uses the STAIR policy by default and asynchronous Gloo movement. Select
+  `default` or `stair` only through the upstream `--eplb-config.policy`
+  option. See the
   [EPLB user guide](../feature_guide/expert_parallelism_load_balancer.md#advanced-stair-tuning)
   for the advanced STAIR fields and their defaults.
 - **Model Runner V1** accepts the legacy fields below except

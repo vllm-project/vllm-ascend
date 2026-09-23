@@ -44,7 +44,11 @@ class AscendEPLBController(EPLBController):
     ) -> None:
         super().__init__(parallel_config, device)
         self.load_collection_phase = "all" if ascend_eplb_config is None else ascend_eplb_config.load_collection_phase
-        self.eplb_policy = None if ascend_eplb_config is None else create_eplb_policy(ascend_eplb_config)
+        self.eplb_policy = (
+            None
+            if ascend_eplb_config is None
+            else create_eplb_policy(parallel_config.eplb_config.policy, ascend_eplb_config.stair_config)
+        )
         self._load_collection_phase_matched = True
 
     def prepare_load(self) -> None:
@@ -68,9 +72,10 @@ class AscendEPLBController(EPLBController):
         state = self.state
         if state is None or not self.parallel_config.enable_eplb:
             return
-        # Operator-provided counts make the upstream unpadded-token tensor unused.
         if not state.uses_custom_load_stats:
+            state.prepare_forward(model_config, num_unpadded_tokens, ubatch_slices)
             return
+        # Operator-provided counts make the upstream unpadded-token tensor unused.
         if state.should_record_tensor is not None:
             is_load_sampling_step = state._should_record_current_step(
                 log_stats=self.parallel_config.eplb_config.log_balancedness

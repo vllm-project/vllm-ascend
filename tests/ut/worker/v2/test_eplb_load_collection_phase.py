@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
+from vllm.distributed.eplb.policy import DefaultEplbPolicy
 
 from vllm_ascend.ascend_config import EplbConfig, StairConfig
 from vllm_ascend.distributed.eplb.policy.stair import StairEplbPolicy
@@ -40,10 +41,13 @@ class TestEplbLoadCollectionPhase(unittest.TestCase):
                 )
 
     @staticmethod
-    def _make_controller(load_collection_phase="all", log_balancedness=False):
+    def _make_controller(load_collection_phase="all", log_balancedness=False, policy="stair"):
         parallel_config = SimpleNamespace(
             enable_eplb=True,
-            eplb_config=SimpleNamespace(log_balancedness=log_balancedness),
+            eplb_config=SimpleNamespace(
+                log_balancedness=log_balancedness,
+                policy=policy,
+            ),
         )
         controller = AscendEPLBController(
             parallel_config,
@@ -64,6 +68,13 @@ class TestEplbLoadCollectionPhase(unittest.TestCase):
 
         self.assertIsInstance(controller.state, AscendEplbState)
         self.assertIs(controller.state.policy, controller.eplb_policy)
+
+    def test_policy_selection_uses_upstream_config(self):
+        default_controller = self._make_controller(policy="default")
+        stair_controller = self._make_controller(policy="stair")
+
+        self.assertIsInstance(default_controller.eplb_policy, DefaultEplbPolicy)
+        self.assertIsInstance(stair_controller.eplb_policy, StairEplbPolicy)
 
     def test_setup_from_mapping_uses_current_upstream_contract(self):
         controller = self._make_controller()

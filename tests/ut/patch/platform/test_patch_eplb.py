@@ -53,6 +53,20 @@ def test_parallel_and_vllm_config_keep_upstream_validation():
     assert vllm_config.parallel_config.eplb_config.communicator == "torch_gloo"
 
 
+def test_eplb_policy_config_supports_stair_and_default():
+    assert EPLBConfig().policy == "stair"
+    assert EPLBConfig(policy="stair", use_async=True).policy == "stair"
+    assert EPLBConfig(policy="default").policy == "default"
+
+    with pytest.raises(ValueError, match="Input should be 'default' or 'stair'"):
+        EPLBConfig(policy="other")
+    with pytest.raises(ValueError, match="torch_nccl communicator is incompatible"):
+        EPLBConfig(policy="stair", communicator="torch_nccl")
+
+    patch_eplb._patch_eplb_policy_config()
+    assert EPLBConfig().policy == "stair"
+
+
 def test_parallel_config_keeps_upstream_nixl_auto_selection():
     with (
         _npu_parallel_config_platform(),

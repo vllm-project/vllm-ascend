@@ -14,11 +14,12 @@ from vllm_ascend.worker.v2.eplb import AscendEPLBController, _unwrap_moe
 
 class TestAscendEPLBController(unittest.TestCase):
     @staticmethod
-    def _make_controller(*, enable_eplb=True, log_balancedness=False):
+    def _make_controller(*, enable_eplb=True, log_balancedness=False, policy="stair"):
         parallel_config = SimpleNamespace(
             enable_eplb=enable_eplb,
             eplb_config=SimpleNamespace(
                 log_balancedness=log_balancedness,
+                policy=policy,
             ),
         )
         controller = AscendEPLBController(
@@ -135,11 +136,7 @@ class TestAscendEPLBController(unittest.TestCase):
 
         controller.prepare_forward(model_config, 4, ubatch_slices)
 
-        state.prepare_forward.assert_called_once_with(
-            model_config,
-            4,
-            ubatch_slices,
-        )
+        state.prepare_forward.assert_not_called()
         state._should_record_current_step.assert_called_once_with(
             log_stats=True,
         )

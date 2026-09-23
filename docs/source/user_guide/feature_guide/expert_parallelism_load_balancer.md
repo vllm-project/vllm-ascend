@@ -82,8 +82,8 @@ EPLB is not recommended in the following scenarios because the load-balancing be
 
 Select MRv2 explicitly when the model or environment does not select it by
 default. Enable expert parallelism and upstream EPLB. Ascend selects STAIR
-internally and the Gloo communicator automatically; movement is asynchronous
-only. The STAIR defaults do not require tuning.
+as the upstream policy default and selects the Gloo communicator automatically;
+movement is asynchronous only. The STAIR defaults do not require tuning.
 
 ```bash
 export VLLM_USE_V2_MODEL_RUNNER=1
@@ -111,13 +111,17 @@ MRv2 uses the upstream `EPLBConfig` fields:
 | `step_interval` | `3000` | Interval between expert rearrangements. |
 | `num_redundant_experts` | `0` | Number of redundant physical experts. |
 | `use_async` | `true` | Ascend MRv2 always runs asynchronously. `false` is normalized to `true` with a warning. |
-| `policy` | `default` | Upstream accepts only `default`; leave it unset. Ascend MRv2 runs STAIR internally. |
+| `policy` | `stair` on Ascend | Select `stair` for the Ascend policy or `default` for upstream-policy comparison experiments. |
 | `log_balancedness` | `false` | Log expert balancedness metrics. |
 | `log_balancedness_interval` | `1` | Interval between balancedness log entries. |
 | `communicator` | `None` | Leave unset for automatic Gloo selection, or set `torch_gloo`. |
 
 These fields may also be passed together as JSON through `--eplb-config`.
 They must not be placed in `--additional-config` for MRv2.
+
+Ascend extends the upstream `policy` field without adding a second selector.
+For example, use `--eplb-config.policy default` to run the upstream policy;
+omit it or set it to `stair` to run STAIR.
 
 #### MRv2 Load Collection Phase
 
