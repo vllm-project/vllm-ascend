@@ -157,6 +157,15 @@ class IndexerOverlapPlan:
     aux_stream: torch.npu.Stream | None = None
 
 
+@dataclass(frozen=True)
+class IndexerCacheUpdate:
+    key: torch.Tensor
+    slot_mapping: torch.Tensor
+    key_cache: torch.Tensor
+    scale_cache: torch.Tensor
+    full_cache: torch.Tensor
+
+
 class AscendIndexerOps:
     def __init__(self, index_topk: int) -> None:
         from vllm_ascend.device.device_op import DeviceOperator
@@ -341,16 +350,15 @@ class DeepseekV4Indexer(nn.Module):
         assert hadamard is not None
         return cache_req_metadata, hadamard
 
-    def update_cache(
+    def prepare_cache_update(
         self,
         hidden_states: torch.Tensor,
         kv_cache: tuple[torch.Tensor, ...],
         metadata: AscendIndexerMetadata,
-    ) -> None:
-        """Update Indexer caches without projecting queries or selecting TopK."""
+    ) -> IndexerCacheUpdate | None:
+        """Compute global Indexer keys before the cache scatter."""
         if hidden_states.shape[0] == 0:
-            return
-
+            return None
         state_cache, key_cache, scale_cache, full_cache = self.ops.unpack_dsa_indexer_kv_cache(kv_cache)
         _, hadamard = self._get_indexer_cache_metadata(metadata)
         compressor = self.compressor
@@ -361,21 +369,77 @@ class DeepseekV4Indexer(nn.Module):
             metadata=metadata.compressor,
         )
         if key.shape[0] == 0:
-            return
+            return None
         if compressor.rotate:
             key = rotate_activation(key, hadamard)
+        return IndexerCacheUpdate(key, slot_mapping, key_cache, scale_cache, full_cache)
+
+    def scatter_prepared_cache_update(self, update: IndexerCacheUpdate | None) -> None:
+        if update is None:
+            return
         _, key_scale = self.ops.quantize_key_and_update_cache(
-            key,
-            key_cache,
-            full_cache,
-            slot_mapping,
+            update.key,
+            update.key_cache,
+            update.full_cache,
+            update.slot_mapping,
         )
         if key_scale is not None:
             self.ops.update_scale_cache(
                 key_scale,
-                scale_cache,
-                slot_mapping,
+                update.scale_cache,
+                update.slot_mapping,
             )
+
+    def update_cache(
+        self,
+        hidden_states: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, ...],
+        metadata: AscendIndexerMetadata,
+    ) -> None:
+        """Update Indexer caches without projecting queries or selecting TopK."""
+        update = self.prepare_cache_update(hidden_states, kv_cache, metadata)
+        self.scatter_prepared_cache_update(update)
+
+    def select_topk_from_prepared_cache(
+        self,
+        layer_name: str,
+        hidden_states: torch.Tensor,
+        qr: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, ...],
+        metadata: AscendIndexerMetadata,
+        cache_ready: torch.npu.Event,
+        qr_pertoken_scale: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Project the local query while global Indexer cache scatter runs."""
+        num_tokens = hidden_states.shape[0]
+        if self.skip_topk:
+            topk_indices = self._get_cached_topk_indices(num_tokens)
+        else:
+            cache_metadata, _ = self._get_indexer_cache_metadata(metadata)
+            q, _, key_cache, scale_cache, _, _, _ = self._indexer_qkv_prepare(
+                hidden_states,
+                qr,
+                kv_cache,
+                metadata,
+                cache_metadata.cos[layer_name][:num_tokens],
+                cache_metadata.sin[layer_name][:num_tokens],
+                qr_pertoken_scale,
+                write_cache=False,
+            )
+            weights = self.weights_proj(hidden_states) * (self.softmax_scale * self.n_heads**-0.5)
+            q, q_scale = self.ops.quantize_query(q)
+            torch.npu.current_stream().wait_event(cache_ready)
+            topk_indices = self.ops.select_topk(
+                q,
+                weights,
+                q_scale,
+                key_cache,
+                scale_cache,
+                cache_metadata,
+            )
+        if self.use_index_cache:
+            self._update_cached_topk_indices(topk_indices)
+        return topk_indices
 
     def _get_cached_topk_indices(self, num_tokens: int, offset: int = 0) -> torch.Tensor:
         if self.topk_indices_buffer is None:

@@ -1,7 +1,7 @@
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar, TypeAlias
+from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, TypeAlias
 
 import torch
 import torch.distributed as dist
@@ -78,6 +78,25 @@ CompressorMetadataOutput: TypeAlias = tuple[torch.Tensor, torch.Tensor, torch.Te
 _DSV4_DSA_OVERLAP_STREAM = None
 CompressorForwardOutput = tuple[torch.Tensor, torch.Tensor]
 CompressorOverlapOutput = tuple[CompressorForwardOutput, torch.npu.Event]
+
+
+class DSAMultistreamKVInputs(NamedTuple):
+    """KV inputs when the Q and KV prologs consume different token views."""
+
+    hidden_states: torch.Tensor
+    cos: torch.Tensor
+    sin: torch.Tensor
+    slot_mapping: torch.Tensor
+
+
+class DSAMultistreamPrologResult(NamedTuple):
+    q: torch.Tensor
+    qr: torch.Tensor
+    qr_pertoken_scale: torch.Tensor | None
+    tail_overlap_output: CompressorOverlapOutput | None
+    swa_ready: torch.npu.Event | None
+    caches_ready: torch.npu.Event | None
+
 
 _COMPRESSOR_METADATA_CACHE_KEY = "dsv4_compressor_metadata_cache"
 
@@ -1551,8 +1570,6 @@ class AscendDSAImpl(AttentionImplBase[Any]):
     understand this class
     """
 
-    enable_pcp_o_proj_weight_sharding = False
-
     _oproj_send_buf: torch.Tensor
     turboquant: TurboQuantLatent | None = None
 
@@ -1805,6 +1822,21 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         """Prepare cache updates and report whether local writes can be skipped."""
         return False
 
+    def _get_prepared_cache_overlap(
+        self,
+        layer_name: str,
+        hidden_states: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, ...],
+        attn_metadata: DSAMetadataDict,
+        actual_tokens: int,
+    ) -> Callable[[], torch.Tensor] | None:
+        """Return an attention path that prepares its own caches, if any."""
+        return None
+
+    def _requires_o_proj_during_profiling(self) -> bool:
+        """Whether profiling must execute O projection to capture collectives."""
+        return oproj_tp_enable()
+
     def _get_o_proj_input_shape(
         self,
         attn_metadata: DSAMetadataDict | None,
@@ -1831,7 +1863,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         if attn_metadata is None:
             # Profiling run: run o_proj on zero input so HCCL collectives are
             # captured by the ACL graph.  Non-OTP just zeros the output.
-            if oproj_tp_enable() or self.enable_pcp_o_proj_weight_sharding:
+            if self._requires_o_proj_during_profiling():
                 o_proj_input = hidden_states.new_zeros(o_proj_input_shape)
                 self._forward_o_proj(o_proj_input, output)
             else:
@@ -1846,11 +1878,13 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         o_proj_input = hidden_states.new_zeros(o_proj_input_shape)
         assert kv_cache is not None, "kv_cache tensor tuple must be provided."
         wait_for_kv_layer_from_connector(layer_name)
-        cache_is_prepared = self._prepare_caches_before_attention(
-            layer_name,
-            hidden_states,
-            kv_cache,
-            attn_metadata,
+        overlap_attention = self._get_prepared_cache_overlap(
+            layer_name, hidden_states, kv_cache, attn_metadata, actual_tokens
+        )
+        cache_is_prepared = (
+            True
+            if overlap_attention is not None
+            else self._prepare_caches_before_attention(layer_name, hidden_states, kv_cache, attn_metadata)
         )
         if actual_tokens == 0:
             output.zero_()
@@ -1861,12 +1895,16 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             return output
 
         req_metadata = _require_req_metadata(common_attn_metadata)
-        o_proj_input[:actual_tokens] = self._forward_attention(
-            layer_name,
-            hidden_states[:actual_tokens],
-            kv_cache,
-            layer_metadata,
-            cache_is_prepared,
+        o_proj_input[:actual_tokens] = (
+            overlap_attention()
+            if overlap_attention is not None
+            else self._forward_attention(
+                layer_name,
+                hidden_states[:actual_tokens],
+                kv_cache,
+                layer_metadata,
+                cache_is_prepared,
+            )
         )
         cos = req_metadata.cos[layer_name]
         sin = req_metadata.sin[layer_name]
@@ -1983,7 +2021,9 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         slot_mapping,
         is_prefill=False,
         tail_overlap_fn: Callable[[], CompressorForwardOutput] | None = None,
-    ):
+        kv_inputs: DSAMultistreamKVInputs | None = None,
+        after_qb_matmul: Callable[[], None] | None = None,
+    ) -> DSAMultistreamPrologResult:
         """3-block multi-stream: 3-stage CV parallel + serial tail
 
         Block partition (V: Vector, C: Cube, AIV: AI Vector):
@@ -1992,13 +2032,18 @@ class AscendDSAImpl(AttentionImplBase[Any]):
           Part3: q_b_matmul[C]             ||  kv_norm[V] + rope[V] + scatter[AIV]
           Tail:  q_rms[V] + rope[V]  ||  optional compressor metadata + compressor
 
-        Each stream's data is self-contained; no cross-stream sync is needed between blocks.
-        Only the tail wait_stream ensures scatter is complete.
+        KV and Q_B matmuls are ordered by events. When Q and KV consume
+        different token views, return cache events to the caller instead of
+        joining the auxiliary stream here. The callback runs after Q_B.
         """
         main_stream = torch.npu.current_stream()
         aux_stream = dsv4_dsa_overlap_stream()
 
         is_w8a8 = _is_w8a8_dynamic(self.wq_b)
+        kv_hidden_states = hidden_states if kv_inputs is None else kv_inputs.hidden_states
+        kv_cos = cos if kv_inputs is None else kv_inputs.cos
+        kv_sin = sin if kv_inputs is None else kv_inputs.sin
+        kv_slot_mapping = slot_mapping if kv_inputs is None else kv_inputs.slot_mapping
 
         # Part1: q_quant[V] -> q_a_down[C]  ||  kv_quant[V]
         # When wq_a and wkv have the same quant_method and the same
@@ -2011,7 +2056,8 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         # - TP comm: both return (hidden_states, None); shareable when custom_op
         #   types match (same communication path).
         share_quant = (
-            type(self.cv_wq_a._quant_method) is type(self.cv_wkv._quant_method)
+            kv_hidden_states is hidden_states
+            and type(self.cv_wq_a._quant_method) is type(self.cv_wkv._quant_method)
             and self.cv_wq_a._has_communication == self.cv_wkv._has_communication
         )
         e_kv_quant_done = None
@@ -2023,7 +2069,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             e_q_quant_done = main_stream.record_event()
             with npu_stream_switch(aux_stream, enabled=True):
                 torch.npu.current_stream().wait_event(e_q_quant_done)
-                kv_quant, kv_pertoken_scale = self.cv_wkv.quantize(hidden_states)
+                kv_quant, kv_pertoken_scale = self.cv_wkv.quantize(kv_hidden_states)
                 e_kv_quant_done = torch.npu.current_stream().record_event()
 
         wq_a_result = self.cv_wq_a.matmul(q_quant, q_pertoken_scale)
@@ -2063,6 +2109,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         # unaffected as it overlaps with q_b_matmul.
         main_stream.wait_event(e_kv_matmul_done)
 
+        swa_ready = None
         with npu_stream_switch(aux_stream, enabled=True):
             torch.npu.current_stream().wait_event(e_part3_start)
             kv = self.kv_norm(kv)
@@ -2070,12 +2117,14 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
             torch.ops._C_ascend.inplace_partial_rotary_mul(
                 kv.unsqueeze(1),
-                cos,
-                sin,
+                kv_cos,
+                kv_sin,
                 rotary_mode="interleave",
                 partial_slice=[self.nope_head_dim, self.head_dim],
             )
-            self._write_kv_cache(swa_kv_cache, kv, slot_mapping, quantize=False)
+            self._write_kv_cache(swa_kv_cache, kv, kv_slot_mapping, quantize=False)
+            if kv_inputs is not None:
+                swa_ready = torch.npu.current_stream().record_event()
 
         if is_prefill:
             q = self.cv_wq_b.matmul(q_b_quant, q_b_scale).unflatten(-1, (self.n_local_heads, self.head_dim))
@@ -2091,9 +2140,17 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         else:
             q = self.cv_wq_b.matmul(q_b_quant, q_b_scale).unflatten(-1, (self.n_local_heads, self.head_dim))
 
-        # Join the Q and SWA-KV branches, then reuse the auxiliary stream for
-        # independent tail work while q_rms[V] + rope[V] run on the main stream.
-        main_stream.wait_stream(aux_stream)
+        # Keep Cube work serial: the auxiliary cache work starts after Q_B.
+        # Q RMS and RoPE can run on the main stream at the same time.
+        caches_ready = None
+        if after_qb_matmul is not None:
+            q_b_done = main_stream.record_event()
+            with npu_stream_switch(aux_stream, enabled=True):
+                torch.npu.current_stream().wait_event(q_b_done)
+                after_qb_matmul()
+                caches_ready = torch.npu.current_stream().record_event()
+        else:
+            main_stream.wait_stream(aux_stream)
 
         tail_overlap_output: CompressorOverlapOutput | None = None
         if tail_overlap_fn is not None:
@@ -2113,7 +2170,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
 
-        return q, qr, qr_pertoken_scale, tail_overlap_output
+        return DSAMultistreamPrologResult(q, qr, qr_pertoken_scale, tail_overlap_output, swa_ready, caches_ready)
 
     def _maybe_update_compressed_caches_and_select_topk(
         self,
@@ -2125,6 +2182,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         qr_pertoken_scale: torch.Tensor | None,
         compress_kv_cache: torch.Tensor,
         state_cache: torch.Tensor,
+        multistream_enabled: bool,
         compressor_overlap_output: CompressorOverlapOutput | None = None,
         write_cache: bool = True,
     ) -> torch.Tensor | None:
@@ -2163,7 +2221,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             overlap_plan = IndexerOverlapPlan(
                 compute_attention_compressed_kv=compute_attention_compressed_kv,
                 scatter_attention_compressed_kv=scatter_attention_compressed_kv,
-                aux_stream=dsv4_dsa_overlap_stream() if self.multistream_dsv4_dsa_overlap else None,
+                aux_stream=dsv4_dsa_overlap_stream() if multistream_enabled else None,
             )
             return self.indexer(
                 hidden_states=hidden_states,
@@ -2196,6 +2254,13 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             )
         return None
 
+    def _use_multistream_attention(
+        self,
+        common_attn_metadata: AscendDSAMetadata,
+        cache_is_prepared: bool,
+    ) -> bool:
+        return self.multistream_dsv4_dsa_overlap
+
     def _forward_attention(
         self,
         layer_name,
@@ -2203,10 +2268,15 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         kv_cache: tuple[torch.Tensor, ...],
         layer_metadata: AscendDSALayerMetadata,
         cache_is_prepared: bool = False,
+        *,
+        prepared_q: torch.Tensor | None = None,
+        prepared_topk: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        # DSA PCP sets cache_is_prepared after global cache updates and forces
-        # single-stream attention because there is no local KV update to overlap.
-        if cache_is_prepared and self.multistream_dsv4_dsa_overlap:
+        common_attn_metadata = layer_metadata.attention
+        if common_attn_metadata is None:
+            common_attn_metadata = layer_metadata.swa
+        multistream_enabled = self._use_multistream_attention(common_attn_metadata, cache_is_prepared)
+        if cache_is_prepared and multistream_enabled:
             raise RuntimeError("Prepared DSA caches require single-stream attention.")
 
         (
@@ -2218,9 +2288,6 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             _,
         ) = DeviceOperator.unpack_dsa_forward_kv_cache(kv_cache, self.compress_ratio)
 
-        common_attn_metadata = layer_metadata.attention
-        if common_attn_metadata is None:
-            common_attn_metadata = layer_metadata.swa
         swa_metadata = layer_metadata.swa
 
         common_metadata = _require_req_metadata(common_attn_metadata)
@@ -2235,7 +2302,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         ori_win_right = 0 if swa_req_metadata.ori_win_right is None else swa_req_metadata.ori_win_right
 
         compressor_tail_fn = None
-        if self.multistream_dsv4_dsa_overlap and self.compress_ratio > 1:
+        if prepared_q is None and multistream_enabled and self.compress_ratio > 1:
             compressor = self.compressor
             tail_compressor_metadata = layer_metadata.compressor
             assert compressor is not None
@@ -2248,8 +2315,13 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                     metadata=tail_compressor_metadata,
                 )
 
-        if self.multistream_dsv4_dsa_overlap:
-            q, qr, qr_pertoken_scale, compressor_overlap_output = self._mla_prolog_multistream(
+        if prepared_q is not None:
+            q = prepared_q
+            qr = None
+            qr_pertoken_scale = None
+            compressor_overlap_output = None
+        elif multistream_enabled:
+            prolog = self._mla_prolog_multistream(
                 hidden_states,
                 cos,
                 sin,
@@ -2258,6 +2330,8 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 is_prefill=has_prefill,
                 tail_overlap_fn=compressor_tail_fn,
             )
+            q, qr = prolog.q, prolog.qr
+            qr_pertoken_scale, compressor_overlap_output = prolog.qr_pertoken_scale, prolog.tail_overlap_output
         else:
             compressor_overlap_output = None
             q, qr, qr_pertoken_scale = self._mla_prolog_single_stream(
@@ -2274,17 +2348,22 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         if self.compress_ratio > 1:
             compressor_metadata = layer_metadata.compressor
             assert compressor_metadata is not None
-            compress_topk_idxs = self._maybe_update_compressed_caches_and_select_topk(
-                layer_name=layer_name,
-                hidden_states=hidden_states,
-                qr=qr,
-                kv_cache=kv_cache,
-                layer_metadata=layer_metadata,
-                qr_pertoken_scale=qr_pertoken_scale,
-                compress_kv_cache=compress_kv_cache,
-                state_cache=state_cache,
-                compressor_overlap_output=compressor_overlap_output,
-                write_cache=not cache_is_prepared,
+            compress_topk_idxs = (
+                prepared_topk
+                if prepared_q is not None
+                else self._maybe_update_compressed_caches_and_select_topk(
+                    layer_name=layer_name,
+                    hidden_states=hidden_states,
+                    qr=qr,
+                    kv_cache=kv_cache,
+                    layer_metadata=layer_metadata,
+                    qr_pertoken_scale=qr_pertoken_scale,
+                    compress_kv_cache=compress_kv_cache,
+                    state_cache=state_cache,
+                    multistream_enabled=multistream_enabled,
+                    compressor_overlap_output=compressor_overlap_output,
+                    write_cache=not cache_is_prepared,
+                )
             )
 
         notify_kv_cache_written(layer_name)

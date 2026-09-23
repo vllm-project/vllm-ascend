@@ -44,6 +44,8 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSAMetadata,
     AscendDSAMetadataBuilder,
     AscendDSAReqMetadata,
+    DSAMultistreamKVInputs,
+    DSAMultistreamPrologResult,
     build_compressor_metadata_out,
     build_vision_bidirectional_swa_indices,
 )
@@ -1512,7 +1514,7 @@ def test_forward_attention_routes_unified_req_metadata(
         patch.object(
             impl,
             "_mla_prolog_multistream",
-            return_value=(q, torch.empty(0), None, None),
+            return_value=DSAMultistreamPrologResult(q, torch.empty(0), None, None, None, None),
         ) as mla_prolog,
         patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan),
         patch("vllm_ascend.attention.dsa_v1.notify_kv_cache_written"),
@@ -1629,6 +1631,7 @@ class TestAscendDSACompressedCacheRouting:
                 qr_pertoken_scale=None,
                 compress_kv_cache=compress_kv_cache,
                 state_cache=state_cache,
+                multistream_enabled=impl.multistream_dsv4_dsa_overlap,
             )
             indexer_call = impl.indexer.call_args
             overlap_plan = indexer_call.kwargs["overlap_plan"]
@@ -1686,6 +1689,7 @@ class TestAscendDSACompressedCacheRouting:
                 qr_pertoken_scale=None,
                 compress_kv_cache=compress_kv_cache,
                 state_cache=state_cache,
+                multistream_enabled=impl.multistream_dsv4_dsa_overlap,
                 write_cache=write_cache,
             )
 
@@ -1939,7 +1943,8 @@ def test_a5_bf16_keeps_multistream_overlap_enabled():
     assert impl.multistream_dsv4_dsa_overlap is True
 
 
-def test_multistream_prolog_scatters_flat_swa_kv_on_aux_stream():
+@pytest.mark.parametrize("separate_kv_view", [False, True])
+def test_multistream_prolog_scatters_flat_swa_kv_on_aux_stream(separate_kv_view: bool):
     impl = _make_impl()
     hidden_states = torch.randn(2, 4)
     cos = torch.ones(2, 1, 1, 1)
@@ -1950,6 +1955,7 @@ def test_multistream_prolog_scatters_flat_swa_kv_on_aux_stream():
 
     aux_depth = {"n": 0}
     scatter_inside_aux: list[bool] = []
+    operation_order: list[str] = []
 
     class _StreamSwitch:
         def __enter__(self):
@@ -1966,17 +1972,34 @@ def test_multistream_prolog_scatters_flat_swa_kv_on_aux_stream():
 
     def fake_scatter(*_args, **_kwargs):
         scatter_inside_aux.append(aux_depth["n"] > 0)
+        operation_order.append("swa_scatter")
 
+    def fake_q_b_matmul(*_args):
+        operation_order.append("q_b_matmul")
+        return q_out
+
+    # The generic fixture shares a linear mock; isolate the projections so the
+    # Q_B callback does not also record Q_A and KV matmuls.
+    impl.cv_wq_a = MagicMock()
+    impl.cv_wkv = MagicMock()
+    impl.cv_wq_b = MagicMock()
     impl.cv_wq_a.quantize = MagicMock(return_value=(hidden_states, None))
     impl.cv_wq_a.matmul = MagicMock(return_value=hidden_states)
     impl.cv_wkv.quantize = MagicMock(return_value=(hidden_states, None))
     impl.cv_wkv.matmul = MagicMock(return_value=hidden_states)
     impl.kv_norm = MagicMock(side_effect=lambda tensor: tensor)
     impl.q_norm = MagicMock(side_effect=lambda tensor: tensor)
-    impl.cv_wq_b.matmul = MagicMock(return_value=q_out)
+    impl.cv_wq_b.quantize = MagicMock(return_value=(hidden_states, None))
+    impl.cv_wq_b.matmul = MagicMock(side_effect=fake_q_b_matmul)
     plan = _mock_dsa_kv_plan()
     plan.dsa_kv_compress_scatter.side_effect = fake_scatter
     stream = MagicMock()
+
+    kv_inputs = DSAMultistreamKVInputs(hidden_states.clone(), cos, sin, slot_mapping) if separate_kv_view else None
+
+    def after_qb_matmul():
+        operation_order.append("cache_update")
+        assert aux_depth["n"] > 0
 
     with (
         patch("vllm_ascend.attention.dsa_v1.torch.npu.current_stream", return_value=stream),
@@ -1986,11 +2009,28 @@ def test_multistream_prolog_scatters_flat_swa_kv_on_aux_stream():
         patch.object(torch.ops._C_ascend, "inplace_partial_rotary_mul", create=True),
         patch.object(DeviceOperator, "apply_dsa_q_rms", side_effect=lambda query, *_args, **_kwargs: query),
     ):
-        impl._mla_prolog_multistream(hidden_states, cos, sin, swa_kv_cache, slot_mapping)
+        prolog = impl._mla_prolog_multistream(
+            hidden_states,
+            cos,
+            sin,
+            swa_kv_cache,
+            slot_mapping,
+            kv_inputs=kv_inputs,
+            after_qb_matmul=after_qb_matmul if separate_kv_view else None,
+        )
 
     assert scatter_inside_aux == [True]
     plan.dsa_kv_compress_scatter.assert_called_once()
-    stream.wait_stream.assert_called()
+    if separate_kv_view:
+        assert operation_order == ["swa_scatter", "q_b_matmul", "cache_update"]
+        assert prolog.swa_ready is not None
+        assert prolog.caches_ready is not None
+        stream.wait_stream.assert_not_called()
+    else:
+        assert operation_order == ["swa_scatter", "q_b_matmul"]
+        assert prolog.swa_ready is None
+        assert prolog.caches_ready is None
+        stream.wait_stream.assert_called()
 
 
 def test_indexer_overlap_keeps_aux_stream_for_flat_bf16_slots():
@@ -2024,6 +2064,7 @@ def test_indexer_overlap_keeps_aux_stream_for_flat_bf16_slots():
             qr_pertoken_scale=None,
             compress_kv_cache=torch.empty(0),
             state_cache=torch.empty(0),
+            multistream_enabled=impl.multistream_dsv4_dsa_overlap,
         )
 
     overlap_plan = impl.indexer.call_args.kwargs["overlap_plan"]
@@ -2045,7 +2086,7 @@ def test_prepared_cache_rejects_multistream_before_cache_access():
             "layer",
             torch.empty((1, 4)),
             (torch.empty(0),),
-            cast(Any, None),
+            AscendDSALayerMetadata(attention=cast(Any, object()), swa=cast(Any, object())),
             True,
         )
 
