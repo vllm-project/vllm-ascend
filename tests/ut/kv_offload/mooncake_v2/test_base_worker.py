@@ -101,6 +101,7 @@ def test_register_kv_caches_uses_config_order_and_publishes_tensor_metadata(monk
     )
     worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
     worker.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
+    worker.pcp_rank, worker.tp_rank, worker.tp_size = 0, 0, 1
     worker.kv_cache_config = config
     worker.engine_id = "engine-d"
     worker.te_rpc_port = 9000
@@ -151,6 +152,7 @@ def test_register_kv_caches_collapses_views_packed_in_one_page(monkeypatch) -> N
     )
     worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
     worker.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
+    worker.pcp_rank, worker.tp_rank, worker.tp_size = 0, 0, 1
     worker.kv_cache_config = config
     worker.engine_id = "engine-d"
     worker.te_rpc_port = 9000
@@ -211,6 +213,7 @@ def test_register_kv_caches_publishes_sfa_indexer_virtual_block_size(
     )
     worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
     worker.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
+    worker.pcp_rank, worker.tp_rank, worker.tp_size = 0, 0, 1
     worker.kv_cache_config = config
     worker.engine_id = "engine-d"
     worker.te_rpc_port = 9000
@@ -254,6 +257,7 @@ def test_register_kv_caches_rejects_missing_and_unconfigured_layers() -> None:
     )
     worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
     worker.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
+    worker.pcp_rank, worker.tp_rank, worker.tp_size = 0, 0, 1
     worker.kv_cache_config = config
     worker.engine_id = "engine"
     worker.te_rpc_port = 9000
