@@ -580,7 +580,9 @@ def test_sample_tokens_spec_pp_broadcasts_draft_tokens():
     runner.pp_handler = MagicMock()
     with patch.object(GPUModelRunner, "sample_tokens", return_value="out"):
         assert runner.sample_tokens("g") == "out"
-    runner.pp_handler.broadcast_draft_tokens.assert_not_called()
+    # sample_tokens always calls broadcast_drafts when legacy spec PP is on.
+    # broadcast_draft_tokens is only an alias installed on the real PP handler.
+    runner.pp_handler.broadcast_drafts.assert_called_once_with()
 
 
 def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():

@@ -18,6 +18,7 @@ from vllm.v1.kv_cache_interface import (
 
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec, is_prefix_cacheable
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import AscendHybridKVCacheCoordinator
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.block_table import BlockTable
 
 
@@ -55,7 +56,7 @@ def test_ring_lifetime_reuse_and_external_tokens():
         manager.cache_blocks(
             SimpleNamespace(request_id="a"),
             tokens,
-            replay_boundaries=[tokens - 1],
+            **({} if vllm_version_is("0.29.0") else {"replay_boundaries": [tokens - 1]}),
         )
         assert manager.req_to_blocks["a"] == a
     assert manager.take_new_block_ids() == []
