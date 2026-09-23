@@ -165,6 +165,7 @@ templates:
       - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable":true}'
 
 benchmarks:
+  # https://github.com/vllm-project/vllm-ascend/actions/runs/35551378782/job/106187335016
   perf_TPOT50_3_5_1_5:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K-in3500-bs4096-prefix0-ds
@@ -174,7 +175,7 @@ benchmarks:
     max_out_len: 1500
     batch_size: 1024
     request_rate: 12
-    baseline: 15569.48
+    baseline: 14735.816
     threshold: 0.95
   perf_TPOT20_3_5_1_5:
     case_type: performance
@@ -185,7 +186,7 @@ benchmarks:
     max_out_len: 1500
     batch_size: 100
     request_rate: 12
-    baseline: 4071.471
+    baseline: 4101.1465
     threshold: 0.95
   perf_TPOT20_3_5_1_5_top_k:
     case_type: performance
@@ -199,5 +200,5 @@ benchmarks:
     max_out_len: 1500
     batch_size: 100
     request_rate: 12
-    baseline: 4071.471
+    baseline: 4043.4797
     threshold: 0.95
