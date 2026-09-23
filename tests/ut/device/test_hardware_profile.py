@@ -80,6 +80,7 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.DSV4_COMPRESSED_CACHE,
             HardwareCapability.DYNAMIC_MX_QUANT_FUSION,
             HardwareCapability.DYNAMIC_MX_QUANT_SCALE_ALG_ONE,
+            HardwareCapability.FLASH_MLA_PREFILL,
             HardwareCapability.FP8_ATTENTION,
             HardwareCapability.GRAPH_MULS_ADD_FUSION,
             HardwareCapability.GRAPH_NORM_QUANT_FUSION,
