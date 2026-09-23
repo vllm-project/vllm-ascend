@@ -1,4 +1,13 @@
+# ruff: noqa: E402
+
 from types import SimpleNamespace
+
+import pytest
+
+pytest.importorskip(
+    "vllm.transformers_utils.configs.deepseek_v41",
+    reason="DeepSeek V4.1 is unavailable on this vLLM release",
+)
 
 import torch
 from PIL import Image

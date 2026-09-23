@@ -62,7 +62,13 @@ from vllm_ascend.core.profiling_chunk_predictor import (
     _start_profiling_chunk_timing,
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
-from vllm_ascend.utils import lmhead_tp_enable, set_potential_max_tokens, vllm_version_is
+from vllm_ascend.utils import (
+    is_pd_decode_recompute_scheduler_enabled,
+    kv_transfer_supports_shared_backing,
+    lmhead_tp_enable,
+    set_potential_max_tokens,
+    vllm_version_is,
+)
 from vllm_ascend.worker.utils import disable_compilation
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
@@ -92,6 +98,11 @@ class NPUModelRunner(GPUModelRunner):
     # backing allocation. Ascend MRV2 preserves that layout in
     # allocate_kv_cache_main and exposes contiguous backend-specific views.
     supports_standardized_shared_kv_backing = True
+
+    @property
+    def supports_shared_backing_with_kv_transfer(self) -> bool:
+        """Whether the active connector can consume one shared KV backing."""
+        return kv_transfer_supports_shared_backing(self.vllm_config.kv_transfer_config)
 
     execute_model_state: ExecuteModelState | None
 
@@ -356,6 +367,25 @@ class NPUModelRunner(GPUModelRunner):
 
     def gather_batch_req_state(self, scheduler_output: SchedulerOutput, dummy_run: bool):
         batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
+        if batch_state is not None and is_pd_decode_recompute_scheduler_enabled(self.vllm_config):
+            pd_decode_recompute = (
+                batch_state.is_prefilling_np
+                & (batch_state.num_computed_prefill_tokens_np > 0)
+                & (batch_state.num_scheduled_tokens == self.decode_query_len)
+                & (
+                    batch_state.num_computed_prefill_tokens_np + batch_state.num_scheduled_tokens
+                    >= batch_state.prefill_len_np
+                )
+            )
+            if np.any(pd_decode_recompute):
+                batch_state.is_prefilling_np[pd_decode_recompute] = False
+                batch_state = batch_state._replace(has_prefill=bool(batch_state.is_prefilling_np.any()))
+                uniform_token_count = vllm_model_runner.get_uniform_decode_token_count(
+                    len(batch_state.req_ids),
+                    batch_state.num_tokens,
+                    int(batch_state.num_scheduled_tokens.max()),
+                    batch_state.has_prefill,
+                )
         num_tokens = None
         if vllm_version_is("0.28.0") and self.pcp_manager is not None and batch_state is not None:
             num_tokens = self.pcp_manager.get_num_tokens_for_dispatch(
