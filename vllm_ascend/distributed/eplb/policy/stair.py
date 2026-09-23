@@ -911,6 +911,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
         ]
         current_has_expert = np.zeros((num_ranks, num_experts), dtype=bool)
         current_has_expert[np.arange(num_ranks)[:, None], current_placement] = True
+        placed_has_expert = np.zeros((num_ranks, num_experts), dtype=bool)
         incoming_demands: list[tuple[int, int]] = []
         incoming_counts = np.zeros(num_ranks, dtype=np.int64)
         if migration_feasibility_cache is None:
@@ -922,6 +923,9 @@ class StairEplbPolicy(AbstractEplbPolicy):
         rank_means = np.zeros(num_ranks, dtype=np.float64)
         rank_variances = np.zeros(num_ranks, dtype=np.float64)
         rank_variance_scales = np.zeros(num_ranks, dtype=np.float64)
+        scaled_variances = variances / replicas**2
+        scaled_covariance = 2 * covariance / (replicas[:, None] * replicas[None, :])
+        slot_ids = np.arange(slots_per_rank)
         per_replica_risks = cls.expert_risk(means, variances, z_score) / replicas
         experts_by_descending_replica_risk = sorted(
             range(num_experts), key=lambda expert: (-per_replica_risks[expert], expert)
@@ -937,6 +941,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
             if not current_has_expert[rank_id, expert]:
                 assert incoming_demands.pop() == (rank_id, expert)
                 incoming_counts[rank_id] -= 1
+            placed_has_expert[rank_id, expert] = False
             placement[rank_id, slot] = -1
             rank_sizes[rank_id] -= 1
             rank_means[rank_id] = previous_state[0]
@@ -947,30 +952,46 @@ class StairEplbPolicy(AbstractEplbPolicy):
         while replica_index < len(replica_order):
             expert = replica_order[replica_index]
             if len(decisions) == replica_index:
-                rank_choices = []
-                for rank_id in range(num_ranks):
-                    size = rank_sizes[rank_id]
-                    rank_experts = placement[rank_id, :size]
-                    incoming_budget_exhausted = (
-                        rank_transfer_limit != -1
-                        and not current_has_expert[rank_id, expert]
-                        and incoming_counts[rank_id] >= rank_transfer_limit
+                valid_ranks = (rank_sizes < slots_per_rank) & ~placed_has_expert[:, expert]
+                if rank_transfer_limit != -1:
+                    valid_ranks &= current_has_expert[:, expert] | (incoming_counts < rank_transfer_limit)
+                rank_ids = np.flatnonzero(valid_ranks)
+                existing_mask = slot_ids[None, :] < rank_sizes[rank_ids, None]
+                existing_experts = np.where(existing_mask, placement[rank_ids], 0)
+                covariance_increments = scaled_covariance[expert, existing_experts] * existing_mask
+                variance_increments = scaled_variances[expert] + covariance_increments.sum(axis=1)
+                updated_variances = rank_variances[rank_ids] + variance_increments
+                updated_scales = (
+                    rank_variance_scales[rank_ids]
+                    + abs(scaled_variances[expert])
+                    + np.abs(covariance_increments).sum(axis=1)
+                )
+                num_rank_experts = rank_sizes[rank_ids] + 1
+                num_terms = num_rank_experts * (num_rank_experts + 1) // 2
+                roundoff_tolerances = (
+                    _VARIANCE_ROUNDOFF_SAFETY_FACTOR
+                    * num_terms
+                    * np.finfo(np.float64).eps
+                    * np.maximum(updated_scales, np.finfo(np.float64).tiny)
+                )
+                if np.any(updated_variances < -roundoff_tolerances):
+                    raise ValueError("expert covariance produces a negative rank variance")
+                updated_variances = np.maximum(updated_variances, 0.0)
+                updated_means = rank_means[rank_ids] + means[expert] / replicas[expert]
+                updated_risks = updated_means + z_score * np.sqrt(updated_variances)
+                rank_choices = sorted(
+                    (
+                        float(risk),
+                        int(rank_id),
+                        float(updated_mean),
+                        float(updated_variance),
+                        float(updated_scale),
                     )
-                    if size == slots_per_rank or expert in rank_experts or incoming_budget_exhausted:
-                        continue
-                    updated_mean = rank_means[rank_id] + means[expert] / replicas[expert]
-                    updated_variance, updated_scale = cls._updated_rank_variance(
-                        expert,
-                        rank_experts,
-                        rank_variances[rank_id],
-                        rank_variance_scales[rank_id],
-                        variances,
-                        covariance,
-                        replicas,
+                    for risk, rank_id, updated_mean, updated_variance, updated_scale in zip(
+                        updated_risks, rank_ids, updated_means, updated_variances, updated_scales
                     )
-                    updated_risk = updated_mean + z_score * np.sqrt(updated_variance)
-                    rank_choices.append((float(updated_risk), rank_id, updated_mean, updated_variance, updated_scale))
-                decisions.append(_PlacementDecision(sorted(rank_choices)))
+                )
+                decisions.append(_PlacementDecision(rank_choices))
 
             decision = decisions[replica_index]
             advanced = False
@@ -980,6 +1001,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
                 slot = rank_sizes[rank_id]
                 previous_state = rank_means[rank_id], rank_variances[rank_id], rank_variance_scales[rank_id]
                 placement[rank_id, slot] = expert
+                placed_has_expert[rank_id, expert] = True
                 rank_sizes[rank_id] += 1
                 rank_means[rank_id] = updated_mean
                 rank_variances[rank_id] = updated_variance
