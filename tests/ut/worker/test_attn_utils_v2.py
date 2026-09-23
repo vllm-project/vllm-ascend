@@ -499,6 +499,7 @@ def test_v2_mla_single_raw_backing_selects_layout_by_hardware_and_local_q_heads(
     num_blocks = 2
     spec = AscendMLAAttentionSpec(
         block_size=384,
+        num_heads=64,
         num_kv_heads=1,
         head_size=576,
         dtype=torch.bfloat16,
@@ -508,7 +509,6 @@ def test_v2_mla_single_raw_backing_selects_layout_by_hardware_and_local_q_heads(
     torch.nn.Module.__init__(attn_module)
     attn_module.kv_lora_rank = 512
     attn_module.qk_rope_head_dim = 64
-    attn_module.num_heads = 64
     attn_module.impl = SimpleNamespace(fa_quant_layer=False)
     backend = MagicMock()
     backend.get_kv_cache_shape.side_effect = lambda num_block_ids, block_size, num_kv_heads, head_size, *_args: (
@@ -564,25 +564,27 @@ def test_v2_mla_single_raw_backing_selects_layout_by_hardware_and_local_q_heads(
 
     monkeypatch.setattr(attn_utils, "get_current_hardware_profile", lambda: flash_profile)
     for q_heads in (8, 12, 64, 96):
-        attn_module.num_heads = q_heads
+        spec = replace(spec, num_heads=q_heads)
+        attn_group.kv_cache_spec = spec
         fused = reshape()
         assert isinstance(fused, torch.Tensor)
-        assert fused.shape == (6, 1, 128, 576)
-        assert fused.stride() == (81408, 73728, 576, 1)
+        assert fused.shape == (6, 128, 1, 576)
+        assert fused.stride() == (81408, 576, 576, 1)
 
     # Even on A5, FlashMLA-incompatible query-head counts use the
     # FIA-compatible component-major layout.
-    attn_module.num_heads = 48
+    spec = replace(spec, num_heads=48)
+    attn_group.kv_cache_spec = spec
     a5_fallback = reshape()
     assert isinstance(a5_fallback, tuple)
 
     monkeypatch.setattr(attn_utils, "get_current_hardware_profile", lambda: component_profile)
     cache = reshape()
     nope, rope = cache
-    assert nope.shape == (6, 1, 128, 512)
-    assert nope.stride() == (81408, 65536, 512, 1)
-    assert rope.shape == (6, 1, 128, 64)
-    assert rope.stride() == (81408, 8192, 64, 1)
+    assert nope.shape == (6, 128, 1, 512)
+    assert nope.stride() == (81408, 512, 512, 1)
+    assert rope.shape == (6, 128, 1, 64)
+    assert rope.stride() == (81408, 64, 64, 1)
     assert rope.storage_offset() - nope.storage_offset() == 65536
     assert nope.untyped_storage() is rope.untyped_storage()
 
@@ -607,6 +609,7 @@ def test_v2_single_raw_mla_path_excludes_unsupported_modes(monkeypatch):
     )
     monkeypatch.setattr(attn_utils, "enable_sfa", lambda *_args, **_kwargs: False)
 
+    assert spec.supports_single_raw_backing
     assert attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, spec)
 
     vllm_config.kv_transfer_config = object()
@@ -622,6 +625,9 @@ def test_v2_single_raw_mla_path_excludes_unsupported_modes(monkeypatch):
     attn_module.impl.fa_quant_layer = False
 
     blocked_spec = replace(spec, indexes_kv_by_block_stride=True)
+    assert not blocked_spec.supports_single_raw_backing
+    assert not replace(spec, tokens_per_state=2).supports_single_raw_backing
+    assert not replace(spec, model_version="deepseek_v4").supports_single_raw_backing
     assert not attn_utils._uses_single_raw_mla_cache(vllm_config, layer_name, blocked_spec)
 
 
@@ -738,13 +744,13 @@ def test_v2_zeroer_covers_each_mla_component_view():
     typed_raw = raw.view(torch.bfloat16)
     nope = torch.as_strided(
         typed_raw,
-        size=(6, 1, 128, 512),
-        stride=(81408, 65536, 512, 1),
+        size=(6, 128, 1, 512),
+        stride=(81408, 512, 512, 1),
     )
     rope = torch.as_strided(
         typed_raw,
-        size=(6, 1, 128, 64),
-        stride=(81408, 8192, 64, 1),
+        size=(6, 128, 1, 64),
+        stride=(81408, 64, 64, 1),
         storage_offset=65536,
     )
     spec = AscendMLAAttentionSpec(
@@ -1979,6 +1985,7 @@ def test_main_entry_allocates_and_reshapes_kvpp_views(monkeypatch, packed):
 def _make_mla_layer(*, fa_quant: bool = False, sparse_c8: bool = False):
     layer = attn_utils.MLAAttention.__new__(attn_utils.MLAAttention)
     layer.kv_sharing_target_layer_name = None
+    layer.num_heads = 64
     layer.head_size = 64
     layer.qk_rope_head_dim = 64
     layer.kv_lora_rank = 128
@@ -1990,6 +1997,9 @@ def _make_mla_layer(*, fa_quant: bool = False, sparse_c8: bool = False):
     )
     layer.get_kv_cache_spec = lambda _cfg: SimpleNamespace(
         block_size=16,
+        # vLLM's generic MLA spec exposes cache head slots here, not local
+        # query heads. The Ascend spec must deliberately use the module count.
+        num_heads=1,
         num_kv_heads=1,
         head_size=128,
         dtype=torch.bfloat16,
@@ -2260,6 +2270,8 @@ def test_attn_state_mla_spec_and_metadata_wrappers(monkeypatch):
     specs = attn_utils.get_kv_cache_spec(vllm_config)
     assert set(specs) == {"fa", "sfa"}
     assert specs["fa"].head_size == 128
+    assert specs["fa"].num_heads == 64
+    assert specs["sfa"].num_heads == 64
     assert specs["sfa"].cache_sparse_sfa_c8 is True
 
     mla_spec = AscendMLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
