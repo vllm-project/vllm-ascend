@@ -455,7 +455,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         self._nano_metadata = None
         if self.use_nano:
             if self.enable_sparse_li_c8:
-                raise NotImplementedError("MTP C8 LIM is built but nano C8 serving is not enabled yet")
+                raise NotImplementedError("Nano offload does not support sparse LI C8 serving yet")
             self.nano_hot_tokens = offload_cfg.topk_buffer_size
             requests = self.vllm_config.scheduler_config.max_num_seqs + 2
             tokens = self.vllm_config.scheduler_config.max_num_batched_tokens

@@ -519,9 +519,7 @@ class MembPullReadThread(threading.Thread):
             return
         offload_id = layer["offload_id"]
         if offload_id >= len(state.topk_k_bases) or offload_id >= len(state.topk_v_bases):
-            raise RuntimeError(
-                f"MembPull nano tail is missing topk buffer bases for {layer['layer_name']}"
-            )
+            raise RuntimeError(f"MembPull nano tail is missing topk buffer bases for {layer['layer_name']}")
         p_k_len = int(layer["p_k_len"])
         p_v_len = int(layer["p_v_len"])
         if p_k_len % state.block_size or p_v_len % state.block_size:
@@ -582,9 +580,7 @@ class MembPullReadThread(threading.Thread):
             )
         offload_id = layer["offload_id"]
         if offload_id >= len(state.topk_k_bases) or offload_id >= len(state.topk_v_bases):
-            raise RuntimeError(
-                f"MembPull nano dense is missing topk buffer bases for {layer['layer_name']}"
-            )
+            raise RuntimeError(f"MembPull nano dense is missing topk buffer bases for {layer['layer_name']}")
         p_k_len = int(layer["p_k_len"])
         p_v_len = int(layer["p_v_len"])
         if p_k_len % state.block_size or p_v_len % state.block_size:

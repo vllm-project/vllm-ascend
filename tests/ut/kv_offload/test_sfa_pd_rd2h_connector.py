@@ -40,9 +40,6 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (  #
     get_external_request_id,
     infer_sfa_component_group_ids,
 )
-from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.nano_topk_slots import (  # noqa: E402
-    NanoTopkSlotAllocator,
-)
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.read_thread import (  # noqa: E402
     ConsumerReadState,
     MembPullReadThread,
@@ -58,6 +55,9 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.send_thread import (
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.worker import (  # noqa: E402
     SFAPDRD2HConsumerWorker,
     SFAPDRD2HProducerWorker,
+)
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.nano_topk_slots import (  # noqa: E402
+    NanoTopkSlotAllocator,
 )
 from vllm_ascend.distributed.kv_transfer.utils.memfabric_transfer_engine import (  # noqa: E402
     BACKEND_MEMFABRIC,
@@ -1724,4 +1724,3 @@ def test_nano_dense_d2d_skips_chunk_outside_prompt_blocks():
     assert local == []
     assert peer == []
     assert lengths == []
-
