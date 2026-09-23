@@ -36,6 +36,7 @@ class TestAscendSFAIndexerBackend(TestBase):
     @patch("vllm_ascend.attention.indexer.get_ascend_config")
     def test_initialization(self, mock_get_ascend_config, mock_get_vllm_config, _mock_enable_dsa_cp):
         mock_get_ascend_config.return_value.is_sparse_li_c8_layer.return_value = False
+        mock_get_ascend_config.return_value.enable_pivot_lightning_indexer = False
         mock_get_vllm_config.return_value.model_config.hf_config.model_type = "deepseek_v32"
         mock_get_vllm_config.return_value.parallel_config.prefill_context_parallel_size = 1
         mock_indexer = self._make_vllm_indexer()
@@ -55,6 +56,7 @@ class TestAscendSFAIndexerBackend(TestBase):
 
         self.assertIsNone(mock_indexer.topk_indices_buffer)
         self.assertFalse(indexer.enable_sparse_li_c8)
+        self.assertFalse(indexer.enable_pivot_lightning_indexer)
         self.assertTrue(indexer.is_rope_neox_style)
         self.assertFalse(indexer.use_torch_npu_lightning_indexer)
 
@@ -63,6 +65,7 @@ class TestAscendSFAIndexerBackend(TestBase):
     @patch("vllm_ascend.attention.indexer.get_ascend_config")
     def test_glm_model_type_flags(self, mock_get_ascend_config, mock_get_vllm_config, _mock_enable_dsa_cp):
         mock_get_ascend_config.return_value.is_sparse_li_c8_layer.return_value = False
+        mock_get_ascend_config.return_value.enable_pivot_lightning_indexer = False
         mock_get_vllm_config.return_value.model_config.hf_config.model_type = "glm_moe_dsa"
         mock_get_vllm_config.return_value.parallel_config.prefill_context_parallel_size = 1
 
@@ -76,6 +79,7 @@ class TestAscendSFAIndexerBackend(TestBase):
     @patch("vllm_ascend.attention.indexer.get_ascend_config")
     def test_li_c8_dtypes(self, mock_get_ascend_config, mock_get_vllm_config, _mock_enable_dsa_cp):
         mock_get_ascend_config.return_value.is_sparse_li_c8_layer.return_value = True
+        mock_get_ascend_config.return_value.enable_pivot_lightning_indexer = False
         mock_get_vllm_config.return_value.model_config.hf_config.model_type = "deepseek_v32"
         mock_get_vllm_config.return_value.parallel_config.prefill_context_parallel_size = 1
 
@@ -97,6 +101,18 @@ class TestAscendSFAIndexerBackend(TestBase):
         self.assertEqual(indexer.c8_k_cache_dtype, torch.int8)
         self.assertEqual(indexer.c8_k_scale_cache_dtype, torch.float16)
 
+    @patch("vllm_ascend.attention.indexer.enable_dsa_cp", return_value=False)
+    @patch("vllm_ascend.attention.indexer.get_current_vllm_config")
+    @patch("vllm_ascend.attention.indexer.get_ascend_config")
+    def test_pivot_rejects_sparse_li_c8(self, mock_get_ascend_config, mock_get_vllm_config, _mock_enable_dsa_cp):
+        mock_get_ascend_config.return_value.is_sparse_li_c8_layer.return_value = True
+        mock_get_ascend_config.return_value.enable_pivot_lightning_indexer = True
+        mock_get_vllm_config.return_value.model_config.hf_config.model_type = "glm_moe_dsa"
+        mock_get_vllm_config.return_value.parallel_config.prefill_context_parallel_size = 1
+
+        with self.assertRaisesRegex(ValueError, "cannot be combined"):
+            AscendSFAIndexerBackend(self._make_vllm_indexer(), qk_rope_head_dim=64)
+
     def test_num_cache_tensors(self):
         indexer = AscendSFAIndexerBackend.__new__(AscendSFAIndexerBackend)
 
@@ -114,6 +130,7 @@ class TestAscendSFAIndexerBackend(TestBase):
         indexer.is_rope_neox_style = True
         indexer.enable_sparse_li_c8 = False
         indexer.use_torch_npu_lightning_indexer = False
+        indexer.enable_pivot_lightning_indexer = False
         indexer.wk_weights_proj = MagicMock(return_value=(torch.zeros(2, 128 + 4), None))
         indexer.wq_b = MagicMock(return_value=(torch.zeros(2, 2 * 128), None))
         indexer._pcp_active = False

@@ -183,6 +183,12 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         vllm_indexer.topk_indices_buffer = None  # delete topk_indices_buffer
 
         self.enable_sparse_li_c8 = get_ascend_config().is_sparse_li_c8_layer(self.k_cache.prefix)
+        self.enable_pivot_lightning_indexer = get_ascend_config().enable_pivot_lightning_indexer
+        if self.enable_sparse_li_c8 and self.enable_pivot_lightning_indexer:
+            raise ValueError(
+                "enable_pivot_lightning_indexer requires a BF16/FP16 indexer cache; "
+                "it cannot be combined with sparse LightningIndexer C8"
+            )
         if self.enable_sparse_li_c8:
             self.c8_k_cache_dtype = kv_cache_dtype_str_to_dtype(
                 get_current_vllm_config().attention_config.indexer_kv_dtype,
@@ -491,6 +497,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             indexer_metadata.actual_seq_lengths_key,
             self.enable_sparse_li_c8,
             self.use_torch_npu_lightning_indexer,
+            self.enable_pivot_lightning_indexer,
         )
 
 

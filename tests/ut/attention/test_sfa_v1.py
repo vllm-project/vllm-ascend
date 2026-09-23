@@ -31,7 +31,7 @@ from vllm_ascend.attention.sfa_v1 import (
     custom_kv_rmsnorm_rope,
 )
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
-from vllm_ascend.device.device_op import BaseDeviceAdaptor, DeviceOperator
+from vllm_ascend.device.device_op import A5DeviceAdaptor, BaseDeviceAdaptor, DeviceOperator
 from vllm_ascend.quantization.methods import (
     AscendW8A8DynamicLinearMethod,
     AscendW8A8LinearMethod,
@@ -405,6 +405,7 @@ class TestAscendSFACacheComposition(TestBase):
             torch.tensor([2], dtype=torch.int32),
             True,
             False,
+            False,
         )
 
         self.assertIs(result, expected_topk)
@@ -414,6 +415,69 @@ class TestAscendSFACacheComposition(TestBase):
             call_kwargs["key_dequant_scale"].data_ptr(),
             indexer_scale_cache.data_ptr(),
         )
+
+    @patch(
+        "vllm_ascend.device.device_op.torch.ops._C_ascend.npu_pivot_lightning_indexer",
+        create=True,
+    )
+    def test_pivot_indexer_uses_separate_operator(self, mock_indexer):
+        expected_topk = torch.zeros(4, 1, 2048, dtype=torch.int32)
+        mock_indexer.return_value = expected_topk, torch.empty(0)
+        q_li = torch.zeros(4, 32, 128, dtype=torch.bfloat16)
+        key_cache = torch.zeros(64, 128, 1, 128, dtype=torch.bfloat16)
+        weights = torch.zeros(4, 32, dtype=torch.bfloat16)
+        block_table = torch.arange(64, dtype=torch.int32).view(1, -1)
+        attn_metadata = SimpleNamespace(block_table=block_table)
+        query_lengths = torch.tensor([4], dtype=torch.int32)
+        key_lengths = torch.tensor([8192], dtype=torch.int32)
+
+        result = BaseDeviceAdaptor.indexer_select_post_process(
+            q_li,
+            None,
+            None,
+            weights,
+            (key_cache,),
+            0,
+            1,
+            attn_metadata,
+            query_lengths,
+            key_lengths,
+            False,
+            True,
+            True,
+        )
+
+        self.assertIs(result, expected_topk)
+        mock_indexer.assert_called_once_with(
+            query=q_li,
+            key=key_cache,
+            weights=weights,
+            actual_seq_lengths_query=query_lengths,
+            actual_seq_lengths_key=key_lengths,
+            block_table=block_table,
+            layout_query="TND",
+            layout_key="PA_BSND",
+            sparse_count=2048,
+            sparse_mode=3,
+        )
+
+    def test_pivot_indexer_is_rejected_on_a5(self):
+        with self.assertRaisesRegex(RuntimeError, "supported only on Ascend 910B/910_93"):
+            A5DeviceAdaptor.indexer_select_post_process(
+                torch.empty(0),
+                None,
+                None,
+                torch.empty(0),
+                (),
+                0,
+                1,
+                SimpleNamespace(block_table=None),
+                torch.empty(0, dtype=torch.int32),
+                torch.empty(0, dtype=torch.int32),
+                False,
+                False,
+                True,
+            )
 
 
 class TestAscendSFAKVQuantSparseAttention(TestBase):
@@ -645,6 +709,7 @@ class TestAscendSFAKPathFusion(TestBase):
         indexer.n_head = n_head
         indexer.wq_b = MagicMock(return_value=(torch.randn(num_tokens, n_head * head_dim), None))
         indexer.use_torch_npu_lightning_indexer = False
+        indexer.enable_pivot_lightning_indexer = False
         indexer.k_cache = SimpleNamespace(kv_cache=torch.zeros(2, 16, 1, 128))
         indexer._pcp_active = False
         indexer._dsa_cp_active = False

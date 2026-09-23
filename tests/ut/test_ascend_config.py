@@ -1217,6 +1217,18 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_enable_pivot_lightning_indexer_is_opt_in(self, mock_fix):
+        vc = VllmConfig()
+        self.assertFalse(init_ascend_config(vc).enable_pivot_lightning_indexer)
+
+        clear_ascend_config()
+        clear_enable_sp()
+        vc = VllmConfig()
+        vc.additional_config = {"enable_pivot_lightning_indexer": True}
+        self.assertTrue(init_ascend_config(vc).enable_pivot_lightning_indexer)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_a_family_additional_config_gets_typed_validation(self, mock_fix):
         vc = VllmConfig()
         vc.additional_config = {

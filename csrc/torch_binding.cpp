@@ -39,6 +39,7 @@
 #include "gmm/grouped_matmul_swiglu_quant_weight_nz_tensor_list/grouped_matmul_swiglu_quant_torch_adpt.h"
 #include "gmm/grouped_matmul_swiglu_quant_v2/grouped_matmul_swiglu_quant_v2_torch_adpt.h"
 #include "attention/lightning_indexer/lightning_indexer_torch_adpt.h"
+#include "attention/pivot_lightning_indexer/pivot_lightning_indexer_torch_adpt.h"
 #include "moe/moe_gating_top_k/moe_gating_top_k_torch_adpt.h"
 #include "attention/sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
 #include "attention/sparse_flash_mla/sparse_flash_mla_torch_adpt.h"
@@ -3048,6 +3049,22 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         ") -> (Tensor sparse_indices, Tensor sparse_values)"
     );
     ops.impl("npu_lightning_indexer", torch::kPrivateUse1, &vllm_ascend::npu_lightning_indexer);
+
+    ops.def(
+        "npu_pivot_lightning_indexer("
+            "Tensor query, Tensor key, Tensor weights, "
+            "*, "
+            "Tensor? actual_seq_lengths_query=None, "
+            "Tensor? actual_seq_lengths_key=None, "
+            "Tensor? block_table=None, "
+            "str layout_query=\"BSND\", str layout_key=\"BSND\", "
+            "int sparse_count=2048, int sparse_mode=3, "
+            "int pre_tokens=9223372036854775807, "
+            "int next_tokens=9223372036854775807, "
+            "bool return_value=False"
+        ") -> (Tensor sparse_indices, Tensor sparse_values)"
+    );
+    ops.impl("npu_pivot_lightning_indexer", torch::kPrivateUse1, &vllm_ascend::npu_pivot_lightning_indexer);
 
     // k2q_csr: q2k -> k2q CSR (Meta/Hist/RowPrefix/TilePrefix/Scatter)
     ops.def(

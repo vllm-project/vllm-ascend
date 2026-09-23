@@ -76,6 +76,7 @@ def _make_indexer(
     _mock_enable_dsa_cp: MagicMock,
 ) -> AscendSFAIndexerBackend:
     mock_get_ascend_config.return_value.is_sparse_li_c8_layer.return_value = True
+    mock_get_ascend_config.return_value.enable_pivot_lightning_indexer = False
     # Keep the config a ``MagicMock`` so nested lookups such as
     # ``model_config.hf_config.model_type`` and ``attention_config.indexer_kv_dtype``
     # resolve without every level having to be spelled out.
