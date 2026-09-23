@@ -110,6 +110,8 @@ runner_mapping:
   tests/e2e/pull_request/one_card:
     default: a2-1
     310p: 310p-1
+  tests/e2e/pull_request/two_card/test_qwen3_moe_eplb_a2.py:
+    default: a2-2
   tests/e2e/pull_request/two_card:
     default: a3-2
   tests/e2e/pull_request/four_card:
@@ -129,6 +131,9 @@ partition:
   a2-1:
     runner_label: linux-aarch64-a2b3-1
     count: 5
+  a2-2:
+    runner_label: linux-aarch64-a2b3-2
+    count: 1
   a3-2:
     runner_label: linux-aarch64-a3-2
     count: 4
