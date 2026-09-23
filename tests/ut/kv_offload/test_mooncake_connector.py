@@ -4309,5 +4309,67 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             worker._get_sfa_replicate_k_block_ids(cast(ReqMeta, meta))
 
 
+class TestMooncakeConnectorSchedulerTransferBlockSize(unittest.TestCase):
+    """P2P transfer metadata must carry the *physical* KV block size.
+
+    Hybrid (Mamba/GDN) engines unify the physical KV block to the lcm of the
+    attention and state page sizes (e.g. 1024 tokens), while the logical
+    ``cache_config.block_size`` can lag at the CLI value (e.g. 128) in the
+    engine-core process. Block ids in the transfer metadata are counted in
+    physical blocks, so the producer must report the physical size — a 128
+    against a 1024 consumer kernel size trips the consumer's kernel-expansion
+    assertion (``128 not divisible by 1024``).
+    """
+
+    def _make_scheduler(self, cache_block_size: int, groups: list) -> "MooncakeConnectorScheduler":
+        config = MockVllmConfig()
+        config.cache_config.block_size = cache_block_size
+        with (
+            patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.init_ascend_config"),
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_ascend_config",
+                return_value=MagicMock(),
+            ),
+        ):
+            return MooncakeConnectorScheduler(config, "test_engine", MockKVCacheConfig(groups))
+
+    def _attention_group(self, block_size: int) -> MockKVCacheGroup:
+        return MockKVCacheGroup(
+            kv_cache_spec=FullAttentionSpec(
+                block_size=block_size,
+                num_kv_heads=4,
+                head_size=128,
+                dtype=torch.bfloat16,
+            )
+        )
+
+    def test_aligns_to_physical_block_size_when_logical_lags(self):
+        scheduler = self._make_scheduler(128, [self._attention_group(1024)])
+        self.assertEqual(scheduler.transfer_block_size, 1024)
+
+    def test_consistent_layout_is_unchanged(self):
+        scheduler = self._make_scheduler(128, [self._attention_group(128)])
+        self.assertEqual(scheduler.transfer_block_size, 128)
+
+    def test_no_spec_block_sizes_falls_back_to_block_size(self):
+        # groups without an int block_size (e.g. test doubles) keep the
+        # historical behavior: logical cache_config.block_size.
+        scheduler = self._make_scheduler(16, [MockKVCacheGroup(kv_cache_spec=MagicMock())])
+        self.assertEqual(scheduler.transfer_block_size, 16)
+
+    def test_request_finished_reports_physical_remote_block_size(self):
+        scheduler = self._make_scheduler(128, [self._attention_group(1024)])
+        request = MockRequest(
+            "req1",
+            prompt_token_ids=list(range(16)),
+            kv_transfer_params={"do_remote_decode": True},
+            status=RequestStatus.FINISHED_LENGTH_CAPPED,
+        )
+        _, params = scheduler.request_finished(request, ([1],))
+        self.assertIsNotNone(params)
+        self.assertEqual(params["remote_block_size"], 1024)
+        self.assertEqual(params["num_prompt_blocks"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
