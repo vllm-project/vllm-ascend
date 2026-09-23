@@ -10,9 +10,11 @@ import vllm_ascend.models.glm5next.ops.kda as kda
 import vllm_ascend.ops.kda as kda_ops
 
 
-@pytest.mark.parametrize("accepted", [None, [1, 2, 1]])
-@pytest.mark.parametrize("qkv_padding", [0, 64])
-def test_recurrent_raw_gates_rollback_slots_and_padding(monkeypatch, accepted, qkv_padding):
+@pytest.mark.parametrize(
+    "accepted,qkv_padding,direct_output",
+    [(None, 0, False), (None, 64, False), ([1, 2, 1], 0, False), ([1, 2, 1], 64, False), (None, 64, True)],
+)
+def test_recurrent_raw_gates_rollback_slots_and_padding(monkeypatch, accepted, qkv_padding, direct_output):
     q, k, v = (torch.ones(1, 4, 1, 128 + qkv_padding * i, dtype=torch.bfloat16)[..., :128] for i in (1, 2, 3))
     gate = q * 2
     beta = torch.zeros(1, 4, 1, dtype=torch.bfloat16)
@@ -37,9 +39,32 @@ def test_recurrent_raw_gates_rollback_slots_and_padding(monkeypatch, accepted, q
         return result
 
     monkeypatch.setattr(torch.ops._C_ascend, "recurrent_kda", recurrent, raising=False)
+    destination = torch.full((1, 8, 1, 128), float("nan"), dtype=q.dtype) if direct_output else None
+
+    def writeback(source, target, ends):
+        assert target is destination and ends is starts
+        assert torch.isnan(source[:, 3:]).all()
+        target.zero_()
+        target[:, :3].copy_(source[:, :3])
+
+    monkeypatch.setattr(kda, "write_recurrent_output", writeback)
     out = kda.recurrent_kda(
-        q, k, v, gate, beta, state, starts, slots, torch.zeros(1), torch.zeros(128), -4, accepted_tensor
+        q,
+        k,
+        v,
+        gate,
+        beta,
+        state,
+        starts,
+        slots,
+        torch.zeros(1),
+        torch.zeros(128),
+        -4,
+        accepted_tensor,
+        output_buffer=destination,
     )
+    if direct_output:
+        assert out is destination
     torch.testing.assert_close(out[:, :3], q[:, :3])
     assert torch.count_nonzero(out[:, 3:]) == 0
 
