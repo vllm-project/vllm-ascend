@@ -27,7 +27,7 @@ config:
     dp_size_local: 4
     dp_rank_start: 4
     tp_size: 4
-    dp_address: "${NODE_0_IP}"
+    dp_address: "${NODE_1_IP}"
 
   - node_index: 2
     port_start: 7100
@@ -112,7 +112,7 @@ templates:
           "kv_connector_extra_config": {
             "prefill": {
               "dp_size": 8,
-              "tp_size": 4
+              "tp_size": 2
             },
             "decode": {
               "dp_size": 8,
@@ -181,7 +181,7 @@ templates:
           "kv_connector_extra_config": {
             "prefill": {
               "dp_size": 8,
-              "tp_size": 4
+              "tp_size": 2
             },
             "decode": {
               "dp_size": 8,
@@ -251,7 +251,7 @@ templates:
         "kv_connector_extra_config": {
           "prefill": {
             "dp_size": 8,
-            "tp_size": 4
+            "tp_size": 2
           },
           "decode": {
             "dp_size": 8,
