@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import torch
 
 from vllm_ascend.attention import dsa_v41
-from vllm_ascend.attention.dsa_v41 import AscendDSAV41Impl
+from vllm_ascend.attention.dsa_v41 import AscendDSAV41Impl, DeepseekV41PreparedIndexer
 
 TOKENS, TOPK = 4, 512
 
@@ -25,7 +25,7 @@ def _attn(selected):
         topk_indices=torch.full((TOKENS, TOPK), 7, dtype=torch.int32),
         candidates=torch.full((TOKENS, 1, 8), 7, dtype=torch.int32),
     )
-    indexer = SimpleNamespace(select=lambda *args, **kwargs: (selected, None))
+    indexer = SimpleNamespace(select_projected=lambda *args, **kwargs: (selected, None))
     return SimpleNamespace(shared_state=shared, indexer=indexer), shared
 
 
@@ -57,6 +57,10 @@ def test_empty_cache_selection_publishes_no_slot(monkeypatch):
         SimpleNamespace(
             swa=SimpleNamespace(num_actual_tokens=TOKENS),
             indexer=SimpleNamespace(cache=object()),
+        ),
+        DeepseekV41PreparedIndexer(
+            query=torch.zeros(TOKENS, 1, 8),
+            weights=torch.zeros(TOKENS, 1),
         ),
     )
 

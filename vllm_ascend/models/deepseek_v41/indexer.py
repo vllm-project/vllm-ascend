@@ -113,24 +113,10 @@ class DeepseekV41Indexer(nn.Module):
             scale.unsqueeze(-1).to(torch.float16),
         )
 
-    def select(
-        self,
-        hidden_states,
-        qr,
-        positions,
-        cos,
-        sin,
-        source_cache,
-        source_metadata,
-        *,
-        is_candidate_source,
-        uses_candidate_filter,
-        candidate_topk_blocks,
-        candidate_block_size,
-        candidates,
-    ):
-        """Score index K, optionally filter blocks, then return position TopK."""
-        query = self._output(self.wq_b, qr).unflatten(-1, (self.n_heads, self.width))
+    def project_query(self, qr):
+        return self._output(self.wq_b, qr).unflatten(-1, (self.n_heads, self.width))
+
+    def apply_query_rope(self, query, cos, sin):
         torch.ops._C_ascend.inplace_partial_rotary_mul(
             query.unsqueeze(1),
             cos,
@@ -138,21 +124,13 @@ class DeepseekV41Indexer(nn.Module):
             rotary_mode="interleave",
             partial_slice=[self.width - self.rope_width, self.width],
         )
-        weights = self._output(self.weights_proj, hidden_states)
-        weights = weights.float() * self.weights_scale
 
-        return self.select_projected(
-            query,
-            weights,
-            positions,
-            source_cache,
-            source_metadata,
-            is_candidate_source=is_candidate_source,
-            uses_candidate_filter=uses_candidate_filter,
-            candidate_topk_blocks=candidate_topk_blocks,
-            candidate_block_size=candidate_block_size,
-            candidates=candidates,
-        )
+    def project_weights(self, hidden_states):
+        return self._output(self.weights_proj, hidden_states).float() * self.weights_scale
+
+    @staticmethod
+    def quantize_query(query):
+        return quantize_indexer_query(query)
 
     def select_projected(
         self,
@@ -167,6 +145,8 @@ class DeepseekV41Indexer(nn.Module):
         candidate_topk_blocks,
         candidate_block_size,
         candidates,
+        quantized_query,
+        query_scale,
     ):
         """Run QLI V2 on paged INT8 K; candidates are block IDs, not positions.
 
@@ -187,7 +167,6 @@ class DeepseekV41Indexer(nn.Module):
                 candidates = torch.full(candidate_shape, -1, dtype=torch.int32, device=query.device)
             return selected, candidates
 
-        quantized_query, query_scale = quantize_indexer_query(query)
         weights = weights.to(torch.float16)
         key, key_scale = source_cache
         key_scale = key_scale.squeeze(-1)  # Preserve the Hybrid cache page stride.
