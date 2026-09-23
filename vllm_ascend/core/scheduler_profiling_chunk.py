@@ -114,6 +114,9 @@ class ProfilingChunkScheduler(Scheduler):
             max_fit_chunk=profiling_cfg.max_fit_chunk,
         )
         self._profiling_initialized = False
+        # DP prefill balancing state for the throttle_prefills path; updated
+        # at the end of every schedule() step that admits prefills.
+        self.prefill_capacity_bound: bool = False
 
         logger.info(
             "[ProfilingChunk] Scheduler initialized. base_chunk=%d, page_size=%d, smooth_factor=%.2f, min_chunk=%d",
