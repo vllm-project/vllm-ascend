@@ -60,6 +60,6 @@ test_cases:
     server_cmd: *server_cmd
     server_cmd_extra:
       - "--additional-config"
-      - '{"ascend_compilation_config":{"enable_static_kernel":true},"enable_flashcomm1":true,"enable_npugraph_ex":true}'
+      - '{"ascend_compilation_config":{"enable_static_kernel":true,"enable_npugraph_ex":true},"enable_flashcomm1":true}'
     benchmarks:
       <<: *benchmarks
