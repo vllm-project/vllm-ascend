@@ -1034,9 +1034,9 @@ dscli start -w \
 
 For both backends:
 
-* Do not use `127.0.0.1` or `0.0.0.0` as a Worker address in a multi-node deployment. Other Workers must be able to connect to the advertised IP.
-* Allow network access to the Coordinator port (`31511`) or etcd client port (`2379`), and to every Worker port (`31501` in these examples).
-* On each node, set `worker_addr` in `yuanrong.json` to that node's local `WORKER_IP:31501`. The configuration file therefore differs by node.
+- Do not use `127.0.0.1` or `0.0.0.0` as a Worker address in a multi-node deployment. Other Workers must be able to connect to the advertised IP.
+- Allow network access to the Coordinator port (`31511`) or etcd client port (`2379`), and to every Worker port (`31501` in these examples).
+- On each node, set `worker_addr` in `yuanrong.json` to that node's local `WORKER_IP:31501`. The configuration file therefore differs by node.
 
 For production control-plane high availability, deploy multiple Coordinators with static Raft peers, a unique `coordinator_address` and `coordinator_raft_data_dir` for each Coordinator, and the same `coordinator_raft_initial_peers` list. See the [Yuanrong Datasystem dscli documentation](https://atomgit.com/openeuler/yuanrong-datasystem/blob/master/docs/source_zh_cn/deployment/dscli.md#coordinator-%E5%A4%9A%E8%8A%82%E7%82%B9%E9%83%A8%E7%BD%B2).
 
@@ -1166,8 +1166,8 @@ Configure `yuanrong.json` (pointed to by `YR_CONFIG_PATH`):
 
 Set `DS_ENABLE_REMOTE_H2D` to `1` (or `enable_remote_h2d` to `true` in `yuanrong.json`) only when Remote Host-to-Device transfer is enabled and verified in the Yuanrong Datasystem deployment:
 
-* Reserve enough 2 MiB HugeTLB pages before starting the worker. For 40 GiB shared memory, reserve at least 20480 2 MiB huge pages.
-* Start each Datasystem worker with Remote H2D enabled. The worker start command must include `--remote_h2d_device_ids`, `--enable_huge_tlb true`, `--arena_per_tenant 1`, and `--enable_fallocate false`. Using multiple available NPU device IDs is recommended, for example `"0,1,2,3,4,5,6,7"` on an 8-NPU node.
+- Reserve enough 2 MiB HugeTLB pages before starting the worker. For 40 GiB shared memory, reserve at least 20480 2 MiB huge pages.
+- Start each Datasystem worker with Remote H2D enabled. The worker start command must include `--remote_h2d_device_ids`, `--enable_huge_tlb true`, `--arena_per_tenant 1`, and `--enable_fallocate false`. Using multiple available NPU device IDs is recommended, for example `"0,1,2,3,4,5,6,7"` on an 8-NPU node.
 
 ```bash
 dscli start -w \
@@ -1207,9 +1207,9 @@ dscli start --interleave 0-7 -w \
   --remote_h2d_hccs_buffer_pool "4:8"
 ```
 
-* Make sure the NPU driver, firmware, and CANN toolkit required by Yuanrong Remote H2D are installed and visible to the worker process. In containers, mount the Ascend driver path, `npu-smi`, `hccn_tool`, `/etc/hccn.conf`, `/etc/ascend_install.info`, and the required `/dev/davinci*` devices.
-* When the worker uses `--remote_h2d_link_type "HCCS"`, the client process must also export `DS_RH2D_LINK_TYPE=HCCS` before starting vLLM (the backend does not export it automatically); `ROCE` is the datasystem default and needs no env var.
-* Verify the NPU and RoCE environment before enabling the client flag:
+- Make sure the NPU driver, firmware, and CANN toolkit required by Yuanrong Remote H2D are installed and visible to the worker process. In containers, mount the Ascend driver path, `npu-smi`, `hccn_tool`, `/etc/hccn.conf`, `/etc/ascend_install.info`, and the required `/dev/davinci*` devices.
+- When the worker uses `--remote_h2d_link_type "HCCS"`, the client process must also export `DS_RH2D_LINK_TYPE=HCCS` before starting vLLM (the backend does not export it automatically); `ROCE` is the datasystem default and needs no env var.
+- Verify the NPU and RoCE environment before enabling the client flag:
 
 ```bash
 # Check the current 2 MiB HugeTLB page size, total count, and free count.
