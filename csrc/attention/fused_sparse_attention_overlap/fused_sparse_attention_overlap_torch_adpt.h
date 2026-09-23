@@ -84,6 +84,13 @@ inline at::Tensor BuildActualSeqQueryForSfa(const at::Tensor &full_q_actual_seq,
     return at::ones({bsz_seq}, like_tensor.options());
 }
 
+inline at::Tensor BuildFullCacheSparseIndicesForSfa(const at::Tensor &selection_topk_indices,
+                                                    int64_t bsz_seq,
+                                                    int64_t sparse_head_num)
+{
+    return FlattenTopkIndicesForSfa(selection_topk_indices, bsz_seq, sparse_head_num);
+}
+
 inline at::Tensor RunFusedSparseAttentionOverlapSideEffectImpl(
     const at::Tensor &query_nope,
     const at::Tensor &query_rope,
@@ -118,7 +125,7 @@ inline at::Tensor RunFusedSparseAttentionOverlapSideEffectImpl(
 
     at::Tensor selection_kv_actual_seq = ConstructSelectionKvActualSeqForSideEffect(
         selection_kv_block_table, selection_kv_block_status, selection_topk_indices);
-    at::Tensor sparse_indices = FlattenTopkIndicesForSfa(
+    at::Tensor sparse_indices = BuildFullCacheSparseIndicesForSfa(
         selection_topk_indices, bsz_seq, sparse_head_num);
     at::Tensor key = full_kv_cache.unsqueeze(2);
     at::Tensor value = key;
@@ -259,6 +266,46 @@ inline at::Tensor npu_fused_sparse_attention_overlap(
         std::string(layout_query),
         std::string(layout_kv),
         sparse_mode);
+}
+
+inline at::Tensor npu_fused_sparse_attention_overlap_cpu_source(
+    const at::Tensor &query,
+    const at::Tensor &selection_k_rope,
+    const at::Tensor &selection_kv_cache,
+    const at::Tensor &selection_kv_block_table,
+    const at::Tensor &selection_kv_block_status,
+    const at::Tensor &selection_membership_map,
+    const at::Tensor &selection_topk_indices,
+    const at::Tensor &full_k_rope,
+    const at::Tensor &full_kv_cache,
+    const at::Tensor &full_kv_block_table,
+    const at::Tensor &full_kv_actual_seq,
+    const at::Tensor &full_q_actual_seq,
+    double scale_value,
+    int64_t sparse_block_size,
+    int64_t selection_topk_block_size,
+    c10::string_view layout_query,
+    c10::string_view layout_kv,
+    int64_t sparse_mode)
+{
+    return npu_fused_sparse_attention_overlap(query,
+                                              selection_k_rope,
+                                              selection_kv_cache,
+                                              selection_kv_block_table,
+                                              selection_kv_block_status,
+                                              selection_membership_map,
+                                              selection_topk_indices,
+                                              full_k_rope,
+                                              full_kv_cache,
+                                              full_kv_block_table,
+                                              full_kv_actual_seq,
+                                              full_q_actual_seq,
+                                              scale_value,
+                                              sparse_block_size,
+                                              selection_topk_block_size,
+                                              layout_query,
+                                              layout_kv,
+                                              sparse_mode);
 }
 
 } // namespace vllm_ascend
