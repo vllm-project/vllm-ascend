@@ -22,8 +22,8 @@ constexpr uint64_t RESERVED_UB_BYTES = 1024;
 constexpr uint64_t BYTES_PER_COLUMN_FP16 = 18;
 constexpr uint64_t BYTES_PER_COLUMN_BF16 = 22;
 // Reduce-tree accumulator (64 fp32) + 32B rstd broadcast + 32B gather
-// offsets.
-constexpr uint64_t FIXED_UB_BYTES = 320;
+// offsets + 32B reciprocal constant.
+constexpr uint64_t FIXED_UB_BYTES = 352;
 
 ge::graphStatus Tiling4RmsNormCast(gert::TilingContext* context)
 {

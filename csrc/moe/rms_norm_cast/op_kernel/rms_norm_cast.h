@@ -53,6 +53,7 @@ public:
         pipe_->InitBuffer(reduce_buf_, NUM_PER_REP_FP32 * sizeof(float));
         pipe_->InitBuffer(rstd_buf_, sizeof(float) * 8);
         pipe_->InitBuffer(gather_off_buf_, sizeof(uint32_t) * 8);
+        pipe_->InitBuffer(one_buf_, sizeof(float) * 8);
     }
 
     __aicore__ inline void Process()
@@ -61,48 +62,41 @@ public:
             return;
         }
 
-        LocalTensor<T> gamma_local = gamma_buf_.Get<T>();
-        DataCopyCustom<T>(gamma_local, gamma_gm_, num_col_);
-        auto gamma_evt = pipe_->AllocEventID<HardEvent::MTE2_V>();
-        SetFlag<HardEvent::MTE2_V>(gamma_evt);
-        WaitFlag<HardEvent::MTE2_V>(gamma_evt);
-
-        // The bf16 path multiplies in fp32 domain, so widen gamma once per
-        // core instead of re-casting it on every row.
-        if constexpr (!IsSame<T, half>::value) {
-            LocalTensor<float> gamma_fp32_local = gamma_fp32_buf_.Get<float>();
-            Cast(gamma_fp32_local, gamma_local, RoundMode::CAST_NONE,
-                 num_col_);
-            PipeBarrier<PIPE_V>();
-        }
-
         // Gather offsets for the per-row rstd broadcast: eight zeros so
-        // Gather replicates work[0] into a full 32B block.
+        // Gather replicates work[0] into a full 32B block. The 1.0f
+        // constant feeds the per-row reciprocal and is likewise invariant.
         LocalTensor<uint32_t> gather_off = gather_off_buf_.Get<uint32_t>();
         Duplicate(gather_off, 0u, 8);
+        LocalTensor<float> one = one_buf_.Get<float>();
+        Duplicate(one, 1.0f, 1);
         PipeBarrier<PIPE_V>();
 
-        // Prologue: prefetch the first row into slot 0. Its completion flag
-        // is consumed at the top of the first loop iteration. The gamma id
-        // stays occupied until after this allocation so the two MTE2_V
-        // flags can never collapse into one (a collapsed pair would
-        // deadlock the single-row tail case).
+        // Prologue: the first input row is the critical path, so it goes to
+        // MTE2 first; gamma only feeds the first gamma multiply deep inside
+        // row 0's vector chain, so its load (and, on the bf16 path, its
+        // widening cast) hides behind the reduce work of row 0. The gamma id
+        // is allocated while the row-0 id is still held, so the two MTE2_V
+        // flags can never collapse into one.
         const uint32_t local_rows = row_end_ - row_begin_;
         load_evt_ = pipe_->AllocEventID<HardEvent::MTE2_V>();
         DataCopyCustom<T>(x_buf_[0].Get<T>(), x_gm_[row_begin_ * num_col_],
                           num_col_);
         SetFlag<HardEvent::MTE2_V>(load_evt_);
-        pipe_->ReleaseEventID<HardEvent::MTE2_V>(gamma_evt);
+        LocalTensor<T> gamma_local = gamma_buf_.Get<T>();
+        gamma_evt_ = pipe_->AllocEventID<HardEvent::MTE2_V>();
+        DataCopyCustom<T>(gamma_local, gamma_gm_, num_col_);
+        SetFlag<HardEvent::MTE2_V>(gamma_evt_);
 
         for (uint32_t i = 0; i < local_rows; ++i) {
-            ProcessRow(i, local_rows, gamma_local, gather_off);
+            ProcessRow(i, local_rows, gamma_local, gather_off, one);
         }
     }
 
 private:
     __aicore__ inline void ProcessRow(uint32_t i, uint32_t local_rows,
                                       LocalTensor<T>& gamma_local,
-                                      LocalTensor<uint32_t>& gather_off)
+                                      LocalTensor<uint32_t>& gather_off,
+                                      LocalTensor<float>& one)
     {
         const uint32_t slot = i & 1U;
         LocalTensor<T> x_local = x_buf_[slot].Get<T>();
@@ -151,9 +145,8 @@ private:
         Adds(work, work, epsilon_, 1);
         PipeBarrier<PIPE_V>();
         Sqrt(work, work, 1);
-        Duplicate(reduce, 1.0f, 1);
         PipeBarrier<PIPE_V>();
-        Div(work, reduce, work, 1);
+        Div(work, one, work, 1);
         PipeBarrier<PIPE_V>();
 
         // Broadcast rstd within the vector pipe: Gather replicates work[0]
@@ -177,6 +170,21 @@ private:
         }
         PipeBarrier<PIPE_V>();
 
+        if (i == 0) {
+            // Gamma was loaded after the row-0 prefetch; it is only needed
+            // here, deep enough inside the chain that the load hides behind
+            // the reduce work of row 0. The bf16 path multiplies in fp32
+            // domain, so widen gamma once per core instead of re-casting it
+            // on every row.
+            WaitFlag<HardEvent::MTE2_V>(gamma_evt_);
+            pipe_->ReleaseEventID<HardEvent::MTE2_V>(gamma_evt_);
+            if constexpr (!IsSame<T, half>::value) {
+                LocalTensor<float> gamma_fp32_local = gamma_fp32_buf_.Get<float>();
+                Cast(gamma_fp32_local, gamma_local, RoundMode::CAST_NONE,
+                     num_col_);
+                PipeBarrier<PIPE_V>();
+            }
+        }
         if constexpr (IsSame<T, half>::value) {
             Cast(x_local, x_fp32, RoundMode::CAST_NONE, num_col_);
             PipeBarrier<PIPE_V>();
@@ -233,6 +241,7 @@ private:
     TBuf<TPosition::VECCALC> reduce_buf_;
     TBuf<TPosition::VECCALC> rstd_buf_;
     TBuf<TPosition::VECCALC> gather_off_buf_;
+    TBuf<TPosition::VECCALC> one_buf_;
     GlobalTensor<T> x_gm_;
     GlobalTensor<T> gamma_gm_;
     GlobalTensor<T> y_gm_;
@@ -249,6 +258,7 @@ private:
     // Event ids are allocated (not fetched) so several flags can be in
     // flight per direction, mirroring what TQue does for depth-2 queues.
     TEventID load_evt_ = 0;
+    TEventID gamma_evt_ = 0;
     TEventID slot_free_evt_ = 0;
     TEventID y_stored_evt_ = 0;
     TEventID fp32_stored_evt_[2] = {0, 0};
