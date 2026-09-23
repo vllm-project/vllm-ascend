@@ -139,3 +139,28 @@ def test_update_ascend_eplb_maps_refreshes_runtime_maps():
     assert torch.equal(routed_experts.ascend_expert_map, new_map.to(torch.int32))
     assert torch.equal(routed_experts.global_expert_map[1], new_map.to(torch.int32))
     assert torch.equal(routed_experts.local_phys_expert_ids, torch.tensor([5, 6, 7, 8, 9], dtype=torch.int64))
+
+
+def test_update_ascend_eplb_maps_preserves_execution_device():
+    # Regression: the EPLB worker ships CPU maps. After checkpoint loading the
+    # runtime map lives on the execution device (NPU), and the refresh must keep
+    # it there - the AllGather dispatcher indexes it with device topk_ids.
+    # "meta" stands in for the execution device on CPU-only test runners.
+    routed_experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
+    routed_experts.moe_config = SimpleNamespace(ep_rank=1)
+    old_map = torch.tensor([-1, -1, -1, -1, -1, 0, 1, 2, -1, -1], dtype=torch.int32, device="meta")
+    new_map = torch.tensor([-1, -1, -1, -1, -1, 0, 1, 2, 3, 4], dtype=torch.int64)
+    routed_experts.ascend_expert_map = old_map
+    routed_experts.global_expert_map = torch.stack(
+        [torch.full((10,), -1, dtype=torch.int32), torch.zeros(10, dtype=torch.int32)]
+    )
+    routed_experts.local_phys_expert_ids = torch.zeros(5, dtype=torch.int64)
+
+    routed_experts.update_ascend_eplb_maps(new_map)
+
+    # Meta tensors carry no data, so the contract asserted here is device and
+    # dtype preservation (value equality is covered by the CPU test above).
+    assert routed_experts.ascend_expert_map.device.type == "meta"
+    assert routed_experts.ascend_expert_map.dtype == torch.int32
+    assert torch.equal(routed_experts.global_expert_map[1], new_map.to(torch.int32))
+    assert torch.equal(routed_experts.local_phys_expert_ids, torch.tensor([5, 6, 7, 8, 9], dtype=torch.int64))
