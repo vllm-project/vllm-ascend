@@ -135,30 +135,25 @@ class AscendMultiKVCacheGroupMTPProposer(AscendEagleProposer):
         else:
             self.block_size = primary_group.get_metadata_builder().kv_cache_spec.block_size
 
-        # Pre-create every per-(group, draft-step) slot-mapping buffer here and
-        # hand it to the cache-only builders, instead of allocating it lazily on
-        # the first metadata build. Two reasons: the runtime hooks then never
-        # allocate, and every address an ACL graph may capture already exists
-        # before capture (replay reads capture-time addresses).
+        # Pre-create every per-(group, draft-step) slot-mapping buffer here
+        # instead of allocating it lazily on the first metadata build, so the
+        # runtime hook never allocates and every address an ACL graph may
+        # capture already exists before capture (replay reads capture-time
+        # addresses).
         slot_mapping_lens = self.slot_mapping_group[0].shape[0]
         self._multi_group_slot_mapping_buffers: dict[tuple[int, int], torch.Tensor] = {}
         for attn_group in self.draft_attn_groups:
             gid = attn_group.kv_cache_group_id
+            if gid == self.kv_cache_gid:
+                # The primary group reuses the proposer's per-step buffers.
+                continue
             for draft_index in range(self.num_speculative_tokens):
-                if gid == self.kv_cache_gid:
-                    # The primary group reuses the proposer's per-step buffers.
-                    group_slot_mapping = self.slot_mapping_group[draft_index]
-                else:
-                    group_slot_mapping = torch.zeros(
-                        slot_mapping_lens,
-                        dtype=torch.int32,
-                        device=self.device,
-                        pin_memory=self.runner.pin_memory,
-                    )
-                    self._multi_group_slot_mapping_buffers[(gid, draft_index)] = group_slot_mapping
-                for builder in attn_group.metadata_builders:
-                    if hasattr(builder, "init_metadata_buffers"):
-                        builder.init_metadata_buffers(group_slot_mapping)
+                self._multi_group_slot_mapping_buffers[(gid, draft_index)] = torch.zeros(
+                    slot_mapping_lens,
+                    dtype=torch.int32,
+                    device=self.device,
+                    pin_memory=self.runner.pin_memory,
+                )
 
         logger.info(
             "Initialized GLM5-Next drafting attention groups for KV cache group ids %s; primary group id is %d",
