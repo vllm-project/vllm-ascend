@@ -405,6 +405,23 @@ widen），pass 数已到算法层下限。本轮做两项零数值风险的微�
 最终态：vec 90-91%（结构上限=ramp/tail/barrier ~9%）、pass 数算法层下限、
 精度 8/8 零回归、1-4 tokens +0.3µs（发射瓶颈，已定位并留档）。
 
+### 精度测试补全（2026-09-23）：`test_rms_norm_cast_coverage.py`（25 用例）
+
+针对三轮优化实际改动的路径补充覆盖（探针预验证全部通过后固化）：
+
+| 覆盖维度 | 用例 | 针对的风险 |
+|---|---|---|
+| 行流水边界 | tokens ∈ {2,3,41,80,120} × 双 dtype | local_rows=1/2/3 的 guard 分支、混合核、空闲核 |
+| hidden 尾部/非对齐 | hidden ∈ {64,100,7184} × 双 dtype | 广播 Mul 的 tail 掩码、DataCopyPad 非对齐 |
+| 高 rank 输入 | [2,3,7168] × 双 dtype | op 契约 rank≥1 |
+| epsilon | 0.0 / 1e-3 | 标量链边界 |
+| 输入极值 | 全零 / ×100 大幅值 | rstd=1/√eps、fp32 累加 |
+| **状态隔离** | op→op→ref→op 交替（混合 shape/dtype） | **退出标志清零契约**（Round 2 的跨 kernel 毒化 bug 回归） |
+| 拒绝路径 | 超大 hidden / 负 eps / gamma dtype 不匹配 | tiling 分档 UB 守卫、attr 校验、adapter TORCH_CHECK |
+
+全套（新 25 + 原 8）= 33 用例通过。错误路径均以 RuntimeError 报出。
+
+
 
 ## 每轮工作流（精度是硬门槛）
 
