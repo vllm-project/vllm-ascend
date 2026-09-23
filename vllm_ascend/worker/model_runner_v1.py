@@ -141,6 +141,7 @@ from vllm_ascend.compilation.acl_graph import (
 from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h import get_prebound_copy_sfa_slots
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
     apply_layerwise_kv_cache_plan,
 )
@@ -3462,15 +3463,6 @@ class NPUModelRunner(GPUModelRunner):
             cudagraph_stats,
         )
 
-    def _prebound_copy_sfa_slots(self) -> dict[str, int]:
-        if not has_kv_transfer_group():
-            return {}
-        connector = get_kv_transfer_group()
-        getter = getattr(connector, "get_copy_sfa_slot_bindings", None)
-        if getter is None:
-            return {}
-        return getter() or {}
-
     def _prepare_copy_sfa_request_slots(self, num_reqs: int, padded_reqs: int, *, dummy: bool) -> None:
         if self._offload_pool_slots is None:
             return
@@ -3484,7 +3476,7 @@ class NPUModelRunner(GPUModelRunner):
         if not dummy:
             # PD binds rows at alloc time. Keep those reservations even when the
             # request is waiting for KV and is not in the current decode batch.
-            prebound = self._prebound_copy_sfa_slots()
+            prebound = get_prebound_copy_sfa_slots()
             live = self.input_batch.req_id_to_index
             self._offload_request_slots = {
                 req: slot
