@@ -143,6 +143,10 @@ class DeepseekV4DSparkModel(nn.Module):
             bias=False,
             with_markov=True,
         )
+        last_layer = self.layers[str(last_layer_idx)]
+        last_layer.norm = self.norm
+        last_layer.markov_head = self.markov_head
+
         hc_dim = self.hc_mult * config.hidden_size
         self.hc_head_fn = nn.Parameter(
             torch.empty(self.hc_mult, hc_dim, dtype=torch.float32),
@@ -156,9 +160,6 @@ class DeepseekV4DSparkModel(nn.Module):
             torch.empty(1, dtype=torch.float32),
             requires_grad=False,
         )
-        last_layer = self.layers[str(last_layer_idx)]
-        last_layer.norm = self.norm
-        last_layer.markov_head = self.markov_head
         last_layer.hc_head_fn = self.hc_head_fn
         last_layer.hc_head_base = self.hc_head_base
         last_layer.hc_head_scale = self.hc_head_scale
@@ -180,9 +181,13 @@ class DeepseekV4DSparkModel(nn.Module):
     ) -> torch.Tensor:
         assert attn is not None
         kv = attn.kv_norm(attn.wkv(hidden_states))
-        k_nope, k_pe = kv.split([attn.nope_head_dim, attn.rope_head_dim], dim=-1)
-        k_pe = _apply_dsv4_rope(attn.rotary_emb, positions, k_pe.unsqueeze(1)).squeeze(1)
-        return torch.cat([k_nope, k_pe], dim=-1).view(-1, 1, attn.head_dim).contiguous()
+        # npu_rotary_mul writes its result back to the input storage
+        # (ComplexExpRotaryEmbedding.forward ends with y.copy_(...)), so rope
+        # can run in-place on the rope-segment view of kv; the previous
+        # split -> rope -> cat -> contiguous round-trip was a redundant copy.
+        k_pe = kv[:, attn.nope_head_dim :]
+        _apply_dsv4_rope(attn.rotary_emb, positions, k_pe.unsqueeze(1))
+        return kv.view(-1, 1, attn.head_dim)
 
     def _store_standard_swa_kv(
         self,

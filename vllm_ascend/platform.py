@@ -1043,6 +1043,18 @@ def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
             )
             vllm_config.scheduler_config = recompute_scheduler_config
 
+    # Checked here, not in AscendConfig: MultiConnector children re-validate the config
+    # with per-child copies that cannot see sibling connectors.
+    kv_transfer_config = vllm_config.kv_transfer_config
+    offload_missing = kv_transfer_config is None or not kv_transfer_config.has_connector("PreemptOffloadConnector")
+    # Only a real split (size > 1) needs the offload guarantee, mirroring the runner gate.
+    if offload_missing and ascend_config.finegrained_tp_config.oproj_tensor_parallel_size > 1:
+        raise AssertionError(
+            "oproj_tensor_parallel_size requires PreemptOffloadConnector (via MultiConnector): "
+            "a preempted request must not return to the prefill node, whose recomputed KV "
+            "loses precision."
+        )
+
 
 def _validate_kv_load_failure_policy(vllm_config: VllmConfig) -> None:
     kv_transfer_config = vllm_config.kv_transfer_config
@@ -1221,22 +1233,12 @@ def _setup_compile_backend(
         # Don't split the FX graph for static kernel; it would compile multiple times.
         compilation_config.splitting_ops = []
     else:
-        logger.info("%s cudagraph_mode is not support on NPU. falling back to NONE", compilation_config.cudagraph_mode)
+        logger.info("cudagraph_mode %s is unsupported on NPU; falling back to NONE.", compilation_config.cudagraph_mode)
         compilation_config.cudagraph_mode = CUDAGraphMode.NONE
         compilation_config.mode = CompilationMode.NONE
         additional_config["ascend_compilation_config"]["enable_npugraph_ex"] = False
         additional_config["ascend_compilation_config"]["enable_static_kernel"] = False
         additional_config["ascend_compilation_config"]["enable_super_kernel"] = False
-
-    # TODO: Remove this check when ACL Graph supports ASCEND_LAUNCH_BLOCKING=1
-    if compilation_config.cudagraph_mode != CUDAGraphMode.NONE and os.environ.get("ASCEND_LAUNCH_BLOCKING", "0") == "1":
-        raise ValueError(
-            "ACL graph is incompatible with ASCEND_LAUNCH_BLOCKING=1. "
-            "Please unset ASCEND_LAUNCH_BLOCKING or set it to 0. If you "
-            "need ASCEND_LAUNCH_BLOCKING for debugging, consider other methods — "
-            "for example, check the plog files (default: $HOME/ascend/log/debug) "
-            "for more information about runtime errors."
-        )
 
 
 def _setup_worker_and_scheduler(
