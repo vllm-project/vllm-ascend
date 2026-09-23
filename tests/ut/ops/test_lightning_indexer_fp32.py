@@ -57,6 +57,13 @@ class TestLightningIndexerFp32Source(unittest.TestCase):
         self.assertIn("TensorHolder(sparseValuesOut, ACL_FLOAT", api)
         self.assertIn("aclnnInnerLightningIndexerFp32GetWorkspaceSize", api)
         self.assertIn("aclnnInnerLightningIndexerFp32(workspace", api)
+        self.assertIn("std::vector<int64_t> shape_ = {0};", api)
+        self.assertIn("int64_t addr_ = 0xff;", api)
+        self.assertNotIn("std::vector<int64_t> shape = {0};", api)
+        self.assertNotIn("int64_t addr = 0xff;", api)
+        self.assertEqual(api.count("return ACLNN_ERR_PARAM_NULLPTR;"), 2)
+        self.assertEqual(api.count("return ACLNN_ERR_INNER_NULLPTR;"), 1)
+        self.assertNotIn("return ge::GRAPH_FAILED;", api)
 
     def test_supported_target_and_packaging(self):
         definition = source(FP32 / "op_host/lightning_indexer_fp32_def.cpp")

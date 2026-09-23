@@ -49,11 +49,9 @@ public:
         inner_ = nullptr;
         name_ = varName;
         if (output == nullptr) {
-            std::vector<int64_t> shape = {0};
-            int64_t addr = 0xff;
-            inner_ = aclCreateTensor(shape.data(), shape.size(),
-                dataType, shape.data(), 0, ACL_FORMAT_ND,
-                shape.data(), shape.size(), static_cast<void *>(&addr));
+            inner_ = aclCreateTensor(shape_.data(), shape_.size(),
+                dataType, shape_.data(), 0, ACL_FORMAT_ND,
+                shape_.data(), shape_.size(), static_cast<void *>(&addr_));
             output = inner_;
         }
     }
@@ -78,6 +76,8 @@ public:
     }
 
 private:
+    std::vector<int64_t> shape_ = {0};
+    int64_t addr_ = 0xff;
     const aclTensor *inner_;
     std::string name_;
 };
@@ -103,18 +103,18 @@ aclnnStatus aclnnLightningIndexerFp32GetWorkspaceSize(
 {
     if (query == nullptr) {
         OP_LOGE(ACLNN_ERR_PARAM_NULLPTR, "Query pointer is null, cannot get data type!");
-        return ge::GRAPH_FAILED;
+        return ACLNN_ERR_PARAM_NULLPTR;
     }
     if (returnValues) {
         if (sparseValuesOut == nullptr) {
             OP_LOGE(ACLNN_ERR_PARAM_NULLPTR, "sparseValuesOut cannot be nullptr.");
-            return ge::GRAPH_FAILED;
+            return ACLNN_ERR_PARAM_NULLPTR;
         }
     }
     auto sparseValuesOutHolder = TensorHolder(sparseValuesOut, ACL_FLOAT, std::string("sparseValuesOut"));
     if (sparseValuesOut == nullptr) {
-        OP_LOGE(ACLNN_ERR_PARAM_NULLPTR, "Failed to create the holder of tensor sparseValuesOut!");
-        return ge::GRAPH_FAILED;
+        OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "Failed to create the holder of tensor sparseValuesOut!");
+        return ACLNN_ERR_INNER_NULLPTR;
     }
 
     return aclnnInnerLightningIndexerFp32GetWorkspaceSize(
