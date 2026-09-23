@@ -3,56 +3,14 @@
 """AscendC short convolution for GLM prefill, decode and MTP verification."""
 
 import torch
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
-CONV_STATE_COPY_BLOCK_SIZE = 256
-CONV_STATE_COPY_MAX_PROGRAMS = 65535
-
-
-@triton.jit
-def _copy_conv_state(
-    cache,
-    packed,
-    cache_indices,
-    starts,
-    packed_indices,
-    cache_stride,
-    index_stride,
-    num_slots,
-    REQUESTS: tl.constexpr,
-    STATE_LEN: tl.constexpr,
-    DIM: tl.constexpr,
-    STATE_STRIDE: tl.constexpr,
-    DIM_STRIDE: tl.constexpr,
-    WRITE_BACK: tl.constexpr,
-    BLOCK: tl.constexpr,
-):
-    channel_tiles = tl.cdiv(DIM, BLOCK)
-    request_tiles = STATE_LEN * channel_tiles
-    # Bound the launch grid, including wide TP shards and large batches.
-    for tile in range(tl.program_id(0), REQUESTS * request_tiles, tl.num_programs(0)):
-        request = tile // request_tiles
-        row_tile = tile % request_tiles
-        state_row = row_tile // channel_tiles
-        channels = row_tile % channel_tiles * BLOCK + tl.arange(0, BLOCK)
-        slot = tl.load(cache_indices + request * index_stride).to(tl.int64)
-        active = (slot >= 0) & (slot < num_slots) & (tl.load(starts + request + 1) > tl.load(starts + request))
-        in_range = channels < DIM
-        safe_slot = tl.where(active, slot, 0)
-        # Keep the potentially large page address scalar. Within-page offsets
-        # fit int32; broadcasting the page address makes every lane use int64.
-        cache_row = cache + safe_slot * cache_stride + state_row * STATE_STRIDE
-        cache_offsets = channels * DIM_STRIDE
-        packed_offsets = request * STATE_LEN * DIM + state_row * DIM + channels
-        if WRITE_BACK:
-            values = tl.load(packed + packed_offsets, mask=in_range, other=0)
-            tl.store(cache_row + cache_offsets, values, mask=active & in_range)
-        else:
-            values = tl.load(cache_row + cache_offsets, mask=active & in_range, other=0)
-            tl.store(packed + packed_offsets, values, mask=in_range)
-            if row_tile == 0:
-                tl.store(packed_indices + request, tl.where(active, request, -1))
+from vllm_ascend.ops.triton.kda.conv_state import (
+    CONV_STATE_COPY_BLOCK_SIZE,
+    CONV_STATE_COPY_MAX_PROGRAMS,
+    copy_conv_state_kernel,
+)
 
 
 def causal_conv1d(
@@ -99,7 +57,7 @@ def causal_conv1d(
             conv_state.stride(1),
             conv_state.stride(2),
         )
-        _copy_conv_state[copy_grid](*copy_args, WRITE_BACK=False, BLOCK=CONV_STATE_COPY_BLOCK_SIZE)
+        copy_conv_state_kernel[copy_grid](*copy_args, WRITE_BACK=False, BLOCK=CONV_STATE_COPY_BLOCK_SIZE)
     # Return the declared result so graph functionalization retains the call.
     result = torch.ops._C_ascend.npu_causal_conv1d_custom(
         output,
@@ -116,5 +74,5 @@ def causal_conv1d(
         run_mode=run_mode,
     )
     if not conv_state.is_contiguous():
-        _copy_conv_state[copy_grid](*copy_args, WRITE_BACK=True, BLOCK=CONV_STATE_COPY_BLOCK_SIZE)
+        copy_conv_state_kernel[copy_grid](*copy_args, WRITE_BACK=True, BLOCK=CONV_STATE_COPY_BLOCK_SIZE)
     return result

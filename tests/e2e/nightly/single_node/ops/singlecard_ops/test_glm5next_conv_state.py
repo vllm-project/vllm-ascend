@@ -6,7 +6,7 @@ import torch
 import torch_npu  # noqa: F401
 from vllm.triton_utils import triton
 
-from vllm_ascend.models.glm5next.ops.causal_conv1d import _copy_conv_state
+from vllm_ascend.ops.triton.kda.conv_state import copy_conv_state_kernel
 
 
 @pytest.mark.parametrize("dim_first", [False, True])
@@ -36,13 +36,13 @@ def test_conv_state_copy_masks_invalid_slots_and_preserves_shared_pages(dim_firs
         *cache.stride()[1:],
     )
     grid = (5 * width * triton.cdiv(dim, 256),)
-    _copy_conv_state[grid](*args, WRITE_BACK=False, BLOCK=256)
+    copy_conv_state_kernel[grid](*args, WRITE_BACK=False, BLOCK=256)
     torch.testing.assert_close(packed_indices.cpu(), torch.tensor([0, -1, -1, -1, 4], dtype=torch.int32))
     torch.testing.assert_close(packed[0], cache[2])
     torch.testing.assert_close(packed[4], cache[3])
     assert torch.count_nonzero(packed[1:4]).item() == 0
     packed.fill_(17)
-    _copy_conv_state[grid](*args, WRITE_BACK=True, BLOCK=256)
+    copy_conv_state_kernel[grid](*args, WRITE_BACK=True, BLOCK=256)
     expected = saved.as_strided(cache.shape, strides)
     expected[2].fill_(17)
     expected[3].fill_(17)
