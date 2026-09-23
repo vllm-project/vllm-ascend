@@ -338,8 +338,26 @@ class NPUPlatform(Platform):
         """Apply Ascend-specific defaults."""
 
         default_max_cg_capture_size = _get_default_max_cudagraph_capture_size(vllm_config)
-        if default_max_cg_capture_size is not None:
-            vllm_config.compilation_config.max_cudagraph_capture_size = default_max_cg_capture_size
+        if default_max_cg_capture_size is None:
+            return
+
+        compilation_config = vllm_config.compilation_config
+        if getattr(vllm_config, "performance_mode", "balanced") == "interactivity":
+            # Upstream builds a contiguous 1..min(max, 32) list in this mode.
+            # That has no grid to fall off, so only the ceiling is needed and
+            # seeding a list here would replace the fine-grained sizes the mode
+            # exists to provide.
+            compilation_config.max_cudagraph_capture_size = default_max_cg_capture_size
+            return
+
+        # Seed the size list rather than the ceiling. Upstream derives the list
+        # from the ceiling on a fixed grid that cannot land on an off-grid
+        # value, and without the `* 2` the ceiling *is* the value that has to be
+        # captured. Leaving `max_cudagraph_capture_size` unset lets upstream
+        # take it from the list, so a later pass that drops sizes (sequence
+        # parallelism filtering to TP-divisible values) stays a truncation
+        # rather than a mismatch between the two fields.
+        compilation_config.cudagraph_capture_sizes = _default_cudagraph_capture_sizes(default_max_cg_capture_size)
 
     def num_compute_units(cls, device_id: int = 0) -> int:
         """Return the number of Cube Cores on the NPU device.
@@ -1417,6 +1435,29 @@ def _get_default_max_cudagraph_capture_size(vllm_config: VllmConfig) -> int | No
         decode_query_len += speculative_config.num_speculative_tokens
 
     return min(max_num_seqs * decode_query_len, 512)
+
+
+def _default_cudagraph_capture_sizes(max_capture_size: int) -> list[int]:
+    """Upstream's capture grid, extended to reach `max_capture_size` itself.
+
+    Upstream builds 1, 2, 4 then multiples of 8 (16 past 256), so the largest
+    entry is the last grid point at or below the ceiling. Upstream's own
+    default overshoots (`max_num_seqs * decode_query_len * 2`), which leaves the
+    configured maximum comfortably inside the list; Ascend drops that `* 2` to
+    save capture memory, which puts the maximum at the end of the list, where an
+    off-grid value is unreachable. `max_num_seqs=12` then stops the list at 8
+    and decode batches of 9-12 fall back to eager, around 7.5x slower
+    (vllm-project/vllm-ascend#16049).
+
+    Adding the maximum costs one captured graph. Note it has to be *added* to
+    the grid, not rounded up onto it: a uniform decode batch is one token per
+    request, so a captured size above `max_num_seqs` has no batch that can fill
+    it and is never dispatched.
+    """
+    sizes = [size for size in (1, 2, 4) if size <= max_capture_size]
+    sizes += list(range(8, min(max_capture_size + 1, 256), 8))
+    sizes += list(range(256, max_capture_size + 1, 16))
+    return sorted({*sizes, max_capture_size})
 
 
 def _config_deprecated_logging():
