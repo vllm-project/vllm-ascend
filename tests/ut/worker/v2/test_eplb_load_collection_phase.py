@@ -150,8 +150,11 @@ class TestAscendEplbFreshLoadGate(unittest.TestCase):
         state.expert_rearrangement_step_interval = 2
         state.expert_load_window_step = 0
         state.expert_load_window_size = 2
-        state._logical_load_window_write_index = 0
+        state._num_recorded_load_steps = 0
+        state._load_stats_window_start_index = 0
+        state._load_stats_window_write_index = 0
         state._local_load_collection_mask = torch.zeros(2, dtype=torch.int32)
+        state._physical_load_sample_slots = torch.full((2,), -1, dtype=torch.long)
         state.should_record_tensor = None
         state._has_fresh_recorded_load = False
         state.policy = StairEplbPolicy(StairConfig())
@@ -221,7 +224,7 @@ class TestAscendEplbFreshLoadGate(unittest.TestCase):
 
         with (
             patch(
-                "vllm_ascend.distributed.eplb.state.get_ep_group",
+                "vllm_ascend.distributed.eplb.state.get_eplb_group",
                 return_value=ep_group,
             ),
             patch(

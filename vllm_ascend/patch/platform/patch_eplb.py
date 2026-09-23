@@ -425,6 +425,8 @@ def _wrap_move_to_workspace(original_move):
                     if np.isfinite(predicted_ratio):
                         model_state._last_committed_mean_ratios[layer_idx] = predicted_ratio
             if is_last_result:
+                if layer_idx is not None and hasattr(model_state, "_load_mapping_generation"):
+                    model_state._load_mapping_generation += 1
                 _clear_transfer_target(model_state.communicator)
                 if bound.arguments["ep_rank"] == 0:
                     if full_target is None:

@@ -128,7 +128,6 @@ class AscendEplbState(_eplb_state.EplbState):
         self._has_fresh_recorded_load = False
         self._is_load_sampling_step = False
         self._should_collect_local_load = False
-        self._logical_load_window_write_index = 0
         if getattr(self, "cuda_device_index", None) is None:
             self.cuda_device_index = torch.accelerator.current_device_index()
 
@@ -144,26 +143,29 @@ class AscendEplbState(_eplb_state.EplbState):
         model_state = self.model_states[model_config.compute_hash()]
         if not self.uses_custom_load_stats:
             return
-        self._initialize_load_stats_buffers(model_state)
+        self._initialize_load_stats_state(model_state)
 
-    def _initialize_load_stats_buffers(self, model_state: Any) -> None:
+    def _initialize_load_stats_state(self, model_state: Any) -> None:
         model = model_state.model
-        model_state._logical_load_window = torch.zeros(
-            self.expert_load_window_size,
-            model.num_moe_layers,
-            model.num_logical_experts,
-            dtype=torch.int64,
-            device=self.device,
-        )
-        model_state._num_recorded_logical_load_samples = 0
         # NaN means this layer has no committed mean-ratio anchor yet.
         model_state._last_committed_mean_ratios = np.full(model.num_moe_layers, np.nan)
+        model_state._load_mapping_generation = 0
+        model_state._observed_load_mapping_generation = 0
         if not hasattr(self, "_local_load_collection_mask"):
             self._local_load_collection_mask = torch.zeros(
                 self.expert_load_window_size,
                 dtype=torch.int32,
-                device=self.device,
+                device="cpu",
             )
+            self._physical_load_sample_slots = torch.full(
+                (self.expert_load_window_size,),
+                -1,
+                dtype=torch.long,
+                device="cpu",
+            )
+            self._num_recorded_load_steps = 0
+            self._load_stats_window_start_index = 0
+            self._load_stats_window_write_index = 0
 
     def get_rank_node_ids(self) -> np.ndarray:
         """Cache node ordinals in EPLB-rank order as ``[num_ranks]``.
@@ -195,63 +197,102 @@ class AscendEplbState(_eplb_state.EplbState):
         return callable(getattr(self.policy, "prepare_local_load_stats", None))
 
     def step(self, is_dummy: bool = False, is_profile: bool = False, log_stats: bool = False) -> None:
-        """Advance the shared window; eligible ranks contribute logical load."""
+        """Advance the shared collection mask alongside the upstream window."""
         is_load_sampling_step = getattr(self, "_is_load_sampling_step", False) and not is_dummy and not is_profile
         should_collect_local_load = getattr(self, "_should_collect_local_load", False)
         self._is_load_sampling_step = False
         self._should_collect_local_load = False
-        if not is_profile and self.uses_custom_load_stats:
-            # Keep dummy and phase-filtered steps aligned across EP ranks.
-            write_index = self._logical_load_window_write_index
-            self._local_load_collection_mask[write_index] = is_load_sampling_step and should_collect_local_load
-            for model_state in self.model_states.values():
-                logical_expert_load = model_state._logical_load_window[write_index]
-                logical_expert_load.zero_()
-                if is_load_sampling_step and should_collect_local_load:
-                    logical_expert_load.scatter_add_(
-                        -1,
-                        model_state.physical_to_logical_map.long(),
-                        model_state.expert_load_pass.to(torch.int64),
-                    )
-                model_state._num_recorded_logical_load_samples = min(
-                    model_state._num_recorded_logical_load_samples + 1,
-                    self.expert_load_window_size,
-                )
-            self._logical_load_window_write_index = (write_index + 1) % self.expert_load_window_size
+        if self.uses_custom_load_stats:
+            self._discard_samples_from_old_mapping()
+            if not is_profile:
+                write_index = self._load_stats_window_write_index
+                has_sample = is_load_sampling_step and should_collect_local_load
+                self._local_load_collection_mask[write_index] = has_sample
+                self._physical_load_sample_slots[write_index] = self.expert_load_window_step if has_sample else -1
+                if self._num_recorded_load_steps < self.expert_load_window_size:
+                    self._num_recorded_load_steps += 1
+                else:
+                    self._load_stats_window_start_index = (
+                        self._load_stats_window_start_index + 1
+                    ) % self.expert_load_window_size
+                self._load_stats_window_write_index = (write_index + 1) % self.expert_load_window_size
         super().step(is_dummy=is_dummy, is_profile=is_profile, log_stats=log_stats)
+
+    def _discard_samples_from_old_mapping(self) -> None:
+        mapping_changed = any(
+            model_state._load_mapping_generation != model_state._observed_load_mapping_generation
+            for model_state in self.model_states.values()
+        )
+        if not mapping_changed:
+            return
+        self._local_load_collection_mask.zero_()
+        self._physical_load_sample_slots.fill_(-1)
+        self._num_recorded_load_steps = 0
+        self._load_stats_window_start_index = 0
+        self._load_stats_window_write_index = 0
+        for model_state in self.model_states.values():
+            model_state._observed_load_mapping_generation = model_state._load_mapping_generation
+
+    def _ordered_load_step_indices(self) -> torch.Tensor:
+        indices = torch.arange(self.expert_load_window_size, dtype=torch.long)
+        return (indices + self._load_stats_window_start_index) % self.expert_load_window_size
+
+    @staticmethod
+    def _map_physical_stats_to_logical(
+        model_state: Any,
+        physical_stats: PreparedLoadStats,
+    ) -> PreparedLoadStats:
+        values = physical_stats.values
+        num_logical_experts = model_state.model.num_logical_experts
+        invalid_expert = torch.full_like(model_state.physical_to_logical_map, num_logical_experts)
+        logical_indices = torch.where(
+            model_state.physical_to_logical_map >= 0,
+            model_state.physical_to_logical_map,
+            invalid_expert,
+        ).long()
+        logical_values = values.new_zeros((*values.shape[:-1], num_logical_experts + 1))
+        logical_values.scatter_add_(
+            -1,
+            logical_indices.unsqueeze(0).expand(values.shape[0], -1, -1),
+            values,
+        )
+        return PreparedLoadStats(logical_values[..., :-1], physical_stats.sample_counts)
 
     def collect_global_load_stats(self) -> dict[str, PreparedLoadStats] | None:
         """Prepare and reduce policy statistics, or skip an empty global window."""
         prepare_load_stats = getattr(self.policy, "prepare_local_load_stats", None)
         if prepare_load_stats is None:
             raise TypeError("The selected EPLB policy does not prepare custom load statistics")
-        ep_group = get_ep_group().device_group
-        num_recorded_samples = next(iter(self.model_states.values()))._num_recorded_logical_load_samples
-        if num_recorded_samples < self.expert_load_window_size:
-            collecting_rank_counts = self._local_load_collection_mask[:num_recorded_samples].clone()
-        else:
-            collecting_rank_counts = torch.roll(
-                self._local_load_collection_mask,
-                -self._logical_load_window_write_index,
-            )
+        self._discard_samples_from_old_mapping()
+        if self._num_recorded_load_steps == 0:
+            return None
+        eplb_group = get_eplb_group()
+        step_indices = self._ordered_load_step_indices()
+        collecting_rank_counts = self._local_load_collection_mask[step_indices].clone()
         # Rank-local phases may differ; every rank filters the same time axis.
-        all_reduce(collecting_rank_counts, group=ep_group)
+        all_reduce(collecting_rank_counts, group=eplb_group.cpu_group)
         included_sample_mask = collecting_rank_counts > 0
         if not included_sample_mask.any():
             return None
         local_stats = {}
         for model_key, model_state in self.model_states.items():
-            if num_recorded_samples < self.expert_load_window_size:
-                ordered_load_samples = model_state._logical_load_window[:num_recorded_samples]
-            else:
-                ordered_load_samples = torch.roll(
-                    model_state._logical_load_window,
-                    -self._logical_load_window_write_index,
-                    dims=0,
-                )
-            local_stats[model_key] = prepare_load_stats(ordered_load_samples[included_sample_mask])
+            included_steps = step_indices[included_sample_mask]
+            physical_slots = self._physical_load_sample_slots[included_steps]
+            physical_samples = model_state.expert_load_window.new_zeros(
+                (included_steps.numel(), *model_state.expert_load_window.shape[1:])
+            )
+            local_sample_mask = physical_slots >= 0
+            if local_sample_mask.any():
+                device_mask = local_sample_mask.to(physical_samples.device)
+                device_slots = physical_slots[local_sample_mask].to(physical_samples.device)
+                physical_samples[device_mask] = model_state.expert_load_window.index_select(0, device_slots)
+            physical_stats = prepare_load_stats(physical_samples)
+            local_stats[model_key] = self._map_physical_stats_to_logical(model_state, physical_stats)
         flat_values = [stats.values.reshape(-1, stats.values.shape[-1]) for stats in local_stats.values()]
-        global_values = self._allreduce_list(flat_values)
+        shapes = [values.shape for values in flat_values]
+        concatenated = torch.cat(flat_values, dim=0)
+        all_reduce(concatenated, group=eplb_group.device_group)
+        global_values = list(concatenated.split([shape[0] for shape in shapes]))
         return {
             model_key: PreparedLoadStats(global_values[index].reshape(stats.values.shape), stats.sample_counts)
             for index, (model_key, stats) in enumerate(local_stats.items())
@@ -282,8 +323,8 @@ class AscendEplbState(_eplb_state.EplbState):
 
     def _has_global_fresh_recorded_load(self) -> bool:
         """Synchronize whether any EP rank recorded load since rearranging."""
-        ep_group = get_ep_group()
-        cpu_group = getattr(ep_group, "cpu_group", None)
+        eplb_group = get_eplb_group()
+        cpu_group = getattr(eplb_group, "cpu_group", None)
         if cpu_group is not None:
             if cpu_group.size() <= 1:
                 return self._has_fresh_recorded_load
@@ -295,7 +336,7 @@ class AscendEplbState(_eplb_state.EplbState):
             all_reduce(flag, group=cpu_group)
             return bool(flag.item())
 
-        device_group = ep_group.device_group
+        device_group = eplb_group.device_group
         if device_group.size() <= 1:
             return self._has_fresh_recorded_load
         flag = torch.tensor(
@@ -385,7 +426,7 @@ class AscendEplbState(_eplb_state.EplbState):
             state.policy = policy
         if state.uses_custom_load_stats:
             for model_state in state.model_states.values():
-                state._initialize_load_stats_buffers(model_state)
+                state._initialize_load_stats_state(model_state)
         for model_state in state.model_states.values():
             refresh_model_routing_tables(model_state)
         return state
