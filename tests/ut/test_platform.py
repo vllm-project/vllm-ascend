@@ -351,6 +351,14 @@ class TestNPUPlatform(TestBase):
         with self.assertRaisesRegex(ValueError, "legacy fields are not supported: dynamic_eplb"):
             _validate_eplb_config(vllm_config)
 
+    def test_validate_eplb_config_rejects_additional_policy(self):
+        vllm_config = self.mock_vllm_config()
+        vllm_config.use_v2_model_runner = True
+        vllm_config.additional_config = {"eplb_config": {"policy": "stair"}}
+
+        with self.assertRaisesRegex(ValueError, "unsupported fields: policy"):
+            _validate_eplb_config(vllm_config)
+
     def test_validate_eplb_config_rejects_v1_load_collection_phase(self):
         vllm_config = self.mock_vllm_config()
         vllm_config.use_v2_model_runner = False

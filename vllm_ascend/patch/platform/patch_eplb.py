@@ -8,10 +8,11 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from functools import wraps
 from inspect import signature
-from typing import Any
+from typing import Any, Literal, get_args
 
 import numpy as np
 import torch
+from pydantic.dataclasses import rebuild_dataclass
 from vllm.config import parallel as _parallel_config
 from vllm.distributed.eplb import async_worker as _async_worker
 from vllm.distributed.eplb import eplb_communicator as _eplb_communicator
@@ -33,6 +34,7 @@ _PATCH_MARKER = "_vllm_ascend_eplb_patch"
 # Old async APIs pass one target layer at a time. Preserve the augmented full
 # target on its per-model communicator until the last workspace commit.
 _EXPLICIT_TRANSFER_TARGET_ATTR = "_vllm_ascend_explicit_transfer_target"
+_ASCEND_EPLB_POLICIES = ("default", "stair")
 
 
 @dataclass
@@ -85,6 +87,41 @@ def _patch_parallel_config() -> None:
     platform = _parallel_config.current_platform
     if not isinstance(platform, _CudaAlikeEplbPlatformProxy):
         _parallel_config.current_platform = _CudaAlikeEplbPlatformProxy(platform)
+
+
+def _patch_eplb_policy_config() -> None:
+    """Extend the upstream policy field while preserving its validation."""
+    config_cls = _parallel_config.EPLBConfig
+    policy_field = getattr(config_cls, "__dataclass_fields__", {}).get("policy")
+    if policy_field is None:
+        raise RuntimeError("Unsupported vLLM EPLB contract: policy field is missing.")
+    policy_type = Literal["default", "stair"]
+    if get_args(policy_field.type) == _ASCEND_EPLB_POLICIES and policy_field.default == "stair":
+        return
+
+    decorators = getattr(config_cls, "__pydantic_decorators__", None)
+    validator = None if decorators is None else decorators.model_validators.get("_validate_eplb_config")
+    if validator is None:
+        raise RuntimeError("Unsupported vLLM EPLB contract: policy validator is missing.")
+    original_validator = validator.func
+
+    @wraps(original_validator)
+    def _validate_with_stair(config):
+        if config.policy != "stair":
+            return original_validator(config)
+        config.policy = "default"
+        try:
+            validated = original_validator(config)
+        finally:
+            config.policy = "stair"
+        return validated
+
+    _parallel_config.EPLBPolicyOption = policy_type  # type: ignore[misc]
+    config_cls.__annotations__["policy"] = policy_type
+    policy_field.type = policy_type
+    policy_field.default = "stair"
+    validator.func = _validate_with_stair
+    rebuild_dataclass(config_cls, force=True)
 
 
 def _wrap_communicator_factory(original_factory):
@@ -450,6 +487,7 @@ def _patch_async_move_to_workspace() -> None:
         _eplb_state._move_to_workspace = _wrap_move_to_workspace(original_move)
 
 
+_patch_eplb_policy_config()
 _patch_parallel_config()
 _patch_initial_expert_layout()
 _patch_communicator_factory()

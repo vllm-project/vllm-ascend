@@ -325,6 +325,11 @@ class TestAscendConfig(TestBase):
             with self.subTest(name=name), self.assertRaises(ValueError):
                 EplbConfig(stair_config={name: 0})
 
+    def test_eplb_config_rejects_policy_selection(self):
+        for policy in ("default", "stair"):
+            with self.subTest(policy=policy), self.assertRaises(ValueError):
+                EplbConfig(**{"policy": policy})
+
     def test_stair_config_rejects_unknown_option(self):
         with self.assertRaises(ValueError):
             EplbConfig(stair_config={"unknown_option": 0})
