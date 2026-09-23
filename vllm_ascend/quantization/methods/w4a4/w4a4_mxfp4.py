@@ -340,11 +340,17 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
                 )
                 for weight in layer.w2_weight.data
             ]
+            # The MegaMoe op validates the dtype of the scale tensor itself, while the
+            # grouped-matmul path takes the scale dtype as a separate argument. The W4A4
+            # scales are stored as raw uint8 bytes, so re-view them as float8_e8m0fnu
+            # (both are one byte wide) instead of converting their values.
             layer.cann_mega_moe_w13_weight_scale_list = [
-                w13_weight_scale.clone() for w13_weight_scale in layer.w13_weight_scale.data.unbind(dim=0)
+                w13_weight_scale.clone().view(torch.float8_e8m0fnu)
+                for w13_weight_scale in layer.w13_weight_scale.data.unbind(dim=0)
             ]
             layer.cann_mega_moe_w2_weight_scale_list = [
-                w2_weight_scale.clone() for w2_weight_scale in layer.w2_weight_scale.data.unbind(dim=0)
+                w2_weight_scale.clone().view(torch.float8_e8m0fnu)
+                for w2_weight_scale in layer.w2_weight_scale.data.unbind(dim=0)
             ]
             tensor_names = (
                 "w13_weight",
