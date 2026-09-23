@@ -208,7 +208,7 @@ msgid ""
 "inference products (64 GB, A3), the configuration and performance data are "
 "as follows."
 msgstr ""
-"为了评估动态分块流水线并行在长序列LLM推理场景中的效果，我们使用**DeepSeek-V3.1-W8A8**和**Qwen3-235B**，在升腾Atlas"
+"为了评估动态分块流水线并行在长序列LLM推理场景中的效果，我们使用**DeepSeek-V3.1-W8A8**和**Qwen3-235B**，在昇腾Atlas"
 " A3推理产品（64 GB，A3）上部署了一个P（预填充）实例，配置和性能数据如下。"
 
 msgid "    | Input length 128k    | TTFT: 22.5s | TTFT: 27.0s |"
