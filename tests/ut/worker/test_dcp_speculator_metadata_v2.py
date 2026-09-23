@@ -120,11 +120,17 @@ def test_dspark_common_dcp_preparation(monkeypatch, architecture, padded, width,
             causal=spec._group_causal,
         )
     common = result["draft.layer"].common
-    expected = [31 + width, 128] + [0] * (padded - 2)
-    assert common.seq_lens_cpu.tolist() == expected
-    assert torch.equal(common.dcp_local_seq_lens_cpu, _local(expected))
+    if architecture == "SFA" and not full_rebuild:
+        # The direct SFA entry delegates to upstream without Ascend CPU preparation.
+        torch.testing.assert_close(common.seq_lens_cpu, device_lengths[:padded])
+        assert common.dcp_local_seq_lens_cpu is None
+        assert common.is_prefilling is None
+    else:
+        expected = [31 + width, 128] + [0] * (padded - 2)
+        assert common.seq_lens_cpu.tolist() == expected
+        assert torch.equal(common.dcp_local_seq_lens_cpu, _local(expected))
+        assert common.is_prefilling.tolist() == [False] * padded
     assert torch.equal(common.dcp_local_seq_lens, _local(device_lengths[:padded].tolist()))
-    assert common.is_prefilling.tolist() == [False] * padded
     assert common.causal is False
     assert torch.equal(spec.target_input_buffers.seq_lens_cpu, original_target)
     if architecture == "MLA":
@@ -179,7 +185,11 @@ def test_non_dcp_preserves_existing_length_fallback(monkeypatch, kind, architect
     common = result["draft.layer"].common
     assert common.dcp_local_seq_lens_cpu is None
     assert common.dcp_local_seq_lens is None
-    assert common.seq_lens_cpu.tolist() == [128, 128]
+    if kind == "dspark" and architecture == "SFA" and not full_rebuild:
+        # Upstream lazily derives its CPU view from device lengths.
+        torch.testing.assert_close(common.seq_lens_cpu, device_lengths[:2])
+    else:
+        assert common.seq_lens_cpu.tolist() == [128, 128]
     assert torch.equal(common.seq_lens, device_lengths[:2])
     assert torch.equal(spec.target_input_buffers.seq_lens_cpu, original_target)
 
