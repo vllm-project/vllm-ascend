@@ -443,13 +443,13 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
 
     export HCCL_IF_IP=$local_ip
     export IFNAME="${NETWORK_INTERFACE}"
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_SOCKET_IFNAME="$IFNAME"
+    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     export GLOO_SOCKET_IFNAME="$IFNAME"
     export TP_SOCKET_IFNAME="$IFNAME"
-    export HCCL_SOCKET_IFNAME="$IFNAME"
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
     export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
-    export HCCL_OP_EXPANSION_MODE="AIV"
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
     vllm serve ${WEIGHT_PATH} \
       --host 0.0.0.0 \
@@ -482,13 +482,13 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
 
     export HCCL_IF_IP=$local_ip
     export IFNAME="${NETWORK_INTERFACE}"
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_SOCKET_IFNAME="$IFNAME"
+    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     export GLOO_SOCKET_IFNAME="$IFNAME"
     export TP_SOCKET_IFNAME="$IFNAME"
-    export HCCL_SOCKET_IFNAME="$IFNAME"
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
     export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
-    export HCCL_OP_EXPANSION_MODE="AIV"
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
     vllm serve ${WEIGHT_PATH} \
       --host 0.0.0.0 \
