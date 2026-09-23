@@ -18,7 +18,6 @@
 #
 
 from contextlib import AbstractContextManager, contextmanager, nullcontext
-
 from typing import Any
 
 import numpy as np
@@ -29,6 +28,7 @@ from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
+from vllm.utils.torch_utils import async_tensor_h2d as async_copy_to_gpu
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
@@ -63,10 +63,8 @@ from vllm_ascend.core.profiling_chunk_predictor import (
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
-    is_pd_decode_recompute_scheduler_enabled,
     lmhead_tp_enable,
     set_potential_max_tokens,
-    vllm_version_is,
 )
 from vllm_ascend.worker.utils import disable_compilation
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
@@ -85,14 +83,6 @@ from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
-
-if vllm_version_is("0.29.0"):
-    from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
-    from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
-else:
-    # vLLM main (#56888) replaced buffer_utils.async_copy_to_gpu with
-    # torch_utils.async_tensor_h2d (gaining out=/device=None support).
-    from vllm.utils.torch_utils import async_tensor_h2d as async_copy_to_gpu
 
 
 class NPUModelRunner(GPUModelRunner):
@@ -242,11 +232,10 @@ class NPUModelRunner(GPUModelRunner):
             if mtp_target_hidden_states is not None:
                 pcp_manager.restore_hidden_state_buffer(mtp_target_hidden_states)
 
-        # vLLM main captures draft_hidden_states before maybe_restore_pcp_for_sampling
-        # (v0.29.0 captured it after the restore), so a replicated draft would
-        # read the PCP-local target output. Restore it to the global layout up
-        # front to match the v0.29.0 draft flow.
-        if not vllm_version_is("0.29.0") and state.hidden_states is not None:
+        # vLLM main captures draft_hidden_states before maybe_restore_pcp_for_sampling,
+        # so a replicated draft would read the PCP-local target output. Restore
+        # it to the global layout up front.
+        if state.hidden_states is not None:
             state = state._replace(
                 hidden_states=pcp_manager.restore_hidden_states(state.hidden_states)
             )
@@ -346,7 +335,7 @@ class NPUModelRunner(GPUModelRunner):
             skip_attn_for_dummy_run=skip_attn_for_dummy_run,
             is_profile=is_profile,
             context_len=context_len,
-            **({} if vllm_version_is("0.29.0") else {"valid_dummy_state_slots": valid_dummy_state_slots}),
+            valid_dummy_state_slots=valid_dummy_state_slots,
         )
         self.model_state.kvpp_is_dummy_run = False
         self.kvpp.complete_forward()
@@ -539,17 +528,7 @@ class NPUModelRunner(GPUModelRunner):
 
         dcp_local_seq_lens = None
         # Main computes DCP lengths in the inherited execute_model after PCP
-        # partitioning (vLLM #55212). Release still prepares them here.
-        if vllm_version_is("0.29.0") and self.use_dcp:
-            prepare_dcp_local_seq_lens(
-                self.input_buffers.dcp_local_seq_lens,
-                self.input_buffers.seq_lens,
-                num_reqs,
-                self.dcp_size,
-                self.dcp_rank,
-                self.cp_interleave,
-            )
-            dcp_local_seq_lens = self.input_buffers.dcp_local_seq_lens[:num_reqs_padded]
+        # partitioning (vLLM #55212).
 
         # Some input token ids are directly read from the last sampled tokens
         # and draft tokens. Also, get the logits indices to sample tokens from.
@@ -605,11 +584,6 @@ class NPUModelRunner(GPUModelRunner):
             num_computed_prefill_tokens_np=batch_req_state.num_computed_prefill_tokens_np,
             is_prefilling_np=batch_req_state.is_prefilling_np,
             has_prefill=batch_req_state.has_prefill,
-            **(
-                {"max_seq_len_np": self.req_states.max_seq_len[idx_mapping_np] if self.use_pp else None}
-                if vllm_version_is("0.29.0")
-                else {}
-            ),
             input_ids=self.input_buffers.input_ids[:num_tokens_after_padding],
             positions=self.input_buffers.positions[:num_tokens_after_padding],
             is_padding=self.input_buffers.is_padding[:num_tokens_after_padding],
@@ -623,20 +597,13 @@ class NPUModelRunner(GPUModelRunner):
             seq_lens_np=self.input_buffers.seq_lens_np,
             attn_state=attn_state,
         )
-        if vllm_version_is("0.29.0"):
-            input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
-                self.pcp_manager,
-                input_batch,
-                padded_num_tokens=batch_desc.num_tokens,
-            )
-        else:
-            # vLLM main (#53867) changed maybe_partition_pcp_batch to take the
-            # whole batch descriptor instead of padded_num_tokens.
-            input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
-                self.pcp_manager,
-                input_batch,
-                batch_desc=batch_desc,
-            )
+        # vLLM main (#53867) changed maybe_partition_pcp_batch to take the
+        # whole batch descriptor instead of padded_num_tokens.
+        input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
+            self.pcp_manager,
+            input_batch,
+            batch_desc=batch_desc,
+        )
 
         # For mla/sfa, update cos/sin. Here is for execute_model.
         update_cos_sin(input_batch.positions)
@@ -649,10 +616,10 @@ class NPUModelRunner(GPUModelRunner):
         if self.pcp_manager is None:
             return super().prepare_dummy_attn(
                 input_batch,
-                **({} if vllm_version_is("0.29.0") else {"valid_state_slots": valid_state_slots}),
+                valid_state_slots=valid_state_slots,
             )
         block_tables, slot_mappings = self.pcp_manager.prepare_dummy_attn(input_batch)
-        if not vllm_version_is("0.29.0") and valid_state_slots:
+        if valid_state_slots:
             # Match the upstream state-slot contract in the persistent PCP views.
             for block_table in block_tables:
                 state_slots = torch.arange(1, block_table.shape[0] + 1, dtype=torch.int32, device=block_table.device)
@@ -919,16 +886,6 @@ def graph_manager_wrapper(model_runner):
         varlen_decode: bool = False,
         ubatch_runner: Any = None,  # vLLM main (#51700)
     ):
-        if vllm_version_is("0.29.0"):
-            return ModelAclGraphManager(
-                vllm_config,
-                device,
-                cudagraph_mode,
-                decode_query_len,
-                model_runner,
-                lora_capture_cases=lora_capture_cases,
-                varlen_decode=varlen_decode,
-            )
         return ModelAclGraphManager(
             vllm_config,
             device,

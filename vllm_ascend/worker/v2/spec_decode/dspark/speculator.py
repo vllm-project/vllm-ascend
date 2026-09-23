@@ -30,7 +30,6 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_wrapper,
@@ -128,31 +127,21 @@ class AscendDSparkSpeculator(DSparkSpeculator):
                 attn_state=AscendAttentionState.ChunkedPrefill,
             ),
         ):
-            if vllm_version_is("0.29.0"):
-                attn_metadata = super()._build_draft_attn_metadata(
-                    num_reqs=self.input_batch.num_reqs,
-                    num_reqs_padded=num_reqs_padded,
-                    num_tokens_padded=num_tokens_padded,
-                    seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
-                    step=self.num_query_per_req,
-                    causal=self._group_causal,
-                )
-            else:
-                # vLLM main (#56181) replaced _build_draft_attn_metadata with
-                # _build_uniform_attn_metadata (BatchExecutionDescriptor).
-                batch_desc = BatchExecutionDescriptor(
-                    cg_mode=CUDAGraphMode.FULL,
-                    num_tokens=num_tokens_padded,
-                    num_reqs=num_reqs_padded,
-                )
-                attn_metadata = super()._build_uniform_attn_metadata(
-                    num_reqs=self.input_batch.num_reqs,
-                    batch_desc=batch_desc,
-                    num_query_per_req=self.num_query_per_req,
-                    seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
-                    step=self.num_query_per_req,
-                    causal=self._group_causal,
-                )
+            # vLLM main (#56181) replaced _build_draft_attn_metadata with
+            # _build_uniform_attn_metadata (BatchExecutionDescriptor).
+            batch_desc = BatchExecutionDescriptor(
+                cg_mode=CUDAGraphMode.FULL,
+                num_tokens=num_tokens_padded,
+                num_reqs=num_reqs_padded,
+            )
+            attn_metadata = super()._build_uniform_attn_metadata(
+                num_reqs=self.input_batch.num_reqs,
+                batch_desc=batch_desc,
+                num_query_per_req=self.num_query_per_req,
+                seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+                step=self.num_query_per_req,
+                causal=self._group_causal,
+            )
 
         if self.attn_architecture not in ("GQA", "MLA"):
             return [attn_metadata]

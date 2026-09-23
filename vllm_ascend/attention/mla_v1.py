@@ -59,7 +59,6 @@ from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_NZ,
     is_pd_decode_recompute_scheduler_enabled,
     maybe_trans_nz,
-    vllm_version_is,
     weak_ref_tensors,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
@@ -1671,7 +1670,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             # TND for the draft (its metadata uses cumulative lengths). Use the
             # forward-context flag, not self.is_draft_model: the draft MLA impl
             # shares the target's vllm_config, so runner_type is "generate".
-            or (not vllm_version_is("0.29.0") and _EXTRA_CTX.is_draft_model)
+            or _EXTRA_CTX.is_draft_model
         ):
             # The right part layout indicates the layout of the attention
             # output. It is set to NTD to avoid the need for a transpose

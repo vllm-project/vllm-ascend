@@ -25,8 +25,6 @@ import torch
 import vllm.v1.worker.gpu.buffer_utils
 from vllm.logger import logger
 
-from vllm_ascend.utils import vllm_version_is
-
 
 def check_triton_ascend_version_valid() -> bool:
     """
@@ -166,24 +164,14 @@ class UvaBufferWrapper:
                 self._uva[dirty_rows] = src.to(device="npu", non_blocking=True)
             self._modified_indices.clear()
 
-    if vllm_version_is("0.29.0"):
+    def uva(self, n: int | None = None) -> torch.Tensor:
+        """Get the device data of the buffer.
 
-        @property
-        def uva(self):
-            """Get the device data of the buffer."""
-            self._sync_dirty_rows()
-            return self._uva
-
-    else:
-
-        def uva(self, n: int | None = None) -> torch.Tensor:
-            """Get the device data of the buffer.
-
-            vLLM main (#56908) turned UvaBuffer.uva into a method taking an
-            optional row count; the pool and StagedWriteTensor call it.
-            """
-            self._sync_dirty_rows()
-            return self._uva if n is None else self._uva[:n]
+        vLLM main (#56908) turned UvaBuffer.uva into a method taking an
+        optional row count; the pool and StagedWriteTensor call it.
+        """
+        self._sync_dirty_rows()
+        return self._uva if n is None else self._uva[:n]
 
 
 vllm.v1.worker.gpu.buffer_utils.UvaBuffer = UvaBufferWrapper

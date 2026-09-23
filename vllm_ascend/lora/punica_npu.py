@@ -8,7 +8,7 @@ from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.lora.lora_ops import _LORA_WRAPPER_IDS, _LORA_WRAPPERS, lora_linear
 from vllm_ascend.lora.utils import refresh_all_lora_classes
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, vllm_version_is
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 
 # The platforms that are compatible with the PyTorch-native implementation can
@@ -597,10 +597,8 @@ class PunicaWrapperNPU(PunicaWrapperBase):
 
         if y.size(1) < r:
             # Ascend bgmv_expand requires hidden_out >= hidden_in (LoRA rank).
-            # Reachable only on vLLM main: the sequence-classification LoRA
-            # head (#53555, post-v0.29.0) has num_labels < rank, whereas on
-            # v0.29.0 add_lora_logits is only called by the logits processor
-            # (vocab-size output > rank), so no version gate is needed.
+            # The sequence-classification LoRA head (#53555) can have
+            # num_labels < rank, so use the matmul fallback.
             self._add_lora_logits_matmul(
                 y, x, lora_a_stacked, lora_b_stacked, scale, indices
             )
@@ -611,19 +609,16 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             buffer = torch.zeros((x.size(0), r), dtype=torch.float32, device=x.device)
 
         self.bgmv_shrink(x, lora_a_stacked, buffer, indices, scale)
-        if vllm_version_is("0.29.0"):
+        if y.dtype in (torch.half, torch.bfloat16):
             self.bgmv_expand(buffer, lora_b_stacked, y, indices, add_inputs=True)
         else:
-            if y.dtype in (torch.half, torch.bfloat16):
-                self.bgmv_expand(buffer, lora_b_stacked, y, indices, add_inputs=True)
-            else:
-                # Ascend bgmv_expand only writes half/bf16 outputs. Compute
-                # the LoRA delta into a matching workspace and merge it back
-                # so fp32 classification outputs (classifier LoRA, #53555)
-                # work on vLLM main.
-                y_half = y.to(torch.bfloat16)
-                self.bgmv_expand(buffer, lora_b_stacked, y_half, indices, add_inputs=True)
-                y.copy_(y_half.to(y.dtype))
+            # Ascend bgmv_expand only writes half/bf16 outputs. Compute
+            # the LoRA delta into a matching workspace and merge it back
+            # so fp32 classification outputs (classifier LoRA, #53555)
+            # work on vLLM main.
+            y_half = y.to(torch.bfloat16)
+            self.bgmv_expand(buffer, lora_b_stacked, y_half, indices, add_inputs=True)
+            y.copy_(y_half.to(y.dtype))
 
         y = y.view_as(y_org)
 

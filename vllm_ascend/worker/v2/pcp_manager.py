@@ -23,6 +23,10 @@ import numpy as np
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_pcp_group, get_pp_group
+
+# vLLM main (#56888) replaced buffer_utils.async_copy_to_gpu with
+# torch_utils.async_tensor_h2d (gaining out=/device=None support).
+from vllm.utils.torch_utils import async_tensor_h2d as async_copy_to_gpu
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
@@ -30,13 +34,6 @@ from vllm.v1.worker.gpu.states import RequestState
 
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
-
-if vllm_version_is("0.29.0"):
-    from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
-else:
-    # vLLM main (#56888) replaced buffer_utils.async_copy_to_gpu with
-    # torch_utils.async_tensor_h2d (gaining out=/device=None support).
-    from vllm.utils.torch_utils import async_tensor_h2d as async_copy_to_gpu
 
 
 @dataclass(frozen=True)
@@ -79,9 +76,6 @@ class AscendPCPManager(PCPManager):
             pcp_world_size=pcp_world_size,
             pcp_rank=pcp_rank,
             device=device,
-            # vLLM v0.29.0 PCPManager still takes req_states; upstream #56107
-            # removed it on main/v0.30.0.
-            **({"req_states": req_states} if vllm_version_is("0.29.0") else {}),
             max_num_reqs=max_num_reqs,
             max_num_tokens=max_num_tokens,
             block_tables=block_tables,
@@ -273,8 +267,8 @@ class AscendPCPManager(PCPManager):
                 global_batch,
                 padded_num_tokens=padded_num_tokens,
                 # vLLM main (#53867) pads request metadata for FULL graphs via
-                # padded_num_reqs; v0.29.0 does not accept it yet.
-                **({} if vllm_version_is("0.29.0") else {"padded_num_reqs": padded_num_reqs}),
+                # padded_num_reqs.
+                padded_num_reqs=padded_num_reqs,
             )
         assert isinstance(local_batch, AscendInputBatch)
 
@@ -378,17 +372,13 @@ class AscendPCPManager(PCPManager):
     def prepare_draft_prefill(self, input_batch: InputBatch, input_ids: torch.Tensor) -> None:
         """Keep the replicated PCP draft on the global batch.
 
-        vLLM v0.29.0 runs the draft prefill directly on the global batch, which
-        the Ascend replicated-PCP attention metadata describes. vLLM main
-        (#56181) routes the draft through the target PCP partition and shrinks
-        the model input to the rank-local batch, desyncing it from the global
-        metadata (FIA rejects `last(actual_seq_lengths_q) != T` in TND layout).
-        Ascend PCP spec decode is always replicated, so skip the partition on
-        newer vLLM to match v0.29.0 behavior.
+        vLLM main (#56181) routes the draft through the target PCP partition and
+        shrinks the model input to the rank-local batch, desyncing it from the
+        global metadata (FIA rejects `last(actual_seq_lengths_q) != T` in TND
+        layout). Ascend PCP spec decode is always replicated, so skip the
+        partition.
         """
-        if not vllm_version_is("0.29.0"):
-            return
-        super().prepare_draft_prefill(input_batch, input_ids)
+        return
 
     def restore_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Restore active tokens and zero any fixed-graph padding rows."""
@@ -424,8 +414,6 @@ class AscendPCPManager(PCPManager):
         before the upstream restore), so a second all-gather here would reorder
         them. Detect the already-restored layout by its padded length.
         """
-        if vllm_version_is("0.29.0"):
-            return super().restore_for_sampling(hidden_states)
         assert self._global_batch is not None
         if hidden_states.shape[0] == self._global_batch.num_tokens_after_padding:
             return hidden_states, self._global_batch

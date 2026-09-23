@@ -11,14 +11,8 @@ import torch
 from vllm.distributed import get_dp_group, get_tensor_model_parallel_rank
 from vllm.forward_context import get_forward_context
 
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("0.29.0"):
-    from vllm.models.deepseek_v4_1.common.engram import DEAD_ID
-else:
-    # Upstream #56741 normalized the V4.1 model package name.
-    from vllm.models.deepseek_v41.common.engram import DEAD_ID
-
+# Upstream #56741 normalized the V4.1 model package name.
+from vllm.models.deepseek_v41.common.engram import DEAD_ID
 from vllm.triton_utils import tl, triton
 
 

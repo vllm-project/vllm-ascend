@@ -13,7 +13,6 @@ from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.model_runner import BatchReqState, GPUModelRunner
 
 from vllm_ascend.ascend_forward_context import MoECommType
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
@@ -140,9 +139,8 @@ def test_execute_model_records_profiling_time():
         "skip_attn_for_dummy_run": False,
         "is_profile": False,
         "context_len": 0,
+        "valid_dummy_state_slots": False,
     }
-    if not vllm_version_is("0.29.0"):
-        expected_kwargs["valid_dummy_state_slots"] = False
     mock_execute_model.assert_called_once_with(scheduler_output, **expected_kwargs)
 
 
@@ -372,10 +370,7 @@ def test_prepare_dummy_attn_without_pcp_uses_upstream():
     dummy = object()
     with patch.object(GPUModelRunner, "prepare_dummy_attn", return_value=((), None)) as parent:
         assert runner.prepare_dummy_attn(dummy) == ((), None)
-    if vllm_version_is("0.29.0"):
-        parent.assert_called_once_with(dummy)
-    else:
-        parent.assert_called_once_with(dummy, valid_state_slots=False)
+    parent.assert_called_once_with(dummy, valid_state_slots=False)
 
 
 @pytest.mark.parametrize("enabled", [False, True])
@@ -558,12 +553,8 @@ def test_init_spec_pp_full_graph_and_speculator():
     assert runner.use_aux_hidden_state_outputs is True
     assert runner.speculator is speculator
     assert speculator.update_stream is runner.update_stream
-    if vllm_version_is("0.29.0"):
-        assert runner.use_spec_pp is True
-        install_pp.assert_called_once()
-    else:
-        assert runner.use_spec_pp is False
-        install_pp.assert_not_called()
+    assert runner.use_spec_pp is False
+    install_pp.assert_not_called()
     assert runner.update_stream is not None
     assert runner.decode_query_len == 2
 
@@ -596,10 +587,7 @@ def test_sample_tokens_spec_pp_broadcasts_draft_tokens():
     runner.pp_handler = MagicMock()
     with patch.object(GPUModelRunner, "sample_tokens", return_value="out"):
         assert runner.sample_tokens("g") == "out"
-    if vllm_version_is("0.29.0"):
-        runner.pp_handler.broadcast_draft_tokens.assert_called_once_with()
-    else:
-        runner.pp_handler.broadcast_draft_tokens.assert_not_called()
+    runner.pp_handler.broadcast_draft_tokens.assert_not_called()
 
 
 def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
@@ -786,7 +774,7 @@ def _fake_async_copy(src, device=None, out=None):
     return tensor
 
 
-def _run_prepare_inputs(runner, scheduler_output, batch_req_state, batch_desc, *, version_029=False):
+def _run_prepare_inputs(runner, scheduler_output, batch_req_state, batch_desc):
     batch = SimpleNamespace(positions=torch.zeros(4, dtype=torch.int32))
 
     def _partition(_pcp_manager, input_batch, **_kwargs):
@@ -813,7 +801,6 @@ def _run_prepare_inputs(runner, scheduler_output, batch_req_state, batch_desc, *
             SimpleNamespace(maybe_partition_pcp_batch=_partition),
         ),
         patch("vllm_ascend.worker.v2.model_runner.update_cos_sin"),
-        patch("vllm_ascend.worker.v2.model_runner.vllm_version_is", return_value=version_029),
     ):
         return runner.prepare_inputs(scheduler_output, batch_req_state, batch_desc), batch
 
@@ -830,7 +817,7 @@ def test_prepare_inputs_covers_draft_full_dcp_pp_and_rswa():
     runner, scheduler_output, batch_req_state, batch_desc = _prepare_inputs_runner(
         draft=True, full_cg=True, use_dcp=True, use_pp=True, rswa=True, speculator=True
     )
-    out, partitioned = _run_prepare_inputs(runner, scheduler_output, batch_req_state, batch_desc, version_029=True)
+    out, partitioned = _run_prepare_inputs(runner, scheduler_output, batch_req_state, batch_desc)
     assert out is partitioned
     runner.num_computed_tokens_event.synchronize.assert_called_once_with()
     assert runner.req_states.num_computed_tokens_cpu[0] == 3

@@ -35,6 +35,7 @@ from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor, ModelCudaGraphManager
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
+from vllm.v1.worker.gpu.ubatch_utils import UBatchRunner
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
@@ -47,15 +48,9 @@ from vllm_ascend.compilation.updatable_graph import (
     ContextSource,
     UpdatableGraph,
 )
-from vllm_ascend.utils import use_updatable_graph, vllm_version_is
+from vllm_ascend.utils import use_updatable_graph
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.utils import communicator_switch
-
-if vllm_version_is("0.29.0"):
-    # vLLM main (#51700) added UBatchRunner for microbatched FULL graphs.
-    UBatchRunner = Any
-else:
-    from vllm.v1.worker.gpu.ubatch_utils import UBatchRunner
 
 
 def _prepare_pcp_inputs_to_capture(
@@ -143,27 +138,17 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         varlen_decode: bool = False,
         ubatch_runner: UBatchRunner | None = None,
     ):
-        if vllm_version_is("0.29.0"):
-            super().__init__(
-                vllm_config,
-                device,
-                cudagraph_mode,
-                decode_query_len,
-                lora_capture_cases=lora_capture_cases,
-                varlen_decode=varlen_decode,
-            )
-        else:
-            # vLLM main (#51700) passes the microbatch runner into the graph
-            # manager; v0.29.0's ModelCudaGraphManager has no such parameter.
-            super().__init__(
-                vllm_config,
-                device,
-                cudagraph_mode,
-                decode_query_len,
-                lora_capture_cases=lora_capture_cases,
-                varlen_decode=varlen_decode,
-                ubatch_runner=ubatch_runner,
-            )
+        # vLLM main (#51700) passes the microbatch runner into the graph
+        # manager.
+        super().__init__(
+            vllm_config,
+            device,
+            cudagraph_mode,
+            decode_query_len,
+            lora_capture_cases=lora_capture_cases,
+            varlen_decode=varlen_decode,
+            ubatch_runner=ubatch_runner,
+        )
         self.breakable_cg_runner: BreakableACLGraphWrapper | None = None
         self.model_runner = model_runner
         self.update_stream = self.model_runner.update_stream

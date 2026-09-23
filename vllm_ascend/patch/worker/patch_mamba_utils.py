@@ -15,20 +15,12 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.gpu_input_batch import CachedRequestState
+from vllm.v1.worker.gpu_input_batch import InputBatch as GPUInputBatch
 from vllm.v1.worker.mamba_utils import MambaCopyBuffers
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.triton.batch_memcpy import batch_memcpy_kernel
 from vllm_ascend.ops.triton.mamba.postprocess import postprocess_mamba_fused_kernel
-from vllm_ascend.utils import vllm_version_is
-
-# v0.29.0 exposes GPUInputBatch as a TPU|GPU union type alias from
-# lora_model_runner_mixin. Upstream #56898 removed the TPU input batch and
-# moved InputBatch to gpu_input_batch, so the alias is gone on newer main.
-if vllm_version_is("0.29.0"):
-    from vllm.v1.worker.lora_model_runner_mixin import GPUInputBatch
-else:
-    from vllm.v1.worker.gpu_input_batch import InputBatch as GPUInputBatch
 
 # Upstream uses 16 temporal-copy tiles to saturate H100/GB200. K3 already
 # exposes 138 independent state programs per request, while Triton-Ascend

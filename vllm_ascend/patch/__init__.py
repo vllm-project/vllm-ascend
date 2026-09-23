@@ -705,11 +705,9 @@
 #       `_verify_with_expert_parallelism` check in
 #       `ModelConfig.verify_with_parallel_config` and cannot start.
 #    How:
-#       On non-v0.29.0 revisions, monkey-patch `verify_with_parallel_config`
-#       to skip the expert-parallel check when `runner_type == "draft"` and
-#       the model is not MoE. The target model EP check and MoE draft models
-#       are unaffected. The v0.29.0 release predates upstream #55914 (EP never
-#       reaches the draft) and keeps the unpatched behavior.
+#       Monkey-patch `verify_with_parallel_config` to skip the expert-parallel
+#       check when `runner_type == "draft"` and the model is not MoE. The target
+#       model EP check and MoE draft models are unaffected.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/55914
 #       https://github.com/vllm-project/vllm/pull/56930
@@ -822,6 +820,16 @@
 #       runner and can rely on upstream's default enablement heuristics
 #       (model architecture, Triton, feature checks) without crashes or
 #       degraded functionality.
+#
+#   2. `vllm.config.parallel.ParallelConfig._validate_parallel_config`
+#    Why:
+#       vLLM 0.28.0 rejected PCP+DP before Ascend MRV2 could validate it.
+#    How:
+#       Removed with the v0.30.0 boundary: the release-only validator override
+#       is no longer applied.
+#    Related PR: https://github.com/vllm-project/vllm/pull/54523
+#    Future Plan:
+#       Re-add only if a supported pin rejects PCP+DP.
 #
 # * Worker Patch:
 # ========#
@@ -1554,30 +1562,21 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.parallel.ParallelConfig._validate_parallel_config`
 #    Why:
-#       vLLM v0.29.0 rejects PCP > 1 combined with DP > 1 in its shared
+#       The v0.29.0 release rejected PCP > 1 combined with DP > 1 in its shared
 #       validator, preventing Ascend's PCP+DP implementation from being reached.
 #       Upstream #54523 scopes this restriction to CUDA/ROCm instead; the pinned
 #       main already contains that fix.
 #    How:
-#       Apply only when vllm_version_is("0.29.0"). Preserve the release validator
-#       except for the PCP+DP rejection, without changing parameter values or
-#       bypassing other validation. Update the class method and Pydantic
-#       model-validator registration, then rebuild ParallelConfig,
-#       SpeculativeConfig, and VllmConfig in dependency order. SpeculativeConfig
-#       retains shared ParallelConfig schemas even through SkipValidation;
-#       rebuilding only the outer VllmConfig can restore the stale validator.
-#       Read parallel.current_platform dynamically to preserve the Ascend EPLB
-#       platform proxy installed by platform/patch_eplb.py.
+#       Removed with the v0.30.0 boundary: v0.30.0 equals the pinned main and
+#       already contains #54523, so no release-only validator override applies.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/54523/files
 #       Upstream commit: 7c2f1ff4958eaf0818405e9192c71608fe4a16b1.
 #       Release source: 98dff2a81d747d1dba01a47f939f48c3526d4206.
 #    Future Plan:
-#       Remove this patch and its platform import when v0.29.0 support is dropped
-#       and all supported pins contain #54523 or an equivalent backend-scoped
-#       check. If the supported release pin first receives a backport, remove
-#       it after verifying PCP+DP construction and execution, retained invalid-
-#       config rejection, and Ascend EPLB validation.
+#       Re-add only if a supported pin predates #54523 or an equivalent
+#       backend-scoped check, then verify PCP+DP construction and execution,
+#       retained invalid-config rejection, and Ascend EPLB validation.
 #
 #   2. `vllm.config.parallel.ParallelConfig.use_sequence_parallel_moe`
 #    Why:
