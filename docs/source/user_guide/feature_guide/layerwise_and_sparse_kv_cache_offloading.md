@@ -154,8 +154,7 @@ The expected interfaces are from
 [vLLM-Ascend PR #16640](https://github.com/vllm-project/vllm-ascend/pull/16640),
 revision `a9823977149172f1604d9f2a1937224d0b11646e`. This branch carries the
 Python integration; it does not bundle these native kernels, their bindings,
-or LIM C8. An operator-enabled native build is required to run the nano path
-and its operator tests.
+or LIM C8. An operator-enabled native build is required to run the nano path.
 
 Copy-SFA receives `dram_k_rope` and `dram_kv_cache` as CPU tensor views backed
 by registered MemFabric memory. Its native adapter must permit those CPU views;

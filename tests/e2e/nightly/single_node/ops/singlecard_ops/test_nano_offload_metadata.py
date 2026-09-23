@@ -220,7 +220,7 @@ def test_lim_consumes_shared_state_without_modifying_it(draft_index):
     )
     query = torch.empty((12, 32, 128), dtype=torch.bfloat16, device="npu")
     weights = torch.empty((12, 32), dtype=torch.bfloat16, device="npu")
-    with patch(MODULE + ".torch.ops._C_ascend.npu_fused_lightning_indexer_manage") as lim:
+    with patch(MODULE + ".torch.ops._C_ascend.npu_fused_lightning_indexer_manage", create=True) as lim:
         impl._nano_select(query, weights, indexer, SimpleNamespace(block_table=cm.block_table_tensor))
         assert lim.call_args.args[10].data_ptr() == metadata.nano_request_state.data_ptr()
         assert metadata.nano_request_state.cpu().tolist() == [-1, -3, -3]
