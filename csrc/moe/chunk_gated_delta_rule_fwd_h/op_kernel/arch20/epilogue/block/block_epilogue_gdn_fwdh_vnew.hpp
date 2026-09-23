@@ -209,19 +209,24 @@ public:
         AscendC::Sub<float>(uUbFloatTensor, uUbFloatTensor, wsUbTensor, mActualThisSubBlock * nvActual);
         AscendC::PipeBarrier<PIPE_V>();
         AscendC::Cast(vNewOutputUbTensor, uUbFloatTensor, AscendC::RoundMode::CAST_NONE, mActualThisSubBlock * nvActual);
-        AscendC::PipeBarrier<PIPE_ALL>();
+        // V write -> MTE3 read of vNewOutputUbTensor.
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID6);
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID6);
         AscendC::DataCopy(vnewOutputThisSubBlock, vNewOutputUbTensor, mActualThisSubBlock * nvActual);
-        AscendC::PipeBarrier<PIPE_ALL>();
+        // Drain the GM store before any later V op rewrites this parity's buffer.
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID6);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID6);
 
         AscendC::Mul(calcUbTensor[gbrcEffStart*nvActual], uUbFloatTensor, calcUbTensor[gbrcEffStart*nvActual], mActualThisSubBlock * nvActual);
-        AscendC::PipeBarrier<PIPE_ALL>();
+        AscendC::PipeBarrier<PIPE_V>();
         AscendC::Cast(vNewDecayUbTensor, calcUbTensor[gbrcEffStart*nvActual], AscendC::RoundMode::CAST_NONE, mActualThisSubBlock * nvActual);
-        AscendC::PipeBarrier<PIPE_ALL>();
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID6);
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID6);
         AscendC::DataCopy(vnewdecayOutputThisSubBlock, vNewDecayUbTensor, mActualThisSubBlock * nvActual);
 
-        if (isFirst) {
-            AscendC::PipeBarrier<PIPE_ALL>();
-        }
+        // Drain the vnewdecay GM store before the next call's V ops touch its buffer.
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID6);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID6);
 
         isFirst = false;
     }
