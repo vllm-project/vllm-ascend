@@ -53,6 +53,8 @@ public:
     static constexpr bool DT_W_FLAG = LIT::weightsTypeFlag;
     using Q_T = typename LIT::queryType;
     using K_T = typename LIT::keyType;
+    using SCORE_T = typename LIT::scoreType;
+    using SCORE_BITS_T = typename std::conditional<std::is_same<SCORE_T, float>::value, uint32_t, uint16_t>::type;
     static constexpr LI_LAYOUT LAYOUT_T = LIT::layout;
     using W_T = typename LightningIndexerTypeTraits<Q_T,
                                          typename std::conditional<DT_W_FLAG, float, void>::type>::weightsType;
@@ -68,7 +70,7 @@ public:
                                       const LITilingData *__restrict tilingData);
     __aicore__ inline void InitVec1GlobalTensor(GlobalTensor<MM1_OUT_T> mm1ResGm, GlobalTensor<float> vec1ResGm,
                                                 GlobalTensor<int64_t> vec1ParamGm, GlobalTensor<W_T> weightsGm,
-                                                GlobalTensor<int32_t> indiceOutGm, GlobalTensor<K_T> valueOutGm);
+                                                GlobalTensor<int32_t> indiceOutGm, GlobalTensor<SCORE_T> valueOutGm);
     __aicore__ inline void CleanInvalidOutput(int64_t invalidS1offset);
     __aicore__ inline void AllocEventID();
     __aicore__ inline void FreeEventID();
@@ -80,7 +82,7 @@ protected:
     GlobalTensor<int64_t> vec1ParamGm;
     GlobalTensor<W_T> weightsGm;
     GlobalTensor<int32_t> indiceOutGm;
-    GlobalTensor<K_T> valueOutGm;
+    GlobalTensor<SCORE_T> valueOutGm;
     // =================================常量区=================================
 
 private:
@@ -205,7 +207,7 @@ __aicore__ inline void
 LightningIndexerServiceVector<LIT>::InitVec1GlobalTensor(GlobalTensor<MM1_OUT_T> mm1ResGm,
                                     GlobalTensor<float> vec1ResGm,
                                     GlobalTensor<int64_t> vec1ParamGm, GlobalTensor<W_T> weightsGm,
-                                    GlobalTensor<int32_t> indiceOutGm, GlobalTensor<K_T> valueOutGm)
+                                    GlobalTensor<int32_t> indiceOutGm, GlobalTensor<SCORE_T> valueOutGm)
 {
     this->mm1ResGm = mm1ResGm;
     this->vec1ResGm = vec1ResGm;
@@ -244,18 +246,20 @@ __aicore__ inline void LightningIndexerServiceVector<LIT>::CleanInvalidOutput(in
     outQueue_.FreeTensor(valueULocal);
 
     if (constInfo_.returnValue) {
-        uint16_t negInf = 0;
-        if constexpr(std::is_same<K_T, float16_t>::value) {
+        SCORE_BITS_T negInf = 0;
+        if constexpr (std::is_same<SCORE_T, float>::value) {
+            negInf = 0xFF800000U;
+        } else if constexpr(std::is_same<K_T, float16_t>::value) {
             negInf = 0xFC00;
         } else {
             negInf = 0xFF80;
         }
-        LocalTensor<uint16_t> valueULocal = outQueue_.AllocTensor<uint16_t>();
+        LocalTensor<SCORE_BITS_T> valueULocal = outQueue_.AllocTensor<SCORE_BITS_T>();
         Duplicate(valueULocal, negInf, constInfo_.sparseCount);
-        outQueue_.EnQue<uint16_t>(valueULocal);
-        valueULocal = outQueue_.DeQue<uint16_t>();
-        GlobalTensor<uint16_t> valueOutGmTmp;
-        valueOutGmTmp.SetGlobalBuffer((__gm__ uint16_t *)valueOutGm.GetPhyAddr());
+        outQueue_.EnQue<SCORE_BITS_T>(valueULocal);
+        valueULocal = outQueue_.DeQue<SCORE_BITS_T>();
+        GlobalTensor<SCORE_BITS_T> valueOutGmTmp;
+        valueOutGmTmp.SetGlobalBuffer((__gm__ SCORE_BITS_T *)valueOutGm.GetPhyAddr());
         LIServiceVec::CopyOut(valueOutGmTmp[invalidS1offset], valueULocal, constInfo_.sparseCount);
         outQueue_.FreeTensor(valueULocal);
     }
@@ -429,10 +433,12 @@ __aicore__ inline void LightningIndexerServiceVector<LIT>::ProcessVec(const LICo
                     Extract(outValueUb, outIdxUb,
                      globalTopkUb_[innerS1Idx * virTopK * 2 + 2 * i * offset], (offset /32));
 
-                    LocalTensor<K_T> valueULocal1 = outValueUb.template ReinterpretCast<K_T>();
+                    LocalTensor<SCORE_T> valueULocal1 = outValueUb.template ReinterpretCast<SCORE_T>();
                     if (constInfo_.returnValue) {
                         PipeBarrier<PIPE_V>();
-                        Cast(valueULocal1, outValueUb, RoundMode::CAST_ROUND, copyLen);
+                        if constexpr (!std::is_same<SCORE_T, float>::value) {
+                            Cast(valueULocal1, outValueUb, RoundMode::CAST_ROUND, copyLen);
+                        }
                     }
 
                     LocalTensor<int32_t> idxULocal1 = outValueUb[offset].template ReinterpretCast<int32_t>();
@@ -689,15 +695,17 @@ __aicore__ inline void LightningIndexerServiceVector<LIT>::ProcessLD()
             Extract(outValueUb, outIdxUb, curValueIdxUb, (BASE_TOPK / 32));
             PipeBarrier<PIPE_V>();
             LocalTensor<int32_t> idxULocal1 = outIdxUb.template ReinterpretCast<int32_t>();
-            LocalTensor<K_T> valueULocal1 = outValueUb.template ReinterpretCast<K_T>();
-            Cast(valueULocal1, outValueUb, RoundMode::CAST_ROUND, constInfo_.sparseCount);
+            LocalTensor<SCORE_T> valueULocal1 = outValueUb.template ReinterpretCast<SCORE_T>();
+            if constexpr (!std::is_same<SCORE_T, float>::value) {
+                Cast(valueULocal1, outValueUb, RoundMode::CAST_ROUND, constInfo_.sparseCount);
+            }
             PipeBarrier<PIPE_V>();
             SetWaitFlag<HardEvent::V_MTE3>(HardEvent::V_MTE3);
             SetWaitFlag<HardEvent::S_MTE3>(HardEvent::S_MTE3);
             DataCopyPad(indiceOutGm[outOffset], idxULocal1,
                         {1, static_cast<uint16_t>(constInfo_.sparseCount * sizeof(int32_t)), 0, 0});
             DataCopyPad(valueOutGm[outOffset], valueULocal1,
-                        {1, static_cast<uint16_t>(constInfo_.sparseCount * sizeof(K_T)), 0, 0});
+                        {1, static_cast<uint16_t>(constInfo_.sparseCount * sizeof(SCORE_T)), 0, 0});
             SetWaitFlag<HardEvent::MTE3_V>(HardEvent::MTE3_V);
         }
     }
