@@ -227,7 +227,7 @@ def _triton_rope(
         k_row_start_ptr = k_ptr + row_idx * k_row_stride
 
         # ####################################################################
-        # get the cos(m胃_{i...d/2}) and sin(m胃_{i...d/2}) for token position
+        # get the cos(mθ_{i...d/2}) and sin(mθ_{i...d/2}) for token position
         # m of this program instance
         # ####################################################################
         cos_offsets = tl.arange(0, pad_rope_dim // 2)
@@ -365,7 +365,7 @@ def _triton_rope_siso(
         out_start_ptr = output_ptr + row_idx * qk_row_stride
 
         # ####################################################################
-        # get the cos(m胃_{i...d/2}) and sin(m胃_{i...d/2}) for token position
+        # get the cos(mθ_{i...d/2}) and sin(mθ_{i...d/2}) for token position
         # m of this program instance
         # ####################################################################
         if USE_COS_SIN:
