@@ -4487,6 +4487,23 @@ class TestMooncakeConnectorWorkerKernelBlockIds(unittest.TestCase):
         self.assertEqual(local, [0, 1, 2, 3])
         self.assertEqual(remote, [80, 81, 82, 83])
 
+    def test_group_size_that_does_not_tile_kernel_falls_back_to_scalar(self):
+        # Producer resolved a smaller page than the local kernel granularity for
+        # this group (e.g. a 128-token sliding-window group against a 1024-token
+        # local kernel); adopting the group size would fail the kernel expansion,
+        # so the historical scalar behavior is kept.
+        worker = self._make_worker(1024, [[1]])
+        spec = self._group_spec("SlidingWindowSpec", 0, 0)
+        meta = self._make_meta(
+            local_block_ids=([0, 1],),
+            remote_block_ids=([1, 2],),
+            remote_block_size=1024,
+            remote_block_sizes=(128,),
+        )
+        local, remote = worker._get_kernel_block_ids([0], meta, 0, spec)
+        self.assertEqual(local, [0, 1])
+        self.assertEqual(remote, [1, 2])
+
     def test_missing_group_entry_falls_back_to_scalar(self):
         # A producer may report sizes for a subset of groups; ids beyond the
         # list keep the historical scalar behavior.
