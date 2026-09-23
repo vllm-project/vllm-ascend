@@ -617,17 +617,11 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
     def build_fia_params(
         self,
         num_reqs_padded: int,
+        draft_attn_metadata: Any,
         is_draft_model_prefill: bool,
     ) -> list[dict[str, Any]]:
-        layer_name, metadata = next(
-            (layer_name, metadata)
-            for layer_name, metadata in self.model_state.attn_metadata.items()
-            if layer_name in self.draft_attn_layer_names
-        )
+        layer_name, metadata = next(iter(draft_attn_metadata.items()))
         block_table = metadata.block_tables
-        if block_table is not None:
-            block_table = block_table.as_strided((num_reqs_padded, block_table.shape[1]), block_table.stride())
-
         if is_draft_model_prefill:
             return [
                 {
