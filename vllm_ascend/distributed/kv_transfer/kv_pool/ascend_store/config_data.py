@@ -887,6 +887,7 @@ class ReqMeta:
     original_block_size: list[int] | int | None = None
 
     event_id: int | None = None
+    load_generation: int = 0
 
     def __init__(
         self,
@@ -906,6 +907,7 @@ class ReqMeta:
         original_block_size: list[int] | int | None = None,
         block_ids: list[int] | list[list[int]] | None = None,
         event_id: int | None = None,
+        load_generation: int = 0,
         save_end_token: int | None = None,
         target_token_len: int | None = None,
         save_start_token: int = 0,
@@ -947,6 +949,7 @@ class ReqMeta:
         self.token_ids = token_ids
         self.original_block_size = original_block_size
         self.event_id = event_id
+        self.load_generation = load_generation
         self.last_block_gva = last_block_gva
         self.partial_block_index = partial_block_index
         self.starts = starts
