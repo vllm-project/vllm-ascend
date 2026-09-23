@@ -172,7 +172,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
                 step=self.num_query_per_req,
                 causal=self._group_causal,
             )
-        if self.attn_architecture not in ("GQA", "MLA") or attn_metadata is None:
+        if self.attn_architecture not in ("GQA", "MLA"):
             return [attn_metadata]
         return [self._update_draft_attn_metadata(attn_metadata, num_reqs_padded)]
 
@@ -180,9 +180,10 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         if self.attn_architecture not in ("GQA", "MLA"):
             return super()._build_draft_attn_metadata(num_reqs_padded=num_reqs_padded, **kwargs)
 
+        # This kwargs["num_tokens_padded"] is only useful in eager/PIECEWISE.
+        # TODO: Replace this temporary padding workaround with upstream #56181's
+        # actual-token metadata and MLA input slicing for non-FULL execution.
         num_tokens_padded = kwargs["num_tokens_padded"]
-        # TODO: Replace this padding workaround with upstream #56181's
-        # actual-token metadata and MLA slicing for non-FULL execution.
         assert num_tokens_padded % self.num_query_per_req == 0, "Draft tokens must contain whole query groups"
         num_reqs_padded = num_tokens_padded // self.num_query_per_req
 
@@ -201,8 +202,6 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             ),
         ):
             attn_metadata = super()._build_draft_attn_metadata(num_reqs_padded=num_reqs_padded, **kwargs)
-        if attn_metadata is None:
-            return attn_metadata
         return self._update_draft_attn_metadata(attn_metadata, num_reqs_padded)
 
     def _update_draft_attn_metadata(self, attn_metadata, num_reqs_padded):
