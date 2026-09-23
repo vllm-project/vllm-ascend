@@ -7,6 +7,7 @@ from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 CONV_STATE_COPY_BLOCK_SIZE = 256
+CONV_STATE_COPY_MAX_PROGRAMS = 65535
 
 
 @triton.jit
@@ -19,6 +20,7 @@ def _copy_conv_state(
     cache_stride,
     index_stride,
     num_slots,
+    REQUESTS: tl.constexpr,
     STATE_LEN: tl.constexpr,
     DIM: tl.constexpr,
     STATE_STRIDE: tl.constexpr,
@@ -26,22 +28,31 @@ def _copy_conv_state(
     WRITE_BACK: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    request = tl.program_id(0)
-    offsets = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
-    slot = tl.load(cache_indices + request * index_stride).to(tl.int64)
-    active = (slot >= 0) & (slot < num_slots) & (tl.load(starts + request + 1) > tl.load(starts + request))
-    in_range = offsets < STATE_LEN * DIM
-    safe_slot = tl.where(active, slot, 0)
-    cache_offsets = safe_slot * cache_stride + offsets // DIM * STATE_STRIDE + offsets % DIM * DIM_STRIDE
-    packed_offsets = request * STATE_LEN * DIM + offsets
-    if WRITE_BACK:
-        values = tl.load(packed + packed_offsets, mask=in_range, other=0)
-        tl.store(cache + cache_offsets, values, mask=active & in_range)
-    else:
-        values = tl.load(cache + cache_offsets, mask=active & in_range, other=0)
-        tl.store(packed + packed_offsets, values, mask=in_range)
-        if tl.program_id(1) == 0:
-            tl.store(packed_indices + request, tl.where(active, request, -1))
+    channel_tiles = tl.cdiv(DIM, BLOCK)
+    request_tiles = STATE_LEN * channel_tiles
+    # Bound the launch grid, including wide TP shards and large batches.
+    for tile in range(tl.program_id(0), REQUESTS * request_tiles, tl.num_programs(0)):
+        request = tile // request_tiles
+        row_tile = tile % request_tiles
+        state_row = row_tile // channel_tiles
+        channels = row_tile % channel_tiles * BLOCK + tl.arange(0, BLOCK)
+        slot = tl.load(cache_indices + request * index_stride).to(tl.int64)
+        active = (slot >= 0) & (slot < num_slots) & (tl.load(starts + request + 1) > tl.load(starts + request))
+        in_range = channels < DIM
+        safe_slot = tl.where(active, slot, 0)
+        # Keep the potentially large page address scalar. Within-page offsets
+        # fit int32; broadcasting the page address makes every lane use int64.
+        cache_row = cache + safe_slot * cache_stride + state_row * STATE_STRIDE
+        cache_offsets = channels * DIM_STRIDE
+        packed_offsets = request * STATE_LEN * DIM + state_row * DIM + channels
+        if WRITE_BACK:
+            values = tl.load(packed + packed_offsets, mask=in_range, other=0)
+            tl.store(cache_row + cache_offsets, values, mask=active & in_range)
+        else:
+            values = tl.load(cache_row + cache_offsets, mask=active & in_range, other=0)
+            tl.store(packed + packed_offsets, values, mask=in_range)
+            if row_tile == 0:
+                tl.store(packed_indices + request, tl.where(active, request, -1))
 
 
 def causal_conv1d(
@@ -70,7 +81,9 @@ def causal_conv1d(
         state_len, dim = conv_state.shape[1:]
         kernel_state = torch.empty((requests, state_len, dim), dtype=conv_state.dtype, device=conv_state.device)
         kernel_indices = torch.empty(requests, dtype=torch.int32, device=cache_indices.device)
-        copy_grid = (requests, triton.cdiv(state_len * dim, CONV_STATE_COPY_BLOCK_SIZE))
+        copy_grid = (
+            min(requests * state_len * triton.cdiv(dim, CONV_STATE_COPY_BLOCK_SIZE), CONV_STATE_COPY_MAX_PROGRAMS),
+        )
         copy_args = (
             conv_state,
             kernel_state,
@@ -80,6 +93,7 @@ def causal_conv1d(
             conv_state.stride(0),
             cache_indices.stride(0),
             conv_state.shape[0],
+            requests,
             state_len,
             dim,
             conv_state.stride(1),
