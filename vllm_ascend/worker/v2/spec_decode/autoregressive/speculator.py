@@ -511,7 +511,8 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             # now so the upcoming FIA call observes this step's lengths. A
             # post-forward update is too late and is discarded when the next
             # step rebuilds its metadata.
-            self._update_decode_attn_metadata(attn_metadata, step, num_reqs)
+            if step > 0:
+                self._update_decode_attn_metadata(attn_metadata, step, num_reqs)
         return attn_metadata
 
     def build_draft_attn_metadatas(
