@@ -186,6 +186,8 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             ascend_indexer = IndexerWrapper(mla_modules.indexer, self.qk_rope_head_dim)
         else:
             ascend_indexer = None
+        q_projection = mla_modules.q_b_proj if q_lora_rank is not None else mla_modules.q_proj
+        self.dcp_q_replicate = getattr(q_projection, "qrep_active", False) is True
         self.mla_attn = MLAAttention(
             num_heads=num_heads,
             scale=scale,
@@ -198,6 +200,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
+            dcp_q_replicate=self.dcp_q_replicate,
             use_sparse=mla_modules.is_sparse,
             indexer=ascend_indexer,
             skip_topk=skip_topk,
@@ -227,7 +230,9 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         def wrapped_process_weights(act_dtype: torch.dtype):
             from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
 
-            if not isinstance(self.mla_attn.impl, AscendSFAImpl):
+            if self.dcp_q_replicate:
+                self.mla_attn.impl.process_weights_after_loading(act_dtype)
+            elif not isinstance(self.mla_attn.impl, AscendSFAImpl):
                 # Both supported vLLM versions dispatch to the impl here.
                 original_process_weights(act_dtype)
             else:

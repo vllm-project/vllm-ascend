@@ -364,6 +364,11 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         return prefill_metadata.chunked_context.padded_chunk_seq_lens_npu[index]
 
     def reorg_decode_q(self, decode_q_nope, decode_q_pe):
+        if getattr(self, "dcp_q_replicate", False):
+            expected_heads = self.num_heads * self.dcp_size
+            if decode_q_nope.shape[1] != expected_heads or decode_q_pe.shape[1] != expected_heads:
+                raise ValueError("DCP replicated Q must contain the complete group head set")
+            return decode_q_nope, decode_q_pe
         return self._dcp_all_gather_fragments(
             decode_q_nope,
             decode_q_pe,

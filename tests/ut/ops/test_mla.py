@@ -371,6 +371,37 @@ class TestAscendMultiHeadLatentAttention(TestBase):
         self.mock_cache_config = MagicMock(spec=CacheConfig)
         self.mock_quant_config = MagicMock()
 
+    @patch("vllm_ascend.ops.mla.get_current_vllm_config")
+    @patch("vllm_ascend.ops.mla.get_tensor_model_parallel_world_size", return_value=4)
+    def test_qrep_owns_one_weight_callback(self, mock_tp, mock_config):
+        config = MagicMock(spec=VllmConfig)
+        config.model_config.hf_text_config = SimpleNamespace(num_hidden_layers=1)
+        config.compilation_config = CompilationConfig()
+        mock_config.return_value = config
+        self.mock_mla_modules.q_b_proj.qrep_active = True
+        self.mock_mla_modules.indexer = None
+        backend = MagicMock()
+        original = backend.process_weights_after_loading
+        with patch("vllm_ascend.ops.mla.MLAAttention", return_value=backend) as constructor:
+            attn = AscendMultiHeadLatentAttention(
+                hidden_size=self.hidden_size,
+                num_heads=self.num_heads,
+                scale=self.scale,
+                qk_nope_head_dim=self.qk_nope_head_dim,
+                qk_rope_head_dim=self.qk_rope_head_dim,
+                v_head_dim=self.v_head_dim,
+                q_lora_rank=self.q_lora_rank,
+                kv_lora_rank=self.kv_lora_rank,
+                mla_modules=self.mock_mla_modules,
+                prefix=self.prefix,
+            )
+        assert attn.dcp_q_replicate
+        assert constructor.call_args.kwargs["dcp_q_replicate"] is True
+        for _ in range(2):
+            attn.mla_attn.process_weights_after_loading(torch.bfloat16)
+        original.assert_not_called()
+        assert backend.impl.process_weights_after_loading.call_count == 2
+
     @patch("vllm_ascend.ops.mla.IndexerWrapper")
     @patch("vllm_ascend.ops.mla.get_current_vllm_config")
     @patch("vllm_ascend.ops.mla.get_tensor_model_parallel_world_size")

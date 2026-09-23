@@ -1597,6 +1597,7 @@ class TestAscendMLAImpl(TestBase):
             "use_mla_rope": True,
         }
 
+        kwargs["q_b_proj"].qrep_active = False
         self.impl = AscendMLAImpl(
             num_heads=num_heads,
             head_size=head_size,
