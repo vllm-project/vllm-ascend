@@ -50,4 +50,3 @@ def test_gqa_draft_block_table_matches_padded_batch():
     steps = namespace[method.name](speculator, {"draft_layer": target_metadata}, num_reqs_padded)
 
     assert steps[0]["draft_layer"].block_tables.shape == (num_reqs_padded, max_blocks)
-
