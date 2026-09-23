@@ -21,6 +21,7 @@ import torch
 import torch.distributed
 import torch.distributed as dist
 import torch_npu
+from vllm.logger import logger
 
 from vllm_ascend.quantization.quant_type import QuantType
 
@@ -118,6 +119,44 @@ def load_cann_mega_moe_ops():
     get_symm_buffer_for_mega_moe = ops_module.get_symm_buffer_for_mega_moe
     mega_moe = ops_module.mega_moe
     return get_symm_buffer_for_mega_moe, mega_moe
+
+
+_ZERCMOE_AVAILABLE: bool | None = None
+
+
+def zercmoe_lib_available() -> bool:
+    """Whether the ZercMoE wheel (dispatch_gmm_combine_zero_redundant host
+    bindings) is importable.
+
+    Importing zercmoe loads its bundled .so libraries (libshmem etc.), so the
+    check is lazy and cached: it must stay out of unrelated configs and must
+    not run repeatedly.
+    """
+    global _ZERCMOE_AVAILABLE
+    if _ZERCMOE_AVAILABLE is None:
+        try:
+            import zercmoe  # noqa: F401
+        except Exception as e:
+            logger.warning_once("zercmoe wheel is not available, ZERC_MOE branch disabled: %s", e)
+            _ZERCMOE_AVAILABLE = False
+        else:
+            _ZERCMOE_AVAILABLE = True
+    return _ZERCMOE_AVAILABLE
+
+
+def load_zercmoe_ops():
+    """Import the zercmoe wheel and return its module.
+
+    The module exposes:
+      - ``mega_moe(x, topk_ids, topk_weights, l1_weights, l2_weights,
+        sym_buffer, **kw)``: fused Dispatch-GMM1-SwiGLU-GMM2-Combine pipeline,
+        returns ``(output, expert_token_nums)``;
+      - ``pack_weights(w1_nd, w2_nd)``: packs ND per-expert weights
+        ([E, k, 2*inter] / [E, inter, k] bf16) into the operator's zN flat
+        layout;
+      - ``get_symm_buffer(...)``: SHMEM symmetric-heap comm-domain handle.
+    """
+    return import_module("zercmoe")
 
 
 def _get_cann_mega_moe_quant_settings(quant_type: QuantType) -> tuple[int, int | None, int | None]:

@@ -14,7 +14,7 @@ def reset_mc2_tokens_capacity(monkeypatch):
     monkeypatch.setattr(
         afc,
         "get_ascend_config",
-        lambda: SimpleNamespace(enable_prefill_mc2=False, enable_fused_mc2=0),
+        lambda: SimpleNamespace(enable_prefill_mc2=False, enable_fused_mc2=0, enable_zerc_moe=0),
     )
 
 
@@ -91,10 +91,13 @@ def _patch_select_moe_comm_method_deps(
     monkeypatch.setattr(afc, "get_mc2_tokens_capacity", lambda: capacity)
     monkeypatch.setattr(afc, "get_ascend_device_type", lambda: device_type)
     monkeypatch.setattr(afc, "get_ep_group", lambda: SimpleNamespace(world_size=ep_world_size))
+    monkeypatch.setattr(afc, "use_cann_zercmoe", lambda _: False)
     monkeypatch.setattr(
         afc,
         "get_ascend_config",
-        lambda: SimpleNamespace(enable_fused_mc2=enable_fused_mc2, enable_prefill_mc2=enable_prefill_mc2),
+        lambda: SimpleNamespace(
+            enable_fused_mc2=enable_fused_mc2, enable_prefill_mc2=enable_prefill_mc2, enable_zerc_moe=0
+        ),
     )
 
 
@@ -122,7 +125,7 @@ def test_set_mc2_tokens_capacity_prefill_mc2_uses_max_num_batched_tokens(monkeyp
     monkeypatch.setattr(
         afc,
         "get_ascend_config",
-        lambda: SimpleNamespace(enable_prefill_mc2=True, enable_fused_mc2=0),
+        lambda: SimpleNamespace(enable_prefill_mc2=True, enable_fused_mc2=0, enable_zerc_moe=0),
     )
     vllm_config = _make_vllm_config(tensor_parallel_size=8, max_num_batched_tokens=513)
 
@@ -139,6 +142,7 @@ def test_set_mc2_tokens_capacity_decode_only_uses_cudagraph_capture_size(monkeyp
         lambda: SimpleNamespace(
             enable_prefill_mc2=False,
             enable_fused_mc2=0,
+            enable_zerc_moe=0,
             scheduler_config=SimpleNamespace(recompute_scheduler_enable=True),
         ),
     )
@@ -164,6 +168,7 @@ def test_set_mc2_tokens_capacity_decode_only_without_cudagraph_uses_decode_shape
         lambda: SimpleNamespace(
             enable_prefill_mc2=False,
             enable_fused_mc2=0,
+            enable_zerc_moe=0,
             scheduler_config=SimpleNamespace(recompute_scheduler_enable=True),
         ),
     )
@@ -187,6 +192,7 @@ def test_set_mc2_tokens_capacity_disable_recompute_decode_uses_max_num_batched_t
         lambda: SimpleNamespace(
             enable_prefill_mc2=False,
             enable_fused_mc2=1,
+            enable_zerc_moe=0,
             scheduler_config=SimpleNamespace(recompute_scheduler_enable=False),
         ),
     )
@@ -480,3 +486,71 @@ def test_select_a3_draft_quant_mismatch(
     vllm_config = _make_vllm_config()
 
     assert afc.select_moe_comm_method(num_tokens, vllm_config, is_draft_model=is_draft_model) == expected
+
+
+@pytest.mark.parametrize(
+    ("num_tokens", "is_decode", "is_draft_model", "expected"),
+    [
+        (4096, False, False, MoECommType.ZERC_MOE),
+        (65, False, False, MoECommType.ZERC_MOE),
+        (64, False, False, MoECommType.ALLGATHER),
+        (1, False, False, MoECommType.ALLGATHER),
+        (4096, True, False, MoECommType.ALLGATHER),
+        (4096, False, True, MoECommType.ALLGATHER),
+        (4097, False, False, MoECommType.ALLGATHER),
+    ],
+)
+def test_select_a2_zercmoe_priority(monkeypatch, num_tokens, is_decode, is_draft_model, expected):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A2,
+        capacity=4096,
+        ep_world_size=4,
+        enable_fused_mc2=1,
+    )
+    monkeypatch.setattr(afc, "use_cann_zercmoe", lambda _: True)
+
+    vllm_config = _make_vllm_config(num_experts=256)
+
+    assert (
+        afc.select_moe_comm_method(num_tokens, vllm_config, is_draft_model=is_draft_model, is_decode=is_decode)
+        == expected
+    )
+
+
+def test_select_a2_zercmoe_gate_off_keeps_legacy(monkeypatch):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A2,
+        capacity=4096,
+        ep_world_size=4,
+        enable_fused_mc2=1,
+    )
+    monkeypatch.setattr(afc, "use_cann_zercmoe", lambda _: False)
+
+    vllm_config = _make_vllm_config(num_experts=256)
+
+    # With the gate off, the legacy A2 rule applies: experts_per_device
+    # (256 // 4 = 64) > 24 -> ALLGATHER.
+    assert afc.select_moe_comm_method(4096, vllm_config) == MoECommType.ALLGATHER
+
+
+def test_set_mc2_tokens_capacity_zercmoe_uses_max_num_batched_tokens(monkeypatch):
+    monkeypatch.setattr(afc, "use_cann_zercmoe", lambda _: True)
+    monkeypatch.setattr(afc, "use_cann_megamoe", lambda _: False)
+    monkeypatch.setattr(
+        afc,
+        "get_ascend_config",
+        lambda: SimpleNamespace(
+            enable_prefill_mc2=False,
+            enable_fused_mc2=1,
+            enable_zerc_moe=1,
+            scheduler_config=SimpleNamespace(recompute_scheduler_enable=True),
+        ),
+    )
+    vllm_config = _make_vllm_config(tensor_parallel_size=4, max_num_batched_tokens=16384)
+
+    afc.set_mc2_tokens_capacity(vllm_config, max_num_reqs=16, uniform_decode_query_len=1)
+
+    # max_num_batched_tokens/tp = 4096, capped by the mega-moe per-rank limit.
+    assert afc.get_mc2_tokens_capacity() == 16384

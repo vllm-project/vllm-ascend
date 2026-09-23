@@ -36,12 +36,13 @@ from vllm.model_executor.layers.fused_moe.layer import (
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import UnquantizedFusedMoEMethod
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType, use_cann_megamoe
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType, use_cann_megamoe, use_cann_zercmoe
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 from vllm_ascend.lora.fused_moe import sync_lora_context
 from vllm_ascend.ops.activation import AscendSituAndMul, SituActivationConfig
+from vllm_ascend.ops.fused_moe import comm_utils
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult, setup_moe_comm_method
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
@@ -145,7 +146,19 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # npu_format_cast. At that point, the operator should be able to handle weights
         # in their native format without explicit casting here.
         enable_fused_mc2 = get_ascend_config().enable_fused_mc2
-        if enable_fused_mc2:
+        use_zercmoe = (
+            enable_fused_mc2 and comm_utils.zercmoe_lib_available() and use_cann_zercmoe(get_current_vllm_config())
+        )
+        if use_zercmoe:
+            # ZercMoE consumes per-expert weights packed in its zN flat layout
+            # (zercmoe.pack_weights). Keep the ND [E, k, 2*inter] / [E, inter, k]
+            # tensors (transposed above) for the ALLGATHER decode path, and add
+            # the packed 1D copies for the ZERC_MOE prefill path. No FRACTAL_NZ
+            # recast here: zN packing must run on plain ND storage.
+            import zercmoe
+
+            layer.w13_weight_zr, layer.w2_weight_zr = zercmoe.pack_weights(layer.w13_weight.data, layer.w2_weight.data)
+        elif enable_fused_mc2:
             use_megamoe = use_cann_megamoe(get_current_vllm_config())
             if not use_megamoe:
                 layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
@@ -256,7 +269,17 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         w13_weight_list = getattr(layer, "w13_weight_list", None)
         w2_weight_list = getattr(layer, "w2_weight_list", None)
         has_split_weight_lists = isinstance(w13_weight_list, list) and isinstance(w2_weight_list, list)
-        if _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2:
+        if _EXTRA_CTX.moe_comm_type == MoECommType.ZERC_MOE:
+            # ZERC_MOE consumes the pre-packed zN 1D weight copies (see
+            # process_weights_after_loading); scales/biases stay None (bf16
+            # A16W16 only).
+            w1 = layer.w13_weight_zr
+            w2 = layer.w2_weight_zr
+            w1_scale = None
+            w2_scale = None
+            w1_scale_bias = None
+            w2_scale_bias = None
+        elif _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2:
             if _EXTRA_CTX.use_megamoe:
                 w1 = w13_weight_list if isinstance(w13_weight_list, list) else [layer.w13_weight]
                 w2 = w2_weight_list if isinstance(w2_weight_list, list) else [layer.w2_weight]
@@ -625,6 +648,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 MoECommType.ALLTOALL,
                 MoECommType.MC2,
                 MoECommType.FUSED_MC2,
+                MoECommType.ZERC_MOE,
             }
             or (moe_comm_type == MoECommType.ALLGATHER and _EXTRA_CTX.flash_comm_v1_enabled)
             or (self._allgather_requires_early_routed_reduce)
@@ -707,7 +731,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         # `maybe_all_reduce_tensor_model_parallel`.
         moe_comm_type = _EXTRA_CTX.moe_comm_type
         if (
-            moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2}
+            moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2, MoECommType.ZERC_MOE}
             and not shared_expert_dp_enabled()
         ):
             shared_out = tensor_model_parallel_all_reduce(shared_out)

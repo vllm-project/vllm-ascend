@@ -488,6 +488,26 @@ class NPUPlatform(Platform):
 
         compilation_config.cudagraph_num_of_warmups = 1
 
+        # ZercMoE runs only on eager (non-graph-captured) batches: the fused
+        # operator lazy-inits its SHMEM transport and performs host-side
+        # checks, which are illegal inside graph capture. FULL captures
+        # prefill too, so demote to FULL_DECODE_ONLY to keep decode graphs
+        # while prefill (ZERC_MOE) runs eager. PIECEWISE keeps decode inside
+        # compiled pieces as well and therefore never selects ZERC_MOE.
+        from vllm_ascend.ascend_forward_context import is_zercmoe_active_by_config
+
+        if (
+            compilation_config.cudagraph_mode == CUDAGraphMode.FULL
+            and not enforce_eager
+            and is_zercmoe_active_by_config(vllm_config)
+        ):
+            logger.warning_once(
+                "Demoting cudagraph_mode from FULL to FULL_DECODE_ONLY because the "
+                "ZERC_MOE branch is active (the fused ZercMoE operator must run "
+                "outside graph capture)."
+            )
+            compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+
         if compilation_config.mode not in [CompilationMode.NONE, CompilationMode.VLLM_COMPILE]:
             logger.warning(
                 "NPU does not support compilation mode. mode=%s, action: setting CUDAGraphMode to NONE.",
@@ -1014,6 +1034,7 @@ class NPUPlatform(Platform):
         moe_comm_type = select_moe_comm_method(
             max_tokens_across_dp,
             vllm_config,
+            is_decode=cudagraph_runtime_mode != CUDAGraphMode.NONE,
         )
         moe_comm_method = get_moe_comm_method(moe_comm_type)
 

@@ -1,4 +1,3 @@
-import contextlib
 import os
 import typing
 from zlib import adler32
@@ -6,10 +5,6 @@ from zlib import adler32
 import numpy as np
 import torch
 import torch_npu
-
-with contextlib.suppress(ImportError):
-    # we should remove this after memfabric.offload is merged to master and available in ci machine.
-    from memfabric_hybrid import offload  # type: ignore
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
@@ -28,6 +23,21 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.utils import CpuGpuBuffer
 
 from vllm_ascend.ascend_config import SparseKVOffloadConfig, get_ascend_config
+
+
+def _get_memfabric_offload():
+    """Load memfabric_hybrid lazily.
+
+    Importing memfabric_hybrid loads libmf_hybm_core.so, whose hybm symbols
+    interpose the PLT calls of other SHMEM-based libraries in the same process
+    (e.g. the zercmoe wheel's bundled libshmem, breaking its bootstrap with
+    ACLSHMEM_INNER_ERROR -4). Sparse KV offload is the only consumer, so keep
+    the library out of the process unless offload is actually initialized.
+    """
+    from memfabric_hybrid import offload  # type: ignore
+
+    return offload
+
 
 # Main BF16 cache:
 # [k_cache, v_cache, k_cache_cpu, v_cache_cpu, topk_buffer_k, topk_buffer_v].
@@ -138,7 +148,7 @@ def empty_aligned_int8_cpu_tensors(
     """
     chunk_nums = [cdiv(size, alignment) for size in sizes]
     total_chunk_num = 1 + sum(chunk_nums)
-    raw_tensor = offload.empty([total_chunk_num * alignment], dtype=torch.int8, pin_memory=True)
+    raw_tensor = _get_memfabric_offload().empty([total_chunk_num * alignment], dtype=torch.int8, pin_memory=True)
     base_addr = raw_tensor.data_ptr()
     if base_addr % alignment:
         base_addr = (base_addr // alignment + 1) * alignment
@@ -360,6 +370,7 @@ class SparseKVOffloadManager:
             "GB dram per dp group, it might be time consuming, please wait.",
             sparse_kv_offload_config.dram_size_per_dp_GB,
         )
+        offload = _get_memfabric_offload()
         config = offload.OffloadConfig()
         config.device_id = torch_npu.npu.current_device()
         config.reserve_size = sparse_kv_offload_config.dram_size_per_dp_GB * (1 << 30)
@@ -845,7 +856,7 @@ class SparseKVOffloadManager:
         self.d2h_lengths_npu[token_count : 2 * token_count].masked_fill_(~valid, 0)
         self.d2h_size_npu.fill_(2 * token_count)
 
-        result = offload.sparse_copy(
+        result = _get_memfabric_offload().sparse_copy(
             self.d2h_src_ptrs_npu,
             self.d2h_dst_ptrs_npu,
             self.d2h_lengths_npu,
@@ -967,7 +978,7 @@ class SparseKVOffloadManager:
             # Make sure that tp0 d2h is finished before other tp's h2d.
             # NOTE we can't use barrier since it can't be captured in graph.
             self.tp_group.broadcast(torch.empty([], dtype=torch.int8, device="npu"), src=0)
-        offload.sparse_copy(
+        _get_memfabric_offload().sparse_copy(
             self.gvas_buffer_npu,
             self.addr_buffer_npu,
             self.size_buffer_npu,

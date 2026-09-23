@@ -94,6 +94,15 @@ env_variables: dict[str, Callable[[], Any]] = {
     # `dispatch_ffn_combine` can be used only for moe layer with W8A8, EP<=32, non-mtp, non-dynamic-eplb.
     # `mega_moe` can be used only for moe layer with W8A8/W4A8/bf16(none quant), EP<=64, non-dynamic-eplb.
     "VLLM_ASCEND_ENABLE_FUSED_MC2": lambda: int(os.getenv("VLLM_ASCEND_ENABLE_FUSED_MC2", "0")),
+    # Whether to enable the ZERC_MOE MoE comm branch (ZercMoE wheel,
+    # dispatch_gmm_combine_zero_redundant fused operator).
+    # 0, or not set: ZERC_MOE is never selected, MegaMoe/FUSED_MC2 behavior is unchanged.
+    # 1: on A2 bf16 MoE models with EP, prefill batches take the ZERC_MOE branch
+    #    (single fused Dispatch-GMM1-SwiGLU-GMM2-Combine operator over SHMEM).
+    # Effective only when VLLM_ASCEND_ENABLE_FUSED_MC2=1 and the `zercmoe` wheel
+    # is importable (pip install zercmoe-*.whl). 0 can always be used as a
+    # per-run fallback switch back to the legacy MegaMoe path.
+    "VLLM_ASCEND_ENABLE_ZERC_MOE": lambda: int(os.getenv("VLLM_ASCEND_ENABLE_ZERC_MOE", "0")),
     # DEPRECATED: VLLM_ASCEND_BALANCE_SCHEDULING env var will be removed in a future release.
     # Use --additional-config '{"enable_balance_scheduling": true}' instead.
     "VLLM_ASCEND_BALANCE_SCHEDULING": lambda: bool(int(os.getenv("VLLM_ASCEND_BALANCE_SCHEDULING", "0"))),
