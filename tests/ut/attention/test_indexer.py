@@ -14,9 +14,53 @@ from vllm_ascend.attention.indexer import (
     AscendSFAIndexerBackend,
     AscendSFAIndexerMetadata,
     AscendSFAIndexerMetadataBuilder,
+    IndexerCacheInputs,
 )
 
 _KERNEL_BLOCK_SIZE = 128
+
+
+@pytest.mark.parametrize("compute_topk", [False, True])
+def test_indexer_prepared_cache_keeps_own_metadata_and_weights(compute_topk):
+    indexer = AscendSFAIndexerBackend.__new__(AscendSFAIndexerBackend)
+    torch.nn.Module.__init__(indexer)
+    indexer.head_dim = 4
+    indexer.n_head = 2
+    indexer.qk_rope_head_dim = 2
+    indexer.enable_sparse_li_c8 = False
+    indexer.use_torch_npu_lightning_indexer = True
+    indexer.wk_weights_proj = MagicMock()
+    indexer.wq_b = MagicMock(return_value=(torch.ones(2, 8), None))
+    indexer.forward_k = MagicMock()
+    indexer._gather_cache_inputs = MagicMock()
+    indexer.write_cache = MagicMock()
+    indexer.k_cache = SimpleNamespace(kv_cache=(torch.empty(4, 4),))
+    hidden = torch.ones(2, 8)
+    inputs = IndexerCacheInputs(torch.randn(4, 4), None, torch.randn(2, 2))
+    metadata = SimpleNamespace(
+        cos=torch.ones(2, 1, 1, 2),
+        sin=torch.zeros(2, 1, 1, 2),
+        slot_mapping=torch.tensor([7, 3, 9, -1]),
+        actual_seq_lengths_query=torch.tensor([2]),
+        actual_seq_lengths_key=torch.tensor([10]),
+    )
+    with (
+        patch("vllm_ascend.attention.indexer.HAS_TRITON", False),
+        patch("torch_npu.npu_rotary_mul", side_effect=lambda x, cos, sin: x, create=True),
+        patch("vllm_ascend.attention.indexer.DeviceOperator.indexer_select_post_process") as select,
+    ):
+        result = indexer(hidden, hidden, hidden, metadata, compute_topk=compute_topk, cache_inputs=inputs)
+    indexer.forward_k.assert_not_called()
+    indexer._gather_cache_inputs.assert_not_called()
+    indexer.wk_weights_proj.assert_not_called()
+    indexer.write_cache.assert_called_once_with(inputs.key, None, metadata.slot_mapping, indexer_attn_metadata=metadata)
+    if compute_topk:
+        select.assert_called_once()
+        assert select.call_args.args[3] is inputs.weights
+        assert select.call_args.args[7] is metadata
+    else:
+        select.assert_not_called()
+        assert result is None
 
 
 def _make_builder(

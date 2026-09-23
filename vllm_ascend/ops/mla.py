@@ -32,7 +32,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 
-from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
+from vllm_ascend.attention.indexer import AscendSFAIndexerBackend, IndexerCacheInputs
 from vllm_ascend.attention.utils import mark_fused_preprocess_weights
 
 
@@ -97,6 +97,16 @@ class IndexerWrapper(nn.Module):
     def process_weights_after_loading(self) -> None:
         self.impl.process_weights_after_loading()
 
+    def prepare_cache_inputs(
+        self,
+        hidden_states: torch.Tensor,
+        indexer_metadata: AttentionMetadata,
+    ) -> IndexerCacheInputs | None:
+        # Other indexer families may use a different K/cache pipeline.
+        if type(self.impl) is not AscendSFAIndexerBackend or self.impl._pcp_active:
+            return None
+        return IndexerCacheInputs(*self.impl.forward_k(hidden_states, indexer_metadata.cos, indexer_metadata.sin))
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -104,7 +114,12 @@ class IndexerWrapper(nn.Module):
         k_hidden_states: torch.Tensor,
         indexer_metadata: AttentionMetadata,
         compute_topk: bool = True,
+        cache_inputs: IndexerCacheInputs | None = None,
     ) -> torch.Tensor | None:
+        if cache_inputs is not None:
+            return self.impl(
+                hidden_states, q_c, k_hidden_states, indexer_metadata, compute_topk, cache_inputs=cache_inputs
+            )
         return self.impl(hidden_states, q_c, k_hidden_states, indexer_metadata, compute_topk)
 
 

@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from dataclasses import dataclass
+from math import prod
 from typing import Any, NamedTuple, TypeVar
 
 import torch
@@ -13,6 +14,7 @@ from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: igno
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 import vllm_ascend.ops.triton.sfa_cp  # noqa: F401
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import (
     DCPImplMixin,
@@ -27,13 +29,20 @@ from vllm_ascend.attention.context_parallel.sfa_dcp_utils import (
     get_sfa_dcp_max_local_block_table_cols,
     get_sfa_pcp_global_metadata,
 )
+from vllm_ascend.attention.indexer import IndexerCacheInputs
 from vllm_ascend.attention.sfa_v1 import (
     AscendSFAImpl,
     AscendSFAMetadata,
     AscendSFAMetadataBuilder,
     SFAForwardContext,
 )
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, enable_dcp, split_decodes_and_prefills
+from vllm_ascend.attention.utils import (
+    AscendCommonAttentionMetadata,
+    enable_dcp,
+    prefill_cache_write_enabled,
+    split_decodes_and_prefills,
+    try_scatter_cache,
+)
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.utils import (
@@ -200,6 +209,7 @@ class AscendSFADSACPMetadata(AscendSFAMetadata):
     """SFA metadata fields used only by the DSA-CP execution path."""
 
     dsa_cp_context: DSACPContext | None = None
+    fast_cache_store: bool = False
 
 
 class DCPGatherContext(NamedTuple):
@@ -348,7 +358,21 @@ class AscendSFADSACPMetadataBuilder(AscendSFAMetadataBuilder):
             actual_seq_lengths_query=actual_seq_lengths_query[: common_attn_metadata.num_reqs],
             actual_seq_lengths_key=actual_seq_lengths_key[: common_attn_metadata.num_reqs],
         )
+        if type(self) is AscendSFADSACPMetadataBuilder:
+            extra["fast_cache_store"] = draft_index is None and prefill_cache_write_enabled(common_attn_metadata)
         return cos, sin, slot_mapping, extra
+
+    def build_for_cudagraph_capture(self, *args, **kwargs):
+        metadata = super().build_for_cudagraph_capture(*args, **kwargs)
+        if isinstance(metadata, AscendSFADSACPMetadata):
+            metadata.fast_cache_store = False
+        return metadata
+
+    def build_for_graph_capture(self, *args, **kwargs):
+        metadata = super().build_for_graph_capture(*args, **kwargs)
+        if isinstance(metadata, AscendSFADSACPMetadata):
+            metadata.fast_cache_store = False
+        return metadata
 
     def _update_parallel_slot_mapping(
         self,
@@ -397,6 +421,16 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
 
     def _parallel_query_gather_dim(self) -> int:
         return 0
+
+    def _use_c8_reshape_optim(self, attn_metadata: AscendSFAMetadata) -> bool:
+        """Use the existing P-node C8 write optimization setting for main KV."""
+        return (
+            self.enable_sparse_sfa_c8
+            and getattr(attn_metadata, "fast_cache_store", False)
+            and self.is_kv_producer
+            and not self.is_kv_consumer
+            and get_ascend_config().c8_enable_reshape_optim
+        )
 
     def _prepare_native_hidden_states(
         self,
@@ -469,12 +503,21 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         )
         return k_pe, k_nope, None
 
+    def _prepare_indexer_cache_inputs(self, hidden_states, indexer_metadata):
+        # PCP and DCP have additional cache ordering/ownership transforms.
+        # Keep their independent pipelines until those layouts are fused too.
+        if not self.runtime_has_indexer or getattr(self, "dcp_size", 1) > 1:
+            return None
+        assert indexer_metadata is not None
+        return self.indexer.prepare_cache_inputs(hidden_states, indexer_metadata)
+
     def _prepare_kv_for_parallel(
         self,
         k_pe,
         k_nope,
         knope_scale,
         full_gather_o_proj_enabled,
+        indexer_cache_inputs=None,
     ):
         assert k_pe is not None and k_nope is not None
         async_op = full_gather_o_proj_enabled
@@ -487,10 +530,17 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
                 knope_scale.view(-1, knope_scale.shape[-1]),
             ]
         else:
-            # With the indexer k computed inside ``indexer.forward`` right
-            # before the cache write, k_li no longer joins this fused gather:
-            # the indexer backend gathers it separately.
             parts = [k_pe.view(-1, k_pe.shape[-1]), k_nope.view(-1, k_nope.shape[-1])]
+        if indexer_cache_inputs is not None:
+            parts.append(indexer_cache_inputs.key.flatten(start_dim=1))
+            if indexer_cache_inputs.scale is not None:
+                parts.append(indexer_cache_inputs.scale)
+            # Preserve every component's bit pattern (in particular int8 K
+            # and fp16/fp32 scales) instead of promoting them with torch.cat.
+            parts = [
+                part.reshape(-1).contiguous().view(torch.uint8).view(part.shape[0], part.shape[1] * part.element_size())
+                for part in parts
+            ]
         fused_kv, handle = all_gather_async(torch.cat(parts, dim=1), get_tp_group(), async_op=async_op)
         if handle is not None:
             handles.append(handle)
@@ -507,27 +557,50 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         slot_mapping_sfa,
         attn_metadata,
         full_gather_o_proj_enabled,
+        indexer_cache_inputs=None,
     ):
         for handle in kv_ag_handles:
             handle.wait()
+        if indexer_cache_inputs is not None:
+            assert fused_kv_no_split is not None
+            main_parts = (k_nope, k_pe, knope_scale) if self.enable_sparse_sfa_c8 else (k_pe, k_nope)
+            main_bytes = sum(part.shape[-1] * part.element_size() for part in main_parts)
+            key = indexer_cache_inputs.key
+            key_bytes = prod(key.shape[1:]) * key.element_size()
+            indexer_cache_inputs.key = (
+                fused_kv_no_split[:, main_bytes : main_bytes + key_bytes]
+                .contiguous()
+                .view(key.dtype)
+                .reshape(-1, *key.shape[1:])
+            )
+            scale = indexer_cache_inputs.scale
+            if scale is not None:
+                indexer_cache_inputs.scale = (
+                    fused_kv_no_split[:, main_bytes + key_bytes :].contiguous().view(scale.dtype)
+                )
+            fused_kv_no_split = fused_kv_no_split[:, :main_bytes].contiguous().view(main_parts[0].dtype)
         if full_gather_o_proj_enabled:
             self._all_gather_o_proj_full_weight()
 
         if kv_cache is not None:
             assert fused_kv_no_split is not None
             if self.enable_sparse_sfa_c8:
-                torch_npu.npu_scatter_nd_update_(
-                    kv_cache[0].view(-1, fused_kv_no_split.shape[-1]),
-                    slot_mapping_sfa[: attn_metadata.num_actual_tokens].view(-1, 1),
-                    fused_kv_no_split[: attn_metadata.num_actual_tokens],
-                )
+                if not (
+                    self._use_c8_reshape_optim(attn_metadata)
+                    and try_scatter_cache(fused_kv_no_split, kv_cache[0], slot_mapping_sfa, attn_metadata)
+                ):
+                    torch_npu.npu_scatter_nd_update_(
+                        kv_cache[0].view(-1, fused_kv_no_split.shape[-1]),
+                        slot_mapping_sfa[: attn_metadata.num_actual_tokens].view(-1, 1),
+                        fused_kv_no_split[: attn_metadata.num_actual_tokens],
+                    )
                 k_pe = k_nope = None
             else:
                 k_pe, k_nope = fused_kv_no_split.split([self.qk_rope_head_dim, self.kv_lora_rank], dim=-1)
             if not self.enable_sparse_sfa_c8:
                 assert k_pe is not None and k_nope is not None
-                k_nope = k_nope.view(k_nope.shape[0], 1, -1)
-                k_pe = k_pe.view(k_pe.shape[0], 1, -1)
+                k_nope = k_nope.view(k_nope.shape[0], 1, self.kv_lora_rank)
+                k_pe = k_pe.view(k_pe.shape[0], 1, self.qk_rope_head_dim)
                 DeviceOperator.reshape_and_cache(
                     key=k_nope[: attn_metadata.num_actual_tokens],
                     value=k_pe[: attn_metadata.num_actual_tokens],
@@ -1374,6 +1447,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         slot_mapping_sfa: torch.Tensor,
         attn_metadata: M,
         full_gather_o_proj_enabled: bool,
+        indexer_cache_inputs: IndexerCacheInputs | None = None,
     ) -> tuple[
         torch.Tensor | None,
         torch.Tensor | None,
@@ -1388,6 +1462,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             slot_mapping_sfa,
             attn_metadata,
             full_gather_o_proj_enabled,
+            indexer_cache_inputs=indexer_cache_inputs,
         )
         # Prefill DCP gathers referenced blocks after the current layer writes
         # its SFA KV cache and before indexer/top-k work begins.
