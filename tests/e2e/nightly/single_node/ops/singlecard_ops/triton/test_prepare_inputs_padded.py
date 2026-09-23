@@ -8,6 +8,14 @@ from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kerne
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 from vllm_ascend.spec_decode.llm_base_proposer import _PREPARE_INPUTS_BLOCK_SIZE as BLOCK_SIZE
 
+from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
+
+# Before running all the test cases in this file, the hardware attributes of NPU
+# are automatically initialized to prevent errors reported by the underlying operators.
+@pytest.fixture(autouse=True)
+def setup_device_properties_for_ut():
+    init_device_properties_triton()
+
 
 def prepare_inputs_padded_ref(
     cu_num_draft_tokens,
