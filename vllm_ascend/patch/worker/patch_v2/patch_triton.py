@@ -6,6 +6,7 @@ from vllm.v1.worker.gpu.sample import (
     bad_words,
     gumbel,
     logprob,
+    output,
     penalties,
     prompt_logprob,
     sampler,
@@ -22,6 +23,7 @@ from vllm_ascend.ops.triton.v2.mamba.precopy import precopy_mamba_align_fused_ke
 from vllm_ascend.ops.triton.v2.metrics.num_nans import get_num_nans
 from vllm_ascend.ops.triton.v2.sample.categorical_sample import categorical_sample
 from vllm_ascend.ops.triton.v2.sample.fill_logprob_token_idx import _fill_logprob_token_ids_kernel
+from vllm_ascend.ops.triton.v2.sample.sampling_mask import sampling_mask_from_logits_npu
 from vllm_ascend.ops.triton.v2.sample.thinking_budget import (
     _load_effective_token_ascend,
     _update_committed_marker_cache_kernel_ascend,
@@ -70,6 +72,8 @@ logprob._fill_logprob_token_ids_kernel = _fill_logprob_token_ids_kernel
 # For now, use the Ascend-specific implementation.
 sampler.get_num_nans = get_num_nans
 rejection_sampler.get_num_nans = get_num_nans
+# Avoid excessive UB allocation for strided vocab-dimension loads.
+output.SamplingMaskTensors.from_logits = classmethod(sampling_mask_from_logits_npu)
 # TODO: Remove after the new Q4 Triton-Ascend release is available.
 thinking_budget._load_effective_token = _load_effective_token_ascend
 # TODO: Remove after Triton-Ascend 3.6.0 is the minimum supported version.
