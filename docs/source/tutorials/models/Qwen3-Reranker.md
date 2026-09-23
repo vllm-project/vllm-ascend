@@ -14,9 +14,9 @@ Refer to [Supported Features List](../../user_guide/support_matrix/supported_mod
 
 |  Weight Version       | Download Links |
 |-----------------------|----------------|
-| `Qwen3-Reranker-8B`   | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-Reranker-8B) |
-| `Qwen3-Reranker-4B`   | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-Reranker-4B) |
-| `Qwen3-Reranker-0.6B` | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-Reranker-0.6B) |
+| `Qwen3-Reranker-8B`   | [AtomGit](https://ai.atomgit.com/hf_mirrors/Qwen/Qwen3-Reranker-8B) / [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-Reranker-8B) |
+| `Qwen3-Reranker-4B`   | [AtomGit](https://ai.atomgit.com/hf_mirrors/Qwen/Qwen3-Reranker-4B) / [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-Reranker-4B) |
+| `Qwen3-Reranker-0.6B` | [AtomGit](https://ai.atomgit.com/hf_mirrors/Qwen/Qwen3-Reranker-0.6B) / [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-Reranker-0.6B) |
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 

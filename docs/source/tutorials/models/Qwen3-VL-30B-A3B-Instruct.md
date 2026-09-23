@@ -20,7 +20,7 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 |  Weight Version                                            | Hardware Requirements                                           | Download Links |
 |------------------------------------------------------------|-----------------------------------------------------------------|----------------|
-| `Qwen3-VL-30B-A3B-Instruct` (BF16 version)                 | 1 Atlas 800 A3 (64GB x 16) node or 1 Atlas 800 A2 (64GB x 8) node | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-VL-30B-A3B-Instruct) |
+| `Qwen3-VL-30B-A3B-Instruct` (BF16 version)                 | 1 Atlas 800 A3 (64GB x 16) node or 1 Atlas 800 A2 (64GB x 8) node | [AtomGit](https://ai.atomgit.com/hf_mirrors/Qwen/Qwen3-VL-30B-A3B-Instruct) / [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-VL-30B-A3B-Instruct) |
 | `Qwen3-VL-30B-A3B-Instruct-w8a8-mxfp8` (quantized version) | 1 950DT Products (96GB x 8) node                                   | [ModelScope](https://modelscope.cn/models/Eco-Tech/Qwen3-VL-30B-A3B-Instruct-w8a8-mxfp8) |
 
 It is recommended to download the model weight to a shared directory across multiple nodes.

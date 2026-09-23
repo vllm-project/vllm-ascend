@@ -18,10 +18,10 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 |  Weight Version          | Hardware Requirements                                             | Download Links |
 |--------------------------|-------------------------------------------------------------------|----------------|
-|  `GLM-5.2`(BF16 version) | 2 Atlas 800 A3 (128GB × 8) node or 4 Atlas 800 A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/ZhipuAI/GLM-5.2) |
-|  `GLM-5.2-w8a8`          | 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w8a8) |
+|  `GLM-5.2`(BF16 version) | 2 Atlas 800 A3 (128GB × 8) node or 4 Atlas 800 A2 (64GB × 8) node | [AtomGit](https://ai.atomgit.com/zai-org/GLM-5.2) / [ModelScope](https://www.modelscope.cn/models/ZhipuAI/GLM-5.2) |
+|  `GLM-5.2-w8a8`          | 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node | [AtomGit](https://ai.atomgit.com/Eco-Tech/GLM-5.2-w8a8) / [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w8a8) |
 |  `GLM-5.2-w8a8c8`(Quantized version)        | 2 Atlas 800 A3 (64GB × 16) node or 4 Atlas 800 A2 (64GB × 8) node | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.2-w8a8c8) |
-|  `GLM-5.2-w4a8c8`        | 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w4a8c8) |
+|  `GLM-5.2-w4a8c8`        | 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node | [AtomGit](https://ai.atomgit.com/Eco-Tech/GLM-5.2-w4a8c8) / [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w4a8c8) |
 
 - `GLM-5.2-w8a8c8`(Quantized version): The weights have been verified and are recommended for use.
 - You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly.

@@ -22,9 +22,9 @@ The following model variants are available. It is recommended to download the mo
 
 | Model                | Hardware Requirement                                                 | Download                                                                 |
 | -------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| Qwen3-30B-A3B (BF16) | Atlas 800I A3 (64GB, 1\~2 cards)<br>Atlas 800I A2 (64GB, 2\~4 cards) | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-30B-A3B)        |
-| Qwen3-30B-A3B-W8A8   | Atlas 800I A3 (64GB, 1\~2 cards)<br>Atlas 800I A2 (64GB, 2\~4 cards) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8) |
-| Eagle3 Draft Model   | NA                                                                   | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8-QuaRot-310) |
+| Qwen3-30B-A3B (BF16) | Atlas 800I A3 (64GB, 1\~2 cards)<br>Atlas 800I A2 (64GB, 2\~4 cards) | [AtomGit](https://ai.atomgit.com/hf_mirrors/Qwen/Qwen3-30B-A3B) / [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-30B-A3B)        |
+| Qwen3-30B-A3B-W8A8   | Atlas 800I A3 (64GB, 1\~2 cards)<br>Atlas 800I A2 (64GB, 2\~4 cards) | [AtomGit](https://ai.atomgit.com/Eco-Tech/Qwen3-30B-A3B-w8a8) / [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8) |
+| Eagle3 Draft Model   | NA                                                                   | [AtomGit](https://ai.atomgit.com/Eco-Tech/Qwen3-30B-A3B-w8a8-QuaRot-310) / [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8-QuaRot-310) |
 
 >**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
@@ -32,7 +32,7 @@ The following model variants are available. It is recommended to download the mo
 
 | Model | Quantization | Hardware Requirement | Download |
 |-------|-------------|---------------------|----------|
-| Qwen3-30B-A3B-w8a8-QuaRot-310  |W8A8 | Atlas 300I DUO (TP2)                                                                                               | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8-QuaRot-310)            |
+| Qwen3-30B-A3B-w8a8-QuaRot-310  |W8A8 | Atlas 300I DUO (TP2)                                                                                               | [AtomGit](https://ai.atomgit.com/Eco-Tech/Qwen3-30B-A3B-w8a8-QuaRot-310) / [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8-QuaRot-310)            |
 
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.
 

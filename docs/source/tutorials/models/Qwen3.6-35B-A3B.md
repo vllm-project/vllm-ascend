@@ -20,8 +20,8 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get feature
 
 |  Weight Version  | Hardware Requirements | Download Links |
 |------------------|-----------------------|----------------|
-| `Qwen3.6-35B-A3B` (BF16 version) | 1 Atlas A3 inference products (64GB x 16) node, 1 Atlas A2 inference products (64GB x 8) node, or Atlas 300I DUO | [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.6-35B-A3B) |
-| `Qwen3.6-35B-A3B-w8a8` (quantized version) | 1 Atlas A3 inference products (64GB x 16) node, 1 Atlas A2 inference products (64GB x 8) node, or Atlas 300I DUO | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-35B-A3B-w8a8) |
+| `Qwen3.6-35B-A3B` (BF16 version) | 1 Atlas A3 inference products (64GB x 16) node, 1 Atlas A2 inference products (64GB x 8) node, or Atlas 300I DUO | [AtomGit](https://ai.atomgit.com/hf_mirrors/Qwen/Qwen3.6-35B-A3B) / [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.6-35B-A3B) |
+| `Qwen3.6-35B-A3B-w8a8` (quantized version) | 1 Atlas A3 inference products (64GB x 16) node, 1 Atlas A2 inference products (64GB x 8) node, or Atlas 300I DUO | [AtomGit](https://ai.atomgit.com/Eco-Tech/Qwen3.6-35B-A3B-w8a8) / [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-35B-A3B-w8a8) |
 
 It is recommended to download the model weight to `/root/.cache/`.
 

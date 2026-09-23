@@ -20,7 +20,7 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 |  Weight Version     | Hardware Requirements | Download Links |
 |---------------------|-----------------------|----------------|
-| `PaddleOCR-VL-0.9B` | 1 Atlas 800 A3 (128GB × 8) nodes or 1 Atlas 800 A2 (64GB × 8) nodes or 1 Atlas 300I DUO (48GB × 8) nodes | [ModelScope](https://www.modelscope.cn/models/PaddlePaddle/PaddleOCR-VL) \| [Hugging Face](https://huggingface.co/PaddlePaddle/PaddleOCR-VL) |
+| `PaddleOCR-VL-0.9B` | 1 Atlas 800 A3 (128GB × 8) nodes or 1 Atlas 800 A2 (64GB × 8) nodes or 1 Atlas 300I DUO (48GB × 8) nodes | [AtomGit](https://ai.atomgit.com/paddlepaddle/PaddleOCR-VL) / [ModelScope](https://www.modelscope.cn/models/PaddlePaddle/PaddleOCR-VL) \| [Hugging Face](https://huggingface.co/PaddlePaddle/PaddleOCR-VL) |
 
 It is recommended to download the model weights to the cache directory and set `VLLM_USE_MODELSCOPE=True` to load the model automatically. If you have downloaded the weights to a local directory, update the `MODEL_PATH` variable in the deployment script accordingly.
 
