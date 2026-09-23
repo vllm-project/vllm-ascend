@@ -25,6 +25,9 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_scheduler import (
     MooncakeSchedulerRecvingThread,
     MooncakeSchedulerSendingThread,
 )
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.stats import (
+    MooncakeKVConnectorStats,
+)
 
 from .helpers import make_blocks, make_full_spec, make_mamba_spec, make_request, make_transfer_metadata
 
@@ -66,6 +69,8 @@ def make_pull_scheduler() -> MooncakePullConnectorScheduler:
     scheduler._reqs_recv_info = {}
     scheduler._sending_thread = None
     scheduler._recving_thread = None
+    scheduler._num_delayed_release_blocks = 0
+    scheduler._kv_stats = MooncakeKVConnectorStats()
     return scheduler
 
 
@@ -381,6 +386,10 @@ def test_request_finished_delays_blocks_and_builds_remote_params() -> None:
     assert params["remote_request_id"] == "request-p"
     assert params["last_token_id"] == 123
     scheduler._sending_thread.add_delayed_request.assert_called_once()
+    stats = scheduler.get_kv_connector_stats()
+    assert stats is not None
+    assert stats.data["delayed_release_requests"] == 1
+    assert stats.data["delayed_release_blocks"] == 3
 
 
 def test_update_connector_output_routes_worker_completion_and_scheduler_ack() -> None:
@@ -389,7 +398,8 @@ def test_update_connector_output_routes_worker_completion_and_scheduler_ack() ->
     scheduler._sending_thread = MagicMock()
     scheduler._sending_thread.get_and_clear_finished_requests.return_value = {"request-p"}
     scheduler._reqs_recv_info["request-d"] = ("10.0.0.1", 6000, "request-p")
-    scheduler._reqs_need_send["request-p"] = time.time()
+    scheduler._reqs_need_send["request-p"] = 3
+    scheduler._num_delayed_release_blocks = 3
     output = SimpleNamespace(finished_recving={"request-d"}, finished_sending=None)
 
     scheduler.update_connector_output(output)  # type: ignore[arg-type]
@@ -397,6 +407,10 @@ def test_update_connector_output_routes_worker_completion_and_scheduler_ack() ->
     scheduler._recving_thread.add_request.assert_called_once_with("10.0.0.1", 6000, "request-p")
     assert output.finished_sending == {"request-p"}
     assert scheduler._reqs_need_send == {}
+    stats = scheduler.get_kv_connector_stats()
+    assert stats is not None
+    assert stats.data["delayed_release_requests"] == 0
+    assert stats.data["delayed_release_blocks"] == 0
 
 
 class _StopLoop(BaseException):
