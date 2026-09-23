@@ -262,7 +262,6 @@ from vllm_ascend.core.profiling_chunk_predictor import (
     _finish_profiling_chunk_timing,
     _start_profiling_chunk_timing,
 )
-
 from vllm_ascend.embedding_offload.ec_mmcache_mstore import EMoonCakeStoreConnector
 
 # vLLM 0.29 does not provide the upstream DeepSeek V4.1 config and model

@@ -291,6 +291,7 @@ class RlConfig:
 
         os.environ["VLLM_SERVER_DEV_MODE"] = "1"
 
+
 @config
 class EncoderCachesOffloadConfig:
     """Configuration for encoder cache offload behavior.
@@ -307,6 +308,7 @@ class EncoderCachesOffloadConfig:
     enabled_swap: bool = False
     """set mooncake store register memory size."""
     aligned_tensor_size: int = 200
+
 
 @config
 class AscendConfig:

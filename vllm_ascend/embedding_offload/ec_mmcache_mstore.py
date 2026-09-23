@@ -34,19 +34,19 @@ class EMoonCakeStoreConnector:
             self.encoder = msgspec.msgpack.Encoder()
 
             self.recv_aligned_tensor, _ = self.aligned_empty_tensor(
-				[self.aligned_tensor_size, 1024, 1024], dtype=torch.bfloat16, device="npu"
-			)
+                [self.aligned_tensor_size, 1024, 1024], dtype=torch.bfloat16, device="npu"
+            )
             tensor_bytes = self.recv_aligned_tensor.element_size() * self.recv_aligned_tensor.numel()
             self.ec_store.register_buffer_single(self.recv_aligned_tensor.data_ptr(), tensor_bytes)
 
             self.send_aligned_tensor, _ = self.aligned_empty_tensor(
-				[self.aligned_tensor_size, 1024, 1024], dtype=torch.bfloat16, device="npu"
-			)
+                [self.aligned_tensor_size, 1024, 1024], dtype=torch.bfloat16, device="npu"
+            )
             self.ec_store.register_buffer_single(self.send_aligned_tensor.data_ptr(), tensor_bytes)
 
             self.swap_aligned_tensor, _ = self.aligned_empty_tensor(
-				[self.aligned_tensor_size, 1024, 1024], dtype=torch.bfloat16, device="npu"
-			)
+                [self.aligned_tensor_size, 1024, 1024], dtype=torch.bfloat16, device="npu"
+            )
             self.ec_store.register_buffer_single(self.swap_aligned_tensor.data_ptr(), tensor_bytes)
 
     def aligned_empty_tensor(self, shape, dtype=torch.float32, device="npu:0"):
@@ -61,11 +61,11 @@ class EMoonCakeStoreConnector:
         offset_elements = offset_bytes // elem_size
         aligned_tensor = big_tensor[offset_elements : offset_elements + numel].view(shape)
         logger.info(
-			"original tensor addr %s, aligned tensor addr %s, aligned %s",
-			hex(ptr),
-			hex(aligned_tensor.data_ptr()),
-			aligned_tensor.data_ptr() % ALIGNMENT == 0,
-		)
+            "original tensor addr %s, aligned tensor addr %s, aligned %s",
+            hex(ptr),
+            hex(aligned_tensor.data_ptr()),
+            aligned_tensor.data_ptr() % ALIGNMENT == 0,
+        )
 
         return aligned_tensor, big_tensor
 
