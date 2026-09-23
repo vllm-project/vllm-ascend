@@ -9,6 +9,7 @@ Workflow:
 
 import argparse
 import ast
+import base64
 import hashlib
 import json
 import os
@@ -16,11 +17,14 @@ import sqlite3
 import ssl
 import subprocess
 import tempfile
+import textwrap
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import defaultdict
-from pathlib import Path
+from fnmatch import fnmatchcase
+from pathlib import Path, PurePosixPath
 
 import regex as re
 
@@ -37,11 +41,17 @@ COVERAGE_DENSITY_THRESHOLD = 0.0
 # Minimum affected lines threshold
 MIN_AFFECTED_LINES = 1
 
+TEST_ROOTS = ("tests/e2e/pull_request/", "tests/ut/")
+
+
+def is_selectable_test(path: str) -> bool:
+    return path.startswith(TEST_ROOTS) and fnmatchcase(PurePosixPath(path).name, "test_*.py")
+
 
 def _get_test_files_from_pr_diff(diff_file: str) -> list[str]:
     """
     Extract new/modified test files from PR diff.
-    Test files must be in tests/ directory and start with test_
+    Test files must be under TEST_ROOTS and match test_*.py.
 
     Args:
         diff_file: Path to the PR diff file
@@ -58,20 +68,17 @@ def _get_test_files_from_pr_diff(diff_file: str) -> list[str]:
         print(f"  Warning: Failed to read diff file for test file detection: {e}")
         return test_files_found
 
-    # Pattern to match test file paths: tests/e2e/pull_request/ or tests/ut/ directory
-    # In diff output:
-    #   - +++ b/tests/ut/core/test_xxx.py (new/modified test file)
-    #   - rename to tests/ut/attention/test_xxx.py (renamed test file)
-    # Test files must be in tests/e2e/pull_request/ or tests/ut/ directory and start with test_
-    test_file_pattern = re.compile(
-        r"^(?:\+\+\+ [ab]/|rename to )((?:tests/e2e/pull_request(?:/.+)?/test_\w+\.py|tests/ut(?:/.+)?/test_\w+\.py))",
-        re.MULTILINE,
-    )
-
     changed_test_files = set()
-    for match in test_file_pattern.finditer(diff_content):
-        test_file_path = match.group(1)
-        changed_test_files.add(test_file_path)
+    for line in diff_content.splitlines():
+        if line.startswith("+++ b/"):
+            test_file_path = line.removeprefix("+++ b/")
+        elif line.startswith("rename to "):
+            test_file_path = line.removeprefix("rename to ")
+        else:
+            continue
+
+        if is_selectable_test(test_file_path):
+            changed_test_files.add(test_file_path)
 
     if not changed_test_files:
         return test_files_found
@@ -106,7 +113,11 @@ def _has_csrc_changes(diff_file: str) -> bool:
 
     # Pattern to match csrc directory in diff paths (csrc as root directory)
     # Match lines like: +++ b/csrc/xxx.cpp or --- a/csrc/xxx.cpp
-    csrc_pattern = re.compile(r"^\+{3} [ab]/csrc/|^\-{3} a/csrc/", re.MULTILINE)
+    # Only non-Markdown changes under csrc require the full test suite.
+    csrc_pattern = re.compile(
+        r"^(?:\+{3} [ab]/|-{3} a/)csrc/(?!.*\.md$)",
+        re.MULTILINE | re.IGNORECASE,
+    )
     if csrc_pattern.search(diff_content):
         print("  CSRC directory changes detected in PR diff")
         return True
@@ -116,7 +127,7 @@ def _has_csrc_changes(diff_file: str) -> bool:
 def _get_deleted_test_files_from_pr(diff_file: str, test_case_map: dict) -> list[str]:
     """
     Extract deleted test files from PR diff.
-    Test files are in vllm_ascend/tests/ directory with test_*.py pattern.
+    Test files must be under TEST_ROOTS and match test_*.py.
 
     Args:
         diff_file: Path to the PR diff file
@@ -134,17 +145,14 @@ def _get_deleted_test_files_from_pr(diff_file: str, test_case_map: dict) -> list
         print(f"  Warning: Failed to read diff file for deleted test detection: {e}")
         return deleted_test_files
 
-    # Pattern to match deleted test files: tests/e2e/pull_request/ or tests/ut/ directory
-    # Match --- a/tests/... followed by +++ /dev/null (deleted file marker)
-    deleted_pattern = re.compile(
-        r"^--- a/(tests/e2e/pull_request(?:/.+)?/test_\w+\.py)\s*\n\s*\+\+\+ [ab]?/dev/null|"
-        r"^--- a/(tests/ut(?:/.+)?/test_\w+\.py)\s*\n\s*\+\+\+ [ab]?/dev/null",
-        re.MULTILINE,
-    )
+    lines = diff_content.splitlines()
+    for old_line, new_line in zip(lines, lines[1:]):
+        if not old_line.startswith("--- a/") or new_line != "+++ /dev/null":
+            continue
 
-    for match in deleted_pattern.finditer(diff_content):
-        test_file_path = match.group(1) or match.group(2)
-        deleted_test_files.append(test_file_path)
+        test_file_path = old_line.removeprefix("--- a/")
+        if is_selectable_test(test_file_path):
+            deleted_test_files.append(test_file_path)
 
     if deleted_test_files:
         print(f"  Found {len(deleted_test_files)} deleted test file(s): {deleted_test_files}")
@@ -353,6 +361,31 @@ class CoverageSelector:
             pass
         return docstring_lines
 
+    @staticmethod
+    def _get_blank_lines(filepath: str) -> set[int]:
+        """
+        Get line numbers of all blank/whitespace-only lines in file.
+
+        Coverage arc data can record blank lines as control-flow nodes
+        (e.g., block boundaries after if/return statements). These lines
+        are not executable and must be filtered out to avoid false matches.
+
+        Args:
+            filepath: Source file path
+
+        Returns:
+            Set of line numbers that are blank or whitespace-only
+        """
+        blank_lines = set()
+        try:
+            with open(filepath, encoding="utf-8") as f:
+                for line_no, line in enumerate(f, start=1):
+                    if not line.strip():
+                        blank_lines.add(line_no)
+        except Exception:
+            pass
+        return blank_lines
+
     def _filter_noise_lines(self, filepath: str, lines: set[int]) -> set[int]:
         """
         Filter out invalid noise lines from coverage data:
@@ -360,6 +393,7 @@ class CoverageSelector:
         2. Function definition lines (def line only)
         3. Class definition lines
         4. Docstring lines
+        5. Blank/whitespace-only lines
 
         Args:
             filepath: Source file path
@@ -377,7 +411,8 @@ class CoverageSelector:
             def_lines = self._get_function_def_lines(filepath)
             class_lines = self._get_class_def_lines(filepath)
             docstring_lines = self._get_docstring_lines(filepath)
-            self._noise_lines_cache[filepath] = import_lines | def_lines | class_lines | docstring_lines
+            blank_lines = self._get_blank_lines(filepath)
+            self._noise_lines_cache[filepath] = import_lines | def_lines | class_lines | docstring_lines | blank_lines
 
         return lines - self._noise_lines_cache[filepath]
 
@@ -445,7 +480,7 @@ class CoverageSelector:
                 "line_count": data["line_count"],
             }
 
-        with open(output_path, "w", encoding="utf-8") as f:
+        with open(output_path, "w", encoding="utf-8", newline="\n") as f:
             json.dump(serializable_map, f, indent=2, ensure_ascii=False)
         print(f"\nTest case mapping saved to: {output_path}")
 
@@ -463,6 +498,521 @@ class CoverageSelector:
             }
         print(f"Loaded {len(self.test_case_map)} test case mappings from {input_path}")
         return self.test_case_map
+
+
+_HUNK_RE = re.compile(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+_DEF_RE = re.compile(r"(async\s+def|def|class)\s")
+
+
+def _parse_diff_base_lines(
+    diff_output: str,
+) -> tuple[dict[str, set[int]], dict[str, list[tuple]], dict[str, list[tuple]]]:
+    """Parse unified diff text into affected base (pre-change) line numbers.
+
+    Returns (files, pending, del_groups):
+      files[path]     : set of base line numbers recorded directly
+                        (blank lines inside contiguous deletion blocks)
+      pending[path]   : candidate pairs needing base-content classification;
+                        tuple = (a, b, kind, add_indent, introduces_def,
+                                 adds_all_comment, hunk_base_end, add_texts)
+                        kind='insert' -> pure insertion between a and b
+                        kind='blank'  -> isolated blank deletion at a+1 (b = a+2)
+      del_groups[path]: deletion groups needing comment/docstring filtering;
+                        tuple = ([(base_line, deleted_text), ...], [added_text, ...])
+    """
+    files, pending, del_groups = {}, {}, {}
+    current = None
+    base_no = None
+    hunk_base_end = 0
+    old_path = None  # path from the last '--- a/...' line (used for deleted files)
+    group_del = []  # (base_line, text) of '-' lines in the current change group
+    group_add = []  # texts of '+' lines in the current change group
+
+    def flush_group():
+        if not group_del and not group_add:
+            return
+        if group_del:
+            del_set = {n for n, _ in group_del}
+            del_lines = []
+            for n, text in group_del:
+                if text.strip():
+                    del_lines.append((n, text))
+                elif (n - 1) in del_set or (n + 1) in del_set:
+                    # blank inside a contiguous deletion block: classify with
+                    # the group (dropped too if the block is pure comment/docstring)
+                    del_lines.append((n, text))
+                else:
+                    pending[current].append((n - 1, n + 1, "blank", None, False, False, hunk_base_end, None))
+            if del_lines:
+                del_groups[current].append((del_lines, list(group_add)))
+        else:
+            # base_no is the next unprocessed base line = the line below the insertion
+            a = base_no - 1
+            indent = min(((len(t) - len(t.lstrip())) for t in group_add if t.strip()), default=0)
+            introduces_def = any(t.strip().startswith("@") or _DEF_RE.match(t.strip()) for t in group_add if t.strip())
+            adds_all_comment = all(t.strip().startswith("#") for t in group_add if t.strip())
+            pending[current].append(
+                (
+                    a,
+                    a + 1,
+                    "insert",
+                    indent,
+                    introduces_def,
+                    adds_all_comment,
+                    hunk_base_end,
+                    tuple(group_add),
+                )
+            )
+
+    for raw_line in diff_output.split("\n"):
+        line = raw_line.rstrip("\r")
+        if line.startswith("diff --git"):
+            flush_group()
+            group_del, group_add = [], []
+            current, base_no = None, None
+            continue
+        if line.startswith("--- "):
+            old_path = line[4:]
+            if old_path.startswith("a/"):
+                old_path = old_path[2:]
+            continue
+        if line.startswith("+++ "):
+            flush_group()
+            group_del, group_add = [], []
+            path = line[4:]
+            if path == "/dev/null":
+                # deleted file: keep the '--- a/...' path so deletions are recorded
+                path = old_path
+                old_path = None
+                if path is None or path == "/dev/null":
+                    current = None
+                    continue
+            if old_path == "/dev/null":
+                # new file: no base version exists, base line numbers are
+                # meaningless - skip line-level parsing entirely (also avoids
+                # a doomed base-content fetch for the file)
+                old_path = None
+                current = None
+                continue
+            if path.startswith("b/"):
+                path = path[2:]
+            current = path
+            files.setdefault(path, set())
+            pending.setdefault(path, [])
+            del_groups.setdefault(path, [])
+            continue
+        if line.startswith("@@"):
+            flush_group()
+            group_del, group_add = [], []
+            if current is None:
+                continue
+            m = _HUNK_RE.search(line)
+            base_no = int(m.group(1))
+            hunk_base_end = base_no + int(m.group(2) or "1") - 1
+            continue
+        if current is None or base_no is None:
+            continue
+        if line.startswith("-"):
+            group_del.append((base_no, line[1:]))
+            base_no += 1
+        elif line.startswith("+"):
+            group_add.append(line[1:])
+        elif line.startswith("\\"):
+            continue
+        else:
+            flush_group()
+            group_del, group_add = [], []
+            base_no += 1
+    flush_group()
+    return files, pending, del_groups
+
+
+def _collect_defs(source: str) -> tuple[list, set, set, set]:
+    """Parse Python source, return (ranges, end_lines, start_lines, blanks).
+
+    ranges      : [(lineno, end_lineno, col_offset)] of every function/method
+    end_lines   : line numbers where a function/class definition ends
+    start_lines : def/class lines and their decorator lines
+    blanks      : blank line numbers
+    """
+    tree = ast.parse(source)
+    ranges, end_lines, start_lines = [], set(), set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            end_lines.add(node.end_lineno)
+            start_lines.add(node.lineno)
+            for deco in node.decorator_list:
+                start_lines.add(deco.lineno)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                ranges.append((node.lineno, node.end_lineno, node.col_offset))
+    blanks = {i for i, text in enumerate(source.splitlines(), 1) if not text.strip()}
+    return ranges, end_lines, start_lines, blanks
+
+
+def _get_docstring_lines(source: str) -> set[int]:
+    """Line numbers covered by docstrings (module/class/function docstring nodes)."""
+    tree = ast.parse(source)
+    lines = set()
+    for node in ast.walk(tree):
+        body = getattr(node, "body", None)
+        if (
+            isinstance(body, list)
+            and body
+            and isinstance(body[0], ast.Expr)
+            and isinstance(body[0].value, ast.Constant)
+            and isinstance(body[0].value.value, str)
+        ):
+            lines.update(range(body[0].lineno, body[0].end_lineno + 1))
+    return lines
+
+
+def _looks_like_code(texts: list) -> bool:
+    """True if the added lines are real code: parseable as Python and not
+    solely string-literal expressions (docstring prose)."""
+    block = textwrap.dedent("\n".join(t for t in texts if t.strip()))
+    if not block.strip():
+        return False
+    try:
+        tree = ast.parse(block)
+    except (SyntaxError, ValueError):
+        return False
+    return any(
+        not (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant) and isinstance(stmt.value.value, str))
+        for stmt in tree.body
+    )
+
+
+def _innermost_func(ranges: list, n: int):
+    """The innermost function whose body contains line n (None if module level)."""
+    best = None
+    for start, end, col in ranges:
+        if start <= n <= end and (best is None or start >= best[0]):
+            best = (start, end, col)
+    return best
+
+
+def _between_definitions(a: int, b: int, end_lines: set, start_lines: set, blanks: set) -> bool:
+    """True if the pair (a, b) sits between two definitions: the upper line is
+    the end of a function/class (if a itself is blank, walk up past consecutive
+    blank lines and check the nearest non-blank line instead) and the lower
+    line is the start of a function/class (def/class line or decorator)."""
+    if b not in start_lines:
+        return False
+    upper = a
+    while upper in blanks:
+        upper -= 1
+    return upper in end_lines
+
+
+# Base classes whose machinery reads class __annotations__ at runtime
+_ANNOTATION_CONSUMING_BASES = frozenset({"TypedDict", "Protocol", "BaseModel", "Enum", "NamedTuple"})
+
+
+def _parse_pure_annotations(texts) -> list[ast.AnnAssign] | None:
+    """Parse diff lines as a block of pure type annotations.
+
+    Returns the annotation statements when every meaningful (non-blank,
+    non-comment) line forms simple-name annotations without a value
+    (``x: int``); returns None when the block is unparsable or contains
+    anything else. An empty list means the block has no meaningful lines.
+    """
+    lines = [t for t in texts if t.strip() and not t.strip().startswith("#")]
+    if not lines:
+        return []
+    block = textwrap.dedent("\n".join(lines))
+    try:
+        tree = ast.parse(block)
+    except (SyntaxError, ValueError):
+        return None
+    anns = []
+    for stmt in tree.body:
+        if not (isinstance(stmt, ast.AnnAssign) and stmt.value is None and isinstance(stmt.target, ast.Name)):
+            return None
+        anns.append(stmt)
+    return anns
+
+
+def _annotation_eval_safe(anns: list[ast.AnnAssign], has_future: bool) -> bool:
+    """False when an annotation expression may have runtime side effects.
+
+    With ``from __future__ import annotations`` expressions are stored as
+    strings and never evaluated. Otherwise annotation expressions are
+    evaluated at definition time, so calls, walrus assignments and
+    ``Annotated[...]`` metadata are treated as unsafe.
+    """
+    if has_future:
+        return True
+    for ann in anns:
+        for node in ast.walk(ann.annotation):
+            if isinstance(node, (ast.Call, ast.NamedExpr)):
+                return False
+            if isinstance(node, ast.Subscript):
+                value = node.value
+                name = None
+                if isinstance(value, ast.Name):
+                    name = value.id
+                elif isinstance(value, ast.Attribute):
+                    name = value.attr
+                if name == "Annotated":
+                    return False
+    return True
+
+
+def _base_simple_name(base: ast.expr) -> str | None:
+    """Simple name of a base class entry: 'Base' for a plain name or the
+    attribute tail of 'pkg.Base'; None for anything unresolvable."""
+    if isinstance(base, ast.Name):
+        return base.id
+    if isinstance(base, ast.Attribute):
+        return base.attr
+    return None
+
+
+def _class_consumes_annotations(cls_node: ast.ClassDef, class_map: dict) -> bool:
+    """True when the class (or a same-file ancestor) may consume
+    ``__annotations__`` at runtime: any decorator, metaclass/other class
+    keywords, an unresolvable base, or an annotation-consuming base such as
+    TypedDict / Protocol / BaseModel / Enum / NamedTuple."""
+    stack, seen = [cls_node], set()
+    while stack:
+        node = stack.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        if node.decorator_list or node.keywords:
+            return True
+        for base in node.bases:
+            name = _base_simple_name(base)
+            if name is None or name in _ANNOTATION_CONSUMING_BASES:
+                return True
+            parent = class_map.get(name)
+            if parent is not None and id(parent) not in seen:
+                stack.append(parent)
+    return False
+
+
+def _collect_class_info(source: str) -> tuple[list[tuple], dict[str, ast.ClassDef], bool]:
+    """Parse source and return (scopes, class_map, has_future):
+
+    scopes    : [(lineno, end_lineno, col_offset, node)] of every
+                function/class definition, for annotation scope resolution;
+    class_map : {class name -> ClassDef} for same-file base resolution
+                (a later definition shadows an earlier one);
+    has_future: the file has ``from __future__ import annotations``.
+    """
+    tree = ast.parse(source)
+    scopes = [
+        (n.lineno, n.end_lineno, n.col_offset, n)
+        for n in ast.walk(tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    ]
+    classes = sorted(
+        (n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)),
+        key=lambda n: n.lineno,
+    )
+    class_map = {n.name: n for n in classes}
+    has_future = any(
+        isinstance(n, ast.ImportFrom)
+        and n.module == "__future__"
+        and any(alias.name == "annotations" for alias in n.names)
+        for n in tree.body
+    )
+    return scopes, class_map, has_future
+
+
+def _insertion_scope(scopes: list[tuple], a: int, b: int, add_indent: int | None):
+    """Innermost function/class whose body receives the insertion between
+    base lines a and b (None when it lands at module level)."""
+    inside = [s for s in scopes if s[0] <= a and b <= s[1]]
+    if inside:
+        return max(inside, key=lambda s: s[0])[3]
+    if add_indent is None:
+        return None
+    containing = [s for s in scopes if s[0] <= a <= s[1] and s[2] < add_indent]
+    if containing:
+        return max(containing, key=lambda s: s[0])[3]
+    return None
+
+
+def _deletion_scope_kind(scopes: list[tuple], first: int, last: int) -> tuple[str, ast.AST | None]:
+    """Scope kind of a contiguous deleted range: ('func'|'class', node),
+    ('module', None), or ('mixed', None) when it crosses scope boundaries."""
+    inside = [s for s in scopes if s[0] <= first and last <= s[1]]
+    if inside:
+        node = max(inside, key=lambda s: s[0])[3]
+        return ("class" if isinstance(node, ast.ClassDef) else "func"), node
+    for s in scopes:
+        if s[0] <= first <= s[1] or s[0] <= last <= s[1]:
+            return "mixed", None
+    return "module", None
+
+
+def _pure_annotation_insert_reason(
+    add_texts,
+    a: int,
+    b: int,
+    add_indent: int | None,
+    ann_ctx: tuple | None,
+) -> str | None:
+    """Skip reason when a pure insertion consists of type annotations in a
+    scope where they are provably inert; None to record as usual.
+
+    Inert scopes: function bodies (local annotations are never evaluated),
+    plain classes (no decorators and no annotation-consuming base) and
+    module level, with annotation expressions free of runtime side effects
+    unless the file uses ``from __future__ import annotations``.
+    """
+    if ann_ctx is None or not add_texts:
+        return None
+    scopes, class_map, has_future = ann_ctx
+    anns = _parse_pure_annotations(add_texts)
+    if not anns:
+        return None
+    scope = _insertion_scope(scopes, a, b, add_indent)
+    if scope is None:
+        if _annotation_eval_safe(anns, has_future):
+            return "module-level pure type annotation"
+        return None
+    if isinstance(scope, ast.ClassDef):
+        if not _class_consumes_annotations(scope, class_map) and _annotation_eval_safe(anns, has_future):
+            return "pure type annotation in a plain class body"
+        return None
+    return "function-local pure type annotation"
+
+
+def _pure_annotation_change_exempt(
+    del_lines,
+    add_texts,
+    ann_ctx: tuple | None,
+) -> bool:
+    """True when a deletion group (with its replacement lines) is a pure type
+    annotation change in a scope where annotations are provably inert.
+
+    Direction-independent counterpart of _pure_annotation_insert_reason:
+    deleted and added lines must both be pure annotations (additions may be
+    absent or comments only), so ``x: int`` -> ``x: str`` and plain
+    deletions are skipped, while ``x: int`` -> ``x = 5`` stays recorded.
+    """
+    if ann_ctx is None:
+        return False
+    scopes, class_map, has_future = ann_ctx
+    del_anns = _parse_pure_annotations([t for _, t in del_lines])
+    if not del_anns:
+        return False
+    adds = [t for t in add_texts if t.strip()]
+    add_anns = []
+    if adds:
+        add_anns = _parse_pure_annotations(adds)
+        if add_anns is None:  # replaced by real code: keep the anchor
+            return False
+    first, last = del_lines[0][0], del_lines[-1][0]
+    kind, node = _deletion_scope_kind(scopes, first, last)
+    if kind == "func":
+        return True  # local annotations are never evaluated at runtime
+    if kind == "mixed":
+        return False
+    safe = _annotation_eval_safe(del_anns, has_future) and (not add_anns or _annotation_eval_safe(add_anns, has_future))
+    if not safe:
+        return False
+    if kind == "module":
+        return True
+    return not _class_consumes_annotations(node, class_map)
+
+
+def _classify_candidate_pairs(
+    affected: set[int],
+    pairs: list[tuple],
+    del_groups: list[tuple],
+    base_text: str | None,
+    path: str,
+) -> None:
+    """Classify deletion groups and candidate pairs of one file using its base
+    content and update the affected line set in place.
+
+    Deletion groups: a group is dropped entirely when every deleted line is a
+    comment/docstring line in the base file AND the added lines are comments or
+    doc prose (not parseable Python), i.e. a pure comment/docstring change.
+    Pure type annotation changes are dropped in every direction (insertion,
+    replacement, deletion) when provably inert: function-local annotations are
+    never evaluated; class-level ones need a plain class (no decorators, no
+    TypedDict/Protocol/Enum/BaseModel/NamedTuple base) and side-effect-free
+    annotation expressions unless the file has future annotations.
+    Candidate pairs: without base content (or non-parseable Python) both sides
+    of each pair are counted, bounded by the hunk.
+    """
+    info = None
+    docstr_lines = set()
+    comment_lines = set()
+    ann_ctx = None
+    if base_text is not None:
+        try:
+            info = _collect_defs(base_text)
+            docstr_lines = _get_docstring_lines(base_text)
+            comment_lines = {i for i, t in enumerate(base_text.splitlines(), 1) if t.strip().startswith("#")}
+            ann_ctx = _collect_class_info(base_text)
+        except (SyntaxError, ValueError):
+            info = None
+    if base_text is None:
+        print(f"  Warning: no base content for {path}, counting candidate pairs on both sides")
+
+    # Deleted non-blank lines: comment/docstring lines are never changes by
+    # themselves; a group made entirely of them is dropped unless its lines are
+    # replaced by real code (then they are kept as the only base anchors).
+    noise_lines = comment_lines | docstr_lines
+    for del_lines, add_texts in del_groups:
+        if info is None:
+            affected.update(n for n, _ in del_lines)
+            continue
+        if _pure_annotation_change_exempt(del_lines, add_texts, ann_ctx):
+            print(f"  Skipped {path}:{[n for n, _ in del_lines]} (pure type annotation change, not counted)")
+            continue
+        code_dels = [n for n, _ in del_lines if n not in noise_lines]
+        if code_dels:
+            affected.update(code_dels)
+            dropped = [n for n, _ in del_lines if n in noise_lines]
+            if dropped:
+                print(f"  Skipped {path}:{dropped} (comment/docstring lines, not counted)")
+            continue
+        adds = [t for t in add_texts if t.strip()]
+        pure = not adds or all(t.strip().startswith("#") for t in adds) or not _looks_like_code(adds)
+        if pure:
+            print(f"  Skipped {path}:{[n for n, _ in del_lines]} (pure comment/docstring change, not counted)")
+        else:
+            # comment/docstring lines replaced by real code: keep as change anchors
+            affected.update(n for n, _ in del_lines)
+
+    for a, b, kind, add_indent, introduces_def, adds_all_comment, hunk_base_end, add_texts in pairs:
+        if info is None:
+            if a >= 1:
+                affected.add(a)
+            if b <= hunk_base_end:
+                affected.add(b)
+            continue
+        ranges, end_lines, start_lines, blanks = info
+        reason = None
+        if kind == "insert":
+            if a in docstr_lines:
+                reason = "inside a docstring"
+            elif adds_all_comment:
+                reason = "pure comment insertion"
+            else:
+                func = _innermost_func(ranges, a)
+                modifies = func is not None and (b <= func[1] or (add_indent is not None and add_indent > func[2]))
+                if not modifies:
+                    if _between_definitions(a, b, end_lines, start_lines, blanks):
+                        reason = "between function/class definitions"
+                    elif introduces_def:
+                        reason = "belongs to a newly added function/class"
+            if reason is None:
+                reason = _pure_annotation_insert_reason(add_texts, a, b, add_indent, ann_ctx)
+        # kind == 'blank': isolated blank deletion == one-line insertion
+        elif _between_definitions(a, b, end_lines, start_lines, blanks):
+            reason = "between function/class definitions"
+        if reason is None:  # kept: record the line above only
+            if a >= 1:
+                affected.add(a)
+        else:
+            print(f"  Skipped {path}:{a}-{b} ({reason}, not counted)")
 
 
 class CodeChangeDetector:
@@ -517,101 +1067,98 @@ class CodeChangeDetector:
 
         return changed_files
 
-    def parse_git_diff(self, diff_output: str, filter_prefix: str | None = None) -> dict[str, set[int]]:
+    def parse_git_diff(
+        self,
+        diff_output: str,
+        base_content_getter=None,
+    ) -> dict[str, set[int]]:
         """
-        Parse git diff output, extract changed line numbers
+        Parse git diff output, extract affected base (pre-change) line numbers.
 
-        Supports two diff formats:
-        1. unified diff: @@ -10,3 +10,4 @@ context
-        2. PR diff
+        Rules:
+        - Deleted lines: record the deleted base line itself, nothing more.
+        - Pure comment/docstring changes are excluded (needs base content):
+          a deletion group where every deleted line is a comment/docstring line
+          and the additions are comments or doc prose; an insertion inside a
+          docstring or consisting of comment lines only.
+        - Pure type annotation changes are excluded in every direction (needs
+          base content): inserted, deleted or replaced lines that are all
+          simple-name valueless annotations (``x: int``) in a scope where they
+          are provably inert - function bodies (never evaluated), plain
+          classes (no decorators, no TypedDict/Protocol/Enum/BaseModel/
+          NamedTuple base) or module level, unless the annotation expression
+          may have runtime side effects (calls, Annotated metadata) and the
+          file has no ``from __future__ import annotations``.
+        - Isolated blank-line deletion (neighbours not deleted): treated as a
+          one-line insertion -> candidate pair (line above, line below).
+        - Pure insertions and blank-deletion pairs are classified via ast of
+          the base file (needs base_content_getter):
+          1. modifies an existing function -> record the line above only;
+          2. sits between two function/class definitions -> excluded;
+          3. inserted text belongs to a newly added def/class -> excluded;
+          4. otherwise (module-level statements) -> record the line above only.
+        - Without base content (or non-parseable Python) pairs fall back to
+          counting both sides, bounded by the hunk's base range.
 
         Args:
             diff_output: diff content
-            filter_prefix: only keep files with this prefix
-                (e.g., '{REPO_NAME}/' filters product code, defaults to REPO_NAME)
+            base_content_getter: optional callable(repo-relative-path -> str | None)
+                returning the base file content for ast classification
 
         Returns:
-            {filepath: {lineno, ...}} - set of changed line numbers in the new file
+            {filepath: {lineno, ...}} - set of affected base line numbers,
+            .py files under '{REPO_NAME}/' only, with the prefix stripped.
+            Renamed and deleted files are excluded: they are matched at file
+            level via detect_renames() (see parse_pr_diff_file/main).
         """
+        filter_prefix = f"{REPO_NAME}/"
+        renamed_files, deleted_files = self.detect_renames(diff_output)
+        renamed_new_paths = set(renamed_files.values())
+        deleted_paths = set(deleted_files)
+
+        files, pending, del_groups = _parse_diff_base_lines(diff_output)
+
         changed_files = {}
-        current_file = None
-
-        # Default to REPO_NAME as filter prefix
-        if filter_prefix is None:
-            filter_prefix = f"{REPO_NAME}/"
-
-        # Parse mode: line by line, precisely calculate each changed line number in the new file
-        for raw_line in diff_output.split("\n"):
-            line = raw_line.rstrip("\r")
-            # New file starts
-            if line.startswith("diff --git"):
+        for path, lines in files.items():
+            # Renamed/deleted files go through file-level matching, skip line-level parsing
+            if path in renamed_new_paths or path in deleted_paths:
                 continue
+            # Filter: only keep product code (exclude test files, etc.)
+            if not path.startswith(filter_prefix):
+                continue
+            if not path.endswith(".py"):
+                continue
+            # Normalize path: remove the '{REPO_NAME}/' prefix
+            key = path[len(filter_prefix) :]
+            changed_files[key] = lines
+            pairs = pending.get(path) or []
+            groups = del_groups.get(path) or []
+            if pairs or groups:
+                base_text = base_content_getter(path) if base_content_getter else None
+                _classify_candidate_pairs(lines, pairs, groups, base_text, path)
 
-            # File path
-            elif line.startswith("+++ b/") or line.startswith("--- a/"):
-                path = line[6:].strip()
-                # Remove a/ or b/ prefix
-                if path.startswith("a/") or path.startswith("b/"):
-                    path = path[2:]
-                # Filter: only keep paths with specified prefix (exclude test files, etc.)
-                if filter_prefix and not path.startswith(filter_prefix):
-                    current_file = None
-                    continue
-                # Normalize path: remove filter_prefix prefix
-                if filter_prefix and path.startswith(filter_prefix):
-                    path = path[len(filter_prefix) :]
-                if not path.endswith(".py"):
-                    continue
-                current_file = path
-                if current_file not in changed_files:
-                    changed_files[current_file] = set()
+        # Drop files that end up with no affected code lines (e.g. pure comment changes)
+        return {k: v for k, v in changed_files.items() if v}
 
-            # hunk header: @@ -old_start,old_count +new_start,new_count @@
-            elif line.startswith("@@") and current_file:
-                # Parse: @@ -100,10 +100,12 @@
-                match = re.search(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", line)
-                if match:
-                    old_start = int(match.group(1))
-                    old_count = int(match.group(2)) if match.group(2) else 1
-                    # Rule: start line = old_start + 2, end line = old_start + old_count - 3
-                    start_line = old_start + 2
-                    end_line = old_start + old_count - 3
-                    if end_line <= start_line:
-                        end_line = old_start + old_count
-                    # Collect all lines in hunk, check if there are new lines (starting with +)
-                    hunk_lines = []
-                    for hunk_line in diff_output.split("\n")[diff_output.split("\n").index(line) + 1 :]:
-                        if (
-                            hunk_line.startswith("@@")
-                            or hunk_line.startswith("diff --git")
-                            or hunk_line.startswith("--- a/")
-                            or hunk_line.startswith("+++ b/")
-                        ):
-                            break
-                        hunk_lines.append(hunk_line)
-                    # If no new lines starting with +, changes only include deletions, shrink range by one line
-                    has_addition = any(hline.lstrip().startswith("+") for hline in hunk_lines)
-                    if not has_addition:
-                        start_line += 1
-                        end_line -= 1
-                    for line_no in range(start_line, end_line + 1):
-                        changed_files[current_file].add(line_no)
-
-        return changed_files
-
-    def detect_renames(self, diff_output: str) -> dict[str, str]:
+    def detect_renames(self, diff_output: str) -> tuple[dict[str, str], list[str]]:
         """
-        Detect file renames in git diff output (product code only, vllm_ascend/).
+        Detect renamed and deleted files in git diff output (product code only,
+        vllm_ascend/). Both are handled the same way: file-level matching with
+        the base path, excluded from line-level parsing.
 
         Args:
             diff_output: diff content
 
         Returns:
-            {old_path: new_path} - mapping from old file path to new file path
+            Tuple of (rename_mapping, deleted_files)
+            - rename_mapping: {old_path: new_path}
+            - deleted_files: [path, ...] (base paths)
         """
         renames = {}
+        deleted = []
         current_old_path = None
         current_new_path = None
+        header_old_path = None
 
         for raw_line in diff_output.split("\n"):
             line = raw_line.rstrip("\r")
@@ -619,7 +1166,8 @@ class CodeChangeDetector:
             # Detect rename marker
             if line.startswith("rename from "):
                 current_old_path = line[12:].strip()
-            elif line.startswith("rename to "):
+                continue
+            if line.startswith("rename to "):
                 current_new_path = line[10:].strip()
                 # When we have both old and new path, record the rename
                 if current_old_path and current_new_path:
@@ -631,30 +1179,46 @@ class CodeChangeDetector:
                         renames[old_path] = new_path
                     current_old_path = None
                     current_new_path = None
+                continue
 
-        return renames
+            # Detect deleted file via '--- a/path' + '+++ /dev/null'
+            if line.startswith("--- "):
+                header_old_path = line[4:].strip()
+                if header_old_path.startswith("a/"):
+                    header_old_path = header_old_path[2:]
+            elif line.startswith("+++ "):
+                if line[4:].strip() == "/dev/null" and header_old_path and header_old_path.startswith(f"{REPO_NAME}/"):
+                    deleted.append(header_old_path)
+                header_old_path = None
 
-    def parse_pr_diff_file(self, diff_file_path: str) -> tuple[dict[str, set[int]], dict[str, str]]:
+        return renames, deleted
+
+    def parse_pr_diff_file(
+        self, diff_file_path: str, base_content_getter=None
+    ) -> tuple[dict[str, set[int]], dict[str, str], list[str]]:
         """
-        Parse changed line numbers and detect renames from PR diff file.
+        Parse changed line numbers, renames and deleted files from PR diff file.
 
         Args:
             diff_file_path: diff file path
+            base_content_getter: optional callable(repo-relative-path -> str | None)
+                returning the base file content for ast classification
 
         Returns:
-            Tuple of (changed_files_with_lines, rename_mapping)
+            Tuple of (changed_files_with_lines, rename_mapping, deleted_files)
             - changed_files_with_lines: {filepath: {lineno, ...}}
             - rename_mapping: {old_path: new_path}
+            - deleted_files: [path, ...]
         """
         try:
             with open(diff_file_path, encoding="utf-8") as f:
                 diff_content = f.read()
-            changed_files = self.parse_git_diff(diff_content)
-            renames = self.detect_renames(diff_content)
-            return changed_files, renames
+            changed_files = self.parse_git_diff(diff_content, base_content_getter=base_content_getter)
+            renames, deleted_files = self.detect_renames(diff_content)
+            return changed_files, renames, deleted_files
         except Exception as e:
             print(f"Warning: Failed to read diff file: {e}")
-            return {}, {}
+            return {}, {}, []
 
 
 class FunctionParser:
@@ -837,20 +1401,8 @@ class TestSelector:
             changed_functions = {}  # {filepath: {func_name: Set[linenos]}}
 
             for changed_file, changed_lines in normalized_changed.items():
-                possible_paths = [
-                    Path(source_dir) / changed_file,
-                    Path(source_dir) / REPO_NAME / changed_file,
-                    Path(source_dir) / "covstub" / REPO_NAME / changed_file,
-                    Path(source_dir) / changed_file.replace("/", os.sep),
-                    Path(source_dir) / REPO_NAME / changed_file.replace("/", os.sep),
-                    Path(source_dir) / "covstub" / REPO_NAME / changed_file.replace("/", os.sep),
-                ]
-
-                source_file = None
-                for p in possible_paths:
-                    if p.exists():
-                        source_file = str(p)
-                        break
+                source_path = Path(source_dir) / REPO_NAME / changed_file
+                source_file = str(source_path) if source_path.exists() else None
 
                 if not source_file:
                     continue
@@ -883,20 +1435,8 @@ class TestSelector:
 
                         for func_name in func_to_lines:
                             # Get full line range of this function
-                            possible_paths = [
-                                Path(source_dir) / changed_file,
-                                Path(source_dir) / REPO_NAME / changed_file,
-                                Path(source_dir) / "covstub" / REPO_NAME / changed_file,
-                                Path(source_dir) / changed_file.replace("/", os.sep),
-                                Path(source_dir) / REPO_NAME / changed_file.replace("/", os.sep),
-                                Path(source_dir) / "covstub" / REPO_NAME / changed_file.replace("/", os.sep),
-                            ]
-
-                            source_file = None
-                            for p in possible_paths:
-                                if p.exists():
-                                    source_file = str(p)
-                                    break
+                            source_path = Path(source_dir) / REPO_NAME / changed_file
+                            source_file = str(source_path) if source_path.exists() else None
 
                             if not source_file:
                                 continue
@@ -984,20 +1524,8 @@ class TestSelector:
             changed_functions = {}  # {filepath: {func_name: Set[linenos]}}
 
             for changed_file, changed_lines in normalized_changed.items():
-                possible_paths = [
-                    Path(source_dir) / changed_file,
-                    Path(source_dir) / REPO_NAME / changed_file,
-                    Path(source_dir) / "covstub" / REPO_NAME / changed_file,
-                    Path(source_dir) / changed_file.replace("/", os.sep),
-                    Path(source_dir) / REPO_NAME / changed_file.replace("/", os.sep),
-                    Path(source_dir) / "covstub" / REPO_NAME / changed_file.replace("/", os.sep),
-                ]
-
-                source_file = None
-                for p in possible_paths:
-                    if p.exists():
-                        source_file = str(p)
-                        break
+                source_path = Path(source_dir) / REPO_NAME / changed_file
+                source_file = str(source_path) if source_path.exists() else None
 
                 if not source_file:
                     continue
@@ -1032,20 +1560,8 @@ class TestSelector:
 
                     for func_name in func_to_lines:
                         # Get full line range of this function
-                        possible_paths = [
-                            Path(source_dir) / changed_file,
-                            Path(source_dir) / REPO_NAME / changed_file,
-                            Path(source_dir) / "covstub" / REPO_NAME / changed_file,
-                            Path(source_dir) / changed_file.replace("/", os.sep),
-                            Path(source_dir) / REPO_NAME / changed_file.replace("/", os.sep),
-                            Path(source_dir) / "covstub" / REPO_NAME / changed_file.replace("/", os.sep),
-                        ]
-
-                        source_file = None
-                        for p in possible_paths:
-                            if p.exists():
-                                source_file = str(p)
-                                break
+                        source_path = Path(source_dir) / REPO_NAME / changed_file
+                        source_file = str(source_path) if source_path.exists() else None
 
                         if not source_file:
                             continue
@@ -1178,7 +1694,8 @@ class TestSelector:
                 line_str = self._format_line_range(sorted(lines))
                 print(f"    - {filepath}: {line_str}")
 
-    def _format_line_range(self, lines: list[int]) -> str:
+    @staticmethod
+    def _format_line_range(lines: list[int]) -> str:
         """Compress line number list into range representation"""
         if not lines:
             return ""
@@ -1246,10 +1763,6 @@ def main():
     )
     parser.add_argument("--disable-function-match", action="store_true", help="Disable function-level matching")
     parser.add_argument(
-        "--enable-file-match", action="store_true", default=True, help="Enable file-level matching (default on)"
-    )
-    parser.add_argument("--disable-file-match", action="store_true", help="Disable file-level matching")
-    parser.add_argument(
         "--skip-imports",
         action="store_true",
         help="Skip import statement lines (only effective for function-level matching, default off)",
@@ -1260,7 +1773,6 @@ def main():
     # Process granularity switches: disable takes precedence over enable
     args.enable_line_match = not args.disable_line_match
     args.enable_function_match = not args.disable_function_match
-    args.enable_file_match = not args.disable_file_match
 
     # 1. Build or load test case mapping
     selector = CoverageSelector(args.coverage_dir, args.source_dir)
@@ -1318,7 +1830,14 @@ def main():
         github_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
 
         def _github_request(url: str) -> urllib.request.Request:
-            headers = {"Accept": "application/vnd.github.v3+json"}
+            # Descriptive User-Agent is required by the GitHub API; the urllib
+            # default (Python-urllib/x.y) is a generic bot signature that edge
+            # layers are more likely to throttle with 5xx.
+            headers = {
+                "Accept": "application/vnd.github.v3+json",
+                "User-Agent": "vllm-ascend-ci-test-selector/1.0",
+                "X-GitHub-Api-Version": "2022-11-28",
+            }
             if github_token:
                 headers["Authorization"] = f"Bearer {github_token}"
             return urllib.request.Request(url, headers=headers)
@@ -1331,6 +1850,7 @@ def main():
         # Use cross-platform temp directory
         diff_file = os.path.join(tempfile.gettempdir(), "pr.diff")
         max_retries = 3
+        base_sha = None
 
         for attempt in range(1, max_retries + 1):
             print(f"  Attempt {attempt}/{max_retries} to get PR diff via GitHub API...")
@@ -1340,6 +1860,7 @@ def main():
                 with urllib.request.urlopen(req, timeout=30, context=ssl_context) as response:
                     pr_data = json.loads(response.read().decode())
                     diff_url = pr_data.get("diff_url")
+                    base_sha = pr_data.get("base", {}).get("sha")
 
                 if not diff_url:
                     raise Exception("Cannot get diff URL")
@@ -1357,9 +1878,26 @@ def main():
                 if attempt == max_retries:
                     print(f"  All {max_retries} attempts failed, exiting")
                     exit(1)
-                time.sleep(1)
+                print("  Waiting 30s before retry...")
+                time.sleep(30)
 
         print(f"  PR diff saved to: {diff_file}")
+
+        def _fetch_base_content(path: str) -> str | None:
+            """Fetch base (pre-change) file content via GitHub contents API"""
+            content_url = f"https://api.github.com/repos/{repo}/contents/{urllib.parse.quote(path)}?ref={base_sha}"
+            try:
+                req = _github_request(content_url)
+                with urllib.request.urlopen(req, timeout=30, context=ssl_context) as response:
+                    data = json.loads(response.read().decode())
+                if data.get("encoding") == "base64":
+                    return base64.b64decode(data["content"]).decode("utf-8")
+            except Exception as e:
+                print(f"  Warning: Failed to fetch base content for {path}: {e}")
+            return None
+
+        # Only usable when the PR base sha was fetched successfully
+        base_content_getter = _fetch_base_content if base_sha else None
     else:
         # Get from file comparison (default)
         change_detector.scan_source_files()
@@ -1385,11 +1923,14 @@ def main():
         print("\n=== CSRC Directory Changes Detected - Running Full Test Suite ===")
     else:
         renames: dict[str, str] = {}
+        deleted_files: list[str] = []
         if args.github_pr and diff_file:
-            changed_files_with_lines, renames = change_detector.parse_pr_diff_file(diff_file)
+            changed_files_with_lines, renames, deleted_files = change_detector.parse_pr_diff_file(
+                diff_file, base_content_getter=base_content_getter
+            )
             print(f"Parsed {len(changed_files_with_lines)} changed files:")
             for file_path, line_set in changed_files_with_lines.items():
-                print(f"  {file_path}")
+                print(f"  {REPO_NAME}/{file_path}: {TestSelector._format_line_range(list(line_set))}")
 
             # detect_renames already filters to vllm_ascend/ prefix only (product code renames)
             if renames:
@@ -1397,18 +1938,21 @@ def main():
                 for old_path, new_path in renames.items():
                     print(f"  {old_path} -> {new_path}")
 
-        if changed_files_with_lines:
+            if deleted_files:
+                print(
+                    f"\n=== Detected {len(deleted_files)} Product Code Deleted File(s) - Using File-Level Matching ==="
+                )
+                for path in deleted_files:
+                    print(f"  {path}")
+
+        if changed_files_with_lines or renames or deleted_files:
             # Select test cases by precision matching
             print("\n=== Selecting Affected Test Cases ===")
             test_selector = TestSelector(selector.test_case_map)
 
-            # For renamed files, we need file-level matching to cover both old and new paths
-            # Filter out renamed new paths from changed files
-            if renames:
-                renamed_new_paths = set(renames.values())
-                normal_files = {k: v for k, v in changed_files_with_lines.items() if k not in renamed_new_paths}
-            else:
-                normal_files = changed_files_with_lines
+            # Renamed files are already excluded from changed_files by
+            # parse_git_diff; they are matched at file level below
+            normal_files = changed_files_with_lines
 
             # Process normal files with precision matching
             selected: list[tuple[str, dict, int]] = []
@@ -1420,31 +1964,34 @@ def main():
                     source_dir=args.source_dir,
                     enable_line_match=args.enable_line_match,
                     enable_function_match=args.enable_function_match,
-                    enable_file_match=args.enable_file_match,
+                    enable_file_match=False,
                     enable_skip_imports=args.skip_imports,
                     enable_dedup=args.dedup,
                 )
 
-            # Process renamed files: use OLD path for file-level matching
-            for old_path, new_path in renames.items():
-                rename_files = {old_path: set()}
-                rename_selected, rename_expand = test_selector.select_tests(
-                    rename_files,
+            # Process renamed/deleted files: file-level matching with the base path
+            file_level_paths = [(p, f"{p} -> {n}") for p, n in renames.items()]
+            file_level_paths += [(p, p) for p in deleted_files]
+            for path, label in file_level_paths:
+                fl_selected, fl_expand = test_selector.select_tests(
+                    {path: set()},
                     min_affected_lines=args.min_affected,
                     source_dir=args.source_dir,
-                    enable_line_match=False,  # Disable line match for renames
-                    enable_function_match=False,  # Disable function match for renames
-                    enable_file_match=True,  # Enable file match for renames
+                    enable_line_match=False,  # Disable line match for file-level matching
+                    enable_function_match=False,  # Disable function match for file-level matching
+                    enable_file_match=True,  # Enable file match for renamed/deleted files
                     enable_skip_imports=args.skip_imports,
                     enable_dedup=args.dedup,
                 )
-                selected.extend(rename_selected)
-                expand_reason += rename_expand
-                # Print file-level matched test cases for this rename
-                if rename_selected:
-                    print(f"\n=== File-Level Matched Tests for Renamed File: {old_path} -> {new_path} ===")
-                    for test_name, _, _ in rename_selected:
+                selected.extend(fl_selected)
+                expand_reason += fl_expand
+                # Print file-level matched test cases (even when empty, for diagnosis)
+                print(f"\n=== File-Level Matched Tests for {label} ===")
+                if fl_selected:
+                    for test_name, _, _ in fl_selected:
                         print(f"  {test_name}")
+                else:
+                    print("  (0 tests matched: no coverage data for this path in test_case_map)")
 
             # Deduplicate
             seen = set()

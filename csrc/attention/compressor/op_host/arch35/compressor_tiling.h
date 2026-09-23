@@ -106,10 +106,11 @@ static const std::string CMP_KV_NAME = "cmp_kv";
 
 static std::string DataTypeToSerialString(ge::DataType type);
 
+// Keep host validation aligned with the selected TH/BF16/FP32-RoPE templates.
 const std::map<std::string, std::vector<ge::DataType>> DTYPE_SUPPORT_MAP = {
-    {X_NAME,                  {ge::DT_BF16, ge::DT_FLOAT16}},
-    {WKV_NAME,                {ge::DT_BF16, ge::DT_FLOAT16}},
-    {WGATE_NAME,              {ge::DT_BF16, ge::DT_FLOAT16}},
+    {X_NAME,                  {ge::DT_BF16}},
+    {WKV_NAME,                {ge::DT_BF16}},
+    {WGATE_NAME,              {ge::DT_BF16}},
     {STATE_CACHE_NAME,        {ge::DT_FLOAT}},
     {APE_NAME,                {ge::DT_FLOAT}},
     {NORM_WEIGHT_NAME,        {ge::DT_FLOAT}},
@@ -119,11 +120,11 @@ const std::map<std::string, std::vector<ge::DataType>> DTYPE_SUPPORT_MAP = {
     {CU_SEQLENS_NAME,         {ge::DT_INT32}},
     {SEQUSED_NAME,            {ge::DT_INT32}},
     {START_POS_NAME,          {ge::DT_INT32}},
-    {CMP_KV_NAME,             {ge::DT_BF16, ge::DT_FLOAT16}}
+    {CMP_KV_NAME,             {ge::DT_BF16}}
 };
 
 const std::map<std::string, std::vector<uint32_t>> DIM_NUM_MAP = {
-    {X_NAME,                  {COMPRESSOR_DIM_NUM_2, COMPRESSOR_DIM_NUM_3}},
+    {X_NAME,                  {COMPRESSOR_DIM_NUM_2}},
     {WKV_NAME,                {COMPRESSOR_DIM_NUM_2}},
     {WGATE_NAME,              {COMPRESSOR_DIM_NUM_2}},
     {STATE_CACHE_NAME,        {COMPRESSOR_DIM_NUM_3}},
@@ -223,9 +224,9 @@ struct CompressorBaseShapeInfo {
 const std::vector<int> ROPE_HEAD_DIM {64};
 const std::vector<int> COFF {1, 2};
 const std::vector<int> CMP_RATIO {2, 4, 8, 16, 32, 64, 128};
-const std::vector<int> ROTARY_MODE {1, 2};
+const std::vector<int> ROTARY_MODE {2};
 const std::vector<uint32_t> HEAD_DIM {128, 512};
-const std::vector<int> CACHE_MODE {1, 2};
+const std::vector<int> CACHE_MODE {1};
 
 enum class ROTARY_MODE:uint8_t {
     HALF = 1,

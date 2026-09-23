@@ -26,7 +26,12 @@ from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
     AscendExtractHiddenStatesProposer,
 )
+from vllm_ascend.spec_decode.gemma4_proposer import AscendGemma4Proposer
 from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
+from vllm_ascend.spec_decode.multi_kv_cache_group_proposer import (
+    AscendMultiKVCacheGroupMTPProposer,
+    is_multi_kv_cache_group_mtp,
+)
 from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
 from vllm_ascend.spec_decode.step3p5 import AscendStep3p5MTPProposer
@@ -44,10 +49,14 @@ def get_spec_decode_method(method, vllm_config, device, runner):
         return AscendMedusaProposer(vllm_config, device)
     elif method == "dspark":
         return AscendDSparkProposer(vllm_config, device, runner)
+    elif method == "mtp" and vllm_config.speculative_config.use_gemma4_mtp():
+        return AscendGemma4Proposer(vllm_config, device, runner)
     elif method in ("eagle", "eagle3", "mtp"):
         speculative_config = vllm_config.speculative_config
         if speculative_config is not None and speculative_config.use_step3p5_mtp():
             return AscendStep3p5MTPProposer(vllm_config, device, runner)
+        if method == "mtp" and is_multi_kv_cache_group_mtp(vllm_config):
+            return AscendMultiKVCacheGroupMTPProposer(vllm_config, device, runner)
         return AscendEagleProposer(vllm_config, device, runner)
     elif method == "dflash":
         if is_dflash2_draft(vllm_config.speculative_config):

@@ -56,6 +56,10 @@ if "torch" not in sys.modules and importlib.util.find_spec("torch") is None:
     sys.modules["torch"] = _torch
     sys.modules["torch.distributed"] = _torch.distributed  # type: ignore[attr-defined]
 
+_torch_module = sys.modules.get("torch") or importlib.import_module("torch")
+if not hasattr(_torch_module, "npu"):
+    _torch_module.npu = MagicMock()  # type: ignore[attr-defined]
+
 if "torch_npu" not in sys.modules:
     sys.modules["torch_npu"] = MagicMock()
     sys.modules["torch_npu._inductor"] = MagicMock()
@@ -84,6 +88,7 @@ _vllm_mock_modules = [
     "vllm.model_executor.layers.linear",
     "vllm.model_executor.layers.quantization",
     "vllm.platforms",
+    "vllm.platforms.interface",
     "vllm.utils",
     "vllm.utils.hashing",
     "vllm.utils.math_utils",
@@ -407,7 +412,7 @@ for _mod_name in [
     "yr.datasystem.object_client",
     "zmq",
 ]:
-    if _mod_name not in sys.modules:
+    if _mod_name not in sys.modules and (_mod_name != "zmq" or importlib.util.find_spec("zmq") is None):
         sys.modules[_mod_name] = MagicMock()
 
 # ---------------------------------------------------------------------------
