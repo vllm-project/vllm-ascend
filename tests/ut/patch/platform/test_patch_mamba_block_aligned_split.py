@@ -15,10 +15,8 @@
 import inspect
 from types import SimpleNamespace
 
-import pytest
 import vllm.v1.core.sched.scheduler as scheduler_module
 
-import vllm_ascend.patch.platform.patch_mamba_block_aligned_split as mod
 from vllm_ascend.patch.platform.patch_mamba_block_aligned_split import (
     _mamba_block_aligned_split,
     _original_mamba_block_aligned_split,
@@ -32,9 +30,13 @@ def _scheduler(
     is_kv_producer: bool | None = None,
     uses_sparse_index_kpool: bool = False,
 ):
-    kv_transfer_config = None if is_kv_consumer is None else SimpleNamespace(is_kv_consumer=is_kv_consumer)
-    if kv_transfer_config is not None and is_kv_producer is not None:
-        kv_transfer_config.is_kv_producer = is_kv_producer
+    if is_kv_consumer is None:
+        kv_transfer_config = None
+    else:
+        role = {"is_kv_consumer": is_kv_consumer}
+        if is_kv_producer is not None:
+            role["is_kv_producer"] = is_kv_producer
+        kv_transfer_config = SimpleNamespace(**role)
     # vLLM main added `mamba_has_prefill_checkpoint_blocks` (gated by
     # MambaSpec.num_prefill_checkpoint_blocks) to the boundary split; v0.28.0
     # does not define it.
@@ -105,6 +107,25 @@ def test_non_pd_request_retains_upstream_mamba_boundary_split():
     )
 
     assert result == 5
+
+
+def test_partial_hit_does_not_stop_at_shared_prefix_junction():
+    request = _request(
+        num_computed_tokens=0,
+        num_prompt_tokens=2000,
+        num_tokens=2000,
+    )
+    request.shared_prefix_boundary = 600
+
+    result = _mamba_block_aligned_split(
+        _scheduler(is_kv_consumer=False),
+        request,
+        num_new_tokens=1000,
+    )
+
+    # Normal alignment ends at 768. The upstream junction stop would cut this
+    # chunk at 384 and create a cold-path-absent recurrent-kernel boundary.
+    assert result == 768
 
 
 def test_pd_consumer_preserves_window_after_external_cache_hit():
@@ -208,95 +229,38 @@ def test_sparse_index_kpool_pd_consumer_still_preserves_verifier_window():
 
 def test_patch_is_registered_with_upstream_signature():
     registered = scheduler_module.Scheduler._mamba_block_aligned_split
-    # The producer/standalone EAGLE-backoff suppression is applied inline
-    # inside _mamba_block_aligned_split; no separate wrapper remains.
+    # The EAGLE-backoff suppression for producers and standalone instances is
+    # inlined in the split itself (``_skips_eagle_block_drop``), so the
+    # method is replaced directly - no outer wrapper is registered.
     assert registered is _mamba_block_aligned_split
     assert inspect.signature(_mamba_block_aligned_split) == inspect.signature(_original_mamba_block_aligned_split)
 
 
-# ---------------------------------------------------------------------------
-# Inline producer/standalone suppression: the drop knobs are cleared for the
-# duration of the upstream call and restored afterwards. The original is
-# monkeypatched so the observed knobs are version-independent.
-# ---------------------------------------------------------------------------
-
-
-def _fake_original_recording(observed: dict):
-    def _fake_original(self, request, num_new_tokens, nlc=0, nec=0):
-        observed["use_eagle"] = self.use_eagle
-        observed["use_eagle_block_drop"] = getattr(self, "use_eagle_block_drop", None)
-        return 42
-
-    return _fake_original
-
-
-def test_producer_clears_drop_knobs_around_upstream_call(monkeypatch):
-    observed: dict[str, bool | None] = {}
-    monkeypatch.setattr(mod, "_original_mamba_block_aligned_split", _fake_original_recording(observed))
-    scheduler = _scheduler(is_kv_consumer=False, is_kv_producer=True)
-    result = _mamba_block_aligned_split(scheduler, _request(), num_new_tokens=8)
-    assert result == 42
-    # The original sees the EAGLE drop disabled...
-    assert observed == {"use_eagle": False, "use_eagle_block_drop": False}
-    # ...and the scheduler's own knobs are restored afterwards.
-    assert scheduler.use_eagle is True
-    assert scheduler.use_eagle_block_drop is True
-
-
-def test_standalone_clears_drop_knobs_around_upstream_call(monkeypatch):
-    observed: dict[str, bool | None] = {}
-    monkeypatch.setattr(mod, "_original_mamba_block_aligned_split", _fake_original_recording(observed))
-    scheduler = _scheduler(is_kv_consumer=None)
-    result = _mamba_block_aligned_split(scheduler, _request(), num_new_tokens=8)
-    assert result == 42
-    assert observed == {"use_eagle": False, "use_eagle_block_drop": False}
-    assert scheduler.use_eagle is True
-    assert scheduler.use_eagle_block_drop is True
-
-
-def test_consumer_keeps_drop_knobs_around_upstream_call(monkeypatch):
-    observed: dict[str, bool | None] = {}
-    monkeypatch.setattr(mod, "_original_mamba_block_aligned_split", _fake_original_recording(observed))
-    # Decode consumer with a computed prefix: the verifier window is preserved
-    # by the early return, the original is never reached.
-    scheduler = _scheduler(is_kv_consumer=True)
-    result = _mamba_block_aligned_split(scheduler, _request(), num_new_tokens=8)
-    assert result == 8
-    assert observed == {}
-
-    # Cold kv_both prefill reaches the original with the knobs untouched.
-    scheduler = _scheduler(is_kv_consumer=True, is_kv_producer=True)
+def test_producer_cold_prefill_suppresses_eagle_backoff():
     result = _mamba_block_aligned_split(
-        scheduler,
-        _request(num_computed_tokens=0),
-        num_new_tokens=8,
+        _scheduler(is_kv_consumer=False, is_kv_producer=True),
+        _request(
+            num_computed_tokens=0,
+            num_prompt_tokens=4800,
+            num_tokens=4800,
+        ),
+        num_new_tokens=4800,
     )
-    assert result == 42
-    assert observed == {"use_eagle": True, "use_eagle_block_drop": True}
+
+    # Without the backoff the chunk reaches the final full-page boundary
+    # (4608 = 12 x 384) instead of stopping one verifier block short (4224).
+    assert result == 4608
 
 
-def test_producer_restores_drop_knobs_on_exception(monkeypatch):
-    def _boom(self, request, num_new_tokens, nlc=0, nec=0):
-        raise RuntimeError("boom")
-
-    monkeypatch.setattr(mod, "_original_mamba_block_aligned_split", _boom)
-    scheduler = _scheduler(is_kv_consumer=False, is_kv_producer=True)
-    with pytest.raises(RuntimeError, match="boom"):
-        _mamba_block_aligned_split(scheduler, _request(), num_new_tokens=8)
-    assert scheduler.use_eagle is True
-    assert scheduler.use_eagle_block_drop is True
-
-
-def test_producer_handles_missing_drop_attributes(monkeypatch):
-    monkeypatch.setattr(
-        mod,
-        "_original_mamba_block_aligned_split",
-        lambda self, request, num_new_tokens, nlc=0, nec=0: 42,
+def test_standalone_cold_prefill_suppresses_eagle_backoff():
+    result = _mamba_block_aligned_split(
+        _scheduler(is_kv_consumer=None),
+        _request(
+            num_computed_tokens=0,
+            num_prompt_tokens=4800,
+            num_tokens=4800,
+        ),
+        num_new_tokens=4800,
     )
-    scheduler = _scheduler(is_kv_consumer=False, is_kv_producer=True)
-    del scheduler.use_eagle
-    del scheduler.use_eagle_block_drop
-    result = _mamba_block_aligned_split(scheduler, _request(), num_new_tokens=8)
-    assert result == 42
-    assert not hasattr(scheduler, "use_eagle")
-    assert not hasattr(scheduler, "use_eagle_block_drop")
+
+    assert result == 4608

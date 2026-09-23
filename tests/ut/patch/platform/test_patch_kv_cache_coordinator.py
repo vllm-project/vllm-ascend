@@ -146,6 +146,27 @@ def test_no_eagle_group_when_speculative_decoding_disabled(monkeypatch):
     assert all(not manager.use_eagle for manager in coordinator.single_type_managers)
 
 
+def test_retention_interval_uses_effective_v029_kv_cache_config(monkeypatch):
+    monkeypatch.setattr(mod, "BlockPool", _FakeBlockPool)
+    monkeypatch.setattr(mod, "get_manager_for_kv_cache_spec", _fake_manager_factory)
+    kv_cache_config = _hybrid_config()
+    kv_cache_config.prefix_cache_retention_interval = 256
+
+    coordinator = AscendHybridKVCacheCoordinator(
+        kv_cache_config=kv_cache_config,
+        max_model_len=4096,
+        use_eagle=False,
+        enable_caching=True,
+        enable_kv_cache_events=False,
+        dcp_world_size=1,
+        pcp_world_size=1,
+        hash_block_size=HASH_BLOCK_SIZE,
+        scheduler_block_size=HASH_BLOCK_SIZE,
+    )
+
+    assert coordinator.retention_interval == 256
+
+
 def test_explicit_eagle_group_marker_takes_precedence(monkeypatch):
     # DeepSeek-V4-style annotation path: a flagged group must be respected
     # even when it is the mamba group (fallback must not overwrite it).
@@ -189,7 +210,38 @@ def test_coordinator_reads_standalone_drop_exemption(monkeypatch):
     # producer, but every content-hash match is a verified local prompt
     # block, so the EAGLE drop is suppressed just like on the producer.
     coordinator = _make_coordinator(monkeypatch, use_eagle=True, kv_transfer_config=None)
+    assert coordinator.is_kv_producer is False
     assert coordinator.skips_eagle_block_drop is True
+
+
+@pytest.mark.parametrize(
+    ("max_length", "expected"),
+    [
+        (145, 144),
+        (144, 128),
+        (17, 16),
+        (16, 0),
+    ],
+)
+def test_producer_hit_cap_leaves_recompute_token(monkeypatch, max_length, expected):
+    coordinator = _make_coordinator(
+        monkeypatch,
+        use_eagle=True,
+        kv_transfer_config=_kv_transfer_config(is_kv_producer=True, is_kv_consumer=False),
+    )
+    coordinator.hash_block_size = 16
+    assert coordinator._producer_hit_cap(max_length) == expected
+
+
+@pytest.mark.parametrize("max_length", [16, 17, 144, 145])
+def test_producer_hit_cap_is_transparent_on_consumer(monkeypatch, max_length):
+    coordinator = _make_coordinator(
+        monkeypatch,
+        use_eagle=True,
+        kv_transfer_config=_kv_transfer_config(is_kv_producer=False, is_kv_consumer=True),
+    )
+    coordinator.hash_block_size = 16
+    assert coordinator._producer_hit_cap(max_length) == max_length
 
 
 @pytest.mark.parametrize(
@@ -204,6 +256,20 @@ def test_coordinator_reads_standalone_drop_exemption(monkeypatch):
 )
 def test_skips_eagle_block_drop_role_semantics(kv_transfer_config, expected):
     assert mod._skips_eagle_block_drop(kv_transfer_config) is expected
+
+
+@pytest.mark.parametrize(
+    ("kv_transfer_config", "expected"),
+    [
+        (_kv_transfer_config(is_kv_producer=True, is_kv_consumer=False), True),
+        (_kv_transfer_config(is_kv_producer=False, is_kv_consumer=True), False),
+        (_kv_transfer_config(is_kv_producer=True, is_kv_consumer=True), False),
+        (_kv_transfer_config(is_kv_producer=False, is_kv_consumer=False), False),
+        (None, False),
+    ],
+)
+def test_is_kv_producer_role_semantics(kv_transfer_config, expected):
+    assert mod._is_kv_producer(kv_transfer_config) is expected
 
 
 @pytest.mark.parametrize(
@@ -364,6 +430,9 @@ def test_per_group_lookup_matches_scheduler_call_convention():
     assert _RecordingFA.calls[-1]["max_length"] == 4095
     assert hit_lengths == (4095, 4095)
 
+
+# NOTE: the scheduler-side EAGLE-backoff suppression (fix ④) now lives
+# directly in patch_mamba_block_aligned_split.py; see its unit tests.
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

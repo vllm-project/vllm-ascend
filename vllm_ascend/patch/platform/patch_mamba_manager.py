@@ -4,9 +4,11 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 # This file is a part of the vllm-ascend project.
 #
+import os
 from collections.abc import Sequence
 
 import vllm.v1.core.single_type_kv_cache_manager as single_type_kv_cache_manager
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.single_type_kv_cache_manager import (
     BlockHashList,
     BlockPool,
@@ -14,13 +16,100 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     KVCacheSpec,
     MambaManager,
     MambaSpec,
+    SingleTypeKVCacheManager,
 )
+
+
+def _allocate_new_blocks_after_growing_request(
+    self: SingleTypeKVCacheManager,
+    request_id: str,
+    num_tokens: int,
+    num_tokens_main_model: int,
+) -> list[KVCacheBlock]:
+    """Grow the request block table before resolving partial-hit CoW.
+
+    Partial-prefix registrations are owned by the common single-type manager,
+    not only by Mamba managers.  Patch the base implementation so attention
+    and recurrent cache groups observe the same safe allocation order.
+    """
+    partial_hit_info = self._partial_hit_reqs.pop(request_id, None)
+
+    req_blocks = self.req_to_blocks[request_id]
+    num_required_blocks = cdiv(num_tokens, self.block_size)
+    num_new_blocks = num_required_blocks - len(req_blocks)
+    new_blocks: list[KVCacheBlock] = []
+    if num_new_blocks > 0:
+        new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
+        req_blocks.extend(new_blocks)
+        if self._record_new_block_ids:
+            self.new_block_ids.extend(block.block_id for block in new_blocks)
+
+    cow_blocks: list[KVCacheBlock] = []
+    if partial_hit_info is not None:
+        block_idx, source_block = partial_hit_info
+        if block_idx < len(req_blocks) and req_blocks[block_idx] is source_block and not source_block.is_null:
+            cow_block = self.block_pool.get_new_blocks(1)[0]
+            self._apply_cow(request_id, block_idx, source_block, cow_block)
+            self.new_block_ids.append(cow_block.block_id)
+            cow_blocks.append(cow_block)
+
+    return cow_blocks + new_blocks
 
 
 class AscendMambaManager(MambaManager):
     def __init__(self, kv_cache_spec: MambaSpec, block_pool: BlockPool, **kwargs) -> None:
         super().__init__(kv_cache_spec, block_pool, **kwargs)
         self.block_size = kv_cache_spec.block_size
+        # Set by AscendHybridKVCacheCoordinator from the effective
+        # --kv-transfer-config role.  Keep this scheduler-owned rather than
+        # relying on a process environment variable that can disagree with
+        # the connector role.
+        self.is_kv_producer = False
+
+    def _cache_partial_tail_block(self, *args, **kwargs):
+        if os.getenv("VLLM_ASCEND_DIAG_DISABLE_MAMBA_PARTIAL_TAIL") == "1":
+            return None
+        return super()._cache_partial_tail_block(*args, **kwargs)
+
+    def add_local_computed_blocks(
+        self,
+        request_id: str,
+        new_computed_blocks: Sequence[KVCacheBlock],
+        num_local_computed_tokens: int,
+        num_external_computed_tokens: int,
+    ) -> None:
+        """Expose an exact Mamba state boundary after a producer-local hit.
+
+        Upstream records a partial-tail offload when the boundary is produced
+        by the current request.  A hot APC hit instead starts from an existing
+        partial state block; preserve that source block for the PD connector
+        before the request's CoW allocation redirects subsequent writes.
+        """
+        partial_source = None
+        if (
+            self.is_kv_producer
+            and num_local_computed_tokens > 0
+            and num_local_computed_tokens % self.block_size != 0
+            and new_computed_blocks
+        ):
+            partial_source = new_computed_blocks[-1]
+
+        super().add_local_computed_blocks(
+            request_id,
+            new_computed_blocks,
+            num_local_computed_tokens,
+            num_external_computed_tokens,
+        )
+
+        if partial_source is not None and not partial_source.is_null:
+            self._pending_boundary_state_offloads.append(
+                (
+                    request_id,
+                    self.kv_cache_group_id,
+                    partial_source,
+                    num_local_computed_tokens,
+                )
+            )
 
     @classmethod
     def find_longest_cache_hit(
@@ -88,4 +177,5 @@ class AscendMambaManager(MambaManager):
         return num_new_blocks
 
 
+SingleTypeKVCacheManager.allocate_new_blocks = _allocate_new_blocks_after_growing_request
 single_type_kv_cache_manager.MambaManager = AscendMambaManager

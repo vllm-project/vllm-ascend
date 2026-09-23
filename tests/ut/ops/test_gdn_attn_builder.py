@@ -181,6 +181,41 @@ def _make_builder(
     return AscendGDNAttentionMetadataBuilder(spec, ["layer0"], vllm_config, device)
 
 
+@pytest.mark.parametrize(
+    ("method", "expected_mask", "expected_accepted"),
+    [
+        pytest.param("mtp", False, 1, id="qwen-mtp-keeps-short-tail-prefill"),
+        pytest.param("dspark", True, 2, id="dspark-folds-short-tail"),
+    ],
+)
+def test_spec_sized_stateful_prefill_fold_is_method_specific(
+    method: str,
+    expected_mask: bool,
+    expected_accepted: int,
+):
+    common_attn_metadata = create_common_attn_metadata(
+        BatchSpec(seq_lens=[18], query_lens=[2]),
+        block_size=16,
+        device=torch.device("cpu"),
+    )
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=1,
+    )
+    builder.vllm_config.speculative_config.method = method
+
+    masks, accepted = builder._fold_spec_sized_prefill_chunks_into_spec(
+        common_attn_metadata,
+        torch.tensor([False]),
+        torch.tensor([1], dtype=torch.int32),
+    )
+
+    assert masks.tolist() == [expected_mask]
+    assert accepted is not None
+    assert accepted.tolist() == [expected_accepted]
+
+
 def _build_attn_metadata(
     batch_spec: BatchSpec,
     *,

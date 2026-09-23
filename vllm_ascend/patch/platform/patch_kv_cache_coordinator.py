@@ -5,14 +5,13 @@ from collections.abc import Mapping
 from math import lcm
 
 import vllm
-import vllm.envs as envs_vllm
-import vllm.v1.core.kv_cache_coordinator as vllm_kv_cache_coordinator
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_coordinator import (
     HybridKVCacheCoordinator,
     KVCacheCoordinator,
     SpecGroup,
+    _validate_prefix_cache_retention_interval,
 )
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
@@ -40,6 +39,15 @@ USE_MULTI_GROUPS_KV_CACHE = True
 _orig_get_kv_cache_coordinator = vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator
 
 
+def _is_kv_producer(kv_transfer_config) -> bool:
+    """Whether this process is a pure PD prefill producer."""
+    return (
+        kv_transfer_config is not None
+        and getattr(kv_transfer_config, "is_kv_producer", False)
+        and not getattr(kv_transfer_config, "is_kv_consumer", False)
+    )
+
+
 def _skips_eagle_block_drop(kv_transfer_config) -> bool:
     """Whether the EAGLE last-block drop must be suppressed on this process.
 
@@ -56,10 +64,7 @@ def _skips_eagle_block_drop(kv_transfer_config) -> bool:
     band). Consumers and ``kv_both`` instances keep upstream behavior: they
     receive external loads whose verifier window the drop protects.
     """
-    return kv_transfer_config is None or (
-        getattr(kv_transfer_config, "is_kv_producer", False)
-        and not getattr(kv_transfer_config, "is_kv_consumer", False)
-    )
+    return kv_transfer_config is None or _is_kv_producer(kv_transfer_config)
 
 
 def _select_kv_token_budget(
@@ -141,18 +146,15 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         token_budget = _select_kv_token_budget(max_model_len, max_in_flight_tokens, max_num_batched_tokens)
         self.max_in_flight_tokens = token_budget
         self.max_num_batched_tokens = token_budget
-        self.retention_interval = getattr(envs_vllm, "VLLM_PREFIX_CACHE_RETENTION_INTERVAL", None)
-        validate_retention_interval = getattr(
-            vllm_kv_cache_coordinator,
-            "_validate_prefix_cache_retention_interval",
-            None,
+        # vLLM 0.29 resolves the environment/CLI value into KVCacheConfig.
+        # Read the effective config rather than consulting the process
+        # environment again, which would discard programmatic overrides.
+        self.retention_interval = kv_cache_config.prefix_cache_retention_interval
+        _validate_prefix_cache_retention_interval(
+            self.retention_interval,
+            self.scheduler_block_size,
+            kv_cache_config,
         )
-        if self.retention_interval is not None and validate_retention_interval is not None:
-            validate_retention_interval(
-                self.retention_interval,
-                self.scheduler_block_size,
-                kv_cache_config,
-            )
         self.block_pool = BlockPool(
             num_gpu_blocks=kv_cache_config.num_blocks,
             enable_caching=enable_caching,
@@ -247,7 +249,31 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # mamba-align pages (1536 tokens) it erases the whole shared prefix
         # of typical ~2K prompts, pinning P-side prefix hits to 0.
         kv_transfer_config = getattr(kv_cache_config, "kv_transfer_config", None)
+        self.is_kv_producer = _is_kv_producer(kv_transfer_config)
         self.skips_eagle_block_drop = _skips_eagle_block_drop(kv_transfer_config)
+        self.has_state_groups = any(isinstance(g.kv_cache_spec, MambaSpec) for g in kv_cache_config.kv_cache_groups)
+        for manager in self.single_type_managers:
+            if isinstance(manager, MambaManager):
+                manager.is_kv_producer = self.is_kv_producer
+
+    def _producer_hit_cap(self, max_cache_hit_length: int) -> int:
+        """Leave a pure prefill producer at least one token to recompute.
+
+        Mooncake truncates the last prompt token before producer scheduling.
+        A local hit covering that whole truncated prompt would consequently
+        schedule zero new tokens.  On an exact fine-grained hash boundary the
+        tail checkpoint also becomes unreachable after a one-token cap, so
+        pull back one complete match unit in that case.
+        """
+        if not (self.is_kv_producer and self.has_state_groups):
+            return max_cache_hit_length
+        if (
+            self.enable_partial_hash_hits
+            and self.hash_block_size > 0
+            and max_cache_hit_length % self.hash_block_size == 0
+        ):
+            return max(max_cache_hit_length - self.hash_block_size, 0)
+        return max(max_cache_hit_length - 1, 0)
 
     @property
     def _cache_hit_alignment_tokens(self) -> int:
@@ -371,6 +397,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         def _get_block_hashes(kv_cache_spec: KVCacheSpec) -> BlockHashList:
             return block_hashes
 
+        max_cache_hit_length = self._producer_hit_cap(max_cache_hit_length)
         num_groups = len(self.kv_cache_config.kv_cache_groups)
         hit_length = max_cache_hit_length
         longest_hit_length = 0
@@ -477,6 +504,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # producer and on standalone instances (see
         # ``self.skips_eagle_block_drop``): matched content blocks are
         # always verified prompt blocks there.
+        max_cache_hit_length = self._producer_hit_cap(max_cache_hit_length)
         num_groups = len(self.kv_cache_config.kv_cache_groups)
         hit_blocks: list[list[KVCacheBlock]] = [[] for _ in range(num_groups)]
         hit_lengths: list[int] = [0] * num_groups
