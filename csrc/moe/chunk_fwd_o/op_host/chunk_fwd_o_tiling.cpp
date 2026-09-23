@@ -103,21 +103,42 @@ ge::graphStatus Tiling4ChunkFwdO(gert::TilingContext *context)
 
     size_t workspaceOffset = ascendcPlatform.GetLibApiWorkSpaceSize();
     workspaceOffset += WORKSPACE_RSV_BYTE;
-    
+
+    // The 310P kernel (op_kernel/arch20) is fully on-chip: q@k^T, the decay/mask
+    // epilogue and attn_masked@v hand the intermediate along through L0C, UB and L1
+    // (copy_ubuf_to_cbuf), and the causal mask is built in UB once per launch. It
+    // therefore reads NONE of these five regions -- grep arch20 for "Workspace".
+    // Only 910B (arch22) still routes the intermediates through GM.
+    //
+    // The fields are still set, to the base offset, so the tiling struct stays
+    // binary-compatible with arch22 and no field is left undefined.
+    const bool needsGmIntermediates =
+        ascendcPlatform.GetSocVersion() != platform_ascendc::SocVersion::ASCEND310P;
+
     tiling.set_vWorkspaceOffset(workspaceOffset);
-    workspaceOffset += (aicCoreNum * chunkSize * vHeadDim * sizeof(float) * pingpongStages + GM_ALIGN) / GM_ALIGN * GM_ALIGN;
+    if (needsGmIntermediates) {
+        workspaceOffset += (aicCoreNum * chunkSize * vHeadDim * sizeof(float) * pingpongStages + GM_ALIGN) / GM_ALIGN * GM_ALIGN;
+    }
 
     tiling.set_hWorkspaceOffset(workspaceOffset);
-    workspaceOffset += (aicCoreNum * chunkSize * vHeadDim * sizeof(float) * pingpongStages + GM_ALIGN) / GM_ALIGN * GM_ALIGN;
+    if (needsGmIntermediates) {
+        workspaceOffset += (aicCoreNum * chunkSize * vHeadDim * sizeof(float) * pingpongStages + GM_ALIGN) / GM_ALIGN * GM_ALIGN;
+    }
 
     tiling.set_attnWorkspaceOffset(workspaceOffset);
-    workspaceOffset += (aicCoreNum * chunkSize * chunkSize * sizeof(float) * pingpongStages + GM_ALIGN) / GM_ALIGN * GM_ALIGN;
+    if (needsGmIntermediates) {
+        workspaceOffset += (aicCoreNum * chunkSize * chunkSize * sizeof(float) * pingpongStages + GM_ALIGN) / GM_ALIGN * GM_ALIGN;
+    }
 
     tiling.set_aftermaskWorkspaceOffset(workspaceOffset);
-    workspaceOffset += (aicCoreNum * chunkSize * chunkSize * sizeof(float) * pingpongStages + GM_ALIGN) / GM_ALIGN * GM_ALIGN;
+    if (needsGmIntermediates) {
+        workspaceOffset += (aicCoreNum * chunkSize * chunkSize * sizeof(float) * pingpongStages + GM_ALIGN) / GM_ALIGN * GM_ALIGN;
+    }
 
     tiling.set_maskWorkspaceOffset(workspaceOffset);
-    workspaceOffset += (chunkSize * chunkSize + GM_ALIGN) / GM_ALIGN * GM_ALIGN;
+    if (needsGmIntermediates) {
+        workspaceOffset += (chunkSize * chunkSize + GM_ALIGN) / GM_ALIGN * GM_ALIGN;
+    }
 
     workspaceOffset += WORKSPACE_RSV_BYTE;
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
