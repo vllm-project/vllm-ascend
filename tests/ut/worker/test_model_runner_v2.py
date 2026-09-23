@@ -10,7 +10,7 @@ import torch
 from vllm.config import CUDAGraphMode
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
-from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+from vllm.v1.worker.gpu.model_runner import BatchReqState, GPUModelRunner
 
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.utils import vllm_version_is
@@ -33,7 +33,85 @@ def _make_runner(need_timing: bool = True):
     runner.attn_groups = []
     runner.adaptive_verification = None
     runner.use_fia = False
+    # Set by NPUModelRunner.__init__ on real instances.
+    runner._oproj_tp_requires_graph = False
     return runner
+
+
+def _make_batch_state(computed: list[int], scheduled: list[int], prefill_lens: list[int]) -> BatchReqState:
+    num_reqs = len(computed)
+    is_prefilling = np.array(computed) < np.array(prefill_lens)
+    return BatchReqState(
+        req_ids=[f"req-{i}" for i in range(num_reqs)],
+        num_scheduled_tokens=np.array(scheduled, dtype=np.int32),
+        num_tokens=sum(scheduled),
+        idx_mapping_np=np.arange(num_reqs, dtype=np.intp),
+        prefill_len_np=np.array(prefill_lens, dtype=np.int32),
+        num_computed_prefill_tokens_np=np.array(computed, dtype=np.int32),
+        is_prefilling_np=is_prefilling,
+        has_prefill=bool(is_prefilling.any()),
+    )
+
+
+def test_recompute_scheduler_reclassifies_pd_tail_in_mixed_decode_batch():
+    runner = _make_runner()
+    runner.decode_query_len = 1
+    batch_state = _make_batch_state([127, 64], [1, 1], [128, 64])
+
+    with (
+        patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(batch_state, None)),
+        patch(
+            "vllm_ascend.worker.v2.model_runner.is_pd_decode_recompute_scheduler_enabled",
+            return_value=True,
+        ),
+    ):
+        gathered, uniform = runner.gather_batch_req_state(SimpleNamespace(), False)
+
+    np.testing.assert_array_equal(gathered.is_prefilling_np, [False, False])
+    assert gathered.has_prefill is False
+    assert uniform == 1
+
+
+@pytest.mark.parametrize(
+    ("computed", "scheduled", "enabled"),
+    [(64, 8, True), (127, 1, False)],
+)
+def test_recompute_scheduler_keeps_non_matching_prefill(computed, scheduled, enabled):
+    runner = _make_runner()
+    runner.decode_query_len = 1
+    batch_state = _make_batch_state([computed, 64], [scheduled, 1], [128, 64])
+
+    with (
+        patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(batch_state, None)),
+        patch(
+            "vllm_ascend.worker.v2.model_runner.is_pd_decode_recompute_scheduler_enabled",
+            return_value=enabled,
+        ),
+    ):
+        gathered, uniform = runner.gather_batch_req_state(SimpleNamespace(), False)
+
+    np.testing.assert_array_equal(gathered.is_prefilling_np, [True, False])
+    assert gathered.has_prefill is True
+    assert uniform is None
+
+
+def test_recompute_scheduler_supports_multi_token_decode_query():
+    runner = _make_runner()
+    runner.decode_query_len = 2
+    batch_state = _make_batch_state([126, 64], [2, 2], [128, 64])
+
+    with (
+        patch.object(GPUModelRunner, "gather_batch_req_state", return_value=(batch_state, None)),
+        patch(
+            "vllm_ascend.worker.v2.model_runner.is_pd_decode_recompute_scheduler_enabled",
+            return_value=True,
+        ),
+    ):
+        gathered, uniform = runner.gather_batch_req_state(SimpleNamespace(), False)
+
+    np.testing.assert_array_equal(gathered.is_prefilling_np, [False, False])
+    assert gathered.has_prefill is False
+    assert uniform == 2
 
 
 def test_execute_model_records_profiling_time():
@@ -389,6 +467,14 @@ def _parent_init(self, vllm_config, device, *, full_graph=False, speculative=Fal
 def test_init_without_spec_pp():
     vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(enable_eplb=False))
     ascend_config = SimpleNamespace(eplb_config=SimpleNamespace(load_collection_phase="all"))
+
+    # Complete the fake with the fields NPUModelRunner reads (mirrors FinegrainedTPConfig).
+    ascend_config.finegrained_tp_config = SimpleNamespace(
+        oproj_tensor_parallel_size=0,
+        lmhead_tensor_parallel_size=0,
+        embedding_tensor_parallel_size=0,
+        mlp_tensor_parallel_size=0,
+    )
     with (
         patch("vllm_ascend.worker.v2.model_runner.get_ascend_config", return_value=ascend_config),
         patch("vllm_ascend.worker.v2.model_runner.set_potential_max_tokens"),
@@ -425,6 +511,14 @@ def test_init_without_spec_pp():
 def test_init_spec_pp_full_graph_and_speculator():
     vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(enable_eplb=True))
     ascend_config = SimpleNamespace(eplb_config=SimpleNamespace(load_collection_phase="decode"))
+
+    # Complete the fake with the fields NPUModelRunner reads (mirrors FinegrainedTPConfig).
+    ascend_config.finegrained_tp_config = SimpleNamespace(
+        oproj_tensor_parallel_size=0,
+        lmhead_tensor_parallel_size=0,
+        embedding_tensor_parallel_size=0,
+        mlp_tensor_parallel_size=0,
+    )
     spec_pp = SimpleNamespace(needs_aux_hidden_states=True)
     speculator = SimpleNamespace()
     with (
