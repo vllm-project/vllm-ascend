@@ -96,7 +96,7 @@ class BlockTable:
         if self.dcp_world_size > 1:
             duplicate_size += num_speculative_tokens
         self.block_table = self._make_buffer(max_num_reqs * duplicate_size, logical_table_size, dtype=torch.int32)
-        self.num_blocks_per_row = np.zeros(max_num_reqs, dtype=np.int32)
+        self.num_blocks_per_row = np.zeros(max_num_reqs, dtype=np.int32)  # type: ignore[var-annotated]
         # MTP slot preparation appends up to num_speculative_tokens - 1
         # draft positions for every request beyond the scheduler token limit.
         num_mtp_draft_slots = max(num_speculative_tokens - 1, 0) * self.max_num_reqs
@@ -237,7 +237,7 @@ class BlockTable:
                 req_indices * self.max_num_blocks_per_req * self.blocks_per_phys_block + logical_block_idx
             )
 
-            block_offsets = positions % self.block_size
+            block_offsets = positions % self.block_size  # type: ignore[var-annotated]
             block_numbers = self.block_table.np.ravel()[block_table_indices]
             np.add(
                 block_numbers * self.block_size,

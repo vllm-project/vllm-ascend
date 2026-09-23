@@ -1,4 +1,5 @@
 from itertools import islice
+from typing import Any
 
 import torch
 from torch import nn
@@ -73,12 +74,18 @@ def _deepseek_v2_mla_attention_init(
     quant_config: QuantizationConfig | None = None,
     prefix: str = "",
     topk_indices_buffer: torch.Tensor | None = None,
+    index_group_builder: Any = None,
     input_size: int | None = None,
     reduce_results: bool = True,
 ) -> None:
     # 这里不能使用 super().__init__()，因为当前函数定义在原类之外，
     # 最后通过赋值的方式替换 DeepseekV2MLAAttention.__init__。
     nn.Module.__init__(self)
+
+    # vLLM #53781 threads a CUDA sparse-attention index-group builder into the
+    # MLA layers. Ascend keeps top-k handling inside its own MLA/SFA impls, so
+    # the builder is accepted for constructor compatibility and ignored.
+    del index_group_builder
 
     self.hidden_size = hidden_size
     self.qk_nope_head_dim = qk_nope_head_dim

@@ -2,6 +2,7 @@ import ast
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import MagicMock, Mock, patch
 
 import numpy as np
@@ -26,7 +27,7 @@ def _make_runner(need_timing: bool = True):
         scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(need_timing=need_timing))
     )
     runner.vllm_config = SimpleNamespace()
-    runner.kvpp = SimpleNamespace(complete_forward=lambda: None)
+    runner.kvpp = SimpleNamespace(complete_forward=lambda: None)  # type: ignore[assignment]
     runner.model_state = SimpleNamespace(kvpp_is_dummy_run=False)
     runner.execute_model_state = None
     runner.is_last_pp_rank = False
@@ -321,15 +322,27 @@ def test_prepare_inputs_preserves_pcp_tokens_and_forwards_graph_padding():
     assert len(padding_assignments) == 1
     assert ast.unparse(padding_assignments[0].value) == "max(num_tokens, batch_desc.num_tokens)"
 
-    assert len(partition_calls) == 1
-    padded_call = next(
+    # Two call forms: release forwards `padded_num_tokens=batch_desc.num_tokens`,
+    # main forwards the descriptor itself (upstream changed the signature).
+    assert len(partition_calls) == 2
+    keyword_calls = [
         call for call in partition_calls if any(keyword.arg == "padded_num_tokens" for keyword in call.keywords)
+    ]
+    descriptor_calls = [call for call in partition_calls if call not in keyword_calls]
+    assert len(keyword_calls) == 1
+    assert len(descriptor_calls) == 1
+
+    padded_num_tokens = next(
+        keyword.value for keyword in keyword_calls[0].keywords if keyword.arg == "padded_num_tokens"
     )
-    padded_num_tokens = next(keyword.value for keyword in padded_call.keywords if keyword.arg == "padded_num_tokens")
     assert isinstance(padded_num_tokens, ast.Attribute)
     assert padded_num_tokens.attr == "num_tokens"
     assert isinstance(padded_num_tokens.value, ast.Name)
     assert padded_num_tokens.value.id == "batch_desc"
+
+    descriptor_arg = descriptor_calls[0].args[2]
+    assert isinstance(descriptor_arg, ast.Name)
+    assert descriptor_arg.id == "batch_desc"
 
 
 @pytest.mark.parametrize("num_reqs,num_tokens", [(4, 4), (2, 6)])
@@ -400,7 +413,7 @@ def test_kvpp_history_ignores_padding_and_dummy_work(monkeypatch, computed, dumm
     state = default.AscendModelState.__new__(default.AscendModelState)
     state.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=1))
     state.max_model_len = 32
-    state.kvpp_runtime = runner.kvpp
+    state.kvpp_runtime = runner.kvpp  # type: ignore[assignment]
     runner.model_state = state
     batch = SimpleNamespace(
         num_reqs=2,
@@ -425,7 +438,10 @@ def test_kvpp_history_ignores_padding_and_dummy_work(monkeypatch, computed, dumm
 
     def forward(_self, _scheduler_output, **_kwargs):
         assert state.kvpp_is_dummy_run is (dummy_run or is_profile)
-        assert state.prepare_attn(batch, CUDAGraphMode.NONE, (), torch.empty(0), [], None) is metadata
+        assert (
+            state.prepare_attn(cast("AscendInputBatch", batch), CUDAGraphMode.NONE, (), torch.empty(0), [], None)
+            is metadata
+        )
         events.append("forward")
         return metadata
 
@@ -579,10 +595,8 @@ def test_sample_tokens_spec_pp_broadcasts_draft_tokens():
     runner.pp_handler = MagicMock()
     with patch.object(GPUModelRunner, "sample_tokens", return_value="out"):
         assert runner.sample_tokens("g") == "out"
-    if vllm_version_is("0.29.0"):
-        runner.pp_handler.broadcast_draft_tokens.assert_called_once_with()
-    else:
-        runner.pp_handler.broadcast_draft_tokens.assert_not_called()
+    runner.pp_handler.broadcast_drafts.assert_called_once_with()
+    runner.pp_handler.broadcast_draft_tokens.assert_not_called()
 
 
 def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
@@ -772,7 +786,7 @@ def _fake_async_copy(src, device=None, out=None):
 def _run_prepare_inputs(runner, scheduler_output, batch_req_state, batch_desc, *, version_029=False):
     batch = SimpleNamespace(positions=torch.zeros(4, dtype=torch.int32))
 
-    def _partition(_pcp_manager, input_batch, **_kwargs):
+    def _partition(_pcp_manager, input_batch, _batch_desc=None, **_kwargs):
         return input_batch
 
     with (

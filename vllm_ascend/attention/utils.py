@@ -235,6 +235,20 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # E.g., tensor([100, 200, 50]) means req0 has 100 tokens already computed.
     num_computed_tokens_cpu: torch.Tensor = None
 
+    # vLLM removed the deprecated ``_seq_lens_cpu``/``_num_computed_tokens_cpu``
+    # slots from ``CommonAttentionMetadata``. Ascend readers/writers and the
+    # ``unpadded()`` reconstruction below still use them, so own them here
+    # (kw_only keeps the field order safe on the pinned release tree, which
+    # still declares the same-named base fields).
+    _seq_lens_cpu: torch.Tensor | None = field(default=None, kw_only=True)
+    _num_computed_tokens_cpu: torch.Tensor | None = field(default=None, kw_only=True)
+
+    # vLLM #53781 replaced ``dcp_local_seq_lens_cpu`` with
+    # ``dcp_local_seq_lens_cpu_upper_bound``. Own both so ``unpadded()`` can
+    # propagate whichever field the selected tree declares.
+    dcp_local_seq_lens_cpu: torch.Tensor | None = field(default=None, kw_only=True)
+    dcp_local_seq_lens_cpu_upper_bound: torch.Tensor | None = field(default=None, kw_only=True)
+
     # Number of decode tokens per request, used for speculative decoding.
     # E.g., 1 for normal decoding, >1 for speculative decoding.
     decode_token_per_req: int = 1
@@ -313,6 +327,7 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             _num_computed_tokens_cpu=_slice_reqs(self._num_computed_tokens_cpu),
             dcp_local_seq_lens=_slice_reqs(self.dcp_local_seq_lens),
             dcp_local_seq_lens_cpu=_slice_reqs(self.dcp_local_seq_lens_cpu),
+            dcp_local_seq_lens_cpu_upper_bound=_slice_reqs(self.dcp_local_seq_lens_cpu_upper_bound),
             is_prefilling=_slice_reqs(self.is_prefilling),
             encoder_seq_lens=_slice_reqs(self.encoder_seq_lens),
             encoder_seq_lens_cpu=_slice_reqs(self.encoder_seq_lens_cpu),

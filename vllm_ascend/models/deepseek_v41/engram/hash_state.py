@@ -17,13 +17,14 @@ launch is split into request search and hashing for the Ascend compiler.
 """
 
 import torch
-from vllm.models.deepseek_v4_1.common.engram import (
+from vllm.triton_utils import tl, triton  # type: ignore[import-not-found]
+
+from .._compat import (
     DEAD_ID,
     EngramLayout,
     NgramHashState,
     _write_hash_cache_kernel,
 )
-from vllm.triton_utils import tl, triton
 
 
 class AscendEngramSlotCache:

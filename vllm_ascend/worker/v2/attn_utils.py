@@ -1254,3 +1254,76 @@ def build_draft_attn_metadata_factory(positions, pad, is_prefilling, *, attn_sta
         yield
     finally:
         _BUILD_ATTN_METADATA_MODULE.build_attn_metadata = raw  # restore
+
+
+def build_draft_attn_metadata_legacy(
+    speculator: Any,
+    num_reqs: int,
+    num_reqs_padded: int,
+    num_tokens_padded: int,
+    seq_lens_cpu_upper_bound: torch.Tensor,
+    step: int,
+    num_query_per_req: int = 1,
+    causal: Any = True,
+    query_start_loc_np: np.ndarray | None = None,
+    dcp_local_seq_lens: torch.Tensor | None = None,
+) -> dict[str, Any] | None:
+    """Reproduce vLLM's pre-#56181 ``Speculator._build_draft_attn_metadata``.
+
+    vLLM main replaced that method with ``_build_attn_metadata`` /
+    ``_build_uniform_attn_metadata``, whose token counts are derived from a
+    ``BatchExecutionDescriptor`` that the Ascend draft call sites do not own.
+    Reimplementing the old body keeps the Ascend draft metadata byte-identical
+    to the pinned release tree on both lanes. Must run inside the caller's
+    ``build_draft_attn_metadata_factory`` (so the patched ``build_attn_metadata``
+    supplies positions/attn_state).
+    """
+    if query_start_loc_np is not None:
+        query_start_loc_cpu = torch.empty(num_reqs_padded + 1, dtype=torch.int32)
+        query_start_loc_cpu[: num_reqs + 1] = torch.from_numpy(query_start_loc_np[: num_reqs + 1])
+        query_start_loc_cpu[num_reqs:] = query_start_loc_cpu[num_reqs]
+        max_query_len = int((query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).max())
+    else:
+        query_start_loc_cpu = torch.clamp(torch.arange(num_reqs_padded + 1, dtype=torch.int32), max=num_reqs)
+        query_start_loc_cpu = query_start_loc_cpu * num_query_per_req
+        max_query_len = num_query_per_req
+
+    block_tables = [x[:num_reqs_padded] for x in speculator.block_tables.input_block_tables]
+    slot_mappings = speculator.block_tables.slot_mappings[:, :num_tokens_padded]
+    draft_seq_lens_cpu_upper_bound = torch.zeros(num_reqs_padded, dtype=torch.int32, device="cpu")
+    torch.add(seq_lens_cpu_upper_bound[:num_reqs], step, out=draft_seq_lens_cpu_upper_bound[:num_reqs])
+    draft_seq_lens_cpu_upper_bound[:num_reqs].clamp_(max=speculator.max_model_len)
+
+    if dcp_local_seq_lens is None and speculator.block_tables.cp_size > 1:
+        # Reached only on vLLM main: the release shims call the pinned
+        # ``_build_draft_attn_metadata`` instead of this helper.
+        from vllm.v1.worker.gpu.cp_utils import (  # type: ignore[import-not-found]
+            maybe_prepare_dcp_local_seq_lens,
+        )
+
+        dcp_local_seq_lens = maybe_prepare_dcp_local_seq_lens(
+            speculator.input_buffers.dcp_local_seq_lens,
+            speculator.input_buffers.seq_lens,
+            num_reqs,
+            speculator.block_tables.cp_size,
+            speculator.block_tables.cp_rank,
+            speculator.block_tables.cp_interleave,
+        )
+
+    build_fn = _BUILD_ATTN_METADATA_MODULE.build_attn_metadata
+    return build_fn(
+        attn_groups=speculator.attn_groups,
+        num_reqs=num_reqs_padded,
+        num_tokens=num_tokens_padded,
+        query_start_loc_gpu=speculator.input_buffers.query_start_loc[: num_reqs_padded + 1],
+        query_start_loc_cpu=query_start_loc_cpu,
+        max_query_len=max_query_len,
+        seq_lens=speculator.input_buffers.seq_lens[:num_reqs_padded],
+        dcp_local_seq_lens=(None if dcp_local_seq_lens is None else dcp_local_seq_lens[:num_reqs_padded]),
+        max_seq_len=speculator.draft_max_seq_len,
+        block_tables=block_tables,
+        slot_mappings=slot_mappings,
+        kv_cache_config=speculator.kv_cache_config,
+        causal=causal,
+        seq_lens_cpu_upper_bound=draft_seq_lens_cpu_upper_bound,
+    )

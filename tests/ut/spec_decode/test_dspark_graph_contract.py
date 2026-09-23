@@ -147,6 +147,7 @@ def test_dispatcher_pads_uniform_draft_descriptors(query_count):
     manager.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
     manager.varlen_decode = False
     manager.lora_capture_cases = [0]
+    manager.ubatch_runner = None
     manager._lora_dispatch_map = {}
     manager._candidates = {}
     manager._capture_descs = {}

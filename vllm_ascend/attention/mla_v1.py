@@ -76,7 +76,7 @@ TRANSPOSE_BMM_MAX_SUPPORTED_DIM = 65536
 
 def _npu_mla_prolog_v3_k3(**kwargs):
     """Call the isolated K3 MLA prolog with optional RoPE inputs omitted."""
-    import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401, PLC0415
+    import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped, import-not-found]  # noqa: F401, PLC0415
 
     return torch.ops._C_ascend.npu_mla_prolog_v3_k3(**kwargs)
 
@@ -797,6 +797,12 @@ class AscendMLAImpl(MLAAttentionImpl):
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
+
+    def record_logical_topk_ready(self) -> None:
+        # vLLM #53781 publishes the logical→physical sparse top-k index group
+        # through this hook. Ascend keeps top-k handling inside its MLA/SFA
+        # impls and builds no index group, so there is nothing to record.
+        return
 
     def __init__(
         self,

@@ -191,7 +191,9 @@ class DCPManager:
             max_query_len = int(num_scheduled_tokens[:num_reqs].max())
             if seq_len <= max_query_len:
                 seq_len = max_query_len + 1
-            dummy_num_computed_tokens = (seq_len - num_scheduled_tokens[:num_reqs]).astype(np.int32, copy=False)
+            dummy_num_computed_tokens = (  # type: ignore[var-annotated]
+                seq_len - num_scheduled_tokens[:num_reqs]
+            ).astype(np.int32, copy=False)
             dummy_metadata = DCPDummyRunMetadata(
                 seq_len=seq_len,
                 seq_lens_cpu=(dummy_num_computed_tokens + num_scheduled_tokens[:num_reqs]),
@@ -405,9 +407,9 @@ class DCPManager:
         assert full_req_indices is not None
         assert full_cu_num_tokens is not None
         token_counts = np.diff(np.concatenate(([0], full_cu_num_tokens)))
-        token_starts = np.repeat(full_cu_num_tokens - token_counts, token_counts)
+        token_starts = np.repeat(full_cu_num_tokens - token_counts, token_counts)  # type: ignore[var-annotated]
         query_positions = arange_np[: self.async_rebuild_num_tokens] - token_starts
-        full_positions = np.empty(self.async_rebuild_num_tokens, dtype=np.int64)
+        full_positions = np.empty(self.async_rebuild_num_tokens, dtype=np.int64)  # type: ignore[var-annotated]
         np.add(
             base_num_computed_tokens[full_req_indices],
             query_positions,

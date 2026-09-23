@@ -55,7 +55,13 @@ def copy_kv_cache_blocks_inplace(
         [[copy.src_block_id, copy.dst_block_id] for copy in kv_cache_block_copies],
         dtype=np.int64,
     )
-    indices = async_tensor_h2d(indices_np, device=device)
+    if device.type == "cpu":
+        # ``async_tensor_h2d`` pins host memory, which needs an accelerator's
+        # PrivateUse1 hooks to be registered. A CPU-resident cache has no
+        # pinned-memory backend, so copy the tiny index tensor directly.
+        indices = torch.from_numpy(indices_np).to(device=device)
+    else:
+        indices = async_tensor_h2d(indices_np, device=device)
     src_indices, dst_indices = indices.unbind(dim=1)
     for tensor in cache_tensors:
         assert tensor.device == device

@@ -72,6 +72,7 @@ from vllm.v1.structured_output import StructuredOutputManager
 
 from tests.ut.kv_offload.utils import create_request, create_vllm_config
 from vllm_ascend.core.short_request_first_scheduler import ShortRequestFirstRequestQueue
+from vllm_ascend.utils import vllm_version_is
 
 _UPSTREAM_SCHED_FILE = _upstream_sched_mod.__file__
 
@@ -691,7 +692,6 @@ def _make_balance_scheduler(*, dp_size=2, max_num_seqs=16):
     from vllm.v1.structured_output import StructuredOutputManager
 
     from vllm_ascend.patch.platform import patch_balance_schedule as pbs
-    from vllm_ascend.utils import vllm_version_is
 
     ascend_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(
@@ -768,7 +768,11 @@ def _make_balance_scheduler(*, dp_size=2, max_num_seqs=16):
             log_stats=True,
             structured_output_manager=MagicMock(spec=StructuredOutputManager),
         )
-    scheduler.structured_output_manager.should_advance = MagicMock(return_value=False)
+    if vllm_version_is("0.29.0"):
+        scheduler.structured_output_manager.should_advance = MagicMock(return_value=False)
+    else:
+        scheduler.structured_output_manager.validate_tokens = MagicMock(side_effect=lambda _request, tokens: tokens)
+        scheduler.structured_output_manager.accept_tokens = MagicMock(return_value=True)
     defaults = {
         "current_step": 0,
         "prefill_capacity_bound": False,

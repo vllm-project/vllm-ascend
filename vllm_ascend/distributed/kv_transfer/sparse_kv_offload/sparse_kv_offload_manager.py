@@ -423,7 +423,7 @@ def update_sparse_kv_offload_metadata(
 
     query_start_loc_cpu = query_start_loc.cpu[: num_reqs + 1]
     query_lens = np.diff(query_start_loc_cpu.numpy()).astype(np.int32, copy=False)
-    token_to_req = np.repeat(np.arange(num_reqs, dtype=np.int32), query_lens)
+    token_to_req = np.repeat(np.arange(num_reqs, dtype=np.int32), query_lens)  # type: ignore[var-annotated]
     if token_to_req.shape[0] < num_tokens:
         raise RuntimeError(
             "KV offload token_to_req metadata is shorter than the scheduled token batch: "
@@ -448,7 +448,7 @@ def prepare_sparse_kv_offload_mtp_dummy_metadata(
         raise RuntimeError("Sparse KV offload metadata buffers are not initialized")
 
     query_lens = np.diff(query_start_loc_cpu[: num_reqs + 1].numpy()).astype(np.int32, copy=False)
-    token_to_req = np.repeat(np.arange(num_reqs, dtype=np.int32), query_lens)
+    token_to_req = np.repeat(np.arange(num_reqs, dtype=np.int32), query_lens)  # type: ignore[var-annotated]
     if token_to_req.shape[0] < num_tokens:
         token_to_req = np.pad(token_to_req, (0, num_tokens - token_to_req.shape[0]))
 

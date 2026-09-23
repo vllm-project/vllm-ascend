@@ -626,7 +626,7 @@ class FlashLB(EplbPolicy):
         SA_mu = np.dot(x_old_centered.T, x_old_centered)
         SB_mu = np.dot(x_new_centered.T, x_new_centered)
 
-        Sigma = cov * (T - 1)
+        Sigma = cov * (T - 1)  # type: ignore[var-annotated]
         Sigma_new = Sigma + SB_mu - SA_mu - np.outer(deltaS, deltaS) / T
         new_cov = Sigma_new / (T - 1)
 
@@ -662,7 +662,7 @@ class FlashLB(EplbPolicy):
         # Update covariance matrix
         if T > 1:
             x_new_centered = x_new - new_mean
-            cov_new = cov * (T - 1)
+            cov_new = cov * (T - 1)  # type: ignore[var-annotated]
             cov_new += np.dot(x_new_centered.T, x_new_centered)
             cov_new += T * np.outer(mean - new_mean, mean - new_mean)
             new_cov = cov_new / (new_T - 1)
@@ -774,12 +774,12 @@ class FlashLB(EplbPolicy):
         Returns:
             matches: Match matrix (N, N)
         """
-        matches = np.zeros((N, N), dtype=np.int32)
+        matches = np.zeros((N, N), dtype=np.int32)  # type: ignore[var-annotated]
         for i in range(N):
             for j in range(N):
                 match = 0
                 for k in range(N * M):
-                    match += min(src_counts[i, k], dst_counts[j, k])
+                    match += min(src_counts[i, k], dst_counts[j, k])  # type: ignore[assignment]
                 matches[i, j] = match
         return matches
 

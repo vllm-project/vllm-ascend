@@ -40,10 +40,12 @@ from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_wrapper,
     build_draft_attn_metadata_factory,
+    build_draft_attn_metadata_legacy,
 )
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
@@ -482,6 +484,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         num_query_per_req: int = 1,
         causal: bool = True,
         query_start_loc_np: np.ndarray | None = None,
+        dcp_local_seq_lens: torch.Tensor | None = None,
     ) -> dict[str, Any] | None:
         assert self.input_batch is not None
         with build_draft_attn_metadata_factory(
@@ -489,16 +492,35 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             num_tokens_padded,
             torch.from_numpy(self.input_batch.is_prefilling_np),
         ):
-            attn_metadata = super()._build_draft_attn_metadata(
-                num_reqs,
-                num_reqs_padded,
-                num_tokens_padded,
-                seq_lens_cpu_upper_bound,
-                step,
-                num_query_per_req,
-                causal,
-                query_start_loc_np=query_start_loc_np,
-            )
+            if vllm_version_is("0.29.0"):
+                attn_metadata = super()._build_draft_attn_metadata(  # type: ignore[attr-defined]
+                    num_reqs,
+                    num_reqs_padded,
+                    num_tokens_padded,
+                    seq_lens_cpu_upper_bound,
+                    step,
+                    num_query_per_req,
+                    causal,
+                    query_start_loc_np=query_start_loc_np,
+                    dcp_local_seq_lens=dcp_local_seq_lens,
+                )
+            else:
+                # vLLM #56181 replaced ``_build_draft_attn_metadata`` with
+                # ``_build_attn_metadata``/``_build_uniform_attn_metadata``;
+                # reproduce the old body so the Ascend draft metadata (and its
+                # FIA ``actual_seq_lengths_q``) is unchanged.
+                attn_metadata = build_draft_attn_metadata_legacy(
+                    self,
+                    num_reqs,
+                    num_reqs_padded,
+                    num_tokens_padded,
+                    seq_lens_cpu_upper_bound,
+                    step,
+                    num_query_per_req,
+                    causal,
+                    query_start_loc_np=query_start_loc_np,
+                    dcp_local_seq_lens=dcp_local_seq_lens,
+                )
         if attn_metadata is not None:
             # Ascend-specific: force DecodeOnly attention state for the draft model.
             for metadata in attn_metadata.values():
@@ -506,6 +528,41 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
                     continue
                 metadata.attn_state = AscendAttentionState.DecodeOnly
         return attn_metadata
+
+    def _build_uniform_attn_metadata(  # type: ignore[misc]
+        self,
+        batch_desc: BatchExecutionDescriptor,
+        num_reqs: int,
+        num_query_per_req: int,
+        seq_lens_cpu_upper_bound: torch.Tensor,
+        step: int,
+        causal: bool = True,
+        dcp_local_seq_lens: torch.Tensor | None = None,
+    ) -> dict[str, Any] | None:
+        """vLLM #56181 entry point for the draft per-step/capture builders.
+
+        Upstream's own ``_build_uniform_attn_metadata`` derives the metadata
+        from ``batch_desc`` but does not force Ascend's ``DecodeOnly`` attention
+        state, so the captured FULL draft graph falls into MLA's non-spec BNSD
+        layout (``Q_S == 1``). Replay still feeds the cumulative FIA
+        ``actual_seq_lengths_q`` (``[1, 2, ...]``), which trips the
+        ``aclnnFusedInferAttentionScoreV4`` tiling check. Route through the
+        Ascend builder so capture and replay share the same TND query layout.
+        """
+        query_start_loc_np: np.ndarray = np.arange(num_reqs + 1, dtype=np.int32) * num_query_per_req
+        return self._build_draft_attn_metadata(
+            num_reqs=num_reqs,
+            num_reqs_padded=batch_desc.num_reqs or num_reqs,
+            num_tokens_padded=(
+                batch_desc.num_tokens if batch_desc.cg_mode == CUDAGraphMode.FULL else int(query_start_loc_np[-1])
+            ),
+            seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+            step=step,
+            num_query_per_req=num_query_per_req,
+            causal=causal,
+            query_start_loc_np=query_start_loc_np,
+            dcp_local_seq_lens=dcp_local_seq_lens,
+        )
 
     def build_draft_attn_metadatas(
         self,

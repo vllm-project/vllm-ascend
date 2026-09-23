@@ -387,23 +387,26 @@ class DeepseekV4VLDummyInputsBuilder(BaseDummyInputsBuilder[DeepseekV4VLProcessi
 class DeepseekV4VLMultiModalProcessor(BaseMultiModalProcessor[DeepseekV4VLProcessingInfo]):
     def _call_hf_processor(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
+        hf_data: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        """Combine the local image transform with v0.27 tokenization."""
-        processor = self.info.get_hf_processor(**mm_kwargs)
+        """Combine the local image transform with v0.27 tokenization.
+
+        vLLM main replaced the old ``(prompt, mm_data, mm_kwargs, tok_kwargs)``
+        hook with ``(hf_data, hf_kwargs)``; the prompt text now travels in
+        ``hf_data`` when ``_get_hf_mm_text`` returns one.
+        """
+        prompt = cast(str, hf_data.get("text") or "")
+        processor = self.info.get_hf_processor(**hf_kwargs)
         processed = processor(
             text=prompt,
-            images=cast(Sequence[Image.Image] | None, mm_data.get("images")),
+            images=cast(Sequence[Image.Image] | None, hf_data.get("images")),
             return_tensors="pt",
         )
         tokenizer = _get_thread_local_tokenizer(self.info.get_tokenizer())
         tokenizer_outputs = tokenizer(
             prompt,
             return_tensors="pt",
-            **tok_kwargs,
         )
         processed["input_ids"] = tokenizer_outputs["input_ids"]
         return processed

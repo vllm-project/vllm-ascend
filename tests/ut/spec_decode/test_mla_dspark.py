@@ -17,11 +17,23 @@ from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend, AscendSFAMetadata
 from vllm_ascend.models import kimi_k3_dspark
 from vllm_ascend.models.kimi_k3 import AscendKimiLinearModel
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.dflash import aclgraph as graph
 from vllm_ascend.worker.v2.spec_decode.dspark import speculator as shared
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
+
+# vLLM #56181 replaced the upstream ``_build_draft_attn_metadata``; patch
+# whichever method the running lane's Ascend shim actually calls.
+_IS_RELEASE = vllm_version_is("0.29.0")
+
+
+def _patch_builder(monkeypatch, value):
+    if _IS_RELEASE:
+        monkeypatch.setattr(DSparkSpeculator, "_build_draft_attn_metadata", value)
+    else:
+        monkeypatch.setattr(AscendDSparkSpeculator, "_super_build_draft_attn_metadata", value)
 
 
 def make_speculator():
@@ -252,7 +264,7 @@ def test_replay_metadata_preserves_architecture_behavior(monkeypatch, architectu
     query_metadata = SimpleNamespace(actual_seq_lengths_q=[5, 5])
     metadata = {"draft": SimpleNamespace(decode=query_metadata) if architecture == "MLA" else query_metadata}
     builder = MagicMock(return_value=metadata)
-    monkeypatch.setattr(DSparkSpeculator, "_build_draft_attn_metadata", builder)
+    _patch_builder(monkeypatch, builder)
     update = MagicMock(wraps=spec._update_draft_attn_metadata)
     monkeypatch.setattr(spec, "_update_draft_attn_metadata", update)
     captured: dict[str, Any] = {}
@@ -341,7 +353,7 @@ def test_query_builder_overrides_and_restores_target_context(monkeypatch, archit
         return module.build_attn_metadata(attn_state=None)
 
     monkeypatch.setattr(attn_utils, "build_attn_metadata", build)
-    monkeypatch.setattr(DSparkSpeculator, "_build_draft_attn_metadata", parent)
+    _patch_builder(monkeypatch, parent)
     with (
         attn_utils.build_attn_metadata_wrapper(),
         attn_utils.build_draft_attn_metadata_factory(

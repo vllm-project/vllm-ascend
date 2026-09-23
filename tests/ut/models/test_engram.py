@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# ruff: noqa: E402
 """Focused tests for the Ascend Engram configuration and storage path."""
 
 import json
@@ -12,6 +13,11 @@ import numpy as np
 import pytest
 import torch
 from safetensors.torch import save_file
+
+pytest.importorskip(
+    "vllm.transformers_utils.configs.deepseek_v41",
+    reason="DeepSeek V4.1 is unavailable on this vLLM release",
+)
 
 from vllm_ascend.models.deepseek_v41.engram import embedding as embedding_mod
 from vllm_ascend.models.deepseek_v41.engram import npu
@@ -49,8 +55,10 @@ def test_dp_shared_memory_config_and_topologies(tp, dp, external):
         )
     )
     assert not AscendEngramConfig().dp_shared_memory
+    # vLLM main defaults cpu_offload to VLLM_PLE_CPU_OFFLOAD (now True); the
+    # invalid combination must be requested explicitly.
     with pytest.raises(ValueError, match="cpu_offload"):
-        AscendEngramConfig(dp_shared_memory=True)
+        AscendEngramConfig(cpu_offload=False, dp_shared_memory=True)
     with pytest.raises(ValueError, match="single-node"):
         config.verify_parallel_config(_topology(tp, dp, nnodes=2))
 
@@ -148,29 +156,29 @@ def test_shared_table_skips_per_step_dp_gather(monkeypatch):
 
     monkeypatch.setattr(embedding_mod, "gather_engram_hashes", gather)
     table = object.__new__(embedding_mod.AscendParallelEngramEmbedding)
-    table.embed_gathered = lambda ids, count: ids[:count]
+    table.embed_gathered = lambda ids, count: ids[:count]  # type: ignore[method-assign, assignment]
     table._shared_group = object()
     ids = torch.tensor([[7, 8]])
     assert table.forward(ids).tolist() == [[7, 8]]
     table._shared_group = None
     table.dp_size = 2
-    table.embed_gathered = lambda gathered, count: gathered[count : 2 * count]
+    table.embed_gathered = lambda g, count: g[count : 2 * count]  # type: ignore[method-assign, assignment]
     assert table.forward(ids).tolist() == [[7, 8]]
     assert calls == [True, False]
 
 
 def _runner(rows, computed, prompt):
-    token_ids = np.full((len(rows), 16), -7, dtype=np.int32)
+    token_ids: np.ndarray = np.full((len(rows), 16), -7, dtype=np.int32)
     for index, row in enumerate(rows):
         token_ids[index, : len(row)] = row
     runner = object.__new__(NPUModelRunner)
-    runner.input_batch = SimpleNamespace(
+    runner.input_batch = SimpleNamespace(  # type: ignore[assignment]
         num_reqs=len(rows),
         token_ids_cpu=token_ids,
         num_computed_tokens_cpu=np.asarray(computed, dtype=np.int32),
         num_prompt_tokens=np.asarray(prompt, dtype=np.int32),
     )
-    lookback = np.empty((len(rows), 3), dtype=np.int32)
+    lookback: np.ndarray = np.empty((len(rows), 3), dtype=np.int32)
     runner.lookback_token_ids = SimpleNamespace(
         np=lookback,
         copy_to_gpu=lambda: torch.from_numpy(lookback.copy()),

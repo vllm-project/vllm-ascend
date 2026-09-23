@@ -44,5 +44,14 @@ def register_deepseek_v4_vision_config_convertor() -> None:
         def is_mm_prefix_lm(self, supports_multimodal: bool = True) -> bool:
             return supports_multimodal and (getattr(self.hf_config, "vision_n_layers", 0) > 0)
 
+    class AscendDeepseekV41ModelArchConfigConvertor(ModelArchConfigConvertorBase):
+        """V4.1 vision: enable mm-prefix plumbing without the V4 compressor pad."""
+
+        def is_mm_prefix_lm(self, supports_multimodal: bool = True) -> bool:
+            return supports_multimodal and (getattr(self.hf_config, "vision_n_layers", 0) > 0)
+
     MODEL_ARCH_CONFIG_CONVERTORS["deepseek_v4"] = AscendDeepseekV4ModelArchConfigConvertor
+    # vLLM main moved ``is_mm_prefix_lm`` off the released config into this
+    # converter; V4.1 ships its own model_type, so it needs its own entry.
+    MODEL_ARCH_CONFIG_CONVERTORS["deepseek_v41"] = AscendDeepseekV41ModelArchConfigConvertor
     _REGISTERED = True

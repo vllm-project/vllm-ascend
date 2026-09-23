@@ -19,6 +19,7 @@
 
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from contextvars import ContextVar
+from typing import Any
 
 import numpy as np
 import torch
@@ -31,7 +32,6 @@ from vllm.sequence import IntermediateTensors
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
-from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.eplb_utils import step_eplb_after
@@ -89,6 +89,21 @@ from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 
 if vllm_version_is("0.29.0"):
     from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
+
+
+def async_copy_to_gpu(
+    x: torch.Tensor | np.ndarray,
+    out: torch.Tensor | None = None,
+    device: torch.device | None = None,
+) -> torch.Tensor:
+    """Host-to-device copy across vLLM's buffer_utils -> torch_utils move."""
+    if vllm_version_is("0.29.0"):
+        from vllm.v1.worker.gpu import buffer_utils as _buffer_utils  # type: ignore[import-not-found]
+
+        return _buffer_utils.async_copy_to_gpu(x, out=out, device=device)
+    from vllm.utils.torch_utils import async_tensor_h2d
+
+    return async_tensor_h2d(x, device=device, out=out)  # type: ignore[call-arg]
 
 
 class NPUModelRunner(GPUModelRunner):
@@ -436,7 +451,7 @@ class NPUModelRunner(GPUModelRunner):
             # No draft token scheduled (common case).
             total_num_draft_tokens = 0
             total_num_logits = num_reqs
-            cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
+            cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)  # type: ignore[var-annotated]
             cu_num_logits = torch.arange(num_reqs + 1, device=self.device, dtype=torch.int32)
             expanded_idx_mapping = idx_mapping
             expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=self.device)
@@ -580,7 +595,7 @@ class NPUModelRunner(GPUModelRunner):
         # CPU upper bound on seq_lens (num_computed_tokens + num_scheduled_tokens).
         # Added by vLLM PR #40654 to avoid GPU->CPU sync for seq_lens.
         num_computed_tokens_np = self.req_states.num_computed_tokens_np[idx_mapping_np]
-        seq_lens_cpu_upper_bound_np = np.zeros(num_reqs_padded, dtype=np.int32)
+        seq_lens_cpu_upper_bound_np = np.zeros(num_reqs_padded, dtype=np.int32)  # type: ignore[var-annotated]
         np.add(
             num_computed_tokens_np,
             num_scheduled_tokens_upper_bound,
@@ -634,11 +649,20 @@ class NPUModelRunner(GPUModelRunner):
             seq_lens_np=self.input_buffers.seq_lens_np,
             attn_state=attn_state,
         )
-        input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
-            self.pcp_manager,
-            input_batch,
-            padded_num_tokens=batch_desc.num_tokens,
-        )
+        if vllm_version_is("0.29.0"):
+            input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
+                self.pcp_manager,
+                input_batch,
+                padded_num_tokens=batch_desc.num_tokens,  # type: ignore[call-arg]
+            )
+        else:
+            # vLLM main takes the whole batch descriptor and derives the padded
+            # token/request extents from it internally.
+            input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
+                self.pcp_manager,
+                input_batch,
+                batch_desc,  # type: ignore[arg-type]
+            )
 
         # For mla/sfa, update cos/sin. Here is for execute_model.
         update_cos_sin(input_batch.positions)
@@ -902,7 +926,9 @@ class NPUModelRunner(GPUModelRunner):
                 num_reqs_padded += 1
             return query_start_loc_np, num_reqs_padded
 
-        cumulative_padding = np.arange(1, num_padding_reqs + 1, dtype=np.int32) * num_padding_tokens // num_padding_reqs
+        cumulative_padding: np.ndarray = (
+            np.arange(1, num_padding_reqs + 1, dtype=np.int32) * num_padding_tokens // num_padding_reqs
+        )
         query_start_loc_np[num_reqs + 1 : num_reqs_padded + 1] = last_loc + cumulative_padding
         return query_start_loc_np, num_reqs_padded
 
@@ -919,6 +945,7 @@ def graph_manager_wrapper(model_runner):
         decode_query_len: int,
         lora_capture_cases: list[int] | None = None,
         varlen_decode: bool = False,
+        **kwargs: Any,
     ):
         return ModelAclGraphManager(
             vllm_config,
@@ -928,6 +955,7 @@ def graph_manager_wrapper(model_runner):
             model_runner,
             lora_capture_cases=lora_capture_cases,
             varlen_decode=varlen_decode,  # type: ignore[call-arg]
+            **kwargs,
         )
 
     try:

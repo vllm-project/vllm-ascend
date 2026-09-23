@@ -11,7 +11,13 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadata
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadata
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
+
+# vLLM #56181 replaced ``_build_draft_attn_metadata`` with
+# ``_build_uniform_attn_metadata``; the Ascend shim routes to whichever the
+# running lane exposes.
+_IS_RELEASE = vllm_version_is("0.29.0")
 
 
 def make_speculator(architecture):
@@ -20,6 +26,17 @@ def make_speculator(architecture):
     spec.num_query_per_req = 5
     spec.input_buffers = SimpleNamespace(positions=torch.arange(32))
     return spec
+
+
+def _patch_builder(monkeypatch, builder):
+    if _IS_RELEASE:
+        monkeypatch.setattr(DSparkSpeculator, "_build_draft_attn_metadata", builder)
+    else:
+        monkeypatch.setattr(AscendDSparkSpeculator, "_super_build_draft_attn_metadata", builder)
+
+
+def _forwarded(call, name):
+    return call.kwargs[name]
 
 
 @pytest.mark.parametrize("num_reqs_padded", [1, 4])
@@ -32,15 +49,17 @@ def test_direct_mla_builder_updates_speculative_metadata(monkeypatch, num_reqs_p
         )
     }
     builder = MagicMock(return_value=metadata)
-    monkeypatch.setattr(DSparkSpeculator, "_build_draft_attn_metadata", builder)
+    _patch_builder(monkeypatch, builder)
 
     result = spec._build_draft_attn_metadata(
         num_reqs=1, num_reqs_padded=num_reqs_padded, num_tokens_padded=num_reqs_padded * 5, step=5
     )
 
-    builder.assert_called_once_with(
-        num_reqs=1, num_reqs_padded=num_reqs_padded, num_tokens_padded=num_reqs_padded * 5, step=5
-    )
+    builder.assert_called_once()
+    assert _forwarded(builder.call_args, "num_reqs") == 1
+    assert _forwarded(builder.call_args, "num_reqs_padded") == num_reqs_padded
+    assert _forwarded(builder.call_args, "num_tokens_padded") == num_reqs_padded * 5
+    assert _forwarded(builder.call_args, "step") == 5
     assert result is metadata
     assert result["draft"].attn_state == AscendAttentionState.PrefillCacheHit
     assert result["draft"].decode.actual_seq_lengths_q == [5 * (i + 1) for i in range(num_reqs_padded)]
@@ -56,10 +75,12 @@ def test_direct_non_dense_mla_builder_preserves_upstream_metadata(monkeypatch, m
     initial_attn_state = getattr(metadata, "attn_state", None)
     layers = {"draft": metadata}
     builder = MagicMock(return_value=layers)
-    monkeypatch.setattr(DSparkSpeculator, "_build_draft_attn_metadata", builder)
+    _patch_builder(monkeypatch, builder)
 
     assert spec._build_draft_attn_metadata(num_reqs=1, num_reqs_padded=2) is layers
-    builder.assert_called_once_with(num_reqs=1, num_reqs_padded=2)
+    builder.assert_called_once()
+    assert _forwarded(builder.call_args, "num_reqs") == 1
+    assert _forwarded(builder.call_args, "num_reqs_padded") == 2
     assert metadata.actual_seq_lengths_q is query_lengths
     assert not hasattr(metadata, "decode")
     assert getattr(metadata, "attn_state", None) is initial_attn_state
@@ -69,7 +90,7 @@ def test_direct_non_dense_mla_builder_preserves_upstream_metadata(monkeypatch, m
 def test_direct_builder_preserves_empty_metadata(monkeypatch, architecture):
     spec = make_speculator(architecture)
     metadata: dict[str, SimpleNamespace] = {}
-    monkeypatch.setattr(DSparkSpeculator, "_build_draft_attn_metadata", MagicMock(return_value=metadata))
+    _patch_builder(monkeypatch, MagicMock(return_value=metadata))
     assert spec._build_draft_attn_metadata(num_reqs=0, num_reqs_padded=1, num_tokens_padded=5) is metadata
 
 
@@ -81,15 +102,17 @@ def test_eager_dp_metadata_covers_padded_tokens(monkeypatch, architecture, local
     query_metadata = SimpleNamespace(actual_seq_lengths_q=[3] * local_reqs)
     metadata = {"draft": SimpleNamespace(decode=query_metadata) if architecture == "MLA" else query_metadata}
     builder = MagicMock(return_value=metadata)
-    monkeypatch.setattr(DSparkSpeculator, "_build_draft_attn_metadata", builder)
+    _patch_builder(monkeypatch, builder)
 
     result = spec._build_draft_attn_metadata(
         num_reqs=local_reqs, num_reqs_padded=local_reqs, num_tokens_padded=padded_reqs * 3, step=3
     )
 
-    builder.assert_called_once_with(
-        num_reqs=local_reqs, num_reqs_padded=padded_reqs, num_tokens_padded=padded_reqs * 3, step=3
-    )
+    builder.assert_called_once()
+    assert _forwarded(builder.call_args, "num_reqs") == local_reqs
+    assert _forwarded(builder.call_args, "num_reqs_padded") == padded_reqs
+    assert _forwarded(builder.call_args, "num_tokens_padded") == padded_reqs * 3
+    assert _forwarded(builder.call_args, "step") == 3
     assert result is metadata
     assert query_metadata.actual_seq_lengths_q == [3 * (i + 1) for i in range(padded_reqs)]
 
@@ -100,7 +123,10 @@ def test_dp_padded_queries_require_padded_request_boundaries(monkeypatch, archit
     query = torch.zeros(10, 1, 8)
     original_boundaries = []
 
-    def build(*, num_reqs, num_reqs_padded, num_tokens_padded, **kwargs):
+    def build(**kwargs):
+        num_reqs = kwargs["num_reqs"]
+        num_reqs_padded = kwargs["num_reqs_padded"]
+        num_tokens_padded = kwargs["num_tokens_padded"]
         assert num_reqs == 1
         assert num_reqs_padded == 2
         assert num_tokens_padded == query.shape[0]
@@ -111,7 +137,7 @@ def test_dp_padded_queries_require_padded_request_boundaries(monkeypatch, archit
         metadata = SimpleNamespace(actual_seq_lengths_q=boundaries)
         return {"draft": SimpleNamespace(decode=metadata) if architecture == "MLA" else metadata}
 
-    monkeypatch.setattr(DSparkSpeculator, "_build_draft_attn_metadata", staticmethod(build))
+    _patch_builder(monkeypatch, staticmethod(build))
     result = spec._build_draft_attn_metadata(num_reqs=1, num_reqs_padded=1, num_tokens_padded=query.shape[0], step=5)
     metadata = result["draft"].decode if architecture == "MLA" else result["draft"]
     assert original_boundaries == [5, 5]
@@ -124,7 +150,7 @@ def test_dp_padded_queries_require_padded_request_boundaries(monkeypatch, archit
 def test_draft_query_tokens_must_be_divisible_by_query_width(monkeypatch, architecture):
     spec = make_speculator(architecture)
     builder = MagicMock()
-    monkeypatch.setattr(DSparkSpeculator, "_build_draft_attn_metadata", builder)
+    _patch_builder(monkeypatch, builder)
     with pytest.raises(AssertionError, match="whole query groups"):
         spec._build_draft_attn_metadata(num_reqs=1, num_reqs_padded=2, num_tokens_padded=9, step=5)
     builder.assert_not_called()
