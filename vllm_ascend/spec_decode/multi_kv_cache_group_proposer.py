@@ -40,9 +40,13 @@ class AscendMultiKVCacheGroupMTPProposer(AscendEagleProposer):
     """MTP proposer for draft layers split across physical KV cache groups.
 
     ``glm5_next_mtp`` drafts (the only family this proposer is instantiated
-    for) support graph-mode drafting. Keeping the draft eager remains available
-    through the speculative-config ``enforce_eager`` flag.
+    for) support graph-mode drafting, so the family-wide forced-eager gate in
+    the base class is skipped via ``_glm_draft_graph_supported``. Keeping the
+    draft eager remains available through the speculative-config
+    ``enforce_eager`` flag, which is honored before that gate.
     """
+
+    _glm_draft_graph_supported = True
 
     def _get_draft_layer_kv_cache_groups(self, kv_cache_config: KVCacheConfig) -> dict[str, int]:
         """Helper: map each draft attention layer to its physical group id.

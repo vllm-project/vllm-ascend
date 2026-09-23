@@ -108,9 +108,28 @@ def greedy_sample(logits: torch.Tensor) -> torch.Tensor:
     return target_argmax
 
 
+# TODO(lilinsiman): Remove this code segment after future versions of the GLM
+# series models support graph input for speculative inference.
+def _is_glm_model(model_config) -> bool:
+    """Return True if the target model belongs to the GLM series.
+
+    Detection is based on the model_type string (covers glm, chatglm, glm4,
+    glm4_moe, glm4_moe_lite, glm4_1v, glm_ocr, glm_moe_dsa, etc).
+    """
+    hf_text_config = getattr(model_config, "hf_text_config", None)
+    model_type = getattr(hf_text_config, "model_type", "") or ""
+    return "glm" in str(model_type).lower()
+
+
 class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     _runnable: ACLGraphWrapper | Callable
     arange: torch.Tensor
+    # GLM family: draft graph capture is not yet supported (see the forced-eager
+    # gate in ``__init__``). Subclasses whose draft family supports graph input
+    # override this to True so the gate is skipped from the start — keeping
+    # every decision made later in ``__init__`` (e.g. ``maybe_eager_context``)
+    # consistent with the final graph-mode state.
+    _glm_draft_graph_supported = False
 
     def _ensure_query_start_loc_arange_capacity(self) -> None:
         """Ensure ``arange`` includes the terminal query boundary."""
@@ -227,6 +246,24 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         self.use_cuda_graph = self.runner._use_aclgraph() and not self.speculative_config.enforce_eager
         self._raise_if_padded_drafter_batch_disabled_and_full_graph_enabled()
+
+        # GLM series models: speculative decoding does not yet support running
+        # the draft model in graph mode. Force the draft model to always use
+        # eager mode. This is equivalent to the user adding
+        # `"enforce_eager": true` to the `--speculative-config`, and keeps
+        # the target model's graph-mode setting untouched.
+        # TODO(lilinsiman): Remove this code segment after future versions of the GLM
+        # series models support graph input for speculative inference.
+        if _is_glm_model(self.vllm_config.model_config) and not self._glm_draft_graph_supported:
+            if self.use_cuda_graph:
+                logger.warning(
+                    "GLM series models with speculative decoding currently do "
+                    "not support graph mode. The draft model has been "
+                    "automatically switched to eager mode "
+                    "(enforce_eager=true). Graph mode support for GLM "
+                    "speculative decoding will be added in a future release. "
+                )
+            self.use_cuda_graph = False
 
         # NOTE: _enable_probabilistic_draft_probs is set by the upstream
         # SpecDecodeBaseProposer.__init__.
