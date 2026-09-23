@@ -15,7 +15,6 @@ from typing import Literal, NamedTuple
 class LaunchSpec(NamedTuple):
     impl: Literal["FT_BASE", "FT_PERSIST", "FT_PERSIST_HOIST"]
     block_m: int
-    block_n_chunk: None = None
 
 
 BM_PERSIST_SINGLE = 32
@@ -112,6 +111,8 @@ def _select_layernorm_launch(
     if N_group == 128 and ngroups > 1:
         return LaunchSpec("FT_BASE", bm_persist)
 
+    # A persistent launch is considered once its tile count reaches a
+    # calibrated fraction of the initialized vector-core count.
     persist_tiles = _ceil_div(M, bm_persist) * ngroups
     if persist_tiles * _need(params.k_persist_den, "k_persist_den") < _need(
         params.k_persist_num, "k_persist_num"

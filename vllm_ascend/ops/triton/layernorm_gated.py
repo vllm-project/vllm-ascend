@@ -291,8 +291,9 @@ def layer_norm_fwd_npu(
         _LAYERNORM_GATED_EXPERIMENTAL_PARAMS,
     )
 
-    # BASE selections, including non-NPU and wide-N fallback, retain the
-    # upstream BASE64 launch and feature-dimension guard.
+    # BASE selections reuse the upstream kernel and feature-dimension guard.
+    # Non-NPU and wide-N inputs retain BLOCK_M=64; qualified NPU inputs may
+    # use a smaller row tile.
     if spec.impl == "FT_BASE":
         max_fused_size = 65536 // x.element_size()
         block_n = min(max_fused_size, triton.next_power_of_2(group_size))
