@@ -113,12 +113,12 @@ def prepare_v41_dummy_ring_state(runner: "NPUModelRunner", num_reqs: int) -> Non
     """
     if ring_state_update_skipped():
         return
-    forward_context = runner.compilation_config.static_forward_context
     for gid, group in enumerate(runner.kv_cache_config.kv_cache_groups):
         if not is_circular_kv_cache_spec(group.kv_cache_spec):
             continue
         if num_reqs >= runner.kv_cache_config.num_blocks:
             raise ValueError("Insufficient ring pages for dummy graph requests")
+        forward_context = runner.compilation_config.static_forward_context
         block_table = runner.block_tables.input_block_tables[gid]
         block_table[:num_reqs, 0] = torch.arange(
             1,

@@ -67,7 +67,11 @@ def test_prepare_inputs_routes_real_steps_with_history_inputs(monkeypatch):
     args, kwargs = model.prepare_engram_inputs.call_args
     assert args[2] == 8
     assert kwargs == {"history_inputs": None}
-    assert result == {"engram_lookups": {}, "engram_mask": torch.empty(0)}
+    # Compare field-by-field: dict == dict would bool() the empty mask tensor
+    # and raise "Boolean value of Tensor with no values is ambiguous".
+    assert set(result) == {"engram_lookups", "engram_mask"}
+    assert result["engram_lookups"] == {}
+    assert result["engram_mask"].shape == (0,)
 
 
 def test_prepare_inputs_computes_history_inputs_from_cached_views(monkeypatch):
