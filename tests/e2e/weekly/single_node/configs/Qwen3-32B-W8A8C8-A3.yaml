@@ -4,7 +4,6 @@
 
 _envs: &envs
   HCCL_OP_EXPANSION_MODE: "AIV"
-  ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   SERVER_PORT: "DEFAULT_PORT"
 
@@ -55,7 +54,7 @@ test_cases:
     server_cmd: *server_cmd
     server_cmd_extra:
       - "--compilation-config"
-      - '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,12,16,20,24,32,48,60,64,68,72,76,80]}'  
+      - '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,12,16,20,24,32,48,60,64,68,72,76,80]}'
       - "--additional-config"
       - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":true}}'
     benchmarks:
