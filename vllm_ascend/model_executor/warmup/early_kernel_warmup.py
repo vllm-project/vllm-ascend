@@ -1,10 +1,10 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 """Compile Triton warmup kernels while weight I/O is already on the critical path.
 
-Rejection-sampler / penalty / RMS JIT is host work. Starting it after model
-construct overlaps the compile with safetensors load. The worker joins this
-thread at the end of ``load_model``, before memory profiling, so the regular
-kernel_warmup hits the Triton cache.
+Rejection-sampler / penalty / RMS JIT is host work. Starting it at the
+beginning of ``NPUModelRunner.load_model`` overlaps the compile with
+safetensors load. That method joins this thread before it returns, before
+memory profiling, so the regular kernel_warmup hits the Triton cache.
 
 Enable with ``ascend_warmup_config.enable_early_kernel_warmup``. Imports
 that the thread needs are done on the main thread first so a concurrent import

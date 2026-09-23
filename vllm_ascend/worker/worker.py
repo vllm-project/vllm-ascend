@@ -835,14 +835,6 @@ class NPUWorker(WorkerBase):
         with context, set_current_vllm_config(self.vllm_config):
             self.model_runner.load_model()
 
-        from vllm_ascend.model_executor.warmup.early_kernel_warmup import join_early_kernel_warmup
-        from vllm_ascend.model_executor.warmup.nz_warmup import join_nz_warm_thread
-
-        # Prewarm threads allocate NPU tensors; they must finish before memory
-        # profiling sizes the KV cache.
-        join_nz_warm_thread()
-        join_early_kernel_warmup("load_model")
-
         if self.vllm_config.weight_transfer_config is not None:
             from vllm.distributed.weight_transfer.factory import (
                 WeightTransferEngineFactory,

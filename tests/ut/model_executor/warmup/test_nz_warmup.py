@@ -50,9 +50,22 @@ def test_warm_nz_format_cast_swallows_failures():
     assert nz_warmup._NZ_WARMED is True
 
 
+def test_thread_is_skipped_when_switch_is_off():
+    _FakeThread.instances = []
+    with (
+        patch.object(nz_warmup, "_nz_enabled", return_value=False),
+        patch.object(nz_warmup.threading, "Thread", _FakeThread),
+    ):
+        nz_warmup.start_nz_warm_thread("thread")
+
+    assert _FakeThread.instances == []
+    assert nz_warmup._NZ_THREAD_STARTED is False
+
+
 def test_thread_is_started_only_once():
     _FakeThread.instances = []
     with (
+        patch.object(nz_warmup, "_nz_enabled", return_value=True),
         patch.object(nz_warmup.threading, "Thread", _FakeThread),
         patch.object(torch.npu, "current_device", return_value=0),
     ):
@@ -67,7 +80,10 @@ def test_thread_is_started_only_once():
 def test_thread_is_skipped_when_already_warm():
     _FakeThread.instances = []
     nz_warmup._NZ_WARMED = True
-    with patch.object(nz_warmup.threading, "Thread", _FakeThread):
+    with (
+        patch.object(nz_warmup, "_nz_enabled", return_value=True),
+        patch.object(nz_warmup.threading, "Thread", _FakeThread),
+    ):
         nz_warmup.start_nz_warm_thread("thread")
 
     assert _FakeThread.instances == []

@@ -1,5 +1,4 @@
 from types import SimpleNamespace
-from unittest.mock import patch
 
 from torch import nn
 
@@ -58,49 +57,3 @@ def test_routed_moe_receives_configured_swiglu_limit(monkeypatch):
 
     assert fused_moe_kwargs["swiglu_limit"] == config.swiglu_limit
 
-
-def _nz_warm_config(enabled):
-    return SimpleNamespace(ascend_warmup_config=SimpleNamespace(enable_early_nz_warmup=enabled))
-
-
-def test_nz_warm_thread_is_opt_in(monkeypatch):
-    monkeypatch.setattr(deepseek_v4, "get_ascend_config", lambda: _nz_warm_config(False))
-
-    with patch("vllm_ascend.model_executor.warmup.nz_warmup.start_nz_warm_thread") as mock_start:
-        deepseek_v4._maybe_start_nz_warm_thread()
-
-    mock_start.assert_not_called()
-
-
-def test_nz_warm_thread_starts_when_requested(monkeypatch):
-    monkeypatch.setattr(deepseek_v4, "get_ascend_config", lambda: _nz_warm_config(True))
-
-    with patch("vllm_ascend.model_executor.warmup.nz_warmup.start_nz_warm_thread") as mock_start:
-        deepseek_v4._maybe_start_nz_warm_thread()
-
-    mock_start.assert_called_once_with("thread")
-
-
-def test_nz_warm_thread_failure_does_not_break_construct(monkeypatch):
-    monkeypatch.setattr(deepseek_v4, "get_ascend_config", lambda: _nz_warm_config(True))
-
-    with patch(
-        "vllm_ascend.model_executor.warmup.nz_warmup.start_nz_warm_thread",
-        side_effect=RuntimeError("boom"),
-    ):
-        deepseek_v4._maybe_start_nz_warm_thread()
-
-
-def test_early_kernel_warmup_hook_is_called():
-    with patch("vllm_ascend.model_executor.warmup.early_kernel_warmup.start_early_kernel_warmup") as mock_start:
-        deepseek_v4._maybe_start_early_kernel_warmup()
-
-    mock_start.assert_called_once_with()
-
-
-def test_early_kernel_warmup_failure_does_not_break_construct():
-    with patch(
-        "vllm_ascend.model_executor.warmup.early_kernel_warmup.start_early_kernel_warmup",
-        side_effect=RuntimeError("boom"),
-    ):
-        deepseek_v4._maybe_start_early_kernel_warmup()

@@ -3,8 +3,8 @@
 
 The first ``npu_format_cast`` on a rank is ~15-19 s; later casts are free. This
 is independent of the quantization scheme, so any model that casts weights to
-NZ can overlap that init with weight I/O. The worker joins this thread at the
-end of ``load_model``, before memory profiling.
+NZ can overlap that init with weight I/O. ``NPUModelRunner.load_model`` joins
+this thread before it returns, which is before memory profiling.
 
 Enable with ``ascend_warmup_config.enable_early_nz_warmup``.
 """
@@ -17,6 +17,7 @@ from typing import Any
 import torch
 from vllm.logger import logger
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import maybe_trans_nz
 
 _NZ_JOIN_TIMEOUT_S = 600.0
@@ -41,9 +42,18 @@ def warm_nz_format_cast(tag: str) -> None:
         logger.warning("NZ format-cast warmup skipped", exc_info=True)
 
 
+def _nz_enabled() -> bool:
+    try:
+        return bool(get_ascend_config().ascend_warmup_config.enable_early_nz_warmup)
+    except RuntimeError:
+        return False
+
+
 def start_nz_warm_thread(tag: str) -> None:
     """Run ``warm_nz_format_cast`` on a daemon thread. Idempotent."""
     global _NZ_THREAD, _NZ_THREAD_STARTED
+    if not _nz_enabled():
+        return
     if _NZ_THREAD_STARTED or _NZ_WARMED:
         return
     _NZ_THREAD_STARTED = True

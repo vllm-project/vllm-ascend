@@ -107,32 +107,6 @@ from vllm_ascend.worker.v2.pp_utils import (
 sequence_parallel_chunk = sp_shard
 
 
-def _maybe_start_nz_warm_thread() -> None:
-    try:
-        if not get_ascend_config().ascend_warmup_config.enable_early_nz_warmup:
-            return
-        from vllm_ascend.model_executor.warmup.nz_warmup import start_nz_warm_thread
-
-        start_nz_warm_thread("thread")
-    except Exception:
-        from vllm.logger import logger
-
-        logger.warning("NZ format-cast warmup thread skipped", exc_info=True)
-
-
-def _maybe_start_early_kernel_warmup() -> None:
-    try:
-        from vllm_ascend.model_executor.warmup.early_kernel_warmup import (
-            start_early_kernel_warmup,
-        )
-
-        start_early_kernel_warmup()
-    except Exception:
-        from vllm.logger import logger
-
-        logger.warning("Early kernel warmup skipped", exc_info=True)
-
-
 class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
     def __init__(
         self,
@@ -864,8 +838,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             lambda prefix: DeepseekV4DecoderLayer(vllm_config, prefix, topk_indices_buffer=topk_indices_buffer),
             prefix=f"{prefix}.layers",
         )
-        _maybe_start_nz_warm_thread()
-        _maybe_start_early_kernel_warmup()
 
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
