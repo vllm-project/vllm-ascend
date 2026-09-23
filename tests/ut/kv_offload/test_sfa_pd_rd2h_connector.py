@@ -707,6 +707,8 @@ def test_send_thread_skips_load_failed_request():
     thread.last_layer_idx = 0
     thread._p_save_events = {}
     thread._pending_reads_by_layer = {}
+    done_event = threading.Event()
+    thread.storage_send_done_events = [done_event]
     thread._ensure_dealer = MagicMock()  # type: ignore[method-assign]
 
     with patch(
@@ -724,6 +726,7 @@ def test_send_thread_skips_load_failed_request():
 
     thread._ensure_dealer.assert_not_called()
     assert thread._pending_reads_by_layer == {}
+    assert done_event.is_set()
 
 
 def test_failed_load_registry_expires_entries():
