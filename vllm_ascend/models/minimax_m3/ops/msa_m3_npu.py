@@ -668,11 +668,10 @@ def minimax_m3_sparse_attn(
         block_size,
     )
     hardware_profile = get_current_hardware_profile()
-    supports_kv_gather_q = hardware_profile.supports(HardwareCapability.MINIMAX_M3_PREFILL_KV_GATHER_Q)
     supports_fp8 = hardware_profile.supports(HardwareCapability.FP8_ATTENTION)
-    # Hardware support does not imply that the optional experimental ACLNN
-    # package is installed. Both A3 and A5 can fall back to Q-gather-KV.
-    if not supports_kv_gather_q or not _is_minimax_sparse_attention_split_kv_available():
+    # Select the optional optimization by ACLNN availability. The installed
+    # experimental package must provide kernels for the current device.
+    if not _is_minimax_sparse_attention_split_kv_available():
         _minimax_m3_sparse_attn_a3(*common_args, supports_fp8=supports_fp8)
         return
 

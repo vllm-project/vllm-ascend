@@ -1996,10 +1996,11 @@ def test_sparse_attn_prefill_fallback_rejects_invalid_fp8(supports_fp8, value_dt
         (AscendDeviceType.A5, False, "legacy"),
         (AscendDeviceType.A3, True, "kv_gather_q"),
         (AscendDeviceType.A3, False, "legacy"),
+        (AscendDeviceType.A2, True, "kv_gather_q"),
         (AscendDeviceType.A2, False, "legacy"),
     ],
 )
-def test_sparse_attn_prefill_dispatches_by_hardware_capability(
+def test_sparse_attn_prefill_dispatches_by_operator_availability(
     device_type: AscendDeviceType,
     split_kv_available: bool,
     expected_impl: str,
@@ -2051,7 +2052,4 @@ def test_sparse_attn_prefill_dispatches_by_hardware_capability(
             "supports_fp8": device_type == AscendDeviceType.A5,
         }
 
-    if device_type in (AscendDeviceType.A3, AscendDeviceType.A5):
-        mock_is_available.assert_called_once_with()
-    else:
-        mock_is_available.assert_not_called()
+    mock_is_available.assert_called_once_with()
