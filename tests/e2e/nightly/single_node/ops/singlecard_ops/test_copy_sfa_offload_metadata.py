@@ -11,6 +11,10 @@ import torch_npu  # noqa: F401
 
 from vllm_ascend.attention.indexer import AscendSFAIndexerMetadataBuilder
 from vllm_ascend.attention.sfa_kv_offload import AscendSFAKVOffloadImpl, AscendSFAKVOffloadMetadataBuilder
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import (
+    prepare_copy_sfa_dummy_slots,
+    prepare_copy_sfa_request_slots,
+)
 
 MODULE = "vllm_ascend.attention.sfa_kv_offload"
 
@@ -425,33 +429,55 @@ def test_main_and_indexer_slots_preserve_independent_layouts():
     assert index_slots.cpu().tolist() == [7] * 8
 
 
-def test_runner_pool_ownership_survives_compaction_and_dummy_run():
+def test_pool_ownership_survives_compaction_and_dummy_run():
     import numpy as np
 
-    from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+    slots = np.zeros(4, dtype=np.int32)
+    generations = np.zeros(4, dtype=np.int64)
+    request_slots = {}
+    generation = 0
+    slot_generations = {}
+    last_prefixes = {}
 
-    runner = NPUModelRunner.__new__(NPUModelRunner)
-    runner.max_num_reqs = 2
-    runner._offload_pool_slots = SimpleNamespace(np=np.zeros(4, dtype=np.int32), copy_to_gpu=lambda n: None)
-    runner._offload_pool_generations = SimpleNamespace(np=np.zeros(4, dtype=np.int64), copy_to_gpu=lambda n: None)
-    runner._offload_request_slots = {}
-    runner._offload_slot_generation = 0
-    runner._offload_slot_generations = {}
-    runner.input_batch = SimpleNamespace(req_ids=["a", "b"], req_id_to_index={"a": 0, "b": 1})
-    runner._prepare_copy_sfa_request_slots(2, 3, dummy=False)
-    assert runner._offload_pool_slots.np[:3].tolist() == [0, 1, 6]
-    assert runner._offload_pool_generations.np[:3].tolist() == [1, 2, -1]
+    def prepare(req_ids, *, dummy=False):
+        nonlocal request_slots, generation
+        request_slots, generation, restore_tails, dense_fills = prepare_copy_sfa_request_slots(
+            req_ids=req_ids,
+            live_req_ids=req_ids,
+            slots=slots,
+            generations=generations,
+            request_slots=request_slots,
+            slot_generations=slot_generations,
+            last_prefixes=last_prefixes,
+            generation=generation,
+            prebound_slots={},
+            computed_tokens=None,
+            padded_reqs=3,
+            block_size=128,
+            hot_tokens=8192,
+            dummy=dummy,
+        )
+        assert restore_tails is False
+        assert dense_fills == {}
+
+    prepare(["a", "b"])
+    assert slots[:3].tolist() == [0, 1, 6]
+    assert generations[:3].tolist() == [1, 2, -1]
     # Removing a compacts b; new c may reuse a's slot, with a new generation.
-    runner.input_batch = SimpleNamespace(req_ids=["b", "c"], req_id_to_index={"b": 0, "c": 1})
-    runner._prepare_copy_sfa_request_slots(2, 3, dummy=False)
-    assert runner._offload_pool_slots.np[:3].tolist() == [1, 0, 6]
-    assert runner._offload_pool_generations.np[:3].tolist() == [2, 3, -1]
-    runner._prepare_copy_sfa_request_slots(2, 3, dummy=True)
-    assert runner._offload_pool_slots.np[:3].tolist() == [4, 5, 6]
-    assert runner._offload_pool_generations.np[:3].tolist() == [-1, -1, -1]
-    assert runner._offload_request_slots == {"b": 1, "c": 0}
-    runner._prepare_copy_sfa_request_slots(2, 3, dummy=False)
-    assert runner._offload_pool_generations.np[:3].tolist() == [2, 3, -1]
+    prepare(["b", "c"])
+    assert slots[:3].tolist() == [1, 0, 6]
+    assert generations[:3].tolist() == [2, 3, -1]
+    prepare(["b", "c"], dummy=True)
+    assert slots[:3].tolist() == [4, 5, 6]
+    assert generations[:3].tolist() == [-1, -1, -1]
+    assert request_slots == {"b": 1, "c": 0}
+    prepare(["b", "c"])
+    assert generations[:3].tolist() == [2, 3, -1]
+    # The draft-only dummy path needs no ownership maps or model runner.
+    prepare_copy_sfa_dummy_slots(slots, generations, 3)
+    assert slots[:3].tolist() == [4, 5, 6]
+    assert generations[:3].tolist() == [-1, -1, -1]
+    assert request_slots == {"b": 1, "c": 0}
 
 
 def test_draft_metadata_remains_valid_until_its_step_executes():

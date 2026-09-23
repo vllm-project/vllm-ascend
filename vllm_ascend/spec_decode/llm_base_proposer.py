@@ -49,6 +49,9 @@ from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, update_full_graph_params
 from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import (
+    prepare_copy_sfa_dummy_slots,
+)
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     prepare_sparse_kv_offload_mtp_dummy_metadata,
 )
@@ -788,7 +791,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 # num_reqs is already the padded version
                 self.query_start_loc.cpu[: num_reqs + 1].copy_(self.runner.query_start_loc.cpu[: num_reqs + 1])
                 self.query_start_loc.copy_to_gpu()
-                self.runner._prepare_copy_sfa_request_slots(num_reqs, num_reqs, dummy=True)
+                if self.runner._offload_pool_slots is not None:
+                    assert self.runner._offload_pool_generations is not None
+                    prepare_copy_sfa_dummy_slots(
+                        self.runner._offload_pool_slots.np,
+                        self.runner._offload_pool_generations.np,
+                        num_reqs,
+                    )
+                    self.runner._copy_sfa_need_eager_tail_restore = False
                 req_ids_tensor, token_to_req = prepare_sparse_kv_offload_mtp_dummy_metadata(
                     num_tokens,
                     num_reqs,

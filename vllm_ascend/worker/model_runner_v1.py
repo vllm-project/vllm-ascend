@@ -145,6 +145,9 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h import get_prebound_
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
     apply_layerwise_kv_cache_plan,
 )
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import (
+    prepare_copy_sfa_request_slots,
+)
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     allocate_kv_cache_tensors_for_sparse_kv_offload,
     allocate_kv_offload_topk_profile_buffers,
@@ -3463,100 +3466,6 @@ class NPUModelRunner(GPUModelRunner):
             cudagraph_stats,
         )
 
-    def _prepare_copy_sfa_request_slots(self, num_reqs: int, padded_reqs: int, *, dummy: bool) -> None:
-        if self._offload_pool_slots is None:
-            return
-        capacity = self.max_num_reqs + 2
-        slots = self._offload_pool_slots.np
-        generations = self._offload_pool_generations.np
-        slots[:padded_reqs] = np.arange(padded_reqs, dtype=np.int32) + capacity
-        generations[:padded_reqs] = -1
-        self._copy_sfa_need_eager_tail_restore = False
-        dense_fills: dict[int, tuple[int, int]] = {}
-        if not dummy:
-            # PD binds rows at alloc time. Keep those reservations even when the
-            # request is waiting for KV and is not in the current decode batch.
-            prebound = get_prebound_copy_sfa_slots()
-            live = self.input_batch.req_id_to_index
-            self._offload_request_slots = {
-                req: slot
-                for req, slot in self._offload_request_slots.items()
-                if req in live or req in prebound
-            }
-            used = set(self._offload_request_slots.values()) | set(prebound.values())
-            available = iter(slot for slot in range(capacity) if slot not in used)
-            computed_all = getattr(self.input_batch, "num_computed_tokens_cpu", None)
-            for row, req in enumerate(self.input_batch.req_ids[:num_reqs]):
-                if req not in self._offload_request_slots:
-                    slot = prebound[req] if req in prebound else next(available)
-                    self._offload_request_slots[req] = slot
-                    self._offload_slot_generation += 1
-                    self._offload_slot_generations[slot] = self._offload_slot_generation
-                    # Fresh short rows get their full KV via the prefill-end
-                    # D2D in exec_kv; only rollbacks need the host-pool fill.
-                slot = self._offload_request_slots[req]
-                slots[row] = slot
-                generations[row] = self._offload_slot_generations[slot]
-            if computed_all is not None:
-                block_size = self.cache_config.block_size
-                hot = self.sparse_kv_offload_config.topk_buffer_size if self.sparse_kv_offload_config else 0
-                for row in range(num_reqs):
-                    slot = int(slots[row])
-                    prefix = (int(computed_all[row]) // block_size) * block_size
-                    last_prefix = self._offload_slot_last_prefix.get(slot)
-                    if last_prefix is not None and prefix < last_prefix:
-                        if prebound:
-                            self._copy_sfa_need_eager_tail_restore = True
-                        # A rollback across the hot boundary leaves a sparse-layout
-                        # row under a dense (-3) reader: refill the whole row.
-                        if hot and last_prefix >= hot > prefix:
-                            dense_fills[slot] = (row, int(computed_all[row]))
-                    self._offload_slot_last_prefix[slot] = prefix
-            if dense_fills:
-                self._dense_fill_copy_sfa_rows(dense_fills)
-        # Fused Copy-SFA builders stage host-owned slot/generation metadata once per step.
-
-    def _dense_fill_copy_sfa_rows(self, dense_fills: dict[int, tuple[int, int]]) -> None:
-        """Copy whole short rows from the CPU pool into their topk-buffer rows.
-
-        Rollback-only safety net: a rollback across the hot boundary leaves a
-        sparse-layout row under a dense (-3) reader, and the paged cache is
-        stale beyond the prompt, so the refill must come from the CPU pool.
-        Runs outside the captured graph at metadata-build time; the per-layer
-        host/device bases were pinned by ``bind_copy_sfa_kv_cache``.
-        """
-        manager = self.sparse_kv_offload_manager
-        assert manager is not None
-        block_size = self.cache_config.block_size
-        block_table = self.input_batch.block_table[0].get_numpy_array()
-        topk_k = manager.topk_buffers_k[0]
-        stride_tokens = topk_k.shape[1]
-        token_bytes = torch.tensor(
-            [[topk_k.element_size() * topk_k.shape[-1]],
-             [manager.topk_buffers_v[0].element_size() * manager.topk_buffers_v[0].shape[-1]]],
-            dtype=torch.int64,
-            device=topk_k.device,
-        )
-        for slot, (row, computed) in dense_fills.items():
-            nblocks = (computed + block_size - 1) // block_size
-            src_tokens = torch.tensor(
-                [int(block_table[row, b]) * block_size for b in range(nblocks)], dtype=torch.int64
-            ).to(topk_k.device)
-            lengths = torch.clamp(
-                torch.arange(nblocks, dtype=torch.int64, device=topk_k.device) * (-block_size) + computed,
-                min=0,
-                max=block_size,
-            )
-            src_offsets = src_tokens.view(1, -1).expand(2, -1) * token_bytes
-            dst_block_tokens = torch.arange(nblocks, dtype=torch.int64, device=topk_k.device) * block_size
-            dst_offsets = (slot * stride_tokens + dst_block_tokens.view(1, -1).expand(2, -1)) * token_bytes
-            lengths_bytes = lengths.view(1, -1).expand(2, -1) * token_bytes
-            count = torch.full((1,), 2 * nblocks, dtype=torch.int32, device=topk_k.device)
-            for host_bases, device_bases in zip(manager.copy_sfa_host_bases, manager.copy_sfa_device_bases):
-                sources = (src_offsets + host_bases).reshape(-1)
-                destinations = (dst_offsets + device_bases).reshape(-1)
-                manager.copy_sfa_kv(sources, destinations, lengths_bytes.reshape(-1), count)
-
     def _maybe_eager_restore_copy_sfa_tails(self, attn_metadata: PerLayerAttnMetadata) -> None:
         if not self._copy_sfa_need_eager_tail_restore:
             return
@@ -3612,7 +3521,36 @@ class NPUModelRunner(GPUModelRunner):
                 self._offload_token_to_req,
             )
         if self.sparse_kv_offload_config.use_fused_copy_sfa and self.sparse_kv_offload_enabled:
-            self._prepare_copy_sfa_request_slots(num_reqs, num_reqs_padded, dummy=offload_dummy)
+            assert self._offload_pool_slots is not None
+            assert self._offload_pool_generations is not None
+            (
+                self._offload_request_slots,
+                self._offload_slot_generation,
+                self._copy_sfa_need_eager_tail_restore,
+                dense_fills,
+            ) = prepare_copy_sfa_request_slots(
+                req_ids=self.input_batch.req_ids[:num_reqs],
+                live_req_ids=self.input_batch.req_id_to_index,
+                slots=self._offload_pool_slots.np,
+                generations=self._offload_pool_generations.np,
+                request_slots=self._offload_request_slots,
+                slot_generations=self._offload_slot_generations,
+                last_prefixes=self._offload_slot_last_prefix,
+                generation=self._offload_slot_generation,
+                prebound_slots=get_prebound_copy_sfa_slots() if not offload_dummy else {},
+                computed_tokens=getattr(self.input_batch, "num_computed_tokens_cpu", None),
+                padded_reqs=num_reqs_padded,
+                block_size=self.cache_config.block_size,
+                hot_tokens=self.sparse_kv_offload_config.topk_buffer_size,
+                dummy=offload_dummy,
+            )
+            if dense_fills:
+                assert self.sparse_kv_offload_manager is not None
+                self.sparse_kv_offload_manager.dense_fill_copy_sfa_rows(
+                    dense_fills,
+                    block_size=self.cache_config.block_size,
+                    block_table=self.input_batch.block_table[0].get_numpy_array(),
+                )
         attn_metadata: PerLayerAttnMetadata = {}
         device_metadata_tasks: list[DeviceMetadataTask] | None = (
             [] if self.device_metadata_executor is not None else None

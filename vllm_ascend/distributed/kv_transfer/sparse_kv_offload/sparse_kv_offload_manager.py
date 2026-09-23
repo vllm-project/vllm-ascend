@@ -1112,6 +1112,50 @@ class SparseKVOffloadManager:
                 ).view(2, 1)
             )
 
+    def dense_fill_copy_sfa_rows(
+        self,
+        dense_fills: dict[int, tuple[int, int]],
+        *,
+        block_size: int,
+        block_table: np.ndarray,
+    ) -> None:
+        """Restore whole short rows from the host pool after prefix rollback.
+
+        A rollback across the hot boundary leaves a sparse-layout row under a
+        dense (-3) reader. Restore it using the input batch's CPU block table
+        and block size, outside graph capture at metadata-build time. Host and
+        device bases are bound during cache registration.
+        """
+        topk_k = self.topk_buffers_k[0]
+        stride_tokens = topk_k.shape[1]
+        token_bytes = torch.tensor(
+            [
+                [topk_k.element_size() * topk_k.shape[-1]],
+                [self.topk_buffers_v[0].element_size() * self.topk_buffers_v[0].shape[-1]],
+            ],
+            dtype=torch.int64,
+            device=topk_k.device,
+        )
+        for slot, (row, computed) in dense_fills.items():
+            nblocks = (computed + block_size - 1) // block_size
+            src_tokens = torch.tensor(
+                [int(block_table[row, b]) * block_size for b in range(nblocks)], dtype=torch.int64
+            ).to(topk_k.device)
+            lengths = torch.clamp(
+                torch.arange(nblocks, dtype=torch.int64, device=topk_k.device) * (-block_size) + computed,
+                min=0,
+                max=block_size,
+            )
+            src_offsets = src_tokens.view(1, -1).expand(2, -1) * token_bytes
+            dst_block_tokens = torch.arange(nblocks, dtype=torch.int64, device=topk_k.device) * block_size
+            dst_offsets = (slot * stride_tokens + dst_block_tokens.view(1, -1).expand(2, -1)) * token_bytes
+            lengths_bytes = lengths.view(1, -1).expand(2, -1) * token_bytes
+            count = torch.full((1,), 2 * nblocks, dtype=torch.int32, device=topk_k.device)
+            for host_bases, device_bases in zip(self.copy_sfa_host_bases, self.copy_sfa_device_bases):
+                sources = (src_offsets + host_bases).reshape(-1)
+                destinations = (dst_offsets + device_bases).reshape(-1)
+                self.copy_sfa_kv(sources, destinations, lengths_bytes.reshape(-1), count)
+
     def restore_copy_sfa_tails(self, metadata) -> None:
         """Copy the current tail descriptors for every layer. Used on prefix rollback."""
         src_off = getattr(metadata, "copy_sfa_copy_src_offsets", None)
