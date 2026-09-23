@@ -39,11 +39,7 @@ from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import RoutedMoEMilestones
 from vllm_ascend.ops.fused_moe.force_eplb import get_force_eplb_topk
-from vllm_ascend.ops.fused_moe.moe_comm_method import (
-    AllGatherCommImpl,
-    FusedExpertsResult,
-    activate_moe_comm_method,
-)
+from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult
 from vllm_ascend.ops.fused_moe.moe_utils import get_moe_num_logical_experts
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
@@ -657,13 +653,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         if lora_context is not None:
             sync_lora_context(self.quant_method, lora_context)
 
-        # Rebind the comm method to THIS layer's expert shape before use: the
-        # context-wide instance published at forward-context setup matches only
-        # one of the shapes coexisting in the process (target vs drafter).
-        moe_comm_method = activate_moe_comm_method(
-            _EXTRA_CTX.moe_comm_type, self.moe_config, _EXTRA_CTX.moe_comm_method
-        )
-        prepare_output = moe_comm_method.prepare(
+        prepare_output = _EXTRA_CTX.moe_comm_method.prepare(
             hidden_states=hidden_states,
             router_logits=router_logits,
             # The SP model wrapper already shards and gathers the MoE sequence.
