@@ -323,6 +323,44 @@ def test_select_moe_comm_method_a3_enable_fused_mc2_mode_1(
     assert afc.select_moe_comm_method(num_tokens, vllm_config) == expected
 
 
+@pytest.mark.parametrize("ep_world_size", [2, 4, 8, 16, 32, 64, 128])
+def test_select_cann_megamoe_supports_a3_ep_sizes(monkeypatch, ep_world_size):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=AscendDeviceType.A3,
+        ep_world_size=ep_world_size,
+        enable_fused_mc2=1,
+    )
+    monkeypatch.setattr(afc, "is_mega_moe_supported", lambda: True)
+
+    assert afc.select_moe_comm_method(4097, _make_vllm_config(quant_type="w4a8")) == MoECommType.FUSED_MC2
+
+
+@pytest.mark.parametrize("ep_world_size", [1, 3, 56, 129])
+def test_select_cann_megamoe_rejects_unsupported_a3_ep_sizes(monkeypatch, ep_world_size):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=AscendDeviceType.A3,
+        ep_world_size=ep_world_size,
+        enable_fused_mc2=1,
+    )
+    monkeypatch.setattr(afc, "is_mega_moe_supported", lambda: True)
+
+    assert afc.use_cann_megamoe(_make_vllm_config(quant_type="w4a8")) is False
+
+
+def test_a3_ep128_extension_does_not_change_a5_limit(monkeypatch):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=AscendDeviceType.A5,
+        ep_world_size=128,
+        enable_fused_mc2=1,
+    )
+    monkeypatch.setattr(afc, "is_mega_moe_supported", lambda: True)
+
+    assert afc.use_cann_megamoe(_make_vllm_config(quant_type="w4a8")) is False
+
+
 @pytest.mark.parametrize(
     ("num_tokens", "expected"),
     [

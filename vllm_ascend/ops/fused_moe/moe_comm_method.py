@@ -396,14 +396,15 @@ class FusedMC2CommImpl(MoECommMethod):
 
         weight1 = to_list(weights.w1)
         weight2 = to_list(weights.w2)
+
         # A8W4-INT MegaMoe reads N from weight1.storageShape.lastDim treated as int8 (N = lastDim*2)
         # and checks weight2.dim0 == N/2, so the weights MUST be int8-shaped (two int4 per byte), NOT
         # the eight-int4-per-int32 packing (that makes the op read N four times too small and fail
         # CheckWeight2Input). The op prototype also REQUIRES FRACTAL_NZ per expert. The W4A8 quant
         # method therefore builds per-expert int8 + FRACTAL_NZ lists (cann_mega_moe_*_weight_list) and
         # they are passed through as-is here. W8A8 weights are already int8 + FRACTAL_NZ, also as-is.
-        weight_scales1 = weights.w1_scale
-        weight_scales2 = weights.w2_scale
+        weight_scales1 = moe_utils.normalize_mega_moe_weight_scales(weights.w1_scale)
+        weight_scales2 = moe_utils.normalize_mega_moe_weight_scales(weights.w2_scale)
         dispatch_quant_mode, dispatch_quant_out_dtype, weight_type = moe_utils._get_cann_mega_moe_quant_settings(
             fused_experts_input.quant.quant_type
         )
@@ -445,6 +446,8 @@ class FusedMC2CommImpl(MoECommMethod):
             activation_clamp=activation_clamp,
             swiglu_alpha=self.swiglu_alpha,
             swiglu_beta=self.swiglu_beta,
+            situ_beta=getattr(self.moe_config, "activation_situ_beta", None),
+            situ_linear_beta=getattr(self.moe_config, "activation_situ_linear_beta", None),
         )
 
         out, expert_tokens = self.mega_moe(
