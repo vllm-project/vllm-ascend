@@ -20,9 +20,7 @@ class AscendGlooEplbCommunicator(TorchDistGlooStagedEplbCommunicator):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self._pinned_staging_buffers: dict[
-            tuple[torch.dtype, tuple[int, ...]], list[torch.Tensor]
-        ] = {}
+        self._pinned_staging_buffers: dict[tuple[torch.dtype, tuple[int, ...]], list[torch.Tensor]] = {}
 
     def _acquire_staging_buffer(
         self,

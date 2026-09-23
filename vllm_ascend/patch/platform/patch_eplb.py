@@ -524,9 +524,9 @@ def _wrap_move_to_workspace(original_move):
                     predicted_ratio = full_target.predicted_mean_ratios[layer_idx]
                     if np.isfinite(predicted_ratio):
                         model_state._last_committed_mean_ratios[layer_idx] = predicted_ratio
-            model_state._eplb_commit_ms = getattr(model_state, "_eplb_commit_ms", 0.0) + (
-                perf_counter() - commit_started_at
-            ) * 1000
+            model_state._eplb_commit_ms = (
+                getattr(model_state, "_eplb_commit_ms", 0.0) + (perf_counter() - commit_started_at) * 1000
+            )
             if is_last_result:
                 if layer_idx is not None and hasattr(model_state, "_load_mapping_generation"):
                     model_state._load_mapping_generation += 1

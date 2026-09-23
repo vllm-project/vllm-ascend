@@ -450,9 +450,10 @@ def test_async_workspace_refreshes_layer_and_clears_target_after_last(monkeypatc
     assert model_state._last_committed_mean_ratios[layer_idx] == 1.2
     refresh.assert_called_once_with(model_state, layer_idx)
     if is_last_layer:
-        assert call(
-            "%s: model=%s rank_transfers=%d", patch_eplb.ASYNC_EPLB_CYCLE_COMMITTED_LOG, "model", 2
-        ) in log_info.call_args_list
+        assert (
+            call("%s: model=%s rank_transfers=%d", patch_eplb.ASYNC_EPLB_CYCLE_COMMITTED_LOG, "model", 2)
+            in log_info.call_args_list
+        )
         assert any(
             logged_call.args and logged_call.args[0].startswith("EPLB phase timing:")
             for logged_call in log_info.call_args_list
@@ -487,17 +488,20 @@ def test_async_workspace_logs_stair_imbalance_after_commit(monkeypatch):
     patch_eplb._wrap_move_to_workspace(original_move)(model_state, 0)
 
     assert model_state._last_committed_mean_ratios[0] == 1.1
-    assert call(
-        "%s: model=%s mean=%.4f->%.4f p95=%.4f->%.4f changed_layers=%d rank_transfers=%d",
-        patch_eplb.ASYNC_EPLB_CYCLE_COMMITTED_LOG,
-        "model",
-        1.2,
-        1.1,
-        1.3,
-        1.2,
-        1,
-        2,
-    ) in log_info.call_args_list
+    assert (
+        call(
+            "%s: model=%s mean=%.4f->%.4f p95=%.4f->%.4f changed_layers=%d rank_transfers=%d",
+            patch_eplb.ASYNC_EPLB_CYCLE_COMMITTED_LOG,
+            "model",
+            1.2,
+            1.1,
+            1.3,
+            1.2,
+            1,
+            2,
+        )
+        in log_info.call_args_list
+    )
 
 
 def test_result_ready_timing_accumulates_poll_cost(monkeypatch):
