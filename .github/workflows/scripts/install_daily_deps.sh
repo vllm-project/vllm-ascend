@@ -53,6 +53,10 @@ python3 -m pip install "$MEMCACHE_URL" --force-reinstall --no-deps
 
 # ---- mfcli kernel install ----
 # Install the memfabric kernel for the target SoC. Only A5 and A3 require it;
+# Disable torch device backend autoload so `import torch` does not pull in
+# torch_npu (unusable on the CPU build host), which breaks mfcli's torch ABI
+# check on A3/A5.
+export TORCH_DEVICE_BACKEND_AUTOLOAD=0
 case "${SOC_VERSION:-}" in
     ascend950dt_9582)
         echo "Install memfabric kernel for A5..."
