@@ -47,13 +47,14 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         super().__init__(vllm_config, device)
         self.input_batch: InputBatch | None = None
         self.attn_architecture: str | None = None
-        self.use_dcp, self.dcp_manager = self._init_dcp()
+        self._init_dcp()
 
-    def _init_dcp(self) -> tuple[bool, DCPManager | None]:
-        use_dcp = self.attn_vllm_config.parallel_config.decode_context_parallel_size > 1
-        if not use_dcp:
-            return False, None
-        return True, DCPManager(
+    def _init_dcp(self) -> None:
+        self.use_dcp = self.attn_vllm_config.parallel_config.decode_context_parallel_size > 1
+        self.dcp_manager: DCPManager | None = None
+        if not self.use_dcp:
+            return
+        self.dcp_manager = DCPManager(
             dcp_world_size=self.attn_vllm_config.parallel_config.decode_context_parallel_size,
             dcp_rank=get_dcp_group().rank_in_group,
             max_buffer_num_tokens=self.max_num_tokens,
@@ -176,13 +177,14 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         return [self._update_draft_attn_metadata(attn_metadata, num_reqs_padded)]
 
     def _build_draft_attn_metadata(self, *, num_reqs_padded, **kwargs):
-        uses_fia = self.attn_architecture in ("GQA", "MLA")
+        if self.attn_architecture not in ("GQA", "MLA"):
+            return super()._build_draft_attn_metadata(num_reqs_padded=num_reqs_padded, **kwargs)
+
         num_tokens_padded = kwargs["num_tokens_padded"]
-        if uses_fia:
-            # TODO: Replace this padding workaround with upstream #56181's
-            # actual-token metadata and MLA slicing for non-FULL execution.
-            assert num_tokens_padded % self.num_query_per_req == 0, "Draft tokens must contain whole query groups"
-            num_reqs_padded = num_tokens_padded // self.num_query_per_req
+        # TODO: Replace this padding workaround with upstream #56181's
+        # actual-token metadata and MLA slicing for non-FULL execution.
+        assert num_tokens_padded % self.num_query_per_req == 0, "Draft tokens must contain whole query groups"
+        num_reqs_padded = num_tokens_padded // self.num_query_per_req
 
         seq_lens_cpu, is_prefilling = self._prepare_draft_dcp_metadata_inputs(
             kwargs["num_reqs"], num_reqs_padded, kwargs["step"]
@@ -199,7 +201,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             ),
         ):
             attn_metadata = super()._build_draft_attn_metadata(num_reqs_padded=num_reqs_padded, **kwargs)
-        if not uses_fia or attn_metadata is None:
+        if attn_metadata is None:
             return attn_metadata
         return self._update_draft_attn_metadata(attn_metadata, num_reqs_padded)
 

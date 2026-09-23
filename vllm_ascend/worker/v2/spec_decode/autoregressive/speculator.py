@@ -88,7 +88,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         self.attn_architecture: str | None = None
         self.attn_backend: type[AttentionBackend] | None = None
         self.draft_vllm_config = self._create_draft_vllm_config()
-        self.use_dcp, self.dcp_manager = self._init_dcp()
+        self._init_dcp()
 
         del self.input_buffers
         # AscendInputBuffers has extra `seq_lens_cpu` attribute.
@@ -112,11 +112,12 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         self.input_batch: InputBatch | None = None
         self.pcp_manager: AscendPCPManager | None = None
 
-    def _init_dcp(self) -> tuple[bool, DCPManager | None]:
-        use_dcp = self.draft_vllm_config.parallel_config.decode_context_parallel_size > 1
-        if not use_dcp:
-            return False, None
-        return True, DCPManager(
+    def _init_dcp(self) -> None:
+        self.use_dcp = self.draft_vllm_config.parallel_config.decode_context_parallel_size > 1
+        self.dcp_manager: DCPManager | None = None
+        if not self.use_dcp:
+            return
+        self.dcp_manager = DCPManager(
             dcp_world_size=self.draft_vllm_config.parallel_config.decode_context_parallel_size,
             dcp_rank=get_dcp_group().rank_in_group,
             max_buffer_num_tokens=self.max_num_tokens,
