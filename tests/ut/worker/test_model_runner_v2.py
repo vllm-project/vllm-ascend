@@ -26,6 +26,9 @@ def _make_runner(need_timing: bool = True):
         scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(need_timing=need_timing))
     )
     runner.vllm_config = SimpleNamespace(aux_output_config=SimpleNamespace(enabled=False))
+    # Post-#45635 lane: the AuxOutput connector is built by the base
+    # initialize_kv_cache, so the runner always carries the attribute here.
+    runner.aux_output_connector = MagicMock()
     runner.kvpp = SimpleNamespace(complete_forward=lambda: None)
     runner.model_state = SimpleNamespace(kvpp_is_dummy_run=False)
     runner.execute_model_state = None
