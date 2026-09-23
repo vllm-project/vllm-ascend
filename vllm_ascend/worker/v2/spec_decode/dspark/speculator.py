@@ -172,8 +172,10 @@ class AscendDSparkSpeculator(DSparkSpeculator):
                 step=self.num_query_per_req,
                 causal=self._group_causal,
             )
+
         if self.attn_architecture not in ("GQA", "MLA"):
             return [attn_metadata]
+
         return [self._update_draft_attn_metadata(attn_metadata, num_reqs_padded)]
 
     def _build_draft_attn_metadata(self, *, num_reqs_padded, **kwargs):
