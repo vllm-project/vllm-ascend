@@ -844,6 +844,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         # The user-facing switches control these layouts independently. LI C8
         # applies only to layers that own an indexer cache.
         self.enable_sparse_sfa_c8 = ascend_config.enable_sparse_sfa_c8
+        self.enable_sfa_split_kv = ascend_config.enable_sfa_split_kv
         if self.qk_rope_head_dim == 0 and self.enable_sparse_sfa_c8:
             raise NotImplementedError("NoPE SFA currently requires an unquantized latent KV cache.")
         self.enable_sparse_li_c8 = self.has_indexer and self.indexer.enable_sparse_li_c8
@@ -1526,6 +1527,9 @@ class AscendSFAImpl(MLAAttentionImpl):
     ):
         if self.qk_rope_head_dim == 0:
             return sparse_mla(ql_nope, kv_cache[0], topk_indices, attn_metadata, self.scale)
+        allow_split_kv = getattr(self, "enable_sfa_split_kv", False)
+        if allow_split_kv:
+            allow_split_kv = get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.NONE
         return DeviceOperator.execute_sparse_flash_attention_process(
             self,
             ql_nope,
@@ -1536,6 +1540,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             actual_seq_lengths_query,
             actual_seq_lengths_key,
             block_table=block_table,
+            allow_split_kv=allow_split_kv,
         )
 
     def _record_query_gather_context(

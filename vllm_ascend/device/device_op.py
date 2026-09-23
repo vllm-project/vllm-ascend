@@ -468,6 +468,7 @@ class BaseDeviceAdaptor:
         block_table: torch.Tensor | None = None,
         sparse_mode: int = 3,
         return_lse: bool = False,
+        allow_split_kv: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if block_table is None:
             block_table = attn_metadata.block_table
@@ -497,24 +498,66 @@ class BaseDeviceAdaptor:
             )
         else:
             key_rope = kv_cache[1]
-            result = torch.ops._C_ascend.npu_sparse_flash_attention(
-                query=ql_nope,
-                key=kv,
-                value=kv,
-                sparse_indices=topk_indices,
-                scale_value=sfa_impl.scale,
-                sparse_block_size=1,
-                block_table=block_table,
-                actual_seq_lengths_query=actual_seq_lengths_query,
-                actual_seq_lengths_kv=actual_seq_lengths_key,
-                query_rope=q_pe,
-                key_rope=key_rope,
-                layout_query="TND",
-                layout_kv="PA_BSND",
-                sparse_mode=sparse_mode,
-                attention_mode=2,
-                return_softmax_lse=return_lse,
+            use_split_kv = (
+                getattr(sfa_impl, "enable_sfa_split_kv", False)
+                and HAS_TRITON
+                and not return_lse
+                and allow_split_kv
+                and getattr(sfa_impl, "dcp_group", None) is None
+                and get_current_hardware_profile().device_adaptor_family is DeviceAdaptorFamily.FP8_OPTIMIZED
             )
+            if use_split_kv:
+                from vllm_ascend.ops.triton.sfa_split_kv import (
+                    can_use_sfa_split_kv,
+                    sparse_flash_attention_split_kv,
+                )
+
+                seq_lens_cpu = getattr(attn_metadata, "seq_lens_cpu", None)
+                if seq_lens_cpu is not None and seq_lens_cpu.numel() == 1:
+                    max_query_len = int(getattr(attn_metadata, "max_query_len", ql_nope.shape[0]))
+                    available_kv_tokens = int(seq_lens_cpu[0]) - max_query_len + 1
+                    use_split_kv = can_use_sfa_split_kv(
+                        ql_nope,
+                        q_pe,
+                        kv,
+                        topk_indices,
+                        available_kv_tokens,
+                    )
+                else:
+                    use_split_kv = False
+            if use_split_kv:
+                result = sparse_flash_attention_split_kv(
+                    query=ql_nope,
+                    key=kv,
+                    value=kv,
+                    sparse_indices=topk_indices,
+                    scale_value=sfa_impl.scale,
+                    block_table=block_table,
+                    actual_seq_lengths_query=actual_seq_lengths_query,
+                    actual_seq_lengths_kv=actual_seq_lengths_key,
+                    query_rope=q_pe,
+                    key_rope=key_rope,
+                    return_softmax_lse=return_lse,
+                )
+            else:
+                result = torch.ops._C_ascend.npu_sparse_flash_attention(
+                    query=ql_nope,
+                    key=kv,
+                    value=kv,
+                    sparse_indices=topk_indices,
+                    scale_value=sfa_impl.scale,
+                    sparse_block_size=1,
+                    block_table=block_table,
+                    actual_seq_lengths_query=actual_seq_lengths_query,
+                    actual_seq_lengths_kv=actual_seq_lengths_key,
+                    query_rope=q_pe,
+                    key_rope=key_rope,
+                    layout_query="TND",
+                    layout_kv="PA_BSND",
+                    sparse_mode=sparse_mode,
+                    attention_mode=2,
+                    return_softmax_lse=return_lse,
+                )
         if not isinstance(result, tuple):
             if return_lse:
                 raise RuntimeError("Sparse flash attention did not return softmax max/sum for DCP LSE merge.")
