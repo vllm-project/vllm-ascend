@@ -149,7 +149,6 @@ check_and_config() {
     pip config set global.timeout 120
 }
 
-
 install_extra_components() {
     echo "====> Installing extra components for DeepSeek-v3.2-exp-bf16"
 
