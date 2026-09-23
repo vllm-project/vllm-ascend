@@ -36,6 +36,8 @@ def _strict_binary_env(name: str, default: str = "0") -> bool:
 
 
 env_variables: dict[str, Callable[[], Any]] = {
+    # Opt-in external FlashMLA for A5 MRV2. Values 0/1; default 0; not sensitive.
+    "VLLM_ASCEND_ENABLE_FLASH_MLA": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASH_MLA", "0"))),
     # max compile thread number for package building. Usually, it is set to
     # the number of CPU cores. If not set, the default value is None, which
     # means all number of CPU cores will be used.

@@ -257,6 +257,14 @@ class AscendK3DSparkForCausalLM(UpstreamK3DSparkForCausalLM):
         config = self.config
         target_layers = getattr(config, "dspark_target_layer_ids", None) or getattr(config, "target_layer_ids", None)
         boundaries = tuple(int(layer) + 1 for layer in (target_layers or ()))
+        if (
+            not boundaries
+            or len(set(boundaries)) != len(boundaries)
+            or any(layer <= 0 or layer > target.model.config.num_hidden_layers for layer in boundaries)
+        ):
+            raise ValueError(f"Invalid K3 MLA target layer boundaries: {boundaries}.")
+        if getattr(config, "num_target_layers", len(boundaries)) != len(boundaries):
+            raise ValueError("K3 MLA num_target_layers does not match target_layer_ids.")
         aux_layers = getattr(target.model, "aux_hidden_state_layers", None)
         if (
             aux_layers is None

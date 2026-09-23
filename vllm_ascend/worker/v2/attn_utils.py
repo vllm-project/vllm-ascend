@@ -19,6 +19,7 @@
 
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -40,14 +41,18 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.worker.gpu.attn_utils import init_attn_backend as _upstream_init_attn_backend
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import AttentionGroup
 
+from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
+from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder
 from vllm_ascend.attention.utils import (
+    MLA_FLASH_SUPPORTED_Q_HEADS,
     AscendCommonAttentionMetadata,
     get_sfa_qsfa_packed_head_dim,
 )
@@ -67,11 +72,33 @@ from vllm_ascend.utils import (
     enable_sfa_dcp_replicated_indexer,
     get_kv_cache_tensor_layers,
     is_hidden_state_cache_spec,
+    vllm_version_is,
 )
+from vllm_ascend.worker.device_metadata import DeviceMetadataExecutor, DeviceMetadataTaskProvider
 from vllm_ascend.worker.kvpp_cache import allocate_kvpp_cache
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
+
+
+_device_metadata_executor: ContextVar[DeviceMetadataExecutor | None] = ContextVar(
+    "ascend_mrv2_device_metadata_executor", default=None
+)
+
+
+@contextmanager
+def device_metadata_context(executor: DeviceMetadataExecutor | None):
+    """Keep task buffers owned until the target/draft consumer has been queued."""
+    if executor is None or _device_metadata_executor.get() is executor:
+        yield
+        return
+    token = _device_metadata_executor.set(executor)
+    try:
+        yield
+    finally:
+        if executor.submission_in_flight:
+            executor.release()
+        _device_metadata_executor.reset(token)
 
 
 def unwrap_mamba_kv_cache_groups(kv_cache_config: KVCacheConfig) -> KVCacheConfig:
@@ -215,6 +242,45 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     return kv_cache_spec
 
 
+def init_attn_backend(kv_cache_config, vllm_config, device, **kwargs):
+    """Refine Flash metadata groups without changing scheduler KV groups."""
+    attn_groups, cg_support, kernel_block_sizes = _upstream_init_attn_backend(
+        kv_cache_config, vllm_config, device, **kwargs
+    )
+    if not ascend_envs.VLLM_ASCEND_ENABLE_FLASH_MLA:
+        return attn_groups, cg_support, kernel_block_sizes
+    layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
+    layer_order = {name: index for index, name in enumerate(layers)}
+    for group_id, groups in enumerate(attn_groups):
+        refined = []
+        for group in groups:
+            if not issubclass(group.backend, AscendMLABackend):
+                # Hybrid KDA/GQA groups keep their original builders and order.
+                refined.append(group)
+                continue
+            partitions = {}
+            for name in sorted(group.layer_names, key=layer_order.__getitem__):
+                impl = getattr(layers[name], "impl", None)
+                # Upstream already splits Q heads and cache geometry. Flash
+                # tiling also bakes in RoPE mode and softmax scale.
+                key = (getattr(impl, "use_mla_rope", None), getattr(impl, "scale", None))
+                partitions.setdefault(key, []).append(name)
+            if len(partitions) <= 1:
+                refined.append(group)
+                continue
+            for names in partitions.values():
+                split_group = AttentionGroup(group.backend, names, group.kv_cache_spec, group.kv_cache_group_id)
+                split_group.create_metadata_builders(
+                    vllm_config=vllm_config,
+                    device=device,
+                    kernel_block_size=kernel_block_sizes[group_id] if group_id < len(kernel_block_sizes) else None,
+                    num_metadata_builders=len(group.metadata_builders),
+                )
+                refined.append(split_group)
+        attn_groups[group_id] = refined
+    return attn_groups, cg_support, kernel_block_sizes
+
+
 def build_attn_metadata(
     *,
     attn_groups: list[list[AttentionGroup]],
@@ -246,6 +312,13 @@ def build_attn_metadata(
     causal: bool | Mapping[int, bool] = True,
 ) -> dict[str, Any]:
     """Build attention metadata for Ascend NPUs."""
+    executor = _device_metadata_executor.get()
+    if executor is not None and executor.submission_in_flight:
+        # Capture factories and draft replay can build another metadata set
+        # after consuming the previous one on this stream.
+        executor.release()
+    device_metadata_tasks = []
+
     # TODO(Ronald1995): optimize AscendCommonAttentionMetadata.
     # seq_lens_np is used for ascend npus, it maybe None in spec_decode case,
     # we fill it with max_seq_len in case `attn_metadata_builder.build` raise
@@ -314,6 +387,8 @@ def build_attn_metadata(
 
         for attn_group in attn_groups[i]:
             attn_metadata_builder = attn_group.get_metadata_builder(0)
+            if executor is not None and isinstance(attn_metadata_builder, DeviceMetadataTaskProvider):
+                attn_metadata_builder.enable_device_metadata()
             is_dsa_builder = isinstance(attn_metadata_builder, AscendDSAMetadataBuilder)
             is_sfa_builder = isinstance(attn_metadata_builder, AscendSFAMetadataBuilder)
             consumes_pcp_context = bool(getattr(attn_metadata_builder, "consumes_pcp_context", False))
@@ -358,6 +433,17 @@ def build_attn_metadata(
                 common_ratio_to_sas_metadata = attn_metadata_builder.common_ratio_to_sas_metadata  # type: ignore[assignment]
             for layer_name in attn_group.layer_names:
                 attn_metadata[layer_name] = metadata
+            if executor is not None and isinstance(attn_metadata_builder, DeviceMetadataTaskProvider):
+                device_metadata_tasks.extend(attn_metadata_builder.take_device_metadata_tasks())
+    if device_metadata_tasks:
+        # Both upstream capture factories and runtime builders execute outside
+        # the captured model. Ordinary stream events therefore stay outside
+        # FULL graphs; replay reads the stable buffers after these waits.
+        assert not torch.npu.is_current_stream_capturing()
+        assert executor is not None
+        executor.submit(device_metadata_tasks)
+        for task in device_metadata_tasks:
+            executor.wait(task.stage, task.group_id)
     return attn_metadata
 
 
@@ -606,11 +692,36 @@ def _allocate_sparse_c8_indexer_tensors(
     return dsa_k_tensor, dsa_k_scale_tensor
 
 
+def _uses_single_raw_mla_cache(
+    vllm_config: VllmConfig,
+    layer_name: str,
+    kv_cache_spec: KVCacheSpec,
+) -> bool:
+    """Whether an MLA layer uses the Ascend single raw backing protocol."""
+    if vllm_version_is("0.28.0"):
+        return False
+
+    attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase, [layer_name])
+    attn_module = attn_layers.get(layer_name)
+    return (
+        isinstance(attn_module, MLAAttention)
+        and type(kv_cache_spec) is AscendMLAAttentionSpec
+        and vllm_config.kv_transfer_config is None
+        and not enable_sfa(vllm_config)
+        and not bool(getattr(kv_cache_spec, "cache_sparse_sfa_c8", False))
+        and get_kv_cache_compression_ratio(kv_cache_spec) == 1
+        and getattr(kv_cache_spec, "model_version", None) is None
+        and not getattr(kv_cache_spec, "indexes_kv_by_block_stride", False)
+        and getattr(attn_module, "indexer", None) is None
+        and not getattr(attn_module.impl, "fa_quant_layer", False)
+    )
+
+
 def _allocate_kv_cache(
     kv_cache_config: KVCacheConfig,
     shared_layers: dict[str, str],
     device: torch.device,
-) -> dict[str, torch.Tensor | tuple[torch.Tensor, torch.Tensor]]:
+) -> dict[str, torch.Tensor | tuple[torch.Tensor, ...]]:
     """
     Initialize the KV cache buffer with the correct size. The buffer needs to be
     reshaped to the desired shape before being used by the models.
@@ -843,6 +954,15 @@ def _allocate_kv_cache(
                         _allocate_int8_cache_tensor(k_tensor_size, alignment, device),
                     )
 
+            continue
+
+        if all(
+            _uses_single_raw_mla_cache(vllm_config, layer_name, layer_kv_cache_spec[layer_name])
+            for layer_name in shared_names
+        ):
+            for layer_name in shared_names:
+                raw_size = kv_cache_config.num_blocks * layer_kv_cache_spec[layer_name].page_size_bytes
+                kv_cache_raw_tensors[layer_name] = (_allocate_int8_cache_tensor(raw_size, alignment, device),)
             continue
 
         # vLLM #51718 packs all group layers into one tensor on main; the
@@ -1123,6 +1243,75 @@ def _reshape_kv_cache_v2(
                 if mamba_cache[0].shape[0] < kv_cache_config.num_blocks:
                     raise ValueError(f"Mamba cache for {layer_name} has fewer blocks than KVCacheManager.")
                 kv_caches[layer_name] = mamba_cache
+                continue
+
+            single_raw_mla_cache = None
+            if isinstance(raw_cache, torch.Tensor):
+                single_raw_mla_cache = raw_cache
+            elif isinstance(raw_cache, tuple) and len(raw_cache) == 1 and isinstance(raw_cache[0], torch.Tensor):
+                single_raw_mla_cache = raw_cache[0]
+
+            if single_raw_mla_cache is not None and _uses_single_raw_mla_cache(vllm_config, layer_name, kv_cache_spec):
+                attn_module = get_layers_from_vllm_config(vllm_config, AttentionLayerBase, [layer_name])[layer_name]
+                typed_raw = single_raw_mla_cache.view(kv_cache_spec.dtype)
+                element_size = torch.empty((), dtype=kv_cache_spec.dtype).element_size()
+                kernel_blocks_per_manager = kv_cache_spec.block_size // kernel_block_size
+                slot_elements = kv_cache_spec.page_size_bytes // kernel_blocks_per_manager // element_size
+                component_shape = (
+                    kv_cache_config.num_blocks * kernel_blocks_per_manager,
+                    kernel_block_size,
+                    kv_cache_spec.num_kv_heads,
+                )
+                nope_dim, rope_dim = _get_attention_kv_cache_dims(layer_name, kv_cache_spec)
+                fused_dim = nope_dim + rope_dim
+
+                if (
+                    get_current_hardware_profile().supports(HardwareCapability.MLA_FLASH)
+                    and attn_module.num_heads in MLA_FLASH_SUPPORTED_Q_HEADS
+                ):
+                    # Preserve the V1 A5 protocol: one token-fused tensor with
+                    # [nope | rope] in the trailing 576 lanes of every token.
+                    fused_cache = torch.as_strided(
+                        typed_raw,
+                        size=(*component_shape, fused_dim),
+                        stride=(
+                            slot_elements,
+                            kv_cache_spec.num_kv_heads * fused_dim,
+                            fused_dim,
+                            1,
+                        ),
+                        storage_offset=typed_raw.storage_offset(),
+                    )
+                    kv_caches[layer_name] = fused_cache
+                    continue
+
+                # A3/FIA keeps each component internally contiguous and puts
+                # the hybrid-page padding only in the leading block stride.
+                nope_cache = torch.as_strided(
+                    typed_raw,
+                    size=(*component_shape, nope_dim),
+                    stride=(
+                        slot_elements,
+                        kv_cache_spec.num_kv_heads * nope_dim,
+                        nope_dim,
+                        1,
+                    ),
+                    storage_offset=typed_raw.storage_offset(),
+                )
+                rope_cache = torch.as_strided(
+                    typed_raw,
+                    size=(*component_shape, rope_dim),
+                    stride=(
+                        slot_elements,
+                        kv_cache_spec.num_kv_heads * rope_dim,
+                        rope_dim,
+                        1,
+                    ),
+                    storage_offset=(
+                        typed_raw.storage_offset() + kernel_block_size * kv_cache_spec.num_kv_heads * nope_dim
+                    ),
+                )
+                kv_caches[layer_name] = (nope_cache, rope_cache)
                 continue
 
             if not isinstance(kv_cache_spec, AttentionSpec):
