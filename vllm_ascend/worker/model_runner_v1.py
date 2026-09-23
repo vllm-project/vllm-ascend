@@ -140,7 +140,11 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
-from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.device.hardware_profile import (
+    DeviceAdaptorFamily,
+    HardwareCapability,
+    get_current_hardware_profile,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
     apply_layerwise_kv_cache_plan,
 )
@@ -453,8 +457,9 @@ class NPUModelRunner(GPUModelRunner):
         # Set up Attention
         self.use_sparse = enable_sfa(vllm_config)
         # dsa c8
-        self.enable_sparse_sfa_c8 = vllm_config.cache_config.cache_dtype in ["fp8", "int8"]
-        self.enable_sparse_li_c8 = vllm_config.attention_config.indexer_kv_dtype in ["fp8", "int8"]
+        self.enable_sparse_sfa_c8 = self.ascend_config.enable_sparse_sfa_c8
+        self.enable_sparse_li_c8 = self.ascend_config.enable_sparse_li_c8
+        self.enable_sparse_li_c4 = self.ascend_config.enable_sparse_li_c4
         if self.enable_sparse_li_c8:
             self.c8_k_cache_dtype = kv_cache_dtype_str_to_dtype(
                 vllm_config.attention_config.indexer_kv_dtype, 
@@ -464,6 +469,15 @@ class NPUModelRunner(GPUModelRunner):
                 self.c8_k_scale_cache_dtype = torch.float32
             elif self.c8_k_cache_dtype == torch.int8:
                 self.c8_k_scale_cache_dtype = torch.float16
+        if self.enable_sparse_li_c4:
+            if get_current_hardware_profile().device_adaptor_family != DeviceAdaptorFamily.FP8_OPTIMIZED:
+                raise RuntimeError("Sparse LI C4 is only supported on A5 devices.")
+            if not hasattr(torch, "float4_e2m1fn_x2") or not hasattr(torch, "float8_e8m0fnu"):
+                raise RuntimeError("Sparse LI C4 requires float4_e2m1fn_x2 and float8_e8m0fnu support.")
+            # Cache planning uses physical packed bytes. The official CANN
+            # binding reinterprets these buffers as FP4/E8M0 without copying.
+            self.c4_k_cache_storage_dtype = torch.uint8
+            self.c4_k_scale_cache_storage_dtype = torch.uint8
 
         self.attn_backend = get_attn_backend(
             0,
@@ -6010,19 +6024,36 @@ class NPUModelRunner(GPUModelRunner):
                 # Remove this special case once the generic vLLM spec/backend
                 # path can describe the Ascend SFA indexer layout directly.
                 cache_sparse_li_c8 = self.ascend_config.is_sparse_li_c8_layer(layer_name)
+                cache_sparse_li_c4 = self.ascend_config.is_sparse_li_c4_layer(layer_name)
+                li_quant_mode = "c4" if cache_sparse_li_c4 else "c8" if cache_sparse_li_c8 else ""
+                index_head_dim = self.model_config.hf_text_config.index_head_dim
                 kv_cache_spec[layer_name] = AscendSFAIndexerCacheSpec(
                     block_size=self.block_size,
                     num_kv_heads=1,
-                    head_size=self.model_config.hf_text_config.index_head_dim,
-                    dtype=self.c8_k_cache_dtype if cache_sparse_li_c8 else self.dtype,
+                    # C4 stores two logical FP4 values in each physical byte.
+                    head_size=index_head_dim // 2 if cache_sparse_li_c4 else index_head_dim,
+                    dtype=(
+                        self.c4_k_cache_storage_dtype
+                        if cache_sparse_li_c4
+                        else self.c8_k_cache_dtype
+                        if cache_sparse_li_c8
+                        else self.dtype
+                    ),
                     cache_dtype_str=(
                         self.vllm_config.cache_config.cache_dtype
-                        if cache_sparse_li_c8
+                        if li_quant_mode
                         else "auto"
                     ),
-                    scale_dim=1 if cache_sparse_li_c8 else 0,
-                    scale_dtype=self.c8_k_scale_cache_dtype if cache_sparse_li_c8 else torch.int8,
+                    scale_dim=index_head_dim // 32 if cache_sparse_li_c4 else 1 if cache_sparse_li_c8 else 0,
+                    scale_dtype=(
+                        self.c4_k_scale_cache_storage_dtype
+                        if cache_sparse_li_c4
+                        else self.c8_k_scale_cache_dtype
+                        if cache_sparse_li_c8
+                        else torch.int8
+                    ),
                     cache_sparse_li_c8=cache_sparse_li_c8,
+                    li_quant_mode=li_quant_mode,
                     sfa_dcp_replicated_indexer_size=self.sfa_dcp_replicated_indexer_size,
                 )
 

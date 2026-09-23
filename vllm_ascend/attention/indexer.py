@@ -44,7 +44,7 @@ from vllm_ascend.utils import (
 )
 
 # Slots of the k / scale caches inside an indexer's own ``k_cache.kv_cache``
-# tuple (the scale slot exists only when LI C8 is enabled).
+# tuple (the scale slot exists when LI C8 or C4 is enabled).
 INDEXER_K_CACHE_SLOT = 0
 INDEXER_SCALE_CACHE_SLOT = 1
 
@@ -179,6 +179,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         vllm_indexer.topk_indices_buffer = None  # delete topk_indices_buffer
 
         self.enable_sparse_li_c8 = get_ascend_config().is_sparse_li_c8_layer(self.k_cache.prefix)
+        self.enable_sparse_li_c4 = get_ascend_config().is_sparse_li_c4_layer(self.k_cache.prefix)
         if self.enable_sparse_li_c8:
             self.c8_k_cache_dtype = kv_cache_dtype_str_to_dtype(
                 get_current_vllm_config().attention_config.indexer_kv_dtype,
@@ -188,6 +189,8 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                 self.c8_k_scale_cache_dtype = torch.float32
             elif self.c8_k_cache_dtype == torch.int8:
                 self.c8_k_scale_cache_dtype = torch.float16
+        if self.enable_sparse_li_c4:
+            self.c4_k_cache_dtype = torch_npu.float4_e2m1fn_x2
 
         model_type = get_current_vllm_config().model_config.hf_config.model_type
         self.is_rope_neox_style = model_type not in ["glm_moe_dsa"]
@@ -201,10 +204,10 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         self._dsa_cp_active = enable_dsa_cp()
 
     def process_weights_after_loading(self) -> None:
-        if self.enable_sparse_li_c8 and AscendSFAIndexerBackend.q_hadamard is None:
+        if self.enable_sparse_li_quant and AscendSFAIndexerBackend.q_hadamard is None:
             hadamard = torch.tensor(scipy.linalg.hadamard(128), dtype=torch.bfloat16, device="npu")
             AscendSFAIndexerBackend.q_hadamard = hadamard / (128**0.5)
-        if self.enable_sparse_li_c8 and AscendSFAIndexerBackend.k_hadamard is None:
+        if self.enable_sparse_li_quant and AscendSFAIndexerBackend.k_hadamard is None:
             hadamard = torch.tensor(scipy.linalg.hadamard(128), dtype=torch.bfloat16, device="npu")
             AscendSFAIndexerBackend.k_hadamard = hadamard / (128**0.5)
 
@@ -212,7 +215,37 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
     def num_cache_tensors(self) -> int:
         """Number of tensors this indexer's cache occupies in the composed
         ``kv_cache`` tuple (k cache only, or k cache plus scale cache)."""
-        return 2 if self.enable_sparse_li_c8 else 1
+        return 2 if self.enable_sparse_li_quant else 1
+
+    @property
+    def enable_sparse_li_quant(self) -> bool:
+        return self.enable_sparse_li_c8 or self.enable_sparse_li_c4
+
+    @property
+    def li_quant_mode(self) -> str:
+        if self.enable_sparse_li_c4:
+            return "c4"
+        if self.enable_sparse_li_c8:
+            return "c8"
+        return ""
+
+    def _quantize_li_tensor(
+        self,
+        x: torch.Tensor,
+        hadamard: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Apply the LI Hadamard transform and the selected cache quantization."""
+        x = x @ hadamard
+        if self.li_quant_mode == "c4":
+            return torch_npu.npu_dynamic_mx_quant(
+                x.view(-1, self.head_dim),
+                dst_type=self.c4_k_cache_dtype,
+            )
+        x, scale = torch_npu.npu_dynamic_quant(
+            x.view(-1, self.head_dim),
+            dst_type=self.c8_k_cache_dtype,
+        )
+        return x, scale.to(self.c8_k_scale_cache_dtype)
 
     def write_cache(
         self,
@@ -223,7 +256,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
     ) -> None:
         """Persist ``k_li`` (and ``k_li_scale`` when LI C8 is enabled) into
         this indexer's own cache tensors: slot 0 of ``self.k_cache.kv_cache``
-        is the k cache, slot 1 (present only for LI C8) is the scale cache.
+        is the k cache, slot 1 (present for LI C8/C4) is the scale cache.
 
         ``forward`` calls this after ``_gather_cache_inputs`` has resolved
         the parallel layout of the tensors and the slot mapping; variants
@@ -249,7 +282,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                 slot_mapping.view(-1, 1),
                 k_li.view(-1, k_li.shape[-1]),
             )
-        if self.enable_sparse_li_c8:
+        if self.enable_sparse_li_quant:
             assert k_li_scale is not None
             indexer_scale_cache = self.k_cache.kv_cache[INDEXER_SCALE_CACHE_SLOT]
             if use_reshape_optim:
@@ -263,6 +296,12 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
                     indexer_attn_metadata.block_size,
                 )
             else:
+                if self.li_quant_mode == "c4":
+                    # ScatterNdUpdate cannot write E8M0 directly. Persist its
+                    # packed bytes and reinterpret them at the CANN boundary.
+                    indexer_scale_cache = indexer_scale_cache.view(torch.uint8)
+                    k_li_scale = k_li_scale.view(torch.uint8)
+                    k_li_scale = k_li_scale.reshape(-1, indexer_scale_cache.shape[-1])
                 torch_npu.npu_scatter_nd_update_(
                     indexer_scale_cache.view(-1, k_li_scale.shape[-1]),
                     slot_mapping.view(-1, 1),
@@ -317,11 +356,11 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
 
             k_li = torch.cat([k_li_pe, k_li_nope], dim=-1)  # [b*s,128]
 
-        if self.enable_sparse_li_c8:
-            k_li = k_li @ AscendSFAIndexerBackend.k_hadamard
-            k_li, k_li_scale = torch_npu.npu_dynamic_quant(k_li.view(-1, self.head_dim), dst_type=self.c8_k_cache_dtype)
-            k_li_scale = k_li_scale.to(self.c8_k_scale_cache_dtype)  # [b*s,]
-            k_li_scale = k_li_scale.unsqueeze(-1)  # [b*s,1]
+        if self.enable_sparse_li_quant:
+            assert AscendSFAIndexerBackend.k_hadamard is not None
+            k_li, k_li_scale = self._quantize_li_tensor(k_li, AscendSFAIndexerBackend.k_hadamard)
+            if self.li_quant_mode == "c8":
+                k_li_scale = k_li_scale.unsqueeze(-1)  # [b*s,1]
         else:
             k_li_scale = None
 
@@ -363,7 +402,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             # throughput becomes a concern.
             k_li, k_handle = all_gather_async(k_li, get_tp_group(), async_op=True)
             scale_handle = None
-            if self.enable_sparse_li_c8:
+            if self.enable_sparse_li_quant:
                 assert k_li_scale is not None
                 k_li_scale, scale_handle = all_gather_async(k_li_scale, get_tp_group(), async_op=True)
             if k_handle is not None:
@@ -455,11 +494,16 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
 
         q_li_scale = None
         q_li_shape_ori = None
-        if self.enable_sparse_li_c8:
+        if self.enable_sparse_li_quant:
             q_li_shape_ori = q_li.shape
-            q_li = q_li @ AscendSFAIndexerBackend.q_hadamard
-            q_li, q_li_scale = torch_npu.npu_dynamic_quant(q_li.view(-1, self.head_dim), dst_type=self.c8_k_cache_dtype)
-            q_li_scale = q_li_scale.to(self.c8_k_scale_cache_dtype)  # [b*s,]
+            assert AscendSFAIndexerBackend.q_hadamard is not None
+            q_li, q_li_scale = self._quantize_li_tensor(q_li, AscendSFAIndexerBackend.q_hadamard)
+            if self.li_quant_mode == "c4":
+                q_li_scale = q_li_scale.view(
+                    *q_li_shape_ori[:-1],
+                    q_li_scale.shape[-2],
+                    q_li_scale.shape[-1],
+                )
 
         return DeviceOperator.indexer_select_post_process(
             q_li,
@@ -472,7 +516,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             indexer_metadata,
             indexer_metadata.actual_seq_lengths_query,
             indexer_metadata.actual_seq_lengths_key,
-            self.enable_sparse_li_c8,
+            self.li_quant_mode,
             self.use_torch_npu_lightning_indexer,
         )
 
