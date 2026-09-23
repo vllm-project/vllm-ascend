@@ -587,13 +587,14 @@ def test_sample_tokens_spec_pp_broadcasts_draft_tokens():
 
 def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
     runner = _make_runner()
-    runner.vllm_config = SimpleNamespace()
+    runner.vllm_config = SimpleNamespace(
+        aux_output_config=SimpleNamespace(enabled=True),
+    )
+    runner.aux_output_connector = MagicMock()
     runner.compilation_config = SimpleNamespace(static_forward_context={})
     runner.pcp_manager = MagicMock(spec=AscendPCPManager)
     runner.model_state = SimpleNamespace(pcp_manager=None, kvpp_runtime=None)
     runner.speculator = SimpleNamespace()
-    runner.model_config = SimpleNamespace(enable_return_routed_experts=True)
-    runner.init_routed_experts_capturer = MagicMock()
     kv_cache_config = KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
     original = vllm_model_runner.ModelCudaGraphManager
     seen = {}
@@ -629,7 +630,9 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
     assert runner.pcp_manager.vllm_config is runner.vllm_config
     assert runner.model_state.pcp_manager is runner.pcp_manager
     assert runner.speculator.pcp_manager is runner.pcp_manager
-    runner.init_routed_experts_capturer.assert_called_once_with()
+    # R3 is owned by upstream's AuxOutput connector; the Ascend runner only
+    # asserts that the connector exists (see NPUModelRunner.initialize_kv_cache).
+    assert runner.aux_output_connector is not None
 
 
 def test_initialize_kv_cache_forwards_allocation_context():
