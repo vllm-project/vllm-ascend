@@ -635,7 +635,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             self.nano_query_scale = torch.empty(
                 (self.nano_topk_src.shape[0], query.shape[1]), dtype=torch.float32, device=query.device
             )
-        torch.ops._C_ascend.npu_fused_li_manage_mtp(
+        torch.ops._C_ascend.npu_fused_lightning_indexer_manage(
             weights[:tokens].contiguous(),
             self.nano_query_scale[:tokens],
             query[:tokens].contiguous(),
@@ -719,7 +719,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         heads = query.shape[1]
         q, qr = prepare_copy_sfa_queries(query[:tokens], query_rope[:tokens])
         out = torch.empty_like(q)
-        torch.ops._C_ascend.npu_fused_copy_sfa_mtp(
+        torch.ops._C_ascend.npu_fused_scatter_copy_sparse_flash_attention(
             qr,
             q,
             metadata.nano_query_ends,

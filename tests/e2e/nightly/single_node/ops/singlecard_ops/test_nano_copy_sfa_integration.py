@@ -1,10 +1,14 @@
-"""Dynamic-TND correctness and graph cases updated to upstream 1518a90dd."""
+"""Serving regressions for the PR 16640 copy-SFA kernel and registered DRAM."""
 
 from __future__ import annotations
 
+import gc
 import json
 import math
+import socket
 import unittest
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 
 import torch
 import torch_npu  # noqa: F401
@@ -41,7 +45,52 @@ def logical_rows(
     return cache[physical_blocks, offsets]
 
 
-class FusedCopySfaMtpDynamicTndTest(unittest.TestCase):
+@contextmanager
+def registered_dram_allocator() -> Iterator[Callable[[torch.Tensor], torch.Tensor]]:
+    # Run these cases in an isolated operator-test process, without an existing
+    # serving/offload manager. Ordinary CPU tensors cannot replace these GVAs.
+    try:
+        from memfabric_hybrid import offload
+    except ImportError as error:
+        raise unittest.SkipTest("registered DRAM cases require MemFabric") from error
+
+    torch.npu.set_device(0)
+    config = offload.OffloadConfig()
+    config.device_id = 0
+    config.world_size = 1
+    config.rank_id = 0
+    config.scene = offload.Scene.SHARED
+    config.reserve_size = 1 << 30
+    config.alloc_size = config.reserve_size
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+    config.store_url = f"tcp://127.0.0.1:{port}"
+    result = offload.initialize(config)
+    if result != 0:
+        raise RuntimeError(f"MemFabric initialization failed: {result}")
+    pointers = []
+
+    def allocate(source: torch.Tensor) -> torch.Tensor:
+        cache = offload.empty(list(source.shape), dtype=source.dtype, pin_memory=True)
+        pointers.append(cache.data_ptr())
+        assert cache.device.type == "cpu"
+        cache.copy_(source)
+        return cache
+
+    try:
+        yield allocate
+    finally:
+        torch.npu.synchronize()
+        gc.collect()
+        try:
+            for pointer in pointers:
+                offload.free(pointer)
+        finally:
+            offload.uninitialize()
+
+
+class NanoCopySfaIntegrationTest(unittest.TestCase):
     def run_case(
         self,
         query_counts: list[int],
@@ -51,6 +100,8 @@ class FusedCopySfaMtpDynamicTndTest(unittest.TestCase):
         cache_budgets: list[int] | None = None,
         pad_heads: bool = False,
         query_prefix_buffer: torch.Tensor | None = None,
+        steady_misses: int = 0,
+        source_allocator: Callable[[torch.Tensor], torch.Tensor] | None = None,
     ) -> None:
         torch.manual_seed(20260901 + heads + sum(query_counts))
         device = torch.device("npu:0")
@@ -62,6 +113,8 @@ class FusedCopySfaMtpDynamicTndTest(unittest.TestCase):
             raise ValueError("cache budgets must match batch size")
         if any(budget < TOPK or budget % BLOCK_SIZE for budget in cache_budgets):
             raise ValueError("cache budgets must be block aligned and >= TopK")
+        if not 0 <= steady_misses <= BLOCK_SIZE:
+            raise ValueError("steady miss cases use one source block per request")
         tail_tokens = 2
         max_logical_tokens = max(budget + tail_tokens + count for budget, count in zip(cache_budgets, query_counts))
         blocks_per_request = math.ceil(max_logical_tokens / BLOCK_SIZE)
@@ -113,6 +166,28 @@ class FusedCopySfaMtpDynamicTndTest(unittest.TestCase):
             destination_offsets = logical_slots % BLOCK_SIZE
             expected_hbm_kpe_cpu[destination_blocks, destination_offsets] = dram_kpe_cpu[source_blocks, source_offsets]
             expected_hbm_ckv_cpu[destination_blocks, destination_offsets] = dram_ckv_cpu[source_blocks, source_offsets]
+
+        # A nonzero odd miss prefix exercises paired writeback and its single-row
+        # tail. In a mixed batch, request zero still takes the first-fill path.
+        for request in range(int(first_fill), batch_size):
+            if steady_misses == 0:
+                continue
+            slots = torch.arange(steady_misses, dtype=torch.int64)
+            query_start = sum(query_counts[:request])
+            query_end = query_start + query_counts[request]
+            topk_miss_counts_cpu[query_start:query_end] = steady_misses
+            topk_src_ids_cpu[query_start:query_end, 0, :steady_misses] = slots.to(torch.int32)
+            miss_src_ids_cpu[request, :steady_misses] = slots.to(torch.int32)
+            miss_dst_slots_cpu[request, :steady_misses] = slots.to(torch.int32)
+            miss_counts_cpu[request] = steady_misses
+            source_blocks = dram_block_table_cpu[request, slots // BLOCK_SIZE].to(torch.int64)
+            destination_blocks = hbm_block_table_cpu[request, slots // BLOCK_SIZE].to(torch.int64)
+            expected_hbm_kpe_cpu[destination_blocks, slots % BLOCK_SIZE] = dram_kpe_cpu[
+                source_blocks, slots % BLOCK_SIZE
+            ]
+            expected_hbm_ckv_cpu[destination_blocks, slots % BLOCK_SIZE] = dram_ckv_cpu[
+                source_blocks, slots % BLOCK_SIZE
+            ]
 
         scale = 1.0 / math.sqrt(CKV_DIM + KPE_DIM)
         expected_rows: list[torch.Tensor] = []
@@ -168,8 +243,9 @@ class FusedCopySfaMtpDynamicTndTest(unittest.TestCase):
         miss_counts = to_npu(miss_counts_cpu)
         hbm_block_table = to_npu(hbm_block_table_cpu)
         dram_block_table = to_npu(dram_block_table_cpu)
-        dram_kpe = to_npu(dram_kpe_cpu)
-        dram_ckv = to_npu(dram_ckv_cpu)
+        allocate_source = source_allocator or to_npu
+        dram_kpe = allocate_source(dram_kpe_cpu)
+        dram_ckv = allocate_source(dram_ckv_cpu)
         output = torch.empty_like(query)
         call_args = [
             query_rope,
@@ -194,11 +270,11 @@ class FusedCopySfaMtpDynamicTndTest(unittest.TestCase):
         ]
         if pad_heads:
             with self.assertRaisesRegex(RuntimeError, "query head count N must be one of"):
-                torch.ops._C_ascend.npu_fused_copy_sfa_mtp.default(*call_args)
+                torch.ops._C_ascend.npu_fused_scatter_copy_sparse_flash_attention.default(*call_args)
             query, query_rope = prepare_copy_sfa_queries(query, query_rope)
             output = torch.empty_like(query)
             call_args[0], call_args[1], call_args[-1] = query_rope, query, output
-        torch.ops._C_ascend.npu_fused_copy_sfa_mtp.default(*call_args)
+        torch.ops._C_ascend.npu_fused_scatter_copy_sparse_flash_attention.default(*call_args)
         torch.npu.synchronize()
 
         actual = output[:, :heads].cpu().float()
@@ -264,7 +340,7 @@ class FusedCopySfaMtpDynamicTndTest(unittest.TestCase):
         graph = torch.npu.NPUGraph()
         pool = torch.npu.graph_pool_handle()
         with torch.npu.graph(graph, pool=pool):
-            torch.ops._C_ascend.npu_fused_copy_sfa_mtp.default(
+            torch.ops._C_ascend.npu_fused_scatter_copy_sparse_flash_attention.default(
                 query_rope,
                 query,
                 actual_q,
@@ -352,6 +428,21 @@ class FusedCopySfaMtpDynamicTndTest(unittest.TestCase):
             first_fill=True,
             cache_budgets=[2048, 2176, 2304],
         )
+
+    def test_registered_dram_first_fill_and_mixed_misses_graph(self) -> None:
+        with registered_dram_allocator() as allocate:
+            self.run_case(
+                [4, 1],
+                heads=8,
+                first_fill=True,
+                cache_budgets=[8192, 8192],
+                steady_misses=3,
+                source_allocator=allocate,
+            )
+
+    def test_registered_dram_steady_misses_graph(self) -> None:
+        with registered_dram_allocator() as allocate:
+            self.run_case([4, 1], heads=8, steady_misses=3, source_allocator=allocate)
 
 
 if __name__ == "__main__":

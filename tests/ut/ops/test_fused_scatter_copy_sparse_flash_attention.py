@@ -34,7 +34,7 @@ def test_generalized_copy_meta_accepts_per_query_and_per_request_misses():
         0.0442,
         tensor(tokens, heads, 512, dtype=torch.bfloat16),
     ]
-    op = torch.ops._C_ascend.npu_fused_copy_sfa_mtp.default
+    op = torch.ops._C_ascend.npu_fused_scatter_copy_sparse_flash_attention.default
     assert op(*inputs) is None
     writes = {arg.name for arg in op._schema.arguments if arg.alias_info is not None and arg.alias_info.is_write}
     assert writes == {"hbm_k_rope", "hbm_kv_cache", "attention_out"}

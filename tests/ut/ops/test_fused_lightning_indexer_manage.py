@@ -29,7 +29,7 @@ def test_generalized_lim_meta_accepts_packed_queries_and_state_outputs():
         tensor(batch, 32768),
         tensor(batch),
     ]
-    op = torch.ops._C_ascend.npu_fused_li_manage_mtp.default
+    op = torch.ops._C_ascend.npu_fused_lightning_indexer_manage.default
     assert op(*inputs) is None
     writes = {arg.name for arg in op._schema.arguments if arg.alias_info is not None and arg.alias_info.is_write}
     assert writes == {

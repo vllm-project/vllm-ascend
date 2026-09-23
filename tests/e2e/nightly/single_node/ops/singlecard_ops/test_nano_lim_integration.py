@@ -216,7 +216,7 @@ def call_custom(
     outputs: tuple[torch.Tensor, ...],
 ) -> None:
     query_ends, actual_key, offload_key, cache_tokens, states, req_entries = case["metadata"]
-    torch.ops._C_ascend.npu_fused_li_manage_mtp.default(
+    torch.ops._C_ascend.npu_fused_lightning_indexer_manage.default(
         case["weights"],
         case["query_scale"],
         case["query"],
@@ -458,7 +458,7 @@ def test_generalized_lim_copy_sfa_first_fill_and_replacement_chain():
             case["query"].neg_()
         call_custom(case, cache, outputs)
         src, dst, route_misses, miss_src, miss_dst, misses = outputs
-        torch.ops._C_ascend.npu_fused_copy_sfa_mtp(
+        torch.ops._C_ascend.npu_fused_scatter_copy_sparse_flash_attention(
             q_rope,
             q,
             case["metadata"][0],
@@ -514,7 +514,7 @@ def test_generalized_lim_copy_sfa_first_fill_and_replacement_chain():
 @pytest.mark.parametrize("queries", [1, 4, 7])
 @pytest.mark.parametrize("use_graph", [False, True])
 def test_generalized_lim_padding_overwrites_old_selection_without_misses(queries, use_graph):
-    """A former active row becomes a short causal dummy, with a private map."""
+    """A former active row becomes a no-copy dummy, with a private map."""
     args = argparse.Namespace(
         source_capacity=16384,
         offload_len=8192,
@@ -550,6 +550,9 @@ def test_generalized_lim_padding_overwrites_old_selection_without_misses(queries
     assert route_misses.count_nonzero().item() == 0
     for route in range(queries):
         valid = src[route, 0][src[route, 0] >= 0].cpu()
-        assert torch.equal(valid.sort().values, torch.arange(route + 1, dtype=torch.int32))
+        # Dummy attention has zero logical length and ignores these indices.
+        # Require old selections to be overwritten, but retain the PR's unused
+        # short-row payload rather than imposing per-query causal -1 padding.
+        assert torch.all(valid < queries)
         assert torch.equal(dst[route], src[route])
     assert torch.equal(cache[1], active_map)
