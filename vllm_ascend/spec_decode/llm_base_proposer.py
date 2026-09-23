@@ -480,6 +480,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             with set_current_vllm_config(self.vllm_config):
                 self.model.post_process(self.vllm_config)
 
+        # Finalize draft topology after all sharing is complete.
+        # This re-registers the final tensor layout with any excluded names
+        # (embed_tokens/lm_head that were shared with target) so the seed
+        # manifest matches what the receiver will see.
+        self._finalize_draft_topology()
+
         if (
             self.parallel_drafting
             and self.pass_hidden_states_to_model
@@ -642,6 +648,29 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         layer_module.shared_head.head.weight, target_lm_head.weight
                     ):
                         layer_module.shared_head.head = target_lm_head
+
+    def _finalize_draft_topology(self) -> None:
+        """Re-register draft topology after sharing embed_tokens/lm_head with target.
+
+        This ensures the seed service manifest includes only the tensors that will
+        actually be transferred, excluding any modules that were shared with the
+        target model after initial registration.
+        """
+        load_config = self.vllm_config.load_config
+        if not hasattr(load_config, "rfork_draft_session"):
+            return
+
+        draft_session = load_config.rfork_draft_session
+        if draft_session is None:
+            return
+
+        try:
+            draft_session.finalize_draft_topology(self.model)
+        except Exception:
+            logger.exception(
+                "[spec_decode/base] Failed to finalize draft topology after sharing;"
+                " RFork seed service may fall back to direct load."
+            )
 
         if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs() and self.use_cuda_graph:
             logger.info(

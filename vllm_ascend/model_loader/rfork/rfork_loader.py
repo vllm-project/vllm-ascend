@@ -694,7 +694,8 @@ class RForkModelLoader(BaseModelLoader):
                     )
 
                 weight_load_start_time = time.perf_counter()
-                if not session.register_destination(model, processed_layout_transfer, exclude_blocks):
+                exclude_prefixes = frozenset(getattr(model, "_rfork_draft_exclusions", ()))
+                if not session.register_destination(model, processed_layout_transfer, exclude_blocks, exclude_prefixes):
                     raise RuntimeError("destination registration failed.")
 
                 acquire_seed_start_time = time.perf_counter()
@@ -724,6 +725,11 @@ class RForkModelLoader(BaseModelLoader):
                         process_weights_after_loading(model, model_config, target_device)
 
                 _restore_rfork_load_derived_state(model, model_config)
+
+                # Mark that RFork transfer completed with post-processed layout.
+                # DSpark drafts read this to skip FC rotation when the seed already applied it.
+                if processed_layout_transfer:
+                    model._rfork_post_processed = True
 
                 session.log_transferred_model_layout(model, processed_layout_transfer)
 

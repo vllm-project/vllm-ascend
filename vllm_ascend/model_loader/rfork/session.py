@@ -51,8 +51,8 @@ def _resolve_seed_server_port(config: RForkConfig, identity: RForkIdentity) -> i
     return config.seed_port_base + identity.global_rank * RFORK_SEED_PORT_SLOTS_PER_RANK + model_slot
 
 
-def _compute_structural_digest(model, processed_layout: bool) -> str:
-    return build_structural_digest(collect_transferable_tensors(model, processed_layout))
+def _compute_structural_digest(model, processed_layout: bool, exclude_prefixes: frozenset[str] | None = None) -> str:
+    return build_structural_digest(collect_transferable_tensors(model, processed_layout, exclude_prefixes))
 
 
 class RForkSession:
@@ -90,6 +90,7 @@ class RForkSession:
         self._registration_elapsed = 0.0
         self._source_transfer_session_id: str | None = None
         self._deferred_seed_start: tuple[Any, bool, list[tuple[int, int]] | None] | None = None
+        self._exclude_prefixes: frozenset[str] | None = None
         self._lock = threading.RLock()
         # Acquire before _lock; release responses must not wait on removal I/O.
         self._seed_lifecycle_lock = threading.RLock()
@@ -98,9 +99,21 @@ class RForkSession:
         atexit.register(self._atexit_callback)
 
     def register_destination(
-        self, model, processed_layout: bool, exclude_blocks: list[tuple[int, int]] | None = None
+        self,
+        model,
+        processed_layout: bool,
+        exclude_blocks: list[tuple[int, int]] | None = None,
+        exclude_prefixes: frozenset[str] | None = None,
     ) -> bool:
-        """Prepare local buffers on the NPU caller thread before acquiring a lease."""
+        """Prepare local buffers on the NPU caller thread before acquiring a lease.
+
+        Args:
+            model: The model to register.
+            processed_layout: Whether the model has undergone post-load layout processing.
+            exclude_blocks: Memory address ranges to skip (e.g., shared with target model).
+            exclude_prefixes: Tensor name prefixes to skip (e.g., draft modules that will
+                be rebuilt or shared). Must be consistent between seed and receiver.
+        """
         with self._lock:
             if (
                 self.state is not RForkLifecycleState.INITIALIZED
@@ -110,10 +123,11 @@ class RForkSession:
                 return False
             self.state = RForkLifecycleState.CLEANUP_REQUIRED
             self._source_transfer_session_id = None
+            self._exclude_prefixes = exclude_prefixes
             started_at = time.monotonic()
             if not self.transfer_backend.register_memory_region(model, processed_layout, exclude_blocks):
                 return False
-            self.planner.bind_structural_digest(_compute_structural_digest(model, processed_layout))
+            self.planner.bind_structural_digest(_compute_structural_digest(model, processed_layout, exclude_prefixes))
             self._registration_elapsed = time.monotonic() - started_at
             self.state = RForkLifecycleState.REGISTERED
             # Seed misses are silent 404s; the bound key and digest make them debuggable.
@@ -197,11 +211,16 @@ class RForkSession:
 
     def can_reuse_shared_weights(self, model, processed_layout: bool, exclude_blocks: list[tuple[int, int]]) -> bool:
         with self._lock:
-            if (
-                self.state is not RForkLifecycleState.INITIALIZED
-                or self.seed_lease is not None
-                or self.lease_release_stop_event.is_set()
-            ):
+            if self.state is not RForkLifecycleState.TRANSFERRED or self._source_transfer_session_id is None:
+                return False
+            current_digest = _compute_structural_digest(model, processed_layout, self._exclude_prefixes)
+            if current_digest != self.planner.structural_digest:
+                logger.warning(
+                    "RFork cannot reuse transferred weights; structural digest changed "
+                    "(expected=%s, current=%s). Falling back to load.",
+                    self.planner.structural_digest,
+                    current_digest,
+                )
                 return False
             return self.transfer_backend.can_reuse_shared_weights(model, processed_layout, exclude_blocks)
 
@@ -487,7 +506,9 @@ class RForkSession:
                             registered = False
                         if registered:
                             try:
-                                self.planner.bind_structural_digest(_compute_structural_digest(model, processed_layout))
+                                self.planner.bind_structural_digest(
+                                    _compute_structural_digest(model, processed_layout, self._exclude_prefixes)
+                                )
                             except RuntimeError as exc:
                                 # The structure drifted from destination registration; a seed
                                 # advertised under the stale key could never pass manifest checks.
@@ -515,6 +536,92 @@ class RForkSession:
             if not started:
                 self._cleanup_failed_seed_start()
             return RForkSeedServiceStartResult.STARTED if started else RForkSeedServiceStartResult.FAILED
+
+    def finalize_draft_topology(
+        self,
+        model,
+        processed_layout: bool,
+        exclude_blocks: list[tuple[int, int]] | None = None,
+    ) -> bool:
+        """Re-register a draft model after sharing/post-processing completes.
+
+        Draft models defer seed startup in start_seed_service() because their
+        topology is not final at load time. After the proposer shares embed/lm_head
+        with the target and applies FC rotation, this method re-snapshots the final
+        topology and publishes it as a seed if the source lease has been released.
+
+        Args:
+            model: The draft model with finalized topology.
+            processed_layout: True after post-load layout processing.
+            exclude_blocks: Memory address ranges to skip (e.g., shared with target).
+
+        Returns:
+            True if re-registration succeeded and seed startup was triggered or deferred;
+            False if re-registration failed (inference can continue regardless).
+        """
+        if not self.identity.is_draft_model:
+            logger.warning("finalize_draft_topology called on a non-draft model; ignoring.")
+            return False
+
+        with self._seed_lifecycle_lock:
+            with self._lock:
+                if self.lease_release_stop_event.is_set():
+                    return False
+                if self.state is RForkLifecycleState.SERVING:
+                    # Already finalized and serving.
+                    return True
+                if self.state not in (
+                    RForkLifecycleState.INITIALIZED,
+                    RForkLifecycleState.LEASED,
+                    RForkLifecycleState.TRANSFERRED,
+                    RForkLifecycleState.READY,
+                ):
+                    logger.error("RFork draft finalization requires a complete model; state=%s", self.state.name)
+                    return False
+
+                # Re-register with the finalized topology (post-sharing addresses).
+                self.state = RForkLifecycleState.CLEANUP_REQUIRED
+                try:
+                    registered = self.transfer_backend.register_memory_region(model, processed_layout, exclude_blocks)
+                except Exception:
+                    logger.exception("RFork draft finalization registration raised; cleaning up.")
+                    registered = False
+
+                if registered:
+                    try:
+                        self.planner.bind_structural_digest(
+                            _compute_structural_digest(model, processed_layout, self._exclude_prefixes)
+                        )
+                    except RuntimeError as exc:
+                        logger.error(
+                            "RFork draft finalization failed; structure changed after destination registration: %s.",
+                            exc,
+                        )
+                        registered = False
+
+                if not registered:
+                    self._reset_transfer_locked()
+                    return False
+
+                self.state = RForkLifecycleState.READY
+
+                # If source lease is still held, defer seed startup.
+                if self.seed_lease is not None:
+                    if self._lease_release_exhausted or self.lease_release_stop_event.is_set():
+                        return False
+                    self._deferred_seed_start = (model, processed_layout, exclude_blocks)
+                    self._ensure_lease_release_retry_locked()
+                    logger.debug(
+                        "RFork draft seed promotion is deferred until the source seed lease is released; "
+                        "the transferred draft remains available for inference."
+                    )
+                    return True
+
+            # Source lease released; start seed service immediately.
+            started = self._start_seed_service(model, processed_layout, exclude_blocks)
+            if not started:
+                self._cleanup_failed_seed_start()
+            return started
 
     def _start_seed_service(
         self,

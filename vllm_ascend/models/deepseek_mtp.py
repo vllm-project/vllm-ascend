@@ -65,7 +65,35 @@ class AscendDeepSeekMTP(DeepSeekMTP):
         the checkpoint cannot be inspected, which sends the caller to a local load
         that runs ``load_weights`` rather than leaving the flag at its class default.
         """
-        self._set_own_lm_head(checkpoint_contains_weight(checkpoint_path, self._own_head_weight_name))
+        from vllm_ascend.models.common.checkpoint import checkpoint_contains_any_weight
+
+        mtp_layer_idx = self.model.mtp_start_layer_idx
+        candidate_names = {
+            "embed": "model.embed_tokens.weight",
+            "lm_head": f"model.layers.{mtp_layer_idx}.shared_head.head.weight",
+        }
+        try:
+            present = {
+                key
+                for key, name in candidate_names.items()
+                if checkpoint_contains_any_weight(checkpoint_path, [name])
+            }
+        except (ValueError, OSError) as e:
+            raise ValueError(
+                f"restore_load_derived_state needs to inspect the draft checkpoint at {checkpoint_path!r}, "
+                f"but cannot inspect it: {e}"
+            ) from e
+
+        exclusions = set()
+        if "embed" not in present:
+            exclusions.add("model.embed_tokens")
+        if "lm_head" not in present:
+            exclusions.add("lm_head")
+        else:
+            self.lm_head = self.model.layers[str(mtp_layer_idx)].shared_head.head
+
+        self._rfork_draft_exclusions = frozenset(exclusions)
+        self._set_own_lm_head("lm_head" in present)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         if self.quant_config is not None and (cache_scale_mapper := self.quant_config.get_cache_scale_mapper()):
