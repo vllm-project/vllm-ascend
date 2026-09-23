@@ -8,7 +8,7 @@ replacing only ACLNN execution; this does not validate kernel execution.
 """
 
 import ast
-import re
+import regex as re
 import shutil
 import subprocess
 import tempfile
