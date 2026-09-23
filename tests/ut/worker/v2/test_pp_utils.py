@@ -25,10 +25,10 @@ def _clear_partition_cache():
 @pytest.mark.parametrize(
     "version, legacy",
     [
-        ("0.28.0", False),
-        ("0.28.1+empty", False),
+        ("0.28.0", True),
+        ("0.28.1+empty", True),
         ("0.29.0", True),
-        ("0.29.1rc1", False),
+        ("0.29.1rc1", True),
         ("0.29.0+empty", True),
         ("0.1.dev1+g84030bbe3.empty", False),
         ("0.30.0", False),
