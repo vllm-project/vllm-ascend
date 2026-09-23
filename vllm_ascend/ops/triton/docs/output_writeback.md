@@ -13,7 +13,7 @@
 
 ## Parameters
 
-All three public entry-point parameters are required. Kernel launch attributes are derived by the wrapper.
+All three public entry-point parameters are required. `write_recurrent_output(source, destination, query_ends)` is the stable public ABI. `_write_output`, `OUTPUT_BLOCK_BYTES`, and the derived launch attributes below are implementation details owned by this module, not an interface for callers or tests. Tuning them does not require changing the model-side call.
 
 | Parameter | Input/Output/Attribute | Description | Data type | Data format |
 | --- | --- | --- | --- | --- |
