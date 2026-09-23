@@ -104,7 +104,7 @@ from vllm.v1.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID, RejectionSamp
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer_gpu import copy_num_valid_draft_tokens
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
-from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
+from vllm.v1.utils import record_function_or_nullcontext
 from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.gpu_model_runner import (
     AsyncGPUModelRunnerOutput,
@@ -368,7 +368,6 @@ class NPUModelRunner(GPUModelRunner):
 
         with _torch_cuda_wrapper():
             super().__init__(vllm_config, device)
-        self.lookback_token_ids: CpuGpuBuffer | None = None
 
         self.device_metadata_executor: DeviceMetadataExecutor | None = None
         self.device_metadata_providers: dict[int, DeviceMetadataTaskProvider] | None = None
@@ -3176,57 +3175,22 @@ class NPUModelRunner(GPUModelRunner):
                 self.speculative_config,
             )
 
-    # Prompt lookback contract backported from vLLM f84b0c4bce.
-    def _prepare_lookback_token_ids(self, num_reqs: int) -> torch.Tensor:
-        """Gather, per request, the `depth` prompt token ids preceding its
-        first scheduled token (column j is position start - 1 - j); -1 where
-        the position is before the prompt or already past it. Generated
-        positions are left to the model: under async scheduling the CPU token
-        table holds placeholders for them."""
-        buf: CpuGpuBuffer | None = getattr(self, "lookback_token_ids", None)
-        assert buf is not None
-        buf.np.fill(-1)
-        if num_reqs > 0:
-            depth = buf.np.shape[1]
-            starts = self.input_batch.num_computed_tokens_cpu[:num_reqs, None]
-            pos = starts - np.arange(1, depth + 1)
-            num_prompt = self.input_batch.num_prompt_tokens[:num_reqs, None]
-            valid = (pos >= 0) & (pos < num_prompt)
-            rows = np.arange(num_reqs)[:, None]
-            ids = self.input_batch.token_ids_cpu[rows, np.clip(pos, 0, None)]
-            buf.np[:num_reqs] = np.where(valid, ids, -1)
-        return buf.copy_to_gpu()
-
-    def _init_model_kwargs(self, num_reqs: int | None = None):
-        model_kwargs = super()._init_model_kwargs()
-        if getattr(self, "lookback_token_ids", None) is not None:
-            if num_reqs is None:
-                num_reqs = self.input_batch.num_reqs
-            model_kwargs["lookback_token_ids"] = self._prepare_lookback_token_ids(num_reqs)
-        return model_kwargs
-
-    def _get_engram_device_inputs(self) -> dict[str, torch.Tensor]:
-        """Full-request device metadata for upstream NgramHashState.
-
-        Taken before any attention CP slicing, and from the physical block
-        table so `block * storage_block_size + offset` addresses the slot
-        cache the hash state sizes itself from.
-        """
+    def _get_engram_history_inputs(self) -> tuple[torch.Tensor, torch.Tensor, int] | None:
+        """Read full-request host pages before any attention CP slicing."""
         layer_name = self.model.engram_cache_layer_name
         if layer_name is None or get_forward_context().attn_metadata is None:
-            return {}
+            return None
         group_id, group = next(
             (group_id, group)
             for group_id, group in enumerate(self.kv_cache_config.kv_cache_groups)
             if layer_name in group.layer_names
         )
         num_reqs = self.input_batch.num_reqs
-        block_table = self.input_batch.block_table[group_id]
-        return {
-            "query_start_loc": self.query_start_loc.gpu[: num_reqs + 1],
-            "slot_mapping": block_table.slot_mapping.gpu,
-            "block_table": block_table.get_device_tensor(num_reqs),
-        }
+        return (
+            self.query_start_loc.cpu[: num_reqs + 1],
+            self.input_batch.block_table[group_id].get_cpu_tensor()[:num_reqs],
+            get_storage_block_size(group.kv_cache_spec),
+        )
 
     def _model_forward(
         self,
@@ -3261,23 +3225,8 @@ class NPUModelRunner(GPUModelRunner):
             ):
                 model_inputs.update(self.model.prepare_engram_graph_inputs(num_tokens_padded))
             else:
-                # The window is upstream's: ``_preprocess`` already ran
-                # ``_init_model_kwargs`` -> ``_prepare_lookback_token_ids`` on
-                # this step's input batch, so ``model_kwargs`` carries the
-                # prompt-only lookback (column j = position start - 1 - j,
-                # -1 where that position is not a prompt token).  Generated
-                # positions stay -1 here and come from the slot cache the hash
-                # state fills itself, which is what keeps async draft
-                # placeholders out of the history.
-                model_inputs.update(
-                    prepare_engram(
-                        input_ids,
-                        positions,
-                        num_tokens_padded,
-                        model_kwargs.get("lookback_token_ids"),
-                        **self._get_engram_device_inputs(),
-                    )
-                )
+                history_inputs = self._get_engram_history_inputs()
+                model_inputs.update(prepare_engram(input_ids, positions, num_tokens_padded, history_inputs))
         run_model = partial(self.model, **model_inputs)
 
         try:
@@ -4460,15 +4409,6 @@ class NPUModelRunner(GPUModelRunner):
         # wrap the model with full graph wrapper if needed.
         cudagraph_mode = self.compilation_config.cudagraph_mode
         assert cudagraph_mode is not None
-
-        # Engram prompts need the tokens just before each chunk start; the
-        # model exposes how many, and _prepare_lookback_token_ids fills them.
-        # Allocated before the graph wrapper so the depth is read off the model.
-        lookback_depth = getattr(self.model, "token_lookback_depth", 0)
-        if lookback_depth > 0:
-            self.lookback_token_ids = self._make_buffer(
-                self.max_num_reqs, lookback_depth, dtype=torch.int32
-            )
 
         if cudagraph_mode.has_full_cudagraphs():
             self.update_stream = torch.npu.Stream()
