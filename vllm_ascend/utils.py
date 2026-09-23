@@ -707,7 +707,7 @@ def routing_replay_enabled(vllm_config) -> bool:
     """
     aux_output_config = getattr(vllm_config, "aux_output_config", None)
     if aux_output_config is not None:
-        return bool(aux_output_config.enabled)
+        return bool(getattr(aux_output_config, "enabled", False))
     return bool(getattr(getattr(vllm_config, "model_config", None), "enable_return_routed_experts", False))
 
 
