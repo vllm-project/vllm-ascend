@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CPU tests for GLM-Next model-runner pooled cache views."""
 
+from itertools import permutations
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 import torch
 from vllm.v1.core.single_type_kv_cache_manager import (
     register_all_kvcache_specs,
@@ -12,25 +14,26 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 from vllm.v1.kv_cache_interface import MambaSpec
 
 from vllm_ascend.core.kv_cache_interface import (
-    AscendIndexerKPoolStateSpec,
+    AscendIndexerKPoolTailSpec,
     AscendMLAAttentionSpec,
+    requires_padded_page_layout,
 )
 from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_next_kv_cache_config,
     get_glm5_next_kv_cache_groups,
     get_glm5_next_pool_bytes_per_block,
 )
-from vllm_ascend.utils import get_kv_cache_tensor_layers, vllm_version_is
+from vllm_ascend.utils import get_kv_cache_tensor_layers
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 MAIN = "model.layers.1.attn"
 INDEXER = "model.layers.1.indexer.k_cache"
-STATE = "model.layers.1.indexer.state_cache"
+STATE = "model.layers.1.indexer.tail_cache"
 MAMBA = "model.layers.0.linear_attn"
 
 
 def _ratio_kwargs(ratio: int) -> dict[str, int]:
-    return {"compress_ratio": ratio} if vllm_version_is("0.28.0") else {"tokens_per_state": ratio}
+    return {"tokens_per_state": ratio}
 
 
 class _AttentionBackend:
@@ -54,7 +57,7 @@ class _StateBackend:
         head_size,
         **_kwargs,
     ):
-        return num_blocks, block_size, head_size
+        return num_blocks, 2, block_size, head_size
 
 
 def _make_config():
@@ -95,11 +98,12 @@ def _make_specs(main_head_size=4):
             indexes_kv_by_block_stride=True,
             **_ratio_kwargs(2),
         ),
-        STATE: AscendIndexerKPoolStateSpec(
+        STATE: AscendIndexerKPoolTailSpec(
             block_size=2,
             sliding_window=2,
+            compress_ratio=2,
             num_kv_heads=1,
-            head_size=3,
+            head_size=1,
             dtype=torch.float32,
             model_version="glm5_next",
             indexes_kv_by_block_stride=True,
@@ -116,6 +120,7 @@ def _make_runner(config, main_cache_dims=(4, 0)):
     runner = NPUModelRunner.__new__(NPUModelRunner)
     runner.device = torch.device("cpu")
     runner.vllm_config = config
+    runner.ascend_config = SimpleNamespace(kvpp_config=SimpleNamespace(size=1))
     runner.compilation_config = config.compilation_config
     runner.runner_only_attn_layers = set()
     runner.shared_kv_cache_layers = {}
@@ -129,8 +134,9 @@ def _make_runner(config, main_cache_dims=(4, 0)):
     runner.sparse_kv_offload_config = SimpleNamespace(enabled=False)
     runner.tp_rank = 0
     runner.attn_backend = _AttentionBackend
-    # The runner must consume the descriptor/spec contract without inspecting
-    # a model type.
+    runner.kernel_block_sizes = [[8], [2], [0]]
+    # The runner gates GLM-Next reshape views on the spec-carried
+    # model_version marker, not on model_config.
     runner.model_config = SimpleNamespace()
 
     specs = _make_specs()
@@ -139,21 +145,25 @@ def _make_runner(config, main_cache_dims=(4, 0)):
             backend=_AttentionBackend,
             kv_cache_spec=specs[MAIN],
             layer_names=[MAIN],
+            kv_cache_group_id=0,
         ),
         SimpleNamespace(
             backend=_AttentionBackend,
             kv_cache_spec=specs[INDEXER],
             layer_names=[INDEXER],
+            kv_cache_group_id=0,
         ),
         SimpleNamespace(
             backend=_StateBackend,
             kv_cache_spec=specs[STATE],
             layer_names=[STATE],
+            kv_cache_group_id=1,
         ),
         SimpleNamespace(
             backend=None,
             kv_cache_spec=specs[MAMBA],
             layer_names=[MAMBA],
+            kv_cache_group_id=2,
         ),
     ]
     runner._kv_cache_spec_attn_group_iterator = lambda: iter(attn_groups)
@@ -165,7 +175,8 @@ def _make_plan(num_blocks=3, main_head_size=4):
     # Match production: vLLM registers built-in specs before the Ascend hook.
     register_all_kvcache_specs(None)
     config = _make_config()
-    groups = get_glm5_next_kv_cache_groups(config, _make_specs(main_head_size))
+    specs = _make_specs(main_head_size)
+    groups = get_glm5_next_kv_cache_groups(config, specs)
     bytes_per_block = get_glm5_next_pool_bytes_per_block(groups)
     plan = get_glm5_next_kv_cache_config(
         config,
@@ -190,32 +201,37 @@ def test_glm5_next_runner_allocates_contiguous_slot_backings():
     }
     main_cache, main_rope_cache = caches[MAIN]
     (indexer_cache,) = caches[INDEXER]
-    (state_cache,) = caches[STATE]
+    (tail_cache,) = caches[STATE]
     assert main_cache.shape == (3, 8, 1, 4)
     assert main_rope_cache.shape == (3, 8, 1, 0)
     assert main_cache.is_contiguous()
     assert indexer_cache.shape == (3, 4, 1, 4)
-    assert state_cache.shape == (3, 2, 3)
+    assert tail_cache.shape == (3, 2, 2, 1)
     assert [cache.shape for cache in caches[MAMBA]] == [
         (3, 2, 2),
         (3, 1, 2, 2),
     ]
 
-    for name, cache in ((INDEXER, indexer_cache), (STATE, state_cache)):
-        page_size = descriptors[name].size // plan.num_blocks
-        assert cache.stride(0) * cache.element_size() == page_size
-        assert cache.data_ptr() == raw_caches[name].data_ptr()
-    assert all(cache.is_contiguous() for cache in caches[MAMBA])
+    assert indexer_cache.is_contiguous()
+    assert indexer_cache.data_ptr() == raw_caches[INDEXER].data_ptr()
+    tail_packed_bytes = tail_cache.numel() * tail_cache.element_size()
+    slot = raw_caches[STATE]
+    slot_bytes = slot.numel() * slot.element_size()
+    assert tail_cache.data_ptr() + tail_packed_bytes == slot.data_ptr() + slot_bytes
+    for cache in caches[MAMBA]:
+        assert cache.stride(0) * cache.element_size() == descriptors[MAMBA].size // plan.num_blocks
 
-    mamba_second_offset = caches[MAMBA][0].numel() * caches[MAMBA][0].element_size()
+    mamba_second_offset = caches[MAMBA][0][0].numel() * caches[MAMBA][0].element_size()
     assert caches[MAMBA][1].data_ptr() - raw_caches[MAMBA].data_ptr() == mamba_second_offset
     mamba_payload_size = sum(cache.numel() * cache.element_size() for cache in caches[MAMBA])
     assert mamba_payload_size < descriptors[MAMBA].size
 
-    state_cache[2].fill_(7)
-    state_payload_size = state_cache[0].numel() * state_cache.element_size()
-    state_padding = 2 * (descriptors[STATE].size // plan.num_blocks) + state_payload_size
-    assert raw_caches[STATE][state_padding].item() == 0
+    tail_cache[2].fill_(7)
+    tail_packed_els = tail_packed_bytes // slot.element_size()
+    block2_els = tail_cache[2].numel() * tail_cache[2].element_size() // slot.element_size()
+    assert torch.all(slot[slot.numel() - block2_els :].view(torch.float32) == 7)
+    assert torch.count_nonzero(slot[: slot.numel() - tail_packed_els]) == 0
+    assert torch.count_nonzero(slot[slot.numel() - tail_packed_els : slot.numel() - block2_els]) == 0
 
 
 def test_glm5_next_runner_splits_main_mla_components_within_each_page():
@@ -266,3 +282,72 @@ def test_glm5_next_initialize_passes_all_pooled_views_to_cache_binding():
         runner.kv_caches,
         1,
     )
+
+
+@pytest.mark.parametrize("offset", [0, 64])
+def test_glm_shared_mla_mamba_pages_preserve_other_block_ids(offset):
+    config, _, plan = _make_plan(num_blocks=4)
+    runner = _make_runner(config)
+    raw_tensors = runner._allocate_kv_cache_tensors(plan)
+    assert raw_tensors[MAIN] is raw_tensors[MAMBA]
+    page_bytes = raw_tensors[MAIN].numel() // plan.num_blocks
+    backing = torch.zeros(offset + raw_tensors[MAIN].numel() + 64, dtype=torch.int8)
+    raw = backing[offset : offset + plan.num_blocks * page_bytes]
+    raw_tensors[MAIN] = raw_tensors[MAMBA] = raw
+    caches = runner._reshape_kv_cache_tensors(plan, raw_tensors)
+    latent, _ = caches[MAIN]
+    conv, ssm = caches[MAMBA]
+    for state in (conv, ssm):
+        assert state.untyped_storage().data_ptr() == raw.untyped_storage().data_ptr()
+        assert state.stride(0) * state.element_size() == page_bytes
+    assert ssm.data_ptr() - conv.data_ptr() == conv[0].numel() * conv.element_size()
+    state_bytes = sum(state[0].numel() * state.element_size() for state in (conv, ssm))
+    for mla_id, state_id in permutations(range(plan.num_blocks), 2):
+        raw.zero_()
+        latent[mla_id].fill_(7)
+        conv[state_id].fill_(11)
+        ssm[state_id].fill_(13)
+        torch.testing.assert_close(latent[mla_id], torch.full_like(latent[mla_id], 7))
+        latent[mla_id].fill_(17)
+        torch.testing.assert_close(conv[state_id], torch.full_like(conv[state_id], 11))
+        torch.testing.assert_close(ssm[state_id], torch.full_like(ssm[state_id], 13))
+        assert torch.count_nonzero(raw.view(plan.num_blocks, page_bytes)[state_id, state_bytes:]) == 0
+    assert torch.count_nonzero(backing[:offset]) == 0
+    assert torch.count_nonzero(backing[offset + raw.numel() :]) == 0
+
+
+def test_padded_page_layout_detected_for_shared_state_pages():
+    # The pooled layout pads the state caches to the page size of the
+    # block-stride addressed MLA/indexer caches they share physical pages with.
+    # Probe the specs the runner itself derives from the KV cache config.
+    config, _, plan = _make_plan()
+    layer_specs = _make_runner(config)._get_layer_kv_cache_specs(plan)
+    assert requires_padded_page_layout(layer_specs.values())
+
+
+def test_padded_page_layout_rejected_without_tail_caches():
+    # A standalone MTP runner has the same attention specs but no recurrent
+    # state caches, so no state view needs the padded page stride.
+    specs = {name: spec for name, spec in _make_specs().items() if not isinstance(spec, MambaSpec)}
+    assert not requires_padded_page_layout(specs.values())
+
+
+def test_padded_page_layout_rejected_for_packed_hybrid_pool():
+    # Other hybrid models pad Mamba pages to the attention page size
+    # (``cache_config.mamba_page_size_padded``) but keep the packed contiguous
+    # state layout, so they must not take the shared padded page path.
+    specs = [
+        AscendMLAAttentionSpec(
+            block_size=8,
+            num_kv_heads=1,
+            head_size=4,
+            dtype=torch.bfloat16,
+        ),
+        MambaSpec(
+            block_size=8,
+            shapes=((2, 2), (1, 2, 2)),
+            dtypes=(torch.bfloat16, torch.float32),
+            page_size_padded=64,
+        ),
+    ]
+    assert not requires_padded_page_layout(specs)

@@ -12,15 +12,27 @@ Refer to [Supported Features List](../../user_guide/support_matrix/supported_mod
 
 Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
-## 3 Model Weight
+## 3 Prerequisites
 
-- `GLM-5.2`(BF16 version): requires 2 Atlas 800 A3 (128GB × 8) node or 4 Atlas 800 A2 (64GB × 8) node.[Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-5.2).
-- `GLM-5.2-w8a8`: requires 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node.[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w8a8).
-- `GLM-5.2-w8a8c8`(Quantized version): requires 2 Atlas 800 A3 (64GB × 16) node or 4 Atlas 800 A2 (64GB × 8) node.[Download model weight](https://modelers.cn/models/Eco-Tech/GLM-5.2-w8a8c8). The weights have been verified and are recommended for use.
-- `GLM-5.2-w4a8c8`: requires 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node.[Download model weight](https://modelscope.cn/models/Eco-Tech/GLM-5.2-w4a8c8).
+### 3.1 Model Weight
+
+|  Weight Version          | Hardware Requirements                                             | Download Links |
+|--------------------------|-------------------------------------------------------------------|----------------|
+|  `GLM-5.2`(BF16 version) | 2 Atlas 800 A3 (128GB × 8) node or 4 Atlas 800 A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/ZhipuAI/GLM-5.2) |
+|  `GLM-5.2-w8a8`          | 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w8a8) |
+|  `GLM-5.2-w8a8c8`(Quantized version)        | 2 Atlas 800 A3 (64GB × 16) node or 4 Atlas 800 A2 (64GB × 8) node | [Modelers](https://modelers.cn/models/Eco-Tech/GLM-5.2-w8a8c8) |
+|  `GLM-5.2-w4a8c8`        | 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w4a8c8) |
+
+- `GLM-5.2-w8a8c8`(Quantized version): The weights have been verified and are recommended for use.
 - You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly.
 
-It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
+It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
+
+### 3.2 Verify Multi-node Communication (Optional)
+
+If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../getting_started/installation.md#installation-multi-node-interconnect).
 
 ## 4 Installation
 
@@ -119,9 +131,10 @@ Run the following script to execute online inference.
 export HCCL_BUFFSIZE=200
 export HCCL_OP_EXPANSION_MODE="AIV"
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+# Ensure the model path matches the directory recorded during download
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
 --host 0.0.0.0 \
---port 8077 \
+--port 8000 \
 --api-server-count 1 \
 --data-parallel-size 2 \
 --enable-expert-parallel \
@@ -138,7 +151,8 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
 --gpu-memory-utilization 0.92 \
 --quantization ascend \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---additional-config '{"enable_dsa_cp": true,"enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true,"enable_balance_scheduling": true,"multistream_overlap_shared_expert":true, "enable_flashcomm1": true, "enable_fused_mc2": 0}' \
+--attention_config.indexer_kv_dtype int8 \
+--additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true,"multistream_overlap_shared_expert":true, "enable_flashcomm1": true, "enable_fused_mc2": 0}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
 
 ```
@@ -149,8 +163,6 @@ The parameters are explained as follows:
 - For single-node deployment, we recommend using `dp1tp16` and turn off expert parallel in low-latency scenarios.
 
 #### 5.1.2 Multi-node Deployment
-
-If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../getting_started/installation.md#installation-multi-node-interconnect).
 
 === "A3 series"
 
@@ -175,10 +187,11 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     export HCCL_SOCKET_IFNAME=$nic_name
     export GLOO_SOCKET_IFNAME=$nic_name
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
     --host 0.0.0.0 \
-    --port 8077 \
+    --port 8000 \
     --api-server-count 1 \
     --data-parallel-size 4 \
     --data-parallel-start-rank 0 \
@@ -199,7 +212,9 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     --gpu-memory-utilization 0.90 \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_dsa_cp": true,"enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true,"enable_balance_scheduling": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true,"c8_enable_reshape_optim":false,    "enable_reduce_sample": "True", "enable_flashcomm1": true, "enable_fused_mc2": 1}'  \
+    --kv-cache-dtype int8 \
+    --attention_config.indexer_kv_dtype int8 \
+    --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true,"c8_enable_reshape_optim":false, "enable_reduce_sample": "True", "enable_flashcomm1": true, "enable_fused_mc2": 1}'  \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
     ```
 
@@ -220,10 +235,11 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     export HCCL_SOCKET_IFNAME=$nic_name
     export GLOO_SOCKET_IFNAME=$nic_name
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
     --host 0.0.0.0 \
-    --port 8077 \
+    --port 8000 \
     --headless \
     --data-parallel-size 4 \
     --data-parallel-start-rank 2 \
@@ -244,7 +260,9 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     --gpu-memory-utilization 0.90 \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_dsa_cp": true,"enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true,"enable_balance_scheduling": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true,"c8_enable_reshape_optim":false,     "enable_reduce_sample": "True", "enable_flashcomm1": true, "enable_fused_mc2": 1}'  \
+    --kv-cache-dtype int8 \
+    --attention_config.indexer_kv_dtype int8 \
+    --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true,"fuse_muls_add":true,"multistream_overlap_shared_expert":true,"c8_enable_reshape_optim":false,     "enable_reduce_sample": "True", "enable_flashcomm1": true, "enable_fused_mc2": 1}'  \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
     ```
 
@@ -269,7 +287,8 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     export HCCL_SOCKET_IFNAME=$nic_name
     export GLOO_SOCKET_IFNAME=$nic_name
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
     --max_model_len 40000 \
     --max-num-batched-tokens 4096 \
@@ -285,7 +304,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     --tensor-parallel-size 8 \
     --enable-expert-parallel \
     --quantization ascend \
-    --port 7000 \
+    --port 8000 \
     --safetensors-load-strategy 'prefetch' \
     --block-size 128 \
     --additional-config '{"multistream_overlap_shared_expert": true}' \
@@ -310,7 +329,8 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     export HCCL_SOCKET_IFNAME=$nic_name
     export GLOO_SOCKET_IFNAME=$nic_name
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
     --max_model_len 40000 \
     --max-num-batched-tokens 4096 \
@@ -327,7 +347,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     --tensor-parallel-size 8 \
     --enable-expert-parallel \
     --quantization ascend \
-    --port 7000 \
+    --port 8000 \
     --safetensors-load-strategy 'prefetch' \
     --block-size 128 \
     --additional-config '{"multistream_overlap_shared_expert": true}' \
@@ -435,9 +455,11 @@ Before you start, please
         export HCCL_OP_EXPANSION_MODE="AIV"
         export HCCL_SOCKET_IFNAME=$nic_name
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
+        export VLLM_USE_FASTOKENS=1
         export GLOO_SOCKET_IFNAME=$nic_name
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
+        # Ensure the model path matches the directory recorded during download
         vllm serve <MODEL_PATH> \
             --host 0.0.0.0 \
             --port $2 \
@@ -454,14 +476,15 @@ Before you start, please
             --served-model-name glm-5 \
             --max-model-len 202752 \
             --safetensors-load-strategy 'prefetch' \
-            --additional-config '{"fuse_muls_add":true, "enable_dsa_cp":true, "enable_sparse_li_c8": true, "enable_flashcomm1": true, "enable_fused_mc2": 1}' \
+            --attention_config.indexer_kv_dtype int8 \
+            --additional-config '{"fuse_muls_add":true, "enable_dsa_cp":true,  "enable_flashcomm1": true, "enable_fused_mc2": 1}' \
             --max-num-batched-tokens 16384 \
             --trust-remote-code \
             --enable-prefix-caching \
             --max-num-seqs 64 \
             --quantization ascend \
             --gpu-memory-utilization 0.85 \
-            --api-server-count 1 \
+            --api-server-count 16 \
             --enforce-eager \
             --enable-auto-tool-choice \
             --tool-call-parser glm47 \
@@ -495,9 +518,11 @@ Before you start, please
         export HCCL_OP_EXPANSION_MODE="AIV"
         export HCCL_SOCKET_IFNAME=$nic_name
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
+        export VLLM_USE_FASTOKENS=1
         export GLOO_SOCKET_IFNAME=$nic_name
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
+        # Ensure the model path matches the directory recorded during download
         vllm serve <MODEL_PATH> \
             --host 0.0.0.0 \
             --port $2 \
@@ -514,7 +539,8 @@ Before you start, please
             --served-model-name glm-5 \
             --max-model-len 202752 \
             --safetensors-load-strategy 'prefetch' \
-            --additional-config '{"fuse_muls_add":true, "enable_dsa_cp":true, "enable_sparse_li_c8": true, "enable_flashcomm1": true, "enable_fused_mc2": 1}' \
+            --attention_config.indexer_kv_dtype int8 \
+            --additional-config '{"fuse_muls_add":true, "enable_dsa_cp":true,  "enable_flashcomm1": true, "enable_fused_mc2": 1}' \
             --max-num-batched-tokens 16384 \
             --trust-remote-code \
             --enable-prefix-caching \
@@ -546,7 +572,7 @@ Before you start, please
         local_ip="xxxx" # change to your own ip
 
         # d0: api server on this node; d1: --headless
-        server_role_args="--api-server-count 1"
+        server_role_args="--api-server-count 16"
 
         export HCCL_BUFFSIZE=256
         export HCCL_IF_IP=$local_ip
@@ -554,9 +580,11 @@ Before you start, please
         export HCCL_SOCKET_IFNAME=$nic_name
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
+        export VLLM_USE_FASTOKENS=1
         export GLOO_SOCKET_IFNAME=$nic_name
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
+        # Ensure the model path matches the directory recorded during download
         vllm serve <MODEL_PATH> \
             --host 0.0.0.0 \
             --port $2 \
@@ -572,8 +600,10 @@ Before you start, please
             --safetensors-load-strategy 'prefetch' \
             --max-num-batched-tokens 192 \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+            --kv-cache-dtype int8 \
+            --attention_config.indexer_kv_dtype int8 \
             --speculative-config '{"num_speculative_tokens": 5,  "method":"deepseek_mtp","enforce_eager":true}' \
-            --additional-config '{"fuse_muls_add":true, "recompute_scheduler_enable":true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_fused_mc2": 1, "enable_mlapo": true}' \
+            --additional-config '{"fuse_muls_add":true, "recompute_scheduler_enable":true, "enable_fused_mc2": 1, "enable_mlapo": true}' \
             --trust-remote-code \
             --max-num-seqs 32 \
             --gpu-memory-utilization 0.90 \
@@ -611,9 +641,11 @@ Before you start, please
         export HCCL_SOCKET_IFNAME=$nic_name
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
+        export VLLM_USE_FASTOKENS=1
         export GLOO_SOCKET_IFNAME=$nic_name
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
+        # Ensure the model path matches the directory recorded during download
         vllm serve <MODEL_PATH> \
             --host 0.0.0.0 \
             --port $2 \
@@ -629,8 +661,10 @@ Before you start, please
             --safetensors-load-strategy 'prefetch' \
             --max-num-batched-tokens 192 \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+            --kv-cache-dtype int8 \
+            --attention_config.indexer_kv_dtype int8 \
             --speculative-config '{"num_speculative_tokens": 5,  "method":"deepseek_mtp","enforce_eager":true}' \
-            --additional-config '{"fuse_muls_add":true, "recompute_scheduler_enable":true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_fused_mc2": 1, "enable_mlapo": true}' \
+            --additional-config '{"fuse_muls_add":true, "recompute_scheduler_enable":true, "enable_fused_mc2": 1, "enable_mlapo": true}' \
             --trust-remote-code \
             --max-num-seqs 32 \
             --gpu-memory-utilization 0.90 \
@@ -711,6 +745,11 @@ Key Parameter Descriptions:
 
 Only the key parameters specific to this model/scenario are described below. `max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario.
 
+**API server and tokenizer configurations:**
+
+- `VLLM_USE_FASTOKENS=1`: Enables the `fastokens` backend for Hugging Face fast tokenizers to accelerate input tokenization and output detokenization. The `fastokens` package must be installed.
+- `--api-server-count 16`: Starts 16 API server processes for each API-facing `vllm serve` instance to improve frontend concurrency. It is configured on prefill node 0 (p0) and decode node 0 (d0); prefill node 1 (p1) and decode node 1 (d1) remain headless.
+
 **PP2 prefill node-specific configurations (p0/p1):**
 
 - `VLLM_PP_LAYER_PARTITION="41,37"` / `--pipeline-parallel-size 2` / `--nnodes 2` / `--node-rank`: The prefill engine is split as PP2 over the two prefill nodes — the 78 layers are partitioned as `41/37`. `--node-rank` is `0` on prefill node 0 (p0) and `1` on prefill node 1 (p1).
@@ -719,7 +758,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
 - `enable_flashcomm1`: Enables FlashComm optimization to reduce communication and computation overhead on prefill nodes.
 - `--enforce-eager`: The prefill side runs in eager mode (the `FULL_DECODE_ONLY` graph capture is used on the decode side instead).
 - `--speculative-config '{"num_speculative_tokens": 1, ...}'`: Minimal MTP speculation during prefill (decode nodes use a higher count, see below).
-- `fuse_muls_add` / `enable_dsa_cp` / `enable_sparse_sfa_c8` / `enable_sparse_li_c8`: Mul-Add fusion, DSA context parallelism for long-context prefill, the SFA/LI sparse attention optimizations and the reshape optimization of the C8 quantized model.
+- `fuse_muls_add` / `enable_dsa_cp` / `--kv-cache-dtype int8` / `--attention_config.indexer_kv_dtype int8`: Mul-Add fusion, DSA context parallelism for long-context prefill, the SFA/LI sparse attention optimizations and the reshape optimization of the C8 quantized model.
 
 **Decode node-specific configurations (d0/d1):**
 
@@ -767,6 +806,7 @@ export MOONCAKE_CONFIG_PATH="/mnt/share/scripts/mooncake.json"
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export PYTHONHASHSEED=0
 
+# Ensure the model path matches the directory recorded during download
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
     --host 0.0.0.0 \
     --port $2 \
@@ -824,7 +864,9 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
         ]
     }
     }' \
-    --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_mc2_hierarchy_comm": false, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": false, "enable_mlapo": true}' \
+    --kv-cache-dtype int8 \
+    --attention_config.indexer_kv_dtype int8 \
+    --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_mc2_hierarchy_comm": false, "enable_cpu_binding": true, "recompute_scheduler_enable": false, "enable_mlapo": true}' \
     --profiler-config \
     '{
         "profiler": "torch",
@@ -854,6 +896,7 @@ export MOONCAKE_CONFIG_PATH="/mnt/share/scripts/mooncake.json"
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export PYTHONHASHSEED=0
 
+# Ensure the model path matches the directory recorded during download
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
     --host 0.0.0.0 \
     --port $2 \
@@ -903,7 +946,6 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
                 "kv_role": "kv_consumer",
                 "kv_connector_extra_config": {
                     "lookup_rpc_port":"0",
-                    "load_async": true,
                     "backend": "mooncake"
                 }
             }
@@ -921,7 +963,9 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
         "torch_profiler_dir": "/mnt/share/xxx/prof",
         "torch_profiler_with_stack": false
     }' \
-    --additional-config '{"enable_flashcomm1": false, "enable_dsa_cp": false, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_mc2_hierarchy_comm": false, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": true, "enable_mlapo": true}' \
+    --kv-cache-dtype int8 \
+    --attention_config.indexer_kv_dtype int8 \
+    --additional-config '{"enable_flashcomm1": false, "enable_dsa_cp": false, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_mc2_hierarchy_comm": false, "enable_cpu_binding": true, "recompute_scheduler_enable": true, "enable_mlapo": true}' \
     --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp", "enforce_eager":true}'
 ```
 
@@ -1000,10 +1044,11 @@ export HCCL_BUFFSIZE=768
 export HCCL_OP_EXPANSION_MODE="AIV"
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
+# Ensure the model path matches the directory recorded during download
 vllm serve <MODEL_PATH> \
   --seed 1024 \
   --host 0.0.0.0 \
-  --port 9000 \
+  --port 8000 \
   --served-model-name glm-52 \
   --max-model-len 1024000 \
   --max-num-batched-tokens 16384 \
@@ -1017,7 +1062,9 @@ vllm serve <MODEL_PATH> \
   --decode-context-parallel-size 16 \
   --cp-kv-cache-interleave-size 128 \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 16, 128]}' \
-  --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_mc2_hierarchy_comm": false, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": false, "weight_nz_mode": 1}' \
+  --kv-cache-dtype int8 \
+  --attention_config.indexer_kv_dtype int8 \
+  --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_mc2_hierarchy_comm": false, "enable_cpu_binding": true, "recompute_scheduler_enable": false, "weight_nz_mode": 1}' \
   --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
   --quantization ascend \
   --enable-expert-parallel \
@@ -1046,10 +1093,11 @@ export HCCL_SOCKET_IFNAME=$nic_name
 export GLOO_SOCKET_IFNAME=$nic_name
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
+# Ensure the model path matches the directory recorded during download
 vllm serve <MODEL_PATH> \
   --seed 1024 \
   --host 0.0.0.0 \
-  --port 9000 \
+  --port 8000 \
   --served-model-name glm-52 \
   --max-model-len 1024000 \
   --max-num-batched-tokens 16384 \
@@ -1067,7 +1115,9 @@ vllm serve <MODEL_PATH> \
   --decode-context-parallel-size 8 \
   --cp-kv-cache-interleave-size 128 \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-  --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_mc2_hierarchy_comm": false, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": false, "weight_nz_mode": 1}' \
+  --kv-cache-dtype int8 \
+  --attention_config.indexer_kv_dtype int8 \
+  --additional-config '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_mc2_hierarchy_comm": false, "enable_cpu_binding": true, "recompute_scheduler_enable": false, "weight_nz_mode": 1}' \
   --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
   --quantization ascend \
   --enable-expert-parallel \
@@ -1130,7 +1180,7 @@ prepare the script `launch_online_dp.py` on each node (used by the prefill and d
         parser.add_argument(
             "--vllm-start-port",
             type=int,
-            default=9000,
+            default=8000,
             help="Starting port for the engine."
         )
         return parser.parse_args()
@@ -1202,6 +1252,7 @@ prepare the script `run_dp_template.sh` on each node.
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export MF_GROUP_JOIN_MAX_TIMEOUT=1200
 
+    # Ensure the model path matches the directory recorded during download
     vllm serve <MODEL_PATH> \
         --host 0.0.0.0 \
         --port $2 \
@@ -1219,7 +1270,9 @@ prepare the script `run_dp_template.sh` on each node.
         --served-model-name glm-5 \
         --max-model-len 1048576 \
         --safetensors-load-strategy 'prefetch' \
-        --additional-config '{"fuse_muls_add":true, "multistream_overlap_shared_expert": true, "enable_dsa_cp":true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "c8_enable_reshape_optim":true, "mega_moe_max_tokens": 8192, "enable_flashcomm1": true, "enable_fused_mc2": 1}' \
+        --kv-cache-dtype int8 \
+        --attention_config.indexer_kv_dtype int8 \
+        --additional-config '{"fuse_muls_add":true, "multistream_overlap_shared_expert": true, "enable_dsa_cp":true, "c8_enable_reshape_optim":true, "mega_moe_max_tokens": 8192, "enable_flashcomm1": true, "enable_fused_mc2": 1}' \
         --max-num-batched-tokens 8192 \
         --trust-remote-code \
         --enable-prefix-caching \
@@ -1281,7 +1334,9 @@ prepare the script `run_dp_template.sh` on each node.
         --served-model-name glm-5 \
         --max-model-len 1048576 \
         --safetensors-load-strategy 'prefetch' \
-        --additional-config '{"fuse_muls_add":true, "multistream_overlap_shared_expert": true, "enable_dsa_cp":true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "c8_enable_reshape_optim":true, "mega_moe_max_tokens": 8192, "enable_flashcomm1": true, "enable_fused_mc2": 1}' \
+        --kv-cache-dtype int8 \
+        --attention_config.indexer_kv_dtype int8 \
+        --additional-config '{"fuse_muls_add":true, "multistream_overlap_shared_expert": true, "c8_enable_reshape_optim":true, "mega_moe_max_tokens": 8192, "enable_flashcomm1": true, "enable_fused_mc2": 1}' \
         --max-num-batched-tokens 8192 \
         --trust-remote-code \
         --enable-prefix-caching \
@@ -1344,7 +1399,9 @@ prepare the script `run_dp_template.sh` on each node.
         --max-num-batched-tokens 192 \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --speculative-config '{"num_speculative_tokens": 5,  "method":"deepseek_mtp","enforce_eager":true}' \
-        --additional-config '{"fuse_muls_add":true, "recompute_scheduler_enable":true, "multistream_overlap_shared_expert":true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_fused_mc2": 1, "enable_mlapo": true}' \
+        --kv-cache-dtype int8 \
+        --attention_config.indexer_kv_dtype int8 \
+        --additional-config '{"fuse_muls_add":true, "recompute_scheduler_enable":true, "multistream_overlap_shared_expert":true, "enable_fused_mc2": 1, "enable_mlapo": true}' \
         --trust-remote-code \
         --max-num-seqs 32 \
         --gpu-memory-utilization 0.90 \
@@ -1403,9 +1460,11 @@ prepare the script `run_dp_template.sh` on each node.
         --max-model-len 1048576 \
         --safetensors-load-strategy 'prefetch' \
         --max-num-batched-tokens 192 \
+        --kv-cache-dtype int8 \
+        --attention_config.indexer_kv_dtype int8 \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
         --speculative-config '{"num_speculative_tokens": 5,  "method":"deepseek_mtp","enforce_eager":true}' \
-        --additional-config '{"fuse_muls_add":true, "recompute_scheduler_enable":true, "multistream_overlap_shared_expert":true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_fused_mc2": 1, "enable_mlapo": true}' \
+        --additional-config '{"fuse_muls_add":true, "recompute_scheduler_enable":true, "multistream_overlap_shared_expert":true, "enable_fused_mc2": 1, "enable_mlapo": true}' \
         --trust-remote-code \
         --max-num-seqs 32 \
         --gpu-memory-utilization 0.90 \
@@ -1530,7 +1589,7 @@ The service returns HTTP 200 OK. The JSON response contains the `choices` field 
             "index": 0,
             "text": "here,and it's not just about chatbots. It's about AI agents",
             "logprobs":null,
-            "finish_reason”:"length",
+            "finish_reason":"length",
             "stop_reason":null,
             "token_ids":null,
             "prompt_logprobs":null,
@@ -1605,8 +1664,9 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 |Fused MC2|A3 prefill nodes|`--additional-config '{"enable_fused_mc2": 1}'`|Replaces ALLTOALL+MC2 with the `dispatch_ffn_combine`/`dispatch_gmm_combine_decode` operators, reducing MoE communication overhead and improving MoE inference performance|`dispatch_ffn_combine` only for w8a8, EP≤32, non-MTP, non-dynamic-EPLB; conflicts with `multistream_overlap_shared_expert` (the latter is auto-disabled)|
 |MLAPO|A3 co-located / PD decode nodes; A2 P/D nodes|`--additional-config '{"enable_mlapo": true}'`|Fuses the MLA preprocess operations, significantly improving decode performance|Consumes more NPU memory; in PD scenarios enable on decode nodes only|
 |DSA CP|A3 prefill nodes; long context|`--additional-config '{"enable_dsa_cp": true}'`|DSA context parallelism accelerates long-context prefill, reducing TTFT for long prompts|In the reference configs, enabled on co-located nodes and PD prefill nodes; PD decode nodes use decode context parallelism instead|
-|Sparse SFA C8|A3 (w8a8c8); long-context prefill|`--additional-config '{"enable_sparse_sfa_c8": true}'`|Sparse Flash Attention skips unnecessary attention computation of the C8 quantized model, accelerating long-context prefill|Experimental in v0.23.0. On the w8a8c8 weights it can be combined with DCP/context parallelism (as in the reference configs in this document); on the w4a8c8 weights enabling both together has known issues and is not recommended|
-|Sparse LI C8|A3 (w8a8c8)|`--additional-config '{"enable_sparse_li_c8": true}'`|Sparse attention optimization reduces computation of the C8 quantized model, improving throughput|Independent of `enable_sparse_sfa_c8`|
+|Sparse SFA C8|A3 (w8a8c8); long-context prefill|`--kv-cache-dtype int8`|Sparse Flash Attention skips unnecessary attention computation of the C8 quantized model, accelerating long-context prefill|Experimental in v0.23.0. On the w8a8c8 weights it can be combined with DCP/context parallelism (as in the reference configs in this document); on the w4a8c8 weights enabling both together has known issues and is not recommended|
+|Sparse LI C8|A3 (w8a8c8)|`--attention_config.indexer_kv_dtype int8`|Sparse attention optimization reduces computation of the C8 quantized model, improving throughput|Independent of `--kv-cache-dtype int8`|
+
 |Recompute Scheduler|A3 decode nodes|`--additional-config '{"recompute_scheduler_enable": true}'`|Recomputes KV cache on prefill nodes when decode KV cache is insufficient, avoiding decode-side OOM and improving throughput|Set to `false` on prefill nodes|
 |Multistream Overlap Shared Expert|A3|`--additional-config '{"multistream_overlap_shared_expert": true}'`|Overlaps shared-expert computation on an additional stream, hiding its latency and improving decode performance|Auto-disabled when `enable_fused_mc2=1`|
 

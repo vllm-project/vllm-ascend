@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
@@ -10,6 +11,7 @@ from tests.ut.core.test_dyntra_lb_scheduler import create_dyntra_lb_scheduler, m
 from vllm_ascend.core.dyntra_lb_scheduler import AsyncDyntraLBScheduler, DyntraLBScheduler
 from vllm_ascend.core.scheduler_profiling_chunk import ProfilingChunkScheduler
 from vllm_ascend.patch.platform.patch_balance_schedule import BalanceScheduler
+from vllm_ascend.utils import vllm_version_is
 
 
 @pytest.mark.parametrize(
@@ -18,7 +20,7 @@ from vllm_ascend.patch.platform.patch_balance_schedule import BalanceScheduler
 )
 @pytest.mark.parametrize("with_connector", [False, True])
 def test_boundary_state_is_drained_consumed_and_not_dispatched(monkeypatch, scheduler_cls, with_connector):
-    """vLLM #51358: hand off exact snapshots only during metadata building."""
+    """Hand off main snapshots locally; preserve release connector metadata."""
     scheduler = create_dyntra_lb_scheduler(make_dyntra_test_config(), scheduler_cls=scheduler_cls)
     if isinstance(scheduler, BalanceScheduler):
         # Exercise the local schedule implementation, not its super fallback.
@@ -34,7 +36,7 @@ def test_boundary_state_is_drained_consumed_and_not_dispatched(monkeypatch, sche
     get_blocks = Mock(side_effect=lambda req_id: {"cached": ([1, 9],), "boundary": ([42],)}[req_id])
     monkeypatch.setattr(scheduler.kv_cache_manager, "take_boundary_state_offloads", drain)
     monkeypatch.setattr(scheduler.kv_cache_manager, "get_block_ids", get_blocks)
-    seen_states = []
+    seen_states: list[Any] = []
     metadata = object()
 
     def build_metadata(connector, output):
@@ -50,18 +52,26 @@ def test_boundary_state_is_drained_consumed_and_not_dispatched(monkeypatch, sche
 
     first_output = scheduler.schedule()
     second_output = scheduler.schedule()
-
     assert drain.call_count == 2
     assert first_output.kv_connector_block_state is None
     assert second_output.kv_connector_block_state is None
     if with_connector:
         assert first_output.kv_connector_metadata is metadata
         assert second_output.kv_connector_metadata is metadata
-        assert seen_states[0].block_ids == {"cached": ([1, 9],), "boundary": ([42],)}
+        if vllm_version_is("0.29.0"):
+            assert seen_states[0].block_ids == {"cached": ([1, 9],), "boundary": ([42],)}
+            assert seen_states[1].block_ids == {"cached": ([1, 9],)}
+            assert get_blocks.call_count == 3
+        else:
+            get_blocks.assert_not_called()
+            assert seen_states[0].req_ids == {"boundary"}
+            assert seen_states[0].get_block_ids("boundary") == ([42],)
+            assert seen_states[0].get_block_ids("cached") is None
+            assert seen_states[0].get_block_ids("finished") is None
+            assert seen_states[1].req_ids == set()
+            get_blocks.assert_called_once_with("boundary")
         assert seen_states[0].boundary_state_offloads is offers
-        assert seen_states[1].block_ids == {"cached": ([1, 9],)}
         assert seen_states[1].boundary_state_offloads == {}
-        assert get_blocks.call_count == 3
     else:
         assert seen_states == []
         get_blocks.assert_not_called()
