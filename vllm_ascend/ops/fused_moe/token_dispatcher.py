@@ -622,26 +622,22 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         input_splits = (
             num_local_tokens_per_expert.reshape(ep_size, self.num_local_experts)
             .sum(axis=1)
-            .to(torch.device("cpu"))
+            .to(torch.device("cpu"), non_blocking=True)
             .numpy()
         )
 
         num_global_tokens_per_expert = gather_from_sequence_parallel_region(
             num_local_tokens_per_expert, group=self.ep_group
         ).reshape(ep_size, self.num_experts)
-        # HCCL runs on its own communication stream; the tiny D2H copies of the
-        # splits below only order against the current stream, so the gathered
-        # histograms may not be written yet when the CPU reads them (observed
-        # as all-zero output_splits on the draft dummy path). Force completion.
-        if torch.npu.is_initialized():
-            torch.npu.synchronize()
         num_global_tokens_per_local_expert = num_global_tokens_per_expert[
             :, self.local_expert_indices[0] : self.local_expert_indices[-1] + 1
         ]
         if num_global_tokens_per_local_expert is None:
             raise ValueError("num_global_tokens_per_local_expert must be set before sum.")
 
-        output_splits = num_global_tokens_per_local_expert.sum(axis=-1).to(torch.device("cpu")).numpy()
+        output_splits = (
+            num_global_tokens_per_local_expert.sum(axis=-1).to(torch.device("cpu"), non_blocking=True).numpy()
+        )
         num_tokens_per_local_expert = num_global_tokens_per_local_expert.sum(axis=0)
 
         global_input_tokens_local_experts_indices = None
@@ -651,7 +647,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
             global_input_tokens_local_experts_indices = torch.repeat_interleave(
                 self.expert_ids_per_ep_rank, num_global_tokens_per_local_expert.ravel()
             )
-        elif torch.npu.is_initialized():
+        else:
             torch.npu.synchronize()
 
         return (
