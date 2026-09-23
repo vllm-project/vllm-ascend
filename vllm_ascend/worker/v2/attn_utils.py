@@ -74,6 +74,12 @@ if TYPE_CHECKING:
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
 
+class PCPAttentionMetadata(dict[str, Any]):
+    """Layer metadata plus the rank-consistent PCP embedding input layout."""
+
+    pcp_inputs_replicated: bool
+
+
 def unwrap_mamba_kv_cache_groups(kv_cache_config: KVCacheConfig) -> KVCacheConfig:
     """Expose homogeneous Mamba specs to the upstream MRV2 initializer.
 
@@ -272,6 +278,12 @@ def build_attn_metadata(
         positions = torch.zeros(num_input_tokens, dtype=torch.int64, device=query_start_loc_gpu.device)
 
     attn_metadata: dict[str, Any] = {}
+    if pcp_context is not None:
+        pcp_metadata = PCPAttentionMetadata()
+        # Use the GLOBAL batch: a local rank can have no prefill rows even
+        # when another rank has some. Local phase detection can deadlock HCCL.
+        pcp_metadata.pcp_inputs_replicated = not bool(pcp_context.global_batch.is_prefilling_np.any())
+        attn_metadata = pcp_metadata
     # Share request-level DSA metadata across cache groups in one execution.
     common_ratio_to_sas_metadata: dict[Any, Any] = {}
     kv_cache_groups = kv_cache_config.kv_cache_groups

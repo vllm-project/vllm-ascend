@@ -14,6 +14,7 @@
 # Adapted from vllm/tests/lora/test_layers.py
 
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 from unittest.mock import MagicMock, patch
 
@@ -289,6 +290,231 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
         self.assertEqual(layer.num_embeddings_per_partition, layer.num_embeddings_padded)
         self.assertEqual(layer.num_org_embeddings_per_partition, layer.org_vocab_size_padded)
         self.assertEqual(layer.num_added_embeddings_per_partition, layer.num_added_embeddings)
+
+
+class TestPCPVocabParallelEmbedding(unittest.TestCase):
+    def setUp(self):
+        self.module = "vllm_ascend.ops.vocab_parallel_embedding"
+        self.config = MagicMock()
+        self.config.parallel_config.prefill_context_parallel_size = 4
+        self.config.model_config.hf_text_config.tie_word_embeddings = False
+        self.config.scheduler_config.max_num_batched_tokens = 4
+        self.config.compilation_config.max_cudagraph_capture_size = 2
+        self.tp_group = MagicMock(world_size=1, rank_in_group=0)
+        self.pcp_group = MagicMock(world_size=4, rank_in_group=0)
+        for name, value in (
+            ("get_current_vllm_config_or_none", self.config),
+            ("get_tp_group", self.tp_group),
+            ("get_pcp_group", self.pcp_group),
+            ("embedding_tp_enable", False),
+            ("lmhead_tp_enable", False),
+            ("get_potential_max_tokens", 2),
+            ("get_ascend_config", MagicMock(enable_reduce_sample=False)),
+            ("is_forward_context_available", False),
+        ):
+            patcher = patch(f"{self.module}.{name}", return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def make_layer(self, cls=AscendVocabParallelEmbedding, **kwargs):
+        return cls(num_embeddings=70, embedding_dim=8, params_dtype=torch.float32, **kwargs)
+
+    def test_pcp_weight_loading_and_local_outputs(self):
+        self._check_local_outputs(([0, 32, 69], [31], [64, 32, 32, 1], []))
+
+    def test_replicated_decode_outputs(self):
+        self._check_local_outputs(([69], [69], [69], [69]))
+
+    def test_mixed_prefill_decode_outputs(self):
+        self._check_local_outputs(([5, 0, 69], [5, 31], [5, 32, 64], [5]))
+
+    def _check_local_outputs(self, sequences):
+        # Different sequences, repeated IDs, vocab boundaries, padding and an
+        # empty rank exercise the gather/scatter layout, not just group choice.
+        weight = torch.arange(70 * 8, dtype=torch.float32).reshape(70, 8)
+        inputs = [torch.tensor(ids, dtype=torch.long) for ids in sequences]
+        gathered = torch.zeros(4, 4, dtype=torch.long)
+        for rank, ids in enumerate(inputs):
+            gathered[rank, : len(ids)] = ids
+        partials, destinations, outputs = [], [], []
+
+        def gather(out, inp, **kwargs):
+            torch.testing.assert_close(inp, gathered[self.pcp_group.rank_in_group])
+            out.copy_(gathered.flatten())
+            self.assertIs(kwargs["group"], self.pcp_group.device_group)
+
+        def scatter(out, inp, **kwargs):
+            partials.append(inp.clone())
+            destinations.append(out)
+            self.assertIs(kwargs["group"], self.pcp_group.device_group)
+
+        with (
+            patch(f"{self.module}.dist.all_gather_into_tensor", side_effect=gather),
+            patch(f"{self.module}.dist.reduce_scatter_tensor", side_effect=scatter),
+        ):
+            for rank, ids in enumerate(inputs):
+                self.pcp_group.rank_in_group = rank
+                layer = self.make_layer()
+                self.assertIs(layer.comm_group, self.pcp_group)
+                self.assertEqual(layer.weight.shape, (32, 8))
+                layer.weight_loader(layer.weight, weight)
+                outputs.append(layer(ids))
+        reduced = torch.stack(partials).sum(0).reshape(4, 4, 8)
+        for rank, (out, ids) in enumerate(zip(outputs, inputs)):
+            destinations[rank].copy_(reduced[rank])
+            torch.testing.assert_close(out, weight[ids])
+
+    def test_other_layouts_keep_original_group(self):
+        self.assertIs(self.make_layer(AscendParallelLMHead).comm_group, self.pcp_group)
+        self.assertEqual(self.make_layer(disable_tp=True).comm_group.world_size, 1)
+        self.tp_group.world_size = 2
+        self.assertIs(self.make_layer().comm_group, self.tp_group)
+        self.tp_group.world_size = 1
+        self.config.parallel_config.prefill_context_parallel_size = 1
+        self.assertIs(self.make_layer().comm_group, self.tp_group)
+
+    def test_tied_weights_share_pcp_partition(self):
+        self.config.model_config.hf_text_config.tie_word_embeddings = True
+        embed = self.make_layer()
+        head = self.make_layer(AscendParallelLMHead)
+        head.tie_weights(embed)
+        self.assertIs(head.weight, embed.weight)
+        self.assertEqual(head.shard_indices, embed.shard_indices)
+        self.assertEqual(head.forward_type, "lmhead_pcp")
+
+    def test_reduce_sample_rejected(self):
+        with (
+            patch(f"{self.module}.get_ascend_config", return_value=MagicMock(enable_reduce_sample=True)),
+            self.assertRaisesRegex(ValueError, "enable_reduce_sample"),
+        ):
+            self.make_layer(AscendParallelLMHead)
+
+    def test_lmhead_restored_prefill_decode_and_mixed_rows(self):
+        # PCP restores token rows before compute_logits for every batch type.
+        for num_rows in (1, 3, 7):
+            for skip_gather in (False, True):
+                with self.subTest(num_rows=num_rows, skip_gather=skip_gather):
+                    self._check_logits(num_rows, skip_gather)
+
+    def _check_logits(self, num_rows, skip_gather):
+        weight = torch.arange(70 * 8, dtype=torch.float32).reshape(70, 8) / 100
+        bias = torch.arange(70, dtype=torch.float32) / 10
+        hidden = torch.arange(num_rows * 8, dtype=torch.float32).reshape(num_rows, 8) / 10
+        processor = object.__new__(AscendLogitsProcessor)
+        torch.nn.Module.__init__(processor)
+        processor.org_vocab_size = 70
+        processor.head_dtype = None
+        partials, gathered, outputs = [], [], []
+
+        def gather(logits, dim):
+            self.assertEqual(dim, -1)
+            self.assertEqual(logits.shape, (num_rows, 32))
+            partials.append(logits.clone())
+            result = torch.empty(num_rows, 128)
+            gathered.append(result)
+            return result
+
+        with patch.object(self.pcp_group, "all_gather", side_effect=gather):
+            for rank in range(4):
+                self.pcp_group.rank_in_group = rank
+                head = self.make_layer(AscendParallelLMHead, bias=True)
+                head.weight_loader(head.weight, weight)
+                head.weight_loader(head.bias, bias)
+                outputs.append(processor._get_logits(hidden, head, head.bias, skip_gather))
+        full_logits = torch.cat(partials, dim=-1)
+        expected = torch.nn.functional.linear(hidden, weight, bias)
+        for buffer, output in zip(gathered, outputs):
+            buffer.copy_(full_logits)
+            self.assertEqual(output.shape, (num_rows, 128 if skip_gather else 70))
+            torch.testing.assert_close(output[:, :70], expected)
+            if skip_gather:
+                torch.testing.assert_close(output[:, 70:], torch.zeros(num_rows, 58))
+
+    def test_capacity_overflow(self):
+        with self.assertRaisesRegex(ValueError, "static capacity"):
+            self.make_layer()(torch.zeros(5, dtype=torch.long))
+
+    def test_pcp_forward_dispatch(self):
+        layer = self.make_layer()
+        ids = torch.tensor([0, 32, 69])
+        expected = torch.empty(3, 8)
+        with (
+            patch.object(layer, "_forward_partitioned_inputs", return_value=expected) as forward,
+            patch.object(layer, "_forward_origin", side_effect=AssertionError("PCP must not use TP all-reduce")),
+            patch.object(layer, "_forward_embed_tp", side_effect=AssertionError("PCP needs prefill capacity")),
+        ):
+            self.assertIs(layer(ids), expected)
+            forward.assert_called_once_with(ids, 4, active_tokens=None)
+
+    def test_pcp_layout_dispatch(self):
+        layer = self.make_layer()
+        ids = torch.tensor([0, 32])
+        for replicated in (True, False):
+            context = SimpleNamespace(attn_metadata=SimpleNamespace(pcp_inputs_replicated=replicated))
+            with (
+                patch(f"{self.module}.is_forward_context_available", return_value=True),
+                patch(f"{self.module}.get_forward_context", return_value=context),
+                patch.object(layer, "_forward_replicated_pcp") as decode,
+                patch.object(layer, "_forward_partitioned_inputs") as partitioned,
+            ):
+                layer(ids)
+                if replicated:
+                    decode.assert_called_once_with(ids)
+                    partitioned.assert_not_called()
+                else:
+                    partitioned.assert_called_once_with(ids, 4, active_tokens=2)
+                    decode.assert_not_called()
+
+    def test_decode_uses_one_all_reduce_without_id_gather(self):
+        weight = torch.arange(70 * 8, dtype=torch.float32).reshape(70, 8)
+        ids = torch.tensor([1, 69])
+        partials, outputs = [], []
+
+        def reduce(output, **kwargs):
+            self.assertEqual(output.shape, (2, 8))
+            self.assertIs(kwargs["group"], self.pcp_group.device_group)
+            partials.append(output.clone())
+
+        with (
+            patch(f"{self.module}.dist.all_reduce", side_effect=reduce) as all_reduce,
+            patch(f"{self.module}.dist.all_gather_into_tensor") as gather,
+            patch(f"{self.module}.dist.reduce_scatter_tensor") as scatter,
+        ):
+            for rank in range(4):
+                self.pcp_group.rank_in_group = rank
+                layer = self.make_layer()
+                layer.weight_loader(layer.weight, weight)
+                outputs.append(layer._forward_replicated_pcp(ids))
+            self.assertEqual(all_reduce.call_count, 4)
+            gather.assert_not_called()
+            scatter.assert_not_called()
+        result = torch.stack(partials).sum(0)
+        torch.testing.assert_close(result, weight[ids])
+
+    def test_prefill_communicates_current_padded_length(self):
+        layer = self.make_layer()
+        ids = torch.tensor([0, 1])
+        layer.weight.data.fill_(1)
+
+        def gather(out, inp, **kwargs):
+            self.assertEqual(inp.shape, (2,))
+            self.assertEqual(out.shape, (8,))
+            out.copy_(inp.repeat(4))
+
+        def scatter(out, inp, **kwargs):
+            self.assertEqual(inp.shape, (8, 8))
+            self.assertEqual(out.shape, (2, 8))
+            out.copy_(inp[:2])
+
+        with (
+            patch(f"{self.module}.dist.all_gather_into_tensor", side_effect=gather),
+            patch(f"{self.module}.dist.reduce_scatter_tensor", side_effect=scatter),
+        ):
+            output = layer._forward_partitioned_inputs(ids, 4, active_tokens=2)
+            self.assertEqual(output.shape, (2, 8))
+            address = layer._embed_rs_in_buf.data_ptr()
+            layer._forward_partitioned_inputs(ids, 4, active_tokens=2)
+            self.assertEqual(layer._embed_rs_in_buf.data_ptr(), address)
 
 
 class TestAscendLogitsProcessor(unittest.TestCase):

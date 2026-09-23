@@ -20,8 +20,10 @@ import torch
 import torch.distributed as dist
 from torch import nn
 from torch.nn.parameter import Parameter
+from vllm.config import get_current_vllm_config_or_none
 from vllm.distributed import divide
-from vllm.distributed.parallel_state import get_tp_group
+from vllm.distributed.parallel_state import get_pcp_group, get_tp_group
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
@@ -92,6 +94,29 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
             self.forward_type = "embed_tp"
         else:
             self.comm_group = get_tp_group()
+            vllm_config = get_current_vllm_config_or_none()
+            if (
+                self.comm_group.world_size == 1
+                and vllm_config is not None
+                and vllm_config.parallel_config.prefill_context_parallel_size > 1
+                and vllm_config.model_config is not None
+                and not embedding_tp_enable()
+                and not lmhead_tp_enable()
+            ):
+                # Reuse vocab-row sharding and the checkpoint loader with PCP
+                # ranks. Unlike TP, PCP ranks own different token sequences,
+                # so lookup needs token all-gather and output reduce-scatter.
+                # Both tables use the same layout, including tied weights.
+                if get_ascend_config().enable_reduce_sample:
+                    raise ValueError("PCP embedding/LM-head sharding does not support enable_reduce_sample.")
+                self.comm_group = get_pcp_group()
+                self.forward_type = "lmhead_pcp" if isinstance(self, ParallelLMHead) else "embed_pcp"
+                # The existing embedding-TP capacity only covers decode.
+                # PCP also runs long prefills through this collective path.
+                self._pcp_embed_capacity = max(
+                    vllm_config.scheduler_config.max_num_batched_tokens,
+                    vllm_config.compilation_config.max_cudagraph_capture_size or 0,
+                )
 
         self.tp_size = self.comm_group.world_size
         self.tp_rank = self.comm_group.rank_in_group
@@ -188,20 +213,59 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         return input_, ~vocab_mask
 
     def forward(self, input_):
+        if self.forward_type == "embed_pcp":
+            return self._forward_embed_pcp(input_)
         if self.forward_type == "embed_tp":
             return self._forward_embed_tp(input_)
         return self._forward_origin(input_)
 
+    def _forward_embed_pcp(self, input_):
+        replicated = None
+        if is_forward_context_available():
+            replicated = getattr(get_forward_context().attn_metadata, "pcp_inputs_replicated", None)
+        if replicated is True:
+            return self._forward_replicated_pcp(input_)
+        # MRV2 PCP pads every rank to the same current batch length. Unknown
+        # contexts (e.g. profiling) retain the fixed-capacity fallback.
+        return self._forward_partitioned_inputs(
+            input_, self._pcp_embed_capacity, active_tokens=input_.shape[0] if replicated is False else None
+        )
+
+    def _forward_replicated_pcp(self, input_):
+        num_tokens = input_.shape[0]
+        if num_tokens > self._pcp_embed_capacity:
+            raise ValueError("PCP embedding input exceeds static capacity.")
+        if not hasattr(self, "_pcp_decode_out"):
+            self._pcp_decode_out = torch.empty(
+                (self._pcp_embed_capacity, self.embedding_dim), dtype=self.params_dtype, device=input_.device
+            )
+        masked_input, input_mask = self._mask_input_for_vocab_range(
+            input_,
+            self.shard_indices.org_vocab_start_index,
+            self.shard_indices.org_vocab_end_index,
+            self.shard_indices.num_org_vocab_padding,
+            self.shard_indices.added_vocab_start_index,
+            self.shard_indices.added_vocab_end_index,
+        )
+        output = self._pcp_decode_out[:num_tokens]
+        output.copy_(self.quant_method.embedding(self, masked_input.long()))
+        output.masked_fill_(input_mask.unsqueeze(-1), 0)
+        # Same IDs and row order on every rank: no token gather is necessary.
+        if num_tokens:
+            dist.all_reduce(output, group=self.comm_group.device_group)
+        return output
+
     def _forward_embed_tp(self, input_):
+        return self._forward_partitioned_inputs(input_, get_potential_max_tokens())
+
+    def _forward_partitioned_inputs(self, input_, capacity, active_tokens=None):
+        assert self.comm_group is not None
         num_tokens = input_.shape[0]
 
-        # potential_max_tokens is computed once in the model runner __init__, so
-        # reading it here is a cheap global lookup. Validate before allocating so
-        # an oversized batch fails fast.
-        capacity = get_potential_max_tokens()
+        # All ranks use the same static capacity, including empty local inputs.
         if num_tokens > capacity:
             raise ValueError(
-                f"embedding_tp static capacity {capacity} < num_tokens "
+                f"{self.forward_type} static capacity {capacity} < num_tokens "
                 f"{num_tokens}; increase max_cudagraph_capture_size or "
                 f"max_num_batched_tokens."
             )
@@ -224,14 +288,21 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
             )
             self._embed_rs_out_buf = torch.empty((capacity, self.embedding_dim), dtype=self.params_dtype, device=device)
 
-        # Pad input into the address-stable all_gather input buffer.
-        self._embed_ag_in_buf.zero_()
-        self._embed_ag_in_buf[:num_tokens].copy_(input_)
-        dist.all_gather_into_tensor(self._embed_ag_out_buf, self._embed_ag_in_buf, group=self.comm_group.device_group)
-        complete_input = self._embed_ag_out_buf
+        comm_tokens = capacity if active_tokens is None else active_tokens
+        if comm_tokens == 0:
+            return self._embed_rs_out_buf[:0]
+        gather_input = self._embed_ag_in_buf[:comm_tokens]
+        complete_input = self._embed_ag_out_buf[: self.tp_size * comm_tokens]
+        scatter_input = self._embed_rs_in_buf[: self.tp_size * comm_tokens]
+        scatter_output = self._embed_rs_out_buf[:comm_tokens]
+        # Views keep stable base addresses while sending only the current
+        # padded batch, not the scheduler's maximum capacity, on PCP steps.
+        gather_input.zero_()
+        gather_input[:num_tokens].copy_(input_)
+        dist.all_gather_into_tensor(complete_input, gather_input, group=self.comm_group.device_group)
 
-        # Masking unchanged; padding rows map to OOB and get masked to 0
-        # via masked_fill_ below (token_id=0 stays in-range after shift).
+        # Mask tokens outside this rank's vocab shard. Capacity padding uses
+        # token 0; its embeddings are discarded when stripping output padding.
         masked_input, input_mask = self._mask_input_for_vocab_range(
             complete_input,
             self.shard_indices.org_vocab_start_index,
@@ -244,12 +315,12 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         # does not affect ACL graph replay. Copy into the static rs_in
         # buffer so reduce_scatter reads from a stable address.
         output_parallel = self.quant_method.embedding(self, masked_input.long())
-        self._embed_rs_in_buf.copy_(output_parallel)
-        self._embed_rs_in_buf.masked_fill_(input_mask.unsqueeze(-1), 0)
-        dist.reduce_scatter_tensor(self._embed_rs_out_buf, self._embed_rs_in_buf, group=self.comm_group.device_group)
+        scatter_input.copy_(output_parallel)
+        scatter_input.masked_fill_(input_mask.unsqueeze(-1), 0)
+        dist.reduce_scatter_tensor(scatter_output, scatter_input, group=self.comm_group.device_group)
 
         # Strip padding rows; preserve the original return shape.
-        return self._embed_rs_out_buf[:num_tokens].view(num_tokens, -1)
+        return self._embed_rs_out_buf[:num_tokens].view(num_tokens, self.embedding_dim)
 
     def _forward_origin(self, input_):
         if self.tp_size > 1:
@@ -391,6 +462,8 @@ class AscendLogitsProcessor(LogitsProcessor):
         embedding_bias: torch.Tensor | None = None,
         skip_gather: bool = False,
     ) -> torch.Tensor | None:
+        if getattr(lm_head, "forward_type", None) in ("lmhead_pcp", "embed_pcp"):
+            return self._get_logits_pcp(hidden_states, lm_head, embedding_bias, skip_gather)
         # vLLM #50465 added skip_gather; when set, upstream returns the
         # untruncated apply_head result for spec-decode/top-k callers.
         if skip_gather:
@@ -403,6 +476,24 @@ class AscendLogitsProcessor(LogitsProcessor):
             return self._get_logits_lmheadtp(hidden_states, lm_head, embedding_bias)
         else:
             return self._get_logits_normal(hidden_states, lm_head, embedding_bias)
+
+    def _get_logits_pcp(
+        self,
+        hidden_states: torch.Tensor,
+        lm_head: AscendParallelLMHead,
+        embedding_bias: torch.Tensor | None,
+        skip_gather: bool,
+    ) -> torch.Tensor:
+        # MRV2 restores PCP hidden states to the global batch before sampling
+        # and prompt logprobs. Every rank projects the same token rows onto
+        # its vocab shard; concatenate vocab columns, never sum logits.
+        logits = self._apply_head(lm_head, hidden_states, embedding_bias)
+        logits = lm_head.comm_group.all_gather(logits, dim=-1)
+        # skip_gather callers expect a TP-local vocabulary. TP=1 here, so
+        # reconstruct the full padded vocabulary even on that path.
+        if skip_gather:
+            return logits
+        return logits[..., : self.org_vocab_size]
 
     def _get_logits_lmheadtp(
         self,
