@@ -16,6 +16,7 @@ import vllm
 
 from tests.e2e.conftest import DisaggEpdProxy, RemoteEPDServer, RemoteOpenAIServer
 from tests.e2e.nightly.scripts.result_postprocess import postprocess_benchmark_results
+from tests.e2e.nightly.single_node.models.scripts.gate_dispatch import dispatch_gate
 from tests.e2e.nightly.single_node.models.scripts.kv_pool_runtime import (
     create_single_node_kv_pool_manager,
 )
@@ -584,20 +585,7 @@ def _run_benchmarks(config: SingleNodeConfig, port: int) -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("config", configs, ids=[config.name for config in configs])
 async def test_single_node(config: SingleNodeConfig) -> None:
-    if "glm5x_logits_gate" in config.extra_config:
-        from tools.glm_reduced.run_logits_gate import run_nightly as run_logits_gate
-
-        run_logits_gate(config)
-        return
-    if "glm5x_perf_gate" in config.extra_config:
-        from tools.glm_reduced.run_perf_gate import run_nightly as run_perf_gate
-
-        run_perf_gate(config)
-        return
-    if "reduced_model_gate" in config.extra_config:
-        from tools.glm_reduced.nightly import run_nightly
-
-        run_nightly(config, RemoteOpenAIServer)
+    if dispatch_gate(config):
         return
     # TODO: remove this part after the transformers version upgraded
     if config.special_dependencies:
