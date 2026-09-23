@@ -2,6 +2,7 @@ import unittest
 from collections import deque
 from contextlib import nullcontext
 from dataclasses import fields
+from dataclasses import replace as dataclasses_replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
@@ -1169,6 +1170,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         num_blocks = 2
         spec = AscendMLAAttentionSpec(
             block_size=384,
+            num_heads=64,
             num_kv_heads=1,
             head_size=576,
             dtype=torch.bfloat16,
@@ -1181,7 +1183,6 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         )
         attn_module = MLAAttention.__new__(MLAAttention)
         torch.nn.Module.__init__(attn_module)
-        attn_module.num_heads = 64
         attn_module.impl = SimpleNamespace(fa_quant_layer=False)
         runner.compilation_config = SimpleNamespace(static_forward_context={layer_name: attn_module})
         runner.kernel_block_sizes = [[128]]
@@ -1200,7 +1201,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         flash_profile = SimpleNamespace(supports=lambda capability: capability is HardwareCapability.MLA_FLASH)
         for q_heads in (8, 12, 64, 96):
             with self.subTest(q_heads=q_heads):
-                attn_module.num_heads = q_heads
+                spec = dataclasses_replace(spec, num_heads=q_heads)
                 with patch(
                     "vllm_ascend.worker.model_runner_v1.get_current_hardware_profile",
                     return_value=flash_profile,
@@ -1208,12 +1209,12 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                     fused = runner._reshape_kv_cache_tensors(kv_cache_config, {layer_name: (raw,)})[layer_name]
 
                 self.assertIsInstance(fused, torch.Tensor)
-                self.assertEqual(fused.shape, (6, 1, 128, 576))
-                self.assertEqual(fused.stride(), (81408, 73728, 576, 1))
+                self.assertEqual(fused.shape, (6, 128, 1, 576))
+                self.assertEqual(fused.stride(), (81408, 576, 576, 1))
 
         # A5 FlashMLA does not support arbitrary query-head counts. Keep these
         # models on the FIA-compatible component-major layout.
-        attn_module.num_heads = 48
+        spec = dataclasses_replace(spec, num_heads=48)
         with patch(
             "vllm_ascend.worker.model_runner_v1.get_current_hardware_profile",
             return_value=flash_profile,
@@ -1228,10 +1229,10 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         ):
             nope, rope = runner._reshape_kv_cache_tensors(kv_cache_config, {layer_name: (raw,)})[layer_name]
 
-        self.assertEqual(nope.shape, (6, 1, 128, 512))
-        self.assertEqual(nope.stride(), (81408, 65536, 512, 1))
-        self.assertEqual(rope.shape, (6, 1, 128, 64))
-        self.assertEqual(rope.stride(), (81408, 8192, 64, 1))
+        self.assertEqual(nope.shape, (6, 128, 1, 512))
+        self.assertEqual(nope.stride(), (81408, 512, 512, 1))
+        self.assertEqual(rope.shape, (6, 128, 1, 64))
+        self.assertEqual(rope.stride(), (81408, 64, 64, 1))
         self.assertEqual(rope.storage_offset() - nope.storage_offset(), 65536)
         self.assertIs(nope.untyped_storage(), rope.untyped_storage())
 
@@ -1384,6 +1385,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         attn_module.impl = SimpleNamespace(fa_quant_layer=False)
         attn_module.model_version = "glm5_next"
         attn_module.indexes_kv_by_block_stride = True
+        attn_module.num_heads = 64
         attn_module.get_kv_cache_spec = MagicMock(return_value=source_spec)
         mock_get_layers.return_value = {layer_name: attn_module}
 
@@ -1392,6 +1394,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertIsInstance(spec, AscendMLAAttentionSpec)
         self.assertEqual(spec.model_version, attn_module.model_version)
         self.assertTrue(spec.indexes_kv_by_block_stride)
+        self.assertEqual(spec.num_heads, 64)
 
     @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
     @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
@@ -1921,8 +1924,8 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         backend.get_supported_kernel_block_sizes.return_value = [kernel_block_size]
         backend.get_kv_cache_shape.side_effect = lambda num_blocks, block_size, num_kv_heads, head_size: (
             num_blocks,
-            num_kv_heads,
             block_size,
+            num_kv_heads,
             head_size,
         )
         runner._kv_cache_spec_attn_group_iterator = lambda: [
@@ -1939,8 +1942,8 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         )[layer_name]
 
         num_kernel_blocks = num_physical_blocks * physical_block_size // kernel_block_size
-        self.assertEqual(k_cache.shape, (num_kernel_blocks, 1, 128, 512))
-        self.assertEqual(v_cache.shape, (num_kernel_blocks, 1, 128, 64))
+        self.assertEqual(k_cache.shape, (num_kernel_blocks, 128, 1, 512))
+        self.assertEqual(v_cache.shape, (num_kernel_blocks, 128, 1, 64))
         self.assertEqual(
             backend.get_kv_cache_shape.call_args.args[:2],
             (num_kernel_blocks, kernel_block_size),
@@ -2172,15 +2175,8 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertEqual(raw_v_cache.numel(), 2 * 16 * 64 * 2)
         self.assertEqual(raw_indexer_cache.numel(), 2 * 2 * 16 * 128 * 2)
 
-        mla_backend = MagicMock()
-        mla_backend.get_kv_cache_shape.side_effect = lambda num_blocks, block_size, num_kv_heads, head_size: (
-            num_blocks,
-            num_kv_heads,
-            block_size,
-            head_size,
-        )
-        indexer_backend = MagicMock()
-        indexer_backend.get_kv_cache_shape.side_effect = lambda num_blocks, block_size, num_kv_heads, head_size: (
+        backend = MagicMock()
+        backend.get_kv_cache_shape.side_effect = lambda num_blocks, block_size, num_kv_heads, head_size: (
             num_blocks,
             block_size,
             num_kv_heads,
@@ -2189,12 +2185,12 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner._kv_cache_spec_attn_group_iterator = lambda: [
             SimpleNamespace(
                 kv_cache_spec=main_spec,
-                backend=mla_backend,
+                backend=backend,
                 layer_names=[attn_layer_name],
             ),
             SimpleNamespace(
                 kv_cache_spec=indexer_spec,
-                backend=indexer_backend,
+                backend=backend,
                 layer_names=[indexer_layer_name],
             ),
         ]
@@ -2203,8 +2199,8 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         k_cache, v_cache = caches[attn_layer_name]
         (indexer_cache,) = caches[indexer_layer_name]
 
-        self.assertEqual(k_cache.shape, (2, 1, 16, 512))
-        self.assertEqual(v_cache.shape, (2, 1, 16, 64))
+        self.assertEqual(k_cache.shape, (2, 16, 1, 512))
+        self.assertEqual(v_cache.shape, (2, 16, 1, 64))
         self.assertEqual(indexer_cache.shape, (4, 16, 1, 128))
 
     @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
@@ -2345,32 +2341,23 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                         )
                     ],
                 )
-                mla_backend = MagicMock()
-                mla_backend.get_kv_cache_shape.side_effect = lambda num_blocks, block_size, num_kv_heads, head_size: (
+                backend = MagicMock()
+                backend.get_kv_cache_shape.side_effect = lambda num_blocks, block_size, num_kv_heads, head_size: (
                     num_blocks,
-                    num_kv_heads,
                     block_size,
+                    num_kv_heads,
                     head_size,
-                )
-                indexer_backend = MagicMock()
-                indexer_backend.get_kv_cache_shape.side_effect = (
-                    lambda num_blocks, block_size, num_kv_heads, head_size: (
-                        num_blocks,
-                        block_size,
-                        num_kv_heads,
-                        head_size,
-                    )
                 )
                 runner._kv_cache_spec_attn_group_iterator = MagicMock(
                     return_value=[
                         SimpleNamespace(
                             kv_cache_spec=main_spec,
-                            backend=mla_backend,
+                            backend=backend,
                             layer_names=[attn_layer_name],
                         ),
                         SimpleNamespace(
                             kv_cache_spec=indexer_spec,
-                            backend=indexer_backend,
+                            backend=backend,
                             layer_names=[indexer_layer_name],
                         ),
                     ]
@@ -2382,11 +2369,11 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                 main_cache = caches[attn_layer_name]
                 self.assertEqual(len(main_cache), 1 if enable_sfa_c8 else 2)
                 if enable_sfa_c8:
-                    self.assertEqual(main_cache[0].shape, (2, 1, 16, packed_head_dim))
+                    self.assertEqual(main_cache[0].shape, (2, 16, 1, packed_head_dim))
                     self.assertEqual(main_cache[0].dtype, torch.int8)
                 else:
-                    self.assertEqual(main_cache[0].shape, (2, 1, 16, 512))
-                    self.assertEqual(main_cache[1].shape, (2, 1, 16, 64))
+                    self.assertEqual(main_cache[0].shape, (2, 16, 1, 512))
+                    self.assertEqual(main_cache[1].shape, (2, 16, 1, 64))
                     self.assertEqual(main_cache[0].dtype, torch.bfloat16)
                     self.assertEqual(main_cache[1].dtype, torch.bfloat16)
 
