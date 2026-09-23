@@ -335,9 +335,12 @@ class NPUPlatform(Platform):
     def apply_config_platform_defaults(cls, vllm_config: VllmConfig) -> None:
         """Apply Ascend-specific defaults."""
 
-        default_max_cg_capture_size = _get_default_max_cudagraph_capture_size(vllm_config)
-        if default_max_cg_capture_size is not None:
-            vllm_config.compilation_config.max_cudagraph_capture_size = default_max_cg_capture_size
+        # TODO: Remove this memory-saving capture-size override and its ceiling
+        # restoration once MC2 is no longer used.
+        reduced_cg_cap = _get_reduced_cg_cap(vllm_config)
+        if reduced_cg_cap is not None:
+            vllm_config.compilation_config.max_cudagraph_capture_size = reduced_cg_cap
+            vllm_config.compilation_config.reduced_cg_cap = reduced_cg_cap
 
     def num_compute_units(cls, device_id: int = 0) -> int:
         """Return the number of Cube Cores on the NPU device.
@@ -1041,6 +1044,18 @@ def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
             )
             vllm_config.scheduler_config = recompute_scheduler_config
 
+    # Checked here, not in AscendConfig: MultiConnector children re-validate the config
+    # with per-child copies that cannot see sibling connectors.
+    kv_transfer_config = vllm_config.kv_transfer_config
+    offload_missing = kv_transfer_config is None or not kv_transfer_config.has_connector("PreemptOffloadConnector")
+    # Only a real split (size > 1) needs the offload guarantee, mirroring the runner gate.
+    if offload_missing and ascend_config.finegrained_tp_config.oproj_tensor_parallel_size > 1:
+        raise AssertionError(
+            "oproj_tensor_parallel_size requires PreemptOffloadConnector (via MultiConnector): "
+            "a preempted request must not return to the prefill node, whose recomputed KV "
+            "loses precision."
+        )
+
 
 def _validate_kv_load_failure_policy(vllm_config: VllmConfig) -> None:
     kv_transfer_config = vllm_config.kv_transfer_config
@@ -1151,6 +1166,16 @@ def _setup_compile_backend(
     if additional_config is None:
         vllm_config.additional_config = {}
         additional_config = vllm_config.additional_config
+
+    reduced_cg_cap = getattr(compilation_config, "reduced_cg_cap", None)
+    if reduced_cg_cap is not None:
+        # Add the off-stride default before upstream rebuilds and truncates the list.
+        reduced_cg_cap = min(reduced_cg_cap, vllm_config.scheduler_config.max_num_batched_tokens)
+        compilation_config.cudagraph_capture_sizes = sorted(
+            set(compilation_config.cudagraph_capture_sizes or []) | {reduced_cg_cap}
+        )
+        compilation_config.max_cudagraph_capture_size = None
+        delattr(compilation_config, "reduced_cg_cap")
 
     # Recompute cudagraph sizes before extending splitting_ops (honors the
     # current max / size inputs after the mode adjustments above).
@@ -1377,8 +1402,8 @@ def _validate_fa3_backend(key, _attn_selector_config):
     return True
 
 
-def _get_default_max_cudagraph_capture_size(vllm_config: VllmConfig) -> int | None:
-    """Mirror the default-max branch in vLLM's `_set_cudagraph_sizes()`.
+def _get_reduced_cg_cap(vllm_config: VllmConfig) -> int | None:
+    """Return Ascend's reduced capture cap, or None to preserve explicit settings.
 
     This helper corresponds to the upstream block under
     "determine the initial max_cudagraph_capture_size" when

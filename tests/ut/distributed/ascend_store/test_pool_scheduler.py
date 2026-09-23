@@ -16,6 +16,7 @@
 #
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -1031,9 +1032,11 @@ class TestKVPoolSchedulerGetLayerwiseHitTokens(unittest.TestCase):
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def _make_scheduler(self, mock_client_cls):
         # memcache backend makes the constructor resolve the real protocol
-        # module; use_layerwise stays False so the test keeps exercising
-        # the query_start_block offset math it was built around.
-        return KVPoolScheduler(make_config(extra_config={"backend": "memcache"}), use_layerwise=False)
+        # module and binds the key layout. Disable layerwise after binding so
+        # this focused test still exercises the query_start_block offset math.
+        scheduler = KVPoolScheduler(make_config(extra_config={"backend": "memcache"}), use_layerwise=True)
+        scheduler.use_layerwise = False
+        return scheduler
 
     def test_layerwise_hit_tokens(self):
         cases = [
@@ -1197,10 +1200,16 @@ class TestKVPoolSchedulerLayerwiseReachableLookup(unittest.TestCase):
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def _make_scheduler(self, mock_client_cls):
-        scheduler = KVPoolScheduler(make_config(extra_config={"backend": "memcache"}), use_layerwise=True)
-        scheduler.cache_coordinator = self._make_coordinator()
-        scheduler.grouped_block_size = [16, 16]
-        scheduler.kv_cache_group_ids = [0, 1]
+        coordinator = self._make_coordinator()
+        # Layout identity is bound during construction, just as in production.
+        config = make_config(extra_config={"backend": "memcache"})
+        config.scheduler_config.disable_hybrid_kv_cache_manager = False
+        with patch.object(KVPoolScheduler, "_build_cache_coordinator", return_value=coordinator):
+            scheduler = KVPoolScheduler(
+                config,
+                use_layerwise=True,
+                kv_cache_config=SimpleNamespace(kv_cache_groups=coordinator.kv_cache_groups),
+            )
         return scheduler
 
     def _stub_pool(self, scheduler, num_blocks: int, pool_layout: dict[int, list[int]]):

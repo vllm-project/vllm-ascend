@@ -176,6 +176,9 @@
 #       for EngineArgs conversion and `--engram-config` JSON parsing, then
 #       resolve DeepSeek V4.1 target configs through that subtype. Keep model,
 #       topology, load-format and DBO validation in the subtype.
+#       Skip this patch when vLLM does not provide EngramConfig. External DP
+#       locality is checked on the initialized DP group because its
+#       data_parallel_size_local counts engines per launcher.
 #    Related PR (if no, explain why):
 #       No Ascend upstream PR. The required generic Engram behavior is
 #       selectively backported from vLLM commit f84b0c4bce:
@@ -797,18 +800,6 @@
 #       runner and can rely on upstream's default enablement heuristics
 #       (model architecture, Triton, feature checks) without crashes or
 #       degraded functionality.
-#
-#   2. `vllm.config.parallel.ParallelConfig._validate_parallel_config`
-#    Why:
-#       vLLM 0.28.0 rejects PCP+DP before Ascend MRV2 can validate it.
-#    How:
-#       Only on Ascend MRV2 with DP>1, PCP>1 and DCP=1, temporarily mask
-#       PCP inside the original validator and restore it on every exit.
-#       Retain real DP validation and world_size; rebuild dependent Pydantic
-#       schemas once at import so nested configs use the same validator.
-#    Related PR: https://github.com/vllm-project/vllm/pull/54523
-#    Future Plan:
-#       Remove this workaround when vLLM 0.28.0 support is dropped.
 #
 # * Worker Patch:
 # ========#
@@ -1565,4 +1556,18 @@
 #       check. If the supported release pin first receives a backport, remove
 #       it after verifying PCP+DP construction and execution, retained invalid-
 #       config rejection, and Ascend EPLB validation.
+#
+#   2. `vllm.config.parallel.ParallelConfig.use_sequence_parallel_moe`
+#    Why:
+#       Upstream requires DP > 1 for MoE sequence parallelism. Ascend
+#       FlashComm also supports the TP/EP, DP=1 topology, where rank-local
+#       token sharding is still required.
+#    How:
+#       Replace the property with the upstream predicate minus only the
+#       `data_parallel_size > 1` condition. Backend, EP, and TP checks remain.
+#    Related PR (if no, explain why):
+#       No, this enables an Ascend FlashComm-specific topology.
+#    Future Plan:
+#       Remove this patch when upstream provides a backend capability hook for
+#       enabling MoE sequence parallelism with DP=1.
 #
