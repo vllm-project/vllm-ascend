@@ -108,6 +108,8 @@ class TestLightningIndexerFp32Source(unittest.TestCase):
 
 
 class TestLightningIndexerFp32Adapter(unittest.TestCase):
+    build: tempfile.TemporaryDirectory[str]
+
     @classmethod
     def setUpClass(cls):
         compiler = shutil.which("c++")
@@ -156,6 +158,9 @@ class TestLightningIndexerFp32Adapter(unittest.TestCase):
         torch.ops.load_library(str(lib))
 
     def check_outputs(self, device, return_value, dtype, layout, check_legacy=True):
+        qshape: tuple[int, ...]
+        kshape: tuple[int, ...]
+        expected: tuple[int, ...]
         if layout == "BSND":
             qshape, kshape, expected = (2, 3, 4, 128), (2, 9, 1, 128), (2, 3, 1, 2048)
             key_layout = "BSND"
