@@ -11,6 +11,10 @@
 a2:
   single_node:
     test_config:
+      # Pytest-driven single-operator tests
+      - name: sampling-mask
+        os: linux-aarch64-a2b3-1
+        tests: tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_sampling_mask.py
       # YAML-driven tests
       - name: qwen3-30b-a3b-bf16-a2-performance
         os: linux-aarch64-a2b3-4

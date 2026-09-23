@@ -1406,6 +1406,34 @@
 #       Triton-Ascend release is available. Remove the marker-cache kernel
 #       patch when Triton-Ascend 3.6.0 is the minimum supported version.
 #
+#   4. `vllm.v1.worker.gpu.sample.output.SamplingMaskTensors.from_logits`
+#    Why:
+#       Triton-Ascend can allocate excessive UB space for the sampling-mask
+#       kernel when the logits vocabulary dimension has a stride greater than
+#       one, causing compilation to fail with UB overflow. Reducing the boolean
+#       keep mask directly also returns one per tile instead of the finite-logit
+#       count on Triton-Ascend. The upstream row-wise bit packing additionally
+#       lowers to scalar-heavy variable shifts and width-8 reductions.
+#    How:
+#       Make logits contiguous only when the vocabulary dimension is strided,
+#       cast the keep mask to int32 before reducing it, and use a 4096-element
+#       tile to keep the corrected reduction within the NPU UB limit. Support
+#       both the release three-field bitmask API and the verified-main
+#       four-field compact-ID plus bitmask API with the same packing kernel.
+#       For the four-field API, return a zero-width `token_ids` tensor so its
+#       existing `tolists()` method uses the exact bitmask fallback. Pack bits by
+#       transposing `[512, 8]` to `[8, 512]`, multiplying by compile-time bit
+#       weights, and reducing the contiguous 8-row axis so the backend emits
+#       vector transpose, multiply, and reduction instructions.
+#    Test:
+#       Regression coverage is in
+#       `tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_sampling_mask.py`.
+#    Related PR (if no, explain why):
+#       No. This is a Triton-Ascend compiler compatibility workaround.
+#    Future Plan:
+#       Remove this patch when Triton-Ascend can compile and efficiently lower
+#       the upstream kernel, or after an equivalent fix lands upstream.
+#
 # ** 29. File: worker/patch_v2/patch_use_v2_model_runner.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.vllm.VllmConfig.use_v2_model_runner`
