@@ -8,13 +8,13 @@ replacing only ACLNN execution; this does not validate kernel execution.
 """
 
 import ast
-import regex as re
 import shutil
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
+import regex as re
 import torch
 from torch.utils.cpp_extension import include_paths, library_paths
 
