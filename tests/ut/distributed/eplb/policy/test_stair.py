@@ -625,21 +625,29 @@ class TestStairLoadStatistics(unittest.TestCase):
 
     def test_lpt_placement_aligns_slots_with_topology_aware_sources(self):
         current = np.array([[2, 0], [1, 0], [3, 1]])
-        placement = StairEplbPolicy.lpt_placement(
-            np.zeros(4),
-            np.zeros(4),
-            np.zeros((4, 4)),
-            np.array([2, 2, 1, 1]),
-            num_ranks=3,
-            z_score=0.0,
-            current_rank_expert_ids=current,
-            rank_node_ids=np.array([0, 1, 0]),
-            rank_transfer_limit=1,
-            cross_node_transfer_limit=1,
-            backtrack_limit=0,
-        )
+        feasibility_check = StairEplbPolicy._has_feasible_migration_sources
+        exact_source_search = StairEplbPolicy._migration_sources
+        with (
+            patch.object(StairEplbPolicy, "_has_feasible_migration_sources", wraps=feasibility_check) as feasibility,
+            patch.object(StairEplbPolicy, "_migration_sources", wraps=exact_source_search) as exact_search,
+        ):
+            placement = StairEplbPolicy.lpt_placement(
+                np.zeros(4),
+                np.zeros(4),
+                np.zeros((4, 4)),
+                np.array([2, 2, 1, 1]),
+                num_ranks=3,
+                z_score=0.0,
+                current_rank_expert_ids=current,
+                rank_node_ids=np.array([0, 1, 0]),
+                rank_transfer_limit=1,
+                cross_node_transfer_limit=1,
+                backtrack_limit=0,
+            )
 
         self.assertIsNotNone(placement)
+        self.assertGreater(feasibility.call_count, 1)
+        self.assertEqual(exact_search.call_count, 1)
         np.testing.assert_array_equal(placement.rank_expert_ids, [[1, 0], [1, 0], [3, 2]])
         np.testing.assert_array_equal(placement.source_rank_ids, [[2, 0], [1, 1], [2, 0]])
         np.testing.assert_array_equal(placement.source_slot_ids, [[1, 1], [0, 1], [0, 0]])

@@ -633,6 +633,63 @@ class StairEplbPolicy(AbstractEplbPolicy):
         return max(float(updated_variance), 0.0), updated_scale
 
     @staticmethod
+    def _has_feasible_migration_sources(
+        demands: list[tuple[int, int]],
+        rank_transfer_limit: int,
+        cross_node_transfer_limit: int,
+        source_candidates: list[list[tuple[int, ...]]],
+        compact_node_ids: np.ndarray,
+        num_nodes: int,
+    ) -> bool:
+        """Check source feasibility for ``(destination rank, expert)`` demands."""
+        if rank_transfer_limit == -1:
+            rank_transfer_limit = len(demands)
+        if cross_node_transfer_limit == -1:
+            cross_node_transfer_limit = len(demands)
+        candidates = [source_candidates[dst_rank][expert] for dst_rank, expert in demands]
+        source_usage = [0] * len(compact_node_ids)
+        cross_out = [0] * num_nodes
+        cross_in = [0] * num_nodes
+        max_cross_transfers = min(len(demands), num_nodes * cross_node_transfer_limit)
+        failed_states: set[tuple[int, int, tuple[int, ...], tuple[int, ...], tuple[int, ...]]] = set()
+
+        def assign(demand_index: int, remaining_cross_transfers: int) -> bool:
+            if demand_index == len(demands):
+                return True
+            state = (
+                demand_index,
+                remaining_cross_transfers,
+                tuple(source_usage),
+                tuple(cross_out),
+                tuple(cross_in),
+            )
+            if state in failed_states:
+                return False
+            dst_rank, _ = demands[demand_index]
+            dst_node = compact_node_ids[dst_rank]
+            for src_rank in candidates[demand_index]:
+                src_node = compact_node_ids[src_rank]
+                crosses_node = src_node != dst_node
+                if source_usage[src_rank] >= rank_transfer_limit or crosses_node > remaining_cross_transfers:
+                    continue
+                if crosses_node and (
+                    cross_out[src_node] >= cross_node_transfer_limit or cross_in[dst_node] >= cross_node_transfer_limit
+                ):
+                    continue
+                source_usage[src_rank] += 1
+                cross_out[src_node] += crosses_node
+                cross_in[dst_node] += crosses_node
+                if assign(demand_index + 1, remaining_cross_transfers - crosses_node):
+                    return True
+                cross_in[dst_node] -= crosses_node
+                cross_out[src_node] -= crosses_node
+                source_usage[src_rank] -= 1
+            failed_states.add(state)
+            return False
+
+        return assign(0, max_cross_transfers)
+
+    @staticmethod
     def _migration_sources(
         current_placement: np.ndarray,
         target_placement: np.ndarray,
@@ -645,17 +702,16 @@ class StairEplbPolicy(AbstractEplbPolicy):
         source_rank_ids = np.full_like(target_placement, -1)
         node_ids = np.asarray(rank_node_ids)
         unique_nodes, compact_node_ids = np.unique(node_ids, return_inverse=True)
-        demands: list[tuple[int, int, int]] = []
-        incoming = np.zeros(current_placement.shape[0], dtype=np.int64)
-        for dst_rank, target_experts in enumerate(target_placement):
-            for slot, expert in enumerate(target_experts):
-                if expert < 0:
-                    continue
-                if expert in current_placement[dst_rank]:
-                    source_rank_ids[dst_rank, slot] = dst_rank
-                    continue
-                incoming[dst_rank] += 1
-                demands.append((dst_rank, slot, int(expert)))
+        assigned = target_placement >= 0
+        retained = assigned & np.any(target_placement[:, :, None] == current_placement[:, None, :], axis=2)
+        destination_ranks = np.broadcast_to(np.arange(current_placement.shape[0])[:, None], target_placement.shape)
+        source_rank_ids[retained] = destination_ranks[retained]
+        incoming_mask = assigned & ~retained
+        incoming = incoming_mask.sum(axis=1)
+        demands = [
+            (int(dst_rank), int(slot), int(target_placement[dst_rank, slot]))
+            for dst_rank, slot in np.argwhere(incoming_mask)
+        ]
         if rank_transfer_limit == -1:
             rank_transfer_limit = len(demands)
         if cross_node_transfer_limit == -1:
@@ -667,17 +723,33 @@ class StairEplbPolicy(AbstractEplbPolicy):
         cross_out = np.zeros(len(unique_nodes), dtype=np.int64)
         cross_in = np.zeros(len(unique_nodes), dtype=np.int64)
         max_cross_transfers = min(len(demands), len(unique_nodes) * cross_node_transfer_limit)
+        candidates_by_demand = [
+            sorted(
+                expert_sources[expert],
+                key=lambda src_rank, dst_node=compact_node_ids[dst_rank]: (
+                    compact_node_ids[src_rank] != dst_node,
+                    src_rank,
+                ),
+            )
+            for dst_rank, _, expert in demands
+        ]
+        failed_states: set[tuple[int, int, bytes, bytes, bytes]] = set()
 
         def assign(demand_index: int, remaining_cross_transfers: int) -> bool:
             if demand_index == len(demands):
                 return True
-            dst_rank, slot, expert = demands[demand_index]
-            dst_node = compact_node_ids[dst_rank]
-            candidates = sorted(
-                expert_sources[expert],
-                key=lambda src_rank: (compact_node_ids[src_rank] != dst_node, src_rank),
+            state = (
+                demand_index,
+                remaining_cross_transfers,
+                source_usage.tobytes(),
+                cross_out.tobytes(),
+                cross_in.tobytes(),
             )
-            for src_rank in candidates:
+            if state in failed_states:
+                return False
+            dst_rank, slot, _ = demands[demand_index]
+            dst_node = compact_node_ids[dst_rank]
+            for src_rank in candidates_by_demand[demand_index]:
                 src_node = compact_node_ids[src_rank]
                 crosses_node = src_node != dst_node
                 if source_usage[src_rank] >= rank_transfer_limit or crosses_node > remaining_cross_transfers:
@@ -696,6 +768,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
                 cross_in[dst_node] -= crosses_node
                 cross_out[src_node] -= crosses_node
                 source_usage[src_rank] -= 1
+            failed_states.add(state)
             return False
 
         # The first feasible budget minimizes cross-node transfers. Sorted
@@ -752,6 +825,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
         rank_transfer_limit: int,
         cross_node_transfer_limit: int,
         backtrack_limit: int,
+        migration_feasibility_cache: dict[tuple[tuple[int, int], ...], bool] | None = None,
     ) -> PlacementPlan | None:
         """Place replicas with deterministic covariance-aware greedy LPT.
 
@@ -821,6 +895,26 @@ class StairEplbPolicy(AbstractEplbPolicy):
             raise ValueError("rank_node_ids must contain one non-negative integer per rank")
         expert_sources = [np.where(current_placement == expert)[0].tolist() for expert in range(num_experts)]
         migration_sources = cls._migration_sources
+        _, compact_node_ids = np.unique(node_ids, return_inverse=True)
+        num_nodes = int(compact_node_ids.max()) + 1
+        source_candidates = [
+            [
+                tuple(
+                    sorted(
+                        expert_sources[expert],
+                        key=lambda src_rank: (compact_node_ids[src_rank] != compact_node_ids[dst_rank], src_rank),
+                    )
+                )
+                for expert in range(num_experts)
+            ]
+            for dst_rank in range(num_ranks)
+        ]
+        current_has_expert = np.zeros((num_ranks, num_experts), dtype=bool)
+        current_has_expert[np.arange(num_ranks)[:, None], current_placement] = True
+        incoming_demands: list[tuple[int, int]] = []
+        incoming_counts = np.zeros(num_ranks, dtype=np.int64)
+        if migration_feasibility_cache is None:
+            migration_feasibility_cache = {(): True}
 
         slots_per_rank = total_slots // num_ranks
         placement = np.full((num_ranks, slots_per_rank), -1, dtype=np.int64)
@@ -839,6 +933,10 @@ class StairEplbPolicy(AbstractEplbPolicy):
         backtracks_used = 0
 
         def undo_placement(rank_id: int, slot: int, previous_state: tuple[float, float, float]) -> None:
+            expert = placement[rank_id, slot]
+            if not current_has_expert[rank_id, expert]:
+                assert incoming_demands.pop() == (rank_id, expert)
+                incoming_counts[rank_id] -= 1
             placement[rank_id, slot] = -1
             rank_sizes[rank_id] -= 1
             rank_means[rank_id] = previous_state[0]
@@ -853,7 +951,12 @@ class StairEplbPolicy(AbstractEplbPolicy):
                 for rank_id in range(num_ranks):
                     size = rank_sizes[rank_id]
                     rank_experts = placement[rank_id, :size]
-                    if size == slots_per_rank or expert in rank_experts:
+                    incoming_budget_exhausted = (
+                        rank_transfer_limit != -1
+                        and not current_has_expert[rank_id, expert]
+                        and incoming_counts[rank_id] >= rank_transfer_limit
+                    )
+                    if size == slots_per_rank or expert in rank_experts or incoming_budget_exhausted:
                         continue
                     updated_mean = rank_means[rank_id] + means[expert] / replicas[expert]
                     updated_variance, updated_scale = cls._updated_rank_variance(
@@ -881,19 +984,29 @@ class StairEplbPolicy(AbstractEplbPolicy):
                 rank_means[rank_id] = updated_mean
                 rank_variances[rank_id] = updated_variance
                 rank_variance_scales[rank_id] = updated_scale
+                expert_is_incoming = not current_has_expert[rank_id, expert]
+                if expert_is_incoming:
+                    incoming_demands.append((rank_id, expert))
+                    incoming_counts[rank_id] += 1
                 # Search needs only source feasibility; topology cost is deferred.
-                sources = migration_sources(
-                    current_placement,
-                    placement,
-                    rank_transfer_limit,
-                    cross_node_transfer_limit,
-                    expert_sources,
-                    node_ids,
-                )
+                sources_are_feasible = True
+                if expert_is_incoming:
+                    migration_key = tuple(sorted(incoming_demands))
+                    sources_are_feasible = migration_feasibility_cache.get(migration_key)
+                    if sources_are_feasible is None:
+                        sources_are_feasible = cls._has_feasible_migration_sources(
+                            incoming_demands,
+                            rank_transfer_limit,
+                            cross_node_transfer_limit,
+                            source_candidates,
+                            compact_node_ids,
+                            num_nodes,
+                        )
+                        migration_feasibility_cache[migration_key] = sources_are_feasible
                 budget_exhausted = (
-                    sources is not None and decision.tried_feasible_choice and backtracks_used == backtrack_limit
+                    sources_are_feasible and decision.tried_feasible_choice and backtracks_used == backtrack_limit
                 )
-                if sources is None or budget_exhausted:
+                if not sources_are_feasible or budget_exhausted:
                     undo_placement(rank_id, slot, previous_state)
                     if budget_exhausted:
                         return None
@@ -960,6 +1073,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
         node_ids = np.asarray(rank_node_ids)
         num_ranks = current_placement.shape[0]
         scored_candidates = []
+        migration_feasibility_cache: dict[tuple[tuple[int, int], ...], bool] = {(): True}
 
         # Replica risk screens the bounded beam; actual imbalance decides acceptance.
         replica_candidates = cls.incremental_replica_candidates(
@@ -984,6 +1098,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
                 rank_transfer_limit=config.rank_transfer_limit,
                 cross_node_transfer_limit=config.cross_node_transfer_limit,
                 backtrack_limit=config.placement_search_backtrack_limit,
+                migration_feasibility_cache=migration_feasibility_cache,
             )
             if placement is None:
                 continue
