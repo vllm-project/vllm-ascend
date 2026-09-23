@@ -5,10 +5,11 @@ import inspect
 import threading
 from contextlib import contextmanager
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import pytest
 from vllm.distributed.ec_transfer.ec_connector.factory import ECConnectorFactory
+from vllm.distributed.ec_transfer.ec_connector.mooncake.memory import ProducerMemoryPool, StagedSources
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ECConnectorOutput
 
 from vllm_ascend.distributed.ec_transfer import register_connector
@@ -16,6 +17,7 @@ from vllm_ascend.distributed.ec_transfer.mooncake import (
     AscendECMooncakeConnector,
     AscendMooncakeTransfer,
     _AscendECMooncakeWorker,
+    _AscendProducerMemoryPool,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -89,6 +91,38 @@ def test_transfer_rejects_direct_source_registration() -> None:
         assert transfer.release_sources([])
         transfer.close()
         get_engine.assert_not_called()
+
+
+@pytest.mark.parametrize("device", ["npu:0", "npu:1"])
+@pytest.mark.parametrize("num_tensors", [0, 1, 2])
+def test_producer_stage_synchronizes_copy_stream_before_return(device: str, num_tensors: int) -> None:
+    pool = _AscendProducerMemoryPool(4096, Mock())
+    sources = [Mock() for _ in range(num_tensors)]
+    staged = StagedSources([Mock(device=device) for _ in sources], [])
+    calls = Mock()
+    with (
+        patch.object(ProducerMemoryPool, "stage", return_value=staged) as stage,
+        patch("vllm_ascend.distributed.ec_transfer.mooncake.torch.npu.current_stream") as current_stream,
+    ):
+        calls.attach_mock(stage, "stage")
+        calls.attach_mock(current_stream, "current_stream")
+        assert pool.stage(sources) is staged
+
+    expected = [call.stage(sources)]
+    if num_tensors:
+        expected.extend([call.current_stream(device), call.current_stream().synchronize()])
+    assert calls.mock_calls == expected
+
+
+def test_producer_stage_preserves_allocation_failure() -> None:
+    pool = _AscendProducerMemoryPool(4096, Mock())
+    with (
+        patch.object(ProducerMemoryPool, "stage", return_value=None),
+        patch("vllm_ascend.distributed.ec_transfer.mooncake.torch.npu.current_stream") as current_stream,
+        pytest.raises(RuntimeError, match="exceeds ec_buffer_size"),
+    ):
+        pool.stage([Mock()])
+    current_stream.assert_not_called()
 
 
 @pytest.mark.parametrize("is_producer, is_consumer", [(True, False), (False, True), (True, True)])
@@ -177,7 +211,7 @@ def test_consumer_binds_pool_device_once_per_control_thread() -> None:
     worker._buffer_device = "npu"
     worker._control_thread = threading.local()
     pool_device = SimpleNamespace(type="npu", index=1)
-    worker._consumer_memory = SimpleNamespace(tensor=SimpleNamespace(device=pool_device))
+    worker._consumer_memory = Mock(tensor=SimpleNamespace(device=pool_device))
     bound_threads = []
     errors = []
     payload = {"transfer_id": "image"}

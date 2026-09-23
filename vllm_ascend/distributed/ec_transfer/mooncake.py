@@ -103,6 +103,9 @@ class _AscendProducerMemoryPool(ProducerMemoryPool):
         staged = super().stage(tensors)
         if staged is None:
             raise RuntimeError("Ascend ECMooncakeConnector source batch exceeds ec_buffer_size.")
+        if staged.tensors:
+            # Mooncake reads raw pointers without waiting on the PyTorch stream.
+            torch.npu.current_stream(staged.tensors[0].device).synchronize()
         return staged
 
 
