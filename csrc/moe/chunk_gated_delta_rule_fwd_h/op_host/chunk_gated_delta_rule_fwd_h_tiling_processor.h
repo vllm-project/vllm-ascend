@@ -61,6 +61,9 @@ struct ChunkGatedDeltaRuleFwdHTilingContext {
     // platform
     uint32_t aicCoreNum;
     size_t libApiWorkSpaceSize;
+    // 310P unified path: v_work and h_work never touch GM (UB/L1-resident),
+    // so their workspace regions are not allocated.
+    bool skipResidentWorkspaces = false;
 };
 
 class ChunkGatedDeltaRuleFwdHTilingProcessor {
@@ -97,7 +100,9 @@ public:
         workspaceOffset += GDN_FWD_H_WORKSPACE_RSV_BYTE;
 
         tiling.vWorkspaceOffset = static_cast<int64_t>(workspaceOffset);
-        workspaceOffset += AlignUp(static_cast<size_t>(aicCoreNum * chunkSize * vHeadDim * static_cast<int64_t>(sizeof(float)) * GDN_FWD_H_PING_PONG_STAGES));
+        if (!ctx_.skipResidentWorkspaces) {
+            workspaceOffset += AlignUp(static_cast<size_t>(aicCoreNum * chunkSize * vHeadDim * static_cast<int64_t>(sizeof(float)) * GDN_FWD_H_PING_PONG_STAGES));
+        }
 
         tiling.vUpdateWorkspaceOffset = static_cast<int64_t>(workspaceOffset);
         workspaceOffset += AlignUp(static_cast<size_t>(aicCoreNum * chunkSize * vHeadDim * static_cast<int64_t>(sizeof(float)) * GDN_FWD_H_PING_PONG_STAGES));
@@ -108,7 +113,9 @@ public:
         }
 
         tiling.hWorkspaceOffset = static_cast<int64_t>(workspaceOffset);
-        workspaceOffset += AlignUp(static_cast<size_t>(aicCoreNum * kHeadDim * vHeadDim * static_cast<int64_t>(sizeof(float)) * GDN_FWD_H_PING_PONG_STAGES));
+        if (!ctx_.skipResidentWorkspaces) {
+            workspaceOffset += AlignUp(static_cast<size_t>(aicCoreNum * kHeadDim * vHeadDim * static_cast<int64_t>(sizeof(float)) * GDN_FWD_H_PING_PONG_STAGES));
+        }
 
         tiling.numSeqWorkspaceOffset = static_cast<int64_t>(workspaceOffset);
         workspaceOffset += AlignUp(static_cast<size_t>((tokenBatch + 1) * static_cast<int64_t>(sizeof(int64_t))));
