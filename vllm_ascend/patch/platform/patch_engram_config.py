@@ -61,24 +61,21 @@ if importlib.util.find_spec("vllm.config.engram") is not None:
             if self.dp_shared_memory and parallel_config.data_parallel_size <= 1:
                 raise ValueError("dp_shared_memory requires data_parallel_size > 1")
             tp = parallel_config.tensor_parallel_size
-            dp = parallel_config.data_parallel_size
+            # The DP dimension may span nodes: Engram shards and exchanges only
+            # inside the node-local EDP group that the distributed init derives
+            # from the physical placement, and it falls back to plain TP shards
+            # where a node holds a single replica. Whether those groups really
+            # are node-local is checked against the initialized groups when the
+            # table is built.
             if (
                 parallel_config.enable_elastic_ep
                 or tp not in (1, 2, 4, 8)
-                or dp < 1
-                or tp * dp > 16
+                or parallel_config.data_parallel_size < 1
                 or parallel_config.pipeline_parallel_size != 1
                 or parallel_config.prefill_context_parallel_size != 1
                 or parallel_config.decode_context_parallel_size != 1
-                or parallel_config.nnodes != 1
-                # External DP launches one engine per process, even on one node.
-                # Check physical co-location after the DP group is initialized.
-                or (not parallel_config.data_parallel_external_lb and parallel_config.data_parallel_size_local != dp)
             ):
-                raise ValueError(
-                    "Ascend Engram requires single-node TP=1/2/4/8 with at most 16 ranks, "
-                    "with all DP replicas local and PP=PCP=DCP=1."
-                )
+                raise ValueError("Ascend Engram requires TP=1/2/4/8 with PP=PCP=DCP=1.")
 
         def verify_load_config(self, load_config) -> None:
             if self.dp_shared_memory and load_config.load_format not in ("auto", "safetensors"):

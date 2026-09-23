@@ -220,6 +220,7 @@ every other node is a headless worker.
       --data-parallel-size 4 \
       --data-parallel-size-local 2 \
       --tensor-parallel-size 8 \
+      --engram-config '{"cpu_offload":true,"dp_shared_memory":true}' \
       --enable-expert-parallel \
       --served-model-name deepseek-v41 \
       --max-model-len 1048576 \
@@ -281,6 +282,7 @@ every other node is a headless worker.
       --data-parallel-size 4 \
       --data-parallel-size-local 1 \
       --tensor-parallel-size 8 \
+      --engram-config '{"cpu_offload":false,"dp_shared_memory":false}' \
       --enable-expert-parallel \
       --served-model-name deepseek-v41 \
       --max-model-len 1048576 \
@@ -315,6 +317,19 @@ DP4/TP8/EP32 in both configurations:
 
 Each DP rank uses eight devices through TP8. Only Node 0 exposes the API
 endpoint.
+
+Engram tables are replicated across nodes and split by hash head inside each
+node. On A3, the two local DP replicas share each TP head shard in host memory:
+24 heads divide over TP8, but not over TP8 times local DP2 without shared memory.
+Keep both local replicas in the same container, with sufficient host RAM and
+`/dev/shm` capacity as configured above. Each node creates its own shared table;
+shared memory does not cross nodes. TP all-gather still assembles the heads for
+each replica's tokens.
+
+On A2, each node has one DP replica, so TP8 alone splits the 24 heads and the
+example keeps the shards in device memory. Set `cpu_offload` to `true` to store
+them in host memory instead. When a node has only one replica, a request for
+`dp_shared_memory` resolves to ordinary TP shards without a shared mapping.
 
 Wait until every DP engine finishes loading weights and graph capture. A
 successful startup includes output similar to:

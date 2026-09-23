@@ -1,8 +1,23 @@
+from math import gcd
+
 import torch
-from vllm.config import ParallelConfig, get_current_vllm_config
-from vllm.distributed.parallel_state import GroupCoordinator, get_world_group, init_model_parallel_group
+import vllm.distributed.parallel_state as vllm_parallel_state
+from vllm.config import ParallelConfig, get_current_vllm_config, get_current_vllm_config_or_none
+from vllm.distributed.parallel_state import (
+    GroupCoordinator,
+    get_node_count,
+    get_world_group,
+    in_the_same_node_as,
+    init_model_parallel_group,
+)
+from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
+
+# Newer vLLM revisions build the node-local Engram DP group themselves (#56512).
+# Until the pinned revision has it, Ascend backports the same grouping below and
+# this stays None so the group is never created twice.
+_UPSTREAM_ENGRAM_DP_GETTER = getattr(vllm_parallel_state, "get_engram_dp_group", None)
 
 # Currently, mc2 op need their own group coordinator.
 _MC2: GroupCoordinator | None = None
@@ -17,6 +32,9 @@ _P_TP: GroupCoordinator | None = None
 
 _DYNAMIC_EPLB: GroupCoordinator | None = None
 _KVPP: GroupCoordinator | None = None
+
+# Node-local DP replicas that shard or share one Engram table.
+_ENGRAM_DP: GroupCoordinator | None = None
 
 
 class ReplicatedGroup:
@@ -47,6 +65,56 @@ class ReplicatedGroup:
 
 # Singleton: identical on every rank, no HCCL comm created.
 _REPLICATED = ReplicatedGroup()
+
+
+def _engram_dp_shard_size(world_size: int, data_parallel_size: int, replica_size: int) -> int:
+    """Size of the node-local Engram DP shards.
+
+    Backport of vLLM's split: a shard has to divide the DP group evenly, to
+    align with complete replicas and to stay inside one node. A layout that
+    cannot guarantee all three gets size 1, i.e. one shard per replica, so no
+    shard ever spans a node boundary.
+    """
+    node_count = get_node_count()
+    replicas_per_node, remainder = divmod(world_size, node_count * replica_size)
+    if remainder:
+        return 1
+    shard_size = gcd(data_parallel_size, replicas_per_node)
+    if shard_size == 1 or node_count == 1:
+        return shard_size
+    ranks_per_node = replicas_per_node * replica_size
+    for start in range(0, world_size, ranks_per_node):
+        same_node = in_the_same_node_as(get_world_group().cpu_group, start)
+        node_ranks = [rank for rank, local in enumerate(same_node) if local]
+        if node_ranks != list(range(start, start + ranks_per_node)):
+            return 1
+    return shard_size
+
+
+def _engram_dp_group_ranks(all_ranks: torch.Tensor, engram_dp_size: int) -> list[list[int]]:
+    """The EDP groups: DP runs of one TP/PP/PCP position in shard-size chunks."""
+    group_ranks = all_ranks.permute(0, 2, 3, 4, 1).reshape(-1, engram_dp_size).unbind(0)
+    return [ranks.tolist() for ranks in group_ranks]
+
+
+def _engram_dp_size_for(parallel_config: ParallelConfig, world_size: int) -> int:
+    """Engram DP shard size for this launch, or 1 when sharding is not safe."""
+    vllm_config = get_current_vllm_config_or_none()
+    if (
+        vllm_config is None
+        or getattr(vllm_config, "engram_config", None) is None
+        or vllm_config.model_config is None
+        or vllm_config.model_config.architecture != "DeepseekV41ForCausalLM"
+        or parallel_config.enable_elastic_ep
+    ):
+        return 1
+    return _engram_dp_shard_size(
+        world_size,
+        parallel_config.data_parallel_size,
+        parallel_config.tensor_parallel_size
+        * parallel_config.pipeline_parallel_size
+        * parallel_config.prefill_context_parallel_size,
+    )
 
 
 def init_ascend_model_parallel(
@@ -179,6 +247,22 @@ def init_ascend_model_parallel(
     if mlp_tp_size > 0:
         _MLP_TP = _create_or_get_group(mlp_tp_size, "mlptp")
 
+    # Engram shards one table over TP x node-local EDP, and neither the shards
+    # nor their per-step exchange may cross a node, so the group comes from the
+    # physical placement instead of the global DP topology.
+    global _ENGRAM_DP
+    assert _ENGRAM_DP is None, "Engram data parallel group is already initialized"
+    if _UPSTREAM_ENGRAM_DP_GETTER is None:
+        engram_dp_size = _engram_dp_size_for(parallel_config, world_size)
+        if engram_dp_size > 1:
+            _ENGRAM_DP = init_model_parallel_group(
+                _engram_dp_group_ranks(all_ranks, engram_dp_size),
+                get_world_group().local_rank,
+                backend,
+                group_name="edp",
+            )
+            logger.info_once("Engram node-local DP group size: %d (TP=%d)", engram_dp_size, global_tp_size)
+
 
 def model_parallel_initialized():
     return _MC2 is not None
@@ -228,6 +312,13 @@ def get_kvpp_group() -> GroupCoordinator:
     return _KVPP
 
 
+def get_engram_dp_group() -> GroupCoordinator | None:
+    """The node-local Engram DP group (EDP), when one exists for this launch."""
+    if _UPSTREAM_ENGRAM_DP_GETTER is not None:
+        return _UPSTREAM_ENGRAM_DP_GETTER()
+    return _ENGRAM_DP
+
+
 def destroy_ascend_model_parallel():
     global _KVPP
     if _KVPP:
@@ -268,6 +359,11 @@ def destroy_ascend_model_parallel():
     if _DYNAMIC_EPLB:
         _DYNAMIC_EPLB.destroy()
     _DYNAMIC_EPLB = None
+
+    global _ENGRAM_DP
+    if _ENGRAM_DP:
+        _ENGRAM_DP.destroy()
+    _ENGRAM_DP = None
 
 
 def get_global_rank(parallel_config: ParallelConfig | None = None) -> int:

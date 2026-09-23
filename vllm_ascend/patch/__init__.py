@@ -176,9 +176,11 @@
 #       for EngineArgs conversion and `--engram-config` JSON parsing, then
 #       resolve DeepSeek V4.1 target configs through that subtype. Keep model,
 #       topology, load-format and DBO validation in the subtype.
-#       Skip this patch when vLLM does not provide EngramConfig. External DP
-#       locality is checked on the initialized DP group because its
-#       data_parallel_size_local counts engines per launcher.
+#       Skip this patch when vLLM does not provide EngramConfig. The subtype
+#       keeps only the model, TP/PP/CP, load-format and DBO ranges: the DP
+#       dimension may span nodes, and node-local ability is verified on the
+#       initialized EDP and TP groups when the table is built, because the CLI
+#       local size counts engines per launcher rather than physical placement.
 #    Related PR (if no, explain why):
 #       No Ascend upstream PR. The required generic Engram behavior is
 #       selectively backported from vLLM commit f84b0c4bce:
