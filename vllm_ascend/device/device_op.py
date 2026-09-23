@@ -1480,6 +1480,41 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             permuted_tokens=permuted_tokens, sorted_indices=sorted_indices, probs=probs
         )
 
+    @staticmethod
+    def index_fill(
+        tensor: torch.Tensor,
+        dim: int,
+        indices: torch.Tensor,
+        value: int,
+    ) -> torch.Tensor:
+        """Temporarily emulate ``index_fill_`` with ``scatter_`` on A5.
+
+        The current A5 torch-npu implementation converts the device index
+        tensor to a host vector, which introduces device-to-host synchronization
+        proportional to the number of indices. Remove this workaround once the
+        native A5 ``index_fill_`` path accepts device indices without syncing.
+        """
+        if indices.numel() == 0:
+            return tensor
+
+        if dim < 0:
+            dim += tensor.dim()
+        if dim < 0 or dim >= tensor.dim():
+            raise IndexError(
+                f"Dimension out of range (expected to be in range of "
+                f"[-{tensor.dim()}, {tensor.dim() - 1}], but got {dim})"
+            )
+
+        dim_size = tensor.size(dim)
+        norm_indices = torch.where(indices < 0, indices + dim_size, indices)
+        index_shape = [1] * tensor.dim()
+        index_shape[dim] = norm_indices.numel()
+        scatter_shape = list(tensor.shape)
+        scatter_shape[dim] = norm_indices.numel()
+        scatter_indices = norm_indices.reshape(index_shape).expand(scatter_shape)
+        tensor.scatter_(dim, scatter_indices, value)
+        return tensor
+
 
 class Ascend310PDeviceAdaptor(BaseDeviceAdaptor):
     @classmethod

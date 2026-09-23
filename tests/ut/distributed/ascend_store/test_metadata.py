@@ -34,6 +34,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     get_group_block_size,
     get_group_cache_family,
     infer_cache_transfer_granularity,
+    infer_dcp_mismatch_info,
     infer_group_block_sizes,
     masked_block_runs,
     uses_hybrid_kv_cache,
@@ -457,6 +458,21 @@ class TestRequestTracker(unittest.TestCase):
         self.assertEqual(tracker.allocated_block_ids_by_group[2], [3, 0, 8])
         self.assertEqual(tracker.allocated_block_ids_by_group[3], [4, 0, 9])
 
+    def test_update_mamba_uses_per_group_speculative_counts(self):
+        tracker = RequestTracker(
+            req_id="r1",
+            token_len=32,
+            allocated_block_ids_by_group=[[1, 2], [3, 4], [5, 6]],
+            num_speculative_blocks_by_group={1: 1, 2: 0},
+            block_sizes=[16] * 3,
+        )
+
+        tracker.update(([7], [4, 8], [9]), 32)
+
+        self.assertEqual(tracker.allocated_block_ids_by_group[0], [1, 2, 7])
+        self.assertEqual(tracker.allocated_block_ids_by_group[1], [0, 0, 4, 8])
+        self.assertEqual(tracker.allocated_block_ids_by_group[2], [0, 6, 9])
+
     def test_update_mamba_mtp_with_tuple_chunk2(self):
         tracker = RequestTracker(
             req_id="r1",
@@ -467,8 +483,7 @@ class TestRequestTracker(unittest.TestCase):
                 [0, 7, 8, 9, 10],
                 [0, 11, 12, 13, 14],
             ],
-            mamba_group_ids=[1, 2, 3],
-            num_speculative_blocks=3,
+            num_speculative_blocks_by_group={1: 3, 2: 3, 3: 3},
             block_sizes=[16] * 4,
         )
 
@@ -488,8 +503,7 @@ class TestRequestTracker(unittest.TestCase):
                 [0, 0, 0, 0, 0, 0, 0, 13, 14, 15, 16],
                 [0, 0, 0, 0, 0, 0, 0, 17, 18, 19, 20],
             ],
-            mamba_group_ids=[1, 2, 3],
-            num_speculative_blocks=3,
+            num_speculative_blocks_by_group={1: 3, 2: 3, 3: 3},
             block_sizes=[16] * 4,
         )
 
@@ -749,3 +763,31 @@ class TestLayerMultiBlockReqMeta(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestInferDcpMismatchInfo(unittest.TestCase):
+    def test_same_dcp_returns_false(self):
+        self.assertFalse(infer_dcp_mismatch_info("kv_consumer", {"prefill_dcp_size": 2}, 2))
+        self.assertFalse(infer_dcp_mismatch_info("kv_producer", {"decode_dcp_size": 8}, 8, 1))
+
+    def test_missing_peer_key_returns_false(self):
+        # single-group path: peer topology absent -> local layout authoritative
+        self.assertFalse(infer_dcp_mismatch_info("kv_consumer", {}, 2, 1))
+
+    def test_consumer_prefill_dcp_mismatch_detected(self):
+        self.assertTrue(infer_dcp_mismatch_info("kv_consumer", {"prefill_dcp_size": 8}, 2))
+
+    def test_producer_decode_dcp_mismatch_detected(self):
+        self.assertTrue(infer_dcp_mismatch_info("kv_producer", {"decode_dcp_size": 2}, 8))
+
+    def test_pcp_mismatch_detected(self):
+        self.assertTrue(infer_dcp_mismatch_info("kv_consumer", {"prefill_dcp_size": 2, "prefill_pcp_size": 4}, 2, 1))
+
+    def test_non_mapping_extra_config_returns_false(self):
+        self.assertFalse(infer_dcp_mismatch_info("kv_consumer", object(), 2, 1))
+
+    def test_kv_both_returns_false(self):
+        self.assertFalse(infer_dcp_mismatch_info("kv_both", {"prefill_dcp_size": 8}, 2, 1))
+
+    def test_invalid_peer_value_treated_as_local(self):
+        self.assertFalse(infer_dcp_mismatch_info("kv_consumer", {"prefill_dcp_size": "bad"}, 2, 1))

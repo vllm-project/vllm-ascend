@@ -89,15 +89,24 @@ class KVPPConfig:
 
         model_config = vllm_config.model_config
         if not model_config.enforce_eager:
-            raise ValueError("KVPP currently supports eager execution only; set --enforce-eager.")
+            from vllm.config import CUDAGraphMode
+
+            if vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.PIECEWISE:
+                raise ValueError("KVPP supports eager execution or PIECEWISE only.")
         if not model_config.use_mla or model_config.is_hybrid:
             raise ValueError("KVPP currently supports only non-hybrid MLA models.")
         speculative_config = vllm_config.speculative_config
         if speculative_config is not None:
-            if speculative_config.method != "mtp":
-                raise ValueError("KVPP currently supports speculative decoding only with method='mtp'.")
+            if speculative_config.method not in ("mtp", "dspark"):
+                raise ValueError("KVPP supports speculative decoding only with method='mtp' or method='dspark'.")
             if speculative_config.num_speculative_tokens_per_batch_size:
-                raise ValueError("KVPP currently supports only a fixed number of MTP speculative tokens.")
+                raise ValueError("KVPP currently supports only a fixed number of speculative tokens.")
+            if speculative_config.method == "dspark":
+                if getattr(speculative_config, "enable_adaptive_verification", False):
+                    raise ValueError("KVPP does not support DSpark adaptive verification.")
+                dynamic_spec = (vllm_config.additional_config or {}).get("dynamic_spec_config") or {}
+                if dynamic_spec.get("method") is not None:
+                    raise ValueError("KVPP does not support dynamic speculative lengths.")
 
 
 @config
@@ -344,6 +353,7 @@ class AscendConfig:
             "enable_shared_expert_dp": false,
             "enable_sparse_sfa_c8": false,
             "enable_sparse_li_c8": false,
+            "c8_enable_reshape_optim": true,
             "ascend_compilation_config": {
                 "enable_npugraph_ex": true,
                 "enable_static_kernel": false,
@@ -521,6 +531,8 @@ class AscendConfig:
     enable_sp_by_pass: bool = False
     enable_sparse_sfa_c8: bool = False
     enable_sparse_li_c8: bool = False
+    # See https://github.com/vllm-project/vllm-ascend/issues/15896
+    c8_enable_reshape_optim: bool = True
     pd_tp_ratio: int = 1
     pd_head_ratio: int = 1
     num_head_replica: int = 1
@@ -602,7 +614,7 @@ class AscendConfig:
             and vc.parallel_config.enable_expert_parallel
             and vc.parallel_config.tensor_parallel_size > 1
         )
-        # TODO: delete the deprecated flashcomm option when upstream SP is ready.
+        # FlashComm remains the SP MoE switch on Ascend.
         flashcomm_explicitly_enabled = validate_additional_config_bool(
             (vc.additional_config or {}).get("enable_flashcomm1", False),
             "additional_config.enable_flashcomm1",
@@ -763,8 +775,9 @@ class AscendConfig:
                     "enable_kv_nz is only supported in pd scenario and can only be used in D node."
                 )
 
-        # Sparse C8 derivation. The StoreKVBlock optimization is internal and
-        # enabled only for SFA + Lightning Indexer C8 on PD prefill nodes.
+        # Sparse C8 derivation. StoreKVBlock can be disabled by users, and is
+        # otherwise enabled only for SFA + Lightning Indexer C8 on PD prefill
+        # nodes.
         from vllm_ascend.utils import model_uses_sfa_sparse
 
         use_sparse = model_uses_sfa_sparse(vc.model_config)
@@ -779,7 +792,7 @@ class AscendConfig:
                 and not bool(getattr(kv_transfer_config, "is_kv_consumer", False))
             )
         )
-        self._c8_reshape_optim_enabled = self.enable_sparse_li_c8 and is_prefill_node
+        self._c8_reshape_optim_enabled = self.c8_enable_reshape_optim and self.enable_sparse_li_c8 and is_prefill_node
         quant_config = getattr(vc, "quant_config", None)
         (
             self._sparse_li_c8_layer_ids,
@@ -1552,11 +1565,6 @@ def _is_ascend_config_initialized(config: AscendConfig | None) -> bool:
 
 def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
     additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
-    if "enable_flashcomm1" in additional_config or os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1") is not None:
-        logger.warning(
-            "FlashComm is deprecated; remove enable_flashcomm1 and "
-            "VLLM_ASCEND_ENABLE_FLASHCOMM1 from the configuration. Use upstream configuration instead"
-        )
     # Upstream EngineArgs injects --gdn-prefill-backend / --kda-prefill-backend
     # into additional_config. The generic GDN/KDA model layers consume them
     # (qwen_gdn_linear_attn / kimi_gdn_linear_attn), but on non-CUDA platforms
@@ -1619,8 +1627,8 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
         # instead of letting extra="forbid" report them as typos.
         "gdn_prefill_backend",
         "kda_prefill_backend",
-        # Removed upstream option: warn above, but do not pass it into the
-        # strict AscendConfig schema where it would be reported as a typo.
+        # Consumed in derive_and_validate as the SP MoE switch. Not an
+        # AscendConfig field, so strip it before extra="forbid" validation.
         "enable_flashcomm1",
         # injected fields (factory passes explicitly; a copy in additional_config would conflict)
         "scheduler_config",

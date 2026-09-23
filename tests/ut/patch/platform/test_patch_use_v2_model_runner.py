@@ -10,10 +10,6 @@ from vllm_ascend.utils import vllm_version_is
 
 
 def test_ascend_v1_supported_features_are_not_rejected(monkeypatch):
-    if vllm_version_is("0.28.0"):
-        assert "_get_v1_model_runner_unsupported_features" not in VllmConfig.__dict__
-        return
-
     monkeypatch.setattr(
         patch_use_v2_model_runner,
         "_original_get_v1_model_runner_unsupported_features",
@@ -31,7 +27,7 @@ def test_ascend_v1_supported_features_are_not_rejected(monkeypatch):
 
 
 def test_release_pcp_is_not_rejected_as_v2_unsupported_feature(monkeypatch):
-    monkeypatch.setattr(patch_use_v2_model_runner, "vllm_version_is", lambda version: version == "0.28.0")
+    monkeypatch.setattr(patch_use_v2_model_runner, "vllm_version_is", lambda version: version == "0.29.0")
     monkeypatch.setattr(
         patch_use_v2_model_runner,
         "_original_get_unsupported_features",
@@ -45,7 +41,9 @@ def test_release_pcp_is_not_rejected_as_v2_unsupported_feature(monkeypatch):
 
     unsupported = patch_use_v2_model_runner._patched_get_unsupported_features(object())
 
-    assert unsupported == ["diffusion models"]
+    # Both supported pins delegate PCP checks to the manager (#53853).
+    # The Ascend wrapper must preserve any remaining upstream restriction.
+    assert unsupported == ["prefill context parallelism", "diffusion models"]
 
 
 @pytest.fixture

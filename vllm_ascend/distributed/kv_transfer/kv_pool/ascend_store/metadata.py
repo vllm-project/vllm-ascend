@@ -16,59 +16,8 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec, UniformTypeKVCacheSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import AttentionComputeStartGate
 
 
-def make_layerwise_block_key(
-    model_name: str,
-    block_hash_or_tail: str,
-    head_or_tp_rank: int,
-) -> str:
-    """Build the canonical one-object-per-block-and-saving-rank key."""
-    return f"{model_name}@{block_hash_or_tail}@{head_or_tp_rank}"
-
-
-def is_block_key_layerwise(use_layerwise: bool, backend_name: str) -> bool:
-    """Whether to use Mooncake's block-key range-session protocol.
-
-    Memcache also stores one object per block, but its layerwise path is
-    selected through the backend protocol registry and uses GVA allocation.
-    Keeping this flag Mooncake-specific prevents the two data planes from
-    being mixed after the generic layerwise refactor.
-    """
-    return use_layerwise and backend_name.lower() == "mooncake"
-
-
 def is_kv_save_role(kv_role: str, consumer_is_to_put: bool) -> bool:
     return kv_role in ("kv_producer", "kv_both") or consumer_is_to_put
-
-
-def validate_mooncake_layerwise_topology(
-    parallel_config: Any,
-    backend_name: str,
-    use_layerwise: bool,
-) -> None:
-    """Reject coordinates omitted from the current Mooncake block key."""
-    if not use_layerwise or backend_name.lower() != "mooncake":
-        return
-
-    def parallel_size(name: str) -> int:
-        value = getattr(parallel_config, name, 1)
-        return value if isinstance(value, int) and not isinstance(value, bool) else 1
-
-    topology_dimensions = (
-        ("pipeline_parallel_size", parallel_size("pipeline_parallel_size")),
-        (
-            "prefill_context_parallel_size",
-            parallel_size("prefill_context_parallel_size"),
-        ),
-        (
-            "decode_context_parallel_size",
-            parallel_size("decode_context_parallel_size"),
-        ),
-    )
-    unsupported = [f"{name}={size}" for name, size in topology_dimensions if size > 1]
-    if unsupported:
-        raise ValueError(
-            "Mooncake block-key layerwise currently supports TP-only topology; unsupported " + ", ".join(unsupported)
-        )
 
 
 @dataclass(frozen=True)
@@ -87,6 +36,43 @@ def _as_positive_int(value: Any, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return parsed if parsed > 0 else default
+
+
+def infer_dcp_mismatch_info(
+    kv_role: str,
+    extra_config: Mapping[str, Any] | object,
+    local_dcp_size: int | object,
+    local_pcp_size: int | object = 1,
+) -> bool:
+    """Whether the peer P/D stage disagrees with this stage on CP layout.
+
+    Both the layerwise GVA shard stride and the per-shard save-leader rule
+    derive from the local dcp size/rank. In PD-disaggregation the producer
+    and consumer are separate worker groups, so when they are started with
+    unequal decode-context-parallel sizes they compute different shard
+    layouts for the SAME pool region and silently corrupt the KV pool.
+
+    The peer topology is carried through the flat peer keys used by the
+    store connector path (``prefill_dcp_size`` / ``decode_dcp_size``),
+    mirroring the existing ``prefill_tp_size`` / ``decode_tp_size``
+    convention. When the key is absent the single-group path is assumed and
+    the local layout is authoritative.
+    """
+    local_dcp_size = _as_positive_int(local_dcp_size, 1)
+    local_pcp_size = _as_positive_int(local_pcp_size, 1)
+    if not isinstance(extra_config, Mapping):
+        return False
+    if kv_role == "kv_consumer":
+        peer_dcp_key = "prefill_dcp_size"
+        peer_pcp_key = "prefill_pcp_size"
+    elif kv_role == "kv_producer":
+        peer_dcp_key = "decode_dcp_size"
+        peer_pcp_key = "decode_pcp_size"
+    else:
+        return False
+    peer_dcp_size = _as_positive_int(extra_config.get(peer_dcp_key, local_dcp_size), local_dcp_size)
+    peer_pcp_size = _as_positive_int(extra_config.get(peer_pcp_key, local_pcp_size), local_pcp_size)
+    return peer_dcp_size != local_dcp_size or peer_pcp_size != local_pcp_size
 
 
 def infer_tp_mismatch_info(
@@ -841,10 +827,8 @@ class RequestTracker:
     gva_block_offset: int = 0
     last_block_gva: int | None = None
 
-    mamba_group_ids: list[int] | None = None
-
-    # spec blocks for mamba cache group
-    num_speculative_blocks: int = 0
+    # Number of speculative scratch blocks for each Mamba cache group.
+    num_speculative_blocks_by_group: dict[int, int] | None = None
 
     block_sizes: list[int] | None = None
 
@@ -861,14 +845,12 @@ class RequestTracker:
         block_gvas_by_group: list[list[int]] | None = None,
         gva_block_offset: int = 0,
         last_block_gva: int | None = None,
-        mamba_group_ids: list[int] | None = None,
-        num_speculative_blocks: int = 0,
+        num_speculative_blocks_by_group: dict[int, int] | None = None,
         block_sizes: list[int] | None = None,
     ) -> None:
         self.req_id = req_id
         self.token_len = token_len
-        self.mamba_group_ids = mamba_group_ids
-        self.num_speculative_blocks = num_speculative_blocks
+        self.num_speculative_blocks_by_group = num_speculative_blocks_by_group
         block_ids = allocated_block_ids_by_group
         if block_ids is None:
             block_ids = normalize_block_ids_by_group(allocated_block_ids or [])
@@ -914,24 +896,27 @@ class RequestTracker:
         so, if a speculative block is moved to last position and replaced with null block,
         we also need to update the previous allocated_block_ids to 0.
         """
-        if self.mamba_group_ids and kv_cache_group_id in self.mamba_group_ids:
+        if (
+            self.num_speculative_blocks_by_group is not None
+            and (num_speculative_blocks := self.num_speculative_blocks_by_group.get(kv_cache_group_id)) is not None
+        ):
             assert self.block_sizes is not None and len(self.block_sizes) > kv_cache_group_id
             num_skipped_blocks = (
-                max(num_computed_tokens - self.num_speculative_blocks - 1, 0) // self.block_sizes[kv_cache_group_id]
+                max(num_computed_tokens - num_speculative_blocks - 1, 0) // self.block_sizes[kv_cache_group_id]
             )
             num_skipped_blocks = min(len(self.allocated_block_ids_by_group[kv_cache_group_id]), num_skipped_blocks)
             if num_skipped_blocks > 0:
                 self.allocated_block_ids_by_group[kv_cache_group_id][:num_skipped_blocks] = [0] * num_skipped_blocks
-            if not block_ids or self.num_speculative_blocks <= 0:
+            if not block_ids or num_speculative_blocks <= 0:
                 return
-            mask_spec_count = min(len(block_ids) - 1, self.num_speculative_blocks)
+            mask_spec_count = min(len(block_ids) - 1, num_speculative_blocks)
             group_block_ids = self.allocated_block_ids_by_group[kv_cache_group_id]
-            if mask_spec_count >= self.num_speculative_blocks:
-                group_block_ids[-self.num_speculative_blocks :] = [0] * self.num_speculative_blocks
+            if mask_spec_count >= num_speculative_blocks:
+                group_block_ids[-num_speculative_blocks:] = [0] * num_speculative_blocks
             else:
-                group_block_ids[-self.num_speculative_blocks : mask_spec_count - self.num_speculative_blocks] = [
-                    0
-                ] * mask_spec_count
+                group_block_ids[-num_speculative_blocks : mask_spec_count - num_speculative_blocks] = [0] * (
+                    mask_spec_count
+                )
 
 
 @dataclass(init=False)
@@ -1272,8 +1257,10 @@ class LayerTransferTask:
     # Cache for KVCacheStoreKeyLayerSendingThread:
     # maps block_range index -> list of (start, end, key_all_layers)
     cached_process_tokens: dict[int, list[tuple[int, int, list]]] | None = None
-    # Mooncake uses one remote object per block/rank with per-layer ranges.
+    # Block-key backends use one remote object per block/rank with per-layer ranges.
     use_key_major_ranges: bool = False
+    # Group-local completion differs from the physical model layer boundary.
+    final_group_layer: bool = False
 
 
 @dataclass

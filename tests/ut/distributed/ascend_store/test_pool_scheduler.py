@@ -16,16 +16,24 @@
 #
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, SlidingWindowSpec
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheGroupSpec,
+    MambaSpec,
+    SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
+)
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LoadSpec,
+    ReqMeta,
     RequestTracker,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import (
@@ -69,6 +77,36 @@ def make_config(kv_role="kv_producer", extra_config=None, block_size=16):
     config.model_config.get_total_num_kv_heads.return_value = 1
     config.model_config.get_num_layers.return_value = 2
     return config
+
+
+@pytest.mark.parametrize("num_speculative_blocks", [None, 0, 3])
+def test_layerwise_runtime_detects_recurrent_state(num_speculative_blocks):
+    config = make_config(extra_config={"backend": "mooncake"})
+    groups = [
+        KVCacheGroupSpec(
+            ["layer.0"], FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
+        )
+    ]
+    if num_speculative_blocks is not None:
+        groups.append(
+            KVCacheGroupSpec(
+                ["layer.1"],
+                MambaSpec(
+                    shapes=((4,),),
+                    dtypes=(torch.float32,),
+                    block_size=16,
+                    mamba_cache_mode="align",
+                    num_speculative_blocks=num_speculative_blocks,
+                ),
+            )
+        )
+    kv_cache_config = MagicMock(kv_cache_groups=groups)
+    if num_speculative_blocks is None:
+        KVPoolScheduler(config, use_layerwise=True, kv_cache_config=kv_cache_config)
+    else:
+        # A Mamba group still has recurrent state when it has no scratch blocks.
+        with pytest.raises(ValueError, match="recurrent Mamba state"):
+            KVPoolScheduler(config, use_layerwise=True, kv_cache_config=kv_cache_config)
 
 
 class TestGetZmqRpcPathLookup(unittest.TestCase):
@@ -128,18 +166,72 @@ class TestKVPoolScheduler(unittest.TestCase):
                 request = MagicMock(prompt_token_ids=list(range(token_count)))
                 self.assertEqual(scheduler.get_num_new_matched_tokens(request, 0), (0, False))
 
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_touch_sending_mamba_blocks_excludes_speculative_tail(self, mock_client_cls):
+        """Speculative scratch blocks must never be pinned for async sends.
+
+        The allocator relocates speculative scratch blocks in place and
+        requires them exclusively owned (vllm PR #51358); the touch here keeps
+        blocks alive only until the send ack, so it must cover the saved state
+        blocks but not the speculative tail of the mamba block table.
+        """
+        # Cover the UniformType wrapper path handled by _infer_mamba_groups.
+        wrapped_mamba_spec = UniformTypeKVCacheSpecs.from_specs(
+            {
+                "layer.1": MambaSpec(
+                    shapes=((4,),),
+                    dtypes=(torch.float32,),
+                    block_size=16,
+                    mamba_cache_mode="align",
+                    num_speculative_blocks=3,
+                )
+            }
+        )
+        assert wrapped_mamba_spec is not None
+        hybrid_groups = [
+            KVCacheGroupSpec(
+                ["layer.0"], FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
+            ),
+            KVCacheGroupSpec(["layer.1"], wrapped_mamba_spec),
+            KVCacheGroupSpec(
+                ["layer.2"],
+                MambaSpec(shapes=((4,),), dtypes=(torch.float32,), block_size=16, mamba_cache_mode="align"),
+            ),
+        ]
+        config = self._make_config(extra_config={"backend": "memcache"})
+        config.speculative_config.num_speculative_tokens = 3
+        config.scheduler_config.disable_hybrid_kv_cache_manager = False
+        scheduler = KVPoolScheduler(
+            config, use_layerwise=False, kv_cache_config=MagicMock(kv_cache_groups=hybrid_groups)
+        )
+        self.assertEqual(scheduler.num_speculative_blocks_by_group, {1: 3, 2: 0})
+
+        scheduler._block_pool = MagicMock()
+        scheduler._block_pool.blocks = {block_id: MagicMock(block_id=block_id) for block_id in range(1, 13)}
+        # Group 1 has three speculative scratch blocks; group 2 has none even
+        # though speculative decoding is enabled globally.
+        req_meta = ReqMeta(
+            req_id="r1",
+            block_ids_by_group=[[13], [1, 2, 3, 4, 5, 6, 7, 8, 9], [10, 11, 12]],
+            can_save=True,
+        )
+        scheduler.touch_sending_mamba_blocks(req_meta)
+
+        touched = [block.block_id for block in scheduler._block_pool.touch.call_args[0][0]]
+        self.assertEqual(touched, [1, 2, 3, 4, 5, 6, 10, 11, 12])
+
     def test_mooncake_layerwise_hit_requires_every_saving_rank(self):
         config = self._make_config(extra_config={"backend": "mooncake", "use_layerwise": True})
         config.parallel_config.tensor_parallel_size = 2
         config.model_config.get_total_num_kv_heads.return_value = 2
         scheduler = KVPoolScheduler(config, use_layerwise=True)
-        scheduler.store_scheduler.batch_is_exist.return_value = [1, 1, 1, 0, 1, 1]
+        scheduler.store_scheduler.batch_is_readable.return_value = [True, True, True, False, True, True]
         request = MagicMock(request_id="r1", block_hashes=[b"h0", b"h1", b"h2"])
 
-        hit_tokens = scheduler._get_mooncake_layerwise_hit_tokens(request, 48, 0)
+        hit_tokens = scheduler._lookup_block_key_contiguous(request, 48, 0)
 
         self.assertEqual(hit_tokens, 16)
-        queried_keys = scheduler.store_scheduler.batch_is_exist.call_args.args[0]
+        queried_keys = scheduler.store_scheduler.batch_is_readable.call_args.args[0]
         self.assertEqual(len(queried_keys), 3 * 2)
         self.assertEqual(queried_keys[:2], ["llama-7b@6830@0", "llama-7b@6830@1"])
 
@@ -904,8 +996,8 @@ class TestKVPoolSchedulerRequestFinishedAllGroups(unittest.TestCase):
         self.assertFalse(delay)
 
 
-class TestKVPoolSchedulerInferMambaGroups(unittest.TestCase):
-    """Test _infer_mamba_groups."""
+class TestKVPoolSchedulerMambaGroups(unittest.TestCase):
+    """Test Mamba group discovery."""
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_no_config(self, mock_client_cls):
@@ -930,7 +1022,8 @@ class TestKVPoolSchedulerInferMambaGroups(unittest.TestCase):
         config.model_config.get_total_num_kv_heads.return_value = 1
         config.model_config.get_num_layers.return_value = 2
         scheduler = KVPoolScheduler(config, use_layerwise=False)
-        self.assertEqual(scheduler._infer_mamba_groups(), [])
+        self.assertEqual(scheduler._infer_mamba_groups(), {})
+        self.assertEqual(scheduler.num_speculative_blocks_by_group, {})
 
 
 class TestKVPoolSchedulerGetLayerwiseHitTokens(unittest.TestCase):
@@ -939,9 +1032,11 @@ class TestKVPoolSchedulerGetLayerwiseHitTokens(unittest.TestCase):
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def _make_scheduler(self, mock_client_cls):
         # memcache backend makes the constructor resolve the real protocol
-        # module; use_layerwise stays False so the test keeps exercising
-        # the query_start_block offset math it was built around.
-        return KVPoolScheduler(make_config(extra_config={"backend": "memcache"}), use_layerwise=False)
+        # module and binds the key layout. Disable layerwise after binding so
+        # this focused test still exercises the query_start_block offset math.
+        scheduler = KVPoolScheduler(make_config(extra_config={"backend": "memcache"}), use_layerwise=True)
+        scheduler.use_layerwise = False
+        return scheduler
 
     def test_layerwise_hit_tokens(self):
         cases = [
@@ -953,14 +1048,7 @@ class TestKVPoolSchedulerGetLayerwiseHitTokens(unittest.TestCase):
         for hash_count, hits, token_count, computed_tokens, expected in cases:
             with self.subTest(hits=hits, computed_tokens=computed_tokens):
                 scheduler = self._make_scheduler()
-                key_infos = []
-                for hit in hits:
-                    info = MagicMock()
-                    info.size.return_value = int(hit)
-                    if hit:
-                        info.gva_list.return_value = [0x1000]
-                    key_infos.append(info)
-                scheduler.store_scheduler.batch_get_key_info.return_value = key_infos
+                scheduler.store_scheduler.batch_is_readable.return_value = hits
                 request = MagicMock()
                 request.block_hashes = [b"\xaa"] * hash_count
                 result = scheduler._get_layerwise_hit_tokens(request, token_count, computed_tokens)
@@ -1112,37 +1200,36 @@ class TestKVPoolSchedulerLayerwiseReachableLookup(unittest.TestCase):
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def _make_scheduler(self, mock_client_cls):
-        scheduler = KVPoolScheduler(make_config(extra_config={"backend": "memcache"}), use_layerwise=True)
-        scheduler.cache_coordinator = self._make_coordinator()
-        scheduler.grouped_block_size = [16, 16]
-        scheduler.kv_cache_group_ids = [0, 1]
+        coordinator = self._make_coordinator()
+        # Layout identity is bound during construction, just as in production.
+        config = make_config(extra_config={"backend": "memcache"})
+        config.scheduler_config.disable_hybrid_kv_cache_manager = False
+        with patch.object(KVPoolScheduler, "_build_cache_coordinator", return_value=coordinator):
+            scheduler = KVPoolScheduler(
+                config,
+                use_layerwise=True,
+                kv_cache_config=SimpleNamespace(kv_cache_groups=coordinator.kv_cache_groups),
+            )
         return scheduler
 
-    @staticmethod
-    def _key_info(hit: bool):
-        info = MagicMock()
-        info.size.return_value = 64 if hit else 0
-        info.gva_list.return_value = [0x1000] if hit else []
-        return info
-
     def _stub_pool(self, scheduler, num_blocks: int, pool_layout: dict[int, list[int]]):
-        """Mock batch_get_key_info so a block exists iff it is in pool_layout.
+        """Mock readability so a block exists iff it is in pool_layout.
 
         Layerwise hit-check keys use the multi-group format model@group@hash@rank,
         so the stub decodes the group and block index from each key.
         """
         hash_hex_by_idx = {f"{idx:02x}" * 32: idx for idx in range(num_blocks)}
 
-        def get_key_info(keys):
-            infos = []
+        def is_readable(keys):
+            states = []
             for key in keys:
                 parts = key.split("@")
                 group_id = int(parts[1])
                 block_idx = hash_hex_by_idx[parts[2]]
-                infos.append(self._key_info(block_idx in pool_layout.get(group_id, [])))
-            return infos
+                states.append(block_idx in pool_layout.get(group_id, []))
+            return states
 
-        scheduler.store_scheduler.batch_get_key_info.side_effect = get_key_info
+        scheduler.store_scheduler.batch_is_readable.side_effect = is_readable
 
     @staticmethod
     def _request(num_blocks: int):
@@ -1161,7 +1248,7 @@ class TestKVPoolSchedulerLayerwiseReachableLookup(unittest.TestCase):
         hit = scheduler._get_layerwise_hit_tokens(self._request(4), 64, 0)
 
         self.assertEqual(hit, 64)
-        queried_keys = scheduler.store_scheduler.batch_get_key_info.call_args_list
+        queried_keys = scheduler.store_scheduler.batch_is_readable.call_args_list
         # Only the 4 FA keys + 2 sparsely-stored SWA keys are queried.
         self.assertEqual(sum(len(call.args[0]) for call in queried_keys), 6)
 
@@ -1187,12 +1274,7 @@ class TestKVPoolSchedulerLayerwiseReachableLookup(unittest.TestCase):
     def test_without_coordinator_falls_back_to_contiguous(self):
         scheduler = self._make_scheduler()
         scheduler.cache_coordinator = None
-        infos = [self._key_info(True), self._key_info(False)]
-
-        def get_key_info(keys):
-            return infos[: len(keys)]
-
-        scheduler.store_scheduler.batch_get_key_info.side_effect = get_key_info
+        scheduler.store_scheduler.batch_is_readable.side_effect = lambda keys: [True, False][: len(keys)]
 
         hit = scheduler._get_layerwise_hit_tokens(self._request(2), 32, 0)
 

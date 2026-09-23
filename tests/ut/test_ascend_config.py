@@ -26,6 +26,7 @@ from vllm.config import KVTransferConfig
 from vllm.config import VllmConfig as _VllmConfig
 
 from tests.ut.base import TestBase
+from tests.ut.kvpp_utils import make_kvpp_config
 from vllm_ascend.ascend_config import (
     AscendCompilationConfig,
     AscendConfig,
@@ -34,6 +35,7 @@ from vllm_ascend.ascend_config import (
     DyntraLBConfig,
     EplbConfig,
     FinegrainedTPConfig,
+    KVPPConfig,
     ProfilingChunkConfig,
     RejectionSamplerConfig,
     RlConfig,
@@ -564,7 +566,7 @@ class TestAscendConfig(TestBase):
     )
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_init_ascend_config_disable_npugraph_ex_on_310p(
-        self, mock_fix_incompatible_config, mock_is_310p, mock_warning
+        self, mock_fix_incompatible_config, mock_hardware_profile, mock_warning
     ):
         test_vllm_config = VllmConfig()
         test_vllm_config.additional_config = {
@@ -598,34 +600,6 @@ class TestAscendConfig(TestBase):
         ascend_config = init_ascend_config(test_vllm_config)
 
         self.assertTrue(ascend_config.msmonitor_use_daemon)
-
-    @_clean_up_ascend_config
-    @patch("vllm_ascend.ascend_config.logger.warning")
-    def test_flashcomm_config_warns(self, mock_warning):
-        test_vllm_config = VllmConfig()
-        test_vllm_config.additional_config = {"enable_flashcomm1": True}
-        init_ascend_config(test_vllm_config)
-
-        warning_messages = [call.args[0] for call in mock_warning.call_args_list]
-        self.assertIn(
-            "FlashComm is deprecated; remove enable_flashcomm1 and "
-            "VLLM_ASCEND_ENABLE_FLASHCOMM1 from the configuration. Use upstream configuration instead",
-            warning_messages,
-        )
-
-    @_clean_up_ascend_config
-    @patch("vllm_ascend.ascend_config.logger.warning")
-    def test_flashcomm_environment_warns(self, mock_warning):
-        test_vllm_config = VllmConfig()
-        with patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"}, clear=True):
-            init_ascend_config(test_vllm_config)
-
-        warning_messages = [call.args[0] for call in mock_warning.call_args_list]
-        self.assertIn(
-            "FlashComm is deprecated; remove enable_flashcomm1 and "
-            "VLLM_ASCEND_ENABLE_FLASHCOMM1 from the configuration. Use upstream configuration instead",
-            warning_messages,
-        )
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
@@ -1476,21 +1450,29 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         mock_uses_sfa,
     ):
         cases = (
-            (True, True, "kv_producer", True),
-            (False, True, "kv_producer", False),
-            (True, False, "kv_producer", False),
-            (True, True, "kv_consumer", False),
-            (True, True, "kv_both", False),
-            (True, True, None, False),
+            (None, True, True, "kv_producer", True),
+            (False, True, True, "kv_producer", False),
+            (True, False, True, "kv_producer", False),
+            (True, True, False, "kv_producer", False),
+            (True, True, True, "kv_consumer", False),
+            (True, True, True, "kv_both", False),
+            (True, True, True, None, False),
         )
-        for uses_sfa, enable_li_c8, kv_role, expected in cases:
-            with self.subTest(uses_sfa=uses_sfa, enable_li_c8=enable_li_c8, kv_role=kv_role):
+        for reshape_optim, uses_sfa, enable_li_c8, kv_role, expected in cases:
+            with self.subTest(
+                reshape_optim=reshape_optim,
+                uses_sfa=uses_sfa,
+                enable_li_c8=enable_li_c8,
+                kv_role=kv_role,
+            ):
                 mock_uses_sfa.return_value = uses_sfa
                 vc = VllmConfig()
                 vc.additional_config = {
                     "refresh": True,
                     "enable_sparse_li_c8": enable_li_c8,
                 }
+                if reshape_optim is not None:
+                    vc.additional_config["c8_enable_reshape_optim"] = reshape_optim
                 # enable_sparse_li_c8 is derived from indexer_kv_dtype (see
                 # init_ascend_config); the per-case flag is expressed there.
                 vc.attention_config.indexer_kv_dtype = "int8" if enable_li_c8 else "auto"
@@ -1656,6 +1638,25 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
 
 class TestKVPPConfig(TestBase):
+    def test_graph_modes(self):
+        from types import SimpleNamespace
+
+        from vllm.config import CUDAGraphMode
+
+        from tests.ut.kvpp_utils import make_kvpp_config
+        from vllm_ascend.ascend_config import KVPPConfig
+
+        for mode in CUDAGraphMode:
+            with self.subTest(mode=mode):
+                config = make_kvpp_config()
+                config.model_config.enforce_eager = False
+                config.compilation_config = SimpleNamespace(cudagraph_mode=mode)
+                if mode == CUDAGraphMode.PIECEWISE:
+                    KVPPConfig.from_vllm_config(config).validate(config)
+                else:
+                    with self.assertRaisesRegex(ValueError, "PIECEWISE"):
+                        KVPPConfig.from_vllm_config(config).validate(config)
+
     def test_enable_switch_uses_tp_size(self):
         from tests.ut.kvpp_utils import make_kvpp_config
         from vllm_ascend.ascend_config import KVPPConfig
@@ -1688,10 +1689,9 @@ class TestKVPPConfig(TestBase):
         KVPPConfig.from_vllm_config(config).validate(config)
         restrictions = (
             ("parallel_config", "decode_context_parallel_size", 2, "DCP"),
-            ("model_config", "enforce_eager", False, "eager"),
             ("model_config", "use_mla", False, "MLA"),
             ("model_config", "is_hybrid", True, "MLA"),
-            ("speculative_config", "method", "dspark", "mtp"),
+            ("speculative_config", "method", "eagle3", "mtp"),
             ("speculative_config", "num_speculative_tokens_per_batch_size", {1: 2}, "fixed"),
         )
         for section, field, value, message in restrictions:
@@ -1702,6 +1702,18 @@ class TestKVPPConfig(TestBase):
                 # Reach KVPP validation through the real platform entry point.
                 with self.assertRaisesRegex(ValueError, message):
                     _validate_parallel_config(config)
+
+    def test_dspark_accepts_fixed_length_and_rejects_dynamic_verification(self):
+        config = make_kvpp_config()
+        config.speculative_config.method = "dspark"
+        KVPPConfig.from_vllm_config(config).validate(config)
+        config.speculative_config.enable_adaptive_verification = True
+        with self.assertRaisesRegex(ValueError, "adaptive verification"):
+            KVPPConfig.from_vllm_config(config).validate(config)
+        config.speculative_config.enable_adaptive_verification = False
+        config.additional_config["dynamic_spec_config"] = {"method": "dspark"}
+        with self.assertRaisesRegex(ValueError, "dynamic speculative lengths"):
+            KVPPConfig.from_vllm_config(config).validate(config)
 
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_config_factory_keeps_kvpp_enabled(self, _check_config):

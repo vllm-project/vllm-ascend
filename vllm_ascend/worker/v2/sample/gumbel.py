@@ -22,8 +22,6 @@ from collections.abc import Callable
 import torch
 from vllm.triton_utils import tl, triton
 
-from vllm_ascend.utils import vllm_version_is
-
 
 @triton.jit(do_not_specialize=["logits_stride", "vocab_size"])
 def _temperature_kernel(
@@ -245,34 +243,32 @@ def _gumbel_sample(
 
 
 gumbel_sample: Callable[..., torch.Tensor]
-if vllm_version_is("0.28.0"):
-    # Preserve the legacy positional order; #54282 inserted is_drafting on main.
-    gumbel_sample = _gumbel_sample
-else:
 
-    def _gumbel_sample_main(
-        logits: torch.Tensor,
-        expanded_idx_mapping: torch.Tensor,
-        temperature: torch.Tensor,
-        seed: torch.Tensor,
-        pos: torch.Tensor,
-        apply_temperature: bool,
-        is_drafting: bool,
-        logits_cache: torch.Tensor | None = None,
-        logits_cache_col: torch.Tensor | None = None,
-        use_fp64: bool = False,
-    ) -> torch.Tensor:
-        return _gumbel_sample(
-            logits,
-            expanded_idx_mapping,
-            temperature,
-            seed,
-            pos,
-            apply_temperature,
-            logits_cache,
-            logits_cache_col,
-            use_fp64,
-            is_drafting=is_drafting,
-        )
 
-    gumbel_sample = _gumbel_sample_main
+def _gumbel_sample_main(
+    logits: torch.Tensor,
+    expanded_idx_mapping: torch.Tensor,
+    temperature: torch.Tensor,
+    seed: torch.Tensor,
+    pos: torch.Tensor,
+    apply_temperature: bool,
+    is_drafting: bool,
+    logits_cache: torch.Tensor | None = None,
+    logits_cache_col: torch.Tensor | None = None,
+    use_fp64: bool = False,
+) -> torch.Tensor:
+    return _gumbel_sample(
+        logits,
+        expanded_idx_mapping,
+        temperature,
+        seed,
+        pos,
+        apply_temperature,
+        logits_cache,
+        logits_cache_col,
+        use_fp64,
+        is_drafting=is_drafting,
+    )
+
+
+gumbel_sample = _gumbel_sample_main

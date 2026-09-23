@@ -20,11 +20,10 @@
 from __future__ import annotations
 
 import functools
-import importlib.util
 import json
 import math
 import os
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -44,7 +43,6 @@ from vllm_ascend.device.device_config import (  # noqa: F401
     AscendDeviceType,
     check_ascend_device_type,
     get_ascend_device_type,
-    is_310p,
     is_950,
 )
 from vllm_ascend.device.hardware_profile import HardwareCapability, WeightLayoutPolicy, get_current_hardware_profile
@@ -77,7 +75,6 @@ _DYNAMIC_EPLB_BUFFER_SIZE = 100
 _IS_MOE_MODEL = None
 _IS_DRAFTER_MOE_MODEL = None
 _IS_VL_MODEL = None
-_HAS_LAYER_IDX = None
 _HAS_ROPE = None
 _ATNN_CALCULATION_STREAM = None
 _CUSTOM_OP_VENDOR_DIR = "custom_transformer"
@@ -116,6 +113,48 @@ def get_dsv4_compress_ratio(config: Any, layer_idx: int) -> int:
     if compress_ratios is None or layer_idx >= len(compress_ratios):
         return 0
     return compress_ratios[layer_idx]
+
+
+def is_deepseek_v41(hf_config: Any) -> bool:
+    """Identify the released V4.1 config at the model boundary."""
+    model_types = ("deepseek_v41", "deepseek_v41_text")
+    if isinstance(hf_config, dict):
+        return hf_config.get("model_type") in model_types or is_deepseek_v41(hf_config.get("text_config"))
+    # SpeculativeConfig may overwrite the instance model_type for DSpark.
+    # The upstream flattened config class still identifies the V4.1 checkpoint.
+    return (
+        getattr(type(hf_config), "model_type", None) in model_types
+        or getattr(hf_config, "model_type", None) in model_types
+        or (getattr(hf_config, "text_config", None) is not None and is_deepseek_v41(hf_config.text_config))
+    )
+
+
+def normalize_deepseek_v41_config(hf_config: Any) -> Any:
+    """Prepare runtime defaults not supplied by upstream's released config."""
+    for name, default in (("num_hash_layers", 0), ("n_group", 1), ("topk_group", 1)):
+        if not hasattr(hf_config, name):
+            setattr(hf_config, name, default)
+    rope = dict(getattr(hf_config, "rope_parameters", None) or {})
+    for name, value in {
+        "factor": 1.0,
+        "beta_fast": 32,
+        "beta_slow": 1,
+        "original_max_position_embeddings": getattr(hf_config, "max_position_embeddings", 1048576),
+        "rope_theta": getattr(hf_config, "rope_theta", 10000.0),
+    }.items():
+        rope.setdefault(name, value)
+    hf_config.rope_parameters = rope
+    hf_config.image_sentinel_base_id = getattr(hf_config, "image_token_id", 129264)
+    hf_config.image_pad_token_id = hf_config.image_sentinel_base_id + 1
+    supported_rotation = {
+        "value_projection_rotated": True,
+        "value_basis": "quarot_global",
+        "key_and_gate_basis": "original",
+        "runtime_delta_rotation": False,
+    }
+    rotation = getattr(hf_config, "engram_rotation_config", None) or supported_rotation
+    hf_config.engram_rotation_config = dict(rotation)
+    return hf_config
 
 
 def model_uses_kpool_indexer(model_config: Any | None) -> bool:
@@ -601,30 +640,25 @@ def adapt_patch(is_global_patch: bool = False):
         from vllm_ascend.patch import worker  # noqa: F401
 
 
-def setup_ascend_local_comm_res(local_rank: int, kv_transfer_config: Any | None) -> None:
-    """Load the local A5 endpoint config into ASCEND_LOCAL_COMM_RES."""
+def setup_ascend_local_comm_res(user_device_id: int, kv_transfer_config: Any | None) -> None:
+    """Load the physical NPU endpoint config after binding a runtime device.
+
+    user_device_id must be the ordinal passed to torch.npu.set_device, not
+    the vLLM local rank. Endpoint filenames use host physical device IDs.
+    """
     if kv_transfer_config is None:
         return
-
-    visible_devices = os.getenv("ASCEND_RT_VISIBLE_DEVICES")
-    if visible_devices is None:
-        from vllm_ascend.cpu_binding import DeviceInfo
-
-        devices = sorted([int(x) for x in DeviceInfo.get_npu_map_info()])
-    else:
-        devices = [int(x) for x in visible_devices.split(",") if x.strip()]
 
     extra_config = kv_transfer_config.kv_connector_extra_config or {}
     local_comm_res_path = extra_config.get("ascend_local_comm_res_path")
     if not local_comm_res_path:
         return
 
-    if not devices:
-        raise ValueError("No NPU devices found or specified in ASCEND_RT_VISIBLE_DEVICES.")
-    if local_rank < 0 or local_rank >= len(devices):
-        raise ValueError(f"local_rank {local_rank} is out of bounds for the available NPU devices: {devices}")
+    # Import lazily: the platform module also imports utils.
+    from vllm.platforms import current_platform
 
-    local_comm_res_file = os.path.join(local_comm_res_path, f"ub_endpoint_npu_{devices[local_rank]}.json")
+    npu_id = current_platform.visible_device_id_to_physical_device_id(user_device_id)
+    local_comm_res_file = os.path.join(local_comm_res_path, f"ub_endpoint_npu_{npu_id}.json")
     try:
         with open(local_comm_res_file) as f:
             data = json.load(f)
@@ -640,26 +674,6 @@ def setup_ascend_local_comm_res(local_rank: int, kv_transfer_config: Any | None)
     os.environ["ASCEND_LOCAL_COMM_RES"] = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
 
 
-@torch._dynamo.disable
-def _vllm_empty_device_matches_release(target_vllm_version: str) -> bool:
-    """Map untagged empty-device installs onto the matching release lane.
-
-    cpu-ut checks out vLLM by SHA with ``--no-tags`` and builds
-    ``VLLM_TARGET_DEVICE=empty``, so setuptools-scm reports
-    ``0.1.dev1+gSHA.empty`` instead of the tagged ``0.28.0``. Distinguish
-    v0.28.0 from main by where PCP lives: model_executor on 0.28.0, v1 ops
-    after the move on main.
-
-    Disabled under Dynamo: ``importlib.util.find_spec`` is marked skipped and
-    must not be traced when version gates run during torch.compile.
-    """
-    if target_vllm_version != "0.28.0":
-        return False
-    has_legacy_pcp = importlib.util.find_spec("vllm.model_executor.layers.attention.pcp") is not None
-    has_main_pcp = importlib.util.find_spec("vllm.v1.attention.ops.pcp") is not None
-    return has_legacy_pcp and not has_main_pcp
-
-
 @functools.cache
 @torch._dynamo.disable
 def vllm_version_is(target_vllm_version: str):
@@ -670,16 +684,11 @@ def vllm_version_is(target_vllm_version: str):
 
         vllm_version = vllm.__version__
     try:
-        # Strip any PEP 440 local version segment (e.g. "0.28.0+empty" built
+        # Strip any PEP 440 local version segment (e.g. "0.29.0+empty" built
         # with VLLM_TARGET_DEVICE=empty): it is a build artifact and must not
         # change the version identity for `vllm_version_is` comparisons.
-        vllm_version = vllm_version.split("+")[0]
         parsed = Version(vllm_version)
-        if parsed == Version(target_vllm_version):
-            return True
-        if parsed.release[:2] == (0, 1) and parsed.dev is not None:
-            return _vllm_empty_device_matches_release(target_vllm_version)
-        return False
+        return Version(parsed.public) == Version(target_vllm_version)
     except InvalidVersion:
         raise ValueError(
             f"Invalid vllm version {vllm_version} found. A dev version of vllm "
@@ -695,8 +704,6 @@ def get_kv_cache_tensor_layers(kv_cache_tensor) -> list[str]:
     vLLM #51718 renamed the `shared_by` field to `layers` and introduced a
     required `layer_stride` on vLLM main. Gate by release vs main lane.
     """
-    if vllm_version_is("0.28.0"):
-        return kv_cache_tensor.shared_by
     return kv_cache_tensor.layers
 
 
@@ -842,7 +849,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "RoutedExperts": AscendRoutedExperts,
         "GateLinear": AscendGateLinear,
     }
-    if not vllm_version_is("0.28.0"):
+    if not vllm_version_is("0.29.0"):
         from vllm_ascend.ops.kimi_mla import AscendKimiK3MultiHeadLatentAttention
 
         REGISTERED_ASCEND_OPS["KimiK3MultiHeadLatentAttentionWrapper"] = AscendKimiK3MultiHeadLatentAttention
@@ -1022,24 +1029,35 @@ def has_rope(vllm_config: VllmConfig):
     return _HAS_ROPE
 
 
+@contextmanager
+def super_kernel_scope(scope: str, enabled: bool):
+    if not enabled:
+        yield
+        return
+
+    torch.npu.super_kernel_scope_begin(scope)
+    try:
+        yield
+    finally:
+        torch.npu.super_kernel_scope_end(scope)
+
+
 def weak_ref_tensor(tensor: Any) -> Any:
     """
     Create a weak reference to a tensor.
     The new tensor will share the same data as the original tensor,
     but will not keep the original tensor alive.
     """
-    if isinstance(tensor, torch.Tensor):
+    if isinstance(tensor, torch.Tensor) and tensor.device.type == "npu":
         return torch_npu._C._weak_ref_tensor(tensor)
     else:
         return tensor
 
 
-def weak_ref_tensors(
-    tensors: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor],
-) -> torch.Tensor | list[Any] | tuple[Any] | Any:
+def weak_ref_tensors(tensors: Any) -> Any:
     """
-    Convenience function to create weak references to tensors,
-    for single tensor, list of tensors or tuple of tensors.
+    Recursively replace tensors with weak references while preserving containers
+    and non-tensor values.
 
     This function should be used in the following scenario:
     When a tensor is created during graph capture, and it's held by a method
@@ -1051,14 +1069,14 @@ def weak_ref_tensors(
     if isinstance(tensors, torch.Tensor):
         return weak_ref_tensor(tensors)
     if isinstance(tensors, list):
-        return [weak_ref_tensor(t) for t in tensors]
+        return [weak_ref_tensors(tensor) for tensor in tensors]
     if isinstance(tensors, tuple):
-        return tuple(weak_ref_tensor(t) for t in tensors)
-    # For IntermediateTensors used in pipeline parallelism
+        return tuple(weak_ref_tensors(tensor) for tensor in tensors)
+    if isinstance(tensors, dict):
+        return {key: weak_ref_tensors(tensor) for key, tensor in tensors.items()}
     if isinstance(tensors, IntermediateTensors):
-        ret = IntermediateTensors({key: weak_ref_tensor(val) for key, val in tensors.tensors.items()})
-        return ret
-    raise ValueError("Invalid type for tensors")
+        return IntermediateTensors(weak_ref_tensors(tensors.tensors))
+    return tensors
 
 
 def npu_stream_switch(target_stream: torch.npu.Stream, *, enabled: bool = True):
@@ -1175,8 +1193,8 @@ def _compute_potential_max_tokens(vllm_config) -> int:
         if potential_max_tokens != compilation_config.max_cudagraph_capture_size:
             logger.warning_once(
                 "The max_cudagraph_capture_size (%d) is smaller than the potential max tokens required for "
-                "decode (%d). This may lead to suboptimal performance. Consider adjusting"
-                "max_cudagraph_capture_size or scheduler_config (max_num_batched_tokens or max_num_seqs)"
+                "decode (%d). This may lead to suboptimal performance. Consider adjusting "
+                "max_cudagraph_capture_size or scheduler_config (max_num_batched_tokens or max_num_seqs) "
                 "to ensure max_cudagraph_capture_size can accommodate the decode workload. For more details, "
                 "see the issue #8240(https://github.com/vllm-project/vllm-ascend/issues/8240).",
                 compilation_config.max_cudagraph_capture_size,
@@ -1270,11 +1288,7 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
 def has_layer_idx(model_instance: torch.nn.Module) -> bool:
     if model_instance is None:
         return False
-
-    global _HAS_LAYER_IDX
-    if _HAS_LAYER_IDX is None:
-        _HAS_LAYER_IDX = hasattr(model_instance, "model") and hasattr(model_instance.model, "start_layer")
-    return _HAS_LAYER_IDX
+    return hasattr(model_instance, "model") and hasattr(model_instance.model, "start_layer")
 
 
 def refresh_block_size(vllm_config):
@@ -1749,3 +1763,11 @@ def get_rotation_matrix(rotation_path: Path | None) -> torch.Tensor:
             rotation_path,
         )
         raise e
+
+
+def use_updatable_graph(
+    attn_backend,
+) -> bool:
+    from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+
+    return attn_backend is not None and issubclass(attn_backend, AscendAttentionBackend)

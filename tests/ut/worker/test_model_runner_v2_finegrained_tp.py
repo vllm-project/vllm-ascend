@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, create_autospec, patch
 
 import pytest
 import torch
+from vllm.v1.worker.gpu.eplb_utils import step_eplb_after
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import RejectionSampler
@@ -27,6 +28,7 @@ def _make_runner(max_num_reqs=8, decode_query_len=2, vocab=6):
     a bare MagicMock.
     """
     runner = object.__new__(NPUModelRunner)
+    runner.adaptive_verification = None
     runner.max_num_reqs = max_num_reqs
     runner.decode_query_len = decode_query_len
     runner.model = MagicMock()
@@ -183,63 +185,56 @@ def test_dispatch_tail_canary_matches_upstream_sample(with_grammar, with_draft):
     assert override_calls == upstream_calls
 
 
-def test_dummy_run_joins_lmhead_collectives_at_capacity():
-    """Idle DP ranks must join the LM-head collectives on every dummy batch.
-
-    Regression test for the PD-disaggregation hang: with lmhead TP the LM-head
-    all_gather spans the whole group, but the V2 dummy path only runs the
-    model forward, so a real sample() on the rank owning requests waited
-    forever. The override must call compute_logits exactly once with
-    zero-indexed rows at the same capacity the sample() override pads to.
-    """
+@pytest.mark.parametrize(
+    "lmhead_enabled,is_profile,has_hidden_states,skip_eplb",
+    [
+        (True, False, True, False),
+        (False, False, True, False),
+        (True, True, True, False),
+        (True, False, False, False),
+        (True, False, True, True),
+    ],
+)
+def test_dummy_lmhead_collective_precedes_eplb(lmhead_enabled, is_profile, has_hidden_states, skip_eplb):
+    """An idle rank must join LM-head TP before its EPLB step can block it."""
     runner = _make_runner(max_num_reqs=8, decode_query_len=2)  # capacity 16
     hidden_states = torch.randn(10, 6)
     sample_hidden = torch.randn(3, 6)
+    runner.eplb = MagicMock()
+    events = []
+    runner.eplb.step.side_effect = lambda **kwargs: events.append("eplb")
+
+    @step_eplb_after(is_dummy=True)
+    def parent_dummy_run(self, *args, **kwargs):
+        assert kwargs["skip_eplb"] is True
+        events.append("forward")
+        return (hidden_states, sample_hidden) if has_hidden_states else (None, None)
+
+    def compute_logits(inputs):
+        events.append("lmhead")
+        return torch.zeros(inputs.shape[0], 6)
+
+    runner.model.compute_logits.side_effect = compute_logits
 
     with (
-        patch("vllm_ascend.worker.v2.model_runner.lmhead_tp_enable", return_value=True),
-        patch.object(NPUModelRunner.__bases__[0], "_dummy_run") as super_dummy,
+        patch("vllm_ascend.worker.v2.model_runner.lmhead_tp_enable", return_value=lmhead_enabled),
+        patch.object(GPUModelRunner, "_dummy_run", parent_dummy_run),
     ):
-        super_dummy.return_value = (hidden_states, sample_hidden)
-        result = runner._dummy_run(4, uniform_decode=True)
+        result = runner._dummy_run(4, uniform_decode=True, is_profile=is_profile, skip_eplb=skip_eplb)
 
-    super_dummy.assert_called_once()
-    assert runner.model.compute_logits.call_count == 1
-    dummy_input = runner.model.compute_logits.call_args.args[0]
-    # zero-indexed rows gathered up to the group-agreed capacity
-    assert dummy_input.shape == (16, 6)
-    torch.testing.assert_close(dummy_input, hidden_states[torch.zeros(16, dtype=torch.long)])
-    # return contract is a pure passthrough of the parent's values
-    assert result == (hidden_states, sample_hidden)
-
-
-def test_dummy_run_lmhead_disabled_or_profile_skips_collectives():
-    """Feature off, profiling runs, and non-last PP ranks must not add dummy
-    compute_logits calls (the profile dummy sampler already runs
-    compute_logits on every rank; non-last PP ranks never produce logits)."""
-    runner = _make_runner()
-    hidden_states = torch.randn(10, 6)
-
-    with (
-        patch("vllm_ascend.worker.v2.model_runner.lmhead_tp_enable", return_value=False),
-        patch.object(NPUModelRunner.__bases__[0], "_dummy_run") as super_dummy,
-    ):
-        super_dummy.return_value = (hidden_states, None)
-        runner._dummy_run(4)
-    runner.model.compute_logits.assert_not_called()
-
-    with (
-        patch("vllm_ascend.worker.v2.model_runner.lmhead_tp_enable", return_value=True),
-        patch.object(NPUModelRunner.__bases__[0], "_dummy_run") as super_dummy,
-    ):
-        super_dummy.return_value = (hidden_states, None)
-        runner._dummy_run(4, is_profile=True)
-    runner.model.compute_logits.assert_not_called()
-
-    with (
-        patch("vllm_ascend.worker.v2.model_runner.lmhead_tp_enable", return_value=True),
-        patch.object(NPUModelRunner.__bases__[0], "_dummy_run") as super_dummy,
-    ):
-        super_dummy.return_value = (None, None)
-        runner._dummy_run(4)
-    runner.model.compute_logits.assert_not_called()
+    expected_events = ["forward"]
+    if lmhead_enabled and not is_profile and has_hidden_states:
+        expected_events.append("lmhead")
+    if not skip_eplb:
+        expected_events.append("eplb")
+        runner.eplb.step.assert_called_once_with(is_dummy=True, is_profile=is_profile)
+    else:
+        runner.eplb.step.assert_not_called()
+    assert events == expected_events
+    assert result == ((hidden_states, sample_hidden) if has_hidden_states else (None, None))
+    if lmhead_enabled and not is_profile and has_hidden_states:
+        dummy_input = runner.model.compute_logits.call_args.args[0]
+        assert dummy_input.shape == (16, 6)
+        torch.testing.assert_close(dummy_input, hidden_states[torch.zeros(16, dtype=torch.long)])
+    else:
+        runner.model.compute_logits.assert_not_called()

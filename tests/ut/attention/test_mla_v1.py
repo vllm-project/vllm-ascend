@@ -30,6 +30,31 @@ from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import AscendW8A8MXFP8Dyna
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ
 
 
+@pytest.mark.parametrize("num_tokens", [1, 3])
+@pytest.mark.parametrize(
+    "num_heads,kv_lora_rank",
+    [(1, 65535), (1, 65536), (1, 65537), (127, 512), (128, 512), (129, 512)],
+)
+def test_v_up_proj_transpose_bmm_limits(num_tokens, num_heads, kv_lora_rank):
+    impl = AscendMLAImpl.__new__(AscendMLAImpl)
+    impl.num_heads = num_heads
+    impl.kv_lora_rank = kv_lora_rank
+    impl.v_head_dim = 2
+    impl.W_UV = torch.randn(num_heads, kv_lora_rank, impl.v_head_dim)
+    x = torch.randn(num_tokens, num_heads, kv_lora_rank)
+    expected = torch.bmm(x.transpose(0, 1), impl.W_UV).transpose(0, 1).reshape(num_tokens, -1)
+
+    def fused_bmm(input, weight, *, perm_x1=(0, 1, 2), perm_y):
+        return torch.bmm(input.permute(perm_x1), weight).permute(perm_y)
+
+    with patch("vllm_ascend.attention.mla_v1.torch_npu.npu_transpose_batchmatmul", side_effect=fused_bmm) as fused:
+        result = impl._v_up_proj_batch_major(x)
+        use_fused = num_heads * kv_lora_rank < 65536
+
+    assert fused.call_count == int(use_fused)
+    torch.testing.assert_close(result, expected)
+
+
 @pytest.mark.parametrize("use_rope", [False, True])
 @pytest.mark.parametrize("weight_quant_mode", [0, 3])
 def test_mla_prolog_k3_and_cann_dispatch_are_isolated(use_rope, weight_quant_mode):
