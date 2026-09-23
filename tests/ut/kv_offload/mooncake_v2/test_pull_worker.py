@@ -805,6 +805,10 @@ def test_attention_address_generation_handles_partial_head_overlap() -> None:
     thread = make_thread(
         tp_size=1,
         tp_rank=0,
+        # The model-level value may describe the main model while this cache
+        # belongs to an MTP model. FA head topology must come from the
+        # registered HND cache shapes instead.
+        num_key_value_heads=64,
         kv_cache_specs=[make_full_spec(num_kv_heads=4)],
         block_shapes=[[(4, 16, 8)]],
         block_lens=[[128]],
@@ -1526,6 +1530,24 @@ def test_infer_total_kv_heads_across_tp_and_dcp_strategies(
             fixed_total_num_kv_heads=fixed_heads,
         )
         == expected_heads
+    )
+
+
+def test_infer_total_kv_heads_keeps_tp_replicas_when_dcp_spans_only_pcp() -> None:
+    thread = make_thread(tp_size=8, pcp_size=2, dcp_size=2)
+
+    assert (
+        thread._infer_total_num_kv_heads(
+            local_num_kv_heads=1,
+            remote_num_kv_heads=2,
+            local_pcp_size=2,
+            remote_pcp_size=2,
+            remote_tp_size=2,
+            local_dcp_size=2,
+            remote_dcp_size=1,
+            fixed_total_num_kv_heads=None,
+        )
+        == 4
     )
 
 

@@ -354,7 +354,6 @@ class MooncakePullRecvingThread(threading.Thread):
             local_dcp_size = self.dcp_size
             local_num_kv_heads = self.block_shapes[local_layer_index][0][0]
             remote_num_kv_heads = remote_metadata.block_shapes[remote_layer_index][0][0]
-            fixed_total_num_kv_heads = self.num_key_value_heads or None
         else:
             raise NotImplementedError(f"Mooncake pull has no TP grouping rule for KV cache spec {type(spec).__name__}")
 
@@ -425,9 +424,9 @@ class MooncakePullRecvingThread(threading.Thread):
             inferred_total_heads.add(local_num_kv_heads * self.tp_size)
         if remote_num_kv_heads > 1:
             inferred_total_heads.add(remote_num_kv_heads * remote_tp_size)
-        if local_dcp_size > 1:
+        if local_dcp_tp_size > 1:
             inferred_total_heads.add(local_head_tp_size)
-        if remote_dcp_size > 1:
+        if remote_dcp_tp_size > 1:
             inferred_total_heads.add(remote_head_tp_size)
 
         if not inferred_total_heads:
@@ -1216,7 +1215,7 @@ class MooncakePullRecvingThread(threading.Thread):
             remote_tp_size=remote_tp_size,
             local_dcp_size=local_attention_dcp_size,
             remote_dcp_size=remote_attention_dcp_size,
-            fixed_total_num_kv_heads=(self.num_key_value_heads if isinstance(spec, FullAttentionSpec) else None),
+            fixed_total_num_kv_heads=None,
         )
         local_dcp_tp_size = 1 if local_attention_dcp_size == 1 else local_attention_dcp_size // self.pcp_size
         remote_dcp_tp_size = 1 if remote_attention_dcp_size == 1 else remote_attention_dcp_size // remote_pcp_size
