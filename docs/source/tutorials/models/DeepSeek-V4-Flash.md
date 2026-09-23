@@ -1130,7 +1130,7 @@ Before you start, please:
 
 #### 5.2.3 Ascend 950DT Series PD Separation Deployment
 
-This section shows an intra-server 1P1D deployment on one Ascend 950DT server (96GB × 8). The Prefill instance uses NPUs 0-3 with `DP4/TP1`, and the Decode instance uses NPUs 4-7 with `DP4/TP1`. You can add Prefill or Decode instances as needed based on the workload's input/output characteristics and service requirements. An expert-parallel size (`ep_size`) of 4 is recommended for each instance. The `prefill` and `decode` parallel settings in `--kv-transfer-config` must match the actual engine settings after scaling.
+This section shows an 1P1D deployment on two Ascend 950DT server (96GB × 8). The Prefill instance uses `DP1/TP8` with dsa_cp enabled, and the Decode instance uses `DP8/TP1`. You can add Prefill or Decode instances as needed based on the workload's input/output characteristics and service requirements. An expert-parallel size (`ep_size`) of 8 is recommended for each instance. The `prefill` and `decode` parallel settings in `--kv-transfer-config` must match the actual engine settings after scaling.
 
 Before starting the service, mount `/etc/hixlep/` into the container and replace `nic_name`, `local_ip`, and the model path with values from your environment.
 
@@ -1158,24 +1158,24 @@ Before starting the service, mount `/etc/hixlep/` into the container and replace
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=10
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
-    vllm serve /root/.cache/DeepSeek-V4-Flash-0731 \
+    vllm serve /mnt/share/weight/DeepSeek-V4-Flash-0731  \
         --host $local_ip \
         --port 8000 \
-        --data-parallel-size 4 \
+        --tensor-parallel-size 8 \
         --data-parallel-address $local_ip \
-        --data-parallel-rpc-port 12321 \
-        --tensor-parallel-size 1 \
-        --max-model-len 1048576 \
-        --max-num-batched-tokens 3072 \
-        --served-model-name dsv4 \
+        --data-parallel-rpc-port 12325 \
+        --max_model_len 1048576 \
+        --max-num-batched-tokens 8192 \
+        --served-model-name dsv \
         --gpu-memory-utilization 0.85 \
         --enable-expert-parallel \
         --async-scheduling \
         --max-num-seqs 8 \
         --block-size 32 \
-        --api-server-count 1 \
+        --enable-prefix-caching \
+        --api_server_count 1 \
         --tokenizer-mode deepseek_v4 \
         --tool-call-parser deepseek_v4 \
         --enable-auto-tool-choice \
@@ -1183,7 +1183,8 @@ Before starting the service, mount `/etc/hixlep/` into the container and replace
         --trust-remote-code \
         --enforce-eager \
         --no-disable-hybrid-kv-cache-manager \
-        --speculative-config '{"num_speculative_tokens": 5, "method": "dspark"}' \
+        --speculative-config '{"num_speculative_tokens": 5,"method": "dspark"}' \
+        --profiler-config '{"profiler": "torch", "torch_profiler_dir": "/home/c30047037/vllm_profile", "torch_profiler_with_stack": false}' \
         --kv-transfer-config \
         '{"kv_connector": "MooncakeHybridConnector",
           "kv_role": "kv_producer",
@@ -1191,17 +1192,17 @@ Before starting the service, mount `/etc/hixlep/` into the container and replace
           "engine_id": "1",
           "kv_connector_extra_config": {
             "prefill": {
-              "dp_size": 4,
-              "tp_size": 1
+              "dp_size": 1,
+              "tp_size": 8
             },
             "decode": {
-              "dp_size": 4,
+              "dp_size": 8,
               "tp_size": 1
             },
             "ascend_local_comm_res_path": "/etc/hixlep"
           }
         }' \
-        --additional-config '{"enable_cpu_binding": true", multistream_overlap_shared_expert": true, "enable_shared_expert_dp":true}'
+        --additional-config '{"enable_cpu_binding": true, multistream_overlap_shared_expert": true, "enable_shared_expert_dp":true, "enable_dsa_cp": true}'
     ```
 
 2. Prepare `run_decode.sh`.
@@ -1228,17 +1229,17 @@ Before starting the service, mount `/etc/hixlep/` into the container and replace
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=10
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export ASCEND_RT_VISIBLE_DEVICES=4,5,6,7
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
     vllm serve /root/.cache/DeepSeek-V4-Flash-0731 \
         --host $local_ip \
         --port 8001 \
-        --data-parallel-size 4 \
+        --data-parallel-size 8 \
         --data-parallel-address $local_ip \
         --data-parallel-rpc-port 12325 \
         --tensor-parallel-size 1 \
         --max-model-len 1048576 \
-        --max-num-batched-tokens 256 \
+        --max-num-batched-tokens 1024 \
         --served-model-name dsv4 \
         --gpu-memory-utilization 0.92 \
         --enable-expert-parallel \
@@ -1261,11 +1262,11 @@ Before starting the service, mount `/etc/hixlep/` into the container and replace
           "engine_id": "1",
           "kv_connector_extra_config": {
             "prefill": {
-              "dp_size": 4,
-              "tp_size": 1
+              "dp_size": 1,
+              "tp_size": 8
             },
             "decode": {
-              "dp_size": 4,
+              "dp_size": 8,
               "tp_size": 1
             },
             "ascend_local_comm_res_path": "/etc/hixlep"
