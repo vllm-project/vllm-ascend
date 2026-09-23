@@ -14,18 +14,18 @@ config:
     port_start: 7100
     dp_rpc_port: 13321
     dp_size: 8
-    dp_size_local: 4
+    dp_size_local: 8
     dp_rank_start: 0
-    tp_size: 4
+    tp_size: 2
     dp_address: "${NODE_0_IP}"
 
   - node_index: 1
     port_start: 7100
     dp_rpc_port: 13321
     dp_size: 8
-    dp_size_local: 4
-    dp_rank_start: 4
-    tp_size: 4
+    dp_size_local: 8
+    dp_rank_start: 0
+    tp_size: 2
     dp_address: "${NODE_1_IP}"
 
   - node_index: 2
