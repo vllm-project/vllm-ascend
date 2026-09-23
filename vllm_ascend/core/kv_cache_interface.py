@@ -11,7 +11,6 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, SlidingWindowManager
 from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
     FullAttentionSpec,
     KVCacheSpec,
     MambaSpec,
@@ -23,6 +22,9 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 from vllm_ascend.utils import vllm_version_is
+
+if not vllm_version_is("0.28.0"):
+    from vllm.v1.kv_cache_interface import CircularBufferSpec
 
 
 def get_kv_cache_compression_ratio(kv_cache_spec: KVCacheSpec) -> int:
@@ -52,7 +54,9 @@ def is_circular_kv_cache_spec(kv_cache_spec: KVCacheSpec) -> bool:
     if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
         specs = tuple(kv_cache_spec.kv_cache_specs.values())
         return bool(specs) and all(is_circular_kv_cache_spec(spec) for spec in specs)
-    return isinstance(kv_cache_spec, CircularBufferSpec) or getattr(kv_cache_spec, "is_circular", False)
+    if not vllm_version_is("0.28.0") and isinstance(kv_cache_spec, CircularBufferSpec):
+        return True
+    return getattr(kv_cache_spec, "is_circular", False)
 
 
 def is_prefix_cacheable(kv_cache_spec: KVCacheSpec) -> bool:
