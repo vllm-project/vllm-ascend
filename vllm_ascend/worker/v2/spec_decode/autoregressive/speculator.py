@@ -17,7 +17,6 @@
 # This file is a part of the vllm-ascend project.
 #
 import logging
-from collections.abc import Mapping
 from contextlib import contextmanager
 from copy import copy
 from typing import TYPE_CHECKING, Any
@@ -498,7 +497,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         seq_lens_cpu_upper_bound: torch.Tensor,
         step: int,
         num_query_per_req: int = 1,
-        causal: bool | Mapping[int, bool] = True,
+        causal: bool = True,
         query_start_loc_np: np.ndarray | None = None,
         dcp_local_seq_lens: torch.Tensor | None = None,
     ) -> dict[str, Any] | None:
