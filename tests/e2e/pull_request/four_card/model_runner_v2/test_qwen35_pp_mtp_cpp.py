@@ -1,5 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
+"""CPP-enabled variant of test_qwen35_pp_mtp.py.
+
+This file is the chunk pipeline parallel (profiling_chunk_config) companion
+to tests/e2e/pull_request/four_card/model_runner_v2/test_qwen35_pp_mtp.py.
+The two files are intentionally kept separate so the base MTP e2e case and
+the CPP e2e case can fail independently without affecting each other.
+"""
 
 import json
 import os
@@ -25,7 +32,7 @@ MAX_BATCHED_TOKENS = 16384
     graph_mode="full_decode_only",
 )
 @wait_until_npu_memory_free()
-def test_qwen35_pp_mtp_full_decode_only() -> None:
+def test_qwen35_pp_mtp_cpp_full_decode_only() -> None:
     port = get_open_port()
     server_args = [
         "--trust-remote-code",
@@ -55,7 +62,10 @@ def test_qwen35_pp_mtp_full_decode_only() -> None:
         "--compilation-config",
         json.dumps({"mode": 3, "cudagraph_mode": "FULL_DECODE_ONLY"}),
         "--additional-config",
-        json.dumps({"enable_cpu_binding": True}),
+        json.dumps({
+            "enable_cpu_binding": True,
+            "scheduler_config": {"profiling_chunk_config": {"enabled": True}},
+        }),
         "--port",
         str(port),
     ]
