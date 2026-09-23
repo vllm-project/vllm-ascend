@@ -466,6 +466,27 @@ class TestStairLoadStatistics(unittest.TestCase):
         self.assertTrue(all(len(set(rank)) == len(rank) for rank in first.rank_expert_ids.tolist()))
         np.testing.assert_array_equal(StairEplbPolicy.placement_replica_counts(first.rank_expert_ids, 3), [2, 1, 1])
 
+    def test_lpt_placement_supports_zero_redundancy_three_rank_cycle(self):
+        current = np.array([[0, 1], [2, 3], [4, 5]])
+
+        placement = StairEplbPolicy.lpt_placement(
+            np.array([19.0, 14.0, 8.0, 5.0, 21.0, 22.0]),
+            np.zeros(6),
+            np.zeros((6, 6)),
+            np.ones(6, dtype=np.int64),
+            num_ranks=3,
+            z_score=0.0,
+            current_rank_expert_ids=current,
+            rank_node_ids=np.zeros(3, dtype=np.int64),
+            rank_transfer_limit=1,
+            cross_node_transfer_limit=1,
+            backtrack_limit=32,
+        )
+
+        np.testing.assert_array_equal(placement.rank_expert_ids, [[5, 1], [2, 0], [4, 3]])
+        remote = placement.source_rank_ids != np.arange(3)[:, None]
+        np.testing.assert_array_equal(placement.source_rank_ids[remote], [2, 0, 1])
+
     def test_lpt_placement_rejects_invalid_covariance_shape(self):
         with self.assertRaises(ValueError):
             StairEplbPolicy.lpt_placement(
