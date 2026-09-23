@@ -876,6 +876,8 @@ def test_main_attention_descriptor_allocates_private_kv_per_layer() -> None:
 def test_model_state_uses_greedy_sampler() -> None:
     model_state = object.__new__(Ascend310PModelState)
     model_state.rope_state = None
+    # AscendModelState.prepare_inputs probes the engram hook via self.model.
+    model_state.model = SimpleNamespace()
 
     model_inputs = model_state.prepare_inputs(SimpleNamespace(), req_states=None)
     sampler, speculator = model_state.custom_sampler(object())
