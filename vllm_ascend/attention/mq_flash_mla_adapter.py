@@ -139,7 +139,7 @@ def mq_attn_adapter(q, kw):
         # Inside CUDA-graph capture the DSpark draft window from kwargs is
         # equivalent: the sliding window clips at the sequence start, so a
         # short sequence gets full coverage either way.
-        if not torch.cuda.is_current_stream_capturing() and _fullcov_sparse_indices(osi, seqused):
+        if not torch.npu.is_current_stream_capturing() and _fullcov_sparse_indices(osi, seqused):
             win_r = int(kw["cu_seqlens_q"][-1].item()) - 1
         osi = None
 
