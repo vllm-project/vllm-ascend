@@ -31,7 +31,7 @@ def _speculator(monkeypatch, kind, architecture, width, padded, step, use_dcp=Tr
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=8 if use_dcp else 1,
             cp_kv_cache_interleave_size=4,
-        )
+        ),
     )
     manager = object.__new__(DCPManager)
     manager.dcp_world_size = config.parallel_config.decode_context_parallel_size
@@ -100,9 +100,7 @@ def _speculator(monkeypatch, kind, architecture, width, padded, step, use_dcp=Tr
     [("MLA", 2, 3, False), ("MLA", 4, 4, True), ("SFA", 4, 3, False), ("SFA", 2, 4, True)],
 )
 def test_dspark_common_dcp_preparation(monkeypatch, architecture, padded, width, full_rebuild):
-    spec, original_target, device_lengths = _speculator(
-        monkeypatch, "dspark", architecture, width, padded, width
-    )
+    spec, original_target, device_lengths = _speculator(monkeypatch, "dspark", architecture, width, padded, width)
     if full_rebuild:
         result = spec.build_draft_attn_metadatas(padded, spec.input_batch.seq_lens_cpu_upper_bound)[0]
     else:
@@ -123,18 +121,12 @@ def test_dspark_common_dcp_preparation(monkeypatch, architecture, padded, width,
     assert common.causal is False
     assert torch.equal(spec.target_input_buffers.seq_lens_cpu, original_target)
     if architecture == "MLA":
-        assert result["draft.layer"].decode.actual_seq_lengths_q == [
-            (i + 1) * width for i in range(padded)
-        ]
+        assert result["draft.layer"].decode.actual_seq_lengths_q == [(i + 1) * width for i in range(padded)]
 
 
-@pytest.mark.parametrize(
-    "architecture,padded,step", [("MLA", 4, 0), ("MLA", 2, 3), ("SFA", 2, 0), ("SFA", 4, 1)]
-)
+@pytest.mark.parametrize("architecture,padded,step", [("MLA", 4, 0), ("MLA", 2, 3), ("SFA", 2, 0), ("SFA", 4, 1)])
 def test_mtp_common_dcp_preparation(monkeypatch, architecture, padded, step):
-    spec, original_target, device_lengths = _speculator(
-        monkeypatch, "mtp", architecture, 1, padded, step
-    )
+    spec, original_target, device_lengths = _speculator(monkeypatch, "mtp", architecture, 1, padded, step)
     supplied_device_local = _local(device_lengths.tolist())
     with attn_utils.build_attn_metadata_wrapper():
         result = spec._build_draft_attn_metadata(
@@ -159,9 +151,7 @@ def test_mtp_common_dcp_preparation(monkeypatch, architecture, padded, step):
 @pytest.mark.parametrize("architecture", ["MLA", "SFA"])
 def test_non_dcp_preserves_existing_length_fallback(monkeypatch, kind, architecture, full_rebuild):
     width = 3 if kind == "dspark" else 1
-    spec, original_target, device_lengths = _speculator(
-        monkeypatch, kind, architecture, width, 2, width, use_dcp=False
-    )
+    spec, original_target, device_lengths = _speculator(monkeypatch, kind, architecture, width, 2, width, use_dcp=False)
 
     def unexpected(*args, **kwargs):
         raise AssertionError("Non-DCP must not enter DCP CPU preparation")

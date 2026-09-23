@@ -239,9 +239,7 @@ def _prepare_dflash_inputs_kernel_ascend(
             mask=is_valid_ctx,
             other=0,
         ).to(tl.int64)
-        local_ctx_slot = cp_local_slot(
-            ctx_pos, ctx_block_id, block_size, cp_rank, CP_SIZE, CP_INTERLEAVE, PAD_SLOT_ID
-        )
+        local_ctx_slot = cp_local_slot(ctx_pos, ctx_block_id, block_size, cp_rank, CP_SIZE, CP_INTERLEAVE, PAD_SLOT_ID)
         ctx_slot = tl.where(is_valid_ctx & (ctx_block_id != 0), local_ctx_slot, PAD_SLOT_ID)
         tl.store(out_context_positions_ptr + ctx_pos_idx, ctx_pos)
         tl.store(out_context_slot_mapping_ptr + ctx_pos_idx, ctx_slot)
@@ -258,9 +256,7 @@ def _prepare_dflash_inputs_kernel_ascend(
         q_block_num = query_pos // (block_size * CP_SIZE)
         q_block_num = tl.minimum(q_block_num, block_table_stride - 1)
         q_block_id = tl.load(block_table_ptr + req_idx * block_table_stride + q_block_num).to(tl.int64)
-        local_q_slot = cp_local_slot(
-            query_pos, q_block_id, block_size, cp_rank, CP_SIZE, CP_INTERLEAVE, PAD_SLOT_ID
-        )
+        local_q_slot = cp_local_slot(query_pos, q_block_id, block_size, cp_rank, CP_SIZE, CP_INTERLEAVE, PAD_SLOT_ID)
         q_slot = tl.where(q_block_id != 0, local_q_slot, PAD_SLOT_ID)
 
         tl.store(out_input_ids_ptr + query_idx, input_id)

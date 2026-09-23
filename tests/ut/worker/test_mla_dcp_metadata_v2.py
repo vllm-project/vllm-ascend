@@ -22,9 +22,7 @@ def _manager(size, rank, interleave):
     manager = object.__new__(DCPManager)
     manager.dcp_world_size = size
     manager.dcp_world_rank = rank
-    manager.vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=interleave)
-    )
+    manager.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=interleave))
     return manager
 
 
@@ -45,9 +43,7 @@ def test_common_lengths_cover_all_ranks_and_preserve_global(size, interleave, us
             dcp_local_seq_lens_cpu=torch.full_like(lengths, -1),
         )
         _manager(size, rank, interleave).prepare_common_attn_metadata(common)
-        assert common.dcp_local_seq_lens.tolist() == _local_lengths(
-            (lengths + 3).tolist(), size, rank, interleave
-        )
+        assert common.dcp_local_seq_lens.tolist() == _local_lengths((lengths + 3).tolist(), size, rank, interleave)
         local = common.dcp_local_seq_lens_cpu
         assert local.tolist() == _local_lengths(lengths.tolist(), size, rank, interleave)
         rank_lengths.append(local)
@@ -60,9 +56,7 @@ def test_common_lengths_cover_all_ranks_and_preserve_global(size, interleave, us
 @pytest.mark.parametrize("use_dcp", [False, True])
 def test_v2_common_lengths_are_shared_by_groups(monkeypatch, for_capture, use_dcp):
     config = SimpleNamespace(
-        parallel_config=SimpleNamespace(
-            decode_context_parallel_size=8 if use_dcp else 1, cp_kv_cache_interleave_size=4
-        )
+        parallel_config=SimpleNamespace(decode_context_parallel_size=8 if use_dcp else 1, cp_kv_cache_interleave_size=4)
     )
     monkeypatch.setattr(attn_utils, "get_dcp_group", lambda: SimpleNamespace(rank_in_group=1))
 
@@ -74,8 +68,7 @@ def test_v2_common_lengths_are_shared_by_groups(monkeypatch, for_capture, use_dc
             return common_attn_metadata
 
     groups = [
-        [SimpleNamespace(get_metadata_builder=lambda _: Builder(), layer_names=[name])]
-        for name in ("layer0", "layer1")
+        [SimpleNamespace(get_metadata_builder=lambda _: Builder(), layer_names=[name])] for name in ("layer0", "layer1")
     ]
     lengths = torch.tensor([37, 128, 0, 0], dtype=torch.int32)
     device_local = torch.tensor([5, 16, 0, 0], dtype=torch.int32) if use_dcp else None
@@ -117,9 +110,7 @@ def test_full_draft_steps_refresh_local_lengths_without_aliasing(size, rank, int
     speculator.max_model_len = 128
     speculator.dcp_manager = _manager(size, rank, interleave)
     speculator.draft_vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(
-            decode_context_parallel_size=size, cp_kv_cache_interleave_size=interleave
-        )
+        parallel_config=SimpleNamespace(decode_context_parallel_size=size, cp_kv_cache_interleave_size=interleave)
     )
     target = torch.tensor([7, 127, 0, 0], dtype=torch.int32)
     speculator._get_seq_lens_cpu = lambda _: target
@@ -132,9 +123,7 @@ def test_full_draft_steps_refresh_local_lengths_without_aliasing(size, rank, int
             "prepare_dcp_local_seq_lens_cpu",
             wraps=speculator.dcp_manager.prepare_dcp_local_seq_lens_cpu,
         ) as partition:
-            speculator._update_decode_attn_metadata(
-                {"layer0": metadata, "layer1": metadata}, step, num_reqs=2
-            )
+            speculator._update_decode_attn_metadata({"layer0": metadata, "layer1": metadata}, step, num_reqs=2)
         partition.assert_called_once()
         metadata_steps.append(metadata)
 
@@ -142,12 +131,8 @@ def test_full_draft_steps_refresh_local_lengths_without_aliasing(size, rank, int
         lengths = [7 + step, 128, 0, 0]
         assert metadata.seq_lens_cpu.tolist() == lengths
         assert metadata.decode.cp_seq_len == _local_lengths(lengths, size, rank, interleave)
-        assert metadata.decode.cp_history_seq_len == _local_lengths(
-            [6 + step, 127, 0, 0], size, rank, interleave
-        )
+        assert metadata.decode.cp_history_seq_len == _local_lengths([6 + step, 127, 0, 0], size, rank, interleave)
     assert target.tolist() == [7, 127, 0, 0]
-
-
 
 
 def test_draft_factory_forwards_cpu_lengths_and_explicit_config(monkeypatch):

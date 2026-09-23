@@ -35,10 +35,10 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
 from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
 from vllm_ascend.utils import vllm_version_is
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage, DeviceMetadataTask
 
@@ -420,9 +420,7 @@ class TestDSparkDraftQueryPhase(_DSparkProposerTestBase):
         )
         proposer.dcp_size = 8
         proposer.dcp_rank = 1
-        proposer.vllm_config = SimpleNamespace(
-            parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=interleave)
-        )
+        proposer.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=interleave))
         primary = proposer.draft_attn_groups[0]
         primary.kv_cache_spec = MagicMock(spec=FullAttentionSpec if backend == "gqa" else AscendMLAAttentionSpec)
         if backend in ("sfa", "mixed"):
@@ -467,9 +465,12 @@ class TestDSparkDraftQueryPhase(_DSparkProposerTestBase):
         assert cad.query_start_loc_cpu.tolist() == [0, width, 2 * width]
         assert extra is None
         assert stale_target.max_query_len == 23
-        assert split_decodes_and_prefills(
-            cad, decode_threshold=width, treat_short_extends_as_decodes=False
-        ) == (2, 0, 2 * width, 0)
+        assert split_decodes_and_prefills(cad, decode_threshold=width, treat_short_extends_as_decodes=False) == (
+            2,
+            0,
+            2 * width,
+            0,
+        )
         if backend in ("gqa", "mixed"):
             legacy.assert_called_once_with(cad)
             metadata = cad.context_parallel_metadata
