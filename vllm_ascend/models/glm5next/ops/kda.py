@@ -4,9 +4,9 @@
 
 import torch
 
-from vllm_ascend.models.glm5next.ops.output_writeback import write_recurrent_output
 from vllm_ascend.models.glm5next.ops.state_ops import gather_initial_states, scatter_states
 from vllm_ascend.ops.kda import run_chunk_kda, run_recurrent_kda
+from vllm_ascend.ops.triton.kda.output_writeback import write_recurrent_output
 
 KDA_MAX_RECURRENT_TOKENS = 8
 

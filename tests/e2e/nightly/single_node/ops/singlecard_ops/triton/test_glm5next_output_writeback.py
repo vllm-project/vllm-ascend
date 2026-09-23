@@ -5,7 +5,7 @@ import pytest
 import torch
 import torch_npu  # noqa: F401
 
-from vllm_ascend.models.glm5next.ops.output_writeback import write_recurrent_output
+from vllm_ascend.ops.triton.kda.output_writeback import write_recurrent_output
 
 
 @pytest.mark.parametrize(
