@@ -154,7 +154,7 @@ class SfaRemoteD2HConnector(KVConnectorBase_V1, SupportsHMA):
             # Producer layer hooks need the reset dispatch state and TP-mapped
             # destination before forward. vLLM may call start_load_kv only
             # after target forward, when resetting would also rewind MTP state.
-            self.connector_worker.start_load_kv(connector_metadata)
+            self.connector_worker.bind_connector_metadata(connector_metadata)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None

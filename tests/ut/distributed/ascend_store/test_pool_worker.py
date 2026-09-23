@@ -1548,7 +1548,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         old_save_tasks = worker.layer_save_tasks
         old_load_tasks = worker.layer_load_tasks
 
-        worker.start_load_kv(AscendConnectorMetadata(set(), set()))
+        worker.bind_connector_metadata(AscendConnectorMetadata(set(), set()))
 
         for layer_id in range(worker.num_layers):
             self.assertIsNot(worker.layer_save_tasks[layer_id], old_save_tasks[layer_id])
@@ -1566,6 +1566,56 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         worker.process_layer_data([MagicMock()])
 
         self.assertEqual(call_order, ["load", "save"])
+
+    def test_layerwise_gvas_are_prepared_at_bind_and_not_repeated_at_load_start(self):
+        worker = self._make_worker()
+        worker.use_layerwise = True
+        worker.num_layers = 0
+        worker.current_layer = 3
+        worker.next_layer_to_submit = 3
+        worker._attention_saved_layers = {0, 1, 2}
+        call_order = []
+        worker._prepare_load_gvas = MagicMock(side_effect=lambda _: call_order.append("load-gvas"))
+        worker._alloc_gvas_for_save = MagicMock(side_effect=lambda _: call_order.append("save-gvas"))
+        worker._build_shared_save_data = MagicMock()
+        worker._build_shared_load_data = MagicMock()
+        metadata = AscendConnectorMetadata(set(), set())
+        metadata.requests = [MagicMock()]
+
+        worker.bind_connector_metadata(metadata)
+
+        self.assertEqual(call_order, ["load-gvas", "save-gvas"])
+        self.assertEqual(worker.current_layer, 0)
+        self.assertEqual(worker.next_layer_to_submit, 0)
+        self.assertEqual(worker._attention_saved_layers, set())
+        save_tasks = worker.layer_save_tasks
+        load_tasks = worker.layer_load_tasks
+        worker.current_layer = 2
+        worker.next_layer_to_submit = 2
+        worker._attention_saved_layers = {0, 1}
+
+        worker.start_load_kv(metadata)
+
+        self.assertEqual(call_order, ["load-gvas", "save-gvas"])
+        self.assertIs(worker.layer_save_tasks, save_tasks)
+        self.assertIs(worker.layer_load_tasks, load_tasks)
+        self.assertEqual(worker.current_layer, 2)
+        self.assertEqual(worker.next_layer_to_submit, 2)
+        self.assertEqual(worker._attention_saved_layers, {0, 1})
+
+    def test_non_layerwise_bind_does_not_submit_loads(self):
+        worker = self._make_worker()
+        worker.use_layerwise = False
+        worker.process_layer_data = MagicMock()
+        worker.kv_recv_thread = MagicMock()
+        metadata = AscendConnectorMetadata(set(), set())
+        metadata.requests = [MagicMock()]
+
+        worker.bind_connector_metadata(metadata)
+
+        worker.process_layer_data.assert_not_called()
+        worker.kv_recv_thread.add_request.assert_not_called()
+        worker.m_store.get.assert_not_called()
 
     def test_process_layer_data_reowns_task_lists_before_populating(self):
         worker = self._make_worker()

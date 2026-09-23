@@ -74,17 +74,18 @@ class TestLayerwiseConnectorLifecycle(unittest.TestCase):
                     finished_req_ids=set(),
                 )
                 with (
+                    patch.object(worker, "start_load_kv", side_effect=AssertionError("layerwise setup is not a load")),
+                    patch.object(worker, "process_layer_data", wraps=worker.process_layer_data) as prepare,
                     patch.object(runner_mixin, "get_kv_transfer_group", return_value=connector),
-                    patch.object(
-                        runner_mixin, "get_forward_context", return_value=SimpleNamespace(attn_metadata={})
-                    ),
+                    patch.object(runner_mixin, "get_forward_context", return_value=SimpleNamespace(attn_metadata={})),
                 ):
                     # A second step catches stale completion events too.
-                    for _ in range(2):
+                    for step in range(2):
                         with runner_mixin.KVConnectorModelRunnerMixin._get_kv_connector_output(
                             scheduler_output, defer_finalize=True
                         ):
                             self.assertEqual(worker.current_layer, 0)
+                            self.assertEqual(prepare.call_count, step + 1)
                             for layer_id in range(2):
                                 connector.save_kv_layer(f"model.layers.{layer_id}", None, None)
                             self.assertEqual(worker.current_layer, 2)
@@ -92,6 +93,7 @@ class TestLayerwiseConnectorLifecycle(unittest.TestCase):
                         # The deferred start_load_kv call must not rewind
                         # the counter or replace the target's pending tasks.
                         self.assertEqual(worker.current_layer, 2)
+                        self.assertEqual(prepare.call_count, step + 1)
                         connector.save_kv_layer("model.layers.2", None, None)
                         self.assertEqual(worker.current_layer, 3)
                         self.assertTrue(all(not event.is_set() for event in worker.layer_save_finished_events))

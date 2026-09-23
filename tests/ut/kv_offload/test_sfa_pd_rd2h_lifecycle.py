@@ -90,6 +90,10 @@ def test_producer_prepares_before_forward_and_preserves_target_state_for_mtp(
     mapped_port = 24000 + tp_rank // tp_ratio
 
     with (
+        # A producer has no load operation. Binding must prepare its metadata
+        # without routing through a worker load hook, even if one is present.
+        patch.object(worker, "start_load_kv", side_effect=AssertionError("producer has no loads"), create=True),
+        patch.object(worker, "bind_connector_metadata", wraps=worker.bind_connector_metadata) as bind_metadata,
         patch.object(runner_mixin, "get_kv_transfer_group", return_value=connector),
         patch.object(runner_mixin, "get_forward_context", return_value=SimpleNamespace(attn_metadata={})),
     ):
@@ -125,6 +129,7 @@ def test_producer_prepares_before_forward_and_preserves_target_state_for_mtp(
             with runner_mixin.KVConnectorModelRunnerMixin._get_kv_connector_output(output, defer_finalize=True):
                 assert request.remote_port == mapped_port
                 assert worker.current_layer == 0
+                assert bind_metadata.call_count == step + 1
                 assert worker._pd_dispatched_layers == set()
                 run_layer(0)
                 run_layer(1)
@@ -133,6 +138,7 @@ def test_producer_prepares_before_forward_and_preserves_target_state_for_mtp(
             # offset the port again on the metadata retained by queued tasks.
             assert request.remote_port == mapped_port
             assert worker.current_layer == 2
+            assert bind_metadata.call_count == step + 1
             assert worker._pd_dispatched_layers == {0, 1}
             run_layer(2)
             assert worker.current_layer == 3
