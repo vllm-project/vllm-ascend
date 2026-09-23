@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CompressorV2 numerical and mutation checks; run on Ascend A2/A3."""
 
+import importlib
 from types import SimpleNamespace
 
 import pytest
@@ -12,7 +13,8 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.utils import bootstrap_custom_op_env
 
 bootstrap_custom_op_env(include_vendor_lib=True)
-import vllm_ascend.vllm_ascend_C  # noqa: E402,F401
+# Loading the extension registers torch.ops; it exposes no typed Python API.
+importlib.import_module("vllm_ascend.vllm_ascend_C")
 
 
 def _reference(x, wkv, wgate, state, blocks, offsets, used, starts):
