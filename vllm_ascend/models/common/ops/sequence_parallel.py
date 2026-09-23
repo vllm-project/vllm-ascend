@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
+import torch.nn.functional as F
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -31,24 +32,28 @@ def sp_all_gather(x: torch.Tensor) -> torch.Tensor:
 def _ascend_sp_shard_impl(x: torch.Tensor) -> torch.Tensor:
     """Pad the token axis (dim 0) to the TP multiple, then take this rank's chunk.
 
-    Supports arbitrary trailing dims. The upstream
-    ``sequence_parallel_chunk`` cannot be reused here: its
-    ``F.pad(x, (0, 0, 0, pad_len))`` pads the second-to-last dim, which for
-    the draft/MTP inputs ``[T, hc_mult, H]`` pads the hc_mult axis instead of
-    the token axis, so any ``T < tp_size`` (e.g. a 6-token dspark draft step
-    on TP8) shards to zero rows on every rank. Wrapped in a custom op so the
-    modulo padding stays invisible to dynamo (a plain Python implementation
-    gets baked into the compiled graph with the trace-time shape, so graph
-    capture at any other bucket size shards to a wrong row count).
+    Mirrors the upstream ``sp_shard`` guard/pad form
+    (``vllm.models.common.ops.sequence_parallel``): skip the pad — and its
+    whole-table copy — when ``sp_pad == 0``, and pad with
+    ``F.pad(x, (0, 0) * (x.ndim - 1) + (0, sp_pad))`` so the token axis is
+    padded for arbitrary trailing dims (the older custom-op variant
+    ``sequence_parallel_chunk_impl`` in ``model_executor/models/utils.py``
+    pads the second-to-last dim, which for the draft/MTP inputs
+    ``[T, hc_mult, H]`` pads the hc_mult axis instead). Kept behind a custom
+    op so the modulo padding stays invisible to dynamo (a plain Python
+    implementation bakes the trace-time shape into the compiled graph, so
+    graph capture at any other bucket size shards to a wrong row count). As
+    in that upstream custom-op variant, the no-pad slice is cloned: a
+    functional custom op must not return a view of an input.
     """
     tp_size = get_tensor_model_parallel_world_size()
     tp_rank = get_tensor_model_parallel_rank()
     sp_pad = (-x.shape[0]) % tp_size
-    pad_shape = list(x.shape)
-    pad_shape[0] = sp_pad
-    x = torch.cat([x, x.new_zeros(pad_shape)], dim=0)
+    if sp_pad > 0:
+        x = F.pad(x, (0, 0) * (x.ndim - 1) + (0, sp_pad))
     chunk = x.shape[0] // tp_size
-    return x[tp_rank * chunk : (tp_rank + 1) * chunk]
+    out = x[tp_rank * chunk : (tp_rank + 1) * chunk]
+    return out.clone() if sp_pad == 0 else out
 
 
 def _ascend_sp_shard_fake(x: torch.Tensor) -> torch.Tensor:
@@ -75,8 +80,11 @@ def sp_shard(x: torch.Tensor) -> torch.Tensor:
 def _ascend_sp_reduce_scatter_impl(x: torch.Tensor) -> torch.Tensor:
     """Pad rows to the TP multiple, then reduce-scatter across TP ranks.
 
+    Same ``if sp_pad > 0`` skip-the-pad guard as the upstream
+    ``sp_reduce_scatter`` (``vllm.models.common.ops.sequence_parallel``).
     Wrapped in a custom op so the modulo padding stays invisible to dynamo
-    (same shape-baking hazard as ``sp_shard``).
+    (same shape-baking hazard as ``sp_shard``). No view-of-input concern
+    here: the collective output is a fresh tensor.
     """
     tp_size = get_tensor_model_parallel_world_size()
     sp_pad = (-x.shape[0]) % tp_size
@@ -117,15 +125,20 @@ def _ascend_sp_padding_mask_impl(is_padding: torch.Tensor) -> torch.Tensor:
     """Pad with True rows up to the TP multiple, then take this rank's chunk.
 
     The output row layout matches ``sp_shard`` so the mask stays aligned with
-    the sharded hidden states. A custom op keeps the modulo padding invisible
-    to dynamo (same shape-baking hazard as ``sp_shard``).
+    the sharded hidden states. Same ``if sp_pad > 0`` pad guard as the
+    upstream ``sp_padding_mask``. A custom op keeps the modulo padding
+    invisible to dynamo (same shape-baking hazard as ``sp_shard``), so like
+    ``sp_shard`` the no-pad slice is cloned to avoid returning a view of an
+    input from a functional custom op.
     """
     tp_size = get_tensor_model_parallel_world_size()
     tp_rank = get_tensor_model_parallel_rank()
     sp_pad = (-is_padding.shape[0]) % tp_size
-    is_padding = torch.cat([is_padding, is_padding.new_ones((sp_pad,))], dim=0)
+    if sp_pad > 0:
+        is_padding = F.pad(is_padding, (0, sp_pad), value=True)
     chunk = is_padding.shape[0] // tp_size
-    return is_padding[tp_rank * chunk : (tp_rank + 1) * chunk]
+    out = is_padding[tp_rank * chunk : (tp_rank + 1) * chunk]
+    return out.clone() if sp_pad == 0 else out
 
 
 def _ascend_sp_padding_mask_fake(is_padding: torch.Tensor) -> torch.Tensor:

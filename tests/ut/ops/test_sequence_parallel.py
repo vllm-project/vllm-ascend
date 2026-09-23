@@ -6,6 +6,7 @@ import torch
 
 import vllm_ascend.models.common.ops.sequence_parallel as sp_module
 from vllm_ascend.models.common.ops.sequence_parallel import (
+    _ascend_sp_padding_mask_impl,
     _ascend_sp_shard_fake,
     _ascend_sp_shard_impl,
 )
@@ -21,10 +22,6 @@ def set_tp(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_sp_shard_pads_token_axis_of_3d_input(set_tp):
-    """Regression: [T, hc_mult, H] draft inputs with T < tp_size must still
-    shard to one row per rank. Routing through the upstream
-    ``sequence_parallel_chunk`` padded the hc_mult axis instead, so a 6-token
-    dspark draft step on TP8 sharded to zero rows on every rank."""
     tp_size = 8
     x = torch.arange(6 * 2 * 3, dtype=torch.float32).reshape(6, 2, 3)
     for tp_rank in range(tp_size):
@@ -43,6 +40,8 @@ def test_sp_shard_chunks_2d_input_without_padding(set_tp):
     out = _ascend_sp_shard_impl(x)
     assert out.shape == (2, 4)
     assert torch.equal(out, x[6:8])
+    # No-pad path: a functional custom op must not return a view of its input.
+    assert out.data_ptr() != x.data_ptr()
 
 
 def test_sp_shard_shards_1d_input_ids(set_tp):
@@ -59,3 +58,21 @@ def test_sp_shard_fake_derives_cdiv_rows(set_tp):
     assert _ascend_sp_shard_fake(x).shape == (1, 2, 3)
     x = torch.empty(16, 4)
     assert _ascend_sp_shard_fake(x).shape == (2, 4)
+
+
+def test_sp_padding_mask_pads_true_rows(set_tp):
+    set_tp(4, 3)
+    is_padding = torch.tensor([False, True, False])
+    out = _ascend_sp_padding_mask_impl(is_padding)
+    assert out.shape == (1,)
+    assert bool(out[0]) is True  # rank chunk falls on the padded True row
+
+
+def test_sp_padding_mask_no_pad_returns_fresh_chunk(set_tp):
+    set_tp(4, 1)
+    is_padding = torch.zeros(4, dtype=torch.bool)
+    out = _ascend_sp_padding_mask_impl(is_padding)
+    assert out.shape == (1,)
+    assert not bool(out[0])
+    # No-pad path must not alias the input (functional custom op contract).
+    assert out.data_ptr() != is_padding.data_ptr()
