@@ -25,7 +25,7 @@ def _make_runner(need_timing: bool = True):
     runner.ascend_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(need_timing=need_timing))
     )
-    runner.vllm_config = SimpleNamespace()
+    runner.vllm_config = SimpleNamespace(aux_output_config=SimpleNamespace(enabled=False))
     runner.kvpp = SimpleNamespace(complete_forward=lambda: None)
     runner.model_state = SimpleNamespace(kvpp_is_dummy_run=False)
     runner.execute_model_state = None
@@ -637,12 +637,11 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
 
 def test_initialize_kv_cache_forwards_allocation_context():
     runner = _make_runner()
-    runner.vllm_config = SimpleNamespace()
+    runner.vllm_config = SimpleNamespace(aux_output_config=SimpleNamespace(enabled=False))
     runner.compilation_config = SimpleNamespace(static_forward_context={})
     runner.pcp_manager = None
     runner.model_state = SimpleNamespace(pcp_manager=None, kvpp_runtime=None)
     runner.speculator = None
-    runner.model_config = SimpleNamespace(enable_return_routed_experts=False)
     called = False
     captured_kwargs: dict[str, object] = {}
     allocation_context = object()

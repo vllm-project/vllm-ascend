@@ -66,7 +66,6 @@ from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
     is_pd_decode_recompute_scheduler_enabled,
     lmhead_tp_enable,
-    routing_replay_enabled,
     set_potential_max_tokens,
     vllm_version_is,
 )
@@ -291,7 +290,7 @@ class NPUModelRunner(GPUModelRunner):
         # ``AuxOutputWorkerConnector`` when ``vllm_config.aux_output_config.enabled``
         # is set (it also wraps the Ascend ``capture`` patch). Keep an explicit
         # invariant check so a silently-missing connector cannot go unnoticed.
-        if routing_replay_enabled(self.vllm_config):
+        if self.vllm_config.aux_output_config.enabled:
             if self.aux_output_connector is None:
                 raise RuntimeError(
                     "aux_output_config.enabled is set but the AuxOutput worker connector "
