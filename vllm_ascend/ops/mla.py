@@ -34,6 +34,7 @@ from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.utils import mark_fused_preprocess_weights
+from vllm_ascend.utils import vllm_version_is
 
 
 class IndexerWrapper(nn.Module):
@@ -186,6 +187,13 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             ascend_indexer = IndexerWrapper(mla_modules.indexer, self.qk_rope_head_dim)
         else:
             ascend_indexer = None
+        # vLLM main (#56157) gates PCP+DCP on MLAAttention.supports_pcp_dcp
+        # (default False) and the guard runs inside __init__, so the flag must
+        # be visible on the class before construction. Ascend implements PCP+DCP
+        # inside its attention impls (AscendSFAPCPDCPImpl / AscendMlaDCPImpl) and
+        # forwards through a custom op, so opt in on main. v0.29.0 has no guard.
+        if not vllm_version_is("0.29.0"):
+            MLAAttention.supports_pcp_dcp = True
         self.mla_attn = MLAAttention(
             num_heads=num_heads,
             scale=scale,
