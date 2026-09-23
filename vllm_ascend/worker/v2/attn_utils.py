@@ -1177,8 +1177,8 @@ def _reshape_kv_cache_v2(
                 slot_elements = kv_cache_spec.page_size_bytes // kernel_blocks_per_manager // element_size
                 component_shape = (
                     kv_cache_config.num_blocks * kernel_blocks_per_manager,
-                    kernel_block_size,
                     kv_cache_spec.num_kv_heads,
+                    kernel_block_size,
                 )
                 nope_dim, rope_dim = _get_attention_kv_cache_dims(layer_name, kv_cache_spec)
                 fused_dim = nope_dim + rope_dim
@@ -1187,14 +1187,14 @@ def _reshape_kv_cache_v2(
                     get_current_hardware_profile().supports(HardwareCapability.MLA_FLASH)
                     and attn_module.num_heads in MLA_FLASH_SUPPORTED_Q_HEADS
                 ):
-                    # Preserve the V1 A5 protocol: one token-fused tensor with
-                    # [nope | rope] in the trailing 576 lanes of every token.
+                    # Preserve the V1 A5 protocol: expose one token-fused
+                    # BNBD tensor with [nope | rope] in every token.
                     fused_cache = torch.as_strided(
                         typed_raw,
                         size=(*component_shape, fused_dim),
                         stride=(
                             slot_elements,
-                            kv_cache_spec.num_kv_heads * fused_dim,
+                            kernel_block_size * fused_dim,
                             fused_dim,
                             1,
                         ),
@@ -1203,14 +1203,14 @@ def _reshape_kv_cache_v2(
                     kv_caches[layer_name] = fused_cache
                     continue
 
-                # A3/FIA keeps each component internally contiguous and puts
-                # the hybrid-page padding only in the leading block stride.
+                # A3/FIA keeps each BNBD component internally contiguous and
+                # puts the hybrid-page padding only in the leading block stride.
                 nope_cache = torch.as_strided(
                     typed_raw,
                     size=(*component_shape, nope_dim),
                     stride=(
                         slot_elements,
-                        kv_cache_spec.num_kv_heads * nope_dim,
+                        kernel_block_size * nope_dim,
                         nope_dim,
                         1,
                     ),
@@ -1221,7 +1221,7 @@ def _reshape_kv_cache_v2(
                     size=(*component_shape, rope_dim),
                     stride=(
                         slot_elements,
-                        kv_cache_spec.num_kv_heads * rope_dim,
+                        kernel_block_size * rope_dim,
                         rope_dim,
                         1,
                     ),
@@ -1275,13 +1275,13 @@ def _reshape_kv_cache_v2(
                 kv_caches[layer_name] = (cache,)
                 continue
             if isinstance(kv_cache_spec, (AscendMLAAttentionSpec, MLAAttentionSpec)):
-                num_blocks_, block_size_, num_kv_heads, _ = kv_cache_shape
+                num_blocks_, num_kv_heads, block_size_, _ = kv_cache_shape
                 k_dim, v_dim = _get_attention_kv_cache_dims(layer_name, kv_cache_spec)
-                k_shape = (num_blocks_, block_size_, num_kv_heads, k_dim)
+                k_shape = (num_blocks_, num_kv_heads, block_size_, k_dim)
                 if sparse_sfa_c8:
-                    k_shape = (num_blocks_, block_size_, num_kv_heads, kv_cache_spec.head_size)
+                    k_shape = (num_blocks_, num_kv_heads, block_size_, kv_cache_spec.head_size)
                     v_dim = 0
-                v_shape = (num_blocks_, block_size_, num_kv_heads, v_dim)
+                v_shape = (num_blocks_, num_kv_heads, block_size_, v_dim)
             else:
                 k_shape = kv_cache_shape[1:]
                 v_shape = (
