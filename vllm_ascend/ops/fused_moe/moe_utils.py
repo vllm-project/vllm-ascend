@@ -164,6 +164,17 @@ def load_cann_mega_moe_ops():
     return get_symm_buffer_for_mega_moe, mega_moe
 
 
+def normalize_mega_moe_weight_scales(
+    scales: torch.Tensor | list[torch.Tensor] | None,
+) -> list[torch.Tensor] | None:
+    if scales is None:
+        return None
+    scale_list = scales if isinstance(scales, list) else [scales]
+    # Weight loading may add a leading singleton to each per-expert scale.
+    # Keep grouped scales intact.
+    return [scale.squeeze(0) if scale.dim() == 2 and scale.shape[0] == 1 else scale for scale in scale_list]
+
+
 def select_mega_moe_activation_kwargs(
     mega_moe_op: Callable[..., Any],
     *,

@@ -477,8 +477,8 @@ class FusedMC2CommImpl(MoECommMethod):
         # CheckWeight2Input). The op prototype also REQUIRES FRACTAL_NZ per expert. The W4A8 quant
         # method therefore builds per-expert int8 + FRACTAL_NZ lists (cann_mega_moe_*_weight_list) and
         # they are passed through as-is here. W8A8 weights are already int8 + FRACTAL_NZ, also as-is.
-        weight_scales1 = weights.w1_scale
-        weight_scales2 = weights.w2_scale
+        weight_scales1 = moe_utils.normalize_mega_moe_weight_scales(weights.w1_scale)
+        weight_scales2 = moe_utils.normalize_mega_moe_weight_scales(weights.w2_scale)
         dispatch_quant_mode, dispatch_quant_out_dtype, weight_type = moe_utils._get_cann_mega_moe_quant_settings(
             fused_experts_input.quant.quant_type
         )
