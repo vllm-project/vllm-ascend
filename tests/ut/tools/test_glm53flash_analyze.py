@@ -8,6 +8,7 @@ from unittest.mock import patch
 import numpy as np
 
 from tools.ci import glm53flash_analyze as analyzer
+from tools.ci.glm53flash_protocol import precision_lengths
 
 
 class AnalyzeTest(unittest.TestCase):
@@ -19,7 +20,11 @@ class AnalyzeTest(unittest.TestCase):
             if graph:
                 settings["compilation_config"] = {"cudagraph_mode": "FULL_DECODE_ONLY"}
             self.data[run] = {
-                "result.json": {"status": "PASS", "lengths": list(range(1, 20)), "replays": [7 if graph else 0] * 4},
+                "result.json": {
+                    "status": "PASS",
+                    "lengths": precision_lengths(1152),
+                    "replays": [7 if graph else 0] * 4,
+                },
                 "settings.json": settings,
                 "runtime-settings.json": {"block_size": 1152},
                 "weights.json": [{"rank": i, "sha256": "a" * 64} for i in range(4)],

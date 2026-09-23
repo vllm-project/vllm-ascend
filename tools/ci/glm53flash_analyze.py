@@ -9,6 +9,8 @@ from pathlib import Path
 
 import numpy as np
 
+from tools.ci.glm53flash_protocol import validate_precision_lengths
+
 
 def read(path):
     return json.loads(path.read_text())
@@ -18,19 +20,19 @@ def analyze(root):
     root = Path(root)
     reference = root / "graph-0"
     cases = read(reference / "result.json")["lengths"]
-    if len(cases) < 19:
-        raise ValueError("Full boundary collection required, not smoke")
     weights = read(reference / "weights.json")
     if [w["rank"] for w in weights] != list(range(4)):
         raise ValueError("Four ordered rank fingerprints required")
     settings = read(reference / "settings.json")
     runtime = read(reference / "runtime-settings.json")
+    validate_precision_lengths(cases, runtime["block_size"])
     comparisons = {}
     rates, ttft, tpot = [], [], []
     run_medians = []
     for run in ("graph-0", "graph-1", "graph-2", "eager-0"):
         folder = root / run
         result = read(folder / "result.json")
+        validate_precision_lengths(result["lengths"], runtime["block_size"])
         if result["status"] != "PASS" or result["lengths"] != cases:
             raise ValueError(f"Incomplete precision run: {run}")
         replays = result["replays"]

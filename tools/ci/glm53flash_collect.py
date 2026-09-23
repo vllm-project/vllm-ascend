@@ -16,10 +16,10 @@ from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 
 from tests.e2e.conftest import VllmRunner
 from tools.ci.glm53flash_launch import effective_settings
+from tools.ci.glm53flash_protocol import precision_lengths
 from tools.ci.glm53flash_worker import BaselineWorker, prompts
 
 LOADER = "glm53flash_ci_dummy"
-PRECISION_LENGTHS = (3, 4, 5, 127, 128, 129, 511, 512, 513, 2047, 2048, 2049, 2051, 2052, 2053, 2177)
 
 
 @register_model_loader(LOADER)
@@ -132,9 +132,7 @@ def run(args):
         (output / "path-evidence.json").write_text(json.dumps(evidence, indent=2))
         (output / "weights.json").write_text(json.dumps(llm.collective_rpc("fingerprint"), indent=2))
         llm.collective_rpc("start_glm51_replay_count")
-        lengths = (
-            (128,) if args.smoke else sorted(set(PRECISION_LENGTHS) | {block_size - 1, block_size, block_size + 1})
-        )
+        lengths = (128,) if args.smoke else precision_lengths(block_size)
         for length in lengths:
             llm.collective_rpc("begin_capture")
             results = llm.generate(
