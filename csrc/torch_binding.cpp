@@ -3226,9 +3226,9 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("npu_copy_and_expand_eagle_inputs", torch::kPrivateUse1, &vllm_ascend::npu_copy_and_expand_eagle_inputs);
     ops.def(
-        "npu_causal_conv1d_custom(Tensor output, Tensor x, "
+        "npu_causal_conv1d_custom(Tensor(a!) output, Tensor x, "
         "                         Tensor weight, "
-        "                         Tensor conv_state, "
+        "                         Tensor(b!) conv_state, "
         "                         Tensor? bias_opt, "
         "                         Tensor? query_start_loc_opt, "
         "                         Tensor? cache_indices_opt, "
@@ -3237,7 +3237,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                         int activation_mode, "
         "                         int pad_slot_id, "
         "                         int run_mode"
-        ") -> (Tensor output)");
+        ") -> Tensor(a!)");
     ops.impl("npu_causal_conv1d_custom", torch::kPrivateUse1, &vllm_ascend::npu_causal_conv1d_custom);
 
     ops.def(

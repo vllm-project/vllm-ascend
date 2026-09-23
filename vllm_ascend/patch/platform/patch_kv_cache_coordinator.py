@@ -32,7 +32,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
-from vllm_ascend.core.kv_cache_interface import is_prefix_cacheable
+from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec, is_prefix_cacheable
 from vllm_ascend.utils import vllm_version_is
 
 USE_MULTI_GROUPS_KV_CACHE = True
@@ -518,7 +518,22 @@ def get_kv_cache_coordinator(  # type: ignore[misc]
     # compatibility; platform validation guarantees that it is one.
     del pcp_world_size
     token_budget = _select_kv_token_budget(max_model_len, max_in_flight_tokens, max_num_batched_tokens)
-    if _is_deepseek_v4_kv_cache_config(kv_cache_config):
+    # A private ring's block_size is physical retention capacity, not a token
+    # page alignment. In particular pool=4 plus MTP lookahead=3 gives capacity
+    # 7, which need not divide scheduler_block_size. The Ascend coordinator
+    # understands these private groups even when prefix caching is disabled.
+    has_private_ring = any(
+        is_circular_kv_cache_spec(group.kv_cache_spec) and not is_prefix_cacheable(group.kv_cache_spec)
+        for group in kv_cache_config.kv_cache_groups
+    )
+    if has_private_ring and scheduler_block_size is not None:
+        assert hash_block_size > 0 and scheduler_block_size % hash_block_size == 0
+        assert all(
+            scheduler_block_size % group.kv_cache_spec.block_size == 0
+            for group in kv_cache_config.kv_cache_groups
+            if is_prefix_cacheable(group.kv_cache_spec)
+        ), "Scheduler alignment must cover every token-page cache group"
+    if _is_deepseek_v4_kv_cache_config(kv_cache_config) or has_private_ring:
         return AscendHybridKVCacheCoordinator(  # type: ignore[call-arg]
             kv_cache_config,
             max_model_len,
