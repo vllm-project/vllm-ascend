@@ -456,6 +456,7 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
       --port 11223 \
       --served-model-name minimax-m3 \
       --trust-remote-code \
+      --quantization ascend \
       --max-model-len 131072 \
       --tensor-parallel-size 8 \
       --enable-expert-parallel \
@@ -495,6 +496,7 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
       --served-model-name minimax-m3 \
       --trust-remote-code \
       --headless \
+      --quantization ascend \
       --max-model-len 131072 \
       --tensor-parallel-size 8 \
       --enable-expert-parallel \
