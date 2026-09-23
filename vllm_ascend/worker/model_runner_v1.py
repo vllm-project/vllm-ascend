@@ -4578,7 +4578,7 @@ class NPUModelRunner(GPUModelRunner):
 
             for module in self.model.modules():
                 if isinstance(module, DeepseekV41Compressor) and module.ratio == 2:
-                    module.prepare_ring_compressor(self.max_num_tokens, self.device)
+                    module.prepare_ring_compressor()
 
         # TODO: refactor the logic of attention
         if (

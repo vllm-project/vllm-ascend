@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""C2 ring compression with an opt-in fused AscendC backend."""
+"""C2 AscendC ring compression, BF16 projections, and FP32 ring state."""
 
 import torch
 from torch import nn
@@ -18,21 +18,10 @@ class DeepseekV41Compressor(nn.Module):
         self.ratio = ratio
         self.width = config.head_dim
         dim = config.hidden_size
-        # Native fusion uses BF16 projections; the reference keeps FP32 weights.
-        # Keep the precision change opt-in until model-level accuracy is qualified.
-        self.use_ascendc = ratio == 2 and bool(
-            vllm_config is not None
-            and getattr(vllm_config, "additional_config", {}).get("use_ascendc_compressor", False)
-        )
-        if self.use_ascendc and (self.width not in (128, 512) or not 1024 <= dim <= 10240 or dim % 512):
-            raise ValueError("AscendC compressor requires D=128/512 and H=1024..10240 aligned to 512")
-        if self.use_ascendc and not get_current_hardware_profile().supports(HardwareCapability.DSV41_RING_COMPRESSOR):
-            raise ValueError("AscendC V4.1 ring compression is currently supported on A2/A3 only")
-        projection_dtype = torch.bfloat16 if self.use_ascendc or ratio == 1 else torch.float32
-        self.wkv = nn.Linear(dim, self.width, bias=False, dtype=projection_dtype)
+        self.wkv = nn.Linear(dim, self.width, bias=False, dtype=torch.bfloat16)
         self.norm = RMSNorm(self.width, eps=config.rms_norm_eps, dtype=torch.bfloat16)
         if ratio == 2:
-            self.wgate = nn.Linear(dim, self.width, bias=False, dtype=projection_dtype)
+            self.wgate = nn.Linear(dim, self.width, bias=False, dtype=torch.bfloat16)
             # Allocate persistent output before memory profiling, so its footprint
             # is included in the cache budget rather than added after allocation.
             if vllm_config is not None:
@@ -56,15 +45,15 @@ class DeepseekV41Compressor(nn.Module):
                     ),
                 )
 
-    def prepare_ring_compressor(self, max_tokens, device):
-        """Resolve ring-compressor hardware before capture."""
-        if self.use_ascendc:
-            if not hasattr(torch.ops._C_ascend, "compressor_v2"):
-                raise RuntimeError("Rebuild vllm-ascend custom ops to enable CompressorV2")
-            return
-        from vllm_ascend.ops.triton.compressor.compressor_triton import _cube_core_num
-
-        self._ring_num_cores = _cube_core_num()
+    def prepare_ring_compressor(self):
+        """Validate the native backend before graph capture."""
+        dim = self.wkv.in_features
+        if self.width not in (128, 512) or not 1024 <= dim <= 10240 or dim % 512:
+            raise ValueError("AscendC compressor requires D=128/512 and H=1024..10240 aligned to 512")
+        if not get_current_hardware_profile().supports(HardwareCapability.DSV41_RING_COMPRESSOR):
+            raise ValueError("AscendC V4.1 ring compression is currently supported on A2/A3 only")
+        if not hasattr(torch.ops._C_ascend, "compressor_v2"):
+            raise RuntimeError("Rebuild vllm-ascend custom ops to enable CompressorV2")
 
     def compress_native(self, x, metadata):
         """Map native compact groups back to the cache writer's token rows.
@@ -98,20 +87,6 @@ class DeepseekV41Compressor(nn.Module):
         pooled.masked_fill_(~complete.unsqueeze(-1), 0)
         return self.norm(pooled)
 
-    def pool_projected(self, kv, scores, metadata):
-        from vllm_ascend.ops.triton.compressor.compressor_triton import compressor_from_projected
-
-        pooled = compressor_from_projected(
-            kv,
-            scores,
-            self.state_cache.kv_cache[0].squeeze(-2),
-            metadata.c2_ring_metadata,
-            self._ring_pooled[: kv.shape[0]],
-            max_query_len=metadata.max_query_len,
-            num_cores=self._ring_num_cores,
-        )
-        return self.norm(pooled)
-
     def forward(self, x):
-        """Project an uncompressed source; C2 selects a ring backend explicitly."""
+        """Project an uncompressed source; C2 uses ``compress_native``."""
         return self.norm(self.wkv(x))

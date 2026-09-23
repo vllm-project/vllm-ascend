@@ -11,29 +11,26 @@ softmax pooling, and in-place FP32 ring-state update. RMSNorm and RoPE are not f
 The binding marks state mutation explicitly and supplies a Meta implementation.
 The existing V4 `compressor` operator is unchanged.
 
-## Experimental model integration
+## Model integration
 
-After rebuilding custom operators, enable the A2/A3 V4.1 C2 path using:
+V4.1 C2 directly uses AscendC on A2/A3; rebuilding custom operators is required.
+There is no backend switch or Triton fallback. Both C2 projection weights are
+loaded as BF16, matching the native input ABI. The kernel uses FP32 accumulation
+and projection results; the ring state remains FP32. The BF16 pooling result,
+existing RMSNorm, RoPE, and cache writers remain unchanged. C1 is unchanged.
 
-```bash
---additional-config '{"use_ascendc_compressor": true}'
-```
-
-This is opt-in because native projections require BF16 weights and activations,
-whereas the existing model path uses FP32 projection weights and computation.
-Native mode loads C2 projection weights as BF16; the FP32 ring layout, BF16
-pooling result, existing RMSNorm, RoPE, and cache writers remain unchanged.
-Disabling the option retains the existing FP32 projection and Triton pooling path.
-C1 is unchanged. Changing this option requires reloading the model.
+Converting BF16 checkpoint weights to FP32 in the previous path did not add
+weight precision. Nevertheless, the two matrix-multiply implementations need
+numerical validation; bitwise equivalence is not assumed.
 
 The adapter translates the compact native output to the original completion-token
 rows, masks incomplete/padded rows, and passes explicit used lengths so padded
 requests do not mutate the null state page. It performs no host tensor reads.
 Supported model dimensions are H in [1024, 10240], aligned to 512, and D=128/512.
-Although the vendored operator also includes arch35, the model option is limited
+Although the vendored operator also includes arch35, the model integration is limited
 to arch22 until the 32-row long-prefill ring contract is qualified on other hardware.
 
-## Validation before enabling by default
+## Validation before merging
 
 Run the operator tests on NPU:
 
