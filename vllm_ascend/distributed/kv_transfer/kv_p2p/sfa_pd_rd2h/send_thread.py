@@ -23,6 +23,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (
     SendTask,
     get_external_request_id,
 )
+from vllm_ascend.distributed.kv_transfer.load_failure_registry import is_failed_load
 
 THREAD_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 
@@ -216,6 +217,14 @@ class MembPullSendingThread(threading.Thread):
             return list(all_block_ids[start_block:end_block]), start_block
 
         for req_id, rm in send_task.send_request.items():
+            if is_failed_load(req_id):
+                logger.warning(
+                    "MembPull P skip READ_READY item for load-failed req=%s layer=%d (%s)",
+                    req_id,
+                    layer_idx,
+                    layer_name,
+                )
+                continue
             p_main_block_ids, main_start_block = _blocks_for_chunk(rm, self._state.main_group_idx)
             if layer_has_indexer:
                 p_indexer_block_ids, indexer_start_block = _blocks_for_chunk(rm, self._state.indexer_group_idx)

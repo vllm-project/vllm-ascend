@@ -70,6 +70,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_la
     get_layerwise_kv_cache_specs,
     get_layerwise_physical_layer_index,
 )
+from vllm_ascend.distributed.kv_transfer.load_failure_registry import (
+    record_failed_load,
+)
 from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
@@ -1542,6 +1545,7 @@ class KVPoolWorker:
                     if self.num_kv_cache_groups == 1:
                         with self._invalid_block_ids_lock:
                             self._invalid_block_ids.update(invalid_block_ids)
+                        record_failed_load((request.req_id,))
                     else:
                         leased_keys_to_release = list(
                             dict.fromkeys(
