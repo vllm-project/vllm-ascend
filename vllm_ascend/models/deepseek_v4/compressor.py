@@ -37,7 +37,10 @@ from vllm.models.deepseek_v4.compressor import CompressorStateCache
 from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
-from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
+from vllm_ascend.core.kv_cache_interface import (
+    AscendSlidingWindowMLASpec,
+    KVCacheBlockGeometry,
+)
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage, wait_for_device_metadata
 
@@ -69,6 +72,11 @@ class AscendCompressorStateCache(CompressorStateCache):
             sliding_window=self.sliding_window,
             alignment=None,
             page_size_padded=page_size_padded,
+            block_geometry=KVCacheBlockGeometry(
+                manager_block_size=self.block_size,
+                kernel_block_size=self.block_size,
+                storage_block_size=self.block_size,
+            ),
         )
 
     def forward(self): ...
