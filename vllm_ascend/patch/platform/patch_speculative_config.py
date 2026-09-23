@@ -1,3 +1,4 @@
+import math
 from contextlib import contextmanager
 from copy import copy
 from dataclasses import replace
@@ -30,8 +31,60 @@ if hasattr(DeepseekV2Config, "__class_validators__"):
     ]
 
 
+# Identify the deployed z-lab/Kimi-K2.5-DFlash checkpoint independently of its
+# local directory name. Other DFlash checkpoints may require the new YaRN math.
+_KIMI_DFLASH_CONFIG = (
+    ("model_type", "qwen3"),
+    ("hidden_size", 7168),
+    ("vocab_size", 163840),
+    ("num_target_layers", 61),
+)
+_KIMI_DFLASH_TARGET_LAYER_IDS = (1, 12, 24, 35, 47, 58)
+_KIMI_DFLASH_YARN_PARAMS = (
+    ("rope_type", "yarn"),
+    ("factor", 64.0),
+    ("mscale", 1.0),
+    ("mscale_all_dim", 1.0),
+    ("original_max_position_embeddings", 4096),
+)
+
+
+def _normalize_kimi_dflash_rope(hf_config: PretrainedConfig) -> None:
+    """Preserve this legacy Kimi draft's vLLM 0.29 YaRN amplitude.
+
+    vLLM #56446 starts honoring mscale/mscale_all_dim for plain YaRN. For
+    this checkpoint their ratio is 1, instead of the old 1 + 0.1 * log(64),
+    which reduces draft acceptance. Make the old amplitude explicit only for
+    the known config; an explicit attention_factor always takes precedence.
+    This compatibility shim can go away once the checkpoint specifies it.
+    """
+    if "DFlashDraftModel" not in (getattr(hf_config, "architectures", None) or ()):
+        return
+    if any(getattr(hf_config, key, None) != value for key, value in _KIMI_DFLASH_CONFIG):
+        return
+    dflash_config = getattr(hf_config, "dflash_config", None) or {}
+    if tuple(dflash_config.get("target_layer_ids") or ()) != _KIMI_DFLASH_TARGET_LAYER_IDS:
+        return
+
+    # Transformers 5 stores the old rope_scaling field in rope_parameters.
+    # Copy before updating so a shared source dict is not modified in place.
+    rope_field = "rope_parameters"
+    rope_params = getattr(hf_config, rope_field, None)
+    if rope_params is None:
+        rope_field = "rope_scaling"
+        rope_params = getattr(hf_config, rope_field, None)
+    if not isinstance(rope_params, dict) or rope_params.get("attention_factor") is not None:
+        return
+    if any(rope_params.get(key) != value for key, value in _KIMI_DFLASH_YARN_PARAMS):
+        return
+
+    legacy_attention_factor = 1.0 + 0.1 * math.log(rope_params["factor"])
+    setattr(hf_config, rope_field, {**rope_params, "attention_factor": legacy_attention_factor})
+
+
 def _normalize_legacy_qwen3_dspark_config(hf_config: PretrainedConfig) -> PretrainedConfig:
     hf_config = _orig_hf_config_override(hf_config)
+    _normalize_kimi_dflash_rope(hf_config)
     architectures = hf_config.architectures or ()
     if hf_config.model_type == "qwen3" and "DSparkDraftModel" in architectures:
         dflash_config = hf_config.dflash_config

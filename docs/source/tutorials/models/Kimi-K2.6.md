@@ -26,6 +26,15 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
+With vLLM 0.30, Ascend preserves the vLLM 0.29 YaRN amplitude for the
+legacy `Kimi-K2.5-DFlash` configuration used here. The draft's plain YaRN
+configuration has `factor=64`, `mscale=1` and `mscale_all_dim=1`; without
+compatibility handling, the new scaling semantics reduce its acceptance rate.
+For this recognized configuration, a missing `attention_factor` defaults to
+`1 + 0.1 * ln(64)` (approximately `1.4158883083`). An explicit
+`attention_factor` in the draft checkpoint takes precedence, including `1.0`
+to select the new ratio-based amplitude. The target model's RoPE is unchanged.
+
 >**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ### 3.2 Verify Multi-node Communication (Optional)
