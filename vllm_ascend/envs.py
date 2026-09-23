@@ -100,6 +100,43 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Fail-fast guard for Mooncake heterogeneous transport on NPU.
+    # When enabled (default), vLLM-Ascend verifies at TransferEngine init time
+    # that the loaded mooncake .so was built with USE_ASCEND_HETEROGENEOUS
+    # (contains HeterogeneousRdmaTransport symbols). A non-heterogeneous build
+    # silently segfaults on NPU HBM operations (batch_register_memory /
+    # updateLocalSegmentDesc). Set to "0" to skip the check (e.g. if `nm` is
+    # unavailable or running a non-NPU build where the guard is irrelevant).
+    # Sensitive: No.
+    "VLLM_ASCEND_MOONCAKE_HETERO_VERIFY": lambda: bool(int(os.getenv("VLLM_ASCEND_MOONCAKE_HETERO_VERIFY", "1"))),
+    # Port offset for MooncakeHeterogeneousConnector's adapter listener (P side).
+    # The adapter binds to kv_port + tp_rank + this offset. Default 0.
+    # Useful when multiple P instances share a host to avoid port conflicts.
+    # Sensitive: No.
+    "VLLM_ASCEND_HETEROGENEOUS_CONNECTOR_PORT_OFFSET": lambda: int(
+        os.getenv("VLLM_ASCEND_HETEROGENEOUS_CONNECTOR_PORT_OFFSET", "0")
+    ),
+    # Adapter (zmq ROUTER) advertise host for cross-end PD. The adapter binds
+    # 0.0.0.0 but advertises this host to the decode side via bootstrap, so it
+    # only needs to be TCP-reachable from D (may be a routed/jump addr that the
+    # P host cannot itself bind, e.g. a routed/jump addr on 910B). None -> get_ip().
+    # Sensitive: No.
+    "VLLM_ASCEND_KV_TRANSFER_HOST": lambda: os.getenv("VLLM_ASCEND_KV_TRANSFER_HOST", None),
+    # TransferEngine RPC hostname for cross-end PD. Unlike
+    # VLLM_ASCEND_KV_TRANSFER_HOST (which may be a non-bindable routed addr),
+    # this MUST be a LOCAL bindable IP that the decode side can also TCP-reach,
+    # typically the P host's IP on the cross-end RDMA subnet (e.g. 910B eth2
+    # IP, reachable from D's IP on the same subnet). None -> get_ip() (homogeneous
+    # case where get_ip() is mutually reachable).
+    # Sensitive: No.
+    "VLLM_ASCEND_KV_TRANSFER_RDMA_HOST": lambda: os.getenv("VLLM_ASCEND_KV_TRANSFER_RDMA_HOST", None),
+    # RDMA NIC whitelist filter for TransferEngine in cross-end PD. Comma-
+    # separated device names (e.g. "mlx5_2") restricting which RDMA NICs the
+    # engine discovers. On 910B set this to the NIC whose GID is on the
+    # cross-end RDMA subnet (e.g. mlx5_2 -> eth2 -> P IP); otherwise the engine
+    # advertises every NIC and D may pick an unreachable one. None -> all NICs.
+    # Sensitive: No.
+    "VLLM_ASCEND_KV_TRANSFER_DEVICE": lambda: os.getenv("VLLM_ASCEND_KV_TRANSFER_DEVICE", None),
 }
 
 # end-env-vars-definition
