@@ -20,6 +20,7 @@ from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
 from vllm_ascend.utils import (
     get_ascend_config,
     is_pd_decode_recompute_scheduler_enabled,
+    _is_glm_model,
 )
 
 SFA_QSFA_TILE_SIZE = 128
@@ -549,33 +550,6 @@ def enabling_mlapo(vllm_config: VllmConfig) -> bool:
     return bool(config_val and is_decode_instance)
 
 
-# dspark (parallel_drafting) models that run the attention metadata build
-# on the CPU seq_lens mirror instead of the NPU seq_lens. The NPU tensor
-# forces an NPU->CPU sync at the seq_lens.tolist() in
-# AscendAttentionMetadataBuilder.build() every step, while _seq_lens_cpu
-# is kept current across draft iterations and carries the same post
-# rejection-sampling lengths.
-FREETIME_DEVICE_SEQ_LENS_MODEL_TYPES: frozenset[str] = frozenset(
-    {
-        "glm5_next",
-        "glm5_next_text",
-        "glm_moe_dsa",
-    }
-)
-
-
-def is_freetime_model_type(vllm_config: VllmConfig) -> bool:
-    """Whether this model runs dspark on the CPU seq_lens mirror."""
-    model_config = vllm_config.model_config
-    hf_config = getattr(model_config, "hf_config", None)
-    model_types = (
-        getattr(hf_config, "model_type", None),
-        getattr(getattr(model_config, "hf_text_config", None), "model_type", None),
-        getattr(getattr(hf_config, "text_config", None), "model_type", None),
-    )
-    return any(model_type in FREETIME_DEVICE_SEQ_LENS_MODEL_TYPES for model_type in model_types)
-
-
 def _select_seq_lens(
     common_attn_metadata: AscendCommonAttentionMetadata,
     kv_cache_spec: AttentionSpec | None,
@@ -594,6 +568,7 @@ def _select_seq_lens(
     """
     # Prefer _seq_lens_cpu (always available, updated during draft
     # iterations) over seq_lens_cpu (None in async spec decode mode).
+    model_config = vllm_config.model_config
     num_reqs = common_attn_metadata.num_reqs
     if common_attn_metadata._seq_lens_cpu is not None:
         seq_lens = common_attn_metadata._seq_lens_cpu[:num_reqs]
@@ -607,6 +582,6 @@ def _select_seq_lens(
     if speculative_config is not None and speculative_config.parallel_drafting:
         # PARD / DFlash (and DSpark on other models) keep the NPU seq_lens;
         # only DSpark on the GLM5.2 family keeps the CPU mirror above.
-        if not (speculative_config.use_dspark() and is_freetime_model_type(vllm_config)):
+        if not (speculative_config.use_dspark() and _is_glm_model(model_config)):
             seq_lens = common_attn_metadata.seq_lens
     return seq_lens
