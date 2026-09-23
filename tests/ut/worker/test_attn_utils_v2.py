@@ -679,12 +679,19 @@ def test_dsv4_backends_declare_role_specific_logical_sizes(
     ],
 )
 def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
+    monkeypatch,
     caller,
     cudagraph_mode,
     for_capture,
     pcp_size,
     expected_input_tokens,
 ):
+    parallel_config = SimpleNamespace(
+        prefill_context_parallel_size=pcp_size,
+        decode_context_parallel_size=2,
+        cp_kv_cache_interleave_size=2,
+    )
+    monkeypatch.setattr(attn_utils, "get_dcp_group", lambda: SimpleNamespace(rank_in_group=0))
     layer_names, specs, calls, attn_groups, kv_cache_config = _make_dsa_metadata_groups()
     block_tables = (
         torch.zeros((4, 1), dtype=torch.int32),
@@ -692,7 +699,7 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
     )
     slot_mappings = torch.zeros((2, 8), dtype=torch.int32)
     dcp_local_seq_lens = torch.tensor(
-        [2, 1, 0, 0],
+        [2, 2, 0, 0],
         dtype=torch.int32,
     )
     pcp_context = object() if pcp_size > 1 else None
@@ -720,14 +727,13 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
             seq_lens_np=np.array([2, 3], dtype=np.int32),
             positions=torch.arange(5, dtype=torch.int32),
             dcp_local_seq_lens=dcp_local_seq_lens[:2],
+            parallel_config=parallel_config,
         )
     else:
         model_state = AscendModelState.__new__(AscendModelState)
         model_state.max_model_len = 8
         model_state.vllm_config = SimpleNamespace(
-            parallel_config=SimpleNamespace(
-                prefill_context_parallel_size=pcp_size,
-            ),
+            parallel_config=parallel_config,
         )
         model_state.pcp_manager = pcp_manager
         input_batch = SimpleNamespace(
@@ -771,6 +777,9 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
             )
         expected_dcp_local_seq_lens = dcp_local_seq_lens[:2] if caller == "default" else dcp_local_seq_lens
         torch.testing.assert_close(common_metadata.dcp_local_seq_lens, expected_dcp_local_seq_lens)
+        torch.testing.assert_close(
+            common_metadata.dcp_local_seq_lens_cpu, expected_dcp_local_seq_lens[: common_metadata.num_reqs]
+        )
     cache_name = "common_ratio_to_sas_metadata"
     assert calls[0][cache_name] is calls[1][cache_name]
     assert calls[1][cache_name]["first_group"] is True
