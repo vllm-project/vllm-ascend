@@ -365,9 +365,7 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
                 group_list=mlp_compute_input.group_list,
                 group_list_type=mlp_compute_input.group_list_type,
                 beta=(
-                    1.0
-                    if mlp_compute_input.activation_situ_beta is None
-                    else mlp_compute_input.activation_situ_beta
+                    1.0 if mlp_compute_input.activation_situ_beta is None else mlp_compute_input.activation_situ_beta
                 ),
                 linear_beta=mlp_compute_input.activation_situ_linear_beta or 0.0,
                 mxfp_quant_dtype=self.quant_type,
