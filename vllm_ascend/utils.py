@@ -698,6 +698,19 @@ def vllm_version_is(target_vllm_version: str):
         )
 
 
+def routing_replay_enabled(vllm_config) -> bool:
+    """Whether routed-experts (R3 / routing replay) capture is requested.
+
+    Upstream vLLM moved the switch from ``ModelConfig.enable_return_routed_experts``
+    to ``VllmConfig.aux_output_config`` (PR #45635). Read both so vllm-ascend keeps
+    working against pre- and post-refactor vLLM lanes.
+    """
+    aux_output_config = getattr(vllm_config, "aux_output_config", None)
+    if aux_output_config is not None:
+        return bool(aux_output_config.enabled)
+    return bool(getattr(getattr(vllm_config, "model_config", None), "enable_return_routed_experts", False))
+
+
 def get_kv_cache_tensor_layers(kv_cache_tensor) -> list[str]:
     """Layer names covered by a KVCacheTensor.
 
