@@ -89,17 +89,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         self.attn_architecture: str | None = None
         self.attn_backend: type[AttentionBackend] | None = None
         self.draft_vllm_config = self._create_draft_vllm_config()
-        self.use_dcp = self.draft_vllm_config.parallel_config.decode_context_parallel_size > 1
-        if self.use_dcp:
-            self.dcp_manager = DCPManager(
-                dcp_world_size=self.draft_vllm_config.parallel_config.decode_context_parallel_size,
-                dcp_rank=get_dcp_group().rank_in_group,
-                max_buffer_num_tokens=self.max_num_tokens,
-                max_num_reqs=self.max_num_reqs,
-                device=self.device,
-                vllm_config=self.draft_vllm_config,
-                use_async_scheduling=self.vllm_config.scheduler_config.async_scheduling,
-            )
+        self.use_dcp, self.dcp_manager = self._init_dcp()
 
         del self.input_buffers
         # AscendInputBuffers has extra `seq_lens_cpu` attribute.
@@ -122,6 +112,20 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         # draft model's input_batch. so we keep a reference here.
         self.input_batch: InputBatch | None = None
         self.pcp_manager: AscendPCPManager | None = None
+
+    def _init_dcp(self) -> tuple[bool, DCPManager | None]:
+        use_dcp = self.draft_vllm_config.parallel_config.decode_context_parallel_size > 1
+        if not use_dcp:
+            return False, None
+        return True, DCPManager(
+            dcp_world_size=self.draft_vllm_config.parallel_config.decode_context_parallel_size,
+            dcp_rank=get_dcp_group().rank_in_group,
+            max_buffer_num_tokens=self.max_num_tokens,
+            max_num_reqs=self.max_num_reqs,
+            device=self.device,
+            vllm_config=self.draft_vllm_config,
+            use_async_scheduling=self.vllm_config.scheduler_config.async_scheduling,
+        )
 
     def _create_draft_vllm_config(self) -> VllmConfig:
         """Build the runtime config used while executing the draft model."""
@@ -502,6 +506,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         seq_lens_cpu = None
         is_prefilling = torch.from_numpy(self.input_batch.is_prefilling_np)
         if self.use_dcp:
+            assert self.dcp_manager is not None
             seq_lens_cpu, is_prefilling = self.dcp_manager.prepare_draft_dcp_metadata_inputs(
                 target_seq_lens_cpu=self._get_seq_lens_cpu(num_reqs_padded),
                 is_prefilling=is_prefilling,
@@ -510,6 +515,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
                 step=step,
                 max_model_len=self.max_model_len,
             )
+
         with build_draft_attn_metadata_factory(
             self.input_buffers.positions,
             num_tokens_padded,
@@ -634,6 +640,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
 
         dcp_local_seq_lens_cpu = None
         if self.use_dcp and self.attn_architecture == "MLA":
+            assert self.dcp_manager is not None
             dcp_local_seq_lens_cpu = self.dcp_manager.prepare_dcp_local_seq_lens_cpu(next_seq_lens_cpu)
 
         query_lens_list = [i for i in range(1, num_reqs_padded + 1)]
@@ -646,6 +653,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             decode_metadata.seq_lens_list = seq_lens_list
             decode_metadata.actual_seq_lengths_q = query_lens_list
             if dcp_local_seq_lens_cpu is not None:
+                assert self.dcp_manager is not None
                 parallel_config = self.draft_vllm_config.parallel_config
                 decode_metadata.update_dcp_seq_lens_cpu(
                     next_seq_lens_cpu,
@@ -655,6 +663,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
                     dcp_rank=self.dcp_manager.dcp_world_rank,
                     cp_kv_cache_interleave_size=parallel_config.cp_kv_cache_interleave_size,
                 )
+
             metadata.seq_lens_cpu.copy_(next_seq_lens_cpu)
 
     def build_fia_params(

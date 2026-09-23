@@ -1266,8 +1266,7 @@ def build_draft_attn_metadata_factory(
         kwargs["positions"] = positions[:pad]
         kwargs["is_prefilling"] = is_prefilling
         kwargs["attn_state"] = attn_state
-        if parallel_config is not None:
-            kwargs["parallel_config"] = parallel_config
+        kwargs["parallel_config"] = parallel_config
         if seq_lens_cpu is not None:
             kwargs["seq_lens_np"] = seq_lens_cpu.numpy()
         return raw(*args, **kwargs)

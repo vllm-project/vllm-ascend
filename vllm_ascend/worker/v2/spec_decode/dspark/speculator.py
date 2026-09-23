@@ -47,17 +47,21 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         super().__init__(vllm_config, device)
         self.input_batch: InputBatch | None = None
         self.attn_architecture: str | None = None
-        self.use_dcp = self.attn_vllm_config.parallel_config.decode_context_parallel_size > 1
-        if self.use_dcp:
-            self.dcp_manager = DCPManager(
-                dcp_world_size=self.attn_vllm_config.parallel_config.decode_context_parallel_size,
-                dcp_rank=get_dcp_group().rank_in_group,
-                max_buffer_num_tokens=self.max_num_tokens,
-                max_num_reqs=self.max_num_reqs,
-                device=self.device,
-                vllm_config=self.attn_vllm_config,
-                use_async_scheduling=self.vllm_config.scheduler_config.async_scheduling,
-            )
+        self.use_dcp, self.dcp_manager = self._init_dcp()
+
+    def _init_dcp(self) -> tuple[bool, DCPManager | None]:
+        use_dcp = self.attn_vllm_config.parallel_config.decode_context_parallel_size > 1
+        if not use_dcp:
+            return False, None
+        return True, DCPManager(
+            dcp_world_size=self.attn_vllm_config.parallel_config.decode_context_parallel_size,
+            dcp_rank=get_dcp_group().rank_in_group,
+            max_buffer_num_tokens=self.max_num_tokens,
+            max_num_reqs=self.max_num_reqs,
+            device=self.device,
+            vllm_config=self.attn_vllm_config,
+            use_async_scheduling=self.vllm_config.scheduler_config.async_scheduling,
+        )
 
     def load_draft_model(
         self,
@@ -132,6 +136,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         is_prefilling = torch.zeros(num_reqs_padded, dtype=torch.bool)
         if not self.use_dcp:
             return None, is_prefilling
+        assert self.dcp_manager is not None
         return self.dcp_manager.prepare_draft_dcp_metadata_inputs(
             target_seq_lens_cpu=self.target_input_buffers.seq_lens_cpu,
             is_prefilling=is_prefilling,
