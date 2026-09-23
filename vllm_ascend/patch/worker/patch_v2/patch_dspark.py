@@ -43,6 +43,7 @@ import vllm.model_executor.models.utils as model_utils
 import vllm.v1.worker.gpu.spec_decode.dspark.speculator as speculator_module
 import vllm.v1.worker.gpu.spec_decode.dspark.utils as dspark_utils
 import vllm.v1.worker.gpu.spec_decode.eagle.utils as eagle_utils
+from vllm.distributed.parallel_state import get_pp_group
 
 from vllm_ascend.worker.v2.pp_utils import (
     bypass_upstream_spec_pp_guard,
@@ -52,6 +53,25 @@ from vllm_ascend.worker.v2.pp_utils import (
 
 _original_get_draft_quant_config = model_utils.get_draft_quant_config
 _original_load_dspark_model = dspark_utils.load_dspark_model
+_original_maybe_share_target_embed = eagle_utils.maybe_share_target_embed
+
+
+def _pp_safe_maybe_share_target_embed(draft_model, draft_inner, target_inner):
+    # PP stages past the first have no target embedding to alias. Drafts
+    # whose post_process loads this stage's own vocab shard (e.g. the
+    # Ascend DSpark align step) run after the share check, so skip the
+    # share here instead of letting upstream raise; every other case keeps
+    # the original behavior.
+    target_embed = getattr(target_inner, "embed_tokens", None) or getattr(target_inner, "embedding", None)
+    if isinstance(target_embed, model_utils.PPMissingLayer):
+        target_embed = None
+    if (
+        target_embed is None
+        and get_pp_group().world_size > 1
+        and hasattr(draft_model, "post_process")
+    ):
+        return
+    return _original_maybe_share_target_embed(draft_model, draft_inner, target_inner)
 
 
 def _load_dspark_model_with_target_quant(target_model, vllm_config):
@@ -85,6 +105,7 @@ def _load_dspark_model_with_target_quant(target_model, vllm_config):
         eagle_utils._should_share = should_share
     if inherits_target_quant:
         model_utils.get_draft_quant_config = lambda _vllm_config: vllm_config.quant_config
+    eagle_utils.maybe_share_target_embed = _pp_safe_maybe_share_target_embed
     try:
         # Native draft loading already sets PP=1, but still reads the target's
         # manual layer partition. Mask that partition on both version paths.
@@ -94,6 +115,7 @@ def _load_dspark_model_with_target_quant(target_model, vllm_config):
         with partition_mask, bypass_upstream_spec_pp_guard(vllm_config, spec_pp_support):
             return _original_load_dspark_model(target_model, vllm_config)
     finally:
+        eagle_utils.maybe_share_target_embed = _original_maybe_share_target_embed
         if inherits_target_quant:
             model_utils.get_draft_quant_config = _original_get_draft_quant_config
         if bypass_pp_guard:
