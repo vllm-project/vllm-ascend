@@ -15,19 +15,24 @@
 #ifndef FUSED_SPARSE_ATTENTION_OVERLAP_SERVICE_VECTOR_MLA_H
 #define FUSED_SPARSE_ATTENTION_OVERLAP_SERVICE_VECTOR_MLA_H
 
+// 优化探针：批量 topk 索引预取（已回退，设为 0）。
+// 开启后 MergeKv 主循环不再逐 token 标量读 topkGm_，改为进入循环前一次 DataCopy 进 UB。
+// 实测会引入精度问题（疑似 UB 缓冲区与 plan/valid size 数据冲突），暂时关闭，后续排查。
+#define FSAO_PROBE_BULK_TOPK 0
+
 #include "kernel_operator.h"
 #include "kernel_operator_list_tensor_intf.h"
 #include "kernel_tiling/kernel_tiling.h"
 #include "lib/matmul_intf.h"
 #include "lib/matrix/matmul/tiling.h"
-#include "../fused_sparse_attention_overlap_common.h"
+#include "fused_sparse_attention_overlap_common.h"
 
 using AscendC::CrossCoreSetFlag;
 using AscendC::CrossCoreWaitFlag;
 
 template <typename FusedSparseAttentionOverlapTraits> class FusedSparseAttentionOverlapVectorService {
 public:
-    // Use float for intermediate computations in high-precision mode.
+    // 中间计算数据类型为float，高精度模式
     using T = float;
     using KV_T = typename FusedSparseAttentionOverlapTraits::kvType;
     using OUT_T = typename FusedSparseAttentionOverlapTraits::outputType;
@@ -92,7 +97,12 @@ public:
     __aicore__ inline void CopyInKv(int64_t &mte2Size, int64_t mte3Size, int64_t mergeMte3Idx, int64_t realS2Idx1,
                                     int64_t realS2Idx2, int64_t selectionTokenOffset1,
                                     int64_t selectionTokenOffset2, int64_t s2IdLimit,
-                                    const RunInfo &runInfo);
+                                    const RunInfo &runInfo,
+                                    int64_t &ubTokenIdx1, int64_t &ubTokenIdx2);
+    __aicore__ inline void FlushDirectSelectionUpdate(
+        const int64_t *updateDstSlot, const int64_t *updateUbIdx, int64_t &updateCount,
+        bool &collectEnabled, int64_t mte3Size, int64_t mte2Size, int64_t mergeMte3Idx,
+        int64_t selectionRow, bool batchCollected);
     __aicore__ inline void CopyInSelectionKvRun(int64_t &mte2Size, int64_t mte3Size,
                                                 int64_t mergeMte3Idx, int64_t selectionTokenOffset,
                                                 int64_t tokenCount);
@@ -101,9 +111,14 @@ public:
         int64_t selectionTokenOffset, int64_t kvSrcStride, int64_t ropeSrcStride);
     __aicore__ inline void CopyOutMrgeResult(int64_t mte2Size, int64_t mte3Size, int64_t s2StartGmOffset,
                                              int64_t mergeMte3Idx, const RunInfo &runInfo);
+    __aicore__ inline void CopyOutSelectionUpdate(int64_t mte2Size, int64_t mte3Size, int64_t s2StartGmOffset,
+                                                  int64_t mergeMte3Idx, const RunInfo &runInfo);
     __aicore__ inline void CopyOutSelectionUpdateFromKvMerge(const RunInfo &runInfo);
     __aicore__ inline void CopyOutSparseSelectionUpdateFromKvMerge(const RunInfo &runInfo);
     __aicore__ inline bool IsSelectionUpdateEnabled() const;
+    __aicore__ inline bool UseAllCoreSelectionUpdate() const;
+    __aicore__ inline bool UsePipelineSelectionUpdate() const;
+    __aicore__ inline void SnapshotSelectionSourceReadyAtEntry();
     __aicore__ inline void RunAllCoreSelectionUpdate();
     __aicore__ inline bool UseSetResidentSelection() const;
     __aicore__ inline void ProcessSetResidentSelectionRow(
@@ -172,12 +187,19 @@ public:
         LocalTensor<int32_t> hitSourceLocal,
         int32_t validTopkNum, bool sameRow, int64_t sourceRow,
         int32_t &maxSameRowHitSlot);
+    __aicore__ inline void CopySelectionUpdateTokenFromSelectionCache(
+        int64_t selectionRow, int64_t destinationSlot, int64_t encodedSourceSlot);
     __aicore__ inline void MergeKvFromSelection(const RunInfo &runInfo);
     __aicore__ inline void MergeKvFromSelectionWithSparseUpdates(const RunInfo &runInfo);
     __aicore__ inline uint64_t GetActualQSeqLenForSelectionUpdate(uint32_t batchIdx);
     __aicore__ inline uint64_t GetActualKVSeqLenForSelectionUpdate(uint32_t batchIdx);
     __aicore__ inline void CopySelectionUpdateTokenFromFullCache(
         int64_t selectionRow, uint32_t batchIdx, int64_t topkPos, int32_t topkValue, int64_t s2IdLimit);
+    __aicore__ inline void UpdateSelectionRange(
+        int64_t selectionRow, uint32_t batchIdx, int64_t tokenStart, int64_t tokenEnd, int64_t s2IdLimit,
+        bool appendActualSeq = false);
+    __aicore__ inline void RefreshSelectionStatusRange(
+        int64_t topkBase, int64_t statusBase, int64_t tokenStart, int64_t tokenEnd);
     __aicore__ inline void SetInfInBlk(const LocalTensor<T> &mmResUb, uint32_t dealRowCount, uint32_t columnCount,
                                        uint64_t startId, uint64_t endId);
     __aicore__ inline void SetMidInf(const LocalTensor<T> &mmResUb, uint32_t dealRowCount, uint32_t columnCount,
@@ -218,14 +240,44 @@ public:
     __aicore__ inline void Bmm2FDDataCopyOut(const RunInfo &info, LocalTensor<T> &bmm2ResUb, uint32_t wsMStart,
                                              uint32_t dealRowCount, uint32_t columnCount, uint32_t actualColumnCount);
     __aicore__ inline uint64_t CalcAccumOffset(uint32_t bN2Idx, uint32_t gS1Idx);
-    // Byte sizes of BLOCK and REPEAT
+    __aicore__ inline void ReduceSplitKV(uint32_t slotBegin, uint32_t partNum, uint32_t mCount,
+                                         uint64_t attenOutOffset);
+    // ====== helper：空闲核的 V0/V1 帮搬 MergeKv ======
+    __aicore__ inline void InitHelperSync(const GlobalTensor<int32_t> &doneGm,
+                                          const GlobalTensor<int32_t> &creditGm,
+                                          uint32_t pairs);
+    __aicore__ inline void InitHelperV0(const GlobalTensor<KV_T> &targetKvMergeGm, uint32_t pairIdx);
+    __aicore__ inline void SetHelperParts(uint32_t partIdx, uint32_t partCount,
+                                          const GlobalTensor<int32_t> &helperValidSizeGm,
+                                          uint32_t pairIdx);
+    __aicore__ inline bool IsHelperV0() const { return isHelperV0_; }
+    __aicore__ inline void PublishHelperCredit(uint32_t loop);
+    __aicore__ inline void WaitHelperCredit(uint32_t loop);
+    __aicore__ inline void SignalMergeDone(uint32_t loop);
+    __aicore__ inline void WaitMergeDone(uint32_t loop);
+    __aicore__ inline void FixValidSize(const RunInfo &info);
+    __aicore__ inline void ZeroHelperSyncArea();
+    __aicore__ inline void GetConfusionTransposeTiling(int64_t numR, int64_t numC, const uint32_t stackBufferSize,
+                                                       const uint32_t typeSize, ConfusionTransposeTiling &tiling);
+
+    // BLOCK和REPEAT的字节数
     static constexpr uint64_t BYTE_BLOCK = 32UL;
     static constexpr uint32_t REPEAT_BLOCK_BYTE = 256U;
-    // Number of FP32 elements in BLOCK and REPEAT
+    // BLOCK和REPEAT的FP32元素�?
     static constexpr uint32_t FP32_BLOCK_ELEMENT_NUM = BYTE_BLOCK / sizeof(float);
     static constexpr uint32_t FP32_REPEAT_ELEMENT_NUM = REPEAT_BLOCK_BYTE / sizeof(float);
-    // Repeat stride cannot exceed 256.
+    // repeat stride不能超过256
     static constexpr uint32_t REPEATE_STRIDE_UP_BOUND = 256;
+
+    // ====== helper：空闲核帮搬 MergeKv 的核间握手参数 ======
+    // 环形槽 64 个，每槽 32B（8 个 int32）：DataCopyPad 和 SetAtomicAdd 都要求 32B 粒度。
+    // ring 远大于 kvMergeGm_ 的 4 槽流水深度，helper 又被 credit 通道卡住领先幅度，
+    // 不会绕回冲突。事件 id 用 2：本文件现有代码只用了 0/1/4/5。
+    static constexpr uint32_t HELPER_SYNC_RING = 64;
+    static constexpr uint32_t HELPER_SYNC_SLOT_INT32 = 8;
+    static constexpr uint32_t HELPER_SIGNALS_PER_BLOCK = 2;   // helper 的 V0、V1 子核各发一次
+    static constexpr uint32_t HELPER_SYNC_EVENT_ID = 2;
+    static constexpr uint32_t HELPER_POLL_BACKOFF = 128;      // 轮询退避拍数（≈0.3μs）
 
 private:
     static constexpr bool PAGE_ATTENTION = FusedSparseAttentionOverlapTraits::pageAttention;
@@ -327,6 +379,8 @@ private:
     int64_t selectionStatusStride_ = 0;
     int64_t selectionMembershipStride_ = 0;
     bool enableSelectionUpdate_ = false;
+    bool useAllCoreSelectionUpdate_ = false;
+    bool selectionSourceReadyAtEntry_ = false;
     bool selectionUpdatePlanActive_ = false;
     bool selectionSparseUpdatePlanActive_ = false;
     int64_t selectionUpdatePlanOffset_ = 0;
@@ -334,8 +388,16 @@ private:
     int64_t selectionDataRow_ = -1;
     int64_t selectionDirectRowStride_ = 0;
     bool selectionPairedCopyActive_ = false;
+    // 第 k 位 = 第 k 个 32-token 窗口的 update 条目已经在 MergeKv 里趁数据还在 UB
+    // 时写完了，CopyOutSelectionUpdateFromKvMerge 据此跳过。窗口编号两边都用
+    // 「相对 s2GmStartOffset 的偏移 >> 5」。
+    // ⚠ 收集用的两个 32 元素数组必须是**局部**变量（放在 MergeKv 里、按指针传给
+    // FlushDirectSelectionUpdate）。放成成员时实测全命中点标量 +30.6 μs、
+    // 搬运 +25.3 μs —— 那一批 update 条目为零、收集器一次都没写，涨的纯粹是
+    // 「这两个数组存在」的代价。回写路的 updateDstSlot[32] 也是局部的。
+    uint32_t directWrittenWindowMask_ = 0;
 
-    // ================================Local Buffer Area====================================
+    // ================================Local Buffer�?===================================
     TBuf<> inputBuff1;            // 64K
     TBuf<> inputBuff2;            // 16K
     TBuf<> outputBuff1;           // 32K
@@ -343,6 +405,7 @@ private:
 
     TBuf<> tmpBuff1;              // 32K
     TBuf<> v0ValidSizeBuff;       // 8K
+    TBuf<> helperSyncBuff;        // 2K，helper 握手 scratch（与所有计算 buffer 无重叠）
 
     TBuf<> nValueBuff;
     TBuf<> cofValueBuff;
@@ -365,6 +428,18 @@ private:
     LocalTensor<KV_T> kvMergUb_;
     LocalTensor<KV_T> ropeMergUb_;
     LocalTensor<int32_t> v0ValidSizeUb_;
+
+    // ====== helper：空闲核帮搬 MergeKv ======
+    bool isHelperV0_ = false;          // 本核是 helper（V0/V1 子核同值，名字沿用最初设计）
+    uint32_t helperPartIdx_ = 0;       // 半区内第几份：target=0，helper=1
+    uint32_t helperPartCount_ = 1;     // 半区分几份：1=无 helper（原行为），2=target+helper 各半
+    bool mergeSplitActive_ = false;    // 本轮 MergeKv 是否真的切了（selection 路径不切）
+    GlobalTensor<int32_t> mergeDoneGm_;       // done 计数环形槽：helper 原子加，target 轮询
+    GlobalTensor<int32_t> mergeCreditGm_;     // credit 槽：target 发布，helper 轮询
+    GlobalTensor<int32_t> helperValidSizeGm_; // target 用：helper 核的 kvValidSizeGm_（回收部分计数）
+    int32_t helperCreditSeen_ = 0;            // helper 已读到的信用水位（缓存，覆盖本轮就免轮询）
+    uint32_t helperSyncPairs_ = 1;            // 握手 ring 的 pair 数（ring 按 pair 隔离）
+    uint32_t mergeSyncPairOffset_ = 0;        // 本 pair 的 ring 起点（int32）= pairIdx*RING*SLOT
 };
 
 template <typename FusedSparseAttentionOverlapTraits> __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::InitBuffers(TPipe *pipe)
@@ -376,6 +451,10 @@ template <typename FusedSparseAttentionOverlapTraits> __aicore__ inline void Fus
 
     pipe->InitBuffer(tmpBuff1, ConstInfo::BUFFER_SIZE_BYTE_32K);
     pipe->InitBuffer(v0ValidSizeBuff, ConstInfo::BUFFER_SIZE_BYTE_8K);
+    if constexpr (TEMPLATE_MODE == V_TEMPLATE) {
+        // helper 握手 scratch，只有 V 模板会用到；C 模板不分配，不占它的 UB 预算
+        pipe->InitBuffer(helperSyncBuff, ConstInfo::BUFFER_SIZE_BYTE_2K);
+    }
 
     // M_MAX = 512/2vector = 256, 256 * sizeof(T) * N_Buffer
     pipe->InitBuffer(nValueBuff, ConstInfo::BUFFER_SIZE_BYTE_1K * constInfo.preLoadNum);
@@ -461,6 +540,7 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
         selectionMembershipStride >= SELECTION_MEMBERSHIP_STORAGE_INT16_COUNT ?
         selectionMembershipStride : SELECTION_MEMBERSHIP_STORAGE_INT16_COUNT;
     this->enableSelectionUpdate_ = enableSelectionUpdate;
+    this->useAllCoreSelectionUpdate_ = enableSelectionUpdate;
 }
 
 template <typename FusedSparseAttentionOverlapTraits>
@@ -529,9 +609,9 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
     size_t size = mSplitInfo.vecDealM * FP32_BLOCK_ELEMENT_NUM;
     uint64_t accumTmpOutNum = CalcAccumOffset(info.bIdx, info.gS1Idx);
     uint64_t offset = (accumTmpOutNum * constInfo.kvHeadNum * constInfo.mBaseSize +              // taskoffset
-                       info.tndCoreStartKVSplitPos * constInfo.kvHeadNum * constInfo.mBaseSize + // Partition offset
+                       info.tndCoreStartKVSplitPos * constInfo.kvHeadNum * constInfo.mBaseSize + // 份数offset
                        mSplitInfo.nBufferStartM + mSplitInfo.vecStartM) *
-                       FP32_BLOCK_ELEMENT_NUM; // M-axis offset
+                       FP32_BLOCK_ELEMENT_NUM; // m轴offset
     if (info.actualSingleProcessSInnerSize != 0) {
         LocalTensor<T> tmp = outputBuff2.Get<T>();
         WaitFlag<AscendC::HardEvent::MTE3_V>(SYNC_OUTPUT_BUF2_FLAG);
@@ -561,7 +641,7 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
 {
     Muls(mmResUb, mmResUb, static_cast<T>(tilingData->baseParams.scaleValue), dealRowCount * columnCount);
     if constexpr (TEMPLATE_MODE == V_TEMPLATE) {
-        // Check invalid values in v0.
+        // v0的无效值判�?
         uint64_t s2ValidSizeFirstPart = v0ValidSizeUb_.GetValue(128 + info.loop % MERGE_CACHE_GM_BUF_NUM);
         uint64_t s2ValidSizeSecondPart = v0ValidSizeUb_.GetValue(256 + info.loop % MERGE_CACHE_GM_BUF_NUM);
 
@@ -574,12 +654,12 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
         if (unlikely(s2ValidSizeFirstPart < s2Mid)) {
             int64_t s2StartCeilAlign = CeilAlign(s2ValidSizeFirstPart, 8);
             int64_t s2MidFloorAlign = s2Mid / 8 * 8;
-            // Case 1: s2Mid > s2ValidSizeFirstPart + oneBlk.
-            // This implies s2StartCeilAlign < s2Mid; phase 1 selects s2StartCeilAlign.
-            // s2StartCeilAlign <= s2MidFloorAlign; phase 2 selects s2MidFloorAlign.
-            // Case 2: s2Mid <= s2ValidSizeFirstPart + oneBlk.
-            // This implies s2StartCeilAlign >= s2Mid; phase 1 selects s2Mid.
-            // s2StartCeilAlign > s2MidFloorAlign; phase 2 selects s2StartCeilAlign.
+            // 场景一 s2Mid > s2ValidSizeFirstPart + oneBlk
+            // 可以推导出s2StartCeilAlign < s2Mid   第一阶段取到s2StartCeilAlign
+            // s2StartCeilAlign <= s2MidFloorAlign 第二阶段取到s2MidFloorAlign
+            // 场景�?s2Mid <= s2ValidSizeFirstPart + oneBlk
+            // 可以推导�?s2StartCeilAlign >= s2Mid 第一阶段取到mid
+            // s2StartCeilAlign > s2MidFloorAlign 第二阶段取到s2StartCeilAlign
             SetInfInBlk(mmResUb, dealRowCount, columnCount, s2ValidSizeFirstPart,
                         s2StartCeilAlign >= s2Mid ? s2Mid : s2StartCeilAlign);
             SetMidInf(mmResUb, dealRowCount, columnCount, s2StartCeilAlign, s2MidFloorAlign);
@@ -587,12 +667,12 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
                         s2StartCeilAlign <= s2MidFloorAlign ? s2MidFloorAlign : s2StartCeilAlign, s2Mid);
         }
         if (unlikely(s2ValidSizeSecondPart < s2ProcessSize - s2Mid)) {
-            // Case 1: s2Mid + s2ValidSizeSecondPart > s2ProcessSize + oneBlk.
-            // This implies s2StartCeilAlign < s2ProcessSize; phase 1 selects s2StartCeilAlign.
-            // s2StartCeilAlign <= s2EndFloorAlign; phase 2 selects s2EndFloorAlign.
-            // Case 2: s2Mid + s2ValidSizeSecondPart <= s2ProcessSize + oneBlk.
-            // This implies s2StartCeilAlign >= s2ProcessSize; phase 1 selects s2ProcessSize.
-            // s2StartCeilAlign > s2EndFloorAlign; phase 2 selects s2StartCeilAlign.
+            // 场景一 s2Mid + s2ValidSizeSecondPart > s2ProcessSize + oneBlk
+            // 可以推导�?s2StartCeilAlign < s2ProcessSize 第一阶段取到s2StartCeilAlign
+            // s2StartCeilAlign <= s2EndFloorAlign 第二阶段取到s2EndFloorAlign
+            // 场景�?s2Mid + s2ValidSizeSecondPart <= s2ProcessSize + oneBlk
+            // 可以推导�?s2StartCeilAlign >= s2ProcessSize 第一阶段取到s2ProcessSize
+            // s2StartCeilAlign > s2EndFloorAlign 第二阶段取到s2StartCeilAlign
             int64_t s2StartCeilAlign = CeilAlign(s2Mid + s2ValidSizeSecondPart, 8);
             int64_t s2EndFloorAlign = s2ProcessSize / 8 * 8;
             SetInfInBlk(mmResUb, dealRowCount, columnCount, s2Mid + s2ValidSizeSecondPart,
@@ -611,7 +691,7 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
 {
     //       startId     endId
     // x x x   0      0   0     x x x
-    // Set [startId, endId) to -inf; startId and endId are indices within the block containing endId.
+    // 从startId到endId部分�?inf, endId、startId为endId一个blk内部的下�?
     if (startId >= endId) {
         return;
     }
@@ -642,7 +722,7 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
     }
     // startId        endId
     //    0      ...    0
-    // Set [startId, endId) to -inf; startId and endId are 32-byte-aligned indices.
+    // 从startId到endId部分�?inf, startId、endId�?2B对齐的下�?
     for (uint64_t rowId = 0; rowId < dealRowCount; rowId++) {
         Duplicate(mmResUb[rowId * columnCount + startId], SOFTMAX_MIN_NUM, endId - startId);
     }
@@ -770,7 +850,7 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
     // nUpdate int32 out
     LocalTensor<int32_t> tmQue = outputBuff2.Get<int32_t>();
     WaitFlag<AscendC::HardEvent::MTE3_V>(SYNC_OUTPUT_BUF2_FLAG);
-    LocalTensor<int32_t> nInt32Out = tmQue[startRow]; // Cache nUpdate
+    LocalTensor<int32_t> nInt32Out = tmQue[startRow]; // 缓存nUpdate
 
     Cast(nInt32Out, nUpdateTmp, RoundMode::CAST_ROUND, dealRowCount);
     pipe_barrier(PIPE_V);
@@ -841,13 +921,13 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
     WaitFlag<AscendC::HardEvent::V_MTE3>(SYNC_OUTPUT_BUF2_FLAG);
 
     constexpr uint32_t dGroupSize = 128U;
-    constexpr uint32_t mSplitSize = 64U;     // tmpQue is 32 KB and processes at most 64 N values at once; maximum stored data is 64 * 128 * sizeof(int32)
+    constexpr uint32_t mSplitSize = 64U;     // tmpQue size 32KB，一次只能处�?4个N，最大保存的数据大小�?4*128*sizeof(int32)
     constexpr uint32_t ONE_BLOCK_SIZE = 32U; // 32B
 
     uint32_t subMSize = FusedSparseAttentionOverlapAlign(mSplitInfo.vecDealM, 16U);
-    uint16_t elementPerBlock = ONE_BLOCK_SIZE / sizeof(int32_t);      // Elements per data block; for int32_t, 32 / 4 = 8
+    uint16_t elementPerBlock = ONE_BLOCK_SIZE / sizeof(int32_t);      // 单个datablock的元素数，int32_t类型的为32/4=8
     uint32_t loopCount = (subMSize + mSplitSize - 1) / mSplitSize;
-    uint32_t tailSplitSize = subMSize - (loopCount - 1) * mSplitSize; // Tail block
+    uint32_t tailSplitSize = subMSize - (loopCount - 1) * mSplitSize; // 尾块
 
     for (uint32_t loop = 0, processMSize = mSplitSize; loop < loopCount; loop++) {
         if (loop == (loopCount - 1)) {
@@ -856,13 +936,13 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
         LocalTensor<int32_t> tmpQue = outputBuff1.Get<int32_t>();
 
         WaitFlag<AscendC::HardEvent::MTE3_V>(SYNC_OUTPUT_BUF1_FLAG);
-        // One BRCB expands (m, 1) to (m, 8); repeating 16 times expands it to (m, 128).
+        // (m,1)单次brcb扩充�?m,8), 重复16�? 扩充�?m,128)
         for (uint32_t i = 0; i < dGroupSize / elementPerBlock; i++) {
             Brcb(tmpQue[i * elementPerBlock],
                  nUpdateTensor[loop * mSplitSize],
                  static_cast<uint8_t>((processMSize + elementPerBlock - 1) / elementPerBlock),
-                 {static_cast<uint16_t>(dGroupSize / elementPerBlock), // Address stride between destination data blocks in one iteration, in data blocks
-                  static_cast<uint16_t>(dGroupSize)});                 // Address stride for the same destination data block between adjacent iterations
+                 {static_cast<uint16_t>(dGroupSize / elementPerBlock), // 单次迭代内，目的操作数不同datablock间地址步长,单位为datablock
+                  static_cast<uint16_t>(dGroupSize)});                 // 相邻迭代间，目的操作数相同datablock地址步长
         }
 
         SetFlag<AscendC::HardEvent::V_MTE3>(SYNC_OUTPUT_BUF1_FLAG);
@@ -874,10 +954,10 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
         SetAtomicAdd<int32_t>();
         DataCopyParams dataCopyParams;
         dataCopyParams.blockCount = static_cast<uint16_t>(processMSize);
-        dataCopyParams.blockLen = dGroupSize * sizeof(int32_t) / ONE_BLOCK_SIZE; // Each block has 128 elements, in 32-byte units
-        dataCopyParams.srcStride = 0;                                            // Gap between the end of one data block and the start of the next
+        dataCopyParams.blockLen = dGroupSize * sizeof(int32_t) / ONE_BLOCK_SIZE; // 每个block�?28个元素，单位�?2B
+        dataCopyParams.srcStride = 0;                                            // 前面一个数据块的尾与后面数据块的头的间�?
         dataCopyParams.dstStride = static_cast<uint16_t>((constInfo.headDim - dGroupSize) *
-                                                         sizeof(int32_t) / ONE_BLOCK_SIZE); // In 32-byte units
+                                                         sizeof(int32_t) / ONE_BLOCK_SIZE); // 单位�?2B
         for (uint32_t i = 0; i < constInfo.headDim / dGroupSize; i++) {          // 4=512/128
             DataCopy(mm2ResInt32Gm[baseoffset + i * dGroupSize] ,tmpQue, dataCopyParams);
         }
@@ -896,8 +976,8 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
     }
     uint32_t mSplitSize = info.actualSingleProcessSInnerSize == 0 ?
         16 : BASE_BLOCK_MAX_ELEMENT_NUM / info.actualSingleProcessSInnerSizeAlign;
-    // 1. Aligning down to 8 is required because UB operations use at least 32 bytes.
-    // 2. info.actualSingleProcessSInnerSizeAlign is at most 512; mSplitSize ensures a minimum of 16.
+    // 1. 向下8对齐是因为UB操作至少32B
+    // 2. info.actualSingleProcessSInnerSizeAlign最�?12, mSplitSize可以确保最小为16
     mSplitSize = mSplitSize / 8 * 8;
 
     if (mSplitSize > mSplitInfo.vecDealM) {
@@ -913,12 +993,12 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
         dataCopyParams.srcStride = 0;
         dataCopyParams.dstStride = 0;
         DataCopyPadExtParams<int32_t> padParams;
-        // Add a 128-element offset so v0 and v1 from different loops do not interfere.
+        // 额外偏移128个元素，避免不同loop下v0和v1互相影响
         DataCopyPad(v0ValidSizeUb_[128], kvValidSizeGm_[info.loop % MERGE_CACHE_GM_BUF_NUM * (128 * 2)],
                     dataCopyParams, padParams);
         SetFlag<HardEvent::MTE2_S>(0);
         if (unlikely(loopCount == 0)) {
-            // Scalar synchronization is expensive, so move it inside the loop.
+            // scalar同步影响较大，挪到循环内部进�?
             WaitFlag<HardEvent::MTE2_S>(0);
         }
     }
@@ -927,7 +1007,7 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
             dealSize = tailSplitSize;
         }
         DealBmm1ResBaseBlock(info, mSplitInfo, i * mSplitSize, dealSize, info.actualSingleProcessSInnerSizeAlign, i);
-        pingpongFlag ^= 1; // Toggle ping-pong buffer 0/1
+        pingpongFlag ^= 1; // pingpong 0 1切换
     }
 }
 
@@ -1186,8 +1266,19 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
                                                         int64_t realS2Idx1, int64_t realS2Idx2,
                                                         int64_t selectionTokenOffset1,
                                                         int64_t selectionTokenOffset2, int64_t s2IdLimit,
-                                                        const RunInfo &runInfo)
+                                                        const RunInfo &runInfo,
+                                                        int64_t &ubTokenIdx1, int64_t &ubTokenIdx2)
 {
+    // ubTokenIdxN = 这个 token 落在 UB 半区里的第几格，−1 = 没写入或不需要。
+    // 只有**未命中**的 token 才可能是 update 条目（IsSelectionPlanHit 与
+    // IsSelectionPlanUpdate 互斥），命中的一律留 −1。
+    //
+    // 换位在这里是现成的：配对搬运按 keyOffset 小的那个起头，谁在前当场就知道。
+    // 回写路 CopyOutSelectionUpdateFromKvMerge 是事后从 GM 重读 topk 和块表反推
+    // 同一件事（优化 02 把那四次读包进了条件，仍要读）——从这里直接带出去，
+    // 那段倒推可以整个不做。
+    ubTokenIdx1 = -1;
+    ubTokenIdx2 = -1;
     bool validS2Idx1 = realS2Idx1 >= 0 && realS2Idx1 < s2IdLimit;
     bool validS2Idx2 = realS2Idx2 >= 0 && realS2Idx2 < s2IdLimit;
     bool selectionHit1 = selectionTokenOffset1 >= 0 && validS2Idx1;
@@ -1199,22 +1290,46 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
         }
         int64_t kvSrcStride = 0;
         int64_t ropeSrcStride = 0;
+        // CanUsePairedSelectionCopy 要求后一个槽位号更大（stride 不能为负）。
+        // 槽位打散之后两者的先后是随机的，约一半的对配不上，退成两次
+        // CopyInSingleKv = 四条搬运指令，而配上只要两条。
+        //
+        // 但这两项都是**命中**（selectionTokenOffsetN >= 0 只可能来自
+        // IsSelectionPlanHit 为真），而它们在合并缓冲里的先后是可以换的：
+        // attention 对 key 的次序不敏感，回写路 CopyOutSelectionUpdateFromKvMerge
+        // 只处理未命中条目、跟这两项不相交。所以按槽位号排一下就能让 stride
+        // 恒为正，配对总能成 —— 搬运指令从平均 1.5 条/token 降到 1.0。
+        int64_t pairLo = selectionTokenOffset1;
+        int64_t pairHi = selectionTokenOffset2;
+        if (pairHi < pairLo) {
+            pairLo = selectionTokenOffset2;
+            pairHi = selectionTokenOffset1;
+        }
         if (selectionPairedCopyActive_ && selectionHit1 && selectionHit2 &&
             CanUsePairedSelectionCopy(
-                selectionTokenOffset1, selectionTokenOffset2,
+                pairLo, pairHi,
                 kvSrcStride, ropeSrcStride)) {
             CopyInSelectionKvPair(
-                mte2Size, mte3Size, mergeMte3Idx, selectionTokenOffset1,
+                mte2Size, mte3Size, mergeMte3Idx, pairLo,
                 kvSrcStride, ropeSrcStride);
             return;
         }
 
         int64_t keyOffset1 = selectionHit1 ? -1 : GetKeyGmOffset(realS2Idx1, runInfo, s2IdLimit);
         int64_t keyOffset2 = selectionHit2 ? -1 : GetKeyGmOffset(realS2Idx2, runInfo, s2IdLimit);
+        int64_t singleSlot1 = mte2Size - mte3Size;
         CopyInSingleKv(mte2Size, mte3Size, mergeMte3Idx, realS2Idx1, keyOffset1,
                        selectionHit1 ? selectionTokenOffset1 : -1, s2IdLimit, runInfo);
+        int64_t singleSlot2 = mte2Size - mte3Size;
         CopyInSingleKv(mte2Size, mte3Size, mergeMte3Idx, realS2Idx2, keyOffset2,
                        selectionHit2 ? selectionTokenOffset2 : -1, s2IdLimit, runInfo);
+        // 两个来源都无效时 CopyInSingleKv 不写、mte2Size 不动，那一格归下一个 token
+        if (!selectionHit1 && keyOffset1 >= 0) {
+            ubTokenIdx1 = singleSlot1;
+        }
+        if (!selectionHit2 && keyOffset2 >= 0) {
+            ubTokenIdx2 = singleSlot2;
+        }
         return;
     }
 
@@ -1229,10 +1344,19 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
     bool usePairedCopy = CanUsePairedKvCopy(
         realS2Idx1, realS2Idx2, keyOffset1, keyOffset2, s2IdLimit,
         runInfo, keySrcStride, keyRopeSrcStride);
+    int64_t pairBaseSlot = mte2Size - mte3Size;
     if (unlikely(!usePairedCopy)) {
-        // For exceptional cases such as stride overflow, negative stride, or excessive S2 length, restore two copy instructions.
+        // stride溢出、stride为负数、s2超长等异常场景，还原�?条搬运指�?
+        int64_t fallbackSlot1 = mte2Size - mte3Size;
         CopyInSingleKv(mte2Size, mte3Size, mergeMte3Idx, realS2Idx1, keyOffset1, -1, s2IdLimit, runInfo);
+        int64_t fallbackSlot2 = mte2Size - mte3Size;
         CopyInSingleKv(mte2Size, mte3Size, mergeMte3Idx, realS2Idx2, keyOffset2, -1, s2IdLimit, runInfo);
+        if (keyOffset1 >= 0) {
+            ubTokenIdx1 = fallbackSlot1;
+        }
+        if (keyOffset2 >= 0) {
+            ubTokenIdx2 = fallbackSlot2;
+        }
     } else {
         DataCopyExtParams intriParams;
         intriParams.blockLen = constInfo.sparseBlockSize * constInfo.headDim * sizeof(KV_T);
@@ -1253,6 +1377,15 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
         intriParams.srcStride = keyRopeSrcStride;
         DataCopyPad(ropeMergUb_[mergeMte3Idx % 2 * 32 * 64 + (mte2Size - mte3Size) * constInfo.headDimRope],
                     keyRopeGm_[startGmOffset * constInfo.headDimRope], intriParams, padParams);
+        // keyOffset 小的那个排在前面 —— 这正是回写路事后要反推的那个换位。
+        bool pairTransposed = keyOffset1 > -1 && keyOffset2 > -1 && keyOffset2 < keyOffset1;
+        if (keyOffset1 > -1) {
+            ubTokenIdx1 = pairTransposed ? pairBaseSlot + constInfo.sparseBlockSize : pairBaseSlot;
+        }
+        if (keyOffset2 > -1) {
+            ubTokenIdx2 = (keyOffset1 > -1 && !pairTransposed) ?
+                pairBaseSlot + constInfo.sparseBlockSize : pairBaseSlot;
+        }
         mte2Size += ((keyOffset1 > -1) + (keyOffset2 > -1)) * constInfo.sparseBlockSize;
     }
 }
@@ -1284,6 +1417,193 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
     (void)runInfo;
 }
 
+// 未命中的 token 取回来时已经在 kvMergUb_ 里待过一趟。CopyOutMrgeResult 把它写进
+// kvMergeGm_（计算流要读），而回写路 CopyOutSelectionUpdateFromKvMerge 之后又从
+// kvMergeGm_ 读回 UB 才写进 selection 缓存 —— 同一份数据在 UB 里出现两次，中间
+// 白跑一个 GM 来回。这里趁数据还在 UB 就把 update 条目直接发出去。
+//
+// 只接条目密的窗口。条目稀时优化 03 的按需回读只读回真要写的那几个，本来就不亏，
+// 留给它走老路 —— 那也是这一刀的零对照臂（命中率 ≥75% 的点结构上一行不变）。
+template <typename FusedSparseAttentionOverlapTraits>
+__aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::FlushDirectSelectionUpdate(
+    const int64_t *updateDstSlot, const int64_t *updateUbIdx, int64_t &updateCount,
+    bool &collectEnabled, int64_t mte3Size, int64_t mte2Size, int64_t mergeMte3Idx,
+    int64_t selectionRow, bool batchCollected)
+{
+    int64_t count = updateCount;
+    updateCount = 0;
+    // 判据与回写路的 sparseWriteback 互为反面，两边各自从同一段 GM 范围数出
+    // 同一个 updateCount，不需要通信。
+    //
+    // ⚠ 收集常开（移植自 yangqiang2018/yq/opt-merge-0723 的 c089d20d）：摘掉
+    // 密度预测（原 count*4 > batchTokenCount 才继续收）。原判据在 strided 布局
+    // miss=512（hit 75%）恰卡数学边界（每窗 8 条、8*4=32 不大于 32），05 直写
+    // 整档失效、退回老路逐窗全扫；常开后 hit 0.75~1.0 段保留 UB 直写快路。
+    // 风险（原作者记录）：05 三版迭代期高命中端曾 +2.7~+4.8% 回归（记账成本+
+    // 寄存器压力）；窗口化后 flush 点已降到每窗一次，需 A/B 复核，回归复现
+    // 则恢复下行密度预测。
+    collectEnabled = true;
+    // 窗口编号 = 批起点 >> 5，与回写路的 (localOffset − s2GmStartOffset) >> 5 同一套。
+    // mte3Size 按定义就是这一批在 GM 里的起点偏移（CopyOutMrgeResult 写到
+    // s2GmStartOffset + mte3Size）。
+    //
+    // ⚠ 起点对齐还不够，批大小也必须恰好 32：只攒了 30 个就落盘的批如果被认下，
+    // 回写路会整个跳过 32 个 token 的窗口，多出的那两个条目就漏写。不满 32 的
+    // 批（尾批、或有 token 被跳过）一律不认、退回老路，代价只是一个窗口。
+    if ((mte3Size & 31) != 0 || mte2Size - mte3Size != 32) {
+        return;
+    }
+    int64_t windowIdx = mte3Size >> 5;
+    if (windowIdx >= 32) {
+        return;
+    }
+    if (count <= 0) {
+        // 满批零条目也置掩码（移植自 22c2af8f）：批恰 32 蕴含本窗全部 token
+        // 有效且落了 UB（无效 token 会 mergeStopped、批必然不满 32）。但
+        // count=0 等价于"本窗确无 update 条目"有两个前提，缺一个都是灾难：
+        //   1) 本批 plan 真解码过（useSelectionPlanSource）。不成立时 Phase A
+        //      根本不读 plan，slotBuf 恒 0，收集是瞎子、count 恒 0——
+        //      dense 计划的 control(2) 记的是 **hitCount**（见
+        //      WriteSelectionUpdatePlan），全 miss 的冷跑 hitCount=0 正是这种
+        //      配置，此时回读路是唯一写入方，任何掩码都是漏写（71cfade2 只挡
+        //      了下一条，没挡这条：冷跑只写出每 part 首窗 32 行）。
+        //   2) 本批收集真开着。helper 核 directWritebackActive=false，首轮
+        //      收集关闭，收集常开（c089）要到本函数第一次执行才重开——那首
+        //      轮的 count=0 是"没查"而非"查过没有"。
+        // 两个前提合起来就是调用点留底的 batchCollected。count<0 是超 32 条
+        // 整批作废的防御分支，同样不置掩码、退回老路兜底。
+        if (count == 0 && batchCollected) {
+            directWrittenWindowMask_ |= (1U << static_cast<uint32_t>(windowIdx));
+        }
+        return;
+    }
+
+    // MTE2→MTE3 的等待 CopyOutMrgeResult 已经做过（count > 0 蕴含 mte2Size > mte3Size，
+    // 那条路上必然执行到那次 SetFlag/WaitFlag），这里不重复。
+    int64_t ubBase = mergeMte3Idx % 2 * 32 * 512;
+    int64_t ropeUbBase = mergeMte3Idx % 2 * 32 * 64;
+    DataCopyExtParams kvParams;
+    kvParams.blockLen = constInfo.headDim * sizeof(KV_T);
+    kvParams.srcStride = 0;
+    kvParams.dstStride = 0;
+    DataCopyExtParams ropeParams;
+    ropeParams.blockLen = constInfo.headDimRope * sizeof(KV_T);
+    ropeParams.srcStride = 0;
+    ropeParams.dstStride = 0;
+
+    int64_t idx = 0;
+    while (idx < count) {
+        int64_t destinationSlot = updateDstSlot[idx];
+        int64_t destinationBlockTableIdx = destinationSlot / selectionKvBlockSize_;
+        int64_t destinationBlockOffset = destinationSlot % selectionKvBlockSize_;
+        int32_t destinationBlockNum = selectionKvBlockTableGm_.GetValue(
+            selectionRow * selectionMaxBlockNum_ + destinationBlockTableIdx);
+        int64_t srcStart = updateUbIdx[idx];
+        int64_t runLen = 1;
+        while (idx + runLen < count &&
+               updateDstSlot[idx + runLen] == destinationSlot + runLen &&
+               updateUbIdx[idx + runLen] == srcStart + runLen &&
+               destinationBlockOffset + runLen < selectionKvBlockSize_) {
+            runLen++;
+        }
+        if (destinationBlockNum >= 0) {
+            kvParams.blockCount = runLen;
+            int64_t dstKvAddr =
+                (static_cast<int64_t>(destinationBlockNum) * selectionKvBlockSize_ +
+                 destinationBlockOffset) * static_cast<int64_t>(constInfo.headDim);
+            DataCopyPad(selectionKvCacheGm_[dstKvAddr],
+                kvMergUb_[ubBase + srcStart * static_cast<int64_t>(constInfo.headDim)],
+                kvParams);
+
+            if (constInfo.headDimRope > 0) {
+                ropeParams.blockCount = runLen;
+                int64_t dstRopeAddr =
+                    (static_cast<int64_t>(destinationBlockNum) * selectionKvBlockSize_ +
+                     destinationBlockOffset) * static_cast<int64_t>(constInfo.headDimRope);
+                DataCopyPad(selectionKRopeGm_[dstRopeAddr],
+                    ropeMergUb_[ropeUbBase + srcStart * static_cast<int64_t>(constInfo.headDimRope)],
+                    ropeParams);
+            }
+        }
+        idx += runLen;
+    }
+    directWrittenWindowMask_ |= (1U << static_cast<uint32_t>(windowIdx));
+}
+
+template <typename FusedSparseAttentionOverlapTraits>
+__aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::CopyOutSelectionUpdate(
+    int64_t mte2Size, int64_t mte3Size, int64_t s2StartGmOffset, int64_t mergeMte3Idx, const RunInfo &runInfo)
+{
+    if (mte2Size <= mte3Size || selectionKvBlockSize_ <= 0 || selectionMaxBlockNum_ <= 0 ||
+        selectionTopkBlockSize_ != 1 || constInfo.sparseBlockSize != 1) {
+        return;
+    }
+
+    int64_t tokenCount = mte2Size - mte3Size;
+    int64_t logicalSparseOffset =
+        static_cast<int64_t>(runInfo.s2Idx) * static_cast<int64_t>(constInfo.s2BaseSize) +
+        s2StartGmOffset + mte3Size;
+    int64_t selectionRow = GetSelectionRow(runInfo);
+
+    int64_t copiedCount = 0;
+    while (copiedCount < tokenCount) {
+        int64_t topkPos = logicalSparseOffset + copiedCount;
+        int64_t selBlockTableIdx = topkPos / selectionKvBlockSize_;
+        int64_t selBlockOffset = topkPos % selectionKvBlockSize_;
+        int64_t writeCount = tokenCount - copiedCount;
+        int64_t remainingInBlock = selectionKvBlockSize_ - selBlockOffset;
+        if (writeCount > remainingInBlock) {
+            writeCount = remainingInBlock;
+        }
+
+        int32_t selBlockNum = selectionKvBlockTableGm_.GetValue(
+            selectionRow * selectionMaxBlockNum_ + selBlockTableIdx);
+        if (selBlockNum >= 0) {
+            DataCopyExtParams kvParams;
+            kvParams.blockCount = writeCount;
+            kvParams.blockLen = constInfo.headDim * sizeof(KV_T);
+            kvParams.srcStride = 0;
+            kvParams.dstStride = 0;
+
+            int64_t dstKvAddr = static_cast<int64_t>(selBlockNum) * selectionKvBlockSize_ *
+                                    static_cast<int64_t>(constInfo.headDim) +
+                                selBlockOffset * static_cast<int64_t>(constInfo.headDim);
+            LocalTensor<KV_T> srcKv =
+                kvMergUb_[mergeMte3Idx % 2 * 32 * 512 + copiedCount * static_cast<int64_t>(constInfo.headDim)];
+            DataCopyPad(selectionKvCacheGm_[dstKvAddr], srcKv, kvParams);
+
+            DataCopyExtParams ropeParams;
+            ropeParams.blockCount = writeCount;
+            ropeParams.blockLen = constInfo.headDimRope * sizeof(KV_T);
+            ropeParams.srcStride = 0;
+            ropeParams.dstStride = 0;
+
+            int64_t dstRopeAddr = static_cast<int64_t>(selBlockNum) * selectionKvBlockSize_ *
+                                      static_cast<int64_t>(constInfo.headDimRope) +
+                                  selBlockOffset * static_cast<int64_t>(constInfo.headDimRope);
+            LocalTensor<KV_T> srcRope =
+                ropeMergUb_[mergeMte3Idx % 2 * 32 * 64 + copiedCount * static_cast<int64_t>(constInfo.headDimRope)];
+            DataCopyPad(selectionKRopeGm_[dstRopeAddr], srcRope, ropeParams);
+        }
+
+        int64_t statusAddr = selectionRow * selectionStatusStride_ + topkPos;
+        for (int64_t idx = 0; idx < writeCount; idx++) {
+            int32_t topkValue = topkGm_.GetValue(runInfo.topKBaseOffset + topkPos + idx);
+            selectionKvBlockStatusGm_.SetValue(statusAddr + idx, topkValue);
+        }
+        copiedCount += writeCount;
+    }
+
+    if (logicalSparseOffset == 0 && GetSubBlockIdx() == 0) {
+        int32_t actualSeq = static_cast<int32_t>(constInfo.sparseBlockCount);
+        selectionKvActualSeqGm_.SetValue(selectionRow, actualSeq);
+        selectionKvBlockStatusGm_.SetValue(
+            selectionRow * selectionStatusStride_ +
+            static_cast<int64_t>(constInfo.sparseBlockCount),
+            actualSeq);
+    }
+}
+
 template <typename FusedSparseAttentionOverlapTraits>
 __aicore__ inline bool FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::IsSelectionUpdateEnabled() const
 {
@@ -1291,15 +1611,48 @@ __aicore__ inline bool FusedSparseAttentionOverlapVectorService<FusedSparseAtten
 }
 
 template <typename FusedSparseAttentionOverlapTraits>
+__aicore__ inline bool FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::UseAllCoreSelectionUpdate() const
+{
+    return useAllCoreSelectionUpdate_;
+}
+
+template <typename FusedSparseAttentionOverlapTraits>
+__aicore__ inline bool FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::UsePipelineSelectionUpdate() const
+{
+    return false;
+}
+
+template <typename FusedSparseAttentionOverlapTraits>
 __aicore__ inline bool
 FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::UseSetResidentSelection() const
 {
-    return enableSelectionUpdate_ && PAGE_ATTENTION &&
+    return enableSelectionUpdate_ && useAllCoreSelectionUpdate_ && PAGE_ATTENTION &&
         TEMPLATE_MODE == V_TEMPLATE && selectionKvBlockSize_ > 0 && selectionMaxBlockNum_ > 0 &&
         selectionTopkBlockSize_ == 1 && constInfo.sparseBlockSize == 1 &&
         constInfo.sparseBlockCount > 0 && constInfo.sparseBlockCount <= SELECTION_MAX_TOPK &&
         selectionStatusStride_ >= static_cast<int64_t>(constInfo.sparseBlockCount) + 1 &&
         selectionMembershipStride_ >= SELECTION_MEMBERSHIP_STORAGE_INT16_COUNT;
+}
+
+template <typename FusedSparseAttentionOverlapTraits>
+__aicore__ inline void
+FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::SnapshotSelectionSourceReadyAtEntry()
+{
+    constexpr int64_t statusElementsPerDataBlock = BYTE_BLOCK / sizeof(int32_t);
+    int64_t readyOffset = static_cast<int64_t>(constInfo.sparseBlockCount);
+    int64_t readyCopyStart = readyOffset / statusElementsPerDataBlock * statusElementsPerDataBlock;
+    DataCopyExtParams readyParams;
+    readyParams.blockCount = 1;
+    readyParams.blockLen = BYTE_BLOCK;
+    readyParams.srcStride = 0;
+    readyParams.dstStride = 0;
+    DataCopyPadExtParams<int32_t> readyPadParams{false, 0, 0, 0};
+    DataCopyPad(v0ValidSizeUb_, selectionKvBlockStatusGm_[readyCopyStart], readyParams, readyPadParams);
+    SetFlag<AscendC::HardEvent::MTE2_S>(0);
+    WaitFlag<AscendC::HardEvent::MTE2_S>(0);
+    selectionSourceReadyAtEntry_ = enableSelectionUpdate_ &&
+        v0ValidSizeUb_.GetValue(readyOffset - readyCopyStart) ==
+            static_cast<int32_t>(constInfo.sparseBlockCount);
 }
 
 template <typename FusedSparseAttentionOverlapTraits>
@@ -1409,6 +1762,138 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
     DataCopyPad(selectionKRopeGm_[dstRopeAddr], ropeMergUb_, ropeParams);
     SetFlag<AscendC::HardEvent::MTE3_MTE2>(0);
     WaitFlag<AscendC::HardEvent::MTE3_MTE2>(0);
+}
+
+template <typename FusedSparseAttentionOverlapTraits>
+__aicore__ inline void
+FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::
+CopySelectionUpdateTokenFromSelectionCache(
+    int64_t selectionRow, int64_t destinationSlot, int64_t encodedSourceSlot)
+{
+    int64_t topkCount = static_cast<int64_t>(constInfo.sparseBlockCount);
+    int64_t sourceRow = encodedSourceSlot / topkCount;
+    int64_t sourceSlot = encodedSourceSlot - sourceRow * topkCount;
+    if (sourceRow < 0 || sourceSlot < 0 || sourceSlot >= topkCount ||
+        (sourceRow == selectionRow && sourceSlot == destinationSlot)) {
+        return;
+    }
+
+    int64_t sourceBlockTableIdx = sourceSlot / selectionKvBlockSize_;
+    int64_t destinationBlockTableIdx = destinationSlot / selectionKvBlockSize_;
+    int32_t sourceBlockNum = selectionKvBlockTableGm_.GetValue(
+        sourceRow * selectionMaxBlockNum_ + sourceBlockTableIdx);
+    int32_t destinationBlockNum = selectionKvBlockTableGm_.GetValue(
+        selectionRow * selectionMaxBlockNum_ + destinationBlockTableIdx);
+    if (sourceBlockNum < 0 || destinationBlockNum < 0) {
+        return;
+    }
+
+    int64_t sourceBlockOffset = sourceSlot % selectionKvBlockSize_;
+    int64_t destinationBlockOffset = destinationSlot % selectionKvBlockSize_;
+    int64_t sourceKvOffset =
+        (static_cast<int64_t>(sourceBlockNum) * selectionKvBlockSize_ + sourceBlockOffset) *
+        static_cast<int64_t>(constInfo.headDim);
+    int64_t destinationKvOffset =
+        (static_cast<int64_t>(destinationBlockNum) * selectionKvBlockSize_ + destinationBlockOffset) *
+        static_cast<int64_t>(constInfo.headDim);
+
+    DataCopyExtParams kvParams;
+    kvParams.blockCount = 1;
+    kvParams.blockLen = constInfo.headDim * sizeof(KV_T);
+    kvParams.srcStride = 0;
+    kvParams.dstStride = 0;
+    DataCopyPadExtParams<KV_T> padParams;
+    DataCopyPad(kvMergUb_, selectionKvCacheGm_[sourceKvOffset], kvParams, padParams);
+
+    DataCopyExtParams ropeParams;
+    ropeParams.blockCount = 1;
+    ropeParams.blockLen = constInfo.headDimRope * sizeof(KV_T);
+    ropeParams.srcStride = 0;
+    ropeParams.dstStride = 0;
+    if (constInfo.headDimRope > 0) {
+        int64_t sourceRopeOffset =
+            (static_cast<int64_t>(sourceBlockNum) * selectionKvBlockSize_ + sourceBlockOffset) *
+            static_cast<int64_t>(constInfo.headDimRope);
+        DataCopyPad(ropeMergUb_, selectionKRopeGm_[sourceRopeOffset], ropeParams, padParams);
+    }
+
+    SetFlag<AscendC::HardEvent::MTE2_MTE3>(0);
+    WaitFlag<AscendC::HardEvent::MTE2_MTE3>(0);
+    DataCopyPad(selectionKvCacheGm_[destinationKvOffset], kvMergUb_, kvParams);
+    if (constInfo.headDimRope > 0) {
+        int64_t destinationRopeOffset =
+            (static_cast<int64_t>(destinationBlockNum) * selectionKvBlockSize_ + destinationBlockOffset) *
+            static_cast<int64_t>(constInfo.headDimRope);
+        DataCopyPad(selectionKRopeGm_[destinationRopeOffset], ropeMergUb_, ropeParams);
+    }
+    SetFlag<AscendC::HardEvent::MTE3_MTE2>(0);
+    WaitFlag<AscendC::HardEvent::MTE3_MTE2>(0);
+}
+
+template <typename FusedSparseAttentionOverlapTraits>
+__aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::UpdateSelectionRange(
+    int64_t selectionRow, uint32_t batchIdx, int64_t tokenStart, int64_t tokenEnd, int64_t s2IdLimit,
+    bool appendActualSeq)
+{
+    int64_t topkBase = selectionRow * static_cast<int64_t>(constInfo.sparseBlockCount);
+    int64_t statusBase = selectionRow * selectionStatusStride_;
+    constexpr int64_t statusElementsPerDataBlock = BYTE_BLOCK / sizeof(int32_t);
+    int64_t tokenCount = tokenEnd - tokenStart;
+    int64_t statusStart = statusBase + tokenStart;
+    LocalTensor<int32_t> statusLocal = v0ValidSizeUb_;
+    int64_t statusLocalOffset = 0;
+    int64_t statusCopyStart = statusStart;
+    int64_t statusCopyCount = tokenCount + static_cast<int64_t>(appendActualSeq);
+    bool useAlignedCopy = statusStart % statusElementsPerDataBlock == 0;
+    if (!useAlignedCopy) {
+        statusCopyStart = statusStart / statusElementsPerDataBlock * statusElementsPerDataBlock;
+        statusLocalOffset = statusStart - statusCopyStart;
+        statusCopyCount = statusElementsPerDataBlock;
+        DataCopyExtParams loadStatusParams;
+        loadStatusParams.blockCount = 1;
+        loadStatusParams.blockLen = BYTE_BLOCK;
+        loadStatusParams.srcStride = 0;
+        loadStatusParams.dstStride = 0;
+        DataCopyPadExtParams<int32_t> padParams{false, 0, 0, 0};
+        DataCopyPad(statusLocal, selectionKvBlockStatusGm_[statusCopyStart], loadStatusParams, padParams);
+        SetFlag<AscendC::HardEvent::MTE2_S>(1);
+        WaitFlag<AscendC::HardEvent::MTE2_S>(1);
+    }
+    for (int64_t topkPos = tokenStart; topkPos < tokenEnd; topkPos++) {
+        int32_t topkValue = topkGm_.GetValue(topkBase + topkPos);
+        int64_t localStatusIdx = statusLocalOffset + topkPos - tokenStart;
+        int32_t currentStatus = useAlignedCopy ?
+            selectionKvBlockStatusGm_.GetValue(statusBase + topkPos) : statusLocal.GetValue(localStatusIdx);
+        if (currentStatus != topkValue) {
+            CopySelectionUpdateTokenFromFullCache(selectionRow, batchIdx, topkPos, topkValue, s2IdLimit);
+        }
+        statusLocal.SetValue(localStatusIdx, topkValue);
+    }
+    if (appendActualSeq) {
+        statusLocal.SetValue(statusLocalOffset + tokenCount, static_cast<int32_t>(constInfo.sparseBlockCount));
+    }
+    if (statusCopyCount > 0) {
+        SetFlag<AscendC::HardEvent::S_MTE3>(1);
+        WaitFlag<AscendC::HardEvent::S_MTE3>(1);
+        DataCopyExtParams statusParams;
+        statusParams.blockCount = 1;
+        statusParams.blockLen = static_cast<uint32_t>(statusCopyCount * sizeof(int32_t));
+        statusParams.srcStride = 0;
+        statusParams.dstStride = 0;
+        DataCopyPad(selectionKvBlockStatusGm_[statusCopyStart], statusLocal, statusParams);
+        SetFlag<AscendC::HardEvent::MTE3_S>(1);
+        WaitFlag<AscendC::HardEvent::MTE3_S>(1);
+    }
+}
+
+template <typename FusedSparseAttentionOverlapTraits>
+__aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::RefreshSelectionStatusRange(
+    int64_t topkBase, int64_t statusBase, int64_t tokenStart, int64_t tokenEnd)
+{
+    for (int64_t topkPos = tokenStart; topkPos < tokenEnd; topkPos++) {
+        selectionKvBlockStatusGm_.SetValue(
+            statusBase + topkPos, topkGm_.GetValue(topkBase + topkPos));
+    }
 }
 
 template <typename FusedSparseAttentionOverlapTraits>
@@ -2066,7 +2551,6 @@ FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::Pro
     int64_t membershipBase = selectionRow * selectionMembershipStride_;
 
     IsSelectionMembershipMapReady(membershipBase, gatheredMembershipLocal);
-    // Only a published external plan bypasses kernel-side planning.
     if (gatheredMembershipLocal.GetValue(1) ==
         SELECTION_EXTERNAL_PLAN_READY_MARKER) {
         selectionKvActualSeqGm_.SetValue(selectionRow, topkCount);
@@ -2336,7 +2820,9 @@ FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::Run
         return;
     }
 
-    uint32_t workerCount = GetBlockNum();
+    // AIV 侧 GetBlockNum() 返回 AIC 核数（c:v = 1:2），乘 2 覆盖全部 AIV 子核参与 P0 行分摊，
+    // 否则后半数子核（workerIdx >= 24）直接退出，bs > 24 时行回绕使首个核承担双倍工作量。
+    uint32_t workerCount = GetBlockNum() * 2;
     uint32_t workerIdx = (GetBlockIdx() / 2) * 2 + GetSubBlockIdx();
     if (workerCount == 0 || workerIdx >= workerCount) {
         return;
@@ -2507,12 +2993,33 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
     int64_t membershipBase = logicalSelectionRow * selectionMembershipStride_;
     int64_t s2ProcessSize = runInfo.actualSingleProcessSInnerSize;
     int64_t s2Pair = CeilDiv(s2ProcessSize, 2L * constInfo.sparseBlockSize);
-    int64_t s2GmStartOffset = GetSubBlockIdx() == 0 ? 0 :
+    int64_t subBlockStart = GetSubBlockIdx() == 0 ? 0 :
         CeilDiv(s2Pair, 2L) * 2 * constInfo.sparseBlockSize;
-    int64_t s2GmLimit = GetSubBlockIdx() == 0 ?
+    int64_t subBlockLimit = GetSubBlockIdx() == 0 ?
         CeilDiv(s2Pair, 2L) * 2 * constInfo.sparseBlockSize : s2ProcessSize;
-    if (s2GmLimit > s2ProcessSize) {
-        s2GmLimit = s2ProcessSize;
+    if (subBlockLimit > s2ProcessSize) {
+        subBlockLimit = s2ProcessSize;
+    }
+    // helper 也分担回写：mergeSplitActive_ 时按 MergeKv 同一 partIdx 再切，
+    // target/helper 各处理自己搬的那部分 token 的 update 槽位（纯数据搬运）。
+    // （对应 helper-only 仓 d06cb9f0 + c517aa70 修复版：V1 起点带 2 倍因子）
+    int64_t s2GmStartOffset = subBlockStart;
+    int64_t s2GmLimit = subBlockLimit;
+    if (mergeSplitActive_) {
+        int64_t alignUnit = 2L * constInfo.sparseBlockSize;
+        int64_t subBlockSize = subBlockLimit - subBlockStart;
+        if (subBlockSize < 0) {
+            subBlockSize = 0;
+        }
+        int64_t partSize = CeilDiv(subBlockSize, (int64_t)helperPartCount_ * alignUnit) * alignUnit;
+        s2GmStartOffset = subBlockStart + helperPartIdx_ * partSize;
+        s2GmLimit = subBlockStart + (helperPartIdx_ + 1) * partSize;
+        if (s2GmLimit > subBlockLimit) {
+            s2GmLimit = subBlockLimit;
+        }
+        if (s2GmStartOffset > s2GmLimit) {
+            s2GmStartOffset = s2GmLimit;
+        }
     }
     if (s2GmStartOffset >= s2GmLimit) {
         return;
@@ -2543,6 +3050,15 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
         if (writeCount > 32) {
             writeCount = 32;
         }
+        // 这个窗口的 update 条目已经在 MergeKv 里趁数据还在 UB 时写完了
+        // （FlushDirectSelectionUpdate：密窗趁 UB 直写完毕，满批零窗已证确无条目）。扫描、回读、写回
+        // 三样一样都不用做。
+        int64_t directWindowIdx = (localOffset - s2GmStartOffset) >> 5;
+        if (directWindowIdx < 32 &&
+            ((directWrittenWindowMask_ >> static_cast<uint32_t>(directWindowIdx)) & 1U) != 0) {
+            localOffset += writeCount;
+            continue;
+        }
         int64_t updateDstSlot[32];
         int64_t updateSrcIdx[32];
         int64_t updateCount = 0;
@@ -2551,16 +3067,31 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
             s2IdLimit = runInfo.curActualSeqLenOri - runInfo.actS1Size +
                         runInfo.gS1Idx / constInfo.gSize + 1;
         }
-        int64_t cachedPackedPlanIdx = -1;
-        uint32_t cachedPackedPlanValue = 0;
-        for (int64_t idx = 0; idx < writeCount; idx++) {
-            int64_t planIdx = localOffset - s2GmStartOffset + idx;
-            int64_t packedPlanIdx = planIdx / 2;
-            if (packedPlanIdx != cachedPackedPlanIdx) {
-                cachedPackedPlanValue = packedPlanLocal.GetValue(packedPlanIdx);
-                cachedPackedPlanIdx = packedPlanIdx;
-            }
-            int16_t planValue = (planIdx & 1) == 0 ?
+        // 换位判定只依赖 pairOffset。一对里两个 token 都是 update 条目时下面那段会
+        // 走两遍，而 pairOffset 随 idx 单调不减，缓存一格就够。
+        int64_t cachedPairOffset = -1;
+        bool cachedPairTransposed = false;
+        // 原来是逐 token 走，每次判一次「这个半字所在的 int32 跟上次是不是同一个」。
+        // 那个判断**每两次真一次、假一次**，是最难预测的那种分支；每 token 还要一次
+        // 三元选择取半字。整段扫描消融实测 15.15 μs / 1024 token ≈ 27 周期/token，
+        // 而每 token 的实活只有半次 UB 读加一次比较。
+        //
+        // 改成一次取一对：int32 读一次、两个半字当场拆开，那个分支整个消失，
+        // 外层循环次数也减半。读的次数一次没变（原来也是每 int32 读一次）。
+        //
+        // 对齐前提：localOffset − s2GmStartOffset 是各次 writeCount 之和，而
+        // writeCount 恒为 32（planCount 是 32 的整数倍），所以 basePlanIdx 恒为偶数，
+        // 低半字就是 base 这个 token。
+        for (int64_t base = 0; base < writeCount; base += 2) {
+            int64_t basePlanIdx = localOffset - s2GmStartOffset + base;
+            int64_t cachedPackedPlanIdx = basePlanIdx >> 1;
+            uint32_t cachedPackedPlanValue =
+                packedPlanLocal.GetValue(cachedPackedPlanIdx);
+            int64_t pairCount = (base + 1 < writeCount) ? 2 : 1;
+            for (int64_t half = 0; half < pairCount; half++) {
+            int64_t idx = base + half;
+            int64_t planIdx = basePlanIdx + half;
+            int16_t planValue = half == 0 ?
                 static_cast<int16_t>(cachedPackedPlanValue & 0xFFFFU) :
                 static_cast<int16_t>(cachedPackedPlanValue >> 16);
             if (!IsSelectionPlanUpdate(planValue)) {
@@ -2572,6 +3103,10 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
             int64_t pairSize = 2L * static_cast<int64_t>(constInfo.sparseBlockSize);
             int64_t pairOffset = (absoluteOffset / pairSize) * pairSize;
             if (constInfo.sparseBlockSize == 1 && pairOffset + 1 < s2ProcessSize) {
+                bool pairTransposed;
+                if (pairOffset == cachedPairOffset) {
+                    pairTransposed = cachedPairTransposed;
+                } else {
                 bool pairHasSelectionHit = false;
                 int64_t pairPlanIdx = pairOffset - s2GmStartOffset;
                 if (pairPlanIdx >= 0 && pairPlanIdx + 1 < planCount) {
@@ -2587,6 +3122,13 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
                     pairHasSelectionHit = IsSelectionPlanHit(pairPlan0) ||
                         IsSelectionPlanHit(pairPlan1);
                 }
+                // pairHasSelectionHit 为真时，下面这四次 GM 标量读全是白做的：
+                // usedPairedCopy 的第一个合取项就是 !pairHasSelectionHit，整个表达式
+                // 短路成 false，realS2Idx0/1 与 keyOffset0/1 之后再没人读。
+                // 而 GetRealS2Idx 读一次 topkGm_、GetKeyGmOffset 读一次 blkTableGm_，
+                // 四次都随 update 条目数走 —— 命中率越高，白做的比例越大。
+                pairTransposed = false;
+                if (!pairHasSelectionHit) {
                 int64_t realS2Idx0 = -1;
                 int64_t realS2Idx1 = -1;
                 GetRealS2Idx(pairOffset, realS2Idx0, runInfo.topKBaseOffset, runInfo);
@@ -2595,11 +3137,16 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
                 int64_t keyOffset1 = GetKeyGmOffset(realS2Idx1, runInfo, s2IdLimit);
                 int64_t keySrcStride = 0;
                 int64_t keyRopeSrcStride = 0;
-                bool usedPairedCopy = !pairHasSelectionHit && keyOffset0 >= 0 && keyOffset1 >= 0 &&
+                bool usedPairedCopy = keyOffset0 >= 0 && keyOffset1 >= 0 &&
                     CanUsePairedKvCopy(
                         realS2Idx0, realS2Idx1, keyOffset0, keyOffset1, s2IdLimit,
                         runInfo, keySrcStride, keyRopeSrcStride);
-                if (usedPairedCopy && keyOffset1 < keyOffset0) {
+                pairTransposed = usedPairedCopy && keyOffset1 < keyOffset0;
+                }
+                cachedPairOffset = pairOffset;
+                cachedPairTransposed = pairTransposed;
+                }
+                if (pairTransposed) {
                     int64_t srcAbsoluteOffset = (absoluteOffset == pairOffset) ? pairOffset + 1 : pairOffset;
                     if (srcAbsoluteOffset >= localOffset && srcAbsoluteOffset < localOffset + writeCount) {
                         srcIdx = srcAbsoluteOffset - localOffset;
@@ -2609,6 +3156,7 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
             updateDstSlot[updateCount] = destinationSlot;
             updateSrcIdx[updateCount] = srcIdx;
             updateCount++;
+            }
         }
 
         if (updateCount > 0) {
@@ -2623,17 +3171,49 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
             ropeParams.srcStride = 0;
             ropeParams.dstStride = 0;
 
-            kvParams.blockCount = writeCount;
-            DataCopyPad(kvMergUb_,
-                kvMergeGm_[runInfo.loop % MERGE_CACHE_GM_BUF_NUM * 512 * 576 +
-                            localOffset * static_cast<int64_t>(constInfo.headDim)],
-                kvParams, padParams);
-            ropeParams.blockCount = writeCount;
-            DataCopyPad(ropeMergUb_,
-                kvMergeGm_[runInfo.loop % MERGE_CACHE_GM_BUF_NUM * 512 * 576 +
-                           512 * static_cast<int64_t>(constInfo.headDim) +
-                           localOffset * static_cast<int64_t>(constInfo.headDimRope)],
-                ropeParams, padParams);
+            // 整段把 writeCount 个 token 读回 UB，是为了下面那个循环能从 UB 取。
+            // 但真要写回 selection 缓存的只有 updateCount 条 —— 90% 命中下
+            // 32 个里约 3 个，其余 29 个读回来没人碰。整趟约 1.18 MB 的 MTE2。
+            //
+            // 条目密的时候按条读会把一条 DataCopyPad 拆成 updateCount 条，
+            // 拿指令数换字节数不划算，所以只在稀疏时走按需读；密的时候逐字走
+            // 老路（那也是这一刀的零对照臂 —— 低命中端结构上一行都没变）。
+            const bool sparseWriteback = (updateCount * 4 <= writeCount);
+            if (sparseWriteback) {
+                kvParams.blockCount = 1;
+                ropeParams.blockCount = 1;
+                for (int64_t i = 0; i < updateCount; i++) {
+                    int64_t srcSlotIdx = updateSrcIdx[i];
+                    DataCopyPad(
+                        kvMergUb_[srcSlotIdx * static_cast<int64_t>(constInfo.headDim)],
+                        kvMergeGm_[runInfo.loop % MERGE_CACHE_GM_BUF_NUM * 512 * 576 +
+                                   (localOffset + srcSlotIdx) *
+                                       static_cast<int64_t>(constInfo.headDim)],
+                        kvParams, padParams);
+                    if (constInfo.headDimRope > 0) {
+                        DataCopyPad(
+                            ropeMergUb_[srcSlotIdx *
+                                        static_cast<int64_t>(constInfo.headDimRope)],
+                            kvMergeGm_[runInfo.loop % MERGE_CACHE_GM_BUF_NUM * 512 * 576 +
+                                       512 * static_cast<int64_t>(constInfo.headDim) +
+                                       (localOffset + srcSlotIdx) *
+                                           static_cast<int64_t>(constInfo.headDimRope)],
+                            ropeParams, padParams);
+                    }
+                }
+            } else {
+                kvParams.blockCount = writeCount;
+                DataCopyPad(kvMergUb_,
+                    kvMergeGm_[runInfo.loop % MERGE_CACHE_GM_BUF_NUM * 512 * 576 +
+                                localOffset * static_cast<int64_t>(constInfo.headDim)],
+                    kvParams, padParams);
+                ropeParams.blockCount = writeCount;
+                DataCopyPad(ropeMergUb_,
+                    kvMergeGm_[runInfo.loop % MERGE_CACHE_GM_BUF_NUM * 512 * 576 +
+                               512 * static_cast<int64_t>(constInfo.headDim) +
+                               localOffset * static_cast<int64_t>(constInfo.headDimRope)],
+                    ropeParams, padParams);
+            }
             SetFlag<AscendC::HardEvent::MTE2_MTE3>(0);
             WaitFlag<AscendC::HardEvent::MTE2_MTE3>(0);
             int64_t updateIdx = 0;
@@ -3016,6 +3596,8 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
     selectionUpdatePlanCount_ = 0;
     selectionDirectRowStride_ = 0;
     selectionPairedCopyActive_ = false;
+    directWrittenWindowMask_ = 0;
+    mergeSplitActive_ = false;   // 默认不切；只有纯主路径且 helperPartCount_>1 才置位
     bool useSelectionPlanSource = false;
     bool useExternalPlanSource = false;
     int64_t selectionRow = -1;
@@ -3051,7 +3633,10 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
                 selectionDirectRowStride_ > 0;
         }
         if (!selectionUpdatePlanActive_ && membershipMapReady) {
-            MergeKvFromSelection(runInfo);
+            // helper 不走 selection 变体：token 范围没切，由 target 全量搬（信号照发）
+            if (!isHelperV0_) {
+                MergeKvFromSelection(runInfo);
+            }
             return;
         }
         selectionUpdatePlanOffset_ = selectionUpdatePlanActive_ ?
@@ -3060,12 +3645,21 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
             static_cast<int32_t>(controlLocal.GetValue(2)) : 0;
         if (selectionSparseUpdatePlanActive_ && selectionUpdatePlanCount_ > 0 &&
             selectionUpdatePlanCount_ <= SELECTION_SYNC_COPY_CAPACITY) {
-            MergeKvFromSelectionWithSparseUpdates(runInfo);
+            // helper 不走 selection 变体：同上，target 全量搬
+            if (!isHelperV0_) {
+                MergeKvFromSelectionWithSparseUpdates(runInfo);
+            }
             return;
         }
         useSelectionPlanSource = !selectionSparseUpdatePlanActive_ &&
             selectionUpdatePlanActive_ &&
             controlLocal.GetValue(2) > 0;
+        // plan source（LRU）路径 helper 也参与搬运（helper-extend 合并线放开，对应
+        // helper-only 仓 db33ab90）：helper 只读 plan（读到本核自己的 UB，无副作用）+
+        // 搬数据进 target 的 kvMergeGm_（InitHelperV0 已指向 target 核）；跨核副作用
+        // （plan 标记清理、UB 直写、status 更新）全部由 target 侧做——helper 的
+        // directWritebackActive 下方强制 false，helper 那半的 update 由回读路
+        // （CopyOutSelectionUpdateFromKvMerge）兜底。
     }
 
     int64_t s2ProcessSize = runInfo.actualSingleProcessSInnerSize;
@@ -3086,10 +3680,52 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
     int64_t s2IdxArray0 = -1;
     int64_t s2IdxArray1 = -1;
     bool needWaitMte3ToMte2 = true;
+    // 从 UB 直发回写要三样：能读到计划值（才知道哪些是 update 条目、写去哪个槽位）、
+    // 一个 token 一格（sparseBlockSize == 1，与回写路的换位逻辑同一前提）、
+    // 块表可用。sparse 计划那条路在上面已经分流走了。
+    bool directWritebackActive = useSelectionPlanSource && IsSelectionUpdateEnabled() &&
+        constInfo.sparseBlockSize == 1 && selectionKvBlockSize_ > 0 && selectionMaxBlockNum_ > 0 &&
+        !isHelperV0_;   // helper 不 UB 直写：它那半的 update 由回读路兜底（target 侧回读
+                        // 覆盖全范围；mask 只标 target 自己直写过的窗口，helper 的不标）
+    int64_t directSelectionRow = selectionDataRow_ >= 0 ? selectionDataRow_ : selectionRow;
+    int64_t directUpdateDstSlot[32];
+    int64_t directUpdateUbIdx[32];
+    int64_t directUpdateCount = 0;
+    // 第一批照收，之后由 FlushDirectSelectionUpdate 按上一批的密度决定还收不收
+    bool directCollectEnabled = directWritebackActive;
     SetFlag<AscendC::HardEvent::MTE3_MTE2>(0);
     SetFlag<AscendC::HardEvent::MTE3_MTE2>(1);
-    int64_t s2GmStartOffset = GetSubBlockIdx() == 0 ? 0 : CeilDiv(s2Pair, 2L) * 2 * constInfo.sparseBlockSize;
-    int64_t s2GmLimit = GetSubBlockIdx() == 0 ? CeilDiv(s2Pair, 2L) * 2 * constInfo.sparseBlockSize: s2ProcessSize;
+    // helper：把本子核的半区再对半切，target 搬前半、helper 搬后半（两个子核
+    // 同理，合起来一块 4 路并行）。plan source 路径同样切（helper-extend 合并线
+    // 放开，对应 helper-only 仓 db33ab90）。
+    // partSize 必须按 2*sparseBlockSize 对齐 —— 主循环按 token 对步进。
+    mergeSplitActive_ = helperPartCount_ > 1;
+    int64_t s2GmStartOffset;
+    int64_t s2GmLimit;
+    if (mergeSplitActive_) {
+        int64_t subBlockStart = GetSubBlockIdx() == 0 ? 0 : CeilDiv(s2Pair, 2L) * 2 * constInfo.sparseBlockSize;
+        int64_t subBlockLimit = GetSubBlockIdx() == 0 ? CeilDiv(s2Pair, 2L) * 2 * constInfo.sparseBlockSize : s2ProcessSize;
+        if (subBlockLimit > s2ProcessSize) {
+            subBlockLimit = s2ProcessSize;
+        }
+        int64_t alignUnit = 2L * constInfo.sparseBlockSize;
+        int64_t subBlockSize = subBlockLimit - subBlockStart;
+        if (subBlockSize < 0) {
+            subBlockSize = 0;
+        }
+        int64_t partSize = CeilDiv(subBlockSize, (int64_t)helperPartCount_ * alignUnit) * alignUnit;
+        s2GmStartOffset = subBlockStart + helperPartIdx_ * partSize;
+        s2GmLimit = subBlockStart + (helperPartIdx_ + 1) * partSize;
+        if (s2GmLimit > subBlockLimit) {
+            s2GmLimit = subBlockLimit;
+        }
+        if (s2GmStartOffset > s2GmLimit) {
+            s2GmStartOffset = s2GmLimit;
+        }
+    } else {
+        s2GmStartOffset = GetSubBlockIdx() == 0 ? 0 : CeilDiv(s2Pair, 2L) * 2 * constInfo.sparseBlockSize;
+        s2GmLimit = GetSubBlockIdx() == 0 ? CeilDiv(s2Pair, 2L) * 2 * constInfo.sparseBlockSize: s2ProcessSize;
+    }
     if (s2GmLimit > s2ProcessSize) {
         s2GmLimit = s2ProcessSize;
     }
@@ -3123,6 +3759,225 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
     if (constInfo.sparseMode == 3) {
         s2IdLimit = runInfo.curActualSeqLenOri - runInfo.actS1Size + runInfo.gS1Idx / constInfo.gSize + 1;
     }
+#if FSAO_PROBE_BULK_TOPK
+    // 批量预取 topk 索引到 UB，后面循环中不再逐 token 标量读 GM。
+    // 只对 sparseBlockSize == 1 生效（生产路径），>1 时回退到逐 token 读。
+    // 放在 v0ValidSizeUb_ 的高区 [1024, 1536)，与 plan 数据 [512, 768) 和
+    // valid size [0, 128) 均不重叠。
+    LocalTensor<int32_t> topkBatchUb = v0ValidSizeUb_[1024];
+    bool useBulkTopk = (constInfo.sparseBlockSize == 1) && (s2GmStartOffset < s2GmLimit);
+    if (useBulkTopk) {
+        int64_t batchTopkStart = topkGmBaseOffset +
+            static_cast<int64_t>(runInfo.s2Idx) * static_cast<int64_t>(constInfo.s2BaseSize) +
+            s2GmStartOffset;
+        int64_t batchTopkCount = s2GmLimit - s2GmStartOffset;
+        DataCopy(topkBatchUb, topkGm_[batchTopkStart],
+                 static_cast<uint32_t>(batchTopkCount));
+    }
+#endif
+    if (constInfo.sparseBlockSize == 1) {
+    // ===== 窗口化两段式主循环（无分支批量段）=====
+    // 移植自 helper-only 仓 d756c697，适配主线两处差异：
+    //   1) CopyInKv 主线带 selectionTokenOffset/ubTokenIdx 出参（hit 走 selection 路
+    //      不进这里，miss 传 -1；-1,-1）；
+    //   2) miss 分支顺带做 UB 直写收集（slotBuf 的负值即本窗 update 目标槽 -值-1），
+    //      Phase C 末尾 FlushDirectSelectionUpdate——窗口 mask 语义与逐对版一致，
+    //      回读路的跳过判据不受影响。
+    // 旧版按 token 对迭代（128 次/半区），每对一串数据依赖分支：plan 解码、
+    // run 检测 while（scattered 下几乎每对都白转一轮、还多读一轮 plan）、
+    // 奇偶回退、逐对 flush 判断 —— 这是 aiv_scalar 固定部分的主体。
+    // 新版按 32-token 窗口迭代，窗内两步：
+    //   Phase A 批量解码本窗 plan 到 slotBuf（-1=非 hit）：plan 的 GetValue 次数
+    //           减半（删掉 run while 的重读），无任何分支；
+    //   Phase B 窗内游标顺序执行：hit 走 selection（连续 slot 段用 Run 整段搬、
+    //           相邻单 hit 用 Pair 合一笔），miss 走 topk+块表（相邻双 miss 交给
+    //           CopyInKv 配对）。所有 CopyIn* 函数原样复用；搬运目的地由 token
+    //           逻辑位置决定、与处理顺序无关 —— 数据与逐对版逐字节等价。
+    //   无效 token（topk 越界 / >= s2IdLimit）只在序列尾部出现：遇到即停，
+    //   剩余由循环后的补零段统一填零（与逐对版同一模型）。
+    const int32_t s2Start32 = (int32_t)s2GmStartOffset;
+    const int32_t s2Limit32 = (int32_t)s2GmLimit;
+    const int32_t sparseBlockSize32 = (int32_t)constInfo.sparseBlockSize;
+    int32_t slotBuf[32];   // 原始紧凑 plan 值：>0 = hit（槽=值-1）、<0 = update（槽=-值-1）、0 = 纯 miss
+    bool mergeStopped = false;
+    for (int32_t winStart = s2Start32; winStart < s2Limit32 && !mergeStopped; winStart += 32) {
+        if (needWaitMte3ToMte2) {
+            WaitFlag<AscendC::HardEvent::MTE3_MTE2>(mergeMte3Idx % 2);
+            needWaitMte3ToMte2 = false;
+        }
+        int32_t winCount = s2Limit32 - winStart;
+        if (winCount > 32) {
+            winCount = 32;
+        }
+        // ---- Phase A：批量解码本窗 plan（plan 已在 UB；无 plan 时全 0 = 全 miss）----
+        // 存原始紧凑 plan 值而不是解码后的槽位：符号就是类型 —— >0 = hit（槽位 =
+        // 值-1）、<0 = update 条目（目标槽位 = -值-1）、0 = 普通 miss。UB 直写收集
+        //（优化05）要的 update 位因此零成本保留，Phase B 用同一套比较完成分流。
+        //（单数组方案移植自 yq/opt-merge-0723：每 token 一次写、无分支；替代旧的
+        // slotBuf+updateSlotBuf 双数组解码。）
+        int32_t localBase = winStart - s2Start32;
+        for (int32_t j = 0; j < winCount; j += 2) {
+            int32_t plan0 = 0;
+            int32_t plan1 = 0;
+            if (useSelectionPlanSource) {
+                uint32_t packedPlanValue =
+                    packedSelectionPlanLocal.GetValue((localBase + j) / 2);
+                plan0 = static_cast<int16_t>(packedPlanValue & 0xFFFFU);
+                plan1 = static_cast<int16_t>(packedPlanValue >> 16);
+            }
+            slotBuf[j] = plan0;
+            if (j + 1 < winCount) {
+                slotBuf[j + 1] = plan1;
+            }
+        }
+        // ---- Phase B：窗内顺序执行 ----
+        int32_t cur = 0;
+        while (cur < winCount && !mergeStopped) {
+            int32_t tokenPos = winStart + cur;
+            if (slotBuf[cur] > 0) {
+                // hit：换算 selection 偏移（direct 布局纯算术；非 direct 走块表缓存）
+                int64_t selectionTokenOffset = GetSelectionSlotTokenOffset(
+                    selectionDataRow_, slotBuf[cur] - 1, cachedSelectionBlockTableIdx,
+                    cachedSelectionBlockNum);
+                if (selectionTokenOffset < 0) {
+                    mergeStopped = true;
+                    break;
+                }
+                // 非 external 计划时逐对版会用 topk 校验有效性，保持一致
+                if (!useExternalPlanSource) {
+                    GetRealS2Idx(tokenPos, s2IdxArray0, topkGmBaseOffset, runInfo);
+                    if (s2IdxArray0 < 0 || s2IdxArray0 >= s2IdLimit) {
+                        mergeStopped = true;
+                        break;
+                    }
+                }
+                // 连续 slot 段：整段搬（run 识别在本地数组上做，无 plan 重读）
+                int32_t runLen = 1;
+                while (cur + runLen < winCount &&
+                       slotBuf[cur + runLen] == slotBuf[cur] + runLen) {
+                    runLen++;
+                }
+                if (selectionDirectRowStride_ <= 0 && selectionKvBlockSize_ > 0) {
+                    // 非 direct（PA 块表）布局：run 不跨 selection block 边界
+                    int32_t inBlock = (int32_t)(selectionKvBlockSize_ -
+                        (slotBuf[cur] - 1) % selectionKvBlockSize_);
+                    if (runLen > inBlock) {
+                        runLen = inBlock;
+                    }
+                }
+                if (runLen >= 2) {
+                    CopyInSelectionKvRun(
+                        mte2Size, mte3Size, mergeMte3Idx, selectionTokenOffset, runLen);
+                    cur += runLen;
+                    continue;
+                }
+                // 单 hit：相邻也是单 hit（slot 不连续）时尝试 Pair 合一笔。
+                // 先按偏移排序再试（移植自 yq/opt-merge-0723 的优化01）——
+                // CanUsePairedSelectionCopy 要求后一个偏移更大（stride 恒正），
+                // 不排的话降序对（scattered 下约一半）全部配不上、退化成两次
+                // CopyInSingleKv（1.5 条搬运/token → 1.0）。两个都是命中，在
+                // 合并缓冲里的先后可以换：attention 对 key 次序不敏感（与
+                // CopyInKv 内部排序同一论证）；命中不是 update 条目，回写不受影响。
+                if (cur + 1 < winCount && slotBuf[cur + 1] > 0 &&
+                    slotBuf[cur + 1] != slotBuf[cur] + 1 && selectionPairedCopyActive_) {
+                    int64_t selectionTokenOffset2 = GetSelectionSlotTokenOffset(
+                        selectionDataRow_, slotBuf[cur + 1] - 1, cachedSelectionBlockTableIdx,
+                        cachedSelectionBlockNum);
+                    if (selectionTokenOffset2 >= 0) {
+                        int64_t pairLo = selectionTokenOffset;
+                        int64_t pairHi = selectionTokenOffset2;
+                        if (pairHi < pairLo) {
+                            pairLo = selectionTokenOffset2;
+                            pairHi = selectionTokenOffset;
+                        }
+                        int64_t kvSrcStride = 0;
+                        int64_t ropeSrcStride = 0;
+                        if (CanUsePairedSelectionCopy(pairLo, pairHi,
+                                kvSrcStride, ropeSrcStride)) {
+                            CopyInSelectionKvPair(mte2Size, mte3Size, mergeMte3Idx,
+                                pairLo, kvSrcStride, ropeSrcStride);
+                            cur += 2;
+                            continue;
+                        }
+                    }
+                }
+                CopyInSingleKv(mte2Size, mte3Size, mergeMte3Idx, 0, -1,
+                               selectionTokenOffset, s2IdLimit, runInfo);
+                cur += 1;
+            } else {
+                // miss：读 topk + 块表（55ns×miss 的 GM 读 stall，本重构不碰）
+                GetRealS2Idx(tokenPos, s2IdxArray0, topkGmBaseOffset, runInfo);
+                if (unlikely(s2IdxArray0 < 0 || s2IdxArray0 >= s2IdLimit)) {
+                    mergeStopped = true;
+                    break;
+                }
+                int64_t ubTokenIdx0 = -1;
+                int64_t ubTokenIdx1 = -1;
+                if (cur + 1 < winCount && slotBuf[cur + 1] <= 0) {
+                    // 相邻双 miss：交给 CopyInKv 配对（内部 CanUsePairedKvCopy 兜底；
+                    // 第二个无效时 blockCount=1 只搬第一个）
+                    GetRealS2Idx(tokenPos + sparseBlockSize32, s2IdxArray1,
+                                 topkGmBaseOffset, runInfo);
+                    CopyInKv(mte2Size, mte3Size, mergeMte3Idx, s2IdxArray0, s2IdxArray1,
+                             -1, -1, s2IdLimit, runInfo, ubTokenIdx0, ubTokenIdx1);
+                    // UB 直写收集：本对里属于 update 条目的（slotBuf < 0）且
+                    // 真落进 UB 的（ubTokenIdxN >= 0）记下来，与逐对版同一模型；
+                    // 超 32 条整批作废退回回读路（同逐对版）。
+                    if (directCollectEnabled && directUpdateCount >= 0) {
+                        bool takeUpdate0 = slotBuf[cur] < 0 && ubTokenIdx0 >= 0;
+                        bool takeUpdate1 = slotBuf[cur + 1] < 0 && ubTokenIdx1 >= 0;
+                        if (directUpdateCount + (int64_t)takeUpdate0 + (int64_t)takeUpdate1 > 32) {
+                            directUpdateCount = -1;
+                        } else {
+                            if (takeUpdate0) {
+                                directUpdateUbIdx[directUpdateCount] = ubTokenIdx0;
+                                directUpdateDstSlot[directUpdateCount] = -slotBuf[cur] - 1;
+                                directUpdateCount++;
+                            }
+                            if (takeUpdate1) {
+                                directUpdateUbIdx[directUpdateCount] = ubTokenIdx1;
+                                directUpdateDstSlot[directUpdateCount] = -slotBuf[cur + 1] - 1;
+                                directUpdateCount++;
+                            }
+                        }
+                    }
+                    if (s2IdxArray1 < 0 || s2IdxArray1 >= s2IdLimit) {
+                        mergeStopped = true;
+                    }
+                    cur += 2;
+                } else {
+                    CopyInKv(mte2Size, mte3Size, mergeMte3Idx, s2IdxArray0, -1,
+                             -1, -1, s2IdLimit, runInfo, ubTokenIdx0, ubTokenIdx1);
+                    if (directCollectEnabled && directUpdateCount >= 0) {
+                        bool takeUpdate0 = slotBuf[cur] < 0 && ubTokenIdx0 >= 0;
+                        if (directUpdateCount + (int64_t)takeUpdate0 > 32) {
+                            directUpdateCount = -1;
+                        } else if (takeUpdate0) {
+                            directUpdateUbIdx[directUpdateCount] = ubTokenIdx0;
+                            directUpdateDstSlot[directUpdateCount] = -slotBuf[cur] - 1;
+                            directUpdateCount++;
+                        }
+                    }
+                    cur += 1;
+                }
+            }
+        }
+        // ---- Phase C：倒出本窗 + flush 直写 + 推进（flush 判断从逐对降到每窗一次）----
+        CopyOutMrgeResult(mte2Size, mte3Size, s2GmStartOffset, mergeMte3Idx, runInfo);
+        // count=0 可信的两个前提（plan 解码过 + 收集开着）必须调用前留底：
+        // Flush 内收集常开（c089）会把 collectEnabled 重新打开；helper 核首轮
+        // 没收过、无 plan-source 时整批没收过，那些 count=0 都是"没查"而非
+        // "查过没有"，不能据以置掩码（见 FlushDirectSelectionUpdate）。
+        bool batchCollected = directCollectEnabled && useSelectionPlanSource;
+        FlushDirectSelectionUpdate(directUpdateDstSlot, directUpdateUbIdx,
+            directUpdateCount, directCollectEnabled, mte3Size, mte2Size,
+            mergeMte3Idx, directSelectionRow, batchCollected);
+        mte3Size = mte2Size;
+        SetFlag<AscendC::HardEvent::MTE3_MTE2>(mergeMte3Idx % 2);
+        mergeMte3Idx++;
+        needWaitMte3ToMte2 = true;
+    }
+    } else {
     for (int64_t s2GmOffsetArray = s2GmStartOffset; s2GmOffsetArray < s2GmLimit;
          s2GmOffsetArray += 2 * constInfo.sparseBlockSize) {
         if (needWaitMte3ToMte2) {
@@ -3196,6 +4051,12 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
                 if (mte2Size - mte3Size >= 32 ||
                     s2GmOffsetArray + selectionRunCount >= s2GmLimit) {
                     CopyOutMrgeResult(mte2Size, mte3Size, s2GmStartOffset, mergeMte3Idx, runInfo);
+                    // 成段快路上全是命中，不产生新的 update 条目，但这一批 UB 里
+                    // 混着之前配对路攒下的，一并发掉。
+                    bool batchCollected = directCollectEnabled && useSelectionPlanSource;  // 留底含义见窗口化主循环 Phase C
+                    FlushDirectSelectionUpdate(directUpdateDstSlot, directUpdateUbIdx,
+                        directUpdateCount, directCollectEnabled, mte3Size, mte2Size,
+                        mergeMte3Idx, directSelectionRow, batchCollected);
                     mte3Size = mte2Size;
                     SetFlag<AscendC::HardEvent::MTE3_MTE2>(mergeMte3Idx % 2);
                     mergeMte3Idx++;
@@ -3229,31 +4090,84 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
             selectionTokenOffset1 >= 0;
         if (externalHit0) {
             s2IdxArray0 = 0;
-        } else {
+        }
+#if FSAO_PROBE_BULK_TOPK
+        else if (useBulkTopk) {
+            s2IdxArray0 = topkBatchUb.GetValue(s2GmOffsetArray - s2GmStartOffset);
+        }
+#endif
+        else {
             GetRealS2Idx(s2GmOffsetArray, s2IdxArray0, topkGmBaseOffset, runInfo);
         }
         if (unlikely(s2IdxArray0 < 0)) {
             CopyOutMrgeResult(mte2Size, mte3Size, s2GmStartOffset, mergeMte3Idx, runInfo);
+            // 这条路不更新 mte3Size，但 CopyOutMrgeResult 写出去的就是 [mte3Size, mte2Size)，
+            // flush 用同一段范围。
+            bool batchCollected = directCollectEnabled && useSelectionPlanSource;  // 留底含义见窗口化主循环 Phase C
+            FlushDirectSelectionUpdate(directUpdateDstSlot, directUpdateUbIdx,
+                directUpdateCount, directCollectEnabled, mte3Size, mte2Size,
+                mergeMte3Idx, directSelectionRow, batchCollected);
             SetFlag<AscendC::HardEvent::MTE3_MTE2>(mergeMte3Idx % 2);
             mergeMte3Idx++;
             break;
         }
         if (externalHit1) {
             s2IdxArray1 = 0;
-        } else {
+        }
+#if FSAO_PROBE_BULK_TOPK
+        else if (useBulkTopk) {
+            s2IdxArray1 = topkBatchUb.GetValue(
+                s2GmOffsetArray + constInfo.sparseBlockSize - s2GmStartOffset);
+        }
+#endif
+        else {
             GetRealS2Idx(s2GmOffsetArray + constInfo.sparseBlockSize,
                          s2IdxArray1, topkGmBaseOffset, runInfo);
         }
+        int64_t ubTokenIdx0 = -1;
+        int64_t ubTokenIdx1 = -1;
         CopyInKv(mte2Size, mte3Size, mergeMte3Idx, s2IdxArray0, s2IdxArray1,
-                 selectionTokenOffset0, selectionTokenOffset1, s2IdLimit, runInfo);
+                 selectionTokenOffset0, selectionTokenOffset1, s2IdLimit, runInfo,
+                 ubTokenIdx0, ubTokenIdx1);
+        // 未命中的 token 刚落进 UB，趁它还在就记下要写去哪个槽位。
+        // ubTokenIdxN ≥ 0 已经蕴含「这个 token 真的写进了 UB 且不是命中」。
+        if (directCollectEnabled && directUpdateCount >= 0) {
+            bool takeUpdate0 = ubTokenIdx0 >= 0 && IsSelectionPlanUpdate(currentPlanValue0);
+            bool takeUpdate1 = s2GmOffsetArray + constInfo.sparseBlockSize < s2GmLimit &&
+                ubTokenIdx1 >= 0 && IsSelectionPlanUpdate(currentPlanValue1);
+            if (directUpdateCount + takeUpdate0 + takeUpdate1 > 32) {
+                // 一批 32 个 token 最多 16 对、每对最多 2 条，装满恰好 32 条，
+                // 走到这里说明前提被打破了。少记一条会让 flush 仍按「密」认下窗口、
+                // 回写路整个跳过，漏写是静默的 —— 宁可整批作废退回老路。
+                directUpdateCount = -1;
+            } else {
+                if (takeUpdate0) {
+                    directUpdateUbIdx[directUpdateCount] = ubTokenIdx0;
+                    directUpdateDstSlot[directUpdateCount] =
+                        DecodeSelectionPlanSlot(currentPlanValue0);
+                    directUpdateCount++;
+                }
+                if (takeUpdate1) {
+                    directUpdateUbIdx[directUpdateCount] = ubTokenIdx1;
+                    directUpdateDstSlot[directUpdateCount] =
+                        DecodeSelectionPlanSlot(currentPlanValue1);
+                    directUpdateCount++;
+                }
+            }
+        }
         if ((mte2Size - mte3Size + 2 * constInfo.sparseBlockSize > 32) ||
             s2GmOffsetArray + 2 * constInfo.sparseBlockSize >= s2GmLimit) {
             CopyOutMrgeResult(mte2Size, mte3Size, s2GmStartOffset, mergeMte3Idx, runInfo);
+            bool batchCollected = directCollectEnabled && useSelectionPlanSource;  // 留底含义见窗口化主循环 Phase C
+            FlushDirectSelectionUpdate(directUpdateDstSlot, directUpdateUbIdx,
+                directUpdateCount, directCollectEnabled, mte3Size, mte2Size,
+                mergeMte3Idx, directSelectionRow, batchCollected);
             mte3Size = mte2Size;
             SetFlag<AscendC::HardEvent::MTE3_MTE2>(mergeMte3Idx % 2);
             mergeMte3Idx++;
             needWaitMte3ToMte2 = true;
         }
+    }
     }
 
     if (unlikely(s2GmStartOffset + mte2Size < s2GmLimit)) {
@@ -3343,7 +4257,125 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
 template <typename FusedSparseAttentionOverlapTraits>
 __aicore__ inline uint64_t FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::CalcAccumOffset(uint32_t bN2Idx, uint32_t gS1Idx)
 {
+    // 保持 0：splitKV 把「第几份」整个交给 tndCoreStartKVSplitPos，而那个值就是核号。
+    // 任务号 = 核号 / 段数、段号 = 核号 % 段数，两下合起来还原成核号本身，
+    // 于是每个核写自己那一格，天生不会撞车。见 kernel_mla.h 的 InitCalcParamsEach。
     return 0;
+}
+
+// splitKV 归约：把同一个请求的 partNum 份局部结果并成一份，写进 attentionOutGm。
+//
+// 每份存着那一段 KV 自己算出来的 attention 结果，外加那一段的 softmax 分母 sum
+// 和最大值 max。合并就是按分母加权平均：
+//     M    = max(各段的 max)
+//     d[s] = sum[s] * exp(max[s] - M)      把各段的分母折算到同一个基准上
+//     out  = Σ(结果[s] * d[s]) / Σ d[s]
+// ⚠ 这是教科书 FlashDecode，与 AMLA 那套 2 的幂缩放无关 —— accumOutGm 里存的
+//    已经是 DealBmm2ResBaseBlock 除干净之后的局部输出，缩放因子早消掉了。
+template <typename FusedSparseAttentionOverlapTraits>
+__aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::ReduceSplitKV(
+    uint32_t slotBegin, uint32_t partNum, uint32_t mCount, uint64_t attenOutOffset)
+{
+    // ⚠ 整个函数体包在 if constexpr 里，FD=0 时它一行都不进二进制。
+    //    按 C++ 规则这本来就该如此（唯一的调用点在 if constexpr(false) 分支里，
+    //    不算 odr-use），加这层是因为不确定这条编译器守不守 —— 而 bs=16
+    //    实测退化 4.4 μs 只出现在全命中端，形状正像多出一段代码占了 I-cache。
+    //    为了让 diff 只有两行，里面没有跟着缩进。
+    if constexpr (FLASH_DECODE) {
+    if (partNum <= 1 || mCount == 0) {
+        return;
+    }
+    // 一个 aiCore 上有两个 vector，让偶数那个把这个请求的行全干完。
+    // ⚠ 没照抄主计算那边的分半公式 —— 那边是先按 nBufferMBaseSize 分块、块内再分半，
+    //    两层。归约这点活（k 份加权和）不值得为省一半时间去跟那套耦合，
+    //    耦合上了以后那边一改分块方式，这边就静默算错。
+    if ((GetBlockIdx() % 2) != 0) {
+        return;
+    }
+    uint32_t mStart = 0;
+    uint32_t mNum = mCount;
+
+    const uint32_t hd = static_cast<uint32_t>(constInfo.headDim);
+    const uint32_t rowsPerSlot = static_cast<uint32_t>(constInfo.kvHeadNum) * constInfo.mBaseSize;
+    // 累加区放 tmpBuff1(32K)，一批最多装得下这么多行
+    uint32_t mBatch = static_cast<uint32_t>(ConstInfo::BUFFER_SIZE_BYTE_32K / sizeof(T)) / hd;
+    if (mBatch == 0) {
+        mBatch = 1;
+    }
+
+    LocalTensor<T> accUb = tmpBuff1.Get<T>();      // [rows, hd] 加权累加
+    LocalTensor<T> partUb = inputBuff1.Get<T>();   // [rows, hd] 当前这一份
+    LocalTensor<OUT_T> outUb = inputBuff2.Get<OUT_T>();
+    LocalTensor<T> lseBuf = outputBuff1.Get<T>();  // 五张 [rows, 8] 的小表
+
+    for (uint32_t m0 = 0; m0 < mNum; m0 += mBatch) {
+        uint32_t rows = ((mNum - m0) < mBatch) ? (mNum - m0) : mBatch;
+        uint32_t lseLen = rows * FP32_BLOCK_ELEMENT_NUM;
+        LocalTensor<T> curMax = lseBuf;
+        LocalTensor<T> curSum = lseBuf[lseLen];
+        LocalTensor<T> gMax = lseBuf[lseLen * 2];
+        LocalTensor<T> dSum = lseBuf[lseLen * 3];
+        LocalTensor<T> wTmp = lseBuf[lseLen * 4];
+        uint64_t rowBase = static_cast<uint64_t>(slotBegin) * rowsPerSlot + mStart + m0;
+        uint64_t lseBase = rowBase * FP32_BLOCK_ELEMENT_NUM;
+        uint64_t outBase = rowBase * hd;
+        uint64_t lseStride = static_cast<uint64_t>(rowsPerSlot) * FP32_BLOCK_ELEMENT_NUM;
+        uint64_t outStride = static_cast<uint64_t>(rowsPerSlot) * hd;
+
+        // 一遍：找出各段最大值里的最大值
+        for (uint32_t s = 0; s < partNum; s++) {
+            DataCopy(curMax, lseMaxFdGm[lseBase + s * lseStride], lseLen);
+            pipe_barrier(PIPE_ALL);
+            if (s == 0) {
+                Adds(gMax, curMax, ConstInfo::FLOAT_ZERO, lseLen);
+            } else {
+                Max(gMax, gMax, curMax, lseLen);
+            }
+            // ⚠ 要 ALL 不是 V：下一轮的 DataCopy 会盖掉 curMax，
+            //    得先等这一轮读完，而 PIPE_V 拦不住搬运提前动手。
+            pipe_barrier(PIPE_ALL);
+        }
+
+        // 二遍：算各段的权重，加权累加分子与分母
+        Duplicate(accUb, ConstInfo::FLOAT_ZERO, rows * hd);
+        Duplicate(dSum, ConstInfo::FLOAT_ZERO, lseLen);
+        pipe_barrier(PIPE_V);
+        for (uint32_t s = 0; s < partNum; s++) {
+            DataCopy(curMax, lseMaxFdGm[lseBase + s * lseStride], lseLen);
+            DataCopy(curSum, lseSumFdGm[lseBase + s * lseStride], lseLen);
+            DataCopy(partUb, accumOutGm[outBase + s * outStride], rows * hd);
+            pipe_barrier(PIPE_ALL);
+            Sub(wTmp, curMax, gMax, lseLen);
+            pipe_barrier(PIPE_V);
+            Exp(wTmp, wTmp, lseLen);
+            pipe_barrier(PIPE_V);
+            Mul(curSum, curSum, wTmp, lseLen); // d[s]：这一段折算后的分母
+            pipe_barrier(PIPE_V);
+            Add(dSum, dSum, curSum, lseLen);
+            RowMuls(partUb, partUb, curSum, rows, hd, hd);
+            pipe_barrier(PIPE_V);
+            Add(accUb, accUb, partUb, rows * hd);
+            pipe_barrier(PIPE_ALL);   // 同上：下一轮要把 partUb 重新搬一遍
+        }
+
+        // ⚠ 不原地除：RowDivs 的现有调用点 dst 都与 src 分开，别在这里开先例
+        RowDivs(partUb, accUb, dSum, rows, hd, hd);
+        pipe_barrier(PIPE_V);
+        if constexpr (IsSameType<OUT_T, bfloat16_t>::value) { // bf16 采取四舍六入五成双
+            Cast(outUb, partUb, AscendC::RoundMode::CAST_RINT, rows * hd);
+        } else {
+            Cast(outUb, partUb, AscendC::RoundMode::CAST_ROUND, rows * hd);
+        }
+        pipe_barrier(PIPE_ALL);
+        DataCopyExtParams copyParams;
+        copyParams.blockCount = rows;
+        copyParams.blockLen = hd * sizeof(OUT_T);
+        copyParams.srcStride = 0;
+        copyParams.dstStride = 0;
+        DataCopyPad(attentionOutGm[attenOutOffset + (mStart + m0) * hd], outUb, copyParams);
+        pipe_barrier(PIPE_ALL);
+    }
+    }  // if constexpr (FLASH_DECODE)
 }
 
 template <typename FusedSparseAttentionOverlapTraits>
@@ -3400,10 +4432,31 @@ __aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAtten
         }
         DealBmm2ResBaseBlock(info, mSplitInfo, i * mSplitSize + mStartRow, dealSize,
                              constInfo.headDim, constInfo.headDim);
-        pingpongFlag ^= 1; // Toggle ping-pong buffer 0/1
+        pingpongFlag ^= 1; // pingpong 0 1切换
     }
 }
 
+
+template <typename FusedSparseAttentionOverlapTraits>
+__aicore__ inline void FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::GetConfusionTransposeTiling(
+    int64_t numR, int64_t numC, const uint32_t stackBufferSize, const uint32_t typeSize,
+    ConfusionTransposeTiling &tiling)
+{
+    (void)stackBufferSize;
+    uint32_t blockSize = ONE_BLK_SIZE / typeSize;
+    uint32_t height = numC;
+    uint32_t width = numR;
+    uint32_t highBlock = height / BLOCK_CUBE;
+    uint32_t stride = height * blockSize * typeSize / ONE_BLK_SIZE;
+    uint32_t repeat = width / blockSize;
+
+    tiling.param0 = blockSize;
+    tiling.param1 = height;
+    tiling.param2 = width;
+    tiling.param3 = highBlock;
+    tiling.param4 = stride;
+    tiling.param5 = repeat;
+}
 
 template <typename FusedSparseAttentionOverlapTraits>
 __aicore__ inline void
@@ -3418,10 +4471,14 @@ FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::Bmm
     WaitFlag<AscendC::HardEvent::V_MTE3>(SYNC_OUTPUT_BUF1_FLAG);
     uint64_t accumTmpOutNum = CalcAccumOffset(info.bIdx, info.gS1Idx);
     uint64_t offset = accumTmpOutNum * constInfo.kvHeadNum * constInfo.mBaseSize * constInfo.headDim +              // taskoffset
-                      info.tndCoreStartKVSplitPos * constInfo.kvHeadNum * constInfo.mBaseSize * constInfo.headDim + // Partition offset
-                      wsMStart * actualColumnCount;                                                                 // M-axis offset
+                      info.tndCoreStartKVSplitPos * constInfo.kvHeadNum * constInfo.mBaseSize * constInfo.headDim + // 份数offset
+                      wsMStart * actualColumnCount;                                                                 // m轴offset
     GlobalTensor<T> dst = accumOutGm[offset];
-    if (info.actualSingleProcessSInnerSize== 0) {
+    // ⚠ 这个判断原来是反的：`== 0`（这一段没有数据）时把 tmp 写出去，
+    // `!= 0`（有数据）时反而清零。旁边的 ComputeLogSumExpAndCopyToGm 同一个
+    // 判断是对的 —— 有数据写数据、没数据填中性值，两相对照可确认。
+    // FLASH_DECODE=1 从没编译过，所以没人发现。
+    if (info.actualSingleProcessSInnerSize != 0) {
         DataCopyExtParams dataCopyParams;
         dataCopyParams.blockCount = dealRowCount;
         dataCopyParams.blockLen = actualColumnCount * sizeof(T);
@@ -3457,7 +4514,7 @@ FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::Bmm
 {
     LocalTensor<OUT_T> tmpBmm2ResCastTensor = outputBuff1.Get<OUT_T>();
     WaitFlag<AscendC::HardEvent::MTE3_V>(SYNC_OUTPUT_BUF1_FLAG);
-    if constexpr (IsSameType<OUT_T, bfloat16_t>::value) { // BF16 uses round-to-nearest-even
+    if constexpr (IsSameType<OUT_T, bfloat16_t>::value) { // bf16 采取四舍六入五成双模�?
         Cast(tmpBmm2ResCastTensor, bmm2ResUb, AscendC::RoundMode::CAST_RINT, dealRowCount * columnCount);
     } else {
         Cast(tmpBmm2ResCastTensor, bmm2ResUb, AscendC::RoundMode::CAST_ROUND, dealRowCount * columnCount);
@@ -3504,7 +4561,7 @@ FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::Dea
     SetFlag<AscendC::HardEvent::MTE2_V>(SYNC_INPUT_BUF1_FLAG);
     WaitFlag<AscendC::HardEvent::MTE2_V>(SYNC_INPUT_BUF1_FLAG);
 
-    // Set values with an absolute value greater than 1e10 to zero.
+    // 将绝对值大�?e10的数置为0
     LocalTensor<T> bmm2ResUb = tmpBuff1.Get<T>();
     bmm2ResUb.SetSize(vec2ComputeSize);
     LocalTensor<T> absBmm2ResUb = bmm2ResUb.template ReinterpretCast<T>();
@@ -3518,7 +4575,7 @@ FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::Dea
     pipe_barrier(PIPE_V);
     uint32_t baseOffset = mSplitInfo.nBufferStartM / 2 + startRow;
     uint32_t idx = info.loop % (constInfo.preLoadNum);
-    LocalTensor<T> tmpSumUb = v0ValidSizeBuff.Get<T>()[384]; // Temporary memory for sumUb: 16 * 32 B = 512 B
+    LocalTensor<T> tmpSumUb = v0ValidSizeBuff.Get<T>()[384]; // sumUb用临时内�?16 * 32B  = 512B
     Brcb(tmpSumUb, aMlaSumUb[idx * SOFTMAX_TMP_BUFFER_OFFSET / sizeof(T) + baseOffset], (dealRowCount + 7) / 8, {1, 8});
     pipe_barrier(PIPE_V);
     RowDivs(bmm2ResUb, tmpBmm2ResUb, tmpSumUb, dealRowCount, columnCount, actualColumnCount);
@@ -3532,7 +4589,7 @@ __aicore__ inline void
 FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::RowDivs(LocalTensor<float> dstUb, LocalTensor<float> src0Ub, LocalTensor<float> src1Ub,
                                 uint32_t dealRowCount, uint32_t columnCount, uint32_t actualColumnCount)
 {
-    // Divide by row: all elements in each row are divided by the same value.
+    // divs by row, 每行的元素除以相同的元素
     // dstUb[i, (j * 8) : (j * 8 + 7)] = src0Ub[i, (j * 8) : (j * 8 + 7)] / src1Ub[i, 0 : 7]
     // src0Ub:[dealRowCount, columnCount], src1Ub:[dealRowCount, FP32_BLOCK_ELEMENT_NUM] dstUb:[dealRowCount,
     // columnCount]
@@ -3559,9 +4616,9 @@ FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::Row
         columnRepeatParams.src0BlkStride = 1;
         columnRepeatParams.src1BlkStride = 0;
         columnRepeatParams.dstBlkStride = 1;
-        columnRepeatParams.src0RepStride = 8; // Along columns, repeat start addresses differ by dtypeMask=64 elements, or 8 blocks
+        columnRepeatParams.src0RepStride = 8; // 列方向上两次repeat起始地址间隔dtypeMask=64个元素，�?个block
         columnRepeatParams.src1RepStride = 0;
-        columnRepeatParams.dstRepStride = 8;  // Along columns, repeat start addresses differ by dtypeMask=64 elements, or 8 blocks
+        columnRepeatParams.dstRepStride = 8;  // 列方向上两次repeat起始地址间隔dtypeMask=64个元素，�?个block
         uint32_t offset = 0;
         for (uint32_t i = 0; i < dealRowCount; i++) {
             Div(dstUb[offset], src0Ub[offset], src1Ub[i * FP32_BLOCK_ELEMENT_NUM], dtypeMask, columnRepeatCount,
@@ -3579,7 +4636,7 @@ __aicore__ inline void
 FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::RowMuls(LocalTensor<T> dstUb, LocalTensor<T> src0Ub, LocalTensor<T> src1Ub,
                                 uint32_t dealRowCount, uint32_t columnCount, uint32_t actualColumnCount)
 {
-    // Multiply by row: all elements in each row are multiplied by the same value.
+    // muls by row, 每行的元素乘以相同的元素
     // dstUb[i, (j * 8) : (j * 8 + 7)] = src0Ub[i, (j * 8) : (j * 8 + 7)] * src1Ub[i, 0 : 7]
     // src0Ub:[dealRowCount, columnCount] src1Ub:[dealRowCount, FP32_BLOCK_ELEMENT_NUM] dstUb:[dealRowCount,
     // columnCount]
@@ -3588,16 +4645,16 @@ FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::Row
     uint32_t blockElementNum = FP32_BLOCK_ELEMENT_NUM;
 
     if constexpr (std::is_same<T, half>::value) {
-        // This limit exists because each repeat can read at most 256 bytes contiguously.
+        // 此限制由于每个repeat至多连续读取256B数据
         repeatElementNum = FP32_REPEAT_ELEMENT_NUM * 2; // 256/4 * 2=128
         blockElementNum = FP32_BLOCK_ELEMENT_NUM * 2;   // 32/4 * 2 = 16
     }
 
-    // Each computation can read only 256 contiguous bytes, so each iteration handles 256 B / sizeof(dType) elements.
-    // Split the column dimension into dLoop iterations, processing eight columns each time.
+    // 每次只能连续读取256B的数据进行计算，故每次只能处�?56B/sizeof(dType)=
+    // 列方向分dLoop次，每次处理8列数�?
     uint32_t dLoop = actualColumnCount / repeatElementNum;
     uint32_t dRemain = actualColumnCount % repeatElementNum;
-    // REPEATE_STRIDE_UP_BOUND is 256 because src0RepStride is uint8 and can represent at most 256 data-block strides.
+    // REPEATE_STRIDE_UP_BOUND=256�?此限制由于src0RepStride数据类型为uint8之多256个datablock间距
     if (columnCount < REPEATE_STRIDE_UP_BOUND * blockElementNum) {
         BinaryRepeatParams repeatParams;
         repeatParams.src0BlkStride = 1;
@@ -3607,7 +4664,7 @@ FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::Row
         repeatParams.src1RepStride = 1;
         repeatParams.dstRepStride = columnCount / blockElementNum;
 
-        // Process by columns when the column-repeat count is smaller than the row-repeat count; otherwise process by rows.
+        // 如果以列为repeat所处理的次数小于行处理次数，则以列方式处理。反之则以行进行repeat处理
         if (dLoop <= dealRowCount) {
             uint32_t offset = 0;
             for (uint32_t i = 0; i < dLoop; i++) {
@@ -3619,34 +4676,34 @@ FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::Row
             columnRepeatParams.src0BlkStride = 1;
             columnRepeatParams.src1BlkStride = 0;
             columnRepeatParams.dstBlkStride = 1;
-            columnRepeatParams.src0RepStride = 8; // Along columns, repeat start addresses differ by dtypeMask=64 elements, or 8 blocks
+            columnRepeatParams.src0RepStride = 8; // 列方向上两次repeat起始地址间隔dtypeMask=64个元素，�?个block
             columnRepeatParams.src1RepStride = 0;
-            columnRepeatParams.dstRepStride = 8;  // Along columns, repeat start addresses differ by dtypeMask=64 elements, or 8 blocks
+            columnRepeatParams.dstRepStride = 8;  // 列方向上两次repeat起始地址间隔dtypeMask=64个元素，�?个block
             for (uint32_t i = 0; i < dealRowCount; i++) {
                 Mul(dstUb[i * columnCount], src0Ub[i * columnCount], src1Ub[i * blockElementNum], repeatElementNum,
                     dLoop, columnRepeatParams);
             }
         }
 
-        // The final iteration covers [dealRowCount, dRemain] * [dealRowCount, blockElementNum] and computes only valid elements.
+        // 最后一次完成[dealRowCount, dRemain] * [dealRowCount, blockElementNum] 只计算有效部�?
         if (dRemain > 0) {
             Mul(dstUb[dLoop * repeatElementNum], src0Ub[dLoop * repeatElementNum], src1Ub, dRemain, dealRowCount,
                 repeatParams);
         }
     } else {
         BinaryRepeatParams repeatParams;
-        repeatParams.src0RepStride = 8; // Each repeat handles 256 bytes, exactly eight data blocks
+        repeatParams.src0RepStride = 8; // 每个repeat�?56B数据，正�?个datablock
         repeatParams.src0BlkStride = 1;
         repeatParams.src1RepStride = 0;
         repeatParams.src1BlkStride = 0;
         repeatParams.dstRepStride = 8;
         repeatParams.dstBlkStride = 1;
-        // Compute one row at a time for a total of dealRowCount rows.
+        // 每次计算一行，共计算dealRowCount�?
         for (uint32_t i = 0; i < dealRowCount; i++) {
-            // Compute dLoop repeats in one row; each repeat processes 256 / block_size data blocks.
+            // 计算一行中的dLoop个repeat, 每个repeat计算256/block_size 个data_block
             Mul(dstUb[i * columnCount], src0Ub[i * columnCount], src1Ub[i * blockElementNum], repeatElementNum, dLoop,
                 repeatParams);
-            // Compute the tail block in one row.
+            //  计算一行中的尾�?
             if (dRemain > 0) {
                 Mul(dstUb[i * columnCount + dLoop * repeatElementNum],
                     src0Ub[i * columnCount + dLoop * repeatElementNum], src1Ub[i * blockElementNum], dRemain, 1,
@@ -3654,6 +4711,224 @@ FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::Row
             }
         }
     }
+}
+
+// ====== helper：空闲核帮搬 MergeKv 的核间握手 ======
+// 协议（每个 S2 块一轮，以流水线序号 loop 做 ring 索引）：
+//   target V0 拿到 flag3 信用（= AIC 已读完该槽）→ PublishHelperCredit 发布 loop+1
+//   helper V0/V1 轮询 credit 到位 → 各搬 1/4 范围 → SignalMergeDone 原子加 1
+//   target V0/V1 轮询 done 到 2（按圈数折算期望）→ 并回 helper 的有效计数 → set syncV0C1
+// credit 是回压通道：helper 最多领先 target 一个信用窗口，不会套圈覆写 AIC 正读的槽。
+// GM 读写全部走 DataCopyPad/DataCopy（MTE2/MTE3，过 L2，跨核可见），不用 scalar 轮询。
+template <typename FusedSparseAttentionOverlapTraits>
+__aicore__ inline void
+FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::InitHelperSync(
+    const GlobalTensor<int32_t> &doneGm, const GlobalTensor<int32_t> &creditGm, uint32_t pairs)
+{
+    mergeDoneGm_ = doneGm;
+    mergeCreditGm_ = creditGm;
+    helperSyncPairs_ = pairs > 0 ? pairs : 1;
+}
+
+template <typename FusedSparseAttentionOverlapTraits>
+__aicore__ inline void
+FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::InitHelperV0(
+    const GlobalTensor<KV_T> &targetKvMergeGm, uint32_t pairIdx)
+{
+    isHelperV0_ = true;
+    helperPartIdx_ = 1;
+    helperPartCount_ = 2;
+    kvMergeGm_ = targetKvMergeGm; // helper 直接写 target 核的 merge 缓冲
+    mergeSyncPairOffset_ = pairIdx * HELPER_SYNC_RING * HELPER_SYNC_SLOT_INT32;
+}
+
+template <typename FusedSparseAttentionOverlapTraits>
+__aicore__ inline void
+FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::SetHelperParts(
+    uint32_t partIdx, uint32_t partCount, const GlobalTensor<int32_t> &helperValidSizeGm,
+    uint32_t pairIdx)
+{
+    helperPartIdx_ = partIdx;
+    helperPartCount_ = partCount;
+    helperValidSizeGm_ = helperValidSizeGm;
+    mergeSyncPairOffset_ = pairIdx * HELPER_SYNC_RING * HELPER_SYNC_SLOT_INT32;
+}
+
+template <typename FusedSparseAttentionOverlapTraits>
+__aicore__ inline void
+FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::PublishHelperCredit(uint32_t loop)
+{
+    if (GetSubBlockIdx() != 0) {
+        return; // credit 只由 target 的 V0 发一次，helper 两个子核都读它
+    }
+    // scratch 按 loop 轮换 4 槽：同槽复用隔着 4 个流水线迭代（μs 级），
+    // 32B 的 MTE3 拷贝早已落地，省掉等拷贝的 MTE3_S 同步，发布即发即弃
+    LocalTensor<int32_t> scratch = helperSyncBuff.Get<int32_t>()[(loop & 3) * HELPER_SYNC_SLOT_INT32];
+    scratch.SetValue(0, static_cast<int32_t>(loop + 1));
+    SetFlag<AscendC::HardEvent::S_MTE3>(HELPER_SYNC_EVENT_ID);
+    WaitFlag<AscendC::HardEvent::S_MTE3>(HELPER_SYNC_EVENT_ID);
+    DataCopyExtParams params;
+    params.blockCount = 1;
+    params.blockLen = HELPER_SYNC_SLOT_INT32 * sizeof(int32_t);
+    params.srcStride = 0;
+    params.dstStride = 0;
+    DataCopyPad(mergeCreditGm_[mergeSyncPairOffset_ + (loop % HELPER_SYNC_RING) * HELPER_SYNC_SLOT_INT32], scratch, params);
+}
+
+template <typename FusedSparseAttentionOverlapTraits>
+__aicore__ inline void
+FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::WaitHelperCredit(uint32_t loop)
+{
+    // target 发布的是 loop+1，单调递增：ring 绕圈后旧值必然小于期望值，不会误判
+    int32_t expected = static_cast<int32_t>(loop + 1);
+    if (helperCreditSeen_ >= expected) {
+        return; // 已读到的信用水位覆盖本轮（初始 4 信用爆发期），零 GM 流量
+    }
+    LocalTensor<int32_t> scratch = helperSyncBuff.Get<int32_t>();
+    DataCopyExtParams params;
+    params.blockCount = 1;
+    params.blockLen = HELPER_SYNC_SLOT_INT32 * sizeof(int32_t);
+    params.srcStride = 0;
+    params.dstStride = 0;
+    DataCopyPadExtParams<int32_t> padParams{false, 0, 0, 0};
+    uint32_t spinsink = 0;
+    while (true) {
+        DataCopyPad(scratch, mergeCreditGm_[mergeSyncPairOffset_ + (loop % HELPER_SYNC_RING) * HELPER_SYNC_SLOT_INT32],
+                    params, padParams);
+        SetFlag<AscendC::HardEvent::MTE2_S>(HELPER_SYNC_EVENT_ID);
+        WaitFlag<AscendC::HardEvent::MTE2_S>(HELPER_SYNC_EVENT_ID);
+        helperCreditSeen_ = scratch.GetValue(0);
+        if (helperCreditSeen_ >= expected) {
+            break;
+        }
+        // 轮询降频：两次 GM 读之间垫一段标量空转，把 MTE2 从事务风暴里卸下来。
+        // LCG 乘法链 + UB 写，编译器折不掉；scratch[1] 没人读，值无所谓
+        for (uint32_t i = 0; i < HELPER_POLL_BACKOFF; ++i) {
+            spinsink = spinsink * 1664525 + 1013904223;
+        }
+        scratch.SetValue(1, spinsink);
+    }
+}
+
+template <typename FusedSparseAttentionOverlapTraits>
+__aicore__ inline void
+FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::SignalMergeDone(uint32_t loop)
+{
+    // MergeKv 的 kvMerge 数据和 validSize 都是 MTE3 写，全部落地后才能计数
+    pipe_barrier(PIPE_ALL);
+    LocalTensor<int32_t> scratch = helperSyncBuff.Get<int32_t>()[HELPER_SYNC_SLOT_INT32];
+    scratch.SetValue(0, 1);
+    SetFlag<AscendC::HardEvent::S_MTE3>(HELPER_SYNC_EVENT_ID);
+    WaitFlag<AscendC::HardEvent::S_MTE3>(HELPER_SYNC_EVENT_ID);
+    // 照抄 sparse_flash_attention 的原子加写法：DataCopyParams 的 blockLen 以 32B 为单位
+    DataCopyParams params;
+    params.blockCount = 1;
+    params.blockLen = HELPER_SYNC_SLOT_INT32 * sizeof(int32_t) / 32;
+    params.srcStride = 0;
+    params.dstStride = 0;
+    SetAtomicAdd<int32_t>();
+    DataCopy(mergeDoneGm_[mergeSyncPairOffset_ + (loop % HELPER_SYNC_RING) * HELPER_SYNC_SLOT_INT32], scratch, params);
+    SetAtomicNone();
+}
+
+template <typename FusedSparseAttentionOverlapTraits>
+__aicore__ inline void
+FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::WaitMergeDone(uint32_t loop)
+{
+    // 同一槽每绕 ring 一圈被 helper 两个子核各 +1，期望值按圈数折算
+    //（scratch 在 [32]，避开 credit 发布的 4 槽轮换区 [0,32) 这段）
+    uint32_t slot = loop % HELPER_SYNC_RING;
+    int32_t expected = static_cast<int32_t>((loop / HELPER_SYNC_RING + 1) * HELPER_SIGNALS_PER_BLOCK);
+    LocalTensor<int32_t> scratch = helperSyncBuff.Get<int32_t>()[4 * HELPER_SYNC_SLOT_INT32];
+    DataCopyExtParams params;
+    params.blockCount = 1;
+    params.blockLen = HELPER_SYNC_SLOT_INT32 * sizeof(int32_t);
+    params.srcStride = 0;
+    params.dstStride = 0;
+    DataCopyPadExtParams<int32_t> padParams{false, 0, 0, 0};
+    uint32_t spinsink = 0;
+    while (true) {
+        DataCopyPad(scratch, mergeDoneGm_[mergeSyncPairOffset_ + slot * HELPER_SYNC_SLOT_INT32], params, padParams);
+        SetFlag<AscendC::HardEvent::MTE2_S>(HELPER_SYNC_EVENT_ID);
+        WaitFlag<AscendC::HardEvent::MTE2_S>(HELPER_SYNC_EVENT_ID);
+        if (scratch.GetValue(0) >= expected) {
+            break;
+        }
+        // 轮询降频：两次 GM 读之间垫一段标量空转（LCG 乘法链 + UB 写防优化），
+        // 把 MTE2 从事务风暴里卸下来；scratch[1] 没人读，值无所谓
+        for (uint32_t i = 0; i < HELPER_POLL_BACKOFF; ++i) {
+            spinsink = spinsink * 1664525 + 1013904223;
+        }
+        scratch.SetValue(1, spinsink);
+    }
+}
+
+template <typename FusedSparseAttentionOverlapTraits>
+__aicore__ inline void
+FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::FixValidSize(
+    const RunInfo &info)
+{
+    if (!mergeSplitActive_) {
+        return; // selection 路径 helper 没搬，valid 计数本来就是完整半区的
+    }
+    // 把 helper 那 1/4 范围的有效计数并回来。helper 的计数在它自己核的
+    // kvValidSizeGm_[mergeSlot*256 + subBlock*128 + mergeSlot]；自己的部分计数在
+    // v0ValidSizeUb_[mergeSlot] 还留着（MergeKv 尾部写的），不用回读 GM。
+    // 两个计数都在各自 128 块的首 32B 内（mergeSlot < 4），按 32B 块读写即可。
+    // 本函数在 setV0C1 之前调：valid 计数在下一轮迭代被 Vec1L 读，给它覆盖顺序的
+    // PIPE_MTE3 旗标只有 syncV0C1 一个，fix 挪到旗标之后就和消费者失去序了。
+    uint32_t mergeSlot = info.loop % MERGE_CACHE_GM_BUF_NUM;
+    uint32_t blockBase = mergeSlot * (128 * 2) + GetSubBlockIdx() * 128;
+    LocalTensor<int32_t> helperChunk = helperSyncBuff.Get<int32_t>()[5 * HELPER_SYNC_SLOT_INT32];
+    LocalTensor<int32_t> writeChunk = helperSyncBuff.Get<int32_t>()[6 * HELPER_SYNC_SLOT_INT32];
+    DataCopyExtParams fixParams;
+    fixParams.blockCount = 1;
+    fixParams.blockLen = HELPER_SYNC_SLOT_INT32 * sizeof(int32_t);
+    fixParams.srcStride = 0;
+    fixParams.dstStride = 0;
+    DataCopyPadExtParams<int32_t> padParams{false, 0, 0, 0};
+    // 自己 MergeKv 尾部的 validSize 块写（MTE3）先落地，后面的 32B 写回不能冲到它前面
+    SetFlag<AscendC::HardEvent::MTE3_MTE2>(HELPER_SYNC_EVENT_ID);
+    WaitFlag<AscendC::HardEvent::MTE3_MTE2>(HELPER_SYNC_EVENT_ID);
+    DataCopyPad(helperChunk, helperValidSizeGm_[blockBase], fixParams, padParams);
+    SetFlag<AscendC::HardEvent::MTE2_S>(HELPER_SYNC_EVENT_ID);
+    WaitFlag<AscendC::HardEvent::MTE2_S>(HELPER_SYNC_EVENT_ID);
+    int32_t merged = v0ValidSizeUb_.GetValue(mergeSlot) + helperChunk.GetValue(mergeSlot);
+    writeChunk.SetValue(mergeSlot, merged); // 其余 7 格随便，消费端只读 [mergeSlot]
+    SetFlag<AscendC::HardEvent::S_MTE3>(HELPER_SYNC_EVENT_ID);
+    WaitFlag<AscendC::HardEvent::S_MTE3>(HELPER_SYNC_EVENT_ID);
+    DataCopyPad(kvValidSizeGm_[blockBase], writeChunk, fixParams);
+}
+
+// 清零握手区（done 2KB + credit 2KB）。仅 core0 的 V0 在 Process 的 SyncAll 前调一次。
+// 必须走 MTE3（DataCopyPad）：本算子的跨核可见性先例（splitKV 归约）就是
+// MTE3 写 + SyncAll。标量 store（S 管）与 SyncAll 旗标/原子加之间没有跨管序
+// 保证 —— 曾经 1024 次标量写清零在背靠背调用下被 helper 的首次原子加反超，
+// done 被抹回 0，target 死等（scattered 路 helper 信号极快才踩中，plan=off 没事）。
+template <typename FusedSparseAttentionOverlapTraits>
+__aicore__ inline void
+FusedSparseAttentionOverlapVectorService<FusedSparseAttentionOverlapTraits>::ZeroHelperSyncArea()
+{
+    // helperSyncBuff 2KB 恰好装满 512 个 int32 零；ring 按 pair 隔离，逐 pair 清 done+credit。
+    // ⚠ 不要改成 blockCount=pairs 单发：DataCopyPad 的 srcStride=0 是"连续推进源地址"，
+    // 会从 2KB 的 zeroLocal 越界读出 pairs×2KB（bs≥2 时 UB 越界）。
+    LocalTensor<int32_t> zeroLocal = helperSyncBuff.Get<int32_t>();
+    Duplicate(zeroLocal, static_cast<int32_t>(0), HELPER_SYNC_RING * HELPER_SYNC_SLOT_INT32);
+    SetFlag<AscendC::HardEvent::V_MTE3>(HELPER_SYNC_EVENT_ID);
+    WaitFlag<AscendC::HardEvent::V_MTE3>(HELPER_SYNC_EVENT_ID);
+    DataCopyExtParams params;
+    params.blockCount = 1;
+    params.blockLen = HELPER_SYNC_RING * HELPER_SYNC_SLOT_INT32 * sizeof(int32_t);
+    params.srcStride = 0;
+    params.dstStride = 0;
+    for (uint32_t pair = 0; pair < helperSyncPairs_; pair++) {
+        uint32_t pairOffset = pair * HELPER_SYNC_RING * HELPER_SYNC_SLOT_INT32;
+        DataCopyPad(mergeDoneGm_[pairOffset], zeroLocal, params);
+        DataCopyPad(mergeCreditGm_[pairOffset], zeroLocal, params);
+    }
+    // 拷贝落地再返回，下一次调用复用 zeroLocal 才安全
+    SetFlag<AscendC::HardEvent::MTE3_V>(HELPER_SYNC_EVENT_ID);
+    WaitFlag<AscendC::HardEvent::MTE3_V>(HELPER_SYNC_EVENT_ID);
 }
 
 #endif // FUSED_SPARSE_ATTENTION_OVERLAP_SERVICE_VECTOR_MLA_H

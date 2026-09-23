@@ -1,8 +1,6 @@
 add_op_to_compiled_list()
 
 if (BUILD_OPEN_PROJECT)
-    set(fused_sparse_attention_overlap_depends attention/common CACHE INTERNAL
-        "Dependencies for fused_sparse_attention_overlap")
     target_sources(op_host_aclnn PRIVATE
         fused_sparse_attention_overlap_def.cpp
     )
@@ -15,8 +13,8 @@ add_ops_compile_options(
         -Wno-deprecated-declarations
         -Werror
         -fpermissive
-        -mllvm -cce-vf-remove-membar=false
         -mllvm -cce-aicore-hoist-movemask=false
+        --cce-aicore-arch=dav-c220-mix
 )
 
 if (NOT BUILD_OPS_RTY_KERNEL)
