@@ -3,6 +3,7 @@
 import pytest
 import torch
 
+from vllm_ascend.ops.triton import sfa_cp
 from vllm_ascend.ops.triton.sfa_cp import (
     fused_sfa_dcp_lse_combine,
     pack_sfa_dcp_output_lse,
@@ -34,6 +35,50 @@ def _simulate_receive(
         for source_rank in range(dcp_size)
     ]
     return torch.stack([send_buffers[source_rank][destination_rank] for source_rank in range(dcp_size)])
+
+
+@pytest.mark.parametrize("num_tokens", [7, 8, 31, 32, 256, 257])
+@torch.inference_mode()
+def test_a5_dcp8_batched_matches_scalar_path(monkeypatch: pytest.MonkeyPatch, num_tokens: int) -> None:
+    """Check the optimized A5 boundaries against the original Triton kernels."""
+    if not sfa_cp.is_950():
+        pytest.skip("The batched DCP8 SFA kernels are enabled only on A5")
+    torch.manual_seed(2026 + num_tokens)
+    output = torch.randn(num_tokens, 96, 512, device="npu", dtype=torch.bfloat16)
+    lse = torch.randn(num_tokens, 96, 1, device="npu", dtype=torch.float32)
+    local_output = torch.randn(num_tokens, 12, 512, device="npu", dtype=torch.bfloat16)
+    local_lse = torch.randn(num_tokens, 12, 1, device="npu", dtype=torch.float32)
+
+    monkeypatch.setattr(sfa_cp, "is_950", lambda: False)
+    scalar_send = pack_sfa_dcp_output_lse(output, lse, 8, 1)
+    scalar_combined = fused_sfa_dcp_lse_combine(scalar_send, 512, 1, local_output=local_output, local_lse=local_lse)
+
+    class LaunchSpy:
+        def __init__(self, kernel):
+            self.kernel = kernel
+            self.calls = 0
+
+        def __getitem__(self, grid):
+            launch = self.kernel[grid]
+
+            def tracked_launch(*args, **kwargs):
+                self.calls += 1
+                return launch(*args, **kwargs)
+
+            return tracked_launch
+
+    pack_spy = LaunchSpy(sfa_cp._pack_sfa_dcp_output_lse_batched_kernel)
+    combine_spy = LaunchSpy(sfa_cp._fused_sfa_dcp_lse_combine_batched_kernel)
+    monkeypatch.setattr(sfa_cp, "_pack_sfa_dcp_output_lse_batched_kernel", pack_spy)
+    monkeypatch.setattr(sfa_cp, "_fused_sfa_dcp_lse_combine_batched_kernel", combine_spy)
+    monkeypatch.setattr(sfa_cp, "is_950", lambda: True)
+    batched_send = pack_sfa_dcp_output_lse(output, lse, 8, 1)
+    batched_combined = fused_sfa_dcp_lse_combine(batched_send, 512, 1, local_output=local_output, local_lse=local_lse)
+
+    torch.testing.assert_close(batched_send, scalar_send, atol=0, rtol=0)
+    torch.testing.assert_close(batched_combined, scalar_combined, atol=2e-2, rtol=2e-2)
+    assert pack_spy.calls == int(8 <= num_tokens <= 256)
+    assert combine_spy.calls == int(32 <= num_tokens <= 256)
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
