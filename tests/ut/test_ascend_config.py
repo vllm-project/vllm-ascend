@@ -32,6 +32,7 @@ from vllm_ascend.ascend_config import (
     AscendCompilationConfig,
     AscendConfig,
     AscendFusionConfig,
+    BlasstConfig,
     DynamicSpecConfig,
     DyntraLBConfig,
     EplbConfig,
@@ -108,6 +109,28 @@ class TestRlConfig(TestBase):
         self.assertFalse(config.sleep_mode_extra_cleanup)
         with self.assertRaises(ValueError):
             RlConfig(refresh=False)  # type: ignore[call-arg]
+
+
+class TestBlasstConfig(TestBase):
+    def test_defaults_and_explicit_values(self):
+        defaults = BlasstConfig()
+
+        self.assertFalse(defaults.enabled)
+        self.assertEqual(defaults.sparse_lambda, -99.0)
+
+        explicit = BlasstConfig(
+            enabled=True,
+            sparse_lambda=-3.0,
+        )
+        self.assertTrue(explicit.enabled)
+        self.assertEqual(explicit.sparse_lambda, -3.0)
+
+    def test_lax_bool_and_unknown_key(self):
+        config = BlasstConfig(enabled="true")  # type: ignore[arg-type]
+
+        self.assertTrue(config.enabled)
+        with self.assertRaises(ValueError):
+            BlasstConfig(quant=False)  # type: ignore[call-arg]
 
 
 class TestAscendConfig(TestBase):

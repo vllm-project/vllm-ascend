@@ -42,6 +42,7 @@ from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: igno
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.utils import (
@@ -65,6 +66,34 @@ SWA_INT_MAX = 2147483647
 _FIA_WORKSPACE_KEY = "npu_fused_infer_attention_score.workspace"
 _FIA_V2_WORKSPACE_KEY = "npu_fused_infer_attention_score_v2.workspace"
 _PA_WORKSPACE_KEY = "npu_paged_attention.workspace"
+_BLASST_WORKSPACE_KEY = "npu_blasst_attention_score.workspace"
+BLASST_MAX_HOST_SEQ = 256
+# The op tiling accepts sparse_mode 0 (no mask) or 3 (compressed causal).
+BLASST_SPARSE_MODE_COMPRESSED_CAUSAL = 3
+BLASST_SPARSE_MODE_NO_MASK = 0
+
+
+_blasst_grown_workspace: torch.Tensor | None = None
+# (probe_key, need) of the last replay-pass workspace probe; see
+# BlasSTParamProvider.resolve for why it is shared across layers.
+_blasst_ws_probe: tuple | None = None
+
+
+def _blasst_op_kwargs(blasst_config, num_heads: int, num_kv_heads: int, scale: float) -> dict:
+    return dict(
+        num_heads=num_heads,
+        scale=scale,
+        pre_tokens=SWA_INT_MAX,
+        next_tokens=SWA_INT_MAX,
+        input_layout="TND",
+        num_key_value_heads=num_kv_heads,
+        sparse_mode=BLASST_SPARSE_MODE_COMPRESSED_CAUSAL,
+        inner_precise=0,
+        antiquant_mode=0,
+        sparse_lambda=blasst_config.sparse_lambda,
+        softmax_lse_flag=False,
+        sparse_stats_flag=False,
+    )
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
@@ -499,6 +528,58 @@ class PAParamProvider:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class BlasSTParamProvider:
+    layer_name: str | None
+    query: torch.Tensor
+    key: torch.Tensor
+    value: torch.Tensor
+    block_size: int
+    attn_mask: torch.Tensor | None
+    op_kwargs: tuple[tuple[str, Any], ...]
+    workspace: torch.Tensor
+
+    def resolve(self, attn_metadata) -> dict[str, Any]:
+        metadata = attn_metadata[self.layer_name]
+        global _blasst_grown_workspace, _blasst_ws_probe
+        # get_workspace runs full host tiling (~25ms at long KV). Layers in a
+        # bucket share shapes and seq lists, and the kv list changes every
+        # step, so probe once per replay pass and let the other layers reuse
+        # it -- probing per layer per step was a 64x collapse (~1.6s/step).
+        probe_key = tuple(metadata.seq_lens_list)
+        if _blasst_ws_probe is not None and _blasst_ws_probe[0] == probe_key:
+            need = _blasst_ws_probe[1]
+        else:
+            need = torch.ops._C_ascend.npu_blasst_attention_score_get_workspace(
+                self.query,
+                self.key,
+                self.value,
+                pse_shift=None,
+                atten_mask=self.attn_mask,
+                actual_seq_lengths=metadata.actual_seq_lengths_q,
+                actual_seq_lengths_kv=metadata.seq_lens_list,
+                blocktable=metadata.block_tables,
+                block_size=self.block_size,
+                **dict(self.op_kwargs),
+            )
+            _blasst_ws_probe = (probe_key, need)
+        ws = self.workspace
+        grown = _blasst_grown_workspace
+        if need > ws.numel():
+            if grown is None or grown.numel() < need:
+                grown = torch.empty(need, dtype=torch.uint8, device=self.query.device)
+                _blasst_grown_workspace = grown
+            ws = grown
+        elif grown is not None and grown.numel() >= ws.numel():
+            ws = grown
+        return {
+            "actual_seq_lengths": metadata.actual_seq_lengths_q,
+            "actual_seq_lengths_kv": metadata.seq_lens_list,
+            "blocktable": metadata.block_tables,
+            "workspace": ws,
+        }
+
+
 class AscendAttentionBackendImpl(AttentionImpl):
     def __init__(
         self,
@@ -565,6 +646,34 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # attn_metadata during graph replay. Record the captured layer name only
         # for that path.
         self._layer_name: str | None = None
+        blasst_cfg = get_ascend_config().blasst_config
+        _hf_cfg = self.vllm_config.model_config.hf_config
+        _layer_types = getattr(_hf_cfg, "layer_types", None) or getattr(
+            getattr(_hf_cfg, "text_config", None), "layer_types", None
+        )
+        self._is_hybrid_linear = _layer_types is not None and ({"linear_attention", "mamba", "gdn"} & set(_layer_types))
+        _blasst_registered = hasattr(torch.ops._C_ascend, "npu_blasst_attention_score")
+        if blasst_cfg.enabled and not _blasst_registered:
+            # Same policy as sparse_kv_offload_manager: a feature the user
+            # explicitly opted into must fail loudly, not silently fall back.
+            raise RuntimeError(
+                "blasst_config is enabled but the BlasST custom op is not "
+                "registered in this build (wrong SoC or missing csrc build). "
+                "Rebuild with COMPILE_CUSTOM_KERNELS=1 on a supported SoC."
+            )
+        self._blasst_supported = (
+            blasst_cfg.enabled
+            and _blasst_registered
+            and not self._is_hybrid_linear
+            and self.vllm_config.model_config.dtype in (torch.float16, torch.bfloat16)
+            and self.kv_cache_dtype in (torch.float16, torch.bfloat16)
+            and self.head_size in (128, 256)
+            and self.sinks is None
+            and self.sliding_window is None
+            and not self.use_bnsd_kv_cache
+            and not envs_vllm.VLLM_BATCH_INVARIANT
+        )
+        self._blasst_op_kwargs_cached: dict | None = None
 
     def _graph_metadata_layer_name(self, layer: AttentionLayer | None = None) -> str | None:
         layer_name = layer.layer_name if layer is not None else self._layer_name
@@ -830,6 +939,168 @@ class AscendAttentionBackendImpl(AttentionImpl):
             block_table = attn_metadata.block_tables
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
         return key, value, block_size, block_table, actual_seq_lengths_kv
+
+    def _can_use_blasst(
+        self,
+        attn_metadata: AscendMetadata,
+    ) -> bool:
+        if not self._blasst_supported:
+            return False
+        if _EXTRA_CTX.is_draft_model:
+            return False
+        if len(attn_metadata.actual_seq_lengths_q) > BLASST_MAX_HOST_SEQ:
+            return False
+        if attn_metadata.attn_state != AscendAttentionState.PrefillNoCache and self.key_cache is None:
+            return False
+        if _EXTRA_CTX.capturing:
+            # Graph capture: decode buckets only, and the captured call bakes
+            # sparse_mode=3 so it must be causal.
+            if attn_metadata.attn_state != AscendAttentionState.DecodeOnly:
+                return False
+            if not attn_metadata.causal:
+                return False
+            if self._use_layer_aware_fia_graph_replay:
+                return False
+        return attn_metadata.attn_state in (
+            AscendAttentionState.DecodeOnly,
+            AscendAttentionState.PrefillNoCache,
+            AscendAttentionState.ChunkedPrefill,
+        )
+
+    def forward_blasst_attention(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+    ):
+        if _EXTRA_CTX.capturing:
+            attn_output, num_tokens = self.full_graph_blasst(query, key, value, attn_metadata, output)
+            output[:num_tokens] = attn_output[:num_tokens]
+            return output
+        key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
+
+        num_tokens = attn_metadata.actual_seq_lengths_q[-1]
+        query = query[:num_tokens]
+        if (
+            attn_metadata.attn_state == AscendAttentionState.PrefillNoCache
+            and self.attn_type != AttentionType.ENCODER_DECODER
+        ):
+            key = key[:num_tokens]
+            value = value[:num_tokens]
+
+        actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
+        if isinstance(actual_seq_lengths_kv, torch.Tensor):
+            actual_seq_lengths_kv = actual_seq_lengths_kv.tolist()
+
+        # Non-causal batches carry attn_mask=None -> sparse_mode=0 (no mask).
+        if self._blasst_op_kwargs_cached is None:
+            self._blasst_op_kwargs_cached = _blasst_op_kwargs(
+                get_ascend_config().blasst_config, self.num_heads, self.num_kv_heads, self.scale
+            )
+        op_kwargs = self._blasst_op_kwargs_cached
+        if not attn_metadata.causal:
+            op_kwargs = {**op_kwargs, "sparse_mode": BLASST_SPARSE_MODE_NO_MASK}
+        attn_output, _, _ = torch.ops._C_ascend.npu_blasst_attention_score(
+            query,
+            key,
+            value,
+            pse_shift=None,
+            atten_mask=attn_metadata.attn_mask,
+            actual_seq_lengths=actual_seq_lengths_q,
+            actual_seq_lengths_kv=actual_seq_lengths_kv,
+            blocktable=block_table,
+            block_size=block_size,
+            **op_kwargs,
+        )
+
+        attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
+        output[:num_tokens] = attn_output[:num_tokens]
+        return output
+
+    def full_graph_blasst(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+    ):
+        key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
+
+        num_tokens = attn_metadata.actual_seq_lengths_q[-1]
+        actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
+        if isinstance(actual_seq_lengths_kv, torch.Tensor):
+            actual_seq_lengths_kv = actual_seq_lengths_kv.tolist()
+
+        attention_out = torch.empty(query.shape, dtype=query.dtype, device=query.device)
+        softmax_lse = torch.empty(query.shape[0], self.num_heads, 1, dtype=torch.float32, device=query.device)
+        sparse_stats = torch.empty(16, dtype=torch.int32, device=query.device)
+
+        op_kwargs = _blasst_op_kwargs(get_ascend_config().blasst_config, self.num_heads, self.num_kv_heads, self.scale)
+        max_kv = self.vllm_config.model_config.max_model_len
+
+        def _ws_factory():
+            ws_args = dict(
+                pse_shift=None,
+                atten_mask=attn_metadata.attn_mask,
+                blocktable=block_table,
+                block_size=block_size,
+                **op_kwargs,
+            )
+            ws_size = torch.ops._C_ascend.npu_blasst_attention_score_get_workspace(
+                query,
+                key,
+                value,
+                actual_seq_lengths=actual_seq_lengths_q,
+                actual_seq_lengths_kv=actual_seq_lengths_kv,
+                **ws_args,
+            )
+            ws_size_fd = torch.ops._C_ascend.npu_blasst_attention_score_get_workspace(
+                query,
+                key,
+                value,
+                actual_seq_lengths=list(range(1, num_tokens + 1)),
+                actual_seq_lengths_kv=[max_kv] * num_tokens,
+                **ws_args,
+            )
+            return torch.empty(max(ws_size, ws_size_fd), dtype=torch.uint8, device=query.device)
+
+        workspace = get_capture_resource(_BLASST_WORKSPACE_KEY, _ws_factory, self._use_max_workspace_for_fia_graph)
+
+        register_task(
+            torch.ops._C_ascend.npu_blasst_attention_score_out,
+            {
+                "query": query,
+                "key": key,
+                "value": value,
+                "attention_out": attention_out,
+                "softmax_lse": softmax_lse,
+                "sparse_stats": sparse_stats,
+                "workspace": workspace,
+                "pse_shift": None,
+                "atten_mask": attn_metadata.attn_mask,
+                "actual_seq_lengths": actual_seq_lengths_q,
+                "actual_seq_lengths_kv": actual_seq_lengths_kv,
+                "blocktable": block_table,
+                "block_size": block_size,
+                **op_kwargs,
+            },
+            BlasSTParamProvider(
+                layer_name=self._graph_metadata_layer_name(),
+                query=query,
+                key=key,
+                value=value,
+                block_size=block_size,
+                attn_mask=attn_metadata.attn_mask,
+                op_kwargs=tuple(op_kwargs.items()),
+                workspace=workspace,
+            ),
+        )
+
+        attn_output = attention_out.view(num_tokens, self.num_heads, self.head_size)
+        return attn_output, num_tokens
 
     def forward_fused_infer_attention(
         self,
@@ -1218,6 +1489,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 and using_paged_attention(num_tokens, self.vllm_config, self.head_size)
             ):
                 output = self.forward_paged_attention(query, attn_metadata, output)
+            elif self._can_use_blasst(attn_metadata):
+                output = self.forward_blasst_attention(query, key, value, attn_metadata, output)
             else:
                 output = self.forward_fused_infer_attention(query, key, value, attn_metadata, output, kv_cache)
 
