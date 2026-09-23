@@ -229,11 +229,10 @@ class DeepseekV4DSparkModel(nn.Module):
     ) -> None:
         if context_states.numel() == 0 or context_slot_mapping is None:
             return
-        first_layer = next(iter(self.layers.values()))
-        first_rope_layer = first_layer.self_attn.rotary_emb.layername
+        rope_layers = [layer.self_attn.rotary_emb.layername for layer in self.layers.values()]
         rope = get_cos_and_sin_dsa(
             context_positions,
-            layer_names=first_rope_layer,
+            layer_names=rope_layers,
         )
         for layer_idx, layer in enumerate(self.layers.values()):
             layer_context_slot_mapping = None if context_slot_mapping is None else context_slot_mapping[layer_idx]
