@@ -249,18 +249,6 @@ class ComplexExpRotaryEmbedding(nn.Module):
 
             _ROPE_STATE.full_rope_cache[config_key] = (cos.unsqueeze(1).unsqueeze(1), sin.unsqueeze(1).unsqueeze(1))
 
-        # The DSA RoPE tables are built while the sleep-mode weights mem-pool is
-        # active and every DSA layer reads them through the process-global
-        # ``_ROPE_STATE`` cache. Own them as non-persistent buffers as well, so a
-        # level-2 sleep backs up and restores their contents in place; the cache
-        # keeps the same tensor objects, so the lookup path and the addresses
-        # baked into captured ACL graphs are unchanged. ``named_buffers()``
-        # de-duplicates shared tensors, so the layers that share a config key
-        # cost a single backup entry.
-        full_rope_cos, full_rope_sin = _ROPE_STATE.full_rope_cache[config_key]
-        self.register_buffer("full_rope_cos", full_rope_cos, persistent=False)
-        self.register_buffer("full_rope_sin", full_rope_sin, persistent=False)
-
         use_eagle = (
             vllm_config is not None
             and vllm_config.speculative_config is not None
