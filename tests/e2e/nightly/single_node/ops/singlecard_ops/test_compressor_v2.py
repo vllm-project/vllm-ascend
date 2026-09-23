@@ -37,7 +37,7 @@ def _reference(x, wkv, wgate, state, blocks, offsets, used, starts):
 
 @pytest.mark.parametrize("width", [128, 512])
 @pytest.mark.parametrize("hidden", [1024, 5120])
-@pytest.mark.parametrize("length,start", [(1, 0), (1, 1), (5, 31), (67, 1), (1003, 0)])
+@pytest.mark.parametrize("length,start", [(1, 0), (1, 1), (5, 31), (33, 1), (67, 1), (1003, 0), (1003, 1)])
 @pytest.mark.parametrize("strided", [False, True])
 @torch.inference_mode()
 def test_compressor_v2_ring(width, hidden, length, start, strided):

@@ -260,6 +260,10 @@ ge::graphStatus CompressorV2Tiling::CalcWorkSpace()
     constexpr uint32_t V1_RES_ELEM_SIZE = 4;  // 4: fp32
     uint32_t maxGroupNum = aicNum_ / (baseParams_->headDim / innerSplitParams_->dBaseSize);
     workspaceSize_ = libapiSize_;
+    // Preserve the partial compression group before a long prefill wraps the
+    // in-place ring. The perf kernel reserves this prefix in its workspace.
+    workspaceSize_ += static_cast<uint64_t>(baseParams_->batchSize) * baseParams_->cmpRatio *
+                      baseParams_->headDim * 2 * MM1_RES_ELEM_SIZE;
     workspaceSize_ +=
         workspaceParams_->mm1KvResSize * maxGroupNum * MM1_RES_ELEM_SIZE * workspaceParams_->dbWorkspaceRatio;
     workspaceSize_ +=

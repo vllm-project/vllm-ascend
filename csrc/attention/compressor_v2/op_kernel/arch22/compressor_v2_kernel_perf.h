@@ -88,6 +88,7 @@ private:
     GlobalTensor<MM1_OUT_T> vec1ScoreCacheGm;
     GlobalTensor<MM1_OUT_T> Vec1InputKvGm;
     GlobalTensor<MM1_OUT_T> Vec1InputScoreGm;
+    GlobalTensor<MM1_OUT_T> historyGm;
     // ================================Task Info====================================
     CompressorV2Tools<COMP> tools_;
     ConstInfo constInfo{};
@@ -153,6 +154,7 @@ __aicore__ inline void CompressorV2KernelPerf<COMP>::Init(__gm__ uint8_t *x, __g
         blockVec_.Init(x, wKv, wGate, stateCache, stateBlockTable, cuSeqlens, seqUsed, startPos, cmpKvOut);
         blockVec_.InitBuffers(pipe_);
         blockVec_.InitVec1GlobalTensor(Vec1InputKvGm, Vec1InputScoreGm, vec1KvCacheGm, vec1ScoreCacheGm);
+        blockVec_.SnapshotHistory(historyGm);
     }
 }
 
@@ -396,7 +398,9 @@ __aicore__ inline void CompressorV2KernelPerf<COMP>::CalcSplitCoreInfo()
 template <typename COMP>
 __aicore__ inline void CompressorV2KernelPerf<COMP>::InitWorkspace(__gm__ uint8_t *workspace)
 {
-    uint64_t offset = 0;
+    historyGm.SetGlobalBuffer((__gm__ MM1_OUT_T *)workspace);
+    uint64_t offset = static_cast<uint64_t>(constInfo.batchSize) * constInfo.cmpRatio *
+                      constInfo.headDim * 2 * sizeof(MM1_OUT_T);
     uint64_t mm1KvResStartOffset = offset;
     // mm1KvResGm
     mm1KvResGm.SetGlobalBuffer(

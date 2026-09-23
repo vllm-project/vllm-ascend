@@ -965,8 +965,9 @@ at::Tensor compressor_v2(const at::Tensor &x, const at::Tensor &wkv, const at::T
         int64_t capacity = std::min(x.size(0), x.size(0) / cmp_ratio + cu_seqlens->size(0) - 1);
         output = at::empty({capacity, wkv.size(0)}, x.options());
     }
+    int64_t state_cache_stride_dim0 = state_cache.stride(0);
     EXEC_NPU_CMD(aclnnCompressorV2, x, wkv, wgate, state_cache, state_block_table, cu_seqlens,
-                 seqused, start_pos, cmp_ratio, state_cache.stride(0), output);
+                 seqused, start_pos, cmp_ratio, state_cache_stride_dim0, output);
     return output;
 }
 

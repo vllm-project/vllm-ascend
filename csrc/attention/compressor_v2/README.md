@@ -26,6 +26,9 @@ numerical validation; bitwise equivalence is not assumed.
 The adapter translates the compact native output to the original completion-token
 rows, masks incomplete/padded rows, and passes explicit used lengths so padded
 requests do not mutate the null state page. It performs no host tensor reads.
+The arch22 perf kernel snapshots a partial group's history before long-prefill
+ring writes can overwrite it. This fixes an upstream in-place read/write race;
+short decode inputs do not require the extra snapshot or cross-core barrier.
 Supported model dimensions are H in [1024, 10240], aligned to 512, and D=128/512.
 Although the vendored operator also includes arch35, the model integration is limited
 to arch22 until the 32-row long-prefill ring contract is qualified on other hardware.

@@ -52,6 +52,7 @@ public:
     __aicore__ inline void FreeEventID();
     // =================================执行计算=================================
     __aicore__ inline void ComputeVec1(const Vec1RunInfo &info);
+    __aicore__ inline void SnapshotHistory(GlobalTensor<T> history);
     __aicore__ inline void InitVec1GlobalTensor(GlobalTensor<T> kvMm1ResGm, GlobalTensor<T> scoreMm1ResGm,
                                                 GlobalTensor<T> kvCacheTcGm, GlobalTensor<T> scoreCacheTcGm);
 
@@ -159,6 +160,8 @@ private:
     GlobalTensor<int32_t> sequsedGm_;
     GlobalTensor<int32_t> stateBlockTableGm_;
     GlobalTensor<T> stateCacheGm_;
+    GlobalTensor<T> historyGm_;
+    bool useHistorySnapshot_ = false;
     GlobalTensor<X_T> cmpKvOutGm_;
 
     // ================================Local Buffer区====================================
@@ -222,6 +225,50 @@ __aicore__ inline void CompressorV2BlockVectorPerf<COMP>::InitBuffers(TPipe *pip
 template <typename COMP>
 __aicore__ inline void CompressorV2BlockVectorPerf<COMP>::AllocEventID()
 {}
+
+template <typename COMP>
+__aicore__ inline void CompressorV2BlockVectorPerf<COMP>::SnapshotHistory(GlobalTensor<T> history)
+{
+    historyGm_ = history;
+    for (uint32_t b = 0; b < constInfo_.batchSize; ++b) {
+        uint32_t heldRows = GetStartPos(b) % cmpRatio_;
+        if (heldRows != 0 && GetSeqUsed(b) + heldRows > constInfo_.blockSize) {
+            useHistorySnapshot_ = true;
+        }
+    }
+    // Decode cannot overwrite the history it consumes; keep its fast path.
+    if (!useHistorySnapshot_) {
+        return;
+    }
+    LocalTensor<T> buffer = tmpBuff1.Get<T>();
+    event_t readReady = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_MTE3));
+    event_t writeDone = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE3_MTE2));
+    uint32_t rowSize = STATE_INTERLEAVE_FACTOR * constInfo_.headDim;
+    for (uint32_t b = GetBlockIdx(); b < constInfo_.batchSize; b += constInfo_.usedCoreNum * 2) {
+        if (GetSeqUsed(b) == 0) {
+            continue;
+        }
+        uint32_t start = GetStartPos(b);
+        uint32_t heldRows = start % cmpRatio_;
+        uint64_t pageOffset = static_cast<uint64_t>(stateBlockTableGm_.GetValue(b)) *
+                              constInfo_.stateCacheStrideDim0;
+        for (uint32_t row = 0; row < heldRows; ++row) {
+            uint64_t src = pageOffset + ((start - heldRows + row) % constInfo_.blockSize) * rowSize;
+            uint64_t dst = (static_cast<uint64_t>(b) * cmpRatio_ + row) * rowSize;
+            DataCopy(buffer, stateCacheGm_[src], rowSize);
+            SetFlag<HardEvent::MTE2_MTE3>(readReady);
+            WaitFlag<HardEvent::MTE2_MTE3>(readReady);
+            DataCopy(historyGm_[dst], buffer, rowSize);
+            SetFlag<HardEvent::MTE3_MTE2>(writeDone);
+            WaitFlag<HardEvent::MTE3_MTE2>(writeDone);
+        }
+    }
+    // All vector cores must finish reading the original ring before any core
+    // writes its final rows. Flags 3..9 are used by the normal C/V pipeline.
+    constexpr uint32_t HISTORY_READY_FLAG = 15;
+    CrossCoreSetFlag<0, PIPE_MTE3>(HISTORY_READY_FLAG);
+    CrossCoreWaitFlag<0, PIPE_MTE2>(HISTORY_READY_FLAG);
+}
 
 template <typename COMP>
 __aicore__ inline void CompressorV2BlockVectorPerf<COMP>::FreeEventID()
@@ -624,8 +671,16 @@ __aicore__ inline void CompressorV2BlockVectorPerf<COMP>::ReadState(const LocalT
         uint64_t startSeqIdx = Trunc(sliceInfo.bStartPos + sliceInfo.sIdx, (uint64_t)constInfo_.cmpRatio);
         uint32_t endSeqIdx = sliceInfo.bStartPos;
         uint64_t dstBaseOffset = sliceInfo.compressoredScCnt * constInfo_.cmpRatio * coff_ * dDealSize;
-        ReadFromCacheState(dstLocal[dstBaseOffset], stateGm, blockTableGm, sliceInfo.bIdx, startSeqIdx, endSeqIdx,
-                           dStartIdx + (coff_ - 1) * constInfo_.headDim, dDealSize, stateIdx);
+        if (useHistorySnapshot_) {
+            uint64_t offset = static_cast<uint64_t>(sliceInfo.bIdx) * cmpRatio_ *
+                              STATE_INTERLEAVE_FACTOR * constInfo_.headDim +
+                              stateIdx * constInfo_.headDim + dStartIdx;
+            DataCopyAlignGmToUb(dstLocal[dstBaseOffset], historyGm_[offset], endSeqIdx - startSeqIdx,
+                               dDealSize, STATE_INTERLEAVE_FACTOR * constInfo_.headDim, coff_ * dDealSize);
+        } else {
+            ReadFromCacheState(dstLocal[dstBaseOffset], stateGm, blockTableGm, sliceInfo.bIdx, startSeqIdx, endSeqIdx,
+                              dStartIdx + (coff_ - 1) * constInfo_.headDim, dDealSize, stateIdx);
+        }
     }
 
     // 填充左边
