@@ -3,7 +3,6 @@
 """Regression for the block-table shape used by padded GQA draft graphs."""
 
 import ast
-from contextlib import nullcontext
 from copy import copy
 from pathlib import Path
 from types import SimpleNamespace
