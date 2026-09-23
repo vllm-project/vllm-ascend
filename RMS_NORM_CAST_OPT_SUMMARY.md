@@ -1,8 +1,5 @@
 # rms_norm_cast 算子优化总结（910B）
 
-> 本文是三轮优化的总结报告：算子背景、优化环境、每轮"为什么 → 怎么做 → 结果"、
-> 性能收益折线图与最终记分板。
-
 ## 1. 算子背景
 
 **是什么**：`torch.ops._C_ascend.npu_rms_norm_cast` 是自研融合算子，一次 kernel
@@ -29,9 +26,9 @@
 |---|---|
 | 硬件 | Ascend 910B3（dav_c220 向量核，40 AIV/Device，UB 192KB/核） |
 | CANN | 9.1.0，驱动 npu-smi 25.5.1 |
-| 被测 shape | hidden=7168（DeepSeek v4/v41 唯一调用方），tokens 1~4096 |
-| 记分板口径 | NPUGraph replay（`benchmarks/rms_norm_cast.py`），≈ 背靠背 serving 场景 |
-| pipe 归因口径 | `msprof op --aic-metrics=PipeUtilization`（孤立执行，含 ~3-4µs 固定开销） |
+| 被测 shape | hidden=7168，tokens 1~4096 |
+| 记分板口径 | NPUGraph replay（`benchmarks/rms_norm_cast.py`）|
+| pipe 归因口径 | `msprof op --aic-metrics=PipeUtilization` |
 | 精度门槛 | `test_rms_norm_cast.py`（8 用例）+ `test_rms_norm_cast_coverage.py`（25 用例） |
 
 **基线 profile（2048×7168 bf16，未优化）**：kernel 103.0µs，其中 vec 管线占
@@ -76,16 +73,6 @@ vec 空转 ~31µs。
 - 每行 MTE2(载入)→V(计算)→MTE3(落盘) 完全串行，vec 等搬运；
 - 每行一次 V_S/GetValue/S_V 标量往返取 rstd——**唯一会阻塞发射线程的等待**
   （wait 挂在标量 pipe 上），每行停等。
-
-**前置研究（CANN 9.1.0 源码级确认，设计的地基）**：
-
-1. `TPipe::FetchEventID` 只窥探不占位；`AllocEventID`/`ReleaseEventID` 才操作
-   占用位图——框架 TQue 的深度 2 队列正是靠 Alloc/Set/Wait/Release 四件套持有
-   多个在途事件（每方向上限 8 个 ID）；
-2. `wait_flag(srcPipe, dstPipe)` 挂在**目标 pipe** 上执行——五个流水方向的
-   wait 都不阻塞发射线程，只有 V_S 例外；
-3. 910B 基础向量算子对 bf16 **无元素级支持**（Mul/Muls/Duplicate 均断言不含
-   bf16），bf16 数学必须全程 fp32 域——原计划的"bf16 域单舍入"被硬件阻断。
 
 **怎么做**：
 
