@@ -647,6 +647,10 @@ class DCPManager:
         dcp_metadata = common_attn_metadata.context_parallel_metadata
         assert dcp_metadata is not None, "DCP metadata must be populated for speculative drafting."
         dcp_metadata = copy.copy(dcp_metadata)
+        # Subsequent draft steps have one query per request; the per-step KV
+        # lengths already exclude future keys. The verify mask describes the
+        # previous multi-token batch and must not be reused here.
+        dcp_metadata.dcp_mtp_attn_mask = None
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         dcp_metadata.query_lens_cpu = query_lens_cpu
@@ -732,7 +736,6 @@ class DCPManager:
         )
 
         if self.speculative_config and not self.vllm_config.model_config.use_mla:
-            assert self.dcp_mtp_attn_mask is not None
             if self.num_decode_reqs > 0:
                 decode_scheduled = num_scheduled_tokens[: self.num_decode_reqs]
                 if fixed_decode_seq_lens_cpu is not None:
