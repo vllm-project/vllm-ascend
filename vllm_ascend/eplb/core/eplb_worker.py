@@ -280,6 +280,7 @@ class EplbWorker:
         log2phy_all = []
         layer_ids = []
 
+        phys_to_logical = self.shared_dict.get("phys_to_logical", None)
         for send_info, recv_info, new_expert_map, layer_id in update_info_generator:
             send_info_this_rank = send_info.get(self.rank_id, [])
             recv_info_this_rank = recv_info.get(self.rank_id, [])
@@ -292,6 +293,7 @@ class EplbWorker:
                 new_expert_map,
                 self.rank_id,
                 tp_size=self.tp_size,
+                phys_to_logical=phys_to_logical,
             )
             log2phy_all.append(log2phy_map.numpy().tolist())
 
