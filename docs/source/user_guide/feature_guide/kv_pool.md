@@ -935,6 +935,7 @@ dscli --version
 ```
 
 Expected output:
+
 - `Yuanrong Datasystem is ready`
 - Version number displayed by `dscli`.
 
@@ -1432,6 +1433,7 @@ done
 For common environment, installation, and general parameter issues, see the [Public FAQ](../../faqs.md). This chapter only covers issues specific to this feature.
 
 Public FAQ references:
+
 - [Mooncake Store Deployment Guide](https://github.com/kvcache-ai/Mooncake/blob/main/docs/source/deployment/mooncake-store-deployment-guide.md)
 - [SSD Offload](https://github.com/kvcache-ai/Mooncake/blob/main/docs/source/deployment/ssd/ssd-offload.md)
 - [HIXL Common Issue Localization Guide](https://gitcode.com/cann/hixl/wiki/HIXL%E5%B8%B8%E8%A7%81%E9%97%AE%E9%A2%98%E5%AE%9A%E4%BD%8D%E6%89%8B%E5%86%8C.md)
@@ -1442,10 +1444,12 @@ Public FAQ references:
 **Problem Description:** vLLM reports failed `put` or `get` operations.
 
 **Root Cause Analysis:** First determine whether the error is reported by Mooncake itself:
+
 - `put` failure: Mooncake log shows `NO_AVAILABLE_HANDLE` or `BatchPut failed ... due to insufficient space`. This usually means the remaining space after eviction is not enough for one `BatchPut` request.
 - `get` failure: Mooncake log shows `lease_expired_before_data_transfer_completed key=...` or returns `LEASE_EXPIRED`. The KV object lease expired before data transfer completed.
 
 **Resolution Steps:**
+
 1. Identify the error source. If Mooncake-reported `put` failure, ensure eviction policy remaining space (e.g., `1 - eviction_ratio`) can hold one batch put, or increase capacity, increase eviction headroom, or reduce batch size.
 2. If `get` failure, increase `mooncake_master` `--default_kv_lease_ttl` and keep it larger than `ASCEND_CONNECT_TIMEOUT` and `ASCEND_TRANSFER_TIMEOUT`.
 3. If not Mooncake-reported, it is likely an HIXL (ascend_direct) transfer-layer issue. Collect plog files under `/root/ascend/log/debug/plog` for investigation.
@@ -1457,6 +1461,7 @@ Public FAQ references:
 **Root Cause Analysis:** Master has unmounted the rank's `LOCAL_DISK` segment (typically after `client_expired` when Ping stops refreshing TTL). Common trigger when `enable_cpu_binding=true`: Mooncake starts Ping during init, then vLLM-Ascend `bind_cpus()` runs `migratepages`/IRQ binding; the Ping thread is not pinned and misses beats under default `client_ttl=10`.
 
 **Resolution Steps:**
+
 1. Temporary: raise Master TTL, e.g., `mooncake_master ... --client_ttl=120`. Tune to your init/warmup window (60-120 is often enough).
 2. Recovery: upgrade Mooncake to > v0.3.11 (main branch) which can remount `LOCAL_DISK` and rescan metadata.
 3. Root fix: pin the storage Ping thread to a release/isolated CPU (Mooncake-side change).
