@@ -233,7 +233,7 @@ templates:
       - --attention_config.indexer_kv_dtype
       - "int8"
       - --additional-config
-      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true,"enable_fused_mc2":1,"enable_mlapo":true}'
+      - '{"ascend_compilation_config": {"fuse_muls_add": true, "enable_npugraph_ex": true, "enable_static_kernel": true, "enable_super_kernel": true},"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true,"enable_fused_mc2":1,"enable_mlapo":true}'
       - --trust-remote-code
       - --max-num-seqs
       - "32"
@@ -303,7 +303,7 @@ templates:
       - --attention_config.indexer_kv_dtype
       - "int8"
       - --additional-config
-      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true,"enable_fused_mc2":1,"enable_mlapo":true}'
+      - '{"ascend_compilation_config": {"fuse_muls_add": true, "enable_npugraph_ex": true, "enable_static_kernel": true, "enable_super_kernel": true},"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true,"enable_fused_mc2":1,"enable_mlapo":true}'
       - --trust-remote-code
       - --max-num-seqs
       - "32"
