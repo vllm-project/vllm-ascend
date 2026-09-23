@@ -51,6 +51,10 @@ _MoECommMethods: dict[MoECommType | None, MoECommMethod] = {}
 # expert shapes (a target and its speculative drafter), so comm state cannot be
 # keyed by comm type alone; see _moe_config_key.
 _MoECommMethodsByConfig: dict[tuple[MoECommType | None, tuple[int, ...]], MoECommMethod] = {}
+# Distinct execution shapes registered above, maintained on the setup (write)
+# path only: activate_moe_comm_method runs on every MoE layer forward and its
+# fast path must not rebuild the shape-key set each time.
+_MoECommShapeKeys: set[tuple[int, ...]] = set()
 
 _CONFIG_KEY_FIELDS = (
     "num_experts",
@@ -85,7 +89,8 @@ def get_moe_comm_method(
     return _MoECommMethods.get(moe_comm_type)
 
 
-def setup_moe_comm_method(moe_config):
+def setup_moe_comm_method(moe_config) -> dict[MoECommType, MoECommMethod]:
+    """Ensure the comm implementations for this config's shape and return them."""
     implementations: dict[MoECommType, type[MoECommMethod]]
     if moe_config.ep_size > 1:
         implementations = {
@@ -98,6 +103,8 @@ def setup_moe_comm_method(moe_config):
         implementations = {MoECommType.ALLGATHER: AllGatherCommImpl}
 
     config_key = _moe_config_key(moe_config)
+    _MoECommShapeKeys.add(config_key)
+    comm_methods: dict[MoECommType, MoECommMethod] = {}
     for comm_type, implementation_cls in implementations.items():
         cache_key = (comm_type, config_key)
         comm_method = _MoECommMethodsByConfig.get(cache_key)
@@ -108,6 +115,8 @@ def setup_moe_comm_method(moe_config):
         # (forward-context setup, capture helpers). The last registered shape
         # wins; layer forwards rebind explicitly via activate_moe_comm_method.
         _MoECommMethods[comm_type] = comm_method
+        comm_methods[comm_type] = comm_method
+    return comm_methods
 
 
 def activate_moe_comm_method(
@@ -125,7 +134,7 @@ def activate_moe_comm_method(
     the identity and the forward context is left untouched (mutating it inside
     a compiled MoE forward changes 310P ModelRunner V2 graph behavior).
     """
-    if len({key for _, key in _MoECommMethodsByConfig}) <= 1:
+    if len(_MoECommShapeKeys) <= 1:
         return current_method
 
     comm_method = get_moe_comm_method(moe_comm_type, moe_config)

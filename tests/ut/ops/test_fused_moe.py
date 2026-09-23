@@ -1854,8 +1854,7 @@ def test_runner_selects_sp_multistream_custom_op(
     monkeypatch.setattr(fused_moe_module, "AscendSharedExperts", MagicMock(return_value=shared_executor))
     monkeypatch.setattr(fused_moe_module, "get_tp_group", MagicMock(return_value=object()))
     monkeypatch.setattr(fused_moe_module, "get_dp_group", MagicMock(return_value=object()))
-    monkeypatch.setattr(fused_moe_module, "setup_moe_comm_method", MagicMock())
-    monkeypatch.setattr(fused_moe_module, "get_moe_comm_method", MagicMock(return_value=None))
+    monkeypatch.setattr(fused_moe_module, "setup_moe_comm_method", MagicMock(return_value={}))
 
     runner = AscendMoERunner(
         "model.layers.0.mlp",
@@ -2526,8 +2525,7 @@ def _stub_moe_runner_init(monkeypatch, *, gate=None, shared_experts=None):
     monkeypatch.setattr(fused_moe_module, "AscendSharedExperts", MagicMock(return_value=SimpleNamespace()))
     monkeypatch.setattr(fused_moe_module, "get_tp_group", MagicMock(return_value=object()))
     monkeypatch.setattr(fused_moe_module, "get_dp_group", MagicMock(return_value=object()))
-    monkeypatch.setattr(fused_moe_module, "setup_moe_comm_method", MagicMock())
-    monkeypatch.setattr(fused_moe_module, "get_moe_comm_method", MagicMock(return_value=None))
+    monkeypatch.setattr(fused_moe_module, "setup_moe_comm_method", MagicMock(return_value={}))
 
     return AscendMoERunner(
         "model.layers.0.mlp",

@@ -32,7 +32,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.dataclass.shared_experts import PreparedSharedExpertInput, RoutedMoEMilestones
-from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method, setup_moe_comm_method
+from vllm_ascend.ops.fused_moe.moe_comm_method import setup_moe_comm_method
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
 from vllm_ascend.ops.fused_moe.shared_experts import (
     AscendSharedExperts,
@@ -136,10 +136,9 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             if self._can_overlap_sp_shared_with(self.routed_input_transform):
                 self._forward_entry = torch.ops.vllm.ascend_moe_forward_shared_sp
 
-        setup_moe_comm_method(self.moe_config)
         # Bind the placement buffer from the instance that owns THIS layer's
         # expert shape, not whatever the legacy global lookup happens to hold.
-        alltoall_comm = get_moe_comm_method(MoECommType.ALLTOALL, self.moe_config)
+        alltoall_comm = setup_moe_comm_method(self.moe_config).get(MoECommType.ALLTOALL)
         if alltoall_comm is not None:
             expert_ids_per_ep_rank = getattr(alltoall_comm.token_dispatcher, "expert_ids_per_ep_rank", None)
             if expert_ids_per_ep_rank is not None:
