@@ -8,7 +8,6 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
-from scipy.optimize import linear_sum_assignment  # type: ignore
 from vllm.distributed import get_eplb_group
 from vllm.distributed.eplb.policy import AbstractEplbPolicy
 
@@ -204,7 +203,9 @@ class StairEplbPolicy(AbstractEplbPolicy):
             current_placement,
             plan,
             logical_load_values.shape[2],
-            self.config.rank_pair_migration_limit,
+            rank_node_ids=node_ids,
+            rank_transfer_limit=self.config.rank_transfer_limit,
+            cross_node_transfer_limit=self.config.cross_node_transfer_limit,
         )
         planned_map = plan.rank_expert_ids.reshape(current_map.shape)
         target = torch.from_numpy(planned_map).to(dtype=current_map.dtype)
@@ -591,143 +592,71 @@ class StairEplbPolicy(AbstractEplbPolicy):
     def _migration_sources(
         current_placement: np.ndarray,
         target_placement: np.ndarray,
-        rank_pair_limit: int,
-        expert_sources: list[list[int]],
-    ) -> np.ndarray | None:
-        """Return source ranks aligned with target slots, or ``None``.
-
-        Current, target, and returned placements are ``[ranks, slots]``;
-        ``expert_sources[e]`` lists the current ranks containing expert ``e``.
-        Per destination, ``(source rank, capacity index)`` owns at most one
-        ``(target slot, expert)`` demand. Occupied capacity recursively rematches
-        its owner; retained experts stay local, and unplaced slots remain ``-1``.
-        """
-        source_rank_ids = np.full_like(target_placement, -1)
-
-        def try_assign_source(
-            slot: int,
-            expert: int,
-            dst_rank: int,
-            capacity_slot_owners: dict[tuple[int, int], tuple[int, int]],
-            visited_capacity_slots: set[tuple[int, int]],
-        ) -> bool:
-            for src_rank in expert_sources[expert]:
-                if src_rank == dst_rank:
-                    continue
-                for capacity_index in range(rank_pair_limit):
-                    capacity_slot = (src_rank, capacity_index)
-                    if capacity_slot in visited_capacity_slots:
-                        continue
-                    visited_capacity_slots.add(capacity_slot)
-                    displaced_demand = capacity_slot_owners.get(capacity_slot)
-                    if displaced_demand is not None:
-                        displaced_slot, displaced_expert = displaced_demand
-                        if not try_assign_source(
-                            displaced_slot, displaced_expert, dst_rank, capacity_slot_owners, visited_capacity_slots
-                        ):
-                            continue
-                    capacity_slot_owners[capacity_slot] = (slot, expert)
-                    source_rank_ids[dst_rank, slot] = src_rank
-                    return True
-            return False
-
-        # Directed pair capacities are independent across destination ranks.
-        for dst_rank, target_experts in enumerate(target_placement):
-            capacity_slot_owners: dict[tuple[int, int], tuple[int, int]] = {}
-            for slot, expert in enumerate(target_experts):
-                if expert >= 0:
-                    if expert in current_placement[dst_rank]:
-                        source_rank_ids[dst_rank, slot] = dst_rank
-                    elif not try_assign_source(slot, int(expert), dst_rank, capacity_slot_owners, set()):
-                        return None
-        return source_rank_ids
-
-    @staticmethod
-    def _minimum_cost_migration_sources(
-        current_placement: np.ndarray,
-        target_placement: np.ndarray,
-        rank_pair_limit: int,
+        rank_transfer_limit: int,
+        cross_node_transfer_limit: int,
         expert_sources: list[list[int]],
         rank_node_ids: np.ndarray,
     ) -> np.ndarray | None:
-        """Choose a source rank for each target slot.
-
-        Current, target, and returned placements are ``[ranks, slots]``;
-        ``rank_node_ids`` is ``[ranks]``. Unplaced slots remain ``-1`` and
-        retained local experts use the destination rank. Local experts do not
-        consume directed rank-pair migration capacity. Among
-        valid assignments, minimize transfers between unequal node IDs, then
-        choose the lexicographically smallest source-rank vector in target-slot
-        order. Return ``None`` when no valid assignment exists.
-
-        The matching helper computes the globally minimal cost of the remaining
-        demands. The outer loop uses it as a tail oracle while fixing the
-        smallest source rank that can still achieve the global minimum.
-        """
+        """Globally assign sources within per-rank and cross-node budgets."""
         source_rank_ids = np.full_like(target_placement, -1)
-
-        def minimum_cross_node_transfers(
-            remaining_demands: list[tuple[int, int]],
-            available_capacity_slots: list[tuple[int, int]],
-            dst_rank: int,
-        ) -> int | None:
-            if not remaining_demands:
-                return 0
-            if len(remaining_demands) > len(available_capacity_slots):
-                return None
-            infeasible_cost = len(remaining_demands) + 1
-            costs = np.full((len(remaining_demands), len(available_capacity_slots)), infeasible_cost, dtype=np.int64)
-            for demand_index, (_, expert) in enumerate(remaining_demands):
-                for capacity_index, (src_rank, _) in enumerate(available_capacity_slots):
-                    if src_rank in expert_sources[expert]:
-                        costs[demand_index, capacity_index] = int(rank_node_ids[src_rank] != rank_node_ids[dst_rank])
-            demand_indices, capacity_indices = linear_sum_assignment(costs)
-            selected_costs = costs[demand_indices, capacity_indices]
-            if len(demand_indices) != len(remaining_demands) or np.any(selected_costs == infeasible_cost):
-                return None
-            return int(selected_costs.sum())
-
+        node_ids = np.asarray(rank_node_ids)
+        unique_nodes, compact_node_ids = np.unique(node_ids, return_inverse=True)
+        demands: list[tuple[int, int, int]] = []
+        incoming = np.zeros(current_placement.shape[0], dtype=np.int64)
         for dst_rank, target_experts in enumerate(target_placement):
-            demands = [
-                (slot, int(expert))
-                for slot, expert in enumerate(target_experts)
-                if expert >= 0 and expert not in current_placement[dst_rank]
-            ]
             for slot, expert in enumerate(target_experts):
-                if expert >= 0 and expert in current_placement[dst_rank]:
+                if expert < 0:
+                    continue
+                if expert in current_placement[dst_rank]:
                     source_rank_ids[dst_rank, slot] = dst_rank
-            candidate_sources = sorted(
-                {src_rank for _, expert in demands for src_rank in expert_sources[expert] if src_rank != dst_rank}
-            )
-            # Expand each directed rank pair into unit-capacity matching slots.
-            capacity_slots = [
-                (src_rank, capacity_index)
-                for src_rank in candidate_sources
-                for capacity_index in range(rank_pair_limit)
-            ]
+                    continue
+                incoming[dst_rank] += 1
+                demands.append((dst_rank, slot, int(expert)))
+        if np.any(incoming > rank_transfer_limit):
+            return None
 
-            remaining_cost = minimum_cross_node_transfers(demands, capacity_slots, dst_rank)
-            if remaining_cost is None:
-                return None
-            # Fix the smallest source that preserves the global minimum tail cost.
-            while demands:
-                slot, expert = demands[0]
-                for capacity_slot in capacity_slots:
-                    src_rank, _ = capacity_slot
-                    if src_rank not in expert_sources[expert]:
-                        continue
-                    edge_cost = int(rank_node_ids[src_rank] != rank_node_ids[dst_rank])
-                    remaining_capacity = [item for item in capacity_slots if item != capacity_slot]
-                    tail_cost = minimum_cross_node_transfers(demands[1:], remaining_capacity, dst_rank)
-                    if tail_cost is not None and edge_cost + tail_cost == remaining_cost:
-                        source_rank_ids[dst_rank, slot] = src_rank
-                        demands = demands[1:]
-                        capacity_slots = remaining_capacity
-                        remaining_cost = tail_cost
-                        break
-                else:
-                    return None
-        return source_rank_ids
+        source_usage = np.zeros(current_placement.shape[0], dtype=np.int64)
+        cross_out = np.zeros(len(unique_nodes), dtype=np.int64)
+        cross_in = np.zeros(len(unique_nodes), dtype=np.int64)
+        max_cross_transfers = min(len(demands), len(unique_nodes) * cross_node_transfer_limit)
+
+        def assign(demand_index: int, remaining_cross_transfers: int) -> bool:
+            if demand_index == len(demands):
+                return True
+            dst_rank, slot, expert = demands[demand_index]
+            dst_node = compact_node_ids[dst_rank]
+            candidates = sorted(
+                expert_sources[expert],
+                key=lambda src_rank: (compact_node_ids[src_rank] != dst_node, src_rank),
+            )
+            for src_rank in candidates:
+                src_node = compact_node_ids[src_rank]
+                crosses_node = src_node != dst_node
+                if source_usage[src_rank] >= rank_transfer_limit or crosses_node > remaining_cross_transfers:
+                    continue
+                if crosses_node and (
+                    cross_out[src_node] >= cross_node_transfer_limit
+                    or cross_in[dst_node] >= cross_node_transfer_limit
+                ):
+                    continue
+                source_usage[src_rank] += 1
+                cross_out[src_node] += crosses_node
+                cross_in[dst_node] += crosses_node
+                source_rank_ids[dst_rank, slot] = src_rank
+                if assign(demand_index + 1, remaining_cross_transfers - crosses_node):
+                    return True
+                source_rank_ids[dst_rank, slot] = -1
+                cross_in[dst_node] -= crosses_node
+                cross_out[src_node] -= crosses_node
+                source_usage[src_rank] -= 1
+            return False
+
+        # The first feasible budget minimizes cross-node transfers. Sorted
+        # candidates then stabilize the selected source ranks.
+        for cross_budget in range(max_cross_transfers + 1):
+            if assign(0, cross_budget):
+                return source_rank_ids
+        return None
 
     @staticmethod
     def _align_target_slots(current_placement: np.ndarray, target_placement: np.ndarray) -> np.ndarray:
@@ -773,7 +702,8 @@ class StairEplbPolicy(AbstractEplbPolicy):
         *,
         current_rank_expert_ids: np.ndarray,
         rank_node_ids: np.ndarray,
-        rank_pair_migration_limit: int,
+        rank_transfer_limit: int,
+        cross_node_transfer_limit: int,
         backtrack_limit: int,
     ) -> PlacementPlan | None:
         """Place replicas with deterministic covariance-aware greedy LPT.
@@ -784,7 +714,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
         Experts are processed by descending per-replica risk. Each replica
         chooses the legal rank with the lowest updated risk,
         breaking ties by rank ID. Each partial placement must have a source
-        assignment within the directed rank-pair limit. ``None`` means bounded
+        assignment within the per-rank and cross-node limits. ``None`` means bounded
         backtracking found no legal placement. The first source-feasible choice
         is free; each accepted alternative choice consumes one backtrack.
         ``rank_node_ids`` contains one non-negative node ID per rank; equal IDs
@@ -825,10 +755,10 @@ class StairEplbPolicy(AbstractEplbPolicy):
         covariance = (covariance + covariance.T) * 0.5
         if not isinstance(num_ranks, int) or isinstance(num_ranks, bool) or num_ranks < 1:
             raise ValueError("num_ranks must be a positive integer")
-        controls = rank_pair_migration_limit, backtrack_limit
+        controls = rank_transfer_limit, cross_node_transfer_limit, backtrack_limit
         invalid_type = any(isinstance(value, bool) or not isinstance(value, int) for value in controls)
-        if invalid_type or rank_pair_migration_limit < 1 or backtrack_limit < 0:
-            raise ValueError("rank_pair_migration_limit and backtrack_limit must be positive/non-negative integers")
+        if invalid_type or rank_transfer_limit < 1 or cross_node_transfer_limit < 0 or backtrack_limit < 0:
+            raise ValueError("STAIR transfer limits and backtrack_limit must be valid integers")
         replicas = replicas.astype(np.int64, copy=False)
         total_slots = int(replicas.sum())
         if np.any(replicas < 1) or np.any(replicas > num_ranks) or total_slots % num_ranks != 0:
@@ -904,7 +834,14 @@ class StairEplbPolicy(AbstractEplbPolicy):
                 rank_variances[rank_id] = updated_variance
                 rank_variance_scales[rank_id] = updated_scale
                 # Search needs only source feasibility; topology cost is deferred.
-                sources = migration_sources(current_placement, placement, rank_pair_migration_limit, expert_sources)
+                sources = migration_sources(
+                    current_placement,
+                    placement,
+                    rank_transfer_limit,
+                    cross_node_transfer_limit,
+                    expert_sources,
+                    node_ids,
+                )
                 budget_exhausted = (
                     sources is not None and decision.tried_feasible_choice and backtracks_used == backtrack_limit
                 )
@@ -935,8 +872,13 @@ class StairEplbPolicy(AbstractEplbPolicy):
 
         # Slot order does not affect risk, so stabilize it before exact source selection.
         placement = cls._align_target_slots(current_placement, placement)
-        sources = cls._minimum_cost_migration_sources(
-            current_placement, placement, rank_pair_migration_limit, expert_sources, node_ids
+        sources = migration_sources(
+            current_placement,
+            placement,
+            rank_transfer_limit,
+            cross_node_transfer_limit,
+            expert_sources,
+            node_ids,
         )
         assert sources is not None
         source_slots = cls._source_slots(current_placement, placement, sources)
@@ -991,7 +933,8 @@ class StairEplbPolicy(AbstractEplbPolicy):
                 config.z_score,
                 current_rank_expert_ids=current_placement,
                 rank_node_ids=node_ids,
-                rank_pair_migration_limit=config.rank_pair_migration_limit,
+                rank_transfer_limit=config.rank_transfer_limit,
+                cross_node_transfer_limit=config.cross_node_transfer_limit,
                 backtrack_limit=config.placement_search_backtrack_limit,
             )
             if placement is None:
@@ -1211,7 +1154,14 @@ class StairEplbPolicy(AbstractEplbPolicy):
             source_slot_ids=gather_owned_field(local_plan_fields[2]),
             predicted_mean_ratios=gather_owned_field(local_plan_fields[3]),
         )
-        cls.validate_plan(current, plan, num_experts, config.rank_pair_migration_limit)
+        cls.validate_plan(
+            current,
+            plan,
+            num_experts,
+            rank_node_ids,
+            config.rank_transfer_limit,
+            config.cross_node_transfer_limit,
+        )
         return plan
 
     @classmethod
@@ -1220,14 +1170,16 @@ class StairEplbPolicy(AbstractEplbPolicy):
         current_rank_expert_ids: np.ndarray,
         plan: StairPlan,
         num_experts: int,
-        rank_pair_migration_limit: int,
+        rank_node_ids: np.ndarray,
+        rank_transfer_limit: int,
+        cross_node_transfer_limit: int,
     ) -> None:
         """Validate a fixed-shape plan against its current placement.
 
         Current and planned arrays are ``[layers, ranks, slots]``. Every source
         coordinate must own its target expert in the current placement;
-        retained experts must keep their rank and slot. Directed rank-pair
-        migration usage is counted independently for each layer. Predicted mean
+        retained experts must keep their rank and slot. Rank and cross-node
+        transfer usage is counted independently for each layer. Predicted mean
         ratios are ``[layers]``: changed layers require a finite value and
         unchanged layers require NaN.
         """
@@ -1241,10 +1193,13 @@ class StairEplbPolicy(AbstractEplbPolicy):
             raise ValueError("STAIR plan placement and source arrays must match the current placement shape")
         if not all(np.issubdtype(values.dtype, np.integer) for values in (target, source_ranks, source_slots)):
             raise ValueError("STAIR plan placement and source arrays must contain integers")
-        controls = num_experts, rank_pair_migration_limit
+        node_ids = np.asarray(rank_node_ids)
+        if node_ids.shape != (current.shape[1],) or not np.issubdtype(node_ids.dtype, np.integer):
+            raise ValueError("rank_node_ids must contain one integer per rank")
+        controls = num_experts, rank_transfer_limit, cross_node_transfer_limit
         invalid_type = any(isinstance(value, bool) or not isinstance(value, int) for value in controls)
-        if invalid_type or num_experts < 1 or rank_pair_migration_limit < 1:
-            raise ValueError("num_experts and rank_pair_migration_limit must be positive integers")
+        if invalid_type or num_experts < 1 or rank_transfer_limit < 1 or cross_node_transfer_limit < 0:
+            raise ValueError("STAIR expert count and transfer limits are invalid")
 
         ratios = np.asarray(plan.predicted_mean_ratios)
         if ratios.shape != (current.shape[0],) or not np.issubdtype(ratios.dtype, np.floating):
@@ -1269,7 +1224,10 @@ class StairEplbPolicy(AbstractEplbPolicy):
             if changed != has_candidate:
                 raise ValueError("predicted_mean_ratios must be finite for changed layers and NaN for unchanged layers")
 
-            pair_usage: dict[tuple[int, int], int] = {}
+            outgoing = np.zeros(current.shape[1], dtype=np.int64)
+            incoming = np.zeros(current.shape[1], dtype=np.int64)
+            cross_out: dict[int, int] = {}
+            cross_in: dict[int, int] = {}
             for dst_rank, target_experts in enumerate(target_layer):
                 current_slots = {int(expert): slot for slot, expert in enumerate(current_layer[dst_rank])}
                 for dst_slot, expert in enumerate(target_experts):
@@ -1282,7 +1240,16 @@ class StairEplbPolicy(AbstractEplbPolicy):
                         if (src_rank, src_slot, dst_slot) != (dst_rank, retained_slot, retained_slot):
                             raise ValueError("retained experts must keep their current rank and slot")
                         continue
-                    pair = (src_rank, dst_rank)
-                    pair_usage[pair] = pair_usage.get(pair, 0) + 1
-                    if pair_usage[pair] > rank_pair_migration_limit:
-                        raise ValueError("STAIR plan exceeds the directed rank-pair migration limit")
+                    outgoing[src_rank] += 1
+                    incoming[dst_rank] += 1
+                    if outgoing[src_rank] > rank_transfer_limit or incoming[dst_rank] > rank_transfer_limit:
+                        raise ValueError("STAIR plan exceeds a per-rank transfer limit")
+                    src_node, dst_node = int(node_ids[src_rank]), int(node_ids[dst_rank])
+                    if src_node != dst_node:
+                        cross_out[src_node] = cross_out.get(src_node, 0) + 1
+                        cross_in[dst_node] = cross_in.get(dst_node, 0) + 1
+                        if (
+                            cross_out[src_node] > cross_node_transfer_limit
+                            or cross_in[dst_node] > cross_node_transfer_limit
+                        ):
+                            raise ValueError("STAIR plan exceeds a per-node cross-node transfer limit")

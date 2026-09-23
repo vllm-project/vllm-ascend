@@ -168,7 +168,8 @@ then fewer same-node transfers between ranks.
 | `load_risk_quantile` | `0.75` | `0.5 < q < 1` | Standard-normal quantile for mean-plus-deviation load risk. |
 | `relative_balance_threshold` | `0.95` | `0 < x <= 1` | Plan a layer when current balance is at most this fraction of its last committed balance. |
 | `absolute_balance_threshold` | `0.90` | `0 < x <= 1` | Plan a layer when current balance is at most this value, even without relative deterioration. |
-| `rank_pair_migration_limit` | `1` | Integer `>= 1` | Maximum transfers per directed rank pair and layer. |
+| `rank_transfer_limit` | `1` | Integer `>= 1` | Maximum outgoing and incoming transfers per rank and layer, counted separately. |
+| `cross_node_transfer_limit` | `1` | Integer `>= 0` | Maximum cross-node outgoing and incoming transfers per node and layer, counted separately; zero disables cross-node transfers. |
 | `replica_search_num_stages` | `4` | Integer `1`–`8` | Number of stages in replica-count search. |
 | `replica_search_radius` | `8` | Integer `0`–`32` | Distance from the greedy replica budget explored per stage. |
 | `replica_search_beam_size` | `64` | Integer `1`–`128` | Maximum replica-count candidates retained per stage. |

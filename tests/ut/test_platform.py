@@ -173,7 +173,7 @@ class TestNPUPlatform(TestBase):
         vllm_config = self.mock_vllm_config()
         vllm_config.use_v2_model_runner = True
         vllm_config.parallel_config.enable_eplb = True
-        vllm_config.additional_config = {"eplb_config": {"stair_config": {"rank_pair_migration_limit": 2}}}
+        vllm_config.additional_config = {"eplb_config": {"stair_config": {"rank_transfer_limit": 2}}}
 
         with patch.dict("os.environ", {}, clear=True):
             _validate_eplb_config(vllm_config)

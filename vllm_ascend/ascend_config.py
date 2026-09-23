@@ -191,8 +191,12 @@ class StairConfig:
             the last committed balance is at or below this value.
         absolute_balance_threshold: Rebalance when current balance is at or
             below this value.
-        rank_pair_migration_limit: Maximum expert transfers for each directed
-            source-destination rank pair in one layer plan.
+        rank_transfer_limit: Maximum outgoing and incoming expert transfers
+            for each rank in one layer plan. Each direction is counted
+            independently.
+        cross_node_transfer_limit: Maximum outgoing and incoming cross-node
+            expert transfers for each node in one layer plan. Each direction
+            is counted independently. Zero disables cross-node transfers.
         replica_search_num_stages: Number of risk-ordered expert groups handled
             by the FlashTree-style replica search.
         replica_search_radius: Maximum distance from the greedy extra-replica
@@ -207,7 +211,8 @@ class StairConfig:
     load_risk_quantile: float = 0.75
     relative_balance_threshold: float = 0.95
     absolute_balance_threshold: float = 0.90
-    rank_pair_migration_limit: int = 1
+    rank_transfer_limit: int = 1
+    cross_node_transfer_limit: int = 1
     replica_search_num_stages: int = 4
     replica_search_radius: int = 8
     replica_search_beam_size: int = 64
@@ -234,8 +239,10 @@ class StairConfig:
             value = getattr(self, name)
             if not math.isfinite(value) or not 0 < value <= 1:
                 raise ValueError(f"stair_config.{name} must be between zero and one")
-        if self.rank_pair_migration_limit < 1:
-            raise ValueError("stair_config.rank_pair_migration_limit must be positive")
+        if self.rank_transfer_limit < 1:
+            raise ValueError("stair_config.rank_transfer_limit must be positive")
+        if self.cross_node_transfer_limit < 0:
+            raise ValueError("stair_config.cross_node_transfer_limit must be non-negative")
         if not 1 <= self.replica_search_num_stages <= 8:
             raise ValueError("stair_config.replica_search_num_stages must be between 1 and 8")
         if not 0 <= self.replica_search_radius <= 32:
