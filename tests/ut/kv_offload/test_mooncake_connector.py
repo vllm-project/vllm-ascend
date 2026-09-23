@@ -3241,6 +3241,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             num_prompt_blocks=3,
             num_computed_tokens=worker.block_size,  # 1 prefix block -> skip first remote kernel
             remote_block_size=worker.block_size,
+            remote_block_sizes=(),  # legacy producer: fall back to the scalar
             remote_engine_id="e_non_cp",
             remote_host="localhost",
             remote_multi_nodes_meta_mapping={},
@@ -3280,6 +3281,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             # kernel token size = kernel_size(8) * compress_ratio(4) = 32 -> skip 1 kernel.
             num_computed_tokens=32,
             remote_block_size=worker.block_size,
+            remote_block_sizes=(),  # legacy producer: fall back to the scalar
             remote_engine_id="e_compress",
             remote_host="localhost",
             remote_multi_nodes_meta_mapping={},
@@ -3568,6 +3570,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                     num_prompt_blocks=4,
                     num_computed_tokens=0,
                     remote_block_size=worker.block_size,
+                    remote_block_sizes=(),  # legacy producer: fall back to the scalar
                     remote_engine_id=f"remote_hybrid_{tp_rank}",
                     remote_host="localhost",
                     remote_multi_nodes_meta_mapping={},
@@ -3785,6 +3788,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             remote_host="localhost",
             remote_multi_nodes_meta_mapping={},
             remote_block_size=16,
+            remote_block_sizes=(),  # legacy producer: fall back to the scalar
         )
 
         ports, local_ids, remote_ids = worker._get_kv_split_metadata("req_hybrid_split", cast(ReqMeta, meta))
@@ -4369,6 +4373,134 @@ class TestMooncakeConnectorSchedulerTransferBlockSize(unittest.TestCase):
         self.assertIsNotNone(params)
         self.assertEqual(params["remote_block_size"], 1024)
         self.assertEqual(params["num_prompt_blocks"], 1)
+
+    def test_request_finished_reports_per_group_remote_block_sizes(self):
+        # Hybrid layout: 1024-token full-attention group next to a 128-token
+        # sliding-window group. The receiver needs the per-group sizes to
+        # expand block ids; a single scalar cannot express both.
+        scheduler = self._make_scheduler(128, [self._attention_group(1024), self._attention_group(128)])
+        request = MockRequest(
+            "req1",
+            prompt_token_ids=list(range(16)),
+            kv_transfer_params={"do_remote_decode": True},
+            status=RequestStatus.FINISHED_LENGTH_CAPPED,
+        )
+        _, params = scheduler.request_finished(request, ([1, 2], [1, 2]))
+        self.assertIsNotNone(params)
+        self.assertEqual(params["remote_block_sizes"], (1024, 128))
+        self.assertEqual(params["remote_block_size"], 1024)
+
+
+class TestMooncakeConnectorWorkerKernelBlockIds(unittest.TestCase):
+    """Receiver-side kernel block expansion must respect per-group sizes.
+
+    Hybrid engines mix physical block sizes across KV groups (e.g. a dspark
+    sliding-window group of 128-token blocks next to 1024-token full-attention
+    groups). Expanding every group with the scalar ``remote_block_size``
+    misplaces blocks of any group whose physical size differs, so the scalar is
+    only a fallback for metadata from older producers.
+    """
+
+    def _make_worker(self, block_size: int, block_size_scale: list) -> "MooncakeConnectorWorker":
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker.block_size = block_size
+        worker.block_size_scale = block_size_scale
+        return worker
+
+    @staticmethod
+    def _group_spec(spec_type: str, layer_idx: int, group_id: int | None = None) -> dict:
+        spec: dict[str, Any] = {
+            "kv_cache_spec_type": spec_type,
+            "layer_names": [f"layer{layer_idx}"],
+        }
+        if group_id is not None:
+            spec["kv_cache_group_id"] = group_id
+        return spec
+
+    def _make_meta(
+        self,
+        local_block_ids,
+        remote_block_ids,
+        num_computed_tokens: int = 0,
+        remote_block_size: int = 128,
+        remote_block_sizes: tuple[int, ...] = (),
+    ) -> ReqMeta:
+        return ReqMeta(
+            local_block_ids=local_block_ids,
+            num_external_tokens=0,
+            num_computed_tokens=num_computed_tokens,
+            remote_block_ids=remote_block_ids,
+            remote_host="host",
+            remote_port=0,
+            remote_engine_id="engine",
+            remote_request_id="request",
+            remote_pcp_size=1,
+            remote_dcp_size=1,
+            remote_ptp_size=None,
+            remote_multi_nodes_meta_mapping={},
+            num_prompt_blocks=1,
+            remote_block_size=remote_block_size,
+            remote_block_sizes=remote_block_sizes,
+        )
+
+    def test_group_size_smaller_than_scalar_keeps_one_to_one(self):
+        # The dspark layout: the scalar reports the 1024-token full-attention
+        # size, while this group ships 128-token blocks. Expanding them with
+        # the scalar would shift every block by 8x, so the group's own size
+        # must win.
+        worker = self._make_worker(128, [[1]])
+        spec = self._group_spec("SlidingWindowSpec", 0, 0)
+        meta = self._make_meta(
+            local_block_ids=([0, 1],),
+            remote_block_ids=([10, 11],),
+            remote_block_size=1024,
+            remote_block_sizes=(128,),
+        )
+        local, remote = worker._get_kernel_block_ids([0], meta, 0, spec)
+        self.assertEqual(local, [0, 1])
+        self.assertEqual(remote, [10, 11])
+
+    def test_group_size_larger_than_kernel_expands_and_skips_prefix(self):
+        worker = self._make_worker(128, [[1]])
+        spec = self._group_spec("FullAttentionSpec", 0, 0)
+        meta = self._make_meta(
+            local_block_ids=([0, 1, 2, 3, 4, 5, 6, 7],),
+            remote_block_ids=([10],),
+            num_computed_tokens=512,
+            remote_block_size=1024,
+            remote_block_sizes=(1024,),
+        )
+        local, remote = worker._get_kernel_block_ids([0], meta, 0, spec)
+        # remote [10] -> kernels [80..87]; skip 512 // 128 = 4 kernels.
+        self.assertEqual(local, [0, 1, 2, 3])
+        self.assertEqual(remote, [84, 85, 86, 87])
+
+    def test_legacy_metadata_falls_back_to_scalar(self):
+        worker = self._make_worker(128, [[1]])
+        spec = self._group_spec("FullAttentionSpec", 0, 0)
+        meta = self._make_meta(
+            local_block_ids=([0, 1, 2, 3],),
+            remote_block_ids=([10],),
+            remote_block_size=1024,
+        )
+        local, remote = worker._get_kernel_block_ids([0], meta, 0, spec)
+        self.assertEqual(local, [0, 1, 2, 3])
+        self.assertEqual(remote, [80, 81, 82, 83])
+
+    def test_missing_group_entry_falls_back_to_scalar(self):
+        # A producer may report sizes for a subset of groups; ids beyond the
+        # list keep the historical scalar behavior.
+        worker = self._make_worker(128, [[1], [1]])
+        spec = self._group_spec("FullAttentionSpec", 1, 1)
+        meta = self._make_meta(
+            local_block_ids=([0, 1, 2, 3], [0, 1, 2, 3]),
+            remote_block_ids=([10], [10]),
+            remote_block_size=1024,
+            remote_block_sizes=(128,),
+        )
+        local, remote = worker._get_kernel_block_ids([1], meta, 1, spec)
+        self.assertEqual(local, [0, 1, 2, 3])
+        self.assertEqual(remote, [80, 81, 82, 83])
 
 
 if __name__ == "__main__":
