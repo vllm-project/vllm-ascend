@@ -519,6 +519,35 @@ def test_transfer_bucket_accepts_sfa_indexer_virtual_block_sizes() -> None:
     assert request_ids == {(0, 0): {"request"}}
 
 
+def test_transfer_bucket_treats_multi_head_fa_as_tp_sharded_with_global_dcp() -> None:
+    spec = make_full_spec(num_kv_heads=4)
+    thread = make_thread(
+        tp_size=2,
+        tp_rank=1,
+        dcp_size=2,
+        dcp_rank=1,
+        kv_cache_specs=[spec],
+        block_shapes=[[(2, 16, 4)]],
+    )
+    remote = make_pp_metadata(
+        block_shapes=[[(2, 16, 4)]],
+        tp_base_addrs={0: [[5000]], 1: [[6000]]},
+    )
+
+    buckets, request_ids = thread._build_transfer_block_buckets(
+        remote_metadata=remote,
+        layer_pairs=[(0, 0)],
+        tp_rank_groups_by_layer={(0, 0): [[1]]},
+        remote_pcp_size=1,
+        remote_dcp_size=2,
+        requests={"request": make_req_meta()},
+        transfer_block_ids_by_spec={},
+    )
+
+    assert buckets[(0, 1)][0][(0, 0)] == [("request", [10, 11], [20, 21])]
+    assert request_ids == {(0, 1): {"request"}}
+
+
 def test_compute_sliding_window_blocks_uses_unhashed_suffix() -> None:
     thread = make_thread()
 
@@ -842,6 +871,48 @@ def test_attention_address_generation_handles_partial_head_overlap() -> None:
     assert src == [1000 + 128 + 64]
     assert dst == [6000 + 2 * 64]
     assert lengths == [64]
+
+
+def test_multi_head_fa_address_generation_uses_tp_layout_with_global_dcp() -> None:
+    spec = make_full_spec(num_kv_heads=4)
+    thread = make_thread(
+        tp_size=2,
+        tp_rank=1,
+        dcp_size=2,
+        dcp_rank=1,
+        kv_cache_specs=[spec],
+        block_shapes=[[(2, 16, 4)]],
+        block_lens=[[128]],
+        block_strides=[[128]],
+        kv_caches_base_addr=[[1000]],
+    )
+    remote = make_pp_metadata(
+        block_shapes=[[(2, 16, 4)]],
+        block_lens=[[128]],
+        block_strides=[[128]],
+        tp_base_addrs={0: [[5000]], 1: [[6000]]},
+    )
+    src: list[int] = []
+    dst: list[int] = []
+    lengths: list[int] = []
+
+    thread._append_spec_transfer_addresses(
+        0,
+        remote_pcp_rank=0,
+        remote_tp_rank=1,
+        remote_pcp_size=1,
+        remote_tp_size=2,
+        remote_dcp_size=2,
+        transfer_entries_by_layer={(0, 0): [("request", [1], [2])]},
+        remote_metadata=remote,
+        src_list=src,
+        dst_list=dst,
+        length_list=lengths,
+    )
+
+    assert src == [1128]
+    assert dst == [6256]
+    assert lengths == [128]
 
 
 def test_mamba_equal_tp_address_generation_transfers_each_cache() -> None:
@@ -1548,6 +1619,43 @@ def test_infer_total_kv_heads_keeps_tp_replicas_when_dcp_spans_only_pcp() -> Non
             fixed_total_num_kv_heads=None,
         )
         == 4
+    )
+
+
+@pytest.mark.parametrize(
+    ("local_tp", "local_rank", "local_heads", "remote_tp", "remote_heads", "expected"),
+    [
+        (8, 3, 8, 16, 4, [[6], [7]]),  # 64 KV heads, P has finer TP shards.
+        (16, 3, 6, 8, 12, [[1]]),  # 96 KV heads, D has finer TP shards.
+    ],
+)
+def test_multi_head_fa_uses_tp_head_shards_with_global_dcp(
+    local_tp: int,
+    local_rank: int,
+    local_heads: int,
+    remote_tp: int,
+    remote_heads: int,
+    expected: list[list[int]],
+) -> None:
+    thread = make_thread(
+        tp_size=local_tp,
+        tp_rank=local_rank,
+        dcp_size=2,
+        block_shapes=[[(local_heads, 16, 4)]],
+    )
+    remote = make_pp_metadata(block_shapes=[[(remote_heads, 16, 4)]])
+
+    assert (
+        thread._get_layer_remote_tp_rank_groups(
+            0,
+            0,
+            make_full_spec(num_kv_heads=local_heads),
+            remote,
+            remote_pcp_size=1,
+            remote_tp_size=remote_tp,
+            remote_dcp_size=2,
+        )
+        == expected
     )
 
 
