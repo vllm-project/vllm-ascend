@@ -530,9 +530,9 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
                 graph_params = get_graph_params()
             assert graph_params is not None
             if graph_params.workspaces.get(num_tokens) is None:
-                # Both FIA calls execute serially on the main stream. Size the
-                # shared workspace before either call is captured so its address
-                # stays fixed; history all-to-all only reads the FIA outputs.
+                # The current FIA waits for the history FIA across streams. Size
+                # their shared workspace before capture so its address stays
+                # fixed; history packing only reads the FIA outputs.
                 workspace_kwargs = {
                     "num_key_value_heads": self.num_kv_heads,
                     "input_layout": "TND",
@@ -589,46 +589,45 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             attention_kind=MLASplitAttentionKind.HISTORY,
         )
 
-        # Overlap history all-to-all with current-token attention.
+        # Run current-token attention on the side stream while the main
+        # stream packs and exchanges history. The ready event also orders
+        # current attention after the history FIA's shared workspace use.
         main_stream = torch.npu.current_stream()
-        comm_stream = _dcp_mtp_comm_stream()
+        attn_stream = _dcp_mtp_comm_stream()
         history_ready = main_stream.record_event()
-        history_output.record_stream(comm_stream)
-        history_lse.record_stream(comm_stream)
-        with torch.npu.stream(comm_stream):
-            comm_stream.wait_event(history_ready)
-            history_recv = torch.ops.vllm.sfa_dcp_a2a_fused(
-                history_output.float(),
-                history_lse.float(),
-                self.dcp_size,
-                1,
-                self.dcp_group.unique_name if self.dcp_size > 1 else "",
-                defer_combine=True,
+        for tensor in (current_q_nope, current_q_pe, current_k_nope, current_k_pe, decode_meta.attn_mask):
+            if tensor is not None:
+                tensor.record_stream(attn_stream)
+        with torch.npu.stream(attn_stream):
+            attn_stream.wait_event(history_ready)
+            # Current K/V is replicated. Each rank computes its own Q heads
+            # and contributes the current chunk once during the local merge.
+            current_output, current_lse = self._run_dcp_mtp_split_attention_op(
+                current_q_nope,
+                current_q_pe,
+                current_k_nope,
+                current_k_pe,
+                attn_mask=decode_meta.attn_mask,
+                sparse_mode=3,
+                block_table=None,
+                block_size=0,
+                actual_seq_lengths=decode_meta.actual_seq_lengths_q,
+                actual_seq_lengths_kv=decode_meta.actual_seq_lengths_q,
+                attention_kind=MLASplitAttentionKind.CURRENT,
             )
-            history_comm_done = comm_stream.record_event()
-        # The result is allocated on the communication stream and consumed
-        # on the main stream; keep its storage alive through the merge.
-        history_recv.record_stream(main_stream)
+            current_attn_done = attn_stream.record_event()
+        current_output.record_stream(main_stream)
+        current_lse.record_stream(main_stream)
 
-        # Current K/V is replicated on every CP rank. Each DCP rank computes
-        # only the Q heads it owns after history all-to-all. Merge this chunk
-        # locally after the collective so it is counted exactly once.
-        current_output, current_lse = self._run_dcp_mtp_split_attention_op(
-            current_q_nope,
-            current_q_pe,
-            current_k_nope.contiguous(),
-            current_k_pe.contiguous(),
-            attn_mask=decode_meta.attn_mask,
-            sparse_mode=3,
-            block_table=None,
-            block_size=0,
-            actual_seq_lengths=decode_meta.actual_seq_lengths_q,
-            actual_seq_lengths_kv=decode_meta.actual_seq_lengths_q,
-            attention_kind=MLASplitAttentionKind.CURRENT,
+        history_recv = torch.ops.vllm.sfa_dcp_a2a_fused(
+            history_output,
+            history_lse,
+            self.dcp_size,
+            1,
+            self.dcp_group.unique_name if self.dcp_size > 1 else "",
+            defer_combine=True,
         )
-
-        # Join the history communication only when both branches are ready.
-        main_stream.wait_event(history_comm_done)
+        main_stream.wait_event(current_attn_done)
         # Reduce all history shards and the replicated current chunk exactly
         # once, reading current FIA tensors directly without packing them.
         attn_output = fused_sfa_dcp_lse_combine(

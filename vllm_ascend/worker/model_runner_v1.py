@@ -104,7 +104,7 @@ from vllm.v1.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID, RejectionSamp
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer_gpu import copy_num_valid_draft_tokens
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
-from vllm.v1.utils import record_function_or_nullcontext
+from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
 from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.gpu_model_runner import (
     AsyncGPUModelRunnerOutput,
@@ -198,8 +198,8 @@ from vllm_ascend.utils import (
     is_hidden_state_cache_spec,
     is_score_encoder_cache_manager,
     kv_cache_spec_uses_sparse_sfa_c8,
-    kv_transfer_supports_shared_backing,
     lmhead_tp_enable,
+    model_uses_kpool_indexer,
     oproj_tp_enable,
     set_potential_max_tokens,
     should_skip_allreduce_across_dp_group,
@@ -357,13 +357,6 @@ class NPUModelRunner(GPUModelRunner):
     # contract for its layer/block-compact Attention+Mamba path.
     supports_standardized_shared_kv_backing = True
 
-    @property
-    def supports_shared_backing_with_kv_transfer(self) -> bool:
-        """Whether the active connector can consume one shared KV backing."""
-        return kv_transfer_supports_shared_backing(
-            self.vllm_config.kv_transfer_config
-        )
-
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Must be set before super().__init__() because parent init may call
         # _allocate_kv_cache_tensors which accesses self.use_compress.
@@ -375,6 +368,7 @@ class NPUModelRunner(GPUModelRunner):
 
         with _torch_cuda_wrapper():
             super().__init__(vllm_config, device)
+        self.lookback_token_ids: CpuGpuBuffer | None = None
 
         self.device_metadata_executor: DeviceMetadataExecutor | None = None
         self.device_metadata_providers: dict[int, DeviceMetadataTaskProvider] | None = None
@@ -451,6 +445,13 @@ class NPUModelRunner(GPUModelRunner):
         self.block_size = vllm_config.cache_config.block_size
         # Set up Attention
         self.use_sparse = enable_sfa(vllm_config)
+        # Backends that derive per-token visible history from self.positions
+        # rather than from seq_lens: the LightningIndexer SFA family and the
+        # GLM-Next kpool indexer. Both reach SparseMLAMetadataState.prepare(),
+        # which calls indexer.get_topk_lengths(positions).
+        self.uses_positions_for_attention = self.use_sparse or model_uses_kpool_indexer(
+            getattr(vllm_config, "model_config", None)
+        )
         # dsa c8
         self.enable_sparse_sfa_c8 = vllm_config.cache_config.cache_dtype in ["fp8", "int8"]
         self.enable_sparse_li_c8 = vllm_config.attention_config.indexer_kv_dtype in ["fp8", "int8"]
@@ -2666,9 +2667,11 @@ class NPUModelRunner(GPUModelRunner):
         )
 
     def _skip_drafting(
-        self, sampled_token_ids: torch.Tensor | None = None
+        self,
+        scheduler_output: "SchedulerOutput",
+        sampled_token_ids: torch.Tensor | None = None,
     ) -> None:
-        """Preserve sampled-token state, align DP ranks, and publish no drafts."""
+        """Preserve sampled state and DP alignment; publish zero draft placeholders."""
         if (
             sampled_token_ids is not None
             and self.valid_sampled_token_count_event is not None
@@ -2704,12 +2707,15 @@ class NPUModelRunner(GPUModelRunner):
                 # drafter DP synchronization pads it to the busiest rank.
                 self.drafter.dummy_run(num_tokens=1)
 
-        self._draft_token_ids: list[list[int]] | torch.Tensor | None = [
-            [] for _ in self.input_batch.req_ids
-        ]
-        self._draft_token_req_ids = self.input_batch.req_ids.copy()
+        # Async scheduling may already have reserved speculative input slots.
+        # Keep a full-width tensor, including when this step produces no drafts,
+        # so the next step can scatter zeros instead of stale draft token IDs.
+        self._draft_token_ids: list[list[int]] | torch.Tensor | None = torch.zeros(
+            1, device=self.device, dtype=torch.int32
+        ).expand(len(self.input_batch.req_ids), self.num_spec_tokens)
         self._draft_probs = None
         self._draft_prob_req_ids = None
+        self._copy_draft_token_ids_to_cpu(scheduler_output, zeros_only=True)
 
     @torch.inference_mode()
     def sample_tokens(
@@ -2779,7 +2785,8 @@ class NPUModelRunner(GPUModelRunner):
         def propose_draft_token_ids(sampled_token_ids):
             if not input_fits_in_drafter:
                 self._skip_drafting(
-                    sampled_token_ids if use_padded_batch else None
+                    scheduler_output,
+                    sampled_token_ids if use_padded_batch else None,
                 )
                 return
             assert spec_decode_common_attn_metadata is not None
@@ -3169,22 +3176,57 @@ class NPUModelRunner(GPUModelRunner):
                 self.speculative_config,
             )
 
-    def _get_engram_history_inputs(self) -> tuple[torch.Tensor, torch.Tensor, int] | None:
-        """Read full-request host pages before any attention CP slicing."""
+    # Prompt lookback contract backported from vLLM f84b0c4bce.
+    def _prepare_lookback_token_ids(self, num_reqs: int) -> torch.Tensor:
+        """Gather, per request, the `depth` prompt token ids preceding its
+        first scheduled token (column j is position start - 1 - j); -1 where
+        the position is before the prompt or already past it. Generated
+        positions are left to the model: under async scheduling the CPU token
+        table holds placeholders for them."""
+        buf: CpuGpuBuffer | None = getattr(self, "lookback_token_ids", None)
+        assert buf is not None
+        buf.np.fill(-1)
+        if num_reqs > 0:
+            depth = buf.np.shape[1]
+            starts = self.input_batch.num_computed_tokens_cpu[:num_reqs, None]
+            pos = starts - np.arange(1, depth + 1)
+            num_prompt = self.input_batch.num_prompt_tokens[:num_reqs, None]
+            valid = (pos >= 0) & (pos < num_prompt)
+            rows = np.arange(num_reqs)[:, None]
+            ids = self.input_batch.token_ids_cpu[rows, np.clip(pos, 0, None)]
+            buf.np[:num_reqs] = np.where(valid, ids, -1)
+        return buf.copy_to_gpu()
+
+    def _init_model_kwargs(self, num_reqs: int | None = None):
+        model_kwargs = super()._init_model_kwargs()
+        if getattr(self, "lookback_token_ids", None) is not None:
+            if num_reqs is None:
+                num_reqs = self.input_batch.num_reqs
+            model_kwargs["lookback_token_ids"] = self._prepare_lookback_token_ids(num_reqs)
+        return model_kwargs
+
+    def _get_engram_device_inputs(self) -> dict[str, torch.Tensor]:
+        """Full-request device metadata for upstream NgramHashState.
+
+        Taken before any attention CP slicing, and from the physical block
+        table so `block * storage_block_size + offset` addresses the slot
+        cache the hash state sizes itself from.
+        """
         layer_name = self.model.engram_cache_layer_name
         if layer_name is None or get_forward_context().attn_metadata is None:
-            return None
+            return {}
         group_id, group = next(
             (group_id, group)
             for group_id, group in enumerate(self.kv_cache_config.kv_cache_groups)
             if layer_name in group.layer_names
         )
         num_reqs = self.input_batch.num_reqs
-        return (
-            self.query_start_loc.cpu[: num_reqs + 1],
-            self.input_batch.block_table[group_id].get_cpu_tensor()[:num_reqs],
-            get_storage_block_size(group.kv_cache_spec),
-        )
+        block_table = self.input_batch.block_table[group_id]
+        return {
+            "query_start_loc": self.query_start_loc.gpu[: num_reqs + 1],
+            "slot_mapping": block_table.slot_mapping.gpu,
+            "block_table": block_table.get_device_tensor(num_reqs),
+        }
 
     def _model_forward(
         self,
@@ -3219,8 +3261,23 @@ class NPUModelRunner(GPUModelRunner):
             ):
                 model_inputs.update(self.model.prepare_engram_graph_inputs(num_tokens_padded))
             else:
-                history_inputs = self._get_engram_history_inputs()
-                model_inputs.update(prepare_engram(input_ids, positions, num_tokens_padded, history_inputs))
+                # The window is upstream's: ``_preprocess`` already ran
+                # ``_init_model_kwargs`` -> ``_prepare_lookback_token_ids`` on
+                # this step's input batch, so ``model_kwargs`` carries the
+                # prompt-only lookback (column j = position start - 1 - j,
+                # -1 where that position is not a prompt token).  Generated
+                # positions stay -1 here and come from the slot cache the hash
+                # state fills itself, which is what keeps async draft
+                # placeholders out of the history.
+                model_inputs.update(
+                    prepare_engram(
+                        input_ids,
+                        positions,
+                        num_tokens_padded,
+                        model_kwargs.get("lookback_token_ids"),
+                        **self._get_engram_device_inputs(),
+                    )
+                )
         run_model = partial(self.model, **model_inputs)
 
         try:
@@ -4082,6 +4139,16 @@ class NPUModelRunner(GPUModelRunner):
                 if self.use_compress:
                     self.positions.fill_(127)
                     self._dsa_positions_cpu_buf.fill_(127)
+                elif self.uses_positions_for_attention:
+                    # A dummy batch reports seq_lens == max_query_len but leaves
+                    # self.positions holding the previous real step's values.
+                    # Sparse attention backends derive each token's visible
+                    # history from positions, so an idle rank plans for a history
+                    # the dummy sequence lengths do not describe, and the ACL
+                    # Graph replay that follows consumes that inconsistent plan.
+                    # Dense and MLA backends address from seq_lens and the block
+                    # table instead, so they are left untouched.
+                    self.positions[:num_tokens_padded].fill_(0)
                 attn_metadata, _ = self._build_attention_metadata(
                     num_tokens=num_tokens_unpadded,
                     num_tokens_padded=num_tokens_padded,
@@ -4393,6 +4460,15 @@ class NPUModelRunner(GPUModelRunner):
         # wrap the model with full graph wrapper if needed.
         cudagraph_mode = self.compilation_config.cudagraph_mode
         assert cudagraph_mode is not None
+
+        # Engram prompts need the tokens just before each chunk start; the
+        # model exposes how many, and _prepare_lookback_token_ids fills them.
+        # Allocated before the graph wrapper so the depth is read off the model.
+        lookback_depth = getattr(self.model, "token_lookback_depth", 0)
+        if lookback_depth > 0:
+            self.lookback_token_ids = self._make_buffer(
+                self.max_num_reqs, lookback_depth, dtype=torch.int32
+            )
 
         if cudagraph_mode.has_full_cudagraphs():
             self.update_stream = torch.npu.Stream()
@@ -4800,13 +4876,6 @@ class NPUModelRunner(GPUModelRunner):
             isinstance(spec, MambaSpec) for spec in layer_kv_cache_spec.values()
         ) and any(isinstance(spec, AttentionSpec) for spec in layer_kv_cache_spec.values())
 
-        # Keep allocation and worker-side KV budget planning on the same
-        # connector capability gate. Mooncake V1/V2/Pull retain per-layer
-        # transfer metadata while registering the shared backing once.
-        supports_shared_backing_with_kv_transfer = (
-            self.supports_shared_backing_with_kv_transfer
-        )
-
         # GLM-Next emits one descriptor for each physical cache slot. Layers
         # listed by a descriptor deliberately alias that slot even when they
         # belong to different scheduler groups (for example MLA and Mamba, or
@@ -4900,7 +4969,6 @@ class NPUModelRunner(GPUModelRunner):
             not is_dsv4_main
             and not uses_padded_page_layout
             and self.hybrid_with_attn_and_mamba
-            and supports_shared_backing_with_kv_transfer
             and not self.use_sparse
             and not self.use_compress
             and kv_cache_config.kv_cache_tensors

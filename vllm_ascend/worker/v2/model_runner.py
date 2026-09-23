@@ -34,6 +34,7 @@ from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
+from vllm.v1.worker.gpu.eplb_utils import step_eplb_after
 from vllm.v1.worker.gpu.input_batch import (
     combine_sampled_and_draft_tokens,
     expand_idx_mapping,
@@ -63,7 +64,7 @@ from vllm_ascend.core.profiling_chunk_predictor import (
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
-    kv_transfer_supports_shared_backing,
+    is_pd_decode_recompute_scheduler_enabled,
     lmhead_tp_enable,
     set_potential_max_tokens,
     vllm_version_is,
@@ -98,11 +99,6 @@ class NPUModelRunner(GPUModelRunner):
     # allocate_kv_cache_main and exposes contiguous backend-specific views.
     supports_standardized_shared_kv_backing = True
 
-    @property
-    def supports_shared_backing_with_kv_transfer(self) -> bool:
-        """Whether the active connector can consume one shared KV backing."""
-        return kv_transfer_supports_shared_backing(self.vllm_config.kv_transfer_config)
-
     execute_model_state: ExecuteModelState | None
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
@@ -130,6 +126,10 @@ class NPUModelRunner(GPUModelRunner):
         # These draft heads consume target aux states collected across PP ranks.
         if spec_pp_support is not None and spec_pp_support.needs_aux_hidden_states:
             self.use_aux_hidden_state_outputs = True
+
+        # Only a real split (size > 1) exchanges across ranks, and graph dispatch keeps it aligned.
+        ftpc = self.ascend_config.finegrained_tp_config
+        self._oproj_tp_requires_graph = ftpc.oproj_tensor_parallel_size > 1 and self.dp_size > 1
 
         self.use_aclgraph = (
             self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
@@ -366,6 +366,25 @@ class NPUModelRunner(GPUModelRunner):
 
     def gather_batch_req_state(self, scheduler_output: SchedulerOutput, dummy_run: bool):
         batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
+        if batch_state is not None and is_pd_decode_recompute_scheduler_enabled(self.vllm_config):
+            pd_decode_recompute = (
+                batch_state.is_prefilling_np
+                & (batch_state.num_computed_prefill_tokens_np > 0)
+                & (batch_state.num_scheduled_tokens == self.decode_query_len)
+                & (
+                    batch_state.num_computed_prefill_tokens_np + batch_state.num_scheduled_tokens
+                    >= batch_state.prefill_len_np
+                )
+            )
+            if np.any(pd_decode_recompute):
+                batch_state.is_prefilling_np[pd_decode_recompute] = False
+                batch_state = batch_state._replace(has_prefill=bool(batch_state.is_prefilling_np.any()))
+                uniform_token_count = vllm_model_runner.get_uniform_decode_token_count(
+                    len(batch_state.req_ids),
+                    batch_state.num_tokens,
+                    int(batch_state.num_scheduled_tokens.max()),
+                    batch_state.has_prefill,
+                )
         num_tokens = None
         if vllm_version_is("0.28.0") and self.pcp_manager is not None and batch_state is not None:
             num_tokens = self.pcp_manager.get_num_tokens_for_dispatch(
@@ -373,6 +392,16 @@ class NPUModelRunner(GPUModelRunner):
             )
         _PCP_DISPATCH_NUM_TOKENS.set(num_tokens)
         return batch_state, uniform_token_count
+
+    def _check_oproj_tp_graph_step(self, cg_mode: CUDAGraphMode) -> None:
+        # Eager dispatch keeps per-rank token counts; the cross-DP o_proj exchange would desync.
+        if self._oproj_tp_requires_graph and cg_mode == CUDAGraphMode.NONE:
+            raise RuntimeError(
+                "o_proj TP requires every step on a captured graph: this step dispatched "
+                "to eager, which desyncs the cross-DP HCCL collectives (mixed or oversized "
+                "batch, a request-arrival step misclassified as prefill, or a full prefill "
+                "scheduled locally — a request sent directly to the decode node)."
+            )
 
     def prepare_inputs(  # type: ignore[misc]
         self,
@@ -384,6 +413,7 @@ class NPUModelRunner(GPUModelRunner):
         npu attention backends need seq_lens_cpu to work.
         so we need to prepare seq_lens_cpu here.
         """
+        self._check_oproj_tp_graph_step(batch_desc.cg_mode)
         num_tokens = batch_req_state.num_tokens
         num_tokens_after_padding = max(num_tokens, batch_desc.num_tokens)
         assert num_tokens > 0
@@ -711,6 +741,7 @@ class NPUModelRunner(GPUModelRunner):
 
         return sampler_output, sampler_output.num_sampled, sampler_output.num_rejected
 
+    @step_eplb_after(is_dummy=True)
     def _dummy_run(
         self,
         num_tokens: int,
@@ -722,14 +753,7 @@ class NPUModelRunner(GPUModelRunner):
         is_profile: bool = False,
         **kwargs,
     ):
-        """Join the LM-head collectives on dummy batches for lmhead TP.
-
-        Idle DP ranks never call sample(), so without this their ranks would
-        be missing from the group collectives and busy ranks would hang.
-        Zero-indexed rows at the same capacity as sample() (both from
-        ``_lmhead_tp_max_num_logits()``; a mismatch hangs). Skipped for
-        profiling and non-last PP ranks. Draft-side alignment is not covered.
-        """
+        """Join LM-head TP before stepping EPLB on an idle DP rank."""
         # Adaptive verification profiles eager tail sizes after graph capture.
         # Use balanced dummy routing, as the initial memory profile does, so a
         # synthetic router hotspot cannot exhaust one EP rank during startup.
@@ -748,7 +772,7 @@ class NPUModelRunner(GPUModelRunner):
                 skip_attn=skip_attn,
                 uniform_decode=uniform_decode,
                 context_len=context_len,
-                skip_eplb=skip_eplb,
+                skip_eplb=True,
                 is_profile=is_profile,
                 **kwargs,
             )

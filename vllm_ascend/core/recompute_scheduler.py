@@ -46,7 +46,7 @@ from vllm_ascend.core.dyntra_lb_scheduler import (
     DyntraLBPolicyMixin,
     print_scheduler_summary,
 )
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.utils import get_ascend_config, vllm_version_is
 
 
 @dataclass
@@ -87,8 +87,8 @@ class RecomputeScheduler(Scheduler):
 
     This keeps a local copy of vLLM's schedule() only to pad the first decode
     request for stable Ascend speculative-decode graph shapes. Preempted KV is
-    offloaded when possible; otherwise the request is sent back to P to redo
-    prefill.
+    offloaded when possible; otherwise the request returns to P to redo
+    prefill, or is aborted under o_proj TP.
     """
 
     prefill_capacity_bound: bool
@@ -132,6 +132,17 @@ class RecomputeScheduler(Scheduler):
                 )
 
         if not offloaded:
+            # Mirror the config gate: only a real split (size > 1) forbids the return to P.
+            if get_ascend_config().finegrained_tp_config.oproj_tensor_parallel_size > 1:
+                logger.error(
+                    "KV offload failed with o_proj TP enabled; aborting the request instead "
+                    "of returning it to P for recomputation: request_id=%s, "
+                    "num_computed_tokens=%d",
+                    request.request_id,
+                    request.num_computed_tokens,
+                )
+                self.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+                return False
             if not offload_raised:
                 logger.warning(
                     "KV offload was unavailable or failed before decode-side "
