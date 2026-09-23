@@ -611,12 +611,14 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             self.bgmv_expand(buffer, lora_b_stacked, y, indices, add_inputs=True)
         else:
             # Ascend bgmv_expand only writes half/bf16 outputs. Compute
-            # the LoRA delta into a matching workspace and merge it back
-            # so fp32 classification outputs (classifier LoRA, #53555)
-            # work on vLLM main.
-            y_half = y.to(torch.bfloat16)
-            self.bgmv_expand(buffer, lora_b_stacked, y_half, indices, add_inputs=True)
-            y.copy_(y_half.to(y.dtype))
+            # the LoRA delta into a workspace of the weight dtype (matching
+            # the kernel's output dtype) and merge it back, so fp32
+            # classification outputs (classifier LoRA, #53555) work on
+            # vLLM main without quantizing the base logits.
+            op_dtype = lora_b_stacked.dtype
+            delta = torch.zeros(y.shape, dtype=op_dtype, device=y.device)
+            self.bgmv_expand(buffer, lora_b_stacked, delta, indices, add_inputs=True)
+            y.add_(delta.to(y.dtype))
 
         y = y.view_as(y_org)
 
