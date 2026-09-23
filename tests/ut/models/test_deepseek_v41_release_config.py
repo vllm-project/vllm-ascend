@@ -5,11 +5,22 @@ from vllm.transformers_utils.config import get_config
 from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config as UpstreamDeepseekV41Config
 
 from vllm_ascend.models import register_model
+from vllm_ascend.models.deepseek_v41.engram import engram_enabled
+from vllm_ascend.models.deepseek_v41.model import AscendDeepseekV41LLMForCausalLM
 from vllm_ascend.utils import normalize_deepseek_v41_config
 
 
 def make_v41_config(**kwargs):
     return normalize_deepseek_v41_config(UpstreamDeepseekV41Config(**kwargs))
+
+
+def test_explicit_test_mode_removes_engram_before_model_construction():
+    config = make_v41_config(text_config={"engram_layer_ids": [1, 14], "engram_num_embeddings": [10, 20]})
+    assert engram_enabled(config)
+    AscendDeepseekV41LLMForCausalLM._skip_engram_for_testing(config)
+    assert config.engram_layer_ids == []
+    assert config.engram_num_embeddings == []
+    assert not engram_enabled(config)
 
 
 def test_released_config_loads_through_vllm_registry(tmp_path):

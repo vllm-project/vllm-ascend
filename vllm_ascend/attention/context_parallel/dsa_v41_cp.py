@@ -7,6 +7,7 @@ from dataclasses import replace
 import torch
 from vllm.distributed import get_tp_group
 from vllm.forward_context import get_forward_context
+from vllm.models.common.ops.sequence_parallel import sp_reduce_scatter
 
 from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder, restore_tp_heads
 from vllm_ascend.attention.dsa_v1 import dsv4_dsa_overlap_stream
@@ -160,7 +161,9 @@ class AscendDSAV41CPImpl(AscendDSAV41Impl):
         full_o_proj = self._use_full_o_proj(v1_impl, swa_metadata)
         if full_o_proj:
             v1_impl._maybe_all_gather_o_proj_full_weight(True)
-        kv_cos, kv_sin = global_metadata.rope(attn.rotary_emb.layername, kv_hidden_states.shape[0])
+        # The gathered KV buffer includes rank padding, but RoPE is applied
+        # only to actual cache tokens below.
+        kv_cos, kv_sin = global_metadata.rope(attn.rotary_emb.layername, global_metadata.swa.num_actual_tokens)
         swa_metadata = global_metadata.swa
         main_stream = torch.npu.current_stream()
         aux_stream = dsv4_dsa_overlap_stream()
@@ -264,8 +267,12 @@ class AscendDSAV41CPImpl(AscendDSAV41Impl):
             # while ``qr`` was projected from this rank's local query slice.
             # SparseFlashMla requires cmp_sparse_indices.T to match q.T.
             return shared.topk_indices[: qr.shape[0]]
-        start, _, _, _ = metadata.swa.cp_token_range
-        hidden_states = hidden_states[start : start + metadata.swa.num_actual_tokens]
+        if getattr(attn.dsa_attn, "need_gather_q_kv", False):
+            # SP already supplied this rank's local token interval.
+            hidden_states = hidden_states[: metadata.swa.num_actual_tokens]
+        else:
+            start, _, _, _ = metadata.swa.cp_token_range
+            hidden_states = hidden_states[start : start + metadata.swa.num_actual_tokens]
         return super()._select_sparse_indices(attn, hidden_states, qr, positions, cos, sin, metadata)
 
     def _project_output(self, attn, output, hidden_states, metadata, *, projected):
@@ -288,7 +295,17 @@ class AscendDSAV41CPImpl(AscendDSAV41Impl):
         if output.shape[0] != per_rank:
             padded = output.new_zeros((per_rank, output.shape[1], output.shape[2]))
             padded[: output.shape[0]] = output
-        exchanged = restore_tp_heads(padded, get_tp_group())
+        tp_group = get_tp_group()
+        exchanged = restore_tp_heads(padded, tp_group)
         # The inherited V4 module owns quantized weights and TP projection logic.
-        v1_impl._forward_o_proj(exchanged[: hidden_states.shape[0]], projected)
+        if getattr(attn.dsa_attn, "need_gather_q_kv", False):
+            # Each rank owns a different token interval. Project all exchanged
+            # tokens with the local head weights, then sum and shard by token.
+            # Reducing local intervals directly would mix different tokens.
+            partial = v1_impl._forward_o_proj(exchanged)
+            projected.copy_(sp_reduce_scatter(partial))
+        else:
+            # The model's baseline SP reduce-scatter performs the sum and
+            # token sharding after projecting the complete exchanged tensor.
+            v1_impl._forward_o_proj(exchanged[: hidden_states.shape[0]], projected)
         return projected

@@ -327,6 +327,9 @@ class AscendConfig:
             "enable_mc2_hierarchy_comm": false,
             "enable_reduce_sample": false,
             "enable_dsa_cp": false,
+            "enable_dsa_v41_cp_comm_optimization": true,
+            "enable_dsa_v41_cp_full_o_proj": true,
+            "skip_engram_for_testing": false,
             "sfa_dcp_force_tmajor_restore": false,
             "enable_force_eplb": false,
             "enable_pcp_o_proj_weight_sharding": false,
@@ -463,6 +466,14 @@ class AscendConfig:
     enable_mc2_hierarchy_comm: bool = False  # deprecated, will be replaced by mc2_comm_alg = "hierarchy"
     enable_reduce_sample: bool = False
     enable_dsa_cp: bool = False
+    # Disable to compare the original V4.1 DSA-CP collectives with the
+    # prefill O-projection weight gather and SP KV gather optimization.
+    enable_dsa_v41_cp_comm_optimization: bool = True
+    # Permit independent validation of the V4.1 full O-projection path.
+    enable_dsa_v41_cp_full_o_proj: bool = True
+    # Test-only: omit DeepSeek V4.1 Engram modules, execution and weights.
+    # Outputs in this mode are not full-model accuracy evidence.
+    skip_engram_for_testing: bool = False
     sfa_dcp_force_tmajor_restore: bool = False
     enable_force_eplb: bool = False
     enable_pcp_o_proj_weight_sharding: bool = False

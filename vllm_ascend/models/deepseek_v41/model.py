@@ -777,6 +777,7 @@ class DeepseekV41DecoderLayer(nn.Module):
         self.norm_eps = config.rms_norm_eps
         self.use_sequence_parallel_moe = parallel_config.use_sequence_parallel_moe
         self.enable_dsa_cp = enable_dsa_cp()  # TODO: delete this when enable_dsa_cp is sunset.
+        self.enable_dsa_v41_cp_comm_optimization = get_ascend_config().enable_dsa_v41_cp_comm_optimization
 
         attn_cls = self.attention_cls
 
@@ -789,11 +790,11 @@ class DeepseekV41DecoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
             topk_indices_buffer=topk_indices_buffer,
             reduce_results=not self.use_sequence_parallel_moe,
-            need_gather_q_kv=self.use_sequence_parallel_moe and self.enable_dsa_cp,
+            need_gather_q_kv=(
+                self.use_sequence_parallel_moe and self.enable_dsa_cp and self.enable_dsa_v41_cp_comm_optimization
+            ),
         )
-        self.use_dsa_cp_full_o_proj = bool(
-            self.enable_dsa_cp and self.self_attn.dsa_attn.dsa_attn.impl.enable_dsa_cp_full_o_proj
-        )
+        self._configure_dsa_cp_full_o_proj()
 
         self.mlp = DeepseekV41MoE(
             config=config,
@@ -839,6 +840,16 @@ class DeepseekV41DecoderLayer(nn.Module):
         else:
             self.engram = None
 
+    def _configure_dsa_cp_full_o_proj(self) -> None:
+        if not self.enable_dsa_cp:
+            return
+        # V4.1 uses full O projection weights for prefill on both A3 and A5.
+        # The generic DSA-CP implementation defaults to A5 only; V4.1's
+        # batch-type gate still keeps pure decode on the activation path.
+        self.self_attn.dsa_attn.dsa_attn.impl.enable_dsa_cp_full_o_proj = bool(
+            self.enable_dsa_v41_cp_comm_optimization and get_ascend_config().enable_dsa_v41_cp_full_o_proj
+        )
+
     def rms_norm_cast(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Normalize once and provide the exact FP32 routing input."""
         if enable_custom_op():
@@ -875,16 +886,6 @@ class DeepseekV41DecoderLayer(nn.Module):
             comb.unsqueeze(0),
         ).squeeze(0)
 
-    def _use_dsa_cp_full_o_proj(self) -> bool:
-        if not getattr(self, "use_dsa_cp_full_o_proj", False) or not is_forward_context_available():
-            return False
-        metadata = get_forward_context().attn_metadata
-        if metadata is None:
-            return False
-        swa_metadata = metadata[self.self_attn.v41_impl.swa_prefix]
-        global_metadata = swa_metadata.global_metadata or swa_metadata
-        return global_metadata.num_prefills > 0
-
     def forward(
         self,
         positions,
@@ -903,12 +904,13 @@ class DeepseekV41DecoderLayer(nn.Module):
             pre_mix,
         )
         x = self.input_layernorm(x)
-        use_dsa_cp = getattr(self, "enable_dsa_cp", False)
-        use_cp_full_o_proj = use_sequence_parallel and self._use_dsa_cp_full_o_proj()
+        use_dsa_cp = getattr(self, "enable_dsa_cp", False) and getattr(
+            self, "enable_dsa_v41_cp_comm_optimization", True
+        )
         if use_sequence_parallel and not use_dsa_cp:
             x = sp_all_gather(x)[: positions.shape[0]]
         x = self.self_attn(positions, x, llama_4_scaling)
-        if use_sequence_parallel and not use_cp_full_o_proj:
+        if use_sequence_parallel and not use_dsa_cp:
             x = sp_reduce_scatter(x)
         hidden_states = self.hc_post(x, residual, attn_post, attn_comb)
 
@@ -1199,9 +1201,18 @@ class AscendDeepseekV41LLMForCausalLM(nn.Module, DeepseekV41MixtureOfExperts, Su
     packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
     model_cls = DeepseekV41Model
 
+    @staticmethod
+    def _skip_engram_for_testing(config) -> None:
+        # This changes model semantics and is only for communication testing.
+        config.engram_layer_ids = []
+        config.engram_num_embeddings = []
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = normalize_deepseek_v41_config(vllm_config.model_config.hf_config)
+        if get_ascend_config().skip_engram_for_testing:
+            # Clearing the plan before construction also skips forward and load.
+            self._skip_engram_for_testing(config)
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
