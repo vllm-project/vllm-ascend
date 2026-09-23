@@ -209,15 +209,12 @@ def test_dspark_context_rope_reuses_all_layer_configs(monkeypatch, shared_config
     }
     monkeypatch.setattr(_ROPE_STATE, "full_rope_cache", {key: (table, -table) for key, table in tables.items()})
     monkeypatch.setattr(_ROPE_STATE, "registry_summary", {key: {"default"} for key in tables})
-    monkeypatch.setattr(
-        _ROPE_STATE, "layer_info", {name: (key, ["default"]) for name, key in zip(names, configs)}
-    )
+    monkeypatch.setattr(_ROPE_STATE, "layer_info", {name: (key, ["default"]) for name, key in zip(names, configs)})
     positions = torch.tensor([1, 3], device="cpu")
     states = torch.zeros(2, 4, device="cpu")
     slots = [torch.tensor([i, i + 1], device="cpu") for i in range(3)]
     layers = {
-        name: SimpleNamespace(self_attn=SimpleNamespace(rotary_emb=SimpleNamespace(layername=name)))
-        for name in names
+        name: SimpleNamespace(self_attn=SimpleNamespace(rotary_emb=SimpleNamespace(layername=name))) for name in names
     }
     lookup = Mock(wraps=get_cos_and_sin_dsa)
     monkeypatch.setattr(dspark, "get_cos_and_sin_dsa", lookup)
