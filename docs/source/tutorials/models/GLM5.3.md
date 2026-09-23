@@ -11,7 +11,7 @@ This document will show the main verification steps of the model, including supp
     **Current status and constraints**
 
     - GLM-5.3 has only been tested on the official Docker image `quay.io/ascend/vllm-ascend:v0.23.0-a3` and `quay.io/ascend/vllm-ascend:v0.23.0` **only on multi-node co-located scenario**.
-    - The features listed in [Supported Features](#2-supported-features) are only those enabled by the verified deployment commands in this document, and do **not** imply that all features are supported for GLM-5.3. This is an early-access version; performance optimization and reliability validation are still in progress (see [Declaration](#10-declaration)).
+    - The features listed in [Supported Features](#2-supported-features) are only those enabled by the verified deployment commands in this document, and do **not** imply that all features are supported for GLM-5.3. This is an early-access version; performance optimization and reliability validation are still in progress (see [Declaration](#11-declaration)).
     - All the scripts below is based on **v0.23.0**, so some params are not supported in main code. If you are using the main branch of vllm-Ascend, please make sure to check it.
 
 ## 2 Supported Features
@@ -140,13 +140,17 @@ The deployment scenarios validated for this release are organized by context win
 
     - The scripts below is tested on **v0.23.0**, some params may have changed in main branch.
 
-### 5.1 Multi-node Deployment
+### 5.1 Context Below 1M
+
+#### 5.1.1 Single-node Deployment
+
+The single-node scenarios have not yet tested for `GLM-5.3`. If you want to deploy on a single node, please refer to the scripts in [GLM-5.2 Single-node Deployment](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html#511-single-node-deployment).
+
+#### 5.1.2 Multi-node Deployment
 
 If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../getting_started/installation.md#installation-multi-node-interconnect).
 
 Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md).
-
-#### 5.1.1 Context Below 1M
 
 === "A3 series"
     -  `GLM-5.3-w8a8c8`: can be deployed on 2 Atlas 800 A3 (64GB × 16).
@@ -415,13 +419,25 @@ Only the key parameters specific to this model/scenario are described below. max
 **Notice:**
 This scenario enables `additional_config.enable_fused_mc2=1` (fused `dispatch_ffn_combine`/`mega_moe` operators). Fused MC2 conflicts with `multistream_overlap_shared_expert` — the two optimizations must not be enabled at the same time (the runtime forcibly disables `multistream_overlap_shared_expert` when fused MC2 is on).
 
-#### 5.1.2 1M Context Deployment
+#### 5.1.3 Prefill-Decode Disaggregation
 
-The 1M context scenarios have not yet tested for `GLM-5.3`. If you want to deploy, please refer to scripts in [GLM-5.2 1M Context Deployment](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html#m-context-deployment).
+Prefill-Decode disaggregation scenarios have not yet tested for `GLM-5.3`. If you want to deploy prefill-decode disaggregation, you can refer to scripts in [GLM-5.2 Prefill-Decode Disaggregation](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html#513-prefill-decode-disaggregation).
 
-### 5.2 Prefill-Decode Disaggregation
+### 5.2 1M Context Configuration
 
-Prefill-Decode disaggregation scenarios have not yet tested for `GLM-5.3`. If you want to deploy prefill-decode disaggregation, you can refer to scripts in [GLM-5.2 Prefill-Decode Disaggregation](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html#prefill-decode-disaggregation).
+The 1M context scenarios have not yet tested for `GLM-5.3`. The subsections below mirror the [GLM-5.2 1M context layout](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html#52-1m-context-configuration); refer to the linked GLM-5.2 scripts.
+
+#### 5.2.1 Single-Node 1M Deployment
+
+Not yet tested for `GLM-5.3`. Refer to [GLM-5.2 Single-Node 1M Deployment](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html#521-single-node-1m-deployment).
+
+#### 5.2.2 Dual-Node Co-Located 1M Deployment
+
+Not yet tested for `GLM-5.3`. Refer to [GLM-5.2 Dual-Node Co-Located 1M Deployment](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html#522-dual-node-co-located-1m-deployment).
+
+#### 5.2.3 PD Disaggregation 1M Deployment
+
+Not yet tested for `GLM-5.3`. Refer to [GLM-5.2 PD Disaggregation 1M Deployment](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html#523-pd-disaggregation-1m-deployment).
 
 ## 6 Functional Verification
 
@@ -477,7 +493,31 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
-## 9 FAQ
+## 9 Performance Tuning
+
+### 9.1 Tested Performance Cases
+
+#### Table 1: Tested Performance Cases
+
+The performance cases have not yet tested for `GLM-5.3`. For reference configurations, see the [GLM-5.2 Performance Tuning](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html#9-performance-tuning) chapter.
+
+### 9.2 Recommended Configurations
+
+#### Table 2: Optimizations Requiring Explicit Enablement
+
+The optimizations below must be explicitly enabled to take effect. The scenarios listed are those used by the verified scripts in [Online Service Deployment](#5-online-service-deployment).
+
+|Optimization|Scenario|Enablement|Principle (Benefits)|Notes|
+|------------|--------|----------|---------------------|-----|
+|FlashComm_v1|Multi-node co-located nodes|`--additional-config '{"enable_flashcomm1": true}'`|Splits AllReduce into Reduce-Scatter and All-Gather, improving prefill throughput and reducing communication latency|Not available when `layer_sharding` includes `o_proj`|
+|Fused MC2|A3 series|`--additional-config '{"enable_fused_mc2": true}'`|Replaces ALLTOALL+MC2 with the `dispatch_ffn_combine`/`dispatch_gmm_combine_decode` operators, reducing MoE communication overhead and improving MoE inference performance|`dispatch_ffn_combine` only for w8a8, EP≤32, non-MTP, non-dynamic-EPLB; conflicts with `multistream_overlap_shared_expert` (the latter is auto-disabled)|
+|DSA CP|A3 series; long context (≥128K)|`--additional-config '{"enable_dsa_cp": true}'`|DSA context parallelism accelerates long-context prefill, reducing TTFT for long prompts|Enabled in the verified multi-node co-located scripts|
+|Balance Scheduling|Co-located, non-PD scenarios|`--additional-config '{"enable_balance_scheduling": true}'`|Improves output throughput and reduces TPOT in the v1 scheduler|TTFT may degrade; not recommended when Prefill-Decode is separated|
+|Sparse SFA C8|Long-context prefill|`--kv-cache-dtype int8`|Sparse Flash Attention skips unnecessary attention computation of the C8 quantized model, accelerating long-context prefill|Experimental in v0.23.0|
+|Sparse LI C8|A3 / A2 series|`--attention_config.indexer_kv_dtype int8`|Sparse attention optimization reduces computation of the C8 quantized model, improving throughput|Independent of `--kv-cache-dtype int8`|
+|Multistream Overlap Shared Expert|A2 series|`--additional-config '{"multistream_overlap_shared_expert": true}'`|Overlaps shared-expert computation on an additional stream, hiding its latency and improving decode performance|Auto-disabled when `"enable_fused_mc2": true`|
+
+## 10 FAQ
 
 - **Q: How to enable function calling for GLM-5.3?**
 
@@ -493,7 +533,7 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 
   A: No, GLM-5.3 does not support `enable_thinking`.
 
-## 10 Declaration
+## 11 Declaration
 
 - The current version is only for early experience, and performance optimization is still in progress.
 - The service reliability has not been fully validated, and it is not recommended for direct use in production environments.
