@@ -15,6 +15,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+from collections.abc import Mapping
 from typing import Any, cast
 
 import torch
@@ -134,7 +135,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
                 num_tokens=num_tokens_padded,
                 num_reqs=num_reqs_padded,
             )
-            attn_metadata = super()._build_uniform_attn_metadata(
+            attn_metadata = self._build_uniform_attn_metadata(
                 num_reqs=self.input_batch.num_reqs,
                 batch_desc=batch_desc,
                 num_query_per_req=self.num_query_per_req,
@@ -143,25 +144,47 @@ class AscendDSparkSpeculator(DSparkSpeculator):
                 causal=self._group_causal,
             )
 
-        if self.attn_architecture not in ("GQA", "MLA"):
-            return [attn_metadata]
+        return [attn_metadata]
 
-        return [self._update_draft_attn_metadata(attn_metadata, num_reqs_padded)]
+    def _build_uniform_attn_metadata(  # type: ignore[misc]
+        self,
+        batch_desc: BatchExecutionDescriptor,
+        num_reqs: int,
+        num_query_per_req: int,
+        seq_lens_cpu_upper_bound: torch.Tensor,
+        step: int,
+        causal: bool | Mapping[int, bool] = True,
+        dcp_local_seq_lens: torch.Tensor | None = None,
+    ) -> dict[str, Any] | None:
+        """Extend vLLM's uniform draft metadata builder for padded batches.
+
+        DSpark inherits DFlash's full-graph path, and upstream
+        ``Speculator._build_uniform_attn_metadata`` clamps ``query_start_loc``
+        at the real ``num_reqs`` to keep the cumulative series non-decreasing,
+        so when a batch is padded to a capture size the cumulative query
+        lengths stop at ``num_reqs * num_query_per_req`` instead of
+        ``num_tokens_padded``. The Ascend FIA operator requires, in TND layout,
+        that the last element of ``actual_seq_lengths_q`` equals the query
+        token count of the graph being replayed; otherwise tiling fails with
+        ``queryT != last element of actualSequenceLengthQ``. Rebuild the
+        per-layer lengths from the padded request count here.
+        """
+        attn_metadata = super()._build_uniform_attn_metadata(
+            batch_desc=batch_desc,
+            num_reqs=num_reqs,
+            num_query_per_req=num_query_per_req,
+            seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+            step=step,
+            causal=causal,
+            dcp_local_seq_lens=dcp_local_seq_lens,
+        )
+        if self.attn_architecture not in ("GQA", "MLA"):
+            return attn_metadata
+        return self._update_draft_attn_metadata(attn_metadata, batch_desc.num_reqs or num_reqs)
 
     def _update_draft_attn_metadata(self, attn_metadata, num_reqs_padded):
         """Rebuild ``actual_seq_lengths_q`` from the padded request count,
         mirroring Eagle's ``_update_decode_attn_metadata``.
-
-        DSpark inherits DFlash's full-graph path, and upstream
-        ``Speculator._build_draft_attn_metadata`` clamps ``query_start_loc`` at
-        the real ``num_reqs`` to keep the cumulative series non-decreasing, so
-        when a batch is padded to a capture size (``num_reqs_padded >
-        num_reqs``) the cumulative query lengths stop at
-        ``num_reqs * num_query_per_req`` instead of ``num_tokens_padded``. The
-        Ascend FIA operator requires, in TND layout, that the last element of
-        ``actual_seq_lengths_q`` equals the query token count of the graph
-        being replayed; otherwise tiling fails with
-        ``queryT != last element of actualSequenceLengthQ``.
         """
         query_lens_list = [(i + 1) * self.num_query_per_req for i in range(num_reqs_padded)]
         for metadata in attn_metadata.values():
