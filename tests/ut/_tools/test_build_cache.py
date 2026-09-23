@@ -493,6 +493,7 @@ def test_third_party_backslash_semantic_change_is_a_cache_miss(tmp_path: Path):
     compiler = shutil.which("g++")
     if compiler is None:
         pytest.skip("g++ is required for the run-level normalization regression")
+    assert compiler is not None
 
     cache_root = tmp_path / "cache"
     output = tmp_path / "output"
@@ -1917,6 +1918,7 @@ def test_cmake_adapter_defaults_cache_under_csrc(tmp_path: Path):
     cmake = shutil.which("cmake")
     if cmake is None:
         pytest.skip("cmake is unavailable")
+    assert cmake is not None
 
     source_dir = tmp_path / "csrc"
     build_dir = tmp_path / "build"

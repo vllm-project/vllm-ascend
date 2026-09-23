@@ -258,6 +258,24 @@ For running nightly multi-node model test cases locally, refer to the `Running L
 
 - Offline test example: [`tests/e2e/pull_request/one_card/test_qwen3_0_6b.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/pull_request/one_card/test_qwen3_0_6b.py)
 
+### Csrc incremental build cache checks
+
+For changes to native build inputs or the cache adapter, run the cache engine,
+concurrency, and snapshot-key tests before requesting an NPU build:
+
+```bash
+pytest -q --confcutdir=tests/ut/_tools \
+  tests/ut/_tools/test_build_cache.py \
+  tests/ut/_tools/test_build_cache_concurrency.py \
+  tests/ut/_tools/test_prepare_csrc_l1_restore.py
+```
+
+On CI, a successful restore step only proves that an outer L1 snapshot was
+available. Check the inner cache telemetry for action HIT/MISS/BYPASS to
+establish whether a source build actually reused compiled work. See the
+[persistent csrc build cache design](../Design_Documents/persistent_csrc_build_cache.md)
+for the identity and failure contracts.
+
 ### PR selective testing (CI)
 
 The PR CI workflow ([pr_test.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/pr_test.yaml)) does not run the full suite on every PR. It selects tests with a coverage/AST based precision-testing pipeline and routes them to NPU runners. Tests run when the PR has the `ready-precise` label (recommended subset), the `ready-all` label (full suite), or the `main2main` label (full suite executed against both the verified vLLM main commit and the matched vLLM release tag).
