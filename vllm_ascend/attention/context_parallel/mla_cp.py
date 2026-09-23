@@ -141,10 +141,21 @@ class AscendMlaDCPMetadataBuilder(
         if chunked_context_metadata is None:
             return None
 
-        local_context_lens_allranks = self._get_dcp_context_lens(
-            common_attn_metadata,
-            start=self.num_decodes,
-        )
+        if common_attn_metadata.context_parallel_metadata is not None:
+            # MRV1 keeps the all-rank CPU lengths in AscendDCPMetadata.
+            local_context_lens_allranks = self._get_dcp_context_lens(
+                common_attn_metadata,
+                start=self.num_decodes,
+            )
+        else:
+            # MRV2 does not populate the legacy AscendDCPMetadata. Derive every
+            # rank's lengths from the global CPU context lengths already kept by
+            # the base MLA builder; MLA needs them when reorganizing chunked KV.
+            local_context_lens_allranks = get_dcp_local_seq_lens(
+                self.context_lens_cpu,
+                dcp_size=self.dcp_size,
+                cp_kv_cache_interleave_size=self.cp_local_block_size,
+            )
         padded_local_context_lens_cpu = (
             cdiv(self.context_lens_cpu, self.cp_virtual_block_size) * self.cp_local_block_size
         )
@@ -199,17 +210,29 @@ class AscendMlaDCPMetadataBuilder(
     ) -> AscendMLADecodeMetadata:
         decode_metadata = super().build_decode_metadata(common_prefix_len, common_attn_metadata)
         assert isinstance(decode_metadata, AscendMLADCPDecodeMetadata)
-        dcp_metadata = self._require_dcp_metadata(common_attn_metadata)
-        if dcp_metadata.draft_cp_seq_len is not None:
-            decode_metadata.cp_seq_len = dcp_metadata.draft_cp_seq_len[: self.num_decodes]
+        dcp_metadata = common_attn_metadata.context_parallel_metadata
+        if dcp_metadata is not None:
+            if dcp_metadata.draft_cp_seq_len is not None:
+                decode_metadata.cp_seq_len = dcp_metadata.draft_cp_seq_len[: self.num_decodes]
+            else:
+                decode_metadata.cp_seq_len = self._get_dcp_rank_context_lens(
+                    common_attn_metadata,
+                    end=self.num_decodes,
+                ).tolist()
+            # The MRV1 CPU mirror includes corrected verifier lengths and the
+            # draft-step extension. Do not synchronize GPU lengths here.
+            local_lengths = self._get_dcp_context_lens(common_attn_metadata, end=self.num_decodes)
         else:
-            decode_metadata.cp_seq_len = self._get_dcp_rank_context_lens(
-                common_attn_metadata,
-                end=self.num_decodes,
-            ).tolist()
-        # Use the DCP CPU mirror: it includes corrected verifier lengths
-        # and the draft-step extension. Do not synchronize GPU lengths here.
-        local_lengths = self._get_dcp_context_lens(common_attn_metadata, end=self.num_decodes)
+            # MRV2 does not populate the legacy AscendDCPMetadata, and the active
+            # runner may leave its optional current-rank length tensor unset.
+            # Derive all-rank host lists from the CPU sequence lengths already
+            # maintained by the base MLA builder, avoiding a device-to-host sync.
+            local_lengths = get_dcp_local_seq_lens(
+                self.seq_lens[: self.num_decodes],
+                dcp_size=self.dcp_size,
+                cp_kv_cache_interleave_size=self.cp_local_block_size,
+            )
+            decode_metadata.cp_seq_len = local_lengths[:, self.dcp_rank].tolist()
         # DCP lengths contain real requests; FULL graph query lengths also
         # include padded requests. Compute real histories before padding.
         query_lens = self.query_lens[: local_lengths.shape[0]]
