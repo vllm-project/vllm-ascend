@@ -987,15 +987,6 @@ def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
                 "profiling_chunk_config with async scheduling requires the v2 model runner "
                 "(VLLM_USE_V2_MODEL_RUNNER=1). Please enable it or disable async scheduling."
             )
-        if profiling_chunk_config.need_timing:
-            # The wall-clock synchronize() timing would serialize the async
-            # pipeline and pollute the latency model. Startup profiling still
-            # applies; only online calibration is turned off.
-            logger.warning(
-                "profiling_chunk_config.need_timing is not supported with async scheduling; "
-                "disabling online calibration."
-            )
-            profiling_chunk_config.need_timing = False
 
     dyntra_lb_config = scheduler_extension_config.dyntra_lb_config
     if dyntra_lb_config.enabled:

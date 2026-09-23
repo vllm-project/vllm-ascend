@@ -1410,7 +1410,6 @@ class TestNPUPlatform(TestBase):
 
                 ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
                 ascend_config.scheduler_config.profiling_chunk_config.enabled = True
-                ascend_config.scheduler_config.profiling_chunk_config.need_timing = False
                 mock_init_ascend.return_value = ascend_config
 
                 vllm_config = TestNPUPlatform.mock_vllm_config()
@@ -1466,48 +1465,6 @@ class TestNPUPlatform(TestBase):
             patch.object(platform, "check_kv_extra_config"),
         ):
             self.platform.check_and_update_config(vllm_config)
-
-    @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
-    @patch(
-        "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
-        return_value=get_hardware_profile(AscendDeviceType.A3),
-    )
-    @patch("vllm_ascend.ascend_config.init_ascend_config")
-    def test_check_and_update_config_profiling_chunk_async_disables_need_timing(
-        self,
-        mock_init_ascend,
-        mock_soc_version,
-        mock_auto_detect,
-    ):
-        from vllm_ascend import platform
-
-        importlib.reload(platform)
-        self.platform = platform.NPUPlatform()
-
-        ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
-        ascend_config.scheduler_config.profiling_chunk_config.enabled = True
-        ascend_config.scheduler_config.profiling_chunk_config.need_timing = True
-        mock_init_ascend.return_value = ascend_config
-
-        vllm_config = TestNPUPlatform.mock_vllm_config()
-        vllm_config.kv_transfer_config = None
-        vllm_config.scheduler_config.async_scheduling = True
-        vllm_config.use_v2_model_runner = True
-
-        with (
-            patch.object(platform, "_fix_incompatible_config"),
-            patch.object(platform, "check_kv_extra_config"),
-            patch.object(platform.logger, "warning") as mock_warning,
-        ):
-            self.platform.check_and_update_config(vllm_config)
-
-        self.assertFalse(ascend_config.scheduler_config.profiling_chunk_config.need_timing)
-        warning_messages = [str(call.args[0]) for call in mock_warning.call_args_list if call.args]
-        self.assertTrue(any("need_timing" in message for message in warning_messages))
-        self.assertEqual(
-            vllm_config.scheduler_config.scheduler_cls,
-            "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkAsyncScheduler",
-        )
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch(
