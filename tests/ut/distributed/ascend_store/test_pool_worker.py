@@ -1917,6 +1917,90 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         self.assertEqual(request.partial_load_gva_per_group, [202])
         self.assertEqual(worker.get_block_ids_with_load_errors(), set())
 
+    def _make_partial_publication_case(self):
+        worker = self._make_gva_worker()
+        key_infos = []
+        for gva in (201, 202):
+            info = MagicMock()
+            info.size.return_value = 64
+            info.gva_list.return_value = [gva]
+            key_infos.append(info)
+        worker.m_store.batch_get_key_info.return_value = key_infos
+        request = ReqMeta(
+            req_id="r1",
+            token_len_chunk=16,
+            target_token_len=24,
+            block_ids=[7, 8],
+            block_hashes=["h0"],
+            load_spec=LoadSpec(vllm_cached_tokens=20, kvpool_cached_tokens=20, can_load=True),
+            block_ids_np=np.asarray([7, 8], dtype=np.int64),
+            block_ids_by_group_np=[np.asarray([7, 8], dtype=np.int64)],
+        )
+        return worker, request
+
+    def test_partial_publication_delayed_beyond_ten_retries(self):
+        worker, request = self._make_partial_publication_case()
+        now = 0.0
+
+        def sleep(seconds):
+            nonlocal now
+            now += seconds
+
+        def add_lease(keys, _ttl):
+            result = 0 if now >= 0.05 else -3101
+            return [0, result] if len(keys) == 2 else [result]
+
+        worker.m_store.batch_add_lease.side_effect = add_lease
+        module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker"
+        with (
+            patch(f"{module}.time.monotonic", side_effect=lambda: now),
+            patch(f"{module}.time.sleep", side_effect=sleep),
+        ):
+            worker._prepare_load_gvas([request])
+
+        self.assertGreater(worker.m_store.batch_add_lease.call_count, 11)
+        self.assertGreaterEqual(now, 0.05)
+        self.assertEqual(request.partial_load_gva_per_group, [202])
+        self.assertEqual(len(request.load_keys), 2)
+        self.assertEqual(worker.get_block_ids_with_load_errors(), set())
+
+    def test_unpublished_partial_expires_without_loading_it(self):
+        worker, request = self._make_partial_publication_case()
+        now = 0.0
+
+        def sleep(seconds):
+            nonlocal now
+            now += seconds
+
+        worker.m_store.batch_add_lease.side_effect = lambda keys, _ttl: [0, -3101] if len(keys) == 2 else [-3101]
+        module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker"
+        with (
+            patch(f"{module}.PARTIAL_LEASE_WAIT_TIMEOUT_S", 0.02),
+            patch(f"{module}.time.monotonic", side_effect=lambda: now),
+            patch(f"{module}.time.sleep", side_effect=sleep),
+        ):
+            worker._prepare_load_gvas([request])
+
+        self.assertAlmostEqual(now, 0.02)
+        self.assertLessEqual(worker.m_store.batch_add_lease.call_count, 21)
+        self.assertEqual(request.partial_load_gva_per_group, [0])
+        self.assertEqual(request.load_keys, [worker._make_layerwise_full_key(0, "h0")])
+        self.assertEqual(worker.get_block_ids_with_load_errors(), {8})
+
+    def test_partial_publication_stops_on_nonretryable_error(self):
+        for lease_results in ([[0, -3102]], [[0, -3101], [-3102]]):
+            with self.subTest(lease_results=lease_results):
+                worker, request = self._make_partial_publication_case()
+                worker.m_store.batch_add_lease.side_effect = lease_results
+                module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker"
+                with patch(f"{module}.time.sleep") as sleep:
+                    worker._prepare_load_gvas([request])
+
+                self.assertEqual(worker.m_store.batch_add_lease.call_count, len(lease_results))
+                self.assertEqual(sleep.call_count, len(lease_results) - 1)
+                self.assertEqual(request.partial_load_gva_per_group, [0])
+                self.assertEqual(worker.get_block_ids_with_load_errors(), {8})
+
     def test_multi_group_load_failure_stops_before_forward(self):
         worker = self._make_gva_worker(2)
         valid_info = MagicMock()
