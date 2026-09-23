@@ -93,6 +93,35 @@ llm = LLM(
 
 For the detailed meaning of `NONE`, `PIECEWISE`, `FULL`, `FULL_DECODE_ONLY`, and `FULL_AND_PIECEWISE`, as well as the generic fallback policy, see the upstream [CUDA Graphs](https://docs.vllm.ai/en/latest/design/cuda_graphs/) design doc.
 
+### Default capture sizes for speculative PD decode
+
+When neither `max_cudagraph_capture_size` nor `cudagraph_capture_sizes` is set,
+Ascend derives the initial maximum from `max_num_seqs * decode_query_len`.
+For speculative decoding, `decode_query_len` is `1 + num_speculative_tokens`.
+The usual default cap is 512 scheduled tokens. A disaggregated decode instance
+with `kv_role="kv_consumer"`, speculative decoding, `FULL_DECODE_ONLY`, and no
+`enforce_eager` instead uses a cap of 1024. Explicit size settings take precedence.
+
+For example, `max_num_seqs=256` and three speculative tokens give a default
+maximum of 1024, covering the configured uniform decode capacity of each DP
+rank. With the previous 512-token cap, 128 requests fit but 129 require 516
+tokens. A balanced DP2 deployment can cross that boundary at a total concurrency
+of 257, causing synchronized ranks to leave full-graph execution.
+
+The cap is a resource limit, not a guarantee of full-graph coverage for every
+configuration. For example, 256 requests with seven speculative tokens can
+require 2048 tokens. Ascend warns when the configured uniform decode capacity
+exceeds the 1024-token default cap. Check graph memory and KV-cache capacity
+before explicitly increasing it. Larger capture sizes can increase capture
+time and graph memory, reduce available KV-cache space, and affect communication
+buffer sizing and method selection.
+
+The upstream token budget, size alignment, and Ascend graph filtering still
+apply, so inspect the final capture sizes in the startup logs. At runtime, the
+dispatcher selects from the captured sizes; setting a maximum of 1024 does not
+pad every batch to 1024. Requests beyond the scheduler's running capacity wait
+rather than increasing the graph size automatically.
+
 ### Attention backend compatibility
 
 Not all attention backends support all graph modes. vLLM checks attention backend compatibility during compatibility checks and, when possible, automatically adjusts `cudagraph_mode` to a more compatible mode instead of failing immediately. In practice, this means a requested full-graph mode may be narrowed to a mixed or piecewise mode, and if the backend cannot support graph execution at all, graph mode may be disabled.
