@@ -149,6 +149,60 @@ def test_deepseek_v4_forward_passes_input_ids_to_layers(monkeypatch):
     assert "input_ids" not in forward_context.additional_kwargs
 
 
+@pytest.mark.parametrize("aux_source", ["none", "local", "transported"])
+def test_deepseek_v4_only_copies_mtp_hidden_states_without_aux_outputs(monkeypatch, aux_source):
+    from vllm_ascend.models.deepseek_v4 import model as deepseek_v4
+
+    monkeypatch.setattr(
+        deepseek_v4,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
+    )
+
+    input_ids = torch.tensor([11, 22, 33])
+    inputs_embeds = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+    transported_aux_hidden_states = [inputs_embeds + 1] if aux_source == "transported" else []
+    monkeypatch.setattr(
+        deepseek_v4,
+        "get_pp_transport_tensors",
+        lambda *_args, **_kwargs: transported_aux_hidden_states.copy(),
+    )
+
+    layer = MagicMock()
+    layer.layer_idx = 0
+    layer.side_effect = lambda _positions, hidden_states, *_args, **_kwargs: (hidden_states, None)
+    mtp_hidden_buffer = torch.full_like(inputs_embeds, -1)
+    model = SimpleNamespace(
+        hc_mult=1,
+        use_sequence_parallel_moe=False,
+        layers=[layer],
+        start_layer=0,
+        end_layer=1,
+        aux_hidden_state_layers={1} if aux_source == "local" else set(),
+        _mtp_hidden_buffer=mtp_hidden_buffer,
+        hc_head=lambda hidden_states, *_: hidden_states.squeeze(1),
+        hc_head_fn=None,
+        hc_head_scale=None,
+        hc_head_base=None,
+        norm=lambda hidden_states: hidden_states,
+    )
+
+    output = deepseek_v4.DeepseekV4Model.forward(
+        model,
+        input_ids,
+        positions=torch.arange(input_ids.numel()),
+        intermediate_tensors=None,
+        inputs_embeds=inputs_embeds,
+    )
+
+    if aux_source == "none":
+        torch.testing.assert_close(mtp_hidden_buffer, inputs_embeds)
+        assert isinstance(output, torch.Tensor)
+    else:
+        torch.testing.assert_close(mtp_hidden_buffer, torch.full_like(inputs_embeds, -1))
+        assert isinstance(output, tuple)
+
+
 def test_set_mc2_tokens_capacity_without_cudagraph_aligns_per_tp_rank():
     vllm_config = _make_vllm_config(tensor_parallel_size=6)
 

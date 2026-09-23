@@ -228,20 +228,20 @@ class NPUModelRunner(GPUModelRunner):
         ):
             return
 
-        get_hidden_states = getattr(
-            self.model,
-            "get_mtp_target_hidden_states",
-            None,
-        )
-        if get_hidden_states is not None:
-            mtp_target_hidden_states = get_hidden_states()
-            if mtp_target_hidden_states is not None:
-                pcp_manager.restore_hidden_state_buffer(mtp_target_hidden_states)
-
         aux_hidden_states = state.aux_hidden_states
         if aux_hidden_states:
             restored_aux_hidden_states = pcp_manager.restore_hidden_states(torch.cat(aux_hidden_states, dim=-1))
             self.execute_model_state = state._replace(aux_hidden_states=[restored_aux_hidden_states])
+        else:
+            get_hidden_states = getattr(
+                self.model,
+                "get_mtp_target_hidden_states",
+                None,
+            )
+            if get_hidden_states is not None:
+                mtp_target_hidden_states = get_hidden_states()
+                if mtp_target_hidden_states is not None:
+                    pcp_manager.restore_hidden_state_buffer(mtp_target_hidden_states)
 
     def sample_tokens(self, grammar_output):
         pcp_manager = self.pcp_manager

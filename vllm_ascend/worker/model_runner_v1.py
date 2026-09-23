@@ -2006,15 +2006,15 @@ class NPUModelRunner(GPUModelRunner):
                 num_prefill_reqs = 0
                 num_decode_reqs = 0
 
-            # Let the target override the hidden state fed to the drafter
-            # (e.g. DeepSeek V4 MTP needs the pre-hc_head residual). Safe to
-            # rebind here: hidden_states was already consumed for sampling
-            # above and is not used again in this branch.
-            mtp_hidden_states = getattr(
-                self.get_model(), "get_mtp_target_hidden_states", lambda: None
-            )()
-            if self.speculative_config.method == "mtp" and mtp_hidden_states is not None:
-                hidden_states = mtp_hidden_states
+            # Let traditional MTP use the pre-hc_head residual. Draft heads
+            # with aux outputs consume those outputs below and do not need the
+            # MTP buffer populated or read.
+            if self.speculative_config.method == "mtp" and not self.use_aux_hidden_state_outputs:
+                mtp_hidden_states = getattr(
+                    self.get_model(), "get_mtp_target_hidden_states", lambda: None
+                )()
+                if mtp_hidden_states is not None:
+                    hidden_states = mtp_hidden_states
 
             num_rejected_tokens_gpu = None
             if spec_decode_metadata is None:
