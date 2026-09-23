@@ -308,7 +308,9 @@ def infer_group_block_sizes(
 def infer_cacheable_group_ids(kv_cache_groups: Sequence[Any] | None) -> list[int]:
     if not kv_cache_groups:
         return [0]
-    return [i for i, group in enumerate(kv_cache_groups) if is_prefix_cacheable(group.kv_cache_spec)]
+    group_ids = [i for i, group in enumerate(kv_cache_groups) if is_prefix_cacheable(group.kv_cache_spec)]
+    assert group_ids, "AscendStore requires at least one prefix-cacheable KV cache group"
+    return group_ids
 
 
 def get_group_block_size(group_block_sizes: Sequence[int], group_id: int) -> int:

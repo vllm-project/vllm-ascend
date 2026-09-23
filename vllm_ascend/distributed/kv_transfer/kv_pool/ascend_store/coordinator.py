@@ -101,7 +101,6 @@ class AscendStoreCoordinator:
         self.group_cache_families = group_cache_families
         self.group_effective_block_sizes = list(group_block_sizes)
         self.cacheable_group_ids = infer_cacheable_group_ids(kv_cache_groups)
-        assert self.cacheable_group_ids, "AscendStore requires at least one prefix-cacheable KV cache group"
         for group_id in self.cacheable_group_ids:
             effective_block_size = self.group_effective_block_sizes[group_id]
             assert effective_block_size % hash_block_size == 0, "block_size must be divisible by hash_block_size"

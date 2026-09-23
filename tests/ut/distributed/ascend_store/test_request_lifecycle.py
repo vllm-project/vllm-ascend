@@ -191,6 +191,28 @@ def payload_value(tokens, end, name, plane):
     return (sum(tokens[:end]) + sum(name.encode()) + plane * 11) % 101 + 1
 
 
+@pytest.mark.parametrize("role", [KVConnectorRole.SCHEDULER, KVConnectorRole.WORKER])
+@pytest.mark.parametrize("prefix_unit", [None, 128])
+def test_private_only_layout_rejected(devices_and_store, role, prefix_unit):
+    config = create_vllm_config(
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="AscendStoreConnector",
+            kv_role="kv_both",
+            kv_connector_module_path="vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector",
+            kv_connector_extra_config={"backend": "cpu"},
+        ),
+    )
+    config.cache_config.prefix_match_unit = prefix_unit
+    spec = CircularBufferSpec(block_size=32, num_kv_heads=1, head_size=16, head_size_v=0, dtype=torch.float32)
+    plan = KVCacheConfig(
+        num_blocks=128,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["model.layers.0.state_cache"], spec)],
+    )
+    with pytest.raises(AssertionError, match="AscendStore requires at least one prefix-cacheable KV cache group"):
+        KVConnectorFactory.create_connector(config, role, plan)
+
+
 @pytest.mark.parametrize("prefix_unit", [None, 32, 128])
 @pytest.mark.parametrize("load_async", [False, True])
 @pytest.mark.parametrize("save_decode_cache", [False, True])
