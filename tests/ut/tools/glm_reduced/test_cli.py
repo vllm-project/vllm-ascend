@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""CLI tests: inventory/profiles/sources/plan/build/verify/compare entry points."""
+"""CLI tests: inventory/profiles/sources/plan/build/verify entry points."""
 
 import json
-from pathlib import Path
 
 from tools.glm_reduced.cli import main
 
@@ -86,70 +85,3 @@ def test_build_cli_error_exit_code(tmp_path, capsys):
     assert main(["build", str(src), str(dst), "--layers", "3"]) == 2  # below profile minimum
     assert "keep_layers >= 8" in capsys.readouterr().err
     assert not dst.exists()
-
-
-def _write_dump(path: Path, mode: str, logprob: float, checkpoint_id: str = "sha256:x", run_id: str = "r1") -> None:
-    meta = {
-        "format": "glm-reduced-logprobs-v2",
-        "model": "/m",
-        "checkpoint_id": checkpoint_id,
-        "run_id": run_id,
-        "dtype": "bfloat16",
-        "mode": mode,
-        "seed": 0,
-        "prompt_count": 1,
-        "output_tokens": 1,
-        "runtime": {"vllm": "0.13.0"},
-        "engine": {"enforce_eager": mode == "eager"},
-    }
-    record = {
-        "prompt_index": 0,
-        "prompt_token_ids": [1],
-        "token_ids": [5],
-        "top_logprobs": [[{"token_id": 5, "logprob": logprob}]],
-    }
-    path.write_text(json.dumps(meta) + "\n" + json.dumps(record) + "\n", encoding="utf-8")
-
-
-def test_compare_logits_cli(tmp_path):
-    baseline = tmp_path / "b.jsonl"
-    candidate = tmp_path / "c.jsonl"
-    _write_dump(baseline, "eager", -0.5, run_id="r1")
-    _write_dump(candidate, "graph", -0.5001, run_id="r2")
-    assert main(["compare-logits", str(baseline), str(candidate), "--atol", "1e-3", "--rtol", "1e-3"]) == 0
-    assert main(["compare-logits", str(baseline), str(candidate), "--atol", "1e-9", "--rtol", "1e-9"]) == 1
-    # Same file on both sides is the same run.
-    assert main(["compare-logits", str(baseline), str(baseline), "--atol", "1", "--rtol", "1"]) == 2
-
-
-def test_compare_perf_cli(tmp_path):
-    def write(path: Path, runtime: str, latency: float, checkpoint_id: str = "sha256:x", run_id: str = "r1") -> None:
-        payload = {
-            "format": "glm-reduced-perf-v2",
-            "meta": {
-                "model": "/m-reduced",
-                "checkpoint_id": checkpoint_id,
-                "run_id": run_id,
-                "hardware": "hw",
-                "workload_id": "w",
-                "mode": "run",
-                "warmup_iterations": 1,
-                "measured_iterations": 2,
-                "expected_iteration_tokens": 100,
-                "runtime": {"vllm": runtime},
-                "engine": {"tensor_parallel_size": 8},
-            },
-            "latencies_s": [latency, latency],
-            "total_tokens": [100, 100],
-        }
-        path.write_text(json.dumps(payload), encoding="utf-8")
-
-    baseline = tmp_path / "b.json"
-    candidate = tmp_path / "c.json"
-    write(baseline, "0.13.0", 1.0, run_id="r1")
-    write(candidate, "0.14.0", 0.5, run_id="r2")
-    assert main(["compare-perf", str(baseline), str(candidate), "--max-latency-regression-pct", "50"]) == 0
-    # Fail closed without thresholds.
-    assert main(["compare-perf", str(baseline), str(candidate)]) == 1
-    # Improvement beyond the allowed "regression" floor still passes.
-    assert main(["compare-perf", str(baseline), str(candidate), "--min-throughput-change-pct", "0"]) == 0

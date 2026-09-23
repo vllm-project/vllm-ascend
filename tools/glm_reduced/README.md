@@ -141,56 +141,43 @@ Quantized checkpoints:
 - Any other scheme (packed MXFP4, AWQ, GPTQ, ...) fails with
   `UnsupportedQuantError` explaining why, instead of emitting a corrupt model.
 
-## Precision gate
+## Registered gates
 
-Two runs of the **same checkpoint** (identical `checkpoint_id`, distinct
-`run_id`s) with a fixed prompt set, compared with caller-supplied tolerances:
+Both gates run against the same reduced GLM-5.2 W4A8 checkpoint (11 main layers
+plus one retained MTP layer, MTP disabled) and never write a baseline.
 
-```bash
-python -m tools.glm_reduced.run_logits_dump REDUCED --profile glm-moe-dsa \
-    --mode eager --enforce-eager --output baseline.jsonl
-python -m tools.glm_reduced.run_logits_dump REDUCED --profile glm-moe-dsa \
-    --mode graph --output candidate.jsonl
-python -m tools.glm_reduced compare-logits baseline.jsonl candidate.jsonl \
-    --atol <per-profile> --rtol <per-profile>
-```
-
-The gate requires: matching checkpoint ids and seeds; complete dumps
-(prompt_count records, unique prompt indices, exactly output_tokens produced
-per record — truncation on both sides fails); identical prompt token ids and
-greedy token sequences (first divergence reported); sampled token present in
-both top-k sets; at least one compared logprob pair; finite values and finite
-tolerances. Independent A/A runs (identical settings, different run ids) are
-valid noise characterization. Tolerances have no defaults. Logit parity alone
-does not prove semantic task accuracy; it complements the accuracy suites in
-`tests/e2e/`.
-
-## Performance gate
-
-The regression gate compares two runs of the **same checkpoint** — typically
-one reduced checkpoint across two runtime revisions — with identical dtype
-and engine settings (TP/EP/caching policy):
+### 11-layer logits gate
 
 ```bash
-python -m tools.glm_reduced.run_perf REDUCED --profile glm-moe-dsa \
-    --hardware <tag> --mode baseline-rev-A --output perf-baseline.json
-python -m tools.glm_reduced.run_perf REDUCED --profile glm-moe-dsa \
-    --hardware <tag> --mode candidate-rev-B --output perf-candidate.json
-python -m tools.glm_reduced compare-perf perf-baseline.json perf-candidate.json \
-    --max-latency-regression-pct <per-profile/hardware>
+python -m tools.glm_reduced.run_logits_gate --model REDUCED --report-dir <new dir>
 ```
 
-`compare-perf` hard-fails on: missing/malformed baselines; checkpoint,
-workload, hardware, dtype or engine mismatches (a TP=1 vs TP=8 comparison is
-not a regression); missing thresholds (a comparison without an explicit
-pass/fail criterion is not a gate); and token-count violations (early EOS or
-cache-shortened work). Full-vs-reduced latency ratios measure the crop, not a
-regression, and are rejected via checkpoint identity. Prefix caching is
-disabled by default in the runner so repeated iterations measure equal work.
+Fixed 200-sample GSM8K position set (all 20,693 prediction positions, first
+sample included), compared against the committed A1 baseline under
+`data/glm52/logits/`. The gate requires at least 90% argmax agreement, compared
+with integer maths, and rejects Flash checkpoints before measuring. It is a
+numerical regression gate on intermediate logits, not GSM8K answer accuracy.
+See [the fixture notes](data/glm52/logits/README.md).
+
+### 11-layer performance gate
+
+```bash
+python -m tools.glm_reduced.run_perf_gate --model REDUCED \
+    --baseline tools/glm_reduced/data/glm52/perf/baseline-167-eager.json \
+    --report-dir <new dir> --hardware <tag> \
+    --min-throughput-fraction <f> --max-latency-fraction <f>
+```
+
+Offline single-round runner (no OpenAI server). One launch per configuration; a
+fixed warmup is excluded from timing and each workload's median is compared
+against the pinned baseline. Identity (model, hardware tag, runner architecture,
+engine settings, workload shapes and iteration counts) must match exactly or the
+gate fails closed; thresholds are supplied by the caller and CI never writes or
+bootstraps a baseline. See [the fixture notes](data/glm52/perf/README.md).
 
 ## Scope notes and runtime boundary
 
-- `run_logits_dump.py` and `run_perf.py` are the only components that need a
+- `run_logits_gate.py` and `run_perf_gate.py` are the only components that need a
   vllm + vllm_ascend NPU runtime; they exit with code 2 and a clear message
   when it is unavailable. Everything else — reduction, verification,
   comparison logic, CLI — is CPU-tested and requires `regex` without Torch or NPU dependencies.

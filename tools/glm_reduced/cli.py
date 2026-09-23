@@ -7,8 +7,6 @@ Subcommands:
   plan           dry-run a reduction: tensor classification and config diff
   build          execute a reduction, writing the checkpoint + manifest
   verify         re-check a reduced checkpoint against its manifest
-  compare-logits compare two logprob dumps (baseline vs candidate)
-  compare-perf   compare two perf records (baseline vs candidate)
 
 All subcommands are CPU-only and require no vllm/torch installation.
 """
@@ -20,10 +18,8 @@ import json
 import sys
 from pathlib import Path
 
-from .compare import compare_dumps, load_dump
 from .errors import ReductionError
 from .inventory import list_inventory, render_markdown, validate_inventory
-from .perf import compare_perf, load_perf
 from .profiles import get_profile, list_profiles, match_profile
 from .reducer import (
     DEFAULT_MAX_SHARD_BYTES,
@@ -150,33 +146,6 @@ def _cmd_verify(args: argparse.Namespace) -> int:
     return 0 if report["ok"] else 1
 
 
-def _cmd_compare_logits(args: argparse.Namespace) -> int:
-    if Path(args.baseline).resolve() == Path(args.candidate).resolve():
-        print("error: baseline and candidate are the same file (same run)", file=sys.stderr)
-        return 2
-    baseline = load_dump(args.baseline)
-    candidate = load_dump(args.candidate)
-    report = compare_dumps(baseline, candidate, atol=args.atol, rtol=args.rtol)
-    print(report.to_json())
-    return 0 if report.ok else 1
-
-
-def _cmd_compare_perf(args: argparse.Namespace) -> int:
-    if Path(args.baseline).resolve() == Path(args.candidate).resolve():
-        print("error: baseline and candidate are the same file (same run)", file=sys.stderr)
-        return 2
-    baseline = load_perf(args.baseline)
-    candidate = load_perf(args.candidate)
-    report = compare_perf(
-        baseline,
-        candidate,
-        max_latency_regression_pct=args.max_latency_regression_pct,
-        min_throughput_change_pct=args.min_throughput_change_pct,
-    )
-    print(report.to_json())
-    return 0 if report.ok else 1
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="glm_reduced", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -238,19 +207,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("output")
     p.set_defaults(func=_cmd_verify)
 
-    p = sub.add_parser("compare-logits", help="compare two logprob dumps")
-    p.add_argument("baseline")
-    p.add_argument("candidate")
-    p.add_argument("--atol", type=float, required=True, help="absolute logprob tolerance (no default)")
-    p.add_argument("--rtol", type=float, required=True, help="relative logprob tolerance (no default)")
-    p.set_defaults(func=_cmd_compare_logits)
-
-    p = sub.add_parser("compare-perf", help="compare two perf records")
-    p.add_argument("baseline")
-    p.add_argument("candidate")
-    p.add_argument("--max-latency-regression-pct", type=float, default=None)
-    p.add_argument("--min-throughput-change-pct", type=float, default=None)
-    p.set_defaults(func=_cmd_compare_perf)
     return parser
 
 

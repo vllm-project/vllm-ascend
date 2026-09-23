@@ -8,7 +8,7 @@ checkpoint, and records an auditable manifest next to the output.
 
 It is deliberately split into a pure transformation core (CPU, stdlib only,
 unit-tested under ``tests/ut/tools/glm_reduced/``) and thin vLLM boundary
-runners (``run_logits_dump.py`` / ``run_perf.py``) that require an NPU runtime.
+runners (``run_logits_gate.py`` / ``run_perf_gate.py``) that require an NPU runtime.
 """
 
 TOOL_NAME = "vllm-ascend-glm-reduced"

@@ -12,6 +12,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PurePosixPath
 
+from .identity import checkpoint_identity, digest
 from .profiles import get_profile
 from .reducer import (
     execute_plan,
@@ -22,7 +23,6 @@ from .reducer import (
     verify_reduced,
 )
 from .safetensors_io import sha256_of_file
-from .serving_gate import checkpoint_identity, digest
 
 
 def read_json(path: str | Path) -> dict:

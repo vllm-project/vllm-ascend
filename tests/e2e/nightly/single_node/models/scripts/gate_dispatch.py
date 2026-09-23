@@ -41,10 +41,4 @@ def dispatch_gate(config: SingleNodeConfig) -> bool:
 
         run_perf_gate(config)
         return True
-    if "reduced_model_gate" in config.extra_config:
-        from tests.e2e.conftest import RemoteOpenAIServer
-        from tools.glm_reduced.nightly import run_nightly
-
-        run_nightly(config, RemoteOpenAIServer)
-        return True
     return False

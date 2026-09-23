@@ -10,7 +10,7 @@ layer handling, and the minimum prefix that still exercises the architecture's
 distinctive blocks. Profiles carry workload shapes for the
 precision/performance gates but deliberately no numeric baselines: baselines
 are produced by running a reference build of the *same* checkpoint on the same
-hardware with ``run_logits_dump.py`` / ``run_perf.py``.
+hardware with ``run_logits_gate.py`` / ``run_perf_gate.py``.
 
 Layer selection policy: reduction keeps a *prefix* of the source layers.
 Suffix cropping would break rotary/cache assumptions and, for GLM-5.2/5.3,
