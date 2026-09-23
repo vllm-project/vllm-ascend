@@ -982,9 +982,20 @@ def _parse_assignments(texts) -> list[tuple[ast.stmt, list[str]]] | None:
 
 
 _LAZY_RHS_NODES = (
-    ast.Constant, ast.Name, ast.Attribute, ast.Tuple, ast.List, ast.Set,
-    ast.Dict, ast.BinOp, ast.UnaryOp, ast.BoolOp,
-    ast.operator, ast.unaryop, ast.boolop, ast.expr_context,
+    ast.Constant,
+    ast.Name,
+    ast.Attribute,
+    ast.Tuple,
+    ast.List,
+    ast.Set,
+    ast.Dict,
+    ast.BinOp,
+    ast.UnaryOp,
+    ast.BoolOp,
+    ast.operator,
+    ast.unaryop,
+    ast.boolop,
+    ast.expr_context,
 )
 
 
