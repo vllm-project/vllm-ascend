@@ -20,6 +20,11 @@ name: E2E-upstream
 on:
   schedule:
     - cron: '0 8 * * 0' # every Sunday at 8:00
+      pull_request:
+        branches:
+          - 'main'
+          - '*_dev'
+          - 'releases/v*'
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
 # It's used to activate ascend-toolkit environment variables.
@@ -73,7 +78,7 @@ jobs:
           image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.image_tag }}
           env:
             VLLM_LOGGING_LEVEL: ERROR
-            HF_HUB_OFFLINE: 1
+            HF_HUB_OFFLINE: 0
         steps:
           - name: Checkout vllm-project/vllm-ascend repo
             uses: actions/checkout@v7
