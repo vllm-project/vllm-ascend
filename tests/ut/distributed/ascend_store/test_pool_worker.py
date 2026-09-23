@@ -60,7 +60,6 @@ def make_worker(
     pp_rank=0,
     dcp_size=1,
     kv_cache_config=None,
-    pp_rank=0,
     pp_partition=None,
     cache_block_size=16,
 ):
