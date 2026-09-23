@@ -242,7 +242,7 @@ Unless stated otherwise, these optimizations are selected automatically for the 
 ### Deprecation and Configuration Changes
 
 - The former `enable_sparse_c8` option was split into `enable_sparse_sfa_c8` and `enable_sparse_li_c8`; update `--additional-config` according to the sparse-attention components in use. [#12351](https://github.com/vllm-project/vllm-ascend/pull/12351)
-- Migrate FlashComm1 deployments from `VLLM_ASCEND_ENABLE_FLASHCOMM1` to `additional_config.enable_flashcomm1`. [#9064](https://github.com/vllm-project/vllm-ascend/pull/9064)
+- Migrate FlashComm1 deployments to `additional_config.enable_flashcomm1`. [#9064](https://github.com/vllm-project/vllm-ascend/pull/9064)
 - `VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL` was removed during the `AscendConfig` migration. DSA-CP is now controlled by `additional_config.enable_dsa_cp`; deployments that previously relied on FlashComm1 implicitly enabling DSA-CP must explicitly enable both options. [#9668](https://github.com/vllm-project/vllm-ascend/pull/9668) [#9697](https://github.com/vllm-project/vllm-ascend/pull/9697) [#9910](https://github.com/vllm-project/vllm-ascend/pull/9910)
 - Sequence Parallelism is marked unavailable for all current model categories in the v0.23.0 support matrix; deployments that used it in v0.18.0 should move to FlashComm1 where applicable. [#12860](https://github.com/vllm-project/vllm-ascend/pull/12860)†
 - `ASCEND_BUFFER_POOL` was removed. Use `ASCEND_ENABLE_USE_FABRIC_MEM=1` or `HCCL_INTRA_ROCE_ENABLE=1` according to the hardware and deployment path. [#13834](https://github.com/vllm-project/vllm-ascend/pull/13834)†
@@ -606,7 +606,7 @@ We're excited to announce the release of v0.20.2rc1 for vLLM Ascend. This is the
 
 ### Breaking Changes and Migration Notes
 
-- Migrated a set of runtime options from environment variables to `AscendConfig`, including the FC1/FlashComm1 switch from `VLLM_ASCEND_ENABLE_FLASHCOMM1` to `additional_config.enable_flashcomm1`. Please review configuration code and deployment manifests when upgrading. [#9064](https://github.com/vllm-project/vllm-ascend/pull/9064)
+- Migrated a set of runtime options from environment variables to `AscendConfig`, including the FC1/FlashComm1 switch (`additional_config.enable_flashcomm1`). Please review configuration code and deployment manifests when upgrading. [#9064](https://github.com/vllm-project/vllm-ascend/pull/9064)
 - Disabled SwiGLU clamp by default, which may slightly change behavior for workloads that previously relied on the old default. [#9438](https://github.com/vllm-project/vllm-ascend/pull/9438)
 
 ### Documentation
@@ -1721,7 +1721,7 @@ This is the 1st release candidate of v0.10.2 for vLLM Ascend. Please follow the 
 - A new improvement for oproj in deepseek is added. Set `oproj_tensor_parallel_size` to enable this feature. [#2167](https://github.com/vllm-project/vllm-ascend/pull/2167)
 - Fix a bug that deepseek with torchair doesn't work as expect when `graph_batch_sizes` is set. [#2760](https://github.com/vllm-project/vllm-ascend/pull/2760)
 - Avoid duplicate generation of sin_cos_cache in rope when kv_seqlen > 4k. [#2744](https://github.com/vllm-project/vllm-ascend/pull/2744)
-- The performance of Qwen3 dense model is improved with flashcomm_v1. Set `VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE=1` and `VLLM_ASCEND_ENABLE_FLASHCOMM=1` to enable it. [#2779](https://github.com/vllm-project/vllm-ascend/issues/2779)
+- The performance of Qwen3 dense model is improved with flashcomm_v1. Enable it with `additional_config.enable_flashcomm1`, together with `VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE=1`. [#2779](https://github.com/vllm-project/vllm-ascend/issues/2779)
 - The performance of Qwen3 dense model is improved with prefetch feature. Set `VLLM_ASCEND_ENABLE_PREFETCH_MLP=1` to enable it. [#2816](https://github.com/vllm-project/vllm-ascend/pull/2816)
 - The performance of Qwen3 MoE model is improved with rope ops update. [#2571](https://github.com/vllm-project/vllm-ascend/pull/2571)
 - Fix the weight load error for RLHF case. [#2756](https://github.com/vllm-project/vllm-ascend/pull/2756)

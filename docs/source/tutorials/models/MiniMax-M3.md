@@ -1493,8 +1493,6 @@ FLASHCOMM1 and language-model-only mode should not be enabled at the same time f
 --language-model-only
 ```
 
-`VLLM_ASCEND_ENABLE_FLASHCOMM1=1` is kept for compatibility, but `additional_config.enable_flashcomm1` is preferred.
-
 ## 6 Thinking and Parser Configuration
 
 ### 6.1 Thinking Mode

@@ -53,23 +53,14 @@ Steps to follow to enable SP currently:
 vLLM Ascend enables SP MoE through the FlashComm switch. The switch is still
 required; SP MoE is not enabled from the parallel configuration alone.
 
-To enable SP MoE, set one of the following (the `additional_config` form is
-preferred):
+Enable SP MoE with `additional_config.enable_flashcomm1`:
 
 ```bash
-# Preferred. On vLLM Ascend, data-parallel-size may be 1.
+# On vLLM Ascend, data-parallel-size may be 1.
 # Upstream requires data-parallel-size > 1 for the same SP path.
 vllm serve <moe-model> \
   --data-parallel-size 1 \
   --tensor-parallel-size 2 \
   --enable-expert-parallel \
   --additional-config '{"enable_flashcomm1": true}'
-```
-
-```bash
-# Kept for compatibility. data-parallel-size may be 1 on vLLM Ascend.
-VLLM_ASCEND_ENABLE_FLASHCOMM1=1 vllm serve <moe-model> \
-  --data-parallel-size 1 \
-  --tensor-parallel-size 2 \
-  --enable-expert-parallel
 ```

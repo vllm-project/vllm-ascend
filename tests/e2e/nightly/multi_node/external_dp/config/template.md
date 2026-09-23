@@ -84,7 +84,6 @@ env_common: &env_common
   ASCEND_TRANSFER_TIMEOUT: "10000"
   HCCL_BUFFSIZE: "256"
   SERVER_PORT: "${PORT}"
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: "0"
 
 templates:
   - node_index: 0
@@ -123,6 +122,8 @@ templates:
             "tp_size": 1
           }
         }}'
+      - --additional-config
+      - '{"enable_flashcomm1": false}'
 
   - node_index: 1
     envs:
@@ -160,6 +161,8 @@ templates:
             "tp_size": 1
           }
         }}'
+      - --additional-config
+      - '{"enable_flashcomm1": false}'
 
 benchmarks:
   perf:

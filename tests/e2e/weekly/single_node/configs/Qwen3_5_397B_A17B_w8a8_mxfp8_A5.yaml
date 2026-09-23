@@ -9,7 +9,6 @@ _envs: &envs
   TASK_QUEUE_ENABLE: "1"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
 _server_cmd: &server_cmd
   - "--port"
   - "$SERVER_PORT"
@@ -42,6 +41,8 @@ _server_cmd: &server_cmd
   - '{"method":"qwen3_5_mtp","num_speculative_tokens": 3, "enforce_eager":"true"}'
   - "--compilation-config"
   - '{"cudagraph_capture_sizes":[1,4,8,16,32,64],"cudagraph_mode":"FULL_DECODE_ONLY"}'
+  - "--additional-config"
+  - '{"enable_flashcomm1": true}'
 _benchmarks_per1: &benchmarks_per
   perf:
     case_type: performance

@@ -618,7 +618,7 @@ class AscendConfig:
         flashcomm_explicitly_enabled = validate_additional_config_bool(
             (vc.additional_config or {}).get("enable_flashcomm1", False),
             "additional_config.enable_flashcomm1",
-        ) or os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0").strip().lower() in ("1", "true")
+        )
         # DSA-CP depends on FlashComm: auto-enable FlashComm when DSA-CP is on
         # so users only need `enable_dsa_cp=true` in additional_config.
         if self.enable_dsa_cp and not flashcomm_explicitly_enabled:

@@ -61,7 +61,6 @@ templates:
   - node_index: 0
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
       HCCL_BUFFSIZE: "400"
     server_cmd_template:
       - --host
@@ -92,7 +91,7 @@ templates:
       - --attention_config.indexer_kv_dtype
       - "int8"
       - --additional-config
-      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_dsa_cp":true,"enable_fused_mc2":1}'
+      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_dsa_cp":true,"enable_fused_mc2":1, "enable_flashcomm1": true}'
       - --max-num-batched-tokens
       - "8192"
       - --trust-remote-code
@@ -128,7 +127,6 @@ templates:
   - node_index: 1
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
       HCCL_BUFFSIZE: "400"
     server_cmd_template:
       - --host
@@ -159,7 +157,7 @@ templates:
       - --attention_config.indexer_kv_dtype
       - "int8"
       - --additional-config
-      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_dsa_cp":true,"enable_fused_mc2":1}'
+      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_dsa_cp":true,"enable_fused_mc2":1, "enable_flashcomm1": true}'
       - --max-num-batched-tokens
       - "8192"
       - --trust-remote-code
