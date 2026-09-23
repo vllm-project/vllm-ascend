@@ -157,6 +157,9 @@ class EplbUpdator:
     def warm_up_eplb(self):
         logger.info("[eplb/updator] Starting EPLB warm-up, rank=%s, world_size=%s", self.rank_id, self.world_size)
         self.shared_dict["expert_maps"] = self.adaptor.get_global_expert_map()
+        # The worker needs the physical -> logical mapping to build
+        # logical-length log2phy maps from physical-length expert maps.
+        self.shared_dict["phys_to_logical"] = self.adaptor.phys_to_logical
         self.compute_and_set_moe_load()
 
         src_tensor = torch.empty((1,), device=self.device)

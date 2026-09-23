@@ -317,6 +317,18 @@ def use_multistage_eplb_load(dynamic_eplb: bool, policy_type: int, collection_in
     return dynamic_eplb and policy_type == 3 and collection_interval > 1
 
 
+def compute_local_phys_expert_ids(ascend_expert_map: torch.Tensor) -> torch.Tensor:
+    """Global physical expert ID held by each local slot.
+
+    ``ascend_expert_map`` maps global physical expert ID -> local slot (-1
+    when this rank does not own the expert). The result has one entry per
+    local slot, ordered by slot, and is used to gather per-slot token counts
+    out of the dispatcher's global per-expert histogram.
+    """
+    sorted_phys = torch.argsort(ascend_expert_map, stable=True)
+    return sorted_phys[ascend_expert_map[sorted_phys] >= 0].to(torch.int64)
+
+
 def make_eplb_placement_config(eplb_config, num_redundant_experts: int) -> SimpleNamespace:
     """Build the minimal config view consumed by init_eplb_config."""
     return SimpleNamespace(
@@ -409,6 +421,8 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         self.ascend_expert_map: torch.Tensor | None = None
         self.log2phy: torch.Tensor | None = None
         self.global_redundant_expert_num: int = 0
+        self.phys_to_logical: torch.Tensor | None = None
+        self.local_phys_expert_ids: torch.Tensor | None = None
         self.ascend_pertoken_scale: torch.Tensor | None = None
         self.ascend_mc2_mask: torch.Tensor | None = None
         if not self._use_v2_model_runner:
@@ -486,6 +500,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             self.ascend_expert_map,
             self.log2phy,
             self.global_redundant_expert_num,
+            self.phys_to_logical,
         ) = init_eplb_config(
             placement_eplb_config,
             AscendRoutedExperts.moe_counter,
@@ -506,10 +521,15 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
                 f"allocated={local_num_experts}, placement={expected_local_num_experts}. "
                 "Ensure vLLM and Ascend use the same redundant expert count."
             )
+        if self.ascend_expert_map is not None:
+            # Map each local slot to its global physical expert ID so the load
+            # collector can gather per-slot counts from the dispatcher's
+            # global per-expert histogram.
+            self.local_phys_expert_ids = compute_local_phys_expert_ids(self.ascend_expert_map).npu()
         # Keep ExpertMapManager's physical-expert map until checkpoint loading
         # finishes. The upstream loader uses it to place both original and
         # redundant physical experts. Ascend execution uses ascend_expert_map,
-        # which maps logical expert IDs to the local physical slots.
+        # which maps global physical expert IDs to the local slots.
 
         self.dynamic_eplb = eplb_config.dynamic_eplb and (self.log2phy is not None)
         self.multi_stage = False
@@ -535,6 +555,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         # Register Ascend runtime EPLB NPU state as named buffers for wake restore.
         # ascend_expert_map stays a plain CPU attribute and does not need promotion.
         self._promote_attr_to_buffer("log2phy")
+        self._promote_attr_to_buffer("local_phys_expert_ids")
         if self.dynamic_eplb:
             self._promote_attr_to_buffer("moe_load")
             if self.multi_stage:
@@ -564,7 +585,13 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
 
     @property
     def ascend_expert_map(self) -> torch.Tensor | None:
-        """Return the global-to-local map used by Ascend MoE execution."""
+        """Return the global-to-local map used by Ascend MoE execution.
+
+        MRv1: CPU tensor of length ``num_experts`` (logical + redundant
+        physical experts). Entry ``p`` is the local slot of global physical
+        expert ``p`` on this rank, or -1 when it is not owned here. MRv2:
+        upstream ``expert_map``, which is already physical-length.
+        """
         if getattr(self, "_use_v2_model_runner", False):
             return self.expert_map
         return getattr(self, "_ascend_expert_map", None)
@@ -572,6 +599,14 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
     @ascend_expert_map.setter
     def ascend_expert_map(self, expert_map: torch.Tensor | None) -> None:
         object.__setattr__(self, "_ascend_expert_map", expert_map)
+
+    def update_ascend_eplb_maps(self, new_ascend_expert_map: torch.Tensor) -> None:
+        """Refresh the runtime maps after a dynamic EPLB rebalance."""
+        self.ascend_expert_map = new_ascend_expert_map.to(self._ascend_expert_map.dtype)
+        self.global_expert_map[self.ep_rank].copy_(new_ascend_expert_map)
+        self.local_phys_expert_ids.copy_(
+            compute_local_phys_expert_ids(new_ascend_expert_map).to(self.local_phys_expert_ids.device)
+        )
 
     def update_expert_map(self, new_expert_map: torch.Tensor | None = None) -> None:
         """Update the upstream map or preserve the legacy Ascend update API."""
@@ -728,6 +763,10 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
                 if group_list_type == 1
                 else torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
             )
+            if local_load.numel() != self.moe_load.numel():
+                # The AllGather dispatcher reports token counts per global
+                # physical expert; gather the counts of this rank's local slots.
+                local_load = local_load[self.local_phys_expert_ids]
             assert self.moe_load is not None
             if self.multi_stage:
                 assert self.load_counter is not None and self.num_iter is not None
