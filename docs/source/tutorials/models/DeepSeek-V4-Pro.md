@@ -43,7 +43,7 @@ Select an image based on your machine type and start the docker image on your no
 
     ```bash
 
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
+    export IMAGE=quay.io/ascend/vllm-ascend:v0.26.0rc2-a3
     docker run --rm \
         --name vllm-ascend \
         --shm-size=512g \
@@ -85,7 +85,7 @@ Select an image based on your machine type and start the docker image on your no
 
     ```bash
 
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+    export IMAGE=quay.io/ascend/vllm-ascend:v0.26.0rc2
     docker run --rm \
         --name vllm-ascend \
         --shm-size=512g \
