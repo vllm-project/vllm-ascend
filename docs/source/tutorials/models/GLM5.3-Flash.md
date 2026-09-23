@@ -348,6 +348,10 @@ Only the key parameters specific to this model/scenario are described below. `ma
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[4,8,16,32,64,96,128]}'
     ```
 
+=== "950DT Products (A5)"
+
+    Startup configuration pending validation.
+
 ##### Key Parameter Descriptions
 
 **Multi-node network and data parallel configuration:**
@@ -363,6 +367,8 @@ Only the key parameters specific to this model/scenario are described below. `ma
 
 Prefill-Decode disaggregation scenarios have not yet tested for `GLM-5.3-Flash`. If you want to deploy prefill-decode disaggregation, you can refer to scripts in [GLM-5.2 Prefill-Decode Disaggregation](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html#513-prefill-decode-disaggregation).
 
+**A5 (950DT Products):** Startup configuration pending validation.
+
 ### 5.2 1M Context Configuration
 
 The 1M context scenarios have not yet tested for `GLM-5.3-Flash`. The subsections below mirror the [GLM-5.2 1M context layout](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html#52-1m-context-configuration); refer to the linked GLM-5.2 scripts.
@@ -371,13 +377,19 @@ The 1M context scenarios have not yet tested for `GLM-5.3-Flash`. The subsection
 
 Not yet tested for `GLM-5.3-Flash`. Refer to [GLM-5.2 Single-Node 1M Deployment](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html#521-single-node-1m-deployment).
 
+**A5 (950DT Products):** Startup configuration pending validation.
+
 #### 5.2.2 Dual-Node Co-Located 1M Deployment
 
 Not yet tested for `GLM-5.3-Flash`. Refer to [GLM-5.2 Dual-Node Co-Located 1M Deployment](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html#522-dual-node-co-located-1m-deployment).
 
+**A5 (950DT Products):** Startup configuration pending validation.
+
 #### 5.2.3 PD Disaggregation 1M Deployment
 
 Not yet tested for `GLM-5.3-Flash`. Refer to [GLM-5.2 PD Disaggregation 1M Deployment](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html#523-pd-disaggregation-1m-deployment).
+
+**A5 (950DT Products):** Startup configuration pending validation.
 
 ## 6 Functional Verification
 

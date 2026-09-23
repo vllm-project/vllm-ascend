@@ -408,6 +408,15 @@ msgstr "- **问：GLM-5.3-Flash 是否支持 `enable_thinking: false`？**"
 msgid "A: No, GLM-5.3-Flash does not support `enable_thinking`."
 msgstr "答：不支持，GLM-5.3-Flash 不支持 `enable_thinking`。"
 
+msgid "=== \"950DT Products (A5)\""
+msgstr "=== \"950DT 产品（A5）\""
+
+msgid "Startup configuration pending validation."
+msgstr "启动配置待验证。"
+
+msgid "**A5 (950DT Products):** Startup configuration pending validation."
+msgstr "**A5（950DT 产品）：**启动配置待验证。"
+
 msgid ""
 "- The current version is only for early experience, and performance optimization is still in progress.\n"
 "- The service reliability has not been fully validated, and it is not recommended for direct use in production environments."

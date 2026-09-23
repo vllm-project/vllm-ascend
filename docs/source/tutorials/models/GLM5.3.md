@@ -30,6 +30,8 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 - You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly.
 
+An A5 (950DT Products) weight and deployment configuration will be documented after validation.
+
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
 >**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
@@ -43,6 +45,10 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 ### 4.1 Docker Image Installation
 
 - You can use our official docker image to run GLM-5.3 directly.
+
+=== "950DT Products (A5)"
+
+    Startup configuration pending validation.
 
 === "A3 series"
 
@@ -145,6 +151,8 @@ The deployment scenarios validated for this release are organized by context win
 #### 5.1.1 Single-node Deployment
 
 The single-node scenarios have not yet tested for `GLM-5.3`. If you want to deploy on a single node, please refer to the scripts in [GLM-5.2 Single-node Deployment](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html#511-single-node-deployment).
+
+**A5 (950DT Products):** Startup configuration pending validation.
 
 #### 5.1.2 Multi-node Deployment
 
@@ -396,6 +404,10 @@ Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md
         --async-scheduling
     ```
 
+=== "950DT Products (A5)"
+
+    Startup configuration pending validation.
+
 Key Parameter Descriptions:
 
 Only the key parameters specific to this model/scenario are described below. max-model-len and max-num-seqs need to be set according to the actual usage scenario.
@@ -423,6 +435,8 @@ This scenario enables `additional_config.enable_fused_mc2=1` (fused `dispatch_ff
 
 Prefill-Decode disaggregation scenarios have not yet tested for `GLM-5.3`. If you want to deploy prefill-decode disaggregation, you can refer to scripts in [GLM-5.2 Prefill-Decode Disaggregation](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html#513-prefill-decode-disaggregation).
 
+**A5 (950DT Products):** Startup configuration pending validation.
+
 ### 5.2 1M Context Configuration
 
 The 1M context scenarios have not yet tested for `GLM-5.3`. The subsections below mirror the [GLM-5.2 1M context layout](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html#52-1m-context-configuration); refer to the linked GLM-5.2 scripts.
@@ -431,13 +445,19 @@ The 1M context scenarios have not yet tested for `GLM-5.3`. The subsections belo
 
 Not yet tested for `GLM-5.3`. Refer to [GLM-5.2 Single-Node 1M Deployment](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html#521-single-node-1m-deployment).
 
+**A5 (950DT Products):** Startup configuration pending validation.
+
 #### 5.2.2 Dual-Node Co-Located 1M Deployment
 
 Not yet tested for `GLM-5.3`. Refer to [GLM-5.2 Dual-Node Co-Located 1M Deployment](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html#522-dual-node-co-located-1m-deployment).
 
+**A5 (950DT Products):** Startup configuration pending validation.
+
 #### 5.2.3 PD Disaggregation 1M Deployment
 
 Not yet tested for `GLM-5.3`. Refer to [GLM-5.2 PD Disaggregation 1M Deployment](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html#523-pd-disaggregation-1m-deployment).
+
+**A5 (950DT Products):** Startup configuration pending validation.
 
 ## 6 Functional Verification
 

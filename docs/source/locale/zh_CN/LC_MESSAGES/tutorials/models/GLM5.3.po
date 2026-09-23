@@ -536,3 +536,15 @@ msgstr "- **问：GLM-5.3 是否支持 `enable_thinking: false`？**"
 
 msgid "A: No, GLM-5.3 does not support `enable_thinking`."
 msgstr "答：不支持，GLM-5.3 不支持 `enable_thinking`。"
+
+msgid "An A5 (950DT Products) weight and deployment configuration will be documented after validation."
+msgstr "A5（950DT 产品）的权重和部署配置将在验证后补充。"
+
+msgid "=== \"950DT Products (A5)\""
+msgstr "=== \"950DT 产品（A5）\""
+
+msgid "Startup configuration pending validation."
+msgstr "启动配置待验证。"
+
+msgid "**A5 (950DT Products):** Startup configuration pending validation."
+msgstr "**A5（950DT 产品）：**启动配置待验证。"
