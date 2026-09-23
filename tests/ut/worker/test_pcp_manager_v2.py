@@ -815,29 +815,34 @@ def test_main2main_v2_overrides_accept_new_upstream_keywords() -> None:
 
 def test_main_pcp_capture_does_not_repartition_local_dummy_batch() -> None:
     """Follow the PCP-local capture contract introduced by vLLM #53515/#53869."""
-    input_batch = object()
-    input_buffers = object()
+    input_batch = MagicMock()
+    input_buffers = MagicMock()
     input_block_tables = object()
     slot_mappings = torch.arange(8)
     slot_mappings_by_layer = object()
     attn_metadata = object()
-    block_tables = MagicMock()
+    block_tables = MagicMock(cp_size=1, cp_rank=0, cp_interleave=1)
     pcp_manager = MagicMock()
     pcp_manager.get_dummy_block_tables.return_value = input_block_tables
     pcp_manager.get_dummy_slot_mappings.return_value = slot_mappings
     model_state = MagicMock()
     model_state.prepare_attn.return_value = attn_metadata
     kv_cache_config = object()
+    dcp_local_seq_lens = object()
 
     with (
         patch(
-            "vllm_ascend.worker.v2.aclgraph_utils.cudagraph_utils.InputBatch.make_dummy",
+            "vllm_ascend.worker.v2.aclgraph_utils.AscendInputBatch.make_dummy",
             return_value=input_batch,
         ) as make_dummy,
         patch(
             "vllm_ascend.worker.v2.aclgraph_utils.cudagraph_utils.build_slot_mappings_by_layer",
             return_value=slot_mappings_by_layer,
         ),
+        patch(
+            "vllm_ascend.worker.v2.aclgraph_utils.maybe_prepare_dcp_local_seq_lens",
+            return_value=dcp_local_seq_lens,
+        ) as prepare_dcp_local_seq_lens,
     ):
         state = _prepare_pcp_inputs_to_capture(
             num_reqs=2,
@@ -858,6 +863,16 @@ def test_main_pcp_capture_does_not_repartition_local_dummy_batch() -> None:
     block_tables.get_dummy_block_tables.assert_not_called()
     pcp_manager.get_dummy_block_tables.assert_called_once_with(2)
     pcp_manager.get_dummy_slot_mappings.assert_called_once_with(8)
+    prepare_dcp_local_seq_lens.assert_called_once_with(
+        input_buffers.dcp_local_seq_lens,
+        input_batch.seq_lens,
+        input_batch.num_reqs,
+        1,
+        0,
+        1,
+        num_reqs_padded=input_batch.num_reqs_after_padding,
+    )
+    assert input_batch.dcp_local_seq_lens is dcp_local_seq_lens
     model_state.prepare_attn.assert_called_once_with(
         input_batch,
         CUDAGraphMode.NONE,
