@@ -749,13 +749,12 @@ endforeach ()
 install(DIRECTORY ${OPS_ADV_UTILS_KERNEL_INC}/
         DESTINATION ${IMPL_INSTALL_DIR}/ascendc/common
 )
-install(FILES ${VLLM_ASCEND_CANN_COMPAT_HEADER}
-        DESTINATION ${IMPL_INSTALL_DIR}/ascendc/common
-)
-# FlashAttn's shared headers use relative includes outside ascendc/.
-install(DIRECTORY ${OPS_TRANSFORMER_DIR}/attention/a5_mla_common/op_kernel
-        DESTINATION ${IMPL_INSTALL_DIR}/a5_mla_common
-)
+if ("ascend950" IN_LIST ASCEND_COMPUTE_UNIT)
+    # FlashAttn's shared headers use relative includes outside ascendc/.
+    install(DIRECTORY ${OPS_TRANSFORMER_DIR}/attention/a5_mla_common/op_kernel
+            DESTINATION ${IMPL_INSTALL_DIR}/a5_mla_common
+    )
+endif ()
 
 # install(DIRECTORY ${OPS_ADV_DIR}/mc2/common/inc/kernel
 #         DESTINATION ${IMPL_INSTALL_DIR}/ascendc/common/inc
