@@ -159,7 +159,12 @@ class EplbUpdator:
         self.shared_dict["expert_maps"] = self.adaptor.get_global_expert_map()
         # The worker needs the physical -> logical mapping to build
         # logical-length log2phy maps from physical-length expert maps.
-        self.shared_dict["phys_to_logical"] = self.adaptor.phys_to_logical
+        # Store a CPU copy: the worker reads it through the Manager proxy, and
+        # torch_npu refuses to re-share NPU tensors that the manager server
+        # received from another process ("Consider cloning before sending").
+        # All values in the shared_dict must be CPU tensors.
+        phys_to_logical = self.adaptor.phys_to_logical
+        self.shared_dict["phys_to_logical"] = phys_to_logical.cpu() if phys_to_logical is not None else None
         self.compute_and_set_moe_load()
 
         src_tensor = torch.empty((1,), device=self.device)
