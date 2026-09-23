@@ -112,39 +112,57 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
             tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
         ] = {}
 
+    def _allocate_metadata_buffers(
+        self,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        return (
+            torch.empty(
+                self._max_num_batched_tokens,
+                dtype=torch.int64,
+                device=self.device,
+            ),
+            torch.empty(
+                self._max_num_metadata_reqs,
+                dtype=torch.int32,
+                device=self.device,
+            ),
+            torch.empty(
+                self._max_num_metadata_reqs,
+                dtype=torch.int32,
+                device=self.device,
+            ),
+            torch.empty(
+                self._max_num_metadata_reqs,
+                dtype=torch.int32,
+                device=self.device,
+            ),
+            torch.empty(
+                self._max_num_batched_tokens,
+                dtype=torch.int64,
+                device=self.device,
+            ),
+        )
+
+    def init_metadata_buffers(self, slot_mapping: torch.Tensor) -> None:
+        """Pre-allocate the derived-buffer set for a persistent slot-mapping tensor.
+
+        Owners of persistent slot-mapping storage register it during
+        initialization, so ``build`` does not allocate on the hot path and every
+        address an ACL graph may capture already exists before capture.
+        """
+        self._metadata_buffers.setdefault(slot_mapping.data_ptr(), self._allocate_metadata_buffers())
+
     def _get_metadata_buffers(
         self, common_attn_metadata: CommonAttentionMetadata
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         key = common_attn_metadata.slot_mapping.data_ptr()
         buffers = self._metadata_buffers.get(key)
         if buffers is None:
-            buffers = (
-                torch.empty(
-                    self._max_num_batched_tokens,
-                    dtype=torch.int64,
-                    device=self.device,
-                ),
-                torch.empty(
-                    self._max_num_metadata_reqs,
-                    dtype=torch.int32,
-                    device=self.device,
-                ),
-                torch.empty(
-                    self._max_num_metadata_reqs,
-                    dtype=torch.int32,
-                    device=self.device,
-                ),
-                torch.empty(
-                    self._max_num_metadata_reqs,
-                    dtype=torch.int32,
-                    device=self.device,
-                ),
-                torch.empty(
-                    self._max_num_batched_tokens,
-                    dtype=torch.int64,
-                    device=self.device,
-                ),
-            )
+            # Reached only by callers that cannot pre-register: the target
+            # model's persistent BlockTable slot mapping. The draft path
+            # registers every (group, draft-step) buffer via
+            # ``init_metadata_buffers`` before capture.
+            buffers = self._allocate_metadata_buffers()
             self._metadata_buffers[key] = buffers
         return buffers
 

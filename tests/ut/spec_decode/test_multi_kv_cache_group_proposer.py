@@ -115,6 +115,9 @@ def test_initialize_attn_backend_splits_glm_physical_cache_groups():
     proposer._draft_attn_layer_names = {"draft.attn", "draft.indexer.k_cache"}
     proposer.vllm_config = MagicMock()
     proposer.device = torch.device("cpu")
+    proposer.num_speculative_tokens = 2
+    proposer.slot_mapping_group = [torch.zeros(4, dtype=torch.int32) for _ in range(2)]
+    proposer.runner = SimpleNamespace(pin_memory=False)
 
     main_backend = MagicMock()
     main_backend.full_cls_name.return_value = "main.backend"
@@ -155,6 +158,8 @@ def test_secondary_group_recomputes_slot_mapping_from_its_block_table():
     proposer._uses_multi_group_kv_cache = True
     proposer.kv_cache_gid = 0
     proposer._draft_block_table_width = MagicMock(return_value=2)
+    # Pre-created in initialize_attn_backend; the hook no longer allocates.
+    proposer._multi_group_slot_mapping_buffers = {(1, 0): torch.zeros(4, dtype=torch.int32)}
 
     secondary_block_table = MagicMock()
     secondary_block_table.get_device_tensor.return_value = torch.arange(8, dtype=torch.int32).reshape(2, 4)
@@ -254,13 +259,10 @@ def test_cache_only_next_step_uses_group_metadata_without_advancing_state():
     }
 
 
-@pytest.mark.parametrize(
-    ("use_compress", "draft_index", "builder_method"),
-    [(False, 0, "build_for_graph_capture"), (True, 1, "build_for_drafting")],
-)
-def test_multi_group_graph_capture_uses_per_group_views(use_compress, draft_index, builder_method):
+@pytest.mark.parametrize("draft_index", [0, 1, 2])
+def test_multi_group_graph_capture_uses_per_group_views(draft_index):
     proposer = AscendMultiKVCacheGroupMTPProposer.__new__(AscendMultiKVCacheGroupMTPProposer)
-    proposer.use_compress = use_compress
+    proposer.use_compress = False
     common = SimpleNamespace(num_input_tokens=8)
     group_views = [object(), object()]
     builders = [MagicMock(), MagicMock()]
@@ -275,7 +277,7 @@ def test_multi_group_graph_capture_uses_per_group_views(use_compress, draft_inde
     proposer._common_attn_metadata_for_draft_group = MagicMock(side_effect=group_views)
     expected = [object(), object()]
     for builder, metadata in zip(builders, expected):
-        getattr(builder, builder_method).return_value = metadata
+        builder.build_for_graph_capture.return_value = metadata
 
     result = proposer._build_multi_group_graph_capture_metadata(common, draft_index)
 
@@ -288,17 +290,17 @@ def test_multi_group_graph_capture_uses_per_group_views(use_compress, draft_inde
         (common, groups[1], 8, draft_index),
     ]
     for builder, group_view in zip(builders, group_views):
-        if builder_method == "build_for_graph_capture":
-            builder.build_for_graph_capture.assert_called_once_with(
-                group_view,
-                multi_group_proposer.AscendAttentionState.SpecDecoding,
-            )
-        else:
-            builder.build_for_drafting.assert_called_once_with(
-                group_view,
-                draft_index,
-                common_ratio_to_sas_metadata={},
-            )
+        builder.build_for_graph_capture.assert_called_once_with(
+            group_view,
+            multi_group_proposer.AscendAttentionState.DecodeOnly,
+        )
+
+
+def test_multi_group_graph_capture_rejects_compressed_attention():
+    proposer = AscendMultiKVCacheGroupMTPProposer.__new__(AscendMultiKVCacheGroupMTPProposer)
+    proposer.use_compress = True
+    with pytest.raises(AssertionError):
+        proposer._build_multi_group_graph_capture_metadata(SimpleNamespace(num_input_tokens=8), 0)
 
 
 def test_secondary_tail_slots_cover_prefill_and_keep_each_step():
@@ -306,6 +308,10 @@ def test_secondary_tail_slots_cover_prefill_and_keep_each_step():
     proposer._uses_multi_group_kv_cache = True
     proposer.kv_cache_gid = 0
     proposer._draft_block_table_width = MagicMock(return_value=1)
+    proposer._multi_group_slot_mapping_buffers = {
+        (1, 0): torch.zeros(8, dtype=torch.int32),
+        (1, 1): torch.zeros(8, dtype=torch.int32),
+    }
     slots = torch.full((8,), -1, dtype=torch.int32)
     table = torch.tensor([[2], [7]], dtype=torch.int32)
     block_table = MagicMock()

@@ -40,13 +40,9 @@ class AscendMultiKVCacheGroupMTPProposer(AscendEagleProposer):
     """MTP proposer for draft layers split across physical KV cache groups.
 
     ``glm5_next_mtp`` drafts (the only family this proposer is instantiated
-    for) support graph-mode drafting, so the family-wide forced-eager gate in
-    the base class is skipped via ``_glm_draft_graph_supported``. Keeping the
-    draft eager remains available through the speculative-config
-    ``enforce_eager`` flag, which is honored before that gate.
+    for) support graph-mode drafting. Keeping the draft eager remains available
+    through the speculative-config ``enforce_eager`` flag.
     """
-
-    _glm_draft_graph_supported = True
 
     def _get_draft_layer_kv_cache_groups(self, kv_cache_config: KVCacheConfig) -> dict[str, int]:
         """Helper: map each draft attention layer to its physical group id.
@@ -135,6 +131,31 @@ class AscendMultiKVCacheGroupMTPProposer(AscendEagleProposer):
         else:
             self.block_size = primary_group.get_metadata_builder().kv_cache_spec.block_size
 
+        # Pre-create every per-(group, draft-step) slot-mapping buffer here and
+        # hand it to the cache-only builders, instead of allocating it lazily on
+        # the first metadata build. Two reasons: the runtime hooks then never
+        # allocate, and every address an ACL graph may capture already exists
+        # before capture (replay reads capture-time addresses).
+        slot_mapping_lens = self.slot_mapping_group[0].shape[0]
+        self._multi_group_slot_mapping_buffers: dict[tuple[int, int], torch.Tensor] = {}
+        for attn_group in self.draft_attn_groups:
+            gid = attn_group.kv_cache_group_id
+            for draft_index in range(self.num_speculative_tokens):
+                if gid == self.kv_cache_gid:
+                    # The primary group reuses the proposer's per-step buffers.
+                    group_slot_mapping = self.slot_mapping_group[draft_index]
+                else:
+                    group_slot_mapping = torch.zeros(
+                        slot_mapping_lens,
+                        dtype=torch.int32,
+                        device=self.device,
+                        pin_memory=self.runner.pin_memory,
+                    )
+                    self._multi_group_slot_mapping_buffers[(gid, draft_index)] = group_slot_mapping
+                for builder in attn_group.metadata_builders:
+                    if hasattr(builder, "init_metadata_buffers"):
+                        builder.init_metadata_buffers(group_slot_mapping)
+
         logger.info(
             "Initialized GLM5-Next drafting attention groups for KV cache group ids %s; primary group id is %d",
             sorted(draft_group_ids),
@@ -194,18 +215,11 @@ class AscendMultiKVCacheGroupMTPProposer(AscendEagleProposer):
                 common_attn_metadata.positions[:num_actual_tokens],
             )
             block_table_tensor = block_table.get_device_tensor()[:num_reqs]
-            buffers = getattr(self, "_multi_group_slot_mapping_buffers", None)
-            if buffers is None:
-                buffers = {}
-                self._multi_group_slot_mapping_buffers = buffers
-            key = (gid, draft_index)
-            group_slot_mapping = buffers.get(key)
-            if group_slot_mapping is None or group_slot_mapping.shape[0] < num_input_tokens:
-                if hasattr(self, "slot_mapping_group"):
-                    group_slot_mapping = torch.empty_like(self.slot_mapping_group[draft_index])
-                else:
-                    group_slot_mapping = torch.empty_like(block_table.slot_mapping.gpu[:num_input_tokens])
-                buffers[key] = group_slot_mapping
+            # Pre-created in ``initialize_attn_backend``; never allocate here so
+            # the address an ACL graph captured stays valid across replays.
+            group_slot_mapping = self._multi_group_slot_mapping_buffers.get((gid, draft_index))
+            assert group_slot_mapping is not None
+            assert group_slot_mapping.shape[0] >= num_input_tokens
             source_slot_mapping = block_table.slot_mapping.gpu[:num_input_tokens]
             group_slot_mapping[:num_input_tokens].copy_(source_slot_mapping)
             group_slot_mapping[num_actual_tokens:].fill_(PADDING_SLOT_ID)
@@ -217,30 +231,22 @@ class AscendMultiKVCacheGroupMTPProposer(AscendEagleProposer):
         return group_metadata
 
     def _build_multi_group_graph_capture_metadata(self, common_attn_metadata, draft_index):
+        # ``glm5_next_mtp`` is the only family routed here and it never uses
+        # compressed attention, so every draft step takes the plain capture
+        # entrypoint.
+        assert not self.use_compress
         per_layer_attn_metadata: dict[str, Any] = {}
-        extra_attn_metadata_args: dict[str, Any] = {}
-        if self.use_compress:
-            extra_attn_metadata_args["common_ratio_to_sas_metadata"] = {}
         for attn_group in self.draft_attn_groups:
-            group_metadata = self._common_attn_metadata_for_draft_group(
+            group_common_metadata = self._common_attn_metadata_for_draft_group(
                 common_attn_metadata,
                 attn_group,
                 common_attn_metadata.num_input_tokens,
                 draft_index,
             )
-            builder = attn_group.get_metadata_builder()
-            if not self.use_compress or draft_index == 0:
-                attn_metadata = builder.build_for_graph_capture(
-                    group_metadata,
-                    AscendAttentionState.SpecDecoding,
-                    **extra_attn_metadata_args,
-                )
-            else:
-                attn_metadata = builder.build_for_drafting(
-                    group_metadata,
-                    draft_index,
-                    **extra_attn_metadata_args,
-                )
+            attn_metadata = attn_group.get_metadata_builder().build_for_graph_capture(
+                group_common_metadata,
+                AscendAttentionState.DecodeOnly,
+            )
             for layer_name in attn_group.layer_names:
                 per_layer_attn_metadata[layer_name] = attn_metadata
         return per_layer_attn_metadata
@@ -402,6 +408,10 @@ class AscendMultiKVCacheGroupMTPProposer(AscendEagleProposer):
                 draft_index,
                 **extra_attn_metadata_args,
             )
+            # The cache-only builder reuses its persistent buffers across draft
+            # steps in eager mode too — the same reuse ACL graph replay performs
+            # — so a step's tensors must be cloned before the next build
+            # overwrites them.
             if not getattr(self, "use_cuda_graph", False):
                 attn_metadata = self._copy_cache_only_draft_metadata(attn_metadata)
             for layer_name in attn_group.layer_names:
