@@ -2924,11 +2924,28 @@ class MooncakeConnectorWorker:
         # sliding-window group next to 1024-token full-attention groups), so the
         # scalar remote_block_size is only a fallback for legacy metadata.
         remote_sizes = meta.remote_block_sizes
-        remote_block_size = (
-            remote_sizes[kv_cache_group_id]
-            if remote_sizes and kv_cache_group_id < len(remote_sizes)
-            else (meta.remote_block_size or self.block_size)
+        group_remote_size = (
+            remote_sizes[kv_cache_group_id] if remote_sizes and kv_cache_group_id < len(remote_sizes) else None
         )
+        remote_block_size = meta.remote_block_size or self.block_size
+        if group_remote_size is not None:
+            if group_remote_size % kernel_size == 0:
+                remote_block_size = group_remote_size
+            else:
+                # A group may report a physical size that the local kernel
+                # granularity cannot tile (producer and consumer resolved
+                # different page sizes for it). Keep the historical scalar
+                # behavior instead of failing the transfer.
+                logger.warning(
+                    "[kv-layout] group %s (%s) reports physical block size %s, which does not tile the local "
+                    "kernel size %s (local_scale=%s, scalar=%s); falling back to the scalar",
+                    kv_cache_group_id,
+                    group_spec.get("kv_cache_spec_type"),
+                    group_remote_size,
+                    kernel_size,
+                    local_scale,
+                    remote_block_size,
+                )
         assert remote_block_size % kernel_size == 0, (
             f"remote_block_size({remote_block_size}) not divisible by kernel_size({kernel_size})"
         )
