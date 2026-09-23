@@ -54,8 +54,9 @@ def _apply_dsv4_rope(
     x: torch.Tensor,
     *,
     inverse: bool = False,
+    rope=None,
 ) -> torch.Tensor:
-    cos, sin = get_cos_and_sin_dsa(positions)
+    cos, sin = rope if rope is not None else get_cos_and_sin_dsa(positions)
     layer_name = rotary_emb.layername
     cos_t = cos[layer_name]
     sin_t = sin[layer_name]
@@ -178,6 +179,7 @@ class DeepseekV4DSparkModel(nn.Module):
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
         attn: type[nn.Module] | None = None,
+        rope=None,
     ) -> torch.Tensor:
         assert attn is not None
         kv = attn.kv_norm(attn.wkv(hidden_states))
@@ -186,7 +188,12 @@ class DeepseekV4DSparkModel(nn.Module):
         # can run in-place on the rope-segment view of kv; the previous
         # split -> rope -> cat -> contiguous round-trip was a redundant copy.
         k_pe = kv[:, attn.nope_head_dim :]
-        _apply_dsv4_rope(attn.rotary_emb, positions, k_pe.unsqueeze(1))
+        _apply_dsv4_rope(
+            attn.rotary_emb,
+            positions,
+            k_pe.unsqueeze(1),
+            rope=rope,
+        )
         return kv.view(-1, 1, attn.head_dim)
 
     def _store_standard_swa_kv(
@@ -222,12 +229,23 @@ class DeepseekV4DSparkModel(nn.Module):
     ) -> None:
         if context_states.numel() == 0 or context_slot_mapping is None:
             return
+        first_layer = next(iter(self.layers.values()))
+        first_rope_layer = first_layer.self_attn.rotary_emb.layername
+        rope = get_cos_and_sin_dsa(
+            context_positions,
+            layer_names=first_rope_layer,
+        )
         for layer_idx, layer in enumerate(self.layers.values()):
             layer_context_slot_mapping = None if context_slot_mapping is None else context_slot_mapping[layer_idx]
             if context_positions.numel() == 0:
                 return
             attn = layer.self_attn
-            shared_kv = self._project_shared_kv(context_states, context_positions, attn)
+            shared_kv = self._project_shared_kv(
+                context_states,
+                context_positions,
+                attn,
+                rope=rope,
+            )
             self._store_standard_swa_kv(shared_kv, layer_context_slot_mapping, attn)
 
     def forward(
