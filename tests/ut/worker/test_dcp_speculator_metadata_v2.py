@@ -89,8 +89,15 @@ def _speculator(monkeypatch, kind, architecture, width, padded, step, use_dcp=Tr
     def prepare_device(out, seq_lens, num_reqs, size, rank, interleave):
         out.zero_()
         out[:num_reqs].copy_(_local(seq_lens[:num_reqs].tolist(), rank, size, interleave))
+        return out
 
-    monkeypatch.setattr(upstream_speculator, "prepare_dcp_local_seq_lens", prepare_device)
+    # vLLM main returns the prepared buffer; 0.29 calls the in-place helper.
+    prepare_name = (
+        "maybe_prepare_dcp_local_seq_lens"
+        if hasattr(upstream_speculator, "maybe_prepare_dcp_local_seq_lens")
+        else "prepare_dcp_local_seq_lens"
+    )
+    monkeypatch.setattr(upstream_speculator, prepare_name, prepare_device)
     monkeypatch.setattr(attn_utils, "get_dcp_group", lambda: SimpleNamespace(rank_in_group=1))
     return spec, target.clone(), device_lengths.clone()
 

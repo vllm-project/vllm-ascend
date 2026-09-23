@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 import torch
+from vllm.config import AttentionConfig
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
@@ -27,7 +28,11 @@ from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpec
 def make_speculator():
     spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
     spec.attn_architecture = "MLA"
-    spec.vllm_config = SimpleNamespace()
+    spec.use_dcp = False
+    spec.requires_non_causal = True
+    spec.vllm_config = SimpleNamespace(
+        attention_config=AttentionConfig(), parallel_config=SimpleNamespace(decode_context_parallel_size=1)
+    )
     spec.draft_model_config = SimpleNamespace(
         hf_config=SimpleNamespace(target_layer_ids=[0, 2], target_hidden_size=4, num_target_layers=2)
     )
@@ -77,14 +82,18 @@ def test_shared_speculator_selects_draft_backend(monkeypatch, target_backend, dr
 
 def initialize_attention(monkeypatch, draft_backend, target_backend=AscendMLABackend):
     monkeypatch.setattr(draft_backend, "get_impl_cls", staticmethod(lambda: object))
-    monkeypatch.setattr(DSparkSpeculator, "__init__", lambda self, *args: None)
+    monkeypatch.setattr(DSparkSpeculator, "__init__", lambda self, config, device: setattr(self, "vllm_config", config))
     monkeypatch.setattr(shared, "prepare_replicated_pcp_config", lambda config: (config, False))
-    config = SimpleNamespace(speculative_config=SimpleNamespace(method="dspark", use_dspark=lambda: True))
+    config = SimpleNamespace(
+        attention_config=AttentionConfig(),
+        speculative_config=SimpleNamespace(method="dspark", use_dspark=lambda: True),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+    )
+    monkeypatch.setattr(AscendDSparkSpeculator, "attn_vllm_config", property(lambda self: config))
     spec = init_speculator(config, torch.device("cpu"))
     assert type(spec) is AscendDSparkSpeculator
     assert spec.attn_architecture is None
     spec.vllm_config = config
-    monkeypatch.setattr(AscendDSparkSpeculator, "attn_vllm_config", property(lambda self: config))
     spec.draft_attn_layer_names = {"draft"}
     spec._context_slot_mappings = torch.zeros(1, dtype=torch.int64)
     target_groups = [[SimpleNamespace(backend=target_backend)]]
@@ -258,7 +267,9 @@ def test_replay_metadata_preserves_architecture_behavior(monkeypatch, architectu
     captured: dict[str, Any] = {}
 
     @contextmanager
-    def factory(positions, pad, is_prefilling, *, attn_state=None):
+    def factory(positions, pad, is_prefilling, seq_lens_cpu=None, *, attn_state=None, parallel_config=None):
+        assert seq_lens_cpu is None
+        assert parallel_config is spec.vllm_config.parallel_config
         captured.update(pad=pad, is_prefilling=is_prefilling, attn_state=attn_state)
         yield
 
