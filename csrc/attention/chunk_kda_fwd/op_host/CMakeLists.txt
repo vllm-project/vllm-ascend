@@ -5,6 +5,8 @@
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # -----------------------------------------------------------------------------------------------------------
+include_guard(GLOBAL)
+
 set(CATLASS_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/third_party/catlass/include")
 get_filename_component(CATLASS_INCLUDE_DIR_ABS ${CATLASS_INCLUDE_DIR} ABSOLUTE)
 set(COMMON_KERNEL_UTILS_DIR "${CMAKE_SOURCE_DIR}/moe/common")
@@ -12,8 +14,34 @@ get_filename_component(COMMON_KERNEL_UTILS_DIR_ABS ${COMMON_KERNEL_UTILS_DIR} AB
 
 add_op_to_compiled_list()
 set(chunk_kda_fwd_depends
-    "attention/kda_gate_cumsum;moe/chunk_gated_delta_rule_fwd_h"
+    "attention/kda_gate_cumsum;moe/chunk_gated_delta_rule_fwd_h;attention/chunk_kda_fwd_prepare;moe/chunk_fwd_h;attention/chunk_kda_fwd_finalize"
     CACHE STRING "Kernel source dependencies for chunk_kda_fwd" FORCE)
+# Dependencies must contribute opdefs, tiling and op_api, not just kernel
+# sources. Otherwise a filtered build lacks the V2 operators' runtime config.
+set(_kda_fwd_build_all_ops FALSE)
+if (NOT DEFINED ASCEND_OP_NAME OR "${ASCEND_OP_NAME}" STREQUAL ""
+        OR "${ASCEND_OP_NAME}" STREQUAL "all" OR "${ASCEND_OP_NAME}" STREQUAL "ALL")
+    set(_kda_fwd_build_all_ops TRUE)
+endif()
+foreach(_kda_dep IN LISTS chunk_kda_fwd_depends)
+    get_filename_component(_kda_dep_name "${_kda_dep}" NAME)
+    if (_kda_fwd_build_all_ops OR _kda_dep_name IN_LIST ASCEND_OP_NAME)
+        continue()
+    endif()
+    set(_kda_dep_dir "${CMAKE_SOURCE_DIR}/${_kda_dep}")
+    if (NOT BUILD_OPEN_PROJECT AND
+            EXISTS "${TOP_DIR}/asl/ops/cann/ops/built-in/tbe/impl/ascendc/${_kda_dep_name}")
+        continue()
+    endif()
+    # Each dependency guards its registration globally: the moe scan may have
+    # already visited it. Do not rely on COMPILED_OPS, which survives reconfigure.
+    message(STATUS "[kda-deps] add dependency op ${_kda_dep_name} to this build")
+    add_subdirectory(
+        ${_kda_dep_dir}/op_host
+        ${CMAKE_BINARY_DIR}/chunk_kda_fwd_deps/${_kda_dep_name}
+    )
+endforeach()
+
 if (BUILD_OPEN_PROJECT)
     target_sources(op_host_aclnnExc PRIVATE
         chunk_kda_fwd_def.cpp

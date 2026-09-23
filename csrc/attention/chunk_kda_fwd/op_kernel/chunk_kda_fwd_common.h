@@ -1,7 +1,11 @@
 #pragma once
 
 #include "kernel_operator.h"
+#if __has_include("../../kda_gate_cumsum/op_kernel/kda_gate_cumsum_kernel.h")
 #include "../../kda_gate_cumsum/op_kernel/kda_gate_cumsum_kernel.h"
+#else
+#include "../kda_gate_cumsum/kda_gate_cumsum_kernel.h"
+#endif
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
 #include "arch35/chunk_kda_fwd_prepare.h"
 #include "arch35/chunk_kda_fwd_post_wu.h"
@@ -12,19 +16,26 @@
 #include "chunk_kda_fwd_finalize.h"
 #endif
 
-#if __has_include("../../../gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_h/op_kernel/chunk_gated_delta_rule_fwd_h_struct.h")
-#include "../../../gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_h/op_kernel/chunk_gated_delta_rule_fwd_h_struct.h"
+#if __has_include("../../../moe/chunk_gated_delta_rule_fwd_h/op_kernel/chunk_gated_delta_rule_fwd_h_struct.h")
+#include "../../../moe/chunk_gated_delta_rule_fwd_h/op_kernel/chunk_gated_delta_rule_fwd_h_struct.h"
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
-#include "../../../gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_h/op_kernel/arch35/gemm/kernel/gdn_fwd_h_kernel.hpp"
+#include "../../../moe/chunk_gated_delta_rule_fwd_h/op_kernel/arch35/gemm/kernel/gdn_fwd_h_kernel.hpp"
 #else
-#include "../../../gdn/chunk_gdn_fwd/chunk_gated_delta_rule_fwd_h/op_kernel/gemm/kernel/gdn_fwd_h_kernel.hpp"
+#include "../../../moe/chunk_gated_delta_rule_fwd_h/op_kernel/gemm/kernel/gdn_fwd_h_kernel.hpp"
 #endif
-#else
+#elif __has_include("../../chunk_gated_delta_rule_fwd_h/op_kernel/chunk_gated_delta_rule_fwd_h_struct.h")
 #include "../../chunk_gated_delta_rule_fwd_h/op_kernel/chunk_gated_delta_rule_fwd_h_struct.h"
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
 #include "../../chunk_gated_delta_rule_fwd_h/op_kernel/arch35/gemm/kernel/gdn_fwd_h_kernel.hpp"
 #else
 #include "../../chunk_gated_delta_rule_fwd_h/op_kernel/gemm/kernel/gdn_fwd_h_kernel.hpp"
+#endif
+#else
+#include "../chunk_gated_delta_rule_fwd_h/chunk_gated_delta_rule_fwd_h_struct.h"
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+#include "../chunk_gated_delta_rule_fwd_h/arch35/gemm/kernel/gdn_fwd_h_kernel.hpp"
+#else
+#include "../chunk_gated_delta_rule_fwd_h/gemm/kernel/gdn_fwd_h_kernel.hpp"
 #endif
 #endif
 

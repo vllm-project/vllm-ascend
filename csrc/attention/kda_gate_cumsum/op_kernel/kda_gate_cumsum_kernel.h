@@ -206,6 +206,8 @@ private:
         }
         auxMte2ToVEvent_ = pipe_->AllocEventID<HardEvent::MTE2_V>();
         scalarVToSEvent_ = pipe_->AllocEventID<HardEvent::V_S>();
+        scalarSToVEvent_ = pipe_->AllocEventID<HardEvent::S_V>();
+        scalarSToMte2Event_ = pipe_->AllocEventID<HardEvent::S_MTE2>();
         bulkMte3ToMte2Event_ = pipe_->AllocEventID<HardEvent::MTE3_MTE2>();
     }
 
@@ -219,6 +221,8 @@ private:
         }
         pipe_->ReleaseEventID<HardEvent::MTE2_V>(auxMte2ToVEvent_);
         pipe_->ReleaseEventID<HardEvent::V_S>(scalarVToSEvent_);
+        pipe_->ReleaseEventID<HardEvent::S_V>(scalarSToVEvent_);
+        pipe_->ReleaseEventID<HardEvent::S_MTE2>(scalarSToMte2Event_);
         pipe_->ReleaseEventID<HardEvent::MTE3_MTE2>(bulkMte3ToMte2Event_);
     }
 
@@ -329,7 +333,13 @@ private:
         SetFlag<HardEvent::V_S>(scalarVToSEvent_);
         WaitFlag<HardEvent::V_S>(scalarVToSEvent_);
         __ubuf__ float *ptr = (__ubuf__ float *)scalar.GetPhyAddr();
-        return ptr[0];
+        const float value = ptr[0];
+        // scalarBuf_ 是 ReadFloat/ExpScalar 共用的 32B 暂存区：读走标量后必须与
+        // 后续写同一地址的向量指令建立 S->V 依赖，否则下一次 Duplicate/Adds 可能在
+        // 标量读完成前就把暂存区改写掉（racecheck 报 UB WAR hazard）。
+        SetFlag<HardEvent::S_V>(scalarSToVEvent_);
+        WaitFlag<HardEvent::S_V>(scalarSToVEvent_);
+        return value;
     }
 
     __aicore__ inline int64_t ReadInt64(GlobalTensor<int64_t> &tensor, uint64_t offset)
@@ -343,7 +353,13 @@ private:
         SetFlag<HardEvent::V_S>(scalarVToSEvent_);
         WaitFlag<HardEvent::V_S>(scalarVToSEvent_);
         __ubuf__ int64_t *ptr = (__ubuf__ int64_t *)scalar.GetPhyAddr();
-        return ptr[0];
+        const int64_t value = ptr[0];
+        // scalarI64Buf_ 会被下一次 ReadInt64 的 DataCopyPad 复用：读走标量后必须
+        // 与后续写同一地址的 MTE2 建立 S->MTE2 依赖，否则下一次搬运可能在标量读
+        // 完成前就覆盖该暂存区（racecheck 报 UB WAR hazard）。
+        SetFlag<HardEvent::S_MTE2>(scalarSToMte2Event_);
+        WaitFlag<HardEvent::S_MTE2>(scalarSToMte2Event_);
+        return value;
     }
 
     __aicore__ inline float ExpScalar(float x)
@@ -356,7 +372,11 @@ private:
         SetFlag<HardEvent::V_S>(scalarVToSEvent_);
         WaitFlag<HardEvent::V_S>(scalarVToSEvent_);
         __ubuf__ float *ptr = (__ubuf__ float *)scalar.GetPhyAddr();
-        return ptr[0];
+        const float value = ptr[0];
+        // 与 ReadFloat 同理：ExpScalar 之后还会继续复用 scalarBuf_。
+        SetFlag<HardEvent::S_V>(scalarSToVEvent_);
+        WaitFlag<HardEvent::S_V>(scalarSToVEvent_);
+        return value;
     }
 
     __aicore__ inline void PrepareGate(uint64_t hv)
@@ -702,6 +722,8 @@ private:
     TEventID outputMte3ToVEvent_[GATE_PIPELINE_DEPTH];
     TEventID auxMte2ToVEvent_;
     TEventID scalarVToSEvent_;
+    TEventID scalarSToVEvent_;
+    TEventID scalarSToMte2Event_;
     TEventID bulkMte3ToMte2Event_;
     uint64_t batch_ = 0;
     uint64_t t_ = 0;

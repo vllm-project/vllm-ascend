@@ -126,6 +126,23 @@ For an installation outside Docker, follow the
 the selected main checkout and its verified vLLM commit instead of the older
 release versions in the generic examples.
 
+### 4.3 In-tree KDA Prefill Operator
+
+Kimi K3 prefill uses the AscendC `chunk_kda_fwd` operator built with this
+repository. BF16 inputs with 128-dimensional keys and values use the V2
+Prepare/FwdH/Finalize pipeline with Q/K normalization inside the operator.
+The supported FP16 and 64-dimensional fallback cases keep external Q/K
+normalization. Raw gate activation, packed sequence boundaries and the existing
+FP32 state cache update are preserved.
+
+Rebuild both the custom operator package and the PyTorch extension from this
+checkout, then restart workers. No additional `fla_npu` package or feature flag
+is needed. See the operator's
+[API and validation notes](https://github.com/flashserve/flash-linear-attention-npu/blob/ad8a7908e6ee57496500a02995b5416b99f66e32/fla/ops/ascendc/kda/chunk_kda_fwd/docs/api.md)
+for the underlying ACLNN contract. The local binding is
+`torch.ops._C_ascend.chunk_kda_fwd`; its source and migration notes are in
+`csrc/attention/chunk_kda_fwd/README.md`.
+
 ## 5 Online Service Deployment
 
 ### 5.1 Four-Node Online Deployment

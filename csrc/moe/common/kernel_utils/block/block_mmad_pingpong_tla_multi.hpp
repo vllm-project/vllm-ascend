@@ -242,6 +242,8 @@ public:
                     l0CEventList[i] = i;
                 }
             } else {
+                // UnitFlag replaces M/FIX synchronization; MTE1/M still needs a valid event ID.
+                l0CEventList[0] = 0;
                 l0CTensorList[0] = resource.l0CBuf.template GetBufferByByte<ElementAccumulator>(0);
             }
             if constexpr (HAS_BIAS) {

@@ -369,20 +369,21 @@ def test_fused_qkv_keeps_non_mxfp_quantization_in_linear_apply():
 
 
 @pytest.mark.parametrize("lower_bound", [None, -4.0])
-def test_prefill_fuses_raw_gate_and_updates_v_first_state(lower_bound):
+@pytest.mark.parametrize("dtype,head_dim", [(torch.bfloat16, 128), (torch.float16, 128), (torch.bfloat16, 64)])
+def test_prefill_fuses_raw_gate_and_updates_v_first_state(lower_bound, dtype, head_dim):
     attention = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
     nn.Module.__init__(attention)
-    attention.head_dim = 2
+    attention.head_dim = head_dim
     attention.gate_lower_bound = lower_bound
     attention.A_log = nn.Parameter(torch.randn(1))
-    attention.dt_bias = nn.Parameter(torch.randn(2))
+    attention.dt_bias = nn.Parameter(torch.randn(head_dim))
 
-    q = torch.randn(1, 2, 1, 2)
+    q = torch.randn(1, 2, 1, head_dim, dtype=dtype)
     k = torch.randn_like(q)
     v = torch.randn_like(q)
-    raw_gate = torch.randn_like(q)
+    raw_gate = torch.randn_like(q, dtype=torch.float32)
     beta = torch.randn(1, 2, 1)
-    recurrent_state = torch.randn(1, 1, 2, 2)
+    recurrent_state = torch.randn(1, 1, head_dim, head_dim)
     state_indices = torch.tensor([0], dtype=torch.int32)
     has_initial_state = torch.tensor([True])
     metadata = SimpleNamespace(
@@ -392,11 +393,11 @@ def test_prefill_fuses_raw_gate_and_updates_v_first_state(lower_bound):
         chunk_indices_chunk64_host=(0, 0),
     )
     output = torch.randn_like(v)
-    final_state = torch.randn(1, 1, 2, 2)
+    final_state = torch.randn(1, 1, head_dim, head_dim)
 
     with (
         patch("vllm_ascend.ops.kimi_kda.clear_ssm_states"),
-        patch("vllm_ascend.ops.kda.l2norm_fwd", side_effect=lambda x: x),
+        patch("vllm_ascend.ops.kda.l2norm_fwd", side_effect=lambda x: x) as normalize,
         patch.object(
             torch.ops._C_ascend,
             "chunk_kda_fwd",
@@ -420,6 +421,10 @@ def test_prefill_fuses_raw_gate_and_updates_v_first_state(lower_bound):
     assert chunk_kda_fwd.call_args.args[3] is raw_gate
     assert chunk_kda_fwd.call_args.kwargs["use_gate_in_kernel"] is True
     assert chunk_kda_fwd.call_args.kwargs["state_v_first"] is True
+    fused_norm = dtype == torch.bfloat16 and head_dim == 128
+    assert chunk_kda_fwd.call_args.kwargs["use_qk_l2norm_in_kernel"] is fused_norm
+    assert chunk_kda_fwd.call_args.kwargs["use_beta_sigmoid_in_kernel"] is False
+    assert normalize.call_count == (0 if fused_norm else 2)
     assert chunk_kda_fwd.call_args.args[4] is beta
     assert chunk_kda_fwd.call_args.kwargs["safe_gate"] is (lower_bound is not None)
     assert chunk_kda_fwd.call_args.kwargs["lower_bound"] == (lower_bound if lower_bound is not None else -5.0)

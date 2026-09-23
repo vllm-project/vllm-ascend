@@ -1,114 +1,153 @@
-# ChunkKdaFwd
+# ChunkKdaFwd in vLLM Ascend
 
-## 功能
+This directory vendors the AscendC KDA forward operator from
+[flash-linear-attention-npu](https://github.com/flashserve/flash-linear-attention-npu/tree/ad8a7908e6ee57496500a02995b5416b99f66e32),
+revision `ad8a7908e6ee57496500a02995b5416b99f66e32`.
+Migration author: Lizheng <12232325@mail.sustech.edu.cn>.
 
-`ChunkKdaFwd` 对齐不涉及 CP 切分的 FLA `chunk_kda_fwd` 顶层语义。公共接口接收 raw gate 或已激活的
-自然对数 gate；Gate、Prepare、PostWu、FwdH 和 Finalize 均在一个物理 `ChunkKdaFwd` L0 内完成，
-L2 不再拼接或依次发射多个阶段 L0。
+## Kimi K3 integration
 
-Shape 符号与布局约定见 [KDA 模型符号表](../README.md#model-shape-symbols)。
+Kimi K3 prefill uses `vllm_ascend.ops.kda.run_chunk_kda`, which calls
+`torch.ops._C_ascend.chunk_kda_fwd`. The operator and all three V2 stages are
+compiled into this repository's custom operator package; installing `fla_npu`
+or loading an external operator library is unnecessary.
 
-## Gate 公式
+The model passes raw gates, FP32 preprocessed beta, FP32 initial state in
+`[sequence, head, V, K]` order, and CPU sequence/chunk metadata. BF16 inputs with
+`K=V=128`, chunk size 64 and strictly increasing sequence offsets use V2 with
+Q/K L2 normalization inside Prepare. FP16, `K=V=64`, and empty logical sequences
+use the fused entry with Q/K normalization performed by the existing caller.
+Both paths return the attention output and a separate FP32 final state for the
+model's existing cache update. Decode continues to use `recurrent_kda`.
 
-令 `x = g + dt_bias`。逐 token、逐 K 维的自然对数衰减为：
+No new environment variable is required. Rebuild the custom operators and the
+PyTorch extension together after switching branches. This is an operator
+migration; it does not by itself validate a one-million-token model deployment.
 
-```text
-use_gate_in_kernel = false:
-    gate = g
+## Public PyTorch interface
 
-use_gate_in_kernel = true, safe_gate = false:
-    gate = -exp(A_log) * softplus(x)
-
-use_gate_in_kernel = true, safe_gate = true:
-    gate = lower_bound * sigmoid(exp(A_log) * x)
+```python
+outputs = torch.ops._C_ascend.chunk_kda_fwd(
+    q, k, v, g, beta, scale, chunk_size,
+    layout="BSND",
+    initial_state=None,
+    output_final_state=False,
+    cu_seqlens=None,
+    chunk_indices=None,
+    safe_gate=False,
+    lower_bound=None,
+    use_gate_in_kernel=False,
+    A_log=None,
+    dt_bias=None,
+    disable_recompute=False,
+    return_intermediate_states=False,
+    state_v_first=False,
+    epsilon=1e-6,
+    use_qk_l2norm_in_kernel=False,
+    use_beta_sigmoid_in_kernel=False,
+    allow_neg_eigval=False,
+    use_exp2=True,
+)
 ```
 
-随后在每个 chunk 内计算：
-
-```text
-gk_i = cumsum(gate)_i / ln(2)
-```
-
-因此后续 `exp2(gk)` 与自然指数 gate 严格绑定，不暴露额外 gate scale。
-
-## 输入
-
-| 名称 | 必选性 | Shape/Dtype | 说明 |
-| --- | --- | --- | --- |
-| `q/k` | 必选 | 输入 layout 对应 Shape；FP16/BF16 | Query/Key |
-| `v` | 必选 | 输入 layout 对应 Shape；与 q 同 dtype | Value |
-| `g` | 必选 | 输入 layout 对应 K 维 Shape；FP32/BF16 | raw gate 或已激活自然对数 gate |
-| `beta` | 必选 | 去掉 g 的 K 维；FP32/BF16 | Delta 系数 |
-| `A_log` | 条件必选 | `[H_v]`，FP32 | `use_gate_in_kernel=true` 时必选 |
-| `dt_bias` | 可选 | `[H_v*K]`，FP32 | gate bias |
-| `initial_state` | 可选 | `[N,H_v,K,V]` 或 `[N,H_v,V,K]`，FP32 | 由 `state_v_first` 解释 |
-| `cu_seqlens` | 可选 | `[N+1]`，INT64 | 变长序列 |
-| `chunk_indices` | 可选 | `[2*N_c]`，INT64 | canonical chunk 顺序 |
-
-`layout` 只描述上述输入。BSND/TND 由 L2 使用 `l0op::Transpose` 转为内部 BNSD/NTD。
-
-## 输出
-
-Python 返回顺序为：
+The existing 12-result contract is preserved:
 
 ```text
 (attn_out, final_state, gk, Aqk, Akk, w, u, qg, kg, v_new, h, initial_state)
 ```
 
-- `attn_out` 固定为 BSND/TND。
-- `final_state` 固定按序列排列，末两维服从 `state_v_first`。
-- `Aqk/Akk` 始终返回，固定为 head-major。
-- `gk/w/u/qg/kg/v_new` 是供反向使用的 head-major 中间量。
-- 公开 `h` 固定为 sequence-major；内部 `hCompute` 保持 head-major 供 Finalize 使用。
-- 第 12 个返回值是 Python 层对 `initial_state` 的原对象透传，不是 aclnn 输出。
+- `q/k/v` must be FP16 or BF16 with matching dtype. `K/V` must both be 64 or both
+  be 128; mixed dimensions and `V=256` are rejected before launch.
+- Input layouts are `BSND`, `BNSD`, `TND` and `NTD`. Attention output is always
+  sequence-major; intermediate token tensors are head-major. Public `h` is
+  sequence-major. `state_v_first` controls the last two state dimensions.
+- `g/beta` accept FP32 or BF16. Raw gate activation requires FP32 `A_log[H_v]`
+  and accepts optional FP32 `dt_bias[H_v*K]`. Safe raw gates require
+  `lower_bound` in `[-5, 0)`; `None` selects `-5`.
+- `cu_seqlens` and flattened `(sequence, chunk)` pairs are host integer lists.
+  When omitted, chunk indices are generated in canonical sequence order.
+  There may be at most 1024 logical sequences; rank-4 packed input requires
+  `B=1`. Device metadata must not be copied to the CPU in the inference hot path.
+- `final_state` is returned only when requested. `gk` is returned for
+  preactivated gates or `disable_recompute=True`. `Aqk/Akk` are always returned;
+  `w/u/qg/kg/v_new` require `disable_recompute=True`. `h` additionally supports
+  `return_intermediate_states=True`. The last result aliases the input state.
+- `epsilon` must be positive and finite in FP32. `allow_neg_eigval=True` requires
+  `use_beta_sigmoid_in_kernel=True`; beta then becomes `2 * sigmoid(beta)`.
+- Non-default normalization/beta/exponent switches require BF16, `K=V=128`,
+  chunk size 64 and strictly increasing offsets. Unsupported combinations fail
+  explicitly. The model retains its existing beta preprocessing, so it does
+  not request beta sigmoid twice.
 
-输出保留策略对齐 fla-org
-[`chunk_kda_fwd`](https://github.com/fla-org/flash-linear-attention/blob/0f0f0c97af39343855b43bbbaddcedfda5cb9d77/fla/ops/kda/chunk_fwd.py)
-提交 `0f0f0c97af39343855b43bbbaddcedfda5cb9d77`：
+V2 invokes `ChunkKdaFwdPrepare -> ChunkFwdH -> ChunkKdaFwdFinalize` through one
+executor. For direct calls with all default switches, the upstream small-workload
+policy retains the fused entry below `H_v * total_chunks = 4096`; requesting
+in-kernel normalization selects V2 regardless of workload size. Optional
+backward-only V2 output slots are passed as null by this inference binding.
 
-| 条件 | 返回 |
+The [upstream API snapshot](docs/upstream_api.md) describes the ACLNN interfaces.
+The PyTorch entry above uses the repository's `_C_ascend` namespace and does not
+expose upstream training wrappers or direct diagnostic launchers.
+
+## Source layout and build
+
+| Component | Repository path |
 | --- | --- |
-| `output_final_state=true` | 返回 `final_state`，否则为 `None` |
-| `use_gate_in_kernel=false` 或 `disable_recompute=true` | 返回 `gk` |
-| 始终 | 返回 `Aqk/Akk` |
-| `disable_recompute=true` | 返回 `w/u/qg/kg/v_new` |
-| `disable_recompute=true` 或 `return_intermediate_states=true` | 返回 `h` |
+| Fused entry and V2 executor | `csrc/attention/chunk_kda_fwd` |
+| Prepare | `csrc/attention/chunk_kda_fwd_prepare` |
+| State propagation | `csrc/moe/chunk_fwd_h` |
+| Finalize | `csrc/attention/chunk_kda_fwd_finalize` |
+| Fused-path dependencies | `csrc/attention/kda_gate_cumsum`, `csrc/moe/chunk_gated_delta_rule_fwd_h` |
+| Shared kernel utilities | `csrc/moe/common` |
 
-这是 `fla_npu.ops.ascendc.chunk_kda_fwd` 的低层 12 返回值语义；不涉及 CP。aclnn L2 不接收
-`output_final_state/disable_recompute/return_intermediate_states`，每个可选输出是否写出仅由对应
-输出指针是否为空决定。`w/u/qg/kg/v_new/h` 的 L0 阶段固定写内部 compute 张量，L2 仅在
-对应指针非空时通过 `ViewCopy` 导出；`gkOut` 非空时直接复用为 `gkCompute`，避免目标场景
-额外复制整张 FP32 gate。内部 `hCompute` 是 FwdH 到 Finalize 的必需 head-major 阶段结果；
-公开 `hOut` 非空时，L2 转为 sequence-major 后导出。`hOut` 为空时仍创建 `hCompute`，但不
-作为第 11 个 Python 返回值公开。
+The CMake dependency list includes dependent operator definitions as well as
+sources, so a filtered `--ops=chunk_kda_fwd` build also packages the V2 stage
+configurations. The regular A2/A3/Ascend 950PR & 950DT custom operator build selects this operator.
+Relative includes are adapted to this repository and its installed kernel layout.
 
-## 属性
+The migration retains this checkout's Ascend 950PR/950DT Prepare final-key alias/tail handling,
+the existing GDN state kernel's 310P/tail fixes, and CANN version compatibility.
+It imports the upstream gate-cumsum scalar dependency fixes and Ascend 950PR/950DT Finalize
+event synchronization along with the V2 host implementation. Shared kernel
+utilities already present in the repository are reused, with the upstream MMAD
+unit-flag event initialization fix applied.
 
-| 名称 | 默认值 | 支持范围 |
-| --- | --- | --- |
-| `layout` | `BSND` | `BSND/BNSD/TND/NTD` |
-| `scale` | 必传 | 通常为 `K**-0.5` |
-| `chunk_size` | `64` | `64/128` |
-| `output_final_state` | `false` | bool |
-| `safe_gate` | `false` | bool |
-| `lower_bound` | `-5.0` | safe raw gate 时 `[-5,0)` |
-| `use_gate_in_kernel` | `false` | bool |
-| `disable_recompute` | `false` | bool |
-| `return_intermediate_states` | `false` | bool |
-| `state_v_first` | `false` | bool |
+On the matching Linux/CANN/PyTorch-NPU development image, build from the repository
+root using its normal source installation workflow, for example on A3:
 
-## 支持范围
+```shell
+git submodule update --init --recursive
+SOC_VERSION=ascend910_9391 COMPILE_CUSTOM_KERNELS=1 python -m pip install -v -e . --no-build-isolation
+```
 
-- A2 (`ascend910b`)、A3 (`ascend910_93`)、Ascend 950PR&950DT 系列产品 (`ascend950`)。
-- `K/V` 为 `[16,256]` 内 16 的倍数；交付重点覆盖 K=128、V=128/256。
-- `chunk_size` 为 64/128。
-- TND/NTD 均支持多 head。
-- 变长调用最多 1024 条逻辑序列，rank-4 变长输入要求 B=1。
+Use the matching vLLM revision and CANN dependencies required by this checkout.
+Restart workers after installation so the extension and custom package are
+loaded from the same build.
 
-## 验证
+## Validation
 
-唯一用例规格是 `tests/op_cases/chunk_kda_fwd.json`。数值测试位于
-`tests/operators/chunk_kda_fwd/accuracy/`，性能使用 `tests/operators/chunk_kda_fwd/performance/profile.py`
-和 `msopprof`。
+Run the focused CPU dispatch tests and, on Ascend hardware, the numerical
+regressions:
 
-完整 API 见 [API 文档](docs/api.md)，阶段和内存设计见 [设计文档](docs/design.md)。
+```shell
+pytest -q tests/ut/ops/test_kda.py tests/ut/ops/test_kimi_kda.py tests/ut/models/test_glm5next_kda_contracts.py
+pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/test_chunk_kda_aclnn.py
+pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/test_chunk_kda_fwd_v2_npu.py
+pytest -q tests/e2e/nightly/single_node/ops/singlecard_ops/test_kimi_k3_chunk_kda_tail_npu.py
+```
+
+The numerical tests compare attention outputs and final states with reference
+implementations, including packed tails, both state layouts, V2 normalization
+and beta switches, fallback paths and invalid arguments. Run these tests on each
+target SoC before claiming device accuracy or performance. Local CPU checks do
+not validate AscendC compilation, device synchronization, or NPU throughput.
+
+## Attribution
+
+Upstream file-level copyright and license notices are retained. Original
+flash-linear-attention-npu code is covered by the accompanying
+[BSD 3-Clause license](LICENSES/BSD-3-Clause.txt); files derived from CANN keep
+the [CANN Open Software License Agreement Version 2.0](LICENSES/CANN-Open-Software-License-Agreement-Version-2.0.txt).
+These notices also apply to the migrated Prepare, Finalize, ChunkFwdH and shared
+utility sources according to their file headers. Migration authorship does not
+replace the original authors' notices.

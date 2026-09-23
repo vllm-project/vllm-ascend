@@ -1,3 +1,5 @@
+include_guard(GLOBAL)
+
 set(CURRENT_CMAKE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 set(CATLASS_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/third_party/catlass/include")
 get_filename_component(CATLASS_INCLUDE_DIR_ABS ${CATLASS_INCLUDE_DIR} ABSOLUTE)
