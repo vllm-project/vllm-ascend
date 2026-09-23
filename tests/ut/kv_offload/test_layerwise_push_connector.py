@@ -546,12 +546,38 @@ def test_destination_registration(backend_name, sparse_enabled):
     ):
         config.return_value.sparse_kv_offload_config.enabled = sparse_enabled
         receiver.return_value.startup_error = None
-        if sparse_enabled:
-            with pytest.raises(ValueError, match="does not yet support sparse decode offload"):
+        if sparse_enabled and backend_name != "memfabric":
+            with pytest.raises(ValueError, match="requires .*transfer_backend.*memfabric"):
                 worker.register_kv_caches({name: (None, None)})
             worker._ensure_engine.assert_not_called()
             engine.register_buffer.assert_not_called()
             receiver.assert_not_called()
+        elif sparse_enabled:
+            k_tensor = torch.empty(4, 16, 1, 8, dtype=torch.bfloat16)
+            v_tensor = torch.empty(4, 16, 1, 4, dtype=torch.bfloat16)
+            manager = SimpleNamespace(
+                offload_layer_names=[name],
+                gvas_k_bases=[0x1000],
+                gvas_v_bases=[0x2000],
+                cpu_block_lens=[(k_tensor.numel() * 2, v_tensor.numel() * 2)],
+                topk_buffers_k=[k_tensor],
+                topk_buffers_v=[v_tensor],
+                block_size=16,
+            )
+            with patch(
+                "vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager."
+                "get_sparse_kv_offload_manager",
+                return_value=manager,
+            ):
+                worker.register_kv_caches({name: (None, None)})
+            engine.register_buffer.assert_called_once_with(
+                [0x1000, 0x2000],
+                [1024 * 4, 512 * 4],
+            )
+            component = worker.layer_layouts[0][0]
+            assert component.base_addrs == (0x1000, 0x2000)
+            assert receiver.call_args.kwargs["state"].tp_shared_components == frozenset({name})
+            receiver.return_value.start.assert_called_once()
         else:
             worker.register_kv_caches({name: tensors})
             engine.register_buffer.assert_called_once_with(
