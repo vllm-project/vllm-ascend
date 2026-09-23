@@ -65,7 +65,6 @@ from vllm_ascend.core.profiling_chunk_predictor import (
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
     is_pd_decode_recompute_scheduler_enabled,
-    kv_transfer_supports_shared_backing,
     lmhead_tp_enable,
     set_potential_max_tokens,
     vllm_version_is,
@@ -99,11 +98,6 @@ class NPUModelRunner(GPUModelRunner):
     # backing allocation. Ascend MRV2 preserves that layout in
     # allocate_kv_cache_main and exposes contiguous backend-specific views.
     supports_standardized_shared_kv_backing = True
-
-    @property
-    def supports_shared_backing_with_kv_transfer(self) -> bool:
-        """Whether the active connector can consume one shared KV backing."""
-        return kv_transfer_supports_shared_backing(self.vllm_config.kv_transfer_config)
 
     execute_model_state: ExecuteModelState | None
 
