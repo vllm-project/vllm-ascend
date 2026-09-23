@@ -1,6 +1,7 @@
-from vllm.logger import logger
-from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorRole
 from vllm.config import ParallelConfig
+from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorRole
+from vllm.logger import logger
+
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import MooncakeBackend
 
 

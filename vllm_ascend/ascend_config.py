@@ -522,7 +522,7 @@ class AscendConfig:
     eplb_config: EplbConfig = dataclasses.field(default_factory=EplbConfig)
     rejection_sampler_config: RejectionSamplerConfig = dataclasses.field(default_factory=RejectionSamplerConfig)
     rl_config: RlConfig = dataclasses.field(default_factory=RlConfig)
-	encoder_caches_offload_config: EncoderCachesOffloadConfig = dataclasses.field(
+    encoder_caches_offload_config: EncoderCachesOffloadConfig = dataclasses.field(
         default_factory=EncoderCachesOffloadConfig
     )
 

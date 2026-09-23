@@ -246,6 +246,7 @@ else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
 
 
+from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorRole
 from vllm.model_executor.layers.attention import Attention, MLAAttention
 
 from vllm_ascend.core.kv_cache_interface import (
@@ -262,7 +263,6 @@ from vllm_ascend.core.profiling_chunk_predictor import (
     _start_profiling_chunk_timing,
 )
 
-from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorRole
 from vllm_ascend.embedding_offload.ec_mmcache_mstore import EMoonCakeStoreConnector
 
 # vLLM 0.29 does not provide the upstream DeepSeek V4.1 config and model

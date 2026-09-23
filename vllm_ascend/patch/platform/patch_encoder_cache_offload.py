@@ -1,72 +1,48 @@
-import vllm
 import time
+from collections import OrderedDict, defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor
+ 
 import torch
-
+import vllm
 from vllm.config import VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorMetadata,
     ECConnectorRole,
 )
 from vllm.distributed.ec_transfer.ec_connector.factory import ECConnectorFactory
-from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
-from vllm.v1.core.encoder_cache_manager import (
-    EncoderCacheManager,
-    EncoderDecoderCacheManager,
-)
-from vllm.v1.engine import EngineCoreEventType
-from collections.abc import Callable
-from typing import cast
-
-from vllm.distributed.parallel_state import get_pp_group
-from vllm.model_executor.models.interfaces_base import (
-    VllmModelForPooling,
-    is_pooling_model,
-)
-from vllm.v1.spec_decode.ngram_proposer_gpu import (
-    update_ngram_gpu_tensors_incremental,
-    update_scheduler_for_invalid_drafts,
-)
-
-from vllm.v1.worker.gpu_input_batch import CachedRequestState
-from collections import defaultdict, deque, OrderedDict
-from typing import Any
-
 from vllm.distributed.kv_events import EventPublisherFactory
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import RoutedExpertsManager
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
-from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
-from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
-from vllm.v1.core.kv_cache_utils import KVCacheBlock
-from vllm.v1.core.sched.interface import PauseState
-from vllm.v1.core.sched.output import (
-    NewRequestData,
-    SchedulerOutput,
-)
-from vllm.v1.core.sched.request_queue import (
-    SchedulingPolicy,
-    create_request_queue,
-)
-from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.metrics.perf import ModelMetrics
-from vllm.v1.metrics.stats import PrefixCacheStats
-from vllm.v1.request import Request, RequestStatus
-from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
-from vllm.v1.structured_output import StructuredOutputManager
-from vllm.v1.utils import record_function_or_nullcontext
-
-from vllm.sampling_params import SamplingType
-from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.multimodal.utils import (
     copy_mm_embedding_modality,
     get_mm_features_in_window,
     set_mm_embedding_modality,
 )
-
+from vllm.utils.torch_utils import PIN_MEMORY
+from vllm.v1.core.encoder_cache_manager import (
+    EncoderCacheManager,
+    EncoderDecoderCacheManager,
+)
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
+from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
+from vllm.v1.core.kv_cache_utils import KVCacheBlock
+from vllm.v1.core.sched.request_queue import (
+    SchedulingPolicy,
+    create_request_queue,
+)
+from vllm.v1.engine import EngineCoreEventType
+from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.metrics.perf import ModelMetrics
+from vllm.v1.metrics.stats import PrefixCacheStats
+from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
+from vllm.v1.structured_output import StructuredOutputManager
+from vllm.v1.utils import record_function_or_nullcontext
+ 
 from vllm_ascend.ascend_config import get_ascend_config
-from concurrent.futures import ThreadPoolExecutor
 from vllm_ascend.embedding_offload.ec_mmcache_mstore import EMoonCakeStoreConnector
 
 logger = init_logger(__name__)
@@ -82,305 +58,346 @@ def _set_swap_encoder_mm_hashes(self, val: list[str]):
         raise TypeError("swap_encoder_mm_hashes must be list[str]")
     self._swap_encoder_mm_hashes = val
 
-vllm.v1.core.sched.output.SchedulerOutput.swap_encoder_mm_hashes = property(_get_swap_encoder_mm_hashes, _set_swap_encoder_mm_hashes)
+vllm.v1.core.sched.output.SchedulerOutput.swap_encoder_mm_hashes = property(
+	_get_swap_encoder_mm_hashes, _set_swap_encoder_mm_hashes
+)
+
 
 def __init__(
-    self,
-    vllm_config: VllmConfig,
-    kv_cache_config: KVCacheConfig,
-    structured_output_manager: StructuredOutputManager,
-    block_size: int,
-    hash_block_size: int | None = None,
-    mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
-    include_finished_set: bool = False,
-    log_stats: bool = False,
+	self,
+	vllm_config: VllmConfig,
+	kv_cache_config: KVCacheConfig,
+	structured_output_manager: StructuredOutputManager,
+	block_size: int,
+	hash_block_size: int | None = None,
+	mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
+	include_finished_set: bool = False,
+	log_stats: bool = False,
 ) -> None:
-    self.vllm_config = vllm_config
-    self.scheduler_config = vllm_config.scheduler_config
-    self.cache_config = vllm_config.cache_config
-    self.lora_config = vllm_config.lora_config
-    self.kv_cache_config = kv_cache_config
-    self.kv_events_config = vllm_config.kv_events_config
-    self.parallel_config = vllm_config.parallel_config
-    self.log_stats = log_stats
-    self.observability_config = vllm_config.observability_config
-    self.kv_metrics_collector: KVCacheMetricsCollector | None = None
-    if self.observability_config.kv_cache_metrics:
-        self.kv_metrics_collector = KVCacheMetricsCollector(
-            self.observability_config.kv_cache_metrics_sample,
-        )
-    self.structured_output_manager = structured_output_manager
-    self.is_encoder_decoder = vllm_config.model_config.is_encoder_decoder
-    self.is_encoder_only = vllm_config.is_encoder_only
+	self.vllm_config = vllm_config
+	self.scheduler_config = vllm_config.scheduler_config
+	self.cache_config = vllm_config.cache_config
+	self.lora_config = vllm_config.lora_config
+	self.model_uses_mrope = vllm_config.model_config.uses_mrope
+	self.kv_cache_config = kv_cache_config
+	self.kv_events_config = vllm_config.kv_events_config
+	self.parallel_config = vllm_config.parallel_config
+	self.log_stats = log_stats
+	self.observability_config = vllm_config.observability_config
+	self.spec_decode_metrics_level = (
+		self.observability_config.per_request_spec_decode_metrics
+	)
+	self.kv_metrics_collector: KVCacheMetricsCollector | None = None
+	if self.observability_config.kv_cache_metrics:
+		self.kv_metrics_collector = KVCacheMetricsCollector(
+			self.observability_config.kv_cache_metrics_sample,
+		)
+	self.structured_output_manager = structured_output_manager
+	self.is_encoder_decoder = vllm_config.model_config.is_encoder_decoder
+	self.is_mm_encoder_only = vllm_config.is_mm_encoder_only
 
-    # include_finished_set controls whether a separate set of finished
-    # request ids should be included in the EngineCoreOutputs returned
-    # by update_from_outputs(). This is currently used in the multi-engine
-    # case to track request lifetimes efficiently.
-    self.finished_req_ids_dict: dict[int, set[str]] | None = (
-        defaultdict(set) if include_finished_set else None
-    )
-    # Track requests scheduled in prior step (MRV1-only).
-    self.prev_step_scheduled_req_ids: set[str] = set()
+	# include_finished_set controls whether a separate set of finished
+	# request ids should be included in the EngineCoreOutputs returned
+	# by update_from_outputs(). This is currently used in the multi-engine
+	# case to track request lifetimes efficiently.
+	self.finished_req_ids_dict: dict[int, set[str]] | None = (
+		defaultdict(set) if include_finished_set else None
+	)
+	# Track requests scheduled in prior step (MRV1-only).
+	self.prev_step_scheduled_req_ids: set[str] = set()
 
-    # Scheduling constraints.
-    self.max_num_running_reqs = self.scheduler_config.max_num_seqs
-    self.max_num_scheduled_tokens = (
-        self.scheduler_config.max_num_scheduled_tokens
-        if self.scheduler_config.max_num_scheduled_tokens is not None
-        else self.scheduler_config.max_num_batched_tokens
-    )
-    self.max_model_len = vllm_config.model_config.max_model_len
-    self.enable_kv_cache_events = (
-        self.kv_events_config is not None
-        and self.kv_events_config.enable_kv_cache_events
-    )
-    # Diffusion models may not sample any tokens for a denoising step.
-    self.num_sampled_tokens_per_step = (
-        1 if not vllm_config.model_config.is_diffusion else 0
-    )
+	# Scheduling constraints.
+	self.max_num_running_reqs = self.scheduler_config.max_num_seqs
+	self.max_num_scheduled_tokens = (
+		self.scheduler_config.max_num_scheduled_tokens
+		if self.scheduler_config.max_num_scheduled_tokens is not None
+		else self.scheduler_config.max_num_batched_tokens
+	)
+	self.max_model_len = vllm_config.model_config.max_model_len
+	self.enable_kv_cache_events = (
+		self.kv_events_config is not None
+		and self.kv_events_config.enable_kv_cache_events
+	)
+	# Diffusion models may not sample any tokens for a denoising step.
+	self.num_sampled_tokens_per_step = (
+		1 if not vllm_config.model_config.is_diffusion else 0
+	)
 
-    # Create KVConnector for the Scheduler. Note that each Worker
-    # will have a corresponding KVConnector with Role=WORKER.
-    # KV Connector pushes/pull of remote KVs for P/D and offloading.
-    self.connector = None
-    self.connector_prefix_cache_stats: PrefixCacheStats | None = None
-    self.recompute_kv_load_failures = True
-    self.defer_block_free = False
-    # Whether a preempted request's in-flight output must be dropped; see
-    # KVConnectorBase_V1.requires_kv_delivery.
-    self.requires_kv_delivery = False
-    kv_transfer_config = self.vllm_config.kv_transfer_config
-    if kv_transfer_config is not None:
-        assert not self.is_encoder_decoder, (
-            "Encoder-decoder models are not currently supported with KV connectors"
-        )
-        self.connector = KVConnectorFactory.create_connector(
-            config=self.vllm_config,
-            role=KVConnectorRole.SCHEDULER,
-            kv_cache_config=self.kv_cache_config,
-        )
-        if self.log_stats:
-            self.connector_prefix_cache_stats = PrefixCacheStats()
-        kv_load_failure_policy = kv_transfer_config.kv_load_failure_policy
-        self.recompute_kv_load_failures = kv_load_failure_policy == "recompute"
+	# Create KVConnector for the Scheduler. Note that each Worker
+	# will have a corresponding KVConnector with Role=WORKER.
+	# KV Connector pushes/pull of remote KVs for P/D and offloading.
+	self.connector = None
+	self.connector_prefix_cache_stats: PrefixCacheStats | None = None
+	self.recompute_kv_load_failures = True
+	self.defer_block_free = False
+	# Whether a preempted request's in-flight output must be dropped; see
+	# KVConnectorBase_V1.requires_kv_delivery.
+	self.requires_kv_delivery = False
+	kv_transfer_config = self.vllm_config.kv_transfer_config
+	if kv_transfer_config is not None:
+		assert not self.is_encoder_decoder, (
+			"Encoder-decoder models are not currently supported with KV connectors"
+		)
+		self.connector = KVConnectorFactory.create_connector(
+			config=self.vllm_config,
+			role=KVConnectorRole.SCHEDULER,
+			kv_cache_config=self.kv_cache_config,
+		)
+		if self.log_stats:
+			self.connector_prefix_cache_stats = PrefixCacheStats()
+		kv_load_failure_policy = kv_transfer_config.kv_load_failure_policy
+		self.recompute_kv_load_failures = kv_load_failure_policy == "recompute"
 
-        # With overlapping batches (async scheduling or PP), a step may
-        # still be writing a freed request's KV blocks. A consumer KV
-        # Connector can reallocate and fill those blocks via a load that
-        # isn't ordered against that write, so defer freeing them.
-        multiple_inflight_batches = self.vllm_config.max_concurrent_batches > 1
-        if multiple_inflight_batches and kv_transfer_config.is_kv_consumer:
-            self.defer_block_free = True
+		# With overlapping batches (async scheduling or PP), a step may
+		# still be writing a freed request's KV blocks. A consumer KV
+		# Connector can reallocate and fill those blocks via a load that
+		# isn't ordered against that write, so defer freeing them.
+		multiple_inflight_batches = self.vllm_config.max_concurrent_batches > 1
+		if multiple_inflight_batches and kv_transfer_config.is_kv_consumer:
+			self.defer_block_free = True
 
-        self.requires_kv_delivery = self.connector.requires_kv_delivery
+		self.requires_kv_delivery = self.connector.requires_kv_delivery
 
-    self.kv_event_publisher = EventPublisherFactory.create(
-        self.kv_events_config,
-        self.parallel_config.data_parallel_index,
-    )
-    self.ec_connector = None
-    if self.vllm_config.ec_transfer_config is not None:
-        self.ec_connector = ECConnectorFactory.create_connector(
-            config=self.vllm_config, role=ECConnectorRole.SCHEDULER
-        )
+	self.kv_event_publisher = EventPublisherFactory.create(
+		self.kv_events_config,
+		self.parallel_config.data_parallel_index,
+	)
+	self.ec_connector = None
+	if self.vllm_config.ec_transfer_config is not None:
+		self.ec_connector = ECConnectorFactory.create_connector(
+			config=self.vllm_config, role=ECConnectorRole.SCHEDULER
+		)
 
-    num_gpu_blocks = self.cache_config.num_gpu_blocks
-    assert num_gpu_blocks is not None and num_gpu_blocks > 0
+	num_gpu_blocks = self.cache_config.num_gpu_blocks
+	assert num_gpu_blocks is not None and num_gpu_blocks > 0
 
-    self.block_size = block_size
-    self.dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
-    self.pcp_world_size = vllm_config.parallel_config.prefill_context_parallel_size
+	self.block_size = block_size
+	self.dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
+	self.pcp_world_size = vllm_config.parallel_config.prefill_context_parallel_size
 
-    # req_id -> Request
-    self.requests: dict[str, Request] = {}
-    # Scheduling policy
-    try:
-        self.policy = SchedulingPolicy(self.scheduler_config.policy)
-    except ValueError as e:
-        raise ValueError(
-            f"Unknown scheduling policy: {self.scheduler_config.policy}"
-        ) from e
-    # Priority queues for requests.
-    self.waiting = create_request_queue(self.policy)
-    # requests skipped in waiting flow due async deps or constraints.
-    self.skipped_waiting = create_request_queue(self.policy)
-    self.running: list[Request] = []
+	# req_id -> Request
+	self.requests: dict[str, Request] = {}
+	# Scheduling policy
+	try:
+		self.policy = SchedulingPolicy(self.scheduler_config.policy)
+	except ValueError as e:
+		raise ValueError(
+			f"Unknown scheduling policy: {self.scheduler_config.policy}"
+		) from e
+	# Priority queues for requests.
+	self.waiting = create_request_queue(self.policy)
+	# requests skipped in waiting flow due async deps or constraints.
+	self.skipped_waiting = create_request_queue(self.policy)
+	self.running: list[Request] = []
 
-    # The request IDs that are finished in between the previous and the
-    # current steps. This is used to notify the workers about the finished
-    # requests so that they can free the cached states for those requests.
-    # This is flushed at the end of each scheduling step.
-    self.finished_req_ids: set[str] = set()
+	# The request IDs that are finished in between the previous and the
+	# current steps. This is used to notify the workers about the finished
+	# requests so that they can free the cached states for those requests.
+	# This is flushed at the end of each scheduling step.
+	self.finished_req_ids: set[str] = set()
 
-    # IDs of requests preempted since the last call to schedule().
-    self.reset_preempted_req_ids: set[str] = set()
+	# IDs of requests preempted since the last call to schedule().
+	self.reset_preempted_req_ids: set[str] = set()
 
-    # Counter for requests waiting for streaming input. Used to calculate
-    # number of unfinished requests
-    self.num_waiting_for_streaming_input: int = 0
+	# Counter for requests waiting for streaming input. Used to calculate
+	# number of unfinished requests
+	self.num_waiting_for_streaming_input: int = 0
 
-    # KV Connector: requests in process of async KV loading or recving
-    self.finished_recving_kv_req_ids: set[str] = set()
-    self.failed_recving_kv_req_ids: set[str] = set()
+	# KV Connector: requests in process of async KV loading or recving
+	self.finished_recving_kv_req_ids: set[str] = set()
+	self.failed_recving_kv_req_ids: set[str] = set()
 
-    # Grammar compilation failures to finish as per-request errors in
-    # update_from_output.
-    self.grammar_compile_error_reqs: set[str] = set()
+	# Grammar compilation failures to finish as per-request errors in
+	# update_from_output.
+	self.grammar_compile_error_reqs: set[str] = set()
 
-    # Encoder-related.
-    # Calculate encoder cache size if applicable
-    supports_mm_inputs = mm_registry.supports_multimodal_inputs(
-        vllm_config.model_config
-    )
-    mm_budget = (
-        MultiModalBudget(vllm_config, mm_registry) if supports_mm_inputs else None
-    )
+	# Encoder-related.
+	# Calculate encoder cache size if applicable
+	supports_mm_inputs = mm_registry.supports_multimodal_inputs(
+		vllm_config.model_config
+	)
+	mm_budget = (
+		MultiModalBudget(vllm_config, mm_registry) if supports_mm_inputs else None
+	)
 
-    # NOTE: Text-only encoder-decoder models are implemented as
-    # multi-modal models for convenience
-    # Example: https://github.com/vllm-project/bart-plugin
-    if self.is_encoder_decoder:
-        assert mm_budget and len(mm_budget.mm_max_toks_per_item) <= 1, (
-            "Encoder-decoder models are expected to implement the "
-            "multimodal interface with at most one modality."
-        )
+	# NOTE: Text-only encoder-decoder models are implemented as
+	# multi-modal models for convenience
+	# Example: https://github.com/vllm-project/bart-plugin
+	if self.is_encoder_decoder:
+		assert mm_budget and len(mm_budget.mm_max_toks_per_item) <= 1, (
+			"Encoder-decoder models are expected to implement the "
+			"multimodal interface with at most one modality."
+		)
 
-    self.max_num_encoder_input_tokens = (
-        mm_budget.encoder_compute_budget if mm_budget else 0
-    )
-    encoder_cache_size = mm_budget.encoder_cache_size if mm_budget else 0
-    manager_cls_obj = vllm_config.ec_manager_config.get_encoder_cache_manager_obj()
-    if manager_cls_obj is None:
-        manager_cls_obj = (
-            EncoderDecoderCacheManager
-            if self.is_encoder_decoder
-            else EncoderCacheManager
-        )
-    self.encoder_cache_manager = manager_cls_obj.create_manager(
-        cache_size=encoder_cache_size, vllm_config=vllm_config
-    )
-    speculative_config = vllm_config.speculative_config
-    self.use_eagle = False
-    self.num_spec_tokens = vllm_config.num_speculative_tokens
-    self.num_lookahead_tokens = vllm_config.num_lookahead_tokens
-    # Positions past the computed tokens that the drafter reads mid-prefill.
-    # Eagle-family drafters read 1 ahead, but multi-module MTP reads
-    # num_spec_tokens ahead at chunked-prefill boundaries. Determines the
-    # encoder scheduling shift, the deferred encoder free, the KV cache
-    # manager's re-prefillable window (this minus 1), and how many tokens to
-    # reserve between a chunk boundary and the prefill end.
-    self.num_prefill_lookahead = 0
-    self.dynamic_sd_lookup: list[int] | None = None
-    if speculative_config is not None:
-        if speculative_config.num_speculative_tokens_per_batch_size:
-            self.dynamic_sd_lookup = build_dynamic_sd_schedule_lookup(
-                speculative_config.num_speculative_tokens_per_batch_size,
-                vllm_max_batch_size=self.scheduler_config.max_num_seqs,
-                vllm_num_speculative_tokens=self.num_spec_tokens,
-            )
-        self.use_eagle = speculative_config.use_eagle()
-        if self.use_eagle:
-            self.num_prefill_lookahead = (
-                self.num_spec_tokens
-                if speculative_config.use_multi_module_mtp()
-                else 1
-            )
+	self.max_num_encoder_input_tokens = (
+		mm_budget.encoder_compute_budget if mm_budget else 0
+	)
+	encoder_cache_size = mm_budget.encoder_cache_size if mm_budget else 0
+	manager_cls_obj = vllm_config.ec_manager_config.get_encoder_cache_manager_obj()
+	if manager_cls_obj is None:
+		manager_cls_obj = (
+			EncoderDecoderCacheManager
+			if self.is_encoder_decoder
+			else EncoderCacheManager
+		)
+	self.encoder_cache_manager = manager_cls_obj.create_manager(
+		cache_size=encoder_cache_size, vllm_config=vllm_config
+	)
+	speculative_config = vllm_config.speculative_config
+	self.use_eagle = False
+	self.use_eagle_block_drop = False
+	self.num_spec_tokens = vllm_config.num_speculative_tokens
+	self.num_lookahead_tokens = vllm_config.num_lookahead_tokens
+	# Positions past the computed tokens that the drafter reads mid-prefill.
+	# Eagle-family drafters read 1 ahead, but multi-module MTP reads
+	# num_spec_tokens ahead at chunked-prefill boundaries. Determines the
+	# encoder scheduling shift, the deferred encoder free, the KV cache
+	# manager's re-prefillable window (this minus 1), and how many tokens to
+	# reserve between a chunk boundary and the prefill end.
+	self.num_prefill_lookahead = 0
+	self.dynamic_sd_lookup: list[int] | None = None
+	if speculative_config is not None:
+		if speculative_config.num_speculative_tokens_per_batch_size:
+			self.dynamic_sd_lookup = build_dynamic_sd_schedule_lookup(
+				speculative_config.num_speculative_tokens_per_batch_size,
+				vllm_max_batch_size=self.scheduler_config.max_num_seqs,
+				vllm_num_speculative_tokens=self.num_spec_tokens,
+			)
+		self.use_eagle = speculative_config.use_eagle()
+		if self.use_eagle:
+			self.num_prefill_lookahead = (
+				self.num_spec_tokens
+				if speculative_config.use_multi_module_mtp()
+				else 1
+			)
+		self.use_eagle_block_drop = speculative_config.use_eagle_block_drop()
+		if self.use_eagle and not self.use_eagle_block_drop:
+			logger.warning(
+				"EAGLE trailing prefix-cache block dropping is disabled. "
+				"This is experimental and may affect speculative-token "
+				"acceptance rates."
+			)
 
-    # Create the KV cache manager.
-    if hash_block_size is None:
-        hash_block_size = block_size
-    self.hash_block_size = hash_block_size
-    self.kv_cache_manager = KVCacheManager(
-        kv_cache_config=kv_cache_config,
-        max_model_len=self.max_model_len,
-        max_in_flight_tokens=vllm_config.max_in_flight_tokens,
-        enable_caching=self.cache_config.enable_prefix_caching,
-        use_eagle=self.use_eagle,
-        num_prefill_lookahead=self.num_prefill_lookahead,
-        log_stats=self.log_stats,
-        enable_kv_cache_events=self.enable_kv_cache_events,
-        dcp_world_size=self.dcp_world_size,
-        pcp_world_size=1,
-        scheduler_block_size=self.block_size,
-        hash_block_size=hash_block_size,
-        metrics_collector=self.kv_metrics_collector,
-        watermark=self.scheduler_config.watermark,
-    )
-    # Bind GPU block pool to the KV connector. This must happen after
-    # kv_cache_manager is constructed so block_pool is available.
-    if self.connector is not None:
-        self.connector.bind_gpu_block_pool(self.kv_cache_manager.block_pool)
+	# Create the KV cache manager.
+	if hash_block_size is None:
+		hash_block_size = block_size
+	self.hash_block_size = hash_block_size
+	self.kv_cache_manager = KVCacheManager(
+		kv_cache_config=kv_cache_config,
+		max_model_len=self.max_model_len,
+		max_in_flight_tokens=vllm_config.max_in_flight_tokens,
+		enable_caching=self.cache_config.enable_prefix_caching,
+		use_eagle=self.use_eagle_block_drop,
+		num_prefill_lookahead=self.num_prefill_lookahead,
+		log_stats=self.log_stats,
+		enable_kv_cache_events=self.enable_kv_cache_events,
+		dcp_world_size=self.dcp_world_size,
+		pcp_world_size=1,
+		scheduler_block_size=self.block_size,
+		hash_block_size=hash_block_size,
+		metrics_collector=self.kv_metrics_collector,
+		watermark=self.scheduler_config.watermark,
+		enable_mamba_fine_grained_prefix_cache=(
+			self.cache_config.enable_mamba_fine_grained_prefix_cache
+		),
+	)
+	# Bind GPU block pool to the KV connector. This must happen after
+	# kv_cache_manager is constructed so block_pool is available.
+	if self.connector is not None:
+		self.connector.bind_gpu_block_pool(self.kv_cache_manager.block_pool)
 
-    self.use_pp = self.parallel_config.pipeline_parallel_size > 1
-    self.use_v2_model_runner = vllm_config.use_v2_model_runner
-    # Scheduler iteration counter. Drives the V2+PP+async decode-throttle
-    # cadence (`next_decode_eligible_step`).
-    self.current_step = 0
-    # DP prefill balancing: Flag to track whether the last cadence-aligned
-    # prefill batch fully drained the waiting queue. Prefill throttling
-    # is disabled in this case.
-    self.prefill_capacity_bound = False
-    self.scheduler_reserve_full_isl = (
-        self.scheduler_config.scheduler_reserve_full_isl
-    )
+	self.use_pp = self.parallel_config.pipeline_parallel_size > 1
+	self.use_v2_model_runner = vllm_config.use_v2_model_runner
+	# Scheduler iteration counter. Drives the V2+PP+async decode-throttle
+	# cadence (`next_decode_eligible_step`).
+	self.current_step = 0
+	# DP prefill balancing: Flag to track whether the last cadence-aligned
+	# prefill batch fully drained the waiting queue. Prefill throttling
+	# is disabled in this case.
+	self.prefill_capacity_bound = False
+	self.scheduler_reserve_full_isl = (
+		self.scheduler_config.scheduler_reserve_full_isl
+	)
 
-    self.has_mamba_layers = kv_cache_config.has_mamba_layers
-    self.needs_kv_cache_zeroing = kv_cache_config.needs_kv_cache_zeroing
-    # Blocks that async KV loads will overwrite this step, skipped from
-    # zeroing since the zeroing could race the out-of-band write.
-    self._skip_zero_block_ids: set[int] = set()
-    self.need_mamba_block_aligned_split = (
-        self.has_mamba_layers and self.cache_config.mamba_cache_mode == "align"
-    )
-    # A finer prefix_match_unit is configured: a mamba partial tail entry
-    # can only be registered by a step ending exactly at the prompt's last
-    # hash boundary, so the split adds that stop.
-    self.mamba_partial_cache_hit = (
-        self.need_mamba_block_aligned_split
-        and self.hash_block_size < self.block_size
-        and self.kv_cache_manager.coordinator.enable_partial_hash_hits
-    )
+	self.has_mamba_layers = kv_cache_config.has_mamba_layers
+	self.needs_kv_cache_zeroing = kv_cache_config.needs_kv_cache_zeroing
+	# Blocks that async KV loads will overwrite this step, skipped from
+	# zeroing since the zeroing could race the out-of-band write.
+	self._skip_zero_block_ids: set[int] = set()
+	self.need_mamba_block_aligned_split = (
+		self.has_mamba_layers and self.cache_config.mamba_cache_mode == "align"
+	)
+	# TODO: Support models with multiple Mamba specs that require different
+	# prefill checkpoint alignments instead of selecting the first one.
+	self.mamba_prefill_checkpoint_alignment = next(
+		(
+			group.kv_cache_spec.prefill_checkpoint_alignment
+			for group in kv_cache_config.kv_cache_groups
+			if isinstance(group.kv_cache_spec, MambaSpec)
+		),
+		None,
+	)
+	self.mamba_has_prefill_checkpoint_blocks = self.has_mamba_layers and all(
+		not isinstance(group.kv_cache_spec, MambaSpec)
+		or group.kv_cache_spec.num_prefill_checkpoint_blocks > 0
+		for group in kv_cache_config.kv_cache_groups
+	)
+	# A finer prefix_match_unit is configured: a mamba partial tail entry
+	# can only be registered by a step ending exactly at the prompt's last
+	# hash boundary, so the split adds that stop.
+	self.mamba_partial_cache_hit = (
+		self.need_mamba_block_aligned_split
+		and self.hash_block_size < self.block_size
+		and self.kv_cache_manager.coordinator.enable_partial_hash_hits
+	)
+	# Opt-in: also stop at the junction, where an eagle sibling resumes. The
+	# manager decides whether it can check-point there (per-group eagle bit,
+	# no MTP re-prefill tail); splitting for a stop it would refuse costs a
+	# forward pass and displaces the block-boundary stop.
+	self.mamba_fine_grained_prefix_cache = (
+		self.mamba_partial_cache_hit
+		and self.kv_cache_manager.mamba_fine_grained_prefix_cache
+	)
 
-    # Counts of non-empty steps scheduled / processed. update_from_output
-    # is called once per scheduled step in FIFO order, so these stay in sync.
-    self.sched_step_seq = 0
-    self.processed_step_seq = 0
-    # FIFO of (fence_seq, blocks): blocks become safe to free once
-    # processed_step_seq >= fence_seq.
-    self.deferred_frees: deque[tuple[int, list[KVCacheBlock]]] = deque()
+	# Counts of non-empty steps scheduled / processed. update_from_output
+	# is called once per scheduled step in FIFO order, so these stay in sync.
+	self.sched_step_seq = 0
+	self.processed_step_seq = 0
+	# FIFO of (fence_seq, blocks): blocks become safe to free once
+	# processed_step_seq >= fence_seq.
+	self.deferred_frees: deque[tuple[int, list[KVCacheBlock]]] = deque()
 
-    self.perf_metrics: ModelMetrics | None = None
-    if self.log_stats and vllm_config.observability_config.enable_mfu_metrics:
-        self.perf_metrics = ModelMetrics(vllm_config)
+	self.perf_metrics: ModelMetrics | None = None
+	if self.log_stats and vllm_config.observability_config.enable_mfu_metrics:
+		self.perf_metrics = ModelMetrics(vllm_config)
 
-    self.enable_return_routed_experts = (
-        vllm_config.model_config.enable_return_routed_experts
-    )
-    self.return_sampling_mask = vllm_config.model_config.return_sampling_mask
+	self.enable_return_routed_experts = (
+		vllm_config.model_config.enable_return_routed_experts
+	)
+	self.return_sampling_mask = vllm_config.model_config.return_sampling_mask
 
-    if self.enable_return_routed_experts:
-        assert self.dcp_world_size == 1 and self.pcp_world_size == 1, (
-            "enable_return_routed_experts does not support context parallelism "
-            "(dcp_world_size > 1 or pcp_world_size > 1)"
-        )
+	if self.enable_return_routed_experts:
+		assert self.dcp_world_size == 1 and self.pcp_world_size == 1, (
+			"enable_return_routed_experts does not support context parallelism "
+			"(dcp_world_size > 1 or pcp_world_size > 1)"
+		)
 
-        self.routed_experts_mgr = RoutedExpertsManager(
-            vllm_config=vllm_config,
-            kv_cache_config=kv_cache_config,
-        )
-        # Block-ID snapshot taken at schedule time (before forward),
-        # so update_from_output can read slot data even if a later
-        # schedule() frees the blocks (async scheduling race).
-        self._re_block_ids: dict[str, list[int]] = {}
+		self.routed_experts_mgr = RoutedExpertsManager(
+			vllm_config=vllm_config,
+			kv_cache_config=kv_cache_config,
+		)
+		# Block-ID snapshot taken at schedule time (before forward),
+		# so update_from_output can read slot data even if a later
+		# schedule() frees the blocks (async scheduling race).
+		self._re_block_ids: dict[str, list[int]] = {}
 
-    self._pause_state: PauseState = PauseState.UNPAUSED
+	self._pause_state: PauseState = PauseState.UNPAUSED
 
-    # In-flight requests still prefilling (prefill chunks + in-progress
-    # async KV loads). Their remaining-block reservation gates async loads.
-    self._inflight_prefills: set[Request] = set()
-
-    # add new feature: encoder cache pop to cpu
+	# In-flight requests still prefilling (prefill chunks + in-progress
+	# async KV loads). Their remaining-block reservation gates async loads.
+	self._inflight_prefills: set[Request] = set()
+	
+	# add new feature: encoder cache pop to cpu
     offload_cfg = get_ascend_config().encoder_caches_offload_config
     if offload_cfg.enabled_offload:
         self.mm_embed_offload = EMoonCakeStoreConnector(self.vllm_config, ECConnectorRole.SCHEDULER)
@@ -1726,5 +1743,7 @@ def _gather_mm_embeddings(
     return mm_embeds, is_mm_embed
 
 import vllm.v1.worker.gpu_model_runner
-vllm.v1.worker.gpu_model_runner.GPUModelRunner._process_encoder_cache_scheduler_output = _process_encoder_cache_scheduler_output
+vllm.v1.worker.gpu_model_runner.GPUModelRunner._process_encoder_cache_scheduler_output = (
+	_process_encoder_cache_scheduler_output
+)
 vllm.v1.worker.gpu_model_runner.GPUModelRunner._gather_mm_embeddings = _gather_mm_embeddings
