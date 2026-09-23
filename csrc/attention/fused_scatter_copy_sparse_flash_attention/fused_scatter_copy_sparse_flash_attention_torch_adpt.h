@@ -133,18 +133,29 @@ inline void npu_fused_scatter_copy_sparse_flash_attention(
 
   const auto device = query.device();
   for (const at::Tensor* tensor :
-       std::array<const at::Tensor*, 18>{
+       std::array<const at::Tensor*, 16>{
            &query_rope, &query, &actual_seq_lengths_query,
            &actual_seq_lengths_kv, &num_cache_tokens, &topk_dst_slots,
            &topk_src_ids, &topk_miss_counts, &miss_src_ids,
            &miss_dst_slots, &miss_counts,
            &hbm_block_table, &dram_block_table, &hbm_k_rope,
-           &hbm_kv_cache, &dram_k_rope, &dram_kv_cache,
-           &attention_out}) {
+           &hbm_kv_cache, &attention_out}) {
     TORCH_CHECK(tensor->device() == device,
-                "All fused MTP tensors must be on the same NPU.");
+                "All fused MTP tensors except DRAM sources must be on the "
+                "same NPU.");
     TORCH_CHECK(tensor->is_contiguous(),
                 "All fused MTP tensors must be contiguous.");
+  }
+
+  // The offload manager exposes registered, device-accessible host memory as
+  // non-owning CPU tensor views. Ordinary CPU allocations are not supported.
+  for (const at::Tensor* tensor :
+       std::array<const at::Tensor*, 2>{&dram_k_rope, &dram_kv_cache}) {
+    TORCH_CHECK(tensor->device().is_cpu() || tensor->device() == device,
+                "DRAM sources must be registered host views or on the query "
+                "NPU.");
+    TORCH_CHECK(tensor->is_contiguous(),
+                "DRAM sources must be contiguous.");
   }
 
   std::string query_layout = "TND";

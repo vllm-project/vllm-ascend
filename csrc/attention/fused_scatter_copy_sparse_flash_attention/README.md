@@ -95,7 +95,9 @@ Kernel 内部同步建立搬运写入与 Attention 读取之间的数据依赖�
 ## 约束说明
 
 - 仅支持推理场景，并支持图模式。
-- 所有 Tensor 必须位于同一 NPU、保持连续且不能为空。
+- 除 `dram_k_rope` 和 `dram_kv_cache` 外，所有 Tensor 必须位于同一 NPU；两个 DRAM
+  Source Tensor 可位于该 NPU，或使用已注册且设备可直接寻址的连续 CPU Host View。
+  普通 CPU 内存不受支持。所有 Tensor 必须保持连续且不能为空。
 - 所有浮点 Tensor 必须使用相同数据类型，只支持 FLOAT16 或 BFLOAT16。
 - 所有 Metadata Tensor 必须为 INT32。
 - Block Size 固定为 128，TopK 固定为 2048，KV Head 数固定为 1。
