@@ -22,7 +22,7 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 
-from vllm_ascend.device.device_config import is_310p
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
 
 def init_asecnd_model_state(
@@ -38,7 +38,7 @@ def init_asecnd_model_state(
 
     # 310P uses Triton-free states under ``vllm_ascend._310p.worker.v2.model_state``.
     if vllm_config.model_config.is_hybrid:
-        if is_310p():
+        if not get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PATCHES):
             from vllm_ascend._310p.worker.v2.model_state import Ascend310PMambaHybridModelState
 
             return Ascend310PMambaHybridModelState(vllm_config, model, encoder_cache, device)
@@ -54,7 +54,7 @@ def init_asecnd_model_state(
             device,
         )
 
-    if is_310p():
+    if not get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PATCHES):
         from vllm_ascend._310p.worker.v2.model_state import (
             Ascend310PModelState,
         )

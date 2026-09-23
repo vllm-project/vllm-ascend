@@ -278,7 +278,7 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, em
             side_effect=_reference_sparse_attention,
             create=True,
         ) as sparse_attention,
-        patch.object(sparse_mla, "record_attention_compute_start"),
+        patch.object(sparse_mla, "attention_transfer_window"),
         patch.object(sparse_mla, "wait_for_kv_layer_from_connector"),
         patch.object(sparse_mla, "notify_kv_cache_written"),
         patch.object(sparse_mla, "maybe_save_kv_layer_to_connector"),
@@ -330,10 +330,12 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, em
     expected_o_input = torch.zeros(padded_tokens, num_heads * value_dim)
     expected_o_input[:num_tokens] = expected_values
     expected_output = expected_o_input @ output_weight
+    if not graph_mode:
+        # Eager writes only the active output view; padding stays untouched.
+        expected_output[num_tokens:] = 123.0
 
     assert actual is output
     torch.testing.assert_close(actual, expected_output)
-    torch.testing.assert_close(actual[num_tokens:], torch.zeros(1, output_dim))
     torch.testing.assert_close(kv_cache[0], expected_cache)
     assert fused_qkv.calls[0][0].shape[0] == (padded_tokens if graph_mode else num_tokens)
     assert indexer.call is not None
@@ -342,6 +344,8 @@ def test_sparse_mla_full_forward_uses_real_rows_and_latent_values(graph_mode, em
     torch.testing.assert_close(indexer.call[2][:num_tokens], real_hidden)
     assert indexer.call[3] is indexer_metadata
     assert indexer.call[4] is True
+    expected_o_rows = padded_tokens if graph_mode else num_tokens
+    torch.testing.assert_close(output_proj.calls[0][0], expected_o_input[:expected_o_rows])
     assert output_proj.calls[0][1] == {}
 
     kwargs = sparse_attention.call_args.kwargs

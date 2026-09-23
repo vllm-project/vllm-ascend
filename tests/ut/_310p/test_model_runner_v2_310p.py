@@ -20,6 +20,8 @@ from vllm_ascend._310p.worker.v2.model_state import (
 )
 from vllm_ascend._310p.worker.v2.sampler import Ascend310PSampler
 from vllm_ascend._310p.worker.v2.states import Ascend310PStagedWriteTensor
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
@@ -202,7 +204,10 @@ def test_init_model_state_routes_qwen35_hybrid_to_310p() -> None:
     expected = object()
 
     with (
-        patch("vllm_ascend.worker.v2.model_states.is_310p", return_value=True),
+        patch(
+            "vllm_ascend.worker.v2.model_states.get_current_hardware_profile",
+            return_value=get_hardware_profile(AscendDeviceType._310P),
+        ),
         patch(
             "vllm_ascend._310p.worker.v2.model_state.Ascend310PMambaHybridModelState",
             return_value=expected,
@@ -517,12 +522,16 @@ def test_config_accepts_mtp_and_rejects_non_mtp() -> None:
     [
         ("speculative_config", object(), "only supported via MTP"),
         ("kv_transfer_config", object(), "KV cache transfer"),
-        ("lora_config", object(), "LoRA"),
     ],
 )
 def test_config_rejects_out_of_scope_features(field, value, message) -> None:
     with pytest.raises(NotImplementedError, match=message):
         NPUModelRunner310V2._validate_config(_make_vllm_config(**{field: value}))
+
+
+def test_config_accepts_lora() -> None:
+    """310P MRv2 supports LoRA; gate must not reject lora_config."""
+    NPUModelRunner310V2._validate_config(_make_vllm_config(lora_config=object()))
 
 
 def test_copy_kv_cache_blocks_flattens_mamba_lists() -> None:

@@ -174,6 +174,23 @@ def get_full_cos_and_sin_dsa(group_name: str) -> tuple[torch.Tensor, torch.Tenso
     return _ROPE_STATE.full_rope_cache[config_key]
 
 
+def get_full_cos_and_sin_dsa_for_layer(
+    layer_name: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return the full RoPE cache selected by one registered layer.
+
+    A group name is not sufficient for V4.1 because pure-SWA and long-context
+    layers both use the ``default`` group while registering different RoPE
+    configurations.  Resolving through ``layer_info`` keeps the compressor
+    metadata path tied to the exact table used by its source attention layer.
+    """
+    info = _ROPE_STATE.layer_info.get(layer_name)
+    if info is None:
+        raise KeyError(f"RoPE layer {layer_name!r} is not registered")
+    config_key, _ = info
+    return _ROPE_STATE.full_rope_cache[config_key]
+
+
 class ComplexExpRotaryEmbedding(nn.Module):
     def __init__(
         self,
@@ -194,9 +211,12 @@ class ComplexExpRotaryEmbedding(nn.Module):
         self.rotary_dim = rotary_dim
         beta_fast = extra_kwargs.get("beta_fast", 32)
         beta_slow = extra_kwargs.get("beta_slow", 1)
+        original_seq_len = extra_kwargs.get("original_max_position_embeddings", max_position_embeddings)
+        apply_yarn_scaling = extra_kwargs.get("apply_yarn_scaling", True)
         config_key = (
             f"rotary_dim{rotary_dim}_max_position_embeddings{max_position_embeddings}_"
-            f"base{base}_scaling_factor{scaling_factor}_beta_fast{beta_fast}_beta_slow{beta_slow}"
+            f"original_seq_len{original_seq_len}_apply_yarn{apply_yarn_scaling}_base{base}_scaling_factor{scaling_factor}_"
+            f"beta_fast{beta_fast}_beta_slow{beta_slow}"
         )
         _ROPE_STATE.layer_info[layername] = (config_key, rope_groups)
 
@@ -207,7 +227,14 @@ class ComplexExpRotaryEmbedding(nn.Module):
 
         if config_key not in _ROPE_STATE.full_rope_cache:
             inv_freq = self.precompute_freqs_cis(
-                rotary_dim, max_position_embeddings, max_position_embeddings, base, scaling_factor, beta_fast, beta_slow
+                rotary_dim,
+                max_position_embeddings,
+                original_seq_len,
+                base,
+                scaling_factor,
+                beta_fast,
+                beta_slow,
+                apply_yarn_scaling=apply_yarn_scaling,
             )
             t = torch.arange(
                 max_position_embeddings * scaling_factor,
@@ -221,6 +248,18 @@ class ComplexExpRotaryEmbedding(nn.Module):
             sin = sin.to(current_platform.device_type)
 
             _ROPE_STATE.full_rope_cache[config_key] = (cos.unsqueeze(1).unsqueeze(1), sin.unsqueeze(1).unsqueeze(1))
+
+        # The DSA RoPE tables are built while the sleep-mode weights mem-pool is
+        # active and every DSA layer reads them through the process-global
+        # ``_ROPE_STATE`` cache. Own them as non-persistent buffers as well, so a
+        # level-2 sleep backs up and restores their contents in place; the cache
+        # keeps the same tensor objects, so the lookup path and the addresses
+        # baked into captured ACL graphs are unchanged. ``named_buffers()``
+        # de-duplicates shared tensors, so the layers that share a config key
+        # cost a single backup entry.
+        full_rope_cos, full_rope_sin = _ROPE_STATE.full_rope_cache[config_key]
+        self.register_buffer("full_rope_cos", full_rope_cos, persistent=False)
+        self.register_buffer("full_rope_sin", full_rope_sin, persistent=False)
 
         use_eagle = (
             vllm_config is not None
@@ -253,7 +292,9 @@ class ComplexExpRotaryEmbedding(nn.Module):
                     _ROPE_STATE.spec_runtime_buffer[config_key][grp] = (buf_cos, buf_sin)
 
     @staticmethod
-    def precompute_freqs_cis(dim, seqlen, original_seq_len, base, factor, beta_fast, beta_slow):
+    def precompute_freqs_cis(
+        dim, seqlen, original_seq_len, base, factor, beta_fast, beta_slow, *, apply_yarn_scaling=True
+    ):
         def yarn_find_correction_dim(
             num_rotations: int,
             dim: int,
@@ -288,6 +329,8 @@ class ComplexExpRotaryEmbedding(nn.Module):
 
         pos_freqs = base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim)
         inv_freq_extrapolation = 1.0 / pos_freqs
+        if not apply_yarn_scaling:
+            return inv_freq_extrapolation
         inv_freq_interpolation = 1.0 / (factor * pos_freqs)
 
         low, high = yarn_find_correction_range(

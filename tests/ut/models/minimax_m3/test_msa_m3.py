@@ -544,31 +544,32 @@ def test_sparse_prepare_bypasses_fused_qkv_norm_rope_on_a5() -> None:
     assert "1.0 + self.q_norm.weight" in source
 
 
-def test_index_score_uses_ascendc_prefill_and_decode() -> None:
+def test_a5_index_score_uses_ascendc_prefill_and_triton_decode() -> None:
     module_source = inspect.getsource(msa_m3_module)
-    fp8_branch_start = module_source.index(
-        "if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):"
-    )
-    fp8_branch_end = module_source.index("\n\ndef _should_use_tp_sharded_index_decode", fp8_branch_start)
-    import_branches = module_source[fp8_branch_start:fp8_branch_end]
+    a5_branch_start = module_source.index("if get_ascend_device_type() == AscendDeviceType.A5:")
+    a5_branch_end = module_source.index("\n\ndef _should_use_tp_sharded_index_decode", a5_branch_start)
+    import_branches = module_source[a5_branch_start:a5_branch_end]
 
     assert msa_m3_module._USE_ASCENDC_INDEX_SCORE_PREFILL is True
-    assert msa_m3_module._USE_ASCENDC_INDEX_SCORE_DECODE is True
+    assert msa_m3_module._USE_ASCENDC_INDEX_SCORE_DECODE is (
+        msa_m3_module.get_ascend_device_type() != AscendDeviceType.A5
+    )
     assert import_branches.count("minimax_m3_index_decode") == 1
     assert "msa_m3_triton_a5" in import_branches
     assert "msa_m3_triton" not in import_branches.replace("msa_m3_triton_a5", "")
     assert "_USE_ASCENDC_INDEX_SCORE_PREFILL = True" in module_source
-    assert "_USE_ASCENDC_INDEX_SCORE_DECODE = True" in module_source
-    with patch.object(
-        msa_m3_module, "get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A5)
+    assert "_USE_ASCENDC_INDEX_SCORE_DECODE = get_ascend_device_type() != AscendDeviceType.A5" in module_source
+    with patch(
+        "vllm_ascend.models.minimax_m3.msa_m3.get_ascend_device_type",
+        return_value=AscendDeviceType.A5,
     ):
         assert not _should_use_tp_sharded_index_decode(tp_size=4, num_prefills=0)
 
 
 def test_non_a5_decode_keeps_tp_block_sharding() -> None:
     with patch(
-        "vllm_ascend.models.minimax_m3.msa_m3.get_current_hardware_profile",
-        return_value=get_hardware_profile(AscendDeviceType.A3),
+        "vllm_ascend.models.minimax_m3.msa_m3.get_ascend_device_type",
+        return_value=AscendDeviceType.A3,
     ):
         assert _should_use_tp_sharded_index_decode(tp_size=4, num_prefills=0)
         assert not _should_use_tp_sharded_index_decode(tp_size=1, num_prefills=0)
@@ -1003,9 +1004,11 @@ def test_bundled_ascendc_index_score_flushes_wide_a5_block_tables() -> None:
     repo_root = Path(msa_m3_module.__file__).parents[3]
     op_root = repo_root / "csrc" / "attention" / "msa_index_score"
     epilogue = (op_root / "op_kernel" / "arch35" / "msa_seg_row_max_epilogue.h").read_text(encoding="utf-8")
+    example = (op_root / "examples" / "test_aclnn_msa_index_score.cpp").read_text(encoding="utf-8")
 
     assert "AdvanceStageWindow" in epilogue
     assert "FlushStageToStrideEnd" in epilogue
+    assert "L0-fp8-wide-table-257" in example
 
 
 def test_ascendc_index_score_uses_dense_mode_without_mask() -> None:
@@ -1902,16 +1905,102 @@ def test_sparse_attn_prefill_a5_uses_fp8_inputs(
     assert args[11] == 4
 
 
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float8_e4m3fn])
+@pytest.mark.parametrize("cache_layout", ["tensor", "tuple", "list"])
+def test_sparse_attn_prefill_a5_missing_package_uses_q_gather_kv(dtype, cache_layout) -> None:
+    q = torch.tensor([[[500.0, -500.0, 1.0, -1.0]]] * 5, dtype=torch.bfloat16)
+    cache = torch.zeros(2, 3, 128, 1, 4, dtype=dtype)
+    kv_cache = cache if cache_layout == "tensor" else (cache[0], cache[1])
+    if cache_layout == "list":
+        kv_cache = list(kv_cache)
+    topk_idx = torch.tensor([[[0, -1]]] * 5, dtype=torch.int32)
+    output = torch.empty_like(q)
+    with (
+        patch.object(
+            msa_m3_npu_module, "get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A5)
+        ),
+        patch.object(msa_m3_npu_module, "_is_minimax_sparse_attention_split_kv_available", return_value=False),
+        patch.object(msa_m3_npu_module, "_npu_k2q_csr") as k2q,
+        patch("torch.ops._C_ascend.npu_sparse_attention_score", create=True, return_value=torch.ones_like(q)) as op,
+        patch("torch.ops._C_ascend.npu_sparse_attention_score_prefill", create=True) as split_kv,
+    ):
+        msa_m3_npu_module.minimax_m3_sparse_attn(
+            q,
+            kv_cache,
+            topk_idx,
+            torch.tensor([[0, 1], [2, 0]], dtype=torch.int32),
+            torch.tensor([0, 2, 5], dtype=torch.int32),
+            torch.tensor([130, 3], dtype=torch.int32),
+            torch.tensor([128, 0], dtype=torch.int32),
+            3,
+            1,
+            0.5,
+            output,
+            total_kv_blocks=3,
+            max_kv_blocks=2,
+        )
+    k2q.assert_not_called()
+    split_kv.assert_not_called()
+    op.assert_called_once()
+    args, kwargs = op.call_args
+    assert args[0].dtype == dtype
+    assert args[1].dtype == dtype
+    assert args[2].dtype == dtype
+    assert args[3] is topk_idx
+    torch.testing.assert_close(kwargs["actual_seq_lengths"], torch.tensor([2, 3], dtype=torch.int32))
+    torch.testing.assert_close(kwargs["actual_seq_lengths_kv"], torch.tensor([130, 3], dtype=torch.int32))
+    torch.testing.assert_close(kwargs["select_num_idx"], torch.ones(5, 1, dtype=torch.int32))
+    assert kwargs["inner_precise"] == 4
+    if dtype == torch.float8_e4m3fn:
+        torch.testing.assert_close(args[0].float(), q.float().clamp(-448, 448))
+        assert kwargs["attention_out_dtype"] == torch.bfloat16
+        scale = kwargs["q_dequant_scale"]
+        assert kwargs["k_dequant_scale"] is scale
+        assert kwargs["v_dequant_scale"] is scale
+        torch.testing.assert_close(scale, torch.ones(1, 1, 1, 1))
+    else:
+        assert args[0] is q
+        assert "q_dequant_scale" not in kwargs
+        assert "attention_out_dtype" not in kwargs
+    torch.testing.assert_close(output, torch.ones_like(q))
+
+
+@pytest.mark.parametrize("supports_fp8,value_dtype", [(False, torch.float8_e4m3fn), (True, torch.bfloat16)])
+def test_sparse_attn_prefill_fallback_rejects_invalid_fp8(supports_fp8, value_dtype) -> None:
+    q = torch.zeros(1, 1, 4, dtype=torch.bfloat16)
+    kv_cache = (torch.zeros(1, 128, 1, 4, dtype=torch.float8_e4m3fn), torch.zeros(1, 128, 1, 4, dtype=value_dtype))
+    with (
+        patch("torch.ops._C_ascend.npu_sparse_attention_score", create=True) as op,
+        pytest.raises(TypeError, match="FP8 sparse attention"),
+    ):
+        msa_m3_npu_module._minimax_m3_sparse_attn_a3(
+            q,
+            kv_cache,
+            torch.zeros(1, 1, 1, dtype=torch.int32),
+            torch.zeros(1, 1, dtype=torch.int32),
+            torch.tensor([0, 1], dtype=torch.int32),
+            torch.ones(1, dtype=torch.int32),
+            1,
+            0.5,
+            torch.empty_like(q),
+            128,
+            supports_fp8=supports_fp8,
+        )
+    op.assert_not_called()
+
+
 @pytest.mark.parametrize(
     ("device_type", "split_kv_available", "expected_impl"),
     [
         (AscendDeviceType.A5, True, "kv_gather_q"),
+        (AscendDeviceType.A5, False, "legacy"),
         (AscendDeviceType.A3, True, "kv_gather_q"),
         (AscendDeviceType.A3, False, "legacy"),
+        (AscendDeviceType.A2, True, "kv_gather_q"),
         (AscendDeviceType.A2, False, "legacy"),
     ],
 )
-def test_sparse_attn_prefill_dispatches_by_hardware_capability(
+def test_sparse_attn_prefill_dispatches_by_operator_availability(
     device_type: AscendDeviceType,
     split_kv_available: bool,
     expected_impl: str,
@@ -1959,8 +2048,8 @@ def test_sparse_attn_prefill_dispatches_by_hardware_capability(
     else:
         mock_legacy.assert_called_once()
         mock_kv_gather_q.assert_not_called()
+        assert mock_legacy.call_args.kwargs == {
+            "supports_fp8": device_type == AscendDeviceType.A5,
+        }
 
-    if device_type == AscendDeviceType.A3:
-        mock_is_available.assert_called_once_with()
-    else:
-        mock_is_available.assert_not_called()
+    mock_is_available.assert_called_once_with()
