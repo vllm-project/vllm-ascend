@@ -491,15 +491,16 @@ def _run_and_assert(case: ManageCase) -> tuple[torch.Tensor, tuple[torch.Tensor,
     src, dst, route_miss, miss_src, miss_dst, miss_count = [tensor.cpu() for tensor in outputs]
     cache_cpu = cache.cpu()
     query_start = 0
+    visible_lengths = _visible_lengths(case)
 
     for request, q in enumerate(case.q_values):
         query_end = query_start + q
         state = case.states[request]
         row = case.req_entries[request]
         length = case.actual_key[request] if state == REQUEST_STATE_NON_OFFLOAD else case.offload_key[request]
-        valid = min(length, TOPK)
 
         for route in range(query_start, query_end):
+            valid = min(visible_lengths[route], TOPK)
             actual_topk = src[route, 0, :valid]
             expected_topk = reference[route, :valid]
             if state == REQUEST_STATE_NON_OFFLOAD:
@@ -590,6 +591,27 @@ def test_fused_lightning_indexer_manage_non_offload_matches_native(dtype, heads)
         dtype=dtype,
         heads=heads,
     )
+    _run_and_assert(case)
+
+
+@pytest.mark.parametrize(
+    "q,offload_len,actual_key",
+    [
+        pytest.param(10, 0, 10, id="visible-1-through-10"),
+        pytest.param(2, 1920, 2048, id="visible-2047-and-2048"),
+    ],
+)
+@torch.inference_mode()
+def test_fused_lightning_indexer_manage_non_offload_short_visible_padding(q, offload_len, actual_key):
+    case = _build_case(
+        q_values=[q],
+        states=[REQUEST_STATE_NON_OFFLOAD],
+        offload_len=offload_len,
+        cache_tokens=offload_len,
+        random_block_table=False,
+    )
+    case.actual_key[0] = actual_key
+    case.actual_seq_lengths_key.fill_(actual_key)
     _run_and_assert(case)
 
 

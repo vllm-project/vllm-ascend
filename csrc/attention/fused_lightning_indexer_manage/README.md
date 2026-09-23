@@ -188,7 +188,7 @@ pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_lightning
 - 2048/2049和4095/4096/4097 Miss Occurrence排序边界；
 - 代表性的shape、dtype、连续性和最大Query路数校验。
 
-测试共收集105个pytest case：Q=1～14覆盖非卸载、首次卸载和稳态卸载状态，代表性Q值覆盖FLOAT16/BFLOAT16与32/64个Index Head的交叉组合，并覆盖窄路由、宽路由、混合状态Batch及多档长序列。每个pytest case结束后会输出`[当前case/总case] [完成百分比]`，便于观察长测试的执行进度。
+测试共收集107个pytest case：Q=1～14覆盖非卸载、首次卸载和稳态卸载状态，代表性Q值覆盖FLOAT16/BFLOAT16与32/64个Index Head的交叉组合，并覆盖非卸载短序列的TopK无效后缀、窄路由、宽路由、混合状态Batch及多档长序列。每个pytest case结束后会输出`[当前case/总case] [完成百分比]`，便于观察长测试的执行进度。
 
 测试使用`torch_npu.npu_lightning_indexer`作为TopK参考实现，仅验证功能正确性，不包含性能测试、耗时阈值或性能基线。
 

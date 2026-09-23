@@ -157,7 +157,7 @@ private:
                                              const LocalTensor<int32_t> &scratchLocal,
                                              int64_t outputOffset, bool hasLongIndexTag,
                                              uint32_t batch, uint32_t routeInBatch,
-                                             uint32_t routeCount);
+                                             uint32_t routeCount, int64_t visibleKeyCount);
     __aicore__ inline void SortTopkBySlotIndex(const LocalTensor<float> &pairLocal,
                                                const LocalTensor<float> &workspaceLocal,
                                                bool hasLongIndexTag);
@@ -415,13 +415,33 @@ __aicore__ inline void LIVector<LIT>::DecodeTopkHitMiss(
     const LocalTensor<float> &pairLocal, const LocalTensor<int32_t> &indexLocal,
     const LocalTensor<int32_t> &slotLocal, const LocalTensor<int32_t> &scratchLocal,
     int64_t outputOffset, bool hasLongIndexTag, uint32_t batch,
-    uint32_t routeInBatch, uint32_t routeCount)
+    uint32_t routeInBatch, uint32_t routeCount, int64_t visibleKeyCount)
 {
     const int32_t requestState = batch < batchSize_
         ? requestStateGm.GetValue(batch) : 0;
     ExtractIndex(indexLocal.template ReinterpretCast<uint32_t>(),
                  pairLocal.template ReinterpretCast<uint32_t>(), constInfo_.sparseCount);
     if (requestState == LIMConfig::REQUEST_STATE_NON_OFFLOAD) {
+        // Causal masking changes scores to -inf, but the shared chunk payload
+        // still contains later queries' source IDs.  Invalidate the fixed
+        // TopK suffix when this route sees fewer than TopK keys.
+        if (visibleKeyCount < constInfo_.sparseCount) {
+            const uint32_t validCount = visibleKeyCount > 0
+                ? static_cast<uint32_t>(visibleKeyCount) : 0U;
+            // Vector stores require a 32-byte-aligned start.  Fill the aligned
+            // suffix in bulk, then repair the at-most-seven boundary entries.
+            const uint32_t alignedCount = (validCount + 7U) & ~7U;
+            PipeBarrier<PIPE_V>();
+            if (alignedCount < constInfo_.sparseCount) {
+                Duplicate(indexLocal[alignedCount], LIMConfig::PADDING_SOURCE_ID,
+                          constInfo_.sparseCount - alignedCount);
+            }
+            SetWaitFlag<HardEvent::V_S>(HardEvent::V_S);
+            for (uint32_t position = validCount; position < alignedCount; ++position) {
+                indexLocal.SetValue(position, LIMConfig::PADDING_SOURCE_ID);
+            }
+            SetWaitFlag<HardEvent::S_MTE3>(HardEvent::S_MTE3);
+        }
         // Standard payload already is the source ID (including -1 padding).
         // Preserve score order and publish the identity destination directly.
         LIServiceVec::CopyOut(slotOutGm[outputOffset], indexLocal,
@@ -793,7 +813,7 @@ __aicore__ inline void LIVector<LIT>::ProcessVec(const LICommon::RunInfo &info)
                                       slotLocal, scratchLocal, outputOffset,
                                       hasLongIndexTag,
                                       info.bIdx, static_cast<uint32_t>(cuS1Idx),
-                                      info.actS1Size);
+                                      info.actS1Size, cuRealAcSeq);
                     InitSortOutBuf(globalTopkUb_[innerS1Idx * BASE_TOPK * 2], BASE_TOPK * 2);
                     outQueue_.EnQue<float>(valueULocal);
                     valueULocal = outQueue_.DeQue<float>();
@@ -1097,7 +1117,7 @@ __aicore__ inline void LIVector<LIT>::ProcessLD()
                               s2ActSeq > EXACT_PACKED_SOURCE_TOKENS,
                               static_cast<uint32_t>(bIdx),
                               static_cast<uint32_t>(s1Idx),
-                              static_cast<uint32_t>(routeCount));
+                              static_cast<uint32_t>(routeCount), s2ActSeq);
             SetWaitFlag<HardEvent::V_MTE3>(HardEvent::V_MTE3);
             SetWaitFlag<HardEvent::S_MTE3>(HardEvent::S_MTE3);
             DataCopyPad(indiceOutGm[outOffset], idxULocal1,

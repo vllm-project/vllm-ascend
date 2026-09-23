@@ -23,6 +23,7 @@ constexpr uint32_t MAX_CACHE_TOKENS = 32640U;
 constexpr int32_t REQUEST_STATE_NON_OFFLOAD = -3;
 constexpr int32_t REQUEST_STATE_FIRST_DECODE = -2;
 constexpr int32_t REQUEST_STATE_STEADY = -1;
+constexpr int32_t PADDING_SOURCE_ID = -1;
 
 constexpr uint32_t AIVS_PER_AIC = 2U;
 constexpr uint32_t LD_PARAM_COUNT = 16U;
