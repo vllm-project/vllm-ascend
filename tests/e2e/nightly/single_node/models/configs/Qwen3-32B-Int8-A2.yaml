@@ -61,6 +61,6 @@ test_cases:
     server_cmd_extra:
       - "--compilation-config"
       - "--additional-config"
-      - '{"ascend_compilation_config":{"enable_static_kernel":true}}'
+      - '{"ascend_compilation_config":{"enable_static_kernel":true},"enable_flashcomm1":true}'
     benchmarks:
       <<: *benchmarks
