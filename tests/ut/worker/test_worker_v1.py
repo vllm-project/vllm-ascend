@@ -1591,9 +1591,7 @@ class TestNPUWorker(TestBase):
 
             with (
                 patch("vllm_ascend.model_executor.warmup.nz_warmup.join_nz_warm_thread") as join_nz,
-                patch(
-                    "vllm_ascend.model_executor.warmup.early_kernel_warmup.join_early_kernel_warmup"
-                ) as join_early,
+                patch("vllm_ascend.model_executor.warmup.early_kernel_warmup.join_early_kernel_warmup") as join_early,
             ):
                 worker.load_model()
 

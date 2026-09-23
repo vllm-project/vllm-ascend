@@ -56,4 +56,3 @@ def test_routed_moe_receives_configured_swiglu_limit(monkeypatch):
     deepseek_v4.DeepseekV4MoE(config, parallel_config, prefix="model.layers.1.mlp")
 
     assert fused_moe_kwargs["swiglu_limit"] == config.swiglu_limit
-
