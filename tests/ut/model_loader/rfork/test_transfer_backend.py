@@ -696,13 +696,27 @@ def test_split_tensors_by_excluded_blocks_separates_shared_storage():
     assert excluded_names == ["model.embed_tokens.weight"]
 
 
+# Sentinel so tests can pass ``memory_registration_cls=None`` explicitly.
+_UNSET = object()
+
+
 def _make_register_memory_region_backend(
     monkeypatch,
     tensors,
     snapshot_blocks,
     stale_blocks=(),
     unregister_error=False,
+    register_outcome="ok",
+    memory_registration_cls=_UNSET,
 ):
+    """Build a backend whose registration outcome can be forced.
+
+    ``register_outcome`` selects what ``batch_register_memory_ex`` does:
+    ``"ok"`` succeeds, ``"error"`` returns an error result, ``"none"`` returns
+    ``None``, ``"raise"`` raises, and ``"unsupported"`` omits the method from the
+    engine entirely. ``memory_registration_cls`` overrides the
+    ``MemoryRegistration`` class so the unsupported-engine guard can be tested.
+    """
     registrations: list[tuple[int, int, int, int]] = []
     unregistered_calls = []
     monkeypatch.setattr(
@@ -719,6 +733,12 @@ def _make_register_memory_region_backend(
 
     def batch_register_memory_ex(items):
         registrations.extend(item.values for item in items)
+        if register_outcome == "raise":
+            raise RuntimeError("mock registration raised")
+        if register_outcome == "none":
+            return None
+        if register_outcome == "error":
+            return SimpleNamespace(is_error=lambda: True, to_string=lambda: "mock registration error")
         return _Ret()
 
     def batch_unregister_memory(addresses):
@@ -726,11 +746,13 @@ def _make_register_memory_region_backend(
         return SimpleNamespace(is_error=lambda: unregister_error, to_string=lambda: "mock unregister error")
 
     backend = RForkTransferBackend()
-    backend.transfer_engine = SimpleNamespace(
-        batch_register_memory_ex=batch_register_memory_ex,
-        batch_unregister_memory=batch_unregister_memory,
+    engine_attrs = {"batch_unregister_memory": batch_unregister_memory}
+    if register_outcome != "unsupported":
+        engine_attrs["batch_register_memory_ex"] = batch_register_memory_ex
+    backend.transfer_engine = SimpleNamespace(**engine_attrs)
+    backend._memory_registration_cls = (
+        _MemoryRegistration if memory_registration_cls is _UNSET else memory_registration_cls
     )
-    backend._memory_registration_cls = _MemoryRegistration
     backend.registered_weight_blocks = list(stale_blocks)
     backend.registered_memory_addresses = [address for address, _ in stale_blocks]
     backend.weight_manifest = None
@@ -824,6 +846,125 @@ def test_register_memory_region_skips_empty_batch_after_excluding_all_weights(mo
     assert backend._registered_transferable_tensors == []
     assert backend.registered_weight_blocks == []
     assert registrations == []
+
+
+def _single_block_snapshot(storage):
+    return [
+        {
+            "address": storage.data_ptr(),
+            "size": storage.numel() * storage.element_size(),
+            "state": "active_allocated",
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("register_outcome", "memory_registration_cls"),
+    [
+        ("unsupported", _UNSET),
+        ("ok", None),
+    ],
+    ids=["engine_without_batch_register_memory_ex", "engine_without_memory_registration"],
+)
+def test_register_memory_region_clears_state_when_engine_lacks_registration_support(
+    monkeypatch, register_outcome, memory_registration_cls
+):
+    storage = torch.arange(10, dtype=torch.float32)
+    backend, registrations, unregistered_calls = _make_register_memory_region_backend(
+        monkeypatch,
+        [("weight", storage)],
+        _single_block_snapshot(storage),
+        register_outcome=register_outcome,
+        memory_registration_cls=memory_registration_cls,
+    )
+
+    assert not backend.register_memory_region(object(), True)
+
+    # An engine that cannot register must leave no provisional manifest behind.
+    assert registrations == []
+    assert unregistered_calls == []
+    assert backend.weight_manifest is None
+    assert backend.weight_formats is None
+    assert backend.registered_weight_blocks == []
+    assert backend.registered_memory_addresses == []
+    assert backend._registered_transferable_tensors is None
+    assert backend._registered_transferable_storages is None
+
+
+@pytest.mark.parametrize("register_outcome", ["raise", "error", "none"])
+def test_register_memory_region_rolls_back_attempted_addresses_when_registration_fails(monkeypatch, register_outcome):
+    storage = torch.arange(10, dtype=torch.float32)
+    backend, registrations, unregistered_calls = _make_register_memory_region_backend(
+        monkeypatch,
+        [("weight", storage)],
+        _single_block_snapshot(storage),
+        register_outcome=register_outcome,
+    )
+
+    assert not backend.register_memory_region(object(), True)
+
+    # The region was handed to the engine, so the attempted address is rolled back
+    # even though the engine never confirmed it.
+    assert registrations == [(storage.data_ptr(), 40, storage.data_ptr(), 40)]
+    assert unregistered_calls == [[storage.data_ptr()]]
+    assert backend.weight_manifest is None
+    assert backend.registered_weight_blocks == []
+    assert backend.registered_memory_addresses == []
+    assert backend._registered_transferable_tensors is None
+
+
+def test_register_memory_region_retains_owners_when_rollback_also_fails(monkeypatch):
+    storage = torch.arange(10, dtype=torch.float32)
+    backend, _, unregistered_calls = _make_register_memory_region_backend(
+        monkeypatch,
+        [("weight", storage)],
+        _single_block_snapshot(storage),
+        unregister_error=True,
+        register_outcome="error",
+    )
+
+    assert not backend.register_memory_region(object(), True)
+
+    # Rollback failed, so the address and its owners stay pinned for a later retry
+    # instead of being dropped while the engine may still hold the region.
+    assert unregistered_calls == [[storage.data_ptr()]]
+    assert backend.registered_memory_addresses == [storage.data_ptr()]
+    assert backend.registered_weight_blocks == [(storage.data_ptr(), 40)]
+    assert backend.weight_manifest is not None and "weight" in backend.weight_manifest
+    assert backend._registered_transferable_tensors is not None
+    assert [name for name, _ in backend._registered_transferable_tensors] == ["weight"]
+
+
+def test_register_memory_region_rolls_back_earlier_batches_when_a_later_batch_fails(monkeypatch):
+    storage = torch.arange(12, dtype=torch.uint8)
+    weights = [storage[0:2], storage[4:6]]
+    calls = []
+
+    backend, _, unregistered_calls = _make_register_memory_region_backend(
+        monkeypatch,
+        [(f"weight_{index}", weight) for index, weight in enumerate(weights)],
+        [{"address": storage.data_ptr(), "size": storage.numel(), "state": "active_allocated"}],
+    )
+    monkeypatch.setattr(transfer_backend, "MAX_MEMORY_REGISTRATION_BATCH_ITEMS", 1)
+
+    # Succeed on the first batch, fail on the second.
+    def batch_register_memory_ex(items):
+        calls.append([item.values for item in items])
+        if len(calls) == 1:
+            return SimpleNamespace(is_error=lambda: False)
+        return SimpleNamespace(is_error=lambda: True, to_string=lambda: "mock registration error")
+
+    backend.transfer_engine.batch_register_memory_ex = batch_register_memory_ex
+
+    assert not backend.register_memory_region(object(), False)
+
+    assert len(calls) == 2
+    # Rollback covers the confirmed first batch, not just the failed one. It reuses the
+    # same batch limit, so each address is unregistered in its own call here.
+    assert unregistered_calls == [[weight.data_ptr()] for weight in weights]
+    assert backend.registered_memory_addresses == []
+    assert backend.weight_manifest is None
+    assert backend._registered_transferable_tensors is None
 
 
 def test_read_weights_from_seed_rejects_missing_registration_cache(monkeypatch):

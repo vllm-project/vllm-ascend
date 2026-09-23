@@ -14,7 +14,7 @@ The RFork loading flow in the current implementation is:
 2. RFork builds a **seed key** from the model identity and deployment topology.
 3. RFork asks the planner for an available seed matching that key.
 4. If a seed is returned, the new instance initializes the model structure on its local NPU, registers local weight memory, fetches the remote transfer-engine metadata from the seed, and performs batch weight transfer into local parameter buffers.
-5. If no seed is available, or any step fails, RFork cleans up and falls back to the default loader.
+5. If no seed is available, or any step fails, RFork releases its registered memory and seed service, then falls back to the default loader. Fallback is conditional on that cleanup succeeding: if registered memory or the seed service cannot be released, RFork raises instead of allocating a second model while the old weights are still pinned.
 6. After the instance finishes loading, it starts a local seed service and periodically reports heartbeat to the planner, so later instances can reuse it.
 
 ## Flowchart
@@ -104,7 +104,10 @@ When validating RFork for a quantized model:
 - Restart the planner and all vLLM instances after changing RFork code, because existing seeds keep their old transfer metadata.
 - Use a new `model_deploy_strategy_name` after changing model arguments or RFork code, so the planner does not match a receiver with an incompatible old seed.
 - A successful TP0 RFork transfer logs elapsed time, bytes, chunks, and throughput at INFO. Other TP ranks and
-  per-chunk details remain at DEBUG. The fallback path logs `RFork transfer failed`.
+  per-chunk details remain at DEBUG. The two fallback paths are logged differently: a plain seed miss logs
+  `seed acquisition was unsuccessful; loading locally` (INFO on the summary rank, DEBUG elsewhere) and reports
+  `source=local`, while a failed transfer logs `RFork transfer failed` at WARNING and reports `source=fallback`.
+  Treat only the latter as a transfer defect.
 
 ### Intentional transfer contracts
 
@@ -226,9 +229,16 @@ lease-release, and publication timing.
 
 - RFork requires `YuanRong TransferEngine` at runtime. If the package is missing, RFork cannot initialize the transfer backend.
 - If RFORK is used, **each worker process** must bind a listening port. That port is assigned randomly.
-- RFork weight transfer does not support dynamic EPLB because expert weights and placement can change after the seed service starts. If `eplb_config.dynamic_eplb` or `eplb_config.expert_map_record_path` enables dynamic EPLB, RFork transfer is bypassed and the model is loaded through the default model loader.
+- RFork transfer is bypassed entirely — the model loads through the default loader and no seed is advertised — under any of the configurations below. RFork registers live NPU weight memory and serves it to other instances, so it cannot be used when that memory may later be released or rewritten, nor when expert placement is not fixed at load time. The bypass is decided before any session or TransferEngine setup and is logged as `RFork transfer is disabled when <reason> is enabled; using the default model loader.`
+    - **Sleep mode** (`enable_sleep_mode` on either the model config or `vllm_config.model_config`), because sleeping discards and reallocates weight storage.
+    - **Online weight transfer** (`weight_transfer_config` is set), because weights can be replaced after loading.
+    - **Static expert placement** (`eplb_config.expert_map_path` is set), because the placement map is applied outside the transferred tensor set.
+    - **Dynamic EPLB**, because expert weights and placement can change after the seed service starts. This covers `parallel_config.enable_eplb`, `eplb_config.dynamic_eplb`, and `eplb_config.expert_map_record_path`.
+- Falling back to the default loader requires releasing the RFork seed service and registered memory first. RFork retries that cleanup (`FALLBACK_CLEANUP_MAX_ATTEMPTS`, currently 2, with a short backoff) and only then reclaims memory and reruns the default loader. If cleanup still fails, tensor owners remain pinned and RFork raises rather than allocating a second copy of the model; a session that already reached the finalized state raises as well. Both cases abort startup instead of degrading to a slow load.
 - The example [`rfork_planner.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rfork/rfork_planner.py) is only a simple mock implementation. If you need stronger scheduling, capacity management, or production-grade availability behavior, implement your own planner based on the RFork seed protocol.
-- The planner protocol headers `SEED_REFCNT` and `SEED_RANK` are deprecated and will be removed in a future release. `SEED_REFCNT` is always sent as `0` and ignored by the planner (seed capacity is controlled by planner configuration), and `SEED_RANK` duplicates the `tp_rank` already encoded in the seed key. Custom planner implementations must not depend on these headers.
+- The planner protocol headers `SEED_REFCNT` and `SEED_RANK` carry no scheduling meaning, but they are not optional on the wire today:
+    - `SEED_REFCNT` is always sent as `0` on advertisement and is ignored for capacity decisions (seed capacity is controlled by planner configuration). A planner must still accept the header.
+    - `SEED_RANK` remains a **required** field. RFork rejects a `/get_seed` response that omits it or carries a negative value, and sends it on every seed advertisement, lease renewal, lease release, and seed removal request. A planner must echo it back on `/get_seed` and accept it on the other routes. What is deprecated is using it for compatibility decisions: it duplicates the `tp_rank` already encoded in the seed key, so a planner must match on the seed key alone and treat `SEED_RANK` as an opaque part of the seed's identity tuple.
 - Each heartbeat verifies that the seed HTTP service remains alive. If the service exits, RFork stops heartbeats and
   attempts to withdraw the advertisement while leaving the loaded model available for inference.
 - Temporary planner outages do not stop inference. Retryable initial advertisements and lease releases continue in the
