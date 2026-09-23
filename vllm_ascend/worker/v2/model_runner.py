@@ -910,6 +910,7 @@ def graph_manager_wrapper(model_runner):
         decode_query_len: int,
         lora_capture_cases: list[int] | None = None,
         varlen_decode: bool = False,
+        ubatch_runner=None,
     ):
         return ModelAclGraphManager(
             vllm_config,
@@ -919,6 +920,7 @@ def graph_manager_wrapper(model_runner):
             model_runner,
             lora_capture_cases=lora_capture_cases,
             varlen_decode=varlen_decode,  # type: ignore[call-arg]
+            ubatch_runner=ubatch_runner,
         )
 
     try:

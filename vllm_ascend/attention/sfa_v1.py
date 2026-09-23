@@ -559,10 +559,11 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         cum_query_lens = common_attn_metadata.query_start_loc[1 : num_reqs + 1]
         seq_lens = common_attn_metadata.seq_lens[:num_reqs]
 
-        # Prefer _seq_lens_cpu (always available, updated during draft
-        # iterations) over seq_lens_cpu (None in async spec decode mode).
-        if common_attn_metadata._seq_lens_cpu is not None:
-            seq_lens_cpu = common_attn_metadata._seq_lens_cpu[:num_reqs]
+        # Older upstream versions update _seq_lens_cpu during draft iterations;
+        # newer versions expose only the public CPU sequence-length field.
+        cached_seq_lens_cpu = getattr(common_attn_metadata, "_seq_lens_cpu", None)
+        if cached_seq_lens_cpu is not None:
+            seq_lens_cpu = cached_seq_lens_cpu[:num_reqs]
         elif common_attn_metadata.seq_lens_cpu is not None:
             seq_lens_cpu = common_attn_metadata.seq_lens_cpu[:num_reqs]
         elif self.nope:

@@ -1,5 +1,5 @@
 import ast
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
@@ -15,8 +15,55 @@ from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
-from vllm_ascend.worker.v2.model_runner import NPUModelRunner
+from vllm_ascend.worker.v2.model_runner import NPUModelRunner, graph_manager_wrapper
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
+
+
+def test_graph_manager_wrapper_forwards_upstream_ubatch_runner():
+    runner, ubatch_runner = object(), object()
+    original = vllm_model_runner.ModelCudaGraphManager
+    with patch("vllm_ascend.worker.v2.model_runner.ModelAclGraphManager") as manager:
+        with graph_manager_wrapper(runner):
+            vllm_model_runner.ModelCudaGraphManager(
+                object(), torch.device("cpu"), CUDAGraphMode.NONE, 1, ubatch_runner=ubatch_runner
+            )
+        assert manager.call_args.kwargs["ubatch_runner"] is ubatch_runner
+        assert manager.call_args.args[4] is runner
+    assert vllm_model_runner.ModelCudaGraphManager is original
+
+
+def test_upstream_initialization_preserves_split_kv_tensors_for_block_copy():
+    """Ascend K/V tuples must become individual copy-on-write cache tensors."""
+    runner = MagicMock()
+    runner.device = torch.device("cpu")
+    runner.is_encoder_decoder = False
+    runner.speculator = None
+    runner.cache_config.kv_sharing_fast_prefill = False
+    runner.model_state.get_additional_cg_support.return_value = ()
+    k, v, indexer = [torch.empty(2, 4) for _ in range(3)]
+    off_device = torch.empty(2, 4, device="meta")
+    caches = {"mla": (k, v), "indexer": [indexer], "off_device": off_device}
+    with ExitStack() as stack:
+        for name in (
+            "BlockTables",
+            "ModelCudaGraphManager",
+            "initialize_mamba_ssu_backend",
+            "check_attention_cp_compatibility",
+            "get_kv_connector",
+        ):
+            stack.enter_context(patch.object(vllm_model_runner, name))
+        stack.enter_context(patch.object(vllm_model_runner, "has_compiled_submodule", return_value=False))
+        stack.enter_context(patch.object(vllm_model_runner, "get_max_chunk_logits", return_value=1))
+        stack.enter_context(patch.object(vllm_model_runner, "init_attn_backend", return_value=([], MagicMock(), [])))
+        stack.enter_context(
+            patch.object(vllm_model_runner, "maybe_create_adaptive_verification_manager", return_value=None)
+        )
+        stack.enter_context(patch.object(vllm_model_runner, "maybe_build_ubatch_runner", return_value=None))
+        stack.enter_context(patch.object(vllm_model_runner.pcp, "maybe_build_pcp_manager", return_value=None))
+        stack.enter_context(patch.object(vllm_model_runner, "init_kv_cache", return_value=caches))
+        GPUModelRunner.initialize_kv_cache(runner, KVCacheConfig(num_blocks=2, kv_cache_tensors=[], kv_cache_groups=[]))
+    assert len(runner.kv_caches) == 3
+    assert all(actual is expected for actual, expected in zip(runner.kv_caches, (k, v, indexer)))
 
 
 def _make_runner(need_timing: bool = True):
@@ -240,27 +287,22 @@ def test_prepare_inputs_preserves_pcp_tokens_and_forwards_graph_padding():
     ]
 
     # prepare_inputs keeps the real global PCP batch when it is larger than the
-    # graph descriptor, and forwards the descriptor as an explicit rank-local
-    # padded extent on both supported versions (upstream vLLM #53515).
+    # graph descriptor. Upstream decides token and request padding from the
+    # complete descriptor before partitioning the batch.
     assert len(padding_assignments) == 1
     assert ast.unparse(padding_assignments[0].value) == "max(num_tokens, batch_desc.num_tokens)"
 
     assert len(partition_calls) == 1
-    padded_call = next(
-        call for call in partition_calls if any(keyword.arg == "padded_num_tokens" for keyword in call.keywords)
-    )
-    padded_num_tokens = next(keyword.value for keyword in padded_call.keywords if keyword.arg == "padded_num_tokens")
-    assert isinstance(padded_num_tokens, ast.Attribute)
-    assert padded_num_tokens.attr == "num_tokens"
-    assert isinstance(padded_num_tokens.value, ast.Name)
-    assert padded_num_tokens.value.id == "batch_desc"
+    descriptor = next(keyword.value for keyword in partition_calls[0].keywords if keyword.arg == "batch_desc")
+    assert isinstance(descriptor, ast.Name)
+    assert descriptor.id == "batch_desc"
 
 
 @pytest.mark.parametrize("num_reqs,num_tokens", [(4, 4), (2, 6)])
 def test_pcp_dummy_refreshes_captured_buffers_after_real_batch(num_reqs, num_tokens):
     runner = _make_runner()
     runner.input_buffers = AscendInputBuffers(4, 8, torch.device("cpu"))
-    manager = AscendPCPManager(2, 1, torch.device("cpu"), max_num_reqs=4, max_num_tokens=8)
+    manager = AscendPCPManager(2, 1, torch.device("cpu"), False, max_num_reqs=4, max_num_tokens=8)
     runner.pcp_manager = manager
     manager._local_block_tables = (torch.full((8, 2), 99, dtype=torch.int32),)
     manager._gathered_kv_slot_mappings = torch.full((1, 16), 99, dtype=torch.int64)
@@ -696,7 +738,10 @@ def _fake_async_copy(src, device=None, out=None):
 def _run_prepare_inputs(runner, scheduler_output, batch_req_state, batch_desc, *, version_029=False):
     batch = SimpleNamespace(positions=torch.zeros(4, dtype=torch.int32))
 
-    def _partition(_pcp_manager, input_batch, **_kwargs):
+    expected_batch_desc = batch_desc
+
+    def _partition(_pcp_manager, input_batch, *, batch_desc):
+        assert batch_desc is expected_batch_desc
         return input_batch
 
     with (

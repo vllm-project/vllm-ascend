@@ -145,8 +145,7 @@ class UvaBufferWrapper:
     def np(self):
         return self._np if is_uva_available() else MonitoredNumPyArray(self._np, self._mark_cpu_modified)
 
-    @property
-    def uva(self):
+    def uva(self, n: int | None = None):
         """Get the device data of the buffer."""
         if not is_uva_available() and self._modified_indices:
             dirty_rows = sorted(self._modified_indices)
@@ -165,7 +164,7 @@ class UvaBufferWrapper:
                 src = self._cpu[dirty_rows].pin_memory()
                 self._uva[dirty_rows] = src.to(device="npu", non_blocking=True)
             self._modified_indices.clear()
-        return self._uva
+        return self._uva[:n] if n is not None else self._uva
 
 
 vllm.v1.worker.gpu.buffer_utils.UvaBuffer = UvaBufferWrapper
