@@ -7,11 +7,12 @@ import numpy as np
 import torch
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import largest_power_of_2_divisor
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.utils.torch_utils import async_tensor_h2d, get_dtype_size
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec
 from vllm.v1.worker.utils import AttentionGroup, KVBlockZeroer
 
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, get_kv_cache_compression_ratio
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
 
@@ -59,10 +60,73 @@ def copy_kv_cache_blocks_inplace(
     src_indices, dst_indices = indices.unbind(dim=1)
     for tensor in cache_tensors:
         assert tensor.device == device
-        assert tensor.numel() % num_blocks == 0
-        blocks = tensor.view(num_blocks, -1)
+        assert tensor.shape[0] % num_blocks == 0
+        kernel_blocks_per_block = tensor.shape[0] // num_blocks
+        # Page-strided MLA views are non-contiguous, so a flat ``view`` would
+        # either fail or materialize a copy. Split only dim 0 to preserve the
+        # original strided storage while copying every kernel block in a page.
+        blocks = tensor.unflatten(0, (num_blocks, kernel_blocks_per_block))
         source_blocks = torch.index_select(blocks, 0, src_indices)
         blocks.index_copy_(0, dst_indices, source_blocks)
+
+
+def get_single_raw_mla_backing(raw_cache: object) -> torch.Tensor | None:
+    """Extract one raw MLA backing from either allocator representation.
+
+    Pure MLA allocations use a one-element tuple so generic K/V unpacking does
+    not mistake the backing for a `(key, value)` pair. Hybrid/shared pools can
+    instead store a bare tensor slice for an MLA layer.
+    """
+    if isinstance(raw_cache, torch.Tensor):
+        return raw_cache
+    if (
+        isinstance(raw_cache, tuple)
+        and len(raw_cache) == 1
+        and isinstance(raw_cache[0], torch.Tensor)
+    ):
+        return raw_cache[0]
+    return None
+
+
+def mla_spec_supports_single_raw_backing(spec: AscendMLAAttentionSpec) -> bool:
+    """Whether an Ascend MLA spec can use the worker single-backing protocol.
+
+    This is a ModelRunner allocation policy, not cache geometry, so it lives in
+    the worker layer rather than on the public KV cache spec.
+    """
+    return (
+        get_kv_cache_compression_ratio(spec) == 1
+        and spec.model_version is None
+        and not spec.indexes_kv_by_block_stride
+    )
+
+
+def row_major_strides(shape: Sequence[int]) -> tuple[int, ...]:
+    """Return row-major strides for a shape without allocating tensor storage."""
+    strides = [1] * len(shape)
+    for dim in range(len(shape) - 2, -1, -1):
+        strides[dim] = strides[dim + 1] * shape[dim + 1]
+    return tuple(strides)
+
+
+def make_page_strided_cache_view(
+    raw_tensor: torch.Tensor,
+    shape: Sequence[int],
+    dtype: torch.dtype,
+    page_size_bytes: int,
+    offset_bytes: int = 0,
+) -> torch.Tensor:
+    """Create a first-axis page-strided view over a raw cache allocation."""
+    dtype_size = get_dtype_size(dtype)
+    strides = row_major_strides(tuple(shape))
+    storage_offset_bytes = raw_tensor.storage_offset() * raw_tensor.element_size() + offset_bytes
+    assert storage_offset_bytes % dtype_size == 0
+    return torch.as_strided(
+        raw_tensor.view(dtype),
+        size=tuple(shape),
+        stride=(page_size_bytes // dtype_size, *strides[1:]),
+        storage_offset=storage_offset_bytes // dtype_size,
+    )
 
 
 @contextmanager
@@ -119,6 +183,29 @@ def _zero_kv_blocks_kernel(
         tl.store(ptr + offset + cols, tl.zeros([BLOCK_SIZE], dtype=tl.int32))
 
 
+def _component_views_share_slot(kv_cache: object, spec: FullAttentionSpec) -> bool:
+    """Whether MLA component views alias one component-major physical page."""
+
+    if not isinstance(spec, MLAAttentionSpec) or not isinstance(kv_cache, tuple) or len(kv_cache) != 2:
+        return False
+
+    nope, rope = kv_cache
+    if not isinstance(nope, torch.Tensor) or not isinstance(rope, torch.Tensor):
+        return False
+
+    storage_ptr = nope.untyped_storage().data_ptr()
+    first_offset = nope.storage_offset()
+    component_elements = nope[0].numel()
+    return (
+        rope.untyped_storage().data_ptr() == storage_ptr
+        and rope.stride(0) == nope.stride(0)
+        and not nope.is_contiguous()
+        and not rope.is_contiguous()
+        and rope.storage_offset() - first_offset == component_elements
+        and component_elements < nope.stride(0)
+    )
+
+
 class AscendKVBlockZeroer(KVBlockZeroer):
     """Manages efficient zeroing of KV cache blocks via a Triton kernel.
 
@@ -173,9 +260,16 @@ class AscendKVBlockZeroer(KVBlockZeroer):
             for layer_name in group.layer_names:
                 if layer_name in runner_only_attn_layers:
                     continue
-                kv_tuple = static_forward_context[layer_name].kv_cache
-                assert len(kv_tuple) == 2, "K and V are not stored separately"
-                for kv in kv_tuple:
+                kv_cache = static_forward_context[layer_name].kv_cache
+                # Fused MLA由单一tensor表示；component-major MLA的两个view同样共享一个物理page，从nope起点清理一次即可。
+                # legacy K/V协议仍逐个component清理。
+                if _component_views_share_slot(kv_cache, spec):
+                    kv_tensors = (kv_cache[0],)
+                elif isinstance(kv_cache, torch.Tensor):
+                    kv_tensors = (kv_cache,)
+                else:
+                    kv_tensors = kv_cache
+                for kv in kv_tensors:
                     block_dim = 0
                     dp = kv.data_ptr()
                     if dp in seen_ptrs:
