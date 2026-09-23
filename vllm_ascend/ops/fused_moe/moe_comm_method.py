@@ -53,20 +53,14 @@ def get_moe_comm_method(moe_comm_type: MoECommType | None) -> MoECommMethod | No
     return _MoECommMethods.get(moe_comm_type)
 
 
-def setup_moe_comm_method(moe_config) -> dict[MoECommType, MoECommMethod]:
-    """Ensure the comm implementations for this config and return them."""
+def setup_moe_comm_method(moe_config):
     if moe_config.ep_size > 1:
-        comm_methods = {
-            MoECommType.ALLTOALL: AlltoAllCommImpl(moe_config),
-            MoECommType.ALLGATHER: AllGatherCommImpl(moe_config),
-            MoECommType.MC2: MC2CommImpl(moe_config),
-            MoECommType.FUSED_MC2: FusedMC2CommImpl(moe_config),
-        }
+        _MoECommMethods[MoECommType.ALLTOALL] = AlltoAllCommImpl(moe_config)
+        _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
+        _MoECommMethods[MoECommType.MC2] = MC2CommImpl(moe_config)
+        _MoECommMethods[MoECommType.FUSED_MC2] = FusedMC2CommImpl(moe_config)
     else:
-        comm_methods = {MoECommType.ALLGATHER: AllGatherCommImpl(moe_config)}
-    for comm_type, comm_method in comm_methods.items():
-        _MoECommMethods[comm_type] = comm_method
-    return comm_methods
+        _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
 
 
 @dataclass
