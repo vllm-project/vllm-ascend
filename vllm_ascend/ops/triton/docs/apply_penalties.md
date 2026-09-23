@@ -17,7 +17,7 @@
   2. `apply_all_penalties_kernel` updates the logits.
      - Grid: `grid = (min(num_seqs * ceil(vocab_size / BLOCK_SIZE), num_vectorcore), 1, 1)` with `BLOCK_SIZE = 2048`. A grid-stride loop distributes the independent sequence/vocabulary tiles across vector cores, including when there is only one sequence.
      - Per tile: load the sequence's three scalar penalties, apply the repetition scaling (`1/p` for positive logits, `p` otherwise), subtract `frequency_penalty * output_bin_counts`, subtract `presence_penalty * output_mask`, and store back in place. Vocabulary tails are masked.
-- **Supported modes**: Atlas A2, Atlas A3, and 950PR&950DT Products. Used by `AscendSampler.apply_penalties` (`vllm_ascend/sample/sampler.py`) and by the rejection sampler (`vllm_ascend/sample/rejection_sampler.py`); it runs in the sampling stage after the model forward and is therefore outside the ACL graph capture region. When Triton is unavailable (`HAS_TRITON` is false), `AscendSampler` falls back to the default vLLM implementation.
+- **Execution**: NPU with Triton-Ascend. Used by `AscendSampler.apply_penalties` (`vllm_ascend/sample/sampler.py`) and by the rejection sampler (`vllm_ascend/sample/rejection_sampler.py`); it runs in the sampling stage after the model forward and is therefore outside the ACL graph capture region. When Triton is unavailable (`HAS_TRITON` is false), `AscendSampler` falls back to the default vLLM implementation.
 
 ## Parameters
 
