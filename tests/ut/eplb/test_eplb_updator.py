@@ -1,9 +1,22 @@
+import multiprocessing
 import unittest
 from unittest.mock import MagicMock, patch
 
 import torch
 
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
+
+
+def _fetch_shared_dict_value(shared_dict, queue):
+    """Module-level helper so the spawn context can pickle it."""
+    try:
+        value = shared_dict.get("phys_to_logical", None)
+        if value is None:
+            queue.put(("none",))
+        else:
+            queue.put(("ok", str(value.device), value.tolist()))
+    except Exception as e:  # pragma: no cover - IPC failure path
+        queue.put(("error", str(e)))
 
 
 class TestEplbUpdatorComputeAndSetMoeLoad(unittest.TestCase):
@@ -81,6 +94,51 @@ class TestEplbUpdatorComputeAndSetMoeLoad(unittest.TestCase):
         self.assertEqual(moe_load.shape, (100, 58, self.world_size, 8))
         self.assertTrue("moe_load" in self.updator.shared_dict)
         self.assertEqual(moe_load.device.type, "cpu")
+
+    def _run_warm_up_eplb(self):
+        with (
+            patch("torch.distributed.P2POp", MagicMock()),
+            patch("torch.distributed.batch_isend_irecv", return_value=[]),
+        ):
+            self.updator.warm_up_eplb()
+
+    def test_warm_up_eplb_stores_cpu_phys_to_logical(self):
+        phys_to_logical = torch.arange(256, dtype=torch.int32)
+        self.adaptor.phys_to_logical = phys_to_logical
+        self._run_warm_up_eplb()
+
+        stored = self.updator.shared_dict["phys_to_logical"]
+        # torch_npu cannot re-share device tensors received from another
+        # process, so the shared_dict contract is CPU-only.
+        self.assertEqual(stored.device.type, "cpu")
+        self.assertTrue(torch.equal(stored, phys_to_logical))
+
+    def test_warm_up_eplb_shared_dict_survives_manager_ipc(self):
+        # Regression: the EPLB worker reads phys_to_logical through the
+        # Manager proxy from a subprocess. NPU tensors stored in the dict
+        # cannot be sent back (torch_npu "_share_npu_" fails for tensors
+        # received from another process), which killed the worker after the
+        # first rebalance.
+        manager = multiprocessing.Manager()
+        self.addCleanup(manager.shutdown)
+        self.updator.shared_dict = manager.dict()
+
+        # Only real tensors may cross the Manager IPC; MagicMock values are
+        # not picklable.
+        self.adaptor.get_global_expert_map.return_value = torch.zeros(2, 4, 64, dtype=torch.int32)
+        self.adaptor.phys_to_logical = torch.arange(256, dtype=torch.int32)
+        self._run_warm_up_eplb()
+
+        ctx = multiprocessing.get_context("spawn")
+        queue = ctx.Queue()
+        proc = ctx.Process(target=_fetch_shared_dict_value, args=(self.updator.shared_dict, queue))
+        proc.start()
+        try:
+            result = queue.get(timeout=60)
+        finally:
+            proc.join(timeout=60)
+        self.assertEqual(result[0], "ok", msg=f"shared_dict IPC failed: {result}")
+        self.assertEqual(result[1], "cpu")
 
 
 if __name__ == "__main__":
