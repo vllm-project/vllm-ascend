@@ -445,9 +445,9 @@ def _wrap_result_ready(original_result_ready):
 
 
 def _patch_result_ready_timing() -> None:
-    original_result_ready = _eplb_state.EplbState._all_ranks_result_ready
+    original_result_ready = AscendEplbState._all_ranks_result_ready
     if not getattr(original_result_ready, _PATCH_MARKER, False):
-        _eplb_state.EplbState._all_ranks_result_ready = _wrap_result_ready(original_result_ready)
+        AscendEplbState._all_ranks_result_ready = _wrap_result_ready(original_result_ready)
 
 
 def _wrap_rearrange_timing(original_rearrange):

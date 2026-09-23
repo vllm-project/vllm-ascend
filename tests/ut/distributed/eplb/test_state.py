@@ -54,6 +54,18 @@ def test_drain_async_accepts_last_changed_layer_before_model_end():
     consumed_event.record.assert_called_once_with()
 
 
+def test_result_readiness_waits_for_next_rearrangement_boundary():
+    state = AscendEplbState.__new__(AscendEplbState)
+    state.expert_rearrangement_step_interval = 10
+    model_state = SimpleNamespace(pending_result=object(), rebalanced=True)
+
+    state.expert_rearrangement_step = 9
+    assert not state._all_ranks_result_ready(model_state)
+
+    state.expert_rearrangement_step = 10
+    assert state._all_ranks_result_ready(model_state)
+
+
 def test_step_discards_physical_samples_after_mapping_changes(monkeypatch):
     model_state = SimpleNamespace(
         _load_mapping_generation=0,
