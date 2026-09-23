@@ -188,6 +188,28 @@ def test_full_decode_only_keeps_graph_descriptor_request_count():
     np.testing.assert_array_equal(actual[:5], np.array([0, 1, 2, 3, 4], dtype=np.int32))
 
 
+@pytest.mark.parametrize("query_len", [1, 2, 3, 4])
+@pytest.mark.parametrize("mode", [CUDAGraphMode.FULL, CUDAGraphMode.FULL_DECODE_ONLY])
+def test_dynamic_spec_decode_padding_uses_captured_query_width(query_len, mode):
+    runner = _make_runner()
+    runner.compilation_config = SimpleNamespace(cudagraph_mode=mode)
+    runner.decode_query_len = 4  # Maximum K=3, not necessarily the active width.
+    query_start_loc = np.array([0, query_len, 2 * query_len, 2 * query_len, 2 * query_len, 2 * query_len])
+
+    actual, num_reqs_padded = runner._pad_query_start_loc_for_fia(
+        num_tokens_padded=4 * query_len,
+        num_reqs_padded=4,
+        num_reqs=2,
+        query_start_loc_np=query_start_loc,
+        cudagraph_runtime_mode=CUDAGraphMode.FULL,
+        batch_desc_num_reqs=4,
+        uniform_token_count=query_len,
+    )
+
+    assert num_reqs_padded == 4
+    np.testing.assert_array_equal(actual[:5], np.arange(5) * query_len)
+
+
 @pytest.mark.parametrize(
     "decode_query_len, query_lens, num_tokens_padded, descriptor_num_reqs, expected_query_start_loc",
     [
@@ -772,6 +794,7 @@ def _prepare_inputs_runner(*, draft=False, full_cg=False, use_dcp=False, use_pp=
     batch_desc = SimpleNamespace(
         num_tokens=8 if full_cg else 4,
         num_reqs=2,
+        uniform_token_count=None,
         cg_mode=CUDAGraphMode.FULL if full_cg else CUDAGraphMode.NONE,
     )
     return runner, scheduler_output, batch_req_state, batch_desc

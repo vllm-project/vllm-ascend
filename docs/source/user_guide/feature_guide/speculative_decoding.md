@@ -675,6 +675,33 @@ implies that:
 
 #### Online examples
 
+##### ACL Graph with batch-size based Dynamic SD
+
+Use model runner V2 for dynamic verification widths with FULL decode graphs:
+
+```bash
+VLLM_USE_V2_MODEL_RUNNER=1 vllm serve <model-with-MTP-weights> \
+  --speculative-config '{"method":"mtp","num_speculative_tokens":3,"num_speculative_tokens_per_batch_size":[[1,8,3],[9,32,0]]}' \
+  --max-num-seqs 32 \
+  --async-scheduling \
+  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+```
+
+The target verification graph uses the **current batch's** query width (`K + 1`),
+not always the configured maximum `num_speculative_tokens + 1`. A batch without
+draft tokens uses width 1. The K selected for the next proposal can differ from
+the current verification width during concurrency changes. Autoregressive draft
+decode steps still consume one token per request.
+
+Use asynchronous scheduling so the scheduler applies the dynamic draft-token
+budget to the next iteration. This path is for DP=1; tensor parallelism can be
+configured separately. Upstream
+vLLM downgrades dynamic SD with FULL graphs on model runner V1, and disables
+batch-size based dynamic SD for DP>1. Do not bypass those compatibility checks.
+FULL replay also requires a compatible captured descriptor for the active query
+width and batch size. Prefills and unmatched decode batches can run eagerly under
+`FULL_DECODE_ONLY`; verify actual replay with profiling when tuning performance.
+
 ##### Dynamic SD Eagle Drafter
 
 ```bash

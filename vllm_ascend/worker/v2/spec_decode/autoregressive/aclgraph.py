@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 from collections.abc import Callable
+from copy import copy
 from typing import Any
 
 import torch
@@ -49,6 +50,17 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
         decode_query_len: int,
         lora_capture_cases: list[int] | None = None,
     ):
+        if (
+            decode_query_len == 1
+            and vllm_config.speculative_config is not None
+            and vllm_config.speculative_config.uses_dynamic_speculative_decoding()
+        ):
+            # Each autoregressive draft step always consumes one token per
+            # request. The target's dynamic verification schedule must not
+            # change draft-decode capture widths (it can even make them negative).
+            vllm_config = copy(vllm_config)
+            vllm_config.speculative_config = copy(vllm_config.speculative_config)
+            vllm_config.speculative_config.num_speculative_tokens_per_batch_size = None
         super().__init__(
             vllm_config,
             device,

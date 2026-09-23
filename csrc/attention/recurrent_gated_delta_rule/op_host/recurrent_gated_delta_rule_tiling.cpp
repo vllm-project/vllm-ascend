@@ -42,6 +42,7 @@ const size_t BETA_DIM_NUM = 2;
 const size_t STATE_DIM_NUM = 4;
 const size_t CUSEQLENS_DIM_NUM = 1;
 const size_t SSM_STATE_INDICES_DIM_NUM = 1;
+const size_t SSM_STATE_INDICES_MATRIX_DIM_NUM = 2;
 const size_t G_DIM_NUM = 2;
 
 const size_t DIM_0 = 0;
@@ -267,9 +268,21 @@ ge::graphStatus RecurrentGatedDeltaRuleTiling::CheckShapeDimAndRelation(const ge
     if (!CheckDim(queryShape, QKV_DIM_NUM, "query") || !CheckDim(keyShape, QKV_DIM_NUM, "key") ||
         !CheckDim(valueShape, QKV_DIM_NUM, "value") || !CheckDim(betaShape, BETA_DIM_NUM, "beta") ||
         !CheckDim(stateShape, STATE_DIM_NUM, "state") ||
-        !CheckDim(cuSeqlensShape, CUSEQLENS_DIM_NUM, "actual_seq_lengths") ||
-        !CheckDim(ssmStateShape, SSM_STATE_INDICES_DIM_NUM, "ssm_state_indices")) {
+        !CheckDim(cuSeqlensShape, CUSEQLENS_DIM_NUM, "actual_seq_lengths")) {
         return ge::GRAPH_FAILED;
+    }
+
+    const auto indicesRank = ssmStateShape.GetDimNum();
+    OP_CHECK_IF(indicesRank != SSM_STATE_INDICES_DIM_NUM && indicesRank != SSM_STATE_INDICES_MATRIX_DIM_NUM,
+                OP_LOGE(inputParams_.opName, "ssm_state_indices must be token-packed [T] or [B, state_slots]"),
+                return ge::GRAPH_FAILED);
+    tilingData_.stateIndicesStride = 0;
+    if (indicesRank == SSM_STATE_INDICES_MATRIX_DIM_NUM) {
+        OP_CHECK_IF(ssmStateShape.GetDim(DIM_0) != cuSeqlensShape.GetDim(DIM_0) - 1 ||
+                    ssmStateShape.GetDim(DIM_1) <= 0 || ssmStateShape.GetDim(DIM_1) > UINT32_MAX,
+                    OP_LOGE(inputParams_.opName, "Invalid ssm_state_indices batch size or state slot count"),
+                    return ge::GRAPH_FAILED);
+        tilingData_.stateIndicesStride = static_cast<uint32_t>(ssmStateShape.GetDim(DIM_1));
     }
 
     if (!CheckDimEqual(queryShape, DIM_0, keyShape, DIM_0, "query", "key", "T dimension") ||

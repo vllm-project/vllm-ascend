@@ -556,6 +556,100 @@ def test_full_graph_spec_conv1d_args_keep_request_granularity():
     )
 
 
+@pytest.mark.parametrize("runtime_k", [0, 1, 2, 3])
+@pytest.mark.parametrize("full_graph", [False, True])
+@pytest.mark.parametrize("builder_cls", [AscendGDNAttentionMetadataBuilder, GDNAttentionMetadataBuilder310])
+def test_dynamic_spec_state_indices_keep_previous_state_slots(runtime_k, full_graph, builder_cls, monkeypatch):
+    monkeypatch.setitem(_make_builder.__globals__, "AscendGDNAttentionMetadataBuilder", builder_cls)
+    device = torch.device("cpu")
+    graph_requests = 4 if full_graph else 2
+    query_len = runtime_k + 1
+    common = create_common_attn_metadata(
+        BatchSpec(
+            seq_lens=[64, 64] + [0] * (graph_requests - 2),
+            query_lens=[query_len, query_len] + [0] * (graph_requests - 2),
+        ),
+        block_size=16,
+        device=device,
+    )
+    common.block_table_tensor = torch.arange(graph_requests * 4, dtype=torch.int32).reshape(graph_requests, 4)
+    builder = _make_builder(
+        device=device,
+        num_heads=32,
+        num_speculative_tokens=3,
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY if full_graph else CUDAGraphMode.NONE,
+    )
+    builder.vllm_config.speculative_config.num_speculative_tokens_per_batch_size = [(1, 2, 3), (3, 4, 0)]
+    metadata = builder.build(
+        0,
+        common,
+        num_accepted_tokens=torch.full((graph_requests,), 4, dtype=torch.int32),
+        num_decode_draft_tokens_cpu=torch.tensor([runtime_k, runtime_k] + [-1] * (graph_requests - 2)),
+        num_actual_reqs=2,
+    )
+
+    indices = metadata.spec_state_indices_tensor
+    if builder_cls is GDNAttentionMetadataBuilder310 and runtime_k == 0:
+        # The separate 310P kernel contract is unchanged by this fix.
+        assert indices is None
+        return
+    assert indices.shape == (graph_requests, 4)
+    assert indices.is_contiguous()
+    torch.testing.assert_close(indices[:2], common.block_table_tensor[:2, :4])
+    assert metadata.num_accepted_tokens[:2].tolist() == [4, 4]
+    if full_graph:
+        assert indices.data_ptr() == builder.spec_state_indices_tensor.data_ptr()
+        assert torch.all(indices[2:] == builder._SPEC_GRAPH_PAD_SLOT_ID)
+
+
+@pytest.mark.parametrize("full_graph", [False, True])
+def test_dynamic_spec_state_indices_refresh_across_width_changes(full_graph):
+    device = torch.device("cpu")
+    builder = _make_builder(
+        device=device,
+        num_heads=32,
+        num_speculative_tokens=3,
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY if full_graph else CUDAGraphMode.NONE,
+    )
+    for runtime_k in [3, 1, 2, 3, 1]:
+        common = create_common_attn_metadata(
+            BatchSpec(seq_lens=[64, 64], query_lens=[runtime_k + 1] * 2),
+            block_size=16,
+            device=device,
+        )
+        common.block_table_tensor.add_(10 * runtime_k)
+        metadata = builder.build(
+            0,
+            common,
+            num_accepted_tokens=torch.ones(2, dtype=torch.int32),
+            num_decode_draft_tokens_cpu=torch.full((2,), runtime_k, dtype=torch.int32),
+        )
+        indices = metadata.spec_state_indices_tensor
+        assert indices.is_contiguous()
+        torch.testing.assert_close(indices, common.block_table_tensor[:, :4])
+        if full_graph:
+            assert indices.data_ptr() == builder.spec_state_indices_tensor.data_ptr()
+
+
+@pytest.mark.parametrize("runtime_k", [1, 2])
+def test_dynamic_spec_mixed_prefill_preserves_state_slots(runtime_k):
+    device = torch.device("cpu")
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=[64, 64, 64], query_lens=[runtime_k + 1, 16, runtime_k + 1]),
+        block_size=16,
+        device=device,
+    )
+    builder = _make_builder(device=device, num_heads=32, num_speculative_tokens=3)
+    metadata = builder.build(
+        0,
+        common,
+        num_accepted_tokens=torch.ones(3, dtype=torch.int32),
+        num_decode_draft_tokens_cpu=torch.tensor([runtime_k, -1, runtime_k], dtype=torch.int32),
+    )
+    assert metadata.num_prefills == 1
+    torch.testing.assert_close(metadata.spec_state_indices_tensor, common.block_table_tensor[[0, 2], :4])
+
+
 def test_full_graph_spec_actual_seq_lengths_use_padded_builder_buffer():
     batch_spec = BatchSpec(
         seq_lens=[4, 4],

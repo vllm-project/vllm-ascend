@@ -700,7 +700,9 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             num_reqs = num_decode_draft_tokens_cpu.numel()
             spec_sequence_masks_cpu = self.spec_sequence_masks_cpu[:num_reqs]
             runtime_draft_tokens = num_decode_draft_tokens_cpu[num_decode_draft_tokens_cpu >= 0]
-            if runtime_draft_tokens.sum().item() > 0:
+            dynamic_sd = getattr(self.vllm_config.speculative_config, "num_speculative_tokens_per_batch_size", None)
+            # K=0 still needs the previously accepted state after a K decrease.
+            if (dynamic_sd and self._USE_COMMON_KERNEL_METADATA) or runtime_draft_tokens.sum().item() > 0:
                 torch.ge(
                     num_decode_draft_tokens_cpu,
                     0,
@@ -775,6 +777,8 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                     device=query_start_loc.device,
                 )
                 spec_state_indices_tensor = torch.index_select(
+                    # Previous acceptance can exceed the current query width
+                    # when dynamic SD lowers K. Preserve all state slots.
                     block_table_tensor[:, : self.num_spec + 1],
                     0,
                     spec_sequence_indices,

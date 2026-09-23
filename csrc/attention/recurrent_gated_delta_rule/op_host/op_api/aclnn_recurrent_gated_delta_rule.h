@@ -24,7 +24,8 @@ extern "C" {
  * @param [in] beta: 数据类型支持：bfloat16。
  * @param [in] state: 数据类型支持：bfloat16。
  * @param [in] actualSeqLengths: 数据类型支持：int32。
- * @param [in] ssmStateIndices: 数据类型支持：int32。
+ * @param [in] ssmStateIndices: int32 [T] token-packed indices, or [B, state_slots] rows.
+ * The 2D form decouples previous accepted state selection from current query lengths.
  * @param [in] g: 数据类型支持：float32。
  * @param [in] gk: 数据类型支持：float32。
  * @param [in] numAcceptedTokens: 数据类型支持：int32。
