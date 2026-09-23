@@ -1,9 +1,9 @@
 """Pure-scalar PR1 launch selection for the gated LayerNorm kernel.
 
 The selector deliberately knows nothing about torch, devices, or resource
-queries.  The wrapper supplies a cached vector-core count only after
-the exact PR1 device/dtype guard has passed.  A missing count therefore means
-that the upstream BASE64 launch must be retained.
+queries.  The wrapper supplies the initialized vector-core count on NPU and
+``None`` for non-NPU tensors.  A missing count therefore means that the
+upstream BASE64 launch must be retained.
 """
 
 from __future__ import annotations
@@ -86,18 +86,15 @@ def _select_layernorm_launch(
     ngroups,
     runtime_p,
     params: DispatchParams = DEFAULT_PARAMS,
-    *,
-    qualified: bool = True,
 ) -> LaunchSpec:
     """Select the bounded PR1 path, or the upstream BASE64 fallback.
 
-    ``qualified`` is supplied by the wrapper's exact dtype/device guard.  It
-    is intentionally separate from ``runtime_p`` so a known P can never be
-    interpreted as evidence of device identity.
+    A missing ``runtime_p`` selects the upstream BASE64 launch.  NPU callers
+    obtain it through the existing initialized-device-properties contract.
     """
     validate_params(params)
     _validate_inputs(M, N_group, ngroups, runtime_p)
-    if not qualified or runtime_p is None:
+    if runtime_p is None:
         return LaunchSpec("FT_BASE", 64)
 
     # PR1 does not own a wide-N path.  The wrapper performs the upstream

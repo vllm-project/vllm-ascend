@@ -40,16 +40,10 @@ class SelectorTests(unittest.TestCase):
             persist_single_qualified=True,
         )
 
-    def test_unknown_p_and_unqualified_device_keep_base64(self):
+    def test_unknown_p_keeps_base64(self):
         m = self.mod
         self.assertEqual(
             m._select_layernorm_launch(20449, 128, 1, None, self.params),
-            m.LaunchSpec("FT_BASE", 64),
-        )
-        self.assertEqual(
-            m._select_layernorm_launch(
-                20449, 128, 1, 40, self.params, qualified=False
-            ),
             m.LaunchSpec("FT_BASE", 64),
         )
 

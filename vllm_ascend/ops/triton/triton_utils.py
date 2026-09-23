@@ -109,18 +109,6 @@ def get_vectorcore_num():
     return _NUM_VECTORCORE
 
 
-def try_get_vectorcore_num() -> int | None:
-    """Read the initialized vector-core cache without probing the device.
-
-    LayerNorm dispatch uses ``None`` as the fail-closed signal.  Keeping this
-    getter cache-only avoids turning a normal operator call into a device
-    property query when worker initialization has not happened yet.
-    """
-    if type(_NUM_VECTORCORE) is int and _NUM_VECTORCORE > 0:
-        return _NUM_VECTORCORE
-    return None
-
-
 def get_ub_size_bytes():
     """Return the Unified Buffer (UB) size in bytes for the current NPU.
 

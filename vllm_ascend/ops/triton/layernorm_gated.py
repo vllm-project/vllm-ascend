@@ -6,42 +6,9 @@
 # The models we train have hidden dim up to 8k anyway (e.g. Llama 70B), so this is fine.
 # mypy: ignore-errors
 
-from functools import lru_cache
-
 import torch
 
 from vllm.triton_utils import tl, triton
-
-
-_PR1_QUALIFIED_DEVICE_NAMES = frozenset(("Ascend910B3", "Ascend910_9382"))
-
-
-@lru_cache(maxsize=8)
-def _is_pr1_device_name_qualified(device_index: int) -> bool:
-    """Read exact runtime identity once per device index; unknown fails closed."""
-    try:
-        runtime_name = torch.npu.get_device_name(device_index)
-        return runtime_name in _PR1_QUALIFIED_DEVICE_NAMES
-    except Exception:
-        return False
-
-
-def _is_pr1_device_qualified(x) -> bool:
-    """Use the tensor's device index, with a conservative current-device fallback."""
-    device = getattr(x, "device", None)
-    if getattr(device, "type", None) != "npu":
-        return False
-    device_index = getattr(device, "index", None)
-    if type(device_index) is not int:
-        try:
-            device_index = torch.npu.current_device()
-        except Exception:
-            return False
-    return _is_pr1_device_name_qualified(device_index)
-
-
-def _is_pr1_dtype(x) -> bool:
-    return getattr(x, "dtype", None) in (torch.float16, torch.bfloat16)
 
 
 @triton.heuristics({"HAS_BIAS": lambda args: args["B"] is not None})
@@ -311,21 +278,21 @@ def layer_norm_fwd_npu(
         DispatchConfigError,
         _select_layernorm_launch,
     )
-    from vllm_ascend.ops.triton.triton_utils import try_get_vectorcore_num
+    runtime_p = None
+    if getattr(getattr(x, "device", None), "type", None) == "npu":
+        from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
-    qualified = _is_pr1_dtype(x) and _is_pr1_device_qualified(x)
-    runtime_p = try_get_vectorcore_num() if qualified else None
+        runtime_p = get_vectorcore_num()
     spec = _select_layernorm_launch(
         M,
         group_size,
         ngroups,
         runtime_p,
         _LAYERNORM_GATED_EXPERIMENTAL_PARAMS,
-        qualified=qualified,
     )
 
-    # All BASE selections, including unsupported dtype/device and wide-N
-    # fallback, retain the upstream BASE64 launch and feature-dimension guard.
+    # BASE selections, including non-NPU and wide-N fallback, retain the
+    # upstream BASE64 launch and feature-dimension guard.
     if spec.impl == "FT_BASE":
         max_fused_size = 65536 // x.element_size()
         block_n = min(max_fused_size, triton.next_power_of_2(group_size))
