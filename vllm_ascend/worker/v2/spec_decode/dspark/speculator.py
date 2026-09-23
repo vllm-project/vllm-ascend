@@ -53,8 +53,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
     ) -> torch.nn.Module:
         model = super().load_draft_model(target_model, target_attn_layer_names)
         if hasattr(model, "post_process"):
-            with set_current_vllm_config(self.vllm_config):
-                model.post_process(self.vllm_config)
+            model.post_process(self.vllm_config)
         if hasattr(model, "configure_target_aux_hidden_capture"):
             model.configure_target_aux_hidden_capture(target_model)
 
