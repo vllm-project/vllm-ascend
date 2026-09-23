@@ -59,7 +59,7 @@ test_cases:
       <<: *envs
     server_cmd: *server_cmd
     server_cmd_extra:
-      - "--enforce-eager"      
+      - "--enforce-eager"
       - "--additional-config"
       - '{"enable_flashcomm1":true}'
     benchmarks:
