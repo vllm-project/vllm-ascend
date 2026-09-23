@@ -64,6 +64,29 @@ vllm serve <supported-model> \
 
 Unlike DCP, PCP adds extra ranks: `world_size_with_pcp = prefill_context_parallel_size * original_world_size`.
 
+#### Decode Request Sharding
+
+With the paired upstream PCP decode-sharding implementation, `--enable-pcp-decode-sharding` defaults to enabled. MRV2 assigns each decode request to one PCP rank when PCP > 1 and DCP = 1; the KV cache remains replicated. Setting the flag does not enable sharding for PCP = 1 or DCP > 1.
+
+Use `--no-enable-pcp-decode-sharding` to restore replicated decode without changing PCP, DCP, TP, or the number of processes. The Python `EngineArgs`/`LLM` equivalent is `enable_pcp_decode_sharding=False`. The internal `pcp_shard_decode_requests` property combines this option with the topology constraints.
+
+For example, keep this configuration fixed and change only the final flag between runs:
+
+```bash
+VLLM_USE_V2_MODEL_RUNNER=1 vllm serve <deepseek-model-path> \
+    --tensor-parallel-size 1 \
+    --prefill-context-parallel-size 2 \
+    --decode-context-parallel-size 1 \
+    --enable-expert-parallel --async-scheduling --enforce-eager \
+    --enable-pcp-decode-sharding
+# Replicated-decode control: replace the last flag with
+# --no-enable-pcp-decode-sharding
+```
+
+The initial Ascend sharded-decode scope is eager, non-hybrid DeepSeek V2/V3/V3.2 MLA/SFA with RoPE; dense MLA requires unquantized KV. Graph execution, speculative decoding, KVPP and PCP O-proj weight sharding are rejected while decode sharding is enabled. Disable decode sharding to use the existing replicated-decode feature combinations documented in this guide.
+
+For performance comparisons, keep request lengths, output lengths, concurrency and warmup identical, with EP and asynchronous scheduling enabled in both runs. Sharded decode disables fused MLA preprocessing. To isolate the cost of request sharding from that preprocessing change, also use `--additional-config '{"enable_mlapo":false}'` in both runs.
+
 #### Speculative Decoding
 
 MRV2 PCP supports MTP with MLA and DSA models, Eagle3 with GQA models, and

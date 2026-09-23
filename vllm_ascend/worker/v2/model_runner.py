@@ -637,7 +637,7 @@ class NPUModelRunner(GPUModelRunner):
         input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
             self.pcp_manager,
             input_batch,
-            padded_num_tokens=batch_desc.num_tokens,
+            batch_desc=batch_desc,
         )
 
         # For mla/sfa, update cos/sin. Here is for execute_model.
@@ -919,6 +919,7 @@ def graph_manager_wrapper(model_runner):
         decode_query_len: int,
         lora_capture_cases: list[int] | None = None,
         varlen_decode: bool = False,
+        ubatch_runner=None,
     ):
         return ModelAclGraphManager(
             vllm_config,
@@ -928,6 +929,7 @@ def graph_manager_wrapper(model_runner):
             model_runner,
             lora_capture_cases=lora_capture_cases,
             varlen_decode=varlen_decode,  # type: ignore[call-arg]
+            ubatch_runner=ubatch_runner,
         )
 
     try:

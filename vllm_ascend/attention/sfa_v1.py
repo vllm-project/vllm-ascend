@@ -20,7 +20,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.utils import select_common_block_size
 
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_config import get_ascend_config, is_pcp_decode_sharding_enabled
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
@@ -641,10 +641,11 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         cum_query_lens = common_attn_metadata.query_start_loc[1 : num_reqs + 1]
         seq_lens = common_attn_metadata.seq_lens[:num_reqs]
 
-        # Prefer _seq_lens_cpu (always available, updated during draft
-        # iterations) over seq_lens_cpu (None in async spec decode mode).
-        if common_attn_metadata._seq_lens_cpu is not None:
-            seq_lens_cpu = common_attn_metadata._seq_lens_cpu[:num_reqs]
+        # Older upstream versions update _seq_lens_cpu during draft iterations;
+        # newer versions expose only the public CPU sequence-length field.
+        cached_seq_lens_cpu = getattr(common_attn_metadata, "_seq_lens_cpu", None)
+        if cached_seq_lens_cpu is not None:
+            seq_lens_cpu = cached_seq_lens_cpu[:num_reqs]
         elif common_attn_metadata.seq_lens_cpu is not None:
             seq_lens_cpu = common_attn_metadata.seq_lens_cpu[:num_reqs]
         elif self.nope:
@@ -792,6 +793,7 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         ascend_config = get_ascend_config()
         self.vllm_config = get_current_vllm_config()
+        self.pcp_shard_decode_requests = is_pcp_decode_sharding_enabled(self.vllm_config)
         # SFA absorbs kv_b_proj (and, for KV consumers on PROLOG_V3, the fused
         # qkv/q projections) and disposes the source parameters. A disposed
         # parameter is no longer a valid destination for the in-place weight
@@ -1012,6 +1014,8 @@ class AscendSFAImpl(MLAAttentionImpl):
 
     def _get_fused_type_unsupported_reasons(self, pp_type: PreprocessType) -> list[str]:
         reasons = []
+        if getattr(self, "pcp_shard_decode_requests", False):
+            reasons.append("PCP decode request sharding requires native preprocessing before the KV all-gather.")
         if self.qk_rope_head_dim == 0:
             reasons.append("NoPE SFA currently uses native preprocessing; fused NoPE contracts are not enabled.")
         if self.kv_a_layernorm is None or self.q_a_layernorm is None:
@@ -1885,6 +1889,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 parallel_context.gather_full_o_proj,
             )
 
+        empty_pcp_shard = getattr(self, "pcp_shard_decode_requests", False) and attn_metadata.num_actual_tokens == 0
         if self.runtime_has_indexer:
             # One unified indexer call: k path -> cache write -> top-k
             # selection (the selection kernel reads the freshly written
@@ -1900,17 +1905,17 @@ class AscendSFAImpl(MLAAttentionImpl):
                 q_c,
                 k_hidden_states,
                 indexer_attn_metadata,
-                compute_topk=not self.skip_topk,
+                compute_topk=not self.skip_topk and not empty_pcp_shard,
             )
-            if self.skip_topk:
+            if self.skip_topk and not empty_pcp_shard:
                 topk_indices = self._get_indexcache_topk_indices(parallel_context.topk_num_tokens)
-            elif self.use_index_cache:
+            elif self.use_index_cache and not empty_pcp_shard:
                 self._update_indexcache_topk_indices(topk_indices)
-        elif self.skip_topk:
+        elif self.skip_topk and not empty_pcp_shard:
             # Static shared-index layers keep no runtime indexer cache and
             # only reuse the shared top-k indices.
             topk_indices = self._get_indexcache_topk_indices(parallel_context.topk_num_tokens)
-        else:
+        elif not empty_pcp_shard:
             raise RuntimeError(f"skip_topk is False but indexer is None. layer_name={self.layer_name}.")
 
         # Notify for every layer that wrote the cache, not just indexer layers:
@@ -1918,6 +1923,13 @@ class AscendSFAImpl(MLAAttentionImpl):
         # scattered - indexer layers persisted it inside indexer.forward
         # above - so the connector can dispatch the PD pull.
         notify_kv_cache_written(self.layer_name or "")
+
+        # A rank without a request still owns replicated cache pages and must
+        # receive every main/indexer KV update. Skip query-only kernels only
+        # after those collectives; retain the padded output for model collectives.
+        if empty_pcp_shard:
+            maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
+            return output.zero_()
 
         # Open the prefetch gate for every SFA layer. Some GLM-5.2 layers
         # reuse cached top-k indices and have no indexer, so recording this

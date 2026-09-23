@@ -1,6 +1,7 @@
 from collections.abc import Sequence
 
 import torch
+import vllm.v1.worker.gpu.attn_utils as gpu_attn_utils
 import vllm.v1.worker.utils as utils
 from vllm.model_executor.layers.attention import Attention
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec
@@ -42,13 +43,22 @@ def bind_kv_cache(
     for layer_name in kv_caches:
         index2name[extract_layer_index(layer_name, num_attn_module)].append(layer_name)
 
-    ordered_layer_names: list[str] = []
     for layer_index in sorted(index2name.keys()):
         layer_names = index2name[layer_index]
         # remove some codes for the typical case of encoder-decoder model, e.g., bart.
         for layer_name in layer_names:
             runner_kv_caches.append(kv_caches[layer_name])
-            ordered_layer_names.append(layer_name)
+
+    bind_kv_cache_to_layers(kv_caches, forward_context, num_attn_module, kv_cache_groups)
+
+
+def bind_kv_cache_to_layers(
+    kv_caches,
+    forward_context,
+    num_attn_module: int = 1,
+    kv_cache_groups: Sequence[KVCacheGroupSpec] | None = None,
+) -> None:
+    """Preserve Ascend's already-shaped cache views in the MRv2 binding API."""
 
     # Bind kv_caches to forward context
     for layer_name, kv_cache in kv_caches.items():
@@ -56,7 +66,10 @@ def bind_kv_cache(
     # vLLM #52506 adds ReplaySSM ring trackers on main. v0.29.0 predates
     # that contract and has no tracker helper to invoke.
     if not vllm_version_is("0.29.0"):
+        ordered_layer_names = sorted(kv_caches, key=lambda name: extract_layer_index(name, num_attn_module))
         utils.share_replayssm_ring_trackers(ordered_layer_names, forward_context, kv_cache_groups)
 
 
 utils.bind_kv_cache = bind_kv_cache
+utils.bind_kv_cache_to_layers = bind_kv_cache_to_layers
+gpu_attn_utils.bind_kv_cache_to_layers = bind_kv_cache_to_layers

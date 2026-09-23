@@ -75,6 +75,7 @@ def _deepseek_v2_mla_attention_init(
     topk_indices_buffer: torch.Tensor | None = None,
     input_size: int | None = None,
     reduce_results: bool = True,
+    index_group_builder=None,
 ) -> None:
     # 这里不能使用 super().__init__()，因为当前函数定义在原类之外，
     # 最后通过赋值的方式替换 DeepseekV2MLAAttention.__init__。
@@ -278,6 +279,7 @@ def _deepseek_v2_mla_attention_init(
         indexer_rotary_emb=self.indexer_rope_emb,
         is_sparse=self.is_v32,
         topk_indices_buffer=topk_indices_buffer,
+        **({"index_group_builder": index_group_builder} if index_group_builder is not None else {}),
     )
 
     self.mla_attn = MultiHeadLatentAttentionWrapper(

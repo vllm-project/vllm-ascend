@@ -49,6 +49,11 @@ def is_mega_moe_supported() -> bool:
     return _MEGA_MOE_SUPPORTED
 
 
+def is_pcp_decode_sharding_enabled(vllm_config: VllmConfig) -> bool:
+    """Use the upstream PCP policy before the MRv2 manager is constructed."""
+    return vllm_config.use_v2_model_runner and vllm_config.parallel_config.pcp_shard_decode_requests
+
+
 def validate_additional_config_bool(value: Any, path: str) -> bool:
     """Apply the same pydantic bool rules to values read before config init."""
     try:
@@ -563,6 +568,33 @@ class AscendConfig:
             self.enable_fused_mc2 = 1
         return self
 
+    def _validate_pcp_decode_sharding(self, vllm_config: VllmConfig) -> None:
+        """Reject layouts whose cache or collective contract is not supported."""
+        if not is_pcp_decode_sharding_enabled(vllm_config):
+            return
+        # Config modules are also imported during platform discovery, before
+        # vllm.config has finished loading. Import the enum only at validation.
+        from vllm.config import CUDAGraphMode
+
+        if vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+            raise ValueError("Ascend PCP decode sharding currently requires eager execution (--enforce-eager).")
+        if vllm_config.speculative_config is not None:
+            raise ValueError("Ascend PCP decode sharding does not support speculative decoding yet.")
+        model_config = vllm_config.model_config
+        supported_architectures = {"DeepseekV2ForCausalLM", "DeepseekV3ForCausalLM", "DeepseekV32ForCausalLM"}
+        if (
+            model_config is None
+            or not model_config.use_mla
+            or model_config.is_hybrid
+            or not supported_architectures.intersection(model_config.architectures)
+            or getattr(model_config.hf_text_config, "qk_rope_head_dim", 0) <= 0
+        ):
+            raise ValueError("Ascend PCP decode sharding supports non-hybrid DeepSeek V2/V3/V3.2 MLA models only.")
+        if self.kvpp_config.size > 1:
+            raise ValueError("Ascend PCP decode sharding does not support KVPP yet.")
+        if self.enable_pcp_o_proj_weight_sharding:
+            raise ValueError("Ascend PCP decode sharding does not support PCP o_proj weight sharding yet.")
+
     # ---- derivations + cross-config downgrades/mutex ----
     # Business validation: invoked explicitly by init_ascend_config (NOT a
     # pydantic after-validator). Preserves the original __init__ ordering —
@@ -570,6 +602,7 @@ class AscendConfig:
     # the max_num_batched_tokens that sequence-parallel writeback corrected).
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
+        self._validate_pcp_decode_sharding(vc)
         if (
             self.enable_force_eplb
             and self.eplb_config.dynamic_eplb

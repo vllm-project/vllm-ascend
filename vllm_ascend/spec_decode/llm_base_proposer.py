@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import copy
+import importlib.util
 import inspect as _inspect
 from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
@@ -85,7 +86,7 @@ _HIDDEN_STATE_DRAFTER_TYPES: tuple[type, ...] = (
     DSparkDeepseekV4ForCausalLM,
 )
 
-if not vllm_version_is("0.29.0"):
+if not vllm_version_is("0.29.0") and importlib.util.find_spec("vllm.models.deepseek_v4_1") is not None:
     from vllm_ascend.models.deepseek_v41.dspark import DSparkDeepseekV41ForCausalLM
 
     _HIDDEN_STATE_DRAFTER_TYPES += (DSparkDeepseekV41ForCausalLM,)
