@@ -147,13 +147,21 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
     -it $IMAGE bash
     ```
 
+### 4.2 Source Code Installation
+
+If you don't want to use the docker image as above, you can also build all from source:
+
+- Install `vllm-ascend` from source, refer to [installation](../../getting_started/installation.md).
+
 ## 5 Online Service Deployment
 
 !!! note
 
     Do not set `enable_thinking: false` / `thinking: false` for GLM-5.3-Flash, otherwise the output quality may degrade.
 
-### 5.1 Single-Node Online Deployment
+### 5.1 Context Below 1M
+
+#### 5.1.1 Single-node Deployment
 
 === "950DT Products"
 
@@ -221,7 +229,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
       --api-server-count 1
     ```
 
-#### Key Parameter Descriptions
+##### Key Parameter Descriptions
 
 Only the key parameters specific to this model/scenario are described below. `max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario.
 
@@ -234,7 +242,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
 - `--limit-mm-per-prompt '{"image": 1, "video": 0}'`: For text-only deployment, --limit-mm-per-prompt can be omitted. For multimodal deployment, configure this parameter according to the actual request shape. For example, use --limit-mm-per-prompt '{"image":2,"video":0}' for two-image requests, and use --limit-mm-per-prompt '{"image":0,"video":1}' for one-video requests.
 - `--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'`: Enables Multi-Token Prediction (MTP) speculative decoding with the DeepSeek-style MTP draft head of GLM-5.3-Flash. `num_speculative_tokens` (3-5) controls how many tokens are speculated per step; `enforce_eager: true` is required because GLM-5.3-Flash does not support graph-mode speculative decoding.
 
-### 5.2 Multi-Node Deployment
+#### 5.1.2 Multi-node Deployment
 
 === "A2 series"
 
@@ -340,7 +348,11 @@ Only the key parameters specific to this model/scenario are described below. `ma
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[4,8,16,32,64,96,128]}'
     ```
 
-#### Key Parameter Descriptions
+=== "950DT Products (A5)"
+
+    Startup configuration pending validation.
+
+##### Key Parameter Descriptions
 
 **Multi-node network and data parallel configuration:**
 
@@ -350,6 +362,34 @@ Only the key parameters specific to this model/scenario are described below. `ma
 - `--data-parallel-address`: IP address of the data parallel master node (node 0). Must match the `local_ip` of the master node.
 - `--data-parallel-rpc-port 12321`: RPC port for data parallel master communication. Must be the same across all nodes.
 - `--headless`: Indicates a non-master node (used on node 1). Do not use on node 0.
+
+#### 5.1.3 Prefill-Decode Disaggregation
+
+Prefill-Decode disaggregation scenarios have not yet tested for `GLM-5.3-Flash`. If you want to deploy prefill-decode disaggregation, you can refer to scripts in [GLM-5.2 Prefill-Decode Disaggregation](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html#513-prefill-decode-disaggregation).
+
+**A5 (950DT Products):** Startup configuration pending validation.
+
+### 5.2 1M Context Configuration
+
+The 1M context scenarios have not yet tested for `GLM-5.3-Flash`. The subsections below mirror the [GLM-5.2 1M context layout](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html#52-1m-context-configuration); refer to the linked GLM-5.2 scripts.
+
+#### 5.2.1 Single-Node 1M Deployment
+
+Not yet tested for `GLM-5.3-Flash`. Refer to [GLM-5.2 Single-Node 1M Deployment](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html#521-single-node-1m-deployment).
+
+**A5 (950DT Products):** Startup configuration pending validation.
+
+#### 5.2.2 Dual-Node Co-Located 1M Deployment
+
+Not yet tested for `GLM-5.3-Flash`. Refer to [GLM-5.2 Dual-Node Co-Located 1M Deployment](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html#522-dual-node-co-located-1m-deployment).
+
+**A5 (950DT Products):** Startup configuration pending validation.
+
+#### 5.2.3 PD Disaggregation 1M Deployment
+
+Not yet tested for `GLM-5.3-Flash`. Refer to [GLM-5.2 PD Disaggregation 1M Deployment](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html#523-pd-disaggregation-1m-deployment).
+
+**A5 (950DT Products):** Startup configuration pending validation.
 
 ## 6 Functional Verification
 
@@ -413,7 +453,21 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
-## 9 FAQ
+## 9 Performance Tuning
+
+### 9.1 Tested Performance Cases
+
+#### Table 1: Tested Performance Cases
+
+The performance cases have not yet tested for `GLM-5.3-Flash`. For reference configurations, see the [GLM-5.2 Performance Tuning](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html#9-performance-tuning) chapter.
+
+### 9.2 Recommended Configurations
+
+#### Table 2: Optimizations Requiring Explicit Enablement
+
+The verified GLM-5.3-Flash deployment scripts do not enable any `--additional-config` optimization. For the optimization catalogue available on the shared GLM-5.3 base model, see [GLM-5.3 Performance Tuning](GLM5.3.md#92-recommended-configurations).
+
+## 10 FAQ
 
 - **Q: How to enable function calling for GLM-5.3-Flash?**
 
@@ -428,3 +482,8 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 - **Q: Does GLM-5.3-Flash support `enable_thinking: false`?**
 
   A: No, GLM-5.3-Flash does not support `enable_thinking`.
+
+## 11 Declaration
+
+- The current version is only for early experience, and performance optimization is still in progress.
+- The service reliability has not been fully validated, and it is not recommended for direct use in production environments.
