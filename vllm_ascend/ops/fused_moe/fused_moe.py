@@ -151,13 +151,19 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         )
         if use_zercmoe:
             # ZercMoE consumes per-expert weights packed in its zN flat layout
-            # (zercmoe.pack_weights). Keep the ND [E, k, 2*inter] / [E, inter, k]
-            # tensors (transposed above) for the ALLGATHER decode path, and add
-            # the packed 1D copies for the ZERC_MOE prefill path. No FRACTAL_NZ
-            # recast here: zN packing must run on plain ND storage.
+            # (zercmoe.pack_weights). Keep the ND [E, k, 2*inter] / [E, inter,
+            # k] tensors (transposed above) for the ALLGATHER decode path and
+            # add the packed 1D copies for the ZERC_MOE prefill path. Dual
+            # retention costs one extra routed-expert weight copy (measured
+            # +15 GB/rank on Qwen3.5-35B, KV -50%); dropping the ND originals
+            # requires decode to take ZERC_MOE too, which is only viable on
+            # large-EP topologies (topK < EP) — decode ZERC measured +11%
+            # TPOT at EP4/topK8.
             import zercmoe
 
-            layer.w13_weight_zr, layer.w2_weight_zr = zercmoe.pack_weights(layer.w13_weight.data, layer.w2_weight.data)
+            layer.w13_weight_zr, layer.w2_weight_zr = zercmoe.pack_weights(
+                layer.w13_weight.data, layer.w2_weight.data
+            )
         elif enable_fused_mc2:
             use_megamoe = use_cann_megamoe(get_current_vllm_config())
             if not use_megamoe:

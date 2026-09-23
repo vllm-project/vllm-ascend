@@ -153,6 +153,7 @@ def use_cann_zercmoe(vllm_config: VllmConfig) -> bool:
         and zercmoe_lib_available()
         and 1 < get_ep_group().world_size <= 64
         and getattr(vllm_config, "lora_config", None) is None
+        and not enable_sp(vllm_config)
         and not get_ascend_config().eplb_config.dynamic_eplb
     )
 
@@ -198,11 +199,11 @@ def set_ascend_forward_context(
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
 
         max_num_tokens = int(num_tokens_across_dp.max().item()) if num_tokens_across_dp is not None else num_tokens
-        # Decode batches run inside full cudagraphs (cudagraph_runtime_mode ==
-        # FULL) and must stay on graph-safe comm methods; ZERC_MOE host-side
-        # state (SHMEM lazy init / per-call checks) is eager-only, so decode
-        # falls back to ALLGATHER. With cudagraph disabled entirely (mode NONE
-        # for every batch) decode also runs eagerly and may take ZERC_MOE.
+        # Decode batches run inside full cudagraphs and stay on ALLGATHER:
+        # the zerc_moe dispatch moves 2*topK*m*k per rank vs the AG+RS
+        # 2*EP*m*k — a LOSS when topK > EP (e.g. topK=8, EP=4), measured as
+        # +11% TPOT. Decode ZERC only pays off on large-EP topologies
+        # (topK < EP); see the weight dual-format note in fused_moe.py.
         is_decode_batch = aclgraph_runtime_mode != CUDAGraphMode.NONE
         moe_comm_type = select_moe_comm_method(
             max_num_tokens,
@@ -400,15 +401,16 @@ def _select_a2_moe_comm_method(
         vllm_config.parallel_config.world_size_across_dp // vllm_config.parallel_config.pipeline_parallel_size
     )
     num_experts_per_device = num_experts // ep_world_size
-    # ZercMoE takes priority over the legacy FUSED_MC2 path for bf16 models.
-    # Only prefill-shaped eager batches (never graph-captured decode, never
-    # the drafter) may take the fused SHMEM operator, and only when the token
-    # count fits the rank-invariant symmetric-buffer capacity.
+    # ZercMoE takes priority over the legacy FUSED_MC2 path for bf16 models,
+    # on EAGER prefill-shaped batches only: decode stays on ALLGATHER (see
+    # set_ascend_forward_context), tiny prefills (<= 64 tokens) fall through
+    # to ALLGATHER as well, and the drafter keeps its own comm path.
     _ZERCMOE_MIN_TOKENS = 64
     if (
         not is_decode
         and not is_draft_model
-        and (num_tokens is None or (num_tokens > _ZERCMOE_MIN_TOKENS and num_tokens <= mc2_tokens_capacity))
+        and (num_tokens is None or num_tokens > _ZERCMOE_MIN_TOKENS)
+        and (num_tokens is None or num_tokens <= mc2_tokens_capacity)
         and use_cann_zercmoe(vllm_config)
     ):
         return MoECommType.ZERC_MOE

@@ -652,14 +652,25 @@ class ZercMoECommImpl(MoECommMethod):
             "Check that the zercmoe gate was active during weight processing."
         )
 
-        out, expert_tokens = self._zercmoe.mega_moe(
+        # Direct torch.ops call: the zercmoe.mega_moe wrapper re-validates
+        # ~20 bf16-only constraints and re-detects the weight layout on every
+        # call (every MoE layer of every forward). Under the ZERC_MOE gate the
+        # argument shapes are compile-time fixed (pre-packed 1D zN weights,
+        # fp32 probs, int32 ids), so call the registered op directly and cache
+        # the constant scalars on the symm buffer's identity.
+        out, expert_tokens = torch.ops.npu.zerc_moe(
             fused_experts_input.hidden_states,
             topk_ids.to(torch.int32),
             fused_experts_input.topk_weights.to(torch.float32),
-            w1,
-            w2,
-            self.zerc_symm_buffer,
-            return_expert_tokens=1,
+            [w1],
+            [w2],
+            self.zerc_symm_buffer.moe_expert_num,
+            self.zerc_symm_buffer.ep_world_size,
+            self.zerc_symm_buffer.ccl_buffer_size,
+            0,  # topk_weights_type: fp32
+            0,  # return_expert_tokens: counts are only consumed by dynamic
+            # EPLB, which the ZERC_MOE gate excludes (mode=0 skips a per-call
+            # sync: measured 3-9x lower single-call latency).
         )
         return FusedExpertsResult(
             routed_out=out,
