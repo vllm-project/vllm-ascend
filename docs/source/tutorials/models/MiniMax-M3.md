@@ -470,7 +470,7 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
       --limit-mm-per-prompt '{"image":1,"video":0}' \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
       --speculative-config '{"model":"${EAGLE3_WEIGHT_PATH}", "method":"eagle3", "num_speculative_tokens":3}' \
-      --additional-config '{"enable_cpu_binding":true,"enable_flashcomm1":true,"ascend_compilation_config":{"enable_static_kernel":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"weight_nz_mode":2}'
+      --additional-config '{"enable_cpu_binding":true,"enable_flashcomm1":true,"ascend_compilation_config":{"enable_static_kernel":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"weight_nz_mode":2}' > ${LOG_PATH} 2>&1 &
     ```
 
     Run the following command on node 1:
@@ -509,7 +509,7 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
       --limit-mm-per-prompt '{"image":1,"video":0}' \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
       --speculative-config '{"model":"${EAGLE3_WEIGHT_PATH}", "method":"eagle3", "num_speculative_tokens":3}' \
-      --additional-config '{"enable_cpu_binding":true,"enable_flashcomm1":true,"ascend_compilation_config":{"enable_static_kernel":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"weight_nz_mode":2}'
+      --additional-config '{"enable_cpu_binding":true,"enable_flashcomm1":true,"ascend_compilation_config":{"enable_static_kernel":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"weight_nz_mode":2}' > ${LOG_PATH} 2>&1 &
     ```
 
 ### 5.3 Prefill-Decode Disaggregation
