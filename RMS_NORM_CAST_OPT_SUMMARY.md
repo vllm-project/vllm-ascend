@@ -45,9 +45,9 @@ y_fp32 = WidenToFp32( y )                  # 精确宽化，逐位等于 y.float
 | 硬件 | Ascend 910B3（dav_c220 向量核，40 AIV/Device，UB 192KB/核） |
 | CANN | 9.1.0，驱动 npu-smi 25.5.1 |
 | 被测 shape | hidden=7168，tokens 1–4096 |
-| 记分板口径 | NPUGraph replay（`benchmarks/rms_norm_cast.py`）|
+| 记分板口径 | NPUGraph replay |
 | pipe 归因口径 | `msprof op --aic-metrics=PipeUtilization` |
-| 精度门槛 | `test_rms_norm_cast.py`（8 用例）+ `test_rms_norm_cast_coverage.py`（25 用例） |
+| 精度门槛 | 全套精度用例 33 项（见 §9） |
 
 **基线 profile（2048×7168 bf16，未优化）**：kernel 103.0µs，其中 vec 管线占
 65.6%——**vec 是瓶颈**；每行 11 遍 vec pass；行间 MTE2→V→MTE3 完全串行，
@@ -263,10 +263,10 @@ xychart-beta
 
 ## 9. 精度保障
 
-- 原有用例 8 个（dtype × tokens 1/16/128 + NPUGraph）+ 新增覆盖用例 25 个：
-  行流水边界（local_rows 1/2/3、混合核、空闲核）、hidden 尾部/非对齐（64/100/7184）、
-  高 rank 输入、epsilon 边界、输入极值（全零/×100）、**同进程连续调用 + 交叉算子**
-  （守护退出标志清零契约）、拒绝路径（超大 hidden/负 eps/dtype 不匹配）；
+- 精度用例覆盖：dtype × token 规模、行流水边界（单核 1/2/3 行、混合行数核、
+  空闲核）、hidden 尾部/非对齐、高 rank 输入、epsilon 边界、输入极值（全零/×100）、
+  **同进程连续调用 + 交叉算子**（守护退出标志清零契约）、非法输入拒绝路径
+  （超大 hidden/负 eps/dtype 不匹配）；
 - 全程 **33/33 通过**；三轮优化对数值路径位级一致（rstd 计算不变，仅消除冗余
   与串行），`y_fp32 == y.float()` 契约逐用例断言。
 
