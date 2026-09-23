@@ -114,8 +114,6 @@ runner_mapping:
   tests/e2e/pull_request/four_card:
     default: a3-4
     310p: 310p-4
-  tests/e2e/pull_request/eight_card:
-    default: a3-8
 
 # === Partition Configuration ===
 # Maps logical test buckets to exact labels from runner_label.json and controls
@@ -136,9 +134,6 @@ partition:
   a3-4:
     runner_label: linux-aarch64-a3-4
     count: 4
-  a3-8:
-    runner_label: linux-aarch64-a3-8
-    count: 1
   cpu-0:
     runner_label: linux-amd64-cpu-8-hk
     count: 1
