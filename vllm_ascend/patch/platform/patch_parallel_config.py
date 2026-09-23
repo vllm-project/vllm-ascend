@@ -9,30 +9,6 @@ from vllm.config.parallel import ParallelConfig, logger
 from vllm_ascend.utils import vllm_version_is
 
 
-def _use_sequence_parallel_moe(self: ParallelConfig) -> bool:
-    """Enable MoE sequence parallelism for TP/EP topologies, including DP=1."""
-    return (
-        self.all2all_backend
-        in (
-            "allgather_reducescatter",
-            "deepep_high_throughput",
-            "deepep_low_latency",
-            "deepep_v2",
-            "flashinfer_nvlink_one_sided",
-            "mori_high_throughput",
-            "mori_low_latency",
-            "nixl_ep",
-        )
-        and self.enable_expert_parallel
-        and self.tensor_parallel_size > 1
-    )
-
-
-# Upstream additionally requires data_parallel_size > 1. On Ascend, FlashComm
-# supports the TP/EP, DP=1 topology and still needs SP's rank-local token layout.
-ParallelConfig.use_sequence_parallel_moe = property(_use_sequence_parallel_moe)
-
-
 # v0.29.0 (98dff2a81d747d1dba01a47f939f48c3526d4206) validator,
 # with only the platform-independent PCP+DP rejection removed for Ascend.
 # Upstream #54523 (7c2f1ff4958eaf0818405e9192c71608fe4a16b1)

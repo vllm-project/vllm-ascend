@@ -603,6 +603,34 @@ class TestAscendConfig(TestBase):
         self.assertTrue(ascend_config.msmonitor_use_daemon)
 
     @_clean_up_ascend_config
+    @patch("vllm_ascend.ascend_config.logger.warning")
+    def test_flashcomm_config_warns(self, mock_warning):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {"enable_flashcomm1": True}
+        init_ascend_config(test_vllm_config)
+
+        warning_messages = [call.args[0] for call in mock_warning.call_args_list]
+        self.assertIn(
+            "FlashComm is deprecated; remove enable_flashcomm1 and "
+            "VLLM_ASCEND_ENABLE_FLASHCOMM1 from the configuration. Use upstream configuration instead",
+            warning_messages,
+        )
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.ascend_config.logger.warning")
+    def test_flashcomm_environment_warns(self, mock_warning):
+        test_vllm_config = VllmConfig()
+        with patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"}, clear=True):
+            init_ascend_config(test_vllm_config)
+
+        warning_messages = [call.args[0] for call in mock_warning.call_args_list]
+        self.assertIn(
+            "FlashComm is deprecated; remove enable_flashcomm1 and "
+            "VLLM_ASCEND_ENABLE_FLASHCOMM1 from the configuration. Use upstream configuration instead",
+            warning_messages,
+        )
+
+    @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_sequence_parallel_and_shared_expert_dp_are_independent(self, mock_check_and_update_config):
         for use_sequence_parallel_moe, enable_shared_expert_dp in (

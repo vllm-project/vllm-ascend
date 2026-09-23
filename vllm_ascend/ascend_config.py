@@ -616,7 +616,7 @@ class AscendConfig:
             and vc.parallel_config.enable_expert_parallel
             and vc.parallel_config.tensor_parallel_size > 1
         )
-        # FlashComm remains the SP MoE switch on Ascend.
+        # TODO: delete the deprecated flashcomm option when upstream SP is ready.
         flashcomm_explicitly_enabled = validate_additional_config_bool(
             (vc.additional_config or {}).get("enable_flashcomm1", False),
             "additional_config.enable_flashcomm1",
@@ -1601,6 +1601,11 @@ def _is_ascend_config_initialized(config: AscendConfig | None) -> bool:
 
 def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
     additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
+    if "enable_flashcomm1" in additional_config or os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1") is not None:
+        logger.warning(
+            "FlashComm is deprecated; remove enable_flashcomm1 and "
+            "VLLM_ASCEND_ENABLE_FLASHCOMM1 from the configuration. Use upstream configuration instead"
+        )
     # Upstream EngineArgs injects --gdn-prefill-backend / --kda-prefill-backend
     # into additional_config. The generic GDN/KDA model layers consume them
     # (qwen_gdn_linear_attn / kimi_gdn_linear_attn), but on non-CUDA platforms
@@ -1663,8 +1668,8 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
         # instead of letting extra="forbid" report them as typos.
         "gdn_prefill_backend",
         "kda_prefill_backend",
-        # Consumed in derive_and_validate as the SP MoE switch. Not an
-        # AscendConfig field, so strip it before extra="forbid" validation.
+        # Removed upstream option: warn above, but do not pass it into the
+        # strict AscendConfig schema where it would be reported as a typo.
         "enable_flashcomm1",
         # injected fields (factory passes explicitly; a copy in additional_config would conflict)
         "scheduler_config",

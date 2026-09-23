@@ -27,31 +27,6 @@ from vllm_ascend.utils import (
 )
 
 
-@pytest.mark.parametrize(
-    ("dp_size", "tp_size", "enable_ep", "all2all_backend", "expected"),
-    [
-        (1, 2, True, "allgather_reducescatter", True),
-        (2, 2, True, "allgather_reducescatter", True),
-        (1, 1, True, "allgather_reducescatter", False),
-        (1, 2, False, "allgather_reducescatter", False),
-        (1, 2, True, "flashinfer_all2allv", False),
-    ],
-)
-def test_ascend_sequence_parallel_moe_supports_dp1(dp_size, tp_size, enable_ep, all2all_backend, expected):
-    from vllm.config.parallel import ParallelConfig
-
-    import vllm_ascend.patch.platform.patch_parallel_config  # noqa: F401
-
-    config = ParallelConfig(
-        data_parallel_size=dp_size,
-        tensor_parallel_size=tp_size,
-        enable_expert_parallel=enable_ep,
-        all2all_backend=all2all_backend,
-    )
-
-    assert config.use_sequence_parallel_moe is expected
-
-
 @pytest.mark.parametrize("model_role", ["target", "draft", "alias", "non_speculative"])
 def test_sfa_dcp_validation_only_bypasses_separate_draft(model_role):
     target = object()
