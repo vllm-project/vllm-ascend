@@ -82,6 +82,7 @@ estimated_times:
   tests/e2e/pull_request/two_card/lora/test_qwen3moe_lora.py: 470
   tests/e2e/pull_request/two_card/lora/test_qwen35_densemodel_lora_tp.py: 490
   tests/e2e/pull_request/two_card/lora/test_qwen35_4b_multi_lora_mtp_aclgraph.py: 420
+  tests/e2e/pull_request/two_card/lora/test_qwen36_moe_lora.py: 600
   tests/e2e/pull_request/two_card/model_runner_v2/test_data_parallel.py: 520
   # Initial estimate for two models with fixed goldens on MRV2.
   tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_5_eagle3.py: 280
