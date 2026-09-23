@@ -56,7 +56,11 @@ CATLASS_DEVICE constexpr uint32_t HmRoundUp16(uint32_t v) { return (v + 15) / 16
 ///   fwd_h's h_work = k.T @ v_update. Nd2Nz of the stored [k, m] block lands zN;
 ///   the L0A load walks one m-block-row of fractals per repeat with
 ///   ifTranspose = true, mirroring the B_COL_MAJOR trick.
-template <class ArchTag, bool B_COL_MAJOR = false, bool A_FROM_L1 = false, bool A_COL_MAJOR = false>
+///   With B_FROM_L1, gmB/ldb are ignored and l1BOff must already hold the tile
+///   in the zN layout the plain path's Nd2Nz would have produced (an earlier
+///   body's GM->L1 load, a UB->L1 hand-off, or an L1-resident state).
+template <class ArchTag, bool B_COL_MAJOR = false, bool A_FROM_L1 = false, bool A_COL_MAJOR = false,
+          bool B_FROM_L1 = false>
 CATLASS_DEVICE void HandMmad(
     Catlass::Arch::Resource<ArchTag> &res,
     AscendC::GlobalTensor<half> const &gmA, uint32_t lda,
@@ -86,7 +90,7 @@ CATLASS_DEVICE void HandMmad(
         pa.dstNzNStride = 1;  pa.dstNzMatrixStride = 0;
         AscendC::DataCopy(l1A, gmA, pa);
     }
-    {
+    if constexpr (!B_FROM_L1) {
         // ColumnMajor source swaps the roles: dValue is the ROW count, nValue the
         // COLUMN count.
         AscendC::Nd2NzParams pb;
