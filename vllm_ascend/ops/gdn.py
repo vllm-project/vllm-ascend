@@ -36,7 +36,103 @@ from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
 
 
+_FLA_CHUNK_SIZE = 64
+
+
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
+    # Cached fused-op availability probe result, shared across all layers so the
+    # smoke call runs at most once per process.
+    _fused_chunk_available: bool | None = None
+
+    @classmethod
+    def _probe_fused_chunk(cls) -> bool:
+        """Whether ``fla_npu.ops.ascendc.chunk_gated_delta_rule_fwd`` can actually be used.
+
+        The interface must exist AND a minimal smoke call must succeed (the op is
+        unavailable on some CANN builds / devices). Any failure disables the
+        fused path so we fall back to the Triton pipeline. The result is cached
+        on the class, so only the first layer runs the smoke call.
+        """
+        if cls._fused_chunk_available is not None:
+            return cls._fused_chunk_available
+
+        try:
+            # FLA NPU is optional; import only when probing the prefill path.
+            from fla_npu.ops.ascendc import chunk_gated_delta_rule_fwd
+
+            # Minimal smoke call matching the op constraints (Dk == Dv == 128,
+            # Nv % Nk == 0). B=1, one short sequence.
+            device = torch.device("npu", torch.npu.current_device())
+            dk = dv = 128
+            nk, nv, seqlen = 1, 1, _FLA_CHUNK_SIZE
+            q = torch.zeros((1, seqlen, nk, dk), dtype=torch.bfloat16, device=device)
+            k = torch.zeros((1, seqlen, nk, dk), dtype=torch.bfloat16, device=device)
+            v = torch.zeros((1, seqlen, nv, dv), dtype=torch.bfloat16, device=device)
+            beta = torch.full((1, seqlen, nv), 0.5, dtype=torch.bfloat16, device=device)
+            g = torch.full((1, seqlen, nv), -0.1, dtype=torch.float32, device=device)
+            initial_state = torch.zeros((1, nv, dk, dv), dtype=torch.bfloat16, device=device)
+            chunk_gated_delta_rule_fwd(
+                q,
+                k,
+                v,
+                beta=beta,
+                initial_state=initial_state,
+                cu_seqlens=(0, seqlen),
+                chunk_indices=(0, 0),
+                chunk_size=_FLA_CHUNK_SIZE,
+                output_final_state=True,
+                disable_recompute=True,
+                return_intermediate_states=False,
+                layout="TND",
+                scale=dk**-0.5,
+                g=g,
+            )
+            torch.npu.synchronize()
+            cls._fused_chunk_available = True
+        except Exception:
+            cls._fused_chunk_available = False
+        return cls._fused_chunk_available
+
+    @staticmethod
+    def _chunk_gated_delta_rule_fused(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        initial_state: torch.Tensor,
+        cu_seqlens: tuple[int, ...],
+        chunk_indices: tuple[int, ...],
+        scale: float,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Adapt packed vLLM inputs to FLA NPU, returning cache-layout states.
+
+        q/k/v retain the leading batch dimension [1, T, H, D]. FLA uses
+        [N, Hv, Dk, Dv] states instead of the cache's [N, Hv, Dv, Dk].
+        Host sequence/chunk metadata is reused from the existing builder.
+        """
+        from fla_npu.ops.ascendc import chunk_gated_delta_rule_fwd
+
+        result = chunk_gated_delta_rule_fwd(
+            l2norm_fwd(q).contiguous(),
+            l2norm_fwd(k).contiguous(),
+            v.contiguous(),
+            g.to(torch.float32).contiguous(),
+            beta.to(v.dtype).contiguous(),
+            initial_state=initial_state.transpose(-1, -2).to(torch.bfloat16).contiguous(),
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            scale=scale,
+            chunk_size=_FLA_CHUNK_SIZE,
+            output_final_state=True,
+            disable_recompute=True,
+            return_intermediate_states=False,
+            layout="TND",
+        )
+        # Remaining tuple entries are optional backward intermediates.
+        output, final_state = result[:2]
+        return output, final_state.transpose(-1, -2).contiguous()
+
     def _split_ba_for_tp(self, ba: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if hasattr(self, "split_ba"):
             return self.split_ba(ba)
@@ -399,22 +495,48 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 g_non_spec = g_non_spec[:, num_decode_tokens:]
                 beta_non_spec = beta_non_spec[:, num_decode_tokens:]
 
-            initial_state = ssm_state[prefill_state_indices].transpose(-1, -2).contiguous()
-            clear_ssm_states(initial_state, prefill_has_initial_state)
-            (core_attn_out_non_spec, last_recurrent_state) = chunk_gated_delta_rule(
-                q=query_non_spec,
-                k=key_non_spec,
-                v=value_non_spec,
-                g=g_non_spec,
-                beta=beta_non_spec,
-                initial_state=initial_state,
-                output_final_state=True,
-                cu_seqlens=prefill_query_start_loc,
-                prebuilt_meta=attn_metadata.non_spec_prefill_metadata.chunk,
-                head_first=False,
-                use_qk_l2norm_in_kernel=True,
-            )
-            ssm_state[prefill_state_indices] = last_recurrent_state.transpose(-1, -2).contiguous().to(ssm_state.dtype)
+            # Use the fused FLA NPU operator when available (probed once, cached on
+            # the class) and applicable. It only supports the non-PCP case; fall
+            # back to the Triton pipeline under PCP or if the op is unavailable.
+            use_fused_chunk = get_pcp_group().world_size == 1 and AscendGatedDeltaNetAttention._probe_fused_chunk()
+            if use_fused_chunk:
+                # The wrapper converts cache states to/from the FLA layout.
+                # Advanced indexing returns a copy, safe to clear in place.
+                initial_state = ssm_state[prefill_state_indices]
+                clear_ssm_states(initial_state, prefill_has_initial_state)
+                core_attn_out_non_spec, last_recurrent_state = (
+                    AscendGatedDeltaNetAttention._chunk_gated_delta_rule_fused(
+                        q=query_non_spec,
+                        k=key_non_spec,
+                        v=value_non_spec,
+                        g=g_non_spec,
+                        beta=beta_non_spec,
+                        initial_state=initial_state,
+                        cu_seqlens=attn_metadata.non_spec_prefill_metadata.chunk.cu_seqlens_host,
+                        chunk_indices=attn_metadata.non_spec_prefill_metadata.chunk.chunk_indices_chunk64_host,
+                        scale=key_non_spec.shape[-1] ** -0.5,
+                    )
+                )
+                ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
+            else:
+                initial_state = ssm_state[prefill_state_indices].transpose(-1, -2).contiguous()
+                clear_ssm_states(initial_state, prefill_has_initial_state)
+                (core_attn_out_non_spec, last_recurrent_state) = chunk_gated_delta_rule(
+                    q=query_non_spec,
+                    k=key_non_spec,
+                    v=value_non_spec,
+                    g=g_non_spec,
+                    beta=beta_non_spec,
+                    initial_state=initial_state,
+                    output_final_state=True,
+                    cu_seqlens=prefill_query_start_loc,
+                    prebuilt_meta=attn_metadata.non_spec_prefill_metadata.chunk,
+                    head_first=False,
+                    use_qk_l2norm_in_kernel=True,
+                )
+                ssm_state[prefill_state_indices] = (
+                    last_recurrent_state.transpose(-1, -2).contiguous().to(ssm_state.dtype)
+                )
             if split_non_spec:
                 core_attn_out_non_spec = torch.cat(
                     [core_attn_out_decode, core_attn_out_non_spec],
