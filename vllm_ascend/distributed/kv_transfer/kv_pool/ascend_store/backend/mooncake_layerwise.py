@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 from vllm.logger import logger
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.layerwise_keys import LayerwiseKeyBuilder
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ReqMeta,
     block_hash_to_str,
@@ -26,14 +27,67 @@ if TYPE_CHECKING:
 LAYERWISE_DATA_PLANE = "block_key"
 
 
+def bind_layerwise_keys(
+    *,
+    vllm_config: Any,
+    kv_cache_config: Any,
+    model_name: str,
+    use_hybrid: bool,
+    grouped_block_size: list[int],
+) -> LayerwiseKeyBuilder:
+    """Resolve Mooncake identity once, without retaining mutable configs."""
+    parallel = vllm_config.parallel_config
+    validate_pp_groups(kv_cache_config, parallel)
+    namespace = layerwise_topology_namespace(vllm_config, kv_cache_config)
+    pp_size = parallel.pipeline_parallel_size
+    if pp_size > 1:
+        logger.info(
+            "Mooncake PP namespace=%s rank=%d pp_size=%d config_block_size=%s group_block_sizes=%s",
+            namespace,
+            parallel.rank,
+            pp_size,
+            vllm_config.cache_config.block_size,
+            [group_block_size_signature(g) for g in kv_cache_config.kv_cache_groups]
+            if kv_cache_config is not None
+            else [],
+        )
+    if use_hybrid:
+        layout = hybrid_layout_id(kv_cache_config, parallel.tensor_parallel_size, namespace=namespace)
+        block_sizes = tuple(grouped_block_size)
+
+        def make_key(group: int, block_hash: str, head: int, stage: int) -> str:
+            return hybrid_block_key(
+                model_name,
+                layout,
+                group,
+                block_sizes[group],
+                block_hash,
+                head,
+                pp_rank=stage if pp_size > 1 else None,
+            )
+
+        return LayerwiseKeyBuilder(make_key, pp_size)
+
+    def make_single_group_key(group: int, block_hash: str, head: int, stage: int) -> str:
+        return make_block_key(model_name, block_hash, head, namespace=namespace, pp_rank=stage)
+
+    return LayerwiseKeyBuilder(make_single_group_key, pp_size)
+
+
 def extract_layout_config(extra_config: dict[str, Any]) -> dict[str, Any] | None:
     """Block-key transfer does not opt into GVA-backed physical reuse."""
     del extra_config
     return None
 
 
-def make_block_key(model_name: str, block_hash_or_tail: str, head_or_tp_rank: int) -> str:
-    """Build the canonical one-object-per-block-and-saving-rank key."""
+def make_block_key(
+    model_name: str, block_hash_or_tail: str, head_or_tp_rank: int, *, namespace: str = "", pp_rank: int = 0
+) -> str:
+    """One object per stage-local layer stack; retain the PP=1 protocol."""
+    if namespace:
+        return f"{model_name}@{namespace}@pp_rank:{pp_rank}@{block_hash_or_tail}@{head_or_tp_rank}"
+    if pp_rank:
+        raise ValueError("Mooncake PP keys require a layout namespace")
     return f"{model_name}@{block_hash_or_tail}@{head_or_tp_rank}"
 
 
@@ -44,9 +98,80 @@ def make_hit_check_keys(
     num_ranks: int,
     num_groups: int,
     pp_size: int = 1,
+    *,
+    namespace: str = "",
 ) -> list[str]:
-    del group_id, num_groups, pp_size
-    return [make_block_key(model_name, block_hash_hex, rank) for rank in range(num_ranks)]
+    del group_id, num_groups
+    return [
+        make_block_key(model_name, block_hash_hex, rank, namespace=namespace, pp_rank=stage)
+        for stage in range(pp_size)
+        for rank in range(num_ranks)
+    ]
+
+
+def layerwise_topology_namespace(vllm_config: Any, kv_cache_config: Any = None) -> str:
+    """Isolate stage-local objects by the actual partition and model/cache config.
+
+    Use vLLM's partition API, including VLLM_PP_LAYER_PARTITION, rather than
+    assuming equal stage sizes. No worker-local layer membership enters this
+    hash: the scheduler and every stage must derive the same namespace.
+    """
+    parallel = vllm_config.parallel_config
+    if parallel.pipeline_parallel_size == 1:
+        return ""
+    model = vllm_config.model_config
+    partitions = []
+    previous_end = 0
+    for stage in range(parallel.pipeline_parallel_size):
+        stage_config = copy(parallel)
+        stage_config.rank = stage * parallel.tensor_parallel_size
+        start, end = model.get_layers_start_end_indices(stage_config)
+        if start != previous_end or end <= start:
+            raise ValueError("Mooncake PP requires contiguous, nonempty model layer partitions")
+        partitions.append((start, end))
+        previous_end = end
+    if previous_end != model.get_total_num_hidden_layers():
+        raise ValueError("Mooncake PP partitions must cover every model layer")
+    # EngineCore rewrites its CacheConfig.block_size to the minimum group
+    # block size after spawning workers. Workers still hold the CLI value
+    # (e.g. 32 while a DSV4 state group uses 2). Hashing either the raw value
+    # or CacheConfig.compute_hash() would split lookup and PUT namespaces.
+    # Normalize a copy from the resolved groups shared by both roles; never
+    # change the worker's config, which model/cache code still needs.
+    cache = copy(vllm_config.cache_config)
+    if kv_cache_config is not None and kv_cache_config.kv_cache_groups:
+        cache.block_size = min(
+            size for group in kv_cache_config.kv_cache_groups for size in group_block_size_signature(group)
+        )
+    speculative = vllm_config.speculative_config
+    identity = (
+        parallel.tensor_parallel_size,
+        partitions,
+        model.compute_hash(),
+        cache.compute_hash(),
+        cache.cache_dtype,
+        cache.block_size,
+        speculative.compute_hash() if speculative is not None else None,
+    )
+    digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+    return f"mooncake_pp_v3:{digest}"
+
+
+def validate_pp_groups(kv_cache_config: Any, parallel_config: Any) -> None:
+    """Fail closed when an all-stage readability check cannot be satisfied.
+
+    Empty projected groups need a group-owner manifest shared with the
+    scheduler. Until that protocol exists, do not silently report permanent
+    misses or ignore a group's state (including draft-only groups).
+    """
+    if parallel_config.pipeline_parallel_size == 1 or kv_cache_config is None:
+        return
+    empty = [index for index, group in enumerate(kv_cache_config.kv_cache_groups) if not group.layer_names]
+    if empty:
+        raise ValueError(
+            f"Mooncake layerwise PP requires each stage to own layers in every KV cache group; empty groups: {empty}. "
+            "Use a partition covering all groups, or disable layerwise pooling. Draft-only groups are not supported."
+        )
 
 
 def validate_topology(parallel_config: Any) -> None:
@@ -57,14 +182,14 @@ def validate_topology(parallel_config: Any) -> None:
         return value if isinstance(value, int) and not isinstance(value, bool) else 1
 
     dimensions = (
-        ("pipeline_parallel_size", parallel_size("pipeline_parallel_size")),
         ("prefill_context_parallel_size", parallel_size("prefill_context_parallel_size")),
         ("decode_context_parallel_size", parallel_size("decode_context_parallel_size")),
     )
     unsupported = [f"{name}={size}" for name, size in dimensions if size > 1]
     if unsupported:
         raise ValueError(
-            "Mooncake block-key layerwise currently supports TP-only topology; unsupported " + ", ".join(unsupported)
+            "Mooncake block-key layerwise supports TP/PP, but not context parallelism; unsupported "
+            + ", ".join(unsupported)
         )
 
 
@@ -89,7 +214,7 @@ def group_block_size_signature(group) -> tuple[int, ...]:
     return tuple(sorted({int(sub.block_size) for sub in specs}))
 
 
-def hybrid_layout_id(kv_cache_config, tp_size: int = 1) -> str:
+def hybrid_layout_id(kv_cache_config, tp_size: int = 1, *, namespace: str = "") -> str:
     """Namespace every pool key, and must agree across processes.
 
     Only representation-independent fields participate. Hashing the spec
@@ -100,22 +225,28 @@ def hybrid_layout_id(kv_cache_config, tp_size: int = 1) -> str:
     queried another, so the pool never reported a hit, silently and with no
     error anywhere.
 
-    Layer membership, group order and per-group page sizes are identical in
-    both representations, and the model name is already part of every key, so
-    this still isolates incompatible layouts from each other.
+    Without PP, layer membership, group order and page sizes are identical in
+    both representations. With PP, membership is stage-local: use the shared
+    model/config/partition namespace plus the globally ordered page signatures.
     """
     groups = []
     for group in kv_cache_config.kv_cache_groups:
-        groups.append((sorted(group.layer_names), group_block_size_signature(group)))
+        # PP projects global groups onto each stage. The model/partition hash
+        # supplies the global identity; local membership must not split it.
+        groups.append(([] if namespace else sorted(group.layer_names), group_block_size_signature(group)))
     # No default= fallback on purpose: anything non-serializable here would have
     # to come from a repr that can differ per process, which is exactly the bug
     # this hash must never reacquire. Fail loudly instead.
-    encoded = json.dumps((tp_size, groups), sort_keys=True).encode()
+    identity = (namespace, tp_size, groups) if namespace else (tp_size, groups)
+    encoded = json.dumps(identity, sort_keys=True).encode()
     return hashlib.sha256(encoded).hexdigest()
 
 
-def hybrid_block_key(model: str, layout: str, group: int, block_size: int, block_hash: str, head: int) -> str:
-    return f"{model}@mooncake_hybrid_v1:{layout}@group:{group}@block:{block_size}@{block_hash}@{head}"
+def hybrid_block_key(
+    model: str, layout: str, group: int, block_size: int, block_hash: str, head: int, *, pp_rank: int | None = None
+) -> str:
+    stage = "" if pp_rank is None else f"@pp_rank:{pp_rank}"
+    return f"{model}@mooncake_hybrid_v1:{layout}{stage}@group:{group}@block:{block_size}@{block_hash}@{head}"
 
 
 def fence_drains_recv() -> bool:
@@ -149,6 +280,14 @@ def send_fence_backlog() -> int:
 
 def selected(mask, index: int) -> bool:
     return mask is None or (0 <= index < len(mask) and bool(mask[index]))
+
+
+def prepare_layerwise_sessions(worker: KVPoolWorker, requests: list[ReqMeta]) -> dict[int, list[ReqMeta]]:
+    """Preserve partial single-group sessions and complete hybrid snapshots."""
+    if worker.block_key_hybrid:
+        return prepare_group_sessions(worker, requests)
+    worker._prepare_block_key_layerwise_sessions(requests)
+    return {}
 
 
 def prepare_group_sessions(worker: KVPoolWorker, requests: list[ReqMeta]) -> dict[int, list[ReqMeta]]:
@@ -202,15 +341,8 @@ def _prepare_group_sessions(worker: KVPoolWorker, requests: list[ReqMeta]) -> di
             load_mask = load_masks[group] if load_masks is not None else None
             store_mask = request.store_masks[group] if request.store_masks is not None else None
 
-            def key(index, group=group, block_size=block_size, hashes=hashes):
-                return hybrid_block_key(
-                    worker.model_name,
-                    worker.block_key_hybrid_layout,
-                    group,
-                    block_size,
-                    block_hash_to_str(hashes[index]),
-                    worker.head_or_tp_rank,
-                )
+            def key(index, group=group, hashes=hashes):
+                return worker._make_layerwise_full_key(group, block_hash_to_str(hashes[index]))
 
             start = request.load_spec.vllm_cached_tokens // block_size if request.load_spec is not None else 0
             entries = (

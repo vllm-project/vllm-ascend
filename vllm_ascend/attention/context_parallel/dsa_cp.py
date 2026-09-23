@@ -2455,12 +2455,16 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
             global_common_attn_metadata,
             pcp_context.global_batch.num_reqs,
         )
+        # num_prefills can miss short prefills; prevent local PCP RoPE from
+        # overwriting the global RoPE buffer whenever a request is prefilling.
+        can_use_rope_cache = not bool(pcp_context.global_batch.is_prefilling_np.any())
         global_dsa_metadata = self._global_metadata_builder.build(
             common_prefix_len,
             global_common_attn_metadata,
             fast_build,
             num_actual_reqs=pcp_context.global_batch.num_reqs,
             common_ratio_to_sas_metadata={},
+            can_use_rope_cache=can_use_rope_cache,
         )
         local_common_attn_metadata = self._build_local_common_attn_metadata(
             pcp_context,

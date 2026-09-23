@@ -33,7 +33,7 @@ import time
 from pathlib import Path
 
 from tools.bisect import git_ops, report
-from tools.bisect.build_manager import DEPLOY_ERRORS, BuildManager
+from tools.bisect.build_manager import BuildError, BuildManager
 from tools.bisect.config import (
     DEFAULT_COORD_DIR,
     DEFAULT_GOOD_TABLE,
@@ -48,10 +48,9 @@ from tools.bisect.config import (
     Verdict,
 )
 from tools.bisect.good_table import GoodTable, valid_soc
-from tools.bisect.runner import BisectFatalError
 from tools.bisect.state import BisectState
 from tools.bisect.verdict import evaluate
-from tools.bisect.version_compat import expected_versions, policy_with_environment_drift
+from tools.bisect.version_compat import VersionAdaptationError, VersionPolicy, expected_versions
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("auto_bisect")
@@ -100,7 +99,7 @@ class Bisector:
                 log_path=str(log_path),
                 note=note,
             )
-        except DEPLOY_ERRORS as exc:
+        except (BuildError, VersionAdaptationError) as exc:
             result = TrialResult(
                 candidate=candidate,
                 verdict="SKIP",
@@ -225,27 +224,18 @@ class Bisector:
 
         candidates = git_ops.candidate_list(self.repo, good.commit, bad.commit)
         logger.info("Search space: %d commits", len(candidates))
-        good_versions = expected_versions(self.repo, good.commit)
-        bad_versions = expected_versions(self.repo, bad.commit)
-        version_policy, drift = policy_with_environment_drift(good_versions, bad_versions)
-        endpoint_changed = tuple(
-            package
-            for package in version_policy.checked_packages
-            if good_versions.get(package) != bad_versions.get(package)
+        version_policy = VersionPolicy.between(
+            expected_versions(self.repo, good.commit),
+            expected_versions(self.repo, bad.commit),
         )
-        if endpoint_changed:
+        self.runner.configure_version_policy(version_policy)
+        if version_policy.enabled:
             logger.info(
                 "Version adaptation enabled for %s; endpoint versions differ",
-                ", ".join(endpoint_changed),
+                ", ".join(version_policy.checked_packages),
             )
-        if drift:
-            logger.info(
-                "Version adaptation enabled for %s; installed version differs from the endpoints' common pin",
-                ", ".join(drift),
-            )
-        if not version_policy.enabled:
-            logger.info("Version adaptation disabled; endpoint pins match and the installed environment matches them")
-        self.runner.configure_version_policy(version_policy)
+        else:
+            logger.info("Version adaptation disabled; good and bad endpoint versions match")
 
         state = BisectState.load(self.state_path, good=good.commit, bad=bad.commit) or BisectState(
             good=good.commit, bad=bad.commit, hi=len(candidates) - 1
@@ -256,15 +246,11 @@ class Bisector:
         # error) so workers never hang waiting for the next round.
         try:
             if not self._verify_endpoints(good, candidates, state):
-                self._write_report(good, bad, first_bad=None)
+                report.write_report_json(
+                    self.report_path, inp=self.inp, good=good, bad=bad, first_bad=None, trials=self.trials
+                )
                 return None
             first_bad = self._bisect(candidates, state)
-        except BisectFatalError:
-            # Unrecoverable environment (e.g. no multi-node worker ever joined):
-            # still leave a report so the run is auditable, then propagate so
-            # main() can exit with code 2.
-            self._write_report(good, bad, first_bad=None)
-            raise
         finally:
             self.runner.finish()
 
@@ -280,14 +266,10 @@ class Bisector:
                     first_bad.short,
                 )
             report.print_conclusion(first_bad, self.trials)
-        self._write_report(good, bad, first_bad=first_bad)
-        return first_bad
-
-    def _write_report(self, good: Candidate, bad: Candidate, first_bad: Candidate | None) -> None:
-        """Write report.json (single writer for every exit path of run())."""
         report.write_report_json(
             self.report_path, inp=self.inp, good=good, bad=bad, first_bad=first_bad, trials=self.trials
         )
+        return first_bad
 
     def _resolve_good(self) -> str:
         if self.inp.good_commit:
@@ -460,11 +442,7 @@ def main(argv: list[str] | None = None) -> int:
 
         return run_worker(inp, opt)
 
-    try:
-        first_bad = Bisector(inp, opt).run()
-    except BisectFatalError as exc:
-        logger.error("Bisect aborted: %s", exc)
-        return 2
+    first_bad = Bisector(inp, opt).run()
     return 0 if first_bad is not None else 2
 
 

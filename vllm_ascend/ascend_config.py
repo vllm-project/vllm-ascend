@@ -89,15 +89,24 @@ class KVPPConfig:
 
         model_config = vllm_config.model_config
         if not model_config.enforce_eager:
-            raise ValueError("KVPP currently supports eager execution only; set --enforce-eager.")
+            from vllm.config import CUDAGraphMode
+
+            if vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.PIECEWISE:
+                raise ValueError("KVPP supports eager execution or PIECEWISE only.")
         if not model_config.use_mla or model_config.is_hybrid:
             raise ValueError("KVPP currently supports only non-hybrid MLA models.")
         speculative_config = vllm_config.speculative_config
         if speculative_config is not None:
-            if speculative_config.method != "mtp":
-                raise ValueError("KVPP currently supports speculative decoding only with method='mtp'.")
+            if speculative_config.method not in ("mtp", "dspark"):
+                raise ValueError("KVPP supports speculative decoding only with method='mtp' or method='dspark'.")
             if speculative_config.num_speculative_tokens_per_batch_size:
-                raise ValueError("KVPP currently supports only a fixed number of MTP speculative tokens.")
+                raise ValueError("KVPP currently supports only a fixed number of speculative tokens.")
+            if speculative_config.method == "dspark":
+                if getattr(speculative_config, "enable_adaptive_verification", False):
+                    raise ValueError("KVPP does not support DSpark adaptive verification.")
+                dynamic_spec = (vllm_config.additional_config or {}).get("dynamic_spec_config") or {}
+                if dynamic_spec.get("method") is not None:
+                    raise ValueError("KVPP does not support dynamic speculative lengths.")
 
 
 @config
@@ -605,7 +614,7 @@ class AscendConfig:
             and vc.parallel_config.enable_expert_parallel
             and vc.parallel_config.tensor_parallel_size > 1
         )
-        # TODO: delete the deprecated flashcomm option when upstream SP is ready.
+        # FlashComm remains the SP MoE switch on Ascend.
         flashcomm_explicitly_enabled = validate_additional_config_bool(
             (vc.additional_config or {}).get("enable_flashcomm1", False),
             "additional_config.enable_flashcomm1",
@@ -1556,11 +1565,6 @@ def _is_ascend_config_initialized(config: AscendConfig | None) -> bool:
 
 def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
     additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
-    if "enable_flashcomm1" in additional_config or os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1") is not None:
-        logger.warning(
-            "FlashComm is deprecated; remove enable_flashcomm1 and "
-            "VLLM_ASCEND_ENABLE_FLASHCOMM1 from the configuration. Use upstream configuration instead"
-        )
     # Upstream EngineArgs injects --gdn-prefill-backend / --kda-prefill-backend
     # into additional_config. The generic GDN/KDA model layers consume them
     # (qwen_gdn_linear_attn / kimi_gdn_linear_attn), but on non-CUDA platforms
@@ -1623,8 +1627,8 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
         # instead of letting extra="forbid" report them as typos.
         "gdn_prefill_backend",
         "kda_prefill_backend",
-        # Removed upstream option: warn above, but do not pass it into the
-        # strict AscendConfig schema where it would be reported as a typo.
+        # Consumed in derive_and_validate as the SP MoE switch. Not an
+        # AscendConfig field, so strip it before extra="forbid" validation.
         "enable_flashcomm1",
         # injected fields (factory passes explicitly; a copy in additional_config would conflict)
         "scheduler_config",
