@@ -704,10 +704,15 @@ class TestKVCacheRecvingThreadBasic(unittest.TestCase):
         self.assertEqual(queued["num_computed_tokens"], 0)
 
     def test_mark_and_is_failed(self):
-        self.thread._mark_failed_recv_request("req1", [[10, 20]])
+        self.thread._mark_failed_recv_request(
+            "req1",
+            [[10, 20], [30], [40, 50]],
+        )
         self.assertTrue(self.thread._is_failed_recv_request("req1"))
-        self.assertIn(10, self.thread.invalid_block_ids)
-        self.assertIn(20, self.thread.invalid_block_ids)
+        self.assertSetEqual(
+            self.thread.invalid_block_ids,
+            {10, 20, 30, 40, 50},
+        )
 
     def test_clear_failed_recv_request(self):
         self.thread._mark_failed_recv_request("req2", [[30]])
@@ -725,6 +730,34 @@ class TestKVCacheRecvingThreadBasic(unittest.TestCase):
         mock_tracker.return_value = {"req1", "req2"}
         result = self.thread.get_and_clear_finished_requests()
         self.assertEqual(result, {"req1", "req2"})
+
+    def test_receiver_accepts_noniterable_tensor_like_cache(self):
+        expected_device = torch.device("npu:5")
+
+        class TensorLikeCache:
+            def __init__(self, device: torch.device):
+                self.device = device
+
+        with patch("torch.npu.set_device") as mock_set_device:
+            thread = KVCacheRecvingThread(
+                tp_rank=1,
+                tp_size=4,
+                _prefill_pp_size=1,
+                engine=self.engine,
+                local_engine_id="local_engine",
+                local_handshake_port=5555,
+                side_channel_port=30000,
+                local_kv_caches_base_addr=[[0x1000]],
+                block_len_per_addr=[[1024]],
+                block_stride_per_addr=[[1024]],
+                ready_event=self.ready_event,
+                vllm_config=self.vllm_config,
+                kv_caches={"layer.0": TensorLikeCache(expected_device)},
+                prefill_pp_layer_partition=None,
+            )
+            thread.executor.submit(lambda: None).result()
+            thread.executor.shutdown(wait=True)
+            mock_set_device.assert_called_once_with(expected_device)
 
     def test_executor_workers_bind_kv_cache_device_before_handling_requests(self):
         expected_device = torch.device("npu:5")
@@ -1038,6 +1071,21 @@ class TestCoreFunctionality(unittest.TestCase):
         mock_get_meta.assert_not_called()
 
     @patch.object(KVCacheRecvingThread, "_get_remote_metadata")
+    def test_transfer_skips_non_owner_sparse_shared_host_group(self, mock_get_meta):
+        req = dict(self.test_req)
+        req["transfer_sparse_shared_main"] = False
+        self.thread.sparse_shared_main_group_ids = {0}
+        self.thread.kv_caches_base_addr["remote_engine"] = {6666: [[0x3000]]}
+        self.thread.remote_block_size_scale["remote_engine"] = {6666: [[1]]}
+
+        with patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_ascend_config") as mock_config:
+            mock_config.return_value.enable_kv_nz = False
+            self.thread._transfer_kv_cache_all_groups(req)
+
+        self.engine.batch_transfer_sync_read.assert_not_called()
+        mock_get_meta.assert_not_called()
+
+    @patch.object(KVCacheRecvingThread, "_get_remote_metadata")
     def test_transfer_mamba_uses_normalized_prompt_state_block(self, mock_get_meta):
         # Pure metadata/address arithmetic: no NPU tensor or torch.npu call.
         self._configure_mock_mamba_transfer()
@@ -1217,6 +1265,24 @@ class TestCoreFunctionality(unittest.TestCase):
         self.assertEqual(call_args[1], [0x2000 + 4 * 2048])
         self.assertEqual(call_args[2], [0x4000 + 7 * 8192])
         self.assertEqual(call_args[3], [2 * 2048])
+        mock_get_meta.assert_not_called()
+
+    @patch.object(KVCacheRecvingThread, "_get_remote_metadata")
+    def test_transfer_skips_regular_indexer_when_replicated_source_is_elsewhere(self, mock_get_meta):
+        req = dict(self.test_req)
+        req["local_block_ids"] = [[1, 2]]
+        req["remote_block_ids"] = [[3, 4]]
+        req["use_replicated_indexer"] = True
+
+        with patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_ascend_config") as mock_config:
+            mock_config.return_value.enable_kv_nz = False
+            self.thread.kv_group2layeridx = {0: ({"kv_cache_spec_type": "AscendSFAIndexerCacheSpec"}, [0])}
+            self.thread.kv_caches_base_addr["remote_engine"] = {6666: [[0x4000]]}
+            self.thread.remote_block_stride_per_addr["remote_engine"][6666] = [[8192]]
+
+            self.thread._transfer_kv_cache_all_groups(req)
+
+        self.engine.batch_transfer_sync_read.assert_not_called()
         mock_get_meta.assert_not_called()
 
     @patch.object(KVCacheRecvingThread, "_get_remote_metadata")
@@ -3586,9 +3652,11 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         self.assertEqual(add_request_calls[0].kwargs["remote_handshake_port"], 31001)
         self.assertEqual(add_request_calls[0].kwargs["local_block_ids_replicate_k"], ([40],))
         self.assertEqual(add_request_calls[0].kwargs["remote_block_ids_replicate_k"], ([20],))
+        self.assertTrue(add_request_calls[0].kwargs["use_replicated_indexer"])
         self.assertEqual(add_request_calls[1].kwargs["remote_handshake_port"], 31003)
         self.assertIsNone(add_request_calls[1].kwargs["local_block_ids_replicate_k"])
         self.assertIsNone(add_request_calls[1].kwargs["remote_block_ids_replicate_k"])
+        self.assertTrue(add_request_calls[1].kwargs["use_replicated_indexer"])
 
     def test_get_kv_split_metadata_dp1_remote_port_send_num_uses_absolute_ports(self):
         self.vllm_config.kv_transfer_config.kv_port = 30000

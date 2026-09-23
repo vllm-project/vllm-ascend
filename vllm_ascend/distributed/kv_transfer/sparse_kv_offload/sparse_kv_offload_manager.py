@@ -381,8 +381,8 @@ class SparseKVOffloadManager:
         torch_npu_include = os.path.join(torch_npu_path, "include")
         torch_npu_lib_path = os.path.join(torch_npu_path, "lib")
         os.environ["TORCH_EXTENSIONS_ALWAYS_BUILD"] = "1"
-        os.environ["CXX"] = "clang++"
-        os.environ["CC"] = "clang"
+        os.environ["CXX"] = "g++"
+        os.environ["CC"] = "gcc"
         abs_path = os.path.dirname(os.path.abspath(__file__))
         src_path = os.path.join(abs_path, "sparse_kv_offload.cpp")
         logger.info_once(f"Sparse KV offload build cpp utils from src: {src_path}")

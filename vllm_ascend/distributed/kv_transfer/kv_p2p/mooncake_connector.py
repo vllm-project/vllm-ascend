@@ -58,6 +58,12 @@ from vllm.v1.request import RequestStatus
 from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec, AscendSlidingWindowMLASpec
+from vllm_ascend.distributed.kv_transfer.utils.memfabric_transfer_engine import (
+    BACKEND_MEMFABRIC,
+    MEMFABRIC_ROLE_DECODE,
+    MEMFABRIC_ROLE_PREFILL,
+    global_memfabric_te,
+)
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     RegisterRegions,
@@ -111,6 +117,8 @@ class MooncakeAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):
     block_strides: list[list[int]]
     local_ip: str = ""
     handshake_port: int = 0
+    transfer_backend: str = "mooncake"
+    transfer_session: str = ""
 
 
 @dataclass
@@ -432,6 +440,8 @@ class KVCacheRecvingThread(threading.Thread):
         prefill_pp_layer_partition: str | None = None,
         kv_group2layeridx: dict[int, tuple[dict[str, Any], list[int]]] | None = None,
         block_size_scale: list[list[int]] | None = None,
+        transfer_backend: str = "mooncake",
+        sparse_shared_main_group_ids: set[int] | None = None,
     ):
         super().__init__(daemon=True, name="KVCacheRecvingThread")
         self.tp_rank = tp_rank
@@ -441,6 +451,7 @@ class KVCacheRecvingThread(threading.Thread):
         self.local_handshake_port = local_handshake_port
         self.side_channel_port = side_channel_port
         self.engine = engine
+        self.transfer_backend = transfer_backend
         if ready_event is None:
             ready_event = threading.Event()
         self.ready_event = ready_event
@@ -455,6 +466,7 @@ class KVCacheRecvingThread(threading.Thread):
         if kv_group2layeridx is None:
             kv_group2layeridx = {}
         self.kv_group2layeridx = kv_group2layeridx
+        self.sparse_shared_main_group_ids = set(sparse_shared_main_group_ids) if sparse_shared_main_group_ids else set()
         self.group_compress_ratios: dict[int, int] = {}
         for group_id, (group_spec, _) in self.kv_group2layeridx.items():
             compress_ratio = 1
@@ -466,6 +478,7 @@ class KVCacheRecvingThread(threading.Thread):
                         break
             self.group_compress_ratios[group_id] = compress_ratio
         self.remote_te_port: dict[str, dict[int, int]] = SizedDict()
+        self.remote_transfer_session: dict[str, dict[int, str]] = SizedDict()
         self.remote_block_size_scale: dict[str, dict[int, list[list[int]]]] = SizedDict()
         self.remote_block_stride_per_addr: dict[str, dict[int, list[list[int]]]] = SizedDict()
         self.remote_kv_group2layeridx: dict[str, dict[int, dict[int, tuple[dict[str, Any], list[int]]]]] = SizedDict()
@@ -478,11 +491,32 @@ class KVCacheRecvingThread(threading.Thread):
         self.pending_reformat_lock = threading.Lock()
 
         self.request_queue: queue.Queue[Any] = queue.Queue()
-        first_kv_cache = next(iter(self.kv_caches.values()))
+        kv_cache_device = next(
+            (
+                tensor.device
+                for cache_or_caches in self.kv_caches.values()
+                for tensor in ((cache_or_caches,) if isinstance(cache_or_caches, torch.Tensor) else cache_or_caches)
+                if isinstance(tensor, torch.Tensor) and tensor.device.type == "npu"
+            ),
+            None,
+        )
+        if kv_cache_device is None:
+            # Unit tests and third-party cache wrappers may expose tensor-like
+            # objects instead of torch.Tensor.  Preserve the old device lookup
+            # as a compatibility fallback after skipping sparse tuple None
+            # entries in the real-tensor path above.
+            first_cache = next(iter(self.kv_caches.values()))
+            cache_entries = first_cache if isinstance(first_cache, (list, tuple)) else (first_cache,)
+            first_cache_entry = next(
+                (entry for entry in cache_entries if entry is not None),
+                None,
+            )
+            if first_cache_entry is None or not hasattr(first_cache_entry, "device"):
+                raise RuntimeError("Mooncake receiver did not find an NPU KV cache tensor")
+            kv_cache_device = first_cache_entry.device
         # NPU device selection is thread-local. Executor workers do not inherit
         # the device selected by the model worker thread and would otherwise
         # use device 0 on their first NPU operation.
-        kv_cache_device = first_kv_cache[0].device
         self.executor = ThreadPoolExecutor(
             max_workers=32,
             initializer=torch.npu.set_device,
@@ -575,6 +609,8 @@ class KVCacheRecvingThread(threading.Thread):
         shard_idx: int = 0,
         local_block_ids_replicate_k: BlockIds | None = None,
         remote_block_ids_replicate_k: BlockIds | None = None,
+        transfer_sparse_shared_main: bool = True,
+        use_replicated_indexer: bool = False,
     ):
         """Add a new request to the queue for processing."""
         if remote_port_send_num is None:
@@ -595,6 +631,8 @@ class KVCacheRecvingThread(threading.Thread):
             "all_task_done": all_task_done,
             "shard_idx": shard_idx,
             "remote_block_size": remote_block_size,
+            "transfer_sparse_shared_main": transfer_sparse_shared_main,
+            "use_replicated_indexer": use_replicated_indexer,
         }
         logger.debug("Adding request %s to the queue.Trans info:%s", request_id, trans_info)
         self.request_queue.put(trans_info)
@@ -621,7 +659,8 @@ class KVCacheRecvingThread(threading.Thread):
     def _mark_failed_recv_request(self, request_id: str, local_block_ids: BlockIds) -> None:
         with self.failed_recv_requests_lock:
             self.failed_recv_requests.add(request_id)
-            self.invalid_block_ids.update(local_block_ids[0])
+            for group_block_ids in local_block_ids:
+                self.invalid_block_ids.update(group_block_ids)
 
     def _clear_failed_recv_request(self, request_id: str) -> None:
         with self.failed_recv_requests_lock:
@@ -717,11 +756,15 @@ class KVCacheRecvingThread(threading.Thread):
         remote_handshake_port = req_meta["remote_handshake_port"]
         remote_port_send_num = req_meta["remote_port_send_num"]
         all_task_done = req_meta["all_task_done"]
+        failed_local_block_ids = (
+            *req_meta["local_block_ids"],
+            *(req_meta.get("local_block_ids_replicate_k") or tuple()),
+        )
         transfer_failed = self._is_failed_recv_request(request_id)
 
         try:
             if transfer_failed:
-                self._mark_failed_recv_request(request_id, req_meta["local_block_ids"])
+                self._mark_failed_recv_request(request_id, failed_local_block_ids)
                 logger.warning("Skipping KV cache transfer for request. remote_request_id=%s. ", remote_request_id)
             else:
                 try:
@@ -730,7 +773,7 @@ class KVCacheRecvingThread(threading.Thread):
                     logger.debug("Finished transferring KV cache for request %s.", remote_request_id)
                 except Exception as e:
                     transfer_failed = True
-                    self._mark_failed_recv_request(request_id, req_meta["local_block_ids"])
+                    self._mark_failed_recv_request(request_id, failed_local_block_ids)
                     logger.exception("Failed to transfer KV cache for request %s: %s", remote_request_id, e)
         finally:
             all_tasks_done = self._mark_request_task_done(request_id, all_task_done)
@@ -743,7 +786,7 @@ class KVCacheRecvingThread(threading.Thread):
                         self._reformat_pending_kv_caches(request_id)
                     except Exception as e:
                         transfer_failed = True
-                        self._mark_failed_recv_request(request_id, req_meta["local_block_ids"])
+                        self._mark_failed_recv_request(request_id, failed_local_block_ids)
                         with self.pending_reformat_lock:
                             self.pending_reformat.pop(request_id, None)
                         logger.exception(
@@ -787,6 +830,7 @@ class KVCacheRecvingThread(threading.Thread):
         local_block_ids_replicate_k: BlockIds = req_meta.get("local_block_ids_replicate_k", tuple())
         remote_block_ids_replicate_k: BlockIds = req_meta.get("remote_block_ids_replicate_k", tuple())
         has_replicate_k_blocks = any(local_block_ids_replicate_k) and any(remote_block_ids_replicate_k)
+        use_replicated_indexer = req_meta.get("use_replicated_indexer", has_replicate_k_blocks)
         group_pulls: list[GroupPull] = req_meta["group_pulls"]
         remote_engine_id = req_meta["remote_engine_id"]
         remote_host = req_meta["remote_host"]
@@ -809,8 +853,11 @@ class KVCacheRecvingThread(threading.Thread):
             remote_kv_caches_base_addrs = self.kv_caches_base_addr[remote_engine_id][remote_handshake_port]
             local_kv_caches_base_addrs = self.kv_caches_base_addr[self.local_engine_id][self.local_handshake_port]
             remote_transfer_port = self.remote_te_port[remote_engine_id][remote_handshake_port]
+            remote_transfer_session = self.remote_transfer_session.get(remote_engine_id, {}).get(
+                remote_handshake_port, ""
+            )
             remote_block_stride_per_addr = self.remote_block_stride_per_addr[remote_engine_id][remote_handshake_port]
-        session_id = f"{remote_host}:{remote_transfer_port}"
+        session_id = remote_transfer_session or f"{remote_host}:{remote_transfer_port}"
 
         req_start_time = time.perf_counter()
         src_list: list[int] = []
@@ -847,6 +894,9 @@ class KVCacheRecvingThread(threading.Thread):
 
         for group_pull in group_pulls:
             group_idx = group_pull.group_id
+            if group_idx in self.sparse_shared_main_group_ids and not req_meta.get("transfer_sparse_shared_main", True):
+                # The shared Host main KV is pulled once per source DCP shard.
+                continue
             group_spec, layer_indices = self.kv_group2layeridx[group_idx]
             kv_cache_group_id = group_spec.get("kv_cache_group_id", group_idx)
             layer_indices = pp_layer_indices(layer_indices, group_pull.prefill_pp_rank)
@@ -955,9 +1005,12 @@ class KVCacheRecvingThread(threading.Thread):
                     remote_block_stride = remote_block_stride_per_addr[layer_idx][cache_idx]
                     inner_block_len = block_len // tp_num_need_pulls
                     is_sfa_indexer_group = group_spec["kv_cache_spec_type"] == "AscendSFAIndexerCacheSpec"
-                    if is_sfa_indexer_group and has_replicate_k_blocks:
-                        transfer_remote_block_ids = grouped_remote_k_block_ids
-                        transfer_local_block_ids = grouped_local_k_block_ids
+                    if is_sfa_indexer_group and use_replicated_indexer:
+                        if has_replicate_k_blocks:
+                            transfer_remote_block_ids = grouped_remote_k_block_ids
+                            transfer_local_block_ids = grouped_local_k_block_ids
+                        else:
+                            continue
                     else:
                         if not has_group_blocks:
                             continue
@@ -1420,6 +1473,11 @@ class KVCacheRecvingThread(threading.Thread):
             ensure_zmq_send(sock, self.encoder.encode((GET_META_MSG, "")), f"{remote_host}:{remote_handshake_port}")
             metadata_bytes = ensure_zmq_recv(sock, f"{remote_host}:{remote_handshake_port}")
             agent_meta = self.decoder.decode(metadata_bytes)
+            if agent_meta.transfer_backend != self.transfer_backend:
+                raise RuntimeError(
+                    "KV transfer backend mismatch: "
+                    f"local={self.transfer_backend!r}, remote={agent_meta.transfer_backend!r}"
+                )
             engine_id = agent_meta.engine_id
             assert engine_id != self.local_engine_id, (
                 f"Conflict engine id {engine_id} with local engine id {self.local_engine_id}."
@@ -1436,6 +1494,7 @@ class KVCacheRecvingThread(threading.Thread):
                 self.remote_kv_group2layeridx[engine_id][remote_handshake_port] = agent_meta.kv_group2layeridx
                 self.kv_caches_base_addr[engine_id][remote_handshake_port] = agent_meta.kv_caches_base_addr
                 self.remote_te_port[engine_id][remote_handshake_port] = agent_meta.te_rpc_port
+                self.remote_transfer_session[engine_id][remote_handshake_port] = agent_meta.transfer_session
                 self.remote_block_size_scale[engine_id][remote_handshake_port] = agent_meta.block_size_scale
                 self.remote_block_stride_per_addr[engine_id][remote_handshake_port] = agent_meta.block_strides
         except Exception:
@@ -2085,6 +2144,22 @@ class MooncakeConnectorWorker:
 
         self.max_device_id = self.tp_size * self.dp_size * self.pcp_size * self.pp_size
         self.kv_role = vllm_config.kv_transfer_config.kv_role
+        self.transfer_backend = vllm_config.kv_transfer_config.get_from_extra_config("transfer_backend", "mooncake")
+        if self.transfer_backend not in ("mooncake", BACKEND_MEMFABRIC):
+            raise ValueError(
+                "MooncakeConnectorV1 transfer_backend must be 'mooncake' or "
+                f"'{BACKEND_MEMFABRIC}', got {self.transfer_backend!r}"
+            )
+        self.sparse_kv_offload_enabled = self.ascend_config.sparse_kv_offload_config.enabled
+        if (
+            self.transfer_backend == BACKEND_MEMFABRIC
+            and self.kv_role == "kv_producer"
+            and self.sparse_kv_offload_enabled
+        ):
+            raise ValueError(
+                "Mooncake MemFabric producer must not enable sparse KV offload; "
+                "only the decode consumer owns the Host KV pool"
+            )
         self.num_key_value_heads = self.vllm_config.model_config.hf_text_config.num_key_value_heads
 
         # kv cache config
@@ -2125,10 +2200,20 @@ class MooncakeConnectorWorker:
         self.handshake_port = self.side_channel_port + device_index
         self.sockets: dict = {}
         device_name = str(torch.npu.current_device()) if self.pp_size > 1 else None
-        self.engine = global_te.get_transfer_engine(
-            self.side_channel_host,
-            device_name=device_name,
-        )
+        if self.transfer_backend == BACKEND_MEMFABRIC:
+            memfabric_role = MEMFABRIC_ROLE_PREFILL if self.kv_role == "kv_producer" else MEMFABRIC_ROLE_DECODE
+            global_memfabric_te.configure(
+                role=memfabric_role,
+                device_id=torch.npu.current_device(),
+            )
+            self.engine = global_memfabric_te.get_transfer_engine(self.side_channel_host)
+            self.transfer_session = global_memfabric_te.unique_id
+        else:
+            self.engine = global_te.get_transfer_engine(
+                self.side_channel_host,
+                device_name=device_name,
+            )
+            self.transfer_session = ""
         self.te_rpc_port = self.engine.get_rpc_port()
 
         # Background thread for sending or receiving KV caches.
@@ -2149,6 +2234,10 @@ class MooncakeConnectorWorker:
             self.tp_num_need_pulls = num_d_block_heads // num_p_block_heads
         self.local_remote_block_port_mapping: dict[str, list[list[int]] | None] = {}
         self.remote_port_send_num: dict[str, dict[int, RemotePortInfo]] = {}
+        self.sparse_shared_main_group_ids: set[int] = set()
+        self._sync_sparse_shared_main_across_tp = False
+        self._recv_terminal_requests: set[str] = set()
+        self._synced_invalid_block_ids: set[int] = set()
 
     def _get_prefill_decode_size(self, vllm_config: VllmConfig):
         # get prefill tp and dp size from extra config
@@ -2171,6 +2260,55 @@ class MooncakeConnectorWorker:
         self._decode_pp_size = decode_parallel_config.get("pp_size", 1)
         assert self._decode_pp_size == 1, "decode pp size must be 1"
         self._prefill_pp_layer_partition = prefill_parallel_config.get("pp_layer_partition")
+
+    def _get_sparse_offload_main_layout(
+        self,
+        layer_name: str,
+    ) -> list[tuple[int, int, int, tuple[int, ...], int]] | None:
+        """Return D-side Host main-KV metadata for MemFabric READ mode.
+
+        SparseKVOffloadManager has already broadcast TP0's Host GVA to every D
+        rank before the connector is registered.  Reuse those addresses instead
+        of exposing the six-element runtime tuple (NPU K/V, CPU K/V and top-k
+        workspaces) as transfer destinations.
+        """
+        if not (
+            self.transfer_backend == BACKEND_MEMFABRIC
+            and self.kv_role == "kv_consumer"
+            and self.sparse_kv_offload_enabled
+        ):
+            return None
+        if self._is_index_cache_layer(layer_name):
+            return None
+
+        from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
+            get_sparse_kv_offload_manager,
+        )
+
+        manager = get_sparse_kv_offload_manager()
+        offload_id = manager.layer_name_to_offload_id.get(layer_name)
+        if offload_id is None:
+            raise KeyError(f"Sparse KV offload manager has no Host layout for Mooncake layer {layer_name!r}")
+        try:
+            bases = (manager.gvas_k_bases[offload_id], manager.gvas_v_bases[offload_id])
+            block_lens = manager.cpu_block_lens[offload_id]
+        except (AttributeError, IndexError) as exc:
+            raise RuntimeError("Sparse KV offload Host GVA metadata is not ready before Mooncake registration") from exc
+        if len(block_lens) != 2 or any(base <= 0 for base in bases) or any(length <= 0 for length in block_lens):
+            raise RuntimeError(
+                f"Invalid sparse KV offload Host layout: layer={layer_name!r}, bases={bases}, block_lens={block_lens}"
+            )
+
+        return [
+            (
+                int(base),
+                int(block_len),
+                int(block_len),
+                (self.num_blocks, int(block_len)),
+                1,
+            )
+            for base, block_len in zip(bases, block_lens)
+        ]
 
     @staticmethod
     def _serialize_kv_group_spec(
@@ -2480,6 +2618,11 @@ class MooncakeConnectorWorker:
             for _, (group_spec, layer_indices) in self.kv_group2layeridx.items()
             for layer_name, layer_idx in zip(group_spec["layer_names"], layer_indices)
         }
+        layer_name_to_group_id = {
+            layer_name: group_id
+            for group_id, (group_spec, _) in self.kv_group2layeridx.items()
+            for layer_name in group_spec["layer_names"]
+        }
         metadata_layers = max(layer_name_to_idx.values(), default=-1) + 1
         # Per-layer registered KV cache base addresses:
         # [layer_idx][cache_idx] -> data_ptr of one cache tensor, e.g. K/V.
@@ -2491,17 +2634,34 @@ class MooncakeConnectorWorker:
         # [layer_idx][cache_idx] -> element_size * prod(block_shape).
         self.block_len_per_addr: list[list[int]] = [[] for _ in range(metadata_layers)]
         # Per-layer full tensor shape for each registered KV cache address:
-        # [layer_idx][cache_idx] -> cache tensor shape, including num_blocks.
-        self.block_shape_per_addr: list[list[int]] = [[] for _ in range(metadata_layers)]
+        # [layer_idx][cache_idx] -> cache tensor shape tuple, including num_blocks.
+        self.block_shape_per_addr: list[list[tuple[int, ...]]] = [[] for _ in range(metadata_layers)]
         # Per-layer byte stride between consecutive tensor blocks:
         # [layer_idx][cache_idx] -> stride(0) * element_size.
         self.block_stride_per_addr: list[list[int]] = [[] for _ in range(metadata_layers)]
+        self.sparse_shared_main_group_ids.clear()
 
         # TODO: For DSV4 use_compress, metadata/transfer can be optimized by
         # aggregating layer views that share the same raw KVCacheTensor.
         for layer_name, kv_cache_tuple in kv_caches.items():
             layer_idx = layer_name_to_idx[layer_name]
+            sparse_main_layout = self._get_sparse_offload_main_layout(layer_name)
+            if sparse_main_layout is not None:
+                self.sparse_shared_main_group_ids.add(layer_name_to_group_id[layer_name])
+                for base_addr, block_len, block_stride, block_shape, block_scale in sparse_main_layout:
+                    self.block_len_per_addr[layer_idx].append(block_len)
+                    self.block_stride_per_addr[layer_idx].append(block_stride)
+                    self.block_shape_per_addr[layer_idx].append(block_shape)
+                    self.block_size_scale[layer_idx].append(block_scale)
+                    self.kv_caches_base_addr[layer_idx].append(base_addr)
+                continue
             for single_kv_cache in self._as_kv_cache_tuple(kv_cache_tuple):
+                if not isinstance(single_kv_cache, torch.Tensor):
+                    raise TypeError(
+                        "Mooncake transfer cache entries must be tensors unless "
+                        "provided by the sparse offload layout: "
+                        f"layer={layer_name!r}, entry={single_kv_cache!r}"
+                    )
                 tensor_num_blocks = single_kv_cache.shape[0]
                 block_size_scale = tensor_num_blocks // self.num_blocks
                 block_shape = single_kv_cache.shape[1:]
@@ -2511,7 +2671,21 @@ class MooncakeConnectorWorker:
                 self.block_size_scale[layer_idx].append(block_size_scale)
                 self.kv_caches_base_addr[layer_idx].append(single_kv_cache.data_ptr())
 
-        if has_mamba_group:
+        if self.sparse_shared_main_group_ids:
+            logger.info("Sparse shared Host KV groups: %s", self.sparse_shared_main_group_ids)
+        self._sync_sparse_shared_main_across_tp = bool(
+            self.transfer_backend == BACKEND_MEMFABRIC
+            and self.kv_role == "kv_consumer"
+            and self.sparse_shared_main_group_ids
+            and self.tp_size > 1
+        )
+
+        if self.transfer_backend == BACKEND_MEMFABRIC and self.kv_role == "kv_consumer":
+            # Local READ destinations do not need to be published as remote
+            # regions.  In sparse mode this also avoids traversing None entries
+            # and the top-k workspace in the six-element main-cache tuple.
+            register_regions = RegisterRegions(ptrs=[], lengths=[])
+        elif has_mamba_group:
             ptrs, lengths = self._get_registered_kv_tensor_buffers(kv_caches)
             register_regions = RegisterRegions(ptrs=ptrs, lengths=lengths)
         elif self.use_hybrid:
@@ -2524,7 +2698,16 @@ class MooncakeConnectorWorker:
             register_regions = collect_storage_merged_register_regions(kv_caches)
 
         validate_register_region_count(register_regions)
-        global_te.register_buffer(register_regions.ptrs, register_regions.lengths)
+        if self.transfer_backend == BACKEND_MEMFABRIC:
+            # READ mode only exposes P-side source HBM to the remote D worker.
+            # D-side Host/HBM destinations are local and are not published.
+            if self.kv_role == "kv_producer":
+                global_memfabric_te.register_buffer(
+                    register_regions.ptrs,
+                    register_regions.lengths,
+                )
+        else:
+            global_te.register_buffer(register_regions.ptrs, register_regions.lengths)
 
         logger.debug(
             "Mooncake register kv caches metadata: kv_group2layeridx=%s, kv_caches_base_addr=%s, "
@@ -2552,6 +2735,8 @@ class MooncakeConnectorWorker:
             block_strides=self.block_stride_per_addr,
             local_ip=get_ip(),
             handshake_port=self.handshake_port,
+            transfer_backend=self.transfer_backend,
+            transfer_session=self.transfer_session,
         )
         self.xfer_handshake_metadata = metadata
 
@@ -2589,6 +2774,8 @@ class MooncakeConnectorWorker:
                 self._prefill_pp_layer_partition,
                 self.kv_group2layeridx,
                 self.block_size_scale,
+                self.transfer_backend,
+                self.sparse_shared_main_group_ids,
             )
             self.kv_recv_thread.start()
         start_wait_time = time.time()
@@ -2614,6 +2801,21 @@ class MooncakeConnectorWorker:
             if self.kv_role == "kv_consumer"
             else set()
         )
+        if self._sync_sparse_shared_main_across_tp:
+            assert self.kv_recv_thread is not None
+            self._recv_terminal_requests.update(done_recving)
+            local_invalid_block_ids = self.kv_recv_thread.get_and_clear_invalid_block_ids()
+            gathered: list[tuple[set[str], set[int]] | None] = [None] * self.tp_size
+            torch.distributed.all_gather_object(
+                gathered,
+                (set(self._recv_terminal_requests), local_invalid_block_ids),
+                group=self.tp_group.cpu_group,
+            )
+            statuses = [status for status in gathered if status is not None]
+            done_recving = set.intersection(*(status[0] for status in statuses)) if statuses else set()
+            self._recv_terminal_requests.difference_update(done_recving)
+            self._synced_invalid_block_ids.update(set().union(*(status[1] for status in statuses)))
+
         if self.tp_rank == 0:
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(
@@ -2624,6 +2826,10 @@ class MooncakeConnectorWorker:
         return done_sending, done_recving
 
     def get_block_ids_with_load_errors(self) -> set[int]:
+        if self._sync_sparse_shared_main_across_tp:
+            invalid_block_ids = self._synced_invalid_block_ids
+            self._synced_invalid_block_ids = set()
+            return invalid_block_ids
         if self.kv_role == "kv_consumer" and self.kv_recv_thread is not None:
             return self.kv_recv_thread.get_and_clear_invalid_block_ids()
         return set()
@@ -3541,6 +3747,26 @@ class MooncakeConnectorWorker:
 
         return (local_block_ids,), (remote_block_ids,)
 
+    def _should_transfer_sparse_shared_main(
+        self,
+        source_cp_shard_idx: int,
+        remote_dcp_size: int,
+        prefill_tp_size: int,
+        remote_pcp_size: int,
+    ) -> bool:
+        """Assign each P-side DCP shard's shared Host main KV to one D TP rank."""
+        if (
+            not getattr(self, "sparse_shared_main_group_ids", set())
+            or remote_dcp_size <= 1
+            or remote_pcp_size != 1
+            or prefill_tp_size != remote_dcp_size
+        ):
+            return True
+
+        source_dcp_rank = source_cp_shard_idx % remote_dcp_size
+        owner_tp_rank = source_dcp_rank % self.tp_size
+        return self.tp_rank == owner_tp_rank
+
     def start_load_kv(self, metadata: MooncakeConnectorMetadata):
         """Start loading KV blocks from remote engine."""
         for req_id in metadata.reqs_in_batch:
@@ -3587,6 +3813,12 @@ class MooncakeConnectorWorker:
             )
 
             for pcp_dcp_rank, remote_ports in enumerate(remote_handshake_port_list):
+                transfer_sparse_shared_main = self._should_transfer_sparse_shared_main(
+                    pcp_dcp_rank,
+                    meta.remote_dcp_size,
+                    prefill_tp_size,
+                    meta.remote_pcp_size,
+                )
                 for remote_tp_offset, remote_handshake_port in enumerate(remote_ports):
                     assert self.kv_recv_thread is not None
                     remote_host, remote_engine_id = self._get_remote_host_info_by_port(
@@ -3630,6 +3862,8 @@ class MooncakeConnectorWorker:
                         remote_block_size=meta.remote_block_size,
                         local_block_ids_replicate_k=local_block_ids_replicate_k_for_port,
                         remote_block_ids_replicate_k=remote_block_ids_replicate_k_for_port,
+                        transfer_sparse_shared_main=transfer_sparse_shared_main,
+                        use_replicated_indexer=has_replicate_k_blocks,
                     )
 
         if self.kv_send_thread is not None and self.pcp_size * self.dcp_size == 1:
