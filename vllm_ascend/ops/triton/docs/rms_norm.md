@@ -12,6 +12,8 @@
   2. Each program owns `ceil(n_rows / n_programs)` consecutive rows; per row it makes two passes over the columns in `BLOCK_SIZE = 1024` chunks with tail masks: pass 1 accumulates the sum of squares in fp32, pass 2 normalizes, scales by `weight`, and stores in the input dtype.
 - **Supported modes**: Atlas A2 and Atlas A3. Intended for the batch-invariant normalization path.
 
+> The kernel also serves the Q-RMS path through the host wrapper `triton_q_rms` in `vllm_ascend/ops/triton/rms_norm.py`, which computes an **adaptive tile size** (`BLOCK_M`) from the hardware UB size instead of a hardcoded constant (see "Caller-side changes").
+
 ## Parameters
 
 > [!NOTE]
@@ -23,6 +25,25 @@
 | `weight` | Input | Per-channel scale `[hidden_size]` (**required**, unlike upstream's optional weight); made contiguous by the wrapper | fp16 / bf16 / fp32 | ND |
 | `eps` | Input | Numerical-stability constant added to the mean square (default `1e-6`) | fp32 | scalar |
 | `output` | Output | Normalized tensor with the input's original shape and dtype | fp16 / bf16 / fp32 | ND |
+
+## Caller-side changes (`triton_q_rms`)
+
+The host wrapper `triton_q_rms` (in `vllm_ascend/ops/triton/rms_norm.py`) applies the same RMSNorm math to a `[bs, head_num, dim]` Q tensor. The wrapper now derives the tile size `BLOCK_M` adaptively:
+
+```python
+resv_buffer = 6144                            # 6 KB reserve to prevent UB overflow
+available_ub_size = get_ub_size_bytes() - resv_buffer
+element_size = element_size()                 # bytes per element (e.g. 2 for bf16)
+
+# intermediate tensors in flight:
+#   fp32: 5x ; fp16/bf16: 7x
+data_multiplier = 5 if element_size == 4 else 7
+ROW_BLOCK_SIZE = int(available_ub_size / (dim * element_size * data_multiplier))
+raw = min(ROW_BLOCK_SIZE, batch_per_core)
+BLOCK_M = 1 << (raw.bit_length() - 1)         # ≤ raw power-of-two
+```
+
+This replaces the previous hardcoded `ROW_BLOCK_SIZE = 16`, so small hidden dims get larger tiles (fewer loop iterations) and large hidden dims shrink the tile to avoid UB overflow. The UB size is auto-detected at runtime via `get_ub_size_bytes()`; `dim > 2048` raises `NotImplementedError`.
 
 ## Constraints
 
@@ -37,7 +58,8 @@
 - **Origin**: Adapted from vllm's `model_executor/layers/batch_invariant.py` (`_rms_norm_kernel` / `rms_norm_batch_invariant`); the three-pass math (sum of squares → inv_rms → normalize+scale) is carried over unchanged (#5517).
 - **Differences**:
     - NPU adaptation for performance: replaces upstream's one-row-per-program grid (`grid = (n_rows,)`) with a capped grid of `min(n_rows, num_vectorcore)` programs, each owning a contiguous block of rows — fewer programs with more work each on the NPU vector cores; fixed `BLOCK_SIZE=1024` instead of upstream's autotuned meta-parameters;
-    - Modified for a specific vllm-ascend logic or different input parameters: `weight` is mandatory (upstream has a `HAS_WEIGHT` constexpr for the optional-weight case), and upstream's `aten` registration is not wired on the NPU facade (the fused add+rmsnorm path uses `torch_npu.npu_rms_norm` instead).
+    - Modified for a specific vllm-ascend logic or different input parameters: `weight` is mandatory (upstream has a `HAS_WEIGHT` constexpr for the optional-weight case), and upstream's `aten` registration is not wired on the NPU facade (the fused add+rmsnorm path uses `torch_npu.npu_rms_norm` instead);
+    - Q-RMS caller (`triton_q_rms`): adaptive `BLOCK_M` derived from the runtime UB size, element width and a dtype-aware `data_multiplier`, replacing the hardcoded `ROW_BLOCK_SIZE = 16` (see "Caller-side changes").
 
 ## Test Cases
 
