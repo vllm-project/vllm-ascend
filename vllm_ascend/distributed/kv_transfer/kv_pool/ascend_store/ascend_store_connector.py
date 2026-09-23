@@ -105,6 +105,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
         self.use_layerwise = extra_config.get("use_layerwise", False)
         self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
+        self.memcache_dp_init_barrier = extra_config.get("memcache_dp_init_barrier", True)
         self.backend_name = extra_config.get("backend", "mooncake").lower()
         self.use_block_key_layerwise = is_block_key_layerwise(self.use_layerwise, self.backend_name)
         validate_mooncake_layerwise_topology(
@@ -140,6 +141,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
                 vllm_config,
                 self.use_layerwise,
                 kv_cache_config,
+                memcache_dp_init_barrier=self.memcache_dp_init_barrier,
             )
             assert self.connector_worker is not None
             if not self.use_layerwise and vllm_config.parallel_config.rank == 0:
