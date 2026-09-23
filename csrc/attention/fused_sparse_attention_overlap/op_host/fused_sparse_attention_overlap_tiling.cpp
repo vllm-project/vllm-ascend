@@ -1,12 +1,12 @@
 /**
-* Copyright (c) 2025 Huawei Technologies Co., Ltd.
-* This program is free software, you can redistribute it and/or modify it under the terms and conditions of
-* CANN Open Software License Agreement Version 2.0 (the "License").
-* Please refer to the License for details. You may not use this file except in compliance with the License.
-* THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
-* INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
-* See LICENSE in the root of the software repository for the full text of the License.
-*/
+ * Copyright (c) 2025 Huawei Technologies Co., Ltd.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ */
 
 /*!
  * \file fused_sparse_attention_overlap_tiling.cpp
@@ -15,8 +15,8 @@
 
 #include <map>
 #include <vector>
+#include <numeric>
 #include <algorithm>
-#include <sstream>
 #include <graph/utils/type_utils.h>
 #include "err/ops_err.h"
 #include "register/op_def_registry.h"
@@ -33,6 +33,7 @@ namespace optiling {
 
 constexpr uint32_t PRE_LOAD_NUM = 2;
 constexpr uint32_t BLOCK_TABLE_ELEM_BYTE = 4;
+constexpr int32_t SPARSE_MODE_BAND = 4;
 constexpr uint32_t SELECTION_MEMBERSHIP_STORAGE_INT16_COUNT = 16400;
 
 static const std::string QUERY_NAME = "query";
@@ -43,6 +44,13 @@ static const std::string SPARSE_INDICES_NAME = "sparse_indices";
 static const std::string QUERY_ROPE_NAME = "query_rope";
 static const std::string KEY_ROPE_NAME = "key_rope";
 static const std::string ATTEN_OUT_NAME = "attention_out";
+static const std::string SOFTMAX_MAX_NAME = "softmax_max";
+static const std::string SOFTMAX_SUM_NAME = "softmax_sum";
+
+static bool IsFusedSparseAttentionOverlapStandaloneOp(const char *opName)
+{
+    return opName != nullptr && std::string(opName) == "FusedSparseAttentionOverlap";
+}
 
 const std::map<std::string, std::vector<ge::DataType>> DTYPE_SUPPORT_MAP = {
     {QUERY_NAME,                  {ge::DT_FLOAT16, ge::DT_BF16}},
@@ -51,6 +59,8 @@ const std::map<std::string, std::vector<ge::DataType>> DTYPE_SUPPORT_MAP = {
     {QUERY_ROPE_NAME,             {ge::DT_FLOAT16, ge::DT_BF16}},
     {KEY_ROPE_NAME,               {ge::DT_FLOAT16, ge::DT_BF16}},
     {ATTEN_OUT_NAME,              {ge::DT_FLOAT16, ge::DT_BF16}},
+    {SOFTMAX_MAX_NAME,            {ge::DT_FLOAT}},
+    {SOFTMAX_SUM_NAME,            {ge::DT_FLOAT}},
     {SPARSE_INDICES_NAME,         {ge::DT_INT32}},
     {BLOCK_TABLE_NAME,            {ge::DT_INT32}},
 };
@@ -60,6 +70,8 @@ const std::map<std::string, std::vector<FusedSparseAttentionOverlapLayout>> LAYO
     {KEY_NAME,               {FusedSparseAttentionOverlapLayout::BSND, FusedSparseAttentionOverlapLayout::TND, FusedSparseAttentionOverlapLayout::PA_BSND}},
     {VALUE_NAME,             {FusedSparseAttentionOverlapLayout::BSND, FusedSparseAttentionOverlapLayout::TND, FusedSparseAttentionOverlapLayout::PA_BSND}},
     {ATTEN_OUT_NAME,         {FusedSparseAttentionOverlapLayout::BSND, FusedSparseAttentionOverlapLayout::TND}},
+    {SOFTMAX_MAX_NAME,       {FusedSparseAttentionOverlapLayout::BNSG, FusedSparseAttentionOverlapLayout::NTG}},
+    {SOFTMAX_SUM_NAME,       {FusedSparseAttentionOverlapLayout::BNSG, FusedSparseAttentionOverlapLayout::NTG}},
 };
 
 const std::map<ge::DataType, std::string> DATATYPE_TO_STRING_MAP = {
@@ -106,12 +118,16 @@ static const std::map<FusedSparseAttentionOverlapLayout, std::vector<FusedSparse
     {FusedSparseAttentionOverlapLayout::BSND, {FusedSparseAttentionOverlapAxis::B, FusedSparseAttentionOverlapAxis::S, FusedSparseAttentionOverlapAxis::N, FusedSparseAttentionOverlapAxis::D}},
     {FusedSparseAttentionOverlapLayout::TND, {FusedSparseAttentionOverlapAxis::T, FusedSparseAttentionOverlapAxis::N, FusedSparseAttentionOverlapAxis::D}},
     {FusedSparseAttentionOverlapLayout::PA_BSND, {FusedSparseAttentionOverlapAxis::Bn, FusedSparseAttentionOverlapAxis::Bs, FusedSparseAttentionOverlapAxis::N, FusedSparseAttentionOverlapAxis::D}},
+    {FusedSparseAttentionOverlapLayout::BNSG, {FusedSparseAttentionOverlapAxis::B, FusedSparseAttentionOverlapAxis::N, FusedSparseAttentionOverlapAxis::S, FusedSparseAttentionOverlapAxis::G}},
+    {FusedSparseAttentionOverlapLayout::NTG, {FusedSparseAttentionOverlapAxis::N, FusedSparseAttentionOverlapAxis::T, FusedSparseAttentionOverlapAxis::G}},
 };
 
 static const std::map<FusedSparseAttentionOverlapLayout, size_t> FUSED_SPARSE_ATTENTION_OVERLAP_LAYOUT_DIM_MAP = {
     {FusedSparseAttentionOverlapLayout::BSND, DIM_NUM_FOUR},
     {FusedSparseAttentionOverlapLayout::TND, DIM_NUM_THREE},
     {FusedSparseAttentionOverlapLayout::PA_BSND, DIM_NUM_FOUR},
+    {FusedSparseAttentionOverlapLayout::BNSG, DIM_NUM_FOUR},
+    {FusedSparseAttentionOverlapLayout::NTG, DIM_NUM_THREE},
 };
 
 static std::string GetShapeStr(gert::Shape shape)
@@ -139,12 +155,49 @@ static std::string FusedSparseAttentionOverlapDataTypeToSerialString(ge::DataTyp
     }
 }
 
-static std::string FusedSparseAttentionOverlapLayoutToSerialString(FusedSparseAttentionOverlapLayout layout)
+string FusedSparseAttentionOverlapTensorDesc2String(const gert::StorageShape *shape, const gert::CompileTimeTensorDesc *tensor)
+{
+    if (shape == nullptr || tensor == nullptr) {
+        return "nil ";
+    }
+
+    std::ostringstream oss;
+    oss << "(dtype: " << ge::TypeUtils::DataTypeToAscendString(tensor->GetDataType()).GetString() << "),";
+    oss << "(shape:" << FusedSparseAttentionOverlapShape2String(shape->GetStorageShape()) << "),";
+    oss << "(ori_shape:" << FusedSparseAttentionOverlapShape2String(shape->GetOriginShape()) << "),";
+    oss << "(format: "
+        << ge::TypeUtils::FormatToAscendString(
+               static_cast<ge::Format>(ge::GetPrimaryFormat(tensor->GetStorageFormat())))
+               .GetString()
+        << "),";
+    oss << "(ori_format: " << ge::TypeUtils::FormatToAscendString(tensor->GetOriginFormat()).GetString() << ") ";
+
+    return oss.str();
+}
+
+string FusedSparseAttentionOverlapDebugTilingContext(const gert::TilingContext *context)
+{
+    std::ostringstream oss;
+    for (size_t i = 0; i < context->GetComputeNodeInfo()->GetInputsNum(); ++i) {
+        oss << "input" << i << ": ";
+        oss << FusedSparseAttentionOverlapTensorDesc2String(context->GetInputShape(i), context->GetInputDesc(i));
+    }
+
+    for (size_t i = 0; i < context->GetComputeNodeInfo()->GetOutputsNum(); ++i) {
+        oss << "output" << i << ": ";
+        oss << FusedSparseAttentionOverlapTensorDesc2String(context->GetOutputShape(i), context->GetOutputDesc(i));
+    }
+    return oss.str();
+}
+
+std::string FusedSparseAttentionOverlapLayoutToSerialString(FusedSparseAttentionOverlapLayout layout)
 {
     switch (layout) {
         case FusedSparseAttentionOverlapLayout::BSND: return "BSND";
         case FusedSparseAttentionOverlapLayout::TND: return "TND";
         case FusedSparseAttentionOverlapLayout::PA_BSND: return "PA_BSND";
+        case FusedSparseAttentionOverlapLayout::BNSG: return "BNSG";
+        case FusedSparseAttentionOverlapLayout::NTG: return "NTG";
         default: return "UNKNOWN";
     }
 }
@@ -158,7 +211,7 @@ ge::graphStatus FusedSparseAttentionOverlapMlaTiling::SetBlockDim(uint32_t block
 ge::graphStatus FusedSparseAttentionOverlapMlaTiling::SetTilingKey(uint64_t tilingKey) const
 {
     context_->SetTilingKey(tilingKey);
-    context_->SetScheduleMode(1);     // 1: batchmode
+    context_->SetScheduleMode(1);     // 1: batchmode模式
     return ge::GRAPH_SUCCESS;
 }
 
@@ -202,12 +255,29 @@ ge::graphStatus FusedSparseAttentionOverlapMlaTiling::GetPlatformInfo()
 
 void FusedSparseAttentionOverlapMlaTiling::GenTilingKey()
 {
+    uint32_t inputQType = static_cast<uint32_t>(sfaInfo_->inputQType);
+    uint32_t inputKvType = static_cast<uint32_t>(sfaInfo_->inputKvType);
+    uint32_t outputType = static_cast<uint32_t>(sfaInfo_->outputType);
     uint32_t layoutQuery = static_cast<uint32_t>(sfaInfo_->qLayout);
     uint32_t layoutKV = static_cast<uint32_t>(sfaInfo_->kvLayout);
-    // Appending the split-G bit keeps every non-split arch22 key unchanged.
-    tilingKey_ = GET_TPL_TILING_KEY(0U, layoutQuery, layoutKV,
-        perfMode_ == FusedSparseAttentionOverlapPerfMode::V_TEMPLATE_MODE,
-        static_cast<uint32_t>(sfaInfo_->isA5 && sfaInfo_->gSize > 64));
+    uint32_t pageAttention = 0U;
+    if (sfaInfo_->kvLayout == FusedSparseAttentionOverlapLayout::PA_BSND) {
+        pageAttention = 1U;
+    }
+
+    if (IsFusedSparseAttentionOverlapStandaloneOp(sfaInfo_->opName)) {
+        // The migrated SelectionUpdate kernel was built from the older SFA template family.
+        // Its registered kernels use the 4-argument key layout:
+        //   flash_decode bit0, layout_query bits[1:4], layout_kv bits[5:8], template_mode bit9.
+        // Keep the normal FusedSparseAttentionOverlap CANN9 key path unchanged.
+        tilingKey_ = static_cast<uint64_t>(splitKVFlag_ ? 1U : 0U) |
+            (static_cast<uint64_t>(layoutQuery) << 1U) |
+            (static_cast<uint64_t>(layoutKV) << 5U) |
+            (static_cast<uint64_t>(perfMode_ == FusedSparseAttentionOverlapPerfMode::V_TEMPLATE_MODE) << 9U);
+    } else {
+        tilingKey_ = GET_TPL_TILING_KEY(0U, pageAttention, layoutQuery, layoutKV,
+            perfMode_ == FusedSparseAttentionOverlapPerfMode::V_TEMPLATE_MODE, static_cast<uint32_t>(sfaInfo_->gSize > 64)); // N1 > 128????G
+    }
 
     OP_LOGI(sfaInfo_->opName, "SFA tilingKey_: %lu.", tilingKey_);
 }
@@ -216,9 +286,9 @@ void FusedSparseAttentionOverlapMlaTiling::ZeroTensorProcess()  const
 {
     if (sfaInfo_->s2Size == 0) {
         /*
-         * Use 1024 as the default for subsequent calculations when the tensor is empty.
-         * This avoids invalid matmul and softmax tiling.
-         * The kernel still uses the actual seqSize=0, consistent with the actual_seq_len path.
+         * 1024，空tensor场景下，作为默认值完成后续计算
+         * 避免matmal tiling  softmax tiling异常
+         * kernel计算使用真实的seqSize=0, 与actuseq_len流程归一
          */
         sfaInfo_->s2Size = 1024;
     }
@@ -226,7 +296,7 @@ void FusedSparseAttentionOverlapMlaTiling::ZeroTensorProcess()  const
 
 void FusedSparseAttentionOverlapMlaTiling::InitParams()
 {
-    if (sfaInfo_->s2Size != 0 && sfaInfo_->sparseBlockSize <= 4) { // 4: currently supported range
+    if (sfaInfo_->s2Size != 0 && sfaInfo_->sparseBlockSize <= 4) { // 4:当前支持范围
         perfMode_ = FusedSparseAttentionOverlapPerfMode::V_TEMPLATE_MODE;
     } else {
         perfMode_ = FusedSparseAttentionOverlapPerfMode::C_TEMPLATE_MODE;
@@ -234,7 +304,26 @@ void FusedSparseAttentionOverlapMlaTiling::InitParams()
 
     coreNum_ = aicNum_;
 
-    headDimAlign_ = Align(sfaInfo_->qkHeadDim, BYTE_BLOCK); // Align the element count to the base-block size
+    // splitKV：解码时一核一请求（kernel 侧 usedCoreNum = 总 query token 数），
+    // bs 小的时候大部分核在空转。把每个请求的 KV 切成 kvSplitPart_ 段分给多个核，
+    // 各算一份局部结果，最后归约。
+    // ⚠ 核已经用满时保持 false —— tiling key 与原来逐位相同、编出来的代码一行不变。
+    //    bs=16 起就落在这一侧，它同时是这一刀的零对照臂。
+    // ⚠ 这里给的是上限，kernel 侧还会按真实的 S2 块数再收一次（host 此时拿不到）。
+    // 【wht/opt-lru0723 合并线】本分支暂时不带 splitKV：强制关闭。tiling key
+    // bit0=0 → FLASH_DECODE=1 变体不进编译，编出代码与 splitKV 之前逐位相同。
+    // 恢复方式：把下一行的 false 换回 git 历史 8ac44f83 里的原条件表达式。
+    splitKVFlag_ = false;
+    kvSplitPart_ = 1U;
+    if (splitKVFlag_) {
+        kvSplitPart_ = aicNum_ / sfaInfo_->bSize;
+        // 4:生产形状 topk=2048、S2 基本块 512，一个请求只有 4 块，再切就出空片
+        if (kvSplitPart_ > 4U) {
+            kvSplitPart_ = 4U;
+        }
+    }
+
+    headDimAlign_ = Align(sfaInfo_->qkHeadDim, BYTE_BLOCK); // 元素个数按照基本块大小对齐
     ZeroTensorProcess();
 }
 
@@ -245,29 +334,55 @@ void FusedSparseAttentionOverlapMlaTiling::CalcUbBmm()
     if (cubeMSize > maxMSize) {
         cubeMSize = maxMSize;
     }
-    mmResUbSize_ = sInnerSizeAlign_ * Align(cubeMSize, 16U);// The kernel writes with 16-element alignment; tiling allocates memory accordingly
-    bmm2ResUbSize_ = headDimAlign_ * Align(cubeMSize, 16U);// The kernel writes with 16-element alignment; tiling allocates memory accordingly
+    mmResUbSize_ = sInnerSizeAlign_ * Align(cubeMSize, 16U);// kernel按照16对齐写出，tiling按照这个原则分配内存
+    bmm2ResUbSize_ = headDimAlign_ * Align(cubeMSize, 16U);// kernel按照16对齐写出，tiling按照这个原则分配内存
+
+    qPreSizeMla_ = sfaInfo_->gSize * (headDimAlign_ + 64U) * sfaInfo_->s1Size;
+}
+
+void FusedSparseAttentionOverlapMlaTiling::CheckUbSpace()
+{
+    CalcUbBmm();
 }
 
 void FusedSparseAttentionOverlapMlaTiling::CalcInnerSize(uint32_t s2Size)
 {
-    sInnerSize_ = 512; // 512: default S2 partition size
+    sInnerSize_ = 512; // 512:s2默认切分大小
+    // FlashDecode时，如果S2的计算量>=256(确保切分后不小于128)但又不足以分2次计算时，则修改sInnerSize_，均分为2份进行计算，确保Nbuffer=2
+    if (splitKVFlag_ && sfaInfo_->qLayout != FusedSparseAttentionOverlapLayout::TND) {
+        if (s2Size == 256) {   // 256:s2Size的阈值，判断sInnerSize_是否切分
+            sInnerSize_ = 128; // 128:sInnerSize_值为s2Size的一半，均分为2份进行计算，
+        } else if (s2Size > 256 && s2Size <= sInnerSize_) { // 256:s2Size的阈值，判断sInnerSize_是否切分
+            sInnerSize_ = (sInnerSize_ + 1) / 2; // 2:减半
+        }
+    }
+
+    sInnerLoopTimes_ = (s2Size + sInnerSize_ - 1) / sInnerSize_;
+    sInnerSizeTail_ = s2Size - (sInnerLoopTimes_ - 1) * sInnerSize_;
     if (sInnerSize_ > s2Size) {
         sInnerSize_ = s2Size;
     }
-    sInnerSizeAlign_ = Align(sInnerSize_, BYTE_BLOCK); // Align the element count to the base-block size
+    sInnerSizeAlign_ = Align(sInnerSize_, BYTE_BLOCK); // 元素个数按照基本块大小对齐
 
-    CalcUbBmm();
+    CheckUbSpace();
 }
 
 void FusedSparseAttentionOverlapMlaTiling::SplitBalanced()
 {
     CalcInnerSize(sfaInfo_->s2Size);
 
-    tilingData_.innerSplitParams.set_mBaseSize(sfaInfo_->gSize);
-    tilingData_.innerSplitParams.set_s2BaseSize(sInnerSize_);
+    FusedOverlapInnerSplitParams innerSplitParams;
+    innerSplitParams.s1GBaseSize = sfaInfo_->gSize;
+    innerSplitParams.s2BaseSize = sInnerSize_;
+    tilingData_.innerSplitParams.set_mBaseSize(innerSplitParams.s1GBaseSize);
+    tilingData_.innerSplitParams.set_s2BaseSize(innerSplitParams.s2BaseSize);
 
     usedCoreNum_ = aicNum_;
+}
+
+void FusedSparseAttentionOverlapMlaTiling::Split()
+{
+    SplitBalanced();
 }
 
 void FusedSparseAttentionOverlapMlaTiling::FillTilingBaseParamsMla()
@@ -290,38 +405,44 @@ void FusedSparseAttentionOverlapMlaTiling::FillTilingBaseParamsMla()
     uint32_t selectionBlockTableStride =
         static_cast<uint32_t>((sfaInfo_->sparseBlockCount + sfaInfo_->blockSize - 1) /
                               sfaInfo_->blockSize);
-    const gert::StorageShape *selectionBlockTableShape =
-        context_->GetInputShape(SELECTION_KV_BLOCK_TABLE_INPUT_INDEX);
-    if (selectionBlockTableShape != nullptr &&
-        selectionBlockTableShape->GetStorageShape().GetDimNum() > 0) {
-        int64_t blockTableLastDim = selectionBlockTableShape->GetStorageShape().GetDim(
-            selectionBlockTableShape->GetStorageShape().GetDimNum() - 1);
-        if (blockTableLastDim >= static_cast<int64_t>(selectionBlockTableStride)) {
-            selectionBlockTableStride = static_cast<uint32_t>(blockTableLastDim);
+    if (IsFusedSparseAttentionOverlapStandaloneOp(sfaInfo_->opName)) {
+        const gert::StorageShape *selectionBlockTableShape =
+            context_->GetInputShape(SELECTION_KV_BLOCK_TABLE_INPUT_INDEX);
+        if (selectionBlockTableShape != nullptr &&
+            selectionBlockTableShape->GetStorageShape().GetDimNum() > 0) {
+            int64_t blockTableLastDim = selectionBlockTableShape->GetStorageShape().GetDim(
+                selectionBlockTableShape->GetStorageShape().GetDimNum() - 1);
+            if (blockTableLastDim >= static_cast<int64_t>(selectionBlockTableStride)) {
+                selectionBlockTableStride = static_cast<uint32_t>(blockTableLastDim);
+            }
         }
     }
     tilingData_.baseParams.set_selectionBlockTableStride(selectionBlockTableStride);
     uint32_t selectionStatusStride = sfaInfo_->sparseBlockCount + 1;
-    const gert::StorageShape *selectionStatusShape =
-        context_->GetInputShape(SELECTION_KV_BLOCK_STATUS_INPUT_INDEX);
-    if (selectionStatusShape != nullptr &&
-        selectionStatusShape->GetStorageShape().GetDimNum() > 0) {
-        int64_t statusLastDim = selectionStatusShape->GetStorageShape().GetDim(
-            selectionStatusShape->GetStorageShape().GetDimNum() - 1);
-        if (statusLastDim >= static_cast<int64_t>(selectionStatusStride)) {
-            selectionStatusStride = static_cast<uint32_t>(statusLastDim);
+    if (IsFusedSparseAttentionOverlapStandaloneOp(sfaInfo_->opName)) {
+        const gert::StorageShape *selectionStatusShape =
+            context_->GetInputShape(SELECTION_KV_BLOCK_STATUS_INPUT_INDEX);
+        if (selectionStatusShape != nullptr &&
+            selectionStatusShape->GetStorageShape().GetDimNum() > 0) {
+            int64_t statusLastDim = selectionStatusShape->GetStorageShape().GetDim(
+                selectionStatusShape->GetStorageShape().GetDimNum() - 1);
+            if (statusLastDim >= static_cast<int64_t>(selectionStatusStride)) {
+                selectionStatusStride = static_cast<uint32_t>(statusLastDim);
+            }
         }
     }
     tilingData_.baseParams.set_selectionStatusStride(selectionStatusStride);
     uint32_t selectionMembershipStride = SELECTION_MEMBERSHIP_STORAGE_INT16_COUNT;
-    const gert::StorageShape *selectionMembershipShape =
-        context_->GetInputShape(SELECTION_MEMBERSHIP_MAP_INPUT_INDEX);
-    if (selectionMembershipShape != nullptr &&
-        selectionMembershipShape->GetStorageShape().GetDimNum() > 0) {
-        int64_t membershipLastDim = selectionMembershipShape->GetStorageShape().GetDim(
-            selectionMembershipShape->GetStorageShape().GetDimNum() - 1);
-        if (membershipLastDim >= static_cast<int64_t>(selectionMembershipStride)) {
-            selectionMembershipStride = static_cast<uint32_t>(membershipLastDim);
+    if (IsFusedSparseAttentionOverlapStandaloneOp(sfaInfo_->opName)) {
+        const gert::StorageShape *selectionMembershipShape =
+            context_->GetInputShape(SELECTION_MEMBERSHIP_MAP_INPUT_INDEX);
+        if (selectionMembershipShape != nullptr &&
+            selectionMembershipShape->GetStorageShape().GetDimNum() > 0) {
+            int64_t membershipLastDim = selectionMembershipShape->GetStorageShape().GetDim(
+                selectionMembershipShape->GetStorageShape().GetDimNum() - 1);
+            if (membershipLastDim >= static_cast<int64_t>(selectionMembershipStride)) {
+                selectionMembershipStride = static_cast<uint32_t>(membershipLastDim);
+            }
         }
     }
     tilingData_.baseParams.set_selectionMembershipStride(selectionMembershipStride);
@@ -331,13 +452,18 @@ void FusedSparseAttentionOverlapMlaTiling::FillTilingBaseParamsMla()
     tilingData_.baseParams.set_isActualLenDimsKVNull(sfaInfo_->actualSeqLenFlag ? 0U : 1U);
 }
 
+// for flash decode
 void FusedSparseAttentionOverlapMlaTiling::FillTilingSplitKVMla()
 {
-    tilingData_.splitKVParams.set_s2(0);
+    tilingData_.splitKVParams.set_s2(kvSplitPart_);
 
-    tilingData_.splitKVParams.set_accumOutSize(aicNum_ * 2 * sfaInfo_->n2Size * mBaseSize_ * headDimAlign_);   // 2: each core may have head and tail reductions, requiring two reduction records
-    tilingData_.splitKVParams.set_logSumExpSize(2 * aicNum_ * 2 * sfaInfo_->n2Size * mBaseSize_ *  // 2: each core may have head and tail reductions, requiring two records; sum + max
+    tilingData_.splitKVParams.set_accumOutSize(aicNum_ * 2 * sfaInfo_->n2Size * mBaseSize_ * headDimAlign_);   // 2:每个核可能有头规约和尾规约，一共两份规约信息
+    tilingData_.splitKVParams.set_logSumExpSize(2 * aicNum_ * 2 * sfaInfo_->n2Size * mBaseSize_ *  // 2:每个核可能有头规约和尾规约，一共两份规约信息;sum + max
                                                 (BYTE_BLOCK / BLOCK_TABLE_ELEM_BYTE));
+
+    if (!splitKVFlag_) {
+        tilingData_.splitKVParams.set_s2(0);
+    }
 }
 
 void FusedSparseAttentionOverlapMlaTiling::FillTilingSingleCoreParamsMla()
@@ -359,44 +485,77 @@ void FusedSparseAttentionOverlapMlaTiling::FillTiling()
     FillTilingSingleCoreTensorSizeMla();
 }
 
+uint32_t FusedSparseAttentionOverlapMlaTiling::CalcBalanceFDParamNums(const uint32_t actCoreNum)  const
+{
+    return actCoreNum * 2 * sfaInfo_->n2Size * mBaseSize_; // 2:每个核可能有头规约和尾规约，一共两份规约信息
+}
+
+void FusedSparseAttentionOverlapMlaTiling::NormalCalcFDWorkSpace(const uint32_t actCoreNum)
+{
+    if (splitKVFlag_) {
+        uint32_t accumOutSize = 0;
+        uint32_t logSumExpSize = 0;
+        uint32_t FDParamNums = CalcBalanceFDParamNums(actCoreNum); //balanceModeFlag_ ? CalcBalanceFDParamNums(actCoreNum) : CalcUnbalanceFDParamNums();
+        accumOutSize = FDParamNums * headDimAlign_;
+        logSumExpSize = 2 * FDParamNums * (BYTE_BLOCK / sfaInfo_->blockTypeSize);  // log和sum的存储空间一致，共需要2份内存
+        workspaceSize_ += (accumOutSize + logSumExpSize) * sfaInfo_->blockTypeSize;
+    }
+}
+
+void FusedSparseAttentionOverlapMlaTiling::CalcFDWorkSpace(const uint32_t actCoreNum)
+{
+    NormalCalcFDWorkSpace(actCoreNum);
+}
+
 void FusedSparseAttentionOverlapMlaTiling::GetWorkspaceSize()
 {
     uint32_t actCoreNum = coreNum_;
     if (sfaInfo_->isA5) {
         workspaceSize_ = libapiSize_;
         constexpr uint32_t TRIPLE_BUFFER_NUM = 3;
-        constexpr uint32_t S2_BASE_SIZE = 128;            // Base-block size along the S2 axis
+        constexpr uint32_t S2_BASE_SIZE = 128;            // S2轴基本块大小
         constexpr uint32_t D_SIZE = 576;
         auto ascendcPlatform = platform_ascendc::PlatformAscendC(sfaInfo_->platformInfo);
         uint32_t aicNum = ascendcPlatform.GetCoreNumAic();
-        if (sfaInfo_->gSize > 64) { // Split G when N1 exceeds 64; two adjacent Cube cores process the same s2Base
+        if (sfaInfo_->gSize > 64) { // N1大于64时切G，相邻两个cube核处理同一个s2Base
             aicNum = aicNum >> 1;
         }
         workspaceSize_ += (S2_BASE_SIZE * D_SIZE * GetTypeSize(sfaInfo_->inputQType) \
             * TRIPLE_BUFFER_NUM * aicNum);
     } else {
-        constexpr uint32_t mmResElemSize = 4;         // 4: fp32
-        constexpr uint32_t vec1ResElemSize = 2;       // 2: fp16/bf16
-        constexpr uint32_t bmm2ResElemSize = 4;       // 4: fp32
-        constexpr uint32_t nUpdateElemSize = 4;       // 4: int32
-        constexpr uint32_t softmaxSumElemSize = 4;    // 4: int32
-        constexpr float kvDtypeRatio = 1.0F;
+        uint32_t mmResElemSize = 4;         // 4:fp32
+        uint32_t vec1ResElemSize = 2;       // 2:fp16/bf16
+        uint32_t bmm2ResElemSize = 4;       // 4:fp32
+        uint32_t qPreProcResElemSize = 0;   // 普通场景不涉及Q预处理
+        uint32_t nUpdateElemSize = 4;   // 4:int32
+        uint32_t softmaxSumElemSize = 4;   // 4:int32
+        float kvDtypeRatio = 1.0;
 
         workspaceSize_ = libapiSize_;
-        workspaceSize_ += PRE_LOAD_NUM * mmResUbSize_ * actCoreNum * mmResElemSize;
-        workspaceSize_ += PRE_LOAD_NUM * static_cast<size_t>(
-            static_cast<float>(mmResUbSize_ * actCoreNum * vec1ResElemSize) * kvDtypeRatio);
-        workspaceSize_ += PRE_LOAD_NUM * bmm2ResUbSize_ * actCoreNum * bmm2ResElemSize;
-        workspaceSize_ += PRE_LOAD_NUM * mBaseSize_ * actCoreNum * nUpdateElemSize;
-        workspaceSize_ += PRE_LOAD_NUM * mBaseSize_ * actCoreNum * softmaxSumElemSize;
-        // When top-k BlkSize == 1, extra space is required to cache discretely aggregated values.
+        uint32_t preLoadNum = 1;
+        preLoadNum = PRE_LOAD_NUM;
+
+        workspaceSize_ += preLoadNum * (mmResUbSize_ * actCoreNum * mmResElemSize);
+        workspaceSize_ += preLoadNum * static_cast<size_t>(static_cast<float>(mmResUbSize_ * \
+            actCoreNum * vec1ResElemSize) * kvDtypeRatio);
+        workspaceSize_ += preLoadNum * bmm2ResUbSize_ * actCoreNum * bmm2ResElemSize;
+        workspaceSize_ += preLoadNum * static_cast<size_t>(static_cast<float>(qPreSizeMla_ * \
+            actCoreNum * qPreProcResElemSize) * kvDtypeRatio);
+        workspaceSize_ += preLoadNum * mBaseSize_ * actCoreNum * nUpdateElemSize;
+        workspaceSize_ += preLoadNum * mBaseSize_ * actCoreNum * softmaxSumElemSize;
+        // topk BlkSize == 1场景, 需要额外空间缓存离散聚合的值
         //              bufNum  s2Base   D   dRope  sizeOf(half)
         // 4:bufNum  512:s2Base  512:D  64:dRope  2:sizeOf(half)
         workspaceSize_ += 4 * 512 * (512 + 64) * 2 * actCoreNum;
-        // Cached valid MTE2-size length, partition count, 512-byte-aligned length, sizeof(int32_t), AIV core count
-        workspaceSize_ += 4 * 128 * 4 * (2 * actCoreNum); // 4: cached valid MTE2-size length; 128: partition count; 4: 512-byte-aligned length; 2: AIV core count
+        // 缓存有效mte2 size的长度 份数  512B对齐的长度  sizeof(int32_t)   aiv核数
+        workspaceSize_ += 4 * 128 * 4 * (2 * actCoreNum); // 4:缓存有效mte2 size的长度 128:份数  4:512B对齐的长度  2:aiv核数
+        // helper 握手区独立选址扩容：done/credit 两环，每核 64 槽×8 int32。
+        // 原借空闲核的 merge 槽，波次满波 24 核全写 merge 会把握手区踩脏、
+        // 尾波前被迫双 SyncAll+清零；独立选址后满波不再触碰（kernel 侧同步改址）。
+        workspaceSize_ += 2 * actCoreNum * 64 * 8 * 4;
     }
 
+    CalcFDWorkSpace(actCoreNum);
 }
 
 void FusedSparseAttentionOverlapMlaTiling::CalcBlockDim()
@@ -416,7 +575,7 @@ ge::graphStatus FusedSparseAttentionOverlapMlaTiling::DoOpTiling(FusedSparseAtte
         return ge::GRAPH_FAILED;
     }
     InitParams();
-    SplitBalanced();
+    Split();
     FillTiling();
     CalcBlockDim();
     GetWorkspaceSize();
@@ -464,6 +623,10 @@ ge::graphStatus FusedSparseAttentionOverlapTilingCheck::GetExpectedShape(gert::S
         shapeExpected = gert::Shape({param.T, param.N, param.D});
     } else if (layout == FusedSparseAttentionOverlapLayout::PA_BSND) {
         shapeExpected = gert::Shape({param.Bn, param.Bs, param.N, param.D});
+    } else if (layout == FusedSparseAttentionOverlapLayout::BNSG) {
+        shapeExpected = gert::Shape({param.B, param.N, param.S, param.G});
+    } else if (layout == FusedSparseAttentionOverlapLayout::NTG) {
+        shapeExpected = gert::Shape({param.N, param.T, param.G});
     } else {
         OP_LOGE(opName_, "layout %s is unsupported", FusedSparseAttentionOverlapLayoutToSerialString(layout).c_str());
         return ge::GRAPH_FAILED;
@@ -634,6 +797,16 @@ ge::graphStatus FusedSparseAttentionOverlapTilingCheck::CheckSingleParaKey() con
     return ge::GRAPH_SUCCESS;
 }
 
+ge::graphStatus FusedSparseAttentionOverlapTilingCheck::CheckSingleParaNumHeads() const
+{
+    return ge::GRAPH_SUCCESS;
+}
+
+ge::graphStatus FusedSparseAttentionOverlapTilingCheck::CheckSingleParaKvHeadNums() const
+{
+    return ge::GRAPH_SUCCESS;
+}
+
 ge::graphStatus FusedSparseAttentionOverlapTilingCheck::CheckSingleParaSparseMode() const
 {
     OP_CHECK_IF((*opParamInfo_.sparseMode != 3 && *opParamInfo_.sparseMode != 0),
@@ -664,13 +837,33 @@ ge::graphStatus FusedSparseAttentionOverlapTilingCheck::CheckSingleParaSparseInd
     return ge::GRAPH_SUCCESS;
 }
 
+ge::graphStatus FusedSparseAttentionOverlapTilingCheck::CheckSingleParaPreTokens() const
+{
+    OP_CHECK_IF((*opParamInfo_.preTokens != INT64_MAX),
+        OP_LOGE(opName_, "preTokens should be 9223372036854775807, but got: %ld.", *opParamInfo_.preTokens),
+        return ge::GRAPH_FAILED);
+    return ge::GRAPH_SUCCESS;
+}
+
+ge::graphStatus FusedSparseAttentionOverlapTilingCheck::CheckSingleParaNextTokens() const
+{
+    OP_CHECK_IF((*opParamInfo_.nextTokens != INT64_MAX),
+        OP_LOGE(opName_, "nextTokens should be 9223372036854775807, but got: %ld.", *opParamInfo_.nextTokens),
+        return ge::GRAPH_FAILED);
+    return ge::GRAPH_SUCCESS;
+}
+
 ge::graphStatus FusedSparseAttentionOverlapTilingCheck::CheckSinglePara() const
 {
     if (ge::GRAPH_SUCCESS != CheckSingleParaQuery() ||
         ge::GRAPH_SUCCESS != CheckSingleParaKey() ||
         ge::GRAPH_SUCCESS != CheckSingleParaSparseIndices() ||
+        ge::GRAPH_SUCCESS != CheckSingleParaNumHeads() ||
+        ge::GRAPH_SUCCESS != CheckSingleParaKvHeadNums() ||
         ge::GRAPH_SUCCESS != CheckSingleParaSparseMode() ||
-        ge::GRAPH_SUCCESS != CheckSingleParaSparseBlockSize()) {
+        ge::GRAPH_SUCCESS != CheckSingleParaSparseBlockSize() ||
+        ge::GRAPH_SUCCESS != CheckSingleParaPreTokens() ||
+        ge::GRAPH_SUCCESS != CheckSingleParaNextTokens()) {
         return ge::GRAPH_FAILED;
     }
 
@@ -679,6 +872,13 @@ ge::graphStatus FusedSparseAttentionOverlapTilingCheck::CheckSinglePara() const
 
 ge::graphStatus FusedSparseAttentionOverlapTilingCheck::CheckRopeExistence()
 {
+    OP_CHECK_IF((opParamInfo_.queryRope.tensor != nullptr || opParamInfo_.keyRope.tensor != nullptr)
+        && *opParamInfo_.attentionMode == 0,
+        OP_LOGE(opName_, "In MHA/GQA situation(attentionMode=0), queryRope and keyRope should be null."),
+        return ge::GRAPH_FAILED);
+    OP_CHECK_IF(*opParamInfo_.attentionMode != 2,
+        OP_LOGE(opName_, "attentionMode only support 2."),
+        return ge::GRAPH_FAILED);
     OP_CHECK_IF((opParamInfo_.queryRope.tensor != nullptr && opParamInfo_.keyRope.tensor == nullptr),
         OP_LOGE(opName_, "KeyRope is null, but queryRope exists, they should be both null or exist."),
         return ge::GRAPH_FAILED);
@@ -699,16 +899,92 @@ ge::graphStatus FusedSparseAttentionOverlapTilingCheck::CheckExists(const void *
     return ge::GRAPH_SUCCESS;
 }
 
+ge::graphStatus FusedSparseAttentionOverlapTilingCheck::CheckNotExists(const void *pointer, const std::string &name) const
+{
+    OP_CHECK_IF(pointer != nullptr,
+        OP_LOGE(opName_, "%s should be null", name.c_str()),
+        return ge::GRAPH_FAILED);
+    return ge::GRAPH_SUCCESS;
+}
+
+ge::graphStatus FusedSparseAttentionOverlapTilingCheck::CheckExistsByMap(const std::map<std::string, const void *> &paramMap) const
+{
+    for (const auto& kv : paramMap) {
+        if (CheckExists(kv.second, kv.first) != ge::GRAPH_SUCCESS) {
+            return ge::GRAPH_FAILED;
+        }
+    }
+    return ge::GRAPH_SUCCESS;
+}
+
+ge::graphStatus FusedSparseAttentionOverlapTilingCheck::CheckNotExistsByMap(const std::map<std::string, const void *> &paramMap) const
+{
+    for (const auto& kv : paramMap) {
+        if (CheckNotExists(kv.second, kv.first) != ge::GRAPH_SUCCESS) {
+            return ge::GRAPH_FAILED;
+        }
+    }
+    return ge::GRAPH_SUCCESS;
+}
+
+ge::graphStatus FusedSparseAttentionOverlapTilingCheck::CheckExistenceByMap(std::map<std::string, const void *> &existMap,
+    std::map<std::string, const void *> &notExistMap) const
+{
+    if (CheckExistsByMap(existMap) != ge::GRAPH_SUCCESS) {
+        return ge::GRAPH_FAILED;
+    }
+    if (CheckNotExistsByMap(notExistMap) != ge::GRAPH_SUCCESS) {
+        return ge::GRAPH_FAILED;
+    }
+    return ge::GRAPH_SUCCESS;
+}
+
+template <typename T>
+ge::graphStatus FusedSparseAttentionOverlapTilingCheck::CheckAttrValueByMap(std::map<std::string, std::pair<const T *, T>> &attrMap) const
+{
+    for (auto const &kv : attrMap) {
+        const std::string &name = kv.first;
+        const std::pair<const T *, T> &pointerValuePair = kv.second;
+        if (pointerValuePair.first == nullptr) {
+            OP_LOGE(opName_, "Attr %s should not be nullptr", name.c_str());
+            return ge::GRAPH_FAILED;
+        }
+
+        if (*(pointerValuePair.first) != pointerValuePair.second) {
+            std::ostringstream ossExpect;
+            ossExpect << std::to_string(pointerValuePair.second);
+            std::ostringstream ossActual;
+            ossActual << std::to_string(*(pointerValuePair.first));
+            OP_LOGE(opName_,
+                "%s value should be %s, but got %s",
+                name.c_str(),
+                ossExpect.str().c_str(),
+                ossActual.str().c_str());
+            return ge::GRAPH_FAILED;
+        }
+    }
+    return ge::GRAPH_SUCCESS;
+}
+
 ge::graphStatus FusedSparseAttentionOverlapTilingCheck::CheckParaExistenceMlaNoquant() const
 {
     if (kvStorageMode_ != FusedOverlapKvStorageMode::PAGE_ATTENTION) {
         return ge::GRAPH_SUCCESS;
     }
-    if (CheckExists(opParamInfo_.actualSeqLengths.tensor, "actualSeqLengths") != ge::GRAPH_SUCCESS ||
-        CheckExists(opParamInfo_.blockTable.tensor, "blockTable") != ge::GRAPH_SUCCESS) {
+    std::map<std::string, const void *> mlaNoquantParamExistMap = {
+        {"actualSeqLengths", opParamInfo_.actualSeqLengths.tensor},
+        {"blockTable", opParamInfo_.blockTable.tensor},
+    };
+    std::map<std::string, const void *> mlaNoquantParamNotExistMap = {};
+    if (CheckExistenceByMap(mlaNoquantParamExistMap, mlaNoquantParamNotExistMap) != ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
     }
     return ge::GRAPH_SUCCESS;
+}
+
+ge::graphStatus FusedSparseAttentionOverlapTilingCheck::CheckParaExistenceMla() const
+{
+    return CheckParaExistenceMlaNoquant();
 }
 
 ge::graphStatus FusedSparseAttentionOverlapTilingCheck::CheckParaExistence()
@@ -717,7 +993,7 @@ ge::graphStatus FusedSparseAttentionOverlapTilingCheck::CheckParaExistence()
         return ge::GRAPH_FAILED;
     }
 
-    return CheckParaExistenceMlaNoquant();
+    return CheckParaExistenceMla();
 }
 
 ge::graphStatus FusedSparseAttentionOverlapTilingCheck::GetActualSeqLenSize(uint32_t &size, const gert::Tensor *tensor,
@@ -740,12 +1016,17 @@ ge::graphStatus FusedSparseAttentionOverlapTilingCheck::GetActualSeqLenSize(uint
 
 void FusedSparseAttentionOverlapTilingCheck::SetSFAShapeCompare()
 {
+    queryShapeCmp_ = opParamInfo_.query.shape->GetStorageShape();
     topkShapeCmp_ = opParamInfo_.sparseIndices.shape->GetStorageShape();
     keyShapeCmp_ = opParamInfo_.key.shape->GetStorageShape();
     valueShapeCmp_ = opParamInfo_.value.shape->GetStorageShape();
     attenOutShapeCmp_ = opParamInfo_.attenOut.shape->GetStorageShape();
     queryRopeShapeCmp_ = opParamInfo_.queryRope.tensor->GetStorageShape();
     keyRopeShapeCmp_ = opParamInfo_.keyRope.tensor->GetStorageShape();
+    if (!IsFusedSparseAttentionOverlapStandaloneOp(opName_)) {
+        softmaxMaxShapeCmp_ = opParamInfo_.softmaxMax.shape->GetStorageShape();
+        softmaxSumShapeCmp_ = opParamInfo_.softmaxSum.shape->GetStorageShape();
+    }
 }
 
 ge::graphStatus FusedSparseAttentionOverlapTilingCheck::CheckBlockTable() const
@@ -817,12 +1098,89 @@ ge::graphStatus FusedSparseAttentionOverlapTilingCheck::CheckAttenOutShape()
     return ge::GRAPH_SUCCESS;
 }
 
+ge::graphStatus FusedSparseAttentionOverlapTilingCheck::CheckSoftmaxMaxShape()
+{
+    if (*opParamInfo_.returnSoftmaxLse) {
+        FusedSparseAttentionOverlapTilingShapeCompareParam shapeParams;
+        shapeParams.B = bSize_;
+        shapeParams.N = n2Size_;
+        shapeParams.S = s1Size_;
+        shapeParams.T = qTSize_;
+        shapeParams.G = n1Size_/n2Size_;
+        if (CompareShape(shapeParams, softmaxMaxShapeCmp_, softmaxMaxLayout_, SOFTMAX_MAX_NAME) != ge::GRAPH_SUCCESS) {
+            return ge::GRAPH_FAILED;
+    }
+    }
+    return ge::GRAPH_SUCCESS;
+}
+
+ge::graphStatus FusedSparseAttentionOverlapTilingCheck::CheckSoftmaxSumShape()
+{
+    if (*opParamInfo_.returnSoftmaxLse) {
+        FusedSparseAttentionOverlapTilingShapeCompareParam shapeParams;
+        shapeParams.B = bSize_;
+        shapeParams.N = n2Size_;
+        shapeParams.S = s1Size_;
+        shapeParams.D = vHeadDim_;
+        shapeParams.T = qTSize_;
+        shapeParams.G = n1Size_/n2Size_;
+        if (CompareShape(shapeParams, softmaxSumShapeCmp_, softmaxSumLayout_, SOFTMAX_SUM_NAME) != ge::GRAPH_SUCCESS) {
+            return ge::GRAPH_FAILED;
+        }
+    }
+
+    return ge::GRAPH_SUCCESS;
+}
+
 ge::graphStatus FusedSparseAttentionOverlapTilingCheck::CheckAttenOut()
 {
     if (ge::GRAPH_SUCCESS != CheckDTypeConsistency(opParamInfo_.attenOut.desc->GetDataType(),
         inputQType_, ATTEN_OUT_NAME) ||
         ge::GRAPH_SUCCESS != CheckAttenOutShape()) {
         return ge::GRAPH_FAILED;
+    }
+    if (!IsFusedSparseAttentionOverlapStandaloneOp(opName_) &&
+        (ge::GRAPH_SUCCESS != CheckSoftmaxMaxShape() ||
+         ge::GRAPH_SUCCESS != CheckSoftmaxSumShape())) {
+        return ge::GRAPH_FAILED;
+    }
+    return ge::GRAPH_SUCCESS;
+}
+ge::graphStatus FusedSparseAttentionOverlapTilingCheck::CheckSoftmaxMax()
+{
+    if (*opParamInfo_.returnSoftmaxLse) {
+        OP_CHECK_IF(opParamInfo_.softmaxMax.shape->GetStorageShape().GetShapeSize() == 0,
+            OP_LOGE(opName_, "When return_softmax_lse is true, SoftmaxMax tensor cannot be empty tensor."),
+                return ge::GRAPH_FAILED);
+        // type类型校验
+        OP_CHECK_IF(opParamInfo_.softmaxMax.desc->GetDataType() != ge::DT_FLOAT,
+            OP_LOGE(opName_, "SoftmaxMax's dtype must be FLOAT."),
+                return ge::GRAPH_FAILED);
+        // shape和维度校验
+        if (ge::GRAPH_SUCCESS != CheckAttenOutShape()) {
+                return ge::GRAPH_FAILED;
+        }
+    } else {
+        if (opParamInfo_.softmaxMax.shape->GetStorageShape().GetShapeSize() != 0) {
+            OP_LOGW(opName_, "When return_softmax_lse is false, SoftmaxMax tensor must be empty tensor.");
+        }
+    }
+    return ge::GRAPH_SUCCESS;
+}
+
+ge::graphStatus FusedSparseAttentionOverlapTilingCheck::CheckSoftmaxSum()
+{
+    if (*opParamInfo_.returnSoftmaxLse) {
+        OP_CHECK_IF(opParamInfo_.softmaxSum.shape->GetStorageShape().GetShapeSize() == 0,
+            OP_LOGE(opName_, "When return_softmax_lse is true, softmaxSum tensor cannot be empty tensor."),
+                return ge::GRAPH_FAILED);
+        OP_CHECK_IF(opParamInfo_.softmaxSum.desc->GetDataType() != ge::DT_FLOAT,
+            OP_LOGE(opName_, "softmaxSum's dtype must be FLOAT."),
+                return ge::GRAPH_FAILED);
+    } else {
+        if (opParamInfo_.softmaxSum.shape->GetStorageShape().GetShapeSize() != 0) {
+            OP_LOGW(opName_, "When return_softmax_lse is false, softmaxSum tensor must be empty tensor.");
+        }
     }
     return ge::GRAPH_SUCCESS;
 }
@@ -1035,6 +1393,8 @@ ge::graphStatus FusedSparseAttentionOverlapTilingCheck::CheckMultiParaConsistenc
         ge::GRAPH_SUCCESS != CheckQRope() ||
         ge::GRAPH_SUCCESS != CheckTopK() ||
         ge::GRAPH_SUCCESS != CheckAttenOut() ||
+        (!IsFusedSparseAttentionOverlapStandaloneOp(opName_) && ge::GRAPH_SUCCESS != CheckSoftmaxMax()) ||
+        (!IsFusedSparseAttentionOverlapStandaloneOp(opName_) && ge::GRAPH_SUCCESS != CheckSoftmaxSum()) ||
         ge::GRAPH_SUCCESS != CheckActualSeqLensQ() ||
         ge::GRAPH_SUCCESS != CheckActualSeqLens() ||
         ge::GRAPH_SUCCESS != CheckBlockTable()) {
@@ -1139,11 +1499,23 @@ ge::graphStatus FusedSparseAttentionOverlapTilingCheck::CheckFeatureMlaNoquant()
     return ge::GRAPH_SUCCESS;
 }
 
+ge::graphStatus FusedSparseAttentionOverlapTilingCheck::CheckFeatureMla() const
+{
+    return CheckFeatureMlaNoquant();
+}
+
+ge::graphStatus FusedSparseAttentionOverlapTilingCheck::CheckFeature() const
+{
+    return CheckFeatureMla();
+}
+
 void FusedSparseAttentionOverlapTilingCheck::Init()
 {
     opName_ = sfaInfo_.opName;
+    platformInfo_ = sfaInfo_.platformInfo;
     opParamInfo_ = sfaInfo_.opParamInfo;
     npuArch_ = sfaInfo_.npuArch;
+    isA5_ = sfaInfo_.isA5;
 
     bSize_ = sfaInfo_.bSize;
     n1Size_ = sfaInfo_.n1Size;
@@ -1171,8 +1543,11 @@ void FusedSparseAttentionOverlapTilingCheck::Init()
     topkLayout_ = sfaInfo_.topkLayout;
     kvLayout_ = sfaInfo_.kvLayout;
     outLayout_ = sfaInfo_.outLayout;
+    softmaxMaxLayout_ = sfaInfo_.softmaxMaxLayout;
+    softmaxSumLayout_ = sfaInfo_.softmaxSumLayout;
 
     kvStorageMode_ = sfaInfo_.kvStorageMode;
+    l2CacheSize_ = sfaInfo_.l2CacheSize;
 }
 
 ge::graphStatus FusedSparseAttentionOverlapTilingCheck::Process()
@@ -1180,7 +1555,7 @@ ge::graphStatus FusedSparseAttentionOverlapTilingCheck::Process()
     Init();
     if (CheckSinglePara() != ge::GRAPH_SUCCESS ||
         CheckParaExistence() != ge::GRAPH_SUCCESS ||
-        CheckFeatureMlaNoquant() != ge::GRAPH_SUCCESS ||
+        CheckFeature() != ge::GRAPH_SUCCESS ||
         CheckMultiParaConsistency() != ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
     }
@@ -1240,6 +1615,16 @@ ge::graphStatus FusedSparseAttentionOverlapInfoParser::CheckRequiredInOutExisten
                return ge::GRAPH_FAILED);
     OP_CHECK_IF(opParamInfo_.attenOut.desc == nullptr, OP_LOGE(opName_, "Desc of tensor output is nullptr"),
                return ge::GRAPH_FAILED);
+    if (!IsFusedSparseAttentionOverlapStandaloneOp(opName_)) {
+        OP_CHECK_IF(opParamInfo_.softmaxMax.shape == nullptr, OP_LOGE(opName_, "Shape of tensor softmaxMax is nullptr"),
+                return ge::GRAPH_FAILED);
+        OP_CHECK_IF(opParamInfo_.softmaxMax.desc == nullptr, OP_LOGE(opName_, "Desc of tensor softmaxMax is nullptr"),
+                return ge::GRAPH_FAILED);
+        OP_CHECK_IF(opParamInfo_.softmaxSum.shape == nullptr, OP_LOGE(opName_, "Shape of tensor softmaxSum is nullptr"),
+                return ge::GRAPH_FAILED);
+        OP_CHECK_IF(opParamInfo_.softmaxSum.desc == nullptr, OP_LOGE(opName_, "Desc of tensor softmaxSum is nullptr"),
+                return ge::GRAPH_FAILED);
+    }
     OP_CHECK_IF(opParamInfo_.queryRope.tensor == nullptr, OP_LOGE(opName_, "Shape of queryRope is nullptr"),
                return ge::GRAPH_FAILED);
     OP_CHECK_IF(opParamInfo_.queryRope.desc == nullptr, OP_LOGE(opName_, "Desc of queryRope is nullptr"),
@@ -1325,6 +1710,8 @@ ge::graphStatus FusedSparseAttentionOverlapInfoParser::GetNpuInfo()
         return GRAPH_FAILED;
     }
 
+    ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::L2, l2CacheSize_);
+
     return ge::GRAPH_SUCCESS;
 }
 
@@ -1359,6 +1746,12 @@ void FusedSparseAttentionOverlapInfoParser::GetOutputParaInfo()
 {
     opParamInfo_.attenOut.desc = context_->GetOutputDesc(OUTPUT_INDEX);
     opParamInfo_.attenOut.shape = context_->GetOutputShape(OUTPUT_INDEX);
+    if (!IsFusedSparseAttentionOverlapStandaloneOp(opName_)) {
+        opParamInfo_.softmaxMax.desc = context_->GetOutputDesc(SOFTMAXMAX_INDEX);
+        opParamInfo_.softmaxMax.shape = context_->GetOutputShape(SOFTMAXMAX_INDEX);
+        opParamInfo_.softmaxSum.desc = context_->GetOutputDesc(SOFTMAXSUM_INDEX);
+        opParamInfo_.softmaxSum.shape = context_->GetOutputShape(SOFTMAXSUM_INDEX);
+    }
 }
 
 ge::graphStatus FusedSparseAttentionOverlapInfoParser::GetAttrParaInfo()
@@ -1372,6 +1765,28 @@ ge::graphStatus FusedSparseAttentionOverlapInfoParser::GetAttrParaInfo()
     opParamInfo_.sparseBlockSize = attrs->GetAttrPointer<int64_t>(SPARSE_BLOCK_SIZE_ATTR_INDEX);
     opParamInfo_.scaleValue = attrs->GetAttrPointer<float>(SCALE_VALUE_ATTR_INDEX);
     opParamInfo_.sparseMode = attrs->GetAttrPointer<int64_t>(SPARSE_MODE_ATTR_INDEX);
+    opParamInfo_.preTokens = attrs->GetAttrPointer<int64_t>(PRE_TOKENS_ATTR_INDEX);
+    opParamInfo_.nextTokens = attrs->GetAttrPointer<int64_t>(NEXT_TOKENS_ATTR_INDEX);
+    opParamInfo_.attentionMode = attrs->GetAttrPointer<int64_t>(ATTENTION_MODE_ATTR_INDEX);
+    opParamInfo_.returnSoftmaxLse = attrs->GetAttrPointer<bool>(RETURN_SOFTMAX_LSE_ATTR_INDEX);
+    static const int64_t defaultPreTokens = INT64_MAX;
+    static const int64_t defaultNextTokens = INT64_MAX;
+    static const int64_t defaultAttentionMode = 2;
+    static const bool defaultReturnSoftmaxLse = false;
+    if (IsFusedSparseAttentionOverlapStandaloneOp(opName_)) {
+        if (opParamInfo_.preTokens == nullptr) {
+            opParamInfo_.preTokens = &defaultPreTokens;
+        }
+        if (opParamInfo_.nextTokens == nullptr) {
+            opParamInfo_.nextTokens = &defaultNextTokens;
+        }
+        if (opParamInfo_.attentionMode == nullptr) {
+            opParamInfo_.attentionMode = &defaultAttentionMode;
+        }
+        if (opParamInfo_.returnSoftmaxLse == nullptr) {
+            opParamInfo_.returnSoftmaxLse = &defaultReturnSoftmaxLse;
+        }
+    }
     return ge::GRAPH_SUCCESS;
 }
 
@@ -1401,9 +1816,9 @@ ge::graphStatus FusedSparseAttentionOverlapInfoParser::GetInOutDataType()
 
 ge::graphStatus FusedSparseAttentionOverlapInfoParser::GetBatchSize()
 {
-    // Obtain the reference B value.
-    // 1. For non-TND layouts, use the query batch_size dimension.
-    // 2. For TND, actual_seq_lens_q is required and its array length defines the B-axis size.
+    // 获取B基准值
+    // 1、非TND时, 以query的batch_size维度为基准;
+    // 2、TND时, actual_seq_lens_q必须传入, 以actual_seq_lens_q数组的长度为B轴大小
     if (qLayout_ == FusedSparseAttentionOverlapLayout::TND) {
         return GetActualSeqLenQSize(bSize_);
     } else { // BSND
@@ -1414,35 +1829,35 @@ ge::graphStatus FusedSparseAttentionOverlapInfoParser::GetBatchSize()
 
 ge::graphStatus FusedSparseAttentionOverlapInfoParser::GetQTSize()
 {
-    // Obtain the reference T value for query.
-    // 1. For non-TND layouts, use the query batch_size dimension.
-    // 2. For TND, actual_seq_lens_q is required and its array length defines the B-axis size.
+    // 获取query的T基准值
+    // 1、非TND时, 以query的batch_size维度为基准;
+    // 2、TND时, actual_seq_lens_q必须传入, 以actual_seq_lens_q数组的长度为B轴大小
     qTSize_ = (qLayout_ == FusedSparseAttentionOverlapLayout::TND) ? GetAxisNum(queryShape_, FusedSparseAttentionOverlapAxis::T, qLayout_) : 0;
     return ge::GRAPH_SUCCESS;
 }
 
 ge::graphStatus FusedSparseAttentionOverlapInfoParser::GetKVTSize()
 {
-    // Obtain the reference T value for KV.
-    // 1. For non-TND layouts, use the key batch_size dimension.
-    // 2. For TND, actual_seq_lens_q is required and its array length defines the B-axis size.
+    // 获取query的T基准值
+    // 1、非TND时, 以key的batch_size维度为基准;
+    // 2、TND时, actual_seq_lens_q必须传入, 以actual_seq_lens_q数组的长度为B轴大小
     kvTSize_ = (kvLayout_ == FusedSparseAttentionOverlapLayout::TND) ? GetAxisNum(keyShape_, FusedSparseAttentionOverlapAxis::T, kvLayout_) : 0;
     return ge::GRAPH_SUCCESS;
 }
 
 ge::graphStatus FusedSparseAttentionOverlapInfoParser::GetQkHeadDim()
 {
-    // Obtain the reference qkHeadDim value.
-    // Use the D dimension of query.
+    // 获取qkHeadDim基准值
+    // 以query的D维度为基准
     qkHeadDim_ = GetAxisNum(queryShape_, FusedSparseAttentionOverlapAxis::D, qLayout_);
     return ge::GRAPH_SUCCESS;
 }
 
 ge::graphStatus FusedSparseAttentionOverlapInfoParser::GetS1Size()
 {
-    // Obtain the reference S1 value.
-    // 1. For non-TND layouts, use the S dimension of query.
-    // 2. For TND, actual_seq_lens_q is required and its maximum value is used.
+    // 获取S1基准值
+    // 1、非TND时, 以query的S维度为基准;
+    // 2、TND时, actual_seq_lens_q必须传入, 以actual_seq_lens_q数组中的最大值为基准
     if (qLayout_ == FusedSparseAttentionOverlapLayout::TND) {
         s1Size_ = GetAxisNum(queryShape_, FusedSparseAttentionOverlapAxis::T, qLayout_);
         return ge::GRAPH_SUCCESS;
@@ -1459,7 +1874,7 @@ ge::graphStatus FusedSparseAttentionOverlapInfoParser::GetKvStorageMode()
     } else {
         kvStorageMode_ = FusedOverlapKvStorageMode::BATCH_CONTINUOUS;
     }
-    // Reference KV storage mode
+    // kv存储模式基准值
     return ge::GRAPH_SUCCESS;
 }
 
@@ -1488,6 +1903,9 @@ ge::graphStatus FusedSparseAttentionOverlapInfoParser::GetKvLayout()
         OP_LOGE(opName_, "When layoutKV is PA_BSND, kvDimNum must be 4, but now is %d.", keyDimNum);
         return ge::GRAPH_FAILED;
     }
+    OP_CHECK_IF(*opParamInfo_.returnSoftmaxLse && kvLayout_ == FusedSparseAttentionOverlapLayout::PA_BSND,
+                OP_LOGE(opName_, "when return_softmax_lse is true, key layout do not support PA_BSND."),
+                return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
 }
 
@@ -1545,9 +1963,9 @@ ge::graphStatus FusedSparseAttentionOverlapInfoParser::GetS2SizeForPageAttention
 
 ge::graphStatus FusedSparseAttentionOverlapInfoParser::GetS2Size()
 {
-    // Obtain the reference S2 value.
-    // 1. For BATCH_CONTINUOUS, read it from the S axis of key.
-    // 2. For PAGE_ATTENTION, S2 = block_table.dim1 * block_size.
+    // 获取S2基准值
+    // 1、BATCH_CONTINUOUS时, 从key的S轴获取
+    // 2、PAGE_ATTENTION时, S2 = block_table.dim1 * block_size
     if (kvStorageMode_ == FusedOverlapKvStorageMode::BATCH_CONTINUOUS) {
         return GetS2SizeForBatchContinuous();
     }
@@ -1556,8 +1974,8 @@ ge::graphStatus FusedSparseAttentionOverlapInfoParser::GetS2Size()
 
 ge::graphStatus FusedSparseAttentionOverlapInfoParser::GetValueHeadDim()
 {
-    // Obtain the reference vHeadDim value.
-    // Use the D dimension of value.
+    // 获取vHeadDim基准值
+    // 以value的D维度为基准
     vHeadDim_ = GetAxisNum(valueShape_, FusedSparseAttentionOverlapAxis::D, kvLayout_);
     return ge::GRAPH_SUCCESS;
 }
@@ -1575,7 +1993,7 @@ ge::graphStatus FusedSparseAttentionOverlapInfoParser::GetRopeHeadDim()
 
 ge::graphStatus FusedSparseAttentionOverlapInfoParser::GetQueryAndOutLayout()
 {
-    // Obtain the reference layouts for query and attentionOut.
+    // 获取query和attentionOut的Layout基准值
     // layoutQuery: {qLayout, outLayout}
     const map<string, pair<FusedSparseAttentionOverlapLayout, FusedSparseAttentionOverlapLayout>> layoutMap = {
         {"BSND",        {FusedSparseAttentionOverlapLayout::BSND,    FusedSparseAttentionOverlapLayout::BSND}},
@@ -1597,6 +2015,18 @@ ge::graphStatus FusedSparseAttentionOverlapInfoParser::GetQueryAndOutLayout()
 ge::graphStatus FusedSparseAttentionOverlapInfoParser::GetTopkLayout()
 {
     topkLayout_ = qLayout_;
+    return ge::GRAPH_SUCCESS;
+}
+
+ge::graphStatus FusedSparseAttentionOverlapInfoParser::GetSoftmaxMaxAndSumLayout()
+{
+    if (qLayout_ == FusedSparseAttentionOverlapLayout::BSND) {
+        softmaxMaxLayout_ = FusedSparseAttentionOverlapLayout::BNSG;
+        softmaxSumLayout_ = FusedSparseAttentionOverlapLayout::BNSG;
+    } else if (qLayout_ == FusedSparseAttentionOverlapLayout::TND) {
+        softmaxMaxLayout_ = FusedSparseAttentionOverlapLayout::NTG;
+        softmaxSumLayout_ = FusedSparseAttentionOverlapLayout::NTG;
+    }
     return ge::GRAPH_SUCCESS;
 }
 
@@ -1631,6 +2061,7 @@ ge::graphStatus FusedSparseAttentionOverlapInfoParser::GetGSize()
 
 ge::graphStatus FusedSparseAttentionOverlapInfoParser::GetActualseqInfo()
 {
+    maxActualseq_ = static_cast<uint32_t>(s2Size_);
     if (opParamInfo_.actualSeqLengths.tensor != nullptr) {
         actualLenDimsKV_ = opParamInfo_.actualSeqLengths.tensor->GetShapeSize();
     }
@@ -1669,22 +2100,36 @@ void FusedSparseAttentionOverlapInfoParser::GenerateInfo(FusedSparseAttentionOve
     sfaInfo.outputType = outputType_;
 
     sfaInfo.kvStorageMode = kvStorageMode_;
+    sfaInfo.l2CacheSize = l2CacheSize_;
+
+    sfaInfo.totalBlockNum = opParamInfo_.key.shape->GetStorageShape().GetDim(0);
     sfaInfo.scaleValue = *opParamInfo_.scaleValue;
+    sfaInfo.pageAttentionFlag = (kvStorageMode_ == FusedOverlapKvStorageMode::PAGE_ATTENTION);
     sfaInfo.blockSize = blockSize_;
+    sfaInfo.blockTypeSize =  sizeof(float);
     sfaInfo.maxBlockNumPerBatch = maxBlockNumPerBatch_;
 
     sfaInfo.actualLenDimsQ = actualLenDimsQ_;
     sfaInfo.actualLenDimsKV = actualLenDimsKV_;
+    sfaInfo.maxActualseq = maxActualseq_;
+    sfaInfo.isSameSeqAllKVTensor = isSameSeqAllKVTensor_;
+    sfaInfo.isSameActualseq = isSameActualseq_;
 
     sfaInfo.actualQSeqLenFlag = (opParamInfo_.actualSeqLengthsQ.tensor != nullptr);
     sfaInfo.actualSeqLenFlag = (opParamInfo_.actualSeqLengths.tensor != nullptr);
 
     sfaInfo.sparseMode = *opParamInfo_.sparseMode;
+    sfaInfo.preTokens = *opParamInfo_.preTokens;
+    sfaInfo.nextTokens = *opParamInfo_.nextTokens;
+    sfaInfo.attentionMode = *opParamInfo_.attentionMode;
+    sfaInfo.returnSoftmaxLse = *opParamInfo_.returnSoftmaxLse;
 
     sfaInfo.qLayout = qLayout_;
     sfaInfo.topkLayout = topkLayout_;
     sfaInfo.kvLayout = kvLayout_;
     sfaInfo.outLayout = outLayout_;
+    sfaInfo.softmaxMaxLayout = softmaxMaxLayout_;
+    sfaInfo.softmaxSumLayout = softmaxSumLayout_;
 }
 
 ge::graphStatus FusedSparseAttentionOverlapInfoParser::Parse(FusedSparseAttentionOverlapTilingInfo &sfaInfo)
@@ -1704,6 +2149,7 @@ ge::graphStatus FusedSparseAttentionOverlapInfoParser::Parse(FusedSparseAttentio
     if (ge::GRAPH_SUCCESS != GetInOutDataType() ||
         ge::GRAPH_SUCCESS != GetQueryAndOutLayout() ||
         ge::GRAPH_SUCCESS != GetTopkLayout() ||
+        ge::GRAPH_SUCCESS != GetSoftmaxMaxAndSumLayout() ||
         ge::GRAPH_SUCCESS != GetKvLayout() ||
         ge::GRAPH_SUCCESS != GetKvStorageMode()) {
         return ge::GRAPH_FAILED;

@@ -20,15 +20,15 @@
 #include "kernel_tiling/kernel_tiling.h"
 #include "lib/matmul_intf.h"
 #include "lib/matrix/matmul/tiling.h"
-#include "../fused_sparse_attention_overlap_common.h"
+#include "fused_sparse_attention_overlap_common.h"
 
 struct PAShape {
     uint32_t blockSize;
-    uint32_t headNum;             // Usually the KV head count, corresponding to N2
-    uint32_t headDim;             // For MLA, RoPE is 64 and NoPE is 512, corresponding to D
-    uint32_t maxblockNumPerBatch; // Maximum number of entries in each block-table row
-    uint32_t actHeadDim;          // Actual copied column size after accounting for N partitioning, corresponding to D
-    uint32_t copyRowNum;          // Total number of rows to copy
+    uint32_t headNum;             //一般为kv的head num，对应n2
+    uint32_t headDim;             //mla下rope�?4，nope�?12, 对应d
+    uint32_t maxblockNumPerBatch; //block table 每一行的最大个�?
+    uint32_t actHeadDim;          //实际拷贝col大小,考虑到N切块   s*d, 对应d
+    uint32_t copyRowNum;          //总共要拷贝的行数
     uint32_t copyRowNumAlign;
 };
 
@@ -39,10 +39,10 @@ struct Position {
     uint32_t dIdx;
 };
 
-// Scenario: copy query, queryRope, key, and value from GM to L1.
-// GM uses ND format.
-// L1 uses NZ format.
-// The parameters describe the GM row count, column count, and column stride.
+// 场景：query、queryRope、key、value GM to L1
+// GM按ND格式存储
+// L1按NZ格式存储
+// GM的行、列、列的stride
 template <typename T>
 __aicore__ inline void DataCopyGmNDToL1(LocalTensor<T> &l1Tensor, GlobalTensor<T> &gmTensor,
                                         uint32_t rowAct,
@@ -52,10 +52,10 @@ __aicore__ inline void DataCopyGmNDToL1(LocalTensor<T> &l1Tensor, GlobalTensor<T
 {
     Nd2NzParams nd2nzPara;
     nd2nzPara.ndNum = 1;
-    nd2nzPara.nValue = rowAct;       // Number of rows in the ND matrix
-    // For int4 T, dValue = col / 2 and srcDValue = colStride / 2.
-    nd2nzPara.dValue = col;          // Number of columns in the ND matrix
-    nd2nzPara.srcDValue = colStride; // Offset between the start addresses of adjacent rows in one ND matrix
+    nd2nzPara.nValue = rowAct;       //nd矩阵的行�?
+    // T为int4场景下，dValue = col / 2，srcDValue = colStride / 2
+    nd2nzPara.dValue = col;          //nd矩阵的列�?
+    nd2nzPara.srcDValue = colStride; //同一nd矩阵相邻行起始地址间的偏移
     nd2nzPara.dstNzC0Stride = rowAlign;
     nd2nzPara.dstNzNStride = 1;
     nd2nzPara.srcNdMatrixStride = 0;
@@ -64,11 +64,10 @@ __aicore__ inline void DataCopyGmNDToL1(LocalTensor<T> &l1Tensor, GlobalTensor<T
 }
 
 /*
-    Copies page-attention data from GM to L1 and supports ND and NZ formats.
-    Page-attention layouts include BNBD (blockNum, N, blockSize, D) and BBH (blockNum, blockSize, N * D).
-    BSH, BSND, and TND use BBH storage.
-    shape.copyRowNumAlign must be aligned to 16. For example, a 128 * 512 key copy with a 10 * 512
-    tail block must be aligned to 16 * 512.
+    适用PA数据从GM拷贝到L1，支持ND、NZ数据�?
+    PA的layout�?BNBD（blockNum,N,blockSize,D�?BBH（blockNum,blockSize,N*D
+    BSH\BSND\TND 为BBH
+    shape.copyRowNumAlign 需�?6字节对齐，如拷贝k矩阵，一次拷�?28*512，遇到尾�?10*512 需对齐�?6*512
 */
 template <typename T, FusedSparseAttentionOverlapLayout SRC_LAYOUT>
 __aicore__ inline void DataCopyPA(LocalTensor<T> &dstTensor,  //l1
@@ -82,15 +81,15 @@ __aicore__ inline void DataCopyPA(LocalTensor<T> &dstTensor,  //l1
     uint32_t curS2Idx = startPos.s2Idx;
     uint32_t blockElementCnt = 32 / sizeof(T);
     while (copyFinishRowCnt < shape.copyRowNum) {
-        uint64_t blockIdOffset = curS2Idx / shape.blockSize;   // Obtain the block-table index
-        uint64_t reaminRowCnt = curS2Idx % shape.blockSize;    // Obtain the row offset within one block
-        uint64_t idInBlockTable = blockTableGm.GetValue(blockTableBaseOffset + blockIdOffset); // Read the block ID from the block table
-        // Calculate the number of rows that can be copied.
-        uint32_t copyRowCnt = shape.blockSize - reaminRowCnt;  // Process only one block at a time
+        uint64_t blockIdOffset = curS2Idx / shape.blockSize;   // 获取block table上的索引
+        uint64_t reaminRowCnt = curS2Idx % shape.blockSize;    // 获取在单个块上超出的行数
+        uint64_t idInBlockTable = blockTableGm.GetValue(blockTableBaseOffset + blockIdOffset); // 从block table上的获取编号
+        // 计算可以拷贝行数
+        uint32_t copyRowCnt = shape.blockSize - reaminRowCnt;  //一次只能处理一个Block
         if (copyFinishRowCnt + copyRowCnt > shape.copyRowNum) {
-            copyRowCnt = shape.copyRowNum - copyFinishRowCnt;  // The final copy does not fill one block
+            copyRowCnt = shape.copyRowNum - copyFinishRowCnt;  //一个block未拷�?
         }
-        uint64_t offset = idInBlockTable * shape.blockSize * shape.headNum * shape.headDim ;   // Page-attention offset
+        uint64_t offset = idInBlockTable * shape.blockSize * shape.headNum * shape.headDim ;   //PA的偏�?
 
         uint64_t dStride = shape.headDim;
         if constexpr (SRC_LAYOUT == FusedSparseAttentionOverlapLayout::BSND || SRC_LAYOUT == FusedSparseAttentionOverlapLayout::TND) {
@@ -115,7 +114,7 @@ __aicore__ inline void DataCopyPA(LocalTensor<T> &dstTensor,  //l1
 
 template <typename FusedSparseAttentionOverlapTraits> class FusedSparseAttentionOverlapMatmulService {
 public:
-    // Use float for intermediate computations in high-precision mode.
+    // 中间计算数据类型为float, 高精度模�?
     using T = float;
     using Q_T = typename FusedSparseAttentionOverlapTraits::queryType;
     using KV_T = typename FusedSparseAttentionOverlapTraits::kvType;
@@ -151,19 +150,19 @@ private:
     static constexpr FusedSparseAttentionOverlapLayout LAYOUT_T = FusedSparseAttentionOverlapTraits::layout;
     static constexpr FusedSparseAttentionOverlapLayout KV_LAYOUT_T = FusedSparseAttentionOverlapTraits::kvLayout;
 
-    static constexpr uint32_t M_SPLIT_SIZE = 128;     // Partition size along M
-    static constexpr uint32_t N_SPLIT_SIZE = 128;     // Partition size along N
-    static constexpr uint32_t N_WORKSPACE_SIZE = 512; // Workspace size along N
+    static constexpr uint32_t M_SPLIT_SIZE = 128;     // m方向切分
+    static constexpr uint32_t N_SPLIT_SIZE = 128;     // n方向切分
+    static constexpr uint32_t N_WORKSPACE_SIZE = 512; // n方向切分
 
     static constexpr uint32_t L1_BLOCK_SIZE = (64 * (512 + 64) * sizeof(Q_T));
-    static constexpr uint32_t L1_BLOCK_OFFSET = 64 * (512 + 64); // Number of elements in 72 KB
+    static constexpr uint32_t L1_BLOCK_OFFSET = 64 * (512 + 64); // 72K的元素个�?
 
     static constexpr uint32_t L0A_PP_SIZE = (32 * 1024);
     static constexpr uint32_t L0B_PP_SIZE = (32 * 1024);
     static constexpr uint32_t L0C_PP_SIZE = (64 * 1024);
 
     // mte2 <> mte1 EventID
-    // L1 uses triple buffering with three event IDs.
+    // L1 3buf, 使用3个eventId
     static constexpr uint32_t L1_EVENT0 = EVENT_ID2;
     static constexpr uint32_t L1_EVENT1 = EVENT_ID3;
     static constexpr uint32_t L1_EVENT2 = EVENT_ID4;
@@ -177,14 +176,14 @@ private:
     static constexpr uint32_t L0AB_EVENT1 = EVENT_ID4;
 
     static constexpr IsResetLoad3dConfig LOAD3DV2_CONFIG = {true, true};                    // isSetFMatrix isSetPadding;
-    static constexpr uint32_t mte21QPIds[4] = {L1_EVENT0, L1_EVENT1, L1_EVENT2, L1_EVENT3}; // Reused by MTE1 and MTE2
+    static constexpr uint32_t mte21QPIds[4] = {L1_EVENT0, L1_EVENT1, L1_EVENT2, L1_EVENT3}; // mte12复用
     static constexpr uint32_t mte21KVIds[3] = {L1_EVENT4, L1_EVENT5, L1_EVENT6};
 
     uint32_t kvCacheBlockSize = 0;
     uint32_t maxBlockNumPerBatch = 0;
     ConstInfo constInfo{};
 
-    // Divide L1 into three buffers for tracking.
+    // L1分成3块buf, 用于记录
     uint32_t qpL1BufIter = 0;
     uint32_t kvL1BufIter = -1;
     uint32_t abL0BufIter = 0;
@@ -228,7 +227,7 @@ private:
 
     __aicore__ inline uint32_t GetQPL1RealIdx(uint32_t mIdx, uint32_t k1Idx)
     {
-        uint32_t idxMap[] = {0, 2}; // Keep blocks 0-1 and 2-3 contiguous so addresses for the same M block remain contiguous
+        uint32_t idxMap[] = {0, 2}; // 确保0块和1块连在一�? 2�?块连在一�? 来保证同一m块的地址相连
         return idxMap[mIdx % 2] + k1Idx;
     }
 
@@ -360,10 +359,10 @@ __aicore__ inline void FusedSparseAttentionOverlapMatmulService<FusedSparseAtten
 {
     Nd2NzParams nd2nzPara;
     nd2nzPara.ndNum = 1;
-    nd2nzPara.nValue = srcN; // Number of rows
+    nd2nzPara.nValue = srcN; // 行数
     nd2nzPara.dValue = srcD;
     nd2nzPara.srcDValue = srcDstride;
-    nd2nzPara.dstNzC0Stride = (srcN + 15) / 16 * 16; // Align to 16, in blocks
+    nd2nzPara.dstNzC0Stride = (srcN + 15) / 16 * 16; // 对齐�?6 单位block
     nd2nzPara.dstNzNStride = 1;
     nd2nzPara.srcNdMatrixStride = 0;
     nd2nzPara.dstNzMatrixStride = 0;
@@ -451,7 +450,7 @@ __aicore__ inline void FusedSparseAttentionOverlapMatmulService<FusedSparseAtten
     loadData3DParams.padList[0] = 0;
     loadData3DParams.padList[1] = 0;
     loadData3DParams.padList[2] = 0;
-    loadData3DParams.padList[3] = 255; // Tail data does not affect the sliding-window result
+    loadData3DParams.padList[3] = 255; // 尾部数据不影响滑窗的结果
 
     // SetLoadToA0Params
     loadData3DParams.mExtension = mSize; // M
@@ -477,7 +476,7 @@ __aicore__ inline void FusedSparseAttentionOverlapMatmulService<FusedSparseAtten
                                                                    LocalTensor<KV_T> &l1Tensor, uint32_t idx,
                                                                    uint32_t kSplitSize, uint32_t kSize, uint32_t nSize)
 {
-    // Load the full N dimension.
+    // N 方向全载
     LocalTensor<KV_T> srcTensor = l1Tensor[nSize * kSplitSize * idx];
 
     LoadData2DParams loadData2DParams;
@@ -561,7 +560,7 @@ __aicore__ inline void FusedSparseAttentionOverlapMatmulService<FusedSparseAtten
 template <typename FusedSparseAttentionOverlapTraits>
 __aicore__ inline void FusedSparseAttentionOverlapMatmulService<FusedSparseAttentionOverlapTraits>::ComputeMm1(const RunInfo &info, const MSplitInfo mSplitInfo)
 {
-    // An additional outer M loop is required.
+    // 最外层还需要一层m的循�?
     uint32_t mSize = mSplitInfo.nBufferDealM;
     uint32_t mL1Size = M_SPLIT_SIZE;
     uint32_t mL1SizeAlign = FusedSparseAttentionOverlapAlign(M_SPLIT_SIZE, 16U);
@@ -574,7 +573,7 @@ __aicore__ inline void FusedSparseAttentionOverlapMatmulService<FusedSparseAtten
 
     uint32_t kSize = 576;
     uint32_t kL1Size = 288;
-    uint32_t kL1Loops = 2; // 2: 576 / 288, MLA-specific; generalized D is not considered here
+    uint32_t kL1Loops = 2; // 2 : 576/288, mla专用 这里不考虑d泛化
 
     uint32_t kL0Size = 96;
     uint32_t kL0Loops = (kL1Size + kL0Size - 1) / kL0Size; // 288 / 96 = 3 kloops
@@ -582,11 +581,11 @@ __aicore__ inline void FusedSparseAttentionOverlapMatmulService<FusedSparseAtten
     LocalTensor<KV_T> bL1Tensor;
     LocalTensor<KV_T> kRopeTensor;
     LocalTensor<KV_T> kTensor;
-    // ka selects one of four buffers for the left matrix; kb selects one of three buffers for the right matrix.
+    // ka表示左矩�?buf选择哪一块buf, kb表示右矩�?buf选择哪一块buf
     uint32_t ka = 0, kb = 0;
     
     uint32_t curTopKIdx = info.curTopKIdx;
-    uint64_t curOffsetInSparseBlock = info.curOffsetInSparseBlock; // Offset within the sparse block
+    uint64_t curOffsetInSparseBlock = info.curOffsetInSparseBlock; //sparse Block块内偏移
     uint32_t copyRowCnt = 0;
     int64_t idInTopK = topKGm.GetValue(info.topKBaseOffset + curTopKIdx);
 
@@ -595,10 +594,10 @@ __aicore__ inline void FusedSparseAttentionOverlapMatmulService<FusedSparseAtten
     uint32_t copyRowCntTmp = 0;
     int64_t idInTopKTmp = 0;
 
-    // Partition N, K, and M in L1.
-    for (uint32_t nL1 = 0; nL1 < nL1Loops; nL1++) { // Partition N in L1: 512 / 128 = 4
+    // L1 切n切k切m
+    for (uint32_t nL1 = 0; nL1 < nL1Loops; nL1++) { // L1切n, 512/128=4
         if (nL1 == (nL1Loops - 1)) {
-            // Recalculate the tail-block size.
+            // 尾块重新计算size
             nL1Size = nSize - (nL1Loops - 1) * N_SPLIT_SIZE;
             nL1SizeAlign = FusedSparseAttentionOverlapAlign(nL1Size, 16U);
         }
@@ -607,13 +606,13 @@ __aicore__ inline void FusedSparseAttentionOverlapMatmulService<FusedSparseAtten
         copyRowCntTmp = copyRowCnt;
         idInTopKTmp = idInTopK;
 
-        for (uint32_t kL1 = 0; kL1 < kL1Loops; kL1++) { // Partition K in L1: 576 / 288; generalized D is not considered here
+        for (uint32_t kL1 = 0; kL1 < kL1Loops; kL1++) { // L1切k, 576/288, 这里不考虑d泛化
             kvL1BufIter++;
             uint32_t kb = kvL1BufIter % 3;
             WaitFlag<HardEvent::MTE1_MTE2>(mte21KVIds[kb]);
-            // Select the current block from K.
+            // 从k当中取当前的�?
             bL1Tensor = l1KVTensor[kb * L1_BLOCK_OFFSET];
-                // Main MM1 copy path
+                // mm1拷贝主流�?
  
                 uint32_t curSeqIdx = info.s2BatchOffset + nL1 * N_SPLIT_SIZE;
                 uint32_t copyFinishRowCnt = 0;
@@ -625,7 +624,7 @@ __aicore__ inline void FusedSparseAttentionOverlapMatmulService<FusedSparseAtten
                     if (kL1 == 0) {
                         Nd2NzParams nd2nzPara;
                         nd2nzPara.ndNum = 1;
-                        nd2nzPara.nValue = nL1Size;                 // Number of rows
+                        nd2nzPara.nValue = nL1Size;                 // 行数
                         nd2nzPara.dValue = constInfo.headDim >> 1;  // constInfo.headDim;
                         nd2nzPara.srcDValue = constInfo.headDim;
                         nd2nzPara.dstNzC0Stride = nL1SizeAlign;
@@ -647,7 +646,7 @@ __aicore__ inline void FusedSparseAttentionOverlapMatmulService<FusedSparseAtten
                         LocalTensor<Q_T> kTmpTensor = bL1Tensor[(constInfo.headDimRope >> 1) * nL1SizeAlign];
                         Nd2NzParams nd2nzPara;
                         nd2nzPara.ndNum = 1;
-                        nd2nzPara.nValue = nL1Size;                 // Number of rows
+                        nd2nzPara.nValue = nL1Size;                 // 行数
                         nd2nzPara.dValue = constInfo.headDim >> 1;  // constInfo.headDim;
                         nd2nzPara.srcDValue = constInfo.headDim;
                         nd2nzPara.dstNzC0Stride = nL1SizeAlign;
@@ -673,14 +672,14 @@ __aicore__ inline void FusedSparseAttentionOverlapMatmulService<FusedSparseAtten
                             copyRowCnt = nL1Size - copyFinishRowCnt;
                         }
 
-                        // BN2-axis offset
+                        // BN2轴偏�?
                         if constexpr (PAGE_ATTENTION) {
                             Position startPos;
                             startPos.bIdx = info.bIdx;
                             startPos.n2Idx = info.n2Idx;
                             startPos.s2Idx = idInTopK * constInfo.sparseBlockSize + curOffsetInSparseBlock;
-                            // Rename 256 and 32 after the seven-buffer naming is updated.
-                            startPos.dIdx = kL1 * 256;  // MM1 right matrix is BN2S2D: D is K and is not split; MM2 right matrix uses S2 as K and splits D
+                            // 256�?2等待7buf命名更改
+                            startPos.dIdx = kL1 * 256;  // mm1 右矩�?bn2s2d, d为k轴不�? mm2 右矩�? s2为k�? d轴切�?
                             Position ropeStartPos = startPos;
                             ropeStartPos.dIdx = kL1 * 32;
                             PAShape shape;
@@ -738,7 +737,7 @@ __aicore__ inline void FusedSparseAttentionOverlapMatmulService<FusedSparseAtten
                             }
                         }
 
-                        // Update loop variables.
+                        // 更新循环变量
                         copyFinishRowCnt += copyRowCnt;
                         curSeqIdx += copyRowCnt;
                     }
@@ -749,35 +748,33 @@ __aicore__ inline void FusedSparseAttentionOverlapMatmulService<FusedSparseAtten
             mL1Size = M_SPLIT_SIZE;
             mL1SizeAlign = FusedSparseAttentionOverlapAlign(M_SPLIT_SIZE, 16U);
             for (uint32_t mL1 = 0; mL1 < mL1Loops; mL1++) {
-                uint32_t aL1PaddingSize = 0; // Align the left-matrix tail so the two 32 KB regions remain contiguous
+                uint32_t aL1PaddingSize = 0; // 用于使左矩阵对齐到尾�? 以保证两�?2K内存连续
                 if (mL1 == (mL1Loops - 1)) {
-                    // Recalculate the tail-block size.
+                    // 尾块重新计算size
                     mL1Size = mSize - (mL1Loops - 1) * M_SPLIT_SIZE;
                     mL1SizeAlign = FusedSparseAttentionOverlapAlign(mL1Size, 16U);
-                    // When mL1SizeAlign < 128 and kL1 == 0, apply an offset so half of qRope is copied to
-                    // the current tensor and half to the next tensor.
+                    // mL1SizeAlign<128 kL1=0时需要偏�? 确保qRope能一半拷贝到当前tensor, 一半拷贝到下一个tensor
                     aL1PaddingSize = (M_SPLIT_SIZE - mL1SizeAlign) * 288;
                 }
 
-                // The M L1 index selects whether the left matrix uses blocks 1-2 or 3-4.
-                // The K L1 index selects the first or second block within the selected pair.
+                // 左矩阵L1选择12块还�?4块的index, 由m l1 index决定
+                // 左矩阵L1选择12块或34块的前一块还是后一�? 由k l1 index决定
                 uint32_t mIdx = qpL1BufIter + mL1;
                 ka = GetQPL1RealIdx(mIdx, kL1);
                 LocalTensor<Q_T> aL1Tensor =
-                    l1QPTensor[ka * L1_BLOCK_OFFSET + (1 - kL1) * aL1PaddingSize]; // An offset is required when kL1 == 0
-                if (nL1 == 0) { // Runs twice, for mL1 == 0 and mL1 == 1
+                    l1QPTensor[ka * L1_BLOCK_OFFSET + (1 - kL1) * aL1PaddingSize]; // kL1=0时需要偏�?
+                if (nL1 == 0) { // mL1=0, mL1=1两次
                     if (kL1 == 0) {
                         WaitFlag<HardEvent::MTE1_MTE2>(mte21QPIds[ka]);
                         WaitFlag<HardEvent::MTE1_MTE2>(mte21QPIds[ka + 1]);
                         CopyInMm1AToL1(aL1Tensor, info, mSplitInfo.nBufferStartM + mL1 * M_SPLIT_SIZE, mL1Size, 256, 0);
-                        // L1 uses NZ format, so the qRope offset is the size of the full qNoPE block after K
-                        // partitioning; 256 is half of headDim.
+                        // 由于L1里面是NZ, 这里q rope的偏移为整块q nope切k的后大小, 256为headDim的一�?
                         LocalTensor<Q_T> qRopeTensor =
                             aL1Tensor[mL1SizeAlign *
                                       256];
                         CopyInMm1ARopeToL1(qRopeTensor, info, mSplitInfo.nBufferStartM + mL1 * M_SPLIT_SIZE, mL1Size);
                     } else {
-                        // 32 is half of the RoPE head dimension.
+                        // 32为rope headDim的一�?
                         LocalTensor<Q_T> qTmpTensor = aL1Tensor[mL1SizeAlign * 32];
                         CopyInMm1AToL1(qTmpTensor, info, mSplitInfo.nBufferStartM + mL1 * M_SPLIT_SIZE, mL1Size, 256,
                                        256);
@@ -786,10 +783,10 @@ __aicore__ inline void FusedSparseAttentionOverlapMatmulService<FusedSparseAtten
                     WaitFlag<HardEvent::MTE2_MTE1>(mte21QPIds[ka]);
                 }
 
-                // Synchronize with unitFlag.
+                // 使用unitflag同步
                 LocalTensor cL0Tensor =
                     cL0TensorPingPong[(cL0BufIter % 2) *
-                                      (L0C_PP_SIZE / sizeof(MM_OUT_T))]; // Keep cL0BufIter synchronized with the M step
+                                      (L0C_PP_SIZE / sizeof(MM_OUT_T))]; // 需要保证cL0BufIter和m步调一�?
                 for (uint32_t kL0 = 0; kL0 < kL0Loops; kL0++) {
                     WaitFlag<HardEvent::M_MTE1>(Mte1MmABEventId(abL0BufIter % 2));
                     LocalTensor<KV_T> aL0Tensor = aL0TensorPingPong[(abL0BufIter % 2) * (L0A_PP_SIZE / sizeof(KV_T))];
@@ -799,7 +796,7 @@ __aicore__ inline void FusedSparseAttentionOverlapMatmulService<FusedSparseAtten
                     SetFlag<HardEvent::MTE1_M>(Mte1MmABEventId(abL0BufIter % 2));
                     WaitFlag<HardEvent::MTE1_M>(Mte1MmABEventId(abL0BufIter % 2));
 
-                    // M == 1 requires special handling.
+                    // m == 1的时候需要特殊处�?
                     MmadParams mmadParams;
                     mmadParams.m = mL1SizeAlign;
                     mmadParams.n = nL1SizeAlign;
@@ -807,7 +804,7 @@ __aicore__ inline void FusedSparseAttentionOverlapMatmulService<FusedSparseAtten
                     mmadParams.cmatrixInitVal = (kL1 == 0 && kL0 == 0);
                     mmadParams.cmatrixSource = false;
                     mmadParams.unitFlag =
-                        (kL1 == 1 && kL0 == (kL0Loops - 1)) ? 0b11 : 0b10; // Flip the flag on the final accumulation to indicate the result can be copied out
+                        (kL1 == 1 && kL0 == (kL0Loops - 1)) ? 0b11 : 0b10; // 累加最后一次翻转flag, 表示可以搬出
                     Mmad(cL0Tensor, aL0Tensor, bL0Tensor, mmadParams);
 
                     if ((mmadParams.m / 16) * (mmadParams.n / 16) < 10) {
@@ -818,20 +815,20 @@ __aicore__ inline void FusedSparseAttentionOverlapMatmulService<FusedSparseAtten
                 }
 
                 if (nL1 == (nL1Loops - 1)) {
-                    SetFlag<HardEvent::MTE1_MTE2>(mte21QPIds[ka]); // Reverse synchronization: A in L1 has been consumed by MTE1
+                    SetFlag<HardEvent::MTE1_MTE2>(mte21QPIds[ka]); // 反向同步, 表示L1中的A已经被mte1消费�?
                 }
 
-                if (kL1 == 1) { // Final kL1 iteration
+                if (kL1 == 1) { // 最后一轮kL1循环
                     FixpipeParamsV220 fixParams;
                     fixParams.nSize = nL1SizeAlign;
                     fixParams.mSize = mL1SizeAlign;
                     fixParams.srcStride = mL1SizeAlign;
-                    // Change to nSizeAlign.
-                    fixParams.dstStride = info.actualSingleProcessSInnerSizeAlign; // Gap between two rows in mm1ResGm
+                    // 改成nSizeAlign
+                    fixParams.dstStride = info.actualSingleProcessSInnerSizeAlign; // mm1ResGm两行之间的间�?
                     fixParams.unitFlag = 0b11;
-                    fixParams.ndNum = 1; // Output in ND format
+                    fixParams.ndNum = 1; // 输出ND
 
-                    // Check whether the output offset (info.loop % constInfo.preLoadNum) * mmResUbSize is calculated in matmul.
+                    // 输出偏移info.loop % (constInfo.preLoadNum)) * mmResUbSize是否在matmul里计�?
                     Fixpipe(mm1ResGm[(info.loop % (constInfo.preLoadNum)) * constInfo.mmResUbSize + nL1 * N_SPLIT_SIZE +
                                      (mSplitInfo.nBufferStartM + mL1 * M_SPLIT_SIZE) *
                                          info.actualSingleProcessSInnerSizeAlign],
@@ -841,7 +838,7 @@ __aicore__ inline void FusedSparseAttentionOverlapMatmulService<FusedSparseAtten
                     cL0BufIter++;
                 }
             }
-            SetFlag<HardEvent::MTE1_MTE2>(mte21KVIds[kb]); // Reverse synchronization: L1 has been consumed by MTE1
+            SetFlag<HardEvent::MTE1_MTE2>(mte21KVIds[kb]); // 反向同步, 表示L1已经被mte1消费�?
         }
         if (mL1Loops == 1) {
             cL0BufIter++;
@@ -856,13 +853,13 @@ __aicore__ inline void FusedSparseAttentionOverlapMatmulService<FusedSparseAtten
     uint32_t mSize = mSplitInfo.nBufferDealM;
     uint32_t mSizeAlign = (mSize + 16 - 1) / 16;
     uint32_t mL1Loops = (mSize + M_SPLIT_SIZE - 1) / M_SPLIT_SIZE;
-    uint32_t mL1SizeAlign = M_SPLIT_SIZE; // 16-element alignment
-    uint32_t mL1Size = M_SPLIT_SIZE;      // Actual M size
+    uint32_t mL1SizeAlign = M_SPLIT_SIZE; // 16对齐
+    uint32_t mL1Size = M_SPLIT_SIZE;      // m的实际大�?
 
     uint32_t nSize = BlockAlign<KV_T>(constInfo.headDim);
     uint32_t nL1Loops = (nSize + N_SPLIT_SIZE - 1) / N_SPLIT_SIZE;
-    uint32_t nL1SizeAlign = N_SPLIT_SIZE; // 16-element alignment
-    uint32_t nL1Size = N_SPLIT_SIZE;      // Actual N size
+    uint32_t nL1SizeAlign = N_SPLIT_SIZE; // 16对齐
+    uint32_t nL1Size = N_SPLIT_SIZE;      // n的实际大�?
 
     uint32_t kSize = info.actualSingleProcessSInnerSize;
     uint32_t kL1Size = 256;
@@ -874,17 +871,17 @@ __aicore__ inline void FusedSparseAttentionOverlapMatmulService<FusedSparseAtten
     LocalTensor<KV_T> bL1Tensor;
     LocalTensor<KV_T> subvTensor;
 
-    // ka selects one of four buffers for the left matrix; kb selects one of three buffers for the right matrix.
+    // ka表示左矩�?buf选择哪一块buf, kb表示右矩�?buf选择哪一块buf
     uint32_t ka = 0, kb = 0;
     uint32_t mBaseIdx = qpL1BufIter;
-    for (uint32_t nL1 = 0; nL1 < nL1Loops; nL1++) { // Partition N in L1
+    for (uint32_t nL1 = 0; nL1 < nL1Loops; nL1++) { // n切L1
         if (nL1 == (nL1Loops - 1)) {
-            // Tail block
+            // 尾块
             nL1Size = nSize - (nL1Loops - 1) * N_SPLIT_SIZE;
             nL1SizeAlign = FusedSparseAttentionOverlapAlign(nL1Size, 16U);
         }
 
-        // Implement K partitioning in L1 as a loop, consistent with MM1.
+        // k l1写成一个循�? 和mm1保持一�?
         kL1Size = 256;
         kL1SizeAlign = FusedSparseAttentionOverlapAlign(kL1Size, 16U);
 
@@ -893,9 +890,9 @@ __aicore__ inline void FusedSparseAttentionOverlapMatmulService<FusedSparseAtten
         uint32_t copyRowCnt = 0;
         int64_t idInTopK = topKGm.GetValue(info.topKBaseOffset + curTopKIdx);
 
-        for (uint32_t k1 = 0; k1 < kL1Loops; k1++) { // Partition K in L1, with an inner L0 loop
+        for (uint32_t k1 = 0; k1 < kL1Loops; k1++) { // k切L1, 这里套了一层l0来操�?
             if (k1 == (kL1Loops - 1)) {
-                // Tail block
+                // 尾块
                 kL1Size = kSize - (kL1Loops - 1) * 256;
                 kL1SizeAlign = FusedSparseAttentionOverlapAlign(kL1Size, 16U);
             }
@@ -905,13 +902,12 @@ __aicore__ inline void FusedSparseAttentionOverlapMatmulService<FusedSparseAtten
             bL1Tensor = l1KVTensor[kb * L1_BLOCK_OFFSET];
             uint32_t kOffset = k1 * kL0Loops;
             kL0Size = 128;
-            // Initialize kL0Size before calculating kL0Loops; the loop modifies kL0Size and would otherwise
-            // produce an incorrect kL0Loops value.
+            // 此处必须先初始化kL0Size, 再求kL0Loops, 否则由于循环会改变kL0Size大小, 导致kL0Loops错误
             kL0Loops = (kL1Size + kL0Size - 1) / kL0Size;
             kL0SizeAlign = kL0Size;
-            for (uint32_t kL1 = kOffset; kL1 < kL0Loops + kOffset; kL1++) { // Copy page-attention data in 128-row iterations
+            for (uint32_t kL1 = kOffset; kL1 < kL0Loops + kOffset; kL1++) { // 128 循环搬pa
                 if (kL1 == kOffset + kL0Loops - 1) {
-                    // Tail block
+                    // 尾块
                     kL0Size = kL1Size - (kL0Loops - 1) * kL0Size;
                     kL0SizeAlign = FusedSparseAttentionOverlapAlign(kL0Size, 16U);
                 }
@@ -921,7 +917,7 @@ __aicore__ inline void FusedSparseAttentionOverlapMatmulService<FusedSparseAtten
                 if constexpr (TEMPLATE_MODE == V_TEMPLATE) {
                     Nd2NzParams nd2nzPara;
                     nd2nzPara.ndNum = 1;
-                    nd2nzPara.nValue = kL0Size;      // Number of rows
+                    nd2nzPara.nValue = kL0Size;      // 行数
                     nd2nzPara.dValue = N_SPLIT_SIZE; // constInfo.headDim;
                     nd2nzPara.srcDValue = constInfo.headDim;
                     nd2nzPara.dstNzC0Stride = kL0SizeAlign;
@@ -946,7 +942,7 @@ __aicore__ inline void FusedSparseAttentionOverlapMatmulService<FusedSparseAtten
                             startPos.n2Idx = info.n2Idx;
                             startPos.s2Idx = idInTopK * constInfo.sparseBlockSize + curOffsetInSparseBlock;
                             startPos.dIdx =
-                                nL1 * N_SPLIT_SIZE;  // MM1 right matrix is BN2S2D: D is K and is not split; MM2 right matrix uses S2 as K and splits D
+                                nL1 * N_SPLIT_SIZE;  // mm1 右矩�?bn2s2d, d为k轴不�? mm2 右矩�? s2为k�? d轴切�?
                             PAShape shape;
                             shape.blockSize = kvCacheBlockSize;
                             shape.headNum = constInfo.kvHeadNum;
@@ -971,7 +967,7 @@ __aicore__ inline void FusedSparseAttentionOverlapMatmulService<FusedSparseAtten
                             CopyInMm2BToL1(subvTensor, valueOffset, kL0SizeAlign, copyFinishRowCnt, copyRowCnt,
                                            nL1 * N_SPLIT_SIZE, nL1Size);
                         }
-                        // Update loop variables.
+                        // 更新循环变量
                         copyFinishRowCnt += copyRowCnt;
                         curSeqIdx += copyRowCnt;
                     }
@@ -980,10 +976,10 @@ __aicore__ inline void FusedSparseAttentionOverlapMatmulService<FusedSparseAtten
             SetFlag<HardEvent::MTE2_MTE1>(mte21KVIds[kb]);
             WaitFlag<HardEvent::MTE2_MTE1>(mte21KVIds[kb]);
             mL1SizeAlign = M_SPLIT_SIZE;
-            mL1Size = M_SPLIT_SIZE;      // Actual M size
+            mL1Size = M_SPLIT_SIZE;      // m的实际大�?
             for (uint32_t mL1 = 0; mL1 < mL1Loops; mL1++) {
                 if (mL1 == (mL1Loops - 1)) {
-                    // Tail block
+                    // 尾块
                     mL1Size = mSize - (mL1Loops - 1) * M_SPLIT_SIZE;
                     mL1SizeAlign = FusedSparseAttentionOverlapAlign(mL1Size, 16U);
                 }
@@ -1001,7 +997,7 @@ __aicore__ inline void FusedSparseAttentionOverlapMatmulService<FusedSparseAtten
 
                 LocalTensor cL0Tensor =
                     cL0TensorPingPong[(cL0BufIter % 2) *
-                                      (L0C_PP_SIZE / sizeof(MM_OUT_T))]; // Keep cL0BufIter synchronized with the M step
+                                      (L0C_PP_SIZE / sizeof(MM_OUT_T))]; // 需要保证cL0BufIter和m步调一�?
                 uint32_t baseK = 128;
                 uint32_t baseN = 128;
                 kL0Size = 128;
@@ -1014,54 +1010,54 @@ __aicore__ inline void FusedSparseAttentionOverlapMatmulService<FusedSparseAtten
                     WaitFlag<HardEvent::M_MTE1>(Mte1MmABEventId(abL0BufIter % 2));
                     LocalTensor<KV_T> bL0Tensor = bL0TensorPingPong[(abL0BufIter % 2) * (L0B_PP_SIZE / sizeof(KV_T))];
                     LoadData3DParamsV2<KV_T> loadData3DParamsForB;
-                    loadData3DParamsForB.l1H = kL0SizeAlign / 16;    // Source operand height
-                    loadData3DParamsForB.l1W = 16;                   // Source operand width is 16; destination height is l1H * l1W
+                    loadData3DParamsForB.l1H = kL0SizeAlign / 16;    // 源操作数height
+                    loadData3DParamsForB.l1W = 16;                   // 源操作数weight=16，目的height=l1H*L1W
                     loadData3DParamsForB.padList[0] = 0;
                     loadData3DParamsForB.padList[1] = 0;
                     loadData3DParamsForB.padList[2] = 0;
-                    loadData3DParamsForB.padList[3] = 255;           // Tail data does not affect the sliding-window result
+                    loadData3DParamsForB.padList[3] = 255;           // 尾部数据不影响滑窗的结果
 
-                    loadData3DParamsForB.mExtension = kL0SizeAlign;  // Transfer length along the destination height dimension
-                    loadData3DParamsForB.kExtension = nL1SizeAlign;  // Transfer length along the destination width dimension
-                    loadData3DParamsForB.mStartPt = 0;               // Kernel start point along the destination width dimension
-                    loadData3DParamsForB.kStartPt = 0;               // Kernel start point along the destination height dimension
+                    loadData3DParamsForB.mExtension = kL0SizeAlign;  // 在目的操作数height维度的传输长�?
+                    loadData3DParamsForB.kExtension = nL1SizeAlign;  // 在目的操作数width维度的传输长�?
+                    loadData3DParamsForB.mStartPt = 0;               // 卷积核在目的操作数width维度的起�?
+                    loadData3DParamsForB.kStartPt = 0;               // 卷积核在目的操作数height维度的起�?
                     loadData3DParamsForB.strideW = 1;
                     loadData3DParamsForB.strideH = 1;
                     loadData3DParamsForB.filterW = 1;
-                    loadData3DParamsForB.filterSizeW = false;        // Whether to add 256 elements to the kernel width based on filterW
+                    loadData3DParamsForB.filterSizeW = false;        // 是否在filterW的基础上将卷积核width增加256个元�?
                     loadData3DParamsForB.filterH = 1;
-                    loadData3DParamsForB.filterSizeH = false;        // Whether to add 256 elements to the kernel height based on filterH
-                    loadData3DParamsForB.dilationFilterW = 1;        // Kernel width dilation factor
-                    loadData3DParamsForB.dilationFilterH = 1;        // Kernel height dilation factor
-                    loadData3DParamsForB.enTranspose = 1;            // Whether transpose is enabled
-                    loadData3DParamsForB.fMatrixCtrl = 0;            // Select FMATRIX_LEFT when 0 and FMATRIX_RIGHT when 1
-                    loadData3DParamsForB.channelSize = nL1SizeAlign; // Source operand channel count; with dilation 1, destination width is filterW * filterH * channelSize
+                    loadData3DParamsForB.filterSizeH = false;        // 是否在filterH的基础上将卷积核height增加256个元�?
+                    loadData3DParamsForB.dilationFilterW = 1;        // 卷积核width膨胀系数
+                    loadData3DParamsForB.dilationFilterH = 1;        // 卷积核height膨胀系数
+                    loadData3DParamsForB.enTranspose = 1;            // 是否启用转置功能
+                    loadData3DParamsForB.fMatrixCtrl = 0;            // 使用FMATRIX_LEFT还是使用FMATRIX_RIGHT�?0使用FMATRIX_LEFT�?1使用FMATRIX_RIGHT 1
+                    loadData3DParamsForB.channelSize = nL1SizeAlign; // 源操作数的通道数。膨胀系数�?时，目的weight为filterW*filterH*channelSize
                     LoadData<KV_T, LOAD3DV2_CONFIG>(bL0Tensor, bL1Tensor[kL0 * baseK * baseN], loadData3DParamsForB);
 
                     LocalTensor<KV_T> aL0Tensor = aL0TensorPingPong[(abL0BufIter % 2) * (L0A_PP_SIZE / sizeof(KV_T))];
                     LoadData3DParamsV2<KV_T> loadData3DParamsForA;
-                    loadData3DParamsForA.l1H = mL1SizeAlign / 16;    // Source operand height
-                    loadData3DParamsForA.l1W = 16;                   // Source operand width
+                    loadData3DParamsForA.l1H = mL1SizeAlign / 16;    // 源操作数height
+                    loadData3DParamsForA.l1W = 16;                   // 源操作数weight
                     loadData3DParamsForA.padList[0] = 0;
                     loadData3DParamsForA.padList[1] = 0;
                     loadData3DParamsForA.padList[2] = 0;
-                    loadData3DParamsForA.padList[3] = 255;           // Tail data does not affect the sliding-window result
+                    loadData3DParamsForA.padList[3] = 255;           // 尾部数据不影响滑窗的结果
 
-                    loadData3DParamsForA.mExtension = mL1SizeAlign;  // Transfer length along the destination height dimension
-                    loadData3DParamsForA.kExtension = kL0SizeAlign;  // Transfer length along the destination width dimension
-                    loadData3DParamsForA.mStartPt = 0;               // Kernel start point along the destination width dimension
-                    loadData3DParamsForA.kStartPt = 0;               // Kernel start point along the destination height dimension
-                    loadData3DParamsForA.strideW = 1;                // Kernel step along the source operand width dimension
-                    loadData3DParamsForA.strideH = 1;                // Kernel step along the source operand height dimension
-                    loadData3DParamsForA.filterW = 1;                // Kernel width
-                    loadData3DParamsForA.filterSizeW = false;        // Whether to add 256 elements to the kernel width based on filterW
-                    loadData3DParamsForA.filterH = 1;                // Kernel height
-                    loadData3DParamsForA.filterSizeH = false;        // Whether to add 256 elements to the kernel height based on filterH
-                    loadData3DParamsForA.dilationFilterW = 1;        // Kernel width dilation factor
-                    loadData3DParamsForA.dilationFilterH = 1;        // Kernel height dilation factor
-                    loadData3DParamsForA.enTranspose = 0;            // Whether to transpose the entire destination matrix
+                    loadData3DParamsForA.mExtension = mL1SizeAlign;  // 在目的操作数height维度的传输长�?
+                    loadData3DParamsForA.kExtension = kL0SizeAlign;  // 在目的操作数width维度的传输长�?
+                    loadData3DParamsForA.mStartPt = 0;               // 卷积核在目的操作数width维度的起�?
+                    loadData3DParamsForA.kStartPt = 0;               // 卷积核在目的操作数height维度的起�?
+                    loadData3DParamsForA.strideW = 1;                // 卷积核在源操作数width维度滑动的步�?
+                    loadData3DParamsForA.strideH = 1;                // 卷积核在源操作数height维度滑动的步�?
+                    loadData3DParamsForA.filterW = 1;                // 卷积核width
+                    loadData3DParamsForA.filterSizeW = false;        // 是否在filterW的基础上将卷积核width增加256个元�?
+                    loadData3DParamsForA.filterH = 1;                // 卷积核height
+                    loadData3DParamsForA.filterSizeH = false;        // 是否在filterH的基础上将卷积核height增加256个元�?
+                    loadData3DParamsForA.dilationFilterW = 1;        // 卷积核width膨胀系数
+                    loadData3DParamsForA.dilationFilterH = 1;        // 卷积核height膨胀系数
+                    loadData3DParamsForA.enTranspose = 0;            // 是否启用转置功能，对整个目标矩阵进行转置
                     loadData3DParamsForA.fMatrixCtrl = 0;
-                    loadData3DParamsForA.channelSize = kL0SizeAlign; // Source operand channel count; with dilation 1, destination width is filterW * filterH * channelSize
+                    loadData3DParamsForA.channelSize = kL0SizeAlign; // 源操作数的通道数。膨胀系数�?时，目的weight为filterW*filterH*channelSize
                     LoadData<KV_T, LOAD3DV2_CONFIG>(aL0Tensor, aL1Tensor[kL0 * baseK * mL1SizeAlign],
                                                     loadData3DParamsForA);
                     SetFlag<HardEvent::MTE1_M>(Mte1MmABEventId(abL0BufIter % 2));
@@ -1083,12 +1079,12 @@ __aicore__ inline void FusedSparseAttentionOverlapMatmulService<FusedSparseAtten
                     abL0BufIter++;
                 }
 
-                if (nL1 == (nL1Loops - 1)) {    // Final nL1 iteration; keep B resident in L1 for the next computation
-                    SetFlag<HardEvent::MTE1_MTE2>(mte21QPIds[ka]); // Reverse synchronization: A in L1 has been consumed by MTE1
+                if (nL1 == (nL1Loops - 1)) {    // nL1最后一�? 需要将B驻留在L1�? 用于下一轮的计算�?
+                    SetFlag<HardEvent::MTE1_MTE2>(mte21QPIds[ka]); // 反向同步, 表示L1中的A已经被mte1消费�?
                 }
 
                 if (k1 == (kL1Loops - 1)) {
-                    if (nL1 == 0 && mL1 == 0) { // Wait before the first Fixpipe
+                    if (nL1 == 0 && mL1 == 0) { // 第一次Fixpipe前等�?
                         CrossCoreWaitFlag(constInfo.syncV1NupdateC2);
                     }
 
@@ -1100,8 +1096,8 @@ __aicore__ inline void FusedSparseAttentionOverlapMatmulService<FusedSparseAtten
                     fixParams.nSize = nL1SizeAlign;
                     fixParams.mSize = mL1SizeAlign;
                     fixParams.srcStride = mL1SizeAlign;
-                    fixParams.dstStride = nSize; // Gap between two rows in mm2ResGm
-                    fixParams.ndNum = 1;         // Output in ND format
+                    fixParams.dstStride = nSize; // mm2ResGm两行之间的间�?
+                    fixParams.ndNum = 1;         // 输出ND
                     fixParams.unitFlag = 0b11;
 
                     uint64_t mm2Offset = (mSplitInfo.nBufferStartM + mL1 * M_SPLIT_SIZE) * nSize + nL1 * N_SPLIT_SIZE;
@@ -1116,9 +1112,9 @@ __aicore__ inline void FusedSparseAttentionOverlapMatmulService<FusedSparseAtten
                     cL0BufIter++;
                 }
             }
-            SetFlag<HardEvent::MTE1_MTE2>(mte21KVIds[kb]); // Reverse synchronization: L1 has been consumed by MTE1
+            SetFlag<HardEvent::MTE1_MTE2>(mte21KVIds[kb]); // 反向同步, 表示L1已经被mte1消费�?
         }
-        // cL0BufIter is no longer in use.
+        // cL0BufIter已经不在使用
         if (mL1Loops == 1) {
             cL0BufIter++;
         }
