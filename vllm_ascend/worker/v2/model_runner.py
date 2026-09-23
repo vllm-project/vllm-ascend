@@ -18,7 +18,6 @@
 #
 
 from contextlib import AbstractContextManager, contextmanager, nullcontext
-from contextvars import ContextVar
 
 import numpy as np
 import torch
@@ -33,7 +32,6 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
-from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.eplb_utils import step_eplb_after
 from vllm.v1.worker.gpu.input_batch import (
     combine_sampled_and_draft_tokens,
@@ -126,6 +124,10 @@ class NPUModelRunner(GPUModelRunner):
         # These draft heads consume target aux states collected across PP ranks.
         if spec_pp_support is not None and spec_pp_support.needs_aux_hidden_states:
             self.use_aux_hidden_state_outputs = True
+
+        # Only a real split (size > 1) exchanges across ranks, and graph dispatch keeps it aligned.
+        ftpc = self.ascend_config.finegrained_tp_config
+        self._oproj_tp_requires_graph = ftpc.oproj_tensor_parallel_size > 1 and self.dp_size > 1
 
         self.use_aclgraph = (
             self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
@@ -321,16 +323,15 @@ class NPUModelRunner(GPUModelRunner):
             get_kv_transfer_group().handle_preemptions(kv_connector_metadata)
 
         self.model_state.kvpp_is_dummy_run = dummy_run or is_profile
-        with pcp_dispatch_context():
-            output = super().execute_model(
-                scheduler_output,
-                intermediate_tensors=intermediate_tensors,
-                dummy_run=dummy_run,
-                skip_attn_for_dummy_run=skip_attn_for_dummy_run,
-                is_profile=is_profile,
-                context_len=context_len,
-                **({} if vllm_version_is("0.29.0") else {"valid_dummy_state_slots": valid_dummy_state_slots}),
-            )
+        output = super().execute_model(
+            scheduler_output,
+            intermediate_tensors=intermediate_tensors,
+            dummy_run=dummy_run,
+            skip_attn_for_dummy_run=skip_attn_for_dummy_run,
+            is_profile=is_profile,
+            context_len=context_len,
+            **({} if vllm_version_is("0.29.0") else {"valid_dummy_state_slots": valid_dummy_state_slots}),
+        )
         self.model_state.kvpp_is_dummy_run = False
         self.kvpp.complete_forward()
 
@@ -381,13 +382,17 @@ class NPUModelRunner(GPUModelRunner):
                     int(batch_state.num_scheduled_tokens.max()),
                     batch_state.has_prefill,
                 )
-        num_tokens = None
-        if vllm_version_is("0.28.0") and self.pcp_manager is not None and batch_state is not None:
-            num_tokens = self.pcp_manager.get_num_tokens_for_dispatch(
-                batch_state.num_scheduled_tokens, batch_state.is_prefilling_np
-            )
-        _PCP_DISPATCH_NUM_TOKENS.set(num_tokens)
         return batch_state, uniform_token_count
+
+    def _check_oproj_tp_graph_step(self, cg_mode: CUDAGraphMode) -> None:
+        # Eager dispatch keeps per-rank token counts; the cross-DP o_proj exchange would desync.
+        if self._oproj_tp_requires_graph and cg_mode == CUDAGraphMode.NONE:
+            raise RuntimeError(
+                "o_proj TP requires every step on a captured graph: this step dispatched "
+                "to eager, which desyncs the cross-DP HCCL collectives (mixed or oversized "
+                "batch, a request-arrival step misclassified as prefill, or a full prefill "
+                "scheduled locally — a request sent directly to the decode node)."
+            )
 
     def prepare_inputs(  # type: ignore[misc]
         self,
@@ -399,6 +404,7 @@ class NPUModelRunner(GPUModelRunner):
         npu attention backends need seq_lens_cpu to work.
         so we need to prepare seq_lens_cpu here.
         """
+        self._check_oproj_tp_graph_step(batch_desc.cg_mode)
         num_tokens = batch_req_state.num_tokens
         num_tokens_after_padding = max(num_tokens, batch_desc.num_tokens)
         assert num_tokens > 0
@@ -935,28 +941,3 @@ def graph_manager_wrapper(model_runner):
         yield
     finally:
         vllm_model_runner.ModelCudaGraphManager = original_graph_manager
-
-
-# v0.28 calls a module-level dispatch function, with no runner hook. Carry
-# only the PCP execution count across that boundary; keep request state intact.
-_PCP_DISPATCH_NUM_TOKENS: ContextVar[int | None] = ContextVar("ascend_pcp_dispatch_num_tokens", default=None)
-
-
-@contextmanager
-def pcp_dispatch_context():
-    token = _PCP_DISPATCH_NUM_TOKENS.set(None)
-    try:
-        yield
-    finally:
-        _PCP_DISPATCH_NUM_TOKENS.reset(token)
-
-
-def _dispatch_pcp_and_sync_dp(cudagraph_manager, num_reqs, num_tokens, *args, **kwargs):
-    pcp_num_tokens = _PCP_DISPATCH_NUM_TOKENS.get()
-    if pcp_num_tokens is not None:
-        num_tokens = pcp_num_tokens
-    return dispatch_cg_and_sync_dp(cudagraph_manager, num_reqs, num_tokens, *args, **kwargs)
-
-
-if vllm_version_is("0.28.0"):
-    vllm_model_runner.dispatch_cg_and_sync_dp = _dispatch_pcp_and_sync_dp

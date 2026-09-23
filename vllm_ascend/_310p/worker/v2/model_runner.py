@@ -202,9 +202,6 @@ class NPUModelRunner310V2(NPUModelRunner):
             raise NotImplementedError("KV cache transfer is not supported by model runner v2 on 310P.")
         # Prefix caching is supported: 310P MRv2 reuses CPU Ascend310PBlockTables /
         # PrefillCacheHit→splitfuse (attention_v1) and hybrid Mamba page sizing below.
-        # TODO: Support LoRA in the next 310P MRV2 iteration.
-        if vllm_config.lora_config is not None:
-            raise NotImplementedError("LoRA is not supported by model runner v2 on 310P.")
 
     def _prepare_inputs_310p(
         self,
