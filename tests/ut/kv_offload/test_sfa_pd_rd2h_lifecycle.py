@@ -156,8 +156,8 @@ def test_consumer_destinations_still_follow_ordered_load_hook(has_sync_loads, mu
     worker.request_map = {}
     worker._dest_blocks_by_req = {}
     worker._cpu_blocks_by_req = {}
-    worker.nano_slots_by_req = {}
-    worker._nano_tail_by_req = {}
+    worker.copy_sfa_slots_by_req = {}
+    worker._copy_sfa_tail_by_req = {}
     child = _connector(worker, producer=False)
     connector = _runner_connector(child, multi)
     metadata = SfaPDConsumerMetadata()
@@ -171,11 +171,11 @@ def test_consumer_destinations_still_follow_ordered_load_hook(has_sync_loads, mu
     ):
         with runner_mixin.KVConnectorModelRunnerMixin._get_kv_connector_output(output):
             assert start_load.call_count == int(has_sync_loads)
-            assert child.get_nano_slot_bindings() == ({req_id: 3} if has_sync_loads else {})
+            assert child.get_copy_sfa_slot_bindings() == ({req_id: 3} if has_sync_loads else {})
         start_load.assert_called_once_with(metadata)
     external_id = get_external_request_id(req_id)
     assert worker._dest_blocks_by_req[external_id] == ([1], [2])
-    assert worker._nano_tail_by_req[external_id].tail_tokens == 7
+    assert worker._copy_sfa_tail_by_req[external_id].tail_tokens == 7
     assert not child.has_connector_metadata()
 
 

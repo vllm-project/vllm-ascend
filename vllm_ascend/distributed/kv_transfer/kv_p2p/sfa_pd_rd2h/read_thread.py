@@ -24,7 +24,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (
     READ_FAILED,
     READ_READY_BATCH,
     SFAPD_PROTOCOL_VERSION,
-    NanoTailDest,
+    CopySfaTailDest,
 )
 
 READ_THREAD_POLL_TIMEOUT_MS = 100
@@ -46,7 +46,7 @@ class ConsumerReadState:
     indexer_scale_tensors: list[Any | None]
     dest_blocks_by_req: dict[str, tuple[list[int], list[int]]]
     get_offload_layer_id: Callable[[str], int]
-    nano_tail_by_req: dict[str, NanoTailDest] = field(default_factory=dict)
+    copy_sfa_tail_by_req: dict[str, CopySfaTailDest] = field(default_factory=dict)
     topk_k_bases: list[int] = field(default_factory=list)
     topk_v_bases: list[int] = field(default_factory=list)
     topk_row_tokens: int = 0
@@ -495,7 +495,7 @@ class MembPullReadThread(threading.Thread):
 
         raise RuntimeError(f"MembPull has no destination blocks on D for req {ext_req_id} (layer {layer_name})")
 
-    def _append_nano_tail_descriptors(
+    def _append_copy_sfa_tail_descriptors(
         self,
         layer: dict[str, Any],
         ext_req_id: str,
@@ -507,7 +507,7 @@ class MembPullReadThread(threading.Thread):
     ) -> None:
         """D2D the last incomplete main block into this rank's circular tail."""
         state = self._state
-        tail = state.nano_tail_by_req.get(ext_req_id)
+        tail = state.copy_sfa_tail_by_req.get(ext_req_id)
         if tail is None or tail.tail_tokens <= 0:
             return
         if not state.topk_k_bases or not state.topk_v_bases:
@@ -519,12 +519,12 @@ class MembPullReadThread(threading.Thread):
             return
         offload_id = layer["offload_id"]
         if offload_id >= len(state.topk_k_bases) or offload_id >= len(state.topk_v_bases):
-            raise RuntimeError(f"MembPull nano tail is missing topk buffer bases for {layer['layer_name']}")
+            raise RuntimeError(f"MembPull fused_copy_sfa tail is missing topk buffer bases for {layer['layer_name']}")
         p_k_len = int(layer["p_k_len"])
         p_v_len = int(layer["p_v_len"])
         if p_k_len % state.block_size or p_v_len % state.block_size:
             raise RuntimeError(
-                f"MembPull nano tail requires block-aligned main KV bytes: "
+                f"MembPull fused_copy_sfa tail requires block-aligned main KV bytes: "
                 f"k={p_k_len}, v={p_v_len}, block_size={state.block_size}"
             )
         token_bytes_k = p_k_len // state.block_size
@@ -554,7 +554,7 @@ class MembPullReadThread(threading.Thread):
         local_chunks.append(local)
         length_chunks.append(length)
 
-    def _append_nano_dense_descriptors(
+    def _append_copy_sfa_dense_descriptors(
         self,
         layer: dict[str, Any],
         ext_req_id: str,
@@ -566,7 +566,7 @@ class MembPullReadThread(threading.Thread):
     ) -> None:
         """D2D a whole short prompt densely into this rank's topk row (slot p = p)."""
         state = self._state
-        dest = state.nano_tail_by_req.get(ext_req_id)
+        dest = state.copy_sfa_tail_by_req.get(ext_req_id)
         if dest is None or not dest.dense or dest.kv_tokens <= 0:
             return
         if not state.topk_k_bases or not state.topk_v_bases:
@@ -575,17 +575,17 @@ class MembPullReadThread(threading.Thread):
             return
         if dest.kv_tokens > state.topk_row_tokens - 2 * state.block_size:
             raise RuntimeError(
-                f"MembPull nano dense prompt exceeds the row hot region: "
+                f"MembPull fused_copy_sfa dense prompt exceeds the row hot region: "
                 f"kv_tokens={dest.kv_tokens}, hot={state.topk_row_tokens - 2 * state.block_size}"
             )
         offload_id = layer["offload_id"]
         if offload_id >= len(state.topk_k_bases) or offload_id >= len(state.topk_v_bases):
-            raise RuntimeError(f"MembPull nano dense is missing topk buffer bases for {layer['layer_name']}")
+            raise RuntimeError(f"MembPull fused_copy_sfa dense is missing topk buffer bases for {layer['layer_name']}")
         p_k_len = int(layer["p_k_len"])
         p_v_len = int(layer["p_v_len"])
         if p_k_len % state.block_size or p_v_len % state.block_size:
             raise RuntimeError(
-                f"MembPull nano dense requires block-aligned main KV bytes: "
+                f"MembPull fused_copy_sfa dense requires block-aligned main KV bytes: "
                 f"k={p_k_len}, v={p_v_len}, block_size={state.block_size}"
             )
         token_bytes_k = p_k_len // state.block_size
@@ -790,7 +790,7 @@ class MembPullReadThread(threading.Thread):
                 local_chunks.append(cl)
                 length_chunks.append(coalesced_lengths)
 
-        self._append_nano_tail_descriptors(
+        self._append_copy_sfa_tail_descriptors(
             layer,
             ext_req_id,
             p_main_block_ids_for_tail,
@@ -799,7 +799,7 @@ class MembPullReadThread(threading.Thread):
             local_chunks,
             length_chunks,
         )
-        self._append_nano_dense_descriptors(
+        self._append_copy_sfa_dense_descriptors(
             layer,
             ext_req_id,
             p_main_block_ids_for_tail,

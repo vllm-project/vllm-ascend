@@ -1555,15 +1555,15 @@ class SparseKVOffloadConfig:
     fused_op_type: str = "none"
 
     @property
-    def use_nano(self) -> bool:
-        return self.fused_op_type == "nano"
+    def use_fused_copy_sfa(self) -> bool:
+        return self.fused_op_type == "fused_copy_sfa"
 
     @model_validator(mode="after")
     def _validate_values(self):
-        if self.fused_op_type not in ("none", "nano"):
-            raise ValueError("sparse_kv_offload_config.fused_op_type must be none or nano")
-        if self.use_nano and self.use_fused_overlap:
-            raise ValueError("nano and use_fused_overlap are mutually exclusive")
+        if self.fused_op_type not in ("none", "fused_copy_sfa"):
+            raise ValueError("sparse_kv_offload_config.fused_op_type must be none or fused_copy_sfa")
+        if self.use_fused_copy_sfa and self.use_fused_overlap:
+            raise ValueError("fused_copy_sfa and use_fused_overlap are mutually exclusive")
         if self.topk_buffer_size <= 0:
             raise ValueError("sparse_kv_offload_config.topk_buffer_size must be positive")
         if self.dram_size_per_dp_GB <= 0:
@@ -1611,13 +1611,13 @@ class SparseKVOffloadConfig:
             raise ValueError("Sparse KV offload doesn't support model_runner_v2 now.")
 
         self.topk = vllm_config.model_config.hf_text_config.index_topk
-        if self.use_nano:
+        if self.use_fused_copy_sfa:
             width = 1 + (vllm_config.speculative_config.num_speculative_tokens if vllm_config.speculative_config else 0)
             if self.topk != 2048 or not 1 <= width <= 7:
-                raise ValueError("nano serving requires TopK=2048 and 1–7 query rows per request")
+                raise ValueError("fused_copy_sfa serving requires TopK=2048 and 1–7 query rows per request")
             if not width * self.topk <= self.topk_buffer_size <= 16256 or self.topk_buffer_size % 256:
                 raise ValueError(
-                    "nano hot budget must be 256-aligned in [Q_max*2048, 16128]: "
+                    "fused_copy_sfa hot budget must be 256-aligned in [Q_max*2048, 16128]: "
                     "the dense short-sequence layout only lines up with the circular "
                     "tail slots when topk_buffer_size is a multiple of 256"
                 )

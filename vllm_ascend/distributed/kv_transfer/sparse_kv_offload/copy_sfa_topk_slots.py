@@ -1,17 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Request-owned nano top-k row slots shared by the PD connector and runner."""
+"""Request-owned fused_copy_sfa top-k row slots shared by the PD connector and runner."""
 
 from __future__ import annotations
 
-NANO_POOL_PADDING_ROWS = 2
+COPY_SFA_POOL_PADDING_ROWS = 2
 
 
-def nano_pool_capacity(max_num_seqs: int) -> int:
-    """Match the runner-owned nano row arena: one row per request plus padding."""
-    return max_num_seqs + NANO_POOL_PADDING_ROWS
+def copy_sfa_pool_capacity(max_num_seqs: int) -> int:
+    """Match the runner-owned fused_copy_sfa row arena: one row per request plus padding."""
+    return max_num_seqs + COPY_SFA_POOL_PADDING_ROWS
 
 
-def nano_tail_geometry(kv_tokens: int, block_size: int) -> tuple[int, int]:
+def copy_sfa_tail_geometry(kv_tokens: int, block_size: int) -> tuple[int, int]:
     """Return ``(tail_tokens, tail_block_index)`` for a finished prefill prefix.
 
     The circular tail only stores the incomplete last block. A 128-aligned
@@ -25,7 +25,7 @@ def nano_tail_geometry(kv_tokens: int, block_size: int) -> tuple[int, int]:
     return tail_tokens, kv_tokens // block_size
 
 
-def nano_prefill_dest_geometry(
+def copy_sfa_prefill_dest_geometry(
     kv_tokens: int,
     block_size: int,
     hot_tokens: int,
@@ -42,16 +42,16 @@ def nano_prefill_dest_geometry(
     """
     if kv_tokens <= hot_tokens:
         return True, 0, 0
-    tail_tokens, tail_block_index = nano_tail_geometry(kv_tokens, block_size)
+    tail_tokens, tail_block_index = copy_sfa_tail_geometry(kv_tokens, block_size)
     return False, tail_tokens, tail_block_index
 
 
-class NanoTopkSlotAllocator:
+class CopySfaTopkSlotAllocator:
     """Bind a stable top-k row to a request from PD alloc until it finishes."""
 
     def __init__(self, capacity: int) -> None:
         if capacity <= 0:
-            raise ValueError(f"nano topk slot capacity must be positive, got {capacity}")
+            raise ValueError(f"fused_copy_sfa topk slot capacity must be positive, got {capacity}")
         self.capacity = capacity
         self._free: list[int] = list(range(capacity))
         self._req_to_slot: dict[str, int] = {}
@@ -61,7 +61,7 @@ class NanoTopkSlotAllocator:
         if slot is not None:
             return slot
         if not self._free:
-            raise RuntimeError(f"nano topk slot pool exhausted (capacity={self.capacity})")
+            raise RuntimeError(f"fused_copy_sfa topk slot pool exhausted (capacity={self.capacity})")
         slot = self._free.pop(0)
         self._req_to_slot[req_id] = slot
         return slot

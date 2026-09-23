@@ -69,7 +69,7 @@ def test_boundary_token_classification_depends_on_pd_decode_role(
     expected_prefills,
 ):
     builder = AscendSFAKVOffloadMetadataBuilder.__new__(AscendSFAKVOffloadMetadataBuilder)
-    builder.use_nano = False
+    builder.use_fused_copy_sfa = False
     builder.decode_threshold = 1
     builder.is_pd_decode_consumer = is_pd_decode_consumer
     metadata = SimpleNamespace(attn_state=AscendAttentionState.DecodeOnly)
@@ -90,7 +90,7 @@ def test_boundary_token_classification_depends_on_pd_decode_role(
 
 def test_pd_decode_consumer_still_rejects_long_prefill_classification():
     builder = AscendSFAKVOffloadMetadataBuilder.__new__(AscendSFAKVOffloadMetadataBuilder)
-    builder.use_nano = False
+    builder.use_fused_copy_sfa = False
     builder.decode_threshold = 1
     builder.is_pd_decode_consumer = True
     metadata = SimpleNamespace()

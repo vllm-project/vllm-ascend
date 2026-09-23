@@ -272,8 +272,8 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # CPU views of runner-owned CpuGpuBuffers; never exact sequence lengths.
     req_topk_buffer_slots: torch.Tensor | None = None
     req_topk_buffer_generations: torch.Tensor | None = None
-    nano_draft_index: int | None = None
-    nano_restore_tails: bool = False
+    copy_sfa_draft_index: int | None = None
+    copy_sfa_restore_tails: bool = False
     offload_dummy: bool = False
 
     # vLLM main (#55353) removed the deprecated
@@ -341,7 +341,7 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             group_key_cache_idx=self.group_key_cache_idx,
             req_topk_buffer_slots=_slice_reqs(self.req_topk_buffer_slots),
             req_topk_buffer_generations=_slice_reqs(self.req_topk_buffer_generations),
-            nano_draft_index=self.nano_draft_index,
+            copy_sfa_draft_index=self.copy_sfa_draft_index,
             offload_dummy=self.offload_dummy,
             req_ids_tensor=_slice_reqs(self.req_ids_tensor),
             token_to_req=(self.token_to_req[:num_actual_tokens] if self.token_to_req is not None else None),

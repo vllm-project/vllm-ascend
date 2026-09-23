@@ -228,12 +228,12 @@ class SfaRemoteD2HConnector(KVConnectorBase_V1, SupportsHMA):
         if self.is_consumer and self.connector_worker is not None:
             self.connector_worker.wait_for_save()
 
-    def get_nano_slot_bindings(self) -> dict[str, int]:
-        """Return the early-bound nano top-k rows for in-flight PD requests."""
+    def get_copy_sfa_slot_bindings(self) -> dict[str, int]:
+        """Return the early-bound fused_copy_sfa top-k rows for in-flight PD requests."""
         worker = self.connector_worker
         if worker is None:
             return {}
-        return dict(getattr(worker, "nano_slots_by_req", {}))
+        return dict(getattr(worker, "copy_sfa_slots_by_req", {}))
 
     # Phase 3: real per-req CPU-block count for the solution-1 threshold.
     def get_num_cpu_blocks(self, req_ids: list[str]) -> dict[str, int] | None:

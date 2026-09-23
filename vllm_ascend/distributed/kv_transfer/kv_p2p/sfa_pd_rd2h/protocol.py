@@ -147,7 +147,7 @@ class SfaPDConsumerReqMeta:
     req_id: str
     main_block_ids: list[int]
     indexer_block_ids: list[int]
-    # Early-bound nano top-k row. The pull thread writes the prefill tail into
+    # Early-bound fused_copy_sfa top-k row. The pull thread writes the prefill tail into
     # this row's circular slots so decode does not H2D the same tokens again,
     # or (dense) the whole prompt into the row's hot region so short requests
     # can decode in the -3 non-offload state without any first-fill H2D.
@@ -159,7 +159,7 @@ class SfaPDConsumerReqMeta:
 
 
 @dataclass
-class NanoTailDest:
+class CopySfaTailDest:
     """D-side circular-tail (or dense-row) destination for one PD request."""
 
     pool_slot: int

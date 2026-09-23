@@ -32,10 +32,10 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (
     get_external_request_id,
     infer_sfa_component_group_ids,
 )
-from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.nano_topk_slots import (
-    NanoTopkSlotAllocator,
-    nano_pool_capacity,
-    nano_prefill_dest_geometry,
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import (
+    CopySfaTopkSlotAllocator,
+    copy_sfa_pool_capacity,
+    copy_sfa_prefill_dest_geometry,
 )
 
 if TYPE_CHECKING:
@@ -278,10 +278,10 @@ class SFAPDRD2HScheduler:
         # when the request finishes (vLLM owns the blocks themselves).
         self._request_trackers: dict[str, tuple[list[int], list[int]]] = {}
         # req_id -> (pool_slot, tail_tokens, tail_block_index, kv_tokens, dense)
-        self._nano_bindings: dict[str, tuple[int, int, int, int, bool]] = {}
+        self._copy_sfa_bindings: dict[str, tuple[int, int, int, int, bool]] = {}
         self.main_block_size = self.block_size[self.main_group_idx]
-        self._nano_hot_tokens = self._resolve_nano_hot_tokens()
-        self._nano_slot_allocator = self._try_create_nano_slot_allocator(vllm_config)
+        self._copy_sfa_hot_tokens = self._resolve_copy_sfa_hot_tokens()
+        self._copy_sfa_slot_allocator = self._try_create_copy_sfa_slot_allocator(vllm_config)
         # req_ids awaiting their first build_connector_meta seed (so the worker
         # can build request_map for get_finished even while async-waiting KV).
         self._reqs_need_recv: set[str] = set()
@@ -326,18 +326,18 @@ class SFAPDRD2HScheduler:
         indexer_block_ids = list(block_ids_by_group[self.indexer_group_idx])
         self._request_trackers[request.request_id] = (main_block_ids, indexer_block_ids)
         self._reqs_need_recv.add(request.request_id)
-        allocator = getattr(self, "_nano_slot_allocator", None)
+        allocator = getattr(self, "_copy_sfa_slot_allocator", None)
         if allocator is not None:
             kv_tokens = request.num_computed_tokens + num_external_tokens
             if kv_tokens <= 0:
                 prompt_token_ids = getattr(request, "prompt_token_ids", None) or []
                 kv_tokens = len(prompt_token_ids)
             block_size = getattr(self, "main_block_size", None) or min(self.block_size)
-            dense, tail_tokens, tail_block_index = nano_prefill_dest_geometry(
-                kv_tokens, block_size, getattr(self, "_nano_hot_tokens", 0)
+            dense, tail_tokens, tail_block_index = copy_sfa_prefill_dest_geometry(
+                kv_tokens, block_size, getattr(self, "_copy_sfa_hot_tokens", 0)
             )
             pool_slot = allocator.bind(request.request_id)
-            self._nano_bindings[request.request_id] = (
+            self._copy_sfa_bindings[request.request_id] = (
                 pool_slot,
                 tail_tokens,
                 tail_block_index,
@@ -395,7 +395,7 @@ class SFAPDRD2HScheduler:
             if tracker is None:
                 continue
             main_block_ids, indexer_block_ids = tracker
-            binding = getattr(self, "_nano_bindings", {}).get(req_id)
+            binding = getattr(self, "_copy_sfa_bindings", {}).get(req_id)
             if binding is None:
                 meta.add_request(req_id, main_block_ids, indexer_block_ids)
             else:
@@ -424,10 +424,10 @@ class SFAPDRD2HScheduler:
         # vLLM owns the block lifecycle; the connector only drops its lookup.
         self._request_trackers.pop(request.request_id, None)
         self._reqs_need_recv.discard(request.request_id)
-        nano_bindings = getattr(self, "_nano_bindings", None)
-        if nano_bindings is not None:
-            nano_bindings.pop(request.request_id, None)
-        allocator = getattr(self, "_nano_slot_allocator", None)
+        copy_sfa_bindings = getattr(self, "_copy_sfa_bindings", None)
+        if copy_sfa_bindings is not None:
+            copy_sfa_bindings.pop(request.request_id, None)
+        allocator = getattr(self, "_copy_sfa_slot_allocator", None)
         if allocator is not None:
             allocator.release(request.request_id)
         with self._metaserver_lock:
@@ -444,27 +444,27 @@ class SFAPDRD2HScheduler:
     # helpers
     # ------------------------------------------------------------------
     @staticmethod
-    def _resolve_nano_hot_tokens() -> int:
+    def _resolve_copy_sfa_hot_tokens() -> int:
         try:
             from vllm_ascend.ascend_config import get_ascend_config
 
-            if not get_ascend_config().sparse_kv_offload_config.use_nano:
+            if not get_ascend_config().sparse_kv_offload_config.use_fused_copy_sfa:
                 return 0
             return int(get_ascend_config().sparse_kv_offload_config.topk_buffer_size)
         except Exception:
             return 0
 
     @staticmethod
-    def _try_create_nano_slot_allocator(vllm_config: VllmConfig) -> NanoTopkSlotAllocator | None:
+    def _try_create_copy_sfa_slot_allocator(vllm_config: VllmConfig) -> CopySfaTopkSlotAllocator | None:
         try:
             from vllm_ascend.ascend_config import get_ascend_config
 
-            if not get_ascend_config().sparse_kv_offload_config.use_nano:
+            if not get_ascend_config().sparse_kv_offload_config.use_fused_copy_sfa:
                 return None
             max_num_seqs = vllm_config.scheduler_config.max_num_seqs
         except Exception:
             return None
-        return NanoTopkSlotAllocator(nano_pool_capacity(max_num_seqs))
+        return CopySfaTopkSlotAllocator(copy_sfa_pool_capacity(max_num_seqs))
 
     def _access_metaserver(self, url: str, message: dict[str, Any]):
         with httpx.Client(

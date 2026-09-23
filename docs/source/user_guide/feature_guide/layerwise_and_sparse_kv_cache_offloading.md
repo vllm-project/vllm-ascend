@@ -142,9 +142,9 @@ in sections 2 and 3.
     If the image provides a specific Clang version, install the matching OpenMP
     package, for example `libomp-17-dev` for Clang 17.
 
-### Optional Nano Operators
+### Optional Fused Copy-SFA Operators
 
-With `sparse_kv_offload_config.use_nano=true`, the Python integration requires
+With `sparse_kv_offload_config.fused_op_type="fused_copy_sfa"`, the Python integration requires
 these operators in the installed `_C_ascend` extension:
 
 - `npu_fused_lightning_indexer_manage`
@@ -154,7 +154,7 @@ The expected interfaces are from
 [vLLM-Ascend PR #16640](https://github.com/vllm-project/vllm-ascend/pull/16640),
 revision `a9823977149172f1604d9f2a1937224d0b11646e`. This branch carries the
 Python integration; it does not bundle these native kernels, their bindings,
-or LIM C8. An operator-enabled native build is required to run the nano path.
+or LIM C8. An operator-enabled native build is required to run the fused_copy_sfa path.
 
 Copy-SFA receives `dram_k_rope` and `dram_kv_cache` as CPU tensor views backed
 by registered MemFabric memory. Its native adapter must permit those CPU views;

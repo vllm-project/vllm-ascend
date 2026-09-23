@@ -672,11 +672,11 @@ class NPUModelRunner(GPUModelRunner):
         self._offload_slot_generation = 0
         self._offload_slot_generations: dict[int, int] = {}
         self._offload_slot_last_prefix: dict[int, int] = {}
-        self._nano_need_eager_tail_restore = False
+        self._copy_sfa_need_eager_tail_restore = False
         if self.sparse_kv_offload_enabled:
             self._offload_req_ids_tensor = self._make_buffer(self.max_num_reqs, dtype=torch.int64)
             self._offload_token_to_req = self._make_buffer(self.max_num_tokens, dtype=torch.int32)
-            if self.sparse_kv_offload_config.use_nano:
+            if self.sparse_kv_offload_config.use_fused_copy_sfa:
                 self._offload_pool_slots = self._make_buffer(self.max_num_reqs + 2, dtype=torch.int32)
                 self._offload_pool_generations = self._make_buffer(self.max_num_reqs + 2, dtype=torch.int64)
 
@@ -3462,16 +3462,16 @@ class NPUModelRunner(GPUModelRunner):
             cudagraph_stats,
         )
 
-    def _prebound_nano_slots(self) -> dict[str, int]:
+    def _prebound_copy_sfa_slots(self) -> dict[str, int]:
         if not has_kv_transfer_group():
             return {}
         connector = get_kv_transfer_group()
-        getter = getattr(connector, "get_nano_slot_bindings", None)
+        getter = getattr(connector, "get_copy_sfa_slot_bindings", None)
         if getter is None:
             return {}
         return getter() or {}
 
-    def _prepare_nano_request_slots(self, num_reqs: int, padded_reqs: int, *, dummy: bool) -> None:
+    def _prepare_copy_sfa_request_slots(self, num_reqs: int, padded_reqs: int, *, dummy: bool) -> None:
         if self._offload_pool_slots is None:
             return
         capacity = self.max_num_reqs + 2
@@ -3479,12 +3479,12 @@ class NPUModelRunner(GPUModelRunner):
         generations = self._offload_pool_generations.np
         slots[:padded_reqs] = np.arange(padded_reqs, dtype=np.int32) + capacity
         generations[:padded_reqs] = -1
-        self._nano_need_eager_tail_restore = False
+        self._copy_sfa_need_eager_tail_restore = False
         dense_fills: dict[int, tuple[int, int]] = {}
         if not dummy:
             # PD binds rows at alloc time. Keep those reservations even when the
             # request is waiting for KV and is not in the current decode batch.
-            prebound = self._prebound_nano_slots()
+            prebound = self._prebound_copy_sfa_slots()
             live = self.input_batch.req_id_to_index
             self._offload_request_slots = {
                 req: slot
@@ -3514,24 +3514,24 @@ class NPUModelRunner(GPUModelRunner):
                     last_prefix = self._offload_slot_last_prefix.get(slot)
                     if last_prefix is not None and prefix < last_prefix:
                         if prebound:
-                            self._nano_need_eager_tail_restore = True
+                            self._copy_sfa_need_eager_tail_restore = True
                         # A rollback across the hot boundary leaves a sparse-layout
                         # row under a dense (-3) reader: refill the whole row.
                         if hot and last_prefix >= hot > prefix:
                             dense_fills[slot] = (row, int(computed_all[row]))
                     self._offload_slot_last_prefix[slot] = prefix
             if dense_fills:
-                self._dense_fill_nano_rows(dense_fills)
-        # Nano builders stage host-owned slot/generation metadata once per step.
+                self._dense_fill_copy_sfa_rows(dense_fills)
+        # Fused Copy-SFA builders stage host-owned slot/generation metadata once per step.
 
-    def _dense_fill_nano_rows(self, dense_fills: dict[int, tuple[int, int]]) -> None:
+    def _dense_fill_copy_sfa_rows(self, dense_fills: dict[int, tuple[int, int]]) -> None:
         """Copy whole short rows from the CPU pool into their topk-buffer rows.
 
         Rollback-only safety net: a rollback across the hot boundary leaves a
         sparse-layout row under a dense (-3) reader, and the paged cache is
         stale beyond the prompt, so the refill must come from the CPU pool.
         Runs outside the captured graph at metadata-build time; the per-layer
-        host/device bases were pinned by ``bind_nano_kv_cache``.
+        host/device bases were pinned by ``bind_copy_sfa_kv_cache``.
         """
         manager = self.sparse_kv_offload_manager
         assert manager is not None
@@ -3560,24 +3560,24 @@ class NPUModelRunner(GPUModelRunner):
             dst_offsets = (slot * stride_tokens + dst_block_tokens.view(1, -1).expand(2, -1)) * token_bytes
             lengths_bytes = lengths.view(1, -1).expand(2, -1) * token_bytes
             count = torch.full((1,), 2 * nblocks, dtype=torch.int32, device=topk_k.device)
-            for host_bases, device_bases in zip(manager.nano_host_bases, manager.nano_device_bases):
+            for host_bases, device_bases in zip(manager.copy_sfa_host_bases, manager.copy_sfa_device_bases):
                 sources = (src_offsets + host_bases).reshape(-1)
                 destinations = (dst_offsets + device_bases).reshape(-1)
-                manager.copy_nano_kv(sources, destinations, lengths_bytes.reshape(-1), count)
+                manager.copy_sfa_kv(sources, destinations, lengths_bytes.reshape(-1), count)
 
-    def _maybe_eager_restore_nano_tails(self, attn_metadata: PerLayerAttnMetadata) -> None:
-        if not self._nano_need_eager_tail_restore:
+    def _maybe_eager_restore_copy_sfa_tails(self, attn_metadata: PerLayerAttnMetadata) -> None:
+        if not self._copy_sfa_need_eager_tail_restore:
             return
-        self._nano_need_eager_tail_restore = False
+        self._copy_sfa_need_eager_tail_restore = False
         groups = attn_metadata if isinstance(attn_metadata, list) else [attn_metadata]
         for group in groups:
             if not isinstance(group, dict):
                 continue
             for metadata in group.values():
-                if getattr(metadata, "nano_enabled", False) and getattr(
-                    metadata, "nano_copy_src_offsets", None
+                if getattr(metadata, "fused_copy_sfa_enabled", False) and getattr(
+                    metadata, "copy_sfa_copy_src_offsets", None
                 ) is not None:
-                    get_sparse_kv_offload_manager().restore_nano_tails(metadata)
+                    get_sparse_kv_offload_manager().restore_copy_sfa_tails(metadata)
                     return
 
     def _build_attention_metadata(
@@ -3619,8 +3619,8 @@ class NPUModelRunner(GPUModelRunner):
                 self._offload_req_ids_tensor,
                 self._offload_token_to_req,
             )
-        if self.sparse_kv_offload_config.use_nano and self.sparse_kv_offload_enabled:
-            self._prepare_nano_request_slots(num_reqs, num_reqs_padded, dummy=offload_dummy)
+        if self.sparse_kv_offload_config.use_fused_copy_sfa and self.sparse_kv_offload_enabled:
+            self._prepare_copy_sfa_request_slots(num_reqs, num_reqs_padded, dummy=offload_dummy)
         attn_metadata: PerLayerAttnMetadata = {}
         device_metadata_tasks: list[DeviceMetadataTask] | None = (
             [] if self.device_metadata_executor is not None else None
@@ -3812,7 +3812,7 @@ class NPUModelRunner(GPUModelRunner):
             req_topk_buffer_generations=(self._offload_pool_generations.cpu[:num_reqs_padded]
                                          if self._offload_pool_generations is not None else None),
             offload_dummy=offload_dummy,
-            nano_restore_tails=self._nano_need_eager_tail_restore,
+            copy_sfa_restore_tails=self._copy_sfa_need_eager_tail_restore,
             mm_req_doc_ranges=req_doc_ranges,
         )
 
@@ -4015,7 +4015,7 @@ class NPUModelRunner(GPUModelRunner):
                 device_metadata_tasks,
                 batch_descriptor if cudagraph_runtime_mode == CUDAGraphMode.FULL else None,
             )
-        self._maybe_eager_restore_nano_tails(attn_metadata)
+        self._maybe_eager_restore_copy_sfa_tails(attn_metadata)
         return attn_metadata, spec_decode_common_attn_metadata
 
     def _should_build_dummy_attn_metadata(
@@ -4589,7 +4589,7 @@ class NPUModelRunner(GPUModelRunner):
         logger.info("Loading model weights took %.4f GB", m.consumed_memory / float(2**30))
 
         get_offloader().post_init()
-        if self.sparse_kv_offload_enabled and self.sparse_kv_offload_config.use_nano:
+        if self.sparse_kv_offload_enabled and self.sparse_kv_offload_config.use_fused_copy_sfa:
             from vllm_ascend.attention.sfa_kv_offload import AscendSFAKVOffloadImpl
 
             owners = {}
@@ -4603,8 +4603,8 @@ class NPUModelRunner(GPUModelRunner):
                 key = shared.data_ptr()
                 if impl.skip_topk:
                     if key not in owners:
-                        raise RuntimeError("nano shared attention precedes its indexer owner")
-                    impl.nano_indexer_owner = owners[key]
+                        raise RuntimeError("fused_copy_sfa shared attention precedes its indexer owner")
+                    impl.lim_indexer_owner = owners[key]
                 else:
                     owners[key] = impl
 
@@ -4778,10 +4778,10 @@ class NPUModelRunner(GPUModelRunner):
         if self.sparse_kv_offload_enabled:
             assert self.sparse_kv_offload_manager is not None
             self.sparse_kv_offload_manager.register_kv_caches(kv_caches)
-            if self.sparse_kv_offload_config.use_nano:
+            if self.sparse_kv_offload_config.use_fused_copy_sfa:
                 for layer_name in self.sparse_kv_offload_manager.offload_layer_names:
                     layer = self.compilation_config.static_forward_context[layer_name]
-                    layer.impl.bind_nano_kv_cache(self.sparse_kv_offload_manager, layer_name)
+                    layer.impl.bind_copy_sfa_kv_cache(self.sparse_kv_offload_manager, layer_name)
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)
 

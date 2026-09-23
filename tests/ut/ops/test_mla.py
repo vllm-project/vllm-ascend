@@ -546,17 +546,17 @@ class TestAscendMultiHeadLatentAttention(TestBase):
         self.assertIs(attn.topk_indices_buffer, buffer)
         self.assertIs(mock_impl.topk_indices_buffer, buffer)
 
-    def test_nano_topk_metadata_compaction_forwards_to_impl(self):
+    def test_lim_topk_metadata_compaction_forwards_to_impl(self):
         attn = AscendMultiHeadLatentAttention.__new__(AscendMultiHeadLatentAttention)
         mock_impl = MagicMock()
-        mock_impl.use_nano = True
+        mock_impl.use_fused_copy_sfa = True
         attn.mla_attn = SimpleNamespace(impl=mock_impl)
         indices = torch.tensor([1, 5], dtype=torch.int32)
 
-        self.assertTrue(attn.uses_nano_topk_metadata)
-        attn.compact_nano_topk_metadata(indices)
+        self.assertTrue(attn.uses_lim_topk_metadata)
+        attn.compact_lim_topk_metadata(indices)
 
-        mock_impl.compact_nano_topk_metadata.assert_called_once_with(indices)
+        mock_impl.compact_lim_topk_metadata.assert_called_once_with(indices)
 
     @patch("vllm_ascend.ops.mla.get_current_vllm_config")
     @patch("vllm_ascend.ops.mla.get_tensor_model_parallel_world_size")

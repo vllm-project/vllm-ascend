@@ -33,8 +33,8 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (  #
     MF_META_ACK,
     READ_READY_BATCH,
     SFAPD_PROTOCOL_VERSION,
+    CopySfaTailDest,
     LayerMetadata,
-    NanoTailDest,
     SendTask,
     SfaPDProducerReqMeta,
     get_external_request_id,
@@ -56,8 +56,8 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.worker import (  # n
     SFAPDRD2HConsumerWorker,
     SFAPDRD2HProducerWorker,
 )
-from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.nano_topk_slots import (  # noqa: E402
-    NanoTopkSlotAllocator,
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.copy_sfa_topk_slots import (  # noqa: E402
+    CopySfaTopkSlotAllocator,
 )
 from vllm_ascend.distributed.kv_transfer.utils.memfabric_transfer_engine import (  # noqa: E402
     BACKEND_MEMFABRIC,
@@ -1452,7 +1452,7 @@ def test_pp_producer_requires_structured_mf_meta_ack():
     assert "tcp://d:1" in thread._mf_meta_sent_paths
 
 
-def test_consumer_scheduler_binds_nano_tail_at_alloc():
+def test_consumer_scheduler_binds_copy_sfa_tail_at_alloc():
     scheduler = SFAPDRD2HScheduler.__new__(SFAPDRD2HScheduler)
     scheduler.main_group_idx = 0
     scheduler.indexer_group_idx = 1
@@ -1470,9 +1470,9 @@ def test_consumer_scheduler_binds_nano_tail_at_alloc():
     )
     scheduler._request_trackers = {}
     scheduler._reqs_need_recv = set()
-    scheduler._nano_bindings = {}
-    scheduler._nano_hot_tokens = 8192
-    scheduler._nano_slot_allocator = NanoTopkSlotAllocator(4)
+    scheduler._copy_sfa_bindings = {}
+    scheduler._copy_sfa_hot_tokens = 8192
+    scheduler._copy_sfa_slot_allocator = CopySfaTopkSlotAllocator(4)
     scheduler._metaserver_lock = threading.Lock()
     scheduler._cancelled_metaserver_requests = set()
     scheduler._metaserver_futures = {}
@@ -1499,10 +1499,10 @@ def test_consumer_scheduler_binds_nano_tail_at_alloc():
     assert req_meta.kv_tokens == 10367
 
     scheduler.request_finished_all_groups(request, ([1, 2], [3]))
-    assert scheduler._nano_slot_allocator.get("req-tail") is None
+    assert scheduler._copy_sfa_slot_allocator.get("req-tail") is None
 
 
-def test_consumer_scheduler_binds_nano_dense_row_at_alloc():
+def test_consumer_scheduler_binds_copy_sfa_dense_row_at_alloc():
     scheduler = SFAPDRD2HScheduler.__new__(SFAPDRD2HScheduler)
     scheduler.main_group_idx = 0
     scheduler.indexer_group_idx = 1
@@ -1520,9 +1520,9 @@ def test_consumer_scheduler_binds_nano_dense_row_at_alloc():
     )
     scheduler._request_trackers = {}
     scheduler._reqs_need_recv = set()
-    scheduler._nano_bindings = {}
-    scheduler._nano_hot_tokens = 8192
-    scheduler._nano_slot_allocator = NanoTopkSlotAllocator(4)
+    scheduler._copy_sfa_bindings = {}
+    scheduler._copy_sfa_hot_tokens = 8192
+    scheduler._copy_sfa_slot_allocator = CopySfaTopkSlotAllocator(4)
     scheduler._metaserver_lock = threading.Lock()
     scheduler._cancelled_metaserver_requests = set()
     scheduler._metaserver_futures = {}
@@ -1552,13 +1552,13 @@ def test_consumer_scheduler_binds_nano_dense_row_at_alloc():
     assert req_meta.kv_tokens == 4096
 
 
-def test_consumer_worker_records_nano_slot_for_runner():
+def test_consumer_worker_records_copy_sfa_slot_for_runner():
     worker = SFAPDRD2HConsumerWorker.__new__(SFAPDRD2HConsumerWorker)
     worker.request_map = {}
     worker._dest_blocks_by_req = {}
     worker._cpu_blocks_by_req = {}
-    worker.nano_slots_by_req = {}
-    worker._nano_tail_by_req = {}
+    worker.copy_sfa_slots_by_req = {}
+    worker._copy_sfa_tail_by_req = {}
     metadata = SimpleNamespace(
         requests=[
             SimpleNamespace(
@@ -1588,25 +1588,25 @@ def test_consumer_worker_records_nano_slot_for_runner():
 
     worker.start_load_kv(metadata)
 
-    assert worker.nano_slots_by_req["req-tail-internal"] == 3
-    dest = worker._nano_tail_by_req[get_external_request_id("req-tail-internal")]
+    assert worker.copy_sfa_slots_by_req["req-tail-internal"] == 3
+    dest = worker._copy_sfa_tail_by_req[get_external_request_id("req-tail-internal")]
     assert dest.pool_slot == 3
     assert dest.tail_tokens == 7
     assert dest.tail_block_index == 4
     assert dest.dense is False
     assert dest.kv_tokens == 1024
 
-    assert worker.nano_slots_by_req["req-dense-internal"] == 1
-    dense_dest = worker._nano_tail_by_req[get_external_request_id("req-dense-internal")]
+    assert worker.copy_sfa_slots_by_req["req-dense-internal"] == 1
+    dense_dest = worker._copy_sfa_tail_by_req[get_external_request_id("req-dense-internal")]
     assert dense_dest.pool_slot == 1
     assert dense_dest.dense is True
     assert dense_dest.kv_tokens == 4096
 
 
-def test_connector_exposes_nano_slot_bindings():
+def test_connector_exposes_copy_sfa_slot_bindings():
     connector = SfaRemoteD2HConnector.__new__(SfaRemoteD2HConnector)
-    connector.connector_worker = SimpleNamespace(nano_slots_by_req={"req-a": 2})
-    assert connector.get_nano_slot_bindings() == {"req-a": 2}
+    connector.connector_worker = SimpleNamespace(copy_sfa_slots_by_req={"req-a": 2})
+    assert connector.get_copy_sfa_slot_bindings() == {"req-a": 2}
 
 
 def _make_tail_read_thread(*, tp_rank: int = 0, tp_size: int = 1) -> MembPullReadThread:
@@ -1614,7 +1614,7 @@ def _make_tail_read_thread(*, tp_rank: int = 0, tp_size: int = 1) -> MembPullRea
     thread.tp_rank = tp_rank
     thread._state.tp_size = tp_size
     thread._state.dest_blocks_by_req["req-0"] = ([9], [])
-    thread._state.nano_tail_by_req["req-0"] = NanoTailDest(pool_slot=1, tail_tokens=3, tail_block_index=0)
+    thread._state.copy_sfa_tail_by_req["req-0"] = CopySfaTailDest(pool_slot=1, tail_tokens=3, tail_block_index=0)
     thread._state.topk_k_bases = [100_000]
     thread._state.topk_v_bases = [200_000]
     thread._state.topk_row_tokens = 256
@@ -1623,7 +1623,7 @@ def _make_tail_read_thread(*, tp_rank: int = 0, tp_size: int = 1) -> MembPullRea
     return thread
 
 
-def test_nano_tail_d2d_appends_to_every_decode_rank():
+def test_copy_sfa_tail_d2d_appends_to_every_decode_rank():
     layer = _make_layer(k_cpu_ptr=None, v_cpu_ptr=None, has_indexer=False)
     layer["p_k_len"] = 1280
     layer["p_v_len"] = 2560
@@ -1643,12 +1643,12 @@ def test_nano_tail_d2d_appends_to_every_decode_rank():
     assert lengths == [3 * 10, 3 * 20]
 
 
-def test_nano_tail_d2d_skips_when_last_block_is_not_in_chunk():
+def test_copy_sfa_tail_d2d_skips_when_last_block_is_not_in_chunk():
     layer = _make_layer(k_cpu_ptr=3000, v_cpu_ptr=4000, has_indexer=False)
     layer["p_k_len"] = 1280
     layer["p_v_len"] = 2560
     thread = _make_tail_read_thread()
-    thread._state.nano_tail_by_req["req-0"] = NanoTailDest(pool_slot=1, tail_tokens=3, tail_block_index=8)
+    thread._state.copy_sfa_tail_by_req["req-0"] = CopySfaTailDest(pool_slot=1, tail_tokens=3, tail_block_index=8)
     thread._state.dest_blocks_by_req["req-0"] = ([0], [])
 
     local, peer, lengths, _ = thread._build_req_descriptors(
@@ -1672,7 +1672,7 @@ def _make_dense_read_thread() -> MembPullReadThread:
     # Enough D-side main blocks for the descriptor-range validation to accept
     # multi-block chunks.
     thread._state.dest_blocks_by_req["req-0"] = ([9, 10, 11, 12, 13], [])
-    thread._state.nano_tail_by_req["req-0"] = NanoTailDest(
+    thread._state.copy_sfa_tail_by_req["req-0"] = CopySfaTailDest(
         pool_slot=1, tail_tokens=0, tail_block_index=0, dense=True, kv_tokens=200
     )
     thread._state.topk_k_bases = [100_000]
@@ -1683,7 +1683,7 @@ def _make_dense_read_thread() -> MembPullReadThread:
     return thread
 
 
-def test_nano_dense_d2d_copies_all_prompt_blocks_into_row():
+def test_copy_sfa_dense_d2d_copies_all_prompt_blocks_into_row():
     layer = _make_layer(k_cpu_ptr=None, v_cpu_ptr=None, has_indexer=False)
     layer["p_k_len"] = 1280
     layer["p_v_len"] = 2560
@@ -1704,7 +1704,7 @@ def test_nano_dense_d2d_copies_all_prompt_blocks_into_row():
     assert lengths == [128 * 10 + 72 * 10, 128 * 20 + 72 * 20]
 
 
-def test_nano_dense_d2d_skips_chunk_outside_prompt_blocks():
+def test_copy_sfa_dense_d2d_skips_chunk_outside_prompt_blocks():
     layer = _make_layer(k_cpu_ptr=None, v_cpu_ptr=None, has_indexer=False)
     layer["p_k_len"] = 1280
     layer["p_v_len"] = 2560
