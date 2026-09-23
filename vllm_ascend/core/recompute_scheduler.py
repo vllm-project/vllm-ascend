@@ -133,9 +133,10 @@ class RecomputeScheduler(Scheduler):
 
         if not offloaded:
             # Mirror the config gate: only a real split (size > 1) forbids the return to P.
-            if get_ascend_config().finegrained_tp_config.oproj_tensor_parallel_size > 1:
+            ftpc = get_ascend_config().finegrained_tp_config
+            if ftpc.oproj_tensor_parallel_size > 1 or ftpc.mlp_tensor_parallel_size > 1:
                 logger.error(
-                    "KV offload failed with o_proj TP enabled; aborting the request instead "
+                    "KV offload failed with fine-grained TP enabled; aborting the request instead "
                     "of returning it to P for recomputation: request_id=%s, "
                     "num_computed_tokens=%d",
                     request.request_id,

@@ -691,14 +691,17 @@ class AscendConfig:
                     str(vc.scheduler_config.max_num_batched_tokens),
                 )
 
+        # mlp mirrors the config gate's >1 exemption; oproj/embedding keep main's >0 semantics.
         finegrained_tp_enabled = (
             self.finegrained_tp_config.oproj_tensor_parallel_size > 0
             or self.finegrained_tp_config.embedding_tensor_parallel_size > 0
+            or self.finegrained_tp_config.mlp_tensor_parallel_size > 1
         )
         if finegrained_tp_enabled and not self.scheduler_config.recompute_scheduler_enable:
             raise AssertionError(
-                "oproj_tensor_parallel_size / embedding_tensor_parallel_size require "
-                "recompute_scheduler_enable=true: it keeps decode-node steps decode-shaped.",
+                "oproj_tensor_parallel_size / mlp_tensor_parallel_size / "
+                "embedding_tensor_parallel_size require recompute_scheduler_enable=true: "
+                "it keeps decode-node steps decode-shaped.",
             )
 
         # enable_fused_mc2 enum + MiniMax mutex + multistream auto-disable
@@ -1191,26 +1194,29 @@ class FinegrainedTPConfig:
 
         vc = vllm_config
         enabled_configs = []
-        if self.oproj_tensor_parallel_size > 1:
-            # _forward_o_proj reshapes with n_local_groups = n_groups // tp_size (standard TP),
-            # which misaligns with the OTP weight shard (DP axis) when tp_size > 1.
+        if self.oproj_tensor_parallel_size > 1 or self.mlp_tensor_parallel_size > 1:
+            # o_proj's _forward_o_proj reshape misaligns under tp > 1; mlp is untested there.
             if vc.parallel_config.tensor_parallel_size > 1:
                 raise AssertionError(
-                    "oproj_tensor_parallel_size currently requires "
-                    "tensor_parallel_size == 1, got "
+                    "oproj_tensor_parallel_size / mlp_tensor_parallel_size currently "
+                    "require tensor_parallel_size == 1, got "
                     f"{vc.parallel_config.tensor_parallel_size}."
                 )
             # Graph dispatch is the only lane that aligns DP token counts (eager keeps per-rank counts).
             if vc.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
-                raise AssertionError("oproj_tensor_parallel_size is only supported in graph mode")
+                raise AssertionError(
+                    "oproj_tensor_parallel_size / mlp_tensor_parallel_size are only supported in graph mode"
+                )
             if vc.kv_transfer_config is None or not vc.kv_transfer_config.is_kv_consumer:
                 raise AssertionError(
-                    "oproj_tensor_parallel_size is only supported in pd scenario and can only be used in D node."
+                    "oproj_tensor_parallel_size / mlp_tensor_parallel_size are only supported "
+                    "in pd scenario and can only be used in D node."
                 )
             # PCP's dispatch recomputes num_tokens per rank, breaking the group-uniform step size.
             if vc.parallel_config.prefill_context_parallel_size > 1:
                 raise AssertionError(
-                    "oproj_tensor_parallel_size is not supported with prefill_context_parallel_size > 1."
+                    "oproj_tensor_parallel_size / mlp_tensor_parallel_size are not supported "
+                    "with prefill_context_parallel_size > 1."
                 )
             # decode_query_len mirrors _get_default_max_cudagraph_capture_size in platform.py.
             decode_query_len = 1
@@ -1228,23 +1234,27 @@ class FinegrainedTPConfig:
             # A step beyond the capture bound dispatches to eager and desyncs the cross-DP collectives.
             if capture_bound is None or capture_bound < max_step:
                 logger.warning(
-                    "Disabling oproj_tensor_parallel_size=%d: the largest cudagraph capture "
-                    "size (%s) does not cover the largest possible step (%d tokens); an "
-                    "oversized step would dispatch to eager and hang the cross-DP HCCL "
-                    "collectives. Raise max_cudagraph_capture_size to re-enable it.",
+                    "Disabling oproj_tensor_parallel_size=%d and mlp_tensor_parallel_size=%d: "
+                    "the largest cudagraph capture size (%s) does not cover the largest "
+                    "possible step (%d tokens); an oversized step would dispatch to eager "
+                    "and hang the cross-DP HCCL collectives. Raise max_cudagraph_capture_size "
+                    "to re-enable them.",
                     self.oproj_tensor_parallel_size,
+                    self.mlp_tensor_parallel_size,
                     str(capture_bound),
                     max_step,
                 )
                 self.oproj_tensor_parallel_size = 0
+                self.mlp_tensor_parallel_size = 0
             else:
-                enabled_configs.append(f"oproj_tensor_parallel_size={self.oproj_tensor_parallel_size}")
+                if self.oproj_tensor_parallel_size > 1:
+                    enabled_configs.append(f"oproj_tensor_parallel_size={self.oproj_tensor_parallel_size}")
+                if self.mlp_tensor_parallel_size > 1:
+                    enabled_configs.append(f"mlp_tensor_parallel_size={self.mlp_tensor_parallel_size}")
         if self.lmhead_tensor_parallel_size > 0:
             enabled_configs.append(f"lmhead_tensor_parallel_size={self.lmhead_tensor_parallel_size}")
         if self.embedding_tensor_parallel_size > 0:
             enabled_configs.append(f"embedding_tensor_parallel_size={self.embedding_tensor_parallel_size}")
-        if self.mlp_tensor_parallel_size > 0:
-            enabled_configs.append(f"mlp_tensor_parallel_size={self.mlp_tensor_parallel_size}")
         module_tp_sizes = [
             self.oproj_tensor_parallel_size,
             self.lmhead_tensor_parallel_size,

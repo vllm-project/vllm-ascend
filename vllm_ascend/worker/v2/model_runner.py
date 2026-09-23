@@ -129,7 +129,9 @@ class NPUModelRunner(GPUModelRunner):
 
         # Only a real split (size > 1) exchanges across ranks, and graph dispatch keeps it aligned.
         ftpc = self.ascend_config.finegrained_tp_config
-        self._oproj_tp_requires_graph = ftpc.oproj_tensor_parallel_size > 1 and self.dp_size > 1
+        self._finegrained_tp_requires_graph = (
+            ftpc.oproj_tensor_parallel_size > 1 or ftpc.mlp_tensor_parallel_size > 1
+        ) and self.dp_size > 1
 
         self.use_aclgraph = (
             self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
@@ -393,11 +395,11 @@ class NPUModelRunner(GPUModelRunner):
         _PCP_DISPATCH_NUM_TOKENS.set(num_tokens)
         return batch_state, uniform_token_count
 
-    def _check_oproj_tp_graph_step(self, cg_mode: CUDAGraphMode) -> None:
-        # Eager dispatch keeps per-rank token counts; the cross-DP o_proj exchange would desync.
-        if self._oproj_tp_requires_graph and cg_mode == CUDAGraphMode.NONE:
+    def _check_finegrained_tp_graph_step(self, cg_mode: CUDAGraphMode) -> None:
+        # Eager dispatch keeps per-rank token counts; the cross-DP o_proj/MLP exchanges would desync.
+        if self._finegrained_tp_requires_graph and cg_mode == CUDAGraphMode.NONE:
             raise RuntimeError(
-                "o_proj TP requires every step on a captured graph: this step dispatched "
+                "o_proj / MLP TP require every step on a captured graph: this step dispatched "
                 "to eager, which desyncs the cross-DP HCCL collectives (mixed or oversized "
                 "batch, a request-arrival step misclassified as prefill, or a full prefill "
                 "scheduled locally — a request sent directly to the decode node)."
@@ -413,7 +415,7 @@ class NPUModelRunner(GPUModelRunner):
         npu attention backends need seq_lens_cpu to work.
         so we need to prepare seq_lens_cpu here.
         """
-        self._check_oproj_tp_graph_step(batch_desc.cg_mode)
+        self._check_finegrained_tp_graph_step(batch_desc.cg_mode)
         num_tokens = batch_req_state.num_tokens
         num_tokens_after_padding = max(num_tokens, batch_desc.num_tokens)
         assert num_tokens > 0
