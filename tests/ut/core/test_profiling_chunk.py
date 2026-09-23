@@ -729,7 +729,6 @@ class TestProfilingChunkAsyncScheduler(TestBase):
         srf_enabled=False,
         async_scheduling=True,
         pipeline_parallel_size=1,
-        use_v2_model_runner=True,
     ):
         profiling_cfg = MagicMock()
         profiling_cfg.enabled = True
@@ -818,15 +817,12 @@ class TestProfilingChunkAsyncScheduler(TestBase):
             # MagicMock hf_config. Override it to keep the UT runnable.
             stack.enter_context(patch.object(ModelConfig, "uses_mrope", new_callable=PropertyMock, return_value=False))
             # VllmConfig.use_v2_model_runner is a property whose default
-            # depends on the CI environment (HAS_TRITON etc.). Pin it so both
-            # model-runner scheduling contracts can be exercised explicitly.
+            # depends on the CI environment (HAS_TRITON etc.). Pin it to
+            # True: CPP + async scheduling is only supported with Model
+            # Runner V2 (the platform layer rejects the v1 combination),
+            # so the supported configuration must not rely on env defaults.
             stack.enter_context(
-                patch.object(
-                    VllmConfig,
-                    "use_v2_model_runner",
-                    new_callable=PropertyMock,
-                    return_value=use_v2_model_runner,
-                )
+                patch.object(VllmConfig, "use_v2_model_runner", new_callable=PropertyMock, return_value=True)
             )
             scheduler = scheduler_cls(
                 vllm_config=vllm_config,
@@ -979,27 +975,6 @@ class TestProfilingChunkAsyncScheduler(TestBase):
         second_output = scheduler.schedule()
         self.assertNotIn(request.request_id, second_output.num_scheduled_tokens)
         self.assertEqual(request.num_output_placeholders, 1)
-
-    def test_v1_pp_uses_async_placeholders_without_v2_decode_cadence(self):
-        # Upstream vLLM 0.30.0 deliberately applies the PP decode cadence only
-        # to MRV2. MRV1 can still use AsyncScheduler placeholder accounting,
-        # but follows its more conservative execution-side in-flight policy.
-        scheduler = self.create_scheduler(
-            pipeline_parallel_size=2,
-            use_v2_model_runner=False,
-        )
-        request = create_requests(num_requests=1, num_tokens=10)[0]
-        scheduler.add_request(request)
-
-        first_output = scheduler.schedule()
-
-        self.assertIn(request.request_id, first_output.num_scheduled_tokens)
-        self.assertEqual(request.num_output_placeholders, 1)
-        self.assertEqual(request.next_decode_eligible_step, 0)
-
-        second_output = scheduler.schedule()
-        self.assertIn(request.request_id, second_output.num_scheduled_tokens)
-        self.assertEqual(request.num_output_placeholders, 2)
 
     def test_scheduler_init_with_short_request_first(self):
         scheduler = self.create_scheduler(srf_enabled=True)

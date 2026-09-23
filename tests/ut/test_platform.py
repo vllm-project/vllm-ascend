@@ -1394,11 +1394,6 @@ class TestNPUPlatform(TestBase):
                 "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkAsyncScheduler",
             ),
             (
-                True,
-                False,
-                "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkAsyncScheduler",
-            ),
-            (
                 False,
                 True,
                 "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkScheduler",
@@ -1445,7 +1440,7 @@ class TestNPUPlatform(TestBase):
         return_value=get_hardware_profile(AscendDeviceType.A3),
     )
     @patch("vllm_ascend.ascend_config.init_ascend_config")
-    def test_check_and_update_config_profiling_chunk_async_accepts_v1_runner(
+    def test_check_and_update_config_profiling_chunk_async_requires_v2_runner(
         self,
         mock_init_ascend,
         mock_soc_version,
@@ -1466,18 +1461,11 @@ class TestNPUPlatform(TestBase):
         vllm_config.use_v2_model_runner = False
 
         with (
+            pytest.raises(ValueError, match="v2 model runner"),
             patch.object(platform, "_fix_incompatible_config"),
             patch.object(platform, "check_kv_extra_config"),
-            patch.object(platform.logger, "warning") as mock_warning,
         ):
             self.platform.check_and_update_config(vllm_config)
-
-        warning_messages = [str(call.args[0]) for call in mock_warning.call_args_list if call.args]
-        self.assertTrue(any("experimental" in message for message in warning_messages))
-        self.assertEqual(
-            vllm_config.scheduler_config.scheduler_cls,
-            "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkAsyncScheduler",
-        )
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch(

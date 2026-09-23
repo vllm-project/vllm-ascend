@@ -977,19 +977,15 @@ def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
                 "vllm_ascend.core.short_request_first_scheduler.ShortRequestFirstAsyncScheduler"
             )
 
-    # Async profiling_chunk uses AsyncScheduler placeholder accounting for both
-    # model runners. Model Runner V1 still follows upstream's more conservative
-    # PP in-flight policy; execution-side compatibility must be validated by
-    # the corresponding PP workload.
+    # profiling_chunk (CPP) works with async scheduling only on the v2 model
+    # runner; the v1 PP execution path does not provide the same asynchronous
+    # sampled-token cadence and broadcast guarantees.
     profiling_chunk_config = scheduler_extension_config.profiling_chunk_config
     if profiling_chunk_config.enabled and vllm_config.scheduler_config.async_scheduling:
         if not vllm_config.use_v2_model_runner:
-            logger.warning(
-                "profiling_chunk_config with async scheduling on Model Runner V1 "
-                "is experimental: vLLM does not fully support asynchronous "
-                "scheduling with pipeline parallelism on Model Runner V1. "
-                "Validate the target PP and speculative-decoding workload before "
-                "production use."
+            raise ValueError(
+                "profiling_chunk_config with async scheduling requires the v2 model runner "
+                "(VLLM_USE_V2_MODEL_RUNNER=1). Please enable it or disable async scheduling."
             )
         if profiling_chunk_config.need_timing:
             # The wall-clock synchronize() timing would serialize the async
