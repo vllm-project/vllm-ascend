@@ -1743,6 +1743,27 @@ class MooncakeConnectorScheduler:
         init_ascend_config(vllm_config)
         self.ascend_config = get_ascend_config()
         self.block_size = vllm_config.cache_config.block_size
+        # [dspark-fix] P2P meta 的 remote_block_size 必须是物理 KV 块单位。
+        # hybrid(Mamba) 布局下物理块统一为 lcm (本机 1024), 而
+        # cache_config.block_size 在 dspark 的 P 侧 EngineCore 进程会停留在
+        # CLI 值 128, 直接发射会让 D 侧 kernel 展开断言
+        # (128 not divisible by 1024)。取 kv_cache_config 各组 spec 的
+        # 物理块大小最大值, 只升不降; 布局一致时等于 self.block_size
+        # (MTP 等已验证路径不变)。
+        spec_block_sizes = [
+            bs
+            for group in kv_cache_config.kv_cache_groups
+            for spec in self._get_group_unique_specs(group)
+            if isinstance((bs := getattr(spec, "block_size", None)), int)
+        ]
+        self.transfer_block_size = max([self.block_size, *spec_block_sizes])
+        if self.transfer_block_size != self.block_size:
+            logger.warning(
+                "[dspark-fix] pid=%s transfer block_size aligned %d -> %d (physical kv spec)",
+                os.getpid(),
+                self.block_size,
+                self.transfer_block_size,
+            )
         self.engine_id = engine_id
         self.local_ip = get_ip()
         logger.info("Initializing Mooncake Scheduler %s", engine_id)
@@ -2042,7 +2063,7 @@ class MooncakeConnectorScheduler:
         if not params.get("do_remote_decode") or request.status != RequestStatus.FINISHED_LENGTH_CAPPED:
             return False, None
 
-        num_prompt_blocks = math.ceil(len(request.prompt_token_ids) / self.block_size)
+        num_prompt_blocks = math.ceil(len(request.prompt_token_ids) / self.transfer_block_size)
         computed_block_ids = self._get_transfer_block_ids(block_ids, len(request.prompt_token_ids))
         computed_block_ids = self._get_swa_transfer_block_ids(computed_block_ids)
         computed_block_lens = [len(block_id_list) for block_id_list in computed_block_ids]
@@ -2065,7 +2086,7 @@ class MooncakeConnectorScheduler:
             last_token_id=request.output_token_ids[-1],
             remote_multi_nodes_meta_mapping=self.multi_nodes_meta_mapping,
             num_prompt_blocks=num_prompt_blocks,
-            remote_block_size=self.block_size,
+            remote_block_size=self.transfer_block_size,
         )
 
     def _port_offset_from_handshake_metadata(
