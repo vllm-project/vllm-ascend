@@ -13,6 +13,7 @@ from vllm_ascend.ops.fused_moe.moe_utils import (
     _prepare_dequant_swiglu_weight_scale,
     cumsum_group_list,
     load_cann_mega_moe_ops,
+    normalize_mega_moe_weight_scales,
     select_mega_moe_activation_kwargs,
 )
 from vllm_ascend.quantization.quant_type import QuantType
@@ -105,6 +106,17 @@ class TestMegaMoeLoading(unittest.TestCase):
 
 
 class TestMegaMoeQuantSettings(unittest.TestCase):
+    def test_normalize_scales_squeezes_only_leading_singleton(self):
+        per_expert = torch.ones(1, 8)
+        grouped = torch.ones(2, 8)
+
+        normalized = normalize_mega_moe_weight_scales([per_expert, grouped])
+
+        self.assertIsNotNone(normalized)
+        self.assertEqual(normalized[0].shape, (8,))
+        self.assertEqual(normalized[1].shape, (2, 8))
+        self.assertIsNone(normalize_mega_moe_weight_scales(None))
+
     def test_mxfp8_uses_e4m3_dispatch_and_weights(self):
         self.assertEqual(_get_cann_mega_moe_quant_settings(QuantType.W8A8MXFP), (4, 24, 24))
 
