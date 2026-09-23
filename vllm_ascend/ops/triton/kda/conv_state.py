@@ -2,14 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Pack and restore strided convolution states for KDA."""
 
+import torch
 from vllm.triton_utils import tl, triton
 
-CONV_STATE_COPY_BLOCK_SIZE = 256
-CONV_STATE_COPY_MAX_PROGRAMS = 65535
+_CONV_STATE_COPY_BLOCK_SIZE = 256
+_CONV_STATE_COPY_MAX_PROGRAMS = 65535
 
 
 @triton.jit
-def copy_conv_state_kernel(
+def _copy_conv_state_kernel(
     cache,
     packed,
     cache_indices,
@@ -51,3 +52,37 @@ def copy_conv_state_kernel(
             tl.store(packed + packed_offsets, values, mask=in_range)
             if row_tile == 0:
                 tl.store(packed_indices + request, tl.where(active, request, -1))
+
+
+def copy_conv_state(
+    cache: torch.Tensor,
+    packed: torch.Tensor,
+    cache_indices: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    packed_indices: torch.Tensor,
+    *,
+    write_back: bool,
+) -> None:
+    """Pack active convolution states or restore them to the original cache view."""
+    requests = cache_indices.shape[0]
+    if requests == 0:
+        return
+    state_len, dim = cache.shape[1:]
+    grid = (min(requests * state_len * triton.cdiv(dim, _CONV_STATE_COPY_BLOCK_SIZE), _CONV_STATE_COPY_MAX_PROGRAMS),)
+    _copy_conv_state_kernel[grid](
+        cache,
+        packed,
+        cache_indices,
+        query_start_loc,
+        packed_indices,
+        cache.stride(0),
+        cache_indices.stride(0),
+        cache.shape[0],
+        requests,
+        state_len,
+        dim,
+        cache.stride(1),
+        cache.stride(2),
+        WRITE_BACK=write_back,
+        BLOCK=_CONV_STATE_COPY_BLOCK_SIZE,
+    )

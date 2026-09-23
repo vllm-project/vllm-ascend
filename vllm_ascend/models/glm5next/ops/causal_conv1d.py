@@ -3,14 +3,9 @@
 """AscendC short convolution for GLM prefill, decode and MTP verification."""
 
 import torch
-from vllm.triton_utils import triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
-from vllm_ascend.ops.triton.kda.conv_state import (
-    CONV_STATE_COPY_BLOCK_SIZE,
-    CONV_STATE_COPY_MAX_PROGRAMS,
-    copy_conv_state_kernel,
-)
+from vllm_ascend.ops.triton.kda.conv_state import copy_conv_state
 
 
 def causal_conv1d(
@@ -39,25 +34,7 @@ def causal_conv1d(
         state_len, dim = conv_state.shape[1:]
         kernel_state = torch.empty((requests, state_len, dim), dtype=conv_state.dtype, device=conv_state.device)
         kernel_indices = torch.empty(requests, dtype=torch.int32, device=cache_indices.device)
-        copy_grid = (
-            min(requests * state_len * triton.cdiv(dim, CONV_STATE_COPY_BLOCK_SIZE), CONV_STATE_COPY_MAX_PROGRAMS),
-        )
-        copy_args = (
-            conv_state,
-            kernel_state,
-            cache_indices,
-            query_start_loc,
-            kernel_indices,
-            conv_state.stride(0),
-            cache_indices.stride(0),
-            conv_state.shape[0],
-            requests,
-            state_len,
-            dim,
-            conv_state.stride(1),
-            conv_state.stride(2),
-        )
-        copy_conv_state_kernel[copy_grid](*copy_args, WRITE_BACK=False, BLOCK=CONV_STATE_COPY_BLOCK_SIZE)
+        copy_conv_state(conv_state, kernel_state, cache_indices, query_start_loc, kernel_indices, write_back=False)
     # Return the declared result so graph functionalization retains the call.
     result = torch.ops._C_ascend.npu_causal_conv1d_custom(
         output,
@@ -74,5 +51,5 @@ def causal_conv1d(
         run_mode=run_mode,
     )
     if not conv_state.is_contiguous():
-        copy_conv_state_kernel[copy_grid](*copy_args, WRITE_BACK=True, BLOCK=CONV_STATE_COPY_BLOCK_SIZE)
+        copy_conv_state(conv_state, kernel_state, cache_indices, query_start_loc, kernel_indices, write_back=True)
     return result
