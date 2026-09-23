@@ -787,7 +787,9 @@ def _fake_async_copy(src, device=None, out=None):
     return tensor
 
 
-def _run_prepare_inputs(runner, scheduler_output, batch_req_state, batch_desc, *, version_029=False):
+def _run_prepare_inputs(
+    runner, scheduler_output, batch_req_state, batch_desc, *, version_029=False, num_active_loras=None
+):
     batch = SimpleNamespace(positions=torch.zeros(4, dtype=torch.int32))
 
     def _partition(_pcp_manager, input_batch, **_kwargs):
@@ -816,7 +818,11 @@ def _run_prepare_inputs(runner, scheduler_output, batch_req_state, batch_desc, *
         patch("vllm_ascend.worker.v2.model_runner.update_cos_sin"),
         patch("vllm_ascend.worker.v2.model_runner.vllm_version_is", return_value=version_029),
     ):
-        return runner.prepare_inputs(scheduler_output, batch_req_state, batch_desc), batch
+        if num_active_loras is None:
+            result = runner.prepare_inputs(scheduler_output, batch_req_state, batch_desc)
+        else:
+            result = runner.prepare_inputs(scheduler_output, batch_req_state, batch_desc, num_active_loras)
+        return result, batch
 
 
 def test_prepare_inputs_common_path():
@@ -835,6 +841,12 @@ def test_prepare_inputs_covers_draft_full_dcp_pp_and_rswa():
     assert out is partitioned
     runner.num_computed_tokens_event.synchronize.assert_called_once_with()
     assert runner.req_states.num_computed_tokens_cpu[0] == 3
+
+
+def test_prepare_inputs_accepts_num_active_loras():
+    runner, scheduler_output, batch_req_state, batch_desc = _prepare_inputs_runner()
+    out, partitioned = _run_prepare_inputs(runner, scheduler_output, batch_req_state, batch_desc, num_active_loras=0)
+    assert out is partitioned
 
 
 def test_postprocess_sampled_copies_only_with_speculator():

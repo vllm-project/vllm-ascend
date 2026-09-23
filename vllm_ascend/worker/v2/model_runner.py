@@ -408,12 +408,14 @@ class NPUModelRunner(GPUModelRunner):
         scheduler_output: SchedulerOutput,
         batch_req_state: BatchReqState,
         batch_desc: BatchExecutionDescriptor,
+        num_active_loras: int = 0,
     ) -> AscendInputBatch:
         """Override GPUModelRunner.prepare_inputs for Ascend NPUs.
         npu attention backends need seq_lens_cpu to work.
         so we need to prepare seq_lens_cpu here.
         """
         self._check_oproj_tp_graph_step(batch_desc.cg_mode)
+        del num_active_loras
         num_tokens = batch_req_state.num_tokens
         num_tokens_after_padding = max(num_tokens, batch_desc.num_tokens)
         assert num_tokens > 0
