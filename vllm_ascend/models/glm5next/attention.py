@@ -32,6 +32,7 @@ from vllm_ascend.models.glm5next.config import Glm5NextConfig
 from vllm_ascend.models.glm5next.kv_cache import (
     Glm5NextIndexerCache,
     Glm5NextTailCache,
+    get_kpool_tail_ring_capacity,
 )
 
 
@@ -112,6 +113,7 @@ class Indexer(nn.Module):
             dtype=torch.float32,
             prefix=f"{prefix}.tail_cache",
             compress_ratio=self.index_kpool,
+            ring_capacity=get_kpool_tail_ring_capacity(vllm_config, self.index_kpool),
         )
         self.prefix = prefix
 
@@ -215,7 +217,7 @@ class Glm5NextMLAAttention(nn.Module):
             self.kv_lora_rank,
             self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
             bias=False,
-            quant_config=quant_config,
+            quant_config=None,  # kv_b_proj stays BF16 in the FP8 checkpoint
             prefix=f"{prefix}.kv_b_proj",
         )
         self.o_proj = RowParallelLinear(

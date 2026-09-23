@@ -6,9 +6,9 @@
 
 | Product                                                               | Supported |
 | --------------------------------------------------------------------- | :-------: |
-| <term>Atlas A2 Training Series/Atlas A2 Inference Series</term>       |     √     |
-| <term>Atlas A3 Training Series/Atlas A3 Inference Series</term>       |     √     |
-| <term>Ascend 950PR/Ascend 950DT</term>                                |     √     |
+| <term>Atlas A2 Products</term>       |     √     |
+| <term>Atlas A3 Products</term>       |     √     |
+| <term>950PR&950DT Products</term>                                |     √     |
 
 ## Function Description
 
@@ -130,10 +130,10 @@ aclnnStatus aclnnMsaIndexScore(
 - PageAttention requires `blockTableOptional`. TND requires a null
   `blockTableOptional` and `[B+1]` prefix sums in `actualSeqKlenOptional`.
 - For non-quantized input, query and key must use the same dtype and
-  `scaleOptional` must be null. A2/A3 support FLOAT16 and BFLOAT16. Ascend 950
+  `scaleOptional` must be null. A2/A3 support FLOAT16 and BFLOAT16. 950PR&950DT Products
   additionally supports HIFLOAT8, FLOAT8_E5M2, and FLOAT8_E4M3FN.
 - The quantized path supports a FLOAT16 query, an INT8 key, and a required
-  FLOAT `scaleOptional`. Native FP8 is a non-quantized Ascend 950 path: query
+  FLOAT `scaleOptional`. Native FP8 is a non-quantized 950PR&950DT Products path: query
   and key must use the same FP8 dtype and `scaleOptional` must be null.
 - `sparseMode=0` requires a null `attenMaskOptional`. `sparseMode=3` requires
   an INT8 `[2048, 2048]` mask.
@@ -143,7 +143,7 @@ aclnnStatus aclnnMsaIndexScore(
   skips empty-query computation and fills scores for empty KV requests. An
   all-empty query batch launches with one block.
 - A PageAttention block table may be wider than the actual logical KV length.
-  Score width is `RoundUp(blockTableOptional.shape[1], 16)`. On Ascend 950,
+  Score width is `RoundUp(blockTableOptional.shape[1], 16)`. On 950PR&950DT Products,
   widths above 256 are flushed in 256-column windows.
 - PageAttention BBND/BNBD keys may be non-contiguous only on the physical-page
   axis. The operator reads the first-axis element stride from tensor metadata;
@@ -197,7 +197,7 @@ For BNBD, set `layoutKey="BNBD"` and use a
 
 ## Validation Matrix
 
-The standalone example runs 40 cases on Ascend 950: 36
+The standalone example runs 40 cases on 950PR&950DT Products: 36
 FLOAT16/BFLOAT16/INT8 cases plus four FP8 cases. A2/A3 skip FP8 and run 36
 cases. The matrix includes all supported layouts, empty sequences,
 non-contiguous PageAttention page axes, and a block-table width of 257.

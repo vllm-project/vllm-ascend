@@ -25,8 +25,11 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 |-----------------------------|---------------------------------------------------------------------|----------------|
 | `DeepSeek-V4-Pro-w4a8-mtp`  | 2 Atlas 800 A3 (128GB × 8) nodes or 4 Atlas 800 A2 (64GB × 8) nodes | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Pro-w4a8-mtp) |
 | `DeepSeek-V4-Pro-0813-w4a8` |                                                                     | [ModelScope](https://modelscope.cn/models/Eco-Tech/DeepSeek-V4-Pro-0813-w4a8)    |
+| `DeepSeek-V4-Pro-0813-w4a4c8` | 950PR&950DT Products | Quantize locally with [msmodelslim](https://gitcode.com/Ascend/msmodelslim/blob/master/lab_practice/deepseek_v4/deepseek_v4_pro_w4a4c8.yaml) |
 
-`DeepSeek-V4-Pro-0813-w4a8` (Official release with DSpark after quantized): This checkpoint includes the DSpark draft weights, so no separate draft-model path is required.
+- `DeepSeek-V4-Pro-0813-w4a8` (Official release with DSpark after quantized): This checkpoint includes the DSpark draft weights, so no separate draft-model path is required.
+
+- `DeepSeek-V4-Pro-0813-w4a4c8` (W4A4 MXFP4 mixed-precision quantization): For how the ultra-low-bit quantization preserves accuracy, see the [W4A4C8 FAQ](#q-how-do-the-w4a4c8-ultra-low-bit-quantized-weights-preserve-accuracy).
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
@@ -193,6 +196,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
       --tool-call-parser deepseek_v4 \
       --enable-auto-tool-choice \
       --reasoning-parser deepseek_v4 \
+      --attention_config.indexer_kv_dtype int8 \
       --model-loader-extra-config '{
          "enable_multithread_load": true,
          "num_threads": 128
@@ -270,6 +274,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
       --tool-call-parser deepseek_v4 \
       --enable-auto-tool-choice \
       --reasoning-parser deepseek_v4 \
+      --attention_config.indexer_kv_dtype int8 \
       --model-loader-extra-config '{
          "enable_multithread_load": true,
          "num_threads": 128
@@ -341,6 +346,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
       --tool-call-parser deepseek_v4 \
       --enable-auto-tool-choice \
       --reasoning-parser deepseek_v4 \
+      --attention_config.indexer_kv_dtype int8 \
       --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
       --quantization ascend \
       --speculative-config '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}' \
@@ -400,6 +406,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
       --tool-call-parser deepseek_v4 \
       --enable-auto-tool-choice \
       --reasoning-parser deepseek_v4 \
+      --attention_config.indexer_kv_dtype int8 \
       --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
       --quantization ascend \
       --speculative-config '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}' \
@@ -466,6 +473,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
       --tool-call-parser deepseek_v4 \
       --enable-auto-tool-choice \
       --reasoning-parser deepseek_v4 \
+      --attention_config.indexer_kv_dtype int8 \
       --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
       --quantization ascend \
       --speculative-config '{"num_speculative_tokens":5,"method":"dspark","enforce_eager":true}' \
@@ -529,6 +537,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
       --tool-call-parser deepseek_v4 \
       --enable-auto-tool-choice \
       --reasoning-parser deepseek_v4 \
+      --attention_config.indexer_kv_dtype int8 \
       --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
       --quantization ascend \
       --speculative-config '{"num_speculative_tokens":5,"method":"dspark","enforce_eager":true}' \
@@ -770,6 +779,7 @@ Before you start, please:
         --tool-call-parser deepseek_v4 \
         --enable-auto-tool-choice \
         --reasoning-parser deepseek_v4 \
+        --attention_config.indexer_kv_dtype int8 \
         --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
         --trust-remote-code \
         --quantization ascend \
@@ -842,6 +852,7 @@ Before you start, please:
         --tool-call-parser deepseek_v4 \
         --enable-auto-tool-choice \
         --reasoning-parser deepseek_v4 \
+        --attention_config.indexer_kv_dtype int8 \
         --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
         --trust-remote-code \
         --quantization ascend \
@@ -941,6 +952,7 @@ Before you start, please:
         --tool-call-parser deepseek_v4 \
         --enable-auto-tool-choice \
         --reasoning-parser deepseek_v4 \
+        --attention_config.indexer_kv_dtype int8 \
         --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
         --trust-remote-code \
         --quantization ascend \
@@ -1006,6 +1018,7 @@ Before you start, please:
         --tool-call-parser deepseek_v4 \
         --enable-auto-tool-choice \
         --reasoning-parser deepseek_v4 \
+        --attention_config.indexer_kv_dtype int8 \
         --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
         --trust-remote-code \
         --quantization ascend \
@@ -1214,6 +1227,7 @@ Before you start, please:
             --tool-call-parser deepseek_v4 \
             --enable-auto-tool-choice \
             --reasoning-parser deepseek_v4 \
+            --attention_config.indexer_kv_dtype int8 \
             --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
             --trust-remote-code \
             --quantization ascend \
@@ -1291,6 +1305,7 @@ Before you start, please:
             --tool-call-parser deepseek_v4 \
             --enable-auto-tool-choice \
             --reasoning-parser deepseek_v4 \
+            --attention_config.indexer_kv_dtype int8 \
             --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
             --trust-remote-code \
             --quantization ascend \
@@ -1435,6 +1450,9 @@ The service returns HTTP 200 OK with a JSON response containing the `choices` fi
 | GPQA | - | accuracy | gen | 91.41 | 0831 official W4A8 weight with DSpark enabled |
 | GPQA | - | accuracy | gen | 89.90 | 2 Atlas 800 A3 (128GB × 8) |
 | GSM8K | - | accuracy | gen | 96.21 | 2 Atlas 800 A3 (128GB × 8) |
+| GSM8K | - | accuracy | gen | 97.54 | 950PR&950DT Products, w4a4c8 |
+
+> **Note**: Dataset evaluation results fluctuate between runs due to sampling and runtime non-determinism. When a dataset is evaluated multiple times, the average score is reported.
 
 ## 8 Performance Evaluation
 
@@ -1489,3 +1507,21 @@ Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_mat
 ## 10 FAQ
 
 For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md); this chapter only covers model-specific issues.
+
+### Q: How do the W4A4C8 ultra-low-bit quantized weights preserve accuracy?
+
+A: For 950PR&950DT Products, the W4A4C8 weights of `DeepSeek-V4-Pro-0813` are quantized with [msmodelslim](https://gitcode.com/Ascend/msmodelslim/blob/master/lab_practice/deepseek_v4/deepseek_v4_pro_w4a4c8.yaml). To preserve accuracy at such a low bit-width, a mixed-precision strategy is used: only the modules that dominate the parameter count are quantized to 4 bit, while precision-sensitive modules fall back to higher precision or are not quantized at all.
+
+| Module | Quantization configuration |
+| ------ | -------------------------- |
+| MoE FFN routed experts | W4A4 MXFP4 |
+| Attention linear layers | W8A8 MXFP8 |
+| FFN shared experts | W8A8 MXFP8 |
+| Router gates, compressor projections (`wgate`/`wkv`), indexer projections, and MTP layers | Not quantized (kept in high precision) |
+
+- **Quantization algorithm**: The weights and activations use the MXFP4/MXFP8 microscaling formats. Each tensor is divided into blocks of 32 elements, and each block shares a single scaling factor obtained with symmetric min-max calibration on a mixed calibration dataset. Block-wise scaling adapts to the local dynamic range of each tensor, so the quantization error is far lower than that of uniform INT4 quantization.
+- **C8 (FP8 KV cache)**: C8 is a dynamic quantization applied to the KV cache during inference. On 950PR&950DT Products, the KV cache is quantized to FP8 (not INT8). It is unrelated to the parameters stored in the weight checkpoint and is controlled only by the serving configuration. DeepSeek-V4-Flash and DeepSeek-V4-Pro share exactly the same C8 scheme:
+    - **Attention KV cache** (FP8 by default on 950PR&950DT Products; switch back to BF16 with `--kv-cache-dtype bfloat16`): the compressed KV latent, which serves as both K and V, is dynamically quantized per 64-element tile to FP8 (E4M3) with a shared E8M0 scale per tile; the RoPE part of the KV cache stays in BF16, and Q is not quantized.
+    - **Indexer cache** (enabled with `--attention_config.indexer_kv_dtype fp8`): both indexer Q and K are first rotated by a Hadamard matrix to spread outliers, and then dynamically quantized per token to FP8 (E4M3) with per-token FP32 scales.
+
+For W4A4C8 accuracy scores, see [Accuracy Evaluation](#7-accuracy-evaluation).

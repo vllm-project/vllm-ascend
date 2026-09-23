@@ -6,9 +6,9 @@ from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.layernorm import AscendFusedRMSNormGated
 from vllm_ascend.utils import enable_custom_op
-from vllm_ascend.utils import is_310p as is_310p_hw
 
 enable_custom_op()
 
@@ -110,7 +110,10 @@ def test_FusedRMSNormGated_dispatches_to_ascend_kernel(default_vllm_config):
     )
 
 
-@pytest.mark.skipif(not is_310p_hw(), reason="310P device unittest case.")
+@pytest.mark.skipif(
+    get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PATCHES),
+    reason="310P device unittest case.",
+)
 @pytest.mark.parametrize("residual", [None, torch.randn(4, 8, dtype=torch.float16)])
 @patch("torch_npu.npu_rms_norm", side_effect=mock_rms_norm)
 @patch("torch_npu.npu_add_rms_norm", side_effect=mock_add_rms_norm)

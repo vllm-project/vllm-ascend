@@ -13,6 +13,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import json
 import math
 import os
 from types import SimpleNamespace
@@ -263,16 +264,13 @@ class TestUtils(TestBase):
         with mock.patch("vllm.__version__", "2.0.0"):
             self.assertTrue(utils.vllm_version_is.__wrapped__("2.0.0"))
             self.assertFalse(utils.vllm_version_is.__wrapped__("1.0.0"))
-        with mock.patch("vllm.__version__", "0.1.dev1+g6e448d0ea.empty"):
-            with mock.patch("vllm_ascend.utils.importlib.util.find_spec") as find_spec:
-                find_spec.side_effect = lambda name: (
-                    object() if name == "vllm.model_executor.layers.attention.pcp" else None
-                )
-                self.assertTrue(utils.vllm_version_is.__wrapped__("0.28.0"))
-                self.assertFalse(utils.vllm_version_is.__wrapped__("0.27.1"))
-            with mock.patch("vllm_ascend.utils.importlib.util.find_spec") as find_spec:
-                find_spec.side_effect = lambda name: (object() if name == "vllm.v1.attention.ops.pcp" else None)
+        for installed in ("0.29.0", "0.29.0+empty"):
+            with mock.patch("vllm.__version__", installed):
+                self.assertTrue(utils.vllm_version_is.__wrapped__("0.29.0"))
                 self.assertFalse(utils.vllm_version_is.__wrapped__("0.28.0"))
+        for installed in ("0.1.dev1+g84030bbe3d.empty", "0.29.0rc1"):
+            with mock.patch("vllm.__version__", installed):
+                self.assertFalse(utils.vllm_version_is.__wrapped__("0.29.0"))
         # Test caching takes effect without leaving a polluted process cache.
         utils.vllm_version_is.cache_clear()
         with mock.patch.dict(os.environ, {"VLLM_VERSION": "1.0.0"}):
@@ -471,7 +469,37 @@ class TestUtils(TestBase):
             self.assertIs(result, weight)
             assert_nz_cast(weight)
 
-        # Test case 7: non-310P quantized weights still convert by default
+        # Test case 7: non-310P NZ mode skips weights with k=1 or n=1.
+        for shape in ((32, 1), (1, 64), (2, 32, 1)):
+            mock_npu_format_cast.reset_mock()
+            with (
+                mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
+                mock.patch(
+                    "vllm_ascend.utils.get_current_hardware_profile",
+                    return_value=get_hardware_profile(AscendDeviceType.A2),
+                ),
+            ):
+                weight = torch.randn(*shape, dtype=torch.float16)
+                result = utils.maybe_trans_nz(weight)
+                self.assertIs(result, weight)
+                mock_npu_format_cast.assert_not_called()
+
+        # Test case 7b: 310P also skips weights with k=1 or n=1.
+        for shape in ((32, 1), (1, 64), (2, 32, 1)):
+            mock_npu_format_cast.reset_mock()
+            with (
+                mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
+                mock.patch(
+                    "vllm_ascend.utils.get_current_hardware_profile",
+                    return_value=get_hardware_profile(AscendDeviceType._310P),
+                ),
+            ):
+                weight = torch.randn(*shape, dtype=torch.float16)
+                result = utils.maybe_trans_nz(weight)
+                self.assertIs(result, weight)
+                mock_npu_format_cast.assert_not_called()
+
+        # Test case 8: non-310P quantized weights still convert by default
         mock_npu_format_cast.reset_mock()
         mock_config.weight_nz_mode = 1
         with (
@@ -490,7 +518,9 @@ class TestUtils(TestBase):
         mock_config.weight_nz_mode = 2
         with (
             mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
-            mock.patch("vllm_ascend.utils.is_310p", return_value=False),
+            mock.patch(
+                "vllm_ascend.utils.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A2)
+            ),
         ):
             weight = torch.empty(32, 64, dtype=torch.float8_e4m3fn)
             result = utils.maybe_trans_nz(weight, customize_dtype=torch.float8_e4m3fn)
@@ -505,7 +535,9 @@ class TestUtils(TestBase):
         mock_config.weight_nz_mode = 2
         with (
             mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
-            mock.patch("vllm_ascend.utils.is_310p", return_value=False),
+            mock.patch(
+                "vllm_ascend.utils.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A2)
+            ),
         ):
             weight = torch.empty(32, 64, dtype=torch.float8_e4m3fn)
             result = utils.maybe_trans_nz(weight, input_dtype=torch_npu.float4_e2m1fn_x2)
@@ -520,7 +552,9 @@ class TestUtils(TestBase):
         mock_config.weight_nz_mode = 2
         with (
             mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
-            mock.patch("vllm_ascend.utils.is_310p", return_value=False),
+            mock.patch(
+                "vllm_ascend.utils.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A2)
+            ),
         ):
             weight = torch.empty(32, 64, dtype=torch.float8_e4m3fn)
             result = utils.maybe_trans_nz(
@@ -540,7 +574,9 @@ class TestUtils(TestBase):
         mock_config.weight_nz_mode = 0
         with (
             mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
-            mock.patch("vllm_ascend.utils.is_310p", return_value=False),
+            mock.patch(
+                "vllm_ascend.utils.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A2)
+            ),
         ):
             weight = torch.randn(32, 64, dtype=torch.float16)
             result = utils.maybe_trans_nz(weight, customize_dtype=torch.float8_e4m3fn)
@@ -743,3 +779,96 @@ class TestIsMtpLayer(TestBase):
         # Mocked/partial hf_configs must not be classified as MTP layers.
         config = SimpleNamespace(num_hidden_layers="80")
         self.assertFalse(utils.is_mtp_layer(config, "model.layers.80.self_attn.attn"))
+
+
+def test_has_layer_idx_is_checked_per_model_instance():
+    target = SimpleNamespace(model=SimpleNamespace(start_layer=0))
+    draft = SimpleNamespace(model=SimpleNamespace())
+
+    assert utils.has_layer_idx(target)
+    assert not utils.has_layer_idx(draft)
+    assert utils.has_layer_idx(target)
+    assert not utils.has_layer_idx(None)
+
+
+class TestIsRlWeightUpdateEnabled(TestBase):
+    """RL weight updates arrive through either deployment switch.
+
+    Both the Ascend RL defaults and the upstream weight transfer service must
+    be recognized on their own: missing either one makes weight owners keep or
+    release the wrong parameters (see ``utils.dispose_layer`` call sites).
+    """
+
+    @staticmethod
+    def _ascend_config(rl_enabled: bool) -> SimpleNamespace:
+        return SimpleNamespace(rl_config=SimpleNamespace(enabled=rl_enabled))
+
+    @staticmethod
+    def _vllm_config(weight_transfer_config: object) -> SimpleNamespace:
+        return SimpleNamespace(weight_transfer_config=weight_transfer_config)
+
+    def test_disabled_without_any_switch(self):
+        with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=self._ascend_config(False)):
+            self.assertFalse(utils.is_rl_weight_update_enabled(self._vllm_config(None)))
+
+    def test_enabled_by_rl_config(self):
+        with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=self._ascend_config(True)):
+            self.assertTrue(utils.is_rl_weight_update_enabled(self._vllm_config(None)))
+
+    def test_enabled_by_weight_transfer_config(self):
+        """`--weight-transfer-config` alone marks a weight update deployment."""
+        with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=self._ascend_config(False)):
+            self.assertTrue(utils.is_rl_weight_update_enabled(self._vllm_config(SimpleNamespace(backend="hccl"))))
+
+    def test_enabled_by_both_switches(self):
+        with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=self._ascend_config(True)):
+            self.assertTrue(utils.is_rl_weight_update_enabled(self._vllm_config(SimpleNamespace(backend="npu_ipc"))))
+
+
+@pytest.fixture
+def physical_device_lookup():
+    with mock.patch("vllm.platforms.current_platform") as platform:
+        yield platform.visible_device_id_to_physical_device_id
+
+
+@pytest.mark.parametrize(
+    "visible_devices,user_device_id,physical_device_id",
+    [(None, 1, 1), ("4,5", 1, 5), ("2", 0, 5)],
+)
+def test_endpoint_uses_platform_physical_id(
+    tmp_path, monkeypatch, physical_device_lookup, visible_devices, user_device_id, physical_device_id
+):
+    # The platform mapping owns runtime/container conversion. The helper must
+    # not derive the host physical ID from ASCEND_RT_VISIBLE_DEVICES itself.
+    if visible_devices is None:
+        monkeypatch.delenv("ASCEND_RT_VISIBLE_DEVICES", raising=False)
+    else:
+        monkeypatch.setenv("ASCEND_RT_VISIBLE_DEVICES", visible_devices)
+    monkeypatch.setenv("ASCEND_LOCAL_COMM_RES", "previous")
+    expected = {"endpoint": f"physical-{physical_device_id}"}
+    (tmp_path / f"ub_endpoint_npu_{physical_device_id}.json").write_text(json.dumps(expected))
+    config = SimpleNamespace(kv_connector_extra_config={"ascend_local_comm_res_path": str(tmp_path)})
+    physical_device_lookup.return_value = physical_device_id
+
+    utils.setup_ascend_local_comm_res(user_device_id, config)
+
+    physical_device_lookup.assert_called_once_with(user_device_id)
+    assert json.loads(utils.os.environ["ASCEND_LOCAL_COMM_RES"]) == expected
+
+
+def test_endpoint_mapping_failure_does_not_fall_back(tmp_path, monkeypatch, physical_device_lookup):
+    monkeypatch.setenv("ASCEND_LOCAL_COMM_RES", "previous")
+    (tmp_path / "ub_endpoint_npu_0.json").write_text('{"wrong": true}')
+    config = SimpleNamespace(kv_connector_extra_config={"ascend_local_comm_res_path": str(tmp_path)})
+    physical_device_lookup.side_effect = RuntimeError("aclrtGetPhyDevIdByUserDevId failed")
+
+    with pytest.raises(RuntimeError, match="aclrtGetPhyDevIdByUserDevId failed"):
+        utils.setup_ascend_local_comm_res(0, config)
+
+    assert utils.os.environ["ASCEND_LOCAL_COMM_RES"] == "previous"
+
+
+@pytest.mark.parametrize("config", [None, SimpleNamespace(kv_connector_extra_config={})])
+def test_no_endpoint_path_does_not_resolve_device(config, physical_device_lookup):
+    utils.setup_ascend_local_comm_res(0, config)
+    physical_device_lookup.assert_not_called()

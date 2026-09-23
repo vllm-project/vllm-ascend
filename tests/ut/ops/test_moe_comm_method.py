@@ -4,6 +4,8 @@ import torch
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
 from tests.ut.base import TestBase
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEFusedExpertsInput, MoEWeights
 from vllm_ascend.ops.fused_moe.dataclass.moe_quant import MoEQuantParams
 from vllm_ascend.ops.fused_moe.dataclass.prepare_finalize import MoEPrepareOutput
@@ -125,6 +127,57 @@ class TestMoECommMethod(TestBase):
         call_args = comm_impl.get_symm_buffer_for_mega_moe.call_args
         self.assertEqual(call_args.kwargs["max_recv_token_num"], 1024)
         mock_warning_once.assert_not_called()
+
+    def test_apply_cann_mega_moe_passes_oai_kwargs_when_supported(self):
+        captured = {}
+
+        def mega_moe(*args, glu_alpha=1.0, glu_bias=0.0, activation_clamp=None, x_active_mask=None, **kwargs):
+            captured["glu_alpha"] = glu_alpha
+            captured["glu_bias"] = glu_bias
+            captured["activation_clamp"] = activation_clamp
+            captured["x_active_mask"] = x_active_mask
+            return torch.zeros(2, 8), torch.zeros(2)
+
+        comm_impl = object.__new__(FusedMC2CommImpl)
+        comm_impl.swiglu_limit = 7.0
+        comm_impl.swiglu_alpha = 1.702
+        comm_impl.swiglu_beta = 1.0
+        comm_impl.mega_moe = mega_moe
+        comm_impl.mega_moe_symm_buffer = MagicMock()
+        comm_impl.token_dispatcher = object.__new__(TokenDispatcherWithMC2)
+        comm_impl.token_dispatcher.max_num_tokens_per_rank = 128
+        comm_impl.token_dispatcher.global_bs = 0
+
+        fused_input = MagicMock()
+        fused_input.hidden_states = torch.zeros(2, 8)
+        fused_input.topk_ids = torch.zeros(2, 2, dtype=torch.int32)
+        fused_input.topk_weights = torch.ones(2, 2)
+        fused_input.quant.quant_type = QuantType.NONE
+        fused_input.routing.mc2_mask = torch.ones(2, dtype=torch.bool)
+        fused_input.activation = "swigluoai_uninterleave"
+        weights = MoEWeights(w1=[torch.zeros(8, 16)], w2=[torch.zeros(16, 8)])
+
+        for device_type in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5):
+            with (
+                self.subTest(device_type=device_type),
+                patch(
+                    "vllm_ascend.ops.fused_moe.moe_comm_method.moe_utils._get_cann_mega_moe_quant_settings",
+                    return_value=(0, None, None),
+                ),
+                patch(
+                    "vllm_ascend.ops.fused_moe.moe_comm_method.get_current_hardware_profile",
+                    return_value=get_hardware_profile(device_type),
+                ),
+            ):
+                comm_impl._apply_cann_mega_moe(fused_input, weights, is_decode_only_node=True)
+
+            self.assertEqual(captured["glu_alpha"], 1.702)
+            self.assertEqual(captured["glu_bias"], 1.0)
+            self.assertEqual(captured["activation_clamp"], 7.0)
+            if device_type == AscendDeviceType.A5:
+                self.assertIsNone(captured["x_active_mask"])
+            else:
+                torch.testing.assert_close(captured["x_active_mask"], torch.ones(2, dtype=torch.int8))
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.PrepareAndFinalizeWithAllGather")

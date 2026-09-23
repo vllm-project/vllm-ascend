@@ -50,6 +50,7 @@ jobs:
       aop_enabled: ${{ steps.resolve.outputs.aop_enabled }}
       bisect_args_json: ${{ steps.resolve.outputs.bisect_args_json }}
       command: ${{ steps.resolve.outputs.command }}
+      pr_number: ${{ steps.resolve.outputs.pr_number }}
     steps:
       - name: Install system dependencies
         run: |
@@ -299,6 +300,7 @@ jobs:
           PR_SHA=$(gh api "$PR_URL" --jq '.head.sha')
           PR_NUMBER=$(gh api "$PR_URL" --jq '.number')
           echo "vllm_ascend_ref=$PR_SHA" >> "$GITHUB_OUTPUT"
+          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
 
           if [ "$TEST_CASES" = "all" ]; then
             if [ "$IS_A3_560T" = "true" ]; then
@@ -362,13 +364,12 @@ jobs:
           BISECT_ARGS_JSON: ${{ needs.authorize.outputs.bisect_args_json }}
         run: |
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
-          REQUEST_ID='${{ github.run_id }}'
           gh workflow run schedule_nightly_test_a2.yaml \
             --repo "$REPO" \
             --ref main \
             -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
             -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
-            -f request_id="$REQUEST_ID" \
+            -f request_id='${{ needs.authorize.outputs.pr_number }}' \
             -f skip_build_image=true \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
@@ -405,13 +406,12 @@ jobs:
           BISECT_ARGS_JSON: ${{ needs.authorize.outputs.bisect_args_json }}
         run: |
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
-          REQUEST_ID='${{ github.run_id }}'
           gh workflow run schedule_nightly_test_a3.yaml \
             --repo "$REPO" \
             --ref main \
             -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
             -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
-            -f request_id="$REQUEST_ID" \
+            -f request_id='${{ needs.authorize.outputs.pr_number }}' \
             -f skip_build_image=true \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
@@ -448,13 +448,12 @@ jobs:
           BISECT_ARGS_JSON: ${{ needs.authorize.outputs.bisect_args_json }}
         run: |
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
-          REQUEST_ID='${{ github.run_id }}'
           gh workflow run schedule_nightly_test_a3_560t.yaml \
             --repo "$REPO" \
             --ref main \
             -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
             -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
-            -f request_id="$REQUEST_ID" \
+            -f request_id='${{ needs.authorize.outputs.pr_number }}' \
             -f skip_build_image=true \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
@@ -490,13 +489,12 @@ jobs:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
-          REQUEST_ID='${{ github.run_id }}'
           gh workflow run schedule_nightly_test_a5.yaml \
             --repo "$REPO" \
             --ref main \
             -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
             -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
-            -f request_id="$REQUEST_ID" \
+            -f request_id='${{ needs.authorize.outputs.pr_number }}' \
             -f skip_build_image=true \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}'
@@ -531,13 +529,12 @@ jobs:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
-          REQUEST_ID='${{ github.run_id }}'
           gh workflow run schedule_nightly_test_310p.yaml \
             --repo "$REPO" \
             --ref main \
             -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
             -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
-            -f request_id="$REQUEST_ID" \
+            -f request_id='${{ needs.authorize.outputs.pr_number }}' \
             -f skip_build_image=true \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}'
@@ -572,13 +569,12 @@ jobs:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
-          REQUEST_ID='${{ github.run_id }}'
           gh workflow run schedule_weekly_test_a2.yaml \
             --repo "$REPO" \
             --ref main \
             -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
             -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
-            -f request_id="$REQUEST_ID" \
+            -f request_id='${{ needs.authorize.outputs.pr_number }}' \
             -f skip_build_image=true \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}'
@@ -614,13 +610,12 @@ jobs:
           BISECT_ARGS_JSON: ${{ needs.authorize.outputs.bisect_args_json }}
         run: |
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
-          REQUEST_ID='${{ github.run_id }}'
           gh workflow run schedule_weekly_test_a3.yaml \
             --repo "$REPO" \
             --ref main \
             -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
             -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
-            -f request_id="$REQUEST_ID" \
+            -f request_id='${{ needs.authorize.outputs.pr_number }}' \
             -f skip_build_image=true \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
@@ -657,13 +652,12 @@ jobs:
           BISECT_ARGS_JSON: ${{ needs.authorize.outputs.bisect_args_json }}
         run: |
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
-          REQUEST_ID='${{ github.run_id }}'
           gh workflow run schedule_weekly_test_a3_560t.yaml \
             --repo "$REPO" \
             --ref main \
             -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
             -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
-            -f request_id="$REQUEST_ID" \
+            -f request_id='${{ needs.authorize.outputs.pr_number }}' \
             -f skip_build_image=true \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
@@ -700,13 +694,12 @@ jobs:
           BISECT_ARGS_JSON: ${{ needs.authorize.outputs.bisect_args_json }}
         run: |
           REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
-          REQUEST_ID='${{ github.run_id }}'
           gh workflow run schedule_weekly_test_310p.yaml \
             --repo "$REPO" \
             --ref main \
             -f test_cases='${{ needs.authorize.outputs.test_cases }}' \
             -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
-            -f request_id="$REQUEST_ID" \
+            -f request_id='${{ needs.authorize.outputs.pr_number }}' \
             -f skip_build_image=true \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \

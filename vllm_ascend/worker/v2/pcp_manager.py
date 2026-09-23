@@ -28,7 +28,6 @@ from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.gpu.states import RequestState
 
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 
@@ -52,6 +51,9 @@ class AscendPCPManager(PCPManager):
     """PCP manager that refreshes Ascend-only local-batch metadata."""
 
     vllm_config: VllmConfig
+    _global_batch_slot_mappings: torch.Tensor | None
+    _gathered_kv_slot_mappings: torch.Tensor | None
+    _pad_slot_id: torch.Tensor
 
     def __init__(
         self,
@@ -78,6 +80,16 @@ class AscendPCPManager(PCPManager):
             dcp_rank=dcp_rank,
             cp_interleave=cp_interleave,
         )
+
+        # PCP supplies its own output buffers to compute_slot_mappings, so their
+        # dtype must match Ascend block-table slots for cache-write operators.
+        if block_tables is not None:
+            slot_dtype = block_tables.slot_mappings.dtype
+            if self._global_batch_slot_mappings is not None:
+                self._global_batch_slot_mappings = torch.empty_like(self._global_batch_slot_mappings, dtype=slot_dtype)
+            if self._gathered_kv_slot_mappings is not None:
+                self._gathered_kv_slot_mappings = torch.empty_like(self._gathered_kv_slot_mappings, dtype=slot_dtype)
+            self._pad_slot_id = self._pad_slot_id.to(slot_dtype)
 
         # vLLM #53515 made the PCP-local buffers persistent and uses them for
         # graph capture. Preserve that ownership while providing the extra CPU
@@ -246,9 +258,6 @@ class AscendPCPManager(PCPManager):
         global_batch = input_batch
         if global_batch.num_draft_tokens > 0:
             local_batch = self._partition_speculative_batch_compat(global_batch)
-        elif vllm_version_is("0.28.0"):
-            # vLLM #53515 added padded_num_tokens on main only.
-            local_batch = super().partition_batch(global_batch)
         else:
             local_batch = super().partition_batch(
                 global_batch,

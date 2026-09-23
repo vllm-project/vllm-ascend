@@ -6,7 +6,13 @@ from types import SimpleNamespace
 from typing import Any
 
 import torch
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, KVCacheTensor, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    KVCacheTensor,
+    UniformTypeKVCacheSpecs,
+)
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 
@@ -21,6 +27,12 @@ def indexer_name(index):
 
 def make_kvpp_config(tp=3):
     return SimpleNamespace(
+        use_v2_model_runner=False,
+        compilation_config=SimpleNamespace(
+            static_forward_context={
+                name: SimpleNamespace(_kvpp_is_draft=name == layer_name(17)) for name in make_kvpp_specs()
+            }
+        ),
         additional_config={"enable_kvpp": True},
         parallel_config=SimpleNamespace(
             tensor_parallel_size=tp,
@@ -61,19 +73,49 @@ def make_kvpp_specs():
     return specs
 
 
+def make_dspark_kvpp_case(tp=3, draft_names=None):
+    config = make_kvpp_config(tp)
+    config.speculative_config.method = "dspark"
+    config.speculative_config.draft_model_config = SimpleNamespace(hf_config=SimpleNamespace(num_hidden_layers=3))
+    config.speculative_config.num_speculative_tokens = 7
+    config.model_config.get_total_num_hidden_layers = lambda: 17
+    specs = make_kvpp_specs()
+    del specs[layer_name(17)]
+    # Qwen3 DSpark numbers its layers after the target. Its layer count is
+    # independent of the target's one MTP layer and of the draft token count.
+    drafts = tuple(draft_names) if draft_names is not None else tuple(layer_name(i) for i in range(17, 20))
+    for name in drafts:
+        specs[name] = FullAttentionSpec(block_size=2, num_kv_heads=2, head_size=8, dtype=torch.float16)
+    config.compilation_config = SimpleNamespace(
+        static_forward_context={
+            name: SimpleNamespace(impl=SimpleNamespace(), _kvpp_is_draft=name in drafts) for name in specs
+        }
+    )
+    return config, specs, drafts
+
+
 def make_cache_config(specs, num_blocks=3):
+    kv_cache_tensors = []
+    for name, spec in specs.items():
+        size = num_blocks * spec.page_size_bytes
+        if "shared_by" in KVCacheTensor.__dataclass_fields__:
+            # vLLM #51718 (0.28.0 release lane): one descriptor per shared layer.
+            kv_cache_tensors.append(
+                KVCacheTensor(size=size, shared_by=[name], offset=0, block_stride=spec.page_size_bytes)
+            )
+        else:
+            kv_cache_tensors.append(
+                KVCacheTensor(
+                    size=size,
+                    layers=[name],
+                    offset=0,
+                    layer_stride=spec.page_size_bytes,
+                    block_stride=spec.page_size_bytes,
+                )
+            )
     return KVCacheConfig(
         num_blocks=num_blocks,
-        kv_cache_tensors=[
-            KVCacheTensor(
-                size=num_blocks * spec.page_size_bytes,
-                layers=[name],
-                offset=0,
-                layer_stride=spec.page_size_bytes,
-                block_stride=spec.page_size_bytes,
-            )
-            for name, spec in specs.items()
-        ],
+        kv_cache_tensors=kv_cache_tensors,
         kv_cache_groups=[
             KVCacheGroupSpec(
                 layer_names=list(specs),
@@ -143,6 +185,10 @@ def make_attention_cache_case(packed):
     )
     config = make_kvpp_config(2)
     config.speculative_config = None
+    # The sparse-SFA-C8 reshape resolves the cache dtype from cache_config,
+    # and the packed MLA caches are int8; "auto" would fall back to the model
+    # dtype and fail on this fake config.
+    config.cache_config.cache_dtype = "int8"
     config.model_config.hf_config.model_type = "deepseek_v2"
     return config, specs, layers
 
