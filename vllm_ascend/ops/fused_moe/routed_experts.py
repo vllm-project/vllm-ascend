@@ -45,6 +45,29 @@ from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
 
 
+def zero_experts_compute(
+    expert_indices: torch.Tensor,
+    expert_scales: torch.Tensor,
+    num_experts: int,
+    zero_expert_type: str,
+    hidden_states: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    if zero_expert_type == "identity":
+        zero_expert_mask = expert_indices < num_experts
+        zero_expert_scales = torch.where(zero_expert_mask, 0.0, expert_scales)
+        result = hidden_states * zero_expert_scales.sum(dim=1, keepdim=True)
+    elif zero_expert_type == "zero":
+        result = None
+    else:
+        raise ValueError(f"Unsupported zero_expert_type: {zero_expert_type}")
+
+    normal_expert_mask = expert_indices >= num_experts
+    expert_indices = torch.where(normal_expert_mask, 0, expert_indices)
+    expert_scales = torch.where(normal_expert_mask, 0.0, expert_scales)
+
+    return expert_indices, expert_scales, result
+
+
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     """Unquantized MoE method with Ascend-specific kernels.
 
@@ -673,6 +696,19 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             enable_force_load_balance=enable_force_load_balance,
             input_ids=input_ids,
         )
+
+        zero_expert_num = getattr(self, "zero_expert_num", 0)
+        zero_expert_type = getattr(self, "zero_expert_type", None)
+        zero_expert_result: torch.Tensor | None = None
+        if zero_expert_num > 0 and zero_expert_type is not None:
+            topk_ids, topk_weights, zero_expert_result = zero_experts_compute(
+                expert_indices=topk_ids,
+                expert_scales=topk_weights,
+                num_experts=self.moe_config.num_logical_experts,
+                zero_expert_type=zero_expert_type,
+                hidden_states=hidden_states,
+            )
+
         self.ascend_pertoken_scale = pertoken_scale
         self.ascend_mc2_mask = mc2_mask
         try:
@@ -687,6 +723,9 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         finally:
             self.ascend_pertoken_scale = None
             self.ascend_mc2_mask = None
+
+        if zero_expert_result is not None:
+            fused_experts_results.routed_out = fused_experts_results.routed_out + zero_expert_result
 
         if self.dynamic_eplb and _EXTRA_CTX.eplb_heat_collection_status:
             expert_tokens = fused_experts_results.expert_tokens
