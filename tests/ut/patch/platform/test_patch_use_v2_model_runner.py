@@ -35,3 +35,4 @@ def test_upstream_pcp_unsupported_feature_is_preserved(monkeypatch):
     # Both supported pins delegate PCP checks to the manager (#53853).
     # The Ascend wrapper must preserve any remaining upstream restriction.
     assert unsupported == ["prefill context parallelism", "diffusion models"]
+
