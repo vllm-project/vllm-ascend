@@ -221,7 +221,7 @@ class TestOProjRowParallelOp(unittest.TestCase):
         ops = [OProjRowParallelOp(layer) for layer in layers]
         for op in ops:
             op.update_attrs()
-        buffer_addresses = {}
+        buffer_addresses: dict[int, list[int]] = {}
 
         with (
             patch("vllm_ascend.ops.linear_op.get_otp_group", return_value=group),
