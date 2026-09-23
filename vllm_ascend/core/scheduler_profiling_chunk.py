@@ -17,9 +17,9 @@
 """Scheduler subclass with profiling-based dynamic chunk sizing.
 
 The ``schedule()`` override below is re-based on the ``Scheduler.schedule()``
-of vLLM v0.29.0 and kept compatible with vLLM main (anchor commit 84030bbe)
-via ``vllm_version_is`` branches.  When the upstream ``schedule()`` method is
-refactored, this override must be updated accordingly.
+of vLLM v0.29.0 and kept compatible with vLLM v0.30.0 and main through
+``vllm_version_is`` branches and capability checks.  When the upstream
+``schedule()`` method is refactored, this override must be updated accordingly.
 """
 
 import inspect
@@ -462,6 +462,19 @@ class ProfilingChunkScheduler(Scheduler):
 
                     if new_blocks is not None:
                         # The request can be scheduled.
+                        break
+
+                    # vLLM 0.30.0 can temporarily fail allocation while a KV
+                    # connector still owns blocks pending deferred release.
+                    # Preempting another request cannot make progress in that
+                    # state. Use capability detection to retain compatibility
+                    # with older connector implementations.
+                    has_pending_block_frees = (
+                        getattr(self.connector, "has_pending_block_frees", None)
+                        if self.connector is not None
+                        else None
+                    )
+                    if has_pending_block_frees is not None and has_pending_block_frees():
                         break
 
                     # The request cannot be scheduled.
