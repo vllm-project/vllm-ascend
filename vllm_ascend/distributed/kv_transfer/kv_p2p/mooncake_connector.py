@@ -134,6 +134,12 @@ class ReqMeta:
     remote_multi_nodes_meta_mapping: dict[str, dict[str, Any]]
     num_prompt_blocks: int
     remote_block_size: int
+    # Per-group remote physical block sizes, indexed by KV cache group id
+    # (same ordering as remote_block_ids). Hybrid layouts mix group sizes
+    # (e.g. 1024-token full-attention blocks next to a 128-token sliding
+    # window group), so the scalar remote_block_size is not enough to expand
+    # block ids on the receiver side. Empty tuple = legacy metadata.
+    remote_block_sizes: tuple[int, ...] = ()
     local_full_block_ids: BlockIds = tuple()
     do_virtual: bool = False
 
@@ -1600,6 +1606,7 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
             remote_multi_nodes_meta_mapping=kv_transfer_params.get("remote_multi_nodes_meta_mapping", {}),
             num_prompt_blocks=kv_transfer_params.get("num_prompt_blocks", 0),
             remote_block_size=kv_transfer_params.get("remote_block_size", 0),
+            remote_block_sizes=tuple(kv_transfer_params.get("remote_block_sizes", ())),
             local_full_block_ids=local_full_block_ids or tuple(),
             do_virtual=kv_transfer_params.get("do_virtual", False),
         )
@@ -2087,6 +2094,7 @@ class MooncakeConnectorScheduler:
             remote_multi_nodes_meta_mapping=self.multi_nodes_meta_mapping,
             num_prompt_blocks=num_prompt_blocks,
             remote_block_size=self.transfer_block_size,
+            remote_block_sizes=tuple(group_info.tokens_per_block for group_info in self.group_transfer_info),
         )
 
     def _port_offset_from_handshake_metadata(
@@ -2909,11 +2917,18 @@ class MooncakeConnectorWorker:
         if group_spec["kv_cache_spec_type"] == "MambaSpec":
             return list(meta.local_block_ids[kv_cache_group_id]), list(meta.remote_block_ids[kv_cache_group_id])
 
-        remote_block_size = meta.remote_block_size or self.block_size
-
         # kernel_size is the shared (P==D) granularity; remote_scale is derived from it.
         local_scale = self._get_kernel_block_scale(layer_indices)
         kernel_size = self.block_size // local_scale
+        # Hybrid layouts mix physical block sizes across groups (e.g. a 128-token
+        # sliding-window group next to 1024-token full-attention groups), so the
+        # scalar remote_block_size is only a fallback for legacy metadata.
+        remote_sizes = meta.remote_block_sizes
+        remote_block_size = (
+            remote_sizes[kv_cache_group_id]
+            if remote_sizes and kv_cache_group_id < len(remote_sizes)
+            else (meta.remote_block_size or self.block_size)
+        )
         assert remote_block_size % kernel_size == 0, (
             f"remote_block_size({remote_block_size}) not divisible by kernel_size({kernel_size})"
         )
