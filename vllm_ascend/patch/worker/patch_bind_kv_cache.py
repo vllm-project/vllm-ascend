@@ -74,9 +74,7 @@ def bind_kv_cache_to_layers(
     """
     for layer_name, kv_cache in kv_caches.items():
         forward_context[layer_name].kv_cache = kv_cache
-    ordered_layer_names = sorted(
-        kv_caches, key=lambda name: extract_layer_index(name, num_attn_module)
-    )
+    ordered_layer_names = sorted(kv_caches, key=lambda name: extract_layer_index(name, num_attn_module))
     utils.share_replayssm_ring_trackers(ordered_layer_names, forward_context, kv_cache_groups)
 
 

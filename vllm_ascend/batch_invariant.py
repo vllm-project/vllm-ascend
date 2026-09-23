@@ -92,12 +92,7 @@ def reduce_sum(
     # unchanged. Everything else (non-last-dim, tuple dim, full reduction when dim
     # is None, CPU tensors, unsupported dtypes, explicit dtype) falls back to the
     # saved native torch.sum.
-    if (
-        dtype is None
-        and x.device.type == "npu"
-        and (dim == -1 or dim == x.dim() - 1)
-        and x.dtype in _SUPPORTED_DTYPES
-    ):
+    if dtype is None and x.device.type == "npu" and (dim == -1 or dim == x.dim() - 1) and x.dtype in _SUPPORTED_DTYPES:
         return torch.ops.batch_invariant_ops.npu_reduce_sum_batch_invariant(x, dim, keepdim)
     if dtype is None:
         return torch_sum(x, dim, keepdim)

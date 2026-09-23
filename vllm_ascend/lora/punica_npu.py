@@ -599,9 +599,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             # Ascend bgmv_expand requires hidden_out >= hidden_in (LoRA rank).
             # The sequence-classification LoRA head (#53555) can have
             # num_labels < rank, so use the matmul fallback.
-            self._add_lora_logits_matmul(
-                y, x, lora_a_stacked, lora_b_stacked, scale, indices
-            )
+            self._add_lora_logits_matmul(y, x, lora_a_stacked, lora_b_stacked, scale, indices)
             y = y.view_as(y_org)
             return
 
@@ -641,12 +639,8 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         if lora_b.ndim == 4:
             lora_b = lora_b[:, 0]
 
-        delta = torch.bmm(
-            x.to(torch.float32).unsqueeze(1), lora_a.to(torch.float32).transpose(1, 2)
-        ).squeeze(1)
-        delta = torch.bmm(
-            delta.unsqueeze(1), lora_b.to(torch.float32).transpose(1, 2)
-        ).squeeze(1)
+        delta = torch.bmm(x.to(torch.float32).unsqueeze(1), lora_a.to(torch.float32).transpose(1, 2)).squeeze(1)
+        delta = torch.bmm(delta.unsqueeze(1), lora_b.to(torch.float32).transpose(1, 2)).squeeze(1)
         delta.mul_(scale)
         delta.masked_fill_(~active.unsqueeze(1), 0)
         y.add_(delta.to(y.dtype))

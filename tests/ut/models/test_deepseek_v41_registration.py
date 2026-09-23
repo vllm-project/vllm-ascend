@@ -8,9 +8,7 @@ from vllm_ascend import models
 
 def _registered_architectures() -> list[str]:
     architectures: list[str] = []
-    with patch.object(
-        models.ModelRegistry, "register_model", side_effect=lambda name, _: architectures.append(name)
-    ):
+    with patch.object(models.ModelRegistry, "register_model", side_effect=lambda name, _: architectures.append(name)):
         models.register_model()
     return architectures
 

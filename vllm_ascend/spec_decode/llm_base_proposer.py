@@ -384,17 +384,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         if self.supports_mm_inputs:
             # Match upstream: a multimodal target can use a text-only drafter.
-            if not _draft_embed_accepts_mm(
-                getattr(self.model, "embed_input_ids", None)
-            ):
+            if not _draft_embed_accepts_mm(getattr(self.model, "embed_input_ids", None)):
                 # Main lane: introspect the draft embed signature instead of
                 # calling it. Drafts that share the target embedding (e.g. K3
                 # DSpark on a kv_consumer) have no own embed_tokens before the
                 # target sharing step, so the runtime probe asserts on
                 # embed_tokens=None.
-                logger.warning(
-                    "Draft model does not support multimodal inputs, falling back to text-only mode"
-                )
+                logger.warning("Draft model does not support multimodal inputs, falling back to text-only mode")
                 self.supports_mm_inputs: bool = False
 
         # Find draft layers (attention layers added by draft model)
