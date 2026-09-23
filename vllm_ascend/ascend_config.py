@@ -193,10 +193,11 @@ class StairConfig:
             below this value.
         rank_transfer_limit: Maximum outgoing and incoming expert transfers
             for each rank in one layer plan. Each direction is counted
-            independently.
+            independently. Minus one removes this limit.
         cross_node_transfer_limit: Maximum outgoing and incoming cross-node
             expert transfers for each node in one layer plan. Each direction
-            is counted independently. Zero disables cross-node transfers.
+            is counted independently. Minus one removes this limit; zero
+            disables cross-node transfers.
         replica_search_num_stages: Number of risk-ordered expert groups handled
             by the FlashTree-style replica search.
         replica_search_radius: Maximum distance from the greedy extra-replica
@@ -239,10 +240,10 @@ class StairConfig:
             value = getattr(self, name)
             if not math.isfinite(value) or not 0 < value <= 1:
                 raise ValueError(f"stair_config.{name} must be between zero and one")
-        if self.rank_transfer_limit < 1:
-            raise ValueError("stair_config.rank_transfer_limit must be positive")
-        if self.cross_node_transfer_limit < 0:
-            raise ValueError("stair_config.cross_node_transfer_limit must be non-negative")
+        if self.rank_transfer_limit != -1 and self.rank_transfer_limit < 1:
+            raise ValueError("stair_config.rank_transfer_limit must be -1 or positive")
+        if self.cross_node_transfer_limit < -1:
+            raise ValueError("stair_config.cross_node_transfer_limit must be at least -1")
         if not 1 <= self.replica_search_num_stages <= 8:
             raise ValueError("stair_config.replica_search_num_stages must be between 1 and 8")
         if not 0 <= self.replica_search_radius <= 32:

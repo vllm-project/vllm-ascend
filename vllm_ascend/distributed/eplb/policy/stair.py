@@ -656,6 +656,10 @@ class StairEplbPolicy(AbstractEplbPolicy):
                     continue
                 incoming[dst_rank] += 1
                 demands.append((dst_rank, slot, int(expert)))
+        if rank_transfer_limit == -1:
+            rank_transfer_limit = len(demands)
+        if cross_node_transfer_limit == -1:
+            cross_node_transfer_limit = len(demands)
         if np.any(incoming > rank_transfer_limit):
             return None
 
@@ -679,8 +683,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
                 if source_usage[src_rank] >= rank_transfer_limit or crosses_node > remaining_cross_transfers:
                     continue
                 if crosses_node and (
-                    cross_out[src_node] >= cross_node_transfer_limit
-                    or cross_in[dst_node] >= cross_node_transfer_limit
+                    cross_out[src_node] >= cross_node_transfer_limit or cross_in[dst_node] >= cross_node_transfer_limit
                 ):
                     continue
                 source_usage[src_rank] += 1
@@ -801,7 +804,8 @@ class StairEplbPolicy(AbstractEplbPolicy):
             raise ValueError("num_ranks must be a positive integer")
         controls = rank_transfer_limit, cross_node_transfer_limit, backtrack_limit
         invalid_type = any(isinstance(value, bool) or not isinstance(value, int) for value in controls)
-        if invalid_type or rank_transfer_limit < 1 or cross_node_transfer_limit < 0 or backtrack_limit < 0:
+        invalid_limits = rank_transfer_limit < -1 or rank_transfer_limit == 0 or cross_node_transfer_limit < -1
+        if invalid_type or invalid_limits or backtrack_limit < 0:
             raise ValueError("STAIR transfer limits and backtrack_limit must be valid integers")
         replicas = replicas.astype(np.int64, copy=False)
         total_slots = int(replicas.sum())
@@ -962,7 +966,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
             risks,
             current_placement,
             num_ranks,
-            num_ranks * config.rank_transfer_limit,
+            current_placement.size if config.rank_transfer_limit == -1 else num_ranks * config.rank_transfer_limit,
             num_stages=config.replica_search_num_stages,
             budget_radius=config.replica_search_radius,
             beam_size=config.replica_search_beam_size,
@@ -1242,7 +1246,8 @@ class StairEplbPolicy(AbstractEplbPolicy):
             raise ValueError("rank_node_ids must contain one integer per rank")
         controls = num_experts, rank_transfer_limit, cross_node_transfer_limit
         invalid_type = any(isinstance(value, bool) or not isinstance(value, int) for value in controls)
-        if invalid_type or num_experts < 1 or rank_transfer_limit < 1 or cross_node_transfer_limit < 0:
+        invalid_limits = rank_transfer_limit < -1 or rank_transfer_limit == 0 or cross_node_transfer_limit < -1
+        if invalid_type or num_experts < 1 or invalid_limits:
             raise ValueError("STAIR expert count and transfer limits are invalid")
 
         ratios = np.asarray(plan.predicted_mean_ratios)
@@ -1286,13 +1291,15 @@ class StairEplbPolicy(AbstractEplbPolicy):
                         continue
                     outgoing[src_rank] += 1
                     incoming[dst_rank] += 1
-                    if outgoing[src_rank] > rank_transfer_limit or incoming[dst_rank] > rank_transfer_limit:
+                    if rank_transfer_limit != -1 and (
+                        outgoing[src_rank] > rank_transfer_limit or incoming[dst_rank] > rank_transfer_limit
+                    ):
                         raise ValueError("STAIR plan exceeds a per-rank transfer limit")
                     src_node, dst_node = int(node_ids[src_rank]), int(node_ids[dst_rank])
                     if src_node != dst_node:
                         cross_out[src_node] = cross_out.get(src_node, 0) + 1
                         cross_in[dst_node] = cross_in.get(dst_node, 0) + 1
-                        if (
+                        if cross_node_transfer_limit != -1 and (
                             cross_out[src_node] > cross_node_transfer_limit
                             or cross_in[dst_node] > cross_node_transfer_limit
                         ):

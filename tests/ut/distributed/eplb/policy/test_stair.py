@@ -545,6 +545,10 @@ class TestStairLoadStatistics(unittest.TestCase):
         sources = StairEplbPolicy._migration_sources(current, target, 2, 1, expert_sources, node_ids)
 
         np.testing.assert_array_equal(sources, [[1, 1], [0, 2], [0, 2]])
+        np.testing.assert_array_equal(
+            StairEplbPolicy._migration_sources(current, target, -1, 1, expert_sources, node_ids),
+            sources,
+        )
 
     def test_migration_sources_reassign_earlier_demand(self):
         current = np.array([[2, 4], [3, 5], [0, 1], [0, 6]])
@@ -570,15 +574,17 @@ class TestStairLoadStatistics(unittest.TestCase):
         sources = StairEplbPolicy._migration_sources(current, target, 1, 2, expert_sources, node_ids)
 
         np.testing.assert_array_equal(sources, [[2], [3], [0], [1]])
+        np.testing.assert_array_equal(
+            StairEplbPolicy._migration_sources(current, target, 1, -1, expert_sources, node_ids),
+            sources,
+        )
 
     def test_migration_sources_allow_disabling_cross_node_transfers(self):
         current = np.array([[0], [1]])
         target = np.array([[1], [0]])
         expert_sources = [[0], [1]]
 
-        self.assertIsNone(
-            StairEplbPolicy._migration_sources(current, target, 1, 0, expert_sources, np.array([0, 1]))
-        )
+        self.assertIsNone(StairEplbPolicy._migration_sources(current, target, 1, 0, expert_sources, np.array([0, 1])))
 
     def test_migration_sources_follow_multi_hop_augmenting_path(self):
         current = np.array([[3, 4, 5], [0, 2, 6], [0, 1, 7], [1, 8, 9]])
@@ -599,12 +605,8 @@ class TestStairLoadStatistics(unittest.TestCase):
         target = np.array([[0], [-1], [-1]])
         expert_sources = [[1, 2], [0]]
 
-        same_node = StairEplbPolicy._migration_sources(
-            current, target, 1, 1, expert_sources, np.array([0, 1, 0])
-        )
-        tied = StairEplbPolicy._migration_sources(
-            current, target, 1, 1, expert_sources, np.zeros(3, dtype=np.int64)
-        )
+        same_node = StairEplbPolicy._migration_sources(current, target, 1, 1, expert_sources, np.array([0, 1, 0]))
+        tied = StairEplbPolicy._migration_sources(current, target, 1, 1, expert_sources, np.zeros(3, dtype=np.int64))
 
         self.assertEqual(same_node[0, 0], 2)
         self.assertEqual(tied[0, 0], 1)
@@ -616,9 +618,7 @@ class TestStairLoadStatistics(unittest.TestCase):
         target[1, 0] = 1
         expert_sources = [np.where(current == expert)[0].tolist() for expert in range(8)]
 
-        sources = StairEplbPolicy._migration_sources(
-            current, target, 1, 1, expert_sources, np.array([0, 0, 0, 0, 1])
-        )
+        sources = StairEplbPolicy._migration_sources(current, target, 1, 1, expert_sources, np.array([0, 0, 0, 0, 1]))
 
         # Taking rank 2 for expert 0 would force expert 1 to cross nodes.
         np.testing.assert_array_equal(sources[:2, 0], [3, 2])
@@ -1062,7 +1062,7 @@ class TestStairLoadStatistics(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "does not own"):
             StairEplbPolicy.validate_plan(current, plan, 4, np.zeros(2, dtype=np.int64), 1, 1)
 
-    def test_validate_plan_rejects_invalid_controls_and_pair_limit(self):
+    def test_validate_plan_accepts_unlimited_transfer_budgets(self):
         current = np.array([[[0, 1], [2, 3], [4, 5]]])
         plan = StairPlan(
             rank_expert_ids=np.array([[[2, 3], [0, 1], [4, 5]]]),
@@ -1071,7 +1071,18 @@ class TestStairLoadStatistics(unittest.TestCase):
             predicted_mean_ratios=np.array([1.0]),
         )
 
-        invalid_controls = ((6.0, 1, 1), (6, 0, 1), (6, 1.5, 1), (6, 1, -1), (6, 1, True))
+        StairEplbPolicy.validate_plan(current, plan, 6, np.arange(3), -1, -1)
+
+    def test_validate_plan_rejects_invalid_controls(self):
+        current = np.array([[[0, 1], [2, 3], [4, 5]]])
+        plan = StairPlan(
+            rank_expert_ids=np.array([[[2, 3], [0, 1], [4, 5]]]),
+            source_rank_ids=np.array([[[1, 1], [0, 0], [2, 2]]]),
+            source_slot_ids=np.array([[[0, 1], [0, 1], [0, 1]]]),
+            predicted_mean_ratios=np.array([1.0]),
+        )
+
+        invalid_controls = ((6.0, 1, 1), (6, 0, 1), (6, 1.5, 1), (6, 1, -2), (6, 1, True))
         for num_experts, rank_limit, node_limit in invalid_controls:
             with self.subTest(controls=(num_experts, rank_limit, node_limit)), self.assertRaises(ValueError):
                 StairEplbPolicy.validate_plan(
