@@ -386,9 +386,24 @@ class AscendEplbState(_eplb_state.EplbState):
             return None
 
         if use_custom_async_stats:
+            eplb_config = getattr(self.parallel_config, "eplb_config", None)
+            timing_enabled = bool(getattr(eplb_config, "log_balancedness", False))
+            start_event = torch.Event(enable_timing=True) if timing_enabled else None
+            end_event = torch.Event(enable_timing=True) if timing_enabled else None
+            if start_event is not None:
+                start_event.record()
+            started_at = time.perf_counter()
             global_load_stats = self.collect_global_load_stats()
             if global_load_stats is not None:
                 self.publish_async_load_stats(global_load_stats)
+                device_ms = 0.0
+                if end_event is not None:
+                    end_event.record()
+                    end_event.synchronize()
+                    device_ms = start_event.elapsed_time(end_event)
+                for model_state in self.model_states.values():
+                    model_state._eplb_stats_ms = (time.perf_counter() - started_at) * 1000
+                    model_state._eplb_stats_device_ms = device_ms
             result = None
         else:
             result = super().rearrange(

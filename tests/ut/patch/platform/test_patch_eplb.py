@@ -3,7 +3,7 @@
 
 from contextlib import contextmanager
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import numpy as np
 import pytest
@@ -450,11 +450,12 @@ def test_async_workspace_refreshes_layer_and_clears_target_after_last(monkeypatc
     assert model_state._last_committed_mean_ratios[layer_idx] == 1.2
     refresh.assert_called_once_with(model_state, layer_idx)
     if is_last_layer:
-        log_info.assert_called_once_with(
-            "%s: model=%s rank_transfers=%d",
-            patch_eplb.ASYNC_EPLB_CYCLE_COMMITTED_LOG,
-            "model",
-            2,
+        assert call(
+            "%s: model=%s rank_transfers=%d", patch_eplb.ASYNC_EPLB_CYCLE_COMMITTED_LOG, "model", 2
+        ) in log_info.call_args_list
+        assert any(
+            logged_call.args and logged_call.args[0].startswith("EPLB phase timing:")
+            for logged_call in log_info.call_args_list
         )
     else:
         log_info.assert_not_called()
@@ -486,7 +487,7 @@ def test_async_workspace_logs_stair_imbalance_after_commit(monkeypatch):
     patch_eplb._wrap_move_to_workspace(original_move)(model_state, 0)
 
     assert model_state._last_committed_mean_ratios[0] == 1.1
-    log_info.assert_called_once_with(
+    assert call(
         "%s: model=%s mean=%.4f->%.4f p95=%.4f->%.4f changed_layers=%d rank_transfers=%d",
         patch_eplb.ASYNC_EPLB_CYCLE_COMMITTED_LOG,
         "model",
@@ -496,7 +497,31 @@ def test_async_workspace_logs_stair_imbalance_after_commit(monkeypatch):
         1.2,
         1,
         2,
+    ) in log_info.call_args_list
+
+
+def test_result_ready_timing_accumulates_poll_cost(monkeypatch):
+    monkeypatch.setattr(patch_eplb, "perf_counter", MagicMock(side_effect=[1.0, 1.005]))
+    model_state = SimpleNamespace()
+    wrapped = patch_eplb._wrap_result_ready(lambda _state, _model_state: True)
+
+    assert wrapped(object(), model_state)
+    assert model_state._eplb_ready_poll_count == 1
+    assert model_state._eplb_ready_poll_ms == pytest.approx(5.0)
+
+
+def test_rearrange_timing_records_main_thread_cost(monkeypatch):
+    monkeypatch.setattr(patch_eplb, "perf_counter", MagicMock(side_effect=[2.0, 2.007]))
+    model_state = SimpleNamespace()
+    state = SimpleNamespace(
+        parallel_config=SimpleNamespace(eplb_config=SimpleNamespace(log_balancedness=False)),
+        model_states={"model": model_state},
     )
+    wrapped = patch_eplb._wrap_rearrange_timing(lambda _state: "published")
+
+    assert wrapped(state) == "published"
+    assert model_state._eplb_stats_ms == pytest.approx(7.0)
+    assert model_state._eplb_stats_device_ms == 0.0
 
 
 def test_async_workspace_refresh_failure_keeps_target_and_defers_ack(monkeypatch):

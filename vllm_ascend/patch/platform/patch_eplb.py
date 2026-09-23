@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import wraps
 from inspect import signature
+from time import perf_counter
 from typing import Any, Literal, get_args
 
 import numpy as np
@@ -246,6 +247,7 @@ def _wrap_async_rebalance(original_rebalance):
 
     @wraps(original_rebalance)
     def _async_rebalance(*args, **kwargs):
+        started_at = perf_counter()
         bound = rebalance_signature.bind(*args, **kwargs)
         model_state = bound.arguments["model_state"]
         eplb_state = bound.arguments["eplb_state"]
@@ -277,6 +279,11 @@ def _wrap_async_rebalance(original_rebalance):
                 raise RuntimeError("EPLB policy returned a non-CPU expert mapping")
         if _has_explicit_sources(target):
             setattr(communicator, _EXPLICIT_TRANSFER_TARGET_ATTR, target)
+        policy = getattr(eplb_state, "policy", None)
+        model_state._eplb_plan_timing = (
+            type(policy).__name__ if policy is not None else "default",
+            (perf_counter() - started_at) * 1000,
+        )
         return target
 
     setattr(_async_rebalance, _PATCH_MARKER, True)
@@ -292,15 +299,16 @@ def _wrap_async_transfer(original_transfer):
 
     @wraps(original_transfer)
     def _async_transfer(*args, **kwargs):
+        started_at = perf_counter()
         bound = transfer_signature.bind(*args, **kwargs)
         bound.apply_defaults()
         values = bound.arguments
         communicator = values["communicator"]
         full_target = getattr(communicator, _EXPLICIT_TRANSFER_TARGET_ATTR, None)
-        if full_target is None or not _has_explicit_sources(full_target):
-            return original_transfer(*bound.args, **bound.kwargs)
-        layer_idx = values["layer_idx"]
         try:
+            if full_target is None or not _has_explicit_sources(full_target):
+                return original_transfer(*bound.args, **bound.kwargs)
+            layer_idx = values["layer_idx"]
             if values["is_profile"] or values["rank_mapping"] is not None:
                 return original_transfer(*bound.args, **bound.kwargs)
             layer_target = full_target[layer_idx]
@@ -321,6 +329,9 @@ def _wrap_async_transfer(original_transfer):
         except Exception:
             _clear_transfer_target(communicator, full_target)
             raise
+        finally:
+            timings = communicator.__dict__.setdefault("_eplb_transfer_timings", [])
+            timings.append((perf_counter() - started_at) * 1000)
 
     setattr(_async_transfer, _PATCH_MARKER, True)
     return _async_transfer
@@ -419,6 +430,56 @@ def _move_changed_layer_to_workspace(model_state, ep_rank: int) -> None:
     result.consumed_event.record()
 
 
+def _wrap_result_ready(original_result_ready):
+    @wraps(original_result_ready)
+    def _all_ranks_result_ready(state, model_state):
+        started_at = perf_counter()
+        result = original_result_ready(state, model_state)
+        elapsed_ms = (perf_counter() - started_at) * 1000
+        model_state._eplb_ready_poll_count = getattr(model_state, "_eplb_ready_poll_count", 0) + 1
+        model_state._eplb_ready_poll_ms = getattr(model_state, "_eplb_ready_poll_ms", 0.0) + elapsed_ms
+        return result
+
+    setattr(_all_ranks_result_ready, _PATCH_MARKER, True)
+    return _all_ranks_result_ready
+
+
+def _patch_result_ready_timing() -> None:
+    original_result_ready = _eplb_state.EplbState._all_ranks_result_ready
+    if not getattr(original_result_ready, _PATCH_MARKER, False):
+        _eplb_state.EplbState._all_ranks_result_ready = _wrap_result_ready(original_result_ready)
+
+
+def _wrap_rearrange_timing(original_rearrange):
+    @wraps(original_rearrange)
+    def _rearrange(state, *args, **kwargs):
+        timing_enabled = state.parallel_config.eplb_config.log_balancedness
+        start_event = torch.Event(enable_timing=True) if timing_enabled else None
+        end_event = torch.Event(enable_timing=True) if timing_enabled else None
+        if start_event is not None:
+            start_event.record()
+        started_at = perf_counter()
+        result = original_rearrange(state, *args, **kwargs)
+        device_ms = 0.0
+        if end_event is not None:
+            end_event.record()
+            end_event.synchronize()
+            device_ms = start_event.elapsed_time(end_event)
+        for model_state in state.model_states.values():
+            model_state._eplb_stats_ms = (perf_counter() - started_at) * 1000
+            model_state._eplb_stats_device_ms = device_ms
+        return result
+
+    setattr(_rearrange, _PATCH_MARKER, True)
+    return _rearrange
+
+
+def _patch_rearrange_timing() -> None:
+    original_rearrange = _eplb_state.EplbState.rearrange
+    if not getattr(original_rearrange, _PATCH_MARKER, False):
+        _eplb_state.EplbState.rearrange = _wrap_rearrange_timing(original_rearrange)
+
+
 def _patch_changed_layer_transfer() -> None:
     original_worker = _async_worker.transfer_run_periodically
     if not getattr(original_worker, _PATCH_MARKER, False):
@@ -432,6 +493,7 @@ def _wrap_move_to_workspace(original_move):
 
     @wraps(original_move)
     def _move_to_workspace(*args, **kwargs):
+        commit_started_at = perf_counter()
         bound = move_signature.bind(*args, **kwargs)
         model_state = bound.arguments["model_state"]
         pending_result = model_state.pending_result
@@ -462,6 +524,9 @@ def _wrap_move_to_workspace(original_move):
                     predicted_ratio = full_target.predicted_mean_ratios[layer_idx]
                     if np.isfinite(predicted_ratio):
                         model_state._last_committed_mean_ratios[layer_idx] = predicted_ratio
+            model_state._eplb_commit_ms = getattr(model_state, "_eplb_commit_ms", 0.0) + (
+                perf_counter() - commit_started_at
+            ) * 1000
             if is_last_result:
                 if layer_idx is not None and hasattr(model_state, "_load_mapping_generation"):
                     model_state._load_mapping_generation += 1
@@ -493,6 +558,27 @@ def _wrap_move_to_workspace(original_move):
                                 model_state.model_name,
                                 rank_transfers,
                             )
+                plan_name, plan_ms = getattr(model_state, "_eplb_plan_timing", ("unknown", 0.0))
+                transfer_timings = getattr(model_state.communicator, "_eplb_transfer_timings", [])
+                logger.info(
+                    "EPLB phase timing: model=%s rank=%d policy=%s stats_ms=%.3f stats_device_ms=%.3f plan_ms=%.3f "
+                    "transfer_ms=%.3f transfer_layers=%d ready_poll_ms=%.3f ready_polls=%d commit_ms=%.3f",
+                    model_state.model_name,
+                    bound.arguments["ep_rank"],
+                    plan_name,
+                    getattr(model_state, "_eplb_stats_ms", 0.0),
+                    getattr(model_state, "_eplb_stats_device_ms", 0.0),
+                    plan_ms,
+                    sum(transfer_timings),
+                    len(transfer_timings),
+                    getattr(model_state, "_eplb_ready_poll_ms", 0.0),
+                    getattr(model_state, "_eplb_ready_poll_count", 0),
+                    model_state._eplb_commit_ms,
+                )
+                model_state._eplb_ready_poll_count = 0
+                model_state._eplb_ready_poll_ms = 0.0
+                model_state._eplb_commit_ms = 0.0
+                model_state.communicator.__dict__.pop("_eplb_transfer_timings", None)
         finally:
             if pending_result is not None and consumed_event is not None:
                 pending_result.consumed_event = consumed_event
@@ -516,4 +602,6 @@ _patch_initial_expert_layout()
 _patch_communicator_factory()
 _patch_explicit_transfer_execution()
 _patch_changed_layer_transfer()
+_patch_result_ready_timing()
+_patch_rearrange_timing()
 _patch_async_move_to_workspace()
