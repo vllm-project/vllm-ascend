@@ -19,6 +19,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 import torch
+from vllm.config import get_current_vllm_config
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
@@ -282,6 +283,64 @@ class FusedMC2CommImpl(MoECommMethod):
         self.swiglu_alpha = 1.0 if moe_config.swiglu_alpha is None else moe_config.swiglu_alpha
         self.swiglu_beta = 0.0 if moe_config.swiglu_beta is None else moe_config.swiglu_beta
 
+        # Tokens this rank hands to the fused MoE operator in one prefill step.
+        # get_current_vllm_config() is only valid while the model is built, so the
+        # value is cached here instead of being read from the operator call path.
+        vllm_config = get_current_vllm_config()
+        tp_size = max(1, int(vllm_config.parallel_config.tensor_parallel_size))
+        self._prefill_tokens_per_rank = int(vllm_config.scheduler_config.max_num_batched_tokens) // tp_size
+
+    # Worst-case imbalance of the per-rank post-dispatch load over its mean,
+    # measured on GLM-5.2 w4a8 / A3 / EP16: 70990 / (2048 * 8) = 4.33, rounded up
+    # to the next power of two.
+    _FUSED_MC2_LOAD_IMBALANCE_FACTOR = 8
+
+    def _fused_mc2_capacity(self) -> int:
+        """Capacity for `dispatch_ffn_combine`'s per-rank output buffers.
+
+        The operator silently drops the output of every token beyond
+        `max_output_size`, hence it has to cover the post-dispatch load of a
+        prefill chunk: `tokens per rank * num_experts_per_tok`, times the
+        measured imbalance. Derived from compile-time configuration only, so
+        that every EP rank ends up with the same value.
+        """
+        tokens_per_rank = int(getattr(self, "_prefill_tokens_per_rank", 0))
+        mean_load = tokens_per_rank * int(self.moe_config.experts_per_token)
+        required = max(1, mean_load * self._FUSED_MC2_LOAD_IMBALANCE_FACTOR)
+        configured = int(get_ascend_config().mega_moe_max_tokens)
+        if required > configured:
+            logger.warning_once(
+                "dispatch_ffn_combine needs %d tokens per rank per dispatch (%d tokens per rank * "
+                "num_experts_per_tok %d * load imbalance %d) but additional_config.mega_moe_max_tokens "
+                "only provides %d. max_output_size is raised to %d: below that value the operator "
+                "silently drops tokens, which corrupts long-context output.",
+                required,
+                tokens_per_rank,
+                int(self.moe_config.experts_per_token),
+                self._FUSED_MC2_LOAD_IMBALANCE_FACTOR,
+                configured,
+                required,
+            )
+        return max(configured, required)
+
+    def _verify_fused_mc2_no_truncation(self, num_tokens: int, topk: int, max_output_size: int) -> None:
+        # Truncation requires sum(expert_token_nums) > max_output_size, and the
+        # per-rank post-dispatch count can never exceed
+        # num_tokens * topk * ep_world_size, so skip the device sync whenever
+        # truncation is provably impossible (keeps decode sync-free).
+        ep_world_size = max(1, int(getattr(self.token_dispatcher, "ep_world_size", 0) or 0))
+        if num_tokens * topk * ep_world_size < max_output_size:
+            return
+        received = int(self.expert_token_nums.sum().item())
+        if received >= max_output_size:
+            raise RuntimeError(
+                f"dispatch_ffn_combine truncated its work: this rank received {received} tokens "
+                f"after dispatch while max_output_size={max_output_size}, so the fused MoE output "
+                f"of the excess tokens was silently dropped. Raise additional_config."
+                f"mega_moe_max_tokens above {received} (or lower --max-num-batched-tokens) before "
+                f"serving traffic."
+            )
+
     def pad_and_split_input_ids(self, input_ids):
         return self.prepare_finalize.pad_and_split_input_ids(input_ids)  # type: ignore[attr-defined]
 
@@ -383,22 +442,24 @@ class FusedMC2CommImpl(MoECommMethod):
         if is_decode_only_node:
             max_recv_token_num = absolute_safe_max_recv_token_num
         else:
-            # P nodes and PD-mixed nodes use the configured value. This keeps
-            # the existing memory/performance tradeoff for prefill workloads.
-            max_recv_token_num = get_ascend_config().mega_moe_max_tokens
-            # absolute_safe_max_recv_token_num is the max value required by mega moe api
-            if max_recv_token_num > absolute_safe_max_recv_token_num:
-                max_recv_token_num = absolute_safe_max_recv_token_num
+            # P nodes and PD-mixed nodes used the configured value verbatim. It is
+            # only a reference value, and it also sizes dispatch_ffn_combine's
+            # max_output_size, so a too small value silently degrades the output of
+            # both buffers. Use the same rank-invariant capacity as the operator,
+            # clamped to the maximum the mega moe api accepts.
+            capacity = self._fused_mc2_capacity()
+            max_recv_token_num = min(capacity, absolute_safe_max_recv_token_num)
             logger.warning_once(
-                "MegaMoe symm buffer: max_recv_token_num is set from "
-                "mega_moe_max_tokens=%d (reference value) on a P or PD-mixed "
-                "node. If the actual per-rank received token count after "
-                "dispatch exceeds this value, precision degradation will "
-                "occur. The absolute safe upper bound is %d "
-                "(num_max_tokens_per_rank=%d, ep_world_size=%d, num_topk=%d, "
+                "MegaMoe symm buffer: max_recv_token_num is set to %d on a P or "
+                "PD-mixed node (mega_moe_max_tokens=%d is a reference value that "
+                "also sizes dispatch_ffn_combine's max_output_size). If the actual "
+                "per-rank received token count after dispatch exceeds this value, "
+                "precision degradation will occur. The absolute safe upper bound is "
+                "%d (num_max_tokens_per_rank=%d, ep_world_size=%d, num_topk=%d, "
                 "expert_per_rank=%d). Please tune mega_moe_max_tokens in "
                 "additional_config based on actual expert load distribution.",
                 max_recv_token_num,
+                capacity,
                 absolute_safe_max_recv_token_num,
                 num_max_tokens_per_rank,
                 int(self.token_dispatcher.ep_world_size),
@@ -549,23 +610,29 @@ class FusedMC2CommImpl(MoECommMethod):
                     "w1_scale_bias and w2_scale_bias cannot be None when enable_fused_mc2=1."
                 )
 
+                num_tokens = fused_experts_input.hidden_states.shape[0]
+                max_output_size = self._fused_mc2_capacity()
+
                 out = torch.empty_like(fused_experts_input.hidden_states)
                 torch.ops._C_ascend.dispatch_ffn_combine(  # type: ignore
                     x=fused_experts_input.hidden_states,
                     weight1=weights.w1,
                     weight2=weights.w2,
-                    expert_idx=fused_experts_input.topk_ids,
+                    expert_idx=fused_experts_input.topk_ids.clone(),
                     scale1=weights.w1_scale,
                     scale2=weights.w2_scale,
                     bias1=weights.w1_scale_bias,
                     bias2=weights.w2_scale_bias,
                     probs=fused_experts_input.topk_weights.to(torch.float32),
                     group=self.token_dispatcher.moe_all_to_all_group_name,
-                    max_output_size=get_ascend_config().mega_moe_max_tokens,
+                    max_output_size=max_output_size,
                     swiglu_limit=self.swiglu_limit,
                     x_active_mask=fused_experts_input.routing.mc2_mask,
                     out=out,
                     expert_token_nums=self.expert_token_nums,
+                )
+                self._verify_fused_mc2_no_truncation(
+                    num_tokens, int(self.moe_config.experts_per_token), max_output_size
                 )
                 expert_tokens = self.expert_token_nums
         else:
