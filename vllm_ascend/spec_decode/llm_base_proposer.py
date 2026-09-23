@@ -475,6 +475,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self._maybe_share_topk_indices(target_language_model)
         self._maybe_share_lm_head(target_language_model)
 
+        # Align draft weights before precomputing draft hidden states.
+        if self.method == "dspark" and hasattr(self.model, "post_process"):
+            with set_current_vllm_config(self.vllm_config):
+                self.model.post_process(self.vllm_config)
+
         if (
             self.parallel_drafting
             and self.pass_hidden_states_to_model
