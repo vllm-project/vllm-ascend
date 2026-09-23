@@ -1,6 +1,6 @@
 from copy import copy
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, TypeVar
 
 import numpy as np
 import torch
@@ -10,6 +10,7 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed.parallel_state import get_pcp_group
 from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import (
+    MLAAttention,
     MLACommonMetadataBuilder,
 )
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
@@ -119,6 +120,20 @@ class AscendMLABackend(AttentionBackend):
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int]:
         return [128]
+
+
+class AscendMLAAttention(MLAAttention):
+    """Ascend ``MLAAttention`` layer.
+
+    Upstream gates PCP+DCP on the layer ``supports_pcp_dcp`` ClassVar (default
+    False) inside ``__init__``, so the Ascend opt-in must live on the class
+    (mirroring upstream ``DeepseekV32Attention``) rather than being assigned
+    onto the shared upstream ``MLAAttention``. PCP+DCP is implemented by the
+    Ascend attention impls (AscendMlaDCPImpl / AscendSFAPCPDCPImpl) selected
+    by the Ascend backends.
+    """
+
+    supports_pcp_dcp: ClassVar[bool] = True
 
 
 @dataclass
