@@ -470,9 +470,7 @@ class ProfilingChunkScheduler(Scheduler):
                     # state. Use capability detection to retain compatibility
                     # with older connector implementations.
                     has_pending_block_frees = (
-                        getattr(self.connector, "has_pending_block_frees", None)
-                        if self.connector is not None
-                        else None
+                        getattr(self.connector, "has_pending_block_frees", None) if self.connector is not None else None
                     )
                     if has_pending_block_frees is not None and has_pending_block_frees():
                         break
