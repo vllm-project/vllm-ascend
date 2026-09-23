@@ -20,8 +20,10 @@ from dataclasses import dataclass
 from typing import cast
 
 import torch
+from vllm.distributed.parallel_state import get_ep_group
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
+from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
 
 from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
@@ -392,7 +394,11 @@ class FusedMC2CommImpl(MoECommMethod):
         # setup_moe_comm_method), which is where global_bs / ep_world_size live.
         # Assert it so mypy resolves those attributes off the base dispatcher.
         assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2)
-        group = get_mc2_group().device_group
+        mc2_group = get_mc2_group()
+        group = mc2_group.device_group
+        ft_enabled = getattr(self.token_dispatcher, "_ft_enabled", False)
+        if ft_enabled and get_ep_group().ranks != mc2_group.ranks:
+            raise ValueError("MegaMoe fault tolerance requires identical EP and MC2 rank order.")
         # The sym buffer is allocated by get_symm_buffer_for_mega_moe, a
         # collective handshake over the EP (mc2) group. Its shape params —
         # especially num_max_tokens_per_rank — MUST be identical on every EP
@@ -462,7 +468,7 @@ class FusedMC2CommImpl(MoECommMethod):
             self.token_dispatcher.global_bs,
         )
 
-        return self.get_symm_buffer_for_mega_moe(
+        symm_buffer = self.get_symm_buffer_for_mega_moe(
             group,
             num_experts,
             num_max_tokens_per_rank,
@@ -478,6 +484,16 @@ class FusedMC2CommImpl(MoECommMethod):
             dispatch_quant_mode=dispatch_quant_mode,
             dispatch_quant_out_dtype=dispatch_quant_out_dtype,
         )
+        if ft_enabled:
+            try:
+                get_ep_all2all_manager().bind_mega_moe_buffer(symm_buffer, list(range(mc2_group.world_size)))
+            except Exception:
+                try:
+                    symm_buffer.destroy()
+                except Exception:
+                    logger.exception("Failed to release MegaMoe buffer after fault-tolerance initialization failed.")
+                raise
+        return symm_buffer
 
     def _apply_cann_mega_moe(
         self,

@@ -32,6 +32,7 @@ from vllm_ascend.ascend_forward_context import (
     MoECommType,
     get_mc2_tokens_capacity,
     select_moe_comm_method,
+    use_cann_megamoe,
 )
 from vllm_ascend.distributed.eplb.eplb_state import refresh_model_routing_tables
 from vllm_ascend.platform import NPUPlatform
@@ -95,7 +96,7 @@ class WorkerSentinel(GPUWorkerSentinel):
 
     Handles commands dispatched from EngineCoreSentinel via collective_rpc,
     including device restart and DP group re-initialization on retry, and
-    MC2 elastic_info masking + expert redistribution on scale_down.
+    MC2 elastic_info or MegaMoe rank masking + expert redistribution on scale_down.
     """
 
     def __init__(self, worker: "Worker", device: torch.device):
@@ -130,6 +131,10 @@ class WorkerSentinel(GPUWorkerSentinel):
         # base flow and lift the quarantine after the groups are rebuilt.
         self.reset_device()
         super().retry(ft_request)
+        if use_cann_megamoe(self.worker.vllm_config):
+            # Publish mask and CCL-buffer writes before another stream replays
+            # the model's captured graph.
+            torch.npu.synchronize()
         self.worker_faulted = False
         self.fault_info = None
 
@@ -176,17 +181,20 @@ class WorkerSentinel(GPUWorkerSentinel):
             )
         self._resolve_drafter()
         ascend_config = get_ascend_config()
-        if ascend_config.enable_fused_mc2:
+        mega_moe = use_cann_megamoe(self.worker.vllm_config)
+        if mega_moe and not get_ep_all2all_manager().uses_mega_moe:
+            raise ValueError("[FT] MegaMoe fault-tolerance buffer was not initialized during warmup.")
+        if ascend_config.enable_fused_mc2 and not mega_moe:
             raise ValueError(
-                "[FT] scale_down is not supported with enable_fused_mc2: the "
-                "fused dispatch_ffn_combine operators take no elastic_info."
+                "[FT] scale_down with enable_fused_mc2 requires CANN MegaMoe; "
+                "the legacy fused dispatch_ffn_combine operators take no rank mask."
             )
         if ascend_config.enable_mc2_hierarchy_comm:
             raise ValueError(
                 "[FT] scale_down (elastic_info) is mutually exclusive with mc2 hierarchy comm (comm_alg='hierarchy')."
             )
         self._check_mc2_only_execution(raise_on_error=True)
-        if not hasattr(torch_npu, "npu_moe_distribute_dispatch_v2"):
+        if not mega_moe and not hasattr(torch_npu, "npu_moe_distribute_dispatch_v2"):
             raise ValueError(
                 "[FT] scale_down requires npu_moe_distribute_dispatch_v2 "
                 "(aclnn V3+); please upgrade the CANN/torch_npu version."
@@ -200,8 +208,9 @@ class WorkerSentinel(GPUWorkerSentinel):
     def _check_mc2_only_execution(self, *, raise_on_error: bool) -> None:
         """Require MC2 for every reachable batch; warn or raise when it fails.
 
-        Dead ranks stay in the device EP group; only MC2 excludes them via
-        elastic_info, so AllToAll/AllGather would target the stopped rank.
+        Dead ranks stay in the device EP group. MC2 excludes them through
+        elastic_info and MegaMoe through its rank mask; AllToAll/AllGather
+        would still target the stopped rank.
         """
         capacity = get_mc2_tokens_capacity()
         if capacity is None:
@@ -209,11 +218,12 @@ class WorkerSentinel(GPUWorkerSentinel):
         else:
             max_tokens = self._max_reachable_num_tokens()
             comm_type = select_moe_comm_method(max_tokens, self.worker.vllm_config)
-            if comm_type is MoECommType.MC2:
+            if comm_type is MoECommType.MC2 or (
+                comm_type is MoECommType.FUSED_MC2 and use_cann_megamoe(self.worker.vllm_config)
+            ):
                 return
-            # TODO: accept MegaMoE/fused MC2 once dispatch_ffn_combine takes elastic_info.
             message = (
-                f"[FT] scale_down requires MC2 for every reachable batch, but a "
+                f"[FT] scale_down requires MC2 or MegaMoe for every reachable batch, but a "
                 f"{max_tokens}-token batch selects {comm_type} (MC2 capacity: {capacity}); "
                 f"lower --max-num-batched-tokens."
             )
@@ -286,7 +296,8 @@ class WorkerSentinel(GPUWorkerSentinel):
         if reassignments:
             reload_experts_from_disk(model, model_config, load_config, reassignments)
         refresh_model_routing_tables(model_state)
-        self._densify_routing_tables(model_state)
+        if not get_ep_all2all_manager().uses_mega_moe:
+            self._densify_routing_tables(model_state)
 
     def _resolve_drafter(self) -> tuple[torch.nn.Module, EplbModelState, ModelConfig, LoadConfig] | None:
         """Resolve a drafter's EPLB state and checkpoint, rejecting unregistered MoE."""
