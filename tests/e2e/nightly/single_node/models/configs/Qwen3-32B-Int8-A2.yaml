@@ -59,8 +59,7 @@ test_cases:
       <<: *envs
     server_cmd: *server_cmd
     server_cmd_extra:
-      - "--compilation-config"
       - "--additional-config"
-      - '{"ascend_compilation_config":{"enable_static_kernel":true},"enable_flashcomm1":true}'
+      - '{"ascend_compilation_config":{"enable_static_kernel":true},"enable_flashcomm1":true,"enable_npugraph_ex":true}'
     benchmarks:
       <<: *benchmarks
