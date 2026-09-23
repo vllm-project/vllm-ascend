@@ -176,7 +176,7 @@ then fewer same-node transfers between ranks.
 | `cross_node_transfer_limit` | `1` | `-1` or integer `>= 0` | Maximum cross-node outgoing and incoming transfers per node and layer, counted separately; `-1` removes the limit and zero disables cross-node transfers. |
 | `replica_search_num_stages` | `4` | Integer `1`–`8` | Number of stages in replica-count search. |
 | `replica_search_radius` | `8` | Integer `0`–`32` | Distance from the greedy replica budget explored per stage. |
-| `replica_search_beam_size` | `64` | Integer `1`–`128` | Maximum replica-count candidates retained per stage. |
+| `replica_search_beam_size` | `4` | Integer `1`–`128` | Maximum replica-count candidates retained per stage. |
 | `placement_search_backtrack_limit` | `32` | Integer `0`–`64` | Maximum feasible-branch reversals in constrained placement search; zero disables backtracking. |
 
 For example, replace the `--additional-config` argument in the first MRv2

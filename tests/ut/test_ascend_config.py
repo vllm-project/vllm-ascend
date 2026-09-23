@@ -221,7 +221,7 @@ class TestAscendConfig(TestBase):
                 "cross_node_transfer_limit": 1,
                 "replica_search_num_stages": 4,
                 "replica_search_radius": 8,
-                "replica_search_beam_size": 64,
+                "replica_search_beam_size": 4,
                 "placement_search_backtrack_limit": 32,
             },
         )
