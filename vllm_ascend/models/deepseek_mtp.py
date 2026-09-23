@@ -9,6 +9,7 @@ from vllm.model_executor.models.deepseek_v2 import GlmMoeDsaForCausalLM
 from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
 from vllm.sequence import IntermediateTensors
 
+from vllm_ascend.models.common.checkpoint import checkpoint_contains_weight
 from vllm_ascend.utils import is_rot_weight_used
 
 
@@ -33,25 +34,66 @@ class AscendDeepSeekMTP(DeepSeekMTP):
             hidden_states = self.rot(hidden_states)
         return super().forward(input_ids, positions, hidden_states, intermediate_tensors, inputs_embeds, spec_step_idx)
 
-    def _maybe_set_own_lm_head(self, loaded_weights: set[str]) -> None:
-        """Expose a checkpoint-provided MTP head to the runner.
+    @property
+    def _own_head_weight_name(self) -> str:
+        return f"model.layers.{self.model.mtp_start_layer_idx}.shared_head.head.weight"
+
+    def _set_own_lm_head(self, owns_head: bool) -> None:
+        """Record MTP head ownership and expose a checkpoint-provided head.
 
         DeepSeekMTP always constructs ``shared_head``, so module existence does
-        not prove head ownership. Treat it as independent only when its weight
-        was loaded from the checkpoint.
+        not prove head ownership. GLM-5.3 and friends ship no MTP head, leaving
+        ``shared_head.head`` at its allocation-time contents; recording that lets
+        the proposer share the target head instead of inspecting those values.
         """
-        mtp_layer_idx = self.model.mtp_start_layer_idx
-        own_head_weight = f"model.layers.{mtp_layer_idx}.shared_head.head.weight"
-        if own_head_weight not in loaded_weights:
-            # GLM-5.3 and friends ship no MTP head, leaving shared_head.head at
-            # its allocation-time contents. Record that so the proposer shares
-            # the target head instead of inspecting those values.
-            self.has_own_lm_head = False
+        self.has_own_lm_head = owns_head
+        if not owns_head:
             return
-
-        self.has_own_lm_head = True
-        mtp_layer = self.model.layers[str(mtp_layer_idx)]
+        mtp_layer = self.model.layers[str(self.model.mtp_start_layer_idx)]
         self.lm_head = mtp_layer.shared_head.head
+
+    def _maybe_set_own_lm_head(self, loaded_weights: set[str]) -> None:
+        self._set_own_lm_head(self._own_head_weight_name in loaded_weights)
+
+    def restore_load_derived_state(self, checkpoint_path: str) -> None:
+        """Reproduce the ``load_weights`` head decision for a weight-transfer loader.
+
+        Loaders that copy tensor bytes never run ``load_weights``, so re-derive
+        head ownership from the checkpoint itself. ``checkpoint_path`` comes from
+        the loader, which holds the ``ModelConfig`` actually being loaded; a model
+        cannot tell a draft checkpoint from its target's on its own. Raises when
+        the checkpoint cannot be inspected, which sends the caller to a local load
+        that runs ``load_weights`` rather than leaving the flag at its class default.
+        """
+        from vllm_ascend.models.common.checkpoint import checkpoint_contains_any_weight
+
+        mtp_layer_idx = self.model.mtp_start_layer_idx
+        candidate_names = {
+            "embed": "model.embed_tokens.weight",
+            "lm_head": f"model.layers.{mtp_layer_idx}.shared_head.head.weight",
+        }
+        try:
+            present = {
+                key
+                for key, name in candidate_names.items()
+                if checkpoint_contains_any_weight(checkpoint_path, [name])
+            }
+        except (ValueError, OSError) as e:
+            raise ValueError(
+                f"restore_load_derived_state needs to inspect the draft checkpoint at {checkpoint_path!r}, "
+                f"but cannot inspect it: {e}"
+            ) from e
+
+        exclusions = set()
+        if "embed" not in present:
+            exclusions.add("model.embed_tokens")
+        if "lm_head" not in present:
+            exclusions.add("lm_head")
+        else:
+            self.lm_head = self.model.layers[str(mtp_layer_idx)].shared_head.head
+
+        self._rfork_draft_exclusions = frozenset(exclusions)
+        self._set_own_lm_head("lm_head" in present)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         if self.quant_config is not None and (cache_scale_mapper := self.quant_config.get_cache_scale_mapper()):

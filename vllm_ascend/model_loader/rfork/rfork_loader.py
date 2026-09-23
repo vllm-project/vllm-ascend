@@ -121,7 +121,9 @@ def _start_rfork_seed_service(
     if result is RForkSeedServiceStartResult.DEFERRED:
         return False
     started = bool(result)
-    if not started:
+    if not started and not getattr(session.identity, "is_draft_model", False):
+        # Drafts decline by design (see RForkSession.start_seed_service), so only a
+        # main model failing to advertise is worth a warning.
         logger.warning(
             "RFork %s model loaded from %s is ready, but seed service startup failed; inference can continue.",
             _rfork_model_kind(session),
@@ -404,8 +406,13 @@ def _rfork_pre_transfer_weight_processing(model: Module):
     restored: list[tuple[Any, object]] = []
     for quant_method in _iter_ascend_moe_quant_methods(model):
         process_weights = getattr(quant_method, "process_weights_after_loading", None)
-        original_process_weights = getattr(process_weights, "__wrapped__", None)
-        if original_process_weights is None:
+        # Read the wrapper's own declaration instead of walking ``__wrapped__``: several
+        # components wrap this method (shared experts, the prefetch offloader), so a single
+        # ``__wrapped__`` hop can land on an unrelated wrapper and keep the shared-expert
+        # validation this context manager exists to skip. Methods that never wrap, or wrap
+        # without declaring a pre-wrapper step, run their own post-load step unchanged.
+        original_process_weights = getattr(quant_method, "unvalidated_process_weights_after_loading", None)
+        if original_process_weights is None or process_weights is None:
             continue
 
         restored.append((quant_method, process_weights))
@@ -454,6 +461,27 @@ def _rfork_skip_unquantized_moe_post_load_processing(model: Module):
 
 def _noop_process_weights_after_loading(*args: Any, **kwargs: Any) -> None:
     pass
+
+
+def _restore_rfork_load_derived_state(model: Module, model_config: ModelConfig) -> None:
+    """Let the model reproduce state that ``load_weights`` would have derived.
+
+    RFork copies tensor bytes only, so a receiver never runs ``load_weights``.
+    Models that decide something during loading beyond the tensors themselves
+    (MTP heads record whether the checkpoint shipped ``shared_head.head``, and
+    DSpark drafts record whether they own embed_tokens/lm_head, both of which
+    later decide between the draft's own module and the target's) keep their
+    class defaults here.
+
+    The checkpoint path comes from the ``ModelConfig`` being loaded rather than
+    from the model, which cannot tell a draft checkpoint from its target's.
+    Models that declare the hook re-derive their state; failures propagate into
+    the loader's fallback flow, which loads locally and runs ``load_weights``.
+    """
+    restore_hook = getattr(model, "restore_load_derived_state", None)
+    if not callable(restore_hook):
+        return
+    restore_hook(model_config.model)
 
 
 def _refresh_rfork_flatquant_state(model: Module) -> None:
@@ -643,6 +671,8 @@ class RForkModelLoader(BaseModelLoader):
                     model, processed_layout_transfer, exclude_blocks
                 ):
                     # Skip hooks because reprocessing can mutate or rebind target-shared storage.
+                    # Load-derived state is not weight storage, so it is still restored.
+                    _restore_rfork_load_derived_state(model, model_config)
                     model = model.eval()
                     _log_rfork_load_summary(session, "shared_target", load_started_at)
                     return model
@@ -664,7 +694,8 @@ class RForkModelLoader(BaseModelLoader):
                     )
 
                 weight_load_start_time = time.perf_counter()
-                if not session.register_destination(model, processed_layout_transfer, exclude_blocks):
+                exclude_prefixes = frozenset(getattr(model, "_rfork_draft_exclusions", ()))
+                if not session.register_destination(model, processed_layout_transfer, exclude_blocks, exclude_prefixes):
                     raise RuntimeError("destination registration failed.")
 
                 acquire_seed_start_time = time.perf_counter()
@@ -692,6 +723,13 @@ class RForkModelLoader(BaseModelLoader):
                 else:
                     with _rfork_skip_unquantized_moe_post_load_processing(model):
                         process_weights_after_loading(model, model_config, target_device)
+
+                _restore_rfork_load_derived_state(model, model_config)
+
+                # Mark that RFork transfer completed with post-processed layout.
+                # DSpark drafts read this to skip FC rotation when the seed already applied it.
+                if processed_layout_transfer:
+                    model._rfork_post_processed = True
 
                 session.log_transferred_model_layout(model, processed_layout_transfer)
 

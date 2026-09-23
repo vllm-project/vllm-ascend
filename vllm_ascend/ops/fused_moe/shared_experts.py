@@ -106,6 +106,11 @@ class AscendSharedExperts:
                 return result
 
             quant_method.process_weights_after_loading = wrapped_process_weights  # type: ignore
+            # Explicit handle on the pre-wrapper step for loaders (e.g. RFork) that must skip
+            # this validation. Do not make them walk ``__wrapped__``: other components wrap the
+            # same method too (see the prefetch offloader), so one hop can land on a different
+            # wrapper and silently keep the validation it meant to skip.
+            quant_method.unvalidated_process_weights_after_loading = original_process_weights  # type: ignore
 
     def set_lora_context(self, lora_context) -> None:
         self.lora_context = lora_context

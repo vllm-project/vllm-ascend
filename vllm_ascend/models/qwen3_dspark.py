@@ -3,6 +3,7 @@ from vllm.config import VllmConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead, VocabParallelEmbedding
 from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
 
+from vllm_ascend.models.common.checkpoint import checkpoint_contains_any_weight
 from vllm_ascend.models.llama_eagle3 import load_quarot_target_layer
 from vllm_ascend.utils import (
     get_rotation_matrix,
@@ -38,14 +39,21 @@ def process_weight(linear_weight: torch.Tensor, rotation_weight: torch.Tensor):
 
 
 @torch.no_grad()
-def align_draft_weights(model, projection, vllm_config):
-    """Align draft inputs with the rotated target without modifying shared weights."""
+def align_draft_weights(model, projection, vllm_config, *, skip_fc_rotation: bool = False):
+    """Align draft inputs with the rotated target without modifying shared weights.
+
+    Args:
+        skip_fc_rotation: True when the draft fc was already rotated during an
+            RFork transfer from a seed that had completed post_process. The seed
+            rotates fc before registering, so transferred bytes arrive rotated.
+    """
     rotation_path = get_rotation_path(vllm_config)
     if rotation_path is None:
         return
     rotation = get_rotation_matrix(rotation_path).cpu()
-    weight = projection.weight
-    weight.copy_(process_weight(weight.cpu(), rotation).to(weight.device))
+    if not skip_fc_rotation:
+        weight = projection.weight
+        weight.copy_(process_weight(weight.cpu(), rotation).to(weight.device))
     target_config = vllm_config.model_config.hf_text_config
     for owner, name, layer_cls, weight_names, own_flag in (
         (model.model, "embed_tokens", VocabParallelEmbedding, TARGET_EMBED_WEIGHT_NAMES, "has_own_embed_tokens"),
@@ -85,5 +93,41 @@ class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
         if set_capture_mode is not None:
             set_capture_mode(True)
 
+    def restore_load_derived_state(self, checkpoint_path: str) -> None:
+        """Reproduce the ``load_weights`` topology flags for a weight-transfer loader.
+
+        Loaders that copy tensor bytes never run ``load_weights``, so both flags
+        and the confidence_head module would keep their ``__init__`` defaults.
+        ``align_draft_weights`` reads the flags as ``getattr(model, flag, False)``,
+        so a missing attribute means "no own weight" and it would rebuild
+        embed_tokens/lm_head from the target checkpoint over the copy this draft
+        already received. Re-derive them from the draft checkpoint, which is what
+        ``load_weights`` observed. Also set ``confidence_head`` to None when the
+        checkpoint lacks it, matching upstream's load-time assignment.
+
+        ``checkpoint_path`` comes from the loader: a DSpark draft usually ships a
+        checkpoint of its own, so the model must not guess it from the target's
+        ``ModelConfig``. Raises when the checkpoint cannot be inspected, which
+        sends the caller to a local load that runs ``load_weights`` for real.
+        """
+        exclusions = set()
+
+        has_embed = checkpoint_contains_any_weight(checkpoint_path, TARGET_EMBED_WEIGHT_NAMES)
+        self.has_own_embed_tokens = has_embed
+        if not has_embed:
+            exclusions.add("model.embed_tokens")
+
+        has_lm_head = checkpoint_contains_any_weight(checkpoint_path, TARGET_LM_HEAD_WEIGHT_NAMES)
+        self.has_own_lm_head = has_lm_head
+        if not has_lm_head:
+            exclusions.add("lm_head")
+
+        confidence_head_names = ("model.confidence_head.weight",)
+        if not checkpoint_contains_any_weight(checkpoint_path, confidence_head_names):
+            self.model.confidence_head = None
+
+        self._rfork_draft_exclusions = frozenset(exclusions)
+
     def post_process(self, vllm_config: VllmConfig) -> None:
-        align_draft_weights(self, self.model.fc, vllm_config)
+        skip_fc_rotation = getattr(self, "_rfork_post_processed", False)
+        align_draft_weights(self, self.model.fc, vllm_config, skip_fc_rotation=skip_fc_rotation)

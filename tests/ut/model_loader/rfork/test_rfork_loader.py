@@ -863,6 +863,35 @@ def test_rfork_seed_start_exception_does_not_escape(monkeypatch):
     assert any("seed service startup raised" in args[0] for args in exceptions)
 
 
+@pytest.mark.parametrize(
+    ("is_draft_model", "expect_warning"),
+    [(True, False), (False, True)],
+)
+def test_rfork_seed_start_warns_only_when_a_main_model_fails(monkeypatch, is_draft_model, expect_warning):
+    """A draft declines by design, so its refusal must not read as a failure."""
+    warnings = []
+
+    class _Session:
+        identity = SimpleNamespace(is_draft_model=is_draft_model)
+
+        def start_seed_service(self, *args, **kwargs):
+            return RForkSeedServiceStartResult.FAILED
+
+    monkeypatch.setattr(
+        "vllm_ascend.model_loader.rfork.rfork_loader.logger.warning",
+        lambda *args, **kwargs: warnings.append(args),
+    )
+
+    assert not _start_rfork_seed_service(
+        _Session(),  # type: ignore[arg-type]
+        object(),
+        False,
+        [],
+        load_source="transfer",
+    )
+    assert bool(warnings) is expect_warning
+
+
 def test_rfork_fallback_clears_only_failed_model_state_before_reinit(monkeypatch):
     """Fallback re-init in the same process must first clear stale layer registries."""
     import vllm.model_executor.layers.rotary_embedding as rotary_embedding
@@ -1048,7 +1077,10 @@ def test_rfork_pre_transfer_weight_processing_unwraps_and_restores_quant_methods
         calls.append("wrapped")
         original_process_weights(*args, **kwargs)
 
-    quant_method = SimpleNamespace(process_weights_after_loading=wrapped_process_weights)
+    quant_method = SimpleNamespace(
+        process_weights_after_loading=wrapped_process_weights,
+        unvalidated_process_weights_after_loading=original_process_weights,
+    )
     fused_moe_layer = _FakeAscendMoERunner(quant_method)
     other_layer = SimpleNamespace()
 
@@ -1070,6 +1102,62 @@ def test_rfork_pre_transfer_weight_processing_unwraps_and_restores_quant_methods
         assert quant_method.process_weights_after_loading is original_process_weights
         raise RuntimeError("boom")
     assert quant_method.process_weights_after_loading is wrapped_process_weights
+
+
+def test_rfork_pre_transfer_weight_processing_ignores_unrelated_wrappers(monkeypatch):
+    """A later wrapper must not hide the declared pre-wrapper step.
+
+    Several components wrap ``process_weights_after_loading`` (shared experts, the
+    prefetch offloader). When another wrapper lands on top, ``__wrapped__`` points at
+    the shared-expert wrapper that still validates, so RFork must read the explicit
+    declaration instead.
+    """
+    import vllm_ascend.ops.fused_moe.fused_moe as fused_moe_module
+
+    class _FakeAscendMoERunner:
+        def __init__(self, quant_method):
+            self._quant_method = quant_method
+
+    calls = []
+
+    def original_process_weights(*args, **kwargs):
+        calls.append("original")
+
+    @wraps(original_process_weights)
+    def validating_process_weights(*args, **kwargs):
+        calls.append("validating")
+        original_process_weights(*args, **kwargs)
+
+    # A second component wraps the already-wrapped method; ``__wrapped__`` now
+    # resolves to the validating wrapper rather than the original step.
+    @wraps(validating_process_weights)
+    def outer_process_weights(*args, **kwargs):
+        calls.append("outer")
+        validating_process_weights(*args, **kwargs)
+
+    assert outer_process_weights.__wrapped__ is validating_process_weights
+
+    quant_method = SimpleNamespace(
+        process_weights_after_loading=outer_process_weights,
+        unvalidated_process_weights_after_loading=original_process_weights,
+    )
+    # A method that declares nothing keeps its own post-load step.
+    undeclared_method = SimpleNamespace(process_weights_after_loading=validating_process_weights)
+    fused_moe_layer = _FakeAscendMoERunner(quant_method)
+    undeclared_layer = _FakeAscendMoERunner(undeclared_method)
+
+    class _FakeModule:
+        def modules(self):
+            return iter([self, fused_moe_layer, undeclared_layer])
+
+    monkeypatch.setattr(fused_moe_module, "AscendMoERunner", _FakeAscendMoERunner)
+
+    with _rfork_pre_transfer_weight_processing(_FakeModule()):
+        assert quant_method.process_weights_after_loading is original_process_weights
+        assert undeclared_method.process_weights_after_loading is validating_process_weights
+        quant_method.process_weights_after_loading()
+    assert quant_method.process_weights_after_loading is outer_process_weights
+    assert calls == ["original"]
 
 
 def test_rfork_skips_only_unquantized_moe_post_load_processing(monkeypatch):

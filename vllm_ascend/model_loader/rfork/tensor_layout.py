@@ -357,14 +357,32 @@ def _try_collect(
     collected.append((name, tensor))
 
 
-def collect_transferable_tensors(model: nn.Module, processed_layout: bool) -> list[tuple[str, torch.Tensor]]:
+def collect_transferable_tensors(
+    model: nn.Module, processed_layout: bool, exclude_prefixes: frozenset[str] | None = None
+) -> list[tuple[str, torch.Tensor]]:
+    """Collect tensors eligible for RFork transfer, optionally excluding by name prefix.
+
+    Args:
+        model: The model to inspect.
+        processed_layout: Whether to scan all public module attributes (True) or
+            only the 'impl' attribute (False).
+        exclude_prefixes: If provided, skip tensors whose fully-qualified name
+            starts with any of these prefixes. Used to exclude draft modules that
+            will be shared with or rebuilt from the target model.
+    """
     seen: dict[str, int] = {}
     seen_tensors: dict[tuple[Any, ...], int] = {}
     collected: list[tuple[str, torch.Tensor]] = []
+
+    def _should_exclude(name: str) -> bool:
+        return exclude_prefixes is not None and any(name.startswith(prefix) for prefix in exclude_prefixes)
+
     for name, tensor in model.named_parameters():
-        _try_collect(name, tensor, seen, seen_tensors, collected)
+        if not _should_exclude(name):
+            _try_collect(name, tensor, seen, seen_tensors, collected)
     for name, tensor in model.named_buffers():
-        _try_collect(name, tensor, seen, seen_tensors, collected)
+        if not _should_exclude(name):
+            _try_collect(name, tensor, seen, seen_tensors, collected)
     for module_prefix, module in model.named_modules():
         attributes: Iterable[tuple[str, Any, bool]]
         if processed_layout:
@@ -385,7 +403,8 @@ def collect_transferable_tensors(model: nn.Module, processed_layout: bool) -> li
                 scan_objects,
             ):
                 full_name = f"{module_prefix}.{tensor_name}" if module_prefix else tensor_name
-                _try_collect(full_name, tensor, seen, seen_tensors, collected)
+                if not _should_exclude(full_name):
+                    _try_collect(full_name, tensor, seen, seen_tensors, collected)
     return collected
 
 

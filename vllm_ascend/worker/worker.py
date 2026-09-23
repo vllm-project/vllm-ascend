@@ -94,6 +94,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     plan_sparse_kv_offload_memory,
 )
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
+from vllm_ascend.model_loader.rfork.safety import ensure_no_registered_rfork_weights
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
 from vllm_ascend.utils import (
@@ -1263,6 +1264,8 @@ class NPUWorker(WorkerBase):
         self.model_runner.update_config(overrides)
 
     def reload_weights(self, *args, **kwargs) -> None:
+        # Reached over RPC, so no load-time configuration marks the weights as mutable.
+        ensure_no_registered_rfork_weights(self.vllm_config, "reload_weights")
         self.model_runner.reload_weights(*args, **kwargs)
 
     def check_health(self) -> None:
