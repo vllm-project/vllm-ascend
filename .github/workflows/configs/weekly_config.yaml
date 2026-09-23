@@ -357,6 +357,9 @@ a3-560t:
       - name: qwen3-30b-acc
         os: linux-aarch64-a3-800i-4
         tests: tests/e2e/weekly/single_node/models/test_qwen3_30b_acc.py
+      - name: Qwen3-32B-W8A8C8-A3
+        os: linux-aarch64-a3-800i-4
+        config_file_path: Qwen3-32B-W8A8C8-A3.yaml
 
   a5:
     #   multi_node:
