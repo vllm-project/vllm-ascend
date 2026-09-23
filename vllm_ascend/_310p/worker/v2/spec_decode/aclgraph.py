@@ -213,18 +213,10 @@ class AutoRegressiveAclGraphManager310(AutoRegressiveAclGraphManager):
             CudaGraphManager.capture(self, create_forward_fn, progress_bar_desc=progress_bar_desc)
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
-        num_tokens = desc.num_tokens
-        if self.is_draft_model_prefill:
-            logger.info_once(
-                "AutoRegressiveAclGraphManager310: draft prefill run_fullgraph with num_tokens=%s",
-                num_tokens,
-            )
-        else:
-            logger.info_once(
-                "AutoRegressiveAclGraphManager310: draft decode per-step run_fullgraph with num_tokens=%s",
-                num_tokens,
-            )
-
+        logger.info_once(
+            "ACL graph replay is active for the 310P draft model (%s, logged once).",
+            "prefill" if self.is_draft_model_prefill else "per-step decode",
+        )
         # Ensure H2D into capture-stable buffers is visible before replay.
         torch.npu.current_stream().synchronize()
         ms = self.speculator.model_state

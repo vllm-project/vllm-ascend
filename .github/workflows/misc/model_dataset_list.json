@@ -511,6 +511,8 @@
             "openbmb/MiniCPM-V-4_5",
             "opendatalab/MinerU2.5-2509-1.2B",
             "popowww/MiniMax-M2.5-Eagle3",
+            "rainney/AEON-DFlash-Qwen3.6-35B-A3B",
+            "rainney/Qwen3.6-27B-DSpark",
             "rhymes-ai/Aria",
             "sentence-transformers/all-MiniLM-L12-v2",
             "unsloth/DeepSeek-V3.1-BF16",

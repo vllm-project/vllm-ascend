@@ -425,7 +425,7 @@ def test_projector_applies_optional_modelslim_rotation():
         torch.testing.assert_close(projector(image_features), image_features)
 
 
-def test_k3_dspark_load_weights_rotates_projection_and_target_boundaries(tmp_path):
+def test_k3_dspark_post_process_rotates_projection_and_target_boundaries(tmp_path, monkeypatch):
     model = AscendK3DSparkForCausalLM.__new__(AscendK3DSparkForCausalLM)
     nn.Module.__init__(model)
     model.model = nn.Module()
@@ -451,7 +451,7 @@ def test_k3_dspark_load_weights_rotates_projection_and_target_boundaries(tmp_pat
     projection = torch.arange(8, dtype=torch.float32).view(2, 4)
     norm_weight = torch.tensor([2.0, 3.0])
 
-    # Load the draft projection plus vocabulary weights from the target checkpoint.
+    # Draft loading stays unrotated; post-processing uses the target configuration.
     model.load_weights(
         iter(
             [
@@ -460,6 +460,23 @@ def test_k3_dspark_load_weights_rotates_projection_and_target_boundaries(tmp_pat
             ]
         )
     )
+
+    torch.testing.assert_close(model.model.context_proj.weight, projection)
+
+    def vocab_layer(vocab_size, hidden_size, params_dtype):
+        layer = nn.Linear(hidden_size, vocab_size, bias=False, dtype=params_dtype)
+        layer.quant_method = SimpleNamespace(process_weights_after_loading=lambda layer: None)
+        return layer
+
+    monkeypatch.setattr("vllm_ascend.models.qwen3_dspark.VocabParallelEmbedding", vocab_layer)
+    monkeypatch.setattr("vllm_ascend.models.qwen3_dspark.ParallelLMHead", vocab_layer)
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(model=str(tmp_path), hf_text_config=SimpleNamespace(vocab_size=3, hidden_size=2)),
+        quant_config=SimpleNamespace(
+            quant_description={"optional": {"quarot": {"rotation_map": {"global_rotation": "rotation.safetensors"}}}}
+        ),
+    )
+    model.post_process(config)
 
     torch.testing.assert_close(
         model.model.context_proj.weight,
