@@ -17,7 +17,7 @@ import regex as re
 
 from .prepare import prepare_checkpoint, read_json
 from .profiles import get_profile
-from .reducer import required_shards
+from .reducer import required_shards, resolve_index_filename
 from .serving_gate import (
     CALIBRATION_REPEATS,
     CALIBRATION_STARTS,
@@ -140,16 +140,17 @@ def prepare_case(config, *, calibrating: bool = False, report_dir: Path | None =
     descriptor = read_json(descriptor_path)
     if config.model != descriptor["model"]:
         raise ValueError("Configured model differs from pinned source")
+    index_name = resolve_index_filename(descriptor["files"])
     source_dir = options.get("source_dir")
     if source_dir is None:
         source_dir = maybe_download_from_modelscope(
             config.model,
             revision=descriptor["revision"],
-            allow_patterns=["config.json", "quant_model_weights.safetensors.index.json"],
+            allow_patterns=["config.json", index_name],
         )
         shards = required_shards(
             str(Path(source_dir) / "config.json"),
-            str(Path(source_dir) / "quant_model_weights.safetensors.index.json"),
+            str(Path(source_dir) / index_name),
             get_profile(options["profile"]),
             options["layers"],
         )["shards"]

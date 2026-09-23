@@ -76,7 +76,7 @@ def validate_checkpoint(model: Path, case: dict) -> None:
     validate_model(read_json(model / "config.json"), case["model"])
     manifest = model / "reduction_manifest.json"
     if manifest.exists():
-        from .reducer import verify_reduced
+        from .reducer import resolve_index_filename, verify_reduced
 
         report = verify_reduced(str(model))
         source = read_json(manifest)["source"]
@@ -85,7 +85,7 @@ def validate_checkpoint(model: Path, case: dict) -> None:
             raise ValueError("Reduced checkpoint failed integrity validation")
         for field, filename in (
             ("config_sha256", "config.json"),
-            ("index_sha256", "quant_model_weights.safetensors.index.json"),
+            ("index_sha256", resolve_index_filename(expected)),
             ("quant_description_sha256", "quant_model_description.json"),
         ):
             if source[field] != expected[filename]:

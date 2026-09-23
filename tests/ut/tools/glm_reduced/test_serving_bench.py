@@ -15,6 +15,7 @@ def bench(monkeypatch):
     spec = importlib.util.spec_from_file_location(
         "tools._gate_bench_test", Path(__file__).resolve().parents[4] / "tools/vllm_bench.py"
     )
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module

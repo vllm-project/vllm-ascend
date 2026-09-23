@@ -19,6 +19,7 @@ import json
 import os
 import shutil
 import uuid
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -56,6 +57,16 @@ from .safetensors_io import (
 # Ascend ModelSlim-quantized checkpoints actually ship (see lab weight share).
 INDEX_FILENAMES = ("model.safetensors.index.json", "quant_model_weights.safetensors.index.json")
 QUANT_DESCRIPTION_FILENAME = "quant_model_description.json"
+
+
+def resolve_index_filename(files: dict) -> str:
+    """Return the weight-index name a source descriptor pins; fail closed if neither is present."""
+    for name in INDEX_FILENAMES:
+        if name in files:
+            return name
+    raise UnsupportedFormatError(f"source descriptor pins no known index file ({', '.join(INDEX_FILENAMES)})")
+
+
 DEFAULT_MAX_SHARD_BYTES = 4 * 1024**3
 
 # Non-safetensors weight containers we refuse explicitly rather than guessing.
@@ -189,8 +200,11 @@ def load_source(src_dir: str) -> SourceCheckpoint:
             weight_map[name] = shard_name
         # Every shard declared by the index is fully covered, and no top-level
         # shard may exist outside the index (it would be silently dropped).
+        tensors_by_shard: dict[str, set[str]] = defaultdict(set)
+        for tensor_name, shard_name in weight_map.items():
+            tensors_by_shard[shard_name].add(tensor_name)
         for shard_name, parsed in shards.items():
-            extra = set(parsed.tensors) - {n for n, s in weight_map.items() if s == shard_name}
+            extra = set(parsed.tensors) - tensors_by_shard[shard_name]
             if extra:
                 raise UnsupportedFormatError(
                     f"shard {shard_name!r} contains tensors missing from {index_name}: {sorted(extra)[:5]}"

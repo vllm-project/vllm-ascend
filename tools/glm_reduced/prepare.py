@@ -13,7 +13,14 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PurePosixPath
 
 from .profiles import get_profile
-from .reducer import execute_plan, load_source_selective, plan_reduction, required_shards, verify_reduced
+from .reducer import (
+    execute_plan,
+    load_source_selective,
+    plan_reduction,
+    required_shards,
+    resolve_index_filename,
+    verify_reduced,
+)
 from .safetensors_io import sha256_of_file
 from .serving_gate import checkpoint_identity, digest
 
@@ -49,8 +56,9 @@ def download_file(root: Path, name: str, descriptor: dict) -> None:
         name
     )
     print(f"Fetching {name} ({expected['bytes']} bytes)", flush=True)
+    request = urllib.request.Request(url, headers={"User-Agent": "vllm-ascend-glm-reduced/1.0"})
     try:
-        with urllib.request.urlopen(url, timeout=120) as response, partial.open("wb") as output:
+        with urllib.request.urlopen(request, timeout=120) as response, partial.open("wb") as output:
             shutil.copyfileobj(response, output, length=8 * 1024**2)
         if partial.stat().st_size != expected["bytes"] or sha256_of_file(str(partial)) != expected["sha256"]:
             raise ValueError(f"Downloaded source checksum mismatch: {name}")
@@ -70,6 +78,7 @@ def prepare_checkpoint(
 ) -> tuple[Path, str]:
     descriptor = read_json(descriptor_path)
     profile = get_profile(profile_name)
+    index_name = resolve_index_filename(descriptor["files"])
     cache = Path(cache_dir)
     cache.mkdir(parents=True, exist_ok=True)
     recipe = {"source": descriptor, "profile": profile_name, "layers": layers}
@@ -83,7 +92,7 @@ def prepare_checkpoint(
             or report["profile"] != profile_name
             or report["keep_layers"] != layers
             or source["config_sha256"] != descriptor["files"]["config.json"]["sha256"]
-            or source["index_sha256"] != descriptor["files"]["quant_model_weights.safetensors.index.json"]["sha256"]
+            or source["index_sha256"] != descriptor["files"][index_name]["sha256"]
             or source["quant_description_sha256"] != descriptor["files"]["quant_model_description.json"]["sha256"]
             or not manifest["reduction"]["keep_mtp"]
         ):
@@ -92,7 +101,7 @@ def prepare_checkpoint(
 
     source_root = Path(source_dir)
     source_root.mkdir(parents=True, exist_ok=True)
-    metadata = ("config.json", "quant_model_weights.safetensors.index.json")
+    metadata = ("config.json", index_name)
     for name in metadata:
         if download:
             download_file(source_root, name, descriptor)

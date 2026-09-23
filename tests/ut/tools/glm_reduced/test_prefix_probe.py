@@ -98,11 +98,11 @@ def test_worker_probe_captures_before_forcing_and_restores_model(tmp_path, monke
         ),
     )
 
-    class Layer(torch.nn.Module):
+    class Layer(torch.nn.Module):  # type: ignore[name-defined]
         def forward(self, positions, hidden, residual):
             return hidden, residual
 
-    class Norm(torch.nn.Module):
+    class Norm(torch.nn.Module):  # type: ignore[name-defined]
         def forward(self, hidden, residual):
             return hidden + residual, residual
 

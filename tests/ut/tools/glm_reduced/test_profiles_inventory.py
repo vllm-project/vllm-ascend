@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Profile/inventory consistency and shared-indexer closure rule tests."""
 
+from typing import Any
+
 import pytest
 
 from tools.glm_reduced.errors import ProfileError
@@ -65,7 +67,7 @@ def test_prefix_starting_with_shared_fails():
 
 
 def test_truncate_does_not_mutate_source_config():
-    config = {
+    config: dict[str, Any] = {
         "num_hidden_layers": 12,
         "indexer_types": ["full"] * 12,
         "layer_types": ["linear_attention"] * 12,
