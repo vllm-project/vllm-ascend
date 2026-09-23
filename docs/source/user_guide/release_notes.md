@@ -1706,7 +1706,7 @@ This is the 1st release candidate of v0.10.2 for vLLM Ascend. Please follow the 
 - A new improvement for oproj in deepseek is added. Set `oproj_tensor_parallel_size` to enable this feature. [#2167](https://github.com/vllm-project/vllm-ascend/pull/2167)
 - Fix a bug that deepseek with torchair doesn't work as expect when `graph_batch_sizes` is set. [#2760](https://github.com/vllm-project/vllm-ascend/pull/2760)
 - Avoid duplicate generation of sin_cos_cache in rope when kv_seqlen > 4k. [#2744](https://github.com/vllm-project/vllm-ascend/pull/2744)
-- The performance of Qwen3 dense model is improved with flashcomm_v1. Set `VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE=1` and `VLLM_ASCEND_ENABLE_FLASHCOMM=1` to enable it. [#2779](https://github.com/vllm-project/vllm-ascend/issues/2779)
+- The performance of Qwen3 dense model is improved with flashcomm_v1. Enable it with `additional_config.enable_flashcomm1`, together with `VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE=1`. [#2779](https://github.com/vllm-project/vllm-ascend/issues/2779)
 - The performance of Qwen3 dense model is improved with prefetch feature. Set `VLLM_ASCEND_ENABLE_PREFETCH_MLP=1` to enable it. [#2816](https://github.com/vllm-project/vllm-ascend/pull/2816)
 - The performance of Qwen3 MoE model is improved with rope ops update. [#2571](https://github.com/vllm-project/vllm-ascend/pull/2571)
 - Fix the weight load error for RLHF case. [#2756](https://github.com/vllm-project/vllm-ascend/pull/2756)
