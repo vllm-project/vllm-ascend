@@ -98,8 +98,10 @@ from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
 from vllm_ascend.utils import (
     check_ascend_device_type,
+    enable_custom_op,
     enable_sp,
     register_ascend_customop,
+    register_device_print,
     setup_ascend_local_comm_res,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
@@ -428,6 +430,9 @@ class NPUWorker(WorkerBase):
         device = torch.device(f"{current_platform.device_type}:{visible_device_index}")
 
         torch.npu.set_device(device)
+
+        if enable_custom_op():
+            register_device_print()
 
         # Import _inductor for graph mode execution with triton
         # This lazy import avoids torch_npu re-initialization in patch
