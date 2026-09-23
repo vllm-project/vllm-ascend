@@ -7,7 +7,19 @@ import numpy as np
 import torch
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor, UvaBuffer
 
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.states import AscendRequestState
+
+
+def _uva_tensor(buf: UvaBuffer) -> torch.Tensor:
+    """Read a buffer's UVA view across vLLM's attribute/method contract change.
+
+    Release vLLM exposes ``UvaBuffer.uva`` as a tensor attribute; main exposes
+    it as the ``uva(n)`` method. The Ascend ``UvaBuffer`` patch shadows both.
+    """
+    if vllm_version_is("0.29.0"):
+        return buf.uva  # type: ignore[return-value]
+    return buf.uva()  # type: ignore[operator]
 
 
 class Ascend310PStagedWriteTensor:
@@ -33,7 +45,7 @@ class Ascend310PStagedWriteTensor:
             self._uva_buffer = UvaBuffer(size, dtype)
             self.cpu = self._uva_buffer.cpu
             self.np = self._uva_buffer.np
-            self.gpu = self._uva_buffer.uva
+            self.gpu = _uva_tensor(self._uva_buffer)
         else:
             self.cpu = torch.zeros(size, dtype=dtype, device="cpu")
             self.np = self.cpu.numpy()
@@ -58,7 +70,7 @@ class Ascend310PStagedWriteTensor:
         if not self._dirty_indices:
             return
         if self.uva_instead_of_gpu:
-            self.gpu = self._uva_buffer.uva
+            self.gpu = _uva_tensor(self._uva_buffer)
             self._dirty_indices.clear()
             return
         # Small request vectors favor one bulk H2D.
@@ -100,13 +112,13 @@ class Ascend310PRequestState(AscendRequestState):
         self.prompt_len = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
         self.prefill_len = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
         self.total_len = Ascend310PStagedWriteTensor(max_num_reqs, dtype=torch.int32, device=device)
-        self.num_computed_prefill_tokens = np.zeros(max_num_reqs, dtype=np.int32)
+        self.num_computed_prefill_tokens = np.zeros(max_num_reqs, dtype=np.int32)  # type: ignore[var-annotated]
         self.num_computed_tokens = Ascend310PStagedWriteTensor(max_num_reqs, dtype=torch.int32, device=device)
-        self.num_computed_tokens_np = np.zeros(max_num_reqs, dtype=np.int32)
+        self.num_computed_tokens_np = np.zeros(max_num_reqs, dtype=np.int32)  # type: ignore[var-annotated]
         self.num_computed_tokens_cpu = torch.zeros(max_num_reqs, dtype=torch.int32, device="cpu")
         self.last_sampled_tokens = torch.zeros(max_num_reqs, 1, dtype=torch.int64, device=device)
         self.last_sampled_tokens_cpu = torch.zeros(max_num_reqs, 1, dtype=torch.int64, device="cpu")
-        self.max_seq_len = np.zeros(max_num_reqs, dtype=np.int32)
+        self.max_seq_len = np.zeros(max_num_reqs, dtype=np.int32)  # type: ignore[var-annotated]
         self.draft_tokens = torch.zeros(
             max_num_reqs,
             num_speculative_steps,

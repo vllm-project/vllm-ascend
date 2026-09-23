@@ -276,7 +276,7 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             num_accepted_tokens = self.num_accepted_tokens_gpu.new_ones(num_reqs)
             num_accepted_tokens[: input_batch.num_reqs] = self.num_accepted_tokens_gpu[input_batch.idx_mapping]
 
-            num_decode_draft_tokens_np = np.full(num_reqs, -1, dtype=np.int32)
+            num_decode_draft_tokens_np = np.full(num_reqs, -1, dtype=np.int32)  # type: ignore[var-annotated]
             num_draft_tokens_per_req = input_batch.num_draft_tokens_per_req
             if num_draft_tokens_per_req is not None:
                 is_decode = input_batch.num_scheduled_tokens == num_draft_tokens_per_req + 1

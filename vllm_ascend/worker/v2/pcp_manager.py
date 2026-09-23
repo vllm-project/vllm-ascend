@@ -24,13 +24,27 @@ import torch
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_pcp_group, get_pp_group
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.gpu.states import RequestState
 
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
+
+
+def async_copy_to_gpu(
+    x: torch.Tensor | np.ndarray,
+    out: torch.Tensor | None = None,
+    device: torch.device | None = None,
+) -> torch.Tensor:
+    """Host-to-device copy across vLLM's buffer_utils -> torch_utils move."""
+    if vllm_version_is("0.29.0"):
+        from vllm.v1.worker.gpu import buffer_utils as _buffer_utils  # type: ignore[import-not-found]
+
+        return _buffer_utils.async_copy_to_gpu(x, out=out, device=device)
+    from vllm.utils.torch_utils import async_tensor_h2d
+
+    return async_tensor_h2d(x, device=device, out=out)  # type: ignore[call-arg]
 
 
 @dataclass(frozen=True)
@@ -69,18 +83,35 @@ class AscendPCPManager(PCPManager):
         dcp_rank: int = 0,
         cp_interleave: int = 1,
     ) -> None:
-        super().__init__(
-            pcp_world_size=pcp_world_size,
-            pcp_rank=pcp_rank,
-            device=device,
-            req_states=req_states,
-            max_num_reqs=max_num_reqs,
-            max_num_tokens=max_num_tokens,
-            block_tables=block_tables,
-            dcp_world_size=dcp_world_size,
-            dcp_rank=dcp_rank,
-            cp_interleave=cp_interleave,
-        )
+        # vLLM dropped `req_states` from PCPManager once MRV2 PCP grew native
+        # speculative-decoding support. Keep accepting it so callers on either
+        # tree can construct this subclass, and only forward it to the release
+        # base class that still owns it.
+        if vllm_version_is("0.29.0"):
+            super().__init__(
+                pcp_world_size=pcp_world_size,
+                pcp_rank=pcp_rank,
+                device=device,
+                req_states=req_states,
+                max_num_reqs=max_num_reqs,
+                max_num_tokens=max_num_tokens,
+                block_tables=block_tables,
+                dcp_world_size=dcp_world_size,
+                dcp_rank=dcp_rank,
+                cp_interleave=cp_interleave,
+            )
+        else:
+            super().__init__(
+                pcp_world_size=pcp_world_size,
+                pcp_rank=pcp_rank,
+                device=device,
+                max_num_reqs=max_num_reqs,
+                max_num_tokens=max_num_tokens,
+                block_tables=block_tables,
+                dcp_world_size=dcp_world_size,
+                dcp_rank=dcp_rank,
+                cp_interleave=cp_interleave,
+            )
 
         # PCP supplies its own output buffers to compute_slot_mappings, so their
         # dtype must match Ascend block-table slots for cache-write operators.
@@ -256,13 +287,10 @@ class AscendPCPManager(PCPManager):
         # Reuse the actual partition rules: decode is replicated, while each
         # prefill contributes two chunks. Computed positions only reorder rows.
         query_start_loc = np.concatenate(([0], np.cumsum(num_scheduled_tokens)))
-        num_computed_tokens = np.zeros_like(num_scheduled_tokens)
         return max(
             sum(
                 segment.num_tokens
-                for segment in self._get_rank_segments(
-                    rank, num_scheduled_tokens, num_computed_tokens, is_prefilling, query_start_loc
-                )
+                for segment in self._get_rank_segments(rank, num_scheduled_tokens, is_prefilling, query_start_loc)
             )
             for rank in range(self.pcp_world_size)
         )
@@ -271,8 +299,16 @@ class AscendPCPManager(PCPManager):
         self,
         input_batch: AscendInputBatch,
         padded_num_tokens: int | None = None,
+        padded_num_reqs: int | None = None,
     ) -> AscendInputBatch:
-        """Partition the batch and update Ascend-specific local metadata."""
+        """Partition the batch and update Ascend-specific local metadata.
+
+        vLLM main added ``padded_num_reqs`` and lets the base manager pad
+        request-shaped metadata itself. Ascend keeps its own FULL-graph
+        request padding below (which also maintains the PCP-local persistent
+        buffers), so the argument is accepted but not forwarded.
+        """
+        del padded_num_reqs
         global_batch = input_batch
         if global_batch.num_draft_tokens > 0:
             local_batch = self._partition_speculative_batch_compat(global_batch)

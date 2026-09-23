@@ -74,6 +74,31 @@ class PunicaWrapperNPU(PunicaWrapperBase):
                 device=device,
             )
 
+    def apply_lora_full_linear(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        weight_stacked: torch.Tensor,
+        bias_stacked: torch.Tensor,
+        module_enabled: torch.Tensor,
+    ) -> None:
+        """Apply request-routed full-linear weights to the selected rows.
+
+        NPU mirror of the CPU punica path (``bgmv_shrink`` with a unit scale);
+        vLLM main added this as an abstract method for full-linear LoRA
+        (classification heads).
+        """
+        indices = self.sampler_indices
+        gathered = weight_stacked[indices.clamp_min(0)]
+        adapter_y = torch.einsum("ni,noi->no", x.float(), gathered.float())
+        adapter_y = torch.where(
+            (indices >= 0).unsqueeze(-1),
+            adapter_y,
+            torch.zeros_like(adapter_y),
+        )
+        result = self._select_full_linear_output(y, adapter_y, bias_stacked, module_enabled)
+        y.copy_(result)
+
     def _update_base_metadata(
         self,
         mapping,

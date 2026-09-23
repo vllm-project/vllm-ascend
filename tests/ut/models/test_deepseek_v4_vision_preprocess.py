@@ -147,9 +147,7 @@ def test_hf_tokenizer_call_is_thread_safe():
 
     def process():
         return processor._call_hf_processor(
-            "prompt",
-            {"images": []},
-            {},
+            {"text": "prompt", "images": []},
             {},
         )["input_ids"]
 

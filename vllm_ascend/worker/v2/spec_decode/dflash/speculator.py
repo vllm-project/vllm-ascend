@@ -5,6 +5,7 @@
 import logging
 from typing import Any, cast
 
+import numpy as np
 import torch
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import CUDAGraphMode
@@ -16,7 +17,11 @@ from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
     DFlashSpeculator,
 )
 
-from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
+from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.worker.v2.attn_utils import (
+    build_attn_metadata_wrapper,
+    build_draft_attn_metadata_legacy,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +40,44 @@ class AscendDFlashSpeculator(DFlashSpeculator):
             )
         self._update_draft_attn_metadata(attn_metadata, num_reqs_padded)
         return [attn_metadata]
+
+    def _build_draft_attn_metadata(
+        self,
+        num_reqs: int,
+        num_reqs_padded: int,
+        num_tokens_padded: int,
+        seq_lens_cpu_upper_bound: torch.Tensor,
+        step: int,
+        num_query_per_req: int = 1,
+        causal: bool = True,
+        query_start_loc_np: np.ndarray | None = None,
+    ) -> dict[str, Any] | None:
+        # vLLM #56181 replaced ``Speculator._build_draft_attn_metadata`` with
+        # ``_build_attn_metadata``/``_build_uniform_attn_metadata``. Route
+        # through this lane-gated shim: the pinned release tree keeps the old
+        # method, main reproduces its body.
+        if vllm_version_is("0.29.0"):
+            return super()._build_draft_attn_metadata(  # type: ignore[attr-defined]
+                num_reqs,
+                num_reqs_padded,
+                num_tokens_padded,
+                seq_lens_cpu_upper_bound,
+                step,
+                num_query_per_req,
+                causal,
+                query_start_loc_np=query_start_loc_np,
+            )
+        return build_draft_attn_metadata_legacy(
+            self,
+            num_reqs,
+            num_reqs_padded,
+            num_tokens_padded,
+            seq_lens_cpu_upper_bound,
+            step,
+            num_query_per_req,
+            causal,
+            query_start_loc_np=query_start_loc_np,
+        )
 
     def _update_draft_attn_metadata(self, attn_metadata, num_reqs_padded):
         """Rebuild ``actual_seq_lengths_q`` from the padded request count,

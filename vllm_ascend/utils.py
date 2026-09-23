@@ -171,6 +171,11 @@ def normalize_deepseek_v41_config(hf_config: Any) -> Any:
     }
     rotation = getattr(hf_config, "engram_rotation_config", None) or supported_rotation
     hf_config.engram_rotation_config = dict(rotation)
+    # vLLM main moved these off ``DeepseekV41Config`` into the model-arch
+    # config converter; the V4.1 runtime paths still read them here.
+    has_vision = getattr(hf_config, "vision_n_layers", 0) > 0
+    hf_config.is_mm_prefix_lm = has_vision
+    hf_config.mm_prefix_clamp_sliding_window = has_vision
     return hf_config
 
 
@@ -651,6 +656,10 @@ def attention_calculation_stream() -> torch.npu.Stream:
 
 
 def adapt_patch(is_global_patch: bool = False):
+    from vllm_ascend import _stub_cpu_gpu_buffer_pinmemory, _stub_triton_placeholder_runtime
+
+    _stub_triton_placeholder_runtime()
+    _stub_cpu_gpu_buffer_pinmemory()
     if is_global_patch:
         from vllm_ascend.patch import platform  # noqa: F401
     else:
@@ -1680,7 +1689,7 @@ def get_compressed_pos_and_indices(
 
         # Note(qcs): some models use compress_ratio=0 as non-compression tag.
         if compress_ratio > 1:
-            compressed_historical_len = num_computed_tokens // compress_ratio
+            compressed_historical_len = num_computed_tokens // compress_ratio  # type: ignore[var-annotated]
             compressed_total_len = (num_computed_tokens + num_scheduled_tokens) // compress_ratio
         else:
             compressed_historical_len = num_computed_tokens
@@ -1696,7 +1705,7 @@ def get_compressed_pos_and_indices(
             pos_starts - prefix_offsets, num_new_compressed_pos
         )
 
-        req_indices_compressed = np.repeat(arrange_np, num_new_compressed_pos)
+        req_indices_compressed = np.repeat(arrange_np, num_new_compressed_pos)  # type: ignore[var-annotated]
         req_indices_compressed_list.append(req_indices_compressed)
         positions_compressed_list.append(compressed_pos_ids)
         num_scheduled_tokens_compressed_list.append(num_new_compressed_pos)

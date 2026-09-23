@@ -14,8 +14,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker import mamba_utils
-from vllm.v1.worker.gpu_input_batch import CachedRequestState
-from vllm.v1.worker.lora_model_runner_mixin import GPUInputBatch
+from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.mamba_utils import MambaCopyBuffers
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
@@ -173,7 +172,7 @@ def _postprocess_mamba_align_gpu_cpu_fallback(
     num_reqs: int,
     num_accepted_tokens_gpu: torch.Tensor,
     num_accepted_tokens_cpu_tensor: torch.Tensor,
-    input_batch: GPUInputBatch,
+    input_batch: InputBatch,
     kv_cache_config: KVCacheConfig,
     forward_context: dict[str, Any],
     mamba_state_copy_funcs: dict[str, tuple[MambaStateCopyFunc, ...]],
@@ -423,7 +422,7 @@ def preprocess_mamba(
     kv_cache_config: KVCacheConfig,
     cache_config: CacheConfig,
     mamba_state_idx: dict[str, int],
-    input_batch: GPUInputBatch,
+    input_batch: InputBatch,
     requests: dict[str, CachedRequestState],
     forward_context: dict[str, Any],
     mamba_state_copy_funcs: dict[str, tuple[MambaStateCopyFunc, ...]],

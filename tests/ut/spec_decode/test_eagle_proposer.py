@@ -158,14 +158,14 @@ def test_load_model_retains_split_indexer_metadata_dependency():
     proposer.method = "mtp"
     proposer.vllm_config = MagicMock()
     proposer.maybe_eager_context = nullcontext()
-    proposer._get_model = MagicMock(return_value=MagicMock())
+    proposer._get_model = MagicMock(return_value=MagicMock())  # type: ignore[method-assign]
     proposer.supports_mm_inputs = False
     proposer.parallel_drafting = False
     proposer.draft_window_size = None
     proposer.sliding_window = None
-    proposer._maybe_share_embeddings = MagicMock()
-    proposer._maybe_share_topk_indices = MagicMock()
-    proposer._maybe_share_lm_head = MagicMock()
+    proposer._maybe_share_embeddings = MagicMock()  # type: ignore[method-assign]
+    proposer._maybe_share_topk_indices = MagicMock()  # type: ignore[method-assign]
+    proposer._maybe_share_lm_head = MagicMock()  # type: ignore[method-assign]
 
     target_name = "model.layers.0.self_attn.attn"
     draft_name = "model.layers.1.self_attn.attn"
@@ -215,7 +215,7 @@ def test_cache_only_groups_use_main_backend_and_metadata(group_order, method):
     proposer.dcp_size = 1
     proposer.runner = MagicMock()
     proposer.vllm_config = MagicMock()
-    proposer.update_stream = MagicMock()
+    proposer.update_stream = MagicMock()  # type: ignore[assignment]
 
     main_name = "model.layers.1.self_attn.attn"
     indexer_name = "model.layers.1.self_attn.indexer.k_cache"
@@ -724,7 +724,7 @@ class TestEagleProposerDummyRun(TestBase):
         self.proposer = AscendEagleProposer(vllm_config=self.vllm_config, device=self.device, runner=self.runner)
         self.proposer.model = MagicMock()
         self.proposer._runnable = MagicMock()
-        self.proposer.update_stream = MagicMock()
+        self.proposer.update_stream = MagicMock()  # type: ignore[assignment]
         self.proposer.draft_attn_groups = [MagicMock()]
 
     def tearDown(self):
@@ -749,7 +749,7 @@ class TestEagleProposerDummyRun(TestBase):
         with set_current_vllm_config(self.vllm_config):
             self.proposer.dummy_run(num_tokens=num_tokens, with_prefill=with_prefill)
 
-            self.assertTrue(self.proposer._runnable.call_count == 1)
+            self.assertTrue(self.proposer._runnable.call_count == 1)  # type: ignore[attr-defined]
             self.assertTrue(mock_context.call_args.kwargs["eplb_heat_collection_status"])
 
     # cpu does not support parallel-group, let alone `sp`
@@ -761,7 +761,7 @@ class TestEagleProposerDummyRun(TestBase):
         # cpu does not support `torch.ops.vllm.maybe_pad_and_reduce`
         with set_current_vllm_config(self.vllm_config):
             self.proposer.dummy_run(num_tokens=64, with_prefill=True, num_reqs=4)
-            self.assertTrue(self.proposer._runnable.call_count == 1)
+            self.assertTrue(self.proposer._runnable.call_count == 1)  # type: ignore[attr-defined]
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("vllm_ascend.spec_decode.llm_base_proposer.update_full_graph_params")
@@ -782,7 +782,7 @@ class TestEagleProposerDummyRun(TestBase):
         # cpu does not support `torch.ops.vllm.maybe_pad_and_reduce`
         with set_current_vllm_config(self.vllm_config):
             self.proposer.dummy_run(num_tokens=64, in_graph_capturing=True, aclgraph_runtime_mode=CUDAGraphMode.FULL)
-            self.assertTrue(self.proposer._runnable.call_count == 1)
+            self.assertTrue(self.proposer._runnable.call_count == 1)  # type: ignore[attr-defined]
             mock_update_full_graph_params.assert_not_called()
             self.proposer.use_cuda_graph = last_use_cuda_graph
 
@@ -805,7 +805,7 @@ class TestEagleProposerDummyRun(TestBase):
         # cpu does not support `torch.ops.vllm.maybe_pad_and_reduce`
         with set_current_vllm_config(self.vllm_config):
             self.proposer.dummy_run(num_tokens=64, in_graph_capturing=False, aclgraph_runtime_mode=CUDAGraphMode.FULL)
-            self.assertTrue(self.proposer._runnable.call_count == 1)
+            self.assertTrue(self.proposer._runnable.call_count == 1)  # type: ignore[attr-defined]
             self.assertTrue(mock_update_full_graph_params.call_count == 1)
             self.proposer.use_cuda_graph = last_use_cuda_graph
 
@@ -877,7 +877,7 @@ class TestEagleProposerHelperMethods(TestBase):
             set_current_vllm_config(self.vllm_config),
             patch.object(self.proposer, "prepare_inputs", return_value=(mock_return_attn, torch.tensor([1, 2, 4]))),
         ):
-            return_attn, indices = self.proposer.prepare_inputs(mock_attn, num_rejected)
+            return_attn, indices = self.proposer.prepare_inputs(mock_attn, num_rejected)  # type: ignore[call-arg]
             self.assertEqual(indices.tolist(), [1, 2, 4])
 
 
@@ -1132,7 +1132,7 @@ class TestEagleProposerPropose:
         self.runner.query_start_loc.cpu = torch.tensor([0, 4, 8, 12, 16], device=torch.device("cpu"), dtype=torch.int32)
         self.runner.seq_lens = seq_lens
         self.runner.optimistic_seq_lens_cpu = seq_lens_cpu
-        self.proposer._update_full_graph_params = MagicMock()
+        self.proposer._update_full_graph_params = MagicMock()  # type: ignore[method-assign]
 
         def side_effect(*args, **kwargs):
             nonlocal captured_common_attn_metadata
@@ -1578,7 +1578,7 @@ class TestEagleProposerPropose:
 
         import vllm_ascend.spec_decode.llm_base_proposer
         assert hasattr(vllm_ascend.spec_decode.llm_base_proposer, "AscendSpecDecodeBaseProposer")
-        RunnerCls = vllm_ascend.spec_decode.llm_base_proposer.AscendSpecDecodeBaseProposer
+        RunnerCls = vllm_ascend.spec_decode.llm_base_proposer.AscendSpecDecodeBaseProposer  # type: ignore[assignment]
         assert hasattr(RunnerCls, "_get_model")
         assert hasattr(RunnerCls, "_update_full_graph_params")
         assert hasattr(RunnerCls, "_propose")
@@ -1644,7 +1644,6 @@ class TestEagleProposerPropose:
             'num_actual_tokens', 'max_query_len', 'max_seq_len', 'block_table_tensor', \
             'slot_mapping', 'causal', 'logits_indices_padded', 'num_logits_indices', \
             'encoder_seq_lens', 'encoder_seq_lens_cpu', 'dcp_local_seq_lens', \
-            'dcp_local_seq_lens_cpu', '_seq_lens_cpu', '_num_computed_tokens_cpu', \
             '_num_computed_tokens_cache'
         }
 
@@ -1671,7 +1670,7 @@ class TestEagleProposerPropose:
 
         import vllm_ascend.spec_decode.llm_base_proposer
         assert hasattr(vllm_ascend.spec_decode.llm_base_proposer, "AscendSpecDecodeBaseProposer")
-        RunnerCls = vllm_ascend.spec_decode.llm_base_proposer.AscendSpecDecodeBaseProposer
+        RunnerCls = vllm_ascend.spec_decode.llm_base_proposer.AscendSpecDecodeBaseProposer  # type: ignore[assignment]
         assert hasattr(RunnerCls, "_run_merged_draft")
         sig = inspect.signature(RunnerCls._run_merged_draft)
         sig_name = self.get_param_names(sig)
@@ -2520,7 +2519,7 @@ class TestRunMergedDraft(TestBase):
             # Greedy path: no draft probabilities.
             return logits, None
 
-        self.proposer.compute_draft_token_ids = compute_draft_token_ids
+        self.proposer.compute_draft_token_ids = compute_draft_token_ids  # type: ignore[method-assign]
         self.proposer.supports_mm_inputs = True
         initial_input_ids = torch.tensor(
             [279, 1196, 374, 8014, 151667, 198, 32313, 11, 151667, 198, 32313, 11],
@@ -4287,7 +4286,11 @@ class TestDeepSeekMTPIndicesSharing(unittest.TestCase):
         proposer._set_positions = lambda n, positions: proposer.positions[:n].copy_(positions)
         proposer.maybe_pad_and_reduce = lambda hidden, positions: (hidden, positions)
         proposer.maybe_all_gather_and_unpad = lambda last, positions, hidden: (last, positions, hidden)
-        proposer.compute_draft_token_ids = lambda hidden, sampling_metadata: (torch.arange(hidden.shape[0]), None)
+        _compute_draft_token_ids = lambda hidden, sampling_metadata: (  # type: ignore[misc]
+            torch.arange(hidden.shape[0]),
+            None,
+        )
+        proposer.compute_draft_token_ids = _compute_draft_token_ids  # type: ignore[method-assign, assignment]
 
         buffer = torch.full((8, 4), -1, dtype=torch.int32)
         impl = SimpleNamespace(skip_topk=False, topk_indices_buffer=buffer)

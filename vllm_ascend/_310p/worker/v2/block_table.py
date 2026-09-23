@@ -70,7 +70,9 @@ class Ascend310PBlockTables(BlockTables):
         self.block_tables_cpu = [tensor.numpy() for tensor in self._block_tables_cpu_tensors]
         self.input_block_tables_cpu = [tensor.numpy() for tensor in self._input_block_tables_cpu_tensors]
         self.input_block_tables = [torch.zeros(shape, dtype=torch.int32, device=device) for shape in table_shapes]
-        self.num_blocks_np = np.zeros((self.num_kv_cache_groups, max_num_reqs), dtype=np.int32)
+        self.num_blocks_np = np.zeros(  # type: ignore[var-annotated]
+            (self.num_kv_cache_groups, max_num_reqs), dtype=np.int32
+        )
         self._slot_mappings_cpu_tensor = torch.full(
             (self.num_kv_cache_groups, max_num_batched_tokens),
             PAD_SLOT_ID,
@@ -177,9 +179,9 @@ class Ascend310PBlockTables(BlockTables):
                 start = int(query_start_loc_np[batch_idx])
                 end = int(query_start_loc_np[batch_idx + 1])
                 token_positions = positions_np[start:end]
-                logical_block_indices = token_positions // block_size
+                logical_block_indices = token_positions // block_size  # type: ignore[var-annotated]
                 block_numbers = block_table[req_idx, logical_block_indices]
-                block_offsets = token_positions % block_size
+                block_offsets = token_positions % block_size  # type: ignore[var-annotated]
                 self.slot_mappings_cpu[group_id, start:end] = block_numbers * block_size + block_offsets
 
         device_slots = self.slot_mappings if out is None else out

@@ -29,10 +29,12 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_wrapper,
     build_draft_attn_metadata_factory,
+    build_draft_attn_metadata_legacy,
 )
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import prepare_replicated_pcp_config
 
@@ -126,9 +128,9 @@ class AscendDSparkSpeculator(DSparkSpeculator):
                 attn_state=AscendAttentionState.ChunkedPrefill,
             ),
         ):
-            attn_metadata = super()._build_draft_attn_metadata(
-                num_reqs=self.input_batch.num_reqs,
+            attn_metadata = self._super_build_draft_attn_metadata(
                 num_reqs_padded=num_reqs_padded,
+                num_reqs=self.input_batch.num_reqs,
                 num_tokens_padded=num_tokens_padded,
                 seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
                 step=self.num_query_per_req,
@@ -140,28 +142,48 @@ class AscendDSparkSpeculator(DSparkSpeculator):
 
         return [self._update_draft_attn_metadata(attn_metadata, num_reqs_padded)]
 
-    def _build_draft_attn_metadata(self, *, num_reqs_padded, **kwargs):
+    def _build_draft_attn_metadata(self, *, num_reqs_padded: int | None = None, **kwargs: Any):
         if self.attn_architecture not in ("GQA", "MLA"):
-            return super()._build_draft_attn_metadata(num_reqs_padded=num_reqs_padded, **kwargs)
+            return self._super_build_draft_attn_metadata(num_reqs_padded=num_reqs_padded, **kwargs)
 
-        # This kwargs["num_tokens_padded"] is only useful in eager/PIECEWISE.
+        # This num_tokens_padded is only useful in eager/PIECEWISE.
         # TODO: Replace this temporary padding workaround with upstream #56181's
         # actual-token metadata and MLA input slicing for non-FULL execution.
         num_tokens_padded = kwargs["num_tokens_padded"]
         assert num_tokens_padded % self.num_query_per_req == 0, "Draft tokens must contain whole query groups"
-        num_reqs_padded = num_tokens_padded // self.num_query_per_req
+        padded_reqs = num_tokens_padded // self.num_query_per_req
 
         with (
             build_attn_metadata_wrapper(),
             build_draft_attn_metadata_factory(
                 self.input_buffers.positions,
                 num_tokens_padded,
-                is_prefilling=torch.zeros(num_reqs_padded, dtype=torch.bool),
+                is_prefilling=torch.zeros(padded_reqs, dtype=torch.bool),
                 attn_state=AscendAttentionState.ChunkedPrefill,
             ),
         ):
-            attn_metadata = super()._build_draft_attn_metadata(num_reqs_padded=num_reqs_padded, **kwargs)
-        return self._update_draft_attn_metadata(attn_metadata, num_reqs_padded)
+            attn_metadata = self._super_build_draft_attn_metadata(num_reqs_padded=padded_reqs, **kwargs)
+        return self._update_draft_attn_metadata(attn_metadata, padded_reqs)
+
+    def _super_build_draft_attn_metadata(self, *, num_reqs_padded: int | None = None, **kwargs: Any):
+        # Lane-gated bridge: release keeps the pinned ``_build_draft_attn_metadata``,
+        # main reproduces its body (vLLM #56181 removed the method).
+        if vllm_version_is("0.29.0"):
+            return super()._build_draft_attn_metadata(  # type: ignore[attr-defined, arg-type]
+                num_reqs_padded=num_reqs_padded,
+                **kwargs,
+            )
+        return build_draft_attn_metadata_legacy(
+            self,
+            kwargs.get("num_reqs") or num_reqs_padded or 0,
+            num_reqs_padded or 0,
+            kwargs.get("num_tokens_padded", 0),
+            kwargs.get("seq_lens_cpu_upper_bound"),
+            kwargs.get("step", 1),
+            self.num_query_per_req,
+            kwargs.get("causal", True),
+            query_start_loc_np=kwargs.get("query_start_loc_np"),
+        )
 
     def _update_draft_attn_metadata(self, attn_metadata, num_reqs_padded):
         """Rebuild ``actual_seq_lengths_q`` from the padded request count,

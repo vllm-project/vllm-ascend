@@ -36,6 +36,7 @@ from vllm_ascend.core.scheduler_profiling_chunk import ProfilingChunkScheduler
 from vllm_ascend.core.short_request_first_scheduler import (
     ShortRequestFirstRequestQueue,
 )
+from vllm_ascend.utils import vllm_version_is
 
 MODEL = "Qwen/Qwen3-0.6B"
 BLOCK_SIZE = 16
@@ -95,13 +96,13 @@ class TestProfilingChunkConfig(TestBase):
 
     def test_invalid_smooth_factor_raises(self):
         with self.assertRaises(ValueError):
-            ProfilingChunkConfig(**{"smooth_factor": 0.0})
+            ProfilingChunkConfig(**{"smooth_factor": 0.0})  # type: ignore[arg-type]
         with self.assertRaises(ValueError):
-            ProfilingChunkConfig(**{"smooth_factor": 1.5})
+            ProfilingChunkConfig(**{"smooth_factor": 1.5})  # type: ignore[arg-type]
 
     def test_invalid_min_chunk_raises(self):
         with self.assertRaises(ValueError):
-            ProfilingChunkConfig(**{"min_chunk": 0})
+            ProfilingChunkConfig(**{"min_chunk": 0})  # type: ignore[arg-type]
 
     def test_need_timing_defaults_to_enabled(self):
         # When need_timing is not provided, it defaults to enabled.
@@ -184,7 +185,7 @@ class TestChunkSizePredictor(TestBase):
 
         chunk = predictor.predict(num_computed_tokens=0, base_chunk_size=8192, page_size=128)
         self.assertIsNotNone(chunk)
-        self.assertEqual(chunk % 128, 0)
+        self.assertEqual(chunk % 128, 0)  # type: ignore[operator]
 
     def test_predict_decreases_with_history(self):
         predictor = ChunkSizePredictor()
@@ -218,7 +219,7 @@ class TestChunkSizePredictor(TestBase):
 
         result = predictor.predict_with_history(1000, 8192, 128)
         self.assertIsNotNone(result)
-        self.assertEqual(result % 128, 0)
+        self.assertEqual(result % 128, 0)  # type: ignore[operator]
 
 
 # ===================================================================
@@ -373,9 +374,13 @@ class TestProfilingChunkScheduler(TestBase):
                 structured_output_manager=MagicMock(spec=StructuredOutputManager),
             )
 
-        should_advance = MagicMock()
-        should_advance.return_value = False
-        scheduler.structured_output_manager.should_advance = should_advance
+        if vllm_version_is("0.29.0"):
+            should_advance = MagicMock()
+            should_advance.return_value = False
+            scheduler.structured_output_manager.should_advance = should_advance
+        else:
+            scheduler.structured_output_manager.validate_tokens = MagicMock(side_effect=lambda _request, tokens: tokens)
+            scheduler.structured_output_manager.accept_tokens = MagicMock(return_value=True)
 
         return scheduler
 

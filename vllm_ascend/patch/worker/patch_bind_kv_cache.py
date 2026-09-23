@@ -60,3 +60,26 @@ def bind_kv_cache(
 
 
 utils.bind_kv_cache = bind_kv_cache
+
+
+# vLLM #53781 split layer binding out of ``bind_kv_cache`` into
+# ``bind_kv_cache_to_layers`` and made ``GPUModelRunner.initialize_kv_cache``
+# call the latter. Ascend stores each layer's cache as ``(k_cache, v_cache)``
+# components (see ``_reshape_kv_cache_v2``), so bind it directly instead of
+# letting upstream's ``Attention.bind_kv_cache`` squeeze a single-tensor view.
+def bind_kv_cache_to_layers(
+    kv_caches: dict[str, torch.Tensor],
+    forward_context: dict[str, Attention],
+    num_attn_module: int = 1,
+    kv_cache_groups: Sequence[KVCacheGroupSpec] | None = None,
+) -> None:
+    """Ascend replacement for upstream ``bind_kv_cache_to_layers``."""
+    for layer_name, kv_cache in kv_caches.items():
+        forward_context[layer_name].kv_cache = kv_cache
+
+    ordered_layer_names = sorted(
+        kv_caches,
+        key=lambda name: extract_layer_index(name, num_attn_module),
+    )
+    if not vllm_version_is("0.29.0"):
+        utils.share_replayssm_ring_trackers(ordered_layer_names, forward_context, kv_cache_groups)

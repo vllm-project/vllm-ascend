@@ -18,6 +18,7 @@ from vllm.v1.kv_cache_interface import (
 
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec, is_prefix_cacheable
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import AscendHybridKVCacheCoordinator
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.block_table import BlockTable
 
 
@@ -55,7 +56,7 @@ def test_ring_lifetime_reuse_and_external_tokens():
         manager.cache_blocks(
             SimpleNamespace(request_id="a"),
             tokens,
-            replay_boundaries=[tokens - 1],
+            **({} if vllm_version_is("0.29.0") else {"replay_boundaries": [tokens - 1]}),
         )
         assert manager.req_to_blocks["a"] == a
     assert manager.take_new_block_ids() == []
@@ -91,7 +92,7 @@ def test_scratch_groups_do_not_reduce_prefix_hits_or_truncation():
         scheduler_block_size=128,
         _get_effective_block_size=lambda spec: spec.block_size,
     )
-    AscendHybridKVCacheCoordinator.verify_and_split_kv_cache_groups(coordinator)
+    AscendHybridKVCacheCoordinator.verify_and_split_kv_cache_groups(coordinator)  # type: ignore[arg-type]
     assert len(coordinator.attention_groups) == 1
     assert coordinator.attention_groups[0].group_ids == [0]
     host = SimpleNamespace(
@@ -118,7 +119,7 @@ def test_ring_bypasses_position_to_page_mapping(draft):
     mapping = torch.zeros(8, dtype=torch.int64)
     table = SimpleNamespace(is_circular_group=True, slot_mapping=SimpleNamespace(gpu=mapping))
     if draft:
-        BlockTable.compute_slot_mapping_draft(table, Mock(), Mock())
+        BlockTable.compute_slot_mapping_draft(table, Mock(), Mock())  # type: ignore[arg-type]
     else:
-        BlockTable.compute_slot_mapping(table, 1, Mock(), Mock())
+        BlockTable.compute_slot_mapping(table, 1, Mock(), Mock())  # type: ignore[arg-type]
     assert mapping.tolist() == [-1] * 8

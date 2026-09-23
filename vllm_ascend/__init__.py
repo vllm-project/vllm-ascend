@@ -18,6 +18,7 @@
 import importlib.util
 import sys
 from types import ModuleType
+from typing import Any
 
 _triton_available = importlib.util.find_spec("triton") is not None
 
@@ -48,6 +49,72 @@ if _triton_available:
     else:
         if not hasattr(_tl_core, "_aggregate"):
             _tl_core._aggregate = lambda *a, **kw: None
+
+
+def _stub_triton_placeholder_runtime() -> None:
+    """Give vLLM's ``TritonPlaceholder`` the attributes import paths read.
+
+    When Triton is installed without an active driver (CPU UT or an
+    accelerator-less environment), ``vllm.triton_utils`` exposes a
+    ``TritonPlaceholder`` instead of the real module. vLLM main's
+    ``_is_autotuned`` reads ``triton.runtime.autotuner.Autotuner`` while
+    decorating kernels at import time, which the placeholder does not define.
+    vLLM main also evaluates ``tl.constexpr(...)`` at import time (DeepSeek
+    V4.1 DSA sparse MQA-logits kernels), while the language placeholder leaves
+    ``constexpr`` as ``None``.
+    """
+    try:
+        import vllm.triton_utils as _triton_utils
+        from vllm.triton_utils.importing import TritonLanguagePlaceholder, TritonPlaceholder
+    except Exception:
+        return
+
+    tl = getattr(_triton_utils, "tl", None)
+    if isinstance(tl, TritonLanguagePlaceholder) and getattr(tl, "constexpr", None) is None:
+        tl.constexpr = lambda *args, **kwargs: args[0] if args else None  # type: ignore[assignment]
+
+    # The placeholder is used only when Triton is disabled; a real Triton
+    # module already provides ``runtime``.
+    if hasattr(TritonPlaceholder, "runtime"):
+        return
+
+    class _Autotuner:
+        pass
+
+    runtime: Any = ModuleType("triton.runtime")
+    runtime.__path__ = []
+    autotuner: Any = ModuleType("triton.runtime.autotuner")
+    autotuner.Autotuner = _Autotuner
+    runtime.autotuner = autotuner
+    TritonPlaceholder.runtime = runtime
+
+
+def _stub_cpu_gpu_buffer_pinmemory() -> None:
+    """Keep ``CpuGpuBuffer.copy_to_gpu`` from re-pinning on Ascend.
+
+    vLLM main calls ``cpu.pin_memory()`` on every ``copy_to_gpu``. Ascend
+    reports pinned memory available but ``.pin_memory()`` needs the
+    PrivateUse1 hooks that CPU-only environments do not register, so copy
+    straight from the buffer's own CPU storage instead (already pinned when
+    the buffer was created with pinning enabled).
+    """
+    try:
+        import vllm.v1.utils as _v1_utils
+    except Exception:
+        return
+    buffer_cls = getattr(_v1_utils, "CpuGpuBuffer", None)
+    if buffer_cls is None or getattr(buffer_cls.copy_to_gpu, "_vllm_ascend_nopin", False):
+        return
+
+    def copy_to_gpu(self, n: int | None = None):
+        cpu, gpu = self.cpu, self.gpu
+        if n is not None:
+            cpu, gpu = cpu[:n], gpu[:n]
+        return gpu.copy_(cpu, non_blocking=True)
+
+    copy_to_gpu._vllm_ascend_nopin = True  # type: ignore[attr-defined]
+    buffer_cls.copy_to_gpu = copy_to_gpu  # type: ignore[method-assign]
+
 
 _GLOBAL_PATCH_APPLIED = False
 

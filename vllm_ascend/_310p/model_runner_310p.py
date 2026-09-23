@@ -270,7 +270,7 @@ class NPUModelRunner310(NPUModelRunner):
 
         self.input_batch.block_table.commit_block_table(num_reqs)
 
-        req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
+        req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)  # type: ignore[var-annotated]
 
         if not scheduler_output.scheduled_spec_decode_tokens:
             num_valid_tokens = num_scheduled_tokens
@@ -401,18 +401,18 @@ class NPUModelRunner310(NPUModelRunner):
                 num_sched = num_scheduled_tokens[req_idx]
 
                 if req_idx not in self.input_batch.req_prompt_embeds:
-                    output_idx += num_sched
+                    output_idx += num_sched  # type: ignore[assignment]
                     continue
 
                 if num_sched <= 0:
-                    output_idx += num_sched
+                    output_idx += num_sched  # type: ignore[assignment]
                     continue
 
                 req_embeds = self.input_batch.req_prompt_embeds[req_idx]
                 start_pos = self.input_batch.num_computed_tokens_cpu[req_idx]
 
                 if start_pos >= req_embeds.shape[0]:
-                    output_idx += num_sched
+                    output_idx += num_sched  # type: ignore[assignment]
                     continue
 
                 end_pos = start_pos + num_sched
@@ -424,7 +424,7 @@ class NPUModelRunner310(NPUModelRunner):
                         req_embeds[start_pos:actual_end]
                     )
 
-                output_idx += num_sched
+                output_idx += num_sched  # type: ignore[assignment]
 
         self.query_start_loc.np[0] = 0
         self.query_start_loc.np[1 : num_reqs + 1] = cu_num_tokens
@@ -523,19 +523,19 @@ class NPUModelRunner310(NPUModelRunner):
         if not use_spec_decode:
             spec_decode_metadata = None
             num_draft_tokens = None
-            num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
+            num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)  # type: ignore[var-annotated]
             logits_indices = self.query_start_loc.gpu[1 : num_reqs + 1] - 1
         else:
             num_draft_tokens = np.zeros(num_reqs, dtype=np.int32)
             new_schedule_reqs = [x.req_id for x in scheduler_output.scheduled_new_reqs]
-            num_decode_draft_tokens = np.full(num_reqs, -1, dtype=np.int32)
+            num_decode_draft_tokens = np.full(num_reqs, -1, dtype=np.int32)  # type: ignore[var-annotated]
             for (
                 req_id,
                 draft_token_ids,
             ) in scheduler_output.scheduled_spec_decode_tokens.items():
                 req_idx = self.input_batch.req_id_to_index[req_id]
                 draft_len = len(draft_token_ids)
-                num_draft_tokens[req_idx] = draft_len
+                num_draft_tokens[req_idx] = draft_len  # type: ignore[index]
                 if (self.is_kv_consumer and req_id in new_schedule_reqs) or (
                     self.input_batch.num_computed_tokens_cpu[req_idx] >= self.input_batch.num_prompt_tokens[req_idx]
                 ):
@@ -544,11 +544,11 @@ class NPUModelRunner310(NPUModelRunner):
                     num_decode_draft_tokens[req_idx] = -1
 
             spec_decode_metadata = self._calc_spec_decode_metadata(
-                num_draft_tokens,
+                num_draft_tokens,  # type: ignore[arg-type]
                 cu_num_tokens,
             )
             logits_indices = spec_decode_metadata.logits_indices
-            num_sampled_tokens = num_draft_tokens + 1
+            num_sampled_tokens = num_draft_tokens + 1  # type: ignore[operator, assignment]
 
             self.num_decode_draft_tokens.np[:num_reqs] = num_decode_draft_tokens
             self.num_decode_draft_tokens.np[num_reqs:].fill(-1)

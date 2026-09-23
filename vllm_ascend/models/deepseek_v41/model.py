@@ -46,7 +46,6 @@ from vllm.model_executor.models.interfaces import (
     SupportsPP,
 )
 from vllm.model_executor.models.utils import PPMissingLayer, is_pp_missing_parameter, make_layers, maybe_prefix
-from vllm.models.deepseek_v4_1.common.engram import EngramLayout
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
@@ -71,6 +70,7 @@ from vllm_ascend.utils import (
     normalize_deepseek_v41_config,
 )
 
+from ._compat import EngramLayout
 from .compressor import DeepseekV41Compressor
 from .engram import (
     create_engram_hash_state,

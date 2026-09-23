@@ -744,6 +744,12 @@ class AscendSFAImpl(MLAAttentionImpl):
     # value. With DCP disabled it does not change the draft KV-cache layout.
     supports_mtp_with_cp_non_trivial_interleave_size: bool = True
 
+    def record_logical_topk_ready(self) -> None:
+        # vLLM #53781 publishes the logical→physical sparse top-k index group
+        # through this hook. Ascend keeps top-k handling inside the SFA impl
+        # and builds no index group, so there is nothing to record.
+        return
+
     def __init__(
         self,
         num_heads: int,
