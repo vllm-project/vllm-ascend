@@ -98,6 +98,9 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     separate :class:`AscendSFAIndexerCacheSpec`.
     """
 
+    # Per-rank query heads used by FlashMLA layout selection. Auxiliary MLA
+    # caches without query heads use the one-latent-head cache contract.
+    num_heads: int = 1
     scale_dim: int = 0
     scale_dtype: torch.dtype = torch.int8
     # Sparse C8 changes the main cache into one packed byte tensor. Keep that
@@ -109,6 +112,15 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     # stride. vLLM main removed this field from AttentionSpec, but it remains
     # part of the Ascend runner/backend contract.
     indexes_kv_by_block_stride: bool = False
+
+    @property
+    def supports_single_raw_backing(self) -> bool:
+        """Whether this geometry can be exposed from one raw MLA backing."""
+        return (
+            get_kv_cache_compression_ratio(self) == 1
+            and self.model_version is None
+            and not self.indexes_kv_by_block_stride
+        )
 
     @property
     def real_page_size_bytes(self) -> int:
@@ -130,6 +142,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
         ascend_layouts = {
             (
                 spec.scale_dim,
+                spec.num_heads,
                 spec.scale_dtype,
                 spec.cache_sparse_sfa_c8,
                 spec.store_on_host,
@@ -151,6 +164,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
         return replace(
             merged,
             scale_dim=first_spec.scale_dim,
+            num_heads=first_spec.num_heads,
             scale_dtype=first_spec.scale_dtype,
             alignment=first_spec.alignment,
             cache_sparse_sfa_c8=first_spec.cache_sparse_sfa_c8,

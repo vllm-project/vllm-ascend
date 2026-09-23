@@ -5,6 +5,7 @@ from typing import Any
 import torch
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import largest_power_of_2_divisor
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec
 from vllm.v1.worker.utils import AttentionGroup, KVBlockZeroer
@@ -66,6 +67,48 @@ def copy_kv_cache_blocks_inplace(
         source_blocks = torch.stack([blocks[copy.src_block_id] for copy in kv_cache_block_copies])
         for index, copy in enumerate(kv_cache_block_copies):
             blocks[copy.dst_block_id].copy_(source_blocks[index])
+
+
+def get_single_raw_mla_backing(raw_cache: object) -> torch.Tensor | None:
+    """Extract one raw MLA backing from either allocator representation.
+
+    Pure MLA allocations use a one-element tuple so generic K/V unpacking does
+    not mistake the backing for a `(key, value)` pair. Hybrid/shared pools can
+    instead store a bare tensor slice for an MLA layer.
+    """
+    if isinstance(raw_cache, torch.Tensor):
+        return raw_cache
+    if isinstance(raw_cache, tuple) and len(raw_cache) == 1 and isinstance(raw_cache[0], torch.Tensor):
+        return raw_cache[0]
+    return None
+
+
+def row_major_strides(shape: Sequence[int]) -> tuple[int, ...]:
+    """Return row-major strides for a shape without allocating tensor storage."""
+    strides = [1] * len(shape)
+    for dim in range(len(shape) - 2, -1, -1):
+        strides[dim] = strides[dim + 1] * shape[dim + 1]
+    return tuple(strides)
+
+
+def make_page_strided_cache_view(
+    raw_tensor: torch.Tensor,
+    shape: Sequence[int],
+    dtype: torch.dtype,
+    page_size_bytes: int,
+    offset_bytes: int = 0,
+) -> torch.Tensor:
+    """Create a first-axis page-strided view over a raw cache allocation."""
+    dtype_size = get_dtype_size(dtype)
+    strides = row_major_strides(tuple(shape))
+    storage_offset_bytes = raw_tensor.storage_offset() * raw_tensor.element_size() + offset_bytes
+    assert storage_offset_bytes % dtype_size == 0
+    return torch.as_strided(
+        raw_tensor.view(dtype),
+        size=tuple(shape),
+        stride=(page_size_bytes // dtype_size, *strides[1:]),
+        storage_offset=storage_offset_bytes // dtype_size,
+    )
 
 
 @contextmanager
@@ -131,7 +174,14 @@ def _zero_kv_blocks_kernel(
 
 
 def _component_views_share_slot(kv_cache: object, spec: FullAttentionSpec) -> bool:
-    """Whether MLA component views alias one component-major physical page."""
+    """Whether already-materialized MLA nope/rope views alias one physical page.
+
+    This is a post-reshape physical-aliasing check used by block zeroing and
+    COW. It deliberately differs from single-raw-backing eligibility:
+    eligibility decides how a cache may be allocated, while this function only
+    recognizes component-major views that were created over the same backing.
+    Legacy contiguous K/V tuples and independently backed tensors return false.
+    """
 
     if not isinstance(spec, MLAAttentionSpec) or not isinstance(kv_cache, tuple) or len(kv_cache) != 2:
         return False
