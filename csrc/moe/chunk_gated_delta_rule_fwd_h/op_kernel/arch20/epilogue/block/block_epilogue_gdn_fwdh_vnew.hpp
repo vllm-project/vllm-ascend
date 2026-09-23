@@ -44,7 +44,7 @@ public:
     using WSElementInput = typename WSInputType_::Element;
 
     CATLASS_DEVICE
-    BlockEpilogue(Arch::Resource<ArchTag> &resource)
+    BlockEpilogue(Arch::Resource<ArchTag> &resource) : resource_(resource)
     {
 
         constexpr uint32_t CALC_BUF_OFFSET = 0;
@@ -93,7 +93,7 @@ public:
         AscendC::GlobalTensor<VElementOutput> vnewdecayOutput,
         AscendC::GlobalTensor<GElementInput> gInput,
         AscendC::GlobalTensor<UElementInput> uInput,
-        AscendC::GlobalTensor<float> wsInput,
+        uint32_t wsUbOffset,
         uint32_t chunkSize,
         uint32_t kHeadDim,
         uint32_t vHeadDim,
@@ -104,8 +104,9 @@ public:
         uint32_t nkActual = kHeadDim;
         uint32_t nvActual = vHeadDim;
 
-        uint32_t subBlockIdx = AscendC::GetSubBlockIdx();
-        uint32_t subBlockNum = AscendC::GetSubBlockNum();
+        // Single working instance (the kernel gates subblock 1 out): full m.
+        uint32_t subBlockIdx = 0;
+        uint32_t subBlockNum = 1;
         uint32_t mActualPerSubBlock = CeilDiv(mActual, subBlockNum);
         uint32_t mActualThisSubBlock = (subBlockIdx == 0) ? mActualPerSubBlock : (mActual - mActualPerSubBlock);
         uint32_t mOffset = subBlockIdx * mActualPerSubBlock;
@@ -141,17 +142,19 @@ public:
         AscendC::GlobalTensor<VElementOutput> vnewdecayOutputThisSubBlock = vnewdecayOutput[offsetK];
         AscendC::GlobalTensor<GElementInput> gInputThisSubBlock = gInput;
         AscendC::GlobalTensor<UElementInput> uInputThisSubBlock = uInput[offsetK];
-        AscendC::GlobalTensor<float> wsInputThisSubBlock = wsInput[offsetK];
 
-        pingpongFlag = isFirst ? 0 : 4;
-        AscendC::LocalTensor<UElementInput> uUbTensor = isFirst ? uUbTensor_ping : uUbTensor_pong;
-        AscendC::LocalTensor<float> uUbFloatTensor = isFirst ? uUbFloatTensor_ping : uUbFloatTensor_pong;
-        AscendC::LocalTensor<float> wsUbTensor = isFirst ? wsUbTensor_ping : wsUbTensor_pong;
-        AscendC::LocalTensor<float> gUbTensor = isFirst ? gUbTensor_ping : gUbTensor_pong;
-        AscendC::LocalTensor<float> gLastUbTensor = isFirst ? gLastUbTensor_ping : gLastUbTensor_pong;
-        AscendC::LocalTensor<GElementInput> gInputUbTensor = isFirst ? gInputUbTensor_ping : gInputUbTensor_pong;
-        AscendC::LocalTensor<VElementOutput> vNewOutputUbTensor = isFirst ? vNewOutputUbTensor_ping : vNewOutputUbTensor_pong;
-        AscendC::LocalTensor<VElementOutput> vNewDecayUbTensor = isFirst ? vNewDecayUbTensor_ping : vNewDecayUbTensor_pong;
+        // Always the pong bank: the ping bank's PING_BUF_1 (64K) is where the
+        // hand path keeps the resident v_work ND tile, and the ping/pong here
+        // was vestigial anyway (isFirst switched banks exactly once).
+        pingpongFlag = 4;
+        AscendC::LocalTensor<UElementInput> uUbTensor = uUbTensor_pong;
+        AscendC::LocalTensor<float> uUbFloatTensor = uUbFloatTensor_pong;
+        AscendC::LocalTensor<float> wsUbTensor = wsUbTensor_pong;
+        AscendC::LocalTensor<float> gUbTensor = gUbTensor_pong;
+        AscendC::LocalTensor<float> gLastUbTensor = gLastUbTensor_pong;
+        AscendC::LocalTensor<GElementInput> gInputUbTensor = gInputUbTensor_pong;
+        AscendC::LocalTensor<VElementOutput> vNewOutputUbTensor = vNewOutputUbTensor_pong;
+        AscendC::LocalTensor<VElementOutput> vNewDecayUbTensor = vNewDecayUbTensor_pong;
 
         AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0 + pingpongFlag);
         AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID2 + pingpongFlag);
@@ -200,13 +203,12 @@ public:
         AscendC::Cast(uUbFloatTensor, uUbTensor, AscendC::RoundMode::CAST_NONE, mActualThisSubBlock * nvActual);
         AscendC::PipeBarrier<PIPE_V>();
 
-        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1 + pingpongFlag);
-        AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1 + pingpongFlag);
-        AscendC::DataCopy(wsUbTensor, wsInputThisSubBlock, mActualThisSubBlock * nvActual);
-        AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID1 + pingpongFlag);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID1 + pingpongFlag);
-        
-        AscendC::Sub<float>(uUbFloatTensor, uUbFloatTensor, wsUbTensor, mActualThisSubBlock * nvActual);
+        // v_work stays UB-resident: the hand-mmad deformat left it at
+        // wsUbOffset (ND, f32). Producer is the V-pipe deformat, consumer is
+        // this V-pipe Sub -- program order on V, no flags, no GM round-trip.
+        AscendC::LocalTensor<float> wsResident =
+            resource_.ubBuf.template GetBufferByByte<float>(wsUbOffset + mOffset * nvActual * sizeof(float));
+        AscendC::Sub<float>(uUbFloatTensor, uUbFloatTensor, wsResident, mActualThisSubBlock * nvActual);
         AscendC::PipeBarrier<PIPE_V>();
         AscendC::Cast(vNewOutputUbTensor, uUbFloatTensor, AscendC::RoundMode::CAST_NONE, mActualThisSubBlock * nvActual);
         // V write -> MTE3 read of vNewOutputUbTensor.
@@ -232,6 +234,7 @@ public:
     }
 
 private:
+    Arch::Resource<ArchTag> &resource_;
     uint32_t pingpongFlag = 0;
     bool isFirst = true;
 

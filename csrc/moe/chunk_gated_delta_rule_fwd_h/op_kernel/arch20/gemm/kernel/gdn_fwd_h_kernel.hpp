@@ -259,12 +259,17 @@ public:
     }
 
     __aicore__ inline void ProcessUnifiedCore() {
-        uint32_t coreNum = AscendC::GetBlockNum();
-        BlockMmadKV blockMmadKV(resource);
+        // The 1:2 task type launches two subblock instances per core with
+        // SEPARATE UBs: they duplicated every cube mmad and could only hand
+        // data to the epilogues through GM (a UB-resident v_work reached
+        // subblock 0 chunk-shifted). Run everything on instance 0; the
+        // epilogues are hardcoded to a single subblock to match. Changing the
+        // task type itself breaks the generated tilingkey wrapper, so gate at
+        // runtime instead.
+        if (AscendC::GetSubBlockIdx() != 0) {
+            return;
+        }
         EpilogueGDNFwdHVnew epilogueGDNFwdHVnew(resource);
-        auto kLayout = tla::MakeLayout<ElementK, LayoutK>(kHeadDim, shapeBatch * kNumHead * cubeBlockScheduler.totalTokens);
-        auto vworkLayout = tla::MakeLayout<ElementV, LayoutV>(coreNum * chunkSize * PING_PONG_STAGES, vHeadDim);
-        auto hworkLayout = tla::MakeLayout<ElementHWork, LayoutH>(coreNum * kHeadDim * PING_PONG_STAGES, vHeadDim);
 
         if (useInitialState) {
             AscendC::LocalTensor<ElementInitialState> stateUbTensorPing = resource.ubBuf.template GetBufferByByte<ElementInitialState>(0);
@@ -343,10 +348,7 @@ public:
                     stage1Offsets.blockTokens, vHeadDim, kHeadDim,
                     HM_L1A_OFFSET, HM_L1B_OFFSET, HM_STAGE_OFFSET, 0);
                 DeformatStagingToUb(stage1Offsets.blockTokens, vHeadDim);
-                AscendC::LocalTensor<float> ndOut =
-                    resource.ubBuf.template GetBufferByByte<float>(HM_ND_OFFSET);
-                AscendC::DataCopy(gmVWorkspace[stage1Offsets.vWorkOffset], ndOut,
-                                  stage1Offsets.blockTokens * vHeadDim);
+                // v_work stays in UB at HM_ND_OFFSET; Vec1 consumes it in place.
 #endif
             }
 
@@ -354,7 +356,7 @@ public:
             if (cubeBlockScheduler.NeedProcessStage1()) {
                 epilogueGDNFwdHVnew(
                     gmV[stage1Offsets.uvOffset], gmVUpdateWorkspace[stage1Offsets.vWorkOffset],
-                    gmG[stage1Offsets.gOffset], gmU[stage1Offsets.uvOffset], gmVWorkspace[stage1Offsets.vWorkOffset],
+                    gmG[stage1Offsets.gOffset], gmU[stage1Offsets.uvOffset], HM_ND_OFFSET,
                     stage1Offsets.blockTokens, kHeadDim, vHeadDim, cubeBlockScheduler.cube1Done
                 );
             }
@@ -362,13 +364,31 @@ public:
             if (cubeBlockScheduler.iterId > 1) {
                 GDNFwdHOffsets& stage2Offsets = cubeBlockScheduler.GetStage2Offsets();
 
-                // CUBE2: h_work = k.T @ v_update, hand mmad with A_COL_MAJOR
-                // (k stored [tokens, kHeadDim] row-major). v_update was MTE3-written
-                // by Vec1 just above: drain MTE3 before the loads. m split at 128.
+                // CUBE2 + VEC2, fused per m-tile (m <= 128). h_work never
+                // touches GM: mmad -> NZ stage -> deformat ND @HM_ND_OFFSET ->
+                // update epilogue reads it in place, casts the h output over it
+                // and stores straight to gmH/final_state. v_update was
+                // MTE3-written by Vec1 just above: drain MTE3 before the loads.
                 if (cubeBlockScheduler.NeedProcessStage2()) {
-#if FWD_H_HAND_CUBE2
                     AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID5);
                     AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID5);
+                    EpilogueGDNFwdHUpdate epilogueGDNFwdHUpdate(resource);
+                    // exp(g_last) once per chunk: one GM scalar read + one
+                    // 1-element vector Exp + S<->V handshake, shared by the tiles.
+                    float hDecayScale;
+                    {
+                        AscendC::LocalTensor<float> gl =
+                            resource.ubBuf.template GetBufferByByte<float>(163840);
+                        gl.SetValue(0, gmG[stage2Offsets.gOffset].GetValue(stage2Offsets.blockTokens - 1));
+                        AscendC::SetFlag<AscendC::HardEvent::S_V>(EVENT_ID5);
+                        AscendC::WaitFlag<AscendC::HardEvent::S_V>(EVENT_ID5);
+                        AscendC::Exp(gl, gl, 1);
+                        AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID5);
+                        AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID5);
+                        hDecayScale = gl.GetValue(0);
+                        AscendC::SetFlag<AscendC::HardEvent::S_V>(EVENT_ID5);
+                        AscendC::WaitFlag<AscendC::HardEvent::S_V>(EVENT_ID5);
+                    }
                     uint32_t mLoopC2 = (kHeadDim + 127) / 128;
                     for (uint32_t mIdx = 0; mIdx < mLoopC2; ++mIdx) {
                         uint32_t mOff = mIdx * 128;
@@ -382,42 +402,17 @@ public:
                             mActual, vHeadDim, stage2Offsets.blockTokens,
                             HM_L1A_OFFSET, HM_L1B_OFFSET, HM_STAGE_OFFSET, 0);
                         DeformatStagingToUb(mActual, vHeadDim);
-                        AscendC::LocalTensor<float> ndOut =
-                            resource.ubBuf.template GetBufferByByte<float>(HM_ND_OFFSET);
-                        AscendC::DataCopy(gmHWorkspace[stage2Offsets.hWorkOffset + mOff * vHeadDim],
-                                          ndOut, mActual * vHeadDim);
+                        epilogueGDNFwdHUpdate(
+                            gmH[stage2Offsets.hDstOffset + mOff * vHeadDim],
+                            gmFinalState[stage2Offsets.finalStateOffset + mOff * vHeadDim],
+                            gmG[stage2Offsets.gOffset],
+                            gmH[stage2Offsets.hSrcOffset + mOff * vHeadDim],
+                            HM_ND_OFFSET, hDecayScale,
+                            stage2Offsets.blockTokens, mActual, vHeadDim,
+                            cubeBlockScheduler.cube2Done,
+                            (stage2Offsets.isFinalState && storeFinalState)
+                        );
                     }
-#else
-                    constexpr uint32_t L1_TILE_M_C2 = tla::get<0>(L1TileShapeTla{});
-                    uint32_t mLoopC2 = (kHeadDim + L1_TILE_M_C2 - 1) / L1_TILE_M_C2;
-                    auto tensorK = tla::MakeTensor(gmK[stage2Offsets.wkOffset], kLayout, Catlass::Arch::PositionGM{});
-                    auto tensorVwork = tla::MakeTensor(gmVUpdateWorkspace[stage2Offsets.vWorkOffset], vworkLayout, Catlass::Arch::PositionGM{});
-                    auto tensorHwork = tla::MakeTensor(gmHWorkspace[stage2Offsets.hWorkOffset], hworkLayout, Catlass::Arch::PositionGM{});
-                    for (uint32_t mIdx = 0; mIdx < mLoopC2; ++mIdx) {
-                        uint32_t mOff = mIdx * L1_TILE_M_C2;
-                        uint32_t mTail = kHeadDim - mOff;
-                        uint32_t mActual = (mTail < L1_TILE_M_C2) ? mTail : L1_TILE_M_C2;
-                        GemmCoord cube2Shape{mActual, vHeadDim, stage2Offsets.blockTokens};
-                        auto tensorBlockK = GetTile(tensorK, tla::MakeCoord(mOff, 0), tla::MakeShape(cube2Shape.m(), cube2Shape.k()));
-                        auto tensorBlockVwork = GetTile(tensorVwork, tla::MakeCoord(0, 0), tla::MakeShape(cube2Shape.k(), cube2Shape.n()));
-                        auto tensorBlockHwork = GetTile(tensorHwork, tla::MakeCoord(mOff, 0), tla::MakeShape(cube2Shape.m(), cube2Shape.n()));
-                        blockMmadKV.preSetFlags();
-                        blockMmadKV(tensorBlockK, tensorBlockVwork, tensorBlockHwork, cube2Shape);
-                        blockMmadKV.finalWaitFlags();
-                    }
-#endif
-                }
-
-                // VEC2: h update epilogue
-                if (cubeBlockScheduler.NeedProcessStage2()) {
-                    EpilogueGDNFwdHUpdate epilogueGDNFwdHUpdate(resource);
-                    epilogueGDNFwdHUpdate(
-                        gmH[stage2Offsets.hDstOffset], gmFinalState[stage2Offsets.finalStateOffset],
-                        gmG[stage2Offsets.gOffset], gmH[stage2Offsets.hSrcOffset],
-                        gmHWorkspace[stage2Offsets.hWorkOffset],
-                        stage2Offsets.blockTokens, kHeadDim, vHeadDim, cubeBlockScheduler.cube2Done,
-                        (stage2Offsets.isFinalState && storeFinalState)
-                    );
                 }
             }
         }
