@@ -16,9 +16,9 @@ speculative decoding. These designs reduce the global KV cache footprint to
 one eighth of DeepSeek-V4-Flash. The model accepts text and images and supports
 a continuously adjustable reasoning effort from 1 to 100.
 
-vLLM Ascend supports W8A8 colocated deployment on either two Atlas 800 A3
-servers or four Atlas 800 A2 servers. A single A3 server can use Engram host
-offload as described below. Prefill-Decode disaggregation is not covered by this guide.
+This guide describes W8A8 colocated deployment on two Atlas 800 A3 servers
+or four Atlas 800 A2 servers, and single-A3 deployment with Engram host
+offload. Prefill-Decode disaggregation is not covered by this guide.
 
 ## 2 Supported Features
 
@@ -27,10 +27,11 @@ for the complete support matrix and the
 [Feature Guide](../../user_guide/feature_guide/index.md) for feature
 configuration.
 
-The configuration in this guide has been validated with W8A8 weights, INT8
-Engram storage, TP8/DP4/EP32, DSpark speculative decoding, and
-`FULL_DECODE_ONLY` ACL Graph. It uses model runner V1 and supports automatic
-prefix caching.
+The multi-node examples use W8A8 weights, INT8 Engram storage, TP8/DP4/EP32,
+DSpark speculative decoding, and `FULL_DECODE_ONLY` ACL Graph with model
+runner V1. Automatic prefix caching is supported. Multi-node Engram execution
+on NPU has not yet been validated for these examples. The single-A3 smoke-test
+scope is described in Section 5.3.
 
 ## 3 Prerequisites
 
@@ -170,9 +171,30 @@ and use the `main` branch with the matching vLLM revision recorded in
 
 ### 5.1 Multi-Node Colocated Deployment
 
-The A3 and A2 configurations use the same global DP4/TP8/EP32 topology. A3
-places two local DP ranks on each of two servers; A2 places one local DP rank
-on each of four servers.
+Use a vLLM Ascend build that includes node-local Engram DP support. Older
+builds that require all DP replicas on one node cannot run these examples;
+adding `--engram-config` alone does not remove that restriction.
+
+Both examples use global DP4/TP8/EP32, with each TP replica contained within
+one server:
+
+| Hardware | Servers | DP replicas per server | Engram storage |
+| --- | --- | --- | --- |
+| A3 | 2 | 2 | Host memory, shared by local DP replicas |
+| A2 | 4 | 1 | Device memory, sharded over TP8 |
+
+Each server stores one copy of the Engram tables, split by hash head. A3
+requires `cpu_offload=true` and `dp_shared_memory=true`: the 24 heads divide
+over TP8, but not over TP8 × local DP2 without sharing. The local replicas
+must share an IPC namespace and have enough host RAM and `/dev/shm` capacity;
+the single-container setup in Section 4.1 provides the shared namespace.
+Each server creates its own shared backing, and TP all-gather still assembles
+the lookup results within each replica.
+
+A2 has one DP replica per server, so TP8 alone divides the 24 heads. Its
+example keeps the shards in device memory; `cpu_offload=true` can instead
+place them in host memory. With global DP > 1 but only one replica per node,
+`dp_shared_memory=true` uses ordinary TP shards without a shared mapping.
 
 Select the tab for the target hardware. In each script, change `NODE_RANK`,
 `NODE0_IP`, `LOCAL_IP`, `NIC_NAME`, and `MODEL_PATH`. Node 0 exposes the API;
@@ -307,29 +329,8 @@ Omit `--data-parallel-start-rank` on Node 0: specifying even `0` selects
 hybrid load balancing in the pinned vLLM CLI, which is incompatible with
 headless remote engines. Set the start rank only on the headless nodes.
 
-Start Node 0 first and then the remaining nodes. The global topology is
-DP4/TP8/EP32 in both configurations:
-
-- **A3 series**: two servers, local DP2 per server, and 16 visible logical
-  devices per server.
-- **A2 series**: four servers, local DP1 per server, and 8 visible devices per
-  server.
-
-Each DP rank uses eight devices through TP8. Only Node 0 exposes the API
+Start Node 0 first and then the remaining nodes. Only Node 0 exposes the API
 endpoint.
-
-Engram tables are replicated across nodes and split by hash head inside each
-node. On A3, the two local DP replicas share each TP head shard in host memory:
-24 heads divide over TP8, but not over TP8 times local DP2 without shared memory.
-Keep both local replicas in the same container, with sufficient host RAM and
-`/dev/shm` capacity as configured above. Each node creates its own shared table;
-shared memory does not cross nodes. TP all-gather still assembles the heads for
-each replica's tokens.
-
-On A2, each node has one DP replica, so TP8 alone splits the 24 heads and the
-example keeps the shards in device memory. Set `cpu_offload` to `true` to store
-them in host memory instead. When a node has only one replica, a request for
-`dp_shared_memory` resolves to ordinary TP shards without a shared mapping.
 
 Wait until every DP engine finishes loading weights and graph capture. A
 successful startup includes output similar to:
@@ -373,23 +374,20 @@ is required to avoid eagerly materializing the entire table on each rank.
 For a single A3, use TP8/DP2/EP16 across all 16 logical devices with both
 DP replicas local (`--data-parallel-size 2 --data-parallel-size-local 2`).
 Keep model runner V1, `FULL_DECODE_ONLY`, and DSpark with eager draft execution.
-Use INT8 Engram tables and turn the offload on through vLLM's Engram config.
-This needs a vLLM that provides `--engram-config`; without it the tables stay
-on the device:
+Use INT8 Engram tables and explicitly enable host offload and DP sharing:
 
 ```bash
 --engram-config '{"cpu_offload": true, "dp_shared_memory": true}'
 ```
 
-With `cpu_offload` the shard stays in host memory, is registered with
-`aclrtHostRegisterV2`, and the NPU gather kernel reads it through the device
-address `aclrtHostGetDevicePointer` returns, so the offloaded table needs
-neither an H2D copy nor a host-side gather.
+The two local replicas share each TP head shard in host memory and query
+their own tokens. This requires a shared IPC namespace and enough host RAM
+and `/dev/shm` capacity, as in the A3 setup in Sections 4.1 and 5.1.
 
 Start with 4 sequences per DP replica, 512 batched tokens, 131072 model
 length, and 1 GiB of KV cache per rank, with prefix caching disabled.
-Ensure enough host RAM for all compressed Engram shards and runtime memory;
-CPU/NUMA page migration can add several minutes to startup.
+Leave enough host RAM beyond the shared tables for weight loading and runtime
+memory.
 
 This configuration passed model loading, decode graph capture, natural-text
 requests, and mixed-length concurrent request smoke tests. These checks do
@@ -464,8 +462,8 @@ No production performance baseline is published for this configuration.
 
 ## 9 Performance Tuning
 
-The values in Section 5.1 are a validated starting point rather than globally
-optimal settings. Tune `--max-num-seqs`, `--max-num-batched-tokens`, and
+Validate the examples in Section 5.1 on the target hardware before tuning
+`--max-num-seqs`, `--max-num-batched-tokens`, and
 `--gpu-memory-utilization` together for the target input length, image sizes,
 output length, and concurrency. Keep the documented DP4/TP8/EP32 topology,
 `--block-size 128`, and `FULL_DECODE_ONLY` mode until an alternative

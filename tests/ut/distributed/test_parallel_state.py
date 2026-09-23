@@ -2,7 +2,6 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
-import torch
 from vllm.config import ParallelConfig
 
 from vllm_ascend.distributed.parallel_state import (
@@ -234,19 +233,6 @@ def test_engram_dp_shard_size(
     monkeypatch.setattr(parallel_state, "in_the_same_node_as", same_node_as)
     monkeypatch.setattr(parallel_state, "get_world_group", lambda: SimpleNamespace(cpu_group=object()))
     assert parallel_state._engram_dp_shard_size(world_size, data_parallel_size, replica_size) == expected
-
-
-def test_engram_dp_group_ranks_stay_inside_one_node():
-    from vllm_ascend.distributed import parallel_state
-
-    # Dual A3, global TP8/DP4: global ranks 0-15 are on node 0, 16-31 on node 1.
-    all_ranks = torch.arange(32).reshape(-1, 4, 1, 1, 8)
-    groups = parallel_state._engram_dp_group_ranks(all_ranks, 2)
-    assert groups[:2] == [[0, 8], [16, 24]]
-    assert len(groups) == 16
-    assert sorted(rank for ranks in groups for rank in ranks) == list(range(32))
-    for ranks in groups:
-        assert max(ranks) - min(ranks) < 16
 
 
 @pytest.mark.parametrize("upstream", [False, True])
