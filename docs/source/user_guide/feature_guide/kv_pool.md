@@ -583,7 +583,7 @@ ock.mmc.evict_threshold_low = 60
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | `ock.mmc.meta_service_url` | str | tcp://127.0.0.1:5000 | No | tcp://<host>:<port>, port [1025, 65535] | MetaService address. P and D nodes must use the same endpoint. Host supports IP and domain. |
 | `ock.mmc.meta_service.config_store_url` | str | tcp://127.0.0.1:6000 | No | tcp://<host>:<port>, port [1025, 65535] | Config store URL. |
-| `ock.mmc.meta_service.metrics_url` | str | http://127.0.0.1:8000 | No | http(s)://<host>:<port>, port [1025, 65535] | Metrics URL. |
+| `ock.mmc.meta_service.metrics_url` | str | `http://127.0.0.1:8000` | No | http(s)://<host>:<port>, port [1025, 65535] | Metrics URL. |
 | `ock.mmc.log_level` | str | info | No | debug / info / warn / error | Log level; shared by MetaService and LocalService. |
 | `ock.mmc.evict_threshold_high` | int | 90 | No | [1, 99] (percentage) | High watermark of the secondary (L2) pool; eviction is triggered when this watermark is reached, and only when `usedSize * 100 > totalSize * threshold`. When SSD is enabled, 70 is recommended to improve SSD cache hit rate. |
 | `ock.mmc.evict_threshold_low` | int | 80 | No | [1, 98] (percentage) | Low watermark of the secondary (L2) pool; eviction stops at this watermark. When SSD is enabled, 60 is recommended. |
@@ -617,7 +617,7 @@ ubsio.standalone.force_new_disk = true
 | `ock.mmc.local_service.config_store_url` | str | tcp://127.0.0.1:6000 | No | tcp://<host>:<port>, port [1025, 65535] | Must match `ock.mmc.meta_service.config_store_url` in mmc-meta.conf. |
 | `ock.mmc.local_service.world_size` | int | 256 | No | [1, 1024] | Maximum number of LocalServices supported (including future additions). Once ranks are connected, no further modifications are allowed — a meta restart is required. |
 | `ock.mmc.local_service.protocol` | str | host_rdma | Yes | host_rdma / host_urma / host_tcp / host_shm / device_sdma / device_rdma / device_urma / device_uboe | Communication protocol. A2 recommended: `device_rdma` (RoCE); A3 HCCS recommended: `device_sdma` (requires LingQu Computing Network >= 1.5); 950PR&950DT Products UB: `device_urma`; UBOE: `device_uboe`. `host_shm` requires DRAM > 0 and HBM = 0. |
-| `ock.mmc.local_service.dram.size` | int | 1GB | Yes | [0, 1TB], auto-aligned to 2MB (host_* protocols) or 1GB (device_* protocols) | DRAM size allocated per die; supports formats such as 134217728, 2048KB, 200MB, 2.5GB, or 1TB. For example, on A3, to allocate 640GB as KV pool, set this parameter to 640/16=40GB. Set 0GB for A3 when HCCS is available. |
+| `ock.mmc.local_service.dram.size` | int | 1GB | Yes | [0, 1TB], auto-aligned to 2MB (host_*protocols) or 1GB (device_*protocols) | DRAM size allocated per die; supports formats such as 134217728, 2048KB, 200MB, 2.5GB, or 1TB. For example, on A3, to allocate 640GB as KV pool, set this parameter to 640/16=40GB. Set 0GB for A3 when HCCS is available. |
 | `ock.mmc.local_service.max.dram.size` | int | 1TB | No | [0, 1TB] | Maximum DRAM size. Needed when ranks contribute different sizes of DRAM. The default 1TB is binary 1024^4 bytes. |
 | `ock.mmc.local_service.storage.enabled` | bool | false | No | true / false | Enable SSD caching. |
 | `ubsio.disk.path` | str | No default | Required when SSD enabled | Absolute paths, multiple paths separated by `:` | SSD block device, partition, or loop device paths. Devices must be dedicated with no mount points or filesystem signatures. `/dev/sd*` not recommended. |
