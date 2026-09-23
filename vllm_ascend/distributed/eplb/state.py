@@ -5,6 +5,8 @@
 
 import inspect
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import fields
 from typing import Any
@@ -13,6 +15,7 @@ import torch
 from torch.distributed import all_reduce
 from vllm.distributed import get_ep_group, get_eplb_group
 from vllm.distributed.eplb import eplb_state as _eplb_state
+from vllm.distributed.eplb.policy import AbstractEplbPolicy
 from vllm.distributed.parallel_state import get_node_count
 
 from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
@@ -20,6 +23,20 @@ from vllm_ascend.ops.fused_moe import eplb as _eplb_ops
 
 ASYNC_EPLB_CYCLE_COMMITTED_LOG = "Ascend async EPLB cycle committed"
 EXPERT_MAPPING_EP_SIZE: ContextVar[int] = ContextVar("vllm_ascend_expert_mapping_ep_size", default=1)
+
+
+@contextmanager
+def _configured_upstream_policy(name: str, policy: AbstractEplbPolicy | None) -> Iterator[None]:
+    """Expose an Ascend policy only while upstream initializes its state."""
+    policies: dict[str, Any] = _eplb_state.EPLB_POLICIES
+    if policy is None or name in policies:
+        yield
+        return
+    policies[name] = policy
+    try:
+        yield
+    finally:
+        policies.pop(name)
 
 
 def _upstream_from_mapping_accepts_valid_expert_count() -> bool:
@@ -119,8 +136,17 @@ class AscendEplbState(_eplb_state.EplbState):
 
     cuda_device_index: int | None
 
-    def __init__(self, parallel_config, device: torch.device) -> None:
-        super().__init__(parallel_config, device)
+    def __init__(
+        self,
+        parallel_config,
+        device: torch.device,
+        policy: AbstractEplbPolicy | None = None,
+    ) -> None:
+        with _configured_upstream_policy(parallel_config.eplb_config.policy, policy):
+            super().__init__(parallel_config, device)
+        self._configured_policy = policy
+        if policy is not None:
+            self.policy = policy
         self._has_fresh_recorded_load = False
         self._is_load_sampling_step = False
         self._should_collect_local_load = False
@@ -136,7 +162,11 @@ class AscendEplbState(_eplb_state.EplbState):
         """Build the EP-aware layout and initialize custom load statistics."""
         token = EXPERT_MAPPING_EP_SIZE.set(get_ep_group().world_size)
         try:
-            super().add_model(model, model_config)
+            with _configured_upstream_policy(
+                self.parallel_config.eplb_config.policy,
+                self._configured_policy,
+            ):
+                super().add_model(model, model_config)
         finally:
             EXPERT_MAPPING_EP_SIZE.reset(token)
         if self.uses_custom_load_stats:
@@ -407,6 +437,7 @@ class AscendEplbState(_eplb_state.EplbState):
         parallel_config,
         expanded_physical_to_logical: torch.Tensor,
         num_valid_physical_experts: int | None = None,
+        policy: AbstractEplbPolicy | None = None,
     ) -> "AscendEplbState":
         from_mapping_kwargs: dict[str, Any] = {
             "model": model,
@@ -419,7 +450,11 @@ class AscendEplbState(_eplb_state.EplbState):
             if num_valid_physical_experts is None:
                 raise TypeError("num_valid_physical_experts is required by the selected vLLM release mapping contract")
             from_mapping_kwargs["num_valid_physical_experts"] = num_valid_physical_experts
-        state = super().from_mapping(**from_mapping_kwargs)
+        with _configured_upstream_policy(parallel_config.eplb_config.policy, policy):
+            state = super().from_mapping(**from_mapping_kwargs)
+        state._configured_policy = policy
+        if policy is not None:
+            state.policy = policy
         if state.uses_custom_load_stats:
             for model_state in state.model_states.values():
                 state._initialize_load_stats_state(model_state)
