@@ -207,8 +207,8 @@ def test_v2_mla_single_raw_backing_selects_layout_by_hardware_and_local_q_heads(
         attn_module.num_heads = q_heads
         fused = reshape()
         assert isinstance(fused, torch.Tensor)
-        assert fused.shape == (6, 1, 128, 576)
-        assert fused.stride() == (81408, 73728, 576, 1)
+        assert fused.shape == (6, 128, 1, 576)
+        assert fused.stride() == (81408, 576, 576, 1)
 
     # Even on A5, FlashMLA-incompatible query-head counts use the
     # FIA-compatible component-major layout.
@@ -219,10 +219,10 @@ def test_v2_mla_single_raw_backing_selects_layout_by_hardware_and_local_q_heads(
     monkeypatch.setattr(attn_utils, "get_current_hardware_profile", lambda: component_profile)
     cache = reshape()
     nope, rope = cache
-    assert nope.shape == (6, 1, 128, 512)
-    assert nope.stride() == (81408, 65536, 512, 1)
-    assert rope.shape == (6, 1, 128, 64)
-    assert rope.stride() == (81408, 8192, 64, 1)
+    assert nope.shape == (6, 128, 1, 512)
+    assert nope.stride() == (81408, 512, 512, 1)
+    assert rope.shape == (6, 128, 1, 64)
+    assert rope.stride() == (81408, 64, 64, 1)
     assert rope.storage_offset() - nope.storage_offset() == 65536
     assert nope.untyped_storage() is rope.untyped_storage()
 
@@ -378,13 +378,13 @@ def test_v2_zeroer_covers_each_mla_component_view():
     typed_raw = raw.view(torch.bfloat16)
     nope = torch.as_strided(
         typed_raw,
-        size=(6, 1, 128, 512),
-        stride=(81408, 65536, 512, 1),
+        size=(6, 128, 1, 512),
+        stride=(81408, 512, 512, 1),
     )
     rope = torch.as_strided(
         typed_raw,
-        size=(6, 1, 128, 64),
-        stride=(81408, 8192, 64, 1),
+        size=(6, 128, 1, 64),
+        stride=(81408, 64, 64, 1),
         storage_offset=65536,
     )
     spec = AscendMLAAttentionSpec(
