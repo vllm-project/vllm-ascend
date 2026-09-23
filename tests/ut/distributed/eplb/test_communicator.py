@@ -52,19 +52,3 @@ def test_peer_group_rank_must_be_in_range(communicator):
 
     with pytest.raises(ValueError, match=r"group rank 2.*\[0, 2\)"):
         communicator.add_send([torch.zeros(1)], dst_rank=2, expert_id=3)
-
-
-def test_pinned_staging_buffers_are_reused_between_transfers(communicator, monkeypatch):
-    allocated = [object(), object()]
-    empty_like = MagicMock(side_effect=allocated)
-    monkeypatch.setattr(torch, "empty_like", empty_like)
-    tensor = torch.zeros((2, 3), dtype=torch.float32)
-
-    first_transfer = {}
-    assert communicator._acquire_staging_buffer(tensor, first_transfer) is allocated[0]
-    assert communicator._acquire_staging_buffer(tensor, first_transfer) is allocated[1]
-
-    second_transfer = {}
-    assert communicator._acquire_staging_buffer(tensor, second_transfer) is allocated[0]
-    assert empty_like.call_count == 2
-    empty_like.assert_called_with(tensor, device="cpu", pin_memory=True)

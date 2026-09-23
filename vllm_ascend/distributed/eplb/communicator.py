@@ -3,9 +3,7 @@
 
 import torch
 import torch.distributed as dist
-from torch.distributed import P2POp, batch_isend_irecv
 from vllm.distributed.eplb.eplb_communicator import TorchDistGlooStagedEplbCommunicator
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 
 class AscendGlooEplbCommunicator(TorchDistGlooStagedEplbCommunicator):
@@ -17,25 +15,6 @@ class AscendGlooEplbCommunicator(TorchDistGlooStagedEplbCommunicator):
     which does not implement the __torch_function__ protocol for
     distributed collectives.
     """
-
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self._pinned_staging_buffers: dict[
-            tuple[torch.dtype, tuple[int, ...]], list[torch.Tensor]
-        ] = {}
-
-    def _acquire_staging_buffer(
-        self,
-        tensor: torch.Tensor,
-        buffer_indices: dict[tuple[torch.dtype, tuple[int, ...]], int],
-    ) -> torch.Tensor:
-        key = tensor.dtype, tuple(tensor.shape)
-        buffer_index = buffer_indices.get(key, 0)
-        buffers = self._pinned_staging_buffers.setdefault(key, [])
-        if buffer_index == len(buffers):
-            buffers.append(torch.empty_like(tensor, device="cpu", pin_memory=True))
-        buffer_indices[key] = buffer_index + 1
-        return buffers[buffer_index]
 
     def _to_global_peer_rank(self, peer_group_rank: int) -> int:
         """Translate an EPLB group-local peer rank to a global rank.
@@ -71,37 +50,6 @@ class AscendGlooEplbCommunicator(TorchDistGlooStagedEplbCommunicator):
         # Keep receive peers in the same global-rank space expected by the
         # parent's positional P2POp.peer argument.
         super().add_recv(tensors, self._to_global_peer_rank(src_rank), expert_id)
-
-    def execute(self) -> None:
-        if not self._ops:
-            return
-
-        p2p_ops: list[P2POp] = []
-        recv_staging: list[tuple[torch.Tensor, torch.Tensor]] = []
-        buffer_indices: dict[tuple[torch.dtype, tuple[int, ...]], int] = {}
-        try:
-            with torch.cuda.stream(self._cuda_stream):
-                for operation, tensor, peer_rank in self._ops:
-                    cpu_tensor = self._acquire_staging_buffer(tensor, buffer_indices)
-                    if operation == "send":
-                        cpu_tensor.copy_(tensor, non_blocking=True)
-                        p2p_ops.append(P2POp(dist.isend, cpu_tensor, peer_rank, self._cpu_group))
-                    else:
-                        p2p_ops.append(P2POp(dist.irecv, cpu_tensor, peer_rank, self._cpu_group))
-                        recv_staging.append((tensor, cpu_tensor))
-        finally:
-            self._ops.clear()
-
-        with gpu_sync_allowed():
-            stream = self._cuda_stream or torch.cuda.current_stream()
-            stream.synchronize()
-
-        for request in batch_isend_irecv(p2p_ops):
-            request.wait()
-
-        with torch.cuda.stream(self._cuda_stream):
-            for dst_tensor, cpu_tensor in recv_staging:
-                dst_tensor.copy_(cpu_tensor, non_blocking=True)
 
     @property
     def needs_profile_buffer_reservation(self) -> bool:
