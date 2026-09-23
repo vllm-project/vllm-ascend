@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
 
@@ -22,7 +23,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, vllm_version_is
 
 
 def get_kv_cache_compression_ratio(kv_cache_spec: KVCacheSpec) -> int:
@@ -90,6 +91,77 @@ def requires_padded_page_layout(kv_cache_specs: Iterable[KVCacheSpec]) -> bool:
     if not any(getattr(spec, "page_size_padded", None) is not None for spec in state_specs):
         return False
     return any(getattr(spec, "indexes_kv_by_block_stride", False) for spec in specs)
+
+
+# ---------------------------------------------------------------------------
+# Token-concatenated (parent) layout for unquantized SFA main caches.
+#
+# The supported parent is ND (blocks, tokens, 1, NoPE + RoPE), FP16/BF16.
+# ---------------------------------------------------------------------------
+
+
+def split_sfa_kv_parent(
+    raw: torch.Tensor,
+    *,
+    dtype: torch.dtype,
+    shape: tuple[int, int, int, int],
+    nope_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Split an exact logical raw region; never copy or include padding.
+
+    ``shape`` must already incorporate the validated manager/kernel block
+    conversion. A larger underlying allocation and aligned nonzero offset are
+    allowed, but raw itself must contain exactly the dense parent's bytes.
+    The raw's flat int8 form and the shape's geometry are guaranteed by the
+    allocation callers; this function enforces the exact byte contract.
+    """
+    if dtype not in (torch.float16, torch.bfloat16):
+        raise ValueError("SFA token-concat requires unquantized FP16 or BF16")
+    dtype_bytes = torch.empty((), dtype=dtype).element_size()
+    if raw.numel() != math.prod(shape) * dtype_bytes:
+        raise ValueError("SFA raw bytes must match the dense parent shape exactly; padded layouts are unsupported")
+    parent = raw.view(dtype).view(shape)
+    return parent[..., :nope_dim], parent[..., nope_dim:]
+
+
+def get_sfa_kv_parent(nope: torch.Tensor, rope: torch.Tensor) -> torch.Tensor:
+    """Validate component views and reconstruct their dense parent without copy.
+
+    Independent legacy caches and padded/interleaved pages are rejected. The
+    returned tensor retains storage ownership. Bounds are checked against the
+    storage; original raw-slice boundaries cannot be inferred from arbitrary
+    views, so allocation callers must use ``split_sfa_kv_parent`` to validate
+    their exact logical raw region first.
+    """
+    if nope.dtype not in (torch.float16, torch.bfloat16):
+        raise ValueError("SFA token-concat requires unquantized FP16 or BF16")
+    if nope.untyped_storage().data_ptr() != rope.untyped_storage().data_ptr():
+        raise ValueError("SFA components must share one storage")
+    width = nope.shape[-1] + rope.shape[-1]
+    shape = (*nope.shape[:-1], width)
+    strides = (shape[1] * width, width, width, 1)
+    if nope.stride() != strides or rope.stride() != strides:
+        raise ValueError("SFA components must have dense token-concat parent strides; padding is unsupported")
+    if rope.storage_offset() != nope.storage_offset() + nope.shape[-1]:
+        raise ValueError("SFA RoPE offset must immediately follow NoPE within each token")
+    end_bytes = (nope.storage_offset() + math.prod(shape)) * nope.element_size()
+    if nope.storage_offset() < 0 or end_bytes > min(nope.untyped_storage().nbytes(), rope.untyped_storage().nbytes()):
+        raise ValueError("SFA parent exceeds the shared storage bounds")
+    return torch.as_strided(nope, shape, strides, storage_offset=nope.storage_offset())
+
+
+def should_use_sfa_kv_parent_layout(vllm_config: VllmConfig) -> bool:
+    """Whether the SFA main KV may use the token-concatenated parent layout.
+    A5 only. When PD transfer is configured, only connectors that understand
+    the packed parent page qualify (MooncakeV2 pull connectors)."""
+    return get_ascend_device_type() == AscendDeviceType.A5 and (
+        vllm_config.kv_transfer_config is None
+        or (
+            getattr(vllm_config.kv_transfer_config, "kv_connector_module_path", None) is None
+            and getattr(vllm_config.kv_transfer_config, "kv_connector", None)
+            in {"MooncakeConnectorV2", "MooncakePullConnector"}
+        )
+    )
 
 
 @dataclass(frozen=True, kw_only=True)
