@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CompressorV2 numerical and mutation checks; run on Ascend A2/A3."""
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 import torch_npu  # noqa: F401
@@ -97,6 +99,64 @@ def test_compressor_v2_graph_replay():
         groups = (start + count) // 2 - start // 2
         torch.testing.assert_close(captured[:groups], expected[:groups], rtol=0, atol=0)
         torch.testing.assert_close(state, before, rtol=0, atol=0)
+
+
+@torch.inference_mode()
+def test_compressor_v2_speculative_compact_mapping():
+    if not get_current_hardware_profile().supports(HardwareCapability.DSV41_RING_COMPRESSOR):
+        pytest.skip("32-row ring adapter currently targets A2/A3")
+    from vllm_ascend.models.deepseek_v41.compressor import DeepseekV41Compressor
+
+    torch.manual_seed(17)
+    x = torch.randn(24, 5120, dtype=torch.bfloat16, device="npu") * 0.1
+    wkv = torch.randn(512, 5120, dtype=torch.bfloat16, device="npu") * 0.02
+    wgate = torch.randn_like(wkv) * 0.02
+    state = torch.randn(5, 32, 1024, device="npu") * 0.1
+    ring = torch.tensor(
+        [[0] * 4, [6] * 4, [0, 6, 12, 18], [0, 6, 12, 18], [1, 2, 3, 4]],
+        dtype=torch.int32,
+        device="npu",
+    )
+    complete = (torch.arange(6, device="npu").repeat(4) % 2) == 1
+    metadata = SimpleNamespace(c2_ring_metadata=ring, c2_complete_mask=complete)
+    adapter = SimpleNamespace(
+        wkv=SimpleNamespace(weight=wkv),
+        wgate=SimpleNamespace(weight=wgate),
+        state_cache=SimpleNamespace(kv_cache=[state.unsqueeze(-2)]),
+        ratio=2,
+        _ring_pooled=torch.empty(24, 512, dtype=torch.bfloat16, device="npu"),
+        norm=lambda value: value,
+    )
+
+    def run():
+        return DeepseekV41Compressor.compress_native(adapter, x, metadata)
+
+    for _ in range(3):
+        run()
+    torch.npu.synchronize()
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        captured = run()
+    for start in (0, 1):
+        ring[0].fill_(start)
+        complete.copy_(((torch.arange(6, device="npu").repeat(4) + start) % 2) == 1)
+        expected_state = state.cpu()
+        expected = _reference(
+            x.cpu(),
+            wkv.cpu(),
+            wgate.cpu(),
+            expected_state,
+            [1, 2, 3, 4],
+            [0, 6, 12, 18],
+            [6] * 4,
+            [start] * 4,
+        )
+        graph.replay()
+        torch.npu.synchronize()
+        actual, mask = captured.cpu(), complete.cpu()
+        torch.testing.assert_close(actual[mask], expected, rtol=0.02, atol=0.002)
+        assert torch.count_nonzero(actual[~mask]) == 0
+        torch.testing.assert_close(state.cpu(), expected_state, rtol=1e-4, atol=1e-5)
 
 
 def test_compressor_v2_meta_and_schema():

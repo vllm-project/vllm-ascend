@@ -4139,8 +4139,21 @@ class NPUModelRunner(GPUModelRunner):
                 pad_attn = cudagraph_runtime_mode == CUDAGraphMode.FULL
                 # check how to build dummy
                 if self.use_compress:
-                    self.positions.fill_(127)
-                    self._dsa_positions_cpu_buf.fill_(127)
+                    if is_deepseek_v41_cache(self.kv_cache_config.kv_cache_groups):
+                        # C2 completion masks and native compact groups must
+                        # describe the same positions. V4's all-127 dummy makes
+                        # every speculative token complete, overrunning C2's
+                        # compact output when the query length is greater than 1.
+                        dummy_positions = self._dsa_positions_cpu_buf[:num_tokens_padded]
+                        dummy_positions.zero_()
+                        starts = np.maximum(seq_lens - num_scheduled_tokens, 0)
+                        positions_np = np.repeat(starts, num_scheduled_tokens)
+                        positions_np += self.query_pos.np[:num_tokens_unpadded]
+                        dummy_positions[:num_tokens_unpadded].copy_(torch.from_numpy(positions_np))
+                        self.positions[:num_tokens_padded].copy_(dummy_positions, non_blocking=True)
+                    else:
+                        self.positions.fill_(127)
+                        self._dsa_positions_cpu_buf.fill_(127)
                 elif self.uses_positions_for_attention:
                     # A dummy batch reports seq_lens == max_query_len but leaves
                     # self.positions holding the previous real step's values.
