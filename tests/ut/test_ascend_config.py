@@ -1414,6 +1414,48 @@ class TestTopLevelSwitchTypeValidation(TestBase):
             self.assertFalse(enable_dsa_cp())
 
     @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_single_dp_dsa_cp_retains_tp_sequence_parallelism(self, mock_fix):
+        """TP-only EP must not silently disable the requested DSA-CP baseline."""
+        vc = VllmConfig()
+        vc.model_config.hf_text_config.index_topk = 2048
+        vc.parallel_config.enable_expert_parallel = True
+        vc.parallel_config.tensor_parallel_size = 16
+        vc.parallel_config.data_parallel_size = 1
+        vc.parallel_config.all2all_backend = "allgather_reducescatter"
+        vc.additional_config = {"enable_dsa_cp": True}
+
+        config = init_ascend_config(vc)
+
+        self.assertTrue(config.enable_dsa_cp)
+        self.assertTrue(enable_sp(vc))
+        self.assertTrue(vc.parallel_config.use_all2all)
+
+        # Disabling FlashComm/DSA-CP must still restore replicated MoE.
+        clear_ascend_config()
+        vc.additional_config = {}
+        with patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "0"}):
+            config = init_ascend_config(vc)
+        self.assertFalse(config.enable_dsa_cp)
+        self.assertFalse(enable_sp(vc))
+
+    def test_single_dp_sp_keeps_unsupported_layouts_disabled(self):
+        for tp, pcp, ep, backend in (
+            (1, 1, True, "allgather_reducescatter"),
+            (16, 1, False, "allgather_reducescatter"),
+            (16, 1, True, "flashinfer_all2allv"),
+            (16, 2, True, "allgather_reducescatter"),
+        ):
+            with self.subTest(tp=tp, pcp=pcp, ep=ep, backend=backend):
+                vc = VllmConfig()
+                vc.parallel_config.tensor_parallel_size = tp
+                vc.parallel_config.prefill_context_parallel_size = pcp
+                vc.parallel_config.data_parallel_size = 1
+                vc.parallel_config.enable_expert_parallel = ep
+                vc.parallel_config.all2all_backend = backend
+                self.assertFalse(vc.parallel_config.use_sequence_parallel_moe)
+
+    @_clean_up
     @patch("vllm_ascend.utils.model_uses_sfa_sparse", return_value=False)
     @patch("vllm_ascend.utils.enable_sp", return_value=True)
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")

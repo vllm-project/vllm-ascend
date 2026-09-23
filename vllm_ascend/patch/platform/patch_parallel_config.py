@@ -9,6 +9,27 @@ from vllm.config.parallel import ParallelConfig, logger
 from vllm_ascend.utils import vllm_version_is
 
 
+def _enable_single_dp_sequence_parallel_moe() -> None:
+    upstream_predicate = ParallelConfig.use_sequence_parallel_moe.fget
+    assert upstream_predicate is not None
+
+    def use_sequence_parallel_moe(self: ParallelConfig) -> bool:
+        # Ascend FlashComm can shard tokens within a single TP/EP group.
+        # Preserve upstream eligibility for all other communication layouts.
+        return upstream_predicate(self) or (
+            self.data_parallel_size == 1
+            and self.tensor_parallel_size > 1
+            and self.prefill_context_parallel_size == 1
+            and self.enable_expert_parallel
+            and self.all2all_backend == "allgather_reducescatter"
+        )
+
+    ParallelConfig.use_sequence_parallel_moe = property(use_sequence_parallel_moe)
+
+
+_enable_single_dp_sequence_parallel_moe()
+
+
 # v0.29.0 (98dff2a81d747d1dba01a47f939f48c3526d4206) validator,
 # with only the platform-independent PCP+DP rejection removed for Ascend.
 # Upstream #54523 (7c2f1ff4958eaf0818405e9192c71608fe4a16b1)

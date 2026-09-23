@@ -178,6 +178,11 @@ DCP reuses the TP devices and does not increase the world size.
 
 ### DSA-CP
 
+For a TP-only comparison with PCP, enable expert parallelism and use
+`allgather_reducescatter` (the default EP backend). Ascend supports sequence-parallel
+MoE with DP=1, TP>1 and PCP=1; DSA-CP automatically enables FlashComm1. With neither
+DSA-CP nor FlashComm1 requested, sequence-parallel MoE remains disabled.
+
 DSA-CP will be fully deprecated once PCP is ready. PCP is currently experimental,
 with support for some feature combinations still in progress.
 
@@ -189,6 +194,7 @@ ranks. Check the compatibility and limitations above before migrating.
 ```bash
 vllm serve <glm-5.2-model> \
   --tensor-parallel-size <N> \
+  --enable-expert-parallel \
   --block-size <B> \
   --additional-config '{"enable_dsa_cp": true}'
 ```
