@@ -35,9 +35,11 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.IRQ_CPU_RESERVATION,
         HardwareCapability.LORA_CUSTOM_OPS,
         HardwareCapability.MC2_HIERARCHY_COMM,
+        HardwareCapability.MOE_GATING_TOP_K_HASH_VISION,
         HardwareCapability.NPUGRAPH_EX,
         HardwareCapability.PAGED_ATTENTION,
         HardwareCapability.RUNTIME_CUSTOM_OPS,
+        HardwareCapability.SCATTER_ND_CACHE_STORE,
         HardwareCapability.SFA_C8_DCP_REPLICATED_INDEXER,
         HardwareCapability.STANDARD_MAMBA_PATCH,
         HardwareCapability.STANDARD_WORKER_PATCHES,
@@ -51,7 +53,6 @@ _EXPECTED_CAPABILITIES = {
     | {
         HardwareCapability.CANN_MEGAMOE,
         HardwareCapability.MC2_FULLMESH_V2_COMM,
-        HardwareCapability.MINIMAX_M3_PREFILL_KV_GATHER_Q,
         HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
         HardwareCapability.NPU_TOP_K_TOP_P,
     },
@@ -70,6 +71,7 @@ _EXPECTED_CAPABILITIES = {
     AscendDeviceType.A5: frozenset(
         {
             HardwareCapability.AUTO_ENABLE_CUSTOM_OPS,
+            HardwareCapability.SCATTER_PA_CACHE_STORE,
             HardwareCapability.BGMV_SGMV_META_REGISTRATION,
             HardwareCapability.CANN_MEGAMOE,
             HardwareCapability.CANN_MEGAMOE_MXFP,
@@ -86,7 +88,6 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.LORA_CUSTOM_OPS,
             HardwareCapability.MLA_DECODE_PROLOG_WITHOUT_ROPE,
             HardwareCapability.MLAPO_NATIVE_WEIGHTS,
-            HardwareCapability.MINIMAX_M3_PREFILL_KV_GATHER_Q,
             HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
             HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS,
             HardwareCapability.NPUGRAPH_EX,

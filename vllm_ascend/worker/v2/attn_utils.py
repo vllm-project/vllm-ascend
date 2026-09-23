@@ -30,6 +30,7 @@ from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.utils.torch_utils import get_dtype_size, kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     EncoderOnlyAttentionSpec,
@@ -344,6 +345,8 @@ def build_attn_metadata(
                     **attn_metadata_extra_kwargs,
                 )
             else:
+                if isinstance(attn_metadata_builder, GDNAttentionMetadataBuilder):
+                    attn_metadata_extra_kwargs["num_actual_reqs"] = num_actual_reqs
                 metadata = attn_metadata_builder.build(
                     common_prefix_len=0,
                     common_attn_metadata=common_attn_metadata,
@@ -1229,7 +1232,7 @@ def build_attn_metadata_wrapper():
 
 
 @contextmanager
-def build_draft_attn_metadata_factory(positions, pad, is_prefilling):
+def build_draft_attn_metadata_factory(positions, pad, is_prefilling, *, attn_state=None):
     """Wrap build_attn_metadata with Ascend draft-model context.
 
     The generic (Ascend) ``build_attn_metadata`` reads ``positions`` inside the
@@ -1243,6 +1246,7 @@ def build_draft_attn_metadata_factory(positions, pad, is_prefilling):
     def build_attn_metadata(*args, **kwargs):
         kwargs["positions"] = positions[:pad]
         kwargs["is_prefilling"] = is_prefilling
+        kwargs["attn_state"] = attn_state
         return raw(*args, **kwargs)
 
     try:

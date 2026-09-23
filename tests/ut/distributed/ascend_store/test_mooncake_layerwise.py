@@ -17,6 +17,7 @@
 
 import threading
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 # isort: off
@@ -168,6 +169,7 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
         worker.kv_role = "kv_producer"
         worker.consumer_is_to_put = False
         worker.tp_rank = 0
+        worker.pp_rank = 0
         worker.put_step = 1
         worker.block_size = 16
         worker.grouped_block_size = [16]
@@ -177,6 +179,13 @@ class TestMooncakeWorkerSessionPreparation(unittest.TestCase):
         worker.head_or_tp_rank = 0
         worker.backend_name = "mooncake"
         worker.layerwise_protocol = mooncake_layerwise
+        worker.layerwise_keys = mooncake_layerwise.bind_layerwise_keys(
+            vllm_config=SimpleNamespace(parallel_config=SimpleNamespace(pipeline_parallel_size=1)),
+            kv_cache_config=None,
+            model_name=worker.model_name,
+            use_hybrid=False,
+            grouped_block_size=worker.grouped_block_size,
+        )
         worker.use_block_key_layerwise = True
         worker.layerwise_offload = False
         worker.independent_layers = []
