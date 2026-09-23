@@ -358,6 +358,36 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         np.testing.assert_array_equal(second_task.shared_block_data.block_ids_arr, [1])
         np.testing.assert_array_equal(second_task.shared_block_data.block_gvas_arr, [101])
 
+    def test_shared_load_data_allows_block_key_plan_without_gvas(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
+            KVCacheStoreLayerRecvingThread,
+        )
+
+        cls = self._make_worker_class()
+        task = LayerTransferTask(layer_id=0, block_ranges=[])
+        block_ids = np.asarray([7], dtype=np.int64)
+        shared = SharedBlockData(
+            block_ids_arr=block_ids[:],
+            block_gvas_arr=None,
+            req_ids=["r0"],
+            is_last_chunks=[False],
+            block_keys=["k0"],
+        )
+        recv_thread = object.__new__(KVCacheStoreLayerRecvingThread)
+        recv_thread.build_shared_data = MagicMock(return_value=shared)
+        worker = SimpleNamespace(
+            kv_recv_thread=recv_thread,
+            layer_load_tasks=[[task]],
+        )
+
+        cls._build_shared_load_data(worker)
+        block_ids[0] = 99
+
+        self.assertIsNotNone(task.shared_block_data)
+        np.testing.assert_array_equal(task.shared_block_data.block_ids_arr, [7])
+        self.assertIsNone(task.shared_block_data.block_gvas_arr)
+        self.assertEqual(task.shared_block_data.block_keys, ["k0"])
+
     def test_find_all_discontinuous_hit_positions_all_tp_hits_with_limits(self):
         cls = self._make_worker_class()
         arr = [[0, 0, 1, 0, 0, 1], [0, 0, 1, 0, 0, 1]]

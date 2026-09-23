@@ -2317,12 +2317,11 @@ class KVPoolWorker:
                 shared = self.kv_recv_thread.build_shared_data(task)
                 if shared is None:
                     continue
-                if shared.block_gvas_arr is None:
-                    raise RuntimeError("GVA layer load plan is missing block addresses")
                 # LayerBatchBuilder reuses its internal arrays. Queued tasks
                 # must retain the block plan produced for that exact layer.
                 shared.block_ids_arr = shared.block_ids_arr.copy()
-                shared.block_gvas_arr = shared.block_gvas_arr.copy()
+                if shared.block_gvas_arr is not None:
+                    shared.block_gvas_arr = shared.block_gvas_arr.copy()
                 task.shared_block_data = shared
 
     def _compute_reachable_store_masks(
