@@ -23,7 +23,10 @@ def _make_runner(need_timing: bool = True):
     runner.ascend_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(need_timing=need_timing))
     )
-    runner.vllm_config = SimpleNamespace()
+    runner.vllm_config = SimpleNamespace(aux_output_config=SimpleNamespace(enabled=False))
+    # Post-#45635 lane: the AuxOutput connector is built by the base
+    # initialize_kv_cache, so the runner always carries the attribute here.
+    runner.aux_output_connector = MagicMock()
     runner.kvpp = SimpleNamespace(complete_forward=lambda: None)
     runner.model_state = SimpleNamespace(kvpp_is_dummy_run=False)
     runner.execute_model_state = None
@@ -585,13 +588,14 @@ def test_sample_tokens_spec_pp_broadcasts_draft_tokens():
 
 def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
     runner = _make_runner()
-    runner.vllm_config = SimpleNamespace()
+    runner.vllm_config = SimpleNamespace(
+        aux_output_config=SimpleNamespace(enabled=True),
+    )
+    runner.aux_output_connector = MagicMock()
     runner.compilation_config = SimpleNamespace(static_forward_context={})
     runner.pcp_manager = MagicMock(spec=AscendPCPManager)
     runner.model_state = SimpleNamespace(pcp_manager=None, kvpp_runtime=None)
     runner.speculator = SimpleNamespace()
-    runner.model_config = SimpleNamespace(enable_return_routed_experts=True)
-    runner.init_routed_experts_capturer = MagicMock()
     kv_cache_config = KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
     original = vllm_model_runner.ModelCudaGraphManager
     seen = {}
@@ -627,17 +631,18 @@ def test_initialize_kv_cache_installs_aclgraph_factory_and_pcp():
     assert runner.pcp_manager.vllm_config is runner.vllm_config
     assert runner.model_state.pcp_manager is runner.pcp_manager
     assert runner.speculator.pcp_manager is runner.pcp_manager
-    runner.init_routed_experts_capturer.assert_called_once_with()
+    # R3 is owned by upstream's AuxOutput connector; the Ascend runner only
+    # asserts that the connector exists (see NPUModelRunner.initialize_kv_cache).
+    assert runner.aux_output_connector is not None
 
 
 def test_initialize_kv_cache_forwards_allocation_context():
     runner = _make_runner()
-    runner.vllm_config = SimpleNamespace()
+    runner.vllm_config = SimpleNamespace(aux_output_config=SimpleNamespace(enabled=False))
     runner.compilation_config = SimpleNamespace(static_forward_context={})
     runner.pcp_manager = None
     runner.model_state = SimpleNamespace(pcp_manager=None, kvpp_runtime=None)
     runner.speculator = None
-    runner.model_config = SimpleNamespace(enable_return_routed_experts=False)
     called = False
     captured_kwargs: dict[str, object] = {}
     allocation_context = object()

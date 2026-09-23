@@ -299,8 +299,21 @@ class NPUModelRunner(GPUModelRunner):
             for group in groups
         )
 
-        if self.model_config.enable_return_routed_experts:
-            self.init_routed_experts_capturer()
+        # Routed-experts (R3 / routing replay) is owned by vLLM's AuxOutput
+        # connector: ``super().initialize_kv_cache()`` above already built the
+        # ``AuxOutputWorkerConnector`` when ``aux_output_config.enabled`` is set
+        # (it also activates the Ascend ``capture`` patch). The ``getattr``
+        # guards keep pre-#45635 vLLM usable, where neither the config field nor
+        # the connector exists and R3 is therefore simply inactive.
+        aux_output_config = getattr(self.vllm_config, "aux_output_config", None)
+        if aux_output_config is not None and aux_output_config.enabled:
+            if getattr(self, "aux_output_connector", None) is None:
+                raise RuntimeError(
+                    "aux_output_config.enabled is set but the AuxOutput worker connector "
+                    "was not created; check that vLLM's GPUModelRunner.initialize_kv_cache "
+                    "ran and that aux_output_config survived config validation."
+                )
+            logger.info_once("Routed-experts (R3) capture enabled through the AuxOutput connector.")
 
         self.kvpp = KVPPRuntime.create_from_kv_cache(
             vllm_config=self.vllm_config,
