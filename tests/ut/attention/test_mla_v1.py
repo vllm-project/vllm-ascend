@@ -2425,8 +2425,8 @@ class TestAscendMLAImpl(TestBase):
         query = torch.randn(S, N, D)
         q_nope = query[..., : self.impl.qk_nope_head_dim]
         q_pe = query[..., self.impl.qk_nope_head_dim :]
-        kv_cache_0 = torch.randn(num_blocks, block_size, N, latent_kv_dim)
-        kv_cache_1 = torch.randn(num_blocks, block_size, N, D)
+        kv_cache_0 = torch.randn(num_blocks, N, block_size, latent_kv_dim)
+        kv_cache_1 = torch.randn(num_blocks, N, block_size, D)
         kv_cache = [kv_cache_0, kv_cache_1]
         prefix_out = torch.randn(S, N, VD)
         prefix_lse = torch.randn(N, S)
@@ -2511,8 +2511,8 @@ class TestAscendMLAImpl(TestBase):
         query = torch.randn(S, N, D)
         q_nope = query[..., : impl.qk_nope_head_dim]
         q_pe = query[..., impl.qk_nope_head_dim :]
-        kv_cache_0 = torch.randn(num_blocks, block_size, N, latent_kv_dim)
-        kv_cache_1 = torch.randn(num_blocks, block_size, N, D)
+        kv_cache_0 = torch.randn(num_blocks, N, block_size, latent_kv_dim)
+        kv_cache_1 = torch.randn(num_blocks, N, block_size, D)
         kv_cache = [kv_cache_0, kv_cache_1]
         prefix_out = torch.randn(S, N, VD)
         prefix_lse = torch.randn(N, S)

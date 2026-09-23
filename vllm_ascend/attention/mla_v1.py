@@ -1223,7 +1223,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         iters = len(prefill_metadata.chunked_context.seq_tot)
         cache_kv_c = kv_c_and_k_pe_cache[0]
         cache_k_pe = kv_c_and_k_pe_cache[1]
-        num_heads = cache_k_pe.size(2)
+        num_heads = cache_k_pe.size(1)  # BNBD: [block, kv_head, token, dim].
         latent_kv_dim = kv_c_and_k_pe_cache[0].size(-1)
 
         actual_seq_lengths_q = prefill_metadata.actual_seq_lengths_q
