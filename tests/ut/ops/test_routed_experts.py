@@ -6,7 +6,11 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts, EplbExpertTensorList
+from vllm_ascend.ops.fused_moe.routed_experts import (
+    AscendRoutedExperts,
+    EplbExpertTensorList,
+    compute_local_phys_expert_ids,
+)
 
 
 def _routed_experts(weight_views):
@@ -108,3 +112,30 @@ def test_update_expert_map_preserves_upstream_and_legacy_contracts(monkeypatch):
 
     assert routed_experts.ascend_expert_map is legacy_map
     assert expert_map_manager._expert_map is legacy_map
+
+
+def test_compute_local_phys_expert_ids_orders_by_slot():
+    # phys -> slot for 5 physical experts, 2 owned by this rank.
+    expert_map = torch.tensor([1, -1, 0, -1, -1], dtype=torch.int32)
+
+    assert torch.equal(compute_local_phys_expert_ids(expert_map), torch.tensor([2, 0], dtype=torch.int64))
+
+
+def test_update_ascend_eplb_maps_refreshes_runtime_maps():
+    # Regression test for issue #14080: after a dynamic EPLB rebalance the
+    # layer's dispatcher-facing maps must track the worker's authoritative map.
+    routed_experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
+    routed_experts.moe_config = SimpleNamespace(ep_rank=1)
+    old_map = torch.tensor([-1, -1, -1, -1, -1, 0, 1, 2, -1, -1], dtype=torch.int32)
+    # Worker payload (int64): rank 1 owns physical experts 5..9 in slots 0..4.
+    new_map = torch.tensor([-1, -1, -1, -1, -1, 0, 1, 2, 3, 4], dtype=torch.int64)
+    routed_experts.ascend_expert_map = old_map
+    routed_experts.global_expert_map = torch.stack([torch.full((10,), -1, dtype=torch.int32), old_map])
+    routed_experts.local_phys_expert_ids = torch.zeros(5, dtype=torch.int64)
+
+    routed_experts.update_ascend_eplb_maps(new_map)
+
+    assert routed_experts.ascend_expert_map.dtype == torch.int32
+    assert torch.equal(routed_experts.ascend_expert_map, new_map.to(torch.int32))
+    assert torch.equal(routed_experts.global_expert_map[1], new_map.to(torch.int32))
+    assert torch.equal(routed_experts.local_phys_expert_ids, torch.tensor([5, 6, 7, 8, 9], dtype=torch.int64))
