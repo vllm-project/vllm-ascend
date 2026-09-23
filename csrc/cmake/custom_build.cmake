@@ -714,6 +714,13 @@ if (BUILD_OPEN_PROJECT)
 endif ()
 
 # ------------------------------------------------ generate adapt py ------------------------------------------------
+set(_GENERATED_ADAPT_PY_FILES)
+foreach (_op_name ${OP_LIST})
+    list(APPEND _GENERATED_ADAPT_PY_FILES
+        ${ASCEND_IMPL_OUT_DIR}/dynamic/${_op_name}.py
+        ${ASCEND_IMPL_OUT_DIR}/dynamic/${_op_name}_apt.py)
+endforeach ()
+list(REMOVE_DUPLICATES _GENERATED_ADAPT_PY_FILES)
 add_custom_target(generate_transformer_adapt_py
         COMMAND ${HI_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/cmake/scripts/util/ascendc_impl_build.py
         \"\"
@@ -723,6 +730,7 @@ add_custom_target(generate_transformer_adapt_py
         ${ASCEND_IMPL_OUT_DIR}
         ${ASCEND_AUTOGEN_DIR}
         --opsinfo-dir ${base_aclnn_binary_dir} ${base_aclnn_binary_dir}/inner ${base_aclnn_binary_dir}/exc
+        BYPRODUCTS ${_GENERATED_ADAPT_PY_FILES}
 )
 
 add_dependencies(generate_transformer_adapt_py opbuild_gen_default opbuild_gen_inner opbuild_gen_exc)
@@ -740,6 +748,13 @@ endforeach ()
 
 install(DIRECTORY ${OPS_ADV_UTILS_KERNEL_INC}/
         DESTINATION ${IMPL_INSTALL_DIR}/ascendc/common
+)
+install(FILES ${VLLM_ASCEND_CANN_COMPAT_HEADER}
+        DESTINATION ${IMPL_INSTALL_DIR}/ascendc/common
+)
+# FlashAttn's shared headers use relative includes outside ascendc/.
+install(DIRECTORY ${OPS_TRANSFORMER_DIR}/attention/a5_mla_common/op_kernel
+        DESTINATION ${IMPL_INSTALL_DIR}/a5_mla_common
 )
 
 # install(DIRECTORY ${OPS_ADV_DIR}/mc2/common/inc/kernel

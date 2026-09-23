@@ -204,6 +204,9 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
     setup_catlass_dependency
 
     CUSTOM_OPS_ARRAY=(
+        "flash_attn"
+        "flash_mla_bf16_prepare"
+        "flash_attn_metadata"
         "add_rms_norm_bias"
         "moe_gating_top_k_hash"
         "inplace_partial_rotary_mul"
@@ -272,9 +275,14 @@ log_selected_ops
   : "${SOC_VERSION:?SOC_VERSION is not set}"
   : "${SOC_ARG:?SOC_ARG is not set}"
 
+  # CANN OPC invokes nested make processes outside Ninja's jobserver.
+  # Propagate the requested concurrency so tiling keys do not build serially.
+  build_jobs="${MAX_JOBS:-$(nproc)}"
+  export MAKEFLAGS="${MAKEFLAGS:+${MAKEFLAGS} }-j${build_jobs}"
+  log "build parallelism: jobs=${build_jobs} MAKEFLAGS=${MAKEFLAGS}"
   log "build command: bash build.sh --pkg --ops=\"${CUSTOM_OPS}\" --soc=\"${SOC_ARG}\""
   log "building custom ops ${CUSTOM_OPS} for ${SOC_VERSION}"
-  bash build.sh --pkg --ops="${CUSTOM_OPS}" --soc="${SOC_ARG}"
+  bash build.sh --pkg --ops="${CUSTOM_OPS}" --soc="${SOC_ARG}" -j"${build_jobs}"
   log "build.sh finished"
 
   custom_ops_install_dir="${ROOT_DIR}/vllm_ascend/_cann_ops_custom"
@@ -307,6 +315,9 @@ log_selected_ops
     chmod u+w "${custom_ops_install_dir}/vendors/custom_transformer/scripts"
   fi
   log "installer finished"
+  if [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
+    python3 "${ROOT_DIR}/csrc/scripts/package_flash_attn.py" "${ROOT_DIR}"
+  fi
   log "installed files under ${custom_ops_install_dir} (maxdepth=4, first 120 entries):"
   { find "${custom_ops_install_dir}" -mindepth 1 -maxdepth 4 -print | sort | head -n 120 | sed 's#^#[build_aclnn] install: #'; } || true
 

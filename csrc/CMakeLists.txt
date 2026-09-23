@@ -39,6 +39,10 @@ set(ASCEND_ALL_COMPUTE_UNIT       "ascend310p;ascend910b;ascend910_93;ascend950;
 set(SOC_VERSION_LIST ascend310p ascend910b ascend910_93 ascend950 kirinx90)
 set(ARCH_DIRECTORY_LIST arch22 arch32 arch32 arch35 arch32)
 
+# Rebuild the selected AICPU target inventory for every configure. Targets from
+# a previous --ops selection do not exist when an incremental gate is narrower.
+unset(AICPU_CUST_OBJ_TARGETS CACHE)
+
 if ("ascend950" IN_LIST ASCEND_COMPUTE_UNIT)
 message(STATUS "build with 3~8 packages........")
 set(BUILD_WITH_3_8_PACKAGE  ON CACHE BOOL "build with 3~8 package and opsbase")
@@ -101,12 +105,16 @@ set_directory_properties(PROPERTIES
 # Suppress warnings from catlass/tla third-party headers for CANN kernel compilation
 set(VLLM_ASCEND_CANN_COMPAT_HEADER "${OPS_TRANSFORMER_DIR}/common/include/cann_compat.h")
 list(APPEND OPS_COMPILE_OPTIONS -Wno-ignored-attributes)
-list(APPEND OPS_COMPILE_OPTIONS -include${VLLM_ASCEND_CANN_COMPAT_HEADER})
+# Generated adapters already search their package-relative ascendc/common directory.
+# Do not bake the build machine's source directory into runtime compiler options.
+list(APPEND OPS_COMPILE_OPTIONS -includecann_compat.h)
 add_compile_options(
     $<$<COMPILE_LANGUAGE:CXX>:-include${VLLM_ASCEND_CANN_COMPAT_HEADER}>
 )
 
 include(cmake/config.cmake)
+configure_file(${VLLM_ASCEND_CANN_COMPAT_HEADER}
+        ${ASCEND_IMPL_OUT_DIR}/ascendc/common/cann_compat.h COPYONLY)
 include(cmake/func.cmake)
 include(cmake/third_party/json.cmake)
 if (ENABLE_TEST)
@@ -546,6 +554,13 @@ if (BUILD_OPS_RTY_KERNEL)
 
     install(DIRECTORY ${OPS_ADV_UTILS_KERNEL_INC}/
             DESTINATION ${IMPL_INSTALL_DIR}/ascendc/common
+    )
+    install(FILES ${VLLM_ASCEND_CANN_COMPAT_HEADER}
+            DESTINATION ${IMPL_INSTALL_DIR}/ascendc/common
+    )
+    # FlashAttn's shared headers use relative includes outside ascendc/.
+    install(DIRECTORY ${OPS_TRANSFORMER_DIR}/attention/a5_mla_common/op_kernel
+            DESTINATION ${IMPL_INSTALL_DIR}/a5_mla_common
     )
 
     foreach (op_dir ${OP_DIR_LIST})

@@ -60,6 +60,7 @@
 #include "moe/dequant_situ_quant/dequant_situ_quant_torch_adpt.h"
 #include "moe/situ_mx_quant/situ_mx_quant_torch_adpt.h"
 #include "attention/mla_prolog_v3_k3/mla_prolog_v3_k3_torch_adpt.h"
+#include "attention/flash_mla_bf16_prepare/flash_mla_bf16_prepare_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
 #include <c10/util/Exception.h>
@@ -3596,6 +3597,10 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("npu_msa_index_score", torch::kPrivateUse1,
              &vllm_ascend::npu_msa_index_score);
+
+    ops.def("flash_mla_bf16_prepare(Tensor key_nope, Tensor value, Tensor key_rope) -> (Tensor, Tensor)");
+    ops.impl("flash_mla_bf16_prepare", torch::kPrivateUse1, &vllm_ascend::flash_mla_bf16_prepare);
+    ops.impl("flash_mla_bf16_prepare", torch::kMeta, &vllm_ascend::flash_mla_bf16_prepare_meta);
 
     ops.def(
         "npu_fused_sparse_attention_overlap(Tensor query, Tensor(a!) selection_k_rope, "
