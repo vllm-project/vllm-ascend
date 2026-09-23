@@ -64,7 +64,7 @@ _benchmarks_per2: &benchmarks_per
     request_rate: 0
     baseline: 83.50106007067137
     threshold: 0.95
-    temperature: 0.0
+    temperature: 0
     ignore_eos: True
 # ==========================================
 # ACTUAL TEST CASES
