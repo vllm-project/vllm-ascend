@@ -64,6 +64,43 @@ def dsv4_block_sizes(vllm_config: VllmConfig):
     return DSV4_BLOCK_SIZES
 
 
+# The attention quantization scales ``_init_kv_cache_quant`` registers. They are
+# attention metadata derived from the KV-cache quantization config, not
+# checkpoint tensors.
+_QUANT_SCALE_BUFFER_NAMES = ("_k_scale", "_v_scale", "_q_scale", "_prob_scale")
+
+
+def _own_quant_scales_as_non_persistent(layer: nn.Module) -> None:
+    """Keep the attention quantization scales out of ``state_dict()``.
+
+    ``_init_kv_cache_quant`` registers ``_q_scale``/``_k_scale``/``_v_scale``/
+    ``_prob_scale`` as *persistent* buffers, so they are part of the module's
+    ``state_dict()``. A dummy-weight start -- ``--load-format dummy``, which the
+    RL weight-update lanes use -- feeds exactly that ``state_dict()`` through
+    ``initialize_dummy_weights``, which overwrites the scales with the
+    deterministic dummy value (one shared value, since the dummy seed depends
+    only on numel and dtype) instead of leaving them at their 1.0 defaults.
+
+    Nothing ever puts the real value back: the scales are derived from the
+    KV-cache quantization config rather than from checkpoint weights, so a live
+    weight update does not carry them, and the layerwise reload sees this
+    attention module receive no weights at all and restores its saved
+    (dummy-seeded) buffers. The lane therefore runs with wrong attention scales
+    and cannot reproduce a server that loaded the same payload at startup --
+    which is exactly what the weight-update oracle compares.
+
+    Owning them as non-persistent buffers keeps them out of ``state_dict()``
+    while leaving everything else intact: ``named_buffers()`` still yields them
+    (the level-2 sleep backup walks that), ``Module.to()`` still moves them, and
+    a quantization method that computes real scales in
+    ``process_weights_after_loading`` still writes them in place.
+    """
+    for name in _QUANT_SCALE_BUFFER_NAMES:
+        scale = getattr(layer, name, None)
+        if isinstance(scale, torch.Tensor):
+            layer.register_buffer(name, scale, persistent=False)
+
+
 class DSAAttention(nn.Module, AttentionLayerBase):
     """Multi-Head Latent Attention layer.
 
@@ -122,6 +159,7 @@ class DSAAttention(nn.Module, AttentionLayerBase):
 
         # Initialize KV cache quantization attributes
         _init_kv_cache_quant(self, quant_config, prefix)
+        _own_quant_scales_as_non_persistent(self)
 
         if self.compress_ratio == 4:
             self.attn_backend = AscendDSAC4Backend

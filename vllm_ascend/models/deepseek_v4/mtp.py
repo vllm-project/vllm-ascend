@@ -36,7 +36,7 @@ from vllm_ascend.models.deepseek_v4.model import (
     DeepseekV4MoE,
     get_spec_layer_idx_from_weight_name,
 )
-from vllm_ascend.utils import enable_dsa_cp
+from vllm_ascend.utils import enable_dsa_cp, own_as_non_persistent_buffer
 
 
 class SharedHead(nn.Module):
@@ -110,6 +110,7 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
 
         self.norm_eps = config.rms_norm_eps
         self.hc_norm = RMSNorm(hc_dim, eps=config.rms_norm_eps, has_weight=False, dtype=torch.float32)
+        own_as_non_persistent_buffer(self.hc_norm, "weight")
 
     def forward(
         self,

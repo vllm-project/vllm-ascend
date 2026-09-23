@@ -94,6 +94,7 @@ from vllm_ascend.utils import (
     enable_dsa_cp,
     extract_dsv4_layer_index,
     get_dsv4_compress_ratio,
+    own_as_non_persistent_buffer,
 )
 from vllm_ascend.worker.v2.pp_utils import (
     PPTransportDataType,
@@ -502,6 +503,7 @@ class DeepseekV4Attention(nn.Module):
         )
         self.q_norm = RMSNorm(self.q_lora_rank, eps=config.rms_norm_eps)
         self.q_norm_without_weight = RMSNorm(self.head_dim, eps=config.rms_norm_eps, has_weight=False)
+        own_as_non_persistent_buffer(self.q_norm_without_weight, "weight")
         wq_b_cls = ReplicatedLinear if self.enable_dsa_cp else ColumnParallelLinear
         self.wq_b = wq_b_cls(
             self.q_lora_rank,
@@ -873,6 +875,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.hc_head_base = nn.Parameter(torch.empty(hc_mult, dtype=torch.float32))
         self.hc_head_scale = nn.Parameter(torch.empty(1, dtype=torch.float32))
         self.hc_norm = RMSNorm(hc_dim, eps=config.rms_norm_eps, has_weight=False, dtype=torch.float32)
+        own_as_non_persistent_buffer(self.hc_norm, "weight")
 
         # Pre-hc_head residual stream buffer for the speculative draft
         # (MTP / DSpark / DFlash). Only needed when the decoder consumes
