@@ -11,7 +11,15 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
-from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
+
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.29.0"):
+    from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
+else:
+    # vLLM main (#56888) replaced buffer_utils.async_copy_to_gpu with
+    # torch_utils.async_tensor_h2d (gaining out=/device=None support).
+    from vllm.utils.torch_utils import async_tensor_h2d as async_copy_to_gpu
 
 _INSTALLED = "_vllm_ascend_upstream_spec_pp_installed"
 

@@ -18,7 +18,8 @@
 #
 
 from contextlib import AbstractContextManager, contextmanager, nullcontext
-from contextvars import ContextVar
+
+from typing import Any
 
 import numpy as np
 import torch
@@ -31,7 +32,6 @@ from vllm.sequence import IntermediateTensors
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
-from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.eplb_utils import step_eplb_after
@@ -89,6 +89,11 @@ from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 
 if vllm_version_is("0.29.0"):
     from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
+    from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
+else:
+    # vLLM main (#56888) replaced buffer_utils.async_copy_to_gpu with
+    # torch_utils.async_tensor_h2d (gaining out=/device=None support).
+    from vllm.utils.torch_utils import async_tensor_h2d as async_copy_to_gpu
 
 
 class NPUModelRunner(GPUModelRunner):
@@ -234,10 +239,20 @@ class NPUModelRunner(GPUModelRunner):
             if mtp_target_hidden_states is not None:
                 pcp_manager.restore_hidden_state_buffer(mtp_target_hidden_states)
 
+        # vLLM main captures draft_hidden_states before maybe_restore_pcp_for_sampling
+        # (v0.29.0 captured it after the restore), so a replicated draft would
+        # read the PCP-local target output. Restore it to the global layout up
+        # front to match the v0.29.0 draft flow.
+        if not vllm_version_is("0.29.0") and state.hidden_states is not None:
+            state = state._replace(
+                hidden_states=pcp_manager.restore_hidden_states(state.hidden_states)
+            )
+
         aux_hidden_states = state.aux_hidden_states
         if aux_hidden_states:
             restored_aux_hidden_states = pcp_manager.restore_hidden_states(torch.cat(aux_hidden_states, dim=-1))
-            self.execute_model_state = state._replace(aux_hidden_states=[restored_aux_hidden_states])
+            state = state._replace(aux_hidden_states=[restored_aux_hidden_states])
+        self.execute_model_state = state
 
     def sample_tokens(self, grammar_output):
         pcp_manager = self.pcp_manager
@@ -321,16 +336,15 @@ class NPUModelRunner(GPUModelRunner):
             get_kv_transfer_group().handle_preemptions(kv_connector_metadata)
 
         self.model_state.kvpp_is_dummy_run = dummy_run or is_profile
-        with pcp_dispatch_context():
-            output = super().execute_model(
-                scheduler_output,
-                intermediate_tensors=intermediate_tensors,
-                dummy_run=dummy_run,
-                skip_attn_for_dummy_run=skip_attn_for_dummy_run,
-                is_profile=is_profile,
-                context_len=context_len,
-                **({} if vllm_version_is("0.29.0") else {"valid_dummy_state_slots": valid_dummy_state_slots}),
-            )
+        output = super().execute_model(
+            scheduler_output,
+            intermediate_tensors=intermediate_tensors,
+            dummy_run=dummy_run,
+            skip_attn_for_dummy_run=skip_attn_for_dummy_run,
+            is_profile=is_profile,
+            context_len=context_len,
+            **({} if vllm_version_is("0.29.0") else {"valid_dummy_state_slots": valid_dummy_state_slots}),
+        )
         self.model_state.kvpp_is_dummy_run = False
         self.kvpp.complete_forward()
 
@@ -359,35 +373,6 @@ class NPUModelRunner(GPUModelRunner):
                 with disable_compilation(self.get_model()):
                     self._dummy_run(mc2_tokens_capacity, skip_attn=True, skip_eplb=True, is_profile=True)
             super().profile_run()
-
-    def gather_batch_req_state(self, scheduler_output: SchedulerOutput, dummy_run: bool):
-        batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
-        if batch_state is not None and is_pd_decode_recompute_scheduler_enabled(self.vllm_config):
-            pd_decode_recompute = (
-                batch_state.is_prefilling_np
-                & (batch_state.num_computed_prefill_tokens_np > 0)
-                & (batch_state.num_scheduled_tokens == self.decode_query_len)
-                & (
-                    batch_state.num_computed_prefill_tokens_np + batch_state.num_scheduled_tokens
-                    >= batch_state.prefill_len_np
-                )
-            )
-            if np.any(pd_decode_recompute):
-                batch_state.is_prefilling_np[pd_decode_recompute] = False
-                batch_state = batch_state._replace(has_prefill=bool(batch_state.is_prefilling_np.any()))
-                uniform_token_count = vllm_model_runner.get_uniform_decode_token_count(
-                    len(batch_state.req_ids),
-                    batch_state.num_tokens,
-                    int(batch_state.num_scheduled_tokens.max()),
-                    batch_state.has_prefill,
-                )
-        num_tokens = None
-        if vllm_version_is("0.28.0") and self.pcp_manager is not None and batch_state is not None:
-            num_tokens = self.pcp_manager.get_num_tokens_for_dispatch(
-                batch_state.num_scheduled_tokens, batch_state.is_prefilling_np
-            )
-        _PCP_DISPATCH_NUM_TOKENS.set(num_tokens)
-        return batch_state, uniform_token_count
 
     def prepare_inputs(  # type: ignore[misc]
         self,
@@ -634,11 +619,20 @@ class NPUModelRunner(GPUModelRunner):
             seq_lens_np=self.input_buffers.seq_lens_np,
             attn_state=attn_state,
         )
-        input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
-            self.pcp_manager,
-            input_batch,
-            padded_num_tokens=batch_desc.num_tokens,
-        )
+        if vllm_version_is("0.29.0"):
+            input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
+                self.pcp_manager,
+                input_batch,
+                padded_num_tokens=batch_desc.num_tokens,
+            )
+        else:
+            # vLLM main (#53867) changed maybe_partition_pcp_batch to take the
+            # whole batch descriptor instead of padded_num_tokens.
+            input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
+                self.pcp_manager,
+                input_batch,
+                batch_desc=batch_desc,
+            )
 
         # For mla/sfa, update cos/sin. Here is for execute_model.
         update_cos_sin(input_batch.positions)
@@ -919,7 +913,18 @@ def graph_manager_wrapper(model_runner):
         decode_query_len: int,
         lora_capture_cases: list[int] | None = None,
         varlen_decode: bool = False,
+        ubatch_runner: Any = None,  # vLLM main (#51700)
     ):
+        if vllm_version_is("0.29.0"):
+            return ModelAclGraphManager(
+                vllm_config,
+                device,
+                cudagraph_mode,
+                decode_query_len,
+                model_runner,
+                lora_capture_cases=lora_capture_cases,
+                varlen_decode=varlen_decode,
+            )
         return ModelAclGraphManager(
             vllm_config,
             device,
@@ -927,7 +932,8 @@ def graph_manager_wrapper(model_runner):
             decode_query_len,
             model_runner,
             lora_capture_cases=lora_capture_cases,
-            varlen_decode=varlen_decode,  # type: ignore[call-arg]
+            varlen_decode=varlen_decode,
+            ubatch_runner=ubatch_runner,
         )
 
     try:
@@ -937,26 +943,4 @@ def graph_manager_wrapper(model_runner):
         vllm_model_runner.ModelCudaGraphManager = original_graph_manager
 
 
-# v0.28 calls a module-level dispatch function, with no runner hook. Carry
-# only the PCP execution count across that boundary; keep request state intact.
-_PCP_DISPATCH_NUM_TOKENS: ContextVar[int | None] = ContextVar("ascend_pcp_dispatch_num_tokens", default=None)
 
-
-@contextmanager
-def pcp_dispatch_context():
-    token = _PCP_DISPATCH_NUM_TOKENS.set(None)
-    try:
-        yield
-    finally:
-        _PCP_DISPATCH_NUM_TOKENS.reset(token)
-
-
-def _dispatch_pcp_and_sync_dp(cudagraph_manager, num_reqs, num_tokens, *args, **kwargs):
-    pcp_num_tokens = _PCP_DISPATCH_NUM_TOKENS.get()
-    if pcp_num_tokens is not None:
-        num_tokens = pcp_num_tokens
-    return dispatch_cg_and_sync_dp(cudagraph_manager, num_reqs, num_tokens, *args, **kwargs)
-
-
-if vllm_version_is("0.28.0"):
-    vllm_model_runner.dispatch_cg_and_sync_dp = _dispatch_pcp_and_sync_dp

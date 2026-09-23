@@ -7,7 +7,7 @@ import vllm.config.speculative as speculative_config
 from transformers import DeepseekV2Config, PretrainedConfig
 from vllm.config.speculative import SpeculativeConfig
 
-from vllm_ascend.utils import is_deepseek_v41
+from vllm_ascend.utils import is_deepseek_v41, vllm_version_is
 
 _orig_post_init = SpeculativeConfig.__post_init__
 _orig_hf_config_override = SpeculativeConfig.hf_config_override
@@ -155,6 +155,31 @@ def _dspark_post_init(self):
 
 SpeculativeConfig.hf_config_override = staticmethod(_normalize_legacy_qwen3_dspark_config)
 SpeculativeConfig.__post_init__ = _dspark_post_init
+
+# The pinned vLLM revision propagates enable_expert_parallel to the draft
+# parallel config (upstream #55914) but no longer disables it for dense
+# drafts (upstream #56930 is not on this revision). Non-MoE draft models
+# (e.g. Kimi K3 DSpark, VWN eagle3) then fail the
+# _verify_with_expert_parallelism check in
+# ModelConfig.verify_with_parallel_config. Skip the EP check for non-MoE
+# draft model configs; the target EP check and MoE draft models are
+# unaffected. The v0.29.0 release predates upstream #55914 (EP never reaches
+# the draft), so it keeps the unpatched behavior.
+if not vllm_version_is("0.29.0"):
+    from vllm.config.model import ModelConfig
+
+    _orig_verify_with_parallel_config = ModelConfig.verify_with_parallel_config
+
+    def _ascend_verify_with_parallel_config(self, parallel_config):
+        if (
+            parallel_config.enable_expert_parallel
+            and not self.is_moe
+            and getattr(self, "runner_type", None) == "draft"
+        ):
+            return
+        return _orig_verify_with_parallel_config(self, parallel_config)
+
+    ModelConfig.verify_with_parallel_config = _ascend_verify_with_parallel_config
 
 if "glm5_next_mtp" not in get_args(speculative_config.MTPModelTypes):
     speculative_config.MTPModelTypes = Literal[(*get_args(speculative_config.MTPModelTypes), "glm5_next_mtp")]

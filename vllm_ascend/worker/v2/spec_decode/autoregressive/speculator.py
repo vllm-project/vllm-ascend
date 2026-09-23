@@ -17,6 +17,7 @@
 # This file is a part of the vllm-ascend project.
 #
 import logging
+from collections.abc import Mapping
 from contextlib import contextmanager
 from copy import copy
 from typing import TYPE_CHECKING, Any
@@ -40,6 +41,7 @@ from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_wrapper,
@@ -489,18 +491,129 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             num_tokens_padded,
             torch.from_numpy(self.input_batch.is_prefilling_np),
         ):
-            attn_metadata = super()._build_draft_attn_metadata(
-                num_reqs,
-                num_reqs_padded,
-                num_tokens_padded,
-                seq_lens_cpu_upper_bound,
-                step,
-                num_query_per_req,
-                causal,
-                query_start_loc_np=query_start_loc_np,
-            )
+            if vllm_version_is("0.29.0"):
+                attn_metadata = super()._build_draft_attn_metadata(
+                    num_reqs,
+                    num_reqs_padded,
+                    num_tokens_padded,
+                    seq_lens_cpu_upper_bound,
+                    step,
+                    num_query_per_req,
+                    causal,
+                    query_start_loc_np=query_start_loc_np,
+                )
+            else:
+                # vLLM main restructured _build_draft_attn_metadata into
+                # _build_uniform_attn_metadata / _build_attn_metadata, which
+                # take a BatchExecutionDescriptor instead of padded counts.
+                # Delegate to the Ascend overrides of the new hooks so the
+                # draft context (rotary positions injection) stays applied.
+                batch_desc = BatchExecutionDescriptor(
+                    cg_mode=CUDAGraphMode.FULL,
+                    num_tokens=num_tokens_padded,
+                    num_reqs=num_reqs_padded,
+                )
+                if query_start_loc_np is not None:
+                    attn_metadata = self._build_attn_metadata(
+                        num_reqs=num_reqs,
+                        batch_desc=batch_desc,
+                        query_start_loc_np=query_start_loc_np,
+                        seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+                        step=step,
+                        causal=causal,
+                    )
+                else:
+                    attn_metadata = self._build_uniform_attn_metadata(
+                        batch_desc=batch_desc,
+                        num_reqs=num_reqs,
+                        num_query_per_req=num_query_per_req,
+                        seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+                        step=step,
+                        causal=causal,
+                    )
         if attn_metadata is not None:
             # Ascend-specific: force DecodeOnly attention state for the draft model.
+            for metadata in attn_metadata.values():
+                if metadata is None:
+                    continue
+                metadata.attn_state = AscendAttentionState.DecodeOnly
+        return attn_metadata
+
+    def _build_uniform_attn_metadata(  # type: ignore[misc]
+        self,
+        batch_desc: BatchExecutionDescriptor,
+        num_reqs: int,
+        num_query_per_req: int,
+        seq_lens_cpu_upper_bound: torch.Tensor,
+        step: int,
+        causal: bool | Mapping[int, bool] = True,
+        dcp_local_seq_lens: torch.Tensor | None = None,
+    ) -> dict[str, Any] | None:
+        """Ascend hook on the vLLM-main uniform draft decode metadata builder.
+
+        Upstream #56181 renamed ``_build_draft_attn_metadata`` into this
+        method (and ``_build_attn_metadata``) and the draft decode loop calls
+        them directly, so the Ascend draft context must hook the new names.
+        Without this override the Ascend ``build_attn_metadata`` receives
+        ``positions=None`` and substitutes a constant zeros tensor: the
+        ``_cos_cache[positions]`` gather recorded into the captured draft
+        decode graph then bakes position-0 RoPE into every replayed draft
+        step, collapsing acceptance at speculative positions > 0.
+        """
+        assert self.input_batch is not None
+        with build_draft_attn_metadata_factory(
+            self.input_buffers.positions,
+            batch_desc.num_tokens,
+            torch.from_numpy(self.input_batch.is_prefilling_np),
+        ):
+            attn_metadata = super()._build_uniform_attn_metadata(
+                batch_desc,
+                num_reqs,
+                num_query_per_req,
+                seq_lens_cpu_upper_bound,
+                step,
+                causal,
+                dcp_local_seq_lens,
+            )
+        return self._force_draft_decode_only(attn_metadata)
+
+    def _build_attn_metadata(  # type: ignore[misc]
+        self,
+        num_reqs: int,
+        batch_desc: BatchExecutionDescriptor,
+        query_start_loc_np: np.ndarray,
+        seq_lens_cpu_upper_bound: torch.Tensor,
+        step: int,
+        causal: bool | Mapping[int, bool] = True,
+        dcp_local_seq_lens: torch.Tensor | None = None,
+    ) -> dict[str, Any] | None:
+        """Ascend hook on the explicit query-layout draft metadata builder.
+
+        Same draft context as ``_build_uniform_attn_metadata``; kept as a
+        separate override because vLLM main routes non-uniform draft queries
+        (e.g. multi-module MTP) through this entry point.
+        """
+        assert self.input_batch is not None
+        with build_draft_attn_metadata_factory(
+            self.input_buffers.positions,
+            batch_desc.num_tokens,
+            torch.from_numpy(self.input_batch.is_prefilling_np),
+        ):
+            attn_metadata = super()._build_attn_metadata(
+                num_reqs,
+                batch_desc,
+                query_start_loc_np,
+                seq_lens_cpu_upper_bound,
+                step,
+                causal,
+                dcp_local_seq_lens,
+            )
+        return self._force_draft_decode_only(attn_metadata)
+
+    @staticmethod
+    def _force_draft_decode_only(attn_metadata: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Force DecodeOnly attention state for the draft model."""
+        if attn_metadata is not None:
             for metadata in attn_metadata.values():
                 if metadata is None:
                     continue

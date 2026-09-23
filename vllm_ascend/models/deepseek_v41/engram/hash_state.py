@@ -17,12 +17,25 @@ launch is split into request search and hashing for the Ascend compiler.
 """
 
 import torch
-from vllm.models.deepseek_v4_1.common.engram import (
-    DEAD_ID,
-    EngramLayout,
-    NgramHashState,
-    _write_hash_cache_kernel,
-)
+
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.29.0"):
+    from vllm.models.deepseek_v4_1.common.engram import (
+        DEAD_ID,
+        EngramLayout,
+        NgramHashState,
+        _write_hash_cache_kernel,
+    )
+else:
+    # Upstream #56741 normalized the V4.1 model package name.
+    from vllm.models.deepseek_v41.common.engram import (
+        DEAD_ID,
+        EngramLayout,
+        NgramHashState,
+        _write_hash_cache_kernel,
+    )
+
 from vllm.triton_utils import tl, triton
 
 

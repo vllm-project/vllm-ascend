@@ -1,4 +1,5 @@
 from itertools import islice
+from typing import Any
 
 import torch
 from torch import nn
@@ -33,8 +34,15 @@ from vllm.model_executor.models.deepseek_v2 import (
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.sequence import IntermediateTensors
 
-from vllm_ascend.utils import is_mtp_layer
+from vllm_ascend.utils import is_mtp_layer, vllm_version_is
 from vllm_ascend.worker.v2 import pp_utils
+
+if vllm_version_is("0.29.0"):
+    # vLLM main (#53781) added the HiSparse index-group builder; the type
+    # does not exist on v0.29.0.
+    SparseMLAIndexGroupBuilder = Any
+else:
+    from vllm.v1.attention.backends.mla.index_group import SparseMLAIndexGroupBuilder
 
 
 def _should_skip_indexer_init(
@@ -75,9 +83,12 @@ def _deepseek_v2_mla_attention_init(
     topk_indices_buffer: torch.Tensor | None = None,
     input_size: int | None = None,
     reduce_results: bool = True,
+    index_group_builder: SparseMLAIndexGroupBuilder | None = None,
 ) -> None:
     # 这里不能使用 super().__init__()，因为当前函数定义在原类之外，
     # 最后通过赋值的方式替换 DeepseekV2MLAAttention.__init__。
+    # index_group_builder is a GPU HiSparse feature; the Ascend MLA stack
+    # does not consume it, so it is accepted for signature compatibility.
     nn.Module.__init__(self)
 
     self.hidden_size = hidden_size

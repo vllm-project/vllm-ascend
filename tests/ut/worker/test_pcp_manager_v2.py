@@ -16,7 +16,6 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-from contextvars import copy_context
 from dataclasses import replace
 from inspect import signature
 from types import SimpleNamespace
@@ -26,13 +25,12 @@ import numpy as np
 import pytest
 import torch
 from vllm.config import CUDAGraphMode
-from vllm.forward_context import DPMetadata
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 from vllm_ascend.utils import vllm_version_is
-from vllm_ascend.worker.v2 import model_runner as ascend_model_runner
+from vllm_ascend.worker.v2 import pcp_manager as pcp_manager_module
 from vllm_ascend.worker.v2 import states as states_module
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager, _prepare_pcp_inputs_to_capture
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
@@ -143,6 +141,30 @@ def test_pcp_manager_uses_persistent_ascend_input_buffers():
     assert manager._input_buffers.seq_lens_np.shape == (6,)
     assert manager._input_buffers.query_start_loc.shape == (7,)
     assert manager.input_buffers is manager._input_buffers
+
+
+def test_pcp_manager_gates_req_states_by_vllm_version(monkeypatch):
+    """v0.29.0 PCPManager takes req_states; upstream #56107 removed it on main."""
+    captured = {}
+
+    def fake_base_init(self, **kwargs):
+        captured.clear()
+        captured.update(kwargs)
+
+    monkeypatch.setattr(PCPManager, "__init__", fake_base_init)
+    req_states = object()
+
+    for is_v29, expected in ((True, True), (False, False)):
+        monkeypatch.setattr(pcp_manager_module, "vllm_version_is", lambda target, _v=is_v29: _v)
+        AscendPCPManager(
+            pcp_world_size=2,
+            pcp_rank=0,
+            device=torch.device("cpu"),
+            req_states=req_states,
+        )
+        assert ("req_states" in captured) is expected
+        if expected:
+            assert captured["req_states"] is req_states
 
 
 def _make_local_pcp_batch():
@@ -277,17 +299,6 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
     assert result.num_tokens == 8
     expected_num_tokens_after_padding = 12
     assert result.num_tokens_after_padding == expected_num_tokens_after_padding
-    if vllm_version_is("0.28.0"):
-        dispatched = manager.get_num_tokens_for_dispatch(
-            global_batch.num_scheduled_tokens, global_batch.is_prefilling_np
-        )
-        # Exercise the real invariant against the real upstream partition, not
-        # just a mocked dispatch call. Global 18 becomes PCP-local padded 10.
-        DPMetadata.make(
-            SimpleNamespace(data_parallel_size=2, data_parallel_rank=0, is_moe_model=True),
-            result.num_tokens_after_padding,
-            torch.tensor([dispatched, 0]),
-        )
     assert torch.equal(result.input_ids[:8], torch.tensor([15, 16, 17, 0, 1, 2, 3, 4], dtype=torch.int32))
 
     # dataclasses.replace() retains the global Ascend-only fields by default;
@@ -1079,73 +1090,6 @@ def test_dummy_attention_context_uses_current_batch(pcp_rank, has_stale_batch):
 def test_pcp_dispatch_counts_match_partition(counts, prefilling, expected):
     manager = AscendPCPManager(pcp_world_size=2, pcp_rank=0, device=torch.device("cpu"))
     assert manager.get_num_tokens_for_dispatch(np.array(counts), np.array(prefilling)) == expected
-
-
-@pytest.mark.skipif(not vllm_version_is("0.28.0"), reason="release dispatch adapter")
-@pytest.mark.parametrize("dummy_run", [False, True])
-@pytest.mark.parametrize("pcp_enabled", [False, True])
-@pytest.mark.parametrize("num_tokens", [0, 44])
-@pytest.mark.parametrize("release_adapter", [False, True])
-def test_pcp_dispatch_preserves_global_batch_and_dummy_count(
-    dummy_run, pcp_enabled, num_tokens, release_adapter, monkeypatch
-):
-    monkeypatch.setattr(ascend_model_runner, "vllm_version_is", lambda version: release_adapter)
-    runner = object.__new__(NPUModelRunner)
-    runner.pcp_manager = (
-        AscendPCPManager(pcp_world_size=2, pcp_rank=0, device=torch.device("cpu")) if pcp_enabled else None
-    )
-    batch = (
-        None
-        if dummy_run
-        else SimpleNamespace(
-            num_tokens=num_tokens, num_scheduled_tokens=np.array([num_tokens]), is_prefilling_np=np.array([True])
-        )
-    )
-    with (
-        patch.object(vllm_model_runner.GPUModelRunner, "gather_batch_req_state", return_value=(batch, None)),
-        patch.object(ascend_model_runner, "dispatch_cg_and_sync_dp") as dispatch,
-    ):
-        with ascend_model_runner.pcp_dispatch_context():
-            gathered, uniform = runner.gather_batch_req_state(object(), dummy_run)
-            assert gathered is batch
-            vllm_model_runner.dispatch_cg_and_sync_dp(None, 1, 44, uniform, 2, 0)
-            expected = num_tokens // 2 if release_adapter and pcp_enabled and not dummy_run else 44
-            assert dispatch.call_args.args[2] == expected
-        vllm_model_runner.dispatch_cg_and_sync_dp(None, 1, 44, None, 2, 0)
-        assert dispatch.call_args.args[2] == 44
-    if batch is not None:
-        assert batch.num_tokens == num_tokens
-
-
-@pytest.mark.skipif(not vllm_version_is("0.28.0"), reason="release dispatch adapter")
-def test_pcp_dispatch_context_restores_after_nested_failure():
-    runner = object.__new__(NPUModelRunner)
-    runner.pcp_manager = AscendPCPManager(pcp_world_size=2, pcp_rank=0, device=torch.device("cpu"))
-    batch = SimpleNamespace(num_tokens=44, num_scheduled_tokens=np.array([44]), is_prefilling_np=np.array([True]))
-    independent_context = copy_context()
-    with (
-        patch.object(vllm_model_runner.GPUModelRunner, "gather_batch_req_state", return_value=(batch, None)),
-        patch.object(ascend_model_runner, "dispatch_cg_and_sync_dp") as dispatch,
-        ascend_model_runner.pcp_dispatch_context(),
-    ):
-        runner.gather_batch_req_state(object(), False)
-        with (
-            pytest.raises(RuntimeError, match="test failure"),
-            ascend_model_runner.pcp_dispatch_context(),
-        ):
-            vllm_model_runner.dispatch_cg_and_sync_dp(None, 1, 44, None, 2, 0)
-            assert dispatch.call_args.args[2] == 44
-            raise RuntimeError("test failure")
-        independent_context.run(vllm_model_runner.dispatch_cg_and_sync_dp, None, 1, 44, None, 2, 0)
-        assert dispatch.call_args.args[2] == 44
-        vllm_model_runner.dispatch_cg_and_sync_dp(None, 1, 44, None, 2, 0)
-        assert dispatch.call_args.args[2] == 22
-        # A dummy gather must clear the previous real batch count, even when
-        # both are collected inside the same execution context.
-        with patch.object(vllm_model_runner.GPUModelRunner, "gather_batch_req_state", return_value=(None, None)):
-            runner.gather_batch_req_state(object(), True)
-        vllm_model_runner.dispatch_cg_and_sync_dp(None, 1, 44, None, 2, 0)
-        assert dispatch.call_args.args[2] == 44
 
 
 @pytest.mark.parametrize("slot_dtype", [torch.int32, torch.int64])

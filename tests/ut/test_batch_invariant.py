@@ -85,6 +85,24 @@ class TestBatchInvariant:
         custom_sum.assert_not_called()
         assert result is expected
 
+    def test_reduce_sum_accepts_axis_alias(self):
+        """Native Tensor.sum accepts NumPy-style ``axis``; the replacement must too."""
+        x = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4)
+        assert torch.equal(
+            batch_invariant.reduce_sum(x, axis=1),
+            batch_invariant.reduce_sum(x, dim=1),
+        )
+
+    def test_reduce_sum_rejects_dim_and_axis_together(self):
+        x = torch.zeros(2, 3)
+        with pytest.raises(TypeError, match="both 'dim' and 'axis'"):
+            batch_invariant.reduce_sum(x, dim=1, axis=1)
+
+    def test_reduce_sum_forwards_dtype_to_native_fallback(self):
+        x = torch.zeros(2, 3, dtype=torch.float32)
+        result = batch_invariant.reduce_sum(x, dim=1, dtype=torch.int64)
+        assert result.dtype == torch.int64
+
     def test_override_envs_for_invariance(self):
         """Test Config and environment variable override"""
         mock_config = MagicMock()

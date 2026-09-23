@@ -696,6 +696,28 @@
 #       before DSpark draft selection, or otherwise guarantees that rebuilding
 #       `model_arch_config` preserves the selected draft architecture.
 #
+#   3. `vllm.config.model.ModelConfig.verify_with_parallel_config`
+#    Why:
+#       The pinned vLLM revision propagates `enable_expert_parallel` to the
+#       draft parallel config (upstream #55914) but no longer disables it for
+#       dense drafts (upstream #56930 is not on this revision). Non-MoE draft
+#       models (e.g. Kimi K3 DSpark, VWN eagle3) then fail the
+#       `_verify_with_expert_parallelism` check in
+#       `ModelConfig.verify_with_parallel_config` and cannot start.
+#    How:
+#       On non-v0.29.0 revisions, monkey-patch `verify_with_parallel_config`
+#       to skip the expert-parallel check when `runner_type == "draft"` and
+#       the model is not MoE. The target model EP check and MoE draft models
+#       are unaffected. The v0.29.0 release predates upstream #55914 (EP never
+#       reaches the draft) and keeps the unpatched behavior.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/55914
+#       https://github.com/vllm-project/vllm/pull/56930
+#    Future Plan:
+#       Remove this patch once the pinned vLLM revision disables expert
+#       parallelism for non-MoE draft models (upstream #56930) or exposes a
+#       backend-safe draft parallel config selection.
+#
 # ** 20. File: platform/patch_structured_output.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.sampling_params.SamplingParams._validate_structured_outputs`

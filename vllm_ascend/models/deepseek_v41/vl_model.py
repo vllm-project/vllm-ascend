@@ -9,22 +9,43 @@ from torch import nn
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings, SupportsEagle3, SupportsMultiModal, SupportsPP
 from vllm.model_executor.models.utils import maybe_prefix
-from vllm.models.deepseek_v4_1.common.mm_preprocess import (
-    IMAGE,
-    IMAGE_END,
-    IMAGE_NEW_LINE,
-    IMAGE_PAD_ID,
-    IMAGE_PLACEHOLDER,
-    IMAGE_SENTINEL_BASE_ID,
-    IMAGE_START,
-    DeepseekV4VLDummyInputsBuilder,
-    DeepseekV4VLMultiModalProcessor,
-    DeepseekV4VLProcessingInfo,
-)
 from vllm.multimodal import MULTIMODAL_REGISTRY
+
+from vllm_ascend.utils import vllm_version_is
 
 from .model import AscendDeepseekV41LLMForCausalLM
 from .vision import DeepseekV41Aligner, DeepseekV41ViT
+
+# Upstream #56741 normalized the V4.1 model package name from deepseek_v4_1
+# to deepseek_v41, and upstream #56554 removed the compressor-alignment pad
+# (IMAGE_PAD_ID) from the V4.1 token stream entirely.
+if vllm_version_is("0.29.0"):
+    from vllm.models.deepseek_v4_1.common.mm_preprocess import (
+        IMAGE,
+        IMAGE_END,
+        IMAGE_NEW_LINE,
+        IMAGE_PAD_ID,
+        IMAGE_PLACEHOLDER,
+        IMAGE_SENTINEL_BASE_ID,
+        IMAGE_START,
+        DeepseekV4VLDummyInputsBuilder,
+        DeepseekV4VLMultiModalProcessor,
+        DeepseekV4VLProcessingInfo,
+    )
+else:
+    from vllm.models.deepseek_v41.common.mm_preprocess import (
+        IMAGE,
+        IMAGE_END,
+        IMAGE_NEW_LINE,
+        IMAGE_PLACEHOLDER,
+        IMAGE_SENTINEL_BASE_ID,
+        IMAGE_START,
+        DeepseekV4VLDummyInputsBuilder,
+        DeepseekV4VLMultiModalProcessor,
+        DeepseekV4VLProcessingInfo,
+    )
+
+    IMAGE_PAD_ID: int | None = None
 
 
 def _vision_parameter_name(name: str) -> str | None:
@@ -68,7 +89,12 @@ class AscendDeepseekV41ForCausalLM(
         if getattr(config, "vision_n_layers", 0) > 0:
             config.is_mm_prefix_lm = True
             config.mm_prefix_clamp_sliding_window = True
-            config.mm_prefix_span_leading_pad_modulus = 2
+            if vllm_version_is("0.29.0"):
+                # v0.29.0 inserts a position-dependent compressor-alignment pad
+                # before each image span, so the model runner must strip it.
+                # vLLM main (#56554) removed those pads; keep the upstream
+                # default (no pad) there.
+                config.mm_prefix_span_leading_pad_modulus = 2
         self.config = config
         self.multimodal_config = model_config.multimodal_config
 
@@ -198,8 +224,11 @@ class AscendDeepseekV41ForCausalLM(
         )
 
         # The leading alignment row is not an image-feature position. It uses
-        # the checkpoint's ordinary image-token embedding instead.
-        embedding_ids = input_ids.masked_fill(input_ids == IMAGE_PAD_ID, IMAGE_SENTINEL_BASE_ID)
+        # the checkpoint's ordinary image-token embedding instead. vLLM main
+        # (#56554) removed the alignment pad, so there is nothing to remap.
+        if IMAGE_PAD_ID is not None:
+            input_ids = input_ids.masked_fill(input_ids == IMAGE_PAD_ID, IMAGE_SENTINEL_BASE_ID)
+        embedding_ids = input_ids
         inputs_embeds = self.language_model.embed_input_ids(embedding_ids)
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
             return inputs_embeds

@@ -25,6 +25,7 @@ import vllm_ascend.patch.platform.patch_parallel_config  # noqa
 import vllm_ascend.patch.platform.patch_pp_mtp  # noqa
 import vllm_ascend.patch.platform.patch_use_v2_model_runner  # noqa
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.utils import vllm_version_is
 
 if get_current_hardware_profile().supports(HardwareCapability.STANDARD_MAMBA_PATCH):
     import vllm_ascend.patch.platform.patch_mamba_config  # noqa
@@ -48,7 +49,13 @@ import vllm_ascend.patch.platform.patch_speculative_config  # noqa
 import vllm_ascend.patch.platform.patch_eplb  # noqa
 import vllm_ascend.patch.platform.patch_fused_moe  # noqa
 import vllm_ascend.patch.platform.patch_dp_device_ids  # noqa
-import vllm_ascend.patch.platform.patch_engram_config  # noqa
+
+# vLLM v0.29.0 has no `vllm.config.engram`; the Ascend Engram adapter only
+# applies to newer vLLM (main/v0.30.0+). Importing it unconditionally breaks
+# the release lane before any model is loaded.
+if not vllm_version_is("0.29.0"):
+    import vllm_ascend.patch.platform.patch_engram_config  # noqa
+
 import vllm_ascend.patch.platform.patch_glm5next_config  # noqa
 import vllm_ascend.patch.platform.patch_indexer_kv_dtype  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_dtype  # noqa

@@ -60,3 +60,29 @@ def bind_kv_cache(
 
 
 utils.bind_kv_cache = bind_kv_cache
+
+
+def bind_kv_cache_to_layers(
+    kv_caches: dict[str, torch.Tensor],
+    forward_context: dict[str, Attention],
+    num_attn_module: int = 1,
+    kv_cache_groups: Sequence[KVCacheGroupSpec] | None = None,
+) -> None:
+    """Ascend binding for vLLM main (#53781).
+
+    Upstream init_kv_cache switched from bind_kv_cache to
+    bind_kv_cache_to_layers on main, which calls each layer's bind_kv_cache
+    with the standardized single-tensor layout (vLLM #51718). Ascend
+    allocates per-layer (k, v) tuples, so assign the raw allocation directly,
+    matching the Ascend bind_kv_cache patch above.
+    """
+    for layer_name, kv_cache in kv_caches.items():
+        forward_context[layer_name].kv_cache = kv_cache
+    ordered_layer_names = sorted(
+        kv_caches, key=lambda name: extract_layer_index(name, num_attn_module)
+    )
+    utils.share_replayssm_ring_trackers(ordered_layer_names, forward_context, kv_cache_groups)
+
+
+if not vllm_version_is("0.29.0"):
+    utils.bind_kv_cache_to_layers = bind_kv_cache_to_layers
