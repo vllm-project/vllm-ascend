@@ -5,37 +5,36 @@ from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec, UniformTypeKVCa
 
 
 def get_310p_shared_cache_slots(kv_cache_groups, layout) -> dict[str, int]:
-    """Identify uniform hybrid groups whose Mamba pages can share storage."""
-    if not (layout.is_layer_compact and layout.is_block_compact) or len(kv_cache_groups) < 2:
+    """Map layers to slots when uniform Mamba groups can share storage."""
+    if not (layout.is_layer_compact and layout.is_block_compact) or not kv_cache_groups:
         return {}
-    group_sizes = {len(group.layer_names) for group in kv_cache_groups}
-    if len(group_sizes) != 1 or 0 in group_sizes:
+    group_size = len(kv_cache_groups[0].layer_names)
+    if not group_size or any(len(group.layer_names) != group_size for group in kv_cache_groups):
         return {}
 
     page_sizes = set()
-    attention_groups = set()
-    attention_specs = []
-    mamba_specs = []
-    for group_id, group in enumerate(kv_cache_groups):
-        for layer_name in group.layer_names:
+    attention_group_count = 0
+    mamba_spec = None
+    shared_slots: dict[str, int] = {}
+    for group in kv_cache_groups:
+        has_attention = False
+        for slot, layer_name in enumerate(group.layer_names):
             group_spec = group.kv_cache_spec
             spec = (
                 group_spec.kv_cache_specs[layer_name] if isinstance(group_spec, UniformTypeKVCacheSpecs) else group_spec
             )
             page_sizes.add(spec.page_size_bytes)
             if isinstance(spec, AttentionSpec):
-                attention_groups.add(group_id)
-                attention_specs.append(spec)
+                has_attention = True
             elif isinstance(spec, MambaSpec):
-                mamba_specs.append(spec)
+                if mamba_spec is not None and spec != mamba_spec:
+                    return {}
+                mamba_spec = spec
+                shared_slots[layer_name] = slot
             else:
                 return {}
-    if (
-        len(page_sizes) != 1
-        or len(attention_groups) != 1
-        or not mamba_specs
-        or any(spec != attention_specs[0] for spec in attention_specs[1:])
-        or any(spec != mamba_specs[0] for spec in mamba_specs[1:])
-    ):
+        attention_group_count += has_attention
+
+    if len(page_sizes) != 1 or attention_group_count != 1 or mamba_spec is None:
         return {}
-    return {layer_name: slot for group in kv_cache_groups for slot, layer_name in enumerate(group.layer_names)}
+    return shared_slots

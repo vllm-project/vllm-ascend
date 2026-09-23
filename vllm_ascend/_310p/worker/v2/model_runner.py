@@ -925,14 +925,9 @@ class NPUModelRunner310V2(NPUModelRunner):
                         raise NotImplementedError("310P MRV2 does not support asymmetric K/V head sizes.")
                     # Symmetric NZ only: K/V share the 4D view ``kv_cache_shape[1:]``.
                     kv_view_shape = kv_cache_shape[1:]
-                    # Standardized descriptors list distinct layer
-                    # regions. Uniform hybrid groups can reuse compatible
-                    # slots because one block ID belongs to one group.
+                    # Attention layers in the single supported attention group
+                    # need separate NZ K/V storage for each layer.
                     for name in cache_layer_names:
-                        slot_key = (share_slots[name], cache_key) if name in share_slots else None
-                        if slot_key is not None and slot_key in slot_caches:
-                            kv_caches[name] = slot_caches[slot_key]
-                            continue
                         k_cache = torch_npu.empty_with_format(
                             size=kv_view_shape,
                             dtype=kv_cache_spec.dtype,
@@ -946,8 +941,6 @@ class NPUModelRunner310V2(NPUModelRunner):
                             acl_format=ACL_FORMAT_FRACTAL_NZ,
                         )
                         kv_caches[name] = (k_cache, v_cache)
-                        if slot_key is not None:
-                            slot_caches[slot_key] = kv_caches[name]
                         storage_ptr = k_cache.untyped_storage().data_ptr()
                         if storage_ptr not in self._attn_kv_storage_ptrs:
                             self._attn_kv_storage_ptrs.add(storage_ptr)
