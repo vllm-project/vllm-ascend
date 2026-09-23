@@ -55,4 +55,4 @@
   pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_layernorm_gated.py
   ```
 
-- Its current small-M cases do not execute the PERSIST32 or HOIST32 branches. Add targeted NPU numerical cases for those branches and run them on the exact PR source before claiming in-tree NPU coverage of the new routes. Earlier offline A2/B3 measurements were on a prior PR1 source snapshot and are not a substitute for that check.
+- Two additional BF16 cases derive M from the initialized vector-core count to exercise PERSIST32 and HOIST32 at their first qualifying tiles. They record the actual JIT launch through the public wrapper and compare `out`, `mean`, and `rstd` with the same CPU reference. These cases still require execution on an NPU before claiming in-tree NPU coverage of the new routes. Earlier offline A2/B3 measurements were on a prior PR1 source snapshot and are not a substitute for that check.

@@ -2,8 +2,9 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+import vllm_ascend.ops.triton.layernorm_gated as layernorm_gated
 from vllm_ascend.ops.triton.layernorm_gated import layer_norm_fwd_npu
-from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
+from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 
 DEVICE = "npu"
 TOLERANCES = {
@@ -135,6 +136,74 @@ def test_layer_norm_fwd_npu_correctness(
     else:
         assert actual_mean is not None
         assert expected_mean is not None
+        torch.testing.assert_close(actual_mean.cpu(), expected_mean, rtol=rtol, atol=atol)
+
+
+class _KernelLaunchRecorder:
+    def __init__(self, kernel):
+        self.kernel = kernel
+        self.grids = []
+
+    def __getitem__(self, grid):
+        self.grids.append(grid)
+        return self.kernel[grid]
+
+
+@pytest.mark.parametrize(
+    ("kernel_name", "is_rms_norm", "norm_before_gate"),
+    [
+        pytest.param("_layer_norm_fwd_persistent_kernel_npu", False, True, id="persistent-layernorm-post-gate"),
+        pytest.param("_layer_norm_fwd_persistent_hoist_kernel_npu", True, False, id="hoist-rmsnorm-pre-gate"),
+    ],
+)
+@torch.inference_mode()
+def test_layer_norm_fwd_npu_persistent_routes(
+    kernel_name,
+    is_rms_norm,
+    norm_before_gate,
+    monkeypatch,
+):
+    vector_cores = get_vectorcore_num()
+    # Pick the first row of the qualifying tile, rather than assuming P=40.
+    first_tile = (
+        (vector_cores + 3) // 4
+        if kernel_name == "_layer_norm_fwd_persistent_kernel_npu"
+        else 16 * vector_cores
+    )
+    rows = (first_tile - 1) * 32 + 1
+    shape = (rows, 128)
+
+    original_kernel = getattr(layernorm_gated, kernel_name)
+    recorder = _KernelLaunchRecorder(original_kernel)
+    monkeypatch.setattr(layernorm_gated, kernel_name, recorder)
+
+    torch.manual_seed(42)
+    x = (torch.randn(shape, dtype=torch.float32) * 0.5).to(dtype=torch.bfloat16, device=DEVICE)
+    weight = (torch.randn(128, dtype=torch.float32) * 0.2 + 1.0).to(dtype=torch.bfloat16, device=DEVICE)
+    bias = (torch.randn(128, dtype=torch.float32) * 0.1).to(dtype=torch.bfloat16, device=DEVICE)
+    z = (torch.randn(shape, dtype=torch.float32) * 0.5).to(dtype=torch.bfloat16, device=DEVICE)
+
+    actual, actual_mean, actual_rstd = layer_norm_fwd_npu(
+        x,
+        weight,
+        bias,
+        1e-5,
+        z=z,
+        norm_before_gate=norm_before_gate,
+        is_rms_norm=is_rms_norm,
+    )
+    expected, expected_mean, expected_rstd = layer_norm_gated_ref(
+        x, weight, bias, 1e-5, z, None, norm_before_gate, is_rms_norm
+    )
+
+    assert recorder.grids == [(min(vector_cores, first_tile),)]
+    rtol, atol = TOLERANCES[torch.bfloat16]
+    torch.testing.assert_close(actual.float().cpu(), expected.float(), rtol=rtol, atol=atol)
+    torch.testing.assert_close(actual_rstd.cpu(), expected_rstd, rtol=rtol, atol=atol)
+    if is_rms_norm:
+        assert actual_mean is None
+    else:
+        assert actual_mean is not None
         torch.testing.assert_close(actual_mean.cpu(), expected_mean, rtol=rtol, atol=atol)
 
 
