@@ -8,6 +8,24 @@
 - 低精度 `y`（bf16/fp16）：RMSNorm 结果
 - 宽化 `y_fp32`（fp32）：**已舍入 y 的精确宽化**
 
+**数学定义**（对输入的每一行，n = hidden size，逐元素计算）：
+
+```text
+rstd   = 1 / sqrt( mean(x²) + ε )          # 倒均方根，mean(x²) 在 fp32 域累加
+y      = RoundToDtype( x · rstd · gamma )  # 逐元素，舍入到 x 的低精度 dtype（RINT）
+y_fp32 = WidenToFp32( y )                  # 精确宽化，逐位等于 y.float()
+```
+
+**接口定义**：
+
+| 方向 | 参数 | dtype / shape | 约束 |
+|---|---|---|---|
+| 输入 | `x` | bf16 或 fp16，rank ≥ 1，最后一维 = n | 非空 |
+| 输入 | `gamma` | 与 `x` 同 dtype，1 维，长度 = n | 逐行共享的缩放权重 |
+| 属性 | `epsilon` | float，默认 1e-6 | 非负 |
+| 输出 | `y` | 与 `x` 同 dtype、同 shape | RMSNorm 结果 |
+| 输出 | `y_fp32` | fp32，同 `x` 的 shape | 契约：`y_fp32 == y.float()` 逐位相等 |
+
 **为什么存在**：DeepSeek v4/v41 的 MoE 路由（HashTopK）同时需要这两份输出。不融合
 时的现有做法是 `torch_npu.npu_rms_norm` + `y.float()` 两个算子串联，中间多一次 y
 的读写（多约 20% 数据搬运量）。融合后理论应始终更快。
