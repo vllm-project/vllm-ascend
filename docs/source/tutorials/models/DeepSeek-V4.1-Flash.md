@@ -363,7 +363,7 @@ This needs a vLLM that provides `--engram-config`; without it the tables stay
 on the device:
 
 ```bash
---engram-config '{"cpu_offload": true}'
+--engram-config '{"cpu_offload": true, "dp_shared_memory": true}'
 ```
 
 With `cpu_offload` the shard stays in host memory, is registered with
