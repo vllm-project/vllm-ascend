@@ -17,7 +17,7 @@ _server_cmd: &server_cmd
   - "--port"
   - "$SERVER_PORT"
   - "--max-model-len"
-  - "5500"
+  - "40960"
   - "--max-num-batched-tokens"
   - "40960"
   - "--block-size"
