@@ -8,9 +8,6 @@ _envs: &envs
   SERVER_PORT: "DEFAULT_PORT"
 
 _server_cmd: &server_cmd
-  - "--quantization"
-  - "ascend"
-  - "--no-enable-prefix-caching"
   - "--tensor-parallel-size"
   - "4"
   - "--max-num-seqs"
@@ -28,8 +25,6 @@ _server_cmd: &server_cmd
   - "--trust-remote-code"
   - "--gpu-memory-utilization"
   - "0.9"
-  - "--distributed-executor-backend"
-  - "mp"
 
 _benchmarks: &benchmarks
   acc:
@@ -53,10 +48,8 @@ test_cases:
       <<: *envs
     server_cmd: *server_cmd
     server_cmd_extra:
-      - "--compilation-config"
-      - '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,12,16,20,24,32,48,60,64,68,72,76,80]}'
       - "--additional-config"
-      - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":true}}'
+      - '{"enable_flashcomm1":true,"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":true}}'
     benchmarks:
       <<: *benchmarks
 
@@ -66,5 +59,7 @@ test_cases:
       <<: *envs
     server_cmd: *server_cmd
     server_cmd_extra:
-      - "--enforce-eager"
+      - "--enforce-eager"      
+      - "--additional-config"
+      - '{"enable_flashcomm1":true}'
     benchmarks:
