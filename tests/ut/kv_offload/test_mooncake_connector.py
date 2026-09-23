@@ -91,7 +91,13 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (  # n
 )
 from vllm_ascend.utils import get_kv_cache_tensor_layers  # noqa: E402
 
+# Keep the freshly imported Mooncake modules active.  D2RH tests import the
+# shared connector before this module is collected; restoring that stale
+# module here would leave the test classes bound to one module object while
+# patch() resolves targets through another, so all mocks would silently miss.
 for _k, _v in _saved_modules.items():
+    if _k.startswith(f"{_kv_xfer}.kv_p2p"):
+        continue
     sys.modules[_k] = _v
 
 GET_META_MSG = b"get_meta_msg"
@@ -1750,6 +1756,7 @@ class TestMainThreadLoop(unittest.TestCase):
 class MockVllmConfig:
     def __init__(self):
         self.model_config = MagicMock()
+        self.attention_config = types.SimpleNamespace(indexer_kv_dtype="auto")
         self.parallel_config = MagicMock()
         self.cache_config = MagicMock()
         self.kv_transfer_config = MagicMock()

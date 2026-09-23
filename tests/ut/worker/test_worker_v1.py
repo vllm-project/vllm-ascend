@@ -2208,17 +2208,20 @@ class TestNPUWorkerWeightUpdate(TestBase):
 
 class TestKVPPWorkerBudget(TestBase):
     def test_complete_spec_and_logical_planner_budget(self):
-        from tests.ut.kvpp_utils import make_kvpp_config, make_kvpp_specs
+        from tests.ut.kvpp_utils import layer_name, make_kvpp_config, make_kvpp_specs
         from vllm_ascend.worker import worker as worker_module
 
         specs = make_kvpp_specs()
         worker = worker_module.NPUWorker.__new__(worker_module.NPUWorker)
         worker.vllm_config = make_kvpp_config()
-        worker.model_runner = SimpleNamespace(get_kv_cache_spec=lambda: specs)
+        worker.model_runner = SimpleNamespace(
+            get_kv_cache_spec=lambda: specs, drafter=SimpleNamespace(_draft_attn_layer_names={layer_name(17)})
+        )
         worker._kvpp_cache_allocation_plan = None
         ascend_config = SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=False))
         with (
             patch.object(worker_module, "get_tp_group", return_value=SimpleNamespace(rank_in_group=1)),
+            patch.object(worker_module, "get_pp_group", return_value=SimpleNamespace(is_last_rank=True)),
             patch.object(worker_module, "get_ascend_config", return_value=ascend_config),
         ):
             self.assertEqual(worker.get_kv_cache_spec(), specs)

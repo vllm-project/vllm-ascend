@@ -232,6 +232,64 @@ def test_load_model_reads_validated_draft_window_size():
     mock_adapter.assert_called_once_with(4096, 16, 8, 4, "cpu")
 
 
+@pytest.mark.parametrize("method,has_post_process", [("dspark", True), ("dspark", False), ("eagle3", True)])
+def test_load_model_aligns_dspark_before_precomputing_hidden_states(method, has_post_process):
+    proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+    proposer.vllm_config = SimpleNamespace(quant_config=object())
+    proposer.maybe_eager_context = nullcontext()
+    proposer.method = method
+    proposer.supports_mm_inputs = False
+    proposer.parallel_drafting = True
+    proposer.pass_hidden_states_to_model = True
+    proposer.eagle3_use_aux_hidden_state = True
+    proposer.hidden_size = 2
+    proposer.parallel_drafting_hidden_state_tensor = torch.empty(2)
+    events = []
+    draft = SimpleNamespace(mask_hidden=torch.ones(6))
+
+    def post_process(config):
+        assert config is proposer.vllm_config
+        events.append("post_process")
+
+    def combine_hidden_states(hidden):
+        events.append("combine")
+        assert torch.equal(hidden, torch.ones(6))
+        return torch.full((2,), 2.0 if "post_process" in events else 1.0)
+
+    if has_post_process:
+        draft.post_process = post_process
+    draft.combine_hidden_states = combine_hidden_states
+    proposer._get_model = MagicMock(return_value=draft)
+    proposer._maybe_share_embeddings = MagicMock(side_effect=lambda _: events.append("embeddings"))
+    proposer._maybe_share_topk_indices = MagicMock(side_effect=lambda _: events.append("indices"))
+    proposer._maybe_share_lm_head = MagicMock(side_effect=lambda _: events.append("lm_head"))
+    draft_layer = MagicMock()
+    draft_layer.get_kv_cache_spec.return_value = object()
+    draft_layer.get_attn_backend.return_value.get_supported_kernel_block_sizes.return_value = [16]
+    module = "vllm_ascend.spec_decode.llm_base_proposer"
+    with (
+        patch(f"{module}.get_pp_group", return_value=SimpleNamespace(is_last_rank=True)),
+        patch(
+            f"{module}.get_layers_from_vllm_config",
+            side_effect=[{}, {"draft": draft_layer}, {"draft": draft_layer}],
+        ),
+        patch("vllm_ascend.ascend_config.get_ascend_config", return_value=SimpleNamespace(draft_window_size=None)),
+        patch(f"{module}.supports_multimodal", return_value=False),
+        patch(f"{module}.set_current_vllm_config", return_value=nullcontext()) as current_config,
+    ):
+        proposer.load_model(MagicMock())
+
+    should_process = method == "dspark" and has_post_process
+    expected = ["embeddings", "indices", "lm_head"]
+    if should_process:
+        expected.append("post_process")
+        current_config.assert_called_once_with(proposer.vllm_config)
+    else:
+        current_config.assert_not_called()
+    assert events == [*expected, "combine"]
+    assert torch.equal(proposer.parallel_drafting_hidden_state_tensor, torch.full((2,), 2.0 if should_process else 1.0))
+
+
 def test_draft_vllm_config_only_propagates_draft_runner_type():
     draft_model_config = SimpleNamespace(
         runner_type="draft",
