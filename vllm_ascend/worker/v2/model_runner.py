@@ -73,7 +73,6 @@ from vllm_ascend.worker.utils import disable_compilation
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_state,
-    ring_state_update_skipped,
     skip_ring_state_update,
 )
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
@@ -89,7 +88,11 @@ from vllm_ascend.worker.v2.pp_utils import (
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
-from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
+from vllm_ascend.worker.v2.utils import (
+    prepare_v41_dummy_ring_state,
+    prepare_v41_source_rope,
+    torch_cuda_wrapper,
+)
 
 
 class NPUModelRunner(GPUModelRunner):
@@ -304,7 +307,7 @@ class NPUModelRunner(GPUModelRunner):
             for module in self.model.modules():
                 if isinstance(module, DeepseekV41Compressor) and module.ratio == 2:
                     module.prepare_ring_compressor(self.max_num_tokens, self.device)
-        self._prepare_v41_source_rope()
+        prepare_v41_source_rope(self)
 
         # Only target-model layers determine whether FIA is in use. This flag
         # is used for adaptive verification handling.
@@ -325,22 +328,6 @@ class NPUModelRunner(GPUModelRunner):
             static_forward_context=self.compilation_config.static_forward_context,
         )
         self.model_state.kvpp_runtime = self.kvpp
-
-    def _prepare_v41_source_rope(self) -> None:
-        """Validate and cache V4.1 source RoPE tables on compressor builders.
-
-        Runner V1 wires this through ``enable_device_metadata`` inside
-        ``initialize_attn_backend``; runner V2 keeps metadata tasks
-        synchronous (``_publish_task`` runs them inline), so only the RoPE
-        cache initialization is needed here. ``build`` raises without it.
-        """
-        from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder
-
-        for groups in self.attn_groups:
-            for attn_group in groups:
-                for builder in attn_group.metadata_builders:
-                    if isinstance(builder, AscendDSAV41MetadataBuilder):
-                        builder.prepare_source_rope()
 
     @torch.inference_mode()
     def execute_model(
@@ -701,37 +688,8 @@ class NPUModelRunner(GPUModelRunner):
                         1, block_table.shape[0] + 1, dtype=torch.int32, device=block_table.device
                     )
                     block_table[:, 0].copy_(state_slots)
-        self._prepare_v41_dummy_ring_state(input_batch.num_reqs)
+        prepare_v41_dummy_ring_state(self, input_batch.num_reqs)
         return block_tables, slot_mappings
-
-    def _prepare_v41_dummy_ring_state(self, num_reqs: int) -> None:
-        """Assign live ring pages to dummy requests for V4.1 graph runs.
-
-        V4.1's compressor ring state owns one private page per request.
-        Upstream zero-fills dummy block tables, which would alias every
-        dummy request onto page 0; assign distinct live state IDs
-        1..num_reqs and zero those ring pages so graph capture/replay see
-        a clean ring instead of stale or aliased state. Fully skipped for
-        dummy batches marked skip_gdn_state_update (mirrors MRV1, which
-        suppresses both the ring prep and the state writes there).
-        """
-        if ring_state_update_skipped():
-            return
-        forward_context = self.compilation_config.static_forward_context
-        for gid, group in enumerate(self.kv_cache_config.kv_cache_groups):
-            if not is_circular_kv_cache_spec(group.kv_cache_spec):
-                continue
-            if num_reqs >= self.kv_cache_config.num_blocks:
-                raise ValueError("Insufficient ring pages for dummy graph requests")
-            block_table = self.block_tables.input_block_tables[gid]
-            block_table[:num_reqs, 0] = torch.arange(
-                1,
-                num_reqs + 1,
-                dtype=block_table.dtype,
-                device=block_table.device,
-            )
-            for name in group.layer_names:
-                forward_context[name].kv_cache[0][1 : num_reqs + 1].zero_()
 
     def _lmhead_tp_max_num_logits(self) -> int:
         """Logits row capacity shared by every rank of the lmhead-TP group.
