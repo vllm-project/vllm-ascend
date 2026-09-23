@@ -218,6 +218,19 @@ public:
     static constexpr uint32_t MASKED_L1_SLOT   = 8 * 1024;            // 64x64 fp16
     static constexpr uint32_t MASKED_L1_OFFSET = HAND_L1B_OFFSET + 64 * 1024;
     static_assert(MASKED_L1_OFFSET + 2 * MASKED_L1_SLOT <= ArchTag::L1_SIZE, "L1 overflow");
+    // Q tile double buffer. Cube1 and Cube2 read the SAME Q tile (same qkOffset,
+    // same [blockTokens, kHeadDim] shape) one body apart, so Cube1(i) lands Q in
+    // slot[parity] and Cube2(i+1) takes it from L1 as its A operand instead of
+    // re-reading GM: 16 KB less MTE2 per body. Two slots because Cube1(i+1) has
+    // already loaded Q(i+1) before Cube2(i+1) consumes Q(i); rotation is gated on
+    // vec1Ran exactly like MASKED_L1 so the drain body reads the right half.
+    // The bottom 256 KB of L1 is free since ProcessSplitCore (the sole Catlass
+    // BlockMmadTla user) was deleted. Cross-body MTE2-write-vs-MTE1-read on a slot
+    // is ordered by each HandMmad's own MTE1_MTE2 fence.
+    static constexpr uint32_t Q_L1_SLOT   = 32 * 1024;   // 64x192 fp16 max = 24 KB
+    static constexpr uint32_t Q_L1_OFFSET = 0;
+    static_assert(Q_L1_OFFSET + 2 * Q_L1_SLOT <= HAND_L1A_OFFSET,
+                  "chunk_fwd_o: Q slots overlap the hand-mmad L1 region");
 
     // ---- L0C -----------------------------------------------------------------
     // One region per cube so the mmads do not serialise on L0C reuse.
@@ -446,7 +459,8 @@ public:
                     gmQ[cube1Offsets.qkOffset], kHeadDim,
                     gmK[cube1Offsets.qkOffset], kHeadDim,
                     cube1Offsets.blockTokens, cube1Offsets.blockTokens, kHeadDim,
-                    HAND_L1A_OFFSET, HAND_L1B_OFFSET, UB_STAGE_OFFSET, L0C_C1_OFFSET);
+                    Q_L1_OFFSET + maskedParity * Q_L1_SLOT,
+                    HAND_L1B_OFFSET, UB_STAGE_OFFSET, L0C_C1_OFFSET);
 
                 // VEC1 is NZ-native: it consumes the cube's staging buffer in place,
                 // so there is no deformat here, and leaves the masked tile in L1 as
@@ -463,13 +477,16 @@ public:
             if (needRun) {
                 GDNFwdOOffsets& prevOffsets = cubeBlockScheduler.GetCube23Offsets();
 
-                // CUBE2: h_work = q @ h.
-                ChunkFwdO::HandMmad<ArchTag>(
+                // CUBE2: h_work = q @ h.  A (the Q tile) is already in L1 -- the
+                // previous body's Cube1 loaded the identical tile -- so gmA/lda are
+                // unused and no GM re-read happens.
+                ChunkFwdO::HandMmad<ArchTag, /*B_COL_MAJOR=*/false, /*A_FROM_L1=*/true>(
                     resource,
                     gmQ[prevOffsets.qkOffset], kHeadDim,
                     gmH[prevOffsets.hOffset], vHeadDim,
                     prevOffsets.blockTokens, vHeadDim, kHeadDim,
-                    HAND_L1A_OFFSET, HAND_L1B_OFFSET, UB_STAGE_OFFSET, L0C_C2_OFFSET);
+                    Q_L1_OFFSET + (maskedParity ^ 1u) * Q_L1_SLOT,
+                    HAND_L1B_OFFSET, UB_STAGE_OFFSET, L0C_C2_OFFSET);
                 // h_work out of the staging buffer before Cube3 overwrites it.
                 DeformatL0CStagingToUb(ubHwTensor, prevOffsets.blockTokens, vHeadDim, UB_STAGE_OFFSET);
 
