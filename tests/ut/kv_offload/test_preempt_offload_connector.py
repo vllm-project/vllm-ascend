@@ -964,6 +964,29 @@ def test_preempt_offload_connector_worker_restores_aliased_conv_prefix(conv_firs
     torch.testing.assert_close(backing, expected)
 
 
+@pytest.mark.parametrize("alias_width", [8, 4])
+def test_preempt_offload_connector_worker_rejects_alias_with_different_block_stride(alias_width):
+    num_blocks = 2
+    backing = torch.empty(32, dtype=torch.int64)
+    kv_caches = {
+        "first": backing.as_strided((num_blocks, 8), (16, 1)),
+        "alias": backing.as_strided((num_blocks, alias_width), (8, 1)),
+    }
+    worker = PreemptOffloadWorker.__new__(PreemptOffloadWorker)
+    worker.kv_cache_config = SimpleNamespace(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[SimpleNamespace(size=backing.numel() * backing.element_size(), layers=list(kv_caches))],
+        kv_cache_groups=[],
+    )
+    worker.cpu_capacity_bytes = None
+    worker.offload_host_memory_ratio = 1
+
+    # Both views start at the same address, but logical block 1 does not.
+    # Neither an equal nor a smaller payload makes pointer-only dedupe safe.
+    with pytest.raises(RuntimeError, match="Aliased KV caches have incompatible block layouts"):
+        worker.register_kv_caches(kv_caches)
+
+
 @pytest.mark.parametrize("accept_offset", [0, 1, 2, 3])
 def test_preempt_offload_connector_worker_restores_only_conv_history(accept_offset):
     worker = PreemptOffloadWorker.__new__(PreemptOffloadWorker)
