@@ -474,7 +474,7 @@ class ExternalDPConfigLoader:
                 parts = partition.split(",")
                 if len(parts) != group.pp_size:
                     raise ValueError(
-                        f"PP group {group.group_id}: pp_layer_partition entry {part!r} is not a positive integer"
+                        f"PP group {group.group_id}: pp_layer_partition has {len(parts)} entries but pp_size={group.pp_size}"
                     )
                 for part in parts:
                     part = part.strip()
