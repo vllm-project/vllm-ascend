@@ -235,14 +235,11 @@ class NPUModelRunner(GPUModelRunner):
 
         # vLLM main captures draft_hidden_states before maybe_restore_pcp_for_sampling,
         # so a replicated draft would read the PCP-local target output. Restore
-        # it to the global layout up front.
+        # it to the global layout up front. aux_hidden_states need no handling
+        # here: upstream sample_tokens (#56107) already restores them, per
+        # tensor, before speculator.propose.
         if state.hidden_states is not None:
             state = state._replace(hidden_states=pcp_manager.restore_hidden_states(state.hidden_states))
-
-        aux_hidden_states = state.aux_hidden_states
-        if aux_hidden_states:
-            restored_aux_hidden_states = pcp_manager.restore_hidden_states(torch.cat(aux_hidden_states, dim=-1))
-            state = state._replace(aux_hidden_states=[restored_aux_hidden_states])
         self.execute_model_state = state
 
     def sample_tokens(self, grammar_output):
