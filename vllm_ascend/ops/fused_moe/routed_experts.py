@@ -576,8 +576,13 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
 
     def update_ascend_eplb_maps(self, new_ascend_expert_map: torch.Tensor) -> None:
         """Refresh the runtime maps after a dynamic EPLB rebalance."""
-        self.ascend_expert_map = new_ascend_expert_map.to(self._ascend_expert_map.dtype)
-        self.global_expert_map[self.ep_rank].copy_(new_ascend_expert_map)
+        # The EPLB worker ships CPU tensors; keep the runtime map on the
+        # execution device and dtype of the current map (NPU after checkpoint
+        # loading) - the AllGather dispatcher indexes it with device topk_ids.
+        self.ascend_expert_map = new_ascend_expert_map.to(
+            device=self._ascend_expert_map.device, dtype=self._ascend_expert_map.dtype
+        )
+        self.global_expert_map[self.ep_rank].copy_(new_ascend_expert_map.to(self.global_expert_map.device))
         self.local_phys_expert_ids.copy_(
             compute_local_phys_expert_ids(new_ascend_expert_map).to(self.local_phys_expert_ids.device)
         )
