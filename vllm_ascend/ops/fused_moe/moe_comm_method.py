@@ -404,12 +404,8 @@ class FusedMC2CommImpl(MoECommMethod):
         # CheckWeight2Input). The op prototype also REQUIRES FRACTAL_NZ per expert. The W4A8 quant
         # method therefore builds per-expert int8 + FRACTAL_NZ lists (cann_mega_moe_*_weight_list) and
         # they are passed through as-is here. W8A8 weights are already int8 + FRACTAL_NZ, also as-is.
-        weight_scales1 = (
-            None if fused_experts_input.weights.w1_scale is None else to_list(fused_experts_input.weights.w1_scale)
-        )
-        weight_scales2 = (
-            None if fused_experts_input.weights.w2_scale is None else to_list(fused_experts_input.weights.w2_scale)
-        )
+        weight_scales1 = None if weights.w1_scale is None else to_list(weights.w1_scale)
+        weight_scales2 = None if weights.w2_scale is None else to_list(weights.w2_scale)
         # MegaMoe expects one-dimensional per-expert scales. Preserve genuine
         # per-group scales and only remove a leading singleton dimension.
         if weight_scales1 is not None:
