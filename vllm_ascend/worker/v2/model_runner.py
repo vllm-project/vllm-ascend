@@ -242,10 +242,20 @@ class NPUModelRunner(GPUModelRunner):
             if mtp_target_hidden_states is not None:
                 pcp_manager.restore_hidden_state_buffer(mtp_target_hidden_states)
 
+        # vLLM main captures draft_hidden_states before maybe_restore_pcp_for_sampling
+        # (v0.29.0 captured it after the restore), so a replicated draft would
+        # read the PCP-local target output. Restore it to the global layout up
+        # front to match the v0.29.0 draft flow.
+        if not vllm_version_is("0.29.0") and state.hidden_states is not None:
+            state = state._replace(
+                hidden_states=pcp_manager.restore_hidden_states(state.hidden_states)
+            )
+
         aux_hidden_states = state.aux_hidden_states
         if aux_hidden_states:
             restored_aux_hidden_states = pcp_manager.restore_hidden_states(torch.cat(aux_hidden_states, dim=-1))
-            self.execute_model_state = state._replace(aux_hidden_states=[restored_aux_hidden_states])
+            state = state._replace(aux_hidden_states=[restored_aux_hidden_states])
+        self.execute_model_state = state
 
     def sample_tokens(self, grammar_output):
         pcp_manager = self.pcp_manager

@@ -24,6 +24,7 @@ import torch
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_pcp_group, get_pp_group
 from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.gpu.states import RequestState
 
@@ -374,6 +375,21 @@ class AscendPCPManager(PCPManager):
         )
         return local_batch
 
+    def prepare_draft_prefill(self, input_batch: InputBatch, input_ids: torch.Tensor) -> None:
+        """Keep the replicated PCP draft on the global batch.
+
+        vLLM v0.29.0 runs the draft prefill directly on the global batch, which
+        the Ascend replicated-PCP attention metadata describes. vLLM main
+        (#56181) routes the draft through the target PCP partition and shrinks
+        the model input to the rank-local batch, desyncing it from the global
+        metadata (FIA rejects `last(actual_seq_lengths_q) != T` in TND layout).
+        Ascend PCP spec decode is always replicated, so skip the partition on
+        newer vLLM to match v0.29.0 behavior.
+        """
+        if not vllm_version_is("0.29.0"):
+            return
+        super().prepare_draft_prefill(input_batch, input_ids)
+
     def restore_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Restore active tokens and zero any fixed-graph padding rows."""
         if not self.is_last_pp_rank:
@@ -396,6 +412,24 @@ class AscendPCPManager(PCPManager):
 
         restored_hidden_states[num_tokens:num_tokens_after_padding].zero_()
         return restored_hidden_states
+
+    def restore_for_sampling(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> tuple[torch.Tensor, InputBatch]:
+        """Return the global batch and, when already global, skip re-gathering.
+
+        On vLLM main the Ascend runner restores the target hidden states to the
+        global PCP layout before sampling (draft_hidden_states is captured
+        before the upstream restore), so a second all-gather here would reorder
+        them. Detect the already-restored layout by its padded length.
+        """
+        if vllm_version_is("0.29.0"):
+            return super().restore_for_sampling(hidden_states)
+        assert self._global_batch is not None
+        if hidden_states.shape[0] == self._global_batch.num_tokens_after_padding:
+            return hidden_states, self._global_batch
+        return super().restore_for_sampling(hidden_states)
 
     def restore_hidden_state_buffer(self, hidden_states: torch.Tensor) -> None:
         """Restore a model-owned rank-local buffer to the global PCP layout."""
