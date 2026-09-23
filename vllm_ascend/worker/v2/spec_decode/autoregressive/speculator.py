@@ -17,6 +17,7 @@
 # This file is a part of the vllm-ascend project.
 #
 import logging
+from collections.abc import Mapping
 from contextlib import contextmanager
 from copy import copy
 from typing import TYPE_CHECKING, Any
@@ -25,6 +26,7 @@ import numpy as np
 import torch
 from vllm.config import VllmConfig, replace, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed import get_dcp_group
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
@@ -40,6 +42,7 @@ from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend
+from vllm_ascend.worker.dcp_utils import DCPManager
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_wrapper,
@@ -86,6 +89,17 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         self.attn_architecture: str | None = None
         self.attn_backend: type[AttentionBackend] | None = None
         self.draft_vllm_config = self._create_draft_vllm_config()
+        self.use_dcp = self.draft_vllm_config.parallel_config.decode_context_parallel_size > 1
+        if self.use_dcp:
+            self.dcp_manager = DCPManager(
+                dcp_world_size=self.draft_vllm_config.parallel_config.decode_context_parallel_size,
+                dcp_rank=get_dcp_group().rank_in_group,
+                max_buffer_num_tokens=self.max_num_tokens,
+                max_num_reqs=self.max_num_reqs,
+                device=self.device,
+                vllm_config=self.draft_vllm_config,
+                use_async_scheduling=self.vllm_config.scheduler_config.async_scheduling,
+            )
 
         del self.input_buffers
         # AscendInputBuffers has extra `seq_lens_cpu` attribute.
@@ -480,14 +494,28 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         seq_lens_cpu_upper_bound: torch.Tensor,
         step: int,
         num_query_per_req: int = 1,
-        causal: bool = True,
+        causal: bool | Mapping[int, bool] = True,
         query_start_loc_np: np.ndarray | None = None,
+        dcp_local_seq_lens: torch.Tensor | None = None,
     ) -> dict[str, Any] | None:
         assert self.input_batch is not None
+        seq_lens_cpu = None
+        is_prefilling = torch.from_numpy(self.input_batch.is_prefilling_np)
+        if self.use_dcp:
+            seq_lens_cpu, is_prefilling = self.dcp_manager.prepare_draft_dcp_metadata_inputs(
+                target_seq_lens_cpu=self._get_seq_lens_cpu(num_reqs_padded),
+                is_prefilling=is_prefilling,
+                num_reqs=num_reqs,
+                num_reqs_padded=num_reqs_padded,
+                step=step,
+                max_model_len=self.max_model_len,
+            )
         with build_draft_attn_metadata_factory(
             self.input_buffers.positions,
             num_tokens_padded,
-            torch.from_numpy(self.input_batch.is_prefilling_np),
+            is_prefilling,
+            seq_lens_cpu=seq_lens_cpu,
+            parallel_config=self.draft_vllm_config.parallel_config,
         ):
             attn_metadata = super()._build_draft_attn_metadata(
                 num_reqs,
@@ -498,6 +526,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
                 num_query_per_req,
                 causal,
                 query_start_loc_np=query_start_loc_np,
+                dcp_local_seq_lens=dcp_local_seq_lens,
             )
         if attn_metadata is not None:
             # Ascend-specific: force DecodeOnly attention state for the draft model.
@@ -603,6 +632,10 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             num_reqs = num_reqs_padded
         next_seq_lens_cpu = self._calc_next_seq_lens_cpu(seq_lens_cpu, num_reqs, num_reqs_padded, step)
 
+        dcp_local_seq_lens_cpu = None
+        if self.use_dcp and self.attn_architecture == "MLA":
+            dcp_local_seq_lens_cpu = self.dcp_manager.prepare_dcp_local_seq_lens_cpu(next_seq_lens_cpu)
+
         query_lens_list = [i for i in range(1, num_reqs_padded + 1)]
         seq_lens_list = next_seq_lens_cpu.tolist()
         for metadata in attn_metadata.values():
@@ -612,6 +645,16 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
                 decode_metadata = metadata
             decode_metadata.seq_lens_list = seq_lens_list
             decode_metadata.actual_seq_lengths_q = query_lens_list
+            if dcp_local_seq_lens_cpu is not None:
+                parallel_config = self.draft_vllm_config.parallel_config
+                decode_metadata.update_dcp_seq_lens_cpu(
+                    next_seq_lens_cpu,
+                    dcp_local_seq_lens_cpu,
+                    torch.ones_like(next_seq_lens_cpu),
+                    dcp_size=parallel_config.decode_context_parallel_size,
+                    dcp_rank=self.dcp_manager.dcp_world_rank,
+                    cp_kv_cache_interleave_size=parallel_config.cp_kv_cache_interleave_size,
+                )
             metadata.seq_lens_cpu.copy_(next_seq_lens_cpu)
 
     def build_fia_params(

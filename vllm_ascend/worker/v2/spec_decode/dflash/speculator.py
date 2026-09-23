@@ -11,6 +11,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.worker.gpu.cp_utils import cp_local_slot
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
     DFlashSpeculator,
@@ -153,11 +154,8 @@ class AscendDFlashSpeculator(DFlashSpeculator):
             )
 
 
-# main2main compat: upstream ``_prepare_dflash_inputs_kernel`` added
-# ``cp_rank``/``CP_SIZE``/``CP_INTERLEAVE`` for DCP support (see
-# vllm-project/vllm#52188). The extra parameters are unused: Ascend does not
-# run dflash with DCP (CP_SIZE is always 1, where upstream ``cp_local_slot``
-# yields the same slots as this kernel).
+# Keep the Ascend scalar-loop implementation while sharing upstream's CP
+# slot ownership and local-offset rules for both DFlash and DSpark.
 @triton.jit
 def _prepare_dflash_inputs_kernel_ascend(
     # Outputs
@@ -234,18 +232,17 @@ def _prepare_dflash_inputs_kernel_ascend(
         ctx_pos_idx = ctx_start + j
         is_valid_ctx = j < num_valid_ctx
         ctx_pos = tl.load(target_positions_ptr + ctx_pos_idx, mask=is_valid_ctx, other=0)
-        ctx_block_num = ctx_pos // block_size
+        ctx_block_num = ctx_pos // (block_size * CP_SIZE)
         ctx_block_num = tl.minimum(ctx_block_num, block_table_stride - 1)
         ctx_block_id = tl.load(
             block_table_ptr + req_idx * block_table_stride + ctx_block_num,
             mask=is_valid_ctx,
             other=0,
         ).to(tl.int64)
-        ctx_slot = tl.where(
-            is_valid_ctx & (ctx_block_id != 0),
-            ctx_block_id * block_size + (ctx_pos % block_size),
-            PAD_SLOT_ID,
+        local_ctx_slot = cp_local_slot(
+            ctx_pos, ctx_block_id, block_size, cp_rank, CP_SIZE, CP_INTERLEAVE, PAD_SLOT_ID
         )
+        ctx_slot = tl.where(is_valid_ctx & (ctx_block_id != 0), local_ctx_slot, PAD_SLOT_ID)
         tl.store(out_context_positions_ptr + ctx_pos_idx, ctx_pos)
         tl.store(out_context_slot_mapping_ptr + ctx_pos_idx, ctx_slot)
 
@@ -258,10 +255,13 @@ def _prepare_dflash_inputs_kernel_ascend(
         else:
             input_id = parallel_drafting_token_id
 
-        q_block_num = query_pos // block_size
+        q_block_num = query_pos // (block_size * CP_SIZE)
         q_block_num = tl.minimum(q_block_num, block_table_stride - 1)
         q_block_id = tl.load(block_table_ptr + req_idx * block_table_stride + q_block_num).to(tl.int64)
-        q_slot = tl.where(q_block_id != 0, q_block_id * block_size + (query_pos % block_size), PAD_SLOT_ID)
+        local_q_slot = cp_local_slot(
+            query_pos, q_block_id, block_size, cp_rank, CP_SIZE, CP_INTERLEAVE, PAD_SLOT_ID
+        )
+        q_slot = tl.where(q_block_id != 0, local_q_slot, PAD_SLOT_ID)
 
         tl.store(out_input_ids_ptr + query_idx, input_id)
         clamped_query_pos = tl.minimum(query_pos, max_model_len - 1)

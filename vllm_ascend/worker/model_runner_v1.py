@@ -3688,6 +3688,9 @@ class NPUModelRunner(GPUModelRunner):
             mm_req_doc_ranges=req_doc_ranges,
         )
 
+        if self.use_dcp:
+            self.dcp_manager.prepare_common_attn_metadata(cm_base)
+
         if logits_indices is not None and self.cache_config.kv_sharing_fast_prefill:
             cm_base.num_logits_indices = logits_indices.size(0)
             cm_base.logits_indices_padded = self._prepare_kv_sharing_fast_prefill(logits_indices)
