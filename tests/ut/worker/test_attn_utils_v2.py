@@ -299,7 +299,7 @@ def test_sfa_indexer_cache_spec_runtime_ownership_and_dcp_replication(
         additional_config={},
         parallel_config=SimpleNamespace(decode_context_parallel_size=4),
         cache_config=SimpleNamespace(block_size=128, cache_dtype="auto"),
-        attention_config=SimpleNamespace(indexer_kv_dtype="int8"),
+        attention_config=SimpleNamespace(indexer_kv_dtype="int8", hisparse_config=None),
         model_config=SimpleNamespace(
             dtype=torch.bfloat16,
             hf_text_config=SimpleNamespace(index_head_dim=128),
@@ -367,7 +367,7 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
     )
     vllm_config = SimpleNamespace(
         additional_config={},
-        attention_config=SimpleNamespace(indexer_kv_dtype="int8"),
+        attention_config=SimpleNamespace(indexer_kv_dtype="int8", hisparse_config=None),
         model_config=SimpleNamespace(
             hf_config=SimpleNamespace(
                 compress_ratios=[4],
@@ -483,21 +483,21 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
     def _ascend_bind_kv_cache(
         kv_caches: dict[str, Any],
         forward_context: dict[str, Any],
-        runner_kv_caches_: list[Any],
         num_attn_module: int = 1,
         kv_cache_groups: Any = None,
     ) -> None:
         del num_attn_module, kv_cache_groups
-        assert len(runner_kv_caches_) == 0
+        assert len(runner_kv_caches) == 0
         for kv_cache in kv_caches.values():
-            runner_kv_caches_.append(kv_cache)
+            runner_kv_caches.append(kv_cache)
         for layer_name_, kv_cache in kv_caches.items():
             forward_context[layer_name_].kv_cache = kv_cache
 
     monkeypatch.setattr(upstream_attn_utils, "allocate_kv_cache", _ascend_allocate_kv_cache)
-    monkeypatch.setattr(upstream_attn_utils, "bind_kv_cache", _ascend_bind_kv_cache)
+    # vLLM main (#53781) routes init_kv_cache through bind_kv_cache_to_layers
+    # and dropped the runner_kv_caches parameter.
+    monkeypatch.setattr(upstream_attn_utils, "bind_kv_cache_to_layers", _ascend_bind_kv_cache)
     kv_caches = upstream_attn_utils.init_kv_cache(
-        runner_kv_caches=runner_kv_caches,
         forward_context={layer_name: cache_layer},
         kv_cache_config=kv_cache_config,
         device=torch.device("cpu"),
@@ -679,12 +679,19 @@ def test_dsv4_backends_declare_role_specific_logical_sizes(
     ],
 )
 def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
+    monkeypatch,
     caller,
     cudagraph_mode,
     for_capture,
     pcp_size,
     expected_input_tokens,
 ):
+    parallel_config = SimpleNamespace(
+        prefill_context_parallel_size=pcp_size,
+        decode_context_parallel_size=2,
+        cp_kv_cache_interleave_size=2,
+    )
+    monkeypatch.setattr(attn_utils, "get_dcp_group", lambda: SimpleNamespace(rank_in_group=0))
     layer_names, specs, calls, attn_groups, kv_cache_config = _make_dsa_metadata_groups()
     block_tables = (
         torch.zeros((4, 1), dtype=torch.int32),
@@ -692,7 +699,7 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
     )
     slot_mappings = torch.zeros((2, 8), dtype=torch.int32)
     dcp_local_seq_lens = torch.tensor(
-        [2, 1, 0, 0],
+        [2, 2, 0, 0],
         dtype=torch.int32,
     )
     pcp_context = object() if pcp_size > 1 else None
@@ -720,14 +727,13 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
             seq_lens_np=np.array([2, 3], dtype=np.int32),
             positions=torch.arange(5, dtype=torch.int32),
             dcp_local_seq_lens=dcp_local_seq_lens[:2],
+            parallel_config=parallel_config,
         )
     else:
         model_state = AscendModelState.__new__(AscendModelState)
         model_state.max_model_len = 8
         model_state.vllm_config = SimpleNamespace(
-            parallel_config=SimpleNamespace(
-                prefill_context_parallel_size=pcp_size,
-            ),
+            parallel_config=parallel_config,
         )
         model_state.pcp_manager = pcp_manager
         input_batch = SimpleNamespace(
@@ -771,6 +777,9 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
             )
         expected_dcp_local_seq_lens = dcp_local_seq_lens[:2] if caller == "default" else dcp_local_seq_lens
         torch.testing.assert_close(common_metadata.dcp_local_seq_lens, expected_dcp_local_seq_lens)
+        torch.testing.assert_close(
+            common_metadata.dcp_local_seq_lens_cpu, expected_dcp_local_seq_lens[: common_metadata.num_reqs]
+        )
     cache_name = "common_ratio_to_sas_metadata"
     assert calls[0][cache_name] is calls[1][cache_name]
     assert calls[1][cache_name]["first_group"] is True
@@ -1088,7 +1097,7 @@ def test_attn_state_mla_spec_and_metadata_wrappers(monkeypatch):
     vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         cache_config=SimpleNamespace(block_size=16, cache_dtype="auto"),
-        attention_config=SimpleNamespace(indexer_kv_dtype="int8"),
+        attention_config=SimpleNamespace(indexer_kv_dtype="int8", hisparse_config=None),
         model_config=SimpleNamespace(
             dtype=torch.bfloat16,
             hf_text_config=SimpleNamespace(kv_lora_rank=128, qk_rope_head_dim=64),

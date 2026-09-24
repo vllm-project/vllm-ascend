@@ -196,7 +196,7 @@ def test_prepare_non_uniform_dummy_run_metadata_uses_input_batch_state() -> None
 
 
 @pytest.mark.parametrize("prefill_flags", [[False, False], [True, False]])
-def test_prepare_dspark_first_pass_cp_metadata_uses_full_query_kv_length(prefill_flags) -> None:
+def test_prepare_legacy_dcp_metadata_uses_full_query_kv_length(prefill_flags) -> None:
     manager = _make_dcp_manager(
         dcp_world_size=2,
         dcp_rank=0,
@@ -210,12 +210,10 @@ def test_prepare_dspark_first_pass_cp_metadata_uses_full_query_kv_length(prefill
         context_parallel_metadata=None,
     )
 
-    long_seq_args = manager.prepare_dspark_first_pass_cp_metadata(
-        common_attn_metadata=common_attn_metadata,
-        num_query_per_req=5,
-    )
+    common_attn_metadata.query_start_loc_cpu = torch.tensor([0, 5, 10], dtype=torch.int32)
+    common_attn_metadata.max_query_len = 5
+    manager.prepare_legacy_dcp_metadata(common_attn_metadata)
 
-    assert long_seq_args == (None, None)
     metadata = common_attn_metadata.context_parallel_metadata
     np.testing.assert_array_equal(
         metadata.num_computed_tokens_of_dcp,
@@ -304,65 +302,39 @@ def test_update_spec_decode_drafting_metadata_skips_prefill() -> None:
 
 
 def test_prepare_spec_decode_drafting_metadata_transitions_to_decode() -> None:
-    manager = object.__new__(DCPManager)
-    manager.dcp_world_rank = 1
-    local_seq_lens = torch.tensor([[4, 3], [6, 5]], dtype=torch.int32)
-    manager._get_dcp_local_seq_lens = MagicMock(return_value=local_seq_lens)
-    mtp_mask = torch.ones((2, 4, 16), dtype=torch.bool)
+    manager = _make_dcp_manager(2, 1, 1)
     original_dcp_metadata = AscendDCPMetadata(
         num_computed_tokens_of_dcp=[[3, 2], [5, 4]],
         query_lens_cpu=torch.tensor([8, 4], dtype=torch.int32),
         max_query_len=8,
-        dcp_mtp_attn_mask=mtp_mask,
     )
     common_attn_metadata = SimpleNamespace(
         context_parallel_metadata=original_dcp_metadata,
         query_start_loc_cpu=torch.tensor([0, 1, 2], dtype=torch.int32),
         is_prefilling=torch.tensor([True, True]),
+        _seq_lens_cpu=torch.tensor([8, 12], dtype=torch.int32),
+        seq_lens=torch.tensor([7, 11], dtype=torch.int32),
+        seq_lens_cpu=None,
+        num_reqs=2,
+        dcp_local_seq_lens_cpu=torch.tensor([99, 99], dtype=torch.int32),
     )
-    seq_lens = torch.tensor([7, 11], dtype=torch.int32)
-    seq_lens_cpu = torch.tensor([6, 10], dtype=torch.int32)
 
     with patch.object(DCPManager, "_is_mla_kv_cache_spec", return_value=True):
         manager.prepare_spec_decode_drafting_cp_metadata(
             common_attn_metadata=common_attn_metadata,
             kv_cache_spec=object(),
-            seq_lens=seq_lens,
-            seq_lens_cpu=seq_lens_cpu,
+            seq_lens=torch.tensor([7, 11], dtype=torch.int32),
+            seq_lens_cpu=torch.tensor([6, 10], dtype=torch.int32),
             draft_index=1,
         )
 
-    draft_dcp_metadata = common_attn_metadata.context_parallel_metadata
-    assert draft_dcp_metadata is not original_dcp_metadata
-    assert torch.equal(
-        draft_dcp_metadata.query_lens_cpu,
-        torch.tensor([1, 1], dtype=torch.int32),
-    )
-    assert draft_dcp_metadata.max_query_len == 1
-    np.testing.assert_array_equal(
-        draft_dcp_metadata.num_computed_tokens_of_dcp,
-        local_seq_lens.numpy(),
-    )
-    assert torch.equal(
-        draft_dcp_metadata.draft_cp_seq_len,
-        torch.tensor([3, 5], dtype=torch.int32),
-    )
-    assert torch.equal(
-        draft_dcp_metadata.draft_base_seq_lens,
-        torch.tensor([13, 13], dtype=torch.int32),
-    )
-    # Split MLA decode uses a current-chunk causal mask, not the old DCP mask.
-    assert draft_dcp_metadata.dcp_mtp_attn_mask is None
-    assert original_dcp_metadata.dcp_mtp_attn_mask is mtp_mask
+    # The common global lengths have already advanced; do not add another step.
+    assert common_attn_metadata.dcp_local_seq_lens_cpu.tolist() == [4, 6]
+    assert common_attn_metadata.dcp_local_seq_lens.tolist() == [3, 5]
+    assert common_attn_metadata.context_parallel_metadata is None
     assert not torch.any(common_attn_metadata.is_prefilling)
     assert original_dcp_metadata.max_query_len == 8
     assert original_dcp_metadata.draft_cp_seq_len is None
-    assert original_dcp_metadata.draft_base_seq_lens is None
-    manager._get_dcp_local_seq_lens.assert_called_once()
-    assert torch.equal(
-        manager._get_dcp_local_seq_lens.call_args.args[0],
-        torch.tensor([15, 15], dtype=torch.int32),
-    )
 
 
 def test_update_spec_decode_drafting_metadata_requires_mla_decode() -> None:

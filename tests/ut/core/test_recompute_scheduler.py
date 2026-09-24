@@ -24,7 +24,7 @@ from vllm_ascend.core.recompute_scheduler import (
 @pytest.fixture(autouse=True)
 def _oproj_tp_config(monkeypatch):
     # _preempt_or_recompute reads the live AscendConfig singleton; default it to off.
-    finegrained_tp_config = SimpleNamespace(oproj_tensor_parallel_size=0)
+    finegrained_tp_config = SimpleNamespace(oproj_tensor_parallel_size=0, mlp_tensor_parallel_size=0)
     monkeypatch.setattr(
         "vllm_ascend.core.recompute_scheduler.get_ascend_config",
         lambda: SimpleNamespace(finegrained_tp_config=finegrained_tp_config),
