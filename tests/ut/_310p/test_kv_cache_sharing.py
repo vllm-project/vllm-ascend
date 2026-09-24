@@ -32,6 +32,18 @@ def test_shares_matching_mamba_slots_across_groups_only() -> None:
     }
 
 
+def test_mtp_attention_layer_does_not_disable_mamba_slot_sharing() -> None:
+    groups = _make_groups()
+    expected_slots = get_310p_shared_cache_slots(groups, KVCacheLayout.LBNHC)
+    assert expected_slots
+    groups[0] = KVCacheGroupSpec(
+        [*groups[0].layer_names, "mtp.layers.0.self_attn.attn"],
+        groups[0].kv_cache_spec,
+    )
+
+    assert get_310p_shared_cache_slots(groups, KVCacheLayout.LBNHC) == expected_slots
+
+
 @pytest.mark.parametrize("layout", [KVCacheLayout.LHBNC, KVCacheLayout.BLHNC])
 def test_rejects_layout_without_contiguous_per_layer_pages(layout: KVCacheLayout) -> None:
     assert get_310p_shared_cache_slots(_make_groups(), layout) == {}
