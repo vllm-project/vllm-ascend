@@ -696,14 +696,12 @@ class AscendConfig:
 
         finegrained_tp_enabled = (
             self.finegrained_tp_config.oproj_tensor_parallel_size > 0
-            or self.finegrained_tp_config.embedding_tensor_parallel_size > 0
             or self.finegrained_tp_config.mlp_tensor_parallel_size > 0
-            or self.finegrained_tp_config.lmhead_tensor_parallel_size > 0
         )
         if finegrained_tp_enabled and not self.scheduler_config.recompute_scheduler_enable:
             raise AssertionError(
-                "finegrained_tp_config requires recompute_scheduler_enable=true: "
-                "it keeps decode-node steps decode-shaped.",
+                "oproj_tensor_parallel_size / mlp_tensor_parallel_size require "
+                "recompute_scheduler_enable=true: it keeps decode-node steps decode-shaped.",
             )
 
         # enable_fused_mc2 enum + MiniMax mutex + multistream auto-disable
