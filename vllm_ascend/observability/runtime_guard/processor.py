@@ -23,6 +23,7 @@ runners ``bind`` the process singleton once; other call sites use
 from __future__ import annotations
 
 import contextlib
+import logging
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -245,20 +246,24 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
         ``scheduler_output`` (optional): lets MRV2 see scheduled tokens for
         later manual dump at end-of-wave after prepare.
         """
-        runner = self.runner
-        dp = getattr(runner, "dp_rank", "?")
-        tp = getattr(runner, "tp_rank", "?")
-        try:
-            pp = get_pp_group().rank_in_group
-        except Exception:
-            pp = "?"
-        logger.debug(
-            "[runtime_guard sync] enter sync_for_step allow_arm=%s dp=%s tp=%s pp=%s",
-            allow_arm,
-            dp,
-            tp,
-            pp,
-        )
+        # Rank introspection for debug logs only: skip the getattrs and the
+        # get_pp_group() try/except when DEBUG is off (guard-all-off zero cost).
+        debug_on = logger.isEnabledFor(logging.DEBUG)
+        if debug_on:
+            runner = self.runner
+            dp = getattr(runner, "dp_rank", "?")
+            tp = getattr(runner, "tp_rank", "?")
+            try:
+                pp = get_pp_group().rank_in_group
+            except Exception:
+                pp = "?"
+            logger.debug(
+                "[runtime_guard sync] enter sync_for_step allow_arm=%s dp=%s tp=%s pp=%s",
+                allow_arm,
+                dp,
+                tp,
+                pp,
+            )
         self._scheduler_output_for_step = scheduler_output
         try:
             self.wave_tracker.advance(allow_arm=allow_arm)
@@ -285,13 +290,14 @@ class RuntimeGuardProcessor(RuntimeGuardBusMixin, RuntimeGuardDumpMixin, Runtime
             self._end_of_wave_sync_if_no_sample(allow_arm=allow_arm)
         finally:
             self._scheduler_output_for_step = None
-            logger.debug(
-                "[runtime_guard sync] leave sync_for_step allow_arm=%s dp=%s tp=%s pp=%s",
-                allow_arm,
-                dp,
-                tp,
-                pp,
-            )
+            if debug_on:
+                logger.debug(
+                    "[runtime_guard sync] leave sync_for_step allow_arm=%s dp=%s tp=%s pp=%s",
+                    allow_arm,
+                    dp,
+                    tp,
+                    pp,
+                )
 
     def _end_of_wave_sync_if_no_sample(self, *, allow_arm: bool) -> None:
         """Safety-net end-of-wave when this wave will not ``run_sample_phase``."""
