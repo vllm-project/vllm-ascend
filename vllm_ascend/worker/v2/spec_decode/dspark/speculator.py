@@ -27,6 +27,7 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
 )
 
+from vllm_ascend.ascend_config import draft_config_loading
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
@@ -51,7 +52,8 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         target_model: torch.nn.Module,
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
-        model = super().load_draft_model(target_model, target_attn_layer_names)
+        with draft_config_loading():
+            model = super().load_draft_model(target_model, target_attn_layer_names)
         if hasattr(model, "post_process"):
             with set_current_vllm_config(self.vllm_config):
                 model.post_process(self.vllm_config)

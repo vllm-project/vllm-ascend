@@ -1284,25 +1284,18 @@
 #
 # ** 24. File: worker/patch_v2/patch_dflash_speculator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.worker.gpu.spec_decode.dflash.speculator.DFlashCudaGraphManager`,
-#      `vllm.v1.worker.gpu.spec_decode.dflash.utils.load_dflash_model`,
-#      `vllm.v1.worker.gpu.spec_decode.dflash.speculator.load_dflash_model`
+#   1. `vllm.v1.worker.gpu.spec_decode.dflash.speculator.DFlashCudaGraphManager`
 #    Why:
 #       The v2 DFlash spec-decode path uses upstream `DFlashCudaGraphManager`
 #       (CUDA graph) for spec decoding, which is not usable on Ascend.
-#       DFlash and DFlash2 also retain the target `model_config` while rebuilding
-#       their draft `VllmConfig`, so config validation cannot identify that
-#       reconstruction from model-config identity.
 #    How：
 #       Replace `DFlashCudaGraphManager` with the Ascend `DFlashAclGraphManager`
-#       (ACL graph) on the upstream speculator module. Wrap the shared DFlash
-#       loader in a scoped draft-config context used by Ascend validation.
+#       (ACL graph) on the upstream speculator module.
 #    Related PR (if no, explain why):
 #       No, vllm-ascend v2 spec-decode ACL graph integration.
 #    Future Plan:
 #       Remove this patch once upstream exposes a backend-dispatchable spec-decode
-#       graph manager abstraction and an explicit draft-config role for external
-#       draft loaders.
+#       graph manager abstraction.
 #
 # ** 25. File: worker/patch_v2/patch_eagle_speculator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1451,19 +1444,16 @@
 #       unquantized draft, and a W4A8/W8A8 target checkpoint cannot be loaded
 #       into it (the draft linear layers lack the `weight_offset`/
 #       `weight_scale`/`scale_bias` params the checkpoint ships), failing with
-#       a KeyError. DSpark also retains the target `model_config` while forcing
-#       draft PP to 1, so model-config identity cannot identify its reconstructed
-#       draft `VllmConfig` during Ascend validation.
+#       a KeyError.
 #    How：
 #       For same-checkpoint drafts (`draft_model_config.model ==
 #       model_config.model`), temporarily redirect `get_draft_quant_config` to
 #       the target quant config during `load_dspark_model`, then restore it.
 #       Self-contained drafts (e.g. Qwen3 DSpark speculators) keep their own
-#       quant config. Mark the loader call with a scoped draft-config context.
+#       quant config.
 #    Future Plan:
 #       Remove this patch once upstream `load_dspark_model` inherits the target
-#       quant config for same-checkpoint drafts and exposes an explicit
-#       draft-config role during reconstruction.
+#       quant config for same-checkpoint drafts.
 #
 # ** 32. File: worker/patch_v2/patch_adaptive_verification.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

@@ -4,7 +4,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from vllm_ascend.draft_config_context import is_draft_config_loading
 from vllm_ascend.patch.worker.patch_v2 import patch_dspark
 from vllm_ascend.worker.v2 import pp_utils
 
@@ -29,7 +28,6 @@ def test_dspark_draft_partition_isolation(monkeypatch, version, pp_size, fail):
     assert "_should_share" not in vars(patch_dspark.dspark_utils)
 
     def load(target, received_config):
-        assert is_draft_config_loading()
         assert received_config is config
         assert config.parallel_config.pipeline_parallel_size == (1 if bypass_pp_guard else pp_size)
         expected_partition = None if pp_size > 1 else "42,36"
@@ -60,4 +58,3 @@ def test_dspark_draft_partition_isolation(monkeypatch, version, pp_size, fail):
     assert patch_dspark.eagle_utils._should_share is should_share
     assert patch_dspark.dspark_utils.get_pp_group is get_pp_group
     assert "_should_share" not in vars(patch_dspark.dspark_utils)
-    assert not is_draft_config_loading()

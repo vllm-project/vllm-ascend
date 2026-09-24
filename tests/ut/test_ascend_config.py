@@ -41,13 +41,13 @@ from vllm_ascend.ascend_config import (
     ShortRequestFirstConfig,
     SparseKVOffloadConfig,
     clear_ascend_config,
+    draft_config_loading,
     get_ascend_config,
     init_ascend_config,
     is_mega_moe_supported,
 )
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
-from vllm_ascend.draft_config_context import draft_config_loading
 from vllm_ascend.utils import clear_enable_sp, enable_dsa_cp, enable_sp, shared_expert_dp_enabled
 
 
@@ -384,7 +384,9 @@ class TestAscendConfig(TestBase):
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_profiling_chunk_rejects_pp1_for_target_model(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
-        test_vllm_config.additional_config = {"scheduler_config": {"profiling_chunk_config": {"enabled": True}}}
+        test_vllm_config.additional_config = {
+            "scheduler_config": {"profiling_chunk_config": {"enabled": True}}
+        }
         test_vllm_config.parallel_config.pipeline_parallel_size = 1
 
         with self.assertRaisesRegex(ValueError, "requires pipeline parallelism"):
@@ -399,7 +401,9 @@ class TestAscendConfig(TestBase):
             draft_model_config=draft_model_config,
             target_model_config=object(),
         )
-        test_vllm_config.additional_config = {"scheduler_config": {"profiling_chunk_config": {"enabled": True}}}
+        test_vllm_config.additional_config = {
+            "scheduler_config": {"profiling_chunk_config": {"enabled": True}}
+        }
         test_vllm_config.parallel_config.pipeline_parallel_size = 1
 
         ascend_config = init_ascend_config(test_vllm_config)
@@ -419,29 +423,15 @@ class TestAscendConfig(TestBase):
                     draft_model_config=object(),
                     target_model_config=target_model_config,
                 )
-                test_vllm_config.additional_config = {"scheduler_config": {"profiling_chunk_config": {"enabled": True}}}
+                test_vllm_config.additional_config = {
+                    "scheduler_config": {"profiling_chunk_config": {"enabled": True}}
+                }
                 test_vllm_config.parallel_config.pipeline_parallel_size = 1
 
-                with draft_config_loading(method):
+                with draft_config_loading():
                     ascend_config = init_ascend_config(test_vllm_config)
 
                 self.assertTrue(ascend_config.scheduler_config.profiling_chunk_config.enabled)
-
-    @_clean_up_ascend_config
-    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_profiling_chunk_rejects_pp1_for_mismatched_draft_loader(self, mock_fix_incompatible_config):
-        test_vllm_config = VllmConfig()
-        target_model_config = test_vllm_config.model_config
-        test_vllm_config.speculative_config = SimpleNamespace(
-            method="dspark",
-            draft_model_config=object(),
-            target_model_config=target_model_config,
-        )
-        test_vllm_config.additional_config = {"scheduler_config": {"profiling_chunk_config": {"enabled": True}}}
-        test_vllm_config.parallel_config.pipeline_parallel_size = 1
-
-        with draft_config_loading("dflash"), self.assertRaisesRegex(ValueError, "requires pipeline parallelism"):
-            init_ascend_config(test_vllm_config)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
@@ -452,7 +442,9 @@ class TestAscendConfig(TestBase):
             draft_model_config=model_config,
             target_model_config=model_config,
         )
-        test_vllm_config.additional_config = {"scheduler_config": {"profiling_chunk_config": {"enabled": True}}}
+        test_vllm_config.additional_config = {
+            "scheduler_config": {"profiling_chunk_config": {"enabled": True}}
+        }
         test_vllm_config.parallel_config.pipeline_parallel_size = 1
 
         with self.assertRaisesRegex(ValueError, "requires pipeline parallelism"):

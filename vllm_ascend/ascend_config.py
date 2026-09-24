@@ -19,6 +19,9 @@ import dataclasses
 import importlib.util
 import json
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from pydantic import ConfigDict, TypeAdapter, model_validator
@@ -28,12 +31,21 @@ from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.config_utils import config
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-from vllm_ascend.draft_config_context import get_draft_config_loading_method
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 _MEGA_MOE_SUPPORTED = None
+_DRAFT_CONFIG_LOADING: ContextVar[bool] = ContextVar("ascend_draft_config_loading", default=False)
+
+
+@contextmanager
+def draft_config_loading() -> Iterator[None]:
+    token = _DRAFT_CONFIG_LOADING.set(True)
+    try:
+        yield
+    finally:
+        _DRAFT_CONFIG_LOADING.reset(token)
 
 
 def is_mega_moe_supported() -> bool:
@@ -61,10 +73,9 @@ def validate_additional_config_bool(value: Any, path: str) -> bool:
 def _is_draft_model_config(vllm_config: VllmConfig) -> bool:
     # DSpark and DFlash retain the target model_config while reconstructing a
     # draft VllmConfig, so object identity alone cannot identify those paths.
-    speculative_config = vllm_config.speculative_config
-    loader_method = get_draft_config_loading_method()
-    if speculative_config is not None and loader_method is not None and loader_method == speculative_config.method:
+    if _DRAFT_CONFIG_LOADING.get():
         return True
+    speculative_config = vllm_config.speculative_config
     return (
         speculative_config is not None
         and vllm_config.model_config is speculative_config.draft_model_config

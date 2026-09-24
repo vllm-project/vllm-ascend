@@ -17,31 +17,16 @@
 #
 import vllm.v1.worker.gpu.spec_decode.dflash.cudagraph as cudagraph_module
 import vllm.v1.worker.gpu.spec_decode.dflash.speculator as speculator_module
-import vllm.v1.worker.gpu.spec_decode.dflash.utils as dflash_utils
 import vllm.v1.worker.gpu.spec_decode.dflash2.speculator as speculator2_module
 
-from vllm_ascend.draft_config_context import draft_config_loading
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.spec_decode.dflash.aclgraph import DFlashAclGraphManager
 from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import (
     _selector_walk_kernel_ascend,
 )
 
-_original_load_dflash_model = dflash_utils.load_dflash_model
-
-
-def _load_dflash_model_with_draft_context(target_model, vllm_config):
-    # DFlash retains the target model_config and passes the draft model_config
-    # separately to get_model. Mark its VllmConfig reconstruction explicitly
-    # so config validation does not mistake the draft for the target.
-    with draft_config_loading("dflash"):
-        return _original_load_dflash_model(target_model, vllm_config)
-
-
 cudagraph_module.build_attn_metadata = build_attn_metadata
 speculator_module.DFlashCudaGraphManager = DFlashAclGraphManager
-dflash_utils.load_dflash_model = _load_dflash_model_with_draft_context
-speculator_module.load_dflash_model = _load_dflash_model_with_draft_context
 
 # triton-ascend cannot lower tldevice.log1p in the upstream selector walk;
 # swap in the algebraically equivalent log(1 - u) variant.

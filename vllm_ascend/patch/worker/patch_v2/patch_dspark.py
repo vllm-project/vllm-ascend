@@ -44,7 +44,6 @@ import vllm.v1.worker.gpu.spec_decode.dspark.speculator as speculator_module
 import vllm.v1.worker.gpu.spec_decode.dspark.utils as dspark_utils
 import vllm.v1.worker.gpu.spec_decode.eagle.utils as eagle_utils
 
-from vllm_ascend.draft_config_context import draft_config_loading
 from vllm_ascend.worker.v2.pp_utils import (
     bypass_upstream_spec_pp_guard,
     resolve_spec_pp_support,
@@ -91,11 +90,7 @@ def _load_dspark_model_with_target_quant(target_model, vllm_config):
         partition_mask = cast(AbstractContextManager[None], nullcontext())
         if spec_pp_support is not None:
             partition_mask = patch.object(vllm_envs, "VLLM_PP_LAYER_PARTITION", None)
-        with (
-            draft_config_loading("dspark"),
-            partition_mask,
-            bypass_upstream_spec_pp_guard(vllm_config, spec_pp_support),
-        ):
+        with partition_mask, bypass_upstream_spec_pp_guard(vllm_config, spec_pp_support):
             return _original_load_dspark_model(target_model, vllm_config)
     finally:
         if inherits_target_quant:

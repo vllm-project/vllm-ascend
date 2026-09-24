@@ -12,6 +12,7 @@ from vllm.model_executor.model_loader.utils import get_model_cls
 from vllm.model_executor.models import ModelRegistry
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
+from vllm_ascend.ascend_config import _DRAFT_CONFIG_LOADING
 from vllm_ascend.models import register_model
 from vllm_ascend.models.qwen3_dspark import (
     AscendQwen3DSparkForCausalLM,
@@ -94,10 +95,12 @@ def test_draft_without_hook_preserves_target_capture(monkeypatch):
     draft = object()
 
     def load(*args):
+        assert _DRAFT_CONFIG_LOADING.get()
         return draft
 
     monkeypatch.setattr(DSparkSpeculator, "load_draft_model", load)
     assert _spec(_vllm_config(quarot=True), config).load_draft_model(target, set()) is draft
+    assert not _DRAFT_CONFIG_LOADING.get()
     target.set_dspark_aux_capture_materialized.assert_not_called()
     assert vars(config) == {"architectures": ["DSparkDraftModel"]}
 
