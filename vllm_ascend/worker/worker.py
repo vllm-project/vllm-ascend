@@ -422,6 +422,19 @@ class NPUWorker(WorkerBase):
                         "must be greater than HCCL_EXEC_TIMEOUT "
                         f"({os.environ['HCCL_EXEC_TIMEOUT']})"
                     )
+                if (
+                    int(os.environ["HCCL_EVENT_TIMEOUT"]) != abort_timeout
+                    or int(os.environ["HCCL_EXEC_TIMEOUT"]) != abort_timeout - 1
+                ):
+                    logger.warning(
+                        "Fault tolerance: HCCL communication timeouts are taken from the "
+                        "HCCL_EVENT_TIMEOUT (%s s) / HCCL_EXEC_TIMEOUT (%s s) environment "
+                        "variables instead of the NPU operator timeout "
+                        "(ft_communication_abort_timeout=%s s).",
+                        os.environ["HCCL_EVENT_TIMEOUT"],
+                        os.environ["HCCL_EXEC_TIMEOUT"],
+                        abort_timeout,
+                    )
                 torch.npu.set_op_timeout_ms(abort_timeout * 1000)
         if (
             parallel_config.distributed_executor_backend not in ("ray", "external_launcher")
