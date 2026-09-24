@@ -385,6 +385,7 @@ class TestAscendMultiHeadLatentAttention(TestBase):
         self.mock_mla_modules.kv_a_layernorm = MagicMock()
         self.mock_mla_modules.kv_b_proj = MagicMock()
         self.mock_mla_modules.o_proj = MagicMock()
+        self.mock_mla_modules.o_proj.output_size = self.hidden_size
 
         self.mock_cache_config = MagicMock(spec=CacheConfig)
         self.mock_quant_config = MagicMock()
@@ -522,6 +523,54 @@ class TestAscendMultiHeadLatentAttention(TestBase):
         output = attn.forward(positions, hidden_states)
 
         self.assertEqual(output.shape, (3, self.hidden_size))
+
+    def test_forward_uses_local_head_size_when_projection_has_no_output_size(self):
+        class IdentityProjection(nn.Module):
+            def forward(self, value):
+                return value, None
+
+        fallback_v_head_dim = 96
+        tp_size = 2
+        local_num_heads = self.num_heads // tp_size
+        self.mock_mla_modules.o_proj = IdentityProjection()
+        mock_vllm_config = MagicMock(spec=VllmConfig)
+        mock_vllm_config.model_config.hf_text_config = MagicMock(
+            num_hidden_layers=32,
+            first_k_dense_replace=False,
+        )
+        mock_vllm_config.compilation_config = CompilationConfig()
+        mock_mla_attn = MagicMock()
+        mock_mla_attn.process_weights_after_loading = MagicMock()
+        mock_mla_attn.impl = MagicMock()
+        mock_mla_attn.impl.process_weights_after_loading = MagicMock()
+
+        with (
+            patch("vllm_ascend.ops.mla.get_tensor_model_parallel_world_size", return_value=tp_size),
+            patch("vllm_ascend.ops.mla.get_current_vllm_config", return_value=mock_vllm_config),
+            patch("vllm_ascend.ops.mla.IndexerWrapper"),
+            patch("vllm_ascend.ops.mla.AscendMLAAttention", return_value=mock_mla_attn),
+            patch("vllm_ascend.ops.mla.torch.ops.vllm.mla_forward") as mla_forward,
+        ):
+            attn = AscendMultiHeadLatentAttention(
+                hidden_size=self.hidden_size,
+                num_heads=local_num_heads,
+                scale=self.scale,
+                qk_nope_head_dim=self.qk_nope_head_dim,
+                qk_rope_head_dim=self.qk_rope_head_dim,
+                v_head_dim=fallback_v_head_dim,
+                q_lora_rank=self.q_lora_rank,
+                kv_lora_rank=self.kv_lora_rank,
+                mla_modules=self.mock_mla_modules,
+                cache_config=self.mock_cache_config,
+                quant_config=self.mock_quant_config,
+                prefix=self.prefix,
+            )
+            output = attn.forward(torch.arange(3), torch.randn(3, self.hidden_size))
+
+        expected_output_size = local_num_heads * fallback_v_head_dim
+        self.assertEqual(attn.output_size, expected_output_size)
+        self.assertEqual(output.shape, (3, expected_output_size))
+        self.assertEqual(mla_forward.call_args.args[1].shape, (3, expected_output_size))
 
     def test_skip_topk_property_forwards_to_impl(self):
         """The proposer's set_skip_topk must reach the impl that gates the indexer."""

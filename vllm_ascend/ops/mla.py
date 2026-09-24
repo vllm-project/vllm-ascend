@@ -185,6 +185,9 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         nn.Module.__init__(self)
         self.hidden_size = hidden_size
         self.output_token_shard_size = 1
+        # A tuple-returning identity leaves the dense projection outside the
+        # wrapper, so its output keeps the local attention-head width.
+        self.output_size = getattr(mla_modules.o_proj, "output_size", num_heads * v_head_dim)
         self.kv_lora_rank = kv_lora_rank
         self.qk_rope_head_dim = qk_rope_head_dim
         self.q_lora_rank = q_lora_rank
@@ -273,7 +276,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         kv_cache: torch.Tensor | None = None,
         attn_metadata: AttentionMetadata | None = None,
     ) -> torch.Tensor:
-        hidden_dim = self.hidden_size
+        hidden_dim = self.output_size
         num_output_tokens = (hidden_states.shape[0] + self.output_token_shard_size - 1) // self.output_token_shard_size
         output = torch.empty((num_output_tokens, hidden_dim), dtype=hidden_states.dtype, device=hidden_states.device)
 
