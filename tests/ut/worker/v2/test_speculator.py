@@ -94,6 +94,7 @@ def test_maybe_remove_d2t_for_non_eagle3():
     speculator._maybe_remove_d2t(draft_model)
     assert draft_model.draft_id_to_target_id is mapping
 
+
 def test_draft_prefill_attn_groups():
     speculator = AscendAutoRegressiveSpeculator.__new__(AscendAutoRegressiveSpeculator)
     speculator.attn_groups = object()
@@ -211,6 +212,7 @@ def test_multi_step_decode_non_full_graph():
     with patch.object(AutoRegressiveSpeculator, "_multi_step_decode") as parent_decode:
         speculator._multi_step_decode(2, False, batch_desc, None, seq_lens_cpu_upper_bound)
     parent_decode.assert_called_once_with(2, False, batch_desc, None, seq_lens_cpu_upper_bound)
+
 
 def test_prefill_filters_target_only_metadata():
     speculator = AscendAutoRegressiveSpeculator.__new__(AscendAutoRegressiveSpeculator)
@@ -466,6 +468,7 @@ def test_set_attn_detects_architecture():
         assert speculator.attn_backend is backend
         assert speculator.attn_architecture == expected
 
+
 def test_capture_single_step_only_captures_prefill():
     speculator = AscendAutoRegressiveSpeculator.__new__(AscendAutoRegressiveSpeculator)
     speculator.last_token_indices = MagicMock()
@@ -639,19 +642,19 @@ def test_update_decode_attn_metadata_mla_with_dcp():
     dcp_manager.prepare_dcp_local_seq_lens_cpu.assert_called_once()
     prepare_args = dcp_manager.prepare_dcp_local_seq_lens_cpu.call_args.args
     torch.testing.assert_close(prepare_args[0], expected)
-    
+
     assert decode_metadata.seq_lens_list == [11, 21, 0]
     assert decode_metadata.actual_seq_lengths_q == [1, 2, 3]
-    
+
     decode_metadata.update_dcp_seq_lens_cpu.assert_called_once()
     update_args = decode_metadata.update_dcp_seq_lens_cpu.call_args.args
     update_kwargs = decode_metadata.update_dcp_seq_lens_cpu.call_args.kwargs
-    
+
     torch.testing.assert_close(update_args[0], expected)
     torch.testing.assert_close(update_args[1], local_seq_lens)
     torch.testing.assert_close(update_args[2], torch.ones_like(expected))
     assert update_kwargs["dcp_size"] == 2
     assert update_kwargs["dcp_rank"] == 1
     assert update_kwargs["cp_kv_cache_interleave_size"] == 1
-    
+
     assert torch.equal(metadata.seq_lens_cpu, expected)

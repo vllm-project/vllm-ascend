@@ -128,6 +128,7 @@ def test_run_fullgraph_uses_legacy_graph():
     )
     manager._updatable_graph_replay.assert_not_called()
 
+
 def test_capture_draft_prefill_delegates_to_parent():
     manager = AutoRegressiveAclGraphManager.__new__(AutoRegressiveAclGraphManager)
     manager.speculator = object()
