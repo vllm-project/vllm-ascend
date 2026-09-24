@@ -191,6 +191,17 @@ class AscendConfig:
             "MiniMax M3 does not support enable_fused_mc2=1. Please set "
             "additional_config.enable_fused_mc2 to 0 or unset VLLM_ASCEND_ENABLE_FUSED_MC2."
         )
+        speculative_config = getattr(vllm_config, "speculative_config", None)
+        if (
+            self.enable_fused_mc2 == 1
+            and speculative_config is not None
+            and getattr(speculative_config, "num_speculative_tokens", 0) > 0
+        ):
+            self.enable_fused_mc2 = 0
+            logger.warning_once(
+                "Fused MC2 dispatch_ffn_combine is not supported with speculative decoding; "
+                "VLLM_ASCEND_ENABLE_FUSED_MC2 will be set to 0."
+            )
         if self.enable_fused_mc2 == 1 and self.multistream_overlap_shared_expert:
             self.multistream_overlap_shared_expert = False
             logger.warning_once(
