@@ -3,9 +3,15 @@
 
 """CPU building blocks for the STAIR EPLB policy."""
 
+import os
+import socket
+import subprocess
+import sys
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from heapq import heapify, heappop, heappush
+from pathlib import Path
+from typing import BinaryIO
 
 import numpy as np
 import torch
@@ -14,8 +20,16 @@ from vllm.distributed.eplb.policy import AbstractEplbPolicy
 from vllm_ascend.ascend_config import StairConfig
 from vllm_ascend.distributed.eplb.layer_sharding import all_gather_layer_shards, assigned_layer_ids
 from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
+from vllm_ascend.distributed.eplb.policy._stair_process import receive_planner_response, send_planner_request
 
 _MEAN_RATIO_TIE_TOLERANCE = 1e-9
+_PLANNER_THREAD_ENV = {
+    "OMP_NUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+    "NUMEXPR_NUM_THREADS": "1",
+}
+_PLANNER_SHUTDOWN_TIMEOUT_SECONDS = 1.0
 
 
 @dataclass(frozen=True)
@@ -87,6 +101,116 @@ class StairEplbPolicy(AbstractEplbPolicy):
 
     def __init__(self, config: StairConfig) -> None:
         self.config = config
+        self._planner_process: subprocess.Popen[bytes] | None = None
+        self._planner_socket: socket.socket | None = None
+        self._planner_stream: BinaryIO | None = None
+
+    def _start_planner_process(self) -> None:
+        process = self._planner_process
+        if process is not None and process.poll() is None:
+            return
+        self._stop_planner_process()
+
+        parent_socket, child_socket = socket.socketpair()
+        environment = os.environ.copy()
+        environment.update(_PLANNER_THREAD_ENV)
+        try:
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    str(Path(__file__).with_name("_stair_process.py")),
+                    str(child_socket.fileno()),
+                ],
+                pass_fds=(child_socket.fileno(),),
+                close_fds=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                env=environment,
+            )
+        except Exception:
+            parent_socket.close()
+            child_socket.close()
+            raise
+        child_socket.close()
+        self._planner_process = process
+        self._planner_socket = parent_socket
+        self._planner_stream = parent_socket.makefile("rwb")
+
+    def _stop_planner_process(self) -> None:
+        stream = getattr(self, "_planner_stream", None)
+        planner_socket = getattr(self, "_planner_socket", None)
+        process = getattr(self, "_planner_process", None)
+        self._planner_stream = None
+        self._planner_socket = None
+        self._planner_process = None
+
+        if stream is not None:
+            stream.close()
+        if planner_socket is not None:
+            planner_socket.close()
+        if process is None:
+            return
+        try:
+            process.wait(timeout=_PLANNER_SHUTDOWN_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            process.terminate()
+            try:
+                process.wait(timeout=_PLANNER_SHUTDOWN_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+        if process.stderr is not None:
+            process.stderr.close()
+
+    def _planner_exit_details(self) -> str:
+        process = self._planner_process
+        if process is None or process.poll() is None or process.stderr is None:
+            return ""
+        return process.stderr.read().decode(errors="replace").strip()
+
+    def _plan_in_subprocess(
+        self,
+        logical_load_values: np.ndarray,
+        current_rank_expert_ids: np.ndarray,
+        last_committed_mean_ratios: np.ndarray,
+        rank_node_ids: np.ndarray,
+        config: StairConfig,
+        layer_ids: Sequence[int] | None = None,
+        sample_counts: np.ndarray | None = None,
+    ) -> StairPlan:
+        """Run one CPU plan in STAIR's persistent subprocess."""
+        self._start_planner_process()
+        stream = self._planner_stream
+        if stream is None:
+            raise RuntimeError("STAIR planner subprocess did not provide a socket")
+        try:
+            send_planner_request(
+                stream,
+                (
+                    logical_load_values,
+                    current_rank_expert_ids,
+                    last_committed_mean_ratios,
+                    rank_node_ids,
+                    asdict(config),
+                    layer_ids,
+                    sample_counts,
+                ),
+            )
+            remote_error_type, remote_error, plan_fields = receive_planner_response(stream)
+        except (EOFError, OSError, TypeError, ValueError) as error:
+            details = self._planner_exit_details()
+            self._stop_planner_process()
+            message = "STAIR planner subprocess terminated unexpectedly"
+            if details:
+                message += f": {details}"
+            raise RuntimeError(message) from error
+        if remote_error is not None:
+            error_class = ValueError if remote_error_type == "ValueError" else RuntimeError
+            raise error_class(f"STAIR planner subprocess failed:\n{remote_error.rstrip()}")
+        if plan_fields is None:
+            raise RuntimeError("STAIR planner subprocess returned no plan")
+        return StairPlan(*plan_fields)
 
     @staticmethod
     def _load_bin_boundaries(num_samples: int, max_bins: int) -> tuple[np.ndarray, np.ndarray]:
