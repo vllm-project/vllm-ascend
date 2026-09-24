@@ -362,7 +362,6 @@ class AscendConfig:
             "mlapo_keep_prefill_weights": false,
             "msmonitor_use_daemon": false,
             "enable_transpose_kv_cache_by_block": true,
-            "block_table_no_commit_optimize": 0,
             "weight_nz_mode": 1,
             "enable_shared_expert_dp": false,
             "enable_sparse_sfa_c8": false,
@@ -526,8 +525,6 @@ class AscendConfig:
     mlapo_keep_prefill_weights: bool = False
     msmonitor_use_daemon: bool = False
     enable_transpose_kv_cache_by_block: bool = True
-    # MRv1 only: 0 uses dirty-range commits; 1 restores a full-table H2D copy.
-    block_table_no_commit_optimize: Literal[0, 1] = 0
     weight_nz_mode: int = 1
 
     # ---- sub-configs (no vllm_config dep): pydantic dict→dataclass coercion ----
