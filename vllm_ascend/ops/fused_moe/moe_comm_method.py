@@ -347,7 +347,7 @@ class FusedMC2CommImpl(MoECommMethod):
         self._mega_moe_symm_buffer = self.get_symm_buffer_for_mega_moe(
             group,
             num_experts,
-            num_max_tokens_per_rank,
+            4096,
             num_topk,
             hidden=self.moe_config.hidden_dim,
             intermediate_hidden=2 * self.moe_config.intermediate_size_per_partition,

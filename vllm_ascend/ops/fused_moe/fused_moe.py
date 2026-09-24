@@ -36,7 +36,7 @@ from vllm.model_executor.layers.fused_moe.layer import (
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import UnquantizedFusedMoEMethod
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, _MEGA_MOE_SUPPORTED, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
@@ -137,23 +137,26 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(1, 2).contiguous()
         layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
 
-        # TODO: Current dispatch_ffn_combine/mega_moe fusion operator ONLY supports NZ format.
-        # Therefore, we must cast weights to NZ when fusion is enabled.
-        # Once the underlying dispatch_ffn_combine/mega_moe operator is updated to support
-        # ND format (or other formats), remove this specific 'if' check and the forced
-        # npu_format_cast. At that point, the operator should be able to handle weights
-        # in their native format without explicit casting here.
+        # NOTE: For the MegaMoe path (_MEGA_MOE_SUPPORTED), the operator's
+        # tiling check requires FORMAT_ND for BF16/FP16 weights; FRACTAL_NZ is
+        # only accepted for INT8/INT4 quantized weights. Unquantized weights
+        # therefore stay in their native ND layout. The legacy
+        # dispatch_ffn_combine fallback still expects FRACTAL_NZ.
         enable_fused_mc2 = get_ascend_config().enable_fused_mc2
-        if enable_fused_mc2:
+        if enable_fused_mc2 and not _MEGA_MOE_SUPPORTED:
             layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
             layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
-            if enable_fused_mc2 == 1 and self.dynamic_eplb:
-                layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
-                layer.w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
-                del layer.w13_weight
-                del layer.w2_weight
-                torch.npu.empty_cache()
-        else:
+        if enable_fused_mc2 == 1 and _MEGA_MOE_SUPPORTED:
+            # MegaMoe consumes per-expert 2D tensors ([hidden, N] each); split
+            # the packed [E, hidden, N] parameter into per-expert lists.
+            layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
+            layer.w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
+            torch.npu.empty_cache()
+        elif enable_fused_mc2 == 1 and self.dynamic_eplb:
+            layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
+            layer.w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
+            torch.npu.empty_cache()
+        if not enable_fused_mc2:
             layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
             layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
 
@@ -266,9 +269,9 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w1_scale_bias = [torch.tensor([], dtype=torch.float32)]
             w2_scale_bias = [torch.tensor([], dtype=torch.float32)]
         else:
-            w1 = w13_weight_list if isinstance(w13_weight_list, list) else layer.w13_weight
+            w1 = layer.w13_weight
             w1_scale = None
-            w2 = w2_weight_list if isinstance(w2_weight_list, list) else layer.w2_weight
+            w2 = layer.w2_weight
             w2_scale = None
             w1_scale_bias = None
             w2_scale_bias = None

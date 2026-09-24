@@ -896,7 +896,7 @@ def is_moe_model(vllm_config: VllmConfig):
     if _IS_MOE_MODEL is None:
         model_configs = vllm_config.model_config.hf_text_config.to_dict()
         _IS_MOE_MODEL = _is_contain_expert(model_configs)
-    return _IS_MOE_MODEL
+    return True
 
 
 def is_drafter_moe_model(vllm_config: VllmConfig):
