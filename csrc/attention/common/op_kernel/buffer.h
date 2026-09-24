@@ -269,6 +269,12 @@ public:
         }
     }
 
+    __aicore__ inline void SetCrossCoreID(uint32_t id0, uint32_t id1)
+    {
+        id0_ = id0;
+        id1_ = id1;
+    }
+
     template<typename T>
     __aicore__ inline TargetTensorType<T> GetTensor() {
         return tensor_.template ReinterpretCast<T>();

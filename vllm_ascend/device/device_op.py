@@ -1335,6 +1335,11 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 q_li_scale = q_li_scale.view(q_li_shape_ori[:-1])
                 key_dequant_scale = kv_cache[indexer_scale_cache_idx].squeeze(2)
 
+                # The INT8 QuantLightningIndexer signature requires FP16
+                # weights. Keep the FP8 path's original weights dtype.
+                if q_li.dtype == torch.int8:
+                    weights = weights.to(torch.float16)
+
                 topk_indices = torch_npu.npu_quant_lightning_indexer(
                     query=q_li.view(q_li_shape_ori),
                     key=kv_cache[indexer_cache_idx],
