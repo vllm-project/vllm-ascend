@@ -43,11 +43,11 @@ class AscendEPLBController(EPLBController):
         ascend_eplb_config: EplbConfig | None = None,
     ) -> None:
         super().__init__(parallel_config, device)
-        self.load_collection_phase = "all" if ascend_eplb_config is None else ascend_eplb_config.load_collection_phase
-        self.eplb_policy = (
-            None
-            if ascend_eplb_config is None
-            else create_eplb_policy(parallel_config.eplb_config.policy, ascend_eplb_config.stair_config)
+        ascend_eplb_config = ascend_eplb_config or EplbConfig()
+        self.load_collection_phase = ascend_eplb_config.load_collection_phase
+        self.eplb_policy = create_eplb_policy(
+            parallel_config.eplb_config.policy,
+            ascend_eplb_config.stair_config,
         )
         self._load_collection_phase_matched = True
 

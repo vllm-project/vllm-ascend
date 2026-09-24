@@ -8,6 +8,8 @@ from unittest.mock import MagicMock, patch
 import torch
 from vllm.distributed.eplb.policy import DefaultEplbPolicy
 
+from vllm_ascend.ascend_config import EplbConfig
+from vllm_ascend.distributed.eplb.policy.stair import StairEplbPolicy
 from vllm_ascend.distributed.eplb.state import AscendEplbState
 from vllm_ascend.worker.v2.eplb import (
     AscendEPLBController,
@@ -50,7 +52,9 @@ class TestEplbLoadCollectionPhase(unittest.TestCase):
         controller = AscendEPLBController(
             parallel_config,
             torch.device("cpu"),
-            load_collection_phase=load_collection_phase,
+            ascend_eplb_config=EplbConfig(
+                load_collection_phase=load_collection_phase,
+            ),
         )
         controller._has_registered_models = True
         return controller
@@ -65,6 +69,7 @@ class TestEplbLoadCollectionPhase(unittest.TestCase):
             controller.prepare_load()
 
         self.assertIsInstance(controller.state, AscendEplbState)
+        self.assertIs(controller.state.policy, controller.eplb_policy)
 
     def test_policy_selection_uses_upstream_config(self):
         default_controller = self._make_controller(policy="default")
@@ -92,6 +97,7 @@ class TestEplbLoadCollectionPhase(unittest.TestCase):
             device=controller.device,
             parallel_config=controller.parallel_config,
             expanded_physical_to_logical=mapping,
+            policy=controller.eplb_policy,
         )
         self.assertIs(controller.state, state)
         self.assertTrue(controller._has_registered_models)
@@ -116,6 +122,7 @@ class TestEplbLoadCollectionPhase(unittest.TestCase):
             parallel_config=controller.parallel_config,
             expanded_physical_to_logical=mapping,
             num_valid_physical_experts=1,
+            policy=controller.eplb_policy,
         )
         self.assertIs(controller.state, state)
         self.assertTrue(controller._has_registered_models)
@@ -133,9 +140,11 @@ class TestEplbLoadCollectionPhase(unittest.TestCase):
 
                 controller.prepare_forward(object(), 7)
 
-                state.prepare_forward.assert_called_once()
+                state.prepare_forward.assert_not_called()
                 state._should_record_current_step.assert_called_once_with(log_stats=False)
                 self.assertIs(bool(state.should_record_tensor), expected_record)
+                self.assertTrue(state._is_load_sampling_step)
+                self.assertIs(state._should_collect_local_load, expected_record)
                 self.assertIs(state._has_fresh_recorded_load, expected_record)
 
 

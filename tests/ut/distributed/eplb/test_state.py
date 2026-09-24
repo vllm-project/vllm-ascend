@@ -172,7 +172,9 @@ def test_from_mapping_refreshes_final_mapping(monkeypatch):
         model=object(),
         model_config=object(),
         device=torch.device("cpu"),
-        parallel_config=object(),
+        parallel_config=SimpleNamespace(
+            eplb_config=SimpleNamespace(policy="default"),
+        ),
         expanded_physical_to_logical=torch.zeros(1),
     )
 
@@ -210,7 +212,9 @@ def test_from_mapping_forwards_release_valid_expert_count(monkeypatch):
         model=object(),
         model_config=object(),
         device=torch.device("cpu"),
-        parallel_config=object(),
+        parallel_config=SimpleNamespace(
+            eplb_config=SimpleNamespace(policy="default"),
+        ),
         expanded_physical_to_logical=torch.zeros((1, 2)),
         num_valid_physical_experts=1,
     )
