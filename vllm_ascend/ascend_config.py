@@ -797,10 +797,14 @@ class AscendConfig:
             self._sparse_li_c8_layer_ids,
             self._sparse_li_c8_layer_names,
         ) = self._parse_sparse_li_layers_from_quant_config(quant_config, ("INT8_DYNAMIC", "W8A8_MXFP8"))
+        # Projection weights may be W8A8 even when the indexer KV cache uses
+        # the C4 (MXFP4) path.
         (
             self._sparse_li_c4_layer_ids,
             self._sparse_li_c4_layer_names,
-        ) = self._parse_sparse_li_layers_from_quant_config(quant_config, ("W4A4_MXFP4",))
+        ) = self._parse_sparse_li_layers_from_quant_config(
+            quant_config, ("W4A4_MXFP4", "W8A8_MXFP8")
+        )
         sparse_li_filter_enabled = self._has_sparse_li_layer_config(quant_config)
         self._sparse_li_c8_layer_filter_enabled = sparse_li_filter_enabled
         self._sparse_li_c4_layer_filter_enabled = sparse_li_filter_enabled

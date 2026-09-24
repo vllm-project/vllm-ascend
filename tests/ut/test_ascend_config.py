@@ -1457,6 +1457,26 @@ class TestTopLevelSwitchTypeValidation(TestBase):
     @_clean_up
     @patch("vllm_ascend.utils.model_uses_sfa_sparse", return_value=True)
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_sparse_li_c4_accepts_w8a8_indexer_projection_weight(self, mock_fix, mock_sparse):
+        vc = VllmConfig()
+        vc.additional_config = {"enable_sparse_li_c4": True}
+        vc.attention_config.indexer_kv_dtype = "mxfp4"
+        vc.quant_config = SimpleNamespace(
+            quant_description={
+                "model.layers.0.self_attn.indexer.wq_b.weight": "W8A8_MXFP8",
+                "model.layers.1.self_attn.indexer.wq_b.weight": "FLOAT",
+            }
+        )
+
+        config = init_ascend_config(vc)
+
+        self.assertTrue(config.enable_sparse_li_c4)
+        self.assertTrue(config.is_sparse_li_c4_layer("model.layers.0.self_attn.indexer.k_cache"))
+        self.assertFalse(config.is_sparse_li_c4_layer("model.layers.1.self_attn.indexer.k_cache"))
+
+    @_clean_up
+    @patch("vllm_ascend.utils.model_uses_sfa_sparse", return_value=True)
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_sparse_sfa_user_input_is_derived_on_factory_path(self, mock_fix, mock_sparse):
         vc = VllmConfig()
         # enable_sparse_sfa_c8 is derived from cache_dtype (see
