@@ -21,8 +21,13 @@ def test_init_draft_prefill_graph():
     with (
         patch.object(SpeculatorCudaGraphManager, "__init__", _parent_init),
         patch.object(SpeculatorCudaGraphManager, "needs_capture", return_value=True),
-        patch("vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.collect_sorted_captured_token_sizes", return_value=[4, 8]),
-        patch("vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.set_draft_graph_prefill_params") as set_prefill,
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.collect_sorted_captured_token_sizes",
+            return_value=[4, 8],
+        ),
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.set_draft_graph_prefill_params"
+        ) as set_prefill,
         patch("vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.set_draft_graph_params") as set_decode,
     ):
         manager = AutoRegressiveAclGraphManager(object(), torch.device("cpu"), CUDAGraphMode.FULL, decode_query_len=2)
@@ -37,8 +42,13 @@ def test_init_draft_decode_graph():
     with (
         patch.object(SpeculatorCudaGraphManager, "__init__", _parent_init),
         patch.object(SpeculatorCudaGraphManager, "needs_capture", return_value=True),
-        patch("vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.collect_sorted_captured_token_sizes", return_value=[4, 8]),
-        patch("vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.set_draft_graph_prefill_params") as set_prefill,
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.collect_sorted_captured_token_sizes",
+            return_value=[4, 8],
+        ),
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.set_draft_graph_prefill_params"
+        ) as set_prefill,
         patch("vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.set_draft_graph_params") as set_decode,
     ):
         manager = AutoRegressiveAclGraphManager(object(), torch.device("cpu"), CUDAGraphMode.FULL, decode_query_len=1)
@@ -92,8 +102,14 @@ def test_capture_draft_prefill_delegates_to_parent():
     attn_groups = object()
     kv_cache_config = object()
     with (
-        patch("vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.communicator_switch", return_value=nullcontext()),
-        patch("vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.model_capture_wrapper", return_value=nullcontext()),
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.communicator_switch",
+            return_value=nullcontext(),
+        ),
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.model_capture_wrapper",
+            return_value=nullcontext(),
+        ),
         patch.object(SpeculatorCudaGraphManager, "capture") as parent_capture,
     ):
         manager.capture(forward_fn, model_state, input_buffers, block_tables, attn_groups, kv_cache_config)
@@ -127,10 +143,19 @@ def test_capture_draft_decode_prepares_inputs_and_runs_forward():
         runner(CUDAGraphMode.FULL)
 
     with (
-        patch("vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.communicator_switch", return_value=nullcontext()),
-        patch("vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.model_capture_wrapper", return_value=nullcontext()),
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.communicator_switch",
+            return_value=nullcontext(),
+        ),
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.model_capture_wrapper",
+            return_value=nullcontext(),
+        ),
         patch("vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.prepare_inputs_to_capture") as prepare_inputs,
-        patch("vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.CudaGraphManager.capture", side_effect=capture_side_effect),
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.CudaGraphManager.capture",
+            side_effect=capture_side_effect,
+        ),
     ):
         manager.capture(forward_fn, model_state, input_buffers, block_tables, attn_groups, kv_cache_config)
 
@@ -174,11 +199,23 @@ def test_graph_replay_updates_full_graph_params():
     extra_ctx = SimpleNamespace()
 
     with (
-        patch("vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.torch.npu.current_stream", return_value=current_stream),
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.torch.npu.current_stream",
+            return_value=current_stream,
+        ),
         patch.object(SpeculatorCudaGraphManager, "run_fullgraph", return_value="result") as parent_replay,
-        patch("vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.set_current_vllm_config", return_value=nullcontext()),
-        patch("vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.set_forward_context", return_value=nullcontext()),
-        patch("vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.get_forward_context", return_value=forward_context),
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.set_current_vllm_config",
+            return_value=nullcontext(),
+        ),
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.set_forward_context",
+            return_value=nullcontext(),
+        ),
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.get_forward_context",
+            return_value=forward_context,
+        ),
         patch("vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph._EXTRA_CTX", extra_ctx),
         patch("vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.update_full_graph_params") as update_params,
     ):
@@ -217,8 +254,14 @@ def test_updatable_graph_replay_updates_resolved_tasks():
     current_stream = object()
 
     with (
-        patch("vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.SharedSource", return_value=source) as shared_source,
-        patch("vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.torch.npu.current_stream", return_value=current_stream),
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.SharedSource",
+            return_value=source,
+        ) as shared_source,
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.torch.npu.current_stream",
+            return_value=current_stream,
+        ),
         patch.object(SpeculatorCudaGraphManager, "run_fullgraph", return_value="result") as parent_replay,
     ):
         result = manager._updatable_graph_replay(desc)
