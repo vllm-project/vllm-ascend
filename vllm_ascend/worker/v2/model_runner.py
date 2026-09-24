@@ -161,6 +161,11 @@ class NPUModelRunner(GPUModelRunner):
             vocab_size=self.vocab_size,
             device=self.device,
         )
+        # The PP token-broadcast skip patch reads per-request length caps
+        # through this reference. Every rank builds it from the same request
+        # stream, so all PP ranks reach the same skip verdict.
+        if getattr(self, "pp_handler", None) is not None:
+            self.pp_handler.ascend_request_states = self.req_states
         if self.use_spec_pp and vllm_version_is("0.28.0"):
             from vllm_ascend.patch.worker.patch_v2.patch_spec_pp import (
                 install_spec_pp_token_broadcast,
