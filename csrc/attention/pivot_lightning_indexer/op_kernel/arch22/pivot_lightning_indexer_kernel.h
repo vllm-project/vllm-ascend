@@ -58,7 +58,7 @@ public:
                                 __gm__ uint8_t *actualSeqLengthsQ, __gm__ uint8_t *actualSeqLengths,
                                 __gm__ uint8_t *blockTable, __gm__ uint8_t *sparseIndices, __gm__ uint8_t *sparseValues,
                                 __gm__ uint8_t *workspace, const PivotLITilingData *__restrict tiling, TPipe *tPipe,
-                                uint32_t pivotInputRows = 0, uint32_t pivotDenseRows = 0);
+                                __gm__ const PivotGroup *pivotGroups = nullptr);
     __aicore__ inline void Process();
 
     // =================================类型定义区=================================
@@ -136,7 +136,8 @@ protected:
     __aicore__ inline void InitActualSeqLen(__gm__ uint8_t *actualSeqLengthsQ, __gm__ uint8_t *actualSeqLengths);
     // ================================Split Core================================
     __aicore__ inline void SplitCore(uint32_t curCoreIdx, uint32_t &coreNum, LICommon::SplitCoreInfo &info);
-    __aicore__ inline uint32_t GetS2BaseBlockNumOnMask(uint32_t s1gIdx, uint32_t actS1Size, uint32_t actS2Size);
+    __aicore__ inline uint32_t GetS2BaseBlockNumOnMask(uint32_t bIdx, uint32_t s1gIdx,
+                                                       uint32_t actS1Size, uint32_t actS2Size);
     __aicore__ inline uint32_t GetTotalBaseBlockNum();
     // ================================Process functions================================
     __aicore__ inline void ProcessMain();
@@ -242,8 +243,8 @@ __aicore__ inline void PivotLightningIndexerKernel<LIT>::GetS1S2ActualSeqLen(uin
 }
 
 template <typename LIT>
-__aicore__ inline uint32_t PivotLightningIndexerKernel<LIT>::GetS2BaseBlockNumOnMask(uint32_t s1gIdx, uint32_t actS1Size,
-                                                                   uint32_t actS2Size)
+__aicore__ inline uint32_t PivotLightningIndexerKernel<LIT>::GetS2BaseBlockNumOnMask(uint32_t bIdx, uint32_t s1gIdx,
+                                                                   uint32_t actS1Size, uint32_t actS2Size)
 {
     if (actS2Size == 0) {
         return 0;
@@ -253,8 +254,8 @@ __aicore__ inline uint32_t PivotLightningIndexerKernel<LIT>::GetS2BaseBlockNumOn
     int32_t validS2Len = s1Offset + validS2LenBase + constInfo.s1BaseSize;
     if constexpr (LIT::pivotReuse) {
         uint32_t lastRow = Min(s1Offset + constInfo.s1BaseSize, actS1Size) - 1;
-        validS2Len = static_cast<int32_t>(actS2Size) - constInfo.pivotInputRows +
-                    LICommon::PivotSourceRow(constInfo, lastRow) + 1;
+        uint32_t base = bIdx == 0 ? 0 : actualSeqLengthsGmQ.GetValue(bIdx - 1);
+        validS2Len = constInfo.pivotGroups[base + lastRow].visibleKeys;
     }
     validS2Len = Min(validS2Len, static_cast<int32_t>(actS2Size));
     validS2Len = Max(validS2Len, 1);
@@ -280,7 +281,7 @@ __aicore__ inline uint32_t PivotLightningIndexerKernel<LIT>::GetTotalBaseBlockNu
         for (uint32_t s1gIdx = 0; s1gIdx < s1GBaseNum; s1gIdx++) {
             s2BaseNum = constInfo.isSparseCountOver2K
                       ? (actS2Size > 0 ? 1 : 0)
-                      : GetS2BaseBlockNumOnMask(s1gIdx, actS1Size, actS2Size);
+                      : GetS2BaseBlockNumOnMask(bIdx, s1gIdx, actS1Size, actS2Size);
             totalBlockNum += s2BaseNum * constInfo.kHeadNum;
         }
     }
@@ -321,7 +322,7 @@ __aicore__ void inline PivotLightningIndexerKernel<LIT>::SplitCore(uint32_t curC
         }
         for (uint32_t gS1Idx = 0; gS1Idx < s1GBaseNum; gS1Idx++) {
             if (constInfo.attenMaskFlag) {
-                s2BaseNum = GetS2BaseBlockNumOnMask(gS1Idx, actS1Size, actS2Size);
+                s2BaseNum = GetS2BaseBlockNumOnMask(bIdx, gS1Idx, actS1Size, actS2Size);
             }
             if (findLastCoreEnd && s2BaseNum == 0U) {
                 info.bN2Start = bN2Idx;
@@ -406,7 +407,7 @@ __aicore__ inline void PivotLightningIndexerKernel<LIT>::Init(__gm__ uint8_t *qu
                                             __gm__ uint8_t *blockTable, __gm__ uint8_t *sparseIndices,
                                             __gm__ uint8_t *sparseValues,
                                             __gm__ uint8_t *workspace, const PivotLITilingData *__restrict tiling,
-                                            TPipe *tPipe, uint32_t pivotInputRows, uint32_t pivotDenseRows)
+                                            TPipe *tPipe, __gm__ const PivotGroup *pivotGroups)
 {
     if ASCEND_IS_AIV {
         tmpBlockIdx = GetBlockIdx(); // vec:0-47
@@ -417,8 +418,7 @@ __aicore__ inline void PivotLightningIndexerKernel<LIT>::Init(__gm__ uint8_t *qu
     }
 
     InitTilingData(tiling);
-    constInfo.pivotInputRows = pivotInputRows;
-    constInfo.pivotDenseRows = pivotDenseRows;
+    constInfo.pivotGroups = pivotGroups;
     InitActualSeqLen(actualSeqLengthsQ, actualSeqLengths);
 
     // 计算分核
@@ -485,7 +485,8 @@ __aicore__ inline void PivotLightningIndexerKernel<LIT>::CalcS2LoopParams(uint32
     bool isEnd = (bN2LoopIdx == splitCoreInfo.bN2End) && (gS1LoopIdx == splitCoreInfo.gS1End);
     uint32_t s2BlockNum;
     if (constInfo.attenMaskFlag) {
-        s2BlockNum = GetS2BaseBlockNumOnMask(gS1LoopIdx, tempLoopInfo.actS1Size, tempLoopInfo.actS2Size);
+        s2BlockNum = GetS2BaseBlockNumOnMask(tempLoopInfo.bIdx, gS1LoopIdx,
+                                            tempLoopInfo.actS1Size, tempLoopInfo.actS2Size);
     } else {
         s2BlockNum = (tempLoopInfo.actS2Size + constInfo.s2BaseSize - 1) / constInfo.s2BaseSize;
     }

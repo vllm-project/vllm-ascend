@@ -14,6 +14,7 @@
  */
 
 #include "pivot_lightning_indexer_tiling.h"
+#include "../op_kernel/pivot_lightning_indexer_pivot_geometry.h"
 #include "../op_kernel/pivot_lightning_indexer_template_tiling_key.h"
 
 using namespace ge;
@@ -755,16 +756,7 @@ ge::graphStatus PivotLightningIndexerTiling::DoTiling(PivotLITilingInfo *tilingI
     constexpr uint32_t V1_DECODE_DATA_NUM = 2;        // Decode每个核需要存储头和尾部两块数据
     constexpr uint32_t S1_BASE_SIZE = 8;              // S1轴基本块的大小
     constexpr uint32_t TOPK_MAX_SIZE = 2048;          // TopK选取个数
-    // The reuse path packs one 4096-element query row and 32 weights per
-    // input row. Keep the regular LightningIndexer workspace after this
-    // private, 512-byte-aligned prefix.
-    constexpr uint64_t QUERY_ELEMENTS_PER_ROW = 4096;
-    constexpr uint64_t PACKED_BYTES_PER_ROW = 8192 + 128;
-    constexpr uint64_t WORKSPACE_ALIGNMENT = 512;
-    uint64_t pivotRows = context_->GetInputShape(0)->GetStorageShape().GetShapeSize() / QUERY_ELEMENTS_PER_ROW;
-    uint64_t pivotWorkspace =
-        (pivotRows * PACKED_BYTES_PER_ROW + WORKSPACE_ALIGNMENT - 1) / WORKSPACE_ALIGNMENT * WORKSPACE_ALIGNMENT;
-    uint64_t workspaceSize = ascendcPlatform.GetLibApiWorkSpaceSize() + pivotWorkspace;
+    uint64_t workspaceSize = ascendcPlatform.GetLibApiWorkSpaceSize();
     // 主流程需Workspace大小
     if (ascendcPlatform.GetCurNpuArch() == NpuArch::DAV_3510) {
         constexpr uint32_t s1BaseSize = 4;
@@ -781,6 +773,14 @@ ge::graphStatus PivotLightningIndexerTiling::DoTiling(PivotLITilingInfo *tilingI
         // 临时存储Decode中间参数信息大小: 2(头/尾)*8(s1Base)*16(paramNum)*sizeof(int64_t)*24=48k
         workspaceSize +=
             V1_DECODE_DATA_NUM * S1_BASE_SIZE * V1_DECODE_PARAM_NUM * V1_DECODE_PARAM_ELEM_SIZE * aicNum;
+    }
+    if (ascendcPlatform.GetCurNpuArch() == NpuArch::DAV_2201 && tilingInfo->pageAttentionFlag &&
+        tilingInfo->gSize == 32 && tilingInfo->sparseCount == LICommon::PIVOT_TOPK &&
+        tilingInfo->sparseMode == 3 && !tilingInfo->returnValue &&
+        (tilingInfo->inputQLayout == PivotDataLayout::TND || tilingInfo->bSize == 1)) {
+        uint64_t rows = context_->GetInputShape(0)->GetStorageShape().GetShapeSize() /
+                        LICommon::PIVOT_QUERY_WIDTH;
+        workspaceSize += LICommon::PivotWorkspace(rows, tilingInfo->bSize).native;
     }
     size_t *workSpaces = context_->GetWorkspaceSizes(1);
     workSpaces[0] = workspaceSize;

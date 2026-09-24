@@ -95,10 +95,6 @@ private:
     TBuf<TPosition::VECCALC> reduceOutBuf_;
     TBuf<TPosition::VECCALC> brcBuf_;
     TBuf<TPosition::VECCALC> paramBuf_;
-    // PIVOT-Reuse only: the W forced window IDs for each of the <=4 rows a proxy
-    // group replicates to. Kept separate from outQueue_ so the scalar writes need
-    // no order against the vector pipe that filled it.
-    TBuf<TPosition::VECCALC> pivotLocalBuf_;
 
     // tmp buff for LD
     TBuf<> ldToBeMrgBuf_;
@@ -148,11 +144,6 @@ __aicore__ inline void PivotLightningIndexerServiceVector<LIT>::InitBuffers(TPip
     pipe->InitBuffer(reduceOutBuf_, s2BaseSize_ * 2 * sizeof(float));                          // 4KB
     pipe->InitBuffer(brcBuf_, groupInner_ * 8 * sizeof(float));
     pipe->InitBuffer(paramBuf_, LD_PARAM_NUM * sizeof(int64_t));
-    if constexpr (LIT::pivotReuse) {
-        // 4 rows x 8 strided slots x int32 = 128B. The stride (not W) sets the
-        // size: each row's block has to start on a 32B boundary for DataCopyPad.
-        pipe->InitBuffer(pivotLocalBuf_, 128);
-    }
 
     tmpUb_ = tmpBuf_.Get<float>();
     globalTopkIndice_ = indexBuf_.Get<int32_t>();
@@ -318,8 +309,8 @@ __aicore__ inline void PivotLightningIndexerServiceVector<LIT>::ProcessVec(const
     for (int innerS1Idx = 0; innerS1Idx < cuS1ProcNumPerAiv; innerS1Idx++) {
         if (constInfo_.attenMaskFlag) {
             if constexpr (LIT::pivotReuse) {
-                cuRealAcSeq = static_cast<int32_t>(info.actS2Size) - constInfo_.pivotInputRows +
-                    LICommon::PivotSourceRow(constInfo_, cuS1BeginIdxPerAiv + innerS1Idx) + 1;
+                uint64_t row = info.indiceOutOffset / constInfo_.sparseCount + cuS1BeginIdxPerAiv + innerS1Idx;
+                cuRealAcSeq = constInfo_.pivotGroups[row].visibleKeys;
             } else {
                 cuRealAcSeq += 1;
             }
@@ -453,59 +444,13 @@ __aicore__ inline void PivotLightningIndexerServiceVector<LIT>::ProcessVec(const
                     outQueue_.EnQue<float>(outValueUb);
                     outValueUb = outQueue_.DeQue<float>();
 
-                    int64_t copies = 1;
-                    int64_t rowOffset = info.indiceOutOffset + cuS1Idx * constInfo_.sparseCount;
-                    if constexpr (LIT::pivotReuse) {
-                        copies = LICommon::PivotRowCopies(constInfo_, cuS1Idx);
-                        rowOffset = LICommon::PivotSourceRow(constInfo_, cuS1Idx) * constInfo_.sparseCount;
-                    }
-                    if constexpr (LIT::pivotReuse) {
-                        // Each row's shared top-k is emitted as a head of
-                        // sparseCount - repeat ids plus a repeat-wide tail of forced
-                        // local ids living in their own scratch buffer. Row 0 has no
-                        // tail and falls back to the original single copy.
-                        LocalTensor<int32_t> pivotLocal = pivotLocalBuf_.Get<int32_t>();
-                        // Same causal length the loop above used for this row.
-                        int64_t firstRowLen = constInfo_.attenMaskFlag
-                            ? static_cast<int64_t>(info.actS2Size) - constInfo_.pivotInputRows +
-                              LICommon::PivotSourceRow(constInfo_, cuS1Idx) + 1
-                            : static_cast<int64_t>(info.actS2Size);
-                        int64_t pivotWidest = LICommon::PivotFillLocalWindows(constInfo_,
-                            copies, firstRowLen, constInfo_.attenMaskFlag, copyLen, pivotLocal);
-                        if (pivotWidest > 0) {
-                            // The fill above is scalar stores; the copy-out below reads
-                            // the same buffer over MTE3. One flag covers every row of
-                            // the group, since they are all filled before any DMA. It
-                            // sits here rather than in LICommon because that header
-                            // carries no AscendC includes and is reachable from
-                            // pivot_lightning_indexer.cpp before HardEvent is declared.
-                            SetWaitFlag<HardEvent::S_MTE3>(HardEvent::S_MTE3);
-                        }
-                        for (int64_t repeat = 0; repeat < copies; ++repeat) {
-                            int64_t dstOffset = rowOffset + repeat * constInfo_.sparseCount + i * offset;
-                            // Gated on the fill's result, not just on the width: a
-                            // sparseCount emitted in halves leaves the fill at 0
-                            // because the half's last columns are not the top-k's,
-                            // and splicing there would land in the wrong place.
-                            int64_t width = pivotWidest > 0
-                                ? LICommon::PivotWindowWidth(repeat, constInfo_.attenMaskFlag) : 0;
-                            LIServiceVec::CopyOut(indiceOutGm[dstOffset], idxULocal1, copyLen - width);
-                            if (width > 0) {
-                                LIServiceVec::CopyOut(indiceOutGm[dstOffset + copyLen - width],
-                                    pivotLocal[repeat * LICommon::PIVOT_LOCAL_WINDOW_STRIDE], width);
-                            }
-                            if (constInfo_.returnValue) {
-                                LIServiceVec::CopyOut(valueOutGm[dstOffset], valueULocal1, copyLen);
-                            }
-                        }
-                    } else {
-                        for (int64_t repeat = 0; repeat < copies; ++repeat) {
-                            int64_t dstOffset = rowOffset + repeat * constInfo_.sparseCount + i * offset;
-                            LIServiceVec::CopyOut(indiceOutGm[dstOffset], idxULocal1, copyLen);
-                            if (constInfo_.returnValue) {
-                                LIServiceVec::CopyOut(valueOutGm[dstOffset], valueULocal1, copyLen);
-                            }
-                        }
+                    LIServiceVec::CopyOut(indiceOutGm[info.indiceOutOffset + cuS1Idx *
+                                                         constInfo_.sparseCount + i * offset],
+                                         idxULocal1, copyLen);
+                    if (constInfo_.returnValue) {
+                        LIServiceVec::CopyOut(valueOutGm[info.indiceOutOffset + cuS1Idx *
+                                                            constInfo_.sparseCount + i * offset],
+                                             valueULocal1, copyLen);
                     }
                     outQueue_.FreeTensor(outValueUb);
                 }
@@ -592,7 +537,6 @@ __aicore__ inline void PivotLightningIndexerServiceVector<LIT>::ProcessLD()
     int32_t curCubeId = blockId_ / 2;
     int32_t tmpCubeId = curCubeId;
 
-    int64_t s2ActSeq;
     int64_t s2Start;
     int64_t s2End;
     int64_t isS2End;
@@ -658,11 +602,6 @@ __aicore__ inline void PivotLightningIndexerServiceVector<LIT>::ProcessLD()
         isS2End = vec1ParamGm.GetValue(wsInfoOffset + 4);
         s1Idx = vec1ParamGm.GetValue(wsInfoOffset + 6);
         outOffset = vec1ParamGm.GetValue(wsInfoOffset + 8);
-        // Same record, same row: the causal key count ProcessVec already derived
-        // for this group's first row. This path is the last writer for any row
-        // whose S2 was split across cores, so the window has to be spliced here
-        // too -- ProcessVec writes it only when one core owns all of S2.
-        s2ActSeq = vec1ParamGm.GetValue(wsInfoOffset + 1);
 
         while (needFd == 1) {
             // 搬入头规约数据
@@ -747,35 +686,8 @@ __aicore__ inline void PivotLightningIndexerServiceVector<LIT>::ProcessLD()
             LocalTensor<int32_t> idxULocal1 = outIdxUb.template ReinterpretCast<int32_t>();
             SetWaitFlag<HardEvent::V_MTE3>(HardEvent::V_MTE3);
             SetWaitFlag<HardEvent::S_MTE3>(HardEvent::S_MTE3);
-            int64_t copies = 1;
-            if constexpr (LIT::pivotReuse) {
-                uint32_t row = outOffset / constInfo_.sparseCount;
-                copies = LICommon::PivotRowCopies(constInfo_, row);
-                outOffset = LICommon::PivotSourceRow(constInfo_, row) * constInfo_.sparseCount;
-                // Row repeat drops `repeat` shared ids for its own local tail; row
-                // 0 has no tail, so a group of one copies the row in a single go.
-                if (LICommon::PivotFillLocalWindows(constInfo_, copies, s2ActSeq,
-                        constInfo_.attenMaskFlag, constInfo_.sparseCount,
-                        pivotLocalBuf_.Get<int32_t>()) > 0) {
-                    // Re-issue the scalar-to-MTE3 barrier: the one above predates
-                    // these ids, so it does not order them against the copy below.
-                    SetWaitFlag<HardEvent::S_MTE3>(HardEvent::S_MTE3);
-                }
-            }
-            for (int64_t repeat = 0; repeat < copies; ++repeat) {
-                int64_t dstOffset = outOffset + repeat * constInfo_.sparseCount;
-                int64_t width = 0;
-                if constexpr (LIT::pivotReuse) {
-                    width = LICommon::PivotWindowWidth(repeat, constInfo_.attenMaskFlag);
-                }
-                DataCopyPad(indiceOutGm[dstOffset], idxULocal1,
-                            {1, static_cast<uint16_t>((constInfo_.sparseCount - width) * sizeof(int32_t)), 0, 0});
-                if (width > 0) {
-                    DataCopyPad(indiceOutGm[dstOffset + constInfo_.sparseCount - width],
-                                pivotLocalBuf_.Get<int32_t>()[repeat * LICommon::PIVOT_LOCAL_WINDOW_STRIDE],
-                                {1, static_cast<uint16_t>(width * sizeof(int32_t)), 0, 0});
-                }
-            }
+            DataCopyPad(indiceOutGm[outOffset], idxULocal1,
+                        {1, static_cast<uint16_t>(constInfo_.sparseCount * sizeof(int32_t)), 0, 0});
             SetWaitFlag<HardEvent::MTE3_V>(HardEvent::MTE3_V);
         } else {
             Extract(outValueUb, outIdxUb, curValueIdxUb, (BASE_TOPK / 32));
@@ -786,37 +698,10 @@ __aicore__ inline void PivotLightningIndexerServiceVector<LIT>::ProcessLD()
             PipeBarrier<PIPE_V>();
             SetWaitFlag<HardEvent::V_MTE3>(HardEvent::V_MTE3);
             SetWaitFlag<HardEvent::S_MTE3>(HardEvent::S_MTE3);
-            int64_t copies = 1;
-            if constexpr (LIT::pivotReuse) {
-                uint32_t row = outOffset / constInfo_.sparseCount;
-                copies = LICommon::PivotRowCopies(constInfo_, row);
-                outOffset = LICommon::PivotSourceRow(constInfo_, row) * constInfo_.sparseCount;
-                // Row repeat drops `repeat` shared ids for its own local tail; row
-                // 0 has no tail, so a group of one copies the row in a single go.
-                if (LICommon::PivotFillLocalWindows(constInfo_, copies, s2ActSeq,
-                        constInfo_.attenMaskFlag, constInfo_.sparseCount,
-                        pivotLocalBuf_.Get<int32_t>()) > 0) {
-                    // Re-issue the scalar-to-MTE3 barrier: the one above predates
-                    // these ids, so it does not order them against the copy below.
-                    SetWaitFlag<HardEvent::S_MTE3>(HardEvent::S_MTE3);
-                }
-            }
-            for (int64_t repeat = 0; repeat < copies; ++repeat) {
-                int64_t dstOffset = outOffset + repeat * constInfo_.sparseCount;
-                int64_t width = 0;
-                if constexpr (LIT::pivotReuse) {
-                    width = LICommon::PivotWindowWidth(repeat, constInfo_.attenMaskFlag);
-                }
-                DataCopyPad(indiceOutGm[dstOffset], idxULocal1,
-                            {1, static_cast<uint16_t>((constInfo_.sparseCount - width) * sizeof(int32_t)), 0, 0});
-                if (width > 0) {
-                    DataCopyPad(indiceOutGm[dstOffset + constInfo_.sparseCount - width],
-                                pivotLocalBuf_.Get<int32_t>()[repeat * LICommon::PIVOT_LOCAL_WINDOW_STRIDE],
-                                {1, static_cast<uint16_t>(width * sizeof(int32_t)), 0, 0});
-                }
-                DataCopyPad(valueOutGm[dstOffset], valueULocal1,
-                            {1, static_cast<uint16_t>(constInfo_.sparseCount * sizeof(K_T)), 0, 0});
-            }
+            DataCopyPad(indiceOutGm[outOffset], idxULocal1,
+                        {1, static_cast<uint16_t>(constInfo_.sparseCount * sizeof(int32_t)), 0, 0});
+            DataCopyPad(valueOutGm[outOffset], valueULocal1,
+                        {1, static_cast<uint16_t>(constInfo_.sparseCount * sizeof(K_T)), 0, 0});
             SetWaitFlag<HardEvent::MTE3_V>(HardEvent::MTE3_V);
         }
     }

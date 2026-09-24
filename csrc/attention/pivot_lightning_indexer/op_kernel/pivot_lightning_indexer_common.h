@@ -14,6 +14,8 @@
  */
 #ifndef PIVOT_LIGHTNING_INDEXER_COMMON_H
 #define PIVOT_LIGHTNING_INDEXER_COMMON_H
+#include "pivot_lightning_indexer_pivot_geometry.h"
+
 using namespace AscendC;
 namespace LICommon {
 
@@ -66,8 +68,7 @@ struct RunInfo {
 };
 
 struct ConstInfo {
-    uint32_t pivotInputRows = 0;
-    uint32_t pivotDenseRows = 0;
+    __gm__ const PivotGroup *pivotGroups = nullptr;
     // CUBE与VEC核间同步的模式
     static constexpr uint32_t FIA_SYNC_MODE2 = 2;
     static constexpr uint32_t QLI_SYNC_MODE4 = 4;
@@ -125,102 +126,6 @@ struct ConstInfo {
     bool returnValueFlag = false;
     bool splitMFlag = false;
 };
-
-__aicore__ inline uint32_t PivotSourceRow(const ConstInfo &info, uint32_t row)
-{
-    return row < info.pivotDenseRows ? row : info.pivotDenseRows + 4 * (row - info.pivotDenseRows);
-}
-
-__aicore__ inline uint32_t PivotRowCopies(const ConstInfo &info, uint32_t row)
-{
-    uint32_t remaining = info.pivotInputRows - PivotSourceRow(info, row);
-    return row < info.pivotDenseRows ? 1 : (remaining < 4 ? remaining : 4);
-}
-
-// Widest trailing window any one row of a group can need forced into its top-k.
-constexpr uint32_t PIVOT_LOCAL_WINDOW = 4;
-// Stride between the rows' window slots in the scratch buffer. DataCopyPad
-// requires its UB source to start on a 32-byte boundary and a row needs at most
-// PIVOT_LOCAL_WINDOW - 1 int32, so a packed layout would misalign odd rows.
-constexpr uint32_t PIVOT_LOCAL_WINDOW_STRIDE = 8;
-
-// How many of row `repeat`'s trailing causal keys the group's shared scan cannot
-// have seen.
-//
-// PIVOT-Reuse scores one proxy query per group and replicates its top-k to every
-// row. The shared scan covers the keys of the group's FIRST row, [0, L0-1]. Under
-// a causal mask each following row is one position later, so row r reaches keys
-// up to L0+r-1: exactly r of them lie past the end of the scan and were never
-// scored by anyone. Row 0 is the row the scan was computed for and loses nothing.
-//
-// That is what makes appending them cheap and unconditional -- no membership
-// test, no re-scoring, and nothing to evict, because a key the shared top-k
-// cannot contain cannot be a duplicate of it. The row's older candidates were
-// scored by the proxy and are left to its judgement.
-//
-// Widths are row-dependent, so the row is emitted as a head of sparseCount - r
-// shared ids plus an r-wide tail; row 0 takes the untouched one-copy path.
-//
-// Without a causal mask every row of the group scans the same range and none is
-// excluded, so this is 0 for all of them and PIVOT-Reuse has no defect there.
-// Not Min(): the AscendC Min visible here is the element-wise vector intrinsic
-// over LocalTensor and returns void. This header is included before the scalar
-// overloads exist, so the clamp is written out.
-__aicore__ inline int64_t PivotWindowWidth(int64_t repeat, bool perRowCausal)
-{
-    constexpr int64_t widest = static_cast<int64_t>(PIVOT_LOCAL_WINDOW) - 1;
-    if (!perRowCausal || repeat <= 0) {
-        return 0;
-    }
-    return repeat < widest ? repeat : widest;
-}
-
-// Write those ids -- row r's are [firstRowLen, firstRowLen + r - 1] -- into the
-// scratch buffer, one row per `repeat`. Returns the widest width it wrote, i.e.
-// the number of rows that splice minus one, or 0 when no row splices and the
-// caller must copy every row verbatim.
-//
-// `firstRowLen` is the causal key count of the group's FIRST row -- exactly the
-// `cuRealAcSeq` the emitter already computed for that row. Under sparseMode 3
-// each following row is one position later, so its window starts at the same
-// absolute position; without the mask pass perRowCausal = false and nothing is
-// written. Row r's last id is firstRowLen + r - 1, which is within its own causal
-// bound by construction, so no length guard is needed.
-//
-// The ids go to a small scratch buffer rather than into the top-k buffer the
-// vector pipe just produced. That keeps the scalar stores independent of that
-// pipe -- no V_S drain -- at the cost of splitting each row's copy-out in two.
-// Every row is filled before a single S_MTE3, so the barrier is one flag per
-// group, not per row. This header is included from pivot_lightning_indexer.cpp before
-// the AscendC intrinsics are declared, so it cannot issue that flag itself; the
-// caller owns it and issues it once, after this returns positive.
-//
-// Note: only indices are rewritten. The returned scores for those slots still
-// hold whatever the row carried there; they are consumed only when returnValue
-// is set, which the PIVOT experiments do not do.
-//
-// Returns 0 -- meaning "emit every row verbatim" -- unless the caller is writing
-// the whole row at once. A sparseCount above 4096 is emitted in halves, and the
-// tail of the first half is not the tail of the top-k, so splicing a window
-// there would land in the wrong place. PIVOT-Reuse is gated on sparseCount ==
-// 2048 and never takes that path, but the check keeps the helper safe to call.
-__aicore__ inline int64_t PivotFillLocalWindows(const ConstInfo &constInfo, int64_t copies,
-    int64_t firstRowLen, bool perRowCausal, int64_t copyLen,
-    const LocalTensor<int32_t> &localIds)
-{
-    if (copies <= 0 || copyLen != static_cast<int64_t>(constInfo.sparseCount)) {
-        return 0;
-    }
-    int64_t widest = PivotWindowWidth(copies - 1, perRowCausal);
-    for (int64_t repeat = 0; repeat < copies; ++repeat) {
-        int64_t width = PivotWindowWidth(repeat, perRowCausal);
-        for (int64_t slot = 0; slot < width; ++slot) {
-            localIds.SetValue(static_cast<int32_t>(repeat * PIVOT_LOCAL_WINDOW_STRIDE + slot),
-                static_cast<int32_t>(firstRowLen + slot));
-        }
-    }
-    return widest;
-}
 
 struct SplitCoreInfo {
     uint32_t s2Start = 0U; // S2的起始位置
