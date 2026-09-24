@@ -10,9 +10,10 @@ from typing import Any
 
 import torch
 from torch.distributed import all_reduce
-from vllm.distributed import get_ep_group
+from vllm.distributed import get_ep_group, get_eplb_group
 from vllm.distributed.eplb import eplb_state as _eplb_state
 
+from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
 from vllm_ascend.ops.fused_moe import eplb as _eplb_ops
 
 ASYNC_EPLB_CYCLE_COMMITTED_LOG = "Ascend async EPLB cycle committed"
@@ -113,16 +114,135 @@ class AscendEplbState(_eplb_state.EplbState):
     def __init__(self, parallel_config, device: torch.device) -> None:
         super().__init__(parallel_config, device)
         self._has_fresh_recorded_load = False
+        self._is_load_sampling_step = False
+        self._should_collect_local_load = False
         if self.cuda_device_index is None:
             self.cuda_device_index = torch.accelerator.current_device_index()
 
+    @property
+    def uses_custom_load_stats(self) -> bool:
+        """Whether the selected policy transforms temporal load samples."""
+        return callable(getattr(self.policy, "prepare_local_load_stats", None))
+
     def add_model(self, model, model_config) -> None:
-        """Build the upstream model state with the MRV2 EP-aware layout."""
+        """Build the EP-aware layout and initialize custom load statistics."""
         token = EXPERT_MAPPING_EP_SIZE.set(get_ep_group().world_size)
         try:
             super().add_model(model, model_config)
         finally:
             EXPERT_MAPPING_EP_SIZE.reset(token)
+        if self.uses_custom_load_stats:
+            self._initialize_load_stats_state(
+                self.model_states[model_config.compute_hash()]
+            )
+
+    def _initialize_load_stats_state(self, model_state: Any) -> None:
+        model_state._load_mapping_generation = 0
+        model_state._observed_load_mapping_generation = 0
+        if hasattr(self, "_local_load_collection_mask"):
+            return
+        self._local_load_collection_mask = torch.zeros(
+            self.expert_load_window_size,
+            dtype=torch.int32,
+            device="cpu",
+        )
+        self._physical_load_sample_slots = torch.full(
+            (self.expert_load_window_size,),
+            -1,
+            dtype=torch.long,
+            device="cpu",
+        )
+        self._num_recorded_load_steps = 0
+        self._load_stats_window_start_index = 0
+        self._load_stats_window_write_index = 0
+
+    def _discard_samples_from_old_mapping(self) -> None:
+        mapping_changed = any(
+            state._load_mapping_generation
+            != state._observed_load_mapping_generation
+            for state in self.model_states.values()
+        )
+        if not mapping_changed:
+            return
+        self._local_load_collection_mask.zero_()
+        self._physical_load_sample_slots.fill_(-1)
+        self._num_recorded_load_steps = 0
+        self._load_stats_window_start_index = 0
+        self._load_stats_window_write_index = 0
+        for state in self.model_states.values():
+            state._observed_load_mapping_generation = (
+                state._load_mapping_generation
+            )
+
+    def _ordered_load_step_indices(self) -> torch.Tensor:
+        indices = torch.arange(self.expert_load_window_size, dtype=torch.long)
+        return (
+            indices + self._load_stats_window_start_index
+        ) % self.expert_load_window_size
+
+    @staticmethod
+    def _map_physical_stats_to_logical(
+        model_state: Any,
+        physical_stats: PreparedLoadStats,
+    ) -> PreparedLoadStats:
+        values = physical_stats.values
+        num_logical_experts = model_state.model.num_logical_experts
+        invalid_expert = torch.full_like(
+            model_state.physical_to_logical_map, num_logical_experts
+        )
+        logical_indices = torch.where(
+            model_state.physical_to_logical_map >= 0,
+            model_state.physical_to_logical_map,
+            invalid_expert,
+        ).long()
+        logical_values = values.new_zeros(
+            (*values.shape[:-1], num_logical_experts + 1)
+        )
+        logical_values.scatter_add_(
+            -1,
+            logical_indices.unsqueeze(0).expand(values.shape[0], -1, -1),
+            values,
+        )
+        return PreparedLoadStats(
+            logical_values[..., :-1], physical_stats.sample_counts
+        )
+
+    def step(
+        self,
+        is_dummy: bool = False,
+        is_profile: bool = False,
+        log_stats: bool = False,
+    ) -> None:
+        """Advance the custom time axis alongside the upstream load window."""
+        is_sampling = (
+            self._is_load_sampling_step and not is_dummy and not is_profile
+        )
+        should_collect = self._should_collect_local_load
+        self._is_load_sampling_step = False
+        self._should_collect_local_load = False
+        if self.uses_custom_load_stats:
+            self._discard_samples_from_old_mapping()
+            if not is_profile:
+                index = self._load_stats_window_write_index
+                has_sample = is_sampling and should_collect
+                self._local_load_collection_mask[index] = has_sample
+                self._physical_load_sample_slots[index] = (
+                    self.expert_load_window_step if has_sample else -1
+                )
+                if self._num_recorded_load_steps < self.expert_load_window_size:
+                    self._num_recorded_load_steps += 1
+                else:
+                    self._load_stats_window_start_index = (
+                        self._load_stats_window_start_index + 1
+                    ) % self.expert_load_window_size
+                self._load_stats_window_write_index = (
+                    index + 1
+                ) % self.expert_load_window_size
+        super().step(
+            is_dummy=is_dummy,
+            is_profile=is_profile,
+            log_stats=log_stats,
+        )
 
     def _has_global_fresh_recorded_load(self) -> bool:
         """Synchronize whether any EP rank recorded load since rearranging."""
