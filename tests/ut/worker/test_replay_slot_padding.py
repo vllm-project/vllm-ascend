@@ -85,8 +85,18 @@ def _dcp_group_patch(dcp_world_size: int = 1, dcp_rank: int = 0):
     return patch("vllm_ascend.worker.block_table.get_dcp_group", return_value=mock_group)
 
 
+def _ascend_config_patch(block_table_no_commit_optimize: int = 0):
+    """``MultiGroupBlockTable`` picks its block-table class off the Ascend
+    config, which a unit test never initializes; 0 is the production default
+    and selects ``OptimizedBlockTable``."""
+    return patch(
+        "vllm_ascend.worker.block_table.get_ascend_config",
+        return_value=SimpleNamespace(block_table_no_commit_optimize=block_table_no_commit_optimize),
+    )
+
+
 def _block_table(groups, *, max_num_reqs: int = 4, max_num_batched_tokens: int = 512, dcp_world_size: int = 1):
-    with _dcp_group_patch(dcp_world_size=dcp_world_size):
+    with _dcp_group_patch(dcp_world_size=dcp_world_size), _ascend_config_patch():
         from vllm_ascend.worker.block_table import MultiGroupBlockTable
 
         return MultiGroupBlockTable(
@@ -298,16 +308,21 @@ def test_decode_step_never_inherits_an_earlier_replay_start():
     """Replay is confined to admission steps, so every later step -- the whole
     steady-state decode -- has to read all zeros, on the device too: the
     attention metadata of that step is built from this buffer. Pinning this is
-    what replaces upstream's ``is_prefilling`` filter."""
-    runner = _runner(prefix_replay_tokens=WINDOW)
+    what replaces upstream's ``is_prefilling`` filter.
+
+    The padded rows are asserted as well, and they are why the buffer is
+    cleared and copied whole rather than up to ``num_reqs``: a graph row must
+    not inherit a write start from the step that did replay.
+    """
+    runner = _runner(prefix_replay_tokens=WINDOW, max_num_reqs=4)
     new_req = SimpleNamespace(req_id="req-0", replay_start=REPLAY_START)
     runner._fill_replay_start(_scheduler_output(new_reqs=[new_req]), num_reqs=2)
-    assert runner.replay_start.gpu.tolist() == [REPLAY_START, 0]
+    assert runner.replay_start.gpu.tolist() == [REPLAY_START, 0, 0, 0]
 
     # The next step names nobody.
     assert runner._fill_replay_start(_scheduler_output(), num_reqs=2) is None
-    assert runner.replay_start.np.tolist() == [0, 0]
-    assert runner.replay_start.gpu.tolist() == [0, 0]
+    assert runner.replay_start.np.tolist() == [0, 0, 0, 0]
+    assert runner.replay_start.gpu.tolist() == [0, 0, 0, 0]
 
 
 def test_requests_outside_the_batch_are_ignored():

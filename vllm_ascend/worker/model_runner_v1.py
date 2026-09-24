@@ -1287,7 +1287,7 @@ class NPUModelRunner(GPUModelRunner):
         # metadata can say None instead of handing the builder a device tensor
         # it would have to read back -- a synchronization on the prefill path.
         self._replay_active = replaying
-        return self.replay_start.gpu if replaying else None
+        return self.replay_start.gpu[:num_reqs] if replaying else None
 
     def _attn_replay_start(self, num_reqs_padded: int) -> torch.Tensor | None:
         """What the step's attention metadata carries as its per-request replay
