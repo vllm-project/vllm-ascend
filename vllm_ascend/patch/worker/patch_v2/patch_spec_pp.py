@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
-"""0.30 PP sampled-token protocol for release trains (vLLM 0.28/0.29).
+"""0.30 PP sampled-token protocol for release trains.
 
 Replaces the deferred-broadcast transport that deadlocked under KV
 saturation with async EPLB.  Delete once the paired vLLM version ships
@@ -11,7 +11,10 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
-from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
+
+# vLLM main (#56888) replaced buffer_utils.async_copy_to_gpu with
+# torch_utils.async_tensor_h2d (gaining out=/device=None support).
+from vllm.utils.torch_utils import async_tensor_h2d as async_copy_to_gpu
 
 _INSTALLED = "_vllm_ascend_upstream_spec_pp_installed"
 

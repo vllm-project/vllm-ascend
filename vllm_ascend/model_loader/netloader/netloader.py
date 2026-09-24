@@ -36,7 +36,7 @@ from vllm.utils.torch_utils import set_default_torch_dtype
 from .executor.elastic_load import cache_processed_layout_transfer_manifest, synchronize_npu
 from .interaction.elastic import ElasticServer
 from .load import elastic_load
-from .utils import find_free_port, is_valid_path_prefix
+from .utils import disk_fallback_loader_extra_config, find_free_port, is_valid_path_prefix
 
 DRAFT_PORT_OFFSET = 10000
 MAX_FREE_PORT_RETRIES = 5
@@ -751,7 +751,11 @@ class ModelNetLoaderElastic(BaseModelLoader):
               weights post-processing (e.g. quantization adjustments) still needs to be applied.
         """
         load_config = deepcopy(self.load_config)
-        load_config.model_loader_extra_config = {}
+        # DefaultModelLoader rejects netloader keys (SOURCE/LISTEN_PORT). Keep
+        # multithread-load settings so seed/fallback disk loads stay parallel.
+        load_config.model_loader_extra_config = disk_fallback_loader_extra_config(
+            load_config.model_loader_extra_config,
+        )
         load_config.load_format = "auto"
         default_model_loader = DefaultModelLoader(load_config)
 

@@ -38,7 +38,8 @@ def test_released_config_loads_through_vllm_registry(tmp_path):
 
     assert isinstance(config, UpstreamDeepseekV41Config)
     assert config.is_mm_prefix_lm
-    assert config.mm_prefix_span_leading_pad_modulus == 2
+    # vLLM main (#56554) removed the compressor-alignment pad.
+    assert not hasattr(config, "mm_prefix_span_leading_pad_modulus")
 
 
 def _released_text_config():
@@ -93,7 +94,8 @@ def test_released_config_names_are_available_to_runtime():
     # The released CausalLM architecture still carries the complete vision path.
     assert config.is_mm_prefix_lm
     assert config.mm_prefix_clamp_sliding_window
-    assert config.mm_prefix_span_leading_pad_modulus == 2
+    # vLLM main (#56554) removed the compressor-alignment pad.
+    assert not hasattr(config, "mm_prefix_span_leading_pad_modulus")
 
 
 def test_released_causal_architecture_uses_multimodal_wrapper(monkeypatch):

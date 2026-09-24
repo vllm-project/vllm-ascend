@@ -32,9 +32,11 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import cudagraph_utils
 from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.cp_utils import maybe_prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor, ModelCudaGraphManager
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
+from vllm.v1.worker.gpu.ubatch_utils import UBatchRunner
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
@@ -80,6 +82,16 @@ def _prepare_pcp_inputs_to_capture(
     input_block_tables = pcp_manager.get_dummy_block_tables(num_reqs)
     slot_mappings = pcp_manager.get_dummy_slot_mappings(num_tokens)
     slot_mappings_by_layer = cudagraph_utils.build_slot_mappings_by_layer(slot_mappings, kv_cache_config)
+
+    input_batch.dcp_local_seq_lens = maybe_prepare_dcp_local_seq_lens(
+        input_buffers.dcp_local_seq_lens,
+        input_batch.seq_lens,
+        input_batch.num_reqs,
+        _block_tables.cp_size,
+        _block_tables.cp_rank,
+        _block_tables.cp_interleave,
+        num_reqs_padded=input_batch.num_reqs_after_padding,
+    )
 
     attn_metadata = model_state.prepare_attn(
         input_batch,
@@ -135,7 +147,10 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         model_runner: Any,
         lora_capture_cases: list[int] | None = None,
         varlen_decode: bool = False,
+        ubatch_runner: UBatchRunner | None = None,
     ):
+        # vLLM main (#51700) passes the microbatch runner into the graph
+        # manager.
         super().__init__(
             vllm_config,
             device,
@@ -143,6 +158,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
             decode_query_len,
             lora_capture_cases=lora_capture_cases,
             varlen_decode=varlen_decode,
+            ubatch_runner=ubatch_runner,
         )
         self.breakable_cg_runner: BreakableACLGraphWrapper | None = None
         self.model_runner = model_runner
