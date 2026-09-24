@@ -10,6 +10,7 @@ import torch
 from vllm.distributed.eplb.policy import AbstractEplbPolicy
 
 from vllm_ascend.ascend_config import StairConfig
+from vllm_ascend.distributed.eplb.policy import PreparedLoadStats
 from vllm_ascend.distributed.eplb.policy.stair import (
     LayerPlan,
     PlacementImbalance,
@@ -20,8 +21,50 @@ from vllm_ascend.distributed.eplb.policy.stair import (
 
 
 class TestStairLoadStatistics(unittest.TestCase):
-    def test_policy_shares_upstream_abstract_base(self):
+    def test_policy_implements_upstream_abstract_contract(self):
         self.assertTrue(issubclass(StairEplbPolicy, AbstractEplbPolicy))
+        self.assertFalse(StairEplbPolicy.__abstractmethods__)
+
+    @patch("vllm_ascend.distributed.eplb.policy.stair.get_eplb_group")
+    def test_upstream_contract_flattens_complete_plan(self, get_eplb_group):
+        policy = StairEplbPolicy(StairConfig())
+        get_eplb_group.return_value.cpu_group.size.return_value = 2
+        plan = StairPlan(
+            rank_expert_ids=np.array([[[0, 3], [2, 1]]]),
+            source_rank_ids=np.array([[[0, 1], [1, 0]]]),
+            source_slot_ids=np.array([[[0, 1], [0, 1]]]),
+            predicted_mean_ratios=np.array([1.0]),
+        )
+        with patch.object(policy, "plan_sharded_rebalance", return_value=plan) as planner:
+            result = policy.rebalance_experts(
+                torch.tensor([[8.0, 7.0, 6.0, 5.0]]),
+                4,
+                1,
+                1,
+                2,
+                torch.tensor([[0, 1, 2, 3]]),
+            )
+
+        torch.testing.assert_close(result, torch.tensor([[0, 3, 2, 1]]))
+        np.testing.assert_array_equal(result.source_rank_ids, plan.source_rank_ids)
+        self.assertIs(planner.call_args.kwargs["planner"].__self__, policy)
+
+    @patch("vllm_ascend.distributed.eplb.policy.stair.get_eplb_group")
+    def test_rebalance_forwards_prepared_stats(self, get_eplb_group):
+        policy = StairEplbPolicy(StairConfig())
+        get_eplb_group.return_value.cpu_group.size.return_value = 2
+        current = np.array([[[0], [1]]])
+        plan = StairPlan(
+            rank_expert_ids=current.copy(),
+            source_rank_ids=np.array([[[0], [1]]]),
+            source_slot_ids=np.zeros_like(current),
+            predicted_mean_ratios=np.array([np.nan]),
+        )
+        prepared = PreparedLoadStats(torch.tensor([[[4, 6]], [[9, 3]]]), np.array([2, 3]))
+        with patch.object(policy, "plan_sharded_rebalance", return_value=plan) as planner:
+            policy.rebalance_experts(prepared, 2, 1, 1, 2, torch.tensor([[0, 1]]))
+
+        np.testing.assert_array_equal(planner.call_args.kwargs["sample_counts"], prepared.sample_counts)
 
     def test_compression_preserves_all_steps_as_weighted_bins(self):
         samples = np.arange(20).reshape(5, 2, 2)
