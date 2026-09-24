@@ -44,6 +44,8 @@ This extraction does not broaden its supported model or numerical contract.
 - Native compute-WY and FwdO source trees, chunk wrapper and GDN execution
   module match the pre-split integration at `c06388df9`.
 - Python source syntax and diff whitespace checks pass.
+- The repository `format.sh ci` check was attempted but could not run because
+  `pre-commit` is not installed. No full-lint pass is claimed.
 - Full plugin tests requiring vLLM/torch_npu and pytest could not run in the
   local CPU-only environment. Initial broad discovery reported missing
   dependencies; the targeted dependency-light tests above were run separately.
