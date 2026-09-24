@@ -46,10 +46,12 @@ from vllm_ascend.ops.fused_moe.token_dispatcher import (
 )
 from vllm_ascend.quantization.quant_type import QuantType
 
-_MoECommMethods: dict[MoECommType | None, MoECommMethod] = {}
+_MoECommMethods: dict[tuple[MoECommType | None, tuple[int, ...]], MoECommMethod] = {}
 
 
-def _moe_config_key(moe_comm_type: MoECommType, moe_config: FusedMoEConfig) -> tuple[int, ...]:
+def _moe_config_key(
+    moe_comm_type: MoECommType | None, moe_config: FusedMoEConfig | None
+) -> tuple[MoECommType | None, tuple[int, ...]]:
     """Return the execution shape that owns mutable MoE comm state."""
     _CONFIG_KEY_FIELDS = ("num_experts", "num_local_experts")
     return (moe_comm_type, tuple(int(getattr(moe_config, field, 0) or 0) for field in _CONFIG_KEY_FIELDS))

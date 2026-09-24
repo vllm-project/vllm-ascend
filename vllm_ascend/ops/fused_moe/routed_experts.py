@@ -685,6 +685,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
 
         moe_comm_method = get_moe_comm_method(_EXTRA_CTX.moe_comm_type, self.moe_config)
         _EXTRA_CTX.moe_comm_method = moe_comm_method
+        assert moe_comm_method is not None
         prepare_output = moe_comm_method.prepare(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -745,6 +746,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             else:
                 self.moe_load.add_(local_load)
 
+        assert _EXTRA_CTX.moe_comm_method is not None
         routed_out = _EXTRA_CTX.moe_comm_method.finalize(
             hidden_states=fused_experts_results.routed_out,
             reduce_results=isinstance(_EXTRA_CTX.moe_comm_method, AllGatherCommImpl),

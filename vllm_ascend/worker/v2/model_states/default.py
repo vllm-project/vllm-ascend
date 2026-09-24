@@ -60,6 +60,8 @@ class AscendModelState(DefaultModelState):
         )
         if group_id is None:
             return {}
+        block_tables: tuple[torch.Tensor, ...] | None
+        slot_mappings: torch.Tensor | None
         if self.pcp_context is not None:
             batch = self.pcp_context.global_batch
             block_tables = self.pcp_context.global_block_tables
