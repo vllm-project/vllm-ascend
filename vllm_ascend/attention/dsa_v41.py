@@ -196,10 +196,6 @@ def _request_counts(common: Any, num_reqs: int):
     ):
         return 0, 0, 0, 0
     flags = is_prefilling[:num_reqs].bool()
-    # Slice bounds must follow is_prefilling's own length: MRV2 keeps the real
-    # request count (no padding) while query_start_loc_cpu is padded, so indexing
-    # query_lens with num_reqs (padded) mismatches the mask. Padded requests sit
-    # at the tail, are flagged False, and contribute no counted tokens.
     num_flags = min(flags.numel(), query_start_loc_cpu.numel() - 1)
     flags = flags[:num_flags]
     query_lens_cpu = query_start_loc_cpu[1 : num_flags + 1] - query_start_loc_cpu[:num_flags]
@@ -1112,13 +1108,7 @@ class DeepseekV41CacheLayer(nn.Module, AttentionLayerBase):
         context[prefix] = self
 
     def bind_kv_cache(self, kv_cache: torch.Tensor | tuple[torch.Tensor, ...]) -> None:
-        """Bind one allocated slot view, keeping the ``kv_cache[0]`` contract.
-
-        The MRV2 reshape delivers the raw per-layer allocation -- a tensor, or
-        a (kv, scale) tuple for the indexer -- while every V4.1 consumer
-        (SWA/long-KV/indexer/compressor state) indexes ``kv_cache[0]``, the
-        model_runner_v1 binding convention.
-        """
+        """Bind one allocated slot view, keeping the ``kv_cache[0]`` contract."""
         self.kv_cache = [kv_cache]
 
     def get_kv_cache_spec(self, vllm_config):

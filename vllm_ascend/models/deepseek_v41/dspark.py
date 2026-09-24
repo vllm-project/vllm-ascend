@@ -326,17 +326,6 @@ class DeepseekV41DSparkModel(torch.nn.Module):
 class DSparkDeepseekV41ForCausalLM(torch.nn.Module, DeepseekV41MixtureOfExperts, SupportsEagle3):
     packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
 
-    # Same declarations as upstream nvidia/amd DSparkDeepseekV4ForCausalLM:
-    # drafter weights ship inside the target checkpoint (mtp.*) without
-    # embed/head, so the proposers alias the target's. These are defaults
-    # only -- load_weights runs process_eagle_weight, which flips them to
-    # True when a checkpoint does carry its own embed_tokens / lm_head.
-    has_own_embed_tokens = False
-    has_own_lm_head = False
-    # Full-vocab draft: draft ids are target ids (map_draft_to_target is the
-    # identity), so None keeps the DSpark speculator off the d2t scatter path.
-    draft_id_to_target_id = None
-
     def __init__(self, *, vllm_config, prefix="") -> None:
         super().__init__()
         self.config = vllm_config.speculative_config.draft_model_config.hf_text_config

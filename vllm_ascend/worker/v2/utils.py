@@ -83,13 +83,7 @@ def torch_npu_graph_wrapper(*args, **kwargs):
 
 
 def prepare_v41_source_rope(runner: "NPUModelRunner") -> None:
-    """Validate and cache V4.1 source RoPE tables on compressor builders.
-
-    Runner V1 wires this through ``enable_device_metadata`` inside
-    ``initialize_attn_backend``; runner V2 keeps metadata tasks
-    synchronous (``_publish_task`` runs them inline), so only the RoPE
-    cache initialization is needed here. ``build`` raises without it.
-    """
+    """Validate and cache V4.1 source RoPE tables on compressor builders."""
     # Lazy import avoids the model/cache registration cycle.
     from vllm_ascend.attention.dsa_v41 import AscendDSAV41MetadataBuilder
 
@@ -101,16 +95,7 @@ def prepare_v41_source_rope(runner: "NPUModelRunner") -> None:
 
 
 def prepare_v41_dummy_ring_state(runner: "NPUModelRunner", num_reqs: int) -> None:
-    """Assign live ring pages to dummy requests for V4.1 graph runs.
-
-    V4.1's compressor ring state owns one private page per request.
-    Upstream zero-fills dummy block tables, which would alias every
-    dummy request onto page 0; assign distinct live state IDs
-    1..num_reqs and zero those ring pages so graph capture/replay see
-    a clean ring instead of stale or aliased state. Fully skipped for
-    dummy batches marked skip_gdn_state_update (mirrors MRV1, which
-    suppresses both the ring prep and the state writes there).
-    """
+    """Assign live ring pages to dummy requests for V4.1 graph runs."""
     if ring_state_update_skipped():
         return
     for gid, group in enumerate(runner.kv_cache_config.kv_cache_groups):

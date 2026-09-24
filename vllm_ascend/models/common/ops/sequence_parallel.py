@@ -30,22 +30,7 @@ def sp_all_gather(x: torch.Tensor) -> torch.Tensor:
 
 
 def _ascend_sp_shard_impl(x: torch.Tensor) -> torch.Tensor:
-    """Pad the token axis (dim 0) to the TP multiple, then take this rank's chunk.
-
-    Mirrors the upstream ``sp_shard`` guard/pad form
-    (``vllm.models.common.ops.sequence_parallel``): skip the pad — and its
-    whole-table copy — when ``sp_pad == 0``, and pad with
-    ``F.pad(x, (0, 0) * (x.ndim - 1) + (0, sp_pad))`` so the token axis is
-    padded for arbitrary trailing dims (the older custom-op variant
-    ``sequence_parallel_chunk_impl`` in ``model_executor/models/utils.py``
-    pads the second-to-last dim, which for the draft/MTP inputs
-    ``[T, hc_mult, H]`` pads the hc_mult axis instead). Kept behind a custom
-    op so the modulo padding stays invisible to dynamo (a plain Python
-    implementation bakes the trace-time shape into the compiled graph, so
-    graph capture at any other bucket size shards to a wrong row count). As
-    in that upstream custom-op variant, the no-pad slice is cloned: a
-    functional custom op must not return a view of an input.
-    """
+    """Pad the token axis (dim 0) to the TP multiple, then take this rank's chunk."""
     tp_size = get_tensor_model_parallel_world_size()
     tp_rank = get_tensor_model_parallel_rank()
     sp_pad = (-x.shape[0]) % tp_size
@@ -80,14 +65,7 @@ def sp_shard(x: torch.Tensor) -> torch.Tensor:
 
 
 def _ascend_sp_reduce_scatter_impl(x: torch.Tensor) -> torch.Tensor:
-    """Pad rows to the TP multiple, then reduce-scatter across TP ranks.
-
-    Same ``if sp_pad > 0`` skip-the-pad guard as the upstream
-    ``sp_reduce_scatter`` (``vllm.models.common.ops.sequence_parallel``).
-    Wrapped in a custom op so the modulo padding stays invisible to dynamo
-    (same shape-baking hazard as ``sp_shard``). No view-of-input concern
-    here: the collective output is a fresh tensor.
-    """
+    """Pad rows to the TP multiple, then reduce-scatter across TP ranks."""
     tp_size = get_tensor_model_parallel_world_size()
     sp_pad = (-x.shape[0]) % tp_size
     # Avoid copying the full input when its token count is already aligned.
