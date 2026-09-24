@@ -30,6 +30,7 @@ class MoECommType(Enum):
 
 
 _MRV2_IN_PROFILE_RUN: ContextVar[bool] = ContextVar("_MRV2_IN_PROFILE_RUN", default=False)
+_CANN_MEGAMOE_EP_SIZE_LIMIT = 128
 _MEGA_MOE_TOKENS_PER_RANK_LIMIT = 4096
 _DISPATCH_FFN_COMBINE_TOKENS_PER_RANK_LIMIT = 512
 _MC2_TOKENS_PER_RANK_LIMIT = 512
@@ -91,7 +92,7 @@ def use_cann_megamoe(vllm_config: VllmConfig) -> bool:
         and get_ascend_config().enable_fused_mc2 == 1
         and is_moe_model(vllm_config)
         and vllm_config.parallel_config.enable_expert_parallel
-        and 1 < get_ep_group().world_size <= 64
+        and 1 < get_ep_group().world_size <= _CANN_MEGAMOE_EP_SIZE_LIMIT
         and getattr(vllm_config, "lora_config", None) is None
         and is_megamoe_supported_by_config(vllm_config)
     )
