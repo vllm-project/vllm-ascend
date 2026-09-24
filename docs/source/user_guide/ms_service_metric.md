@@ -47,11 +47,11 @@ Run `ms-service-metric restart` after changing YAML configuration. Restart the v
 
 ## Adding a Metric Point
 
-vLLM Ascend-owned metric configurations are stored as YAML files in `vllm_ascend/observability/config/`. All YAML files in this directory are loaded automatically.
+vLLM Ascend-owned metric configurations are stored as YAML files in `vllm_ascend/observability/metrics/config/`. All YAML files in this directory are loaded automatically.
 
 1. Identify the target function and add its fully qualified `module:Class.method` name as `symbol`.
 2. Reuse a stable handler from `ms_service_metric.provider_handlers` when it provides the required data processing.
-3. For Ascend-specific processing, add a handler to `vllm_ascend/observability/handlers.py` and reference it as `vllm_ascend.observability.handlers:function_name`.
+3. For Ascend-specific processing, add a handler to `vllm_ascend/observability/metrics/handlers.py` and reference it as `vllm_ascend.observability.metrics.handlers:function_name`.
 4. Add the metric name and Prometheus type under `metrics`, then update `tests/ut/observability/test_ms_metrics_provider.py`.
 
 Example:

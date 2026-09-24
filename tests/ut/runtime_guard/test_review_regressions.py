@@ -44,16 +44,16 @@ import numpy as np
 import pytest
 import torch
 
-import vllm_ascend.runtime_config.config as cfg_mod
-from vllm_ascend.runtime_config.config import RuntimeConfig
-from vllm_ascend.runtime_guard.action.queue import ActionQueue
-from vllm_ascend.runtime_guard.detector.logits_finite import LogitsFiniteDetector
-from vllm_ascend.runtime_guard.detector.manager import DetectorManager
-from vllm_ascend.runtime_guard.processor import RuntimeGuardProcessor
-from vllm_ascend.runtime_guard.report import dumps_report_json
-from vllm_ascend.runtime_guard.runner_bridge import AscendAsyncOutput
+import vllm_ascend.observability.runtime_config.config as cfg_mod
+from vllm_ascend.observability.runtime_config.config import RuntimeConfig
+from vllm_ascend.observability.runtime_guard.action.queue import ActionQueue
+from vllm_ascend.observability.runtime_guard.detector.logits_finite import LogitsFiniteDetector
+from vllm_ascend.observability.runtime_guard.detector.manager import DetectorManager
+from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
+from vllm_ascend.observability.runtime_guard.report import dumps_report_json
+from vllm_ascend.observability.runtime_guard.runner_bridge import AscendAsyncOutput
 from ._helpers import bare_processor as _bare_processor
-from vllm_ascend.runtime_guard.wave_tracker import WaveTracker
+from vllm_ascend.observability.runtime_guard.wave_tracker import WaveTracker
 
 # ---------------------------------------------------------------- V2 (P0-5)
 
@@ -143,10 +143,10 @@ def _template_path() -> Path:
 def test_v4_example_template_loads_and_validates(tmp_path: Path):
     from copy import deepcopy
 
-    from vllm_ascend.runtime_config._defaults import _DEFAULTS
-    from vllm_ascend.runtime_config._merge import _deep_merge, _normalize_config_sections
-    from vllm_ascend.runtime_config._validate import validate_runtime_config
-    from vllm_ascend.runtime_config.jsonc_io import loads_jsonc
+    from vllm_ascend.observability.runtime_config._defaults import _DEFAULTS
+    from vllm_ascend.observability.runtime_config._merge import _deep_merge, _normalize_config_sections
+    from vllm_ascend.observability.runtime_config._validate import validate_runtime_config
+    from vllm_ascend.observability.runtime_config.jsonc_io import loads_jsonc
 
     raw = loads_jsonc(_template_path().read_text(encoding="utf-8"))
     assert isinstance(raw, dict)
@@ -295,7 +295,7 @@ def test_v8b_reap_discards_wave_stamps():
     p.runtime_config.log_print_output_on_finish.return_value = False
     store = MagicMock()
     store.list_reapable.return_value = ["r1", "r2"]
-    with patch("vllm_ascend.runtime_guard.processor.RequestGuardStore") as store_cls:
+    with patch("vllm_ascend.observability.runtime_guard.processor.RequestGuardStore") as store_cls:
         store_cls.get.return_value = store
         # Call the real method (the bare processor mocks the instance attr).
         RuntimeGuardProcessor._reap_finished_requests(p)
@@ -305,7 +305,7 @@ def test_v8b_reap_discards_wave_stamps():
 
 def test_v8c_async_skips_sample_wave_stamp_on_non_tp0():
     """Async non-TP0 must not record stamps (no AscendAsync take on that rank)."""
-    from vllm_ascend.runtime_guard.processor import SamplePhaseResult
+    from vllm_ascend.observability.runtime_guard.processor import SamplePhaseResult
 
     p = _bare_processor()
     wt = WaveTracker()
@@ -329,7 +329,7 @@ def test_v8c_async_skips_sample_wave_stamp_on_non_tp0():
         )
 
     with patch(
-        "vllm_ascend.runtime_guard.processor.runner_tp_rank",
+        "vllm_ascend.observability.runtime_guard.processor.runner_tp_rank",
         return_value=1,
     ):
         p.run_sample_phase(
@@ -342,7 +342,7 @@ def test_v8c_async_skips_sample_wave_stamp_on_non_tp0():
     assert wt.pending("r1") is False
 
     with patch(
-        "vllm_ascend.runtime_guard.processor.runner_tp_rank",
+        "vllm_ascend.observability.runtime_guard.processor.runner_tp_rank",
         return_value=0,
     ):
         p.run_sample_phase(
@@ -416,7 +416,7 @@ def test_v9d_dedupe_key_skips_second_submit_same_key(caplog):
     gate = threading.Event()
     ran: list[int] = []
     try:
-        with caplog.at_level(logging.INFO, logger="vllm_ascend.runtime_guard.action.queue"):
+        with caplog.at_level(logging.INFO, logger="vllm_ascend.observability.runtime_guard.action.queue"):
             assert q.submit(lambda: gate.wait(2.0), dedupe_key=("report", 1, "r1")) is True
             time.sleep(0.05)
             assert q.submit(lambda: ran.append(1), dedupe_key=("report", 1, "r1")) is False
@@ -459,7 +459,7 @@ def test_v10b_unknown_top_level_key_rejected_on_reload(tmp_path: Path, caplog):
     """W2-1 / F-07: typo top-level keys (e.g. windw) must not be silently persisted."""
     import logging
 
-    from vllm_ascend.runtime_config._validate import validate_runtime_config
+    from vllm_ascend.observability.runtime_config._validate import validate_runtime_config
 
     with pytest.raises(ValueError, match="unknown top-level key"):
         validate_runtime_config(
@@ -485,7 +485,7 @@ def test_v10b_unknown_top_level_key_rejected_on_reload(tmp_path: Path, caplog):
     assert cfg.detector_get("token_repeat", "enabled") is False
     cfg_path.write_text(json.dumps({"windw": 10, "detector": {"token_repeat": {"enabled": True}}}), encoding="utf-8")
     os.utime(cfg_path, (time.time() + 10, time.time() + 10))
-    with caplog.at_level(logging.ERROR, logger="vllm_ascend.runtime_config.config"):
+    with caplog.at_level(logging.ERROR, logger="vllm_ascend.observability.runtime_config.config"):
         assert cfg.reload(force=True) is False
     assert any("unknown top-level key" in r.message for r in caplog.records)
     assert cfg.detector_get("token_repeat", "enabled") is False
@@ -517,7 +517,7 @@ def test_v12_logits_finite_unattributable_row_warns_not_misattributes():
     buf = io.StringIO()
     handler = logging.StreamHandler(buf)
     handler.setLevel(logging.WARNING)
-    lg = logging.getLogger("vllm_ascend.runtime_guard.detector.logits_finite")
+    lg = logging.getLogger("vllm_ascend.observability.runtime_guard.detector.logits_finite")
     lg.addHandler(handler)
     try:
         det.check_all(logits=logits, logits_indices=idx, input_batch=input_batch)
@@ -595,8 +595,8 @@ def test_v12c2_logits_finite_hit_resolved_before_enqueue():
 def test_v12d_logits_finite_check_every_tokens_rejected():
     import copy
 
-    from vllm_ascend.runtime_config._defaults import _DEFAULTS
-    from vllm_ascend.runtime_config._validate import validate_runtime_config
+    from vllm_ascend.observability.runtime_config._defaults import _DEFAULTS
+    from vllm_ascend.observability.runtime_config._validate import validate_runtime_config
 
     data = copy.deepcopy(_DEFAULTS)
     data["detector"]["logits_finite"] = {
@@ -650,7 +650,7 @@ def _quota_rc(max_times: int, cooldown: float) -> SimpleNamespace:
 
 
 def test_v14_quota_try_consume_atomic_and_refund():
-    from vllm_ascend.runtime_guard.quota import DumpQuota
+    from vllm_ascend.observability.runtime_guard.quota import DumpQuota
 
     q = DumpQuota(_quota_rc(max_times=2, cooldown=0.0))
     assert q.try_consume() is True
@@ -661,7 +661,7 @@ def test_v14_quota_try_consume_atomic_and_refund():
 
 
 def test_v14b_quota_cooldown_block_must_not_burn():
-    from vllm_ascend.runtime_guard.quota import DumpQuota
+    from vllm_ascend.observability.runtime_guard.quota import DumpQuota
 
     q = DumpQuota(_quota_rc(max_times=5, cooldown=3600.0))
     assert q.try_consume() is True
@@ -676,7 +676,7 @@ def test_v14b_quota_cooldown_block_must_not_burn():
 
 def test_v14c_refund_clears_cooldown_without_prior_count():
     """Defensive: refund with total_count==0 still drops a stale last_ts."""
-    from vllm_ascend.runtime_guard.quota import DumpQuota
+    from vllm_ascend.observability.runtime_guard.quota import DumpQuota
 
     q = DumpQuota(_quota_rc(max_times=5, cooldown=3600.0))
     assert q.try_consume() is True
@@ -689,8 +689,8 @@ def test_v14c_refund_clears_cooldown_without_prior_count():
 
 
 def test_v15_report_writer_dedupes_same_pair(tmp_path: Path):
-    from vllm_ascend.runtime_guard.report import ReportWriter
-    from vllm_ascend.runtime_guard.request_state import RequestGuardStore
+    from vllm_ascend.observability.runtime_guard.report import ReportWriter
+    from vllm_ascend.observability.runtime_guard.request_state import RequestGuardStore
 
     RequestGuardStore.reset_for_tests()
     store = RequestGuardStore.get()
@@ -705,9 +705,9 @@ def test_v15_report_writer_dedupes_same_pair(tmp_path: Path):
 
 
 def test_v15b_report_writer_wave_backoff(tmp_path: Path):
-    from vllm_ascend.runtime_guard._constants import SAME_PAIR_BACKOFF_BASE_WAVES
-    from vllm_ascend.runtime_guard.report import ReportWriter
-    from vllm_ascend.runtime_guard.request_state import RequestGuardStore
+    from vllm_ascend.observability.runtime_guard._constants import SAME_PAIR_BACKOFF_BASE_WAVES
+    from vllm_ascend.observability.runtime_guard.report import ReportWriter
+    from vllm_ascend.observability.runtime_guard.request_state import RequestGuardStore
 
     RequestGuardStore.reset_for_tests()
     store = RequestGuardStore.get()
@@ -727,7 +727,7 @@ def test_v15b_report_writer_wave_backoff(tmp_path: Path):
 
 def test_v15c_stop_detect_after_reap_does_not_resurrect():
     """Report commit can race finish→reap; late stop must not allocate orphans."""
-    from vllm_ascend.runtime_guard.request_state import RequestGuardStore
+    from vllm_ascend.observability.runtime_guard.request_state import RequestGuardStore
 
     RequestGuardStore.reset_for_tests()
     store = RequestGuardStore.get()
@@ -747,7 +747,7 @@ def test_v15c_stop_detect_after_reap_does_not_resurrect():
 
 
 def test_v16b_spec_acceptance_clear_finished_history():
-    from vllm_ascend.runtime_guard.detector.spec_acceptance import SpecAcceptanceDetector
+    from vllm_ascend.observability.runtime_guard.detector.spec_acceptance import SpecAcceptanceDetector
 
     section = {"enabled": True, "window": 2}
     rc = SimpleNamespace(
@@ -764,7 +764,7 @@ def test_v16b_spec_acceptance_clear_finished_history():
 
 
 def test_v17_spec_acceptance_short_batch_no_index_error():
-    from vllm_ascend.runtime_guard.detector.spec_acceptance import SpecAcceptanceDetector
+    from vllm_ascend.observability.runtime_guard.detector.spec_acceptance import SpecAcceptanceDetector
 
     section = {
         "enabled": True,
@@ -787,7 +787,7 @@ def test_v17_spec_acceptance_short_batch_no_index_error():
     det = SpecAcceptanceDetector(runtime_config=rc, runner=runner)
     sampled = torch.tensor([[7, 8, 9, 10], [7, 8, 9, 10]])
     with patch(
-        "vllm_ascend.runtime_guard.detector.spec_acceptance.get_pp_group",
+        "vllm_ascend.observability.runtime_guard.detector.spec_acceptance.get_pp_group",
         return_value=SimpleNamespace(is_last_rank=True),
     ):
         alerts = det.check_all(sampled, [1])  # accepted shorter than req_ids
@@ -796,7 +796,7 @@ def test_v17_spec_acceptance_short_batch_no_index_error():
 
 def test_v17b_spec_acceptance_v2_threads_req_ids_without_input_batch():
     """v2: runner.input_batch is None; req_ids must come from SamplePhaseResult."""
-    from vllm_ascend.runtime_guard.detector.spec_acceptance import SpecAcceptanceDetector
+    from vllm_ascend.observability.runtime_guard.detector.spec_acceptance import SpecAcceptanceDetector
 
     section = {
         "enabled": True,
@@ -819,7 +819,7 @@ def test_v17b_spec_acceptance_v2_threads_req_ids_without_input_batch():
     det = SpecAcceptanceDetector(runtime_config=rc, runner=runner)
     sampled = torch.tensor([[7, 8, 9, 10], [7, 8, 9, 10]])
     with patch(
-        "vllm_ascend.runtime_guard.detector.spec_acceptance.get_pp_group",
+        "vllm_ascend.observability.runtime_guard.detector.spec_acceptance.get_pp_group",
         return_value=SimpleNamespace(is_last_rank=True),
     ):
         assert det.check_all(sampled, [0, 0]) == []
@@ -830,7 +830,7 @@ def test_v17b_spec_acceptance_v2_threads_req_ids_without_input_batch():
 
 def test_v17c_check_after_spec_forwards_req_ids():
     """Processor/DetectorManager must pass SamplePhaseResult.req_ids_output_copy."""
-    from vllm_ascend.runtime_guard.detector.manager import DetectorManager
+    from vllm_ascend.observability.runtime_guard.detector.manager import DetectorManager
 
     seen: dict[str, object] = {}
 
@@ -856,7 +856,7 @@ def test_v17c_check_after_spec_forwards_req_ids():
 
 
 def test_v18_dump_payload_carries_tp_rank_and_heads(tmp_path: Path):
-    from vllm_ascend.runtime_guard.kv_cache_reader import KvCacheReader
+    from vllm_ascend.observability.runtime_guard.kv_cache_reader import KvCacheReader
 
     cache = torch.randn(4, 8, 2, 16)  # [blocks, block_size, kv_heads, head_dim]
     runner = SimpleNamespace(kv_caches={"L0": cache}, tp_rank=3, dp_rank=0, dcp_rank=0, dcp_size=1)
@@ -874,7 +874,7 @@ def test_v18_dump_payload_carries_tp_rank_and_heads(tmp_path: Path):
 
 def test_v18c_list_kv_caches_use_global_layer_names(tmp_path: Path):
     """PP last stage: list caches must not be named layer_0.. locally."""
-    from vllm_ascend.runtime_guard.kv_cache_reader import KvCacheReader
+    from vllm_ascend.observability.runtime_guard.kv_cache_reader import KvCacheReader
 
     cache0 = torch.randn(2, 4, 1, 8)
     cache1 = torch.randn(2, 4, 1, 8)
@@ -900,7 +900,7 @@ def test_v18c_list_kv_caches_use_global_layer_names(tmp_path: Path):
 
 
 def test_v18d_list_kv_caches_fallback_start_layer(tmp_path: Path):
-    from vllm_ascend.runtime_guard.kv_cache_reader import KvCacheReader
+    from vllm_ascend.observability.runtime_guard.kv_cache_reader import KvCacheReader
 
     cache = torch.randn(2, 4, 1, 8)
     runner = SimpleNamespace(
@@ -921,9 +921,9 @@ def test_v18d_list_kv_caches_fallback_start_layer(tmp_path: Path):
 
 @pytest.mark.parametrize("tp_rank", [0, 1])
 def test_v18b_kv_drain_dumps_on_tp_ranks(tmp_path: Path, tp_rank: int):
-    from vllm_ascend.runtime_guard.kv_cache_reader import KvCacheReader
-    from vllm_ascend.runtime_guard.processor import RuntimeGuardProcessor
-    from vllm_ascend.runtime_guard.rank_gate import dump_rank_tag
+    from vllm_ascend.observability.runtime_guard.kv_cache_reader import KvCacheReader
+    from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
+    from vllm_ascend.observability.runtime_guard.rank_gate import dump_rank_tag
 
     cache = torch.randn(2, 4, 1, 8)
     runner = SimpleNamespace(
@@ -948,7 +948,7 @@ def test_v18b_kv_drain_dumps_on_tp_ranks(tmp_path: Path, tp_rank: int):
         }
     ]
     with patch(
-        "vllm_ascend.runtime_guard.processor_dump.block_ids_for_request",
+        "vllm_ascend.observability.runtime_guard.processor_dump.block_ids_for_request",
         return_value=[0],
     ):
         RuntimeGuardProcessor._run_kv_dumps(proc, jobs)
@@ -958,7 +958,7 @@ def test_v18b_kv_drain_dumps_on_tp_ranks(tmp_path: Path, tp_rank: int):
 
 
 def test_v18e_file_mode_claim_skips_object_broadcast_when_empty():
-    from vllm_ascend.runtime_guard.processor import RuntimeGuardProcessor
+    from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
 
     proc = SimpleNamespace(
         runner=SimpleNamespace(),
@@ -972,11 +972,11 @@ def test_v18e_file_mode_claim_skips_object_broadcast_when_empty():
     tp.broadcast_object = MagicMock()
     with (
         patch(
-            "vllm_ascend.runtime_guard.processor_dump.should_dump_kv_on_rank",
+            "vllm_ascend.observability.runtime_guard.processor_dump.should_dump_kv_on_rank",
             return_value=True,
         ),
         patch(
-            "vllm_ascend.runtime_guard.processor_dump.get_tp_group",
+            "vllm_ascend.observability.runtime_guard.processor_dump.get_tp_group",
             return_value=tp,
         ),
         patch("torch.distributed.all_reduce"),
@@ -988,7 +988,7 @@ def test_v18e_file_mode_claim_skips_object_broadcast_when_empty():
 
 def test_v18h_apply_config_payload_bumps_follower_reload_ts(tmp_path: Path):
     """Followers must advance _last_reload_ts even when data is None."""
-    from vllm_ascend.runtime_config.config import RuntimeConfig
+    from vllm_ascend.observability.runtime_config.config import RuntimeConfig
 
     path = tmp_path / "runtime_config.json"
     path.write_text("{}", encoding="utf-8")
@@ -1013,7 +1013,7 @@ def test_v18h_apply_config_payload_bumps_follower_reload_ts(tmp_path: Path):
 
 def test_v18f_merged_bus_idle_one_ar_zero_bcast():
     """Wave-head: neither lane due → one due AR, no broadcast_object."""
-    from vllm_ascend.runtime_guard.processor import RuntimeGuardProcessor
+    from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
 
     cfg = MagicMock()
     cfg.hot_reload_enabled = True
@@ -1033,7 +1033,7 @@ def test_v18f_merged_bus_idle_one_ar_zero_bcast():
     )
     with (
         patch(
-            "vllm_ascend.runtime_guard.processor_bus.should_dump_kv_on_rank",
+            "vllm_ascend.observability.runtime_guard.processor_bus.should_dump_kv_on_rank",
             return_value=True,
         ),
         patch("torch.distributed.all_reduce") as ar,
@@ -1046,7 +1046,7 @@ def test_v18f_merged_bus_idle_one_ar_zero_bcast():
 
 def test_v18g_merged_bus_both_lanes_two_bcasts():
     """When both due: one AR + config bcast + dump bcast (dump stashed deferred)."""
-    from vllm_ascend.runtime_guard.processor import RuntimeGuardProcessor
+    from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
 
     jobs = [{"req_id": "r1", "incident_type": "token_repeat"}]
     cfg = MagicMock()
@@ -1072,7 +1072,7 @@ def test_v18g_merged_bus_both_lanes_two_bcasts():
     )
     with (
         patch(
-            "vllm_ascend.runtime_guard.processor_bus.should_dump_kv_on_rank",
+            "vllm_ascend.observability.runtime_guard.processor_bus.should_dump_kv_on_rank",
             return_value=True,
         ),
         patch("torch.distributed.all_reduce"),
@@ -1162,9 +1162,9 @@ def _quota_stub(ok: bool = True):
 
 def test_v19a4_manual_dump_arms_with_empty_block_ids(monkeypatch):
     """First prefill wave: req ids known, block table empty — still queue."""
-    from vllm_ascend.runtime_guard.action.actions import DumpKvAction
-    from vllm_ascend.runtime_guard.incident import Incident
-    from vllm_ascend.runtime_guard.manual_trigger import MANUAL_TRIGGER_TYPE
+    from vllm_ascend.observability.runtime_guard.action.actions import DumpKvAction
+    from vllm_ascend.observability.runtime_guard.incident import Incident
+    from vllm_ascend.observability.runtime_guard.manual_trigger import MANUAL_TRIGGER_TYPE
 
     rc = _ConsumeRecorder(remaining=1)
     kv_reader = MagicMock()
@@ -1182,7 +1182,7 @@ def test_v19a4_manual_dump_arms_with_empty_block_ids(monkeypatch):
     )
     ctx.action_overrides = {"dump_kv": {"scope": "all_requests"}}
     monkeypatch.setattr(
-        "vllm_ascend.runtime_guard.kv_block_meta.block_ids_for_request",
+        "vllm_ascend.observability.runtime_guard.kv_block_meta.block_ids_for_request",
         lambda *_a, **_k: [],
     )
     DumpKvAction().run(ctx)
@@ -1192,9 +1192,9 @@ def test_v19a4_manual_dump_arms_with_empty_block_ids(monkeypatch):
 
 def test_v19a_manual_dump_forces_all_requests_no_consume_in_prepare(monkeypatch):
     """Manual dump ignores scope=request; consume happens in processor handle."""
-    from vllm_ascend.runtime_guard.action.actions import DumpKvAction
-    from vllm_ascend.runtime_guard.incident import Incident
-    from vllm_ascend.runtime_guard.manual_trigger import MANUAL_TRIGGER_TYPE
+    from vllm_ascend.observability.runtime_guard.action.actions import DumpKvAction
+    from vllm_ascend.observability.runtime_guard.incident import Incident
+    from vllm_ascend.observability.runtime_guard.manual_trigger import MANUAL_TRIGGER_TYPE
 
     rc = _ConsumeRecorder(remaining=2)
     kv_reader = MagicMock()
@@ -1212,7 +1212,7 @@ def test_v19a_manual_dump_forces_all_requests_no_consume_in_prepare(monkeypatch)
     )
     ctx.action_overrides = {"dump_kv": {"scope": "request"}}
     monkeypatch.setattr(
-        "vllm_ascend.runtime_guard.kv_block_meta.block_ids_for_request",
+        "vllm_ascend.observability.runtime_guard.kv_block_meta.block_ids_for_request",
         lambda _runner, req_id, req_idx=None, **kw: [0] if req_id == "r1" else [1],
     )
     DumpKvAction().run(ctx)  # arm only; D2H is end_of_wave_sync at sample end
@@ -1223,7 +1223,7 @@ def test_v19a_manual_dump_forces_all_requests_no_consume_in_prepare(monkeypatch)
 
 
 def test_v19a2_manual_trigger_handle_consumes_one_count():
-    from vllm_ascend.runtime_guard.manual_trigger import (
+    from vllm_ascend.observability.runtime_guard.manual_trigger import (
         MANUAL_TRIGGER_REQ_ID,
         MANUAL_TRIGGER_TYPE,
         TriggerEvent,
@@ -1253,12 +1253,12 @@ def test_v19a2_manual_trigger_handle_consumes_one_count():
     p.wave_tracker.current_wave.return_value = 3
     with (
         patch(
-            "vllm_ascend.runtime_guard.processor_report.is_action_leader_rank",
+            "vllm_ascend.observability.runtime_guard.processor_report.is_action_leader_rank",
             return_value=True,
         ),
-        patch("vllm_ascend.runtime_guard.processor_report.RequestIoSnapshotManager") as io_cls,
+        patch("vllm_ascend.observability.runtime_guard.processor_report.RequestIoSnapshotManager") as io_cls,
         patch(
-            "vllm_ascend.runtime_guard.processor_report.block_ids_for_request",
+            "vllm_ascend.observability.runtime_guard.processor_report.block_ids_for_request",
             return_value=[0],
         ),
     ):
@@ -1275,7 +1275,7 @@ def test_v19a2_manual_trigger_handle_consumes_one_count():
 
 def test_v19a3_manual_trigger_consumes_even_when_dump_not_armed():
     """Arm failure still burns manual_dump; DumpKvAction writes dump_skipped."""
-    from vllm_ascend.runtime_guard.manual_trigger import (
+    from vllm_ascend.observability.runtime_guard.manual_trigger import (
         MANUAL_TRIGGER_REQ_ID,
         MANUAL_TRIGGER_TYPE,
         TriggerEvent,
@@ -1292,12 +1292,12 @@ def test_v19a3_manual_trigger_consumes_even_when_dump_not_armed():
     p.wave_tracker.current_wave.return_value = 1
     with (
         patch(
-            "vllm_ascend.runtime_guard.processor_report.is_action_leader_rank",
+            "vllm_ascend.observability.runtime_guard.processor_report.is_action_leader_rank",
             return_value=True,
         ),
-        patch("vllm_ascend.runtime_guard.processor_report.RequestIoSnapshotManager") as io_cls,
+        patch("vllm_ascend.observability.runtime_guard.processor_report.RequestIoSnapshotManager") as io_cls,
         patch(
-            "vllm_ascend.runtime_guard.processor_report.block_ids_for_request",
+            "vllm_ascend.observability.runtime_guard.processor_report.block_ids_for_request",
             return_value=[],
         ),
     ):
@@ -1313,8 +1313,8 @@ def test_v19a3_manual_trigger_consumes_even_when_dump_not_armed():
 
 
 def test_v19b_non_manual_incident_does_not_consume():
-    from vllm_ascend.runtime_guard.action.actions import DumpKvAction
-    from vllm_ascend.runtime_guard.incident import Incident
+    from vllm_ascend.observability.runtime_guard.action.actions import DumpKvAction
+    from vllm_ascend.observability.runtime_guard.incident import Incident
 
     rc = _ConsumeRecorder(remaining=2)
     kv_reader = MagicMock()
@@ -1335,9 +1335,9 @@ def test_v19b_non_manual_incident_does_not_consume():
 
 def test_v19c_empty_block_ids_manual_still_queues(monkeypatch):
     """Manual arm with empty block_ids still queues (resolve at flush)."""
-    from vllm_ascend.runtime_guard.action.actions import DumpKvAction
-    from vllm_ascend.runtime_guard.incident import Incident
-    from vllm_ascend.runtime_guard.manual_trigger import MANUAL_TRIGGER_TYPE
+    from vllm_ascend.observability.runtime_guard.action.actions import DumpKvAction
+    from vllm_ascend.observability.runtime_guard.incident import Incident
+    from vllm_ascend.observability.runtime_guard.manual_trigger import MANUAL_TRIGGER_TYPE
 
     rc = _ConsumeRecorder(remaining=2)
     kv_reader = MagicMock()
@@ -1350,7 +1350,7 @@ def test_v19c_empty_block_ids_manual_still_queues(monkeypatch):
         req_ids=["r1"],
     )
     monkeypatch.setattr(
-        "vllm_ascend.runtime_guard.kv_block_meta.block_ids_for_request",
+        "vllm_ascend.observability.runtime_guard.kv_block_meta.block_ids_for_request",
         lambda *_a, **_k: [],
     )
     DumpKvAction().run(ctx)
@@ -1360,8 +1360,8 @@ def test_v19c_empty_block_ids_manual_still_queues(monkeypatch):
 
 
 def test_v19d_dump_kv_queues_jobs_on_leader():
-    from vllm_ascend.runtime_guard.action.actions import DumpKvAction
-    from vllm_ascend.runtime_guard.incident import Incident
+    from vllm_ascend.observability.runtime_guard.action.actions import DumpKvAction
+    from vllm_ascend.observability.runtime_guard.incident import Incident
 
     guard = MagicMock()
     rc = _ConsumeRecorder(remaining=2)
@@ -1379,7 +1379,7 @@ def test_v19d_dump_kv_queues_jobs_on_leader():
     )
     ctx.runner.runtime_guard = guard
     with patch(
-        "vllm_ascend.runtime_guard.action.actions.runner_tp_rank",
+        "vllm_ascend.observability.runtime_guard.action.actions.runner_tp_rank",
         return_value=0,
     ):
         DumpKvAction().run(ctx)
@@ -1391,8 +1391,8 @@ def test_v19d_dump_kv_queues_jobs_on_leader():
 
 
 def test_v19e_queue_fail_refunds_quota():
-    from vllm_ascend.runtime_guard.action.actions import DumpKvAction
-    from vllm_ascend.runtime_guard.incident import Incident
+    from vllm_ascend.observability.runtime_guard.action.actions import DumpKvAction
+    from vllm_ascend.observability.runtime_guard.incident import Incident
 
     rc = _ConsumeRecorder(remaining=2)
     kv_reader = MagicMock()
@@ -1411,7 +1411,7 @@ def test_v19e_queue_fail_refunds_quota():
     # Drop queue so _queue_kv_dumps returns False after try_consume.
     ctx.runner.runtime_guard = SimpleNamespace()
     with patch(
-        "vllm_ascend.runtime_guard.action.actions.runner_tp_rank",
+        "vllm_ascend.observability.runtime_guard.action.actions.runner_tp_rank",
         return_value=0,
     ):
         DumpKvAction().run(ctx)
@@ -1421,8 +1421,8 @@ def test_v19e_queue_fail_refunds_quota():
 
 def test_v19f_multi_job_arm_refunds_once_when_all_fail(tmp_path: Path):
     """Same arm_id + consume_quota: all skips → single refund (not N)."""
-    from vllm_ascend.runtime_guard.processor import RuntimeGuardProcessor
-    from vllm_ascend.runtime_guard.request_state import RequestGuardStore
+    from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
+    from vllm_ascend.observability.runtime_guard.request_state import RequestGuardStore
 
     RequestGuardStore.reset_for_tests()
     try:
@@ -1460,7 +1460,7 @@ def test_v19f_multi_job_arm_refunds_once_when_all_fail(tmp_path: Path):
 
 
 def test_v21_bootstrap_overwrites_existing_file_with_defaults(tmp_path: Path, monkeypatch):
-    import vllm_ascend.runtime_config.config as cfg
+    import vllm_ascend.observability.runtime_config.config as cfg
 
     cfg_file = tmp_path / "runtime" / "config" / "runtime_config.json"
     cfg_file.parent.mkdir(parents=True)
@@ -1477,7 +1477,7 @@ def test_v21_bootstrap_overwrites_existing_file_with_defaults(tmp_path: Path, mo
 
 
 def test_v21b_default_path_missing_file_pure_defaults(tmp_path: Path, monkeypatch):
-    import vllm_ascend.runtime_config.config as cfg
+    import vllm_ascend.observability.runtime_config.config as cfg
 
     monkeypatch.chdir(tmp_path)
     rc = cfg.RuntimeConfig(config_path=None)
@@ -1489,7 +1489,7 @@ def test_v21c_pre_bootstrap_file_ignored_on_reload(tmp_path: Path):
     """A JSON written before this process's bootstrap must not leak in via the
     first hot-reload (the race where the background reloader reads the stale
     file before ``ensure_persisted`` overwrites it)."""
-    import vllm_ascend.runtime_config.config as cfg
+    import vllm_ascend.observability.runtime_config.config as cfg
 
     cfg_file = tmp_path / "runtime_config.json"
     # Hand-edit written well before bootstrap: token_repeat enabled.
@@ -1531,7 +1531,7 @@ def test_v21c_pre_bootstrap_file_ignored_on_reload(tmp_path: Path):
 def test_v23_dump_root_default_json_and_startup_seed(tmp_path: Path, monkeypatch):
     import json
 
-    import vllm_ascend.runtime_config.config as cfg
+    import vllm_ascend.observability.runtime_config.config as cfg
 
     monkeypatch.chdir(tmp_path)
     cfg_file = tmp_path / "runtime" / "config" / "runtime_config.json"
@@ -1570,7 +1570,7 @@ def test_v23_dump_root_default_json_and_startup_seed(tmp_path: Path, monkeypatch
 
 
 def test_v23b_report_writer_dump_dir_follows_provider(tmp_path: Path):
-    from vllm_ascend.runtime_guard.report import ReportWriter
+    from vllm_ascend.observability.runtime_guard.report import ReportWriter
 
     root = tmp_path / "kv_root"
 
@@ -1590,11 +1590,11 @@ def test_v23b_report_writer_dump_dir_follows_provider(tmp_path: Path):
 
 def test_v23c_manual_trigger_report_dump_dir_uses_real_req_ids(tmp_path: Path):
     """Per-req manual reports: top-level req_id/dump_dir align (W3-2 / K-13)."""
-    from vllm_ascend.runtime_guard.manual_trigger import (
+    from vllm_ascend.observability.runtime_guard.manual_trigger import (
         MANUAL_TRIGGER_REQ_ID,
         MANUAL_TRIGGER_TYPE,
     )
-    from vllm_ascend.runtime_guard.report import ReportWriter
+    from vllm_ascend.observability.runtime_guard.report import ReportWriter
 
     root = tmp_path / "kv"
     w = ReportWriter(tmp_path / "reports", dump_root_provider=lambda: str(root))
@@ -1640,7 +1640,7 @@ def test_v23c_manual_trigger_report_dump_dir_uses_real_req_ids(tmp_path: Path):
 
 def test_v23d_manual_handle_writes_one_report_per_req(tmp_path: Path):
     """``_handle_manual_trigger`` one ActionExecutor.handle(report) per batch row."""
-    from vllm_ascend.runtime_guard.manual_trigger import (
+    from vllm_ascend.observability.runtime_guard.manual_trigger import (
         MANUAL_TRIGGER_REQ_ID,
         MANUAL_TRIGGER_TYPE,
         TriggerEvent,
@@ -1656,12 +1656,12 @@ def test_v23d_manual_handle_writes_one_report_per_req(tmp_path: Path):
     p.wave_tracker.current_wave.return_value = 5
     with (
         patch(
-            "vllm_ascend.runtime_guard.processor_report.is_action_leader_rank",
+            "vllm_ascend.observability.runtime_guard.processor_report.is_action_leader_rank",
             return_value=True,
         ),
-        patch("vllm_ascend.runtime_guard.processor_report.RequestIoSnapshotManager") as io_cls,
+        patch("vllm_ascend.observability.runtime_guard.processor_report.RequestIoSnapshotManager") as io_cls,
         patch(
-            "vllm_ascend.runtime_guard.processor_report.block_ids_for_request",
+            "vllm_ascend.observability.runtime_guard.processor_report.block_ids_for_request",
             side_effect=lambda _r, rid, *_a, **_k: [10] if rid == "cmpl-a" else [20],
         ),
     ):
@@ -1690,7 +1690,7 @@ def test_v23d_manual_handle_writes_one_report_per_req(tmp_path: Path):
 
 def test_v25b_dump_rank_tag_uses_global_dp_rank(monkeypatch):
     """External multi-DP: get_dp_group().rank_in_group is 0; use runner.dp_rank."""
-    import vllm_ascend.runtime_guard.rank_gate as rank_gate
+    import vllm_ascend.observability.runtime_guard.rank_gate as rank_gate
 
     monkeypatch.setattr(
         rank_gate,
@@ -1721,7 +1721,7 @@ def test_v25b_dump_rank_tag_uses_global_dp_rank(monkeypatch):
 
 
 def test_v25b_manager_skips_when_gated(tmp_path, monkeypatch):
-    import vllm_ascend.runtime_config.config as cfg
+    import vllm_ascend.observability.runtime_config.config as cfg
 
     monkeypatch.chdir(tmp_path)
     rc = cfg.RuntimeConfig(config_path=None)
@@ -1749,9 +1749,9 @@ def test_v25b_manager_skips_when_gated(tmp_path, monkeypatch):
 
 
 def test_v26a_after_sample_cpu_does_not_block_return():
-    from vllm_ascend.runtime_guard.detector.manager import AfterSampleCpuSnapshot
-    from vllm_ascend.runtime_guard.incident import Incident
-    from vllm_ascend.runtime_guard.request_state import RequestGuardStore
+    from vllm_ascend.observability.runtime_guard.detector.manager import AfterSampleCpuSnapshot
+    from vllm_ascend.observability.runtime_guard.incident import Incident
+    from vllm_ascend.observability.runtime_guard.request_state import RequestGuardStore
 
     RequestGuardStore.reset_for_tests()
     p = object.__new__(RuntimeGuardProcessor)
@@ -1819,7 +1819,7 @@ def test_v26b_cpu_detect_dropped_not_inline():
 
 def test_v27a_print_output_uses_runner_tp_rank(monkeypatch):
     """v1 runners often lack tp_rank; must not print on every TP via getattr→0."""
-    from vllm_ascend.runtime_guard.processor_report import RuntimeGuardReportMixin
+    from vllm_ascend.observability.runtime_guard.processor_report import RuntimeGuardReportMixin
 
     calls: list[int] = []
 
@@ -1828,7 +1828,7 @@ def test_v27a_print_output_uses_runner_tp_rank(monkeypatch):
         return 1  # non-TP0
 
     monkeypatch.setattr(
-        "vllm_ascend.runtime_guard.processor_report.runner_tp_rank",
+        "vllm_ascend.observability.runtime_guard.processor_report.runner_tp_rank",
         _fake_tp_rank,
     )
     p = object.__new__(RuntimeGuardProcessor)
@@ -1841,8 +1841,8 @@ def test_v27a_print_output_uses_runner_tp_rank(monkeypatch):
 
 
 def test_v27b_dump_prepare_exception_refunds_quota():
-    from vllm_ascend.runtime_guard.action.actions import DumpKvAction
-    from vllm_ascend.runtime_guard.incident import Incident
+    from vllm_ascend.observability.runtime_guard.action.actions import DumpKvAction
+    from vllm_ascend.observability.runtime_guard.incident import Incident
 
     rc = _ConsumeRecorder(remaining=2)
     kv_reader = MagicMock()
@@ -1861,7 +1861,7 @@ def test_v27b_dump_prepare_exception_refunds_quota():
     ctx.runner.runtime_guard.queue_kv_dump.side_effect = RuntimeError("boom")
     with (
         patch(
-            "vllm_ascend.runtime_guard.action.actions.runner_tp_rank",
+            "vllm_ascend.observability.runtime_guard.action.actions.runner_tp_rank",
             return_value=0,
         ),
         pytest.raises(RuntimeError, match="boom"),
@@ -1873,7 +1873,7 @@ def test_v27b_dump_prepare_exception_refunds_quota():
 
 def test_v27c_zombie_with_stuck_cpu_jobs_force_reaps():
     """Post-reap late append: finished + mark=None + cpu_jobs must not stick forever."""
-    from vllm_ascend.runtime_guard.request_state import RequestGuardStore
+    from vllm_ascend.observability.runtime_guard.request_state import RequestGuardStore
 
     RequestGuardStore.reset_for_tests()
     try:

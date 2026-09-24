@@ -112,14 +112,14 @@ from vllm.v1.worker.gpu_model_runner import (
     nans_to_dict,
 )
 
-from vllm_ascend.runtime_guard.processor import RuntimeGuardProcessor, SamplePhaseResult
-from vllm_ascend.runtime_guard.runner_bridge import (
+from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor, SamplePhaseResult
+from vllm_ascend.observability.runtime_guard.runner_bridge import (
     AscendAsyncGPUModelRunnerOutput,
     is_async_output_rank,
     need_pre_sample_hook,
     wrap_compute_logits_for_pre_sample,
 )
-from vllm_ascend.runtime_guard.token_utils import accepted_token_counts
+from vllm_ascend.observability.runtime_guard.token_utils import accepted_token_counts
 
 # vLLM main (#15146) exports gpu_sync_allowed; keep optional for older wheels.
 try:

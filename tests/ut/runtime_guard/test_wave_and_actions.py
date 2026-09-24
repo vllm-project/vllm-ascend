@@ -18,10 +18,10 @@ import threading
 import time
 from unittest.mock import MagicMock, patch
 
-from vllm_ascend.runtime_guard.action.queue import ActionQueue
-from vllm_ascend.runtime_guard.processor import RuntimeGuardProcessor
-from vllm_ascend.runtime_guard.quota import DumpQuota
-from vllm_ascend.runtime_guard.wave_tracker import WaveTracker
+from vllm_ascend.observability.runtime_guard.action.queue import ActionQueue
+from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
+from vllm_ascend.observability.runtime_guard.quota import DumpQuota
+from vllm_ascend.observability.runtime_guard.wave_tracker import WaveTracker
 
 
 class _Cfg:

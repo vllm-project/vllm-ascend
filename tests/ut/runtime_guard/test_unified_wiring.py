@@ -4,8 +4,8 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from vllm_ascend.runtime_guard.processor import RuntimeGuardProcessor, SamplePhaseResult
-from vllm_ascend.runtime_guard.runner_bridge import (
+from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor, SamplePhaseResult
+from vllm_ascend.observability.runtime_guard.runner_bridge import (
     check_before_sample_from_batch,
     wrap_compute_logits_for_pre_sample,
 )
@@ -144,7 +144,7 @@ def test_d11_async_model_runner_output_defers_after_sample():
     """
     from vllm.v1.outputs import AsyncModelRunnerOutput, ModelRunnerOutput
 
-    from vllm_ascend.runtime_guard.processor import SamplePhaseResult
+    from vllm_ascend.observability.runtime_guard.processor import SamplePhaseResult
 
     class _FakeAsync(AsyncModelRunnerOutput):
         def get_output(self) -> ModelRunnerOutput:
@@ -187,7 +187,7 @@ def test_d11_trim_sampled_rows_drops_pad_beyond_num_sampled():
     """Padded v2 rows must keep only num_sampled tokens (AsyncOutput.get_output)."""
     import numpy as np
 
-    from vllm_ascend.runtime_guard.token_utils import trim_sampled_rows
+    from vllm_ascend.observability.runtime_guard.token_utils import trim_sampled_rows
 
     padded = np.array([[42, 0, 0, 7], [9, -1, -1, -1]], dtype=np.int64)
     trimmed = trim_sampled_rows(padded, num_sampled=np.array([1, 1], dtype=np.int32))
@@ -196,9 +196,9 @@ def test_d11_trim_sampled_rows_drops_pad_beyond_num_sampled():
 
 def test_d11_ascend_async_output_appends_trimmed_once():
     """AscendAsyncOutput.get_output is the sole after-sample append for v2."""
-    from vllm_ascend.runtime_guard.io_snapshot import RequestIoSnapshotManager
-    from vllm_ascend.runtime_guard.request_state import RequestGuardStore
-    from vllm_ascend.runtime_guard.runner_bridge import AscendAsyncOutput
+    from vllm_ascend.observability.runtime_guard.io_snapshot import RequestIoSnapshotManager
+    from vllm_ascend.observability.runtime_guard.request_state import RequestGuardStore
+    from vllm_ascend.observability.runtime_guard.runner_bridge import AscendAsyncOutput
 
     RequestGuardStore.reset_for_tests()
     RequestIoSnapshotManager.reset_for_tests()
@@ -263,7 +263,7 @@ def _fake_req_states(rows):
 def test_read_staged_row_prefers_fresh_host_mirror():
     import numpy as np
 
-    from vllm_ascend.runtime_guard.io_snapshot import _read_staged_row
+    from vllm_ascend.observability.runtime_guard.io_snapshot import _read_staged_row
 
     staged = _FakeStaged(np.array([[5, 6, 7, 0]], dtype=np.int64), gpu=None)
     assert _read_staged_row(staged, 0, 3) == [5, 6, 7]
@@ -274,14 +274,14 @@ def test_read_staged_row_falls_to_gpu_when_host_mirror_stale():
     import numpy as np
     import torch
 
-    from vllm_ascend.runtime_guard.io_snapshot import _read_staged_row
+    from vllm_ascend.observability.runtime_guard.io_snapshot import _read_staged_row
 
     staged = _FakeStaged(np.zeros((1, 4), dtype=np.int64), torch.tensor([[1, 2, 3, 4]]))
     assert _read_staged_row(staged, 0, 4) == [1, 2, 3, 4]
 
 
 def test_req_state_index_prefers_explicit_idx_then_id_map():
-    from vllm_ascend.runtime_guard.io_snapshot import _req_state_index
+    from vllm_ascend.observability.runtime_guard.io_snapshot import _req_state_index
 
     states = _fake_req_states([([1], [2]), ([3], [4])])
     assert _req_state_index(states, "req-1", None) == 1
@@ -290,15 +290,15 @@ def test_req_state_index_prefers_explicit_idx_then_id_map():
 
 
 def test_output_from_req_states_reads_device_side_appends():
-    from vllm_ascend.runtime_guard.io_snapshot import _output_from_req_states
+    from vllm_ascend.observability.runtime_guard.io_snapshot import _output_from_req_states
 
     runner = SimpleNamespace(req_states=_fake_req_states([([10, 11, 12, 13], [90, 91, 92])]))
     assert _output_from_req_states(runner, "req-0", 0) == (3, [90, 91, 92])
 
 
 def test_output_token_count_uses_v2_staged_tensors_when_v1_paths_empty():
-    from vllm_ascend.runtime_guard.io_snapshot import output_token_count_for_request
-    from vllm_ascend.runtime_guard.request_state import RequestGuardStore
+    from vllm_ascend.observability.runtime_guard.io_snapshot import output_token_count_for_request
+    from vllm_ascend.observability.runtime_guard.request_state import RequestGuardStore
 
     RequestGuardStore.reset_for_tests()
     runner = SimpleNamespace(req_states=_fake_req_states([([10, 11], [42, 43, 44])]))
@@ -306,8 +306,8 @@ def test_output_token_count_uses_v2_staged_tensors_when_v1_paths_empty():
 
 
 def test_snapshot_reports_prompt_and_output_for_v2_runner():
-    from vllm_ascend.runtime_guard.io_snapshot import RequestIoSnapshotManager
-    from vllm_ascend.runtime_guard.request_state import RequestGuardStore
+    from vllm_ascend.observability.runtime_guard.io_snapshot import RequestIoSnapshotManager
+    from vllm_ascend.observability.runtime_guard.request_state import RequestGuardStore
 
     RequestGuardStore.reset_for_tests()
     RequestIoSnapshotManager.reset_for_tests()

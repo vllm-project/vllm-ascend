@@ -160,7 +160,7 @@ Combine **all `tp*` dirs under the same `req_id` + same `wave_*` on last PP** fo
 - Cause: container UCM may replace `vllm.logger.init_logger`; loggers from that entry can have levels locked in C extensions.
 - This repo: runtime_guard / Ascend modules use `init_logger_ascend` (stdlib + once methods), unaffected by UCM replacement.
 - Note: upstream code still using `vllm.logger.init_logger` may remain affected by UCM.
-- Preflight: `type(logging.getLogger("vllm_ascend.runtime_guard..."))` should be `logging.Logger`, and present in `Logger.manager.loggerDict` (UT checklist: `tests/ut/runtime_guard/TEST_MATRIX.md` L1–L5).
+- Preflight: `type(logging.getLogger("vllm_ascend.observability.runtime_guard..."))` should be `logging.Logger`, and present in `Logger.manager.loggerDict` (UT checklist: `tests/ut/runtime_guard/TEST_MATRIX.md` L1–L5).
 
 ## 3. Troubleshooting Quick Reference
 

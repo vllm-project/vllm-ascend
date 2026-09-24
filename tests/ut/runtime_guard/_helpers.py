@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from vllm_ascend.runtime_guard.processor import RuntimeGuardProcessor
+from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
 
 
 def bare_processor() -> RuntimeGuardProcessor:

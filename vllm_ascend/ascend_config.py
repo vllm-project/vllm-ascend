@@ -1678,7 +1678,7 @@ def init_ascend_config(vllm_config: VllmConfig) -> AscendConfig:
     # pre-step; the resolved path is passed as the dump_config_path field.
     dump_config_path = AscendConfig._resolve_dump_config_path(additional_config)
 
-    from vllm_ascend.runtime_config.from_additional_config import (
+    from vllm_ascend.observability.runtime_config.from_additional_config import (
         ADDITIONAL_CONFIG_STRIP_KEYS as _RUNTIME_CONFIG_STRIP_KEYS,
         build_runtime_config_from_additional,
     )

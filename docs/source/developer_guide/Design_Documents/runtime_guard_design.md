@@ -1,8 +1,8 @@
 # Runtime Guard Design (vllm-ascend)
 
 > Runtime anomaly detection and incident response control plane.  
-> Code root: `vllm_ascend/runtime_guard/`  
-> Config module: `vllm_ascend/runtime_config/`
+> Code root: `vllm_ascend/observability/runtime_guard/`  
+> Config module: `vllm_ascend/observability/runtime_config/`
 
 ## 1. Components and Flow
 
@@ -19,7 +19,7 @@
 | Quota | `quota.py` (`DumpQuota`) | Auto dump count cap and cooldown |
 | Rank gate | `rank_gate.py` | Detection / report: last-PP TP0; dump: all TP on last PP |
 
-Public entry: `from vllm_ascend.runtime_guard import RuntimeGuardProcessor`
+Public entry: `from vllm_ascend.observability.runtime_guard import RuntimeGuardProcessor`
 
 ```text
 additional_config
@@ -126,7 +126,7 @@ Cost: with PP==1 broadcast, dump and config share one `all_reduce` due bit; no `
 | Default file | `<cwd>/runtime/config/runtime_config.json` |
 | Explicit path | `additional_config.runtime_config_path` |
 | Report root | Default `<cwd>/runtime/report`; override with `runtime_report_dir` |
-| Example | `vllm_ascend/runtime_config/templates/runtime_config.example.jsonc` |
+| Example | `vllm_ascend/observability/runtime_config/templates/runtime_config.example.jsonc` |
 
 ### 2.2 Sync mode `sync_mode`
 

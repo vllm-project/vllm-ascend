@@ -97,7 +97,7 @@ runtime_guard loggers stay on the stdlib tree.
 
 | ID | What | How (UT) | Expect |
 |----|------|----------|--------|
-| L1 | Logger type | `import vllm_ascend.runtime_guard.detector.logits_finite as m; type(m.logger)` | `logging.Logger`, registered in `Logger.manager.loggerDict` (not `ucm.logger.Logger`) |
+| L1 | Logger type | `import vllm_ascend.observability.runtime_guard.detector.logits_finite as m; type(m.logger)` | `logging.Logger`, registered in `Logger.manager.loggerDict` (not `ucm.logger.Logger`) |
 | L2 | Once helpers | `hasattr(logger, "info_once"/"debug_once"/"warning_once")` | All True; repeated calls dedupe |
 | L3 | Level control | `logging.getLogger("vllm_ascend.x").setLevel(WARNING)` then `info` | INFO suppressed (UCM previously locked INFO) |
 | L4 | caplog | `test_v12_logits_finite_unattributable_row_warns_not_misattributes` | caplog / leaf handler captures warning |

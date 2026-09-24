@@ -24,8 +24,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from vllm_ascend.runtime_config.config import RuntimeConfig
-from vllm_ascend.runtime_guard.processor import RuntimeGuardProcessor, SamplePhaseResult
+from vllm_ascend.observability.runtime_config.config import RuntimeConfig
+from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor, SamplePhaseResult
 
 
 def _cfg(tmp_path: Path, *, reload: float) -> RuntimeConfig:
@@ -117,7 +117,7 @@ def test_sync_for_step_skips_refresh_when_reload_off_idle(tmp_path: Path):
     with (
         patch.object(RuntimeGuardProcessor, "refresh_config") as refresh,
         patch(
-            "vllm_ascend.runtime_guard.processor.get_pp_group",
+            "vllm_ascend.observability.runtime_guard.processor.get_pp_group",
             side_effect=Exception("no pp"),
         ),
     ):
@@ -136,7 +136,7 @@ def test_sync_for_step_refreshes_when_reload_on_idle(tmp_path: Path):
     with (
         patch.object(RuntimeGuardProcessor, "refresh_config") as refresh,
         patch(
-            "vllm_ascend.runtime_guard.processor.get_pp_group",
+            "vllm_ascend.observability.runtime_guard.processor.get_pp_group",
             side_effect=Exception("no pp"),
         ),
     ):
@@ -182,7 +182,7 @@ def test_sync_for_step_marks_finished_on_empty_batch(tmp_path: Path):
         patch.object(RuntimeGuardProcessor, "mark_finished", _mark),
         patch.object(RuntimeGuardProcessor, "_reap_finished_requests", _reap),
         patch(
-            "vllm_ascend.runtime_guard.processor.get_pp_group",
+            "vllm_ascend.observability.runtime_guard.processor.get_pp_group",
             side_effect=Exception("no pp"),
         ),
     ):
@@ -200,7 +200,7 @@ def test_sync_for_step_marks_finished_on_empty_batch(tmp_path: Path):
 
 def test_refresh_config_skips_clear_wave_cache_when_idle(tmp_path: Path):
     cfg = _cfg(tmp_path, reload=0.0)
-    with patch("vllm_ascend.runtime_guard.processor.RequestIoSnapshotManager") as io_mgr:
+    with patch("vllm_ascend.observability.runtime_guard.processor.RequestIoSnapshotManager") as io_mgr:
         io = MagicMock()
         io_mgr.get.return_value = io
         proc = _bind(cfg)

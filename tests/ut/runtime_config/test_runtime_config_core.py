@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from vllm_ascend.runtime_config.config import RuntimeConfig
+from vllm_ascend.observability.runtime_config.config import RuntimeConfig
 
 
 def _write(path: Path, data: dict) -> None:
@@ -173,8 +173,8 @@ def test_detector_on_trigger_override_accepted(tmp_path: Path):
 def test_dump_manual_trigger_unknown_key_rejected():
     from copy import deepcopy
 
-    from vllm_ascend.runtime_config._defaults import _DEFAULTS
-    from vllm_ascend.runtime_config._validate import validate_runtime_config
+    from vllm_ascend.observability.runtime_config._defaults import _DEFAULTS
+    from vllm_ascend.observability.runtime_config._validate import validate_runtime_config
 
     data = deepcopy(_DEFAULTS)
     data["dump"]["manual_trigger"] = 2
@@ -185,8 +185,8 @@ def test_dump_manual_trigger_unknown_key_rejected():
 def test_ascend_log_enabled_unknown_key_rejected():
     from copy import deepcopy
 
-    from vllm_ascend.runtime_config._defaults import _DEFAULTS
-    from vllm_ascend.runtime_config._validate import validate_runtime_config
+    from vllm_ascend.observability.runtime_config._defaults import _DEFAULTS
+    from vllm_ascend.observability.runtime_config._validate import validate_runtime_config
 
     data = deepcopy(_DEFAULTS)
     data["ascend_log"]["enabled"] = True
@@ -233,7 +233,7 @@ def test_pp_gt1_forces_sync_mode_file(tmp_path: Path, monkeypatch):
     cfg_path = tmp_path / "runtime_config.json"
     _write(cfg_path, {"sync_mode": "broadcast"})
     monkeypatch.setattr(
-        "vllm_ascend.runtime_config.config._pp_forces_file_sync",
+        "vllm_ascend.observability.runtime_config.config._pp_forces_file_sync",
         lambda: True,
     )
     cfg = RuntimeConfig(

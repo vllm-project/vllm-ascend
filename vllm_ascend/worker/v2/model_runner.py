@@ -63,8 +63,8 @@ from vllm_ascend.core.profiling_chunk_predictor import (
     _start_profiling_chunk_timing,
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
-from vllm_ascend.runtime_guard.processor import RuntimeGuardProcessor, SamplePhaseResult
-from vllm_ascend.runtime_guard.runner_bridge import (
+from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor, SamplePhaseResult
+from vllm_ascend.observability.runtime_guard.runner_bridge import (
     maybe_wrap_v2_async_output,
     need_pre_sample_hook,
     wrap_compute_logits_for_pre_sample,

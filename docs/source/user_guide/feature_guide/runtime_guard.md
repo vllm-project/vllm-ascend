@@ -35,7 +35,7 @@ vllm serve Qwen/Qwen3-8B --additional-config '{
 }'
 ```
 
-Use the annotated template at `vllm_ascend/runtime_config/templates/runtime_config.example.jsonc` and set:
+Use the annotated template at `vllm_ascend/observability/runtime_config/templates/runtime_config.example.jsonc` and set:
 
 - `detector.<name>.enabled`: `true`
 - `detector.<name>.on_trigger`: `["report", "dump_kv"]`

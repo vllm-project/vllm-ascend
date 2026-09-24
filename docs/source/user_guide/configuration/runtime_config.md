@@ -2,7 +2,7 @@
 
 JSON schema for Runtime Guard. Default path: `<cwd>/runtime/config/runtime_config.json`.
 
-Annotated example: `vllm_ascend/runtime_config/templates/runtime_config.example.jsonc`.
+Annotated example: `vllm_ascend/observability/runtime_config/templates/runtime_config.example.jsonc`.
 
 Startup keys (`runtime_config_path`, `runtime_config_reload_interval`, overlay dict) are documented in [Additional Configuration](./additional_config.md#runtime_guard).
 
@@ -57,7 +57,7 @@ Manual dump / manual trigger skip auto quota and cooldown. Requires hot-reload i
 |-----|------|---------|-------------|
 | `print_output_on_finish` | bool | `false` | Log output token ids/text when any request finishes |
 
-`[SamplingMeta]` is emitted at DEBUG on the after-sample path (TP0 + last PP). Enable with `ascend_log` / logger level for `vllm_ascend.runtime_guard` — there is no JSON toggle.
+`[SamplingMeta]` is emitted at DEBUG on the after-sample path (TP0 + last PP). Enable with `ascend_log` / logger level for `vllm_ascend.observability.runtime_guard` — there is no JSON toggle.
 
 ## ascend_log
 
