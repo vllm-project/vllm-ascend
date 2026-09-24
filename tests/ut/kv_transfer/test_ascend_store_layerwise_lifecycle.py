@@ -195,7 +195,13 @@ def test_raw_tokens_hybrid_roundtrip(memory_store, recurrent_type, wrapped):
         KVCacheGroupSpec(["model.layers.0.attn", "model.layers.2.attn"], full),
         KVCacheGroupSpec(["model.layers.1.attn", "model.layers.3.attn"], recurrent),
     ]
-    plan = KVCacheConfig(num_blocks=128, kv_cache_tensors=[], kv_cache_groups=groups)
+    retention_interval = None
+    plan = KVCacheConfig(
+        num_blocks=128,
+        kv_cache_tensors=[],
+        kv_cache_groups=groups,
+        prefix_cache_retention_interval=retention_interval,
+    )
     # Scheduler merged specs and worker per-layer specs must describe the same layout.
     worker_plan = KVCacheConfig(
         num_blocks=plan.num_blocks,
@@ -212,6 +218,7 @@ def test_raw_tokens_hybrid_roundtrip(memory_store, recurrent_type, wrapped):
             )
             for group in groups
         ],
+        prefix_cache_retention_interval=retention_interval,
     )
     config = create_vllm_config(max_num_batched_tokens=32, block_size=16)
     config.model_config.hf_text_config.num_hidden_layers = 4
@@ -220,6 +227,7 @@ def test_raw_tokens_hybrid_roundtrip(memory_store, recurrent_type, wrapped):
     config.scheduler_config.max_model_len = 512
     config.scheduler_config.disable_hybrid_kv_cache_manager = False
     config.cache_config.mamba_cache_mode = "align"
+    config.cache_config.prefix_cache_retention_interval = retention_interval
     config.cache_config.num_gpu_blocks = plan.num_blocks
     config.kv_transfer_config = KVTransferConfig(
         kv_connector="AscendStoreConnector",
