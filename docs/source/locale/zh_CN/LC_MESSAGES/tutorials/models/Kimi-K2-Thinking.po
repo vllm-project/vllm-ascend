@@ -253,12 +253,6 @@ msgstr ""
 msgid "## 7 Accuracy Evaluation"
 msgstr "## 7 精度评估"
 
-msgid "### Using AISBench"
-msgstr "### 使用 AISBench"
-
-msgid "### Using lm-eval"
-msgstr "### 使用 lm-eval"
-
 msgid "## 8 Performance Evaluation"
 msgstr "## 8 性能评估"
 
@@ -537,13 +531,6 @@ msgid ""
 msgstr "请参阅[特性指南](../../user_guide/feature_guide/index.md)以获取特性的配置。"
 
 msgid ""
-"- `Kimi-K2-Thinking` (bfloat16): requires 1 Atlas 800 A3 (64GB × 16) node. "
-"[Download model weight](https://huggingface.co/moonshotai/Kimi-K2-Thinking)."
-msgstr ""
-"- `Kimi-K2-Thinking`（bfloat16）：需要1个Atlas 800 A3（64GB × "
-"16）节点。[下载模型权重](https://huggingface.co/moonshotai/Kimi-K2-Thinking)。"
-
-msgid ""
 "For an Atlas 800 A3 (64GB × 16) node, `tensor-parallel-size` should be at "
 "least 16."
 msgstr "对于Atlas 800 A3（64GB × 16）节点，`tensor-parallel-size`应至少为16。"
@@ -613,3 +600,32 @@ msgstr ""
 "| 高吞吐量 | 单节点 | 16 (A3) | bfloat16 | 逐步增加`--max-num-"
 "seqs`，并以接近实际工作负载的请求速率进行基准测试。在第8章的1k/1k并发扫描中，并发数为8时输出吞吐量最佳；在生产环境中使用更高并发前，请验证尾部延迟。"
 " |"
+
+msgid ""
+"|  Weight Version               | Hardware Requirements           | Download"
+" Links |"
+msgstr "|  权重版本               | 硬件要求           | 下载链接 |"
+
+msgid ""
+"| `Kimi-K2-Thinking` (bfloat16) | 1 Atlas 800 A3 (64GB × 16) node | "
+"[ModelScope](https://www.modelscope.cn/models/moonshotai/Kimi-K2-Thinking) "
+"\\| [Hugging Face](https://huggingface.co/moonshotai/Kimi-K2-Thinking) |"
+msgstr ""
+"| `Kimi-K2-Thinking` (bfloat16) | 1 个 Atlas 800 A3 (64GB × 16) 节点 | "
+"[ModelScope](https://www.modelscope.cn/models/moonshotai/Kimi-K2-Thinking) "
+"\\| [Hugging Face](https://huggingface.co/moonshotai/Kimi-K2-Thinking) |"
+
+msgid ""
+">**Path description**: Download the model weights to a directory of your "
+"choice and record it. Ensure the model path in the subsequent deployment "
+"command matches this directory."
+msgstr ">**路径说明**：将模型权重下载到您选择的目录并记录该路径。确保后续部署命令中的模型路径与此目录一致。"
+
+msgid "### 7.1 Using AISBench"
+msgstr "### 7.1 使用 AISBench"
+
+msgid "### 7.2 Using lm-eval"
+msgstr "### 7.2 使用 lm-eval"
+
+msgid "### 8.1 Using vLLM Benchmark"
+msgstr "### 8.1 使用 vLLM Benchmark"

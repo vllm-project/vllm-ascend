@@ -28,7 +28,9 @@ from vllm.distributed import (
 from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.logger import logger
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.models.deepseek_v4_1.common.engram import ParallelEngramEmbedding
+
+# Upstream #56741 normalized the V4.1 model package name.
+from vllm.models.deepseek_v41.common.engram import ParallelEngramEmbedding
 
 from .npu import (
     HostUvaBuffer,

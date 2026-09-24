@@ -1756,7 +1756,9 @@ class TestMainThreadLoop(unittest.TestCase):
 class MockVllmConfig:
     def __init__(self):
         self.model_config = MagicMock()
-        self.attention_config = types.SimpleNamespace(indexer_kv_dtype="auto")
+        # vLLM main reads attention_config.hisparse_config in the KV cache
+        # config helpers; Ascend does not enable HiSparse.
+        self.attention_config = types.SimpleNamespace(indexer_kv_dtype="auto", hisparse_config=None)
         self.parallel_config = MagicMock()
         self.cache_config = MagicMock()
         self.kv_transfer_config = MagicMock()

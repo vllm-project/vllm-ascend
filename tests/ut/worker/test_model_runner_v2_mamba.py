@@ -313,7 +313,10 @@ def test_prepare_attn_keeps_actual_counts_separate_from_padding(mock_build_attn_
     expected_metadata = {"gdn": object()}
     mock_build_attn_metadata.return_value = expected_metadata
     state = SimpleNamespace(
-        vllm_config=SimpleNamespace(num_speculative_tokens=num_spec),
+        vllm_config=SimpleNamespace(
+            num_speculative_tokens=num_spec,
+            parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        ),
         num_accepted_tokens_gpu=torch.tensor([2, 3], dtype=torch.int32),
         max_model_len=1024,
     )

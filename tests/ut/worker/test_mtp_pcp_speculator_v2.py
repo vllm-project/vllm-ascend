@@ -77,6 +77,7 @@ def test_draft_runtime_config_preserves_target_worker_topology(
         block_size=128,
     )
     target_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(async_scheduling=False),
         parallel_config=target_parallel_config,
         speculative_config=SimpleNamespace(
             draft_parallel_config=draft_parallel_config,
@@ -103,6 +104,7 @@ def test_draft_runtime_config_preserves_target_worker_topology(
 
     def fake_parent_init(speculator, execution_config, device):
         captured["execution_config"] = execution_config
+        speculator.device = device
         speculator.vllm_config = execution_config
         speculator.speculative_config = execution_config.speculative_config
         speculator.draft_model_config = draft_model_config
@@ -112,6 +114,8 @@ def test_draft_runtime_config_preserves_target_worker_topology(
         speculator.num_speculative_steps = 3
 
     with (
+        patch.object(speculator_module, "get_dcp_group", return_value=SimpleNamespace(rank_in_group=0)),
+        patch.object(speculator_module, "DCPManager") as dcp_manager,
         patch.object(
             speculator_module,
             "replace",
@@ -134,6 +138,8 @@ def test_draft_runtime_config_preserves_target_worker_topology(
     ):
         speculator = AscendMTPSpeculator(target_config, torch.device("cpu"))
 
+    assert dcp_manager.call_args.kwargs["dcp_world_size"] == dcp_size
+    assert dcp_manager.call_args.kwargs["dcp_rank"] == 0
     execution_config = captured["execution_config"]
     execution_parallel_config = execution_config.parallel_config
     assert execution_parallel_config.prefill_context_parallel_size == expected_execution_pcp_size
