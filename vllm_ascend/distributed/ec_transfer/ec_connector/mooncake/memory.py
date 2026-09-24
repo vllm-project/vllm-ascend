@@ -19,9 +19,12 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake.memory import (
 from vllm.distributed.ec_transfer.ec_connector.mooncake.transfer import (
     MooncakeTransfer,
 )
+from vllm.logger import init_logger
 from vllm.utils.math_utils import round_up
 
 ASCEND_DIRECT_MEMORY_ALIGNMENT = 2 * 1024 * 1024  # 2 MiB
+
+logger = init_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -126,15 +129,61 @@ class AscendContiguousAllocator(ContiguousAllocator):
 
 
 class AscendProducerAllocator(AscendContiguousAllocator):
-    """Own one registered slab partitioned into staging and bounce."""
+    """Own the single registered producer slab.
+
+    Ascend direct registration requires a 2 MiB-aligned start address. A source
+    tensor may begin before the first aligned address contained in its storage,
+    so registering the tensor in place could cover memory that the storage does
+    not own. The fallback path therefore splits such a source into an
+    unregistrable prefix and an aligned suffix. It copies the prefix into a
+    pre-registered bounce arena and registers the suffix directly.
+
+    The producer normally allocates one registered slab containing both the
+    primary staging pool and the shared bounce arena::
+
+        +----------------------+-----------+---------------------+
+        | staging pool         | alignment | shared bounce arena |
+        |                      | padding   |                     |
+        +----------------------+-----------+---------------------+
+
+    Requests use the staging pool first. If a batch does not fit, transfer
+    waves lease space from the shared bounce arena for their prefixes and use
+    direct registration for their suffixes. Each fragment retains its
+    destination offset, so Mooncake reconstructs the original tensor byte order
+    in the consumer pool. A wave releases its bounce lease only after all
+    writes using those bytes have finished.
+
+    If allocating or registering the full slab fails, a producer with a
+    nonzero bounce capacity retries once with the same allocator configured for
+    a bounce-only slab::
+
+        +---------------------+
+        | shared bounce arena |
+        +---------------------+
+
+    In this degraded mode, the effective staging capacity and free list are
+    empty. ProducerMemoryPool.stage() consequently returns None, routing every
+    batch through the same direct-registration and bounced-prefix fallback.
+    Reusing this allocator ensures that at most one producer slab is
+    successfully registered. A zero bounce capacity disables both the fallback
+    path and the bounce-only retry, so a staging failure remains fatal.
+    """
 
     def __init__(
         self,
         staging_capacity: int,
         bounce_capacity: int,
     ) -> None:
+        self.configured_staging_capacity = staging_capacity
+        self.bounce_capacity = bounce_capacity
+        self.fallback_only = staging_capacity == 0
+        self._configure_layout(staging_capacity)
+
+        super().__init__(self.registered_capacity)
+
+    def _configure_layout(self, staging_capacity: int) -> None:
         bounce_offset = staging_capacity
-        if bounce_capacity:
+        if self.bounce_capacity:
             bounce_offset = round_up(
                 staging_capacity,
                 ASCEND_DIRECT_MEMORY_ALIGNMENT,
@@ -142,10 +191,8 @@ class AscendProducerAllocator(AscendContiguousAllocator):
 
         self.staging_capacity = staging_capacity
         self.bounce_offset = bounce_offset
-        self.bounce_capacity = bounce_capacity
-        self.registered_capacity = bounce_offset + bounce_capacity
-
-        super().__init__(self.registered_capacity)
+        self.registered_capacity = bounce_offset + self.bounce_capacity
+        self._capacity = self.registered_capacity
 
     @property
     def padding(self) -> int:
@@ -177,17 +224,31 @@ class AscendProducerAllocator(AscendContiguousAllocator):
 
         super().prepare(device, transfer)
 
+        if self.tensor is None and self.bounce_capacity and not self.fallback_only:
+            logger.warning(
+                "Could not initialize the full Ascend Mooncake producer "
+                "buffer; retrying with a bounce-only buffer "
+                "(staging=%d bytes, bounce=%d bytes)",
+                self.configured_staging_capacity,
+                self.bounce_capacity,
+            )
+            self.fallback_only = True
+            self._configure_layout(0)
+            self._disabled = False
+            super().prepare(device, transfer)
+
         if self.tensor is None:
             raise RuntimeError(
                 "Could not initialize the Ascend Mooncake producer buffer: "
-                f"staging={self.staging_capacity} bytes, "
+                f"configured_staging={self.configured_staging_capacity} bytes, "
+                f"effective_staging={self.staging_capacity} bytes, "
                 f"padding={self.padding} bytes, "
                 f"bounce={self.bounce_capacity} bytes, "
                 f"registered={self.registered_capacity} bytes, "
                 f"allocation={self.raw_allocation_size} bytes"
             )
 
-        self._free = [(0, self.staging_capacity)]
+        self._free = [(0, self.staging_capacity)] if self.staging_capacity else []
 
 
 class AscendConsumerMemoryPool(ConsumerMemoryPool):
