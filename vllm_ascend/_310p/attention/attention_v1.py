@@ -225,17 +225,10 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
         Returns:
             The output tensor after flash attention.
         """
-        real_tokens = attn_metadata.num_actual_tokens
-        if real_tokens is None:
-            # Prefer host mirrors; ``seq_lens.sum().item()`` is a decode/prefill sync.
-            host_qlens = get_query_lens_cpu(attn_metadata)
-            if host_qlens is not None:
-                real_tokens = int(host_qlens.sum())
-            else:
-                real_tokens = int(attn_metadata.seq_lens.sum().item())
+        real_tokens = int(attn_metadata.seq_lens.sum().item())
         seq_len = attn_metadata.seq_lens
         aligned_tokens = int(query.shape[0])
-        delta = aligned_tokens - int(real_tokens)
+        delta = aligned_tokens - real_tokens
 
         # Adjust sequence length if padding (alignment) was applied to the inputs
         if delta:

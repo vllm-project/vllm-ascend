@@ -15,7 +15,6 @@
 # This file is a part of the vllm-ascend project.
 #
 
-import numpy as np
 import torch
 import torch_npu
 
@@ -88,22 +87,11 @@ class AttentionMaskBuilder310:
         """
         if cls.chunked_prefill_attn_mask is None:
             cls.chunked_prefill_attn_mask = cls.gen_causal_additive_mask(cls.max_seqlen, device)
-        # Prefer host mirrors to avoid D2H on every SpecDecoding / splitfuse step.
-        from vllm_ascend._310p.attention.metadata_builder import get_query_lens_cpu
-
-        host_qlens = get_query_lens_cpu(attn_metadata)
-        if isinstance(host_qlens, torch.Tensor):
-            q_list = host_qlens.tolist()
-        else:
-            qsl = attn_metadata.query_start_loc.to("cpu", dtype=torch.int32)
-            q_list = (qsl[1:] - qsl[:-1]).tolist()
-        # Only accept real host arrays; MagicMock getattr stubs are truthy but empty.
-        seq_lens_np = getattr(attn_metadata, "seq_lens_np", None)
-        if isinstance(seq_lens_np, np.ndarray):
-            c_list = [int(x) for x in seq_lens_np[: len(q_list)]]
-        else:
-            context_lens = attn_metadata.seq_lens.to("cpu", dtype=torch.int32)
-            c_list = context_lens.tolist()
+        qsl = attn_metadata.query_start_loc.to("cpu", dtype=torch.int32)
+        qlens = qsl[1:] - qsl[:-1]
+        q_list = qlens.tolist()
+        context_lens = attn_metadata.seq_lens.to("cpu", dtype=torch.int32)
+        c_list = context_lens.tolist()
         pos_list = [p for ql, cl in zip(q_list, c_list) for p in range(cl - ql, cl)]
         position = torch.tensor(pos_list, dtype=torch.int32, device=device)
         splitfuse_mask = cls.chunked_prefill_attn_mask.index_select(0, position)
