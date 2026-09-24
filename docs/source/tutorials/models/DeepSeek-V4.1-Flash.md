@@ -49,17 +49,6 @@ every server; the examples use `<YOUR_MODEL_PATH>`.
 Alternatively, use [ModelSlim](https://github.com/Ascend/msmodelslim) to
 prepare a ModelSlim-compatible W8A8 checkpoint from the official weights.
 
-For a BF16 checkpoint, omit `--quantization ascend` and use `--dtype bfloat16`.
-Engram keeps its embedding tables and WKV projection in BF16 and computes the
-gate in the original residual basis; no QuaRot file is required. Engram tables
-are not implicitly quantized to INT8. `--engram-config` controls host offload
-and shared memory in the same way as for W8A8.
-
-BF16 requires more memory than the W8A8 examples below. For Flash, the two
-Engram tables alone occupy approximately 366 GiB in BF16, before the backbone,
-KV cache, and runtime buffers. Size device memory and, when using host offload,
-host memory and shared-memory capacity accordingly.
-
 Use one of the following hardware configurations:
 
 - **A3 series**: two Atlas 800 A3 servers. Each server has 8 NPUs with 128GB

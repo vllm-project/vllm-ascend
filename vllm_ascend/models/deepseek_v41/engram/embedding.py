@@ -151,17 +151,16 @@ class AscendParallelEngramEmbedding(ParallelEngramEmbedding):
             self._codes_uva = SharedUvaBuffer(codes_shape, self.storage_dtype, device, self._shared_group)
             if quantized:
                 self._scales_uva = SharedUvaBuffer(scales_shape, torch.float32, device, self._shared_group)
-            return self._codes_uva.tensor, self._scales_uva.tensor if quantized else None
+            return self._codes_uva.tensor, self._scales_uva.tensor if self._scales_uva is not None else None
         self._codes_uva = HostUvaBuffer(codes_shape, self.storage_dtype, device)
         if quantized:
             self._scales_uva = HostUvaBuffer(scales_shape, torch.float32, device)
+            self._scales_uva.tensor.zero_()
         # Same reason as the device path: aclrtMallocHost hands back whatever
         # was in the pages, and the profiling forward looks up before the
         # checkpoint load fills them.
         self._codes_uva.tensor.zero_()
-        if quantized:
-            self._scales_uva.tensor.zero_()
-        return self._codes_uva.tensor, self._scales_uva.tensor if quantized else None
+        return self._codes_uva.tensor, self._scales_uva.tensor if self._scales_uva is not None else None
 
     def close_host_offload(self) -> None:
         """Release the registered host ranges (shutdown / reload path).
