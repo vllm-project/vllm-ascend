@@ -1488,6 +1488,14 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         for layer_tasks in worker.layer_load_tasks:
             self.assertEqual(layer_tasks, [])
 
+    def test_gva_pp_group_lookup_uses_stage_local_layer(self):
+        worker = self._make_gva_worker(num_groups=2)
+        worker.pp_size = 2
+        worker.layerwise_key_layer_offset = 2
+        worker.physical_layer_to_group_layers = {0: [(1, 0)]}
+
+        self.assertEqual(worker._groups_for_layerwise_transfer(0), [(1, 0)])
+
     def test_empty_layerwise_step_reowns_task_lists(self):
         worker = self._make_worker()
         worker.use_layerwise = True

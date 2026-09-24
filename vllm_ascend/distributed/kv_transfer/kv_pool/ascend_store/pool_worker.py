@@ -1977,8 +1977,7 @@ class KVPoolWorker:
             if groups is None:
                 raise RuntimeError(f"Mooncake layerwise: no KV cache group for local layer {local_layer}")
             return groups
-        physical_layer = local_layer + self.layerwise_key_layer_offset
-        return self.physical_layer_to_group_layers.get(physical_layer, [(0, local_layer)])
+        return self.physical_layer_to_group_layers.get(local_layer, [(0, local_layer)])
 
     def _layerwise_key_batches(self, keys: list[str]) -> list[list[str]]:
         batch_size = self.layerwise_max_transfer_blocks if self.layerwise_max_transfer_blocks > 0 else max(1, len(keys))
