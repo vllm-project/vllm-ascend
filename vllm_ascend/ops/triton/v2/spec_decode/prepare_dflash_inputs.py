@@ -115,6 +115,7 @@ def _prepare_dflash_inputs_kernel(
     ctx_pos_idx = ctx_start + ctx_local
 
     ctx_pos = tl.load(target_positions_ptr + ctx_pos_idx, mask=ctx_valid_mask, other=0)
+    # Text-only: scalar positions are linear KV indices; multimodal/M-RoPE is unsupported.
     ctx_block_num = tl.minimum(ctx_pos // block_size, block_table_stride - 1)
     ctx_block_id = tl.load(
         block_table_ptr + req_idx * block_table_stride + ctx_block_num,
