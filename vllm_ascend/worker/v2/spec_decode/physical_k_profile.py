@@ -17,6 +17,7 @@ from vllm.logger import logger
 
 from vllm_ascend.dynamic_spec import (
     PHYSICAL_K_MIN_TUNED_BATCH_SIZE,
+    PHYSICAL_K_RECOMMEND_INTERVAL,
     resolve_physical_k,
 )
 
@@ -122,6 +123,7 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
     manager._physical_k_draft_costs = None
     manager._physical_k_recommendation = None
     manager._physical_k_last_logged = {}
+    manager._physical_k_score_steps = defaultdict(int)
 
     def batches_to_profile(self, capture_sizes) -> Iterator[dict[str, int]]:
         base = list(original_batches(capture_sizes))
@@ -302,8 +304,8 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
         batch_size = len(active)
         if not batch_size:
             return None
-        # Small batches deliberately stay at max K. Avoid confidence copies,
-        # cumprod, and sorting entirely on this latency-sensitive path.
+        # Only non-empty active batches are scored. Cost tables cover every
+        # power-of-two request bucket, including small RL rollout tails.
         if batch_size < min_batch_size:
             return None
         if not _is_tp_rank_zero():
@@ -379,7 +381,21 @@ def configure_physical_k_profiling(manager: Any, vllm_config: Any):
 
     def get_num_tokens(self, num_tokens_per_req, draft_tokens) -> int:
         result = original_get_num_tokens(num_tokens_per_req, draft_tokens)
-        self._physical_k_recommendation = recommend(self, num_tokens_per_req, draft_tokens)
+        # Avoid request-list construction only for an empty batch. Every
+        # non-empty concurrency can now use a bucket-specific recommendation.
+        # Confidence scoring is amortized per bucket: score on first entry and
+        # then once every N decode steps, while scheduler acceptance feedback
+        # continues to update the controller on every step.
+        if len(num_tokens_per_req) < min_batch_size:
+            self._physical_k_recommendation = None
+        else:
+            bucket = _batch_bucket(len(num_tokens_per_req))
+            steps = self._physical_k_score_steps[bucket]
+            self._physical_k_score_steps[bucket] = steps + 1
+            if steps % PHYSICAL_K_RECOMMEND_INTERVAL == 0:
+                self._physical_k_recommendation = recommend(self, num_tokens_per_req, draft_tokens)
+            else:
+                self._physical_k_recommendation = None
         return result
 
     manager.batches_to_profile = MethodType(batches_to_profile, manager)

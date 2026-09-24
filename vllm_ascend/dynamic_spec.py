@@ -20,7 +20,11 @@ from typing import Any
 _ACCEPTANCE_EMA_ALPHA = 0.2
 _BUCKET_SWITCH_STEPS = 2
 _MIN_K_DWELL_STEPS = 8
-PHYSICAL_K_MIN_TUNED_BATCH_SIZE = 9
+# Include every non-empty active-batch bucket in AV profiling and runtime K
+# selection. This is important for RL, where a rollout can decay from a large
+# batch (for example 128) through 64/32/16 down to 8 or fewer requests.
+PHYSICAL_K_MIN_TUNED_BATCH_SIZE = 1
+PHYSICAL_K_RECOMMEND_INTERVAL = 128
 _ACCEPTANCE_THRESHOLD = 0.6
 _DOWNSHIFT_STEPS = 3
 _UPSHIFT_STEPS = 2
@@ -159,6 +163,17 @@ class AdaptiveDraftKController:
         state = self._state(self._batch_bucket(batch_size))
         state.profile_k = physical_k
 
+    def advance_profile(self, batch_size: int) -> None:
+        """Advance a profiled bucket without rebuilding per-request samples."""
+
+        if batch_size <= 0:
+            return
+        state = self._state(self._batch_bucket(batch_size))
+        if state.profile_k is None:
+            return
+        state.observations += 1
+        self._advance_state(state)
+
     def cap(self, configured_k: int, batch_size: int | None = None) -> int:
         configured_k = max(min(int(configured_k), self.max_k), 0)
         if configured_k == 0:
@@ -166,6 +181,10 @@ class AdaptiveDraftKController:
         if batch_size is not None and batch_size < PHYSICAL_K_MIN_TUNED_BATCH_SIZE:
             return configured_k
         if batch_size:
+            bucket = self._batch_bucket(batch_size)
+            state = self._state(bucket)
+            if state.profile_k == state.stable_k == self.max_k:
+                return min(state.stable_k, configured_k)
             bucket = self._settled_bucket(batch_size)
             state = self._state(bucket)
             if (
@@ -186,18 +205,24 @@ class AdaptiveDraftKController:
     ) -> None:
         if len(scheduled_widths) != len(sampled_token_ids):
             return
+        if self.auto_tune:
+            active_batch_size = sum(int(width) > 0 for width in scheduled_widths)
+            if not active_batch_size:
+                return
+            state = self._state(self._batch_bucket(active_batch_size))
+            state.observations += 1
+            if state.profile_k is not None:
+                self._advance_state(state)
+                return
         pairs = [(int(width), tokens) for width, tokens in zip(scheduled_widths, sampled_token_ids) if width > 0]
         if not pairs:
             return
         widths = [width for width, _ in pairs]
         if len(widths) < PHYSICAL_K_MIN_TUNED_BATCH_SIZE:
             return
-        bucket = self._batch_bucket(len(widths))
-        state = self._state(bucket)
-        state.observations += 1
-        if self.auto_tune and state.profile_k is not None:
-            self._advance_state(state)
-            return
+        if not (self.auto_tune and state.profile_k is None):
+            state = self._state(self._batch_bucket(len(widths)))
+            state.observations += 1
         accepted = [min(width, max(len(tokens) - 1, 0)) for width, tokens in pairs]
         alpha = _ACCEPTANCE_EMA_ALPHA
         for position in range(1, self.max_k + 1):
@@ -254,11 +279,31 @@ def _create_controller(vllm_config: Any) -> AdaptiveDraftKController | None:
 
 def _update_controller(controller, scheduler_output, model_runner_output) -> None:
     recommendation = getattr(model_runner_output, "physical_k_recommendation", None)
+    scheduled = getattr(scheduler_output, "scheduled_spec_decode_tokens", None) or {}
+    scheduler_batch_size = len(scheduled)
     if recommendation is not None:
-        controller.recommend(*recommendation)
+        recommended_batch_size, physical_k = recommendation
+        if (
+            scheduler_batch_size
+            and controller._batch_bucket(recommended_batch_size)
+            != controller._batch_bucket(scheduler_batch_size)
+        ):
+            # The AV worker may only have fresh draft rows for a subset of
+            # scheduled requests. Never apply a K priced for that smaller
+            # subset to a different scheduler batch bucket.
+            controller.recommend(scheduler_batch_size, controller.max_k)
+        else:
+            controller.recommend(*recommendation)
+    if recommendation is None and scheduler_batch_size < PHYSICAL_K_MIN_TUNED_BATCH_SIZE:
+        return
+    if recommendation is None and controller.auto_tune and scheduler_batch_size:
+        state = controller._state(controller._batch_bucket(scheduler_batch_size))
+        if state.profile_k is not None:
+            if state.profile_k != state.stable_k or state.stable_k < controller.max_k:
+                controller.advance_profile(scheduler_batch_size)
+            return
     sampled = getattr(model_runner_output, "sampled_token_ids", None)
     req_ids = getattr(model_runner_output, "req_ids", ())
-    scheduled = getattr(scheduler_output, "scheduled_spec_decode_tokens", None) or {}
     if sampled is not None and len(req_ids) == len(sampled):
         controller.observe(
             [len(scheduled.get(req_id, ())) for req_id in req_ids],
