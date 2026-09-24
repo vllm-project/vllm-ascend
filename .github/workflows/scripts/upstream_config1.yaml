@@ -1,3 +1,9 @@
 e2e-upstream_singlecard:
   - name: tests/models/multimodal/pooling/test_llama_nemotron_vl.py
     estimated_time: 20
+  - name: tests/models/multimodal/pooling/test_llama_nemotron_vl.py
+    estimated_time: 20
+  - name: tests/models/multimodal/pooling/test_llama_nemotron_vl.py
+    estimated_time: 20
+  - name: tests/models/multimodal/pooling/test_llama_nemotron_vl.py
+    estimated_time: 20
