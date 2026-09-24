@@ -182,6 +182,18 @@ class AscendFusionConfig:
 
 
 @config
+class AscendWarmupConfig:
+    """Configuration for startup warmup that overlaps weight loading.
+
+    Both threads are joined at the end of ``load_model``, before memory
+    profiling, so they never touch the KV cache budget.
+    """
+
+    enable_early_kernel_warmup: bool = False
+    enable_early_nz_warmup: bool = False
+
+
+@config
 class EplbConfig:
     """Configuration Object for ``additional_config["eplb_config"]``.
 
@@ -366,6 +378,10 @@ class AscendConfig:
             "ascend_fusion_config": {
                 "fusion_ops_gmmswigluquant": true
             },
+            "ascend_warmup_config": {
+                "enable_early_kernel_warmup": false,
+                "enable_early_nz_warmup": false
+            },
             "eplb_config": {
                 "dynamic_eplb": false,
                 "expert_map_path": null,
@@ -517,6 +533,7 @@ class AscendConfig:
     # ---- sub-configs (no vllm_config dep): pydantic dict→dataclass coercion ----
     ascend_compilation_config: AscendCompilationConfig = dataclasses.field(default_factory=AscendCompilationConfig)
     ascend_fusion_config: AscendFusionConfig = dataclasses.field(default_factory=AscendFusionConfig)
+    ascend_warmup_config: AscendWarmupConfig = dataclasses.field(default_factory=AscendWarmupConfig)
     eplb_config: EplbConfig = dataclasses.field(default_factory=EplbConfig)
     rejection_sampler_config: RejectionSamplerConfig = dataclasses.field(default_factory=RejectionSamplerConfig)
     rl_config: RlConfig = dataclasses.field(default_factory=RlConfig)
