@@ -28,6 +28,7 @@ from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     ChunkedTokenDatabase,
     KeyMetadata,
+    LayerBlockRange,
     LayerLoadTask,
     LayerMultiBlockReqMeta,
     LayerPoolKey,
@@ -93,6 +94,41 @@ class MaskedFakeTokenDatabase(FakeTokenDatabase):
 
 
 class TestLayerBatchBuilder(unittest.TestCase):
+    def test_reversed_full_block_range_keeps_partial_block(self):
+        builder = LayerBatchBuilder(
+            FakeTokenDatabase(),
+            my_key_index=0,
+            num_ranks_per_layer=1,
+            page_size_bytes=16,
+            num_layers=1,
+        )
+        request = ReqMeta(
+            req_id="r1",
+            block_ids=[7, 8, 9],
+            block_hashes=["h0", "h1"],
+            can_save=True,
+            block_ids_by_group_np=[np.asarray([7, 8, 9])],
+            block_gvas_by_group_np=[np.asarray([100, 200, 300])],
+            partial_save_gva_per_group=[900],
+        )
+        task = LayerTransferTask(
+            layer_id=0,
+            block_ranges=[
+                LayerBlockRange(
+                    request=request,
+                    start_block=3,
+                    end_block=2,
+                    partial_block_index=2,
+                )
+            ],
+        )
+
+        shared = builder.build_shared(task)
+
+        self.assertIsNotNone(shared)
+        np.testing.assert_array_equal(shared.block_ids_arr, [9])
+        np.testing.assert_array_equal(shared.block_gvas_arr, [900])
+
     def test_uses_real_offsets_for_variable_cache_entries_per_layer(self):
         database = FakeTokenDatabase()
         database.set_group_buffers(
