@@ -103,7 +103,11 @@ from vllm_ascend.distributed.utils import (
 
 # PERF-TUNE switch: defer the last layer's save drain out of the forward
 # critical path; the drain runs at the start of the next step's start_load_kv.
-_LW_DEFER_LAST_SAVE = os.environ.get("VLLM_ASCEND_LW_DEFER_LAST_SAVE", "1") == "1"
+# Opt-in (default off): the synchronous inline drain is the long-standing
+# contract that layerwise tests (e.g. test_mooncake_pipeline) and downstream
+# readers rely on, and deferring widens the window in which a subsequent
+# request can observe a partially published prefix.
+_LW_DEFER_LAST_SAVE = os.environ.get("VLLM_ASCEND_LW_DEFER_LAST_SAVE", "0") == "1"
 
 # Read lease TTL (ms) for the layerwise load path. batch_add_lease acquires a
 # read lease before batch_copy(G2L); the lease must cover the asynchronous
@@ -2466,9 +2470,13 @@ class KVPoolWorker:
         # PERF-TUNE(4): per-step RPC result caches. Concurrent requests with a
         # shared prefix issue identical memcache queries; cache per step so each
         # distinct key is queried/leased/existence-checked once.
-        self._step_keyinfo_cache.clear()
-        self._step_lease_result.clear()
-        self._step_exist_cache.clear()
+        # Plain (un-annotated) re-assignment keeps mypy happy (only the
+        # annotated definition in _init_state_vars counts as a definition)
+        # and stays safe on workers built via __new__ that never ran
+        # _init_state_vars (e.g. unit tests).
+        self._step_keyinfo_cache = {}
+        self._step_lease_result = {}
+        self._step_exist_cache = {}
         # Keep this method safe for direct callers as well as start_load_kv().
         # Worker threads may still own the lists from the preceding step.
         # Mooncake uses the projected stage-local cache layout, including any
