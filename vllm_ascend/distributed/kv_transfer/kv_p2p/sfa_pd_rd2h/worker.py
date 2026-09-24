@@ -566,15 +566,15 @@ class SFAPDRD2HProducerWorker:
             return req_meta
         raise RuntimeError("SfaRemoteD2HConnector P side supports memfabric pull only.")
 
-    def bind_connector_metadata(self, metadata: KVConnectorMetadata) -> None:
-        """Prepare P-side dispatch metadata before this step's layer hooks.
+    def start_load_kv(self, metadata: KVConnectorMetadata) -> None:
+        """Prepare P-side request metadata for memfabric pull mode.
 
-        * reset ``self.current_layer`` — the stage-local fallback position for
-          hooks without an explicit layer name.
-        * clear ``_pd_dispatched_layers`` so the new step can send each layer
-          once, through either the scatter-time or layer-end hook.
-        * adjust ``remote_port`` by the mapped D TP rank. D advertises its base
-          port, while each D rank listens on ``base + decode_tp_rank``.
+        * reset ``self.current_layer`` — the per-step layer counter that
+          ``save_kv_layer`` increments; without the reset it drifts to
+          ``>= total_layers`` and every request after the first is skipped.
+        * adjust ``remote_port`` by ``tp_rank`` — D's ROUTER binds
+          ``side_channel_port + tp_rank`` (one per rank) but D advertises the
+          base port, so each P rank must send to ``base + tp_rank``.
 
         ``remote_host`` / ``local_block_ids`` are already correct from
         ``build_connector_meta``; main and indexer group ids remain separate."""
@@ -602,7 +602,7 @@ class SFAPDRD2HProducerWorker:
                     description="SFAPD remote D-side TP control-plane port",
                 )
                 logger.debug(
-                    "MembPull P bind_connector_metadata req %s: remote_host=%s, "
+                    "MembPull P start_load_kv req %s: remote_host=%s, "
                     "remote_port=%s->%s, tp_rank=%s, tp_ratio=%s, local_block_ids=%s, "
                     "chunk_finish=%s, local_computed_tokens=%s, local_transed_tokens=%s",
                     req_id,

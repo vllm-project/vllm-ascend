@@ -1117,32 +1117,24 @@ class KVPoolWorker:
             self.m_store.validate_layerwise_support()
         self._start_kv_transfer_threads()
 
-    def bind_connector_metadata(self, metadata: AscendConnectorMetadata) -> None:
-        """Prepare layerwise GVA descriptors and tasks before model forward.
-
-        Copies are submitted by the per-layer hooks. The runner's later load
-        hook must not reset these tasks or acquire/allocate their GVAs again.
-        """
-        if not self.use_layerwise:
-            return
+    def start_load_kv(self, metadata: AscendConnectorMetadata):
         self.current_layer = 0
         self.layerwise_retrievers: list[Any] = []
-        self.next_layer_to_submit = 0
-        # Transfer threads receive these lists by reference. Give every step
-        # fresh lists so clearing old work cannot remove the new tasks.
-        self.layer_save_tasks = [[] for _ in range(self.num_layers)]
-        self.layer_load_tasks = [[] for _ in range(self.num_layers)]
-        reset_attention_compute_start_gate()
-        self._attention_saved_layers = set()
-        logger.debug("KV pool worker bind_connector_metadata requests=%d", len(metadata.requests))
-        if metadata.requests:
-            self.process_layer_data(metadata.requests)
-
-    def start_load_kv(self, metadata: AscendConnectorMetadata):
-        """Submit non-layerwise loads at the runner's ordered load hook."""
         if self.use_layerwise:
-            return
+            self.next_layer_to_submit = 0
+            # Transfer threads receive these lists by reference. Give every
+            # step fresh lists so a late clear of a previous step cannot drop
+            # newly prepared loads/saves and leave a reused buffer stale.
+            self.layer_save_tasks = [[] for _ in range(self.num_layers)]
+            self.layer_load_tasks = [[] for _ in range(self.num_layers)]
+            reset_attention_compute_start_gate()
+            self._attention_saved_layers = set()
         logger.debug("KV pool worker start_load_kv requests=%d", len(metadata.requests))
+        if len(metadata.requests) == 0:
+            return
+        if self.use_layerwise:
+            self.process_layer_data(metadata.requests)
+            return
         for request in metadata.requests:
             load_spec = request.load_spec
             if load_spec is None or not load_spec.can_load:  # load =0
@@ -2418,7 +2410,7 @@ class KVPoolWorker:
     def process_layer_data(self, requests: list[ReqMeta]) -> None:
         if not requests:
             return
-        # Keep this method safe for direct callers as well as metadata binding.
+        # Keep this method safe for direct callers as well as start_load_kv().
         # Worker threads may still own the lists from the preceding step.
         # Mooncake uses the projected stage-local cache layout, including any
         # draft layers. The GVA/key planes retain their existing PP key count.
