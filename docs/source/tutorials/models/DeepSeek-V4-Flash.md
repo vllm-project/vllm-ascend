@@ -1158,6 +1158,8 @@ Before starting the service, mount `/etc/hixlep/` into the container and replace
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=10
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export TASK_QUEUE_ENABLE=1
+    export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
     vllm serve /mnt/share/weight/DeepSeek-V4-Flash-0731  \
@@ -1184,7 +1186,6 @@ Before starting the service, mount `/etc/hixlep/` into the container and replace
         --enforce-eager \
         --no-disable-hybrid-kv-cache-manager \
         --speculative-config '{"num_speculative_tokens": 5,"method": "dspark"}' \
-        --profiler-config '{"profiler": "torch", "torch_profiler_dir": "/home/c30047037/vllm_profile", "torch_profiler_with_stack": false}' \
         --kv-transfer-config \
         '{"kv_connector": "MooncakeHybridConnector",
           "kv_role": "kv_producer",
@@ -1198,8 +1199,7 @@ Before starting the service, mount `/etc/hixlep/` into the container and replace
             "decode": {
               "dp_size": 8,
               "tp_size": 1
-            },
-            "ascend_local_comm_res_path": "/etc/hixlep"
+            }
           }
         }' \
         --additional-config '{"enable_cpu_binding": true, multistream_overlap_shared_expert": true, "enable_shared_expert_dp":true, "enable_dsa_cp": true}'
@@ -1225,10 +1225,11 @@ Before starting the service, mount `/etc/hixlep/` into the container and replace
     export HCCL_CONNECT_TIMEOUT=1200
     export HCCL_BUFFSIZE=1024
     export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
-    export ASCEND_LOCAL_COMM_RES_PATH=/etc/hixlep/
     export OMP_PROC_BIND=false
     export OMP_NUM_THREADS=10
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export TASK_QUEUE_ENABLE=1
+    export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
     vllm serve /root/.cache/DeepSeek-V4-Flash-0731 \
@@ -1240,13 +1241,14 @@ Before starting the service, mount `/etc/hixlep/` into the container and replace
         --tensor-parallel-size 1 \
         --max-model-len 1048576 \
         --max-num-batched-tokens 1024 \
-        --served-model-name dsv4 \
+        --served-model-name dsv \
         --gpu-memory-utilization 0.92 \
         --enable-expert-parallel \
         --async-scheduling \
         --max-num-seqs 56 \
         --block-size 32 \
         --no-enable-prefix-caching \
+        --api_server_count 1 \
         --tokenizer-mode deepseek_v4 \
         --tool-call-parser deepseek_v4 \
         --enable-auto-tool-choice \
@@ -1268,11 +1270,10 @@ Before starting the service, mount `/etc/hixlep/` into the container and replace
             "decode": {
               "dp_size": 8,
               "tp_size": 1
-            },
-            "ascend_local_comm_res_path": "/etc/hixlep"
+            }
           }
         }' \
-        --additional-config '{"enable_cpu_binding": true, "recompute_scheduler_enable": true, "multistream_overlap_shared_expert": true, "enable_shared_expert_dp":true}'
+        --additional-config '{"enable_cpu_binding": true, "recompute_scheduler_enable": true, , "enable_shared_expert_dp":true, "multistream_overlap_shared_expert": true}'
     ```
 
 3. Start the Prefill and Decode services in separate terminals.
