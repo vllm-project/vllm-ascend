@@ -10,13 +10,17 @@ import pytest
 import torch
 
 from vllm_ascend.observability.runtime_guard.hooks import (
-    SamplePhasePreState,
     runtime_guard_idle_step,
     runtime_guard_sample_tokens,
     runtime_guard_step,
 )
+from vllm_ascend.observability.runtime_guard.runner_bridge import (
+    get_postprocess_sampled,
+    note_postprocess_sampled,
+)
 
 _WORKER_ROOT = Path(__file__).resolve().parents[3] / "vllm_ascend" / "worker"
+_PENDING_SO_ATTR = "_pending_scheduler_output"
 
 
 def _decorator_names(fn_node: ast.FunctionDef) -> list[str]:
@@ -77,7 +81,7 @@ def test_step_runs_sync_inside_inference_mode():
     assert runner.body_ran
     # Inner placement: the wave sync executes inside the inference-mode context.
     assert runner.seen_inference_mode is True
-    assert runner._rg_scheduler_output is so
+    assert getattr(runner, _PENDING_SO_ATTR) is so
     guard.sync_for_step.assert_called_once_with(scheduler_output=so, allow_arm=True)
     # No-sample step (execute_model_state stays None) flushes end-of-wave.
     guard.end_of_wave_sync.assert_called_once_with(allow_arm=False)
@@ -136,7 +140,7 @@ def test_step_guardless_keeps_bare_path():
 
     assert runner.execute_model(so) == "output"
     assert runner.body_ran
-    assert runner._rg_scheduler_output is so
+    assert getattr(runner, _PENDING_SO_ATTR) is so
 
 
 class _IdleWorker:
@@ -197,8 +201,10 @@ class _SampleRunner:
         self.order: list[str] = []
         self.speculative_config = None
         self.use_async_scheduling = False
-        self._rg_spec_sampled_tokens = None
-        self._rg_spec_num_sampled = None
+        self.execute_model_state = SimpleNamespace(
+            input_batch=SimpleNamespace(req_ids=["r1"]),
+            finished_req_ids=["r1"],
+        )
         self.run_phase_kwargs = None
 
     @runtime_guard_sample_tokens
@@ -206,29 +212,18 @@ class _SampleRunner:
         self.order.append("body")
         return SimpleNamespace(sampled_token_ids=[[7]])
 
-    def _rg_before_sample_phase(self):
-        self.order.append("before")
-        return SamplePhasePreState(
-            input_batch=SimpleNamespace(req_ids=["r1"]),
-            finished_req_ids=["r1"],
-        )
+    def _prepare_sample_tokens(self):
+        self.order.append("prepare")
 
-    def _rg_sample_phase_result(self, output, pre):
-        self.order.append("result")
-        return SimpleNamespace(
-            input_batch=pre.input_batch,
-            model_runner_output=output,
-            req_ids_output_copy=list(pre.input_batch.req_ids),
-        )
-
-    def _rg_after_sample_phase(self, output, guard):
-        self.order.append("after")
+    def _finalize_sample_tokens(self, output):
+        self.order.append("finalize")
         return output
 
 
 def test_sample_tokens_orchestrates_hooks_in_order():
     guard = MagicMock()
     guard.runtime_config = None  # need_pre_sample_hook -> False
+    guard.needs_sample_phase_hooks.return_value = False
     runner = _SampleRunner(guard)
 
     def _run(sample_fn, **kwargs):
@@ -239,8 +234,8 @@ def test_sample_tokens_orchestrates_hooks_in_order():
 
     out = runner.sample_tokens("grammar")
     assert out.sampled_token_ids == [[7]]
-    # before -> (body -> result inside sample_fn) -> after
-    assert runner.order == ["before", "body", "result", "after"]
+    # prepare -> body (inside sample_fn) -> finalize; result built in hooks
+    assert runner.order == ["prepare", "body", "finalize"]
     assert runner.run_phase_kwargs == {
         "speculative_config": None,
         "need_accepted_tokens": False,
@@ -252,14 +247,22 @@ def test_sample_tokens_orchestrates_hooks_in_order():
 def test_sample_tokens_passes_accepted_token_nums_fn_for_spec():
     guard = MagicMock()
     guard.runtime_config = None
+    guard.needs_sample_phase_hooks.return_value = False
     runner = _SampleRunner(guard)
     runner.speculative_config = object()
-    guard.run_sample_phase.side_effect = lambda sample_fn, **kwargs: (sample_fn(), None)
 
+    def _run(sample_fn, **kwargs):
+        result = sample_fn()
+        # postprocess_sampled would have noted during the sample body.
+        note_postprocess_sampled(runner, [[1]], [3])
+        nums_fn = kwargs["accepted_token_nums_fn"]
+        assert nums_fn is not None
+        assert nums_fn(result) == [3]
+        return result, None
+
+    guard.run_sample_phase.side_effect = _run
     runner.sample_tokens(None)
-    fn = guard.run_sample_phase.call_args.kwargs["accepted_token_nums_fn"]
-    assert fn is not None
-    assert fn(None) is runner._rg_spec_num_sampled
+    assert get_postprocess_sampled(runner) == ([[1]], [3])
 
 
 def test_sample_tokens_guardless_runs_functional_hooks():
@@ -267,6 +270,5 @@ def test_sample_tokens_guardless_runs_functional_hooks():
 
     out = runner.sample_tokens("grammar")
     assert out.sampled_token_ids == [[7]]
-    # Functional hooks still run without the guard; only the guard-side
-    # result builder is skipped.
-    assert runner.order == ["before", "body", "after"]
+    # Neutral prepare/finalize still run without the guard.
+    assert runner.order == ["prepare", "body", "finalize"]

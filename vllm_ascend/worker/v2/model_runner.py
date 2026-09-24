@@ -18,7 +18,6 @@
 #
 
 from contextlib import AbstractContextManager, contextmanager, nullcontext
-from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -63,12 +62,11 @@ from vllm_ascend.core.profiling_chunk_predictor import (
     _start_profiling_chunk_timing,
 )
 from vllm_ascend.observability.runtime_guard.hooks import (
-    SamplePhasePreState,
     runtime_guard_sample_tokens,
     runtime_guard_step,
 )
-from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor, SamplePhaseResult
-from vllm_ascend.observability.runtime_guard.runner_bridge import maybe_wrap_v2_async_output
+from vllm_ascend.observability.runtime_guard.processor import RuntimeGuardProcessor
+from vllm_ascend.observability.runtime_guard.runner_bridge import note_postprocess_sampled
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
     is_pd_decode_recompute_scheduler_enabled,
@@ -263,8 +261,12 @@ class NPUModelRunner(GPUModelRunner):
     def sample_tokens(self, grammar_output):
         return super().sample_tokens(grammar_output)
 
-    def _rg_before_sample_phase(self) -> SamplePhasePreState:
-        """Functional pre-sample work + ephemeral-state peek (before the pop)."""
+    def _prepare_sample_tokens(self) -> None:
+        """Ascend prep before parent ``sample_tokens`` pops ``execute_model_state``.
+
+        Neutral hook used with or without runtime_guard: PCP global-batch swap
+        for non-last PP ranks, and replicated-draft target restore.
+        """
         pcp_manager = self.pcp_manager
         if pcp_manager is not None and not self.is_last_pp_rank and self.execute_model_state is not None:
             assert isinstance(pcp_manager, AscendPCPManager)
@@ -282,40 +284,11 @@ class NPUModelRunner(GPUModelRunner):
             pcp_manager._sampling_hidden_restored = False
         self._restore_replicated_draft_target_states()
 
-        # Peek before super() pops it: these refs stay valid after the pop.
-        state = self.execute_model_state
-        input_batch = getattr(state, "input_batch", None) if state is not None else None
-        finished_req_ids = getattr(state, "finished_req_ids", None) if state is not None else None
-        # Cleared each step; filled by postprocess_sampled during sample_fn.
-        self._rg_spec_sampled_tokens = None
-        self._rg_spec_num_sampled = None
-        return SamplePhasePreState(input_batch=input_batch, finished_req_ids=finished_req_ids)
-
-    def _rg_sample_phase_result(self, output, pre: SamplePhasePreState) -> SamplePhaseResult:
-        """Guard-visible result of one sample phase (reads postprocess stashes)."""
-        req_ids = list(getattr(pre.input_batch, "req_ids", None) or [])
-        # AsyncOutput.sampled_token_ids is padded D2H numpy until get_output()
-        # trims with num_sampled. run_sample_phase defers check_after_sample
-        # for AsyncModelRunnerOutput; AscendAsyncOutput.get_output appends
-        # the trimmed rows (W2-3 / D-11 token_repeat false positive).
-        return SamplePhaseResult(
-            scheduler_output=getattr(self, "_rg_scheduler_output", None),
-            input_batch=pre.input_batch,
-            model_runner_output=output,
-            sampler_output=SimpleNamespace(sampled_token_ids=self._rg_spec_sampled_tokens),
-            valid_sampled_token_ids=getattr(output, "sampled_token_ids", None),
-            req_ids_output_copy=req_ids,
-            invalid_req_indices=None,
-            finished_req_ids=pre.finished_req_ids,
-        )
-
-    def _rg_after_sample_phase(self, output, guard):
-        """Functional sample tail (spec-PP broadcast) + guard async-output wrap."""
+    def _finalize_sample_tokens(self, output):
+        """Ascend sample tail (spec-PP draft broadcast). Guard-independent."""
         if self.use_spec_pp and self.is_last_pp_rank:
             assert self.pp_handler is not None
             self.pp_handler.broadcast_drafts()
-        if guard is not None and guard.needs_sample_phase_hooks():
-            output = maybe_wrap_v2_async_output(output, self)
         return output
 
     def initialize_kv_cache(
@@ -841,8 +814,8 @@ class NPUModelRunner(GPUModelRunner):
         npu attention backends need seq_lens_cpu to work.
         so we need to copy num_computed_tokens back to cpu here.
 
-        Also stash spec-accept stats for ``run_sample_phase`` /
-        ``check_after_spec`` (called after ``sample_fn`` returns).
+        Also stash sampled / num_sampled for the same-wave sample-phase
+        observability path (cleared each sample by the sample-tokens decorator).
         """
         super().postprocess_sampled(
             idx_mapping,
@@ -851,8 +824,7 @@ class NPUModelRunner(GPUModelRunner):
             num_rejected,
             query_start_loc,
         )
-        self._rg_spec_sampled_tokens = sampled_tokens
-        self._rg_spec_num_sampled = num_sampled
+        note_postprocess_sampled(self, sampled_tokens, num_sampled)
 
         # Without MTP, update_requests writes the shared NumPy/torch CPU state.
         if self.speculator is not None:

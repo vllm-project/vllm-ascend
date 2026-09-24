@@ -30,6 +30,24 @@ from vllm_ascend.logger import init_logger_ascend
 
 logger = init_logger_ascend(__name__)
 
+# Written from ModelRunner.postprocess_sampled; read only by sample-phase hooks.
+_POSTPROCESS_SAMPLED_ATTR = "_obs_postprocess_sampled_tokens"
+_POSTPROCESS_NUM_ATTR = "_obs_postprocess_num_sampled"
+
+
+def note_postprocess_sampled(runner: Any, sampled_tokens: Any, num_sampled: Any) -> None:
+    """Stash spec-sample stats for the current sample phase (clears with None)."""
+    setattr(runner, _POSTPROCESS_SAMPLED_ATTR, sampled_tokens)
+    setattr(runner, _POSTPROCESS_NUM_ATTR, num_sampled)
+
+
+def get_postprocess_sampled(runner: Any) -> tuple[Any, Any]:
+    """Return ``(sampled_tokens, num_sampled)`` stashed by :func:`note_postprocess_sampled`."""
+    return (
+        getattr(runner, _POSTPROCESS_SAMPLED_ATTR, None),
+        getattr(runner, _POSTPROCESS_NUM_ATTR, None),
+    )
+
 
 def need_pre_sample_hook(guard: Any) -> bool:
     """True when wrapping ``compute_logits`` is useful (detector on + gate open)."""

@@ -241,7 +241,7 @@ With `report.save_sensitive_info=true`, persist prompt/output token ids (truncat
 | Runner | bind | Main hooks |
 |--------|------|----------|
 | v1 | `model_runner_v1.py` ctor | `@runtime_guard_step` on `execute_model`; sample still calls `run_sample_phase` inline |
-| v2 | `worker/v2/model_runner.py` ctor | `@runtime_guard_step` + `@runtime_guard_sample_tokens`; runner keeps `_rg_*` functional hooks only |
+| v2 | `worker/v2/model_runner.py` ctor | `@runtime_guard_step` + `@runtime_guard_sample_tokens`; runner keeps only neutral `_prepare_sample_tokens` / `_finalize_sample_tokens` (no `_rg_*` / `SamplePhaseResult`) |
 
 Shared decorators live in `observability/runtime_guard/hooks.py` (must sit **inside** `@torch.inference_mode()`). They own wave sync / sample-phase orchestration so v1/v2 worker diffs stay thin on upstream bumps.
 

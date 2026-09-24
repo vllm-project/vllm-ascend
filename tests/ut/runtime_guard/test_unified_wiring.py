@@ -138,7 +138,12 @@ def test_runners_call_run_sample_phase():
     # v2 routes it through the shared decorator.
     assert "run_sample_phase(" in hooks
     assert "@runtime_guard_sample_tokens" in v2
-    assert "_rg_spec_num_sampled" in v2
+    assert "note_postprocess_sampled" in v2
+    assert "_prepare_sample_tokens" in v2
+    assert "_finalize_sample_tokens" in v2
+    assert "_rg_sample_phase_result" not in v2
+    assert "_rg_before_sample_phase" not in v2
+    assert "_rg_after_sample_phase" not in v2
 
 
 def test_d11_async_model_runner_output_defers_after_sample():

@@ -590,7 +590,7 @@ def test_sample_tokens_spec_pp_broadcasts_draft_tokens():
     with patch.object(GPUModelRunner, "sample_tokens", return_value="out"):
         assert runner.sample_tokens("g") == "out"
     # The spec-PP broadcast is functional (guard-independent): it fires on the
-    # guard-less ``__new__`` UT path too, via ``_rg_after_sample_phase``.
+    # guard-less ``__new__`` UT path too, via ``_finalize_sample_tokens``.
     runner.pp_handler.broadcast_drafts.assert_called_once_with()
     runner.pp_handler.broadcast_draft_tokens.assert_not_called()
 
