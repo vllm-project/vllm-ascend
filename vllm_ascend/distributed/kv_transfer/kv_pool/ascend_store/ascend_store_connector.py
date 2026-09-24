@@ -254,9 +254,18 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         self.connector_worker.wait_for_previous_save()
 
+    def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
+        super().bind_connector_metadata(connector_metadata)
+        if self.use_layerwise:
+            assert self.connector_worker is not None
+            self._mamba_copy_bufs = None
+            # Layer hooks run before start_load_kv on steps without sync loads.
+            self.connector_worker.prepare_layerwise_step(connector_metadata)
+
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
-        self._mamba_copy_bufs = None
+        if not self.use_layerwise:
+            self._mamba_copy_bufs = None
         metadata = self._get_connector_metadata()
         self._current_step_has_real_forward = forward_context is not None
         logger.debug(
