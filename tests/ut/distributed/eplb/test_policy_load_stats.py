@@ -48,7 +48,10 @@ def test_step_keeps_skipped_samples_on_shared_time_axis(monkeypatch):
     state._should_collect_local_load = True
     state.step()
 
-    torch.testing.assert_close(state._local_load_collection_mask, torch.tensor([0, 1]))
+    torch.testing.assert_close(
+        state._local_load_collection_mask,
+        torch.tensor([0, 1], dtype=torch.int32),
+    )
     torch.testing.assert_close(state._physical_load_sample_slots, torch.tensor([-1, 1]))
     assert state._num_recorded_load_steps == 2
     assert upstream_step.call_count == 2
