@@ -20,10 +20,9 @@ from vllm.logger import logger
 def _flash_binding_source() -> str:
     """Name the package that will serve ``cann_ops_transformer.ops.flash_attn``.
 
-    ``vllm_ascend/utils.py`` prepends ``_cann_ops_custom/python`` to ``sys.path``,
-    and the build writes ``flash_attn_manifest.json`` there when it overlays the
-    official package with this repository's csrc FlashAttn. The manifest is
-    therefore the marker that separates the two candidates.
+    The operator is served by the CANN-bundled ``cann_ops_transformer``; the
+    ``flash_attn_manifest.json`` check is a leftover of the former csrc overlay
+    build and reports the resolved package directory only.
     """
     import cann_ops_transformer
 
@@ -310,10 +309,9 @@ def native_flash_adapters(
 ):
     """Use a matched CANN 192/128 binding/runtime; no custom backend or switch.
 
-    The binding must be this repository's csrc overlay, which is the only build
-    exposing ``head_dim_v`` and therefore the only one that can make QK192 attend
-    V128. A CANN-bundled ``cann_ops_transformer`` sizes V and the output at QK
-    width and cannot run this path.
+    The binding must expose ``head_dim_v`` so that QK192 can attend V128; the
+    CANN-bundled ``cann_ops_transformer`` provides it, and
+    :func:`_flash_binding_source` reports which package serves the call.
     """
     from cann_ops_transformer.ops import flash_attn, flash_attn_metadata
 

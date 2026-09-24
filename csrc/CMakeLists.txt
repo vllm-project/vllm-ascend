@@ -551,12 +551,6 @@ if (BUILD_OPS_RTY_KERNEL)
     install(DIRECTORY ${OPS_ADV_UTILS_KERNEL_INC}/
             DESTINATION ${IMPL_INSTALL_DIR}/ascendc/common
     )
-    if ("ascend950" IN_LIST ASCEND_COMPUTE_UNIT)
-        # FlashAttn's shared headers use relative includes outside ascendc/.
-        install(DIRECTORY ${OPS_TRANSFORMER_DIR}/attention/a5_mla_common/op_kernel
-                DESTINATION ${IMPL_INSTALL_DIR}/a5_mla_common
-        )
-    endif ()
 
     foreach (op_dir ${OP_DIR_LIST})
         get_filename_component(_op_name "${op_dir}" NAME)

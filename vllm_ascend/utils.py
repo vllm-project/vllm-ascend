@@ -434,14 +434,6 @@ def bootstrap_custom_op_env(*, include_vendor_lib: bool = False) -> None:
         return
     _prepend_env_path("ASCEND_CUSTOM_OPP_PATH", vendor_path)
 
-    # Prefer the packaged custom bindings over an installed official package.
-    binding_path = os.path.join(_CUSTOM_OP_BASE_DIR, "_cann_ops_custom", "python")
-    if os.path.isfile(os.path.join(binding_path, "cann_ops_transformer", "__init__.py")):
-        import sys
-
-        if binding_path not in sys.path:
-            sys.path.insert(0, binding_path)
-
     if include_vendor_lib:
         vendor_lib_path = os.path.join(vendor_path, "op_api", "lib")
         if os.path.exists(vendor_lib_path):
