@@ -260,12 +260,11 @@ def _wrap_async_rebalance(original_rebalance):
         _clear_transfer_target(communicator)
         prepared_stats = getattr(model_state, "_policy_load_stats", None)
         eplb_stats = model_state.eplb_stats
-        prepared_stats_is_current = (
-            prepared_stats is not None
-            and eplb_stats is not None
-            and prepared_stats.values is eplb_stats.global_expert_load_window
-        )
-        if not prepared_stats_is_current:
+        if (
+            prepared_stats is None
+            or eplb_stats is None
+            or prepared_stats.values is not eplb_stats.global_expert_load_window
+        ):
             target = original_rebalance(*bound.args, **bound.kwargs)
         else:
             with _async_worker.device_stream(bound.arguments["stream"]):
