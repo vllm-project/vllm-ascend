@@ -65,7 +65,6 @@ from vllm_ascend.core.profiling_chunk_predictor import (
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
     is_pd_decode_recompute_scheduler_enabled,
-    kv_transfer_supports_shared_backing,
     lmhead_tp_enable,
     set_potential_max_tokens,
 )

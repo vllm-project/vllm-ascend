@@ -17,6 +17,7 @@
 import torch
 from vllm.config import get_current_vllm_config
 from vllm.forward_context import get_forward_context
+
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 
 
