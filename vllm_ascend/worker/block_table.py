@@ -10,13 +10,17 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.utils import CpuGpuBuffer
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.core.kv_cache_interface import is_circular_kv_cache_spec
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
+from vllm_ascend.ops.triton.block_table_scatter import scatter_block_table
 from vllm_ascend.ops.triton.compute_slot_mapping import (
     _compute_slot_mapping_kernel,
     _next_power_of_2,
     compute_slot_mapping_fused_groups,
 )
+
+_DIRTY_SENTINEL = np.iinfo(np.int32).max
 
 
 class BlockTable:
@@ -337,6 +341,123 @@ class BlockTable:
         return CpuGpuBuffer(*size, dtype=dtype, device=self.device, pin_memory=self.pin_memory)
 
 
+class OptimizedBlockTable(BlockTable):
+    """MRv1 block table that commits only ranges changed since the last step."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        table_size = self.block_table.np.size
+        self._scatter_block_size = 1024
+        segments_per_row = cdiv(self.block_table.np.shape[1], self._scatter_block_size)
+        max_segments = self.max_num_reqs * segments_per_row
+        self._dirty_begin = np.full(self.max_num_reqs, _DIRTY_SENTINEL, dtype=np.int32)
+        self._dirty_end = np.zeros(self.max_num_reqs, dtype=np.int32)
+        self._packed_buffers = tuple(self._make_buffer(table_size, dtype=torch.int32) for _ in range(2))
+        self._metadata_buffers = tuple(self._make_buffer(max_segments, 4, dtype=torch.int32) for _ in range(2))
+        self._buffer_events: list[torch.npu.Event | None] = [None, None]
+        self._buffer_index = 0
+
+    def _mark_dirty(self, row_idx: int, begin: int, end: int) -> None:
+        if begin >= end:
+            return
+        self._dirty_begin[row_idx] = min(self._dirty_begin[row_idx], begin)
+        self._dirty_end[row_idx] = max(self._dirty_end[row_idx], end)
+
+    def append_row(self, block_ids, row_idx: int) -> None:
+        begin = int(self.num_blocks_per_row[row_idx])
+        super().append_row(block_ids, row_idx)
+        self._mark_dirty(row_idx, begin, int(self.num_blocks_per_row[row_idx]))
+
+    def add_row(self, block_ids: list[int], row_idx: int) -> None:
+        self.num_blocks_per_row[row_idx] = 0
+        self.append_row(block_ids, row_idx)
+
+    def clear_row(self, row_idx: int) -> None:
+        super().clear_row(row_idx)
+        self._dirty_begin[row_idx] = _DIRTY_SENTINEL
+        self._dirty_end[row_idx] = 0
+
+    def move_row(self, src: int, tgt: int) -> None:
+        super().move_row(src, tgt)
+        self._mark_dirty(tgt, 0, int(self.num_blocks_per_row[tgt]))
+
+    def swap_row(self, src: int, tgt: int) -> None:
+        num_blocks_src = int(self.num_blocks_per_row[src])
+        num_blocks_tgt = int(self.num_blocks_per_row[tgt])
+        width = max(num_blocks_src, num_blocks_tgt)
+        if width:
+            tmp = self.block_table.np[src, :width].copy()
+            self.block_table.np[src, :width] = self.block_table.np[tgt, :width]
+            self.block_table.np[tgt, :width] = tmp
+        self.num_blocks_per_row[src] = num_blocks_tgt
+        self.num_blocks_per_row[tgt] = num_blocks_src
+        self._mark_dirty(src, 0, num_blocks_tgt)
+        self._mark_dirty(tgt, 0, num_blocks_src)
+
+    def commit_block_table(self, num_reqs: int) -> None:
+        dirty_rows = np.flatnonzero(self._dirty_begin[:num_reqs] < self._dirty_end[:num_reqs])
+        if dirty_rows.size == 0:
+            return
+
+        # CPU devices are used by unit tests and do not need a scatter kernel.
+        if self.device.type == "cpu":
+            self.block_table.copy_to_gpu(num_reqs)
+            self._reset_dirty(dirty_rows)
+            return
+
+        buffer_index = self._buffer_index
+        previous_event = self._buffer_events[buffer_index]
+        if previous_event is not None:
+            previous_event.synchronize()
+
+        packed = self._packed_buffers[buffer_index]
+        metadata = self._metadata_buffers[buffer_index]
+        packed_offset = 0
+        segments: list[tuple[int, int, int]] = []
+        for row_idx_value in dirty_rows:
+            row_idx = int(row_idx_value)
+            begin = int(self._dirty_begin[row_idx])
+            end = int(self._dirty_end[row_idx])
+            for segment_begin in range(begin, end, self._scatter_block_size):
+                segment_end = min(segment_begin + self._scatter_block_size, end)
+                segments.append((row_idx, segment_begin, segment_end))
+
+        for segment_idx, (row_idx, begin, end) in enumerate(segments):
+            length = end - begin
+            packed.np[packed_offset : packed_offset + length] = self.block_table.np[row_idx, begin:end]
+            metadata.np[segment_idx] = (row_idx, begin, length, packed_offset)
+            packed_offset += length
+
+        packed.copy_to_gpu(packed_offset)
+        metadata.copy_to_gpu(len(segments))
+        scatter_block_table(
+            packed.gpu,
+            metadata.gpu,
+            self.block_table.gpu,
+            len(segments),
+        )
+        done = torch.npu.Event()
+        done.record(torch.npu.current_stream())
+        self._buffer_events[buffer_index] = done
+        self._buffer_index = 1 - buffer_index
+        self._reset_dirty(dirty_rows)
+
+    def _reset_dirty(self, rows: np.ndarray) -> None:
+        self._dirty_begin[rows] = _DIRTY_SENTINEL
+        self._dirty_end[rows] = 0
+
+    def clear(self) -> None:
+        super().clear()
+        self._dirty_begin.fill(_DIRTY_SENTINEL)
+        self._dirty_end.fill(0)
+
+
+def _get_block_table_cls() -> type[BlockTable]:
+    if get_ascend_config().block_table_no_commit_optimize == 1:
+        return BlockTable
+    return OptimizedBlockTable
+
+
 class MultiGroupBlockTable:
     """The BlockTables for each KV cache group."""
 
@@ -354,6 +475,7 @@ class MultiGroupBlockTable:
         cp_kv_cache_interleave_size: int = 1,
         kv_cache_groups: KVCacheGroupSpec = None,
     ) -> None:
+        block_table_cls = _get_block_table_cls()
         if kernel_sizes is None:
             kernel_sizes = [[0]] * len(block_sizes)
         # Ensure kernel_sizes matches block_sizes length
@@ -380,7 +502,7 @@ class MultiGroupBlockTable:
         # Use zip to pair block_sizes with kernel_sizes one-to-one
         if kv_cache_groups is not None:
             self.block_tables = [
-                BlockTable(
+                block_table_cls(
                     block_size,
                     max_num_reqs,
                     max_num_blocks_per_req,
@@ -398,7 +520,7 @@ class MultiGroupBlockTable:
             ]
         else:
             self.block_tables = [
-                BlockTable(
+                block_table_cls(
                     block_size,
                     max_num_reqs,
                     max_num_blocks_per_req,

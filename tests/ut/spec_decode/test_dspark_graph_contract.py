@@ -151,6 +151,8 @@ def test_dispatcher_pads_uniform_draft_descriptors(query_count):
     manager._candidates = {}
     manager._capture_descs = {}
     manager._graphs_captured = True
+    # vLLM #51700 added ubatch_runner to the cudagraph manager.
+    manager.ubatch_runner = None
     manager._init_candidates()
 
     for num_reqs in (1, 2, 3, 4, 8, 16):

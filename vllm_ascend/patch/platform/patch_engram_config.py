@@ -71,7 +71,9 @@ if importlib.util.find_spec("vllm.config.engram") is not None:
                 or parallel_config.prefill_context_parallel_size != 1
                 or parallel_config.decode_context_parallel_size != 1
                 or parallel_config.nnodes != 1
-                or parallel_config.data_parallel_size_local != dp
+                # External DP launches one engine per process, even on one node.
+                # Check physical co-location after the DP group is initialized.
+                or (not parallel_config.data_parallel_external_lb and parallel_config.data_parallel_size_local != dp)
             ):
                 raise ValueError(
                     "Ascend Engram requires single-node TP=1/2/4/8 with at most 16 ranks, "
