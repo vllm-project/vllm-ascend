@@ -209,14 +209,20 @@ public:
     }
 
     // ---- L1 ------------------------------------------------------------------
-    // The Catlass BlockMmadTla tiles used to own the bottom 256 KB; the hand mmad
-    // keeps clear of them.
-    static constexpr uint32_t HAND_L1A_OFFSET = 256 * 1024;
-    static constexpr uint32_t HAND_L1B_OFFSET = HAND_L1A_OFFSET + 32 * 1024;
+    // Software pipeline: every GM tile task i needs (Q, K, h, v) is issued into
+    // its own double-buffered L1 bank at the top of body i, and the whole MTE2
+    // stream runs under task i-1's compute (C2/C3/Vec2). All three mmads then
+    // read L1 only. Banks are indexed by maskedParity like the masked slots.
+    static constexpr uint32_t K_L1_SLOT   = 32 * 1024;   // 64x192 fp16 nZ = 24 KB
+    static constexpr uint32_t K_L1_OFFSET = 256 * 1024;
+    static constexpr uint32_t H_L1_SLOT   = 48 * 1024;   // 192x128 fp16 zN image
+    static constexpr uint32_t H_L1_OFFSET = K_L1_OFFSET + 2 * K_L1_SLOT;
+    static constexpr uint32_t V_L1_SLOT   = 16 * 1024;   // 64x128 fp16 zN
+    static constexpr uint32_t V_L1_OFFSET = H_L1_OFFSET + 2 * H_L1_SLOT;
     // Masked attn tile handed UB->L1 (copy_ubuf_to_cbuf, MTE3) instead of through GM.
     // Two slots: Vec1[i] writes one while Cube3[i-1] still reads the other.
     static constexpr uint32_t MASKED_L1_SLOT   = 8 * 1024;            // 64x64 fp16
-    static constexpr uint32_t MASKED_L1_OFFSET = HAND_L1B_OFFSET + 64 * 1024;
+    static constexpr uint32_t MASKED_L1_OFFSET = V_L1_OFFSET + 2 * V_L1_SLOT;
     static_assert(MASKED_L1_OFFSET + 2 * MASKED_L1_SLOT <= ArchTag::L1_SIZE, "L1 overflow");
     // Q tile double buffer. Cube1 and Cube2 read the SAME Q tile (same qkOffset,
     // same [blockTokens, kHeadDim] shape) one body apart, so Cube1(i) lands Q in
@@ -229,8 +235,8 @@ public:
     // is ordered by each HandMmad's own MTE1_MTE2 fence.
     static constexpr uint32_t Q_L1_SLOT   = 32 * 1024;   // 64x192 fp16 max = 24 KB
     static constexpr uint32_t Q_L1_OFFSET = 0;
-    static_assert(Q_L1_OFFSET + 2 * Q_L1_SLOT <= HAND_L1A_OFFSET,
-                  "chunk_fwd_o: Q slots overlap the hand-mmad L1 region");
+    static_assert(Q_L1_OFFSET + 2 * Q_L1_SLOT <= K_L1_OFFSET,
+                  "chunk_fwd_o: Q slots overlap the prefetch banks");
 
     // ---- L0C -----------------------------------------------------------------
     // One region per cube so the mmads do not serialise on L0C reuse.
@@ -288,17 +294,23 @@ public:
                   "chunk_fwd_o: UB map moved -- these are the offsets the 24/24 "
                   "correctness sweep was measured at, re-verify before changing");
 
-    // Vec2 scratch, aliasing Vec1's region. NZ-native Vec2: h_work stages at
-    // UB_HW, v_work at UB_STAGE (both straight from HandMmad, no deformat), so
-    // UB_VW is dead -- the Broadcast temp lives there now.
-    static constexpr uint32_t UB_G_OFFSET      = 0;
-    static constexpr uint32_t UB_GBRC_OFFSET   = 512;
-    static constexpr uint32_t UB_OUT_OFFSET    = UB_GBRC_OFFSET + UB_TILE_BYTES;
-    static constexpr uint32_t UB_BRCTMP_OFFSET = UB_VW_OFFSET;
-    static_assert(UB_OUT_OFFSET + 64 * 128 * sizeof(half) <= UB_VEC1_TOP,
-                  "chunk_fwd_o: Vec2 scratch does not fit in Vec1's region");
-    static_assert(UB_OUT_OFFSET + 64 * 128 * sizeof(half) <= UB_MASK_OFFSET,
-                  "chunk_fwd_o: Vec2 scratch collides with the persistent causal mask");
+    // Vec2 scratch. NZ-native Vec2: h_work stages at UB_HW, v_work at UB_STAGE
+    // (both straight from HandMmad, no deformat). gBrc aliases Vec1's brcA/brcB
+    // (V pipe both, never concurrent); everything else lives in the dead UB_VW
+    // window and the gap under the staging buffer, DISJOINT from Vec1's g
+    // scratch and Broadcast temp -- so Vec1's MTE2 g load needs no fence
+    // against Vec2's V stream or the o store's MTE3 read (auto_flag-verified,
+    // fwd_o_v3.yaml).
+    static constexpr uint32_t UB_GBRC_OFFSET   = 0;
+    static constexpr uint32_t UB_G_OFFSET      = UB_VW_OFFSET;             // 256 B
+    static constexpr uint32_t UB_BRCTMP_OFFSET = UB_VW_OFFSET + 512;
+    static constexpr uint32_t UB_OUT_OFFSET    = UB_STAGE_OFFSET - 64 * 128 * sizeof(half);
+    // Vec2's g vector, prefetched one body early; nothing else writes up here.
+    static constexpr uint32_t UB_GPRE_OFFSET   = UB_OUT_OFFSET - 512;
+    static_assert(UB_GBRC_OFFSET + UB_TILE_BYTES <= UB_GCOMP_OFFSET,
+                  "chunk_fwd_o: gBrc runs into Vec1's g scratch");
+    static_assert(UB_GPRE_OFFSET + 512 <= UB_OUT_OFFSET,
+                  "chunk_fwd_o: gPre runs into the Vec2 out tile");
 
     // ---- NZ-native Vec1 -------------------------------------------------------
     // Causal mask in NZ fractal order, built once:
@@ -424,58 +436,70 @@ public:
             const bool vec1Ran = cubeBlockScheduler.isRunning;
 
             if (vec1Ran) {
-                // CUBE1: attn = q @ k^T.  B is ColumnMajor because k is stored
-                // [seqlen][kHeadDim] row-major, so B[kk][j] == gm[j*kHeadDim + kk].
+                // PREFETCH: issue every GM tile task i needs before task i-1's
+                // compute, so the whole MTE2 stream (~112 KB/body) runs under it.
+                // K/Q feed C1 at the end of THIS body; h/v/g feed C2/C3/Vec2 in
+                // the NEXT body. Ordering against older readers of these banks is
+                // the previous mmads' internal MTE1_MTE2 fences.
                 GDNFwdOOffsets& cube1Offsets = cubeBlockScheduler.GetCube1Offsets();
-                M200Gemm::HandMmad<ArchTag, /*B_COL_MAJOR=*/true>(
-                    resource,
-                    gmQ[cube1Offsets.qkOffset], kHeadDim,
-                    gmK[cube1Offsets.qkOffset], kHeadDim,
-                    cube1Offsets.blockTokens, cube1Offsets.blockTokens, kHeadDim,
-                    Q_L1_OFFSET + maskedParity * Q_L1_SLOT,
-                    HAND_L1B_OFFSET, UB_STAGE_OFFSET, L0C_C1_OFFSET);
-
-                // VEC1 is NZ-native: it consumes the cube's staging buffer in place,
-                // so there is no deformat here, and leaves the masked tile in L1 as
-                // Cube3's A operand.
-                Vec1NZ(cube1Offsets.gOffset, cube1Offsets.blockTokens);
-                MaskedNZToL1(MASKED_L1_OFFSET + maskedParity * MASKED_L1_SLOT,
-                             cube1Offsets.blockTokens);
-                // Set here, wait down at Cube3, so all of Cube2 runs underneath the
-                // outstanding MTE3. That deferral is the point of the two L1 slots:
-                // waiting here would drain MTE3 and the double buffer would be free.
-                AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE1>(EVENT_ID3);
+                const uint32_t pbt = cube1Offsets.blockTokens;
+                M200Gemm::HmLoadGmToL1<ArchTag>(
+                    resource, gmQ[cube1Offsets.qkOffset], kHeadDim,
+                    pbt, kHeadDim, Q_L1_OFFSET + maskedParity * Q_L1_SLOT);
+                M200Gemm::HmLoadGmToL1<ArchTag>(
+                    resource, gmK[cube1Offsets.qkOffset], kHeadDim,
+                    pbt, kHeadDim, K_L1_OFFSET + maskedParity * K_L1_SLOT);
+                // C1's gate: only Q and K. h/v below carry their own flag, so
+                // C1 does not stall on the 64 KB it never reads.
+                AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID6);
+                {   // h is already a zN image: one flat burst.
+                    auto l1H = resource.l1Buf.template GetBufferByByte<half>(
+                        H_L1_OFFSET + maskedParity * H_L1_SLOT);
+                    AscendC::DataCopy(l1H, gmH[cube1Offsets.hOffset],
+                                      M200Gemm::HmRoundUp16(kHeadDim) *
+                                      M200Gemm::HmRoundUp16(vHeadDim));
+                }
+                M200Gemm::HmLoadGmToL1<ArchTag>(
+                    resource, gmV[cube1Offsets.ovOffset], vHeadDim,
+                    pbt, vHeadDim, V_L1_OFFSET + maskedParity * V_L1_SLOT);
+                AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID5);  // h/v -> next body's C2/C3
             }
 
             if (needRun) {
                 GDNFwdOOffsets& prevOffsets = cubeBlockScheduler.GetCube23Offsets();
 
-                // CUBE2: h_work = q @ h.  A (the Q tile) is already in L1 -- the
-                // previous body's Cube1 loaded the identical tile -- so gmA/lda are
-                // unused and no GM re-read happens. B (the h tile) arrives as a zN
-                // image from chunk_gated_delta_rule_fwd_h: one flat 48 KB burst.
+                // h/v banks for this task were prefetched at the previous body's
+                // top; consume their flag here.
+                AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID5);
+                // CUBE2: h_work = q @ h. Both operands were prefetched at the top
+                // of the previous body: Q in its slot, h's zN image in its bank.
                 M200Gemm::HandMmad<ArchTag, /*B_COL_MAJOR=*/false, /*A_FROM_L1=*/true,
-                                   /*A_COL_MAJOR=*/false, /*B_FROM_L1=*/false,
-                                   /*B_NZ_GM=*/true>(
+                                   /*A_COL_MAJOR=*/false, /*B_FROM_L1=*/true,
+                                   /*B_NZ_GM=*/false, /*LEAN_TAIL=*/true, /*NO_MTE1_MTE2=*/true>(
                     resource,
                     gmQ[prevOffsets.qkOffset], kHeadDim,
                     gmH[prevOffsets.hOffset], vHeadDim,
                     prevOffsets.blockTokens, vHeadDim, kHeadDim,
                     Q_L1_OFFSET + (maskedParity ^ 1u) * Q_L1_SLOT,
-                    HAND_L1B_OFFSET, UB_HW_OFFSET, L0C_C2_OFFSET);
+                    H_L1_OFFSET + (maskedParity ^ 1u) * H_L1_SLOT,
+                    UB_HW_OFFSET, L0C_C2_OFFSET);
 
-                // Deferred consume of Vec1's UB->L1 store (set above, before Cube2).
-                if (vec1Ran) { AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE1>(EVENT_ID3); }
+                // Deferred consume of the previous body's masked-tile UB->L1 store
+                // (needRun implies that body ran Vec1, so the flag is outstanding).
+                AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE1>(EVENT_ID3);
 
-                // CUBE3: v_work = attn_masked @ v.  A is already in L1 -- the previous
-                // body's Vec1 put it there -- so gmA/lda are unused.
-                M200Gemm::HandMmad<ArchTag, /*B_COL_MAJOR=*/false, /*A_FROM_L1=*/true>(
+                // CUBE3: v_work = attn_masked @ v. A is the previous body's Vec1
+                // tile, B was prefetched into its bank alongside it.
+                M200Gemm::HandMmad<ArchTag, /*B_COL_MAJOR=*/false, /*A_FROM_L1=*/true,
+                                   /*A_COL_MAJOR=*/false, /*B_FROM_L1=*/true,
+                                   /*B_NZ_GM=*/false, /*LEAN_TAIL=*/true, /*NO_MTE1_MTE2=*/true>(
                     resource,
                     gmV[prevOffsets.ovOffset], 0,
                     gmV[prevOffsets.ovOffset], vHeadDim,
                     prevOffsets.blockTokens, vHeadDim, prevOffsets.blockTokens,
                     MASKED_L1_OFFSET + (maskedParity ^ 1u) * MASKED_L1_SLOT,
-                    HAND_L1B_OFFSET, UB_STAGE_OFFSET, L0C_C3_OFFSET);
+                    V_L1_OFFSET + (maskedParity ^ 1u) * V_L1_SLOT,
+                    UB_STAGE_OFFSET, L0C_C3_OFFSET);
 
                 // VEC2 for 310P, NZ-native: o = scale * (v_work + exp(g) * h_work).
                 // h_work sits in UB_HW and v_work in UB_STAGE exactly as HandMmad
@@ -499,19 +523,25 @@ public:
                     AscendC::LocalTensor<ElementVNEW> outUb =
                         resource.ubBuf.template GetBufferByByte<ElementVNEW>(UB_OUT_OFFSET);
 
-                    if constexpr (std::is_same<ElementG, float>::value) {
-                        AscendC::DataCopy(gUb, gmG[prevOffsets.gOffset], bt);
-                    } else {
-                        AscendC::LocalTensor<ElementG> gTyped =
-                            resource.ubBuf.template GetBufferByByte<ElementG>(UB_G_OFFSET + 256);
-                        AscendC::DataCopy(gTyped, gmG[prevOffsets.gOffset], bt);
-                        AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID3);
-                        AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID3);
-                        AscendC::Cast(gUb, gTyped, AscendC::RoundMode::CAST_NONE, bt);
-                    }
-                    AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID2);
+                    // g was prefetched at the top of the previous body; the wait
+                    // pairs with the MTE2_V set right after that issue.
                     AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID2);
-                    AscendC::Exp(gUb, gUb, bt);
+                    if constexpr (std::is_same<ElementG, float>::value) {
+                        AscendC::LocalTensor<float> gPre =
+                            resource.ubBuf.template GetBufferByByte<float>(UB_GPRE_OFFSET);
+                        AscendC::Exp(gUb, gPre, bt);
+                    } else {
+                        AscendC::LocalTensor<ElementG> gPre =
+                            resource.ubBuf.template GetBufferByByte<ElementG>(UB_GPRE_OFFSET);
+                        AscendC::Cast(gUb, gPre, AscendC::RoundMode::CAST_NONE, bt);
+                        AscendC::PipeBarrier<PIPE_V>();
+                        AscendC::Exp(gUb, gUb, bt);
+                    }
+                    // gPre is consumed; release it for this body's re-prefetch
+                    // (auto_flag: WAR v2_exp -> gpre@MTE2). Narrow: only the g
+                    // load waits, the big prefetch batch of the next body is
+                    // already past its own fence by then.
+                    if (vec1Ran) { AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID4); }
                     AscendC::PipeBarrier<PIPE_V>();
                     {
                         uint32_t dstShape[2] = {bt, 16};
@@ -542,10 +572,10 @@ public:
                     for (uint32_t nf = 0; nf < nFr; ++nf) {
                         AscendC::DataCopy(gmO[prevOffsets.ovOffset + nf * 16], outUb[nf * FRUN], op);
                     }
-                    // Next iteration's Vec1 rewrites this low-UB scratch (V) while
-                    // the o store's MTE3 read of outUb may still be in flight.
-                    AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID3);
-                    AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID3);
+                    // No MTE3_V drain after the store: v2out sits in its own
+                    // window now and its only later writer is the next body's
+                    // Vec2 cast, ordered through the kept V_MTE3 pair
+                    // (reduce_flags: v2fin dropped, checker-verified).
                     // The old end-of-body V_MTE3 fence is gone with the deformats:
                     // the next body's only MTE3 readers (MaskedNZToL1, HandMmad
                     // internals) touch windows Vec2 never writes, and every V-write
@@ -554,8 +584,46 @@ public:
                 }
             }
 
-            if (vec1Ran && !needRun) {
-                AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE1>(EVENT_ID3);
+            if (vec1Ran) {
+                GDNFwdOOffsets& cube1Offsets = cubeBlockScheduler.GetCube1Offsets();
+                // All four prefetched tiles are in by now -- the wait pairs with
+                // the set at the top of this body.
+                AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID6);
+
+                // CUBE1: attn = q @ k^T.  B is ColumnMajor because k is stored
+                // [seqlen][kHeadDim] row-major, so B[kk][j] == gm[j*kHeadDim + kk];
+                // the prefetch's Nd2Nz already landed it in the nZ image this
+                // path expects.
+                M200Gemm::HandMmad<ArchTag, /*B_COL_MAJOR=*/true, /*A_FROM_L1=*/true,
+                                   /*A_COL_MAJOR=*/false, /*B_FROM_L1=*/true,
+                                   /*B_NZ_GM=*/false, /*LEAN_TAIL=*/true>(
+                    resource,
+                    gmQ[cube1Offsets.qkOffset], kHeadDim,
+                    gmK[cube1Offsets.qkOffset], kHeadDim,
+                    cube1Offsets.blockTokens, cube1Offsets.blockTokens, kHeadDim,
+                    Q_L1_OFFSET + maskedParity * Q_L1_SLOT,
+                    K_L1_OFFSET + maskedParity * K_L1_SLOT,
+                    UB_STAGE_OFFSET, L0C_C1_OFFSET);
+
+                // VEC1 is NZ-native: it consumes the cube's staging buffer in place,
+                // so there is no deformat here, and leaves the masked tile in L1 as
+                // Cube3's A operand.
+                Vec1NZ(cube1Offsets.gOffset, cube1Offsets.blockTokens);
+                // Vec2(i)'s g, prefetched HERE and not in the top batch: Vec1NZ's
+                // closing V_MTE3 drain just retired the previous Vec2's read of
+                // gPre, so the single buffer is safe to overwrite (an MTE2 write
+                // is not otherwise ordered against V reads).
+                if (needRun) { AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID4); }
+                {
+                    auto gPre = resource.ubBuf.template GetBufferByByte<ElementG>(UB_GPRE_OFFSET);
+                    AscendC::DataCopy(gPre, gmG[cube1Offsets.gOffset], cube1Offsets.blockTokens);
+                }
+                AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID2);     // g -> next body's Vec2
+                MaskedNZToL1(MASKED_L1_OFFSET + maskedParity * MASKED_L1_SLOT,
+                             cube1Offsets.blockTokens);
+                // Set here, wait at the NEXT body's Cube3: the next body's Cube2
+                // runs underneath the outstanding MTE3.
+                AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE1>(EVENT_ID3);
             }
             if (vec1Ran) { maskedParity ^= 1u; }
             needRun = true;
