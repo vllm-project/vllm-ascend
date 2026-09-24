@@ -2228,6 +2228,7 @@ class TestKVPPWorkerBudget(TestBase):
         with (
             patch.object(worker_module, "get_tp_group", return_value=SimpleNamespace(rank_in_group=1)),
             patch.object(worker_module, "get_pp_group", return_value=SimpleNamespace(is_last_rank=True)),
+            patch.object(worker_module, "get_pcp_group", return_value=SimpleNamespace(rank_in_group=0)),
             patch.object(worker_module, "get_ascend_config", return_value=ascend_config),
         ):
             self.assertEqual(worker.get_kv_cache_spec(), specs)
@@ -2241,3 +2242,30 @@ class TestKVPPWorkerBudget(TestBase):
         worker._kvpp_cache_allocation_plan = None
         self.assertEqual(worker._apply_kvpp_memory_budget(1176), 1176)
         self.assertEqual(worker.available_kv_cache_memory_bytes, 1176)
+
+    def test_allocation_plan_uses_pcp_tp_kvpp_rank(self):
+        from tests.ut.kvpp_utils import layer_name, make_kvpp_config, make_kvpp_specs
+        from vllm_ascend.worker import worker as worker_module
+
+        specs = make_kvpp_specs()
+        worker = worker_module.NPUWorker.__new__(worker_module.NPUWorker)
+        worker.vllm_config = make_kvpp_config(tp=2, pcp=2)
+        worker.model_runner = SimpleNamespace(
+            get_kv_cache_spec=lambda: specs, drafter=SimpleNamespace(_draft_attn_layer_names={layer_name(17)})
+        )
+        worker._kvpp_cache_allocation_plan = None
+        ascend_config = SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=False))
+        allocation_plan = MagicMock()
+        with (
+            patch.object(worker_module, "get_tp_group", return_value=SimpleNamespace(rank_in_group=0)),
+            patch.object(worker_module, "get_pp_group", return_value=SimpleNamespace(is_last_rank=True)),
+            patch.object(worker_module, "get_pcp_group", return_value=SimpleNamespace(rank_in_group=1)),
+            patch.object(worker_module, "get_ascend_config", return_value=ascend_config),
+            patch.object(
+                worker_module, "create_kvpp_cache_allocation_plan", return_value=allocation_plan
+            ) as create_plan,
+        ):
+            self.assertEqual(worker.get_kv_cache_spec(), specs)
+
+        create_plan.assert_called_once_with(worker.vllm_config, specs, 2)
+        self.assertIs(worker._kvpp_cache_allocation_plan, allocation_plan)

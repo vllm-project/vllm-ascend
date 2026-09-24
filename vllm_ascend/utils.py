@@ -195,6 +195,7 @@ def clear_enable_sp():
     enable_dsa_cp.cache_clear()
     enable_dsa_cp_full_o_proj.cache_clear()
     enable_pcp_o_proj_weight_sharding.cache_clear()
+    enable_pcp_embedding_lmhead_weight_sharding.cache_clear()
     _libc_getenv.cache_clear()
 
 
@@ -224,14 +225,7 @@ def is_rc_device() -> bool:
     return _IS_RC_DEVICE
 
 
-def _mark_op_side_effectful(op: Any) -> None:
-    torch.fx.node.has_side_effect(op)
-    default_overload = getattr(op, "default", None)
-    if default_overload is not None:
-        torch.fx.node.has_side_effect(default_overload)
-
-
-def _ensure_device_print_registered() -> None:
+def register_device_print() -> None:
     global _DEVICE_PRINT_OP_REGISTERED
 
     if _DEVICE_PRINT_OP_REGISTERED:
@@ -244,9 +238,10 @@ def _ensure_device_print_registered() -> None:
         )
 
     try:
-        # Mark device_print ops side-effectful so FX/Inductor does not DCE or reorder these debug callbacks.
-        _mark_op_side_effectful(torch.ops._C_ascend.device_print)
-        _mark_op_side_effectful(torch.ops._C_ascend.device_print_tensor)
+        from torch._higher_order_ops.effects import _EffectType, _register_effectful_op
+
+        _register_effectful_op(torch.ops._C_ascend.device_print.default, _EffectType.ORDERED)
+        _register_effectful_op(torch.ops._C_ascend.device_print_tensor.default, _EffectType.ORDERED)
         _DEVICE_PRINT_OP_REGISTERED = True
     except AttributeError as exc:
         raise RuntimeError(
@@ -268,7 +263,8 @@ def device_print(
 
     Supported usage:
 
-        >>> from vllm_ascend.utils import device_print
+        >>> from vllm_ascend.utils import device_print, register_device_print
+        >>> register_device_print()
         >>> device_print(x)
         >>> device_print("already formatted text")
         >>> device_print(7)
@@ -290,8 +286,6 @@ def device_print(
         >>> device_print(f"x = {x}")
         >>> device_print("x = " + str(x))
     """
-    _ensure_device_print_registered()
-
     if isinstance(value, torch.Tensor):
         torch.ops._C_ascend.device_print_tensor(value)
     elif isinstance(value, (str, int, float, bool, torch.dtype, torch.device, torch.Size)):
@@ -684,7 +678,7 @@ def vllm_version_is(target_vllm_version: str):
 
         vllm_version = vllm.__version__
     try:
-        # Strip any PEP 440 local version segment (e.g. "0.29.0+empty" built
+        # Strip any PEP 440 local version segment (e.g. "0.30.0+empty" built
         # with VLLM_TARGET_DEVICE=empty): it is a build artifact and must not
         # change the version identity for `vllm_version_is` comparisons.
         parsed = Version(vllm_version)
@@ -849,10 +843,9 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "RoutedExperts": AscendRoutedExperts,
         "GateLinear": AscendGateLinear,
     }
-    if not vllm_version_is("0.29.0"):
-        from vllm_ascend.ops.kimi_mla import AscendKimiK3MultiHeadLatentAttention
+    from vllm_ascend.ops.kimi_mla import AscendKimiK3MultiHeadLatentAttention
 
-        REGISTERED_ASCEND_OPS["KimiK3MultiHeadLatentAttentionWrapper"] = AscendKimiK3MultiHeadLatentAttention
+    REGISTERED_ASCEND_OPS["KimiK3MultiHeadLatentAttentionWrapper"] = AscendKimiK3MultiHeadLatentAttention
 
     if vllm_config is None:
         try:
@@ -1495,6 +1488,14 @@ def enable_pcp_o_proj_weight_sharding() -> bool:
     from vllm_ascend.ascend_config import get_ascend_config
 
     return get_ascend_config().enable_pcp_o_proj_weight_sharding
+
+
+@lru_cache(maxsize=1)
+def enable_pcp_embedding_lmhead_weight_sharding() -> bool:
+    """Whether PCP shards embedding and LM Head weights."""
+    from vllm_ascend.ascend_config import get_ascend_config
+
+    return get_ascend_config().enable_pcp_embedding_lmhead_weight_sharding
 
 
 @lru_cache(maxsize=1)

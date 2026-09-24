@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include <dlfcn.h>
 #include <torch/extension.h>
 #include <torch/library.h>
 #include <torch/version.h>
@@ -2065,9 +2066,33 @@ at::Tensor npu_sparse_attention_score_prefill(
 
 bool is_minimax_sparse_attention_split_kv_available()
 {
-    static const bool is_available =
-        GetOpApiFuncAddr("aclnnMinimaxSparseAttentionSplitKv") != nullptr &&
-        GetOpApiFuncAddr("aclnnMinimaxSparseAttentionSplitKvGetWorkspaceSize") != nullptr;
+    static const bool is_available = []() {
+        auto run = GetOpApiFuncAddr("aclnnMinimaxSparseAttentionSplitKv");
+        auto workspace = GetOpApiFuncAddr("aclnnMinimaxSparseAttentionSplitKvGetWorkspaceSize");
+        if (run == nullptr || workspace == nullptr) {
+            return false;
+        }
+        Dl_info run_info{}, workspace_info{};
+        if (dladdr(run, &run_info) == 0 || dladdr(workspace, &workspace_info) == 0 ||
+            run_info.dli_fbase != workspace_info.dli_fbase) {
+            return false;
+        }
+        // The metadata-enabled experimental ABI adds metadataOptional to
+        // GetWorkspaceSize without renaming it. This binding uses the earlier
+        // signature. Reject that known incompatible ABI before invoking it.
+        // Inspect the selected provider, not a lower-priority vendor library.
+        if (workspace_info.dli_fname == nullptr) {
+            return false;
+        }
+        auto handle = dlopen(workspace_info.dli_fname, RTLD_LAZY | RTLD_LOCAL);
+        if (handle == nullptr) {
+            return false;
+        }
+        const bool has_metadata =
+            dlsym(handle, "aclnnMinimaxSparseAttentionSplitKvMetadataGetWorkspaceSize") != nullptr;
+        dlclose(handle);
+        return !has_metadata;
+    }();
     return is_available;
 }
 

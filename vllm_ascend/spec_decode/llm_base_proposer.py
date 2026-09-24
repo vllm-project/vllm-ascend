@@ -64,7 +64,7 @@ from vllm_ascend.spec_decode.utils import (
     _maybe_eager_context,
     patch_tensor_parallel_group,
 )
-from vllm_ascend.utils import check_gdn_layer, enable_sp, lmhead_tp_enable, use_updatable_graph, vllm_version_is
+from vllm_ascend.utils import check_gdn_layer, enable_sp, lmhead_tp_enable, use_updatable_graph
 from vllm_ascend.worker.device_metadata import DeviceMetadataTask, DeviceMetadataTaskProvider
 
 
@@ -85,7 +85,9 @@ _HIDDEN_STATE_DRAFTER_TYPES: tuple[type, ...] = (
     DSparkDeepseekV4ForCausalLM,
 )
 
-if not vllm_version_is("0.29.0"):
+# DeepSeek V4.1 is skipped on Triton-less builds such as 310P (newer main's
+# sparse_mqa_logits calls tl.constexpr at module scope, crashing the import).
+if HAS_TRITON:
     from vllm_ascend.models.deepseek_v41.dspark import DSparkDeepseekV41ForCausalLM
 
     _HIDDEN_STATE_DRAFTER_TYPES += (DSparkDeepseekV41ForCausalLM,)
@@ -301,14 +303,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         self._runnable: Any = self._run_merged_draft
         if self.uses_mrope:
-            num_dims = 3 if vllm_version_is("0.29.0") else self.draft_model_config.mrope_num_dims
+            num_dims = self.draft_model_config.mrope_num_dims
             self.mrope_positions = torch.zeros((num_dims, self.max_num_tokens + 1), dtype=torch.int32, device=device)
-        elif vllm_version_is("0.29.0") and self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0:
-            self.xdrope_positions = torch.zeros(
-                (self.uses_xdrope_dim, self.max_num_tokens + 1),
-                dtype=torch.int32,
-                device=device,
-            )
         else:
             # RoPE need (max_num_tokens,)
             self.positions = torch.zeros(self.max_num_tokens, dtype=torch.int32, device=device)
@@ -388,10 +384,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         if self.supports_mm_inputs:
             # Match upstream: a multimodal target can use a text-only drafter.
-            try:
-                dummy_input_ids = torch.tensor([[1]], device=self.input_ids.device)
-                self.model.embed_input_ids(dummy_input_ids, multimodal_embeddings=None)
-            except (NotImplementedError, AttributeError, TypeError):
+            if not _draft_embed_accepts_mm(getattr(self.model, "embed_input_ids", None)):
+                # Main lane: introspect the draft embed signature instead of
+                # calling it. Drafts that share the target embedding (e.g. K3
+                # DSpark on a kv_consumer) have no own embed_tokens before the
+                # target sharing step, so the runtime probe asserts on
+                # embed_tokens=None.
                 logger.warning("Draft model does not support multimodal inputs, falling back to text-only mode")
                 self.supports_mm_inputs: bool = False
 
@@ -855,6 +853,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     if self.dcp_size > 1 and draft_index > 0:
                         assert self.block_table_tensor_clone is not None, "block_table_tensor_clone is not init"
                         common_attn_metadata.block_table_tensor = self.block_table_tensor_clone[:num_reqs]
+                    if dcp_manager is not None:
+                        dcp_manager.prepare_common_attn_metadata(common_attn_metadata)
                     per_layer_attn_metadata = self._build_multi_group_graph_capture_metadata(
                         common_attn_metadata, draft_index
                     )
@@ -1169,6 +1169,19 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         multi_steps_attn_metadata, attn_metadata_i = self.build_draft_attn_metadata(
             common_attn_metadata, num_input_tokens, num_tokens
         )
+
+        # Merged step 0 is the draft model's first-pass/prefill forward, not a
+        # one-token draft decode step. It reuses the target-model layout and
+        # therefore keeps the unadjusted sequence lengths. Before building the
+        # remaining one-token draft decode steps, remove the rejected target
+        # tokens from an independent NPU buffer. This mirrors upstream vLLM's
+        # rejection-correction boundary while preserving step 0 metadata and
+        # the model runner's shared seq_lens.
+        if not self.parallel_drafting and self.num_speculative_tokens > 1 and num_rejected_tokens_gpu is not None:
+            next_step_seq_lens = self.seq_lens_group[1][: common_attn_metadata.seq_lens.shape[0]]
+            next_step_seq_lens.copy_(common_attn_metadata.seq_lens)
+            next_step_seq_lens[:batch_size].sub_(num_rejected_tokens_gpu[:batch_size])
+            common_attn_metadata.seq_lens = next_step_seq_lens
 
         if self.uses_mrope:
             used_update_positions = self.mrope_positions[:, token_indices_to_sample]
@@ -1817,9 +1830,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 long_seq_args = first_pass_inputs.long_seq_args
 
             # copy inputs to buffer for cudagraph
-            if vllm_version_is("0.29.0") and self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim == 0:
-                target_positions = target_positions[0]
-
             self._set_positions(num_tokens, target_positions)
             self.hidden_states[:num_tokens] = target_hidden_states.view(num_tokens, -1)
 
@@ -2554,6 +2564,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # the cache empty in the non-compression path to avoid passing an
         # unexpected argument.
         shared_dsa_draft_cache: dict = dict(common_ratio_to_sas_metadata=dict()) if self.use_compress else {}
+        dcp_manager = getattr(self.runner, "dcp_manager", None)
         device_metadata_tasks: list[DeviceMetadataTask] = []
         device_metadata_executor = (
             getattr(self.runner, "device_metadata_executor", None)
@@ -2592,12 +2603,16 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 # (dspark only - self.sliding_window is None for MTP.)
                 if self.sliding_window is not None:
                     self.sliding_window.apply(common_attn_metadata)
+                if dcp_manager is not None:
+                    dcp_manager.prepare_common_attn_metadata(common_attn_metadata)
                 attn_metadata = builder.build_for_drafting(
                     common_attn_metadata, draft_index=1, **extra_attn_metadata_args
                 )
                 if device_metadata_provider is not None:
                     device_metadata_tasks.extend(device_metadata_provider.take_device_metadata_tasks())
             else:
+                if dcp_manager is not None:
+                    dcp_manager.prepare_common_attn_metadata(common_attn_metadata)
                 attn_metadata = builder.build(
                     0, common_attn_metadata, self.runner.get_model(), **extra_attn_metadata_args
                 )

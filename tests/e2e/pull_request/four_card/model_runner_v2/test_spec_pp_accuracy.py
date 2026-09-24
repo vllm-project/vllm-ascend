@@ -1,3 +1,4 @@
+#
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 # Copyright 2026 The vLLM team.
 #
@@ -5,7 +6,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-# http://www.apache.org/licenses/LICENSE-2.0
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,6 +14,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
+# Adapted from tests/e2e/pull_request/eight_card/model_runner_v2/test_spec_pp_accuracy.py
+#
+
+"""DeepSeek-V4 DSpark speculative decoding accuracy on TP2xPP2 with four NPUs.
+
+Four-card variant of tests/e2e/pull_request/eight_card/model_runner_v2/
+test_spec_pp_accuracy.py: the model runs full-layer (no hf_overrides) with
+tensor_parallel_size=2 and pipeline_parallel_size=2. The W4A8 checkpoint is
+~168 GiB, so two cards cannot hold it even without a KV cache. Greedy GSM8K
+output and speculative counters are verified the same way as the eight-card
+case.
+"""
 
 from __future__ import annotations
 
@@ -95,7 +108,7 @@ def test_deepseek_v4_dspark_pp_accuracy() -> None:
         max_model_len=4096,
         max_num_seqs=2,
         max_num_batched_tokens=512,
-        tensor_parallel_size=4,
+        tensor_parallel_size=2,
         pipeline_parallel_size=2,
         enable_expert_parallel=True,
         distributed_executor_backend="mp",
