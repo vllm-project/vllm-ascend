@@ -24,7 +24,7 @@
 #include "kernel_operator.h"
 #include "deps/reduce_common_regbase.h"
 
-namespace AddRmsNormBiasA5 {
+namespace AddRmsNorm {
 using namespace AscendC;
 constexpr uint64_t ALIGN_32_FACTOR = 32;
 constexpr int32_t CONST_FACTOR_2 = 2;
@@ -375,5 +375,5 @@ private:
     uint32_t nullptrBeta{1};
     uint64_t rowWork{1};
 };
-} // namespace AddRmsNormBiasA5
+} // namespace AddRmsNorm
 #endif // ADD_RMS_NORM_BIAS_REGBASE_H

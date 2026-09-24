@@ -22,12 +22,12 @@
 
 #include "add_rms_norm_bias_regbase_common.h"
 #include "../rms_norm_base.h"
-namespace AddRmsNormBiasA5 {
+namespace AddRmsNorm {
 using namespace AscendC;
-using AddRmsNormBiasA5::ALIGN_32_FACTOR;
-using AddRmsNormBiasA5::ComputeLatterY;
-using AddRmsNormBiasA5::CONST_FACTOR_2;
-using AddRmsNormBiasA5::Min;
+using AddRmsNorm::ALIGN_32_FACTOR;
+using AddRmsNorm::ComputeLatterY;
+using AddRmsNorm::CONST_FACTOR_2;
+using AddRmsNorm::Min;
 using NormCommon::ComputeMultiLevelRstd;
 using RmsNorm::ComputeMultiLevelReduce;
 using RmsNorm::ComputeRstd;
@@ -346,5 +346,5 @@ private:
     uint32_t nullptrBeta{1};
     uint32_t rowWork{1};
 };
-} // namespace AddRmsNormBiasA5
+} // namespace AddRmsNorm
 #endif // _ADD_RMS_NORM_BIAS_REGBASE_SPLIT_D_H
