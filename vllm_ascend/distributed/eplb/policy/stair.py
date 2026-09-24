@@ -645,8 +645,10 @@ class StairEplbPolicy(AbstractEplbPolicy):
         *,
         current_rank_expert_ids: np.ndarray,
         rank_node_ids: np.ndarray,
-        rank_pair_migration_limit: int,
+        rank_transfer_limit: int,
+        cross_node_transfer_limit: int,
         backtrack_limit: int,
+        migration_feasibility_cache: dict[tuple[tuple[int, int], ...], bool] | None = None,
     ) -> PlacementPlan | None:
         """Place replicas with deterministic covariance-aware greedy LPT.
 
@@ -654,7 +656,7 @@ class StairEplbPolicy(AbstractEplbPolicy):
         ``[experts, experts]``. Experts are processed by descending per-replica
         risk. Each replica chooses the legal rank with the lowest updated risk,
         breaking ties by rank ID. Each partial placement must have a source
-        assignment within the directed rank-pair limit. ``None`` means bounded
+        assignment within the per-rank and cross-node limits. ``None`` means bounded
         backtracking found no legal placement. The first source-feasible choice
         is free; each accepted alternative choice consumes one backtrack.
         ``rank_node_ids`` contains one non-negative node ID per rank; equal IDs
@@ -695,10 +697,11 @@ class StairEplbPolicy(AbstractEplbPolicy):
         covariance = (covariance + covariance.T) * 0.5
         if not isinstance(num_ranks, int) or isinstance(num_ranks, bool) or num_ranks < 1:
             raise ValueError("num_ranks must be a positive integer")
-        controls = rank_pair_migration_limit, backtrack_limit
+        controls = rank_transfer_limit, cross_node_transfer_limit, backtrack_limit
         invalid_type = any(isinstance(value, bool) or not isinstance(value, int) for value in controls)
-        if invalid_type or rank_pair_migration_limit < 1 or backtrack_limit < 0:
-            raise ValueError("rank_pair_migration_limit and backtrack_limit must be positive/non-negative integers")
+        invalid_limits = rank_transfer_limit < -1 or rank_transfer_limit == 0 or cross_node_transfer_limit < -1
+        if invalid_type or invalid_limits or backtrack_limit < 0:
+            raise ValueError("STAIR transfer limits and backtrack_limit must be valid integers")
         replicas = replicas.astype(np.int64, copy=False)
         total_slots = int(replicas.sum())
         if np.any(replicas < 1) or np.any(replicas > num_ranks) or total_slots % num_ranks != 0:
@@ -713,6 +716,27 @@ class StairEplbPolicy(AbstractEplbPolicy):
             raise ValueError("rank_node_ids must contain one non-negative integer per rank")
         expert_sources = [np.where(current_placement == expert)[0].tolist() for expert in range(num_experts)]
         migration_sources = cls._migration_sources
+        _, compact_node_ids = np.unique(node_ids, return_inverse=True)
+        num_nodes = int(compact_node_ids.max()) + 1
+        source_candidates = [
+            [
+                tuple(
+                    sorted(
+                        expert_sources[expert],
+                        key=lambda src_rank: (compact_node_ids[src_rank] != compact_node_ids[dst_rank], src_rank),
+                    )
+                )
+                for expert in range(num_experts)
+            ]
+            for dst_rank in range(num_ranks)
+        ]
+        current_has_expert = np.zeros((num_ranks, num_experts), dtype=bool)
+        current_has_expert[np.arange(num_ranks)[:, None], current_placement] = True
+        placed_has_expert = np.zeros((num_ranks, num_experts), dtype=bool)
+        incoming_demands: list[tuple[int, int]] = []
+        incoming_counts = np.zeros(num_ranks, dtype=np.int64)
+        if migration_feasibility_cache is None:
+            migration_feasibility_cache = {(): True}
 
         slots_per_rank = total_slots // num_ranks
         placement = np.full((num_ranks, slots_per_rank), -1, dtype=np.int64)
@@ -720,6 +744,9 @@ class StairEplbPolicy(AbstractEplbPolicy):
         rank_means = np.zeros(num_ranks, dtype=np.float64)
         rank_variances = np.zeros(num_ranks, dtype=np.float64)
         rank_variance_scales = np.zeros(num_ranks, dtype=np.float64)
+        scaled_variances = variances / replicas**2
+        scaled_covariance = 2 * covariance / (replicas[:, None] * replicas[None, :])
+        slot_ids = np.arange(slots_per_rank)
         per_replica_risks = cls.expert_risk(means, variances, z_score) / replicas
         experts_by_descending_replica_risk = sorted(
             range(num_experts), key=lambda expert: (-per_replica_risks[expert], expert)
@@ -731,6 +758,11 @@ class StairEplbPolicy(AbstractEplbPolicy):
         backtracks_used = 0
 
         def undo_placement(rank_id: int, slot: int, previous_state: tuple[float, float, float]) -> None:
+            expert = placement[rank_id, slot]
+            if not current_has_expert[rank_id, expert]:
+                assert incoming_demands.pop() == (rank_id, expert)
+                incoming_counts[rank_id] -= 1
+            placed_has_expert[rank_id, expert] = False
             placement[rank_id, slot] = -1
             rank_sizes[rank_id] -= 1
             rank_means[rank_id] = previous_state[0]
@@ -740,25 +772,46 @@ class StairEplbPolicy(AbstractEplbPolicy):
         while replica_index < len(replica_order):
             expert = replica_order[replica_index]
             if len(decisions) == replica_index:
-                rank_choices = []
-                for rank_id in range(num_ranks):
-                    size = rank_sizes[rank_id]
-                    rank_experts = placement[rank_id, :size]
-                    if size == slots_per_rank or expert in rank_experts:
-                        continue
-                    updated_mean = rank_means[rank_id] + means[expert] / replicas[expert]
-                    updated_variance, updated_scale = cls._updated_rank_variance(
-                        expert,
-                        rank_experts,
-                        rank_variances[rank_id],
-                        rank_variance_scales[rank_id],
-                        variances,
-                        covariance,
-                        replicas,
+                valid_ranks = (rank_sizes < slots_per_rank) & ~placed_has_expert[:, expert]
+                if rank_transfer_limit != -1:
+                    valid_ranks &= current_has_expert[:, expert] | (incoming_counts < rank_transfer_limit)
+                rank_ids = np.flatnonzero(valid_ranks)
+                existing_mask = slot_ids[None, :] < rank_sizes[rank_ids, None]
+                existing_experts = np.where(existing_mask, placement[rank_ids], 0)
+                covariance_increments = scaled_covariance[expert, existing_experts] * existing_mask
+                variance_increments = scaled_variances[expert] + covariance_increments.sum(axis=1)
+                updated_variances = rank_variances[rank_ids] + variance_increments
+                updated_scales = (
+                    rank_variance_scales[rank_ids]
+                    + abs(scaled_variances[expert])
+                    + np.abs(covariance_increments).sum(axis=1)
+                )
+                num_rank_experts = rank_sizes[rank_ids] + 1
+                num_terms = num_rank_experts * (num_rank_experts + 1) // 2
+                roundoff_tolerances = (
+                    _VARIANCE_ROUNDOFF_SAFETY_FACTOR
+                    * num_terms
+                    * np.finfo(np.float64).eps
+                    * np.maximum(updated_scales, np.finfo(np.float64).tiny)
+                )
+                if np.any(updated_variances < -roundoff_tolerances):
+                    raise ValueError("expert covariance produces a negative rank variance")
+                updated_variances = np.maximum(updated_variances, 0.0)
+                updated_means = rank_means[rank_ids] + means[expert] / replicas[expert]
+                updated_risks = updated_means + z_score * np.sqrt(updated_variances)
+                rank_choices = sorted(
+                    (
+                        float(risk),
+                        int(rank_id),
+                        float(updated_mean),
+                        float(updated_variance),
+                        float(updated_scale),
                     )
-                    updated_risk = updated_mean + z_score * np.sqrt(updated_variance)
-                    rank_choices.append((float(updated_risk), rank_id, updated_mean, updated_variance, updated_scale))
-                decisions.append(_PlacementDecision(sorted(rank_choices)))
+                    for risk, rank_id, updated_mean, updated_variance, updated_scale in zip(
+                        updated_risks, rank_ids, updated_means, updated_variances, updated_scales
+                    )
+                )
+                decisions.append(_PlacementDecision(rank_choices))
 
             decision = decisions[replica_index]
             advanced = False
@@ -768,15 +821,33 @@ class StairEplbPolicy(AbstractEplbPolicy):
                 slot = rank_sizes[rank_id]
                 previous_state = rank_means[rank_id], rank_variances[rank_id], rank_variance_scales[rank_id]
                 placement[rank_id, slot] = expert
+                placed_has_expert[rank_id, expert] = True
                 rank_sizes[rank_id] += 1
                 rank_means[rank_id] = updated_mean
                 rank_variances[rank_id] = updated_variance
                 rank_variance_scales[rank_id] = updated_scale
-                sources = migration_sources(current_placement, placement, rank_pair_migration_limit, expert_sources)
+                expert_is_incoming = not current_has_expert[rank_id, expert]
+                if expert_is_incoming:
+                    incoming_demands.append((rank_id, expert))
+                    incoming_counts[rank_id] += 1
+                sources_are_feasible = True
+                if expert_is_incoming:
+                    migration_key = tuple(sorted(incoming_demands))
+                    sources_are_feasible = migration_feasibility_cache.get(migration_key)
+                    if sources_are_feasible is None:
+                        sources_are_feasible = cls._has_feasible_migration_sources(
+                            incoming_demands,
+                            rank_transfer_limit,
+                            cross_node_transfer_limit,
+                            source_candidates,
+                            compact_node_ids,
+                            num_nodes,
+                        )
+                        migration_feasibility_cache[migration_key] = sources_are_feasible
                 budget_exhausted = (
-                    sources is not None and decision.tried_feasible_choice and backtracks_used == backtrack_limit
+                    sources_are_feasible and decision.tried_feasible_choice and backtracks_used == backtrack_limit
                 )
-                if sources is None or budget_exhausted:
+                if not sources_are_feasible or budget_exhausted:
                     undo_placement(rank_id, slot, previous_state)
                     if budget_exhausted:
                         return None
@@ -801,8 +872,13 @@ class StairEplbPolicy(AbstractEplbPolicy):
             undo_placement(rank_id, slot, previous_state)
 
         placement = cls._align_target_slots(current_placement, placement)
-        sources = cls._minimum_cost_migration_sources(
-            current_placement, placement, rank_pair_migration_limit, expert_sources, node_ids
+        sources = migration_sources(
+            current_placement,
+            placement,
+            rank_transfer_limit,
+            cross_node_transfer_limit,
+            expert_sources,
+            node_ids,
         )
         assert sources is not None
         source_slots = cls._source_slots(current_placement, placement, sources)
