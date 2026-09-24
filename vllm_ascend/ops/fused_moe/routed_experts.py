@@ -657,14 +657,10 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         if lora_context is not None:
             sync_lora_context(self.quant_method, lora_context)
 
-        # Rebind the comm method to THIS layer's expert shape before use: the
-        # context-wide instance published at forward-context setup matches only
-        # one of the shapes coexisting in the process (target vs drafter).
+        # Bind before prepare; routing, dispatch and finalize also read the context.
         moe_comm_method = activate_moe_comm_method(
             _EXTRA_CTX.moe_comm_type, self.moe_config, _EXTRA_CTX.moe_comm_method
         )
-        # The forward context always publishes a comm method before any MoE
-        # layer runs; the rebind returns None only if the context had none.
         assert moe_comm_method is not None
         prepare_output = moe_comm_method.prepare(
             hidden_states=hidden_states,
