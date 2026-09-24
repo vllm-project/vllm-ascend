@@ -13,7 +13,14 @@ from vllm_ascend.compilation.updatable_graph import UpdatableGraph
 from vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph import AutoRegressiveAclGraphManager
 
 
-def _parent_init(self, vllm_config, device, cudagraph_mode, decode_query_len, lora_capture_cases=None):
+def _parent_init(
+    self,
+    vllm_config,
+    device,
+    cudagraph_mode,
+    decode_query_len,
+    lora_capture_cases=None,
+):
     self._capture_descs = [object()]
 
 
@@ -63,14 +70,28 @@ def test_run_fullgraph_uses_updatable_graph():
     manager.is_draft_model_prefill = False
     backend = object()
     draft_vllm_config = object()
-    manager.speculator = SimpleNamespace(attn_backend=backend, draft_vllm_config=draft_vllm_config)
+    draft_attn_metadatas = [{"draft": object()}]
+    manager.speculator = SimpleNamespace(
+        attn_backend=backend,
+        draft_vllm_config=draft_vllm_config,
+        build_draft_attn_metadatas=MagicMock(
+            return_value=draft_attn_metadatas
+        ),
+    )
     manager._updatable_graph_replay = MagicMock(return_value="result")
     manager._graph_replay = MagicMock()
-    desc = SimpleNamespace(num_tokens=8)
-    with patch("vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.use_updatable_graph", return_value=True):
+    desc = SimpleNamespace(num_tokens=8, num_reqs=2)
+    with patch(
+        "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.use_updatable_graph",
+        return_value=True,
+    ):
         result = manager.run_fullgraph(desc)
     assert result == "result"
-    manager._updatable_graph_replay.assert_called_once_with(desc)
+    manager.speculator.build_draft_attn_metadatas.assert_called_once_with(2, 8, False)
+    manager._updatable_graph_replay.assert_called_once_with(
+        desc,
+        draft_attn_metadatas,
+    )
     manager._graph_replay.assert_not_called()
 
 
@@ -80,16 +101,32 @@ def test_run_fullgraph_uses_legacy_graph():
     manager.is_draft_model_prefill = False
     backend = object()
     draft_vllm_config = object()
-    manager.speculator = SimpleNamespace(attn_backend=backend, draft_vllm_config=draft_vllm_config)
+    draft_attn_metadatas = [{"draft": object()}]
+    manager.speculator = SimpleNamespace(
+        attn_backend=backend,
+        draft_vllm_config=draft_vllm_config,
+        build_draft_attn_metadatas=MagicMock(
+            return_value=draft_attn_metadatas
+        ),
+    )
     manager._updatable_graph_replay = MagicMock()
     manager._graph_replay = MagicMock(return_value="result")
-    desc = SimpleNamespace(num_tokens=8)
-    with patch("vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.use_updatable_graph", return_value=False):
+    desc = SimpleNamespace(num_tokens=8, num_reqs=2)
+    with patch(
+        "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.use_updatable_graph",
+        return_value=False,
+    ):
         result = manager.run_fullgraph(desc)
     assert result == "result"
-    manager._graph_replay.assert_called_once_with(desc, backend, 8, draft_vllm_config)
+    manager.speculator.build_draft_attn_metadatas.assert_called_once_with(2, 8, False)
+    manager._graph_replay.assert_called_once_with(
+        desc,
+        backend,
+        8,
+        draft_vllm_config,
+        draft_attn_metadatas,
+    )
     manager._updatable_graph_replay.assert_not_called()
-
 
 def test_capture_draft_prefill_delegates_to_parent():
     manager = AutoRegressiveAclGraphManager.__new__(AutoRegressiveAclGraphManager)
@@ -189,9 +226,12 @@ def test_graph_replay_updates_full_graph_params():
         dp_size=2,
         model_state=SimpleNamespace(attn_metadata={"draft": object()}),
         speculative_config=speculative_config,
-        build_draft_attn_metadatas=MagicMock(return_value=draft_attn_metadatas),
     )
-    desc = SimpleNamespace(num_reqs=2, num_tokens=4, cg_mode=CUDAGraphMode.FULL)
+    desc = SimpleNamespace(
+        num_reqs=2,
+        num_tokens=4,
+        cg_mode=CUDAGraphMode.FULL,
+    )
     attn_backend = object()
     draft_vllm_config = object()
     current_stream = object()
@@ -203,7 +243,11 @@ def test_graph_replay_updates_full_graph_params():
             "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.torch.npu.current_stream",
             return_value=current_stream,
         ),
-        patch.object(SpeculatorCudaGraphManager, "run_fullgraph", return_value="result") as parent_replay,
+        patch.object(
+            SpeculatorCudaGraphManager,
+            "run_fullgraph",
+            return_value="result",
+        ) as parent_replay,
         patch(
             "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.set_current_vllm_config",
             return_value=nullcontext(),
@@ -216,17 +260,27 @@ def test_graph_replay_updates_full_graph_params():
             "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.get_forward_context",
             return_value=forward_context,
         ),
-        patch("vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph._EXTRA_CTX", extra_ctx),
-        patch("vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.update_full_graph_params") as update_params,
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph._EXTRA_CTX",
+            extra_ctx,
+        ),
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.update_full_graph_params"
+        ) as update_params,
     ):
-        result = manager._graph_replay(desc, attn_backend, 4, draft_vllm_config)
+        result = manager._graph_replay(
+            desc,
+            attn_backend,
+            4,
+            draft_vllm_config,
+            draft_attn_metadatas,
+        )
 
     assert result == "result"
     assert extra_ctx.is_draft_model is True
     assert extra_ctx.is_draft_model_prefill is False
     manager.update_stream.wait_stream.assert_called_once_with(current_stream)
     parent_replay.assert_called_once_with(desc)
-    manager.speculator.build_draft_attn_metadatas.assert_called_once_with(2, 4, False)
     update_params.assert_called_once_with(
         attn_backend,
         manager.update_stream,
@@ -249,9 +303,12 @@ def test_updatable_graph_replay_updates_resolved_tasks():
     graph.resolve_tasks.return_value = resolved_tasks
     manager.graphs = {desc: graph}
     fia_params = [{"layer_name": "draft"}]
-    manager.speculator = SimpleNamespace(build_fia_params=MagicMock(return_value=fia_params))
+    manager.speculator = SimpleNamespace(
+        build_fia_params=MagicMock(return_value=fia_params)
+    )
     source = object()
     current_stream = object()
+    draft_attn_metadatas = [{"draft": object()}]
 
     with (
         patch(
@@ -262,14 +319,28 @@ def test_updatable_graph_replay_updates_resolved_tasks():
             "vllm_ascend.worker.v2.spec_decode.autoregressive.aclgraph.torch.npu.current_stream",
             return_value=current_stream,
         ),
-        patch.object(SpeculatorCudaGraphManager, "run_fullgraph", return_value="result") as parent_replay,
+        patch.object(
+            SpeculatorCudaGraphManager,
+            "run_fullgraph",
+            return_value="result",
+        ) as parent_replay,
     ):
-        result = manager._updatable_graph_replay(desc)
+        result = manager._updatable_graph_replay(
+            desc,
+            draft_attn_metadatas,
+        )
 
     assert result == "result"
-    manager.speculator.build_fia_params.assert_called_once_with(2, False)
+    manager.speculator.build_fia_params.assert_called_once_with(
+        2,
+        draft_attn_metadatas[0],
+        False,
+    )
     shared_source.assert_called_once_with(fia_params)
     graph.resolve_tasks.assert_called_once_with(source)
     manager.update_stream.wait_stream.assert_called_once_with(current_stream)
     parent_replay.assert_called_once_with(desc)
-    graph.update.assert_called_once_with(manager.update_stream, resolved_tasks)
+    graph.update.assert_called_once_with(
+        manager.update_stream,
+        resolved_tasks,
+    )

@@ -121,7 +121,9 @@ def test_load_draft_model_calls_remove_d2t():
     draft_model = MagicMock()
     target_attn_layer_names = {"layer.0"}
     speculator._maybe_remove_d2t = MagicMock()
-    with patch.object(AutoRegressiveSpeculator, "load_draft_model", return_value=draft_model) as parent_load_draft_model:
+    with patch.object(
+        AutoRegressiveSpeculator, "load_draft_model", return_value=draft_model
+    ) as parent_load_draft_model:
         result = speculator.load_draft_model(target_model, target_attn_layer_names)
     parent_load_draft_model.assert_called_once_with(target_model, target_attn_layer_names)
     speculator._maybe_remove_d2t.assert_called_once_with(draft_model)
@@ -161,7 +163,11 @@ def test_run_model_broadcasts_replicated_hidden_states():
     hidden_states = torch.tensor([2])
     expected = (torch.tensor([3]), torch.tensor([4]))
     with (
-        patch.object(AutoRegressiveSpeculator, "_run_model", return_value=(last_hidden_states, hidden_states)) as parent_run_model,
+        patch.object(
+            AutoRegressiveSpeculator,
+            "_run_model",
+            return_value=(last_hidden_states, hidden_states),
+        ) as parent_run_model,
         patch.object(AscendPCPManager, "broadcast_replicated_hidden_states", return_value=expected) as broadcast,
     ):
         result = speculator._run_model(3, None, None, None)
@@ -216,7 +222,13 @@ def test_prefill_filters_target_only_metadata():
     speculator._prepare_replicated_prefill_attn = MagicMock(return_value=(attn_metadata, slot_mappings))
     with patch.object(AutoRegressiveSpeculator, "_prefill") as parent_prefill:
         speculator._prefill(2, 4, attn_metadata, slot_mappings, None)
-    parent_prefill.assert_called_once_with(2, 4, {"draft": draft_metadata}, slot_mappings, None, CUDAGraphMode.NONE, None)
+    parent_prefill.assert_called_once_with(2, 4,
+        {"draft": draft_metadata},
+        slot_mappings,
+        None,
+        CUDAGraphMode.NONE,
+        None,
+    )
 
 
 def test_build_draft_attn_metadata_sets_decode_only():
@@ -224,14 +236,23 @@ def test_build_draft_attn_metadata_sets_decode_only():
     metadata = SimpleNamespace(attn_state=None)
     speculator.input_batch = SimpleNamespace(is_prefilling_np=np.array([True, False]))
     speculator.input_buffers = SimpleNamespace(positions=torch.tensor([0, 1]))
+    speculator.use_dcp = False
+    speculator.draft_vllm_config = SimpleNamespace(parallel_config=object())
+    speculator._build_uniform_attn_metadata = MagicMock(
+        return_value={"draft": metadata, "none": None}
+    )
+    speculator._update_decode_attn_metadata = MagicMock()
     seq_lens = torch.tensor([10, 20], dtype=torch.int32)
-    with (
-        patch("vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.build_draft_attn_metadata_factory", return_value=nullcontext()),
-        patch.object(AutoRegressiveSpeculator, "_build_draft_attn_metadata", return_value={"draft": metadata, "none": None}),
+    with patch(
+        "vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.build_draft_attn_metadata_factory",
+        return_value=nullcontext(),
     ):
         result = speculator._build_draft_attn_metadata(2, 2, 2, seq_lens, 1)
     assert result["draft"] is metadata
     assert metadata.attn_state == AscendAttentionState.DecodeOnly
+    speculator._update_decode_attn_metadata.assert_called_once_with(
+        {"draft": metadata, "none": None}, 1, 2
+    )
 
 
 def test_build_draft_attn_metadatas_prefill():
@@ -274,7 +295,12 @@ def test_init_decode_draft_attn_metadatas_gqa():
     speculator = AscendAutoRegressiveSpeculator.__new__(AscendAutoRegressiveSpeculator)
     speculator.attn_architecture = "GQA"
     speculator.input_batch = SimpleNamespace(num_reqs=2, seq_lens_cpu_upper_bound=torch.tensor([10, 20]))
-    speculator.input_buffers = SimpleNamespace(draft_seq_lens_cpus=[torch.tensor([11, 21, 0]), torch.tensor([12, 22, 0])])
+    speculator.input_buffers = SimpleNamespace(
+        draft_seq_lens_cpus=[
+            torch.tensor([11, 21, 0]),
+            torch.tensor([12, 22, 0]),
+        ]
+    )
     metadata = SimpleNamespace(attn_state=None, seq_lens_cpu=None)
     speculator._build_draft_attn_metadata = MagicMock(return_value={"draft": metadata})
     result = speculator._init_decode_draft_attn_metadatas({"draft": metadata}, 3)
@@ -288,7 +314,12 @@ def test_update_decode_attn_metadata_gqa():
     speculator = AscendAutoRegressiveSpeculator.__new__(AscendAutoRegressiveSpeculator)
     speculator.attn_architecture = "GQA"
     speculator.max_model_len = 32
-    metadata = SimpleNamespace(seq_lens_cpu=torch.zeros(4, dtype=torch.int32), seq_lens_list=None, actual_seq_lengths_q=None)
+    speculator.use_dcp = False
+    metadata = SimpleNamespace(
+        seq_lens_cpu=torch.zeros(4, dtype=torch.int32),
+        seq_lens_list=None,
+        actual_seq_lengths_q=None,
+    )
     speculator._get_seq_lens_cpu = MagicMock(return_value=torch.tensor([10, 20, 31, 7], dtype=torch.int32))
     speculator._update_decode_attn_metadata({"draft": metadata}, step=2, num_reqs=3)
     assert metadata.seq_lens_list == [12, 22, 32, 0]
@@ -302,12 +333,12 @@ def test_build_fia_params_prefill():
     metadata = SimpleNamespace(block_tables=block_table, actual_seq_lengths_q=[1, 2], seq_lens_list=[10, 20])
     speculator.model_state = SimpleNamespace(attn_metadata={"draft": metadata})
     speculator.draft_attn_layer_names = {"draft"}
-    result = speculator.build_fia_params(3, True)
+    result = speculator.build_fia_params(3, {"draft": metadata}, True)
     assert len(result) == 1
     assert result[0]["layer_name"] == "draft"
     assert result[0]["actual_seq_lengths"] == [1, 2]
     assert result[0]["actual_seq_lengths_kv"] == [10, 20]
-    assert result[0]["block_table"].shape == (3, 3)
+    assert result[0]["block_table"].shape == (4, 3)
 
 
 def test_build_fia_params_decode():
@@ -318,7 +349,7 @@ def test_build_fia_params_decode():
     speculator.input_batch = SimpleNamespace(num_reqs=2, seq_lens_np=np.array([10, 29]))
     speculator.num_speculative_steps = 3
     speculator.max_model_len = 30
-    result = speculator.build_fia_params(3, False)
+    result = speculator.build_fia_params(3, {"draft": metadata}, False)
     assert len(result) == 2
     assert result[0]["actual_seq_lengths"] == [1, 2, 3]
     assert result[0]["actual_seq_lengths_kv"] == [11, 30, 0]
@@ -326,15 +357,26 @@ def test_build_fia_params_decode():
 
 
 def test_set_attn_detects_architecture():
-    cases = [(AscendDSABackend, "DSA"), (AscendMLABackend, "MLA"), (AscendSFABackend, "SFA"), (AscendAttentionBackend, "GQA")]
+    cases = [
+        (AscendDSABackend, "DSA"),
+        (AscendMLABackend, "MLA"),
+        (AscendSFABackend, "SFA"),
+        (AscendAttentionBackend, "GQA"),
+    ]
     for backend, expected in cases:
         speculator = AscendAutoRegressiveSpeculator.__new__(AscendAutoRegressiveSpeculator)
         speculator.vllm_config = object()
         speculator.attn_groups = object()
         with (
-            patch("vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.set_current_vllm_config", return_value=nullcontext()),
+            patch(
+                "vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.set_current_vllm_config",
+                return_value=nullcontext(),
+            ),
             patch.object(AutoRegressiveSpeculator, "set_attn"),
-            patch("vllm_ascend.worker.v2.spec_decode.autoregressive.speculator._get_graph_update_backend", return_value=backend),
+            patch(
+                "vllm_ascend.worker.v2.spec_decode.autoregressive.speculator._get_graph_update_backend",
+                return_value=backend,
+            ),
         ):
             speculator.set_attn(object(), object(), object(), object(), object())
         assert speculator.attn_backend is backend
@@ -354,7 +396,10 @@ def test_capture_single_step_only_captures_prefill():
     speculator.replicated_pcp = False
     speculator.kv_cache_config = object()
     speculator.num_speculative_steps = 1
-    with patch("vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.disable_target_pcp_for_replicated_draft", return_value=nullcontext()):
+    with patch(
+        "vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.disable_target_pcp_for_replicated_draft",
+        return_value=nullcontext(),
+    ):
         speculator.capture()
     speculator.last_token_indices.zero_.assert_called_once_with()
     speculator.prefill_cudagraph_manager.init_breakable_cg_runner.assert_called_once_with(speculator.model)
@@ -378,8 +423,14 @@ def test_capture_multi_step_captures_decode():
     speculator.kv_cache_config = object()
     speculator.num_speculative_steps = 3
     with (
-        patch("vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.disable_target_pcp_for_replicated_draft", return_value=nullcontext()),
-        patch("vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.build_attn_metadata_wrapper", return_value=nullcontext()),
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.disable_target_pcp_for_replicated_draft",
+            return_value=nullcontext(),
+        ),
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.build_attn_metadata_wrapper",
+            return_value=nullcontext(),
+        ),
     ):
         speculator.capture()
     speculator.prefill_cudagraph_manager.capture.assert_called_once()
@@ -394,9 +445,18 @@ def test_propose_replicated_pcp_disables_dp_sync():
     dp_sync = object()
     expected = object()
     with (
-        patch("vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.disable_target_pcp_for_replicated_draft", return_value=nullcontext()),
-        patch("vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.build_attn_metadata_wrapper", return_value=nullcontext()),
-        patch("vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.torch_gather_wrapper", return_value=nullcontext()),
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.disable_target_pcp_for_replicated_draft",
+            return_value=nullcontext(),
+        ),
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.build_attn_metadata_wrapper",
+            return_value=nullcontext(),
+        ),
+        patch(
+            "vllm_ascend.worker.v2.spec_decode.autoregressive.speculator.torch_gather_wrapper",
+            return_value=nullcontext(),
+        ),
         patch.object(AutoRegressiveSpeculator, "propose", return_value=expected) as parent_propose,
     ):
         result = speculator.propose(input_batch, *args, dp_sync=dp_sync)
