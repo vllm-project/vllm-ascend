@@ -320,7 +320,6 @@ a3-560t:
         config_file_path: Qwen3VL-8B-310p.yaml
         config_base_path: tests/e2e/cases/models/configs/Qwen
 
-
 a5:
 #   multi_node:
 #     test_config:
