@@ -23,18 +23,14 @@ from vllm.utils.math_utils import next_power_of_2
 from vllm_ascend.ops.triton.triton_utils import get_element
 
 
-@triton.jit(do_not_specialize=["topk_count", "dcp_size", "interleave_size", "dcp_rank"])
+@triton.jit(do_not_specialize=["topk_count", "dcp_rank"])
 def remap_sparse_indices_fused_kernel(
     indices_ptr,  # [rows, topk_count] int32, replicated-view topk indices
     chunk_out_ptr,  # [rows * num_chunks, BLOCK] int32 (output)
     chunk_count_ptr,  # [rows, num_chunks] int32 (output)
     out_ptr,  # [rows, topk_count] int32 (output): tail pre-filled with -1 here
     topk_count,
-    dcp_size,
-    interleave_size,
     dcp_rank,
-    EXACT_DCP8: tl.constexpr,
-    INTERLEAVE_ONE: tl.constexpr,
     BLOCK: tl.constexpr,
     NUM_CHUNKS: tl.constexpr,
 ):
@@ -56,17 +52,8 @@ def remap_sparse_indices_fused_kernel(
     idx = tl.load(indices_ptr + row * topk_count + offsets, mask=in_bounds, other=-1)
     # This backend's vector divsi loses integer boundaries above 2**24.
     # Keep the native DCP8/interleave128 path entirely in bit operations.
-    if EXACT_DCP8:
-        owner = (idx >> 7) & 7
-        remapped = ((idx >> 10) << 7) + (idx & 127)
-    else:
-        block_idx = idx // interleave_size
-        owner = block_idx - (block_idx // dcp_size) * dcp_size
-        if INTERLEAVE_ONE:
-            remapped = idx // dcp_size
-        else:
-            local_offsets = idx - block_idx * interleave_size
-            remapped = (idx // (dcp_size * interleave_size)) * interleave_size + local_offsets
+    owner = (idx >> 7) & 7
+    remapped = ((idx >> 10) << 7) + (idx & 127)
     valid = (idx >= 0) & (owner == dcp_rank)
 
     valid_i32 = valid.to(tl.int32)
@@ -107,6 +94,25 @@ def remap_sparse_indices_compact_gather_kernel(
         write_pos += cnt
 
 
+def _remap_sparse_indices_integer(
+    indices: torch.Tensor, dcp_size: int, dcp_rank: int, interleave_size: int
+) -> torch.Tensor:
+    """Exact fallback; do not reintroduce FP32 index arithmetic above 2**24.
+
+    Integer sorting may use AICPU on Ascend. This fallback favors correctness
+    outside the verified native DCP8/interleave128 two-kernel fast path.
+    """
+    integer = indices.to(torch.int64)
+    blocks = torch.div(integer, interleave_size, rounding_mode="floor")
+    valid = (integer >= 0) & (blocks.remainder(dcp_size) == dcp_rank)
+    mapped = torch.div(blocks, dcp_size, rounding_mode="floor") * interleave_size + integer.remainder(interleave_size)
+    mapped = torch.where(valid, mapped, -1).to(indices.dtype)
+    count = indices.shape[-1]
+    order = torch.arange(count, dtype=torch.int64, device=indices.device)
+    keys = (~valid).to(torch.int64) * count + order
+    return torch.gather(mapped, -1, keys.argsort(dim=-1))
+
+
 def remap_sparse_indices_triton(
     topk_indices: torch.Tensor,
     dcp_size: int,
@@ -138,14 +144,16 @@ def remap_sparse_indices_triton(
       is pre-filled in the fused kernel with a plain ``in_bounds`` mask
       instead, so this path has only two device ops (fused + gather).
     """
+    if topk_indices.numel() == 0:
+        return topk_indices
+    if dcp_size != 8 or interleave_size != 128:
+        return _remap_sparse_indices_integer(topk_indices, dcp_size, dcp_rank, interleave_size)
     orig_dtype = topk_indices.dtype
     orig_shape = topk_indices.shape
     if not topk_indices.is_contiguous():
         topk_indices = topk_indices.contiguous()
     indices = topk_indices if topk_indices.dtype == torch.int32 else topk_indices.to(torch.int32)
     topk_count = indices.shape[-1]
-    if indices.numel() == 0:
-        return topk_indices
     rows = indices.numel() // topk_count
     # The torch implementation operates per-row on the last dim, so arbitrary
     # leading dims (e.g. [dcp_size, 1, topk_count] from the DCP all_gather) can
@@ -164,11 +172,7 @@ def remap_sparse_indices_triton(
         chunk_count,
         out,
         topk_count,
-        dcp_size,
-        interleave_size,
         dcp_rank,
-        EXACT_DCP8=dcp_size == 8 and interleave_size == 128,
-        INTERLEAVE_ONE=interleave_size == 1,
         BLOCK=block,
         NUM_CHUNKS=num_chunks,
         multibuffer=False,

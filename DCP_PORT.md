@@ -10,7 +10,7 @@ The update merges main without rewriting the published branch history.
 
 | Area | Selection |
 |---|---|
-| Sparse-index remap | Keep upstream two-kernel pipeline; DCP8/interleave128 integer-boundary and empty-input repairs |
+| Sparse-index remap | Exact DCP8/interleave128 two-kernel path; other configurations use integer Torch fallback |
 | O/LSE | Raw-bit pack, one AllToAll, FP32 merge and BF16 conversion; up to min(scheduler budget,192) tokens |
 | Query | Head-major preparation and contiguous unpack; existing T2-12 guard unchanged |
 | Indexer | Native INT8 quantization plus fused final key/scale writes; existing T1-12 guard unchanged |
@@ -39,7 +39,7 @@ or experimental VMM peer exchange is included.
 
 ## Fresh validation and outstanding gates
 
-The focused CPU suite passes **101 tests**, covering budget boundaries and
+The focused CPU suite passes **113 tests**, covering budget boundaries and
 current-caller propagation, PCP/token-scatter fallback, deferred/returned-LSE
 semantics, FakeTensor output, native quantization/store routing, projection
 tail preservation, query wait ordering and empty remap inputs:
@@ -58,7 +58,8 @@ Single-card operator precision tests are in
 - `test_sfa_indexer_store_triton.py`: native INT8 key/scale byte checks and changing graph slots.
 - `test_sfa_dcp_remap.py`: independent integer-boundary oracle, changing graph inputs and empty inputs.
 
-These files were relocated without changing their contents or tolerances.
+The September22 relocation preserved contents and tolerances. The September24
+follow-up adds generic integer-fallback precision and graph cases.
 The query-gather and O/LSE exchange tests under `tests/ut/attention/a2/` require
 an isolated eight-NPU group and are not single-card tests. The registered-op
 regression covers T48/T192 and changing inputs with an exact uniform-LSE oracle;
@@ -66,8 +67,9 @@ it does not replace the unchanged strict random-BF16 oracle.
 
 ### Executed main-source validation, 2026-09-21/22
 
-Runtime source: `c1e82ee97510f7805a6eef7663c53e7e3afacfe3`. Subsequent test relocation
-and documentation edits do not change runtime code. The fresh main runs include:
+Historical runtime source: `c1e82ee97510f7805a6eef7663c53e7e3afacfe3`. The September22
+test relocation did not change runtime code; the September24 review fixes below do.
+The September21/22 runs include:
 
 - DCP8 registered T48/T192 ACLGraph capture and changing-input replay on all eight ranks.
 - Single-card indexer-store/remap and DCP8 query graph checks.
@@ -115,6 +117,60 @@ acceptance, 1M-context and SuperMem ON/OFF performance are not established here.
 Published evidence: [fresh NPU](https://github.com/vllm-project/vllm-ascend/pull/16350#issuecomment-5759854639),
 [full weights](https://github.com/vllm-project/vllm-ascend/pull/16350#issuecomment-5764536283),
 [performance](https://github.com/vllm-project/vllm-ascend/pull/16350#issuecomment-5770334097).
+
+## Review follow-up, 2026-09-24
+
+- The FP32 merge uses a finite `safe_max` for all-invalid rows, so even the
+  expression discarded by `tl.where` no longer evaluates `-inf - (-inf)`.
+- Merge and query helpers use the centralized device-property initialization
+  and VectorCore count instead of probing the Triton driver separately.
+- Registered graph tests add T13/T191/T192 with nonuniform LSE, changing inputs,
+  extreme weights, and all-invalid/mixed-invalid ranks, including NaN/+Inf LSE.
+  CPU FP64 reduction is independent of the NPU implementation. FP32 acceptance
+  is `1e-6 + 8 * eps32 * sum(abs(weighted contributions))` per element. Registered
+  BF16 output additionally permits half a local BF16 ULP. This is an explicit
+  acceptance budget, not a formal bound on the backend exponential. The old
+  strict BF16-to-BF16 test and its historical limitation remain unchanged.
+- Generic remap errors were reproduced on DCP4/128, DCP8/64, DCP2/1 and DCP3/127
+  with int32-range indices above `2**24`. The unsafe generic vector division
+  is removed: other configurations now use int64 Torch division/remainder and
+  order-preserving compaction. Integer sort may run on AICPU; this is a
+  correctness fallback, not a performance improvement for those configurations.
+  Native DCP8/128 retains its exact bit operations and two-kernel layout.
+
+Fresh execution of this follow-up's runtime/test bytes passed on A3:
+eight ranks each passed the new nonuniform test (96 rank/shape/replay cases),
+the existing uniform T48/T192 test (128 cases), and query graph regression.
+The single-card remap suite passed all35 cases, including102 changed-input
+generic-fallback graph replays plus192 native-path replays and3 empty inputs.
+Per-rank imported source/test hashes were checked against the publication tree;
+allocated devices were healthy and empty after the suite. The existing full-model
+service was not restarted or modified.
+
+Both pre-commit stages pass for the changed files. An all-file run with ShellCheck
+available additionally reports pre-existing warnings in untouched workflow YAML;
+this follow-up does not modify those workflows or claim that full-repository gate
+is green.
+
+### Pack-kernel cold compilation and cache reuse
+
+Sweep: T1/2/6/12/13/16/32/48/64/96/128/191/192, isolated A3, fresh dedicated cache,
+then a new Python process reusing that cache. Each output is checked bitwise.
+The pack kernel body is unchanged by this review follow-up.
+
+- Sum of thirteen synchronized first calls with cold cache: **18.511 seconds**.
+- Sum of first calls in the new process with disk cache: **0.169 seconds**.
+- Cache growth: **531,350 bytes**, including metadata/IR; thirteen NPU binaries
+  total **41,024 bytes**, each **3,000-3,400 bytes**.
+- T192 binary: **3,192 bytes**; emitted TTIR contains one `scf.for`.
+  The sweep does not show token-count-proportional unrolled code growth.
+
+These are host first-call costs including compilation/loading/launch, not
+kernel latency. The first cold call also includes Triton backend initialization.
+Specialization still occurs; this is a representative sweep, not all T1-192.
+No dynamic-token rewrite is made without evidence that it improves this tradeoff.
+Previous model/performance numbers above remain tied to their original revision;
+this follow-up does not claim a fresh full-model or SuperMem performance run.
 
 ## Reused release evidence, not a new main benchmark
 

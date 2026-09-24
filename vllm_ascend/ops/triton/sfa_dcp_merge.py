@@ -12,6 +12,8 @@ try:
     import triton.language as tl
     from triton.language.extra.cann import extension
 
+    from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
+
     get_element = extension.get_element
 except ImportError:  # CPU-only test environments retain exact torch semantics.
     triton = None
@@ -82,7 +84,10 @@ if triton is not None:
             finite = (raw_lse == raw_lse) & (raw_lse > float("-inf")) & (raw_lse < float("inf"))
             safe_lse = tl.where(finite, raw_lse, float("-inf"))
             max_lse = tl.max(safe_lse, axis=0)
-            shifted = tl.where(finite, safe_lse - max_lse, 0.0)
+            # An all-invalid row must not evaluate -inf - (-inf), even in a
+            # branch later discarded by tl.where.
+            safe_max = tl.where(max_lse > float("-inf"), max_lse, 0.0)
+            shifted = tl.where(finite, safe_lse - safe_max, 0.0)
             exponent = tl.where(finite, tl.exp(shifted), 0.0)
             denominator = tl.sum(exponent, axis=0)
             safe_denominator = tl.where(denominator > 0.0, denominator, 1.0)
@@ -136,8 +141,8 @@ def fused_merge(out_recv: torch.Tensor, lse_recv: torch.Tensor, token_dim: int) 
     # holds one FP32 accumulator plus one rank vector; retry verifies compiler UB.
     block_d = min(triton.next_power_of_2(head_dim), 512)
     tiles = tokens * heads * math.ceil(head_dim / block_d)
-    properties = triton.runtime.driver.active.utils.get_device_properties(out_recv.device.index)
-    programs = min(tiles, properties["num_vectorcore"])
+    init_device_properties_triton()
+    programs = min(tiles, get_vectorcore_num())
     _fused_merge_kernel[(programs,)](
         out_recv,
         lse_recv,

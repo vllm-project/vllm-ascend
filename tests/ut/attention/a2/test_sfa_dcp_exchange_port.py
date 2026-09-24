@@ -147,3 +147,118 @@ def test_large_batch_registered_graph_matches_exact_uniform_merge(monkeypatch):
     torch.npu.synchronize()
     group.destroy()
     destroy_distributed_environment()
+
+
+def _nonuniform_inputs(tokens, step):
+    rng = torch.Generator().manual_seed(16350 + step)
+    outputs = torch.randn(8, tokens, 64, 512, generator=rng).to(torch.bfloat16)
+    lses = torch.randn(8, tokens, 64, 1, generator=rng) * 4
+    # Repeat special cases in every receiver's head shard.
+    lses[:, :, 0::8] = -torch.inf
+    outputs[:, :, 0::8] = torch.nan
+    lses[:4, :, 1::8] = -torch.inf
+    outputs[:4, :, 1::8] = torch.nan
+    lses[:, :, 2::8] = -80
+    lses[step % 8, :, 2::8] = 80
+    lses[:, :, 3::8] = torch.arange(8).view(8, 1, 1, 1) * 1e-3
+    for sender, value in enumerate((torch.nan, torch.inf, -torch.inf)):
+        lses[sender, :, 4::8] = value
+        outputs[sender, :, 4::8] = torch.nan
+    return outputs, lses
+
+
+def _fp64_merge_reference(outputs, lses, rank):
+    values = outputs[:, :, rank * 8 : (rank + 1) * 8].double()
+    stats = lses[:, :, rank * 8 : (rank + 1) * 8].double()
+    valid = torch.isfinite(stats)
+    safe = stats.masked_fill(~valid, -torch.inf)
+    maximum = safe.amax(dim=0, keepdim=True)
+    maximum = torch.where(torch.isfinite(maximum), maximum, 0.0)
+    exponent = torch.exp(safe - maximum)
+    denominator = exponent.sum(dim=0, keepdim=True)
+    weights = exponent / torch.where(denominator > 0, denominator, 1.0)
+    terms = values.masked_fill(~valid, 0.0) * weights
+    return terms.sum(dim=0), terms.abs().sum(dim=0)
+
+
+def test_nonuniform_large_batch_registered_graph_against_fp64(monkeypatch):
+    """Check FP32 math separately from the registered BF16 output rounding.
+
+    FP32 error budget: 1e-6 + 8 * eps32 * sum(abs(weighted contributions)).
+    BF16 output additionally permits half of one local BF16 ULP. This is a
+    dtype-rounding bound against FP64, not a relaxation of the old strict
+    BF16-to-BF16 test above (which remains unchanged).
+    """
+    from vllm.distributed.parallel_state import (
+        destroy_distributed_environment,
+        init_distributed_environment,
+        init_model_parallel_group,
+    )
+
+    from vllm_ascend.ops.triton import sfa_cp as dispatch
+    from vllm_ascend.ops.triton.sfa_dcp_exchange import exchange
+
+    rank = int(os.environ["RANK"])
+    local_rank = int(os.environ["LOCAL_RANK"])
+    torch.npu.set_device(local_rank)
+    init_distributed_environment(
+        world_size=8, rank=rank, local_rank=local_rank, distributed_init_method="env://", backend="hccl"
+    )
+    group = init_model_parallel_group(
+        [list(range(8))],
+        local_rank=local_rank,
+        backend="hccl",
+        group_name="nonuniform_dcp8",
+        use_device_communicator=False,
+    )
+    calls = []
+
+    def observed(output, lse, process_group):
+        calls.append(output.shape[0])
+        return exchange(output, lse, process_group)
+
+    monkeypatch.setattr(dispatch, "exchange", observed)
+    retained = []
+    for tokens in (13, 191, 192):
+        outputs, lses = _nonuniform_inputs(tokens, 0)
+        owner = outputs[rank].transpose(0, 1).contiguous().npu()
+        output = owner.transpose(0, 1)
+        lse = lses[rank].npu()
+
+        def invoke(output=output, lse=lse):
+            fp32 = exchange(output, lse, group.device_group)
+            bf16 = torch.ops.vllm.sfa_dcp_a2a_fused(output, lse, 8, 1, group.unique_name, decode_token_budget=192)
+            return fp32, bf16
+
+        for _ in range(3):
+            invoke()
+        torch.npu.synchronize()
+        graph = torch.npu.NPUGraph()
+        before = len(calls)
+        with torch.npu.graph(graph):
+            fp32, bf16 = invoke()
+        assert len(calls) > before, "registered capture bypassed optimized exchange"
+        for step in range(4):
+            outputs, lses = _nonuniform_inputs(tokens, step)
+            owner.copy_(outputs[rank].transpose(0, 1).contiguous())
+            lse.copy_(lses[rank])
+            graph.replay()
+            reference, magnitude = _fp64_merge_reference(outputs, lses, rank)
+            actual32, actual16 = fp32.cpu().double(), bf16.cpu().double()
+            roundoff = 1e-6 + 8 * torch.finfo(torch.float32).eps * magnitude
+            rounded = reference.to(torch.bfloat16)
+            up = torch.nextafter(rounded, torch.full_like(rounded, torch.inf)).double()
+            down = torch.nextafter(rounded, torch.full_like(rounded, -torch.inf)).double()
+            half_ulp = torch.maximum(up - rounded.double(), rounded.double() - down) / 2
+            assert torch.isfinite(actual32).all() and torch.isfinite(actual16).all()
+            assert ((actual32 - reference).abs() <= roundoff).all()
+            assert ((actual16 - reference).abs() <= half_ulp + roundoff).all()
+            assert torch.count_nonzero(actual32[:, 0]) == torch.count_nonzero(actual16[:, 0]) == 0
+        retained.append((graph, fp32, bf16, owner, lse))
+    dist.barrier()
+    retained.clear()
+    del graph, fp32, bf16, owner, output, lse
+    gc.collect()
+    torch.npu.synchronize()
+    group.destroy()
+    destroy_distributed_environment()

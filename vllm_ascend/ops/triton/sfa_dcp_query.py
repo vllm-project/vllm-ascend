@@ -6,6 +6,8 @@ import torch
 try:
     import triton
     import triton.language as tl
+
+    from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 except ImportError:
     triton = None
     tl = None
@@ -88,7 +90,8 @@ def prepare_query_head_major(qn: torch.Tensor, qr: torch.Tensor) -> torch.Tensor
         raise ValueError("Unsupported native-DCP8 query preparation")
     tokens = qn.shape[0]
     result = torch.empty((_LOCAL_HEADS, tokens, _PACKED_DIM), dtype=qn.dtype, device=qn.device)
-    cores = triton.runtime.driver.active.utils.get_device_properties(qn.device.index)["num_vectorcore"]
+    init_device_properties_triton()
+    cores = get_vectorcore_num()
     programs = min(_LOCAL_HEADS * tokens, cores)
     _prepare_query_head_major[(programs,)](
         qn,
@@ -120,7 +123,8 @@ def unpack_query(gathered: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     tokens = gathered.shape[1]
     qn = torch.empty((tokens, _TOTAL_HEADS, _NOPE_DIM), dtype=gathered.dtype, device=gathered.device)
     qr = torch.empty((tokens, _TOTAL_HEADS, _ROPE_DIM), dtype=gathered.dtype, device=gathered.device)
-    cores = triton.runtime.driver.active.utils.get_device_properties(gathered.device.index)["num_vectorcore"]
+    init_device_properties_triton()
+    cores = get_vectorcore_num()
     programs = min(tokens * _TOTAL_HEADS, cores)
     _unpack_query_fragments[(programs,)](
         gathered,
