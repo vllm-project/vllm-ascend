@@ -42,12 +42,12 @@ def _starts_from_output(output):
     """Map req_id -> first token position of this pass's scheduled chunk."""
     starts = {req_data.req_id: req_data.num_computed_tokens for req_data in output.scheduled_new_reqs}
     cached_reqs = output.scheduled_cached_reqs
+    assert len(cached_reqs.req_ids) == len(cached_reqs.num_computed_tokens)
     starts.update(
         dict(
             zip(
                 cached_reqs.req_ids,
                 cached_reqs.num_computed_tokens,
-                strict=True,
             )
         )
     )
